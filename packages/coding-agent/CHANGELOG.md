@@ -9,6 +9,8 @@
 ### Changed
 
 - Renamed the `/new` slash command to `/clear`. The `app.session.new` keybinding action id is unchanged.
+- Restyled the built-in `dark` and `light` themes around an electric purple accent palette.
+- Replaced the plain-text startup logo with an ASCII wordmark; renamed forks (via `voltConfig.name`) still get the plain-text logo.
 
 ## [0.79.1] - 2026-06-09
 

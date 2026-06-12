@@ -2,8 +2,9 @@
 	"$schema": "./theme-schema.json",
 	"name": "dark",
 	"vars": {
-		"cyan": "#00d7ff",
-		"blue": "#5f87ff",
+		"purple": "#bf5af2",
+		"brightPurple": "#e066ff",
+		"violet": "#7d6bfa",
 		"green": "#b5bd68",
 		"red": "#cc6666",
 		"yellow": "#ffff00",
@@ -11,18 +12,17 @@
 		"gray": "#808080",
 		"dimGray": "#666666",
 		"darkGray": "#505050",
-		"accent": "#8abeb7",
-		"selectedBg": "#3a3a4a",
-		"userMsgBg": "#343541",
-		"toolPendingBg": "#282832",
+		"selectedBg": "#39304f",
+		"userMsgBg": "#322c44",
+		"toolPendingBg": "#2a2536",
 		"toolSuccessBg": "#283228",
 		"toolErrorBg": "#3c2828",
 		"customMsgBg": "#2d2838"
 	},
 	"colors": {
-		"accent": "accent",
-		"border": "blue",
-		"borderAccent": "cyan",
+		"accent": "purple",
+		"border": "violet",
+		"borderAccent": "brightPurple",
 		"borderMuted": "darkGray",
 		"success": "green",
 		"error": "red",
@@ -37,7 +37,7 @@
 		"userMessageText": "text",
 		"customMessageBg": "customMsgBg",
 		"customMessageText": "text",
-		"customMessageLabel": "#9575cd",
+		"customMessageLabel": "#b39ddb",
 		"toolPendingBg": "toolPendingBg",
 		"toolSuccessBg": "toolSuccessBg",
 		"toolErrorBg": "toolErrorBg",
@@ -45,15 +45,15 @@
 		"toolOutput": "gray",
 
 		"mdHeading": "#f0c674",
-		"mdLink": "#81a2be",
+		"mdLink": "#9d8cff",
 		"mdLinkUrl": "dimGray",
-		"mdCode": "accent",
+		"mdCode": "purple",
 		"mdCodeBlock": "green",
 		"mdCodeBlockBorder": "gray",
 		"mdQuote": "gray",
 		"mdQuoteBorder": "gray",
 		"mdHr": "gray",
-		"mdListBullet": "accent",
+		"mdListBullet": "purple",
 
 		"toolDiffAdded": "green",
 		"toolDiffRemoved": "red",
@@ -71,16 +71,16 @@
 
 		"thinkingOff": "darkGray",
 		"thinkingMinimal": "#6e6e6e",
-		"thinkingLow": "#5f87af",
-		"thinkingMedium": "#81a2be",
-		"thinkingHigh": "#b294bb",
-		"thinkingXhigh": "#d183e8",
+		"thinkingLow": "#7060c0",
+		"thinkingMedium": "#9575e0",
+		"thinkingHigh": "purple",
+		"thinkingXhigh": "brightPurple",
 
 		"bashMode": "green"
 	},
 	"export": {
-		"pageBg": "#18181e",
-		"cardBg": "#1e1e24",
+		"pageBg": "#171420",
+		"cardBg": "#1d1a28",
 		"infoBg": "#3c3728"
 	}
 }
