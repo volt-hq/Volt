@@ -63,6 +63,8 @@ interface PendingRequest {
 interface PublishedDiagnostics {
 	diagnostics: LspDiagnostic[];
 	seq: number;
+	/** Document version from the publish notification, when the server provided one */
+	version?: number;
 }
 
 interface PublishWaiter {
@@ -348,16 +350,22 @@ export class LspClient {
 		const key = normalizeUri(uri);
 
 		if (this.supportsPullDiagnostics) {
-			try {
-				const result = (await this.request("textDocument/diagnostic", { textDocument: { uri } }, signal)) as
-					| { kind?: string; items?: LspDiagnostic[] }
-					| undefined;
-				if (result?.kind === "full" && Array.isArray(result.items)) {
-					this.everPublished = true;
-					return result.items;
+			// Pull results are request-ordered after the didChange above, so they
+			// can never describe stale content. Retry once before falling back:
+			// servers may reject a pull (e.g. ContentModified) while recomputing.
+			for (let attempt = 0; attempt < 2; attempt++) {
+				try {
+					const result = (await this.request("textDocument/diagnostic", { textDocument: { uri } }, signal)) as
+						| { kind?: string; items?: LspDiagnostic[] }
+						| undefined;
+					if (result?.kind === "full" && Array.isArray(result.items)) {
+						this.everPublished = true;
+						return result.items;
+					}
+					break;
+				} catch {
+					// Retry once, then fall back to published diagnostics below.
 				}
-			} catch {
-				// Fall back to published diagnostics below.
 			}
 		}
 
@@ -370,8 +378,22 @@ export class LspClient {
 		}
 
 		const timeoutMs = this.everPublished ? settleMs : Math.max(settleMs, firstSettleMs ?? settleMs);
+		const deadline = Date.now() + timeoutMs;
 		await this.waitForPublish(key, sinceSeq, timeoutMs, signal);
-		return this.published.get(key)?.diagnostics ?? [];
+		let entry = this.published.get(key);
+		// An unversioned publish that arrives after our didChange can still have
+		// been computed against the pre-change content (the version field is
+		// optional in LSP, and cross-file invalidation from an earlier edit can
+		// race the sync). When this document's content just changed, re-wait once
+		// for a fresher publish before trusting an unversioned one.
+		if (changed && entry !== undefined && entry.seq > sinceSeq && entry.version === undefined) {
+			const remainingMs = deadline - Date.now();
+			if (remainingMs > 0) {
+				await this.waitForPublish(key, entry.seq, remainingMs, signal);
+				entry = this.published.get(key) ?? entry;
+			}
+		}
+		return entry?.diagnostics ?? [];
 	}
 
 	/** Sync a document to the server and return its URI. Starts the server if needed. */
@@ -697,10 +719,27 @@ export class LspClient {
 				if (params.version !== undefined && document !== undefined && params.version < document.version) {
 					return;
 				}
+				const diagnostics = Array.isArray(params.diagnostics) ? params.diagnostics : [];
+				// Unversioned publishes can be computed against stale content. Drop
+				// those whose positions point past the end of the synced content:
+				// they describe an older snapshot and would otherwise satisfy the
+				// settle wait (and the cross-file sweep) with stale diagnostics.
+				if (params.version === undefined && document !== undefined && diagnostics.length > 0) {
+					const lineCount = document.content.split("\n").length;
+					if (diagnostics.some((diagnostic) => (diagnostic.range?.start?.line ?? 0) >= lineCount)) {
+						this.tracer?.log(
+							this.options.serverName,
+							"info",
+							`dropping stale unversioned publish for ${params.uri} (position past end of synced content)`,
+						);
+						return;
+					}
+				}
 				this.publishSeq++;
 				this.published.set(key, {
-					diagnostics: Array.isArray(params.diagnostics) ? params.diagnostics : [],
+					diagnostics,
 					seq: this.publishSeq,
+					version: params.version,
 				});
 				for (const waiter of [...this.publishWaiters]) {
 					if (waiter.uri === key) {

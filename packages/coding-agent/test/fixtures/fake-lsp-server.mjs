@@ -19,12 +19,17 @@
 // - Exits on the exit notification.
 
 const pullMode = process.argv.includes("--pull");
+const pullFlakyMode = process.argv.includes("--pull-flaky");
 const configMode = process.argv.includes("--config");
 const staleMode = process.argv.includes("--stale");
+const staleUnversionedMode = process.argv.includes("--stale-unversioned");
+const staleOobMode = process.argv.includes("--stale-oob");
+const staleCrossMode = process.argv.includes("--stale-cross");
 const hangMode = process.argv.includes("--hang");
 const initErrorMode = process.argv.includes("--init-error");
 const delayIndex = process.argv.indexOf("--delay");
 const publishDelayMs = delayIndex !== -1 ? Number.parseInt(process.argv[delayIndex + 1], 10) : 50;
+let pullRequests = 0;
 const documents = new Map();
 const versions = new Map();
 const state = { opens: [], changes: [], closes: [], watched: [], configChanges: [], configResponses: undefined };
@@ -147,7 +152,9 @@ function handle(message) {
 					callHierarchyProvider: true,
 					codeActionProvider: true,
 					executeCommandProvider: { commands: ["fake.fix"] },
-					...(pullMode ? { diagnosticProvider: { interFileDependencies: false, workspaceDiagnostics: false } } : {}),
+					...(pullMode || pullFlakyMode
+						? { diagnosticProvider: { interFileDependencies: false, workspaceDiagnostics: false } }
+						: {}),
 				},
 			},
 		});
@@ -216,18 +223,22 @@ function handle(message) {
 		documents.set(params.textDocument.uri, params.contentChanges[0].text);
 		versions.set(params.textDocument.uri, params.textDocument.version);
 		state.changes.push({ uri: params.textDocument.uri, version: params.textDocument.version });
-		if (staleMode) {
+		if (staleMode || staleUnversionedMode || staleOobMode) {
 			// Immediately publish a bogus result computed against the previous
-			// version, like a server racing syntactic/semantic passes.
+			// content, like a server racing syntactic/semantic passes. --stale
+			// tags it with the previous version; the other variants omit the
+			// version field (it is optional in LSP). --stale-oob points the
+			// diagnostic past the end of the synced content.
+			const staleLine = staleOobMode ? 9999 : 0;
 			send({
 				jsonrpc: "2.0",
 				method: "textDocument/publishDiagnostics",
 				params: {
 					uri: params.textDocument.uri,
-					version: params.textDocument.version - 1,
+					...(staleMode ? { version: params.textDocument.version - 1 } : {}),
 					diagnostics: [
 						{
-							range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+							range: { start: { line: staleLine, character: 0 }, end: { line: staleLine, character: 1 } },
 							severity: 1,
 							source: "fake",
 							message: "stale result from previous version",
@@ -235,6 +246,35 @@ function handle(message) {
 					],
 				},
 			});
+		}
+		if (staleCrossMode) {
+			// Shortly after the change, publish bogus unversioned out-of-bounds
+			// results for every *other* open document, like a server recomputing
+			// dependents against an older snapshot. The real republish for those
+			// documents never arrives within the settle window.
+			const changedUri = params.textDocument.uri;
+			setTimeout(() => {
+				for (const uri of documents.keys()) {
+					if (uri === changedUri) continue;
+					send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: {
+							uri,
+							diagnostics: [
+								{
+									range: { start: { line: 9999, character: 0 }, end: { line: 9999, character: 1 } },
+									severity: 1,
+									source: "fake",
+									message: "stale cross-file result",
+								},
+							],
+						},
+					});
+				}
+			}, 10);
+			publishLater(changedUri);
+			return;
 		}
 		publishLater();
 		return;
@@ -482,6 +522,13 @@ function handle(message) {
 		return;
 	}
 	if (method === "textDocument/diagnostic") {
+		pullRequests++;
+		if (pullFlakyMode && pullRequests === 1) {
+			// Reject the first pull like a server that cancels with
+			// ContentModified while recomputing.
+			send({ jsonrpc: "2.0", id, error: { code: -32801, message: "content modified" } });
+			return;
+		}
 		send({
 			jsonrpc: "2.0",
 			id,
@@ -497,10 +544,11 @@ function handle(message) {
 	}
 }
 
-function publishLater() {
-	if (pullMode) return;
+function publishLater(onlyUri) {
+	if (pullMode || pullFlakyMode) return;
 	setTimeout(() => {
 		for (const [uri, text] of documents) {
+			if (onlyUri !== undefined && uri !== onlyUri) continue;
 			send({
 				jsonrpc: "2.0",
 				method: "textDocument/publishDiagnostics",
