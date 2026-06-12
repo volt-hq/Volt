@@ -78,6 +78,17 @@ import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScop
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
+import {
+	formatReviewForNewSession,
+	listRecentCommits,
+	type ParsedReview,
+	parseReviewCommandArgs,
+	REVIEW_USAGE,
+	type ResolvedReview,
+	type ReviewTarget,
+	resolveReviewTarget,
+	runReview,
+} from "../../core/review.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { type SessionContext, SessionManager } from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
@@ -510,6 +521,17 @@ export class InteractiveMode {
 					label: item.id,
 					description: item.provider,
 				}));
+			};
+		}
+
+		const reviewCommand = slashCommands.find((command) => command.name === "review");
+		if (reviewCommand) {
+			reviewCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
+				const options = ["uncommitted", "branch", "pr", "commit"];
+				const normalized = prefix.trim().toLowerCase();
+				const filtered = options.filter((option) => option.startsWith(normalized));
+				if (filtered.length === 0) return null;
+				return filtered.map((value) => ({ value, label: value }));
 			};
 		}
 
@@ -2629,6 +2651,12 @@ export class InteractiveMode {
 				await this.handleCompactCommand(customInstructions);
 				return;
 			}
+			if (text === "/review" || text.startsWith("/review ")) {
+				const reviewArgs = text.startsWith("/review ") ? text.slice(8) : "";
+				this.editor.setText("");
+				await this.handleReviewCommand(reviewArgs);
+				return;
+			}
 			if (text === "/reload") {
 				this.editor.setText("");
 				await this.handleReloadCommand();
@@ -3953,6 +3981,8 @@ export class InteractiveMode {
 	}
 
 	private showSettingsSelector(): void {
+		this.session.modelRegistry.refresh();
+		const availableModels = this.session.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`);
 		this.showSelector((done) => {
 			const selector = new SettingsSelectorComponent(
 				{
@@ -3968,6 +3998,8 @@ export class InteractiveMode {
 					httpIdleTimeoutMs: this.settingsManager.getHttpIdleTimeoutMs(),
 					thinkingLevel: this.session.thinkingLevel,
 					availableThinkingLevels: this.session.getAvailableThinkingLevels(),
+					reviewModel: this.settingsManager.getReviewModel(),
+					availableModels,
 					currentTheme: this.settingsManager.getTheme() || "dark",
 					availableThemes: getAvailableThemes(),
 					hideThinkingBlock: this.hideThinkingBlock,
@@ -4034,6 +4066,10 @@ export class InteractiveMode {
 						this.session.setThinkingLevel(level);
 						this.footer.invalidate();
 						this.updateEditorBorderColor();
+					},
+					onReviewModelChange: (modelReference) => {
+						this.settingsManager.setReviewModel(modelReference);
+						this.showStatus(`Review model: ${modelReference ?? "session model"}`);
 					},
 					onThemeChange: (themeName) => {
 						const result = setTheme(themeName, true);
@@ -5594,6 +5630,11 @@ export class InteractiveMode {
 	}
 
 	private async handleClearCommand(): Promise<void> {
+		if (this.session.isStreaming) {
+			// Abort deliberately before the session switch so the in-flight turn is
+			// stopped and persisted, instead of relying on dispose-time teardown.
+			await this.session.abort();
+		}
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
@@ -5755,6 +5796,231 @@ export class InteractiveMode {
 
 		this.bashComponent = undefined;
 		this.ui.requestRender();
+	}
+
+	private async promptForReviewTarget(): Promise<ReviewTarget | undefined> {
+		const uncommittedLabel = "Uncommitted changes";
+		const branchLabel = "Branch changes (vs base)";
+		const prLabel = "GitHub pull request";
+		const commitLabel = "Specific commit";
+		const choice = await this.showExtensionSelector("Review what?", [
+			uncommittedLabel,
+			branchLabel,
+			prLabel,
+			commitLabel,
+		]);
+		if (choice === undefined) {
+			return undefined;
+		}
+		if (choice === uncommittedLabel) {
+			return { kind: "uncommitted" };
+		}
+		if (choice === branchLabel) {
+			const base = await this.showExtensionInput("Base branch (empty to auto-detect)", "main");
+			if (base === undefined) {
+				return undefined;
+			}
+			return { kind: "branch", base: base.trim() || undefined };
+		}
+		if (choice === prLabel) {
+			const number = await this.showExtensionInput("PR number (empty for current branch's PR)", "123");
+			if (number === undefined) {
+				return undefined;
+			}
+			return { kind: "pr", number: number.trim() || undefined };
+		}
+		// Commit: the SHA is picked from the recent-commit list in handleReviewCommand.
+		return { kind: "commit" };
+	}
+
+	/** Show a recent-commit picker and return the selected SHA. */
+	private async promptForReviewCommit(): Promise<string | undefined> {
+		const commits = await listRecentCommits(this.sessionManager.getCwd());
+		if ("error" in commits) {
+			this.showError(commits.error);
+			return undefined;
+		}
+		if (commits.length === 0) {
+			this.showError("No commits to review.");
+			return undefined;
+		}
+		const labels = commits.map((commit) => `${commit.sha} ${commit.subject} (${commit.date})`);
+		const choice = await this.showExtensionSelector("Review which commit?", labels);
+		if (choice === undefined) {
+			return undefined;
+		}
+		return commits[labels.indexOf(choice)]?.sha;
+	}
+
+	private async resolveReviewModel(): Promise<Model<any> | undefined> {
+		const reference = this.settingsManager.getReviewModel();
+		if (reference) {
+			this.session.modelRegistry.refresh();
+			const available = this.session.modelRegistry.getAvailable();
+			const match = findExactModelReferenceMatch(reference, available);
+			if (match) {
+				return match;
+			}
+			this.showWarning(`reviewModel "${reference}" not found or not authenticated; using the current model.`);
+		}
+		return this.session.model;
+	}
+
+	private async handleReviewCommand(argsText: string): Promise<void> {
+		if (this.session.isStreaming || this.session.isCompacting) {
+			this.showWarning("Wait for the current response to finish before starting a review.");
+			return;
+		}
+
+		const parsedArgs = parseReviewCommandArgs(argsText);
+		if (parsedArgs.error) {
+			this.showError(parsedArgs.error);
+			return;
+		}
+
+		let target = parsedArgs.target;
+		if (!target) {
+			target = await this.promptForReviewTarget();
+			if (!target) {
+				this.showStatus("Review cancelled");
+				return;
+			}
+		}
+		if (target.kind === "commit" && !target.sha) {
+			const sha = await this.promptForReviewCommit();
+			if (!sha) {
+				this.showStatus("Review cancelled");
+				return;
+			}
+			target = { kind: "commit", sha };
+		}
+
+		const resolution = await resolveReviewTarget(target, this.sessionManager.getCwd());
+		if ("error" in resolution) {
+			this.showError(`${resolution.error} ${REVIEW_USAGE}`);
+			return;
+		}
+
+		const model = await this.resolveReviewModel();
+		if (!model) {
+			this.showError("No model available for review. Use /model to select one.");
+			return;
+		}
+
+		// Re-check: a prompt submitted while the target/model were being resolved
+		// (selectors, git/gh subprocesses) may have started streaming. Starting the
+		// review now would later tear down that session and silently abort the turn.
+		if (this.session.isStreaming || this.session.isCompacting) {
+			this.showWarning("Wait for the current response to finish before starting a review.");
+			return;
+		}
+
+		const result = await this.runBlockingReview(resolution, model);
+		if (!result) {
+			return;
+		}
+
+		await this.startPostReviewSession(resolution, result);
+	}
+
+	/** Run the review with a blocking, cancellable loader in place of the editor. */
+	private async runBlockingReview(
+		resolution: ResolvedReview,
+		model: Model<any>,
+	): Promise<{ raw: string; parsed?: ParsedReview } | undefined> {
+		const baseMessage = `Reviewing ${resolution.description} with ${model.id}...`;
+		const loader = new BorderedLoader(this.ui, theme, baseMessage);
+		this.editorContainer.clear();
+		this.editorContainer.addChild(loader);
+		this.ui.setFocus(loader);
+		this.ui.requestRender();
+
+		const abortController = new AbortController();
+		loader.onAbort = () => {
+			abortController.abort();
+		};
+
+		const restoreEditor = () => {
+			loader.dispose();
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+			this.ui.setFocus(this.editor);
+			this.ui.requestRender();
+		};
+
+		try {
+			const result = await runReview({
+				cwd: this.sessionManager.getCwd(),
+				agentDir: this.runtimeHost.services.agentDir,
+				model,
+				thinkingLevel: this.session.thinkingLevel,
+				authStorage: this.session.modelRegistry.authStorage,
+				modelRegistry: this.session.modelRegistry,
+				settingsManager: this.settingsManager,
+				resolved: resolution,
+				signal: abortController.signal,
+				onProgress: (message) => {
+					loader.setMessage(`${baseMessage} ${message}`);
+					this.ui.requestRender();
+				},
+			});
+
+			restoreEditor();
+
+			if (result.aborted || abortController.signal.aborted) {
+				this.showStatus("Review cancelled");
+				return undefined;
+			}
+			if (result.errorMessage) {
+				this.showError(`Review failed: ${result.errorMessage}`);
+				return undefined;
+			}
+			return { raw: result.raw, parsed: result.parsed };
+		} catch (error) {
+			restoreEditor();
+			this.showError(`Review failed: ${error instanceof Error ? error.message : String(error)}`);
+			return undefined;
+		}
+	}
+
+	/** Start a fresh session seeded only with the review findings. */
+	private async startPostReviewSession(
+		resolution: ResolvedReview,
+		result: { raw: string; parsed?: ParsedReview },
+	): Promise<void> {
+		const reviewMessage = {
+			customType: "review",
+			content: formatReviewForNewSession(resolution, result.parsed, result.raw),
+			display: true,
+			details: { target: resolution.description, findings: result.parsed?.findings ?? [] },
+		};
+
+		try {
+			const newSessionResult = await this.runtimeHost.newSession({
+				withSession: async (ctx) => {
+					await ctx.sendMessage(reviewMessage);
+				},
+			});
+			if (newSessionResult.cancelled) {
+				// An extension blocked the session switch; keep the findings in the current session.
+				await this.session.sendCustomMessage(reviewMessage);
+				this.showStatus("Review complete (session switch was cancelled; findings added to this session)");
+				return;
+			}
+			this.renderCurrentSessionState();
+			const findingCount = result.parsed?.findings.length;
+			const summary =
+				findingCount === undefined
+					? "Review complete."
+					: findingCount === 0
+						? "Review complete: no issues found."
+						: `Review complete: ${findingCount} finding${findingCount === 1 ? "" : "s"}.`;
+			this.showStatus(
+				`${summary} This is a fresh session seeded with the review. Tell me which findings to fix (e.g. "fix 1 and 3").`,
+			);
+		} catch (error: unknown) {
+			await this.handleFatalRuntimeError("Failed to create session", error);
+		}
 	}
 
 	private async handleCompactCommand(customInstructions?: string): Promise<void> {

@@ -39,6 +39,10 @@ export class BorderedLoader extends Container {
 		this.addChild(new DynamicBorder(borderColor));
 	}
 
+	setMessage(message: string): void {
+		this.loader.setMessage(message);
+	}
+
 	get signal(): AbortSignal {
 		if (this.cancellable) {
 			return (this.loader as CancellableLoader).signal;

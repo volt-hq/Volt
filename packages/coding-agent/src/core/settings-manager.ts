@@ -109,6 +109,7 @@ export interface Settings {
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
+	reviewModel?: string; // Model for /review, e.g. "anthropic/claude-opus-4-5" (falls back to the session model)
 	doubleEscapeAction?: "fork" | "tree" | "none"; // Action for double-escape with empty editor (default: "tree")
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
@@ -1124,6 +1125,16 @@ export class SettingsManager {
 
 	getEnabledModels(): string[] | undefined {
 		return this.settings.enabledModels;
+	}
+
+	getReviewModel(): string | undefined {
+		return this.settings.reviewModel;
+	}
+
+	setReviewModel(modelReference: string | undefined): void {
+		this.globalSettings.reviewModel = modelReference;
+		this.markModified("reviewModel");
+		this.save();
 	}
 
 	setEnabledModels(patterns: string[] | undefined): void {

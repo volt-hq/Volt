@@ -41,6 +41,8 @@ const DEFAULT_PROJECT_TRUST_BY_LABEL = new Map(
 	Object.entries(DEFAULT_PROJECT_TRUST_LABELS).map(([value, label]) => [label, value as DefaultProjectTrust]),
 );
 
+const SESSION_MODEL_LABEL = "session model";
+
 export interface SettingsConfig {
 	autoCompact: boolean;
 	showImages: boolean;
@@ -54,6 +56,9 @@ export interface SettingsConfig {
 	httpIdleTimeoutMs: number;
 	thinkingLevel: ThinkingLevel;
 	availableThinkingLevels: ThinkingLevel[];
+	reviewModel?: string;
+	/** Model references (provider/id) available for the review model submenu. */
+	availableModels: string[];
 	currentTheme: string;
 	availableThemes: string[];
 	hideThinkingBlock: boolean;
@@ -83,6 +88,7 @@ export interface SettingsCallbacks {
 	onTransportChange: (transport: Transport) => void;
 	onHttpIdleTimeoutMsChange: (timeoutMs: number) => void;
 	onThinkingLevelChange: (level: ThinkingLevel) => void;
+	onReviewModelChange: (modelReference: string | undefined) => void;
 	onThemeChange: (theme: string) => void;
 	onThemePreview?: (theme: string) => void;
 	onHideThinkingBlockChange: (hidden: boolean) => void;
@@ -342,6 +348,34 @@ export class SettingsSelectorComponent extends Container {
 						currentValue,
 						(value) => {
 							callbacks.onThinkingLevelChange(value as ThinkingLevel);
+							done(value);
+						},
+						() => done(),
+					),
+			},
+			{
+				id: "review-model",
+				label: "Review model",
+				description: "Model used by /review (falls back to the session model)",
+				currentValue: config.reviewModel ?? SESSION_MODEL_LABEL,
+				submenu: (currentValue, done) =>
+					new SelectSubmenu(
+						"Review Model",
+						"Select the model used by /review",
+						[
+							{
+								value: SESSION_MODEL_LABEL,
+								label: SESSION_MODEL_LABEL,
+								description: "Use whatever model the session is on",
+							},
+							...config.availableModels.map((reference) => ({
+								value: reference,
+								label: reference,
+							})),
+						],
+						currentValue,
+						(value) => {
+							callbacks.onReviewModelChange(value === SESSION_MODEL_LABEL ? undefined : value);
 							done(value);
 						},
 						() => done(),

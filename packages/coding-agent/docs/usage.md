@@ -47,6 +47,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optionally with custom instructions |
+| `/review [target]` | Review uncommitted changes, a branch, a PR, or a commit; findings seed a fresh session |
 | `/copy` | Copy last assistant message to clipboard |
 | `/export [file]` | Export session to HTML |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
@@ -90,6 +91,22 @@ Useful session commands:
 - `/compact` summarizes older messages to free context.
 
 See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
+
+## Code Review
+
+`/review` runs a code review in an isolated in-process session with its own context window and a dedicated reviewer prompt. The reviewer has full tool access, so it reads the code around each hunk and can run tests to verify suspected bugs.
+
+```
+/review                # open a target selector
+/review uncommitted    # review uncommitted changes (vs HEAD, plus untracked files)
+/review branch [base]  # review branch changes vs base (auto-detects main/master)
+/review pr [number]    # review a GitHub PR (requires gh; defaults to the current branch's PR)
+/review commit [sha]   # review a single commit (omit the sha to pick from recent commits)
+```
+
+When the review finishes, volt starts a **fresh session seeded only with the numbered findings**. Your next message runs with clean context, so you can say "fix 1 and 3" and the agent fixes those findings without the review transcript or your previous conversation consuming the context window.
+
+Set the `reviewModel` setting (e.g. `"anthropic/claude-opus-4-5"`) to review with a different model than the active session; otherwise the current model is used.
 
 ## Context Files
 
