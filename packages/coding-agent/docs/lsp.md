@@ -59,18 +59,18 @@ The symbol is located by name: volt finds its position in the file (preferring a
 
 ## Built-in Servers
 
-The matching server must be installed and on your `PATH`. Built-in defaults:
+The matching server must be installed and on your `PATH`. When a built-in server binary is missing, the one-time failure message includes the install command for it. Built-in defaults:
 
-| Name | Command | Extensions | Root markers |
-|------|---------|------------|--------------|
-| `typescript` | `typescript-language-server --stdio` | `.ts` `.tsx` `.mts` `.cts` `.js` `.jsx` `.mjs` `.cjs` | `tsconfig.json`, `jsconfig.json`, `package.json` |
-| `python` | `pyright-langserver --stdio` | `.py` `.pyi` | `pyrightconfig.json`, `pyproject.toml`, `setup.py`, `requirements.txt` |
-| `go` | `gopls` | `.go` | `go.mod`, `go.work` |
-| `rust` | `rust-analyzer` | `.rs` | `Cargo.toml` |
-| `cpp` | `clangd` | `.c` `.h` `.cpp` `.cc` `.cxx` `.hpp` `.hh` | `compile_commands.json`, `compile_flags.txt`, `.clangd` |
-| `zig` | `zls` | `.zig` | `build.zig` |
-| `lua` | `lua-language-server` | `.lua` | `.luarc.json`, `.luarc.jsonc` |
-| `bash` | `bash-language-server start` | `.sh` `.bash` | (working directory) |
+| Name | Command | Extensions | Root markers | Install |
+|------|---------|------------|--------------|---------|
+| `typescript` | `typescript-language-server --stdio` | `.ts` `.tsx` `.mts` `.cts` `.js` `.jsx` `.mjs` `.cjs` | `tsconfig.json`, `jsconfig.json`, `package.json` | `npm install -g typescript-language-server typescript` |
+| `python` | `pyright-langserver --stdio` | `.py` `.pyi` | `pyrightconfig.json`, `pyproject.toml`, `setup.py`, `requirements.txt` | `npm install -g pyright` |
+| `go` | `gopls` | `.go` | `go.mod`, `go.work` | `go install golang.org/x/tools/gopls@latest` |
+| `rust` | `rust-analyzer` | `.rs` | `Cargo.toml` | `rustup component add rust-analyzer` |
+| `cpp` | `clangd` | `.c` `.h` `.cpp` `.cc` `.cxx` `.hpp` `.hh` | `compile_commands.json`, `compile_flags.txt`, `.clangd` | [clangd.llvm.org/installation](https://clangd.llvm.org/installation) |
+| `zig` | `zls` | `.zig` | `build.zig` | [github.com/zigtools/zls](https://github.com/zigtools/zls) |
+| `lua` | `lua-language-server` | `.lua` | `.luarc.json`, `.luarc.jsonc` | [luals.github.io/#install](https://luals.github.io/#install) |
+| `bash` | `bash-language-server start` | `.sh` `.bash` | (working directory) | `npm install -g bash-language-server` |
 
 ## Configuration
 

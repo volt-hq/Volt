@@ -14,7 +14,12 @@ import type { ToolDiagnosticsProvider } from "../tools/diagnostics-provider.ts";
 import { withFileMutationQueue } from "../tools/file-mutation-queue.ts";
 import type { LspNavigationProvider } from "../tools/lsp.ts";
 import { LspClient, type LspDiagnostic, type LspPosition, type LspRange } from "./client.ts";
-import { type ResolvedLspConfig, type ResolvedLspServerConfig, SEVERITY_NAMES } from "./config.ts";
+import {
+	installHintForCommand,
+	type ResolvedLspConfig,
+	type ResolvedLspServerConfig,
+	SEVERITY_NAMES,
+} from "./config.ts";
 import { applyTextEdits, type LspWorkspaceEdit, normalizeWorkspaceEdit } from "./workspace-edit.ts";
 
 export interface LspManagerOptions {
@@ -1001,7 +1006,8 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		}
 		failure.reported = true;
 		const message = error instanceof Error ? error.message : String(error);
-		return `lsp(${server.name}): ${message} (further failures for this server will be silent)`;
+		const hint = message.includes("ENOENT") ? installHintForCommand(server.command) : undefined;
+		return `lsp(${server.name}): ${message}${hint ? `. ${hint}` : ""} (further failures for this server will be silent)`;
 	}
 
 	private formatDiagnostics(absolutePath: string, diagnostics: LspDiagnostic[]): string | undefined {

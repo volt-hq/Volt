@@ -6,6 +6,8 @@
  * are only used when the matching server binary is installed.
  */
 
+import { basename } from "node:path";
+
 export type LspSeverity = "error" | "warning" | "information" | "hint";
 
 /** One language server definition. User entries merge over built-in defaults by name. */
@@ -114,6 +116,31 @@ const DEFAULT_LSP_SERVERS: Record<
 		rootMarkers: [],
 	},
 };
+
+/**
+ * Install hints keyed by server binary (argv[0]). Used to make "server not
+ * found" failures actionable. Keyed by binary rather than server name so
+ * custom commands never get a hint for a binary they do not use.
+ */
+const INSTALL_HINTS: Record<string, string> = {
+	"typescript-language-server": "Install with: npm install -g typescript-language-server typescript",
+	"pyright-langserver": "Install with: npm install -g pyright",
+	gopls: "Install with: go install golang.org/x/tools/gopls@latest",
+	"rust-analyzer": "Install with: rustup component add rust-analyzer",
+	clangd: "Install instructions: https://clangd.llvm.org/installation",
+	zls: "Install instructions: https://github.com/zigtools/zls",
+	"lua-language-server": "Install instructions: https://luals.github.io/#install",
+	"bash-language-server": "Install with: npm install -g bash-language-server",
+};
+
+/**
+ * Install hint for a server launch command, or undefined for unknown
+ * binaries. Matches on the binary basename so absolute-path commands
+ * (e.g. /usr/local/bin/gopls) still get a hint.
+ */
+export function installHintForCommand(command: string[]): string | undefined {
+	return INSTALL_HINTS[basename(command[0] ?? "")];
+}
 
 const SEVERITY_TO_NUMBER: Record<LspSeverity, number> = {
 	error: 1,

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { LspClient } from "../src/core/lsp/client.ts";
-import { resolveLspConfig } from "../src/core/lsp/config.ts";
+import { installHintForCommand, resolveLspConfig } from "../src/core/lsp/config.ts";
 import { LspManager } from "../src/core/lsp/manager.ts";
 import { applyTextEdits, normalizeWorkspaceEdit } from "../src/core/lsp/workspace-edit.ts";
 import type { ToolDiagnosticsProvider } from "../src/core/tools/diagnostics-provider.ts";
@@ -98,6 +98,20 @@ describe("resolveLspConfig", () => {
 	it("skips user servers without a command or file extensions", () => {
 		const config = resolveLspConfig({ servers: { broken: { command: ["x"] } } });
 		expect(config.servers.find((s) => s.name === "broken")).toBeUndefined();
+	});
+});
+
+describe("installHintForCommand", () => {
+	it("returns install hints for built-in server binaries", () => {
+		expect(installHintForCommand(["typescript-language-server", "--stdio"])).toContain(
+			"npm install -g typescript-language-server",
+		);
+		expect(installHintForCommand(["gopls"])).toContain("go install");
+	});
+
+	it("returns undefined for unknown binaries and empty commands", () => {
+		expect(installHintForCommand(["my-custom-lsp", "--stdio"])).toBeUndefined();
+		expect(installHintForCommand([])).toBeUndefined();
 	});
 });
 
@@ -445,8 +459,37 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		const first = await manager.getDiagnostics(filePath, "ERROR\n");
 		expect(first).toContain("lsp(missing):");
+		// Unknown binaries must not get an install hint
+		expect(first).not.toContain("Install");
 		const second = await manager.getDiagnostics(filePath, "ERROR\n");
 		expect(second).toBeUndefined();
+	});
+
+	it("includes an install hint when a built-in server binary is missing", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		manager = new LspManager({
+			cwd: tempDir,
+			config: resolveLspConfig({
+				enabled: true,
+				servers: {
+					typescript: { enabled: false },
+					python: { enabled: false },
+					go: { enabled: false },
+					rust: { enabled: false },
+					// Binary name carries the hint; a missing dir guarantees ENOENT
+					// even on machines that have gopls installed.
+					missing: {
+						command: [join(tempDir, "no-such-dir", "gopls")],
+						fileExtensions: [".foo"],
+					},
+				},
+			}),
+		});
+		const filePath = join(tempDir, "test.foo");
+		const first = await manager.getDiagnostics(filePath, "ERROR\n");
+		expect(first).toContain("lsp(missing):");
+		expect(first).toContain("ENOENT");
+		expect(first).toContain("Install with: go install golang.org/x/tools/gopls@latest");
 	});
 });
 

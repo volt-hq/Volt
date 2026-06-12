@@ -16,6 +16,7 @@
 - Added `implementations` and `type-definition` actions to the `lsp` tool.
 - Added a `kind` parameter to `lsp fix` for kind-filtered code actions such as `source.organizeImports` and `source.fixAll`.
 - Added built-in LSP server defaults for clangd (C/C++), zls (Zig), lua-language-server, and bash-language-server.
+- LSP server start failures caused by a missing binary now include an install hint for the built-in servers (e.g. `npm install -g typescript-language-server typescript`), matched on the command's binary name so custom commands are unaffected.
 
 ### Changed
 
