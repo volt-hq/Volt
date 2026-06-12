@@ -1,26 +1,32 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-	checkForNewPiVersion,
+	checkForNewVoltVersion,
 	comparePackageVersions,
-	getLatestPiRelease,
-	getLatestPiVersion,
+	getLatestVoltRelease,
+	getLatestVoltVersion,
 	isNewerPackageVersion,
 } from "../src/utils/version-check.ts";
 
-const originalSkipVersionCheck = process.env.PI_SKIP_VERSION_CHECK;
-const originalOffline = process.env.PI_OFFLINE;
+const originalSkipVersionCheck = process.env.VOLT_SKIP_VERSION_CHECK;
+const originalOffline = process.env.VOLT_OFFLINE;
+const originalLatestVersionUrl = process.env.VOLT_LATEST_VERSION_URL;
 
 afterEach(() => {
 	vi.unstubAllGlobals();
 	if (originalSkipVersionCheck === undefined) {
-		delete process.env.PI_SKIP_VERSION_CHECK;
+		delete process.env.VOLT_SKIP_VERSION_CHECK;
 	} else {
-		process.env.PI_SKIP_VERSION_CHECK = originalSkipVersionCheck;
+		process.env.VOLT_SKIP_VERSION_CHECK = originalSkipVersionCheck;
 	}
 	if (originalOffline === undefined) {
-		delete process.env.PI_OFFLINE;
+		delete process.env.VOLT_OFFLINE;
 	} else {
-		process.env.PI_OFFLINE = originalOffline;
+		process.env.VOLT_OFFLINE = originalOffline;
+	}
+	if (originalLatestVersionUrl === undefined) {
+		delete process.env.VOLT_LATEST_VERSION_URL;
+	} else {
+		process.env.VOLT_LATEST_VERSION_URL = originalLatestVersionUrl;
 	}
 });
 
@@ -34,23 +40,33 @@ describe("version checks", () => {
 	});
 
 	it("returns only newer versions", async () => {
+		process.env.VOLT_LATEST_VERSION_URL = "https://updates.example/latest-version";
 		const fetchMock = vi.fn(async () => Response.json({ version: "1.2.3" }));
 		vi.stubGlobal("fetch", fetchMock);
 
-		await expect(checkForNewPiVersion("1.2.3")).resolves.toBeUndefined();
-		await expect(checkForNewPiVersion("1.2.2")).resolves.toEqual({ version: "1.2.3" });
+		await expect(checkForNewVoltVersion("1.2.3")).resolves.toBeUndefined();
+		await expect(checkForNewVoltVersion("1.2.2")).resolves.toEqual({ version: "1.2.3" });
 	});
 
-	it("uses the pi.dev version check api with a pi user agent", async () => {
+	it("skips api calls when no version check endpoint is configured", async () => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+
+		await expect(getLatestVoltVersion("1.2.3")).resolves.toBeUndefined();
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("uses the configured version check api with a volt user agent", async () => {
+		process.env.VOLT_LATEST_VERSION_URL = "https://updates.example/latest-version";
 		const fetchMock = vi.fn(async () => Response.json({ version: "1.2.4" }));
 		vi.stubGlobal("fetch", fetchMock);
 
-		await expect(getLatestPiVersion("1.2.3")).resolves.toBe("1.2.4");
+		await expect(getLatestVoltVersion("1.2.3")).resolves.toBe("1.2.4");
 		expect(fetchMock).toHaveBeenCalledWith(
-			"https://pi.dev/api/latest-version",
+			"https://updates.example/latest-version",
 			expect.objectContaining({
 				headers: expect.objectContaining({
-					"User-Agent": expect.stringMatching(/^pi\/1\.2\.3 /),
+					"User-Agent": expect.stringMatching(/^volt\/1\.2\.3 /),
 					accept: "application/json",
 				}),
 			}),
@@ -58,33 +74,36 @@ describe("version checks", () => {
 	});
 
 	it("returns the active package metadata from the version check api", async () => {
+		process.env.VOLT_LATEST_VERSION_URL = "https://updates.example/latest-version";
 		const fetchMock = vi.fn(async () =>
 			Response.json({
-				packageName: "@new-scope/pi",
+				packageName: "@new-scope/volt",
 				version: "1.2.4",
 			}),
 		);
 		vi.stubGlobal("fetch", fetchMock);
 
-		await expect(getLatestPiRelease("1.2.3")).resolves.toEqual({
-			packageName: "@new-scope/pi",
+		await expect(getLatestVoltRelease("1.2.3")).resolves.toEqual({
+			packageName: "@new-scope/volt",
 			version: "1.2.4",
 		});
 	});
 
 	it("returns update notes from the version check api", async () => {
+		process.env.VOLT_LATEST_VERSION_URL = "https://updates.example/latest-version";
 		const fetchMock = vi.fn(async () => Response.json({ note: " **Read this** ", version: "1.2.4" }));
 		vi.stubGlobal("fetch", fetchMock);
 
-		await expect(getLatestPiRelease("1.2.3")).resolves.toEqual({ note: "**Read this**", version: "1.2.4" });
+		await expect(getLatestVoltRelease("1.2.3")).resolves.toEqual({ note: "**Read this**", version: "1.2.4" });
 	});
 
 	it("skips api calls when version checks are disabled", async () => {
-		process.env.PI_SKIP_VERSION_CHECK = "1";
+		process.env.VOLT_LATEST_VERSION_URL = "https://updates.example/latest-version";
+		process.env.VOLT_SKIP_VERSION_CHECK = "1";
 		const fetchMock = vi.fn();
 		vi.stubGlobal("fetch", fetchMock);
 
-		await expect(getLatestPiVersion("1.2.3")).resolves.toBeUndefined();
+		await expect(getLatestVoltVersion("1.2.3")).resolves.toBeUndefined();
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 });

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Release script for pi-mono
+ * Release script for volt
  *
  * Usage:
  *   node scripts/release.mjs <major|minor|patch>

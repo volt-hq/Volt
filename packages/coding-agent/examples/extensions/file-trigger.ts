@@ -9,17 +9,17 @@
  */
 
 import * as fs from "node:fs";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
 
-export default function (pi: ExtensionAPI) {
-	pi.on("session_start", async (_event, ctx) => {
+export default function (volt: ExtensionAPI) {
+	volt.on("session_start", async (_event, ctx) => {
 		const triggerFile = "/tmp/agent-trigger.txt";
 
 		fs.watch(triggerFile, () => {
 			try {
 				const content = fs.readFileSync(triggerFile, "utf-8").trim();
 				if (content) {
-					pi.sendMessage(
+					volt.sendMessage(
 						{
 							customType: "file-trigger",
 							content: `External trigger: ${content}`,

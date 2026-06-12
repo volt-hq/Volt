@@ -1,5 +1,5 @@
 {
-	"name": "@earendil-works/pi-ai",
+	"name": "@earendil-works/volt-ai",
 	"version": "0.79.1",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"type": "module",
@@ -52,7 +52,7 @@
 		}
 	},
 	"bin": {
-		"pi-ai": "./dist/cli.js"
+		"volt-ai": "./dist/cli.js"
 	},
 	"files": [
 		"dist",
@@ -90,11 +90,6 @@
 	],
 	"author": "Mario Zechner",
 	"license": "MIT",
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/earendil-works/pi.git",
-		"directory": "packages/ai"
-	},
 	"engines": {
 		"node": ">=22.19.0"
 	},

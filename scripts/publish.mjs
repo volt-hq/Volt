@@ -5,10 +5,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const packages = [
-	{ directory: "packages/ai", name: "@earendil-works/pi-ai" },
-	{ directory: "packages/agent", name: "@earendil-works/pi-agent-core" },
-	{ directory: "packages/tui", name: "@earendil-works/pi-tui" },
-	{ directory: "packages/coding-agent", name: "@earendil-works/pi-coding-agent" },
+	{ directory: "packages/ai", name: "@earendil-works/volt-ai" },
+	{ directory: "packages/agent", name: "@earendil-works/volt-agent-core" },
+	{ directory: "packages/tui", name: "@earendil-works/volt-tui" },
+	{ directory: "packages/coding-agent", name: "@earendil-works/volt-coding-agent" },
 ];
 
 const dryRun = process.argv.includes("--dry-run");
@@ -87,7 +87,7 @@ if (versions.length !== 1) {
 	throw new Error(`Publish packages are not lockstep versioned: ${versions.join(", ")}`);
 }
 
-console.log(`Publishing pi packages at ${versions[0]}${dryRun ? " (dry run)" : ""}\n`);
+console.log(`Publishing volt packages at ${versions[0]}${dryRun ? " (dry run)" : ""}\n`);
 
 for (const pkg of packages) {
 	const version = packageVersions.get(pkg.name);

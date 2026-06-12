@@ -20,18 +20,18 @@ describe("getThemeExportColors", () => {
 	let previousAgentDir: string | undefined;
 
 	beforeEach(() => {
-		tempRoot = mkdtempSync(join(tmpdir(), "pi-theme-export-"));
-		previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-		process.env.PI_CODING_AGENT_DIR = join(tempRoot, "agent");
-		mkdirSync(join(process.env.PI_CODING_AGENT_DIR, "themes"), { recursive: true });
+		tempRoot = mkdtempSync(join(tmpdir(), "volt-theme-export-"));
+		previousAgentDir = process.env.VOLT_CODING_AGENT_DIR;
+		process.env.VOLT_CODING_AGENT_DIR = join(tempRoot, "agent");
+		mkdirSync(join(process.env.VOLT_CODING_AGENT_DIR, "themes"), { recursive: true });
 	});
 
 	afterEach(() => {
 		rmSync(tempRoot, { recursive: true, force: true });
 		if (previousAgentDir === undefined) {
-			delete process.env.PI_CODING_AGENT_DIR;
+			delete process.env.VOLT_CODING_AGENT_DIR;
 		} else {
-			process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			process.env.VOLT_CODING_AGENT_DIR = previousAgentDir;
 		}
 	});
 
@@ -58,7 +58,7 @@ describe("getThemeExportColors", () => {
 		};
 
 		writeFileSync(
-			join(process.env.PI_CODING_AGENT_DIR!, "themes", "custom-export-vars.json"),
+			join(process.env.VOLT_CODING_AGENT_DIR!, "themes", "custom-export-vars.json"),
 			JSON.stringify(customTheme, null, 2),
 		);
 
@@ -91,7 +91,7 @@ describe("getThemeExportColors", () => {
 		};
 
 		writeFileSync(
-			join(process.env.PI_CODING_AGENT_DIR!, "themes", "custom-export-recursive.json"),
+			join(process.env.VOLT_CODING_AGENT_DIR!, "themes", "custom-export-recursive.json"),
 			JSON.stringify(customTheme, null, 2),
 		);
 

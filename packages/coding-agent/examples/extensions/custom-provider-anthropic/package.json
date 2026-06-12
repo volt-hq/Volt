@@ -1,5 +1,5 @@
 {
-  "name": "pi-extension-custom-provider-anthropic",
+  "name": "volt-extension-custom-provider-anthropic",
   "private": true,
   "version": "0.79.1",
   "type": "module",
@@ -8,7 +8,7 @@
     "build": "echo 'nothing to build'",
     "check": "echo 'nothing to check'"
   },
-  "pi": {
+  "volt": {
     "extensions": [
       "./index.ts"
     ]

@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { DynamicBorder, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Container, Text } from "@earendil-works/pi-tui";
+import { DynamicBorder, type ExtensionAPI, type ExtensionContext } from "@earendil-works/volt-coding-agent";
+import { Container, Text } from "@earendil-works/volt-tui";
 
 const PR_PROMPT_PATTERN = /^\s*You are given one or more GitHub PR URLs:\s*(\S+)/im;
 const ISSUE_PROMPT_PATTERN = /^\s*Analyze GitHub issue\(s\):\s*(\S+)/im;
@@ -114,12 +114,12 @@ function formatAdvisoryDetail(advisory: GitHubAdvisoryMetadata): string | undefi
 	return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
-async function fetchAdvisoryMetadata(pi: ExtensionAPI, cwd: string, target: string): Promise<GhMetadata | undefined> {
+async function fetchAdvisoryMetadata(volt: ExtensionAPI, cwd: string, target: string): Promise<GhMetadata | undefined> {
 	const advisoryRef = parseAdvisoryUrl(target) ?? (await readAdvisoryRefFromDraft(cwd, target));
 	if (!advisoryRef) return undefined;
 
 	try {
-		const result = await pi.exec("gh", [
+		const result = await volt.exec("gh", [
 			"api",
 			`repos/${advisoryRef.owner}/${advisoryRef.repo}/security-advisories/${advisoryRef.ghsaId}`,
 		]);
@@ -136,13 +136,13 @@ async function fetchAdvisoryMetadata(pi: ExtensionAPI, cwd: string, target: stri
 }
 
 async function fetchGhMetadata(
-	pi: ExtensionAPI,
+	volt: ExtensionAPI,
 	kind: PromptMatch["kind"],
 	target: string,
 	cwd: string,
 ): Promise<GhMetadata | undefined> {
 	if (kind === "advisory") {
-		return fetchAdvisoryMetadata(pi, cwd, target);
+		return fetchAdvisoryMetadata(volt, cwd, target);
 	}
 
 	const args =
@@ -151,7 +151,7 @@ async function fetchGhMetadata(
 			: ["issue", "view", target, "--json", "title,author"];
 
 	try {
-		const result = await pi.exec("gh", args);
+		const result = await volt.exec("gh", args);
 		if (result.code !== 0 || !result.stdout) return undefined;
 		return JSON.parse(result.stdout) as GhMetadata;
 	} catch {
@@ -169,7 +169,7 @@ function formatAuthor(author?: GhMetadata["author"]): string | undefined {
 	return undefined;
 }
 
-export default function promptUrlWidgetExtension(pi: ExtensionAPI) {
+export default function promptUrlWidgetExtension(volt: ExtensionAPI) {
 	const setWidget = (ctx: ExtensionContext, match: PromptMatch, metadata?: GhMetadata) => {
 		ctx.ui.setWidget("prompt-url", (_tui, thm) => {
 			const displayTarget = metadata?.displayUrl ?? match.target;
@@ -198,26 +198,26 @@ export default function promptUrlWidgetExtension(pi: ExtensionAPI) {
 		const fallbackName = `${label}: ${match.target}`;
 		const desiredFallbackName = `${label}: ${displayTarget}`;
 		const desiredName = trimmedTitle ? `${label}: ${trimmedTitle} (${displayTarget})` : desiredFallbackName;
-		const currentName = pi.getSessionName()?.trim();
+		const currentName = volt.getSessionName()?.trim();
 		if (!currentName) {
-			pi.setSessionName(desiredName);
+			volt.setSessionName(desiredName);
 			return;
 		}
 		if (currentName === match.target || currentName === fallbackName || currentName === desiredFallbackName) {
-			pi.setSessionName(desiredName);
+			volt.setSessionName(desiredName);
 		}
 	};
 
 	const updatePromptContext = (ctx: ExtensionContext, match: PromptMatch) => {
 		setWidget(ctx, match);
 		applySessionName(ctx, match);
-		void fetchGhMetadata(pi, match.kind, match.target, ctx.cwd).then((meta) => {
+		void fetchGhMetadata(volt, match.kind, match.target, ctx.cwd).then((meta) => {
 			setWidget(ctx, match, meta);
 			applySessionName(ctx, match, meta);
 		});
 	};
 
-	pi.on("before_agent_start", async (event, ctx) => {
+	volt.on("before_agent_start", async (event, ctx) => {
 		if (!ctx.hasUI) return;
 		const match = extractPromptMatch(event.prompt);
 		if (!match) {
@@ -227,7 +227,7 @@ export default function promptUrlWidgetExtension(pi: ExtensionAPI) {
 		updatePromptContext(ctx, match);
 	});
 
-	pi.on("session_switch", async (_event, ctx) => {
+	volt.on("session_switch", async (_event, ctx) => {
 		rebuildFromSession(ctx);
 	});
 
@@ -264,7 +264,7 @@ export default function promptUrlWidgetExtension(pi: ExtensionAPI) {
 		updatePromptContext(ctx, match);
 	};
 
-	pi.on("session_start", async (_event, ctx) => {
+	volt.on("session_start", async (_event, ctx) => {
 		rebuildFromSession(ctx);
 	});
 }

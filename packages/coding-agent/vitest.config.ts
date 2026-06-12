@@ -19,14 +19,14 @@ export default defineConfig({
 	},
 	resolve: {
 		alias: [
-			{ find: /^@earendil-works\/pi-ai$/, replacement: aiSrcIndex },
-			{ find: /^@earendil-works\/pi-ai\/oauth$/, replacement: aiSrcOAuth },
-			{ find: /^@earendil-works\/pi-agent-core$/, replacement: agentSrcIndex },
-			{ find: /^@earendil-works\/pi-tui$/, replacement: tuiSrcIndex },
-			{ find: /^@mariozechner\/pi-ai$/, replacement: aiSrcIndex },
-			{ find: /^@mariozechner\/pi-ai\/oauth$/, replacement: aiSrcOAuth },
-			{ find: /^@mariozechner\/pi-agent-core$/, replacement: agentSrcIndex },
-			{ find: /^@mariozechner\/pi-tui$/, replacement: tuiSrcIndex },
+			{ find: /^@earendil-works\/volt-ai$/, replacement: aiSrcIndex },
+			{ find: /^@earendil-works\/volt-ai\/oauth$/, replacement: aiSrcOAuth },
+			{ find: /^@earendil-works\/volt-agent-core$/, replacement: agentSrcIndex },
+			{ find: /^@earendil-works\/volt-tui$/, replacement: tuiSrcIndex },
+			{ find: /^@mariozechner\/volt-ai$/, replacement: aiSrcIndex },
+			{ find: /^@mariozechner\/volt-ai\/oauth$/, replacement: aiSrcOAuth },
+			{ find: /^@mariozechner\/volt-agent-core$/, replacement: agentSrcIndex },
+			{ find: /^@mariozechner\/volt-tui$/, replacement: tuiSrcIndex },
 		],
 	},
 });
