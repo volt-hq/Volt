@@ -1,7 +1,12 @@
 import { APP_NAME } from "../../../config.ts";
 import { theme } from "../theme/theme.ts";
 
-const VOLT_WORDMARK = ["█ █ █▀█ █   ▀█▀", "▀▄▀ █▄█ █▄▄  █"];
+const VOLT_WORDMARK = [
+	"__   __ ___  _   _____ ",
+	"\\ \\ / // _ \\| | |_   _|",
+	" \\ V /| (_) | |__ | |  ",
+	"  \\_/  \\___/|____||_|  ",
+];
 
 /**
  * Render the startup logo: an ASCII wordmark for "volt" with the version

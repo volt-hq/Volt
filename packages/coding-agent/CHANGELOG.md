@@ -27,6 +27,10 @@
 - Restyled the built-in `dark` and `light` themes around an electric purple accent palette.
 - Replaced the plain-text startup logo with an ASCII wordmark; renamed forks (via `voltConfig.name`) still get the plain-text logo.
 
+### Fixed
+
+- Reworked the startup ASCII wordmark to an outline letterform so it no longer appears split across a horizontal seam on macOS terminals that add inter-line spacing (the previous solid half-block art was bisected by the line gap).
+
 ## [0.79.1] - 2026-06-09
 
 ### New Features
