@@ -32,6 +32,10 @@
           "path": "settings.md"
         },
         {
+          "title": "LSP Diagnostics",
+          "path": "lsp.md"
+        },
+        {
           "title": "Keybindings",
           "path": "keybindings.md"
         },

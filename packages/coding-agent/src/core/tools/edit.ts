@@ -6,6 +6,7 @@ import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import type { ToolDiagnosticsProvider } from "./diagnostics-provider.ts";
 import {
 	applyEditsToNormalizedContent,
 	computeEditsDiff,
@@ -65,6 +66,8 @@ export interface EditToolDetails {
 	patch: string;
 	/** Line number of the first change in the new file (for editor navigation) */
 	firstChangedLine?: number;
+	/** Formatted diagnostics collected after the edit (e.g. from LSP) */
+	diagnostics?: string;
 }
 
 /**
@@ -89,6 +92,8 @@ const defaultEditOperations: EditOperations = {
 export interface EditToolOptions {
 	/** Custom operations for file editing. Default: local filesystem */
 	operations?: EditOperations;
+	/** Optional post-edit diagnostics provider (e.g. LSP). Failures are ignored. */
+	diagnosticsProvider?: ToolDiagnosticsProvider;
 }
 
 function prepareEditArguments(input: unknown): EditToolInput {
@@ -218,12 +223,16 @@ function formatEditResult(
 		return theme.fg("error", errorText);
 	}
 
+	const parts: string[] = [];
 	const resultDiff = result.details?.diff;
 	if (resultDiff && resultDiff !== previewDiff) {
-		return renderDiff(resultDiff, { filePath: rawPath ?? undefined });
+		parts.push(renderDiff(resultDiff, { filePath: rawPath ?? undefined }));
+	}
+	if (result.details?.diagnostics) {
+		parts.push(theme.fg("warning", result.details.diagnostics));
 	}
 
-	return undefined;
+	return parts.length > 0 ? parts.join("\n\n") : undefined;
 }
 
 function getEditHeaderBg(
@@ -347,6 +356,15 @@ export function createEditToolDefinition(
 				await ops.writeFile(absolutePath, finalContent);
 				throwIfAborted();
 
+				let diagnostics: string | undefined;
+				if (options?.diagnosticsProvider) {
+					try {
+						diagnostics = await options.diagnosticsProvider.getDiagnostics(absolutePath, finalContent, signal);
+					} catch {
+						// Diagnostics are best-effort and must never fail the edit.
+					}
+				}
+
 				const diffResult = generateDiffString(baseContent, newContent);
 				const patch = generateUnifiedPatch(path, baseContent, newContent);
 				return {
@@ -355,8 +373,9 @@ export function createEditToolDefinition(
 							type: "text",
 							text: `Successfully replaced ${edits.length} block(s) in ${path}.`,
 						},
+						...(diagnostics ? [{ type: "text" as const, text: `Diagnostics:\n${diagnostics}` }] : []),
 					],
-					details: { diff: diffResult.diff, patch, firstChangedLine: diffResult.firstChangedLine },
+					details: { diff: diffResult.diff, patch, firstChangedLine: diffResult.firstChangedLine, diagnostics },
 				};
 			});
 		},

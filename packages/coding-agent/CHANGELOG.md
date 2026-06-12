@@ -5,9 +5,11 @@
 ### Added
 
 - Added an experimental first-time setup flow behind `PI_EXPERIMENTAL=1` that asks for a dark/light theme choice (preselecting the detected appearance) and opt-in analytics data sharing on first launch with the default agent directory; opting in stores a `trackingId` in `settings.json`.
+- Added native LSP diagnostics: a config-driven multi-server manager spawns language servers lazily and appends diagnostics to `edit`/`write` tool results. Enable with `--lsp` or the `lsp.enabled` setting; configure servers via `lsp.servers`. See [LSP Diagnostics](docs/lsp.md).
 
 ### Changed
 
+- `SettingsManager.applyOverrides()` overrides now persist across `reload()` and internal settings re-merges instead of being silently dropped.
 - Renamed the `/new` slash command to `/clear`. The `app.session.new` keybinding action id is unchanged.
 - Restyled the built-in `dark` and `light` themes around an electric purple accent palette.
 - Replaced the plain-text startup logo with an ASCII wordmark; renamed forks (via `voltConfig.name`) still get the plain-text logo.

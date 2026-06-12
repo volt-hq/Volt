@@ -79,6 +79,8 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { resolveLspConfig } from "./lsp/config.ts";
+import { LspManager } from "./lsp/manager.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -311,6 +313,9 @@ export class AgentSession {
 
 	// Model registry for API key resolution
 	private _modelRegistry: ModelRegistry;
+
+	// LSP diagnostics manager (created when lsp.enabled is set)
+	private _lspManager?: LspManager;
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -721,6 +726,7 @@ export class AgentSession {
 			this.abortBranchSummary();
 			this.abortBash();
 			this.agent.abort();
+			this._lspManager?.dispose();
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
 		}
@@ -2386,6 +2392,14 @@ export class AgentSession {
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
+
+		this._lspManager?.dispose();
+		this._lspManager = undefined;
+		const lspConfig = resolveLspConfig(this.settingsManager.getLspSettings());
+		if (lspConfig.enabled) {
+			this._lspManager = new LspManager({ cwd: this._cwd, config: lspConfig });
+		}
+
 		const baseToolDefinitions = this._baseToolsOverride
 			? Object.fromEntries(
 					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
@@ -2396,6 +2410,8 @@ export class AgentSession {
 			: createAllToolDefinitions(this._cwd, {
 					read: { autoResizeImages },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
+					edit: { diagnosticsProvider: this._lspManager },
+					write: { diagnosticsProvider: this._lspManager },
 				});
 
 		this._baseToolDefinitions = new Map(

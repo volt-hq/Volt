@@ -6,6 +6,7 @@ import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
+import type { LspSettings } from "./lsp/config.ts";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -119,6 +120,7 @@ export interface Settings {
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
+	lsp?: LspSettings; // LSP diagnostics after edit/write (see docs/lsp.md)
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -278,6 +280,7 @@ export class SettingsManager {
 	private projectSettingsLoadError: Error | null = null; // Track if project settings file had parse errors
 	private writeQueue: Promise<void> = Promise.resolve();
 	private errors: SettingsError[];
+	private sessionOverrides: Settings = {}; // Runtime overrides (e.g. CLI flags), reapplied on every re-merge
 
 	private constructor(
 		storage: SettingsStorage,
@@ -296,6 +299,15 @@ export class SettingsManager {
 		this.projectSettingsLoadError = projectLoadError;
 		this.errors = [...initialErrors];
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+	}
+
+	/** Re-merge effective settings from global, project, and session overrides */
+	private mergeEffectiveSettings(): void {
+		let merged = deepMergeSettings(this.globalSettings, this.projectSettings);
+		if (Object.keys(this.sessionOverrides).length > 0) {
+			merged = deepMergeSettings(merged, this.sessionOverrides);
+		}
+		this.settings = merged;
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -456,7 +468,7 @@ export class SettingsManager {
 		if (!trusted) {
 			this.projectSettings = {};
 			this.projectSettingsLoadError = null;
-			this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+			this.mergeEffectiveSettings();
 			return;
 		}
 
@@ -466,7 +478,7 @@ export class SettingsManager {
 		if (projectLoad.error) {
 			this.recordError("project", projectLoad.error);
 		}
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.mergeEffectiveSettings();
 	}
 
 	async reload(): Promise<void> {
@@ -494,12 +506,13 @@ export class SettingsManager {
 			this.recordError("project", projectLoad.error);
 		}
 
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.mergeEffectiveSettings();
 	}
 
-	/** Apply additional overrides on top of current settings */
+	/** Apply additional overrides on top of current settings. Overrides persist across reload() and re-merges. */
 	applyOverrides(overrides: Partial<Settings>): void {
-		this.settings = deepMergeSettings(this.settings, overrides);
+		this.sessionOverrides = deepMergeSettings(this.sessionOverrides, overrides);
+		this.mergeEffectiveSettings();
 	}
 
 	/** Mark a global field as modified during this session */
@@ -600,7 +613,7 @@ export class SettingsManager {
 	}
 
 	private save(): void {
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.mergeEffectiveSettings();
 
 		if (this.globalSettingsLoadError) {
 			return;
@@ -618,7 +631,7 @@ export class SettingsManager {
 	private saveProjectSettings(settings: Settings): void {
 		this.assertProjectTrustedForWrite();
 		this.projectSettings = structuredClone(settings);
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.mergeEffectiveSettings();
 
 		if (this.projectSettingsLoadError) {
 			return;
@@ -1173,6 +1186,10 @@ export class SettingsManager {
 
 	getCodeBlockIndent(): string {
 		return this.settings.markdown?.codeBlockIndent ?? "  ";
+	}
+
+	getLspSettings(): LspSettings | undefined {
+		return this.settings.lsp ? structuredClone(this.settings.lsp) : undefined;
 	}
 
 	getWarnings(): WarningSettings {

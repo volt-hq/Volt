@@ -9,6 +9,7 @@ export {
 	createBashToolDefinition,
 	createLocalBashOperations,
 } from "./bash.ts";
+export type { ToolDiagnosticsProvider } from "./diagnostics-provider.ts";
 export {
 	createEditTool,
 	createEditToolDefinition,
@@ -64,6 +65,7 @@ export {
 	createWriteTool,
 	createWriteToolDefinition,
 	type WriteOperations,
+	type WriteToolDetails,
 	type WriteToolInput,
 	type WriteToolOptions,
 } from "./write.ts";

@@ -6,6 +6,7 @@ import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import type { ToolDiagnosticsProvider } from "./diagnostics-provider.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render-utils.ts";
@@ -17,6 +18,11 @@ const writeSchema = Type.Object({
 });
 
 export type WriteToolInput = Static<typeof writeSchema>;
+
+export interface WriteToolDetails {
+	/** Formatted diagnostics collected after the write (e.g. from LSP) */
+	diagnostics?: string;
+}
 
 /**
  * Pluggable operations for the write tool.
@@ -37,6 +43,8 @@ const defaultWriteOperations: WriteOperations = {
 export interface WriteToolOptions {
 	/** Custom operations for file writing. Default: local filesystem */
 	operations?: WriteOperations;
+	/** Optional post-write diagnostics provider (e.g. LSP). Failures are ignored. */
+	diagnosticsProvider?: ToolDiagnosticsProvider;
 }
 
 type WriteHighlightCache = {
@@ -162,11 +170,16 @@ function formatWriteCall(
 }
 
 function formatWriteResult(
-	result: { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>; isError?: boolean },
+	result: {
+		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+		details?: WriteToolDetails;
+		isError?: boolean;
+	},
 	theme: Theme,
 ): string | undefined {
 	if (!result.isError) {
-		return undefined;
+		const diagnostics = result.details?.diagnostics;
+		return diagnostics ? `\n${theme.fg("warning", diagnostics)}` : undefined;
 	}
 	const output = result.content
 		.filter((c) => c.type === "text")
@@ -181,7 +194,7 @@ function formatWriteResult(
 export function createWriteToolDefinition(
 	cwd: string,
 	options?: WriteToolOptions,
-): ToolDefinition<typeof writeSchema, undefined> {
+): ToolDefinition<typeof writeSchema, WriteToolDetails | undefined> {
 	const ops = options?.operations ?? defaultWriteOperations;
 	return {
 		name: "write",
@@ -218,9 +231,21 @@ export function createWriteToolDefinition(
 				await ops.writeFile(absolutePath, content);
 				throwIfAborted();
 
+				let diagnostics: string | undefined;
+				if (options?.diagnosticsProvider) {
+					try {
+						diagnostics = await options.diagnosticsProvider.getDiagnostics(absolutePath, content, signal);
+					} catch {
+						// Diagnostics are best-effort and must never fail the write.
+					}
+				}
+
 				return {
-					content: [{ type: "text", text: `Successfully wrote ${content.length} bytes to ${path}` }],
-					details: undefined,
+					content: [
+						{ type: "text", text: `Successfully wrote ${content.length} bytes to ${path}` },
+						...(diagnostics ? [{ type: "text" as const, text: `Diagnostics:\n${diagnostics}` }] : []),
+					],
+					details: diagnostics ? { diagnostics } : undefined,
 				};
 			});
 		},
@@ -249,7 +274,10 @@ export function createWriteToolDefinition(
 			return component;
 		},
 		renderResult(result, _options, theme, context) {
-			const output = formatWriteResult({ ...result, isError: context.isError }, theme);
+			const output = formatWriteResult(
+				{ content: result.content, details: result.details, isError: context.isError },
+				theme,
+			);
 			if (!output) {
 				const component = (context.lastComponent as Container | undefined) ?? new Container();
 				component.clear();

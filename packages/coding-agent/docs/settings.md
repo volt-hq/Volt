@@ -204,6 +204,18 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 |---------|------|---------|-------------|
 | `markdown.codeBlockIndent` | string | `"  "` | Indentation for code blocks |
 
+### LSP Diagnostics
+
+See [LSP Diagnostics](lsp.md) for the full reference, including built-in server defaults.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `lsp.enabled` | boolean | `false` | Run language servers and append diagnostics to `edit`/`write` results (also `--lsp` per run) |
+| `lsp.servers` | object | built-ins | Server definitions keyed by name, merged over the built-in defaults |
+| `lsp.settleMs` | number | `1500` | How long to wait for published diagnostics after a change |
+| `lsp.maxDiagnostics` | number | `20` | Maximum diagnostics reported per tool call |
+| `lsp.severity` | string | `"error"` | Minimum severity to report: `error`, `warning`, `information`, or `hint` |
+
 ### Resources
 
 These settings define where to load extensions, skills, prompts, and themes from.

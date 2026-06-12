@@ -154,6 +154,21 @@ export {
 } from "./core/extensions/index.ts";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.ts";
+// LSP
+export {
+	LspClient,
+	type LspClientOptions,
+	type LspDiagnostic,
+	LspManager,
+	type LspManagerOptions,
+	type LspServerSettings,
+	type LspSettings,
+	type LspSeverity,
+	languageIdForExtension,
+	type ResolvedLspConfig,
+	type ResolvedLspServerConfig,
+	resolveLspConfig,
+} from "./core/lsp/index.ts";
 export { convertToLlm } from "./core/messages.ts";
 export { ModelRegistry } from "./core/model-registry.ts";
 export type {
@@ -277,6 +292,7 @@ export {
 	type ReadToolDetails,
 	type ReadToolInput,
 	type ReadToolOptions,
+	type ToolDiagnosticsProvider,
 	type ToolsOptions,
 	type TruncationOptions,
 	type TruncationResult,
@@ -284,6 +300,7 @@ export {
 	truncateLine,
 	truncateTail,
 	type WriteOperations,
+	type WriteToolDetails,
 	type WriteToolInput,
 	type WriteToolOptions,
 	withFileMutationQueue,
