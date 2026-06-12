@@ -2,7 +2,7 @@
 
 Volt can run language servers and feed diagnostics back to the model after every `edit` and `write`. When enabled, the tool result includes a `Diagnostics:` block with errors reported by the matching language server, so the model sees type and compile errors immediately instead of discovering them at build time.
 
-When LSP is enabled, the model also gets an `lsp` tool for code navigation: go-to-definition, find-references, hover, file symbol outlines, and on-demand diagnostics.
+When LSP is enabled, the model also gets an `lsp` tool for code navigation and refactoring: go-to-definition, find-references, hover, file symbol outlines, on-demand diagnostics, project-wide rename, and quick fixes (e.g. auto-import).
 
 ## Enabling
 
@@ -45,8 +45,12 @@ When LSP is enabled, the `lsp` tool is active by default (it still respects `--t
 | `hover` | `path`, `symbol`, `line?` | Type signature and documentation for a symbol |
 | `symbols` | `path` | Hierarchical symbol outline of a file |
 | `diagnostics` | `path` | Current diagnostics for a file, on demand |
+| `rename` | `path`, `symbol`, `newName`, `line?` | Rename a symbol across the project (applies the server's WorkspaceEdit to disk) |
+| `fix` | `path`, `symbol?` or `line?`, `title?` | Apply a quick fix (e.g. add a missing import). A single available action applies automatically; multiple actions are listed and chosen via `title` |
 
 The symbol is located by name: volt finds its position in the file (preferring a word-boundary match on the hinted `line`) and issues the positional LSP request. Errors such as a missing server or symbol are returned as text so the model can react.
+
+`rename` and `fix` write the server's `WorkspaceEdit` to disk (including create/rename/delete file operations), re-sync changed open documents, and report a per-file summary. Command-based code actions are executed via `workspace/executeCommand` with server-initiated `workspace/applyEdit` requests applied the same way.
 
 ## Built-in Servers
 

@@ -9,3 +9,10 @@ export {
 	resolveLspConfig,
 } from "./config.ts";
 export { LspManager, type LspManagerOptions } from "./manager.ts";
+export {
+	applyTextEdits,
+	type LspTextEdit,
+	type LspWorkspaceEdit,
+	type NormalizedWorkspaceOperation,
+	normalizeWorkspaceEdit,
+} from "./workspace-edit.ts";

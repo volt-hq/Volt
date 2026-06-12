@@ -1,10 +1,11 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { LspClient } from "../src/core/lsp/client.ts";
 import { resolveLspConfig } from "../src/core/lsp/config.ts";
 import { LspManager } from "../src/core/lsp/manager.ts";
+import { applyTextEdits, normalizeWorkspaceEdit } from "../src/core/lsp/workspace-edit.ts";
 import type { ToolDiagnosticsProvider } from "../src/core/tools/diagnostics-provider.ts";
 import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { createLspToolDefinition, type LspNavigationProvider } from "../src/core/tools/lsp.ts";
@@ -242,6 +243,60 @@ describe("LspManager", () => {
 		expect(result).toContain("error: found ERROR on line 1");
 	});
 
+	it("renames a symbol across open files", async () => {
+		const manager = setup();
+		const fileA = join(tempDir, "a.foo");
+		const fileB = join(tempDir, "b.foo");
+		writeFileSync(fileA, "function renameme() {}\nrenameme();\n");
+		writeFileSync(fileB, "call renameme() twice renameme\n");
+		// Open both documents on the server.
+		await manager.documentSymbols(fileB);
+
+		const result = await manager.rename(fileA, "renameme", "renamed");
+		expect(result).toContain('Renamed "renameme" to "renamed"');
+		expect(result).toContain("a.foo (2 edits)");
+		expect(result).toContain("b.foo (2 edits)");
+		expect(readFileSync(fileA, "utf-8")).toBe("function renamed() {}\nrenamed();\n");
+		expect(readFileSync(fileB, "utf-8")).toBe("call renamed() twice renamed\n");
+	});
+
+	it("applies a single quick fix automatically", async () => {
+		const manager = setup();
+		const filePath = join(tempDir, "test.foo");
+		writeFileSync(filePath, "this line has ERROR in it\n");
+		const result = await manager.codeFix(filePath, { line: 1 });
+		expect(result).toContain('Applied "Replace ERROR with FIXED"');
+		expect(result).toContain("test.foo (1 edit)");
+		expect(readFileSync(filePath, "utf-8")).toBe("this line has FIXED in it\n");
+	});
+
+	it("lists multiple code actions and applies the chosen title", async () => {
+		const manager = setup();
+		const filePath = join(tempDir, "test.foo");
+		const content = "has ERROR and MULTI here\n";
+		writeFileSync(filePath, content);
+
+		const listed = await manager.codeFix(filePath, { line: 1 });
+		expect(listed).toContain("Multiple code actions available");
+		expect(listed).toContain("- Replace ERROR with FIXED (quickfix)");
+		expect(listed).toContain("- Replace MULTI with CHOSEN (refactor)");
+		expect(readFileSync(filePath, "utf-8")).toBe(content);
+
+		const applied = await manager.codeFix(filePath, { line: 1, title: "MULTI" });
+		expect(applied).toContain('Applied "Replace MULTI with CHOSEN"');
+		expect(readFileSync(filePath, "utf-8")).toBe("has ERROR and CHOSEN here\n");
+	});
+
+	it("applies command-based code actions via workspace/applyEdit", async () => {
+		const manager = setup();
+		const filePath = join(tempDir, "test.foo");
+		writeFileSync(filePath, "needs CMDFIX here\n");
+		const result = await manager.codeFix(filePath, { line: 1 });
+		expect(result).toContain('Applied "Fix via command"');
+		expect(result).toContain("test.foo (1 edit)");
+		expect(readFileSync(filePath, "utf-8")).toBe("needs FIXED here\n");
+	});
+
 	it("reports a failed server start once, then stays silent", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
 		manager = new LspManager({
@@ -262,6 +317,63 @@ describe("LspManager", () => {
 		expect(first).toContain("lsp(missing):");
 		const second = await manager.getDiagnostics(filePath, "ERROR\n");
 		expect(second).toBeUndefined();
+	});
+});
+
+describe("workspace edits", () => {
+	it("applies multiple text edits bottom-up", () => {
+		const content = "one two\nthree four\nfive\n";
+		const result = applyTextEdits(content, [
+			{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "ONE" },
+			{ range: { start: { line: 1, character: 6 }, end: { line: 1, character: 10 } }, newText: "FOUR" },
+			{ range: { start: { line: 2, character: 0 }, end: { line: 2, character: 0 } }, newText: "inserted " },
+		]);
+		expect(result).toBe("ONE two\nthree FOUR\ninserted five\n");
+	});
+
+	it("applies multi-line range replacements and clamps out-of-range positions", () => {
+		const content = "alpha\nbeta\ngamma";
+		const replaced = applyTextEdits(content, [
+			{ range: { start: { line: 0, character: 2 }, end: { line: 2, character: 3 } }, newText: "-" },
+		]);
+		expect(replaced).toBe("al-ma");
+		const appended = applyTextEdits(content, [
+			{ range: { start: { line: 9, character: 0 }, end: { line: 9, character: 5 } }, newText: "!" },
+		]);
+		expect(appended).toBe("alpha\nbeta\ngamma!");
+	});
+
+	it("normalizes both WorkspaceEdit shapes", () => {
+		expect(
+			normalizeWorkspaceEdit({
+				changes: {
+					"file:///a": [
+						{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, newText: "x" },
+					],
+				},
+			}),
+		).toEqual([
+			{
+				kind: "edit",
+				uri: "file:///a",
+				edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, newText: "x" }],
+			},
+		]);
+		expect(
+			normalizeWorkspaceEdit({
+				documentChanges: [
+					{ textDocument: { uri: "file:///a" }, edits: [] },
+					{ kind: "create", uri: "file:///b" },
+					{ kind: "rename", oldUri: "file:///b", newUri: "file:///c" },
+					{ kind: "delete", uri: "file:///c" },
+				],
+			}),
+		).toEqual([
+			{ kind: "edit", uri: "file:///a", edits: [] },
+			{ kind: "create", uri: "file:///b" },
+			{ kind: "rename", oldUri: "file:///b", newUri: "file:///c" },
+			{ kind: "delete", uri: "file:///c" },
+		]);
 	});
 });
 
@@ -418,6 +530,14 @@ describe("tool diagnostics integration", () => {
 			hover: async () => "hover-result",
 			documentSymbols: async () => "symbols-result",
 			fileDiagnostics: async () => "diag-result",
+			rename: async (path, symbol, newName) => {
+				calls.push(`rename ${path} ${symbol} ${newName}`);
+				return "rename-result";
+			},
+			codeFix: async (path, options) => {
+				calls.push(`fix ${path} ${options.line} ${options.title}`);
+				return "fix-result";
+			},
 		};
 		const tool = createLspToolDefinition(tempDir, { provider: navProvider });
 
@@ -438,6 +558,30 @@ describe("tool diagnostics integration", () => {
 		await expect(
 			tool.execute("t3", { action: "references", path: "a.ts" }, undefined, undefined, {} as never),
 		).rejects.toThrow("lsp references requires a symbol name");
+
+		const renamed = await tool.execute(
+			"t4",
+			{ action: "rename", path: "a.ts", symbol: "foo", newName: "bar" },
+			undefined,
+			undefined,
+			{} as never,
+		);
+		expect(renamed.content[0]).toEqual({ type: "text", text: "rename-result" });
+		expect(calls).toContain(`rename ${join(tempDir, "a.ts")} foo bar`);
+
+		const fixed = await tool.execute(
+			"t5",
+			{ action: "fix", path: "a.ts", line: 3, title: "Add import" },
+			undefined,
+			undefined,
+			{} as never,
+		);
+		expect(fixed.content[0]).toEqual({ type: "text", text: "fix-result" });
+		expect(calls).toContain(`fix ${join(tempDir, "a.ts")} 3 Add import`);
+
+		await expect(
+			tool.execute("t6", { action: "rename", path: "a.ts", symbol: "foo" }, undefined, undefined, {} as never),
+		).rejects.toThrow("lsp rename requires newName");
 	});
 
 	it("lsp tool reports when LSP is disabled", async () => {

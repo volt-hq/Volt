@@ -7,13 +7,15 @@
  */
 
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { rename as fsRename, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ToolDiagnosticsProvider } from "../tools/diagnostics-provider.ts";
+import { withFileMutationQueue } from "../tools/file-mutation-queue.ts";
 import type { LspNavigationProvider } from "../tools/lsp.ts";
 import { LspClient, type LspDiagnostic, type LspPosition, type LspRange } from "./client.ts";
 import { type ResolvedLspConfig, type ResolvedLspServerConfig, SEVERITY_NAMES } from "./config.ts";
+import { applyTextEdits, type LspWorkspaceEdit, normalizeWorkspaceEdit } from "./workspace-edit.ts";
 
 export interface LspManagerOptions {
 	cwd: string;
@@ -28,6 +30,14 @@ interface ServerFailureState {
 const MAX_START_ATTEMPTS = 3;
 const MAX_REFERENCES = 50;
 const MAX_SYMBOL_LINES = 200;
+
+function uriToPath(uri: string): string {
+	try {
+		return fileURLToPath(uri);
+	} catch {
+		return uri;
+	}
+}
 
 const SYMBOL_KIND_NAMES: Record<number, string> = {
 	1: "file",
@@ -79,6 +89,57 @@ interface LspDocumentSymbol {
 
 interface LspHoverResult {
 	contents: unknown;
+}
+
+interface LspCommand {
+	title?: string;
+	command: string;
+	arguments?: unknown[];
+}
+
+interface LspCodeAction {
+	title: string;
+	kind?: string;
+	edit?: LspWorkspaceEdit;
+	command?: LspCommand;
+}
+
+interface NormalizedCodeAction {
+	title: string;
+	kind?: string;
+	edit?: LspWorkspaceEdit;
+	command?: LspCommand;
+	/** Raw action payload, used for codeAction/resolve */
+	raw: unknown;
+}
+
+function positionLeq(a: LspPosition, b: LspPosition): boolean {
+	return a.line < b.line || (a.line === b.line && a.character <= b.character);
+}
+
+function rangesOverlap(a: LspRange, b: LspRange): boolean {
+	return positionLeq(a.start, b.end) && positionLeq(b.start, a.end);
+}
+
+/** Normalize codeAction results: bare Commands and CodeAction literals. */
+function normalizeCodeActions(result: unknown): NormalizedCodeAction[] {
+	if (!Array.isArray(result)) {
+		return [];
+	}
+	const actions: NormalizedCodeAction[] = [];
+	for (const item of result) {
+		if (!item || typeof item !== "object" || typeof (item as { title?: unknown }).title !== "string") {
+			continue;
+		}
+		const entry = item as LspCodeAction & { command?: LspCommand | string };
+		if (typeof entry.command === "string") {
+			// Bare Command shape.
+			actions.push({ title: entry.title, command: entry as unknown as LspCommand, raw: item });
+		} else {
+			actions.push({ title: entry.title, kind: entry.kind, edit: entry.edit, command: entry.command, raw: item });
+		}
+	}
+	return actions;
 }
 
 type DocumentSession = { error: string } | { client: LspClient; uri: string; content: string };
@@ -174,6 +235,8 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	private clients = new Map<string, LspClient>();
 	private startFailures = new Map<string, ServerFailureState>();
 	private disposed = false;
+	/** Summaries of WorkspaceEdits applied via server-initiated workspace/applyEdit */
+	private serverApplyEditSummaries: string[] = [];
 
 	constructor(options: LspManagerOptions) {
 		this.cwd = options.cwd;
@@ -380,6 +443,213 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		}
 	}
 
+	async rename(
+		absolutePath: string,
+		symbol: string,
+		newName: string,
+		line?: number,
+		_signal?: AbortSignal,
+	): Promise<string> {
+		const session = await this.openSession(absolutePath);
+		if ("error" in session) {
+			return session.error;
+		}
+		const position = findSymbolPosition(session.content, symbol, line);
+		if (!position) {
+			return `Symbol "${symbol}" not found in ${this.displayPath(absolutePath)}.`;
+		}
+		try {
+			const result = (await session.client.sendRequest("textDocument/rename", {
+				textDocument: { uri: session.uri },
+				position,
+				newName,
+			})) as LspWorkspaceEdit | null;
+			if (!result || normalizeWorkspaceEdit(result).length === 0) {
+				return `Rename of "${symbol}" is not available at this position.`;
+			}
+			const { summary } = await this.applyWorkspaceEdit(session.client, result);
+			return `Renamed "${symbol}" to "${newName}":\n${summary}`;
+		} catch (error) {
+			return this.describeRequestError(absolutePath, error);
+		}
+	}
+
+	async codeFix(
+		absolutePath: string,
+		options: { symbol?: string; line?: number; title?: string },
+		_signal?: AbortSignal,
+	): Promise<string> {
+		const session = await this.openSession(absolutePath);
+		if ("error" in session) {
+			return session.error;
+		}
+		const contentLines = session.content.split("\n");
+		let range: LspRange;
+		if (options.symbol) {
+			const position = findSymbolPosition(session.content, options.symbol, options.line);
+			if (!position) {
+				return `Symbol "${options.symbol}" not found in ${this.displayPath(absolutePath)}.`;
+			}
+			range = {
+				start: position,
+				end: { line: position.line, character: position.character + options.symbol.length },
+			};
+		} else if (options.line !== undefined && options.line >= 1 && options.line <= contentLines.length) {
+			const lineIndex = options.line - 1;
+			range = {
+				start: { line: lineIndex, character: 0 },
+				end: { line: lineIndex, character: contentLines[lineIndex].length },
+			};
+		} else {
+			range = {
+				start: { line: 0, character: 0 },
+				end: {
+					line: Math.max(0, contentLines.length - 1),
+					character: contentLines[contentLines.length - 1]?.length ?? 0,
+				},
+			};
+		}
+
+		// Servers derive quick fixes from the diagnostics passed in the context,
+		// so make sure we have them before asking for code actions.
+		let published = session.client.getPublishedDiagnostics(absolutePath);
+		if (published.length === 0) {
+			try {
+				published = await session.client.getDiagnostics(
+					absolutePath,
+					session.content,
+					this.config.settleMs,
+					this.config.firstSettleMs,
+					_signal,
+				);
+			} catch {
+				// Code actions may still be available without diagnostics context.
+			}
+		}
+		const diagnostics = published.filter((diagnostic) => rangesOverlap(diagnostic.range, range));
+		try {
+			const result = await session.client.sendRequest("textDocument/codeAction", {
+				textDocument: { uri: session.uri },
+				range,
+				context: { diagnostics },
+			});
+			const actions = normalizeCodeActions(result);
+			if (actions.length === 0) {
+				return "No code actions available at this position.";
+			}
+			const describe = (action: NormalizedCodeAction): string =>
+				`- ${action.title}${action.kind ? ` (${action.kind})` : ""}`;
+			let chosen: NormalizedCodeAction | undefined;
+			if (options.title) {
+				const wanted = options.title.toLowerCase();
+				chosen =
+					actions.find((action) => action.title.toLowerCase() === wanted) ??
+					actions.find((action) => action.title.toLowerCase().includes(wanted));
+				if (!chosen) {
+					return `No code action matching "${options.title}". Available:\n${actions.map(describe).join("\n")}`;
+				}
+			} else if (actions.length === 1) {
+				chosen = actions[0];
+			} else {
+				return `Multiple code actions available; rerun with a title to apply one:\n${actions.map(describe).join("\n")}`;
+			}
+			return await this.applyCodeAction(session.client, chosen);
+		} catch (error) {
+			return this.describeRequestError(absolutePath, error);
+		}
+	}
+
+	private async applyCodeAction(client: LspClient, action: NormalizedCodeAction): Promise<string> {
+		let edit = action.edit;
+		if (!edit) {
+			// Servers may defer the edit to codeAction/resolve.
+			try {
+				const resolved = (await client.sendRequest("codeAction/resolve", action.raw)) as {
+					edit?: LspWorkspaceEdit;
+				} | null;
+				edit = resolved?.edit;
+			} catch {
+				// Fall back to the command below.
+			}
+		}
+		if (edit && normalizeWorkspaceEdit(edit).length > 0) {
+			const { summary } = await this.applyWorkspaceEdit(client, edit);
+			return `Applied "${action.title}":\n${summary}`;
+		}
+		if (action.command) {
+			// Command-based actions apply their edits via workspace/applyEdit.
+			this.serverApplyEditSummaries = [];
+			await client.sendRequest("workspace/executeCommand", {
+				command: action.command.command,
+				arguments: action.command.arguments ?? [],
+			});
+			const summaries = this.serverApplyEditSummaries;
+			this.serverApplyEditSummaries = [];
+			if (summaries.length > 0) {
+				return `Applied "${action.title}":\n${summaries.join("\n")}`;
+			}
+			return `Executed "${action.title}" (no workspace edits reported).`;
+		}
+		return `Code action "${action.title}" produced no edits.`;
+	}
+
+	/**
+	 * Apply a WorkspaceEdit to disk, re-sync open documents, and notify the
+	 * server about files it does not have open.
+	 */
+	private async applyWorkspaceEdit(
+		client: LspClient,
+		edit: LspWorkspaceEdit,
+	): Promise<{ summary: string; changedPaths: string[] }> {
+		const operations = normalizeWorkspaceEdit(edit);
+		const lines: string[] = [];
+		const changedPaths: string[] = [];
+		for (const operation of operations) {
+			if (operation.kind === "edit") {
+				const path = uriToPath(operation.uri);
+				await withFileMutationQueue(path, async () => {
+					const content = await readFile(path, "utf-8").catch(() => "");
+					await writeFile(path, applyTextEdits(content, operation.edits), "utf-8");
+				});
+				changedPaths.push(path);
+				lines.push(
+					`${this.displayPath(path)} (${operation.edits.length} edit${operation.edits.length === 1 ? "" : "s"})`,
+				);
+			} else if (operation.kind === "create") {
+				const path = uriToPath(operation.uri);
+				await mkdir(dirname(path), { recursive: true });
+				await writeFile(path, "", { flag: "a" });
+				changedPaths.push(path);
+				lines.push(`created ${this.displayPath(path)}`);
+			} else if (operation.kind === "rename") {
+				const oldPath = uriToPath(operation.oldUri);
+				const newPath = uriToPath(operation.newUri);
+				await mkdir(dirname(newPath), { recursive: true });
+				await fsRename(oldPath, newPath);
+				changedPaths.push(newPath);
+				lines.push(`renamed ${this.displayPath(oldPath)} -> ${this.displayPath(newPath)}`);
+			} else {
+				const path = uriToPath(operation.uri);
+				await rm(path, { force: true });
+				lines.push(`deleted ${this.displayPath(path)}`);
+			}
+		}
+
+		const unopenedPaths: string[] = [];
+		for (const path of changedPaths) {
+			if (client.isDocumentOpen(path)) {
+				const content = await readFile(path, "utf-8").catch(() => undefined);
+				if (content !== undefined) {
+					await client.openDocument(path, content);
+				}
+			} else {
+				unopenedPaths.push(path);
+			}
+		}
+		client.notifyFilesChanged(unopenedPaths);
+		return { summary: lines.join("\n"), changedPaths };
+	}
+
 	/** Re-sync open documents that changed on disk outside edit/write (best-effort). */
 	private async refreshStale(client: LspClient, excludePath: string): Promise<void> {
 		try {
@@ -402,12 +672,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	}
 
 	private async formatLocation(location: LspLocation): Promise<string> {
-		let path: string;
-		try {
-			path = fileURLToPath(location.uri);
-		} catch {
-			path = location.uri;
-		}
+		const path = uriToPath(location.uri);
 		const line = location.range.start.line + 1;
 		const column = location.range.start.character + 1;
 		let snippet = "";
@@ -477,12 +742,19 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			return existing;
 		}
 		existing?.dispose();
+		let clientRef!: LspClient;
 		const client = new LspClient({
 			serverName: server.name,
 			command: server.command,
 			rootDir: root,
 			initializationOptions: server.initializationOptions,
+			onApplyEdit: async (edit) => {
+				const { summary } = await this.applyWorkspaceEdit(clientRef, edit as LspWorkspaceEdit);
+				this.serverApplyEditSummaries.push(summary);
+				return true;
+			},
 		});
+		clientRef = client;
 		this.clients.set(key, client);
 		return client;
 	}

@@ -38,6 +38,11 @@ export interface LspClientOptions {
 	initializationOptions?: unknown;
 	/** Timeout for individual LSP requests (including initialize). Default: 30000 */
 	requestTimeoutMs?: number;
+	/**
+	 * Handler for server-initiated workspace/applyEdit requests (used by
+	 * command-based code actions). Returns whether the edit was applied.
+	 */
+	onApplyEdit?: (edit: unknown) => Promise<boolean>;
 }
 
 interface PendingRequest {
@@ -208,11 +213,24 @@ export class LspClient {
 						references: { dynamicRegistration: false },
 						hover: { dynamicRegistration: false, contentFormat: ["markdown", "plaintext"] },
 						documentSymbol: { dynamicRegistration: false, hierarchicalDocumentSymbolSupport: true },
+						rename: { dynamicRegistration: false, prepareSupport: false },
+						codeAction: {
+							dynamicRegistration: false,
+							codeActionLiteralSupport: {
+								codeActionKind: { valueSet: ["quickfix", "refactor", "source"] },
+							},
+							resolveSupport: { properties: ["edit"] },
+						},
 					},
 					workspace: {
 						configuration: true,
 						workspaceFolders: true,
 						didChangeWatchedFiles: { dynamicRegistration: false },
+						applyEdit: true,
+						workspaceEdit: {
+							documentChanges: true,
+							resourceOperations: ["create", "rename", "delete"],
+						},
 					},
 					window: { workDoneProgress: false },
 				},
@@ -343,6 +361,29 @@ export class LspClient {
 	async sendRequest(method: string, params: unknown): Promise<unknown> {
 		await this.start();
 		return this.request(method, params);
+	}
+
+	/** Whether the document is currently open (synced) on the server. */
+	isDocumentOpen(absolutePath: string): boolean {
+		return this.documents.has(normalizeUri(pathToFileURL(absolutePath).toString()));
+	}
+
+	/** Last published diagnostics for a document, if any. */
+	getPublishedDiagnostics(absolutePath: string): LspDiagnostic[] {
+		return this.published.get(normalizeUri(pathToFileURL(absolutePath).toString()))?.diagnostics ?? [];
+	}
+
+	/** Notify the server that files changed on disk (e.g. after applying a WorkspaceEdit). */
+	notifyFilesChanged(absolutePaths: string[]): void {
+		if (absolutePaths.length === 0) {
+			return;
+		}
+		this.notify("workspace/didChangeWatchedFiles", {
+			changes: absolutePaths.map((path) => ({
+				uri: pathToFileURL(path).toString(),
+				type: FILE_CHANGE_TYPE_CHANGED,
+			})),
+		});
 	}
 
 	dispose(): void {
@@ -554,6 +595,20 @@ export class LspClient {
 	}
 
 	private handleServerRequest(id: number | string, method: string, params: unknown): void {
+		if (method === "workspace/applyEdit" && this.options.onApplyEdit) {
+			const edit = (params as { edit?: unknown } | undefined)?.edit;
+			void this.options
+				.onApplyEdit(edit)
+				.catch(() => false)
+				.then((applied) => {
+					try {
+						this.sendMessage({ jsonrpc: "2.0", id, result: { applied } });
+					} catch {
+						// Server may have exited.
+					}
+				});
+			return;
+		}
 		// Respond with sensible empty defaults so servers that depend on client
 		// round-trips (configuration, capability registration) do not stall.
 		let result: unknown = null;
