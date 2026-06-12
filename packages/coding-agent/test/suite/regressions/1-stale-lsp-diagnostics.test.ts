@@ -116,6 +116,27 @@ describe("stale cross-file LSP diagnostics (issue #1)", () => {
 		expect(result).toBeUndefined();
 	});
 
+	it("does not stall the full settle window for servers that never send versions", async () => {
+		// A correct server that omits the optional version field and publishes
+		// exactly once per change never produces a fresher publish, so the
+		// unversioned re-wait must be capped at a short grace window instead of
+		// running to the settle deadline on every edit.
+		const manager = setup({
+			serverArgs: ["--no-version"],
+			settleMs: 5000,
+			firstSettleMs: 5000,
+		});
+		const filePath = join(tempDir, "test.foo");
+		writeFileSync(filePath, "clean\n");
+		expect(await manager.getDiagnostics(filePath, "clean\n")).toBeUndefined();
+
+		const start = Date.now();
+		const result = await manager.getDiagnostics(filePath, "ERROR here\n");
+		const elapsed = Date.now() - start;
+		expect(result).toContain("found ERROR on line 1");
+		expect(elapsed).toBeLessThan(2500);
+	});
+
 	it("retries a failed pull so stale published diagnostics are never the fallback", async () => {
 		// The server rejects the first textDocument/diagnostic request (like a
 		// ContentModified cancellation) and answers the retry. Pull results are

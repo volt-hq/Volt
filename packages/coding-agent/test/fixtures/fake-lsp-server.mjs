@@ -25,6 +25,7 @@ const staleMode = process.argv.includes("--stale");
 const staleUnversionedMode = process.argv.includes("--stale-unversioned");
 const staleOobMode = process.argv.includes("--stale-oob");
 const staleCrossMode = process.argv.includes("--stale-cross");
+const noVersionMode = process.argv.includes("--no-version");
 const hangMode = process.argv.includes("--hang");
 const initErrorMode = process.argv.includes("--init-error");
 const delayIndex = process.argv.indexOf("--delay");
@@ -552,7 +553,7 @@ function publishLater(onlyUri) {
 			send({
 				jsonrpc: "2.0",
 				method: "textDocument/publishDiagnostics",
-				params: { uri, version: versions.get(uri), diagnostics: scan(text, uri) },
+				params: { uri, ...(noVersionMode ? {} : { version: versions.get(uri) }), diagnostics: scan(text, uri) },
 			});
 		}
 	}, publishDelayMs);

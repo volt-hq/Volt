@@ -99,6 +99,15 @@ interface JsonRpcMessage {
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
 
+/**
+ * How long to re-wait for a fresher publish after an unversioned one when the
+ * server has never tagged any publish with a version. Such servers publish
+ * exactly once per change in the common case, so a full settle-window re-wait
+ * would just run to the deadline on every edit; a racing stale publish and its
+ * corrected follow-up arrive close together in practice.
+ */
+const UNVERSIONED_REPUBLISH_GRACE_MS = 250;
+
 function quoteWindowsArg(arg: string): string {
 	return /\s/.test(arg) ? `"${arg}"` : arg;
 }
@@ -191,6 +200,7 @@ export class LspClient {
 	private publishSeq = 0;
 	private publishWaiters: PublishWaiter[] = [];
 	private everPublished = false;
+	private everPublishedVersioned = false;
 	private tracer: LspTracer | undefined;
 
 	constructor(options: LspClientOptions) {
@@ -385,9 +395,15 @@ export class LspClient {
 		// been computed against the pre-change content (the version field is
 		// optional in LSP, and cross-file invalidation from an earlier edit can
 		// race the sync). When this document's content just changed, re-wait once
-		// for a fresher publish before trusting an unversioned one.
+		// for a fresher publish before trusting an unversioned one. For servers
+		// that tag publishes with versions, an unversioned one is anomalous and
+		// the versioned republish will resolve the wait promptly, so use the full
+		// remaining deadline; for servers that never send versions, cap the
+		// re-wait so every edit does not stall for the whole settle window.
 		if (changed && entry !== undefined && entry.seq > sinceSeq && entry.version === undefined) {
-			const remainingMs = deadline - Date.now();
+			const remainingMs = this.everPublishedVersioned
+				? deadline - Date.now()
+				: Math.min(deadline - Date.now(), UNVERSIONED_REPUBLISH_GRACE_MS);
 			if (remainingMs > 0) {
 				await this.waitForPublish(key, entry.seq, remainingMs, signal);
 				entry = this.published.get(key) ?? entry;
@@ -713,6 +729,9 @@ export class LspClient {
 			if (params?.uri) {
 				const key = normalizeUri(params.uri);
 				this.everPublished = true;
+				if (params.version !== undefined) {
+					this.everPublishedVersioned = true;
+				}
 				// Ignore publishes computed against an older synced version: they
 				// would satisfy the settle wait with stale diagnostics.
 				const document = this.documents.get(key);
