@@ -8,6 +8,7 @@
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { readFile, stat } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { languageIdForExtension } from "./config.ts";
@@ -55,6 +56,21 @@ interface PublishWaiter {
 	sinceSeq: number;
 	resolve: () => void;
 }
+
+interface TrackedDocument {
+	uri: string;
+	absolutePath: string;
+	version: number;
+	/** The exact content last synced to the server */
+	content: string;
+	/** Disk stat at last sync, used as a cheap staleness filter */
+	mtimeMs?: number;
+	size?: number;
+}
+
+/** LSP FileChangeType values for workspace/didChangeWatchedFiles */
+const FILE_CHANGE_TYPE_CHANGED = 2;
+const FILE_CHANGE_TYPE_DELETED = 3;
 
 interface JsonRpcMessage {
 	jsonrpc: "2.0";
@@ -121,10 +137,11 @@ export class LspClient {
 	private readBuffer: Buffer = Buffer.alloc(0);
 
 	private supportsPullDiagnostics = false;
-	private documentVersions = new Map<string, number>();
+	private documents = new Map<string, TrackedDocument>();
 	private published = new Map<string, PublishedDiagnostics>();
 	private publishSeq = 0;
 	private publishWaiters: PublishWaiter[] = [];
+	private everPublished = false;
 
 	constructor(options: LspClientOptions) {
 		this.options = options;
@@ -192,7 +209,11 @@ export class LspClient {
 						hover: { dynamicRegistration: false, contentFormat: ["markdown", "plaintext"] },
 						documentSymbol: { dynamicRegistration: false, hierarchicalDocumentSymbolSupport: true },
 					},
-					workspace: { configuration: true, workspaceFolders: true },
+					workspace: {
+						configuration: true,
+						workspaceFolders: true,
+						didChangeWatchedFiles: { dynamicRegistration: false },
+					},
 					window: { workDoneProgress: false },
 				},
 				initializationOptions: this.options.initializationOptions,
@@ -207,20 +228,22 @@ export class LspClient {
 	/**
 	 * Sync a document and collect its diagnostics.
 	 *
-	 * Uses pull diagnostics when the server supports them; otherwise waits up to
-	 * settleMs for the server to publish diagnostics for the document.
+	 * Uses pull diagnostics when the server supports them; otherwise waits for
+	 * the server to publish diagnostics for the document. The first collection
+	 * on a fresh server waits up to firstSettleMs (servers like tsserver publish
+	 * nothing until the project has loaded); afterwards settleMs applies.
 	 */
 	async getDiagnostics(
 		absolutePath: string,
 		content: string,
 		settleMs: number,
+		firstSettleMs?: number,
 		signal?: AbortSignal,
 	): Promise<LspDiagnostic[]> {
 		await this.start();
-		const uri = pathToFileURL(absolutePath).toString();
-		const key = normalizeUri(uri);
 		const sinceSeq = this.publishSeq;
-		this.syncDocument(uri, absolutePath, content);
+		const { uri, changed } = await this.syncContent(absolutePath, content);
+		const key = normalizeUri(uri);
 
 		if (this.supportsPullDiagnostics) {
 			try {
@@ -228,6 +251,7 @@ export class LspClient {
 					| { kind?: string; items?: LspDiagnostic[] }
 					| undefined;
 				if (result?.kind === "full" && Array.isArray(result.items)) {
+					this.everPublished = true;
 					return result.items;
 				}
 			} catch {
@@ -235,16 +259,79 @@ export class LspClient {
 			}
 		}
 
-		await this.waitForPublish(key, sinceSeq, settleMs, signal);
+		// Unchanged content will not trigger a republish; reuse the last publish.
+		const existing = this.published.get(key);
+		if (!changed && existing) {
+			return existing.diagnostics;
+		}
+
+		const timeoutMs = this.everPublished ? settleMs : Math.max(settleMs, firstSettleMs ?? settleMs);
+		await this.waitForPublish(key, sinceSeq, timeoutMs, signal);
 		return this.published.get(key)?.diagnostics ?? [];
 	}
 
 	/** Sync a document to the server and return its URI. Starts the server if needed. */
 	async openDocument(absolutePath: string, content: string): Promise<string> {
 		await this.start();
-		const uri = pathToFileURL(absolutePath).toString();
-		this.syncDocument(uri, absolutePath, content);
+		const { uri } = await this.syncContent(absolutePath, content);
 		return uri;
+	}
+
+	/**
+	 * Re-sync any open document whose on-disk content changed outside the edit
+	 * and write tools (e.g. via bash). Deleted documents are closed. Servers are
+	 * additionally notified via workspace/didChangeWatchedFiles so they can
+	 * invalidate caches. Returns the absolute paths that were refreshed.
+	 */
+	async refreshStaleDocuments(excludePath?: string): Promise<string[]> {
+		if (!this.isAlive) {
+			return [];
+		}
+		const excludeKey = excludePath ? normalizeUri(pathToFileURL(excludePath).toString()) : undefined;
+		const refreshed: Array<{ uri: string; type: number; absolutePath: string }> = [];
+		for (const [key, document] of [...this.documents]) {
+			if (key === excludeKey) {
+				continue;
+			}
+			let fileStat: { mtimeMs: number; size: number };
+			try {
+				fileStat = await stat(document.absolutePath);
+			} catch {
+				// File was deleted (or became unreadable): close it on the server.
+				this.documents.delete(key);
+				this.published.delete(key);
+				this.notify("textDocument/didClose", { textDocument: { uri: document.uri } });
+				refreshed.push({ uri: document.uri, type: FILE_CHANGE_TYPE_DELETED, absolutePath: document.absolutePath });
+				continue;
+			}
+			if (fileStat.mtimeMs === document.mtimeMs && fileStat.size === document.size) {
+				continue;
+			}
+			let content: string;
+			try {
+				content = await readFile(document.absolutePath, "utf-8");
+			} catch {
+				continue;
+			}
+			document.mtimeMs = fileStat.mtimeMs;
+			document.size = fileStat.size;
+			if (content === document.content) {
+				continue;
+			}
+			document.content = content;
+			document.version++;
+			this.notify("textDocument/didChange", {
+				textDocument: { uri: document.uri, version: document.version },
+				contentChanges: [{ text: content }],
+			});
+			refreshed.push({ uri: document.uri, type: FILE_CHANGE_TYPE_CHANGED, absolutePath: document.absolutePath });
+		}
+		if (refreshed.length > 0) {
+			this.notify("workspace/didChangeWatchedFiles", {
+				changes: refreshed.map(({ uri, type }) => ({ uri, type })),
+			});
+		}
+		return refreshed.map(({ absolutePath }) => absolutePath);
 	}
 
 	/** Send an arbitrary LSP request. Starts the server if needed. */
@@ -289,11 +376,27 @@ export class LspClient {
 	// Document sync and diagnostics collection
 	// =========================================================================
 
-	private syncDocument(uri: string, absolutePath: string, content: string): void {
+	/**
+	 * Sync explicit content for a document (didOpen on first sight, didChange
+	 * after). Returns whether the synced view actually changed.
+	 */
+	private async syncContent(absolutePath: string, content: string): Promise<{ uri: string; changed: boolean }> {
+		const uri = pathToFileURL(absolutePath).toString();
 		const key = normalizeUri(uri);
-		const version = this.documentVersions.get(key);
-		if (version === undefined) {
-			this.documentVersions.set(key, 1);
+		const existing = this.documents.get(key);
+
+		let mtimeMs: number | undefined;
+		let size: number | undefined;
+		try {
+			const fileStat = await stat(absolutePath);
+			mtimeMs = fileStat.mtimeMs;
+			size = fileStat.size;
+		} catch {
+			// Stat is only a staleness filter; missing files still sync in-memory content.
+		}
+
+		if (!existing) {
+			this.documents.set(key, { uri, absolutePath, version: 1, content, mtimeMs, size });
 			this.notify("textDocument/didOpen", {
 				textDocument: {
 					uri,
@@ -302,14 +405,21 @@ export class LspClient {
 					text: content,
 				},
 			});
-			return;
+			return { uri, changed: true };
 		}
-		const nextVersion = version + 1;
-		this.documentVersions.set(key, nextVersion);
+
+		existing.mtimeMs = mtimeMs;
+		existing.size = size;
+		if (existing.content === content) {
+			return { uri, changed: false };
+		}
+		existing.content = content;
+		existing.version++;
 		this.notify("textDocument/didChange", {
-			textDocument: { uri, version: nextVersion },
+			textDocument: { uri, version: existing.version },
 			contentChanges: [{ text: content }],
 		});
+		return { uri, changed: true };
 	}
 
 	private waitForPublish(key: string, sinceSeq: number, timeoutMs: number, signal?: AbortSignal): Promise<void> {
@@ -423,6 +533,7 @@ export class LspClient {
 			const params = message.params as { uri?: string; diagnostics?: LspDiagnostic[] } | undefined;
 			if (params?.uri) {
 				const key = normalizeUri(params.uri);
+				this.everPublished = true;
 				this.publishSeq++;
 				this.published.set(key, {
 					diagnostics: Array.isArray(params.diagnostics) ? params.diagnostics : [],

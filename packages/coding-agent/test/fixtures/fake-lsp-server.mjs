@@ -9,10 +9,17 @@
 // - In pull mode, answers textDocument/diagnostic from the same scan.
 // - Answers definition/references/hover/documentSymbol with fixed shapes so
 //   navigation formatting can be tested.
+// - Publishes after a delay (default 50ms, configurable via --delay <ms>) to
+//   exercise the publish wait paths.
+// - Answers the custom "fake/state" request with observed notifications so
+//   tests can assert sync behavior.
 // - Exits on the exit notification.
 
 const pullMode = process.argv.includes("--pull");
+const delayIndex = process.argv.indexOf("--delay");
+const publishDelayMs = delayIndex !== -1 ? Number.parseInt(process.argv[delayIndex + 1], 10) : 50;
 const documents = new Map();
+const state = { opens: [], changes: [], closes: [], watched: [] };
 let buffer = Buffer.alloc(0);
 
 function send(message) {
@@ -75,12 +82,27 @@ function handle(message) {
 	}
 	if (method === "textDocument/didOpen") {
 		documents.set(params.textDocument.uri, params.textDocument.text);
+		state.opens.push(params.textDocument.uri);
 		publishLater(params.textDocument.uri);
 		return;
 	}
 	if (method === "textDocument/didChange") {
 		documents.set(params.textDocument.uri, params.contentChanges[0].text);
+		state.changes.push({ uri: params.textDocument.uri, version: params.textDocument.version });
 		publishLater(params.textDocument.uri);
+		return;
+	}
+	if (method === "textDocument/didClose") {
+		documents.delete(params.textDocument.uri);
+		state.closes.push(params.textDocument.uri);
+		return;
+	}
+	if (method === "workspace/didChangeWatchedFiles") {
+		state.watched.push(...params.changes);
+		return;
+	}
+	if (method === "fake/state") {
+		send({ jsonrpc: "2.0", id, result: state });
 		return;
 	}
 	if (method === "textDocument/definition") {
@@ -161,7 +183,7 @@ function publishLater(uri) {
 			method: "textDocument/publishDiagnostics",
 			params: { uri, diagnostics: scan(documents.get(uri) ?? "") },
 		});
-	}, 50);
+	}, publishDelayMs);
 }
 
 process.stdin.on("data", (chunk) => {

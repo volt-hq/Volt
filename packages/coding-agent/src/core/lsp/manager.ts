@@ -202,7 +202,14 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		const client = this.getClient(server, absolutePath);
 		let diagnostics: LspDiagnostic[];
 		try {
-			diagnostics = await client.getDiagnostics(absolutePath, content, this.config.settleMs, signal);
+			await this.refreshStale(client, absolutePath);
+			diagnostics = await client.getDiagnostics(
+				absolutePath,
+				content,
+				this.config.settleMs,
+				this.config.firstSettleMs,
+				signal,
+			);
 		} catch (error) {
 			return this.handleClientError(server, client, error);
 		}
@@ -291,7 +298,14 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		}
 		const client = this.getClient(server, absolutePath);
 		try {
-			const diagnostics = await client.getDiagnostics(absolutePath, content, this.config.settleMs, signal);
+			await this.refreshStale(client, absolutePath);
+			const diagnostics = await client.getDiagnostics(
+				absolutePath,
+				content,
+				this.config.settleMs,
+				this.config.firstSettleMs,
+				signal,
+			);
 			return (
 				this.formatDiagnostics(absolutePath, diagnostics) ?? `No diagnostics in ${this.displayPath(absolutePath)}.`
 			);
@@ -357,6 +371,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		const client = this.getClient(server, absolutePath);
 		try {
 			const uri = await client.openDocument(absolutePath, content);
+			await this.refreshStale(client, absolutePath);
 			this.startFailures.delete(server.name);
 			return { client, uri, content };
 		} catch (error) {
@@ -364,6 +379,15 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			return {
 				error: reported ?? `lsp(${server.name}): ${error instanceof Error ? error.message : String(error)}`,
 			};
+		}
+	}
+
+	/** Re-sync open documents that changed on disk outside edit/write (best-effort). */
+	private async refreshStale(client: LspClient, excludePath: string): Promise<void> {
+		try {
+			await client.refreshStaleDocuments(excludePath);
+		} catch {
+			// Staleness refresh must never fail the operation that triggered it.
 		}
 	}
 

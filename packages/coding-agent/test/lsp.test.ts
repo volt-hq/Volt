@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { LspClient } from "../src/core/lsp/client.ts";
 import { resolveLspConfig } from "../src/core/lsp/config.ts";
 import { LspManager } from "../src/core/lsp/manager.ts";
 import type { ToolDiagnosticsProvider } from "../src/core/tools/diagnostics-provider.ts";
@@ -24,10 +25,18 @@ async function removeTempDir(dir: string): Promise<void> {
 	rmSync(dir, { recursive: true, force: true });
 }
 
-function fakeServerConfig(options?: { pull?: boolean; severity?: "error" | "warning"; maxDiagnostics?: number }) {
+function fakeServerConfig(options?: {
+	pull?: boolean;
+	severity?: "error" | "warning";
+	maxDiagnostics?: number;
+	settleMs?: number;
+	firstSettleMs?: number;
+	publishDelayMs?: number;
+}) {
 	return resolveLspConfig({
 		enabled: true,
-		settleMs: 3000,
+		settleMs: options?.settleMs ?? 3000,
+		firstSettleMs: options?.firstSettleMs,
 		maxDiagnostics: options?.maxDiagnostics,
 		severity: options?.severity,
 		servers: {
@@ -37,7 +46,12 @@ function fakeServerConfig(options?: { pull?: boolean; severity?: "error" | "warn
 			go: { enabled: false },
 			rust: { enabled: false },
 			fake: {
-				command: [process.execPath, FAKE_SERVER, ...(options?.pull ? ["--pull"] : [])],
+				command: [
+					process.execPath,
+					FAKE_SERVER,
+					...(options?.pull ? ["--pull"] : []),
+					...(options?.publishDelayMs !== undefined ? ["--delay", String(options.publishDelayMs)] : []),
+				],
 				fileExtensions: [".foo"],
 				rootMarkers: [],
 			},
@@ -52,6 +66,7 @@ describe("resolveLspConfig", () => {
 		expect(config.servers.map((s) => s.name)).toContain("typescript");
 		expect(config.maxSeverity).toBe(1);
 		expect(config.settleMs).toBe(1500);
+		expect(config.firstSettleMs).toBe(10000);
 	});
 
 	it("merges user overrides over built-in defaults by name", () => {
@@ -198,6 +213,17 @@ describe("LspManager", () => {
 		expect(await manager.hover(join(tempDir, "test.bar"), "x")).toContain("No language server configured for .bar");
 	});
 
+	it("waits longer for the first diagnostics from a fresh server", async () => {
+		// The publish delay exceeds settleMs but not firstSettleMs, so only the
+		// extended first-collection window catches the cold-start publish.
+		const manager = setup({ settleMs: 100, firstSettleMs: 5000, publishDelayMs: 800 });
+		const filePath = join(tempDir, "test.foo");
+		const content = "has ERROR here\n";
+		writeFileSync(filePath, content);
+		const result = await manager.getDiagnostics(filePath, content);
+		expect(result).toContain("error: found ERROR on line 1");
+	});
+
 	it("reports a failed server start once, then stays silent", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
 		manager = new LspManager({
@@ -218,6 +244,91 @@ describe("LspManager", () => {
 		expect(first).toContain("lsp(missing):");
 		const second = await manager.getDiagnostics(filePath, "ERROR\n");
 		expect(second).toBeUndefined();
+	});
+});
+
+describe("LspClient disk sync", () => {
+	let tempDir: string;
+	let client: LspClient | undefined;
+
+	function setupClient(): LspClient {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-client-test-"));
+		client = new LspClient({
+			serverName: "fake",
+			command: [process.execPath, FAKE_SERVER],
+			rootDir: tempDir,
+		});
+		return client;
+	}
+
+	afterEach(async () => {
+		client?.dispose();
+		client = undefined;
+		if (tempDir) {
+			await removeTempDir(tempDir);
+		}
+	});
+
+	interface FakeState {
+		opens: string[];
+		changes: Array<{ uri: string; version: number }>;
+		closes: string[];
+		watched: Array<{ uri: string; type: number }>;
+	}
+
+	it("re-syncs documents that changed on disk and notifies watched files", async () => {
+		const client = setupClient();
+		const fileA = join(tempDir, "a.foo");
+		writeFileSync(fileA, "original\n");
+		await client.openDocument(fileA, "original\n");
+
+		// Unchanged on disk: no refresh.
+		expect(await client.refreshStaleDocuments()).toEqual([]);
+
+		writeFileSync(fileA, "modified outside the tools\n");
+		expect(await client.refreshStaleDocuments()).toEqual([fileA]);
+
+		const state = (await client.sendRequest("fake/state", {})) as FakeState;
+		expect(state.opens).toHaveLength(1);
+		expect(state.changes).toHaveLength(1);
+		expect(state.changes[0].version).toBe(2);
+		expect(state.watched).toEqual([{ uri: state.opens[0], type: 2 }]);
+	});
+
+	it("closes documents that were deleted on disk", async () => {
+		const client = setupClient();
+		const fileA = join(tempDir, "a.foo");
+		writeFileSync(fileA, "original\n");
+		await client.openDocument(fileA, "original\n");
+
+		rmSync(fileA);
+		expect(await client.refreshStaleDocuments()).toEqual([fileA]);
+
+		const state = (await client.sendRequest("fake/state", {})) as FakeState;
+		expect(state.closes).toHaveLength(1);
+		expect(state.watched).toEqual([{ uri: state.closes[0], type: 3 }]);
+	});
+
+	it("skips the excluded path and redundant content syncs", async () => {
+		const client = setupClient();
+		const fileA = join(tempDir, "a.foo");
+		const content = "has ERROR\n";
+		writeFileSync(fileA, content);
+
+		const first = await client.getDiagnostics(fileA, content, 3000);
+		expect(first).toHaveLength(1);
+
+		// Same content again: no didChange, reuses the existing publish.
+		const second = await client.getDiagnostics(fileA, content, 3000);
+		expect(second).toEqual(first);
+
+		// Excluded path is not refreshed even if it changed on disk.
+		writeFileSync(fileA, "different\n");
+		expect(await client.refreshStaleDocuments(fileA)).toEqual([]);
+
+		const state = (await client.sendRequest("fake/state", {})) as FakeState;
+		expect(state.opens).toHaveLength(1);
+		expect(state.changes).toHaveLength(0);
 	});
 });
 

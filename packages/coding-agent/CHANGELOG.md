@@ -12,6 +12,8 @@
 
 - `SettingsManager.applyOverrides()` overrides now persist across `reload()` and internal settings re-merges instead of being silently dropped.
 - LSP project-root markers are now priority-ordered (a `tsconfig.json` anywhere up the tree beats a closer `package.json`), and diagnostics for files outside the working directory display absolute paths.
+- LSP cold starts now wait up to `lsp.firstSettleMs` (default 10s) for the first diagnostics from a fresh server, so the first edit no longer misses errors while the project loads.
+- LSP clients now re-sync open documents that changed on disk outside the `edit`/`write` tools (e.g. `git checkout` via bash) before every diagnostics collection or navigation query, closing deleted files and notifying servers via `workspace/didChangeWatchedFiles`.
 - Renamed the `/new` slash command to `/clear`. The `app.session.new` keybinding action id is unchanged.
 - Restyled the built-in `dark` and `light` themes around an electric purple accent palette.
 - Replaced the plain-text startup logo with an ASCII wordmark; renamed forks (via `voltConfig.name`) still get the plain-text logo.

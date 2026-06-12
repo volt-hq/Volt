@@ -26,7 +26,8 @@ Or persistently in `~/.volt/agent/settings.json` (or per project in `.volt/setti
 
 - Servers are spawned lazily: the first `edit`/`write` to a file with a matching extension starts the server for that file's project root.
 - The project root is found by walking up from the edited file looking for the server's `rootMarkers` (falling back to the working directory). Markers are priority-ordered: for TypeScript, a `tsconfig.json` anywhere up the tree wins over a closer `package.json`, so monorepo subpackages resolve to the directory carrying the language configuration.
-- After each successful `edit`/`write`, volt syncs the new file content to the server and collects diagnostics, using pull diagnostics (`textDocument/diagnostic`) when the server supports them, otherwise waiting up to `settleMs` for the server to publish.
+- After each successful `edit`/`write`, volt syncs the new file content to the server and collects diagnostics, using pull diagnostics (`textDocument/diagnostic`) when the server supports them, otherwise waiting up to `settleMs` for the server to publish. The first collection on a freshly started server waits up to `firstSettleMs` instead, because servers like tsserver publish nothing until the project has loaded.
+- Before every diagnostics collection or navigation query, volt re-syncs any previously opened file whose on-disk content changed outside the `edit`/`write` tools (e.g. via `bash`: `git checkout`, codegen). Deleted files are closed on the server, and servers are notified via `workspace/didChangeWatchedFiles`.
 - Diagnostics at or above the configured `severity` are appended to the tool result and shown in the TUI.
 - One client runs per (server, project root) pair. Servers shut down when the session ends or reloads.
 - A server that fails to start (for example, not installed) is reported once in the tool result and then silenced; after three failed starts it is disabled for the session.
@@ -90,6 +91,7 @@ All settings live under `lsp` in `settings.json`:
 |---------|------|---------|-------------|
 | `enabled` | boolean | `false` | Master switch (also `--lsp` per run) |
 | `settleMs` | number | `1500` | How long to wait for published diagnostics after a change (servers without pull diagnostics) |
+| `firstSettleMs` | number | `10000` | Wait window for the first diagnostics from a freshly started server (project load time) |
 | `maxDiagnostics` | number | `20` | Maximum diagnostics per tool call; the rest are summarized as `... and N more` |
 | `severity` | string | `"error"` | Minimum severity to report: `error`, `warning`, `information`, or `hint` |
 | `servers.<name>` | object | | Server definition, merged over the built-in default with the same name |
@@ -108,6 +110,6 @@ User entries merge field-wise over built-in defaults: overriding only `command` 
 
 ## Limitations
 
-- Only files changed through the `edit` and `write` tools are synced to servers. Changes made via `bash` (e.g. `git checkout`) are not pushed, so cross-file diagnostics can be stale until the affected files are edited again.
-- Some servers index the project after startup; diagnostics for the first edit may be incomplete if the server has not finished loading. Servers that support pull diagnostics (e.g. typescript-language-server 4+) are more reliable here.
+- Disk changes are only detected for files the server has already seen (opened by an earlier edit, write, or `lsp` query). Files created or changed via `bash` that were never touched by a tool are unknown to the server until first opened.
 - Diagnostics are collected only for the edited file, not for other files the change may affect.
+- On very large projects the first collection can still miss diagnostics if project loading exceeds `firstSettleMs`; raise it in settings if needed.

@@ -29,6 +29,12 @@ export interface LspSettings {
 	servers?: Record<string, LspServerSettings>;
 	/** How long to wait for published diagnostics after a change, in milliseconds. Default: 1500 */
 	settleMs?: number;
+	/**
+	 * How long to wait for the first diagnostics from a freshly started server,
+	 * in milliseconds. Servers like tsserver publish nothing until the project
+	 * has loaded, so the first collection gets a longer window. Default: 10000
+	 */
+	firstSettleMs?: number;
 	/** Maximum diagnostics reported per tool call. Default: 20 */
 	maxDiagnostics?: number;
 	/** Minimum severity to report. Default: "error" */
@@ -47,6 +53,7 @@ export interface ResolvedLspConfig {
 	enabled: boolean;
 	servers: ResolvedLspServerConfig[];
 	settleMs: number;
+	firstSettleMs: number;
 	maxDiagnostics: number;
 	/** Numeric LSP DiagnosticSeverity cutoff (1=error .. 4=hint); diagnostics with severity <= this value are reported */
 	maxSeverity: number;
@@ -123,6 +130,7 @@ export function resolveLspConfig(settings: LspSettings | undefined): ResolvedLsp
 		enabled: settings?.enabled ?? false,
 		servers,
 		settleMs: settings?.settleMs ?? 1500,
+		firstSettleMs: settings?.firstSettleMs ?? 10000,
 		maxDiagnostics: settings?.maxDiagnostics ?? 20,
 		maxSeverity: SEVERITY_TO_NUMBER[settings?.severity ?? "error"],
 	};
