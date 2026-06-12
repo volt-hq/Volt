@@ -162,6 +162,7 @@ export {
 	LspManager,
 	type LspManagerOptions,
 	type LspServerSettings,
+	type LspServerStatus,
 	type LspSettings,
 	type LspSeverity,
 	languageIdForExtension,

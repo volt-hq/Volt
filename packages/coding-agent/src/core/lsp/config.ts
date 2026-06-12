@@ -37,6 +37,8 @@ export interface LspSettings {
 	firstSettleMs?: number;
 	/** Maximum diagnostics reported per tool call. Default: 20 */
 	maxDiagnostics?: number;
+	/** Shut down language servers idle for this long, in milliseconds. 0 disables. Default: 600000 (10 minutes) */
+	idleShutdownMs?: number;
 	/** Minimum severity to report. Default: "error" */
 	severity?: LspSeverity;
 }
@@ -55,6 +57,7 @@ export interface ResolvedLspConfig {
 	settleMs: number;
 	firstSettleMs: number;
 	maxDiagnostics: number;
+	idleShutdownMs: number;
 	/** Numeric LSP DiagnosticSeverity cutoff (1=error .. 4=hint); diagnostics with severity <= this value are reported */
 	maxSeverity: number;
 }
@@ -132,6 +135,7 @@ export function resolveLspConfig(settings: LspSettings | undefined): ResolvedLsp
 		settleMs: settings?.settleMs ?? 1500,
 		firstSettleMs: settings?.firstSettleMs ?? 10000,
 		maxDiagnostics: settings?.maxDiagnostics ?? 20,
+		idleShutdownMs: settings?.idleShutdownMs ?? 600000,
 		maxSeverity: SEVERITY_TO_NUMBER[settings?.severity ?? "error"],
 	};
 }

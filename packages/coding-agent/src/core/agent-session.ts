@@ -80,7 +80,7 @@ import {
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { resolveLspConfig } from "./lsp/config.ts";
-import { LspManager } from "./lsp/manager.ts";
+import { LspManager, type LspServerStatus } from "./lsp/manager.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -357,6 +357,19 @@ export class AgentSession {
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this._modelRegistry;
+	}
+
+	/** LSP status for the /lsp command. */
+	getLspStatus(): { enabled: boolean; servers: LspServerStatus[] } {
+		return {
+			enabled: this._lspManager !== undefined,
+			servers: this._lspManager?.getStatus() ?? [],
+		};
+	}
+
+	/** Stop all running language servers; they respawn lazily on next use. Returns the number stopped. */
+	restartLspServers(): number {
+		return this._lspManager?.restart() ?? 0;
 	}
 
 	private async _getRequiredRequestAuth(model: Model<any>): Promise<{

@@ -8,7 +8,7 @@ export {
 	type ResolvedLspServerConfig,
 	resolveLspConfig,
 } from "./config.ts";
-export { LspManager, type LspManagerOptions } from "./manager.ts";
+export { LspManager, type LspManagerOptions, type LspServerStatus } from "./manager.ts";
 export {
 	applyTextEdits,
 	type LspTextEdit,

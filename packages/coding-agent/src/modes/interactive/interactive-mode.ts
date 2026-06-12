@@ -2573,6 +2573,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/lsp" || text.startsWith("/lsp ")) {
+				this.handleLspCommand(text.startsWith("/lsp ") ? text.slice(5).trim() : undefined);
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/changelog") {
 				this.handleChangelogCommand();
 				this.editor.setText("");
@@ -5375,6 +5380,40 @@ export class InteractiveMode {
 		if (stats.cost > 0) {
 			info += `\n${theme.bold("Cost")}\n`;
 			info += `${theme.fg("dim", "Total:")} ${stats.cost.toFixed(4)}`;
+		}
+
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(info, 1, 0));
+		this.ui.requestRender();
+	}
+
+	private handleLspCommand(args?: string): void {
+		const formatIdle = (idleMs: number): string => {
+			const seconds = Math.floor(idleMs / 1000);
+			if (seconds < 60) return `${seconds}s`;
+			return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+		};
+
+		let info: string;
+		const status = this.session.getLspStatus();
+		if (args === "restart") {
+			const count = this.session.restartLspServers();
+			info = status.enabled
+				? `Stopped ${count} language server${count === 1 ? "" : "s"}. Servers respawn on next use.`
+				: "LSP is disabled. Run with --lsp or set lsp.enabled in settings.";
+		} else if (!status.enabled) {
+			info = "LSP is disabled. Run with --lsp or set lsp.enabled in settings.";
+		} else if (status.servers.length === 0) {
+			info = `${theme.bold("LSP Servers")}\n\nNo servers running. Servers spawn on first use of a matching file.`;
+		} else {
+			info = `${theme.bold("LSP Servers")}\n`;
+			for (const server of status.servers) {
+				info += `\n${theme.bold(server.name)} ${server.alive ? theme.fg("success", "running") : theme.fg("error", "dead")}\n`;
+				info += `${theme.fg("dim", "Root:")} ${server.root}\n`;
+				info += `${theme.fg("dim", "Open documents:")} ${server.openDocuments}\n`;
+				info += `${theme.fg("dim", "Idle:")} ${formatIdle(server.idleMs)}\n`;
+			}
+			info += `\n${theme.fg("dim", "Use /lsp restart to restart servers.")}`;
 		}
 
 		this.chatContainer.addChild(new Spacer(1));

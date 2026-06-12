@@ -29,7 +29,8 @@ Or persistently in `~/.volt/agent/settings.json` (or per project in `.volt/setti
 - After each successful `edit`/`write`, volt syncs the new file content to the server and collects diagnostics, using pull diagnostics (`textDocument/diagnostic`) when the server supports them, otherwise waiting up to `settleMs` for the server to publish. The first collection on a freshly started server waits up to `firstSettleMs` instead, because servers like tsserver publish nothing until the project has loaded.
 - Before every diagnostics collection or navigation query, volt re-syncs any previously opened file whose on-disk content changed outside the `edit`/`write` tools (e.g. via `bash`: `git checkout`, codegen). Deleted files are closed on the server, and servers are notified via `workspace/didChangeWatchedFiles`.
 - Diagnostics at or above the configured `severity` are appended to the tool result and shown in the TUI.
-- One client runs per (server, project root) pair. Servers shut down when the session ends or reloads.
+- One client runs per (server, project root) pair. Servers shut down when the session ends or reloads, and after `idleShutdownMs` without use (they respawn lazily on the next operation).
+- `/lsp` shows the status of running servers (root, open documents, idle time); `/lsp restart` stops them all so they respawn fresh on next use.
 - A server that fails to start (for example, not installed) is reported once in the tool result and then silenced; after three failed starts it is disabled for the session.
 
 Diagnostics are best-effort: server failures or timeouts never fail the edit itself.
@@ -96,6 +97,7 @@ All settings live under `lsp` in `settings.json`:
 | `enabled` | boolean | `false` | Master switch (also `--lsp` per run) |
 | `settleMs` | number | `1500` | How long to wait for published diagnostics after a change (servers without pull diagnostics) |
 | `firstSettleMs` | number | `10000` | Wait window for the first diagnostics from a freshly started server (project load time) |
+| `idleShutdownMs` | number | `600000` | Shut down servers idle for this long (10 minutes); `0` disables idle shutdown |
 | `maxDiagnostics` | number | `20` | Maximum diagnostics per tool call; the rest are summarized as `... and N more` |
 | `severity` | string | `"error"` | Minimum severity to report: `error`, `warning`, `information`, or `hint` |
 | `servers.<name>` | object | | Server definition, merged over the built-in default with the same name |

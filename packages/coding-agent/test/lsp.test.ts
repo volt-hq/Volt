@@ -33,6 +33,7 @@ function fakeServerConfig(options?: {
 	settleMs?: number;
 	firstSettleMs?: number;
 	publishDelayMs?: number;
+	idleShutdownMs?: number;
 }) {
 	return resolveLspConfig({
 		enabled: true,
@@ -40,6 +41,7 @@ function fakeServerConfig(options?: {
 		firstSettleMs: options?.firstSettleMs,
 		maxDiagnostics: options?.maxDiagnostics,
 		severity: options?.severity,
+		idleShutdownMs: options?.idleShutdownMs ?? 0,
 		servers: {
 			// Disable built-in defaults so the test never spawns real servers.
 			typescript: { enabled: false },
@@ -295,6 +297,45 @@ describe("LspManager", () => {
 		expect(result).toContain('Applied "Fix via command"');
 		expect(result).toContain("test.foo (1 edit)");
 		expect(readFileSync(filePath, "utf-8")).toBe("needs FIXED here\n");
+	});
+
+	it("reports server status and restarts servers", async () => {
+		const manager = setup();
+		expect(manager.getStatus()).toEqual([]);
+
+		const filePath = join(tempDir, "test.foo");
+		writeFileSync(filePath, "ok\n");
+		await manager.documentSymbols(filePath);
+
+		const status = manager.getStatus();
+		expect(status).toHaveLength(1);
+		expect(status[0].name).toBe("fake");
+		expect(status[0].root).toBe(tempDir);
+		expect(status[0].alive).toBe(true);
+		expect(status[0].openDocuments).toBe(1);
+		expect(status[0].idleMs).toBeGreaterThanOrEqual(0);
+
+		expect(manager.restart()).toBe(1);
+		expect(manager.getStatus()).toEqual([]);
+
+		// Servers respawn lazily after restart.
+		await manager.documentSymbols(filePath);
+		expect(manager.getStatus()).toHaveLength(1);
+	});
+
+	it("shuts down idle servers and respawns on next use", async () => {
+		const manager = setup({ idleShutdownMs: 400 });
+		const filePath = join(tempDir, "test.foo");
+		writeFileSync(filePath, "ok\n");
+		await manager.documentSymbols(filePath);
+		expect(manager.getStatus()).toHaveLength(1);
+
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+		expect(manager.getStatus()).toEqual([]);
+
+		const result = await manager.documentSymbols(filePath);
+		expect(result).toContain("FakeClass");
+		expect(manager.getStatus()).toHaveLength(1);
 	});
 
 	it("reports a failed server start once, then stays silent", async () => {

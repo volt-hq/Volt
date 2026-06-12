@@ -368,6 +368,11 @@ export class LspClient {
 		return this.documents.has(normalizeUri(pathToFileURL(absolutePath).toString()));
 	}
 
+	/** Number of documents currently open on the server. */
+	get openDocumentCount(): number {
+		return this.documents.size;
+	}
+
 	/** Last published diagnostics for a document, if any. */
 	getPublishedDiagnostics(absolutePath: string): LspDiagnostic[] {
 		return this.published.get(normalizeUri(pathToFileURL(absolutePath).toString()))?.diagnostics ?? [];

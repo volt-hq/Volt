@@ -22,6 +22,15 @@ export interface LspManagerOptions {
 	config: ResolvedLspConfig;
 }
 
+export interface LspServerStatus {
+	name: string;
+	root: string;
+	alive: boolean;
+	openDocuments: number;
+	/** Milliseconds since the server was last used */
+	idleMs: number;
+}
+
 interface ServerFailureState {
 	count: number;
 	reported: boolean;
@@ -237,10 +246,59 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	private disposed = false;
 	/** Summaries of WorkspaceEdits applied via server-initiated workspace/applyEdit */
 	private serverApplyEditSummaries: string[] = [];
+	private lastUsedAt = new Map<string, number>();
+	private idleTimer: NodeJS.Timeout | undefined;
 
 	constructor(options: LspManagerOptions) {
 		this.cwd = options.cwd;
 		this.config = options.config;
+		if (this.config.idleShutdownMs > 0) {
+			const checkIntervalMs = Math.max(250, Math.min(this.config.idleShutdownMs / 2, 60000));
+			this.idleTimer = setInterval(() => this.shutdownIdleClients(), checkIntervalMs);
+			this.idleTimer.unref();
+		}
+	}
+
+	/** Status of all spawned language servers. */
+	getStatus(): LspServerStatus[] {
+		const now = Date.now();
+		return [...this.clients.entries()].map(([key, client]) => {
+			const [name, root] = key.split("\u0000");
+			return {
+				name,
+				root,
+				alive: client.isAlive,
+				openDocuments: client.openDocumentCount,
+				idleMs: now - (this.lastUsedAt.get(key) ?? now),
+			};
+		});
+	}
+
+	/** Dispose all running servers. They respawn lazily on next use. Returns the number stopped. */
+	restart(): number {
+		const count = this.clients.size;
+		for (const client of this.clients.values()) {
+			client.dispose();
+		}
+		this.clients.clear();
+		this.lastUsedAt.clear();
+		this.startFailures.clear();
+		return count;
+	}
+
+	private shutdownIdleClients(): void {
+		if (this.disposed) {
+			return;
+		}
+		const now = Date.now();
+		for (const [key, client] of [...this.clients.entries()]) {
+			const lastUsed = this.lastUsedAt.get(key) ?? now;
+			if (now - lastUsed >= this.config.idleShutdownMs) {
+				client.dispose();
+				this.clients.delete(key);
+				this.lastUsedAt.delete(key);
+			}
+		}
 	}
 
 	/**
@@ -284,10 +342,15 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 
 	dispose(): void {
 		this.disposed = true;
+		if (this.idleTimer) {
+			clearInterval(this.idleTimer);
+			this.idleTimer = undefined;
+		}
 		for (const client of this.clients.values()) {
 			client.dispose();
 		}
 		this.clients.clear();
+		this.lastUsedAt.clear();
 	}
 
 	// =========================================================================
@@ -737,6 +800,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	private getClient(server: ResolvedLspServerConfig, absolutePath: string): LspClient {
 		const root = this.findRoot(absolutePath, server.rootMarkers);
 		const key = `${server.name}\u0000${root}`;
+		this.lastUsedAt.set(key, Date.now());
 		const existing = this.clients.get(key);
 		if (existing?.isAlive) {
 			return existing;
@@ -764,6 +828,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			for (const [key, value] of this.clients) {
 				if (value === client) {
 					this.clients.delete(key);
+					this.lastUsedAt.delete(key);
 				}
 			}
 			client.dispose();
