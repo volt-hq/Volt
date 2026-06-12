@@ -507,12 +507,12 @@ export class Editor implements Component, Focusable {
 			const indicator = `─── ↑ ${this.scrollOffset} more `;
 			const remaining = innerWidth - visibleWidth(indicator);
 			if (remaining >= 0) {
-				result.push(this.borderColor("╭" + indicator + "─".repeat(remaining) + "╮"));
+				result.push(this.borderColor(`╭${indicator}${"─".repeat(remaining)}╮`));
 			} else {
-				result.push(this.borderColor(truncateToWidth("╭" + indicator, width)));
+				result.push(this.borderColor(truncateToWidth(`╭${indicator}`, width)));
 			}
 		} else {
-			result.push(this.borderColor("╭" + "─".repeat(innerWidth) + "╮"));
+			result.push(this.borderColor(`╭${"─".repeat(innerWidth)}╮`));
 		}
 
 		// Render each visible layout line
@@ -569,12 +569,12 @@ export class Editor implements Component, Focusable {
 			const indicator = `─── ↓ ${linesBelow} more `;
 			const remaining = innerWidth - visibleWidth(indicator);
 			if (remaining >= 0) {
-				result.push(this.borderColor("╰" + indicator + "─".repeat(remaining) + "╯"));
+				result.push(this.borderColor(`╰${indicator}${"─".repeat(remaining)}╯`));
 			} else {
-				result.push(this.borderColor(truncateToWidth("╰" + indicator, width)));
+				result.push(this.borderColor(truncateToWidth(`╰${indicator}`, width)));
 			}
 		} else {
-			result.push(this.borderColor("╰" + "─".repeat(innerWidth) + "╯"));
+			result.push(this.borderColor(`╰${"─".repeat(innerWidth)}╯`));
 		}
 
 		// Add autocomplete list if active

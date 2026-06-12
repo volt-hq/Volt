@@ -39,6 +39,14 @@
 - Restyled the built-in `dark` and `light` themes around an electric purple accent palette.
 - Replaced the plain-text startup logo with an ASCII wordmark; renamed forks (via `voltConfig.name`) still get the plain-text logo.
 
+### Fixed
+
+- Fixed inherited user-message transcript rendering so standalone `+` messages no longer render as `-` ([#5657](https://github.com/earendil-works/pi/issues/5657)).
+- Fixed `--model` resolution for authenticated custom model IDs whose slash prefix matches an unauthenticated built-in provider ([#5643](https://github.com/earendil-works/pi/issues/5643)).
+- Fixed `/fork` to keep session parent chains connected when the forked path contains labels ([#5669](https://github.com/earendil-works/pi/issues/5669)).
+- Fixed `/share` and `/export` HTML exports to use the active fallback theme when the configured custom theme no longer exists ([#5596](https://github.com/earendil-works/pi/issues/5596)).
+- Fixed custom fallback model IDs with `:<thinking>` suffixes to preserve the requested thinking level when the provider template model does not advertise reasoning ([#5552](https://github.com/earendil-works/pi/issues/5552)).
+
 ## [0.79.1] - 2026-06-09
 
 ### New Features
