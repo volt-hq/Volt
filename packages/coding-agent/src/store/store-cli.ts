@@ -496,7 +496,9 @@ async function runRemove(
 	if (!(await confirmMutation({ yes: options.yes, action: "remove" }))) {
 		return true;
 	}
-	const removed = await packageManager.removeAndPersist(resolved.source, { local: target.scope === "project" });
+	const removed = await packageManager.removeAndPersist(target.actionSource ?? target.source, {
+		local: target.scope === "project",
+	});
 	await settingsManager.flush();
 	const settingsErrors = settingsManager.drainErrors();
 	if (settingsErrors.length > 0) {
@@ -565,11 +567,14 @@ async function runUpdate(
 		return true;
 	}
 
-	if (target.source === resolved.source) {
+	if (target.source === resolved.source || target.actionSource === resolved.source) {
 		if (!(await confirmMutation({ yes: options.yes, action: "update" }))) {
 			return true;
 		}
-		await packageManager.update(target.source, { local: target.scope === "project", scripts: "never" });
+		await packageManager.update(target.actionSource ?? target.source, {
+			local: target.scope === "project",
+			scripts: "never",
+		});
 		console.log(chalk.green(`Updated ${target.source}`));
 		return true;
 	}

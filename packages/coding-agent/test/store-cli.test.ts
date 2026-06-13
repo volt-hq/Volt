@@ -200,6 +200,49 @@ describe("store CLI", () => {
 		}
 	});
 
+	it("removes a project-local package by its settings-relative source", async () => {
+		const projectPackageDir = join(projectDir, "pkg");
+		mkdirSync(join(projectPackageDir, "extensions"), { recursive: true });
+		writeFileSync(
+			join(projectPackageDir, "package.json"),
+			JSON.stringify(
+				{
+					name: "settings-relative-rtk",
+					version: "0.1.0",
+					description: "Settings-relative RTK extension",
+					volt: { extensions: ["extensions/rtk.ts"] },
+				},
+				null,
+				2,
+			),
+		);
+		writeFileSync(join(projectPackageDir, "extensions", "rtk.ts"), "export default function rtk() {}\n");
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await main(["store", "install", "./pkg", "--local", "--approve", "--yes"]);
+
+			const settingsPath = join(projectDir, CONFIG_DIR_NAME, "settings.json");
+			const installedSettings = JSON.parse(readFileSync(settingsPath, "utf-8")) as {
+				packages?: Array<string | { source: string; scripts?: string }>;
+			};
+			expect(installedSettings.packages).toEqual([{ source: "../pkg", scripts: "never" }]);
+
+			await expect(main(["store", "remove", "../pkg", "--local", "--approve", "--yes"])).resolves.toBeUndefined();
+
+			const settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { packages?: string[] };
+			expect(settings.packages ?? []).toHaveLength(0);
+			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stdout).toContain("Removed");
+			expect(errorSpy).not.toHaveBeenCalled();
+			expect(process.exitCode).toBeUndefined();
+		} finally {
+			logSpy.mockRestore();
+			errorSpy.mockRestore();
+		}
+	});
+
 	it("updates all installed packages with --yes and keeps lifecycle scripts disabled", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});

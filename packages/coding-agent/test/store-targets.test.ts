@@ -41,6 +41,31 @@ describe("store target selection", () => {
 		expect(chooseStoreUpdateTarget(manager, "npm:pkg@1.0.0", true)).toEqual(projectTarget);
 	});
 
+	it("matches settings-relative local project sources", () => {
+		const packagePath = "/repo/project/pkg";
+		const manager: StoreTargetPackageManager = {
+			getPackageIdentity(source, scope) {
+				if (source === packagePath) {
+					return `local:${packagePath}`;
+				}
+				if (source === "../pkg" && scope === "project") {
+					return `local:${packagePath}`;
+				}
+				if (source === "../pkg") {
+					return "local:/repo/pkg";
+				}
+				return `local:${scope ?? "cwd"}:${source}`;
+			},
+			listConfiguredPackages() {
+				return [{ source: "../pkg", actionSource: packagePath, scope: "project", filtered: false }];
+			},
+		};
+		const projectTarget = { target: { source: "../pkg", actionSource: packagePath, scope: "project" } };
+
+		expect(chooseStoreRemoveTarget(manager, "../pkg", true)).toEqual(projectTarget);
+		expect(chooseStoreUpdateTarget(manager, "../pkg", true)).toEqual(projectTarget);
+	});
+
 	it("reports ambiguous user/project targets", () => {
 		const manager = createManager([
 			{ source: "npm:pkg@1.0.0", actionSource: "npm:pkg@1.0.0", scope: "user", filtered: false },

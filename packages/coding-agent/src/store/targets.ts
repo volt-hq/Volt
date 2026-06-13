@@ -4,6 +4,7 @@ import type { StoreInstallScope } from "./install-plan.ts";
 export interface StoreScopeTarget {
 	source: string;
 	scope: StoreInstallScope;
+	actionSource?: string;
 }
 
 export type StoreTargetConflict = "both-scopes";
@@ -25,8 +26,16 @@ export function getMatchingStorePackageScopes(
 	const inputIdentity = packageManager.getPackageIdentity(source);
 	return packageManager
 		.listConfiguredPackages()
-		.filter((pkg) => packageManager.getPackageIdentity(pkg.source, pkg.scope) === inputIdentity)
-		.map((pkg) => ({ source: pkg.source, scope: pkg.scope }));
+		.filter((pkg) => {
+			const configuredIdentity = packageManager.getPackageIdentity(pkg.source, pkg.scope);
+			const scopedInputIdentity = packageManager.getPackageIdentity(source, pkg.scope);
+			return configuredIdentity === inputIdentity || configuredIdentity === scopedInputIdentity;
+		})
+		.map((pkg) => ({
+			source: pkg.source,
+			scope: pkg.scope,
+			...(pkg.actionSource !== pkg.source ? { actionSource: pkg.actionSource } : {}),
+		}));
 }
 
 export function chooseStoreRemoveTarget(
