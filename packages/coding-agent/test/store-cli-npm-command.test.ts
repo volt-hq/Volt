@@ -136,6 +136,24 @@ describe("store CLI npm command inspection", () => {
 		errorSpy.mockRestore();
 	});
 
+	it("refuses non-interactive store installs without --yes before package inspection", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const installSpy = vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
+
+		await main(["store", "install", "theme"]);
+
+		expect(inspectorMock.inspectStorePackage).not.toHaveBeenCalled();
+		expect(installSpy).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"Non-interactive install requires --yes.",
+		);
+		expect(process.exitCode).toBe(1);
+		installSpy.mockRestore();
+		logSpy.mockRestore();
+		errorSpy.mockRestore();
+	});
+
 	it("uses npmCommand for store update inspection", async () => {
 		writeSettings({ npmCommand, packages: ["npm:@scope/theme@1.0.0"] });
 		vi.stubGlobal(
@@ -152,6 +170,29 @@ describe("store CLI npm command inspection", () => {
 		expect(installSpy).toHaveBeenCalled();
 		expect(errorSpy).not.toHaveBeenCalled();
 		expect(process.exitCode).toBeUndefined();
+		installSpy.mockRestore();
+		logSpy.mockRestore();
+		errorSpy.mockRestore();
+	});
+
+	it("refuses non-interactive catalog updates without --yes before package inspection", async () => {
+		writeSettings({ npmCommand, packages: ["npm:@scope/theme@1.0.0"] });
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => createCatalog("npm:@scope/theme@2.0.0")),
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const installSpy = vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
+
+		await main(["store", "update", "theme"]);
+
+		expect(inspectorMock.inspectStorePackage).not.toHaveBeenCalled();
+		expect(installSpy).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"Non-interactive update requires --yes.",
+		);
+		expect(process.exitCode).toBe(1);
 		installSpy.mockRestore();
 		logSpy.mockRestore();
 		errorSpy.mockRestore();

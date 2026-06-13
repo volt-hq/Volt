@@ -328,14 +328,21 @@ async function resolveScriptPolicyForInstall(plan: StoreInstallPlan): Promise<Pa
 	return allow ? "allow" : "never";
 }
 
-async function confirmMutation(options: { yes: boolean; action: string }): Promise<boolean> {
-	if (options.yes) {
+function preflightNonInteractiveMutation(options: { yes: boolean; action: string }): boolean {
+	if (options.yes || getCommandAppMode() === "interactive") {
 		return true;
 	}
-	if (getCommandAppMode() !== "interactive") {
-		console.error(chalk.red(`Non-interactive ${options.action} requires --yes.`));
-		process.exitCode = 1;
+	console.error(chalk.red(`Non-interactive ${options.action} requires --yes.`));
+	process.exitCode = 1;
+	return false;
+}
+
+async function confirmMutation(options: { yes: boolean; action: string }): Promise<boolean> {
+	if (!preflightNonInteractiveMutation(options)) {
 		return false;
+	}
+	if (options.yes) {
+		return true;
 	}
 	const confirmed = await promptConfirm(`Proceed with store ${options.action}?`);
 	if (!confirmed) {
@@ -392,6 +399,9 @@ async function runInstall(
 		console.error(chalk.red("Missing store install source."));
 		console.error(chalk.dim(`Usage: ${getStoreCommandUsage("install")}`));
 		process.exitCode = 1;
+		return true;
+	}
+	if (!preflightNonInteractiveMutation({ yes: options.yes, action: "install" })) {
 		return true;
 	}
 	const catalog = await loadCatalog(agentDir, { required: false });
@@ -459,6 +469,9 @@ async function runRemove(
 		process.exitCode = 1;
 		return true;
 	}
+	if (!preflightNonInteractiveMutation({ yes: options.yes, action: "remove" })) {
+		return true;
+	}
 	const catalog = await loadCatalog(agentDir, { required: false });
 	if (!catalog) {
 		return true;
@@ -519,6 +532,9 @@ async function runUpdate(
 		return true;
 	}
 
+	if (!preflightNonInteractiveMutation({ yes: options.yes, action: "update" })) {
+		return true;
+	}
 	const catalog = await loadCatalog(agentDir, { required: false });
 	if (!catalog) {
 		return true;
