@@ -240,6 +240,49 @@ describe("store CLI", () => {
 		}
 	});
 
+	it("updates the project catalog package with --local when the package is installed in both scopes", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				Response.json({
+					schemaVersion: 1,
+					packages: [
+						{
+							id: "rtk",
+							name: "RTK Output Compression",
+							description: "Token optimized shell output",
+							source: "npm:@scope/rtk",
+							verified: true,
+							resources: ["extensions"],
+						},
+					],
+				}),
+			),
+		);
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:@scope/rtk"] }, null, 2));
+		mkdirSync(join(projectDir, CONFIG_DIR_NAME), { recursive: true });
+		writeFileSync(
+			join(projectDir, CONFIG_DIR_NAME, "settings.json"),
+			JSON.stringify({ packages: ["npm:@scope/rtk"] }, null, 2),
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const updateSpy = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue(undefined);
+
+		try {
+			await expect(main(["store", "update", "rtk", "--local", "--approve", "--yes"])).resolves.toBeUndefined();
+
+			expect(updateSpy).toHaveBeenCalledOnce();
+			expect(updateSpy).toHaveBeenCalledWith("npm:@scope/rtk", { local: true, scripts: "never" });
+			expect(errorSpy).not.toHaveBeenCalled();
+			expect(process.exitCode).toBeUndefined();
+		} finally {
+			updateSpy.mockRestore();
+			logSpy.mockRestore();
+			errorSpy.mockRestore();
+		}
+	});
+
 	it("refuses non-interactive installs without --yes before writing settings", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});

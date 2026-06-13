@@ -58,7 +58,7 @@ function getStoreCommandUsage(command?: StoreCommand): string {
 		case "remove":
 			return `${APP_NAME} store remove <id|source> [-l] [--yes] [--approve|--no-approve]`;
 		case "update":
-			return `${APP_NAME} store update [id|source] [--yes] [--approve|--no-approve]`;
+			return `${APP_NAME} store update [id|source] [-l] [--yes] [--approve|--no-approve]`;
 		default:
 			return `${APP_NAME} store <search|show|install|remove|update>`;
 	}
@@ -141,7 +141,7 @@ function parseStoreCommand(args: string[]): StoreCommandOptions | undefined {
 			continue;
 		}
 		if (arg === "-l" || arg === "--local") {
-			if (command === "install" || command === "remove") {
+			if (command === "install" || command === "remove" || command === "update") {
 				local = true;
 			} else {
 				invalidOption = invalidOption ?? arg;
@@ -514,7 +514,7 @@ async function runUpdate(
 		if (!(await confirmMutation({ yes: options.yes, action: "update" }))) {
 			return true;
 		}
-		await packageManager.update(undefined, { scripts: "never" });
+		await packageManager.update(undefined, options.local ? { local: true, scripts: "never" } : { scripts: "never" });
 		console.log(chalk.green("Updated packages"));
 		return true;
 	}
@@ -528,15 +528,15 @@ async function runUpdate(
 		if (!(await confirmMutation({ yes: options.yes, action: "update" }))) {
 			return true;
 		}
-		await packageManager.update(input, { scripts: "never" });
+		await packageManager.update(input, options.local ? { local: true, scripts: "never" } : { scripts: "never" });
 		console.log(chalk.green(`Updated ${input}`));
 		return true;
 	}
 
 	const resolved = await resolveStoreSource({ input, catalog, pinGit: true });
-	const selection = chooseStoreUpdateTarget(packageManager, resolved.source);
+	const selection = chooseStoreUpdateTarget(packageManager, resolved.source, options.local);
 	if (selection.conflict === "both-scopes") {
-		console.error(chalk.red("Package is installed in both user and project scopes. Update one scope directly."));
+		console.error(chalk.red("Package is installed in both user and project scopes. Use -l to update project scope."));
 		process.exitCode = 1;
 		return true;
 	}
@@ -634,7 +634,8 @@ export async function handleStoreCommand(
 
 	const cwd = process.cwd();
 	const agentDir = getAgentDir();
-	const writesProjectPackageConfig = options.local && (options.command === "install" || options.command === "remove");
+	const writesProjectPackageConfig =
+		options.local && (options.command === "install" || options.command === "remove" || options.command === "update");
 	const { settingsManager, projectTrustWarnings } = await createCommandSettingsManager({
 		cwd,
 		agentDir,

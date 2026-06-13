@@ -30,15 +30,15 @@ describe("store target selection", () => {
 		]);
 	});
 
-	it("selects project scope for local remove", () => {
+	it("selects project scope for local remove and update", () => {
 		const manager = createManager([
 			{ source: "npm:pkg@1.0.0", actionSource: "npm:pkg@1.0.0", scope: "user", filtered: false },
 			{ source: "npm:pkg@1.0.0", actionSource: "npm:pkg@1.0.0", scope: "project", filtered: false },
 		]);
 
-		expect(chooseStoreRemoveTarget(manager, "npm:pkg@1.0.0", true)).toEqual({
-			target: { source: "npm:pkg@1.0.0", scope: "project" },
-		});
+		const projectTarget = { target: { source: "npm:pkg@1.0.0", scope: "project" } };
+		expect(chooseStoreRemoveTarget(manager, "npm:pkg@1.0.0", true)).toEqual(projectTarget);
+		expect(chooseStoreUpdateTarget(manager, "npm:pkg@1.0.0", true)).toEqual(projectTarget);
 	});
 
 	it("reports ambiguous user/project targets", () => {
@@ -48,6 +48,6 @@ describe("store target selection", () => {
 		]);
 
 		expect(chooseStoreRemoveTarget(manager, "npm:pkg@1.0.0", false)).toEqual({ conflict: "both-scopes" });
-		expect(chooseStoreUpdateTarget(manager, "npm:pkg@1.0.0")).toEqual({ conflict: "both-scopes" });
+		expect(chooseStoreUpdateTarget(manager, "npm:pkg@1.0.0", false)).toEqual({ conflict: "both-scopes" });
 	});
 });

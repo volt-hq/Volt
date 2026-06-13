@@ -48,8 +48,12 @@ export function chooseStoreRemoveTarget(
 export function chooseStoreUpdateTarget(
 	packageManager: StoreTargetPackageManager,
 	source: string,
+	local = false,
 ): StoreTargetSelection {
 	const matches = getMatchingStorePackageScopes(packageManager, source);
+	if (local) {
+		return { target: matches.find((match) => match.scope === "project") };
+	}
 	const scopes = new Set(matches.map((match) => match.scope));
 	if (scopes.has("user") && scopes.has("project")) {
 		return { conflict: "both-scopes" };
