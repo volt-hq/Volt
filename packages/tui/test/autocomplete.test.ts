@@ -36,6 +36,25 @@ const setupFolder = (baseDir: string, structure: FolderStructure = {}): void => 
 	});
 };
 
+const isSymlinkPermissionError = (error: unknown): boolean =>
+	error instanceof Error && "code" in error && (error as { code?: unknown }).code === "EPERM";
+
+const createDirectorySymlink = (target: string, linkPath: string): void => {
+	symlinkSync(target, linkPath, process.platform === "win32" ? "junction" : "dir");
+};
+
+const tryCreateFileSymlink = (target: string, linkPath: string): boolean => {
+	try {
+		symlinkSync(target, linkPath, "file");
+		return true;
+	} catch (error) {
+		if (isSymlinkPermissionError(error)) {
+			return false;
+		}
+		throw error;
+	}
+};
+
 const fdPath = resolveFdPath();
 const isFdInstalled = Boolean(fdPath);
 
@@ -311,7 +330,7 @@ describe("CombinedAutocompleteProvider", () => {
 					"some_file.txt": "symlinked",
 				},
 			});
-			symlinkSync("../outside", join(baseDir, "symlinked_dir"));
+			createDirectorySymlink(outsideDir, join(baseDir, "symlinked_dir"));
 
 			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
 			const line = "@some";
@@ -328,7 +347,7 @@ describe("CombinedAutocompleteProvider", () => {
 					"nested/file.txt": "symlinked",
 				},
 			});
-			symlinkSync("../outside", join(baseDir, "symlinked_dir"));
+			createDirectorySymlink(outsideDir, join(baseDir, "symlinked_dir"));
 
 			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
 			const line = "@symlinked";
@@ -338,14 +357,17 @@ describe("CombinedAutocompleteProvider", () => {
 			assert.ok(values.includes("@symlinked_dir/"));
 		});
 
-		test("returns symlinked files without requiring type l", async () => {
+		test("returns symlinked files without requiring type l", async (t) => {
 			setupFolder(baseDir, {
 				files: {
 					"original.txt": "content",
 				},
 			});
 			const linkPath = join(baseDir, "link.txt");
-			symlinkSync("original.txt", linkPath);
+			if (!tryCreateFileSymlink("original.txt", linkPath)) {
+				t.skip("file symlinks are not permitted in this Windows environment");
+				return;
+			}
 
 			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
 			const line = "@link";
