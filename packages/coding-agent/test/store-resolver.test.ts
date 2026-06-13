@@ -52,7 +52,24 @@ describe("store resolver", () => {
 			gitLsRemote: async () => "0123456789abcdef0123456789abcdef01234567\tHEAD",
 		});
 
-		expect(resolved.source).toBe("git:github.com/user/repo@0123456789abcdef0123456789abcdef01234567");
+		expect(resolved.source).toBe("git:https://github.com/user/repo@0123456789abcdef0123456789abcdef01234567");
+		expect(resolved.pinned).toBe(true);
+		expect(resolved.tracking).toBe(false);
+	});
+
+	it("preserves SSH clone URLs and ports when pinning ref-less git sources", async () => {
+		let lsRemoteRepo: string | undefined;
+		const resolved = await resolveStoreSource({
+			input: "git:ssh://git@example.com:2222/user/repo",
+			catalog,
+			gitLsRemote: async (repo) => {
+				lsRemoteRepo = repo;
+				return "0123456789abcdef0123456789abcdef01234567\tHEAD";
+			},
+		});
+
+		expect(lsRemoteRepo).toBe("ssh://git@example.com:2222/user/repo");
+		expect(resolved.source).toBe("git:ssh://git@example.com:2222/user/repo@0123456789abcdef0123456789abcdef01234567");
 		expect(resolved.pinned).toBe(true);
 		expect(resolved.tracking).toBe(false);
 	});
@@ -64,7 +81,7 @@ describe("store resolver", () => {
 			track: true,
 		});
 
-		expect(resolved.source).toBe("git:github.com/user/repo");
+		expect(resolved.source).toBe("git:https://github.com/user/repo");
 		expect(resolved.pinned).toBe(false);
 		expect(resolved.tracking).toBe(true);
 		expect(resolved.warnings).toContain(

@@ -96,13 +96,17 @@ export interface PackageInstallOptions {
 	scripts?: PackageInstallScriptPolicy;
 }
 
+export interface PackageUpdateOptions {
+	scripts?: PackageInstallScriptPolicy;
+}
+
 export interface PackageManager {
 	resolve(onMissing?: (source: string) => Promise<MissingSourceAction>): Promise<ResolvedPaths>;
 	install(source: string, options?: PackageInstallOptions): Promise<void>;
 	installAndPersist(source: string, options?: PackageInstallOptions): Promise<void>;
 	remove(source: string, options?: { local?: boolean }): Promise<void>;
 	removeAndPersist(source: string, options?: { local?: boolean }): Promise<boolean>;
-	update(source?: string): Promise<void>;
+	update(source?: string, options?: PackageUpdateOptions): Promise<void>;
 	listConfiguredPackages(): ConfiguredPackage[];
 	resolveExtensionSources(
 		sources: string[],
@@ -1023,10 +1027,11 @@ export class DefaultPackageManager implements PackageManager {
 		return this.removeSourceFromSettings(source, options);
 	}
 
-	async update(source?: string): Promise<void> {
+	async update(source?: string, options?: PackageUpdateOptions): Promise<void> {
 		const globalSettings = this.settingsManager.getGlobalSettings();
 		const projectSettings = this.settingsManager.getProjectSettings();
 		const identity = source ? this.getPackageIdentity(source) : undefined;
+		const scripts = options?.scripts ?? "allow";
 		let matched = false;
 		const updateSources: ConfiguredUpdateSource[] = [];
 
@@ -1052,10 +1057,13 @@ export class DefaultPackageManager implements PackageManager {
 			);
 		}
 
-		await this.updateConfiguredSources(updateSources);
+		await this.updateConfiguredSources(updateSources, scripts);
 	}
 
-	private async updateConfiguredSources(sources: ConfiguredUpdateSource[]): Promise<void> {
+	private async updateConfiguredSources(
+		sources: ConfiguredUpdateSource[],
+		scripts: PackageInstallScriptPolicy,
+	): Promise<void> {
 		if (isOfflineModeEnabled() || sources.length === 0) {
 			return;
 		}
@@ -1096,16 +1104,16 @@ export class DefaultPackageManager implements PackageManager {
 
 		const tasks: Promise<void>[] = [];
 		if (userNpmUpdates.length > 0) {
-			tasks.push(this.updateNpmBatch(userNpmUpdates, "user"));
+			tasks.push(this.updateNpmBatch(userNpmUpdates, "user", scripts));
 		}
 		if (projectNpmUpdates.length > 0) {
-			tasks.push(this.updateNpmBatch(projectNpmUpdates, "project"));
+			tasks.push(this.updateNpmBatch(projectNpmUpdates, "project", scripts));
 		}
 		if (gitCandidates.length > 0) {
 			const gitTasks = gitCandidates.map(
 				(entry) => async () =>
 					this.withProgress("update", entry.source, `Updating ${entry.source}...`, async () => {
-						await this.updateGit(entry.parsed, entry.scope);
+						await this.updateGit(entry.parsed, entry.scope, scripts);
 					}),
 			);
 			tasks.push(this.runWithConcurrency(gitTasks, GIT_UPDATE_CONCURRENCY).then(() => {}));
@@ -1130,7 +1138,11 @@ export class DefaultPackageManager implements PackageManager {
 		}
 	}
 
-	private async updateNpmBatch(sources: NpmUpdateTarget[], scope: InstalledSourceScope): Promise<void> {
+	private async updateNpmBatch(
+		sources: NpmUpdateTarget[],
+		scope: InstalledSourceScope,
+		scripts: PackageInstallScriptPolicy,
+	): Promise<void> {
 		if (sources.length === 0) {
 			return;
 		}
@@ -1140,14 +1152,18 @@ export class DefaultPackageManager implements PackageManager {
 		const specs = sources.map((entry) => `${entry.parsed.name}@latest`);
 
 		await this.withProgress("update", sourceLabel, message, async () => {
-			await this.installNpmBatch(specs, scope);
+			await this.installNpmBatch(specs, scope, scripts);
 		});
 	}
 
-	private async installNpmBatch(specs: string[], scope: InstalledSourceScope): Promise<void> {
+	private async installNpmBatch(
+		specs: string[],
+		scope: InstalledSourceScope,
+		scripts: PackageInstallScriptPolicy,
+	): Promise<void> {
 		const installRoot = this.getNpmInstallRoot(scope, false);
 		this.ensureNpmProject(installRoot);
-		await this.runNpmCommand(this.getNpmInstallArgs(specs, installRoot, "allow"));
+		await this.runNpmCommand(this.getNpmInstallArgs(specs, installRoot, scripts));
 	}
 
 	async checkForAvailableUpdates(): Promise<PackageUpdate[]> {
@@ -1811,20 +1827,20 @@ export class DefaultPackageManager implements PackageManager {
 		}
 	}
 
-	private async updateGit(source: GitSource, scope: SourceScope): Promise<void> {
+	private async updateGit(source: GitSource, scope: SourceScope, scripts: PackageInstallScriptPolicy): Promise<void> {
 		const targetDir = this.getGitInstallPath(source, scope);
 		if (!existsSync(targetDir)) {
-			await this.installGit(source, scope, "allow");
+			await this.installGit(source, scope, scripts);
 			return;
 		}
 
 		if (source.ref) {
-			await this.ensureGitRef(targetDir, ["fetch", "origin", source.ref], "FETCH_HEAD", "allow");
+			await this.ensureGitRef(targetDir, ["fetch", "origin", source.ref], "FETCH_HEAD", scripts);
 			return;
 		}
 
 		const target = await this.getLocalGitUpdateTarget(targetDir);
-		await this.ensureGitRef(targetDir, target.fetchArgs, target.ref, "allow");
+		await this.ensureGitRef(targetDir, target.fetchArgs, target.ref, scripts);
 	}
 
 	private async ensureGitRef(
@@ -1866,7 +1882,7 @@ export class DefaultPackageManager implements PackageManager {
 		}
 		try {
 			await this.withProgress("pull", sourceStr, `Refreshing ${sourceStr}...`, async () => {
-				await this.updateGit(source, "temporary");
+				await this.updateGit(source, "temporary", "allow");
 			});
 		} catch {
 			// Keep cached temporary checkout if refresh fails.

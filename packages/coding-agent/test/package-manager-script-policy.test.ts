@@ -12,16 +12,18 @@ interface PackageManagerInternals {
 describe("DefaultPackageManager script policy", () => {
 	let tempDir: string;
 	let agentDir: string;
+	let settingsManager: SettingsManager;
 	let packageManager: DefaultPackageManager;
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `pm-script-policy-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		agentDir = join(tempDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
+		settingsManager = SettingsManager.inMemory();
 		packageManager = new DefaultPackageManager({
 			cwd: tempDir,
 			agentDir,
-			settingsManager: SettingsManager.inMemory(),
+			settingsManager,
 		});
 	});
 
@@ -67,6 +69,40 @@ describe("DefaultPackageManager script policy", () => {
 			});
 
 		await packageManager.install("git:github.com/user/repo", { scripts: "never" });
+
+		expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--ignore-scripts"], {
+			cwd: targetDir,
+		});
+	});
+
+	it("passes --ignore-scripts for npm updates when scripts are disabled", async () => {
+		settingsManager.setPackages(["npm:@scope/pkg"]);
+		const runCommandSpy = vi
+			.spyOn(packageManager as unknown as PackageManagerInternals, "runCommand")
+			.mockResolvedValue(undefined);
+
+		await packageManager.update(undefined, { scripts: "never" });
+
+		expect(runCommandSpy).toHaveBeenCalledWith(
+			"npm",
+			expect.arrayContaining(["install", "@scope/pkg@latest", "--ignore-scripts"]),
+			undefined,
+		);
+	});
+
+	it("passes --ignore-scripts for git update dependency installs when scripts are disabled", async () => {
+		settingsManager.setPackages(["git:github.com/user/repo"]);
+		const targetDir = join(agentDir, "git", "github.com", "user", "repo");
+		const runCommandSpy = vi
+			.spyOn(packageManager as unknown as PackageManagerInternals, "runCommand")
+			.mockImplementation(async (command, args) => {
+				if (command === "git" && args[0] === "clone") {
+					mkdirSync(targetDir, { recursive: true });
+					writeFileSync(join(targetDir, "package.json"), JSON.stringify({ name: "repo", version: "1.0.0" }));
+				}
+			});
+
+		await packageManager.update(undefined, { scripts: "never" });
 
 		expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--ignore-scripts"], {
 			cwd: targetDir,

@@ -353,7 +353,12 @@ async function runSearch(options: StoreCommandOptions, agentDir: string): Promis
 	return true;
 }
 
-async function runShow(options: StoreCommandOptions, cwd: string, agentDir: string): Promise<boolean> {
+async function runShow(
+	options: StoreCommandOptions,
+	cwd: string,
+	agentDir: string,
+	settingsManager: SettingsManager,
+): Promise<boolean> {
 	const input = options.input;
 	if (!input) {
 		console.error(chalk.red("Missing store show source."));
@@ -366,7 +371,11 @@ async function runShow(options: StoreCommandOptions, cwd: string, agentDir: stri
 		return true;
 	}
 	const resolved = await resolveStoreSource({ input, catalog, pinGit: false });
-	const inspection = await inspectStorePackage({ source: resolved.source, cwd });
+	const inspection = await inspectStorePackage({
+		source: resolved.source,
+		cwd,
+		npmCommand: settingsManager.getNpmCommand(),
+	});
 	console.log(renderStoreShow(resolved, inspection));
 	return true;
 }
@@ -396,7 +405,11 @@ async function runInstall(
 		ref: options.ref,
 		pinGit: true,
 	});
-	const inspection = await inspectStorePackage({ source: resolved.source, cwd });
+	const inspection = await inspectStorePackage({
+		source: resolved.source,
+		cwd,
+		npmCommand: settingsManager.getNpmCommand(),
+	});
 	const scope: StoreInstallScope = options.local ? "project" : "user";
 	const plan = buildStoreInstallPlan({
 		resolved,
@@ -501,7 +514,7 @@ async function runUpdate(
 		if (!(await confirmMutation({ yes: options.yes, action: "update" }))) {
 			return true;
 		}
-		await packageManager.update();
+		await packageManager.update(undefined, { scripts: "never" });
 		console.log(chalk.green("Updated packages"));
 		return true;
 	}
@@ -515,7 +528,7 @@ async function runUpdate(
 		if (!(await confirmMutation({ yes: options.yes, action: "update" }))) {
 			return true;
 		}
-		await packageManager.update(input);
+		await packageManager.update(input, { scripts: "never" });
 		console.log(chalk.green(`Updated ${input}`));
 		return true;
 	}
@@ -540,12 +553,16 @@ async function runUpdate(
 		if (!(await confirmMutation({ yes: options.yes, action: "update" }))) {
 			return true;
 		}
-		await packageManager.update(target.source);
+		await packageManager.update(target.source, { scripts: "never" });
 		console.log(chalk.green(`Updated ${target.source}`));
 		return true;
 	}
 
-	const inspection = await inspectStorePackage({ source: resolved.source, cwd });
+	const inspection = await inspectStorePackage({
+		source: resolved.source,
+		cwd,
+		npmCommand: settingsManager.getNpmCommand(),
+	});
 	const plan = buildStoreInstallPlan({
 		resolved,
 		inspection,
@@ -644,7 +661,7 @@ export async function handleStoreCommand(
 			case "search":
 				return await runSearch(options, agentDir);
 			case "show":
-				return await runShow(options, cwd, agentDir);
+				return await runShow(options, cwd, agentDir, settingsManager);
 			case "install":
 				return await runInstall(options, cwd, agentDir, settingsManager, packageManager);
 			case "remove":

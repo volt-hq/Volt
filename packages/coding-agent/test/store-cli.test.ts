@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
+import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { main } from "../src/main.ts";
 
 describe("store CLI", () => {
@@ -134,18 +135,21 @@ describe("store CLI", () => {
 		}
 	});
 
-	it("updates all installed packages with --yes", async () => {
+	it("updates all installed packages with --yes and keeps lifecycle scripts disabled", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const updateSpy = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue(undefined);
 
 		try {
 			await expect(main(["store", "update", "--yes"])).resolves.toBeUndefined();
 
+			expect(updateSpy).toHaveBeenCalledWith(undefined, { scripts: "never" });
 			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
 			expect(stdout).toContain("Updated packages");
 			expect(errorSpy).not.toHaveBeenCalled();
 			expect(process.exitCode).toBeUndefined();
 		} finally {
+			updateSpy.mockRestore();
 			logSpy.mockRestore();
 			errorSpy.mockRestore();
 		}

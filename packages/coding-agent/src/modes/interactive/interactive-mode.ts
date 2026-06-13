@@ -4357,7 +4357,11 @@ export class InteractiveMode {
 		try {
 			this.showStatus(`Inspecting ${input}...`);
 			const resolved = await resolveStoreSource({ input, catalog: storeCatalog, pinGit: false });
-			const inspection = await inspectStorePackage({ source: resolved.source, cwd: this.sessionManager.getCwd() });
+			const inspection = await inspectStorePackage({
+				source: resolved.source,
+				cwd: this.sessionManager.getCwd(),
+				npmCommand: this.settingsManager.getNpmCommand(),
+			});
 			this.showStoreText(renderStoreShow(resolved, inspection));
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));
@@ -4381,7 +4385,11 @@ export class InteractiveMode {
 		try {
 			this.showStatus(`Preparing store install for ${input}...`);
 			const resolved = await resolveStoreSource({ input, catalog: storeCatalog, pinGit: true });
-			const inspection = await inspectStorePackage({ source: resolved.source, cwd: this.sessionManager.getCwd() });
+			const inspection = await inspectStorePackage({
+				source: resolved.source,
+				cwd: this.sessionManager.getCwd(),
+				npmCommand: this.settingsManager.getNpmCommand(),
+			});
 			const plan = buildStoreInstallPlan({
 				resolved,
 				inspection,
@@ -4446,7 +4454,7 @@ export class InteractiveMode {
 				return;
 			}
 			try {
-				await packageManager.update();
+				await packageManager.update(undefined, { scripts: "never" });
 				this.showStatus("Updated packages. Run /reload to load resource changes.");
 			} catch (error: unknown) {
 				this.showError(error instanceof Error ? error.message : String(error));
@@ -4466,7 +4474,7 @@ export class InteractiveMode {
 				return;
 			}
 			try {
-				await packageManager.update(input);
+				await packageManager.update(input, { scripts: "never" });
 				this.showStatus(`Updated ${input}. Run /reload to load resource changes.`);
 			} catch (error: unknown) {
 				this.showError(error instanceof Error ? error.message : String(error));
@@ -4492,12 +4500,16 @@ export class InteractiveMode {
 					this.showStatus("Store update cancelled");
 					return;
 				}
-				await packageManager.update(selection.target.source);
+				await packageManager.update(selection.target.source, { scripts: "never" });
 				this.showStatus(`Updated ${selection.target.source}. Run /reload to load resource changes.`);
 				return;
 			}
 
-			const inspection = await inspectStorePackage({ source: resolved.source, cwd: this.sessionManager.getCwd() });
+			const inspection = await inspectStorePackage({
+				source: resolved.source,
+				cwd: this.sessionManager.getCwd(),
+				npmCommand: this.settingsManager.getNpmCommand(),
+			});
 			const plan = buildStoreInstallPlan({
 				resolved,
 				inspection,
@@ -4604,7 +4616,7 @@ export class InteractiveMode {
 			return;
 		}
 		try {
-			await packageManager.update(pkg.source);
+			await packageManager.update(pkg.source, { scripts: "never" });
 			this.showStatus(`Updated ${pkg.source}. Run /reload to load resource changes.`);
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));

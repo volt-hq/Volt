@@ -85,7 +85,7 @@ function isStoreLocalPathInput(input: string): boolean {
 }
 
 function formatGitSource(source: GitSource, ref?: string): string {
-	return `git:${source.host}/${source.path}${ref ? `@${ref}` : ""}`;
+	return `git:${source.repo}${ref ? `@${ref}` : ""}`;
 }
 
 function withGitRef(source: GitSource, ref: string): GitSource {
