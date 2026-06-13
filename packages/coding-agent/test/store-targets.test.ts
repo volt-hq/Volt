@@ -21,8 +21,8 @@ function createManager(packages: ConfiguredPackage[]): StoreTargetPackageManager
 describe("store target selection", () => {
 	it("finds matching configured package scopes", () => {
 		const manager = createManager([
-			{ source: "npm:one@1.0.0", scope: "user", filtered: false },
-			{ source: "npm:two@1.0.0", scope: "project", filtered: false },
+			{ source: "npm:one@1.0.0", actionSource: "npm:one@1.0.0", scope: "user", filtered: false },
+			{ source: "npm:two@1.0.0", actionSource: "npm:two@1.0.0", scope: "project", filtered: false },
 		]);
 
 		expect(getMatchingStorePackageScopes(manager, "npm:two@1.0.0")).toEqual([
@@ -32,8 +32,8 @@ describe("store target selection", () => {
 
 	it("selects project scope for local remove", () => {
 		const manager = createManager([
-			{ source: "npm:pkg@1.0.0", scope: "user", filtered: false },
-			{ source: "npm:pkg@1.0.0", scope: "project", filtered: false },
+			{ source: "npm:pkg@1.0.0", actionSource: "npm:pkg@1.0.0", scope: "user", filtered: false },
+			{ source: "npm:pkg@1.0.0", actionSource: "npm:pkg@1.0.0", scope: "project", filtered: false },
 		]);
 
 		expect(chooseStoreRemoveTarget(manager, "npm:pkg@1.0.0", true)).toEqual({
@@ -43,8 +43,8 @@ describe("store target selection", () => {
 
 	it("reports ambiguous user/project targets", () => {
 		const manager = createManager([
-			{ source: "npm:pkg@1.0.0", scope: "user", filtered: false },
-			{ source: "npm:pkg@1.0.0", scope: "project", filtered: false },
+			{ source: "npm:pkg@1.0.0", actionSource: "npm:pkg@1.0.0", scope: "user", filtered: false },
+			{ source: "npm:pkg@1.0.0", actionSource: "npm:pkg@1.0.0", scope: "project", filtered: false },
 		]);
 
 		expect(chooseStoreRemoveTarget(manager, "npm:pkg@1.0.0", false)).toEqual({ conflict: "both-scopes" });

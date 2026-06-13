@@ -4602,7 +4602,11 @@ export class InteractiveMode {
 			return;
 		}
 		if (action === "Remove") {
-			await this.removeInstalledStorePackage(packageManager, { source: pkg.source, scope: pkg.scope });
+			await this.removeInstalledStorePackage(
+				packageManager,
+				{ source: pkg.source, scope: pkg.scope },
+				pkg.actionSource,
+			);
 		}
 	}
 
@@ -4616,7 +4620,7 @@ export class InteractiveMode {
 			return;
 		}
 		try {
-			await packageManager.update(pkg.source, { scripts: "never" });
+			await packageManager.update(pkg.actionSource, { scripts: "never" });
 			this.showStatus(`Updated ${pkg.source}. Run /reload to load resource changes.`);
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));

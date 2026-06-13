@@ -84,6 +84,7 @@ export interface PackageUpdate {
 
 export interface ConfiguredPackage {
 	source: string;
+	actionSource: string;
 	scope: "user" | "project";
 	filtered: boolean;
 	installedPath?: string;
@@ -953,6 +954,7 @@ export class DefaultPackageManager implements PackageManager {
 			const source = typeof pkg === "string" ? pkg : pkg.source;
 			configuredPackages.push({
 				source,
+				actionSource: this.getConfiguredPackageActionSource(source, "user"),
 				scope: "user",
 				filtered: typeof pkg === "object",
 				installedPath: this.getInstalledPath(source, "user"),
@@ -963,6 +965,7 @@ export class DefaultPackageManager implements PackageManager {
 			const source = typeof pkg === "string" ? pkg : pkg.source;
 			configuredPackages.push({
 				source,
+				actionSource: this.getConfiguredPackageActionSource(source, "project"),
 				scope: "project",
 				filtered: typeof pkg === "object",
 				installedPath: this.getInstalledPath(source, "project"),
@@ -970,6 +973,14 @@ export class DefaultPackageManager implements PackageManager {
 		}
 
 		return configuredPackages;
+	}
+
+	private getConfiguredPackageActionSource(source: string, scope: "user" | "project"): string {
+		const parsed = this.parseSource(source);
+		if (parsed.type !== "local") {
+			return source;
+		}
+		return this.resolvePathFromBase(parsed.path, this.getBaseDirForScope(scope));
 	}
 
 	async install(source: string, options?: PackageInstallOptions): Promise<void> {
