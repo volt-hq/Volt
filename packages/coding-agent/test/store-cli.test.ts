@@ -100,9 +100,11 @@ describe("store CLI", () => {
 		try {
 			await expect(main(["store", "install", "rtk", "--yes"])).resolves.toBeUndefined();
 
-			const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as { packages?: string[] };
+			const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as {
+				packages?: Array<string | { source: string; scripts?: string }>;
+			};
 			expect(settings.packages).toHaveLength(1);
-			expect(settings.packages?.[0]).toContain("package");
+			expect(settings.packages?.[0]).toEqual({ source: expect.stringContaining("package"), scripts: "never" });
 			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
 			expect(stdout).toContain("Store install plan");
 			expect(stdout).toContain("Script policy: never");
@@ -177,8 +179,10 @@ describe("store CLI", () => {
 			await main(["store", "install", "project-local-rtk", "--local", "--approve", "--yes"]);
 
 			const settingsPath = join(projectDir, CONFIG_DIR_NAME, "settings.json");
-			const installedSettings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { packages?: string[] };
-			expect(installedSettings.packages).toEqual(["../pkg"]);
+			const installedSettings = JSON.parse(readFileSync(settingsPath, "utf-8")) as {
+				packages?: Array<string | { source: string; scripts?: string }>;
+			};
+			expect(installedSettings.packages).toEqual([{ source: "../pkg", scripts: "never" }]);
 
 			await expect(
 				main(["store", "remove", "project-local-rtk", "--local", "--approve", "--yes"]),

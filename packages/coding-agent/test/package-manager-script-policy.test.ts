@@ -2,6 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CONFIG_DIR_NAME } from "../src/config.ts";
 import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
@@ -69,6 +70,45 @@ describe("DefaultPackageManager script policy", () => {
 			});
 
 		await packageManager.install("git:github.com/user/repo", { scripts: "never" });
+
+		expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--ignore-scripts"], {
+			cwd: targetDir,
+		});
+	});
+
+	it("uses persisted disabled scripts policy when auto-reinstalling missing npm packages", async () => {
+		const runCommandSpy = vi
+			.spyOn(packageManager as unknown as PackageManagerInternals, "runCommand")
+			.mockResolvedValue(undefined);
+
+		await packageManager.installAndPersist("npm:@scope/pkg@1.0.0", { local: true, scripts: "never" });
+		runCommandSpy.mockClear();
+
+		await packageManager.resolve();
+
+		expect(runCommandSpy).toHaveBeenCalledWith(
+			"npm",
+			expect.arrayContaining(["install", "@scope/pkg@1.0.0", "--ignore-scripts"]),
+			undefined,
+		);
+	});
+
+	it("uses persisted disabled scripts policy when auto-reinstalling missing git packages", async () => {
+		const targetDir = join(tempDir, CONFIG_DIR_NAME, "git", "github.com", "user", "repo");
+		const runCommandSpy = vi
+			.spyOn(packageManager as unknown as PackageManagerInternals, "runCommand")
+			.mockImplementation(async (command, args) => {
+				if (command === "git" && args[0] === "clone") {
+					mkdirSync(targetDir, { recursive: true });
+					writeFileSync(join(targetDir, "package.json"), JSON.stringify({ name: "repo", version: "1.0.0" }));
+				}
+			});
+
+		await packageManager.installAndPersist("git:github.com/user/repo", { local: true, scripts: "never" });
+		rmSync(targetDir, { recursive: true, force: true });
+		runCommandSpy.mockClear();
+
+		await packageManager.resolve();
 
 		expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--ignore-scripts"], {
 			cwd: targetDir,

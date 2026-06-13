@@ -98,6 +98,7 @@ export interface PackageInstallOptions {
 }
 
 export interface PackageUpdateOptions {
+	local?: boolean;
 	scripts?: PackageInstallScriptPolicy;
 }
 
@@ -113,7 +114,7 @@ export interface PackageManager {
 		sources: string[],
 		options?: { local?: boolean; temporary?: boolean },
 	): Promise<ResolvedPaths>;
-	addSourceToSettings(source: string, options?: { local?: boolean }): boolean;
+	addSourceToSettings(source: string, options?: PackageInstallOptions): boolean;
 	removeSourceFromSettings(source: string, options?: { local?: boolean }): boolean;
 	setProgressCallback(callback: ProgressCallback | undefined): void;
 	getInstalledPath(source: string, scope: "user" | "project"): string | undefined;
@@ -195,6 +196,8 @@ interface PackageFilter {
 	prompts?: string[];
 	themes?: string[];
 }
+
+type PackageSourceConfig = Exclude<PackageSource, string>;
 
 type ResourceType = "extensions" | "skills" | "prompts" | "themes";
 
@@ -792,8 +795,8 @@ export class DefaultPackageManager implements PackageManager {
 		this.progressCallback = callback;
 	}
 
-	addSourceToSettings(source: string, options?: { local?: boolean }): boolean {
-		const scope: SourceScope = options?.local ? "project" : "user";
+	addSourceToSettings(source: string, options?: PackageInstallOptions): boolean {
+		const scope: InstalledSourceScope = options?.local ? "project" : "user";
 		const currentSettings =
 			scope === "project" ? this.settingsManager.getProjectSettings() : this.settingsManager.getGlobalSettings();
 		const currentPackages = currentSettings.packages ?? [];
@@ -801,30 +804,73 @@ export class DefaultPackageManager implements PackageManager {
 		const matchIndex = currentPackages.findIndex((existing) => this.packageSourcesMatch(existing, source, scope));
 		if (matchIndex !== -1) {
 			const existing = currentPackages[matchIndex];
-			if (this.getPackageSourceString(existing) === normalizedSource) {
+			const nextPackage = this.updatePackageSourceForSettings(existing, normalizedSource, options?.scripts);
+			if (JSON.stringify(existing) === JSON.stringify(nextPackage)) {
 				return false;
 			}
 			const nextPackages = [...currentPackages];
-			nextPackages[matchIndex] =
-				typeof existing === "string" ? normalizedSource : { ...existing, source: normalizedSource };
-			if (scope === "project") {
-				this.settingsManager.setProjectPackages(nextPackages);
-			} else {
-				this.settingsManager.setPackages(nextPackages);
-			}
+			nextPackages[matchIndex] = nextPackage;
+			this.setPackagesForScope(scope, nextPackages);
 			return true;
 		}
-		const nextPackages = [...currentPackages, normalizedSource];
-		if (scope === "project") {
-			this.settingsManager.setProjectPackages(nextPackages);
-		} else {
-			this.settingsManager.setPackages(nextPackages);
-		}
+		const nextPackages = [
+			...currentPackages,
+			this.createPackageSourceForSettings(normalizedSource, options?.scripts),
+		];
+		this.setPackagesForScope(scope, nextPackages);
 		return true;
 	}
 
+	private setPackagesForScope(scope: InstalledSourceScope, packages: PackageSource[]): void {
+		if (scope === "project") {
+			this.settingsManager.setProjectPackages(packages);
+		} else {
+			this.settingsManager.setPackages(packages);
+		}
+	}
+
+	private createPackageSourceForSettings(
+		source: string,
+		scripts: PackageInstallScriptPolicy | undefined,
+	): PackageSource {
+		if (scripts === "never") {
+			return { source, scripts };
+		}
+		return source;
+	}
+
+	private updatePackageSourceForSettings(
+		existing: PackageSource,
+		source: string,
+		scripts: PackageInstallScriptPolicy | undefined,
+	): PackageSource {
+		if (typeof existing === "string") {
+			return this.createPackageSourceForSettings(source, scripts);
+		}
+		const next: PackageSourceConfig = { ...existing, source };
+		if (scripts === "never") {
+			next.scripts = "never";
+		} else if (scripts === "allow") {
+			delete next.scripts;
+		}
+		return this.simplifyPackageSourceConfig(next);
+	}
+
+	private simplifyPackageSourceConfig(config: PackageSourceConfig): PackageSource {
+		if (
+			config.scripts === undefined &&
+			config.extensions === undefined &&
+			config.skills === undefined &&
+			config.prompts === undefined &&
+			config.themes === undefined
+		) {
+			return config.source;
+		}
+		return config;
+	}
+
 	removeSourceFromSettings(source: string, options?: { local?: boolean }): boolean {
-		const scope: SourceScope = options?.local ? "project" : "user";
+		const scope: InstalledSourceScope = options?.local ? "project" : "user";
 		const currentSettings =
 			scope === "project" ? this.settingsManager.getProjectSettings() : this.settingsManager.getGlobalSettings();
 		const currentPackages = currentSettings.packages ?? [];
@@ -833,11 +879,7 @@ export class DefaultPackageManager implements PackageManager {
 		if (!changed) {
 			return false;
 		}
-		if (scope === "project") {
-			this.settingsManager.setProjectPackages(nextPackages);
-		} else {
-			this.settingsManager.setPackages(nextPackages);
-		}
+		this.setPackagesForScope(scope, nextPackages);
 		return true;
 	}
 
@@ -956,7 +998,7 @@ export class DefaultPackageManager implements PackageManager {
 				source,
 				actionSource: this.getConfiguredPackageActionSource(source, "user"),
 				scope: "user",
-				filtered: typeof pkg === "object",
+				filtered: this.getPackageFilter(pkg) !== undefined,
 				installedPath: this.getInstalledPath(source, "user"),
 			});
 		}
@@ -967,7 +1009,7 @@ export class DefaultPackageManager implements PackageManager {
 				source,
 				actionSource: this.getConfiguredPackageActionSource(source, "project"),
 				scope: "project",
-				filtered: typeof pkg === "object",
+				filtered: this.getPackageFilter(pkg) !== undefined,
 				installedPath: this.getInstalledPath(source, "project"),
 			});
 		}
@@ -1042,21 +1084,27 @@ export class DefaultPackageManager implements PackageManager {
 		const globalSettings = this.settingsManager.getGlobalSettings();
 		const projectSettings = this.settingsManager.getProjectSettings();
 		const identity = source ? this.getPackageIdentity(source) : undefined;
+		const scopeFilter: InstalledSourceScope | undefined =
+			options?.local === undefined ? undefined : options.local ? "project" : "user";
 		const scripts = options?.scripts ?? "allow";
 		let matched = false;
 		const updateSources: ConfiguredUpdateSource[] = [];
 
-		for (const pkg of globalSettings.packages ?? []) {
-			const sourceStr = typeof pkg === "string" ? pkg : pkg.source;
-			if (identity && this.getPackageIdentity(sourceStr, "user") !== identity) continue;
-			matched = true;
-			updateSources.push({ source: sourceStr, scope: "user" });
+		if (scopeFilter !== "project") {
+			for (const pkg of globalSettings.packages ?? []) {
+				const sourceStr = typeof pkg === "string" ? pkg : pkg.source;
+				if (identity && this.getPackageIdentity(sourceStr, "user") !== identity) continue;
+				matched = true;
+				updateSources.push({ source: sourceStr, scope: "user" });
+			}
 		}
-		for (const pkg of projectSettings.packages ?? []) {
-			const sourceStr = typeof pkg === "string" ? pkg : pkg.source;
-			if (identity && this.getPackageIdentity(sourceStr, "project") !== identity) continue;
-			matched = true;
-			updateSources.push({ source: sourceStr, scope: "project" });
+		if (scopeFilter !== "user") {
+			for (const pkg of projectSettings.packages ?? []) {
+				const sourceStr = typeof pkg === "string" ? pkg : pkg.source;
+				if (identity && this.getPackageIdentity(sourceStr, "project") !== identity) continue;
+				matched = true;
+				updateSources.push({ source: sourceStr, scope: "project" });
+			}
 		}
 
 		if (source && !matched) {
@@ -1249,7 +1297,8 @@ export class DefaultPackageManager implements PackageManager {
 	): Promise<void> {
 		for (const { pkg, scope } of sources) {
 			const sourceStr = typeof pkg === "string" ? pkg : pkg.source;
-			const filter = typeof pkg === "object" ? pkg : undefined;
+			const filter = this.getPackageFilter(pkg);
+			const scripts = this.getPackageInstallScriptPolicy(pkg);
 			const parsed = this.parseSource(sourceStr);
 			const metadata: PathMetadata = { source: sourceStr, scope, origin: "package" };
 
@@ -1264,13 +1313,13 @@ export class DefaultPackageManager implements PackageManager {
 					return false;
 				}
 				if (!onMissing) {
-					await this.installParsedSource(parsed, scope);
+					await this.installParsedSource(parsed, scope, scripts);
 					return true;
 				}
 				const action = await onMissing(sourceStr);
 				if (action === "skip") return false;
 				if (action === "error") throw new Error(`Missing source: ${sourceStr}`);
-				await this.installParsedSource(parsed, scope);
+				await this.installParsedSource(parsed, scope, scripts);
 				return true;
 			};
 
@@ -1351,6 +1400,38 @@ export class DefaultPackageManager implements PackageManager {
 
 	private getPackageSourceString(pkg: PackageSource): string {
 		return typeof pkg === "string" ? pkg : pkg.source;
+	}
+
+	private getPackageFilter(pkg: PackageSource): PackageFilter | undefined {
+		if (typeof pkg === "string") {
+			return undefined;
+		}
+		const filter: PackageFilter = {};
+		let filtered = false;
+		if (pkg.extensions !== undefined) {
+			filter.extensions = pkg.extensions;
+			filtered = true;
+		}
+		if (pkg.skills !== undefined) {
+			filter.skills = pkg.skills;
+			filtered = true;
+		}
+		if (pkg.prompts !== undefined) {
+			filter.prompts = pkg.prompts;
+			filtered = true;
+		}
+		if (pkg.themes !== undefined) {
+			filter.themes = pkg.themes;
+			filtered = true;
+		}
+		return filtered ? filter : undefined;
+	}
+
+	private getPackageInstallScriptPolicy(pkg: PackageSource): PackageInstallScriptPolicy {
+		if (typeof pkg === "object" && (pkg.scripts === "never" || pkg.scripts === "allow")) {
+			return pkg.scripts;
+		}
+		return "allow";
 	}
 
 	private getSourceMatchKeyForInput(source: string): string {

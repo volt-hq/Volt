@@ -4500,7 +4500,10 @@ export class InteractiveMode {
 					this.showStatus("Store update cancelled");
 					return;
 				}
-				await packageManager.update(selection.target.source, { scripts: "never" });
+				await packageManager.update(selection.target.source, {
+					local: selection.target.scope === "project",
+					scripts: "never",
+				});
 				this.showStatus(`Updated ${selection.target.source}. Run /reload to load resource changes.`);
 				return;
 			}
@@ -4620,7 +4623,7 @@ export class InteractiveMode {
 			return;
 		}
 		try {
-			await packageManager.update(pkg.actionSource, { scripts: "never" });
+			await packageManager.update(pkg.actionSource, { local: pkg.scope === "project", scripts: "never" });
 			this.showStatus(`Updated ${pkg.source}. Run /reload to load resource changes.`);
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));

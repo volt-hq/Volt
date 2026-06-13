@@ -553,7 +553,7 @@ async function runUpdate(
 		if (!(await confirmMutation({ yes: options.yes, action: "update" }))) {
 			return true;
 		}
-		await packageManager.update(target.source, { scripts: "never" });
+		await packageManager.update(target.source, { local: target.scope === "project", scripts: "never" });
 		console.log(chalk.green(`Updated ${target.source}`));
 		return true;
 	}

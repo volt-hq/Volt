@@ -1,10 +1,14 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CONFIG_DIR_NAME } from "../src/config.ts";
 import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+
+interface PackageManagerInternals {
+	runCommand(command: string, args: string[], options?: { cwd?: string }): Promise<void>;
+}
 
 describe("configured package actions", () => {
 	let tempDir: string;
@@ -21,6 +25,7 @@ describe("configured package actions", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -38,5 +43,35 @@ describe("configured package actions", () => {
 		await expect(packageManager.update(configured.actionSource, { scripts: "never" })).resolves.toBeUndefined();
 		await expect(packageManager.removeAndPersist(configured.actionSource, { local: true })).resolves.toBe(true);
 		expect(settingsManager.getProjectSettings().packages).toEqual([]);
+	});
+
+	it("updates only the selected scope when configured packages share an identity", async () => {
+		settingsManager.setPackages(["npm:example"]);
+		settingsManager.setProjectPackages(["npm:example"]);
+		const runCommandSpy = vi
+			.spyOn(packageManager as unknown as PackageManagerInternals, "runCommand")
+			.mockResolvedValue(undefined);
+
+		await packageManager.update("npm:example", { local: true, scripts: "never" });
+
+		let npmInstallCalls = runCommandSpy.mock.calls.filter(
+			([command, args]) => command === "npm" && args[0] === "install",
+		);
+		expect(npmInstallCalls).toHaveLength(1);
+		expect(npmInstallCalls[0]?.[1]).toEqual(
+			expect.arrayContaining(["--prefix", join(tempDir, CONFIG_DIR_NAME, "npm")]),
+		);
+		expect(npmInstallCalls[0]?.[1]).not.toContain(join(agentDir, "npm"));
+
+		runCommandSpy.mockClear();
+
+		await packageManager.update("npm:example", { local: false, scripts: "never" });
+
+		npmInstallCalls = runCommandSpy.mock.calls.filter(
+			([command, args]) => command === "npm" && args[0] === "install",
+		);
+		expect(npmInstallCalls).toHaveLength(1);
+		expect(npmInstallCalls[0]?.[1]).toEqual(expect.arrayContaining(["--prefix", join(agentDir, "npm")]));
+		expect(npmInstallCalls[0]?.[1]).not.toContain(join(tempDir, CONFIG_DIR_NAME, "npm"));
 	});
 });
