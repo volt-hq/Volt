@@ -5,6 +5,8 @@ export default defineConfig({
 		globals: true,
 		environment: "node",
 		testTimeout: 30000,
+		maxWorkers: 8,
+		minWorkers: 1,
 		include: ["test/harness/**/*.test.ts"],
 		coverage: {
 			provider: "v8",

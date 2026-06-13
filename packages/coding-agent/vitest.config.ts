@@ -11,6 +11,8 @@ export default defineConfig({
 		globals: true,
 		environment: "node",
 		testTimeout: 30000,
+		maxWorkers: 8,
+		minWorkers: 1,
 		server: {
 			deps: {
 				external: [/@silvia-odwyer\/photon-node/],
