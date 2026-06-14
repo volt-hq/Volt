@@ -18,7 +18,6 @@
 - Added built-in LSP server defaults for clangd (C/C++), zls (Zig), lua-language-server, and bash-language-server.
 - Added LSP protocol tracing: `lsp.traceFile` setting and `/lsp trace [path|off]` runtime toggle append JSON-RPC traffic, server stderr, and lifecycle events to a log file.
 - Added a built-in `/review` command that reviews uncommitted changes, branch diffs vs a base, GitHub PRs, or single commits in an isolated in-process review session with full tool access, then starts a fresh session seeded only with the numbered findings so follow-ups like "fix 1 and 3" run with clean context. Configure the reviewer model with the `reviewModel` setting or the "Review model" entry in `/settings`.
-- Added an RTK extension example that rewrites bash tool calls through `rtk rewrite` for token-optimized command output.
 
 ### Fixed
 
@@ -39,6 +38,7 @@
 
 ### Changed
 
+- Changed the interactive `/store` browser to list available packages immediately, with search available from the package list.
 - `SettingsManager.applyOverrides()` overrides now persist across `reload()` and internal settings re-merges instead of being silently dropped.
 - LSP project-root markers are now priority-ordered (a `tsconfig.json` anywhere up the tree beats a closer `package.json`), and diagnostics for files outside the working directory display absolute paths.
 - LSP cold starts now wait up to `lsp.firstSettleMs` (default 10s) for the first diagnostics from a fresh server, so the first edit no longer misses errors while the project loads.

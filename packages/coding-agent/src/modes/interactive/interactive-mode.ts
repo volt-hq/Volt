@@ -4274,23 +4274,22 @@ export class InteractiveMode {
 		await this.showStoreCatalogBrowser(args);
 	}
 
-	private async showStoreCatalogBrowser(initialQuery?: string): Promise<void> {
-		const catalog = await this.loadStoreCatalog(true);
-		if (!catalog) {
+	private async promptStoreCatalogSearch(catalog: StoreCatalog): Promise<void> {
+		const value = await this.showExtensionInput("Store search", "Search packages");
+		if (value === undefined) {
+			this.showStatus("Store search cancelled");
+			return;
+		}
+		await this.showStoreCatalogBrowser(value.trim(), catalog);
+	}
+
+	private async showStoreCatalogBrowser(query = "", catalog?: StoreCatalog): Promise<void> {
+		const storeCatalog = catalog ?? (await this.loadStoreCatalog(true));
+		if (!storeCatalog) {
 			return;
 		}
 
-		let query = initialQuery;
-		if (query === undefined) {
-			const value = await this.showExtensionInput("Store search", "Search packages");
-			if (value === undefined) {
-				this.showStatus("Store search cancelled");
-				return;
-			}
-			query = value.trim();
-		}
-
-		const matches = searchCatalogPackages(catalog, query).slice(0, 50);
+		const matches = searchCatalogPackages(storeCatalog, query).slice(0, 50);
 		if (matches.length === 0) {
 			this.showStoreText(renderCatalogSearch(matches, query));
 			return;
@@ -4302,20 +4301,21 @@ export class InteractiveMode {
 			labels.set(label, pkg);
 			return label;
 		});
-		options.push("Search again", "Cancel");
+		const searchLabel = query.trim() ? "Search again" : "Search";
+		options.push(searchLabel, "Cancel");
 
 		const selection = await this.showExtensionSelector("Store packages", options);
 		if (!selection || selection === "Cancel") {
 			return;
 		}
-		if (selection === "Search again") {
-			await this.showStoreCatalogBrowser();
+		if (selection === searchLabel) {
+			await this.promptStoreCatalogSearch(storeCatalog);
 			return;
 		}
 
 		const pkg = labels.get(selection);
 		if (pkg) {
-			await this.showStorePackageActions(pkg.id, catalog);
+			await this.showStorePackageActions(pkg.id, storeCatalog);
 		}
 	}
 
