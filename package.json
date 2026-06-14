@@ -1,0 +1,17 @@
+{
+	"name": "volt-rtk-extension",
+	"version": "0.1.0",
+	"description": "Rewrite bash tool calls through RTK for token-optimized command output.",
+	"type": "module",
+	"keywords": [
+		"volt-package",
+		"volt-extension",
+		"rtk"
+	],
+	"license": "MIT",
+	"volt": {
+		"extensions": [
+			"extensions/rtk.ts"
+		]
+	}
+}
