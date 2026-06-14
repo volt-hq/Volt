@@ -419,7 +419,8 @@ function collectManifestFiles(root: string, entries: string[], resourceType: Sto
 		}).map((match) => resolve(match));
 	});
 	const files = collectFilesFromPaths(resolved, resourceType);
-	const enabled = applyManifestPatterns(files, entries, root);
+	const overridePatterns = entries.filter(isOverridePattern);
+	const enabled = applyManifestPatterns(files, overridePatterns, root);
 	return files.filter((file) => enabled.has(file));
 }
 

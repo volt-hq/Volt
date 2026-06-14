@@ -86,6 +86,38 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		expect(inspection.discoveredResources.extensions).not.toContain("extensions/dev.ts");
 	});
 
+	it("discovers resources from manifest directory entries", async () => {
+		mkdirSync(join(packageDir, "prompts"), { recursive: true });
+		mkdirSync(join(packageDir, "themes"), { recursive: true });
+		writeFileSync(join(packageDir, "extensions", "dev.ts"), "export default function dev() {}\n");
+		writeFileSync(join(packageDir, "prompts", "summary.md"), "Summarize this.\n");
+		writeFileSync(join(packageDir, "themes", "dark.json"), "{}\n");
+		writeFileSync(
+			join(packageDir, "package.json"),
+			JSON.stringify(
+				{
+					name: "volt-example",
+					version: "1.2.3",
+					volt: {
+						extensions: ["./extensions", "!extensions/dev.ts"],
+						skills: ["./skills"],
+						prompts: ["./prompts"],
+						themes: ["./themes"],
+					},
+				},
+				null,
+				2,
+			),
+		);
+
+		const inspection = await inspectStorePackage({ source: packageDir, cwd: tempDir });
+
+		expect(inspection.discoveredResources.extensions).toEqual(["extensions/example.ts"]);
+		expect(inspection.discoveredResources.skills).toEqual(["skills/helper/SKILL.md"]);
+		expect(inspection.discoveredResources.prompts).toEqual(["prompts/summary.md"]);
+		expect(inspection.discoveredResources.themes).toEqual(["themes/dark.json"]);
+	});
+
 	it("discovers conventional resource directories when no volt manifest exists", async () => {
 		mkdirSync(join(packageDir, "extensions", "nested"), { recursive: true });
 		mkdirSync(join(packageDir, "extensions", "with-index"), { recursive: true });
