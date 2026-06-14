@@ -142,6 +142,7 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		});
 		const rendered = renderStoreInstallPlan(plan);
 
+		expect(rendered).toContain("Package: example - Example");
 		expect(plan.compatibility).toBe("compatible");
 		expect(plan.warnings).toContain("Extensions run as local code with the full permissions of the Volt process.");
 		expect(plan.warnings).toContain("Package lifecycle scripts will be disabled for this store install.");
@@ -150,5 +151,35 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		expect(rendered).toContain("Scripts:");
 		expect(rendered).toContain("postinstall: node build.js");
 		expect(rendered).toContain("Compatibility: compatible");
+	});
+
+	it("renders catalog git plans with package names and shortened source labels", async () => {
+		const inspection = await inspectStorePackage({ source: packageDir, cwd: tempDir });
+		const resolved: StoreResolvedSource = {
+			input: "rtk",
+			source: "git:https://github.com/user/volt-rtk@0123456789abcdef0123456789abcdef01234567",
+			kind: "catalog",
+			pinned: true,
+			tracking: false,
+			catalogPackage: {
+				id: "rtk",
+				name: "RTK Output Compression",
+				description: "Token optimized shell output",
+				source: "git:https://github.com/user/volt-rtk",
+			},
+			warnings: [],
+		};
+
+		const plan = buildStoreInstallPlan({
+			resolved,
+			inspection,
+			scope: "user",
+			scriptPolicy: "never",
+		});
+		const rendered = renderStoreInstallPlan(plan);
+
+		expect(rendered).toContain("Package: rtk - RTK Output Compression");
+		expect(rendered).toContain("Source: git github.com/user/volt-rtk @ 0123456789ab");
+		expect(rendered).not.toContain("git:https://github.com/user/volt-rtk@0123456789abcdef0123456789abcdef01234567");
 	});
 });

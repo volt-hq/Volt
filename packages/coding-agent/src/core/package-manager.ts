@@ -1,4 +1,4 @@
-import type { ChildProcess, ChildProcessByStdio } from "node:child_process";
+import type { ChildProcessByStdio } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -32,7 +32,6 @@ import { spawnProcess, spawnProcessSync } from "../utils/child-process.ts";
 import { type GitSource, parseGitUrl } from "../utils/git.ts";
 import { getNpmUpdateSpec, parseNpmSpec } from "../utils/npm-spec.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
-import { isStdoutTakenOver } from "./output-guard.ts";
 import type { PackageSource, SettingsManager } from "./settings-manager.ts";
 
 const NETWORK_TIMEOUT_MS = 10000;
@@ -2628,15 +2627,6 @@ export class DefaultPackageManager implements PackageManager {
 		};
 	}
 
-	private spawnCommand(command: string, args: string[], options?: { cwd?: string }): ChildProcess {
-		const env = getEnv();
-		return spawnProcess(command, args, {
-			cwd: options?.cwd,
-			stdio: isStdoutTakenOver() ? ["ignore", 2, 2] : "inherit",
-			env,
-		});
-	}
-
 	private spawnCaptureCommand(
 		command: string,
 		args: string[],
@@ -2695,18 +2685,8 @@ export class DefaultPackageManager implements PackageManager {
 		});
 	}
 
-	private runCommand(command: string, args: string[], options?: { cwd?: string }): Promise<void> {
-		return new Promise((resolvePromise, reject) => {
-			const child = this.spawnCommand(command, args, options);
-			child.on("error", reject);
-			child.on("exit", (code) => {
-				if (code === 0) {
-					resolvePromise();
-				} else {
-					reject(new Error(`${command} ${args.join(" ")} failed with code ${code}`));
-				}
-			});
-		});
+	private async runCommand(command: string, args: string[], options?: { cwd?: string }): Promise<void> {
+		await this.runCommandCapture(command, args, options);
 	}
 
 	private runCommandSync(command: string, args: string[]): string {

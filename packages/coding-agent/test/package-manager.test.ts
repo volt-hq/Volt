@@ -2408,6 +2408,26 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			);
 		});
 
+		it("should run package commands through captured stdio", async () => {
+			const managerWithInternals = packageManager as unknown as PackageManagerInternals & {
+				spawnCaptureCommand(
+					command: string,
+					args: string[],
+					options?: { cwd?: string; env?: Record<string, string> },
+				): MockSpawnedProcess;
+			};
+			const child = new MockSpawnedProcess();
+			const spawnSpy = vi.spyOn(managerWithInternals, "spawnCaptureCommand").mockReturnValue(child);
+
+			const commandPromise = managerWithInternals.runCommand("git", ["clone", "repo", "dest"]);
+			child.stdout.write("stdout that should not be inherited\n");
+			child.stderr.write("stderr that should not be inherited\n");
+			child.emit("close", 0, null);
+
+			await expect(commandPromise).resolves.toBeUndefined();
+			expect(spawnSpy).toHaveBeenCalledWith("git", ["clone", "repo", "dest"], undefined);
+		});
+
 		it("should wait for close before resolving captured stdout", async () => {
 			const managerWithInternals = packageManager as unknown as {
 				spawnCaptureCommand(

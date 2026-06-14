@@ -20,7 +20,14 @@ import {
 	type StoreInstallScope,
 	type StoreInstallScriptPolicy,
 } from "./install-plan.ts";
-import { renderCatalogSearch, renderStoreInstallPlan, renderStoreShow } from "./render.ts";
+import {
+	formatStoreInstallPlanTarget,
+	formatStoreProgressMessage,
+	formatStoreSourceSummary,
+	renderCatalogSearch,
+	renderStoreInstallPlan,
+	renderStoreShow,
+} from "./render.ts";
 import { resolveStoreSource } from "./resolver.ts";
 import { chooseStoreRemoveTarget, chooseStoreUpdateTarget, storeTargetMatchesUpdateSource } from "./targets.ts";
 
@@ -452,7 +459,7 @@ async function runInstall(
 		return true;
 	}
 
-	console.log(chalk.green(`Installed ${plan.source}`));
+	console.log(chalk.green(`Installed ${formatStoreInstallPlanTarget(plan)}`));
 	return true;
 }
 
@@ -492,7 +499,7 @@ async function runRemove(
 		return true;
 	}
 
-	console.log(`Removing ${target.source} from ${target.scope} scope.`);
+	console.log(`Removing ${formatStoreSourceSummary(target.source)} from ${target.scope} scope.`);
 	if (!(await confirmMutation({ yes: options.yes, action: "remove" }))) {
 		return true;
 	}
@@ -513,7 +520,7 @@ async function runRemove(
 		process.exitCode = 1;
 		return true;
 	}
-	console.log(chalk.green(`Removed ${target.source}`));
+	console.log(chalk.green(`Removed ${formatStoreSourceSummary(target.source)}`));
 	return true;
 }
 
@@ -547,7 +554,7 @@ async function runUpdate(
 			return true;
 		}
 		await packageManager.update(input, options.local ? { local: true, scripts: "never" } : { scripts: "never" });
-		console.log(chalk.green(`Updated ${input}`));
+		console.log(chalk.green(`Updated ${formatStoreSourceSummary(input)}`));
 		return true;
 	}
 
@@ -575,7 +582,7 @@ async function runUpdate(
 			local: target.scope === "project",
 			scripts: "never",
 		});
-		console.log(chalk.green(`Updated ${target.source}`));
+		console.log(chalk.green(`Updated ${formatStoreSourceSummary(target.source)}`));
 		return true;
 	}
 
@@ -611,7 +618,9 @@ async function runUpdate(
 		process.exitCode = 1;
 		return true;
 	}
-	console.log(chalk.green(`Updated ${target.source} to ${plan.source}`));
+	console.log(
+		chalk.green(`Updated ${formatStoreSourceSummary(target.source)} to ${formatStoreInstallPlanTarget(plan)}`),
+	);
 	return true;
 }
 
@@ -705,8 +714,8 @@ export async function handleStoreCommand(
 
 		const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
 		packageManager.setProgressCallback((event) => {
-			if (event.type === "start") {
-				process.stdout.write(chalk.dim(`${event.message}\n`));
+			if (event.type === "start" && event.message) {
+				process.stdout.write(chalk.dim(`${formatStoreProgressMessage(event.source, event.message)}\n`));
 			}
 		});
 

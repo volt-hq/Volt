@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { parseGitUrl } from "../utils/git.ts";
 import type { StoreCatalogPackage, StoreResourceType } from "./catalog.ts";
 import type { StorePackageInspection, StoreVoltManifest } from "./inspector.ts";
 import type { StoreInstallPlan } from "./install-plan.ts";
@@ -8,6 +9,35 @@ const RESOURCE_TYPES: StoreResourceType[] = ["extensions", "skills", "prompts", 
 
 function formatList(values: readonly string[] | undefined): string {
 	return values && values.length > 0 ? values.join(", ") : "none";
+}
+
+export function formatStoreSourceSummary(source: string): string {
+	const gitSource = parseGitUrl(source);
+	if (gitSource) {
+		const ref = gitSource.ref
+			? ` @ ${/^[0-9a-f]{40}$/i.test(gitSource.ref) ? gitSource.ref.slice(0, 12) : gitSource.ref}`
+			: "";
+		return `git ${gitSource.host}/${gitSource.path}${ref}`;
+	}
+
+	if (source.startsWith("npm:")) {
+		const spec = source.slice("npm:".length).trim();
+		return spec ? `npm ${spec}` : source;
+	}
+
+	return source;
+}
+
+export function formatStoreInstallPlanTarget(plan: StoreInstallPlan): string {
+	const catalogPackage = plan.resolved.catalogPackage;
+	if (catalogPackage) {
+		return `${catalogPackage.id} - ${catalogPackage.name}`;
+	}
+	return formatStoreSourceSummary(plan.resolved.source);
+}
+
+export function formatStoreProgressMessage(source: string, message: string): string {
+	return source ? message.split(source).join(formatStoreSourceSummary(source)) : message;
 }
 
 function renderRecord(title: string, values: Record<string, string>): string[] {
@@ -64,7 +94,7 @@ export function renderCatalogSearch(packages: readonly StoreCatalogPackage[], qu
 		const categories = pkg.categories && pkg.categories.length > 0 ? ` [${pkg.categories.join(", ")}]` : "";
 		lines.push(`${pkg.id} - ${pkg.name}${verified}${categories}`);
 		lines.push(chalk.dim(`  ${pkg.description}`));
-		lines.push(chalk.dim(`  ${pkg.source}`));
+		lines.push(chalk.dim(`  Source: ${formatStoreSourceSummary(pkg.source)}`));
 	}
 	return lines.join("\n");
 }
@@ -76,7 +106,7 @@ export function renderStoreShow(resolved: StoreResolvedSource, inspection: Store
 		lines.push(chalk.bold(catalogPackage.name));
 		lines.push(`ID: ${catalogPackage.id}`);
 		lines.push(`Description: ${catalogPackage.description}`);
-		lines.push(`Source: ${catalogPackage.source}`);
+		lines.push(`Source: ${formatStoreSourceSummary(catalogPackage.source)}`);
 		lines.push(`Verified: ${catalogPackage.verified === true ? "yes" : "no"}`);
 		if (catalogPackage.repo) lines.push(`Repo: ${catalogPackage.repo}`);
 		if (catalogPackage.author) lines.push(`Author: ${catalogPackage.author}`);
@@ -86,7 +116,7 @@ export function renderStoreShow(resolved: StoreResolvedSource, inspection: Store
 		lines.push("");
 	} else {
 		lines.push(chalk.bold(resolved.input));
-		lines.push(`Source: ${resolved.source}`);
+		lines.push(`Source: ${formatStoreSourceSummary(resolved.source)}`);
 		lines.push("");
 	}
 
@@ -107,10 +137,12 @@ export function renderStoreShow(resolved: StoreResolvedSource, inspection: Store
 }
 
 export function renderStoreInstallPlan(plan: StoreInstallPlan): string {
+	const target = formatStoreInstallPlanTarget(plan);
+	const source = formatStoreSourceSummary(plan.source);
 	const lines = [
 		chalk.bold("Store install plan"),
-		`Input: ${plan.input}`,
-		`Source: ${plan.source}`,
+		...(target !== source ? [`Package: ${target}`] : []),
+		`Source: ${source}`,
 		`Scope: ${plan.scope}`,
 		`Tracking: ${plan.tracking ? "yes" : "no"}`,
 		`Script policy: ${plan.scriptPolicy}`,

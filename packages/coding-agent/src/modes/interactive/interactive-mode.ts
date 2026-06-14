@@ -105,7 +105,14 @@ import {
 } from "../../store/catalog.ts";
 import { inspectStorePackage } from "../../store/inspector.ts";
 import { buildStoreInstallPlan, type StoreInstallScope } from "../../store/install-plan.ts";
-import { renderCatalogSearch, renderStoreInstallPlan, renderStoreShow } from "../../store/render.ts";
+import {
+	formatStoreInstallPlanTarget,
+	formatStoreProgressMessage,
+	formatStoreSourceSummary,
+	renderCatalogSearch,
+	renderStoreInstallPlan,
+	renderStoreShow,
+} from "../../store/render.ts";
 import { resolveStoreSource } from "../../store/resolver.ts";
 import {
 	chooseStoreRemoveTarget,
@@ -4189,7 +4196,7 @@ export class InteractiveMode {
 		});
 		packageManager.setProgressCallback((event) => {
 			if (event.type === "start" && event.message) {
-				this.showStatus(event.message);
+				this.showStatus(formatStoreProgressMessage(event.source, event.message));
 			}
 		});
 		return packageManager;
@@ -4388,7 +4395,7 @@ export class InteractiveMode {
 			return;
 		}
 		try {
-			this.showStatus(`Preparing store install for ${input}...`);
+			this.showStatus(`Preparing store install for ${formatStoreSourceSummary(input)}...`);
 			const resolved = await resolveStoreSource({ input, catalog: storeCatalog, pinGit: true });
 			const inspection = await inspectStorePackage({
 				source: resolved.source,
@@ -4401,11 +4408,12 @@ export class InteractiveMode {
 				scope,
 				scriptPolicy: "never",
 			});
+			const targetLabel = formatStoreInstallPlanTarget(plan);
 			this.showStoreText(renderStoreInstallPlan(plan));
 
 			const confirmed = await this.showExtensionConfirm(
 				"Store install",
-				`Install ${plan.source} to ${scope} scope? Package lifecycle scripts will be disabled.`,
+				`Install ${targetLabel} to ${scope} scope? Package lifecycle scripts will be disabled.`,
 			);
 			if (!confirmed) {
 				this.showStatus("Store install cancelled");
@@ -4421,7 +4429,7 @@ export class InteractiveMode {
 			if (this.reportStoreSettingsErrors(packageManager, plan.source, scope)) {
 				return;
 			}
-			await this.offerStoreReload(`Installed ${plan.source}`);
+			await this.offerStoreReload(`Installed ${targetLabel}`);
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -4477,14 +4485,15 @@ export class InteractiveMode {
 		}
 		const catalogPackage = findCatalogPackage(storeCatalog, input);
 		if (!catalogPackage) {
-			const confirmed = await this.showExtensionConfirm("Store update", `Update ${input}?`);
+			const inputLabel = formatStoreSourceSummary(input);
+			const confirmed = await this.showExtensionConfirm("Store update", `Update ${inputLabel}?`);
 			if (!confirmed) {
 				this.showStatus("Store update cancelled");
 				return;
 			}
 			try {
 				await packageManager.update(input, { scripts: "never" });
-				this.showStatus(`Updated ${input}. Run /reload to load resource changes.`);
+				this.showStatus(`Updated ${inputLabel}. Run /reload to load resource changes.`);
 			} catch (error: unknown) {
 				this.showError(error instanceof Error ? error.message : String(error));
 			}
@@ -4504,7 +4513,8 @@ export class InteractiveMode {
 				return;
 			}
 			if (storeTargetMatchesUpdateSource(selection.target, resolved.source)) {
-				const confirmed = await this.showExtensionConfirm("Store update", `Update ${selection.target.source}?`);
+				const targetLabel = formatStoreSourceSummary(selection.target.source);
+				const confirmed = await this.showExtensionConfirm("Store update", `Update ${targetLabel}?`);
 				if (!confirmed) {
 					this.showStatus("Store update cancelled");
 					return;
@@ -4513,7 +4523,7 @@ export class InteractiveMode {
 					local: selection.target.scope === "project",
 					scripts: "never",
 				});
-				this.showStatus(`Updated ${selection.target.source}. Run /reload to load resource changes.`);
+				this.showStatus(`Updated ${targetLabel}. Run /reload to load resource changes.`);
 				return;
 			}
 
@@ -4528,10 +4538,12 @@ export class InteractiveMode {
 				scope: selection.target.scope,
 				scriptPolicy: "never",
 			});
+			const currentLabel = formatStoreSourceSummary(selection.target.source);
+			const targetLabel = formatStoreInstallPlanTarget(plan);
 			this.showStoreText(renderStoreInstallPlan(plan));
 			const confirmed = await this.showExtensionConfirm(
 				"Store update",
-				`Update ${selection.target.source} to ${plan.source}? Package lifecycle scripts will be disabled.`,
+				`Update ${currentLabel} to ${targetLabel}? Package lifecycle scripts will be disabled.`,
 			);
 			if (!confirmed) {
 				this.showStatus("Store update cancelled");
@@ -4545,7 +4557,7 @@ export class InteractiveMode {
 			if (this.reportStoreSettingsErrors(packageManager, plan.source, selection.target.scope)) {
 				return;
 			}
-			await this.offerStoreReload(`Updated ${selection.target.source} to ${plan.source}`);
+			await this.offerStoreReload(`Updated ${currentLabel} to ${targetLabel}`);
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -4562,7 +4574,7 @@ export class InteractiveMode {
 		const labels = new Map<string, ConfiguredPackage>();
 		const options = packages.map((pkg, index) => {
 			const filtered = pkg.filtered ? " filtered" : "";
-			const label = `${index + 1}. ${pkg.scope} - ${pkg.source}${filtered}`;
+			const label = `${index + 1}. ${pkg.scope} - ${formatStoreSourceSummary(pkg.source)}${filtered}`;
 			labels.set(label, pkg);
 			return label;
 		});
@@ -4587,7 +4599,8 @@ export class InteractiveMode {
 		packageManager: DefaultPackageManager,
 		pkg: ConfiguredPackage,
 	): Promise<void> {
-		const action = await this.showExtensionSelector(`${pkg.scope}: ${pkg.source}`, [
+		const sourceLabel = formatStoreSourceSummary(pkg.source);
+		const action = await this.showExtensionSelector(`${pkg.scope}: ${sourceLabel}`, [
 			"Show details",
 			"Update",
 			"Remove",
@@ -4600,7 +4613,7 @@ export class InteractiveMode {
 			this.showStoreText(
 				[
 					"Installed package",
-					`Source: ${pkg.source}`,
+					`Source: ${sourceLabel}`,
 					`Scope: ${pkg.scope}`,
 					`Filtered: ${pkg.filtered ? "yes" : "no"}`,
 					`Installed path: ${pkg.installedPath ?? "not installed"}`,
@@ -4626,14 +4639,15 @@ export class InteractiveMode {
 		packageManager: DefaultPackageManager,
 		pkg: ConfiguredPackage,
 	): Promise<void> {
-		const confirmed = await this.showExtensionConfirm("Store update", `Update ${pkg.source}?`);
+		const sourceLabel = formatStoreSourceSummary(pkg.source);
+		const confirmed = await this.showExtensionConfirm("Store update", `Update ${sourceLabel}?`);
 		if (!confirmed) {
 			this.showStatus("Store update cancelled");
 			return;
 		}
 		try {
 			await packageManager.update(pkg.actionSource, { local: pkg.scope === "project", scripts: "never" });
-			this.showStatus(`Updated ${pkg.source}. Run /reload to load resource changes.`);
+			this.showStatus(`Updated ${sourceLabel}. Run /reload to load resource changes.`);
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -4648,9 +4662,10 @@ export class InteractiveMode {
 			this.showWarning("Project is not trusted. Use /trust, then restart volt before removing project packages.");
 			return;
 		}
+		const targetLabel = formatStoreSourceSummary(target.source);
 		const confirmed = await this.showExtensionConfirm(
 			"Store remove",
-			`Remove ${target.source} from ${target.scope} scope?`,
+			`Remove ${targetLabel} from ${target.scope} scope?`,
 		);
 		if (!confirmed) {
 			this.showStatus("Store remove cancelled");
@@ -4665,10 +4680,10 @@ export class InteractiveMode {
 				return;
 			}
 			if (!removed) {
-				this.showWarning(`No matching package found for ${target.source}`);
+				this.showWarning(`No matching package found for ${targetLabel}`);
 				return;
 			}
-			await this.offerStoreReload(`Removed ${target.source}`);
+			await this.offerStoreReload(`Removed ${targetLabel}`);
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}

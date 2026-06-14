@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- Fixed store package installs leaking verbose git and npm subprocess output into the interactive screen.
 - Fixed the default store catalog URL to point at the deployed GitHub Pages catalog.
 - Fixed store removal for project-local packages whose saved paths are relative to the project settings directory.
 - Fixed store updates to keep lifecycle scripts disabled, preserve git clone URLs when pinning sources, and honor configured `npmCommand` during store package inspection.
@@ -38,6 +39,7 @@
 
 ### Changed
 
+- Changed store install/update confirmations and summaries to show package names and concise source labels instead of full git source strings.
 - Changed the interactive `/store` browser to list available packages immediately, with search available from the package list.
 - `SettingsManager.applyOverrides()` overrides now persist across `reload()` and internal settings re-merges instead of being silently dropped.
 - LSP project-root markers are now priority-ordered (a `tsconfig.json` anywhere up the tree beats a closer `package.json`), and diagnostics for files outside the working directory display absolute paths.
