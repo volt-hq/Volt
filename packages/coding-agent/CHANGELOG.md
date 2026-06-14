@@ -22,6 +22,7 @@
 
 ### Fixed
 
+- Fixed the default store catalog URL to point at the deployed GitHub Pages catalog.
 - Fixed store removal for project-local packages whose saved paths are relative to the project settings directory.
 - Fixed store updates to keep lifecycle scripts disabled, preserve git clone URLs when pinning sources, and honor configured `npmCommand` during store package inspection.
 - Fixed store commands to avoid resolving configured packages before their confirmation gates and to fall back to cached catalog data when remote catalog fetches time out.
