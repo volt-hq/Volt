@@ -1,4 +1,22 @@
 {
 	"schemaVersion": 1,
-	"packages": []
+	"packages": [
+		{
+			"id": "rtk",
+			"name": "RTK Output Compression",
+			"description": "Rewrites bash commands through RTK for token-optimized command output.",
+			"source": "git:https://github.com/hansjm10/Volt@ac0fbad2d8bade4a6fabd1b8d83796284e20fbd7",
+			"repo": "https://github.com/hansjm10/Volt/tree/store/rtk",
+			"author": "Volt",
+			"license": "MIT",
+			"verified": true,
+			"categories": [
+				"shell",
+				"tokens"
+			],
+			"resources": [
+				"extensions"
+			]
+		}
+	]
 }
