@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { DefaultPackageManager } from "../src/core/package-manager.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 import { inspectStorePackage } from "../src/store/inspector.ts";
 import { buildStoreInstallPlan } from "../src/store/install-plan.ts";
 import { renderStoreInstallPlan } from "../src/store/render.ts";
@@ -49,6 +51,16 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 	afterEach(() => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
+
+	async function resolveRuntimeSkillResources(root: string): Promise<string[]> {
+		const packageManager = new DefaultPackageManager({
+			cwd: tempDir,
+			agentDir: join(tempDir, "agent"),
+			settingsManager: SettingsManager.inMemory(),
+		});
+		const resolved = await packageManager.resolveExtensionSources([root]);
+		return resolved.skills.map((resource) => relative(root, resource.path).replace(/\\/g, "/")).sort();
+	}
 
 	it("reads package metadata and manifest resources without loading extension code", async () => {
 		const inspection = await inspectStorePackage({ source: packageDir, cwd: tempDir });
@@ -137,6 +149,35 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		expect(inspection.discoveredResources.skills).toEqual(["skills/helper/SKILL.md"]);
 		expect(inspection.discoveredResources.prompts).toEqual(["prompts/summary.md"]);
 		expect(inspection.discoveredResources.themes).toEqual(["themes/dark.json"]);
+	});
+
+	it("matches runtime loading for nested conventional skill markdown files", async () => {
+		const nestedPackageDir = join(tempDir, "nested-skill-markdown-pkg");
+		mkdirSync(join(nestedPackageDir, "skills", "nested"), { recursive: true });
+		writeFileSync(join(nestedPackageDir, "package.json"), JSON.stringify({ name: "nested-skills" }, null, 2));
+		writeFileSync(join(nestedPackageDir, "skills", "nested", "extra.md"), "---\nname: extra\n---\n");
+
+		const inspection = await inspectStorePackage({ source: nestedPackageDir, cwd: tempDir });
+		const runtimeSkills = await resolveRuntimeSkillResources(nestedPackageDir);
+
+		expect(runtimeSkills).toEqual([]);
+		expect(inspection.discoveredResources.skills.sort()).toEqual(runtimeSkills);
+	});
+
+	it("matches runtime loading when a manifest skill directory contains nested skills", async () => {
+		mkdirSync(join(packageDir, "skills", "root-skill", "nested-skill"), { recursive: true });
+		writeFileSync(join(packageDir, "skills", "root-skill", "SKILL.md"), "---\nname: root-skill\n---\n");
+		writeFileSync(join(packageDir, "skills", "root-skill", "nested-skill", "SKILL.md"), "---\nname: nested\n---\n");
+		writeFileSync(
+			join(packageDir, "package.json"),
+			JSON.stringify({ name: "volt-example", version: "1.2.3", volt: { skills: ["skills/root-skill"] } }, null, 2),
+		);
+
+		const inspection = await inspectStorePackage({ source: packageDir, cwd: tempDir });
+		const runtimeSkills = await resolveRuntimeSkillResources(packageDir);
+
+		expect(runtimeSkills).toEqual(["skills/root-skill/SKILL.md"]);
+		expect(inspection.discoveredResources.skills.sort()).toEqual(runtimeSkills);
 	});
 
 	it("discovers conventional resource directories when no volt manifest exists", async () => {

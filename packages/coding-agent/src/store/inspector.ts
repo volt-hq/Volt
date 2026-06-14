@@ -203,9 +203,39 @@ function statIfExists(path: string): Stats | undefined {
 	}
 }
 
-function collectResourceFiles(dir: string, resourceType: StoreResourceType, root = dir): string[] {
+function collectSkillResourceFiles(dir: string, root = dir): string[] {
+	if (!existsSync(dir)) {
+		return [];
+	}
+
+	const entries = readdirSync(dir, { withFileTypes: true });
+	for (const entry of entries) {
+		if (entry.name === "SKILL.md" && entry.isFile()) {
+			return [join(dir, entry.name)];
+		}
+	}
+
+	const files: string[] = [];
+	for (const entry of entries) {
+		if (entry.name.startsWith(".") || entry.name === "node_modules") {
+			continue;
+		}
+		const fullPath = join(dir, entry.name);
+		if (entry.isDirectory()) {
+			files.push(...collectSkillResourceFiles(fullPath, root));
+		} else if (dir === root && entry.isFile() && FILE_PATTERNS.skills.test(entry.name)) {
+			files.push(fullPath);
+		}
+	}
+	return files;
+}
+
+function collectResourceFiles(dir: string, resourceType: StoreResourceType): string[] {
 	if (resourceType === "extensions") {
 		return collectConventionalExtensionFiles(dir);
+	}
+	if (resourceType === "skills") {
+		return collectSkillResourceFiles(dir);
 	}
 	if (!existsSync(dir)) {
 		return [];
@@ -218,17 +248,10 @@ function collectResourceFiles(dir: string, resourceType: StoreResourceType, root
 		}
 		const fullPath = join(dir, entry.name);
 		if (entry.isDirectory()) {
-			if (resourceType === "skills" && existsSync(join(fullPath, "SKILL.md"))) {
-				files.push(join(fullPath, "SKILL.md"));
-			} else {
-				files.push(...collectResourceFiles(fullPath, resourceType, root));
-			}
+			files.push(...collectResourceFiles(fullPath, resourceType));
 		} else if (entry.isFile() && FILE_PATTERNS[resourceType].test(entry.name)) {
 			files.push(fullPath);
 		}
-	}
-	if (resourceType === "skills" && existsSync(join(dir, "SKILL.md")) && dir !== root) {
-		return [join(dir, "SKILL.md")];
 	}
 	return files;
 }
