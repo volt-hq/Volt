@@ -244,6 +244,34 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		expect(inspection.discoveredResources).toEqual(runtimeResources);
 	});
 
+	it.each([".gitignore", ".ignore", ".fdignore"])(
+		"honors %s when discovering conventional package resources",
+		async (ignoreFileName) => {
+			const ignoredPackageDir = join(tempDir, `ignored-${ignoreFileName.slice(1)}`);
+			mkdirSync(join(ignoredPackageDir, "extensions"), { recursive: true });
+			mkdirSync(join(ignoredPackageDir, "prompts"), { recursive: true });
+			mkdirSync(join(ignoredPackageDir, "themes"), { recursive: true });
+			writeFileSync(join(ignoredPackageDir, "package.json"), JSON.stringify({ name: "ignored-resources" }, null, 2));
+			writeFileSync(join(ignoredPackageDir, "extensions", ignoreFileName), "ignored.ts\n");
+			writeFileSync(join(ignoredPackageDir, "prompts", ignoreFileName), "ignored.md\n");
+			writeFileSync(join(ignoredPackageDir, "themes", ignoreFileName), "ignored.json\n");
+			writeFileSync(join(ignoredPackageDir, "extensions", "visible.ts"), "export default function visible() {}\n");
+			writeFileSync(join(ignoredPackageDir, "extensions", "ignored.ts"), "export default function ignored() {}\n");
+			writeFileSync(join(ignoredPackageDir, "prompts", "visible.md"), "Visible prompt\n");
+			writeFileSync(join(ignoredPackageDir, "prompts", "ignored.md"), "Ignored prompt\n");
+			writeFileSync(join(ignoredPackageDir, "themes", "visible.json"), "{}\n");
+			writeFileSync(join(ignoredPackageDir, "themes", "ignored.json"), "{}\n");
+
+			const inspection = await inspectStorePackage({ source: ignoredPackageDir, cwd: tempDir });
+			const runtimeResources = await resolveRuntimeResources(ignoredPackageDir);
+
+			expect(inspection.discoveredResources).toEqual(runtimeResources);
+			expect(inspection.discoveredResources.extensions).toEqual(["extensions/visible.ts"]);
+			expect(inspection.discoveredResources.prompts).toEqual(["prompts/visible.md"]);
+			expect(inspection.discoveredResources.themes).toEqual(["themes/visible.json"]);
+		},
+	);
+
 	it("builds and renders a plan with security, dependency, script, and compatibility details", async () => {
 		const inspection = await inspectStorePackage({ source: packageDir, cwd: tempDir });
 		const resolved: StoreResolvedSource = {

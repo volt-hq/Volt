@@ -7,6 +7,7 @@ import { globSync } from "glob";
 import { minimatch } from "minimatch";
 import { spawnProcess } from "../utils/child-process.ts";
 import { parseGitUrl } from "../utils/git.ts";
+import { addIgnoreRules, createIgnoreMatcher, type IgnoreMatcher } from "../utils/ignore-files.ts";
 import { resolvePath } from "../utils/paths.ts";
 import type { StoreResourceType } from "./catalog.ts";
 
@@ -203,15 +204,19 @@ function statIfExists(path: string): Stats | undefined {
 	}
 }
 
-function collectSkillResourceFiles(dir: string, root = dir): string[] {
+function collectSkillResourceFiles(dir: string, root = dir, ignoreMatcher?: IgnoreMatcher): string[] {
 	if (!existsSync(dir)) {
 		return [];
 	}
 
+	const ig = ignoreMatcher ?? createIgnoreMatcher();
+	addIgnoreRules(ig, dir, root);
 	const entries = readdirSync(dir, { withFileTypes: true });
 	for (const entry of entries) {
-		if (entry.name === "SKILL.md" && entry.isFile()) {
-			return [join(dir, entry.name)];
+		const fullPath = join(dir, entry.name);
+		const relPath = toPosixPath(relative(root, fullPath));
+		if (entry.name === "SKILL.md" && entry.isFile() && !ig.ignores(relPath)) {
+			return [fullPath];
 		}
 	}
 
@@ -221,16 +226,25 @@ function collectSkillResourceFiles(dir: string, root = dir): string[] {
 			continue;
 		}
 		const fullPath = join(dir, entry.name);
+		const relPath = toPosixPath(relative(root, fullPath));
 		if (entry.isDirectory()) {
-			files.push(...collectSkillResourceFiles(fullPath, root));
-		} else if (dir === root && entry.isFile() && FILE_PATTERNS.skills.test(entry.name)) {
+			if (ig.ignores(`${relPath}/`)) {
+				continue;
+			}
+			files.push(...collectSkillResourceFiles(fullPath, root, ig));
+		} else if (dir === root && entry.isFile() && FILE_PATTERNS.skills.test(entry.name) && !ig.ignores(relPath)) {
 			files.push(fullPath);
 		}
 	}
 	return files;
 }
 
-function collectResourceFiles(dir: string, resourceType: StoreResourceType): string[] {
+function collectResourceFiles(
+	dir: string,
+	resourceType: StoreResourceType,
+	root = dir,
+	ignoreMatcher?: IgnoreMatcher,
+): string[] {
 	if (resourceType === "extensions") {
 		return collectConventionalExtensionFiles(dir);
 	}
@@ -241,14 +255,21 @@ function collectResourceFiles(dir: string, resourceType: StoreResourceType): str
 		return [];
 	}
 
+	const ig = ignoreMatcher ?? createIgnoreMatcher();
+	addIgnoreRules(ig, dir, root);
 	const files: string[] = [];
 	for (const entry of readdirSync(dir, { withFileTypes: true })) {
 		if (entry.name.startsWith(".") || entry.name === "node_modules") {
 			continue;
 		}
 		const fullPath = join(dir, entry.name);
+		const relPath = toPosixPath(relative(root, fullPath));
+		const ignorePath = entry.isDirectory() ? `${relPath}/` : relPath;
+		if (ig.ignores(ignorePath)) {
+			continue;
+		}
 		if (entry.isDirectory()) {
-			files.push(...collectResourceFiles(fullPath, resourceType));
+			files.push(...collectResourceFiles(fullPath, resourceType, root, ig));
 		} else if (entry.isFile() && FILE_PATTERNS[resourceType].test(entry.name)) {
 			files.push(fullPath);
 		}
@@ -297,12 +318,19 @@ function collectConventionalExtensionFiles(dir: string): string[] {
 		return rootEntries;
 	}
 
+	const ig = createIgnoreMatcher();
+	addIgnoreRules(ig, dir, dir);
 	const files: string[] = [];
 	for (const entry of readdirSync(dir, { withFileTypes: true })) {
 		if (entry.name.startsWith(".") || entry.name === "node_modules") {
 			continue;
 		}
 		const fullPath = join(dir, entry.name);
+		const relPath = toPosixPath(relative(dir, fullPath));
+		const ignorePath = entry.isDirectory() ? `${relPath}/` : relPath;
+		if (ig.ignores(ignorePath)) {
+			continue;
+		}
 		if (entry.isDirectory()) {
 			const resolvedEntries = resolveConventionalExtensionEntries(fullPath);
 			if (resolvedEntries) {
