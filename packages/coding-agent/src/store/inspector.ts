@@ -584,7 +584,10 @@ export function inspectPackageDirectory(
 ): StorePackageInspection {
 	const packageJsonPath = join(root, "package.json");
 	if (!existsSync(packageJsonPath)) {
-		return emptyInspection(source, [`No package.json found at ${root}.`, ...initialWarnings]);
+		return buildInspection(source, readPackageJsonData({}), root, [
+			`No package.json found at ${root}.`,
+			...initialWarnings,
+		]);
 	}
 	try {
 		const pkg = readPackageJsonFile(packageJsonPath);

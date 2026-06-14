@@ -50,6 +50,19 @@ describe("configured package actions", () => {
 		expect(settingsManager.getProjectSettings().packages).toEqual([]);
 	});
 
+	it("removes project-local packages using the settings-relative listed source", async () => {
+		const packageDir = join(tempDir, "pkg");
+		mkdirSync(packageDir, { recursive: true });
+
+		await packageManager.installAndPersist("./pkg", { local: true });
+
+		const [configured] = packageManager.listConfiguredPackages();
+		expect(configured).toBeDefined();
+		expect(configured.source).toBe(relative(join(tempDir, CONFIG_DIR_NAME), packageDir));
+		expect(packageManager.removeSourceFromSettings(configured.source, { local: true })).toBe(true);
+		expect(settingsManager.getProjectSettings().packages).toEqual([]);
+	});
+
 	it("updates settings-relative project-local package inputs in the selected scope", async () => {
 		const packageDir = join(tempDir, "pkg");
 		mkdirSync(packageDir, { recursive: true });

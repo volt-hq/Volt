@@ -52,14 +52,28 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	async function resolveRuntimeSkillResources(root: string): Promise<string[]> {
+	async function resolveRuntimeResources(root: string): Promise<{
+		extensions: string[];
+		skills: string[];
+		prompts: string[];
+		themes: string[];
+	}> {
 		const packageManager = new DefaultPackageManager({
 			cwd: tempDir,
 			agentDir: join(tempDir, "agent"),
 			settingsManager: SettingsManager.inMemory(),
 		});
 		const resolved = await packageManager.resolveExtensionSources([root]);
-		return resolved.skills.map((resource) => relative(root, resource.path).replace(/\\/g, "/")).sort();
+		return {
+			extensions: resolved.extensions.map((resource) => relative(root, resource.path).replace(/\\/g, "/")).sort(),
+			skills: resolved.skills.map((resource) => relative(root, resource.path).replace(/\\/g, "/")).sort(),
+			prompts: resolved.prompts.map((resource) => relative(root, resource.path).replace(/\\/g, "/")).sort(),
+			themes: resolved.themes.map((resource) => relative(root, resource.path).replace(/\\/g, "/")).sort(),
+		};
+	}
+
+	async function resolveRuntimeSkillResources(root: string): Promise<string[]> {
+		return (await resolveRuntimeResources(root)).skills;
 	}
 
 	it("reads package metadata and manifest resources without loading extension code", async () => {
@@ -207,6 +221,27 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 			"extensions/with-manifest/src/main.ts",
 		]);
 		expect(inspection.discoveredResources.skills).toEqual(["skills/helper/SKILL.md"]);
+	});
+
+	it("discovers conventional resources without package.json to match runtime loading", async () => {
+		const packageWithoutManifestDir = join(tempDir, "no-package-json");
+		mkdirSync(join(packageWithoutManifestDir, "extensions"), { recursive: true });
+		mkdirSync(join(packageWithoutManifestDir, "skills", "helper"), { recursive: true });
+		mkdirSync(join(packageWithoutManifestDir, "prompts"), { recursive: true });
+		mkdirSync(join(packageWithoutManifestDir, "themes"), { recursive: true });
+		writeFileSync(
+			join(packageWithoutManifestDir, "extensions", "index.ts"),
+			"export default function extension() {}\n",
+		);
+		writeFileSync(join(packageWithoutManifestDir, "skills", "helper", "SKILL.md"), "---\nname: helper\n---\n");
+		writeFileSync(join(packageWithoutManifestDir, "prompts", "summary.md"), "Summarize this.\n");
+		writeFileSync(join(packageWithoutManifestDir, "themes", "dark.json"), "{}\n");
+
+		const inspection = await inspectStorePackage({ source: packageWithoutManifestDir, cwd: tempDir });
+		const runtimeResources = await resolveRuntimeResources(packageWithoutManifestDir);
+
+		expect(inspection.warnings).toContain(`No package.json found at ${packageWithoutManifestDir}.`);
+		expect(inspection.discoveredResources).toEqual(runtimeResources);
 	});
 
 	it("builds and renders a plan with security, dependency, script, and compatibility details", async () => {

@@ -1448,15 +1448,18 @@ export class DefaultPackageManager implements PackageManager {
 		return "allow";
 	}
 
-	private getSourceMatchKeyForInput(source: string): string {
+	private getSourceMatchKeysForInput(source: string, scope: SourceScope): string[] {
 		const parsed = this.parseSource(source);
 		if (parsed.type === "npm") {
-			return `npm:${parsed.name}`;
+			return [`npm:${parsed.name}`];
 		}
 		if (parsed.type === "git") {
-			return `git:${parsed.host}/${parsed.path}`;
+			return [`git:${parsed.host}/${parsed.path}`];
 		}
-		return `local:${this.resolvePath(parsed.path)}`;
+		const keys = new Set<string>();
+		keys.add(`local:${this.resolvePath(parsed.path)}`);
+		keys.add(`local:${this.resolvePathFromBase(parsed.path, this.getBaseDirForScope(scope))}`);
+		return Array.from(keys);
 	}
 
 	private getSourceMatchKeyForSettings(source: string, scope: SourceScope): string {
@@ -1506,8 +1509,8 @@ export class DefaultPackageManager implements PackageManager {
 
 	private packageSourcesMatch(existing: PackageSource, inputSource: string, scope: SourceScope): boolean {
 		const left = this.getSourceMatchKeyForSettings(this.getPackageSourceString(existing), scope);
-		const right = this.getSourceMatchKeyForInput(inputSource);
-		return left === right;
+		const right = this.getSourceMatchKeysForInput(inputSource, scope);
+		return right.includes(left);
 	}
 
 	private normalizePackageSourceForSettings(source: string, scope: SourceScope): string {
