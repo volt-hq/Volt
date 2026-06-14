@@ -10,10 +10,6 @@ export function createIgnoreMatcher(): IgnoreMatcher {
 	return ignore();
 }
 
-function toPosixPath(path: string): string {
-	return path.split(sep).join("/");
-}
-
 function prefixIgnorePattern(line: string, prefix: string): string | null {
 	const trimmed = line.trim();
 	if (!trimmed) return null;
@@ -39,7 +35,7 @@ function prefixIgnorePattern(line: string, prefix: string): string | null {
 
 export function addIgnoreRules(ig: IgnoreMatcher, dir: string, rootDir: string): void {
 	const relativeDir = relative(rootDir, dir);
-	const prefix = relativeDir ? `${toPosixPath(relativeDir)}/` : "";
+	const prefix = relativeDir ? `${relativeDir.split(sep).join("/")}/` : "";
 
 	for (const filename of IGNORE_FILE_NAMES) {
 		const ignorePath = join(dir, filename);
