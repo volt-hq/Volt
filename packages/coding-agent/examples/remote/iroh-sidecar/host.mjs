@@ -1,10 +1,11 @@
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { basename, dirname, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import iroh from "@number0/iroh";
 import {
 	ALPN,
@@ -106,6 +107,93 @@ function selectWorkspace(state, requestedWorkspace, allowTools) {
 	return upsertWorkspace(state, parseWorkspace(undefined), allowTools);
 }
 
+async function assertWorkspaceDirectory(workspace) {
+	let workspaceStat;
+	try {
+		workspaceStat = await stat(workspace.path);
+	} catch (error) {
+		if (error && error.code === "ENOENT") {
+			throw new Error(`Workspace path does not exist: ${workspace.path}`);
+		}
+		throw error;
+	}
+	if (!workspaceStat.isDirectory()) {
+		throw new Error(`Workspace path is not a directory: ${workspace.path}`);
+	}
+}
+
+function getPlatformVoltBin(voltBin) {
+	return process.platform === "win32" && voltBin === "volt" ? "volt.cmd" : voltBin;
+}
+
+function isPathCommand(command) {
+	return isAbsolute(command) || command.includes("/") || command.includes("\\");
+}
+
+function getExecutableCandidates(command) {
+	if (process.platform !== "win32") return [command];
+
+	const lowerCommand = command.toLowerCase();
+	const extensions = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+		.split(";")
+		.map((extension) => extension.trim())
+		.filter((extension) => extension.length > 0);
+	if (extensions.some((extension) => lowerCommand.endsWith(extension.toLowerCase()))) {
+		return [command];
+	}
+	return [command, ...extensions.map((extension) => `${command}${extension}`)];
+}
+
+async function isExecutable(path) {
+	try {
+		await access(path, constants.X_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function findExecutable(command) {
+	const candidates = getExecutableCandidates(command);
+	if (isPathCommand(command)) {
+		for (const candidate of candidates) {
+			const candidatePath = isAbsolute(candidate) ? candidate : resolve(candidate);
+			if (await isExecutable(candidatePath)) return candidatePath;
+		}
+		return undefined;
+	}
+
+	const pathEntries = (process.env.PATH ?? "").split(delimiter).filter((entry) => entry.length > 0);
+	for (const pathEntry of pathEntries) {
+		for (const candidate of candidates) {
+			const candidatePath = join(pathEntry, candidate);
+			if (await isExecutable(candidatePath)) return candidatePath;
+		}
+	}
+	return undefined;
+}
+
+function sourceCheckoutVoltBinHint(workspace) {
+	if (process.platform === "win32") {
+		return "If testing a source checkout on Windows, run from an environment that can execute volt-test.sh or pass a built volt.cmd path.";
+	}
+	return `If testing a source checkout, pass --volt-bin ${resolve(workspace.path, "volt-test.sh")}.`;
+}
+
+async function preflightRpcChild(options, workspace) {
+	await assertWorkspaceDirectory(workspace);
+	if (!options.useVolt) return;
+
+	const voltBin = getPlatformVoltBin(options.voltBin);
+	const resolvedVoltBin = await findExecutable(voltBin);
+	if (!resolvedVoltBin) {
+		throw new Error(
+			`Volt executable is not available: ${voltBin}. Install Volt globally or pass --volt-bin <path>. ${sourceCheckoutVoltBinHint(workspace)}`,
+		);
+	}
+	options.resolvedVoltBin = resolvedVoltBin;
+}
+
 async function bindEndpoint(relayMode, state, statePath) {
 	const builder = Endpoint.builder();
 	if (relayMode === "default") {
@@ -132,22 +220,56 @@ async function bindEndpoint(relayMode, state, statePath) {
 function spawnRpcChild(options, workspace, allowTools) {
 	if (!options.useVolt) {
 		const fakeRpcPath = fileURLToPath(new URL("./fake-rpc.mjs", import.meta.url));
-		return spawn(process.execPath, [fakeRpcPath], {
-			cwd: workspace.path,
-			stdio: ["pipe", "pipe", "pipe"],
-		});
+		return {
+			command: process.execPath,
+			args: [fakeRpcPath],
+			child: spawn(process.execPath, [fakeRpcPath], {
+				cwd: workspace.path,
+				stdio: ["pipe", "pipe", "pipe"],
+			}),
+		};
 	}
 
-	const voltBin = process.platform === "win32" && options.voltBin === "volt" ? "volt.cmd" : options.voltBin;
+	const voltBin = options.resolvedVoltBin ?? getPlatformVoltBin(options.voltBin);
 	const args = ["--mode", "rpc"];
 	if (allowTools) args.push("--tools", allowTools);
-	return spawn(voltBin, args, {
-		cwd: workspace.path,
-		stdio: ["pipe", "pipe", "pipe"],
+	return {
+		command: voltBin,
+		args,
+		child: spawn(voltBin, args, {
+			cwd: workspace.path,
+			stdio: ["pipe", "pipe", "pipe"],
+		}),
+	};
+}
+
+function formatCommand(command, args) {
+	return [command, ...args].join(" ");
+}
+
+async function waitForChildSpawn(child, commandText, workspace) {
+	await new Promise((resolveSpawn, rejectSpawn) => {
+		const cleanup = () => {
+			child.off("spawn", handleSpawn);
+			child.off("error", handleError);
+		};
+		const handleSpawn = () => {
+			cleanup();
+			resolveSpawn();
+		};
+		const handleError = (error) => {
+			cleanup();
+			rejectSpawn(
+				new Error(`Failed to spawn RPC child (${commandText}) in ${workspace.path}: ${error.message}`),
+			);
+		};
+		child.once("spawn", handleSpawn);
+		child.once("error", handleError);
 	});
 }
 
 function attachChildLogging(child) {
+	if (!child.stderr) return;
 	child.stderr.setEncoding("utf8");
 	child.stderr.on("data", (chunk) => {
 		for (const line of chunk.split("\n")) {
@@ -242,6 +364,17 @@ async function handleConnection(incoming, options, state) {
 			return;
 		}
 
+		const spawnedChild = spawnRpcChild(options, authorization.workspace, authorization.allowTools);
+		child = spawnedChild.child;
+		const childCommand = formatCommand(spawnedChild.command, spawnedChild.args);
+		attachChildLogging(child);
+		try {
+			await waitForChildSpawn(child, childCommand, authorization.workspace);
+		} catch (error) {
+			await sendHandshakeError(stream.send, error instanceof Error ? error.message : String(error));
+			return;
+		}
+
 		await stream.send.writeAll(
 			toBytes(
 				serializeJsonLine({
@@ -254,9 +387,6 @@ async function handleConnection(incoming, options, state) {
 			),
 		);
 
-		child = spawnRpcChild(options, authorization.workspace, authorization.allowTools);
-		attachChildLogging(child);
-
 		const clientToChild = pipeIrohRecvToNodeWritable(stream.recv, child.stdin, handshake.rest).catch((error) => {
 			if (!child.killed) child.kill();
 			throw error;
@@ -265,8 +395,13 @@ async function handleConnection(incoming, options, state) {
 		const childExit = new Promise((resolveChildExit) => {
 			child.once("exit", (code, signal) => resolveChildExit({ code, signal }));
 		});
+		const childError = new Promise((_, rejectChildError) => {
+			child.once("error", (error) => {
+				rejectChildError(new Error(`RPC child error (${childCommand}): ${error.message}`));
+			});
+		});
 
-		await Promise.race([clientToChild, childToClient, childExit]);
+		await Promise.race([clientToChild, childToClient, childExit, childError]);
 	} finally {
 		if (child && !child.killed) child.kill();
 		connection.close(0n, Array.from(Buffer.from("done", "utf8")));
@@ -291,7 +426,6 @@ async function serve(flags) {
 	const state = await readState(statePath);
 	const allowTools = getFlag(flags, "allow-tools", DEFAULT_ALLOW_TOOLS);
 	const workspace = selectWorkspace(state, getFlag(flags, "workspace"), allowTools);
-	await writeState(statePath, state);
 
 	const relayMode = getFlag(flags, "relay", "disabled");
 	if (relayMode !== "disabled" && relayMode !== "default") {
@@ -309,6 +443,8 @@ async function serve(flags) {
 		voltBin: getFlag(flags, "volt-bin", "volt"),
 		workspace,
 	};
+	await preflightRpcChild(options, workspace);
+	await writeState(statePath, state);
 
 	const endpoint = await bindEndpoint(relayMode, state, statePath);
 	const ticket = encodeTicketPayload(createTicketPayload(endpoint, options, pairingEnabled));
@@ -316,7 +452,9 @@ async function serve(flags) {
 	console.error(`host id: ${endpoint.id().toString()}`);
 	console.error(`state: ${statePath}`);
 	console.error(`workspace: ${workspace.name} -> ${workspace.path}`);
-	console.error(`child: ${options.useVolt ? "volt --mode rpc" : "fake-rpc"}`);
+	console.error(
+		`child: ${options.useVolt ? `${options.resolvedVoltBin ?? getPlatformVoltBin(options.voltBin)} --mode rpc` : "fake-rpc"}`,
+	);
 	console.error(`pairing: ${pairingEnabled ? "enabled" : "disabled"}`);
 	console.error(pairingEnabled ? "pairing ticket:" : "paired-client ticket:");
 	console.log(ticket);

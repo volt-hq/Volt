@@ -74,13 +74,14 @@ volt-iroh-host serve --workspace volt=C:\Users\Jordan\source\repos\Volt
 The host process:
 
 1. Creates or loads a persistent Iroh endpoint key from `~/.volt/agent/remote/iroh-host.key`.
-2. Starts an Iroh endpoint using the default relay/discovery configuration.
-3. Prints a pairing ticket as text and QR payload.
-4. Waits for one client connection.
-5. Validates the pairing secret.
-6. Spawns `volt --mode rpc --session-dir <host-session-dir>` in the selected workspace.
-7. Pipes Iroh stream bytes to child stdin and child stdout bytes back to the Iroh stream.
-8. Logs child stderr and sidecar diagnostics to `~/.volt/agent/remote/iroh-host.log`.
+2. Validates the selected workspace path and child RPC executable before printing a ticket.
+3. Starts an Iroh endpoint using the default relay/discovery configuration.
+4. Prints a pairing ticket as text and QR payload.
+5. Waits for one client connection.
+6. Validates the pairing secret.
+7. Spawns `volt --mode rpc --session-dir <host-session-dir>` in the selected workspace.
+8. Pipes Iroh stream bytes to child stdin and child stdout bytes back to the Iroh stream.
+9. Logs child stderr and sidecar diagnostics to `~/.volt/agent/remote/iroh-host.log`.
 
 ### Client command
 
@@ -261,6 +262,7 @@ Proof-of-concept validation:
 - Verify extension UI requests can round-trip through the client.
 - Verify child process exits when the Iroh stream closes.
 - Verify unpaired clients are rejected.
+- Verify a missing workspace path or Volt executable fails before printing a pairing ticket.
 - Verify a client cannot request a workspace outside the host allowlist.
 
 Automated tests for a monorepo version:

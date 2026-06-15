@@ -71,7 +71,13 @@ In `--no-pairing` mode, the printed ticket contains no pairing secret. Only clie
 
 ## Test with real Volt RPC
 
-Terminal 1:
+Terminal 1, when testing from a source checkout:
+
+```bash
+npm run host -- --use-volt --volt-bin /path/to/volt/volt-test.sh --workspace volt=/path/to/volt --allow-tools read,grep,find,ls
+```
+
+Terminal 1, when `volt` is globally installed on the host `PATH`:
 
 ```bash
 npm run host -- --use-volt --workspace volt=/path/to/repo --allow-tools read,grep,find,ls
@@ -84,13 +90,7 @@ npm run client -- "<ticket>" --get-state
 npm run client -- "<ticket>" --message "List the top-level files."
 ```
 
-Use a source checkout binary if `volt` is not globally installed:
-
-```bash
-npm run host -- --use-volt --volt-bin /path/to/volt/volt-test.sh --workspace volt=/path/to/repo
-```
-
-On Windows, a global install normally resolves through `volt.cmd` automatically when `--volt-bin` is omitted.
+Add `--relay default` to the host command when testing across networks; the ticket carries the relay mode to the client. On Windows, a global install normally resolves through `volt.cmd` automatically when `--volt-bin` is omitted.
 
 ## Relay mode
 
