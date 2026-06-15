@@ -189,6 +189,7 @@ Content`,
 			process.env.HOME = tempDir;
 
 			try {
+				mkdirSync(join(tempDir, ".git"), { recursive: true });
 				const sharedDir = join(tempDir, "shared-resources");
 				const sharedExtensionsDir = join(sharedDir, "extensions");
 				const sharedSkillsDir = join(sharedDir, "skills");
@@ -2408,20 +2409,14 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			);
 		});
 
-		it("should run package commands through captured stdio", async () => {
+		it("should run package commands through inherited stdio", async () => {
 			const managerWithInternals = packageManager as unknown as PackageManagerInternals & {
-				spawnCaptureCommand(
-					command: string,
-					args: string[],
-					options?: { cwd?: string; env?: Record<string, string> },
-				): MockSpawnedProcess;
+				spawnCommand(command: string, args: string[], options?: { cwd?: string }): MockSpawnedProcess;
 			};
 			const child = new MockSpawnedProcess();
-			const spawnSpy = vi.spyOn(managerWithInternals, "spawnCaptureCommand").mockReturnValue(child);
+			const spawnSpy = vi.spyOn(managerWithInternals, "spawnCommand").mockReturnValue(child);
 
 			const commandPromise = managerWithInternals.runCommand("git", ["clone", "repo", "dest"]);
-			child.stdout.write("stdout that should not be inherited\n");
-			child.stderr.write("stderr that should not be inherited\n");
 			child.emit("close", 0, null);
 
 			await expect(commandPromise).resolves.toBeUndefined();

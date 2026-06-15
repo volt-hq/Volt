@@ -1,4 +1,4 @@
-import type { ChildProcessByStdio } from "node:child_process";
+import type { ChildProcess, ChildProcessByStdio } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -13,6 +13,7 @@ import { addIgnoreRules, createIgnoreMatcher, type IgnoreMatcher } from "../util
 import { getNpmUpdateSpec, parseNpmSpec } from "../utils/npm-spec.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
 import { getSubprocessEnv } from "../utils/process-env.ts";
+import { isStdoutTakenOver } from "./output-guard.ts";
 import type { PackageSource, SettingsManager } from "./settings-manager.ts";
 
 const NETWORK_TIMEOUT_MS = 10000;
@@ -2563,6 +2564,15 @@ export class DefaultPackageManager implements PackageManager {
 		};
 	}
 
+	private spawnCommand(command: string, args: string[], options?: { cwd?: string }): ChildProcess {
+		const env = getSubprocessEnv();
+		return spawnProcess(command, args, {
+			cwd: options?.cwd,
+			stdio: isStdoutTakenOver() ? ["ignore", 2, 2] : "inherit",
+			env,
+		});
+	}
+
 	private spawnCaptureCommand(
 		command: string,
 		args: string[],
@@ -2622,23 +2632,13 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private async runCommand(command: string, args: string[], options?: { cwd?: string }): Promise<void> {
-		const child = this.spawnCaptureCommand(command, args, options);
-		let stdout = "";
-		let stderr = "";
-
-		child.stdout?.on("data", (data) => {
-			stdout += data.toString();
-		});
-		child.stderr?.on("data", (data) => {
-			stderr += data.toString();
-		});
-
+		const child = this.spawnCommand(command, args, options);
 		const code = await waitForChildProcess(child);
 		if (code === 0) {
 			return;
 		}
 		const exitStatus = code === null ? `signal ${child.signalCode ?? "unknown"}` : `code ${code}`;
-		throw new Error(`${command} ${args.join(" ")} failed with ${exitStatus}: ${stderr || stdout}`);
+		throw new Error(`${command} ${args.join(" ")} failed with ${exitStatus}`);
 	}
 
 	private runCommandSync(command: string, args: string[]): string {
