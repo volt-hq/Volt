@@ -1,17 +1,32 @@
 {
-	"name": "volt-rtk-extension",
+	"name": "volt-azure-devops",
 	"version": "0.1.0",
-	"description": "Rewrite bash tool calls through RTK for token-optimized command output.",
+	"description": "Azure DevOps integration tools for Volt.",
 	"type": "module",
-	"keywords": [
-		"volt-package",
-		"volt-extension",
-		"rtk"
-	],
+	"keywords": ["volt-package", "volt-extension", "volt", "azure-devops", "ado"],
 	"license": "MIT",
+	"files": ["README.md", "extensions"],
 	"volt": {
-		"extensions": [
-			"extensions/rtk.ts"
-		]
+		"extensions": ["extensions/azure-devops.ts"]
+	},
+	"dependencies": {
+		"@azure/identity": "4.13.1",
+		"azure-devops-node-api": "15.1.2"
+	},
+	"peerDependencies": {
+		"@earendil-works/volt-ai": "*",
+		"@earendil-works/volt-coding-agent": "*",
+		"typebox": "*"
+	},
+	"peerDependenciesMeta": {
+		"@earendil-works/volt-ai": {
+			"optional": true
+		},
+		"@earendil-works/volt-coding-agent": {
+			"optional": true
+		},
+		"typebox": {
+			"optional": true
+		}
 	}
 }
