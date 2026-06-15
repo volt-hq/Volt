@@ -283,6 +283,15 @@ async function sendHandshakeError(send, message) {
 	await send.finish();
 }
 
+function isExpectedDoneClose(error) {
+	const message = error instanceof Error ? error.message : String(error);
+	return (
+		message.includes("ConnectionLost(ApplicationClosed") &&
+		message.includes("error_code: 0") &&
+		message.includes('reason: b"done"')
+	);
+}
+
 function findClient(state, nodeId) {
 	return state.clients.find((client) => client.nodeId === nodeId);
 }
@@ -463,7 +472,9 @@ async function serve(flags) {
 		const incoming = await endpoint.acceptNext();
 		if (!incoming) break;
 		await handleConnection(incoming, options, state).catch((error) => {
-			console.error(error instanceof Error ? error.stack : String(error));
+			if (!isExpectedDoneClose(error)) {
+				console.error(error instanceof Error ? error.stack : String(error));
+			}
 		});
 		if (options.once) break;
 	}
