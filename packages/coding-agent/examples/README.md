@@ -18,6 +18,9 @@ Example extensions demonstrating:
 - External integrations (SSH, file watchers, system theme sync)
 - Custom providers (Anthropic with custom streaming, GitLab Duo)
 
+### [remote/iroh-sidecar/](remote/iroh-sidecar/)
+Proof of concept for tunneling Volt RPC JSONL over Iroh without adding Iroh to Volt's default install path.
+
 ## Documentation
 
 - [SDK Reference](sdk/README.md)
