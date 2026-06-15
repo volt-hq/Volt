@@ -4,6 +4,10 @@
 
 - When Amazon Bedrock rejects an unsupported data retention mode, the error now links the AWS data retention documentation ([#5561](https://github.com/earendil-works/pi/pull/5561) by [@unexge](https://github.com/unexge)).
 
+### Changed
+
+- Changed package builds to use the checked-in generated model catalogs; run `npm run refresh-models` in `packages/ai` to intentionally refresh live model metadata.
+
 ### Fixed
 
 - Increased the OpenAI Codex Responses SSE response-header timeout to 20 seconds to reduce false-positive stalls while retaining the bounded wait introduced for zero-event hangs ([#4945](https://github.com/earendil-works/pi/issues/4945)).

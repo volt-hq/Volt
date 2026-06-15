@@ -12312,7 +12312,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 262144,
+			maxTokens: 81920,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3.5-397b-a17b": {
 			id: "qwen/qwen3.5-397b-a17b",
@@ -15043,6 +15043,23 @@ export const MODELS = {
 			},
 			contextWindow: 256000,
 			maxTokens: 32768,
+		} satisfies Model<"anthropic-messages">,
+		"moonshotai/kimi-k2.7-code-highspeed": {
+			id: "moonshotai/kimi-k2.7-code-highspeed",
+			name: "Kimi K2.7 Code High Speed",
+			api: "anthropic-messages",
+			provider: "vercel-ai-gateway",
+			baseUrl: "https://ai-gateway.vercel.sh",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 1.9,
+				output: 8,
+				cacheRead: 0.38,
+				cacheWrite: 0,
+			},
+			contextWindow: 262144,
+			maxTokens: 4096,
 		} satisfies Model<"anthropic-messages">,
 		"nvidia/nemotron-3-super-120b-a12b": {
 			id: "nvidia/nemotron-3-super-120b-a12b",
