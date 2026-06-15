@@ -17,6 +17,24 @@
 			"resources": [
 				"extensions"
 			]
+		},
+		{
+			"id": "terminal-bench-harbor",
+			"name": "Terminal-Bench Harbor",
+			"description": "Runs Volt on Terminal-Bench through Harbor.",
+			"source": "git:https://github.com/hansjm10/Volt@d89e4bbf627ae6fb2ddaff54b3293857fac23d71",
+			"repo": "https://github.com/hansjm10/Volt/tree/store/terminal-bench-harbor",
+			"author": "Volt",
+			"license": "MIT",
+			"verified": true,
+			"categories": [
+				"benchmark",
+				"harbor",
+				"terminal-bench"
+			],
+			"resources": [
+				"extensions"
+			]
 		}
 	]
 }
