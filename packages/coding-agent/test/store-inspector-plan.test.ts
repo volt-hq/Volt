@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -221,6 +221,41 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 			"extensions/with-manifest/src/main.ts",
 		]);
 		expect(inspection.discoveredResources.skills).toEqual(["skills/helper/SKILL.md"]);
+	});
+
+	it("discovers symlinked conventional extension resources to match runtime loading", async () => {
+		const symlinkPackageDir = join(tempDir, "symlinked-resources");
+		const targetDir = join(tempDir, "symlink-targets");
+		mkdirSync(join(symlinkPackageDir, "extensions"), { recursive: true });
+		mkdirSync(join(targetDir, "extension-dir"), { recursive: true });
+		writeFileSync(join(symlinkPackageDir, "package.json"), JSON.stringify({ name: "symlinked-resources" }, null, 2));
+		writeFileSync(join(targetDir, "real.ts"), "export default function real() {}\n");
+		writeFileSync(join(targetDir, "extension-dir", "index.ts"), "export default function indexed() {}\n");
+		symlinkSync(join(targetDir, "real.ts"), join(symlinkPackageDir, "extensions", "link.ts"));
+		symlinkSync(join(targetDir, "extension-dir"), join(symlinkPackageDir, "extensions", "linked-dir"), "dir");
+
+		const inspection = await inspectStorePackage({ source: symlinkPackageDir, cwd: tempDir });
+		const runtimeResources = await resolveRuntimeResources(symlinkPackageDir);
+
+		expect(inspection.discoveredResources.extensions.sort()).toEqual(runtimeResources.extensions);
+		expect(inspection.discoveredResources.extensions.sort()).toEqual([
+			"extensions/link.ts",
+			"extensions/linked-dir/index.ts",
+		]);
+	});
+
+	it("discovers conventional resources after package metadata parse failures to match runtime loading", async () => {
+		const malformedPackageDir = join(tempDir, "malformed-package-json");
+		mkdirSync(join(malformedPackageDir, "extensions"), { recursive: true });
+		writeFileSync(join(malformedPackageDir, "package.json"), "{ invalid json");
+		writeFileSync(join(malformedPackageDir, "extensions", "ext.ts"), "export default function extension() {}\n");
+
+		const inspection = await inspectStorePackage({ source: malformedPackageDir, cwd: tempDir });
+		const runtimeResources = await resolveRuntimeResources(malformedPackageDir);
+
+		expect(inspection.warnings[0]).toContain("Failed to read package metadata:");
+		expect(inspection.discoveredResources).toEqual(runtimeResources);
+		expect(inspection.discoveredResources.extensions).toEqual(["extensions/ext.ts"]);
 	});
 
 	it("preserves empty volt manifests during inspection to match runtime loading", async () => {

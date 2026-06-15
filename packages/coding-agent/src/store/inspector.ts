@@ -1,5 +1,5 @@
 import type { ChildProcessByStdio } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, type Stats, statSync } from "node:fs";
+import { type Dirent, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, type Stats, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
@@ -176,18 +176,6 @@ function readPackageJsonFile(packageJsonPath: string): PackageJsonData {
 	return readPackageJsonData(parsed);
 }
 
-function emptyInspection(source: string, warnings: string[]): StorePackageInspection {
-	return {
-		source,
-		discoveredResources: structuredClone(EMPTY_RESOURCES),
-		dependencies: {},
-		peerDependencies: {},
-		optionalDependencies: {},
-		scripts: {},
-		warnings,
-	};
-}
-
 function isDirectory(path: string): boolean {
 	try {
 		return statSync(path).isDirectory();
@@ -204,6 +192,17 @@ function statIfExists(path: string): Stats | undefined {
 	}
 }
 
+function getDirentKind(entry: Dirent, fullPath: string): { isDirectory: boolean; isFile: boolean } | undefined {
+	if (!entry.isSymbolicLink()) {
+		return { isDirectory: entry.isDirectory(), isFile: entry.isFile() };
+	}
+	const stats = statIfExists(fullPath);
+	if (!stats) {
+		return undefined;
+	}
+	return { isDirectory: stats.isDirectory(), isFile: stats.isFile() };
+}
+
 function collectSkillResourceFiles(dir: string, root = dir, ignoreMatcher?: IgnoreMatcher): string[] {
 	if (!existsSync(dir)) {
 		return [];
@@ -214,8 +213,12 @@ function collectSkillResourceFiles(dir: string, root = dir, ignoreMatcher?: Igno
 	const entries = readdirSync(dir, { withFileTypes: true });
 	for (const entry of entries) {
 		const fullPath = join(dir, entry.name);
+		const kind = getDirentKind(entry, fullPath);
+		if (!kind) {
+			continue;
+		}
 		const relPath = toPosixPath(relative(root, fullPath));
-		if (entry.name === "SKILL.md" && entry.isFile() && !ig.ignores(relPath)) {
+		if (entry.name === "SKILL.md" && kind.isFile && !ig.ignores(relPath)) {
 			return [fullPath];
 		}
 	}
@@ -226,13 +229,17 @@ function collectSkillResourceFiles(dir: string, root = dir, ignoreMatcher?: Igno
 			continue;
 		}
 		const fullPath = join(dir, entry.name);
+		const kind = getDirentKind(entry, fullPath);
+		if (!kind) {
+			continue;
+		}
 		const relPath = toPosixPath(relative(root, fullPath));
-		if (entry.isDirectory()) {
+		if (kind.isDirectory) {
 			if (ig.ignores(`${relPath}/`)) {
 				continue;
 			}
 			files.push(...collectSkillResourceFiles(fullPath, root, ig));
-		} else if (dir === root && entry.isFile() && FILE_PATTERNS.skills.test(entry.name) && !ig.ignores(relPath)) {
+		} else if (dir === root && kind.isFile && FILE_PATTERNS.skills.test(entry.name) && !ig.ignores(relPath)) {
 			files.push(fullPath);
 		}
 	}
@@ -263,14 +270,18 @@ function collectResourceFiles(
 			continue;
 		}
 		const fullPath = join(dir, entry.name);
+		const kind = getDirentKind(entry, fullPath);
+		if (!kind) {
+			continue;
+		}
 		const relPath = toPosixPath(relative(root, fullPath));
-		const ignorePath = entry.isDirectory() ? `${relPath}/` : relPath;
+		const ignorePath = kind.isDirectory ? `${relPath}/` : relPath;
 		if (ig.ignores(ignorePath)) {
 			continue;
 		}
-		if (entry.isDirectory()) {
+		if (kind.isDirectory) {
 			files.push(...collectResourceFiles(fullPath, resourceType, root, ig));
-		} else if (entry.isFile() && FILE_PATTERNS[resourceType].test(entry.name)) {
+		} else if (kind.isFile && FILE_PATTERNS[resourceType].test(entry.name)) {
 			files.push(fullPath);
 		}
 	}
@@ -326,17 +337,21 @@ function collectConventionalExtensionFiles(dir: string): string[] {
 			continue;
 		}
 		const fullPath = join(dir, entry.name);
+		const kind = getDirentKind(entry, fullPath);
+		if (!kind) {
+			continue;
+		}
 		const relPath = toPosixPath(relative(dir, fullPath));
-		const ignorePath = entry.isDirectory() ? `${relPath}/` : relPath;
+		const ignorePath = kind.isDirectory ? `${relPath}/` : relPath;
 		if (ig.ignores(ignorePath)) {
 			continue;
 		}
-		if (entry.isDirectory()) {
+		if (kind.isDirectory) {
 			const resolvedEntries = resolveConventionalExtensionEntries(fullPath);
 			if (resolvedEntries) {
 				files.push(...resolvedEntries);
 			}
-		} else if (entry.isFile() && FILE_PATTERNS.extensions.test(entry.name)) {
+		} else if (kind.isFile && FILE_PATTERNS.extensions.test(entry.name)) {
 			files.push(fullPath);
 		}
 	}
@@ -622,7 +637,10 @@ export function inspectPackageDirectory(
 		return buildInspection(source, pkg, root, initialWarnings);
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : String(error);
-		return emptyInspection(source, [`Failed to read package metadata: ${message}`, ...initialWarnings]);
+		return buildInspection(source, readPackageJsonData({}), root, [
+			`Failed to read package metadata: ${message}`,
+			...initialWarnings,
+		]);
 	}
 }
 
