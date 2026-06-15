@@ -281,6 +281,26 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		expect(inspection.discoveredResources.skills).toEqual([]);
 	});
 
+	it("treats truthy non-object volt manifests as manifest-present to match runtime loading", async () => {
+		const invalidManifestPackageDir = join(tempDir, "invalid-manifest");
+		mkdirSync(join(invalidManifestPackageDir, "extensions"), { recursive: true });
+		writeFileSync(
+			join(invalidManifestPackageDir, "package.json"),
+			JSON.stringify({ name: "invalid-manifest", volt: [] }, null, 2),
+		);
+		writeFileSync(
+			join(invalidManifestPackageDir, "extensions", "ext.ts"),
+			"export default function extension() {}\n",
+		);
+
+		const inspection = await inspectStorePackage({ source: invalidManifestPackageDir, cwd: tempDir });
+		const runtimeResources = await resolveRuntimeResources(invalidManifestPackageDir);
+
+		expect(runtimeResources.extensions).toEqual([]);
+		expect(inspection.voltManifest).toEqual({});
+		expect(inspection.discoveredResources).toEqual(runtimeResources);
+	});
+
 	it("discovers conventional resources without package.json to match runtime loading", async () => {
 		const packageWithoutManifestDir = join(tempDir, "no-package-json");
 		mkdirSync(join(packageWithoutManifestDir, "extensions"), { recursive: true });

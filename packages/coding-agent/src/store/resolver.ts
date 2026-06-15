@@ -6,6 +6,7 @@ import type { GitSource } from "../utils/git.ts";
 import { parseGitUrl } from "../utils/git.ts";
 import { type ParsedNpmSpec, parseNpmSpec } from "../utils/npm-spec.ts";
 import { isLocalPath } from "../utils/paths.ts";
+import { getSubprocessEnv } from "../utils/process-env.ts";
 import {
 	findCatalogPackage,
 	type StoreCatalog,
@@ -101,7 +102,7 @@ function runGitLsRemote(repo: string, ref: string): Promise<string> {
 	return new Promise((resolvePromise, reject) => {
 		const child = spawnProcess("git", ["ls-remote", repo, ref], {
 			stdio: ["ignore", "pipe", "pipe"],
-			env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+			env: { ...getSubprocessEnv(), GIT_TERMINAL_PROMPT: "0" },
 		}) as ChildProcessByStdio<null, Readable, Readable>;
 		let stdout = "";
 		let stderr = "";

@@ -2,26 +2,6 @@ import type { ChildProcessByStdio } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-
-function getEnv(): NodeJS.ProcessEnv {
-	if (process.platform !== "linux" || Object.keys(process.env).length > 0) {
-		return process.env;
-	}
-	try {
-		const data = readFileSync("/proc/self/environ", "utf-8");
-		const env: NodeJS.ProcessEnv = {};
-		for (const entry of data.split("\0")) {
-			const idx = entry.indexOf("=");
-			if (idx > 0) {
-				env[entry.slice(0, idx)] = entry.slice(idx + 1);
-			}
-		}
-		return env;
-	} catch {
-		return process.env;
-	}
-}
-
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
 import { globSync } from "glob";
@@ -32,6 +12,7 @@ import { type GitSource, parseGitUrl } from "../utils/git.ts";
 import { addIgnoreRules, createIgnoreMatcher, type IgnoreMatcher } from "../utils/ignore-files.ts";
 import { getNpmUpdateSpec, parseNpmSpec } from "../utils/npm-spec.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
+import { getSubprocessEnv } from "../utils/process-env.ts";
 import type { PackageSource, SettingsManager } from "./settings-manager.ts";
 
 const NETWORK_TIMEOUT_MS = 10000;
@@ -2587,7 +2568,7 @@ export class DefaultPackageManager implements PackageManager {
 		args: string[],
 		options?: { cwd?: string; env?: Record<string, string> },
 	): ChildProcessByStdio<null, Readable, Readable> {
-		const baseEnv = getEnv();
+		const baseEnv = getSubprocessEnv();
 		const env = options?.env ? { ...baseEnv, ...options.env } : baseEnv;
 		return spawnProcess(command, args, {
 			cwd: options?.cwd,
@@ -2661,7 +2642,7 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private runCommandSync(command: string, args: string[]): string {
-		const env = getEnv();
+		const env = getSubprocessEnv();
 		const result = spawnProcessSync(command, args, {
 			stdio: ["ignore", "pipe", "pipe"],
 			encoding: "utf-8",

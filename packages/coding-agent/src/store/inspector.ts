@@ -9,6 +9,7 @@ import { spawnProcess } from "../utils/child-process.ts";
 import { parseGitUrl } from "../utils/git.ts";
 import { addIgnoreRules, createIgnoreMatcher, type IgnoreMatcher } from "../utils/ignore-files.ts";
 import { resolvePath } from "../utils/paths.ts";
+import { getSubprocessEnv } from "../utils/process-env.ts";
 import type { StoreResourceType } from "./catalog.ts";
 
 export interface StoreVoltManifest {
@@ -129,8 +130,11 @@ function readLicense(value: unknown): string | undefined {
 }
 
 function readVoltManifest(value: unknown): StoreVoltManifest | undefined {
-	if (!isRecord(value)) {
+	if (!value) {
 		return undefined;
+	}
+	if (!isRecord(value)) {
+		return {};
 	}
 	const manifest: StoreVoltManifest = {};
 	const extensions = readStringArray(value.extensions);
@@ -543,10 +547,11 @@ function getNpmCommand(npmCommand?: string[]): { command: string; args: string[]
 
 function runCommandCapture(command: string, args: string[], options: CommandCaptureOptions = {}): Promise<string> {
 	return new Promise((resolvePromise, reject) => {
+		const baseEnv = getSubprocessEnv();
 		const child = spawnProcess(command, args, {
 			cwd: options.cwd,
 			stdio: ["ignore", "pipe", "pipe"],
-			env: options.env ? { ...process.env, ...options.env } : process.env,
+			env: options.env ? { ...baseEnv, ...options.env } : baseEnv,
 		}) as ChildProcessByStdio<null, Readable, Readable>;
 		let stdout = "";
 		let stderr = "";
