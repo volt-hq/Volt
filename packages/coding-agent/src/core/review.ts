@@ -298,6 +298,31 @@ export interface RecentCommit {
 	date: string;
 }
 
+function prioritizeBaseBranches(branches: string[]): string[] {
+	const priority = new Map([
+		["main", 0],
+		["master", 1],
+	]);
+	return [...branches].sort((a, b) => {
+		const aPriority = priority.get(a) ?? 2;
+		const bPriority = priority.get(b) ?? 2;
+		return aPriority === bPriority ? a.localeCompare(b) : aPriority - bPriority;
+	});
+}
+
+/** List local branches for the /review base-branch picker. */
+export async function listLocalBranches(cwd: string): Promise<string[] | { error: string }> {
+	const result = await runCommand("git", ["for-each-ref", "--format=%(refname:short)", "refs/heads"], cwd);
+	if (!result.ok) {
+		return { error: `git branch failed: ${result.stderr.trim()}` };
+	}
+	const branches = result.stdout
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean);
+	return prioritizeBaseBranches(branches);
+}
+
 /** List recent commits on HEAD for the /review commit picker. */
 export async function listRecentCommits(cwd: string, limit = 30): Promise<RecentCommit[] | { error: string }> {
 	const result = await runCommand("git", ["log", "-n", String(limit), "--pretty=format:%h%x09%cr%x09%s"], cwd);

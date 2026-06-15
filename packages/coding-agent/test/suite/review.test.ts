@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	buildReviewPrompt,
 	formatReviewForNewSession,
+	listLocalBranches,
 	listRecentCommits,
 	MAX_REVIEW_DIFF_CHARS,
 	parseReviewCommandArgs,
@@ -387,6 +388,20 @@ describe("resolveReviewTarget", () => {
 		const repo = createRepo();
 		const result = await resolveReviewTarget({ kind: "commit" }, repo);
 		expect(result).toEqual({ error: "Missing commit SHA." });
+	});
+
+	it("lists local branches with main and master first for the base picker", async () => {
+		const repo = createRepo();
+		git(repo, "checkout", "-b", "zeta");
+		git(repo, "checkout", "main");
+		git(repo, "checkout", "-b", "master");
+		git(repo, "checkout", "main");
+		git(repo, "checkout", "-b", "alpha");
+		const branches = await listLocalBranches(repo);
+		if ("error" in branches) {
+			throw new Error(branches.error);
+		}
+		expect(branches).toEqual(["main", "master", "alpha", "zeta"]);
 	});
 
 	it("lists recent commits for the picker", async () => {
