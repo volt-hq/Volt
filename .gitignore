@@ -42,3 +42,4 @@ collect.sh
 # Volt local state
 .volt/designs/
 .volt/design/
+/jobs/
