@@ -88,6 +88,7 @@ function getHarborArgs(model: string, extraArgs: string[] = []): string[] {
 		"--jobs-dir",
 		getJobsDir(),
 		...getInheritedAgentKwargs().flatMap((arg) => ["--agent-kwarg", arg]),
+		"--yes",
 		...extraArgs,
 	];
 }
@@ -193,7 +194,7 @@ export default function terminalBenchHarbor(volt: ExtensionAPI) {
 			}
 
 			if (action === "oracle") {
-				await runTbenchCommand(volt, ctx, ["run", "-d", DATASET, "-a", "oracle", "--jobs-dir", getJobsDir(), "-l", "1", "-n", "1", ...rest], 3_600_000);
+				await runTbenchCommand(volt, ctx, ["run", "-d", DATASET, "-a", "oracle", "--jobs-dir", getJobsDir(), "-l", "1", "-n", "1", "--yes", ...rest], 3_600_000);
 				return;
 			}
 
