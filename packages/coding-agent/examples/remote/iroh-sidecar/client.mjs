@@ -82,6 +82,14 @@ function createCommand(flags) {
 	return { id: "prompt-1", type: "prompt", message };
 }
 
+const FIRE_AND_FORGET_EXTENSION_UI_METHODS = new Set([
+	"notify",
+	"setStatus",
+	"setWidget",
+	"setTitle",
+	"set_editor_text",
+]);
+
 function printRpcLine(line, state) {
 	if (line.trim().length === 0) return;
 
@@ -119,6 +127,11 @@ function printRpcLine(line, state) {
 	}
 
 	if (event.type === "extension_ui_request") {
+		if (FIRE_AND_FORGET_EXTENSION_UI_METHODS.has(event.method)) {
+			if (state.verbose) console.error(JSON.stringify(event));
+			return;
+		}
+
 		console.error(`\nextension UI request not handled by PoC client: ${event.method}`);
 		return;
 	}
