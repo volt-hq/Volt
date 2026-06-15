@@ -18,10 +18,15 @@
 - Added built-in LSP server defaults for clangd (C/C++), zls (Zig), lua-language-server, and bash-language-server.
 - Added LSP protocol tracing: `lsp.traceFile` setting and `/lsp trace [path|off]` runtime toggle append JSON-RPC traffic, server stderr, and lifecycle events to a log file.
 - Added a built-in `/review` command that reviews uncommitted changes, branch diffs vs a base, GitHub PRs, or single commits in an isolated in-process review session with full tool access, then starts a fresh session seeded only with the numbered findings so follow-ups like "fix 1 and 3" run with clean context. Configure the reviewer model with the `reviewModel` setting or the "Review model" entry in `/settings`.
-- Added an RTK extension example that rewrites bash tool calls through `rtk rewrite` for token-optimized command output.
 
 ### Fixed
 
+- Fixed store package installs leaking verbose git and npm subprocess output into the interactive screen.
+- Fixed the default store catalog URL to point at the deployed GitHub Pages catalog.
+- Fixed store removal for project-local packages whose saved paths are relative to the project settings directory.
+- Fixed store updates to keep lifecycle scripts disabled, preserve git clone URLs when pinning sources, and honor configured `npmCommand` during store package inspection.
+- Fixed store commands to avoid resolving configured packages before their confirmation gates and to fall back to cached catalog data when remote catalog fetches time out.
+- Fixed store npm updates to honor configured tracking specs such as ranges and tags instead of forcing every non-pinned source to latest.
 - Fixed LSP diagnostics waits accepting publishes computed against an older document version, which could surface stale results after rapid consecutive edits.
 - Fixed LSP edit diagnostics reporting stale cross-file errors against pre-edit content: unversioned publishes that race a content change now trigger a re-wait for a fresher publish (capped at a short grace window for servers that never send versions, so single-publish servers do not stall every edit until the settle deadline), unversioned publishes pointing past the end of the synced content are dropped (also keeping them out of the "newly failing in other open files" sweep), and failed diagnostic pulls are retried once before falling back to published diagnostics ([#1](https://github.com/hansjm10/Volt/issues/1)).
 - Fixed missing-server install hints on Windows: shell spawning masked missing binaries as exit code 1, so a PATH/PATHEXT pre-check now produces the proper ENOENT failure.
@@ -34,6 +39,8 @@
 
 ### Changed
 
+- Changed store install/update confirmations and summaries to show package names and concise source labels instead of full git source strings.
+- Changed the interactive `/store` browser to list available packages immediately, with search available from the package list.
 - Updated the `/review` selector to offer base-branch review first and show local branches with `main`/`master` prioritized.
 - Updated `/review` to use XML-structured review prompts, require whole-diff coverage reporting, and parse XML-wrapped JSON review payloads.
 - `SettingsManager.applyOverrides()` overrides now persist across `reload()` and internal settings re-merges instead of being silently dropped.
