@@ -20,6 +20,8 @@ npm install --ignore-scripts
 
 `@number0/iroh` is a native package with optional prebuilt platform packages. Keeping it in this example package avoids adding Iroh to Volt's default install path.
 
+If a root script says the Iroh sidecar dependencies are not installed, run `npm run iroh:poc:install` on that machine.
+
 ## Root scripts
 
 From the repository root:
