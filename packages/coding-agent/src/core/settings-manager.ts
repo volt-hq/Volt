@@ -589,6 +589,10 @@ export class SettingsManager {
 		return this.activeProfile;
 	}
 
+	getRequestedProfile(): string | undefined {
+		return this.requestedProfile;
+	}
+
 	getProfileNames(): string[] {
 		const names = new Set<string>();
 		const addProfileNames = (profiles: Settings["profiles"]) => {
