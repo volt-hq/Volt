@@ -63,6 +63,28 @@ export type DefaultProjectTrust = "ask" | "always" | "never";
 
 export type TransportSetting = Transport;
 
+export interface ProfileStorageSettings {
+	/** Reserved for future per-profile auth isolation. Ignored by the MVP. */
+	authDir?: string;
+	/** Reserved for future per-profile session isolation. Ignored by the MVP. */
+	sessionDir?: string;
+}
+
+export type ProfileSettings = Omit<
+	Settings,
+	| "lastChangelogVersion"
+	| "defaultProfile"
+	| "profiles"
+	| "defaultProjectTrust"
+	| "enableInstallTelemetry"
+	| "enableAnalytics"
+	| "trackingId"
+	| "sessionDir"
+> & {
+	/** Reserved for future per-profile storage isolation. Ignored by the MVP. */
+	storage?: ProfileStorageSettings;
+};
+
 /**
  * Package source for npm/git packages.
  * - String form: load all resources from the package
@@ -81,6 +103,8 @@ export type PackageSource =
 
 export interface Settings {
 	lastChangelogVersion?: string;
+	defaultProfile?: string;
+	profiles?: Record<string, ProfileSettings>;
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -156,6 +180,29 @@ function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 	return result;
 }
 
+function normalizeProfileName(profile: string | undefined): string | undefined {
+	const trimmed = profile?.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+function sanitizeProfileSettings(profile: ProfileSettings | undefined): Settings {
+	if (!profile) {
+		return {};
+	}
+
+	const sanitized = structuredClone(profile) as Record<string, unknown>;
+	delete sanitized.lastChangelogVersion;
+	delete sanitized.defaultProfile;
+	delete sanitized.profiles;
+	delete sanitized.defaultProjectTrust;
+	delete sanitized.enableInstallTelemetry;
+	delete sanitized.enableAnalytics;
+	delete sanitized.trackingId;
+	delete sanitized.sessionDir;
+	delete sanitized.storage;
+	return sanitized as Settings;
+}
+
 function parseTimeoutSetting(value: unknown, settingName: string): number | undefined {
 	const timeoutMs = parseHttpIdleTimeoutMs(value);
 	if (timeoutMs !== undefined) {
@@ -171,6 +218,7 @@ export type SettingsScope = "global" | "project";
 
 export interface SettingsManagerCreateOptions {
 	projectTrusted?: boolean;
+	profile?: string;
 }
 
 export interface SettingsStorage {
@@ -272,7 +320,12 @@ export class SettingsManager {
 	private storage: SettingsStorage;
 	private globalSettings: Settings;
 	private projectSettings: Settings;
-	private settings: Settings;
+	private globalEffectiveSettings: Settings = {};
+	private projectEffectiveSettings: Settings = {};
+	private settings: Settings = {};
+	private requestedProfile: string | undefined;
+	private activeProfile: string | undefined;
+	private reportedMissingProfiles = new Set<string>();
 	private projectTrusted: boolean;
 	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
 	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
@@ -292,24 +345,53 @@ export class SettingsManager {
 		projectLoadError: Error | null = null,
 		initialErrors: SettingsError[] = [],
 		projectTrusted = true,
+		profile?: string,
 	) {
 		this.storage = storage;
 		this.globalSettings = initialGlobal;
 		this.projectSettings = initialProject;
 		this.projectTrusted = projectTrusted;
+		this.requestedProfile = normalizeProfileName(profile);
 		this.globalSettingsLoadError = globalLoadError;
 		this.projectSettingsLoadError = projectLoadError;
 		this.errors = [...initialErrors];
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.mergeEffectiveSettings();
 	}
 
-	/** Re-merge effective settings from global, project, and session overrides */
+	private applyProfile(settings: Settings, profileName: string | undefined): Settings {
+		if (!profileName) {
+			return settings;
+		}
+		return deepMergeSettings(settings, sanitizeProfileSettings(settings.profiles?.[profileName]));
+	}
+
+	private reportMissingProfile(profileName: string): void {
+		if (!this.projectTrusted || this.reportedMissingProfiles.has(profileName)) {
+			return;
+		}
+		if (this.globalSettings.profiles?.[profileName] || this.projectSettings.profiles?.[profileName]) {
+			return;
+		}
+		this.reportedMissingProfiles.add(profileName);
+		this.recordError("global", new Error(`Profile "${profileName}" was selected but is not defined`));
+	}
+
+	/** Re-merge effective settings from global, project, profile overlays, and session overrides */
 	private mergeEffectiveSettings(): void {
-		let merged = deepMergeSettings(this.globalSettings, this.projectSettings);
+		const baseSettings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		const profileName = this.requestedProfile ?? normalizeProfileName(baseSettings.defaultProfile);
+		this.activeProfile = profileName;
+		this.globalEffectiveSettings = this.applyProfile(this.globalSettings, profileName);
+		this.projectEffectiveSettings = this.projectTrusted ? this.applyProfile(this.projectSettings, profileName) : {};
+
+		let merged = deepMergeSettings(this.globalEffectiveSettings, this.projectEffectiveSettings);
 		if (Object.keys(this.sessionOverrides).length > 0) {
 			merged = deepMergeSettings(merged, this.sessionOverrides);
 		}
 		this.settings = merged;
+		if (profileName) {
+			this.reportMissingProfile(profileName);
+		}
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -343,15 +425,16 @@ export class SettingsManager {
 			projectLoad.error,
 			initialErrors,
 			projectTrusted,
+			options.profile,
 		);
 	}
 
 	/** Create an in-memory SettingsManager (no file I/O) */
-	static inMemory(settings: Partial<Settings> = {}): SettingsManager {
+	static inMemory(settings: Partial<Settings> = {}, options: SettingsManagerCreateOptions = {}): SettingsManager {
 		const storage = new InMemorySettingsStorage();
 		const initialSettings = SettingsManager.migrateSettings(structuredClone(settings) as Record<string, unknown>);
 		storage.withLock("global", () => JSON.stringify(initialSettings, null, 2));
-		return SettingsManager.fromStorage(storage);
+		return SettingsManager.fromStorage(storage, options);
 	}
 
 	private static loadFromStorage(storage: SettingsStorage, scope: SettingsScope, projectTrusted = true): Settings {
@@ -452,6 +535,24 @@ export class SettingsManager {
 
 	getProjectSettings(): Settings {
 		return structuredClone(this.projectSettings);
+	}
+
+	getGlobalEffectiveSettings(): Settings {
+		return structuredClone(this.globalEffectiveSettings);
+	}
+
+	getProjectEffectiveSettings(): Settings {
+		return structuredClone(this.projectEffectiveSettings);
+	}
+
+	getActiveProfile(): string | undefined {
+		return this.activeProfile;
+	}
+
+	setActiveProfile(profile: string | undefined): void {
+		this.requestedProfile = normalizeProfileName(profile);
+		this.reportedMissingProfiles.clear();
+		this.mergeEffectiveSettings();
 	}
 
 	isProjectTrusted(): boolean {

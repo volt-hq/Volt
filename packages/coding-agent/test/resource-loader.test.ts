@@ -301,6 +301,36 @@ export default function(volt) {
 			]);
 		});
 
+		it("should load resources from the active profile", async () => {
+			const profileExtensionPath = join(tempDir, "profile-extension.ts");
+			writeFileSync(
+				profileExtensionPath,
+				`export default function(volt) {
+	volt.registerCommand("profile-command", {
+		description: "profile command",
+		handler: async () => {},
+	});
+}`,
+			);
+			const settingsManager = SettingsManager.inMemory(
+				{
+					profiles: {
+						development: {
+							extensions: [profileExtensionPath],
+						},
+					},
+				},
+				{ profile: "development" },
+			);
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			const extensionsResult = loader.getExtensions();
+			expect(extensionsResult.errors).toEqual([]);
+			expect(extensionsResult.extensions.map((extension) => extension.path)).toContain(profileExtensionPath);
+		});
+
 		it("should honor overrides for auto-discovered resources", async () => {
 			const settingsManager = SettingsManager.inMemory();
 			settingsManager.setExtensionPaths(["-extensions/disabled.ts"]);

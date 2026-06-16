@@ -78,6 +78,8 @@ export interface CreateAgentSessionOptions {
 	/** Session manager. Default: SessionManager.create(cwd) */
 	sessionManager?: SessionManager;
 
+	/** Settings profile to apply when creating the default SettingsManager. */
+	profile?: string;
 	/** Settings manager. Default: SettingsManager.create(cwd, agentDir) */
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
@@ -177,7 +179,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const authStorage = options.authStorage ?? AuthStorage.create(authPath);
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, modelsPath);
 
-	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+	const settingsManager =
+		options.settingsManager ?? SettingsManager.create(cwd, agentDir, { profile: options.profile });
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 
 	if (!resourceLoader) {

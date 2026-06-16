@@ -21,7 +21,40 @@ If no extension or saved decision applies, `defaultProjectTrust` controls the fa
 
 Use `/trust` in interactive mode to save a project trust decision for future sessions, including trust for the immediate parent folder. It writes `~/.volt/agent/trust.json` only; the current session is not reloaded, so restart volt for changes to take effect.
 
+## Profiles
+
+Profiles are named settings overlays for switching workflows. Select one with `--profile <name>`, set `VOLT_PROFILE`, or set `defaultProfile` in settings. Profiles can override normal settings such as packages, extensions, skills, prompts, themes, model defaults, model cycling, thinking level, and UI preferences.
+
+Global and project profiles follow the normal settings precedence and trust model: global settings load first, the selected global profile overlays them, trusted project settings overlay that, and the selected trusted project profile overlays last. Without project trust, project profiles are ignored.
+
+```json
+{
+  "defaultProfile": "development",
+  "profiles": {
+    "development": {
+      "packages": ["npm:@me/dev-tools"],
+      "extensions": ["./extensions/dev.ts"],
+      "enabledModels": ["anthropic/*", "openai/*"]
+    },
+    "work": {
+      "packages": ["npm:@corp/work-tools"],
+      "defaultProvider": "github-copilot",
+      "enabledModels": ["github-copilot/*"]
+    }
+  }
+}
+```
+
+Profiles do not isolate auth or sessions yet. `sessionDir` and reserved profile `storage` settings are ignored for now so future auth/session profile support can be added without changing the profile shape.
+
 ## All Settings
+
+### Profiles
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `defaultProfile` | string | - | Profile to apply when `--profile` and `VOLT_PROFILE` are not set |
+| `profiles` | object | `{}` | Named settings overlays keyed by profile name |
 
 ### Model & Thinking
 

@@ -96,6 +96,12 @@ function isTruthyEnvFlag(value: string | undefined): boolean {
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
 }
 
+function resolveRequestedProfile(parsed: Args): string | undefined {
+	const profile = parsed.profile ?? process.env.VOLT_PROFILE;
+	const trimmed = profile?.trim();
+	return trimmed ? trimmed : undefined;
+}
+
 function resolveAppMode(parsed: Args, stdinIsTTY: boolean, stdoutIsTTY: boolean): AppMode {
 	if (parsed.mode === "rpc") {
 		return "rpc";
@@ -480,6 +486,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	const parsed = parseArgs(args);
+	const requestedProfile = resolveRequestedProfile(parsed);
 	if (parsed.diagnostics.length > 0) {
 		for (const d of parsed.diagnostics) {
 			const color = d.type === "error" ? chalk.red : chalk.yellow;
@@ -530,7 +537,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 	const cwd = process.cwd();
 	const agentDir = getAgentDir();
-	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
+	const startupSettingsManager = SettingsManager.create(cwd, agentDir, { profile: requestedProfile });
 	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
 
 	// Experimental first-time setup: theme choice and analytics opt-in.
@@ -602,7 +609,10 @@ export async function main(args: string[], options?: MainOptions) {
 		const projectTrusted = shouldResolveProjectTrust
 			? false
 			: (cachedProjectTrust ?? parsed.projectTrustOverride ?? (!hasTrustInputs || trustStore.get(cwd) === true));
-		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
+		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, {
+			projectTrusted,
+			profile: requestedProfile,
+		});
 		const services = await createAgentSessionServices({
 			cwd,
 			agentDir,

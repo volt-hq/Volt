@@ -252,6 +252,8 @@ Use `/settings` to modify common options, or edit JSON files directly:
 | `~/.volt/agent/settings.json` | Global (all projects) |
 | `.volt/settings.json` | Project (overrides global) |
 
+Settings can define named profiles for switching workflows. Select one with `volt --profile development`, `VOLT_PROFILE=work`, or `defaultProfile` in settings. Profiles overlay normal settings and resources, but do not isolate auth or sessions yet.
+
 See [docs/settings.md](docs/settings.md) for all options.
 
 ### Project Trust
@@ -516,6 +518,7 @@ cat README.md | volt -p "Summarize this text"
 |--------|-------------|
 | `--provider <name>` | Provider (anthropic, openai, google, etc.) |
 | `--model <pattern>` | Model pattern or ID (supports `provider/id` and optional `:<thinking>`) |
+| `--profile <name>` | Apply a named settings profile (or set `VOLT_PROFILE`) |
 | `--api-key <key>` | API key (overrides env vars) |
 | `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `--models <patterns>` | Comma-separated patterns for Ctrl+P cycling |
@@ -626,6 +629,7 @@ volt --thinking high "Solve this complex problem"
 | `VOLT_CODING_AGENT_DIR` | Override config directory (default: `~/.volt/agent`) |
 | `VOLT_CODING_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
 | `VOLT_PACKAGE_DIR` | Override package directory (useful for Nix/Guix where store paths tokenize poorly) |
+| `VOLT_PROFILE` | Apply a named settings profile |
 | `VOLT_OFFLINE` | Disable startup network operations, including update checks, package update checks, and install/update telemetry |
 | `VOLT_SKIP_VERSION_CHECK` | Skip the Volt version update check at startup |
 | `VOLT_LATEST_VERSION_URL` | Enable hosted version checks against this JSON endpoint |

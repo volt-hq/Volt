@@ -156,6 +156,123 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("profiles", () => {
+		it("should apply selected global and project profile overlays", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					theme: "dark",
+					defaultModel: "base-model",
+					profiles: {
+						development: {
+							theme: "light",
+							defaultModel: "global-profile-model",
+							packages: ["npm:global-profile"],
+						},
+					},
+				}),
+			);
+			writeFileSync(
+				join(projectDir, ".volt", "settings.json"),
+				JSON.stringify({
+					defaultModel: "project-base-model",
+					profiles: {
+						development: {
+							defaultThinkingLevel: "high",
+							packages: ["npm:project-profile"],
+						},
+					},
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir, { profile: "development" });
+
+			expect(manager.getActiveProfile()).toBe("development");
+			expect(manager.getTheme()).toBe("light");
+			expect(manager.getDefaultModel()).toBe("project-base-model");
+			expect(manager.getDefaultThinkingLevel()).toBe("high");
+			expect(manager.getPackages()).toEqual(["npm:project-profile"]);
+			expect(manager.getGlobalEffectiveSettings().packages).toEqual(["npm:global-profile"]);
+			expect(manager.getProjectEffectiveSettings().packages).toEqual(["npm:project-profile"]);
+		});
+
+		it("should use defaultProfile when no explicit profile is selected", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					defaultProfile: "work",
+					profiles: {
+						work: { theme: "light" },
+					},
+					theme: "dark",
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getActiveProfile()).toBe("work");
+			expect(manager.getTheme()).toBe("light");
+		});
+
+		it("should let explicit profile override defaultProfile", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					defaultProfile: "work",
+					profiles: {
+						development: { theme: "dark" },
+						work: { theme: "light" },
+					},
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir, { profile: "development" });
+
+			expect(manager.getActiveProfile()).toBe("development");
+			expect(manager.getTheme()).toBe("dark");
+		});
+
+		it("should skip project profile overlays when project is not trusted", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					profiles: {
+						work: { theme: "global-profile" },
+					},
+				}),
+			);
+			writeFileSync(
+				join(projectDir, ".volt", "settings.json"),
+				JSON.stringify({
+					profiles: {
+						work: { theme: "project-profile" },
+					},
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir, { projectTrusted: false, profile: "work" });
+
+			expect(manager.getTheme()).toBe("global-profile");
+			expect(manager.getProjectEffectiveSettings()).toEqual({});
+		});
+
+		it("should ignore profile sessionDir until profile storage isolation is implemented", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					sessionDir: "/base/sessions",
+					profiles: {
+						work: { sessionDir: "/profile/sessions" },
+					},
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir, { profile: "work" });
+
+			expect(manager.getSessionDir()).toBe("/base/sessions");
+		});
+	});
+
 	describe("reload", () => {
 		it("should reload global settings from disk", async () => {
 			const settingsPath = join(agentDir, "settings.json");

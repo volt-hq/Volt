@@ -243,6 +243,8 @@ export {
 	type DefaultProjectTrust,
 	type ImageSettings,
 	type PackageSource,
+	type ProfileSettings,
+	type ProfileStorageSettings,
 	type RetrySettings,
 	SettingsManager,
 	type SettingsManagerCreateOptions,

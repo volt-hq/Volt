@@ -862,8 +862,8 @@ export class DefaultPackageManager implements PackageManager {
 
 	async resolve(onMissing?: (source: string) => Promise<MissingSourceAction>): Promise<ResolvedPaths> {
 		const accumulator = this.createAccumulator();
-		const globalSettings = this.settingsManager.getGlobalSettings();
-		const projectSettings = this.settingsManager.getProjectSettings();
+		const globalSettings = this.settingsManager.getGlobalEffectiveSettings();
+		const projectSettings = this.settingsManager.getProjectEffectiveSettings();
 
 		// Collect all packages with scope (project first so cwd resources win collisions)
 		const allPackages: Array<{ pkg: PackageSource; scope: SourceScope }> = [];
@@ -1019,8 +1019,8 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	async update(source?: string, options?: PackageUpdateOptions): Promise<void> {
-		const globalSettings = this.settingsManager.getGlobalSettings();
-		const projectSettings = this.settingsManager.getProjectSettings();
+		const globalSettings = this.settingsManager.getGlobalEffectiveSettings();
+		const projectSettings = this.settingsManager.getProjectEffectiveSettings();
 		const scopeFilter: InstalledSourceScope | undefined =
 			options?.local === undefined ? undefined : options.local ? "project" : "user";
 		let matched = false;
@@ -1185,8 +1185,8 @@ export class DefaultPackageManager implements PackageManager {
 			return [];
 		}
 
-		const globalSettings = this.settingsManager.getGlobalSettings();
-		const projectSettings = this.settingsManager.getProjectSettings();
+		const globalSettings = this.settingsManager.getGlobalEffectiveSettings();
+		const projectSettings = this.settingsManager.getProjectEffectiveSettings();
 		const allPackages: Array<{ pkg: PackageSource; scope: SourceScope }> = [];
 		for (const pkg of projectSettings.packages ?? []) {
 			allPackages.push({ pkg, scope: "project" });
