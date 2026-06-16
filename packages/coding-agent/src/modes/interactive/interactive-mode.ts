@@ -549,6 +549,24 @@ export class InteractiveMode {
 			};
 		}
 
+		const profileCommand = slashCommands.find((command) => command.name === "profile");
+		if (profileCommand) {
+			profileCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
+				const currentProfile = this.settingsManager.getActiveProfile();
+				const items = this.settingsManager.getProfileNames().map((name) => ({
+					name,
+					isCurrent: name === currentProfile,
+				}));
+				const filtered = fuzzyFilter(items, prefix, (item) => item.name);
+				if (filtered.length === 0) return null;
+				return filtered.map((item) => ({
+					value: item.name,
+					label: item.name,
+					description: item.isCurrent ? "current profile" : "profile",
+				}));
+			};
+		}
+
 		const reviewCommand = slashCommands.find((command) => command.name === "review");
 		if (reviewCommand) {
 			reviewCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
@@ -2577,6 +2595,12 @@ export class InteractiveMode {
 			if (text === "/settings") {
 				this.showSettingsSelector();
 				this.editor.setText("");
+				return;
+			}
+			if (text === "/profile" || text.startsWith("/profile ")) {
+				const profileName = text.startsWith("/profile ") ? text.slice(9).trim() : undefined;
+				this.editor.setText("");
+				await this.handleProfileCommand(profileName);
 				return;
 			}
 			if (text === "/scoped-models") {
@@ -4718,6 +4742,148 @@ export class InteractiveMode {
 		this.showStatus(`${message}. Run /reload to load resource changes.`);
 	}
 
+	private async handleProfileCommand(profileName?: string): Promise<void> {
+		if (this.session.isStreaming) {
+			this.showWarning("Wait for the current response to finish before switching profiles.");
+			return;
+		}
+		if (this.session.isCompacting) {
+			this.showWarning("Wait for compaction to finish before switching profiles.");
+			return;
+		}
+
+		if (profileName) {
+			if (!this.settingsManager.hasProfile(profileName)) {
+				this.showWarning(`Profile "${profileName}" is not defined. Run /profile to create it.`);
+				return;
+			}
+			await this.switchProfile(profileName);
+			return;
+		}
+
+		await this.showProfileSelector();
+	}
+
+	private async showProfileSelector(): Promise<void> {
+		const currentProfile = this.settingsManager.getActiveProfile();
+		const profileNames = this.settingsManager.getProfileNames();
+		const profileByLabel = new Map<string, string>();
+		const options: string[] = [];
+
+		for (const [index, profileName] of profileNames.entries()) {
+			const currentSuffix = profileName === currentProfile ? " (current)" : "";
+			const label = `${index + 1}. ${profileName}${currentSuffix}`;
+			profileByLabel.set(label, profileName);
+			options.push(label);
+		}
+
+		const createCurrentLabel =
+			currentProfile && !profileNames.includes(currentProfile) ? `Create "${currentProfile}"` : undefined;
+		if (createCurrentLabel) {
+			options.push(createCurrentLabel);
+		}
+		options.push("Create new profile", "Cancel");
+
+		const currentLabel = currentProfile ?? "none";
+		const selection = await this.showExtensionSelector(`Current profile: ${currentLabel}`, options);
+		if (!selection || selection === "Cancel") {
+			return;
+		}
+
+		const selectedProfile = profileByLabel.get(selection);
+		if (selectedProfile) {
+			await this.switchProfile(selectedProfile);
+			return;
+		}
+
+		if (selection === createCurrentLabel && currentProfile) {
+			await this.createAndSwitchProfile(currentProfile, { forceReload: true });
+			return;
+		}
+
+		const createdProfile = await this.showExtensionInput("Create profile", "Profile name");
+		if (createdProfile === undefined) {
+			this.showStatus("Profile creation cancelled");
+			return;
+		}
+		await this.createAndSwitchProfile(createdProfile);
+	}
+
+	private async createAndSwitchProfile(profileName: string, options?: { forceReload?: boolean }): Promise<void> {
+		const normalizedProfile = profileName.trim();
+		if (!normalizedProfile) {
+			this.showWarning("Profile name cannot be empty");
+			return;
+		}
+
+		try {
+			const profileExists = this.settingsManager.hasProfile(normalizedProfile);
+			const createdProfile = profileExists
+				? normalizedProfile
+				: this.settingsManager.ensureGlobalProfile(normalizedProfile);
+			if (!profileExists) {
+				await this.settingsManager.flush();
+			}
+			await this.switchProfile(createdProfile, { created: !profileExists, forceReload: options?.forceReload });
+		} catch (error: unknown) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private async switchProfile(
+		profileName: string,
+		options?: { created?: boolean; forceReload?: boolean },
+	): Promise<void> {
+		const normalizedProfile = profileName.trim();
+		if (!normalizedProfile) {
+			this.showWarning("Profile name cannot be empty");
+			return;
+		}
+		if (!options?.forceReload && this.settingsManager.getActiveProfile() === normalizedProfile) {
+			this.showStatus(`Current profile: ${normalizedProfile}`);
+			return;
+		}
+
+		this.settingsManager.setActiveProfile(normalizedProfile);
+		const reloaded = await this.reloadRuntimeResources({
+			action: "switching profiles",
+			progressMessage: `Switching profile to ${normalizedProfile}...`,
+			successMessage: (savedImplicitProjectTrust) => {
+				const createdPrefix = options?.created ? `Created profile ${normalizedProfile}. ` : "";
+				const trustSuffix = savedImplicitProjectTrust ? "; saved project trust" : "";
+				return `${createdPrefix}Profile: ${normalizedProfile}. Reloaded keybindings, extensions, skills, prompts, themes${trustSuffix}`;
+			},
+		});
+		if (!reloaded) {
+			return;
+		}
+		try {
+			await this.applyScopedModelsFromSettings();
+		} catch (error: unknown) {
+			this.showWarning(
+				`Could not apply profile model scope: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	private async applyScopedModelsFromSettings(): Promise<void> {
+		const patterns = this.settingsManager.getEnabledModels();
+		if (patterns && patterns.length > 0) {
+			const scopedModels = await resolveModelScope(patterns, this.session.modelRegistry);
+			this.session.setScopedModels(
+				scopedModels.map((scopedModel) => ({
+					model: scopedModel.model,
+					thinkingLevel: scopedModel.thinkingLevel,
+				})),
+			);
+		} else {
+			this.session.setScopedModels([]);
+		}
+		await this.updateAvailableProviderCount();
+		this.footer.invalidate();
+		this.updateEditorBorderColor();
+	}
+
 	private async handleModelCommand(searchTerm?: string): Promise<void> {
 		if (!searchTerm) {
 			this.showModelSelector();
@@ -5641,14 +5807,19 @@ export class InteractiveMode {
 	// Command handlers
 	// =========================================================================
 
-	private async handleReloadCommand(): Promise<void> {
+	private async reloadRuntimeResources(options?: {
+		action?: string;
+		progressMessage?: string;
+		successMessage?: (savedImplicitProjectTrust: boolean) => string;
+	}): Promise<boolean> {
+		const action = options?.action ?? "reloading";
 		if (this.session.isStreaming) {
-			this.showWarning("Wait for the current response to finish before reloading.");
-			return;
+			this.showWarning(`Wait for the current response to finish before ${action}.`);
+			return false;
 		}
 		if (this.session.isCompacting) {
-			this.showWarning("Wait for compaction to finish before reloading.");
-			return;
+			this.showWarning(`Wait for compaction to finish before ${action}.`);
+			return false;
 		}
 
 		this.resetExtensionUI();
@@ -5658,7 +5829,14 @@ export class InteractiveMode {
 		reloadBox.addChild(new DynamicBorder(borderColor));
 		reloadBox.addChild(new Spacer(1));
 		reloadBox.addChild(
-			new Text(theme.fg("muted", "Reloading keybindings, extensions, skills, prompts, themes..."), 1, 0),
+			new Text(
+				theme.fg(
+					"muted",
+					options?.progressMessage ?? "Reloading keybindings, extensions, skills, prompts, themes...",
+				),
+				1,
+				0,
+			),
 		);
 		reloadBox.addChild(new Spacer(1));
 		reloadBox.addChild(new DynamicBorder(borderColor));
@@ -5680,6 +5858,7 @@ export class InteractiveMode {
 		try {
 			await this.session.reload();
 			configureHttpDispatcher(this.settingsManager.getHttpIdleTimeoutMs());
+			this.session.agent.transport = this.settingsManager.getTransport();
 			this.keybindings.reload();
 			const activeHeader = this.customHeader ?? this.builtInHeader;
 			if (isExpandable(activeHeader)) {
@@ -5687,6 +5866,7 @@ export class InteractiveMode {
 			}
 			setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
 			this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
+			this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 			const themeName = this.settingsManager.getTheme();
 			const themeResult = themeName ? setTheme(themeName, true) : { success: true };
 			if (!themeResult.success) {
@@ -5717,14 +5897,21 @@ export class InteractiveMode {
 				this.showError(`models.json error: ${modelsJsonError}`);
 			}
 			this.showStatus(
-				savedImplicitProjectTrust
-					? "Reloaded keybindings, extensions, skills, prompts, themes; saved project trust"
-					: "Reloaded keybindings, extensions, skills, prompts, themes",
+				options?.successMessage?.(savedImplicitProjectTrust) ??
+					(savedImplicitProjectTrust
+						? "Reloaded keybindings, extensions, skills, prompts, themes; saved project trust"
+						: "Reloaded keybindings, extensions, skills, prompts, themes"),
 			);
+			return true;
 		} catch (error) {
 			dismissReloadBox(previousEditor as Component);
 			this.showError(`Reload failed: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
 		}
+	}
+
+	private async handleReloadCommand(): Promise<void> {
+		await this.reloadRuntimeResources();
 	}
 
 	private async handleExportCommand(text: string): Promise<void> {

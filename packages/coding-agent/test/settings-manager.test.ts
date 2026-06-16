@@ -287,6 +287,76 @@ describe("SettingsManager", () => {
 			expect(manager.getTheme()).toBe("dark");
 		});
 
+		it("should list global and trusted project profiles", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					profiles: {
+						global: { theme: "dark" },
+						shared: { defaultModel: "global-model" },
+					},
+				}),
+			);
+			writeFileSync(
+				join(projectDir, ".volt", "settings.json"),
+				JSON.stringify({
+					profiles: {
+						project: { theme: "light" },
+						shared: { defaultModel: "project-model" },
+					},
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getProfileNames()).toEqual(["global", "project", "shared"]);
+			expect(manager.hasProfile("project")).toBe(true);
+		});
+
+		it("should not list project profiles when project is not trusted", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ profiles: { global: { theme: "dark" } } }));
+			writeFileSync(
+				join(projectDir, ".volt", "settings.json"),
+				JSON.stringify({ profiles: { project: { theme: "light" } } }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir, { projectTrusted: false });
+
+			expect(manager.getProfileNames()).toEqual(["global"]);
+			expect(manager.hasProfile("project")).toBe(false);
+		});
+
+		it("should create empty global profiles without removing existing fields", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(
+				settingsPath,
+				JSON.stringify({
+					profiles: {
+						work: { theme: "dark" },
+					},
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			const profileName = manager.ensureGlobalProfile(" new-work ");
+			await manager.flush();
+
+			expect(profileName).toBe("new-work");
+			expect(manager.getProfileNames()).toEqual(["new-work", "work"]);
+			expect(JSON.parse(readFileSync(settingsPath, "utf-8"))).toEqual({
+				profiles: {
+					work: { theme: "dark" },
+					"new-work": {},
+				},
+			});
+		});
+
+		it("should reject empty profile names", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(() => manager.ensureGlobalProfile("   ")).toThrow("Profile name cannot be empty");
+		});
+
 		it("should skip project profile overlays when project is not trusted", () => {
 			writeFileSync(
 				join(agentDir, "settings.json"),

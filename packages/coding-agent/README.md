@@ -144,6 +144,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 |---------|-------------|
 | `/login`, `/logout` | OAuth authentication |
 | `/model` | Switch models |
+| `/profile` | Show, switch, or create the active settings profile |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
 | `/resume` | Pick from previous sessions |
@@ -252,7 +253,7 @@ Use `/settings` to modify common options, or edit JSON files directly:
 | `~/.volt/agent/settings.json` | Global (all projects) |
 | `.volt/settings.json` | Project (overrides global) |
 
-Settings can define named profiles for switching workflows. Select one with `volt --profile development`, `VOLT_PROFILE=work`, or `defaultProfile` in settings. Profiles overlay normal settings and resources, but do not isolate auth or sessions yet.
+Settings can define named profiles for switching workflows. Select one with `volt --profile development`, `VOLT_PROFILE=work`, or `defaultProfile` in settings, or use `/profile` during an interactive session to show, switch, or create profiles. Profiles overlay normal settings and resources, but do not isolate auth or sessions yet.
 
 See [docs/settings.md](docs/settings.md) for all options.
 

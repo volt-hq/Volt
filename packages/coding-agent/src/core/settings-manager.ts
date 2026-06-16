@@ -589,6 +589,53 @@ export class SettingsManager {
 		return this.activeProfile;
 	}
 
+	getProfileNames(): string[] {
+		const names = new Set<string>();
+		const addProfileNames = (profiles: Settings["profiles"]) => {
+			if (!isSettingsRecord(profiles)) {
+				return;
+			}
+			for (const [profileName, profile] of Object.entries(profiles)) {
+				if (isSettingsRecord(profile)) {
+					names.add(profileName);
+				}
+			}
+		};
+
+		addProfileNames(this.globalSettings.profiles);
+		if (this.projectTrusted) {
+			addProfileNames(this.projectSettings.profiles);
+		}
+		return [...names].sort((a, b) => a.localeCompare(b));
+	}
+
+	hasProfile(profile: string): boolean {
+		const profileName = normalizeProfileName(profile);
+		if (!profileName) {
+			return false;
+		}
+		return (
+			getOwnProfileSettings(this.globalSettings, profileName) !== undefined ||
+			(this.projectTrusted && getOwnProfileSettings(this.projectSettings, profileName) !== undefined)
+		);
+	}
+
+	ensureGlobalProfile(profile: string): string {
+		const profileName = normalizeProfileName(profile);
+		if (!profileName) {
+			throw new Error("Profile name cannot be empty");
+		}
+		if (getOwnProfileSettings(this.globalSettings, profileName)) {
+			return profileName;
+		}
+
+		this.globalSettings.profiles = cloneProfiles(this.globalSettings.profiles);
+		defineOwnEnumerableProperty(this.globalSettings.profiles, profileName, {});
+		this.markProfileModified(profileName);
+		this.save();
+		return profileName;
+	}
+
 	setActiveProfile(profile: string | undefined): void {
 		this.requestedProfile = normalizeProfileName(profile);
 		this.reportedMissingProfiles.clear();
@@ -683,12 +730,14 @@ export class SettingsManager {
 		}
 	}
 
-	private markProfileModified(profileName: string, field: keyof Settings): void {
+	private markProfileModified(profileName: string, field?: keyof Settings): void {
 		this.modifiedFields.add("profiles");
 		if (!this.modifiedProfileFields.has(profileName)) {
 			this.modifiedProfileFields.set(profileName, new Set());
 		}
-		this.modifiedProfileFields.get(profileName)!.add(field);
+		if (field !== undefined) {
+			this.modifiedProfileFields.get(profileName)!.add(field);
+		}
 	}
 
 	private markProjectProfileModified(profileName: string, field: keyof Settings): void {
@@ -786,6 +835,10 @@ export class SettingsManager {
 							Object.hasOwn(snapshotProfiles, profileName) && isSettingsRecord(snapshotProfiles[profileName])
 								? snapshotProfiles[profileName]
 								: {};
+						if (profileFields.size === 0) {
+							defineOwnEnumerableProperty(mergedProfiles, profileName, snapshotProfile);
+							continue;
+						}
 						const mergedProfile: Record<string, unknown> = {};
 						for (const [profileField, profileValue] of Object.entries(currentProfile)) {
 							defineOwnEnumerableProperty(mergedProfile, profileField, profileValue);
