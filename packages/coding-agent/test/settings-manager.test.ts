@@ -269,6 +269,55 @@ describe("SettingsManager", () => {
 			expect(manager.getTheme()).toBe("light");
 		});
 
+		it("should persist active profile setting updates into the profile overlay", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(
+				settingsPath,
+				JSON.stringify({
+					defaultProfile: "work",
+					enabledModels: ["base-model"],
+					profiles: {
+						work: { enabledModels: ["profile-model"] },
+					},
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setEnabledModels(["updated-profile-model"]);
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(manager.getEnabledModels()).toEqual(["updated-profile-model"]);
+			expect(savedSettings.enabledModels).toEqual(["base-model"]);
+			expect(savedSettings.profiles.work.enabledModels).toEqual(["updated-profile-model"]);
+		});
+
+		it("should preserve externally added nested fields when updating an active profile setting", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(
+				settingsPath,
+				JSON.stringify({
+					defaultProfile: "work",
+					profiles: {
+						work: { terminal: { showImages: true } },
+					},
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			const currentSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			currentSettings.profiles.work.terminal.imageWidthCells = 100;
+			writeFileSync(settingsPath, JSON.stringify(currentSettings, null, 2));
+
+			manager.setShowImages(false);
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(manager.getShowImages()).toBe(false);
+			expect(savedSettings.profiles.work.terminal).toEqual({ showImages: false, imageWidthCells: 100 });
+			expect(savedSettings.terminal).toBeUndefined();
+		});
+
 		it("should let explicit profile override defaultProfile", () => {
 			writeFileSync(
 				join(agentDir, "settings.json"),
