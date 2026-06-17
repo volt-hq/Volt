@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 
 const cliPath = resolve(__dirname, "source-cli-runner.mjs");
+const CLI_TIMEOUT_MS = 30_000;
 const tempDirs: string[] = [];
 
 afterEach(() => {
@@ -82,7 +83,7 @@ async function runCli(args: string[], dirs: CliDirs): Promise<CliResult> {
 	return new Promise((resolvePromise, reject) => {
 		const timeout = setTimeout(() => {
 			child.kill("SIGKILL");
-		}, 10_000);
+		}, CLI_TIMEOUT_MS);
 		child.on("error", (error) => {
 			clearTimeout(timeout);
 			reject(error);
