@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -228,6 +228,137 @@ async function withStateDir(name, callback) {
 	}
 }
 
+async function createFakeSourceVolt(stateDir) {
+	const sourceDir = join(stateDir, "fake-source-volt");
+	const scriptsDir = join(sourceDir, "scripts");
+	const logPath = join(stateDir, "fake-source-volt-rpc.jsonl");
+	await mkdir(scriptsDir, { recursive: true });
+	await writeFile(
+		join(scriptsDir, "run-coding-agent-source.mjs"),
+		`import { appendFile } from "node:fs/promises";
+
+const logPath = ${JSON.stringify(logPath)};
+await appendFile(logPath, JSON.stringify({ argv: process.argv.slice(2) }) + "\\n");
+
+function write(value) {
+	process.stdout.write(JSON.stringify(value) + "\\n");
+}
+
+function messageFor(text) {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: "fake-source-volt",
+		provider: "iroh-poc",
+		model: "fake-source",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
+
+function writePromptResponse(command) {
+	const responseText = "fake source Volt response: " + command.message;
+	const message = messageFor(responseText);
+	write({ id: command.id, type: "response", command: "prompt", success: true });
+	setTimeout(() => {
+		write({
+			type: "message_update",
+			message,
+			assistantMessageEvent: {
+				type: "text_delta",
+				contentIndex: 0,
+				delta: responseText,
+				partial: message,
+			},
+		});
+		write({ type: "agent_end", messages: [message] });
+	}, 50);
+}
+
+function writeStateResponse(command) {
+	write({
+		id: command.id,
+		type: "response",
+		command: "get_state",
+		success: true,
+		data: {
+			model: { provider: "iroh-poc", id: "fake-source", name: "Fake Source Volt" },
+			thinkingLevel: "off",
+			isStreaming: false,
+			isCompacting: false,
+			steeringMode: "one-at-a-time",
+			followUpMode: "one-at-a-time",
+			sessionId: "fake-source-session",
+			sessionName: "Fake Source Volt RPC",
+			autoCompactionEnabled: false,
+			messageCount: 0,
+			pendingMessageCount: 0,
+		},
+	});
+}
+
+function handleLine(line) {
+	if (line.trim().length === 0) return;
+	let command;
+	try {
+		command = JSON.parse(line);
+	} catch (error) {
+		write({
+			type: "response",
+			command: "parse",
+			success: false,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return;
+	}
+	if (command.type === "prompt") {
+		writePromptResponse(command);
+		return;
+	}
+	if (command.type === "get_state") {
+		writeStateResponse(command);
+		return;
+	}
+	write({
+		id: command.id,
+		type: "response",
+		command: command.type ?? "unknown",
+		success: false,
+		error: "fake source Volt does not implement " + command.type,
+	});
+}
+
+let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+	buffer += chunk;
+	while (true) {
+		const newlineIndex = buffer.indexOf("\\n");
+		if (newlineIndex === -1) break;
+		let line = buffer.slice(0, newlineIndex);
+		buffer = buffer.slice(newlineIndex + 1);
+		if (line.endsWith("\\r")) line = line.slice(0, -1);
+		handleLine(line);
+	}
+});
+process.stdin.on("end", () => {
+	process.exit(0);
+});
+process.stdin.resume();
+setInterval(() => {}, 1000);
+`,
+	);
+	return { logPath, sourceDir };
+}
+
 async function runHostClientOnce({ clientArgs, clientStatePath, hostArgs, hostStatePath, label }) {
 	const host = startHost(["--state", hostStatePath, "--once", ...hostArgs]);
 	try {
@@ -290,6 +421,30 @@ async function rawHalfClosePromptScenario() {
 			assert(
 				lines.join("\n").includes(expected),
 				`Expected raw half-close response to contain ${JSON.stringify(expected)}, got:\n${lines.join("\n")}`,
+			);
+		} finally {
+			await stopProcess(host.child);
+		}
+	});
+}
+
+async function halfClosedSourceVoltPromptScenario() {
+	await withStateDir("source-half-close", async ({ hostStatePath, stateDir }) => {
+		const { sourceDir } = await createFakeSourceVolt(stateDir);
+		const message = "half-close source prompt";
+		const host = startHost(["--state", hostStatePath, "--source-volt", sourceDir, "--once"]);
+		try {
+			const ticket = await waitForFirstStdoutLine(host.child, host.output, "source half-close host");
+			const lines = await runRawRpcClient(
+				ticket,
+				{ id: "prompt-source-half-close", type: "prompt", message },
+				{ finishSend: true },
+			);
+			await waitForExit(host.child, "source half-close host", host.output);
+			const expected = `fake source Volt response: ${message}`;
+			assert(
+				lines.join("\n").includes(expected),
+				`Expected source Volt half-close response to contain ${JSON.stringify(expected)}, got:\n${lines.join("\n")}`,
 			);
 		} finally {
 			await stopProcess(host.child);
@@ -393,6 +548,40 @@ async function pairingAndRevocationScenario() {
 	});
 }
 
+async function pairedClientCurrentToolsScenario() {
+	await withStateDir("paired-tools", async ({ clientStatePath, hostStatePath, stateDir }) => {
+		const { logPath, sourceDir } = await createFakeSourceVolt(stateDir);
+		await runHostClientOnce({
+			clientArgs: ["--message", "pair with bash", "--timeout-ms", "10000"],
+			clientStatePath,
+			hostArgs: ["--source-volt", sourceDir, "--allow-tools", "bash"],
+			hostStatePath,
+			label: "paired tools initial",
+		});
+		await runHostClientOnce({
+			clientArgs: ["--message", "paired default tools", "--timeout-ms", "10000"],
+			clientStatePath,
+			hostArgs: ["--source-volt", sourceDir, "--no-pairing"],
+			hostStatePath,
+			label: "paired tools current allowlist",
+		});
+
+		const entries = (await readFile(logPath, "utf8"))
+			.trim()
+			.split("\n")
+			.filter((line) => line.length > 0)
+			.map((line) => JSON.parse(line));
+		assert(entries.length === 2, `Expected two fake source Volt invocations, got:\n${JSON.stringify(entries)}`);
+		const secondArgs = entries[1].argv;
+		const toolsIndex = secondArgs.indexOf("--tools");
+		assert(toolsIndex !== -1, `Expected second invocation to include --tools, got:\n${secondArgs.join(" ")}`);
+		assert(
+			secondArgs[toolsIndex + 1] === "read,grep,find,ls",
+			`Expected current default tool allowlist, got:\n${secondArgs.join(" ")}`,
+		);
+	});
+}
+
 async function pairingTicketWorkspaceBindingScenario() {
 	await withStateDir("workspace-binding", async ({ clientStatePath, hostStatePath, stateDir }) => {
 		await writeFile(
@@ -466,9 +655,11 @@ async function missingWorkspaceScenario() {
 const scenarios = [
 	["prompt round trip", promptRoundTripScenario],
 	["raw half-close prompt", rawHalfClosePromptScenario],
+	["source Volt half-close prompt", halfClosedSourceVoltPromptScenario],
 	["raw command filter", rawCommandFilterScenario],
 	["get_state", getStateScenario],
 	["pairing and revocation", pairingAndRevocationScenario],
+	["paired client current tools", pairedClientCurrentToolsScenario],
 	["pairing ticket workspace binding", pairingTicketWorkspaceBindingScenario],
 	["expired ticket", expiredTicketScenario],
 	["missing workspace preflight", missingWorkspaceScenario],

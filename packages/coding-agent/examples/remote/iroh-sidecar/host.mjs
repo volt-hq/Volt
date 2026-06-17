@@ -35,6 +35,8 @@ const REMOTE_RPC_PASSTHROUGH_TYPES = new Set([
 	"get_state",
 	"extension_ui_response",
 ]);
+const PROMPT_COMPLETION_RPC_TYPES = new Set(["prompt", "steer", "follow_up"]);
+const RESPONSE_COMPLETION_RPC_TYPES = new Set(["abort", "get_state"]);
 
 function printUsage() {
 	console.error(`Usage: npm run host -- [serve] [options]
@@ -375,16 +377,107 @@ function isExpectedDoneClose(error) {
 
 function createIrohSendQueue(send) {
 	let pendingWrite = Promise.resolve();
+	let finishPromise;
 	return {
 		write(chunk) {
-			if (chunk.length === 0) return pendingWrite;
+			if (chunk.length === 0 || finishPromise) return pendingWrite;
 			const bytes = typeof chunk === "string" ? toBytes(chunk) : Array.from(Buffer.from(chunk));
 			pendingWrite = pendingWrite.then(() => send.writeAll(bytes));
 			return pendingWrite;
 		},
 		async finish() {
-			await pendingWrite;
-			await send.finish();
+			finishPromise ??= pendingWrite.then(() => send.finish());
+			await finishPromise;
+		},
+	};
+}
+
+function createRemoteRpcCompletionTracker(sendQueue) {
+	let clientInputEnded = false;
+	let pendingPromptCompletions = 0;
+	let completionSettled = false;
+	const pendingResponseIds = new Set();
+	const pendingResponseCommands = new Map();
+	let resolveCompletion;
+	let rejectCompletion;
+	const completion = new Promise((resolve, reject) => {
+		resolveCompletion = resolve;
+		rejectCompletion = reject;
+	});
+
+	const getPendingResponseCommandCount = () => {
+		let count = 0;
+		for (const value of pendingResponseCommands.values()) count += value;
+		return count;
+	};
+	const addPendingResponseCommand = (command) => {
+		pendingResponseCommands.set(command, (pendingResponseCommands.get(command) ?? 0) + 1);
+	};
+	const completePendingResponseCommand = (command) => {
+		const count = pendingResponseCommands.get(command) ?? 0;
+		if (count <= 1) {
+			pendingResponseCommands.delete(command);
+			return;
+		}
+		pendingResponseCommands.set(command, count - 1);
+	};
+	const maybeComplete = () => {
+		if (
+			completionSettled ||
+			!clientInputEnded ||
+			pendingPromptCompletions > 0 ||
+			pendingResponseIds.size > 0 ||
+			getPendingResponseCommandCount() > 0
+		) {
+			return;
+		}
+		completionSettled = true;
+		sendQueue.finish().then(resolveCompletion, rejectCompletion);
+	};
+
+	return {
+		completion,
+		markChildOutputLine(line) {
+			let event;
+			try {
+				event = JSON.parse(line);
+			} catch {
+				return;
+			}
+			if (typeof event !== "object" || event === null || typeof event.type !== "string") return;
+
+			if (event.type === "agent_end") {
+				if (pendingPromptCompletions > 0) pendingPromptCompletions -= 1;
+				maybeComplete();
+				return;
+			}
+
+			if (event.type !== "response" || typeof event.command !== "string") return;
+			if (PROMPT_COMPLETION_RPC_TYPES.has(event.command) && event.success === false) {
+				if (pendingPromptCompletions > 0) pendingPromptCompletions -= 1;
+			} else if (typeof event.id === "string" && pendingResponseIds.delete(event.id)) {
+				// The response id completed a one-shot command.
+			} else if (RESPONSE_COMPLETION_RPC_TYPES.has(event.command)) {
+				completePendingResponseCommand(event.command);
+			}
+			maybeComplete();
+		},
+		markClientInputEnded() {
+			clientInputEnded = true;
+			maybeComplete();
+		},
+		registerForwardedCommand(command) {
+			if (typeof command?.type !== "string") return;
+			if (PROMPT_COMPLETION_RPC_TYPES.has(command.type)) {
+				pendingPromptCompletions += 1;
+				return;
+			}
+			if (!RESPONSE_COMPLETION_RPC_TYPES.has(command.type)) return;
+			if (typeof command.id === "string") {
+				pendingResponseIds.add(command.id);
+				return;
+			}
+			addPendingResponseCommand(command.type);
 		},
 	};
 }
@@ -416,7 +509,7 @@ function getRemoteRpcFilterResult(line) {
 	}
 
 	if (REMOTE_RPC_PASSTHROUGH_TYPES.has(parsed.type)) {
-		return { allowed: true };
+		return { allowed: true, command: parsed };
 	}
 
 	return {
@@ -429,34 +522,40 @@ function getRemoteRpcFilterResult(line) {
 	};
 }
 
-async function writeRemoteRpcLineToChild(line, writable, writeToClient) {
+async function writeRemoteRpcLineToChild(line, writable, writeToClient, rpcCompletionTracker) {
 	const filterResult = getRemoteRpcFilterResult(line);
 	if (!filterResult.allowed) {
 		await writeToClient(filterResult.response);
 		return;
 	}
+	rpcCompletionTracker.registerForwardedCommand(filterResult.command);
 	await writeNodeStream(writable, Buffer.from(`${line}\n`, "utf8"));
 }
 
-async function pipeFilteredIrohRpcToNodeWritable(recv, writable, initial, writeToClient) {
+async function pipeFilteredIrohRpcToNodeWritable(recv, writable, initial, writeToClient, rpcCompletionTracker) {
 	let buffer = Buffer.from(initial);
 
 	while (true) {
 		const result = await readLineFromIroh(recv, buffer);
 		if (result.line === undefined) {
 			if (result.rest.length > 0) {
-				await writeRemoteRpcLineToChild(result.rest.toString("utf8"), writable, writeToClient);
+				await writeRemoteRpcLineToChild(
+					result.rest.toString("utf8"),
+					writable,
+					writeToClient,
+					rpcCompletionTracker,
+				);
 			}
-			if (!writable.destroyed && !writable.writableEnded) writable.end();
+			rpcCompletionTracker.markClientInputEnded();
 			return;
 		}
 
-		await writeRemoteRpcLineToChild(result.line, writable, writeToClient);
+		await writeRemoteRpcLineToChild(result.line, writable, writeToClient, rpcCompletionTracker);
 		buffer = result.rest;
 	}
 }
 
-async function pipeNodeJsonlReadableToIrohSend(readable, sendQueue) {
+async function pipeNodeJsonlReadableToIrohSend(readable, sendQueue, onLine) {
 	const decoder = new StringDecoder("utf8");
 	let buffer = "";
 
@@ -468,11 +567,15 @@ async function pipeNodeJsonlReadableToIrohSend(readable, sendQueue) {
 			const line = buffer.slice(0, newlineIndex + 1);
 			buffer = buffer.slice(newlineIndex + 1);
 			await sendQueue.write(line);
+			onLine(line);
 		}
 	}
 
 	buffer += decoder.end();
-	if (buffer.length > 0) await sendQueue.write(buffer);
+	if (buffer.length > 0) {
+		await sendQueue.write(buffer);
+		onLine(buffer);
+	}
 	await sendQueue.finish();
 }
 
@@ -516,12 +619,13 @@ async function authorizeClient({ hello, options, remoteId, state }) {
 		return { error: "client is not paired" };
 	}
 
+	const currentAllowTools = options.allowTools;
 	if (!existingClient) {
 		const client = {
 			nodeId: remoteId,
 			label: hello.clientLabel || remoteId.slice(0, 12),
 			allowedWorkspaces: [workspace.name],
-			allowedTools: workspace.allowedTools ?? options.allowTools,
+			allowedTools: currentAllowTools,
 			pairedAt: now,
 			lastSeenAt: now,
 		};
@@ -530,19 +634,20 @@ async function authorizeClient({ hello, options, remoteId, state }) {
 		options.pairingSecret = undefined;
 		options.pairingExpiresAt = undefined;
 		console.error(`paired client: ${client.label} (${remoteId})`);
-		return { client, workspace, allowTools: client.allowedTools };
+		return { client, workspace, allowTools: currentAllowTools };
 	}
 
 	if (!getClientWorkspace(existingClient, workspace.name)) {
 		return { error: `client is not allowed to use workspace: ${workspace.name}` };
 	}
 	existingClient.lastSeenAt = now;
+	existingClient.allowedTools = currentAllowTools;
 	if (hello.clientLabel) existingClient.label = hello.clientLabel;
 	await writeState(options.statePath, state);
 	return {
 		client: existingClient,
 		workspace,
-		allowTools: existingClient.allowedTools ?? workspace.allowedTools ?? options.allowTools,
+		allowTools: currentAllowTools,
 	};
 }
 
@@ -605,16 +710,20 @@ async function handleConnection(incoming, options, state) {
 		);
 
 		const sendQueue = createIrohSendQueue(stream.send);
+		const rpcCompletionTracker = createRemoteRpcCompletionTracker(sendQueue);
 		const clientToChild = pipeFilteredIrohRpcToNodeWritable(
 			stream.recv,
 			child.stdin,
 			handshake.rest,
 			(chunk) => sendQueue.write(chunk),
+			rpcCompletionTracker,
 		).catch((error) => {
 			if (!child.killed) child.kill();
 			throw error;
 		});
-		const childToClient = pipeNodeJsonlReadableToIrohSend(child.stdout, sendQueue);
+		const childToClient = pipeNodeJsonlReadableToIrohSend(child.stdout, sendQueue, (line) => {
+			rpcCompletionTracker.markChildOutputLine(line);
+		});
 		const childError = new Promise((_, rejectChildError) => {
 			child.once("error", (error) => {
 				rejectChildError(new Error(`RPC child error (${childCommand}): ${error.message}`));
@@ -622,7 +731,7 @@ async function handleConnection(incoming, options, state) {
 		});
 		const clientToChildFailure = clientToChild.then(() => new Promise(() => {}));
 
-		await Promise.race([childToClient, childError, clientToChildFailure]);
+		await Promise.race([childToClient, childError, clientToChildFailure, rpcCompletionTracker.completion]);
 	} finally {
 		if (child && child.exitCode === null && !child.killed) child.kill();
 		connection.close(0n, Array.from(Buffer.from("done", "utf8")));
