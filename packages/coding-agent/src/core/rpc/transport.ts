@@ -63,42 +63,103 @@ export interface JsonlStreamRpcTransportOptions {
 
 /** Create an RPC transport from normal Node readable/writable streams. */
 export function createJsonlStreamRpcTransport(options: JsonlStreamRpcTransportOptions): RpcTransport {
-	let pendingDrain: Promise<void> | undefined;
+	const pendingWrites = new Set<Promise<void>>();
+	const pendingWriteRejects = new Set<(error: Error) => void>();
+	let pendingWriteError: Error | undefined;
 
-	const waitForBackpressure = async (): Promise<void> => {
-		while (pendingDrain) {
-			await pendingDrain;
-		}
+	const recordWriteError = (error: unknown): Error => {
+		const writeError = error instanceof Error ? error : new Error(String(error));
+		pendingWriteError ??= writeError;
+		return writeError;
 	};
 
-	const writeLine = (line: string): void => {
+	const throwPendingWriteError = (): void => {
+		if (!pendingWriteError) {
+			return;
+		}
+		const writeError = pendingWriteError;
+		pendingWriteError = undefined;
+		throw writeError;
+	};
+
+	const onOutputError = (error: Error): void => {
+		const writeError = recordWriteError(error);
+		for (const reject of pendingWriteRejects) {
+			reject(writeError);
+		}
+	};
+	options.output.on("error", onOutputError);
+
+	const trackPendingWrite = (writeComplete: Promise<void>, rejectWrite: (error: Error) => void): Promise<void> => {
+		pendingWrites.add(writeComplete);
+		pendingWriteRejects.add(rejectWrite);
+		void writeComplete.then(
+			() => {
+				pendingWrites.delete(writeComplete);
+				pendingWriteRejects.delete(rejectWrite);
+			},
+			() => {
+				pendingWrites.delete(writeComplete);
+				pendingWriteRejects.delete(rejectWrite);
+			},
+		);
+		return writeComplete;
+	};
+
+	const waitForPendingWrites = async (): Promise<void> => {
+		while (pendingWrites.size > 0) {
+			await Promise.allSettled(pendingWrites);
+		}
+		throwPendingWriteError();
+	};
+
+	const writeLine = (line: string): Promise<void> => {
 		if (options.output.destroyed || !options.output.writable) {
 			throw new Error("RPC output stream is not writable");
 		}
 
-		const canContinue = options.output.write(line);
-		if (!canContinue && !pendingDrain) {
-			pendingDrain = once(options.output, "drain")
-				.then(() => undefined)
-				.finally(() => {
-					pendingDrain = undefined;
-				});
+		let resolveWrite: () => void;
+		let rejectWrite: (error: Error) => void;
+		const writeComplete = new Promise<void>((resolve, reject) => {
+			resolveWrite = resolve;
+			rejectWrite = reject;
+		});
+		trackPendingWrite(writeComplete, rejectWrite!);
+
+		try {
+			options.output.write(line, (error) => {
+				if (error) {
+					rejectWrite!(recordWriteError(error));
+					return;
+				}
+				resolveWrite!();
+			});
+		} catch (error: unknown) {
+			const writeError = recordWriteError(error);
+			rejectWrite!(writeError);
+			throw writeError;
 		}
+
+		return writeComplete;
 	};
 
 	return createJsonlRpcTransport({
 		input: options.input,
 		writeLine,
-		waitForBackpressure,
-		flush: waitForBackpressure,
+		waitForBackpressure: waitForPendingWrites,
+		flush: waitForPendingWrites,
 		close: async () => {
-			if (!options.closeOutput || options.output.destroyed || options.output.writableEnded) {
-				return;
-			}
+			try {
+				if (!options.closeOutput || options.output.destroyed || options.output.writableEnded) {
+					return;
+				}
 
-			options.output.end();
-			if (!options.output.writableFinished) {
-				await once(options.output, "finish");
+				options.output.end();
+				if (!options.output.writableFinished) {
+					await once(options.output, "finish");
+				}
+			} finally {
+				options.output.off("error", onOutputError);
 			}
 		},
 	});

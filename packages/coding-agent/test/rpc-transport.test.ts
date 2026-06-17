@@ -1,4 +1,4 @@
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { describe, expect, test } from "vitest";
 import { serializeJsonLine } from "../src/core/rpc/jsonl.ts";
 import {
@@ -75,6 +75,58 @@ describe("RPC transports", () => {
 		await transport.flush?.();
 
 		expect(outputChunks.join("")).toBe(serializeJsonLine({ ok: true }));
+	});
+
+	test("flush waits for asynchronous stream write callbacks", async () => {
+		let completeWrite: (() => void) | undefined;
+		const output = new Writable({
+			write(_chunk, _encoding, callback) {
+				completeWrite = () => callback();
+			},
+		});
+		const transport = createJsonlStreamRpcTransport({ input: new PassThrough(), output });
+
+		const writeResult = transport.write({ ok: true });
+		let flushed = false;
+		const flushPromise = transport.flush?.().then(() => {
+			flushed = true;
+		});
+		await new Promise<void>((resolve) => setImmediate(resolve));
+
+		expect(flushed).toBe(false);
+		expect(completeWrite).toBeDefined();
+
+		completeWrite?.();
+		await writeResult;
+		await flushPromise;
+
+		expect(flushed).toBe(true);
+	});
+
+	test("surfaces asynchronous stream write errors", async () => {
+		const writeError = new Error("write failed");
+		let failWrite: (() => void) | undefined;
+		const output = new Writable({
+			write(_chunk, _encoding, callback) {
+				failWrite = () => callback(writeError);
+			},
+		});
+		output.on("error", () => undefined);
+		const transport = createJsonlStreamRpcTransport({ input: new PassThrough(), output });
+
+		const writeResult = transport.write({ ok: true });
+		const flushPromise = transport.flush?.();
+		if (!writeResult || !flushPromise) {
+			throw new Error("Expected stream transport writes and flushes to return promises");
+		}
+		const writeExpectation = expect(writeResult).rejects.toBe(writeError);
+		const flushExpectation = expect(flushPromise).rejects.toBe(writeError);
+
+		expect(failWrite).toBeDefined();
+		failWrite?.();
+
+		await writeExpectation;
+		await flushExpectation;
 	});
 
 	test("can end an owned output stream on close", async () => {
