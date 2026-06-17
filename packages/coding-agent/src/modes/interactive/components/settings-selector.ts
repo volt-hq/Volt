@@ -73,7 +73,7 @@ export interface SettingsConfig {
 	defaultProjectTrust: DefaultProjectTrust;
 	clearOnShrink: boolean;
 	showTerminalProgress: boolean;
-	turnDoneAlert: TurnDoneAlert;
+	turnDoneAlert?: TurnDoneAlert;
 	warnings: WarningSettings;
 }
 
@@ -104,7 +104,7 @@ export interface SettingsCallbacks {
 	onDefaultProjectTrustChange: (defaultProjectTrust: DefaultProjectTrust) => void;
 	onClearOnShrinkChange: (enabled: boolean) => void;
 	onShowTerminalProgressChange: (enabled: boolean) => void;
-	onTurnDoneAlertChange: (mode: TurnDoneAlert) => void;
+	onTurnDoneAlertChange?: (mode: TurnDoneAlert) => void;
 	onWarningsChange: (warnings: WarningSettings) => void;
 	onCancel: () => void;
 }
@@ -513,14 +513,16 @@ export class SettingsSelectorComponent extends Container {
 		});
 
 		// Turn done alert (insert after terminal-progress)
-		const terminalProgressIndex = items.findIndex((item) => item.id === "terminal-progress");
-		items.splice(terminalProgressIndex + 1, 0, {
-			id: "turn-done-alert",
-			label: "Turn done alert",
-			description: "Ring the terminal bell when Volt finishes a response",
-			currentValue: config.turnDoneAlert,
-			values: ["off", "bell"],
-		});
+		if (callbacks.onTurnDoneAlertChange) {
+			const terminalProgressIndex = items.findIndex((item) => item.id === "terminal-progress");
+			items.splice(terminalProgressIndex + 1, 0, {
+				id: "turn-done-alert",
+				label: "Turn done alert",
+				description: "Ring the terminal bell when Volt finishes a response",
+				currentValue: config.turnDoneAlert ?? "off",
+				values: ["off", "bell"],
+			});
+		}
 
 		// Add borders
 		this.addChild(new DynamicBorder());
@@ -608,7 +610,7 @@ export class SettingsSelectorComponent extends Container {
 						callbacks.onShowTerminalProgressChange(newValue === "true");
 						break;
 					case "turn-done-alert":
-						callbacks.onTurnDoneAlertChange(newValue as TurnDoneAlert);
+						callbacks.onTurnDoneAlertChange?.(newValue as TurnDoneAlert);
 						break;
 				}
 			},
