@@ -96,6 +96,33 @@ function isTruthyEnvFlag(value: string | undefined): boolean {
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
 }
 
+function resolveRequestedProfile(parsed: Args): string | undefined {
+	const profile = parsed.profile ?? process.env.VOLT_PROFILE;
+	const trimmed = profile?.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+function stripCommandProfileArgs(args: readonly string[]): { args: string[]; profile?: string; error?: string } {
+	const commandArgs: string[] = [];
+	let profile: string | undefined;
+
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index];
+		if (arg === "--profile") {
+			const value = args[index + 1];
+			if (value === undefined || value.startsWith("-")) {
+				return { args: [...args], error: "--profile requires a value" };
+			}
+			profile = value;
+			index++;
+			continue;
+		}
+		commandArgs.push(arg);
+	}
+
+	return { args: commandArgs, profile };
+}
+
 function resolveAppMode(parsed: Args, stdinIsTTY: boolean, stdoutIsTTY: boolean): AppMode {
 	if (parsed.mode === "rpc") {
 		return "rpc";
@@ -467,19 +494,31 @@ export async function main(args: string[], options?: MainOptions) {
 		cleanupWindowsSelfUpdateQuarantine(getPackageDir());
 	}
 
-	if (await handleStoreCommand(args, { extensionFactories: options?.extensionFactories })) {
+	const commandProfileArgs = stripCommandProfileArgs(args);
+	if (commandProfileArgs.error) {
+		console.error(chalk.red(`Error: ${commandProfileArgs.error}`));
+		process.exitCode = 1;
+		return;
+	}
+	const commandRuntimeOptions = {
+		extensionFactories: options?.extensionFactories,
+		profile: commandProfileArgs.profile,
+	};
+
+	if (await handleStoreCommand(commandProfileArgs.args, commandRuntimeOptions)) {
 		return;
 	}
 
-	if (await handlePackageCommand(args, { extensionFactories: options?.extensionFactories })) {
+	if (await handlePackageCommand(commandProfileArgs.args, commandRuntimeOptions)) {
 		return;
 	}
 
-	if (await handleConfigCommand(args, { extensionFactories: options?.extensionFactories })) {
+	if (await handleConfigCommand(commandProfileArgs.args, commandRuntimeOptions)) {
 		return;
 	}
 
 	const parsed = parseArgs(args);
+	const requestedProfile = resolveRequestedProfile(parsed);
 	if (parsed.diagnostics.length > 0) {
 		for (const d of parsed.diagnostics) {
 			const color = d.type === "error" ? chalk.red : chalk.yellow;
@@ -530,7 +569,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 	const cwd = process.cwd();
 	const agentDir = getAgentDir();
-	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
+	const startupSettingsManager = SettingsManager.create(cwd, agentDir, { profile: requestedProfile });
 	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
 
 	// Experimental first-time setup: theme choice and analytics opt-in.
@@ -586,13 +625,9 @@ export async function main(args: string[], options?: MainOptions) {
 	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
 	const authStorage = AuthStorage.create();
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
-		cwd,
-		agentDir,
-		sessionManager,
-		sessionStartEvent,
-		projectTrustContext,
-	}) => {
+	const createRuntime: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
+		const { cwd, agentDir, sessionManager, sessionStartEvent, projectTrustContext } = runtimeOptions;
+		const runtimeProfile = Object.hasOwn(runtimeOptions, "profile") ? runtimeOptions.profile : requestedProfile;
 		const isInitialRuntime = sessionStartEvent === undefined;
 		const projectTrustDiagnostics: AgentSessionRuntimeDiagnostic[] = [];
 		const cachedProjectTrust = projectTrustByCwd.get(cwd);
@@ -602,7 +637,10 @@ export async function main(args: string[], options?: MainOptions) {
 		const projectTrusted = shouldResolveProjectTrust
 			? false
 			: (cachedProjectTrust ?? parsed.projectTrustOverride ?? (!hasTrustInputs || trustStore.get(cwd) === true));
-		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
+		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, {
+			projectTrusted,
+			profile: runtimeProfile,
+		});
 		const services = await createAgentSessionServices({
 			cwd,
 			agentDir,
@@ -786,6 +824,7 @@ export async function main(args: string[], options?: MainOptions) {
 		const interactiveMode = new InteractiveMode(runtime, {
 			migratedProviders,
 			modelFallbackMessage,
+			modelScopePatterns: parsed.models,
 			autoTrustOnReloadCwd,
 			initialMessage,
 			initialImages,

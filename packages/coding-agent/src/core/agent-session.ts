@@ -30,7 +30,6 @@ import {
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	modelsAreEqual,
-	resetApiProviders,
 	streamSimple,
 } from "@earendil-works/volt-ai";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
@@ -242,6 +241,10 @@ export interface SessionStats {
 interface ToolDefinitionEntry {
 	definition: ToolDefinition;
 	sourceInfo: SourceInfo;
+}
+
+interface DefaultPersistenceOptions {
+	persistDefault?: boolean;
 }
 
 // ============================================================================
@@ -1461,22 +1464,25 @@ export class AgentSession {
 
 	/**
 	 * Set model directly.
-	 * Validates that auth is configured, saves to session and settings.
+	 * Validates that auth is configured, saves to session, and persists as the default unless disabled.
 	 * @throws Error if no auth is configured for the model
 	 */
-	async setModel(model: Model<any>): Promise<void> {
+	async setModel(model: Model<any>, options?: DefaultPersistenceOptions): Promise<void> {
 		if (!this._modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
 		const previousModel = this.model;
+		const persistDefault = options?.persistDefault !== false;
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		this.agent.state.model = model;
 		this.sessionManager.appendModelChange(model.provider, model.id);
-		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+		if (persistDefault) {
+			this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+		}
 
 		// Re-clamp thinking level for new model's capabilities
-		this.setThinkingLevel(thinkingLevel);
+		this.setThinkingLevel(thinkingLevel, { persistDefault });
 
 		await this._emitModelSelect(model, previousModel, "set");
 	}
@@ -1555,21 +1561,22 @@ export class AgentSession {
 	/**
 	 * Set thinking level.
 	 * Clamps to model capabilities based on available thinking levels.
-	 * Saves to session and settings only if the level actually changes.
+	 * Saves to session and settings only if the level actually changes. Settings persistence can be disabled.
 	 */
-	setThinkingLevel(level: ThinkingLevel): void {
+	setThinkingLevel(level: ThinkingLevel, options?: DefaultPersistenceOptions): void {
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
 
 		// Only persist if actually changing
 		const previousLevel = this.agent.state.thinkingLevel;
 		const isChanging = effectiveLevel !== previousLevel;
+		const persistDefault = options?.persistDefault !== false;
 
 		this.agent.state.thinkingLevel = effectiveLevel;
 
 		if (isChanging) {
 			this.sessionManager.appendThinkingLevelChange(effectiveLevel);
-			if (this.supportsThinking() || effectiveLevel !== "off") {
+			if (persistDefault && (this.supportsThinking() || effectiveLevel !== "off")) {
 				this.settingsManager.setDefaultThinkingLevel(effectiveLevel);
 			}
 			this._emit({ type: "thinking_level_changed", level: effectiveLevel });
@@ -1634,6 +1641,13 @@ export class AgentSession {
 	private syncQueueModesFromSettings(): void {
 		this.agent.steeringMode = this.settingsManager.getSteeringMode();
 		this.agent.followUpMode = this.settingsManager.getFollowUpMode();
+	}
+
+	private syncAgentRuntimeSettingsFromSettings(): void {
+		this.syncQueueModesFromSettings();
+		this.agent.transport = this.settingsManager.getTransport();
+		this.agent.thinkingBudgets = this.settingsManager.getThinkingBudgets();
+		this.agent.maxRetryDelayMs = this.settingsManager.getProviderRetrySettings().maxRetryDelayMs;
 	}
 
 	/**
@@ -2188,11 +2202,26 @@ export class AgentSession {
 		}
 
 		const refreshedModel = this._modelRegistry.find(currentModel.provider, currentModel.id);
-		if (!refreshedModel || refreshedModel === currentModel) {
+		if (refreshedModel) {
+			if (refreshedModel !== currentModel) {
+				this.agent.state.model = refreshedModel;
+			}
 			return;
 		}
 
-		this.agent.state.model = refreshedModel;
+		const scopedFallback = this._scopedModels
+			.map((scoped) => this._modelRegistry.find(scoped.model.provider, scoped.model.id))
+			.find((model) => model !== undefined && this._modelRegistry.hasConfiguredAuth(model));
+		const fallbackModel = scopedFallback ?? this._modelRegistry.getAvailable()[0];
+		if (!fallbackModel) {
+			(this.agent.state as unknown as { model: Model<any> | undefined }).model = undefined;
+			return;
+		}
+
+		const thinkingLevel = this._getThinkingLevelForModelSwitch();
+		this.agent.state.model = fallbackModel;
+		this.sessionManager.appendModelChange(fallbackModel.provider, fallbackModel.id);
+		this.setThinkingLevel(thinkingLevel, { persistDefault: false });
 	}
 
 	private _bindExtensionCore(runner: ExtensionRunner): void {
@@ -2472,14 +2501,15 @@ export class AgentSession {
 		const previousFlagValues = this._extensionRunner.getFlagValues();
 		await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });
 		await this.settingsManager.reload();
-		this.syncQueueModesFromSettings();
-		resetApiProviders();
+		this.syncAgentRuntimeSettingsFromSettings();
+		this._modelRegistry.clearRegisteredProviders();
 		await this._resourceLoader.reload();
 		this._buildRuntime({
 			activeToolNames: this.getActiveToolNames(),
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});
+		this._refreshCurrentModelFromRegistry();
 
 		const hasBindings =
 			this._extensionUIContext ||

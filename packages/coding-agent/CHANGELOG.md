@@ -18,9 +18,12 @@
 - Added built-in LSP server defaults for clangd (C/C++), zls (Zig), lua-language-server, and bash-language-server.
 - Added LSP protocol tracing: `lsp.traceFile` setting and `/lsp trace [path|off]` runtime toggle append JSON-RPC traffic, server stderr, and lifecycle events to a log file.
 - Added a built-in `/review` command that reviews uncommitted changes, branch diffs vs a base, GitHub PRs, or single commits in an isolated in-process review session with full tool access, then starts a fresh session seeded only with the numbered findings so follow-ups like "fix 1 and 3" run with clean context. Configure the reviewer model with the `reviewModel` setting or the "Review model" entry in `/settings`.
+- Added settings profiles, selectable with `--profile`, `VOLT_PROFILE`, or `defaultProfile`, for workflow-specific settings and resource overlays.
+- Added `/profile` for interactive profile inspection, switching, and creating empty global profiles.
 
 ### Fixed
 
+- Fixed interactive mode to remember the last active settings profile on quit.
 - Fixed store package installs leaking verbose git and npm subprocess output into the interactive screen.
 - Fixed the default store catalog URL to point at the deployed GitHub Pages catalog.
 - Fixed store removal for project-local packages whose saved paths are relative to the project settings directory.
