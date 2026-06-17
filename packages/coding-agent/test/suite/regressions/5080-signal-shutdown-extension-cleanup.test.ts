@@ -22,6 +22,7 @@ type ShutdownThis = {
 	runtimeHost: { dispose: () => Promise<void> };
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	stop: () => void;
+	settingsManager: { rememberActiveProfile: () => void; flush: () => Promise<void> };
 	sessionManager: SessionManager;
 };
 
@@ -84,6 +85,10 @@ function createContext(order: string[], sessionManager = createSessionManager())
 		stop: vi.fn(() => {
 			order.push("stop");
 		}),
+		settingsManager: {
+			rememberActiveProfile: vi.fn(),
+			flush: vi.fn(async () => {}),
+		},
 		sessionManager,
 	};
 }

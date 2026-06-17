@@ -435,7 +435,7 @@ describe("LspManager", () => {
 			let content = "";
 			for (let attempt = 0; attempt < 20; attempt++) {
 				content = readFileSync(traceFile, "utf-8");
-				if (content.includes("documentSymbol")) break;
+				if (content.includes("textDocument/documentSymbol")) break;
 				await new Promise((resolve) => setTimeout(resolve, 100));
 			}
 			expect(content).toContain("info: spawning:");

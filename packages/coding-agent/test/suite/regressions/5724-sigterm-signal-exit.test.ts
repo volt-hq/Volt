@@ -14,6 +14,7 @@ type ShutdownThis = {
 	runtimeHost: { dispose: () => Promise<void> };
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	stop: () => void;
+	settingsManager: { rememberActiveProfile: () => void; flush: () => Promise<void> };
 };
 
 type InteractiveModePrototypeWithShutdown = {
@@ -76,6 +77,10 @@ describe("InteractiveMode SIGTERM shutdown with signal-exit (#5724)", () => {
 			stop: vi.fn(() => {
 				order.push("stop");
 			}),
+			settingsManager: {
+				rememberActiveProfile: vi.fn(),
+				flush: vi.fn(async () => {}),
+			},
 		};
 
 		const shutdownPromise = callShutdown(context, { fromSignal: true });
