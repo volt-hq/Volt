@@ -27,6 +27,7 @@ const FIRE_AND_FORGET_EXTENSION_UI_METHODS = new Set([
 	"setTitle",
 	"set_editor_text",
 ]);
+const PROMPT_COMPLETION_SETTLE_MS = 100;
 
 function printUsage() {
 	console.error(`Usage: npm run client -- <ticket> [options]
@@ -95,9 +96,15 @@ function createRpcState(flags) {
 	return {
 		currentPrompt: undefined,
 		done: false,
+		failed: false,
+		pendingCompaction: false,
+		pendingQueueMessages: false,
+		promptCompletionTimer: undefined,
 		responseResolvers: new Map(),
+		retryInProgress: false,
 		sawText: false,
 		verbose: hasFlag(flags, "verbose"),
+		waitingForContinuation: false,
 	};
 }
 
@@ -111,11 +118,51 @@ function formatToolArgs(args) {
 	}
 }
 
+function markDone(state) {
+	if (state.done) return;
+	state.done = true;
+	state.resolveDone?.();
+}
+
+function clearPromptCompletionTimer(state) {
+	if (!state.promptCompletionTimer) return;
+	clearTimeout(state.promptCompletionTimer);
+	state.promptCompletionTimer = undefined;
+}
+
+function hasPendingPromptContinuation(state) {
+	return state.waitingForContinuation || state.retryInProgress || state.pendingCompaction || state.pendingQueueMessages;
+}
+
 function finishCurrentPrompt(state) {
+	clearPromptCompletionTimer(state);
 	if (!state.currentPrompt) return;
 	if (state.currentPrompt.sawText) process.stdout.write("\n");
 	state.currentPrompt.resolve();
 	state.currentPrompt = undefined;
+}
+
+function finishOneShotPrompt(state) {
+	clearPromptCompletionTimer(state);
+	if (state.sawText) process.stdout.write("\n");
+	markDone(state);
+}
+
+function finishPrompt(state) {
+	if (state.currentPrompt) {
+		finishCurrentPrompt(state);
+		return;
+	}
+	finishOneShotPrompt(state);
+}
+
+function schedulePromptCompletion(state) {
+	clearPromptCompletionTimer(state);
+	state.promptCompletionTimer = setTimeout(() => {
+		state.promptCompletionTimer = undefined;
+		if (hasPendingPromptContinuation(state)) return;
+		finishPrompt(state);
+	}, PROMPT_COMPLETION_SETTLE_MS);
 }
 
 function finishCurrentPromptWithError(state, message) {
@@ -156,13 +203,15 @@ function printRpcLine(line, state) {
 				finishCurrentPromptWithError(state, message);
 			} else {
 				console.error(`\n${message}`);
-				state.done = true;
+				state.failed = true;
+				clearPromptCompletionTimer(state);
+				markDone(state);
 			}
 			return;
 		}
 		if (event.command === "get_state") {
 			console.log(JSON.stringify(event.data, null, 2));
-			state.done = true;
+			markDone(state);
 		}
 		return;
 	}
@@ -173,13 +222,61 @@ function printRpcLine(line, state) {
 		return;
 	}
 
+	if (event.type === "agent_start") {
+		state.waitingForContinuation = false;
+		clearPromptCompletionTimer(state);
+		if (state.verbose) console.error(JSON.stringify(event));
+		return;
+	}
+
+	if (event.type === "queue_update") {
+		state.pendingQueueMessages =
+			(event.steering?.length ?? 0) > 0 || (event.followUp?.length ?? 0) > 0;
+		if (state.pendingQueueMessages) clearPromptCompletionTimer(state);
+		if (state.verbose) console.error(JSON.stringify(event));
+		return;
+	}
+
+	if (event.type === "auto_retry_start") {
+		state.retryInProgress = true;
+		state.waitingForContinuation = false;
+		clearPromptCompletionTimer(state);
+		if (state.verbose) console.error(JSON.stringify(event));
+		return;
+	}
+
+	if (event.type === "auto_retry_end") {
+		state.retryInProgress = false;
+		state.waitingForContinuation = false;
+		if (event.success === false && !hasPendingPromptContinuation(state)) schedulePromptCompletion(state);
+		if (state.verbose) console.error(JSON.stringify(event));
+		return;
+	}
+
+	if (event.type === "compaction_start") {
+		state.pendingCompaction = true;
+		state.waitingForContinuation = false;
+		clearPromptCompletionTimer(state);
+		if (state.verbose) console.error(JSON.stringify(event));
+		return;
+	}
+
+	if (event.type === "compaction_end") {
+		state.pendingCompaction = false;
+		state.waitingForContinuation = event.willRetry === true;
+		if (!state.waitingForContinuation && !hasPendingPromptContinuation(state)) schedulePromptCompletion(state);
+		if (state.verbose) console.error(JSON.stringify(event));
+		return;
+	}
+
 	if (event.type === "agent_end") {
-		if (state.currentPrompt) {
-			finishCurrentPrompt(state);
+		if (event.willRetry) {
+			state.waitingForContinuation = true;
+			clearPromptCompletionTimer(state);
 			return;
 		}
-		if (state.sawText) process.stdout.write("\n");
-		state.done = true;
+		state.waitingForContinuation = false;
+		if (!hasPendingPromptContinuation(state)) schedulePromptCompletion(state);
 		return;
 	}
 
@@ -248,6 +345,7 @@ async function runOneShot(stream, flags, initialRest) {
 	let resolveDone;
 	const done = new Promise((resolve) => {
 		resolveDone = resolve;
+		state.resolveDone = resolve;
 	});
 	const reader = readJsonlFromIroh(
 		stream.recv,
@@ -260,6 +358,10 @@ async function runOneShot(stream, flags, initialRest) {
 		.then(() => {
 			readerDone = true;
 			if (!state.done) {
+				if (state.promptCompletionTimer) {
+					finishPrompt(state);
+					return;
+				}
 				throw new Error("Connection closed before the RPC command completed");
 			}
 		})
@@ -284,7 +386,10 @@ async function runOneShot(stream, flags, initialRest) {
 		}
 	} finally {
 		clearTimeout(timeoutId);
+		clearPromptCompletionTimer(state);
 	}
+
+	if (state.failed) process.exitCode = 1;
 }
 
 async function runInteractive(stream, flags, initialRest) {
@@ -355,6 +460,7 @@ async function runInteractive(stream, flags, initialRest) {
 		}
 	} finally {
 		closing = true;
+		clearPromptCompletionTimer(state);
 		rl.close();
 	}
 

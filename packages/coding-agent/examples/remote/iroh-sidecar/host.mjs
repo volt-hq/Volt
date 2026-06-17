@@ -37,6 +37,7 @@ const REMOTE_RPC_PASSTHROUGH_TYPES = new Set([
 ]);
 const PROMPT_COMPLETION_RPC_TYPES = new Set(["prompt", "steer", "follow_up"]);
 const RESPONSE_COMPLETION_RPC_TYPES = new Set(["abort", "get_state"]);
+const PROMPT_COMPLETION_SETTLE_MS = 100;
 
 function printUsage() {
 	console.error(`Usage: npm run host -- [serve] [options]
@@ -265,7 +266,7 @@ function spawnRpcChild(options, workspace, allowTools) {
 	if (options.sourceVolt) {
 		const runnerPath = options.resolvedSourceVoltRunner ?? resolve(options.sourceVolt, "scripts", "run-coding-agent-source.mjs");
 		const args = [runnerPath, "--mode", "rpc"];
-		if (allowTools) args.push("--tools", allowTools);
+		if (allowTools !== undefined) args.push("--tools", allowTools);
 		return {
 			command: process.execPath,
 			args,
@@ -291,7 +292,7 @@ function spawnRpcChild(options, workspace, allowTools) {
 
 	const voltBin = options.resolvedVoltBin ?? getPlatformVoltBin(options.voltBin);
 	const args = ["--mode", "rpc"];
-	if (allowTools) args.push("--tools", allowTools);
+	if (allowTools !== undefined) args.push("--tools", allowTools);
 	return {
 		command: voltBin,
 		args,
@@ -396,6 +397,11 @@ function createRemoteRpcCompletionTracker(sendQueue) {
 	let clientInputEnded = false;
 	let pendingPromptCompletions = 0;
 	let completionSettled = false;
+	let pendingCompaction = false;
+	let pendingQueueMessages = false;
+	let promptCompletionTimer;
+	let retryInProgress = false;
+	let waitingForContinuation = false;
 	const pendingResponseIds = new Set();
 	const pendingResponseCommands = new Map();
 	let resolveCompletion;
@@ -421,6 +427,31 @@ function createRemoteRpcCompletionTracker(sendQueue) {
 		}
 		pendingResponseCommands.set(command, count - 1);
 	};
+	const clearPromptCompletionTimer = () => {
+		if (!promptCompletionTimer) return;
+		clearTimeout(promptCompletionTimer);
+		promptCompletionTimer = undefined;
+	};
+	const hasPendingPromptContinuation = () => {
+		return waitingForContinuation || retryInProgress || pendingCompaction || pendingQueueMessages;
+	};
+	const completePendingPromptCompletion = () => {
+		clearPromptCompletionTimer();
+		if (pendingPromptCompletions > 0) pendingPromptCompletions -= 1;
+		maybeComplete();
+	};
+	const schedulePendingPromptCompletion = () => {
+		if (pendingPromptCompletions <= 0) {
+			maybeComplete();
+			return;
+		}
+		clearPromptCompletionTimer();
+		promptCompletionTimer = setTimeout(() => {
+			promptCompletionTimer = undefined;
+			if (hasPendingPromptContinuation()) return;
+			completePendingPromptCompletion();
+		}, PROMPT_COMPLETION_SETTLE_MS);
+	};
 	const maybeComplete = () => {
 		if (
 			completionSettled ||
@@ -432,6 +463,7 @@ function createRemoteRpcCompletionTracker(sendQueue) {
 			return;
 		}
 		completionSettled = true;
+		clearPromptCompletionTimer();
 		sendQueue.finish().then(resolveCompletion, rejectCompletion);
 	};
 
@@ -446,15 +478,61 @@ function createRemoteRpcCompletionTracker(sendQueue) {
 			}
 			if (typeof event !== "object" || event === null || typeof event.type !== "string") return;
 
+			if (event.type === "agent_start") {
+				waitingForContinuation = false;
+				clearPromptCompletionTimer();
+				return;
+			}
+
+			if (event.type === "queue_update") {
+				pendingQueueMessages =
+					(event.steering?.length ?? 0) > 0 || (event.followUp?.length ?? 0) > 0;
+				if (pendingQueueMessages) clearPromptCompletionTimer();
+				return;
+			}
+
+			if (event.type === "auto_retry_start") {
+				retryInProgress = true;
+				waitingForContinuation = false;
+				clearPromptCompletionTimer();
+				return;
+			}
+
+			if (event.type === "auto_retry_end") {
+				retryInProgress = false;
+				waitingForContinuation = false;
+				if (event.success === false && !hasPendingPromptContinuation()) schedulePendingPromptCompletion();
+				return;
+			}
+
+			if (event.type === "compaction_start") {
+				pendingCompaction = true;
+				waitingForContinuation = false;
+				clearPromptCompletionTimer();
+				return;
+			}
+
+			if (event.type === "compaction_end") {
+				pendingCompaction = false;
+				waitingForContinuation = event.willRetry === true;
+				if (!waitingForContinuation && !hasPendingPromptContinuation()) schedulePendingPromptCompletion();
+				return;
+			}
+
 			if (event.type === "agent_end") {
-				if (pendingPromptCompletions > 0) pendingPromptCompletions -= 1;
-				maybeComplete();
+				if (event.willRetry) {
+					waitingForContinuation = true;
+					clearPromptCompletionTimer();
+					return;
+				}
+				waitingForContinuation = false;
+				if (!hasPendingPromptContinuation()) schedulePendingPromptCompletion();
 				return;
 			}
 
 			if (event.type !== "response" || typeof event.command !== "string") return;
 			if (PROMPT_COMPLETION_RPC_TYPES.has(event.command) && event.success === false) {
-				if (pendingPromptCompletions > 0) pendingPromptCompletions -= 1;
+				completePendingPromptCompletion();
 			} else if (typeof event.id === "string" && pendingResponseIds.delete(event.id)) {
 				// The response id completed a one-shot command.
 			} else if (RESPONSE_COMPLETION_RPC_TYPES.has(event.command)) {
