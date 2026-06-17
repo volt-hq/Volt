@@ -21,6 +21,7 @@ import type {
 } from "../../core/extensions/index.ts";
 import {
 	flushRawStdout,
+	restoreStdout,
 	takeOverStdout,
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
@@ -84,6 +85,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		takeOverStdout();
 	}
 	const shouldExitProcess = options.exitProcess ?? !options.transport;
+	const shouldRestoreStdout = !options.transport && !shouldExitProcess;
 	const transport = options.transport ?? createStdioRpcTransport();
 	const pendingWrites = new Set<Promise<void>>();
 	let hasPendingWriteError = false;
@@ -762,19 +764,40 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		shuttingDown = true;
 		shutdownPromise = (async () => {
 			try {
-				for (const cleanup of signalCleanupHandlers) {
-					cleanup();
+				let hasShutdownError = false;
+				let shutdownError: unknown;
+				try {
+					for (const cleanup of signalCleanupHandlers) {
+						cleanup();
+					}
+					unsubscribe?.();
+					unsubscribeBackpressure?.();
+					await runtimeHost.dispose();
+					detachInput();
+					detachClose();
+					if (signal !== "SIGTERM") {
+						await waitForTransportBackpressure();
+						await transport.flush?.();
+					}
+				} catch (error: unknown) {
+					hasShutdownError = true;
+					shutdownError = error;
+				} finally {
+					try {
+						await transport.close();
+					} catch (closeError: unknown) {
+						if (!hasShutdownError) {
+							hasShutdownError = true;
+							shutdownError = closeError;
+						}
+					}
+					if (shouldRestoreStdout) {
+						restoreStdout();
+					}
 				}
-				unsubscribe?.();
-				unsubscribeBackpressure?.();
-				await runtimeHost.dispose();
-				detachInput();
-				detachClose();
-				if (signal !== "SIGTERM") {
-					await waitForTransportBackpressure();
-					await transport.flush?.();
+				if (hasShutdownError) {
+					throw shutdownError;
 				}
-				await transport.close();
 				if (shouldExitProcess) {
 					process.exit(exitCode);
 				}

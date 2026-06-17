@@ -1,5 +1,6 @@
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { isStdoutTakenOver, restoreStdout } from "../src/core/output-guard.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 
@@ -22,6 +23,10 @@ function createRuntimeHost(): { runtimeHost: AgentSessionRuntime; dispose: Retur
 
 	return { runtimeHost, dispose };
 }
+
+afterEach(() => {
+	restoreStdout();
+});
 
 describe("RPC mode caller-provided transports", () => {
 	test("close without exiting the embedding process", async () => {
@@ -60,5 +65,53 @@ describe("RPC mode caller-provided transports", () => {
 		} finally {
 			exitSpy.mockRestore();
 		}
+	});
+
+	test("closes the transport when shutdown flushing fails", async () => {
+		let closeHandler: RpcCloseHandler | undefined;
+		const flushError = new Error("flush failed");
+		const transportClose = vi.fn(async () => {});
+		const transportFlush = vi.fn(async () => {
+			throw flushError;
+		});
+		const transport: RpcTransport = {
+			write: vi.fn(),
+			onLine: vi.fn(() => () => {}),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return () => {};
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: transportFlush,
+			close: transportClose,
+		};
+		const { runtimeHost } = createRuntimeHost();
+
+		const modePromise = runRpcMode(runtimeHost, { transport });
+		await vi.waitFor(() => expect(closeHandler).toBeDefined());
+
+		closeHandler?.();
+
+		await expect(modePromise).rejects.toThrow(flushError);
+		expect(transportFlush).toHaveBeenCalledOnce();
+		expect(transportClose).toHaveBeenCalledOnce();
+	});
+});
+
+describe("RPC mode stdio transport", () => {
+	test("restores stdout when non-exiting stdio mode closes", async () => {
+		const initialEndListenerCount = process.stdin.listenerCount("end");
+		const { runtimeHost } = createRuntimeHost();
+
+		const modePromise = runRpcMode(runtimeHost, { exitProcess: false });
+		await vi.waitFor(() => {
+			expect(process.stdin.listenerCount("end")).toBeGreaterThan(initialEndListenerCount);
+		});
+		expect(isStdoutTakenOver()).toBe(true);
+
+		process.stdin.emit("end");
+
+		await expect(modePromise).resolves.toBeUndefined();
+		expect(isStdoutTakenOver()).toBe(false);
 	});
 });
