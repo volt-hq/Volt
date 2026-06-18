@@ -1,0 +1,128 @@
+import { describe, expect, test, vi } from "vitest";
+import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { createLoopbackRpcTransportPair } from "../src/core/rpc/index.ts";
+import { createInProcessRpcClient } from "../src/modes/rpc/in-process-rpc-client.ts";
+import { RpcTransportClient } from "../src/modes/rpc/rpc-transport-client.ts";
+
+describe("loopback RPC transport", () => {
+	test("buffers writes until a peer line handler attaches and preserves JSON string separators", () => {
+		const pair = createLoopbackRpcTransportPair();
+		const receivedLines: string[] = [];
+
+		pair.client.write({ text: "a\u2028b\u2029c" });
+		pair.server.onLine((line) => {
+			receivedLines.push(line);
+		});
+
+		expect(receivedLines).toEqual([JSON.stringify({ text: "a\u2028b\u2029c" })]);
+	});
+
+	test("closing one endpoint notifies the peer input", () => {
+		const pair = createLoopbackRpcTransportPair();
+		const closeHandler = vi.fn();
+		pair.server.onClose?.(closeHandler);
+
+		pair.client.close();
+
+		expect(closeHandler).toHaveBeenCalledOnce();
+	});
+});
+
+describe("RpcTransportClient", () => {
+	test("sends typed commands and receives non-response events over a transport", async () => {
+		const pair = createLoopbackRpcTransportPair();
+		const client = new RpcTransportClient({ transport: pair.client });
+		const events: Array<{ type: string }> = [];
+		client.onEvent((event) => {
+			events.push(event);
+		});
+		pair.server.onLine((line) => {
+			const command = parseCommandLine(line);
+			pair.server.write({
+				id: command.id,
+				type: "response",
+				command: command.type,
+				success: true,
+				data: { commands: [] },
+			});
+			pair.server.write({ type: "extension_ui_request", id: "ui-1", method: "notify", message: "hello" });
+		});
+
+		await client.start();
+
+		await expect(client.getCommands()).resolves.toEqual([]);
+		expect(events).toEqual([{ type: "extension_ui_request", id: "ui-1", method: "notify", message: "hello" }]);
+
+		await client.stop();
+	});
+
+	test("rejects in-flight requests when the transport closes", async () => {
+		const pair = createLoopbackRpcTransportPair();
+		const client = new RpcTransportClient({ transport: pair.client });
+		await client.start();
+
+		const statePromise = client.getState();
+		pair.server.close();
+
+		await expect(statePromise).rejects.toThrow("RPC transport closed");
+	});
+});
+
+describe("createInProcessRpcClient", () => {
+	test("runs RPC mode against a runtime in the same process", async () => {
+		const dispose = vi.fn(async () => {});
+		const runtimeHost = createRuntimeHost(dispose);
+		const client = await createInProcessRpcClient(runtimeHost);
+
+		await expect(client.getState()).resolves.toMatchObject({
+			thinkingLevel: "off",
+			isStreaming: false,
+			sessionId: "in-process-session",
+			messageCount: 0,
+		});
+
+		await client.stop();
+		expect(dispose).toHaveBeenCalledOnce();
+	});
+});
+
+function parseCommandLine(line: string): { id: string; type: string } {
+	const parsed: unknown = JSON.parse(line);
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		throw new Error("command must be an object");
+	}
+	const command = parsed as Record<string, unknown>;
+	if (typeof command.id !== "string" || typeof command.type !== "string") {
+		throw new Error("command must include id and type");
+	}
+	return { id: command.id, type: command.type };
+}
+
+function createRuntimeHost(dispose: () => Promise<void>): AgentSessionRuntime {
+	return {
+		session: {
+			bindExtensions: vi.fn(async () => {}),
+			subscribe: vi.fn(() => () => {}),
+			agent: {
+				subscribe: vi.fn(() => () => {}),
+			},
+			model: undefined,
+			thinkingLevel: "off",
+			isStreaming: false,
+			isCompacting: false,
+			steeringMode: "one-at-a-time",
+			followUpMode: "one-at-a-time",
+			sessionFile: undefined,
+			sessionId: "in-process-session",
+			sessionName: undefined,
+			autoCompactionEnabled: true,
+			messages: [],
+			pendingMessageCount: 0,
+		},
+		newSession: vi.fn(async () => ({ cancelled: true })),
+		switchSession: vi.fn(async () => ({ cancelled: true })),
+		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+		dispose,
+		setRebindSession: vi.fn(),
+	} as unknown as AgentSessionRuntime;
+}
