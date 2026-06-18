@@ -16,6 +16,7 @@ export {
 	type RpcClientEvent,
 	type RpcClientOptions,
 	type RpcEventListener,
+	type RpcExtensionErrorEvent,
 } from "./rpc/rpc-client.ts";
 export { type RpcModeOptions, runRpcMode } from "./rpc/rpc-mode.ts";
 export { RpcTransportClient, type RpcTransportClientOptions } from "./rpc/rpc-transport-client.ts";

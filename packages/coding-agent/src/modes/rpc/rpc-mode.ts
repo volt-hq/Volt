@@ -52,6 +52,8 @@ export interface RpcModeOptions {
 	transport?: RpcTransport;
 	/** Defaults to true for stdio RPC mode and false for caller-provided transports. */
 	exitProcess?: boolean;
+	/** Called after initial startup has completed and the RPC transport is accepting commands. */
+	onReady?: () => void;
 }
 
 function createStdioRpcTransport(): RpcTransport {
@@ -916,6 +918,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			}
 			void shutdown().catch(() => {});
 		}) ?? (() => {});
+	options.onReady?.();
 
 	// Keep RPC mode active until shutdown completes.
 	return modeClosed;

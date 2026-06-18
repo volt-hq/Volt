@@ -1,8 +1,9 @@
-import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/volt-agent-core";
+import type { AgentMessage, ThinkingLevel } from "@earendil-works/volt-agent-core";
 import type { ImageContent } from "@earendil-works/volt-ai";
-import type { SessionStats } from "../../core/agent-session.ts";
+import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
+import type { ExtensionError } from "../../core/extensions/index.ts";
 import type { RpcCommand, RpcExtensionUIRequest, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
 
 /** Distributive Omit that works with union types. */
@@ -28,7 +29,8 @@ export interface ModelInfo {
 	reasoning: boolean;
 }
 
-export type RpcClientEvent = AgentEvent | RpcExtensionUIRequest;
+export type RpcExtensionErrorEvent = { type: "extension_error" } & ExtensionError;
+export type RpcClientEvent = AgentSessionEvent | RpcExtensionUIRequest | RpcExtensionErrorEvent;
 export type RpcEventListener = (event: RpcClientEvent) => void;
 
 export abstract class RpcClientBase {

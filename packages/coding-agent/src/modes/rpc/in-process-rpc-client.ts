@@ -20,14 +20,43 @@ interface InProcessRpcClientConstructorOptions extends InProcessRpcClientOptions
  */
 export class InProcessRpcClient extends RpcTransportClient {
 	private readonly modeClosed: Promise<void>;
+	private readonly modeReady: Promise<void>;
 
 	constructor(options: InProcessRpcClientConstructorOptions) {
 		const pair = createLoopbackRpcTransportPair();
 		super({ transport: pair.client, requestTimeoutMs: options.requestTimeoutMs });
-		this.modeClosed = runRpcMode(options.runtimeHost, { transport: pair.server, exitProcess: false });
-		void this.modeClosed.catch(() => {
+
+		let readySettled = false;
+		let resolveReady: () => void = () => {};
+		let rejectReady: (error: unknown) => void = () => {};
+		this.modeReady = new Promise<void>((resolve, reject) => {
+			resolveReady = () => {
+				readySettled = true;
+				resolve();
+			};
+			rejectReady = (error) => {
+				readySettled = true;
+				reject(error);
+			};
+		});
+		void this.modeReady.catch(() => {});
+
+		this.modeClosed = runRpcMode(options.runtimeHost, {
+			transport: pair.server,
+			exitProcess: false,
+			onReady: resolveReady,
+		});
+		void this.modeClosed.catch((error: unknown) => {
+			if (!readySettled) {
+				rejectReady(error);
+			}
 			void pair.server.close();
 		});
+	}
+
+	async start(): Promise<void> {
+		await super.start();
+		await this.modeReady;
 	}
 
 	async stop(): Promise<void> {

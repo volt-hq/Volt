@@ -84,6 +84,18 @@ describe("createInProcessRpcClient", () => {
 		await client.stop();
 		expect(dispose).toHaveBeenCalledOnce();
 	});
+
+	test("rejects with the startup error when RPC mode cannot bind extensions", async () => {
+		const bindError = new Error("bind failed");
+		const runtimeHost = createRuntimeHost(
+			vi.fn(async () => {}),
+			async () => {
+				throw bindError;
+			},
+		);
+
+		await expect(createInProcessRpcClient(runtimeHost)).rejects.toBe(bindError);
+	});
 });
 
 function parseCommandLine(line: string): { id: string; type: string } {
@@ -98,10 +110,13 @@ function parseCommandLine(line: string): { id: string; type: string } {
 	return { id: command.id, type: command.type };
 }
 
-function createRuntimeHost(dispose: () => Promise<void>): AgentSessionRuntime {
+function createRuntimeHost(
+	dispose: () => Promise<void>,
+	bindExtensions: () => Promise<void> = async () => {},
+): AgentSessionRuntime {
 	return {
 		session: {
-			bindExtensions: vi.fn(async () => {}),
+			bindExtensions: vi.fn(bindExtensions),
 			subscribe: vi.fn(() => () => {}),
 			agent: {
 				subscribe: vi.fn(() => () => {}),

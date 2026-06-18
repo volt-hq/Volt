@@ -413,6 +413,7 @@ export {
 	type RpcClientOptions,
 	type RpcCommand,
 	type RpcEventListener,
+	type RpcExtensionErrorEvent,
 	type RpcExtensionUIRequest,
 	type RpcExtensionUIResponse,
 	type RpcModeOptions,

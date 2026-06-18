@@ -3,7 +3,7 @@ import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import { RpcClientBase } from "./rpc-client-base.ts";
 import type { RpcCommand } from "./rpc-types.ts";
 
-export type { ModelInfo, RpcClientEvent, RpcEventListener } from "./rpc-client-base.ts";
+export type { ModelInfo, RpcClientEvent, RpcEventListener, RpcExtensionErrorEvent } from "./rpc-client-base.ts";
 
 export interface RpcClientOptions {
 	/** Path to the CLI entry point (default: searches for dist/cli.js) */
