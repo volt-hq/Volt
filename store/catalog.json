@@ -71,6 +71,26 @@
 			"resources": [
 				"extensions"
 			]
+		},
+		{
+			"id": "build-ios-apps",
+			"name": "Build iOS Apps",
+			"description": "Build, profile, debug, and refine iOS apps with SwiftUI and Xcode workflows.",
+			"source": "git:https://github.com/hansjm10/Volt@2918dd07b43bb6fe0e78140bcc7dc6676deebde2",
+			"repo": "https://github.com/hansjm10/Volt/tree/store/build-ios-apps",
+			"author": "OpenAI",
+			"license": "MIT",
+			"verified": true,
+			"categories": [
+				"developer-tools",
+				"ios",
+				"swiftui",
+				"xcode"
+			],
+			"resources": [
+				"extensions",
+				"skills"
+			]
 		}
 	]
 }
