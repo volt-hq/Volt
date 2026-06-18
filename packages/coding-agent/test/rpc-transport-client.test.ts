@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from "vitest";
+import type { ExtensionBindings } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
-import { createLoopbackRpcTransportPair } from "../src/core/rpc/index.ts";
+import { createLoopbackRpcTransportPair, type RpcExtensionUIRequest } from "../src/core/rpc/index.ts";
 import { createInProcessRpcClient } from "../src/modes/rpc/in-process-rpc-client.ts";
 import { RpcTransportClient } from "../src/modes/rpc/rpc-transport-client.ts";
 
@@ -85,6 +86,46 @@ describe("createInProcessRpcClient", () => {
 		expect(dispose).toHaveBeenCalledOnce();
 	});
 
+	test("sends extension UI responses from in-process clients", async () => {
+		let uiContext: ExtensionBindings["uiContext"];
+		const runtimeHost = createRuntimeHost(
+			vi.fn(async () => {}),
+			async (bindings) => {
+				uiContext = bindings.uiContext;
+			},
+		);
+		const client = await createInProcessRpcClient(runtimeHost);
+
+		try {
+			const boundUiContext = uiContext;
+			if (!boundUiContext) {
+				throw new Error("UI context was not bound");
+			}
+
+			let unsubscribe = () => {};
+			const requestPromise = new Promise<Extract<RpcExtensionUIRequest, { method: "confirm" }>>((resolve) => {
+				unsubscribe = client.onEvent((event) => {
+					if (event.type === "extension_ui_request" && event.method === "confirm") {
+						unsubscribe();
+						resolve(event);
+					}
+				});
+			});
+			const confirmPromise = boundUiContext.confirm("Approve", "Continue?");
+			const request = await requestPromise;
+
+			await client.sendExtensionUIResponse({
+				type: "extension_ui_response",
+				id: request.id,
+				confirmed: true,
+			});
+
+			await expect(confirmPromise).resolves.toBe(true);
+		} finally {
+			await client.stop();
+		}
+	});
+
 	test("rejects with the startup error when RPC mode cannot bind extensions", async () => {
 		const bindError = new Error("bind failed");
 		const dispose = vi.fn(async () => {});
@@ -111,7 +152,7 @@ function parseCommandLine(line: string): { id: string; type: string } {
 
 function createRuntimeHost(
 	dispose: () => Promise<void>,
-	bindExtensions: () => Promise<void> = async () => {},
+	bindExtensions: (bindings: ExtensionBindings) => Promise<void> = async () => {},
 ): AgentSessionRuntime {
 	return {
 		session: {

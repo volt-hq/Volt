@@ -1,6 +1,6 @@
 import type { RpcTransport } from "../../core/rpc/index.ts";
 import { RpcClientBase } from "./rpc-client-base.ts";
-import type { RpcCommand } from "./rpc-types.ts";
+import type { RpcCommand, RpcExtensionUIResponse } from "./rpc-types.ts";
 
 export interface RpcTransportClientOptions {
 	transport: RpcTransport;
@@ -64,8 +64,8 @@ export class RpcTransportClient extends RpcClientBase {
 		super.assertCanSend();
 	}
 
-	protected writeCommand(command: RpcCommand): void | Promise<void> {
-		return this.transport.write(command);
+	protected writeMessage(message: RpcCommand | RpcExtensionUIResponse): void | Promise<void> {
+		return this.transport.write(message);
 	}
 
 	private handleTransportClose(error?: Error): void {

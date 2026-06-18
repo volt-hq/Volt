@@ -4,7 +4,14 @@ import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.t
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { ExtensionError } from "../../core/extensions/index.ts";
-import type { RpcCommand, RpcExtensionUIRequest, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
+import type {
+	RpcCommand,
+	RpcExtensionUIRequest,
+	RpcExtensionUIResponse,
+	RpcResponse,
+	RpcSessionState,
+	RpcSlashCommand,
+} from "./rpc-types.ts";
 
 /** Distributive Omit that works with union types. */
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
@@ -53,6 +60,16 @@ export abstract class RpcClientBase {
 				this.eventListeners.splice(index, 1);
 			}
 		};
+	}
+
+	/** Respond to an extension UI request emitted through onEvent(). */
+	async sendExtensionUIResponse(response: RpcExtensionUIResponse): Promise<void> {
+		this.assertCanSend();
+		try {
+			await this.writeMessage(response);
+		} catch (error: unknown) {
+			throw toError(error);
+		}
 	}
 
 	/** Send a prompt to the agent. */
@@ -311,7 +328,7 @@ export abstract class RpcClientBase {
 		return undefined;
 	}
 
-	protected abstract writeCommand(command: RpcCommand): void | Promise<void>;
+	protected abstract writeMessage(message: RpcCommand | RpcExtensionUIResponse): void | Promise<void>;
 
 	private async send(command: RpcCommandBody): Promise<RpcResponse> {
 		this.assertCanSend();
@@ -340,7 +357,7 @@ export abstract class RpcClientBase {
 			});
 
 			try {
-				const writeResult = this.writeCommand(fullCommand);
+				const writeResult = this.writeMessage(fullCommand);
 				if (writeResult) {
 					void Promise.resolve(writeResult).catch((error: unknown) => {
 						rejectRequest(toError(error));

@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import { RpcClientBase } from "./rpc-client-base.ts";
-import type { RpcCommand } from "./rpc-types.ts";
+import type { RpcCommand, RpcExtensionUIResponse } from "./rpc-types.ts";
 
 export type { ModelInfo, RpcClientEvent, RpcEventListener, RpcExtensionErrorEvent } from "./rpc-client-base.ts";
 
@@ -159,12 +159,12 @@ export class RpcClient extends RpcClientBase {
 		}
 	}
 
-	protected writeCommand(command: RpcCommand): void {
+	protected writeMessage(message: RpcCommand | RpcExtensionUIResponse): void {
 		const stdin = this.process?.stdin;
 		if (!stdin) {
 			throw new Error("Client not started");
 		}
-		stdin.write(serializeJsonLine(command));
+		stdin.write(serializeJsonLine(message));
 	}
 
 	protected getErrorContext(): string {
