@@ -319,16 +319,16 @@ export abstract class RpcClientBase {
 
 			unsubscribe = this.onEvent((event) => {
 				events.push(event);
-				if (event.type === "agent_end") {
+				if (event.type === "agent_end" && promptAccepted) {
 					agentEnded = true;
 					resolveIfComplete();
 				}
 			});
 
-			void this.prompt(message, images).then(() => {
+			void this.send({ type: "prompt", message, images }, () => {
 				promptAccepted = true;
 				resolveIfComplete();
-			}, rejectAndCleanup);
+			}).catch(rejectAndCleanup);
 		});
 	}
 
@@ -379,7 +379,7 @@ export abstract class RpcClientBase {
 
 	protected abstract writeMessage(message: RpcCommand | RpcExtensionUIResponse): void | Promise<void>;
 
-	private async send(command: RpcCommandBody): Promise<RpcResponse> {
+	private async send(command: RpcCommandBody, onSuccessResponse?: () => void): Promise<RpcResponse> {
 		this.assertCanSend();
 
 		const id = `req_${++this.requestId}`;
@@ -402,6 +402,12 @@ export abstract class RpcClientBase {
 					clearTimeout(timeout);
 					if (!response.success) {
 						reject(new Error(response.error));
+						return;
+					}
+					try {
+						onSuccessResponse?.();
+					} catch (error: unknown) {
+						reject(toError(error));
 						return;
 					}
 					resolve(response);

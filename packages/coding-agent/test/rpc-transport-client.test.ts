@@ -126,6 +126,38 @@ describe("RpcTransportClient", () => {
 		}
 	});
 
+	test("promptAndWait ignores pre-response agent_end events", async () => {
+		const pair = createLoopbackRpcTransportPair();
+		const client = new RpcTransportClient({ transport: pair.client });
+		pair.server.onLine((line) => {
+			const command = parseCommandLine(line);
+			pair.server.write({ type: "agent_end" });
+			pair.server.write({
+				id: command.id,
+				type: "response",
+				command: command.type,
+				success: true,
+			});
+		});
+
+		await client.start();
+		try {
+			let resolved = false;
+			const eventsPromise = client.promptAndWait("hi", undefined, 500).then((events) => {
+				resolved = true;
+				return events;
+			});
+
+			await Promise.resolve();
+			expect(resolved).toBe(false);
+
+			pair.server.write({ type: "agent_end" });
+			await expect(eventsPromise).resolves.toEqual([{ type: "agent_end" }, { type: "agent_end" }]);
+		} finally {
+			await client.stop();
+		}
+	});
+
 	test("rejects in-flight requests when the transport closes", async () => {
 		const pair = createLoopbackRpcTransportPair();
 		const client = new RpcTransportClient({ transport: pair.client });
