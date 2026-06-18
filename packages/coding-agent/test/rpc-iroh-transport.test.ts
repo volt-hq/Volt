@@ -76,6 +76,45 @@ class ManualIrohRecvStream implements IrohRecvStreamLike {
 	}
 }
 
+class BlockingStopIrohRecvStream implements IrohRecvStreamLike {
+	readonly stopCalls: bigint[] = [];
+	readonly readStarted: Promise<void>;
+	private resolveReadStarted: (() => void) | undefined;
+	private resolveRead: ((value: IrohBytes | undefined) => void) | undefined;
+	private resolveStop: (() => void) | undefined;
+
+	constructor() {
+		this.readStarted = new Promise((resolve) => {
+			this.resolveReadStarted = resolve;
+		});
+	}
+
+	read(_sizeLimit: number): Promise<IrohBytes | undefined> {
+		this.resolveReadStarted?.();
+		this.resolveReadStarted = undefined;
+		return new Promise((resolve) => {
+			this.resolveRead = resolve;
+		});
+	}
+
+	stop(errorCode: bigint): Promise<void> {
+		this.stopCalls.push(errorCode);
+		return new Promise((resolve) => {
+			this.resolveStop = resolve;
+		});
+	}
+
+	endRead(): void {
+		this.resolveRead?.(undefined);
+		this.resolveRead = undefined;
+	}
+
+	finishStop(): void {
+		this.resolveStop?.();
+		this.resolveStop = undefined;
+	}
+}
+
 interface DeferredWrite {
 	resolve(): void;
 	reject(error: Error): void;
@@ -233,6 +272,28 @@ describe("Iroh RPC transport", () => {
 
 		await transport.close();
 
+		expect(send.finishCalls).toBe(1);
+		expect(recv.stopCalls).toEqual([0n]);
+	});
+
+	test("close does not wait for recv stop while the read loop is blocked", async () => {
+		const recv = new BlockingStopIrohRecvStream();
+		const send = new ManualIrohSendStream();
+		const transport = createIrohRpcTransport({ stream: { recv, send } });
+		transport.onLine(() => {});
+		await recv.readStarted;
+
+		let closeResolved = false;
+		const closePromise = Promise.resolve(transport.close()).then(() => {
+			closeResolved = true;
+		});
+		await nextTick();
+		const resolvedBeforeStopFinished = closeResolved;
+		recv.finishStop();
+		recv.endRead();
+		await closePromise;
+
+		expect(resolvedBeforeStopFinished).toBe(true);
 		expect(send.finishCalls).toBe(1);
 		expect(recv.stopCalls).toEqual([0n]);
 	});

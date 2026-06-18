@@ -172,7 +172,13 @@ export function createIrohRpcTransport(options: IrohRpcTransportOptions): RpcTra
 			}
 			if ((options.stopRecvOnClose ?? true) && options.stream.recv.stop) {
 				try {
-					await options.stream.recv.stop(closeErrorCode);
+					const stopPromise = options.stream.recv.stop(closeErrorCode);
+					if (!readLoopStarted && stopPromise) {
+						await stopPromise;
+					} else if (stopPromise) {
+						// Iroh read() and stop() share a stream lock; do not block local shutdown behind the read loop.
+						void stopPromise.catch(() => {});
+					}
 				} catch (error: unknown) {
 					closeFailures.push(toError(error));
 				}
