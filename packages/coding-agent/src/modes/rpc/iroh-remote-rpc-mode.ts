@@ -25,7 +25,7 @@ export function runIrohRemoteRpcMode(
 	return runRpcMode(runtimeHost, {
 		transport: createIrohRemoteCloseDeferringRpcTransport({
 			transport: createIrohRemoteRpcTransport(options),
-			waitForPromptCompletion: () => runtimeHost.session.agent.waitForIdle(),
+			waitForPromptCompletion: () => runtimeHost.session.waitForIdle(),
 		}),
 		exitProcess: false,
 	});
@@ -92,8 +92,9 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 
 	const finishAfterPromptCompletion = async (pending: PendingIrohRemoteCommand): Promise<void> => {
 		try {
-			// The prompt success response is emitted just before AgentSession starts the run.
-			// Yield once so waitForIdle observes that new active run instead of the previous idle state.
+			// Prompt success is emitted just before AgentSession starts the run.
+			// Steer/follow_up success means input was accepted into an active session run.
+			// Yield once so waitForIdle observes that run or any accepted queued input.
 			await Promise.resolve();
 			await options.waitForPromptCompletion();
 		} finally {
@@ -110,7 +111,10 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 		if (!pending) {
 			return;
 		}
-		if (pending.command === "prompt" && response.success === true) {
+		if (
+			response.success === true &&
+			(pending.command === "prompt" || pending.command === "steer" || pending.command === "follow_up")
+		) {
 			void finishAfterPromptCompletion(pending).catch(() => {});
 			return;
 		}

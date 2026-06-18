@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -41,7 +42,7 @@ export async function readIrohRemoteHostState(path: string): Promise<IrohRemoteH
 
 export async function writeIrohRemoteHostState(path: string, state: IrohRemoteHostState): Promise<void> {
 	await mkdir(dirname(path), { recursive: true });
-	const tempPath = `${path}.${process.pid}.tmp`;
+	const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
 	await writeFile(tempPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
 	await rename(tempPath, path);
 }

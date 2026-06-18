@@ -401,6 +401,37 @@ describe("Iroh remote core helpers", () => {
 		expect(closed).toBe(true);
 	});
 
+	test.each(["steer", "follow_up"] as const)(
+		"defers clean remote close until %s completion after success",
+		async (command) => {
+			const inner = new ManualRpcTransport();
+			const promptCompletion = createDeferredVoid();
+			const transport = createIrohRemoteCloseDeferringRpcTransport({
+				transport: inner,
+				waitForPromptCompletion: () => promptCompletion.promise,
+			});
+			let closed = false;
+			transport.onLine(() => {});
+			transport.onClose?.(() => {
+				closed = true;
+			});
+
+			inner.emitLine(JSON.stringify({ id: `${command}-1`, type: command, message: "hi" }));
+			inner.emitClose();
+			await nextTick();
+			expect(closed).toBe(false);
+
+			transport.write({ id: `${command}-1`, type: "response", command, success: true });
+			await nextTick();
+			expect(closed).toBe(false);
+
+			promptCompletion.resolve();
+			await nextTick();
+
+			expect(closed).toBe(true);
+		},
+	);
+
 	test("filters remote RPC commands before forwarding to Volt RPC", () => {
 		const prompt = getIrohRemoteRpcFilterResult(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hi" }));
 		if (!prompt.allowed) {
