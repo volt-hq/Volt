@@ -48,6 +48,7 @@ export function createIrohRpcTransport(options: IrohRpcTransportOptions): RpcTra
 	const lineHandlers = new Set<RpcLineHandler>();
 	const closeHandlers = new Set<RpcCloseHandler>();
 	const pendingWrites = new Set<Promise<void>>();
+	let writeQueue: Promise<void> | undefined;
 	let pendingWriteError: Error | undefined;
 	let readLoopStarted = false;
 	let localCloseRequested = false;
@@ -120,21 +121,28 @@ export function createIrohRpcTransport(options: IrohRpcTransportOptions): RpcTra
 				throw new Error("Iroh RPC send stream is closed");
 			}
 
-			let rawWrite: Promise<void>;
-			try {
-				rawWrite = options.stream.send.writeAll(textToBytes(serializeJsonLine(value)));
-			} catch (error: unknown) {
-				throw recordWriteError(error);
-			}
-
+			const bytes = textToBytes(serializeJsonLine(value));
+			const runWrite = (): Promise<void> => {
+				try {
+					return options.stream.send.writeAll(bytes);
+				} catch (error: unknown) {
+					throw recordWriteError(error);
+				}
+			};
+			const queuedAfter = writeQueue;
+			const rawWrite = queuedAfter ? queuedAfter.then(runWrite) : runWrite();
 			const writePromise = rawWrite
 				.catch((error: unknown) => {
 					throw recordWriteError(error);
 				})
 				.finally(() => {
 					pendingWrites.delete(writePromise);
+					if (writeQueue === writePromise) {
+						writeQueue = undefined;
+					}
 				});
 			pendingWrites.add(writePromise);
+			writeQueue = writePromise;
 			return writePromise;
 		},
 		onLine(handler) {

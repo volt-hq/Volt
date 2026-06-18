@@ -237,6 +237,24 @@ describe("Iroh RPC transport", () => {
 		expect(flushed).toBe(true);
 	});
 
+	test("queues outbound Iroh writes before calling writeAll", async () => {
+		const recv = new ManualIrohRecvStream();
+		const send = new ManualIrohSendStream();
+		const transport = createIrohRpcTransport({ stream: { recv, send } });
+		send.deferNextWrite();
+
+		const firstWrite = transport.write({ sequence: 1 });
+		const secondWrite = transport.write({ sequence: 2 });
+		await nextTick();
+
+		expect(send.writtenText()).toBe(serializeJsonLine({ sequence: 1 }));
+
+		send.completeWrite();
+		await Promise.all([firstWrite, secondWrite]);
+
+		expect(send.writtenText()).toBe(`${serializeJsonLine({ sequence: 1 })}${serializeJsonLine({ sequence: 2 })}`);
+	});
+
 	test("surfaces Iroh write failures through write and flush", async () => {
 		const recv = new ManualIrohRecvStream();
 		const send = new ManualIrohSendStream();
