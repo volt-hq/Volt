@@ -254,10 +254,10 @@ the rollup item is resolved, and the final turn's required verification passed.
     <evidence>Resolved 2026-06-21: persisted read-only legacy defaults, pair-time tool snapshots, reconnect authorization from client.allowedTools, unit/scenario coverage, and changelog/design updates; verification: lsp.diagnostics on changed TS/test files, cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-iroh-core.test.ts, npm run iroh:poc:test, npm run check, git diff --check -- .volt/iroh-productization-design.md packages/coding-agent/CHANGELOG.md; commit 125d0d3e</evidence>
   </item>
 
-  <item ref="A.2" status="open" prereq="A.1">
+  <item ref="A.2" status="resolved" prereq="A.1">
     <title>Add unsafe remote tool gates for bash/edit/write grants on host startup and new pairing tickets, with --yes for noninteractive approval and audit logging for accepted unsafe grants</title>
     <acceptance>Unsafe tools are centrally detected; TTY host/pair flows require confirmation unless --yes is present; non-TTY unsafe flows fail without --yes; accepted unsafe grants write an unsafe_tools_enabled audit event; docs and CLI help mention the risk; tests cover safe, unsafe rejected, and unsafe accepted paths.</acceptance>
-    <evidence/>
+    <evidence>Resolved 2026-06-21: added shared unsafe tool detection, host startup confirmation/--yes gate, unsafe_tools_enabled audit events, help/docs warnings, unit/CLI/scenario coverage; verification: lsp.diagnostics on changed TS/test files, cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-iroh-core.test.ts test/remote-cli.test.ts, npm run iroh:poc:test, npm run check, git diff --check -- .volt/iroh-productization-design.md packages/coding-agent/CHANGELOG.md packages/coding-agent/examples/remote/iroh-sidecar/README.md; commit 278e22aa</evidence>
   </item>
 
   <item ref="A.3" status="open" prereq="A.1">
