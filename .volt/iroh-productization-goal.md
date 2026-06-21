@@ -248,11 +248,10 @@ the rollup item is resolved, and the final turn's required verification passed.
      </item> -->
 
 <group n="1" title="Security and authorization blockers">
-  <item ref="A.1" status="open" prereq="">
+  <item ref="A.1" status="resolved" prereq="">
     <title>Persist and enforce per-client allowedTools: new clients store pair-time tools, reconnecting clients use persisted tools, and host restart flags cannot silently broaden an existing client's tool grant</title>
     <acceptance>Existing state files still parse; newly paired clients persist allowedTools; reconnect authorization returns persisted client.allowedTools; existing clients do not get bash/edit/write from a broader host --allow-tools; unit tests cover pairing, reconnect, and state-manager clones; scenario coverage proves a read-only client remains read-only after host restart with unsafe host defaults.</acceptance>
-    <progress date="2026-06-21">Implemented and verified per-client allowedTools persistence/enforcement, pair-time tool snapshots, legacy-client defaults, defensive clone coverage, scenario coverage for read-only reconnect after unsafe host defaults, and a changelog entry; remains open pending explicit commit authorization and resolved ledger update.</progress>
-    <evidence/>
+    <evidence>Resolved 2026-06-21: persisted read-only legacy defaults, pair-time tool snapshots, reconnect authorization from client.allowedTools, unit/scenario coverage, and changelog/design updates; verification: lsp.diagnostics on changed TS/test files, cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-iroh-core.test.ts, npm run iroh:poc:test, npm run check, git diff --check -- .volt/iroh-productization-design.md packages/coding-agent/CHANGELOG.md; commit 125d0d3e</evidence>
   </item>
 
   <item ref="A.2" status="open" prereq="A.1">
