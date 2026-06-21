@@ -385,6 +385,8 @@ The current ticket includes `irohTicket`, which is produced from the bound endpo
 
 Preferred approach: running-host control socket if feasible, short-lived pair endpoint if not. Do not ship a misleading offline pair command.
 
+Resolved 2026-06-21: Offline pairing from persisted host state is not supported. Direct `@number0/iroh` evidence: `EndpointTicket.fromAddr()` wraps an `EndpointAddr`; an ID-only `EndpointAddr` created from a persisted secret key produced a ticket with zero direct addresses and no relay URL, and a native connect attempt failed with `No addressing information available` / `No address lookup configured`; a bound endpoint ticket included a direct address. Decision: implement `volt remote pair` as a running-host-mediated command. The CLI will contact the live host's local control channel, and the host will create the ticket from its current bound endpoint address, persist/audit the pending pairing ticket, and return the ticket to stdout. If no live host/control channel is available, the workspace is missing or ambiguous, unsafe tools are not accepted, or endpoint-ticket creation fails, the command fails with diagnostics on stderr and no ticket on stdout. Security implications: pairing remains a local management action, raw secrets appear only in the returned ticket, persisted state stores only hashes and non-secret metadata, and pair-time tools/TTL/label policy are owned by the host. A short-lived pair endpoint is deferred as a fallback only if the control channel becomes impractical; no offline pair command should be shipped.
+
 ### `volt remote clients`
 
 Improve output while preserving JSON compatibility if it currently prints JSON.
@@ -936,7 +938,7 @@ Do not remove experimental language until all of these are true:
 
 These must be resolved during implementation:
 
-1. Can a valid Iroh endpoint ticket be generated offline from persisted host state, or must pairing be mediated by a live endpoint?
+1. Resolved 2026-06-21: A dialable Iroh endpoint ticket cannot be generated offline from persisted host state alone; `volt remote pair` will be mediated by a running host control channel that has access to the live endpoint address.
 2. Should duplicate connections from the same client node ID be rejected or should the newer connection replace the older one?
 3. Should `get_messages`, `get_commands`, or `get_available_models` be allowed over remote RPC in preview?
 4. Should client policy updates be supported by a command, or should users revoke and re-pair?
