@@ -88,6 +88,7 @@ describe("remote CLI", () => {
 		expect(logSpy).not.toHaveBeenCalled();
 		const helpText = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
 		expect(helpText).toContain("volt remote pair [options]");
+		expect(helpText).toContain("volt remote status [options]");
 		expect(helpText).toContain("bash, edit, or write can modify host state and require confirmation");
 		expect(helpText).toContain("--yes");
 		expect(process.exitCode).toBeUndefined();
@@ -264,6 +265,75 @@ describe("remote CLI", () => {
 			workspace: "project",
 		});
 		expect(logSpy.mock.calls.map(([message]) => String(message))).toEqual(["volt+iroh://v1/unsafe-ticket"]);
+		expect(errorSpy).not.toHaveBeenCalled();
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("prints persisted Iroh remote status without secrets", async () => {
+		const statePath = join(tempDir, "host.json");
+		const auditPath = join(tempDir, "custom.audit.jsonl");
+		await writeIrohRemoteHostState(statePath, {
+			hostSecretKey: [1, 2, 3],
+			consumedPairingSecretHashes: ["sha256:consumed-secret-hash"],
+			workspaces: [
+				{ name: "zeta", path: join(projectDir, "zeta"), allowedTools: "read" },
+				{ name: "alpha", path: join(projectDir, "alpha"), allowedTools: "read,grep" },
+			],
+			clients: [
+				{
+					nodeId: "client-b",
+					label: "tablet",
+					allowedWorkspaces: ["zeta", "alpha"],
+					allowedTools: "read,grep",
+					pairedAt: 10,
+					lastSeenAt: 20,
+				},
+			],
+			pendingPairingTickets: [
+				{
+					secretHash: "sha256:pending-secret-hash",
+					workspace: "alpha",
+					allowedTools: "read",
+					createdAt: 30,
+					expiresAt: 40,
+				},
+			],
+		});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(main(["remote", "status", "--state", statePath, "--audit", auditPath])).resolves.toBeUndefined();
+
+		const statusText = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
+		const status = JSON.parse(statusText);
+		expect(status).toEqual({
+			statePath,
+			auditPath,
+			warning: "Persisted state only; live Iroh remote host status is not available from this command yet.",
+			liveStatus: {
+				available: false,
+				warning: "Persisted state only; live Iroh remote host status is not available from this command yet.",
+			},
+			workspaces: [
+				{ name: "alpha", path: join(projectDir, "alpha"), allowedTools: "read,grep" },
+				{ name: "zeta", path: join(projectDir, "zeta"), allowedTools: "read" },
+			],
+			clientCount: 1,
+			clients: [
+				{
+					nodeId: "client-b",
+					label: "tablet",
+					allowedWorkspaces: ["alpha", "zeta"],
+					allowedTools: "read,grep",
+					pairedAt: 10,
+					lastSeenAt: 20,
+				},
+			],
+		});
+		expect(statusText).not.toContain("hostSecretKey");
+		expect(statusText).not.toContain("consumedPairingSecretHashes");
+		expect(statusText).not.toContain("pendingPairingTickets");
+		expect(statusText).not.toContain("sha256:");
 		expect(errorSpy).not.toHaveBeenCalled();
 		expect(process.exitCode).toBeUndefined();
 	});

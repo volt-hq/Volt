@@ -39,9 +39,11 @@ import {
 	getIrohRemoteUnsafeAllowedTools,
 	IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE,
 	IrohRemoteAuditLogger,
+	type IrohRemoteClient,
 	IrohRemoteHostStateManager,
 	type IrohRemoteRelayMode,
 	type IrohRemoteUnsafeApproval,
+	type IrohRemoteWorkspace,
 	isIrohRemoteRelayMode,
 	requestIrohRemotePairingTicket,
 } from "./core/remote/iroh/index.ts";
@@ -91,6 +93,7 @@ function printRemoteCommandHelp(): void {
 	console.error(`Usage:
   volt remote host [options]
   volt remote pair [options]
+  volt remote status [options]
   volt remote clients [options]
   volt remote revoke <node-id> [options]
 
@@ -121,7 +124,7 @@ Pair options:
 
 Client management options:
   --state <path>                Host state path
-  --audit <path>                Audit JSONL path for revoke
+  --audit <path>                Audit JSONL path for status/revoke
 `);
 }
 
@@ -145,6 +148,37 @@ interface RemotePairArgs {
 	workspace?: string;
 	yes: boolean;
 }
+
+interface IrohRemoteStatusWorkspaceView {
+	allowedTools?: string;
+	name: string;
+	path: string;
+}
+
+interface IrohRemoteStatusClientView {
+	allowedTools: string;
+	allowedWorkspaces: string[];
+	label: string;
+	lastSeenAt: number;
+	nodeId: string;
+	pairedAt: number;
+}
+
+interface IrohRemoteStatusView {
+	auditPath: string;
+	clientCount: number;
+	clients: IrohRemoteStatusClientView[];
+	liveStatus: {
+		available: false;
+		warning: string;
+	};
+	statePath: string;
+	warning: string;
+	workspaces: IrohRemoteStatusWorkspaceView[];
+}
+
+const IROH_REMOTE_PERSISTED_STATUS_WARNING =
+	"Persisted state only; live Iroh remote host status is not available from this command yet.";
 
 function getDefaultIrohRemoteStatePath(): string {
 	return join(getAgentDir(), "remote", "iroh-host.json");
@@ -435,6 +469,83 @@ async function handleRemotePairCommand(args: readonly string[]): Promise<void> {
 	}
 }
 
+function formatRemoteStatusWorkspace(workspace: IrohRemoteWorkspace): IrohRemoteStatusWorkspaceView {
+	return {
+		name: workspace.name,
+		path: workspace.path,
+		...(workspace.allowedTools === undefined ? {} : { allowedTools: workspace.allowedTools }),
+	};
+}
+
+function formatRemoteStatusClient(client: IrohRemoteClient): IrohRemoteStatusClientView {
+	return {
+		nodeId: client.nodeId,
+		label: client.label,
+		allowedWorkspaces: [...client.allowedWorkspaces].sort(),
+		allowedTools: client.allowedTools,
+		pairedAt: client.pairedAt,
+		lastSeenAt: client.lastSeenAt,
+	};
+}
+
+function createRemoteStatusView(options: {
+	auditPath: string;
+	clients: readonly IrohRemoteClient[];
+	statePath: string;
+	workspaces: readonly IrohRemoteWorkspace[];
+}): IrohRemoteStatusView {
+	const clients = options.clients
+		.map((client) => formatRemoteStatusClient(client))
+		.sort((left, right) => left.nodeId.localeCompare(right.nodeId));
+	return {
+		statePath: options.statePath,
+		auditPath: options.auditPath,
+		warning: IROH_REMOTE_PERSISTED_STATUS_WARNING,
+		liveStatus: {
+			available: false,
+			warning: IROH_REMOTE_PERSISTED_STATUS_WARNING,
+		},
+		workspaces: options.workspaces
+			.map((workspace) => formatRemoteStatusWorkspace(workspace))
+			.sort((left, right) => left.name.localeCompare(right.name)),
+		clientCount: clients.length,
+		clients,
+	};
+}
+
+async function handleRemoteStatusCommand(args: readonly string[]): Promise<void> {
+	const parsed = parseRemoteManagementArgs(args);
+	if (parsed.help) {
+		printRemoteCommandHelp();
+		return;
+	}
+	if (parsed.error) {
+		console.error(chalk.red(`Error: ${parsed.error}`));
+		process.exitCode = 1;
+		return;
+	}
+	if (parsed.positionals.length > 0) {
+		console.error(chalk.red(`Error: Unexpected remote status argument: ${parsed.positionals[0]}`));
+		process.exitCode = 1;
+		return;
+	}
+
+	const stateManager = new IrohRemoteHostStateManager({ statePath: parsed.statePath });
+	const state = await stateManager.getState();
+	console.log(
+		JSON.stringify(
+			createRemoteStatusView({
+				auditPath: parsed.auditPath ?? getDefaultIrohRemoteAuditPath(parsed.statePath),
+				clients: state.clients,
+				statePath: parsed.statePath,
+				workspaces: state.workspaces,
+			}),
+			null,
+			2,
+		),
+	);
+}
+
 async function handleRemoteClientsCommand(args: readonly string[]): Promise<void> {
 	const parsed = parseRemoteManagementArgs(args);
 	if (parsed.help) {
@@ -543,6 +654,10 @@ async function handleRemoteCommand(args: string[], options: { profile?: string }
 	}
 	if (command === "pair") {
 		await handleRemotePairCommand(args.slice(2));
+		return true;
+	}
+	if (command === "status") {
+		await handleRemoteStatusCommand(args.slice(2));
 		return true;
 	}
 	if (command === "revoke") {

@@ -32,6 +32,7 @@ npm run iroh:poc:host:volt              # integrated source Volt host for this c
 npm run iroh:poc:client -- "<ticket>"    # one-shot client
 npm run iroh:poc:client -- "<ticket>" --interactive  # persistent prompt loop
 npm run iroh:poc:clients                # list paired clients
+volt remote status                      # inspect persisted host state
 npm run iroh:poc:revoke -- <node-id>    # revoke a paired client
 ```
 
@@ -52,7 +53,7 @@ Run the automated local scenario suite when changing the remote host bridge:
 npm run iroh:poc:test
 ```
 
-The suite starts local host/client processes with isolated temporary state and covers fake-RPC prompt streaming, `get_state`, first-class `volt remote pair`, pairing persistence, `--no-pairing` rejection, revocation, expired tickets, and workspace preflight failures.
+The suite starts local host/client processes with isolated temporary state and covers fake-RPC prompt streaming, `get_state`, first-class `volt remote pair`, `volt remote status`, pairing persistence, `--no-pairing` rejection, revocation, expired tickets, and workspace preflight failures.
 
 ## Local fake-RPC smoke test
 
@@ -110,6 +111,15 @@ List paired clients:
 ```bash
 npm run iroh:poc:clients
 ```
+
+Inspect persisted host state, workspaces, clients, client tool grants, and state/audit paths:
+
+```bash
+volt remote status
+volt remote status --state ~/.volt/agent/remote/iroh-host.json
+```
+
+`volt remote status` prints persisted state only and includes that warning in its output; it does not print pairing secrets or secret hashes.
 
 Revoke a client:
 

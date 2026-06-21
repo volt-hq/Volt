@@ -425,6 +425,8 @@ Minimum output:
 - clients with labels, node IDs, workspaces, tools, last seen
 - warning if this is persisted state only and no live host status is available
 
+Resolved 2026-06-21: `volt remote status` now prints deterministic JSON for persisted host state, including state/audit paths, sorted workspaces, client count, client labels/node IDs, allowedWorkspaces, allowedTools, pairedAt, and lastSeenAt. It omits host secret keys, consumed pairing secret hashes, and pending ticket secret hashes, and includes a persisted-state-only warning because live host status discovery is not implemented for this command yet.
+
 Optional live status if a host control socket exists:
 
 - host process PID
@@ -765,7 +767,7 @@ Tasks:
 
 Acceptance criteria:
 
-- `volt remote status --state <path>` shows persisted workspaces and clients.
+- `volt remote status --state <path>` shows persisted workspaces and clients. Resolved 2026-06-21.
 - `volt remote clients --state <path>` includes allowed tools and workspace permissions.
 - `volt remote revoke <node-id>` prevents reconnect.
 - If active disconnect is implemented, active revoked clients are disconnected promptly and an audit event is written.
@@ -936,7 +938,7 @@ Do not remove experimental language until all of these are true:
 - [ ] Protocol compatibility tests exist.
 - [ ] Reconnect/resume behavior is implemented and documented.
 - [ ] Revocation behavior is implemented and documented, including active connection semantics.
-- [ ] `volt remote status` or equivalent state inspection exists.
+- [x] `volt remote status` persisted-state inspection exists. Resolved 2026-06-21.
 - [ ] Scenario tests cover pair, reconnect, policy, revocation, expiry, and command filtering.
 - [ ] Cross-network `--relay default` dogfood succeeds.
 - [ ] README and usage docs include security warnings and unsupported environments.

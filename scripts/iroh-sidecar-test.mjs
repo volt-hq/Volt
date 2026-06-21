@@ -942,6 +942,44 @@ async function getStateScenario() {
 	});
 }
 
+async function statusCommandScenario() {
+	await withStateDir("status", async ({ clientStatePath, hostStatePath }) => {
+		await runHostClientOnce({
+			clientArgs: ["--message", "status", "--timeout-ms", "10000"],
+			clientStatePath,
+			hostArgs: [],
+			hostStatePath,
+			label: "status initial pairing",
+		});
+
+		const statusCommand = spawnSourceCli(["remote", "status", "--state", hostStatePath]);
+		await waitForExit(statusCommand.child, "remote status command", statusCommand.output);
+		const statusText = statusCommand.output.stdout;
+		const status = JSON.parse(statusText);
+		assert(status.statePath === hostStatePath, `Expected status state path, got:\n${statusText}`);
+		assert(status.auditPath === getDefaultAuditPath(hostStatePath), `Expected status audit path, got:\n${statusText}`);
+		assert(
+			status.warning?.includes("Persisted state only"),
+			`Expected persisted-state-only warning, got:\n${statusText}`,
+		);
+		assert(status.liveStatus?.available === false, `Expected no live status, got:\n${statusText}`);
+		assert(status.clientCount === 1, `Expected one status client, got:\n${statusText}`);
+		assert(status.workspaces?.[0]?.name, `Expected status workspace, got:\n${statusText}`);
+		const client = status.clients?.[0];
+		assert(client?.nodeId && client.label, `Expected status client identity, got:\n${statusText}`);
+		assert(client.allowedTools === "read,grep,find,ls", `Expected status client tools, got:\n${statusText}`);
+		assert(
+			Array.isArray(client.allowedWorkspaces) && client.allowedWorkspaces.length === 1,
+			`Expected status client workspaces, got:\n${statusText}`,
+		);
+		assert(typeof client.pairedAt === "number", `Expected status pairedAt, got:\n${statusText}`);
+		assert(typeof client.lastSeenAt === "number", `Expected status lastSeenAt, got:\n${statusText}`);
+		for (const forbidden of ["hostSecretKey", "consumedPairingSecretHashes", "pendingPairingTickets", "sha256:"]) {
+			assert(!statusText.includes(forbidden), `Status leaked ${forbidden}:\n${statusText}`);
+		}
+	});
+}
+
 async function pairCommandScenario() {
 	await withStateDir("pair-command", async ({ clientStatePath, hostStatePath, stateDir }) => {
 		const workspacePath = join(stateDir, "workspace");
@@ -1395,6 +1433,7 @@ const scenarios = [
 	["integrated Volt env profile", integratedVoltEnvProfileScenario],
 	["malformed handshake", malformedHandshakeScenario],
 	["get_state", getStateScenario],
+	["status command", statusCommandScenario],
 	["pair command", pairCommandScenario],
 	["pairing and revocation", pairingAndRevocationScenario],
 	["audit log", auditLogScenario],
