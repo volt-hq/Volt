@@ -260,10 +260,10 @@ the rollup item is resolved, and the final turn's required verification passed.
     <evidence>Resolved 2026-06-21: added shared unsafe tool detection, host startup confirmation/--yes gate, unsafe_tools_enabled audit events, help/docs warnings, unit/CLI/scenario coverage; verification: lsp.diagnostics on changed TS/test files, cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-iroh-core.test.ts test/remote-cli.test.ts, npm run iroh:poc:test, npm run check, git diff --check -- .volt/iroh-productization-design.md packages/coding-agent/CHANGELOG.md packages/coding-agent/examples/remote/iroh-sidecar/README.md; commit 278e22aa</evidence>
   </item>
 
-  <item ref="A.3" status="open" prereq="A.1">
+  <item ref="A.3" status="resolved" prereq="A.1">
     <title>Harden pairing secret lifecycle so raw secrets are never persisted, consumed secrets cannot be reused across restarts, expired pending secrets are rejected/pruned, and audit events distinguish created/consumed/expired tickets</title>
     <acceptance>State contains only hashes and non-secret metadata; consumed secrets reject after process restart; expired pending tickets reject and are pruned opportunistically; audit covers pairing_ticket_created, pairing_ticket_consumed, and pairing_ticket_expired; tests cover reuse, expiry, and old-state compatibility.</acceptance>
-    <evidence/>
+    <evidence>Resolved 2026-06-21: pending pairing tickets persist only sha256 hashes and non-secret metadata, consumed hashes reject after restart, expired pending tickets reject/prune opportunistically, and created/consumed/expired audit events are covered; verification: lsp.diagnostics on changed TS/test files, cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-iroh-core.test.ts test/remote-cli.test.ts, npm run iroh:poc:test, npm run check, git diff --check -- .volt/iroh-productization-design.md packages/coding-agent/CHANGELOG.md; commit 432d9eda</evidence>
   </item>
 </group>
 
