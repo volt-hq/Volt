@@ -280,10 +280,10 @@ the rollup item is resolved, and the final turn's required verification passed.
     <evidence>Resolved 2026-06-21: core/host pair lifecycle now records pair-time allowedTools, label hints, TTLs, relay hints, workspace binding, one-time consumption, and cross-workspace rejection; verification: lsp.diagnostics on changed TS/test files, cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-iroh-core.test.ts, npm run iroh:poc:test, npm run check, git diff --check -- .volt/iroh-productization-design.md packages/coding-agent/CHANGELOG.md; commit bba0ef12</evidence>
   </item>
 
-  <item ref="B.3" status="open" prereq="B.2">
+  <item ref="B.3" status="resolved" prereq="B.2">
     <title>Expose `volt remote pair` in the main CLI with --workspace, --allow-tools, --label, --ttl, --state, --relay, and --yes; stdout must contain only the ticket and stderr must contain diagnostics</title>
     <acceptance>`volt remote pair --workspace &lt;name&gt;` works for saved workspaces under the chosen B.1 model; missing/ambiguous workspace fails with actionable error; unsafe --allow-tools follows A.2 gates; stdout is ticket-only; CLI tests cover argument parsing and failure modes; scenario tests pair a real demo client using the new command or document why host-mediated pairing is required.</acceptance>
-    <evidence/>
+    <evidence>Resolved 2026-06-21: added host control-channel pairing and main CLI `volt remote pair` with saved-workspace validation, unsafe grant gates, ticket-only stdout, stderr failures, CLI coverage, and a real sidecar pair-command scenario; verification: lsp.diagnostics on changed TS/test files, node --check packages/coding-agent/src/remote/iroh-host.mjs scripts/iroh-sidecar-test.mjs, cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-cli.test.ts, npm run iroh:poc:test, npm run check, git diff --check; commit a6210d50</evidence>
   </item>
 </group>
 
