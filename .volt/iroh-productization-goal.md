@@ -274,10 +274,10 @@ the rollup item is resolved, and the final turn's required verification passed.
     <evidence>Resolved 2026-06-21: decided `volt remote pair` must be mediated by a running host control channel; native smoke showed an ID-only persisted-secret ticket had zero direct addresses/no relay and connect failed with no address lookup, while a bound endpoint ticket had a direct address; design records user behavior, failure modes, and security implications; verification: git diff --check -- .volt/iroh-productization-design.md and pre-commit npm run check; commit 9d3aa735</evidence>
   </item>
 
-  <item ref="B.2" status="open" prereq="B.1,A.2">
+  <item ref="B.2" status="resolved" prereq="B.1,A.2">
     <title>Implement the core/host pairing-ticket lifecycle according to the B.1 decision, including workspace binding, pair-time allowedTools, label hints, TTL, relay hint, and one-time consumption</title>
     <acceptance>Pairing tickets bind to a saved workspace name; pair-time allowedTools are stored for the eventual client; label hints are applied when the client does not provide a label; TTL is enforced; relay mode is embedded when available; reusing or crossing workspace tickets fails; core tests cover success, expiry, reuse, and workspace mismatch.</acceptance>
-    <evidence/>
+    <evidence>Resolved 2026-06-21: core/host pair lifecycle now records pair-time allowedTools, label hints, TTLs, relay hints, workspace binding, one-time consumption, and cross-workspace rejection; verification: lsp.diagnostics on changed TS/test files, cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-iroh-core.test.ts, npm run iroh:poc:test, npm run check, git diff --check -- .volt/iroh-productization-design.md packages/coding-agent/CHANGELOG.md; commit bba0ef12</evidence>
   </item>
 
   <item ref="B.3" status="open" prereq="B.2">
