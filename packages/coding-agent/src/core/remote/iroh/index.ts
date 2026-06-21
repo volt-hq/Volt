@@ -16,6 +16,19 @@ export {
 	isIrohRemoteClientAllowedForWorkspace,
 } from "./authorization.ts";
 export {
+	DEFAULT_IROH_REMOTE_CONTROL_TIMEOUT_MS,
+	getIrohRemoteControlPath,
+	IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE,
+	IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
+	type IrohRemotePairControlClientOptions,
+	type IrohRemotePairControlRequest,
+	type IrohRemotePairControlResponse,
+	type IrohRemoteUnsafeApproval,
+	parseIrohRemotePairControlRequest,
+	parseIrohRemotePairControlResponse,
+	requestIrohRemotePairingTicket,
+} from "./control.ts";
+export {
 	DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS,
 	IrohRemoteClientEngine,
 	type IrohRemoteClientEngineOptions,

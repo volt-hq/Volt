@@ -2,7 +2,8 @@ import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { constants } from "node:fs";
-import { access, mkdir, realpath, stat } from "node:fs/promises";
+import { access, mkdir, realpath, rm, stat } from "node:fs/promises";
+import { connect as connectNet, createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -14,13 +15,16 @@ import {
 	DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS,
 	DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS,
 	encodeIrohRemoteTicketPayload,
+	getIrohRemoteControlPath,
 	getIrohRemoteRpcFilterResult,
 	getIrohRemoteUnsafeAllowedTools,
+	IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
 	getAgentDir,
 	IROH_REMOTE_ALPN,
 	IrohRemoteAuditLogger,
 	IrohRemoteHostEngine,
 	IrohRemoteHostStateManager,
+	parseIrohRemotePairControlRequest,
 	pipeIrohRemoteOutboundJsonlReadable,
 	readIrohRemoteHostState,
 	sanitizeIrohRemoteOutboundJsonLine,
@@ -42,6 +46,7 @@ let presetN0;
 const HOST_ENTRYPOINT_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_DIR = resolve(HOST_ENTRYPOINT_DIR, "..", "..");
 const ALPN = Array.from(Buffer.from(IROH_REMOTE_ALPN, "utf8"));
+const CONTROL_REQUEST_MAX_BYTES = 16 * 1024;
 const DEFAULT_READ_LIMIT = 64 * 1024;
 const DEFAULT_STATE_PATH = join(getAgentDir(), "remote", "iroh-host.json");
 const PROMPT_COMPLETION_RPC_TYPES = new Set(["prompt", "steer", "follow_up"]);
@@ -1044,6 +1049,180 @@ async function handleConnection(incoming, options) {
 	}
 }
 
+function listenServer(server, controlPath) {
+	return new Promise((resolveListen, rejectListen) => {
+		const cleanup = () => {
+			server.off("error", handleError);
+		};
+		const handleError = (error) => {
+			cleanup();
+			rejectListen(error);
+		};
+		server.once("error", handleError);
+		server.listen(controlPath, () => {
+			cleanup();
+			resolveListen();
+		});
+	});
+}
+
+function canConnectToControlPath(controlPath) {
+	return new Promise((resolveConnect) => {
+		const socket = connectNet(controlPath);
+		let settled = false;
+		const finish = (canConnect) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			socket.destroy();
+			resolveConnect(canConnect);
+		};
+		const timeout = setTimeout(() => finish(false), 250);
+		socket.once("connect", () => finish(true));
+		socket.once("error", () => finish(false));
+	});
+}
+
+async function listenOnControlPath(server, controlPath) {
+	if (process.platform !== "win32") {
+		await mkdir(dirname(controlPath), { recursive: true });
+	}
+	try {
+		await listenServer(server, controlPath);
+		return;
+	} catch (error) {
+		if (process.platform === "win32" || error?.code !== "EADDRINUSE") throw error;
+		if (await canConnectToControlPath(controlPath)) {
+			throw new Error(`Iroh remote host control channel is already active for this state path: ${controlPath}`);
+		}
+		await rm(controlPath, { force: true });
+		await listenServer(server, controlPath);
+	}
+}
+
+function readLineFromControlSocket(socket) {
+	return new Promise((resolveLine, rejectLine) => {
+		let buffer = "";
+		const cleanup = () => {
+			socket.off("data", handleData);
+			socket.off("end", handleEnd);
+			socket.off("error", handleError);
+		};
+		const handleData = (chunk) => {
+			buffer += chunk;
+			if (Buffer.byteLength(buffer, "utf8") > CONTROL_REQUEST_MAX_BYTES) {
+				cleanup();
+				rejectLine(new Error(`Control request exceeds ${CONTROL_REQUEST_MAX_BYTES} bytes`));
+				return;
+			}
+			const newlineIndex = buffer.indexOf("\n");
+			if (newlineIndex === -1) return;
+			cleanup();
+			resolveLine(buffer.slice(0, newlineIndex));
+		};
+		const handleEnd = () => {
+			cleanup();
+			rejectLine(new Error("Control request ended before a line was received"));
+		};
+		const handleError = (error) => {
+			cleanup();
+			rejectLine(error);
+		};
+		socket.setEncoding("utf8");
+		socket.on("data", handleData);
+		socket.once("end", handleEnd);
+		socket.once("error", handleError);
+	});
+}
+
+function createPairControlErrorResponse(message) {
+	return {
+		type: IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
+		success: false,
+		error: message,
+	};
+}
+
+async function createPairControlSuccessResponse(request, endpoint, options) {
+	if (request.workspace !== options.workspace.name) {
+		return createPairControlErrorResponse(
+			`running host is serving workspace ${options.workspace.name}; cannot pair workspace ${request.workspace}`,
+		);
+	}
+	if (request.relayMode !== undefined && request.relayMode !== options.relayMode) {
+		return createPairControlErrorResponse(
+			`running host relay mode is ${options.relayMode}; cannot create a ${request.relayMode} ticket`,
+		);
+	}
+
+	const allowTools = request.allowTools ?? options.workspace.allowedTools ?? options.allowTools;
+	const unsafeTools = getIrohRemoteUnsafeAllowedTools(allowTools);
+	if (unsafeTools.length > 0) {
+		if (!request.unsafeApproval) {
+			return createPairControlErrorResponse("Unsafe remote tool grants require confirmation or --yes.");
+		}
+		await logAudit(options.auditLogger, {
+			type: "unsafe_tools_enabled",
+			workspace: request.workspace,
+			success: true,
+			details: {
+				allowTools,
+				approval: request.unsafeApproval,
+				context: "pair_command",
+				unsafeTools,
+			},
+		});
+	}
+
+	const pairing = await options.hostEngine.pair({
+		allowTools,
+		irohTicket: EndpointTicket.fromAddr(endpoint.addr()).toString(),
+		labelHint: request.labelHint,
+		nodeId: endpoint.id().toString(),
+		relayMode: options.relayMode,
+		ttlMs: request.ttlMs,
+		workspace: request.workspace,
+	});
+	return {
+		type: IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
+		success: true,
+		expiresAt: pairing.expiresAt,
+		ticket: pairing.ticket,
+	};
+}
+
+async function handlePairControlConnection(socket, endpoint, options) {
+	try {
+		const line = await readLineFromControlSocket(socket);
+		const request = parseIrohRemotePairControlRequest(JSON.parse(line));
+		const response = await createPairControlSuccessResponse(request, endpoint, options);
+		socket.end(`${JSON.stringify(response)}\n`);
+	} catch (error) {
+		socket.end(`${JSON.stringify(createPairControlErrorResponse(error instanceof Error ? error.message : String(error)))}\n`);
+	}
+}
+
+async function startPairControlServer(endpoint, options) {
+	const controlPath = getIrohRemoteControlPath(options.statePath);
+	const server = createServer((socket) => {
+		handlePairControlConnection(socket, endpoint, options).catch((error) => {
+			socket.end(`${JSON.stringify(createPairControlErrorResponse(error instanceof Error ? error.message : String(error)))}\n`);
+		});
+	});
+	await listenOnControlPath(server, controlPath);
+	return { controlPath, server };
+}
+
+async function closePairControlServer(controlServer) {
+	if (!controlServer) return;
+	await new Promise((resolveClose) => {
+		controlServer.server.close(() => resolveClose());
+	});
+	if (process.platform !== "win32") {
+		await rm(controlServer.controlPath, { force: true });
+	}
+}
+
 function createTicketPayload(endpoint, options, includePairingSecret) {
 	return {
 		alpn: IROH_REMOTE_ALPN,
@@ -1119,10 +1298,12 @@ async function serve(flags) {
 				})
 			).ticket
 		: encodeIrohRemoteTicketPayload(createTicketPayload(endpoint, options, false));
+	const controlServer = await startPairControlServer(endpoint, options);
 
 	console.error(`host id: ${endpoint.id().toString()}`);
 	console.error(`state: ${statePath}`);
 	console.error(`audit: ${auditPath}`);
+	console.error(`control: ${controlServer.controlPath}`);
 	console.error(`workspace: ${workspace.name} -> ${workspace.path}`);
 	console.error(
 		`child: ${options.integratedVolt ? "in-process volt remote host" : options.sourceVolt ? `${process.execPath} ${options.resolvedSourceVoltRunner} --mode rpc` : options.useVolt ? `${options.resolvedVoltBin ?? getPlatformVoltBin(options.voltBin)} --mode rpc` : "fake-rpc"}`,
@@ -1131,18 +1312,21 @@ async function serve(flags) {
 	console.error(pairingEnabled ? "pairing ticket:" : "paired-client ticket:");
 	console.log(ticket);
 
-	while (true) {
-		const incoming = await endpoint.acceptNext();
-		if (!incoming) break;
-		await handleConnection(incoming, options).catch((error) => {
-			if (!isExpectedDoneClose(error)) {
-				console.error(error instanceof Error ? error.stack : String(error));
-			}
-		});
-		if (options.once) break;
+	try {
+		while (true) {
+			const incoming = await endpoint.acceptNext();
+			if (!incoming) break;
+			await handleConnection(incoming, options).catch((error) => {
+				if (!isExpectedDoneClose(error)) {
+					console.error(error instanceof Error ? error.stack : String(error));
+				}
+			});
+			if (options.once) break;
+		}
+	} finally {
+		await closePairControlServer(controlServer);
+		await endpoint.close();
 	}
-
-	await endpoint.close();
 }
 
 async function listClients(flags) {

@@ -1,0 +1,198 @@
+import { createHash } from "node:crypto";
+import { connect } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { type IrohRemoteRelayMode, isIrohRemoteRelayMode } from "./protocol.ts";
+
+export const IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE = "volt_iroh_pair_request";
+export const IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE = "volt_iroh_pair_response";
+export const DEFAULT_IROH_REMOTE_CONTROL_TIMEOUT_MS = 5_000;
+
+export type IrohRemoteUnsafeApproval = "tty_confirmation" | "yes_flag";
+
+export interface IrohRemotePairControlRequest {
+	type: typeof IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE;
+	allowTools?: string;
+	labelHint?: string;
+	relayMode?: IrohRemoteRelayMode;
+	ttlMs?: number;
+	unsafeApproval?: IrohRemoteUnsafeApproval;
+	workspace: string;
+}
+
+export type IrohRemotePairControlResponse =
+	| {
+			type: typeof IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE;
+			success: true;
+			expiresAt: number;
+			ticket: string;
+	  }
+	| {
+			type: typeof IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE;
+			success: false;
+			error: string;
+	  };
+
+export interface IrohRemotePairControlClientOptions {
+	request: IrohRemotePairControlRequest;
+	statePath: string;
+	timeoutMs?: number;
+}
+
+export function getIrohRemoteControlPath(statePath: string): string {
+	const hash = createHash("sha256").update(statePath).digest("hex").slice(0, 32);
+	if (process.platform === "win32") {
+		return `\\\\.\\pipe\\volt-iroh-remote-${hash}`;
+	}
+	return join(tmpdir(), "volt-iroh-remote", `${hash}.sock`);
+}
+
+export function parseIrohRemotePairControlRequest(value: unknown): IrohRemotePairControlRequest {
+	const request = expectRecord(value, "Iroh remote pair control request");
+	const type = expectString(request.type, "pair control request type");
+	if (type !== IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE) {
+		throw new Error(`Unsupported Iroh remote control request type: ${type}`);
+	}
+	const relayMode = expectOptionalRelayMode(request.relayMode, "pair control request relayMode");
+	const unsafeApproval = expectOptionalUnsafeApproval(request.unsafeApproval, "pair control request unsafeApproval");
+	const allowTools = expectOptionalString(request.allowTools, "pair control request allowTools");
+	const labelHint = expectOptionalString(request.labelHint, "pair control request labelHint");
+	const ttlMs = expectOptionalPositiveNumber(request.ttlMs, "pair control request ttlMs");
+	return {
+		type: IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE,
+		workspace: expectString(request.workspace, "pair control request workspace"),
+		...(allowTools === undefined ? {} : { allowTools }),
+		...(labelHint === undefined ? {} : { labelHint }),
+		...(relayMode === undefined ? {} : { relayMode }),
+		...(ttlMs === undefined ? {} : { ttlMs }),
+		...(unsafeApproval === undefined ? {} : { unsafeApproval }),
+	};
+}
+
+export function parseIrohRemotePairControlResponse(value: unknown): IrohRemotePairControlResponse {
+	const response = expectRecord(value, "Iroh remote pair control response");
+	const type = expectString(response.type, "pair control response type");
+	if (type !== IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE) {
+		throw new Error(`Unsupported Iroh remote control response type: ${type}`);
+	}
+	const success = expectBoolean(response.success, "pair control response success");
+	if (!success) {
+		return {
+			type: IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
+			success: false,
+			error: expectString(response.error, "pair control response error"),
+		};
+	}
+	const expiresAt = expectPositiveNumber(response.expiresAt, "pair control response expiresAt");
+	return {
+		type: IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
+		success: true,
+		expiresAt,
+		ticket: expectString(response.ticket, "pair control response ticket"),
+	};
+}
+
+export async function requestIrohRemotePairingTicket(
+	options: IrohRemotePairControlClientOptions,
+): Promise<IrohRemotePairControlResponse> {
+	const controlPath = getIrohRemoteControlPath(options.statePath);
+	const timeoutMs = options.timeoutMs ?? DEFAULT_IROH_REMOTE_CONTROL_TIMEOUT_MS;
+	const socket = connect(controlPath);
+	socket.setEncoding("utf8");
+
+	return await new Promise<IrohRemotePairControlResponse>((resolve, reject) => {
+		let buffer = "";
+		let settled = false;
+		const timeout = setTimeout(() => {
+			finish(undefined, new Error("Timed out waiting for a running Iroh remote host control response"));
+		}, timeoutMs);
+
+		const finish = (response?: IrohRemotePairControlResponse, error?: Error) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			socket.destroy();
+			if (error) {
+				reject(error);
+				return;
+			}
+			if (!response) {
+				reject(new Error("Iroh remote host control channel closed without a response"));
+				return;
+			}
+			resolve(response);
+		};
+
+		socket.once("connect", () => {
+			socket.write(`${JSON.stringify(options.request)}\n`);
+		});
+		socket.on("data", (chunk: string) => {
+			buffer += chunk;
+			const newlineIndex = buffer.indexOf("\n");
+			if (newlineIndex === -1) return;
+			try {
+				finish(parseIrohRemotePairControlResponse(JSON.parse(buffer.slice(0, newlineIndex))));
+			} catch (error) {
+				finish(undefined, error instanceof Error ? error : new Error(String(error)));
+			}
+		});
+		socket.once("error", (error) => {
+			finish(undefined, new Error(`No running Iroh remote host control channel is available (${error.message})`));
+		});
+		socket.once("end", () => finish());
+	});
+}
+
+function expectRecord(value: unknown, description: string): Record<string, unknown> {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new Error(`${description} must be an object`);
+	}
+	return value as Record<string, unknown>;
+}
+
+function expectString(value: unknown, description: string): string {
+	if (typeof value !== "string" || value.length === 0) {
+		throw new Error(`${description} must be a non-empty string`);
+	}
+	return value;
+}
+
+function expectOptionalString(value: unknown, description: string): string | undefined {
+	if (value === undefined) return undefined;
+	return expectString(value, description);
+}
+
+function expectBoolean(value: unknown, description: string): boolean {
+	if (typeof value !== "boolean") {
+		throw new Error(`${description} must be a boolean`);
+	}
+	return value;
+}
+
+function expectPositiveNumber(value: unknown, description: string): number {
+	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+		throw new Error(`${description} must be a positive number`);
+	}
+	return value;
+}
+
+function expectOptionalPositiveNumber(value: unknown, description: string): number | undefined {
+	if (value === undefined) return undefined;
+	return expectPositiveNumber(value, description);
+}
+
+function expectOptionalRelayMode(value: unknown, description: string): IrohRemoteRelayMode | undefined {
+	if (value === undefined) return undefined;
+	if (!isIrohRemoteRelayMode(value)) {
+		throw new Error(`${description} must be disabled or default`);
+	}
+	return value;
+}
+
+function expectOptionalUnsafeApproval(value: unknown, description: string): IrohRemoteUnsafeApproval | undefined {
+	if (value === undefined) return undefined;
+	if (value !== "tty_confirmation" && value !== "yes_flag") {
+		throw new Error(`${description} must be tty_confirmation or yes_flag`);
+	}
+	return value;
+}

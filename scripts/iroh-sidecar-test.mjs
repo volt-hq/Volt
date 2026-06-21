@@ -942,6 +942,67 @@ async function getStateScenario() {
 	});
 }
 
+async function pairCommandScenario() {
+	await withStateDir("pair-command", async ({ clientStatePath, hostStatePath, stateDir }) => {
+		const workspacePath = join(stateDir, "workspace");
+		await mkdir(workspacePath, { recursive: true });
+		const host = startHost([
+			"--state",
+			hostStatePath,
+			"--workspace",
+			`pair-command=${workspacePath}`,
+			"--no-pairing",
+			"--once",
+		]);
+		try {
+			await waitForFirstStdoutLine(host.child, host.output, "pair command host");
+			const pairCommand = spawnSourceCli([
+				"remote",
+				"pair",
+				"--state",
+				hostStatePath,
+				"--workspace",
+				"pair-command",
+				"--allow-tools",
+				"read,grep,find,ls",
+				"--label",
+				"scenario client",
+				"--ttl",
+				"30s",
+			]);
+			await waitForExit(pairCommand.child, "remote pair command", pairCommand.output);
+			const pairStdoutLines = pairCommand.output.stdout
+				.trim()
+				.split("\n")
+				.filter((line) => line.length > 0);
+			assert(
+				pairStdoutLines.length === 1 && pairStdoutLines[0].startsWith(TICKET_PREFIX),
+				`Expected pair command stdout to contain only a ticket, got:\nstdout:\n${pairCommand.output.stdout}\nstderr:\n${pairCommand.output.stderr}`,
+			);
+
+			const clientOutput = await runClient(
+				pairStdoutLines[0],
+				clientStatePath,
+				["--message", "pair command", "--timeout-ms", "10000"],
+				{ label: "pair command client" },
+			);
+			await waitForExit(host.child, "pair command host", host.output);
+			assert(
+				clientOutput.stdout.includes("fake RPC response over Iroh: pair command"),
+				`Expected pair command client response, got:\n${clientOutput.stdout}`,
+			);
+
+			const hostState = JSON.parse(await readFile(hostStatePath, "utf8"));
+			assert(
+				hostState.clients?.[0]?.allowedTools === "read,grep,find,ls",
+				`Expected pair command client to persist requested tools, got:\n${JSON.stringify(hostState)}`,
+			);
+		} finally {
+			await stopProcess(host.child);
+		}
+	});
+}
+
 async function pairingAndRevocationScenario() {
 	await withStateDir("pairing", async ({ clientStatePath, hostStatePath, stateDir }) => {
 		await runHostClientOnce({
@@ -1334,6 +1395,7 @@ const scenarios = [
 	["integrated Volt env profile", integratedVoltEnvProfileScenario],
 	["malformed handshake", malformedHandshakeScenario],
 	["get_state", getStateScenario],
+	["pair command", pairCommandScenario],
 	["pairing and revocation", pairingAndRevocationScenario],
 	["audit log", auditLogScenario],
 	["paired client persisted tools", pairedClientPersistedToolsScenario],

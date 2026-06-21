@@ -389,6 +389,8 @@ Resolved 2026-06-21: Offline pairing from persisted host state is not supported.
 
 Resolved 2026-06-21: Core/host pairing ticket lifecycle now supports pair-time `allowedTools`, label hints, TTL, relay hints in ticket payloads, saved-workspace binding, one-time consumption, and cross-workspace rejection. Pending state remains hash-only plus non-secret metadata, and authorization applies a label hint only when the client does not provide a label.
 
+Resolved 2026-06-21: `volt remote pair` is now exposed in the main CLI as a running-host-mediated command. The host opens a local control channel derived from the state path, creates tickets from its live bound endpoint address, and applies requested `--workspace`, `--allow-tools`, `--label`, `--ttl`, `--relay`, and `--yes` policy. The command validates saved workspace selection before contacting the host, prints only the ticket on stdout, emits diagnostics to stderr, reuses unsafe-tool confirmation gates, and fails if no running host control channel is available.
+
 ### `volt remote clients`
 
 Improve output while preserving JSON compatibility if it currently prints JSON.
@@ -743,6 +745,8 @@ Acceptance criteria:
 
 Resolved 2026-06-21: Core/host lifecycle support is in place for host-mediated pair command implementation: pair requests can supply workspace, pair-time tools, label hints, TTL, relay hints, and the host enforces one-time use plus workspace binding.
 
+Resolved 2026-06-21: The main CLI implements host-mediated `volt remote pair` with saved-workspace validation, unsafe grant confirmation/`--yes`, ticket-only stdout, stderr diagnostics, and local scenario coverage that pairs a real demo client through the new command.
+
 - `volt remote pair --workspace volt` creates a valid ticket for a saved workspace or fails with a precise actionable message.
 - Ticket can pair a new client exactly once.
 - Expired pair ticket is rejected.
@@ -927,7 +931,7 @@ Do not remove experimental language until all of these are true:
 
 - [x] Per-client tools are persisted and enforced on reconnect. Resolved 2026-06-21.
 - [x] Unsafe tool grants require confirmation or `--yes`. Resolved 2026-06-21.
-- [ ] Pairing workflow is first-class or explicitly scoped to running host startup with clear docs.
+- [x] Pairing workflow is first-class and scoped to a running host control channel. Resolved 2026-06-21.
 - [ ] Protocol v1 is documented.
 - [ ] Protocol compatibility tests exist.
 - [ ] Reconnect/resume behavior is implemented and documented.

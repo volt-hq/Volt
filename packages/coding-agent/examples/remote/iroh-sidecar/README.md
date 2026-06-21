@@ -52,7 +52,7 @@ Run the automated local scenario suite when changing the remote host bridge:
 npm run iroh:poc:test
 ```
 
-The suite starts local host/client processes with isolated temporary state and covers fake-RPC prompt streaming, `get_state`, pairing persistence, `--no-pairing` rejection, revocation, expired tickets, and workspace preflight failures.
+The suite starts local host/client processes with isolated temporary state and covers fake-RPC prompt streaming, `get_state`, first-class `volt remote pair`, pairing persistence, `--no-pairing` rejection, revocation, expired tickets, and workspace preflight failures.
 
 ## Local fake-RPC smoke test
 
@@ -94,6 +94,16 @@ Use `--state <path>` on host or client for isolated test state.
 ## Pairing and revocation
 
 The host prints a pairing ticket by default. A client that connects with that ticket is added to the host allowlist for the selected workspace.
+
+A running host also accepts local management requests from `volt remote pair`, which prints only the generated ticket on stdout:
+
+```bash
+volt remote host --workspace volt=/path/to/repo --no-pairing
+volt remote pair --workspace volt
+volt remote pair --workspace volt --allow-tools read,grep,find,ls,bash --yes
+```
+
+If no host is running for the selected `--state` file, or if the workspace is missing or ambiguous, `volt remote pair` fails with diagnostics on stderr and no ticket on stdout.
 
 List paired clients:
 
@@ -182,7 +192,7 @@ Remote host support is experimental and should be treated as remote access to th
 - Any paired client can control the integrated runtime or spawned RPC child for its allowed workspace.
 - Real Volt RPC can read files, edit files, and run tools allowed by `--allow-tools`.
 - Keep the default read-only tool list while testing remotely.
-- `--allow-tools` grants that include `bash`, `edit`, or `write` can modify host files or run shell commands; TTY hosts ask for confirmation, and noninteractive hosts must pass `--yes`.
+- `--allow-tools` grants that include `bash`, `edit`, or `write` can modify host files or run shell commands; TTY host and pair commands ask for confirmation, and noninteractive commands must pass `--yes`.
 - Do not expose sensitive workspaces or run with `bash,edit,write` unless the client is trusted.
 
 See [the design document](../../../docs/iroh-remote-access-design.md) for the intended product security model.

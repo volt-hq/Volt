@@ -34,7 +34,17 @@ import type { ModelRegistry } from "./core/model-registry.ts";
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
-import { IrohRemoteAuditLogger, IrohRemoteHostStateManager } from "./core/remote/iroh/index.ts";
+import {
+	DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+	getIrohRemoteUnsafeAllowedTools,
+	IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE,
+	IrohRemoteAuditLogger,
+	IrohRemoteHostStateManager,
+	type IrohRemoteRelayMode,
+	type IrohRemoteUnsafeApproval,
+	isIrohRemoteRelayMode,
+	requestIrohRemotePairingTicket,
+} from "./core/remote/iroh/index.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
 	formatMissingSessionCwdPrompt,
@@ -80,6 +90,7 @@ async function readPipedStdin(): Promise<string | undefined> {
 function printRemoteCommandHelp(): void {
 	console.error(`Usage:
   volt remote host [options]
+  volt remote pair [options]
   volt remote clients [options]
   volt remote revoke <node-id> [options]
 
@@ -99,6 +110,15 @@ Host options are forwarded to the integrated Iroh remote host. Common options:
   --once                        Exit after first client disconnects
   --yes                         Accept unsafe remote tool grants for noninteractive startup
 
+Pair options:
+  --workspace <name>            Saved workspace name to pair with the running host
+  --allow-tools <list>          Tool allowlist for the new client. Defaults to the saved workspace allowlist or read-only tools.
+  --label <label>               Optional label hint if the client does not provide one
+  --ttl <duration>              Pairing ticket TTL, e.g. 30s, 10m, or 1h
+  --state <path>                Host state path
+  --relay <disabled|default>    Expected running host relay mode; omitted uses the live host mode
+  --yes                         Accept unsafe remote tool grants for noninteractive pairing
+
 Client management options:
   --state <path>                Host state path
   --audit <path>                Audit JSONL path for revoke
@@ -111,6 +131,19 @@ interface RemoteManagementArgs {
 	help: boolean;
 	positionals: string[];
 	statePath: string;
+}
+
+interface RemotePairArgs {
+	allowTools?: string;
+	error?: string;
+	help: boolean;
+	labelHint?: string;
+	positionals: string[];
+	relayMode?: IrohRemoteRelayMode;
+	statePath: string;
+	ttlMs?: number;
+	workspace?: string;
+	yes: boolean;
 }
 
 function getDefaultIrohRemoteStatePath(): string {
@@ -182,6 +215,224 @@ function parseRemoteManagementArgs(args: readonly string[]): RemoteManagementArg
 	}
 
 	return { auditPath, help: false, positionals, statePath: resolvePath(statePath) };
+}
+
+function parseRemotePairArgs(args: readonly string[]): RemotePairArgs {
+	const positionals: string[] = [];
+	let allowTools: string | undefined;
+	let labelHint: string | undefined;
+	let relayMode: IrohRemoteRelayMode | undefined;
+	let statePath = getDefaultIrohRemoteStatePath();
+	let ttlMs: number | undefined;
+	let workspace: string | undefined;
+	let yes = false;
+
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index];
+		if (arg === "--help" || arg === "-h") {
+			return { help: true, positionals, statePath, yes };
+		}
+		if (arg === "--yes") {
+			yes = true;
+			continue;
+		}
+
+		const eqIndex = arg.indexOf("=");
+		const flag = eqIndex === -1 ? arg : arg.slice(0, eqIndex);
+		const inlineValue = eqIndex === -1 ? undefined : arg.slice(eqIndex + 1);
+		if (
+			flag === "--allow-tools" ||
+			flag === "--label" ||
+			flag === "--relay" ||
+			flag === "--state" ||
+			flag === "--ttl" ||
+			flag === "--workspace"
+		) {
+			const value = inlineValue ?? args[index + 1];
+			if (value === undefined || value.startsWith("-")) {
+				return { error: `${flag} requires a value`, help: false, positionals, statePath, yes };
+			}
+			if (inlineValue === undefined) {
+				index++;
+			}
+
+			if (flag === "--allow-tools") {
+				allowTools = value;
+			} else if (flag === "--label") {
+				labelHint = value;
+			} else if (flag === "--relay") {
+				if (!isIrohRemoteRelayMode(value)) {
+					return { error: "--relay must be disabled or default", help: false, positionals, statePath, yes };
+				}
+				relayMode = value;
+			} else if (flag === "--state") {
+				statePath = resolvePath(value);
+			} else if (flag === "--ttl") {
+				const parsedTtlMs = parseRemotePairTtlMs(value);
+				if (parsedTtlMs === undefined) {
+					return {
+						error: "--ttl must be a positive duration such as 30s, 10m, or 1h",
+						help: false,
+						positionals,
+						statePath,
+						yes,
+					};
+				}
+				ttlMs = parsedTtlMs;
+			} else {
+				workspace = value;
+			}
+			continue;
+		}
+
+		if (arg.startsWith("-")) {
+			return { error: `Unknown remote pair option: ${arg}`, help: false, positionals, statePath, yes };
+		}
+		positionals.push(arg);
+	}
+
+	return {
+		help: false,
+		positionals,
+		statePath: resolvePath(statePath),
+		yes,
+		...(allowTools === undefined ? {} : { allowTools }),
+		...(labelHint === undefined ? {} : { labelHint }),
+		...(relayMode === undefined ? {} : { relayMode }),
+		...(ttlMs === undefined ? {} : { ttlMs }),
+		...(workspace === undefined ? {} : { workspace }),
+	};
+}
+
+function parseRemotePairTtlMs(value: string): number | undefined {
+	const match = /^(\d+)(ms|s|m|h)$/.exec(value.trim());
+	if (!match) return undefined;
+	const amount = Number(match[1]);
+	if (!Number.isSafeInteger(amount) || amount <= 0) return undefined;
+	const unit = match[2];
+	const multiplier = unit === "ms" ? 1 : unit === "s" ? 1_000 : unit === "m" ? 60_000 : 3_600_000;
+	const ttlMs = amount * multiplier;
+	return Number.isSafeInteger(ttlMs) ? ttlMs : undefined;
+}
+
+function selectRemotePairWorkspace(
+	workspaces: readonly { name: string; allowedTools?: string }[],
+	workspaceName: string | undefined,
+): { name: string; allowedTools?: string } | { error: string } {
+	if (workspaceName !== undefined) {
+		const workspace = workspaces.find((entry) => entry.name === workspaceName);
+		return workspace ?? { error: `No saved Iroh remote workspace named ${workspaceName}` };
+	}
+	if (workspaces.length === 0) {
+		return {
+			error: "No saved Iroh remote workspaces found. Start `volt remote host --workspace <name=path>` first.",
+		};
+	}
+	if (workspaces.length > 1) {
+		return {
+			error: `Multiple saved Iroh remote workspaces found (${workspaces.map((workspace) => workspace.name).join(", ")}). Pass --workspace <name>.`,
+		};
+	}
+	const workspace = workspaces[0];
+	if (!workspace) {
+		return {
+			error: "No saved Iroh remote workspaces found. Start `volt remote host --workspace <name=path>` first.",
+		};
+	}
+	return workspace;
+}
+
+async function confirmUnsafeRemotePairToolGrant(
+	allowTools: string,
+	yes: boolean,
+): Promise<IrohRemoteUnsafeApproval | undefined> {
+	const unsafeTools = getIrohRemoteUnsafeAllowedTools(allowTools);
+	if (unsafeTools.length === 0) return undefined;
+
+	const warning = [
+		`Unsafe remote tools requested: ${unsafeTools.join(", ")}.`,
+		"These tools can modify files or run shell commands on the host through a paired remote client.",
+	].join("\n");
+	if (yes) return "yes_flag";
+	if (!process.stdin.isTTY || !process.stderr.isTTY) {
+		throw new Error(`${warning}\nPass --yes to accept unsafe remote tool grants in noninteractive contexts.`);
+	}
+
+	const readline = createInterface({ input: process.stdin, output: process.stderr });
+	try {
+		const accepted = await new Promise<boolean>((resolve) => {
+			readline.question(`${warning}\nType yes to continue: `, (answer) => {
+				resolve(answer.trim().toLowerCase() === "yes");
+			});
+		});
+		if (!accepted) {
+			throw new Error("Unsafe remote tool grant was not accepted.");
+		}
+		return "tty_confirmation";
+	} finally {
+		readline.close();
+	}
+}
+
+async function handleRemotePairCommand(args: readonly string[]): Promise<void> {
+	const parsed = parseRemotePairArgs(args);
+	if (parsed.help) {
+		printRemoteCommandHelp();
+		return;
+	}
+	if (parsed.error) {
+		console.error(chalk.red(`Error: ${parsed.error}`));
+		process.exitCode = 1;
+		return;
+	}
+	if (parsed.positionals.length > 0) {
+		console.error(chalk.red(`Error: Unexpected remote pair argument: ${parsed.positionals[0]}`));
+		process.exitCode = 1;
+		return;
+	}
+
+	const stateManager = new IrohRemoteHostStateManager({ statePath: parsed.statePath });
+	const state = await stateManager.getState();
+	const workspace = selectRemotePairWorkspace(state.workspaces, parsed.workspace);
+	if ("error" in workspace) {
+		console.error(chalk.red(`Error: ${workspace.error}`));
+		process.exitCode = 1;
+		return;
+	}
+
+	const allowTools = parsed.allowTools ?? workspace.allowedTools ?? DEFAULT_IROH_REMOTE_ALLOW_TOOLS;
+	let unsafeApproval: IrohRemoteUnsafeApproval | undefined;
+	try {
+		unsafeApproval = await confirmUnsafeRemotePairToolGrant(allowTools, parsed.yes);
+	} catch (error) {
+		console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
+		process.exitCode = 1;
+		return;
+	}
+
+	try {
+		const response = await requestIrohRemotePairingTicket({
+			statePath: parsed.statePath,
+			request: {
+				type: IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE,
+				workspace: workspace.name,
+				allowTools,
+				...(parsed.labelHint === undefined ? {} : { labelHint: parsed.labelHint }),
+				...(parsed.relayMode === undefined ? {} : { relayMode: parsed.relayMode }),
+				...(parsed.ttlMs === undefined ? {} : { ttlMs: parsed.ttlMs }),
+				...(unsafeApproval === undefined ? {} : { unsafeApproval }),
+			},
+		});
+		if (!response.success) {
+			console.error(chalk.red(`Error: ${response.error}`));
+			process.exitCode = 1;
+			return;
+		}
+		console.log(response.ticket);
+	} catch (error) {
+		console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
+		process.exitCode = 1;
+	}
 }
 
 async function handleRemoteClientsCommand(args: readonly string[]): Promise<void> {
@@ -288,6 +539,10 @@ async function handleRemoteCommand(args: string[], options: { profile?: string }
 	}
 	if (command === "clients") {
 		await handleRemoteClientsCommand(args.slice(2));
+		return true;
+	}
+	if (command === "pair") {
+		await handleRemotePairCommand(args.slice(2));
 		return true;
 	}
 	if (command === "revoke") {

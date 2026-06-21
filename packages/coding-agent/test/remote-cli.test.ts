@@ -1,10 +1,48 @@
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import { readIrohRemoteHostState, writeIrohRemoteHostState } from "../src/core/remote/iroh/index.ts";
+import {
+	getIrohRemoteControlPath,
+	IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
+	readIrohRemoteHostState,
+	writeIrohRemoteHostState,
+} from "../src/core/remote/iroh/index.ts";
 import { main } from "../src/main.ts";
+
+async function withMockPairControlServer(
+	statePath: string,
+	handleRequest: (request: Record<string, unknown>) => Record<string, unknown>,
+	callback: () => Promise<void>,
+): Promise<void> {
+	const controlPath = getIrohRemoteControlPath(statePath);
+	if (process.platform !== "win32") {
+		mkdirSync(dirname(controlPath), { recursive: true });
+		rmSync(controlPath, { force: true });
+	}
+	const server = createServer((socket) => {
+		let buffer = "";
+		socket.setEncoding("utf8");
+		socket.on("data", (chunk) => {
+			buffer += chunk;
+			const newlineIndex = buffer.indexOf("\n");
+			if (newlineIndex === -1) return;
+			const request = JSON.parse(buffer.slice(0, newlineIndex)) as Record<string, unknown>;
+			socket.end(`${JSON.stringify(handleRequest(request))}\n`);
+		});
+	});
+	await new Promise<void>((resolveListen) => server.listen(controlPath, resolveListen));
+	try {
+		await callback();
+	} finally {
+		await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+		if (process.platform !== "win32") {
+			rmSync(controlPath, { force: true });
+		}
+	}
+}
 
 describe("remote CLI", () => {
 	let tempDir: string;
@@ -49,8 +87,184 @@ describe("remote CLI", () => {
 
 		expect(logSpy).not.toHaveBeenCalled();
 		const helpText = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
+		expect(helpText).toContain("volt remote pair [options]");
 		expect(helpText).toContain("bash, edit, or write can modify host state and require confirmation");
 		expect(helpText).toContain("--yes");
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("creates a remote pairing ticket through a running host control channel", async () => {
+		const statePath = join(tempDir, "host.json");
+		await writeIrohRemoteHostState(statePath, {
+			hostSecretKey: undefined,
+			consumedPairingSecretHashes: [],
+			workspaces: [{ name: "project", path: projectDir, allowedTools: "read" }],
+			clients: [],
+		});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		let requestBody: Record<string, unknown> | undefined;
+
+		await withMockPairControlServer(
+			statePath,
+			(request) => {
+				requestBody = request;
+				return {
+					type: IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
+					success: true,
+					expiresAt: 125,
+					ticket: "volt+iroh://v1/mock-ticket",
+				};
+			},
+			async () => {
+				await expect(
+					main([
+						"remote",
+						"pair",
+						"--state",
+						statePath,
+						"--workspace",
+						"project",
+						"--label",
+						"tablet",
+						"--ttl",
+						"30s",
+						"--relay",
+						"disabled",
+					]),
+				).resolves.toBeUndefined();
+			},
+		);
+
+		expect(requestBody).toEqual({
+			type: "volt_iroh_pair_request",
+			workspace: "project",
+			allowTools: "read",
+			labelHint: "tablet",
+			ttlMs: 30_000,
+			relayMode: "disabled",
+		});
+		expect(logSpy.mock.calls.map(([message]) => String(message))).toEqual(["volt+iroh://v1/mock-ticket"]);
+		expect(errorSpy).not.toHaveBeenCalled();
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("rejects ambiguous remote pair workspace selection before contacting a host", async () => {
+		const statePath = join(tempDir, "host.json");
+		await writeIrohRemoteHostState(statePath, {
+			hostSecretKey: undefined,
+			consumedPairingSecretHashes: [],
+			workspaces: [
+				{ name: "one", path: projectDir, allowedTools: "read" },
+				{ name: "two", path: projectDir, allowedTools: "read" },
+			],
+			clients: [],
+		});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(main(["remote", "pair", "--state", statePath])).resolves.toBeUndefined();
+
+		expect(logSpy).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"Multiple saved Iroh remote workspaces found",
+		);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("reports when no running host control channel is available for remote pair", async () => {
+		const statePath = join(tempDir, "host.json");
+		await writeIrohRemoteHostState(statePath, {
+			hostSecretKey: undefined,
+			consumedPairingSecretHashes: [],
+			workspaces: [{ name: "project", path: projectDir, allowedTools: "read" }],
+			clients: [],
+		});
+		const controlPath = getIrohRemoteControlPath(statePath);
+		if (process.platform !== "win32") {
+			rmSync(controlPath, { force: true });
+		}
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(main(["remote", "pair", "--state", statePath, "--workspace", "project"])).resolves.toBeUndefined();
+
+		expect(logSpy).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"No running Iroh remote host control channel is available",
+		);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("requires --yes for unsafe remote pair tool grants in noninteractive contexts", async () => {
+		const statePath = join(tempDir, "host.json");
+		await writeIrohRemoteHostState(statePath, {
+			hostSecretKey: undefined,
+			consumedPairingSecretHashes: [],
+			workspaces: [{ name: "project", path: projectDir, allowedTools: "read" }],
+			clients: [],
+		});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(
+			main(["remote", "pair", "--state", statePath, "--workspace", "project", "--allow-tools", "read,bash"]),
+		).resolves.toBeUndefined();
+
+		expect(logSpy).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"Pass --yes to accept unsafe remote tool grants",
+		);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("passes unsafe remote pair approvals to the running host control channel", async () => {
+		const statePath = join(tempDir, "host.json");
+		await writeIrohRemoteHostState(statePath, {
+			hostSecretKey: undefined,
+			consumedPairingSecretHashes: [],
+			workspaces: [{ name: "project", path: projectDir, allowedTools: "read" }],
+			clients: [],
+		});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		let requestBody: Record<string, unknown> | undefined;
+
+		await withMockPairControlServer(
+			statePath,
+			(request) => {
+				requestBody = request;
+				return {
+					type: IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
+					success: true,
+					expiresAt: 125,
+					ticket: "volt+iroh://v1/unsafe-ticket",
+				};
+			},
+			async () => {
+				await expect(
+					main([
+						"remote",
+						"pair",
+						"--state",
+						statePath,
+						"--workspace",
+						"project",
+						"--allow-tools",
+						"read,bash",
+						"--yes",
+					]),
+				).resolves.toBeUndefined();
+			},
+		);
+
+		expect(requestBody).toMatchObject({
+			allowTools: "read,bash",
+			unsafeApproval: "yes_flag",
+			workspace: "project",
+		});
+		expect(logSpy.mock.calls.map(([message]) => String(message))).toEqual(["volt+iroh://v1/unsafe-ticket"]);
+		expect(errorSpy).not.toHaveBeenCalled();
 		expect(process.exitCode).toBeUndefined();
 	});
 
