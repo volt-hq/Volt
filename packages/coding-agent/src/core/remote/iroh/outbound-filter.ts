@@ -229,6 +229,15 @@ function sanitizePathField(value: string, context: IrohRemoteOutboundSanitizerCo
 	if (isRemoteWorkspacePath(value, context)) {
 		return value;
 	}
+	if (isBashOutputPath(value)) {
+		return IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH;
+	}
+	if (isSessionFilePath(value)) {
+		return IROH_REMOTE_REDACTED_SESSION_FILE;
+	}
+	if (isExportPath(value)) {
+		return IROH_REMOTE_REDACTED_EXPORT_PATH;
+	}
 	if (isTildePath(value)) {
 		return sanitizePathToken(value, context);
 	}

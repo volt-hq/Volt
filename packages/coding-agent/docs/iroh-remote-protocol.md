@@ -123,9 +123,10 @@ Before host RPC output is sent to the remote stream, Volt sanitizes host-local p
 
 - Paths under the hosted workspace are rewritten under `/workspace`.
 - Host-local paths outside the workspace are replaced with `[redacted host path]`.
-- Export paths are redacted. Recognized export path occurrences use `[redacted export path]`; structured path fields that are not export-specific may use `[redacted host path]`.
+- Export paths are redacted. Recognized export path occurrences and structured path fields use `[redacted export path]`; unrecognized host-local path fields use `[redacted host path]`.
 - Session files are omitted or replaced with `[redacted session file]`.
-- Bash output file paths are replaced with `[redacted bash output path]`.
+- Bash output file paths are omitted or replaced with `[redacted bash output path]`.
+- Redaction applies to responses, extension UI requests, assistant content, tool-call arguments, and plain-text fallback lines.
 - Opaque model/provider data such as image base64 payloads and signature fields are preserved, while adjacent text and structured arguments are still sanitized.
 
 These placeholders are part of the v1 compatibility surface. Clients must display them as opaque strings and must not assume that a redacted path can be expanded locally.

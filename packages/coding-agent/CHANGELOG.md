@@ -59,6 +59,7 @@
 - Fixed the Iroh remote host scenario harness and host preflight to canonicalize workspace paths before comparing or spawning RPC children.
 - Fixed the Iroh remote client to use core remote ticket and handshake helpers, and made direct Iroh remote runtime creation default to the read-only tool allowlist.
 - Fixed Iroh remote RPC outbound messages to normalize workspace paths and redact host-only session, export, and bash temp paths before sending data to remote clients.
+- Hardened Iroh remote outbound redaction for structured session, export, and bash-output path fields and added representative response, extension UI, assistant content, and tool-call compatibility coverage.
 
 ### Changed
 

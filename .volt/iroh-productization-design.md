@@ -572,7 +572,9 @@ Guarantees:
 - Absolute host paths outside the workspace are redacted.
 - Image data and opaque signatures are preserved.
 
-Resolved 2026-06-21: Protocol compatibility tests now assert representative outbound RPC event redaction, including workspace normalization, host path redaction, session-file omission, structured export-path redaction, opaque image payload preservation, and signature preservation. D.3 keeps broader redaction hardening open for additional event shapes and path variants.
+Resolved 2026-06-21: Protocol compatibility tests now assert representative outbound RPC event redaction, including workspace normalization, host path redaction, session-file omission, structured export-path redaction, opaque image payload preservation, and signature preservation.
+
+Resolved 2026-06-21: D.3 hardened structured path-field redaction so recognized session files, export paths, and bash output paths use their dedicated placeholders even in strict path fields. Tests now cover representative `get_state`, `export_html`, `bash`, extension UI, assistant-content, and tool-call outbound events, plus the existing POSIX, Windows, UNC, tilde, file URL, spaced-path, opaque image, and signature cases. The protocol doc now lists the outbound redaction surfaces and placeholder guarantees.
 
 ## Reconnect and Session Resume Design
 
@@ -782,7 +784,7 @@ Tasks:
 2. Link it from `packages/coding-agent/docs/index.md` and the existing Iroh design doc.
 3. Add test vectors for tickets and handshakes.
 4. Add tests for allowed/rejected command types.
-5. Add tests for redaction compatibility.
+5. Add tests for redaction compatibility. Resolved 2026-06-21: D.3 adds representative response/event coverage and structured path-field hardening for redaction compatibility.
 
 Acceptance criteria:
 

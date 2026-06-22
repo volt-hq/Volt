@@ -456,7 +456,7 @@ describe("Iroh remote core helpers", () => {
 			success: true,
 			data: {
 				cwd: "/workspace/src",
-				exportPath: IROH_REMOTE_REDACTED_HOST_PATH,
+				exportPath: IROH_REMOTE_REDACTED_EXPORT_PATH,
 				message: `inside /workspace/src/index.ts outside ${IROH_REMOTE_REDACTED_HOST_PATH}`,
 				content: [
 					{
@@ -1601,6 +1601,162 @@ describe("Iroh remote core helpers", () => {
 		]);
 	});
 
+	test("sanitizes representative remote-safe RPC event views", () => {
+		const workspacePath = "/Users/jordan/project";
+		const sessionFile = "/Users/jordan/.volt/agent/sessions/project/session.jsonl";
+		const exportPath = "/Users/jordan/.volt/agent/exports/Volt-session-session.html";
+		const bashOutputPath = join(tmpdir(), "volt-bash-deadbeef.log");
+
+		expect(
+			sanitizeIrohRemoteOutbound(
+				{
+					type: "response",
+					command: "get_state",
+					success: true,
+					data: {
+						cwd: `${workspacePath}/src`,
+						sessionFile,
+						sessionPath: sessionFile,
+						message: `Workspace ${workspacePath}/src/index.ts private /Users/jordan/.volt/auth.json`,
+					},
+				},
+				{ workspacePath },
+			),
+		).toEqual({
+			type: "response",
+			command: "get_state",
+			success: true,
+			data: {
+				cwd: "/workspace/src",
+				sessionPath: IROH_REMOTE_REDACTED_SESSION_FILE,
+				message: `Workspace /workspace/src/index.ts private ${IROH_REMOTE_REDACTED_HOST_PATH}`,
+			},
+		});
+		expect(
+			sanitizeIrohRemoteOutbound(
+				{
+					type: "response",
+					command: "export_html",
+					success: true,
+					data: { path: exportPath, message: `Exported ${exportPath}` },
+				},
+				{ workspacePath },
+			),
+		).toEqual({
+			type: "response",
+			command: "export_html",
+			success: true,
+			data: { path: IROH_REMOTE_REDACTED_EXPORT_PATH, message: `Exported ${IROH_REMOTE_REDACTED_EXPORT_PATH}` },
+		});
+		expect(
+			sanitizeIrohRemoteOutbound(
+				{
+					type: "response",
+					command: "bash",
+					success: true,
+					data: {
+						fullOutputPath: bashOutputPath,
+						outputPath: bashOutputPath,
+						stdout: `Wrote ${bashOutputPath}`,
+						stderr: "opened file://localhost/Users/jordan/.volt/auth.json",
+					},
+				},
+				{ workspacePath },
+			),
+		).toEqual({
+			type: "response",
+			command: "bash",
+			success: true,
+			data: {
+				outputPath: IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH,
+				stdout: `Wrote ${IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH}`,
+				stderr: `opened ${IROH_REMOTE_REDACTED_HOST_PATH}`,
+			},
+		});
+		expect(
+			sanitizeIrohRemoteOutbound(
+				{
+					type: "extension_ui_request",
+					id: "extension-confirm-1",
+					method: "confirm",
+					title: `Use ${workspacePath}/src/index.ts`,
+					message: "Approve /Users/jordan/.volt/auth.json?",
+				},
+				{ workspacePath },
+			),
+		).toEqual({
+			type: "extension_ui_request",
+			id: "extension-confirm-1",
+			method: "confirm",
+			title: "Use /workspace/src/index.ts",
+			message: `Approve ${IROH_REMOTE_REDACTED_HOST_PATH}?`,
+		});
+		expect(
+			sanitizeIrohRemoteOutbound(
+				{
+					type: "event",
+					message: {
+						role: "assistant",
+						content: [
+							{
+								type: "text",
+								text: `Read ${workspacePath}/src/index.ts and /Users/jordan/.volt/auth.json`,
+								textSignature: "/opaque/text-signature",
+							},
+							{
+								type: "thinking",
+								thinking: "Saw /Users/jordan/.volt/auth.json",
+								thinkingSignature: "/opaque/thinking-signature",
+							},
+							{
+								type: "image",
+								data: "/9j/4AAQSkZJRgABAQAAAQABAAD=",
+								mimeType: "image/jpeg",
+							},
+							{
+								type: "toolCall",
+								id: "tool-call-1",
+								name: "read",
+								arguments: { path: "/Users/jordan/.volt/auth.json", cwd: `${workspacePath}/src` },
+								thoughtSignature: "/opaque/thought-signature",
+							},
+						],
+					},
+				},
+				{ workspacePath },
+			),
+		).toEqual({
+			type: "event",
+			message: {
+				role: "assistant",
+				content: [
+					{
+						type: "text",
+						text: `Read /workspace/src/index.ts and ${IROH_REMOTE_REDACTED_HOST_PATH}`,
+						textSignature: "/opaque/text-signature",
+					},
+					{
+						type: "thinking",
+						thinking: `Saw ${IROH_REMOTE_REDACTED_HOST_PATH}`,
+						thinkingSignature: "/opaque/thinking-signature",
+					},
+					{
+						type: "image",
+						data: "/9j/4AAQSkZJRgABAQAAAQABAAD=",
+						mimeType: "image/jpeg",
+					},
+					{
+						type: "toolCall",
+						id: "tool-call-1",
+						name: "read",
+						arguments: { path: IROH_REMOTE_REDACTED_HOST_PATH, cwd: "/workspace/src" },
+						thoughtSignature: "/opaque/thought-signature",
+					},
+				],
+			},
+		});
+	});
+
 	test("sanitizes remote outbound host paths", () => {
 		const workspacePath = "/Users/jordan/project";
 		const sessionFile = "/Users/jordan/.volt/agent/sessions/project/session.jsonl";
@@ -1664,7 +1820,7 @@ describe("Iroh remote core helpers", () => {
 
 		expect(sanitized.id).toBe("/Users/jordan/private/request-id");
 		expect(sanitized.data.sessionFile).toBeUndefined();
-		expect(sanitized.data.sessionPath).toBe(IROH_REMOTE_REDACTED_HOST_PATH);
+		expect(sanitized.data.sessionPath).toBe(IROH_REMOTE_REDACTED_SESSION_FILE);
 		expect(sanitized.data.tildeSessionPath).toBe(IROH_REMOTE_REDACTED_SESSION_FILE);
 		expect(sanitized.data.tildeUserSessionPath).toBe(IROH_REMOTE_REDACTED_SESSION_FILE);
 		expect(sanitized.data.sourceInfo.path).toBe("/workspace/src/index.ts");
