@@ -15,6 +15,7 @@ import { type RpcSessionChange, runRpcMode } from "./rpc-mode.ts";
 
 export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	decorateOutbound?: IrohRemoteOutboundValueDecorator;
+	disposeRuntimeOnClose?: boolean;
 	onSessionChanged?: (session: RpcSessionChange) => void | Promise<void>;
 	remoteWorkspacePath?: string;
 	workspacePath: string;
@@ -43,6 +44,7 @@ export function runIrohRemoteRpcMode(
 	options: IrohRemoteRpcModeOptions,
 ): Promise<void> {
 	return runRpcMode(runtimeHost, {
+		disposeRuntimeOnClose: options.disposeRuntimeOnClose,
 		onSessionChanged: options.onSessionChanged,
 		transport: createIrohRemoteFilteredRpcTransport({
 			transport: createIrohRemoteCloseDeferringRpcTransport({

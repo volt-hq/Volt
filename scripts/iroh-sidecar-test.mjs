@@ -462,6 +462,22 @@ async function readAuditEvents(auditPath) {
 		.map((line) => JSON.parse(line));
 }
 
+async function waitForAuditEvent(auditPath, predicate, label, timeoutMs = PROCESS_TIMEOUT_MS) {
+	const startedAt = Date.now();
+	while (Date.now() - startedAt < timeoutMs) {
+		let events = [];
+		try {
+			events = await readAuditEvents(auditPath);
+		} catch (error) {
+			if (error?.code !== "ENOENT") throw error;
+		}
+		const event = events.find(predicate);
+		if (event) return event;
+		await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+	}
+	throw new Error(`${label} audit event did not appear within ${timeoutMs}ms`);
+}
+
 async function findSessionFileById(directory, sessionId) {
 	let entries;
 	try {
@@ -1091,7 +1107,15 @@ async function integratedVoltGetStateScenario() {
 			);
 
 			const auditEvents = await readAuditEvents(getDefaultAuditPath(hostStatePath));
-			for (const eventType of ["runtime_started", "runtime_stopped"]) {
+			for (const eventType of [
+				"runtime_started",
+				"runtime_stopped",
+				"remote_runtime_started",
+				"remote_subscriber_attached",
+				"remote_subscriber_detached",
+				"remote_runtime_detached",
+				"remote_runtime_stopped",
+			]) {
 				assert(
 					auditEvents.some((event) => event.type === eventType && event.success === true),
 					`Expected successful audit event ${eventType}, got:\n${JSON.stringify(auditEvents)}`,
@@ -1189,6 +1213,116 @@ async function integratedVoltReconnectSessionScenario() {
 			),
 			"Expected session_created audit event for missing-session replacement",
 		);
+	});
+}
+
+async function integratedVoltDetachReattachRuntimeScenario() {
+	await withStateDir("integrated-detach-reattach", async ({ hostStatePath, stateDir }) => {
+		const agentDir = await createIntegratedVoltAgentDir(stateDir);
+		const workspacePath = join(stateDir, "workspace");
+		await mkdir(workspacePath, { recursive: true });
+		const workspaceArg = `detach=${workspacePath}`;
+		const auditPath = getDefaultAuditPath(hostStatePath);
+		const endpoint = await bindRawClientEndpoint("disabled");
+		let rawClient;
+		const host = startHost([
+			"--state",
+			hostStatePath,
+			"--agent-dir",
+			agentDir,
+			"--workspace",
+			workspaceArg,
+			"--integrated-volt",
+			"--no-pairing",
+		]);
+		try {
+			await waitForFirstStdoutLine(host.child, host.output, "integrated detach host");
+			const pairCommand = spawnSourceCli([
+				"remote",
+				"pair",
+				"--state",
+				hostStatePath,
+				"--workspace",
+				"detach",
+				"--allow-tools",
+				DEFAULT_TEST_ALLOW_TOOLS,
+				"--label",
+				"detach client",
+			]);
+			await waitForExit(pairCommand.child, "integrated detach pair command", pairCommand.output);
+			const ticket = pairCommand.output.stdout.trim();
+			assert(ticket.startsWith(TICKET_PREFIX), `Expected detach pair command ticket, got:\n${pairCommand.output.stdout}`);
+
+			rawClient = await openRawAuthorizedClientOnEndpoint(endpoint, ticket, {
+				clientLabel: "detach client",
+			});
+			const firstState = await readRawRpcResponse(
+				rawClient,
+				{ id: "state-detach-first", type: "get_state" },
+				"integrated detach first get_state",
+			);
+			assert(firstState.event.success === true, `Expected first get_state success, got:\n${firstState.lines.join("\n")}`);
+			const sessionId = firstState.event.data?.sessionId;
+			assert(sessionId, `Expected first get_state session id, got:\n${JSON.stringify(firstState.event)}`);
+
+			closeRawConnection(rawClient.connection);
+			rawClient = undefined;
+			await waitForAuditEvent(
+				auditPath,
+				(event) => event.type === "remote_runtime_detached" && event.details?.sessionId === sessionId,
+				"integrated detach runtime detached",
+			);
+			const detachedAuditEvents = await readAuditEvents(auditPath);
+			assert(
+				!detachedAuditEvents.some((event) => event.type === "remote_runtime_stopped"),
+				`Runtime stopped instead of remaining detached:\n${JSON.stringify(detachedAuditEvents)}`,
+			);
+
+			rawClient = await openRawAuthorizedClientOnEndpoint(endpoint, ticket, {
+				clientLabel: "detach client",
+			});
+			const secondState = await readRawRpcResponse(
+				rawClient,
+				{ id: "state-detach-second", type: "get_state" },
+				"integrated detach second get_state",
+			);
+			assert(secondState.event.success === true, `Expected second get_state success, got:\n${secondState.lines.join("\n")}`);
+			assert(
+				secondState.event.data?.sessionId === sessionId,
+				`Expected reattach to keep session ${sessionId}, got:\n${JSON.stringify(secondState.event)}`,
+			);
+
+			closeRawConnection(rawClient.connection);
+			rawClient = undefined;
+			await waitForAuditEvent(
+				auditPath,
+				(event) => event.type === "remote_runtime_reattached" && event.details?.sessionId === sessionId,
+				"integrated detach runtime reattached",
+			);
+			await waitForAuditEvent(
+				auditPath,
+				(event) => event.type === "remote_subscriber_detached" && event.details?.subscriberId === "subscriber-2",
+				"integrated detach second subscriber detached",
+			);
+
+			const auditEvents = await readAuditEvents(auditPath);
+			assert(
+				auditEvents.filter((event) => event.type === "remote_runtime_started").length === 1,
+				`Expected one runtime start for detach/reattach, got:\n${JSON.stringify(auditEvents)}`,
+			);
+			assert(
+				auditEvents.filter((event) => event.type === "remote_subscriber_attached").length === 2,
+				`Expected two subscriber attach events, got:\n${JSON.stringify(auditEvents)}`,
+			);
+			assert(
+				auditEvents.filter((event) => event.type === "remote_subscriber_detached").length === 2,
+				`Expected two subscriber detach events, got:\n${JSON.stringify(auditEvents)}`,
+			);
+		} finally {
+			closeRawConnection(rawClient?.connection);
+			await endpoint.close();
+			await stopProcess(host.child);
+		}
 	});
 }
 
@@ -2004,6 +2138,7 @@ const scenarios = [
 	["integrated raw command filter", integratedRawCommandFilterScenario],
 	["integrated Volt get_state", integratedVoltGetStateScenario],
 	["integrated Volt reconnect session", integratedVoltReconnectSessionScenario],
+	["integrated Volt detach reattach runtime", integratedVoltDetachReattachRuntimeScenario],
 	["duplicate active connection", duplicateActiveConnectionScenario],
 	["integrated Volt profile", integratedVoltProfileScenario],
 	["integrated Volt env profile", integratedVoltEnvProfileScenario],

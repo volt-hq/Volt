@@ -981,31 +981,10 @@ async function runSpawnedRpcConnection(stream, handshake, authorization, options
 }
 
 async function runIntegratedVoltConnection(stream, handshake, authorization, options) {
-	let runtime;
-	let runtimeOwnedByRpcMode = false;
-	let recordedSessionId;
+	let entry;
 	try {
-		const previousSessionId = authorization.client.lastSessionIdByWorkspace?.[authorization.workspace.name];
-		const runtimeResult = await createIrohRemoteAgentRuntimeWithSessionSelection({
-			agentDir: options.agentDir,
-			allowTools: authorization.allowTools,
-			cwd: authorization.workspace.path,
-			profile: options.profile,
-			projectTrusted: options.projectTrusted,
-			resumeSessionId: previousSessionId,
-		});
-		runtime = runtimeResult.runtime;
-		recordedSessionId = runtime.session.sessionId;
-		await options.hostEngine.setClientLastSessionId(
-			authorization.client.nodeId,
-			authorization.workspace.name,
-			runtime.session.sessionId,
-		);
-		await logRemoteSessionSelection(runtimeResult.sessionSelection, authorization, options);
+		({ entry } = await getOrCreateIntegratedRuntimeEntry(authorization, options));
 	} catch (error) {
-		if (runtime) {
-			await runtime.dispose().catch(() => {});
-		}
 		const message = error instanceof Error ? error.message : String(error);
 		await logAudit(options.auditLogger, {
 			type: "runtime_failure",
@@ -1019,55 +998,36 @@ async function runIntegratedVoltConnection(stream, handshake, authorization, opt
 		return;
 	}
 
-	await logAudit(options.auditLogger, {
-		type: "runtime_started",
-		clientNodeId: authorization.client.nodeId,
-		workspace: authorization.workspace.name,
-		success: true,
-		details: { runtime: "integrated-volt", sessionId: runtime.session.sessionId },
-	});
-
-	let runtimeStopSuccess = true;
-	let runtimeStopError;
-	let runtimeDisposeError;
+	let subscriber;
+	let subscriberError;
 	try {
 		await writeIrohRemoteHandshakeResponse(stream.send, handshake.response);
-		const rpcMode = runIrohRemoteRpcMode(runtime, {
+		subscriber = await attachIntegratedRuntimeSubscriber(entry, options);
+		const rpcMode = runIrohRemoteRpcMode(entry.runtime, {
 			decorateOutbound: (value) => decorateRemoteHostState(value, authorization, options),
+			disposeRuntimeOnClose: false,
 			onSessionChanged: async (session) => {
-				if (session.sessionId === recordedSessionId) return;
-				recordedSessionId = session.sessionId;
+				if (session.sessionId === entry.recordedSessionId) return;
+				entry.recordedSessionId = session.sessionId;
 				await recordRemoteSessionChange(session, authorization, options);
 			},
 			stream,
 			initialInput: handshake.initialInput,
 			workspacePath: authorization.workspace.path,
 		});
-		runtimeOwnedByRpcMode = true;
 		await rpcMode;
 	} catch (error) {
-		runtimeStopSuccess = false;
-		runtimeStopError = error instanceof Error ? error.message : String(error);
-		throw error;
+		subscriberError = error;
 	} finally {
-		if (!runtimeOwnedByRpcMode) {
-			try {
-				await runtime.dispose();
-			} catch (error) {
-				runtimeStopSuccess = false;
-				runtimeStopError = error instanceof Error ? error.message : String(error);
-				runtimeDisposeError = error;
-			}
+		if (subscriber) {
+			await detachIntegratedRuntimeSubscriber(
+				entry,
+				subscriber,
+				options,
+				subscriberError ? "transport_error" : "transport_closed",
+				subscriberError,
+			);
 		}
-		await logAudit(options.auditLogger, {
-			type: "runtime_stopped",
-			clientNodeId: authorization.client.nodeId,
-			workspace: authorization.workspace.name,
-			success: runtimeStopSuccess,
-			error: runtimeStopError,
-			details: { runtime: "integrated-volt" },
-		});
-		if (runtimeDisposeError) throw runtimeDisposeError;
 	}
 }
 
@@ -1134,6 +1094,169 @@ async function logRemoteSessionSelection(selection, authorization, options) {
 		success: true,
 		details: { reason: "new_client_connection", sessionId: selection.sessionId },
 	});
+}
+
+function getIntegratedRuntimeRegistryKey(authorization) {
+	return `${authorization.client.nodeId}\0${authorization.workspace.name}`;
+}
+
+function getIntegratedRuntimeDetails(entry, extraDetails = {}) {
+	return {
+		runtime: "integrated-volt",
+		sessionId: entry.runtime.session.sessionId,
+		subscriberCount: entry.subscribers.size,
+		active: entry.runtime.session.isStreaming,
+		...extraDetails,
+	};
+}
+
+async function logIntegratedRuntimeAudit(options, entry, type, details = {}, success = true, error) {
+	await logAudit(options.auditLogger, {
+		type,
+		clientNodeId: entry.clientNodeId,
+		workspace: entry.workspaceName,
+		success,
+		error,
+		details: getIntegratedRuntimeDetails(entry, details),
+	});
+}
+
+async function createIntegratedRuntimeEntry(authorization, options) {
+	let runtime;
+	try {
+		const previousSessionId = authorization.client.lastSessionIdByWorkspace?.[authorization.workspace.name];
+		const runtimeResult = await createIrohRemoteAgentRuntimeWithSessionSelection({
+			agentDir: options.agentDir,
+			allowTools: authorization.allowTools,
+			cwd: authorization.workspace.path,
+			profile: options.profile,
+			projectTrusted: options.projectTrusted,
+			resumeSessionId: previousSessionId,
+		});
+		runtime = runtimeResult.runtime;
+		const entry = {
+			key: getIntegratedRuntimeRegistryKey(authorization),
+			clientNodeId: authorization.client.nodeId,
+			workspaceName: authorization.workspace.name,
+			runtime,
+			recordedSessionId: runtime.session.sessionId,
+			subscribers: new Set(),
+			detachedAt: undefined,
+		};
+		options.integratedRuntimes.set(entry.key, entry);
+		await options.hostEngine.setClientLastSessionId(
+			authorization.client.nodeId,
+			authorization.workspace.name,
+			runtime.session.sessionId,
+		);
+		await logRemoteSessionSelection(runtimeResult.sessionSelection, authorization, options);
+		await logAudit(options.auditLogger, {
+			type: "runtime_started",
+			clientNodeId: authorization.client.nodeId,
+			workspace: authorization.workspace.name,
+			success: true,
+			details: getIntegratedRuntimeDetails(entry),
+		});
+		await logIntegratedRuntimeAudit(options, entry, "remote_runtime_started", { reason: "created" });
+		return entry;
+	} catch (error) {
+		if (runtime) {
+			await runtime.dispose().catch(() => {});
+		}
+		throw error;
+	}
+}
+
+async function getOrCreateIntegratedRuntimeEntry(authorization, options) {
+	const key = getIntegratedRuntimeRegistryKey(authorization);
+	const existing = options.integratedRuntimes.get(key);
+	if (existing) {
+		return { entry: existing, created: false };
+	}
+	return { entry: await createIntegratedRuntimeEntry(authorization, options), created: true };
+}
+
+let integratedRuntimeSubscriberSequence = 0;
+
+async function attachIntegratedRuntimeSubscriber(entry, options) {
+	const wasDetached = entry.subscribers.size === 0 && entry.detachedAt !== undefined;
+	const subscriber = {
+		id: `subscriber-${++integratedRuntimeSubscriberSequence}`,
+		attachedAt: Date.now(),
+	};
+	entry.subscribers.add(subscriber);
+	if (wasDetached) {
+		entry.detachedAt = undefined;
+		await logIntegratedRuntimeAudit(options, entry, "remote_runtime_reattached", {
+			reason: "subscriber_attached",
+			subscriberId: subscriber.id,
+		});
+	}
+	await logIntegratedRuntimeAudit(options, entry, "remote_subscriber_attached", {
+		subscriberId: subscriber.id,
+	});
+	return subscriber;
+}
+
+async function detachIntegratedRuntimeSubscriber(entry, subscriber, options, reason, error) {
+	if (!entry.subscribers.delete(subscriber)) {
+		return;
+	}
+	const errorMessage = error instanceof Error ? error.message : error ? String(error) : undefined;
+	await logIntegratedRuntimeAudit(
+		options,
+		entry,
+		"remote_subscriber_detached",
+		{ reason, subscriberId: subscriber.id },
+		errorMessage === undefined,
+		errorMessage,
+	);
+	if (entry.subscribers.size > 0) {
+		return;
+	}
+	entry.detachedAt = Date.now();
+	await logIntegratedRuntimeAudit(options, entry, "remote_runtime_detached", {
+		detachedAt: entry.detachedAt,
+		reason,
+	});
+}
+
+async function stopIntegratedRuntimeEntry(entry, options, reason) {
+	if (!options.integratedRuntimes.has(entry.key)) {
+		return;
+	}
+	options.integratedRuntimes.delete(entry.key);
+	const wasActive = entry.runtime.session.isStreaming;
+	let stopSuccess = true;
+	let stopError;
+	try {
+		await entry.runtime.dispose();
+	} catch (error) {
+		stopSuccess = false;
+		stopError = error instanceof Error ? error.message : String(error);
+	}
+	await logAudit(options.auditLogger, {
+		type: "runtime_stopped",
+		clientNodeId: entry.clientNodeId,
+		workspace: entry.workspaceName,
+		success: stopSuccess,
+		error: stopError,
+		details: getIntegratedRuntimeDetails(entry, { active: wasActive, reason }),
+	});
+	await logIntegratedRuntimeAudit(
+		options,
+		entry,
+		"remote_runtime_stopped",
+		{ active: wasActive, reason },
+		stopSuccess,
+		stopError,
+	);
+}
+
+async function stopIntegratedRuntimes(options, reason) {
+	for (const entry of Array.from(options.integratedRuntimes.values())) {
+		await stopIntegratedRuntimeEntry(entry, options, reason);
+	}
 }
 
 function registerActiveConnection(options, authorization, connection) {
@@ -1577,6 +1700,7 @@ async function serve(flags) {
 		auditLogger,
 		hostEngine: undefined,
 		integratedVolt: hasFlag(flags, "integrated-volt"),
+		integratedRuntimes: new Map(),
 		profile: getFlag(flags, "profile"),
 		relayMode,
 		hostNodeId: undefined,
@@ -1645,7 +1769,11 @@ async function serve(flags) {
 		}
 	} finally {
 		await closePairControlServer(controlServer);
-		await endpoint.close();
+		try {
+			await endpoint.close();
+		} finally {
+			await stopIntegratedRuntimes(options, "host_shutdown");
+		}
 	}
 }
 

@@ -57,6 +57,8 @@ export interface RpcSessionChange {
 
 export interface RpcModeOptions {
 	transport?: RpcTransport;
+	/** Defaults to true. Remote hosts can detach a transport without disposing the owned runtime. */
+	disposeRuntimeOnClose?: boolean;
 	/** Defaults to true for stdio RPC mode and false for caller-provided transports. */
 	exitProcess?: boolean;
 	/** Called after the active session is rebound, including initial startup. */
@@ -108,6 +110,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		takeOverStdout();
 	}
 	const shouldExitProcess = options.exitProcess ?? !options.transport;
+	const shouldDisposeRuntimeOnClose = options.disposeRuntimeOnClose ?? true;
 	const shouldRestoreStdout = !options.transport && !shouldExitProcess;
 	const transport = options.transport ?? createStdioRpcTransport();
 	const startupAwareTransport = transport as RpcModeStartupAwareTransport;
@@ -554,7 +557,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			}
 			unsubscribe?.();
 			unsubscribeBackpressure?.();
-			await runtimeHost.dispose();
+			if (shouldDisposeRuntimeOnClose) {
+				await runtimeHost.dispose();
+			}
 			detachInput();
 			detachClose();
 		} finally {
@@ -922,7 +927,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					}
 					unsubscribe?.();
 					unsubscribeBackpressure?.();
-					await runtimeHost.dispose();
+					if (shouldDisposeRuntimeOnClose) {
+						await runtimeHost.dispose();
+					}
 					detachInput();
 					detachClose();
 					if (signal !== "SIGTERM" && !hasShutdownError) {
