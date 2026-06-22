@@ -12,6 +12,7 @@ import {
 	createIrohRemoteOutboundFilteredRpcTransport,
 	createIrohRemoteTicketQrCode,
 	DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+	DEFAULT_IROH_REMOTE_PAIRING_SECRET_TOMBSTONE_RETENTION_MS,
 	decodeIrohRemoteTicketPayload,
 	encodeIrohRemoteTicketPayload,
 	formatIrohRemoteTicketQrCode,
@@ -544,7 +545,18 @@ describe("Iroh remote core helpers", () => {
 
 			const state: IrohRemoteHostState = {
 				hostSecretKey: [1, 2, 3],
-				consumedPairingSecretHashes: ["sha256:used"],
+				pairingSecretTombstones: [
+					{
+						secretHash: "sha256:used",
+						workspace: "volt",
+						outcome: "pairing_secret_consumed",
+						createdAt: 5,
+						expiresAt: 40,
+						consumedAt: 20,
+						clientNodeId: "client-node",
+						retainUntil: 100,
+					},
+				],
 				workspaces: [{ name: "volt", path: stateDir, allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS }],
 				clients: [
 					{
@@ -582,10 +594,12 @@ describe("Iroh remote core helpers", () => {
 						lastSeenAt: 20,
 					},
 				],
+				pairingSecretTombstones: undefined,
 				pendingPairingTickets: undefined,
 			});
 			expect(parsedLegacyState.clients[0].allowedTools).toBe(DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
 			expect(parsedLegacyState.clients[0].lastSessionIdByWorkspace).toBeUndefined();
+			expect(parsedLegacyState.pairingSecretTombstones).toEqual([]);
 			expect(parsedLegacyState.pendingPairingTickets).toEqual([]);
 			expect((await readFile(statePath, "utf8")).endsWith("\n")).toBe(true);
 			expect((await stat(statePath)).isFile()).toBe(true);
@@ -599,6 +613,12 @@ describe("Iroh remote core helpers", () => {
 					clients: [{ ...state.clients[0], lastSessionIdByWorkspace: { volt: "" } }],
 				}),
 			).toThrow("client last session id must be a non-empty string");
+			expect(() =>
+				parseIrohRemoteHostState({
+					...state,
+					pairingSecretTombstones: [{ ...state.pairingSecretTombstones![0], outcome: "pairing_secret_unknown" }],
+				}),
+			).toThrow("pairing secret tombstone outcome must be pairing_secret_consumed or pairing_secret_expired");
 			await expect(readIrohRemoteHostState(statePath)).rejects.toThrow("client label must be a non-empty string");
 		} finally {
 			await rm(stateDir, { force: true, recursive: true });
@@ -663,8 +683,17 @@ describe("Iroh remote core helpers", () => {
 			pairedAt: 100,
 			lastSeenAt: 100,
 		});
-		expect(state.consumedPairingSecretHashes).toHaveLength(1);
-		expect(state.consumedPairingSecretHashes[0]).toMatch(/^sha256:/);
+		expect(state.pairingSecretTombstones).toEqual([
+			{
+				secretHash: hashIrohRemotePairingSecret("secret"),
+				workspace: "volt",
+				outcome: "pairing_secret_consumed",
+				expiresAt: 200,
+				consumedAt: 100,
+				clientNodeId: "client-node",
+				retainUntil: 100 + DEFAULT_IROH_REMOTE_PAIRING_SECRET_TOMBSTONE_RETENTION_MS,
+			},
+		]);
 		expect(
 			authorizeIrohRemoteClient(state, makeHello("volt", "secret", "second phone"), "other-client", {
 				allowTools: "read",
@@ -673,6 +702,20 @@ describe("Iroh remote core helpers", () => {
 				now: 125,
 			}),
 		).toEqual({ ok: false, error: "pairing ticket has already been used", pairingSecretExpired: false });
+		const recovered = authorizeIrohRemoteClient(state, makeHello("volt", "secret", "recovery phone"), "client-node", {
+			allowTools: "read",
+			pairingSecret: "secret",
+			workspace,
+			now: 140,
+		});
+		if (!recovered.ok) {
+			throw new Error(recovered.error);
+		}
+		expect(recovered.paired).toBe(false);
+		expect(recovered.pairingSecretConsumed).toBe(false);
+		expect(recovered.client.label).toBe("recovery phone");
+		expect(recovered.client.lastSeenAt).toBe(140);
+		expect(state.pairingSecretTombstones).toHaveLength(1);
 
 		const persisted = authorizeIrohRemoteClient(state, makeHello("volt", undefined, "renamed phone"), "client-node", {
 			allowTools: "bash",
@@ -689,7 +732,6 @@ describe("Iroh remote core helpers", () => {
 		expect(persisted.client.lastSeenAt).toBe(150);
 
 		const legacyState = parseIrohRemoteHostState({
-			consumedPairingSecretHashes: [],
 			workspaces: [workspace],
 			clients: [
 				{
@@ -945,6 +987,19 @@ describe("Iroh remote core helpers", () => {
 			allowedWorkspaces: ["volt"],
 		});
 		expect((await stateManager.getState()).pendingPairingTickets).toEqual([]);
+		expect((await stateManager.getState()).pairingSecretTombstones).toEqual([
+			{
+				secretHash: hashIrohRemotePairingSecret("secret"),
+				workspace: "volt",
+				outcome: "pairing_secret_consumed",
+				createdAt: 100,
+				expiresAt: 125,
+				consumedAt: 100,
+				clientNodeId: "client-node",
+				labelHint: "tablet",
+				retainUntil: 100 + DEFAULT_IROH_REMOTE_PAIRING_SECRET_TOMBSTONE_RETENTION_MS,
+			},
+		]);
 		await expect(hostEngine.authorizeHello(makeHello("volt", "secret"), "other-client")).resolves.toEqual({
 			ok: false,
 			error: "pairing ticket has already been used",
@@ -972,6 +1027,29 @@ describe("Iroh remote core helpers", () => {
 			error: "pairing ticket is not valid for workspace: safe",
 			pairingSecretExpired: false,
 		});
+		expect(await stateManager.getState()).toMatchObject({
+			pairingSecretTombstones: [],
+			pendingPairingTickets: [
+				{
+					secretHash: hashIrohRemotePairingSecret("secret"),
+					workspace: "private",
+					allowedTools: "read",
+					createdAt: 100,
+					expiresAt: 200,
+				},
+			],
+		});
+
+		const privateHostEngine = new IrohRemoteHostEngine({
+			now: () => 150,
+			stateManager,
+			workspace: { name: "private", path: "/private" },
+		});
+		const paired = await privateHostEngine.authorizeHello(makeHello("private", "secret"), "client-node");
+		if (!paired.ok) {
+			throw new Error(paired.error);
+		}
+		expect(paired.paired).toBe(true);
 	});
 
 	test("host engine persists pending pairing hashes, rejects expired pending tickets, and audits lifecycle", async () => {
@@ -1026,9 +1104,47 @@ describe("Iroh remote core helpers", () => {
 			pairingSecretExpired: true,
 		});
 		expect((await stateManager.getState()).pendingPairingTickets).toEqual([]);
+		expect((await stateManager.getState()).pairingSecretTombstones).toEqual([
+			{
+				secretHash: hashIrohRemotePairingSecret(secret),
+				workspace: "volt",
+				outcome: "pairing_secret_expired",
+				createdAt: 100,
+				expiresAt: 150,
+				expiredAt: 200,
+				retainUntil: 200 + DEFAULT_IROH_REMOTE_PAIRING_SECRET_TOMBSTONE_RETENTION_MS,
+			},
+		]);
+		const retainedExpiredHostEngine = new IrohRemoteHostEngine({
+			auditLogger,
+			now: () => 250,
+			stateManager,
+			workspace,
+		});
+		await expect(
+			retainedExpiredHostEngine.authorizeHello(makeHello("volt", secret), "later-client"),
+		).resolves.toEqual({
+			ok: false,
+			error: "pairing ticket has expired",
+			pairingSecretExpired: true,
+		});
+		const prunedExpiredHostEngine = new IrohRemoteHostEngine({
+			auditLogger,
+			now: () => 201 + DEFAULT_IROH_REMOTE_PAIRING_SECRET_TOMBSTONE_RETENTION_MS,
+			stateManager,
+			workspace,
+		});
+		await expect(prunedExpiredHostEngine.authorizeHello(makeHello("volt", secret), "later-client")).resolves.toEqual({
+			ok: false,
+			error: "client is not paired",
+			pairingSecretExpired: false,
+		});
+		expect((await stateManager.getState()).pairingSecretTombstones).toEqual([]);
 		expect(sink.events.map((event) => event.type)).toEqual([
 			"pairing_ticket_created",
 			"pairing_ticket_expired",
+			"client_rejected",
+			"client_rejected",
 			"client_rejected",
 		]);
 		expect(sink.events).toEqual([
@@ -1040,6 +1156,8 @@ describe("Iroh remote core helpers", () => {
 				details: expect.objectContaining({ createdAt: 100, expiresAt: 150 }),
 			}),
 			expect.objectContaining({ type: "client_rejected", error: "pairing ticket has expired" }),
+			expect.objectContaining({ type: "client_rejected", error: "pairing ticket has expired" }),
+			expect.objectContaining({ type: "client_rejected", error: "client is not paired" }),
 		]);
 	});
 
@@ -1047,7 +1165,18 @@ describe("Iroh remote core helpers", () => {
 		const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
 		const initialState: IrohRemoteHostState = {
 			hostSecretKey: [1, 2, 3],
-			consumedPairingSecretHashes: [],
+			pairingSecretTombstones: [
+				{
+					secretHash: "sha256:consumed",
+					workspace: "volt",
+					outcome: "pairing_secret_consumed",
+					createdAt: 1,
+					expiresAt: 200,
+					consumedAt: 10,
+					clientNodeId: "client-node",
+					retainUntil: 300,
+				},
+			],
 			workspaces: [{ ...workspace }],
 			clients: [
 				{
@@ -1074,6 +1203,15 @@ describe("Iroh remote core helpers", () => {
 		initialState.workspaces[0].path = "/mutated-before-load";
 		initialState.clients[0].lastSessionIdByWorkspace!.volt = "mutated-before-load";
 		initialState.hostSecretKey?.push(4);
+		initialState.pairingSecretTombstones?.push({
+			secretHash: "sha256:leaked-tombstone",
+			workspace: "leaked",
+			outcome: "pairing_secret_expired",
+			createdAt: 1,
+			expiresAt: 2,
+			expiredAt: 3,
+			retainUntil: 4,
+		});
 		initialState.pendingPairingTickets?.push({
 			secretHash: "sha256:leaked",
 			workspace: "leaked",
@@ -1085,6 +1223,15 @@ describe("Iroh remote core helpers", () => {
 		const loaded = await stateManager.load();
 		loaded.hostSecretKey?.push(5);
 		loaded.workspaces[0].path = "/mutated-loaded";
+		loaded.pairingSecretTombstones?.push({
+			secretHash: "sha256:loaded-tombstone-leak",
+			workspace: "loaded-leak",
+			outcome: "pairing_secret_expired",
+			createdAt: 1,
+			expiresAt: 2,
+			expiredAt: 3,
+			retainUntil: 4,
+		});
 		loaded.pendingPairingTickets?.push({
 			secretHash: "sha256:loaded-leak",
 			workspace: "loaded-leak",
@@ -1103,7 +1250,18 @@ describe("Iroh remote core helpers", () => {
 		});
 		expect(await stateManager.getState()).toEqual({
 			hostSecretKey: [1, 2, 3],
-			consumedPairingSecretHashes: [],
+			pairingSecretTombstones: [
+				{
+					secretHash: "sha256:consumed",
+					workspace: "volt",
+					outcome: "pairing_secret_consumed",
+					createdAt: 1,
+					expiresAt: 200,
+					consumedAt: 10,
+					clientNodeId: "client-node",
+					retainUntil: 300,
+				},
+			],
 			workspaces: [{ name: "volt", path: "/workspace" }],
 			clients: [
 				{
@@ -1358,9 +1516,74 @@ describe("Iroh remote core helpers", () => {
 				error: "pairing ticket has already been used",
 				pairingSecretExpired: false,
 			});
-			expect((await readIrohRemoteHostState(statePath)).clients).toEqual([
-				expect.objectContaining({ nodeId: "first-client" }),
+			const recovered = await secondEngine.authorizeHello(makeHello("volt", "secret", "recovered"), "first-client");
+			if (!recovered.ok) {
+				throw new Error(recovered.error);
+			}
+			expect(recovered.paired).toBe(false);
+			expect(recovered.pairingSecretConsumed).toBe(false);
+			const savedState = await readIrohRemoteHostState(statePath);
+			expect(savedState.clients).toEqual([expect.objectContaining({ nodeId: "first-client" })]);
+			expect(savedState.pairingSecretTombstones).toEqual([
+				expect.objectContaining({
+					secretHash: hashIrohRemotePairingSecret("secret"),
+					outcome: "pairing_secret_consumed",
+					clientNodeId: "first-client",
+				}),
 			]);
+		} finally {
+			await rm(stateDir, { force: true, recursive: true });
+		}
+	});
+
+	test("persists runtime-only pairing secret consumption across host engine restart", async () => {
+		const stateDir = await mkdtemp(join(tmpdir(), "volt-iroh-core-runtime-pairing-consumption-"));
+		try {
+			const statePath = join(stateDir, "host.json");
+			const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
+			const firstEngine = new IrohRemoteHostEngine({
+				now: () => 100,
+				pairingExpiresAt: 200,
+				pairingSecret: "runtime-secret",
+				stateManager: new IrohRemoteHostStateManager({ statePath }),
+				workspace,
+			});
+			const paired = await firstEngine.authorizeHello(makeHello("volt", "runtime-secret"), "first-client");
+			if (!paired.ok) {
+				throw new Error(paired.error);
+			}
+			expect(paired.paired).toBe(true);
+			expect((await readIrohRemoteHostState(statePath)).pairingSecretTombstones).toEqual([
+				{
+					secretHash: hashIrohRemotePairingSecret("runtime-secret"),
+					workspace: "volt",
+					outcome: "pairing_secret_consumed",
+					expiresAt: 200,
+					consumedAt: 100,
+					clientNodeId: "first-client",
+					retainUntil: 100 + DEFAULT_IROH_REMOTE_PAIRING_SECRET_TOMBSTONE_RETENTION_MS,
+				},
+			]);
+
+			const restartedEngine = new IrohRemoteHostEngine({
+				now: () => 125,
+				stateManager: new IrohRemoteHostStateManager({ statePath }),
+				workspace,
+			});
+			await expect(
+				restartedEngine.authorizeHello(makeHello("volt", "runtime-secret"), "second-client"),
+			).resolves.toEqual({
+				ok: false,
+				error: "pairing ticket has already been used",
+				pairingSecretExpired: false,
+			});
+			await expect(
+				restartedEngine.authorizeHello(makeHello("volt", "runtime-secret", "recovered"), "first-client"),
+			).resolves.toMatchObject({
+				ok: true,
+				paired: false,
+				pairingSecretConsumed: false,
+			});
 		} finally {
 			await rm(stateDir, { force: true, recursive: true });
 		}
@@ -1373,7 +1596,6 @@ describe("Iroh remote core helpers", () => {
 			const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
 			await writeIrohRemoteHostState(statePath, {
 				hostSecretKey: undefined,
-				consumedPairingSecretHashes: [],
 				workspaces: [workspace],
 				clients: [
 					{
@@ -1412,7 +1634,6 @@ describe("Iroh remote core helpers", () => {
 			const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
 			await writeIrohRemoteHostState(statePath, {
 				hostSecretKey: undefined,
-				consumedPairingSecretHashes: [],
 				workspaces: [workspace],
 				clients: [
 					{
@@ -1456,7 +1677,6 @@ describe("Iroh remote core helpers", () => {
 			const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
 			await writeIrohRemoteHostState(statePath, {
 				hostSecretKey: undefined,
-				consumedPairingSecretHashes: [],
 				workspaces: [workspace],
 				clients: [
 					{
@@ -1490,7 +1710,6 @@ describe("Iroh remote core helpers", () => {
 			const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
 			await writeIrohRemoteHostState(statePath, {
 				hostSecretKey: undefined,
-				consumedPairingSecretHashes: [],
 				workspaces: [workspace],
 				clients: [
 					{

@@ -1978,7 +1978,13 @@ async function statusCommandScenario() {
 		);
 		assert(typeof client.pairedAt === "number", `Expected status pairedAt, got:\n${statusText}`);
 		assert(typeof client.lastSeenAt === "number", `Expected status lastSeenAt, got:\n${statusText}`);
-		for (const forbidden of ["hostSecretKey", "consumedPairingSecretHashes", "pendingPairingTickets", "sha256:"]) {
+		for (const forbidden of [
+			"hostSecretKey",
+			"consumedPairingSecretHashes",
+			"pairingSecretTombstones",
+			"pendingPairingTickets",
+			"sha256:",
+		]) {
 			assert(!statusText.includes(forbidden), `Status leaked ${forbidden}:\n${statusText}`);
 		}
 	});

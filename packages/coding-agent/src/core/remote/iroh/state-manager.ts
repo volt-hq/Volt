@@ -11,6 +11,7 @@ import {
 	createEmptyIrohRemoteHostState,
 	type IrohRemoteClient,
 	type IrohRemoteHostState,
+	type IrohRemotePairingSecretTombstone,
 	type IrohRemotePendingPairingTicket,
 	type IrohRemoteWorkspace,
 	readIrohRemoteHostState,
@@ -247,11 +248,17 @@ function cloneClient(client: IrohRemoteClient): IrohRemoteClient {
 function cloneHostState(state: IrohRemoteHostState): IrohRemoteHostState {
 	return {
 		hostSecretKey: state.hostSecretKey ? [...state.hostSecretKey] : undefined,
-		consumedPairingSecretHashes: [...(state.consumedPairingSecretHashes ?? [])],
+		pairingSecretTombstones: (state.pairingSecretTombstones ?? []).map((tombstone) =>
+			clonePairingSecretTombstone(tombstone),
+		),
 		workspaces: state.workspaces.map((workspace) => cloneWorkspace(workspace)),
 		clients: state.clients.map((client) => cloneClient(client)),
 		pendingPairingTickets: (state.pendingPairingTickets ?? []).map((ticket) => clonePendingPairingTicket(ticket)),
 	};
+}
+
+function clonePairingSecretTombstone(tombstone: IrohRemotePairingSecretTombstone): IrohRemotePairingSecretTombstone {
+	return { ...tombstone };
 }
 
 function clonePendingPairingTicket(ticket: IrohRemotePendingPairingTicket): IrohRemotePendingPairingTicket {

@@ -222,6 +222,8 @@ If the host records the phone but the app fails before saving `SavedHostRecord`,
 
 Concurrent pairing attempts for one QR must be serialized by host state. At most one previously unpaired node ID may commit for a pairing secret. A duplicate attempt from the winning phone node ID is an existing-client reconnect/recovery attempt; it does not consume the secret again and may complete app-side saving. Attempts from any other node ID after the commit must receive `pairing_secret_consumed`. If an unintended device wins the race, the desktop user must revoke that device and generate a fresh QR; the host must not grant the same consumed QR to a second node ID.
 
+Implemented 2026-06-22: host core authorization serializes pairing attempts through the host state manager, commits a new client and consumed-secret tombstone together, preserves same-node recovery with the original QR data, and keeps failed attempts from consuming the pending pairing ticket.
+
 ## Pairing Metadata Retention
 
 Resolved 2026-06-22: consumed pairing-secret hashes should not be retained forever. The host should keep bounded non-secret tombstones for consumed and expired pairing secrets, then prune them by TTL.
@@ -238,6 +240,8 @@ Consumed tombstones should contain `secretHash`, `workspace`, `consumedAt`, orig
 The default tombstone retention should be 30 days after the terminal state, with `retainUntil` never earlier than the original ticket `expiresAt`. After `retainUntil`, the host should prune the tombstone. A replay after pruning is still unauthorized; it may be reported as `client_unknown` because the host no longer has enough retained metadata to prove the secret was previously consumed or expired.
 
 Cleanup should run at host startup/load, before writing state after any pairing/auth/revoke/status mutation, and before status output. Cleanup must never require or expose raw pairing secrets.
+
+Implemented 2026-06-22: host core state stores consumed and expired pairing-secret tombstones with retained non-secret metadata instead of an unbounded consumed-hash list. Expired pending tickets move to expired tombstones, retained tombstones reject replays while in retention, and authorization prunes tombstones after their retention window.
 
 ## Relay and Discovery
 

@@ -99,7 +99,6 @@ describe("remote CLI", () => {
 		const statePath = join(tempDir, "host.json");
 		await writeIrohRemoteHostState(statePath, {
 			hostSecretKey: undefined,
-			consumedPairingSecretHashes: [],
 			workspaces: [{ name: "project", path: projectDir, allowedTools: "read" }],
 			clients: [],
 		});
@@ -155,7 +154,6 @@ describe("remote CLI", () => {
 		const statePath = join(tempDir, "host.json");
 		await writeIrohRemoteHostState(statePath, {
 			hostSecretKey: undefined,
-			consumedPairingSecretHashes: [],
 			workspaces: [
 				{ name: "one", path: projectDir, allowedTools: "read" },
 				{ name: "two", path: projectDir, allowedTools: "read" },
@@ -178,7 +176,6 @@ describe("remote CLI", () => {
 		const statePath = join(tempDir, "host.json");
 		await writeIrohRemoteHostState(statePath, {
 			hostSecretKey: undefined,
-			consumedPairingSecretHashes: [],
 			workspaces: [{ name: "project", path: projectDir, allowedTools: "read" }],
 			clients: [],
 		});
@@ -202,7 +199,6 @@ describe("remote CLI", () => {
 		const statePath = join(tempDir, "host.json");
 		await writeIrohRemoteHostState(statePath, {
 			hostSecretKey: undefined,
-			consumedPairingSecretHashes: [],
 			workspaces: [{ name: "project", path: projectDir, allowedTools: "read" }],
 			clients: [],
 		});
@@ -224,7 +220,6 @@ describe("remote CLI", () => {
 		const statePath = join(tempDir, "host.json");
 		await writeIrohRemoteHostState(statePath, {
 			hostSecretKey: undefined,
-			consumedPairingSecretHashes: [],
 			workspaces: [{ name: "project", path: projectDir, allowedTools: "read" }],
 			clients: [],
 		});
@@ -275,7 +270,18 @@ describe("remote CLI", () => {
 		const auditPath = join(tempDir, "custom.audit.jsonl");
 		await writeIrohRemoteHostState(statePath, {
 			hostSecretKey: [1, 2, 3],
-			consumedPairingSecretHashes: ["sha256:consumed-secret-hash"],
+			pairingSecretTombstones: [
+				{
+					secretHash: "sha256:consumed-secret-hash",
+					workspace: "alpha",
+					outcome: "pairing_secret_consumed",
+					createdAt: 5,
+					expiresAt: 15,
+					consumedAt: 10,
+					clientNodeId: "client-b",
+					retainUntil: 20,
+				},
+			],
 			workspaces: [
 				{ name: "zeta", path: join(projectDir, "zeta"), allowedTools: "read" },
 				{ name: "alpha", path: join(projectDir, "alpha"), allowedTools: "read,grep" },
@@ -333,6 +339,7 @@ describe("remote CLI", () => {
 		});
 		expect(statusText).not.toContain("hostSecretKey");
 		expect(statusText).not.toContain("consumedPairingSecretHashes");
+		expect(statusText).not.toContain("pairingSecretTombstones");
 		expect(statusText).not.toContain("pendingPairingTickets");
 		expect(statusText).not.toContain("sha256:");
 		expect(errorSpy).not.toHaveBeenCalled();
@@ -344,7 +351,6 @@ describe("remote CLI", () => {
 		const auditPath = join(tempDir, "host.audit.jsonl");
 		await writeIrohRemoteHostState(statePath, {
 			hostSecretKey: undefined,
-			consumedPairingSecretHashes: [],
 			workspaces: [{ name: "project", path: projectDir, allowedTools: "read" }],
 			clients: [
 				{
@@ -398,7 +404,6 @@ describe("remote CLI", () => {
 		const auditPath = join(tempDir, "host.audit.jsonl");
 		await writeIrohRemoteHostState(statePath, {
 			hostSecretKey: undefined,
-			consumedPairingSecretHashes: [],
 			workspaces: [{ name: "project", path: projectDir, allowedTools: "read" }],
 			clients: [],
 		});
@@ -427,7 +432,6 @@ describe("remote CLI", () => {
 		const auditPath = join(tempDir, "host.audit.jsonl");
 		await writeIrohRemoteHostState(statePath, {
 			hostSecretKey: undefined,
-			consumedPairingSecretHashes: [],
 			workspaces: [{ name: "project", path: projectDir, allowedTools: "read" }],
 			clients: [
 				{

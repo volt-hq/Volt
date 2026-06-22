@@ -28,9 +28,24 @@ export interface IrohRemotePendingPairingTicket {
 	labelHint?: string;
 }
 
+export type IrohRemotePairingSecretTombstoneOutcome = "pairing_secret_consumed" | "pairing_secret_expired";
+
+export interface IrohRemotePairingSecretTombstone {
+	secretHash: string;
+	workspace: string;
+	outcome: IrohRemotePairingSecretTombstoneOutcome;
+	retainUntil: number;
+	createdAt?: number;
+	expiresAt?: number;
+	labelHint?: string;
+	consumedAt?: number;
+	clientNodeId?: string;
+	expiredAt?: number;
+}
+
 export interface IrohRemoteHostState {
 	hostSecretKey?: number[];
-	consumedPairingSecretHashes: string[];
+	pairingSecretTombstones?: IrohRemotePairingSecretTombstone[];
 	workspaces: IrohRemoteWorkspace[];
 	clients: IrohRemoteClient[];
 	pendingPairingTickets?: IrohRemotePendingPairingTicket[];
@@ -39,7 +54,7 @@ export interface IrohRemoteHostState {
 export function createEmptyIrohRemoteHostState(): IrohRemoteHostState {
 	return {
 		hostSecretKey: undefined,
-		consumedPairingSecretHashes: [],
+		pairingSecretTombstones: [],
 		workspaces: [],
 		clients: [],
 		pendingPairingTickets: [],
@@ -62,7 +77,7 @@ export async function readIrohRemoteHostState(path: string): Promise<IrohRemoteH
 export async function writeIrohRemoteHostState(path: string, state: IrohRemoteHostState): Promise<void> {
 	await mkdir(dirname(path), { recursive: true });
 	const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-	await writeFile(tempPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+	await writeFile(tempPath, `${JSON.stringify(serializeIrohRemoteHostState(state), null, 2)}\n`, { mode: 0o600 });
 	await rename(tempPath, path);
 }
 
@@ -70,10 +85,10 @@ export function parseIrohRemoteHostState(value: unknown): IrohRemoteHostState {
 	const state = expectRecord(value, "Iroh remote host state");
 	return {
 		hostSecretKey: parseOptionalByteArray(state.hostSecretKey, "hostSecretKey"),
-		consumedPairingSecretHashes: parseOptionalStringArray(
-			state.consumedPairingSecretHashes,
-			"consumedPairingSecretHashes",
-			"consumed pairing secret hash",
+		pairingSecretTombstones: parseOptionalArray(
+			state.pairingSecretTombstones,
+			"pairingSecretTombstones",
+			parseIrohRemotePairingSecretTombstone,
 		),
 		workspaces: parseArray(state.workspaces, "workspaces", parseIrohRemoteWorkspace),
 		clients: parseArray(state.clients, "clients", parseIrohRemoteClient),
@@ -82,6 +97,22 @@ export function parseIrohRemoteHostState(value: unknown): IrohRemoteHostState {
 			"pendingPairingTickets",
 			parseIrohRemotePendingPairingTicket,
 		),
+	};
+}
+
+function serializeIrohRemoteHostState(state: IrohRemoteHostState): IrohRemoteHostState {
+	return {
+		hostSecretKey: state.hostSecretKey ? [...state.hostSecretKey] : undefined,
+		pairingSecretTombstones: (state.pairingSecretTombstones ?? []).map((tombstone) => ({ ...tombstone })),
+		workspaces: state.workspaces.map((workspace) => ({ ...workspace })),
+		clients: state.clients.map((client) => ({
+			...client,
+			allowedWorkspaces: [...client.allowedWorkspaces],
+			...(client.lastSessionIdByWorkspace
+				? { lastSessionIdByWorkspace: { ...client.lastSessionIdByWorkspace } }
+				: {}),
+		})),
+		pendingPairingTickets: (state.pendingPairingTickets ?? []).map((ticket) => ({ ...ticket })),
 	};
 }
 
@@ -111,6 +142,34 @@ export function parseIrohRemoteClient(value: unknown): IrohRemoteClient {
 			"client last session workspace",
 			"client last session id",
 		),
+	};
+}
+
+export function parseIrohRemotePairingSecretTombstone(value: unknown): IrohRemotePairingSecretTombstone {
+	const tombstone = expectRecord(value, "Iroh remote pairing secret tombstone");
+	const outcome = expectPairingSecretTombstoneOutcome(tombstone.outcome);
+	const createdAt = expectOptionalNumber(tombstone.createdAt, "pairing secret tombstone createdAt");
+	const expiresAt = expectOptionalNumber(tombstone.expiresAt, "pairing secret tombstone expiresAt");
+	const labelHint = expectOptionalString(tombstone.labelHint, "pairing secret tombstone labelHint");
+	const common = {
+		secretHash: expectString(tombstone.secretHash, "pairing secret tombstone secretHash"),
+		workspace: expectString(tombstone.workspace, "pairing secret tombstone workspace"),
+		outcome,
+		retainUntil: expectNumber(tombstone.retainUntil, "pairing secret tombstone retainUntil"),
+		...(createdAt === undefined ? {} : { createdAt }),
+		...(expiresAt === undefined ? {} : { expiresAt }),
+		...(labelHint === undefined ? {} : { labelHint }),
+	};
+	if (outcome === "pairing_secret_consumed") {
+		return {
+			...common,
+			consumedAt: expectNumber(tombstone.consumedAt, "pairing secret tombstone consumedAt"),
+			clientNodeId: expectString(tombstone.clientNodeId, "pairing secret tombstone clientNodeId"),
+		};
+	}
+	return {
+		...common,
+		expiredAt: expectNumber(tombstone.expiredAt, "pairing secret tombstone expiredAt"),
 	};
 }
 
@@ -153,13 +212,6 @@ function parseOptionalByteArray(value: unknown, label: string): number[] | undef
 	});
 }
 
-function parseOptionalStringArray(value: unknown, label: string, entryLabel: string): string[] {
-	if (value === undefined) {
-		return [];
-	}
-	return parseArray(value, label, (entry) => expectString(entry, entryLabel));
-}
-
 function parseOptionalStringRecordProperty(
 	value: unknown,
 	label: string,
@@ -178,6 +230,13 @@ function parseOptionalStringRecordProperty(
 		parsed[key] = expectString(entry, valueLabel);
 	}
 	return { lastSessionIdByWorkspace: parsed };
+}
+
+function expectPairingSecretTombstoneOutcome(value: unknown): IrohRemotePairingSecretTombstoneOutcome {
+	if (value === "pairing_secret_consumed" || value === "pairing_secret_expired") {
+		return value;
+	}
+	throw new Error("pairing secret tombstone outcome must be pairing_secret_consumed or pairing_secret_expired");
 }
 
 function expectRecord(value: unknown, label: string): Record<string, unknown> {
@@ -199,6 +258,13 @@ function expectOptionalString(value: unknown, label: string): string | undefined
 		return undefined;
 	}
 	return expectString(value, label);
+}
+
+function expectOptionalNumber(value: unknown, label: string): number | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	return expectNumber(value, label);
 }
 
 function expectNumber(value: unknown, label: string): number {

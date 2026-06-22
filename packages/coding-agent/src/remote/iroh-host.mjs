@@ -268,7 +268,7 @@ async function withStateFileLock(statePath, operation) {
 
 function syncState(target, source) {
 	target.hostSecretKey = source.hostSecretKey;
-	target.consumedPairingSecretHashes = source.consumedPairingSecretHashes ?? [];
+	target.pairingSecretTombstones = source.pairingSecretTombstones ?? [];
 	target.workspaces = source.workspaces ?? [];
 	target.clients = source.clients ?? [];
 	target.pendingPairingTickets = source.pendingPairingTickets ?? [];

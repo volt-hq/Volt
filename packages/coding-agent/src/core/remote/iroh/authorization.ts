@@ -4,10 +4,13 @@ import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS } from "./protocol.ts";
 import type {
 	IrohRemoteClient,
 	IrohRemoteHostState,
+	IrohRemotePairingSecretTombstone,
 	IrohRemotePendingPairingTicket,
 	IrohRemoteWorkspace,
 } from "./state.ts";
 import { upsertIrohRemoteWorkspace } from "./workspace.ts";
+
+export const DEFAULT_IROH_REMOTE_PAIRING_SECRET_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface AuthorizeIrohRemoteClientOptions {
 	allowTools: string;
@@ -59,18 +62,39 @@ export function authorizeIrohRemoteClient(
 	const matchingRuntimePairingSecret =
 		options.pairingSecret !== undefined && hello.secret === options.pairingSecret ? options.pairingSecret : undefined;
 	const hasPairingSecret = matchingRuntimePairingSecret !== undefined || matchingPendingPairingTicket !== undefined;
-	if (!state.consumedPairingSecretHashes) {
-		state.consumedPairingSecretHashes = [];
-	}
-	const consumedPairingSecretHashes = state.consumedPairingSecretHashes;
+	const pairingSecretTombstones = prunePairingSecretTombstones(state, now);
+	const matchingConsumedPairingSecret = pairingSecretHash
+		? pairingSecretTombstones.find(
+				(tombstone) =>
+					tombstone.secretHash === pairingSecretHash && tombstone.outcome === "pairing_secret_consumed",
+			)
+		: undefined;
+	const matchingExpiredPairingSecret = pairingSecretHash
+		? pairingSecretTombstones.find(
+				(tombstone) => tombstone.secretHash === pairingSecretHash && tombstone.outcome === "pairing_secret_expired",
+			)
+		: undefined;
 	const runtimePairingSecretExpired =
 		matchingRuntimePairingSecret !== undefined &&
 		options.pairingExpiresAt !== undefined &&
 		now > options.pairingExpiresAt;
-	const pairingSecretExpired = runtimePairingSecretExpired || matchingExpiredPairingTicket !== undefined;
+	const pairingSecretExpired =
+		runtimePairingSecretExpired ||
+		matchingExpiredPairingTicket !== undefined ||
+		matchingExpiredPairingSecret !== undefined;
 	const expiredResultTickets = expiredPairingTickets.length > 0 ? expiredPairingTickets : undefined;
 
 	if (!existingClient && pairingSecretExpired) {
+		if (runtimePairingSecretExpired && pairingSecretHash) {
+			upsertPairingSecretTombstone(state, {
+				secretHash: pairingSecretHash,
+				workspace: workspace.name,
+				outcome: "pairing_secret_expired",
+				expiresAt: options.pairingExpiresAt,
+				expiredAt: now,
+				retainUntil: getPairingSecretTombstoneRetainUntil(now, options.pairingExpiresAt),
+			});
+		}
 		return {
 			ok: false,
 			error: "pairing ticket has expired",
@@ -88,7 +112,7 @@ export function authorizeIrohRemoteClient(
 		};
 	}
 
-	if (!existingClient && pairingSecretHash && consumedPairingSecretHashes.includes(pairingSecretHash)) {
+	if (!existingClient && matchingConsumedPairingSecret) {
 		return {
 			ok: false,
 			error: "pairing ticket has already been used",
@@ -125,6 +149,7 @@ export function authorizeIrohRemoteClient(
 		}
 		const allowedTools = matchingPendingPairingTicket?.allowedTools ?? options.allowTools;
 		const allowedWorkspace = matchingPendingPairingTicket?.workspace ?? workspace.name;
+		const ticketExpiresAt = matchingPendingPairingTicket?.expiresAt ?? options.pairingExpiresAt;
 		const client: IrohRemoteClient = {
 			nodeId: remoteNodeId,
 			label: hello.clientLabel || matchingPendingPairingTicket?.labelHint || remoteNodeId.slice(0, 12),
@@ -133,7 +158,21 @@ export function authorizeIrohRemoteClient(
 			pairedAt: now,
 			lastSeenAt: now,
 		};
-		consumedPairingSecretHashes.push(pairingSecretHash);
+		upsertPairingSecretTombstone(state, {
+			secretHash: pairingSecretHash,
+			workspace: allowedWorkspace,
+			outcome: "pairing_secret_consumed",
+			consumedAt: now,
+			clientNodeId: remoteNodeId,
+			...(matchingPendingPairingTicket?.createdAt === undefined
+				? {}
+				: { createdAt: matchingPendingPairingTicket.createdAt }),
+			...(ticketExpiresAt === undefined ? {} : { expiresAt: ticketExpiresAt }),
+			...(matchingPendingPairingTicket?.labelHint === undefined
+				? {}
+				: { labelHint: matchingPendingPairingTicket.labelHint }),
+			retainUntil: getPairingSecretTombstoneRetainUntil(now, ticketExpiresAt),
+		});
 		if (matchingPendingPairingTicket) {
 			state.pendingPairingTickets = getPendingPairingTickets(state).filter(
 				(ticket) => ticket.secretHash !== matchingPendingPairingTicket.secretHash,
@@ -195,11 +234,49 @@ function getPendingPairingTickets(state: IrohRemoteHostState): IrohRemotePending
 	return state.pendingPairingTickets;
 }
 
+function getPairingSecretTombstones(state: IrohRemoteHostState): IrohRemotePairingSecretTombstone[] {
+	state.pairingSecretTombstones ??= [];
+	return state.pairingSecretTombstones;
+}
+
+function getPairingSecretTombstoneRetainUntil(terminalAt: number, expiresAt: number | undefined): number {
+	return Math.max(terminalAt + DEFAULT_IROH_REMOTE_PAIRING_SECRET_TOMBSTONE_RETENTION_MS, expiresAt ?? terminalAt);
+}
+
+function prunePairingSecretTombstones(state: IrohRemoteHostState, now: number): IrohRemotePairingSecretTombstone[] {
+	const tombstones = getPairingSecretTombstones(state);
+	const retainedTombstones = tombstones.filter((tombstone) => now <= tombstone.retainUntil);
+	if (retainedTombstones.length !== tombstones.length) {
+		state.pairingSecretTombstones = retainedTombstones;
+	}
+	return retainedTombstones;
+}
+
+function upsertPairingSecretTombstone(state: IrohRemoteHostState, tombstone: IrohRemotePairingSecretTombstone): void {
+	const tombstones = getPairingSecretTombstones(state);
+	state.pairingSecretTombstones = [
+		...tombstones.filter((entry) => entry.secretHash !== tombstone.secretHash),
+		tombstone,
+	];
+}
+
 function pruneExpiredPendingPairingTickets(state: IrohRemoteHostState, now: number): IrohRemotePendingPairingTicket[] {
 	const pendingPairingTickets = getPendingPairingTickets(state);
 	const expiredPairingTickets = pendingPairingTickets.filter((ticket) => now > ticket.expiresAt);
 	if (expiredPairingTickets.length > 0) {
 		state.pendingPairingTickets = pendingPairingTickets.filter((ticket) => now <= ticket.expiresAt);
+		for (const ticket of expiredPairingTickets) {
+			upsertPairingSecretTombstone(state, {
+				secretHash: ticket.secretHash,
+				workspace: ticket.workspace,
+				outcome: "pairing_secret_expired",
+				createdAt: ticket.createdAt,
+				expiresAt: ticket.expiresAt,
+				expiredAt: now,
+				...(ticket.labelHint === undefined ? {} : { labelHint: ticket.labelHint }),
+				retainUntil: getPairingSecretTombstoneRetainUntil(now, ticket.expiresAt),
+			});
+		}
 	}
 	return expiredPairingTickets;
 }
