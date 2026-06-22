@@ -282,10 +282,10 @@ blocked.
     <evidence>2026-06-22: Root and app specs now keep bare volt remote host defaulting to relay disabled, make desktop Pair Phone/service and a dedicated CLI mobile mode default to relay default, preserve explicit --relay disabled LAN-only opt-out, and treat volt remote pair --relay as a running-host expectation check; verification: Volt/app doc whitespace checks and commit-hook npm run check passed; Volt commit dab5c3c5.</evidence>
   </item>
 
-  <item ref="A.6" status="open" prereq="A.2,A.3" type="decision">
+  <item ref="A.6" status="resolved" prereq="A.2,A.3" type="decision">
     <title>Define pairing metadata retention and precise auth outcome detection</title>
     <acceptance>Specs define cleanup for pending pairing tickets and consumed pairing-secret hashes, including whether consumed hashes are retained forever or pruned by TTL. Specs also define how hosts distinguish client_unknown, client_revoked, host_identity_mismatch, workspace_unavailable, and workspace_forbidden in protocol terms.</acceptance>
-    <evidence/>
+    <evidence>2026-06-22: Root/app specs now define active pending tickets, consumed/expired pairing-secret tombstones pruned after 30-day retention, and stable protocol outcomes for client_unknown, client_revoked, workspace_unavailable, workspace_forbidden, pairing_secret_expired, and pairing_secret_consumed; verification: pending doc checks and commit-hook npm run check; Volt commit pending.</evidence>
   </item>
 </group>
 

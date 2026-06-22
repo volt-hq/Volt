@@ -119,8 +119,8 @@ Persisted on the computer:
 - optional last session ID by workspace
 - revoked client tombstones keyed by client node ID
 - explicit re-pair approvals for revoked client node IDs, if any
-- consumed pairing secret hashes
-- pending pairing ticket hashes and non-secret metadata
+- active pending pairing ticket hashes and non-secret metadata
+- consumed and expired pairing-secret tombstones with non-secret metadata and bounded retention
 
 The host should not persist raw pairing secrets.
 
@@ -221,6 +221,23 @@ Failed attempts before this commit must not consume the secret. That includes ma
 If the host records the phone but the app fails before saving `SavedHostRecord`, the host relationship is still authoritative. A retry from the same phone endpoint identity should succeed even if the client still sends the original now-consumed QR secret, because the host should authorize existing clients by node ID before treating the secret as a new-pairing credential. That retry lets the app save a `SavedHostRecord` without another desktop approval step. If the phone loses both its endpoint identity and the QR/discovery data before saving, it cannot prove it is the recorded node and must use Pair Again.
 
 Concurrent pairing attempts for one QR must be serialized by host state. At most one previously unpaired node ID may commit for a pairing secret. A duplicate attempt from the winning phone node ID is an existing-client reconnect/recovery attempt; it does not consume the secret again and may complete app-side saving. Attempts from any other node ID after the commit must receive `pairing_secret_consumed`. If an unintended device wins the race, the desktop user must revoke that device and generate a fresh QR; the host must not grant the same consumed QR to a second node ID.
+
+## Pairing Metadata Retention
+
+Resolved 2026-06-22: consumed pairing-secret hashes should not be retained forever. The host should keep bounded non-secret tombstones for consumed and expired pairing secrets, then prune them by TTL.
+
+Host state should distinguish:
+
+- active pending pairing tickets: unexpired, unconsumed ticket hashes plus non-secret metadata needed to complete first pairing
+- terminal pairing-secret tombstones: consumed or expired ticket hashes plus non-secret metadata used only to reject replay with a precise outcome and support status/audit
+
+Active pending pairing tickets should contain `secretHash`, `workspace`, `allowedTools`, `createdAt`, `expiresAt`, optional `labelHint`, and any future non-secret pair-flow metadata. They should be pruned from the active pending list as soon as `now > expiresAt`. When pruned for expiry, the host should write an expired tombstone so a later scan can receive `pairing_secret_expired` while the tombstone is retained.
+
+Consumed tombstones should contain `secretHash`, `workspace`, `consumedAt`, original `createdAt` and `expiresAt` if known, `clientNodeId`, optional `labelHint`, and `retainUntil`. Expired tombstones should contain `secretHash`, `workspace`, original `createdAt` and `expiresAt`, optional `labelHint`, outcome `pairing_secret_expired`, and `retainUntil`.
+
+The default tombstone retention should be 30 days after the terminal state, with `retainUntil` never earlier than the original ticket `expiresAt`. After `retainUntil`, the host should prune the tombstone. A replay after pruning is still unauthorized; it may be reported as `client_unknown` because the host no longer has enough retained metadata to prove the secret was previously consumed or expired.
+
+Cleanup should run at host startup/load, before writing state after any pairing/auth/revoke/status mutation, and before status output. Cleanup must never require or expose raw pairing secrets.
 
 ## Relay and Discovery
 
@@ -336,6 +353,8 @@ The app needs stable machine-readable outcomes, not only human-readable error st
 
 Resolved 2026-06-22: reconnect UX must classify failures by saved-host recovery boundary. Offline and stale discovery keep the saved host; identity mismatch, revoked/unknown client, and invalid local records require explicit Pair Again or Forget Host decisions.
 
+Resolved 2026-06-22: host handshake failures should carry a stable machine-readable `outcome` field. The human `error` field remains diagnostic text and must not be the app's authority for user-facing state.
+
 Suggested outcomes:
 
 - `host_unreachable`: app could not reach the host. Keep the saved host and show offline/retry.
@@ -347,6 +366,28 @@ Suggested outcomes:
 - `workspace_forbidden`: phone is paired but not allowed for that workspace. Keep the saved host and show permission denied.
 - `host_identity_mismatch`: saved host record reached a different host identity. Stop reconnecting and offer Pair Again or Forget Host.
 - `saved_host_invalid`: local saved host record is malformed or unusable. Offer Forget Host and Pair Again.
+
+Protocol outcome source:
+
+- Client-local outcomes:
+  - `host_unreachable`: no transport/connection/handshake can be opened to the saved host.
+  - `host_identity_mismatch`: the reached Iroh node ID or authenticated handshake `hostNodeId` differs from `SavedHostRecord.hostNodeId`. The client should ignore any later host auth outcome from that connection.
+  - `saved_host_invalid`: the saved host record is malformed, unsupported, or missing required local fields before dialing.
+- Host handshake outcomes:
+  - `pairing_secret_expired`: the pairing secret hash matches an expired pending ticket or retained expired tombstone.
+  - `pairing_secret_consumed`: the pairing secret hash matches a retained consumed tombstone and the authoritative remote node ID is not the already-paired client for recovery.
+  - `client_unknown`: the authoritative remote node ID has no active client record, no revoked tombstone, and no recognized active/expired/consumed pairing secret.
+  - `client_revoked`: the authoritative remote node ID matches a revoked-client tombstone and does not have an active desktop-approved re-pair grant.
+  - `workspace_unavailable`: the requested workspace name is not currently known or exposed by the host.
+  - `workspace_forbidden`: the requested workspace exists, but this paired client or pairing ticket is not granted access to it.
+
+Handshake failure responses should include at least:
+
+```json
+{"type":"volt_iroh_handshake","success":false,"outcome":"client_unknown","error":"client is not paired","hostNodeId":"<host-node-id>"}
+```
+
+Handshake success responses should include the authoritative `hostNodeId` and `clientNodeId` so saved-host clients can verify identity and update non-secret discovery data after success. Outcome precedence on the host should be: revoked node, existing paired client authorization, recognized active pending secret, retained consumed/expired secret tombstone, then unknown client. Workspace checks apply before success: missing workspace is `workspace_unavailable`; known but unauthorized workspace is `workspace_forbidden`.
 
 ## Implementation Plan
 
@@ -387,6 +428,9 @@ Host/core tests:
 - Existing paired client reconnects without `secret`.
 - New unpaired client without `secret` is rejected.
 - Consumed pairing secret cannot pair a second client.
+- Pending pairing tickets expire into retained expired tombstones, then prune after retention.
+- Consumed pairing secret tombstones are retained by TTL, not forever.
+- Handshake failures include stable `outcome` values for expired/consumed secrets, unknown clients, revoked clients, unavailable workspaces, and forbidden workspaces.
 - Saved-host reconnect verifies reached host node ID against `SavedHostRecord.hostNodeId`.
 - Verified reconnect refreshes non-secret discovery fields without changing `hostNodeId`.
 - Malformed saved-host records missing required v1 fields map to `saved_host_invalid`.
@@ -494,3 +538,7 @@ Resolved 2026-06-22: clients persist `schemaVersion`, required `hostNodeId`, opt
 ### What is the scope of the mobile `--relay default` product default?
 
 Resolved 2026-06-22: do not change the global CLI default. The default changes only for mobile-facing product/profile flows. Bare `volt remote host` remains relay-disabled; desktop Pair Phone, desktop service startup for the iOS app, and `volt remote host --mobile` default to relay `"default"`. Explicit `--relay disabled` remains the advanced LAN-only opt-out. `volt remote pair` uses the running host relay mode by default and treats `--relay` as an expectation check.
+
+### How long are pairing metadata hashes retained, and how are auth outcomes detected?
+
+Resolved 2026-06-22: active pending pairing tickets expire at `expiresAt`; expired and consumed secrets become non-secret tombstones retained for 30 days after their terminal state, with `retainUntil` never before the original expiry. Tombstones are pruned after `retainUntil`, so hashes are not retained forever. Host handshake failures use a stable `outcome` field. `client_unknown`, `client_revoked`, `workspace_unavailable`, `workspace_forbidden`, `pairing_secret_expired`, and `pairing_secret_consumed` are host outcomes; `host_unreachable`, `host_identity_mismatch`, and `saved_host_invalid` are client-local outcomes based on transport, reached host identity, and saved record validation.
