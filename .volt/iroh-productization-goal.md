@@ -314,10 +314,10 @@ the rollup item is resolved, and the final turn's required verification passed.
     <evidence>Resolved 2026-06-21: added Iroh remote protocol v1 docs linked from the docs index/design doc plus compatibility vectors for ticket/hello/handshake shapes, LF framing with initialInput preservation, command allowlist/rejections, and representative outbound redaction; verification: lsp.diagnostics on packages/coding-agent/test/remote-iroh-core.test.ts, cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-iroh-core.test.ts, npm run check, git diff --check -- .volt/iroh-productization-design.md packages/coding-agent/CHANGELOG.md packages/coding-agent/docs/index.md packages/coding-agent/docs/iroh-remote-access-design.md packages/coding-agent/docs/iroh-remote-protocol.md packages/coding-agent/test/remote-iroh-core.test.ts; commit 0dcf9bc4</evidence>
   </item>
 
-  <item ref="D.2" status="open" prereq="D.1" type="decision">
+  <item ref="D.2" status="resolved" prereq="D.1" type="decision">
     <title>Decide whether preview remote RPC should allow additional read-only commands such as get_messages, get_commands, get_last_assistant_text, or get_available_models beyond prompt/steer/follow_up/abort/get_state/extension_ui_response</title>
     <acceptance>Decision is recorded with security rationale for each candidate command; if commands are added, `IROH_REMOTE_RPC_PASSTHROUGH_TYPES`, docs, and tests are updated; if kept narrow, docs explain that tool access and RPC command access are separate surfaces.</acceptance>
-    <evidence/>
+    <evidence>Resolved 2026-06-21: decided to keep the v1 preview direct remote RPC allowlist narrow and continue rejecting get_messages, get_commands, get_last_assistant_text, and get_available_models; design/protocol docs record candidate-specific security rationale and the distinction between allowedTools and direct RPC command access, and compatibility tests pin candidate rejection; verification: lsp.diagnostics on packages/coding-agent/test/remote-iroh-core.test.ts, cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-iroh-core.test.ts, npm run check, git diff --check -- .volt/iroh-productization-design.md packages/coding-agent/CHANGELOG.md packages/coding-agent/docs/iroh-remote-protocol.md packages/coding-agent/test/remote-iroh-core.test.ts; commit ec4bb991</evidence>
   </item>
 
   <item ref="D.3" status="open" prereq="D.1">
