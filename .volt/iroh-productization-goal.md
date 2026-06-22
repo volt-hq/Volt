@@ -300,10 +300,10 @@ the rollup item is resolved, and the final turn's required verification passed.
     <evidence>Resolved 2026-06-21: chose live host coordination for preview active revocation, with persisted-state revocation as fallback; design names the running host control channel, active connection registry, one-second close guarantee, and `active_connection_revoked` audit requirements; direct @number0/iroh API evidence: Connection.close/closed plus stream stop/reset handles in node_modules/@number0/iroh/index.d.ts; verification: git diff --check -- .volt/iroh-productization-design.md and pre-commit npm run check; commit c36d9dd4</evidence>
   </item>
 
-  <item ref="C.3" status="open" prereq="C.2">
+  <item ref="C.3" status="resolved" prereq="C.2">
     <title>Implement revocation behavior from C.2 and ensure `volt remote revoke &lt;node-id&gt;` audits the action, prevents reconnect, and handles active connections according to the recorded policy</title>
     <acceptance>Revoked clients cannot reconnect; revoke writes audit with success/failure; active connections are either closed within the documented bound or documented as unaffected until reconnect; tests and/or scenario coverage prove the selected behavior.</acceptance>
-    <evidence/>
+    <evidence>Resolved 2026-06-21: extended the host control channel with revoke requests, added active authorized connection tracking, made main CLI and host-script revoke remove persisted clients, audit success/failure, request live revocation, close active native Iroh connections with reason `revoked`, and audit `active_connection_revoked`; verification: lsp.diagnostics on changed TS/test files, node --check packages/coding-agent/src/remote/iroh-host.mjs scripts/iroh-sidecar-test.mjs, cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-cli.test.ts, npm run iroh:poc:test, npm run check, git diff --check; commit ee17ef39</evidence>
   </item>
 </group>
 
