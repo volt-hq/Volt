@@ -261,7 +261,7 @@ blocked.
   <item ref="A.2" status="resolved" prereq="A.1" type="decision">
     <title>Define revocation and re-pair behavior for a previously revoked phone identity</title>
     <acceptance>Specs define whether revocation blocks the same phone node ID from re-pairing until desktop approval, whether re-pair can reuse the phone identity after explicit approval, and when the app should rotate or clear its endpoint identity. Host state, app Forget Host behavior, and UX copy are consistent.</acceptance>
-    <evidence>2026-06-22: Root and app specs now require durable revoked-client tombstones, explicit desktop approval before same-node re-pair, same phone identity reuse after approval, and no automatic endpoint identity rotation for revoked/unknown clients; verification: pending doc checks and commit-hook npm run check; Volt commit SHA to be recorded after commit.</evidence>
+    <evidence>2026-06-22: Root and app specs now require durable revoked-client tombstones, explicit desktop approval before same-node re-pair, same phone identity reuse after approval, and no automatic endpoint identity rotation for revoked/unknown clients; verification: Volt/app doc whitespace checks and commit-hook npm run check passed; Volt commit 4597671b.</evidence>
   </item>
 
   <item ref="A.3" status="open" prereq="A.1" type="decision">
