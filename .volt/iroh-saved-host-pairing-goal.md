@@ -308,10 +308,10 @@ blocked.
     <evidence>2026-06-22: Volt protocol now exposes sanitized non-secret reconnect tickets, includes hostNodeId in handshakes when the host identity is known, and verifies saved-host identity in ticket, connection, and handshake paths; core tests cover host restart with same state, host identity mismatch, and malformed saved reconnect fields. Verification: targeted Vitest file, npm run iroh:poc:test, git diff --check, npm run check, and commit-hook npm run check passed; Volt commit 95da73e0.</evidence>
   </item>
 
-  <item ref="B.4" status="open" prereq="A.1,A.6">
+  <item ref="B.4" status="resolved" prereq="A.1,A.6">
     <title>Add machine-readable auth and reconnect outcomes</title>
     <acceptance>Handshake failures or response data include stable outcomes for host/client/app UX: host_unreachable where applicable on the client side, pairing_secret_expired, pairing_secret_consumed, client_unknown, client_revoked, workspace_unavailable, workspace_forbidden, host_identity_mismatch, and saved_host_invalid. Protocol docs and compatibility tests cover these outcomes without relying on fragile human strings.</acceptance>
-    <evidence/>
+    <evidence>2026-06-22: Volt protocol now defines stable reconnect outcomes, emits host auth outcomes on failed handshakes, exposes outcome-bearing client-local errors for host identity mismatch and invalid saved-host ticket data, and updates PoC client/tests to assert outcome fields instead of only human strings. Verification: targeted Vitest file, npm run iroh:poc:test, git diff --check, npm run check, and commit-hook npm run check passed; Volt commit 2b5336f1.</evidence>
   </item>
 
   <item ref="B.5" status="open" prereq="A.5">
