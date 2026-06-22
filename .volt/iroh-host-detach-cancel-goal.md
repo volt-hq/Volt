@@ -239,10 +239,10 @@ the rollup item is resolved, and the final turn's required verification passed.
 <work_queue>
 
 <group n="1" title="Contract and lifecycle shape">
-  <item ref="A.1" status="open" prereq="">
+  <item ref="A.1" status="resolved" prereq="">
     <title>Document and enforce the remote lifecycle contract: transport close is detach, explicit abort is cancel</title>
     <acceptance>RPC and Iroh protocol docs define detach versus cancel; `abort` remains the only remote cancellation command; transport close is not documented or implemented as implicit cancel; existing remote command allowlist and transcript security constraints remain intact; targeted tests cover the command contract where practical.</acceptance>
-    <evidence/>
+    <evidence>Resolved 2026-06-22: added RPC/Iroh detach-vs-cancel docs, exported the remote cancellation command set as `abort` only, added lifecycle contract tests for cancel-like rejections and clean close not synthesizing `abort`, and fixed the sidecar harness safe allowlist default for noninteractive native scenarios; verification: `cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-iroh-lifecycle-contract.test.ts test/remote-iroh-core.test.ts`, `npm run iroh:poc:test`, `npm run check`; commit 9ba8888d</evidence>
   </item>
 
   <item ref="A.2" status="open" prereq="A.1">

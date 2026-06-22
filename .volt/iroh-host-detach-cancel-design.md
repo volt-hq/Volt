@@ -106,6 +106,8 @@ Response:
 
 Transport close has no RPC payload and must not be translated into `abort`.
 
+Resolved 2026-06-22: RPC and Iroh protocol docs now define transport close as detach and `abort` as cancellation; the remote command filter exports the v1 cancellation set as `abort` only, and contract tests pin cancel-like command rejection plus clean close not synthesizing `abort`.
+
 Optional future additions:
 
 - `cancel_run`: clearer alias for `abort` if the protocol wants run-scoped naming.
