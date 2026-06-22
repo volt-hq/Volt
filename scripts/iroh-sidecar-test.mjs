@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -526,6 +527,96 @@ async function ensureSessionFileForId(agentDir, workspacePath, sessionId, label)
 	return sessionFile;
 }
 
+function createDeferred() {
+	let resolve = () => {};
+	const promise = new Promise((innerResolve) => {
+		resolve = innerResolve;
+	});
+	return { promise, resolve };
+}
+
+async function startFakeOpenAICompletionsServer(responseText) {
+	const requestStarted = createDeferred();
+	const releaseResponse = createDeferred();
+	const requestBodies = [];
+	let requestCount = 0;
+	const server = createServer(async (req, res) => {
+		if (req.method !== "POST" || (req.url !== "/v1/chat/completions" && req.url !== "/chat/completions")) {
+			res.writeHead(404).end();
+			return;
+		}
+
+		let body = "";
+		for await (const chunk of req) {
+			body += chunk.toString();
+		}
+		requestCount += 1;
+		requestBodies.push(JSON.parse(body));
+		requestStarted.resolve();
+
+		res.writeHead(200, {
+			"content-type": "text/event-stream",
+			"cache-control": "no-cache",
+			connection: "keep-alive",
+		});
+		await releaseResponse.promise;
+		res.write(
+			`data: ${JSON.stringify({
+				id: "chatcmpl-iroh-active-detach",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: "fake-integrated",
+				choices: [{ index: 0, delta: { role: "assistant", content: responseText }, finish_reason: null }],
+			})}\n\n`,
+		);
+		res.write(
+			`data: ${JSON.stringify({
+				id: "chatcmpl-iroh-active-detach",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: "fake-integrated",
+				choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+				usage: { prompt_tokens: 1, completion_tokens: 1 },
+			})}\n\n`,
+		);
+		res.write("data: [DONE]\n\n");
+		res.end();
+	});
+
+	await new Promise((resolveListen, rejectListen) => {
+		server.once("error", rejectListen);
+		server.listen(0, "127.0.0.1", () => {
+			server.off("error", rejectListen);
+			resolveListen();
+		});
+	});
+	const address = server.address();
+	assert(address && typeof address === "object", "Fake OpenAI server did not bind to a TCP port");
+	return {
+		baseUrl: `http://127.0.0.1:${address.port}/v1`,
+		get requestBodies() {
+			return requestBodies;
+		},
+		get requestCount() {
+			return requestCount;
+		},
+		releaseResponse: releaseResponse.resolve,
+		waitForRequest: () => requestStarted.promise,
+		async close() {
+			releaseResponse.resolve();
+			await new Promise((resolveClose, rejectClose) => {
+				server.close((error) => {
+					if (error) {
+						rejectClose(error);
+						return;
+					}
+					resolveClose();
+				});
+			});
+		},
+	};
+}
+
 async function createFakeSourceVolt(stateDir) {
 	const sourceDir = join(stateDir, "fake-source-volt");
 	const scriptsDir = join(sourceDir, "scripts");
@@ -691,7 +782,7 @@ setInterval(() => {}, 1000);
 	return { logPath, sourceDir };
 }
 
-async function createIntegratedVoltAgentDir(stateDir) {
+async function createIntegratedVoltAgentDir(stateDir, options = {}) {
 	const agentDir = join(stateDir, "agent");
 	await mkdir(agentDir, { recursive: true });
 	await writeFile(
@@ -702,7 +793,7 @@ async function createIntegratedVoltAgentDir(stateDir) {
 					"iroh-integrated-test": {
 						api: "openai-completions",
 						apiKey: "test-key",
-						baseUrl: "http://127.0.0.1:9/v1",
+						baseUrl: options.baseUrl ?? "http://127.0.0.1:9/v1",
 						models: [
 							{
 								id: "fake-integrated",
@@ -1404,6 +1495,166 @@ async function integratedVoltDetachedRuntimeTtlScenario() {
 			closeRawConnection(rawClient?.connection);
 			await endpoint.close();
 			await stopProcess(host.child);
+		}
+	});
+}
+
+async function integratedVoltActiveDetachReconnectTranscriptScenario() {
+	await withStateDir("integrated-active-detach-reconnect", async ({ hostStatePath, stateDir }) => {
+		const responseText = "detached active completion";
+		const fakeOpenAI = await startFakeOpenAICompletionsServer(responseText);
+		const agentDir = await createIntegratedVoltAgentDir(stateDir, { baseUrl: fakeOpenAI.baseUrl });
+		const workspacePath = join(stateDir, "workspace");
+		await mkdir(workspacePath, { recursive: true });
+		const workspaceArg = `active-detach=${workspacePath}`;
+		const auditPath = getDefaultAuditPath(hostStatePath);
+		const endpoint = await bindRawClientEndpoint("disabled");
+		const differentEndpoint = await bindRawClientEndpoint("disabled");
+		let rawClient;
+		let differentClient;
+		const host = startHost([
+			"--state",
+			hostStatePath,
+			"--agent-dir",
+			agentDir,
+			"--workspace",
+			workspaceArg,
+			"--integrated-volt",
+			"--no-pairing",
+		]);
+		try {
+			await waitForFirstStdoutLine(host.child, host.output, "integrated active detach host");
+			const pairCommand = spawnSourceCli([
+				"remote",
+				"pair",
+				"--state",
+				hostStatePath,
+				"--workspace",
+				"active-detach",
+				"--allow-tools",
+				DEFAULT_TEST_ALLOW_TOOLS,
+				"--label",
+				"active detach client",
+			]);
+			await waitForExit(pairCommand.child, "integrated active detach pair command", pairCommand.output);
+			const ticket = pairCommand.output.stdout.trim();
+			assert(ticket.startsWith(TICKET_PREFIX), `Expected active detach pair command ticket, got:\n${pairCommand.output.stdout}`);
+
+			rawClient = await openRawAuthorizedClientOnEndpoint(endpoint, ticket, {
+				clientLabel: "active detach client",
+			});
+			const initialState = await readRawRpcResponse(
+				rawClient,
+				{ id: "state-active-detach-initial", type: "get_state" },
+				"integrated active detach initial get_state",
+			);
+			assert(initialState.event.success === true, `Expected initial get_state success, got:\n${initialState.lines.join("\n")}`);
+			const sessionId = initialState.event.data?.sessionId;
+			assert(sessionId, `Expected initial session id, got:\n${JSON.stringify(initialState.event)}`);
+
+			const prompt = await readRawRpcResponse(
+				rawClient,
+				{ id: "prompt-active-detach", type: "prompt", message: "recover while detached" },
+				"integrated active detach prompt",
+			);
+			assert(prompt.event.success === true, `Expected active detach prompt success, got:\n${prompt.lines.join("\n")}`);
+			await fakeOpenAI.waitForRequest();
+			assert(fakeOpenAI.requestCount === 1, `Expected one fake OpenAI request, got ${fakeOpenAI.requestCount}`);
+
+			closeRawConnection(rawClient.connection);
+			rawClient = undefined;
+			await waitForAuditEvent(
+				auditPath,
+				(event) =>
+					event.type === "remote_runtime_detached" &&
+					event.details?.sessionId === sessionId &&
+					event.details?.active === true,
+				"integrated active detach runtime detached",
+			);
+
+			differentClient = await openRawAuthorizedClientOnEndpoint(differentEndpoint, ticket, {
+				clientLabel: "different active detach client",
+				expectSuccess: false,
+			});
+			assert(
+				differentClient.handshakeResponse.success === false &&
+					differentClient.handshakeResponse.error === "pairing ticket has already been used",
+				`Expected different node to be rejected, got:\n${JSON.stringify(differentClient.handshakeResponse)}`,
+			);
+			closeRawConnection(differentClient.connection);
+			differentClient = undefined;
+
+			rawClient = await openRawAuthorizedClientOnEndpoint(endpoint, ticket, {
+				clientLabel: "active detach client",
+			});
+			const reattachedState = await readRawRpcResponse(
+				rawClient,
+				{ id: "state-active-detach-reattached", type: "get_state" },
+				"integrated active detach reattached get_state",
+			);
+			assert(
+				reattachedState.event.success === true,
+				`Expected reattached get_state success, got:\n${reattachedState.lines.join("\n")}`,
+			);
+			assert(
+				reattachedState.event.data?.sessionId === sessionId,
+				`Expected reattached session ${sessionId}, got:\n${JSON.stringify(reattachedState.event)}`,
+			);
+			assert(
+				reattachedState.event.data?.isStreaming === true,
+				`Expected reattached runtime to still be streaming, got:\n${JSON.stringify(reattachedState.event)}`,
+			);
+
+			fakeOpenAI.releaseResponse();
+			let agentEnd;
+			for (let index = 0; !agentEnd && index < 20; index += 1) {
+				const { event } = await readRawRpcEvent(rawClient, "integrated active detach completion");
+				if (event.type === "agent_end") agentEnd = event;
+			}
+			assert(agentEnd, "Expected active detached prompt to finish after reconnect");
+
+			const transcript = await readRawRpcResponse(
+				rawClient,
+				{ id: "transcript-active-detach", type: "get_transcript", limit: 20 },
+				"integrated active detach transcript",
+			);
+			assert(transcript.event.success === true, `Expected transcript success, got:\n${transcript.lines.join("\n")}`);
+			assert(
+				transcript.event.data?.sessionId === sessionId,
+				`Expected transcript session ${sessionId}, got:\n${JSON.stringify(transcript.event)}`,
+			);
+			const transcriptItems = transcript.event.data?.items ?? [];
+			assert(
+				transcriptItems.some((item) => item.role === "user" && item.text === "recover while detached"),
+				`Expected detached user prompt in transcript, got:\n${JSON.stringify(transcriptItems)}`,
+			);
+			assert(
+				transcriptItems.some((item) => item.role === "assistant" && item.text === responseText),
+				`Expected detached assistant response in transcript, got:\n${JSON.stringify(transcriptItems)}`,
+			);
+
+			const revokeCommand = spawnSourceCli(["remote", "revoke", rawClient.nodeId, "--state", hostStatePath]);
+			await waitForExit(revokeCommand.child, "integrated active detach revoke command", revokeCommand.output);
+			await waitForRawConnectionClosed(rawClient.connection, "integrated active detach revoked client");
+			rawClient = undefined;
+
+			const revokedClient = await openRawAuthorizedClientOnEndpoint(endpoint, ticket, {
+				clientLabel: "active detach client",
+				expectSuccess: false,
+			});
+			assert(
+				revokedClient.handshakeResponse.success === false &&
+					revokedClient.handshakeResponse.error === "pairing ticket has already been used",
+				`Expected revoked node to be rejected, got:\n${JSON.stringify(revokedClient.handshakeResponse)}`,
+			);
+			closeRawConnection(revokedClient.connection);
+		} finally {
+			closeRawConnection(rawClient?.connection);
+			closeRawConnection(differentClient?.connection);
+			await endpoint.close();
+			await differentEndpoint.close();
+			await stopProcess(host.child);
+			await fakeOpenAI.close();
 		}
 	});
 }
@@ -2222,6 +2473,7 @@ const scenarios = [
 	["integrated Volt reconnect session", integratedVoltReconnectSessionScenario],
 	["integrated Volt detach reattach runtime", integratedVoltDetachReattachRuntimeScenario],
 	["integrated Volt detached runtime TTL", integratedVoltDetachedRuntimeTtlScenario],
+	["integrated Volt active detach reconnect transcript", integratedVoltActiveDetachReconnectTranscriptScenario],
 	["duplicate active connection", duplicateActiveConnectionScenario],
 	["integrated Volt profile", integratedVoltProfileScenario],
 	["integrated Volt env profile", integratedVoltEnvProfileScenario],
