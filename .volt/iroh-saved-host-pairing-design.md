@@ -117,6 +117,8 @@ Persisted on the computer:
 - paired timestamp
 - last-seen timestamp
 - optional last session ID by workspace
+- revoked client tombstones keyed by client node ID
+- explicit re-pair approvals for revoked client node IDs, if any
 - consumed pairing secret hashes
 - pending pairing ticket hashes and non-secret metadata
 
@@ -227,7 +229,27 @@ Use these boundaries:
 - `host_identity_mismatch`: the app reaches a node whose cryptographic host node ID differs from the `SavedHostRecord` host node ID, or the host handshake proves a different identity. Stop automatic reconnect for that saved host, do not overwrite the saved host identity, and offer Pair Again or Forget Host.
 - `saved_host_invalid`: the local saved host record cannot be parsed or lacks required v1 fields needed to identify and dial the host, such as a valid host node ID, supported relay mode, or usable discovery/ticket data. Do not attempt network reconnect from that record; offer Forget Host and Pair Again.
 - `client_unknown`: the app reaches the saved host identity, but the host does not authorize the phone node ID. Keep the distinction from offline and invalid local data; offer Pair Again or Forget Host because host-side state no longer contains the phone relationship.
+- `client_revoked`: the app reaches the saved host identity, but the host has a durable revocation tombstone for the phone node ID. Keep the saved host and phone endpoint identity, show that the phone was revoked by the desktop host, and offer Pair Again only after desktop approval plus Forget Host.
 - `workspace_unavailable` and `workspace_forbidden`: keep the saved host. These outcomes are workspace access problems, not pairing or discovery failures.
+
+## Revocation and Re-Pairing
+
+Resolved 2026-06-22: revocation is a durable host-side block for a specific phone node ID, not only deletion from the paired-client list.
+
+When the desktop user revokes a phone, the host should:
+
+- remove the phone from the active allowed-client list
+- close active connections from that node ID
+- retain a revoked-client tombstone keyed by the phone node ID
+- record enough non-secret metadata for status, audit, and future approval, such as label, revoked timestamp, previous paired timestamp, previous workspace grants, and previous allowed tools
+- reject reconnects from that node ID with `client_revoked`
+- reject fresh pairing attempts from that same node ID with `client_revoked` unless the desktop user explicitly approved re-pair for that revoked node ID
+
+A generic "Pair phone" QR is approval to add a new phone. It is not, by itself, approval for a previously revoked node ID to come back. Re-pairing the same phone identity requires an explicit desktop action such as "Allow re-pair" for that revoked device. After that approval, the next successful pairing from the same phone node ID may reuse the existing phone endpoint identity and create a new paired-client record, replacing or clearing the revocation tombstone according to the host-state implementation.
+
+The app should not rotate or clear its endpoint identity automatically when it receives `client_revoked` or `client_unknown`. Keeping the phone identity lets the host make an authoritative decision and lets a desktop-approved re-pair reuse the same phone node ID. The app should rotate or clear the endpoint identity only when the user intentionally removes local state, such as Forget Host in the one-host v1 app, app deletion, Keychain deletion, or a future explicit "Reset phone identity" action.
+
+If the app has cleared its endpoint identity, the host cannot cryptographically connect the new node ID to the revoked tombstone. That device is treated as a new phone and still requires a fresh desktop-generated pairing QR. The product should not describe endpoint rotation as a way to bypass revocation.
 
 ## UX Requirements
 
@@ -238,6 +260,8 @@ Desktop host:
 - Explain that the QR is temporary.
 - Show saved paired devices.
 - Allow revoking a device.
+- Show revoked devices separately from active paired devices.
+- Offer an explicit re-pair approval action for a revoked device when the desktop user wants to trust the same phone identity again.
 - Prefer labels like "Jordan iPhone" over raw node IDs when available.
 
 iOS app:
@@ -247,7 +271,7 @@ iOS app:
 - Provide "Forget Host".
 - Show useful errors:
   - host unavailable
-  - phone revoked
+  - phone revoked by this desktop
   - saved host invalid
   - pairing ticket expired
 
@@ -265,7 +289,7 @@ Suggested outcomes:
 - `pairing_secret_expired`: QR expired before pairing. Ask the user to generate a new QR.
 - `pairing_secret_consumed`: QR was already used. Ask the user to generate a new QR.
 - `client_unknown`: saved host exists, but the host does not know this phone. Offer Pair Again or Forget Host.
-- `client_revoked`: phone was revoked by the desktop host. Offer Pair Again only after desktop approval, plus Forget Host.
+- `client_revoked`: phone was revoked by the desktop host. Keep the saved host and phone endpoint identity; offer Pair Again only after desktop approval, plus Forget Host.
 - `workspace_unavailable`: requested workspace is no longer exposed by the host. Keep the saved host and show workspace unavailable.
 - `workspace_forbidden`: phone is paired but not allowed for that workspace. Keep the saved host and show permission denied.
 - `host_identity_mismatch`: saved host record reached a different host identity. Stop reconnecting and offer Pair Again or Forget Host.
@@ -315,6 +339,8 @@ Host/core tests:
 - Host restart with same state authorizes existing client node ID.
 - Host restart with deleted state requires re-pairing.
 - Revoked client cannot reconnect.
+- Revoked client cannot re-pair with the same node ID until desktop approval.
+- Desktop-approved re-pair can reuse the same phone node ID.
 
 iOS tests:
 
@@ -387,3 +413,7 @@ The QR scanner should not be the main path from this state. Offline means the sa
 ### Where is the boundary between offline, stale discovery, identity mismatch, and invalid saved-host data?
 
 Resolved 2026-06-22: the authoritative saved-host identity is the saved host node ID. A well-formed saved host with that node ID stays saved through offline and stale-discovery failures. The app should retry and refresh non-secret discovery data when it can verify the same host identity. It should only leave the normal reconnect path when local data is malformed or unsupported (`saved_host_invalid`), when a reached host proves a different node ID (`host_identity_mismatch`), or when the reached saved host rejects the phone relationship (`client_unknown` or `client_revoked`).
+
+### Can a revoked phone re-pair with the same phone identity?
+
+Resolved 2026-06-22: not silently. The host must keep a revocation tombstone for the phone node ID and reject both saved reconnect and fresh pairing from that node ID with `client_revoked` until the desktop user explicitly approves re-pair for that revoked device. After desktop approval, the app may re-pair with the same phone endpoint identity. The app should not rotate endpoint identity automatically for `client_revoked`; it clears endpoint identity only when the user intentionally removes local state, such as Forget Host in the one-host v1 app, app deletion, Keychain deletion, or a future explicit reset identity action.
