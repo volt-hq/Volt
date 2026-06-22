@@ -391,6 +391,26 @@ async function readRawRpcResponse(rawClient, command, label, timeoutMs = PROCESS
 	}
 }
 
+async function readRawRpcEvent(rawClient, label, timeoutMs = PROCESS_TIMEOUT_MS) {
+	let timeoutId;
+	try {
+		const lineRead = await Promise.race([
+			readLineFromIroh(rawClient.stream.recv, rawClient.rest),
+			new Promise((_, reject) => {
+				timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+			}),
+		]);
+		clearTimeout(timeoutId);
+		rawClient.rest = lineRead.rest;
+		if (lineRead.line === undefined) {
+			throw new Error(`${label} closed before next event`);
+		}
+		return { event: JSON.parse(lineRead.line), line: lineRead.line };
+	} finally {
+		clearTimeout(timeoutId);
+	}
+}
+
 async function waitForRawConnectionClosed(connection, label, timeoutMs = 2000) {
 	let timeoutId;
 	try {
@@ -754,6 +774,104 @@ async function rawHalfClosePromptScenario() {
 	});
 }
 
+async function pairStreamAbortRelaunchReconnectScenario() {
+	await withStateDir("pair-stream-abort-relaunch-reconnect", async ({ hostStatePath }) => {
+		const endpoint = await bindRawClientEndpoint("disabled");
+		let rawClient;
+		try {
+			const host = startHost(["--state", hostStatePath, "--once"]);
+			try {
+				const ticket = await waitForFirstStdoutLine(host.child, host.output, "pair stream abort host");
+				rawClient = await openRawAuthorizedClientOnEndpoint(endpoint, ticket, {
+					clientLabel: "pair stream abort client",
+				});
+				const prompt = await readRawRpcResponse(
+					rawClient,
+					{ id: "prompt-abort", type: "prompt", message: "abortable streaming prompt" },
+					"pair stream abort prompt response",
+				);
+				assert(prompt.event.success === true, `Expected prompt to start, got:\n${prompt.lines.join("\n")}`);
+
+				let sawTextDelta = false;
+				for (let index = 0; index < 20; index += 1) {
+					const { event } = await readRawRpcEvent(rawClient, "pair stream abort text delta");
+					if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
+						sawTextDelta = true;
+						break;
+					}
+				}
+				assert(sawTextDelta, "Expected prompt stream to produce a text delta before abort");
+
+				const abort = await readRawRpcResponse(
+					rawClient,
+					{ id: "abort-stream", type: "abort" },
+					"pair stream abort response",
+				);
+				assert(abort.event.success === true, `Expected abort success, got:\n${abort.lines.join("\n")}`);
+
+				const postAbortEvents = abort.lines.map((line) => JSON.parse(line));
+				let postAbortTextDeltaCount = postAbortEvents.filter(
+					(event) => event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta",
+				).length;
+				let agentEnd = postAbortEvents.find((event) => event.type === "agent_end");
+				for (let index = 0; !agentEnd && index < 20; index += 1) {
+					const { event } = await readRawRpcEvent(rawClient, "pair stream abort completion");
+					if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
+						postAbortTextDeltaCount += 1;
+					}
+					if (event.type === "agent_end") agentEnd = event;
+				}
+				assert(agentEnd, "Expected aborted prompt to finish with agent_end");
+				assert(postAbortTextDeltaCount === 0, "Expected no text deltas after abort acknowledgement");
+				assert(
+					agentEnd.messages?.[0]?.stopReason === "aborted",
+					`Expected aborted stopReason, got:\n${JSON.stringify(agentEnd)}`,
+				);
+
+				closeRawConnection(rawClient.connection);
+				rawClient = undefined;
+				await waitForExit(host.child, "pair stream abort host", host.output);
+			} finally {
+				closeRawConnection(rawClient?.connection);
+				rawClient = undefined;
+				await stopProcess(host.child);
+			}
+
+			const reconnectHost = startHost(["--state", hostStatePath, "--no-pairing", "--once"]);
+			try {
+				const reconnectTicket = await waitForFirstStdoutLine(
+					reconnectHost.child,
+					reconnectHost.output,
+					"pair stream abort reconnect host",
+				);
+				rawClient = await openRawAuthorizedClientOnEndpoint(endpoint, reconnectTicket, {
+					clientLabel: "pair stream abort client",
+				});
+				const state = await readRawRpcResponse(
+					rawClient,
+					{ id: "state-after-relaunch", type: "get_state" },
+					"pair stream abort reconnect get_state",
+				);
+				assert(state.event.success === true, `Expected reconnect get_state success, got:\n${state.lines.join("\n")}`);
+				assert(
+					state.event.data?.remoteHost?.hostNodeId,
+					`Expected reconnect get_state to include remoteHost metadata, got:\n${JSON.stringify(state.event)}`,
+				);
+				closeRawConnection(rawClient.connection);
+				rawClient = undefined;
+				await waitForExit(reconnectHost.child, "pair stream abort reconnect host", reconnectHost.output);
+			} finally {
+				closeRawConnection(rawClient?.connection);
+				rawClient = undefined;
+				await stopProcess(reconnectHost.child);
+			}
+		} finally {
+			closeRawConnection(rawClient?.connection);
+			await endpoint.close();
+		}
+	});
+}
+
 async function halfClosedSourceVoltPromptScenario() {
 	await withStateDir("source-half-close", async ({ hostStatePath, stateDir }) => {
 		const { sourceDir } = await createFakeSourceVolt(stateDir);
@@ -952,6 +1070,15 @@ async function integratedVoltGetStateScenario() {
 				response.data?.model?.provider === "iroh-integrated-test" &&
 					response.data?.model?.id === "fake-integrated",
 				`Expected integrated fake model state, got:\n${JSON.stringify(response)}`,
+			);
+			assert(
+				response.data?.remoteHost?.workspace === "integrated" &&
+					response.data?.remoteHost?.hostNodeId &&
+					response.data?.remoteHost?.relayMode === "disabled" &&
+					response.data?.remoteHost?.hostName &&
+					response.data?.remoteHost?.userName &&
+					response.data?.remoteHost?.cwd === "/workspace",
+				`Expected integrated remote host metadata, got:\n${JSON.stringify(response.data?.remoteHost)}`,
 			);
 
 			const auditEvents = await readAuditEvents(getDefaultAuditPath(hostStatePath));
@@ -1334,6 +1461,12 @@ async function getStateScenario() {
 		const state = JSON.parse(clientOutput.stdout);
 		assert(state.model.provider === "iroh-poc", `Expected fake provider state, got:\n${clientOutput.stdout}`);
 		assert(state.sessionName === "Iroh PoC fake RPC", `Expected fake session state, got:\n${clientOutput.stdout}`);
+		assert(state.remoteHost?.workspace, `Expected remote host workspace, got:\n${clientOutput.stdout}`);
+		assert(state.remoteHost?.hostNodeId, `Expected remote host node id, got:\n${clientOutput.stdout}`);
+		assert(state.remoteHost?.relayMode === "disabled", `Expected remote host relay mode, got:\n${clientOutput.stdout}`);
+		assert(state.remoteHost?.hostName, `Expected remote host name, got:\n${clientOutput.stdout}`);
+		assert(state.remoteHost?.userName, `Expected remote host user, got:\n${clientOutput.stdout}`);
+		assert(state.remoteHost?.cwd === "/workspace", `Expected remote host cwd, got:\n${clientOutput.stdout}`);
 	});
 }
 
@@ -1853,6 +1986,7 @@ async function missingWorkspaceScenario() {
 const scenarios = [
 	["prompt round trip", promptRoundTripScenario],
 	["raw half-close prompt", rawHalfClosePromptScenario],
+	["pair stream abort relaunch reconnect", pairStreamAbortRelaunchReconnectScenario],
 	["source Volt half-close prompt", halfClosedSourceVoltPromptScenario],
 	["source Volt handled half-close prompt", halfClosedSourceVoltHandledPromptScenario],
 	["source Volt retry-cancelled half-close prompt", halfClosedSourceVoltRetryCancelledScenario],

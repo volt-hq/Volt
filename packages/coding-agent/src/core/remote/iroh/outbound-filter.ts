@@ -21,12 +21,14 @@ const STRICT_REMOTE_PATH_FIELDS = new Set([
 ]);
 
 export interface IrohRemoteOutboundFilterOptions {
+	decorate?: IrohRemoteOutboundValueDecorator;
 	remoteWorkspacePath?: string;
 	transport: RpcTransport;
 	workspacePath: string;
 }
 
 export interface IrohRemoteOutboundSanitizerOptions {
+	decorate?: IrohRemoteOutboundValueDecorator;
 	remoteWorkspacePath?: string;
 	workspacePath: string;
 }
@@ -42,10 +44,13 @@ interface IrohRemoteOutboundSanitizerContext {
 	workspacePathVariants: string[];
 }
 
+export type IrohRemoteOutboundValueDecorator = (value: object) => object;
+
 type PathContinuationMode = "text" | "delimited";
 
 export function createIrohRemoteOutboundFilteredRpcTransport(options: IrohRemoteOutboundFilterOptions): RpcTransport {
 	const sanitizerOptions: IrohRemoteOutboundSanitizerOptions = {
+		decorate: options.decorate,
 		remoteWorkspacePath: options.remoteWorkspacePath,
 		workspacePath: options.workspacePath,
 	};
@@ -73,7 +78,8 @@ export function createIrohRemoteOutboundFilteredRpcTransport(options: IrohRemote
 
 export function sanitizeIrohRemoteOutbound(value: object, options: IrohRemoteOutboundSanitizerOptions): object {
 	const context = createSanitizerContext(options);
-	const sanitized = sanitizeValue(value, context, undefined);
+	const decorated = options.decorate ? options.decorate(value) : value;
+	const sanitized = sanitizeValue(decorated, context, undefined);
 	return isRecord(sanitized) || Array.isArray(sanitized) ? sanitized : {};
 }
 
@@ -90,7 +96,8 @@ export function sanitizeIrohRemoteOutboundJsonLine(line: string, options: IrohRe
 	if (!isRecord(parsed) && !Array.isArray(parsed)) {
 		return `${sanitizeRemoteText(rawLine, context)}${hasTrailingNewline ? "\n" : ""}`;
 	}
-	const sanitized = sanitizeValue(parsed, context, undefined);
+	const decorated = options.decorate ? options.decorate(parsed) : parsed;
+	const sanitized = sanitizeValue(decorated, context, undefined);
 	return `${JSON.stringify(sanitized)}${hasTrailingNewline ? "\n" : ""}`;
 }
 

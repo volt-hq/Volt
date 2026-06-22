@@ -82,6 +82,7 @@ export {
 	type IrohRemoteOutboundFilterOptions,
 	type IrohRemoteOutboundJsonlReadablePipeOptions,
 	type IrohRemoteOutboundSanitizerOptions,
+	type IrohRemoteOutboundValueDecorator,
 	pipeIrohRemoteOutboundJsonlReadable,
 	sanitizeIrohRemoteOutbound,
 	sanitizeIrohRemoteOutboundJsonLine,

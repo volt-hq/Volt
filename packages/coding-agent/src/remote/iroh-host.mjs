@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { constants } from "node:fs";
 import { access, mkdir, realpath, rm, stat } from "node:fs/promises";
 import { connect as connectNet, createServer } from "node:net";
+import { hostname, userInfo } from "node:os";
 import { fileURLToPath } from "node:url";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -630,6 +631,48 @@ function createIrohSendQueue(send) {
 	};
 }
 
+function getCurrentUserName() {
+	try {
+		return userInfo().username;
+	} catch {
+		return process.env.USER ?? process.env.USERNAME;
+	}
+}
+
+function createRemoteHostMetadata(authorization, options) {
+	return {
+		workspace: authorization.workspace.name,
+		hostNodeId: options.hostNodeId,
+		relayMode: options.relayMode,
+		hostName: hostname(),
+		userName: getCurrentUserName(),
+		cwd: "/workspace",
+	};
+}
+
+function decorateRemoteHostState(value, authorization, options) {
+	if (
+		typeof value !== "object" ||
+		value === null ||
+		Array.isArray(value) ||
+		value.type !== "response" ||
+		value.command !== "get_state" ||
+		value.success !== true ||
+		typeof value.data !== "object" ||
+		value.data === null ||
+		Array.isArray(value.data)
+	) {
+		return value;
+	}
+	return {
+		...value,
+		data: {
+			...value.data,
+			remoteHost: createRemoteHostMetadata(authorization, options),
+		},
+	};
+}
+
 function createRemoteRpcCompletionTracker(sendQueue) {
 	let clientInputEnded = false;
 	let pendingPromptCompletions = 0;
@@ -907,6 +950,7 @@ async function runSpawnedRpcConnection(stream, handshake, authorization, options
 		throw error;
 	});
 	const childToClient = pipeIrohRemoteOutboundJsonlReadable(child.stdout, {
+		decorate: (value) => decorateRemoteHostState(value, authorization, options),
 		workspacePath: authorization.workspace.path,
 		writeLine: (line) => sendQueue.write(line),
 		onLine: (line) => {
@@ -980,6 +1024,7 @@ async function runIntegratedVoltConnection(stream, handshake, authorization, opt
 	try {
 		await writeIrohRemoteHandshakeResponse(stream.send, handshake.response);
 		const rpcMode = runIrohRemoteRpcMode(runtime, {
+			decorateOutbound: (value) => decorateRemoteHostState(value, authorization, options),
 			stream,
 			initialInput: handshake.initialInput,
 			workspacePath: authorization.workspace.path,
@@ -1480,6 +1525,7 @@ async function serve(flags) {
 		integratedVolt: hasFlag(flags, "integrated-volt"),
 		profile: getFlag(flags, "profile"),
 		relayMode,
+		hostNodeId: undefined,
 		projectTrusted: hasFlag(flags, "approve"),
 		ticketExpiresAt,
 		once: hasFlag(flags, "once"),
@@ -1500,6 +1546,7 @@ async function serve(flags) {
 	Object.assign(workspace, await stateManager.upsertWorkspace(workspace, allowTools));
 
 	const endpoint = await bindEndpoint(relayMode, state, statePath);
+	options.hostNodeId = endpoint.id().toString();
 	const hostEngine = new IrohRemoteHostEngine({
 		allowTools,
 		auditLogger,

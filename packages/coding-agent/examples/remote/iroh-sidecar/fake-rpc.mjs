@@ -34,7 +34,9 @@ function usage() {
 	};
 }
 
-function textMessage(text) {
+let activePrompt;
+
+function textMessage(text, stopReason = "stop") {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text }],
@@ -42,7 +44,7 @@ function textMessage(text) {
 		provider: "iroh-poc",
 		model: "fake",
 		usage: usage(),
-		stopReason: "stop",
+		stopReason,
 		timestamp: Date.now(),
 	};
 }
@@ -50,30 +52,43 @@ function textMessage(text) {
 async function writePromptResponse(command) {
 	const responseText = `fake RPC response over Iroh: ${command.message}`;
 	const message = textMessage(responseText);
+	const prompt = { aborted: false };
+	activePrompt = prompt;
 
-	write({ id: command.id, type: "response", command: "prompt", success: true });
-	write({ type: "agent_start" });
-	write({ type: "turn_start" });
-	write({ type: "message_start", message });
+	try {
+		write({ id: command.id, type: "response", command: "prompt", success: true });
+		write({ type: "agent_start" });
+		write({ type: "turn_start" });
+		write({ type: "message_start", message });
 
-	for (const word of responseText.split(/(\s+)/)) {
-		if (word.length === 0) continue;
-		write({
-			type: "message_update",
-			message,
-			assistantMessageEvent: {
-				type: "text_delta",
-				contentIndex: 0,
-				delta: word,
-				partial: message,
-			},
-		});
-		await new Promise((resolve) => setTimeout(resolve, 20));
+		for (const word of responseText.split(/(\s+)/)) {
+			if (prompt.aborted) {
+				const abortedMessage = { ...message, stopReason: "aborted" };
+				write({ type: "message_end", message: abortedMessage });
+				write({ type: "turn_end", message: abortedMessage, toolResults: [] });
+				write({ type: "agent_end", messages: [abortedMessage] });
+				return;
+			}
+			if (word.length === 0) continue;
+			write({
+				type: "message_update",
+				message,
+				assistantMessageEvent: {
+					type: "text_delta",
+					contentIndex: 0,
+					delta: word,
+					partial: message,
+				},
+			});
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+
+		write({ type: "message_end", message });
+		write({ type: "turn_end", message, toolResults: [] });
+		write({ type: "agent_end", messages: [message] });
+	} finally {
+		if (activePrompt === prompt) activePrompt = undefined;
 	}
-
-	write({ type: "message_end", message });
-	write({ type: "turn_end", message, toolResults: [] });
-	write({ type: "agent_end", messages: [message] });
 }
 
 function writeStateResponse(command) {
@@ -125,6 +140,7 @@ async function handleLine(line) {
 	}
 
 	if (command.type === "abort") {
+		if (activePrompt) activePrompt.aborted = true;
 		write({ id: command.id, type: "response", command: "abort", success: true });
 		return;
 	}

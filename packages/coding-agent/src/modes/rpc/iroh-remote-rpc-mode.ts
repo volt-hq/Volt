@@ -2,6 +2,7 @@ import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
 	createIrohRemoteOutboundFilteredRpcTransport,
+	type IrohRemoteOutboundValueDecorator,
 } from "../../core/remote/iroh/index.ts";
 import {
 	createIrohRpcTransport,
@@ -13,6 +14,7 @@ import {
 import { runRpcMode } from "./rpc-mode.ts";
 
 export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
+	decorateOutbound?: IrohRemoteOutboundValueDecorator;
 	remoteWorkspacePath?: string;
 	workspacePath: string;
 }
@@ -43,6 +45,7 @@ export function runIrohRemoteRpcMode(
 		transport: createIrohRemoteFilteredRpcTransport({
 			transport: createIrohRemoteCloseDeferringRpcTransport({
 				transport: createIrohRemoteOutboundFilteredRpcTransport({
+					decorate: options.decorateOutbound,
 					remoteWorkspacePath: options.remoteWorkspacePath,
 					transport: createIrohRpcTransport(options),
 					workspacePath: options.workspacePath,
