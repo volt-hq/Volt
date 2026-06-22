@@ -73,11 +73,11 @@ volt remote host --workspace volt=C:\Users\Jordan\source\repos\Volt
 The host process:
 
 1. Creates or loads a persistent Iroh endpoint key. The current host stores this as `hostSecretKey` in `~/.volt/agent/remote/iroh-host.json`.
-2. Validates the selected workspace path, plus any requested child RPC executable before printing a ticket.
+2. Validates the selected workspace path, plus any requested child RPC executable before creating or printing a ticket.
 3. Starts an Iroh endpoint. The current bare host defaults to disabled relay for local tests; `--mobile` defaults to Iroh's default relay/discovery preset for mobile-facing setup; `--relay disabled` remains the explicit LAN-only opt-out.
-4. Prints a pairing ticket QR code when stderr is a TTY, plus the text ticket for copy/paste and scripting.
+4. Prints a startup pairing ticket QR code for the bare preview CLI when stderr is a TTY, plus the text ticket for copy/paste and scripting. Mobile-facing `--mobile` startup does not create or print a startup pairing ticket; adding a phone uses `volt remote pair` against the running host.
 5. Accepts client connections until stopped, or exits after the first disconnect when `--once` is set.
-6. Validates the pairing secret.
+6. Validates the pairing secret for new clients, or the paired client node ID for reconnecting clients.
 7. Runs Volt in-process by default, or spawns the configured RPC child in the selected workspace for compatibility and fake-RPC tests.
 8. Pipes Iroh stream bytes to the selected RPC runtime.
 9. Writes host diagnostics and prefixed child stderr, when a child process is used, to stderr.
@@ -201,7 +201,7 @@ Suggested shape:
 
 The host state file also persists `hostSecretKey`, consumed pairing secret hashes, pending pairing ticket hashes plus non-secret metadata, and per-client last session IDs. It does not persist raw pairing secrets. `volt remote status` prints a secret-free persisted-state view. Preview does not store relay mode in the persisted state; the running host owns the live relay mode, tickets include a relay hint, and `volt remote pair --relay <disabled|default>` can be used as an expected-live-mode check when needed.
 
-Bare `volt remote host` keeps relay mode disabled for same-machine and same-LAN preview workflows. Mobile-facing host startup uses `volt remote host --mobile`, which emits tickets with `relayMode: "default"` unless `--relay disabled` is supplied as an explicit LAN-only opt-out.
+Bare `volt remote host` keeps relay mode disabled for same-machine and same-LAN preview workflows. Mobile-facing host startup uses `volt remote host --mobile`, which starts with relay/discovery mode `"default"` and does not create a startup pairing ticket. `volt remote pair` creates tickets with the running host's relay mode, unless `--relay disabled` is supplied as an explicit LAN-only expectation check.
 
 ## CLI UX
 
@@ -211,7 +211,7 @@ Supported preview commands:
 # Start a host for one saved workspace.
 volt remote host --workspace volt=/path/to/repo --yes
 
-# Start a mobile-facing host that defaults tickets to relay/discovery mode.
+# Start a mobile-facing host. It does not create a startup pairing ticket.
 volt remote host --mobile --workspace volt=/path/to/repo --yes
 
 # Ask the running host for a short-lived one-time pairing ticket.
@@ -288,6 +288,7 @@ Preview validation:
 - Verify spawned child process mode exits when the Iroh stream closes.
 - Verify unpaired clients are rejected.
 - Verify a missing workspace path or Volt executable fails before printing a pairing ticket.
+- Verify mobile-facing host startup creates no pending pairing ticket until `volt remote pair` is run.
 - Verify a client cannot request a workspace outside the host allowlist.
 
 Automated tests for a monorepo version:
@@ -321,6 +322,7 @@ Resolved preview decisions:
 - Remote clients use the default tool grant (`read,bash,edit,write,grep,find,ls`) unless configured otherwise, and keep their pair-time tool grant on reconnect.
 - Remote outbound state/events normalize workspace paths to `/workspace` and redact host-only session, export, bash-output, and arbitrary absolute host paths.
 - Pairing is workspace-bound by saved workspace name; clients cannot request arbitrary host paths.
+- Mobile-facing host startup skips startup pairing; Pair Phone is the explicit `volt remote pair` path.
 - Transport close is detach, not cancel; remote cancellation is the `abort` RPC command.
 - Spawned child compatibility mode remains connection-scoped, while integrated runtime mode is the supported active-work detach path.
 - Host process exit is not durable recovery; only persisted session state can be recovered after restarting the host.

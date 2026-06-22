@@ -199,7 +199,7 @@ function printUsage() {
 
 Serve options:
   --workspace <name=path>    Workspace exposed to the client. Defaults to saved workspace or cwd.
-  --mobile                   Mobile-facing host mode. Defaults relay to default unless --relay is supplied.
+  --mobile                   Mobile-facing host mode. Defaults relay to default and skips startup pairing.
   --relay <disabled|default> Iroh relay preset. Defaults to disabled, or default with --mobile.
   --state <path>             Host state path. Defaults to ~/.volt/agent/remote/iroh-host.json.
   --audit <path>             Host audit JSONL path. Defaults to <state>.audit.jsonl.
@@ -1756,6 +1756,16 @@ function getRelayMode(flags) {
 	return relayMode;
 }
 
+function getStartupTicketMode(flags) {
+	if (hasFlag(flags, "no-pairing")) {
+		return "paired-client";
+	}
+	if (hasFlag(flags, "mobile")) {
+		return "none";
+	}
+	return "pairing";
+}
+
 async function serve(flags) {
 	ensureIrohAvailable();
 	const statePath = resolve(getFlag(flags, "state", DEFAULT_STATE_PATH));
@@ -1766,9 +1776,12 @@ async function serve(flags) {
 	const workspace = selectIrohRemoteWorkspace(state, getFlag(flags, "workspace"), allowTools, process.cwd());
 
 	const relayMode = getRelayMode(flags);
-	const pairingEnabled = !hasFlag(flags, "no-pairing");
+	const startupTicketMode = getStartupTicketMode(flags);
+	const startupPairingEnabled = startupTicketMode === "pairing";
 	const sourceVolt = getFlag(flags, "source-volt");
-	const ticketExpiresAt = pairingEnabled ? Date.now() + DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS : undefined;
+	const ticketExpiresAt = startupPairingEnabled
+		? Date.now() + DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS
+		: undefined;
 	const options = {
 		activeConnections: new Map(),
 		agentDir: getFlag(flags, "agent-dir"),
@@ -1793,7 +1806,7 @@ async function serve(flags) {
 	await confirmUnsafeRemoteToolGrant({
 		allowTools,
 		auditLogger,
-		context: pairingEnabled ? "host_startup_pairing" : "host_startup",
+		context: startupPairingEnabled ? "host_startup_pairing" : "host_startup",
 		workspaceName: workspace.name,
 		yes: hasFlag(flags, "yes"),
 	});
@@ -1811,16 +1824,22 @@ async function serve(flags) {
 	});
 	options.hostEngine = hostEngine;
 	const endpointTicket = EndpointTicket.fromAddr(endpoint.addr()).toString();
-	const ticket = pairingEnabled
-		? (
-				await hostEngine.pair({
-					expiresAt: ticketExpiresAt,
-					irohTicket: endpointTicket,
-					nodeId: endpoint.id().toString(),
-					relayMode,
-				})
-			).ticket
-		: encodeIrohRemoteTicketPayload(createTicketPayload(endpoint, options, false));
+	let ticket;
+	let ticketLabel;
+	if (startupTicketMode === "pairing") {
+		ticket = (
+			await hostEngine.pair({
+				expiresAt: ticketExpiresAt,
+				irohTicket: endpointTicket,
+				nodeId: endpoint.id().toString(),
+				relayMode,
+			})
+		).ticket;
+		ticketLabel = "pairing ticket";
+	} else if (startupTicketMode === "paired-client") {
+		ticket = encodeIrohRemoteTicketPayload(createTicketPayload(endpoint, options, false));
+		ticketLabel = "paired-client ticket";
+	}
 	const controlServer = await startPairControlServer(endpoint, options);
 
 	console.error(`host id: ${endpoint.id().toString()}`);
@@ -1831,8 +1850,12 @@ async function serve(flags) {
 	console.error(
 		`child: ${options.integratedVolt ? "in-process volt remote host" : options.sourceVolt ? `${process.execPath} ${options.resolvedSourceVoltRunner} --mode rpc` : options.useVolt ? `${options.resolvedVoltBin ?? getPlatformVoltBin(options.voltBin)} --mode rpc` : "fake-rpc"}`,
 	);
-	console.error(`pairing: ${pairingEnabled ? "enabled" : "disabled"}`);
-	printTicket(ticket, pairingEnabled ? "pairing ticket" : "paired-client ticket");
+	console.error(`pairing: ${startupPairingEnabled ? "enabled" : "disabled"}`);
+	if (ticket !== undefined && ticketLabel !== undefined) {
+		printTicket(ticket, ticketLabel);
+	} else {
+		console.error("startup ticket: disabled; run `volt remote pair` to create a pairing ticket.");
+	}
 
 	try {
 		while (true) {

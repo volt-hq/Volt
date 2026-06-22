@@ -63,6 +63,7 @@ Supported preview safety model:
 - The default remote tool allowlist includes the built-in coding tools: `read,bash,edit,write,grep,find,ls`.
 - Pairing tickets are short-lived, one-time credentials. Persisted state stores secret hashes and non-secret metadata, not raw pairing secrets.
 - Pairing through `volt remote pair` requires a running host control channel; offline ticket generation from persisted state is not supported.
+- Mobile-facing `volt remote host --mobile` startup does not create an active pairing ticket. Add phones explicitly with `volt remote pair`.
 - Paired clients are persisted until revoked with `volt remote revoke <node-id>`.
 - Revocation removes future access from persisted state and asks a live host to close matching active connections when one is reachable.
 - In the default integrated runtime, Iroh stream close is detach, not cancellation. Active work can continue on the host until it finishes or an authorized client sends `abort`.
@@ -78,7 +79,7 @@ Remote host support requires a Node.js npm package install or source checkout wi
 
 Host process exit, host crash, or explicit host shutdown stops in-memory work; remote access does not provide durable job recovery beyond persisted session state. Spawned child compatibility modes through `--use-volt` or `--source-volt` are connection-scoped and can stop the child on disconnect.
 
-Bare `volt remote host` uses `--relay disabled` for same-machine and same-LAN preview workflows. Use `volt remote host --mobile` for mobile-facing setup; it defaults tickets to relay/discovery mode `"default"` unless the host user explicitly opts out with `--relay disabled` for LAN-only use. Use `--relay default` when validating access across networks.
+Bare `volt remote host` uses `--relay disabled` for same-machine and same-LAN preview workflows. Use `volt remote host --mobile` for mobile-facing setup; it starts the host in relay/discovery mode `"default"` without creating a startup pairing invite. Use `volt remote pair` to create pairing tickets, and use `--relay disabled` only when the host user explicitly chooses LAN-only mode. Use `--relay default` when validating access across networks.
 
 See [Using Volt](usage.md#remote-access-over-iroh-preview) for copy-pastable commands and [Iroh remote protocol v1](iroh-remote-protocol.md) for the external client contract.
 

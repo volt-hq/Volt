@@ -200,6 +200,7 @@ Pairing QR codes should not be:
 - reused as permanent credentials
 - required for every app launch
 - required for reconnect after host restart
+- created merely because a mobile-facing host service started
 - usable after the phone has already paired and saved the host
 
 ## Pairing Transaction Boundary
@@ -259,7 +260,7 @@ The relay default scope is:
 
 Mobile-facing tickets should include `relayMode: "default"` so the iOS app binds with compatible Iroh options. LAN-only tickets should include `relayMode: "disabled"` and be treated as an explicit advanced/local configuration.
 
-Implemented 2026-06-22: `volt remote host --mobile` defaults the running host and emitted startup/control-channel tickets to `relayMode: "default"`. Bare `volt remote host` continues to default tickets to `relayMode: "disabled"`, and explicit `--relay disabled` overrides `--mobile` for LAN-only setup.
+Implemented 2026-06-22: `volt remote host --mobile` defaults the running host and explicit control-channel pair tickets to `relayMode: "default"` without emitting a startup ticket. Bare `volt remote host` continues to default startup tickets to `relayMode: "disabled"`, and explicit `--relay disabled` overrides `--mobile` for LAN-only setup.
 
 ## Local Development Guidance
 
@@ -420,6 +421,7 @@ Handshake success responses should include the authoritative `hostNodeId` and `c
    - Treat QR generation as an explicit "Pair phone" action.
    - Add or polish `volt remote pair` for generating new pairing QR codes from a running host.
    - Keep existing clients authorized through saved state.
+   - Implemented 2026-06-22: `volt remote host --mobile` starts without creating or printing a startup pairing ticket; `volt remote pair` creates the Pair Phone ticket from the running host. Bare preview `volt remote host` keeps its startup pairing ticket for local preview compatibility.
 
 5. Improve status and diagnostics.
    - Host should expose paired device list and revoke controls.
@@ -445,8 +447,8 @@ Host/core tests:
 - Verified reconnect refreshes non-secret discovery fields without changing `hostNodeId`.
 - Malformed saved-host records missing required v1 fields map to `saved_host_invalid`.
 - Bare `volt remote host` keeps relay mode disabled by default.
-- Mobile-facing host/profile startup emits tickets with `relayMode: "default"` unless explicitly opted out.
-- Explicit LAN-only opt-out emits tickets with `relayMode: "disabled"`.
+- Mobile-facing host/profile startup creates no pending startup ticket, while explicit Pair Phone tickets use `relayMode: "default"` unless explicitly opted out.
+- Explicit LAN-only opt-out tickets use `relayMode: "disabled"`.
 - `volt remote pair --relay default` validates that the running host is relay-capable.
 - Retry from the same phone node ID after host commit can recover even if the app has not saved `SavedHostRecord` yet.
 - Host response-write failure after client commit keeps the client paired and the secret consumed.
@@ -500,6 +502,8 @@ Resolved 2026-06-22: bare `volt remote host` keeps its existing `--relay disable
 Only when the user chooses "Pair phone".
 
 The QR is a temporary invite for adding a new device. Printing it every startup makes pairing look like a required reconnect step and creates unnecessary active invites. Startup can show that no phone is paired yet and offer a "Pair phone" action, but QR generation should be tied to that explicit user action.
+
+Resolved 2026-06-22: mobile-facing `volt remote host --mobile` now follows this product rule by starting without a startup pairing ticket. `volt remote pair` is the explicit Pair Phone action path. The bare preview CLI remains compatible and still prints a startup pairing ticket unless `--mobile` or `--no-pairing` changes that startup mode.
 
 ### Should saved reconnect use the current endpoint ticket format, or do we need a more stable host identity/discovery ticket for stronger restart/network-change behavior?
 

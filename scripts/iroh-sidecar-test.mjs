@@ -145,6 +145,20 @@ async function waitForFirstStdoutLine(child, output, label) {
 	throw new Error(`${label} did not print a ticket within ${TICKET_TIMEOUT_MS}ms:\n${output.stderr}`);
 }
 
+async function waitForHostReady(child, output, label) {
+	const startedAt = Date.now();
+	while (Date.now() - startedAt < TICKET_TIMEOUT_MS) {
+		if (/(^|\n)control: /.test(output.stderr)) {
+			return;
+		}
+		if (child.exitCode !== null) {
+			throw new Error(`${label} exited before becoming ready:\n${output.stderr}`);
+		}
+		await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+	}
+	throw new Error(`${label} was not ready within ${TICKET_TIMEOUT_MS}ms:\n${output.stderr}`);
+}
+
 async function stopProcess(child) {
 	if (child.exitCode !== null) return;
 	child.kill();
@@ -841,6 +855,12 @@ async function readStartupTicketPayload({ hostArgs, hostStatePath, label }) {
 	} finally {
 		await stopProcess(host.child);
 	}
+}
+
+async function assertNoPendingPairingTickets(hostStatePath, label) {
+	const state = JSON.parse(await readFile(hostStatePath, "utf8"));
+	const pendingTicketCount = state.pendingPairingTickets?.length ?? 0;
+	assert(pendingTicketCount === 0, `${label} created ${pendingTicketCount} pending pairing ticket(s)`);
 }
 
 async function expectHostClientFailure({ clientArgs, clientStatePath, hostArgs, hostStatePath, label }) {
@@ -1970,18 +1990,39 @@ async function relayDefaultPolicyScenario() {
 			`Expected bare host ticket relay disabled, got:\n${JSON.stringify(barePayload)}`,
 		);
 
-		const mobilePayload = await readStartupTicketPayload({
-			hostArgs: ["--mobile", "--once"],
-			hostStatePath: join(stateDir, "mobile-host.json"),
-			label: "mobile relay policy",
+		const mobileStatePath = join(stateDir, "mobile-host.json");
+		const mobileHost = startHost(["--state", mobileStatePath, "--mobile"]);
+		try {
+			await waitForHostReady(mobileHost.child, mobileHost.output, "mobile relay policy host");
+			assert(
+				mobileHost.output.stdout.trim() === "",
+				`Expected mobile startup to avoid printing a ticket, got:\n${mobileHost.output.stdout}`,
+			);
+			assert(
+				mobileHost.output.stderr.includes("startup ticket: disabled"),
+				`Expected mobile startup ticket diagnostic, got:\n${mobileHost.output.stderr}`,
+			);
+			await assertNoPendingPairingTickets(mobileStatePath, "mobile startup");
+		} finally {
+			await stopProcess(mobileHost.child);
+		}
+
+		const mobileNoPairingPayload = await readStartupTicketPayload({
+			hostArgs: ["--mobile", "--no-pairing", "--once"],
+			hostStatePath: join(stateDir, "mobile-no-pairing-host.json"),
+			label: "mobile no-pairing relay policy",
 		});
 		assert(
-			mobilePayload.relayMode === "default",
-			`Expected mobile host ticket relay default, got:\n${JSON.stringify(mobilePayload)}`,
+			mobileNoPairingPayload.relayMode === "default",
+			`Expected explicit mobile paired-client ticket relay default, got:\n${JSON.stringify(mobileNoPairingPayload)}`,
+		);
+		assert(
+			mobileNoPairingPayload.secret === undefined && mobileNoPairingPayload.expiresAt === undefined,
+			`Expected explicit mobile paired-client ticket to omit pairing secret, got:\n${JSON.stringify(mobileNoPairingPayload)}`,
 		);
 
 		const optOutPayload = await readStartupTicketPayload({
-			hostArgs: ["--mobile", "--relay", "disabled", "--once"],
+			hostArgs: ["--mobile", "--relay", "disabled", "--no-pairing", "--once"],
 			hostStatePath: join(stateDir, "mobile-opt-out-host.json"),
 			label: "mobile relay opt-out policy",
 		});
@@ -1993,21 +2034,22 @@ async function relayDefaultPolicyScenario() {
 		const workspacePath = join(stateDir, "workspace");
 		await mkdir(workspacePath, { recursive: true });
 		const pairStatePath = join(stateDir, "mobile-pair-host.json");
+		const clientStatePath = join(stateDir, "mobile-client.json");
 		const host = startHost([
 			"--state",
 			pairStatePath,
 			"--mobile",
-			"--no-pairing",
 			"--workspace",
 			`mobile=${workspacePath}`,
 		]);
+		let pairTicket;
 		try {
-			const startupTicket = await waitForFirstStdoutLine(host.child, host.output, "mobile pair relay policy host");
-			const startupPayload = decodeTicketPayload(startupTicket);
+			await waitForHostReady(host.child, host.output, "mobile explicit pair host");
 			assert(
-				startupPayload.relayMode === "default",
-				`Expected mobile paired-client ticket relay default, got:\n${JSON.stringify(startupPayload)}`,
+				host.output.stdout.trim() === "",
+				`Expected explicit mobile pair host startup to avoid printing a ticket, got:\n${host.output.stdout}`,
 			);
+			await assertNoPendingPairingTickets(pairStatePath, "mobile explicit pair startup");
 			const pairCommand = spawnSourceCli([
 				"remote",
 				"pair",
@@ -2021,15 +2063,51 @@ async function relayDefaultPolicyScenario() {
 				"mobile client",
 			]);
 			await waitForExit(pairCommand.child, "mobile relay policy pair command", pairCommand.output);
-			const pairTicket = pairCommand.output.stdout.trim();
+			pairTicket = pairCommand.output.stdout.trim();
 			assert(pairTicket.startsWith(TICKET_PREFIX), `Expected pair command ticket, got:\n${pairCommand.output.stdout}`);
 			const pairPayload = decodeTicketPayload(pairTicket);
 			assert(
 				pairPayload.relayMode === "default",
 				`Expected mobile pair command ticket relay default, got:\n${JSON.stringify(pairPayload)}`,
 			);
+			assert(
+				typeof pairPayload.secret === "string" && pairPayload.secret.length > 0,
+				`Expected mobile pair command ticket to include pairing secret, got:\n${JSON.stringify(pairPayload)}`,
+			);
+			assert(
+				typeof pairPayload.expiresAt === "number",
+				`Expected mobile pair command ticket to include expiry, got:\n${JSON.stringify(pairPayload)}`,
+			);
+			await runClient(pairTicket, clientStatePath, ["--message", "mobile pair", "--timeout-ms", "10000"], {
+				label: "mobile explicit pair client",
+			});
 		} finally {
 			await stopProcess(host.child);
+		}
+
+		const restartHost = startHost([
+			"--state",
+			pairStatePath,
+			"--mobile",
+			"--workspace",
+			`mobile=${workspacePath}`,
+		]);
+		try {
+			await waitForHostReady(restartHost.child, restartHost.output, "mobile reconnect host");
+			assert(
+				restartHost.output.stdout.trim() === "",
+				`Expected mobile restart to avoid printing a ticket, got:\n${restartHost.output.stdout}`,
+			);
+			await assertNoPendingPairingTickets(pairStatePath, "mobile restart");
+			const reconnectPayload = decodeTicketPayload(pairTicket);
+			delete reconnectPayload.secret;
+			delete reconnectPayload.expiresAt;
+			const reconnectTicket = encodeTicketPayload(reconnectPayload);
+			await runClient(reconnectTicket, clientStatePath, ["--message", "mobile reconnect", "--timeout-ms", "10000"], {
+				label: "mobile reconnect client",
+			});
+		} finally {
+			await stopProcess(restartHost.child);
 		}
 	});
 }

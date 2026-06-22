@@ -181,7 +181,7 @@ Happy path:
 
 ```bash
 # Terminal 1: expose one named workspace with an explicit read-only tool subset.
-# The host prints a scannable pairing-ticket QR code when stderr is a TTY.
+# Bare preview hosts print a startup pairing ticket; mobile-facing hosts do not.
 volt remote host --workspace volt=/path/to/repo --allow-tools read,grep,find,ls
 
 # Terminal 2: ask the running host for a short-lived one-time pairing ticket.
@@ -200,6 +200,10 @@ volt remote clients                        # paired client JSON
 volt remote revoke <node-id>               # revoke future access; live hosts also close active connections
 volt remote pair --workspace volt --label "Jordan iPhone"
 volt remote host --workspace volt=/path/to/repo --no-pairing
+
+# Mobile-facing startup does not create a pairing invite; pair explicitly.
+volt remote host --mobile --workspace volt=/path/to/repo --yes
+volt remote pair --workspace volt --label "Jordan iPhone"
 ```
 
 Options to know:
@@ -212,7 +216,7 @@ Security and support boundary:
 
 - The default remote tool allowlist is `read,bash,edit,write,grep,find,ls`.
 - Granting `bash`, `edit`, or `write` can modify host files or run shell commands. TTY host/pair commands require confirmation; noninteractive unsafe grants, including the default grant, require `--yes`.
-- Pairing tickets are short-lived and one-time. `volt remote host` shows the startup ticket as a terminal QR code by default when stderr is a TTY. `volt remote pair` is mediated by a running host control channel; offline pairing from persisted state is not supported.
+- Pairing tickets are short-lived and one-time. Bare preview `volt remote host` shows a startup ticket as a terminal QR code by default when stderr is a TTY. `volt remote host --mobile` starts without an active startup pairing invite; use `volt remote pair` to create the QR/ticket when pairing a phone. `volt remote pair` is mediated by a running host control channel; offline pairing from persisted state is not supported.
 - Remote clients select saved workspace names only. They cannot request arbitrary host paths.
 - Remote sessions do not bypass project trust. Pass `--approve` only when the host user trusts project-local settings/resources for that workspace.
 - In the default integrated runtime, app backgrounding, network loss, or stream close detaches the client and does not send `abort`. Active work continues on the host; the same paired client/workspace can reconnect and refresh with `get_state` and `get_transcript`.
@@ -220,8 +224,8 @@ Security and support boundary:
 - Idle detached integrated runtimes are retained for 30 minutes by default; change this with `--detached-runtime-ttl-ms <ms>`. Host exit, crash, explicit shutdown, or `--once` is not durable recovery for active work.
 - `--use-volt` and `--source-volt` spawned child compatibility modes remain connection-scoped. A disconnect can stop the spawned RPC child and any active in-memory work.
 - Default paths are `~/.volt/agent/remote/iroh-host.json` for state and `~/.volt/agent/remote/iroh-host.audit.jsonl` for audit JSONL.
-- Bare `volt remote host` uses `--relay disabled` for same-machine/LAN preview workflows. `volt remote host --mobile` is the mobile-facing host mode and defaults tickets to `relayMode: "default"` unless `--relay disabled` is supplied as an explicit LAN-only opt-out.
-- `volt remote pair` uses the live host relay mode unless `--relay <disabled|default>` is supplied as an expectation check; it cannot change a running host's relay mode.
+- Bare `volt remote host` uses `--relay disabled` for same-machine/LAN preview workflows. `volt remote host --mobile` is the mobile-facing host mode: it starts in relay/discovery mode `"default"` and skips startup pairing. Use `--relay disabled` only as an explicit LAN-only opt-out.
+- `volt remote pair` creates pairing tickets with the live host relay mode unless `--relay <disabled|default>` is supplied as an expectation check; it cannot change a running host's relay mode.
 - `volt remote host` requires a Node.js npm install or source checkout with optional `@number0/iroh` available for the platform. Bun binary builds reject it because the native Iroh adapter is not bundled.
 
 See [Iroh remote protocol v1](iroh-remote-protocol.md), [Iroh remote access design](iroh-remote-access-design.md), and [Security](security.md#remote-access-over-iroh-preview).

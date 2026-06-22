@@ -103,7 +103,7 @@ function printRemoteCommandHelp(): void {
 
 Host options are forwarded to the integrated Iroh remote host. Common options:
   --workspace <name=path>       Workspace exposed to the client
-  --mobile                      Mobile-facing host mode. Defaults relay to default unless --relay is supplied
+  --mobile                      Mobile-facing host mode. Defaults relay to default and skips startup pairing
   --relay <disabled|default>    Iroh relay preset
   --state <path>                Host state path
   --audit <path>                Host audit JSONL path
@@ -114,7 +114,7 @@ Host options are forwarded to the integrated Iroh remote host. Common options:
   --profile <name>              Volt settings profile
   --agent-dir <path>            Volt agent config directory
   --approve                     Trust project-local Volt settings/resources
-  --no-pairing                  Reject unpaired clients
+  --no-pairing                  Reject unpaired clients and print a paired-client ticket
   --once                        Exit after first client disconnects
   --yes                         Accept unsafe remote tool grants for noninteractive startup
 
