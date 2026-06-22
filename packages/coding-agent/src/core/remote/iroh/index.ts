@@ -99,6 +99,12 @@ export {
 	isIrohRemoteRelayMode,
 } from "./protocol.ts";
 export {
+	createIrohRemoteTicketQrCode,
+	formatIrohRemoteTicketQrCode,
+	type IrohRemoteTicketQrCode,
+	type IrohRemoteTicketQrCodeFormatOptions,
+} from "./qr.ts";
+export {
 	createIrohRemoteRpcErrorResponse,
 	getIrohRemoteRpcFilterResult,
 	IROH_REMOTE_RPC_PASSTHROUGH_TYPES,

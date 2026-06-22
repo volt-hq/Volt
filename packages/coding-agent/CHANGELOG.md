@@ -33,6 +33,7 @@
 - Added `volt remote status` for deterministic persisted Iroh remote host state inspection without printing secrets or secret hashes.
 - Added Iroh remote protocol v1 documentation and compatibility vectors for tickets, handshakes, LF JSONL framing, command filtering, and outbound redaction.
 - Added Iroh remote per-client session tracking so integrated remote reconnects resume the client's previous workspace session when its session file still exists and create/audit a replacement when it is missing.
+- Added terminal QR code rendering for `volt remote host` pairing tickets.
 - Added a self-contained `volt remote host` product entrypoint backed by optional `@number0/iroh`, keeping native Iroh loading isolated from the main CLI.
 - Added transport-backed RPC clients, including an in-memory loopback transport and in-process client helper for running Volt RPC without spawning a subprocess.
 - Added a `swe-pruner.ts` example extension that finds task-relevant excerpts in local files through a local SWE-Pruner service, persists its settings in global or project config, and includes npm scripts for starting and stopping the local service.

@@ -16,6 +16,7 @@ import {
 	DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS,
 	DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS,
 	encodeIrohRemoteTicketPayload,
+	formatIrohRemoteTicketQrCode,
 	getIrohRemoteControlPath,
 	getIrohRemoteRpcFilterResult,
 	getIrohRemoteUnsafeAllowedTools,
@@ -1499,6 +1500,19 @@ function createTicketPayload(endpoint, options, includePairingSecret) {
 	};
 }
 
+function printTicket(ticket, label) {
+	if (process.stderr.isTTY) {
+		try {
+			console.error(`${label} QR:`);
+			console.error(formatIrohRemoteTicketQrCode(ticket));
+		} catch (error) {
+			console.error(`Could not render ${label} QR: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	console.error(`${label}:`);
+	console.log(ticket);
+}
+
 async function serve(flags) {
 	ensureIrohAvailable();
 	const statePath = resolve(getFlag(flags, "state", DEFAULT_STATE_PATH));
@@ -1576,8 +1590,7 @@ async function serve(flags) {
 		`child: ${options.integratedVolt ? "in-process volt remote host" : options.sourceVolt ? `${process.execPath} ${options.resolvedSourceVoltRunner} --mode rpc` : options.useVolt ? `${options.resolvedVoltBin ?? getPlatformVoltBin(options.voltBin)} --mode rpc` : "fake-rpc"}`,
 	);
 	console.error(`pairing: ${pairingEnabled ? "enabled" : "disabled"}`);
-	console.error(pairingEnabled ? "pairing ticket:" : "paired-client ticket:");
-	console.log(ticket);
+	printTicket(ticket, pairingEnabled ? "pairing ticket" : "paired-client ticket");
 
 	try {
 		while (true) {

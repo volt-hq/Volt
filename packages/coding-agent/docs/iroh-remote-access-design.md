@@ -75,7 +75,7 @@ The host process:
 1. Creates or loads a persistent Iroh endpoint key. The current host stores this as `hostSecretKey` in `~/.volt/agent/remote/iroh-host.json`.
 2. Validates the selected workspace path, plus any requested child RPC executable before printing a ticket.
 3. Starts an Iroh endpoint. The current host defaults to disabled relay for local tests; `--relay default` opts into Iroh's default relay/discovery preset.
-4. Prints a pairing ticket as text.
+4. Prints a pairing ticket QR code when stderr is a TTY, plus the text ticket for copy/paste and scripting.
 5. Accepts client connections until stopped, or exits after the first disconnect when `--once` is set.
 6. Validates the pairing secret.
 7. Runs Volt in-process by default, or spawns the configured RPC child in the selected workspace for compatibility and fake-RPC tests.

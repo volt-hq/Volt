@@ -10,9 +10,11 @@ import {
 	createIrohRemoteHandshakeFailure,
 	createIrohRemoteHandshakeSuccess,
 	createIrohRemoteOutboundFilteredRpcTransport,
+	createIrohRemoteTicketQrCode,
 	DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
 	decodeIrohRemoteTicketPayload,
 	encodeIrohRemoteTicketPayload,
+	formatIrohRemoteTicketQrCode,
 	getIrohRemoteRpcFilterResult,
 	getIrohRemoteUnsafeAllowedTools,
 	hashIrohRemotePairingSecret,
@@ -258,6 +260,26 @@ describe("Iroh remote core helpers", () => {
 			"ticket relayMode must be disabled or default",
 		);
 		expect(() => assertIrohRemoteTicketNotExpired(payload, 1001)).toThrow("Pairing ticket has expired");
+	});
+
+	test("renders remote tickets as terminal QR codes", () => {
+		const ticket = "volt+iroh://v1/mock-ticket";
+		const qrCode = createIrohRemoteTicketQrCode(ticket);
+
+		expect(qrCode.version).toBe(2);
+		expect(qrCode.size).toBe(25);
+		expect(qrCode.modules).toHaveLength(qrCode.size);
+		expect(qrCode.modules.every((row) => row.length === qrCode.size)).toBe(true);
+		expect(qrCode.modules[0][0]).toBe(true);
+		expect(qrCode.modules[7][7]).toBe(false);
+		expect(qrCode.modules[qrCode.size - 8][8]).toBe(true);
+
+		const formatted = formatIrohRemoteTicketQrCode(ticket, { margin: 1 });
+
+		expect(formatted.split("\n")).toHaveLength(14);
+		expect(formatted).toContain("\x1b[38;2;0;0;0m");
+		expect(formatted).toContain("▀");
+		expect(formatted.endsWith("\x1b[0m")).toBe(true);
 	});
 
 	test("parses handshakes and creates handshake responses", () => {
@@ -2095,6 +2117,17 @@ describe("Iroh remote core helpers", () => {
 			{ workspacePath },
 		) as { data: string };
 		expect(ordinaryDataSanitized.data).toBe(IROH_REMOTE_REDACTED_HOST_PATH);
+		const spacedRelativeSeparatorSanitized = sanitizeIrohRemoteOutbound(
+			{ message: "Updated Sources / Example.swift, Sources /Example.swift, and Sources/Example.swift" },
+			{ workspacePath },
+		) as { message: string };
+		expect(spacedRelativeSeparatorSanitized.message).toBe(
+			"Updated Sources / Example.swift, Sources /Example.swift, and Sources/Example.swift",
+		);
+		const strictRootPathSanitized = sanitizeIrohRemoteOutbound({ path: "/" }, { workspacePath }) as {
+			path: string;
+		};
+		expect(strictRootPathSanitized.path).toBe(IROH_REMOTE_REDACTED_HOST_PATH);
 
 		const opaqueContentSanitized = sanitizeIrohRemoteOutbound(
 			{

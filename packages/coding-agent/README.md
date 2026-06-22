@@ -515,6 +515,7 @@ Copy-pastable happy path:
 
 ```bash
 # Terminal 1: start a host for one named workspace.
+# The host prints a scannable pairing-ticket QR code when stderr is a TTY.
 volt remote host --workspace volt=/path/to/repo --allow-tools read,grep,find,ls
 
 # Terminal 2: create a pairing ticket from the running host.
@@ -538,7 +539,7 @@ Security defaults and limitations:
 
 - Default remote tools are read-only: `read,grep,find,ls`.
 - Granting `bash`, `edit`, or `write` can modify the host or run shell commands. TTY host/pair commands ask for confirmation; noninteractive unsafe grants require `--yes`.
-- Pairing tickets are short-lived, one-time credentials. `volt remote pair` requires a running host control channel; it does not generate offline tickets from persisted state.
+- Pairing tickets are short-lived, one-time credentials. `volt remote host` shows the startup ticket as a terminal QR code by default when stderr is a TTY. `volt remote pair` requires a running host control channel; it does not generate offline tickets from persisted state.
 - Remote workspaces are selected by saved name, not arbitrary client-provided paths.
 - Remote sessions do not auto-approve project trust. Use `--approve` only when the host user trusts the workspace resources.
 - Default paths are `~/.volt/agent/remote/iroh-host.json` for state and `~/.volt/agent/remote/iroh-host.audit.jsonl` for audit JSONL.

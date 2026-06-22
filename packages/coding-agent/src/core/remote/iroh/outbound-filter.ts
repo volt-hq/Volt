@@ -19,7 +19,6 @@ const STRICT_REMOTE_PATH_FIELDS = new Set([
 	"sessionPath",
 	"traceFile",
 ]);
-
 export interface IrohRemoteOutboundFilterOptions {
 	decorate?: IrohRemoteOutboundValueDecorator;
 	remoteWorkspacePath?: string;
@@ -337,6 +336,9 @@ function redactPathOccurrences(
 
 function sanitizePathToken(value: string, context: IrohRemoteOutboundSanitizerContext): string {
 	const { path, suffix } = splitTrailingPathPunctuation(value);
+	if (path === "/") {
+		return `${path}${suffix}`;
+	}
 	const normalizedPath = normalizeWorkspacePath(path, context);
 	if (normalizedPath) {
 		return `${normalizedPath}${suffix}`;
@@ -433,7 +435,29 @@ function startsPosixPathAt(value: string, index: number): boolean {
 	if (value[index - 1] === ":" && value[index + 1] === "/") {
 		return false;
 	}
+	if (isRelativePathSeparatorAt(value, index)) {
+		return false;
+	}
 	return !isInsideUrlToken(value, index);
+}
+
+function isRelativePathSeparatorAt(value: string, index: number): boolean {
+	const previousIndex = findPreviousNonWhitespaceIndex(value, index - 1);
+	const nextIndex = findNextNonWhitespaceIndex(value, index + 1);
+	if (previousIndex === undefined || nextIndex === undefined) {
+		return false;
+	}
+	if (!isRelativePathSegmentCharacter(value[previousIndex]) || !isRelativePathSegmentCharacter(value[nextIndex])) {
+		return false;
+	}
+	const segmentEnd = findPathSegmentEnd(value, nextIndex);
+	const nextSegment = stripTrailingPathPunctuation(value.slice(nextIndex, segmentEnd));
+	if (hasPathSeparator(nextSegment)) {
+		return false;
+	}
+	const previousSegmentStart = findPathTokenStart(value, previousIndex + 1);
+	const previousSegment = value.slice(previousSegmentStart, previousIndex + 1);
+	return isPlainRelativePathSegment(previousSegment) && looksLikeRelativeFileNameSegment(nextSegment);
 }
 
 function isPathPrefixBoundary(value: string, index: number): boolean {
@@ -463,6 +487,24 @@ function findPathTokenStart(value: string, index: number): number {
 		tokenStart--;
 	}
 	return tokenStart;
+}
+
+function findPreviousNonWhitespaceIndex(value: string, index: number): number | undefined {
+	for (let cursor = index; cursor >= 0; cursor--) {
+		if (!isPathTokenWhitespace(value[cursor])) {
+			return cursor;
+		}
+	}
+	return undefined;
+}
+
+function findNextNonWhitespaceIndex(value: string, index: number): number | undefined {
+	for (let cursor = index; cursor < value.length; cursor++) {
+		if (!isPathTokenWhitespace(value[cursor])) {
+			return cursor;
+		}
+	}
+	return undefined;
 }
 
 function findPathTokenEnd(
@@ -600,6 +642,18 @@ function looksLikeIncompletePathName(value: string): boolean {
 function looksLikePlainPathNameSegment(value: string): boolean {
 	const trimmed = stripTrailingPathPunctuation(value);
 	return /^[A-Za-z0-9._-]/.test(trimmed);
+}
+
+function isRelativePathSegmentCharacter(value: string | undefined): boolean {
+	return value !== undefined && /[A-Za-z0-9._-]/.test(value);
+}
+
+function isPlainRelativePathSegment(value: string): boolean {
+	return /^[A-Za-z0-9._-]+$/.test(value) && value !== "." && value !== "..";
+}
+
+function looksLikeRelativeFileNameSegment(value: string): boolean {
+	return isPlainRelativePathSegment(value) && /(?:^\.|.+\.[A-Za-z0-9]+$)/.test(value);
 }
 
 function looksLikeCapitalizedPathNameSegment(value: string): boolean {
