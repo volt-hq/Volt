@@ -33,6 +33,9 @@
 - Added `volt remote status` for deterministic persisted Iroh remote host state inspection without printing secrets or secret hashes.
 - Added Iroh remote protocol v1 documentation and compatibility vectors for tickets, handshakes, LF JSONL framing, command filtering, and outbound redaction.
 - Added Iroh remote per-client session tracking so integrated remote reconnects resume the client's previous workspace session when its session file still exists and create/audit a replacement when it is missing.
+- Added Iroh remote `new_session` RPC support so remote clients can start a fresh conversation and have that session recorded for reconnect.
+- Added workspace-scoped `list_sessions` and `switch_session_by_id` RPC support for remote-safe session switching.
+- Added a remote-safe `get_transcript` RPC response that projects the active session into bounded user, assistant, tool-summary, and compaction-summary transcript items with pagination.
 - Added terminal QR code rendering for `volt remote host` pairing tickets.
 - Added a self-contained `volt remote host` product entrypoint backed by optional `@number0/iroh`, keeping native Iroh loading isolated from the main CLI.
 - Added transport-backed RPC clients, including an in-memory loopback transport and in-process client helper for running Volt RPC without spawning a subprocess.
@@ -40,6 +43,7 @@
 
 ### Fixed
 
+- Fixed Iroh remote host QR display by using `qrcode-terminal` for compact terminal-native pairing codes.
 - Fixed Iroh remote reconnect authorization to keep each paired client's persisted tool allowlist instead of inheriting broader host restart defaults.
 - Fixed interactive mode to remember the last active settings profile on quit.
 - Fixed store package installs leaking verbose git and npm subprocess output into the interactive screen.
@@ -69,7 +73,7 @@
 - Changed Iroh remote pairing ticket state to persist only secret hashes and non-secret metadata, prune expired pending tickets, audit ticket consumption and expiry, and apply pair-time tools/label hints through the host lifecycle.
 - Changed Iroh remote revocation to coordinate with a running host control channel, close matching active connections, and audit `active_connection_revoked` while keeping persisted-state revocation as a no-host fallback.
 - Changed Iroh remote host active connection handling to reject duplicate same-client/workspace connections with a `client already connected` handshake failure and `duplicate_connection_rejected` audit event.
-- Clarified that Iroh remote protocol v1 keeps the direct RPC command allowlist narrow and continues rejecting transcript, command-list, last-assistant-text, and model-list RPC commands in preview.
+- Clarified that Iroh remote protocol v1 keeps the direct RPC command allowlist narrow, exposes only the projected `get_transcript` transcript surface, and continues rejecting raw messages, command-list, last-assistant-text, model-list, and path-based session-switch commands in preview.
 - Documented the Iroh remote supported-preview user workflow, security model, relay guidance, state/audit paths, and Node-only host support boundary across README, usage, security, protocol, design, and sidecar docs.
 - Documented the Iroh remote v1 preview duplicate-connection policy: reject a second active connection for the same client/workspace instead of replacing the existing runtime.
 - Updated the SWE-Pruner example extension guidance to prefer semantic pruning after candidate-file discovery and clarify when to use search, LSP, or full reads instead.

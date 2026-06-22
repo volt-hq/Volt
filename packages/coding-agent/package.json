@@ -54,6 +54,7 @@
 		"jiti": "2.7.0",
 		"minimatch": "10.2.5",
 		"proper-lockfile": "4.1.2",
+		"qrcode-terminal": "0.12.0",
 		"semver": "7.8.0",
 		"typebox": "1.1.38",
 		"undici": "8.3.0",
@@ -66,8 +67,8 @@
 		}
 	},
 	"optionalDependencies": {
-		"@number0/iroh": "1.0.0",
-		"@mariozechner/clipboard": "0.3.9"
+		"@mariozechner/clipboard": "0.3.9",
+		"@number0/iroh": "1.0.0"
 	},
 	"devDependencies": {
 		"@types/cross-spawn": "6.0.6",

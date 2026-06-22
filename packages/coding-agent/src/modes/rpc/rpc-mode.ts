@@ -26,6 +26,7 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
+import { projectSessionTranscript } from "../../core/rpc/transcript.ts";
 import type { RpcTransport } from "../../core/rpc/transport.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
@@ -35,6 +36,7 @@ import type {
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcResponse,
+	RpcSessionListItem,
 	RpcSessionState,
 	RpcSlashCommand,
 } from "./rpc-types.ts";
@@ -48,10 +50,17 @@ export type {
 	RpcSessionState,
 } from "./rpc-types.ts";
 
+export interface RpcSessionChange {
+	sessionFile?: string;
+	sessionId: string;
+}
+
 export interface RpcModeOptions {
 	transport?: RpcTransport;
 	/** Defaults to true for stdio RPC mode and false for caller-provided transports. */
 	exitProcess?: boolean;
+	/** Called after the active session is rebound, including initial startup. */
+	onSessionChanged?: (session: RpcSessionChange) => void | Promise<void>;
 	/** Called after initial startup has completed and the RPC transport is accepting commands. */
 	onReady?: () => void;
 }
@@ -161,6 +170,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		await transport.waitForBackpressure?.();
 	};
 	let session = runtimeHost.session;
+	let lastNotifiedSessionId: string | undefined;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
 
@@ -490,6 +500,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			},
 		});
 		if (shuttingDown) return;
+		if (options.onSessionChanged && session.sessionId !== lastNotifiedSessionId) {
+			lastNotifiedSessionId = session.sessionId;
+			await options.onSessionChanged({ sessionFile: session.sessionFile, sessionId: session.sessionId });
+		}
 
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
@@ -637,6 +651,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				return success(id, "get_state", state);
 			}
 
+			case "get_transcript": {
+				const transcript = projectSessionTranscript(session.sessionManager, {
+					beforeEntryId: command.beforeEntryId,
+					limit: command.limit,
+				});
+				return success(id, "get_transcript", transcript);
+			}
+
 			// =================================================================
 			// Model
 			// =================================================================
@@ -748,6 +770,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				return success(id, "get_session_stats", stats);
 			}
 
+			case "list_sessions": {
+				const sessions: RpcSessionListItem[] = await runtimeHost.listSessions();
+				return success(id, "list_sessions", { sessions });
+			}
+
 			case "export_html": {
 				const path = await session.exportToHtml(command.outputPath);
 				return success(id, "export_html", { path });
@@ -759,6 +786,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					await rebindSession();
 				}
 				return success(id, "switch_session", result);
+			}
+
+			case "switch_session_by_id": {
+				const result = await runtimeHost.switchSessionById(command.sessionId);
+				if (!result.cancelled) {
+					await rebindSession();
+				}
+				return success(id, "switch_session_by_id", result);
 			}
 
 			case "fork": {

@@ -12,7 +12,7 @@ import type {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
-import { SessionManager } from "./session-manager.ts";
+import { assertValidSessionId, type SessionInfo, SessionManager } from "./session-manager.ts";
 
 /**
  * Result returned by runtime creation.
@@ -23,6 +23,22 @@ import { SessionManager } from "./session-manager.ts";
 export interface CreateAgentSessionRuntimeResult extends CreateAgentSessionResult {
 	services: AgentSessionServices;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
+}
+
+export interface WorkspaceSessionSummary {
+	sessionId: string;
+	sessionName?: string;
+	createdAt: string;
+	modifiedAt: string;
+	messageCount: number;
+	firstMessage: string;
+	current: boolean;
+}
+
+export interface AgentSessionSwitchOptions {
+	cwdOverride?: string;
+	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+	projectTrustContextFactory?: (cwd: string) => ProjectTrustContext;
 }
 
 /**
@@ -63,6 +79,47 @@ function extractUserMessageText(content: string | Array<{ type: string; text?: s
 		.filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string")
 		.map((part) => part.text)
 		.join("");
+}
+
+function extractUnknownMessageText(content: unknown): string {
+	if (typeof content === "string") {
+		return content;
+	}
+	if (!Array.isArray(content)) {
+		return "";
+	}
+	return content
+		.filter(
+			(part): part is { type: "text"; text: string } =>
+				typeof part === "object" &&
+				part !== null &&
+				"type" in part &&
+				part.type === "text" &&
+				"text" in part &&
+				typeof part.text === "string",
+		)
+		.map((part) => part.text)
+		.join("");
+}
+
+function toSessionTimestamp(value: string | undefined): string {
+	if (!value) {
+		return new Date(0).toISOString();
+	}
+	const date = new Date(value);
+	return Number.isNaN(date.getTime()) ? new Date(0).toISOString() : date.toISOString();
+}
+
+function sessionInfoToSummary(info: SessionInfo, currentSessionId: string): WorkspaceSessionSummary {
+	return {
+		sessionId: info.id,
+		sessionName: info.name,
+		createdAt: info.created.toISOString(),
+		modifiedAt: info.modified.toISOString(),
+		messageCount: info.messageCount,
+		firstMessage: info.firstMessage,
+		current: info.id === currentSessionId,
+	};
 }
 
 /**
@@ -195,14 +252,62 @@ export class AgentSessionRuntime {
 		}
 	}
 
-	async switchSession(
-		sessionPath: string,
-		options?: {
-			cwdOverride?: string;
-			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-			projectTrustContextFactory?: (cwd: string) => ProjectTrustContext;
-		},
-	): Promise<{ cancelled: boolean }> {
+	private async listWorkspaceSessionInfos(): Promise<SessionInfo[]> {
+		const workspaceCwd = resolvePath(this.cwd);
+		return (await SessionManager.list(this.cwd, this.session.sessionManager.getSessionDir())).filter(
+			(session) => !session.cwd || resolvePath(session.cwd) === workspaceCwd,
+		);
+	}
+
+	private getCurrentSessionSummary(): WorkspaceSessionSummary {
+		const header = this.session.sessionManager.getHeader();
+		const entries = this.session.sessionManager.getEntries();
+		const lastEntry = entries.at(-1);
+		let firstMessage = "(no messages)";
+		for (const message of this.session.messages) {
+			if (message.role !== "user" || !("content" in message)) {
+				continue;
+			}
+			firstMessage = extractUnknownMessageText(message.content) || "(no messages)";
+			break;
+		}
+		return {
+			sessionId: this.session.sessionId,
+			sessionName: this.session.sessionName,
+			createdAt: toSessionTimestamp(header?.timestamp),
+			modifiedAt: toSessionTimestamp(lastEntry?.timestamp ?? header?.timestamp),
+			messageCount: this.session.messages.length,
+			firstMessage: firstMessage || "(no messages)",
+			current: true,
+		};
+	}
+
+	async listSessions(): Promise<WorkspaceSessionSummary[]> {
+		const current = this.getCurrentSessionSummary();
+		const summaries = (await this.listWorkspaceSessionInfos()).map((info) =>
+			sessionInfoToSummary(info, this.session.sessionId),
+		);
+		const currentIndex = summaries.findIndex((summary) => summary.sessionId === current.sessionId);
+		if (currentIndex === -1) {
+			return [current, ...summaries];
+		}
+		summaries[currentIndex] = current;
+		return summaries;
+	}
+
+	async switchSessionById(sessionId: string, options?: AgentSessionSwitchOptions): Promise<{ cancelled: boolean }> {
+		assertValidSessionId(sessionId);
+		if (sessionId === this.session.sessionId) {
+			return { cancelled: false };
+		}
+		const target = (await this.listWorkspaceSessionInfos()).find((session) => session.id === sessionId);
+		if (!target) {
+			throw new Error(`Session not found in current workspace: ${sessionId}`);
+		}
+		return this.switchSession(target.path, target.cwd ? options : { ...options, cwdOverride: this.cwd });
+	}
+
+	async switchSession(sessionPath: string, options?: AgentSessionSwitchOptions): Promise<{ cancelled: boolean }> {
 		const beforeResult = await this.emitBeforeSwitch("resume", sessionPath);
 		if (beforeResult.cancelled) {
 			return beforeResult;

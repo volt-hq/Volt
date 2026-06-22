@@ -180,7 +180,7 @@ See [Volt Packages](packages.md) for package sources and security notes.
 Happy path:
 
 ```bash
-# Terminal 1: expose one named workspace with read-only tools.
+# Terminal 1: expose one named workspace with an explicit read-only tool subset.
 # The host prints a scannable pairing-ticket QR code when stderr is a TTY.
 volt remote host --workspace volt=/path/to/repo --allow-tools read,grep,find,ls
 
@@ -210,8 +210,8 @@ Options to know:
 
 Security and support boundary:
 
-- The default remote tool allowlist is read-only: `read,grep,find,ls`.
-- Granting `bash`, `edit`, or `write` can modify host files or run shell commands. TTY host/pair commands require confirmation; noninteractive unsafe grants require `--yes`.
+- The default remote tool allowlist is `read,bash,edit,write,grep,find,ls`.
+- Granting `bash`, `edit`, or `write` can modify host files or run shell commands. TTY host/pair commands require confirmation; noninteractive unsafe grants, including the default grant, require `--yes`.
 - Pairing tickets are short-lived and one-time. `volt remote host` shows the startup ticket as a terminal QR code by default when stderr is a TTY. `volt remote pair` is mediated by a running host control channel; offline pairing from persisted state is not supported.
 - Remote clients select saved workspace names only. They cannot request arbitrary host paths.
 - Remote sessions do not bypass project trust. Pass `--approve` only when the host user trusts project-local settings/resources for that workspace.

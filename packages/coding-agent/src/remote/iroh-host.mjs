@@ -57,7 +57,14 @@ const DEFAULT_READ_LIMIT = 64 * 1024;
 const DEFAULT_STATE_PATH = join(getAgentDir(), "remote", "iroh-host.json");
 const ACTIVE_REVOKE_CLOSE_REASON = "revoked";
 const PROMPT_COMPLETION_RPC_TYPES = new Set(["prompt", "steer", "follow_up"]);
-const RESPONSE_COMPLETION_RPC_TYPES = new Set(["abort", "get_state"]);
+const RESPONSE_COMPLETION_RPC_TYPES = new Set([
+	"abort",
+	"new_session",
+	"get_state",
+	"get_transcript",
+	"list_sessions",
+	"switch_session_by_id",
+]);
 const PROMPT_COMPLETION_SETTLE_MS = 100;
 const BOOLEAN_FLAGS = new Set(["approve", "help", "integrated-volt", "no-pairing", "once", "use-volt", "yes"]);
 const VALUE_FLAGS = new Set([
@@ -71,7 +78,6 @@ const VALUE_FLAGS = new Set([
 	"volt-bin",
 	"workspace",
 ]);
-
 function parseFlags(argv) {
 	const flags = new Map();
 	const positionals = [];
@@ -196,7 +202,7 @@ Serve options:
   --source-volt <repo-root>  Spawn Volt from a source checkout. Implies --use-volt.
   --integrated-volt          Run Volt's runtime in-process over Iroh.
   --volt-bin <path>          Volt executable for --use-volt. Defaults to volt.
-  --allow-tools <list>       Tool allowlist passed to Volt. Defaults to read,grep,find,ls.
+  --allow-tools <list>       Tool allowlist passed to Volt. Defaults to read,bash,edit,write,grep,find,ls.
                               bash, edit, or write can modify host state and require confirmation.
   --profile <name>           Volt settings profile for integrated Volt runtime.
   --agent-dir <path>         Volt agent config directory for integrated Volt runtime.
@@ -977,6 +983,7 @@ async function runSpawnedRpcConnection(stream, handshake, authorization, options
 async function runIntegratedVoltConnection(stream, handshake, authorization, options) {
 	let runtime;
 	let runtimeOwnedByRpcMode = false;
+	let recordedSessionId;
 	try {
 		const previousSessionId = authorization.client.lastSessionIdByWorkspace?.[authorization.workspace.name];
 		const runtimeResult = await createIrohRemoteAgentRuntimeWithSessionSelection({
@@ -988,6 +995,7 @@ async function runIntegratedVoltConnection(stream, handshake, authorization, opt
 			resumeSessionId: previousSessionId,
 		});
 		runtime = runtimeResult.runtime;
+		recordedSessionId = runtime.session.sessionId;
 		await options.hostEngine.setClientLastSessionId(
 			authorization.client.nodeId,
 			authorization.workspace.name,
@@ -1026,6 +1034,11 @@ async function runIntegratedVoltConnection(stream, handshake, authorization, opt
 		await writeIrohRemoteHandshakeResponse(stream.send, handshake.response);
 		const rpcMode = runIrohRemoteRpcMode(runtime, {
 			decorateOutbound: (value) => decorateRemoteHostState(value, authorization, options),
+			onSessionChanged: async (session) => {
+				if (session.sessionId === recordedSessionId) return;
+				recordedSessionId = session.sessionId;
+				await recordRemoteSessionChange(session, authorization, options);
+			},
 			stream,
 			initialInput: handshake.initialInput,
 			workspacePath: authorization.workspace.path,
@@ -1055,6 +1068,33 @@ async function runIntegratedVoltConnection(stream, handshake, authorization, opt
 			details: { runtime: "integrated-volt" },
 		});
 		if (runtimeDisposeError) throw runtimeDisposeError;
+	}
+}
+
+async function recordRemoteSessionChange(session, authorization, options) {
+	try {
+		const client = await options.hostEngine.setClientLastSessionId(
+			authorization.client.nodeId,
+			authorization.workspace.name,
+			session.sessionId,
+		);
+		await logAudit(options.auditLogger, {
+			type: "session_changed",
+			clientNodeId: authorization.client.nodeId,
+			workspace: authorization.workspace.name,
+			success: client !== undefined,
+			error: client ? undefined : "client not found",
+			details: { reason: "remote_rpc_session_change", sessionId: session.sessionId },
+		});
+	} catch (error) {
+		await logAudit(options.auditLogger, {
+			type: "session_changed",
+			clientNodeId: authorization.client.nodeId,
+			workspace: authorization.workspace.name,
+			success: false,
+			error: error instanceof Error ? error.message : String(error),
+			details: { reason: "remote_rpc_session_change", sessionId: session.sessionId },
+		});
 	}
 }
 

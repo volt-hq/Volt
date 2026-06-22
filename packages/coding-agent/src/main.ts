@@ -117,7 +117,7 @@ Host options are forwarded to the integrated Iroh remote host. Common options:
 
 Pair options:
   --workspace <name>            Saved workspace name to pair with the running host
-  --allow-tools <list>          Tool allowlist for the new client. Defaults to the saved workspace allowlist or read-only tools.
+  --allow-tools <list>          Tool allowlist for the new client. Defaults to the saved workspace allowlist or default remote tools.
   --label <label>               Optional label hint if the client does not provide one
   --ttl <duration>              Pairing ticket TTL, e.g. 30s, 10m, or 1h
   --state <path>                Host state path

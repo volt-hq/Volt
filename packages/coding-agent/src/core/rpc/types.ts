@@ -28,6 +28,7 @@ export type RpcCommand =
 
 	// State
 	| { id?: string; type: "get_state" }
+	| { id?: string; type: "get_transcript"; limit?: number; beforeEntryId?: string }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -56,8 +57,10 @@ export type RpcCommand =
 
 	// Session
 	| { id?: string; type: "get_session_stats" }
+	| { id?: string; type: "list_sessions" }
 	| { id?: string; type: "export_html"; outputPath?: string }
 	| { id?: string; type: "switch_session"; sessionPath: string }
+	| { id?: string; type: "switch_session_by_id"; sessionId: string }
 	| { id?: string; type: "fork"; entryId: string }
 	| { id?: string; type: "clone" }
 	| { id?: string; type: "get_fork_messages" }
@@ -90,6 +93,16 @@ export interface RpcSlashCommand {
 // RPC State
 // ============================================================================
 
+export interface RpcSessionListItem {
+	sessionId: string;
+	sessionName?: string;
+	createdAt: string;
+	modifiedAt: string;
+	messageCount: number;
+	firstMessage: string;
+	current: boolean;
+}
+
 export interface RpcSessionState {
 	model?: RpcModel;
 	thinkingLevel: ThinkingLevel;
@@ -103,6 +116,44 @@ export interface RpcSessionState {
 	autoCompactionEnabled: boolean;
 	messageCount: number;
 	pendingMessageCount: number;
+}
+
+export type RpcTranscriptToolStatus = "started" | "completed" | "failed";
+
+export interface RpcTranscriptBaseItem {
+	id: string;
+	role: "user" | "assistant" | "tool" | "summary";
+	timestamp: string;
+}
+
+export interface RpcTranscriptTextItem extends RpcTranscriptBaseItem {
+	role: "user" | "assistant";
+	text: string;
+}
+
+export interface RpcTranscriptToolItem extends RpcTranscriptBaseItem {
+	role: "tool";
+	toolName: string;
+	status: RpcTranscriptToolStatus;
+	path?: string;
+	summary: string;
+	diffPreview?: string;
+	patchPreview?: string;
+}
+
+export interface RpcTranscriptSummaryItem extends RpcTranscriptBaseItem {
+	role: "summary";
+	title: "Conversation compacted";
+	text: string;
+}
+
+export type RpcTranscriptItem = RpcTranscriptTextItem | RpcTranscriptToolItem | RpcTranscriptSummaryItem;
+
+export interface RpcTranscriptResponse {
+	sessionId: string;
+	items: RpcTranscriptItem[];
+	hasMore: boolean;
+	nextBeforeEntryId: string | null;
 }
 
 // ============================================================================
@@ -120,6 +171,7 @@ export type RpcResponse =
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
+	| { id?: string; type: "response"; command: "get_transcript"; success: true; data: RpcTranscriptResponse }
 
 	// Model
 	| {
@@ -172,8 +224,16 @@ export type RpcResponse =
 
 	// Session
 	| { id?: string; type: "response"; command: "get_session_stats"; success: true; data: SessionStats }
+	| {
+			id?: string;
+			type: "response";
+			command: "list_sessions";
+			success: true;
+			data: { sessions: RpcSessionListItem[] };
+	  }
 	| { id?: string; type: "response"; command: "export_html"; success: true; data: { path: string } }
 	| { id?: string; type: "response"; command: "switch_session"; success: true; data: { cancelled: boolean } }
+	| { id?: string; type: "response"; command: "switch_session_by_id"; success: true; data: { cancelled: boolean } }
 	| { id?: string; type: "response"; command: "fork"; success: true; data: { text: string; cancelled: boolean } }
 	| { id?: string; type: "response"; command: "clone"; success: true; data: { cancelled: boolean } }
 	| {

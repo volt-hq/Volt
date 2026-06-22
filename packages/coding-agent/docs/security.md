@@ -60,7 +60,7 @@ Supported preview safety model:
 
 - Nothing listens until the host user runs `volt remote host`.
 - Workspaces are exposed by saved names such as `volt=/path/to/repo`; clients cannot request arbitrary host paths.
-- The default remote tool allowlist is read-only: `read,grep,find,ls`.
+- The default remote tool allowlist includes the built-in coding tools: `read,bash,edit,write,grep,find,ls`.
 - Pairing tickets are short-lived, one-time credentials. Persisted state stores secret hashes and non-secret metadata, not raw pairing secrets.
 - Pairing through `volt remote pair` requires a running host control channel; offline ticket generation from persisted state is not supported.
 - Paired clients are persisted until revoked with `volt remote revoke <node-id>`.
@@ -68,7 +68,7 @@ Supported preview safety model:
 - `volt remote status` reports persisted workspaces, clients, tool grants, state path, and audit path without printing secrets or secret hashes.
 - Default paths are `~/.volt/agent/remote/iroh-host.json` for state and `~/.volt/agent/remote/iroh-host.audit.jsonl` for audit JSONL.
 
-Unsafe remote tools require explicit host approval. Granting `bash`, `edit`, or `write` lets the remote session modify files or run shell commands on the host. TTY host/pair commands ask for confirmation; noninteractive unsafe grants require `--yes`. Do not grant unsafe tools unless the client device and network path are trusted.
+Unsafe remote tools require explicit host approval. Granting `bash`, `edit`, or `write` lets the remote session modify files or run shell commands on the host. TTY host/pair commands ask for confirmation; noninteractive unsafe grants, including the default grant, require `--yes`. Do not grant unsafe tools unless the client device and network path are trusted.
 
 Remote sessions do not auto-approve project trust. Project-local settings, extensions, skills, prompt templates, themes, system prompts, and package-managed resources follow the same project trust rules as local Volt. Use `--approve` only when the host user trusts those resources for the exposed workspace.
 

@@ -192,6 +192,51 @@ Response:
 
 The `model` field is a full [Model](#model) object or `null`. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set.
 
+#### get_transcript
+
+Get a UI-ready projected transcript for the active session. The response is ordered oldest-to-newest and omits raw provider payloads, thinking blocks, image data, raw tool output, full file contents, and session file paths. Text, summaries, and mutation previews are bounded.
+
+```json
+{"type": "get_transcript", "limit": 100}
+```
+
+Use `beforeEntryId` to request older items than the first item already loaded:
+
+```json
+{"type": "get_transcript", "limit": 100, "beforeEntryId": "entry-id"}
+```
+
+`limit` defaults to 100 and is capped at 200.
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "get_transcript",
+  "success": true,
+  "data": {
+    "sessionId": "abc123",
+    "items": [
+      {"id": "entry-user", "role": "user", "text": "User prompt", "timestamp": "2026-06-22T15:00:00.000Z"},
+      {"id": "entry-assistant", "role": "assistant", "text": "Assistant response", "timestamp": "2026-06-22T15:01:00.000Z"},
+      {"id": "entry-tool", "role": "tool", "toolName": "read", "status": "completed", "path": "src/file.ts", "summary": "Read src/file.ts (completed)", "timestamp": "2026-06-22T15:01:30.000Z"},
+      {"id": "entry-summary", "role": "summary", "title": "Conversation compacted", "text": "Earlier conversation summary...", "timestamp": "2026-06-22T15:02:00.000Z"}
+    ],
+    "hasMore": false,
+    "nextBeforeEntryId": null
+  }
+}
+```
+
+Tool items may include bounded `diffPreview` and `patchPreview` fields for mutation tools.
+
+Recommended resume flow for remote or headless UI clients:
+
+1. After a successful connection or reconnect, send `get_state`, then `get_transcript` for the active persisted session.
+2. After a successful `switch_session_by_id`, clear or replace the visible transcript with a loading state, refresh with `get_state`, then call `get_transcript` for the selected session.
+3. After a successful `new_session`, refresh state only and keep the fresh empty transcript; do not reuse or load older transcript from the previous session.
+4. For pagination, keep `hasMore` and `nextBeforeEntryId`; when `hasMore` is true, request older items with `beforeEntryId` and prepend returned items by stable `id`.
+
 #### get_messages
 
 Get all messages in the conversation.
@@ -538,6 +583,36 @@ Response:
 
 `contextUsage` is omitted when no model or context window is available. `contextUsage.tokens` and `contextUsage.percent` are `null` immediately after compaction until a fresh post-compaction assistant response provides valid usage data.
 
+#### list_sessions
+
+List sessions for the current workspace. The response omits host file paths so remote clients can present workspace-scoped session choices safely.
+
+```json
+{"type": "list_sessions"}
+```
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "list_sessions",
+  "success": true,
+  "data": {
+    "sessions": [
+      {
+        "sessionId": "abc123",
+        "sessionName": "my-feature-work",
+        "createdAt": "2026-06-22T15:00:00.000Z",
+        "modifiedAt": "2026-06-22T15:10:00.000Z",
+        "messageCount": 12,
+        "firstMessage": "Implement the feature",
+        "current": true
+      }
+    ]
+  }
+}
+```
+
 #### export_html
 
 Export session to an HTML file.
@@ -577,6 +652,24 @@ Response:
 If an extension cancelled the switch:
 ```json
 {"type": "response", "command": "switch_session", "success": true, "data": {"cancelled": true}}
+```
+
+#### switch_session_by_id
+
+Load another session from the current workspace by session ID. This is the remote-safe form of session switching; clients do not need to know host session file paths.
+
+```json
+{"type": "switch_session_by_id", "sessionId": "abc123"}
+```
+
+Response:
+```json
+{"type": "response", "command": "switch_session_by_id", "success": true, "data": {"cancelled": false}}
+```
+
+If an extension cancelled the switch:
+```json
+{"type": "response", "command": "switch_session_by_id", "success": true, "data": {"cancelled": true}}
 ```
 
 #### fork

@@ -92,7 +92,9 @@ A paired client may have only one active connection per workspace in v1 preview.
 
 ## Reconnect and session selection
 
-A reconnecting paired client with the same authoritative Iroh node ID resumes the last recorded Volt session for that workspace when the session file still exists. If the recorded session is missing, the host creates a new session, records it for future reconnects, and reports the active `sessionId` through `get_state`. V1 does not replay live stream deltas; clients recover by reconnecting, calling `get_state`, and continuing from the persisted session state.
+A reconnecting paired client with the same authoritative Iroh node ID resumes the last recorded Volt session for that workspace when the session file still exists. If the recorded session is missing, the host creates a new session, records it for future reconnects, and reports the active `sessionId` through `get_state`. Clients may start a fresh conversation on the active stream with the `new_session` RPC command, list current-workspace sessions with `list_sessions`, or resume another current-workspace session with `switch_session_by_id`; the host records the active `sessionId` for future reconnects after new-session and switch operations. V1 does not replay live stream deltas; clients recover by reconnecting, calling `get_state` and `get_transcript`, and continuing from the persisted session state.
+
+Remote UI clients should request `get_state` followed by `get_transcript` after connect/reconnect, and after a successful `switch_session_by_id` should show a loading transcript state while refreshing state and transcript for the selected session. After `new_session`, clients should keep a fresh empty transcript and refresh state without requesting older transcript from the previous session. For older history, clients use `get_transcript` pagination (`hasMore` and `nextBeforeEntryId`) and request pages with `beforeEntryId`.
 
 ## JSONL framing
 
@@ -111,16 +113,22 @@ The host forwards only these inbound RPC command `type` values from remote clien
 - `steer`
 - `follow_up`
 - `abort`
+- `new_session`
 - `get_state`
+- `get_transcript`
+- `list_sessions`
+- `switch_session_by_id`
 - `extension_ui_response`
 
 All other command types receive a JSONL `response` with `success:false` and are not forwarded to the local Volt RPC process.
 
 The preview RPC surface intentionally stays narrow. It excludes local tools such as `bash`, `edit`, and `write`; those tools can only be used through the normal model/tool flow and host-side permission policy. It also excludes read-only local RPC commands such as `get_messages`, `get_commands`, `get_last_assistant_text`, and `get_available_models` for v1 preview:
 
-- `get_messages` can return the full transcript, including prompts, tool output, file excerpts, and extension content beyond the minimal state needed for reconnect.
+The path-based `switch_session` command remains blocked remotely; remote clients must use workspace-scoped `switch_session_by_id` instead. `get_transcript` is the remote-safe transcript read: it returns only the active session's projected user, assistant, tool-summary, and compaction-summary items, ordered oldest-to-newest, with default limit 100 and server cap 200. Host session file paths, raw `get_messages` payloads, thinking blocks, raw tool output, full file contents, provider payloads, and extension-private custom data are not returned. Transcript path and text fields still pass through the outbound redaction layer below.
+
+- `get_messages` can return the full raw transcript, including prompts, tool output, file excerpts, provider payloads, and extension content beyond the projected transcript needed for reconnect.
 - `get_commands` exposes installed extension, prompt-template, and skill metadata; slash-command use should go through `prompt` until the remote UI command surface is reviewed separately.
-- `get_last_assistant_text` duplicates streamed assistant output and would expose prior-session text without a settled transcript-access policy.
+- `get_last_assistant_text` duplicates streamed assistant output and is superseded remotely by the projected transcript surface.
 - `get_available_models` exposes provider/model availability while remote model selection remains unsupported.
 
 Tool access and RPC command access are separate surfaces. `allowedTools` controls which tools the host-side model may invoke; this allowlist controls which JSONL commands a remote client may send directly.

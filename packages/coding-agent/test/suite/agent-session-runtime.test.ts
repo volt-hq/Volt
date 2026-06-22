@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/volt-ai";
@@ -204,6 +204,68 @@ describe("AgentSessionRuntime characterization", () => {
 			{ type: "session_shutdown", reason: "resume", targetSessionFile: originalSessionFile },
 			{ type: "session_start", reason: "resume", previousSessionFile: secondSessionFile },
 		]);
+	});
+
+	it("lists current-workspace sessions and switches by session id", async () => {
+		const { runtime, tempDir } = await createRuntimeForTest(() => {});
+
+		runtime.session.setSessionName("First session");
+		await runtime.session.prompt("first prompt");
+		const firstSessionId = runtime.session.sessionId;
+
+		const newSessionResult = await runtime.newSession();
+		expect(newSessionResult.cancelled).toBe(false);
+		await runtime.session.bindExtensions({});
+		runtime.session.setSessionName("Second session");
+		await runtime.session.prompt("second prompt");
+		const secondSessionId = runtime.session.sessionId;
+
+		const foreignCwd = join(tempDir, "foreign-workspace");
+		mkdirSync(foreignCwd, { recursive: true });
+		writeFileSync(
+			join(runtime.session.sessionManager.getSessionDir(), "2026-01-01T00-00-00-000Z_foreign-session.jsonl"),
+			`${JSON.stringify({
+				cwd: foreignCwd,
+				id: "foreign-session",
+				timestamp: "2026-01-01T00:00:00.000Z",
+				type: "session",
+				version: 3,
+			})}\n`,
+		);
+
+		const sessions = await runtime.listSessions();
+		expect(sessions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					current: false,
+					firstMessage: "first prompt",
+					messageCount: 2,
+					sessionId: firstSessionId,
+					sessionName: "First session",
+				}),
+				expect.objectContaining({
+					current: true,
+					firstMessage: "second prompt",
+					messageCount: 2,
+					sessionId: secondSessionId,
+					sessionName: "Second session",
+				}),
+			]),
+		);
+		expect(sessions.some((session) => session.sessionId === "foreign-session")).toBe(false);
+		expect(sessions.every((session) => !Object.hasOwn(session, "path"))).toBe(true);
+		await expect(runtime.switchSessionById("foreign-session")).rejects.toThrow(
+			"Session not found in current workspace: foreign-session",
+		);
+
+		const switchResult = await runtime.switchSessionById(firstSessionId);
+		expect(switchResult.cancelled).toBe(false);
+		await runtime.session.bindExtensions({});
+		expect(runtime.session.sessionId).toBe(firstSessionId);
+		expect(runtime.session.messages.find((message) => message.role === "user")).toMatchObject({
+			content: [{ text: "first prompt", type: "text" }],
+			role: "user",
+		});
 	});
 
 	it("honors session_before_switch cancellation for new and resume", async () => {

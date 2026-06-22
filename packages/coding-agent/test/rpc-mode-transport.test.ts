@@ -3,6 +3,7 @@ import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { ExtensionUIContext } from "../src/core/extensions/index.ts";
 import { isStdoutTakenOver, restoreStdout } from "../src/core/output-guard.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 
 function createRuntimeHost(): { runtimeHost: AgentSessionRuntime; dispose: ReturnType<typeof vi.fn> } {
@@ -30,6 +31,285 @@ afterEach(() => {
 });
 
 describe("RPC mode caller-provided transports", () => {
+	test("lists sessions and switches by session id", async () => {
+		let lineHandler: ((line: string) => void) | undefined;
+		let closeHandler: RpcCloseHandler | undefined;
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const detachSession = vi.fn();
+		const detachBackpressure = vi.fn();
+		const writes: object[] = [];
+		const transport: RpcTransport = {
+			write: vi.fn((value) => {
+				writes.push(value);
+			}),
+			onLine: vi.fn((handler) => {
+				lineHandler = handler;
+				return detachInput;
+			}),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return detachClose;
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: vi.fn(async () => {}),
+		};
+		const makeSession = (sessionId: string) => ({
+			bindExtensions: vi.fn(async () => {}),
+			subscribe: vi.fn(() => detachSession),
+			agent: {
+				subscribe: vi.fn(() => detachBackpressure),
+			},
+			sessionFile: `/sessions/${sessionId}.jsonl`,
+			sessionId,
+		});
+		let currentSession = makeSession("initial-session");
+		const runtimeHost = {
+			get session() {
+				return currentSession;
+			},
+			listSessions: vi.fn(async () => [
+				{
+					current: true,
+					createdAt: "2026-01-01T00:00:00.000Z",
+					firstMessage: "hello",
+					messageCount: 2,
+					modifiedAt: "2026-01-01T00:01:00.000Z",
+					sessionId: "initial-session",
+					sessionName: "Initial",
+				},
+			]),
+			switchSessionById: vi.fn(async () => {
+				currentSession = makeSession("selected-session");
+				return { cancelled: false };
+			}),
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		let resolveReady: () => void = () => {};
+		const ready = new Promise<void>((resolve) => {
+			resolveReady = resolve;
+		});
+
+		const modePromise = runRpcMode(runtimeHost, {
+			onReady: () => {
+				resolveReady();
+			},
+			transport,
+		});
+		await ready;
+		await vi.waitFor(() => expect(lineHandler).toBeDefined());
+
+		lineHandler?.(JSON.stringify({ id: "list-1", type: "list_sessions" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual({
+				id: "list-1",
+				type: "response",
+				command: "list_sessions",
+				success: true,
+				data: {
+					sessions: [
+						{
+							current: true,
+							createdAt: "2026-01-01T00:00:00.000Z",
+							firstMessage: "hello",
+							messageCount: 2,
+							modifiedAt: "2026-01-01T00:01:00.000Z",
+							sessionId: "initial-session",
+							sessionName: "Initial",
+						},
+					],
+				},
+			}),
+		);
+
+		lineHandler?.(JSON.stringify({ id: "switch-1", type: "switch_session_by_id", sessionId: "selected-session" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual({
+				id: "switch-1",
+				type: "response",
+				command: "switch_session_by_id",
+				success: true,
+				data: { cancelled: false },
+			}),
+		);
+		expect(runtimeHost.switchSessionById).toHaveBeenCalledWith("selected-session");
+
+		closeHandler?.();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("returns projected transcript items", async () => {
+		let lineHandler: ((line: string) => void) | undefined;
+		let closeHandler: RpcCloseHandler | undefined;
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const detachSession = vi.fn();
+		const detachBackpressure = vi.fn();
+		const writes: object[] = [];
+		const transport: RpcTransport = {
+			write: vi.fn((value) => {
+				writes.push(value);
+			}),
+			onLine: vi.fn((handler) => {
+				lineHandler = handler;
+				return detachInput;
+			}),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return detachClose;
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: vi.fn(async () => {}),
+		};
+		const sessionManager = SessionManager.inMemory("/workspace");
+		sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "hello" }], timestamp: 10 });
+		const currentSession = {
+			bindExtensions: vi.fn(async () => {}),
+			subscribe: vi.fn(() => detachSession),
+			agent: {
+				subscribe: vi.fn(() => detachBackpressure),
+			},
+			sessionId: sessionManager.getSessionId(),
+			sessionManager,
+		};
+		const runtimeHost = {
+			session: currentSession,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		let resolveReady: () => void = () => {};
+		const ready = new Promise<void>((resolve) => {
+			resolveReady = resolve;
+		});
+
+		const modePromise = runRpcMode(runtimeHost, {
+			onReady: () => {
+				resolveReady();
+			},
+			transport,
+		});
+		await ready;
+		await vi.waitFor(() => expect(lineHandler).toBeDefined());
+
+		lineHandler?.(JSON.stringify({ id: "transcript-1", type: "get_transcript", limit: 10 }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual({
+				id: "transcript-1",
+				type: "response",
+				command: "get_transcript",
+				success: true,
+				data: {
+					sessionId: sessionManager.getSessionId(),
+					items: [
+						expect.objectContaining({
+							role: "user",
+							text: "hello",
+						}),
+					],
+					hasMore: false,
+					nextBeforeEntryId: null,
+				},
+			}),
+		);
+
+		closeHandler?.();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("notifies caller when the active session changes", async () => {
+		let lineHandler: ((line: string) => void) | undefined;
+		let closeHandler: RpcCloseHandler | undefined;
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const detachSession = vi.fn();
+		const detachBackpressure = vi.fn();
+		const writes: object[] = [];
+		const transport: RpcTransport = {
+			write: vi.fn((value) => {
+				writes.push(value);
+			}),
+			onLine: vi.fn((handler) => {
+				lineHandler = handler;
+				return detachInput;
+			}),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return detachClose;
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: vi.fn(async () => {}),
+		};
+		const makeSession = (sessionId: string) => ({
+			bindExtensions: vi.fn(async () => {}),
+			subscribe: vi.fn(() => detachSession),
+			agent: {
+				subscribe: vi.fn(() => detachBackpressure),
+			},
+			sessionFile: `/sessions/${sessionId}.jsonl`,
+			sessionId,
+		});
+		let currentSession = makeSession("initial-session");
+		const runtimeHost = {
+			get session() {
+				return currentSession;
+			},
+			newSession: vi.fn(async () => {
+				currentSession = makeSession("next-session");
+				return { cancelled: false };
+			}),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const sessionChanges: Array<{ sessionFile?: string; sessionId: string }> = [];
+		let resolveReady: () => void = () => {};
+		const ready = new Promise<void>((resolve) => {
+			resolveReady = resolve;
+		});
+
+		const modePromise = runRpcMode(runtimeHost, {
+			onReady: () => {
+				resolveReady();
+			},
+			onSessionChanged: (session) => {
+				sessionChanges.push(session);
+			},
+			transport,
+		});
+		await ready;
+		await vi.waitFor(() => expect(lineHandler).toBeDefined());
+
+		lineHandler?.(JSON.stringify({ id: "new-session-1", type: "new_session" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual({
+				id: "new-session-1",
+				type: "response",
+				command: "new_session",
+				success: true,
+				data: { cancelled: false },
+			}),
+		);
+
+		expect(sessionChanges).toEqual([
+			{ sessionFile: "/sessions/initial-session.jsonl", sessionId: "initial-session" },
+			{ sessionFile: "/sessions/next-session.jsonl", sessionId: "next-session" },
+		]);
+
+		closeHandler?.();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
 	test("rejects and closes when a command response write rejects", async () => {
 		let lineHandler: ((line: string) => void) | undefined;
 		const detachInput = vi.fn();

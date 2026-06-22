@@ -23,14 +23,15 @@
 				"jiti": "2.7.0",
 				"minimatch": "10.2.5",
 				"proper-lockfile": "4.1.2",
+				"qrcode-terminal": "0.12.0",
 				"semver": "7.8.0",
 				"typebox": "1.1.38",
 				"undici": "8.3.0",
 				"yaml": "2.9.0"
 			},
 			"optionalDependencies": {
-				"@number0/iroh": "1.0.0",
-				"@mariozechner/clipboard": "0.3.9"
+				"@mariozechner/clipboard": "0.3.9",
+				"@number0/iroh": "1.0.0"
 			},
 			"bin": {
 				"volt": "dist/cli.js"
@@ -628,9 +629,6 @@
 			"cpu": [
 				"arm64"
 			],
-			"libc": [
-				"glibc"
-			],
 			"optional": true
 		},
 		"node_modules/@mariozechner/clipboard-linux-arm64-musl": {
@@ -646,9 +644,6 @@
 			],
 			"cpu": [
 				"arm64"
-			],
-			"libc": [
-				"musl"
 			],
 			"optional": true
 		},
@@ -666,9 +661,6 @@
 			"cpu": [
 				"riscv64"
 			],
-			"libc": [
-				"glibc"
-			],
 			"optional": true
 		},
 		"node_modules/@mariozechner/clipboard-linux-x64-gnu": {
@@ -685,9 +677,6 @@
 			"cpu": [
 				"x64"
 			],
-			"libc": [
-				"glibc"
-			],
 			"optional": true
 		},
 		"node_modules/@mariozechner/clipboard-linux-x64-musl": {
@@ -703,9 +692,6 @@
 			],
 			"cpu": [
 				"x64"
-			],
-			"libc": [
-				"musl"
 			],
 			"optional": true
 		},
@@ -1806,6 +1792,14 @@
 				"node": ">=12.0.0"
 			},
 			"hasInstallScript": true
+		},
+		"node_modules/qrcode-terminal": {
+			"version": "0.12.0",
+			"resolved": "https://registry.npmjs.org/qrcode-terminal/-/qrcode-terminal-0.12.0.tgz",
+			"integrity": "sha512-EXtzRZmC+YGmGlDFbXKxQiMZNwCLEO6BANKXG4iCtSIM0yqc/pappSx3RIKr4r0uh5JsBckOXeKrB3Iz7mdQpQ==",
+			"bin": {
+				"qrcode-terminal": "bin/qrcode-terminal.js"
+			}
 		},
 		"node_modules/retry": {
 			"version": "0.13.1",

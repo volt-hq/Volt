@@ -27,4 +27,7 @@ export type {
 	RpcResponse,
 	RpcSessionState,
 	RpcSlashCommand,
+	RpcTranscriptItem,
+	RpcTranscriptResponse,
+	RpcTranscriptToolStatus,
 } from "./types.ts";

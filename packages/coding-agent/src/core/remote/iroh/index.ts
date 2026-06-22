@@ -101,6 +101,7 @@ export {
 export {
 	createIrohRemoteTicketQrCode,
 	formatIrohRemoteTicketQrCode,
+	formatIrohRemoteTicketQrCodeTerminal,
 	type IrohRemoteTicketQrCode,
 	type IrohRemoteTicketQrCodeFormatOptions,
 } from "./qr.ts";

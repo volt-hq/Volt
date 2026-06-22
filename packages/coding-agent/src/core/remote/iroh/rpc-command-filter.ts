@@ -5,7 +5,11 @@ export const IROH_REMOTE_RPC_PASSTHROUGH_TYPES = new Set([
 	"steer",
 	"follow_up",
 	"abort",
+	"new_session",
 	"get_state",
+	"get_transcript",
+	"list_sessions",
+	"switch_session_by_id",
 	"extension_ui_response",
 ]);
 

@@ -5,6 +5,10 @@ export type {
 	RpcExtensionUIResponse,
 	RpcModel,
 	RpcResponse,
+	RpcSessionListItem,
 	RpcSessionState,
 	RpcSlashCommand,
+	RpcTranscriptItem,
+	RpcTranscriptResponse,
+	RpcTranscriptToolStatus,
 } from "../../core/rpc/types.ts";

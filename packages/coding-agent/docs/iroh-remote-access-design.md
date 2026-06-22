@@ -150,17 +150,17 @@ Required controls for preview:
 - No automatic `--approve`. Project trust should inherit existing Volt behavior unless the host user explicitly approves a workspace.
 - Clear warning that `bash`, `write`, and `edit` allow remote modification of the host machine.
 
-Preview safety default:
+Default tool grant:
 
 ```bash
-volt remote host --workspace volt=. --allow-tools read,grep,find,ls
+volt remote host --workspace volt=. --allow-tools read,bash,edit,write,grep,find,ls
 ```
 
-Granting write or shell tools requires explicit host approval. TTY host and pair commands prompt before accepting `bash`, `edit`, or `write`; noninteractive flows must pass `--yes`:
+The default grant includes write and shell tools, so it requires explicit host approval. TTY host and pair commands prompt before accepting `bash`, `edit`, or `write`; noninteractive flows must pass `--yes`:
 
 ```bash
-volt remote host --workspace volt=. --allow-tools read,grep,find,ls,bash,edit,write --yes
-volt remote pair --workspace volt --allow-tools read,grep,find,ls,bash --yes
+volt remote host --workspace volt=. --yes
+volt remote pair --workspace volt --yes
 ```
 
 Remote sessions do not auto-approve project trust. Pass `--approve` only when the host user trusts project-local settings/resources for the exposed workspace.
@@ -187,7 +187,7 @@ Suggested shape:
       "nodeId": "<client-node-id>",
       "label": "Jordan iPhone",
       "allowedWorkspaces": ["volt"],
-      "allowedTools": "read,grep,find,ls"
+      "allowedTools": "read,bash,edit,write,grep,find,ls"
     }
   ]
 }
@@ -201,7 +201,7 @@ Supported preview commands:
 
 ```bash
 # Start a host for one saved workspace.
-volt remote host --workspace volt=/path/to/repo --allow-tools read,grep,find,ls
+volt remote host --workspace volt=/path/to/repo --yes
 
 # Ask the running host for a short-lived one-time pairing ticket.
 volt remote pair --workspace volt
@@ -226,7 +226,7 @@ npm run iroh:poc:client -- "<ticket>" --get-state
 - Spawn the installed `volt` binary with `--mode rpc`.
 - Bridge bytes with backpressure handling.
 - Support one workspace, one client, one session.
-- Demonstrate prompt, streaming output, abort, model list, and read-only tools.
+- Demonstrate prompt, streaming output, abort, model list, and configured tools.
 
 ### Phase 1: Monorepo experiment
 
@@ -270,7 +270,7 @@ Preview validation:
 
 - Pair a client and host on the same LAN.
 - Pair a client and host across different networks using `--relay default` relay/discovery.
-- Send allowed remote RPC commands such as `get_state`, `prompt`, `abort`, `steer`, `follow_up`, and `extension_ui_response`.
+- Send allowed remote RPC commands such as `get_state`, `list_sessions`, `switch_session_by_id`, `prompt`, `abort`, `steer`, `follow_up`, `new_session`, and `extension_ui_response`.
 - Verify assistant streaming events arrive in order.
 - Verify extension UI requests can round-trip through the client.
 - Verify child process exits when the Iroh stream closes.
@@ -289,7 +289,7 @@ Automated tests for a monorepo version:
 
 | Risk | Mitigation |
 | --- | --- |
-| Remote access exposes local shell and filesystem | Opt-in host command, read-only tool default, workspace allowlist, client revocation, clear warnings |
+| Remote access exposes local shell and filesystem | Opt-in host command, unsafe-tool confirmation, workspace allowlist, client revocation, clear warnings |
 | Native dependency increases install complexity | Keep `@number0/iroh` optional, keep native loading isolated from the main CLI, document native install troubleshooting, and reject Bun binary remote host startup with an actionable Node/source guidance message |
 | Mobile networks disconnect often | Preview reconnect resumes the last recorded session when present and creates/audits a replacement when missing |
 | RPC responses expose host paths | Remote-safe outbound filtering normalizes workspace paths and redacts host-only session, export, bash-output, and arbitrary absolute paths |
@@ -306,7 +306,7 @@ These are outside the host preview support boundary:
 
 Resolved preview decisions:
 
-- Remote clients are read-only by default (`read,grep,find,ls`) and keep their pair-time tool grant on reconnect.
+- Remote clients use the default tool grant (`read,bash,edit,write,grep,find,ls`) unless configured otherwise, and keep their pair-time tool grant on reconnect.
 - Remote outbound state/events normalize workspace paths to `/workspace` and redact host-only session, export, bash-output, and arbitrary absolute host paths.
 - Pairing is workspace-bound by saved workspace name; clients cannot request arbitrary host paths.
 

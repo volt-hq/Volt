@@ -15,6 +15,7 @@ import {
 	decodeIrohRemoteTicketPayload,
 	encodeIrohRemoteTicketPayload,
 	formatIrohRemoteTicketQrCode,
+	formatIrohRemoteTicketQrCodeTerminal,
 	getIrohRemoteRpcFilterResult,
 	getIrohRemoteUnsafeAllowedTools,
 	hashIrohRemotePairingSecret,
@@ -262,7 +263,7 @@ describe("Iroh remote core helpers", () => {
 		expect(() => assertIrohRemoteTicketNotExpired(payload, 1001)).toThrow("Pairing ticket has expired");
 	});
 
-	test("renders remote tickets as terminal QR codes", () => {
+	test("renders remote tickets as QR codes", () => {
 		const ticket = "volt+iroh://v1/mock-ticket";
 		const qrCode = createIrohRemoteTicketQrCode(ticket);
 
@@ -274,12 +275,14 @@ describe("Iroh remote core helpers", () => {
 		expect(qrCode.modules[7][7]).toBe(false);
 		expect(qrCode.modules[qrCode.size - 8][8]).toBe(true);
 
-		const formatted = formatIrohRemoteTicketQrCode(ticket, { margin: 1 });
+		const formatted = formatIrohRemoteTicketQrCode(ticket);
+		const terminal = formatIrohRemoteTicketQrCodeTerminal(ticket);
 
-		expect(formatted.split("\n")).toHaveLength(14);
-		expect(formatted).toContain("\x1b[38;2;0;0;0m");
-		expect(formatted).toContain("▀");
-		expect(formatted.endsWith("\x1b[0m")).toBe(true);
+		expect(formatted).toBe(terminal);
+		expect(terminal.split("\n")).toHaveLength(15);
+		expect(terminal).toContain("▄▄▄▄▄▄▄");
+		expect(terminal).toContain("█ ▄▄▄▄▄ █");
+		expect(terminal).not.toContain("\x1b[47m");
 	});
 
 	test("parses handshakes and creates handshake responses", () => {
@@ -409,7 +412,11 @@ describe("Iroh remote core helpers", () => {
 			"steer",
 			"follow_up",
 			"abort",
+			"new_session",
 			"get_state",
+			"get_transcript",
+			"list_sessions",
+			"switch_session_by_id",
 			"extension_ui_response",
 		]);
 		for (const type of IROH_REMOTE_RPC_PASSTHROUGH_TYPES) {
@@ -428,6 +435,7 @@ describe("Iroh remote core helpers", () => {
 		});
 		for (const command of [
 			"get_messages",
+			"switch_session",
 			"get_commands",
 			"get_last_assistant_text",
 			"get_available_models",
@@ -598,7 +606,7 @@ describe("Iroh remote core helpers", () => {
 	});
 
 	test("detects unsafe remote tool grants", () => {
-		expect(getIrohRemoteUnsafeAllowedTools(DEFAULT_IROH_REMOTE_ALLOW_TOOLS)).toEqual([]);
+		expect(getIrohRemoteUnsafeAllowedTools(DEFAULT_IROH_REMOTE_ALLOW_TOOLS)).toEqual(["bash", "edit", "write"]);
 		expect(getIrohRemoteUnsafeAllowedTools("read,bash, edit,write,bash,custom")).toEqual(["bash", "edit", "write"]);
 	});
 
@@ -1737,6 +1745,52 @@ describe("Iroh remote core helpers", () => {
 				outputPath: IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH,
 				stdout: `Wrote ${IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH}`,
 				stderr: `opened ${IROH_REMOTE_REDACTED_HOST_PATH}`,
+			},
+		});
+		expect(
+			sanitizeIrohRemoteOutbound(
+				{
+					type: "response",
+					command: "get_transcript",
+					success: true,
+					data: {
+						sessionId: "session-one",
+						items: [
+							{
+								id: "entry-one",
+								role: "tool",
+								toolName: "read",
+								status: "completed",
+								path: `${workspacePath}/src/index.ts`,
+								summary: `Read ${workspacePath}/src/index.ts and /Users/jordan/.volt/auth.json`,
+								timestamp: "2026-06-22T15:00:00.000Z",
+							},
+						],
+						hasMore: false,
+						nextBeforeEntryId: null,
+					},
+				},
+				{ workspacePath },
+			),
+		).toEqual({
+			type: "response",
+			command: "get_transcript",
+			success: true,
+			data: {
+				sessionId: "session-one",
+				items: [
+					{
+						id: "entry-one",
+						role: "tool",
+						toolName: "read",
+						status: "completed",
+						path: "/workspace/src/index.ts",
+						summary: `Read /workspace/src/index.ts and ${IROH_REMOTE_REDACTED_HOST_PATH}`,
+						timestamp: "2026-06-22T15:00:00.000Z",
+					},
+				],
+				hasMore: false,
+				nextBeforeEntryId: null,
 			},
 		});
 		expect(
