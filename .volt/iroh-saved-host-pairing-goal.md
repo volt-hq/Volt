@@ -255,7 +255,7 @@ blocked.
   <item ref="A.1" status="resolved" prereq="" type="decision">
     <title>Define the boundary between transient offline, stale discovery, and invalid saved-host data</title>
     <acceptance>Root and app specs define when the app keeps the saved host and shows offline/retry, when it refreshes discovery data, and when it offers Pair Again or Forget Host. The decision distinguishes host_unreachable, stale-but-refreshable discovery, host_identity_mismatch, and saved_host_invalid without requiring QR scanning for ordinary offline hosts.</acceptance>
-    <evidence>2026-06-22: Root and app specs now classify host_unreachable, stale-but-refreshable discovery, host_identity_mismatch, saved_host_invalid, client_unknown, and workspace access outcomes; verification: Volt/app doc whitespace checks passed; commit SHA reported in turn summary if committed.</evidence>
+    <evidence>2026-06-22: Root and app specs now classify host_unreachable, stale-but-refreshable discovery, host_identity_mismatch, saved_host_invalid, client_unknown, and workspace access outcomes; verification: Volt/app doc whitespace checks and commit-hook npm run check passed; Volt commit 75b6037e.</evidence>
   </item>
 
   <item ref="A.2" status="open" prereq="A.1" type="decision">
