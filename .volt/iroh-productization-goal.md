@@ -354,18 +354,16 @@ the rollup item is resolved, and the final turn's required verification passed.
     <evidence>Resolved 2026-06-21: updated README, usage, docs index, security, Iroh design, protocol, sidecar README, changelog, and productization design with preview remote workflow, host/pair/client/revoke/status/relay guidance, state/audit paths, read-only defaults, unsafe tool and project-trust warnings, native troubleshooting, Node-only/Bun limitation, revoke-and-repair policy updates, and relay-status support boundary; verification: git diff --check on changed docs, npm run check; commit 4a475d61</evidence>
   </item>
 
-  <item ref="F.2" status="blocked" prereq="F.1">
+  <item ref="F.2" status="resolved" prereq="F.1">
     <title>Run final validation, including local scenario suite, targeted tests touched by the final docs/code, `npm run check`, and a documented `--relay default` cross-network smoke or explicit blocker</title>
     <acceptance>Final evidence lists exact commands and results; cross-network relay smoke succeeds or the item is blocked with what environment is needed; optional native dependency install failure messaging is verified or documented; no unsupported environment is implied supported.</acceptance>
-    <progress date="2026-06-21">Achievable validation passed: `cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-iroh-core.test.ts test/rpc-iroh-transport.test.ts test/iroh-remote-agent-runtime.test.ts test/remote-cli.test.ts` (4 files, 67 tests passed); `npm run iroh:poc:test` (all local Iroh remote scenario tests passed); `node /tmp/iroh-final-relay-smoke.mjs` (same-machine `--relay default` integrated `get_state` passed with sessionId present, temp script removed); optional native adapter failure smoke with a temp `Module._load` blocker (`node --conditions volt-source -r /tmp/volt-block-iroh.cjs packages/coding-agent/src/remote/iroh-host.mjs --state &lt;tmp&gt;/host.json --workspace volt=. --integrated-volt --once`) failed as expected with `The optional @number0/iroh native adapter is not available.`, reinstall guidance, and no ticket; `npm run check` passed.</progress>
-    <blocker>Cross-network `--relay default` host/client smoke was not run because this agent session has no real two-network relay environment. Needed to unblock: host and client on separate networks, or operator-provided equivalent access, to run `npm run iroh:poc:host:volt -- --relay default --allow-tools read,grep,find,ls` and `npm run iroh:poc:client -- "&lt;ticket&gt;" --get-state` without recording the raw ticket.</blocker>
-    <evidence/>
+    <evidence>Resolved 2026-06-21: final validation passed with targeted vitest (`cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-iroh-core.test.ts test/rpc-iroh-transport.test.ts test/iroh-remote-agent-runtime.test.ts test/remote-cli.test.ts`, 4 files/67 tests), `npm run iroh:poc:test`, same-machine `--relay default` integrated get_state smoke, optional native adapter missing-message smoke, `npm run check`, and operator-provided cross-network `--relay default` host/client smoke (macOS phone hotspot host, WSL home ethernet client) using `npm run iroh:poc:host:volt -- --relay default --allow-tools read,grep,find,ls` plus `npm run iroh:poc:client -- "&lt;redacted ticket&gt;" --get-state`; client returned get_state with session ID and host logged connect/pair/disconnect; raw ticket and private paths omitted; commit 9f0886a8</evidence>
   </item>
 
-  <item ref="F.3" status="open" prereq="F.2" type="rollup">
+  <item ref="F.3" status="resolved" prereq="F.2" type="rollup">
     <title>Rollup: all graduation checklist items in `.volt/iroh-productization-design.md` are checked, every work_queue item is resolved, and Iroh remote access is ready to be described as supported preview</title>
     <acceptance>All prior items resolved; design doc graduation checklist fully checked; final verification evidence recorded; no open decisions remain unresolved; known unsupported cases are documented.</acceptance>
-    <evidence/>
+    <evidence>Resolved 2026-06-21: completion audit found A.1-F.2 resolved, design graduation checklist fully checked, open decisions resolved or explicitly future-product scoped, known unsupported cases documented, and final validation evidence recorded; verification: git diff --check on changed ledger docs, npm run check; commit 9f0886a8</evidence>
   </item>
 </group>
 
