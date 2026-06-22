@@ -334,10 +334,10 @@ the rollup item is resolved, and the final turn's required verification passed.
     <evidence>Resolved 2026-06-21: chose to reject a second active connection for the same authoritative client node ID and workspace with handshake failure `client already connected`, keep the existing runtime alive, audit `duplicate_connection_rejected`, and cover the behavior in E.3 reconnect scenarios; verification: git diff --check -- .volt/iroh-productization-design.md packages/coding-agent/CHANGELOG.md packages/coding-agent/docs/iroh-remote-protocol.md, npm run check, and pre-commit npm run check; commit 91781b6e</evidence>
   </item>
 
-  <item ref="E.2" status="open" prereq="E.1">
+  <item ref="E.2" status="resolved" prereq="E.1">
     <title>Persist per-client per-workspace last session IDs and update remote runtime creation so reconnecting a paired client resumes the previous session when its session file still exists</title>
     <acceptance>Client state records lastSessionIdByWorkspace or equivalent; runtime can open the previous session for the authorized workspace; missing session file creates a new session and logs session_missing_on_resume/session_created; `get_state` after reconnect returns the resumed session ID; unit tests cover state updates and runtime selection.</acceptance>
-    <evidence/>
+    <evidence>Resolved 2026-06-21: added `lastSessionIdByWorkspace` state parsing/cloning/persistence, integrated remote runtime session selection and audit events for session_created/session_resumed/session_missing_on_resume, state updates after runtime creation, and duplicate same-client/workspace handshake rejection from E.1; verification: lsp.diagnostics on changed TS/test files, node --check packages/coding-agent/src/remote/iroh-host.mjs, cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-iroh-core.test.ts test/iroh-remote-agent-runtime.test.ts, npm run iroh:poc:test, npm run check, git diff --check; commit db2201e7</evidence>
   </item>
 
   <item ref="E.3" status="open" prereq="E.2">
