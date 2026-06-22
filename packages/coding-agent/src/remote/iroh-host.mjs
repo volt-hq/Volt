@@ -591,8 +591,11 @@ async function logRpcChildStopped(child, childCommand, authorization, options) {
 	});
 }
 
-async function sendHandshakeError(stream, message) {
-	await writeIrohRemoteHandshakeResponse(stream.send, createIrohRemoteHandshakeFailure(message));
+async function sendHandshakeError(stream, message, options) {
+	await writeIrohRemoteHandshakeResponse(
+		stream.send,
+		createIrohRemoteHandshakeFailure(message, { hostNodeId: options.hostNodeId }),
+	);
 	await stream.send.finish?.();
 	await Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
 }
@@ -938,7 +941,7 @@ async function runSpawnedRpcConnection(stream, handshake, authorization, options
 			error: message,
 			details: { command: childCommand },
 		});
-		await sendHandshakeError(stream, message);
+		await sendHandshakeError(stream, message, options);
 		return child;
 	}
 
@@ -1002,7 +1005,7 @@ async function runIntegratedVoltConnection(stream, handshake, authorization, opt
 			error: message,
 			details: { runtime: "integrated-volt" },
 		});
-		await sendHandshakeError(stream, message);
+		await sendHandshakeError(stream, message, options);
 		return;
 	}
 
@@ -1364,7 +1367,10 @@ async function rejectDuplicateActiveConnection(stream, authorization, options) {
 		error,
 		details: { source: "active_connection_registry" },
 	});
-	await writeIrohRemoteHandshakeResponse(stream.send, createIrohRemoteHandshakeFailure(error));
+	await writeIrohRemoteHandshakeResponse(
+		stream.send,
+		createIrohRemoteHandshakeFailure(error, { hostNodeId: options.hostNodeId }),
+	);
 	await stream.send.finish?.();
 	await Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
 }
@@ -1794,6 +1800,7 @@ async function serve(flags) {
 	const hostEngine = new IrohRemoteHostEngine({
 		allowTools,
 		auditLogger,
+		hostNodeId: options.hostNodeId,
 		stateManager,
 		workspace,
 	});

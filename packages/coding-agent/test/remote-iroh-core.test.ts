@@ -3,13 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
+	assertIrohRemoteHandshakeHostIdentity,
 	assertIrohRemoteTicketNotExpired,
+	assertIrohRemoteTicketPayloadHostIdentity,
 	authorizeIrohRemoteClient,
 	createEmptyIrohRemoteHostState,
 	createIrohRemoteFilteredRpcTransport,
 	createIrohRemoteHandshakeFailure,
 	createIrohRemoteHandshakeSuccess,
 	createIrohRemoteOutboundFilteredRpcTransport,
+	createIrohRemoteSanitizedReconnectTicket,
+	createIrohRemoteSanitizedReconnectTicketPayload,
 	createIrohRemoteTicketQrCode,
 	DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
 	DEFAULT_IROH_REMOTE_PAIRING_SECRET_TOMBSTONE_RETENTION_MS,
@@ -264,6 +268,44 @@ describe("Iroh remote core helpers", () => {
 		expect(() => assertIrohRemoteTicketNotExpired(payload, 1001)).toThrow("Pairing ticket has expired");
 	});
 
+	test("creates sanitized reconnect tickets and verifies ticket host identity", () => {
+		const payload: IrohRemoteTicketPayload = {
+			alpn: IROH_REMOTE_ALPN,
+			expiresAt: 1000,
+			irohTicket: "iroh-endpoint-ticket",
+			nodeId: "host-node",
+			relayMode: "default",
+			secret: "pairing-secret",
+			workspace: "volt",
+		};
+		const sanitizedPayload = createIrohRemoteSanitizedReconnectTicketPayload(payload);
+
+		expect(sanitizedPayload).toEqual({
+			alpn: IROH_REMOTE_ALPN,
+			irohTicket: "iroh-endpoint-ticket",
+			nodeId: "host-node",
+			relayMode: "default",
+			workspace: "volt",
+		});
+		expect(JSON.stringify(sanitizedPayload)).not.toContain("pairing-secret");
+		expect(createIrohRemoteSanitizedReconnectTicket(encodeIrohRemoteTicketPayload(payload))).toBe(
+			encodeIrohRemoteTicketPayload(sanitizedPayload),
+		);
+		expect(() => assertIrohRemoteTicketPayloadHostIdentity(payload, "host-node")).not.toThrow();
+		expect(() => assertIrohRemoteTicketPayloadHostIdentity(payload, "other-host")).toThrow(
+			"host_identity_mismatch: expected other-host, got host-node",
+		);
+		expect(() => createIrohRemoteSanitizedReconnectTicketPayload({ ...payload, nodeId: undefined })).toThrow(
+			"saved_host_invalid: ticket nodeId is required for saved-host reconnect",
+		);
+		expect(() => createIrohRemoteSanitizedReconnectTicketPayload({ ...payload, relayMode: undefined })).toThrow(
+			"saved_host_invalid: ticket relayMode is required for saved-host reconnect",
+		);
+		expect(() => assertIrohRemoteTicketPayloadHostIdentity({ ...payload, nodeId: undefined }, "host-node")).toThrow(
+			"saved_host_invalid: ticket nodeId is required for host identity verification",
+		);
+	});
+
 	test("renders remote tickets as QR codes", () => {
 		const ticket = "volt+iroh://v1/mock-ticket";
 		const qrCode = createIrohRemoteTicketQrCode(ticket);
@@ -310,19 +352,48 @@ describe("Iroh remote core helpers", () => {
 			clientNodeId: "client",
 			child: "volt",
 		});
-		expect(createIrohRemoteHandshakeFailure("client is not paired")).toEqual({
+		const hostHandshakeSuccess = createIrohRemoteHandshakeSuccess({
+			workspace: "volt",
+			hostNodeId: "host-node",
+			clientNodeId: "client",
+			child: "volt",
+		});
+		expect(hostHandshakeSuccess).toEqual({
+			type: "volt_iroh_handshake",
+			success: true,
+			workspace: "volt",
+			hostNodeId: "host-node",
+			clientNodeId: "client",
+			child: "volt",
+		});
+		expect(() => assertIrohRemoteHandshakeHostIdentity(hostHandshakeSuccess, "host-node")).not.toThrow();
+		expect(() => assertIrohRemoteHandshakeHostIdentity(hostHandshakeSuccess, "other-host")).toThrow(
+			"host_identity_mismatch: expected other-host, got host-node",
+		);
+		expect(() =>
+			assertIrohRemoteHandshakeHostIdentity(createIrohRemoteHandshakeFailure("client is not paired"), "host-node"),
+		).toThrow("host_identity_mismatch: expected host-node, got <missing>");
+		expect(createIrohRemoteHandshakeFailure("client is not paired", { hostNodeId: "host-node" })).toEqual({
 			type: "volt_iroh_handshake",
 			success: false,
+			hostNodeId: "host-node",
 			error: "client is not paired",
 		});
 		expect(
 			parseIrohRemoteHandshakeResponseLine(
-				JSON.stringify({ type: "volt_iroh_handshake", success: true, workspace: "volt", clientNodeId: "client" }),
+				JSON.stringify({
+					type: "volt_iroh_handshake",
+					success: true,
+					workspace: "volt",
+					hostNodeId: "host-node",
+					clientNodeId: "client",
+				}),
 			),
 		).toEqual({
 			type: "volt_iroh_handshake",
 			success: true,
 			workspace: "volt",
+			hostNodeId: "host-node",
 			clientNodeId: "client",
 			child: undefined,
 		});
@@ -369,11 +440,12 @@ describe("Iroh remote core helpers", () => {
 
 		const success = createIrohRemoteHandshakeSuccess({
 			workspace: "volt",
+			hostNodeId: "host-node-id",
 			clientNodeId: "authoritative-client-node-id",
 			child: "volt",
 		});
 		const successLine =
-			'{"type":"volt_iroh_handshake","success":true,"workspace":"volt","clientNodeId":"authoritative-client-node-id","child":"volt"}';
+			'{"type":"volt_iroh_handshake","success":true,"workspace":"volt","hostNodeId":"host-node-id","clientNodeId":"authoritative-client-node-id","child":"volt"}';
 		expect(JSON.stringify(success)).toBe(successLine);
 		expect(parseIrohRemoteHandshakeResponseLine(successLine)).toEqual(success);
 		expect(
@@ -814,6 +886,7 @@ describe("Iroh remote core helpers", () => {
 		const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
 		const hostEngine = new IrohRemoteHostEngine({
 			auditLogger,
+			hostNodeId: "host-node",
 			now: () => 100,
 			stateManager,
 			workspace,
@@ -860,6 +933,7 @@ describe("Iroh remote core helpers", () => {
 			type: "volt_iroh_handshake",
 			success: true,
 			workspace: "volt",
+			hostNodeId: "host-node",
 			clientNodeId: "client-node",
 			child: "volt",
 		});
@@ -971,6 +1045,86 @@ describe("Iroh remote core helpers", () => {
 		expect(reconnected.client.label).toBe("renamed phone");
 		expect(reconnected.client.allowedTools).toBe(DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
 		expect(reconnected.client.lastSeenAt).toBe(200);
+	});
+
+	test("host engine restart with the same state authorizes saved reconnects and preserves host identity", async () => {
+		const stateDir = await mkdtemp(join(tmpdir(), "volt-iroh-core-host-restart-"));
+		try {
+			const statePath = join(stateDir, "host.json");
+			const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
+			const firstHostEngine = new IrohRemoteHostEngine({
+				hostNodeId: "host-node",
+				now: () => 100,
+				stateManager: new IrohRemoteHostStateManager({ statePath }),
+				workspace,
+			});
+			await firstHostEngine.pair({
+				irohTicket: "iroh-endpoint-ticket",
+				nodeId: "host-node",
+				relayMode: "disabled",
+				secret: "secret",
+			});
+
+			const pairRecv = new ManualIrohRecvStream();
+			const pairSend = new ManualIrohSendStream();
+			pairRecv.push(
+				Buffer.from(
+					`${JSON.stringify({
+						type: "volt_iroh_hello",
+						protocol: IROH_REMOTE_ALPN,
+						workspace: "volt",
+						secret: "secret",
+						clientLabel: "phone",
+					})}\n`,
+				),
+			);
+			const pairedHandshake = await firstHostEngine.readHandshake({ recv: pairRecv, send: pairSend }, "client-node");
+			if (!pairedHandshake.ok) {
+				throw new Error(pairedHandshake.error);
+			}
+			expect(pairedHandshake.authorization.paired).toBe(true);
+			expect(pairedHandshake.response.hostNodeId).toBe("host-node");
+
+			const restartedHostEngine = new IrohRemoteHostEngine({
+				hostNodeId: "host-node",
+				now: () => 200,
+				stateManager: new IrohRemoteHostStateManager({ statePath }),
+				workspace,
+			});
+			const reconnectRecv = new ManualIrohRecvStream();
+			const reconnectSend = new ManualIrohSendStream();
+			reconnectRecv.push(
+				Buffer.from(
+					`${JSON.stringify({
+						type: "volt_iroh_hello",
+						protocol: IROH_REMOTE_ALPN,
+						workspace: "volt",
+						clientLabel: "phone renamed",
+					})}\n`,
+				),
+			);
+			const reconnectHandshake = await restartedHostEngine.readHandshake(
+				{ recv: reconnectRecv, send: reconnectSend },
+				"client-node",
+			);
+			if (!reconnectHandshake.ok) {
+				throw new Error(reconnectHandshake.error);
+			}
+
+			expect(reconnectHandshake.authorization.paired).toBe(false);
+			expect(reconnectHandshake.authorization.client.label).toBe("phone renamed");
+			expect(reconnectHandshake.authorization.client.lastSeenAt).toBe(200);
+			expect(reconnectHandshake.response).toEqual({
+				type: "volt_iroh_handshake",
+				success: true,
+				workspace: "volt",
+				hostNodeId: "host-node",
+				clientNodeId: "client-node",
+				child: undefined,
+			});
+		} finally {
+			await rm(stateDir, { force: true, recursive: true });
+		}
 	});
 
 	test("revoked clients require explicit approval and a fresh pairing secret to re-pair", async () => {
@@ -1954,6 +2108,7 @@ describe("Iroh remote core helpers", () => {
 			type: "volt_iroh_handshake",
 			success: true,
 			workspace: "volt",
+			hostNodeId: "host-node",
 			clientNodeId: "client-node",
 			child: "volt",
 		};
@@ -1961,12 +2116,35 @@ describe("Iroh remote core helpers", () => {
 		recv.push(Buffer.from(`${JSON.stringify(response)}\n{"type":"response"}\n`));
 		await writeIrohRemoteHandshakeResponse(send, response);
 
-		await expect(clientEngine.readHandshakeResponse(recv, { timeoutMs: 1000 })).resolves.toEqual({
+		await expect(
+			clientEngine.readHandshakeResponse(recv, { expectedHostNodeId: "host-node", timeoutMs: 1000 }),
+		).resolves.toEqual({
 			response,
 			initialInput: Buffer.from('{"type":"response"}\n'),
 		});
 		expect(send.writtenText()).toBe(`${JSON.stringify(hello)}\n${JSON.stringify(response)}\n`);
 		expect(sink.events.map((event) => event.type)).toEqual(["ticket_loaded", "handshake_response_received"]);
+
+		const mismatched = new ManualIrohRecvStream();
+		mismatched.push(Buffer.from(`${JSON.stringify({ ...response, hostNodeId: "other-host" })}\n`));
+		await expect(
+			clientEngine.readHandshakeResponse(mismatched, { expectedHostNodeId: "host-node", timeoutMs: 1000 }),
+		).rejects.toThrow("host_identity_mismatch: expected host-node, got other-host");
+
+		const missing = new ManualIrohRecvStream();
+		missing.push(
+			Buffer.from(
+				`${JSON.stringify({
+					type: "volt_iroh_handshake",
+					success: true,
+					workspace: "volt",
+					clientNodeId: "client-node",
+				})}\n`,
+			),
+		);
+		await expect(
+			clientEngine.readHandshakeResponse(missing, { expectedHostNodeId: "host-node", timeoutMs: 1000 }),
+		).rejects.toThrow("host_identity_mismatch: expected host-node, got <missing>");
 	});
 
 	test("client engine audit failures do not fail protocol progress", async () => {

@@ -13,6 +13,7 @@ export interface IrohRemoteHandshakeSuccess {
 	type: typeof IROH_REMOTE_HANDSHAKE_TYPE;
 	success: true;
 	workspace: string;
+	hostNodeId?: string;
 	clientNodeId: string;
 	child?: string;
 }
@@ -20,6 +21,7 @@ export interface IrohRemoteHandshakeSuccess {
 export interface IrohRemoteHandshakeFailure {
 	type: typeof IROH_REMOTE_HANDSHAKE_TYPE;
 	success: false;
+	hostNodeId?: string;
 	error: string;
 }
 
@@ -74,44 +76,68 @@ export function parseIrohRemoteHandshakeResponse(value: unknown): IrohRemoteHand
 		throw new Error("unexpected handshake response type");
 	}
 	if (response.success === true) {
-		return {
+		const hostNodeId = expectOptionalString(response.hostNodeId, "handshake response hostNodeId");
+		const success: IrohRemoteHandshakeSuccess = {
 			type: IROH_REMOTE_HANDSHAKE_TYPE,
 			success: true,
 			workspace: expectString(response.workspace, "handshake response workspace"),
 			clientNodeId: expectString(response.clientNodeId, "handshake response clientNodeId"),
 			child: expectOptionalString(response.child, "handshake response child"),
 		};
+		return hostNodeId === undefined ? success : { ...success, hostNodeId };
 	}
 	if (response.success === false) {
-		return {
+		const hostNodeId = expectOptionalString(response.hostNodeId, "handshake response hostNodeId");
+		const failure: IrohRemoteHandshakeFailure = {
 			type: IROH_REMOTE_HANDSHAKE_TYPE,
 			success: false,
 			error: expectString(response.error, "handshake response error"),
 		};
+		return hostNodeId === undefined ? failure : { ...failure, hostNodeId };
 	}
 	throw new Error("handshake response success must be a boolean");
 }
 
 export function createIrohRemoteHandshakeSuccess(options: {
 	workspace: string;
+	hostNodeId?: string;
 	clientNodeId: string;
 	child?: string;
 }): IrohRemoteHandshakeSuccess {
-	return {
+	const response: IrohRemoteHandshakeSuccess = {
 		type: IROH_REMOTE_HANDSHAKE_TYPE,
 		success: true,
 		workspace: options.workspace,
+		...(options.hostNodeId === undefined ? {} : { hostNodeId: options.hostNodeId }),
 		clientNodeId: options.clientNodeId,
 		child: options.child,
 	};
+	return response;
 }
 
-export function createIrohRemoteHandshakeFailure(error: string): IrohRemoteHandshakeFailure {
+export function createIrohRemoteHandshakeFailure(
+	error: string,
+	options: { hostNodeId?: string } = {},
+): IrohRemoteHandshakeFailure {
 	return {
 		type: IROH_REMOTE_HANDSHAKE_TYPE,
 		success: false,
+		...(options.hostNodeId === undefined ? {} : { hostNodeId: options.hostNodeId }),
 		error,
 	};
+}
+
+export function assertIrohRemoteHandshakeHostIdentity(
+	response: IrohRemoteHandshakeResponse,
+	expectedHostNodeId: string | undefined,
+): void {
+	if (expectedHostNodeId === undefined) {
+		return;
+	}
+	const actualHostNodeId = response.hostNodeId;
+	if (actualHostNodeId !== expectedHostNodeId) {
+		throw new Error(`host_identity_mismatch: expected ${expectedHostNodeId}, got ${actualHostNodeId ?? "<missing>"}`);
+	}
 }
 
 function expectRecord(value: unknown, label: string): Record<string, unknown> {

@@ -46,6 +46,7 @@ export {
 	IrohRemoteClientEngine,
 	type IrohRemoteClientEngineOptions,
 	type IrohRemoteClientHandshakeResponseResult,
+	type IrohRemoteClientReadHandshakeResponseOptions,
 	type IrohRemoteClientTicketHello,
 	IrohRemoteHostEngine,
 	type IrohRemoteHostEngineOptions,
@@ -55,6 +56,7 @@ export {
 	type IrohRemotePairingTicket,
 } from "./engine.ts";
 export {
+	assertIrohRemoteHandshakeHostIdentity,
 	createIrohRemoteHandshakeFailure,
 	createIrohRemoteHandshakeSuccess,
 	type IrohRemoteHandshakeFailure,
@@ -148,8 +150,12 @@ export {
 } from "./state-manager.ts";
 export {
 	assertIrohRemoteTicketNotExpired,
+	assertIrohRemoteTicketPayloadHostIdentity,
+	createIrohRemoteSanitizedReconnectTicket,
+	createIrohRemoteSanitizedReconnectTicketPayload,
 	decodeIrohRemoteTicketPayload,
 	encodeIrohRemoteTicketPayload,
+	type IrohRemoteSanitizedReconnectTicketPayload,
 	type IrohRemoteTicketPayload,
 	parseIrohRemoteTicketPayload,
 } from "./ticket.ts";

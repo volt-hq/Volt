@@ -16,6 +16,11 @@ export interface IrohRemoteTicketPayload {
 	workspace: string;
 }
 
+export interface IrohRemoteSanitizedReconnectTicketPayload extends IrohRemoteTicketPayload {
+	nodeId: string;
+	relayMode: IrohRemoteRelayMode;
+}
+
 export function encodeIrohRemoteTicketPayload(payload: IrohRemoteTicketPayload): string {
 	return `${IROH_REMOTE_TICKET_PREFIX}${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}`;
 }
@@ -66,6 +71,42 @@ export function parseIrohRemoteTicketPayload(value: unknown): IrohRemoteTicketPa
 export function assertIrohRemoteTicketNotExpired(payload: IrohRemoteTicketPayload, now = Date.now()): void {
 	if (payload.expiresAt !== undefined && now > payload.expiresAt) {
 		throw new Error("Pairing ticket has expired");
+	}
+}
+
+export function createIrohRemoteSanitizedReconnectTicketPayload(
+	payload: IrohRemoteTicketPayload,
+): IrohRemoteSanitizedReconnectTicketPayload {
+	if (payload.nodeId === undefined) {
+		throw new Error("saved_host_invalid: ticket nodeId is required for saved-host reconnect");
+	}
+	if (payload.relayMode === undefined) {
+		throw new Error("saved_host_invalid: ticket relayMode is required for saved-host reconnect");
+	}
+	return {
+		alpn: payload.alpn,
+		irohTicket: payload.irohTicket,
+		nodeId: payload.nodeId,
+		relayMode: payload.relayMode,
+		workspace: payload.workspace,
+	};
+}
+
+export function createIrohRemoteSanitizedReconnectTicket(ticket: string): string {
+	return encodeIrohRemoteTicketPayload(
+		createIrohRemoteSanitizedReconnectTicketPayload(decodeIrohRemoteTicketPayload(ticket)),
+	);
+}
+
+export function assertIrohRemoteTicketPayloadHostIdentity(
+	payload: IrohRemoteTicketPayload,
+	expectedHostNodeId: string,
+): void {
+	if (payload.nodeId === undefined) {
+		throw new Error("saved_host_invalid: ticket nodeId is required for host identity verification");
+	}
+	if (payload.nodeId !== expectedHostNodeId) {
+		throw new Error(`host_identity_mismatch: expected ${expectedHostNodeId}, got ${payload.nodeId}`);
 	}
 }
 

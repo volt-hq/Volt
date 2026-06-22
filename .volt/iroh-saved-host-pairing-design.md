@@ -541,6 +541,8 @@ Resolved 2026-06-22: the QR is consumed when the host durably commits the new ph
 
 Resolved 2026-06-22: clients persist `schemaVersion`, required `hostNodeId`, optional `hostDisplayName`, normalized `relayMode`, `primaryWorkspace`, `workspaceNames`, required `endpointTicket`, optional `sanitizedReconnectTicket`, `savedAt`, optional `lastConnectedAt`, and optional `discoveryRefreshedAt`. `hostNodeId` is authoritative. Endpoint tickets and sanitized reconnect tickets are refreshable dial hints. The current sanitized endpoint ticket is sufficient for v1 discovery when paired with explicit `hostNodeId` verification; no separate discovery blob is required for v1.
 
+Resolved 2026-06-22: Volt protocol helpers now expose a sanitized reconnect ticket payload that strips `secret` and `expiresAt` while requiring `nodeId` and `relayMode` for saved-host use. Host handshake responses can include authoritative `hostNodeId`; clients verify expected host identity before trusting reconnect results or refreshing non-secret discovery.
+
 ### What is the scope of the mobile `--relay default` product default?
 
 Resolved 2026-06-22: do not change the global CLI default. The default changes only for mobile-facing product/profile flows. Bare `volt remote host` remains relay-disabled; desktop Pair Phone, desktop service startup for the iOS app, and `volt remote host --mobile` default to relay `"default"`. Explicit `--relay disabled` remains the advanced LAN-only opt-out. `volt remote pair` uses the running host relay mode by default and treats `--relay` as an expectation check.

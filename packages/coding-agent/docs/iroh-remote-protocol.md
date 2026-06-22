@@ -32,7 +32,7 @@ The decoded JSON payload is an object with these fields:
 | `workspace` | yes | Workspace label requested by the client. The host still authorizes against its persisted workspace binding. |
 | `secret` | no | One-time pairing secret. Present only in pairing tickets. Persisted host state stores only a hash. |
 | `expiresAt` | no | Unix epoch milliseconds after which the pairing secret is invalid. |
-| `nodeId` | no | Host node ID hint for display and diagnostics. The native Iroh ticket remains the dial authority. |
+| `nodeId` | no | Host node ID. Required for saved-host reconnect records and verified against the native Iroh ticket plus handshake host identity. |
 | `relayMode` | no | `default` or `disabled`; clients may use it only as a diagnostic hint. |
 
 Unknown ticket fields are reserved for compatible extension and must be ignored by v1 clients.
@@ -50,6 +50,8 @@ Example decoded payload:
   "workspace": "volt"
 }
 ```
+
+Saved-host reconnect data uses the same ticket payload shape without `secret` or `expiresAt`. A saved reconnect record must retain a non-empty `nodeId`, supported `relayMode`, `workspace`, and `irohTicket`; records missing those required reconnect fields are invalid and should not be dialed.
 
 ## Stream handshake
 
@@ -77,22 +79,24 @@ The host responds with one UTF-8 JSON object followed by LF.
 Success:
 
 ```json
-{"type":"volt_iroh_handshake","success":true,"workspace":"volt","clientNodeId":"<authoritative-client-node-id>","child":"volt"}
+{"type":"volt_iroh_handshake","success":true,"workspace":"volt","hostNodeId":"<authoritative-host-node-id>","clientNodeId":"<authoritative-client-node-id>","child":"volt"}
 ```
 
 Failure:
 
 ```json
-{"type":"volt_iroh_handshake","success":false,"error":"client is not paired"}
+{"type":"volt_iroh_handshake","success":false,"hostNodeId":"<authoritative-host-node-id>","error":"client is not paired"}
 ```
 
-On success, `clientNodeId` is authoritative and comes from the host's accepted Iroh connection. `child` is an implementation label for the host-side child process and may be omitted. Unknown handshake response fields are ignored.
+On success, `hostNodeId` is the host's authoritative Iroh node ID and `clientNodeId` is the client's authoritative Iroh node ID observed by the host on the accepted connection. `child` is an implementation label for the host-side child process and may be omitted. Failure responses include `hostNodeId` when the host identity is known. Unknown handshake response fields are ignored.
 
 A paired client may have only one active connection per workspace in v1 preview. If the same authoritative client node ID connects to the same workspace while a previous connection is still active, the host rejects the new stream with a normal handshake failure response whose `error` is `client already connected`; the existing connection remains active.
 
 ## Reconnect and session selection
 
 A reconnecting paired client with the same authoritative Iroh node ID resumes the last recorded Volt session for that workspace when the session file still exists. If the recorded session is missing, the host creates a new session, records it for future reconnects, and reports the active `sessionId` through `get_state`. Clients may start a fresh conversation on the active stream with the `new_session` RPC command, list current-workspace sessions with `list_sessions`, or resume another current-workspace session with `switch_session_by_id`; the host records the active `sessionId` for future reconnects after new-session and switch operations. V1 does not replay live stream deltas; clients recover by reconnecting, calling `get_state` and `get_transcript`, and continuing from the persisted session state.
+
+Saved-host clients must verify that the native endpoint ticket node ID and the handshake `hostNodeId` match the saved host's `nodeId` before trusting authorization failures or refreshing non-secret discovery fields. If the reached identity differs, clients should treat the attempt as `host_identity_mismatch` and leave the saved host identity and discovery data unchanged.
 
 Remote UI clients should request `get_state` followed by `get_transcript` after connect/reconnect, and after a successful `switch_session_by_id` should show a loading transcript state while refreshing state and transcript for the selected session. After `new_session`, clients should keep a fresh empty transcript and refresh state without requesting older transcript from the previous session. For older history, clients use `get_transcript` pagination (`hasMore` and `nextBeforeEntryId`) and request pages with `beforeEntryId`.
 

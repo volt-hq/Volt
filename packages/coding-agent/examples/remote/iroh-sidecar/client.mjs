@@ -487,7 +487,19 @@ async function main() {
 	const clientState = await readState(statePath);
 	const endpoint = await bindEndpoint(payload.relayMode ?? "disabled", clientState, statePath);
 	const endpointTicket = EndpointTicket.fromString(payload.irohTicket);
+	if (payload.nodeId !== undefined) {
+		const ticketHostNodeId = endpointTicket.endpointAddr().id().toString();
+		if (ticketHostNodeId !== payload.nodeId) {
+			throw new Error(`host_identity_mismatch: expected ${payload.nodeId}, got ${ticketHostNodeId}`);
+		}
+	}
 	const connection = await endpoint.connect(endpointTicket.endpointAddr(), ALPN);
+	if (payload.nodeId !== undefined) {
+		const connectedHostNodeId = connection.remoteId().toString();
+		if (connectedHostNodeId !== payload.nodeId) {
+			throw new Error(`host_identity_mismatch: expected ${payload.nodeId}, got ${connectedHostNodeId}`);
+		}
+	}
 	const stream = await connection.openBi();
 	const clientEngine = new IrohRemoteClientEngine({
 		clientLabel: getFlag(flags, "client-label", `node-${process.pid}`),
@@ -495,7 +507,7 @@ async function main() {
 	});
 
 	await clientEngine.writeHello(stream, payload);
-	const handshake = await clientEngine.readHandshakeResponse(stream.recv);
+	const handshake = await clientEngine.readHandshakeResponse(stream.recv, { expectedHostNodeId: payload.nodeId });
 	if (!handshake.response.success) {
 		throw new Error(handshake.response.error);
 	}

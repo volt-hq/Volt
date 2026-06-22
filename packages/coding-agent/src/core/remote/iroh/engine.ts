@@ -8,6 +8,7 @@ import {
 	type IrohRemoteClientAuthorizationSuccess,
 } from "./authorization.ts";
 import {
+	assertIrohRemoteHandshakeHostIdentity,
 	createIrohRemoteHandshakeFailure,
 	createIrohRemoteHandshakeSuccess,
 	type IrohRemoteHandshakeFailure,
@@ -42,6 +43,7 @@ export const DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS = 10 * 60 * 1000;
 export interface IrohRemoteHostEngineOptions {
 	allowTools?: string;
 	auditLogger?: IrohRemoteAuditLogger;
+	hostNodeId?: string;
 	now?: () => number;
 	pairingExpiresAt?: number;
 	pairingSecret?: string;
@@ -109,8 +111,13 @@ export interface IrohRemoteClientHandshakeResponseResult {
 	response: IrohRemoteHandshakeResponse;
 }
 
+export interface IrohRemoteClientReadHandshakeResponseOptions extends IrohRemoteHandshakeLineReadOptions {
+	expectedHostNodeId?: string;
+}
+
 export class IrohRemoteHostEngine {
 	private readonly auditLogger: IrohRemoteAuditLogger;
+	private readonly hostNodeId: string | undefined;
 	private readonly now: () => number;
 	private readonly stateManager: IrohRemoteHostStateManager;
 	private readonly workspace: IrohRemoteWorkspace;
@@ -123,6 +130,7 @@ export class IrohRemoteHostEngine {
 	constructor(options: IrohRemoteHostEngineOptions) {
 		this.allowTools = options.allowTools ?? DEFAULT_IROH_REMOTE_ALLOW_TOOLS;
 		this.auditLogger = options.auditLogger ?? new IrohRemoteAuditLogger();
+		this.hostNodeId = options.hostNodeId;
 		this.now = options.now ?? Date.now;
 		this.pairingExpiresAt = options.pairingExpiresAt;
 		this.pairingSecret = options.pairingSecret;
@@ -279,7 +287,7 @@ export class IrohRemoteHostEngine {
 					ok: false,
 					error: authorization.error,
 					initialInput,
-					response: createIrohRemoteHandshakeFailure(authorization.error),
+					response: createIrohRemoteHandshakeFailure(authorization.error, { hostNodeId: this.hostNodeId }),
 					responseWritten: false,
 				});
 			}
@@ -292,6 +300,7 @@ export class IrohRemoteHostEngine {
 				response: createIrohRemoteHandshakeSuccess({
 					child: options.child,
 					clientNodeId: remoteNodeId,
+					hostNodeId: this.hostNodeId,
 					workspace: authorization.workspace.name,
 				}),
 				responseWritten: false,
@@ -332,7 +341,7 @@ export class IrohRemoteHostEngine {
 			ok: false,
 			error,
 			initialInput,
-			response: createIrohRemoteHandshakeFailure(error),
+			response: createIrohRemoteHandshakeFailure(error, { hostNodeId: this.hostNodeId }),
 			responseWritten: false,
 		};
 	}
@@ -462,13 +471,14 @@ export class IrohRemoteClientEngine {
 
 	async readHandshakeResponse(
 		recv: IrohRecvStreamLike,
-		options: IrohRemoteHandshakeLineReadOptions = {},
+		options: IrohRemoteClientReadHandshakeResponseOptions = {},
 	): Promise<IrohRemoteClientHandshakeResponseResult> {
 		const handshake = await readIrohRemoteHandshakeLine(recv, options);
 		if (handshake.line === undefined) {
 			throw new Error("missing handshake response");
 		}
 		const response = parseIrohRemoteHandshakeResponseLine(handshake.line);
+		assertIrohRemoteHandshakeHostIdentity(response, options.expectedHostNodeId);
 		await this.log({
 			type: "handshake_response_received",
 			workspace: response.success ? response.workspace : undefined,
