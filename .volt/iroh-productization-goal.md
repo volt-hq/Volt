@@ -348,10 +348,10 @@ the rollup item is resolved, and the final turn's required verification passed.
 </group>
 
 <group n="6" title="Docs, packaging boundary, and release readiness">
-  <item ref="F.1" status="open" prereq="B.3,C.1,C.3,D.1,E.3">
+  <item ref="F.1" status="resolved" prereq="B.3,C.1,C.3,D.1,E.3">
     <title>Update user documentation for remote host, pair, clients, revoke, status, relay mode, state/audit paths, read-only defaults, unsafe tool warnings, project trust, and Node-only/Bun-binary limitation</title>
     <acceptance>README, docs/usage, docs/index, security docs, Iroh design doc, protocol doc, sidecar README, and changelog are updated; experimental language is either removed or narrowed to explicit unsupported areas; docs include copy-pastable happy path and revocation path; security warnings are prominent.</acceptance>
-    <evidence/>
+    <evidence>Resolved 2026-06-21: updated README, usage, docs index, security, Iroh design, protocol, sidecar README, changelog, and productization design with preview remote workflow, host/pair/client/revoke/status/relay guidance, state/audit paths, read-only defaults, unsafe tool and project-trust warnings, native troubleshooting, Node-only/Bun limitation, revoke-and-repair policy updates, and relay-status support boundary; verification: git diff --check on changed docs, npm run check; commit 4a475d61</evidence>
   </item>
 
   <item ref="F.2" status="open" prereq="F.1">
