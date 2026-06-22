@@ -19,6 +19,18 @@ export interface IrohRemoteClient {
 	lastSessionIdByWorkspace?: Record<string, string>;
 }
 
+export interface IrohRemoteRevokedClient {
+	nodeId: string;
+	label: string;
+	allowedWorkspaces: string[];
+	allowedTools: string;
+	pairedAt: number;
+	lastSeenAt: number;
+	revokedAt: number;
+	lastSessionIdByWorkspace?: Record<string, string>;
+	rePairApprovedAt?: number;
+}
+
 export interface IrohRemotePendingPairingTicket {
 	secretHash: string;
 	workspace: string;
@@ -48,6 +60,7 @@ export interface IrohRemoteHostState {
 	pairingSecretTombstones?: IrohRemotePairingSecretTombstone[];
 	workspaces: IrohRemoteWorkspace[];
 	clients: IrohRemoteClient[];
+	revokedClients?: IrohRemoteRevokedClient[];
 	pendingPairingTickets?: IrohRemotePendingPairingTicket[];
 }
 
@@ -57,6 +70,7 @@ export function createEmptyIrohRemoteHostState(): IrohRemoteHostState {
 		pairingSecretTombstones: [],
 		workspaces: [],
 		clients: [],
+		revokedClients: [],
 		pendingPairingTickets: [],
 	};
 }
@@ -92,6 +106,7 @@ export function parseIrohRemoteHostState(value: unknown): IrohRemoteHostState {
 		),
 		workspaces: parseArray(state.workspaces, "workspaces", parseIrohRemoteWorkspace),
 		clients: parseArray(state.clients, "clients", parseIrohRemoteClient),
+		revokedClients: parseOptionalArray(state.revokedClients, "revokedClients", parseIrohRemoteRevokedClient),
 		pendingPairingTickets: parseOptionalArray(
 			state.pendingPairingTickets,
 			"pendingPairingTickets",
@@ -106,6 +121,13 @@ function serializeIrohRemoteHostState(state: IrohRemoteHostState): IrohRemoteHos
 		pairingSecretTombstones: (state.pairingSecretTombstones ?? []).map((tombstone) => ({ ...tombstone })),
 		workspaces: state.workspaces.map((workspace) => ({ ...workspace })),
 		clients: state.clients.map((client) => ({
+			...client,
+			allowedWorkspaces: [...client.allowedWorkspaces],
+			...(client.lastSessionIdByWorkspace
+				? { lastSessionIdByWorkspace: { ...client.lastSessionIdByWorkspace } }
+				: {}),
+		})),
+		revokedClients: (state.revokedClients ?? []).map((client) => ({
 			...client,
 			allowedWorkspaces: [...client.allowedWorkspaces],
 			...(client.lastSessionIdByWorkspace
@@ -142,6 +164,30 @@ export function parseIrohRemoteClient(value: unknown): IrohRemoteClient {
 			"client last session workspace",
 			"client last session id",
 		),
+	};
+}
+
+export function parseIrohRemoteRevokedClient(value: unknown): IrohRemoteRevokedClient {
+	const client = expectRecord(value, "Iroh remote revoked client");
+	const rePairApprovedAt = expectOptionalNumber(client.rePairApprovedAt, "revoked client rePairApprovedAt");
+	return {
+		nodeId: expectString(client.nodeId, "revoked client nodeId"),
+		label: expectString(client.label, "revoked client label"),
+		allowedWorkspaces: parseArray(client.allowedWorkspaces, "revoked client allowedWorkspaces", (entry) =>
+			expectString(entry, "revoked client allowed workspace"),
+		),
+		allowedTools:
+			expectOptionalString(client.allowedTools, "revoked client allowedTools") ?? DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+		pairedAt: expectNumber(client.pairedAt, "revoked client pairedAt"),
+		lastSeenAt: expectNumber(client.lastSeenAt, "revoked client lastSeenAt"),
+		revokedAt: expectNumber(client.revokedAt, "revoked client revokedAt"),
+		...parseOptionalStringRecordProperty(
+			client.lastSessionIdByWorkspace,
+			"revoked client lastSessionIdByWorkspace",
+			"revoked client last session workspace",
+			"revoked client last session id",
+		),
+		...(rePairApprovedAt === undefined ? {} : { rePairApprovedAt }),
 	};
 }
 

@@ -13,6 +13,7 @@ import {
 	type IrohRemoteHostState,
 	type IrohRemotePairingSecretTombstone,
 	type IrohRemotePendingPairingTicket,
+	type IrohRemoteRevokedClient,
 	type IrohRemoteWorkspace,
 	readIrohRemoteHostState,
 	writeIrohRemoteHostState,
@@ -27,6 +28,12 @@ export interface IrohRemoteHostStateManagerOptions {
 export interface IrohRemoteClientRevocationResult {
 	revoked: boolean;
 	client?: IrohRemoteClient;
+	revokedClient?: IrohRemoteRevokedClient;
+}
+
+export interface IrohRemoteClientRePairApprovalResult {
+	approved: boolean;
+	revokedClient?: IrohRemoteRevokedClient;
 }
 
 export class IrohRemoteHostStateManager {
@@ -103,6 +110,13 @@ export class IrohRemoteHostStateManager {
 		});
 	}
 
+	async listRevokedClients(): Promise<IrohRemoteRevokedClient[]> {
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			return getRevokedClients(state).map((client) => cloneRevokedClient(client));
+		});
+	}
+
 	async setClientLastSessionId(
 		nodeId: string,
 		workspace: string,
@@ -123,17 +137,47 @@ export class IrohRemoteHostStateManager {
 		});
 	}
 
-	async revokeClient(nodeId: string): Promise<IrohRemoteClientRevocationResult> {
+	async revokeClient(nodeId: string, now = Date.now()): Promise<IrohRemoteClientRevocationResult> {
 		return this.runExclusive(async () => {
 			const state = await this.loadUnlocked();
 			const clientIndex = state.clients.findIndex((client) => client.nodeId === nodeId);
 			if (clientIndex === -1) {
-				return { revoked: false };
+				const revokedClient = getRevokedClients(state).find((client) => client.nodeId === nodeId);
+				return {
+					revoked: false,
+					...(revokedClient ? { revokedClient: cloneRevokedClient(revokedClient) } : {}),
+				};
 			}
 
 			const [client] = state.clients.splice(clientIndex, 1);
+			const revokedClient: IrohRemoteRevokedClient = {
+				nodeId: client.nodeId,
+				label: client.label,
+				allowedWorkspaces: [...client.allowedWorkspaces],
+				allowedTools: client.allowedTools,
+				pairedAt: client.pairedAt,
+				lastSeenAt: client.lastSeenAt,
+				revokedAt: now,
+				...(client.lastSessionIdByWorkspace
+					? { lastSessionIdByWorkspace: { ...client.lastSessionIdByWorkspace } }
+					: {}),
+			};
+			state.revokedClients = [...getRevokedClients(state).filter((entry) => entry.nodeId !== nodeId), revokedClient];
 			await this.saveUnlocked(state);
-			return { revoked: true, client: cloneClient(client) };
+			return { revoked: true, client: cloneClient(client), revokedClient: cloneRevokedClient(revokedClient) };
+		});
+	}
+
+	async approveClientRePair(nodeId: string, now = Date.now()): Promise<IrohRemoteClientRePairApprovalResult> {
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			const revokedClient = getRevokedClients(state).find((client) => client.nodeId === nodeId);
+			if (!revokedClient) {
+				return { approved: false };
+			}
+			revokedClient.rePairApprovedAt = now;
+			await this.saveUnlocked(state);
+			return { approved: true, revokedClient: cloneRevokedClient(revokedClient) };
 		});
 	}
 
@@ -253,6 +297,7 @@ function cloneHostState(state: IrohRemoteHostState): IrohRemoteHostState {
 		),
 		workspaces: state.workspaces.map((workspace) => cloneWorkspace(workspace)),
 		clients: state.clients.map((client) => cloneClient(client)),
+		revokedClients: (state.revokedClients ?? []).map((client) => cloneRevokedClient(client)),
 		pendingPairingTickets: (state.pendingPairingTickets ?? []).map((ticket) => clonePendingPairingTicket(ticket)),
 	};
 }
@@ -265,6 +310,19 @@ function clonePendingPairingTicket(ticket: IrohRemotePendingPairingTicket): Iroh
 	return { ...ticket };
 }
 
+function cloneRevokedClient(client: IrohRemoteRevokedClient): IrohRemoteRevokedClient {
+	return {
+		...client,
+		allowedWorkspaces: [...client.allowedWorkspaces],
+		...(client.lastSessionIdByWorkspace ? { lastSessionIdByWorkspace: { ...client.lastSessionIdByWorkspace } } : {}),
+	};
+}
+
 function cloneWorkspace(workspace: IrohRemoteWorkspace): IrohRemoteWorkspace {
 	return { ...workspace };
+}
+
+function getRevokedClients(state: IrohRemoteHostState): IrohRemoteRevokedClient[] {
+	state.revokedClients ??= [];
+	return state.revokedClients;
 }

@@ -90,6 +90,7 @@ describe("remote CLI", () => {
 		const helpText = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
 		expect(helpText).toContain("volt remote pair [options]");
 		expect(helpText).toContain("volt remote status [options]");
+		expect(helpText).toContain("volt remote approve-repair <node-id> [options]");
 		expect(helpText).toContain("bash, edit, or write can modify host state and require confirmation");
 		expect(helpText).toContain("--yes");
 		expect(process.exitCode).toBeUndefined();
@@ -296,6 +297,18 @@ describe("remote CLI", () => {
 					lastSeenAt: 20,
 				},
 			],
+			revokedClients: [
+				{
+					nodeId: "client-a",
+					label: "old phone",
+					allowedWorkspaces: ["alpha"],
+					allowedTools: "read",
+					pairedAt: 1,
+					lastSeenAt: 2,
+					revokedAt: 3,
+					rePairApprovedAt: 4,
+				},
+			],
 			pendingPairingTickets: [
 				{
 					secretHash: "sha256:pending-secret-hash",
@@ -334,6 +347,19 @@ describe("remote CLI", () => {
 					allowedTools: "read,grep",
 					pairedAt: 10,
 					lastSeenAt: 20,
+				},
+			],
+			revokedClientCount: 1,
+			revokedClients: [
+				{
+					nodeId: "client-a",
+					label: "old phone",
+					allowedWorkspaces: ["alpha"],
+					allowedTools: "read",
+					pairedAt: 1,
+					lastSeenAt: 2,
+					revokedAt: 3,
+					rePairApprovedAt: 4,
 				},
 			],
 		});
@@ -386,7 +412,9 @@ describe("remote CLI", () => {
 		);
 
 		expect(requestBody).toEqual({ type: "volt_iroh_revoke_request", nodeId: "client-node" });
-		expect((await readIrohRemoteHostState(statePath)).clients).toEqual([]);
+		const savedState = await readIrohRemoteHostState(statePath);
+		expect(savedState.clients).toEqual([]);
+		expect(savedState.revokedClients).toEqual([expect.objectContaining({ nodeId: "client-node" })]);
 		expect(logSpy).not.toHaveBeenCalled();
 		const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
 		expect(stderr).toContain("Active connection revoked for client-node");
@@ -427,6 +455,77 @@ describe("remote CLI", () => {
 		expect(process.exitCode).toBe(1);
 	});
 
+	it("approves revoked Iroh clients for explicit re-pair", async () => {
+		const statePath = join(tempDir, "host.json");
+		const auditPath = join(tempDir, "host.audit.jsonl");
+		await writeIrohRemoteHostState(statePath, {
+			hostSecretKey: undefined,
+			workspaces: [{ name: "project", path: projectDir, allowedTools: "read" }],
+			clients: [],
+			revokedClients: [
+				{
+					nodeId: "client-node",
+					label: "phone",
+					allowedWorkspaces: ["project"],
+					allowedTools: "read",
+					pairedAt: 10,
+					lastSeenAt: 20,
+					revokedAt: 30,
+				},
+			],
+		});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(
+			main(["remote", "approve-repair", "client-node", "--state", statePath, "--audit", auditPath]),
+		).resolves.toBeUndefined();
+
+		const savedState = await readIrohRemoteHostState(statePath);
+		expect(savedState.revokedClients).toEqual([
+			expect.objectContaining({ nodeId: "client-node", rePairApprovedAt: expect.any(Number) }),
+		]);
+		expect(logSpy).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"Approved re-pair for client-node",
+		);
+		expect(JSON.parse(readFileSync(auditPath, "utf8").trim())).toMatchObject({
+			type: "client_repair_approved",
+			clientNodeId: "client-node",
+			success: true,
+		});
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("audits failed Iroh remote re-pair approval", async () => {
+		const statePath = join(tempDir, "host.json");
+		const auditPath = join(tempDir, "host.audit.jsonl");
+		await writeIrohRemoteHostState(statePath, {
+			hostSecretKey: undefined,
+			workspaces: [{ name: "project", path: projectDir, allowedTools: "read" }],
+			clients: [],
+			revokedClients: [],
+		});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(
+			main(["remote", "approve-repair", "missing-client", "--state", statePath, "--audit", auditPath]),
+		).resolves.toBeUndefined();
+
+		expect(logSpy).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"Error: No revoked client found for missing-client",
+		);
+		expect(JSON.parse(readFileSync(auditPath, "utf8").trim())).toMatchObject({
+			type: "client_repair_approved",
+			clientNodeId: "missing-client",
+			success: false,
+			error: "revoked client not found",
+		});
+		expect(process.exitCode).toBe(1);
+	});
+
 	it("lists and revokes paired Iroh clients", async () => {
 		const statePath = join(tempDir, "host.json");
 		const auditPath = join(tempDir, "host.audit.jsonl");
@@ -460,7 +559,9 @@ describe("remote CLI", () => {
 			main(["remote", "revoke", "client-node", "--state", statePath, "--audit", auditPath]),
 		).resolves.toBeUndefined();
 
-		expect((await readIrohRemoteHostState(statePath)).clients).toEqual([]);
+		const savedState = await readIrohRemoteHostState(statePath);
+		expect(savedState.clients).toEqual([]);
+		expect(savedState.revokedClients).toEqual([expect.objectContaining({ nodeId: "client-node" })]);
 		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain("Revoked client-node");
 		expect(JSON.parse(readFileSync(auditPath, "utf8").trim())).toMatchObject({
 			type: "client_revoked",

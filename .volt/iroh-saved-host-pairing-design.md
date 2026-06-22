@@ -310,6 +310,8 @@ Use these boundaries:
 
 Resolved 2026-06-22: revocation is a durable host-side block for a specific phone node ID, not only deletion from the paired-client list.
 
+Resolved 2026-06-22: Volt host state implements revocation as `revokedClients[]` tombstones keyed by node ID. Each tombstone records label, prior workspace/tool grants, prior paired and last-seen timestamps, revocation time, optional last session metadata, and optional `rePairApprovedAt`. `volt remote status` exposes active clients and revoked clients separately; `volt remote approve-repair <node-id>` records explicit desktop approval. A revoked node cannot reconnect or consume a generic pairing QR. If the tombstone has `rePairApprovedAt`, the same node may re-pair only with an active unused pairing secret; the successful re-pair creates a new active client record and clears the tombstone.
+
 When the desktop user revokes a phone, the host should:
 
 - remove the phone from the active allowed-client list

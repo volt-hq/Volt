@@ -43,6 +43,7 @@ import {
 	type IrohRemoteClient,
 	IrohRemoteHostStateManager,
 	type IrohRemoteRelayMode,
+	type IrohRemoteRevokedClient,
 	type IrohRemoteUnsafeApproval,
 	type IrohRemoteWorkspace,
 	isIrohRemoteRelayMode,
@@ -98,6 +99,7 @@ function printRemoteCommandHelp(): void {
   volt remote status [options]
   volt remote clients [options]
   volt remote revoke <node-id> [options]
+  volt remote approve-repair <node-id> [options]
 
 Host options are forwarded to the integrated Iroh remote host. Common options:
   --workspace <name=path>       Workspace exposed to the client
@@ -126,7 +128,7 @@ Pair options:
 
 Client management options:
   --state <path>                Host state path
-  --audit <path>                Audit JSONL path for status/revoke
+  --audit <path>                Audit JSONL path for status/revoke/approve-repair
 `);
 }
 
@@ -166,6 +168,17 @@ interface IrohRemoteStatusClientView {
 	pairedAt: number;
 }
 
+interface IrohRemoteStatusRevokedClientView {
+	allowedTools: string;
+	allowedWorkspaces: string[];
+	label: string;
+	lastSeenAt: number;
+	nodeId: string;
+	pairedAt: number;
+	rePairApprovedAt?: number;
+	revokedAt: number;
+}
+
 interface IrohRemoteStatusView {
 	auditPath: string;
 	clientCount: number;
@@ -174,6 +187,8 @@ interface IrohRemoteStatusView {
 		available: false;
 		warning: string;
 	};
+	revokedClientCount: number;
+	revokedClients: IrohRemoteStatusRevokedClientView[];
 	statePath: string;
 	warning: string;
 	workspaces: IrohRemoteStatusWorkspaceView[];
@@ -490,14 +505,31 @@ function formatRemoteStatusClient(client: IrohRemoteClient): IrohRemoteStatusCli
 	};
 }
 
+function formatRemoteStatusRevokedClient(client: IrohRemoteRevokedClient): IrohRemoteStatusRevokedClientView {
+	return {
+		nodeId: client.nodeId,
+		label: client.label,
+		allowedWorkspaces: [...client.allowedWorkspaces].sort(),
+		allowedTools: client.allowedTools,
+		pairedAt: client.pairedAt,
+		lastSeenAt: client.lastSeenAt,
+		revokedAt: client.revokedAt,
+		...(client.rePairApprovedAt === undefined ? {} : { rePairApprovedAt: client.rePairApprovedAt }),
+	};
+}
+
 function createRemoteStatusView(options: {
 	auditPath: string;
 	clients: readonly IrohRemoteClient[];
+	revokedClients: readonly IrohRemoteRevokedClient[];
 	statePath: string;
 	workspaces: readonly IrohRemoteWorkspace[];
 }): IrohRemoteStatusView {
 	const clients = options.clients
 		.map((client) => formatRemoteStatusClient(client))
+		.sort((left, right) => left.nodeId.localeCompare(right.nodeId));
+	const revokedClients = options.revokedClients
+		.map((client) => formatRemoteStatusRevokedClient(client))
 		.sort((left, right) => left.nodeId.localeCompare(right.nodeId));
 	return {
 		statePath: options.statePath,
@@ -512,6 +544,8 @@ function createRemoteStatusView(options: {
 			.sort((left, right) => left.name.localeCompare(right.name)),
 		clientCount: clients.length,
 		clients,
+		revokedClientCount: revokedClients.length,
+		revokedClients,
 	};
 }
 
@@ -539,6 +573,7 @@ async function handleRemoteStatusCommand(args: readonly string[]): Promise<void>
 			createRemoteStatusView({
 				auditPath: parsed.auditPath ?? getDefaultIrohRemoteAuditPath(parsed.statePath),
 				clients: state.clients,
+				revokedClients: state.revokedClients ?? [],
 				statePath: parsed.statePath,
 				workspaces: state.workspaces,
 			}),
@@ -638,6 +673,55 @@ async function handleRemoteRevokeCommand(args: readonly string[]): Promise<void>
 	console.error(`Revoked ${nodeId}`);
 }
 
+async function handleRemoteApproveRepairCommand(args: readonly string[]): Promise<void> {
+	const parsed = parseRemoteManagementArgs(args);
+	if (parsed.help) {
+		printRemoteCommandHelp();
+		return;
+	}
+	if (parsed.error) {
+		console.error(chalk.red(`Error: ${parsed.error}`));
+		process.exitCode = 1;
+		return;
+	}
+
+	const nodeId = parsed.positionals[0];
+	if (!nodeId) {
+		console.error(chalk.red("Error: Missing node id to approve for re-pair"));
+		process.exitCode = 1;
+		return;
+	}
+	if (parsed.positionals.length > 1) {
+		console.error(chalk.red(`Error: Unexpected remote approve-repair argument: ${parsed.positionals[1]}`));
+		process.exitCode = 1;
+		return;
+	}
+
+	const stateManager = new IrohRemoteHostStateManager({ statePath: parsed.statePath });
+	const result = await stateManager.approveClientRePair(nodeId);
+	const auditLogger = new IrohRemoteAuditLogger({
+		path: parsed.auditPath ?? getDefaultIrohRemoteAuditPath(parsed.statePath),
+	});
+	try {
+		await auditLogger.log({
+			type: "client_repair_approved",
+			clientNodeId: nodeId,
+			success: result.approved,
+			error: result.approved ? undefined : "revoked client not found",
+		});
+	} catch {
+		// Audit logging is best-effort for local client management commands.
+	}
+
+	if (!result.approved) {
+		console.error(chalk.red(`Error: No revoked client found for ${nodeId}`));
+		process.exitCode = 1;
+		return;
+	}
+
+	console.error(`Approved re-pair for ${nodeId}`);
+}
+
 async function pathExists(path: string): Promise<boolean> {
 	try {
 		await access(path);
@@ -673,6 +757,10 @@ async function handleRemoteCommand(args: string[], options: { profile?: string }
 	}
 	if (command === "clients") {
 		await handleRemoteClientsCommand(args.slice(2));
+		return true;
+	}
+	if (command === "approve-repair") {
+		await handleRemoteApproveRepairCommand(args.slice(2));
 		return true;
 	}
 	if (command === "pair") {

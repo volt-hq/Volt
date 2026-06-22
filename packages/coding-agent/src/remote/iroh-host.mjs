@@ -195,6 +195,7 @@ function printUsage() {
 	console.error(`Usage: volt remote host [serve] [options]
        volt remote clients [options]
        volt remote revoke <node-id> [options]
+       volt remote approve-repair <node-id> [options]
 
 Serve options:
   --workspace <name=path>    Workspace exposed to the client. Defaults to saved workspace or cwd.
@@ -219,6 +220,7 @@ Serve options:
 Client management:
   clients                    Print paired clients from state.
   revoke <node-id>           Remove a paired client from state.
+  approve-repair <node-id>   Allow a revoked client node ID to re-pair.
 `);
 }
 
@@ -271,6 +273,7 @@ function syncState(target, source) {
 	target.pairingSecretTombstones = source.pairingSecretTombstones ?? [];
 	target.workspaces = source.workspaces ?? [];
 	target.clients = source.clients ?? [];
+	target.revokedClients = source.revokedClients ?? [];
 	target.pendingPairingTickets = source.pendingPairingTickets ?? [];
 }
 
@@ -1885,6 +1888,25 @@ async function revokeClient(flags, nodeId) {
 	console.error(`Revoked ${nodeId}`);
 }
 
+async function approveClientRePair(flags, nodeId) {
+	if (!nodeId) throw new Error("Missing node id to approve for re-pair");
+	const statePath = resolve(getFlag(flags, "state", DEFAULT_STATE_PATH));
+	const { auditLogger } = createAuditLogger(flags, statePath);
+	const stateManager = new IrohRemoteHostStateManager({ statePath });
+	const result = await stateManager.approveClientRePair(nodeId);
+	await logAudit(auditLogger, {
+		type: "client_repair_approved",
+		clientNodeId: nodeId,
+		success: result.approved,
+		error: result.approved ? undefined : "revoked client not found",
+	});
+	if (!result.approved) {
+		console.error(`No revoked client found for ${nodeId}`);
+		return;
+	}
+	console.error(`Approved re-pair for ${nodeId}`);
+}
+
 async function main() {
 	const { flags, positionals } = parseFlags(process.argv.slice(2));
 	if (hasFlag(flags, "help")) {
@@ -1903,6 +1925,10 @@ async function main() {
 	}
 	if (command === "revoke") {
 		await revokeClient(flags, positionals[1]);
+		return;
+	}
+	if (command === "approve-repair") {
+		await approveClientRePair(flags, positionals[1]);
 		return;
 	}
 

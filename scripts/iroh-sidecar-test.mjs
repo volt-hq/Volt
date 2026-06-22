@@ -1644,7 +1644,7 @@ async function integratedVoltActiveDetachReconnectTranscriptScenario() {
 			});
 			assert(
 				revokedClient.handshakeResponse.success === false &&
-					revokedClient.handshakeResponse.error === "pairing ticket has already been used",
+					revokedClient.handshakeResponse.error === "client is revoked",
 				`Expected revoked node to be rejected, got:\n${JSON.stringify(revokedClient.handshakeResponse)}`,
 			);
 			closeRawConnection(revokedClient.connection);
@@ -1968,6 +1968,7 @@ async function statusCommandScenario() {
 		);
 		assert(status.liveStatus?.available === false, `Expected no live status, got:\n${statusText}`);
 		assert(status.clientCount === 1, `Expected one status client, got:\n${statusText}`);
+		assert(status.revokedClientCount === 0, `Expected no revoked status clients, got:\n${statusText}`);
 		assert(status.workspaces?.[0]?.name, `Expected status workspace, got:\n${statusText}`);
 		const client = status.clients?.[0];
 		assert(client?.nodeId && client.label, `Expected status client identity, got:\n${statusText}`);
@@ -2142,7 +2143,7 @@ async function pairingAndRevocationScenario() {
 			label: "revoked client",
 		});
 		assert(
-			revokedFailure.clientOutput.stderr.includes("client is not paired"),
+			revokedFailure.clientOutput.stderr.includes("client is revoked"),
 			`Expected revoked client rejection, got:\n${revokedFailure.clientOutput.stderr}`,
 		);
 	});

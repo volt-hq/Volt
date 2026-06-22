@@ -25,7 +25,11 @@ import {
 } from "./handshake-reader.ts";
 import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS, IROH_REMOTE_ALPN, type IrohRemoteRelayMode } from "./protocol.ts";
 import { type IrohRemoteClient, type IrohRemoteWorkspace, parseIrohRemoteWorkspace } from "./state.ts";
-import type { IrohRemoteClientRevocationResult, IrohRemoteHostStateManager } from "./state-manager.ts";
+import type {
+	IrohRemoteClientRePairApprovalResult,
+	IrohRemoteClientRevocationResult,
+	IrohRemoteHostStateManager,
+} from "./state-manager.ts";
 import {
 	assertIrohRemoteTicketNotExpired,
 	decodeIrohRemoteTicketPayload,
@@ -183,12 +187,23 @@ export class IrohRemoteHostEngine {
 	}
 
 	async revokeClient(nodeId: string): Promise<IrohRemoteClientRevocationResult> {
-		const result = await this.stateManager.revokeClient(nodeId);
+		const result = await this.stateManager.revokeClient(nodeId, this.now());
 		await this.log({
 			type: "client_revoked",
 			clientNodeId: nodeId,
 			success: result.revoked,
 			error: result.revoked ? undefined : "client not found",
+		});
+		return result;
+	}
+
+	async approveClientRePair(nodeId: string): Promise<IrohRemoteClientRePairApprovalResult> {
+		const result = await this.stateManager.approveClientRePair(nodeId, this.now());
+		await this.log({
+			type: "client_repair_approved",
+			clientNodeId: nodeId,
+			success: result.approved,
+			error: result.approved ? undefined : "revoked client not found",
 		});
 		return result;
 	}

@@ -569,6 +569,19 @@ describe("Iroh remote core helpers", () => {
 						lastSessionIdByWorkspace: { volt: "session-one" },
 					},
 				],
+				revokedClients: [
+					{
+						nodeId: "revoked-node",
+						label: "revoked phone",
+						allowedWorkspaces: ["volt"],
+						allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+						pairedAt: 11,
+						lastSeenAt: 21,
+						revokedAt: 31,
+						lastSessionIdByWorkspace: { volt: "revoked-session" },
+						rePairApprovedAt: 41,
+					},
+				],
 				pendingPairingTickets: [
 					{
 						secretHash: "sha256:pending",
@@ -595,11 +608,13 @@ describe("Iroh remote core helpers", () => {
 					},
 				],
 				pairingSecretTombstones: undefined,
+				revokedClients: undefined,
 				pendingPairingTickets: undefined,
 			});
 			expect(parsedLegacyState.clients[0].allowedTools).toBe(DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
 			expect(parsedLegacyState.clients[0].lastSessionIdByWorkspace).toBeUndefined();
 			expect(parsedLegacyState.pairingSecretTombstones).toEqual([]);
+			expect(parsedLegacyState.revokedClients).toEqual([]);
 			expect(parsedLegacyState.pendingPairingTickets).toEqual([]);
 			expect((await readFile(statePath, "utf8")).endsWith("\n")).toBe(true);
 			expect((await stat(statePath)).isFile()).toBe(true);
@@ -619,6 +634,12 @@ describe("Iroh remote core helpers", () => {
 					pairingSecretTombstones: [{ ...state.pairingSecretTombstones![0], outcome: "pairing_secret_unknown" }],
 				}),
 			).toThrow("pairing secret tombstone outcome must be pairing_secret_consumed or pairing_secret_expired");
+			expect(() =>
+				parseIrohRemoteHostState({
+					...state,
+					revokedClients: [{ ...state.revokedClients![0], rePairApprovedAt: Number.NaN }],
+				}),
+			).toThrow("revoked client rePairApprovedAt must be a finite number");
 			await expect(readIrohRemoteHostState(statePath)).rejects.toThrow("client label must be a non-empty string");
 		} finally {
 			await rm(stateDir, { force: true, recursive: true });
@@ -880,8 +901,21 @@ describe("Iroh remote core helpers", () => {
 		await expect(hostEngine.revokeClient("client-node")).resolves.toEqual({
 			revoked: true,
 			client: expect.objectContaining({ nodeId: "client-node" }),
+			revokedClient: expect.objectContaining({
+				nodeId: "client-node",
+				label: "phone",
+				allowedWorkspaces: ["volt"],
+				allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+				pairedAt: 100,
+				lastSeenAt: 100,
+				revokedAt: 100,
+				lastSessionIdByWorkspace: { volt: "session-one" },
+			}),
 		});
 		await expect(hostEngine.listClients()).resolves.toEqual([]);
+		await expect(stateManager.listRevokedClients()).resolves.toEqual([
+			expect.objectContaining({ nodeId: "client-node", revokedAt: 100 }),
+		]);
 		expect(sink.events.map((event) => event.type)).toEqual([
 			"pairing_ticket_created",
 			"pairing_ticket_consumed",
@@ -937,6 +971,110 @@ describe("Iroh remote core helpers", () => {
 		expect(reconnected.client.label).toBe("renamed phone");
 		expect(reconnected.client.allowedTools).toBe(DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
 		expect(reconnected.client.lastSeenAt).toBe(200);
+	});
+
+	test("revoked clients require explicit approval and a fresh pairing secret to re-pair", async () => {
+		let now = 100;
+		const sink = new InMemoryAuditSink();
+		const stateManager = new IrohRemoteHostStateManager({ initialState: createEmptyIrohRemoteHostState() });
+		const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
+		const hostEngine = new IrohRemoteHostEngine({
+			auditLogger: new IrohRemoteAuditLogger({ now: () => now, sink }),
+			now: () => now,
+			stateManager,
+			workspace,
+		});
+		await hostEngine.pair({
+			irohTicket: "iroh-endpoint-ticket",
+			labelHint: "phone hint",
+			secret: "initial-secret",
+			ttlMs: 1000,
+		});
+		const paired = await hostEngine.authorizeHello(makeHello("volt", "initial-secret", "phone"), "client-node");
+		if (!paired.ok) {
+			throw new Error(paired.error);
+		}
+		await stateManager.setClientLastSessionId("client-node", "volt", "session-one");
+
+		now = 150;
+		await expect(hostEngine.revokeClient("client-node")).resolves.toEqual({
+			revoked: true,
+			client: expect.objectContaining({ nodeId: "client-node" }),
+			revokedClient: expect.objectContaining({
+				nodeId: "client-node",
+				label: "phone",
+				allowedWorkspaces: ["volt"],
+				allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+				pairedAt: 100,
+				lastSeenAt: 100,
+				lastSessionIdByWorkspace: { volt: "session-one" },
+				revokedAt: 150,
+			}),
+		});
+		await expect(hostEngine.authorizeHello(makeHello("volt"), "client-node")).resolves.toEqual({
+			ok: false,
+			error: "client is revoked",
+			pairingSecretExpired: false,
+		});
+
+		now = 160;
+		await hostEngine.pair({
+			irohTicket: "iroh-endpoint-ticket",
+			labelHint: "approved phone",
+			secret: "repair-secret",
+			ttlMs: 1000,
+		});
+		await expect(
+			hostEngine.authorizeHello(makeHello("volt", "repair-secret", "phone"), "client-node"),
+		).resolves.toEqual({
+			ok: false,
+			error: "client is revoked",
+			pairingSecretExpired: false,
+		});
+		expect((await stateManager.getState()).pendingPairingTickets).toEqual([
+			expect.objectContaining({ secretHash: hashIrohRemotePairingSecret("repair-secret") }),
+		]);
+
+		now = 170;
+		await expect(hostEngine.approveClientRePair("client-node")).resolves.toEqual({
+			approved: true,
+			revokedClient: expect.objectContaining({ nodeId: "client-node", rePairApprovedAt: 170 }),
+		});
+		await expect(hostEngine.authorizeHello(makeHello("volt"), "client-node")).resolves.toEqual({
+			ok: false,
+			error: "client is revoked",
+			pairingSecretExpired: false,
+		});
+
+		now = 180;
+		const repaired = await hostEngine.authorizeHello(
+			makeHello("volt", "repair-secret", "phone repaired"),
+			"client-node",
+		);
+		if (!repaired.ok) {
+			throw new Error(repaired.error);
+		}
+		expect(repaired.paired).toBe(true);
+		expect(repaired.pairingSecretConsumed).toBe(true);
+		expect(repaired.client).toMatchObject({
+			nodeId: "client-node",
+			label: "phone repaired",
+			allowedWorkspaces: ["volt"],
+			pairedAt: 180,
+			lastSeenAt: 180,
+		});
+		expect((await stateManager.getState()).revokedClients).toEqual([]);
+		expect(sink.events).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					type: "client_rejected",
+					clientNodeId: "client-node",
+					error: "client is revoked",
+				}),
+				expect.objectContaining({ type: "client_repair_approved", clientNodeId: "client-node", success: true }),
+				expect.objectContaining({ type: "pairing_ticket_consumed", clientNodeId: "client-node", success: true }),
+			]),
+		);
 	});
 
 	test("host engine stores pair-time policy, relay hints, TTLs, and label hints", async () => {
@@ -1189,6 +1327,18 @@ describe("Iroh remote core helpers", () => {
 					lastSessionIdByWorkspace: { volt: "session-one" },
 				},
 			],
+			revokedClients: [
+				{
+					nodeId: "revoked-node",
+					label: "revoked phone",
+					allowedWorkspaces: ["volt"],
+					allowedTools: "read",
+					pairedAt: 2,
+					lastSeenAt: 3,
+					revokedAt: 4,
+					lastSessionIdByWorkspace: { volt: "revoked-session" },
+				},
+			],
 			pendingPairingTickets: [
 				{
 					secretHash: "sha256:pending",
@@ -1202,6 +1352,8 @@ describe("Iroh remote core helpers", () => {
 		const stateManager = new IrohRemoteHostStateManager({ initialState });
 		initialState.workspaces[0].path = "/mutated-before-load";
 		initialState.clients[0].lastSessionIdByWorkspace!.volt = "mutated-before-load";
+		initialState.revokedClients![0].lastSessionIdByWorkspace!.volt = "mutated-before-load";
+		initialState.revokedClients![0].allowedWorkspaces.push("mutated-before-load");
 		initialState.hostSecretKey?.push(4);
 		initialState.pairingSecretTombstones?.push({
 			secretHash: "sha256:leaked-tombstone",
@@ -1240,6 +1392,16 @@ describe("Iroh remote core helpers", () => {
 			expiresAt: 200,
 		});
 		loaded.clients[0].lastSessionIdByWorkspace!.volt = "mutated-session";
+		loaded.revokedClients?.push({
+			nodeId: "loaded-revoked-leak",
+			label: "loaded revoked leak",
+			allowedWorkspaces: ["loaded-leak"],
+			allowedTools: "bash",
+			pairedAt: 1,
+			lastSeenAt: 2,
+			revokedAt: 3,
+		});
+		loaded.revokedClients![0].lastSessionIdByWorkspace!.volt = "mutated-revoked-session";
 		loaded.clients.push({
 			nodeId: "leaked-client",
 			label: "leaked",
@@ -1272,6 +1434,18 @@ describe("Iroh remote core helpers", () => {
 					pairedAt: 1,
 					lastSeenAt: 1,
 					lastSessionIdByWorkspace: { volt: "session-one" },
+				},
+			],
+			revokedClients: [
+				{
+					nodeId: "revoked-node",
+					label: "revoked phone",
+					allowedWorkspaces: ["volt"],
+					allowedTools: "read",
+					pairedAt: 2,
+					lastSeenAt: 3,
+					revokedAt: 4,
+					lastSessionIdByWorkspace: { volt: "revoked-session" },
 				},
 			],
 			pendingPairingTickets: [
@@ -1620,8 +1794,10 @@ describe("Iroh remote core helpers", () => {
 			]);
 
 			expect(revocation.revoked).toBe(true);
-			expect(authorization).toEqual({ ok: false, error: "client is not paired", pairingSecretExpired: false });
-			expect((await readIrohRemoteHostState(statePath)).clients).toEqual([]);
+			expect(authorization).toEqual({ ok: false, error: "client is revoked", pairingSecretExpired: false });
+			const savedState = await readIrohRemoteHostState(statePath);
+			expect(savedState.clients).toEqual([]);
+			expect(savedState.revokedClients).toEqual([expect.objectContaining({ nodeId: "client-node" })]);
 		} finally {
 			await rm(stateDir, { force: true, recursive: true });
 		}
@@ -1662,9 +1838,11 @@ describe("Iroh remote core helpers", () => {
 			if (authorization.ok) {
 				expect(authorization.client.nodeId).toBe("client-node");
 			} else {
-				expect(authorization).toEqual({ ok: false, error: "client is not paired", pairingSecretExpired: false });
+				expect(authorization).toEqual({ ok: false, error: "client is revoked", pairingSecretExpired: false });
 			}
-			expect((await readIrohRemoteHostState(statePath)).clients).toEqual([]);
+			const savedState = await readIrohRemoteHostState(statePath);
+			expect(savedState.clients).toEqual([]);
+			expect(savedState.revokedClients).toEqual([expect.objectContaining({ nodeId: "client-node" })]);
 		} finally {
 			await rm(stateDir, { force: true, recursive: true });
 		}
@@ -1697,7 +1875,9 @@ describe("Iroh remote core helpers", () => {
 			expect((await firstManager.getState()).clients).toEqual([]);
 			await firstManager.save();
 
-			expect((await readIrohRemoteHostState(statePath)).clients).toEqual([]);
+			const savedState = await readIrohRemoteHostState(statePath);
+			expect(savedState.clients).toEqual([]);
+			expect(savedState.revokedClients).toEqual([expect.objectContaining({ nodeId: "client-node" })]);
 		} finally {
 			await rm(stateDir, { force: true, recursive: true });
 		}
@@ -1731,7 +1911,9 @@ describe("Iroh remote core helpers", () => {
 				"Cannot save explicit Iroh remote host state snapshots for file-backed state",
 			);
 
-			expect((await readIrohRemoteHostState(statePath)).clients).toEqual([]);
+			const savedState = await readIrohRemoteHostState(statePath);
+			expect(savedState.clients).toEqual([]);
+			expect(savedState.revokedClients).toEqual([expect.objectContaining({ nodeId: "client-node" })]);
 		} finally {
 			await rm(stateDir, { force: true, recursive: true });
 		}

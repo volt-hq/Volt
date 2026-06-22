@@ -6,6 +6,7 @@ import type {
 	IrohRemoteHostState,
 	IrohRemotePairingSecretTombstone,
 	IrohRemotePendingPairingTicket,
+	IrohRemoteRevokedClient,
 	IrohRemoteWorkspace,
 } from "./state.ts";
 import { upsertIrohRemoteWorkspace } from "./workspace.ts";
@@ -50,7 +51,8 @@ export function authorizeIrohRemoteClient(
 ): IrohRemoteClientAuthorizationResult {
 	const workspace = upsertIrohRemoteWorkspace(state, options.workspace, options.allowTools);
 	const now = options.now ?? Date.now();
-	const existingClient = findIrohRemoteClient(state, remoteNodeId);
+	const revokedClient = findIrohRemoteRevokedClient(state, remoteNodeId);
+	const existingClient = revokedClient ? undefined : findIrohRemoteClient(state, remoteNodeId);
 	const pairingSecretHash = hello.secret ? hashIrohRemotePairingSecret(hello.secret) : undefined;
 	const expiredPairingTickets = pruneExpiredPendingPairingTickets(state, now);
 	const matchingExpiredPairingTicket = pairingSecretHash
@@ -83,6 +85,21 @@ export function authorizeIrohRemoteClient(
 		matchingExpiredPairingTicket !== undefined ||
 		matchingExpiredPairingSecret !== undefined;
 	const expiredResultTickets = expiredPairingTickets.length > 0 ? expiredPairingTickets : undefined;
+	const hasActivePairingSecretForRevokedClient =
+		revokedClient?.rePairApprovedAt !== undefined &&
+		hasPairingSecret &&
+		!pairingSecretExpired &&
+		matchingConsumedPairingSecret === undefined &&
+		matchingExpiredPairingSecret === undefined;
+
+	if (revokedClient && !hasActivePairingSecretForRevokedClient) {
+		return {
+			ok: false,
+			error: "client is revoked",
+			...(expiredResultTickets ? { expiredPairingTickets: expiredResultTickets } : {}),
+			pairingSecretExpired: false,
+		};
+	}
 
 	if (!existingClient && pairingSecretExpired) {
 		if (runtimePairingSecretExpired && pairingSecretHash) {
@@ -178,6 +195,10 @@ export function authorizeIrohRemoteClient(
 				(ticket) => ticket.secretHash !== matchingPendingPairingTicket.secretHash,
 			);
 		}
+		if (revokedClient) {
+			state.revokedClients = getRevokedClients(state).filter((client) => client.nodeId !== remoteNodeId);
+			state.clients = state.clients.filter((entry) => entry.nodeId !== remoteNodeId);
+		}
 		state.clients.push(client);
 		return {
 			ok: true,
@@ -221,6 +242,13 @@ export function findIrohRemoteClient(state: IrohRemoteHostState, nodeId: string)
 	return state.clients.find((client) => client.nodeId === nodeId);
 }
 
+export function findIrohRemoteRevokedClient(
+	state: IrohRemoteHostState,
+	nodeId: string,
+): IrohRemoteRevokedClient | undefined {
+	return getRevokedClients(state).find((client) => client.nodeId === nodeId);
+}
+
 export function isIrohRemoteClientAllowedForWorkspace(client: IrohRemoteClient, workspaceName: string): boolean {
 	return client.allowedWorkspaces.length === 0 || client.allowedWorkspaces.includes(workspaceName);
 }
@@ -237,6 +265,11 @@ function getPendingPairingTickets(state: IrohRemoteHostState): IrohRemotePending
 function getPairingSecretTombstones(state: IrohRemoteHostState): IrohRemotePairingSecretTombstone[] {
 	state.pairingSecretTombstones ??= [];
 	return state.pairingSecretTombstones;
+}
+
+function getRevokedClients(state: IrohRemoteHostState): IrohRemoteRevokedClient[] {
+	state.revokedClients ??= [];
+	return state.revokedClients;
 }
 
 function getPairingSecretTombstoneRetainUntil(terminalAt: number, expiresAt: number | undefined): number {
