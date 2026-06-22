@@ -145,6 +145,8 @@ The registry owns:
 
 Accepted Iroh streams become subscribers to an existing runtime when one exists for the same client/workspace and policy allows it. If no runtime exists, the host creates one using the existing session-selection logic.
 
+Resolved 2026-06-22: Integrated remote hosts now keep a host-owned runtime registry keyed by authoritative client node ID and workspace name. Runtime entries own the `AgentSessionRuntime`, current session ID, subscriber set, and detached timestamps; authorized streams attach as subscribers, clean close detaches without runtime disposal, and same-client reconnect reattaches to the existing runtime.
+
 ### Subscriber Transport
 
 Instead of letting stream close dispose the session runtime:
@@ -155,6 +157,8 @@ Instead of letting stream close dispose the session runtime:
 - Stream close does not call `session.abort()` and does not call `runtime.dispose()` while an active prompt is expected to continue.
 
 Write failures should be treated as subscriber loss. They should not shut down the session runtime unless they indicate a host-internal fatal error.
+
+Resolved 2026-06-22: `runRpcMode()` now has an opt-in `disposeRuntimeOnClose: false` path used by integrated Iroh subscribers, so stream shutdown closes the subscriber transport while leaving the host runtime alive. The host audits `remote_subscriber_attached`, `remote_subscriber_detached`, `remote_runtime_detached`, and `remote_runtime_reattached`.
 
 ### Runtime Disposal
 
@@ -167,6 +171,8 @@ Dispose the runtime only when one of these is true:
 - A future administrative control explicitly stops the runtime.
 
 If the runtime is disposed while active, that is cancellation/stop behavior and should be logged as such.
+
+Resolved 2026-06-22: Integrated runtime disposal moved to host-owned registry shutdown for this phase. Host shutdown disposes retained runtimes and audits `remote_runtime_stopped` while preserving the legacy `runtime_started`/`runtime_stopped` events for existing diagnostics.
 
 ### Explicit Cancel Path
 

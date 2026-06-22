@@ -245,10 +245,10 @@ the rollup item is resolved, and the final turn's required verification passed.
     <evidence>Resolved 2026-06-22: added RPC/Iroh detach-vs-cancel docs, exported the remote cancellation command set as `abort` only, added lifecycle contract tests for cancel-like rejections and clean close not synthesizing `abort`, and fixed the sidecar harness safe allowlist default for noninteractive native scenarios; verification: `cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/remote-iroh-lifecycle-contract.test.ts test/remote-iroh-core.test.ts`, `npm run iroh:poc:test`, `npm run check`; commit 9ba8888d</evidence>
   </item>
 
-  <item ref="A.2" status="open" prereq="A.1">
+  <item ref="A.2" status="resolved" prereq="A.1">
     <title>Add host runtime/subscriber lifecycle state for integrated Iroh runtimes</title>
     <acceptance>The integrated host has a runtime registry keyed by authoritative client node ID and workspace; a runtime can have zero or more subscribers; clean stream close detaches the subscriber without disposing the runtime; reconnect attaches to the existing runtime when authorized; audit/logging records attach, detach, reattach, and runtime stop transitions.</acceptance>
-    <evidence/>
+    <evidence>Resolved 2026-06-22: added integrated host runtime registry keyed by authoritative client node ID/workspace, subscriber attach/detach state, reattach to existing runtime, host-shutdown runtime disposal, `disposeRuntimeOnClose: false` RPC mode support, and audit events for runtime/subscriber lifecycle transitions; verification: `node --check packages/coding-agent/src/remote/iroh-host.mjs`, `node --check scripts/iroh-sidecar-test.mjs`, `cd packages/coding-agent &amp;&amp; node node_modules/vitest/dist/cli.js --run test/rpc-mode-transport.test.ts test/remote-iroh-core.test.ts test/remote-iroh-lifecycle-contract.test.ts`, `npm run iroh:poc:test`, `npm run check`; commit 30abb623</evidence>
   </item>
 </group>
 
