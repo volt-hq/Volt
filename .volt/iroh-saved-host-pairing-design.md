@@ -76,7 +76,7 @@ The phone scans it and connects to the host. During the handshake:
 - the phone saves the host as a trusted host
 - the phone saves a `SavedHostRecord` with no pairing secret
 
-After this succeeds, the pairing QR can expire or be consumed.
+After the host commits the new client record, the pairing QR is consumed for new client identities. If the app fails before saving `SavedHostRecord`, the same phone identity can retry and recover because the host now authorizes that phone by node ID.
 
 ### Reconnect
 
@@ -164,7 +164,7 @@ Pairing QR codes should be:
 - generated on demand from the running host
 - revocable indirectly by revoking the paired client after use
 
-A pairing secret should be consumed only after a successful first pairing transaction. Failed connection or authorization attempts should not consume it. After one successful pairing, all later uses of that pairing secret should be rejected, including attempts from the same phone. Concurrent scans should allow at most one successful pairing.
+A pairing secret should be consumed only after a successful first pairing transaction. Failed connection or authorization attempts should not consume it. After one successful pairing, all later uses of that pairing secret by other node IDs should be rejected. The paired phone node ID may still recover from app-side save failure using the same QR data because the host authorizes it as an existing client, not as a new use of the secret. Concurrent scans should allow at most one successful new-client pairing.
 
 Pairing QR codes should not be:
 
@@ -172,6 +172,26 @@ Pairing QR codes should not be:
 - required for every app launch
 - required for reconnect after host restart
 - usable after the phone has already paired and saved the host
+
+## Pairing Transaction Boundary
+
+Resolved 2026-06-22: the successful pairing transaction boundary is the host-side durable authorization commit.
+
+A host consumes a one-time pairing secret only when it atomically commits all host-side state needed to trust the phone:
+
+- validate the pending pairing secret, expiry, workspace, and any revocation or re-pair approval rules
+- record the phone node ID as a paired client with its label, workspace grants, allowed tools, paired timestamp, and last-seen timestamp
+- remove or invalidate the matching pending pairing ticket
+- persist the consumed pairing secret hash
+- prepare a successful handshake response for that same phone node ID
+
+Handshake response delivery, audit-log I/O, and the app's Keychain save are not part of the host commit. If the host commits the client and then fails to write the success response, the host must not roll back the client record or un-consume the secret. Rollback after commit would reopen the QR to another device. The recovery path is that the same phone endpoint identity reconnects as an already-paired client.
+
+Failed attempts before this commit must not consume the secret. That includes malformed handshakes, wrong workspace, expired tickets, revoked clients without explicit re-pair approval, unknown clients without a valid pending secret, network failures before the host authorizes the hello, and any attempt where the host does not create or update the paired-client record.
+
+If the host records the phone but the app fails before saving `SavedHostRecord`, the host relationship is still authoritative. A retry from the same phone endpoint identity should succeed even if the client still sends the original now-consumed QR secret, because the host should authorize existing clients by node ID before treating the secret as a new-pairing credential. That retry lets the app save a `SavedHostRecord` without another desktop approval step. If the phone loses both its endpoint identity and the QR/discovery data before saving, it cannot prove it is the recorded node and must use Pair Again.
+
+Concurrent pairing attempts for one QR must be serialized by host state. At most one previously unpaired node ID may commit for a pairing secret. A duplicate attempt from the winning phone node ID is an existing-client reconnect/recovery attempt; it does not consume the secret again and may complete app-side saving. Attempts from any other node ID after the commit must receive `pairing_secret_consumed`. If an unintended device wins the race, the desktop user must revoke that device and generate a fresh QR; the host must not grant the same consumed QR to a second node ID.
 
 ## Relay and Discovery
 
@@ -333,6 +353,8 @@ Host/core tests:
 - Existing paired client reconnects without `secret`.
 - New unpaired client without `secret` is rejected.
 - Consumed pairing secret cannot pair a second client.
+- Retry from the same phone node ID after host commit can recover even if the app has not saved `SavedHostRecord` yet.
+- Host response-write failure after client commit keeps the client paired and the secret consumed.
 - Failed pairing attempt does not consume the pairing secret.
 - Concurrent pairing attempts allow at most one successful pairing.
 - Expired pairing secret is rejected.
@@ -417,3 +439,7 @@ Resolved 2026-06-22: the authoritative saved-host identity is the saved host nod
 ### Can a revoked phone re-pair with the same phone identity?
 
 Resolved 2026-06-22: not silently. The host must keep a revocation tombstone for the phone node ID and reject both saved reconnect and fresh pairing from that node ID with `client_revoked` until the desktop user explicitly approves re-pair for that revoked device. After desktop approval, the app may re-pair with the same phone endpoint identity. The app should not rotate endpoint identity automatically for `client_revoked`; it clears endpoint identity only when the user intentionally removes local state, such as Forget Host in the one-host v1 app, app deletion, Keychain deletion, or a future explicit reset identity action.
+
+### When is a one-time QR consumed, and how does app-save failure recover?
+
+Resolved 2026-06-22: the QR is consumed when the host durably commits the new phone node ID, removes the pending ticket, and persists the consumed secret hash. The app saving `SavedHostRecord` is required for normal future reconnect, but it is not part of the host's commit boundary. If the app crashes or Keychain save fails after the host records the phone, the same phone endpoint identity can retry with the original QR data and the host must treat it as an existing-client recovery path, not as a second use of the consumed secret. A different node ID cannot reuse the consumed secret.

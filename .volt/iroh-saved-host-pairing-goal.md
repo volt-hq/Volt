@@ -264,10 +264,10 @@ blocked.
     <evidence>2026-06-22: Root and app specs now require durable revoked-client tombstones, explicit desktop approval before same-node re-pair, same phone identity reuse after approval, and no automatic endpoint identity rotation for revoked/unknown clients; verification: Volt/app doc whitespace checks and commit-hook npm run check passed; Volt commit 4597671b.</evidence>
   </item>
 
-  <item ref="A.3" status="open" prereq="A.1" type="decision">
+  <item ref="A.3" status="resolved" prereq="A.1" type="decision">
     <title>Define pairing transaction completion and QR consumption boundary</title>
     <acceptance>Specs define when the host consumes the one-time pairing secret, what happens if the host records the client but the app fails before saving SavedHostRecord, whether a retry from the same phone can complete recovery, and how concurrent attempts allow at most one successful pairing without stranding the legitimate phone.</acceptance>
-    <evidence/>
+    <evidence>2026-06-22: Root and app specs now define host-side durable authorization commit as the QR consumption boundary, same-phone retry recovery after app save failure, and serialized concurrency where one new node wins and other nodes get pairing_secret_consumed; verification: pending doc checks and commit-hook npm run check; Volt commit SHA to be recorded after commit.</evidence>
   </item>
 
   <item ref="A.4" status="open" prereq="A.1" type="decision">
