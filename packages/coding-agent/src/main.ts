@@ -38,6 +38,7 @@ import {
 	DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
 	getIrohRemoteUnsafeAllowedTools,
 	IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE,
+	IROH_REMOTE_REVOKE_CONTROL_REQUEST_TYPE,
 	IrohRemoteAuditLogger,
 	type IrohRemoteClient,
 	IrohRemoteHostStateManager,
@@ -45,6 +46,7 @@ import {
 	type IrohRemoteUnsafeApproval,
 	type IrohRemoteWorkspace,
 	isIrohRemoteRelayMode,
+	requestIrohRemoteActiveRevocation,
 	requestIrohRemotePairingTicket,
 } from "./core/remote/iroh/index.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
@@ -611,6 +613,27 @@ async function handleRemoteRevokeCommand(args: readonly string[]): Promise<void>
 		console.error(chalk.red(`Error: No client found for ${nodeId}`));
 		process.exitCode = 1;
 		return;
+	}
+
+	try {
+		const activeRevocation = await requestIrohRemoteActiveRevocation({
+			statePath: parsed.statePath,
+			request: {
+				type: IROH_REMOTE_REVOKE_CONTROL_REQUEST_TYPE,
+				nodeId,
+			},
+		});
+		if (activeRevocation.success && activeRevocation.closed) {
+			console.error(`Active connection revoked for ${nodeId}`);
+		} else if (activeRevocation.success) {
+			console.error(`No active live connection found for ${nodeId}`);
+		} else {
+			console.error(`Active live revocation unavailable for ${nodeId}: ${activeRevocation.error}`);
+		}
+	} catch (error) {
+		console.error(
+			`Active live revocation unavailable for ${nodeId}: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	}
 	console.error(`Revoked ${nodeId}`);
 }

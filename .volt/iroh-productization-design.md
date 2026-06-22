@@ -415,6 +415,8 @@ Preferred preview acceptance: active connections are closed within one second of
 
 Resolved 2026-06-21: Preview revocation will use live host coordination when available. `volt remote revoke <node-id>` must always remove the client from persisted state first so future authorization fails; it must also send a local control-channel revoke request to any running host for the same state path. The running host will keep an active connection registry keyed by authoritative Iroh remote node ID and workspace, close matching native `Connection` handles, let the existing connection cleanup stop the RPC child/runtime, and audit `active_connection_revoked`. Direct `@number0/iroh` API evidence: `Connection.close(errorCode, reason)` and `Connection.closed()` are available for active QUIC connections, with `RecvStream.stop()` and `SendStream.reset()` available if stream-level cleanup is needed. Lifecycle guarantee for C.3: if a live host acknowledges a matching active client, the connection is closed within one second with reason `revoked`; if no host is reachable, the command still succeeds for persisted revocation and reports that active live revocation was not available.
 
+Resolved 2026-06-21: `volt remote revoke <node-id>` and the host-script management path now remove the client from persisted state, audit `client_revoked`, send a local control-channel revoke request to the running host, and close active native Iroh connections with reason `revoked` when present. Running hosts track active authorized connections by authoritative remote node ID, audit `active_connection_revoked`, and report when no matching active connection exists. CLI and sidecar scenario tests cover control-channel active revocation, persisted reconnect denial remains covered by the revocation scenario, and no-host revocation remains a successful persisted-state operation with an active-live-unavailable diagnostic.
+
 ### `volt remote status`
 
 New command.
@@ -775,8 +777,8 @@ Acceptance criteria:
 
 - `volt remote status --state <path>` shows persisted workspaces and clients. Resolved 2026-06-21.
 - `volt remote clients --state <path>` includes allowed tools and workspace permissions.
-- `volt remote revoke <node-id>` prevents reconnect.
-- If active disconnect is implemented, active revoked clients are disconnected promptly and an audit event is written. Resolved 2026-06-21 decision: implement this path in C.3.
+- `volt remote revoke <node-id>` prevents reconnect. Resolved 2026-06-21.
+- If active disconnect is implemented, active revoked clients are disconnected promptly and an audit event is written. Resolved 2026-06-21.
 - If active disconnect is deferred, docs explicitly state revocation applies to future connections only.
 
 ### Phase 4: Protocol documentation and compatibility tests
@@ -943,7 +945,7 @@ Do not remove experimental language until all of these are true:
 - [ ] Protocol v1 is documented.
 - [ ] Protocol compatibility tests exist.
 - [ ] Reconnect/resume behavior is implemented and documented.
-- [ ] Revocation behavior is implemented and documented, including active connection semantics.
+- [x] Revocation behavior is implemented and documented, including active connection semantics. Resolved 2026-06-21.
 - [x] `volt remote status` persisted-state inspection exists. Resolved 2026-06-21.
 - [ ] Scenario tests cover pair, reconnect, policy, revocation, expiry, and command filtering.
 - [ ] Cross-network `--relay default` dogfood succeeds.

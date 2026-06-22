@@ -127,6 +127,8 @@ Revoke a client:
 npm run iroh:poc:revoke -- <client-node-id>
 ```
 
+Revocation removes the client from persisted state so future connections fail. If a host is currently running for the same state file, the revoke command also asks that host to close matching active connections and audits `active_connection_revoked`; if no live host is reachable, persisted revocation still succeeds and the command prints an active-live-unavailable diagnostic.
+
 After a client is paired, the host can run without accepting new clients:
 
 ```bash

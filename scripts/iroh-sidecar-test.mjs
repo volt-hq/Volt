@@ -260,6 +260,61 @@ async function runRawHandshakeLine(ticket, line) {
 	}
 }
 
+async function openRawAuthorizedClient(ticket, options = {}) {
+	const payload = decodeTicketPayload(ticket);
+	const endpoint = await bindRawClientEndpoint(payload.relayMode ?? "disabled");
+	let connection;
+	try {
+		const endpointTicket = EndpointTicket.fromString(payload.irohTicket);
+		connection = await endpoint.connect(endpointTicket.endpointAddr(), ALPN);
+		const stream = await connection.openBi();
+		await stream.send.writeAll(
+			toBytes(
+				serializeJsonLine({
+					type: "volt_iroh_hello",
+					protocol: ALPN_TEXT,
+					workspace: payload.workspace,
+					secret: payload.secret,
+					clientLabel: options.clientLabel ?? `raw-node-${process.pid}`,
+					clientNodeId: endpoint.id().toString(),
+				}),
+			),
+		);
+
+		const handshake = await readLineFromIroh(stream.recv);
+		if (handshake.line === undefined) throw new Error("Host closed before raw RPC handshake response");
+		const handshakeResponse = JSON.parse(handshake.line);
+		if (handshakeResponse.type !== "volt_iroh_handshake" || !handshakeResponse.success) {
+			throw new Error(handshakeResponse.error ?? "Raw RPC handshake rejected");
+		}
+		return { connection, endpoint, nodeId: endpoint.id().toString(), stream };
+	} catch (error) {
+		if (connection) connection.close(0n, Array.from(Buffer.from("done", "utf8")));
+		await endpoint.close();
+		throw error;
+	}
+}
+
+async function closeRawAuthorizedClient(rawClient) {
+	if (!rawClient) return;
+	rawClient.connection.close(0n, Array.from(Buffer.from("done", "utf8")));
+	await rawClient.endpoint.close();
+}
+
+async function waitForRawConnectionClosed(connection, label, timeoutMs = 2000) {
+	let timeoutId;
+	try {
+		await Promise.race([
+			connection.closed().catch(() => {}),
+			new Promise((_, reject) => {
+				timeoutId = setTimeout(() => reject(new Error(`${label} did not close within ${timeoutMs}ms`)), timeoutMs);
+			}),
+		]);
+	} finally {
+		clearTimeout(timeoutId);
+	}
+}
+
 async function withStateDir(name, callback) {
 	const stateDir = await mkdtemp(join(tmpdir(), `volt-iroh-sidecar-${name}-`));
 	try {
@@ -1041,6 +1096,42 @@ async function pairCommandScenario() {
 	});
 }
 
+async function activeRevocationScenario() {
+	await withStateDir("active-revoke", async ({ hostStatePath }) => {
+		const host = startHost(["--state", hostStatePath, "--once"]);
+		let rawClient;
+		try {
+			const ticket = await waitForFirstStdoutLine(host.child, host.output, "active revocation host");
+			rawClient = await openRawAuthorizedClient(ticket, { clientLabel: "active revocation client" });
+			const startedAt = Date.now();
+			const revokeCommand = spawnSourceCli(["remote", "revoke", rawClient.nodeId, "--state", hostStatePath]);
+			await waitForExit(revokeCommand.child, "active revocation command", revokeCommand.output);
+			await waitForRawConnectionClosed(rawClient.connection, "active revocation client");
+			const elapsedMs = Date.now() - startedAt;
+			assert(elapsedMs < 1000, `Expected active revocation within 1000ms, took ${elapsedMs}ms`);
+			await waitForExit(host.child, "active revocation host", host.output);
+			assert(
+				revokeCommand.output.stderr.includes(`Active connection revoked for ${rawClient.nodeId}`),
+				`Expected active revocation diagnostic, got:\n${revokeCommand.output.stderr}`,
+			);
+			const auditEvents = await readAuditEvents(getDefaultAuditPath(hostStatePath));
+			assert(
+				auditEvents.some(
+					(event) =>
+						event.type === "active_connection_revoked" &&
+						event.clientNodeId === rawClient.nodeId &&
+						event.success === true &&
+						event.details?.closeReason === "revoked",
+				),
+				`Expected active_connection_revoked audit event, got:\n${JSON.stringify(auditEvents)}`,
+			);
+		} finally {
+			await closeRawAuthorizedClient(rawClient);
+			await stopProcess(host.child);
+		}
+	});
+}
+
 async function pairingAndRevocationScenario() {
 	await withStateDir("pairing", async ({ clientStatePath, hostStatePath, stateDir }) => {
 		await runHostClientOnce({
@@ -1435,6 +1526,7 @@ const scenarios = [
 	["get_state", getStateScenario],
 	["status command", statusCommandScenario],
 	["pair command", pairCommandScenario],
+	["active revocation", activeRevocationScenario],
 	["pairing and revocation", pairingAndRevocationScenario],
 	["audit log", auditLogScenario],
 	["paired client persisted tools", pairedClientPersistedToolsScenario],

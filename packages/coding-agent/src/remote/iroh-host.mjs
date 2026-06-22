@@ -18,15 +18,19 @@ import {
 	getIrohRemoteControlPath,
 	getIrohRemoteRpcFilterResult,
 	getIrohRemoteUnsafeAllowedTools,
+	IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE,
 	IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
+	IROH_REMOTE_REVOKE_CONTROL_REQUEST_TYPE,
+	IROH_REMOTE_REVOKE_CONTROL_RESPONSE_TYPE,
 	getAgentDir,
 	IROH_REMOTE_ALPN,
 	IrohRemoteAuditLogger,
 	IrohRemoteHostEngine,
 	IrohRemoteHostStateManager,
-	parseIrohRemotePairControlRequest,
+	parseIrohRemoteControlRequest,
 	pipeIrohRemoteOutboundJsonlReadable,
 	readIrohRemoteHostState,
+	requestIrohRemoteActiveRevocation,
 	sanitizeIrohRemoteOutboundJsonLine,
 	selectIrohRemoteWorkspace,
 	serializeIrohRemoteRpcFilterRejection,
@@ -49,6 +53,7 @@ const ALPN = Array.from(Buffer.from(IROH_REMOTE_ALPN, "utf8"));
 const CONTROL_REQUEST_MAX_BYTES = 16 * 1024;
 const DEFAULT_READ_LIMIT = 64 * 1024;
 const DEFAULT_STATE_PATH = join(getAgentDir(), "remote", "iroh-host.json");
+const ACTIVE_REVOKE_CLOSE_REASON = "revoked";
 const PROMPT_COMPLETION_RPC_TYPES = new Set(["prompt", "steer", "follow_up"]);
 const RESPONSE_COMPLETION_RPC_TYPES = new Set(["abort", "get_state"]);
 const PROMPT_COMPLETION_SETTLE_MS = 100;
@@ -599,12 +604,12 @@ async function withTimeout(promise, timeoutMs, message) {
 	}
 }
 
-function isExpectedDoneClose(error) {
+function isExpectedApplicationClose(error) {
 	const message = error instanceof Error ? error.message : String(error);
 	return (
 		message.includes("ConnectionLost(ApplicationClosed") &&
 		message.includes("error_code: 0") &&
-		message.includes('reason: b"done"')
+		(message.includes('reason: b"done"') || message.includes(`reason: b"${ACTIVE_REVOKE_CLOSE_REASON}"`))
 	);
 }
 
@@ -995,6 +1000,59 @@ async function runIntegratedVoltConnection(stream, handshake, authorization, opt
 	}
 }
 
+function registerActiveConnection(options, authorization, connection) {
+	const entry = {
+		clientNodeId: authorization.client.nodeId,
+		connection,
+		workspace: authorization.workspace.name,
+	};
+	let entries = options.activeConnections.get(entry.clientNodeId);
+	if (!entries) {
+		entries = new Set();
+		options.activeConnections.set(entry.clientNodeId, entries);
+	}
+	entries.add(entry);
+	return () => {
+		entries.delete(entry);
+		if (entries.size === 0) {
+			options.activeConnections.delete(entry.clientNodeId);
+		}
+	};
+}
+
+async function closeActiveConnectionsForClient(options, nodeId) {
+	const entries = Array.from(options.activeConnections.get(nodeId) ?? []);
+	if (entries.length === 0) {
+		await logAudit(options.auditLogger, {
+			type: "active_connection_revoked",
+			clientNodeId: nodeId,
+			success: false,
+			error: "no active connection found",
+			details: {
+				closeReason: ACTIVE_REVOKE_CLOSE_REASON,
+				source: "control_channel",
+			},
+		});
+		return { closed: false, closedCount: 0 };
+	}
+
+	const closeReason = Array.from(Buffer.from(ACTIVE_REVOKE_CLOSE_REASON, "utf8"));
+	for (const entry of entries) {
+		entry.connection.close(0n, closeReason);
+		await logAudit(options.auditLogger, {
+			type: "active_connection_revoked",
+			clientNodeId: nodeId,
+			workspace: entry.workspace,
+			success: true,
+			details: {
+				closeReason: ACTIVE_REVOKE_CLOSE_REASON,
+				source: "control_channel",
+			},
+		});
+	}
+	return { closed: true, closedCount: entries.length };
+}
+
 async function handleConnection(incoming, options) {
 	const accepting = await incoming.accept();
 	const connection = await accepting.connect();
@@ -1008,6 +1066,7 @@ async function handleConnection(incoming, options) {
 	});
 
 	let child;
+	let removeActiveConnection;
 	try {
 		const stream = await withTimeout(
 			connection.acceptBi(),
@@ -1029,6 +1088,7 @@ async function handleConnection(incoming, options) {
 		if (handshake.authorization.paired) {
 			console.error(`paired client: ${handshake.authorization.client.label} (${remoteId})`);
 		}
+		removeActiveConnection = registerActiveConnection(options, handshake.authorization, connection);
 
 		if (options.integratedVolt) {
 			await runIntegratedVoltConnection(stream, handshake, handshake.authorization, options);
@@ -1036,6 +1096,7 @@ async function handleConnection(incoming, options) {
 		}
 		child = await runSpawnedRpcConnection(stream, handshake, handshake.authorization, options);
 	} finally {
+		removeActiveConnection?.();
 		if (child && child.exitCode === null && !child.killed) child.kill();
 		connection.close(0n, Array.from(Buffer.from("done", "utf8")));
 		await waitForConnectionClose(connection);
@@ -1135,22 +1196,31 @@ function readLineFromControlSocket(socket) {
 	});
 }
 
-function createPairControlErrorResponse(message) {
+function createControlErrorResponse(type, message) {
 	return {
-		type: IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
+		type,
 		success: false,
 		error: message,
 	};
 }
 
+function getControlResponseType(request) {
+	if (request.type === IROH_REMOTE_REVOKE_CONTROL_REQUEST_TYPE) {
+		return IROH_REMOTE_REVOKE_CONTROL_RESPONSE_TYPE;
+	}
+	return IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE;
+}
+
 async function createPairControlSuccessResponse(request, endpoint, options) {
 	if (request.workspace !== options.workspace.name) {
-		return createPairControlErrorResponse(
+		return createControlErrorResponse(
+			IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
 			`running host is serving workspace ${options.workspace.name}; cannot pair workspace ${request.workspace}`,
 		);
 	}
 	if (request.relayMode !== undefined && request.relayMode !== options.relayMode) {
-		return createPairControlErrorResponse(
+		return createControlErrorResponse(
+			IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
 			`running host relay mode is ${options.relayMode}; cannot create a ${request.relayMode} ticket`,
 		);
 	}
@@ -1159,7 +1229,10 @@ async function createPairControlSuccessResponse(request, endpoint, options) {
 	const unsafeTools = getIrohRemoteUnsafeAllowedTools(allowTools);
 	if (unsafeTools.length > 0) {
 		if (!request.unsafeApproval) {
-			return createPairControlErrorResponse("Unsafe remote tool grants require confirmation or --yes.");
+			return createControlErrorResponse(
+				IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
+				"Unsafe remote tool grants require confirmation or --yes.",
+			);
 		}
 		await logAudit(options.auditLogger, {
 			type: "unsafe_tools_enabled",
@@ -1191,14 +1264,35 @@ async function createPairControlSuccessResponse(request, endpoint, options) {
 	};
 }
 
+async function createRevokeControlSuccessResponse(request, options) {
+	const result = await closeActiveConnectionsForClient(options, request.nodeId);
+	return {
+		type: IROH_REMOTE_REVOKE_CONTROL_RESPONSE_TYPE,
+		success: true,
+		closed: result.closed,
+		closedCount: result.closedCount,
+	};
+}
+
+async function createControlSuccessResponse(request, endpoint, options) {
+	if (request.type === IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE) {
+		return await createPairControlSuccessResponse(request, endpoint, options);
+	}
+	return await createRevokeControlSuccessResponse(request, options);
+}
+
 async function handlePairControlConnection(socket, endpoint, options) {
+	let responseType = IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE;
 	try {
 		const line = await readLineFromControlSocket(socket);
-		const request = parseIrohRemotePairControlRequest(JSON.parse(line));
-		const response = await createPairControlSuccessResponse(request, endpoint, options);
+		const request = parseIrohRemoteControlRequest(JSON.parse(line));
+		responseType = getControlResponseType(request);
+		const response = await createControlSuccessResponse(request, endpoint, options);
 		socket.end(`${JSON.stringify(response)}\n`);
 	} catch (error) {
-		socket.end(`${JSON.stringify(createPairControlErrorResponse(error instanceof Error ? error.message : String(error)))}\n`);
+		socket.end(
+			`${JSON.stringify(createControlErrorResponse(responseType, error instanceof Error ? error.message : String(error)))}\n`,
+		);
 	}
 }
 
@@ -1253,6 +1347,7 @@ async function serve(flags) {
 	const sourceVolt = getFlag(flags, "source-volt");
 	const ticketExpiresAt = pairingEnabled ? Date.now() + DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS : undefined;
 	const options = {
+		activeConnections: new Map(),
 		agentDir: getFlag(flags, "agent-dir"),
 		allowTools,
 		auditLogger,
@@ -1317,7 +1412,7 @@ async function serve(flags) {
 			const incoming = await endpoint.acceptNext();
 			if (!incoming) break;
 			await handleConnection(incoming, options).catch((error) => {
-				if (!isExpectedDoneClose(error)) {
+				if (!isExpectedApplicationClose(error)) {
 					console.error(error instanceof Error ? error.stack : String(error));
 				}
 			});
@@ -1350,6 +1445,26 @@ async function revokeClient(flags, nodeId) {
 	if (!result.revoked) {
 		console.error(`No client found for ${nodeId}`);
 		return;
+	}
+	try {
+		const activeRevocation = await requestIrohRemoteActiveRevocation({
+			statePath,
+			request: {
+				type: IROH_REMOTE_REVOKE_CONTROL_REQUEST_TYPE,
+				nodeId,
+			},
+		});
+		if (activeRevocation.success && activeRevocation.closed) {
+			console.error(`Active connection revoked for ${nodeId}`);
+		} else if (activeRevocation.success) {
+			console.error(`No active live connection found for ${nodeId}`);
+		} else {
+			console.error(`Active live revocation unavailable for ${nodeId}: ${activeRevocation.error}`);
+		}
+	} catch (error) {
+		console.error(
+			`Active live revocation unavailable for ${nodeId}: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	}
 	console.error(`Revoked ${nodeId}`);
 }
