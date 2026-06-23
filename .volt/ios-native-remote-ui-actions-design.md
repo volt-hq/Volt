@@ -1266,6 +1266,20 @@ Concrete behavior:
 - `VoltSession.invokeUIAction` checks connected/enabled state before sending `invoke_ui_action`, omits empty argument objects, and appends a system message only if transport send fails. C.4 remains responsible for handling invocation responses and streaming-state transitions.
 - Tests cover session invocation encoding/disabled-action refusal and source-level UI affordances for the command palette, argument sheet, search, grouping/source display, disabled reasons, invocation modes, and invocation calls.
 
+## Resolved 2026-06-23: iOS Action Invocation Lifecycle
+
+C.4 implementation teaches `VoltSession` to track native action invocation pending state and interpret the host disposition response without assuming every action produces an `agent_end`.
+
+Concrete behavior:
+
+- `VoltSession` exposes `pendingUIActionID`/`isInvokingUIAction` and blocks overlapping prompts, session switches, session list loads, older transcript page loads, workspace switches, and new-session requests while an action invocation is awaiting its disposition.
+- `invokeUIAction` records pending state before sending `invoke_ui_action`, clears it on send failure, and chooses `streamingBehavior: "followUp"` or `"steer"` from descriptor `queueFollowUp`/`queueSteer` support when invoked during an active stream.
+- Successful `invoke_ui_action` responses handle all v1 statuses: `accepted` enters or keeps streaming and remains pending until `agent_end`; `queued` clears tap pending state while preserving the active stream; `completed`, `handled`, and `cancelled` clear pending state immediately without waiting for `agent_end`.
+- Failed `invoke_ui_action` responses append an `Action failed` system message and clear action pending state without forcing `isStreaming` false, so an unrelated active turn can continue.
+- Invocation responses honor `actionsChanged`, `stateChanged`, and returned action state hints by refreshing actions or state as appropriate.
+- The demo mock transport now returns `handled` for its advertised mock command, so demo command invocation exercises the terminal synchronous path.
+- Lifecycle tests cover direct invocation encoding, terminal handled/completed/cancelled statuses, prompt-like accepted streaming through `agent_end`, queued follow-up behavior while already streaming, and failure responses preserving the active stream.
+
 ## Host Implementation Plan
 
 ### Phase A: Design and Inventory
