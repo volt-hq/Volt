@@ -360,16 +360,16 @@ blocked.
     <evidence>2026-06-22: Root usage/security/protocol docs, root/app design docs, and app README now document Pair Phone, one-time QR, saved-host reconnect without ordinary QR rescans, mobile relay defaults, revocation/re-pair approval, offline outcomes, host state path, and preview limitations; verification: root/app doc whitespace checks passed and root pre-commit npm run check passed; root docs commit 6fecaa09, app README commit 772c5a1.</evidence>
   </item>
 
-  <item ref="D.2" status="open" prereq="B.1,B.2,B.3,B.4,B.5,B.6,C.4,D.1">
+  <item ref="D.2" status="resolved" prereq="B.1,B.2,B.3,B.4,B.5,B.6,C.4,D.1">
     <title>Run final automated and manual saved-host validation</title>
     <acceptance>Final evidence lists exact targeted Vitest files, `npm run iroh:poc:test`, `npm run check`, Swift package tests, iOS simulator tests, doc checks, native Iroh saved-host smoke, and iOS saved-host smoke. Manual evidence covers pair once, relaunch app without launch ticket, reconnect without QR, restart host with same state path, reconnect without QR, revoked phone behavior, and relay mode used. Unsupported cases are documented without overclaiming.</acceptance>
-    <evidence/>
+    <evidence>2026-06-22: Final validation passed: targeted Vitest `node node_modules/vitest/dist/cli.js --run test/remote-iroh-core.test.ts test/remote-cli.test.ts` (63 tests), `npm run iroh:poc:test`, `npm run check`, `cd ../volt-app/Packages/VoltClient &amp;&amp; swift test`, XcodeBuildMCP `test_sim` on iPhone 17 Pro simulator `66257DFE-85C0-4010-9C47-2F7D24225BE6`, root/app doc checks, native sidecar saved-host smoke, and iOS simulator saved-host smoke all passed; manual smokes used relay `default`, paired once, reconnected without QR/secret after host restart with the same temp state path, and verified revoked reconnect produced `client_revoked`; two-network relay and real-device background smoke were unavailable and not claimed; validation details in root spec commit 3fb1c389.</evidence>
   </item>
 
-  <item ref="D.3" status="open" prereq="D.2" type="rollup">
+  <item ref="D.3" status="resolved" prereq="D.2" type="rollup">
     <title>Rollup: saved-host pairing is implemented, tested, documented, and ready for preview use</title>
     <acceptance>All prior items are resolved; root and app design docs record final behavior and limitations; no open saved-host pairing implementation decisions remain except explicitly deferred future work; final automated and manual validation evidence is recorded.</acceptance>
-    <evidence/>
+    <evidence>2026-06-22: Rollup resolved after D.2; all work_queue items are resolved, root/app specs record final behavior and limitations, final automated/manual validation evidence is recorded, and remaining gaps are explicitly deferred preview boundaries; validation details in root spec commit 3fb1c389.</evidence>
   </item>
 </group>
 
