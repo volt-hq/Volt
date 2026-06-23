@@ -399,10 +399,10 @@ and recorded without overclaiming.
     <evidence>Resolved 2026-06-23: deliberately deferred first-class `volt.registerAction()` for v1, documented extension command native action projection and no-`registerAction` API guidance, added RPC regression coverage that projected extension commands remain palette actions with `arguments`/completion support, and recorded follow-up E.5 for chat-scoped/default Fast mode and model selection policy; verified with `node node_modules/vitest/dist/cli.js --run test/rpc-transport-client.test.ts` from `packages/coding-agent`, `npm run check`, and `git diff --check -- .volt/ios-native-remote-ui-actions-design.md .volt/ios-native-remote-ui-actions-goal.md packages/coding-agent/docs/extensions.md`.</evidence>
   </item>
 
-  <item ref="E.4" status="open" prereq="E.2,E.3">
+  <item ref="E.4" status="resolved" prereq="E.2,E.3">
     <title>Support extension-provided native cards in iOS when remote-safe</title>
     <acceptance>Remote-safe extension-provided actions or projected extension commands can appear in iOS extension/action groups with safe source labels; users can distinguish built-in versus extension/package actions; extension UI requests continue to render or degrade through the existing RPC UI protocol; tests cover extension action visibility, source labeling, disabled state, and invocation.</acceptance>
-    <evidence></evidence>
+    <evidence>Resolved 2026-06-23: after the E.3 `registerAction()` defer, the iOS Actions tab now renders projected extension command descriptors in Extensions groups with safe source/provenance/slash badges, disabled-state handling, and normal `invoke_ui_action` dispatch; the demo transport exposes enabled and disabled extension commands and handles the mock command terminally. Verified with `swift test --filter MockVoltTransportTests`, `swift test --filter XcodeProjectConfigurationTests`, `swift test` from `../volt-app/Packages/VoltClient`, XcodeBuildMCP `test_sim`, `xcodebuild -scheme Volt -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=27.0' test`, and manual iPhone 17 Pro iOS 27.0 Demo smoke (`/tmp/volt-e4-actions-extension.png`, `/tmp/volt-e4-actions-after-mock.png`); app commit a8d699dc83b4808651aaded0e8c628e6ab3aeb16.</evidence>
   </item>
 
   <item ref="E.5" status="open" prereq="D.4,E.2" type="decision">

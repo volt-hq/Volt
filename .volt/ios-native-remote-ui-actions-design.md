@@ -1376,6 +1376,19 @@ Concrete behavior:
 - The demo transport exposes primary Review and Fast mode descriptors for simulator smoke coverage. Demo Review starts a mock accepted agent run; Demo Fast mode completes synchronously and refreshes action state.
 - Manual simulator smoke on iPhone 17 Pro iOS 27.0 used Demo transport, opened the Actions tab, verified Review and Model groups, verified disabled Review branch reason, toggled Fast mode to `Fast: low`, invoked Review changes, and verified the Chat transcript received `Mock review started. No issues found.` Screenshots were saved at `/tmp/volt-actions-smoke-actions.png` and `/tmp/volt-actions-smoke-chat.png`.
 
+## Resolved 2026-06-23: iOS Extension Action Groups
+
+E.4 implementation renders projected extension commands in the native Actions tab after the E.3 `registerAction()` defer decision.
+
+Concrete behavior:
+
+- ActionsView includes host primary `card`/`button`/`toggle` descriptors and projected extension command descriptors whose source/category are `extension` and whose presentation kind is `palette`.
+- Projected extension commands appear in the host-provided Extensions group with the same disabled-state and pending-state handling as other action rows.
+- Extension rows show safe metadata badges for source type, sanitized source label or scope, and slash alias, so users can distinguish extension/package actions such as `Extension`, `Package`, `Demo`, `/disabled`, and `/mock` without exposing source paths.
+- ActionsView invokes enabled projected extension commands through the existing `VoltSession.invokeUIAction` path. Commands with required unsupported arguments stay disabled on the Actions page; richer argument entry remains available through the command palette.
+- The demo transport now returns one enabled projected extension command and one disabled package-origin extension command, and handles the enabled mock command with a terminal `handled` response.
+- Manual simulator smoke on iPhone 17 Pro iOS 27.0 used Demo transport, opened the Actions tab, verified the Extensions group, disabled package-labeled command, enabled Demo command, and tapped the mock command without leaving a stuck pending state. Screenshots were saved at `/tmp/volt-e4-actions-extension.png` and `/tmp/volt-e4-actions-after-mock.png`.
+
 ## Host Implementation Plan
 
 ### Phase A: Design and Inventory
