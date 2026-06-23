@@ -361,10 +361,10 @@ and recorded without overclaiming.
     <evidence>Resolved 2026-06-23: added `HostActionRegistry` in coding-agent core with built-in action registration, descriptor projection, availability checks, argument validation, slash alias lookup, and handler invocation; registered the local-only `session.new` action with `/clear`; routed TUI `/clear`, RPC `new_session`, and built-in `invoke_ui_action` through the shared new-session handler while keeping dynamic extension/prompt/skill prompt semantics unchanged; exposed built-in descriptors through `get_ui_actions` without widening remote-safe action invocation. Added registry and RPC integration coverage; verified with `node node_modules/vitest/dist/cli.js --run test/host-actions.test.ts test/rpc-transport-client.test.ts` from `packages/coding-agent`, `npm run check`, and pre-commit `npm run check`; Volt commit 08006b211c698b82a9a4f21b67953e09957df9d8.</evidence>
   </item>
 
-  <item ref="D.2" status="open" prereq="D.1">
+  <item ref="D.2" status="resolved" prereq="D.1">
     <title>Migrate simple built-ins to shared actions and keep TUI aliases working</title>
     <acceptance>At least `session.new`, `run.cancel`, `context.compact`, and `session.rename` (or a documented subset if policy requires) are implemented as shared actions; TUI slash commands continue to work; RPC action invocation works for the remote-safe subset; docs list action ids and slash aliases; tests prove TUI slash and RPC action paths hit equivalent handlers.</acceptance>
-    <evidence></evidence>
+    <evidence>Resolved 2026-06-23: migrated `session.new`, `run.cancel`, `context.compact`, and `session.rename` into the shared host action registry with descriptors, availability, argument validation, and slash aliases where applicable; routed TUI `/clear`, `/compact`, and `/name`, plus RPC `new_session`, `abort`, `compact`, `set_session_name`, and built-in `invoke_ui_action` through shared helpers; exposed exact remote-safe built-in actions `session.new` and `run.cancel` over Iroh while keeping `context.compact` and `session.rename` local-only; documented action ids and aliases. Verified with `node node_modules/vitest/dist/cli.js --run test/host-actions.test.ts test/rpc-transport-client.test.ts test/remote-iroh-core.test.ts` from `packages/coding-agent`, `npm run iroh:poc:test`, `npm run check`, `git diff --check`, and pre-commit `npm run check`; Volt commit 63fc27da3c226033816d2d789e71accdaa885696.</evidence>
   </item>
 
   <item ref="D.3" status="open" prereq="D.1,A.5">
