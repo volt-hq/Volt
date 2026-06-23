@@ -827,7 +827,7 @@ describe("Iroh remote core helpers", () => {
 		expect(paired.client).toMatchObject({
 			nodeId: "client-node",
 			label: "phone",
-			allowedWorkspaces: ["volt"],
+			allowedWorkspaces: [],
 			allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
 			pairedAt: 100,
 			lastSeenAt: 100,
@@ -1023,11 +1023,11 @@ describe("Iroh remote core helpers", () => {
 			expect.objectContaining({
 				nodeId: "client-node",
 				label: "phone",
-				allowedWorkspaces: ["volt"],
+				allowedWorkspaces: [],
 			}),
 		]);
 		clients[0].allowedWorkspaces.push("mutated");
-		expect(await hostEngine.listClients()).toEqual([expect.objectContaining({ allowedWorkspaces: ["volt"] })]);
+		expect(await hostEngine.listClients()).toEqual([expect.objectContaining({ allowedWorkspaces: [] })]);
 
 		const rejectedRecv = new ManualIrohRecvStream();
 		const rejectedSend = new ManualIrohSendStream();
@@ -1086,7 +1086,7 @@ describe("Iroh remote core helpers", () => {
 			revokedClient: expect.objectContaining({
 				nodeId: "client-node",
 				label: "phone",
-				allowedWorkspaces: ["volt"],
+				allowedWorkspaces: [],
 				allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
 				pairedAt: 100,
 				lastSeenAt: 100,
@@ -1154,6 +1154,163 @@ describe("Iroh remote core helpers", () => {
 		expect(reconnected.client.label).toBe("renamed phone");
 		expect(reconnected.client.allowedTools).toBe(DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
 		expect(reconnected.client.lastSeenAt).toBe(200);
+	});
+
+	test("host engine authorizes paired clients across registered workspaces without another pairing secret", async () => {
+		const stateManager = new IrohRemoteHostStateManager({ initialState: createEmptyIrohRemoteHostState() });
+		const alphaWorkspace: IrohRemoteWorkspace = { name: "alpha", path: "/alpha" };
+		const betaWorkspace: IrohRemoteWorkspace = { name: "beta", path: "/beta" };
+		const hostEngine = new IrohRemoteHostEngine({
+			now: () => 100,
+			stateManager,
+			workspace: alphaWorkspace,
+		});
+		await hostEngine.pair({
+			irohTicket: "iroh-endpoint-ticket",
+			secret: "secret",
+		});
+		const paired = await hostEngine.authorizeHello(makeHello("alpha", "secret"), "client-node");
+		if (!paired.ok) {
+			throw new Error(paired.error);
+		}
+		expect(paired.client.allowedWorkspaces).toEqual([]);
+
+		await stateManager.upsertWorkspace(betaWorkspace);
+		const restartedHostEngine = new IrohRemoteHostEngine({
+			now: () => 200,
+			stateManager,
+			workspace: alphaWorkspace,
+		});
+		const reconnected = await restartedHostEngine.authorizeHello(makeHello("beta"), "client-node");
+		if (!reconnected.ok) {
+			throw new Error(reconnected.error);
+		}
+
+		expect(reconnected.paired).toBe(false);
+		expect(reconnected.workspace).toEqual(betaWorkspace);
+		expect(reconnected.client.allowedWorkspaces).toEqual([]);
+		expect(reconnected.client.lastSeenAt).toBe(200);
+		expect((await stateManager.getState()).clients).toEqual([
+			expect.objectContaining({ nodeId: "client-node", allowedWorkspaces: [] }),
+		]);
+	});
+
+	test("normalizes legacy active workspace grants on successful registered workspace authorization", async () => {
+		const stateManager = new IrohRemoteHostStateManager({
+			initialState: {
+				...createEmptyIrohRemoteHostState(),
+				workspaces: [
+					{ name: "alpha", path: "/alpha" },
+					{ name: "beta", path: "/beta" },
+				],
+				clients: [
+					{
+						nodeId: "client-node",
+						label: "phone",
+						allowedWorkspaces: ["alpha"],
+						allowedTools: "read",
+						pairedAt: 10,
+						lastSeenAt: 20,
+					},
+				],
+			},
+		});
+		const hostEngine = new IrohRemoteHostEngine({
+			now: () => 200,
+			stateManager,
+			workspace: { name: "alpha", path: "/alpha" },
+		});
+
+		const authorized = await hostEngine.authorizeHello(makeHello("beta"), "client-node");
+		if (!authorized.ok) {
+			throw new Error(authorized.error);
+		}
+
+		expect(authorized.workspace).toEqual({ name: "beta", path: "/beta" });
+		expect(authorized.client.allowedWorkspaces).toEqual([]);
+		expect(authorized.client.lastSeenAt).toBe(200);
+		expect((await stateManager.getState()).clients).toEqual([
+			expect.objectContaining({ nodeId: "client-node", allowedWorkspaces: [] }),
+		]);
+	});
+
+	test("rejects unknown and stale registered workspaces without normalizing legacy clients", async () => {
+		const stateManager = new IrohRemoteHostStateManager({
+			initialState: {
+				...createEmptyIrohRemoteHostState(),
+				workspaces: [{ name: "alpha", path: "/alpha" }],
+				clients: [
+					{
+						nodeId: "client-node",
+						label: "phone",
+						allowedWorkspaces: ["alpha"],
+						allowedTools: "read",
+						pairedAt: 10,
+						lastSeenAt: 20,
+					},
+				],
+			},
+		});
+		const hostEngine = new IrohRemoteHostEngine({
+			now: () => 200,
+			stateManager,
+			validateWorkspace: (workspace) => workspace.name !== "alpha",
+			workspace: { name: "alpha", path: "/alpha" },
+		});
+
+		await expect(hostEngine.authorizeHello(makeHello("missing"), "client-node")).resolves.toEqual({
+			ok: false,
+			error: "workspace not allowed: missing",
+			outcome: "workspace_unavailable",
+			pairingSecretExpired: false,
+		});
+		await expect(hostEngine.authorizeHello(makeHello("alpha"), "client-node")).resolves.toEqual({
+			ok: false,
+			error: "workspace not allowed: alpha",
+			outcome: "workspace_unavailable",
+			pairingSecretExpired: false,
+		});
+		expect((await stateManager.getState()).clients).toEqual([
+			expect.objectContaining({ nodeId: "client-node", allowedWorkspaces: ["alpha"] }),
+		]);
+	});
+
+	test("revoked legacy workspace grants stay revoked for every registered workspace", async () => {
+		const stateManager = new IrohRemoteHostStateManager({
+			initialState: {
+				...createEmptyIrohRemoteHostState(),
+				workspaces: [
+					{ name: "alpha", path: "/alpha" },
+					{ name: "beta", path: "/beta" },
+				],
+				revokedClients: [
+					{
+						nodeId: "client-node",
+						label: "phone",
+						allowedWorkspaces: ["alpha"],
+						allowedTools: "read",
+						pairedAt: 10,
+						lastSeenAt: 20,
+						revokedAt: 30,
+					},
+				],
+			},
+		});
+		const hostEngine = new IrohRemoteHostEngine({
+			now: () => 200,
+			stateManager,
+			workspace: { name: "alpha", path: "/alpha" },
+		});
+
+		await expect(hostEngine.authorizeHello(makeHello("beta"), "client-node")).resolves.toEqual({
+			ok: false,
+			error: "client is revoked",
+			outcome: "client_revoked",
+			pairingSecretExpired: false,
+		});
+		expect(await stateManager.listRevokedClients()).toEqual([
+			expect.objectContaining({ nodeId: "client-node", allowedWorkspaces: ["alpha"] }),
+		]);
 	});
 
 	test("host engine restart with the same state authorizes saved reconnects and preserves host identity", async () => {
@@ -1266,7 +1423,7 @@ describe("Iroh remote core helpers", () => {
 			revokedClient: expect.objectContaining({
 				nodeId: "client-node",
 				label: "phone",
-				allowedWorkspaces: ["volt"],
+				allowedWorkspaces: [],
 				allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
 				pairedAt: 100,
 				lastSeenAt: 100,
@@ -1325,7 +1482,7 @@ describe("Iroh remote core helpers", () => {
 		expect(repaired.client).toMatchObject({
 			nodeId: "client-node",
 			label: "phone repaired",
-			allowedWorkspaces: ["volt"],
+			allowedWorkspaces: [],
 			pairedAt: 180,
 			lastSeenAt: 180,
 		});
@@ -1388,7 +1545,7 @@ describe("Iroh remote core helpers", () => {
 		expect(paired.client).toMatchObject({
 			label: "tablet",
 			allowedTools: "read,bash",
-			allowedWorkspaces: ["volt"],
+			allowedWorkspaces: [],
 		});
 		expect((await stateManager.getState()).pendingPairingTickets).toEqual([]);
 		expect((await stateManager.getState()).pairingSecretTombstones).toEqual([
@@ -1414,6 +1571,8 @@ describe("Iroh remote core helpers", () => {
 
 	test("host engine rejects pending pairing tickets bound to another workspace", async () => {
 		const stateManager = new IrohRemoteHostStateManager({ initialState: createEmptyIrohRemoteHostState() });
+		await stateManager.upsertWorkspace({ name: "safe", path: "/workspace" });
+		await stateManager.upsertWorkspace({ name: "private", path: "/private" });
 		await stateManager.addPendingPairingTicket({
 			secretHash: hashIrohRemotePairingSecret("secret"),
 			workspace: "private",
@@ -1743,7 +1902,7 @@ describe("Iroh remote core helpers", () => {
 		authorized.workspace.path = "/mutated-workspace";
 
 		const state = await stateManager.getState();
-		expect(state.clients[0].allowedWorkspaces).toEqual(["volt"]);
+		expect(state.clients[0].allowedWorkspaces).toEqual([]);
 		expect(state.workspaces[0].path).toBe("/workspace");
 	});
 

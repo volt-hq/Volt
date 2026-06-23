@@ -769,6 +769,14 @@ Tasks:
    - consumed/expired pairing behavior unchanged
    - persisted `lastSessionIdByWorkspace` still keyed by selected workspace
 
+Resolved 2026-06-23: host authorization resolves `hello.workspace` from the
+current host state on every handshake, validates the selected registered
+workspace path before handshake success in the product host, returns the
+selected workspace in authorization success, persists new pairings as
+workstation wildcard `allowedWorkspaces: []`, normalizes legacy active clients
+to that wildcard on successful authorization, and leaves revoked tombstones
+unchanged while rejecting them for every registered workspace.
+
 ### Phase 3: Pair control and running host reload
 
 Files likely touched:

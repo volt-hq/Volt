@@ -44,6 +44,13 @@ export function upsertIrohRemoteWorkspace(
 	return existing;
 }
 
+export function findIrohRemoteWorkspace(
+	state: IrohRemoteHostState,
+	workspaceName: string,
+): IrohRemoteWorkspace | undefined {
+	return state.workspaces.find((entry) => entry.name === workspaceName);
+}
+
 export function selectIrohRemoteWorkspace(
 	state: IrohRemoteHostState,
 	workspaceSpec: string | undefined,

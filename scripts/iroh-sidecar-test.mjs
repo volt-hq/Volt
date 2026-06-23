@@ -2198,8 +2198,8 @@ async function statusCommandScenario() {
 		assert(client?.nodeId && client.label, `Expected status client identity, got:\n${statusText}`);
 		assert(client.allowedTools === "read,grep,find,ls", `Expected status client tools, got:\n${statusText}`);
 		assert(
-			Array.isArray(client.allowedWorkspaces) && client.allowedWorkspaces.length === 1,
-			`Expected status client workspaces, got:\n${statusText}`,
+			Array.isArray(client.allowedWorkspaces) && client.allowedWorkspaces.length === 0,
+			`Expected status client wildcard workspaces, got:\n${statusText}`,
 		);
 		assert(typeof client.pairedAt === "number", `Expected status pairedAt, got:\n${statusText}`);
 		assert(typeof client.lastSeenAt === "number", `Expected status lastSeenAt, got:\n${statusText}`);
@@ -2590,7 +2590,9 @@ async function pairingTicketWorkspaceBindingScenario() {
 			await waitForExit(host.child, "workspace-bound ticket host", host.output);
 			assert(clientOutput.exit.code !== 0, "Workspace-bound ticket client unexpectedly succeeded");
 			assert(
-				clientOutput.stderr.includes("workspace_unavailable: workspace not allowed: private"),
+				clientOutput.stderr.includes(
+					"workspace_forbidden: pairing ticket is not valid for workspace: private",
+				),
 				`Expected workspace-bound ticket rejection, got:\n${clientOutput.stderr}`,
 			);
 		} finally {
@@ -2606,7 +2608,7 @@ async function runningWorkspaceAuthorizationScenario() {
 		const savedWorkspace = join(stateDir, "saved");
 		await mkdir(runningWorkspace, { recursive: true });
 		await mkdir(savedWorkspace, { recursive: true });
-		const canonicalRunningWorkspace = await realpath(runningWorkspace);
+		const canonicalSavedWorkspace = await realpath(savedWorkspace);
 
 		const host = startHost([
 			"--state",
@@ -2647,8 +2649,8 @@ async function runningWorkspaceAuthorizationScenario() {
 				.map((line) => JSON.parse(line));
 			assert(entries.length === 1, `Expected one fake source Volt invocation, got:\n${JSON.stringify(entries)}`);
 			assert(
-				entries[0].cwd === canonicalRunningWorkspace,
-				`Expected RPC child to run in ${canonicalRunningWorkspace}, got:\n${JSON.stringify(entries[0])}`,
+				entries[0].cwd === canonicalSavedWorkspace,
+				`Expected RPC child to run in ${canonicalSavedWorkspace}, got:\n${JSON.stringify(entries[0])}`,
 			);
 		} finally {
 			await stopProcess(host.child);

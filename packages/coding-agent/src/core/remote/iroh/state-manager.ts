@@ -18,7 +18,7 @@ import {
 	readIrohRemoteHostState,
 	writeIrohRemoteHostState,
 } from "./state.ts";
-import { upsertIrohRemoteWorkspace } from "./workspace.ts";
+import { findIrohRemoteWorkspace, upsertIrohRemoteWorkspace } from "./workspace.ts";
 
 export interface IrohRemoteHostStateManagerOptions {
 	initialState?: IrohRemoteHostState;
@@ -97,7 +97,14 @@ export class IrohRemoteHostStateManager {
 	): Promise<IrohRemoteClientAuthorizationResult> {
 		return this.runExclusive(async () => {
 			const state = await this.loadUnlocked();
-			const result = authorizeIrohRemoteClient(state, hello, remoteNodeId, options);
+			const workspace = findIrohRemoteWorkspace(state, hello.workspace);
+			const workspaceAvailable =
+				workspace !== undefined &&
+				(options.validateWorkspace === undefined || (await options.validateWorkspace(workspace)));
+			const result = authorizeIrohRemoteClient(state, hello, remoteNodeId, {
+				...options,
+				workspace: workspaceAvailable ? workspace : undefined,
+			});
 			await this.saveUnlocked(state);
 			return cloneAuthorizationResult(result);
 		});

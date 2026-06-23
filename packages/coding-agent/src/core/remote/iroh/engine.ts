@@ -37,6 +37,7 @@ import {
 	encodeIrohRemoteTicketPayload,
 	type IrohRemoteTicketPayload,
 } from "./ticket.ts";
+import { findIrohRemoteWorkspace } from "./workspace.ts";
 
 export const DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS = 10 * 60 * 1000;
 
@@ -48,6 +49,7 @@ export interface IrohRemoteHostEngineOptions {
 	pairingExpiresAt?: number;
 	pairingSecret?: string;
 	stateManager: IrohRemoteHostStateManager;
+	validateWorkspace?: (workspace: IrohRemoteWorkspace) => boolean | Promise<boolean>;
 	workspace: IrohRemoteWorkspace;
 }
 
@@ -120,6 +122,7 @@ export class IrohRemoteHostEngine {
 	private readonly hostNodeId: string | undefined;
 	private readonly now: () => number;
 	private readonly stateManager: IrohRemoteHostStateManager;
+	private readonly validateWorkspace: ((workspace: IrohRemoteWorkspace) => boolean | Promise<boolean>) | undefined;
 	private readonly workspace: IrohRemoteWorkspace;
 	private authorizationQueue: Promise<void> = Promise.resolve();
 	private allowTools: string;
@@ -135,6 +138,7 @@ export class IrohRemoteHostEngine {
 		this.pairingExpiresAt = options.pairingExpiresAt;
 		this.pairingSecret = options.pairingSecret;
 		this.stateManager = options.stateManager;
+		this.validateWorkspace = options.validateWorkspace;
 		this.workspace = parseIrohRemoteWorkspace(options.workspace);
 	}
 
@@ -144,6 +148,7 @@ export class IrohRemoteHostEngine {
 			if (workspace !== this.workspace.name) {
 				throw new Error(`pairing workspace does not match host workspace: ${workspace}`);
 			}
+			await this.ensurePrimaryWorkspaceRegistered();
 
 			const secret = options.secret ?? randomBytes(24).toString("base64url");
 			const createdAt = this.now();
@@ -228,10 +233,22 @@ export class IrohRemoteHostEngine {
 		return this.runAuthorizationExclusive(() => this.authorizeHelloUnlocked(hello, remoteNodeId));
 	}
 
+	private async ensurePrimaryWorkspaceRegistered(): Promise<IrohRemoteWorkspace> {
+		const state = await this.stateManager.getState();
+		const workspace = findIrohRemoteWorkspace(state, this.workspace.name);
+		if (workspace) {
+			return workspace;
+		}
+		return await this.stateManager.upsertWorkspace(this.workspace);
+	}
+
 	private async authorizeHelloUnlocked(
 		hello: IrohRemoteHello,
 		remoteNodeId: string,
 	): Promise<IrohRemoteClientAuthorizationResult> {
+		if (this.pairingSecret !== undefined) {
+			await this.ensurePrimaryWorkspaceRegistered();
+		}
 		const allowTools =
 			this.pairingSecret !== undefined && hello.secret === this.pairingSecret
 				? (this.pairingAllowTools ?? this.allowTools)
@@ -241,7 +258,7 @@ export class IrohRemoteHostEngine {
 			now: this.now(),
 			pairingExpiresAt: this.pairingExpiresAt,
 			pairingSecret: this.pairingSecret,
-			workspace: this.workspace,
+			validateWorkspace: this.validateWorkspace,
 		});
 
 		if (result.ok && result.pairingSecretConsumed) {

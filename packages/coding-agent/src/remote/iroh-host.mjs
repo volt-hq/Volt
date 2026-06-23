@@ -371,6 +371,15 @@ async function assertWorkspaceDirectory(workspace) {
 	workspace.path = await realpath(workspace.path);
 }
 
+async function isWorkspaceDirectoryAvailable(workspace) {
+	try {
+		const workspaceStat = await stat(workspace.path);
+		return workspaceStat.isDirectory();
+	} catch {
+		return false;
+	}
+}
+
 function getRegisterWorkspacePositionals(positionals) {
 	return positionals[0] === "serve" ? positionals.slice(1) : positionals;
 }
@@ -1896,6 +1905,7 @@ async function serve(flags) {
 		auditLogger,
 		hostNodeId: options.hostNodeId,
 		stateManager,
+		validateWorkspace: isWorkspaceDirectoryAvailable,
 		workspace,
 	});
 	options.hostEngine = hostEngine;

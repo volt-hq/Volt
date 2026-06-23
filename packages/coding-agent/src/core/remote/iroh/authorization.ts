@@ -9,7 +9,6 @@ import type {
 	IrohRemoteRevokedClient,
 	IrohRemoteWorkspace,
 } from "./state.ts";
-import { upsertIrohRemoteWorkspace } from "./workspace.ts";
 
 export const DEFAULT_IROH_REMOTE_PAIRING_SECRET_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -17,7 +16,8 @@ export interface AuthorizeIrohRemoteClientOptions {
 	allowTools: string;
 	pairingExpiresAt?: number;
 	pairingSecret?: string;
-	workspace: IrohRemoteWorkspace;
+	validateWorkspace?: (workspace: IrohRemoteWorkspace) => boolean | Promise<boolean>;
+	workspace?: IrohRemoteWorkspace;
 	now?: number;
 }
 
@@ -50,7 +50,8 @@ export function authorizeIrohRemoteClient(
 	remoteNodeId: string,
 	options: AuthorizeIrohRemoteClientOptions,
 ): IrohRemoteClientAuthorizationResult {
-	const workspace = upsertIrohRemoteWorkspace(state, options.workspace, options.allowTools);
+	const workspace = options.workspace;
+	const workspaceName = workspace?.name ?? hello.workspace;
 	const now = options.now ?? Date.now();
 	const revokedClient = findIrohRemoteRevokedClient(state, remoteNodeId);
 	const existingClient = revokedClient ? undefined : findIrohRemoteClient(state, remoteNodeId);
@@ -107,7 +108,7 @@ export function authorizeIrohRemoteClient(
 		if (runtimePairingSecretExpired && pairingSecretHash) {
 			upsertPairingSecretTombstone(state, {
 				secretHash: pairingSecretHash,
-				workspace: workspace.name,
+				workspace: workspaceName,
 				outcome: "pairing_secret_expired",
 				expiresAt: options.pairingExpiresAt,
 				expiredAt: now,
@@ -123,7 +124,7 @@ export function authorizeIrohRemoteClient(
 		};
 	}
 
-	if (hello.workspace !== workspace.name) {
+	if (!workspace || hello.workspace !== workspace.name) {
 		return {
 			ok: false,
 			error: `workspace not allowed: ${hello.workspace}`,
@@ -178,7 +179,7 @@ export function authorizeIrohRemoteClient(
 		const client: IrohRemoteClient = {
 			nodeId: remoteNodeId,
 			label: hello.clientLabel || matchingPendingPairingTicket?.labelHint || remoteNodeId.slice(0, 12),
-			allowedWorkspaces: [allowedWorkspace],
+			allowedWorkspaces: [],
 			allowedTools,
 			pairedAt: now,
 			lastSeenAt: now,
@@ -220,18 +221,9 @@ export function authorizeIrohRemoteClient(
 		};
 	}
 
-	if (!isIrohRemoteClientAllowedForWorkspace(existingClient, workspace.name)) {
-		return {
-			ok: false,
-			error: `client is not allowed to use workspace: ${workspace.name}`,
-			...(expiredResultTickets ? { expiredPairingTickets: expiredResultTickets } : {}),
-			outcome: "workspace_forbidden",
-			pairingSecretExpired: false,
-		};
-	}
-
 	const persistedAllowedTools = existingClient.allowedTools ?? DEFAULT_IROH_REMOTE_ALLOW_TOOLS;
 	existingClient.lastSeenAt = now;
+	existingClient.allowedWorkspaces = [];
 	existingClient.allowedTools = persistedAllowedTools;
 	if (hello.clientLabel) {
 		existingClient.label = hello.clientLabel;
