@@ -297,10 +297,10 @@ workspace-selection smoke, or explicitly document why that evidence is blocked.
     <evidence>2026-06-23: Added one-shot workspace registration before native Iroh startup, realpath validation/storage, default and explicit state support, path/name parser coverage, invalid path rejection, and preserve-on-reregister allowedTools behavior; verification: targeted Vitest `test/remote-cli.test.ts` and `test/remote-iroh-core.test.ts`, `npm run iroh:poc:test`, `git diff --check -- .volt/iroh-multi-workspace-mvp-design.md`, `npm run check`, and commit-hook `npm run check` passed; Volt commit 72b6525a.</evidence>
   </item>
 
-  <item ref="B.2" status="open" prereq="A.1,A.2,B.1">
+  <item ref="B.2" status="resolved" prereq="A.1,A.2,B.1">
     <title>Implement multi-workspace host authorization</title>
     <acceptance>Host authorization resolves the requested workspace by registered name, authorizes paired workstation-scoped clients for any registered workspace, rejects unknown workspaces with `workspace_unavailable`, preserves revocation and pairing-secret semantics, and tests cover workspace A/B reconnect without QR.</acceptance>
-    <evidence></evidence>
+    <evidence>2026-06-23: Added state-resolved handshake workspace authorization, product-host path availability validation, workstation wildcard grants for new pairings, legacy active-client normalization, unknown/stale `workspace_unavailable`, and revocation preservation; verification: LSP tools unavailable in this session, so fallback TypeScript validation used targeted Vitest `test/remote-iroh-core.test.ts` and `test/remote-cli.test.ts`, `npm run iroh:poc:test`, `git diff --check -- .volt/iroh-multi-workspace-mvp-design.md`, `npm run check`, and commit-hook `npm run check`; Volt commit cc3c8fb4.</evidence>
   </item>
 
   <item ref="B.3" status="open" prereq="B.2">
