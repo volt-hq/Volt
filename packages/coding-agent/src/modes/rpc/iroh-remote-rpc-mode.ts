@@ -44,9 +44,10 @@ export function runIrohRemoteRpcMode(
 	options: IrohRemoteRpcModeOptions,
 ): Promise<void> {
 	return runRpcMode(runtimeHost, {
-		allowUiActionInvocation: false,
+		allowUiActionInvocation: true,
 		disposeRuntimeOnClose: options.disposeRuntimeOnClose,
 		onSessionChanged: options.onSessionChanged,
+		requireRemoteSafeUiActions: true,
 		transport: createIrohRemoteFilteredRpcTransport({
 			transport: createIrohRemoteCloseDeferringRpcTransport({
 				transport: createIrohRemoteOutboundFilteredRpcTransport({
@@ -154,10 +155,7 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 			return;
 		}
 		pending.responseMatched = true;
-		if (
-			response.success === true &&
-			(pending.command === "prompt" || pending.command === "steer" || pending.command === "follow_up")
-		) {
+		if (response.success === true && shouldWaitForRemoteResponseCompletion(pending.command, response)) {
 			void finishAfterPromptCompletion(pending).catch(() => {});
 			return;
 		}
@@ -255,4 +253,22 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 		},
 	};
 	return transport;
+}
+
+function shouldWaitForRemoteResponseCompletion(command: string, response: Record<string, unknown>): boolean {
+	if (command === "prompt" || command === "steer" || command === "follow_up") {
+		return true;
+	}
+	if (command !== "invoke_ui_action") {
+		return false;
+	}
+	const data = response.data;
+	if (!isRecord(data)) {
+		return false;
+	}
+	return data.status === "accepted" || data.status === "queued";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }

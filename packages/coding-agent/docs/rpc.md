@@ -271,7 +271,7 @@ Messages are `AgentMessage` objects (see [Message Types](#message-types)).
 
 Native UI action commands let typed clients discover host-owned actions for native cards, buttons, toggles, pickers, and command palettes. They are distinct from raw slash command strings: slash commands are presentation aliases, while action ids are the invocation contract.
 
-The current local RPC implementation exposes the v1 protocol shape, sanitized palette descriptors, and prompt-like invocation for extension commands, prompt templates, and skills. Iroh remote transports allow only the read-only discovery commands, `get_ui_capabilities` and `get_ui_actions`; remote `invoke_ui_action` remains blocked until invocation-time authorization exists.
+The current local RPC implementation exposes the v1 protocol shape, sanitized palette descriptors, and prompt-like invocation for extension commands, prompt templates, and skills. Iroh remote transports allow discovery plus `invoke_ui_action` for the currently advertised remote-safe projected extension command, prompt template, and skill actions. Local-only built-ins and unreviewed action ids remain blocked remotely.
 
 #### get_ui_capabilities
 
@@ -296,7 +296,7 @@ Response:
 }
 ```
 
-`ui_actions.v1` means the host understands `get_ui_actions` descriptors. `ui_action_invocation.v1` means the host accepts `invoke_ui_action` for currently advertised actions. Clients must only rely on features present in this list. Iroh remote discovery currently omits `ui_action_invocation.v1`, and `ui_action_completions.v1` is reserved for later support.
+`ui_actions.v1` means the host understands `get_ui_actions` descriptors. `ui_action_invocation.v1` means the host accepts `invoke_ui_action` for currently advertised actions. Clients must only rely on features present in this list. `ui_action_completions.v1` is reserved for later support.
 
 #### get_ui_actions
 
@@ -423,10 +423,11 @@ For projected dynamic actions, invocation uses the host's existing prompt semant
 - Extension command actions invoke their registered slash command and return `handled` when the command handler completes. They do not require an `agent_end` event.
 - Prompt template and skill actions send their slash alias through host prompt expansion. While idle they return `accepted`; while the agent is streaming they require `streamingBehavior: "steer"` or `"followUp"` and return `queued`.
 - Dynamic action ids are opaque and tied to the current action catalog. After a reload, session replacement, or catalog change, clients must refresh descriptors; stale ids are rejected instead of being remapped to another action.
+- Over Iroh, v1 invocation is allowlist-based and forwards only projected dynamic ids under `extension.command.*`, `prompt.template.*`, and `skill.*`. Local-only built-ins such as deferred review/model actions are rejected with a normal RPC error.
 
 #### Native UI Action Security
 
-Descriptors must not expose host-local paths, extension source paths, prompt template bodies, skill content, provider secrets, environment values, auth internals, raw model/provider metadata, raw transcript payloads, or host session file paths. Iroh remote discovery responses pass through the remote outbound redaction layer in addition to descriptor-level sanitization. Future remote invocation must be allowlist-based and must re-check action availability, authorization, project trust, streaming policy, and argument validity at invocation time.
+Descriptors must not expose host-local paths, extension source paths, prompt template bodies, skill content, provider secrets, environment values, auth internals, raw model/provider metadata, raw transcript payloads, or host session file paths. Iroh remote discovery responses pass through the remote outbound redaction layer in addition to descriptor-level sanitization. Remote invocation is allowlist-based and re-checks action availability, remote safety, authorization, streaming policy, and argument validity at invocation time.
 
 `get_commands` remains the legacy local command-discovery surface for raw slash invocation and may include source metadata useful to local clients. Remote clients must use sanitized `get_ui_actions`; raw `get_commands` remains blocked over Iroh.
 

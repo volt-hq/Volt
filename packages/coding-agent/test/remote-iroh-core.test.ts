@@ -543,6 +543,8 @@ describe("Iroh remote core helpers", () => {
 			"new_session",
 			"get_state",
 			"get_transcript",
+			"get_ui_capabilities",
+			"get_ui_actions",
 			"list_sessions",
 			"switch_session_by_id",
 			"extension_ui_response",
@@ -559,6 +561,29 @@ describe("Iroh remote core helpers", () => {
 				command: "bash",
 				success: false,
 				error: "RPC command not allowed over remote host: bash",
+			},
+		});
+		const dynamicInvocation = {
+			id: "invoke-1",
+			type: "invoke_ui_action",
+			action: "skill.sk_a1b2c3d4e5f6_1",
+		};
+		expect(getIrohRemoteRpcFilterResult(JSON.stringify(dynamicInvocation))).toEqual({
+			allowed: true,
+			command: dynamicInvocation,
+		});
+		expect(
+			getIrohRemoteRpcFilterResult(
+				JSON.stringify({ id: "invoke-local", type: "invoke_ui_action", action: "review.pr" }),
+			),
+		).toEqual({
+			allowed: false,
+			response: {
+				id: "invoke-local",
+				type: "response",
+				command: "invoke_ui_action",
+				success: false,
+				error: "UI action not available over remote host: review.pr",
 			},
 		});
 		for (const command of [

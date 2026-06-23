@@ -1216,6 +1216,18 @@ Concrete behavior:
 - Prompt template and skill actions invoke through the same host prompt path used by raw slash compatibility. Idle invocations return `accepted`; streaming invocations require `streamingBehavior: "steer"` or `"followUp"` and return `queued` with `queuedAs`.
 - Dynamic ids now include an opaque per-session catalog token. The token changes when the current extension/prompt/skill catalog changes or when a new session object owns the catalog, so stale ids reject instead of silently invoking a different action at the same index.
 
+## Resolved 2026-06-23: Iroh Prompt-Like Action Invocation
+
+B.5 implementation exposes the B.4 prompt-like action invocation path over Iroh for the currently reviewed remote-safe dynamic action classes only.
+
+Concrete behavior:
+
+- The Iroh remote command filter accepts `invoke_ui_action` only for projected dynamic ids under `extension.command.*`, `prompt.template.*`, and `skill.*`. Local-only built-in ids, deferred review/model ids, malformed ids, and unreviewed prefixes receive a normal RPC error before reaching the local Volt RPC process.
+- Integrated Iroh RPC runs with `allowUiActionInvocation: true` and a remote-safe action policy. Remote descriptor lists are filtered to `remoteSafe: true`, and invocation rechecks the live descriptor's `remoteSafe` flag before dispatch.
+- Spawned-child Iroh hosts no longer strip `ui_action_invocation.v1` from `get_ui_capabilities`; their outbound `get_ui_actions` responses are filtered to `remoteSafe: true` before path sanitization.
+- Remote invocation still uses the host `AgentSession.prompt()` expansion path from B.4, so extension commands return terminal `handled`, prompt templates and skills return `accepted` while idle, and queued prompt-like actions return `queued`.
+- Iroh close/defer tracking treats terminal `invoke_ui_action` statuses such as `handled`, `completed`, and `cancelled` as complete after the response write, while `accepted` and `queued` continue to wait for the normal prompt lifecycle where the transport path requires that wait.
+
 ## Host Implementation Plan
 
 ### Phase A: Design and Inventory

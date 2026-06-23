@@ -34,6 +34,10 @@ export interface UiActionInvocationPlan {
 	response: UiActionInvocationResponse;
 }
 
+export interface UiActionDescriptorOptions {
+	remoteSafeOnly?: boolean;
+}
+
 interface UiActionCatalogState {
 	fingerprint: string;
 	token: string;
@@ -50,12 +54,15 @@ const catalogStates = new WeakMap<UiActionDiscoverySession, UiActionCatalogState
 export function getUiActionDescriptors(
 	session: UiActionDiscoverySession,
 	scope?: UiActionListScope,
+	options: UiActionDescriptorOptions = {},
 ): UiActionDescriptor[] {
 	if (scope === "primary") {
 		return [];
 	}
 
-	return getUiActionCatalog(session).map((entry) => entry.descriptor);
+	return getUiActionCatalog(session)
+		.filter((entry) => !options.remoteSafeOnly || entry.descriptor.remoteSafe)
+		.map((entry) => entry.descriptor);
 }
 
 export function createUiActionInvocationPlan(
@@ -63,6 +70,7 @@ export function createUiActionInvocationPlan(
 	options: {
 		action: string;
 		args?: unknown;
+		requireRemoteSafe?: boolean;
 		streamingBehavior?: unknown;
 	},
 ): UiActionInvocationPlan {
@@ -73,6 +81,9 @@ export function createUiActionInvocationPlan(
 	const entry = getUiActionCatalog(session).find((candidate) => candidate.descriptor.id === options.action);
 	if (!entry) {
 		throw new Error(`UI action not available: ${options.action}`);
+	}
+	if (options.requireRemoteSafe && !entry.descriptor.remoteSafe) {
+		throw new Error(`UI action not available over remote host: ${options.action}`);
 	}
 	if (!entry.descriptor.enabled) {
 		throw new Error(entry.descriptor.disabledReason ?? `UI action is disabled: ${options.action}`);

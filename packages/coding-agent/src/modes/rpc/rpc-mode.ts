@@ -98,6 +98,8 @@ export interface RpcModeOptions {
 	onReady?: () => void;
 	/** Defaults to true. Remote transports can disable this until their action allowlist is widened. */
 	allowUiActionInvocation?: boolean;
+	/** Defaults to false. Remote transports should only expose and invoke actions marked remote-safe. */
+	requireRemoteSafeUiActions?: boolean;
 }
 
 type RpcModeStartupAwareTransport = RpcTransport & {
@@ -145,6 +147,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	const shouldExitProcess = options.exitProcess ?? !options.transport;
 	const shouldDisposeRuntimeOnClose = options.disposeRuntimeOnClose ?? true;
 	const allowUiActionInvocation = options.allowUiActionInvocation ?? true;
+	const requireRemoteSafeUiActions = options.requireRemoteSafeUiActions ?? false;
 	const shouldRestoreStdout = !options.transport && !shouldExitProcess;
 	const transport = options.transport ?? createStdioRpcTransport();
 	const startupAwareTransport = transport as RpcModeStartupAwareTransport;
@@ -677,7 +680,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			}
 
 			case "get_ui_actions": {
-				return success(id, "get_ui_actions", { actions: getUiActionDescriptors(session, command.scope) });
+				return success(id, "get_ui_actions", {
+					actions: getUiActionDescriptors(session, command.scope, { remoteSafeOnly: requireRemoteSafeUiActions }),
+				});
 			}
 
 			case "invoke_ui_action": {
@@ -687,6 +692,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				const invocation = createUiActionInvocationPlan(session, {
 					action: command.action,
 					args: command.args,
+					requireRemoteSafe: requireRemoteSafeUiActions,
 					streamingBehavior: command.streamingBehavior,
 				});
 				let preflightSucceeded = false;

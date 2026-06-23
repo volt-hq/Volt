@@ -66,9 +66,13 @@ const RESPONSE_COMPLETION_RPC_TYPES = new Set([
 	"new_session",
 	"get_state",
 	"get_transcript",
+	"get_ui_capabilities",
+	"get_ui_actions",
+	"invoke_ui_action",
 	"list_sessions",
 	"switch_session_by_id",
 ]);
+const UI_ACTION_PROMPT_COMPLETION_STATUSES = new Set(["accepted", "queued"]);
 const PROMPT_COMPLETION_SETTLE_MS = 100;
 const BOOLEAN_FLAGS = new Set([
 	"approve",
@@ -728,7 +732,7 @@ function createRemoteHostMetadata(authorization, options) {
 }
 
 function decorateRemoteHostState(value, authorization, options) {
-	const decoratedValue = decorateRemoteUiActionCapabilities(value);
+	const decoratedValue = decorateRemoteUiActionResponse(value);
 	if (
 		typeof decoratedValue !== "object" ||
 		decoratedValue === null ||
@@ -751,18 +755,18 @@ function decorateRemoteHostState(value, authorization, options) {
 	};
 }
 
-function decorateRemoteUiActionCapabilities(value) {
+function decorateRemoteUiActionResponse(value) {
 	if (
 		typeof value !== "object" ||
 		value === null ||
 		Array.isArray(value) ||
 		value.type !== "response" ||
-		value.command !== "get_ui_capabilities" ||
+		value.command !== "get_ui_actions" ||
 		value.success !== true ||
 		typeof value.data !== "object" ||
 		value.data === null ||
 		Array.isArray(value.data) ||
-		!Array.isArray(value.data.features)
+		!Array.isArray(value.data.actions)
 	) {
 		return value;
 	}
@@ -770,7 +774,7 @@ function decorateRemoteUiActionCapabilities(value) {
 		...value,
 		data: {
 			...value.data,
-			features: value.data.features.filter((feature) => feature !== "ui_action_invocation.v1"),
+			actions: value.data.actions.filter((action) => action?.remoteSafe === true),
 		},
 	};
 }
@@ -935,7 +939,11 @@ function createRemoteRpcCompletionTracker(sendQueue) {
 
 			if (event.type !== "response" || typeof event.command !== "string") return;
 			const completedTrackedResponse = completePendingResponse(event);
-			if (completedTrackedResponse && PROMPT_COMPLETION_RPC_TYPES.has(event.command) && event.success === true) {
+			if (
+				completedTrackedResponse &&
+				event.success === true &&
+				shouldWaitForRemoteRpcPromptCompletion(event.command, event)
+			) {
 				pendingPromptCompletions += 1;
 				if (!hasPendingPromptContinuation()) schedulePendingPromptCompletion();
 			}
@@ -963,6 +971,16 @@ function createRemoteRpcCompletionTracker(sendQueue) {
 			addPendingResponseCommand(command.type);
 		},
 	};
+}
+
+function shouldWaitForRemoteRpcPromptCompletion(command, response) {
+	if (PROMPT_COMPLETION_RPC_TYPES.has(command)) {
+		return true;
+	}
+	if (command !== "invoke_ui_action") {
+		return false;
+	}
+	return UI_ACTION_PROMPT_COMPLETION_STATUSES.has(response.data?.status);
 }
 
 async function writeRemoteRpcLineToChild(line, writable, writeToClient, rpcCompletionTracker, sanitizerOptions) {

@@ -17,6 +17,8 @@ export const IROH_REMOTE_RPC_PASSTHROUGH_TYPES = new Set([
 	"extension_ui_response",
 ]);
 
+const IROH_REMOTE_UI_ACTION_PREFIXES = ["extension.command.", "prompt.template.", "skill."] as const;
+
 export interface IrohRemoteRpcCommand extends Record<string, unknown> {
 	type: string;
 }
@@ -71,6 +73,31 @@ export function getIrohRemoteRpcFilterResult(line: string): IrohRemoteRpcFilterR
 		};
 	}
 
+	if (command.type === "invoke_ui_action") {
+		const action = command.action;
+		if (typeof action !== "string" || action.length === 0) {
+			return {
+				allowed: false,
+				response: createIrohRemoteRpcErrorResponse(
+					responseId,
+					"invoke_ui_action",
+					"UI action id must be a non-empty string",
+				),
+			};
+		}
+		if (!isIrohRemoteUiActionId(action)) {
+			return {
+				allowed: false,
+				response: createIrohRemoteRpcErrorResponse(
+					responseId,
+					"invoke_ui_action",
+					`UI action not available over remote host: ${action}`,
+				),
+			};
+		}
+		return { allowed: true, command: command as IrohRemoteRpcCommand };
+	}
+
 	if (IROH_REMOTE_RPC_PASSTHROUGH_TYPES.has(command.type)) {
 		return { allowed: true, command: command as IrohRemoteRpcCommand };
 	}
@@ -83,6 +110,10 @@ export function getIrohRemoteRpcFilterResult(line: string): IrohRemoteRpcFilterR
 			`RPC command not allowed over remote host: ${command.type}`,
 		),
 	};
+}
+
+function isIrohRemoteUiActionId(action: string): boolean {
+	return IROH_REMOTE_UI_ACTION_PREFIXES.some((prefix) => action.startsWith(prefix));
 }
 
 export function serializeIrohRemoteRpcFilterRejection(response: IrohRemoteRpcErrorResponse): string {

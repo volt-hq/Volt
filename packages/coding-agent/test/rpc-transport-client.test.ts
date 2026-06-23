@@ -184,7 +184,7 @@ describe("RpcTransportClient", () => {
 });
 
 describe("Iroh remote RPC filter", () => {
-	test("allows native UI action discovery while keeping invocation and legacy local commands blocked", () => {
+	test("allows native UI action discovery and dynamic invocation while keeping local commands blocked", () => {
 		for (const type of ["get_ui_capabilities", "get_ui_actions"]) {
 			const command = { id: `${type}-1`, type };
 			expect(getIrohRemoteRpcFilterResult(JSON.stringify(command))).toEqual({
@@ -193,8 +193,32 @@ describe("Iroh remote RPC filter", () => {
 			});
 		}
 
+		const invocation = {
+			id: "invoke-1",
+			type: "invoke_ui_action",
+			action: "extension.command.ec_a1b2c3d4e5f6_1",
+			args: { arguments: "prod" },
+		};
+		expect(getIrohRemoteRpcFilterResult(JSON.stringify(invocation))).toEqual({
+			allowed: true,
+			command: invocation,
+		});
+		expect(
+			getIrohRemoteRpcFilterResult(
+				JSON.stringify({ id: "local-action-1", type: "invoke_ui_action", action: "review.pr", args: {} }),
+			),
+		).toEqual({
+			allowed: false,
+			response: {
+				id: "local-action-1",
+				type: "response",
+				command: "invoke_ui_action",
+				success: false,
+				error: "UI action not available over remote host: review.pr",
+			},
+		});
+
 		for (const type of [
-			"invoke_ui_action",
 			"get_messages",
 			"get_commands",
 			"switch_session",
@@ -439,6 +463,39 @@ describe("runRpcMode", () => {
 		expect(dispose).toHaveBeenCalledOnce();
 	});
 
+	test("does not wait for agent completion after handled UI action responses", async () => {
+		const pair = createLoopbackRpcTransportPair();
+		let waitedForCompletion = false;
+		const transport = createIrohRemoteCloseDeferringRpcTransport({
+			transport: pair.server,
+			waitForPromptCompletion: () => {
+				waitedForCompletion = true;
+				return new Promise(() => {});
+			},
+		});
+		let closed = false;
+		transport.onLine(() => {});
+		transport.onClose?.(() => {
+			closed = true;
+		});
+
+		const action = "extension.command.ec_a1b2c3d4e5f6_1";
+		pair.client.write({ id: "invoke-1", type: "invoke_ui_action", action, args: { arguments: "prod" } });
+		pair.client.close();
+		await Promise.resolve();
+		expect(closed).toBe(false);
+
+		transport.write({
+			id: "invoke-1",
+			type: "response",
+			command: "invoke_ui_action",
+			success: true,
+			data: { action, status: "handled" },
+		});
+		await vi.waitFor(() => expect(closed).toBe(true));
+		expect(waitedForCompletion).toBe(false);
+	});
+
 	test("sanitizes malformed unknown command responses", async () => {
 		const pair = createLoopbackRpcTransportPair();
 		const dispose = vi.fn(async () => {});
@@ -519,6 +576,98 @@ describe("runRpcMode", () => {
 		});
 
 		pair.client.close();
+		await expect(modePromise).resolves.toBeUndefined();
+		expect(dispose).toHaveBeenCalledOnce();
+	});
+
+	test("allows remote-safe UI action invocation over Iroh filtered transport", async () => {
+		const pair = createLoopbackRpcTransportPair();
+		const dispose = vi.fn(async () => {});
+		const sourceInfo = createSourceInfo("/Users/jordan/project/.volt/agent/extensions/deploy.ts");
+		const prompt = vi.fn(async (_message: string, options?: PromptOptions) => {
+			options?.preflightResult?.(true);
+		});
+		const runtimeHost = createRuntimeHost(dispose, async () => {}, {
+			commands: [createCommand("deploy", "deploy", "Deploy", sourceInfo)],
+			prompts: [
+				{
+					name: "fix-tests",
+					description: "Fix failing tests",
+					argumentHint: "failure output",
+					content: "Fix $ARGUMENTS",
+					filePath: "/Users/jordan/project/.volt/agent/prompts/fix-tests.md",
+					sourceInfo,
+				},
+			],
+			skills: [
+				{
+					name: "debugger",
+					description: "Debug issues",
+					filePath: "/Users/jordan/project/.volt/agent/skills/debugger/SKILL.md",
+					baseDir: "/Users/jordan/project/.volt/agent/skills/debugger",
+					sourceInfo,
+					disableModelInvocation: false,
+				},
+			],
+			prompt,
+		});
+		const transport = createIrohRemoteFilteredRpcTransport({
+			transport: createIrohRemoteCloseDeferringRpcTransport({
+				transport: pair.server,
+				waitForPromptCompletion: () => Promise.resolve(),
+			}),
+		});
+		const modePromise = runRpcMode(runtimeHost, {
+			allowUiActionInvocation: true,
+			exitProcess: false,
+			requireRemoteSafeUiActions: true,
+			transport,
+		});
+		const client = new RpcTransportClient({ transport: pair.client });
+		await client.start();
+
+		try {
+			await expect(client.getUiCapabilities()).resolves.toEqual({
+				protocolVersion: 1,
+				features: ["ui_actions.v1", "ui_action_invocation.v1"],
+				maxActions: 200,
+				maxDescriptorBytes: 65_536,
+			});
+			const actions = await client.getUiActions("all");
+			const extensionAction = actions.find((action) => action.source === "extension");
+			const promptAction = actions.find((action) => action.source === "prompt");
+			const skillAction = actions.find((action) => action.source === "skill");
+			if (!extensionAction || !promptAction || !skillAction) {
+				throw new Error("expected remote extension, prompt, and skill actions");
+			}
+			await expect(client.invokeUiAction(extensionAction.id, { args: { arguments: "prod" } })).resolves.toEqual({
+				action: extensionAction.id,
+				status: "handled",
+			});
+			await expect(
+				client.invokeUiAction(promptAction.id, { args: { arguments: "copy failing output" } }),
+			).resolves.toEqual({
+				action: promptAction.id,
+				status: "accepted",
+			});
+			await expect(client.invokeUiAction(skillAction.id, { args: { arguments: "inspect crash" } })).resolves.toEqual(
+				{
+					action: skillAction.id,
+					status: "accepted",
+				},
+			);
+			await expect(client.invokeUiAction("review.pr", { args: {} })).rejects.toThrow(
+				"UI action not available over remote host: review.pr",
+			);
+			expect(prompt).toHaveBeenCalledTimes(3);
+			expect(prompt.mock.calls.map(([message]) => message)).toEqual([
+				"/deploy prod",
+				"/fix-tests copy failing output",
+				"/skill:debugger inspect crash",
+			]);
+		} finally {
+			await client.stop();
+		}
 		await expect(modePromise).resolves.toBeUndefined();
 		expect(dispose).toHaveBeenCalledOnce();
 	});
