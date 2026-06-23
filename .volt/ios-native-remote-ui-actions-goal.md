@@ -335,10 +335,10 @@ and recorded without overclaiming.
     <evidence>Resolved 2026-06-23: added VoltClient command encoders for `get_ui_capabilities`, `get_ui_actions`, and `invoke_ui_action`; added Swift UI action descriptor, capability, list, and invocation response models with lenient optional-field decoding, unknown string passthrough, string-or-array streaming behavior parsing, and invalid descriptor/argument/option skipping; covered command encoding and descriptor parsing with unknown fields in `VoltUIActionRPCTests`; verified with `swift test --filter VoltUIActionRPCTests`, `swift test` from `../volt-app/Packages/VoltClient`, and `git diff --check -- Packages/VoltClient/Sources/VoltClient/RPC/VoltRPC.swift Packages/VoltClient/Sources/VoltClient/RPC/VoltUIActions.swift Packages/VoltClient/Tests/VoltClientTests/VoltUIActionRPCTests.swift`; app commit b58f698bce46decc8fe4c2928ecdeed2738be1fd.</evidence>
   </item>
 
-  <item ref="C.2" status="open" prereq="C.1,B.3">
+  <item ref="C.2" status="resolved" prereq="C.1,B.3">
     <title>Load and refresh native action descriptors in `VoltSession`</title>
     <acceptance>The iOS session loads action capabilities/descriptors after connect/reconnect, refreshes after session switch/new session and action-change events if available, stores loading/error state, preserves existing transcript loading behavior, and treats unavailable host support as non-fatal fallback. Tests cover connect, reconnect, session switch, new session, unsupported-command fallback, and invalid descriptor skipping.</acceptance>
-    <evidence></evidence>
+    <evidence>Resolved 2026-06-23: added `VoltSession` native action capability/list state, connect/reconnect discovery, session and action-change refresh triggers, non-fatal unsupported-host fallback, mock action discovery responses, and lifecycle coverage for loading, refresh, fallback, invalid descriptor skipping, and transcript preservation; verified with `swift test --filter VoltSessionLifecycleTests`, `swift test` from `../volt-app/Packages/VoltClient`, and `git diff --check -- Packages/VoltClient/Sources/VoltCore/VoltSession.swift Packages/VoltClient/Sources/VoltClient/Transport/MockVoltTransport.swift Packages/VoltClient/Tests/VoltCoreTests/VoltSessionLifecycleTests.swift`; app commit 78907485103e03a53086f5708eced6ba13d12e12.</evidence>
   </item>
 
   <item ref="C.3" status="open" prereq="C.2,B.4">

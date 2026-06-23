@@ -1239,6 +1239,19 @@ Concrete behavior:
 - Descriptor parsing keeps required v1 fields strict, passes unknown source/category/presentation/argument/state/streaming string values through for forward compatibility, ignores unknown fields, and skips invalid descriptors, argument entries, or option entries without failing the whole action list.
 - Tests cover command JSONL encoding and descriptor parsing with unknown fields, invalid entries, presentation/source metadata, enabled and disabled reason state, argument metadata, state snapshots, streaming behavior, and slash aliases.
 
+## Resolved 2026-06-23: iOS Session Action Discovery
+
+C.2 implementation loads host native action descriptors into `VoltSession` as optional capability-driven state.
+
+Concrete behavior:
+
+- `VoltSession` now stores `uiActionCapabilities`, `uiActions`, `isLoadingUIActions`, `uiActionLoadError`, and `uiActionsUnsupported`.
+- Connect and reconnect request state, transcript, and UI action capabilities without changing transcript loading semantics. When `ui_actions.v1` is advertised, the session requests `get_ui_actions` with `scope: "all"` and stores parsed descriptors.
+- New conversation, session switch, changed `sessionId` in `get_state`, `ui_actions_changed`, and `ui_action_state_changed` clear stale descriptors and refresh the action list.
+- Capability/list failures do not fail the connection. Unsupported capability responses are treated as a non-fatal fallback; malformed or failed action-list responses are stored in action error state instead of transcript noise.
+- The demo mock transport advertises the v1 action protocol and returns a safe mock palette action so local demo sessions exercise the discovery path.
+- Lifecycle tests cover initial connect/reconnect request ordering, successful capability/list loading, invalid descriptor skipping, unsupported-command fallback, session-change refresh, action-change refresh, and unchanged transcript loading behavior.
+
 ## Host Implementation Plan
 
 ### Phase A: Design and Inventory
