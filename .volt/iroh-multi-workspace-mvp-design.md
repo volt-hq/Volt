@@ -595,6 +595,24 @@ No extra confirmation dialog is required for MVP. The picker action itself is
 the user's explicit workspace switch request, and the list contains only
 host-verified names from saved metadata.
 
+Resolved 2026-06-23: the iOS session model implements saved-host workspace
+selection for registered names already present in `SavedHostRecord.workspaceNames`.
+Selection saves the chosen name as `primaryWorkspace`, clears any stale
+`sanitizedReconnectTicket` so the next reconnect ticket is synthesized for the
+selected workspace, and preserves saved host identity, endpoint discovery,
+relay mode, timestamps, display name, and the known workspace list. Session-level
+selection is refused while connecting or streaming, selecting the current
+workspace is a no-op, and unknown names are rejected without changing the saved
+record.
+
+Connected-idle, disconnected saved-host, and workspace-specific failure states
+reconnect immediately after the selected workspace is saved. Host-offline,
+waiting-for-network, and suspended states persist the selected workspace without
+auto-retry; the next Retry uses the selected workspace. A later
+`workspace_unavailable` result keeps the saved host and keeps the selected
+primary workspace for another selection or retry. The Settings UI picker remains
+the C.3 implementation item.
+
 ### Reconnect with selected workspace
 
 Saved reconnect should synthesize a reconnect ticket for `primaryWorkspace`.
@@ -860,6 +878,13 @@ Tasks:
 8. Add tests for refresh, selection, reconnect ticket workspace, unavailable
    workspace issue, offline selection persistence, streaming/connecting disabled
    states, connected-idle reconnect, and Settings UI affordance.
+
+Resolved 2026-06-23: C.2 completed the non-UI selection model portions of this
+phase: primary workspace selection, stale reconnect envelope invalidation,
+state-dependent reconnect behavior, and saved-host/session tests for selected
+workspace reconnect tickets, offline persistence, workspace-specific retry, and
+streaming/connecting disabled states. Settings picker UI coverage remains in
+C.3.
 
 ### Phase 6: Docs and smoke validation
 

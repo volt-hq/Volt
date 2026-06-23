@@ -329,10 +329,10 @@ workspace-selection smoke, or explicitly document why that evidence is blocked.
     <evidence>2026-06-23: Added iOS saved-host metadata refresh from verified `get_state.remoteHost.workspaceNames`, preserving saved host identity and primary workspace while falling back to existing workspace names when metadata omits them; verification: `swift test --filter VoltSessionLifecycleTests`, full `swift test` from `../volt-app/Packages/VoltClient`, app `git diff --check` for changed Swift files, and Volt `git diff --check -- .volt/iroh-multi-workspace-mvp-design.md .volt/iroh-multi-workspace-mvp-goal.md`; app commit 2399885.</evidence>
   </item>
 
-  <item ref="C.2" status="open" prereq="A.3,C.1">
+  <item ref="C.2" status="resolved" prereq="A.3,C.1">
     <title>Implement saved-host workspace selection and reconnect</title>
     <acceptance>The app can select a registered workspace name, saves it as `primaryWorkspace`, regenerates or omits stale reconnect envelopes, reconnects using the selected workspace when safe, and tests prove the reconnect ticket uses the selected workspace and `workspace_unavailable` keeps the saved host.</acceptance>
-    <evidence></evidence>
+    <evidence>2026-06-23: Added iOS saved-host workspace selection from known registered workspace names, selected `primaryWorkspace` persistence, stale reconnect envelope clearing, selected-workspace reconnect ticket synthesis, safe-state reconnect behavior, offline persistence, and workspace-unavailable saved-host retention coverage; verification: `swift test --filter SavedHostRecordTests`, `swift test --filter VoltSessionLifecycleTests`, full `swift test` from `../volt-app/Packages/VoltClient`, app `git diff --check` for changed Swift files, and Volt `git diff --check -- .volt/iroh-multi-workspace-mvp-design.md .volt/iroh-multi-workspace-mvp-goal.md`; app commit 6ecf5a1.</evidence>
   </item>
 
   <item ref="C.3" status="open" prereq="C.2">
