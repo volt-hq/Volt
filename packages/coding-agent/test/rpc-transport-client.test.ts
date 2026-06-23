@@ -1,7 +1,7 @@
 import { describe, expect, test, vi } from "vitest";
 import type { ExtensionBindings } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
-import { createIrohRemoteFilteredRpcTransport } from "../src/core/remote/iroh/index.ts";
+import { createIrohRemoteFilteredRpcTransport, getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/index.ts";
 import { createLoopbackRpcTransportPair, type RpcExtensionUIRequest } from "../src/core/rpc/index.ts";
 import { createInProcessRpcClient } from "../src/modes/rpc/in-process-rpc-client.ts";
 import { createIrohRemoteCloseDeferringRpcTransport } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
@@ -172,6 +172,23 @@ describe("RpcTransportClient", () => {
 		pair.server.close();
 
 		await expect(statePromise).rejects.toThrow("RPC transport closed");
+	});
+});
+
+describe("Iroh remote RPC filter", () => {
+	test("keeps native UI action commands blocked until explicitly allowlisted", () => {
+		for (const type of ["get_ui_capabilities", "get_ui_actions", "invoke_ui_action"]) {
+			expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${type}-1`, type }))).toEqual({
+				allowed: false,
+				response: {
+					id: `${type}-1`,
+					type: "response",
+					command: type,
+					success: false,
+					error: `RPC command not allowed over remote host: ${type}`,
+				},
+			});
+		}
 	});
 });
 
@@ -441,6 +458,31 @@ describe("createInProcessRpcClient", () => {
 		});
 
 		await client.stop();
+		expect(dispose).toHaveBeenCalledOnce();
+	});
+
+	test("exposes native UI action discovery without invocation support", async () => {
+		const dispose = vi.fn(async () => {});
+		const runtimeHost = createRuntimeHost(dispose);
+		const client = await createInProcessRpcClient(runtimeHost);
+
+		try {
+			await expect(client.getUiCapabilities()).resolves.toEqual({
+				protocolVersion: 1,
+				features: ["ui_actions.v1"],
+				maxActions: 200,
+				maxDescriptorBytes: 65_536,
+			});
+			await expect(client.getUiActions("all")).resolves.toEqual([]);
+			await expect(
+				client.invokeUiAction("review.uncommitted", {
+					args: {},
+					streamingBehavior: "followUp",
+				}),
+			).rejects.toThrow("UI action invocation is not available yet");
+		} finally {
+			await client.stop();
+		}
 		expect(dispose).toHaveBeenCalledOnce();
 	});
 

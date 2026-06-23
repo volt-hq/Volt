@@ -39,6 +39,7 @@ import type {
 	RpcSessionListItem,
 	RpcSessionState,
 	RpcSlashCommand,
+	UiActionCapabilities,
 } from "./rpc-types.ts";
 
 // Re-export types for consumers
@@ -48,7 +49,34 @@ export type {
 	RpcExtensionUIResponse,
 	RpcResponse,
 	RpcSessionState,
+	UiActionArgumentDescriptor,
+	UiActionArgumentType,
+	UiActionCapabilities,
+	UiActionCapabilityFeature,
+	UiActionCategory,
+	UiActionDescriptor,
+	UiActionInvocationQueueBehavior,
+	UiActionInvocationResponse,
+	UiActionInvocationStatus,
+	UiActionListResponse,
+	UiActionListScope,
+	UiActionOptionDescriptor,
+	UiActionPresentationHint,
+	UiActionPresentationKind,
+	UiActionScalar,
+	UiActionSlashAlias,
+	UiActionSource,
+	UiActionStateDescriptor,
+	UiActionStateType,
+	UiActionStreamingBehavior,
 } from "./rpc-types.ts";
+
+const UI_ACTION_CAPABILITIES: UiActionCapabilities = {
+	protocolVersion: 1,
+	features: ["ui_actions.v1"],
+	maxActions: 200,
+	maxDescriptorBytes: 65_536,
+};
 
 export interface RpcSessionChange {
 	sessionFile?: string;
@@ -632,6 +660,22 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					await rebindSession();
 				}
 				return success(id, "new_session", result);
+			}
+
+			// =================================================================
+			// Native UI Actions
+			// =================================================================
+
+			case "get_ui_capabilities": {
+				return success(id, "get_ui_capabilities", UI_ACTION_CAPABILITIES);
+			}
+
+			case "get_ui_actions": {
+				return success(id, "get_ui_actions", { actions: [] });
+			}
+
+			case "invoke_ui_action": {
+				return error(id, "invoke_ui_action", "UI action invocation is not available yet");
 			}
 
 			// =================================================================

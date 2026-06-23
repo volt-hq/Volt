@@ -1162,6 +1162,20 @@ Compatibility rules:
 - Hosts may omit actions that are unavailable or unsafe for the client.
 - Clients should handle missing features by falling back to current prompt/new-session/session-list behavior.
 
+## Resolved 2026-06-23: Core RPC UI Action Protocol Foundation
+
+B.1 implementation adds the v1 native UI action protocol shape to the local RPC contract without widening Iroh remote access.
+
+Concrete behavior:
+
+- `RpcCommand` includes `get_ui_capabilities`, `get_ui_actions`, and `invoke_ui_action`.
+- `RpcResponse` includes success shapes for UI action capabilities, action lists, and invocation responses.
+- Exported protocol types include `UiActionDescriptor`, presentation hints, argument/state descriptors, capabilities, action-list responses, and invocation responses.
+- `RpcClientBase` exposes typed `getUiCapabilities()`, `getUiActions(scope?)`, and `invokeUiAction(action, options?)` helpers.
+- Local `runRpcMode` returns protocol v1 capabilities with only `ui_actions.v1` advertised, returns an empty `actions` array for `get_ui_actions`, and rejects `invoke_ui_action` with a normal RPC error until handlers exist.
+- `docs/rpc.md` documents the non-remote commands, descriptor shape, invocation response statuses, and security notes.
+- Iroh remote RPC remains allowlist-based and still rejects `get_ui_capabilities`, `get_ui_actions`, and `invoke_ui_action`; B.3 and B.5 own any future remote allowlist changes.
+
 ## Host Implementation Plan
 
 ### Phase A: Design and Inventory

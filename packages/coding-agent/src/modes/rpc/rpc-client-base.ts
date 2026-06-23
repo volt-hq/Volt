@@ -11,6 +11,11 @@ import type {
 	RpcResponse,
 	RpcSessionState,
 	RpcSlashCommand,
+	UiActionCapabilities,
+	UiActionDescriptor,
+	UiActionInvocationQueueBehavior,
+	UiActionInvocationResponse,
+	UiActionListScope,
 } from "./rpc-types.ts";
 
 /** Distributive Omit that works with union types. */
@@ -101,6 +106,32 @@ export abstract class RpcClientBase {
 	/** Get current session state. */
 	async getState(): Promise<RpcSessionState> {
 		const response = await this.send({ type: "get_state" });
+		return this.getData(response);
+	}
+
+	/** Get native UI action protocol capabilities. */
+	async getUiCapabilities(): Promise<UiActionCapabilities> {
+		const response = await this.send({ type: "get_ui_capabilities" });
+		return this.getData(response);
+	}
+
+	/** Get native UI action descriptors. */
+	async getUiActions(scope?: UiActionListScope): Promise<UiActionDescriptor[]> {
+		const response = await this.send({ type: "get_ui_actions", scope });
+		return this.getData<{ actions: UiActionDescriptor[] }>(response).actions;
+	}
+
+	/** Invoke a native UI action by id. */
+	async invokeUiAction(
+		action: string,
+		options: { args?: Record<string, unknown>; streamingBehavior?: UiActionInvocationQueueBehavior } = {},
+	): Promise<UiActionInvocationResponse> {
+		const response = await this.send({
+			type: "invoke_ui_action",
+			action,
+			args: options.args,
+			streamingBehavior: options.streamingBehavior,
+		});
 		return this.getData(response);
 	}
 

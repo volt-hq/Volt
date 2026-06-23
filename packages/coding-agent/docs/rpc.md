@@ -267,6 +267,140 @@ Response:
 
 Messages are `AgentMessage` objects (see [Message Types](#message-types)).
 
+### Native UI Actions
+
+Native UI action commands let typed clients discover host-owned actions for native cards, buttons, toggles, pickers, and command palettes. They are distinct from raw slash command strings: slash commands are presentation aliases, while action ids are the invocation contract.
+
+The current non-remote RPC implementation exposes the v1 protocol shape and an empty action list. It does not advertise invocation support yet, and `invoke_ui_action` returns a normal RPC error until action handlers are registered in later implementation phases. Iroh remote transports still reject these commands until a separate allowlist and descriptor-sanitization change is made.
+
+#### get_ui_capabilities
+
+Get supported native UI action protocol features.
+
+```json
+{"type": "get_ui_capabilities"}
+```
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "get_ui_capabilities",
+  "success": true,
+  "data": {
+    "protocolVersion": 1,
+    "features": ["ui_actions.v1"],
+    "maxActions": 200,
+    "maxDescriptorBytes": 65536
+  }
+}
+```
+
+`ui_actions.v1` means the host understands `get_ui_actions` descriptors. Clients must only rely on features present in this list. `ui_action_invocation.v1` and `ui_action_completions.v1` are reserved for later support.
+
+#### get_ui_actions
+
+Get native UI action descriptors. `scope` is optional and may be `"primary"`, `"palette"`, or `"all"`.
+
+```json
+{"type": "get_ui_actions", "scope": "palette"}
+```
+
+Initial response:
+```json
+{
+  "type": "response",
+  "command": "get_ui_actions",
+  "success": true,
+  "data": {
+    "actions": []
+  }
+}
+```
+
+When actions are available, each descriptor uses this v1 shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "review.uncommitted",
+  "label": "Review changes",
+  "description": "Review uncommitted workspace changes for bugs and regressions.",
+  "source": "builtin",
+  "category": "review",
+  "presentation": {
+    "kind": "card",
+    "group": "Review",
+    "priority": 100,
+    "icon": "magnifyingglass"
+  },
+  "args": [],
+  "enabled": true,
+  "disabledReason": null,
+  "destructive": false,
+  "requiresConfirmation": true,
+  "streamingBehavior": "disabled",
+  "remoteSafe": true,
+  "slash": {
+    "name": "review",
+    "example": "/review uncommitted"
+  }
+}
+```
+
+Required fields are `schemaVersion`, `id`, `label`, `source`, `category`, `enabled`, and `remoteSafe`. Clients should ignore unknown fields, skip invalid descriptors, render unknown categories as advanced or other actions, and treat unknown presentation kinds as palette rows.
+
+Descriptor fields are advisory snapshots. The host remains authoritative and may omit actions that are unavailable, unsafe, too large, or unsupported by the client. Dynamic action ids are session-local unless a future descriptor explicitly documents stronger stability.
+
+#### invoke_ui_action
+
+Invoke a native UI action by descriptor id.
+
+```json
+{"type": "invoke_ui_action", "action": "review.uncommitted", "args": {}, "streamingBehavior": "followUp"}
+```
+
+`args` is an optional object matching the descriptor's argument metadata. `streamingBehavior` is optional and may be `"steer"` or `"followUp"` when the descriptor allows queued invocation while the agent is streaming.
+
+Current response before invocation support is implemented:
+```json
+{
+  "type": "response",
+  "command": "invoke_ui_action",
+  "success": false,
+  "error": "UI action invocation is not available yet"
+}
+```
+
+When invocation is supported, successful response data reports the command disposition:
+
+```json
+{
+  "type": "response",
+  "command": "invoke_ui_action",
+  "success": true,
+  "data": {
+    "action": "review.uncommitted",
+    "status": "accepted"
+  }
+}
+```
+
+Possible statuses:
+- `"accepted"`: a prompt-like action was accepted while idle. Normal agent events, including `agent_end`, report completion.
+- `"queued"`: a prompt-like action was queued while another turn is streaming. `queuedAs` is `"steer"` or `"followUp"`.
+- `"completed"`: the action finished synchronously. No `agent_end` is expected for this invocation.
+- `"handled"`: the host, extension command, or input hook handled the action without starting an agent turn.
+- `"cancelled"`: the action was cancelled before execution.
+
+Only `accepted` and `queued` may require waiting for later agent events. Clients must clear pending UI immediately for `completed`, `handled`, `cancelled`, and RPC errors.
+
+#### Native UI Action Security
+
+For non-remote RPC, descriptors still must not expose host-local paths, extension source paths, prompt template bodies, skill content, provider secrets, environment values, auth internals, raw model/provider metadata, raw transcript payloads, or host session file paths. Future remote exposure must be allowlist-based and must re-check action availability, authorization, project trust, streaming policy, and argument validity at invocation time.
+
+`get_commands` remains the legacy local command-discovery surface for raw slash invocation and may include source metadata useful to local clients. Remote clients should use sanitized `get_ui_actions` only after the remote allowlist explicitly permits it.
+
 ### Model
 
 #### set_model

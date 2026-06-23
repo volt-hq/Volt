@@ -26,6 +26,17 @@ export type RpcCommand =
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "new_session"; parentSession?: string }
 
+	// Native UI actions
+	| { id?: string; type: "get_ui_capabilities" }
+	| { id?: string; type: "get_ui_actions"; scope?: UiActionListScope }
+	| {
+			id?: string;
+			type: "invoke_ui_action";
+			action: string;
+			args?: Record<string, unknown>;
+			streamingBehavior?: UiActionInvocationQueueBehavior;
+	  }
+
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "get_transcript"; limit?: number; beforeEntryId?: string }
@@ -72,6 +83,116 @@ export type RpcCommand =
 
 	// Commands (available for invocation via prompt)
 	| { id?: string; type: "get_commands" };
+
+// ============================================================================
+// RPC Native UI Actions
+// ============================================================================
+
+export type UiActionSource = "builtin" | "extension" | "prompt" | "skill" | "package";
+export type UiActionCategory =
+	| "review"
+	| "session"
+	| "model"
+	| "context"
+	| "extension"
+	| "prompt"
+	| "skill"
+	| "advanced";
+export type UiActionPresentationKind = "card" | "button" | "toggle" | "picker" | "palette" | "detail" | "hidden";
+export type UiActionArgumentType = "string" | "boolean" | "enum" | "integer";
+export type UiActionStateType = "boolean" | "string" | "enum" | "integer";
+export type UiActionStreamingBehavior = "disabled" | "immediate" | "queueSteer" | "queueFollowUp";
+export type UiActionScalar = string | number | boolean | null;
+export type UiActionListScope = "primary" | "palette" | "all";
+export type UiActionInvocationQueueBehavior = "steer" | "followUp";
+export type UiActionInvocationStatus = "accepted" | "completed" | "queued" | "handled" | "cancelled";
+export type UiActionCapabilityFeature =
+	| "ui_actions.v1"
+	| "ui_action_invocation.v1"
+	| "ui_action_completions.v1"
+	| (string & {});
+
+export interface UiActionOptionDescriptor {
+	value: string;
+	label?: string;
+	description?: string;
+}
+
+export interface UiActionPresentationHint {
+	kind: UiActionPresentationKind | (string & {});
+	group?: string;
+	priority?: number;
+	icon?: string;
+}
+
+export interface UiActionArgumentDescriptor {
+	name: string;
+	label?: string;
+	description?: string;
+	type: UiActionArgumentType | (string & {});
+	required?: boolean;
+	multiline?: boolean;
+	placeholder?: string;
+	hint?: string;
+	defaultValue?: UiActionScalar;
+	options?: UiActionOptionDescriptor[];
+	completion?: "commandArguments" | (string & {});
+}
+
+export interface UiActionStateDescriptor {
+	type: UiActionStateType | (string & {});
+	value: UiActionScalar;
+	label?: string;
+	options?: UiActionOptionDescriptor[];
+}
+
+export interface UiActionSlashAlias {
+	name: string;
+	example?: string;
+}
+
+export interface UiActionDescriptor {
+	schemaVersion: 1;
+	id: string;
+	label: string;
+	description?: string;
+	source: UiActionSource | (string & {});
+	sourceScope?: "user" | "project" | "temporary";
+	sourceOrigin?: "package" | "top-level";
+	sourceLabel?: string;
+	category: UiActionCategory | (string & {});
+	presentation?: UiActionPresentationHint;
+	args?: UiActionArgumentDescriptor[];
+	state?: UiActionStateDescriptor;
+	enabled: boolean;
+	disabledReason?: string | null;
+	destructive?: boolean;
+	requiresConfirmation?: boolean;
+	streamingBehavior?: UiActionStreamingBehavior | UiActionStreamingBehavior[];
+	remoteSafe: boolean;
+	slash?: UiActionSlashAlias;
+}
+
+export interface UiActionCapabilities {
+	protocolVersion: 1;
+	features: UiActionCapabilityFeature[];
+	maxActions: number;
+	maxDescriptorBytes: number;
+}
+
+export interface UiActionListResponse {
+	actions: UiActionDescriptor[];
+}
+
+export interface UiActionInvocationResponse {
+	action: string;
+	status: UiActionInvocationStatus;
+	queuedAs?: UiActionInvocationQueueBehavior;
+	state?: UiActionStateDescriptor;
+	stateChanged?: boolean;
+	actionsChanged?: boolean;
+	message?: string;
+}
 
 // ============================================================================
 // RPC Slash Command (for get_commands response)
@@ -168,6 +289,17 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "follow_up"; success: true }
 	| { id?: string; type: "response"; command: "abort"; success: true }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
+
+	// Native UI actions
+	| { id?: string; type: "response"; command: "get_ui_capabilities"; success: true; data: UiActionCapabilities }
+	| { id?: string; type: "response"; command: "get_ui_actions"; success: true; data: UiActionListResponse }
+	| {
+			id?: string;
+			type: "response";
+			command: "invoke_ui_action";
+			success: true;
+			data: UiActionInvocationResponse;
+	  }
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
