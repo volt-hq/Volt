@@ -309,10 +309,10 @@ and recorded without overclaiming.
     <evidence>Resolved 2026-06-23: implemented sanitized `get_ui_actions` projection for extension commands, prompt templates, and skills with opaque ids, bounded safe source labels, duplicate invocation-name preservation, path-like text redaction, and sensitive-field omission tests; verified with `node node_modules/vitest/dist/cli.js --run test/rpc-transport-client.test.ts` from `packages/coding-agent`, `npm run check`, `npm run iroh:poc:test` after an initial timeout rerun, and `git diff --check -- packages/coding-agent/docs/rpc.md .volt/ios-native-remote-ui-actions-design.md .volt/ios-native-remote-ui-actions-goal.md`; commit 31da88fdf8da25bdeb3e1d470bb81e49832c6f95.</evidence>
   </item>
 
-  <item ref="B.3" status="open" prereq="B.2">
+  <item ref="B.3" status="resolved" prereq="B.2">
     <title>Allow safe action discovery over Iroh without widening unrelated remote RPC access</title>
     <acceptance>The Iroh remote command filter allows the minimum discovery command(s) needed for action descriptors; blocked commands such as raw `get_messages`, path-based `switch_session`, unrestricted model listing, and local tool RPC remain blocked; outbound redaction applies to descriptors; protocol docs explain the remote action discovery surface; tests cover allowed discovery and blocked legacy commands.</acceptance>
-    <evidence></evidence>
+    <evidence>Resolved 2026-06-23: allowed only `get_ui_capabilities` and `get_ui_actions` through the Iroh remote RPC filter, kept `invoke_ui_action` and legacy/local commands blocked, added descriptor outbound-redaction coverage, and documented the remote discovery-only surface; verified with `node node_modules/vitest/dist/cli.js --run test/rpc-transport-client.test.ts` from `packages/coding-agent`, `npm run iroh:poc:test`, `npm run check`, pre-commit `npm run check`, and `git diff --check -- packages/coding-agent/docs/rpc.md packages/coding-agent/docs/iroh-remote-protocol.md .volt/ios-native-remote-ui-actions-design.md`; commit b6fb63e22dfc1638f619d732b9d71f965b38ce05.</evidence>
   </item>
 
   <item ref="B.4" status="open" prereq="B.2,A.3">
