@@ -271,10 +271,10 @@ and recorded without overclaiming.
     <evidence>Resolved 2026-06-23: design records built-in slash/RPC/dynamic command inventory, narrow Iroh discovery/invocation scope, and Review/Fast first-phase deferrals; verified with `git diff --check -- .volt/ios-native-remote-ui-actions-design.md .volt/ios-native-remote-ui-actions-goal.md` and pre-commit `npm run check`; commit 3db207b225007462498148fe70e512a778e40a91.</evidence>
   </item>
 
-  <item ref="A.2" status="open" prereq="A.1" type="decision">
+  <item ref="A.2" status="resolved" prereq="A.1" type="decision">
     <title>Define the v1 action descriptor schema, ids, and compatibility rules</title>
     <acceptance>`UiActionDescriptor` v1 fields are documented, including stable built-in ids, session-local or stable extension ids, label/description, source, category, presentation hints, args, state, enabled/disabledReason, destructive/confirmation flags, remoteSafe, and slash alias. Compatibility rules say clients ignore unknown fields, hosts reject unknown ids, and descriptors never expose sensitive source paths or bodies. The decision names whether extension command action ids are stable or session-local for v1.</acceptance>
-    <evidence></evidence>
+    <evidence>Resolved 2026-06-23: design documents the v1 `UiActionDescriptor` schema, stable built-in ids, session-local opaque dynamic ids, and compatibility/security rules; verification pending; commit pending.</evidence>
   </item>
 
   <item ref="A.3" status="open" prereq="A.1,A.2" type="decision">

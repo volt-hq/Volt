@@ -286,10 +286,114 @@ Fast mode is deferred from the first implementation phase. Current model and thi
 
 ## Action Descriptor Shape
 
-Proposed action descriptor:
+### Resolved 2026-06-23: V1 Descriptor Schema, Ids, and Compatibility
+
+A.2 decision: v1 uses a small custom descriptor schema. Built-in action ids are stable and semantic. Projected extension commands, prompt templates, and skills use session-local opaque ids for v1. Future extension-provided native actions may add stable extension-owned ids only after E.3 defines registration, trust, and compatibility rules.
+
+Normative v1 TypeScript shape:
+
+```ts
+type UiActionSource = "builtin" | "extension" | "prompt" | "skill" | "package";
+type UiActionCategory = "review" | "session" | "model" | "context" | "extension" | "prompt" | "skill" | "advanced";
+type UiActionPresentationKind = "card" | "button" | "toggle" | "picker" | "palette" | "detail" | "hidden";
+type UiActionArgumentType = "string" | "boolean" | "enum" | "integer";
+type UiActionStateType = "boolean" | "string" | "enum" | "integer";
+type UiActionScalar = string | number | boolean | null;
+
+interface UiActionDescriptor {
+  schemaVersion: 1;
+  id: string;
+  label: string;
+  description?: string;
+  source: UiActionSource;
+  sourceScope?: "user" | "project" | "temporary";
+  sourceOrigin?: "package" | "top-level";
+  sourceLabel?: string;
+  category: UiActionCategory | string;
+  presentation?: UiActionPresentationHint;
+  args?: UiActionArgumentDescriptor[];
+  state?: UiActionStateDescriptor;
+  enabled: boolean;
+  disabledReason?: string | null;
+  destructive?: boolean;
+  requiresConfirmation?: boolean;
+  remoteSafe: boolean;
+  slash?: UiActionSlashAlias;
+}
+
+interface UiActionPresentationHint {
+  kind: UiActionPresentationKind | string;
+  group?: string;
+  priority?: number;
+  icon?: string;
+}
+
+interface UiActionArgumentDescriptor {
+  name: string;
+  label?: string;
+  description?: string;
+  type: UiActionArgumentType;
+  required?: boolean;
+  multiline?: boolean;
+  placeholder?: string;
+  hint?: string;
+  defaultValue?: UiActionScalar;
+  options?: Array<{ value: string; label?: string; description?: string }>;
+  completion?: "commandArguments" | string;
+}
+
+interface UiActionStateDescriptor {
+  type: UiActionStateType | string;
+  value: UiActionScalar;
+  label?: string;
+  options?: Array<{ value: string; label?: string; description?: string }>;
+}
+
+interface UiActionSlashAlias {
+  name: string;
+  example?: string;
+}
+```
+
+Field rules:
+
+- `schemaVersion` is required and must be `1` for this contract.
+- `id`, `label`, `source`, `category`, `enabled`, and `remoteSafe` are required.
+- `description`, labels, hints, group names, icon names, and disabled reasons are display strings. They must be bounded by host-side descriptor limits and must not include source paths or secrets.
+- `sourceScope`, `sourceOrigin`, and `sourceLabel` are optional sanitized provenance. They are replacements for raw `SourceInfo`, not a direct projection of it.
+- `presentation` is a hint. Unknown `presentation.kind` values must render as a palette/list item or be ignored.
+- `args` describes the data shape the app may collect. The first implementation may support only a single optional string argument, but descriptors should use this shape so later forms remain compatible.
+- `state` is a display snapshot for toggles, pickers, or selected values. Host state remains authoritative and must be refreshed after invocation, reconnect, or `ui_action_state_changed`.
+- `destructive` and `requiresConfirmation` default to `false` when omitted. The host may still require confirmation or reject an action at invocation time.
+- `remoteSafe` describes whether the action may be shown to a remote client after filtering. It is not an authorization grant.
+- `slash` is an alias/presentation hint only. Clients must not treat slash text as the canonical action id.
+
+Id rules:
+
+- Built-in ids are stable, semantic, lower-case, dot-separated ids such as `session.new`, `run.cancel`, `context.compact`, `session.rename`, `review.uncommitted`, or `model.fast_mode`. Once shipped, a built-in id must not be reused for a different behavior. Breaking behavior requires a new id.
+- V1 projected extension command ids are session-local opaque ids under the `extension.command.` prefix, for example `extension.command.ec_7f3k2q`. They are derived from the current host action catalog, not from raw source paths.
+- V1 projected prompt template ids are session-local opaque ids under the `prompt.template.` prefix, for example `prompt.template.pt_4v9m1x`.
+- V1 projected skill ids are session-local opaque ids under the `skill.` prefix, for example `skill.sk_8k2p0d`.
+- Dynamic ids are valid only for the action list/revision that returned them. Clients must not persist them across reconnect, session switch, reload, project trust change, or host restart. After any refresh trigger, clients must discard old dynamic ids and use the latest descriptors.
+- The human slash alias and display label may remain stable while the action id changes. Invocation must use `id`, not `slash.name`.
+- Stable extension-owned ids are deferred until `volt.registerAction()` or an equivalent first-class action API defines package identity, project trust, collision handling, and migration semantics.
+
+Compatibility rules:
+
+- Clients must ignore unknown descriptor fields.
+- Clients should skip descriptors missing required fields or containing invalid required field types.
+- Clients must tolerate unknown `source`, `category`, `presentation.kind`, argument type, and state type values. Unknown categories render in an advanced/other group; unknown presentation kinds render as palette rows; unknown argument types make the action non-invokable from generated forms.
+- Hosts must reject unknown, stale, disabled, unauthorized, or not-remote-safe action ids at invocation time with the normal RPC error shape.
+- Descriptors are advisory snapshots. Hosts must re-check availability, streaming state, project trust, remote policy, and authorization when `invoke_ui_action` is received.
+- Hosts may omit actions that are unavailable, unsafe, too large, or unsupported by the requesting client capabilities.
+- Additive fields and enum values do not require a new protocol version. Removing required fields, changing required field meanings, or changing invocation semantics requires a new capability or schema version.
+- Remote descriptors must never include `sourceInfo.path`, `baseDir`, `filePath`, prompt template `content`, full skill content, raw package install paths, provider secrets, environment values, auth internals, raw model/provider metadata, raw transcript payloads, or host session file paths.
+
+Example descriptor:
 
 ```json
 {
+  "schemaVersion": 1,
   "id": "review.uncommitted",
   "label": "Review changes",
   "description": "Review uncommitted workspace changes for bugs and regressions.",
@@ -314,7 +418,7 @@ Proposed action descriptor:
 }
 ```
 
-Action ids should be stable and semantic. They should not include display labels, localized text, file paths, or extension source paths.
+Built-in action ids should be stable and semantic. Dynamic source action ids should be opaque and session-local. No action id should include display labels, localized text, file paths, or extension source paths.
 
 ### Built-in Sources
 
@@ -322,6 +426,7 @@ Built-in examples:
 
 ```json
 {
+  "schemaVersion": 1,
   "id": "session.new",
   "label": "New conversation",
   "source": "builtin",
@@ -329,18 +434,22 @@ Built-in examples:
   "presentation": { "kind": "button", "group": "Session" },
   "slash": { "name": "clear", "example": "/clear" },
   "enabled": true,
-  "requiresConfirmation": true
+  "requiresConfirmation": true,
+  "remoteSafe": true
 }
 ```
 
 ```json
 {
+  "schemaVersion": 1,
   "id": "context.compact",
   "label": "Compact context",
   "source": "builtin",
   "category": "context",
   "presentation": { "kind": "card", "group": "Context" },
   "slash": { "name": "compact", "example": "/compact" },
+  "enabled": true,
+  "remoteSafe": false,
   "args": [
     {
       "name": "customInstructions",
@@ -355,12 +464,15 @@ Built-in examples:
 
 ```json
 {
+  "schemaVersion": 1,
   "id": "review.pr",
   "label": "Review PR",
   "source": "builtin",
   "category": "review",
   "presentation": { "kind": "card", "group": "Review" },
   "slash": { "name": "review", "example": "/review pr <url>" },
+  "enabled": true,
+  "remoteSafe": false,
   "args": [
     {
       "name": "target",
@@ -379,14 +491,19 @@ Extension commands can be projected as actions:
 
 ```json
 {
-  "id": "extension.command.abc123.deploy",
+  "schemaVersion": 1,
+  "id": "extension.command.ec_7f3k2q",
   "label": "Deploy",
   "description": "Deploy to an environment",
   "source": "extension",
+  "sourceScope": "project",
+  "sourceOrigin": "package",
+  "sourceLabel": "deploy-tools",
   "category": "extension",
   "presentation": { "kind": "palette", "group": "Extensions" },
   "slash": { "name": "deploy", "example": "/deploy" },
   "enabled": true,
+  "remoteSafe": true,
   "args": [
     {
       "name": "arguments",
@@ -398,7 +515,7 @@ Extension commands can be projected as actions:
 }
 ```
 
-Remote projection must not include host-local `sourceInfo.path` by default. If provenance is useful, expose coarse metadata such as `scope: "user" | "project" | "package"` and a package/source label that has passed remote redaction.
+Remote projection must not include host-local `sourceInfo.path` by default. If provenance is useful, expose only sanitized `sourceScope`, `sourceOrigin`, and `sourceLabel` fields.
 
 ### Prompt Template Sources
 
@@ -406,13 +523,18 @@ Prompt templates can become actions whose execution sends the expanded prompt:
 
 ```json
 {
-  "id": "prompt.template.review",
+  "schemaVersion": 1,
+  "id": "prompt.template.pt_4v9m1x",
   "label": "review",
   "description": "Review staged git changes",
   "source": "prompt",
+  "sourceScope": "project",
+  "sourceOrigin": "top-level",
   "category": "prompt",
   "presentation": { "kind": "palette", "group": "Prompts" },
   "slash": { "name": "review", "example": "/review" },
+  "enabled": true,
+  "remoteSafe": true,
   "args": [
     {
       "name": "arguments",
@@ -433,13 +555,18 @@ Skills can become actions that inject the skill content through existing skill e
 
 ```json
 {
-  "id": "skill.pi-goal-writer",
+  "schemaVersion": 1,
+  "id": "skill.sk_8k2p0d",
   "label": "pi-goal-writer",
   "description": "Drafts and reviews strong /goal objectives.",
   "source": "skill",
+  "sourceScope": "user",
+  "sourceOrigin": "top-level",
   "category": "skill",
   "presentation": { "kind": "palette", "group": "Skills" },
   "slash": { "name": "skill:pi-goal-writer", "example": "/skill:pi-goal-writer" },
+  "enabled": true,
+  "remoteSafe": true,
   "args": [
     {
       "name": "instructions",
@@ -538,6 +665,7 @@ The exact implementation may vary by provider and settings:
 
 ```json
 {
+  "schemaVersion": 1,
   "id": "model.fast_mode",
   "label": "Fast mode",
   "description": "Prefer lower latency model settings when supported.",
@@ -545,6 +673,7 @@ The exact implementation may vary by provider and settings:
   "category": "model",
   "presentation": { "kind": "toggle", "group": "Model" },
   "enabled": true,
+  "remoteSafe": false,
   "state": {
     "type": "boolean",
     "value": false
@@ -609,21 +738,29 @@ Potential descriptors:
 
 ```json
 {
+  "schemaVersion": 1,
   "id": "review.uncommitted",
   "label": "Review changes",
   "description": "Review uncommitted workspace changes.",
+  "source": "builtin",
+  "category": "review",
   "presentation": { "kind": "card", "group": "Review", "priority": 100 },
-  "enabled": true
+  "enabled": true,
+  "remoteSafe": false
 }
 ```
 
 ```json
 {
+  "schemaVersion": 1,
   "id": "review.branch",
   "label": "Review branch",
   "description": "Review the current branch against its merge base.",
+  "source": "builtin",
+  "category": "review",
   "presentation": { "kind": "card", "group": "Review", "priority": 90 },
   "enabled": true,
+  "remoteSafe": false,
   "args": [
     {
       "name": "base",
@@ -1010,6 +1147,7 @@ The design should not require a flag day.
    - Option A: deterministic hash of source info plus invocation name.
    - Option B: session-local ids that must be refreshed after reload.
    - Proposed: session-local opaque ids for v1 remote descriptors, with stable built-in ids only.
+   - Resolved 2026-06-23: v1 uses session-local opaque ids for projected extension commands, prompt templates, and skills. Stable extension-owned action ids are deferred to the future `registerAction()` decision.
 
 2. **Fast mode persistence**
    - Session-local, profile-level, or global setting.
