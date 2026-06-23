@@ -613,6 +613,13 @@ auto-retry; the next Retry uses the selected workspace. A later
 primary workspace for another selection or retry. The Settings UI picker remains
 the C.3 implementation item.
 
+Resolved 2026-06-23: Settings now shows a native menu-style Workspace picker in
+the `Saved Iroh Host` section when the saved host has multiple known workspace
+names. The picker is bound to the session's saved-host workspace-selection API,
+is disabled by the session-level connecting/streaming gate, and leaves the
+existing Retry, Pair Again, and Forget Host actions unchanged. Saved hosts with
+one known workspace keep the read-only Workspace row.
+
 ### Reconnect with selected workspace
 
 Saved reconnect should synthesize a reconnect ticket for `primaryWorkspace`.
@@ -885,6 +892,11 @@ state-dependent reconnect behavior, and saved-host/session tests for selected
 workspace reconnect tickets, offline persistence, workspace-specific retry, and
 streaming/connecting disabled states. Settings picker UI coverage remains in
 C.3.
+
+Resolved 2026-06-23: C.3 completed the Settings UI portion of this phase with a
+Workspace picker for multi-workspace saved hosts, the read-only single-workspace
+fallback row, source-level affordance coverage, Swift package tests, and a Volt
+scheme simulator test on iPhone 17 Pro.
 
 ### Phase 6: Docs and smoke validation
 

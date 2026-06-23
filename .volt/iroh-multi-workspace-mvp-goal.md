@@ -335,10 +335,10 @@ workspace-selection smoke, or explicitly document why that evidence is blocked.
     <evidence>2026-06-23: Added iOS saved-host workspace selection from known registered workspace names, selected `primaryWorkspace` persistence, stale reconnect envelope clearing, selected-workspace reconnect ticket synthesis, safe-state reconnect behavior, offline persistence, and workspace-unavailable saved-host retention coverage; verification: `swift test --filter SavedHostRecordTests`, `swift test --filter VoltSessionLifecycleTests`, full `swift test` from `../volt-app/Packages/VoltClient`, app `git diff --check` for changed Swift files, and Volt `git diff --check -- .volt/iroh-multi-workspace-mvp-design.md .volt/iroh-multi-workspace-mvp-goal.md`; app commit 6ecf5a1.</evidence>
   </item>
 
-  <item ref="C.3" status="open" prereq="C.2">
+  <item ref="C.3" status="resolved" prereq="C.2">
     <title>Add Settings workspace picker UX</title>
     <acceptance>Settings shows a picker when multiple saved workspace names exist, follows the A.3 disabled/auto-reconnect behavior, keeps Retry/Pair Again/Forget Host semantics intact, and simulator or source tests cover visible state decisions where practical.</acceptance>
-    <evidence></evidence>
+    <evidence>2026-06-23: Added Settings `Saved Iroh Host` Workspace picker for multi-workspace saved hosts, kept the read-only single-workspace row, wired picker changes through `selectSavedHostWorkspace`, preserved Retry/Pair Again/Forget Host actions, and added source-level affordance coverage; verification: `swift test --filter XcodeProjectConfigurationTests`, full `swift test` from `../volt-app/Packages/VoltClient`, XcodeBuildMCP `test_sim` on Volt scheme using iPhone 17 Pro simulator `66257DFE-85C0-4010-9C47-2F7D24225BE6` iOS 27.0, app `git diff --check` for changed files, and Volt `git diff --check -- .volt/iroh-multi-workspace-mvp-design.md .volt/iroh-multi-workspace-mvp-goal.md`; app commit 84a053a.</evidence>
   </item>
 </group>
 
