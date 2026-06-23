@@ -720,6 +720,8 @@ Persistence:
 - It must not write `defaultThinkingLevel`, `defaultProvider`, `defaultModel`, `enabledModels`, profile settings, or review model settings.
 - New session, session switch, profile switch, resource reload, model switch, model cycle, or scoped-model changes clear the fast-mode overlay and recompute descriptor state.
 
+Follow-up 2026-06-23: this v1 boundary is not the final preference model. Future work should define persisted per-chat Fast mode/model overrides, global defaults exposed through native settings, and the relationship between chat-local overrides and profile/scoped model defaults. The same host-owned action/state abstraction should cover model selection after a separate remote-safe model policy is defined.
+
 Policy:
 
 - Enabling captures the current thinking level as the restore level, then applies the lowest-latency supported level that lowers the current model's thinking setting.
@@ -1022,6 +1024,24 @@ Behavior:
 - Invocation passes a single `arguments` string, matching existing command handler semantics.
 - Extension UI requests continue through the existing `extension_ui_request` protocol.
 - Commands that rely on TUI-only APIs may receive degraded RPC UI behavior just as they do today.
+
+### Resolved 2026-06-23: First-Class Extension Actions Deferred for V1
+
+E.3 decision: do not add `volt.registerAction()` in the v1 native action pass. Existing extension commands remain the compatibility surface and continue to project as remote-safe palette actions with the descriptor `arguments` field, command-argument completions, opaque session-local ids, and invocation through the host `AgentSession.prompt()` path.
+
+Rationale:
+
+- A first-class native action API needs stable extension-owned id rules, package/project identity, collision handling, reload migration behavior, project trust enforcement, descriptor validation, remote-safety review, and handler lifecycle semantics.
+- The current command projection already covers the safe compatibility requirement for mobile palette invocation without exposing extension source paths or requiring clients to synthesize slash text.
+- Adding card/toggle-capable extension handlers before those policy rules exist would create a wider remote execution and UI surface than the v1 action contract has reviewed.
+
+Compatibility behavior that must remain covered:
+
+- `volt.registerCommand()` commands appear as `source: "extension"` palette actions, not primary cards.
+- Descriptor ids use the `extension.command.*` opaque dynamic prefix and must be refreshed after catalog changes.
+- The descriptor contains a single optional string argument named `arguments`; when the command supplies argument completions, the descriptor advertises `completion: "commandArguments"`.
+- Invocation by action id passes the raw `arguments` string to the existing command path and may return terminal `handled` without requiring an agent turn.
+- Project-local command projection remains gated by the existing project-trust resource loading path, and remote invocation still rechecks the live descriptor and remote-safe policy.
 
 ### Future: Extension-Provided Native Actions
 
@@ -1404,10 +1424,10 @@ Concrete behavior:
 
 ### Phase E: Rich Extension Actions
 
-1. Add `volt.registerAction()` extension API.
-2. Add descriptor validation and remote-safety fields.
-3. Add argument schema and completion support.
-4. Render extension cards in iOS when remote-safe.
+1. Defer `volt.registerAction()` for v1 while preserving the projected-command compatibility path.
+2. Define future stable extension-owned ids, descriptor validation, trust, and remote-safety fields before adding native extension handlers.
+3. Keep descriptor argument schema and completion support for projected commands.
+4. Render extension groups in iOS from remote-safe projected extension commands first; native extension cards wait for the future API.
 5. Keep extension slash commands as compatibility palette actions.
 
 ## iOS Implementation Plan
@@ -1551,6 +1571,12 @@ The design should not require a flag day.
    - Some actions can execute immediately, some can queue, some must be disabled.
    - Need per-action `streamingBehavior`: `disabled`, `immediate`, `queueSteer`, `queueFollowUp`, or `custom`.
    - Resolved 2026-06-23: v1 supports `disabled`, `immediate`, `queueSteer`, and `queueFollowUp`. `custom` remains deferred; host handlers must recheck the live descriptor and reject unsupported streaming invocations.
+
+9. **Persisted Fast mode and model selection scope**
+   - V1 `thinking.fast_mode` is a session-local non-persistent overlay.
+   - Future product behavior should allow per-chat Fast mode and model overrides, including multiple conversations with independent Fast mode state.
+   - Native settings may also need global defaults such as Fast mode on by default or a default model, while preserving profile/scoped-model precedence.
+   - Model selection needs a separate remote-safe policy before exposing global or chat-scoped selection over Iroh.
 
 ## Acceptance Criteria
 

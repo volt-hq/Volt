@@ -1162,6 +1162,16 @@ describe("createInProcessRpcClient", () => {
 			]);
 			expect(dynamicActions.map((action) => action.source)).toEqual(["extension", "extension", "prompt", "skill"]);
 			expect(dynamicActions.map((action) => action.category)).toEqual(["extension", "extension", "prompt", "skill"]);
+			expect(dynamicActions.filter((action) => action.source === "extension")).toEqual([
+				expect.objectContaining({
+					presentation: { kind: "palette", group: "Extensions" },
+					args: [expect.objectContaining({ name: "arguments", type: "string", completion: "commandArguments" })],
+				}),
+				expect.objectContaining({
+					presentation: { kind: "palette", group: "Extensions" },
+					args: [expect.objectContaining({ name: "arguments", type: "string", completion: "commandArguments" })],
+				}),
+			]);
 			expect(dynamicActions.every((action) => action.remoteSafe)).toBe(true);
 			expect(dynamicActions.every((action) => action.enabled)).toBe(true);
 			expect(dynamicActions[0].sourceScope).toBe("project");

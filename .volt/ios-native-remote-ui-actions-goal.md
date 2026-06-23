@@ -393,15 +393,21 @@ and recorded without overclaiming.
     <evidence>Resolved 2026-06-23: added native iOS Actions tab for host primary card/button/toggle descriptors, Review/Model grouping, disabled reasons, Fast-mode toggle invocation, host confirmation alerts, and demo Review/Fast actions; verified with `swift test --filter VoltUIActionRPCTests`, `swift test --filter MockVoltTransportTests`, `swift test --filter VoltSessionLifecycleTests`, `swift test --filter XcodeProjectConfigurationTests`, `swift test` from `../volt-app/Packages/VoltClient`, `xcodebuild -scheme Volt -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=27.0' test` from `../volt-app`, XcodeBuildMCP `build_run_sim`, and manual iPhone 17 Pro iOS 27.0 Demo smoke showing Fast mode `Fast: low` plus Review transcript output (`/tmp/volt-actions-smoke-actions.png`, `/tmp/volt-actions-smoke-chat.png`); app commit dc6e4b0ae2ff94d48d4cfd1330802856726cb2bc.</evidence>
   </item>
 
-  <item ref="E.3" status="open" prereq="B.4,E.1">
+  <item ref="E.3" status="resolved" prereq="B.4,E.1">
     <title>Add a first-class extension `registerAction` API or explicitly defer it with compatibility coverage</title>
     <acceptance>Either `volt.registerAction()` exists with descriptor validation, remote-safety fields, handler invocation, docs, examples, and tests; or the design records a deliberate defer decision while existing extension commands remain projected as palette actions with argument support. If implemented, project trust and remote-safe filtering apply to extension-provided actions.</acceptance>
-    <evidence></evidence>
+    <evidence>Resolved 2026-06-23: deliberately deferred first-class `volt.registerAction()` for v1, documented extension command native action projection and no-`registerAction` API guidance, added RPC regression coverage that projected extension commands remain palette actions with `arguments`/completion support, and recorded follow-up E.5 for chat-scoped/default Fast mode and model selection policy; verified with `node node_modules/vitest/dist/cli.js --run test/rpc-transport-client.test.ts` from `packages/coding-agent`, `npm run check`, and `git diff --check -- .volt/ios-native-remote-ui-actions-design.md .volt/ios-native-remote-ui-actions-goal.md packages/coding-agent/docs/extensions.md`.</evidence>
   </item>
 
   <item ref="E.4" status="open" prereq="E.2,E.3">
     <title>Support extension-provided native cards in iOS when remote-safe</title>
     <acceptance>Remote-safe extension-provided actions or projected extension commands can appear in iOS extension/action groups with safe source labels; users can distinguish built-in versus extension/package actions; extension UI requests continue to render or degrade through the existing RPC UI protocol; tests cover extension action visibility, source labeling, disabled state, and invocation.</acceptance>
+    <evidence></evidence>
+  </item>
+
+  <item ref="E.5" status="open" prereq="D.4,E.2" type="decision">
+    <title>Define chat-scoped and default Fast mode/model selection policy</title>
+    <acceptance>The design decides whether Fast mode and model selection can persist per chat, whether global defaults are exposed through native settings, how those preferences interact with profiles and scoped models, and what remote-safe metadata iOS may display. If implementation is deferred, the design records the smaller v1 behavior and future unlock conditions.</acceptance>
     <evidence></evidence>
   </item>
 </group>

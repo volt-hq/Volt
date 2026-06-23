@@ -1458,6 +1458,10 @@ volt.registerCommand("deploy", {
 });
 ```
 
+Native action projection: extension commands are also exposed through the native UI action protocol as palette actions when the host supports `get_ui_actions`. They use an opaque session-local action id, keep `presentation.kind` as `"palette"`, and accept one optional string argument named `arguments`. If the command defines `getArgumentCompletions`, the projected action advertises `completion: "commandArguments"` and remote clients can request the same completions through the UI action completion RPC.
+
+There is no first-class `volt.registerAction()` API in v1. Use `volt.registerCommand()` for user-invokable extension actions; native card/toggle metadata for extensions is deferred until stable extension-owned action ids, descriptor validation, project trust, and remote-safety rules are defined.
+
 ### volt.getCommands()
 
 Get the slash commands available for invocation via `prompt` in the current session. Includes extension commands, prompt templates, and skill commands.
