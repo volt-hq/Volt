@@ -303,10 +303,10 @@ workspace-selection smoke, or explicitly document why that evidence is blocked.
     <evidence>2026-06-23: Added state-resolved handshake workspace authorization, product-host path availability validation, workstation wildcard grants for new pairings, legacy active-client normalization, unknown/stale `workspace_unavailable`, and revocation preservation; verification: LSP tools unavailable in this session, so fallback TypeScript validation used targeted Vitest `test/remote-iroh-core.test.ts` and `test/remote-cli.test.ts`, `npm run iroh:poc:test`, `git diff --check -- .volt/iroh-multi-workspace-mvp-design.md`, `npm run check`, and commit-hook `npm run check`; Volt commit cc3c8fb4.</evidence>
   </item>
 
-  <item ref="B.3" status="open" prereq="B.2">
+  <item ref="B.3" status="resolved" prereq="B.2">
     <title>Update pair control and pairing tickets for registered workspace names</title>
     <acceptance>`volt remote pair --workspace <name>` can create a ticket for any registered workspace from a running host, rejects unknown names, keeps relay expectation behavior, and creates workstation-scoped client grants after successful pairing. Tests cover pair-control success and failure.</acceptance>
-    <evidence></evidence>
+    <evidence>2026-06-23: Updated host-engine pairing and pair-control to issue tickets for registered workspaces from current state, reject missing or stale selected workspaces with `workspace_unavailable` before ticket creation, preserve relay expectation checks, and verify successful pairing persists workstation-scoped client grants; verification: LSP tools unavailable in this session, so fallback TypeScript validation used targeted Vitest `test/remote-iroh-core.test.ts` and `test/remote-cli.test.ts`, `npm run iroh:poc:test`, `git diff --check -- .volt/iroh-multi-workspace-mvp-design.md`, and `npm run check` in a B.3-only clean worktree; Volt commit aa1deb37.</evidence>
   </item>
 
   <item ref="B.4" status="open" prereq="B.2">
