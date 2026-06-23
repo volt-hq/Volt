@@ -321,10 +321,10 @@ and recorded without overclaiming.
     <evidence>Resolved 2026-06-23: implemented local `invoke_ui_action` for discovered extension command, prompt template, and skill actions using `AgentSession.prompt()` semantics with raw `arguments` support, handled/accepted/queued responses, streaming queue behavior, stale catalog-id rejection, and Iroh remote invocation capability suppression; verified with `node node_modules/vitest/dist/cli.js --run test/rpc-transport-client.test.ts` from `packages/coding-agent`, `npm run iroh:poc:test`, `npm run check`, pre-commit `npm run check`, and `git diff --check -- packages/coding-agent/docs/rpc.md packages/coding-agent/docs/iroh-remote-protocol.md .volt/ios-native-remote-ui-actions-design.md`; commit 9a7dd0671f80189908b4c24848674adc2c269d14.</evidence>
   </item>
 
-  <item ref="B.5" status="open" prereq="B.4,B.3">
+  <item ref="B.5" status="resolved" prereq="B.4,B.3">
     <title>Expose prompt-like action invocation over Iroh with security and lifecycle tests</title>
     <acceptance>Iroh remote allowlist includes `invoke_ui_action` only after host-side reauthorization and action-level remote-safety checks exist; remote invocation can run allowed prompt/template/skill/extension actions; local-only action ids are rejected with a normal RPC error; transport close remains detach-only; tests cover remote allowed invocation, rejected local-only action, and synchronous action response behavior.</acceptance>
-    <evidence></evidence>
+    <evidence>Resolved 2026-06-23: exposed `invoke_ui_action` over Iroh for remote-safe projected extension command, prompt template, and skill ids with dynamic-prefix allowlisting, remote-safe descriptor/invocation rechecks, local-only id rejection, and terminal synchronous response close handling; verified with `node node_modules/vitest/dist/cli.js --run test/rpc-transport-client.test.ts`, `node node_modules/vitest/dist/cli.js --run test/remote-iroh-core.test.ts`, and `node node_modules/vitest/dist/cli.js --run test/remote-iroh-lifecycle-contract.test.ts` from `packages/coding-agent`, plus `npm run iroh:poc:test`, `npm run check`, pre-commit `npm run check`, and `git diff --check -- packages/coding-agent/docs/rpc.md packages/coding-agent/docs/iroh-remote-protocol.md .volt/ios-native-remote-ui-actions-design.md`; commit 74e08416f365a6fe2bc611195aaafac0c6737c55.</evidence>
   </item>
 </group>
 
