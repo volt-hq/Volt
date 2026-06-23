@@ -596,7 +596,13 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				cwd: runtimeHost.cwd,
 				agentDir: runtimeHost.services.agentDir,
 				session,
-				newSession: (newSessionOptions) => runtimeHost.newSession(newSessionOptions),
+				newSession: async (newSessionOptions) => {
+					const result = await runtimeHost.newSession(newSessionOptions);
+					if (!result.cancelled) {
+						await rebindSession();
+					}
+					return result;
+				},
 				authStorage: session.modelRegistry.authStorage,
 				settingsManager: session.settingsManager,
 				tools: REMOTE_REVIEW_TOOL_NAMES,

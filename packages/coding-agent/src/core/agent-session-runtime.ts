@@ -12,7 +12,7 @@ import type {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
-import { assertValidSessionId, type SessionInfo, SessionManager } from "./session-manager.ts";
+import { assertValidSessionId, type SessionInfo, SessionManager, summarizeSessionEntries } from "./session-manager.ts";
 
 /**
  * Result returned by runtime creation.
@@ -77,27 +77,6 @@ function extractUserMessageText(content: string | Array<{ type: string; text?: s
 
 	return content
 		.filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string")
-		.map((part) => part.text)
-		.join("");
-}
-
-function extractUnknownMessageText(content: unknown): string {
-	if (typeof content === "string") {
-		return content;
-	}
-	if (!Array.isArray(content)) {
-		return "";
-	}
-	return content
-		.filter(
-			(part): part is { type: "text"; text: string } =>
-				typeof part === "object" &&
-				part !== null &&
-				"type" in part &&
-				part.type === "text" &&
-				"text" in part &&
-				typeof part.text === "string",
-		)
 		.map((part) => part.text)
 		.join("");
 }
@@ -263,21 +242,14 @@ export class AgentSessionRuntime {
 		const header = this.session.sessionManager.getHeader();
 		const entries = this.session.sessionManager.getEntries();
 		const lastEntry = entries.at(-1);
-		let firstMessage = "(no messages)";
-		for (const message of this.session.messages) {
-			if (message.role !== "user" || !("content" in message)) {
-				continue;
-			}
-			firstMessage = extractUnknownMessageText(message.content) || "(no messages)";
-			break;
-		}
+		const summary = summarizeSessionEntries(entries);
 		return {
 			sessionId: this.session.sessionId,
 			sessionName: this.session.sessionName,
 			createdAt: toSessionTimestamp(header?.timestamp),
 			modifiedAt: toSessionTimestamp(lastEntry?.timestamp ?? header?.timestamp),
-			messageCount: this.session.messages.length,
-			firstMessage: firstMessage || "(no messages)",
+			messageCount: summary.messageCount,
+			firstMessage: summary.firstMessage,
 			current: true,
 		};
 	}

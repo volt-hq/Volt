@@ -1,4 +1,5 @@
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import { REVIEW_BRANCH_ACTION_ID, REVIEW_UNCOMMITTED_ACTION_ID } from "../../core/host-actions.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
 	createIrohRemoteOutboundFilteredRpcTransport,
@@ -21,9 +22,38 @@ export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	workspacePath: string;
 }
 
+export type IrohRemoteNotificationKind =
+	| "conversation_completed"
+	| "review_completed"
+	| "action_completed"
+	| "host_notice";
+
+export interface IrohRemoteNotificationRequest {
+	type: "notification_request";
+	eventId: string;
+	kind: IrohRemoteNotificationKind;
+	title: string;
+	body: string;
+	sessionId?: string;
+}
+
+export interface IrohRemoteCompletionState {
+	sessionId: string;
+	runId?: string;
+}
+
+export interface IrohRemoteCompletedCommand {
+	command: string;
+	id: string | undefined;
+	initialState: IrohRemoteCompletionState | undefined;
+	finalState: IrohRemoteCompletionState | undefined;
+	response?: Record<string, unknown>;
+}
+
 interface PendingIrohRemoteCommand {
 	command: string;
 	id: string | undefined;
+	initialState: IrohRemoteCompletionState | undefined;
 	done: Promise<void>;
 	responseMatched: boolean;
 	finish(): void;
@@ -31,6 +61,8 @@ interface PendingIrohRemoteCommand {
 
 interface IrohRemoteCloseDeferringRpcTransportOptions {
 	transport: RpcTransport;
+	getCompletionState?: () => IrohRemoteCompletionState;
+	onCommandCompleted?: (completion: IrohRemoteCompletedCommand) => void | Promise<void>;
 	waitForPromptCompletion(): Promise<void>;
 }
 
@@ -43,21 +75,34 @@ export function runIrohRemoteRpcMode(
 	runtimeHost: AgentSessionRuntime,
 	options: IrohRemoteRpcModeOptions,
 ): Promise<void> {
+	const sentNotificationEventIds = new Set<string>();
+	const outboundTransport = createIrohRemoteOutboundFilteredRpcTransport({
+		decorate: options.decorateOutbound,
+		remoteWorkspacePath: options.remoteWorkspacePath,
+		transport: createIrohRpcTransport(options),
+		workspacePath: options.workspacePath,
+	});
+	const closeDeferringTransport = createIrohRemoteCloseDeferringRpcTransport({
+		transport: outboundTransport,
+		getCompletionState: () => getIrohRemoteCompletionState(runtimeHost),
+		onCommandCompleted: async (completion) => {
+			const notification = createIrohRemoteCompletionNotification(completion);
+			if (!notification || sentNotificationEventIds.has(notification.eventId)) {
+				return;
+			}
+			sentNotificationEventIds.add(notification.eventId);
+			await outboundTransport.write(notification);
+		},
+		waitForPromptCompletion: () => runtimeHost.session.waitForIdle(),
+	});
+
 	return runRpcMode(runtimeHost, {
 		allowUiActionInvocation: true,
 		disposeRuntimeOnClose: options.disposeRuntimeOnClose,
 		onSessionChanged: options.onSessionChanged,
 		requireRemoteSafeUiActions: true,
 		transport: createIrohRemoteFilteredRpcTransport({
-			transport: createIrohRemoteCloseDeferringRpcTransport({
-				transport: createIrohRemoteOutboundFilteredRpcTransport({
-					decorate: options.decorateOutbound,
-					remoteWorkspacePath: options.remoteWorkspacePath,
-					transport: createIrohRpcTransport(options),
-					workspacePath: options.workspacePath,
-				}),
-				waitForPromptCompletion: () => runtimeHost.session.waitForIdle(),
-			}),
+			transport: closeDeferringTransport,
 		}),
 		exitProcess: false,
 	});
@@ -78,6 +123,7 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 		const pending: PendingIrohRemoteCommand = {
 			command,
 			id,
+			initialState: options.getCompletionState?.(),
 			done: new Promise<void>((resolve) => {
 				resolveDone = resolve;
 			}),
@@ -133,6 +179,30 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 		return createPendingCommand(command.type, typeof command.id === "string" ? command.id : undefined);
 	};
 
+	const notifyCompletedCommand = async (
+		pending: PendingIrohRemoteCommand,
+		response?: Record<string, unknown>,
+	): Promise<void> => {
+		await options.onCommandCompleted?.({
+			command: pending.command,
+			id: pending.id,
+			initialState: pending.initialState,
+			finalState: options.getCompletionState?.(),
+			response,
+		});
+	};
+
+	const finishAfterCommandCompletion = async (
+		pending: PendingIrohRemoteCommand,
+		response?: Record<string, unknown>,
+	): Promise<void> => {
+		try {
+			await notifyCompletedCommand(pending, response);
+		} finally {
+			pending.finish();
+		}
+	};
+
 	const finishAfterPromptCompletion = async (pending: PendingIrohRemoteCommand): Promise<void> => {
 		try {
 			// Prompt success is emitted just before AgentSession starts the run.
@@ -140,6 +210,7 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 			// Yield once so waitForIdle observes that run or any accepted queued input.
 			await Promise.resolve();
 			await options.waitForPromptCompletion();
+			await notifyCompletedCommand(pending);
 		} finally {
 			pending.finish();
 		}
@@ -157,6 +228,10 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 		pending.responseMatched = true;
 		if (response.success === true && shouldWaitForRemoteResponseCompletion(pending.command, response)) {
 			void finishAfterPromptCompletion(pending).catch(() => {});
+			return;
+		}
+		if (response.success === true && isCompletedReviewInvocationResponse(pending.command, response)) {
+			void finishAfterCommandCompletion(pending, response).catch(() => {});
 			return;
 		}
 		pending.finish();
@@ -255,8 +330,63 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 	return transport;
 }
 
+function getIrohRemoteCompletionState(runtimeHost: AgentSessionRuntime): IrohRemoteCompletionState {
+	return {
+		sessionId: runtimeHost.session.sessionId,
+		runId: runtimeHost.session.sessionManager.getLeafId() ?? undefined,
+	};
+}
+
+function createIrohRemoteCompletionNotification(
+	completion: IrohRemoteCompletedCommand,
+): IrohRemoteNotificationRequest | undefined {
+	const finalState = getChangedFinalCompletionState(completion);
+	if (!finalState) {
+		return undefined;
+	}
+	if (isConversationCompletionCommand(completion.command)) {
+		return {
+			type: "notification_request",
+			eventId: `conversation:${finalState.sessionId}:${finalState.runId}:completed`,
+			kind: "conversation_completed",
+			title: "Volt finished",
+			body: "Your conversation is ready.",
+			sessionId: finalState.sessionId,
+		};
+	}
+	if (isCompletedReviewInvocationResponse(completion.command, completion.response)) {
+		return {
+			type: "notification_request",
+			eventId: `review:${finalState.sessionId}:${finalState.runId}:completed`,
+			kind: "review_completed",
+			title: "Review complete",
+			body: "Open Volt to see the findings.",
+			sessionId: finalState.sessionId,
+		};
+	}
+	return undefined;
+}
+
+function getChangedFinalCompletionState(
+	completion: IrohRemoteCompletedCommand,
+): Required<IrohRemoteCompletionState> | undefined {
+	const finalState = completion.finalState;
+	if (!finalState?.runId) {
+		return undefined;
+	}
+	const initialState = completion.initialState;
+	if (initialState?.sessionId === finalState.sessionId && initialState.runId === finalState.runId) {
+		return undefined;
+	}
+	return { sessionId: finalState.sessionId, runId: finalState.runId };
+}
+
+function isConversationCompletionCommand(command: string): boolean {
+	return command === "prompt" || command === "steer" || command === "follow_up";
+}
+
 function shouldWaitForRemoteResponseCompletion(command: string, response: Record<string, unknown>): boolean {
-	if (command === "prompt" || command === "steer" || command === "follow_up") {
+	if (isConversationCompletionCommand(command)) {
 		return true;
 	}
 	if (command !== "invoke_ui_action") {
@@ -267,6 +397,24 @@ function shouldWaitForRemoteResponseCompletion(command: string, response: Record
 		return false;
 	}
 	return data.status === "accepted" || data.status === "queued";
+}
+
+function isCompletedReviewInvocationResponse(
+	command: string,
+	response: Record<string, unknown> | undefined,
+): response is Record<string, unknown> & { data: { action: string; status: "completed" } } {
+	if (command !== "invoke_ui_action" || !response) {
+		return false;
+	}
+	const data = response.data;
+	if (!isRecord(data)) {
+		return false;
+	}
+	return data.status === "completed" && isReviewActionId(data.action);
+}
+
+function isReviewActionId(action: unknown): boolean {
+	return action === REVIEW_UNCOMMITTED_ACTION_ID || action === REVIEW_BRANCH_ACTION_ID;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

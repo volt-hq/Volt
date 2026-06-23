@@ -73,6 +73,14 @@ function projectTranscriptItems(entries: SessionEntry[]): RpcTranscriptItem[] {
 			continue;
 		}
 
+		if (entry.type === "custom_message") {
+			const customItem = projectCustomMessage(entry);
+			if (customItem) {
+				items.push(customItem);
+			}
+			continue;
+		}
+
 		if (entry.type !== "message") {
 			continue;
 		}
@@ -105,6 +113,17 @@ function projectTranscriptItems(entries: SessionEntry[]): RpcTranscriptItem[] {
 	}
 
 	return items;
+}
+
+function projectCustomMessage(entry: Extract<SessionEntry, { type: "custom_message" }>): RpcTranscriptItem | undefined {
+	if (!entry.display || entry.customType !== "review") {
+		return undefined;
+	}
+	const text = boundText(extractTextContent(entry.content), MESSAGE_TEXT_LIMIT);
+	if (!text) {
+		return undefined;
+	}
+	return { id: entry.id, role: "assistant", text, timestamp: normalizeTimestamp(entry.timestamp) };
 }
 
 function collectToolCalls(entries: SessionEntry[]): Map<string, StoredToolCall> {

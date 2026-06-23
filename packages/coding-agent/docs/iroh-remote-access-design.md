@@ -153,7 +153,7 @@ Required controls for preview:
 - Workspace allowlist. Remote clients choose from names, not arbitrary host paths.
 - Client revocation command.
 - Host-side audit log for connections, workspace selection, child process start/stop, and rejected attempts.
-- No automatic `--approve`. Project trust should inherit existing Volt behavior unless the host user explicitly approves a workspace.
+- No automatic project trust bypass. Saved workspace trust is honored, and TTY host/registration flows offer an explicit `trust` choice before loading project-local resources.
 - Clear warning that `bash`, `write`, and `edit` allow remote modification of the host machine.
 
 Default tool grant:
@@ -169,7 +169,7 @@ volt remote host --workspace volt=. --yes
 volt remote pair --workspace volt --yes
 ```
 
-Remote sessions do not auto-approve project trust. Pass `--approve` only when the host user trusts project-local settings/resources for the exposed workspace.
+Remote sessions do not bypass project trust. Saved workspace trust is honored; otherwise choose `trust` in the host prompt or pass `--approve` only when the host user trusts project-local settings/resources for the exposed workspace.
 
 ## Configuration
 
@@ -307,7 +307,7 @@ Automated tests for a monorepo version:
 | Mobile networks disconnect often | Integrated hosts treat stream close as detach, retain active host work, allow same-client/workspace reconnect, and recover persisted output through `get_transcript` |
 | RPC responses expose host paths | Remote-safe outbound filtering normalizes workspace paths and only uses dedicated redaction for host-only session, export, and bash-output paths |
 | Relay fallback may add latency or cost | Prefer direct connections, expose connection diagnostics, allow custom relay config later |
-| Project extensions can run arbitrary code | Preserve project trust behavior and do not auto-approve remote workspaces |
+| Project extensions can run arbitrary code | Preserve project trust behavior, honor saved workspace trust, and require explicit `trust`/`--approve` for new remote workspace trust |
 
 ## Future Product Questions
 

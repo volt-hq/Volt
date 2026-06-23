@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { constants } from "node:fs";
+import { constants, rmSync } from "node:fs";
 import { access, mkdir, realpath, rm, stat } from "node:fs/promises";
 import { connect as connectNet, createServer } from "node:net";
 import { hostname, userInfo } from "node:os";
@@ -20,6 +20,7 @@ import {
 	getIrohRemoteControlPath,
 	getIrohRemoteRpcFilterResult,
 	getIrohRemoteUnsafeAllowedTools,
+	hasTrustRequiringProjectResources,
 	IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE,
 	IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
 	IROH_REMOTE_REVOKE_CONTROL_REQUEST_TYPE,
@@ -31,6 +32,7 @@ import {
 	IrohRemoteHostStateManager,
 	parseIrohRemoteWorkspaceSpec,
 	parseIrohRemoteControlRequest,
+	ProjectTrustStore,
 	pipeIrohRemoteOutboundJsonlReadable,
 	readIrohRemoteHostState,
 	requestIrohRemoteActiveRevocation,
@@ -56,10 +58,13 @@ const HOST_ENTRYPOINT_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_DIR = resolve(HOST_ENTRYPOINT_DIR, "..", "..");
 const ALPN = Array.from(Buffer.from(IROH_REMOTE_ALPN, "utf8"));
 const CONTROL_REQUEST_MAX_BYTES = 16 * 1024;
+const CONTROL_ACTIVE_RETRY_ATTEMPTS = 10;
+const CONTROL_ACTIVE_RETRY_DELAY_MS = 250;
 const DEFAULT_READ_LIMIT = 64 * 1024;
 const DEFAULT_STATE_PATH = join(getAgentDir(), "remote", "iroh-host.json");
 const ACTIVE_REVOKE_CLOSE_REASON = "revoked";
 const ACTIVE_REPLACE_CLOSE_REASON = "replaced";
+let activeConnectionSequence = 0;
 const PROMPT_COMPLETION_RPC_TYPES = new Set(["prompt", "steer", "follow_up"]);
 const RESPONSE_COMPLETION_RPC_TYPES = new Set([
 	"abort",
@@ -231,10 +236,10 @@ Serve options:
   --agent-dir <path>         Volt agent config directory for integrated Volt runtime.
   --detached-runtime-ttl-ms <ms>
                               Retain idle detached integrated runtimes for this many milliseconds. Defaults to 30 minutes.
-  --approve                  Trust project-local Volt settings/resources for integrated Volt runtime.
+  --approve                  Trust project-local Volt settings/resources for the remote workspace.
   --no-pairing               Reject unpaired clients and print a paired-client ticket.
   --once                     Exit after the first client disconnects.
-  --yes                      Accept unsafe remote tool grants for noninteractive startup.
+  --yes                      Accept unsafe remote tool grants for noninteractive startup without trusting the workspace.
 
 Client management:
   clients                    Print paired clients from state.
@@ -323,32 +328,40 @@ function formatUnsafeToolWarning(unsafeTools) {
 	].join("\n");
 }
 
-async function confirmUnsafeRemoteToolGrant(options) {
-	const unsafeTools = getIrohRemoteUnsafeAllowedTools(options.allowTools);
-	if (unsafeTools.length === 0) return;
+function getRemoteWorkspaceTrustState(flags, workspace) {
+	const trustStore = new ProjectTrustStore(getFlag(flags, "agent-dir", getAgentDir()));
+	const hasTrustResources = hasTrustRequiringProjectResources(workspace.path);
+	return {
+		hasTrustResources,
+		projectTrusted: hasFlag(flags, "approve") || !hasTrustResources || trustStore.get(workspace.path) === true,
+		trustStore,
+	};
+}
 
-	const warning = formatUnsafeToolWarning(unsafeTools);
-	let approval = "yes_flag";
-	if (!options.yes) {
-		if (!process.stdin.isTTY || !process.stderr.isTTY) {
-			throw new Error(`${warning}\nPass --yes to accept unsafe remote tool grants in noninteractive contexts.`);
-		}
-		const readline = createInterface({ input: process.stdin, output: process.stderr });
-		let answer;
-		try {
-			answer = await readline.question(`${warning}\nType yes to continue: `);
-		} finally {
-			readline.close();
-		}
-		if (answer.trim().toLowerCase() !== "yes") {
-			throw new Error("Unsafe remote tool grant was not accepted.");
-		}
-		approval = "tty_confirmation";
+function formatRemoteWorkspaceConfirmationPrompt(options) {
+	const lines = [];
+	if (options.unsafeTools.length > 0) {
+		lines.push(formatUnsafeToolWarning(options.unsafeTools), "");
 	}
+	lines.push(`Remote workspace: ${options.workspace.name} -> ${options.workspace.path}`);
+	if (options.offerTrust) {
+		lines.push(
+			"This workspace has project-local Volt settings/resources.",
+			"Type yes to continue without trusting project-local resources.",
+			"Type trust to continue and trust this workspace.",
+			"Any other answer cancels.",
+		);
+	} else {
+		lines.push("Type yes to continue.");
+	}
+	return `${lines.join("\n")}\nChoice: `;
+}
 
+async function auditUnsafeRemoteToolGrant(options, unsafeTools, approval) {
+	if (!options.auditLogger) return;
 	await logAudit(options.auditLogger, {
 		type: "unsafe_tools_enabled",
-		workspace: options.workspaceName,
+		workspace: options.workspace.name,
 		success: true,
 		details: {
 			allowTools: options.allowTools,
@@ -357,6 +370,62 @@ async function confirmUnsafeRemoteToolGrant(options) {
 			unsafeTools,
 		},
 	});
+}
+
+async function confirmRemoteWorkspaceAccess(options) {
+	const unsafeTools = options.allowTools ? getIrohRemoteUnsafeAllowedTools(options.allowTools) : [];
+	const offerTrust = options.promptForTrust && options.hasTrustResources && !options.projectTrusted;
+	if (unsafeTools.length === 0 && !offerTrust) {
+		return { projectTrusted: options.projectTrusted };
+	}
+
+	if (options.yes) {
+		if (unsafeTools.length > 0) {
+			await auditUnsafeRemoteToolGrant(options, unsafeTools, "yes_flag");
+		}
+		return { projectTrusted: options.projectTrusted };
+	}
+
+	if (!process.stdin.isTTY || !process.stderr.isTTY) {
+		if (unsafeTools.length > 0) {
+			const warning = formatUnsafeToolWarning(unsafeTools);
+			throw new Error(
+				[
+					warning,
+					"Pass --yes to accept unsafe remote tool grants in noninteractive contexts.",
+					"Pass --approve to trust project-local resources for the remote workspace.",
+				].join("\n"),
+			);
+		}
+		return { projectTrusted: options.projectTrusted };
+	}
+
+	const readline = createInterface({ input: process.stdin, output: process.stderr });
+	let answer;
+	try {
+		answer = await readline.question(
+			formatRemoteWorkspaceConfirmationPrompt({ ...options, offerTrust, unsafeTools }),
+		);
+	} finally {
+		readline.close();
+	}
+
+	const normalizedAnswer = answer.trim().toLowerCase();
+	let projectTrusted = options.projectTrusted;
+	if (normalizedAnswer === "trust" || normalizedAnswer === "t") {
+		options.trustStore.set(options.workspace.path, true);
+		projectTrusted = true;
+		console.error(`trusted workspace: ${options.workspace.name} -> ${options.workspace.path}`);
+	} else if (normalizedAnswer !== "yes" && normalizedAnswer !== "y") {
+		throw new Error(
+			unsafeTools.length > 0 ? "Unsafe remote tool grant was not accepted." : "Remote workspace was not accepted.",
+		);
+	}
+
+	if (unsafeTools.length > 0) {
+		await auditUnsafeRemoteToolGrant(options, unsafeTools, "tty_confirmation");
+	}
+	return { projectTrusted };
 }
 
 async function assertWorkspaceDirectory(workspace) {
@@ -410,6 +479,21 @@ async function registerWorkspace(flags, positionals) {
 	if (useRealpathBasename) {
 		workspace.name = basename(workspace.path) || "workspace";
 	}
+
+	const trustState = getRemoteWorkspaceTrustState(flags, workspace);
+	if (hasFlag(flags, "approve")) {
+		trustState.trustStore.set(workspace.path, true);
+	}
+	await confirmRemoteWorkspaceAccess({
+		allowTools: undefined,
+		context: "workspace_registration",
+		hasTrustResources: trustState.hasTrustResources,
+		projectTrusted: trustState.projectTrusted,
+		promptForTrust: true,
+		trustStore: trustState.trustStore,
+		workspace,
+		yes: hasFlag(flags, "yes"),
+	});
 
 	const stateManager = new IrohRemoteHostStateManager({ statePath });
 	const savedWorkspace = await stateManager.upsertWorkspace(workspace, getFlag(flags, "allow-tools"));
@@ -548,9 +632,11 @@ function spawnProcess(command, args, options) {
 
 function spawnRpcChild(options, workspace, allowTools) {
 	if (options.sourceVolt) {
-		const runnerPath = options.resolvedSourceVoltRunner ?? resolve(options.sourceVolt, "scripts", "run-coding-agent-source.mjs");
+		const runnerPath =
+			options.resolvedSourceVoltRunner ?? resolve(options.sourceVolt, "scripts", "run-coding-agent-source.mjs");
 		const args = [runnerPath, "--mode", "rpc"];
 		if (allowTools !== undefined) args.push("--tools", allowTools);
+		if (options.projectTrusted) args.push("--approve");
 		return {
 			command: process.execPath,
 			args,
@@ -577,6 +663,7 @@ function spawnRpcChild(options, workspace, allowTools) {
 	const voltBin = options.resolvedVoltBin ?? getPlatformVoltBin(options.voltBin);
 	const args = ["--mode", "rpc"];
 	if (allowTools !== undefined) args.push("--tools", allowTools);
+	if (options.projectTrusted) args.push("--approve");
 	return {
 		command: voltBin,
 		args,
@@ -681,6 +768,12 @@ async function withTimeout(promise, timeoutMs, message) {
 	} finally {
 		clearTimeout(timeoutId);
 	}
+}
+
+function delay(ms) {
+	return new Promise((resolveDelay) => {
+		setTimeout(resolveDelay, ms);
+	});
 }
 
 function isExpectedApplicationClose(error) {
@@ -1429,10 +1522,11 @@ async function stopIntegratedRuntimes(options, reason) {
 	}
 }
 
-function registerActiveConnection(options, authorization, connection) {
+function registerActiveConnection(options, authorization, connection, connectionId) {
 	const entry = {
 		clientNodeId: authorization.client.nodeId,
 		connection,
+		connectionId,
 		workspace: authorization.workspace.name,
 	};
 	let entries = options.activeConnections.get(entry.clientNodeId);
@@ -1460,13 +1554,14 @@ function getActiveConnectionsForAuthorization(options, authorization) {
 	return matchingEntries;
 }
 
-async function replaceActiveConnectionForAuthorization(options, authorization) {
+async function replaceActiveConnectionForAuthorization(options, authorization, replacementConnectionId) {
 	const entries = options.activeConnections.get(authorization.client.nodeId);
 	const matchingEntries = getActiveConnectionsForAuthorization(options, authorization);
 	if (matchingEntries.length === 0) {
 		return { replaced: false, closedCount: 0 };
 	}
 
+	const replacedConnectionIds = matchingEntries.map((entry) => entry.connectionId);
 	const closeReason = Array.from(Buffer.from(ACTIVE_REPLACE_CLOSE_REASON, "utf8"));
 	for (const entry of matchingEntries) {
 		entries.delete(entry);
@@ -1476,6 +1571,9 @@ async function replaceActiveConnectionForAuthorization(options, authorization) {
 		options.activeConnections.delete(authorization.client.nodeId);
 	}
 
+	console.error(
+		`client connection replaced: ${authorization.client.nodeId} (${replacedConnectionIds.join(", ")} -> ${replacementConnectionId})`,
+	);
 	await logAudit(options.auditLogger, {
 		type: "duplicate_connection_replaced",
 		clientNodeId: authorization.client.nodeId,
@@ -1484,6 +1582,8 @@ async function replaceActiveConnectionForAuthorization(options, authorization) {
 		details: {
 			closeReason: ACTIVE_REPLACE_CLOSE_REASON,
 			closedCount: matchingEntries.length,
+			replacedConnectionIds,
+			replacementConnectionId,
 			source: "active_connection_registry",
 		},
 	});
@@ -1588,12 +1688,14 @@ async function handleConnection(incoming, options) {
 	const accepting = await incoming.accept();
 	const connection = await accepting.connect();
 	const remoteId = connection.remoteId().toString();
-	console.error(`client connected: ${remoteId}`);
+	const connectionId = `conn-${++activeConnectionSequence}`;
+	console.error(`client connection opened: ${remoteId} (${connectionId})`);
 	await logAudit(options.auditLogger, {
 		type: "client_connected",
 		clientNodeId: remoteId,
 		workspace: options.workspace.name,
 		success: true,
+		details: { connectionId },
 	});
 
 	let child;
@@ -1618,10 +1720,10 @@ async function handleConnection(incoming, options) {
 		}
 
 		if (handshake.authorization.paired) {
-			console.error(`paired client: ${handshake.authorization.client.label} (${remoteId})`);
+			console.error(`paired client connection: ${handshake.authorization.client.label} (${remoteId}, ${connectionId})`);
 		}
-		await replaceActiveConnectionForAuthorization(options, handshake.authorization);
-		removeActiveConnection = registerActiveConnection(options, handshake.authorization, connection);
+		await replaceActiveConnectionForAuthorization(options, handshake.authorization, connectionId);
+		removeActiveConnection = registerActiveConnection(options, handshake.authorization, connection, connectionId);
 		stopDuplicateStreamRejectionLoop = startDuplicateStreamRejectionLoop(connection, remoteId, options);
 
 		if (options.integratedVolt) {
@@ -1635,12 +1737,13 @@ async function handleConnection(incoming, options) {
 		if (child && child.exitCode === null && !child.killed) child.kill();
 		connection.close(0n, Array.from(Buffer.from("done", "utf8")));
 		await waitForConnectionClose(connection);
-		console.error(`client disconnected: ${remoteId}`);
+		console.error(`client connection closed: ${remoteId} (${connectionId})`);
 		await logAudit(options.auditLogger, {
 			type: "client_disconnected",
 			clientNodeId: remoteId,
 			workspace: options.workspace.name,
 			success: true,
+			details: { connectionId },
 		});
 	}
 }
@@ -1683,16 +1786,21 @@ async function listenOnControlPath(server, controlPath) {
 	if (process.platform !== "win32") {
 		await mkdir(dirname(controlPath), { recursive: true });
 	}
-	try {
-		await listenServer(server, controlPath);
-		return;
-	} catch (error) {
-		if (process.platform === "win32" || error?.code !== "EADDRINUSE") throw error;
-		if (await canConnectToControlPath(controlPath)) {
-			throw new Error(`Iroh remote host control channel is already active for this state path: ${controlPath}`);
+	for (let attempt = 0; ; attempt += 1) {
+		try {
+			await listenServer(server, controlPath);
+			return;
+		} catch (error) {
+			if (process.platform === "win32" || error?.code !== "EADDRINUSE") throw error;
+			if (await canConnectToControlPath(controlPath)) {
+				if (attempt < CONTROL_ACTIVE_RETRY_ATTEMPTS) {
+					await delay(CONTROL_ACTIVE_RETRY_DELAY_MS);
+					continue;
+				}
+				throw new Error(`Iroh remote host control channel is already active for this state path: ${controlPath}`);
+			}
+			await rm(controlPath, { force: true });
 		}
-		await rm(controlPath, { force: true });
-		await listenServer(server, controlPath);
 	}
 }
 
@@ -1846,7 +1954,14 @@ async function startPairControlServer(endpoint, options) {
 	const controlPath = getIrohRemoteControlPath(options.statePath);
 	const server = createServer((socket) => {
 		handlePairControlConnection(socket, endpoint, options).catch((error) => {
-			socket.end(`${JSON.stringify(createPairControlErrorResponse(error instanceof Error ? error.message : String(error)))}\n`);
+			socket.end(
+				`${JSON.stringify(
+					createControlErrorResponse(
+						IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
+						error instanceof Error ? error.message : String(error),
+					),
+				)}\n`,
+			);
 		});
 	});
 	await listenOnControlPath(server, controlPath);
@@ -1861,6 +1976,34 @@ async function closePairControlServer(controlServer) {
 	if (process.platform !== "win32") {
 		await rm(controlServer.controlPath, { force: true });
 	}
+}
+
+function installControlPathExitCleanup(controlPath) {
+	if (process.platform === "win32") {
+		return () => {};
+	}
+	const cleanup = () => {
+		rmSync(controlPath, { force: true });
+	};
+	process.once("exit", cleanup);
+	return () => {
+		process.off("exit", cleanup);
+	};
+}
+
+function installShutdownSignalHandlers(requestShutdown) {
+	const signals = ["SIGINT", "SIGTERM"];
+	const handlers = [];
+	for (const signal of signals) {
+		const handler = () => requestShutdown(signal);
+		process.once(signal, handler);
+		handlers.push([signal, handler]);
+	}
+	return () => {
+		for (const [signal, handler] of handlers) {
+			process.off(signal, handler);
+		}
+	};
 }
 
 function createTicketPayload(endpoint, options, includePairingSecret) {
@@ -1919,9 +2062,18 @@ async function serve(flags) {
 	const startupTicketMode = getStartupTicketMode(flags);
 	const startupPairingEnabled = startupTicketMode === "pairing";
 	const sourceVolt = getFlag(flags, "source-volt");
-	const ticketExpiresAt = startupPairingEnabled
-		? Date.now() + DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS
-		: undefined;
+	const trustState = getRemoteWorkspaceTrustState(flags, workspace);
+	const confirmation = await confirmRemoteWorkspaceAccess({
+		allowTools,
+		auditLogger,
+		context: startupPairingEnabled ? "host_startup_pairing" : "host_startup",
+		hasTrustResources: trustState.hasTrustResources,
+		projectTrusted: trustState.projectTrusted,
+		promptForTrust: true,
+		trustStore: trustState.trustStore,
+		workspace,
+		yes: hasFlag(flags, "yes"),
+	});
 	const options = {
 		activeConnections: new Map(),
 		agentDir: getFlag(flags, "agent-dir"),
@@ -1934,8 +2086,8 @@ async function serve(flags) {
 		profile: getFlag(flags, "profile"),
 		relayMode,
 		hostNodeId: undefined,
-		projectTrusted: hasFlag(flags, "approve"),
-		ticketExpiresAt,
+		projectTrusted: confirmation.projectTrusted,
+		ticketExpiresAt: undefined,
 		once: hasFlag(flags, "once"),
 		sourceVolt: sourceVolt ? resolve(sourceVolt) : undefined,
 		stateManager,
@@ -1944,13 +2096,6 @@ async function serve(flags) {
 		voltBin: getFlag(flags, "volt-bin", "volt"),
 		workspace,
 	};
-	await confirmUnsafeRemoteToolGrant({
-		allowTools,
-		auditLogger,
-		context: startupPairingEnabled ? "host_startup_pairing" : "host_startup",
-		workspaceName: workspace.name,
-		yes: hasFlag(flags, "yes"),
-	});
 	await preflightRpcChild(options, workspace);
 	Object.assign(workspace, await stateManager.upsertWorkspace(workspace, allowTools));
 
@@ -1966,43 +2111,66 @@ async function serve(flags) {
 	});
 	options.hostEngine = hostEngine;
 	const endpointTicket = EndpointTicket.fromAddr(endpoint.addr()).toString();
-	let ticket;
-	let ticketLabel;
-	if (startupTicketMode === "pairing") {
-		ticket = (
-			await hostEngine.pair({
-				expiresAt: ticketExpiresAt,
-				irohTicket: endpointTicket,
-				nodeId: endpoint.id().toString(),
-				relayMode,
-			})
-		).ticket;
-		ticketLabel = "pairing ticket";
-	} else if (startupTicketMode === "paired-client") {
-		ticket = encodeIrohRemoteTicketPayload(createTicketPayload(endpoint, options, false));
-		ticketLabel = "paired-client ticket";
-	}
-	const controlServer = await startPairControlServer(endpoint, options);
-
-	console.error(`host id: ${endpoint.id().toString()}`);
-	console.error(`state: ${statePath}`);
-	console.error(`audit: ${auditPath}`);
-	console.error(`control: ${controlServer.controlPath}`);
-	console.error(`workspace: ${workspace.name} -> ${workspace.path}`);
-	console.error(
-		`child: ${options.integratedVolt ? "in-process volt remote host" : options.sourceVolt ? `${process.execPath} ${options.resolvedSourceVoltRunner} --mode rpc` : options.useVolt ? `${options.resolvedVoltBin ?? getPlatformVoltBin(options.voltBin)} --mode rpc` : "fake-rpc"}`,
-	);
-	console.error(`pairing: ${startupPairingEnabled ? "enabled" : "disabled"}`);
-	if (ticket !== undefined && ticketLabel !== undefined) {
-		printTicket(ticket, ticketLabel);
-	} else {
-		console.error("startup ticket: disabled; run `volt remote pair` to create a pairing ticket.");
-	}
-
-	const connectionTasks = new Set();
+	let controlServer;
 	try {
+		controlServer = await startPairControlServer(endpoint, options);
+	} catch (error) {
+		await endpoint.close().catch(() => {});
+		throw error;
+	}
+	const connectionTasks = new Set();
+	let shutdownRequested = false;
+	let shutdownSignal;
+	const removeControlPathExitCleanup = installControlPathExitCleanup(controlServer.controlPath);
+	const removeShutdownSignalHandlers = installShutdownSignalHandlers((signal) => {
+		if (shutdownRequested) return;
+		shutdownRequested = true;
+		shutdownSignal = signal;
+		process.exitCode = signal === "SIGINT" ? 130 : 143;
+		void endpoint.close().catch(() => {});
+	});
+	try {
+		let ticket;
+		let ticketLabel;
+		if (startupTicketMode === "pairing") {
+			options.ticketExpiresAt = Date.now() + DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS;
+			ticket = (
+				await hostEngine.pair({
+					expiresAt: options.ticketExpiresAt,
+					irohTicket: endpointTicket,
+					nodeId: endpoint.id().toString(),
+					relayMode,
+				})
+			).ticket;
+			ticketLabel = "pairing ticket";
+		} else if (startupTicketMode === "paired-client") {
+			ticket = encodeIrohRemoteTicketPayload(createTicketPayload(endpoint, options, false));
+			ticketLabel = "paired-client ticket";
+		}
+
+		console.error(`host id: ${endpoint.id().toString()}`);
+		console.error(`state: ${statePath}`);
+		console.error(`audit: ${auditPath}`);
+		console.error(`control: ${controlServer.controlPath}`);
+		console.error(`workspace: ${workspace.name} -> ${workspace.path}`);
+		console.error(
+			`child: ${options.integratedVolt ? "in-process volt remote host" : options.sourceVolt ? `${process.execPath} ${options.resolvedSourceVoltRunner} --mode rpc` : options.useVolt ? `${options.resolvedVoltBin ?? getPlatformVoltBin(options.voltBin)} --mode rpc` : "fake-rpc"}`,
+		);
+		console.error(`pairing: ${startupPairingEnabled ? "enabled" : "disabled"}`);
+		if (ticket !== undefined && ticketLabel !== undefined) {
+			printTicket(ticket, ticketLabel);
+		} else {
+			console.error("startup ticket: disabled; run `volt remote pair` to create a pairing ticket.");
+		}
+
 		while (true) {
-			const incoming = await endpoint.acceptNext();
+			let incoming;
+			try {
+				incoming = await endpoint.acceptNext();
+			} catch (error) {
+				if (shutdownRequested) break;
+				throw error;
+			}
 			if (!incoming) break;
 			const task = handleConnection(incoming, options).catch((error) => {
 				if (!isExpectedApplicationClose(error)) {
@@ -2018,12 +2186,14 @@ async function serve(flags) {
 			}
 		}
 	} finally {
+		removeShutdownSignalHandlers();
 		await closePairControlServer(controlServer);
+		removeControlPathExitCleanup();
 		try {
 			await endpoint.close();
 		} finally {
 			await Promise.allSettled(connectionTasks);
-			await stopIntegratedRuntimes(options, "host_shutdown");
+			await stopIntegratedRuntimes(options, shutdownSignal ? "host_signal_shutdown" : "host_shutdown");
 		}
 	}
 }

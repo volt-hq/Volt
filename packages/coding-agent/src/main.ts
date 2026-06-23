@@ -115,10 +115,10 @@ Host options are forwarded to the integrated Iroh remote host. Common options:
   --allow-tools <list>          Remote tool allowlist. bash, edit, or write can modify host state and require confirmation.
   --profile <name>              Volt settings profile
   --agent-dir <path>            Volt agent config directory
-  --approve                     Trust project-local Volt settings/resources
+  --approve                     Trust project-local Volt settings/resources for the remote workspace
   --no-pairing                  Reject unpaired clients and print a paired-client ticket
   --once                        Exit after first client disconnects
-  --yes                         Accept unsafe remote tool grants for noninteractive startup
+  --yes                         Accept unsafe remote tool grants for noninteractive startup without trusting the workspace
 
 Pair options:
   --workspace <name>            Saved workspace name to pair with the running host

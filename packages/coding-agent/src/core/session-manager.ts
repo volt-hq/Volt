@@ -561,15 +561,25 @@ function isMessageWithContent(message: AgentMessage): message is Message {
 	return typeof (message as Message).role === "string" && "content" in message;
 }
 
-function extractTextContent(message: Message): string {
-	const content = message.content;
+function extractTextContentFromContent(content: string | Array<{ type: string; text?: string }>): string {
 	if (typeof content === "string") {
 		return content;
 	}
 	return content
-		.filter((block): block is TextContent => block.type === "text")
+		.filter(
+			(block): block is { type: "text"; text: string } => block.type === "text" && typeof block.text === "string",
+		)
 		.map((block) => block.text)
 		.join(" ");
+}
+
+function extractTextContent(message: Message): string {
+	return extractTextContentFromContent(message.content);
+}
+
+function getEntryTimestamp(entry: Pick<SessionEntryBase, "timestamp">): number | undefined {
+	const t = new Date(entry.timestamp).getTime();
+	return Number.isNaN(t) ? undefined : t;
 }
 
 function getMessageActivityTime(entry: SessionMessageEntry): number | undefined {
@@ -582,19 +592,92 @@ function getMessageActivityTime(entry: SessionMessageEntry): number | undefined 
 		return msgTimestamp;
 	}
 
-	const t = new Date(entry.timestamp).getTime();
-	return Number.isNaN(t) ? undefined : t;
+	return getEntryTimestamp(entry);
+}
+
+function isDisplayedCustomMessage(entry: SessionEntry): entry is CustomMessageEntry {
+	return entry.type === "custom_message" && entry.display;
+}
+
+function isSessionFileFlushContent(entry: FileEntry): boolean {
+	return (
+		(entry.type === "message" && entry.message.role === "assistant") ||
+		(entry.type === "custom_message" && entry.display)
+	);
+}
+
+export interface SessionEntrySummary {
+	messageCount: number;
+	firstMessage: string;
+	allMessagesText: string;
+	lastActivityTime?: number;
+}
+
+export function summarizeSessionEntries(entries: Iterable<SessionEntry>): SessionEntrySummary {
+	let messageCount = 0;
+	let firstUserMessage = "";
+	let firstFallbackMessage = "";
+	const allMessages: string[] = [];
+	let lastActivityTime: number | undefined;
+
+	for (const entry of entries) {
+		if (entry.type === "message") {
+			messageCount++;
+
+			const activityTime = getMessageActivityTime(entry);
+			if (typeof activityTime === "number") {
+				lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
+			}
+
+			const message = entry.message;
+			if (!isMessageWithContent(message)) continue;
+			if (message.role !== "user" && message.role !== "assistant") continue;
+
+			const textContent = extractTextContent(message);
+			if (!textContent) continue;
+
+			allMessages.push(textContent);
+			if (!firstUserMessage && message.role === "user") {
+				firstUserMessage = textContent;
+			}
+			if (!firstFallbackMessage && message.role === "assistant") {
+				firstFallbackMessage = textContent;
+			}
+			continue;
+		}
+
+		if (isDisplayedCustomMessage(entry)) {
+			messageCount++;
+
+			const activityTime = getEntryTimestamp(entry);
+			if (typeof activityTime === "number") {
+				lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
+			}
+
+			const textContent = extractTextContentFromContent(entry.content);
+			if (!textContent) continue;
+
+			allMessages.push(textContent);
+			if (!firstFallbackMessage) {
+				firstFallbackMessage = textContent;
+			}
+		}
+	}
+
+	return {
+		messageCount,
+		firstMessage: firstUserMessage || firstFallbackMessage || "(no messages)",
+		allMessagesText: allMessages.join(" "),
+		lastActivityTime,
+	};
 }
 
 async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	try {
 		const stats = await stat(filePath);
 		let header: SessionHeader | null = null;
-		let messageCount = 0;
-		let firstMessage = "";
-		const allMessages: string[] = [];
+		const entries: SessionEntry[] = [];
 		let name: string | undefined;
-		let lastActivityTime: number | undefined;
 
 		const rl = createInterface({
 			input: createReadStream(filePath, { encoding: "utf8" }),
@@ -616,35 +699,20 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 				name = entry.name?.trim() || undefined;
 			}
 
-			if (entry.type !== "message") continue;
-			messageCount++;
-
-			const activityTime = getMessageActivityTime(entry);
-			if (typeof activityTime === "number") {
-				lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
-			}
-
-			const message = entry.message;
-			if (!isMessageWithContent(message)) continue;
-			if (message.role !== "user" && message.role !== "assistant") continue;
-
-			const textContent = extractTextContent(message);
-			if (!textContent) continue;
-
-			allMessages.push(textContent);
-			if (!firstMessage && message.role === "user") {
-				firstMessage = textContent;
+			if (entry.type !== "session") {
+				entries.push(entry);
 			}
 		}
 
 		if (!header) return null;
 
+		const summary = summarizeSessionEntries(entries);
 		const cwd = typeof header.cwd === "string" ? header.cwd : "";
 		const parentSessionPath = header.parentSession;
 		const headerTime = typeof header.timestamp === "string" ? new Date(header.timestamp).getTime() : NaN;
 		const modified =
-			typeof lastActivityTime === "number" && lastActivityTime > 0
-				? new Date(lastActivityTime)
+			typeof summary.lastActivityTime === "number" && summary.lastActivityTime > 0
+				? new Date(summary.lastActivityTime)
 				: !Number.isNaN(headerTime)
 					? new Date(headerTime)
 					: stats.mtime;
@@ -657,9 +725,9 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 			parentSessionPath,
 			created: new Date(header.timestamp),
 			modified,
-			messageCount,
-			firstMessage: firstMessage || "(no messages)",
-			allMessagesText: allMessages.join(" "),
+			messageCount: summary.messageCount,
+			firstMessage: summary.firstMessage,
+			allMessagesText: summary.allMessagesText,
 		};
 	} catch {
 		return null;
@@ -908,12 +976,12 @@ export class SessionManager {
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
-		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-		if (!hasAssistant) {
+		const hasFlushContent = this.fileEntries.some(isSessionFileFlushContent);
+		if (!hasFlushContent) {
 			if (this.flushed) {
 				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
 			} else {
-				// Mark as not flushed so when assistant arrives, all entries get written
+				// Mark as not flushed so when conversation content arrives, all entries get written.
 				this.flushed = false;
 			}
 			return;
@@ -1348,13 +1416,13 @@ export class SessionManager {
 			this.sessionFile = newSessionFile;
 			this._buildIndex();
 
-			// Only write the file now if it contains an assistant message.
-			// Otherwise defer to _persist(), which creates the file on the
-			// first assistant response, matching the newSession() contract
-			// and avoiding the duplicate-header bug when _persist()'s
-			// no-assistant guard later resets flushed to false.
-			const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-			if (hasAssistant) {
+			// Only write the file now if it contains conversation content that should
+			// make a session visible (assistant output or a displayed custom message).
+			// Otherwise defer to _persist(), which creates the file once such content
+			// arrives, matching the newSession() contract and avoiding the
+			// duplicate-header bug when the no-content guard later resets flushed to false.
+			const hasFlushContent = this.fileEntries.some(isSessionFileFlushContent);
+			if (hasFlushContent) {
 				this._rewriteFile();
 				this.flushed = true;
 			} else {

@@ -97,6 +97,7 @@ describe("remote CLI", () => {
 		expect(helpText).toContain("bash, edit, or write can modify host state and require confirmation");
 		expect(helpText).toContain("--mobile");
 		expect(helpText).toContain("--yes");
+		expect(helpText).toContain("without trusting the workspace");
 		expect(process.exitCode).toBeUndefined();
 	});
 
@@ -154,6 +155,19 @@ describe("remote CLI", () => {
 				path: realProjectDir,
 			},
 		]);
+		expect(process.exitCode).toBe(0);
+	});
+
+	it("trusts a registered workspace when approved", async () => {
+		const statePath = join(tempDir, "host.json");
+		const realProjectDir = realpathSync(projectDir);
+
+		await expect(
+			main(["remote", "host", "--state", statePath, "--register-workspace", `app=${projectDir}`, "--approve"]),
+		).resolves.toBeUndefined();
+
+		const trustState = JSON.parse(readFileSync(join(agentDir, "trust.json"), "utf8")) as Record<string, boolean>;
+		expect(trustState[realProjectDir]).toBe(true);
 		expect(process.exitCode).toBe(0);
 	});
 

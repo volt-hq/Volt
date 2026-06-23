@@ -45,6 +45,7 @@
 
 ### Fixed
 
+- Fixed Iroh remote host control socket cleanup and startup ordering so failed restarts do not leave nondialable pairing tickets and stale Unix sockets are retried before reporting an active host.
 - Fixed Iroh remote host QR display by using `qrcode-terminal` for compact terminal-native pairing codes.
 - Fixed Iroh remote reconnect authorization to keep each paired client's persisted tool allowlist instead of inheriting broader host restart defaults.
 - Fixed interactive mode to remember the last active settings profile on quit.
@@ -71,6 +72,7 @@
 
 ### Changed
 
+- Changed Iroh remote host startup and workspace registration prompts to offer a `trust` choice for project-local workspace resources, with saved workspace trust honored by remote sessions.
 - Changed Iroh remote host startup to require TTY confirmation or `--yes` before granting unsafe remote tools (`bash`, `edit`, or `write`) and to audit accepted unsafe grants.
 - Changed Iroh remote pairing ticket state to persist only secret hashes and non-secret metadata, prune expired pending tickets, audit ticket consumption and expiry, and apply pair-time tools/label hints through the host lifecycle.
 - Changed Iroh remote revocation to coordinate with a running host control channel, close matching active connections, and audit `active_connection_revoked` while keeping persisted-state revocation as a no-host fallback.

@@ -145,6 +145,26 @@ describe("RPC transcript projection", () => {
 		expect(serialized).not.toContain("image-bytes");
 	});
 
+	test("projects displayed review seed messages so remote clients can continue from findings", () => {
+		const session = SessionManager.inMemory("/workspace");
+		session.appendCustomMessageEntry("review", "Automated review result\n\nFindings:\n1. Fix the bug", true, {
+			findings: [{ title: "Fix the bug" }],
+		});
+		session.appendCustomMessageEntry("review", "Hidden review context", false);
+		session.appendCustomMessageEntry("extension.note", "Displayed extension note", true);
+
+		const transcript = projectSessionTranscript(session);
+
+		expect(transcript.items).toEqual([
+			expect.objectContaining({
+				role: "assistant",
+				text: "Automated review result\n\nFindings:\n1. Fix the bug",
+			}),
+		]);
+		expect(JSON.stringify(transcript)).not.toContain("Hidden review context");
+		expect(JSON.stringify(transcript)).not.toContain("Displayed extension note");
+	});
+
 	test("caps limits and paginates older items with beforeEntryId", () => {
 		const session = SessionManager.inMemory("/workspace");
 		for (let index = 0; index < 205; index++) {

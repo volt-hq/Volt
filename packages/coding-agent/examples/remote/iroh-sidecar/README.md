@@ -96,7 +96,7 @@ Use `--state <path>` on host or client for isolated test state.
 
 ## Workspace registration, pairing, and revocation
 
-Register workspaces locally on the desktop host. The registered name is what remote clients and the iOS app see; the host-local path stays in the host state file.
+Register workspaces locally on the desktop host. The registered name is what remote clients and the iOS app see; the host-local path stays in the host state file. In a TTY, registration offers `trust` when the workspace has project-local Volt resources; use `--approve` to save workspace trust noninteractively.
 
 ```bash
 volt remote host --register-workspace volt=/path/to/repo
@@ -169,7 +169,7 @@ The same integrated path is also available through the source CLI:
 node scripts/run-coding-agent-source.mjs remote host --workspace volt=. --allow-tools read,grep,find,ls
 ```
 
-Remote sessions follow normal project trust behavior. Add `--approve` only when the host user trusts project-local settings/resources for the exposed workspace.
+Remote sessions follow normal project trust behavior. Saved workspace trust is honored; otherwise choose `trust` in the host prompt or add `--approve` only when the host user trusts project-local settings/resources for the exposed workspace.
 
 Terminal 1, when testing another source checkout as a spawned RPC child from this directory:
 
@@ -228,7 +228,7 @@ Remote host support is a preview feature and should be treated as remote access 
 - Keep the default read-only tool list (`read,grep,find,ls`) unless the client and workspace are trusted.
 - `--allow-tools` grants that include `bash`, `edit`, or `write` can modify host files or run shell commands; TTY host and pair commands ask for confirmation, and noninteractive commands must pass `--yes`.
 - Workspaces are registered locally and selected by saved name, not arbitrary client-provided paths. Remote clients cannot register, edit, delete, or map workspace paths.
-- Remote sessions do not auto-approve project trust. Use `--approve` only when the host user trusts project-local resources.
+- Remote sessions do not bypass project trust. Saved workspace trust is honored; otherwise choose `trust` in the host prompt or use `--approve` only when the host user trusts project-local resources.
 - Default state and audit paths are `~/.volt/agent/remote/iroh-host.json` and `~/.volt/agent/remote/iroh-host.audit.jsonl`.
 - Do not expose sensitive workspaces or run with `bash,edit,write` unless the client is trusted.
 

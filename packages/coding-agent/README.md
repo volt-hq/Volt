@@ -538,10 +538,10 @@ volt remote host --workspace volt=/path/to/repo --no-pairing
 Security defaults and limitations:
 
 - Default remote tools are read-only: `read,grep,find,ls`.
-- Granting `bash`, `edit`, or `write` can modify the host or run shell commands. TTY host/pair commands ask for confirmation; noninteractive unsafe grants require `--yes`.
+- Granting `bash`, `edit`, or `write` can modify the host or run shell commands. TTY host startup asks for confirmation and offers `trust` to continue while trusting workspace resources; noninteractive unsafe grants require `--yes`.
 - Pairing tickets are short-lived, one-time credentials. `volt remote host` shows the startup ticket as a terminal QR code by default when stderr is a TTY. `volt remote pair` requires a running host control channel; it does not generate offline tickets from persisted state.
 - Remote workspaces are selected by saved name, not arbitrary client-provided paths.
-- Remote sessions do not auto-approve project trust. Use `--approve` only when the host user trusts the workspace resources.
+- Remote sessions do not bypass project trust. Saved workspace trust is honored; otherwise use the host prompt's `trust` option or `--approve` only when the host user trusts the workspace resources.
 - Default paths are `~/.volt/agent/remote/iroh-host.json` for state and `~/.volt/agent/remote/iroh-host.audit.jsonl` for audit JSONL.
 - Use `--relay default` on the host when validating cross-network relay/discovery; same-machine and same-LAN testing can keep the default `--relay disabled`.
 - Remote host support requires a Node.js npm package install or source checkout with optional `@number0/iroh` available for the platform. Bun binary builds reject `volt remote host` because the native Iroh adapter is not bundled.

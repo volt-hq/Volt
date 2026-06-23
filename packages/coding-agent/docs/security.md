@@ -76,9 +76,9 @@ Supported preview safety model:
 - `volt remote status` reports persisted workspaces, clients, tool grants, state path, and audit path without printing secrets or secret hashes.
 - Default paths are `~/.volt/agent/remote/iroh-host.json` for state and `~/.volt/agent/remote/iroh-host.audit.jsonl` for audit JSONL.
 
-Unsafe remote tools require explicit host approval. Granting `bash`, `edit`, or `write` lets the remote session modify files or run shell commands on the host. TTY host/pair commands ask for confirmation; noninteractive unsafe grants, including the default grant, require `--yes`. Do not grant unsafe tools unless the client device and network path are trusted.
+Unsafe remote tools require explicit host approval. Granting `bash`, `edit`, or `write` lets the remote session modify files or run shell commands on the host. TTY host startup asks for confirmation and offers `trust` to continue while saving workspace trust; TTY pair commands ask for confirmation. Noninteractive unsafe grants, including the default grant, require `--yes`. Do not grant unsafe tools unless the client device and network path are trusted.
 
-Remote sessions do not auto-approve project trust. Project-local settings, extensions, skills, prompt templates, themes, system prompts, and package-managed resources follow the same project trust rules as local Volt. Use `--approve` only when the host user trusts those resources for the exposed workspace.
+Remote sessions do not bypass project trust. Project-local settings, extensions, skills, prompt templates, themes, system prompts, and package-managed resources follow the same project trust rules as local Volt. A saved trust decision for the workspace is honored; otherwise the host runs those resources untrusted unless the host user chooses `trust` in the prompt or passes `--approve`. `volt remote host --register-workspace --approve` saves trust for the registered workspace.
 
 Remote host support requires a Node.js npm package install or source checkout with optional `@number0/iroh` available for the platform. Bun binary builds reject `volt remote host` because the native Iroh adapter is not bundled. If startup reports that the optional native adapter is unavailable, reinstall with optional dependencies enabled for the current platform.
 
