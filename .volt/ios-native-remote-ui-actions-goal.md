@@ -289,10 +289,10 @@ and recorded without overclaiming.
     <evidence>Resolved 2026-06-23: design defers full `model.fast_mode` and records v1 `thinking.fast_mode` as session-local, non-persistent, thinking-level-only, scoped/profile-safe, and bounded in iOS-visible metadata; verified with `git diff --check -- .volt/ios-native-remote-ui-actions-design.md .volt/ios-native-remote-ui-actions-goal.md` and pre-commit `npm run check`; commit f0a1f2872ec7c1dcade73193742ed55c825e3846.</evidence>
   </item>
 
-  <item ref="A.5" status="open" prereq="A.1" type="decision">
+  <item ref="A.5" status="resolved" prereq="A.1" type="decision">
     <title>Define Review action remote-safety and first card set</title>
     <acceptance>The design document states which review actions are exposed first, what arguments they accept, whether they require confirmation, what host-side tools/commands they may run, and how the remote security boundary applies. If any review mode is deferred, the reason and future unlock condition are recorded.</acceptance>
-    <evidence></evidence>
+    <evidence>Resolved 2026-06-23: design records the first remote review card set as `review.uncommitted` and `review.branch`, requires confirmation, documents arguments, fixed git command use, read-only remote reviewer tools, and defers PR/commit/tool review actions with unlock conditions; verified with `git diff --check -- .volt/ios-native-remote-ui-actions-design.md .volt/ios-native-remote-ui-actions-goal.md` and pre-commit `npm run check`; commit pending.</evidence>
   </item>
 </group>
 

@@ -248,7 +248,7 @@ Initial Iroh action additions:
 | `/logout` | none | local-only | Provider auth mutation stays local. |
 | `/clear` | `new_session` remote-allowed RPC | initial remote-safe existing RPC | Keep existing native new-session flow; add `session.new` action only after the shared registry scaffold. |
 | `/compact` | `compact` local RPC only | deferred pending policy | Compaction uses model auth, mutates context, and can abort active work; defer until shared action policy. |
-| `/review` | none | deferred pending policy | Not in the first action subset. A.5 will decide review cards and confirmations. |
+| `/review` | none | deferred pending registry | Not in the first discovery subset. A.5 resolves remote-native review exposure to `review.uncommitted` and `review.branch` after shared action handlers exist. |
 | `/resume` | `list_sessions`, `switch_session_by_id` remote-allowed RPC | initial remote-safe existing RPC | Keep existing native session list/switch flow; action projection waits for the shared registry. |
 | `/reload` | none | local-only | Reloads keybindings, extensions, skills, prompts, and themes; remote policy is not defined. |
 | `/quit` | none | unsupported remote | Remote detach is transport close; host shutdown is not a mobile action. |
@@ -280,7 +280,7 @@ Unregistered developer or easter-egg handlers in `interactive-mode.ts` such as `
 
 ### Review and Fast Mode First-Phase Decisions
 
-Review actions are deferred from the first implementation phase. Current `/review` runs git or `gh`, may prompt for target/tool choices, uses review-model policy, runs an isolated agent session, and then starts a fresh session with findings. That is a good long-term native card surface, but it needs A.5 policy for which review targets are remote-safe, what arguments and confirmations are required, and how host-side tool/model policy is represented.
+Review actions are deferred from the first discovery phase. Current `/review` runs git or `gh`, may prompt for target/tool choices, uses review-model policy, runs an isolated agent session, and then starts a fresh session with findings. A.5 resolves the first native review card set as a narrow remote-safe subset plus local-only/deferred review targets.
 
 Fast mode is deferred from the first discovery phase. Current model and thinking RPC commands are local-only over Iroh. A.4 resolves the first native model-speed action as the narrower `thinking.fast_mode` substitute described below.
 
@@ -416,7 +416,8 @@ Example descriptor:
   "enabled": true,
   "disabledReason": null,
   "destructive": false,
-  "requiresConfirmation": false,
+  "requiresConfirmation": true,
+  "streamingBehavior": "disabled",
   "remoteSafe": true,
   "args": []
 }
@@ -475,7 +476,9 @@ Built-in examples:
   "category": "review",
   "presentation": { "kind": "card", "group": "Review" },
   "slash": { "name": "review", "example": "/review pr <url>" },
-  "enabled": true,
+  "enabled": false,
+  "disabledReason": "GitHub credential and network policy is not remote-safe yet.",
+  "requiresConfirmation": true,
   "remoteSafe": false,
   "args": [
     {
@@ -816,15 +819,23 @@ Full `model.fast_mode` remains deferred until a remote model policy answers:
 
 Review workflows are a strong fit for native action cards.
 
-Initial card set:
+### Resolved 2026-06-23: Review Remote-Safety and First Card Set
 
-- Review uncommitted changes.
-- Review staged changes.
-- Review current branch against base.
-- Review PR by URL/number.
-- Review commit by ref.
+A.5 decision: v1 exposes only two remotely visible review cards after the shared action registry exists:
 
-Potential descriptors:
+- `review.uncommitted`: review uncommitted workspace changes against `HEAD`, including untracked file names as extra context.
+- `review.branch`: review `HEAD` against a base branch. The `base` argument is optional; if omitted the host auto-detects `origin/HEAD`, `main`, or `master`.
+
+These actions may be shown over Iroh only after `invoke_ui_action` reauthorization exists. They require confirmation, are disabled while streaming or compacting, and use `streamingBehavior: "disabled"`. They are not file-destructive, but they do consume model tokens, inspect workspace diffs, may read project files during the isolated review session, and create a fresh Volt session seeded with findings.
+
+Deferred or local-only review actions:
+
+- `review.pr`: local-only in v1. It runs `gh pr view` and `gh pr diff`, can contact GitHub, and may use host GitHub credentials or expose private PR metadata. Remote unlock requires a GitHub/network credential policy and confirmation copy that names that external access.
+- `review.commit`: local-only in v1. It needs a native recent-commit picker or explicit arbitrary-ref policy before remote exposure, because commit subjects/history are a separate data surface.
+- `review.tools`: local-only. Tool selection persists `reviewTools` settings and can reveal extension/custom tool names and provenance; remote review tool policy is fixed by the host.
+- `review.staged`: deferred because the current review implementation has no staged-only target.
+
+First remote descriptors:
 
 ```json
 {
@@ -836,7 +847,11 @@ Potential descriptors:
   "category": "review",
   "presentation": { "kind": "card", "group": "Review", "priority": 100 },
   "enabled": true,
-  "remoteSafe": false
+  "remoteSafe": true,
+  "requiresConfirmation": true,
+  "destructive": false,
+  "streamingBehavior": "disabled",
+  "slash": { "name": "review", "example": "/review uncommitted" }
 }
 ```
 
@@ -850,10 +865,15 @@ Potential descriptors:
   "category": "review",
   "presentation": { "kind": "card", "group": "Review", "priority": 90 },
   "enabled": true,
-  "remoteSafe": false,
+  "remoteSafe": true,
+  "requiresConfirmation": true,
+  "destructive": false,
+  "streamingBehavior": "disabled",
+  "slash": { "name": "review", "example": "/review branch [base]" },
   "args": [
     {
       "name": "base",
+      "label": "Base branch",
       "type": "string",
       "required": false,
       "placeholder": "main"
@@ -862,14 +882,72 @@ Potential descriptors:
 }
 ```
 
-Host-side review execution should remain responsible for:
+Local-only/deferred descriptors can exist in local RPC/TUI action discovery, but must be filtered from Iroh until their policy is resolved:
 
-- Git/gh command execution.
-- Tool selection.
-- Review prompt construction.
-- Session replacement if review findings start a fresh session.
-- Model choice if a review model is configured.
-- Security checks and project trust.
+```json
+{
+  "schemaVersion": 1,
+  "id": "review.pr",
+  "label": "Review PR",
+  "description": "Review a GitHub pull request.",
+  "source": "builtin",
+  "category": "review",
+  "presentation": { "kind": "card", "group": "Review", "priority": 80 },
+  "enabled": false,
+  "disabledReason": "GitHub credential and network policy is not remote-safe yet.",
+  "remoteSafe": false,
+  "requiresConfirmation": true,
+  "slash": { "name": "review", "example": "/review pr [number]" },
+  "args": [
+    {
+      "name": "target",
+      "label": "PR number, URL, or branch",
+      "type": "string",
+      "required": false,
+      "placeholder": "123"
+    }
+  ]
+}
+```
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "review.commit",
+  "label": "Review commit",
+  "description": "Review one commit by ref.",
+  "source": "builtin",
+  "category": "review",
+  "presentation": { "kind": "palette", "group": "Review", "priority": 70 },
+  "enabled": false,
+  "disabledReason": "Commit picker and arbitrary-ref policy are not remote-safe yet.",
+  "remoteSafe": false,
+  "requiresConfirmation": true,
+  "slash": { "name": "review", "example": "/review commit <sha>" },
+  "args": [
+    {
+      "name": "sha",
+      "label": "Commit ref",
+      "type": "string",
+      "required": true,
+      "placeholder": "HEAD"
+    }
+  ]
+}
+```
+
+Host-side review execution remains authoritative for:
+
+- Fixed git command execution for remote-safe targets:
+  - `review.uncommitted`: `git rev-parse --is-inside-work-tree`, `git diff HEAD` or no-commit fallback `git diff --cached` plus `git diff`, and `git ls-files --others --exclude-standard`.
+  - `review.branch`: the same repository check, optional base detection with `git symbolic-ref --short refs/remotes/origin/HEAD` and `git rev-parse --verify --quiet main/master`, explicit base validation with `git rev-parse --verify --quiet <base>`, `git diff <base>...HEAD`, and `git log --oneline <base>..HEAD`.
+- Review prompt construction and diff truncation. Descriptors and invocation responses must not include the raw diff.
+- Model choice. If `reviewModel` is configured and authenticated, the host may use it; otherwise the current session model is used. iOS must not see configured review model values, model catalogs, auth state, or provider policy.
+- Review tool policy. Local TUI review may keep using configured `reviewTools`; remote v1 review must use a host-owned read-only tool set and must not expose tool names or extension source labels. The remote v1 reviewer tool set is limited to safe read/navigation tools such as `read`, `grep`, `find`, and `ls`. It must not include `edit`, `write`, arbitrary extension tools, or `bash` unless a future explicit unsafe-review-tools policy is added.
+- Session replacement. Successful review starts a fresh session seeded only with numbered findings, matching current `/review` behavior. If session replacement is blocked, findings may be added to the current session using the existing host logic.
+- Security checks and project trust. Review actions use the registered workspace cwd only, never a client-provided host path. The host rechecks project trust, current streaming/compaction state, model availability, target validity, remote allowlist, and action enabled state at invocation time.
+
+Confirmation text should tell the user that review will inspect the selected diff, may read related project files with host-approved read-only tools, consumes model tokens, and will create a fresh session with findings. For `review.branch`, the confirmation should include the resolved base branch before the run starts when available.
 
 The iOS app should only provide user intent and optional arguments.
 
@@ -1122,11 +1200,9 @@ Compatibility rules:
 ### Phase D: Review and Model Actions
 
 1. Refactor `/review` into shared action handlers:
-   - `review.tools`
    - `review.uncommitted`
    - `review.branch`
-   - `review.pr`
-   - `review.commit`
+   - Local-only/deferred descriptors for `review.tools`, `review.pr`, and `review.commit`
 2. Add native action descriptors for review cards.
 3. Add `thinking.fast_mode` as the first model-speed action; defer full `model.fast_mode`.
 4. Expose model/thinking state changes as action state updates.
@@ -1164,7 +1240,7 @@ Compatibility rules:
 1. Render descriptor-driven string/boolean/enum arguments.
 2. Support `toggle` presentation and state refresh.
 3. Add Fast mode card/toggle.
-4. Add Review PR form.
+4. Add Review branch base form; add Review PR form only after PR policy is resolved.
 5. Add model/thinking picker actions when remote-safe.
 
 ### Phase 4: Extension Cards
@@ -1188,12 +1264,14 @@ Compatibility rules:
 - `invoke_ui_action` for a prompt-like action returns success on acceptance and streams normal agent events.
 - Actions that complete synchronously do not require `agent_end`.
 - `thinking.fast_mode` lowers/restores thinking with default persistence disabled and does not mutate model, scoped-model, profile, or global default settings.
+- Review descriptors expose only `review.uncommitted` and `review.branch` remotely, require confirmation, omit raw diffs/model/tool metadata, and keep `review.pr`, `review.commit`, and `review.tools` local-only or deferred.
 
 ### Host Integration Tests
 
 - TUI `/compact` and RPC `invoke_ui_action(context.compact)` use the same core handler.
 - TUI `/review uncommitted` and RPC `invoke_ui_action(review.uncommitted)` produce equivalent session behavior.
 - Iroh remote rejects local-only actions.
+- Iroh remote allows only the A.5 review subset, rejects `review.pr`, `review.commit`, and `review.tools`, and keeps direct git/gh/model/tool metadata out of descriptors and responses.
 - Iroh remote exposes `thinking.fast_mode` only through the action allowlist and never exposes direct model listing/selection as part of the descriptor or response.
 - Iroh outbound sanitizer applies to action responses and extension UI events.
 - Revoked or unauthorized clients cannot invoke actions.
@@ -1210,6 +1288,7 @@ Compatibility rules:
 - Toggle state updates from response or refresh.
 - Disabled actions render with reason and do not invoke.
 - Fast mode toggle updates thinking state while leaving the displayed model unchanged.
+- Review cards show confirmation, render the optional base-branch argument, and do not show local-only PR/commit/tool actions over Iroh.
 
 ### Manual iOS Smoke
 
@@ -1263,6 +1342,7 @@ The design should not require a flag day.
 5. **Built-in review exposure over Iroh**
    - Review can run git/gh commands and may inspect workspace data.
    - Need confirmation that this is acceptable for an authorized paired client and consistent with tool policy.
+   - Resolved 2026-06-23: v1 remote review exposure is limited to `review.uncommitted` and `review.branch`, both requiring confirmation and read-only remote reviewer tools. `review.pr`, `review.commit`, and `review.tools` remain local-only or deferred pending GitHub credential/network, commit-history, and tool-provenance policy.
 
 6. **Extension-provided card trust**
    - Project-local extension actions should only appear after project trust.
