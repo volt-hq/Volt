@@ -720,7 +720,13 @@ Persistence:
 - It must not write `defaultThinkingLevel`, `defaultProvider`, `defaultModel`, `enabledModels`, profile settings, or review model settings.
 - New session, session switch, profile switch, resource reload, model switch, model cycle, or scoped-model changes clear the fast-mode overlay and recompute descriptor state.
 
-Follow-up 2026-06-23: this v1 boundary is not the final preference model. Future work should define persisted per-chat Fast mode/model overrides, global defaults exposed through native settings, and the relationship between chat-local overrides and profile/scoped model defaults. The same host-owned action/state abstraction should cover model selection after a separate remote-safe model policy is defined.
+Follow-up 2026-06-23: this v1 boundary is not the final preference model. Future work should define a shared host-owned preference abstraction for native-controllable chat policy:
+
+- Global defaults editable from native General settings, such as Fast mode on/off by default and a default model, subject to host policy.
+- Per-chat overrides so multiple conversations can independently opt into Fast mode or a model choice while other chats inherit defaults.
+- An explicit effective-value model: preference key, configured global default, optional chat override, effective value, inheritance source, allowed values/actions, reset-to-default behavior, and update events.
+- The same abstraction should cover Fast mode and model selection. Model selection still needs a separate remote-safe model policy before exposing global or chat-scoped model choices over Iroh.
+- Profiles and scoped models remain authoritative policy inputs. Chat overrides and global defaults must not expose provider secrets, full model catalogs, costs, config paths, or raw profile/scoped-model metadata to iOS.
 
 Policy:
 
@@ -1585,11 +1591,13 @@ The design should not require a flag day.
    - Need per-action `streamingBehavior`: `disabled`, `immediate`, `queueSteer`, `queueFollowUp`, or `custom`.
    - Resolved 2026-06-23: v1 supports `disabled`, `immediate`, `queueSteer`, and `queueFollowUp`. `custom` remains deferred; host handlers must recheck the live descriptor and reject unsupported streaming invocations.
 
-9. **Persisted Fast mode and model selection scope**
+9. **Chat-scoped defaults and model preference abstraction**
    - V1 `thinking.fast_mode` is a session-local non-persistent overlay.
-   - Future product behavior should allow per-chat Fast mode and model overrides, including multiple conversations with independent Fast mode state.
-   - Native settings may also need global defaults such as Fast mode on by default or a default model, while preserving profile/scoped-model precedence.
-   - Model selection needs a separate remote-safe policy before exposing global or chat-scoped selection over Iroh.
+   - Future behavior should use a shared host-owned preference abstraction for Fast mode and model selection.
+   - Native General settings can edit global defaults such as Fast mode on by default or a default model; chat settings/actions can edit a per-chat override.
+   - Multiple conversations may have independent Fast mode and model overrides. Chats without an explicit override inherit the effective global/profile/scoped default.
+   - Preference metadata should expose the effective value, whether it is inherited or chat-specific, allowed host-owned actions, and reset-to-default behavior.
+   - Profiles and scoped models remain policy inputs and may constrain available values. Model selection needs a separate remote-safe policy before exposing global or chat-scoped selection over Iroh.
 
 ## Acceptance Criteria
 

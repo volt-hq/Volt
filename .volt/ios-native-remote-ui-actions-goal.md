@@ -407,7 +407,7 @@ and recorded without overclaiming.
 
   <item ref="E.5" status="open" prereq="D.4,E.2" type="decision">
     <title>Define chat-scoped and default Fast mode/model selection policy</title>
-    <acceptance>The design decides whether Fast mode and model selection can persist per chat, whether global defaults are exposed through native settings, how those preferences interact with profiles and scoped models, and what remote-safe metadata iOS may display. If implementation is deferred, the design records the smaller v1 behavior and future unlock conditions.</acceptance>
+    <acceptance>The design decides the shared preference abstraction for Fast mode and model selection, including global defaults in native General settings, per-chat overrides, inherited effective values, reset-to-default behavior, multiple conversations with independent Fast mode/model state, profile/scoped-model precedence, and remote-safe iOS metadata. If implementation is deferred, the design records the smaller v1 behavior and future unlock conditions.</acceptance>
     <evidence></evidence>
   </item>
 </group>
