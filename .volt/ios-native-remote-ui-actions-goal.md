@@ -268,7 +268,7 @@ and recorded without overclaiming.
   <item ref="A.1" status="resolved" prereq="" type="decision">
     <title>Classify initial action scope and remote allowlist</title>
     <acceptance>The design document includes an inventory of current TUI built-in slash commands, existing RPC equivalents, extension commands, prompt templates, and skills. Each candidate is classified as initial remote-safe, local-only, deferred pending policy, or unsupported. The initial exposed Iroh subset is deliberately narrow and justified. Review actions and Fast mode have explicit include/defer decisions for the first implementation phase.</acceptance>
-    <evidence>Resolved 2026-06-23: design records built-in slash/RPC/dynamic command inventory, narrow Iroh discovery/invocation scope, and Review/Fast first-phase deferrals; verified with `git diff --check -- .volt/ios-native-remote-ui-actions-design.md .volt/ios-native-remote-ui-actions-goal.md`; commit pending.</evidence>
+    <evidence>Resolved 2026-06-23: design records built-in slash/RPC/dynamic command inventory, narrow Iroh discovery/invocation scope, and Review/Fast first-phase deferrals; verified with `git diff --check -- .volt/ios-native-remote-ui-actions-design.md .volt/ios-native-remote-ui-actions-goal.md` and pre-commit `npm run check`; commit 3db207b225007462498148fe70e512a778e40a91.</evidence>
   </item>
 
   <item ref="A.2" status="open" prereq="A.1" type="decision">
