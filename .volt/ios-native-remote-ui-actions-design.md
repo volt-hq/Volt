@@ -92,10 +92,10 @@ Example native card behavior:
 
 Example native toggle behavior:
 
-- Host exposes `model.fast_mode` with current state `off`, enabled `true`, and display text "Fast mode".
+- Host exposes `thinking.fast_mode` with current state `off`, enabled `true`, and display text "Fast mode".
 - User toggles it on.
-- iOS sends `invoke_ui_action` with action id `model.fast_mode.set` and `{ "enabled": true }`.
-- Host chooses a faster model, lowers thinking level, or applies whatever model policy is valid for the current profile/provider.
+- iOS sends `invoke_ui_action` with action id `thinking.fast_mode` and `{ "enabled": true }`.
+- Host lowers the current session thinking level when that is supported by the current model.
 - iOS updates from subsequent `ui_action_state_changed`, `get_state`, or action-list refresh data.
 
 ## Goals
@@ -128,7 +128,7 @@ Introduce a shared action registry used by TUI, RPC, Iroh remote, SDK/in-process
 
 Each action should define:
 
-- Stable `id`, such as `review.uncommitted` or `model.fast_mode.set`.
+- Stable `id`, such as `review.uncommitted` or `thinking.fast_mode`.
 - Human label and description.
 - Source: `builtin`, `extension`, `prompt`, `skill`, or `package`.
 - Optional slash alias, such as `review` or `skill:foo`.
@@ -197,7 +197,7 @@ Core events:
 ```
 
 ```json
-{"type":"ui_action_state_changed","action":"model.fast_mode","state":{"value":"on"}}
+{"type":"ui_action_state_changed","action":"thinking.fast_mode","state":{"value":"on"}}
 ```
 
 The first implementation can be much smaller, but the protocol should be designed so the iOS app can evolve without needing new hardcoded routes for every TUI feature.
@@ -263,7 +263,7 @@ Unregistered developer or easter-egg handlers in `interactive-mode.ts` such as `
 | Cancellation | `abort` | Already remote allowed. Future `run.cancel` can wrap it after shared registry work. |
 | Session basics | `new_session`, `get_state`, `get_transcript`, `list_sessions`, `switch_session_by_id` | Already remote allowed. Continue using these as native data/control flows before action projection. |
 | Extension UI | `extension_ui_response` | Already remote allowed as the response path for host-owned UI requests. |
-| Model/thinking | `set_model`, `cycle_model`, `get_available_models`, `set_thinking_level`, `cycle_thinking_level` | Local-only for now; Fast mode and model actions require A.4 policy. |
+| Model/thinking | `set_model`, `cycle_model`, `get_available_models`, `set_thinking_level`, `cycle_thinking_level` | Direct RPC stays local-only over Iroh. A.4 allows only the narrower future `thinking.fast_mode` action after shared action authorization exists. |
 | Context/settings/retry | `compact`, `set_auto_compaction`, `set_auto_retry`, `abort_retry` | Local-only for now; remote actions need shared handlers and state semantics. |
 | Local tools/export/raw data | `bash`, `abort_bash`, `export_html`, `get_messages`, `get_last_assistant_text` | Remain blocked remotely. |
 | Session internals | `switch_session`, `fork`, `clone`, `get_fork_messages`, `get_session_stats`, `set_session_name` | Local-only unless a later action explicitly sanitizes data and rechecks state. |
@@ -282,7 +282,7 @@ Unregistered developer or easter-egg handlers in `interactive-mode.ts` such as `
 
 Review actions are deferred from the first implementation phase. Current `/review` runs git or `gh`, may prompt for target/tool choices, uses review-model policy, runs an isolated agent session, and then starts a fresh session with findings. That is a good long-term native card surface, but it needs A.5 policy for which review targets are remote-safe, what arguments and confirmations are required, and how host-side tool/model policy is represented.
 
-Fast mode is deferred from the first implementation phase. Current model and thinking RPC commands are local-only over Iroh, and there is no single host-owned "fast" policy today. A.4 will decide whether v1 exposes `model.fast_mode`, a narrower `thinking.fast_mode`, or no model-speed action until provider/profile policy is explicit.
+Fast mode is deferred from the first discovery phase. Current model and thinking RPC commands are local-only over Iroh. A.4 resolves the first native model-speed action as the narrower `thinking.fast_mode` substitute described below.
 
 ## Action Descriptor Shape
 
@@ -373,7 +373,7 @@ Field rules:
 
 Id rules:
 
-- Built-in ids are stable, semantic, lower-case, dot-separated ids such as `session.new`, `run.cancel`, `context.compact`, `session.rename`, `review.uncommitted`, or `model.fast_mode`. Once shipped, a built-in id must not be reused for a different behavior. Breaking behavior requires a new id.
+- Built-in ids are stable, semantic, lower-case, dot-separated ids such as `session.new`, `run.cancel`, `context.compact`, `session.rename`, `review.uncommitted`, or `thinking.fast_mode`. Once shipped, a built-in id must not be reused for a different behavior. Breaking behavior requires a new id.
 - V1 projected extension command ids are session-local opaque ids under the `extension.command.` prefix, for example `extension.command.ec_7f3k2q`. They are derived from the current host action catalog, not from raw source paths.
 - V1 projected prompt template ids are session-local opaque ids under the `prompt.template.` prefix, for example `prompt.template.pt_4v9m1x`.
 - V1 projected skill ids are session-local opaque ids under the `skill.` prefix, for example `skill.sk_8k2p0d`.
@@ -612,6 +612,7 @@ interface UiActionInvocationResponse {
   action: string;
   status: UiActionInvocationStatus;
   queuedAs?: "steer" | "followUp";
+  state?: UiActionStateDescriptor;
   stateChanged?: boolean;
   actionsChanged?: boolean;
   message?: string;
@@ -703,34 +704,68 @@ This keeps slash commands useful without making slash text the canonical remote 
 
 Fast mode should be a host-owned policy action, not an iOS hardcoded provider map.
 
+### Resolved 2026-06-23: Fast Mode Policy Boundary
+
+A.4 decision: full `model.fast_mode` is deferred. The v1 model-speed action is `thinking.fast_mode`, a session-local toggle that only changes the current session's thinking level. It never switches models, changes scoped model lists, edits profile/global defaults, or exposes model catalog metadata.
+
+`thinking.fast_mode` may be exposed to iOS over Iroh after the shared action registry and `invoke_ui_action` remote allowlist exist. Direct remote `set_thinking_level`, `cycle_thinking_level`, `set_model`, `cycle_model`, and `get_available_models` remain blocked. The action is safe because the host computes the target level from the current session model and returns only bounded action state, not the provider's full model/thinking matrix.
+
+Persistence:
+
+- Fast mode is session-local and non-persistent.
+- Enabling or disabling it must call thinking-level mutation with default persistence disabled.
+- It must not write `defaultThinkingLevel`, `defaultProvider`, `defaultModel`, `enabledModels`, profile settings, or review model settings.
+- New session, session switch, profile switch, resource reload, model switch, model cycle, or scoped-model changes clear the fast-mode overlay and recompute descriptor state.
+
+Policy:
+
+- Enabling captures the current thinking level as the restore level, then applies the lowest-latency supported level that lowers the current model's thinking setting.
+- The target order is `off`, then `minimal`, then `low`, filtered by the current model's supported thinking levels.
+- If the target would not lower the current level, the descriptor is disabled with a reason such as "Current model is already at its fastest supported thinking level."
+- Disabling restores the captured thinking level, clamped to the current model if the model changed before the action state refreshed.
+- Manual thinking-level changes, explicit model changes, profile switches, and scoped-model changes turn fast mode off; the user's explicit choice becomes the new session state.
+
+Scoped models and profiles remain authoritative:
+
+- Profile defaults and scoped model `:thinking` suffixes define the base session model/thinking state.
+- Fast mode is an overlay on that base state for the current session only.
+- Scoped model cycling keeps its existing behavior: an explicit scoped thinking level overrides the previous session level, and an omitted scoped thinking level inherits the current session preference after fast mode has been cleared.
+- A future full `model.fast_mode` may switch models only after a separate remote model policy defines how host-owned fast variants are configured and how profile/scoped defaults are restored.
+
+iOS may display only host-provided, bounded metadata:
+
+- Action label, description, presentation, boolean state, state label, disabled reason, and invocation message.
+- The current active model provider/id and thinking level already available through `get_state`.
+- No model catalog, costs, provider capability matrices, auth state, profile contents, scoped model list, configured defaults, or provider-specific thinking maps.
+
 ### User Intent
 
 Fast mode means: prefer speed and lower cost/latency over maximum reasoning depth when the current model/profile supports a meaningful speed tradeoff.
 
-The exact implementation may vary by provider and settings:
+The v1 implementation is deliberately narrower than the long-term product idea:
 
-- Lower thinking level from `high` to `low`, `minimal`, or `off`.
-- Switch from a slower scoped model to a faster scoped model.
-- Disable optional deep-review behavior.
-- Use a configured fast model profile.
-- Do nothing with a clear disabled reason if no fast variant exists.
+- Lower the current thinking level to `off`, `minimal`, or `low` when that is supported and actually lowers latency.
+- Do nothing with a clear disabled reason if no faster thinking level exists.
+- Do not switch models, select a configured fast profile, or change review behavior in v1.
 
 ### Action Shape
 
 ```json
 {
   "schemaVersion": 1,
-  "id": "model.fast_mode",
+  "id": "thinking.fast_mode",
   "label": "Fast mode",
-  "description": "Prefer lower latency model settings when supported.",
+  "description": "Use the fastest supported thinking level for this session.",
   "source": "builtin",
   "category": "model",
   "presentation": { "kind": "toggle", "group": "Model" },
   "enabled": true,
-  "remoteSafe": false,
+  "remoteSafe": true,
+  "streamingBehavior": "disabled",
   "state": {
     "type": "boolean",
-    "value": false
+    "value": false,
+    "label": "Normal reasoning"
   },
   "args": [
     {
@@ -745,10 +780,10 @@ The exact implementation may vary by provider and settings:
 Invocation:
 
 ```json
-{"type":"invoke_ui_action","action":"model.fast_mode","args":{"enabled":true}}
+{"type":"invoke_ui_action","action":"thinking.fast_mode","args":{"enabled":true}}
 ```
 
-Response can include the applied policy:
+Response uses generic action state and refresh hints:
 
 ```json
 {
@@ -756,25 +791,26 @@ Response can include the applied policy:
   "command": "invoke_ui_action",
   "success": true,
   "data": {
-    "action": "model.fast_mode",
+    "action": "thinking.fast_mode",
     "status": "completed",
-    "state": { "value": true },
-    "applied": {
-      "model": "anthropic/claude-sonnet-4-5",
-      "thinkingLevel": "low"
-    }
+    "state": { "type": "boolean", "value": true, "label": "Fast: minimal thinking" },
+    "stateChanged": true,
+    "actionsChanged": true,
+    "message": "Fast mode enabled: minimal thinking"
   }
 }
 ```
 
-The app can display applied state but should not calculate it.
+The app can display returned state and message but should not calculate the target level.
 
-### Open Policy Questions
+### Deferred Full Model Fast Mode
 
-- Should fast mode persist as a settings/profile preference or be session-local?
-- Should it be a simple thinking-level toggle first, then model policy later?
-- How should fast mode interact with scoped model cycling and profile defaults?
-- Should there also be a **Deep mode** or **Review mode** action, or is fast mode enough?
+Full `model.fast_mode` remains deferred until a remote model policy answers:
+
+- How users configure host-owned fast variants without exposing raw model catalogs over Iroh.
+- Whether model-speed preferences live in a profile, a named policy, or session state.
+- How to restore scoped model/profile defaults after a temporary fast model switch.
+- Whether **Deep mode** or review-specific model policy should be separate actions.
 
 ## Review Cards Design
 
@@ -852,6 +888,7 @@ Several built-in actions already have RPC equivalents. The action layer can init
 | Set session name | `set_session_name` in local RPC | `session.rename` |
 | Set model | `set_model` in local RPC | `model.set` |
 | Get models | `get_available_models` in local RPC | data source for `model.set` |
+| Fast thinking toggle | `set_thinking_level` in local RPC | `thinking.fast_mode` |
 | Extension command | `prompt` with `/cmd` | `extension.command.*` |
 | Skill | `prompt` with `/skill:name` | `skill.*` |
 | Prompt template | `prompt` with `/template` | `prompt.template.*` |
@@ -1091,7 +1128,7 @@ Compatibility rules:
    - `review.pr`
    - `review.commit`
 2. Add native action descriptors for review cards.
-3. Add `model.fast_mode` or a smaller first version such as `thinking.fast_mode`.
+3. Add `thinking.fast_mode` as the first model-speed action; defer full `model.fast_mode`.
 4. Expose model/thinking state changes as action state updates.
 5. Add iOS cards for Review and Fast mode.
 
@@ -1150,12 +1187,14 @@ Compatibility rules:
 - Prompt template and skill actions invoke through host expansion, not client expansion.
 - `invoke_ui_action` for a prompt-like action returns success on acceptance and streams normal agent events.
 - Actions that complete synchronously do not require `agent_end`.
+- `thinking.fast_mode` lowers/restores thinking with default persistence disabled and does not mutate model, scoped-model, profile, or global default settings.
 
 ### Host Integration Tests
 
 - TUI `/compact` and RPC `invoke_ui_action(context.compact)` use the same core handler.
 - TUI `/review uncommitted` and RPC `invoke_ui_action(review.uncommitted)` produce equivalent session behavior.
 - Iroh remote rejects local-only actions.
+- Iroh remote exposes `thinking.fast_mode` only through the action allowlist and never exposes direct model listing/selection as part of the descriptor or response.
 - Iroh outbound sanitizer applies to action responses and extension UI events.
 - Revoked or unauthorized clients cannot invoke actions.
 - Session switch/reload causes action descriptors to refresh.
@@ -1170,6 +1209,7 @@ Compatibility rules:
 - Prompt-like action keeps streaming state until `agent_end`.
 - Toggle state updates from response or refresh.
 - Disabled actions render with reason and do not invoke.
+- Fast mode toggle updates thinking state while leaving the displayed model unchanged.
 
 ### Manual iOS Smoke
 
@@ -1177,7 +1217,7 @@ Compatibility rules:
 2. Open the native Actions page.
 3. Confirm primary cards load.
 4. Tap Review uncommitted and verify a review run starts.
-5. Tap Fast mode and verify model/thinking state updates.
+5. Tap Fast mode and verify thinking state updates while the model remains unchanged.
 6. Invoke a skill from the command palette.
 7. Invoke an extension command that emits a notification.
 8. Disconnect/reconnect and verify actions refresh.
@@ -1207,11 +1247,13 @@ The design should not require a flag day.
 2. **Fast mode persistence**
    - Session-local, profile-level, or global setting.
    - Proposed first implementation: session-local or profile-level depending on existing settings model; avoid global surprises.
+   - Resolved 2026-06-23: v1 `thinking.fast_mode` is session-local and non-persistent. It must not change profile/global defaults or scoped model settings.
 
 3. **Remote model selection**
    - Current remote allowlist blocks `get_available_models` and `set_model`.
    - Need a separate remote-safe model policy review before exposing full model/provider metadata.
    - Fast mode may be safer than raw model selection because the host keeps provider policy private.
+   - Resolved 2026-06-23: direct remote model listing/selection stays blocked. V1 exposes only `thinking.fast_mode`, which does not switch models or expose model catalog metadata. Full `model.fast_mode` is deferred pending separate model policy.
 
 4. **Action result detail**
    - Keep invocation response small and rely on transcript/state events, or return richer action-specific results.

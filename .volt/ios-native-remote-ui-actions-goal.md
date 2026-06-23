@@ -283,10 +283,10 @@ and recorded without overclaiming.
     <evidence>Resolved 2026-06-23: design documents `invoke_ui_action` response statuses, `agent_end` waiting rules, synchronous pending-state clearing, descriptor streaming policy, host-side stale enabled rechecks, and later host/Iroh/iOS test names; verified with `git diff --check -- .volt/ios-native-remote-ui-actions-design.md .volt/ios-native-remote-ui-actions-goal.md` and pre-commit `npm run check`; commit 13e7b9ea8277860ed71a88154d02c0710382574d.</evidence>
   </item>
 
-  <item ref="A.4" status="open" prereq="A.1" type="decision">
+  <item ref="A.4" status="resolved" prereq="A.1" type="decision">
     <title>Define Fast mode policy boundaries</title>
     <acceptance>The design document states whether Fast mode is in v1, whether it is session-local/profile/global, whether it changes thinking level only or may switch models, how it interacts with scoped models/profile defaults, and what metadata iOS may display. If deferred, the design records a smaller substitute such as `thinking.fast_mode` or names the blocker.</acceptance>
-    <evidence></evidence>
+    <evidence>Resolved 2026-06-23: design defers full `model.fast_mode` and records v1 `thinking.fast_mode` as session-local, non-persistent, thinking-level-only, scoped/profile-safe, and bounded in iOS-visible metadata; verified with `git diff --check -- .volt/ios-native-remote-ui-actions-design.md .volt/ios-native-remote-ui-actions-goal.md` and pre-commit `npm run check`; commit pending.</evidence>
   </item>
 
   <item ref="A.5" status="open" prereq="A.1" type="decision">
