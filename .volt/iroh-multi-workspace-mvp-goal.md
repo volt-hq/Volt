@@ -323,10 +323,10 @@ workspace-selection smoke, or explicitly document why that evidence is blocked.
 </group>
 
 <group n="3" title="iOS app implementation">
-  <item ref="C.1" status="open" prereq="A.3,B.4">
+  <item ref="C.1" status="resolved" prereq="A.3,B.4">
     <title>Refresh saved host workspace names from verified host metadata</title>
     <acceptance>The app parses `remoteHost.workspaceNames`, updates `SavedHostRecord.workspaceNames` after verified host connection without changing host identity, preserves the current/primary workspace, and tests cover metadata refresh and missing metadata fallback.</acceptance>
-    <evidence></evidence>
+    <evidence>2026-06-23: Added iOS saved-host metadata refresh from verified `get_state.remoteHost.workspaceNames`, preserving saved host identity and primary workspace while falling back to existing workspace names when metadata omits them; verification: `swift test --filter VoltSessionLifecycleTests`, full `swift test` from `../volt-app/Packages/VoltClient`, app `git diff --check` for changed Swift files, and Volt `git diff --check -- .volt/iroh-multi-workspace-mvp-design.md .volt/iroh-multi-workspace-mvp-goal.md`; app commit 2399885.</evidence>
   </item>
 
   <item ref="C.2" status="open" prereq="A.3,C.1">

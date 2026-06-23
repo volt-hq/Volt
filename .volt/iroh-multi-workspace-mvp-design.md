@@ -528,6 +528,15 @@ When the app receives `get_state.remoteHost.workspaceNames`, it should update th
 
 If metadata does not include `workspaceNames`, keep the existing list.
 
+Resolved 2026-06-23: the iOS session model parses
+`get_state.remoteHost.workspaceNames` after a verified Iroh connection, carries
+the names in `ConnectedHostSummary`, and refreshes the saved host record while
+preserving the saved `hostNodeId`, `primaryWorkspace`, `endpointTicket`,
+`relayMode`, and host display name. The refreshed record keeps the existing
+workspace list when metadata omits `workspaceNames`, includes the current
+connected workspace, updates `lastConnectedAt`, and skips persistence if host
+metadata would change the saved host identity.
+
 ### Workspace picker
 
 Settings should show a workspace picker when a saved host has more than one workspace name.
