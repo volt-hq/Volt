@@ -539,19 +539,52 @@ Minimum UI:
 - Picker values: `savedHostRecord.workspaceNames`
 - Current selection: `savedHostRecord.primaryWorkspace`
 
-Changing selection should:
+Resolved 2026-06-23: the Settings workspace picker is a saved-host control, not
+a free-form path field. It is visible only when `workspaceNames` has more than
+one entry. With one workspace, Settings may continue to show the current
+`primaryWorkspace` as read-only text.
+
+Changing selection persists the selected workspace name before any reconnect
+attempt:
 
 1. Create a new `SavedHostRecord` with the selected `primaryWorkspace`.
 2. Preserve `workspaceNames`, `hostNodeId`, `relayMode`, `endpointTicket`, timestamps, and display name.
 3. Clear or regenerate `sanitizedReconnectTicket` so it matches the selected primary workspace.
 4. Save the record.
-5. Reconnect to the saved host using the selected workspace, or show a `Reconnect` action if automatic reconnect is not desired.
+5. Keep the selected primary workspace even if the later reconnect attempt fails.
 
-MVP preference:
+Picker state rules:
 
-- If idle, changing the picker disconnects/reconnects automatically.
-- If connected and streaming, disable the picker or require the user to wait/stop first.
-- If host is offline, allow changing the saved primary workspace locally but keep offline state until retry.
+- Enabled when a saved host exists, multiple workspace names are known, the app
+  is not connecting, and no prompt/agent stream is active.
+- Disabled while `isStreaming` is true. MVP does not show a confirmation dialog
+  or move an active prompt between workspaces; the user waits for completion or
+  stops the stream first.
+- Disabled while a connection or reconnect attempt is already in progress.
+- Selecting the current workspace is a no-op.
+
+Reconnect rules:
+
+- If the app is connected and idle, selection saves the new primary workspace,
+  closes the current Iroh connection, and reconnects to the same saved host
+  using the selected workspace. Host detach/runtime retention for the old
+  workspace remains host-owned behavior.
+- If the app is disconnected but not in a host-offline state, selection saves
+  the new primary workspace and starts saved-host reconnect immediately.
+- If the app is showing `workspace_unavailable` or `workspace_forbidden`,
+  selection saves the new primary workspace and starts saved-host reconnect
+  immediately because the prior failure was workspace-specific.
+- If the app is showing `host_unreachable`, waiting for network, or the saved
+  host is otherwise offline, selection saves the new primary workspace locally
+  but does not auto-retry. The offline issue and Retry action remain visible,
+  and the next Retry uses the newly selected workspace.
+- If the selected workspace later fails with `workspace_unavailable`, the app
+  keeps the saved host and keeps that selected primary workspace so the user can
+  choose another workspace or retry after desktop registration changes.
+
+No extra confirmation dialog is required for MVP. The picker action itself is
+the user's explicit workspace switch request, and the list contains only
+host-verified names from saved metadata.
 
 ### Reconnect with selected workspace
 
@@ -563,6 +596,8 @@ If the selected workspace is unavailable:
 - App keeps the saved host.
 - App marks `savedHostIssue = .workspaceUnavailable`.
 - App keeps the selected primary workspace unless the user selects another workspace.
+- Pair Again is not the primary recovery action for `workspace_unavailable`.
+  Retry and selecting another saved workspace are the intended recoveries.
 
 If the selected workspace is forbidden:
 
@@ -778,9 +813,16 @@ Tasks:
 2. Refresh saved record workspace names after verified connection.
 3. Add method to select primary workspace.
 4. Regenerate or omit stale `sanitizedReconnectTicket` on primary change.
-5. Add Settings picker.
-6. Reconnect on workspace change when safe.
-7. Add tests for refresh, selection, reconnect ticket workspace, unavailable workspace issue, and UI affordance.
+5. Add Settings picker for multiple saved workspace names and keep the read-only
+   workspace row for one saved workspace.
+6. Reconnect on workspace change when safe: connected idle, disconnected saved
+   host, or workspace-specific failure states; do not auto-retry host-offline or
+   waiting-for-network states.
+7. Disable workspace selection while streaming or connecting; do not add a
+   confirmation dialog for MVP.
+8. Add tests for refresh, selection, reconnect ticket workspace, unavailable
+   workspace issue, offline selection persistence, streaming/connecting disabled
+   states, connected-idle reconnect, and Settings UI affordance.
 
 ### Phase 6: Docs and smoke validation
 
@@ -851,7 +893,13 @@ Required:
 - Selecting a workspace regenerates or omits stale reconnect envelope.
 - Reconnect after selection sends selected workspace.
 - `workspace_unavailable` keeps saved host and selected workspace.
-- Workspace selection is disabled or guarded while streaming.
+- Selecting another workspace from `workspace_unavailable` triggers reconnect
+  when not streaming or connecting.
+- Offline workspace selection persists the selected primary workspace and does
+  not auto-retry until the user taps Retry.
+- Connected idle workspace selection disconnects/reconnects using the selected
+  workspace.
+- Workspace selection is disabled while streaming or connecting.
 
 ### Scenario/manual smoke
 
@@ -899,7 +947,11 @@ These should be resolved before implementation or explicitly accepted as MVP con
      current state through the state manager and validate only the selected
      workspace path.
 3. Should selecting a workspace in the app auto-reconnect immediately?
-   - Preferred MVP: yes when idle, disabled while streaming.
+   - Resolved 2026-06-23: yes for safe idle states. Connected idle,
+     disconnected saved-host, and workspace-specific failure states reconnect
+     after persisting the selected primary workspace. Host-offline and
+     waiting-for-network states persist the selection locally and wait for Retry.
+     Streaming and connecting states disable the picker.
 4. Should `--register-workspace` print JSON for scripting or plain text for humans?
    - Preferred MVP: plain text is enough; JSON can be added later if needed.
 5. Should host startup validate all registered paths or only validate a selected path on connection?
