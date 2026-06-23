@@ -314,10 +314,13 @@ Current behavior compares `hello.workspace` to one engine workspace. MVP behavio
 
 1. Load or access the current registered workspace list.
 2. Find a workspace whose `name` equals `hello.workspace`.
-3. If none exists, reject with `workspace_unavailable`.
-4. If the client is revoked, reject with `client_revoked` before allowing reconnect.
-5. If the client is paired and workstation-scoped, authorize it for the selected workspace.
-6. If the client is an active legacy record with a non-wildcard
+3. Validate the selected workspace path still exists, is a directory, and can be
+   canonicalized before returning handshake success or starting a runtime.
+4. If no workspace name exists or the selected workspace path is stale,
+   deleted, a file, or otherwise unusable, reject with `workspace_unavailable`.
+5. If the client is revoked, reject with `client_revoked` before allowing reconnect.
+6. If the client is paired and workstation-scoped, authorize it for the selected workspace.
+7. If the client is an active legacy record with a non-wildcard
    `allowedWorkspaces` list, authorize it for the selected registered workspace
    under the MVP migration rule and normalize the active record to `[]` on
    success.
@@ -327,6 +330,13 @@ workstation-scoped for MVP. `workspace_forbidden` remains reserved for future
 per-client workspace subset grants or malformed legacy states that cannot be
 normalized safely; it is not the normal outcome for old one-workspace preview
 clients selecting a newly registered workspace.
+
+Resolved 2026-06-23: running hosts must not rely on a cached startup workspace
+for handshakes. Each future handshake resolves `hello.workspace` from the current
+state file through the state manager, validates only the selected workspace path,
+and uses that canonical path as the runtime cwd and sanitizer root for the
+connection. Existing active connections and runtimes are not moved when
+registration changes.
 
 ### Pairing tickets
 
@@ -403,14 +413,23 @@ Required behavior:
 - Pair request for registered workspace succeeds.
 - Pair request for unregistered workspace fails with clear error.
 - Pair request does not allow arbitrary paths.
-- Running host should pick up workspaces registered under the same state path without requiring restart if feasible.
+- Running host picks up workspaces registered under the same state path without
+  requiring restart.
+- Pair request for a registered workspace whose path is stale or no longer a
+  directory fails with a clear local error and does not create a ticket.
 
-Preferred MVP implementation:
+Resolved 2026-06-23: on each pair-control request, the running host reads the
+current state through `IrohRemoteHostStateManager`, resolves `request.workspace`
+against `state.workspaces`, validates only that selected workspace path, and
+creates a ticket for the selected name. The host process's endpoint identity and
+relay mode are still supplied by the running process. This keeps
+`--register-workspace` visible to `volt remote pair --workspace <name>` without
+restarting the host.
 
-- On each pair-control request, read current state through `IrohRemoteHostStateManager`.
-- Resolve `request.workspace` against `state.workspaces`.
-- Create ticket for that workspace.
-- The host process's endpoint identity and relay mode are still supplied by the running process.
+The pair-control response shape does not need a new structured outcome for MVP.
+The local error string should include `workspace_unavailable` for stale or
+missing registered paths so CLI users and tests can distinguish it from relay
+mode, unsafe-tool, and control-channel failures.
 
 ## Running Host and Registration Interaction
 
@@ -428,11 +447,19 @@ volt remote host --register-workspace
 Expected MVP behavior:
 
 - The registration command writes the same default state file.
-- The running host sees the new workspace for future pair-control requests and future handshakes.
+- The running host sees the new workspace for future pair-control requests and
+  future handshakes without restart.
 - Existing connected clients may need to reconnect or refresh state before the app UI shows the new workspace.
 - No existing active runtime is moved or restarted by registration.
+- The running host does not eagerly validate every registered workspace on each
+  state change. Only explicit registration input and the selected workspace for
+  a pair-control request or handshake are validated.
 
-If immediate live reload is too costly, the fallback MVP may require host restart after registration. That fallback must be documented, but it is not preferred because it weakens the simple workflow.
+Resolved 2026-06-23: host restart is not part of the MVP workflow for newly
+registered workspaces. Restart remains acceptable as a recovery action for
+unrelated host failures, but a normal registration under the same state path
+must be visible to future pair-control requests and saved-host reconnect
+handshakes in the already-running host.
 
 ## Host Metadata Requirements
 
@@ -605,7 +632,9 @@ Workspace registration is a local desktop action. It assumes the desktop user ha
 
 Use existing stable outcomes where possible:
 
-- `workspace_unavailable`: selected workspace name is not registered or the registered path is no longer usable.
+- `workspace_unavailable`: selected workspace name is not registered, or the
+  registered path is missing, no longer a directory, cannot be canonicalized, or
+  cannot be used as the runtime cwd.
 - `workspace_forbidden`: client is known but not allowed for that workspace. This is reserved for legacy/future per-client restrictions.
 - `client_unknown`: phone identity is not paired with this workstation state.
 - `client_revoked`: phone identity was revoked.
@@ -614,6 +643,11 @@ Use existing stable outcomes where possible:
 - `saved_host_invalid`: local saved host record is malformed.
 
 MVP should not introduce a new outcome for workspace registration.
+
+Resolved 2026-06-23: stale registered paths map to `workspace_unavailable`.
+Remote handshakes return the stable host outcome and keep saved-host recovery in
+the workspace-unavailable path. Local pair-control failures create no ticket and
+report a clear error string containing `workspace_unavailable`.
 
 ## Backward Compatibility and Migration
 
@@ -655,7 +689,10 @@ Tasks:
 4. Validate path exists and is directory.
 5. Store realpath.
 6. Upsert via state manager.
-7. Add tests for cwd, path, `name=path`, state path, invalid path, and update existing name.
+7. Preserve existing workspace `allowedTools` when re-registering a name unless
+   `--allow-tools` is supplied.
+8. Add tests for cwd, path, `name=path`, state path, invalid path, file path,
+   realpath storage, and update existing name.
 
 ### Phase 2: Host multi-workspace authorization
 
@@ -670,18 +707,22 @@ Files likely touched:
 Tasks:
 
 1. Change host engine options from single `workspace` to registered workspace resolver or workspace list.
-2. Resolve `hello.workspace` dynamically.
-3. Return selected workspace in authorization success.
-4. Make new pairings workstation-scoped with `allowedWorkspaces: []`.
-5. Normalize legacy active clients to `allowedWorkspaces: []` on their next
+2. Resolve `hello.workspace` dynamically from the current state on every
+   handshake.
+3. Validate the selected registered path before returning handshake success or
+   starting a runtime.
+4. Return selected workspace in authorization success.
+5. Make new pairings workstation-scoped with `allowedWorkspaces: []`.
+6. Normalize legacy active clients to `allowedWorkspaces: []` on their next
    successful authorization; do not normalize revoked tombstones.
-6. Preserve revocation and pairing-secret semantics.
-7. Add tests for:
+7. Preserve revocation and pairing-secret semantics.
+8. Add tests for:
    - pair in workspace A, reconnect workspace B
    - new pairing persists `allowedWorkspaces: []`
    - legacy active client with `allowedWorkspaces: ["volt"]` can reconnect to
      another registered workspace and is persisted as `[]`
    - unregistered workspace rejected
+   - stale registered workspace path rejected with `workspace_unavailable`
    - revoked legacy client rejected for all workspaces and not normalized
    - consumed/expired pairing behavior unchanged
    - persisted `lastSessionIdByWorkspace` still keyed by selected workspace
@@ -700,8 +741,10 @@ Tasks:
 1. Resolve pair-control workspace from current state.
 2. Allow any registered workspace.
 3. Reject unregistered workspace with a clear error.
-4. Keep relay expectation behavior unchanged.
-5. Add scenario coverage for registering a second workspace and pairing/selecting it.
+4. Reject a registered workspace whose path is stale or not a directory with a
+   `workspace_unavailable` local error and no ticket.
+5. Keep relay expectation behavior unchanged.
+6. Add scenario coverage for registering a second workspace and pairing/selecting it without restarting the host.
 
 ### Phase 4: Host metadata
 
@@ -772,8 +815,12 @@ Required:
 - Re-register same name updates path.
 - Register command respects `--state`.
 - Host auth resolves requested workspace by name.
+- Running host handshakes see workspaces registered after host startup without
+  restart.
 - Paired client can reconnect to a second registered workspace without another secret.
 - Unregistered workspace returns `workspace_unavailable`.
+- Stale, deleted, file, or otherwise unusable registered workspace paths return
+  `workspace_unavailable` on handshake and do not create pair-control tickets.
 - Revoked client cannot use any registered workspace.
 - Pairing ticket for workspace A creates workstation-scoped client grant.
 - New pairing persists active client `allowedWorkspaces: []` while pending ticket
@@ -786,6 +833,9 @@ Required:
 - Same client `lastSessionIdByWorkspace` is independent for workspaces A and B.
 - Pair control can create ticket for any registered workspace.
 - Pair control rejects unknown workspace.
+- Pair control sees a workspace registered after host startup without restart.
+- Pair control rejects a stale registered workspace path with
+  `workspace_unavailable` in the local error.
 - `remoteHost.workspaceNames` contains registered names and no host paths.
 - Outbound sanitizer still redacts paths outside the selected workspace.
 
@@ -845,13 +895,18 @@ These should be resolved before implementation or explicitly accepted as MVP con
      Startup does not blanket-rewrite state, and revoked tombstones are not
      normalized.
 2. Should workspace registration while the host is running be immediately visible without restart?
-   - Preferred MVP: yes, by reading state for control requests and handshakes.
+   - Resolved 2026-06-23: yes. Future pair-control requests and handshakes read
+     current state through the state manager and validate only the selected
+     workspace path.
 3. Should selecting a workspace in the app auto-reconnect immediately?
    - Preferred MVP: yes when idle, disabled while streaming.
 4. Should `--register-workspace` print JSON for scripting or plain text for humans?
    - Preferred MVP: plain text is enough; JSON can be added later if needed.
 5. Should host startup validate all registered paths or only validate a selected path on connection?
-   - Preferred MVP: registration validates paths; connection failures for stale paths return `workspace_unavailable`.
+   - Resolved 2026-06-23: registration validates new input, and pair-control or
+     handshake validates the selected registered path at use time. The host does
+     not eagerly validate every persisted workspace at startup; stale selected
+     paths fail with `workspace_unavailable`.
 
 ## Deferred Future Work
 
