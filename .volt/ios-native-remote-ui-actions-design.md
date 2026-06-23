@@ -728,6 +728,49 @@ Follow-up 2026-06-23: this v1 boundary is not the final preference model. Future
 - The same abstraction should cover Fast mode and model selection. Model selection still needs a separate remote-safe model policy before exposing global or chat-scoped model choices over Iroh.
 - Profiles and scoped models remain authoritative policy inputs. Chat overrides and global defaults must not expose provider secrets, full model catalogs, costs, config paths, or raw profile/scoped-model metadata to iOS.
 
+### Resolved 2026-06-23: Chat-Scoped Defaults and Model Preference Policy
+
+E.5 decision: the long-term model for Fast mode and model selection is a shared host-owned preference descriptor layer, not separate iOS-special cases and not raw settings/model RPC. V1 `thinking.fast_mode` remains the shipped behavior: session-local, non-persistent, thinking-only, and remote-safe. Persisted global defaults and per-chat overrides are deliberately deferred until the preference descriptor layer and remote-safe model policy exist.
+
+Preference abstraction:
+
+- A native-controllable preference has a stable key, global default value, optional chat override, effective value, inheritance source, allowed values/actions, reset-to-default behavior, disabled reason, and update events.
+- Global defaults are edited from native General settings through host-owned preference actions. If an active profile is selected, writes must follow the existing profile-aware settings behavior; otherwise they write the normal user default. Project settings remain host-controlled unless a separate project-settings policy allows remote writes.
+- Per-chat overrides are stored with the chat/session, not in global or project settings. Switching conversations restores that conversation's overrides; new conversations inherit the current effective defaults.
+- A chat whose override is unset always inherits the latest effective global/profile/scoped default. A chat with an explicit override keeps that override until the user resets it, even if another chat or the global default changes.
+- Preference updates emit the same kind of host-owned state/action invalidation used by UI actions so iOS refreshes visible cards, chat controls, and General settings without synthesizing slash commands.
+
+Precedence and constraints:
+
+- Host launch flags, project trust, provider auth, profile overlays, project settings, and scoped model constraints remain policy inputs that can constrain or disable native preference changes.
+- Scoped models constrain the available model set. A chat or global default model can only select a host-advertised allowed model option; if the stored option becomes unavailable, the host reports an inherited/fallback effective value and a bounded reason.
+- Profile switches and resource reloads recompute allowed values and effective values. Existing chat overrides are revalidated rather than blindly applied.
+- For continuing or resumed chats, persisted chat/session model state remains authoritative unless the user resets the chat override or host policy invalidates it.
+
+Fast mode preference behavior:
+
+- Future global Fast mode default uses a boolean default such as "start new chats in Fast mode when supported."
+- Future per-chat Fast mode uses a boolean override with an inherited state. Multiple conversations can therefore independently have Fast mode on while other conversations inherit the global default.
+- Applying effective Fast mode still uses the host-owned lower-thinking policy from `thinking.fast_mode`; unsupported models expose a disabled or ineffective state with a bounded reason rather than leaking provider capability matrices.
+
+Model selection preference behavior:
+
+- Model selection uses the same preference shape as Fast mode, but it is blocked over Iroh until a remote-safe model option policy is designed.
+- The model policy must expose only host-approved option ids and display labels needed for a native picker. It must not expose full model catalogs, auth state, costs, raw provider metadata, profile contents, scoped-model patterns, or config paths.
+- Setting a chat model override changes only that chat/session's model preference. Setting a global default model changes only future inherited chats, subject to profile/scoped constraints.
+
+iOS-visible metadata:
+
+- iOS may display the preference label, effective value label, inherited versus chat-specific state, reset availability, disabled reason, and host-approved option labels.
+- iOS must not display profile contents, project/user config paths, provider secrets, raw `enabledModels` patterns, full model catalogs, costs, or auth internals.
+
+Future unlock conditions:
+
+- Add typed preference descriptors or a settings scope to the UI action layer.
+- Add session metadata storage for chat overrides and migration behavior for existing sessions.
+- Add host tests for inheritance, per-chat independence, profile/scoped precedence, invalid stored values, and no persistence from v1 `thinking.fast_mode`.
+- Add Iroh allowlist and sanitizer tests before exposing any model preference surface remotely.
+
 Policy:
 
 - Enabling captures the current thinking level as the restore level, then applies the lowest-latency supported level that lowers the current model's thinking setting.
@@ -1593,11 +1636,11 @@ The design should not require a flag day.
 
 9. **Chat-scoped defaults and model preference abstraction**
    - V1 `thinking.fast_mode` is a session-local non-persistent overlay.
-   - Future behavior should use a shared host-owned preference abstraction for Fast mode and model selection.
+   - Resolved 2026-06-23: future behavior uses a shared host-owned preference descriptor layer for Fast mode and model selection.
    - Native General settings can edit global defaults such as Fast mode on by default or a default model; chat settings/actions can edit a per-chat override.
    - Multiple conversations may have independent Fast mode and model overrides. Chats without an explicit override inherit the effective global/profile/scoped default.
-   - Preference metadata should expose the effective value, whether it is inherited or chat-specific, allowed host-owned actions, and reset-to-default behavior.
-   - Profiles and scoped models remain policy inputs and may constrain available values. Model selection needs a separate remote-safe policy before exposing global or chat-scoped selection over Iroh.
+   - Preference metadata exposes the effective value, whether it is inherited or chat-specific, allowed host-owned actions, reset-to-default behavior, and bounded disabled reasons.
+   - Profiles and scoped models remain policy inputs and may constrain available values. Model selection remains blocked over Iroh until a separate remote-safe model option policy exists.
 
 ## Acceptance Criteria
 

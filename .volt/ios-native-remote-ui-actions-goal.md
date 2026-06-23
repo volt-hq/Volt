@@ -405,10 +405,10 @@ and recorded without overclaiming.
     <evidence>Resolved 2026-06-23: after the E.3 `registerAction()` defer, the iOS Actions tab now renders projected extension command descriptors in Extensions groups with safe source/provenance/slash badges, disabled-state handling, and normal `invoke_ui_action` dispatch; the demo transport exposes enabled and disabled extension commands and handles the mock command terminally. Verified with `swift test --filter MockVoltTransportTests`, `swift test --filter XcodeProjectConfigurationTests`, `swift test` from `../volt-app/Packages/VoltClient`, XcodeBuildMCP `test_sim`, `xcodebuild -scheme Volt -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=27.0' test`, and manual iPhone 17 Pro iOS 27.0 Demo smoke (`/tmp/volt-e4-actions-extension.png`, `/tmp/volt-e4-actions-after-mock.png`); app commit a8d699dc83b4808651aaded0e8c628e6ab3aeb16.</evidence>
   </item>
 
-  <item ref="E.5" status="open" prereq="D.4,E.2" type="decision">
+  <item ref="E.5" status="resolved" prereq="D.4,E.2" type="decision">
     <title>Define chat-scoped and default Fast mode/model selection policy</title>
     <acceptance>The design decides the shared preference abstraction for Fast mode and model selection, including global defaults in native General settings, per-chat overrides, inherited effective values, reset-to-default behavior, multiple conversations with independent Fast mode/model state, profile/scoped-model precedence, and remote-safe iOS metadata. If implementation is deferred, the design records the smaller v1 behavior and future unlock conditions.</acceptance>
-    <evidence></evidence>
+    <evidence>Resolved 2026-06-23: design records the shared host-owned preference descriptor decision for future global defaults and per-chat Fast mode/model overrides, keeps v1 `thinking.fast_mode` unchanged as session-local and non-persistent, defines inheritance/reset/profile/scoped-model precedence and remote-safe iOS metadata, and defers remote model selection until a model option policy, session metadata storage, and Iroh sanitizer/allowlist tests exist. Verified with `git diff --check -- .volt/ios-native-remote-ui-actions-design.md .volt/ios-native-remote-ui-actions-goal.md`; commit pending.</evidence>
   </item>
 </group>
 
