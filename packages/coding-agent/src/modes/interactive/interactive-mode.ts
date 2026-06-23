@@ -77,6 +77,8 @@ import {
 	BUILTIN_HOST_ACTION_REGISTRY,
 	CONTEXT_COMPACT_SLASH_ALIAS,
 	type HostActionInvocationContext,
+	REVIEW_BRANCH_ACTION_ID,
+	REVIEW_UNCOMMITTED_ACTION_ID,
 	SESSION_NEW_SLASH_ALIAS,
 	SESSION_RENAME_SLASH_ALIAS,
 } from "../../core/host-actions.ts";
@@ -88,16 +90,16 @@ import { type ConfiguredPackage, DefaultPackageManager } from "../../core/packag
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import {
-	formatReviewForNewSession,
+	formatReviewWorkflowSummary,
 	listLocalBranches,
 	listRecentCommits,
-	type ParsedReview,
 	parseReviewCommandArgs,
+	REMOTE_REVIEW_TOOL_NAMES,
 	REVIEW_USAGE,
 	type ResolvedReview,
 	type ReviewTarget,
-	resolveReviewTarget,
-	runReview,
+	type ReviewWorkflowHooks,
+	runReviewWorkflow,
 } from "../../core/review.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { type SessionContext, SessionManager } from "../../core/session-manager.ts";
@@ -2653,6 +2655,12 @@ export class InteractiveMode {
 			renameSession: (name) => {
 				this.session.setSessionName(name);
 			},
+			runReviewAction: (target, reviewOptions) =>
+				this.runInteractiveReviewWorkflow(target, {
+					tools: reviewOptions.remote ? REMOTE_REVIEW_TOOL_NAMES : this.getReviewToolsForRun(),
+					requireConfirmation: reviewOptions.requireConfirmation,
+					requireProjectTrust: reviewOptions.remote,
+				}),
 		};
 	}
 
@@ -6915,20 +6923,6 @@ export class InteractiveMode {
 		this.showStatus(`Review tools saved: ${selected.join(", ")}`);
 	}
 
-	private async resolveReviewModel(): Promise<Model<any> | undefined> {
-		const reference = this.settingsManager.getReviewModel();
-		if (reference) {
-			this.session.modelRegistry.refresh();
-			const available = this.session.modelRegistry.getAvailable();
-			const match = findExactModelReferenceMatch(reference, available);
-			if (match) {
-				return match;
-			}
-			this.showWarning(`reviewModel "${reference}" not found or not authenticated; using the current model.`);
-		}
-		return this.session.model;
-	}
-
 	private async handleReviewCommand(argsText: string): Promise<void> {
 		if (this.session.isStreaming || this.session.isCompacting) {
 			this.showWarning("Wait for the current response to finish before starting a review.");
@@ -6962,40 +6956,31 @@ export class InteractiveMode {
 			target = { kind: "commit", sha };
 		}
 
-		const resolution = await resolveReviewTarget(target, this.sessionManager.getCwd());
-		if ("error" in resolution) {
-			this.showError(`${resolution.error} ${REVIEW_USAGE}`);
+		if (target.kind === "uncommitted") {
+			await this.invokeReviewHostAction(REVIEW_UNCOMMITTED_ACTION_ID, {});
+			return;
+		}
+		if (target.kind === "branch") {
+			await this.invokeReviewHostAction(REVIEW_BRANCH_ACTION_ID, { base: target.base });
 			return;
 		}
 
-		const model = await this.resolveReviewModel();
-		if (!model) {
-			this.showError("No model available for review. Use /model to select one.");
-			return;
-		}
-
-		// Re-check: a prompt submitted while the target/model were being resolved
-		// (selectors, git/gh subprocesses) may have started streaming. Starting the
-		// review now would later tear down that session and silently abort the turn.
-		if (this.session.isStreaming || this.session.isCompacting) {
-			this.showWarning("Wait for the current response to finish before starting a review.");
-			return;
-		}
-
-		const result = await this.runBlockingReview(resolution, model, this.getReviewToolsForRun());
-		if (!result) {
-			return;
-		}
-
-		await this.startPostReviewSession(resolution, result);
+		await this.runInteractiveReviewWorkflow(target, {
+			tools: this.getReviewToolsForRun(),
+			requireConfirmation: false,
+			requireProjectTrust: false,
+		});
 	}
 
-	/** Run the review with a blocking, cancellable loader in place of the editor. */
-	private async runBlockingReview(
-		resolution: ResolvedReview,
-		model: Model<any>,
-		tools: string[],
-	): Promise<{ raw: string; parsed?: ParsedReview } | undefined> {
+	private async invokeReviewHostAction(actionId: string, args: Record<string, unknown>): Promise<void> {
+		try {
+			await BUILTIN_HOST_ACTION_REGISTRY.invoke(actionId, this.createHostActionContext(), args);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private createReviewWorkflowHooks(resolution: ResolvedReview, model: Model<any>): ReviewWorkflowHooks {
 		const baseMessage = `Reviewing ${resolution.description} with ${model.id}...`;
 		const loader = new BorderedLoader(this.ui, theme, baseMessage);
 		this.editorContainer.clear();
@@ -7016,80 +7001,57 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		};
 
-		try {
-			const result = await runReview({
-				cwd: this.sessionManager.getCwd(),
-				agentDir: this.runtimeHost.services.agentDir,
-				model,
-				thinkingLevel: this.session.thinkingLevel,
-				authStorage: this.session.modelRegistry.authStorage,
-				modelRegistry: this.session.modelRegistry,
-				settingsManager: this.settingsManager,
-				resolved: resolution,
-				parentResourceLoader: this.session.resourceLoader,
-				tools,
-				signal: abortController.signal,
-				onProgress: (message) => {
-					loader.setMessage(`${baseMessage} ${message}`);
-					this.ui.requestRender();
-				},
-			});
-
-			restoreEditor();
-
-			if (result.aborted || abortController.signal.aborted) {
-				this.showStatus("Review cancelled");
-				return undefined;
-			}
-			if (result.errorMessage) {
-				this.showError(`Review failed: ${result.errorMessage}`);
-				return undefined;
-			}
-			return { raw: result.raw, parsed: result.parsed };
-		} catch (error) {
-			restoreEditor();
-			this.showError(`Review failed: ${error instanceof Error ? error.message : String(error)}`);
-			return undefined;
-		}
+		return {
+			signal: abortController.signal,
+			onProgress: (message) => {
+				loader.setMessage(`${baseMessage} ${message}`);
+				this.ui.requestRender();
+			},
+			cleanup: restoreEditor,
+		};
 	}
 
-	/** Start a fresh session seeded only with the review findings. */
-	private async startPostReviewSession(
-		resolution: ResolvedReview,
-		result: { raw: string; parsed?: ParsedReview },
-	): Promise<void> {
-		const reviewMessage = {
-			customType: "review",
-			content: formatReviewForNewSession(resolution, result.parsed, result.raw),
-			display: true,
-			details: { target: resolution.description, findings: result.parsed?.findings ?? [] },
-		};
-
+	private async runInteractiveReviewWorkflow(
+		target: ReviewTarget,
+		options: { tools: readonly string[]; requireConfirmation: boolean; requireProjectTrust: boolean },
+	): Promise<Awaited<ReturnType<NonNullable<HostActionInvocationContext["runReviewAction"]>>>> {
 		try {
-			const newSessionResult = await this.runtimeHost.newSession({
-				withSession: async (ctx) => {
-					await ctx.sendMessage(reviewMessage);
-				},
+			const result = await runReviewWorkflow({
+				target,
+				cwd: this.sessionManager.getCwd(),
+				agentDir: this.runtimeHost.services.agentDir,
+				session: this.session,
+				newSession: (newSessionOptions) => this.runtimeHost.newSession(newSessionOptions),
+				authStorage: this.session.modelRegistry.authStorage,
+				settingsManager: this.settingsManager,
+				tools: options.tools,
+				requireConfirmation: options.requireConfirmation,
+				requireProjectTrust: options.requireProjectTrust,
+				confirm: ({ title, message }) => this.showExtensionConfirm(title, message),
+				onReviewModelWarning: (message) => this.showWarning(message),
+				onBeforeReview: (resolution, model) => this.createReviewWorkflowHooks(resolution, model),
 			});
-			if (newSessionResult.cancelled) {
-				// An extension blocked the session switch; keep the findings in the current session.
-				await this.session.sendCustomMessage(reviewMessage);
+
+			if (result.status === "cancelled") {
+				this.showStatus("Review cancelled");
+				return result;
+			}
+
+			if (result.sessionSwitchCancelled) {
 				this.showStatus("Review complete (session switch was cancelled; findings added to this session)");
-				return;
+				return result;
 			}
 			this.renderCurrentSessionState();
-			const findingCount = result.parsed?.findings.length;
-			const summary =
-				findingCount === undefined
-					? "Review complete."
-					: findingCount === 0
-						? "Review complete: no issues found."
-						: `Review complete: ${findingCount} finding${findingCount === 1 ? "" : "s"}.`;
 			this.showStatus(
-				`${summary} This is a fresh session seeded with the review. Tell me which findings to fix (e.g. "fix 1 and 3").`,
+				`${formatReviewWorkflowSummary(result)} This is a fresh session seeded with the review. Tell me which findings to fix (e.g. "fix 1 and 3").`,
 			);
-		} catch (error: unknown) {
-			await this.handleFatalRuntimeError("Failed to create session", error);
+			return result;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.showError(
+				message.includes("git") || message.includes("repository") ? `${message} ${REVIEW_USAGE}` : message,
+			);
+			return { status: "cancelled" };
 		}
 	}
 

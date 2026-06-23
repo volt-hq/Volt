@@ -1,9 +1,12 @@
+import { tmpdir } from "node:os";
 import { describe, expect, test, vi } from "vitest";
 import type { ExtensionBindings, PromptOptions } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { ResolvedCommand } from "../src/core/extensions/types.ts";
 import {
 	CONTEXT_COMPACT_ACTION_ID,
+	REVIEW_BRANCH_ACTION_ID,
+	REVIEW_UNCOMMITTED_ACTION_ID,
 	RUN_CANCEL_ACTION_ID,
 	SESSION_NEW_ACTION_ID,
 	SESSION_NEW_SLASH_ALIAS,
@@ -210,7 +213,12 @@ describe("Iroh remote RPC filter", () => {
 			allowed: true,
 			command: invocation,
 		});
-		for (const action of [SESSION_NEW_ACTION_ID, RUN_CANCEL_ACTION_ID]) {
+		for (const action of [
+			SESSION_NEW_ACTION_ID,
+			RUN_CANCEL_ACTION_ID,
+			REVIEW_UNCOMMITTED_ACTION_ID,
+			REVIEW_BRANCH_ACTION_ID,
+		]) {
 			const builtInInvocation = {
 				id: `${action}-1`,
 				type: "invoke_ui_action",
@@ -673,16 +681,36 @@ describe("runRpcMode", () => {
 			const skillAction = actions.find((action) => action.source === "skill");
 			const newSessionAction = actions.find((action) => action.id === SESSION_NEW_ACTION_ID);
 			const cancelAction = actions.find((action) => action.id === RUN_CANCEL_ACTION_ID);
+			const reviewChangesAction = actions.find((action) => action.id === REVIEW_UNCOMMITTED_ACTION_ID);
+			const reviewBranchAction = actions.find((action) => action.id === REVIEW_BRANCH_ACTION_ID);
 			expect(actions.find((action) => action.id === CONTEXT_COMPACT_ACTION_ID)).toBeUndefined();
 			expect(actions.find((action) => action.id === SESSION_RENAME_ACTION_ID)).toBeUndefined();
 			if (!extensionAction || !promptAction || !skillAction) {
 				throw new Error("expected remote extension, prompt, and skill actions");
 			}
-			if (!newSessionAction || !cancelAction) {
+			if (!newSessionAction || !cancelAction || !reviewChangesAction || !reviewBranchAction) {
 				throw new Error("expected remote-safe built-in actions");
 			}
 			expect(newSessionAction.remoteSafe).toBe(true);
 			expect(cancelAction.remoteSafe).toBe(true);
+			expect(reviewChangesAction).toEqual(
+				expect.objectContaining({
+					category: "review",
+					presentation: expect.objectContaining({ kind: "card", group: "Review" }),
+					requiresConfirmation: true,
+					remoteSafe: true,
+					slash: { name: "review", example: "/review uncommitted" },
+				}),
+			);
+			expect(reviewBranchAction).toEqual(
+				expect.objectContaining({
+					category: "review",
+					presentation: expect.objectContaining({ kind: "card", group: "Review" }),
+					requiresConfirmation: true,
+					remoteSafe: true,
+					slash: { name: "review", example: "/review branch [base]" },
+				}),
+			);
 			await expect(client.invokeUiAction(extensionAction.id, { args: { arguments: "prod" } })).resolves.toEqual({
 				action: extensionAction.id,
 				status: "handled",
@@ -815,6 +843,38 @@ describe("createInProcessRpcClient", () => {
 					remoteSafe: false,
 					slash: { name: "name", example: "/name <name>" },
 				}),
+				expect.objectContaining({
+					id: REVIEW_UNCOMMITTED_ACTION_ID,
+					label: "Review changes",
+					source: "builtin",
+					category: "review",
+					presentation: expect.objectContaining({ kind: "card", group: "Review" }),
+					enabled: false,
+					remoteSafe: true,
+					requiresConfirmation: true,
+					slash: { name: "review", example: "/review uncommitted" },
+				}),
+				expect.objectContaining({
+					id: REVIEW_BRANCH_ACTION_ID,
+					label: "Review branch",
+					source: "builtin",
+					category: "review",
+					presentation: expect.objectContaining({ kind: "card", group: "Review" }),
+					enabled: false,
+					remoteSafe: true,
+					requiresConfirmation: true,
+					slash: { name: "review", example: "/review branch [base]" },
+				}),
+			]);
+			await expect(client.getUiActions("primary")).resolves.toEqual([
+				expect.objectContaining({
+					id: REVIEW_UNCOMMITTED_ACTION_ID,
+					presentation: expect.objectContaining({ kind: "card" }),
+				}),
+				expect.objectContaining({
+					id: REVIEW_BRANCH_ACTION_ID,
+					presentation: expect.objectContaining({ kind: "card" }),
+				}),
 			]);
 			await expect(client.invokeUiAction(SESSION_NEW_ACTION_ID, { args: {} })).resolves.toEqual({
 				action: SESSION_NEW_ACTION_ID,
@@ -848,8 +908,35 @@ describe("createInProcessRpcClient", () => {
 				message: "Session name set: D.2",
 			});
 			expect(setSessionName).toHaveBeenCalledWith("D.2");
-			await expect(client.invokeUiAction("review.uncommitted", { args: {} })).rejects.toThrow(
-				"UI action not available: review.uncommitted",
+			await expect(client.invokeUiAction(REVIEW_UNCOMMITTED_ACTION_ID, { args: {} })).rejects.toThrow(
+				"Review is not available while the agent is streaming",
+			);
+		} finally {
+			await client.stop();
+		}
+		expect(dispose).toHaveBeenCalledOnce();
+	});
+
+	test("routes review action invocation through RPC built-in actions", async () => {
+		const dispose = vi.fn(async () => {});
+		const runtimeHost = createRuntimeHost(dispose, async () => {}, { cwd: tmpdir() });
+		const client = await createInProcessRpcClient(runtimeHost);
+
+		try {
+			const actions = await client.getUiActions("all");
+			expect(actions.find((action) => action.id === REVIEW_UNCOMMITTED_ACTION_ID)).toEqual(
+				expect.objectContaining({
+					enabled: true,
+					presentation: expect.objectContaining({ kind: "card", group: "Review" }),
+					requiresConfirmation: true,
+					remoteSafe: true,
+				}),
+			);
+			await expect(client.invokeUiAction(REVIEW_UNCOMMITTED_ACTION_ID, { args: {} })).rejects.toThrow(
+				"Not inside a git repository.",
+			);
+			await expect(client.invokeUiAction(REVIEW_BRANCH_ACTION_ID, { args: { base: "main" } })).rejects.toThrow(
+				"Not inside a git repository.",
 			);
 		} finally {
 			await client.stop();
@@ -906,6 +993,8 @@ describe("createInProcessRpcClient", () => {
 				RUN_CANCEL_ACTION_ID,
 				CONTEXT_COMPACT_ACTION_ID,
 				SESSION_RENAME_ACTION_ID,
+				REVIEW_UNCOMMITTED_ACTION_ID,
+				REVIEW_BRANCH_ACTION_ID,
 			]);
 			expect(dynamicActions).toHaveLength(4);
 			expect(dynamicActions.map((action) => action.id)).toEqual([
@@ -935,7 +1024,10 @@ describe("createInProcessRpcClient", () => {
 			expect(dynamicActions[2].args).toEqual([
 				expect.objectContaining({ name: "arguments", type: "string", hint: "paste failing test output" }),
 			]);
-			expect(await client.getUiActions("primary")).toEqual([]);
+			expect(await client.getUiActions("primary")).toEqual([
+				expect.objectContaining({ id: REVIEW_UNCOMMITTED_ACTION_ID }),
+				expect.objectContaining({ id: REVIEW_BRANCH_ACTION_ID }),
+			]);
 
 			const serialized = JSON.stringify(actions);
 			expect(serialized).not.toContain(sensitiveRoot);
@@ -1233,8 +1325,10 @@ function createRuntimeHost(
 	bindExtensions: (bindings: ExtensionBindings) => Promise<void> = async () => {},
 	resources: {
 		abort?: () => Promise<void>;
+		agentDir?: string;
 		compact?: (customInstructions?: string) => Promise<ReturnType<typeof createCompactionResult>>;
 		commands?: ResolvedCommand[];
+		cwd?: string;
 		isCompacting?: boolean;
 		isStreaming?: boolean;
 		newSession?: (options?: { parentSession?: string }) => Promise<{ cancelled: boolean }>;
@@ -1244,7 +1338,24 @@ function createRuntimeHost(
 		skills?: Skill[];
 	} = {},
 ): AgentSessionRuntime {
+	const authStorage = {};
+	const modelRegistry = {
+		authStorage,
+		refresh: vi.fn(),
+		getAvailable: vi.fn(() => []),
+	};
+	const settingsManager = {
+		getReviewModel: vi.fn(() => undefined),
+		isProjectTrusted: vi.fn(() => true),
+	};
+	const resourceLoader = {
+		getSkills: vi.fn(() => ({ skills: resources.skills ?? [], diagnostics: [] })),
+	};
 	return {
+		cwd: resources.cwd ?? tmpdir(),
+		services: {
+			agentDir: resources.agentDir ?? tmpdir(),
+		},
 		session: {
 			bindExtensions: vi.fn(bindExtensions),
 			subscribe: vi.fn(() => () => {}),
@@ -1272,9 +1383,10 @@ function createRuntimeHost(
 				getRegisteredCommands: vi.fn(() => resources.commands ?? []),
 			},
 			promptTemplates: resources.prompts ?? [],
-			resourceLoader: {
-				getSkills: vi.fn(() => ({ skills: resources.skills ?? [], diagnostics: [] })),
-			},
+			modelRegistry,
+			settingsManager,
+			resourceLoader,
+			sendCustomMessage: vi.fn(async () => {}),
 			abort: resources.abort ?? vi.fn(async () => {}),
 			compact: resources.compact ?? vi.fn(async () => createCompactionResult()),
 			setSessionName: resources.setSessionName ?? vi.fn(() => {}),

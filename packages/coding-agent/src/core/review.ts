@@ -14,10 +14,12 @@
 import { spawn } from "node:child_process";
 import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
 import type { AssistantMessage, Model } from "@earendil-works/volt-ai";
+import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
 import type { AuthStorage } from "./auth-storage.ts";
 import { createExtensionRuntime } from "./extensions/loader.ts";
-import type { ToolDefinition } from "./extensions/types.ts";
+import type { ReplacedSessionContext, ToolDefinition } from "./extensions/types.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import { findExactModelReferenceMatch } from "./model-resolver.ts";
 import { loadProjectContextFiles, type ResourceLoader } from "./resource-loader.ts";
 import { createAgentSession } from "./sdk.ts";
 import { SessionManager } from "./session-manager.ts";
@@ -35,6 +37,8 @@ export type ReviewTarget =
 
 export const REVIEW_USAGE =
 	"Usage: /review [tools | uncommitted | branch [base] | pr [number] | commit [sha]] (no arguments opens a selector)";
+
+export const REMOTE_REVIEW_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 
 /**
  * Parse the argument text after "/review".
@@ -809,6 +813,197 @@ export interface ReviewRunResult {
 	raw: string;
 	parsed?: ParsedReview;
 	errorMessage?: string;
+}
+
+export interface ReviewWorkflowSession {
+	isStreaming: boolean;
+	isCompacting: boolean;
+	model?: Model<any>;
+	thinkingLevel?: ThinkingLevel;
+	modelRegistry: ModelRegistry;
+	resourceLoader: ResourceLoader;
+	sendCustomMessage<T = unknown>(
+		message: Pick<ReviewCustomMessage<T>, "customType" | "content" | "display" | "details">,
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	): Promise<void>;
+}
+
+interface ReviewCustomMessage<T> {
+	customType: string;
+	content: string;
+	display: boolean;
+	details: T;
+}
+
+export interface ReviewWorkflowHooks {
+	signal?: AbortSignal;
+	onProgress?: (message: string) => void;
+	cleanup?: () => void;
+}
+
+export interface ReviewWorkflowOptions {
+	target: ReviewTarget;
+	cwd: string;
+	agentDir: string;
+	session: ReviewWorkflowSession;
+	newSession: AgentSessionRuntime["newSession"];
+	authStorage: AuthStorage;
+	settingsManager: SettingsManager;
+	tools?: readonly string[];
+	requireProjectTrust?: boolean;
+	requireConfirmation?: boolean;
+	confirm?: (request: { title: string; message: string; resolution: ResolvedReview }) => Promise<boolean>;
+	onBeforeReview?: (
+		resolution: ResolvedReview,
+		model: Model<any>,
+	) => Promise<ReviewWorkflowHooks> | ReviewWorkflowHooks;
+	onReviewModelWarning?: (message: string) => void;
+}
+
+export type ReviewWorkflowResult =
+	| { status: "cancelled"; resolution?: ResolvedReview }
+	| {
+			status: "completed";
+			resolution: ResolvedReview;
+			findingsCount?: number;
+			sessionSwitchCancelled: boolean;
+	  };
+
+export function createReviewConfirmationMessage(resolution: ResolvedReview): string {
+	return [
+		`Review ${resolution.description}?`,
+		"",
+		"Volt will inspect the selected git diff, may read related project files with host-approved read-only tools, consume model tokens, and create a fresh session seeded with the findings.",
+		`Diff command: ${resolution.diffCommand}`,
+	].join("\n");
+}
+
+export function resolveReviewModel(options: {
+	settingsManager: SettingsManager;
+	modelRegistry: ModelRegistry;
+	currentModel?: Model<any>;
+}): { model?: Model<any>; warning?: string } {
+	const reference = options.settingsManager.getReviewModel();
+	if (reference) {
+		options.modelRegistry.refresh();
+		const available = options.modelRegistry.getAvailable();
+		const match = findExactModelReferenceMatch(reference, available);
+		if (match) {
+			return { model: match };
+		}
+		return {
+			model: options.currentModel,
+			warning: `reviewModel "${reference}" not found or not authenticated; using the current model.`,
+		};
+	}
+	return { model: options.currentModel };
+}
+
+export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise<ReviewWorkflowResult> {
+	assertReviewCanStart(options.session);
+	if (options.requireProjectTrust && !options.settingsManager.isProjectTrusted()) {
+		throw new Error("Project trust is required before running a remote review.");
+	}
+
+	const resolution = await resolveReviewTarget(options.target, options.cwd);
+	if ("error" in resolution) {
+		throw new Error(resolution.error);
+	}
+
+	if (options.requireConfirmation) {
+		const confirmed = await options.confirm?.({
+			title: "Review changes",
+			message: createReviewConfirmationMessage(resolution),
+			resolution,
+		});
+		if (!confirmed) {
+			return { status: "cancelled", resolution };
+		}
+	}
+
+	const reviewModel = resolveReviewModel({
+		settingsManager: options.settingsManager,
+		modelRegistry: options.session.modelRegistry,
+		currentModel: options.session.model,
+	});
+	if (reviewModel.warning) {
+		options.onReviewModelWarning?.(reviewModel.warning);
+	}
+	const model = reviewModel.model;
+	if (!model) {
+		throw new Error("No model available for review. Use /model to select one.");
+	}
+
+	assertReviewCanStart(options.session);
+	const hooks = await options.onBeforeReview?.(resolution, model);
+	let result: ReviewRunResult;
+	try {
+		result = await runReview({
+			cwd: options.cwd,
+			agentDir: options.agentDir,
+			model,
+			thinkingLevel: options.session.thinkingLevel,
+			authStorage: options.authStorage,
+			modelRegistry: options.session.modelRegistry,
+			settingsManager: options.settingsManager,
+			resolved: resolution,
+			parentResourceLoader: options.session.resourceLoader,
+			tools: options.tools ? [...options.tools] : undefined,
+			signal: hooks?.signal,
+			onProgress: hooks?.onProgress,
+		});
+	} finally {
+		hooks?.cleanup?.();
+	}
+
+	if (result.aborted || hooks?.signal?.aborted) {
+		return { status: "cancelled", resolution };
+	}
+	if (result.errorMessage) {
+		throw new Error(`Review failed: ${result.errorMessage}`);
+	}
+
+	const reviewMessage = createReviewSeedMessage(resolution, result);
+	const newSessionResult = await options.newSession({
+		withSession: async (ctx: ReplacedSessionContext) => {
+			await ctx.sendMessage(reviewMessage);
+		},
+	});
+	if (newSessionResult.cancelled) {
+		await options.session.sendCustomMessage(reviewMessage);
+	}
+	return {
+		status: "completed",
+		resolution,
+		findingsCount: result.parsed?.findings.length,
+		sessionSwitchCancelled: newSessionResult.cancelled,
+	};
+}
+
+export function formatReviewWorkflowSummary(result: Extract<ReviewWorkflowResult, { status: "completed" }>): string {
+	const findingCount = result.findingsCount;
+	if (findingCount === undefined) {
+		return "Review complete.";
+	}
+	if (findingCount === 0) {
+		return "Review complete: no issues found.";
+	}
+	return `Review complete: ${findingCount} finding${findingCount === 1 ? "" : "s"}.`;
+}
+
+function assertReviewCanStart(session: Pick<ReviewWorkflowSession, "isStreaming" | "isCompacting">): void {
+	if (session.isStreaming || session.isCompacting) {
+		throw new Error("Wait for the current response to finish before starting a review.");
+	}
+}
+
+function createReviewSeedMessage(resolution: ResolvedReview, result: Pick<ReviewRunResult, "raw" | "parsed">) {
+	return {
+		customType: "review",
+		content: formatReviewForNewSession(resolution, result.parsed, result.raw),
+		display: true,
+		details: { target: resolution.description, findings: result.parsed?.findings ?? [] },
+	};
 }
 
 function summarizeToolArgs(args: unknown): string | undefined {

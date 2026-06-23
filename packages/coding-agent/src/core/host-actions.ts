@@ -1,4 +1,5 @@
 import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
+import type { ReviewTarget, ReviewWorkflowResult } from "./review.ts";
 import type {
 	UiActionArgumentDescriptor,
 	UiActionDescriptor,
@@ -28,6 +29,7 @@ export interface HostActionInvocationContext extends HostActionDescriptorContext
 	newSession(options?: HostActionNewSessionOptions): Promise<HostActionNewSessionResult>;
 	afterSessionSwitch?: () => Promise<void>;
 	renameSession(name: string): void;
+	runReviewAction?(target: ReviewTarget, options: HostActionReviewOptions): Promise<ReviewWorkflowResult>;
 }
 
 export type HostActionAvailability =
@@ -52,8 +54,13 @@ export interface HostActionDefinition {
 	streamingBehavior?: UiActionDescriptor["streamingBehavior"];
 	remoteSafe: boolean;
 	slashAliases?: ReadonlyArray<UiActionSlashAlias>;
+	slash?: UiActionSlashAlias;
 	availability?: (context: HostActionDescriptorContext) => HostActionAvailability;
-	handler: (context: HostActionInvocationContext, args: unknown) => Promise<UiActionInvocationResponse>;
+	handler: (
+		context: HostActionInvocationContext,
+		args: unknown,
+		options: HostActionInvokeOptions,
+	) => Promise<UiActionInvocationResponse>;
 }
 
 export interface HostActionInvokeOptions {
@@ -67,13 +74,25 @@ export interface HostActionSlashCommand {
 
 export const CONTEXT_COMPACT_ACTION_ID = "context.compact";
 export const CONTEXT_COMPACT_SLASH_ALIAS = "compact";
+export const REVIEW_BRANCH_ACTION_ID = "review.branch";
+export const REVIEW_UNCOMMITTED_ACTION_ID = "review.uncommitted";
 export const RUN_CANCEL_ACTION_ID = "run.cancel";
 export const SESSION_NEW_ACTION_ID = "session.new";
 export const SESSION_NEW_SLASH_ALIAS = "clear";
 export const SESSION_RENAME_ACTION_ID = "session.rename";
 export const SESSION_RENAME_SLASH_ALIAS = "name";
 
-const REMOTE_SAFE_BUILTIN_HOST_ACTION_IDS = new Set<string>([SESSION_NEW_ACTION_ID, RUN_CANCEL_ACTION_ID]);
+export interface HostActionReviewOptions {
+	remote: boolean;
+	requireConfirmation: boolean;
+}
+
+const REMOTE_SAFE_BUILTIN_HOST_ACTION_IDS = new Set<string>([
+	SESSION_NEW_ACTION_ID,
+	RUN_CANCEL_ACTION_ID,
+	REVIEW_UNCOMMITTED_ACTION_ID,
+	REVIEW_BRANCH_ACTION_ID,
+]);
 
 export class HostActionRegistry {
 	private readonly actionIds: string[] = [];
@@ -176,7 +195,7 @@ export class HostActionRegistry {
 		if (!descriptor.enabled) {
 			throw new Error(descriptor.disabledReason ?? `UI action is disabled: ${actionId}`);
 		}
-		return action.handler(context, args);
+		return action.handler(context, args, options);
 	}
 
 	invokeBySlashAlias(
@@ -222,6 +241,17 @@ export function runSessionRenameHostAction(context: HostActionInvocationContext,
 	}
 	context.renameSession(trimmedName);
 	return trimmedName;
+}
+
+export async function runReviewHostAction(
+	context: HostActionInvocationContext,
+	target: ReviewTarget,
+	options: HostActionReviewOptions,
+): Promise<ReviewWorkflowResult> {
+	if (!context.runReviewAction) {
+		throw new Error("Review actions are not available in this host");
+	}
+	return context.runReviewAction(target, options);
 }
 
 export function registerBuiltinHostActions(registry: HostActionRegistry): HostActionRegistry {
@@ -321,6 +351,55 @@ export function registerBuiltinHostActions(registry: HostActionRegistry): HostAc
 		availability: () => ({ enabled: true }),
 		handler: invokeSessionRenameAction,
 	});
+	registry.register({
+		id: REVIEW_UNCOMMITTED_ACTION_ID,
+		label: "Review changes",
+		description: "Review uncommitted workspace changes.",
+		category: "review",
+		presentation: { kind: "card", group: "Review", priority: 100, icon: "magnifyingglass" },
+		args: [],
+		destructive: false,
+		requiresConfirmation: true,
+		streamingBehavior: "disabled",
+		remoteSafe: true,
+		slash: {
+			name: "review",
+			example: "/review uncommitted",
+		},
+		availability: reviewAvailability,
+		handler: invokeReviewUncommittedAction,
+	});
+	registry.register({
+		id: REVIEW_BRANCH_ACTION_ID,
+		label: "Review branch",
+		description: "Review the current branch against its merge base.",
+		category: "review",
+		presentation: {
+			kind: "card",
+			group: "Review",
+			priority: 90,
+			icon: "point.topleft.down.curvedto.point.bottomright.up",
+		},
+		args: [
+			{
+				name: "base",
+				label: "Base branch",
+				type: "string",
+				required: false,
+				placeholder: "main",
+			},
+		],
+		destructive: false,
+		requiresConfirmation: true,
+		streamingBehavior: "disabled",
+		remoteSafe: true,
+		slash: {
+			name: "review",
+			example: "/review branch [base]",
+		},
+		availability: reviewAvailability,
+		handler: invokeReviewBranchAction,
+	});
 	return registry;
 }
 
@@ -399,6 +478,74 @@ async function invokeSessionRenameAction(
 	};
 }
 
+async function invokeReviewUncommittedAction(
+	context: HostActionInvocationContext,
+	args: unknown,
+	options: HostActionInvokeOptions,
+): Promise<UiActionInvocationResponse> {
+	assertNoActionArgs(args);
+	return createReviewInvocationResponse(
+		REVIEW_UNCOMMITTED_ACTION_ID,
+		await runReviewHostAction(context, { kind: "uncommitted" }, createReviewOptions(options)),
+	);
+}
+
+async function invokeReviewBranchAction(
+	context: HostActionInvocationContext,
+	args: unknown,
+	options: HostActionInvokeOptions,
+): Promise<UiActionInvocationResponse> {
+	const base = getOptionalStringArg(args, "base")?.trim() || undefined;
+	return createReviewInvocationResponse(
+		REVIEW_BRANCH_ACTION_ID,
+		await runReviewHostAction(context, { kind: "branch", base }, createReviewOptions(options)),
+	);
+}
+
+function reviewAvailability(context: HostActionDescriptorContext): HostActionAvailability {
+	if (context.session.isStreaming) {
+		return { enabled: false, disabledReason: "Review is not available while the agent is streaming" };
+	}
+	if (context.session.isCompacting) {
+		return { enabled: false, disabledReason: "Review is not available while compaction is running" };
+	}
+	return { enabled: true };
+}
+
+function createReviewOptions(options: HostActionInvokeOptions): HostActionReviewOptions {
+	return {
+		remote: options.requireRemoteSafe === true,
+		requireConfirmation: options.requireRemoteSafe === true,
+	};
+}
+
+function createReviewInvocationResponse(action: string, result: ReviewWorkflowResult): UiActionInvocationResponse {
+	if (result.status === "cancelled") {
+		return {
+			action,
+			status: "cancelled",
+			actionsChanged: true,
+			message: "Review cancelled",
+		};
+	}
+	const findingCount = result.findingsCount;
+	const summary =
+		findingCount === undefined
+			? "Review complete"
+			: findingCount === 0
+				? "Review complete: no issues found"
+				: `Review complete: ${findingCount} finding${findingCount === 1 ? "" : "s"}`;
+	return {
+		action,
+		status: "completed",
+		stateChanged: true,
+		actionsChanged: true,
+		message: result.sessionSwitchCancelled
+			? `${summary}; findings added to the current session`
+			: `${summary}; fresh session created with findings`,
+	};
+}
+
 function createDescriptor(action: HostActionDefinition, context: HostActionDescriptorContext): UiActionDescriptor {
 	const availability = action.availability?.(context) ?? { enabled: true };
 	return {
@@ -417,7 +564,7 @@ function createDescriptor(action: HostActionDefinition, context: HostActionDescr
 		requiresConfirmation: action.requiresConfirmation ?? false,
 		streamingBehavior: action.streamingBehavior ?? "disabled",
 		remoteSafe: action.remoteSafe,
-		slash: action.slashAliases?.[0],
+		slash: action.slashAliases?.[0] ?? action.slash,
 	};
 }
 

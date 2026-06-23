@@ -34,6 +34,7 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
+import { REMOTE_REVIEW_TOOL_NAMES, runReviewWorkflow } from "../../core/review.ts";
 import { projectSessionTranscript } from "../../core/rpc/transcript.ts";
 import type { RpcTransport } from "../../core/rpc/transport.ts";
 import { createUiActionInvocationPlan, getUiActionDescriptors } from "../../core/rpc/ui-actions.ts";
@@ -576,6 +577,20 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		renameSession: (name) => {
 			session.setSessionName(name);
 		},
+		runReviewAction: (target, reviewOptions) =>
+			runReviewWorkflow({
+				target,
+				cwd: runtimeHost.cwd,
+				agentDir: runtimeHost.services.agentDir,
+				session,
+				newSession: (newSessionOptions) => runtimeHost.newSession(newSessionOptions),
+				authStorage: session.modelRegistry.authStorage,
+				settingsManager: session.settingsManager,
+				tools: REMOTE_REVIEW_TOOL_NAMES,
+				requireProjectTrust: reviewOptions.remote,
+				requireConfirmation: reviewOptions.requireConfirmation,
+				confirm: ({ title, message }) => createExtensionUIContext().confirm(title, message),
+			}),
 	});
 
 	let detachInput = () => {};

@@ -59,21 +59,23 @@ export function getUiActionDescriptors(
 	scope?: UiActionListScope,
 	options: UiActionDescriptorOptions = {},
 ): UiActionDescriptor[] {
-	if (scope === "primary") {
-		return [];
-	}
-
-	const descriptors = [
-		...BUILTIN_HOST_ACTION_REGISTRY.getDescriptors({
-			session: {
-				isCompacting: session.isCompacting ?? false,
-				isStreaming: session.isStreaming ?? false,
-			},
-		}),
-		...getUiActionCatalog(session).map((entry) => entry.descriptor),
-	];
+	const builtinDescriptors = BUILTIN_HOST_ACTION_REGISTRY.getDescriptors({
+		session: {
+			isCompacting: session.isCompacting ?? false,
+			isStreaming: session.isStreaming ?? false,
+		},
+	});
+	const descriptors =
+		scope === "primary"
+			? builtinDescriptors.filter(isPrimaryBuiltinAction)
+			: [...builtinDescriptors, ...getUiActionCatalog(session).map((entry) => entry.descriptor)];
 
 	return descriptors.filter((descriptor) => !options.remoteSafeOnly || descriptor.remoteSafe).slice(0, MAX_ACTIONS);
+}
+
+function isPrimaryBuiltinAction(descriptor: UiActionDescriptor): boolean {
+	const kind = descriptor.presentation?.kind;
+	return kind === "card" || kind === "toggle";
 }
 
 export function createUiActionInvocationPlan(

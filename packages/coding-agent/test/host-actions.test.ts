@@ -3,6 +3,8 @@ import {
 	CONTEXT_COMPACT_ACTION_ID,
 	CONTEXT_COMPACT_SLASH_ALIAS,
 	HostActionRegistry,
+	REVIEW_BRANCH_ACTION_ID,
+	REVIEW_UNCOMMITTED_ACTION_ID,
 	RUN_CANCEL_ACTION_ID,
 	registerBuiltinHostActions,
 	SESSION_NEW_ACTION_ID,
@@ -119,6 +121,8 @@ describe("HostActionRegistry", () => {
 			RUN_CANCEL_ACTION_ID,
 			CONTEXT_COMPACT_ACTION_ID,
 			SESSION_RENAME_ACTION_ID,
+			REVIEW_UNCOMMITTED_ACTION_ID,
+			REVIEW_BRANCH_ACTION_ID,
 		]);
 		expect(descriptors.find((descriptor) => descriptor.id === RUN_CANCEL_ACTION_ID)).toEqual(
 			expect.objectContaining({
@@ -174,6 +178,79 @@ describe("HostActionRegistry", () => {
 		expect(renameSession).toHaveBeenCalledWith("D.2 work");
 	});
 
+	test("registers review actions as remote-safe cards with shared handlers", async () => {
+		const runReviewAction = vi.fn(async () => ({
+			status: "completed" as const,
+			resolution: {
+				description: "uncommitted changes",
+				diffCommand: "git diff HEAD",
+				diff: "diff --git a/file.txt b/file.txt",
+				truncated: false,
+			},
+			findingsCount: 2,
+			sessionSwitchCancelled: false,
+		}));
+		const registry = registerBuiltinHostActions(new HostActionRegistry());
+		const context = {
+			session: { isStreaming: false, isCompacting: false },
+			abortRun: vi.fn(async () => {}),
+			compactContext: vi.fn(async () => createCompactionResult()),
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			renameSession: vi.fn(() => {}),
+			runReviewAction,
+		};
+
+		const descriptors = registry.getDescriptors(context);
+		expect(descriptors.find((descriptor) => descriptor.id === REVIEW_UNCOMMITTED_ACTION_ID)).toEqual(
+			expect.objectContaining({
+				label: "Review changes",
+				category: "review",
+				presentation: { kind: "card", group: "Review", priority: 100, icon: "magnifyingglass" },
+				requiresConfirmation: true,
+				remoteSafe: true,
+				slash: { name: "review", example: "/review uncommitted" },
+				streamingBehavior: "disabled",
+			}),
+		);
+		expect(descriptors.find((descriptor) => descriptor.id === REVIEW_BRANCH_ACTION_ID)).toEqual(
+			expect.objectContaining({
+				label: "Review branch",
+				category: "review",
+				presentation: expect.objectContaining({ kind: "card", group: "Review", priority: 90 }),
+				requiresConfirmation: true,
+				remoteSafe: true,
+				slash: { name: "review", example: "/review branch [base]" },
+				args: [expect.objectContaining({ name: "base", type: "string", required: false })],
+			}),
+		);
+
+		await expect(registry.invoke(REVIEW_UNCOMMITTED_ACTION_ID, context, {})).resolves.toEqual({
+			action: REVIEW_UNCOMMITTED_ACTION_ID,
+			status: "completed",
+			stateChanged: true,
+			actionsChanged: true,
+			message: "Review complete: 2 findings; fresh session created with findings",
+		});
+		await expect(
+			registry.invoke(REVIEW_BRANCH_ACTION_ID, context, { base: "  main  " }, { requireRemoteSafe: true }),
+		).resolves.toEqual({
+			action: REVIEW_BRANCH_ACTION_ID,
+			status: "completed",
+			stateChanged: true,
+			actionsChanged: true,
+			message: "Review complete: 2 findings; fresh session created with findings",
+		});
+
+		expect(runReviewAction).toHaveBeenCalledWith(
+			{ kind: "uncommitted" },
+			{ remote: false, requireConfirmation: false },
+		);
+		expect(runReviewAction).toHaveBeenCalledWith(
+			{ kind: "branch", base: "main" },
+			{ remote: true, requireConfirmation: true },
+		);
+	});
+
 	test("rechecks built-in availability and validates arguments at invocation time", async () => {
 		const registry = registerBuiltinHostActions(new HostActionRegistry());
 		const idleContext = {
@@ -191,6 +268,19 @@ describe("HostActionRegistry", () => {
 		await expect(
 			registry.invokeBySlashAlias(CONTEXT_COMPACT_SLASH_ALIAS, idleContext, { unexpected: true }),
 		).rejects.toThrow("Unsupported UI action argument: unexpected");
+		await expect(registry.invoke(REVIEW_UNCOMMITTED_ACTION_ID, idleContext, { unexpected: true })).rejects.toThrow(
+			"Unsupported UI action argument: unexpected",
+		);
+		await expect(
+			registry.invoke(
+				REVIEW_BRANCH_ACTION_ID,
+				{
+					...idleContext,
+					session: { isStreaming: true, isCompacting: false },
+				},
+				{},
+			),
+		).rejects.toThrow("Review is not available while the agent is streaming");
 	});
 });
 

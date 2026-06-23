@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
 	CONTEXT_COMPACT_ACTION_ID,
+	REVIEW_BRANCH_ACTION_ID,
+	REVIEW_UNCOMMITTED_ACTION_ID,
 	RUN_CANCEL_ACTION_ID,
 	SESSION_NEW_ACTION_ID,
 	SESSION_RENAME_ACTION_ID,
@@ -578,7 +580,12 @@ describe("Iroh remote core helpers", () => {
 			allowed: true,
 			command: dynamicInvocation,
 		});
-		for (const action of [SESSION_NEW_ACTION_ID, RUN_CANCEL_ACTION_ID]) {
+		for (const action of [
+			SESSION_NEW_ACTION_ID,
+			RUN_CANCEL_ACTION_ID,
+			REVIEW_UNCOMMITTED_ACTION_ID,
+			REVIEW_BRANCH_ACTION_ID,
+		]) {
 			const builtInInvocation = {
 				id: `${action}-1`,
 				type: "invoke_ui_action",

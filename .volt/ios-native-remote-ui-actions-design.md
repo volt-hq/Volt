@@ -1297,6 +1297,24 @@ Concrete behavior:
 - Iroh remote `invoke_ui_action` is still allowlist-based. It forwards exact built-in ids `session.new` and `run.cancel`, plus the previously reviewed projected dynamic prefixes. It rejects `context.compact`, `session.rename`, review/model ids, malformed ids, and unreviewed prefixes before forwarding.
 - `get_ui_actions` returns built-in descriptors alongside dynamic palette actions; remote descriptor lists include only actions whose live descriptors are marked `remoteSafe`.
 
+## Resolved 2026-06-23: Review Actions in Shared Registry
+
+D.3 implementation moves the A.5 remote-safe review subset into the shared built-in action registry.
+
+Concrete behavior:
+
+- Registered review built-ins are:
+  - `review.uncommitted`, slash presentation `/review uncommitted`, remote-safe over Iroh, card presentation in the Review group, no arguments.
+  - `review.branch`, slash presentation `/review branch [base]`, remote-safe over Iroh, card presentation in the Review group, optional string `base` argument.
+- Both descriptors require confirmation, are non-destructive, use `streamingBehavior: "disabled"`, and are disabled while the current session is streaming or compacting.
+- `get_ui_actions("primary")` now returns curated built-in card/toggle actions, so review cards are visible to native primary action surfaces without projecting dynamic extension/prompt/skill palette entries into primary.
+- TUI `/review uncommitted` and `/review branch [base]` route through the registered action handlers after the existing parser resolves user intent. `/review tools`, `/review pr`, `/review commit`, selectors, and pickers remain local-only TUI flows.
+- The shared review workflow owns git target resolution, review-model fallback, isolated review execution, and fresh-session seeding. It rechecks streaming/compaction state before the run and uses the registered workspace cwd, never a client-provided host path.
+- Remote review invocation requires project trust and host confirmation. RPC/iOS confirmation is emitted through the existing extension UI `confirm` request. Remote review runs with the host-owned read-only review tool set `read`, `grep`, `find`, and `ls`; local TUI review keeps using configured review tools.
+- Invocation responses are terminal `completed` or `cancelled` statuses for the review workflow. They may include bounded status text and refresh hints, but they do not include raw diffs, review prompts, configured review model values, auth state, tool names/provenance, or GitHub metadata.
+- Iroh `invoke_ui_action` now forwards exact built-in ids `review.uncommitted` and `review.branch` in addition to `session.new`, `run.cancel`, and projected dynamic ids. It continues to reject `review.pr`, `review.commit`, `review.tools`, `context.compact`, `session.rename`, model actions, malformed ids, stale ids, and unreviewed prefixes.
+- Automated evidence covers descriptor shape and handler options in `test/host-actions.test.ts`, parser coverage in the existing review suite, local RPC review invocation reaching git target validation in `test/rpc-transport-client.test.ts`, and Iroh allowlist coverage in `test/remote-iroh-core.test.ts`.
+
 ## Host Implementation Plan
 
 ### Phase A: Design and Inventory
