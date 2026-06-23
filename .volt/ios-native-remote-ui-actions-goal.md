@@ -286,7 +286,7 @@ and recorded without overclaiming.
   <item ref="A.4" status="resolved" prereq="A.1" type="decision">
     <title>Define Fast mode policy boundaries</title>
     <acceptance>The design document states whether Fast mode is in v1, whether it is session-local/profile/global, whether it changes thinking level only or may switch models, how it interacts with scoped models/profile defaults, and what metadata iOS may display. If deferred, the design records a smaller substitute such as `thinking.fast_mode` or names the blocker.</acceptance>
-    <evidence>Resolved 2026-06-23: design defers full `model.fast_mode` and records v1 `thinking.fast_mode` as session-local, non-persistent, thinking-level-only, scoped/profile-safe, and bounded in iOS-visible metadata; verified with `git diff --check -- .volt/ios-native-remote-ui-actions-design.md .volt/ios-native-remote-ui-actions-goal.md` and pre-commit `npm run check`; commit pending.</evidence>
+    <evidence>Resolved 2026-06-23: design defers full `model.fast_mode` and records v1 `thinking.fast_mode` as session-local, non-persistent, thinking-level-only, scoped/profile-safe, and bounded in iOS-visible metadata; verified with `git diff --check -- .volt/ios-native-remote-ui-actions-design.md .volt/ios-native-remote-ui-actions-goal.md` and pre-commit `npm run check`; commit f0a1f2872ec7c1dcade73193742ed55c825e3846.</evidence>
   </item>
 
   <item ref="A.5" status="open" prereq="A.1" type="decision">
