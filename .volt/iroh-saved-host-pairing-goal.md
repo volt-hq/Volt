@@ -354,10 +354,10 @@ blocked.
 </group>
 
 <group n="4" title="Docs and validation">
-  <item ref="D.1" status="open" prereq="B.4,B.5,B.6,C.2">
+  <item ref="D.1" status="resolved" prereq="B.4,B.5,B.6,C.2">
     <title>Update root and app docs for saved-host pairing behavior</title>
     <acceptance>Root docs and app README/design docs describe Pair Phone, one-time QR, saved-host reconnect, default relay policy, revocation/re-pair behavior, offline states, host state path, and known limitations. Docs avoid implying QR is needed after ordinary reconnect.</acceptance>
-    <evidence/>
+    <evidence>2026-06-22: Root usage/security/protocol docs, root/app design docs, and app README now document Pair Phone, one-time QR, saved-host reconnect without ordinary QR rescans, mobile relay defaults, revocation/re-pair approval, offline outcomes, host state path, and preview limitations; verification: root/app doc whitespace checks passed and root pre-commit npm run check passed; root docs commit 6fecaa09, app README commit 772c5a1.</evidence>
   </item>
 
   <item ref="D.2" status="open" prereq="B.1,B.2,B.3,B.4,B.5,B.6,C.4,D.1">
