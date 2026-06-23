@@ -29,7 +29,7 @@ The decoded JSON payload is an object with these fields:
 | --- | --- | --- |
 | `alpn` | yes | Must be `volt-rpc/0`. |
 | `irohTicket` | yes | Native Iroh endpoint ticket used to dial the running host. |
-| `workspace` | yes | Workspace label requested by the client. The host still authorizes against its persisted workspace binding. |
+| `workspace` | yes | Registered workspace name requested by the client. The host resolves this name from persisted state; clients must not send host paths. |
 | `secret` | no | One-time pairing secret. Present only in pairing tickets. Persisted host state stores only a hash. |
 | `expiresAt` | no | Unix epoch milliseconds after which the pairing secret is invalid. |
 | `nodeId` | no | Host node ID. Required for saved-host reconnect records and verified against the native Iroh ticket plus handshake host identity. |
@@ -51,9 +51,9 @@ Example decoded payload:
 }
 ```
 
-Pairing tickets are explicit Pair Phone invitations. They are short-lived, one-time credentials for adding a new client, not durable reconnect credentials. Mobile-facing host startup does not create an active pairing ticket; `volt remote pair` creates the QR/ticket from a running host when a phone is being added.
+Pairing tickets are explicit Pair Phone invitations. They are short-lived, one-time credentials for adding a new client, not durable reconnect credentials. Mobile-facing host startup does not create an active pairing ticket; `volt remote pair` creates the QR/ticket from a running host when a phone is being added. The ticket's `workspace` is the initial registered workspace for that pairing, not the client's permanent workspace boundary.
 
-Saved-host reconnect data uses the same ticket payload shape without `secret` or `expiresAt`. A saved reconnect record must retain a non-empty `nodeId`, supported `relayMode`, `workspace`, and `irohTicket`; records missing those required reconnect fields are invalid and should not be dialed. Ordinary reconnect after app restart, network loss, or host restart with the same host state uses this saved-host data and does not require another QR scan.
+Saved-host reconnect data uses the same ticket payload shape without `secret` or `expiresAt`. A saved reconnect record must retain a non-empty `nodeId`, supported `relayMode`, `workspace`, and `irohTicket`; records missing those required reconnect fields are invalid and should not be dialed. Ordinary reconnect after app restart, network loss, or host restart with the same host state uses this saved-host data and does not require another QR scan. A saved-host client may synthesize a reconnect ticket for any registered workspace name it learned from verified host metadata; the host remains authoritative and rejects unknown or stale names with `workspace_unavailable`.
 
 ## Stream handshake
 
@@ -69,7 +69,7 @@ Fields:
 | --- | --- | --- |
 | `type` | yes | Must be `volt_iroh_hello`. |
 | `protocol` | yes | Must be `volt-rpc/0`. |
-| `workspace` | yes | Workspace label requested by the client. |
+| `workspace` | yes | Registered workspace name requested by the client. |
 | `secret` | no | Pairing secret when completing a pairing ticket. Omitted for already-paired clients. |
 | `clientLabel` | no | Human-readable client label requested during pairing. |
 | `clientNodeId` | no | Client-claimed node ID for diagnostics only. It is not authoritative. |
@@ -100,12 +100,14 @@ Host handshake failure outcomes:
 | `pairing_secret_consumed` | The supplied pairing secret matches a retained consumed tombstone and this client is not the paired recovery node. |
 | `client_unknown` | The host does not know this client node ID and no active, expired, or consumed pairing secret applies. |
 | `client_revoked` | The client node ID has a retained revocation tombstone and has not completed an approved re-pair. |
-| `workspace_unavailable` | The requested workspace is not currently served by this host. |
-| `workspace_forbidden` | The requested workspace exists, but this client or pairing ticket is not allowed to use it. |
+| `workspace_unavailable` | The requested workspace name is not registered in this host state, or its saved path is no longer usable. |
+| `workspace_forbidden` | The requested workspace exists, but this client is not allowed to use it. This is reserved for legacy or future per-client workspace restrictions; normal preview pairings are workstation-scoped. |
 
 Client-local reconnect outcomes are not sent by the host: `host_unreachable` means no usable transport/handshake could be opened, `host_identity_mismatch` means the reached Iroh node or handshake `hostNodeId` differs from the saved host identity, and `saved_host_invalid` means the local saved record is malformed or missing required v1 fields.
 
 `client_revoked` remains authoritative for a revoked client node ID. A generic new pairing ticket does not let that same node silently return. The desktop host must first approve re-pair for the revoked node ID, then issue a fresh active pairing ticket; successful re-pair creates a new active client record and clears the revocation tombstone.
+
+A successful pairing stores the client as authorized for the workstation represented by the host state file. That paired client can use any registered workspace name in that state file, including workspaces registered later, without scanning another QR. Revocation blocks that client node ID from every registered workspace. The client's persisted `allowedTools` grant applies across all selected workspaces; registering a workspace does not add tools.
 
 A paired client may have only one active connection per workspace in v1 preview. If the same authoritative client node ID connects to the same workspace while a previous connection is still active, the host rejects the new stream with a normal handshake failure response whose `error` is `client already connected`; the existing connection remains active.
 
@@ -116,6 +118,24 @@ A reconnecting paired client with the same authoritative Iroh node ID resumes th
 Saved-host clients must verify that the native endpoint ticket node ID and the handshake `hostNodeId` match the saved host's `nodeId` before trusting authorization failures or refreshing non-secret discovery fields. If the reached identity differs, clients should treat the attempt as `host_identity_mismatch` and leave the saved host identity and discovery data unchanged.
 
 Remote UI clients should request `get_state` followed by `get_transcript` after connect/reconnect, and after a successful `switch_session_by_id` should show a loading transcript state while refreshing state and transcript for the selected session. After `new_session`, clients should keep a fresh empty transcript and refresh state without requesting older transcript from the previous session. For older history, clients use `get_transcript` pagination (`hasMore` and `nextBeforeEntryId`) and request pages with `beforeEntryId`.
+
+`get_state` responses for Iroh sessions include remote host metadata with the current workspace and the registered workspace names visible to the saved host:
+
+```json
+{
+  "remoteHost": {
+    "workspace": "volt",
+    "workspaceNames": ["volt", "other-project"],
+    "hostNodeId": "<authoritative-host-node-id>",
+    "relayMode": "default",
+    "hostName": "macstudio",
+    "userName": "jordan",
+    "cwd": "/workspace"
+  }
+}
+```
+
+`remoteHost.workspaceNames` contains names only, never host-local paths. Clients may present those names for selection after verifying the saved host identity. Selecting a different workspace opens a new saved-host reconnect using that name; v1 does not switch the cwd of an active stream in place.
 
 ## Lifecycle: detach versus cancel
 

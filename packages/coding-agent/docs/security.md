@@ -59,14 +59,17 @@ If you bind-mount a host workspace read/write, writes from inside the container 
 Supported preview safety model:
 
 - Nothing listens until the host user runs `volt remote host`.
-- Workspaces are exposed by saved names such as `volt=/path/to/repo`; clients cannot request arbitrary host paths.
+- Workspaces are registered locally by the desktop user with saved names such as `volt=/path/to/repo` or `volt remote host --register-workspace volt=/path/to/repo`; clients cannot request arbitrary host paths.
+- Registering a workspace is not a remote API. Clients cannot create, rename, delete, or path-map host workspaces from the app.
 - The default remote tool allowlist includes the built-in coding tools: `read,bash,edit,write,grep,find,ls`.
 - Pairing tickets are short-lived, one-time credentials. Persisted state stores secret hashes and non-secret metadata, not raw pairing secrets.
 - Pairing through `volt remote pair` requires a running host control channel; offline ticket generation from persisted state is not supported.
 - Mobile-facing `volt remote host --mobile` startup does not create an active pairing ticket. Add phones explicitly with `volt remote pair`.
 - Paired clients are persisted until revoked with `volt remote revoke <node-id>`.
 - After pairing, saved-host reconnect uses the persisted client node ID and a secret-free client saved-host record. Ordinary app reconnect, temporary network loss, or host restart with the same host state path should not require scanning another QR.
-- Revocation removes future access from persisted state and asks a live host to close matching active connections when one is reachable.
+- Pairing is workstation-scoped for the host state file. A paired phone can reconnect to any registered workspace name in that state file, including workspaces registered after pairing, without another QR scan. The app receives and selects names only, never host-local paths.
+- Registering another workspace does not grant more tools. The client's persisted `allowedTools` grant applies across every registered workspace until the client is revoked and paired again with a different grant.
+- Revocation removes future access from persisted state and asks a live host to close matching active connections when one is reachable. A revoked phone is blocked from every registered workspace in that state file.
 - A revoked phone node ID cannot reconnect or re-pair with only a generic new QR. The desktop host must approve that node with `volt remote approve-repair <node-id>`, then issue a fresh active pairing ticket.
 - In the default integrated runtime, Iroh stream close is detach, not cancellation. Active work can continue on the host until it finishes or an authorized client sends `abort`.
 - Detached integrated runtimes can be reattached only by the same authoritative Iroh client node ID and workspace, and idle detached runtimes expire by the host retention policy.
@@ -83,7 +86,7 @@ Host process exit, host crash, or explicit host shutdown stops in-memory work; r
 
 Bare `volt remote host` uses `--relay disabled` for same-machine and same-LAN preview workflows. Use `volt remote host --mobile` for mobile-facing setup; it starts the host in relay/discovery mode `"default"` without creating a startup pairing invite. Use `volt remote pair` to create pairing tickets, and use `--relay disabled` only when the host user explicitly chooses LAN-only mode. Use `--relay default` when validating access across networks.
 
-Client UX should treat offline and authorization failures differently. `host_unreachable` keeps the saved host and retries later. `host_identity_mismatch`, `saved_host_invalid`, `client_unknown`, and `client_revoked` require explicit user action such as Pair Again or Forget Host. `workspace_unavailable` and `workspace_forbidden` are workspace access problems, not reasons to discard the host relationship.
+Client UX should treat offline and authorization failures differently. `host_unreachable` keeps the saved host and retries later. `host_identity_mismatch`, `saved_host_invalid`, `client_unknown`, and `client_revoked` require explicit user action such as Pair Again or Forget Host. `workspace_unavailable` and `workspace_forbidden` are workspace access problems, not reasons to discard the host relationship; the app can keep the saved host and let the user retry or select another saved workspace name.
 
 See [Using Volt](usage.md#remote-access-over-iroh-preview) for copy-pastable commands and [Iroh remote protocol v1](iroh-remote-protocol.md) for the external client contract.
 

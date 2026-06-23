@@ -343,10 +343,10 @@ workspace-selection smoke, or explicitly document why that evidence is blocked.
 </group>
 
 <group n="4" title="Docs and validation">
-  <item ref="D.1" status="open" prereq="B.4,C.2">
+  <item ref="D.1" status="resolved" prereq="B.4,C.2">
     <title>Document multi-workspace registration and workstation-scoped auth</title>
     <acceptance>Root docs and app docs/README describe `--register-workspace`, registered names only, workstation-scoped authorization, app workspace selection, tool grants applying across workspaces, revocation blocking all workspaces, and the MVP limitations. Docs avoid implying that QR rescanning is needed for workspace changes.</acceptance>
-    <evidence></evidence>
+    <evidence>2026-06-23: Documented `--register-workspace`, registered-name-only app selection, workstation-scoped pairing, no-QR saved-host workspace changes, shared per-client tool grants, revocation across all workspaces, and MVP limitations in Volt usage/security/protocol/example docs plus the app README; verification: app `git diff --check -- README.md`, Volt `git diff --check -- packages/coding-agent/docs/usage.md packages/coding-agent/docs/security.md packages/coding-agent/docs/iroh-remote-protocol.md packages/coding-agent/examples/remote/iroh-sidecar/README.md .volt/iroh-multi-workspace-mvp-design.md .volt/iroh-multi-workspace-mvp-goal.md`, app commit 91e15c4, and Volt commit-hook `npm run check`.</evidence>
   </item>
 
   <item ref="D.2" status="open" prereq="B.5,C.3,D.1">

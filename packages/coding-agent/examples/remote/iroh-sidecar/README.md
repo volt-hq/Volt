@@ -55,7 +55,7 @@ Run the automated local scenario suite when changing the remote host bridge:
 npm run iroh:poc:test
 ```
 
-The suite starts local host/client processes with isolated temporary state and covers fake-RPC prompt streaming, remote command filtering, `get_state`, first-class `volt remote pair`, `volt remote status`, pairing persistence, reconnect session resume, missing-session fallback, duplicate active connection rejection, `--no-pairing` rejection, active revocation, unsafe tool gates, expired tickets, and workspace preflight failures.
+The suite starts local host/client processes with isolated temporary state and covers fake-RPC prompt streaming, remote command filtering, `get_state`, first-class `volt remote pair`, `volt remote status`, pairing persistence, multi-workspace reconnect without another QR, reconnect session resume, missing-session fallback, duplicate active connection rejection, `--no-pairing` rejection, active revocation, unsafe tool gates, expired tickets, and workspace preflight failures.
 
 ## Local fake-RPC smoke test
 
@@ -85,7 +85,7 @@ Expected output for the one-shot command:
 fake RPC response over Iroh: hello from another device
 ```
 
-The first successful connection persists the host key, client key, workspace, and paired client allowlist in state files:
+The first successful connection persists the host key, client key, registered workspaces, and paired client allowlist in state files:
 
 ```text
 ~/.volt/agent/remote/iroh-host.json
@@ -94,15 +94,23 @@ The first successful connection persists the host key, client key, workspace, an
 
 Use `--state <path>` on host or client for isolated test state.
 
-## Pairing and revocation
+## Workspace registration, pairing, and revocation
 
-The host prints a pairing ticket by default. A client that connects with that ticket is added to the host allowlist for the selected workspace.
+Register workspaces locally on the desktop host. The registered name is what remote clients and the iOS app see; the host-local path stays in the host state file.
+
+```bash
+volt remote host --register-workspace volt=/path/to/repo
+volt remote host --register-workspace other=/path/to/other-repo
+```
+
+The host prints a pairing ticket by default. A client that connects with that ticket is added to the host allowlist for the workstation represented by the host state file. The ticket workspace is the first selected workspace, not the only workspace the paired client may use.
 
 A running host also accepts local management requests from `volt remote pair`, which prints only the generated ticket on stdout:
 
 ```bash
 # Terminal 1
-volt remote host --workspace volt=/path/to/repo --allow-tools read,grep,find,ls
+volt remote host --register-workspace volt=/path/to/repo --allow-tools read,grep,find,ls
+volt remote host --mobile --yes
 
 # Terminal 2
 volt remote pair --workspace volt
@@ -113,6 +121,8 @@ volt remote pair --workspace volt --allow-tools read,grep,find,ls,bash --yes
 ```
 
 If no host is running for the selected `--state` file, or if the workspace is missing or ambiguous, `volt remote pair` fails with diagnostics on stderr and no ticket on stdout.
+
+After a client is paired, reconnect tickets do not need a pairing secret. The same paired client can reconnect to another registered workspace name in the same host state file without scanning another QR. Registering a new workspace does not change the client's persisted tool grant; the existing `allowedTools` grant applies across all registered workspaces until the client is revoked and paired again with a different grant.
 
 List paired clients:
 
@@ -135,7 +145,7 @@ Revoke a client:
 npm run iroh:poc:revoke -- <client-node-id>
 ```
 
-Revocation removes the client from persisted state so future connections fail. If a host is currently running for the same state file, the revoke command also asks that host to close matching active connections and audits `active_connection_revoked`; if no live host is reachable, persisted revocation still succeeds and the command prints an active-live-unavailable diagnostic. To change an existing client's tool grant in preview, revoke that client and pair it again with the desired `--allow-tools`.
+Revocation removes the client from persisted state so future connections to every registered workspace fail. If a host is currently running for the same state file, the revoke command also asks that host to close matching active connections and audits `active_connection_revoked`; if no live host is reachable, persisted revocation still succeeds and the command prints an active-live-unavailable diagnostic. To change an existing client's tool grant in preview, revoke that client and pair it again with the desired `--allow-tools`.
 
 After a client is paired, the host can run without accepting new clients:
 
@@ -212,11 +222,12 @@ Remote host support is a preview feature and should be treated as remote access 
 - Remote access is opt-in; nothing listens until the host command starts.
 - Pairing tickets contain a short-lived one-time secret for adding a client to the allowlist. Persisted state stores hashes and non-secret metadata, not raw secrets.
 - Paired clients are persisted until revoked.
-- Any paired client can control the integrated runtime or spawned RPC child for its allowed workspace.
-- Real Volt RPC can use only tools allowed by the client's persisted `allowedTools` grant.
+- Any paired client can control the integrated runtime or spawned RPC child for registered workspace names in the same host state file.
+- Pairing is workstation-scoped in this preview. A paired client can use registered workspace names added later without another QR scan, and revocation blocks that client from every registered workspace.
+- Real Volt RPC can use only tools allowed by the client's persisted `allowedTools` grant. That grant applies across all registered workspaces.
 - Keep the default read-only tool list (`read,grep,find,ls`) unless the client and workspace are trusted.
 - `--allow-tools` grants that include `bash`, `edit`, or `write` can modify host files or run shell commands; TTY host and pair commands ask for confirmation, and noninteractive commands must pass `--yes`.
-- Workspaces are selected by saved name, not arbitrary client-provided paths.
+- Workspaces are registered locally and selected by saved name, not arbitrary client-provided paths. Remote clients cannot register, edit, delete, or map workspace paths.
 - Remote sessions do not auto-approve project trust. Use `--approve` only when the host user trusts project-local resources.
 - Default state and audit paths are `~/.volt/agent/remote/iroh-host.json` and `~/.volt/agent/remote/iroh-host.audit.jsonl`.
 - Do not expose sensitive workspaces or run with `bash,edit,write` unless the client is trusted.

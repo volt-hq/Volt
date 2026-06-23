@@ -917,6 +917,14 @@ Tasks:
 5. Document per-client tool grants still apply across all workspaces.
 6. Run automated tests and a manual smoke.
 
+Resolved 2026-06-23: D.1 updated the public Volt usage guide, security notes,
+Iroh protocol reference, sidecar example README, and iOS app README to document
+workspace registration, registered names as the only app-selected value,
+workstation-scoped pairing, saved-host workspace selection without another QR,
+tool grants applying across all registered workspaces, revocation blocking every
+workspace for the phone, and the MVP limits around remote workspace management,
+per-workspace grants, and live cwd switching.
+
 ## Test Plan
 
 ### Host/core tests
