@@ -1315,6 +1315,21 @@ Concrete behavior:
 - Iroh `invoke_ui_action` now forwards exact built-in ids `review.uncommitted` and `review.branch` in addition to `session.new`, `run.cancel`, and projected dynamic ids. It continues to reject `review.pr`, `review.commit`, `review.tools`, `context.compact`, `session.rename`, model actions, malformed ids, stale ids, and unreviewed prefixes.
 - Automated evidence covers descriptor shape and handler options in `test/host-actions.test.ts`, parser coverage in the existing review suite, local RPC review invocation reaching git target validation in `test/rpc-transport-client.test.ts`, and Iroh allowlist coverage in `test/remote-iroh-core.test.ts`.
 
+## Resolved 2026-06-23: Fast Thinking Action in Shared Registry
+
+D.4 implementation adds the A.4 first model-speed action as `thinking.fast_mode`.
+
+Concrete behavior:
+
+- `thinking.fast_mode` is a shared built-in action with toggle presentation in the Model group, a required boolean `enabled` argument, boolean descriptor state, `streamingBehavior: "disabled"`, and `remoteSafe: true`.
+- The action is session-local and non-persistent. Enabling captures the current thinking level as a restore marker, then applies the fastest supported lower thinking level in priority order `off`, `minimal`, `low`.
+- If the current model has no lower supported Fast mode target, the descriptor is disabled with a host-owned reason. Non-reasoning models and models whose lower thinking levels are explicitly unsupported therefore do not expose a runnable toggle.
+- Disabling restores the captured thinking level through the normal host clamp path. It does not persist defaults and does not switch models.
+- Manual thinking-level changes, model changes, scoped-model changes, profile-driven thinking resets, and registry refresh fallback paths clear the session-local Fast mode restore marker so the explicit host/user choice becomes current session state.
+- Descriptors and invocation responses expose only bounded toggle metadata, current boolean state, disabled reason, and status text. They never expose model catalogs, provider matrices, cost data, auth state, profile names, scoped model lists, or raw model/provider metadata.
+- Iroh `invoke_ui_action` now forwards the exact `thinking.fast_mode` id in addition to the reviewed session and review ids plus projected dynamic ids. Direct remote `get_available_models`, `set_model`, `set_thinking_level`, and `cycle_thinking_level` remain blocked.
+- Automated evidence covers descriptor shape, supported/unsupported thinking targets, remote-safe invocation, state refresh after `get_state`/`get_ui_actions`, manual direct thinking changes clearing Fast mode state, and Iroh allowlist/blocklist coverage.
+
 ## Host Implementation Plan
 
 ### Phase A: Design and Inventory

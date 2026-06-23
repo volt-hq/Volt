@@ -78,6 +78,36 @@ describe("AgentSession model and extension characterization", () => {
 		expect(harness.session.cycleThinkingLevel()).toBeUndefined();
 	});
 
+	it("clears the Fast mode restore marker on manual model and thinking changes", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "faux-1", name: "One", reasoning: true },
+				{ id: "faux-2", name: "Two", reasoning: true },
+			],
+		});
+		harnesses.push(harness);
+		const modelOne = harness.getModel("faux-1")!;
+		const modelTwo = harness.getModel("faux-2")!;
+
+		harness.session.setFastModeRestoreThinkingLevel("high");
+		harness.session.setThinkingLevel("low", { persistDefault: false, preserveFastMode: true });
+		expect(harness.session.fastModeRestoreThinkingLevel).toBe("high");
+
+		harness.session.setThinkingLevel("medium", { persistDefault: false });
+		expect(harness.session.fastModeRestoreThinkingLevel).toBeUndefined();
+
+		harness.session.setFastModeRestoreThinkingLevel("high");
+		await harness.session.setModel(modelTwo, { persistDefault: false });
+		expect(harness.session.fastModeRestoreThinkingLevel).toBeUndefined();
+
+		harness.session.setFastModeRestoreThinkingLevel("high");
+		harness.session.setScopedModels([{ model: modelOne }] as Array<{
+			model: Model<string>;
+			thinkingLevel?: ThinkingLevel;
+		}>);
+		expect(harness.session.fastModeRestoreThinkingLevel).toBeUndefined();
+	});
+
 	it("throws when setModel is called without configured auth", async () => {
 		const harness = await createHarness({
 			models: [

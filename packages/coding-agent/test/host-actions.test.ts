@@ -1,3 +1,5 @@
+import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
+import type { Api, Model, ThinkingLevelMap } from "@earendil-works/volt-ai";
 import { describe, expect, test, vi } from "vitest";
 import {
 	CONTEXT_COMPACT_ACTION_ID,
@@ -11,6 +13,7 @@ import {
 	SESSION_NEW_SLASH_ALIAS,
 	SESSION_RENAME_ACTION_ID,
 	SESSION_RENAME_SLASH_ALIAS,
+	THINKING_FAST_MODE_ACTION_ID,
 } from "../src/core/host-actions.ts";
 
 describe("HostActionRegistry", () => {
@@ -121,6 +124,7 @@ describe("HostActionRegistry", () => {
 			RUN_CANCEL_ACTION_ID,
 			CONTEXT_COMPACT_ACTION_ID,
 			SESSION_RENAME_ACTION_ID,
+			THINKING_FAST_MODE_ACTION_ID,
 			REVIEW_UNCOMMITTED_ACTION_ID,
 			REVIEW_BRANCH_ACTION_ID,
 		]);
@@ -176,6 +180,109 @@ describe("HostActionRegistry", () => {
 		expect(abortRun).toHaveBeenCalledOnce();
 		expect(compactContext).toHaveBeenCalledWith("preserve todo list");
 		expect(renameSession).toHaveBeenCalledWith("D.2 work");
+	});
+
+	test("registers Fast mode as a remote-safe session-local thinking toggle", async () => {
+		let thinkingLevel: ThinkingLevel = "high";
+		let fastModeRestoreThinkingLevel: ThinkingLevel | undefined;
+		const setThinkingLevel = vi.fn(
+			(level: ThinkingLevel, _options?: { persistDefault?: boolean; preserveFastMode?: boolean }) => {
+				thinkingLevel = level;
+			},
+		);
+		const setFastModeRestoreThinkingLevel = vi.fn((level: ThinkingLevel | undefined) => {
+			fastModeRestoreThinkingLevel = level;
+		});
+		const session = {
+			isStreaming: false,
+			isCompacting: false,
+			model: createModel({ reasoning: true }),
+			get thinkingLevel() {
+				return thinkingLevel;
+			},
+			get fastModeRestoreThinkingLevel() {
+				return fastModeRestoreThinkingLevel;
+			},
+		};
+		const context = {
+			session,
+			abortRun: vi.fn(async () => {}),
+			compactContext: vi.fn(async () => createCompactionResult()),
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			renameSession: vi.fn(() => {}),
+			setThinkingLevel,
+			setFastModeRestoreThinkingLevel,
+		};
+		const registry = registerBuiltinHostActions(new HostActionRegistry());
+
+		expect(registry.getDescriptor(THINKING_FAST_MODE_ACTION_ID, context)).toEqual(
+			expect.objectContaining({
+				id: THINKING_FAST_MODE_ACTION_ID,
+				label: "Fast mode",
+				category: "model",
+				presentation: { kind: "toggle", group: "Model", priority: 100 },
+				enabled: true,
+				remoteSafe: true,
+				streamingBehavior: "disabled",
+				args: [expect.objectContaining({ name: "enabled", type: "boolean", required: true })],
+				state: { type: "boolean", value: false, label: "Normal reasoning" },
+			}),
+		);
+
+		await expect(
+			registry.invoke(THINKING_FAST_MODE_ACTION_ID, context, { enabled: true }, { requireRemoteSafe: true }),
+		).resolves.toEqual({
+			action: THINKING_FAST_MODE_ACTION_ID,
+			status: "completed",
+			state: { type: "boolean", value: true, label: "Fast: thinking off" },
+			stateChanged: true,
+			actionsChanged: true,
+			message: "Fast mode enabled: thinking off",
+		});
+		expect(setThinkingLevel).toHaveBeenCalledWith("off", { persistDefault: false, preserveFastMode: true });
+		expect(setFastModeRestoreThinkingLevel).toHaveBeenCalledWith("high");
+
+		await expect(
+			registry.invoke(THINKING_FAST_MODE_ACTION_ID, context, { enabled: false }, { requireRemoteSafe: true }),
+		).resolves.toEqual({
+			action: THINKING_FAST_MODE_ACTION_ID,
+			status: "completed",
+			state: { type: "boolean", value: false, label: "Normal reasoning" },
+			stateChanged: true,
+			actionsChanged: true,
+			message: "Fast mode disabled: restored high thinking",
+		});
+		expect(setThinkingLevel).toHaveBeenLastCalledWith("high", { persistDefault: false, preserveFastMode: true });
+		expect(setFastModeRestoreThinkingLevel).toHaveBeenLastCalledWith(undefined);
+	});
+
+	test("disables Fast mode when no lower supported thinking level exists", async () => {
+		const registry = registerBuiltinHostActions(new HostActionRegistry());
+		const context = {
+			session: {
+				isStreaming: false,
+				isCompacting: false,
+				model: createModel({ reasoning: true, thinkingLevelMap: { off: null, minimal: null } }),
+				thinkingLevel: "low" as ThinkingLevel,
+			},
+			abortRun: vi.fn(async () => {}),
+			compactContext: vi.fn(async () => createCompactionResult()),
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			renameSession: vi.fn(() => {}),
+			setThinkingLevel: vi.fn(() => {}),
+			setFastModeRestoreThinkingLevel: vi.fn(() => {}),
+		};
+
+		expect(registry.getDescriptor(THINKING_FAST_MODE_ACTION_ID, context)).toEqual(
+			expect.objectContaining({
+				enabled: false,
+				disabledReason: "Current model is already at its fastest supported thinking level.",
+				state: { type: "boolean", value: false, label: "Normal reasoning" },
+			}),
+		);
+		await expect(registry.invoke(THINKING_FAST_MODE_ACTION_ID, context, { enabled: true })).rejects.toThrow(
+			"Current model is already at its fastest supported thinking level.",
+		);
 	});
 
 	test("registers review actions as remote-safe cards with shared handlers", async () => {
@@ -273,6 +380,23 @@ describe("HostActionRegistry", () => {
 		);
 		await expect(
 			registry.invoke(
+				THINKING_FAST_MODE_ACTION_ID,
+				{
+					...idleContext,
+					session: {
+						isStreaming: false,
+						isCompacting: false,
+						model: createModel({ reasoning: true }),
+						thinkingLevel: "high",
+					},
+					setThinkingLevel: vi.fn(() => {}),
+					setFastModeRestoreThinkingLevel: vi.fn(() => {}),
+				},
+				{ enabled: "yes" },
+			),
+		).rejects.toThrow('UI action argument "enabled" must be a boolean');
+		await expect(
+			registry.invoke(
 				REVIEW_BRANCH_ACTION_ID,
 				{
 					...idleContext,
@@ -289,5 +413,26 @@ function createCompactionResult() {
 		summary: "summary",
 		firstKeptEntryId: "entry-1",
 		tokensBefore: 100,
+	};
+}
+
+function createModel(options: { reasoning?: boolean; thinkingLevelMap?: ThinkingLevelMap } = {}): Model<Api> {
+	return {
+		id: "faux-fast",
+		name: "Faux Fast",
+		api: "openai-responses",
+		provider: "openai",
+		baseUrl: "https://example.test",
+		reasoning: options.reasoning ?? false,
+		thinkingLevelMap: options.thinkingLevelMap,
+		input: ["text"],
+		cost: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		},
+		contextWindow: 128_000,
+		maxTokens: 4096,
 	};
 }

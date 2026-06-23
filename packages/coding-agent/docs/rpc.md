@@ -271,7 +271,7 @@ Messages are `AgentMessage` objects (see [Message Types](#message-types)).
 
 Native UI action commands let typed clients discover host-owned actions for native cards, buttons, toggles, pickers, and command palettes. They are distinct from raw slash command strings: slash commands are presentation aliases, while action ids are the invocation contract.
 
-The current local RPC implementation exposes the v1 protocol shape, sanitized palette descriptors, shared built-in actions, review cards, and prompt-like invocation for extension commands, prompt templates, and skills. Iroh remote transports allow discovery plus `invoke_ui_action` for the currently advertised remote-safe built-in, review, projected extension command, prompt template, and skill actions. Local-only built-ins and unreviewed action ids remain blocked remotely.
+The current local RPC implementation exposes the v1 protocol shape, sanitized palette descriptors, shared built-in actions, review cards, Fast mode, and prompt-like invocation for extension commands, prompt templates, and skills. Iroh remote transports allow discovery plus `invoke_ui_action` for the currently advertised remote-safe built-in, review, Fast mode, projected extension command, prompt template, and skill actions. Local-only built-ins and unreviewed action ids remain blocked remotely.
 
 #### get_ui_capabilities
 
@@ -383,6 +383,7 @@ Built-in v1 actions currently include:
 | `run.cancel` | none | yes | Aborts the current agent operation through the same host path as `abort`; descriptors may be disabled when no run is active. |
 | `context.compact` | `/compact` | no | Runs host compaction through the same handler as the local `compact` RPC command. |
 | `session.rename` | `/name <name>` | no | Sets the current session display name through the same handler as `set_session_name`. |
+| `thinking.fast_mode` | none | yes | Session-local, non-persistent toggle that lowers current thinking to the fastest supported host-owned level and restores the captured level when disabled. |
 | `review.uncommitted` | `/review uncommitted` | yes | Reviews uncommitted changes against `HEAD`, requires confirmation remotely, uses host-owned git/model/session policy, and returns only bounded workflow status. |
 | `review.branch` | `/review branch [base]` | yes | Reviews `HEAD` against a base branch; optional `base` is validated by the host and omitted values use host auto-detection. |
 
@@ -437,8 +438,9 @@ For projected dynamic actions, invocation uses the host's existing prompt semant
 - Extension command actions invoke their registered slash command and return `handled` when the command handler completes. They do not require an `agent_end` event.
 - Prompt template and skill actions send their slash alias through host prompt expansion. While idle they return `accepted`; while the agent is streaming they require `streamingBehavior: "steer"` or `"followUp"` and return `queued`.
 - Dynamic action ids are opaque and tied to the current action catalog. After a reload, session replacement, or catalog change, clients must refresh descriptors; stale ids are rejected instead of being remapped to another action.
+- `thinking.fast_mode` uses a required boolean `enabled` argument. Enabling captures the current thinking level, applies the fastest supported lower thinking level among `off`, `minimal`, and `low`, and returns updated boolean state. Disabling restores the captured thinking level after host clamping. It never switches models, exposes model catalogs, changes scoped-model/profile settings, or persists model/thinking defaults. Manual thinking/model/profile/scoped-model changes clear the session-local restore marker.
 - Review actions run a host workflow: the host resolves git targets, applies review-model settings, runs an isolated review session with the approved tool policy, and creates a fresh session seeded with findings. Responses do not include raw diffs, review prompts, configured model names, auth state, or tool provenance. Remote review actions require confirmation and use the host-owned read-only tool set (`read`, `grep`, `find`, `ls`).
-- Over Iroh, v1 invocation is allowlist-based and forwards only exact reviewed built-in ids (`session.new`, `run.cancel`, `review.uncommitted`, `review.branch`) plus projected dynamic ids under `extension.command.*`, `prompt.template.*`, and `skill.*`. Local-only built-ins such as `context.compact`, `session.rename`, deferred review/model actions, and unreviewed prefixes are rejected with a normal RPC error.
+- Over Iroh, v1 invocation is allowlist-based and forwards only exact reviewed built-in ids (`session.new`, `run.cancel`, `thinking.fast_mode`, `review.uncommitted`, `review.branch`) plus projected dynamic ids under `extension.command.*`, `prompt.template.*`, and `skill.*`. Local-only built-ins such as `context.compact`, `session.rename`, deferred review/model actions, direct model/thinking RPC commands, and unreviewed prefixes are rejected with a normal RPC error.
 
 #### Native UI Action Security
 

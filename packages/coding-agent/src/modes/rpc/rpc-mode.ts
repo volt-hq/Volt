@@ -577,6 +577,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		renameSession: (name) => {
 			session.setSessionName(name);
 		},
+		setThinkingLevel: (level, options) => {
+			session.setThinkingLevel(level, options);
+		},
+		setFastModeRestoreThinkingLevel: (level) => {
+			session.setFastModeRestoreThinkingLevel(level);
+		},
 		runReviewAction: (target, reviewOptions) =>
 			runReviewWorkflow({
 				target,

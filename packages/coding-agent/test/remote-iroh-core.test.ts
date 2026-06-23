@@ -9,6 +9,7 @@ import {
 	RUN_CANCEL_ACTION_ID,
 	SESSION_NEW_ACTION_ID,
 	SESSION_RENAME_ACTION_ID,
+	THINKING_FAST_MODE_ACTION_ID,
 } from "../src/core/host-actions.ts";
 import {
 	assertIrohRemoteHandshakeHostIdentity,
@@ -583,6 +584,7 @@ describe("Iroh remote core helpers", () => {
 		for (const action of [
 			SESSION_NEW_ACTION_ID,
 			RUN_CANCEL_ACTION_ID,
+			THINKING_FAST_MODE_ACTION_ID,
 			REVIEW_UNCOMMITTED_ACTION_ID,
 			REVIEW_BRANCH_ACTION_ID,
 		]) {
@@ -630,6 +632,9 @@ describe("Iroh remote core helpers", () => {
 			"get_commands",
 			"get_last_assistant_text",
 			"get_available_models",
+			"set_model",
+			"set_thinking_level",
+			"cycle_thinking_level",
 		] as const) {
 			expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${command}-1`, type: command }))).toEqual({
 				allowed: false,

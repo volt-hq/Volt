@@ -1,4 +1,6 @@
 import { tmpdir } from "node:os";
+import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
+import type { Api, Model, ThinkingLevelMap } from "@earendil-works/volt-ai";
 import { describe, expect, test, vi } from "vitest";
 import type { ExtensionBindings, PromptOptions } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
@@ -11,6 +13,7 @@ import {
 	SESSION_NEW_ACTION_ID,
 	SESSION_NEW_SLASH_ALIAS,
 	SESSION_RENAME_ACTION_ID,
+	THINKING_FAST_MODE_ACTION_ID,
 } from "../src/core/host-actions.ts";
 import type { PromptTemplate } from "../src/core/prompt-templates.ts";
 import {
@@ -216,6 +219,7 @@ describe("Iroh remote RPC filter", () => {
 		for (const action of [
 			SESSION_NEW_ACTION_ID,
 			RUN_CANCEL_ACTION_ID,
+			THINKING_FAST_MODE_ACTION_ID,
 			REVIEW_UNCOMMITTED_ACTION_ID,
 			REVIEW_BRANCH_ACTION_ID,
 		]) {
@@ -264,6 +268,8 @@ describe("Iroh remote RPC filter", () => {
 			"switch_session",
 			"get_available_models",
 			"set_model",
+			"set_thinking_level",
+			"cycle_thinking_level",
 			"bash",
 			"export_html",
 		]) {
@@ -681,6 +687,7 @@ describe("runRpcMode", () => {
 			const skillAction = actions.find((action) => action.source === "skill");
 			const newSessionAction = actions.find((action) => action.id === SESSION_NEW_ACTION_ID);
 			const cancelAction = actions.find((action) => action.id === RUN_CANCEL_ACTION_ID);
+			const fastModeAction = actions.find((action) => action.id === THINKING_FAST_MODE_ACTION_ID);
 			const reviewChangesAction = actions.find((action) => action.id === REVIEW_UNCOMMITTED_ACTION_ID);
 			const reviewBranchAction = actions.find((action) => action.id === REVIEW_BRANCH_ACTION_ID);
 			expect(actions.find((action) => action.id === CONTEXT_COMPACT_ACTION_ID)).toBeUndefined();
@@ -688,11 +695,20 @@ describe("runRpcMode", () => {
 			if (!extensionAction || !promptAction || !skillAction) {
 				throw new Error("expected remote extension, prompt, and skill actions");
 			}
-			if (!newSessionAction || !cancelAction || !reviewChangesAction || !reviewBranchAction) {
+			if (!newSessionAction || !cancelAction || !fastModeAction || !reviewChangesAction || !reviewBranchAction) {
 				throw new Error("expected remote-safe built-in actions");
 			}
 			expect(newSessionAction.remoteSafe).toBe(true);
 			expect(cancelAction.remoteSafe).toBe(true);
+			expect(fastModeAction).toEqual(
+				expect.objectContaining({
+					category: "model",
+					presentation: expect.objectContaining({ kind: "toggle", group: "Model" }),
+					enabled: false,
+					remoteSafe: true,
+					state: { type: "boolean", value: false, label: "Normal reasoning" },
+				}),
+			);
 			expect(reviewChangesAction).toEqual(
 				expect.objectContaining({
 					category: "review",
@@ -748,6 +764,9 @@ describe("runRpcMode", () => {
 				actionsChanged: true,
 				message: "Run cancelled",
 			});
+			await expect(client.invokeUiAction(THINKING_FAST_MODE_ACTION_ID, { args: { enabled: true } })).rejects.toThrow(
+				"Fast mode is not available while the agent is streaming",
+			);
 			await expect(client.invokeUiAction(CONTEXT_COMPACT_ACTION_ID, { args: {} })).rejects.toThrow(
 				`UI action not available over remote host: ${CONTEXT_COMPACT_ACTION_ID}`,
 			);
@@ -844,6 +863,16 @@ describe("createInProcessRpcClient", () => {
 					slash: { name: "name", example: "/name <name>" },
 				}),
 				expect.objectContaining({
+					id: THINKING_FAST_MODE_ACTION_ID,
+					label: "Fast mode",
+					source: "builtin",
+					category: "model",
+					presentation: expect.objectContaining({ kind: "toggle", group: "Model" }),
+					enabled: false,
+					remoteSafe: true,
+					state: { type: "boolean", value: false, label: "Normal reasoning" },
+				}),
+				expect.objectContaining({
 					id: REVIEW_UNCOMMITTED_ACTION_ID,
 					label: "Review changes",
 					source: "builtin",
@@ -867,6 +896,10 @@ describe("createInProcessRpcClient", () => {
 				}),
 			]);
 			await expect(client.getUiActions("primary")).resolves.toEqual([
+				expect.objectContaining({
+					id: THINKING_FAST_MODE_ACTION_ID,
+					presentation: expect.objectContaining({ kind: "toggle" }),
+				}),
 				expect.objectContaining({
 					id: REVIEW_UNCOMMITTED_ACTION_ID,
 					presentation: expect.objectContaining({ kind: "card" }),
@@ -910,6 +943,70 @@ describe("createInProcessRpcClient", () => {
 			expect(setSessionName).toHaveBeenCalledWith("D.2");
 			await expect(client.invokeUiAction(REVIEW_UNCOMMITTED_ACTION_ID, { args: {} })).rejects.toThrow(
 				"Review is not available while the agent is streaming",
+			);
+		} finally {
+			await client.stop();
+		}
+		expect(dispose).toHaveBeenCalledOnce();
+	});
+
+	test("invokes native Fast mode without changing model defaults or exposing model lists", async () => {
+		const dispose = vi.fn(async () => {});
+		const runtimeHost = createRuntimeHost(dispose, async () => {}, {
+			model: createModel({ reasoning: true }),
+			thinkingLevel: "high",
+		});
+		const client = await createInProcessRpcClient(runtimeHost);
+
+		try {
+			const actions = await client.getUiActions("all");
+			expect(actions.find((action) => action.id === THINKING_FAST_MODE_ACTION_ID)).toEqual(
+				expect.objectContaining({
+					enabled: true,
+					state: { type: "boolean", value: false, label: "Normal reasoning" },
+				}),
+			);
+
+			await expect(
+				client.invokeUiAction(THINKING_FAST_MODE_ACTION_ID, { args: { enabled: true } }),
+			).resolves.toEqual({
+				action: THINKING_FAST_MODE_ACTION_ID,
+				status: "completed",
+				state: { type: "boolean", value: true, label: "Fast: thinking off" },
+				stateChanged: true,
+				actionsChanged: true,
+				message: "Fast mode enabled: thinking off",
+			});
+			await expect(client.getState()).resolves.toMatchObject({ thinkingLevel: "off" });
+			expect(
+				(await client.getUiActions("all")).find((action) => action.id === THINKING_FAST_MODE_ACTION_ID),
+			).toEqual(
+				expect.objectContaining({
+					state: { type: "boolean", value: true, label: "Fast: thinking off" },
+				}),
+			);
+
+			await expect(
+				client.invokeUiAction(THINKING_FAST_MODE_ACTION_ID, { args: { enabled: false } }),
+			).resolves.toEqual({
+				action: THINKING_FAST_MODE_ACTION_ID,
+				status: "completed",
+				state: { type: "boolean", value: false, label: "Normal reasoning" },
+				stateChanged: true,
+				actionsChanged: true,
+				message: "Fast mode disabled: restored high thinking",
+			});
+			await expect(client.getState()).resolves.toMatchObject({ thinkingLevel: "high" });
+
+			await client.invokeUiAction(THINKING_FAST_MODE_ACTION_ID, { args: { enabled: true } });
+			await client.setThinkingLevel("medium");
+			await expect(client.getState()).resolves.toMatchObject({ thinkingLevel: "medium" });
+			expect(
+				(await client.getUiActions("all")).find((action) => action.id === THINKING_FAST_MODE_ACTION_ID),
+			).toEqual(
+				expect.objectContaining({
+					state: { type: "boolean", value: false, label: "Normal reasoning" },
+				}),
 			);
 		} finally {
 			await client.stop();
@@ -993,6 +1090,7 @@ describe("createInProcessRpcClient", () => {
 				RUN_CANCEL_ACTION_ID,
 				CONTEXT_COMPACT_ACTION_ID,
 				SESSION_RENAME_ACTION_ID,
+				THINKING_FAST_MODE_ACTION_ID,
 				REVIEW_UNCOMMITTED_ACTION_ID,
 				REVIEW_BRANCH_ACTION_ID,
 			]);
@@ -1025,6 +1123,7 @@ describe("createInProcessRpcClient", () => {
 				expect.objectContaining({ name: "arguments", type: "string", hint: "paste failing test output" }),
 			]);
 			expect(await client.getUiActions("primary")).toEqual([
+				expect.objectContaining({ id: THINKING_FAST_MODE_ACTION_ID }),
 				expect.objectContaining({ id: REVIEW_UNCOMMITTED_ACTION_ID }),
 				expect.objectContaining({ id: REVIEW_BRANCH_ACTION_ID }),
 			]);
@@ -1331,13 +1430,23 @@ function createRuntimeHost(
 		cwd?: string;
 		isCompacting?: boolean;
 		isStreaming?: boolean;
+		model?: Model<Api>;
 		newSession?: (options?: { parentSession?: string }) => Promise<{ cancelled: boolean }>;
 		prompt?: (message: string, options?: PromptOptions) => Promise<void>;
 		prompts?: PromptTemplate[];
+		thinkingLevel?: ThinkingLevel;
+		fastModeRestoreThinkingLevel?: ThinkingLevel;
+		setThinkingLevel?: (
+			level: ThinkingLevel,
+			options?: { persistDefault?: boolean; preserveFastMode?: boolean },
+		) => void;
+		setFastModeRestoreThinkingLevel?: (level: ThinkingLevel | undefined) => void;
 		setSessionName?: (name: string) => void;
 		skills?: Skill[];
 	} = {},
 ): AgentSessionRuntime {
+	let thinkingLevel = resources.thinkingLevel ?? "off";
+	let fastModeRestoreThinkingLevel = resources.fastModeRestoreThinkingLevel;
 	const authStorage = {};
 	const modelRegistry = {
 		authStorage,
@@ -1351,6 +1460,19 @@ function createRuntimeHost(
 	const resourceLoader = {
 		getSkills: vi.fn(() => ({ skills: resources.skills ?? [], diagnostics: [] })),
 	};
+	const setThinkingLevel = vi.fn(
+		(level: ThinkingLevel, options?: { persistDefault?: boolean; preserveFastMode?: boolean }) => {
+			if (options?.preserveFastMode !== true) {
+				fastModeRestoreThinkingLevel = undefined;
+			}
+			thinkingLevel = level;
+			resources.setThinkingLevel?.(level, options);
+		},
+	);
+	const setFastModeRestoreThinkingLevel = vi.fn((level: ThinkingLevel | undefined) => {
+		fastModeRestoreThinkingLevel = level;
+		resources.setFastModeRestoreThinkingLevel?.(level);
+	});
 	return {
 		cwd: resources.cwd ?? tmpdir(),
 		services: {
@@ -1362,8 +1484,15 @@ function createRuntimeHost(
 			agent: {
 				subscribe: vi.fn(() => () => {}),
 			},
-			model: undefined,
-			thinkingLevel: "off",
+			get model() {
+				return resources.model;
+			},
+			get thinkingLevel() {
+				return thinkingLevel;
+			},
+			get fastModeRestoreThinkingLevel() {
+				return fastModeRestoreThinkingLevel;
+			},
 			isStreaming: resources.isStreaming ?? false,
 			isCompacting: resources.isCompacting ?? false,
 			steeringMode: "one-at-a-time",
@@ -1389,6 +1518,8 @@ function createRuntimeHost(
 			sendCustomMessage: vi.fn(async () => {}),
 			abort: resources.abort ?? vi.fn(async () => {}),
 			compact: resources.compact ?? vi.fn(async () => createCompactionResult()),
+			setThinkingLevel,
+			setFastModeRestoreThinkingLevel,
 			setSessionName: resources.setSessionName ?? vi.fn(() => {}),
 		},
 		newSession: resources.newSession ?? vi.fn(async () => ({ cancelled: true })),
@@ -1437,5 +1568,26 @@ function createCommand(
 		sourceInfo,
 		getArgumentCompletions: vi.fn(() => []),
 		handler: vi.fn(async () => {}),
+	};
+}
+
+function createModel(options: { reasoning?: boolean; thinkingLevelMap?: ThinkingLevelMap } = {}): Model<Api> {
+	return {
+		id: "faux-fast",
+		name: "Faux Fast",
+		api: "openai-responses",
+		provider: "openai",
+		baseUrl: "https://example.test",
+		reasoning: options.reasoning ?? false,
+		thinkingLevelMap: options.thinkingLevelMap,
+		input: ["text"],
+		cost: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		},
+		contextWindow: 128_000,
+		maxTokens: 4096,
 	};
 }

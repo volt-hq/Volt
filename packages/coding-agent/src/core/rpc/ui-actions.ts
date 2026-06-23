@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
+import type { Api, Model } from "@earendil-works/volt-ai";
 import type { ResolvedCommand } from "../extensions/types.ts";
 import { BUILTIN_HOST_ACTION_REGISTRY } from "../host-actions.ts";
 import type { PromptTemplate } from "../prompt-templates.ts";
@@ -27,6 +29,9 @@ export interface UiActionDiscoverySession {
 	};
 	isCompacting?: boolean;
 	isStreaming?: boolean;
+	model?: Model<Api>;
+	thinkingLevel?: ThinkingLevel;
+	fastModeRestoreThinkingLevel?: ThinkingLevel;
 	promptTemplates: ReadonlyArray<PromptTemplate>;
 	resourceLoader: Pick<ResourceLoader, "getSkills">;
 }
@@ -63,6 +68,9 @@ export function getUiActionDescriptors(
 		session: {
 			isCompacting: session.isCompacting ?? false,
 			isStreaming: session.isStreaming ?? false,
+			model: session.model,
+			thinkingLevel: session.thinkingLevel,
+			fastModeRestoreThinkingLevel: session.fastModeRestoreThinkingLevel,
 		},
 	});
 	const descriptors =

@@ -2655,6 +2655,12 @@ export class InteractiveMode {
 			renameSession: (name) => {
 				this.session.setSessionName(name);
 			},
+			setThinkingLevel: (level, options) => {
+				this.session.setThinkingLevel(level, options);
+			},
+			setFastModeRestoreThinkingLevel: (level) => {
+				this.session.setFastModeRestoreThinkingLevel(level);
+			},
 			runReviewAction: (target, reviewOptions) =>
 				this.runInteractiveReviewWorkflow(target, {
 					tools: reviewOptions.remote ? REMOTE_REVIEW_TOOL_NAMES : this.getReviewToolsForRun(),

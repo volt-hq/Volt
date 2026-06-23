@@ -245,6 +245,7 @@ interface ToolDefinitionEntry {
 
 interface DefaultPersistenceOptions {
 	persistDefault?: boolean;
+	preserveFastMode?: boolean;
 }
 
 // ============================================================================
@@ -318,6 +319,7 @@ export class AgentSession {
 
 	// Model registry for API key resolution
 	private _modelRegistry: ModelRegistry;
+	private _fastModeRestoreThinkingLevel: ThinkingLevel | undefined;
 
 	// LSP diagnostics manager (created when lsp.enabled is set)
 	private _lspManager?: LspManager;
@@ -784,6 +786,16 @@ export class AgentSession {
 		return this.agent.state.thinkingLevel;
 	}
 
+	/** Thinking level to restore when session-local Fast mode is disabled. */
+	get fastModeRestoreThinkingLevel(): ThinkingLevel | undefined {
+		return this._fastModeRestoreThinkingLevel;
+	}
+
+	/** Set the session-local Fast mode restore marker. */
+	setFastModeRestoreThinkingLevel(level: ThinkingLevel | undefined): void {
+		this._fastModeRestoreThinkingLevel = level;
+	}
+
 	/** Whether agent is currently streaming a response */
 	get isStreaming(): boolean {
 		return this.agent.state.isStreaming;
@@ -893,6 +905,7 @@ export class AgentSession {
 
 	/** Update scoped models for cycling */
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
+		this._clearFastModeUnlessPreserved();
 		this._scopedModels = scopedModels;
 	}
 
@@ -1592,6 +1605,7 @@ export class AgentSession {
 	 * Saves to session and settings only if the level actually changes. Settings persistence can be disabled.
 	 */
 	setThinkingLevel(level: ThinkingLevel, options?: DefaultPersistenceOptions): void {
+		this._clearFastModeUnlessPreserved(options);
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
 
@@ -1660,6 +1674,12 @@ export class AgentSession {
 
 	private _clampThinkingLevel(level: ThinkingLevel, _availableLevels: ThinkingLevel[]): ThinkingLevel {
 		return this.model ? (clampThinkingLevel(this.model, level) as ThinkingLevel) : "off";
+	}
+
+	private _clearFastModeUnlessPreserved(options?: DefaultPersistenceOptions): void {
+		if (options?.preserveFastMode !== true) {
+			this._fastModeRestoreThinkingLevel = undefined;
+		}
 	}
 
 	// =========================================================================

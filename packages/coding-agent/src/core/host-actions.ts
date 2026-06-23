@@ -1,3 +1,6 @@
+import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
+import type { Api, Model } from "@earendil-works/volt-ai";
+import { getSupportedThinkingLevels } from "@earendil-works/volt-ai";
 import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
 import type { ReviewTarget, ReviewWorkflowResult } from "./review.ts";
 import type {
@@ -5,6 +8,7 @@ import type {
 	UiActionDescriptor,
 	UiActionInvocationResponse,
 	UiActionSlashAlias,
+	UiActionStateDescriptor,
 } from "./rpc/types.ts";
 
 type RuntimeNewSession = AgentSessionRuntime["newSession"];
@@ -17,6 +21,9 @@ export type HostActionCompactResult = Awaited<ReturnType<RuntimeSession["compact
 export interface HostActionSessionState {
 	isStreaming: boolean;
 	isCompacting: boolean;
+	model?: Model<Api>;
+	thinkingLevel?: ThinkingLevel;
+	fastModeRestoreThinkingLevel?: ThinkingLevel;
 }
 
 export interface HostActionDescriptorContext {
@@ -29,6 +36,8 @@ export interface HostActionInvocationContext extends HostActionDescriptorContext
 	newSession(options?: HostActionNewSessionOptions): Promise<HostActionNewSessionResult>;
 	afterSessionSwitch?: () => Promise<void>;
 	renameSession(name: string): void;
+	setThinkingLevel?(level: ThinkingLevel, options?: { persistDefault?: boolean; preserveFastMode?: boolean }): void;
+	setFastModeRestoreThinkingLevel?(level: ThinkingLevel | undefined): void;
 	runReviewAction?(target: ReviewTarget, options: HostActionReviewOptions): Promise<ReviewWorkflowResult>;
 }
 
@@ -53,6 +62,7 @@ export interface HostActionDefinition {
 	requiresConfirmation?: boolean;
 	streamingBehavior?: UiActionDescriptor["streamingBehavior"];
 	remoteSafe: boolean;
+	state?: UiActionStateDescriptor | ((context: HostActionDescriptorContext) => UiActionStateDescriptor | undefined);
 	slashAliases?: ReadonlyArray<UiActionSlashAlias>;
 	slash?: UiActionSlashAlias;
 	availability?: (context: HostActionDescriptorContext) => HostActionAvailability;
@@ -81,6 +91,7 @@ export const SESSION_NEW_ACTION_ID = "session.new";
 export const SESSION_NEW_SLASH_ALIAS = "clear";
 export const SESSION_RENAME_ACTION_ID = "session.rename";
 export const SESSION_RENAME_SLASH_ALIAS = "name";
+export const THINKING_FAST_MODE_ACTION_ID = "thinking.fast_mode";
 
 export interface HostActionReviewOptions {
 	remote: boolean;
@@ -90,6 +101,7 @@ export interface HostActionReviewOptions {
 const REMOTE_SAFE_BUILTIN_HOST_ACTION_IDS = new Set<string>([
 	SESSION_NEW_ACTION_ID,
 	RUN_CANCEL_ACTION_ID,
+	THINKING_FAST_MODE_ACTION_ID,
 	REVIEW_UNCOMMITTED_ACTION_ID,
 	REVIEW_BRANCH_ACTION_ID,
 ]);
@@ -352,6 +364,28 @@ export function registerBuiltinHostActions(registry: HostActionRegistry): HostAc
 		handler: invokeSessionRenameAction,
 	});
 	registry.register({
+		id: THINKING_FAST_MODE_ACTION_ID,
+		label: "Fast mode",
+		description: "Prefer lower-latency thinking for the current session.",
+		category: "model",
+		presentation: { kind: "toggle", group: "Model", priority: 100 },
+		args: [
+			{
+				name: "enabled",
+				label: "Enabled",
+				type: "boolean",
+				required: true,
+			},
+		],
+		destructive: false,
+		requiresConfirmation: false,
+		streamingBehavior: "disabled",
+		remoteSafe: true,
+		state: createThinkingFastModeState,
+		availability: thinkingFastModeAvailability,
+		handler: invokeThinkingFastModeAction,
+	});
+	registry.register({
 		id: REVIEW_UNCOMMITTED_ACTION_ID,
 		label: "Review changes",
 		description: "Review uncommitted workspace changes.",
@@ -478,6 +512,70 @@ async function invokeSessionRenameAction(
 	};
 }
 
+function invokeThinkingFastModeAction(
+	context: HostActionInvocationContext,
+	args: unknown,
+): Promise<UiActionInvocationResponse> {
+	return Promise.resolve(runThinkingFastModeHostAction(context, getRequiredBooleanArg(args, "enabled")));
+}
+
+export function runThinkingFastModeHostAction(
+	context: HostActionInvocationContext,
+	enabled: boolean,
+): UiActionInvocationResponse {
+	if (!context.setThinkingLevel || !context.setFastModeRestoreThinkingLevel) {
+		throw new Error("Fast mode is not available in this host");
+	}
+
+	const isEnabled = isThinkingFastModeEnabled(context.session);
+	if (enabled) {
+		if (isEnabled) {
+			return {
+				action: THINKING_FAST_MODE_ACTION_ID,
+				status: "completed",
+				state: createThinkingFastModeState(context),
+				stateChanged: false,
+				actionsChanged: false,
+				message: "Fast mode already enabled",
+			};
+		}
+
+		const restoreLevel = context.session.thinkingLevel;
+		const targetLevel = getFastModeTargetThinkingLevel(context.session);
+		if (!restoreLevel || !targetLevel) {
+			throw new Error(getThinkingFastModeDisabledReason(context.session));
+		}
+
+		context.setThinkingLevel(targetLevel, { persistDefault: false, preserveFastMode: true });
+		context.setFastModeRestoreThinkingLevel(restoreLevel);
+		return {
+			action: THINKING_FAST_MODE_ACTION_ID,
+			status: "completed",
+			state: createThinkingFastModeState(context),
+			stateChanged: true,
+			actionsChanged: true,
+			message: `Fast mode enabled: ${formatThinkingLevelLabel(context.session.thinkingLevel ?? targetLevel)}`,
+		};
+	}
+
+	const restoreLevel = context.session.fastModeRestoreThinkingLevel;
+	if (restoreLevel !== undefined) {
+		context.setThinkingLevel(restoreLevel, { persistDefault: false, preserveFastMode: true });
+	}
+	context.setFastModeRestoreThinkingLevel(undefined);
+	return {
+		action: THINKING_FAST_MODE_ACTION_ID,
+		status: "completed",
+		state: createThinkingFastModeState(context),
+		stateChanged: restoreLevel !== undefined,
+		actionsChanged: restoreLevel !== undefined,
+		message:
+			restoreLevel === undefined
+				? "Fast mode already disabled"
+				: `Fast mode disabled: restored ${formatThinkingLevelLabel(context.session.thinkingLevel ?? restoreLevel)}`,
+	};
+}
+
 async function invokeReviewUncommittedAction(
 	context: HostActionInvocationContext,
 	args: unknown,
@@ -508,6 +606,23 @@ function reviewAvailability(context: HostActionDescriptorContext): HostActionAva
 	}
 	if (context.session.isCompacting) {
 		return { enabled: false, disabledReason: "Review is not available while compaction is running" };
+	}
+	return { enabled: true };
+}
+
+function thinkingFastModeAvailability(context: HostActionDescriptorContext): HostActionAvailability {
+	if (context.session.isStreaming) {
+		return { enabled: false, disabledReason: "Fast mode is not available while the agent is streaming" };
+	}
+	if (context.session.isCompacting) {
+		return { enabled: false, disabledReason: "Fast mode is not available while compaction is running" };
+	}
+	if (isThinkingFastModeEnabled(context.session)) {
+		return { enabled: true };
+	}
+	const targetLevel = getFastModeTargetThinkingLevel(context.session);
+	if (!targetLevel) {
+		return { enabled: false, disabledReason: getThinkingFastModeDisabledReason(context.session) };
 	}
 	return { enabled: true };
 }
@@ -548,7 +663,8 @@ function createReviewInvocationResponse(action: string, result: ReviewWorkflowRe
 
 function createDescriptor(action: HostActionDefinition, context: HostActionDescriptorContext): UiActionDescriptor {
 	const availability = action.availability?.(context) ?? { enabled: true };
-	return {
+	const state = typeof action.state === "function" ? action.state(context) : action.state;
+	const descriptor: UiActionDescriptor = {
 		schemaVersion: 1,
 		id: action.id,
 		label: action.label,
@@ -566,6 +682,62 @@ function createDescriptor(action: HostActionDefinition, context: HostActionDescr
 		remoteSafe: action.remoteSafe,
 		slash: action.slashAliases?.[0] ?? action.slash,
 	};
+	if (state) {
+		descriptor.state = state;
+	}
+	return descriptor;
+}
+
+const THINKING_LEVEL_ORDER: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const FAST_MODE_TARGET_ORDER: ThinkingLevel[] = ["off", "minimal", "low"];
+
+function createThinkingFastModeState(context: HostActionDescriptorContext): UiActionStateDescriptor {
+	const enabled = isThinkingFastModeEnabled(context.session);
+	return {
+		type: "boolean",
+		value: enabled,
+		label: enabled ? `Fast: ${formatThinkingLevelLabel(context.session.thinkingLevel)}` : "Normal reasoning",
+	};
+}
+
+function isThinkingFastModeEnabled(session: HostActionSessionState): boolean {
+	return session.fastModeRestoreThinkingLevel !== undefined;
+}
+
+function getFastModeTargetThinkingLevel(session: HostActionSessionState): ThinkingLevel | undefined {
+	if (!session.model || !session.thinkingLevel) {
+		return undefined;
+	}
+	const currentRank = getThinkingLevelRank(session.thinkingLevel);
+	if (currentRank <= 0) {
+		return undefined;
+	}
+	const supportedLevels = getSupportedThinkingLevels(session.model) as ThinkingLevel[];
+	return FAST_MODE_TARGET_ORDER.find((level) => {
+		const targetRank = getThinkingLevelRank(level);
+		return supportedLevels.includes(level) && targetRank >= 0 && targetRank < currentRank;
+	});
+}
+
+function getThinkingFastModeDisabledReason(session: HostActionSessionState): string {
+	if (!session.model) {
+		return "No model is selected.";
+	}
+	if (!session.thinkingLevel) {
+		return "No thinking level is selected.";
+	}
+	return "Current model is already at its fastest supported thinking level.";
+}
+
+function getThinkingLevelRank(level: ThinkingLevel): number {
+	return THINKING_LEVEL_ORDER.indexOf(level);
+}
+
+function formatThinkingLevelLabel(level: ThinkingLevel | undefined): string {
+	if (level === undefined) {
+		return "current thinking";
+	}
+	return level === "off" ? "thinking off" : `${level} thinking`;
 }
 
 function normalizeSlashAlias(alias: string): string {
@@ -619,6 +791,30 @@ function getRequiredStringArg(args: unknown, name: string): string {
 	const value = getOptionalStringArg(args, name);
 	if (value === undefined) {
 		throw new Error(`Missing required UI action argument: ${name}`);
+	}
+	return value;
+}
+
+function getOptionalBooleanArg(args: unknown, name: string): boolean | undefined {
+	const record = getArgsRecord(args);
+	const unknownKeys = Object.keys(record).filter((key) => key !== name);
+	if (unknownKeys.length > 0) {
+		throw new Error(`Unsupported UI action argument: ${unknownKeys[0]}`);
+	}
+	const value = record[name];
+	if (value === undefined || value === null) {
+		return undefined;
+	}
+	if (typeof value !== "boolean") {
+		throw new Error(`UI action argument "${name}" must be a boolean`);
+	}
+	return value;
+}
+
+function getRequiredBooleanArg(args: unknown, name: string): boolean {
+	const value = getOptionalBooleanArg(args, name);
+	if (value === undefined) {
+		throw new Error(`UI action argument "${name}" is required`);
 	}
 	return value;
 }

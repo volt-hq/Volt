@@ -39,6 +39,7 @@
 - Added terminal QR code rendering for `volt remote host` pairing tickets.
 - Added a self-contained `volt remote host` product entrypoint backed by optional `@number0/iroh`, keeping native Iroh loading isolated from the main CLI.
 - Added transport-backed RPC clients, including an in-memory loopback transport and in-process client helper for running Volt RPC without spawning a subprocess.
+- Added a remote-safe native UI `thinking.fast_mode` toggle that lowers/restores session thinking without exposing model metadata or changing defaults.
 - Added a `swe-pruner.ts` example extension that finds task-relevant excerpts in local files through a local SWE-Pruner service, persists its settings in global or project config, and includes npm scripts for starting and stopping the local service.
 
 ### Fixed
