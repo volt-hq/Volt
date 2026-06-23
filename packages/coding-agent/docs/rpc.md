@@ -289,14 +289,14 @@ Response:
   "success": true,
   "data": {
     "protocolVersion": 1,
-    "features": ["ui_actions.v1", "ui_action_invocation.v1"],
+    "features": ["ui_actions.v1", "ui_action_invocation.v1", "ui_action_completions.v1"],
     "maxActions": 200,
     "maxDescriptorBytes": 65536
   }
 }
 ```
 
-`ui_actions.v1` means the host understands `get_ui_actions` descriptors. `ui_action_invocation.v1` means the host accepts `invoke_ui_action` for currently advertised actions. Clients must only rely on features present in this list. `ui_action_completions.v1` is reserved for later support.
+`ui_actions.v1` means the host understands `get_ui_actions` descriptors. `ui_action_invocation.v1` means the host accepts `invoke_ui_action` for currently advertised actions. `ui_action_completions.v1` means the host accepts `get_ui_action_completions` for descriptor arguments that advertise a `completion` source. Clients must only rely on features present in this list.
 
 #### get_ui_actions
 
@@ -387,6 +387,31 @@ Built-in v1 actions currently include:
 | `review.uncommitted` | `/review uncommitted` | yes | Reviews uncommitted changes against `HEAD`, requires confirmation remotely, uses host-owned git/model/session policy, and returns only bounded workflow status. |
 | `review.branch` | `/review branch [base]` | yes | Reviews `HEAD` against a base branch; optional `base` is validated by the host and omitted values use host auto-detection. |
 
+#### get_ui_action_completions
+
+Get completion options for one action argument. Clients should only call this when the descriptor argument includes a supported `completion` value. V1 currently supports extension command argument completions via `"completion": "commandArguments"`.
+
+```json
+{"type": "get_ui_action_completions", "action": "extension.command.ec_a1b2c3d4e5f6_1", "argument": "arguments", "prefix": "pr"}
+```
+
+Response:
+
+```json
+{
+  "type": "response",
+  "command": "get_ui_action_completions",
+  "success": true,
+  "data": {
+    "completions": [
+      {"value": "prod", "label": "Production", "description": "Production target"}
+    ]
+  }
+}
+```
+
+Unknown or stale action ids fail with the normal RPC error shape. Unsupported arguments or completion kinds return an empty completion list unless the argument name itself is not present in the descriptor.
+
 #### invoke_ui_action
 
 Invoke a native UI action by descriptor id.
@@ -395,7 +420,7 @@ Invoke a native UI action by descriptor id.
 {"type": "invoke_ui_action", "action": "review.uncommitted", "args": {}, "streamingBehavior": "followUp"}
 ```
 
-`args` is an optional object matching the descriptor's argument metadata. `streamingBehavior` is optional and may be `"steer"` or `"followUp"` when the descriptor allows queued invocation while the agent is streaming.
+`args` is an optional object matching the descriptor's argument metadata. V1 hosts validate the supported descriptor subset: `string` and multiline `string` values are JSON strings, `boolean` values are JSON booleans, `enum` values are strings present in `options`, and `integer` values are JSON numbers with integer values. Unknown argument names, unknown argument types, missing required values, and mismatched value types fail before invocation. `streamingBehavior` is optional and may be `"steer"` or `"followUp"` when the descriptor allows queued invocation while the agent is streaming.
 
 Unknown, stale, disabled, unauthorized, or unavailable action ids fail with the normal RPC error shape:
 ```json

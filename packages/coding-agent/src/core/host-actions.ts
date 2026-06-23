@@ -10,6 +10,7 @@ import type {
 	UiActionSlashAlias,
 	UiActionStateDescriptor,
 } from "./rpc/types.ts";
+import { validateUiActionArgs } from "./rpc/ui-action-args.ts";
 
 type RuntimeNewSession = AgentSessionRuntime["newSession"];
 type RuntimeSession = AgentSessionRuntime["session"];
@@ -207,7 +208,8 @@ export class HostActionRegistry {
 		if (!descriptor.enabled) {
 			throw new Error(descriptor.disabledReason ?? `UI action is disabled: ${actionId}`);
 		}
-		return action.handler(context, args, options);
+		const validatedArgs = validateUiActionArgs(args, descriptor.args ?? []);
+		return action.handler(context, validatedArgs, options);
 	}
 
 	invokeBySlashAlias(

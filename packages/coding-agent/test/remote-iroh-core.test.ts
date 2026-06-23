@@ -581,6 +581,17 @@ describe("Iroh remote core helpers", () => {
 			allowed: true,
 			command: dynamicInvocation,
 		});
+		const dynamicCompletion = {
+			id: "completion-1",
+			type: "get_ui_action_completions",
+			action: "skill.sk_a1b2c3d4e5f6_1",
+			argument: "arguments",
+			prefix: "crash",
+		};
+		expect(getIrohRemoteRpcFilterResult(JSON.stringify(dynamicCompletion))).toEqual({
+			allowed: true,
+			command: dynamicCompletion,
+		});
 		for (const action of [
 			SESSION_NEW_ACTION_ID,
 			RUN_CANCEL_ACTION_ID,
@@ -611,6 +622,25 @@ describe("Iroh remote core helpers", () => {
 					error: `UI action not available over remote host: ${action}`,
 				},
 			});
+			expect(
+				getIrohRemoteRpcFilterResult(
+					JSON.stringify({
+						id: `${action}-completion-1`,
+						type: "get_ui_action_completions",
+						action,
+						argument: "arguments",
+					}),
+				),
+			).toEqual({
+				allowed: false,
+				response: {
+					id: `${action}-completion-1`,
+					type: "response",
+					command: "get_ui_action_completions",
+					success: false,
+					error: `UI action not available over remote host: ${action}`,
+				},
+			});
 		}
 		expect(
 			getIrohRemoteRpcFilterResult(
@@ -622,6 +652,25 @@ describe("Iroh remote core helpers", () => {
 				id: "invoke-local",
 				type: "response",
 				command: "invoke_ui_action",
+				success: false,
+				error: "UI action not available over remote host: review.pr",
+			},
+		});
+		expect(
+			getIrohRemoteRpcFilterResult(
+				JSON.stringify({
+					id: "completion-local",
+					type: "get_ui_action_completions",
+					action: "review.pr",
+					argument: "target",
+				}),
+			),
+		).toEqual({
+			allowed: false,
+			response: {
+				id: "completion-local",
+				type: "response",
+				command: "get_ui_action_completions",
 				success: false,
 				error: "UI action not available over remote host: review.pr",
 			},

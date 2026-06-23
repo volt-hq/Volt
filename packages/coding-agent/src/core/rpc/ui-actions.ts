@@ -13,8 +13,10 @@ import type {
 	UiActionInvocationQueueBehavior,
 	UiActionInvocationResponse,
 	UiActionListScope,
+	UiActionOptionDescriptor,
 	UiActionStreamingBehavior,
 } from "./types.ts";
+import { validateUiActionArgs } from "./ui-action-args.ts";
 
 const MAX_ACTIONS = 200;
 const MAX_LABEL_LENGTH = 80;
@@ -55,6 +57,7 @@ interface UiActionCatalogEntry {
 	descriptor: UiActionDescriptor;
 	promptName: string;
 	source: "extension" | "prompt" | "skill";
+	command?: ResolvedCommand;
 }
 
 const catalogStates = new WeakMap<UiActionDiscoverySession, UiActionCatalogState>();
@@ -110,7 +113,7 @@ export function createUiActionInvocationPlan(
 		throw new Error(entry.descriptor.disabledReason ?? `UI action is disabled: ${options.action}`);
 	}
 
-	const rawArguments = getRawArguments(options.args);
+	const rawArguments = getRawArguments(options.args, entry.descriptor.args ?? []);
 	const promptText = createPromptText(entry.promptName, rawArguments);
 	if (entry.source === "extension") {
 		return {
@@ -144,6 +147,52 @@ export function createUiActionInvocationPlan(
 	};
 }
 
+export async function getUiActionCompletions(
+	session: UiActionDiscoverySession,
+	options: {
+		action: string;
+		argument: string;
+		prefix?: unknown;
+		requireRemoteSafe?: boolean;
+	},
+): Promise<UiActionOptionDescriptor[]> {
+	if (typeof options.action !== "string" || options.action.length === 0) {
+		throw new Error("UI action id must be a non-empty string");
+	}
+	if (typeof options.argument !== "string" || options.argument.length === 0) {
+		throw new Error("UI action argument name must be a non-empty string");
+	}
+	if (options.prefix !== undefined && typeof options.prefix !== "string") {
+		throw new Error("UI action completion prefix must be a string");
+	}
+
+	const entry = getUiActionCatalog(session).find((candidate) => candidate.descriptor.id === options.action);
+	if (!entry) {
+		throw new Error(`UI action not available: ${options.action}`);
+	}
+	if (options.requireRemoteSafe && !entry.descriptor.remoteSafe) {
+		throw new Error(`UI action not available over remote host: ${options.action}`);
+	}
+
+	const argument = (entry.descriptor.args ?? []).find((candidate) => candidate.name === options.argument);
+	if (!argument) {
+		throw new Error(`UI action argument not available: ${options.argument}`);
+	}
+	if (argument.completion !== "commandArguments" || !entry.command?.getArgumentCompletions) {
+		return [];
+	}
+
+	const completions = await entry.command.getArgumentCompletions(options.prefix ?? "");
+	return (completions ?? [])
+		.map((completion) => ({
+			value: boundedDisplayString(completion.value, MAX_LABEL_LENGTH) ?? "",
+			label: boundedDisplayString(completion.label, MAX_LABEL_LENGTH),
+			description: boundedDisplayString(completion.description, MAX_DESCRIPTION_LENGTH),
+		}))
+		.filter((completion) => completion.value.length > 0)
+		.slice(0, 50);
+}
+
 function getUiActionCatalog(session: UiActionDiscoverySession): UiActionCatalogEntry[] {
 	const token = getCatalogToken(session);
 	const extensionActions = session.extensionRunner
@@ -164,6 +213,7 @@ function createExtensionCommandAction(command: ResolvedCommand, index: number, t
 	return {
 		promptName: command.invocationName,
 		source: "extension",
+		command,
 		descriptor: {
 			schemaVersion: 1,
 			id: `extension.command.${opaqueId("ec", token, index)}`,
@@ -297,17 +347,11 @@ function sourceFingerprint(sourceInfo: SourceInfo): Record<string, string | unde
 	};
 }
 
-function getRawArguments(args: unknown): string {
-	if (args === undefined) {
-		return "";
-	}
-	if (typeof args !== "object" || args === null || Array.isArray(args)) {
-		throw new Error("UI action args must be an object");
-	}
-	const record = args as Record<string, unknown>;
+function getRawArguments(args: unknown, descriptors: ReadonlyArray<UiActionArgumentDescriptor>): string {
+	const record = validateUiActionArgs(args, descriptors);
 	const unknownKeys = Object.keys(record).filter((key) => key !== "arguments");
 	if (unknownKeys.length > 0) {
-		throw new Error(`Unsupported UI action argument: ${unknownKeys[0]}`);
+		throw new Error(`Unsupported prompt-like UI action argument: ${unknownKeys[0]}`);
 	}
 	const value = record.arguments;
 	if (value === undefined || value === null) {

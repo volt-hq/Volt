@@ -74,29 +74,8 @@ export function getIrohRemoteRpcFilterResult(line: string): IrohRemoteRpcFilterR
 		};
 	}
 
-	if (command.type === "invoke_ui_action") {
-		const action = command.action;
-		if (typeof action !== "string" || action.length === 0) {
-			return {
-				allowed: false,
-				response: createIrohRemoteRpcErrorResponse(
-					responseId,
-					"invoke_ui_action",
-					"UI action id must be a non-empty string",
-				),
-			};
-		}
-		if (!isIrohRemoteUiActionId(action)) {
-			return {
-				allowed: false,
-				response: createIrohRemoteRpcErrorResponse(
-					responseId,
-					"invoke_ui_action",
-					`UI action not available over remote host: ${action}`,
-				),
-			};
-		}
-		return { allowed: true, command: command as IrohRemoteRpcCommand };
+	if (command.type === "invoke_ui_action" || command.type === "get_ui_action_completions") {
+		return getIrohRemoteUiActionCommandResult(command, responseId, command.type);
 	}
 
 	if (IROH_REMOTE_RPC_PASSTHROUGH_TYPES.has(command.type)) {
@@ -111,6 +90,31 @@ export function getIrohRemoteRpcFilterResult(line: string): IrohRemoteRpcFilterR
 			`RPC command not allowed over remote host: ${command.type}`,
 		),
 	};
+}
+
+function getIrohRemoteUiActionCommandResult(
+	command: Record<string, unknown>,
+	responseId: string | undefined,
+	commandType: "invoke_ui_action" | "get_ui_action_completions",
+): IrohRemoteRpcFilterResult {
+	const action = command.action;
+	if (typeof action !== "string" || action.length === 0) {
+		return {
+			allowed: false,
+			response: createIrohRemoteRpcErrorResponse(responseId, commandType, "UI action id must be a non-empty string"),
+		};
+	}
+	if (!isIrohRemoteUiActionId(action)) {
+		return {
+			allowed: false,
+			response: createIrohRemoteRpcErrorResponse(
+				responseId,
+				commandType,
+				`UI action not available over remote host: ${action}`,
+			),
+		};
+	}
+	return { allowed: true, command: command as IrohRemoteRpcCommand };
 }
 
 function isIrohRemoteUiActionId(action: string): boolean {

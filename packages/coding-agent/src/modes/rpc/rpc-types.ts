@@ -16,6 +16,7 @@ export type {
 	UiActionCapabilities,
 	UiActionCapabilityFeature,
 	UiActionCategory,
+	UiActionCompletionListResponse,
 	UiActionDescriptor,
 	UiActionInvocationQueueBehavior,
 	UiActionInvocationResponse,

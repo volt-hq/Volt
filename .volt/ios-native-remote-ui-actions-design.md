@@ -1330,6 +1330,19 @@ Concrete behavior:
 - Iroh `invoke_ui_action` now forwards the exact `thinking.fast_mode` id in addition to the reviewed session and review ids plus projected dynamic ids. Direct remote `get_available_models`, `set_model`, `set_thinking_level`, and `cycle_thinking_level` remain blocked.
 - Automated evidence covers descriptor shape, supported/unsupported thinking targets, remote-safe invocation, state refresh after `get_state`/`get_ui_actions`, manual direct thinking changes clearing Fast mode state, and Iroh allowlist/blocklist coverage.
 
+## Resolved 2026-06-23: Descriptor Argument Forms and Completions
+
+E.1 implementation makes the descriptor argument schema actionable instead of treating all palette arguments as one raw string.
+
+Concrete behavior:
+
+- Host invocation validates the v1 argument subset before dispatch: string and multiline string values must be JSON strings, booleans must be JSON booleans, enum values must match descriptor `options`, and integers must be JSON integer numbers.
+- Unknown argument names, unsupported argument types, missing required values, and mismatched value types fail with normal RPC errors. Built-in action handlers still own domain validation such as empty session names or review target resolution.
+- `get_ui_action_completions` is a v1 RPC command advertised by `ui_action_completions.v1`. It resolves the current action catalog by id, rechecks remote safety for Iroh transports, and returns bounded option descriptors for extension command arguments that advertise `completion: "commandArguments"`.
+- Iroh remote filtering allows `get_ui_action_completions` only for the same reviewed action-id set as `invoke_ui_action`: exact remote-safe built-ins and projected dynamic prefixes. Local-only ids and unreviewed prefixes are rejected before forwarding.
+- iOS command palette rows open a native argument form when every descriptor argument is supported. The form renders text fields for string and integer values, multiline text fields for multiline strings, toggles for booleans, and menu pickers for enums; unsupported argument types keep the row disabled.
+- iOS form state initializes from descriptor defaults where usable, validates required and integer fields before enabling Run, and sends typed JSON values through `invoke_ui_action`.
+
 ## Host Implementation Plan
 
 ### Phase A: Design and Inventory
@@ -1519,6 +1532,7 @@ The design should not require a flag day.
 7. **Argument schema format**
    - Reuse TypeBox/JSON Schema subset or define a small custom schema.
    - Proposed first implementation: small custom schema for `string`, `boolean`, `enum`, and `integer`, with room for JSON Schema later.
+   - Resolved 2026-06-23: v1 uses the small custom descriptor schema for string, multiline string, boolean, enum, and integer arguments. Hosts validate this subset before invocation, and unknown/unsupported types fail or disable generated forms.
 
 8. **Action availability while streaming**
    - Some actions can execute immediately, some can queue, some must be disabled.

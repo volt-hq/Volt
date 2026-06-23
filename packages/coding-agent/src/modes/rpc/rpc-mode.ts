@@ -37,7 +37,11 @@ import {
 import { REMOTE_REVIEW_TOOL_NAMES, runReviewWorkflow } from "../../core/review.ts";
 import { projectSessionTranscript } from "../../core/rpc/transcript.ts";
 import type { RpcTransport } from "../../core/rpc/transport.ts";
-import { createUiActionInvocationPlan, getUiActionDescriptors } from "../../core/rpc/ui-actions.ts";
+import {
+	createUiActionInvocationPlan,
+	getUiActionCompletions,
+	getUiActionDescriptors,
+} from "../../core/rpc/ui-actions.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
@@ -64,6 +68,7 @@ export type {
 	UiActionCapabilities,
 	UiActionCapabilityFeature,
 	UiActionCategory,
+	UiActionCompletionListResponse,
 	UiActionDescriptor,
 	UiActionInvocationQueueBehavior,
 	UiActionInvocationResponse,
@@ -84,7 +89,9 @@ export type {
 function getUiActionCapabilities(invocationEnabled: boolean): UiActionCapabilities {
 	return {
 		protocolVersion: 1,
-		features: invocationEnabled ? ["ui_actions.v1", "ui_action_invocation.v1"] : ["ui_actions.v1"],
+		features: invocationEnabled
+			? ["ui_actions.v1", "ui_action_invocation.v1", "ui_action_completions.v1"]
+			: ["ui_actions.v1", "ui_action_completions.v1"],
 		maxActions: 200,
 		maxDescriptorBytes: 65_536,
 	};
@@ -719,6 +726,17 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			case "get_ui_actions": {
 				return success(id, "get_ui_actions", {
 					actions: getUiActionDescriptors(session, command.scope, { remoteSafeOnly: requireRemoteSafeUiActions }),
+				});
+			}
+
+			case "get_ui_action_completions": {
+				return success(id, "get_ui_action_completions", {
+					completions: await getUiActionCompletions(session, {
+						action: command.action,
+						argument: command.argument,
+						prefix: command.prefix,
+						requireRemoteSafe: requireRemoteSafeUiActions,
+					}),
 				});
 			}
 

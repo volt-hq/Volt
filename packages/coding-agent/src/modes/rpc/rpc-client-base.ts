@@ -16,6 +16,7 @@ import type {
 	UiActionInvocationQueueBehavior,
 	UiActionInvocationResponse,
 	UiActionListScope,
+	UiActionOptionDescriptor,
 } from "./rpc-types.ts";
 
 /** Distributive Omit that works with union types. */
@@ -119,6 +120,16 @@ export abstract class RpcClientBase {
 	async getUiActions(scope?: UiActionListScope): Promise<UiActionDescriptor[]> {
 		const response = await this.send({ type: "get_ui_actions", scope });
 		return this.getData<{ actions: UiActionDescriptor[] }>(response).actions;
+	}
+
+	/** Get native UI action completions for one argument. */
+	async getUiActionCompletions(
+		action: string,
+		argument: string,
+		prefix?: string,
+	): Promise<UiActionOptionDescriptor[]> {
+		const response = await this.send({ type: "get_ui_action_completions", action, argument, prefix });
+		return this.getData<{ completions: UiActionOptionDescriptor[] }>(response).completions;
 	}
 
 	/** Invoke a native UI action by id. */

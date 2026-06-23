@@ -183,6 +183,7 @@ The host forwards only these inbound RPC command `type` values from remote clien
 - `get_transcript`
 - `get_ui_capabilities`
 - `get_ui_actions`
+- `get_ui_action_completions`
 - `invoke_ui_action`
 - `list_sessions`
 - `switch_session_by_id`
@@ -190,9 +191,9 @@ The host forwards only these inbound RPC command `type` values from remote clien
 
 All other command types receive a JSONL `response` with `success:false` and are not forwarded to the local Volt RPC process. Within this allowlist, only `abort` is a direct cancellation command.
 
-`get_ui_capabilities`, `get_ui_actions`, and `invoke_ui_action` expose the v1 native UI action protocol for the narrow remote-safe action set. Remote `get_ui_capabilities` advertises `ui_action_invocation.v1` only when the host accepts invocation. Descriptor responses omit prompt bodies, skill content, raw `sourceInfo`, extension source paths, prompt and skill file paths, skill base directories, host session files, provider metadata, and secrets. They still pass through the outbound path handling layer below before being written to the remote stream.
+`get_ui_capabilities`, `get_ui_actions`, `get_ui_action_completions`, and `invoke_ui_action` expose the v1 native UI action protocol for the narrow remote-safe action set. Remote `get_ui_capabilities` advertises `ui_action_invocation.v1` only when the host accepts invocation and `ui_action_completions.v1` when action argument completions are available. Descriptor responses omit prompt bodies, skill content, raw `sourceInfo`, extension source paths, prompt and skill file paths, skill base directories, host session files, provider metadata, and secrets. They still pass through the outbound path handling layer below before being written to the remote stream.
 
-Remote `invoke_ui_action` is allowlist-based. V1 forwards exact reviewed built-in ids `session.new`, `run.cancel`, `thinking.fast_mode`, `review.uncommitted`, and `review.branch`, plus projected dynamic action ids under `extension.command.*`, `prompt.template.*`, and `skill.*`; the host still resolves the current action catalog, rechecks action availability and remote safety, validates arguments, confirms remote review requests, and applies streaming policy at invocation time. Local-only built-ins such as `context.compact` and `session.rename`, deferred review/model actions such as `review.pr`, `review.commit`, and `review.tools`, stale ids, malformed ids, and unreviewed action id prefixes receive a normal JSONL `response` with `success:false` and are not forwarded to the local Volt RPC process.
+Remote `get_ui_action_completions` and `invoke_ui_action` are allowlist-based. V1 forwards exact reviewed built-in ids `session.new`, `run.cancel`, `thinking.fast_mode`, `review.uncommitted`, and `review.branch`, plus projected dynamic action ids under `extension.command.*`, `prompt.template.*`, and `skill.*`; the host still resolves the current action catalog, rechecks action availability and remote safety, validates arguments, confirms remote review requests, and applies streaming policy at invocation time. Local-only built-ins such as `context.compact` and `session.rename`, deferred review/model actions such as `review.pr`, `review.commit`, and `review.tools`, stale ids, malformed ids, and unreviewed action id prefixes receive a normal JSONL `response` with `success:false` and are not forwarded to the local Volt RPC process.
 
 Remote review descriptors expose only bounded card metadata. Review invocation responses do not include raw diffs, GitHub metadata, configured review model values, auth state, or tool provenance. The remote review workflow uses the host-owned read-only review tool set (`read`, `grep`, `find`, `ls`) and creates a fresh session seeded with findings when the review completes.
 

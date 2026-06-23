@@ -216,6 +216,17 @@ describe("Iroh remote RPC filter", () => {
 			allowed: true,
 			command: invocation,
 		});
+		const completion = {
+			id: "completion-1",
+			type: "get_ui_action_completions",
+			action: "extension.command.ec_a1b2c3d4e5f6_1",
+			argument: "arguments",
+			prefix: "pr",
+		};
+		expect(getIrohRemoteRpcFilterResult(JSON.stringify(completion))).toEqual({
+			allowed: true,
+			command: completion,
+		});
 		for (const action of [
 			SESSION_NEW_ACTION_ID,
 			RUN_CANCEL_ACTION_ID,
@@ -246,6 +257,25 @@ describe("Iroh remote RPC filter", () => {
 					error: `UI action not available over remote host: ${action}`,
 				},
 			});
+			expect(
+				getIrohRemoteRpcFilterResult(
+					JSON.stringify({
+						id: `${action}-completion-1`,
+						type: "get_ui_action_completions",
+						action,
+						argument: "arguments",
+					}),
+				),
+			).toEqual({
+				allowed: false,
+				response: {
+					id: `${action}-completion-1`,
+					type: "response",
+					command: "get_ui_action_completions",
+					success: false,
+					error: `UI action not available over remote host: ${action}`,
+				},
+			});
 		}
 		expect(
 			getIrohRemoteRpcFilterResult(
@@ -257,6 +287,25 @@ describe("Iroh remote RPC filter", () => {
 				id: "local-action-1",
 				type: "response",
 				command: "invoke_ui_action",
+				success: false,
+				error: "UI action not available over remote host: review.pr",
+			},
+		});
+		expect(
+			getIrohRemoteRpcFilterResult(
+				JSON.stringify({
+					id: "local-completion-1",
+					type: "get_ui_action_completions",
+					action: "review.pr",
+					argument: "target",
+				}),
+			),
+		).toEqual({
+			allowed: false,
+			response: {
+				id: "local-completion-1",
+				type: "response",
+				command: "get_ui_action_completions",
 				success: false,
 				error: "UI action not available over remote host: review.pr",
 			},
@@ -677,7 +726,7 @@ describe("runRpcMode", () => {
 		try {
 			await expect(client.getUiCapabilities()).resolves.toEqual({
 				protocolVersion: 1,
-				features: ["ui_actions.v1", "ui_action_invocation.v1"],
+				features: ["ui_actions.v1", "ui_action_invocation.v1", "ui_action_completions.v1"],
 				maxActions: 200,
 				maxDescriptorBytes: 65_536,
 			});
@@ -727,6 +776,7 @@ describe("runRpcMode", () => {
 					slash: { name: "review", example: "/review branch [base]" },
 				}),
 			);
+			await expect(client.getUiActionCompletions(extensionAction.id, "arguments", "pr")).resolves.toEqual([]);
 			await expect(client.invokeUiAction(extensionAction.id, { args: { arguments: "prod" } })).resolves.toEqual({
 				action: extensionAction.id,
 				status: "handled",
@@ -770,6 +820,9 @@ describe("runRpcMode", () => {
 			await expect(client.invokeUiAction(CONTEXT_COMPACT_ACTION_ID, { args: {} })).rejects.toThrow(
 				`UI action not available over remote host: ${CONTEXT_COMPACT_ACTION_ID}`,
 			);
+			await expect(
+				client.getUiActionCompletions(CONTEXT_COMPACT_ACTION_ID, "customInstructions", "preserve"),
+			).rejects.toThrow(`UI action not available over remote host: ${CONTEXT_COMPACT_ACTION_ID}`);
 			await expect(client.invokeUiAction("review.pr", { args: {} })).rejects.toThrow(
 				"UI action not available over remote host: review.pr",
 			);
@@ -827,7 +880,7 @@ describe("createInProcessRpcClient", () => {
 		try {
 			await expect(client.getUiCapabilities()).resolves.toEqual({
 				protocolVersion: 1,
-				features: ["ui_actions.v1", "ui_action_invocation.v1"],
+				features: ["ui_actions.v1", "ui_action_invocation.v1", "ui_action_completions.v1"],
 				maxActions: 200,
 				maxDescriptorBytes: 65_536,
 			});
@@ -1143,11 +1196,15 @@ describe("createInProcessRpcClient", () => {
 
 	test("invokes discovered extension, prompt template, and skill actions through prompt semantics", async () => {
 		const sourceInfo = createSourceInfo("/Users/jordan/project/.volt/agent/extensions/deploy.ts");
+		const deployCommand = createCommand("deploy", "deploy", "Deploy", sourceInfo);
+		deployCommand.getArgumentCompletions = vi.fn((prefix: string) => [
+			{ value: `${prefix}-prod`, label: "Production", description: "Production target" },
+		]);
 		const prompt = vi.fn(async (_message: string, options?: PromptOptions) => {
 			options?.preflightResult?.(true);
 		});
 		const resources = {
-			commands: [createCommand("deploy", "deploy", "Deploy", sourceInfo)],
+			commands: [deployCommand],
 			prompts: [
 				{
 					name: "fix-tests",
@@ -1182,6 +1239,18 @@ describe("createInProcessRpcClient", () => {
 			if (!extensionAction || !promptAction || !skillAction) {
 				throw new Error("expected extension, prompt, and skill actions");
 			}
+			expect(extensionAction.args?.[0]).toEqual(
+				expect.objectContaining({ name: "arguments", type: "string", completion: "commandArguments" }),
+			);
+
+			await expect(client.getUiActionCompletions(extensionAction.id, "arguments", "pr")).resolves.toEqual([
+				{ value: "pr-prod", label: "Production", description: "Production target" },
+			]);
+			expect(deployCommand.getArgumentCompletions).toHaveBeenCalledWith("pr");
+			await expect(client.getUiActionCompletions(promptAction.id, "arguments", "")).resolves.toEqual([]);
+			await expect(client.getUiActionCompletions(extensionAction.id, "missing", "")).rejects.toThrow(
+				"UI action argument not available: missing",
+			);
 
 			await expect(client.invokeUiAction(extensionAction.id, { args: { arguments: "prod" } })).resolves.toEqual({
 				action: extensionAction.id,
@@ -1297,6 +1366,9 @@ describe("createInProcessRpcClient", () => {
 			}
 			resources.commands.splice(0, 1, createCommand("release", "release", "Release", sourceInfo));
 
+			await expect(client.getUiActionCompletions(staleAction.id, "arguments", "prod")).rejects.toThrow(
+				`UI action not available: ${staleAction.id}`,
+			);
 			await expect(client.invokeUiAction(staleAction.id, { args: { arguments: "prod" } })).rejects.toThrow(
 				`UI action not available: ${staleAction.id}`,
 			);

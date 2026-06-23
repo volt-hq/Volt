@@ -381,10 +381,10 @@ and recorded without overclaiming.
 </group>
 
 <group n="5" title="Richer action UX, arguments, and extensions">
-  <item ref="E.1" status="open" prereq="C.4,D.2">
+  <item ref="E.1" status="resolved" prereq="C.4,D.2">
     <title>Add descriptor-driven argument forms and completions</title>
     <acceptance>The host supports a v1 argument schema subset for string, multiline string, boolean, enum, and integer arguments; optional `get_ui_action_completions` or equivalent completion flow is implemented for applicable command arguments; iOS renders simple forms from descriptors; tests cover argument validation, invalid args, completions, and form state.</acceptance>
-    <evidence></evidence>
+    <evidence>Resolved 2026-06-23: added shared host-side v1 argument validation for string, multiline string, boolean, enum, and integer descriptors; implemented `get_ui_action_completions` with typed RPC/client support, extension command completion mapping, Iroh action-id filtering, docs, and changelog; replaced the iOS one-string argument sheet with descriptor-driven string/multiline, boolean, enum, and integer form controls with typed form state and validation; added Swift completion command/response models. Verified with `node node_modules/vitest/dist/cli.js --run test/host-actions.test.ts test/rpc-transport-client.test.ts test/remote-iroh-core.test.ts` from `packages/coding-agent`, `npm run check`, `npm run iroh:poc:test` after one late relay reconnect timeout rerun, `swift test --filter VoltUIActionRPCTests`, `swift test --filter XcodeProjectConfigurationTests`, `swift test` from `../volt-app/Packages/VoltClient`, and `xcodebuild -scheme Volt -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=27.0' test` from `../volt-app`.</evidence>
   </item>
 
   <item ref="E.2" status="open" prereq="C.4,D.3,D.4">

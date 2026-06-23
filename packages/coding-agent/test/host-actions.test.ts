@@ -105,6 +105,71 @@ describe("HostActionRegistry", () => {
 		expect(afterSessionSwitch).toHaveBeenCalledOnce();
 	});
 
+	test("validates descriptor argument schema subset before invoking handlers", async () => {
+		const handler = vi.fn(async () => ({
+			action: "test.schema",
+			status: "completed" as const,
+		}));
+		const registry = new HostActionRegistry().register({
+			id: "test.schema",
+			label: "Schema action",
+			category: "advanced",
+			presentation: { kind: "palette", group: "Tests" },
+			args: [
+				{ name: "message", label: "Message", type: "string", required: true, multiline: true },
+				{ name: "enabled", label: "Enabled", type: "boolean", required: true },
+				{
+					name: "target",
+					label: "Target",
+					type: "enum",
+					required: true,
+					options: [
+						{ value: "prod", label: "Production" },
+						{ value: "staging", label: "Staging" },
+					],
+				},
+				{ name: "retries", label: "Retries", type: "integer", required: false },
+			],
+			remoteSafe: true,
+			handler,
+		});
+		const context = {
+			session: { isStreaming: false, isCompacting: false },
+			abortRun: vi.fn(async () => {}),
+			compactContext: vi.fn(async () => createCompactionResult()),
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			renameSession: vi.fn(() => {}),
+		};
+
+		await expect(
+			registry.invoke("test.schema", context, {
+				message: "Ship it",
+				enabled: true,
+				target: "prod",
+				retries: 2,
+			}),
+		).resolves.toEqual({ action: "test.schema", status: "completed" });
+		expect(handler).toHaveBeenCalledWith(
+			context,
+			{ message: "Ship it", enabled: true, target: "prod", retries: 2 },
+			{},
+		);
+		await expect(
+			registry.invoke("test.schema", context, { message: "Ship it", enabled: true, target: "dev" }),
+		).rejects.toThrow('UI action argument "target" must be one of: prod, staging');
+		await expect(
+			registry.invoke("test.schema", context, {
+				message: "Ship it",
+				enabled: true,
+				target: "prod",
+				retries: 1.5,
+			}),
+		).rejects.toThrow('UI action argument "retries" must be an integer');
+		await expect(registry.invoke("test.schema", context, { enabled: true, target: "prod" })).rejects.toThrow(
+			"Missing required UI action argument: message",
+		);
+	});
+
 	test("registers cancel, compact, and rename built-ins", async () => {
 		const abortRun = vi.fn(async () => {});
 		const compactContext = vi.fn(async () => createCompactionResult());

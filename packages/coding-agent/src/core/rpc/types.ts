@@ -31,6 +31,13 @@ export type RpcCommand =
 	| { id?: string; type: "get_ui_actions"; scope?: UiActionListScope }
 	| {
 			id?: string;
+			type: "get_ui_action_completions";
+			action: string;
+			argument: string;
+			prefix?: string;
+	  }
+	| {
+			id?: string;
 			type: "invoke_ui_action";
 			action: string;
 			args?: Record<string, unknown>;
@@ -184,6 +191,10 @@ export interface UiActionListResponse {
 	actions: UiActionDescriptor[];
 }
 
+export interface UiActionCompletionListResponse {
+	completions: UiActionOptionDescriptor[];
+}
+
 export interface UiActionInvocationResponse {
 	action: string;
 	status: UiActionInvocationStatus;
@@ -293,6 +304,13 @@ export type RpcResponse =
 	// Native UI actions
 	| { id?: string; type: "response"; command: "get_ui_capabilities"; success: true; data: UiActionCapabilities }
 	| { id?: string; type: "response"; command: "get_ui_actions"; success: true; data: UiActionListResponse }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_ui_action_completions";
+			success: true;
+			data: UiActionCompletionListResponse;
+	  }
 	| {
 			id?: string;
 			type: "response";
