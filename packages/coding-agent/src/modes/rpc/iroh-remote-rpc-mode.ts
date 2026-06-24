@@ -1,8 +1,11 @@
+import type { AgentSessionEvent } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import { REVIEW_BRANCH_ACTION_ID, REVIEW_UNCOMMITTED_ACTION_ID } from "../../core/host-actions.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
 	createIrohRemoteOutboundFilteredRpcTransport,
+	type IrohRemoteLiveActivityContentState,
+	type IrohRemoteLiveActivityToolGlyph,
 	type IrohRemoteOutboundValueDecorator,
 	type IrohRemotePushNotificationDelivery,
 } from "../../core/remote/iroh/index.ts";
@@ -80,6 +83,11 @@ export function runIrohRemoteRpcMode(
 	options: IrohRemoteRpcModeOptions,
 ): Promise<void> {
 	const sentNotificationEventIds = new Set<string>();
+	let detachLiveActivityUpdates: (() => void) | undefined;
+	const attachLiveActivityUpdates = () => {
+		detachLiveActivityUpdates?.();
+		detachLiveActivityUpdates = attachIrohRemoteLiveActivityUpdates(runtimeHost, options.notificationDelivery);
+	};
 	const outboundTransport = createIrohRemoteOutboundFilteredRpcTransport({
 		decorate: options.decorateOutbound,
 		remoteWorkspacePath: options.remoteWorkspacePath,
@@ -112,14 +120,214 @@ export function runIrohRemoteRpcMode(
 	return runRpcMode(runtimeHost, {
 		allowUiActionInvocation: true,
 		disposeRuntimeOnClose: options.disposeRuntimeOnClose,
-		onSessionChanged: options.onSessionChanged,
+		onSessionChanged: async (session) => {
+			attachLiveActivityUpdates();
+			await options.onSessionChanged?.(session);
+		},
 		requireRemoteSafeUiActions: true,
 		transport: createIrohRemoteFilteredRpcTransport({
 			transport: closeDeferringTransport,
 		}),
 		exitProcess: false,
 		registerPushTarget: options.registerPushTarget,
+	}).finally(() => {
+		detachLiveActivityUpdates?.();
 	});
+}
+
+function attachIrohRemoteLiveActivityUpdates(
+	runtimeHost: AgentSessionRuntime,
+	delivery: IrohRemotePushNotificationDelivery | undefined,
+): () => void {
+	if (!delivery?.deliverLiveActivityUpdate) {
+		return () => {};
+	}
+	const updater = new IrohRemoteLiveActivityUpdater(runtimeHost, delivery);
+	return runtimeHost.session.subscribe((event) => {
+		void updater.handle(event).catch(() => {});
+	});
+}
+
+class IrohRemoteLiveActivityUpdater {
+	private readonly delivery: Required<Pick<IrohRemotePushNotificationDelivery, "deliverLiveActivityUpdate">>;
+	private readonly runtimeHost: AgentSessionRuntime;
+	private readonly toolIndexesByCallId = new Map<string, number>();
+	private recentTools: IrohRemoteLiveActivityToolGlyph[] = [];
+	private sequence = 0;
+	private active = false;
+
+	constructor(runtimeHost: AgentSessionRuntime, delivery: IrohRemotePushNotificationDelivery) {
+		if (!delivery.deliverLiveActivityUpdate) {
+			throw new Error("live activity delivery is unavailable");
+		}
+		this.runtimeHost = runtimeHost;
+		this.delivery = { deliverLiveActivityUpdate: delivery.deliverLiveActivityUpdate.bind(delivery) };
+	}
+
+	async handle(event: AgentSessionEvent): Promise<void> {
+		switch (event.type) {
+			case "agent_start":
+				this.active = true;
+				this.recentTools = [];
+				this.toolIndexesByCallId.clear();
+				break;
+			case "tool_execution_start":
+				this.active = true;
+				break;
+			case "tool_execution_end":
+				this.active = true;
+				if (
+					this.recordTool(
+						event.toolCallId,
+						createLiveActivityToolGlyph(event.toolName, event.isError ? "failed" : "completed"),
+					)
+				) {
+					await this.sendUpdate("running");
+				}
+				break;
+			case "agent_end":
+				if (!this.active || event.willRetry) {
+					return;
+				}
+				await this.sendUpdate("completed", "end");
+				this.active = false;
+				this.toolIndexesByCallId.clear();
+				break;
+			default:
+				break;
+		}
+	}
+
+	private recordTool(toolCallId: string | undefined, tool: IrohRemoteLiveActivityToolGlyph): boolean {
+		const normalizedCallId = typeof toolCallId === "string" && toolCallId.length > 0 ? toolCallId : undefined;
+		if (normalizedCallId) {
+			const existingIndex = this.toolIndexesByCallId.get(normalizedCallId);
+			if (existingIndex !== undefined && existingIndex < this.recentTools.length) {
+				this.recentTools[existingIndex] = tool;
+				return true;
+			}
+		}
+		if (this.recentTools.at(-1)?.name === tool.name) {
+			return false;
+		}
+		this.recentTools.push(tool);
+		while (this.recentTools.length > 6) {
+			this.recentTools.shift();
+			for (const [callId, index] of this.toolIndexesByCallId) {
+				if (index === 0) {
+					this.toolIndexesByCallId.delete(callId);
+				} else {
+					this.toolIndexesByCallId.set(callId, index - 1);
+				}
+			}
+		}
+		if (normalizedCallId) {
+			this.toolIndexesByCallId.set(normalizedCallId, this.recentTools.length - 1);
+		}
+		return true;
+	}
+
+	private async sendUpdate(
+		status: IrohRemoteLiveActivityContentState["status"],
+		activityEvent: "update" | "end" = "update",
+	): Promise<void> {
+		const nowSeconds = Math.floor(Date.now() / 1000);
+		const currentTool = this.recentTools.at(-1);
+		const completionState = getIrohRemoteCompletionState(this.runtimeHost);
+		const contentState: IrohRemoteLiveActivityContentState = {
+			status,
+			statusText: liveActivityStatusText(status, currentTool),
+			...(currentTool === undefined ? {} : { currentTool }),
+			recentTools: this.recentTools.slice(-6),
+			sessionID: completionState.sessionId,
+			updatedAtEpochSeconds: nowSeconds,
+		};
+		await this.delivery.deliverLiveActivityUpdate({
+			eventId: `live-activity:${completionState.sessionId}:${completionState.runId ?? "active"}:${++this.sequence}`,
+			kind: activityEvent === "end" ? "live_activity_end" : "live_activity_update",
+			activityEvent,
+			contentState,
+			...(activityEvent === "end"
+				? { dismissalDateEpochSeconds: nowSeconds + 45 }
+				: { staleDateEpochSeconds: nowSeconds + 90 }),
+		});
+	}
+}
+
+function createLiveActivityToolGlyph(
+	toolName: string | undefined,
+	status: IrohRemoteLiveActivityToolGlyph["status"],
+): IrohRemoteLiveActivityToolGlyph {
+	const name = sanitizeLiveActivityToolName(toolName);
+	return {
+		name,
+		symbolName: liveActivitySymbolNameForTool(name),
+		status,
+	};
+}
+
+function sanitizeLiveActivityToolName(toolName: string | undefined): string {
+	const trimmed = toolName?.trim();
+	if (!trimmed) {
+		return "tool";
+	}
+	return trimmed.slice(0, 32);
+}
+
+function liveActivityStatusText(
+	status: IrohRemoteLiveActivityContentState["status"],
+	currentTool: IrohRemoteLiveActivityToolGlyph | undefined,
+): string {
+	if (status === "completed") {
+		return "Volt finished";
+	}
+	if (status === "failed") {
+		return "Volt needs attention";
+	}
+	if (status === "waiting") {
+		return "Waiting for input";
+	}
+	return currentTool ? `Using ${currentTool.name}` : "Volt is thinking";
+}
+
+function liveActivitySymbolNameForTool(toolName: string): string {
+	switch (toolName.toLowerCase()) {
+		case "read":
+			return "doc.text.magnifyingglass";
+		case "write":
+			return "square.and.pencil";
+		case "edit":
+			return "pencil.and.outline";
+		case "bash":
+		case "shell":
+		case "terminal":
+			return "terminal";
+		case "find":
+		case "grep":
+		case "search":
+		case "rg":
+			return "magnifyingglass";
+		case "lsp":
+			return "point.3.connected.trianglepath.dotted";
+		case "build":
+		case "build_sim":
+		case "build_run_sim":
+			return "hammer";
+		case "test":
+		case "test_sim":
+			return "checkmark.seal";
+		case "screenshot":
+		case "snapshot_ui":
+			return "camera.viewfinder";
+		case "tap":
+		case "touch":
+		case "gesture":
+		case "swipe":
+		case "drag":
+			return "hand.tap";
+		default:
+			return "sparkles";
+	}
 }
 
 export function createIrohRemoteCloseDeferringRpcTransport(

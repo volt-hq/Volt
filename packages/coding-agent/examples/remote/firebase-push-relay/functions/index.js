@@ -6,6 +6,7 @@ const { onRequest } = require("firebase-functions/v2/https");
 
 const DEFAULT_COLLECTION = "voltPushTargets";
 const DEFAULT_PUBLIC_RELAY_URL = "https://us-central1-volt-3fae7.cloudfunctions.net/pushRelay";
+const DEFAULT_LIVE_ACTIVITY_APNS_TOPIC = "com.hansjm10.volt.push-type.liveactivity";
 const DEFAULT_REGION = "us-central1";
 const INVALID_TARGET_ERROR_CODES = new Set([
 	"messaging/invalid-registration-token",
@@ -40,6 +41,10 @@ exports.pushRelay = onRequest(
 			}
 			if (routePath === "/v1/notifications") {
 				await sendNotification(request, response);
+				return;
+			}
+			if (routePath === "/v1/live-activities") {
+				await sendLiveActivityUpdate(request, response);
 				return;
 			}
 			response.status(404).json({ error: "not_found" });
@@ -90,25 +95,9 @@ async function registerPushTarget(request, response) {
 async function sendNotification(request, response) {
 	const body = readJsonBody(request);
 	const notification = parseNotification(body);
-	const pushTargetRef = getPushTargetsCollection().doc(notification.pushTargetId);
-	const pushTargetSnapshot = await pushTargetRef.get();
-	if (!pushTargetSnapshot.exists) {
-		response.status(404).json({ error: "push_target_not_found" });
-		return;
-	}
-
-	const pushTarget = pushTargetSnapshot.data();
-	if (!isRecord(pushTarget) || pushTarget.enabled !== true || typeof pushTarget.token !== "string") {
-		response.status(410).json({ error: "push_target_invalid" });
-		return;
-	}
-	if (
-		typeof pushTarget.pushTargetAuthTokenHash !== "string" ||
-		!timingSafeStringEqual(hashToken(notification.pushTargetAuthToken), pushTarget.pushTargetAuthTokenHash)
-	) {
-		response.status(401).json({ error: "unauthorized" });
-		return;
-	}
+	const authorizedTarget = await getAuthorizedPushTarget(notification, response);
+	if (!authorizedTarget) return;
+	const { pushTarget, pushTargetRef } = authorizedTarget;
 
 	try {
 		const messageId = await getMessaging().send({
@@ -119,20 +108,47 @@ async function sendNotification(request, response) {
 			},
 			token: pushTarget.token,
 		});
-		await pushTargetRef.update({
-			lastEventId: notification.eventId,
-			lastKind: notification.kind,
-			lastMessageId: messageId,
-			lastSentAt: FieldValue.serverTimestamp(),
-			updatedAt: FieldValue.serverTimestamp(),
+		await markPushSent(pushTargetRef, notification, messageId);
+		response.status(200).json({ status: "sent", messageId });
+	} catch (error) {
+		if (isInvalidTargetError(error)) {
+			await disablePushTarget(pushTargetRef, getErrorCode(error) || "messaging/invalid-target");
+			response.status(410).json({ error: "push_target_invalid" });
+			return;
+		}
+		throw error;
+	}
+}
+
+async function sendLiveActivityUpdate(request, response) {
+	const body = readJsonBody(request);
+	const liveActivity = parseLiveActivityUpdate(body);
+	const authorizedTarget = await getAuthorizedPushTarget(liveActivity, response);
+	if (!authorizedTarget) return;
+	const { pushTarget, pushTargetRef } = authorizedTarget;
+
+	try {
+		const messageId = await getMessaging().send({
+			token: pushTarget.token,
+			apns: {
+				liveActivityToken: liveActivity.activityPushToken,
+				headers: {
+					"apns-priority": "10",
+					"apns-push-type": "liveactivity",
+					"apns-topic": getLiveActivityApnsTopic(),
+				},
+				payload: {
+					aps: liveActivityApsPayload(liveActivity),
+				},
+			},
 		});
+		await markPushSent(pushTargetRef, liveActivity, messageId);
 		response.status(200).json({ status: "sent", messageId });
 	} catch (error) {
 		if (isInvalidTargetError(error)) {
 			await pushTargetRef.update({
-				disabledAt: FieldValue.serverTimestamp(),
-				disabledReason: getErrorCode(error) || "messaging/invalid-target",
-				enabled: false,
+				lastLiveActivityInvalidAt: FieldValue.serverTimestamp(),
+				lastLiveActivityInvalidReason: getErrorCode(error) || "messaging/invalid-live-activity-target",
 				updatedAt: FieldValue.serverTimestamp(),
 			});
 			response.status(410).json({ error: "push_target_invalid" });
@@ -140,6 +156,67 @@ async function sendNotification(request, response) {
 		}
 		throw error;
 	}
+}
+
+async function getAuthorizedPushTarget(request, response) {
+	const pushTargetRef = getPushTargetsCollection().doc(request.pushTargetId);
+	const pushTargetSnapshot = await pushTargetRef.get();
+	if (!pushTargetSnapshot.exists) {
+		response.status(404).json({ error: "push_target_not_found" });
+		return undefined;
+	}
+
+	const pushTarget = pushTargetSnapshot.data();
+	if (!isRecord(pushTarget) || pushTarget.enabled !== true || typeof pushTarget.token !== "string") {
+		response.status(410).json({ error: "push_target_invalid" });
+		return undefined;
+	}
+	if (
+		typeof pushTarget.pushTargetAuthTokenHash !== "string" ||
+		!timingSafeStringEqual(hashToken(request.pushTargetAuthToken), pushTarget.pushTargetAuthTokenHash)
+	) {
+		response.status(401).json({ error: "unauthorized" });
+		return undefined;
+	}
+	return { pushTarget, pushTargetRef };
+}
+
+async function markPushSent(pushTargetRef, request, messageId) {
+	await pushTargetRef.update({
+		lastEventId: request.eventId,
+		lastKind: request.kind,
+		lastMessageId: messageId,
+		lastSentAt: FieldValue.serverTimestamp(),
+		updatedAt: FieldValue.serverTimestamp(),
+	});
+}
+
+async function disablePushTarget(pushTargetRef, reason) {
+	await pushTargetRef.update({
+		disabledAt: FieldValue.serverTimestamp(),
+		disabledReason: reason,
+		enabled: false,
+		updatedAt: FieldValue.serverTimestamp(),
+	});
+}
+
+function liveActivityApsPayload(liveActivity) {
+	const aps = {
+		"content-state": liveActivity.contentState,
+		event: liveActivity.activityEvent,
+		timestamp: Math.floor(Date.now() / 1000),
+	};
+	if (liveActivity.staleDateEpochSeconds !== undefined) {
+		aps["stale-date"] = liveActivity.staleDateEpochSeconds;
+	}
+	if (liveActivity.dismissalDateEpochSeconds !== undefined) {
+		aps["dismissal-date"] = liveActivity.dismissalDateEpochSeconds;
+	}
+	return aps;
+}
+
+function getLiveActivityApnsTopic() {
+	return process.env.LIVE_ACTIVITY_APNS_TOPIC || DEFAULT_LIVE_ACTIVITY_APNS_TOPIC;
 }
 
 function timingSafeStringEqual(left, right) {
@@ -208,6 +285,33 @@ function parseNotification(body) {
 	};
 }
 
+function parseLiveActivityUpdate(body) {
+	const contentState = expectLiveActivityContentState(body.contentState);
+	return {
+		activityEvent: expectOptionalLiteral(body.activityEvent, ["update", "end"], "activityEvent") || "update",
+		activityPushToken: expectString(body.activityPushToken, "activityPushToken"),
+		activityId: expectString(body.activityId, "activityId"),
+		contentState,
+		dismissalDateEpochSeconds: expectOptionalNumber(body.dismissalDateEpochSeconds, "dismissalDateEpochSeconds"),
+		eventId: expectString(body.eventId, "eventId"),
+		kind: expectString(body.kind, "kind"),
+		pushTargetAuthToken: expectString(body.pushTargetAuthToken, "pushTargetAuthToken"),
+		pushTargetId: expectString(body.pushTargetId, "pushTargetId"),
+		staleDateEpochSeconds: expectOptionalNumber(body.staleDateEpochSeconds, "staleDateEpochSeconds"),
+	};
+}
+
+function expectLiveActivityContentState(value) {
+	if (!isRecord(value)) {
+		throw new RequestError(400, "contentState_must_be_object");
+	}
+	const encoded = JSON.stringify(value);
+	if (encoded.length > 3500) {
+		throw new RequestError(400, "contentState_too_large");
+	}
+	return value;
+}
+
 function getPublicRelayUrl(request) {
 	if (typeof process.env.PUSH_RELAY_URL === "string" && process.env.PUSH_RELAY_URL.length > 0) {
 		return process.env.PUSH_RELAY_URL;
@@ -246,6 +350,26 @@ function expectString(value, label) {
 function expectBoolean(value, label) {
 	if (typeof value !== "boolean") {
 		throw new RequestError(400, `${label}_must_be_boolean`);
+	}
+	return value;
+}
+
+function expectOptionalNumber(value, label) {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (!Number.isSafeInteger(value) || value < 0) {
+		throw new RequestError(400, `${label}_must_be_non_negative_integer`);
+	}
+	return value;
+}
+
+function expectOptionalLiteral(value, expected, label) {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (!expected.includes(value)) {
+		throw new RequestError(400, `${label}_must_be_${expected.join("_or_")}`);
 	}
 	return value;
 }

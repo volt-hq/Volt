@@ -3,6 +3,7 @@ export type {
 	RpcCommandType,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcLiveActivityRegistration,
 	RpcModel,
 	RpcPushPlatform,
 	RpcPushProvider,

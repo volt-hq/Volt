@@ -20,6 +20,31 @@ export interface IrohRemotePushNotificationIntent {
 	sessionId?: string;
 }
 
+export interface IrohRemoteLiveActivityToolGlyph {
+	name: string;
+	symbolName: string;
+	status: "started" | "completed" | "failed";
+}
+
+export interface IrohRemoteLiveActivityContentState {
+	status: "running" | "completed" | "failed" | "waiting";
+	statusText: string;
+	currentTool?: IrohRemoteLiveActivityToolGlyph;
+	recentTools: IrohRemoteLiveActivityToolGlyph[];
+	sessionID?: string;
+	workspaceName?: string;
+	updatedAtEpochSeconds: number;
+}
+
+export interface IrohRemoteLiveActivityUpdateIntent {
+	eventId: string;
+	kind: string;
+	activityEvent?: "update" | "end";
+	contentState: IrohRemoteLiveActivityContentState;
+	staleDateEpochSeconds?: number;
+	dismissalDateEpochSeconds?: number;
+}
+
 export interface IrohRemotePushRelayNotificationRequest {
 	pushTargetId: string;
 	pushTargetAuthToken: string;
@@ -34,10 +59,26 @@ export interface IrohRemotePushRelayNotificationRequest {
 	};
 }
 
+export interface IrohRemotePushRelayLiveActivityRequest {
+	pushTargetId: string;
+	pushTargetAuthToken: string;
+	activityId: string;
+	activityPushToken: string;
+	eventId: string;
+	kind: string;
+	contentState: IrohRemoteLiveActivityContentState;
+	activityEvent?: "update" | "end";
+	staleDateEpochSeconds?: number;
+	dismissalDateEpochSeconds?: number;
+}
+
 export type IrohRemotePushRelayNotificationResult = { status: "sent" } | { status: "invalid_target" };
 
 export interface IrohRemotePushRelayClient {
 	sendNotification(request: IrohRemotePushRelayNotificationRequest): Promise<IrohRemotePushRelayNotificationResult>;
+	sendLiveActivityUpdate?(
+		request: IrohRemotePushRelayLiveActivityRequest,
+	): Promise<IrohRemotePushRelayNotificationResult>;
 }
 
 export type IrohRemotePushNotificationDeliveryStatus =
@@ -50,6 +91,9 @@ export type IrohRemotePushNotificationDeliveryStatus =
 export interface IrohRemotePushNotificationDelivery {
 	deliverNotification(
 		notification: IrohRemotePushNotificationIntent,
+	): Promise<IrohRemotePushNotificationDeliveryStatus>;
+	deliverLiveActivityUpdate?(
+		update: IrohRemoteLiveActivityUpdateIntent,
 	): Promise<IrohRemotePushNotificationDeliveryStatus>;
 }
 
@@ -122,8 +166,21 @@ export class IrohRemotePushRelayHttpClient implements IrohRemotePushRelayClient 
 	async sendNotification(
 		request: IrohRemotePushRelayNotificationRequest,
 	): Promise<IrohRemotePushRelayNotificationResult> {
-		const response = await this.fetcher(new URL("v1/notifications", this.baseUrl).toString(), {
-			body: JSON.stringify(createRelayNotificationBody(request)),
+		return this.sendRelayRequest("v1/notifications", createRelayNotificationBody(request));
+	}
+
+	async sendLiveActivityUpdate(
+		request: IrohRemotePushRelayLiveActivityRequest,
+	): Promise<IrohRemotePushRelayNotificationResult> {
+		return this.sendRelayRequest("v1/live-activities", createRelayLiveActivityBody(request));
+	}
+
+	private async sendRelayRequest(
+		path: string,
+		body: IrohRemotePushRelayNotificationRequest | IrohRemotePushRelayLiveActivityRequest,
+	): Promise<IrohRemotePushRelayNotificationResult> {
+		const response = await this.fetcher(new URL(path, this.baseUrl).toString(), {
+			body: JSON.stringify(body),
 			headers: this.createHeaders(),
 			method: "POST",
 			signal: AbortSignal.timeout(this.timeoutMs),
@@ -156,6 +213,25 @@ function createRelayNotificationBody(
 		title: request.title,
 		body: request.body,
 		data: request.data,
+	};
+}
+
+function createRelayLiveActivityBody(
+	request: IrohRemotePushRelayLiveActivityRequest,
+): IrohRemotePushRelayLiveActivityRequest {
+	return {
+		pushTargetId: request.pushTargetId,
+		pushTargetAuthToken: request.pushTargetAuthToken,
+		activityId: request.activityId,
+		activityPushToken: request.activityPushToken,
+		eventId: request.eventId,
+		kind: request.kind,
+		contentState: request.contentState,
+		...(request.activityEvent === undefined ? {} : { activityEvent: request.activityEvent }),
+		...(request.staleDateEpochSeconds === undefined ? {} : { staleDateEpochSeconds: request.staleDateEpochSeconds }),
+		...(request.dismissalDateEpochSeconds === undefined
+			? {}
+			: { dismissalDateEpochSeconds: request.dismissalDateEpochSeconds }),
 	};
 }
 
@@ -199,6 +275,18 @@ export class IrohRemotePushNotificationDispatcher implements IrohRemotePushNotif
 				pushTargetAuthToken: registration.pushTargetAuthToken,
 				...(registration.relayUrl === undefined ? {} : { relayUrl: registration.relayUrl }),
 				...(registration.tokenHash === undefined ? {} : { tokenHash: registration.tokenHash }),
+				...(registration.liveActivity === undefined
+					? {}
+					: {
+							liveActivity: {
+								activityId: registration.liveActivity.activityId,
+								pushToken: registration.liveActivity.pushToken,
+								...(registration.liveActivity.tokenHash === undefined
+									? {}
+									: { tokenHash: registration.liveActivity.tokenHash }),
+								updatedAt: now,
+							},
+						}),
 				enabled: registration.enabled,
 				createdAt: now,
 				updatedAt: now,
@@ -233,6 +321,7 @@ export class IrohRemotePushNotificationDispatcher implements IrohRemotePushNotif
 					platform: registration.platform,
 					relayUrl: registration.relayUrl,
 					tokenHash: registration.tokenHash,
+					liveActivityTokenHash: registration.liveActivity?.tokenHash,
 					enabled: registration.enabled,
 				},
 			});
@@ -243,27 +332,14 @@ export class IrohRemotePushNotificationDispatcher implements IrohRemotePushNotif
 	async deliverNotification(
 		notification: IrohRemotePushNotificationIntent,
 	): Promise<IrohRemotePushNotificationDeliveryStatus> {
-		if (!this.deduper.tryMark(this.clientNodeId, notification.eventId)) {
-			await this.log({
-				type: "push_notification_deduplicated",
-				clientNodeId: this.clientNodeId,
-				workspace: this.workspace,
-				success: true,
-				details: { eventId: notification.eventId, kind: notification.kind },
-			});
+		if (!(await this.markDeliveryIntent(notification.eventId, notification.kind))) {
 			return "duplicate";
 		}
 
 		const client = await this.stateManager.getClient(this.clientNodeId);
 		const pushTarget = selectEnabledPushTarget(client?.pushTargets ?? []);
 		if (!pushTarget) {
-			await this.log({
-				type: "push_notification_fallback",
-				clientNodeId: this.clientNodeId,
-				workspace: this.workspace,
-				success: true,
-				details: { eventId: notification.eventId, kind: notification.kind, reason: "no_push_target" },
-			});
+			await this.logPushFallback(notification.eventId, notification.kind, "no_push_target");
 			return "no_push_target";
 		}
 
@@ -272,24 +348,120 @@ export class IrohRemotePushNotificationDispatcher implements IrohRemotePushNotif
 			const relayResult = await this.sendNotificationWithRetry(relayRequest);
 			if (relayResult.status === "invalid_target") {
 				await this.stateManager.disableClientPushTarget(this.clientNodeId, pushTarget.id, this.now());
-				await this.logPushDelivery(pushTarget, notification, false, "push target is invalid or unregistered");
+				await this.logPushDelivery(
+					pushTarget,
+					notification.eventId,
+					notification.kind,
+					false,
+					"push target is invalid or unregistered",
+				);
 				return "invalid_target";
 			}
-			await this.logPushDelivery(pushTarget, notification, true);
+			await this.logPushDelivery(pushTarget, notification.eventId, notification.kind, true);
 			return "sent";
 		} catch (error: unknown) {
-			await this.logPushDelivery(pushTarget, notification, false, toErrorMessage(error));
+			await this.logPushDelivery(pushTarget, notification.eventId, notification.kind, false, toErrorMessage(error));
 			return "failed";
 		}
+	}
+
+	async deliverLiveActivityUpdate(
+		update: IrohRemoteLiveActivityUpdateIntent,
+	): Promise<IrohRemotePushNotificationDeliveryStatus> {
+		if (!(await this.markDeliveryIntent(update.eventId, update.kind))) {
+			return "duplicate";
+		}
+
+		const client = await this.stateManager.getClient(this.clientNodeId);
+		const pushTarget = selectEnabledLiveActivityPushTarget(client?.pushTargets ?? []);
+		if (!pushTarget?.liveActivity) {
+			await this.logPushFallback(update.eventId, update.kind, "no_live_activity_target");
+			return "no_push_target";
+		}
+
+		const relayRequest = createRelayLiveActivityRequest(pushTarget, update);
+		try {
+			const relayResult = await this.sendLiveActivityUpdateWithRetry(relayRequest);
+			if (relayResult.status === "invalid_target") {
+				await this.logPushDelivery(
+					pushTarget,
+					update.eventId,
+					update.kind,
+					false,
+					"live activity target is invalid or unregistered",
+					pushTarget.liveActivity.tokenHash,
+				);
+				return "invalid_target";
+			}
+			await this.logPushDelivery(
+				pushTarget,
+				update.eventId,
+				update.kind,
+				true,
+				undefined,
+				pushTarget.liveActivity.tokenHash,
+			);
+			return "sent";
+		} catch (error: unknown) {
+			await this.logPushDelivery(
+				pushTarget,
+				update.eventId,
+				update.kind,
+				false,
+				toErrorMessage(error),
+				pushTarget.liveActivity.tokenHash,
+			);
+			return "failed";
+		}
+	}
+
+	private async markDeliveryIntent(eventId: string, kind: string): Promise<boolean> {
+		if (this.deduper.tryMark(this.clientNodeId, eventId)) {
+			return true;
+		}
+		await this.log({
+			type: "push_notification_deduplicated",
+			clientNodeId: this.clientNodeId,
+			workspace: this.workspace,
+			success: true,
+			details: { eventId, kind },
+		});
+		return false;
+	}
+
+	private async logPushFallback(eventId: string, kind: string, reason: string): Promise<void> {
+		await this.log({
+			type: "push_notification_fallback",
+			clientNodeId: this.clientNodeId,
+			workspace: this.workspace,
+			success: true,
+			details: { eventId, kind, reason },
+		});
 	}
 
 	private async sendNotificationWithRetry(
 		request: IrohRemotePushRelayNotificationRequest,
 	): Promise<IrohRemotePushRelayNotificationResult> {
+		return this.sendWithRetry(() => this.relayClient.sendNotification(request));
+	}
+
+	private async sendLiveActivityUpdateWithRetry(
+		request: IrohRemotePushRelayLiveActivityRequest,
+	): Promise<IrohRemotePushRelayNotificationResult> {
+		const sendLiveActivityUpdate = this.relayClient.sendLiveActivityUpdate?.bind(this.relayClient);
+		if (!sendLiveActivityUpdate) {
+			throw new Error("push relay does not support live activity updates");
+		}
+		return this.sendWithRetry(() => sendLiveActivityUpdate(request));
+	}
+
+	private async sendWithRetry(
+		send: () => Promise<IrohRemotePushRelayNotificationResult>,
+	): Promise<IrohRemotePushRelayNotificationResult> {
 		let lastError: unknown;
 		for (let attempt = 1; attempt <= this.retryAttempts; attempt += 1) {
 			try {
-				return await this.relayClient.sendNotification(request);
+				return await send();
 			} catch (error: unknown) {
 				lastError = error;
 				if (attempt >= this.retryAttempts || !isTransientPushRelayError(error)) {
@@ -303,9 +475,11 @@ export class IrohRemotePushNotificationDispatcher implements IrohRemotePushNotif
 
 	private async logPushDelivery(
 		pushTarget: IrohRemotePushTarget,
-		notification: IrohRemotePushNotificationIntent,
+		eventId: string,
+		kind: string,
 		success: boolean,
 		error?: string,
+		deliveredTokenHash?: string,
 	): Promise<void> {
 		await this.log({
 			type: "push_notification_delivered",
@@ -314,12 +488,12 @@ export class IrohRemotePushNotificationDispatcher implements IrohRemotePushNotif
 			success,
 			error,
 			details: {
-				eventId: notification.eventId,
-				kind: notification.kind,
+				eventId,
+				kind,
 				pushTargetId: pushTarget.id,
 				provider: pushTarget.provider,
 				platform: pushTarget.platform,
-				tokenHash: pushTarget.tokenHash,
+				tokenHash: deliveredTokenHash ?? pushTarget.tokenHash,
 			},
 		});
 	}
@@ -349,7 +523,23 @@ export function parseRegisterPushTargetArgs(value: unknown): RpcRegisterPushTarg
 		pushTargetAuthToken: expectString(args.pushTargetAuthToken, "push target auth token"),
 		relayUrl: expectOptionalString(args.relayUrl, "push relay URL"),
 		tokenHash: expectOptionalString(args.tokenHash, "push token hash"),
+		liveActivity: parseOptionalLiveActivityRegistration(args.liveActivity, "push liveActivity"),
 		enabled: expectBoolean(args.enabled, "push enabled"),
+	};
+}
+
+function parseOptionalLiveActivityRegistration(
+	value: unknown,
+	label: string,
+): RpcRegisterPushTargetArgs["liveActivity"] {
+	if (value === undefined) {
+		return undefined;
+	}
+	const liveActivity = expectRecord(value, label);
+	return {
+		activityId: expectString(liveActivity.activityId, `${label} activityId`),
+		pushToken: expectString(liveActivity.pushToken, `${label} pushToken`),
+		tokenHash: expectOptionalString(liveActivity.tokenHash, `${label} tokenHash`),
 	};
 }
 
@@ -357,6 +547,15 @@ function selectEnabledPushTarget(pushTargets: IrohRemotePushTarget[]): IrohRemot
 	return pushTargets
 		.filter((target) => target.enabled)
 		.sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt)[0];
+}
+
+function selectEnabledLiveActivityPushTarget(pushTargets: IrohRemotePushTarget[]): IrohRemotePushTarget | undefined {
+	return pushTargets
+		.filter((target) => target.enabled && target.liveActivity)
+		.sort((a, b) => {
+			const activityDelta = (b.liveActivity?.updatedAt ?? 0) - (a.liveActivity?.updatedAt ?? 0);
+			return activityDelta || b.updatedAt - a.updatedAt || b.createdAt - a.createdAt;
+		})[0];
 }
 
 function createRelayNotificationRequest(
@@ -378,6 +577,29 @@ function createRelayNotificationRequest(
 	};
 }
 
+function createRelayLiveActivityRequest(
+	pushTarget: IrohRemotePushTarget,
+	update: IrohRemoteLiveActivityUpdateIntent,
+): IrohRemotePushRelayLiveActivityRequest {
+	if (!pushTarget.liveActivity) {
+		throw new Error("push target has no live activity token");
+	}
+	return {
+		pushTargetId: pushTarget.id,
+		pushTargetAuthToken: pushTarget.pushTargetAuthToken,
+		activityId: pushTarget.liveActivity.activityId,
+		activityPushToken: pushTarget.liveActivity.pushToken,
+		eventId: update.eventId,
+		kind: update.kind,
+		contentState: update.contentState,
+		...(update.activityEvent === undefined ? {} : { activityEvent: update.activityEvent }),
+		...(update.staleDateEpochSeconds === undefined ? {} : { staleDateEpochSeconds: update.staleDateEpochSeconds }),
+		...(update.dismissalDateEpochSeconds === undefined
+			? {}
+			: { dismissalDateEpochSeconds: update.dismissalDateEpochSeconds }),
+	};
+}
+
 function getPushTargetAuditDetails(pushTarget: IrohRemotePushTarget): Record<string, unknown> {
 	return {
 		pushTargetId: pushTarget.id,
@@ -385,6 +607,7 @@ function getPushTargetAuditDetails(pushTarget: IrohRemotePushTarget): Record<str
 		platform: pushTarget.platform,
 		relayUrl: pushTarget.relayUrl,
 		tokenHash: pushTarget.tokenHash,
+		liveActivityTokenHash: pushTarget.liveActivity?.tokenHash,
 		enabled: pushTarget.enabled,
 		createdAt: pushTarget.createdAt,
 		updatedAt: pushTarget.updatedAt,

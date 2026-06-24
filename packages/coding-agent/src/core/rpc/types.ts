@@ -215,6 +215,12 @@ export interface UiActionInvocationResponse {
 export type RpcPushProvider = "fcm";
 export type RpcPushPlatform = "ios";
 
+export interface RpcLiveActivityRegistration {
+	activityId: string;
+	pushToken: string;
+	tokenHash?: string;
+}
+
 export interface RpcRegisterPushTargetArgs {
 	provider: RpcPushProvider;
 	platform: RpcPushPlatform;
@@ -222,6 +228,7 @@ export interface RpcRegisterPushTargetArgs {
 	pushTargetAuthToken: string;
 	relayUrl?: string;
 	tokenHash?: string;
+	liveActivity?: RpcLiveActivityRegistration;
 	enabled: boolean;
 }
 

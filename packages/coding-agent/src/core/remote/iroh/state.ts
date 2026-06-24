@@ -12,6 +12,13 @@ export interface IrohRemoteWorkspace {
 export type IrohRemotePushTargetProvider = "fcm";
 export type IrohRemotePushTargetPlatform = "ios";
 
+export interface IrohRemoteLiveActivityTarget {
+	activityId: string;
+	pushToken: string;
+	tokenHash?: string;
+	updatedAt: number;
+}
+
 export interface IrohRemotePushTarget {
 	id: string;
 	provider: IrohRemotePushTargetProvider;
@@ -19,6 +26,7 @@ export interface IrohRemotePushTarget {
 	pushTargetAuthToken: string;
 	relayUrl?: string;
 	tokenHash?: string;
+	liveActivity?: IrohRemoteLiveActivityTarget;
 	enabled: boolean;
 	createdAt: number;
 	updatedAt: number;
@@ -194,9 +202,26 @@ export function parseIrohRemotePushTarget(value: unknown): IrohRemotePushTarget 
 		pushTargetAuthToken: expectString(target.pushTargetAuthToken, "push target pushTargetAuthToken"),
 		relayUrl: expectOptionalString(target.relayUrl, "push target relayUrl"),
 		tokenHash: expectOptionalString(target.tokenHash, "push target tokenHash"),
+		liveActivity: parseOptionalIrohRemoteLiveActivityTarget(target.liveActivity, "push target liveActivity"),
 		enabled: expectBoolean(target.enabled, "push target enabled"),
 		createdAt: expectNumber(target.createdAt, "push target createdAt"),
 		updatedAt: expectNumber(target.updatedAt, "push target updatedAt"),
+	};
+}
+
+function parseOptionalIrohRemoteLiveActivityTarget(
+	value: unknown,
+	label: string,
+): IrohRemoteLiveActivityTarget | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	const target = expectRecord(value, label);
+	return {
+		activityId: expectString(target.activityId, `${label} activityId`),
+		pushToken: expectString(target.pushToken, `${label} pushToken`),
+		tokenHash: expectOptionalString(target.tokenHash, `${label} tokenHash`),
+		updatedAt: expectNumber(target.updatedAt, `${label} updatedAt`),
 	};
 }
 

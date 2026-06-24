@@ -39,6 +39,7 @@ export type {
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcLiveActivityRegistration,
 	RpcPushPlatform,
 	RpcPushProvider,
 	RpcRegisterPushTargetArgs,

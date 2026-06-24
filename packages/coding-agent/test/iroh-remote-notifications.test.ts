@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { REVIEW_UNCOMMITTED_ACTION_ID } from "../src/core/host-actions.ts";
 import {
@@ -250,6 +251,53 @@ describe("Iroh remote notification requests", () => {
 		});
 	});
 
+	test("relay HTTP client posts Live Activity state to the live activity endpoint", async () => {
+		const fetcher = vi.fn(async (_input: string, _init: RequestInit): Promise<Response> => {
+			return new Response("{}", { status: 200 });
+		});
+		const client = new IrohRemotePushRelayHttpClient({ baseUrl: "https://push.example.test", fetcher });
+
+		await expect(
+			client.sendLiveActivityUpdate({
+				pushTargetId: "relay-target-1",
+				pushTargetAuthToken: "relay-target-auth-token",
+				activityId: "activity-1",
+				activityPushToken: "activity-token",
+				eventId: "event-1",
+				kind: "live_activity_update",
+				contentState: {
+					status: "running",
+					statusText: "Using read",
+					currentTool: { name: "read", symbolName: "doc.text.magnifyingglass", status: "started" },
+					recentTools: [{ name: "read", symbolName: "doc.text.magnifyingglass", status: "started" }],
+					sessionID: "session-1",
+					updatedAtEpochSeconds: 123,
+				},
+				staleDateEpochSeconds: 213,
+			}),
+		).resolves.toEqual({ status: "sent" });
+
+		expect(fetcher).toHaveBeenCalledWith(
+			"https://push.example.test/v1/live-activities",
+			expect.objectContaining({ method: "POST" }),
+		);
+		const init = fetcher.mock.calls[0]?.[1];
+		if (!init) {
+			throw new Error("Expected live activity fetch init");
+		}
+		const body = JSON.parse(String(init.body)) as unknown;
+		if (!isRecord(body)) {
+			throw new Error("Expected live activity body object");
+		}
+		expect(body).toMatchObject({
+			activityId: "activity-1",
+			activityPushToken: "activity-token",
+			contentState: { statusText: "Using read" },
+			eventId: "event-1",
+			pushTargetId: "relay-target-1",
+		});
+	});
+
 	test("relay HTTP client sends bearer auth when configured", async () => {
 		const fetcher = vi.fn(async (_input: string, _init: RequestInit): Promise<Response> => {
 			return new Response("{}", { status: 200 });
@@ -357,6 +405,11 @@ describe("Iroh remote notification requests", () => {
 					pushTargetAuthToken: "secret-target-auth-token",
 					relayUrl: "https://push.example.test",
 					tokenHash: hashIrohRemotePushToken("secret-fcm-token"),
+					liveActivity: {
+						activityId: "activity-1",
+						pushToken: "secret-live-activity-token",
+						tokenHash: hashIrohRemotePushToken("secret-live-activity-token"),
+					},
 					enabled: true,
 					clientNodeId: "untrusted-client",
 				},
@@ -381,6 +434,12 @@ describe("Iroh remote notification requests", () => {
 				pushTargetAuthToken: "secret-target-auth-token",
 				relayUrl: "https://push.example.test",
 				tokenHash: hashIrohRemotePushToken("secret-fcm-token"),
+				liveActivity: {
+					activityId: "activity-1",
+					pushToken: "secret-live-activity-token",
+					tokenHash: hashIrohRemotePushToken("secret-live-activity-token"),
+					updatedAt: 100,
+				},
 				enabled: true,
 				createdAt: 100,
 				updatedAt: 100,
@@ -389,11 +448,206 @@ describe("Iroh remote notification requests", () => {
 		expect(JSON.stringify(state)).not.toContain("secret-fcm-token");
 		expect(JSON.stringify(auditEvents)).not.toContain("secret-target-auth-token");
 		expect(JSON.stringify(auditEvents)).not.toContain("secret-fcm-token");
+		expect(JSON.stringify(auditEvents)).not.toContain("secret-live-activity-token");
 		expect(auditEvents).toContainEqual(
 			expect.objectContaining({
 				type: "push_target_registered",
 				details: expect.objectContaining({ tokenHash: hashIrohRemotePushToken("secret-fcm-token") }),
 			}),
+		);
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("keeps Live Activity open when the agent run will retry", async () => {
+		const sessionHandlers: Array<(event: AgentSessionEvent) => void> = [];
+		const session = {
+			autoCompactionEnabled: false,
+			bindExtensions: vi.fn(async () => {}),
+			followUpMode: "all" as const,
+			isCompacting: false,
+			isStreaming: false,
+			messages: [],
+			model: undefined,
+			modelRegistry: { authStorage: {} },
+			pendingMessageCount: 0,
+			sessionFile: "/sessions/session-one.jsonl",
+			sessionId: "session-one",
+			sessionManager: { getLeafId: () => "run-one" },
+			settingsManager: {},
+			steeringMode: "all" as const,
+			subscribe: vi.fn((handler: (event: AgentSessionEvent) => void) => {
+				sessionHandlers.push(handler);
+				return () => {};
+			}),
+			thinkingLevel: "off" as const,
+			waitForIdle: vi.fn(async () => {}),
+			agent: { subscribe: vi.fn(() => () => {}), waitForIdle: vi.fn(async () => {}) },
+		};
+		const deliveredUpdates: Array<{ activityEvent?: "update" | "end"; kind: string }> = [];
+		const recv = new ManualIrohRecvStream();
+		const modePromise = runIrohRemoteRpcMode(
+			{
+				session,
+				dispose: vi.fn(async () => {}),
+				setRebindSession: vi.fn(),
+			} as unknown as AgentSessionRuntime,
+			{
+				disposeRuntimeOnClose: false,
+				notificationDelivery: {
+					deliverNotification: vi.fn(async () => "no_push_target" as const),
+					deliverLiveActivityUpdate: vi.fn(async (update) => {
+						deliveredUpdates.push({ activityEvent: update.activityEvent, kind: update.kind });
+						return "sent" as const;
+					}),
+				},
+				stream: { recv, send: new ManualIrohSendStream() },
+				workspacePath: "/workspace",
+			},
+		);
+
+		await vi.waitFor(() => expect(sessionHandlers.length).toBeGreaterThanOrEqual(2));
+		for (const handler of sessionHandlers) {
+			handler({ type: "agent_start" });
+			handler({ type: "tool_execution_end", toolCallId: "read-1", toolName: "read", result: {}, isError: false });
+		}
+		await vi.waitFor(() =>
+			expect(deliveredUpdates).toContainEqual({ activityEvent: "update", kind: "live_activity_update" }),
+		);
+		for (const handler of sessionHandlers) {
+			handler({ type: "agent_end", messages: [], willRetry: true });
+		}
+		await new Promise((resolve) => setImmediate(resolve));
+
+		expect(deliveredUpdates).not.toContainEqual({ activityEvent: "end", kind: "live_activity_end" });
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("sends Live Activity tool state through the push relay when an activity target exists", async () => {
+		const stateManager = createStateManagerWithClient([
+			createEnabledPushTarget({
+				liveActivity: {
+					activityId: "activity-1",
+					pushToken: "activity-token",
+					tokenHash: hashIrohRemotePushToken("activity-token"),
+					updatedAt: 20,
+				},
+			}),
+		]);
+		const relayClient = createRelayClient({
+			sendLiveActivityUpdate: vi.fn(async () => ({ status: "sent" as const })),
+		});
+		const dispatcher = new IrohRemotePushNotificationDispatcher({
+			clientNodeId: "paired-client",
+			relayClient,
+			retryDelayMs: 0,
+			stateManager,
+		});
+		const contentState = {
+			status: "running" as const,
+			statusText: "Using read",
+			currentTool: { name: "read", symbolName: "doc.text.magnifyingglass", status: "started" as const },
+			recentTools: [{ name: "read", symbolName: "doc.text.magnifyingglass", status: "started" as const }],
+			sessionID: "session-one",
+			updatedAtEpochSeconds: 123,
+		};
+
+		await expect(
+			dispatcher.deliverLiveActivityUpdate({
+				eventId: "live-activity:session-one:run-1:1",
+				kind: "live_activity_update",
+				contentState,
+				staleDateEpochSeconds: 213,
+			}),
+		).resolves.toBe("sent");
+
+		expect(relayClient.sendLiveActivityUpdate).toHaveBeenCalledWith({
+			pushTargetId: "relay-target-1",
+			pushTargetAuthToken: "relay-target-auth-token",
+			activityId: "activity-1",
+			activityPushToken: "activity-token",
+			eventId: "live-activity:session-one:run-1:1",
+			kind: "live_activity_update",
+			contentState,
+			staleDateEpochSeconds: 213,
+		});
+	});
+
+	test("Live Activity updater only sends completed new tool names", async () => {
+		const session = createTestSession("session-one", "conversation-run");
+		const stateManager = createStateManagerWithClient([
+			createEnabledPushTarget({
+				liveActivity: {
+					activityId: "activity-1",
+					pushToken: "activity-token",
+					tokenHash: hashIrohRemotePushToken("activity-token"),
+					updatedAt: 20,
+				},
+			}),
+		]);
+		const relayClient = createRelayClient({
+			sendLiveActivityUpdate: vi.fn(async () => ({ status: "sent" as const })),
+		});
+		const dispatcher = new IrohRemotePushNotificationDispatcher({
+			clientNodeId: "paired-client",
+			relayClient,
+			retryDelayMs: 0,
+			stateManager,
+		});
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv } = await startIrohRpcMode(runtimeHost, session, {
+			notificationDelivery: dispatcher,
+		});
+		const liveActivityHandler = session.subscribe.mock.calls[0]?.[0] as ((event: object) => void) | undefined;
+		if (!liveActivityHandler) {
+			throw new Error("Expected Live Activity session subscription");
+		}
+
+		liveActivityHandler({ type: "agent_start" });
+		liveActivityHandler({ type: "tool_execution_start", toolCallId: "read-1", toolName: "read", args: {} });
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(relayClient.sendLiveActivityUpdate).not.toHaveBeenCalled();
+
+		liveActivityHandler({
+			type: "tool_execution_end",
+			toolCallId: "read-1",
+			toolName: "read",
+			result: {},
+			isError: false,
+		});
+		await vi.waitFor(() => expect(relayClient.sendLiveActivityUpdate).toHaveBeenCalledTimes(1));
+		liveActivityHandler({
+			type: "tool_execution_end",
+			toolCallId: "read-2",
+			toolName: "read",
+			result: {},
+			isError: false,
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(relayClient.sendLiveActivityUpdate).toHaveBeenCalledTimes(1);
+
+		liveActivityHandler({
+			type: "tool_execution_end",
+			toolCallId: "bash-1",
+			toolName: "bash",
+			result: {},
+			isError: false,
+		});
+		await vi.waitFor(() => expect(relayClient.sendLiveActivityUpdate).toHaveBeenCalledTimes(2));
+		liveActivityHandler({ type: "agent_end", messages: [], willRetry: false });
+		await vi.waitFor(() => expect(relayClient.sendLiveActivityUpdate).toHaveBeenCalledTimes(3));
+		expect(relayClient.sendLiveActivityUpdate).toHaveBeenLastCalledWith(
+			expect.objectContaining({ activityEvent: "end", kind: "live_activity_end" }),
 		);
 
 		recv.end();

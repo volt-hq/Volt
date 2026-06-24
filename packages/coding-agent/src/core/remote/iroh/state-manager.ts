@@ -373,7 +373,10 @@ function clonePendingPairingTicket(ticket: IrohRemotePendingPairingTicket): Iroh
 }
 
 function clonePushTarget(pushTarget: IrohRemotePushTarget): IrohRemotePushTarget {
-	return { ...pushTarget };
+	return {
+		...pushTarget,
+		...(pushTarget.liveActivity ? { liveActivity: { ...pushTarget.liveActivity } } : {}),
+	};
 }
 
 function cloneRevokedClient(client: IrohRemoteRevokedClient): IrohRemoteRevokedClient {

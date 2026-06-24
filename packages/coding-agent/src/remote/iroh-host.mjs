@@ -79,8 +79,10 @@ const RESPONSE_COMPLETION_RPC_TYPES = new Set([
 	"get_transcript",
 	"get_ui_capabilities",
 	"get_ui_actions",
+	"get_ui_action_completions",
 	"invoke_ui_action",
 	"list_sessions",
+	"register_push_target",
 	"switch_session_by_id",
 ]);
 const UI_ACTION_PROMPT_COMPLETION_STATUSES = new Set(["accepted", "queued"]);
