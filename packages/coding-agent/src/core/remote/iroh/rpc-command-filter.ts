@@ -15,6 +15,7 @@ export const IROH_REMOTE_RPC_PASSTHROUGH_TYPES = new Set([
 	"get_ui_actions",
 	"list_sessions",
 	"switch_session_by_id",
+	"register_push_target",
 	"extension_ui_response",
 ]);
 

@@ -185,11 +185,36 @@ The host forwards only these inbound RPC command `type` values from remote clien
 - `get_ui_actions`
 - `get_ui_action_completions`
 - `invoke_ui_action`
+- `register_push_target`
 - `list_sessions`
 - `switch_session_by_id`
 - `extension_ui_response`
 
 All other command types receive a JSONL `response` with `success:false` and are not forwarded to the local Volt RPC process. Within this allowlist, only `abort` is a direct cancellation command.
+
+`register_push_target` registers mobile-issued relay credentials with the host. The client must first register its raw FCM token with the Volt push relay; it must not send that raw FCM token to the desktop host. The host persists the relay target id and target-scoped auth token so it can notify the phone after the Iroh stream detaches:
+
+```json
+{
+  "id": "push-1",
+  "type": "register_push_target",
+  "args": {
+    "provider": "fcm",
+    "platform": "ios",
+    "pushTargetId": "<relay-target-id>",
+    "pushTargetAuthToken": "<relay-target-auth-token>",
+    "relayUrl": "https://us-central1-volt-3fae7.cloudfunctions.net/pushRelay",
+    "tokenHash": "sha256:<fcm-token-hash>",
+    "enabled": true
+  }
+}
+```
+
+The successful response is:
+
+```json
+{"id":"push-1","type":"response","command":"register_push_target","success":true,"data":{"status":"registered","pushTargetId":"<relay-target-id>"}}
+```
 
 `get_ui_capabilities`, `get_ui_actions`, `get_ui_action_completions`, and `invoke_ui_action` expose the v1 native UI action protocol for the narrow remote-safe action set. Remote `get_ui_capabilities` advertises `ui_action_invocation.v1` only when the host accepts invocation and `ui_action_completions.v1` when action argument completions are available. Descriptor responses omit prompt bodies, skill content, raw `sourceInfo`, extension source paths, prompt and skill file paths, skill base directories, host session files, provider metadata, and secrets. They still pass through the outbound path handling layer below before being written to the remote stream.
 

@@ -42,6 +42,7 @@ import {
 	IrohRemoteAuditLogger,
 	type IrohRemoteClient,
 	IrohRemoteHostStateManager,
+	type IrohRemotePushTarget,
 	type IrohRemoteRelayMode,
 	type IrohRemoteRevokedClient,
 	type IrohRemoteUnsafeApproval,
@@ -115,6 +116,9 @@ Host options are forwarded to the integrated Iroh remote host. Common options:
   --allow-tools <list>          Remote tool allowlist. bash, edit, or write can modify host state and require confirmation.
   --profile <name>              Volt settings profile
   --agent-dir <path>            Volt agent config directory
+  --push-relay-url <url>        Volt push relay URL. Defaults to the managed Volt relay or VOLT_PUSH_RELAY_URL.
+  --push-relay-auth-token <token>
+                                Optional bearer token for custom push relays. Defaults to VOLT_PUSH_RELAY_AUTH_TOKEN.
   --approve                     Trust project-local Volt settings/resources for the remote workspace
   --no-pairing                  Reject unpaired clients and print a paired-client ticket
   --once                        Exit after first client disconnects
@@ -169,6 +173,18 @@ interface IrohRemoteStatusClientView {
 	lastSeenAt: number;
 	nodeId: string;
 	pairedAt: number;
+	pushTargetCount?: number;
+	pushTargets?: IrohRemoteStatusPushTargetView[];
+}
+
+interface IrohRemoteStatusPushTargetView {
+	createdAt: number;
+	enabled: boolean;
+	hasTokenHash: boolean;
+	platform: string;
+	provider: string;
+	relayUrl?: string;
+	updatedAt: number;
 }
 
 interface IrohRemoteStatusRevokedClientView {
@@ -498,6 +514,15 @@ function formatRemoteStatusWorkspace(workspace: IrohRemoteWorkspace): IrohRemote
 }
 
 function formatRemoteStatusClient(client: IrohRemoteClient): IrohRemoteStatusClientView {
+	const pushTargets = (client.pushTargets ?? [])
+		.map((target) => formatRemoteStatusPushTarget(target))
+		.sort(
+			(left, right) =>
+				left.provider.localeCompare(right.provider) ||
+				left.platform.localeCompare(right.platform) ||
+				left.createdAt - right.createdAt ||
+				left.updatedAt - right.updatedAt,
+		);
 	return {
 		nodeId: client.nodeId,
 		label: client.label,
@@ -505,6 +530,19 @@ function formatRemoteStatusClient(client: IrohRemoteClient): IrohRemoteStatusCli
 		allowedTools: client.allowedTools,
 		pairedAt: client.pairedAt,
 		lastSeenAt: client.lastSeenAt,
+		...(pushTargets.length === 0 ? {} : { pushTargetCount: pushTargets.length, pushTargets }),
+	};
+}
+
+function formatRemoteStatusPushTarget(target: IrohRemotePushTarget): IrohRemoteStatusPushTargetView {
+	return {
+		provider: target.provider,
+		platform: target.platform,
+		enabled: target.enabled,
+		hasTokenHash: target.tokenHash !== undefined,
+		...(target.relayUrl === undefined ? {} : { relayUrl: target.relayUrl }),
+		createdAt: target.createdAt,
+		updatedAt: target.updatedAt,
 	};
 }
 
@@ -604,7 +642,10 @@ async function handleRemoteClientsCommand(args: readonly string[]): Promise<void
 	}
 
 	const stateManager = new IrohRemoteHostStateManager({ statePath: parsed.statePath });
-	console.log(JSON.stringify(await stateManager.listClients(), null, 2));
+	const clients = (await stateManager.listClients())
+		.map((client) => formatRemoteStatusClient(client))
+		.sort((left, right) => left.nodeId.localeCompare(right.nodeId));
+	console.log(JSON.stringify(clients, null, 2));
 }
 
 async function handleRemoteRevokeCommand(args: readonly string[]): Promise<void> {

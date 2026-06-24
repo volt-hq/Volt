@@ -44,6 +44,9 @@ export type RpcCommand =
 			streamingBehavior?: UiActionInvocationQueueBehavior;
 	  }
 
+	// Push notifications
+	| { id?: string; type: "register_push_target"; args: RpcRegisterPushTargetArgs }
+
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "get_transcript"; limit?: number; beforeEntryId?: string }
@@ -206,6 +209,28 @@ export interface UiActionInvocationResponse {
 }
 
 // ============================================================================
+// RPC Push Notifications
+// ============================================================================
+
+export type RpcPushProvider = "fcm";
+export type RpcPushPlatform = "ios";
+
+export interface RpcRegisterPushTargetArgs {
+	provider: RpcPushProvider;
+	platform: RpcPushPlatform;
+	pushTargetId: string;
+	pushTargetAuthToken: string;
+	relayUrl?: string;
+	tokenHash?: string;
+	enabled: boolean;
+}
+
+export interface RpcRegisterPushTargetResponse {
+	status: "registered";
+	pushTargetId: string;
+}
+
+// ============================================================================
 // RPC Slash Command (for get_commands response)
 // ============================================================================
 
@@ -317,6 +342,15 @@ export type RpcResponse =
 			command: "invoke_ui_action";
 			success: true;
 			data: UiActionInvocationResponse;
+	  }
+
+	// Push notifications
+	| {
+			id?: string;
+			type: "response";
+			command: "register_push_target";
+			success: true;
+			data: RpcRegisterPushTargetResponse;
 	  }
 
 	// State

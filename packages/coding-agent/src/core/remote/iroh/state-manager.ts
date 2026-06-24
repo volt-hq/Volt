@@ -13,6 +13,7 @@ import {
 	type IrohRemoteHostState,
 	type IrohRemotePairingSecretTombstone,
 	type IrohRemotePendingPairingTicket,
+	type IrohRemotePushTarget,
 	type IrohRemoteRevokedClient,
 	type IrohRemoteWorkspace,
 	readIrohRemoteHostState,
@@ -117,6 +118,14 @@ export class IrohRemoteHostStateManager {
 		});
 	}
 
+	async getClient(nodeId: string): Promise<IrohRemoteClient | undefined> {
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			const client = state.clients.find((entry) => entry.nodeId === nodeId);
+			return client ? cloneClient(client) : undefined;
+		});
+	}
+
 	async listRevokedClients(): Promise<IrohRemoteRevokedClient[]> {
 		return this.runExclusive(async () => {
 			const state = await this.loadUnlocked();
@@ -141,6 +150,50 @@ export class IrohRemoteHostStateManager {
 			};
 			await this.saveUnlocked(state);
 			return cloneClient(client);
+		});
+	}
+
+	async upsertClientPushTarget(
+		nodeId: string,
+		pushTarget: IrohRemotePushTarget,
+	): Promise<IrohRemoteClient | undefined> {
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			const client = state.clients.find((entry) => entry.nodeId === nodeId);
+			if (!client) {
+				return undefined;
+			}
+			let createdAt = pushTarget.createdAt;
+			const retainedTargets: IrohRemotePushTarget[] = [];
+			for (const existingTarget of client.pushTargets ?? []) {
+				if (isSamePushTargetSlot(existingTarget, pushTarget)) {
+					createdAt = existingTarget.createdAt;
+					continue;
+				}
+				retainedTargets.push(existingTarget);
+			}
+			client.pushTargets = [...retainedTargets, { ...pushTarget, createdAt }];
+			await this.saveUnlocked(state);
+			return cloneClient(client);
+		});
+	}
+
+	async disableClientPushTarget(
+		nodeId: string,
+		pushTargetId: string,
+		now = Date.now(),
+	): Promise<IrohRemotePushTarget | undefined> {
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			const client = state.clients.find((entry) => entry.nodeId === nodeId);
+			const pushTarget = client?.pushTargets?.find((entry) => entry.id === pushTargetId);
+			if (!pushTarget) {
+				return undefined;
+			}
+			pushTarget.enabled = false;
+			pushTarget.updatedAt = now;
+			await this.saveUnlocked(state);
+			return clonePushTarget(pushTarget);
 		});
 	}
 
@@ -294,6 +347,7 @@ function cloneClient(client: IrohRemoteClient): IrohRemoteClient {
 		...client,
 		allowedWorkspaces: [...client.allowedWorkspaces],
 		...(client.lastSessionIdByWorkspace ? { lastSessionIdByWorkspace: { ...client.lastSessionIdByWorkspace } } : {}),
+		...(client.pushTargets ? { pushTargets: client.pushTargets.map((target) => clonePushTarget(target)) } : {}),
 	};
 }
 
@@ -318,6 +372,10 @@ function clonePendingPairingTicket(ticket: IrohRemotePendingPairingTicket): Iroh
 	return { ...ticket };
 }
 
+function clonePushTarget(pushTarget: IrohRemotePushTarget): IrohRemotePushTarget {
+	return { ...pushTarget };
+}
+
 function cloneRevokedClient(client: IrohRemoteRevokedClient): IrohRemoteRevokedClient {
 	return {
 		...client,
@@ -333,4 +391,8 @@ function cloneWorkspace(workspace: IrohRemoteWorkspace): IrohRemoteWorkspace {
 function getRevokedClients(state: IrohRemoteHostState): IrohRemoteRevokedClient[] {
 	state.revokedClients ??= [];
 	return state.revokedClients;
+}
+
+function isSamePushTargetSlot(a: IrohRemotePushTarget, b: IrohRemotePushTarget): boolean {
+	return a.id === b.id || (a.provider === b.provider && a.platform === b.platform);
 }

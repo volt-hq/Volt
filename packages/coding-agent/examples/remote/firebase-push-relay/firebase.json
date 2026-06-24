@@ -1,0 +1,11 @@
+{
+	"functions": [
+		{
+			"source": "functions",
+			"codebase": "volt-push-relay"
+		}
+	],
+	"firestore": {
+		"rules": "firestore.rules"
+	}
+}

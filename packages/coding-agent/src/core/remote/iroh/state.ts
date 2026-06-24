@@ -9,6 +9,21 @@ export interface IrohRemoteWorkspace {
 	allowedTools?: string;
 }
 
+export type IrohRemotePushTargetProvider = "fcm";
+export type IrohRemotePushTargetPlatform = "ios";
+
+export interface IrohRemotePushTarget {
+	id: string;
+	provider: IrohRemotePushTargetProvider;
+	platform: IrohRemotePushTargetPlatform;
+	pushTargetAuthToken: string;
+	relayUrl?: string;
+	tokenHash?: string;
+	enabled: boolean;
+	createdAt: number;
+	updatedAt: number;
+}
+
 export interface IrohRemoteClient {
 	nodeId: string;
 	label: string;
@@ -17,6 +32,7 @@ export interface IrohRemoteClient {
 	pairedAt: number;
 	lastSeenAt: number;
 	lastSessionIdByWorkspace?: Record<string, string>;
+	pushTargets?: IrohRemotePushTarget[];
 }
 
 export interface IrohRemoteRevokedClient {
@@ -126,6 +142,7 @@ function serializeIrohRemoteHostState(state: IrohRemoteHostState): IrohRemoteHos
 			...(client.lastSessionIdByWorkspace
 				? { lastSessionIdByWorkspace: { ...client.lastSessionIdByWorkspace } }
 				: {}),
+			...(client.pushTargets ? { pushTargets: client.pushTargets.map((target) => ({ ...target })) } : {}),
 		})),
 		revokedClients: (state.revokedClients ?? []).map((client) => ({
 			...client,
@@ -164,6 +181,22 @@ export function parseIrohRemoteClient(value: unknown): IrohRemoteClient {
 			"client last session workspace",
 			"client last session id",
 		),
+		...parseOptionalPushTargetsProperty(client.pushTargets, "client pushTargets"),
+	};
+}
+
+export function parseIrohRemotePushTarget(value: unknown): IrohRemotePushTarget {
+	const target = expectRecord(value, "push target");
+	return {
+		id: expectString(target.id, "push target id"),
+		provider: expectPushTargetProvider(target.provider, "push target provider"),
+		platform: expectPushTargetPlatform(target.platform, "push target platform"),
+		pushTargetAuthToken: expectString(target.pushTargetAuthToken, "push target pushTargetAuthToken"),
+		relayUrl: expectOptionalString(target.relayUrl, "push target relayUrl"),
+		tokenHash: expectOptionalString(target.tokenHash, "push target tokenHash"),
+		enabled: expectBoolean(target.enabled, "push target enabled"),
+		createdAt: expectNumber(target.createdAt, "push target createdAt"),
+		updatedAt: expectNumber(target.updatedAt, "push target updatedAt"),
 	};
 }
 
@@ -278,11 +311,32 @@ function parseOptionalStringRecordProperty(
 	return { lastSessionIdByWorkspace: parsed };
 }
 
+function parseOptionalPushTargetsProperty(value: unknown, label: string): { pushTargets?: IrohRemotePushTarget[] } {
+	if (value === undefined) {
+		return {};
+	}
+	return { pushTargets: parseArray(value, label, parseIrohRemotePushTarget) };
+}
+
 function expectPairingSecretTombstoneOutcome(value: unknown): IrohRemotePairingSecretTombstoneOutcome {
 	if (value === "pairing_secret_consumed" || value === "pairing_secret_expired") {
 		return value;
 	}
 	throw new Error("pairing secret tombstone outcome must be pairing_secret_consumed or pairing_secret_expired");
+}
+
+function expectPushTargetProvider(value: unknown, label: string): IrohRemotePushTargetProvider {
+	if (value === "fcm") {
+		return value;
+	}
+	throw new Error(`${label} must be fcm`);
+}
+
+function expectPushTargetPlatform(value: unknown, label: string): IrohRemotePushTargetPlatform {
+	if (value === "ios") {
+		return value;
+	}
+	throw new Error(`${label} must be ios`);
 }
 
 function expectRecord(value: unknown, label: string): Record<string, unknown> {
@@ -311,6 +365,13 @@ function expectOptionalNumber(value: unknown, label: string): number | undefined
 		return undefined;
 	}
 	return expectNumber(value, label);
+}
+
+function expectBoolean(value: unknown, label: string): boolean {
+	if (typeof value !== "boolean") {
+		throw new Error(`${label} must be a boolean`);
+	}
+	return value;
 }
 
 function expectNumber(value: unknown, label: string): number {

@@ -203,7 +203,7 @@ Common management commands:
 
 ```bash
 volt remote status                         # persisted state, workspaces, clients, tools, state/audit paths
-volt remote clients                        # paired client JSON
+volt remote clients                        # paired client JSON without secrets
 volt remote revoke <node-id>               # revoke future access; live hosts also close active connections
 volt remote approve-repair <node-id>       # allow a revoked phone identity to re-pair with a fresh ticket
 volt remote host --register-workspace .    # register current directory by basename
@@ -218,7 +218,7 @@ volt remote pair --workspace volt --label "Jordan iPhone"
 
 Options to know:
 
-- Host: `--workspace <name=path>`, `--register-workspace [path|name=path]`, `--mobile`, `--relay <disabled|default>`, `--state <path>`, `--audit <path>`, `--allow-tools <list>`, `--profile <name>`, `--agent-dir <path>`, `--detached-runtime-ttl-ms <ms>`, `--approve`, `--no-pairing`, `--once`, `--yes`.
+- Host: `--workspace <name=path>`, `--register-workspace [path|name=path]`, `--mobile`, `--relay <disabled|default>`, `--state <path>`, `--audit <path>`, `--allow-tools <list>`, `--profile <name>`, `--agent-dir <path>`, `--push-relay-url <url>`, `--push-relay-auth-token <token>`, `--detached-runtime-ttl-ms <ms>`, `--approve`, `--no-pairing`, `--once`, `--yes`.
 - Pair: `--workspace <name>`, `--allow-tools <list>`, `--label <label>`, `--ttl <duration>`, `--state <path>`, `--relay <disabled|default>`, `--yes`.
 - Management: `--state <path>` and `--audit <path>` for `status`, `clients`, `revoke`, and `approve-repair`.
 
@@ -241,6 +241,7 @@ Security and support boundary:
 - Idle detached integrated runtimes are retained for 30 minutes by default; change this with `--detached-runtime-ttl-ms <ms>`. Host exit, crash, explicit shutdown, or `--once` is not durable recovery for active work.
 - `--use-volt` and `--source-volt` spawned child compatibility modes remain connection-scoped. A disconnect can stop the spawned RPC child and any active in-memory work.
 - Default paths are `~/.volt/agent/remote/iroh-host.json` for state and `~/.volt/agent/remote/iroh-host.audit.jsonl` for audit JSONL.
+- Remote push notifications use the managed Volt push relay by default. The mobile app registers its FCM token with the relay and sends the host target-scoped relay credentials over Iroh; the host does not store raw FCM tokens. Use `--push-relay-url` or `VOLT_PUSH_RELAY_URL` only for a custom relay, and `--push-relay-auth-token` or `VOLT_PUSH_RELAY_AUTH_TOKEN` only when that custom relay requires shared bearer auth.
 - Bare `volt remote host` uses `--relay disabled` for same-machine/LAN preview workflows. `volt remote host --mobile` is the mobile-facing host mode: it starts in relay/discovery mode `"default"` and skips startup pairing. Use `--relay disabled` only as an explicit LAN-only opt-out.
 - `volt remote pair` creates pairing tickets with the live host relay mode unless `--relay <disabled|default>` is supplied as an expectation check; it cannot change a running host's relay mode.
 - `volt remote host` requires a Node.js npm install or source checkout with optional `@number0/iroh` available for the platform. Bun binary builds reject it because the native Iroh adapter is not bundled.

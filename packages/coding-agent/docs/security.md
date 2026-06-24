@@ -73,7 +73,7 @@ Supported preview safety model:
 - A revoked phone node ID cannot reconnect or re-pair with only a generic new QR. The desktop host must approve that node with `volt remote approve-repair <node-id>`, then issue a fresh active pairing ticket.
 - In the default integrated runtime, Iroh stream close is detach, not cancellation. Active work can continue on the host until it finishes or an authorized client sends `abort`.
 - Detached integrated runtimes can be reattached only by the same authoritative Iroh client node ID and workspace, and idle detached runtimes expire by the host retention policy.
-- `volt remote status` reports persisted workspaces, clients, tool grants, state path, and audit path without printing secrets or secret hashes.
+- `volt remote status` and `volt remote clients` report persisted workspaces, clients, tool grants, state path, audit path, and redacted push target metadata without printing secrets or secret hashes.
 - Default paths are `~/.volt/agent/remote/iroh-host.json` for state and `~/.volt/agent/remote/iroh-host.audit.jsonl` for audit JSONL.
 
 Unsafe remote tools require explicit host approval. Granting `bash`, `edit`, or `write` lets the remote session modify files or run shell commands on the host. TTY host startup asks for confirmation and offers `trust` to continue while saving workspace trust; TTY pair commands ask for confirmation. Noninteractive unsafe grants, including the default grant, require `--yes`. Do not grant unsafe tools unless the client device and network path are trusted.
@@ -83,6 +83,8 @@ Remote sessions do not bypass project trust. Project-local settings, extensions,
 Remote host support requires a Node.js npm package install or source checkout with optional `@number0/iroh` available for the platform. Bun binary builds reject `volt remote host` because the native Iroh adapter is not bundled. If startup reports that the optional native adapter is unavailable, reinstall with optional dependencies enabled for the current platform.
 
 Host process exit, host crash, or explicit host shutdown stops in-memory work; remote access does not provide durable job recovery beyond persisted session state. Spawned child compatibility modes through `--use-volt` or `--source-volt` are connection-scoped and can stop the child on disconnect.
+
+Push notification delivery is mediated by the managed Volt relay by default. The mobile app registers its FCM token with the relay, then sends the desktop host only an opaque relay target id plus a target-scoped delivery credential. Volt host state stores that relay credential and optional token hash, but not the raw FCM registration token. Custom relays can be selected with `--push-relay-url` or `VOLT_PUSH_RELAY_URL`; if a custom relay uses shared bearer auth, pass it with `--push-relay-auth-token` or `VOLT_PUSH_RELAY_AUTH_TOKEN`.
 
 Bare `volt remote host` uses `--relay disabled` for same-machine and same-LAN preview workflows. Use `volt remote host --mobile` for mobile-facing setup; it starts the host in relay/discovery mode `"default"` without creating a startup pairing invite. Use `volt remote pair` to create pairing tickets, and use `--relay disabled` only when the host user explicitly chooses LAN-only mode. Use `--relay default` when validating access across networks.
 

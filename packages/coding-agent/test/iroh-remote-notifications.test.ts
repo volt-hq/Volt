@@ -2,6 +2,17 @@ import { Buffer } from "node:buffer";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { REVIEW_UNCOMMITTED_ACTION_ID } from "../src/core/host-actions.ts";
+import {
+	createEmptyIrohRemoteHostState,
+	hashIrohRemotePushToken,
+	IrohRemoteAuditLogger,
+	IrohRemoteHostStateManager,
+	IrohRemotePushNotificationDispatcher,
+	type IrohRemotePushRelayClient,
+	IrohRemotePushRelayHttpClient,
+	type IrohRemotePushRelayNotificationRequest,
+	type IrohRemotePushTarget,
+} from "../src/core/remote/iroh/index.ts";
 import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/rpc/index.ts";
 
 const reviewMocks = vi.hoisted(() => ({
@@ -143,10 +154,12 @@ function createTestSession(sessionId: string, leafId: string | null) {
 async function startIrohRpcMode(
 	runtimeHost: AgentSessionRuntime,
 	startupSession: ReturnType<typeof createTestSession>,
+	options: Partial<Parameters<typeof runIrohRemoteRpcMode>[1]> = {},
 ) {
 	const recv = new ManualIrohRecvStream();
 	const send = new ManualIrohSendStream();
 	const modePromise = runIrohRemoteRpcMode(runtimeHost, {
+		...options,
 		disposeRuntimeOnClose: false,
 		stream: { recv, send },
 		workspacePath: "/workspace",
@@ -155,11 +168,383 @@ async function startIrohRpcMode(
 	return { modePromise, recv, send };
 }
 
+function createStateManagerWithClient(pushTargets: IrohRemotePushTarget[] = []): IrohRemoteHostStateManager {
+	return new IrohRemoteHostStateManager({
+		initialState: {
+			...createEmptyIrohRemoteHostState(),
+			clients: [
+				{
+					nodeId: "paired-client",
+					label: "phone",
+					allowedWorkspaces: [],
+					allowedTools: "read",
+					pairedAt: 1,
+					lastSeenAt: 2,
+					...(pushTargets.length > 0 ? { pushTargets } : {}),
+				},
+			],
+		},
+	});
+}
+
+function createEnabledPushTarget(overrides: Partial<IrohRemotePushTarget> = {}): IrohRemotePushTarget {
+	return {
+		id: "relay-target-1",
+		provider: "fcm",
+		platform: "ios",
+		pushTargetAuthToken: "relay-target-auth-token",
+		tokenHash: hashIrohRemotePushToken("fcm-token"),
+		enabled: true,
+		createdAt: 10,
+		updatedAt: 10,
+		...overrides,
+	};
+}
+
+function createRelayClient(overrides: Partial<IrohRemotePushRelayClient> = {}): IrohRemotePushRelayClient {
+	return {
+		sendNotification: vi.fn(async () => ({ status: "sent" as const })),
+		...overrides,
+	};
+}
+
 afterEach(() => {
 	reviewMocks.runReviewWorkflow.mockClear();
 });
 
 describe("Iroh remote notification requests", () => {
+	test("relay HTTP client posts scoped target credentials to the notification endpoint", async () => {
+		const fetcher = vi.fn(async (_input: string, _init: RequestInit): Promise<Response> => {
+			return new Response("{}", { status: 200 });
+		});
+		const client = new IrohRemotePushRelayHttpClient({ baseUrl: "https://push.example.test", fetcher });
+
+		await expect(
+			client.sendNotification({
+				pushTargetId: "relay-target-1",
+				pushTargetAuthToken: "relay-target-auth-token",
+				eventId: "event-1",
+				kind: "conversation_completed",
+				title: "Volt finished",
+				body: "Your conversation is ready.",
+				data: { eventId: "event-1", kind: "conversation_completed" },
+			}),
+		).resolves.toEqual({ status: "sent" });
+
+		expect(fetcher).toHaveBeenCalledWith(
+			"https://push.example.test/v1/notifications",
+			expect.objectContaining({ method: "POST" }),
+		);
+		const init = fetcher.mock.calls[0]?.[1];
+		if (!init) {
+			throw new Error("Expected notification fetch init");
+		}
+		const body = JSON.parse(String(init.body)) as unknown;
+		if (!isRecord(body)) {
+			throw new Error("Expected notification body object");
+		}
+		expect(body).toMatchObject({
+			pushTargetId: "relay-target-1",
+			pushTargetAuthToken: "relay-target-auth-token",
+			eventId: "event-1",
+		});
+	});
+
+	test("relay HTTP client sends bearer auth when configured", async () => {
+		const fetcher = vi.fn(async (_input: string, _init: RequestInit): Promise<Response> => {
+			return new Response("{}", { status: 200 });
+		});
+		const client = new IrohRemotePushRelayHttpClient({
+			authToken: "relay-secret",
+			baseUrl: "https://push.example.test",
+			fetcher,
+		});
+
+		await client.sendNotification({
+			pushTargetId: "relay-target-1",
+			pushTargetAuthToken: "relay-target-auth-token",
+			eventId: "event-1",
+			kind: "conversation_completed",
+			title: "Volt finished",
+			body: "Your conversation is ready.",
+			data: { eventId: "event-1", kind: "conversation_completed" },
+		});
+
+		const init = fetcher.mock.calls[0]?.[1];
+		if (!init || !isRecord(init.headers)) {
+			throw new Error("Expected notification fetch headers");
+		}
+		expect(init.headers).toMatchObject({
+			authorization: "Bearer relay-secret",
+			"content-type": "application/json",
+		});
+	});
+
+	test("register_push_target persists app-issued relay credentials with redacted audit metadata", async () => {
+		const now = 100;
+		const session = createTestSession("session-one", "before-run");
+		const stateManager = createStateManagerWithClient();
+		const relayClient = createRelayClient();
+		const auditEvents: object[] = [];
+		const dispatcher = new IrohRemotePushNotificationDispatcher({
+			auditLogger: new IrohRemoteAuditLogger({
+				sink: {
+					write: (event) => {
+						auditEvents.push(event);
+					},
+				},
+			}),
+			clientNodeId: "paired-client",
+			now: () => now,
+			relayClient,
+			stateManager,
+		});
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+			registerPushTarget: (args) => dispatcher.registerPushTarget(args),
+		});
+
+		recv.pushLine(
+			JSON.stringify({
+				id: "push-1",
+				type: "register_push_target",
+				args: {
+					provider: "fcm",
+					platform: "ios",
+					pushTargetId: "relay-target-1",
+					pushTargetAuthToken: "secret-target-auth-token",
+					relayUrl: "https://push.example.test",
+					tokenHash: hashIrohRemotePushToken("secret-fcm-token"),
+					enabled: true,
+					clientNodeId: "untrusted-client",
+				},
+			}),
+		);
+
+		await vi.waitFor(() =>
+			expect(parseWrittenObjects(send)).toContainEqual({
+				id: "push-1",
+				type: "response",
+				command: "register_push_target",
+				success: true,
+				data: { status: "registered", pushTargetId: "relay-target-1" },
+			}),
+		);
+		const state = await stateManager.getState();
+		expect(state.clients[0].pushTargets).toEqual([
+			{
+				id: "relay-target-1",
+				provider: "fcm",
+				platform: "ios",
+				pushTargetAuthToken: "secret-target-auth-token",
+				relayUrl: "https://push.example.test",
+				tokenHash: hashIrohRemotePushToken("secret-fcm-token"),
+				enabled: true,
+				createdAt: 100,
+				updatedAt: 100,
+			},
+		]);
+		expect(JSON.stringify(state)).not.toContain("secret-fcm-token");
+		expect(JSON.stringify(auditEvents)).not.toContain("secret-target-auth-token");
+		expect(JSON.stringify(auditEvents)).not.toContain("secret-fcm-token");
+		expect(auditEvents).toContainEqual(
+			expect.objectContaining({
+				type: "push_target_registered",
+				details: expect.objectContaining({ tokenHash: hashIrohRemotePushToken("secret-fcm-token") }),
+			}),
+		);
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("sends conversation completion notifications through the push relay when a target exists", async () => {
+		const session = createTestSession("session-one", "before-run");
+		session.prompt.mockImplementation(
+			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
+				options?.preflightResult?.(true);
+				session.leafId = "conversation-run";
+			},
+		);
+		const stateManager = createStateManagerWithClient([createEnabledPushTarget()]);
+		const relayClient = createRelayClient();
+		const dispatcher = new IrohRemotePushNotificationDispatcher({
+			clientNodeId: "paired-client",
+			relayClient,
+			retryDelayMs: 0,
+			stateManager,
+		});
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+			notificationDelivery: dispatcher,
+		});
+
+		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
+
+		const expectedNotification: IrohRemotePushRelayNotificationRequest = {
+			pushTargetId: "relay-target-1",
+			pushTargetAuthToken: "relay-target-auth-token",
+			eventId: "conversation:session-one:conversation-run:completed",
+			kind: "conversation_completed",
+			title: "Volt finished",
+			body: "Your conversation is ready.",
+			data: {
+				eventId: "conversation:session-one:conversation-run:completed",
+				kind: "conversation_completed",
+				sessionId: "session-one",
+			},
+		};
+		await vi.waitFor(() => expect(relayClient.sendNotification).toHaveBeenCalledWith(expectedNotification));
+		expect(getNotifications(send)).toEqual([]);
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("falls back to Iroh notification_request when no push target exists", async () => {
+		const session = createTestSession("session-one", "before-run");
+		session.prompt.mockImplementation(
+			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
+				options?.preflightResult?.(true);
+				session.leafId = "conversation-run";
+			},
+		);
+		const stateManager = createStateManagerWithClient();
+		const relayClient = createRelayClient();
+		const dispatcher = new IrohRemotePushNotificationDispatcher({
+			clientNodeId: "paired-client",
+			relayClient,
+			stateManager,
+		});
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+			notificationDelivery: dispatcher,
+		});
+
+		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
+
+		await vi.waitFor(() =>
+			expect(getNotifications(send)).toEqual([
+				{
+					type: "notification_request",
+					eventId: "conversation:session-one:conversation-run:completed",
+					kind: "conversation_completed",
+					title: "Volt finished",
+					body: "Your conversation is ready.",
+					sessionId: "session-one",
+				},
+			]),
+		);
+		expect(relayClient.sendNotification).not.toHaveBeenCalled();
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("does not send duplicate push notifications for the same eventId", async () => {
+		const session = createTestSession("session-one", "before-run");
+		session.prompt.mockImplementation(
+			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
+				options?.preflightResult?.(true);
+				session.leafId = "conversation-run";
+			},
+		);
+		const stateManager = createStateManagerWithClient([createEnabledPushTarget()]);
+		const relayClient = createRelayClient();
+		const dispatcher = new IrohRemotePushNotificationDispatcher({
+			clientNodeId: "paired-client",
+			relayClient,
+			retryDelayMs: 0,
+			stateManager,
+		});
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv } = await startIrohRpcMode(runtimeHost, session, {
+			notificationDelivery: dispatcher,
+		});
+
+		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
+		await vi.waitFor(() => expect(relayClient.sendNotification).toHaveBeenCalledTimes(1));
+		session.leafId = "before-run";
+		recv.pushLine(JSON.stringify({ id: "prompt-2", type: "prompt", message: "hello again" }));
+		await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledTimes(2));
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(relayClient.sendNotification).toHaveBeenCalledTimes(1);
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("disables push targets reported invalid by the relay", async () => {
+		const session = createTestSession("session-one", "before-run");
+		session.prompt.mockImplementation(
+			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
+				options?.preflightResult?.(true);
+				session.leafId = "conversation-run";
+			},
+		);
+		const stateManager = createStateManagerWithClient([createEnabledPushTarget()]);
+		const relayClient = createRelayClient({
+			sendNotification: vi.fn(async () => ({ status: "invalid_target" as const })),
+		});
+		const dispatcher = new IrohRemotePushNotificationDispatcher({
+			clientNodeId: "paired-client",
+			now: () => 500,
+			relayClient,
+			retryDelayMs: 0,
+			stateManager,
+		});
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+			notificationDelivery: dispatcher,
+		});
+
+		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
+
+		await vi.waitFor(async () => {
+			const state = await stateManager.getState();
+			expect(state.clients[0].pushTargets?.[0]).toMatchObject({ enabled: false, updatedAt: 500 });
+		});
+		expect(getNotifications(send)).toEqual([]);
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
 	test("emits one conversation completion notification after prompt completion", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(

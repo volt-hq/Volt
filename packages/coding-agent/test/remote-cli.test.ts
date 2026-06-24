@@ -471,6 +471,19 @@ describe("remote CLI", () => {
 					allowedTools: "read,grep",
 					pairedAt: 10,
 					lastSeenAt: 20,
+					pushTargets: [
+						{
+							id: "relay-target-1",
+							provider: "fcm",
+							platform: "ios",
+							pushTargetAuthToken: "secret-target-auth-token",
+							relayUrl: "https://push.example.test",
+							tokenHash: "sha256:push-token-hash",
+							enabled: true,
+							createdAt: 100,
+							updatedAt: 110,
+						},
+					],
 				},
 			],
 			revokedClients: [
@@ -523,6 +536,18 @@ describe("remote CLI", () => {
 					allowedTools: "read,grep",
 					pairedAt: 10,
 					lastSeenAt: 20,
+					pushTargetCount: 1,
+					pushTargets: [
+						{
+							provider: "fcm",
+							platform: "ios",
+							enabled: true,
+							hasTokenHash: true,
+							relayUrl: "https://push.example.test",
+							createdAt: 100,
+							updatedAt: 110,
+						},
+					],
 				},
 			],
 			revokedClientCount: 1,
@@ -543,6 +568,7 @@ describe("remote CLI", () => {
 		expect(statusText).not.toContain("consumedPairingSecretHashes");
 		expect(statusText).not.toContain("pairingSecretTombstones");
 		expect(statusText).not.toContain("pendingPairingTickets");
+		expect(statusText).not.toContain("secret-target-auth-token");
 		expect(statusText).not.toContain("sha256:");
 		expect(errorSpy).not.toHaveBeenCalled();
 		expect(process.exitCode).toBeUndefined();
@@ -716,6 +742,19 @@ describe("remote CLI", () => {
 					allowedTools: "read",
 					pairedAt: 10,
 					lastSeenAt: 20,
+					pushTargets: [
+						{
+							id: "relay-target-2",
+							provider: "fcm",
+							platform: "ios",
+							pushTargetAuthToken: "client-list-secret-target-auth-token",
+							relayUrl: "https://push.example.test",
+							tokenHash: "sha256:client-list-token-hash",
+							enabled: true,
+							createdAt: 30,
+							updatedAt: 40,
+						},
+					],
 				},
 			],
 		});
@@ -724,9 +763,27 @@ describe("remote CLI", () => {
 
 		await expect(main(["remote", "clients", "--state", statePath])).resolves.toBeUndefined();
 
-		expect(JSON.parse(logSpy.mock.calls.map(([message]) => String(message)).join("\n"))).toEqual([
-			expect.objectContaining({ nodeId: "client-node", label: "phone" }),
+		const clientsText = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
+		expect(JSON.parse(clientsText)).toEqual([
+			expect.objectContaining({
+				nodeId: "client-node",
+				label: "phone",
+				pushTargetCount: 1,
+				pushTargets: [
+					{
+						provider: "fcm",
+						platform: "ios",
+						enabled: true,
+						hasTokenHash: true,
+						relayUrl: "https://push.example.test",
+						createdAt: 30,
+						updatedAt: 40,
+					},
+				],
+			}),
 		]);
+		expect(clientsText).not.toContain("client-list-secret-target-auth-token");
+		expect(clientsText).not.toContain("sha256:");
 		expect(errorSpy).not.toHaveBeenCalled();
 		expect(process.exitCode).toBeUndefined();
 

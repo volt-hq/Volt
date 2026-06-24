@@ -49,6 +49,7 @@ import type {
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcRegisterPushTargetResponse,
 	RpcResponse,
 	RpcSessionListItem,
 	RpcSessionState,
@@ -61,6 +62,10 @@ export type {
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcPushPlatform,
+	RpcPushProvider,
+	RpcRegisterPushTargetArgs,
+	RpcRegisterPushTargetResponse,
 	RpcResponse,
 	RpcSessionState,
 	UiActionArgumentDescriptor,
@@ -116,6 +121,8 @@ export interface RpcModeOptions {
 	allowUiActionInvocation?: boolean;
 	/** Defaults to false. Remote transports should only expose and invoke actions marked remote-safe. */
 	requireRemoteSafeUiActions?: boolean;
+	/** Remote host callback for registering platform push notification targets. */
+	registerPushTarget?: (args: unknown) => Promise<RpcRegisterPushTargetResponse>;
 }
 
 type RpcModeStartupAwareTransport = RpcTransport & {
@@ -783,6 +790,21 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 						}
 					});
 				return undefined;
+			}
+
+			// =================================================================
+			// Push notifications
+			// =================================================================
+
+			case "register_push_target": {
+				if (!options.registerPushTarget) {
+					return error(
+						id,
+						"register_push_target",
+						"Push target registration is not available over this RPC transport",
+					);
+				}
+				return success(id, "register_push_target", await options.registerPushTarget(command.args));
 			}
 
 			// =================================================================

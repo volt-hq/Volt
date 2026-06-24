@@ -30,6 +30,10 @@ import {
 	IrohRemoteAuditLogger,
 	IrohRemoteHostEngine,
 	IrohRemoteHostStateManager,
+	IrohRemoteInMemoryPushNotificationDeduper,
+	DEFAULT_IROH_REMOTE_PUSH_RELAY_URL,
+	IrohRemotePushNotificationDispatcher,
+	IrohRemotePushRelayHttpClient,
 	parseIrohRemoteWorkspaceSpec,
 	parseIrohRemoteControlRequest,
 	ProjectTrustStore,
@@ -96,6 +100,8 @@ const VALUE_FLAGS = new Set([
 	"audit",
 	"detached-runtime-ttl-ms",
 	"profile",
+	"push-relay-auth-token",
+	"push-relay-url",
 	"relay",
 	"source-volt",
 	"state",
@@ -234,6 +240,9 @@ Serve options:
                               bash, edit, or write can modify host state and require confirmation.
   --profile <name>           Volt settings profile for integrated Volt runtime.
   --agent-dir <path>         Volt agent config directory for integrated Volt runtime.
+  --push-relay-url <url>     Volt push relay URL. Defaults to the managed Volt relay or VOLT_PUSH_RELAY_URL.
+  --push-relay-auth-token <token>
+                              Optional bearer token for custom push relays. Defaults to VOLT_PUSH_RELAY_AUTH_TOKEN.
   --detached-runtime-ttl-ms <ms>
                               Retain idle detached integrated runtimes for this many milliseconds. Defaults to 30 minutes.
   --approve                  Trust project-local Volt settings/resources for the remote workspace.
@@ -1209,14 +1218,19 @@ async function runIntegratedVoltConnection(stream, handshake, authorization, opt
 	try {
 		await writeIrohRemoteHandshakeResponse(stream.send, handshake.response);
 		subscriber = await attachIntegratedRuntimeSubscriber(entry, options);
+		const pushDispatcher = createPushNotificationDispatcher(authorization, options);
 		const rpcMode = runIrohRemoteRpcMode(entry.runtime, {
 			decorateOutbound: (value) => decorateRemoteHostState(value, authorization, options),
 			disposeRuntimeOnClose: false,
+			notificationDelivery: pushDispatcher,
 			onSessionChanged: async (session) => {
 				if (session.sessionId === entry.recordedSessionId) return;
 				entry.recordedSessionId = session.sessionId;
 				await recordRemoteSessionChange(session, authorization, options);
 			},
+			registerPushTarget: pushDispatcher
+				? (args) => pushDispatcher.registerPushTarget(args)
+				: undefined,
 			stream,
 			initialInput: handshake.initialInput,
 			workspacePath: authorization.workspace.path,
@@ -1235,6 +1249,20 @@ async function runIntegratedVoltConnection(stream, handshake, authorization, opt
 			);
 		}
 	}
+}
+
+function createPushNotificationDispatcher(authorization, options) {
+	if (!options.pushRelayClient) {
+		return undefined;
+	}
+	return new IrohRemotePushNotificationDispatcher({
+		auditLogger: options.auditLogger,
+		clientNodeId: authorization.client.nodeId,
+		deduper: options.pushNotificationDeduper,
+		relayClient: options.pushRelayClient,
+		stateManager: options.stateManager,
+		workspace: authorization.workspace.name,
+	});
 }
 
 async function recordRemoteSessionChange(session, authorization, options) {
@@ -2074,6 +2102,9 @@ async function serve(flags) {
 		workspace,
 		yes: hasFlag(flags, "yes"),
 	});
+	const pushRelayUrl = getFlag(flags, "push-relay-url", process.env.VOLT_PUSH_RELAY_URL);
+	const effectivePushRelayUrl = pushRelayUrl ?? DEFAULT_IROH_REMOTE_PUSH_RELAY_URL;
+	const pushRelayAuthToken = getFlag(flags, "push-relay-auth-token", process.env.VOLT_PUSH_RELAY_AUTH_TOKEN);
 	const options = {
 		activeConnections: new Map(),
 		agentDir: getFlag(flags, "agent-dir"),
@@ -2084,6 +2115,10 @@ async function serve(flags) {
 		integratedVolt: hasFlag(flags, "integrated-volt"),
 		integratedRuntimes: new Map(),
 		profile: getFlag(flags, "profile"),
+		pushNotificationDeduper: new IrohRemoteInMemoryPushNotificationDeduper(),
+		pushRelayClient: new IrohRemotePushRelayHttpClient({ authToken: pushRelayAuthToken, baseUrl: pushRelayUrl }),
+		pushRelayAuthToken,
+		pushRelayUrl: effectivePushRelayUrl,
 		relayMode,
 		hostNodeId: undefined,
 		projectTrusted: confirmation.projectTrusted,
@@ -2153,6 +2188,9 @@ async function serve(flags) {
 		console.error(`audit: ${auditPath}`);
 		console.error(`control: ${controlServer.controlPath}`);
 		console.error(`workspace: ${workspace.name} -> ${workspace.path}`);
+		console.error(
+			`push relay: ${effectivePushRelayUrl}${pushRelayUrl ? "" : " (managed default)"}${pushRelayAuthToken ? " with bearer auth" : ""}`,
+		);
 		console.error(
 			`child: ${options.integratedVolt ? "in-process volt remote host" : options.sourceVolt ? `${process.execPath} ${options.resolvedSourceVoltRunner} --mode rpc` : options.useVolt ? `${options.resolvedVoltBin ?? getPlatformVoltBin(options.voltBin)} --mode rpc` : "fake-rpc"}`,
 		);

@@ -4,6 +4,7 @@ import {
 	createIrohRemoteFilteredRpcTransport,
 	createIrohRemoteOutboundFilteredRpcTransport,
 	type IrohRemoteOutboundValueDecorator,
+	type IrohRemotePushNotificationDelivery,
 } from "../../core/remote/iroh/index.ts";
 import {
 	createIrohRpcTransport,
@@ -13,11 +14,14 @@ import {
 	type RpcTransport,
 } from "../../core/rpc/index.ts";
 import { type RpcSessionChange, runRpcMode } from "./rpc-mode.ts";
+import type { RpcRegisterPushTargetResponse } from "./rpc-types.ts";
 
 export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	decorateOutbound?: IrohRemoteOutboundValueDecorator;
 	disposeRuntimeOnClose?: boolean;
+	notificationDelivery?: IrohRemotePushNotificationDelivery;
 	onSessionChanged?: (session: RpcSessionChange) => void | Promise<void>;
+	registerPushTarget?: (args: unknown) => Promise<RpcRegisterPushTargetResponse>;
 	remoteWorkspacePath?: string;
 	workspacePath: string;
 }
@@ -82,6 +86,15 @@ export function runIrohRemoteRpcMode(
 		transport: createIrohRpcTransport(options),
 		workspacePath: options.workspacePath,
 	});
+	const deliverCompletionNotification = async (notification: IrohRemoteNotificationRequest): Promise<void> => {
+		if (options.notificationDelivery) {
+			const deliveryStatus = await options.notificationDelivery.deliverNotification(notification);
+			if (deliveryStatus !== "no_push_target") {
+				return;
+			}
+		}
+		await outboundTransport.write(notification);
+	};
 	const closeDeferringTransport = createIrohRemoteCloseDeferringRpcTransport({
 		transport: outboundTransport,
 		getCompletionState: () => getIrohRemoteCompletionState(runtimeHost),
@@ -91,7 +104,7 @@ export function runIrohRemoteRpcMode(
 				return;
 			}
 			sentNotificationEventIds.add(notification.eventId);
-			await outboundTransport.write(notification);
+			await deliverCompletionNotification(notification);
 		},
 		waitForPromptCompletion: () => runtimeHost.session.waitForIdle(),
 	});
@@ -105,6 +118,7 @@ export function runIrohRemoteRpcMode(
 			transport: closeDeferringTransport,
 		}),
 		exitProcess: false,
+		registerPushTarget: options.registerPushTarget,
 	});
 }
 
