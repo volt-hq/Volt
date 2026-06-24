@@ -58,10 +58,12 @@ import {
 	pipeIrohRemoteOutboundJsonlReadable,
 	readIrohRemoteHandshakeLine,
 	readIrohRemoteHostState,
+	resolveIrohRemoteWorkspaceProjectTrusted,
 	sanitizeIrohRemoteOutbound,
 	sanitizeIrohRemoteOutboundJsonLine,
 	selectIrohRemoteWorkspace,
 	serializeIrohRemoteRpcFilterRejection,
+	shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization,
 	writeIrohRemoteHandshakeResponse,
 	writeIrohRemoteHello,
 	writeIrohRemoteHostState,
@@ -923,6 +925,49 @@ describe("Iroh remote core helpers", () => {
 		} finally {
 			await rm(stateDir, { force: true, recursive: true });
 		}
+	});
+
+	test("resolves remote workspace trust per workspace", () => {
+		const trustStore = {
+			get(cwd: string): boolean | null {
+				return cwd === "/trusted" ? true : null;
+			},
+		};
+		const hasTrustResources = (cwd: string) => cwd !== "/plain";
+
+		expect(
+			resolveIrohRemoteWorkspaceProjectTrusted(
+				{ name: "plain", path: "/plain" },
+				{ hasTrustRequiringProjectResources: hasTrustResources, trustStore },
+			),
+		).toBe(true);
+		expect(
+			resolveIrohRemoteWorkspaceProjectTrusted(
+				{ name: "trusted", path: "/trusted" },
+				{ hasTrustRequiringProjectResources: hasTrustResources, trustStore },
+			),
+		).toBe(true);
+		expect(
+			resolveIrohRemoteWorkspaceProjectTrusted(
+				{ name: "sensitive", path: "/sensitive" },
+				{ hasTrustRequiringProjectResources: hasTrustResources, trustStore },
+			),
+		).toBe(false);
+		expect(
+			resolveIrohRemoteWorkspaceProjectTrusted(
+				{ name: "sensitive", path: "/sensitive" },
+				{
+					approvedWorkspacePaths: new Set(["/sensitive"]),
+					hasTrustRequiringProjectResources: hasTrustResources,
+					trustStore,
+				},
+			),
+		).toBe(true);
+	});
+
+	test("requires a fresh integrated runtime after a new pairing authorization", () => {
+		expect(shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization({ paired: true })).toBe(true);
+		expect(shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization({ paired: false })).toBe(false);
 	});
 
 	test("authorizes pairing, persisted clients, workspace binding, and expiry", () => {

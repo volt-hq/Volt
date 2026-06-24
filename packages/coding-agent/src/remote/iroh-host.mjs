@@ -37,6 +37,7 @@ import {
 	parseIrohRemoteWorkspaceSpec,
 	parseIrohRemoteControlRequest,
 	ProjectTrustStore,
+	resolveIrohRemoteWorkspaceProjectTrusted,
 	pipeIrohRemoteOutboundJsonlReadable,
 	readIrohRemoteHostState,
 	requestIrohRemoteActiveRevocation,
@@ -49,6 +50,7 @@ import {
 	parseIntegratedDetachedRuntimeTtlMs,
 	runIrohRemoteRpcMode,
 	scheduleDetachedRuntimeRetention,
+	shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization,
 } from "@earendil-works/volt-coding-agent";
 import nativeAdapter from "./iroh-native-adapter.cjs";
 
@@ -639,13 +641,17 @@ function spawnProcess(command, args, options) {
 	return spawn(process.env.ComSpec ?? process.env.COMSPEC ?? "cmd.exe", ["/d", "/s", "/c", command, ...args], options);
 }
 
+function getProjectTrustedForWorkspace(options, workspace) {
+	return options.getProjectTrustedForWorkspace?.(workspace) === true;
+}
+
 function spawnRpcChild(options, workspace, allowTools) {
 	if (options.sourceVolt) {
 		const runnerPath =
 			options.resolvedSourceVoltRunner ?? resolve(options.sourceVolt, "scripts", "run-coding-agent-source.mjs");
 		const args = [runnerPath, "--mode", "rpc"];
 		if (allowTools !== undefined) args.push("--tools", allowTools);
-		if (options.projectTrusted) args.push("--approve");
+		if (getProjectTrustedForWorkspace(options, workspace)) args.push("--approve");
 		return {
 			command: process.execPath,
 			args,
@@ -672,7 +678,7 @@ function spawnRpcChild(options, workspace, allowTools) {
 	const voltBin = options.resolvedVoltBin ?? getPlatformVoltBin(options.voltBin);
 	const args = ["--mode", "rpc"];
 	if (allowTools !== undefined) args.push("--tools", allowTools);
-	if (options.projectTrusted) args.push("--approve");
+	if (getProjectTrustedForWorkspace(options, workspace)) args.push("--approve");
 	return {
 		command: voltBin,
 		args,
@@ -1364,7 +1370,7 @@ async function createIntegratedRuntimeEntry(authorization, options) {
 			allowTools: authorization.allowTools,
 			cwd: authorization.workspace.path,
 			profile: options.profile,
-			projectTrusted: options.projectTrusted,
+			projectTrusted: getProjectTrustedForWorkspace(options, authorization.workspace),
 			resumeSessionId: previousSessionId,
 		});
 		runtime = runtimeResult.runtime;
@@ -1406,7 +1412,10 @@ async function getOrCreateIntegratedRuntimeEntry(authorization, options) {
 	const key = getIntegratedRuntimeRegistryKey(authorization);
 	const existing = options.integratedRuntimes.get(key);
 	if (existing) {
-		return { entry: existing, created: false };
+		if (!shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization(authorization)) {
+			return { entry: existing, created: false };
+		}
+		await stopIntegratedRuntimeEntry(existing, options, "fresh_pairing_replaced_runtime");
 	}
 	return { entry: await createIntegratedRuntimeEntry(authorization, options), created: true };
 }
@@ -1464,6 +1473,8 @@ async function stopIntegratedRuntimeEntry(entry, options, reason) {
 	}
 	cancelIntegratedRuntimeRetention(entry);
 	options.integratedRuntimes.delete(entry.key);
+	entry.subscribers.clear();
+	entry.detachedAt = undefined;
 	const wasActive = entry.runtime.session.isStreaming;
 	let stopSuccess = true;
 	let stopError;
@@ -1548,6 +1559,18 @@ async function stopIntegratedRuntimes(options, reason) {
 	for (const entry of Array.from(options.integratedRuntimes.values())) {
 		await stopIntegratedRuntimeEntry(entry, options, reason);
 	}
+}
+
+async function stopIntegratedRuntimesForClient(options, nodeId, reason) {
+	let stoppedCount = 0;
+	for (const entry of Array.from(options.integratedRuntimes.values())) {
+		if (entry.clientNodeId !== nodeId) {
+			continue;
+		}
+		await stopIntegratedRuntimeEntry(entry, options, reason);
+		stoppedCount++;
+	}
+	return stoppedCount;
 }
 
 function registerActiveConnection(options, authorization, connection, connectionId) {
@@ -1682,14 +1705,16 @@ async function rejectDuplicateStream(stream, remoteId, options) {
 async function closeActiveConnectionsForClient(options, nodeId) {
 	const entries = Array.from(options.activeConnections.get(nodeId) ?? []);
 	if (entries.length === 0) {
+		const stoppedRuntimeCount = await stopIntegratedRuntimesForClient(options, nodeId, "client_revoked");
 		await logAudit(options.auditLogger, {
 			type: "active_connection_revoked",
 			clientNodeId: nodeId,
-			success: false,
-			error: "no active connection found",
+			success: stoppedRuntimeCount > 0,
+			error: stoppedRuntimeCount > 0 ? undefined : "no active connection found",
 			details: {
 				closeReason: ACTIVE_REVOKE_CLOSE_REASON,
 				source: "control_channel",
+				stoppedRuntimeCount,
 			},
 		});
 		return { closed: false, closedCount: 0 };
@@ -1698,6 +1723,9 @@ async function closeActiveConnectionsForClient(options, nodeId) {
 	const closeReason = Array.from(Buffer.from(ACTIVE_REVOKE_CLOSE_REASON, "utf8"));
 	for (const entry of entries) {
 		entry.connection.close(0n, closeReason);
+	}
+	const stoppedRuntimeCount = await stopIntegratedRuntimesForClient(options, nodeId, "client_revoked");
+	for (const entry of entries) {
 		await logAudit(options.auditLogger, {
 			type: "active_connection_revoked",
 			clientNodeId: nodeId,
@@ -1706,6 +1734,7 @@ async function closeActiveConnectionsForClient(options, nodeId) {
 			details: {
 				closeReason: ACTIVE_REVOKE_CLOSE_REASON,
 				source: "control_channel",
+				stoppedRuntimeCount,
 			},
 		});
 	}
@@ -2105,12 +2134,18 @@ async function serve(flags) {
 	const pushRelayUrl = getFlag(flags, "push-relay-url", process.env.VOLT_PUSH_RELAY_URL);
 	const effectivePushRelayUrl = pushRelayUrl ?? DEFAULT_IROH_REMOTE_PUSH_RELAY_URL;
 	const pushRelayAuthToken = getFlag(flags, "push-relay-auth-token", process.env.VOLT_PUSH_RELAY_AUTH_TOKEN);
+	const approvedWorkspacePaths = new Set();
 	const options = {
 		activeConnections: new Map(),
 		agentDir: getFlag(flags, "agent-dir"),
 		allowTools,
 		auditLogger,
 		detachedRuntimeTtlMs: parseIntegratedDetachedRuntimeTtlMs(getFlag(flags, "detached-runtime-ttl-ms")),
+		getProjectTrustedForWorkspace: (candidateWorkspace) =>
+			resolveIrohRemoteWorkspaceProjectTrusted(candidateWorkspace, {
+				approvedWorkspacePaths,
+				trustStore: trustState.trustStore,
+			}),
 		hostEngine: undefined,
 		integratedVolt: hasFlag(flags, "integrated-volt"),
 		integratedRuntimes: new Map(),
@@ -2121,7 +2156,6 @@ async function serve(flags) {
 		pushRelayUrl: effectivePushRelayUrl,
 		relayMode,
 		hostNodeId: undefined,
-		projectTrusted: confirmation.projectTrusted,
 		ticketExpiresAt: undefined,
 		once: hasFlag(flags, "once"),
 		sourceVolt: sourceVolt ? resolve(sourceVolt) : undefined,
@@ -2133,6 +2167,9 @@ async function serve(flags) {
 	};
 	await preflightRpcChild(options, workspace);
 	Object.assign(workspace, await stateManager.upsertWorkspace(workspace, allowTools));
+	if (hasFlag(flags, "approve") && confirmation.projectTrusted) {
+		approvedWorkspacePaths.add(workspace.path);
+	}
 
 	const endpoint = await bindEndpoint(relayMode, state, statePath);
 	options.hostNodeId = endpoint.id().toString();

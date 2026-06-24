@@ -78,6 +78,12 @@ export {
 	writeIrohRemoteHello,
 } from "./handshake-reader.ts";
 export {
+	type IrohRemoteWorkspaceTrustStore,
+	type ResolveIrohRemoteWorkspaceProjectTrustOptions,
+	resolveIrohRemoteWorkspaceProjectTrusted,
+	shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization,
+} from "./host-policy.ts";
+export {
 	createIrohRemoteOutboundFilteredRpcTransport,
 	IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH,
 	IROH_REMOTE_REDACTED_EXPORT_PATH,
@@ -115,6 +121,9 @@ export {
 	DEFAULT_IROH_REMOTE_PUSH_RELAY_URL,
 	hashIrohRemotePushToken,
 	IrohRemoteInMemoryPushNotificationDeduper,
+	type IrohRemoteLiveActivityContentState,
+	type IrohRemoteLiveActivityToolGlyph,
+	type IrohRemoteLiveActivityUpdateIntent,
 	type IrohRemotePushNotificationDeduper,
 	type IrohRemotePushNotificationDelivery,
 	type IrohRemotePushNotificationDeliveryStatus,
@@ -125,6 +134,7 @@ export {
 	IrohRemotePushRelayHttpClient,
 	type IrohRemotePushRelayHttpClientOptions,
 	IrohRemotePushRelayHttpError,
+	type IrohRemotePushRelayLiveActivityRequest,
 	type IrohRemotePushRelayNotificationRequest,
 	type IrohRemotePushRelayNotificationResult,
 	type IrohRemotePushTargetRegistrationRequest,
@@ -160,6 +170,7 @@ export {
 	type IrohRemotePairingSecretTombstone,
 	type IrohRemotePairingSecretTombstoneOutcome,
 	type IrohRemotePendingPairingTicket,
+	type IrohRemoteLiveActivityTarget,
 	type IrohRemotePushTarget,
 	type IrohRemotePushTargetPlatform,
 	type IrohRemotePushTargetProvider,
