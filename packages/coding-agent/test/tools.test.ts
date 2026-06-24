@@ -303,6 +303,18 @@ describe("Coding Agent Tools", () => {
 			expect(result.details?.diff).toContain("GAMMA");
 		});
 
+		it("should preserve unrelated content when fuzzy matching edit text", async () => {
+			const testFile = join(testDir, "edit-fuzzy-preserve.txt");
+			writeFileSync(testFile, "keep – dash   \ntarget   \n");
+
+			await editTool.execute("test-call-8-fuzzy", {
+				path: testFile,
+				edits: [{ oldText: "target\n", newText: "replacement\n" }],
+			});
+
+			expect(readFileSync(testFile, "utf-8")).toBe("keep – dash   \nreplacement\n");
+		});
+
 		it("should collapse large unchanged gaps in multi-edit diffs", async () => {
 			const testFile = join(testDir, "edit-multi-large-gap.txt");
 			const lines = Array.from({ length: 600 }, (_, i) => `line ${String(i + 1).padStart(3, "0")}`);

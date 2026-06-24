@@ -24,21 +24,20 @@ export function restoreLineEndings(text: string, ending: "\r\n" | "\n"): string 
 	return ending === "\r\n" ? text.replace(/\n/g, "\r\n") : text;
 }
 
-/**
- * Normalize text for fuzzy matching. Applies progressive transformations:
- * - Strip trailing whitespace from each line
- * - Normalize smart quotes to ASCII equivalents
- * - Normalize Unicode dashes/hyphens to ASCII hyphen
- * - Normalize special Unicode spaces to regular space
- */
-export function normalizeForFuzzyMatch(text: string): string {
+interface NormalizedCharacterRange {
+	start: number;
+	end: number;
+}
+
+interface FuzzyNormalizedText {
+	text: string;
+	ranges: NormalizedCharacterRange[];
+}
+
+function normalizeFuzzySegment(segment: string): string {
 	return (
-		text
+		segment
 			.normalize("NFKC")
-			// Strip trailing whitespace per line
-			.split("\n")
-			.map((line) => line.trimEnd())
-			.join("\n")
 			// Smart single quotes → '
 			.replace(/[\u2018\u2019\u201A\u201B]/g, "'")
 			// Smart double quotes → "
@@ -54,19 +53,111 @@ export function normalizeForFuzzyMatch(text: string): string {
 	);
 }
 
+function getCodePointEnd(text: string, index: number): number {
+	const codePoint = text.codePointAt(index);
+	return index + (codePoint !== undefined && codePoint > 0xffff ? 2 : 1);
+}
+
+function isCombiningMark(segment: string): boolean {
+	return /^\p{Mark}$/u.test(segment);
+}
+
+function getFuzzySegmentEnd(text: string, index: number): number {
+	let end = getCodePointEnd(text, index);
+	while (end < text.length) {
+		const nextEnd = getCodePointEnd(text, end);
+		if (!isCombiningMark(text.slice(end, nextEnd))) {
+			break;
+		}
+		end = nextEnd;
+	}
+	return end;
+}
+
+function pushNormalizedCharacter(
+	characters: string[],
+	ranges: NormalizedCharacterRange[],
+	character: string,
+	range: NormalizedCharacterRange,
+): void {
+	characters.push(character);
+	for (let index = 0; index < character.length; index++) {
+		ranges.push(range);
+	}
+}
+
+function pushNormalizedSegment(
+	characters: string[],
+	ranges: NormalizedCharacterRange[],
+	segment: string,
+	start: number,
+	end: number,
+): void {
+	for (const character of Array.from(normalizeFuzzySegment(segment))) {
+		pushNormalizedCharacter(characters, ranges, character, { start, end });
+	}
+}
+
+function isTrailingFuzzyWhitespace(character: string | undefined): boolean {
+	return character !== undefined && character.trimEnd() === "";
+}
+
+function trimTrailingFuzzyWhitespace(
+	characters: string[],
+	ranges: NormalizedCharacterRange[],
+	lineStart: number,
+): void {
+	while (characters.length > lineStart && isTrailingFuzzyWhitespace(characters.at(-1))) {
+		const removed = characters.pop()!;
+		ranges.splice(ranges.length - removed.length, removed.length);
+	}
+}
+
+function normalizeForFuzzyMatchWithMap(text: string): FuzzyNormalizedText {
+	const characters: string[] = [];
+	const ranges: NormalizedCharacterRange[] = [];
+	let lineStart = 0;
+	let index = 0;
+
+	while (index < text.length) {
+		if (text[index] === "\n") {
+			trimTrailingFuzzyWhitespace(characters, ranges, lineStart);
+			pushNormalizedCharacter(characters, ranges, "\n", { start: index, end: index + 1 });
+			index++;
+			lineStart = characters.length;
+			continue;
+		}
+
+		const end = getFuzzySegmentEnd(text, index);
+		pushNormalizedSegment(characters, ranges, text.slice(index, end), index, end);
+		index = end;
+	}
+
+	trimTrailingFuzzyWhitespace(characters, ranges, lineStart);
+	return { text: characters.join(""), ranges };
+}
+
+/**
+ * Normalize text for fuzzy matching. Applies progressive transformations:
+ * - Strip trailing whitespace from each line
+ * - Normalize smart quotes to ASCII equivalents
+ * - Normalize Unicode dashes/hyphens to ASCII hyphen
+ * - Normalize special Unicode spaces to regular space
+ */
+export function normalizeForFuzzyMatch(text: string): string {
+	return normalizeForFuzzyMatchWithMap(text).text;
+}
+
 export interface FuzzyMatchResult {
 	/** Whether a match was found */
 	found: boolean;
-	/** The index where the match starts (in the content that should be used for replacement) */
+	/** The index where the match starts in the original content */
 	index: number;
-	/** Length of the matched text */
+	/** Length of the matched text in the original content */
 	matchLength: number;
 	/** Whether fuzzy matching was used (false = exact match) */
 	usedFuzzyMatch: boolean;
-	/**
-	 * The content to use for replacement operations.
-	 * When exact match: original content. When fuzzy match: normalized content.
-	 */
+	/** Original content retained for compatibility with existing callers. */
 	contentForReplacement: string;
 }
 
@@ -89,9 +180,8 @@ export interface AppliedEditsResult {
 
 /**
  * Find oldText in content, trying exact match first, then fuzzy match.
- * When fuzzy matching is used, the returned contentForReplacement is the
- * fuzzy-normalized version of the content (trailing whitespace stripped,
- * Unicode quotes/dashes normalized to ASCII).
+ * Fuzzy matches are found in normalized text, but the returned replacement
+ * range points back into the original content so unrelated text is preserved.
  */
 export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResult {
 	// Try exact match first
@@ -106,10 +196,18 @@ export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResul
 		};
 	}
 
-	// Try fuzzy match - work entirely in normalized space
-	const fuzzyContent = normalizeForFuzzyMatch(content);
+	const fuzzyContent = normalizeForFuzzyMatchWithMap(content);
 	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
-	const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
+	if (fuzzyOldText.length === 0) {
+		return {
+			found: false,
+			index: -1,
+			matchLength: 0,
+			usedFuzzyMatch: false,
+			contentForReplacement: content,
+		};
+	}
+	const fuzzyIndex = fuzzyContent.text.indexOf(fuzzyOldText);
 
 	if (fuzzyIndex === -1) {
 		return {
@@ -121,15 +219,24 @@ export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResul
 		};
 	}
 
-	// When fuzzy matching, we work in the normalized space for replacement.
-	// This means the output will have normalized whitespace/quotes/dashes,
-	// which is acceptable since we're fixing minor formatting differences anyway.
+	const start = fuzzyContent.ranges[fuzzyIndex];
+	const end = fuzzyContent.ranges[fuzzyIndex + fuzzyOldText.length - 1];
+	if (!start || !end) {
+		return {
+			found: false,
+			index: -1,
+			matchLength: 0,
+			usedFuzzyMatch: false,
+			contentForReplacement: content,
+		};
+	}
+
 	return {
 		found: true,
-		index: fuzzyIndex,
-		matchLength: fuzzyOldText.length,
+		index: start.start,
+		matchLength: end.end - start.start,
 		usedFuzzyMatch: true,
-		contentForReplacement: fuzzyContent,
+		contentForReplacement: content,
 	};
 }
 
@@ -141,6 +248,9 @@ export function stripBom(content: string): { bom: string; text: string } {
 function countOccurrences(content: string, oldText: string): number {
 	const fuzzyContent = normalizeForFuzzyMatch(content);
 	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
+	if (fuzzyOldText.length === 0) {
+		return 0;
+	}
 	return fuzzyContent.split(fuzzyOldText).length - 1;
 }
 
@@ -186,9 +296,9 @@ function getNoChangeError(path: string, totalEdits: number): Error {
  * Apply one or more exact-text replacements to LF-normalized content.
  *
  * All edits are matched against the same original content. Replacements are
- * then applied in reverse order so offsets remain stable. If any edit needs
- * fuzzy matching, the operation runs in fuzzy-normalized content space to
- * preserve current single-edit behavior.
+ * then applied in reverse order so offsets remain stable. Fuzzy matching may
+ * tolerate small whitespace/Unicode differences in the targeted text, but only
+ * the matched original ranges are replaced.
  */
 export function applyEditsToNormalizedContent(
 	normalizedContent: string,
@@ -206,11 +316,7 @@ export function applyEditsToNormalizedContent(
 		}
 	}
 
-	const initialMatches = normalizedEdits.map((edit) => fuzzyFindText(normalizedContent, edit.oldText));
-	const baseContent = initialMatches.some((match) => match.usedFuzzyMatch)
-		? normalizeForFuzzyMatch(normalizedContent)
-		: normalizedContent;
-
+	const baseContent = normalizedContent;
 	const matchedEdits: MatchedEdit[] = [];
 	for (let i = 0; i < normalizedEdits.length; i++) {
 		const edit = normalizedEdits[i];
