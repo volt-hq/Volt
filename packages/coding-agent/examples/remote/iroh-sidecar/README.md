@@ -203,17 +203,17 @@ Interactive commands:
 - `/quit` or `/exit` exits the client.
 - Ctrl+C aborts a running prompt; Ctrl+C while idle exits.
 
-Add `--relay default` to the host command when testing across networks; the ticket carries the relay mode to the client. On Windows, a global install normally resolves through `volt.cmd` automatically when `--volt-bin` is omitted.
+The default relay mode is suitable for cross-network testing; the ticket carries the relay mode to the client. On Windows, a global install normally resolves through `volt.cmd` automatically when `--volt-bin` is omitted.
 
 ## Relay mode
 
-The default is `--relay disabled`, which is best for same-machine or same-LAN testing. To exercise Iroh's relay/discovery path:
+The default is `--relay default`, which keeps saved-host reconnect tickets usable across host restarts. For explicit LAN-only testing:
 
 ```bash
-npm run iroh:poc:host -- --relay default --once
+npm run iroh:poc:host -- --relay disabled --once
 ```
 
-The ticket records the relay mode and the client uses the same preset. Use `--relay default` for real cross-network validation; same-machine tests do not prove relay reachability.
+The ticket records the relay mode and the client uses the same preset. Use the default relay mode for real app validation; same-machine tests do not prove relay reachability.
 
 ## Security notes
 

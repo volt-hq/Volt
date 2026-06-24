@@ -543,7 +543,7 @@ Security defaults and limitations:
 - Remote workspaces are selected by saved name, not arbitrary client-provided paths.
 - Remote sessions do not bypass project trust. Saved workspace trust is honored; otherwise use the host prompt's `trust` option or `--approve` only when the host user trusts the workspace resources.
 - Default paths are `~/.volt/agent/remote/iroh-host.json` for state and `~/.volt/agent/remote/iroh-host.audit.jsonl` for audit JSONL.
-- Use `--relay default` on the host when validating cross-network relay/discovery; same-machine and same-LAN testing can keep the default `--relay disabled`.
+- Iroh relay/discovery defaults to `--relay default` so saved-host reconnects survive host restarts. Use `--relay disabled` only for explicit LAN-only testing.
 - Remote host support requires a Node.js npm package install or source checkout with optional `@number0/iroh` available for the platform. Bun binary builds reject `volt remote host` because the native Iroh adapter is not bundled.
 
 See [Iroh remote protocol v1](docs/iroh-remote-protocol.md), [Iroh remote access design](docs/iroh-remote-access-design.md), and [Security](docs/security.md#remote-access-over-iroh-preview).

@@ -234,8 +234,8 @@ function printUsage() {
 Serve options:
   --workspace <name=path>    Workspace exposed to the client. Defaults to saved workspace or cwd.
   --register-workspace       Register cwd, path, or name=path in host state and exit.
-  --mobile                   Mobile-facing host mode. Defaults relay to default and skips startup pairing.
-  --relay <disabled|default> Iroh relay preset. Defaults to disabled, or default with --mobile.
+  --mobile                   Mobile-facing host mode. Skips startup pairing; relay already defaults to default.
+  --relay <disabled|default> Iroh relay preset. Defaults to default; use disabled for LAN-only testing.
   --state <path>             Host state path. Defaults to ~/.volt/agent/remote/iroh-host.json.
   --audit <path>             Host audit JSONL path. Defaults to <state>.audit.jsonl.
   --use-volt                 Spawn volt --mode rpc instead of the fake RPC child.
@@ -2091,7 +2091,7 @@ function printTicket(ticket, label) {
 }
 
 function getRelayMode(flags) {
-	const relayMode = getFlag(flags, "relay", hasFlag(flags, "mobile") ? "default" : "disabled");
+	const relayMode = getFlag(flags, "relay", "default");
 	if (relayMode !== "disabled" && relayMode !== "default") {
 		throw new Error("--relay must be disabled or default");
 	}

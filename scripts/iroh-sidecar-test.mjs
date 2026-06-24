@@ -176,12 +176,18 @@ function withDefaultTestAllowTools(args) {
 	return hasFlagArg(args, "allow-tools") ? args : ["--allow-tools", DEFAULT_TEST_ALLOW_TOOLS, ...args];
 }
 
-function startHost(args) {
-	return spawnScript(hostScript, withDefaultTestAllowTools(args));
+function withDefaultTestRelay(args) {
+	if (hasFlagArg(args, "relay") || hasFlagArg(args, "mobile")) return args;
+	return ["--relay", "disabled", ...args];
+}
+
+function startHost(args, options = {}) {
+	const hostArgs = options.preserveRelayDefault ? args : withDefaultTestRelay(args);
+	return spawnScript(hostScript, withDefaultTestAllowTools(hostArgs));
 }
 
 function startSourceCliRemoteHost(args, env = {}) {
-	return spawnSourceCli(["remote", "host", ...withDefaultTestAllowTools(args)], env);
+	return spawnSourceCli(["remote", "host", ...withDefaultTestAllowTools(withDefaultTestRelay(args))], env);
 }
 
 async function runHostCommand(args) {
@@ -866,8 +872,8 @@ async function runHostClientOnce({ clientArgs, clientStatePath, hostArgs, hostSt
 	}
 }
 
-async function readStartupTicketPayload({ hostArgs, hostStatePath, label }) {
-	const host = startHost(["--state", hostStatePath, ...hostArgs]);
+async function readStartupTicketPayload({ hostArgs, hostStatePath, label, preserveRelayDefault = false }) {
+	const host = startHost(["--state", hostStatePath, ...hostArgs], { preserveRelayDefault });
 	try {
 		const ticket = await waitForFirstStdoutLine(host.child, host.output, `${label} host`);
 		return decodeTicketPayload(ticket);
@@ -2111,10 +2117,11 @@ async function relayDefaultPolicyScenario() {
 			hostArgs: ["--once"],
 			hostStatePath: join(stateDir, "bare-host.json"),
 			label: "bare relay policy",
+			preserveRelayDefault: true,
 		});
 		assert(
-			barePayload.relayMode === "disabled",
-			`Expected bare host ticket relay disabled, got:\n${JSON.stringify(barePayload)}`,
+			barePayload.relayMode === "default",
+			`Expected bare host ticket relay default, got:\n${JSON.stringify(barePayload)}`,
 		);
 
 		const mobileStatePath = join(stateDir, "mobile-host.json");
@@ -2149,13 +2156,13 @@ async function relayDefaultPolicyScenario() {
 		);
 
 		const optOutPayload = await readStartupTicketPayload({
-			hostArgs: ["--mobile", "--relay", "disabled", "--no-pairing", "--once"],
-			hostStatePath: join(stateDir, "mobile-opt-out-host.json"),
-			label: "mobile relay opt-out policy",
+			hostArgs: ["--relay", "disabled", "--no-pairing", "--once"],
+			hostStatePath: join(stateDir, "opt-out-host.json"),
+			label: "relay opt-out policy",
 		});
 		assert(
 			optOutPayload.relayMode === "disabled",
-			`Expected mobile opt-out ticket relay disabled, got:\n${JSON.stringify(optOutPayload)}`,
+			`Expected relay opt-out ticket relay disabled, got:\n${JSON.stringify(optOutPayload)}`,
 		);
 
 		const workspacePath = join(stateDir, "workspace");

@@ -252,19 +252,18 @@ Implemented 2026-06-22: host core state stores consumed and expired pairing-secr
 
 Mobile reconnect should default to Iroh relay/discovery mode because phones move between Wi-Fi, cellular, and constrained networks.
 
-Resolved 2026-06-22: the global preview CLI default should not change. Bare `volt remote host` remains `--relay disabled` for same-machine, LAN, CI, and existing preview workflows. Mobile-facing product flows default to relay/discovery.
+Updated 2026-06-24: `volt remote host` now defaults to relay/discovery mode `"default"` so saved-host reconnects can survive host restarts without requiring a fresh direct-address ticket. LAN-only mode is an explicit opt-out.
 
 The relay default scope is:
 
 - Desktop/mobile product flow: a desktop "Pair Phone" action, background host service launched for the iOS app, or equivalent product setup should use relay mode `"default"` unless the user explicitly chooses an advanced LAN-only mode.
-- CLI mobile profile: add a dedicated mobile-facing host option such as `volt remote host --mobile` that defaults relay mode to `"default"`. Do not overload `--profile`; that option already means a Volt settings profile.
-- Existing CLI preview flow: `volt remote host` with no mobile option keeps relay mode `"disabled"`.
-- Explicit opt-out: `--relay disabled` remains available and wins over mobile/product defaults when the user intentionally chooses LAN-only mode.
-- Pair command: `volt remote pair` cannot change the relay mode of an already-running host. When omitted, its `--relay` expectation should use the live host mode. In mobile-facing flows, the host should already be running in relay mode `"default"`; `volt remote pair --relay default` should validate that expectation.
+- CLI host flow: `volt remote host` defaults to relay mode `"default"`; `volt remote host --mobile` keeps that relay default and additionally disables startup pairing-ticket creation.
+- Explicit opt-out: `--relay disabled` remains available when the user intentionally chooses LAN-only mode.
+- Pair command: `volt remote pair` cannot change the relay mode of an already-running host. When omitted, its `--relay` expectation should use the live host mode. `volt remote pair --relay default` validates that expectation.
 
 Mobile-facing tickets should include `relayMode: "default"` so the iOS app binds with compatible Iroh options. LAN-only tickets should include `relayMode: "disabled"` and be treated as an explicit advanced/local configuration.
 
-Implemented 2026-06-22: `volt remote host --mobile` defaults the running host and explicit control-channel pair tickets to `relayMode: "default"` without emitting a startup ticket. Bare `volt remote host` continues to default startup tickets to `relayMode: "disabled"`, and explicit `--relay disabled` overrides `--mobile` for LAN-only setup.
+Updated 2026-06-24: `volt remote host` and `volt remote host --mobile` default running hosts and tickets to `relayMode: "default"`. `--mobile` still avoids emitting a startup ticket, and explicit `--relay disabled` remains the LAN-only opt-out.
 
 ## Local Development Guidance
 
@@ -428,8 +427,8 @@ Implemented 2026-06-22: the iOS transport now decodes handshake `outcome` and `h
 3. Make host startup reconnect-friendly.
    - Ensure the default host state path is stable.
    - Ensure `hostSecretKey` is reused.
-   - Keep bare CLI host relay default disabled for preview/local workflows.
-   - Prefer relay mode `default` for desktop/mobile Pair Phone and CLI mobile-profile host commands.
+   - Default CLI host relay mode to `default` so saved-host reconnects survive host restarts.
+   - Keep explicit `--relay disabled` for preview/local LAN-only workflows.
 
 4. Improve pairing UX.
    - Treat QR generation as an explicit "Pair phone" action.
@@ -460,7 +459,7 @@ Host/core tests:
 - Saved-host reconnect verifies reached host node ID against `SavedHostRecord.hostNodeId`.
 - Verified reconnect refreshes non-secret discovery fields without changing `hostNodeId`.
 - Malformed saved-host records missing required v1 fields map to `saved_host_invalid`.
-- Bare `volt remote host` keeps relay mode disabled by default.
+- `volt remote host` defaults startup tickets to `relayMode: "default"`.
 - Mobile-facing host/profile startup creates no pending startup ticket, while explicit Pair Phone tickets use `relayMode: "default"` unless explicitly opted out.
 - Explicit LAN-only opt-out tickets use `relayMode: "disabled"`.
 - `volt remote pair --relay default` validates that the running host is relay-capable.
@@ -532,11 +531,11 @@ Resolved 2026-06-22: all product decisions, host/protocol implementation items, 
 
 ### Should the product default for mobile host setup always be `--relay default`?
 
-Yes for mobile-facing product setup, no for the bare preview CLI.
+Yes.
 
-Phones frequently move between Wi-Fi, cellular, VPNs, hotspots, and sleep/wake network states. A local-only default would make reconnect feel unreliable for normal phone use. Relay-capable setup should be the product default, while LAN-only mode can remain available as an explicit advanced option.
+Phones frequently move between Wi-Fi, cellular, VPNs, hotspots, and sleep/wake network states. A local-only default makes reconnect unreliable even for ordinary host restarts because direct-address tickets can go stale. Relay-capable setup is now the default, while LAN-only mode remains available as an explicit advanced option.
 
-Resolved 2026-06-22: bare `volt remote host` keeps its existing `--relay disabled` default for same-machine, LAN, CI, and preview workflows. Desktop Pair Phone, the future desktop background service, and a dedicated CLI mobile mode such as `volt remote host --mobile` default to `--relay default`. `volt remote pair` follows the running host relay mode unless `--relay` is supplied as an expectation check.
+Updated 2026-06-24: bare `volt remote host`, desktop Pair Phone, future desktop background service startup, and `volt remote host --mobile` default to `--relay default`. `volt remote pair` follows the running host relay mode unless `--relay` is supplied as an expectation check.
 
 ### Should the desktop host print a QR on every startup, or only when the user chooses "Pair phone"?
 
@@ -594,7 +593,7 @@ Resolved 2026-06-22: Volt protocol helpers now expose a sanitized reconnect tick
 
 ### What is the scope of the mobile `--relay default` product default?
 
-Resolved 2026-06-22: do not change the global CLI default. The default changes only for mobile-facing product/profile flows. Bare `volt remote host` remains relay-disabled; desktop Pair Phone, desktop service startup for the iOS app, and `volt remote host --mobile` default to relay `"default"`. Explicit `--relay disabled` remains the advanced LAN-only opt-out. `volt remote pair` uses the running host relay mode by default and treats `--relay` as an expectation check.
+Updated 2026-06-24: the global CLI host default changed to relay `"default"`. Desktop Pair Phone, desktop service startup for the iOS app, bare `volt remote host`, and `volt remote host --mobile` all use relay `"default"` unless the user explicitly passes `--relay disabled` as the advanced LAN-only opt-out. `volt remote pair` uses the running host relay mode by default and treats `--relay` as an expectation check.
 
 ### How long are pairing metadata hashes retained, and how are auth outcomes detected?
 
