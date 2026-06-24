@@ -242,7 +242,7 @@ Serve options:
   --source-volt <repo-root>  Spawn Volt from a source checkout. Implies --use-volt.
   --integrated-volt          Run Volt's runtime in-process over Iroh.
   --volt-bin <path>          Volt executable for --use-volt. Defaults to volt.
-  --allow-tools <list>       Tool allowlist passed to Volt. Defaults to read,bash,edit,write,grep,find,ls.
+  --allow-tools <list>       Tool allowlist passed to Volt. Defaults to the saved workspace allowlist or read,bash,edit,write,grep,find,ls.
                               bash, edit, or write can modify host state and require confirmation.
   --profile <name>           Volt settings profile for integrated Volt runtime.
   --agent-dir <path>         Volt agent config directory for integrated Volt runtime.
@@ -2114,8 +2114,9 @@ async function serve(flags) {
 	const { auditLogger, auditPath } = createAuditLogger(flags, statePath);
 	const stateManager = new IrohRemoteHostStateManager({ statePath });
 	const state = await stateManager.load();
-	const allowTools = getFlag(flags, "allow-tools", DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
-	const workspace = selectIrohRemoteWorkspace(state, getFlag(flags, "workspace"), allowTools, process.cwd());
+	const allowToolsFlag = getFlag(flags, "allow-tools");
+	const workspace = selectIrohRemoteWorkspace(state, getFlag(flags, "workspace"), allowToolsFlag, process.cwd());
+	const allowTools = allowToolsFlag ?? workspace.allowedTools ?? DEFAULT_IROH_REMOTE_ALLOW_TOOLS;
 
 	const relayMode = getRelayMode(flags);
 	const startupTicketMode = getStartupTicketMode(flags);

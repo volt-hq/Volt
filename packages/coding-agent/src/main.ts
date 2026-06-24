@@ -113,7 +113,8 @@ Host options are forwarded to the integrated Iroh remote host. Common options:
   --use-volt                    Spawn volt --mode rpc instead of the integrated runtime
   --source-volt <repo-root>     Spawn Volt from a source checkout. Implies --use-volt
   --volt-bin <path>             Volt executable for --use-volt
-  --allow-tools <list>          Remote tool allowlist. bash, edit, or write can modify host state and require confirmation.
+  --allow-tools <list>          Remote tool allowlist. Defaults to the saved workspace allowlist or default remote tools.
+                                bash, edit, or write can modify host state and require confirmation.
   --profile <name>              Volt settings profile
   --agent-dir <path>            Volt agent config directory
   --push-relay-url <url>        Volt push relay URL. Defaults to the managed Volt relay or VOLT_PUSH_RELAY_URL.

@@ -363,6 +363,34 @@ describe("Iroh remote core helpers", () => {
 		}
 	});
 
+	test("creates the shared remote control socket root with owner-only permissions", async () => {
+		if (process.platform === "win32") {
+			return;
+		}
+
+		const previousTmpdir = process.env.TMPDIR;
+		const tmpRoot = await mkdtemp(join(tmpdir(), "volt-iroh-core-control-root-"));
+		try {
+			process.env.TMPDIR = tmpRoot;
+			const stateDir = join(tmpRoot, "state");
+			const controlPath = getIrohRemoteControlPath(join(stateDir, "host.json"));
+			const controlRoot = dirname(dirname(controlPath));
+			await mkdir(controlRoot, { mode: 0o777, recursive: true });
+			await chmod(controlRoot, 0o777);
+
+			await ensureIrohRemoteControlDirectory(controlPath);
+
+			expect((await stat(controlRoot)).mode & 0o777).toBe(0o700);
+		} finally {
+			if (previousTmpdir === undefined) {
+				delete process.env.TMPDIR;
+			} else {
+				process.env.TMPDIR = previousTmpdir;
+			}
+			await rm(tmpRoot, { force: true, recursive: true });
+		}
+	});
+
 	test("renders remote tickets as QR codes", () => {
 		const ticket = "volt+iroh://v1/mock-ticket";
 		const qrCode = createIrohRemoteTicketQrCode(ticket);
@@ -958,6 +986,32 @@ describe("Iroh remote core helpers", () => {
 		} finally {
 			await rm(stateDir, { force: true, recursive: true });
 		}
+	});
+
+	test("preserves saved workspace tool defaults unless a host allowlist is explicit", () => {
+		const state = createEmptyIrohRemoteHostState();
+		state.workspaces.push({ name: "app", path: "/app", allowedTools: "read" });
+
+		expect(selectIrohRemoteWorkspace(state, undefined, undefined, "/cwd")).toEqual({
+			name: "app",
+			path: "/app",
+			allowedTools: "read",
+		});
+		expect(state.workspaces[0].allowedTools).toBe("read");
+
+		expect(selectIrohRemoteWorkspace(state, "app=/new-app", undefined, "/cwd")).toEqual({
+			name: "app",
+			path: "/new-app",
+			allowedTools: "read",
+		});
+		expect(state.workspaces[0].allowedTools).toBe("read");
+
+		expect(selectIrohRemoteWorkspace(state, undefined, "read,grep", "/cwd")).toEqual({
+			name: "app",
+			path: "/new-app",
+			allowedTools: "read,grep",
+		});
+		expect(state.workspaces[0].allowedTools).toBe("read,grep");
 	});
 
 	test("resolves remote workspace trust per workspace", () => {

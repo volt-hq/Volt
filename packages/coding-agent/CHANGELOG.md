@@ -47,6 +47,8 @@
 
 ### Fixed
 
+- Fixed Iroh remote host control socket setup to harden the shared control root directory before binding per-state sockets.
+- Fixed Iroh remote host startup to preserve saved workspace tool allowlists unless `--allow-tools` is explicitly passed.
 - Fixed Iroh remote RPC transports to reject oversized inbound JSONL lines instead of buffering them without bound.
 - Fixed Iroh remote host control sockets to live under state-specific owner-only directories.
 - Fixed Iroh remote host workspace trust and revocation handling so multi-workspace remote sessions do not inherit startup workspace trust and fresh re-pairing cannot reuse stale integrated runtimes.

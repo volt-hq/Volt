@@ -54,7 +54,7 @@ export function findIrohRemoteWorkspace(
 export function selectIrohRemoteWorkspace(
 	state: IrohRemoteHostState,
 	workspaceSpec: string | undefined,
-	allowTools: string,
+	allowTools?: string,
 	cwd = process.cwd(),
 ): IrohRemoteWorkspace {
 	if (workspaceSpec) {
@@ -62,7 +62,9 @@ export function selectIrohRemoteWorkspace(
 	}
 	if (state.workspaces.length > 0) {
 		const workspace = state.workspaces[0];
-		workspace.allowedTools = allowTools;
+		if (allowTools !== undefined) {
+			workspace.allowedTools = allowTools;
+		}
 		return workspace;
 	}
 	return upsertIrohRemoteWorkspace(state, parseIrohRemoteWorkspaceSpec(undefined, cwd), allowTools);
