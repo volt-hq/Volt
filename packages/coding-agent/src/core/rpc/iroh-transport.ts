@@ -3,6 +3,7 @@ import { serializeJsonLine } from "./jsonl.ts";
 import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "./transport.ts";
 
 export const DEFAULT_IROH_READ_LIMIT = 64 * 1024;
+export const DEFAULT_IROH_RPC_MAX_LINE_BYTES = 16 * 1024 * 1024;
 
 export type IrohBytes = Array<number> | Uint8Array;
 
@@ -28,6 +29,8 @@ export interface IrohRpcTransportOptions {
 	initialInput?: IrohBytes;
 	/** Maximum bytes requested per Iroh read. Defaults to 64 KiB. */
 	readLimit?: number;
+	/** Maximum bytes allowed in one inbound JSONL line. Defaults to 16 MiB. */
+	maxLineBytes?: number;
 	/** Finish the send half during close. Defaults to true. */
 	finishSendOnClose?: boolean;
 	/** Stop the recv half during close. Defaults to true. */
@@ -54,7 +57,12 @@ export function createIrohRpcTransport(options: IrohRpcTransportOptions): RpcTra
 	let localCloseRequested = false;
 	let closeEmitted = false;
 	let sendClosed = false;
-	const readLimit = options.readLimit ?? DEFAULT_IROH_READ_LIMIT;
+	const requestedReadLimit = normalizePositiveInteger(options.readLimit ?? DEFAULT_IROH_READ_LIMIT, "readLimit");
+	const maxLineBytes = normalizePositiveInteger(
+		options.maxLineBytes ?? DEFAULT_IROH_RPC_MAX_LINE_BYTES,
+		"maxLineBytes",
+	);
+	const readLimit = Math.min(requestedReadLimit, maxLineBytes + 1);
 	const closeErrorCode = options.closeErrorCode ?? 0n;
 
 	const recordWriteError = (error: unknown): Error => {
@@ -101,7 +109,7 @@ export function createIrohRpcTransport(options: IrohRpcTransportOptions): RpcTra
 			return;
 		}
 		readLoopStarted = true;
-		void readIrohJsonl(options.stream.recv, readLimit, options.initialInput, emitLine).then(
+		void readIrohJsonl(options.stream.recv, readLimit, maxLineBytes, options.initialInput, emitLine).then(
 			() => {
 				if (!localCloseRequested) {
 					emitClose();
@@ -204,6 +212,7 @@ export function createIrohRpcTransport(options: IrohRpcTransportOptions): RpcTra
 async function readIrohJsonl(
 	recv: IrohRecvStreamLike,
 	readLimit: number,
+	maxLineBytes: number,
 	initialInput: IrohBytes | undefined,
 	onLine: (line: string) => void,
 ): Promise<void> {
@@ -217,10 +226,12 @@ async function readIrohJsonl(
 			}
 
 			const lineBuffer = buffer.subarray(0, newlineIndex);
+			assertIrohRpcLineWithinLimit(lineBuffer.length, maxLineBytes);
 			buffer = buffer.subarray(newlineIndex + 1);
 			onLine(lineBuffer.toString("utf8"));
 		}
 
+		assertIrohRpcLineWithinLimit(buffer.length, maxLineBytes);
 		const chunk = await recv.read(readLimit);
 		if (!chunk || chunk.length === 0) {
 			break;
@@ -229,8 +240,22 @@ async function readIrohJsonl(
 	}
 
 	if (buffer.length > 0) {
+		assertIrohRpcLineWithinLimit(buffer.length, maxLineBytes);
 		onLine(buffer.toString("utf8"));
 	}
+}
+
+function assertIrohRpcLineWithinLimit(length: number, maxLineBytes: number): void {
+	if (length > maxLineBytes) {
+		throw new Error(`Iroh RPC line exceeds maximum size of ${maxLineBytes} bytes`);
+	}
+}
+
+function normalizePositiveInteger(value: number, label: string): number {
+	if (!Number.isInteger(value) || value <= 0) {
+		throw new Error(`${label} must be a positive integer`);
+	}
+	return value;
 }
 
 function bytesToBuffer(bytes: IrohBytes): Buffer {

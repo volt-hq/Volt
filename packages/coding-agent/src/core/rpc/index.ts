@@ -1,6 +1,7 @@
 export {
 	createIrohRpcTransport,
 	DEFAULT_IROH_READ_LIMIT,
+	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
 	type IrohBiStreamLike,
 	type IrohBytes,
 	type IrohRecvStreamLike,

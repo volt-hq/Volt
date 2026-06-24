@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
+import { chmod, lstat, mkdir } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { type IrohRemoteRelayMode, isIrohRemoteRelayMode } from "./protocol.ts";
 
 export const IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE = "volt_iroh_pair_request";
@@ -69,7 +70,26 @@ export function getIrohRemoteControlPath(statePath: string): string {
 	if (process.platform === "win32") {
 		return `\\\\.\\pipe\\volt-iroh-remote-${hash}`;
 	}
-	return join(tmpdir(), "volt-iroh-remote", `${hash}.sock`);
+	return join(tmpdir(), "volt-iroh-remote", hash, "control.sock");
+}
+
+export async function ensureIrohRemoteControlDirectory(controlPath: string): Promise<void> {
+	if (process.platform === "win32") {
+		return;
+	}
+	const controlDir = dirname(controlPath);
+	await mkdir(controlDir, { recursive: true, mode: 0o700 });
+	const controlDirStat = await lstat(controlDir);
+	if (!controlDirStat.isDirectory() || controlDirStat.isSymbolicLink()) {
+		throw new Error(`Iroh remote host control directory is not a directory: ${controlDir}`);
+	}
+	const currentUid = process.getuid?.();
+	if (currentUid !== undefined && controlDirStat.uid !== currentUid) {
+		throw new Error(`Iroh remote host control directory is owned by another user: ${controlDir}`);
+	}
+	if ((controlDirStat.mode & 0o777) !== 0o700) {
+		await chmod(controlDir, 0o700);
+	}
 }
 
 export function parseIrohRemoteControlRequest(value: unknown): IrohRemoteControlRequest {

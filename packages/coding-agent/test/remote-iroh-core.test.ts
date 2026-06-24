@@ -1,6 +1,6 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
 	CONTEXT_COMPACT_ACTION_ID,
@@ -28,8 +28,10 @@ import {
 	DEFAULT_IROH_REMOTE_PAIRING_SECRET_TOMBSTONE_RETENTION_MS,
 	decodeIrohRemoteTicketPayload,
 	encodeIrohRemoteTicketPayload,
+	ensureIrohRemoteControlDirectory,
 	formatIrohRemoteTicketQrCode,
 	formatIrohRemoteTicketQrCodeTerminal,
+	getIrohRemoteControlPath,
 	getIrohRemoteRpcFilterResult,
 	getIrohRemoteUnsafeAllowedTools,
 	hashIrohRemotePairingSecret,
@@ -328,6 +330,37 @@ describe("Iroh remote core helpers", () => {
 		expect(() => assertIrohRemoteTicketPayloadHostIdentity({ ...payload, nodeId: undefined }, "host-node")).toThrow(
 			"saved_host_invalid: ticket nodeId is required for host identity verification",
 		);
+	});
+
+	test("places remote control sockets under a state-specific directory", () => {
+		const controlPath = getIrohRemoteControlPath(join(tmpdir(), "volt-iroh-control-test", "host.json"));
+
+		if (process.platform === "win32") {
+			expect(controlPath).toMatch(/^\\\\\.\\pipe\\volt-iroh-remote-/);
+		} else {
+			expect(basename(controlPath)).toBe("control.sock");
+			expect(basename(dirname(controlPath))).toMatch(/^[a-f0-9]{32}$/);
+		}
+	});
+
+	test("creates remote control socket directories with owner-only permissions", async () => {
+		if (process.platform === "win32") {
+			return;
+		}
+
+		const stateDir = await mkdtemp(join(tmpdir(), "volt-iroh-core-control-dir-"));
+		const controlPath = getIrohRemoteControlPath(join(stateDir, "host.json"));
+		const controlDir = dirname(controlPath);
+		try {
+			await mkdir(controlDir, { mode: 0o755, recursive: true });
+			await chmod(controlDir, 0o755);
+			await ensureIrohRemoteControlDirectory(controlPath);
+
+			expect((await stat(controlDir)).mode & 0o777).toBe(0o700);
+		} finally {
+			await rm(controlDir, { force: true, recursive: true });
+			await rm(stateDir, { force: true, recursive: true });
+		}
 	});
 
 	test("renders remote tickets as QR codes", () => {

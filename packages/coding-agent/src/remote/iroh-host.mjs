@@ -15,6 +15,7 @@ import {
 	DEFAULT_IROH_REMOTE_HANDSHAKE_MAX_LINE_BYTES,
 	DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS,
 	DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS,
+	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
 	encodeIrohRemoteTicketPayload,
 	formatIrohRemoteTicketQrCode,
 	getIrohRemoteControlPath,
@@ -32,6 +33,7 @@ import {
 	IrohRemoteHostStateManager,
 	IrohRemoteInMemoryPushNotificationDeduper,
 	DEFAULT_IROH_REMOTE_PUSH_RELAY_URL,
+	ensureIrohRemoteControlDirectory,
 	IrohRemotePushNotificationDispatcher,
 	IrohRemotePushRelayHttpClient,
 	parseIrohRemoteWorkspaceSpec,
@@ -1116,7 +1118,7 @@ async function pipeFilteredIrohRpcToNodeWritable(
 	let buffer = Buffer.from(initial);
 
 	while (true) {
-		const result = await readLineFromIroh(recv, buffer);
+		const result = await readLineFromIroh(recv, buffer, { maxLineBytes: DEFAULT_IROH_RPC_MAX_LINE_BYTES });
 		if (result.line === undefined) {
 			if (result.rest.length > 0) {
 				await writeRemoteRpcLineToChild(
@@ -1842,9 +1844,7 @@ function canConnectToControlPath(controlPath) {
 }
 
 async function listenOnControlPath(server, controlPath) {
-	if (process.platform !== "win32") {
-		await mkdir(dirname(controlPath), { recursive: true });
-	}
+	await ensureIrohRemoteControlDirectory(controlPath);
 	for (let attempt = 0; ; attempt += 1) {
 		try {
 			await listenServer(server, controlPath);

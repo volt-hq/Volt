@@ -215,6 +215,23 @@ describe("Iroh RPC transport", () => {
 		]);
 	});
 
+	test("rejects Iroh RPC lines that exceed the configured maximum", async () => {
+		const recv = new ManualIrohRecvStream();
+		const send = new ManualIrohSendStream();
+		const transport = createIrohRpcTransport({ stream: { recv, send }, maxLineBytes: 4 });
+		transport.onLine(() => {
+			throw new Error("oversized lines must not be delivered");
+		});
+		const closed = waitForTransportClose(transport);
+
+		recv.push(Buffer.from("abcde"));
+		recv.end();
+
+		await expect(closed).resolves.toMatchObject({
+			message: "Iroh RPC line exceeds maximum size of 4 bytes",
+		});
+	});
+
 	test("flush waits for pending Iroh writes", async () => {
 		const recv = new ManualIrohRecvStream();
 		const send = new ManualIrohSendStream();

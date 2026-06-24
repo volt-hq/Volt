@@ -19,6 +19,7 @@ export {
 } from "./authorization.ts";
 export {
 	DEFAULT_IROH_REMOTE_CONTROL_TIMEOUT_MS,
+	ensureIrohRemoteControlDirectory,
 	getIrohRemoteControlPath,
 	IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE,
 	IROH_REMOTE_PAIR_CONTROL_RESPONSE_TYPE,
