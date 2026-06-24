@@ -47,6 +47,7 @@
 
 ### Fixed
 
+- Fixed Iroh remote push delivery to ignore client-provided relay URLs, preventing a paired client from redirecting host push relay requests or configured relay bearer tokens.
 - Fixed Iroh remote host control socket cleanup and startup ordering so failed restarts do not leave nondialable pairing tickets and stale Unix sockets are retried before reporting an active host.
 - Fixed Iroh remote host QR display by using `qrcode-terminal` for compact terminal-native pairing codes.
 - Fixed Iroh remote reconnect authorization to keep each paired client's persisted tool allowlist instead of inheriting broader host restart defaults.

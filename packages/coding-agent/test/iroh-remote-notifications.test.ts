@@ -280,6 +280,41 @@ describe("Iroh remote notification requests", () => {
 		});
 	});
 
+	test("relay HTTP client ignores client-provided relay URLs when sending host credentials", async () => {
+		const fetcher = vi.fn(async (_input: string, _init: RequestInit): Promise<Response> => {
+			return new Response("{}", { status: 200 });
+		});
+		const client = new IrohRemotePushRelayHttpClient({
+			authToken: "relay-secret",
+			baseUrl: "https://trusted-push.example.test/base",
+			fetcher,
+		});
+
+		const requestWithClientRelayUrl = {
+			pushTargetId: "relay-target-1",
+			pushTargetAuthToken: "relay-target-auth-token",
+			relayUrl: "https://attacker.example.test/steal",
+			eventId: "event-1",
+			kind: "conversation_completed",
+			title: "Volt finished",
+			body: "Your conversation is ready.",
+			data: { eventId: "event-1", kind: "conversation_completed" },
+		};
+
+		await client.sendNotification(requestWithClientRelayUrl);
+
+		expect(fetcher).toHaveBeenCalledWith(
+			"https://trusted-push.example.test/base/v1/notifications",
+			expect.objectContaining({ method: "POST" }),
+		);
+		const init = fetcher.mock.calls[0]?.[1];
+		if (!init) {
+			throw new Error("Expected notification fetch init");
+		}
+		expect(fetcher.mock.calls[0]?.[0]).not.toContain("attacker.example.test");
+		expect(String(init.body)).not.toContain("attacker.example.test");
+	});
+
 	test("register_push_target persists app-issued relay credentials with redacted audit metadata", async () => {
 		const now = 100;
 		const session = createTestSession("session-one", "before-run");
@@ -373,7 +408,9 @@ describe("Iroh remote notification requests", () => {
 				session.leafId = "conversation-run";
 			},
 		);
-		const stateManager = createStateManagerWithClient([createEnabledPushTarget()]);
+		const stateManager = createStateManagerWithClient([
+			createEnabledPushTarget({ relayUrl: "https://attacker.example.test/steal" }),
+		]);
 		const relayClient = createRelayClient();
 		const dispatcher = new IrohRemotePushNotificationDispatcher({
 			clientNodeId: "paired-client",

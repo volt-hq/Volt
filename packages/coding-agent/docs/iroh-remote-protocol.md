@@ -192,7 +192,7 @@ The host forwards only these inbound RPC command `type` values from remote clien
 
 All other command types receive a JSONL `response` with `success:false` and are not forwarded to the local Volt RPC process. Within this allowlist, only `abort` is a direct cancellation command.
 
-`register_push_target` registers mobile-issued relay credentials with the host. The client must first register its raw FCM token with the Volt push relay; it must not send that raw FCM token to the desktop host. The host persists the relay target id and target-scoped auth token so it can notify the phone after the Iroh stream detaches:
+`register_push_target` registers mobile-issued relay credentials with the host. The client must first register its raw FCM token with the Volt push relay; it must not send that raw FCM token to the desktop host. The host persists the relay target id and target-scoped auth token so it can notify the phone after the Iroh stream detaches. `relayUrl` is accepted as app registration metadata, but host delivery uses the desktop host's configured relay URL (`--push-relay-url` / `VOLT_PUSH_RELAY_URL`) and does not let clients redirect delivery:
 
 ```json
 {

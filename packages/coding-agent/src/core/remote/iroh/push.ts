@@ -23,7 +23,6 @@ export interface IrohRemotePushNotificationIntent {
 export interface IrohRemotePushRelayNotificationRequest {
 	pushTargetId: string;
 	pushTargetAuthToken: string;
-	relayUrl?: string;
 	eventId: string;
 	kind: string;
 	title: string;
@@ -123,9 +122,8 @@ export class IrohRemotePushRelayHttpClient implements IrohRemotePushRelayClient 
 	async sendNotification(
 		request: IrohRemotePushRelayNotificationRequest,
 	): Promise<IrohRemotePushRelayNotificationResult> {
-		const baseUrl = this.getRequestBaseUrl(request);
-		const response = await this.fetcher(new URL("v1/notifications", baseUrl).toString(), {
-			body: JSON.stringify(request),
+		const response = await this.fetcher(new URL("v1/notifications", this.baseUrl).toString(), {
+			body: JSON.stringify(createRelayNotificationBody(request)),
 			headers: this.createHeaders(),
 			method: "POST",
 			signal: AbortSignal.timeout(this.timeoutMs),
@@ -139,19 +137,26 @@ export class IrohRemotePushRelayHttpClient implements IrohRemotePushRelayClient 
 		throw new IrohRemotePushRelayHttpError(response.status, isTransientHttpStatus(response.status));
 	}
 
-	private getRequestBaseUrl(request: IrohRemotePushRelayNotificationRequest): string {
-		if (!request.relayUrl) {
-			return this.baseUrl;
-		}
-		return request.relayUrl.endsWith("/") ? request.relayUrl : `${request.relayUrl}/`;
-	}
-
 	private createHeaders(): Record<string, string> {
 		return {
 			"content-type": "application/json",
 			...(this.authToken ? { authorization: `Bearer ${this.authToken}` } : {}),
 		};
 	}
+}
+
+function createRelayNotificationBody(
+	request: IrohRemotePushRelayNotificationRequest,
+): IrohRemotePushRelayNotificationRequest {
+	return {
+		pushTargetId: request.pushTargetId,
+		pushTargetAuthToken: request.pushTargetAuthToken,
+		eventId: request.eventId,
+		kind: request.kind,
+		title: request.title,
+		body: request.body,
+		data: request.data,
+	};
 }
 
 export class IrohRemotePushNotificationDispatcher implements IrohRemotePushNotificationDelivery {
@@ -361,7 +366,6 @@ function createRelayNotificationRequest(
 	return {
 		pushTargetId: pushTarget.id,
 		pushTargetAuthToken: pushTarget.pushTargetAuthToken,
-		...(pushTarget.relayUrl === undefined ? {} : { relayUrl: pushTarget.relayUrl }),
 		eventId: notification.eventId,
 		kind: notification.kind,
 		title: notification.title,
