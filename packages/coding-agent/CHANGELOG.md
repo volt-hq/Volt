@@ -49,6 +49,7 @@
 ### Fixed
 
 - Fixed `get_ui_actions` palette scope responses so they return only palette descriptors instead of all actions.
+- Fixed `volt remote host` source entrypoint startup by exporting the Iroh remote workspace unregister RPC helpers from the package root, and added a source export check to keep the host entrypoint imports in sync.
 - Fixed `volt remote host` source entrypoint startup by exporting the Iroh remote RPC tool-argument helper from the package root.
 - Fixed Iroh remote host default tool grants to keep loaded extension tools available to the remote runtime.
 - Fixed fuzzy `edit` matches so they only replace the targeted range and no longer normalize unrelated file content.
