@@ -301,6 +301,110 @@ describe("RpcTransportClient", () => {
 			await client.stop();
 		}
 	});
+
+	test("fails pending and future requests when inbound JSON is not an RPC message", async () => {
+		const invalidLines = [
+			JSON.stringify("log"),
+			JSON.stringify([]),
+			JSON.stringify({}),
+			JSON.stringify({ type: 1, payload: "x".repeat(256), tail: "should-not-appear" }),
+		];
+
+		for (const invalidLine of invalidLines) {
+			const transport = new ManualRpcTransport();
+			const client = new RpcTransportClient({ transport, requestTimeoutMs: 10_000 });
+			const events: Array<{ type: string }> = [];
+			client.onEvent((event) => {
+				events.push(event);
+			});
+			await client.start();
+
+			try {
+				const stateErrorPromise = client.getState().catch((error: unknown) => error);
+				const commandsErrorPromise = client.getCommands().catch((error: unknown) => error);
+				expect(transport.writes).toHaveLength(2);
+
+				transport.emitLine(invalidLine);
+
+				const [stateError, commandsError] = await Promise.all([stateErrorPromise, commandsErrorPromise]);
+				if (!(stateError instanceof Error)) {
+					throw new Error("expected state request to reject with an Error");
+				}
+				expect(commandsError).toBe(stateError);
+				expect(stateError.message).toContain("Invalid inbound RPC message: expected object with string type");
+				expect(stateError.message).toContain("Bad line preview:");
+				expect(stateError.message).not.toContain("should-not-appear");
+				expect(events).toEqual([]);
+
+				await expect(client.getState()).rejects.toBe(stateError);
+			} finally {
+				await client.stop();
+			}
+		}
+	});
+
+	test("fails pending and future requests when inbound responses are malformed or unknown", async () => {
+		const invalidResponses: Array<{
+			createResponse: (pendingId: string) => Record<string, unknown>;
+			expectedMessage: string;
+		}> = [
+			{
+				createResponse: () => ({ type: "response", command: "get_state", success: true }),
+				expectedMessage: "Invalid inbound RPC response: expected string id",
+			},
+			{
+				createResponse: () => ({ type: "response", id: 1, command: "get_state", success: true }),
+				expectedMessage: "Invalid inbound RPC response: expected string id",
+			},
+			{
+				createResponse: () => ({ type: "response", id: "unknown-request", command: "get_state", success: true }),
+				expectedMessage: 'Invalid inbound RPC response: unknown id "unknown-request"',
+			},
+			{
+				createResponse: (pendingId) => ({ type: "response", id: pendingId, success: true }),
+				expectedMessage: "Invalid inbound RPC response: expected string command",
+			},
+			{
+				createResponse: (pendingId) => ({ type: "response", id: pendingId, command: "get_state" }),
+				expectedMessage: "Invalid inbound RPC response: expected boolean success",
+			},
+			{
+				createResponse: (pendingId) => ({ type: "response", id: pendingId, command: "get_state", success: false }),
+				expectedMessage: "Invalid inbound RPC response: expected string error",
+			},
+		];
+
+		for (const { createResponse, expectedMessage } of invalidResponses) {
+			const transport = new ManualRpcTransport();
+			const client = new RpcTransportClient({ transport, requestTimeoutMs: 10_000 });
+			const events: Array<{ type: string }> = [];
+			client.onEvent((event) => {
+				events.push(event);
+			});
+			await client.start();
+
+			try {
+				const stateErrorPromise = client.getState().catch((error: unknown) => error);
+				const commandsErrorPromise = client.getCommands().catch((error: unknown) => error);
+				expect(transport.writes).toHaveLength(2);
+
+				transport.emitLine(JSON.stringify(createResponse(getWrittenCommandId(transport, 0))));
+
+				const [stateError, commandsError] = await Promise.all([stateErrorPromise, commandsErrorPromise]);
+				if (!(stateError instanceof Error)) {
+					throw new Error("expected state request to reject with an Error");
+				}
+				expect(commandsError).toBe(stateError);
+				expect(stateError.message).toContain(expectedMessage);
+				expect(stateError.message).toContain("Bad line preview:");
+				expect(events).toEqual([]);
+
+				await expect(client.getState()).rejects.toBe(stateError);
+			} finally {
+				await client.stop();
+			}
+		}
+	});
 });
 
 describe("Iroh remote RPC filter", () => {
@@ -1644,6 +1748,18 @@ class ManualRpcTransport implements RpcTransport {
 			handler(line);
 		}
 	}
+}
+
+function getWrittenCommandId(transport: ManualRpcTransport, index: number): string {
+	const command = transport.writes[index];
+	if (!isTestRecord(command) || typeof command.id !== "string") {
+		throw new Error(`expected write ${index} to include a string id`);
+	}
+	return command.id;
+}
+
+function isTestRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function parseCommandLine(line: string): { id: string; type: string } {

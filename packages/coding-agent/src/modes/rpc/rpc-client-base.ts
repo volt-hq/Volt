@@ -38,6 +38,8 @@ interface PendingRpcRequest {
 	reject(error: Error): void;
 }
 
+type InboundRpcMessage = Record<string, unknown> & { type: string };
+
 export interface RpcClientBaseOptions {
 	/** Milliseconds to wait for a command response. Defaults to 30 seconds. */
 	requestTimeoutMs?: number;
@@ -443,13 +445,14 @@ export abstract class RpcClientBase {
 			return;
 		}
 
-		if (isRecord(data) && data.type === "response" && typeof data.id === "string") {
-			const pending = this.pendingRequests.get(data.id);
-			if (pending) {
-				this.pendingRequests.delete(data.id);
-				pending.resolve(data as RpcResponse);
-				return;
-			}
+		if (!isInboundRpcMessage(data)) {
+			this.failInboundProtocol("Invalid inbound RPC message: expected object with string type", line);
+			return;
+		}
+
+		if (data.type === "response") {
+			this.handleResponse(data, line);
+			return;
 		}
 
 		this.emitEvent(data as RpcClientEvent);
@@ -542,6 +545,43 @@ export abstract class RpcClientBase {
 		});
 	}
 
+	private handleResponse(response: InboundRpcMessage, line: string): void {
+		// Responses are reserved protocol messages. Missing, malformed, or
+		// unrecognized correlation ids fail the client instead of reaching event
+		// listeners as ordinary events.
+		if (typeof response.id !== "string") {
+			this.failInboundProtocol("Invalid inbound RPC response: expected string id", line);
+			return;
+		}
+		if (typeof response.command !== "string") {
+			this.failInboundProtocol("Invalid inbound RPC response: expected string command", line);
+			return;
+		}
+		if (typeof response.success !== "boolean") {
+			this.failInboundProtocol("Invalid inbound RPC response: expected boolean success", line);
+			return;
+		}
+		if (response.success === false && typeof response.error !== "string") {
+			this.failInboundProtocol("Invalid inbound RPC response: expected string error", line);
+			return;
+		}
+
+		const pending = this.pendingRequests.get(response.id);
+		if (!pending) {
+			this.failInboundProtocol(`Invalid inbound RPC response: unknown id ${JSON.stringify(response.id)}`, line);
+			return;
+		}
+
+		this.pendingRequests.delete(response.id);
+		pending.resolve(response as RpcResponse);
+	}
+
+	private failInboundProtocol(message: string, line: string): void {
+		const failureError = new Error(this.formatError(`${message}. Bad line preview: ${formatLinePreview(line)}`));
+		this.setFailureError(failureError);
+		this.rejectPendingRequests(failureError);
+	}
+
 	private getData<T>(response: RpcResponse): T {
 		if (!response.success) {
 			const errorResponse = response as Extract<RpcResponse, { success: false }>;
@@ -561,6 +601,10 @@ export abstract class RpcClientBase {
 		const context = this.getErrorContext();
 		return context ? `${message}. ${context}` : message;
 	}
+}
+
+function isInboundRpcMessage(value: unknown): value is InboundRpcMessage {
+	return isRecord(value) && typeof value.type === "string";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
