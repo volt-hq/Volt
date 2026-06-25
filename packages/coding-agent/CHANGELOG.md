@@ -48,6 +48,7 @@
 
 ### Fixed
 
+- Fixed `volt remote host` source entrypoint startup by exporting the Iroh remote RPC tool-argument helper from the package root.
 - Fixed Iroh remote host default tool grants to keep loaded extension tools available to the remote runtime.
 - Fixed fuzzy `edit` matches so they only replace the targeted range and no longer normalize unrelated file content.
 - Fixed Iroh remote Live Activity updates to report new turns as running and keep completed activities updateable for continued conversations.

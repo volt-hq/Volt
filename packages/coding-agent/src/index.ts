@@ -237,6 +237,7 @@ export {
 	getIrohRemoteControlPath,
 	getIrohRemoteRpcFilterResult,
 	getIrohRemoteUnsafeAllowedTools,
+	getIrohRemoteVoltRpcToolArgs,
 	hashIrohRemotePairingSecret,
 	hashIrohRemotePushToken,
 	IROH_REMOTE_ALPN,
