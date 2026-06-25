@@ -265,6 +265,8 @@ export {
 	IROH_REMOTE_TICKET_PREFIX,
 	IROH_REMOTE_UNREGISTER_WORKSPACE_RPC_TYPE,
 	IROH_REMOTE_UNSAFE_TOOL_NAMES,
+	type IrohRemoteActiveStreamEntry,
+	IrohRemoteActiveStreamRegistry,
 	type IrohRemoteAuditEvent,
 	type IrohRemoteAuditEventInput,
 	IrohRemoteAuditLogger,

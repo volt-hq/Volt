@@ -34,6 +34,7 @@ import {
 	getAgentDir,
 	IROH_REMOTE_ALPN,
 	IrohRemoteAuditLogger,
+	IrohRemoteActiveStreamRegistry,
 	IrohRemoteHostEngine,
 	IrohRemoteHostStateManager,
 	IrohRemoteInMemoryPushNotificationDeduper,
@@ -76,6 +77,7 @@ const DEFAULT_STATE_PATH = join(getAgentDir(), "remote", "iroh-host.json");
 const ACTIVE_REVOKE_CLOSE_REASON = "revoked";
 const ACTIVE_REPLACE_CLOSE_REASON = "replaced";
 let activeConnectionSequence = 0;
+let activeStreamSequence = 0;
 const PROMPT_COMPLETION_RPC_TYPES = new Set(["prompt", "steer", "follow_up"]);
 const RESPONSE_COMPLETION_RPC_TYPES = new Set([
 	"abort",
@@ -604,6 +606,19 @@ async function resolveSourceVoltRunner(sourceVolt) {
 		if (error && error.code !== "ENOENT") throw error;
 	}
 	throw new Error(`Volt source runner is not available: ${runnerPath}`);
+}
+
+function selectServeWorkspace(state, workspaceSpec, allowTools, cwd) {
+	if (workspaceSpec !== undefined || state.workspaces.length === 0) {
+		return selectIrohRemoteWorkspace(state, workspaceSpec, allowTools, cwd);
+	}
+
+	const cwdWorkspace = parseIrohRemoteWorkspaceSpec(undefined, cwd);
+	const workspace = state.workspaces.find((entry) => entry.path === cwdWorkspace.path) ?? state.workspaces[0];
+	if (allowTools !== undefined) {
+		workspace.allowedTools = allowTools;
+	}
+	return workspace;
 }
 
 async function preflightRpcChild(options, workspace) {
@@ -1656,57 +1671,96 @@ async function stopIntegratedRuntimesForClient(options, nodeId, reason) {
 	return stoppedCount;
 }
 
-function registerActiveConnection(options, authorization, connection, connectionId) {
+function registerClientConnection(options, nodeId, connection, connectionId) {
 	const entry = {
-		clientNodeId: authorization.client.nodeId,
-		connection,
 		connectionId,
-		workspace: authorization.workspace.name,
+		close: (reason) => closeConnection(connection, reason),
 	};
-	let entries = options.activeConnections.get(entry.clientNodeId);
+	let entries = options.clientConnections.get(nodeId);
 	if (!entries) {
 		entries = new Set();
-		options.activeConnections.set(entry.clientNodeId, entries);
+		options.clientConnections.set(nodeId, entries);
 	}
 	entries.add(entry);
+	let removed = false;
 	return () => {
+		if (removed) {
+			return;
+		}
+		removed = true;
 		entries.delete(entry);
-		if (entries.size === 0 && options.activeConnections.get(entry.clientNodeId) === entries) {
-			options.activeConnections.delete(entry.clientNodeId);
+		if (entries.size === 0 && options.clientConnections.get(nodeId) === entries) {
+			options.clientConnections.delete(nodeId);
 		}
 	};
 }
 
-function getActiveConnectionsForAuthorization(options, authorization) {
-	const entries = options.activeConnections.get(authorization.client.nodeId) ?? [];
-	const matchingEntries = [];
+async function closeClientConnectionsForClient(options, nodeId, reason) {
+	const entries = Array.from(options.clientConnections.get(nodeId) ?? []);
+	if (entries.length === 0) {
+		return 0;
+	}
+
+	options.clientConnections.delete(nodeId);
 	for (const entry of entries) {
-		if (entry.workspace === authorization.workspace.name) {
-			matchingEntries.push(entry);
+		try {
+			await Promise.resolve(entry.close(reason));
+		} catch {
+			// Connection closure is best-effort; the transport may already be closing.
 		}
+	}
+	return entries.length;
+}
+
+function registerActiveStream(options, authorization, stream, connection, connectionId, streamId) {
+	const entry = {
+		clientNodeId: authorization.client.nodeId,
+		connectionId,
+		streamId,
+		workspaceName: authorization.workspace.name,
+		close: (reason) => closeIrohRemoteStream(stream, reason),
+		closeConnection: (reason) => closeConnection(connection, reason),
+	};
+	const remove = options.activeStreams.register(entry);
+	return { entry, remove };
+}
+
+function getActiveStreamsForAuthorization(options, authorization) {
+	return options.activeStreams.entriesForWorkspace(authorization.client.nodeId, authorization.workspace.name);
+}
+
+function hasActiveStreamForAuthorizationOnConnection(options, authorization, connectionId) {
+	return options.activeStreams.hasWorkspaceOnConnection(
+		authorization.client.nodeId,
+		authorization.workspace.name,
+		connectionId,
+	);
+}
+
+function takeActiveStreamsForAuthorization(options, authorization) {
+	const matchingEntries = getActiveStreamsForAuthorization(options, authorization);
+	if (matchingEntries.length === 0) {
+		return [];
+	}
+
+	for (const entry of matchingEntries) {
+		options.activeStreams.unregister(entry);
 	}
 	return matchingEntries;
 }
 
-async function replaceActiveConnectionForAuthorization(options, authorization, replacementConnectionId) {
-	const entries = options.activeConnections.get(authorization.client.nodeId);
-	const matchingEntries = getActiveConnectionsForAuthorization(options, authorization);
-	if (matchingEntries.length === 0) {
+async function closeReplacedActiveStreams(options, authorization, replacementStreamId, replacedEntries) {
+	if (replacedEntries.length === 0) {
 		return { replaced: false, closedCount: 0 };
 	}
 
-	const replacedConnectionIds = matchingEntries.map((entry) => entry.connectionId);
-	const closeReason = Array.from(Buffer.from(ACTIVE_REPLACE_CLOSE_REASON, "utf8"));
-	for (const entry of matchingEntries) {
-		entries.delete(entry);
-		entry.connection.close(0n, closeReason);
+	const replacedStreamIds = replacedEntries.map((entry) => entry.streamId);
+	for (const entry of replacedEntries) {
+		await Promise.resolve(entry.close(ACTIVE_REPLACE_CLOSE_REASON)).catch(() => {});
 	}
-	if (entries.size === 0 && options.activeConnections.get(authorization.client.nodeId) === entries) {
-		options.activeConnections.delete(authorization.client.nodeId);
-	}
-
+	await closeIdleConnectionsForEntries(options, replacedEntries, ACTIVE_REPLACE_CLOSE_REASON);
 	console.error(
-		`client connection replaced: ${authorization.client.nodeId} (${replacedConnectionIds.join(", ")} -> ${replacementConnectionId})`,
+		`client stream replaced: ${authorization.client.nodeId}/${authorization.workspace.name} (${replacedStreamIds.join(", ")} -> ${replacementStreamId})`,
 	);
 	await logAudit(options.auditLogger, {
 		type: "duplicate_connection_replaced",
@@ -1715,13 +1769,13 @@ async function replaceActiveConnectionForAuthorization(options, authorization, r
 		success: true,
 		details: {
 			closeReason: ACTIVE_REPLACE_CLOSE_REASON,
-			closedCount: matchingEntries.length,
-			replacedConnectionIds,
-			replacementConnectionId,
-			source: "active_connection_registry",
+			closedCount: replacedEntries.length,
+			replacedStreamIds,
+			replacementStreamId,
+			source: "active_stream_registry",
 		},
 	});
-	return { replaced: true, closedCount: matchingEntries.length };
+	return { replaced: true, closedCount: replacedEntries.length };
 }
 
 async function rejectDuplicateActiveConnection(stream, authorization, options) {
@@ -1732,7 +1786,7 @@ async function rejectDuplicateActiveConnection(stream, authorization, options) {
 		workspace: authorization.workspace.name,
 		success: false,
 		error,
-		details: { source: "active_connection_registry" },
+		details: { source: "active_stream_registry" },
 	});
 	await writeIrohRemoteHandshakeResponse(
 		stream.send,
@@ -1746,31 +1800,88 @@ function getHandshakeChildLabel(options) {
 	return options.integratedVolt || options.useVolt ? "volt" : "fake-rpc";
 }
 
-function startDuplicateStreamRejectionLoop(connection, remoteId, options) {
-	let stopped = false;
-	const loop = async () => {
-		while (!stopped) {
-			let stream;
-			try {
-				stream = await connection.acceptBi();
-			} catch {
-				return;
-			}
-			if (stopped) {
-				await Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
-				await Promise.resolve(stream.send.finish?.()).catch(() => {});
-				return;
-			}
-			void rejectDuplicateStream(stream, remoteId, options);
-		}
-	};
-	void loop().catch(() => {});
-	return () => {
-		stopped = true;
-	};
+function closeIrohRemoteStream(stream, _reason) {
+	void Promise.resolve(stream.send.finish?.()).catch(() => {});
+	void Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
 }
 
-async function rejectDuplicateStream(stream, remoteId, options) {
+async function closeEntryConnection(entry, reason) {
+	try {
+		await Promise.resolve(entry.closeConnection?.(reason));
+	} catch {
+		// Connection closure is best-effort. Stream teardown still drives task cleanup.
+	}
+}
+
+async function closeIdleConnectionsForEntries(options, entries, reason) {
+	const closedConnectionIds = new Set();
+	for (const entry of entries) {
+		if (closedConnectionIds.has(entry.connectionId)) {
+			continue;
+		}
+		if (options.activeStreams.entriesForConnection(entry.connectionId).length > 0) {
+			continue;
+		}
+		closedConnectionIds.add(entry.connectionId);
+		await closeEntryConnection(entry, reason);
+	}
+}
+
+async function closeActiveStreamsForClient(options, nodeId) {
+	const entries = options.activeStreams.entriesForClientNodeId(nodeId);
+	if (entries.length === 0) {
+		const closedConnectionCount = await closeClientConnectionsForClient(options, nodeId, ACTIVE_REVOKE_CLOSE_REASON);
+		const stoppedRuntimeCount = await stopIntegratedRuntimesForClient(options, nodeId, "client_revoked");
+		const closed = closedConnectionCount > 0;
+		await logAudit(options.auditLogger, {
+			type: "active_connection_revoked",
+			clientNodeId: nodeId,
+			success: closed || stoppedRuntimeCount > 0,
+			error: closed || stoppedRuntimeCount > 0 ? undefined : "no active connection found",
+			details: {
+				closeReason: ACTIVE_REVOKE_CLOSE_REASON,
+				closedConnectionCount,
+				source: "control_channel",
+				stoppedRuntimeCount,
+			},
+		});
+		return { closed, closedCount: closedConnectionCount };
+	}
+
+	for (const entry of entries) {
+		options.activeStreams.unregister(entry);
+		await Promise.resolve(entry.close(ACTIVE_REVOKE_CLOSE_REASON)).catch(() => {});
+	}
+	await closeIdleConnectionsForEntries(options, entries, ACTIVE_REVOKE_CLOSE_REASON);
+	const closedConnectionCount = await closeClientConnectionsForClient(options, nodeId, ACTIVE_REVOKE_CLOSE_REASON);
+	const stoppedRuntimeCount = await stopIntegratedRuntimesForClient(options, nodeId, "client_revoked");
+	for (const entry of entries) {
+		await logAudit(options.auditLogger, {
+			type: "active_connection_revoked",
+			clientNodeId: nodeId,
+			workspace: entry.workspaceName,
+			success: true,
+			details: {
+				closeReason: ACTIVE_REVOKE_CLOSE_REASON,
+				closedConnectionCount,
+				source: "control_channel",
+				streamId: entry.streamId,
+				stoppedRuntimeCount,
+			},
+		});
+	}
+	return { closed: true, closedCount: entries.length };
+}
+
+async function handleConnectionStream(
+	stream,
+	connection,
+	remoteId,
+	connectionId,
+	streamId,
+	options,
+	replaceExistingWorkspaceStream,
+) {
 	const handshake = await options.hostEngine.readHandshake(stream, remoteId, {
 		child: getHandshakeChildLabel(options),
 		maxLineBytes: DEFAULT_IROH_REMOTE_HANDSHAKE_MAX_LINE_BYTES,
@@ -1782,46 +1893,52 @@ async function rejectDuplicateStream(stream, remoteId, options) {
 		await Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
 		return;
 	}
-	await rejectDuplicateActiveConnection(stream, handshake.authorization, options);
+
+	if (handshake.authorization.paired) {
+		console.error(`paired client stream: ${handshake.authorization.client.label} (${remoteId}, ${streamId})`);
+	}
+
+	if (hasActiveStreamForAuthorizationOnConnection(options, handshake.authorization, connectionId)) {
+		await rejectDuplicateActiveConnection(stream, handshake.authorization, options);
+		return;
+	}
+
+	const matchingActiveStreams = getActiveStreamsForAuthorization(options, handshake.authorization);
+	if (matchingActiveStreams.length > 0 && !replaceExistingWorkspaceStream) {
+		await rejectDuplicateActiveConnection(stream, handshake.authorization, options);
+		return;
+	}
+	const replacedEntries = replaceExistingWorkspaceStream
+		? takeActiveStreamsForAuthorization(options, handshake.authorization)
+		: [];
+	let child;
+	const activeStream = registerActiveStream(options, handshake.authorization, stream, connection, connectionId, streamId);
+	if (replaceExistingWorkspaceStream) {
+		await closeReplacedActiveStreams(options, handshake.authorization, streamId, replacedEntries);
+	}
+
+	try {
+		if (options.integratedVolt) {
+			await runIntegratedVoltConnection(stream, handshake, handshake.authorization, options);
+			return;
+		}
+		child = await runSpawnedRpcConnection(stream, handshake, handshake.authorization, options);
+	} finally {
+		if (child && child.exitCode === null && !child.killed) child.kill();
+		activeStream.remove();
+	}
 }
 
-async function closeActiveConnectionsForClient(options, nodeId) {
-	const entries = Array.from(options.activeConnections.get(nodeId) ?? []);
-	if (entries.length === 0) {
-		const stoppedRuntimeCount = await stopIntegratedRuntimesForClient(options, nodeId, "client_revoked");
-		await logAudit(options.auditLogger, {
-			type: "active_connection_revoked",
-			clientNodeId: nodeId,
-			success: stoppedRuntimeCount > 0,
-			error: stoppedRuntimeCount > 0 ? undefined : "no active connection found",
-			details: {
-				closeReason: ACTIVE_REVOKE_CLOSE_REASON,
-				source: "control_channel",
-				stoppedRuntimeCount,
-			},
-		});
-		return { closed: false, closedCount: 0 };
-	}
+function closeConnection(connection, reason) {
+	connection.close(0n, Array.from(Buffer.from(reason, "utf8")));
+}
 
-	const closeReason = Array.from(Buffer.from(ACTIVE_REVOKE_CLOSE_REASON, "utf8"));
+async function closeActiveStreamsForConnection(options, connectionId, reason) {
+	const entries = options.activeStreams.entriesForConnection(connectionId);
 	for (const entry of entries) {
-		entry.connection.close(0n, closeReason);
+		options.activeStreams.unregister(entry);
+		await Promise.resolve(entry.close(reason)).catch(() => {});
 	}
-	const stoppedRuntimeCount = await stopIntegratedRuntimesForClient(options, nodeId, "client_revoked");
-	for (const entry of entries) {
-		await logAudit(options.auditLogger, {
-			type: "active_connection_revoked",
-			clientNodeId: nodeId,
-			workspace: entry.workspace,
-			success: true,
-			details: {
-				closeReason: ACTIVE_REVOKE_CLOSE_REASON,
-				source: "control_channel",
-				stoppedRuntimeCount,
-			},
-		});
-	}
-	return { closed: true, closedCount: entries.length };
 }
 
 async function handleConnection(incoming, options) {
@@ -1829,6 +1946,10 @@ async function handleConnection(incoming, options) {
 	const connection = await accepting.connect();
 	const remoteId = connection.remoteId().toString();
 	const connectionId = `conn-${++activeConnectionSequence}`;
+	const removeClientConnection = registerClientConnection(options, remoteId, connection, connectionId);
+	const streamTasks = new Set();
+	let acceptedStreamCount = 0;
+	let closeRequested = false;
 	console.error(`client connection opened: ${remoteId} (${connectionId})`);
 	await logAudit(options.auditLogger, {
 		type: "client_connected",
@@ -1838,44 +1959,53 @@ async function handleConnection(incoming, options) {
 		details: { connectionId },
 	});
 
-	let child;
-	let removeActiveConnection;
-	let stopDuplicateStreamRejectionLoop;
+	const requestCloseWhenIdle = () => {
+		if (closeRequested || acceptedStreamCount === 0 || streamTasks.size > 0) {
+			return;
+		}
+		closeRequested = true;
+		closeConnection(connection, "done");
+	};
+
 	try {
-		const stream = await withTimeout(
-			connection.acceptBi(),
-			DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS,
-			"handshake timed out",
-		);
-		const handshake = await options.hostEngine.readHandshake(stream, remoteId, {
-			child: getHandshakeChildLabel(options),
-			maxLineBytes: DEFAULT_IROH_REMOTE_HANDSHAKE_MAX_LINE_BYTES,
-			timeoutMs: DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS,
-			writeSuccessResponse: false,
-		});
-		if (!handshake.ok) {
-			await stream.send.finish?.();
-			await Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
-			return;
+		while (!closeRequested) {
+			const stream = await (acceptedStreamCount === 0
+				? withTimeout(connection.acceptBi(), DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS, "handshake timed out")
+				: connection.acceptBi());
+			acceptedStreamCount++;
+			const streamId = `stream-${++activeStreamSequence}`;
+			const replaceExistingWorkspaceStream = acceptedStreamCount === 1;
+			const task = handleConnectionStream(
+				stream,
+				connection,
+				remoteId,
+				connectionId,
+				streamId,
+				options,
+				replaceExistingWorkspaceStream,
+			)
+				.catch((error) => {
+					if (!isExpectedApplicationClose(error)) {
+						console.error(error instanceof Error ? error.stack : String(error));
+					}
+				})
+				.finally(() => {
+					streamTasks.delete(task);
+					requestCloseWhenIdle();
+				});
+			streamTasks.add(task);
 		}
-
-		if (handshake.authorization.paired) {
-			console.error(`paired client connection: ${handshake.authorization.client.label} (${remoteId}, ${connectionId})`);
+	} catch (error) {
+		if (acceptedStreamCount === 0) {
+			throw error;
 		}
-		await replaceActiveConnectionForAuthorization(options, handshake.authorization, connectionId);
-		removeActiveConnection = registerActiveConnection(options, handshake.authorization, connection, connectionId);
-		stopDuplicateStreamRejectionLoop = startDuplicateStreamRejectionLoop(connection, remoteId, options);
-
-		if (options.integratedVolt) {
-			await runIntegratedVoltConnection(stream, handshake, handshake.authorization, options);
-			return;
-		}
-		child = await runSpawnedRpcConnection(stream, handshake, handshake.authorization, options);
 	} finally {
-		stopDuplicateStreamRejectionLoop?.();
-		removeActiveConnection?.();
-		if (child && child.exitCode === null && !child.killed) child.kill();
-		connection.close(0n, Array.from(Buffer.from("done", "utf8")));
+		await closeActiveStreamsForConnection(options, connectionId, "connection_closed");
+		await Promise.allSettled(streamTasks);
+		removeClientConnection();
+		if (!closeRequested) {
+			closeConnection(connection, "done");
+		}
 		await waitForConnectionClose(connection);
 		console.error(`client connection closed: ${remoteId} (${connectionId})`);
 		await logAudit(options.auditLogger, {
@@ -2003,7 +2133,7 @@ async function createPairControlSuccessResponse(request, endpoint, options) {
 }
 
 async function createRevokeControlSuccessResponse(request, options) {
-	const result = await closeActiveConnectionsForClient(options, request.nodeId);
+	const result = await closeActiveStreamsForClient(options, request.nodeId);
 	return {
 		type: IROH_REMOTE_REVOKE_CONTROL_RESPONSE_TYPE,
 		success: true,
@@ -2140,7 +2270,7 @@ async function serve(flags) {
 	const stateManager = new IrohRemoteHostStateManager({ statePath });
 	const state = await stateManager.load();
 	const allowToolsFlag = getFlag(flags, "allow-tools");
-	const workspace = selectIrohRemoteWorkspace(state, getFlag(flags, "workspace"), allowToolsFlag, process.cwd());
+	const workspace = selectServeWorkspace(state, getFlag(flags, "workspace"), allowToolsFlag, process.cwd());
 	const allowTools = allowToolsFlag ?? workspace.allowedTools ?? DEFAULT_IROH_REMOTE_ALLOW_TOOLS;
 
 	const relayMode = getRelayMode(flags);
@@ -2164,10 +2294,11 @@ async function serve(flags) {
 	const pushRelayAuthToken = getFlag(flags, "push-relay-auth-token", process.env.VOLT_PUSH_RELAY_AUTH_TOKEN);
 	const approvedWorkspacePaths = new Set();
 	const options = {
-		activeConnections: new Map(),
+		activeStreams: new IrohRemoteActiveStreamRegistry(),
 		agentDir: getFlag(flags, "agent-dir"),
 		allowTools,
 		auditLogger,
+		clientConnections: new Map(),
 		detachedRuntimeTtlMs: parseIntegratedDetachedRuntimeTtlMs(getFlag(flags, "detached-runtime-ttl-ms")),
 		getProjectTrustedForWorkspace: (candidateWorkspace) =>
 			resolveIrohRemoteWorkspaceProjectTrusted(candidateWorkspace, {

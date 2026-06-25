@@ -1,4 +1,8 @@
 export {
+	type IrohRemoteActiveStreamEntry,
+	IrohRemoteActiveStreamRegistry,
+} from "./active-stream-registry.ts";
+export {
 	type IrohRemoteAuditEvent,
 	type IrohRemoteAuditEventInput,
 	IrohRemoteAuditLogger,
