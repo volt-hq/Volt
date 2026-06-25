@@ -2736,6 +2736,145 @@ async function multiWorkspaceReconnectScenario() {
 	});
 }
 
+async function runningWorkspaceUnregisterScenario() {
+	await withStateDir("running-unregister", async ({ clientStatePath, hostStatePath, stateDir }) => {
+		const { sourceDir } = await createFakeSourceVolt(stateDir);
+		const alphaWorkspacePath = join(stateDir, "alpha-workspace");
+		const betaWorkspacePath = join(stateDir, "beta-workspace");
+		await mkdir(alphaWorkspacePath, { recursive: true });
+		await mkdir(betaWorkspacePath, { recursive: true });
+		const canonicalAlphaWorkspacePath = await realpath(alphaWorkspacePath);
+		const canonicalBetaWorkspacePath = await realpath(betaWorkspacePath);
+
+		async function registerWorkspace(name, workspacePath) {
+			const registerCommand = spawnSourceCli([
+				"remote",
+				"host",
+				"--state",
+				hostStatePath,
+				"--register-workspace",
+				`${name}=${workspacePath}`,
+				"--allow-tools",
+				DEFAULT_TEST_ALLOW_TOOLS,
+			]);
+			await waitForExit(registerCommand.child, `running unregister register ${name}`, registerCommand.output);
+		}
+
+		async function createPairTicket(workspace, label) {
+			const pairCommand = spawnSourceCli([
+				"remote",
+				"pair",
+				"--state",
+				hostStatePath,
+				"--workspace",
+				workspace,
+				"--allow-tools",
+				DEFAULT_TEST_ALLOW_TOOLS,
+				"--label",
+				label,
+			]);
+			await waitForExit(pairCommand.child, `running unregister pair ${workspace}`, pairCommand.output);
+			const pairStdoutLines = pairCommand.output.stdout
+				.trim()
+				.split("\n")
+				.filter((line) => line.length > 0);
+			assert(
+				pairStdoutLines.length === 1 && pairStdoutLines[0].startsWith(TICKET_PREFIX),
+				`Expected running unregister pair command to emit one ticket, got:\nstdout:\n${pairCommand.output.stdout}\nstderr:\n${pairCommand.output.stderr}`,
+			);
+			return pairStdoutLines[0];
+		}
+
+		function assertRemoteHostWorkspaces(metadata, expectedNames, label) {
+			const expectedWorkspaces = expectedNames.map((name) => ({ name, status: "available" }));
+			assert(
+				JSON.stringify(metadata?.workspaceNames) === JSON.stringify(expectedNames),
+				`Expected ${label} workspaceNames ${JSON.stringify(expectedNames)}, got:\n${JSON.stringify(metadata)}`,
+			);
+			assert(
+				JSON.stringify(metadata?.workspaces) === JSON.stringify(expectedWorkspaces),
+				`Expected ${label} workspaces ${JSON.stringify(expectedWorkspaces)}, got:\n${JSON.stringify(metadata)}`,
+			);
+			const metadataText = JSON.stringify(metadata ?? null);
+			for (const workspacePath of [canonicalAlphaWorkspacePath, canonicalBetaWorkspacePath, stateDir]) {
+				assert(
+					!metadataText.includes(workspacePath),
+					`Expected ${label} metadata to omit host path ${workspacePath}, got:\n${metadataText}`,
+				);
+			}
+		}
+
+		await registerWorkspace("alpha", alphaWorkspacePath);
+		await registerWorkspace("beta", betaWorkspacePath);
+
+		const host = startHost([
+			"--state",
+			hostStatePath,
+			"--workspace",
+			`alpha=${alphaWorkspacePath}`,
+			"--source-volt",
+			sourceDir,
+			"--no-pairing",
+		]);
+		let rawClient;
+		try {
+			await waitForFirstStdoutLine(host.child, host.output, "running unregister host");
+			const initialPairTicket = await createPairTicket("alpha", "running unregister active client");
+			rawClient = await openRawAuthorizedClient(initialPairTicket, {
+				clientLabel: "running unregister active client",
+			});
+			const initialStateResponse = await readRawRpcResponse(
+				rawClient,
+				{ id: "running-unregister-state-before", type: "get_state" },
+				"running unregister initial get_state",
+			);
+			assertRemoteHostWorkspaces(initialStateResponse.event.data?.remoteHost, ["alpha", "beta"], "initial");
+
+			const unregisterCommand = spawnSourceCli([
+				"remote",
+				"host",
+				"--state",
+				hostStatePath,
+				"--unregister-workspace",
+				"beta",
+			]);
+			await waitForExit(unregisterCommand.child, "running unregister command", unregisterCommand.output);
+			assert(
+				unregisterCommand.output.stderr.includes("Unregistered workspace beta"),
+				`Expected unregister confirmation, got:\n${unregisterCommand.output.stderr}`,
+			);
+			const stateAfterUnregister = JSON.parse(await readFile(hostStatePath, "utf8"));
+			assert(
+				JSON.stringify(stateAfterUnregister.workspaces?.map((workspace) => workspace.name)) === JSON.stringify(["alpha"]),
+				`Expected beta removed from host state, got:\n${JSON.stringify(stateAfterUnregister.workspaces)}`,
+			);
+
+			const activeStateResponse = await readRawRpcResponse(
+				rawClient,
+				{ id: "running-unregister-active-state-after", type: "get_state" },
+				"running unregister active get_state after unregister",
+			);
+			assert(
+				activeStateResponse.event.success === true,
+				`Expected active connection to remain usable after unregister, got:\n${JSON.stringify(activeStateResponse.event)}`,
+			);
+
+			const futurePairTicket = await createPairTicket("alpha", "running unregister future client");
+			const futureClientOutput = await runClient(
+				futurePairTicket,
+				clientStatePath,
+				["--get-state", "--timeout-ms", "10000"],
+				{ label: "running unregister future get_state" },
+			);
+			const futureState = JSON.parse(futureClientOutput.stdout);
+			assertRemoteHostWorkspaces(futureState.remoteHost, ["alpha"], "future");
+		} finally {
+			await closeRawAuthorizedClient(rawClient);
+			await stopProcess(host.child);
+		}
+	});
+}
+
 async function auditLogScenario() {
 	await withStateDir("audit", async ({ clientStatePath, hostStatePath, stateDir }) => {
 		await runHostClientOnce({
@@ -3081,6 +3220,7 @@ const scenarios = [
 	["active revocation", activeRevocationScenario],
 	["pairing and revocation", pairingAndRevocationScenario],
 	["multi-workspace reconnect", multiWorkspaceReconnectScenario],
+	["running workspace unregister", runningWorkspaceUnregisterScenario],
 	["audit log", auditLogScenario],
 	["paired client persisted tools", pairedClientPersistedToolsScenario],
 	["unsafe tool gates", unsafeToolGateScenario],
