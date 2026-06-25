@@ -55,6 +55,44 @@ function createStateSession(sessionId: string) {
 	};
 }
 
+function createPayloadValidationSession() {
+	return {
+		agent: {
+			subscribe: vi.fn(() => () => {}),
+		},
+		bindExtensions: vi.fn(async () => {}),
+		executeBash: vi.fn(async () => ({ cancelled: false, exitCode: 0, output: "" })),
+		followUp: vi.fn(async () => {}),
+		prompt: vi.fn(async () => {}),
+		sessionId: "payload-validation-session",
+		sessionManager: {
+			getBranch: vi.fn(() => []),
+			getSessionId: vi.fn(() => "payload-validation-session"),
+		},
+		setAutoCompactionEnabled: vi.fn(),
+		setAutoRetryEnabled: vi.fn(),
+		setFollowUpMode: vi.fn(),
+		setSessionName: vi.fn(),
+		setSteeringMode: vi.fn(),
+		setThinkingLevel: vi.fn(),
+		steer: vi.fn(async () => {}),
+		subscribe: vi.fn(() => () => {}),
+	};
+}
+
+function createPayloadValidationRuntimeHost(
+	session: ReturnType<typeof createPayloadValidationSession>,
+): AgentSessionRuntime {
+	return {
+		session,
+		newSession: vi.fn(async () => ({ cancelled: true })),
+		switchSession: vi.fn(async () => ({ cancelled: true })),
+		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+		dispose: vi.fn(async () => {}),
+		setRebindSession: vi.fn(),
+	} as unknown as AgentSessionRuntime;
+}
+
 async function startRpcModeHarness(runtimeHost: AgentSessionRuntime): Promise<RpcModeHarness> {
 	let lineHandler: ((line: string) => void) | undefined;
 	let closeHandler: RpcCloseHandler | undefined;
@@ -833,6 +871,120 @@ describe("RPC mode caller-provided transports", () => {
 		});
 		await expect(modePromise).resolves.toBeUndefined();
 		expect(runtimeHost.dispose).toHaveBeenCalledOnce();
+	});
+
+	test("rejects invalid scalar state mutation payloads before calling session setters", async () => {
+		const session = createPayloadValidationSession();
+		const rpc = await startRpcModeHarness(createPayloadValidationRuntimeHost(session));
+		const invalidCommands = [
+			{ id: "auto-compaction-invalid", type: "set_auto_compaction", enabled: "false" },
+			{ id: "auto-retry-invalid", type: "set_auto_retry", enabled: "false" },
+			{ id: "steering-mode-invalid", type: "set_steering_mode", mode: "bad" },
+			{ id: "follow-up-mode-invalid", type: "set_follow_up_mode", mode: "bad" },
+			{ id: "thinking-level-invalid", type: "set_thinking_level", level: "bad" },
+			{ id: "session-name-invalid", type: "set_session_name", name: 123 },
+		];
+
+		try {
+			for (const command of invalidCommands) {
+				rpc.send(command);
+			}
+
+			await vi.waitFor(() => {
+				for (const command of invalidCommands) {
+					expect(rpc.writes).toContainEqual(
+						expect.objectContaining({
+							id: command.id,
+							type: "response",
+							command: command.type,
+							success: false,
+							error: expect.any(String),
+						}),
+					);
+				}
+			});
+			expect(session.setAutoCompactionEnabled).not.toHaveBeenCalled();
+			expect(session.setAutoRetryEnabled).not.toHaveBeenCalled();
+			expect(session.setSteeringMode).not.toHaveBeenCalled();
+			expect(session.setFollowUpMode).not.toHaveBeenCalled();
+			expect(session.setThinkingLevel).not.toHaveBeenCalled();
+			expect(session.setSessionName).not.toHaveBeenCalled();
+		} finally {
+			rpc.close();
+			await rpc.modePromise.catch(() => {});
+		}
+	});
+
+	test("rejects invalid prompt and bash string payloads before calling session methods", async () => {
+		const session = createPayloadValidationSession();
+		const rpc = await startRpcModeHarness(createPayloadValidationRuntimeHost(session));
+		const invalidCommands = [
+			{ id: "prompt-invalid", type: "prompt", message: 123 },
+			{ id: "steer-invalid", type: "steer", message: 123 },
+			{ id: "follow-up-invalid", type: "follow_up", message: 123 },
+			{ id: "bash-invalid", type: "bash", command: 123 },
+		];
+
+		try {
+			for (const command of invalidCommands) {
+				rpc.send(command);
+			}
+
+			await vi.waitFor(() => {
+				for (const command of invalidCommands) {
+					expect(rpc.writes).toContainEqual(
+						expect.objectContaining({
+							id: command.id,
+							type: "response",
+							command: command.type,
+							success: false,
+							error: expect.any(String),
+						}),
+					);
+				}
+			});
+			expect(session.prompt).not.toHaveBeenCalled();
+			expect(session.steer).not.toHaveBeenCalled();
+			expect(session.followUp).not.toHaveBeenCalled();
+			expect(session.executeBash).not.toHaveBeenCalled();
+		} finally {
+			rpc.close();
+			await rpc.modePromise.catch(() => {});
+		}
+	});
+
+	test("rejects invalid transcript pagination payloads before projecting the transcript", async () => {
+		const session = createPayloadValidationSession();
+		const rpc = await startRpcModeHarness(createPayloadValidationRuntimeHost(session));
+		const invalidCommands = [
+			{ id: "transcript-limit-invalid", type: "get_transcript", limit: "10" },
+			{ id: "transcript-before-invalid", type: "get_transcript", beforeEntryId: 123 },
+		];
+
+		try {
+			for (const command of invalidCommands) {
+				rpc.send(command);
+			}
+
+			await vi.waitFor(() => {
+				for (const command of invalidCommands) {
+					expect(rpc.writes).toContainEqual(
+						expect.objectContaining({
+							id: command.id,
+							type: "response",
+							command: command.type,
+							success: false,
+							error: expect.any(String),
+						}),
+					);
+				}
+			});
+			expect(session.sessionManager.getBranch).not.toHaveBeenCalled();
+			expect(session.sessionManager.getSessionId).not.toHaveBeenCalled();
+		} finally {
+			rpc.close();
+			await rpc.modePromise.catch(() => {});
+		}
 	});
 
 	test("returns projected transcript items", async () => {
