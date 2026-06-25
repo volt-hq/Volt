@@ -61,6 +61,8 @@ export type RpcClientEvent =
 	| RpcExtensionErrorEvent;
 export type RpcEventListener = (event: RpcClientEvent) => void;
 
+const MALFORMED_RPC_LINE_PREVIEW_CHARS = 200;
+
 export abstract class RpcClientBase {
 	private readonly requestTimeoutMs: number;
 	private readonly eventListeners: RpcEventListener[] = [];
@@ -423,10 +425,21 @@ export abstract class RpcClientBase {
 	}
 
 	protected handleLine(line: string): void {
+		if (this.failureError) {
+			return;
+		}
+
 		let data: unknown;
 		try {
 			data = JSON.parse(line);
-		} catch {
+		} catch (error: unknown) {
+			const failureError = new Error(
+				this.formatError(
+					`Malformed inbound RPC JSON: ${toError(error).message}. Bad line preview: ${formatLinePreview(line)}`,
+				),
+			);
+			this.setFailureError(failureError);
+			this.rejectPendingRequests(failureError);
 			return;
 		}
 
@@ -556,4 +569,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function toError(value: unknown): Error {
 	return value instanceof Error ? value : new Error(String(value));
+}
+
+function formatLinePreview(line: string): string {
+	const preview = JSON.stringify(line.slice(0, MALFORMED_RPC_LINE_PREVIEW_CHARS));
+	return line.length > MALFORMED_RPC_LINE_PREVIEW_CHARS ? `${preview}… (${line.length} chars)` : preview;
 }

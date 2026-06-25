@@ -21,7 +21,12 @@ import {
 	getIrohRemoteRpcFilterResult,
 	sanitizeIrohRemoteOutbound,
 } from "../src/core/remote/iroh/index.ts";
-import { createLoopbackRpcTransportPair, type RpcExtensionUIRequest } from "../src/core/rpc/index.ts";
+import {
+	createLoopbackRpcTransportPair,
+	type RpcExtensionUIRequest,
+	type RpcLineHandler,
+	type RpcTransport,
+} from "../src/core/rpc/index.ts";
 import type { Skill } from "../src/core/skills.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import { createInProcessRpcClient } from "../src/modes/rpc/in-process-rpc-client.ts";
@@ -266,6 +271,35 @@ describe("RpcTransportClient", () => {
 		pair.server.close();
 
 		await expect(statePromise).rejects.toThrow("RPC transport closed");
+	});
+
+	test("fails pending and future requests when inbound JSON is malformed", async () => {
+		const transport = new ManualRpcTransport();
+		const client = new RpcTransportClient({ transport, requestTimeoutMs: 10_000 });
+		await client.start();
+
+		try {
+			const stateErrorPromise = client.getState().catch((error: unknown) => error);
+			const commandsErrorPromise = client.getCommands().catch((error: unknown) => error);
+			expect(transport.writes).toHaveLength(2);
+
+			const malformedLine = `{"bad":"${"x".repeat(256)}-tail`;
+			transport.emitLine(malformedLine);
+
+			const [stateError, commandsError] = await Promise.all([stateErrorPromise, commandsErrorPromise]);
+			if (!(stateError instanceof Error)) {
+				throw new Error("expected state request to reject with an Error");
+			}
+			expect(commandsError).toBe(stateError);
+			expect(stateError.message).toContain("Malformed inbound RPC JSON:");
+			expect(stateError.message).toContain("Bad line preview:");
+			expect(stateError.message).toContain('"{\\"bad\\":\\"');
+			expect(stateError.message).not.toContain("-tail");
+
+			await expect(client.getState()).rejects.toBe(stateError);
+		} finally {
+			await client.stop();
+		}
 	});
 });
 
@@ -1587,6 +1621,30 @@ describe("createInProcessRpcClient", () => {
 		expect(dispose).toHaveBeenCalledOnce();
 	});
 });
+
+class ManualRpcTransport implements RpcTransport {
+	readonly writes: object[] = [];
+	private readonly lineHandlers = new Set<RpcLineHandler>();
+
+	write(value: object): void {
+		this.writes.push(value);
+	}
+
+	onLine(handler: RpcLineHandler): () => void {
+		this.lineHandlers.add(handler);
+		return () => {
+			this.lineHandlers.delete(handler);
+		};
+	}
+
+	close(): void {}
+
+	emitLine(line: string): void {
+		for (const handler of this.lineHandlers) {
+			handler(line);
+		}
+	}
+}
 
 function parseCommandLine(line: string): { id: string; type: string } {
 	const parsed: unknown = JSON.parse(line);
