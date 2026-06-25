@@ -44,8 +44,8 @@ import {
 	getRpcErrorResponseTarget,
 	HOST_ACTION_REQUESTS_CAPABILITY,
 	handleRpcCommand,
-	validateRpcCommandPayload,
 } from "./rpc-command-dispatcher.ts";
+import { validateRpcCommandPayload } from "./rpc-command-validation.ts";
 import type {
 	RpcClientCapabilityFeature,
 	RpcCommand,
