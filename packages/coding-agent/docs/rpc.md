@@ -280,7 +280,7 @@ Native clients should treat this as an optional capability:
 3. If `ui_action_invocation.v1` is present, invoke by descriptor `id` with `invoke_ui_action`.
 4. Keep raw `prompt` slash-text submission as compatibility for clients or hosts that do not expose native actions.
 
-`scope: "primary"` is for curated cards, buttons, and toggles such as Review and Fast mode. `scope: "palette"` is for searchable commands such as extension commands, prompt templates, and skills. `scope: "all"` lets a client build both surfaces from one response.
+`scope` defaults to `"all"`. In v1, `scope: "primary"` returns built-in cards and toggles such as Review and Fast mode. `scope: "palette"` returns descriptors with `presentation.kind: "palette"`, including searchable built-ins, extension commands, prompt templates, and skills. `scope: "all"` lets a client build both surfaces from one response.
 
 #### get_ui_capabilities
 
@@ -309,7 +309,7 @@ Response:
 
 #### get_ui_actions
 
-Get native UI action descriptors. `scope` is optional and may be `"primary"`, `"palette"`, or `"all"`.
+Get native UI action descriptors. `scope` is optional, defaults to `"all"`, and may be `"primary"`, `"palette"`, or `"all"`.
 
 ```json
 {"type": "get_ui_actions", "scope": "palette"}

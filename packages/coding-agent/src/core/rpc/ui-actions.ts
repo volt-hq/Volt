@@ -76,17 +76,34 @@ export function getUiActionDescriptors(
 			fastModeRestoreThinkingLevel: session.fastModeRestoreThinkingLevel,
 		},
 	});
+	const normalizedScope = normalizeUiActionListScope(scope);
 	const descriptors =
-		scope === "primary"
-			? builtinDescriptors.filter(isPrimaryBuiltinAction)
+		normalizedScope === "primary"
+			? builtinDescriptors
 			: [...builtinDescriptors, ...getUiActionCatalog(session).map((entry) => entry.descriptor)];
 
-	return descriptors.filter((descriptor) => !options.remoteSafeOnly || descriptor.remoteSafe).slice(0, MAX_ACTIONS);
+	return descriptors
+		.filter((descriptor) => matchesUiActionScope(descriptor, normalizedScope))
+		.filter((descriptor) => !options.remoteSafeOnly || descriptor.remoteSafe)
+		.slice(0, MAX_ACTIONS);
 }
 
-function isPrimaryBuiltinAction(descriptor: UiActionDescriptor): boolean {
+function normalizeUiActionListScope(scope: UiActionListScope | undefined): UiActionListScope {
+	return scope === "primary" || scope === "palette" || scope === "all" ? scope : "all";
+}
+
+function matchesUiActionScope(descriptor: UiActionDescriptor, scope: UiActionListScope): boolean {
 	const kind = descriptor.presentation?.kind;
-	return kind === "card" || kind === "toggle";
+	switch (scope) {
+		case "all":
+			return true;
+		case "primary":
+			return descriptor.source === "builtin" && (kind === "card" || kind === "toggle");
+		case "palette":
+			return kind === "palette";
+		default:
+			return true;
+	}
 }
 
 export function createUiActionInvocationPlan(

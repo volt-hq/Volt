@@ -849,6 +849,12 @@ describe("runRpcMode", () => {
 					slash: { name: "review", example: "/review branch [base]" },
 				}),
 			);
+			expect((await client.getUiActions("palette")).map((action) => action.id)).toEqual([
+				SESSION_NEW_ACTION_ID,
+				extensionAction.id,
+				promptAction.id,
+				skillAction.id,
+			]);
 			await expect(client.getUiActionCompletions(extensionAction.id, "arguments", "pr")).resolves.toEqual([]);
 			await expect(client.invokeUiAction(extensionAction.id, { args: { arguments: "prod" } })).resolves.toEqual({
 				action: extensionAction.id,
@@ -1033,6 +1039,20 @@ describe("createInProcessRpcClient", () => {
 				expect.objectContaining({
 					id: REVIEW_BRANCH_ACTION_ID,
 					presentation: expect.objectContaining({ kind: "card" }),
+				}),
+			]);
+			await expect(client.getUiActions("palette")).resolves.toEqual([
+				expect.objectContaining({
+					id: SESSION_NEW_ACTION_ID,
+					presentation: expect.objectContaining({ kind: "palette" }),
+				}),
+				expect.objectContaining({
+					id: CONTEXT_COMPACT_ACTION_ID,
+					presentation: expect.objectContaining({ kind: "palette" }),
+				}),
+				expect.objectContaining({
+					id: SESSION_RENAME_ACTION_ID,
+					presentation: expect.objectContaining({ kind: "palette" }),
 				}),
 			]);
 			await expect(client.invokeUiAction(SESSION_NEW_ACTION_ID, { args: {} })).resolves.toEqual({
@@ -1262,6 +1282,12 @@ describe("createInProcessRpcClient", () => {
 				expect.objectContaining({ id: THINKING_FAST_MODE_ACTION_ID }),
 				expect.objectContaining({ id: REVIEW_UNCOMMITTED_ACTION_ID }),
 				expect.objectContaining({ id: REVIEW_BRANCH_ACTION_ID }),
+			]);
+			expect((await client.getUiActions("palette")).map((action) => action.id)).toEqual([
+				SESSION_NEW_ACTION_ID,
+				CONTEXT_COMPACT_ACTION_ID,
+				SESSION_RENAME_ACTION_ID,
+				...dynamicActions.map((action) => action.id),
 			]);
 
 			const serialized = JSON.stringify(actions);
