@@ -27,6 +27,17 @@ function isOfflineModeEnabled(): boolean {
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
 }
 
+function canonicalizePathForRelative(path: string): string {
+	if (existsSync(path)) {
+		return canonicalizePath(path);
+	}
+	const parent = dirname(path);
+	if (parent === path) {
+		return path;
+	}
+	return resolve(canonicalizePathForRelative(parent), basename(path));
+}
+
 function getNpmVersionRange(version: string | undefined): string | undefined {
 	return version ? (validRange(version) ?? undefined) : undefined;
 }
@@ -1532,7 +1543,17 @@ export class DefaultPackageManager implements PackageManager {
 	private packageSourcesMatch(existing: PackageSource, inputSource: string, scope: SourceScope): boolean {
 		const left = this.getSourceMatchKeyForSettings(this.getPackageSourceString(existing), scope);
 		const right = this.getSourceMatchKeysForInput(inputSource, scope);
-		return right.includes(left);
+		return right.some((key) => this.packageSourceKeysMatch(left, key));
+	}
+
+	private packageSourceKeysMatch(left: string, right: string): boolean {
+		if (left === right) {
+			return true;
+		}
+		if (!left.startsWith("local:") || !right.startsWith("local:")) {
+			return false;
+		}
+		return canonicalizePath(left.slice("local:".length)) === canonicalizePath(right.slice("local:".length));
 	}
 
 	private getPackageSourceMatchesForAction(
@@ -1567,7 +1588,7 @@ export class DefaultPackageManager implements PackageManager {
 
 			const existingKey = this.getSourceMatchKeyForSettings(existingSource, scope);
 			const cwdRelativeInputKey = `local:${this.resolvePath(inputParsed.path)}`;
-			if (existingKey === cwdRelativeInputKey) {
+			if (this.packageSourceKeysMatch(existingKey, cwdRelativeInputKey)) {
 				return 1;
 			}
 
@@ -1575,7 +1596,7 @@ export class DefaultPackageManager implements PackageManager {
 				inputParsed.path,
 				this.getBaseDirForScope(scope),
 			)}`;
-			return existingKey === settingsRelativeInputKey ? 2 : undefined;
+			return this.packageSourceKeysMatch(existingKey, settingsRelativeInputKey) ? 2 : undefined;
 		}
 
 		if (!this.packageSourcesMatch(existing, inputSource, scope)) {
@@ -1593,8 +1614,8 @@ export class DefaultPackageManager implements PackageManager {
 		if (parsed.type !== "local") {
 			return source;
 		}
-		const baseDir = this.getBaseDirForScope(scope);
-		const resolved = this.resolvePath(parsed.path);
+		const baseDir = canonicalizePathForRelative(this.getBaseDirForScope(scope));
+		const resolved = canonicalizePathForRelative(this.resolvePath(parsed.path));
 		const rel = relative(baseDir, resolved);
 		return rel || ".";
 	}
@@ -1851,9 +1872,9 @@ export class DefaultPackageManager implements PackageManager {
 		}
 		if (scope) {
 			const baseDir = this.getBaseDirForScope(scope);
-			return `local:${this.resolvePathFromBase(parsed.path, baseDir)}`;
+			return `local:${canonicalizePath(this.resolvePathFromBase(parsed.path, baseDir))}`;
 		}
-		return `local:${this.resolvePath(parsed.path)}`;
+		return `local:${canonicalizePath(this.resolvePath(parsed.path))}`;
 	}
 
 	/**

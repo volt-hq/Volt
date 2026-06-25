@@ -203,7 +203,7 @@ describe("NodeExecutionEnv", () => {
 				env: { NODE_ENV_TEST: "ok" },
 			}),
 		);
-		expect(result).toEqual({ stdout: `${root}:ok`, stderr: "", exitCode: 0 });
+		expect(result).toEqual({ stdout: `${await realpath(root)}:ok`, stderr: "", exitCode: 0 });
 	});
 
 	it("streams stdout and stderr chunks", async () => {
