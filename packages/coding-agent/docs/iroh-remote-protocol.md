@@ -12,6 +12,7 @@ For user-facing setup, run `volt remote host` on a trusted host workspace, creat
 - ALPN: `volt-rpc/0`
 - Handshake type: `volt_iroh_hello`
 - Handshake response type: `volt_iroh_handshake`
+- Host feature: `multi_streams.v1`
 
 The URL prefix selects protocol v1. The `alpn` ticket field and `protocol` hello field must be exactly `volt-rpc/0`.
 
@@ -81,7 +82,7 @@ The host responds with one UTF-8 JSON object followed by LF.
 Success:
 
 ```json
-{"type":"volt_iroh_handshake","success":true,"workspace":"volt","hostNodeId":"<authoritative-host-node-id>","clientNodeId":"<authoritative-client-node-id>","child":"volt"}
+{"type":"volt_iroh_handshake","success":true,"workspace":"volt","hostNodeId":"<authoritative-host-node-id>","clientNodeId":"<authoritative-client-node-id>","features":["multi_streams.v1"],"child":"volt"}
 ```
 
 Failure:
@@ -90,7 +91,7 @@ Failure:
 {"type":"volt_iroh_handshake","success":false,"outcome":"client_unknown","hostNodeId":"<authoritative-host-node-id>","error":"client is not paired"}
 ```
 
-On success, `hostNodeId` is the host's authoritative Iroh node ID and `clientNodeId` is the client's authoritative Iroh node ID observed by the host on the accepted connection. `child` is an implementation label for the host-side child process and may be omitted. Failure responses include `hostNodeId` when the host identity is known. The optional failure `outcome` is the machine-readable reason; `error` is diagnostic text and should not drive app state. Unknown handshake response fields are ignored.
+On success, `hostNodeId` is the host's authoritative Iroh node ID and `clientNodeId` is the client's authoritative Iroh node ID observed by the host on the accepted connection. `features` is an optional list of host feature strings. Hosts that advertise `multi_streams.v1` support multiple workspace streams for the same paired client node ID on one Iroh connection. Clients must treat a missing, empty, or malformed `features` field as no advertised feature support and continue using the legacy one-stream-per-dial behavior. `child` is an implementation label for the host-side child process and may be omitted. Failure responses include `hostNodeId` when the host identity is known. The optional failure `outcome` is the machine-readable reason; `error` is diagnostic text and should not drive app state. Unknown handshake response fields are ignored.
 
 Host handshake failure outcomes:
 
@@ -109,7 +110,7 @@ Client-local reconnect outcomes are not sent by the host: `host_unreachable` mea
 
 A successful pairing stores the client as authorized for the workstation represented by the host state file. That paired client can use any registered workspace name in that state file, including workspaces registered later, without scanning another QR. Revocation blocks that client node ID from every registered workspace. The client's persisted `allowedTools` grant applies across all selected workspaces; registering a workspace does not add built-in tools. When the persisted grant is the default built-in list, the host also exposes active tools registered by loaded extensions in the selected workspace.
 
-A paired client may have only one active connection per workspace in v1 preview. If the same authoritative client node ID connects to the same workspace while a previous connection is still active, the host rejects the new stream with a normal handshake failure response whose `error` is `client already connected`; the existing connection remains active.
+A paired client may have only one active stream per workspace in v1 preview. When the host advertises `multi_streams.v1`, the same authoritative client node ID may open additional streams on the same Iroh connection for other registered workspaces. If the same authoritative client node ID opens another stream to a workspace that already has an active stream, the host rejects the new stream with a normal handshake failure response whose `error` is `client already connected`; the existing stream remains active.
 
 ## Reconnect and session selection
 
@@ -126,6 +127,7 @@ Remote UI clients should request `get_state` followed by `get_transcript` after 
   "remoteHost": {
     "workspace": "volt",
     "workspaceNames": ["volt", "other-project"],
+    "features": ["multi_streams.v1"],
     "hostNodeId": "<authoritative-host-node-id>",
     "relayMode": "default",
     "hostName": "macstudio",
@@ -135,7 +137,7 @@ Remote UI clients should request `get_state` followed by `get_transcript` after 
 }
 ```
 
-`remoteHost.workspaceNames` contains names only, never host-local paths. Clients may present those names for selection after verifying the saved host identity. Selecting a different workspace opens a new saved-host reconnect using that name; v1 does not switch the cwd of an active stream in place.
+`remoteHost.workspaceNames` contains names only, never host-local paths. `remoteHost.features` repeats the safe host feature strings advertised during handshake. Clients may present those names for selection after verifying the saved host identity. Selecting a different workspace opens a new saved-host reconnect using that name, or an additional same-connection stream when `multi_streams.v1` is advertised; v1 does not switch the cwd of an active stream in place.
 
 ## Lifecycle: detach versus cancel
 
@@ -216,6 +218,14 @@ The successful response is:
 {"id":"push-1","type":"response","command":"register_push_target","success":true,"data":{"status":"registered","pushTargetId":"<relay-target-id>"}}
 ```
 
+Completion notifications sent through the relay, or over JSONL as `notification_request` when no push target is available, include the safe workspace name when the host knows it:
+
+```json
+{"type":"notification_request","eventId":"conversation:session-one:run-one:completed","kind":"conversation_completed","title":"Volt finished in volt-app","body":"Your conversation is ready.","sessionId":"session-one","workspace":"volt-app"}
+```
+
+The `workspace` field is a registered workspace name only. It must never contain a host-local path.
+
 `get_ui_capabilities`, `get_ui_actions`, `get_ui_action_completions`, and `invoke_ui_action` expose the v1 native UI action protocol for the narrow remote-safe action set. Remote `get_ui_capabilities` advertises `ui_action_invocation.v1` only when the host accepts invocation and `ui_action_completions.v1` when action argument completions are available. Descriptor responses omit prompt bodies, skill content, raw `sourceInfo`, extension source paths, prompt and skill file paths, skill base directories, host session files, provider metadata, and secrets. They still pass through the outbound path handling layer below before being written to the remote stream.
 
 Remote `get_ui_action_completions` and `invoke_ui_action` are allowlist-based. V1 forwards exact reviewed built-in ids `session.new`, `run.cancel`, `thinking.fast_mode`, `review.uncommitted`, and `review.branch`, plus projected dynamic action ids under `extension.command.*`, `prompt.template.*`, and `skill.*`; the host still resolves the current action catalog, rechecks action availability and remote safety, validates arguments, confirms remote review requests, and applies streaming policy at invocation time. Local-only built-ins such as `context.compact` and `session.rename`, deferred review/model actions such as `review.pr`, `review.commit`, and `review.tools`, stale ids, malformed ids, and unreviewed action id prefixes receive a normal JSONL `response` with `success:false` and are not forwarded to the local Volt RPC process.
@@ -246,7 +256,8 @@ Tool access and RPC command access are separate surfaces. `allowedTools` control
 
 Before host RPC output is sent to the remote stream, Volt normalizes remote-meaningful workspace paths and keeps generic host paths intact:
 
-- Paths under the hosted workspace are rewritten under `/workspace`.
+- Paths under the selected stream's hosted workspace are rewritten under `/workspace`.
+- A multi-stream host applies this mapping independently per stream; sibling workspace paths are not rewritten to `/workspace` unless they are the selected workspace for that stream.
 - Host-local paths outside the workspace are left unchanged; Volt no longer emits a generic placeholder for them.
 - Export paths are redacted when recognized with `[redacted export path]`.
 - Session files are omitted or replaced with `[redacted session file]`.

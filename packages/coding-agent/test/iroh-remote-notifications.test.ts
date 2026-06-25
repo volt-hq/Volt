@@ -717,6 +717,7 @@ describe("Iroh remote notification requests", () => {
 		} as unknown as AgentSessionRuntime;
 		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
 			notificationDelivery: dispatcher,
+			workspaceName: "volt-app",
 		});
 
 		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
@@ -726,12 +727,14 @@ describe("Iroh remote notification requests", () => {
 			pushTargetAuthToken: "relay-target-auth-token",
 			eventId: "conversation:session-one:conversation-run:completed",
 			kind: "conversation_completed",
-			title: "Volt finished",
+			title: "Volt finished in volt-app",
 			body: "Your conversation is ready.",
+			workspace: "volt-app",
 			data: {
 				eventId: "conversation:session-one:conversation-run:completed",
 				kind: "conversation_completed",
 				sessionId: "session-one",
+				workspace: "volt-app",
 			},
 		};
 		await vi.waitFor(() => expect(relayClient.sendNotification).toHaveBeenCalledWith(expectedNotification));
@@ -766,6 +769,7 @@ describe("Iroh remote notification requests", () => {
 		} as unknown as AgentSessionRuntime;
 		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
 			notificationDelivery: dispatcher,
+			workspaceName: "volt-app",
 		});
 
 		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
@@ -776,9 +780,10 @@ describe("Iroh remote notification requests", () => {
 					type: "notification_request",
 					eventId: "conversation:session-one:conversation-run:completed",
 					kind: "conversation_completed",
-					title: "Volt finished",
+					title: "Volt finished in volt-app",
 					body: "Your conversation is ready.",
 					sessionId: "session-one",
+					workspace: "volt-app",
 				},
 			]),
 		);

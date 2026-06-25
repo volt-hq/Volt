@@ -24,7 +24,12 @@ import {
 	writeIrohRemoteHandshakeResponse,
 	writeIrohRemoteHello,
 } from "./handshake-reader.ts";
-import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS, IROH_REMOTE_ALPN, type IrohRemoteRelayMode } from "./protocol.ts";
+import {
+	DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+	IROH_REMOTE_ALPN,
+	IROH_REMOTE_HOST_FEATURES,
+	type IrohRemoteRelayMode,
+} from "./protocol.ts";
 import { type IrohRemoteClient, type IrohRemoteWorkspace, parseIrohRemoteWorkspace } from "./state.ts";
 import type {
 	IrohRemoteClientRePairApprovalResult,
@@ -338,6 +343,7 @@ export class IrohRemoteHostEngine {
 				response: createIrohRemoteHandshakeSuccess({
 					child: options.child,
 					clientNodeId: remoteNodeId,
+					features: [...IROH_REMOTE_HOST_FEATURES],
 					hostNodeId: this.hostNodeId,
 					workspace: authorization.workspace.name,
 				}),

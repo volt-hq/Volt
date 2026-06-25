@@ -1337,6 +1337,7 @@ async function runIntegratedVoltConnection(stream, handshake, authorization, opt
 			remoteCommandHandler: (command) => handleRemoteHostRpcCommand(command, authorization, options),
 			stream,
 			initialInput: handshake.initialInput,
+			workspaceName: authorization.workspace.name,
 			workspacePath: authorization.workspace.path,
 		});
 		await rpcMode;

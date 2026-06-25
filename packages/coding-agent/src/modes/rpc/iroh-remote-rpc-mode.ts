@@ -29,6 +29,7 @@ export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	registerPushTarget?: (args: unknown) => Promise<RpcRegisterPushTargetResponse>;
 	remoteCommandHandler?: (command: Record<string, unknown>) => object | Promise<object | undefined> | undefined;
 	remoteWorkspacePath?: string;
+	workspaceName?: string;
 	workspacePath: string;
 }
 
@@ -45,6 +46,7 @@ export interface IrohRemoteNotificationRequest {
 	title: string;
 	body: string;
 	sessionId?: string;
+	workspace?: string;
 }
 
 export interface IrohRemoteCompletionState {
@@ -115,7 +117,7 @@ export function runIrohRemoteRpcMode(
 		transport: outboundTransport,
 		getCompletionState: () => getIrohRemoteCompletionState(runtimeHost),
 		onCommandCompleted: async (completion) => {
-			const notification = createIrohRemoteCompletionNotification(completion);
+			const notification = createIrohRemoteCompletionNotification(completion, options.workspaceName);
 			if (!notification || sentNotificationEventIds.has(notification.eventId)) {
 				return;
 			}
@@ -687,19 +689,23 @@ function getIrohRemoteCompletionState(runtimeHost: AgentSessionRuntime): IrohRem
 
 function createIrohRemoteCompletionNotification(
 	completion: IrohRemoteCompletedCommand,
+	workspaceName: string | undefined,
 ): IrohRemoteNotificationRequest | undefined {
 	const finalState = getChangedFinalCompletionState(completion);
 	if (!finalState) {
 		return undefined;
 	}
+	const workspace = getSafeNotificationWorkspace(workspaceName);
+	const workspaceDetails = workspace === undefined ? {} : { workspace };
 	if (isConversationCompletionCommand(completion.command)) {
 		return {
 			type: "notification_request",
 			eventId: `conversation:${finalState.sessionId}:${finalState.runId}:completed`,
 			kind: "conversation_completed",
-			title: "Volt finished",
+			title: workspace === undefined ? "Volt finished" : `Volt finished in ${workspace}`,
 			body: "Your conversation is ready.",
 			sessionId: finalState.sessionId,
+			...workspaceDetails,
 		};
 	}
 	if (isCompletedReviewInvocationResponse(completion.command, completion.response)) {
@@ -707,12 +713,24 @@ function createIrohRemoteCompletionNotification(
 			type: "notification_request",
 			eventId: `review:${finalState.sessionId}:${finalState.runId}:completed`,
 			kind: "review_completed",
-			title: "Review complete",
+			title: workspace === undefined ? "Review complete" : `Review complete in ${workspace}`,
 			body: "Open Volt to see the findings.",
 			sessionId: finalState.sessionId,
+			...workspaceDetails,
 		};
 	}
 	return undefined;
+}
+
+function getSafeNotificationWorkspace(workspaceName: string | undefined): string | undefined {
+	if (workspaceName === undefined) {
+		return undefined;
+	}
+	const trimmed = workspaceName.trim();
+	if (trimmed.length === 0 || trimmed.includes("/") || trimmed.includes("\\") || trimmed.includes("\0")) {
+		return undefined;
+	}
+	return trimmed;
 }
 
 function getChangedFinalCompletionState(

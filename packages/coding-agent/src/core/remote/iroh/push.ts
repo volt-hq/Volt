@@ -18,6 +18,7 @@ export interface IrohRemotePushNotificationIntent {
 	title: string;
 	body: string;
 	sessionId?: string;
+	workspace?: string;
 }
 
 export interface IrohRemoteLiveActivityToolGlyph {
@@ -52,10 +53,12 @@ export interface IrohRemotePushRelayNotificationRequest {
 	kind: string;
 	title: string;
 	body: string;
+	workspace?: string;
 	data: {
 		eventId: string;
 		kind: string;
 		sessionId?: string;
+		workspace?: string;
 	};
 }
 
@@ -212,6 +215,7 @@ function createRelayNotificationBody(
 		kind: request.kind,
 		title: request.title,
 		body: request.body,
+		...(request.workspace === undefined ? {} : { workspace: request.workspace }),
 		data: request.data,
 	};
 }
@@ -562,6 +566,7 @@ function createRelayNotificationRequest(
 	pushTarget: IrohRemotePushTarget,
 	notification: IrohRemotePushNotificationIntent,
 ): IrohRemotePushRelayNotificationRequest {
+	const workspace = getSafeNotificationWorkspace(notification.workspace);
 	return {
 		pushTargetId: pushTarget.id,
 		pushTargetAuthToken: pushTarget.pushTargetAuthToken,
@@ -569,12 +574,25 @@ function createRelayNotificationRequest(
 		kind: notification.kind,
 		title: notification.title,
 		body: notification.body,
+		...(workspace === undefined ? {} : { workspace }),
 		data: {
 			eventId: notification.eventId,
 			kind: notification.kind,
 			...(notification.sessionId === undefined ? {} : { sessionId: notification.sessionId }),
+			...(workspace === undefined ? {} : { workspace }),
 		},
 	};
+}
+
+function getSafeNotificationWorkspace(workspace: string | undefined): string | undefined {
+	if (workspace === undefined) {
+		return undefined;
+	}
+	const trimmed = workspace.trim();
+	if (trimmed.length === 0 || trimmed.includes("/") || trimmed.includes("\\") || trimmed.includes("\0")) {
+		return undefined;
+	}
+	return trimmed;
 }
 
 function createRelayLiveActivityRequest(

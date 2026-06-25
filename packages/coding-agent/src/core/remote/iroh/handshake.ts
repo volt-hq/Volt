@@ -23,6 +23,7 @@ export interface IrohRemoteHandshakeSuccess {
 	workspace: string;
 	hostNodeId?: string;
 	clientNodeId: string;
+	features?: string[];
 	child?: string;
 }
 
@@ -86,11 +87,13 @@ export function parseIrohRemoteHandshakeResponse(value: unknown): IrohRemoteHand
 	}
 	if (response.success === true) {
 		const hostNodeId = expectOptionalString(response.hostNodeId, "handshake response hostNodeId");
+		const features = parseOptionalFeatures(response.features);
 		const success: IrohRemoteHandshakeSuccess = {
 			type: IROH_REMOTE_HANDSHAKE_TYPE,
 			success: true,
 			workspace: expectString(response.workspace, "handshake response workspace"),
 			clientNodeId: expectString(response.clientNodeId, "handshake response clientNodeId"),
+			...(features === undefined ? {} : { features }),
 			child: expectOptionalString(response.child, "handshake response child"),
 		};
 		return hostNodeId === undefined ? success : { ...success, hostNodeId };
@@ -116,6 +119,7 @@ export function createIrohRemoteHandshakeSuccess(options: {
 	workspace: string;
 	hostNodeId?: string;
 	clientNodeId: string;
+	features?: string[];
 	child?: string;
 }): IrohRemoteHandshakeSuccess {
 	const response: IrohRemoteHandshakeSuccess = {
@@ -124,6 +128,7 @@ export function createIrohRemoteHandshakeSuccess(options: {
 		workspace: options.workspace,
 		...(options.hostNodeId === undefined ? {} : { hostNodeId: options.hostNodeId }),
 		clientNodeId: options.clientNodeId,
+		...(options.features === undefined ? {} : { features: [...options.features] }),
 		child: options.child,
 	};
 	return response;
@@ -187,4 +192,21 @@ function expectOptionalOutcome(value: unknown, label: string): IrohRemoteOutcome
 		throw new Error(`${label} must be a known Iroh remote outcome`);
 	}
 	return value;
+}
+
+function parseOptionalFeatures(value: unknown): string[] | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	const features: string[] = [];
+	for (const entry of value) {
+		if (typeof entry !== "string" || entry.length === 0) {
+			return [];
+		}
+		features.push(entry);
+	}
+	return features;
 }

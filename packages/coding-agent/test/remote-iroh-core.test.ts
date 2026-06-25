@@ -40,7 +40,9 @@ import {
 	handleIrohRemoteWorkspaceUnregisterRpcCommand,
 	hashIrohRemotePairingSecret,
 	IROH_REMOTE_ALPN,
+	IROH_REMOTE_HOST_FEATURES,
 	IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES,
+	IROH_REMOTE_MULTI_STREAMS_FEATURE,
 	IROH_REMOTE_OUTCOMES,
 	IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH,
 	IROH_REMOTE_REDACTED_EXPORT_PATH,
@@ -504,6 +506,23 @@ describe("Iroh remote core helpers", () => {
 			clientNodeId: "client",
 			child: "volt",
 		});
+		expect(
+			createIrohRemoteHandshakeSuccess({
+				workspace: "volt",
+				hostNodeId: "host-node",
+				clientNodeId: "client",
+				features: [IROH_REMOTE_MULTI_STREAMS_FEATURE],
+				child: "volt",
+			}),
+		).toEqual({
+			type: "volt_iroh_handshake",
+			success: true,
+			workspace: "volt",
+			hostNodeId: "host-node",
+			clientNodeId: "client",
+			features: [IROH_REMOTE_MULTI_STREAMS_FEATURE],
+			child: "volt",
+		});
 		expect(() => assertIrohRemoteHandshakeHostIdentity(hostHandshakeSuccess, "host-node")).not.toThrow();
 		expect(() => assertIrohRemoteHandshakeHostIdentity(hostHandshakeSuccess, "other-host")).toThrow(
 			"host_identity_mismatch: expected other-host, got host-node",
@@ -537,6 +556,7 @@ describe("Iroh remote core helpers", () => {
 					workspace: "volt",
 					hostNodeId: "host-node",
 					clientNodeId: "client",
+					features: [IROH_REMOTE_MULTI_STREAMS_FEATURE],
 				}),
 			),
 		).toEqual({
@@ -545,6 +565,47 @@ describe("Iroh remote core helpers", () => {
 			workspace: "volt",
 			hostNodeId: "host-node",
 			clientNodeId: "client",
+			features: [IROH_REMOTE_MULTI_STREAMS_FEATURE],
+			child: undefined,
+		});
+		expect(
+			parseIrohRemoteHandshakeResponseLine(
+				JSON.stringify({
+					type: "volt_iroh_handshake",
+					success: true,
+					workspace: "volt",
+					hostNodeId: "host-node",
+					clientNodeId: "client",
+					features: "multi_streams.v1",
+				}),
+			),
+		).toEqual({
+			type: "volt_iroh_handshake",
+			success: true,
+			workspace: "volt",
+			hostNodeId: "host-node",
+			clientNodeId: "client",
+			features: [],
+			child: undefined,
+		});
+		expect(
+			parseIrohRemoteHandshakeResponseLine(
+				JSON.stringify({
+					type: "volt_iroh_handshake",
+					success: true,
+					workspace: "volt",
+					hostNodeId: "host-node",
+					clientNodeId: "client",
+					features: [IROH_REMOTE_MULTI_STREAMS_FEATURE, 1],
+				}),
+			),
+		).toEqual({
+			type: "volt_iroh_handshake",
+			success: true,
+			workspace: "volt",
+			hostNodeId: "host-node",
+			clientNodeId: "client",
+			features: [],
 			child: undefined,
 		});
 		expect(() => parseIrohRemoteHandshakeResponseLine(JSON.stringify({ type: "volt_iroh_handshake" }))).toThrow(
@@ -1330,6 +1391,7 @@ describe("Iroh remote core helpers", () => {
 			workspace: "volt",
 			hostNodeId: "host-node",
 			clientNodeId: "client-node",
+			features: [...IROH_REMOTE_HOST_FEATURES],
 			child: "volt",
 		});
 		expect(handshake.responseWritten).toBe(true);
@@ -1705,6 +1767,7 @@ describe("Iroh remote core helpers", () => {
 				workspace: "volt",
 				hostNodeId: "host-node",
 				clientNodeId: "client-node",
+				features: [...IROH_REMOTE_HOST_FEATURES],
 				child: undefined,
 			});
 		} finally {
@@ -2289,6 +2352,8 @@ describe("Iroh remote core helpers", () => {
 			});
 			expect(metadata.workspaceNames).toEqual(["available"]);
 			expect(metadata.workspaces).toEqual(authorized.workspaces);
+			expect(metadata.features).toEqual([...IROH_REMOTE_HOST_FEATURES]);
+			expect(metadata.features).toEqual([IROH_REMOTE_MULTI_STREAMS_FEATURE]);
 			expect(JSON.stringify(metadata)).not.toContain(availablePath);
 			expect(JSON.stringify(metadata)).not.toContain(missingPath);
 			expect(JSON.stringify(metadata)).not.toContain(unavailablePath);
@@ -3429,6 +3494,42 @@ describe("Iroh remote core helpers", () => {
 						thoughtSignature: "/opaque/thought-signature",
 					},
 				],
+			},
+		});
+	});
+
+	test("maps outbound paths for the selected stream workspace only", () => {
+		const alphaPath = "/Users/jordan/alpha";
+		const betaPath = "/Users/jordan/beta";
+		const value = {
+			type: "response",
+			command: "get_state",
+			success: true,
+			data: {
+				alphaCwd: `${alphaPath}/src`,
+				betaCwd: `${betaPath}/src`,
+				message: `alpha ${alphaPath}/src beta ${betaPath}/src`,
+			},
+		};
+
+		expect(sanitizeIrohRemoteOutbound(value, { workspacePath: alphaPath })).toEqual({
+			type: "response",
+			command: "get_state",
+			success: true,
+			data: {
+				alphaCwd: "/workspace/src",
+				betaCwd: `${betaPath}/src`,
+				message: `alpha /workspace/src beta ${betaPath}/src`,
+			},
+		});
+		expect(sanitizeIrohRemoteOutbound(value, { workspacePath: betaPath })).toEqual({
+			type: "response",
+			command: "get_state",
+			success: true,
+			data: {
+				alphaCwd: `${alphaPath}/src`,
+				betaCwd: "/workspace/src",
+				message: `alpha ${alphaPath}/src beta /workspace/src`,
 			},
 		});
 	});
