@@ -21,15 +21,29 @@ workstation-scoped: register local workspaces by name, pair the phone once with
 `volt remote pair`, then the phone can open known workspace names without another
 QR scan.
 
-Hosts that advertise `multi_streams.v1` let one paired client keep multiple
-workspace streams open at once, one active stream per registered workspace.
-Commands, sessions, transcripts, native actions, host actions, notifications,
-and `/workspace` path mapping stay scoped to the selected stream workspace.
-Closing a stream is detach only; user cancellation is the `abort` RPC command.
-Mobile clients recover from backgrounding by reopening their saved open
-workspace set and refreshing `get_state` plus `get_transcript` per workspace.
-Same-workspace multi-conversation support, per-workspace client grants, and host
-path browsing/creation/rename/delete remain out of scope for the preview.
+Integrated hosts advertise `multi_streams.v1` and `conversation_streams.v1`.
+Mobile streams bind during the Iroh handshake to one workspace/session
+conversation: `target:last`, `target:new`, or `target:session`. The iOS app
+renders those conversations as pinned agent tabs, including multiple sessions
+inside the same registered workspace. Commands, transcripts, native actions,
+host actions, notifications, Live Activity registration, and `/workspace` path
+mapping stay scoped to the bound conversation stream.
+
+Workspace discovery and management use short-lived utility streams. Discovery
+permits only `list_sessions`; management permits only authorized
+`unregister_workspace`. Mobile conversation streams no longer use direct
+`new_session`, `switch_session_by_id`, or raw `get_messages`; new and resumed
+agents are selected by opening a targeted conversation stream, and transcript
+recovery uses bounded `get_transcript` plus sanitized `transcript_entry` events.
+
+Closing a stream, switching tabs, app backgrounding, or network loss is detach
+only. User cancellation is the selected stream's `abort` RPC command. Same
+client/workspace/session duplicates fail with `duplicate_conversation_connection`
+and retry metadata; another client owning the same conversation fails with
+`conversation_in_use`. Revocation, workspace authorization removal, and
+workspace unregister close only affected streams and retained runtimes. Host
+process exit is not durable active-work recovery, and large hidden-agent sets may
+need future resource controls.
 
 See [Using Volt](packages/coding-agent/docs/usage.md#remote-access-over-iroh-preview),
 [Security](packages/coding-agent/docs/security.md#remote-access-over-iroh-preview),

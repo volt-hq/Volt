@@ -2,7 +2,7 @@
 
 ## Status
 
-The Iroh remote host is a supported preview for Node.js npm installs and source checkouts with optional `@number0/iroh` available for the platform. RPC mode has a transport abstraction, Iroh streams have a structurally typed RPC adapter, remote command filtering is available, and the Iroh remote helpers cover tickets, handshakes, host identity verification, host state, authorization, workspace selection, audit logging, redaction, reconnect/session selection, revocation, active stream registration, and host/client engine orchestration. `volt remote host` launches a product host entrypoint in the coding-agent package and runs Volt's runtime in-process over `runIrohRemoteRpcMode()`. Integrated hosts advertise `multi_streams.v1`, allow one active stream per client/workspace while permitting other workspace streams on the same Iroh connection, treat stream close as client detach, keep active work running on the host, and reserve explicit cancellation for the `abort` RPC command. The iOS app now uses the saved-host and workspace metadata exposed by this host preview to open, switch, detach, and recover multiple registered workspaces without another QR scan. The preview wire contract is documented in [Iroh Remote Protocol v1](iroh-remote-protocol.md). Unsupported areas remain explicit: Bun binary builds reject remote host startup, spawned child compatibility mode remains connection-scoped, host process exit is not durable recovery, same-workspace multi-conversation support is deferred, `volt remote status` is persisted-state-only, and cross-network relay should be validated with `--relay default` in the target environment.
+The Iroh remote host is a supported preview for Node.js npm installs and source checkouts with optional `@number0/iroh` available for the platform. RPC mode has a transport abstraction, Iroh streams have a structurally typed RPC adapter, remote command filtering is available, and the Iroh remote helpers cover tickets, handshakes, host identity verification, host state, authorization, workspace selection, audit logging, redaction, reconnect/session selection, revocation, active stream registration, Live Activity routing, and host/client engine orchestration. `volt remote host` launches a product host entrypoint in the coding-agent package and runs Volt's runtime in-process over `runIrohRemoteRpcMode()`. Integrated hosts advertise `multi_streams.v1` and `conversation_streams.v1`, bind mobile streams during handshake to one workspace/session conversation, allow multiple sessions in the same workspace, treat stream close as client detach, keep active work running on the host, and reserve explicit cancellation for the selected stream's `abort` RPC command. The iOS app uses saved-host and workspace metadata to render pinned agent tabs across verified workspaces, opens New Agent and Resume Agent by targeted conversation stream, uses short-lived workspace discovery and management streams, and recovers selected conversations without another QR scan. The preview wire contract is documented in [Iroh Remote Protocol v1](iroh-remote-protocol.md). Unsupported areas remain explicit: Bun binary builds reject remote host startup, spawned child compatibility mode remains connection-scoped, host process exit is not durable recovery, `volt remote status` is persisted-state-only, hidden-agent resource controls are conservative, and cross-network relay should be validated with `--relay default` in the target environment.
 
 ## Summary
 
@@ -67,12 +67,12 @@ The product host entrypoint owns native Iroh endpoint lifecycle through an isola
 ### Host command
 
 ```bash
-volt remote host --workspace volt=C:\Users\Jordan\source\repos\Volt
+volt remote host --workspace volt=<workspace-dir>
 ```
 
 The host process:
 
-1. Creates or loads a persistent Iroh endpoint key. The current host stores this as `hostSecretKey` in `~/.volt/agent/remote/iroh-host.json`.
+1. Creates or loads a persistent Iroh endpoint key. The current host stores this as `hostSecretKey` in the selected host state file.
 2. Validates the selected workspace path, plus any requested child RPC executable before creating or printing a ticket.
 3. Starts an Iroh endpoint. The host defaults to Iroh's default relay/discovery preset so saved-host reconnects can survive host restarts; `--relay disabled` remains the explicit LAN-only opt-out.
 4. Prints a startup pairing ticket QR code for the bare preview CLI when stderr is a TTY, plus the text ticket for copy/paste and scripting. Mobile-facing `--mobile` startup does not create or print a startup pairing ticket; adding a phone uses `volt remote pair` against the running host.
@@ -133,12 +133,14 @@ Failed authorization handshakes carry a stable machine-readable `outcome` next t
 Preview process model:
 
 - Default `volt remote host` adds `--integrated-volt` and uses an in-process Volt runtime.
-- Integrated runtime entries are keyed by authoritative client node ID and workspace name.
+- Integrated runtime entries are keyed by authoritative client node ID, workspace name, and session ID.
 - An authorized Iroh stream is a subscriber/control channel for that runtime; closing the stream detaches the subscriber and does not synthesize `abort`.
-- Hosts advertise `multi_streams.v1` in handshake success and `get_state.remoteHost.features`; clients that see it can keep one paired Iroh connection open and add streams for other registered workspace names.
+- Hosts advertise `multi_streams.v1` and `conversation_streams.v1` in stream-mode handshake success and `get_state.remoteHost.features`; clients that see both features can keep one paired Iroh connection open and add conversation streams for other registered workspace/session targets.
 - Active detached integrated runtimes keep running on the host. Idle detached integrated runtimes are retained for 30 minutes by default, configurable with `--detached-runtime-ttl-ms`, then stopped by the retention policy.
-- Reconnecting paired clients with the same authoritative client node ID and workspace attach to the existing detached integrated runtime when it still exists. If no detached runtime exists, the host resumes the last recorded session for that workspace when the session file still exists; if it is missing, the host creates and audits a replacement session.
-- A second active stream for the same authoritative client node ID and workspace is rejected with handshake error `client already connected`; streams for different registered workspaces can run concurrently and each stream uses its selected workspace path for outbound `/workspace` mapping.
+- Reconnecting paired clients with the same authoritative client node ID, workspace, and session attach to the existing detached integrated runtime when it still exists. If no detached runtime exists, `target:last` resumes the last recorded session for that workspace when the session file still exists; if it is missing or invalid, the host creates and audits a replacement session.
+- A second active stream for the same authoritative client node ID, workspace, and session is rejected with `duplicate_conversation_connection`; streams for different sessions or registered workspaces can run concurrently and each stream uses its selected workspace for outbound `/workspace` mapping. Cross-client ownership of the same workspace/session fails with `conversation_in_use`.
+- Workspace discovery streams authorize a workspace, allow only `list_sessions`, create no runtime, and do not update last-session state. Workspace management streams allow only same-workspace `unregister_workspace`, send the success response, then close affected streams and retained runtimes.
+- Mobile conversation streams reject direct `new_session`, `switch_session_by_id`, and raw `get_messages`; New Agent and Resume Agent are selected by opening a `target:new` or `target:session` conversation stream.
 - Compatibility and fake-RPC modes can still spawn a child process through `--use-volt`, `--source-volt`, or internal test paths. Those modes remain connection-scoped: the host terminates the child on disconnect after a short grace period, so active work is not preserved across detach unless a persistent child registry is implemented.
 - Host process exit, crash, or explicit shutdown stops in-memory work because there is no durable job recovery layer.
 
@@ -174,12 +176,7 @@ Remote sessions do not bypass project trust. Saved workspace trust is honored; o
 
 ## Configuration
 
-Default host state and audit paths:
-
-```text
-~/.volt/agent/remote/iroh-host.json
-~/.volt/agent/remote/iroh-host.audit.jsonl
-```
+Host state and audit JSONL are stored under the Volt agent config directory by default, or under the paths passed with `--state` and `--audit`.
 
 Suggested shape:
 
@@ -187,7 +184,7 @@ Suggested shape:
 {
   "hostName": "home-desktop",
   "workspaces": [
-    { "name": "volt", "path": "C:\\Users\\Jordan\\source\\repos\\Volt" }
+    { "name": "volt", "path": "<workspace-dir>" }
   ],
   "clients": [
     {
@@ -212,10 +209,10 @@ Supported preview commands:
 
 ```bash
 # Start a host for one saved workspace.
-volt remote host --workspace volt=/path/to/repo --yes
+volt remote host --workspace volt=<workspace-dir> --yes
 
 # Start a mobile-facing host. It does not create a startup pairing ticket.
-volt remote host --mobile --workspace volt=/path/to/repo --yes
+volt remote host --mobile --workspace volt=<workspace-dir> --yes
 
 # Ask the running host for a short-lived one-time pairing ticket.
 volt remote pair --workspace volt
@@ -224,7 +221,7 @@ volt remote pair --workspace volt
 volt remote status
 volt remote clients
 volt remote revoke <node-id>
-volt remote host --register-workspace app=/path/to/other-repo
+volt remote host --register-workspace app=<workspace-dir>
 volt remote host --unregister-workspace app
 
 # Demo client used by the source checkout examples.
@@ -286,7 +283,8 @@ Preview validation:
 
 - Pair a client and host on the same LAN.
 - Pair a client and host across different networks using `--relay default` relay/discovery.
-- Send allowed remote RPC commands such as `get_state`, `list_sessions`, `switch_session_by_id`, `prompt`, `abort`, `steer`, `follow_up`, `new_session`, and `extension_ui_response`.
+- Send allowed remote RPC commands such as `get_state`, `get_transcript`, `list_sessions`, `prompt`, `abort`, `steer`, `follow_up`, `register_live_activity`, `unregister_live_activity`, and `extension_ui_response`.
+- Verify mobile conversation streams reject direct `new_session`, `switch_session_by_id`, and raw `get_messages`.
 - Verify assistant streaming events arrive in order.
 - Verify extension UI requests can round-trip through the client.
 - Verify integrated runtime detach keeps active work running and reconnect recovers `get_state` plus `get_transcript`.
@@ -295,7 +293,7 @@ Preview validation:
 - Verify a missing workspace path or Volt executable fails before printing a pairing ticket.
 - Verify mobile-facing host startup creates no pending pairing ticket until `volt remote pair` is run.
 - Verify a client cannot request a workspace outside the host allowlist.
-- Verify one paired client can open two registered workspace streams concurrently when `multi_streams.v1` is advertised, and that closing or aborting one stream does not affect the other.
+- Verify one paired client can open two conversations in the same workspace and one conversation in another workspace when both stream features are advertised, and that closing or aborting one selected stream does not affect the others.
 
 Automated tests for a monorepo version:
 
@@ -332,7 +330,7 @@ Resolved preview decisions:
 - Transport close is detach, not cancel; remote cancellation is the `abort` RPC command.
 - Spawned child compatibility mode remains connection-scoped, while integrated runtime mode is the supported active-work detach path.
 - Host process exit is not durable recovery; only persisted session state can be recovered after restarting the host.
-- Integrated multi-stream hosts advertise `multi_streams.v1`; old hosts without that feature remain compatible through single-workspace operation or one-connection-per-workspace fallback when supported.
+- Integrated conversation-stream hosts advertise `multi_streams.v1` and `conversation_streams.v1`; mobile pinned-agent clients require both features and do not fall back to direct mobile mutation commands.
 
 ## References
 
