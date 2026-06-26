@@ -85,6 +85,7 @@ describe("IrohRemoteActiveStreamRegistry", () => {
 		expect(registry.entriesForConversation("client-a", "alpha", "session-1")).toEqual([alpha]);
 		expect(registry.entriesForConversation("client-a", "alpha", "session-2")).toEqual([alphaOtherSession]);
 		expect(registry.entriesForWorkspace("client-b", "alpha")).toEqual([otherClientAlpha]);
+		expect(registry.entriesForWorkspaceName("alpha")).toEqual([alpha, alphaOtherSession, otherClientAlpha]);
 		expect(registry.entriesForWorkspace("client-a", "beta")).toEqual([beta]);
 		expect(registry.hasWorkspaceOnConnection("client-a", "alpha", "conn-1")).toBe(true);
 		expect(registry.hasConversationOnConnection("client-a", "alpha", "session-1", "conn-1")).toBe(true);

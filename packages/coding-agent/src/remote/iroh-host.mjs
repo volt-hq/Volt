@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { constants, rmSync } from "node:fs";
 import { access, mkdir, realpath, rm, stat } from "node:fs/promises";
@@ -21,6 +22,7 @@ import {
 	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
 	encodeIrohRemoteTicketPayload,
 	formatIrohRemoteTicketQrCode,
+	getDefaultSessionDir,
 	getIrohRemoteControlPath,
 	getIrohRemoteRpcFilterResult,
 	getIrohRemoteUnsafeAllowedTools,
@@ -41,6 +43,7 @@ import {
 	IrohRemoteHostStateManager,
 	IrohRemoteInMemoryPushNotificationDeduper,
 	isIrohRemoteSessionId,
+	isIrohRemoteWorkspaceName,
 	DEFAULT_IROH_REMOTE_PUSH_RELAY_URL,
 	IrohRemotePushNotificationDispatcher,
 	IrohRemotePushRelayHttpClient,
@@ -52,9 +55,12 @@ import {
 	pipeIrohRemoteOutboundJsonlReadable,
 	readIrohRemoteHostState,
 	requestIrohRemoteActiveRevocation,
+	sanitizeIrohRemoteOutbound,
 	sanitizeIrohRemoteOutboundJsonLine,
 	selectIrohRemoteWorkspace,
+	serializeJsonLine,
 	serializeIrohRemoteRpcFilterRejection,
+	SessionManager,
 	writeIrohRemoteHandshakeResponse,
 	writeIrohRemoteHostState,
 	createIrohRemoteAgentRuntimeWithSessionSelection,
@@ -81,6 +87,14 @@ const ACTIVE_REVOKE_CLOSE_REASON = "revoked";
 const ACTIVE_REPLACE_CLOSE_REASON = "replaced";
 const DUPLICATE_CONVERSATION_RETRY_AFTER_MS = 500;
 const LEGACY_WORKSPACE_SESSION_ID = "legacy-workspace";
+const WORKSPACE_DISCOVERY_STREAM_SESSION_ID = "$workspace-discovery";
+const WORKSPACE_MANAGEMENT_STREAM_SESSION_ID = "$workspace-management";
+const WORKSPACE_UNREGISTERED_CLOSE_REASON = "workspace_unregistered";
+const REMOTE_SESSION_LIST_DEFAULT_LIMIT = 50;
+const REMOTE_SESSION_LIST_MAX_LIMIT = 200;
+const REMOTE_SESSION_LIST_CURSOR_TTL_MS = 10 * 60 * 1000;
+const REMOTE_SESSION_LIST_CURSOR_MAX_BYTES = 512;
+const REMOTE_SESSION_LIST_CURSOR_TTL_ENV = "VOLT_IROH_SESSION_LIST_CURSOR_TTL_MS";
 let activeConnectionSequence = 0;
 let activeStreamSequence = 0;
 const PROMPT_COMPLETION_RPC_TYPES = new Set(["prompt", "steer", "follow_up"]);
@@ -218,6 +232,251 @@ async function readLineFromIroh(recv, initial = Buffer.alloc(0), options = {}) {
 		}
 		buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
 	}
+}
+
+function getRpcResponseId(command) {
+	return typeof command.id === "string" ? command.id : undefined;
+}
+
+function createRpcSuccessResponse(id, command, data) {
+	return {
+		...(id === undefined ? {} : { id }),
+		type: "response",
+		command,
+		success: true,
+		...(data === undefined ? {} : { data }),
+	};
+}
+
+function createRemoteRpcError(command, error) {
+	return createIrohRemoteRpcErrorResponse(
+		typeof command.id === "string" ? command.id : undefined,
+		typeof command.type === "string" ? command.type : "unknown",
+		error,
+	);
+}
+
+function parseRemoteRpcCommandLine(line) {
+	let parsed;
+	try {
+		parsed = JSON.parse(line);
+	} catch {
+		return {
+			ok: false,
+			response: createIrohRemoteRpcErrorResponse(undefined, "parse", "invalid_request"),
+		};
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		return {
+			ok: false,
+			response: createIrohRemoteRpcErrorResponse(undefined, "unknown", "invalid_request"),
+		};
+	}
+	if (typeof parsed.type !== "string") {
+		return {
+			ok: false,
+			response: createIrohRemoteRpcErrorResponse(getRpcResponseId(parsed), "unknown", "invalid_request"),
+		};
+	}
+	return { ok: true, command: parsed };
+}
+
+function getRemoteSanitizerOptions(authorization) {
+	return {
+		remoteWorkspacePath: "/workspace",
+		workspacePath: authorization.workspace.path,
+	};
+}
+
+async function writeIrohRemoteJsonLine(send, value, authorization) {
+	const sanitized = sanitizeIrohRemoteOutbound(value, getRemoteSanitizerOptions(authorization));
+	await send.writeAll(Array.from(Buffer.from(serializeJsonLine(sanitized), "utf8")));
+}
+
+async function writeIrohRemoteRpcResponse(stream, response, authorization) {
+	await writeIrohRemoteJsonLine(stream.send, response, authorization);
+}
+
+function truncateUnicodeScalars(value, maxLength) {
+	const scalars = Array.from(value);
+	return scalars.length <= maxLength ? value : scalars.slice(0, maxLength).join("");
+}
+
+function sanitizeRemoteTextField(value, maxLength, authorization) {
+	const sanitized = sanitizeIrohRemoteOutbound({ value }, getRemoteSanitizerOptions(authorization)).value;
+	return truncateUnicodeScalars(typeof sanitized === "string" ? sanitized : "", maxLength);
+}
+
+function toRemoteSessionTimestamp(value) {
+	const date = value instanceof Date ? value : new Date(value);
+	return Number.isNaN(date.getTime()) ? new Date(0).toISOString() : date.toISOString();
+}
+
+function getRemoteSessionTimestampMs(value) {
+	const date = new Date(value);
+	return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+}
+
+function createRemoteSessionSummary(input, authorization) {
+	const createdAt = toRemoteSessionTimestamp(input.createdAt);
+	const updatedAt = toRemoteSessionTimestamp(input.updatedAt);
+	return {
+		sortUpdatedAtMs: getRemoteSessionTimestampMs(updatedAt),
+		session: {
+			sessionId: input.sessionId,
+			title: sanitizeRemoteTextField(input.title, 160, authorization),
+			createdAt,
+			updatedAt,
+			messageCount: input.messageCount,
+		},
+	};
+}
+
+function sortRemoteSessionSummaries(left, right) {
+	return right.sortUpdatedAtMs - left.sortUpdatedAtMs || left.session.sessionId.localeCompare(right.session.sessionId);
+}
+
+async function listRemoteWorkspaceSessionSummaries(authorization, options, runtime) {
+	const summaries =
+		runtime === undefined
+			? (await SessionManager.list(
+					authorization.workspace.path,
+					getDefaultSessionDir(authorization.workspace.path, options.agentDir),
+				)).map((info) =>
+					createRemoteSessionSummary(
+						{
+							sessionId: info.id,
+							title: info.name ?? info.firstMessage,
+							createdAt: info.created,
+							updatedAt: info.modified,
+							messageCount: info.messageCount,
+						},
+						authorization,
+					),
+				)
+			: (await runtime.listSessions()).map((summary) =>
+					createRemoteSessionSummary(
+						{
+							sessionId: summary.sessionId,
+							title: summary.sessionName ?? summary.firstMessage,
+							createdAt: summary.createdAt,
+							updatedAt: summary.modifiedAt,
+							messageCount: summary.messageCount,
+						},
+						authorization,
+					),
+				);
+	const bySessionId = new Map();
+	for (const summary of summaries) {
+		bySessionId.set(summary.session.sessionId, summary);
+	}
+	return Array.from(bySessionId.values()).sort(sortRemoteSessionSummaries);
+}
+
+function cleanupExpiredSessionListCursors(options, now = Date.now()) {
+	for (const [cursor, entry] of options.sessionListCursors) {
+		if (entry.expiresAt <= now) {
+			options.sessionListCursors.delete(cursor);
+		}
+	}
+}
+
+function createSessionListCursor(options, authorization, sessions, nextIndex) {
+	const cursor = randomUUID();
+	options.sessionListCursors.set(cursor, {
+		clientNodeId: authorization.client.nodeId,
+		workspaceName: authorization.workspace.name,
+		sessions,
+		nextIndex,
+		expiresAt: Date.now() + options.sessionListCursorTtlMs,
+	});
+	return cursor;
+}
+
+function getSessionListCursorEntry(options, authorization, cursor) {
+	cleanupExpiredSessionListCursors(options);
+	const entry = options.sessionListCursors.get(cursor);
+	if (
+		!entry ||
+		entry.clientNodeId !== authorization.client.nodeId ||
+		entry.workspaceName !== authorization.workspace.name
+	) {
+		return undefined;
+	}
+	return entry;
+}
+
+function parseRemoteSessionListLimit(command) {
+	if (command.limit === undefined) {
+		return { ok: true, limit: REMOTE_SESSION_LIST_DEFAULT_LIMIT };
+	}
+	if (typeof command.limit !== "number" || !Number.isInteger(command.limit) || command.limit <= 0) {
+		return { ok: false, error: "invalid_limit" };
+	}
+	return { ok: true, limit: Math.min(command.limit, REMOTE_SESSION_LIST_MAX_LIMIT) };
+}
+
+function parseRemoteSessionListRequest(command) {
+	if (Object.hasOwn(command, "sessionId")) {
+		return { ok: false, error: "unexpected_session_id" };
+	}
+	for (const field of ["workspace", "workspaceName", "clientNodeId", "hostNodeId"]) {
+		if (Object.hasOwn(command, field)) {
+			return { ok: false, error: "session_mismatch" };
+		}
+	}
+	for (const field of Object.keys(command)) {
+		if (field !== "id" && field !== "type" && field !== "limit" && field !== "cursor") {
+			return { ok: false, error: "invalid_request" };
+		}
+	}
+	const limit = parseRemoteSessionListLimit(command);
+	if (!limit.ok) {
+		return limit;
+	}
+	if (command.cursor !== undefined) {
+		if (
+			typeof command.cursor !== "string" ||
+			command.cursor.length === 0 ||
+			Buffer.byteLength(command.cursor, "utf8") > REMOTE_SESSION_LIST_CURSOR_MAX_BYTES
+		) {
+			return { ok: false, error: "invalid_cursor" };
+		}
+	}
+	return { ok: true, limit: limit.limit, cursor: command.cursor };
+}
+
+async function createRemoteListSessionsRpcResponse(command, authorization, options, runtime) {
+	const id = getRpcResponseId(command);
+	const request = parseRemoteSessionListRequest(command);
+	if (!request.ok) {
+		return createIrohRemoteRpcErrorResponse(id, "list_sessions", request.error);
+	}
+
+	let sessions;
+	let startIndex;
+	if (request.cursor) {
+		const cursorEntry = getSessionListCursorEntry(options, authorization, request.cursor);
+		if (!cursorEntry) {
+			return createIrohRemoteRpcErrorResponse(id, "list_sessions", "invalid_cursor");
+		}
+		sessions = cursorEntry.sessions;
+		startIndex = cursorEntry.nextIndex;
+	} else {
+		sessions = (await listRemoteWorkspaceSessionSummaries(authorization, options, runtime)).map(
+			(summary) => summary.session,
+		);
+		startIndex = 0;
+	}
+
+	const nextIndex = startIndex + request.limit;
+	const page = sessions.slice(startIndex, nextIndex);
+	const hasMore = nextIndex < sessions.length;
+	return createRpcSuccessResponse(id, "list_sessions", {
+		sessions: page,
+		hasMore,
+		nextCursor: hasMore ? createSessionListCursor(options, authorization, sessions, nextIndex) : null,
+	});
 }
 
 function formatIrohLoadError(error) {
@@ -847,7 +1106,8 @@ function isExpectedApplicationClose(error) {
 		message.includes("error_code: 0") &&
 		(message.includes('reason: b"done"') ||
 			message.includes(`reason: b"${ACTIVE_REVOKE_CLOSE_REASON}"`) ||
-			message.includes(`reason: b"${ACTIVE_REPLACE_CLOSE_REASON}"`))
+			message.includes(`reason: b"${ACTIVE_REPLACE_CLOSE_REASON}"`) ||
+			message.includes(`reason: b"${WORKSPACE_UNREGISTERED_CLOSE_REASON}"`))
 	);
 }
 
@@ -1399,7 +1659,8 @@ async function runIntegratedVoltConnection(stream, handshake, authorization, con
 			registerPushTarget: pushDispatcher
 				? (args) => pushDispatcher.registerPushTarget(args)
 				: undefined,
-			remoteCommandHandler: (command) => handleRemoteHostRpcCommand(command, authorization, options),
+			remoteCommandHandler: (command) =>
+				handleIntegratedConversationRpcCommand(command, authorization, options, entry.runtime),
 			stream,
 			initialInput: handshake.initialInput,
 			workspaceName: authorization.workspace.name,
@@ -1430,6 +1691,216 @@ async function runIntegratedVoltConnection(stream, handshake, authorization, con
 			);
 		}
 		activeStream?.remove();
+	}
+}
+
+async function handleIntegratedConversationRpcCommand(command, authorization, options, runtime) {
+	if (command.type === "list_sessions") {
+		return await createRemoteListSessionsRpcResponse(command, authorization, options, runtime);
+	}
+	return await handleRemoteHostRpcCommand(command, authorization, options);
+}
+
+async function runWorkspaceUtilityRpcLoop(stream, handshake, authorization, handleCommand) {
+	let buffer = Buffer.from(handshake.initialInput);
+	while (true) {
+		const result = await readLineFromIroh(stream.recv, buffer, {
+			maxLineBytes: DEFAULT_IROH_RPC_MAX_LINE_BYTES,
+		});
+		if (result.line === undefined) {
+			if (result.rest.length > 0) {
+				const shouldClose = await handleCommand(result.rest.toString("utf8"));
+				if (shouldClose) return;
+			}
+			return;
+		}
+
+		const shouldClose = await handleCommand(result.line);
+		if (shouldClose) return;
+		buffer = result.rest;
+	}
+}
+
+async function runIntegratedWorkspaceDiscoveryConnection(
+	stream,
+	handshake,
+	authorization,
+	connection,
+	connectionId,
+	streamId,
+	options,
+) {
+	await writeIrohRemoteHandshakeResponse(stream.send, handshake.response);
+	const activeStream = registerActiveStream(
+		options,
+		authorization,
+		WORKSPACE_DISCOVERY_STREAM_SESSION_ID,
+		stream,
+		connection,
+		connectionId,
+		streamId,
+		{ terminalSessionId: undefined },
+	);
+	try {
+		await runWorkspaceUtilityRpcLoop(stream, handshake, authorization, async (line) => {
+			const parsed = parseRemoteRpcCommandLine(line);
+			if (!parsed.ok) {
+				await writeIrohRemoteRpcResponse(stream, parsed.response, authorization);
+				return false;
+			}
+			if (parsed.command.type !== "list_sessions") {
+				await writeIrohRemoteRpcResponse(
+					stream,
+					createRemoteRpcError(parsed.command, "unsupported_on_workspace_discovery_stream"),
+					authorization,
+				);
+				return false;
+			}
+			await writeIrohRemoteRpcResponse(
+				stream,
+				await createRemoteListSessionsRpcResponse(parsed.command, authorization, options),
+				authorization,
+			);
+			return false;
+		});
+	} finally {
+		activeStream.remove();
+	}
+}
+
+function parseWorkspaceManagementUnregisterRequest(command, authorization) {
+	if (typeof command.workspaceName !== "string" || !isIrohRemoteWorkspaceName(command.workspaceName)) {
+		return { ok: false, error: "invalid_workspace_payload" };
+	}
+	if (command.workspaceName !== authorization.workspace.name) {
+		return { ok: false, error: "session_mismatch" };
+	}
+	for (const field of Object.keys(command)) {
+		if (field !== "id" && field !== "type" && field !== "workspaceName") {
+			return { ok: false, error: "invalid_request" };
+		}
+	}
+	return { ok: true, workspaceName: command.workspaceName };
+}
+
+async function closeActiveStreamsForWorkspace(options, workspaceName, reason, excludedEntry) {
+	const entries = options.activeStreams
+		.entriesForWorkspaceName(workspaceName)
+		.filter((entry) => entry !== excludedEntry);
+	if (entries.length === 0) {
+		return 0;
+	}
+	for (const entry of entries) {
+		options.activeStreams.unregister(entry);
+		await Promise.resolve(entry.close(reason)).catch(() => {});
+	}
+	await closeIdleConnectionsForEntries(options, entries, reason);
+	return entries.length;
+}
+
+async function stopIntegratedRuntimesForWorkspace(options, workspaceName, reason) {
+	let stoppedCount = 0;
+	for (const entry of Array.from(options.integratedRuntimes.values())) {
+		if (entry.workspaceName !== workspaceName) {
+			continue;
+		}
+		await stopIntegratedRuntimeEntry(entry, options, reason);
+		stoppedCount++;
+	}
+	return stoppedCount;
+}
+
+async function handleWorkspaceManagementUnregisterCommand(command, authorization, activeStream, options) {
+	const id = getRpcResponseId(command);
+	const request = parseWorkspaceManagementUnregisterRequest(command, authorization);
+	if (!request.ok) {
+		return { close: false, response: createIrohRemoteRpcErrorResponse(id, "unregister_workspace", request.error) };
+	}
+
+	const removedWorkspace = await options.stateManager.unregisterWorkspace(request.workspaceName);
+	if (!removedWorkspace) {
+		return {
+			close: false,
+			response: createIrohRemoteRpcErrorResponse(id, "unregister_workspace", "workspace_unregistered"),
+		};
+	}
+	const closedStreamCount = await closeActiveStreamsForWorkspace(
+		options,
+		request.workspaceName,
+		WORKSPACE_UNREGISTERED_CLOSE_REASON,
+		activeStream.entry,
+	);
+	const stoppedRuntimeCount = await stopIntegratedRuntimesForWorkspace(
+		options,
+		request.workspaceName,
+		WORKSPACE_UNREGISTERED_CLOSE_REASON,
+	);
+	await logAudit(options.auditLogger, {
+		type: "workspace_unregistered",
+		clientNodeId: authorization.client.nodeId,
+		workspace: request.workspaceName,
+		success: true,
+		details: {
+			closedStreamCount,
+			source: "remote_workspace_management_stream",
+			stoppedRuntimeCount,
+		},
+	});
+	return {
+		close: true,
+		response: createRpcSuccessResponse(id, "unregister_workspace", {
+			workspaceName: request.workspaceName,
+			unregistered: true,
+		}),
+	};
+}
+
+async function runIntegratedWorkspaceManagementConnection(
+	stream,
+	handshake,
+	authorization,
+	connection,
+	connectionId,
+	streamId,
+	options,
+) {
+	await writeIrohRemoteHandshakeResponse(stream.send, handshake.response);
+	const activeStream = registerActiveStream(
+		options,
+		authorization,
+		WORKSPACE_MANAGEMENT_STREAM_SESSION_ID,
+		stream,
+		connection,
+		connectionId,
+		streamId,
+		{ terminalSessionId: undefined },
+	);
+	try {
+		await runWorkspaceUtilityRpcLoop(stream, handshake, authorization, async (line) => {
+			const parsed = parseRemoteRpcCommandLine(line);
+			if (!parsed.ok) {
+				await writeIrohRemoteRpcResponse(stream, parsed.response, authorization);
+				return false;
+			}
+			if (parsed.command.type !== "unregister_workspace") {
+				await writeIrohRemoteRpcResponse(
+					stream,
+					createRemoteRpcError(parsed.command, "unsupported_on_workspace_management_stream"),
+					authorization,
+				);
+				return false;
+			}
+			const result = await handleWorkspaceManagementUnregisterCommand(parsed.command, authorization, activeStream, options);
+			await writeIrohRemoteRpcResponse(stream, result.response, authorization);
+			if (!result.close) {
+				return false;
+			}
+			activeStream.remove();
+			closeIrohRemoteStream(stream, WORKSPACE_UNREGISTERED_CLOSE_REASON);
+			return true;
+		});
+	} finally {
+		activeStream.remove();
 	}
 }
 
@@ -1965,14 +2436,21 @@ async function closeClientConnectionsForClient(options, nodeId, reason) {
 	return entries.length;
 }
 
-function registerActiveStream(options, authorization, sessionId, stream, connection, connectionId, streamId) {
+function registerActiveStream(options, authorization, sessionId, stream, connection, connectionId, streamId, details = {}) {
+	const terminalSessionId = Object.hasOwn(details, "terminalSessionId") ? details.terminalSessionId : sessionId;
 	const entry = {
 		clientNodeId: authorization.client.nodeId,
 		connectionId,
 		sessionId,
 		streamId,
 		workspaceName: authorization.workspace.name,
-		close: (reason) => closeIrohRemoteStream(stream, reason),
+		close: (reason) =>
+			closeIrohRemoteStreamWithTerminal(stream, reason, {
+				authorization,
+				hostNodeId: options.hostNodeId,
+				sessionId: terminalSessionId,
+				workspace: authorization.workspace.name,
+			}),
 		closeConnection: (reason) => closeConnection(connection, reason),
 	};
 	const remove = options.activeStreams.register(entry);
@@ -2097,9 +2575,37 @@ function getHandshakeChildLabel(options) {
 	return options.integratedVolt || options.useVolt ? "volt" : "fake-rpc";
 }
 
+function getRemoteTerminalReason(reason) {
+	if (reason === ACTIVE_REVOKE_CLOSE_REASON) {
+		return "client_revoked";
+	}
+	if (reason === WORKSPACE_UNREGISTERED_CLOSE_REASON || reason === "workspace_authorization_removed") {
+		return reason;
+	}
+	return undefined;
+}
+
 function closeIrohRemoteStream(stream, _reason) {
 	void Promise.resolve(stream.send.finish?.()).catch(() => {});
 	void Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
+}
+
+async function closeIrohRemoteStreamWithTerminal(stream, reason, terminal) {
+	const terminalReason = getRemoteTerminalReason(reason);
+	if (terminalReason) {
+		await writeIrohRemoteJsonLine(
+			stream.send,
+			{
+				type: "remote_terminal",
+				reason: terminalReason,
+				workspace: terminal.workspace,
+				...(terminal.sessionId === undefined ? {} : { sessionId: terminal.sessionId }),
+				hostNodeId: terminal.hostNodeId,
+			},
+			terminal.authorization,
+		).catch(() => {});
+	}
+	closeIrohRemoteStream(stream, reason);
 }
 
 async function closeEntryConnection(entry, reason) {
@@ -2203,9 +2709,27 @@ async function handleConnectionStream(
 				return;
 			}
 		} else {
-			await writeIrohRemoteHandshakeResponse(stream.send, handshake.response);
-			await stream.send.finish?.();
-			await Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
+			if (handshake.hello.mode === "workspaceDiscovery") {
+				await runIntegratedWorkspaceDiscoveryConnection(
+					stream,
+					handshake,
+					handshake.authorization,
+					connection,
+					connectionId,
+					streamId,
+					options,
+				);
+				return;
+			}
+			await runIntegratedWorkspaceManagementConnection(
+				stream,
+				handshake,
+				handshake.authorization,
+				connection,
+				connectionId,
+				streamId,
+				options,
+			);
 			return;
 		}
 	} else if (!options.integratedVolt) {
@@ -2595,6 +3119,17 @@ function getStartupTicketMode(flags) {
 	return "pairing";
 }
 
+function parseRemoteSessionListCursorTtlMs(value) {
+	if (value === undefined || value === "") {
+		return REMOTE_SESSION_LIST_CURSOR_TTL_MS;
+	}
+	const parsed = Number(value);
+	if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
+		throw new Error(`${REMOTE_SESSION_LIST_CURSOR_TTL_ENV} must be a positive integer when set`);
+	}
+	return parsed;
+}
+
 async function serve(flags) {
 	ensureIrohAvailable();
 	const statePath = resolve(getFlag(flags, "state", DEFAULT_STATE_PATH));
@@ -2646,6 +3181,8 @@ async function serve(flags) {
 		pushRelayAuthToken,
 		pushRelayUrl: effectivePushRelayUrl,
 		relayMode,
+		sessionListCursorTtlMs: parseRemoteSessionListCursorTtlMs(process.env[REMOTE_SESSION_LIST_CURSOR_TTL_ENV]),
+		sessionListCursors: new Map(),
 		hostNodeId: undefined,
 		ticketExpiresAt: undefined,
 		once: hasFlag(flags, "once"),

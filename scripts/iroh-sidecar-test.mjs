@@ -79,9 +79,10 @@ function formatExit(code, signal) {
 	return signal ?? code ?? "unknown";
 }
 
-function spawnScript(script, args) {
+function spawnScript(script, args, env = {}) {
 	const child = spawn(process.execPath, [...SOURCE_IMPORT_CONDITION_ARGS, script, ...args], {
 		cwd: repoRoot,
+		env: { ...process.env, ...env },
 		stdio: ["ignore", "pipe", "pipe"],
 	});
 	return { child, output: collectProcess(child) };
@@ -183,7 +184,7 @@ function withDefaultTestRelay(args) {
 
 function startHost(args, options = {}) {
 	const hostArgs = options.preserveRelayDefault ? args : withDefaultTestRelay(args);
-	return spawnScript(hostScript, withDefaultTestAllowTools(hostArgs));
+	return spawnScript(hostScript, withDefaultTestAllowTools(hostArgs), options.env);
 }
 
 function startSourceCliRemoteHost(args, env = {}) {
@@ -260,6 +261,32 @@ function assertConversationHandshakeResponse(handshakeResponse, label, options =
 			handshakeResponse.conversation?.sessionId === handshakeResponse.sessionId &&
 			["resumed", "created", "created_missing_last"].includes(handshakeResponse.conversation?.selection),
 		`Expected ${label} conversation handshake metadata, got:\n${JSON.stringify(handshakeResponse)}`,
+	);
+}
+
+function assertWorkspaceDiscoveryHandshakeResponse(handshakeResponse, label) {
+	assert(
+		handshakeResponse.hostNodeId &&
+			Array.isArray(handshakeResponse.features) &&
+			handshakeResponse.features.includes("multi_streams.v1") &&
+			handshakeResponse.features.includes("conversation_streams.v1") &&
+			handshakeResponse.workspaceDiscovery?.purpose === "list_sessions" &&
+			handshakeResponse.sessionId === undefined &&
+			handshakeResponse.conversation === undefined,
+		`Expected ${label} workspace discovery handshake metadata, got:\n${JSON.stringify(handshakeResponse)}`,
+	);
+}
+
+function assertWorkspaceManagementHandshakeResponse(handshakeResponse, label) {
+	assert(
+		handshakeResponse.hostNodeId &&
+			Array.isArray(handshakeResponse.features) &&
+			handshakeResponse.features.includes("multi_streams.v1") &&
+			handshakeResponse.features.includes("conversation_streams.v1") &&
+			handshakeResponse.workspaceManagement?.purpose === "unregister_workspace" &&
+			handshakeResponse.sessionId === undefined &&
+			handshakeResponse.conversation === undefined,
+		`Expected ${label} workspace management handshake metadata, got:\n${JSON.stringify(handshakeResponse)}`,
 	);
 }
 
@@ -379,6 +406,12 @@ async function openRawAuthorizedClientOnEndpoint(endpoint, ticket, options = {})
 		if (handshakeResponse.success === true && options.helloMode === "conversation") {
 			assertConversationHandshakeResponse(handshakeResponse, "raw authorized client", options);
 		}
+		if (handshakeResponse.success === true && options.helloMode === "workspaceDiscovery") {
+			assertWorkspaceDiscoveryHandshakeResponse(handshakeResponse, "raw authorized client");
+		}
+		if (handshakeResponse.success === true && options.helloMode === "workspaceManagement") {
+			assertWorkspaceManagementHandshakeResponse(handshakeResponse, "raw authorized client");
+		}
 		return {
 			connection,
 			handshakeResponse,
@@ -413,6 +446,12 @@ async function openRawAuthorizedStreamOnConnection(rawClient, ticket, options = 
 	}
 	if (handshakeResponse.success === true && options.helloMode === "conversation") {
 		assertConversationHandshakeResponse(handshakeResponse, "raw authorized stream", options);
+	}
+	if (handshakeResponse.success === true && options.helloMode === "workspaceDiscovery") {
+		assertWorkspaceDiscoveryHandshakeResponse(handshakeResponse, "raw authorized stream");
+	}
+	if (handshakeResponse.success === true && options.helloMode === "workspaceManagement") {
+		assertWorkspaceManagementHandshakeResponse(handshakeResponse, "raw authorized stream");
 	}
 	return { handshakeResponse, rest: handshake.rest, stream };
 }
@@ -619,6 +658,33 @@ async function ensureSessionFileForId(agentDir, workspacePath, sessionId, label)
 			cwd: workspacePath,
 		})}\n`,
 	);
+	return sessionFile;
+}
+
+async function writeTestSessionFile(sessionDir, workspacePath, options) {
+	const sessionFile = join(sessionDir, `${options.fileTimestamp}_${options.sessionId}.jsonl`);
+	const messageTimestampMs = new Date(options.updatedAt).getTime();
+	const entries = [
+		{
+			type: "session",
+			version: 3,
+			id: options.sessionId,
+			timestamp: options.createdAt,
+			cwd: workspacePath,
+		},
+		{
+			type: "message",
+			id: `${options.sessionId}-message`,
+			parentId: null,
+			timestamp: options.updatedAt,
+			message: {
+				role: "user",
+				content: options.title,
+				timestamp: messageTimestampMs,
+			},
+		},
+	];
+	await writeFile(sessionFile, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
 	return sessionFile;
 }
 
@@ -2847,6 +2913,355 @@ async function integratedVoltSameWorkspaceConversationOwnershipScenario() {
 	});
 }
 
+async function workspaceDiscoveryManagementScenario() {
+	await withStateDir("workspace-discovery-management", async ({ hostStatePath, stateDir }) => {
+		const agentDir = await createIntegratedVoltAgentDir(stateDir);
+		const workspacePath = join(stateDir, "workspace");
+		await mkdir(workspacePath, { recursive: true });
+		const canonicalWorkspacePath = await realpath(workspacePath);
+		const endpoint = await bindRawClientEndpoint("disabled");
+		const hostArgs = [
+			"--state",
+			hostStatePath,
+			"--agent-dir",
+			agentDir,
+			"--workspace",
+			`remote=${workspacePath}`,
+			"--integrated-volt",
+		];
+		let host;
+		let rawClient;
+		let discoveryClient;
+		let restartDiscoveryClient;
+		let conversationClient;
+		let managementClient;
+
+		async function startScenarioHost(label) {
+			const runningHost = startHost(hostArgs, {
+				env: { VOLT_IROH_SESSION_LIST_CURSOR_TTL_MS: "1000" },
+			});
+			await waitForHostReady(runningHost.child, runningHost.output, label);
+			const ticket = runningHost.output.stdout.trim();
+			assert(ticket.startsWith(TICKET_PREFIX), `Expected ${label} to print a ticket, got:\n${runningHost.output.stdout}`);
+			return { host: runningHost, ticket };
+		}
+
+		try {
+			let started = await startScenarioHost("workspace discovery management host");
+			host = started.host;
+			rawClient = await openRawAuthorizedClientOnEndpoint(endpoint, started.ticket, {
+				clientLabel: "workspace discovery management client",
+				helloMode: "conversation",
+			});
+			const initialState = await readRawRpcResponse(
+				rawClient,
+				{ id: "state-workspace-discovery-initial", type: "get_state" },
+				"workspace discovery initial get_state",
+			);
+			const initialSessionId = initialState.event.data?.sessionId;
+			assert(initialSessionId, `Expected initial session id, got:\n${JSON.stringify(initialState.event)}`);
+			await ensureSessionFileForId(
+				agentDir,
+				canonicalWorkspacePath,
+				initialSessionId,
+				"workspace discovery initial",
+			);
+			const sessionDir = await getOnlySessionDirectory(agentDir, "workspace discovery seeded sessions");
+			await writeTestSessionFile(sessionDir, canonicalWorkspacePath, {
+				sessionId: "sess001",
+				fileTimestamp: "2026-06-26T12-05-00-000Z",
+				createdAt: "2026-06-26T12:00:00.000Z",
+				updatedAt: "2026-06-26T12:05:00.000Z",
+				title: "First seeded session",
+			});
+			await writeTestSessionFile(sessionDir, canonicalWorkspacePath, {
+				sessionId: "sess002",
+				fileTimestamp: "2026-06-26T12-05-00-001Z",
+				createdAt: "2026-06-26T12:01:00.000Z",
+				updatedAt: "2026-06-26T12:05:00.000Z",
+				title: "Second seeded session",
+			});
+			await writeTestSessionFile(sessionDir, canonicalWorkspacePath, {
+				sessionId: "sess003",
+				fileTimestamp: "2026-06-26T12-04-00-000Z",
+				createdAt: "2026-06-26T12:02:00.000Z",
+				updatedAt: "2026-06-26T12:04:00.000Z",
+				title: "Third seeded session",
+			});
+			await writeTestSessionFile(sessionDir, canonicalWorkspacePath, {
+				sessionId: "sess004",
+				fileTimestamp: "2026-06-26T12-03-00-000Z",
+				createdAt: "2026-06-26T12:03:00.000Z",
+				updatedAt: "2026-06-26T12:03:00.000Z",
+				title: "Fourth seeded session",
+			});
+
+			const discoveryStream = await openRawAuthorizedStreamOnConnection(rawClient, started.ticket, {
+				clientLabel: "workspace discovery management client",
+				helloMode: "workspaceDiscovery",
+			});
+			discoveryClient = {
+				connection: rawClient.connection,
+				handshakeResponse: discoveryStream.handshakeResponse,
+				nodeId: rawClient.nodeId,
+				rest: discoveryStream.rest,
+				stream: discoveryStream.stream,
+			};
+			const unsupportedDiscovery = await readRawRpcResponse(
+				discoveryClient,
+				{ id: "workspace-discovery-get-state", type: "get_state" },
+				"workspace discovery unsupported get_state",
+			);
+			assert(
+				unsupportedDiscovery.event.success === false &&
+					unsupportedDiscovery.event.error === "unsupported_on_workspace_discovery_stream",
+				`Expected workspace discovery stream-mode error, got:\n${JSON.stringify(unsupportedDiscovery.event)}`,
+			);
+			const unexpectedSession = await readRawRpcResponse(
+				discoveryClient,
+				{ id: "workspace-discovery-unexpected-session", type: "list_sessions", sessionId: initialSessionId },
+				"workspace discovery list_sessions unexpected session",
+			);
+			assert(
+				unexpectedSession.event.success === false && unexpectedSession.event.error === "unexpected_session_id",
+				`Expected unexpected_session_id, got:\n${JSON.stringify(unexpectedSession.event)}`,
+			);
+			const identityMismatch = await readRawRpcResponse(
+				discoveryClient,
+				{ id: "workspace-discovery-identity", type: "list_sessions", workspaceName: "remote" },
+				"workspace discovery list_sessions identity assertion",
+			);
+			assert(
+				identityMismatch.event.success === false && identityMismatch.event.error === "session_mismatch",
+				`Expected session_mismatch, got:\n${JSON.stringify(identityMismatch.event)}`,
+			);
+			const invalidRequest = await readRawRpcResponse(
+				discoveryClient,
+				{ id: "workspace-discovery-invalid-request", type: "list_sessions", extra: true },
+				"workspace discovery list_sessions invalid request",
+			);
+			assert(
+				invalidRequest.event.success === false && invalidRequest.event.error === "invalid_request",
+				`Expected invalid_request, got:\n${JSON.stringify(invalidRequest.event)}`,
+			);
+			const invalidLimit = await readRawRpcResponse(
+				discoveryClient,
+				{ id: "workspace-discovery-invalid-limit", type: "list_sessions", limit: 0 },
+				"workspace discovery list_sessions invalid limit",
+			);
+			assert(
+				invalidLimit.event.success === false && invalidLimit.event.error === "invalid_limit",
+				`Expected invalid_limit, got:\n${JSON.stringify(invalidLimit.event)}`,
+			);
+
+			const hostStateBeforeList = JSON.parse(await readFile(hostStatePath, "utf8"));
+			const firstPage = await readRawRpcResponse(
+				discoveryClient,
+				{ id: "workspace-discovery-page-1", type: "list_sessions", limit: 2 },
+				"workspace discovery list_sessions page 1",
+			);
+			assert(firstPage.event.success === true, `Expected list_sessions success, got:\n${JSON.stringify(firstPage.event)}`);
+			assert(
+				JSON.stringify(hostStateBeforeList.clients?.[0]?.lastSessionIdByWorkspace) ===
+					JSON.stringify(JSON.parse(await readFile(hostStatePath, "utf8")).clients?.[0]?.lastSessionIdByWorkspace),
+				"Workspace discovery list_sessions unexpectedly changed last-session state",
+			);
+			const firstPageSessions = firstPage.event.data?.sessions ?? [];
+			assert(
+				firstPageSessions.map((session) => session.sessionId).join(",") === "sess001,sess002",
+				`Expected first page tie order sess001,sess002, got:\n${JSON.stringify(firstPage.event)}`,
+			);
+			assert(
+				firstPage.event.data?.hasMore === true && typeof firstPage.event.data?.nextCursor === "string",
+				`Expected first page cursor, got:\n${JSON.stringify(firstPage.event)}`,
+			);
+			assert(
+				firstPageSessions.every(
+					(session) =>
+						typeof session.title === "string" &&
+						typeof session.createdAt === "string" &&
+						typeof session.updatedAt === "string" &&
+						typeof session.messageCount === "number" &&
+						session.path === undefined &&
+						session.sessionFile === undefined,
+				),
+				`Expected remote-safe session summaries, got:\n${JSON.stringify(firstPage.event)}`,
+			);
+
+			const secondPage = await readRawRpcResponse(
+				rawClient,
+				{ id: "workspace-discovery-page-2-conversation", type: "list_sessions", limit: 2, cursor: firstPage.event.data.nextCursor },
+				"workspace discovery list_sessions page 2 on conversation stream",
+			);
+			assert(secondPage.event.success === true, `Expected second page success, got:\n${JSON.stringify(secondPage.event)}`);
+			const secondPageIds = (secondPage.event.data?.sessions ?? []).map((session) => session.sessionId);
+			assert(
+				secondPageIds.join(",") === "sess003,sess004",
+				`Expected cross-mode second page sess003,sess004, got:\n${JSON.stringify(secondPage.event)}`,
+			);
+
+			await new Promise((resolveWait) => setTimeout(resolveWait, 1100));
+			const expiredCursor = await readRawRpcResponse(
+				discoveryClient,
+				{ id: "workspace-discovery-expired-cursor", type: "list_sessions", cursor: firstPage.event.data.nextCursor },
+				"workspace discovery expired cursor",
+			);
+			assert(
+				expiredCursor.event.success === false && expiredCursor.event.error === "invalid_cursor",
+				`Expected expired cursor invalid_cursor, got:\n${JSON.stringify(expiredCursor.event)}`,
+			);
+
+			const restartCursorPage = await readRawRpcResponse(
+				discoveryClient,
+				{ id: "workspace-discovery-restart-cursor-source", type: "list_sessions", limit: 1 },
+				"workspace discovery restart cursor source",
+			);
+			assert(
+				typeof restartCursorPage.event.data?.nextCursor === "string",
+				`Expected restart cursor source cursor, got:\n${JSON.stringify(restartCursorPage.event)}`,
+			);
+			const restartCursor = restartCursorPage.event.data.nextCursor;
+
+			closeRawConnection(rawClient.connection);
+			await waitForRawConnectionClosed(rawClient.connection, "workspace discovery pre-restart connection close");
+			rawClient = undefined;
+			discoveryClient = undefined;
+			await stopProcess(host.child);
+			host = undefined;
+
+			started = await startScenarioHost("workspace discovery management restart host");
+			host = started.host;
+			restartDiscoveryClient = await openRawAuthorizedClientOnEndpoint(endpoint, started.ticket, {
+				clientLabel: "workspace discovery management client",
+				helloMode: "workspaceDiscovery",
+			});
+			const postRestartCursor = await readRawRpcResponse(
+				restartDiscoveryClient,
+				{ id: "workspace-discovery-post-restart-cursor", type: "list_sessions", cursor: restartCursor },
+				"workspace discovery post-restart cursor",
+			);
+			assert(
+				postRestartCursor.event.success === false && postRestartCursor.event.error === "invalid_cursor",
+				`Expected post-restart cursor invalid_cursor, got:\n${JSON.stringify(postRestartCursor.event)}`,
+			);
+
+			const conversationStream = await openRawAuthorizedStreamOnConnection(restartDiscoveryClient, started.ticket, {
+				clientLabel: "workspace discovery management client",
+				helloMode: "conversation",
+			});
+			conversationClient = {
+				connection: restartDiscoveryClient.connection,
+				handshakeResponse: conversationStream.handshakeResponse,
+				nodeId: restartDiscoveryClient.nodeId,
+				rest: conversationStream.rest,
+				stream: conversationStream.stream,
+			};
+			const conversationState = await readRawRpcResponse(
+				conversationClient,
+				{ id: "workspace-management-conversation-state", type: "get_state" },
+				"workspace management conversation get_state",
+			);
+			assert(
+				conversationState.event.success === true,
+				`Expected workspace management conversation state, got:\n${JSON.stringify(conversationState.event)}`,
+			);
+			const managementStream = await openRawAuthorizedStreamOnConnection(restartDiscoveryClient, started.ticket, {
+				clientLabel: "workspace discovery management client",
+				helloMode: "workspaceManagement",
+			});
+			managementClient = {
+				connection: restartDiscoveryClient.connection,
+				handshakeResponse: managementStream.handshakeResponse,
+				nodeId: restartDiscoveryClient.nodeId,
+				rest: managementStream.rest,
+				stream: managementStream.stream,
+			};
+			const managementUnsupported = await readRawRpcResponse(
+				managementClient,
+				{ id: "workspace-management-get-state", type: "get_state" },
+				"workspace management unsupported get_state",
+			);
+			assert(
+				managementUnsupported.event.success === false &&
+					managementUnsupported.event.error === "unsupported_on_workspace_management_stream",
+				`Expected workspace management stream-mode error, got:\n${JSON.stringify(managementUnsupported.event)}`,
+			);
+			const managementInvalid = await readRawRpcResponse(
+				managementClient,
+				{ id: "workspace-management-invalid", type: "unregister_workspace", workspaceName: "" },
+				"workspace management invalid unregister",
+			);
+			assert(
+				managementInvalid.event.success === false && managementInvalid.event.error === "invalid_workspace_payload",
+				`Expected invalid workspace payload, got:\n${JSON.stringify(managementInvalid.event)}`,
+			);
+			const managementMismatch = await readRawRpcResponse(
+				managementClient,
+				{ id: "workspace-management-mismatch", type: "unregister_workspace", workspaceName: "other" },
+				"workspace management mismatch unregister",
+			);
+			assert(
+				managementMismatch.event.success === false && managementMismatch.event.error === "session_mismatch",
+				`Expected session_mismatch, got:\n${JSON.stringify(managementMismatch.event)}`,
+			);
+			const unregister = await readRawRpcResponse(
+				managementClient,
+				{ id: "workspace-management-unregister", type: "unregister_workspace", workspaceName: "remote" },
+				"workspace management unregister",
+			);
+			assert(
+				unregister.event.success === true &&
+					unregister.event.data?.workspaceName === "remote" &&
+					unregister.event.data?.unregistered === true,
+				`Expected workspace management unregister success, got:\n${JSON.stringify(unregister.event)}`,
+			);
+			const discoveryTerminal = await readRawRpcEvent(
+				restartDiscoveryClient,
+				"workspace management discovery terminal",
+			);
+			assert(
+				discoveryTerminal.event.type === "remote_terminal" &&
+					discoveryTerminal.event.reason === "workspace_unregistered" &&
+					discoveryTerminal.event.workspace === "remote" &&
+					discoveryTerminal.event.sessionId === undefined,
+				`Expected discovery remote_terminal, got:\n${JSON.stringify(discoveryTerminal.event)}`,
+			);
+			const conversationTerminal = await readRawRpcEvent(
+				conversationClient,
+				"workspace management conversation terminal",
+			);
+			assert(
+				conversationTerminal.event.type === "remote_terminal" &&
+					conversationTerminal.event.reason === "workspace_unregistered" &&
+					conversationTerminal.event.workspace === "remote" &&
+					conversationTerminal.event.sessionId === conversationState.event.data?.sessionId,
+				`Expected conversation remote_terminal, got:\n${JSON.stringify(conversationTerminal.event)}`,
+			);
+			await waitForAuditEvent(
+				getDefaultAuditPath(hostStatePath),
+				(event) =>
+					event.type === "remote_runtime_stopped" &&
+					event.workspace === "remote" &&
+					event.details?.reason === "workspace_unregistered",
+				"workspace management runtime stopped",
+			);
+			const hostStateAfterUnregister = JSON.parse(await readFile(hostStatePath, "utf8"));
+			assert(
+				!hostStateAfterUnregister.workspaces?.some((workspace) => workspace.name === "remote"),
+				`Expected remote workspace to be removed, got:\n${JSON.stringify(hostStateAfterUnregister.workspaces)}`,
+			);
+		} finally {
+			await closeRawStream(managementClient);
+			await closeRawStream(conversationClient);
+			await closeRawStream(restartDiscoveryClient);
+			await closeRawStream(discoveryClient);
+			closeRawConnection(rawClient?.connection ?? restartDiscoveryClient?.connection);
+			await endpoint.close();
+			await stopProcess(host?.child);
+		}
+	});
+}
+
 async function integratedVoltProfileScenario() {
 	await withStateDir("integrated-profile", async ({ hostStatePath, stateDir }) => {
 		const agentDir = await createIntegratedVoltAgentDir(stateDir);
@@ -4128,6 +4543,7 @@ const scenarios = [
 	["native Iroh multi-stream lifecycle", nativeIrohMultiStreamLifecycleScenario],
 	["duplicate active connection", duplicateActiveConnectionScenario],
 	["integrated Volt same-workspace conversation ownership", integratedVoltSameWorkspaceConversationOwnershipScenario],
+	["workspace discovery and management", workspaceDiscoveryManagementScenario],
 	["integrated Volt profile", integratedVoltProfileScenario],
 	["integrated Volt env profile", integratedVoltEnvProfileScenario],
 	["malformed handshake", malformedHandshakeScenario],
