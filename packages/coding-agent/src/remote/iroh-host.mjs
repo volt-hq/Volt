@@ -95,9 +95,19 @@ const REMOTE_SESSION_LIST_MAX_LIMIT = 200;
 const REMOTE_SESSION_LIST_CURSOR_TTL_MS = 10 * 60 * 1000;
 const REMOTE_SESSION_LIST_CURSOR_MAX_BYTES = 512;
 const REMOTE_SESSION_LIST_CURSOR_TTL_ENV = "VOLT_IROH_SESSION_LIST_CURSOR_TTL_MS";
+const REMOTE_TRANSCRIPT_DEFAULT_LIMIT = 200;
+const REMOTE_TRANSCRIPT_MAX_LIMIT = 200;
+const REMOTE_TRANSCRIPT_CURSOR_MAX_BYTES = 2048;
+const REMOTE_TRANSCRIPT_CURSOR_MAX_SCALARS = 512;
+const REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS = 12_000;
 let activeConnectionSequence = 0;
 let activeStreamSequence = 0;
 const PROMPT_COMPLETION_RPC_TYPES = new Set(["prompt", "steer", "follow_up"]);
+const INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES = new Set([
+	"new_session",
+	"switch_session_by_id",
+	"get_messages",
+]);
 const RESPONSE_COMPLETION_RPC_TYPES = new Set([
 	"abort",
 	"new_session",
@@ -305,6 +315,164 @@ function truncateUnicodeScalars(value, maxLength) {
 function sanitizeRemoteTextField(value, maxLength, authorization) {
 	const sanitized = sanitizeIrohRemoteOutbound({ value }, getRemoteSanitizerOptions(authorization)).value;
 	return truncateUnicodeScalars(typeof sanitized === "string" ? sanitized : "", maxLength);
+}
+
+function sanitizeRemoteTranscriptText(value, authorization) {
+	const raw = typeof value === "string" ? value : "";
+	const normalized = raw
+		.replace(/\r\n?/g, "\n")
+		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+		.replace(/[\n\t]/g, " ")
+		.replace(/\s+/gu, " ")
+		.trim();
+	const sanitized = sanitizeIrohRemoteOutbound({ value: normalized }, getRemoteSanitizerOptions(authorization)).value;
+	const text = (typeof sanitized === "string" ? sanitized : "").replace(/\s+/gu, " ").trim();
+	const scalars = Array.from(text);
+	if (scalars.length <= REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS) {
+		return { text, truncated: false };
+	}
+	return {
+		text: scalars.slice(0, REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS).join(""),
+		truncated: true,
+	};
+}
+
+function parseRemoteTranscriptLimit(command) {
+	if (command.limit === undefined) {
+		return { ok: true, limit: REMOTE_TRANSCRIPT_DEFAULT_LIMIT };
+	}
+	if (!Number.isFinite(command.limit) || !Number.isInteger(command.limit) || command.limit <= 0) {
+		return { ok: false, error: "invalid_limit" };
+	}
+	return { ok: true, limit: Math.min(command.limit, REMOTE_TRANSCRIPT_MAX_LIMIT) };
+}
+
+function isValidRemoteTranscriptCursor(value) {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		Array.from(value).length <= REMOTE_TRANSCRIPT_CURSOR_MAX_SCALARS &&
+		Buffer.byteLength(value, "utf8") <= REMOTE_TRANSCRIPT_CURSOR_MAX_BYTES
+	);
+}
+
+function parseRemoteTranscriptRequest(command) {
+	const limit = parseRemoteTranscriptLimit(command);
+	if (!limit.ok) {
+		return limit;
+	}
+	if (command.beforeEntryId !== undefined && !isValidRemoteTranscriptCursor(command.beforeEntryId)) {
+		return { ok: false, error: "invalid_cursor" };
+	}
+	return { ok: true, limit: limit.limit, beforeEntryId: command.beforeEntryId };
+}
+
+function extractTranscriptContentText(content) {
+	if (typeof content === "string") {
+		return content;
+	}
+	if (!Array.isArray(content)) {
+		return "";
+	}
+	return content
+		.filter((part) => part && typeof part === "object" && part.type === "text" && typeof part.text === "string")
+		.map((part) => part.text)
+		.join("");
+}
+
+function createRemoteTranscriptItem(entry, role, text, authorization) {
+	const sanitized = sanitizeRemoteTranscriptText(text, authorization);
+	return {
+		entryId: entry.id,
+		createdAt: toRemoteSessionTimestamp(entry.timestamp),
+		role,
+		text: sanitized.text,
+		truncated: sanitized.truncated,
+	};
+}
+
+function projectRemoteTranscriptEntry(entry, authorization) {
+	if (!entry || typeof entry !== "object") {
+		return undefined;
+	}
+	if (entry.type === "compaction") {
+		return createRemoteTranscriptItem(entry, "system", entry.summary, authorization);
+	}
+	if (entry.type === "custom_message") {
+		if (entry.customType !== "review" || entry.display !== true) {
+			return undefined;
+		}
+		const text = extractTranscriptContentText(entry.content);
+		return text ? createRemoteTranscriptItem(entry, "assistant", text, authorization) : undefined;
+	}
+	if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") {
+		return undefined;
+	}
+	const message = entry.message;
+	if (message.role === "user" || message.role === "assistant") {
+		const text = extractTranscriptContentText(message.content);
+		return text ? createRemoteTranscriptItem(entry, message.role, text, authorization) : undefined;
+	}
+	if (message.role === "toolResult") {
+		const status = message.isError ? "failed" : "completed";
+		const toolName = typeof message.toolName === "string" && message.toolName.trim() ? message.toolName.trim() : "tool";
+		return createRemoteTranscriptItem(entry, "tool", `${toolName} ${status}`, authorization);
+	}
+	if (message.role === "bashExecution") {
+		const failed = message.cancelled || (message.exitCode !== undefined && message.exitCode !== 0);
+		const status = failed ? "failed" : "completed";
+		const exit = message.cancelled
+			? "cancelled"
+			: message.exitCode === undefined
+				? status
+				: `exit ${message.exitCode}`;
+		return createRemoteTranscriptItem(entry, "tool", `bash ${exit}`, authorization);
+	}
+	return undefined;
+}
+
+function projectRemoteTranscriptItems(sessionManager, authorization) {
+	return sessionManager
+		.getBranch()
+		.map((entry) => projectRemoteTranscriptEntry(entry, authorization))
+		.filter(Boolean);
+}
+
+function createRemoteTranscriptPage(items, request) {
+	const beforeIndex =
+		request.beforeEntryId === undefined
+			? items.length
+			: items.findIndex((item) => item.entryId === request.beforeEntryId);
+	if (beforeIndex === -1) {
+		return undefined;
+	}
+	const eligibleItems = items.slice(0, beforeIndex);
+	const pageStart = Math.max(0, eligibleItems.length - request.limit);
+	const pageItems = eligibleItems.slice(pageStart);
+	const hasMore = pageStart > 0;
+	return {
+		items: pageItems,
+		hasMore,
+		nextBeforeEntryId: hasMore ? (pageItems[0]?.entryId ?? null) : null,
+	};
+}
+
+function createRemoteGetTranscriptRpcResponse(command, authorization, runtime) {
+	const id = getRpcResponseId(command);
+	const request = parseRemoteTranscriptRequest(command);
+	if (!request.ok) {
+		return createIrohRemoteRpcErrorResponse(id, "get_transcript", request.error);
+	}
+	const items = projectRemoteTranscriptItems(runtime.session.sessionManager, authorization);
+	const page = createRemoteTranscriptPage(items, request);
+	if (!page) {
+		return createIrohRemoteRpcErrorResponse(id, "get_transcript", "invalid_cursor");
+	}
+	return createRpcSuccessResponse(id, "get_transcript", {
+		workspaceName: authorization.workspace.name,
+		sessionId: runtime.session.sessionId,
+		...page,
+	});
 }
 
 function toRemoteSessionTimestamp(value) {
@@ -1202,6 +1370,7 @@ function decorateRemoteHostState(value, authorization, options) {
 		...decoratedValue,
 		data: {
 			...decoratedValue.data,
+			workspaceName: authorization.workspace.name,
 			remoteHost: createRemoteHostMetadata(authorization, options),
 		},
 	};
@@ -1698,7 +1867,36 @@ async function handleIntegratedConversationRpcCommand(command, authorization, op
 	if (command.type === "list_sessions") {
 		return await createRemoteListSessionsRpcResponse(command, authorization, options, runtime);
 	}
+	if (INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES.has(command.type)) {
+		return createIrohRemoteRpcErrorResponse(getRpcResponseId(command), command.type, "unsupported_remote_command");
+	}
+	const identityError = getIntegratedConversationIdentityError(command, authorization, runtime);
+	if (identityError) {
+		return createIrohRemoteRpcErrorResponse(getRpcResponseId(command), command.type, identityError);
+	}
+	if (command.type === "get_transcript") {
+		return createRemoteGetTranscriptRpcResponse(command, authorization, runtime);
+	}
 	return await handleRemoteHostRpcCommand(command, authorization, options);
+}
+
+function getIntegratedConversationIdentityError(command, authorization, runtime) {
+	const expectedWorkspaceName = authorization.workspace.name;
+	for (const field of ["workspace", "workspaceName"]) {
+		if (
+			Object.hasOwn(command, field) &&
+			(typeof command[field] !== "string" || command[field] !== expectedWorkspaceName)
+		) {
+			return "session_mismatch";
+		}
+	}
+	if (
+		Object.hasOwn(command, "sessionId") &&
+		(typeof command.sessionId !== "string" || command.sessionId !== runtime.session.sessionId)
+	) {
+		return "session_mismatch";
+	}
+	return undefined;
 }
 
 async function runWorkspaceUtilityRpcLoop(stream, handshake, authorization, handleCommand) {

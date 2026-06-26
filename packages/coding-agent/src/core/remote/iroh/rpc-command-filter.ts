@@ -3,6 +3,8 @@ import { serializeJsonLine } from "../../rpc/jsonl.ts";
 
 export const IROH_REMOTE_RPC_CANCELLATION_TYPES = new Set(["abort"]);
 
+export const IROH_REMOTE_RPC_UNSUPPORTED_TYPES = new Set(["get_messages"]);
+
 export const IROH_REMOTE_RPC_PASSTHROUGH_TYPES = new Set([
 	"prompt",
 	"steer",
@@ -81,6 +83,13 @@ export function getIrohRemoteRpcFilterResult(line: string): IrohRemoteRpcFilterR
 
 	if (command.type === "invoke_ui_action" || command.type === "get_ui_action_completions") {
 		return getIrohRemoteUiActionCommandResult(command, responseId, command.type);
+	}
+
+	if (IROH_REMOTE_RPC_UNSUPPORTED_TYPES.has(command.type)) {
+		return {
+			allowed: false,
+			response: createIrohRemoteRpcErrorResponse(responseId, command.type, "unsupported_remote_command"),
+		};
 	}
 
 	if (IROH_REMOTE_RPC_PASSTHROUGH_TYPES.has(command.type)) {

@@ -1800,11 +1800,13 @@ async function integratedVoltDetachedRuntimeTtlScenario() {
 
 async function integratedVoltActiveDetachReconnectTranscriptScenario() {
 	await withStateDir("integrated-active-detach-reconnect", async ({ hostStatePath, stateDir }) => {
-		const responseText = "detached active completion";
-		const fakeOpenAI = await startFakeOpenAICompletionsServer(responseText);
-		const agentDir = await createIntegratedVoltAgentDir(stateDir, { baseUrl: fakeOpenAI.baseUrl });
 		const workspacePath = join(stateDir, "workspace");
 		await mkdir(workspacePath, { recursive: true });
+		const canonicalWorkspacePath = await realpath(workspacePath);
+		const rawResponseText = `detached\nactive\tcompletion\u0000 ${canonicalWorkspacePath}/src/secret.ts`;
+		const responseText = "detached active completion /workspace/src/secret.ts";
+		const fakeOpenAI = await startFakeOpenAICompletionsServer(rawResponseText);
+		const agentDir = await createIntegratedVoltAgentDir(stateDir, { baseUrl: fakeOpenAI.baseUrl });
 		const workspaceArg = `active-detach=${workspacePath}`;
 		const auditPath = getDefaultAuditPath(hostStatePath);
 		const endpoint = await bindRawClientEndpoint("disabled");
@@ -1910,11 +1912,27 @@ async function integratedVoltActiveDetachReconnectTranscriptScenario() {
 
 			fakeOpenAI.releaseResponse();
 			let agentEnd;
-			for (let index = 0; !agentEnd && index < 20; index += 1) {
+			let liveTranscriptEntry;
+			for (let index = 0; (!agentEnd || !liveTranscriptEntry) && index < 30; index += 1) {
 				const { event } = await readRawRpcEvent(rawClient, "integrated active detach completion");
 				if (event.type === "agent_end") agentEnd = event;
+				if (
+					event.type === "transcript_entry" &&
+					event.entry?.role === "assistant" &&
+					event.entry?.text === responseText
+				) {
+					liveTranscriptEntry = event;
+				}
 			}
 			assert(agentEnd, "Expected active detached prompt to finish after reconnect");
+			assert(
+				liveTranscriptEntry &&
+					liveTranscriptEntry.final === true &&
+					JSON.stringify(Object.keys(liveTranscriptEntry).sort()) === JSON.stringify(["entry", "final", "type"]) &&
+					JSON.stringify(Object.keys(liveTranscriptEntry.entry).sort()) ===
+						JSON.stringify(["createdAt", "entryId", "role", "text", "truncated"]),
+				`Expected live assistant transcript_entry with final item schema, got:\n${JSON.stringify(liveTranscriptEntry)}`,
+			);
 
 			const transcript = await readRawRpcResponse(
 				rawClient,
@@ -1926,7 +1944,26 @@ async function integratedVoltActiveDetachReconnectTranscriptScenario() {
 				transcript.event.data?.sessionId === sessionId,
 				`Expected transcript session ${sessionId}, got:\n${JSON.stringify(transcript.event)}`,
 			);
+			assert(
+				transcript.event.data?.workspaceName === "active-detach",
+				`Expected transcript workspace active-detach, got:\n${JSON.stringify(transcript.event)}`,
+			);
 			const transcriptItems = transcript.event.data?.items ?? [];
+			for (const item of transcriptItems) {
+				assert(
+					JSON.stringify(Object.keys(item).sort()) ===
+						JSON.stringify(["createdAt", "entryId", "role", "text", "truncated"]),
+					`Expected exact remote transcript item fields, got:\n${JSON.stringify(item)}`,
+				);
+				assert(
+					typeof item.entryId === "string" &&
+						typeof item.createdAt === "string" &&
+						["user", "assistant", "system", "tool"].includes(item.role) &&
+						typeof item.text === "string" &&
+						typeof item.truncated === "boolean",
+					`Expected scalar transcript item formats, got:\n${JSON.stringify(item)}`,
+				);
+			}
 			assert(
 				transcriptItems.some((item) => item.role === "user" && item.text === "recover while detached"),
 				`Expected detached user prompt in transcript, got:\n${JSON.stringify(transcriptItems)}`,
@@ -1934,6 +1971,64 @@ async function integratedVoltActiveDetachReconnectTranscriptScenario() {
 			assert(
 				transcriptItems.some((item) => item.role === "assistant" && item.text === responseText),
 				`Expected detached assistant response in transcript, got:\n${JSON.stringify(transcriptItems)}`,
+			);
+			assert(
+				transcriptItems.every(
+					(item) => !item.text.includes(workspacePath) && !/[\u0000-\u001f\u007f]/.test(item.text),
+				),
+				`Expected transcript sanitizer to remove host-local text, got:\n${JSON.stringify(transcriptItems)}`,
+			);
+			const newestPage = await readRawRpcResponse(
+				rawClient,
+				{ id: "transcript-active-detach-newest", type: "get_transcript", limit: 1 },
+				"integrated active detach newest transcript page",
+			);
+			assert(
+				newestPage.event.success === true &&
+					newestPage.event.data?.items?.length === 1 &&
+					newestPage.event.data.items[0].role === "assistant" &&
+					newestPage.event.data.items[0].text === responseText &&
+					newestPage.event.data.hasMore === true &&
+					typeof newestPage.event.data.nextBeforeEntryId === "string",
+				`Expected newest transcript page with assistant cursor, got:\n${JSON.stringify(newestPage.event)}`,
+			);
+			const olderPage = await readRawRpcResponse(
+				rawClient,
+				{
+					id: "transcript-active-detach-older",
+					type: "get_transcript",
+					limit: 1,
+					beforeEntryId: newestPage.event.data.nextBeforeEntryId,
+				},
+				"integrated active detach older transcript page",
+			);
+			assert(
+				olderPage.event.success === true &&
+					olderPage.event.data?.items?.length === 1 &&
+					olderPage.event.data.items[0].role === "user" &&
+					olderPage.event.data.items[0].text === "recover while detached" &&
+					olderPage.event.data.items[0].entryId !== newestPage.event.data.nextBeforeEntryId,
+				`Expected older transcript page before cursor, got:\n${JSON.stringify(olderPage.event)}`,
+			);
+			const invalidTranscriptLimit = await readRawRpcResponse(
+				rawClient,
+				{ id: "transcript-active-detach-invalid-limit", type: "get_transcript", limit: 0 },
+				"integrated active detach invalid transcript limit",
+			);
+			assert(
+				invalidTranscriptLimit.event.success === false &&
+					invalidTranscriptLimit.event.error === "invalid_limit",
+				`Expected invalid_limit for transcript limit, got:\n${JSON.stringify(invalidTranscriptLimit.event)}`,
+			);
+			const invalidTranscriptCursor = await readRawRpcResponse(
+				rawClient,
+				{ id: "transcript-active-detach-invalid-cursor", type: "get_transcript", beforeEntryId: "missing-entry" },
+				"integrated active detach invalid transcript cursor",
+			);
+			assert(
+				invalidTranscriptCursor.event.success === false &&
+					invalidTranscriptCursor.event.error === "invalid_cursor",
+				`Expected invalid_cursor for transcript cursor, got:\n${JSON.stringify(invalidTranscriptCursor.event)}`,
 			);
 
 			const revokeCommand = spawnSourceCli(["remote", "revoke", rawClient.nodeId, "--state", hostStatePath]);
@@ -2073,19 +2168,37 @@ async function integratedVoltMultiWorkspaceRuntimeIsolationScenario() {
 				"integrated multi-workspace beta new_session",
 			);
 			assert(
-				betaNewSession.event.success === true,
-				`Expected beta new_session success, got:\n${betaNewSession.lines.join("\n")}`,
+				betaNewSession.event.success === false && betaNewSession.event.error === "unsupported_remote_command",
+				`Expected beta new_session unsupported_remote_command, got:\n${betaNewSession.lines.join("\n")}`,
 			);
-			const betaNewState = await readRawRpcResponse(
+			const betaNewWithMismatch = await readRawRpcResponse(
 				betaClient,
-				{ id: "state-runtime-beta-new", type: "get_state" },
-				"integrated multi-workspace beta get_state after new_session",
+				{ id: "new-session-runtime-beta-mismatch", type: "new_session", sessionId: alphaSessionId },
+				"integrated multi-workspace beta new_session mismatch precedence",
 			);
-			const betaNewSessionId = betaNewState.event.data?.sessionId;
-			assert(betaNewSessionId, `Expected beta new session id, got:\n${JSON.stringify(betaNewState.event)}`);
 			assert(
-				betaNewSessionId !== betaInitialSessionId,
-				`Expected beta new_session to change only beta session, got ${betaNewSessionId}`,
+				betaNewWithMismatch.event.success === false &&
+					betaNewWithMismatch.event.error === "unsupported_remote_command",
+				`Expected new_session unsupported_remote_command before mismatch, got:\n${JSON.stringify(betaNewWithMismatch.event)}`,
+			);
+			const betaRawMessages = await readRawRpcResponse(
+				betaClient,
+				{ id: "get-messages-runtime-beta", type: "get_messages" },
+				"integrated multi-workspace beta raw get_messages",
+			);
+			assert(
+				betaRawMessages.event.success === false &&
+					betaRawMessages.event.error === "unsupported_remote_command",
+				`Expected raw get_messages unsupported_remote_command, got:\n${JSON.stringify(betaRawMessages.event)}`,
+			);
+			const betaStateAfterUnsupported = await readRawRpcResponse(
+				betaClient,
+				{ id: "state-runtime-beta-after-unsupported", type: "get_state" },
+				"integrated multi-workspace beta get_state after unsupported commands",
+			);
+			assert(
+				betaStateAfterUnsupported.event.data?.sessionId === betaInitialSessionId,
+				`Expected beta stream to remain on ${betaInitialSessionId}, got:\n${JSON.stringify(betaStateAfterUnsupported.event)}`,
 			);
 			const alphaAfterBetaNew = await readRawRpcResponse(
 				rawClient,
@@ -2100,8 +2213,8 @@ async function integratedVoltMultiWorkspaceRuntimeIsolationScenario() {
 			let hostState = JSON.parse(await readFile(hostStatePath, "utf8"));
 			assert(
 				hostState.clients?.[0]?.lastSessionIdByWorkspace?.alpha === alphaSessionId &&
-					hostState.clients?.[0]?.lastSessionIdByWorkspace?.beta === betaNewSessionId,
-				`Expected per-workspace last session IDs after beta new_session, got:\n${JSON.stringify(hostState.clients)}`,
+					hostState.clients?.[0]?.lastSessionIdByWorkspace?.beta === betaInitialSessionId,
+				`Expected per-workspace last session IDs to stay bound, got:\n${JSON.stringify(hostState.clients)}`,
 			);
 
 			const alphaList = await readRawRpcResponse(
@@ -2112,7 +2225,7 @@ async function integratedVoltMultiWorkspaceRuntimeIsolationScenario() {
 			const alphaSessions = alphaList.event.data?.sessions ?? [];
 			assert(
 				alphaSessions.some((session) => session.sessionId === alphaSessionId) &&
-					!alphaSessions.some((session) => session.sessionId === betaInitialSessionId || session.sessionId === betaNewSessionId),
+					!alphaSessions.some((session) => session.sessionId === betaInitialSessionId),
 				`Expected alpha list_sessions to stay workspace-scoped, got:\n${JSON.stringify(alphaList.event)}`,
 			);
 			const betaList = await readRawRpcResponse(
@@ -2122,35 +2235,81 @@ async function integratedVoltMultiWorkspaceRuntimeIsolationScenario() {
 			);
 			const betaSessions = betaList.event.data?.sessions ?? [];
 			assert(
-				betaSessions.some((session) => session.sessionId === betaNewSessionId) &&
+				betaSessions.some((session) => session.sessionId === betaInitialSessionId) &&
 					!betaSessions.some((session) => session.sessionId === alphaSessionId),
 				`Expected beta list_sessions to stay workspace-scoped, got:\n${JSON.stringify(betaList.event)}`,
 			);
 
 			const alphaSwitchToBeta = await readRawRpcResponse(
 				rawClient,
-				{ id: "switch-runtime-alpha-to-beta", type: "switch_session_by_id", sessionId: betaNewSessionId },
+				{ id: "switch-runtime-alpha-to-beta", type: "switch_session_by_id", sessionId: betaInitialSessionId },
 				"integrated multi-workspace alpha switch_session_by_id beta",
 			);
 			assert(
 				alphaSwitchToBeta.event.success === false &&
-					alphaSwitchToBeta.event.error === `Session not found in current workspace: ${betaNewSessionId}`,
-				`Expected alpha to reject beta session switch, got:\n${JSON.stringify(alphaSwitchToBeta.event)}`,
+					alphaSwitchToBeta.event.error === "unsupported_remote_command",
+				`Expected alpha switch_session_by_id unsupported_remote_command, got:\n${JSON.stringify(alphaSwitchToBeta.event)}`,
 			);
 			const betaSwitchCurrent = await readRawRpcResponse(
 				betaClient,
-				{ id: "switch-runtime-beta-current", type: "switch_session_by_id", sessionId: betaNewSessionId },
+				{ id: "switch-runtime-beta-current", type: "switch_session_by_id", sessionId: betaInitialSessionId },
 				"integrated multi-workspace beta switch_session_by_id current",
 			);
 			assert(
-				betaSwitchCurrent.event.success === true,
-				`Expected beta switch_session_by_id success, got:\n${JSON.stringify(betaSwitchCurrent.event)}`,
+				betaSwitchCurrent.event.success === false &&
+					betaSwitchCurrent.event.error === "unsupported_remote_command",
+				`Expected beta switch_session_by_id unsupported_remote_command, got:\n${JSON.stringify(betaSwitchCurrent.event)}`,
+			);
+			const alphaPromptRetarget = await readRawRpcResponse(
+				rawClient,
+				{
+					id: "prompt-runtime-alpha-retarget-beta",
+					type: "prompt",
+					message: "should not run on beta",
+					sessionId: betaInitialSessionId,
+				},
+				"integrated multi-workspace alpha prompt retarget beta",
+			);
+			assert(
+				alphaPromptRetarget.event.success === false &&
+					alphaPromptRetarget.event.error === "session_mismatch",
+				`Expected alpha prompt retarget session_mismatch, got:\n${JSON.stringify(alphaPromptRetarget.event)}`,
+			);
+			const betaUiActionRetarget = await readRawRpcResponse(
+				betaClient,
+				{
+					id: "invoke-runtime-beta-retarget-alpha",
+					type: "invoke_ui_action",
+					action: "session.new",
+					sessionId: alphaSessionId,
+				},
+				"integrated multi-workspace beta invoke_ui_action retarget alpha",
+			);
+			assert(
+				betaUiActionRetarget.event.success === false &&
+					betaUiActionRetarget.event.error === "session_mismatch",
+				`Expected beta UI action retarget session_mismatch, got:\n${JSON.stringify(betaUiActionRetarget.event)}`,
+			);
+			const betaHostActionRetarget = await readRawRpcResponse(
+				betaClient,
+				{
+					id: "host-action-runtime-beta-retarget-alpha",
+					type: "host_action_response",
+					decision: "approved",
+					sessionId: alphaSessionId,
+				},
+				"integrated multi-workspace beta host_action_response retarget alpha",
+			);
+			assert(
+				betaHostActionRetarget.event.success === false &&
+					betaHostActionRetarget.event.error === "session_mismatch",
+				`Expected beta host action response retarget session_mismatch, got:\n${JSON.stringify(betaHostActionRetarget.event)}`,
 			);
 			hostState = JSON.parse(await readFile(hostStatePath, "utf8"));
 			assert(
 				hostState.clients?.[0]?.lastSessionIdByWorkspace?.alpha === alphaSessionId &&
-					hostState.clients?.[0]?.lastSessionIdByWorkspace?.beta === betaNewSessionId,
-				`Expected beta session switch to preserve per-workspace last session IDs, got:\n${JSON.stringify(hostState.clients)}`,
+					hostState.clients?.[0]?.lastSessionIdByWorkspace?.beta === betaInitialSessionId,
+				`Expected rejected retargets to preserve per-workspace last session IDs, got:\n${JSON.stringify(hostState.clients)}`,
 			);
 
 			const alphaPrompt = await readRawRpcResponse(
@@ -2179,7 +2338,7 @@ async function integratedVoltMultiWorkspaceRuntimeIsolationScenario() {
 				"integrated multi-workspace beta get_state while alpha aborted",
 			);
 			assert(
-				betaStreaming.event.data?.sessionId === betaNewSessionId && betaStreaming.event.data?.isStreaming === true,
+				betaStreaming.event.data?.sessionId === betaInitialSessionId && betaStreaming.event.data?.isStreaming === true,
 				`Expected beta to keep streaming after alpha abort, got:\n${JSON.stringify(betaStreaming.event)}`,
 			);
 

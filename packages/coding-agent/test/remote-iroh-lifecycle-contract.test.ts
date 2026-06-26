@@ -178,6 +178,17 @@ describe("Iroh remote lifecycle command contract", () => {
 				},
 			});
 		}
+
+		expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: "messages-1", type: "get_messages" }))).toEqual({
+			allowed: false,
+			response: {
+				id: "messages-1",
+				type: "response",
+				command: "get_messages",
+				success: false,
+				error: "unsupported_remote_command",
+			},
+		});
 	});
 
 	test("clean transport close is not translated into an abort command", async () => {
