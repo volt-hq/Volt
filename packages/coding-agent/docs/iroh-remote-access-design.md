@@ -2,13 +2,13 @@
 
 ## Status
 
-The Iroh remote host is a supported preview for Node.js npm installs and source checkouts with optional `@number0/iroh` available for the platform. RPC mode has a transport abstraction, Iroh streams have a structurally typed RPC adapter, remote command filtering is available, and the Iroh remote helpers cover tickets, handshakes, host identity verification, host state, authorization, workspace selection, audit logging, redaction, reconnect/session selection, revocation, active stream registration, and host/client engine orchestration. `volt remote host` launches a product host entrypoint in the coding-agent package and runs Volt's runtime in-process over `runIrohRemoteRpcMode()`. Integrated hosts advertise `multi_streams.v1`, allow one active stream per client/workspace while permitting other workspace streams on the same Iroh connection, treat stream close as client detach, keep active work running on the host, and reserve explicit cancellation for the `abort` RPC command. The preview wire contract is documented in [Iroh Remote Protocol v1](iroh-remote-protocol.md). Unsupported areas remain explicit: Bun binary builds reject remote host startup, spawned child compatibility mode remains connection-scoped, host process exit is not durable recovery, `volt remote status` is persisted-state-only, cross-network relay should be validated with `--relay default` in the target environment, and mobile UI/product work is outside this host preview.
+The Iroh remote host is a supported preview for Node.js npm installs and source checkouts with optional `@number0/iroh` available for the platform. RPC mode has a transport abstraction, Iroh streams have a structurally typed RPC adapter, remote command filtering is available, and the Iroh remote helpers cover tickets, handshakes, host identity verification, host state, authorization, workspace selection, audit logging, redaction, reconnect/session selection, revocation, active stream registration, and host/client engine orchestration. `volt remote host` launches a product host entrypoint in the coding-agent package and runs Volt's runtime in-process over `runIrohRemoteRpcMode()`. Integrated hosts advertise `multi_streams.v1`, allow one active stream per client/workspace while permitting other workspace streams on the same Iroh connection, treat stream close as client detach, keep active work running on the host, and reserve explicit cancellation for the `abort` RPC command. The iOS app now uses the saved-host and workspace metadata exposed by this host preview to open, switch, detach, and recover multiple registered workspaces without another QR scan. The preview wire contract is documented in [Iroh Remote Protocol v1](iroh-remote-protocol.md). Unsupported areas remain explicit: Bun binary builds reject remote host startup, spawned child compatibility mode remains connection-scoped, host process exit is not durable recovery, same-workspace multi-conversation support is deferred, `volt remote status` is persisted-state-only, and cross-network relay should be validated with `--relay default` in the target environment.
 
 ## Summary
 
 Add optional remote access that exposes Volt's existing RPC protocol over [Iroh](https://www.iroh.computer/blog/v1). The native `@number0/iroh` dependency is optional in the coding-agent package, while Volt core provides the typed transport, handshake, state, authorization, audit, redaction, reconnect, revocation, and engine helpers needed for the integrated remote mode.
 
-This turns Volt into a remotely reachable local coding agent without requiring users to open ports, configure reverse proxies, or move provider credentials to a mobile client. A future iOS app can use Iroh Swift support to connect to the user's host machine and render a native UI from RPC events.
+This turns Volt into a remotely reachable local coding agent without requiring users to open ports, configure reverse proxies, or move provider credentials to a mobile client. The iOS app uses Iroh Swift support to connect to the user's host machine and render a native UI from RPC events.
 
 ## Background
 
@@ -18,7 +18,7 @@ Volt already has three relevant layers:
 - RPC mode (`volt --mode rpc`) for language-agnostic clients over LF-delimited JSONL.
 - Extension UI requests in RPC mode, so remote clients can respond to confirmation, input, and selection prompts.
 
-Iroh v1 provides key-based dialing, encrypted QUIC connections, NAT traversal, local-first discovery, relay fallback, and stable v1 wire compatibility. The v1 announcement also calls out official Rust, Node.js, Swift, Kotlin, and Python support, which matches a host-side native daemon plus future mobile clients.
+Iroh v1 provides key-based dialing, encrypted QUIC connections, NAT traversal, local-first discovery, relay fallback, and stable v1 wire compatibility. The v1 announcement also calls out official Rust, Node.js, Swift, Kotlin, and Python support, which matches a host-side native daemon plus mobile clients.
 
 ## Goals
 
@@ -193,14 +193,16 @@ Suggested shape:
     {
       "nodeId": "<client-node-id>",
       "label": "Jordan iPhone",
-      "allowedWorkspaces": ["volt"],
-      "allowedTools": "read,bash,edit,write,grep,find,ls"
+      "allowedTools": "read,bash,edit,write,grep,find,ls",
+      "lastSessionIdByWorkspace": {
+        "volt": "<session-id>"
+      }
     }
   ]
 }
 ```
 
-The host state file also persists `hostSecretKey`, consumed pairing secret hashes, pending pairing ticket hashes plus non-secret metadata, per-client last session IDs, and push relay target metadata. It does not persist raw pairing secrets or raw FCM registration tokens, but it does persist the target-scoped relay credential needed to notify a paired phone after the Iroh stream disconnects. `volt remote status` prints a secret-free persisted-state view. Preview does not store relay mode in the persisted state; the running host owns the live relay mode, tickets include a relay hint, and `volt remote pair --relay <disabled|default>` can be used as an expected-live-mode check when needed.
+The host state file also persists `hostSecretKey`, consumed pairing secret hashes, pending pairing ticket hashes plus non-secret metadata, per-client last session IDs keyed by workspace, and push relay target metadata. It does not persist raw pairing secrets or raw FCM registration tokens, but it does persist the target-scoped relay credential needed to notify a paired phone after the Iroh stream disconnects. `volt remote status` prints a secret-free persisted-state view. Preview does not store relay mode in the persisted state; the running host owns the live relay mode, tickets include a relay hint, and `volt remote pair --relay <disabled|default>` can be used as an expected-live-mode check when needed.
 
 `volt remote host` defaults to relay/discovery mode `"default"` so saved-host reconnects can survive host restarts. Mobile-facing host startup uses `volt remote host --mobile`, which also starts with relay/discovery mode `"default"` and does not create a startup pairing ticket. `volt remote pair` creates tickets with the running host's relay mode, unless `--relay disabled` is supplied as an explicit LAN-only expectation check.
 
@@ -222,6 +224,8 @@ volt remote pair --workspace volt
 volt remote status
 volt remote clients
 volt remote revoke <node-id>
+volt remote host --register-workspace app=/path/to/other-repo
+volt remote host --unregister-workspace app
 
 # Demo client used by the source checkout examples.
 npm run iroh:poc:client -- "<ticket>" --get-state
@@ -291,6 +295,7 @@ Preview validation:
 - Verify a missing workspace path or Volt executable fails before printing a pairing ticket.
 - Verify mobile-facing host startup creates no pending pairing ticket until `volt remote pair` is run.
 - Verify a client cannot request a workspace outside the host allowlist.
+- Verify one paired client can open two registered workspace streams concurrently when `multi_streams.v1` is advertised, and that closing or aborting one stream does not affect the other.
 
 Automated tests for a monorepo version:
 
@@ -315,18 +320,19 @@ Automated tests for a monorepo version:
 These are outside the host preview support boundary:
 
 - Should the long-term host remain a Node.js package using Iroh Node bindings, or add a Rust/native sidecar?
-- How should mobile clients display and approve extension UI prompts?
+- Which additional mobile-native extension UI controls should be supported beyond the current confirmation and action surfaces?
 - Should sessions created over remote access be tagged as remote in session metadata?
 
 Resolved preview decisions:
 
 - Remote clients use the default built-in tool grant (`read,bash,edit,write,grep,find,ls`) plus active extension tools unless configured otherwise, and keep their pair-time built-in tool grant on reconnect.
 - Remote outbound state/events normalize workspace paths to `/workspace`, keep generic host paths intact, and only use dedicated redaction for host-only session, export, and bash-output paths.
-- Pairing is workspace-bound by saved workspace name; clients cannot request arbitrary host paths.
+- Pairing is workstation-scoped by host state file; clients select registered workspace names and cannot request arbitrary host paths.
 - Mobile-facing host startup skips startup pairing; Pair Phone is the explicit `volt remote pair` path.
 - Transport close is detach, not cancel; remote cancellation is the `abort` RPC command.
 - Spawned child compatibility mode remains connection-scoped, while integrated runtime mode is the supported active-work detach path.
 - Host process exit is not durable recovery; only persisted session state can be recovered after restarting the host.
+- Integrated multi-stream hosts advertise `multi_streams.v1`; old hosts without that feature remain compatible through single-workspace operation or one-connection-per-workspace fallback when supported.
 
 ## References
 

@@ -13,6 +13,29 @@ Volt is a local coding-agent monorepo with a CLI, agent runtime, provider API, a
 | **[@earendil-works/volt-ai](packages/ai)** | Unified multi-provider LLM API |
 | **[@earendil-works/volt-tui](packages/tui)** | Terminal UI library with differential rendering |
 
+## Remote Access Preview
+
+`volt remote host` can expose a local Volt runtime to a paired phone over Iroh
+without moving provider credentials or repository files off the host. Pairing is
+workstation-scoped: register local workspaces by name, pair the phone once with
+`volt remote pair`, then the phone can open known workspace names without another
+QR scan.
+
+Hosts that advertise `multi_streams.v1` let one paired client keep multiple
+workspace streams open at once, one active stream per registered workspace.
+Commands, sessions, transcripts, native actions, host actions, notifications,
+and `/workspace` path mapping stay scoped to the selected stream workspace.
+Closing a stream is detach only; user cancellation is the `abort` RPC command.
+Mobile clients recover from backgrounding by reopening their saved open
+workspace set and refreshing `get_state` plus `get_transcript` per workspace.
+Same-workspace multi-conversation support, per-workspace client grants, and host
+path browsing/creation/rename/delete remain out of scope for the preview.
+
+See [Using Volt](packages/coding-agent/docs/usage.md#remote-access-over-iroh-preview),
+[Security](packages/coding-agent/docs/security.md#remote-access-over-iroh-preview),
+and [Iroh Remote Protocol v1](packages/coding-agent/docs/iroh-remote-protocol.md)
+for setup commands, fallback behavior for old hosts, and the wire contract.
+
 ## Permissions And Containerization
 
 Volt does not include a built-in permission system for restricting filesystem, process, network, or credential access. By default, it runs with the permissions of the user and process that launched it.

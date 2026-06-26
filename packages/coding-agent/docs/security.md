@@ -60,7 +60,7 @@ Supported preview safety model:
 
 - Nothing listens until the host user runs `volt remote host`.
 - Workspaces are registered locally by the desktop user with saved names such as `volt=/path/to/repo` or `volt remote host --register-workspace volt=/path/to/repo`; clients cannot request arbitrary host paths.
-- Registering a workspace is not a remote API. Clients cannot create, rename, delete, or path-map host workspaces from the app.
+- Registering a workspace is a local desktop action. Remote clients cannot create, rename, delete files, browse host paths, or path-map host workspaces from the app. A reviewed remote unregister request may remove a known workspace name from host state only; it does not delete files.
 - The default remote tool grant includes the built-in coding tools `read,bash,edit,write,grep,find,ls` plus active tools registered by loaded extensions. Custom grants that differ from the default built-in list are strict; extension tools must be named explicitly there.
 - Pairing tickets are short-lived, one-time credentials. Persisted state stores secret hashes and non-secret metadata, not raw pairing secrets.
 - Pairing through `volt remote pair` requires a running host control channel; offline ticket generation from persisted state is not supported.
@@ -68,11 +68,12 @@ Supported preview safety model:
 - Paired clients are persisted until revoked with `volt remote revoke <node-id>`.
 - After pairing, saved-host reconnect uses the persisted client node ID and a secret-free client saved-host record. Ordinary app reconnect, temporary network loss, or host restart with the same host state path should not require scanning another QR.
 - Pairing is workstation-scoped for the host state file. A paired phone can reconnect to any registered workspace name in that state file, including workspaces registered after pairing, without another QR scan. The app receives and selects names and host feature strings only, never host-local paths.
-- Hosts that advertise `multi_streams.v1` may let the same paired phone open streams for multiple registered workspaces on one Iroh connection. Each stream is still authorized by registered workspace name, and outbound `/workspace` path mapping is scoped to that stream's selected workspace.
+- Hosts that advertise `multi_streams.v1` may let the same paired phone open streams for multiple registered workspaces on one Iroh connection. Each stream is still authorized by registered workspace name, outbound `/workspace` path mapping is scoped to that stream's selected workspace, and the preview limit is one active stream per client/workspace.
+- If `multi_streams.v1` is missing, new clients stay compatible with single-workspace hosts and may try one-connection-per-workspace fallback. Failure to keep multiple workspaces live is a degraded host capability, not a pairing or trust failure.
 - Registering another workspace does not grant more built-in tools. The client's persisted `allowedTools` grant applies across every registered workspace until the client is revoked and paired again with a different grant; when that grant is the default built-in list, active extension tools in the selected workspace are also exposed.
-- Revocation removes future access from persisted state and asks a live host to close matching active streams and connections when one is reachable. A revoked phone is blocked from every registered workspace in that state file.
+- Revocation removes future access from persisted state and asks a live host to close matching active streams, connections, and integrated runtimes when one is reachable. A revoked phone is blocked from every registered workspace in that state file.
 - A revoked phone node ID cannot reconnect or re-pair with only a generic new QR. The desktop host must approve that node with `volt remote approve-repair <node-id>`, then issue a fresh active pairing ticket.
-- In the default integrated runtime, Iroh stream close is detach, not cancellation. Active work can continue on the host until it finishes or an authorized client sends `abort`.
+- In the default integrated runtime, Iroh stream close is detach, not cancellation. Closing one workspace stream does not close or abort other active workspace streams for the same phone. Active work can continue on the host until it finishes or an authorized client sends `abort`.
 - Detached integrated runtimes can be reattached only by the same authoritative Iroh client node ID and workspace, and idle detached runtimes expire by the host retention policy.
 - `volt remote status` and `volt remote clients` report persisted workspaces, clients, tool grants, state path, audit path, and redacted push target metadata without printing secrets or secret hashes.
 - Default paths are `~/.volt/agent/remote/iroh-host.json` for state and `~/.volt/agent/remote/iroh-host.audit.jsonl` for audit JSONL.

@@ -110,7 +110,18 @@ Client-local reconnect outcomes are not sent by the host: `host_unreachable` mea
 
 A successful pairing stores the client as authorized for the workstation represented by the host state file. That paired client can use any registered workspace name in that state file, including workspaces registered later, without scanning another QR. Revocation blocks that client node ID from every registered workspace. The client's persisted `allowedTools` grant applies across all selected workspaces; registering a workspace does not add built-in tools. When the persisted grant is the default built-in list, the host also exposes active tools registered by loaded extensions in the selected workspace.
 
-A paired client may have only one active stream per workspace in v1 preview. When the host advertises `multi_streams.v1`, the same authoritative client node ID may open additional streams on the same Iroh connection for other registered workspaces. If the same authoritative client node ID opens another stream to a workspace that already has an active stream, the host rejects the new stream with a normal handshake failure response whose `error` is `client already connected`; the existing stream remains active.
+A paired client may have only one active stream per workspace in v1 preview. When the host advertises `multi_streams.v1`, the same authoritative client node ID may open additional streams on the same Iroh connection for other registered workspaces. If the same authoritative client node ID opens another stream to a workspace that already has an active stream, the host rejects the new stream with a normal handshake failure response whose `error` is `client already connected`; the existing stream remains active. Same-workspace multi-conversation support is intentionally deferred until a future protocol can identify runtime/conversation identity separately from workspace stream identity.
+
+## Multi-stream compatibility
+
+`multi_streams.v1` is an optional host feature, not a protocol version bump. New clients must keep working with hosts that omit it:
+
+- If the current verified host connection advertises `multi_streams.v1`, clients may keep that Iroh connection open and add one bidirectional stream per registered workspace.
+- If the feature is missing, clients should treat the host as legacy single-stream for that connection. They may still try one-connection-per-workspace fallback using the same persisted client endpoint identity and a workspace-specific saved-host ticket for each registered workspace.
+- A fallback is usable only when each workspace connection independently verifies the same saved host identity and stays alive without replacing or closing the other workspace.
+- If a host cannot keep multiple workspaces live, clients should preserve the saved host, keep or reopen one healthy selected workspace when possible, and explain the degraded capability to the user. The current product copy is: "Multiple workspaces require an updated desktop host. Close the current workspace or update Volt on this computer to keep workspaces open together."
+
+Missing `multi_streams.v1`, one-connection fallback failure, and `workspace_unavailable` are not QR re-pair requirements by themselves. `host_identity_mismatch`, malformed saved-host data, `client_unknown`, and `client_revoked` still require explicit Pair Again or Forget Host style UX.
 
 ## Reconnect and session selection
 
@@ -190,6 +201,7 @@ The host forwards only these inbound RPC command `type` values from remote clien
 - `register_push_target`
 - `list_sessions`
 - `switch_session_by_id`
+- `unregister_workspace`
 - `extension_ui_response`
 
 All other command types receive a JSONL `response` with `success:false` and are not forwarded to the local Volt RPC process. Within this allowlist, only `abort` is a direct cancellation command.
@@ -225,6 +237,20 @@ Completion notifications sent through the relay, or over JSONL as `notification_
 ```
 
 The `workspace` field is a registered workspace name only. It must never contain a host-local path.
+
+`unregister_workspace` removes a registered workspace name from the host state file without deleting files:
+
+```json
+{"id":"unregister-1","type":"unregister_workspace","name":"old-workspace"}
+```
+
+The host rejects missing names, the currently selected stream workspace, and unknown workspaces. A successful response includes refreshed safe workspace metadata when available:
+
+```json
+{"id":"unregister-1","type":"response","command":"unregister_workspace","success":true,"data":{"removedWorkspace":"old-workspace","workspaceNames":["volt"]}}
+```
+
+This command is host-state metadata management only. It does not create, rename, browse, path-map, or delete host workspace directories, and response data must contain registered names and availability statuses only, never host-local paths.
 
 `get_ui_capabilities`, `get_ui_actions`, `get_ui_action_completions`, and `invoke_ui_action` expose the v1 native UI action protocol for the narrow remote-safe action set. Remote `get_ui_capabilities` advertises `ui_action_invocation.v1` only when the host accepts invocation and `ui_action_completions.v1` when action argument completions are available. Descriptor responses omit prompt bodies, skill content, raw `sourceInfo`, extension source paths, prompt and skill file paths, skill base directories, host session files, provider metadata, and secrets. They still pass through the outbound path handling layer below before being written to the remote stream.
 

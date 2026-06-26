@@ -181,11 +181,27 @@ Phone setup uses a Pair Phone flow. For mobile-facing setup, start the host with
 
 Workspace access is workstation-scoped in this preview. Register local desktop directories by name in the host state file, then pair the phone once. The app can later select only those registered workspace names; it cannot request host paths. Registering another workspace under the same state file makes that name available to already paired clients without another QR scan. The client's persisted tool grant applies across every registered workspace, and revocation blocks that phone from every workspace.
 
+Hosts that advertise `multi_streams.v1` can keep one paired phone connected to
+multiple registered workspaces at the same time, with one active stream per
+workspace. Commands and state are stream-scoped: prompts, `abort`,
+`new_session`, `list_sessions`, `switch_session_by_id`, `get_state`,
+`get_transcript`, native actions, host actions, notifications, and `/workspace`
+path mapping affect only the stream's workspace. Closing one stream is detach
+for that workspace only; it does not cancel active work or close other workspace
+streams. If a host does not advertise `multi_streams.v1`, new clients remain
+compatible with single-workspace operation and may try one-connection-per-workspace
+fallback. If a host cannot keep multiple workspaces live, clients
+should preserve the saved host, keep one healthy workspace when possible, and
+surface: "Multiple workspaces require an updated desktop host. Close the
+current workspace or update Volt on this computer to keep workspaces open
+together."
+
 Happy path:
 
 ```bash
-# Terminal 1: register one named workspace, then start the mobile-facing host.
+# Terminal 1: register one or more named workspaces, then start the mobile-facing host.
 volt remote host --register-workspace volt=/path/to/repo --allow-tools read,grep,find,ls
+volt remote host --register-workspace app=/path/to/other-repo
 cd /path/to/repo
 volt remote host --mobile --yes
 
@@ -205,10 +221,11 @@ Common management commands:
 ```bash
 volt remote status                         # persisted state, workspaces, clients, tools, state/audit paths
 volt remote clients                        # paired client JSON without secrets
-volt remote revoke <node-id>               # revoke future access; live hosts also close active connections
+volt remote revoke <node-id>               # revoke future access; live hosts also close active streams/connections
 volt remote approve-repair <node-id>       # allow a revoked phone identity to re-pair with a fresh ticket
 volt remote host --register-workspace .    # register current directory by basename
 volt remote host --register-workspace other=/path/to/other
+volt remote host --unregister-workspace other
 volt remote pair --workspace volt --label "Jordan iPhone"
 volt remote host --workspace volt=/path/to/repo --no-pairing
 
@@ -219,7 +236,7 @@ volt remote pair --workspace volt --label "Jordan iPhone"
 
 Options to know:
 
-- Host: `--workspace <name=path>`, `--register-workspace [path|name=path]`, `--mobile`, `--relay <disabled|default>`, `--state <path>`, `--audit <path>`, `--allow-tools <list>`, `--profile <name>`, `--agent-dir <path>`, `--push-relay-url <url>`, `--push-relay-auth-token <token>`, `--detached-runtime-ttl-ms <ms>`, `--approve`, `--no-pairing`, `--once`, `--yes`.
+- Host: `--workspace <name=path>`, `--register-workspace [path|name=path]`, `--unregister-workspace <name>`, `--mobile`, `--relay <disabled|default>`, `--state <path>`, `--audit <path>`, `--allow-tools <list>`, `--profile <name>`, `--agent-dir <path>`, `--push-relay-url <url>`, `--push-relay-auth-token <token>`, `--detached-runtime-ttl-ms <ms>`, `--approve`, `--no-pairing`, `--once`, `--yes`.
 - Pair: `--workspace <name>`, `--allow-tools <list>`, `--label <label>`, `--ttl <duration>`, `--state <path>`, `--relay <disabled|default>`, `--yes`.
 - Management: `--state <path>` and `--audit <path>` for `status`, `clients`, `revoke`, and `approve-repair`.
 
@@ -227,18 +244,19 @@ Security and support boundary:
 
 - The default remote tool grant enables the built-in tools `read,bash,edit,write,grep,find,ls` plus active tools registered by loaded extensions. Custom `--allow-tools` grants that differ from the default built-in list are strict; name extension tools explicitly when using one.
 - Granting `bash`, `edit`, or `write` can modify host files or run shell commands. Extension tools run code installed on the host and may do the same. TTY host startup asks for confirmation and offers `trust` to continue while trusting project-local workspace resources; noninteractive unsafe grants, including the default grant, require `--yes`.
-- `--register-workspace` is a local desktop action. It stores a workspace name and realpath in the selected host state file, without starting a remote API for clients to create, rename, delete, or path-map workspaces. In a TTY, registration also offers `trust` when the workspace has project-local Volt resources; `--register-workspace --approve` saves workspace trust noninteractively.
+- `--register-workspace` is a local desktop action. It stores a workspace name and realpath in the selected host state file, without starting a remote API for clients to create, rename, browse, or path-map workspaces. In a TTY, registration also offers `trust` when the workspace has project-local Volt resources; `--register-workspace --approve` saves workspace trust noninteractively. Removing a workspace unregisters the saved name from host state only; it does not delete files.
 - Bare `volt remote host` exposes the current working directory. If that directory is already registered, the saved workspace name and tool defaults are reused; otherwise the host registers it by basename.
 - If a host state file has multiple registered workspaces, `volt remote pair --workspace <name>` chooses the initial workspace for the ticket. It does not restrict that paired phone to only that workspace.
 - Pairing tickets are short-lived and one-time. Bare preview `volt remote host` shows a startup ticket as a terminal QR code by default when stderr is a TTY. `volt remote host --mobile` starts without an active startup pairing invite; use `volt remote pair` to create the QR/ticket when pairing a phone. The QR is for first setup or explicit Pair Again, not ordinary reconnect. `volt remote pair` is mediated by a running host control channel; offline pairing from persisted state is not supported.
 - Saved-host reconnects omit the pairing secret and verify the host node ID. App restart, foreground reconnect after network loss, and host restart with the same `~/.volt/agent/remote/iroh-host.json` state path should use the saved-host path instead of asking for another QR.
 - A paired phone is authorized for the workstation represented by the host state file. It can reconnect to any registered workspace name in that state file, including names registered later, without scanning another QR.
+- On hosts that advertise `multi_streams.v1`, that paired phone can keep multiple workspace streams open together. The preview limit is one active stream per client/workspace; same-workspace multi-conversation support is deferred.
 - Registering a workspace does not add built-in tools to a client. The persisted client `allowedTools` grant applies across all registered workspaces until the client is revoked and paired again with a different grant; when that grant is the default built-in list, active extension tools in the selected workspace are also exposed.
-- Revoked clients cannot reconnect or silently re-pair. To trust the same phone identity again, run `volt remote approve-repair <node-id>` on the desktop host, then create a fresh pairing ticket.
+- Revoked clients cannot reconnect or silently re-pair. Live hosts close active streams and runtimes for that phone across all workspaces. To trust the same phone identity again, run `volt remote approve-repair <node-id>` on the desktop host, then create a fresh pairing ticket.
 - Reconnect clients should distinguish `host_unreachable`, `host_identity_mismatch`, `saved_host_invalid`, `client_unknown`, `client_revoked`, `workspace_unavailable`, and `workspace_forbidden`. Ordinary offline hosts are retry states that keep the saved host; invalid, mismatched, unknown, or revoked relationships require Pair Again or Forget Host decisions.
-- Remote clients select saved workspace names only. They cannot request arbitrary host paths. If a selected name is not registered or its saved path is stale, reconnect fails with `workspace_unavailable` while keeping the saved host.
+- Remote clients select saved workspace names only. They cannot request arbitrary host paths. If a selected name is not registered or its saved path is stale, reconnect fails with `workspace_unavailable` while keeping the saved host. A reviewed remote unregister request can remove a known workspace name from host state without deleting files; creating, renaming, browsing, or path-mapping host workspaces stays local to the desktop host.
 - Remote sessions do not bypass project trust. A saved trust decision for the workspace is honored; otherwise the host runs project resources untrusted unless the host user chooses `trust` in the prompt or passes `--approve`.
-- In the default integrated runtime, app backgrounding, network loss, or stream close detaches the client and does not send `abort`. Active work continues on the host; the same paired client/workspace can reconnect and refresh with `get_state` and `get_transcript`.
+- In the default integrated runtime, app backgrounding, network loss, or stream close detaches the client and does not send `abort`. Active work continues on the host; the same paired client/workspace can reconnect and refresh with `get_state` and `get_transcript`. A multi-workspace client should reopen its saved open workspace set on foreground recovery and refresh each workspace independently.
 - Remote stop/cancel controls must send the `abort` RPC command. Closing the stream without `abort` is disconnect only.
 - Idle detached integrated runtimes are retained for 30 minutes by default; change this with `--detached-runtime-ttl-ms <ms>`. Host exit, crash, explicit shutdown, or `--once` is not durable recovery for active work.
 - `--use-volt` and `--source-volt` spawned child compatibility modes remain connection-scoped. A disconnect can stop the spawned RPC child and any active in-memory work.
@@ -247,7 +265,7 @@ Security and support boundary:
 - `volt remote host` uses `--relay default` by default so saved-host reconnects can survive host restarts. `volt remote host --mobile` remains the mobile-facing mode because it skips startup pairing. Use `--relay disabled` only as an explicit LAN-only opt-out.
 - `volt remote pair` creates pairing tickets with the live host relay mode unless `--relay <disabled|default>` is supplied as an expectation check; it cannot change a running host's relay mode.
 - `volt remote host` requires a Node.js npm install or source checkout with optional `@number0/iroh` available for the platform. Bun binary builds reject it because the native Iroh adapter is not bundled.
-- Known preview limitations: spawned child compatibility modes are connection-scoped, host process exit is not durable active-work recovery, the app selects registered names by reconnecting instead of live-switching cwd inside an active stream, per-workspace client grants and remote workspace management are deferred, `volt remote status` is a persisted-state view, and default relay/discovery should be validated in the target cross-network environment.
+- Known preview limitations: spawned child compatibility modes are connection-scoped, host process exit is not durable active-work recovery, each workspace is limited to one active stream per paired client, same-workspace multi-conversation support is deferred, per-workspace client grants are deferred, remote workspace creation/rename/path browsing stays local to the desktop host, `volt remote status` is a persisted-state view, and default relay/discovery should be validated in the target cross-network environment.
 
 See [Iroh remote protocol v1](iroh-remote-protocol.md), [Iroh remote access design](iroh-remote-access-design.md), and [Security](security.md#remote-access-over-iroh-preview).
 
