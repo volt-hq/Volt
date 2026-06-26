@@ -11,6 +11,9 @@ import {
 	assertIrohRemoteHandshakeHostIdentity,
 	createIrohRemoteHandshakeFailure,
 	createIrohRemoteHandshakeSuccess,
+	type IrohRemoteConversationHandshakeMetadata,
+	type IrohRemoteConversationSelection,
+	IrohRemoteHandshakeError,
 	type IrohRemoteHandshakeFailure,
 	type IrohRemoteHandshakeResponse,
 	type IrohRemoteHandshakeSuccess,
@@ -99,6 +102,10 @@ export type IrohRemoteHostHandshakeResult =
 
 export interface IrohRemoteHostReadHandshakeOptions extends IrohRemoteHandshakeLineReadOptions {
 	child?: string;
+	conversationSession?: {
+		selection: IrohRemoteConversationSelection;
+		sessionId: string;
+	};
 	writeSuccessResponse?: boolean;
 }
 
@@ -121,6 +128,20 @@ export interface IrohRemoteClientHandshakeResponseResult {
 
 export interface IrohRemoteClientReadHandshakeResponseOptions extends IrohRemoteHandshakeLineReadOptions {
 	expectedHostNodeId?: string;
+}
+
+function createConversationHandshakeMetadata(
+	hello: IrohRemoteHello,
+	conversationSession: { selection: IrohRemoteConversationSelection; sessionId: string },
+): IrohRemoteConversationHandshakeMetadata {
+	if (hello.mode !== "conversation") {
+		throw new Error("conversation handshake metadata requires a conversation hello");
+	}
+	return {
+		target: hello.conversation.target,
+		sessionId: conversationSession.sessionId,
+		selection: conversationSession.selection,
+	};
 }
 
 export class IrohRemoteHostEngine {
@@ -340,13 +361,7 @@ export class IrohRemoteHostEngine {
 				authorization,
 				hello,
 				initialInput,
-				response: createIrohRemoteHandshakeSuccess({
-					child: options.child,
-					clientNodeId: remoteNodeId,
-					features: [...IROH_REMOTE_HOST_FEATURES],
-					hostNodeId: this.hostNodeId,
-					workspace: authorization.workspace.name,
-				}),
+				response: this.createHandshakeSuccessResponse(hello, authorization, remoteNodeId, options),
 				responseWritten: false,
 			};
 			if (options.writeSuccessResponse === false) {
@@ -356,7 +371,11 @@ export class IrohRemoteHostEngine {
 		} catch (error: unknown) {
 			return await this.writeHandshakeResult(
 				stream,
-				await this.createHandshakeFailure(error instanceof Error ? error.message : String(error), initialInput),
+				await this.createHandshakeFailure(
+					error instanceof Error ? error.message : String(error),
+					initialInput,
+					error,
+				),
 			);
 		}
 	}
@@ -374,20 +393,61 @@ export class IrohRemoteHostEngine {
 	private async createHandshakeFailure(
 		error: string,
 		initialInput: IrohBytes,
+		cause?: unknown,
 	): Promise<IrohRemoteHostHandshakeResult> {
+		const outcome = cause instanceof IrohRemoteHandshakeError ? cause.outcome : undefined;
 		await this.log({
 			type: "handshake_rejected",
 			workspace: this.workspace.name,
 			success: false,
 			error,
+			details: outcome === undefined ? undefined : { outcome },
 		});
 		return {
 			ok: false,
 			error,
 			initialInput,
-			response: createIrohRemoteHandshakeFailure(error, { hostNodeId: this.hostNodeId }),
+			response: createIrohRemoteHandshakeFailure(error, {
+				hostNodeId: this.hostNodeId,
+				...(outcome === undefined ? {} : { outcome }),
+			}),
 			responseWritten: false,
 		};
+	}
+
+	private createHandshakeSuccessResponse(
+		hello: IrohRemoteHello,
+		authorization: IrohRemoteClientAuthorizationSuccess,
+		remoteNodeId: string,
+		options: IrohRemoteHostReadHandshakeOptions,
+	): IrohRemoteHandshakeSuccess {
+		const common = {
+			child: options.child,
+			clientNodeId: remoteNodeId,
+			features: [...IROH_REMOTE_HOST_FEATURES],
+			hostNodeId: this.hostNodeId,
+			workspace: authorization.workspace.name,
+		};
+		if (hello.mode === "workspaceDiscovery") {
+			return createIrohRemoteHandshakeSuccess({
+				...common,
+				workspaceDiscovery: { purpose: hello.workspaceDiscovery.purpose },
+			});
+		}
+		if (hello.mode === "workspaceManagement") {
+			return createIrohRemoteHandshakeSuccess({
+				...common,
+				workspaceManagement: { purpose: hello.workspaceManagement.purpose },
+			});
+		}
+		if (options.conversationSession === undefined) {
+			return createIrohRemoteHandshakeSuccess(common);
+		}
+		return createIrohRemoteHandshakeSuccess({
+			...common,
+			sessionId: options.conversationSession.sessionId,
+			conversation: createConversationHandshakeMetadata(hello, options.conversationSession),
+		});
 	}
 
 	private async writeHandshakeResult(
@@ -501,6 +561,8 @@ export class IrohRemoteClientEngine {
 			secret: payload.secret,
 			clientLabel: this.clientLabel,
 			clientNodeId: this.clientNodeId,
+			mode: "conversation",
+			conversation: { target: "last" },
 		};
 	}
 

@@ -221,6 +221,18 @@ async function bindRawClientEndpoint(relayMode, secretKey) {
 	return endpoint;
 }
 
+function createRawConversationHello(payload, clientLabel, clientNodeId) {
+	return {
+		type: "volt_iroh_hello",
+		protocol: ALPN_TEXT,
+		workspace: payload.workspace,
+		secret: payload.secret,
+		clientLabel,
+		clientNodeId,
+		conversation: { target: "last" },
+	};
+}
+
 async function runRawRpcClient(ticket, command, options = {}) {
 	const payload = decodeTicketPayload(ticket);
 	const endpoint = await bindRawClientEndpoint(payload.relayMode ?? "disabled");
@@ -231,14 +243,13 @@ async function runRawRpcClient(ticket, command, options = {}) {
 		const stream = await connection.openBi();
 		await stream.send.writeAll(
 			toBytes(
-				serializeJsonLine({
-					type: "volt_iroh_hello",
-					protocol: ALPN_TEXT,
-					workspace: payload.workspace,
-					secret: payload.secret,
-					clientLabel: options.clientLabel ?? `raw-node-${process.pid}`,
-					clientNodeId: endpoint.id().toString(),
-				}),
+				serializeJsonLine(
+					createRawConversationHello(
+						payload,
+						options.clientLabel ?? `raw-node-${process.pid}`,
+						endpoint.id().toString(),
+					),
+				),
 			),
 		);
 
@@ -311,14 +322,13 @@ async function openRawAuthorizedClientOnEndpoint(endpoint, ticket, options = {})
 		}
 		await stream.send.writeAll(
 			toBytes(
-				serializeJsonLine({
-					type: "volt_iroh_hello",
-					protocol: ALPN_TEXT,
-					workspace: payload.workspace,
-					secret: payload.secret,
-					clientLabel: options.clientLabel ?? `raw-node-${process.pid}`,
-					clientNodeId: endpoint.id().toString(),
-				}),
+				serializeJsonLine(
+					createRawConversationHello(
+						payload,
+						options.clientLabel ?? `raw-node-${process.pid}`,
+						endpoint.id().toString(),
+					),
+				),
 			),
 		);
 
@@ -349,14 +359,9 @@ async function openRawAuthorizedStreamOnConnection(rawClient, ticket, options = 
 	const stream = await rawClient.connection.openBi();
 	await stream.send.writeAll(
 		toBytes(
-			serializeJsonLine({
-				type: "volt_iroh_hello",
-				protocol: ALPN_TEXT,
-				workspace: payload.workspace,
-				secret: payload.secret,
-				clientLabel: options.clientLabel ?? `raw-node-${process.pid}`,
-				clientNodeId: rawClient.nodeId,
-			}),
+			serializeJsonLine(
+				createRawConversationHello(payload, options.clientLabel ?? `raw-node-${process.pid}`, rawClient.nodeId),
+			),
 		),
 	);
 	const handshake = await readLineFromIroh(stream.recv);
@@ -2599,6 +2604,7 @@ async function malformedHandshakeScenario() {
 					workspace: "Volt",
 					secret: "secret",
 					clientLabel: {},
+					conversation: { target: "last" },
 				}),
 				error: "handshake clientLabel must be a non-empty string",
 			},

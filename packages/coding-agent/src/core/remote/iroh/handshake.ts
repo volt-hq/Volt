@@ -1,14 +1,59 @@
+import { Buffer } from "node:buffer";
 import {
 	IROH_REMOTE_ALPN,
+	IROH_REMOTE_CONVERSATION_STREAMS_FEATURE,
 	IROH_REMOTE_HANDSHAKE_TYPE,
 	IROH_REMOTE_HELLO_TYPE,
+	IROH_REMOTE_MULTI_STREAMS_FEATURE,
 	type IrohRemoteHostHandshakeFailureOutcome,
 	type IrohRemoteOutcome,
 	IrohRemoteOutcomeError,
 	isIrohRemoteOutcome,
 } from "./protocol.ts";
 
-export interface IrohRemoteHello {
+export type IrohRemoteConversationTarget =
+	| {
+			target: "last";
+	  }
+	| {
+			target: "new";
+	  }
+	| {
+			target: "session";
+			sessionId: string;
+	  };
+
+export type IrohRemoteConversationSelection = "resumed" | "created" | "created_missing_last";
+
+export interface IrohRemoteConversationHandshakeMetadata {
+	target: IrohRemoteConversationTarget["target"];
+	sessionId: string;
+	selection: IrohRemoteConversationSelection;
+}
+
+export interface IrohRemoteWorkspaceDiscoveryTarget {
+	purpose: "list_sessions";
+}
+
+export interface IrohRemoteWorkspaceManagementTarget {
+	purpose: "unregister_workspace";
+}
+
+export type IrohRemoteHelloMode =
+	| {
+			mode: "conversation";
+			conversation: IrohRemoteConversationTarget;
+	  }
+	| {
+			mode: "workspaceDiscovery";
+			workspaceDiscovery: IrohRemoteWorkspaceDiscoveryTarget;
+	  }
+	| {
+			mode: "workspaceManagement";
+			workspaceManagement: IrohRemoteWorkspaceManagementTarget;
+	  };
+
+interface IrohRemoteHelloBase {
 	type: typeof IROH_REMOTE_HELLO_TYPE;
 	protocol: typeof IROH_REMOTE_ALPN;
 	workspace: string;
@@ -17,6 +62,8 @@ export interface IrohRemoteHello {
 	clientNodeId?: string;
 }
 
+export type IrohRemoteHello = IrohRemoteHelloBase & IrohRemoteHelloMode;
+
 export interface IrohRemoteHandshakeSuccess {
 	type: typeof IROH_REMOTE_HANDSHAKE_TYPE;
 	success: true;
@@ -24,6 +71,10 @@ export interface IrohRemoteHandshakeSuccess {
 	hostNodeId?: string;
 	clientNodeId: string;
 	features?: string[];
+	sessionId?: string;
+	conversation?: IrohRemoteConversationHandshakeMetadata;
+	workspaceDiscovery?: IrohRemoteWorkspaceDiscoveryTarget;
+	workspaceManagement?: IrohRemoteWorkspaceManagementTarget;
 	child?: string;
 }
 
@@ -37,12 +88,23 @@ export interface IrohRemoteHandshakeFailure {
 
 export type IrohRemoteHandshakeResponse = IrohRemoteHandshakeSuccess | IrohRemoteHandshakeFailure;
 
+export class IrohRemoteHandshakeError extends Error {
+	readonly outcome: IrohRemoteHostHandshakeFailureOutcome;
+
+	constructor(outcome: IrohRemoteHostHandshakeFailureOutcome, message: string) {
+		super(message);
+		this.name = "IrohRemoteHandshakeError";
+		this.outcome = outcome;
+	}
+}
+
 export function parseIrohRemoteHelloLine(line: string): IrohRemoteHello {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(line);
 	} catch (error: unknown) {
-		throw new Error(
+		throw new IrohRemoteHandshakeError(
+			"invalid_conversation_target",
 			`Failed to parse Iroh remote handshake: ${error instanceof Error ? error.message : String(error)}`,
 		);
 	}
@@ -70,13 +132,16 @@ export function parseIrohRemoteHello(value: unknown): IrohRemoteHello {
 		throw new Error(`unsupported protocol: ${typeof hello.protocol === "string" ? hello.protocol : "<missing>"}`);
 	}
 
+	const workspace = expectWorkspaceName(hello.workspace, "handshake workspace");
+	const mode = parseIrohRemoteHelloMode(hello);
 	return {
 		type: IROH_REMOTE_HELLO_TYPE,
 		protocol: IROH_REMOTE_ALPN,
-		workspace: expectString(hello.workspace, "handshake workspace"),
+		workspace,
 		secret: expectOptionalString(hello.secret, "handshake secret"),
 		clientLabel: expectOptionalString(hello.clientLabel, "handshake clientLabel"),
 		clientNodeId: expectOptionalString(hello.clientNodeId, "handshake clientNodeId"),
+		...mode,
 	};
 }
 
@@ -94,6 +159,7 @@ export function parseIrohRemoteHandshakeResponse(value: unknown): IrohRemoteHand
 			workspace: expectString(response.workspace, "handshake response workspace"),
 			clientNodeId: expectString(response.clientNodeId, "handshake response clientNodeId"),
 			...(features === undefined ? {} : { features }),
+			...parseOptionalHandshakeSuccessMode(response),
 			child: expectOptionalString(response.child, "handshake response child"),
 		};
 		return hostNodeId === undefined ? success : { ...success, hostNodeId };
@@ -120,6 +186,10 @@ export function createIrohRemoteHandshakeSuccess(options: {
 	hostNodeId?: string;
 	clientNodeId: string;
 	features?: string[];
+	sessionId?: string;
+	conversation?: IrohRemoteConversationHandshakeMetadata;
+	workspaceDiscovery?: IrohRemoteWorkspaceDiscoveryTarget;
+	workspaceManagement?: IrohRemoteWorkspaceManagementTarget;
 	child?: string;
 }): IrohRemoteHandshakeSuccess {
 	const response: IrohRemoteHandshakeSuccess = {
@@ -129,6 +199,10 @@ export function createIrohRemoteHandshakeSuccess(options: {
 		...(options.hostNodeId === undefined ? {} : { hostNodeId: options.hostNodeId }),
 		clientNodeId: options.clientNodeId,
 		...(options.features === undefined ? {} : { features: [...options.features] }),
+		...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+		...(options.conversation === undefined ? {} : { conversation: { ...options.conversation } }),
+		...(options.workspaceDiscovery === undefined ? {} : { workspaceDiscovery: { ...options.workspaceDiscovery } }),
+		...(options.workspaceManagement === undefined ? {} : { workspaceManagement: { ...options.workspaceManagement } }),
 		child: options.child,
 	};
 	return response;
@@ -170,9 +244,27 @@ function expectRecord(value: unknown, label: string): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
 
+function expectRecordForOutcome(
+	value: unknown,
+	label: string,
+	outcome: IrohRemoteHostHandshakeFailureOutcome,
+): Record<string, unknown> {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new IrohRemoteHandshakeError(outcome, `${label} must be an object`);
+	}
+	return value as Record<string, unknown>;
+}
+
 function expectString(value: unknown, label: string): string {
 	if (typeof value !== "string" || value.length === 0) {
 		throw new Error(`${label} must be a non-empty string`);
+	}
+	return value;
+}
+
+function expectStringForOutcome(value: unknown, label: string, outcome: IrohRemoteHostHandshakeFailureOutcome): string {
+	if (typeof value !== "string" || value.length === 0) {
+		throw new IrohRemoteHandshakeError(outcome, `${label} must be a non-empty string`);
 	}
 	return value;
 }
@@ -182,6 +274,127 @@ function expectOptionalString(value: unknown, label: string): string | undefined
 		return undefined;
 	}
 	return expectString(value, label);
+}
+
+function expectWorkspaceName(value: unknown, label: string): string {
+	const workspace = expectStringForOutcome(value, label, "invalid_workspace");
+	if (hasAsciiControlCharacter(workspace)) {
+		throw new IrohRemoteHandshakeError("invalid_workspace", `${label} must not contain ASCII control characters`);
+	}
+	if (Array.from(workspace).length > 255 || Buffer.byteLength(workspace, "utf8") > 1024) {
+		throw new IrohRemoteHandshakeError("invalid_workspace", `${label} exceeds maximum length`);
+	}
+	return workspace;
+}
+
+function hasAsciiControlCharacter(value: string): boolean {
+	for (const char of value) {
+		const code = char.charCodeAt(0);
+		if (code <= 0x1f || code === 0x7f) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function parseIrohRemoteHelloMode(hello: Record<string, unknown>): IrohRemoteHelloMode {
+	const modeKeys = (["conversation", "workspaceDiscovery", "workspaceManagement"] as const).filter(
+		(key) => hello[key] !== undefined,
+	);
+	if (modeKeys.length !== 1) {
+		throw new IrohRemoteHandshakeError(
+			"invalid_conversation_target",
+			"Iroh remote hello must include exactly one stream mode",
+		);
+	}
+	const modeKey = modeKeys[0];
+	if (modeKey === "conversation") {
+		return { mode: "conversation", conversation: parseConversationTarget(hello.conversation) };
+	}
+	if (modeKey === "workspaceDiscovery") {
+		return {
+			mode: "workspaceDiscovery",
+			workspaceDiscovery: parseWorkspaceDiscoveryTarget(hello.workspaceDiscovery),
+		};
+	}
+	return {
+		mode: "workspaceManagement",
+		workspaceManagement: parseWorkspaceManagementTarget(hello.workspaceManagement),
+	};
+}
+
+function parseConversationTarget(value: unknown): IrohRemoteConversationTarget {
+	const target = expectRecordForOutcome(value, "handshake conversation", "invalid_conversation_target");
+	expectKnownFields(target, "handshake conversation", ["target", "sessionId"]);
+	const targetKind = expectStringForOutcome(
+		target.target,
+		"handshake conversation target",
+		"invalid_conversation_target",
+	);
+	if (targetKind === "last" || targetKind === "new") {
+		if (target.sessionId !== undefined) {
+			throw new IrohRemoteHandshakeError(
+				"invalid_conversation_target",
+				`handshake conversation ${targetKind} target must not include sessionId`,
+			);
+		}
+		return { target: targetKind };
+	}
+	if (targetKind === "session") {
+		return {
+			target: "session",
+			sessionId: expectRemoteSessionId(target.sessionId, "handshake conversation sessionId"),
+		};
+	}
+	throw new IrohRemoteHandshakeError("invalid_conversation_target", "unsupported conversation target");
+}
+
+function parseWorkspaceDiscoveryTarget(value: unknown): IrohRemoteWorkspaceDiscoveryTarget {
+	const target = expectRecordForOutcome(value, "handshake workspaceDiscovery", "invalid_conversation_target");
+	expectKnownFields(target, "handshake workspaceDiscovery", ["purpose"]);
+	const purpose = expectStringForOutcome(
+		target.purpose,
+		"handshake workspaceDiscovery purpose",
+		"invalid_conversation_target",
+	);
+	if (purpose !== "list_sessions") {
+		throw new IrohRemoteHandshakeError("invalid_conversation_target", "unsupported workspaceDiscovery purpose");
+	}
+	return { purpose };
+}
+
+function parseWorkspaceManagementTarget(value: unknown): IrohRemoteWorkspaceManagementTarget {
+	const target = expectRecordForOutcome(value, "handshake workspaceManagement", "invalid_conversation_target");
+	expectKnownFields(target, "handshake workspaceManagement", ["purpose"]);
+	const purpose = expectStringForOutcome(
+		target.purpose,
+		"handshake workspaceManagement purpose",
+		"invalid_conversation_target",
+	);
+	if (purpose !== "unregister_workspace") {
+		throw new IrohRemoteHandshakeError("invalid_conversation_target", "unsupported workspaceManagement purpose");
+	}
+	return { purpose };
+}
+
+function expectKnownFields(value: Record<string, unknown>, label: string, allowedFields: readonly string[]): void {
+	const allowed = new Set(allowedFields);
+	for (const field of Object.keys(value)) {
+		if (!allowed.has(field)) {
+			throw new IrohRemoteHandshakeError("invalid_conversation_target", `${label} has unexpected field ${field}`);
+		}
+	}
+}
+
+function expectRemoteSessionId(value: unknown, label: string): string {
+	const sessionId = expectStringForOutcome(value, label, "invalid_conversation_target");
+	if (!/^[a-z0-9_-]{1,128}$/.test(sessionId)) {
+		throw new IrohRemoteHandshakeError(
+			"invalid_conversation_target",
+			`${label} must match lowercase remote session ID syntax`,
+		);
+	}
+	return sessionId;
 }
 
 function expectOptionalOutcome(value: unknown, label: string): IrohRemoteOutcome | undefined {
@@ -209,4 +422,105 @@ function parseOptionalFeatures(value: unknown): string[] | undefined {
 		features.push(entry);
 	}
 	return features;
+}
+
+function parseOptionalHandshakeSuccessMode(
+	response: Record<string, unknown>,
+): Pick<IrohRemoteHandshakeSuccess, "sessionId" | "conversation" | "workspaceDiscovery" | "workspaceManagement"> {
+	const modeKeys = (["conversation", "workspaceDiscovery", "workspaceManagement"] as const).filter(
+		(key) => response[key] !== undefined,
+	);
+	if (modeKeys.length === 0) {
+		return {};
+	}
+	if (modeKeys.length !== 1) {
+		throw new Error("handshake response success must include exactly one stream mode");
+	}
+	assertRequiredHandshakeFeatures(parseOptionalFeatures(response.features));
+	const modeKey = modeKeys[0];
+	if (modeKey === "conversation") {
+		const sessionId = expectString(response.sessionId, "handshake response sessionId");
+		const conversation = parseConversationHandshakeMetadata(response.conversation);
+		if (conversation.sessionId !== sessionId) {
+			throw new Error("handshake response conversation sessionId must match top-level sessionId");
+		}
+		return { sessionId, conversation };
+	}
+	if (response.sessionId !== undefined) {
+		throw new Error(`handshake response ${modeKey} must not include sessionId`);
+	}
+	if (modeKey === "workspaceDiscovery") {
+		return { workspaceDiscovery: parseWorkspaceDiscoveryResponseMetadata(response.workspaceDiscovery) };
+	}
+	return { workspaceManagement: parseWorkspaceManagementResponseMetadata(response.workspaceManagement) };
+}
+
+function assertRequiredHandshakeFeatures(features: string[] | undefined): void {
+	if (
+		features === undefined ||
+		!features.includes(IROH_REMOTE_MULTI_STREAMS_FEATURE) ||
+		!features.includes(IROH_REMOTE_CONVERSATION_STREAMS_FEATURE)
+	) {
+		throw new Error("handshake response features must include required Iroh remote stream features");
+	}
+}
+
+function parseConversationHandshakeMetadata(value: unknown): IrohRemoteConversationHandshakeMetadata {
+	const metadata = expectRecord(value, "handshake response conversation");
+	const conversation: IrohRemoteConversationHandshakeMetadata = {
+		target: expectConversationTargetKind(metadata.target, "handshake response conversation target"),
+		sessionId: expectRemoteSessionIdForResponse(metadata.sessionId, "handshake response conversation sessionId"),
+		selection: expectConversationSelection(metadata.selection, "handshake response conversation selection"),
+	};
+	assertConversationTargetSelection(conversation);
+	return conversation;
+}
+
+function expectConversationTargetKind(value: unknown, label: string): IrohRemoteConversationTarget["target"] {
+	const target = expectString(value, label);
+	if (target === "last" || target === "new" || target === "session") {
+		return target;
+	}
+	throw new Error(`${label} must be a supported conversation target`);
+}
+
+function expectConversationSelection(value: unknown, label: string): IrohRemoteConversationSelection {
+	const selection = expectString(value, label);
+	if (selection === "resumed" || selection === "created" || selection === "created_missing_last") {
+		return selection;
+	}
+	throw new Error(`${label} must be a supported conversation selection`);
+}
+
+function assertConversationTargetSelection(conversation: IrohRemoteConversationHandshakeMetadata): void {
+	if (conversation.target === "new" && conversation.selection !== "created") {
+		throw new Error("handshake response new target must use created selection");
+	}
+	if (conversation.target === "session" && conversation.selection !== "resumed") {
+		throw new Error("handshake response session target must use resumed selection");
+	}
+}
+
+function expectRemoteSessionIdForResponse(value: unknown, label: string): string {
+	const sessionId = expectString(value, label);
+	if (!/^[a-z0-9_-]{1,128}$/.test(sessionId)) {
+		throw new Error(`${label} must match lowercase remote session ID syntax`);
+	}
+	return sessionId;
+}
+
+function parseWorkspaceDiscoveryResponseMetadata(value: unknown): IrohRemoteWorkspaceDiscoveryTarget {
+	const metadata = expectRecord(value, "handshake response workspaceDiscovery");
+	if (metadata.purpose !== "list_sessions") {
+		throw new Error("handshake response workspaceDiscovery purpose must be list_sessions");
+	}
+	return { purpose: "list_sessions" };
+}
+
+function parseWorkspaceManagementResponseMetadata(value: unknown): IrohRemoteWorkspaceManagementTarget {
+	const metadata = expectRecord(value, "handshake response workspaceManagement");
+	if (metadata.purpose !== "unregister_workspace") {
+		throw new Error("handshake response workspaceManagement purpose must be unregister_workspace");
+	}
+	return { purpose: "unregister_workspace" };
 }

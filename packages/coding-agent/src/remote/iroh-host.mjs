@@ -11,6 +11,7 @@ import { createInterface } from "node:readline/promises";
 import lockfile from "proper-lockfile";
 import {
 	createIrohRemoteHandshakeFailure,
+	createIrohRemoteHandshakeSuccess,
 	createIrohRemoteHostMetadata,
 	createIrohRemoteRpcErrorResponse,
 	DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
@@ -792,10 +793,15 @@ async function logRpcChildStopped(child, childCommand, authorization, options) {
 	});
 }
 
-async function sendHandshakeError(stream, message, options) {
+async function sendHandshakeError(stream, error, options) {
+	const message = error instanceof Error ? error.message : String(error);
+	const outcome = typeof error?.outcome === "string" ? error.outcome : undefined;
 	await writeIrohRemoteHandshakeResponse(
 		stream.send,
-		createIrohRemoteHandshakeFailure(message, { hostNodeId: options.hostNodeId }),
+		createIrohRemoteHandshakeFailure(message, {
+			hostNodeId: options.hostNodeId,
+			...(outcome === undefined ? {} : { outcome }),
+		}),
 	);
 	await stream.send.finish?.();
 	await Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
@@ -1300,26 +1306,29 @@ async function runSpawnedRpcConnection(stream, handshake, authorization, options
 
 async function runIntegratedVoltConnection(stream, handshake, authorization, options) {
 	let entry;
+	let sessionSelection;
 	try {
-		({ entry } = await getOrCreateIntegratedRuntimeEntry(authorization, options));
+		({ entry, sessionSelection } = await getOrCreateIntegratedRuntimeEntry(handshake, authorization, options));
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
 		await logAudit(options.auditLogger, {
 			type: "runtime_failure",
 			clientNodeId: authorization.client.nodeId,
 			workspace: authorization.workspace.name,
 			success: false,
-			error: message,
+			error: error instanceof Error ? error.message : String(error),
 			details: { runtime: "integrated-volt" },
 		});
-		await sendHandshakeError(stream, message, options);
+		await sendHandshakeError(stream, error, options);
 		return;
 	}
 
 	let subscriber;
 	let subscriberError;
 	try {
-		await writeIrohRemoteHandshakeResponse(stream.send, handshake.response);
+		await writeIrohRemoteHandshakeResponse(
+			stream.send,
+			createIntegratedConversationHandshakeResponse(handshake, authorization, entry, sessionSelection, options),
+		);
 		subscriber = await attachIntegratedRuntimeSubscriber(entry, options);
 		const pushDispatcher = createPushNotificationDispatcher(authorization, options);
 		const rpcMode = runIrohRemoteRpcMode(entry.runtime, {
@@ -1460,17 +1469,16 @@ async function logIntegratedRuntimeAudit(options, entry, type, details = {}, suc
 	});
 }
 
-async function createIntegratedRuntimeEntry(authorization, options) {
+async function createIntegratedRuntimeEntry(handshake, authorization, options) {
 	let runtime;
 	try {
-		const previousSessionId = authorization.client.lastSessionIdByWorkspace?.[authorization.workspace.name];
 		const runtimeResult = await createIrohRemoteAgentRuntimeWithSessionSelection({
 			agentDir: options.agentDir,
 			allowTools: authorization.allowTools,
+			conversationTarget: createIrohRuntimeConversationTarget(handshake.hello, authorization),
 			cwd: authorization.workspace.path,
 			profile: options.profile,
 			projectTrusted: getProjectTrustedForWorkspace(options, authorization.workspace),
-			resumeSessionId: previousSessionId,
 		});
 		runtime = runtimeResult.runtime;
 		const entry = {
@@ -1498,7 +1506,7 @@ async function createIntegratedRuntimeEntry(authorization, options) {
 			details: getIntegratedRuntimeDetails(entry),
 		});
 		await logIntegratedRuntimeAudit(options, entry, "remote_runtime_started", { reason: "created" });
-		return entry;
+		return { entry, sessionSelection: runtimeResult.sessionSelection };
 	} catch (error) {
 		if (runtime) {
 			await runtime.dispose().catch(() => {});
@@ -1507,16 +1515,67 @@ async function createIntegratedRuntimeEntry(authorization, options) {
 	}
 }
 
-async function getOrCreateIntegratedRuntimeEntry(authorization, options) {
+function createIrohRuntimeConversationTarget(hello, authorization) {
+	if (hello.mode !== "conversation") {
+		throw new Error("integrated runtime requires a conversation stream");
+	}
+	if (hello.conversation.target === "new") {
+		return { target: "new" };
+	}
+	if (hello.conversation.target === "session") {
+		return { target: "session", sessionId: hello.conversation.sessionId };
+	}
+	const previousSessionId = authorization.client.lastSessionIdByWorkspace?.[authorization.workspace.name];
+	return previousSessionId === undefined
+		? { target: "last" }
+		: { target: "last", resumeSessionId: previousSessionId };
+}
+
+function createConversationSessionSelectionFromEntry(entry) {
+	return {
+		kind: "resumed",
+		requestedSessionId: entry.runtime.session.sessionId,
+		sessionId: entry.runtime.session.sessionId,
+	};
+}
+
+function getHandshakeConversationSelection(sessionSelection) {
+	if (sessionSelection.kind === "created_after_missing") {
+		return "created_missing_last";
+	}
+	if (sessionSelection.kind === "created") {
+		return "created";
+	}
+	return "resumed";
+}
+
+function createIntegratedConversationHandshakeResponse(handshake, authorization, entry, sessionSelection, options) {
+	const sessionId = entry.runtime.session.sessionId;
+	return createIrohRemoteHandshakeSuccess({
+		child: handshake.response.child,
+		clientNodeId: authorization.client.nodeId,
+		features: handshake.response.features,
+		hostNodeId: options.hostNodeId,
+		workspace: authorization.workspace.name,
+		sessionId,
+		conversation: {
+			target: handshake.hello.conversation.target,
+			sessionId,
+			selection: getHandshakeConversationSelection(sessionSelection),
+		},
+	});
+}
+
+async function getOrCreateIntegratedRuntimeEntry(handshake, authorization, options) {
 	const key = getIntegratedRuntimeRegistryKey(authorization);
 	const existing = options.integratedRuntimes.get(key);
 	if (existing) {
 		if (!shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization(authorization)) {
-			return { entry: existing, created: false };
+			return { entry: existing, created: false, sessionSelection: createConversationSessionSelectionFromEntry(existing) };
 		}
 		await stopIntegratedRuntimeEntry(existing, options, "fresh_pairing_replaced_runtime");
 	}
-	return { entry: await createIntegratedRuntimeEntry(authorization, options), created: true };
+	return { ...(await createIntegratedRuntimeEntry(handshake, authorization, options)), created: true };
 }
 
 let integratedRuntimeSubscriberSequence = 0;
@@ -1897,6 +1956,13 @@ async function handleConnectionStream(
 
 	if (handshake.authorization.paired) {
 		console.error(`paired client stream: ${handshake.authorization.client.label} (${remoteId}, ${streamId})`);
+	}
+
+	if (handshake.hello.mode !== "conversation") {
+		await writeIrohRemoteHandshakeResponse(stream.send, handshake.response);
+		await stream.send.finish?.();
+		await Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
+		return;
 	}
 
 	if (hasActiveStreamForAuthorizationOnConnection(options, handshake.authorization, connectionId)) {

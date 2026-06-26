@@ -265,6 +265,7 @@ function makeHello(workspace: string, secret?: string, clientLabel = "phone"): I
 			secret,
 			clientLabel,
 			clientNodeId: "client-claimed-id",
+			conversation: { target: "last" },
 		}),
 	);
 }
@@ -277,6 +278,7 @@ function makeHelloWithoutLabel(workspace: string, secret?: string): IrohRemoteHe
 			workspace,
 			secret,
 			clientNodeId: "client-claimed-id",
+			conversation: { target: "last" },
 		}),
 	);
 }
@@ -478,6 +480,8 @@ describe("Iroh remote core helpers", () => {
 			secret: "secret",
 			clientLabel: "Jordan iPhone",
 			clientNodeId: "client-claimed-id",
+			mode: "conversation",
+			conversation: { target: "last" },
 		});
 		expect(() => parseIrohRemoteHelloLine(JSON.stringify({ type: "wrong", protocol: IROH_REMOTE_ALPN }))).toThrow(
 			"unexpected handshake type",
@@ -641,7 +645,7 @@ describe("Iroh remote core helpers", () => {
 		expect(parseIrohRemoteTicketPayload({ ...payload, unknownFutureField: "ignored" })).toEqual(payload);
 
 		const helloLine =
-			'{"type":"volt_iroh_hello","protocol":"volt-rpc/0","workspace":"volt","secret":"one-time-secret","clientLabel":"Jordan iPhone","clientNodeId":"client-claimed-node-id"}';
+			'{"type":"volt_iroh_hello","protocol":"volt-rpc/0","workspace":"volt","secret":"one-time-secret","clientLabel":"Jordan iPhone","clientNodeId":"client-claimed-node-id","conversation":{"target":"last"}}';
 		expect(parseIrohRemoteHelloLine(helloLine)).toEqual({
 			type: "volt_iroh_hello",
 			protocol: IROH_REMOTE_ALPN,
@@ -649,6 +653,8 @@ describe("Iroh remote core helpers", () => {
 			secret: "one-time-secret",
 			clientLabel: "Jordan iPhone",
 			clientNodeId: "client-claimed-node-id",
+			mode: "conversation",
+			conversation: { target: "last" },
 		});
 		expect(parseIrohRemoteHelloLine(`${helloLine.slice(0, -1)},"unknownFutureField":"ignored"}`)).toEqual({
 			type: "volt_iroh_hello",
@@ -657,6 +663,8 @@ describe("Iroh remote core helpers", () => {
 			secret: "one-time-secret",
 			clientLabel: "Jordan iPhone",
 			clientNodeId: "client-claimed-node-id",
+			mode: "conversation",
+			conversation: { target: "last" },
 		});
 
 		const success = createIrohRemoteHandshakeSuccess({
@@ -688,6 +696,7 @@ describe("Iroh remote core helpers", () => {
 			workspace: "volt",
 			secret: "one-time-secret",
 			clientLabel: `line separator client with unicode separators ${unicodeLineSeparators}`,
+			conversation: { target: "last" },
 		});
 		const initialRpcInput = '{"id":"prompt-1","type":"prompt","message":"kept after hello"}\n';
 		const recv = new ManualIrohRecvStream();
@@ -704,22 +713,38 @@ describe("Iroh remote core helpers", () => {
 	test("pins protocol v1 remote command and redaction compatibility vectors", () => {
 		expect(Array.from(IROH_REMOTE_OUTCOMES)).toEqual([
 			"host_unreachable",
+			"invalid_workspace",
+			"invalid_conversation_target",
+			"conversation_streams_unsupported",
 			"pairing_secret_expired",
 			"pairing_secret_consumed",
 			"client_unknown",
 			"client_revoked",
 			"workspace_unavailable",
 			"workspace_forbidden",
+			"workspace_authorization_removed",
+			"workspace_unregistered",
+			"session_unavailable",
+			"duplicate_conversation_connection",
+			"conversation_in_use",
 			"host_identity_mismatch",
 			"saved_host_invalid",
 		]);
 		expect(Array.from(IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES)).toEqual([
+			"invalid_workspace",
+			"invalid_conversation_target",
+			"conversation_streams_unsupported",
 			"pairing_secret_expired",
 			"pairing_secret_consumed",
 			"client_unknown",
 			"client_revoked",
 			"workspace_unavailable",
 			"workspace_forbidden",
+			"workspace_authorization_removed",
+			"workspace_unregistered",
+			"session_unavailable",
+			"duplicate_conversation_connection",
+			"conversation_in_use",
 		]);
 		expect(Array.from(IROH_REMOTE_RPC_PASSTHROUGH_TYPES)).toEqual([
 			"prompt",
@@ -1377,11 +1402,15 @@ describe("Iroh remote core helpers", () => {
 					workspace: "volt",
 					secret: "secret",
 					clientLabel: "phone",
+					conversation: { target: "last" },
 				})}\n{"id":"state-1","type":"get_state"}\n`,
 			),
 		);
 
-		const handshake = await hostEngine.readHandshake({ recv, send }, "client-node", { child: "volt" });
+		const handshake = await hostEngine.readHandshake({ recv, send }, "client-node", {
+			child: "volt",
+			conversationSession: { sessionId: "session-one", selection: "created" },
+		});
 		if (!handshake.ok) {
 			throw new Error(handshake.error);
 		}
@@ -1392,6 +1421,12 @@ describe("Iroh remote core helpers", () => {
 			hostNodeId: "host-node",
 			clientNodeId: "client-node",
 			features: [...IROH_REMOTE_HOST_FEATURES],
+			sessionId: "session-one",
+			conversation: {
+				target: "last",
+				sessionId: "session-one",
+				selection: "created",
+			},
 			child: "volt",
 		});
 		expect(handshake.responseWritten).toBe(true);
@@ -1420,6 +1455,7 @@ describe("Iroh remote core helpers", () => {
 					workspace: "volt",
 					secret: "secret",
 					clientLabel: "second phone",
+					conversation: { target: "last" },
 				})}\n`,
 			),
 		);
@@ -1722,10 +1758,15 @@ describe("Iroh remote core helpers", () => {
 						workspace: "volt",
 						secret: "secret",
 						clientLabel: "phone",
+						conversation: { target: "last" },
 					})}\n`,
 				),
 			);
-			const pairedHandshake = await firstHostEngine.readHandshake({ recv: pairRecv, send: pairSend }, "client-node");
+			const pairedHandshake = await firstHostEngine.readHandshake(
+				{ recv: pairRecv, send: pairSend },
+				"client-node",
+				{ conversationSession: { sessionId: "session-one", selection: "created" } },
+			);
 			if (!pairedHandshake.ok) {
 				throw new Error(pairedHandshake.error);
 			}
@@ -1747,12 +1788,14 @@ describe("Iroh remote core helpers", () => {
 						protocol: IROH_REMOTE_ALPN,
 						workspace: "volt",
 						clientLabel: "phone renamed",
+						conversation: { target: "last" },
 					})}\n`,
 				),
 			);
 			const reconnectHandshake = await restartedHostEngine.readHandshake(
 				{ recv: reconnectRecv, send: reconnectSend },
 				"client-node",
+				{ conversationSession: { sessionId: "session-one", selection: "resumed" } },
 			);
 			if (!reconnectHandshake.ok) {
 				throw new Error(reconnectHandshake.error);
@@ -1768,6 +1811,12 @@ describe("Iroh remote core helpers", () => {
 				hostNodeId: "host-node",
 				clientNodeId: "client-node",
 				features: [...IROH_REMOTE_HOST_FEATURES],
+				sessionId: "session-one",
+				conversation: {
+					target: "last",
+					sessionId: "session-one",
+					selection: "resumed",
+				},
 				child: undefined,
 			});
 		} finally {
@@ -2353,7 +2402,7 @@ describe("Iroh remote core helpers", () => {
 			expect(metadata.workspaceNames).toEqual(["available"]);
 			expect(metadata.workspaces).toEqual(authorized.workspaces);
 			expect(metadata.features).toEqual([...IROH_REMOTE_HOST_FEATURES]);
-			expect(metadata.features).toEqual([IROH_REMOTE_MULTI_STREAMS_FEATURE]);
+			expect(metadata.features).toContain(IROH_REMOTE_MULTI_STREAMS_FEATURE);
 			expect(JSON.stringify(metadata)).not.toContain(availablePath);
 			expect(JSON.stringify(metadata)).not.toContain(missingPath);
 			expect(JSON.stringify(metadata)).not.toContain(unavailablePath);
@@ -2593,11 +2642,14 @@ describe("Iroh remote core helpers", () => {
 					protocol: IROH_REMOTE_ALPN,
 					workspace: "volt",
 					secret: "secret",
+					conversation: { target: "last" },
 				})}\n`,
 			),
 		);
 
-		const handshake = await hostEngine.readHandshake({ recv, send }, "client-node");
+		const handshake = await hostEngine.readHandshake({ recv, send }, "client-node", {
+			conversationSession: { sessionId: "session-one", selection: "created" },
+		});
 
 		if (!handshake.ok) {
 			throw new Error(handshake.error);
@@ -2629,6 +2681,7 @@ describe("Iroh remote core helpers", () => {
 					protocol: IROH_REMOTE_ALPN,
 					workspace: "volt",
 					secret: "secret",
+					conversation: { target: "last" },
 				})}\n{"id":"state-1","type":"get_state"}\n`,
 			),
 		);
@@ -2670,11 +2723,14 @@ describe("Iroh remote core helpers", () => {
 					protocol: IROH_REMOTE_ALPN,
 					workspace: "volt",
 					secret: "secret",
+					conversation: { target: "last" },
 				})}\n`,
 			),
 		);
 
-		const handshake = await hostEngine.readHandshake({ recv, send }, "client-node");
+		const handshake = await hostEngine.readHandshake({ recv, send }, "client-node", {
+			conversationSession: { sessionId: "session-one", selection: "created" },
+		});
 
 		if (!handshake.ok) {
 			throw new Error(handshake.error);
@@ -3075,6 +3131,8 @@ describe("Iroh remote core helpers", () => {
 			secret: "secret",
 			clientLabel: "phone",
 			clientNodeId: "client-node",
+			mode: "conversation",
+			conversation: { target: "last" },
 		});
 
 		const send = new ManualIrohSendStream();
@@ -3150,6 +3208,8 @@ describe("Iroh remote core helpers", () => {
 			secret: "secret",
 			clientLabel: "phone",
 			clientNodeId: "client-node",
+			mode: "conversation",
+			conversation: { target: "last" },
 		});
 		expect(send.writtenText()).toContain("volt_iroh_hello");
 

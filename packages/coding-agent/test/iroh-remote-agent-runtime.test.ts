@@ -252,6 +252,26 @@ export default function (volt) {
 		}
 	});
 
+	it("rejects a strict missing remote session target", async () => {
+		writeRuntimeConfig({});
+		const sessionDir = join(agentDir, "sessions", "remote-workspace");
+		mkdirSync(sessionDir, { recursive: true });
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await expect(
+				createIrohRemoteAgentRuntimeWithSessionSelection({
+					agentDir,
+					conversationTarget: { target: "session", sessionId: "missing-session" },
+					cwd,
+					sessionDir,
+				}),
+			).rejects.toMatchObject({ outcome: "session_unavailable" });
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
 	it("validates HTTP idle timeout settings before creating the runtime", async () => {
 		writeRuntimeConfig({ httpIdleTimeoutMs: -1 });
 

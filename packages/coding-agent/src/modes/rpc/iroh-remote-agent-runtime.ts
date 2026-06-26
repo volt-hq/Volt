@@ -10,7 +10,11 @@ import { createAgentSessionFromServices, createAgentSessionServices } from "../.
 import { formatNoModelsAvailableMessage } from "../../core/auth-guidance.ts";
 import { AuthStorage } from "../../core/auth-storage.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "../../core/http-dispatcher.ts";
-import { parseIrohRemoteAllowTools, usesDefaultIrohRemoteAllowTools } from "../../core/remote/iroh/index.ts";
+import {
+	IrohRemoteOutcomeError,
+	parseIrohRemoteAllowTools,
+	usesDefaultIrohRemoteAllowTools,
+} from "../../core/remote/iroh/index.ts";
 import { getDefaultSessionDir, SessionManager } from "../../core/session-manager.ts";
 import { SettingsManager } from "../../core/settings-manager.ts";
 import { runMigrations } from "../../migrations.ts";
@@ -19,12 +23,26 @@ import { resolvePath } from "../../utils/paths.ts";
 export interface IrohRemoteAgentRuntimeOptions {
 	allowTools?: string;
 	agentDir?: string;
+	conversationTarget?: IrohRemoteAgentRuntimeConversationTarget;
 	cwd: string;
 	profile?: string;
 	projectTrusted?: boolean;
 	resumeSessionId?: string;
 	sessionDir?: string;
 }
+
+export type IrohRemoteAgentRuntimeConversationTarget =
+	| {
+			target: "last";
+			resumeSessionId?: string;
+	  }
+	| {
+			target: "new";
+	  }
+	| {
+			target: "session";
+			sessionId: string;
+	  };
 
 export type IrohRemoteAgentRuntimeSessionSelection =
 	| {
@@ -118,7 +136,8 @@ async function createIrohRemoteSessionManager(
 	agentDir: string,
 ): Promise<{ sessionManager: SessionManager; selection: IrohRemoteAgentRuntimeSessionSelection }> {
 	const sessionDir = options.sessionDir ?? getDefaultSessionDir(options.cwd, agentDir);
-	if (!options.resumeSessionId) {
+	const target = getConversationTarget(options);
+	if (target.target === "new") {
 		const sessionManager = SessionManager.create(options.cwd, sessionDir);
 		return {
 			sessionManager,
@@ -130,16 +149,30 @@ async function createIrohRemoteSessionManager(
 		};
 	}
 
-	const existingSession = (await SessionManager.list(options.cwd, sessionDir)).find(
-		(session) => session.id === options.resumeSessionId && existsSync(session.path),
-	);
+	const resumeSessionId = target.target === "last" ? target.resumeSessionId : target.sessionId;
+	if (!resumeSessionId) {
+		const sessionManager = SessionManager.create(options.cwd, sessionDir);
+		return {
+			sessionManager,
+			selection: {
+				kind: "created",
+				sessionFile: sessionManager.getSessionFile(),
+				sessionId: sessionManager.getSessionId(),
+			},
+		};
+	}
+
+	const existingSession = await findExistingIrohRemoteSession(options.cwd, sessionDir, resumeSessionId);
 	if (!existingSession) {
+		if (target.target === "session") {
+			throw new IrohRemoteOutcomeError("session_unavailable", "session not found in workspace");
+		}
 		const sessionManager = SessionManager.create(options.cwd, sessionDir);
 		return {
 			sessionManager,
 			selection: {
 				kind: "created_after_missing",
-				requestedSessionId: options.resumeSessionId,
+				requestedSessionId: resumeSessionId,
 				sessionFile: sessionManager.getSessionFile(),
 				sessionId: sessionManager.getSessionId(),
 			},
@@ -151,11 +184,27 @@ async function createIrohRemoteSessionManager(
 		sessionManager,
 		selection: {
 			kind: "resumed",
-			requestedSessionId: options.resumeSessionId,
+			requestedSessionId: resumeSessionId,
 			sessionFile: sessionManager.getSessionFile(),
 			sessionId: sessionManager.getSessionId(),
 		},
 	};
+}
+
+function getConversationTarget(options: IrohRemoteAgentRuntimeOptions): IrohRemoteAgentRuntimeConversationTarget {
+	if (options.conversationTarget !== undefined) {
+		return options.conversationTarget;
+	}
+	if (options.resumeSessionId !== undefined) {
+		return { target: "last", resumeSessionId: options.resumeSessionId };
+	}
+	return { target: "new" };
+}
+
+async function findExistingIrohRemoteSession(cwd: string, sessionDir: string, sessionId: string) {
+	return (await SessionManager.list(cwd, sessionDir)).find(
+		(session) => session.id === sessionId && existsSync(session.path),
+	);
 }
 
 function runIrohRemoteStartupMigrations(cwd: string, agentDir: string): void {
