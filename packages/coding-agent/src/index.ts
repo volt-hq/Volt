@@ -307,6 +307,7 @@ export {
 	type IrohRemoteHostEngineOptions,
 	type IrohRemoteHostFeature,
 	type IrohRemoteHostHandshakeFailureOutcome,
+	type IrohRemoteHostHandshakeMetadata,
 	type IrohRemoteHostHandshakeResult,
 	type IrohRemoteHostMetadata,
 	type IrohRemoteHostPairOptions,

@@ -522,8 +522,19 @@ describe("Iroh remote RPC filter", () => {
 			},
 		});
 
+		for (const type of ["get_messages"]) {
+			expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${type}-1`, type }))).toEqual({
+				allowed: false,
+				response: {
+					id: `${type}-1`,
+					type: "response",
+					command: type,
+					success: false,
+					error: "unsupported_remote_command",
+				},
+			});
+		}
 		for (const type of [
-			"get_messages",
 			"get_commands",
 			"switch_session",
 			"get_available_models",

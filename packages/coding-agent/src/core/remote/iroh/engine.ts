@@ -27,13 +27,19 @@ import {
 	writeIrohRemoteHandshakeResponse,
 	writeIrohRemoteHello,
 } from "./handshake-reader.ts";
+import { createIrohRemoteHostMetadata } from "./metadata.ts";
 import {
 	DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
 	IROH_REMOTE_ALPN,
 	IROH_REMOTE_HOST_FEATURES,
 	type IrohRemoteRelayMode,
 } from "./protocol.ts";
-import { type IrohRemoteClient, type IrohRemoteWorkspace, parseIrohRemoteWorkspace } from "./state.ts";
+import {
+	type IrohRemoteClient,
+	type IrohRemoteHostState,
+	type IrohRemoteWorkspace,
+	parseIrohRemoteWorkspace,
+} from "./state.ts";
 import type {
 	IrohRemoteClientRePairApprovalResult,
 	IrohRemoteClientRevocationResult,
@@ -145,6 +151,16 @@ function createConversationHandshakeMetadata(
 	};
 }
 
+function isEmptyIrohRemoteHostStateForRuntimePairingBootstrap(state: IrohRemoteHostState): boolean {
+	return (
+		state.workspaces.length === 0 &&
+		state.clients.length === 0 &&
+		(state.revokedClients ?? []).length === 0 &&
+		(state.pendingPairingTickets ?? []).length === 0 &&
+		(state.pairingSecretTombstones ?? []).length === 0
+	);
+}
+
 export class IrohRemoteHostEngine {
 	private readonly auditLogger: IrohRemoteAuditLogger;
 	private readonly classifyWorkspaceAvailability: IrohRemoteWorkspaceAvailabilityClassifier | undefined;
@@ -158,6 +174,7 @@ export class IrohRemoteHostEngine {
 	private pairingAllowTools: string | undefined;
 	private pairingExpiresAt: number | undefined;
 	private pairingSecret: string | undefined;
+	private pairingWorkspaceName: string | undefined;
 
 	constructor(options: IrohRemoteHostEngineOptions) {
 		this.allowTools = options.allowTools ?? DEFAULT_IROH_REMOTE_ALLOW_TOOLS;
@@ -167,6 +184,7 @@ export class IrohRemoteHostEngine {
 		this.now = options.now ?? Date.now;
 		this.pairingExpiresAt = options.pairingExpiresAt;
 		this.pairingSecret = options.pairingSecret;
+		this.pairingWorkspaceName = options.pairingSecret === undefined ? undefined : options.workspace.name;
 		this.stateManager = options.stateManager;
 		this.validateWorkspace = options.validateWorkspace;
 		this.workspace = parseIrohRemoteWorkspace(options.workspace);
@@ -185,6 +203,7 @@ export class IrohRemoteHostEngine {
 			this.pairingAllowTools = allowTools;
 			this.pairingSecret = secret;
 			this.pairingExpiresAt = expiresAt;
+			this.pairingWorkspaceName = workspace.name;
 			const pendingPairingTicket = await this.stateManager.addPendingPairingTicket({
 				secretHash: hashIrohRemotePairingSecret(secret),
 				workspace: workspace.name,
@@ -290,9 +309,7 @@ export class IrohRemoteHostEngine {
 		hello: IrohRemoteHello,
 		remoteNodeId: string,
 	): Promise<IrohRemoteClientAuthorizationResult> {
-		if (this.pairingSecret !== undefined) {
-			await this.ensurePrimaryWorkspaceRegistered();
-		}
+		await this.ensureRuntimePairingWorkspaceRegistered();
 		const allowTools =
 			this.pairingSecret !== undefined && hello.secret === this.pairingSecret
 				? (this.pairingAllowTools ?? this.allowTools)
@@ -388,10 +405,34 @@ export class IrohRemoteHostEngine {
 		this.allowTools = allowTools;
 	}
 
+	clearPairingSecretForWorkspace(workspaceName: string): boolean {
+		if (this.pairingWorkspaceName !== workspaceName) {
+			return false;
+		}
+		this.clearPairingSecret();
+		return true;
+	}
+
+	private async ensureRuntimePairingWorkspaceRegistered(): Promise<void> {
+		if (this.pairingSecret === undefined || this.pairingWorkspaceName !== this.workspace.name) {
+			return;
+		}
+		const state = await this.stateManager.getState();
+		if (findIrohRemoteWorkspace(state, this.workspace.name)) {
+			return;
+		}
+		if (isEmptyIrohRemoteHostStateForRuntimePairingBootstrap(state)) {
+			await this.stateManager.upsertWorkspace(this.workspace);
+			return;
+		}
+		this.clearPairingSecret();
+	}
+
 	private clearPairingSecret(): void {
 		this.pairingAllowTools = undefined;
 		this.pairingSecret = undefined;
 		this.pairingExpiresAt = undefined;
+		this.pairingWorkspaceName = undefined;
 	}
 
 	private async createHandshakeFailure(
@@ -430,6 +471,11 @@ export class IrohRemoteHostEngine {
 			clientNodeId: remoteNodeId,
 			features: [...IROH_REMOTE_HOST_FEATURES],
 			hostNodeId: this.hostNodeId,
+			remoteHost: createIrohRemoteHostMetadata({
+				authorization,
+				hostNodeId: this.hostNodeId,
+				features: [...IROH_REMOTE_HOST_FEATURES],
+			}),
 			workspace: authorization.workspace.name,
 		};
 		if (hello.mode === "workspaceDiscovery") {

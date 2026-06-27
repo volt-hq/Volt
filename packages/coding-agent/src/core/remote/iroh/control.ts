@@ -14,6 +14,7 @@ export const DEFAULT_IROH_REMOTE_CONTROL_TIMEOUT_MS = 5_000;
 const DEFAULT_IROH_REMOTE_CONTROL_ACTIVE_RETRY_ATTEMPTS = 10;
 const DEFAULT_IROH_REMOTE_CONTROL_ACTIVE_RETRY_DELAY_MS = 250;
 const IROH_REMOTE_CONTROL_ROOT_DIR = "volt-iroh-remote";
+const IROH_REMOTE_UNIX_CONTROL_PATH_MAX_BYTES = 100;
 
 export type IrohRemoteUnsafeApproval = "tty_confirmation" | "yes_flag";
 
@@ -79,7 +80,11 @@ export function getIrohRemoteControlPath(statePath: string): string {
 	if (process.platform === "win32") {
 		return `\\\\.\\pipe\\volt-iroh-remote-${hash}`;
 	}
-	return join(tmpdir(), IROH_REMOTE_CONTROL_ROOT_DIR, hash, "control.sock");
+	const defaultPath = join(tmpdir(), IROH_REMOTE_CONTROL_ROOT_DIR, hash, "control.sock");
+	if (Buffer.byteLength(defaultPath, "utf8") <= IROH_REMOTE_UNIX_CONTROL_PATH_MAX_BYTES) {
+		return defaultPath;
+	}
+	return join("/tmp", IROH_REMOTE_CONTROL_ROOT_DIR, hash, "control.sock");
 }
 
 export async function ensureIrohRemoteControlDirectory(controlPath: string): Promise<void> {

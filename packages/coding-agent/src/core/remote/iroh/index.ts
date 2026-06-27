@@ -77,6 +77,7 @@ export {
 	type IrohRemoteHello,
 	type IrohRemoteHelloMode,
 	type IrohRemoteHelloParseOptions,
+	type IrohRemoteHostHandshakeMetadata,
 	type IrohRemoteWorkspaceDiscoveryTarget,
 	type IrohRemoteWorkspaceManagementTarget,
 	isIrohRemoteSessionId,

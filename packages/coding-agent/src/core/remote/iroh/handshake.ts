@@ -8,8 +8,11 @@ import {
 	type IrohRemoteHostHandshakeFailureOutcome,
 	type IrohRemoteOutcome,
 	IrohRemoteOutcomeError,
+	type IrohRemoteRelayMode,
 	isIrohRemoteOutcome,
+	isIrohRemoteRelayMode,
 } from "./protocol.ts";
+import type { IrohRemoteWorkspaceStatus } from "./workspace.ts";
 
 export type IrohRemoteConversationTarget =
 	| {
@@ -37,6 +40,18 @@ export interface IrohRemoteWorkspaceDiscoveryTarget {
 
 export interface IrohRemoteWorkspaceManagementTarget {
 	purpose: "unregister_workspace";
+}
+
+export interface IrohRemoteHostHandshakeMetadata {
+	workspace: string;
+	workspaceNames: string[];
+	workspaces: IrohRemoteWorkspaceStatus[];
+	features: string[];
+	hostNodeId?: string;
+	relayMode?: IrohRemoteRelayMode;
+	hostName?: string;
+	userName?: string;
+	cwd: string;
 }
 
 export type IrohRemoteHelloMode =
@@ -84,6 +99,7 @@ export interface IrohRemoteHandshakeSuccess {
 	conversation?: IrohRemoteConversationHandshakeMetadata;
 	workspaceDiscovery?: IrohRemoteWorkspaceDiscoveryTarget;
 	workspaceManagement?: IrohRemoteWorkspaceManagementTarget;
+	remoteHost?: IrohRemoteHostHandshakeMetadata;
 	child?: string;
 }
 
@@ -164,18 +180,22 @@ export function parseIrohRemoteHandshakeResponse(value: unknown): IrohRemoteHand
 	}
 	if (response.success === true) {
 		const hostNodeId = expectOptionalString(response.hostNodeId, "handshake response hostNodeId");
+		const workspace = expectString(response.workspace, "handshake response workspace");
 		const features = parseOptionalFeatures(response.features);
 		const modeMetadata = parseOptionalHandshakeSuccessMode(response);
+		const remoteHost = parseOptionalRemoteHostHandshakeMetadata(response.remoteHost);
 		if (hasHandshakeSuccessModeMetadata(modeMetadata) && hostNodeId === undefined) {
 			throw new Error("handshake response hostNodeId is required for stream mode success");
 		}
+		assertRemoteHostMetadataMatchesHandshake(remoteHost, { hostNodeId, workspace });
 		const success: IrohRemoteHandshakeSuccess = {
 			type: IROH_REMOTE_HANDSHAKE_TYPE,
 			success: true,
-			workspace: expectString(response.workspace, "handshake response workspace"),
+			workspace,
 			clientNodeId: expectString(response.clientNodeId, "handshake response clientNodeId"),
 			...(features === undefined ? {} : { features }),
 			...modeMetadata,
+			...(remoteHost === undefined ? {} : { remoteHost }),
 			child: expectOptionalString(response.child, "handshake response child"),
 		};
 		return hostNodeId === undefined ? success : { ...success, hostNodeId };
@@ -212,6 +232,7 @@ export function createIrohRemoteHandshakeSuccess(options: {
 	conversation?: IrohRemoteConversationHandshakeMetadata;
 	workspaceDiscovery?: IrohRemoteWorkspaceDiscoveryTarget;
 	workspaceManagement?: IrohRemoteWorkspaceManagementTarget;
+	remoteHost?: IrohRemoteHostHandshakeMetadata;
 	child?: string;
 }): IrohRemoteHandshakeSuccess {
 	const response: IrohRemoteHandshakeSuccess = {
@@ -225,6 +246,7 @@ export function createIrohRemoteHandshakeSuccess(options: {
 		...(options.conversation === undefined ? {} : { conversation: { ...options.conversation } }),
 		...(options.workspaceDiscovery === undefined ? {} : { workspaceDiscovery: { ...options.workspaceDiscovery } }),
 		...(options.workspaceManagement === undefined ? {} : { workspaceManagement: { ...options.workspaceManagement } }),
+		...(options.remoteHost === undefined ? {} : { remoteHost: cloneRemoteHostHandshakeMetadata(options.remoteHost) }),
 		child: options.child,
 	};
 	return response;
@@ -265,6 +287,39 @@ export function assertIrohRemoteHandshakeHostIdentity(
 			"host_identity_mismatch",
 			`expected ${expectedHostNodeId}, got ${actualHostNodeId ?? "<missing>"}`,
 		);
+	}
+}
+
+function cloneRemoteHostHandshakeMetadata(metadata: IrohRemoteHostHandshakeMetadata): IrohRemoteHostHandshakeMetadata {
+	return {
+		workspace: metadata.workspace,
+		workspaceNames: [...metadata.workspaceNames],
+		workspaces: metadata.workspaces.map((workspace) => ({ ...workspace })),
+		features: [...metadata.features],
+		...(metadata.hostNodeId === undefined ? {} : { hostNodeId: metadata.hostNodeId }),
+		...(metadata.relayMode === undefined ? {} : { relayMode: metadata.relayMode }),
+		...(metadata.hostName === undefined ? {} : { hostName: metadata.hostName }),
+		...(metadata.userName === undefined ? {} : { userName: metadata.userName }),
+		cwd: metadata.cwd,
+	};
+}
+
+function assertRemoteHostMetadataMatchesHandshake(
+	metadata: IrohRemoteHostHandshakeMetadata | undefined,
+	response: { hostNodeId: string | undefined; workspace: string },
+): void {
+	if (metadata === undefined) {
+		return;
+	}
+	if (metadata.workspace !== response.workspace) {
+		throw new Error("handshake response remoteHost workspace must match top-level workspace");
+	}
+	if (
+		metadata.hostNodeId !== undefined &&
+		response.hostNodeId !== undefined &&
+		metadata.hostNodeId !== response.hostNodeId
+	) {
+		throw new Error("handshake response remoteHost hostNodeId must match top-level hostNodeId");
 	}
 }
 
@@ -508,6 +563,96 @@ function parseOptionalFeatures(value: unknown): string[] | undefined {
 		features.push(entry);
 	}
 	return features;
+}
+
+function parseRequiredFeatures(value: unknown, label: string): string[] {
+	const features = parseOptionalFeatures(value);
+	if (features === undefined || features.length === 0) {
+		throw new Error(`${label} must be a non-empty string array`);
+	}
+	return features;
+}
+
+function parseOptionalRemoteHostHandshakeMetadata(value: unknown): IrohRemoteHostHandshakeMetadata | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	const metadata = expectRecord(value, "handshake response remoteHost");
+	expectKnownResponseFields(metadata, "handshake response remoteHost", [
+		"workspace",
+		"workspaceNames",
+		"workspaces",
+		"features",
+		"hostNodeId",
+		"relayMode",
+		"hostName",
+		"userName",
+		"cwd",
+	]);
+	return {
+		workspace: expectWorkspaceNameForResponse(metadata.workspace, "handshake response remoteHost workspace"),
+		workspaceNames: parseRemoteHostWorkspaceNames(metadata.workspaceNames),
+		workspaces: parseRemoteHostWorkspaces(metadata.workspaces),
+		features: parseRequiredFeatures(metadata.features, "handshake response remoteHost features"),
+		...(metadata.hostNodeId === undefined
+			? {}
+			: { hostNodeId: expectString(metadata.hostNodeId, "handshake response remoteHost hostNodeId") }),
+		...(metadata.relayMode === undefined
+			? {}
+			: { relayMode: expectRelayMode(metadata.relayMode, "handshake response remoteHost relayMode") }),
+		...(metadata.hostName === undefined
+			? {}
+			: { hostName: expectString(metadata.hostName, "handshake response remoteHost hostName") }),
+		...(metadata.userName === undefined
+			? {}
+			: { userName: expectString(metadata.userName, "handshake response remoteHost userName") }),
+		cwd: expectString(metadata.cwd, "handshake response remoteHost cwd"),
+	};
+}
+
+function parseRemoteHostWorkspaceNames(value: unknown): string[] {
+	if (!Array.isArray(value)) {
+		throw new Error("handshake response remoteHost workspaceNames must be an array");
+	}
+	return value.map((entry) => expectWorkspaceNameForResponse(entry, "handshake response remoteHost workspace name"));
+}
+
+function parseRemoteHostWorkspaces(value: unknown): IrohRemoteWorkspaceStatus[] {
+	if (!Array.isArray(value)) {
+		throw new Error("handshake response remoteHost workspaces must be an array");
+	}
+	return value.map((entry) => {
+		const workspace = expectRecord(entry, "handshake response remoteHost workspace");
+		expectKnownResponseFields(workspace, "handshake response remoteHost workspace", ["name", "status"]);
+		return {
+			name: expectWorkspaceNameForResponse(workspace.name, "handshake response remoteHost workspace name"),
+			status: expectWorkspaceStatus(workspace.status, "handshake response remoteHost workspace status"),
+		};
+	});
+}
+
+function expectWorkspaceNameForResponse(value: unknown, label: string): string {
+	const workspace = expectString(value, label);
+	const validationError = getIrohRemoteWorkspaceNameValidationError(workspace, label);
+	if (validationError) {
+		throw new Error(validationError);
+	}
+	return workspace;
+}
+
+function expectWorkspaceStatus(value: unknown, label: string): IrohRemoteWorkspaceStatus["status"] {
+	const status = expectString(value, label);
+	if (status === "available" || status === "missing" || status === "unavailable") {
+		return status;
+	}
+	throw new Error(`${label} must be a supported workspace status`);
+}
+
+function expectRelayMode(value: unknown, label: string): IrohRemoteRelayMode {
+	if (isIrohRemoteRelayMode(value)) {
+		return value;
+	}
+	throw new Error(`${label} must be a supported relay mode`);
 }
 
 function parseOptionalHandshakeSuccessMode(

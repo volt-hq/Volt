@@ -108,6 +108,9 @@ export class IrohRemoteHostStateManager {
 				return undefined;
 			}
 			const [removedWorkspace] = state.workspaces.splice(index, 1);
+			state.pendingPairingTickets = (state.pendingPairingTickets ?? []).filter(
+				(ticket) => ticket.workspace !== name,
+			);
 			await this.saveUnlocked(state);
 			return removedWorkspace ? cloneWorkspace(removedWorkspace) : undefined;
 		});

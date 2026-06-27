@@ -1343,6 +1343,9 @@ async function handleRemoteHostRpcCommand(command, authorization, options) {
 	if (result.metadata) {
 		updateAuthorizationWorkspaceMetadata(authorization, result.metadata);
 	}
+	if (result.response.success === true && typeof command.name === "string") {
+		options.hostEngine?.clearPairingSecretForWorkspace(command.name);
+	}
 	await logAudit(options.auditLogger, {
 		type: "workspace_unregistered",
 		clientNodeId: authorization.client.nodeId,
@@ -2243,6 +2246,7 @@ async function handleWorkspaceManagementUnregisterCommand(command, authorization
 			response: createIrohRemoteRpcErrorResponse(id, "unregister_workspace", "workspace_unregistered"),
 		};
 	}
+	options.hostEngine?.clearPairingSecretForWorkspace(request.workspaceName);
 	const closedStreamCount = await closeActiveStreamsForWorkspace(
 		options,
 		request.workspaceName,
@@ -2612,6 +2616,7 @@ function createIntegratedConversationHandshakeResponse(handshake, authorization,
 		clientNodeId: authorization.client.nodeId,
 		features: handshake.response.features,
 		hostNodeId: options.hostNodeId,
+		remoteHost: createRemoteHostMetadata(authorization, options),
 		workspace: authorization.workspace.name,
 		sessionId,
 		conversation: {
