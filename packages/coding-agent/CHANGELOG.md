@@ -90,6 +90,7 @@
 
 ### Changed
 
+- Changed the default coding-agent prompt to discourage source-text assertions for ordinary behavior tests.
 - Changed `volt remote host` to default to Iroh relay/discovery mode `default`, keeping saved-host reconnect tickets usable across host restarts unless `--relay disabled` is explicitly passed.
 - Changed Iroh remote host startup and workspace registration prompts to offer a `trust` choice for project-local workspace resources, with saved workspace trust honored by remote sessions.
 - Changed Iroh remote host startup to require TTY confirmation or `--yes` before granting unsafe remote tools (`bash`, `edit`, or `write`) and to audit accepted unsafe grants.
