@@ -51,6 +51,20 @@ export type RpcCommand =
 
 	// Push notifications
 	| { id?: string; type: "register_push_target"; args: RpcRegisterPushTargetArgs }
+	| {
+			id?: string;
+			type: "register_live_activity";
+			workspaceName: string;
+			sessionId: string;
+			activityId: string;
+			tokenHash: string;
+			tokenEnvironment: RpcPushTokenEnvironment;
+			platform: RpcPushPlatform;
+	  }
+	| { id?: string; type: "unregister_live_activity"; workspaceName: string; sessionId: string; activityId: string }
+
+	// Remote host management
+	| { id?: string; type: "unregister_workspace"; name: string }
 
 	// State
 	| { id?: string; type: "get_state" }
@@ -274,11 +288,13 @@ export interface RpcPendingHostActionsResponse {
 
 export type RpcPushProvider = "fcm";
 export type RpcPushPlatform = "ios";
+export type RpcPushTokenEnvironment = "development" | "production";
 
 export interface RpcLiveActivityRegistration {
 	activityId: string;
 	pushToken: string;
 	tokenHash?: string;
+	tokenEnvironment?: RpcPushTokenEnvironment;
 }
 
 export interface RpcRegisterPushTargetArgs {
@@ -295,6 +311,16 @@ export interface RpcRegisterPushTargetArgs {
 export interface RpcRegisterPushTargetResponse {
 	status: "registered";
 	pushTargetId: string;
+}
+
+export interface RpcRegisterLiveActivityResponse {
+	status: "registered";
+	activityId: string;
+}
+
+export interface RpcUnregisterLiveActivityResponse {
+	status: "unregistered";
+	activityId: string;
 }
 
 // ============================================================================
@@ -327,6 +353,19 @@ export interface RpcSessionListItem {
 	current: boolean;
 }
 
+export interface RpcActiveToolExecution {
+	toolCallId: string;
+	toolName: string;
+	status: "started";
+	args?: Record<string, unknown>;
+}
+
+export interface RpcActiveCompaction {
+	reason: "manual" | "threshold" | "overflow";
+	/** Unix epoch milliseconds when the active compaction started. */
+	startedAt: number;
+}
+
 export interface RpcSessionState {
 	model?: RpcModel;
 	thinkingLevel: ThinkingLevel;
@@ -340,6 +379,8 @@ export interface RpcSessionState {
 	autoCompactionEnabled: boolean;
 	messageCount: number;
 	pendingMessageCount: number;
+	activeTools?: RpcActiveToolExecution[];
+	activeCompaction?: RpcActiveCompaction;
 }
 
 export type RpcTranscriptToolStatus = "started" | "completed" | "failed";
@@ -428,6 +469,33 @@ export type RpcResponse =
 			command: "register_push_target";
 			success: true;
 			data: RpcRegisterPushTargetResponse;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "register_live_activity";
+			success: true;
+			data: RpcRegisterLiveActivityResponse;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "unregister_live_activity";
+			success: true;
+			data: RpcUnregisterLiveActivityResponse;
+	  }
+
+	// Remote host management
+	| {
+			id?: string;
+			type: "response";
+			command: "unregister_workspace";
+			success: true;
+			data: {
+				removedWorkspace: string;
+				workspaceNames: string[];
+				workspaces: Array<{ name: string; status: string }>;
+			};
 	  }
 
 	// State

@@ -1,14 +1,17 @@
 import type { AgentSessionEvent } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import { REVIEW_BRANCH_ACTION_ID, REVIEW_UNCOMMITTED_ACTION_ID } from "../../core/host-actions.ts";
+import type { CustomMessage } from "../../core/messages.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
 	createIrohRemoteOutboundFilteredRpcTransport,
+	createIrohRemoteRpcErrorResponse,
 	type IrohRemoteLiveActivityContentState,
 	type IrohRemoteLiveActivityToolGlyph,
 	type IrohRemoteLiveActivityUpdateIntent,
 	type IrohRemoteOutboundValueDecorator,
 	type IrohRemotePushNotificationDelivery,
+	sanitizeIrohRemoteOutbound,
 } from "../../core/remote/iroh/index.ts";
 import {
 	createIrohRpcTransport,
@@ -17,16 +20,21 @@ import {
 	type RpcLineHandler,
 	type RpcTransport,
 } from "../../core/rpc/index.ts";
-import { type RpcSessionChange, runRpcMode } from "./rpc-mode.ts";
+import type { CustomMessageEntry, SessionEntry, SessionMessageEntry } from "../../core/session-manager.ts";
+import { type RpcModeOptions, type RpcSessionChange, runRpcMode } from "./rpc-mode.ts";
 import type { RpcRegisterPushTargetResponse } from "./rpc-types.ts";
 
 export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	decorateOutbound?: IrohRemoteOutboundValueDecorator;
 	disposeRuntimeOnClose?: boolean;
 	notificationDelivery?: IrohRemotePushNotificationDelivery;
+	onResponseWritten?: (response: Record<string, unknown>) => void | Promise<void>;
 	onSessionChanged?: (session: RpcSessionChange) => void | Promise<void>;
+	onWorkflowEvent?: RpcModeOptions["onWorkflowEvent"];
 	registerPushTarget?: (args: unknown) => Promise<RpcRegisterPushTargetResponse>;
+	remoteCommandHandler?: (command: Record<string, unknown>) => object | Promise<object | undefined> | undefined;
 	remoteWorkspacePath?: string;
+	workspaceName?: string;
 	workspacePath: string;
 }
 
@@ -43,6 +51,7 @@ export interface IrohRemoteNotificationRequest {
 	title: string;
 	body: string;
 	sessionId?: string;
+	workspace?: string;
 }
 
 export interface IrohRemoteCompletionState {
@@ -71,12 +80,20 @@ interface IrohRemoteCloseDeferringRpcTransportOptions {
 	transport: RpcTransport;
 	getCompletionState?: () => IrohRemoteCompletionState;
 	onCommandCompleted?: (completion: IrohRemoteCompletedCommand) => void | Promise<void>;
+	onResponseWritten?: (response: Record<string, unknown>) => void | Promise<void>;
 	waitForPromptCompletion(): Promise<void>;
 }
 
 interface IrohRemoteCloseDeferringRpcTransport extends RpcTransport {
 	setRpcModeStartupComplete(startupComplete: boolean): void;
 }
+
+interface IrohRemoteHostCommandRpcTransportOptions {
+	handleCommand: (command: Record<string, unknown>) => object | Promise<object | undefined> | undefined;
+	transport: RpcTransport;
+}
+
+const IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS = 12_000;
 
 /** Run Volt RPC in-process over an authorized Iroh bidirectional stream. */
 export function runIrohRemoteRpcMode(
@@ -85,9 +102,15 @@ export function runIrohRemoteRpcMode(
 ): Promise<void> {
 	const sentNotificationEventIds = new Set<string>();
 	let detachLiveActivityUpdates: (() => void) | undefined;
+	let detachTranscriptEntryEvents: (() => void) | undefined;
+	let transportClosed = false;
 	const attachLiveActivityUpdates = () => {
 		detachLiveActivityUpdates?.();
-		detachLiveActivityUpdates = attachIrohRemoteLiveActivityUpdates(runtimeHost, options.notificationDelivery);
+		detachLiveActivityUpdates = attachIrohRemoteLiveActivityUpdates(
+			runtimeHost,
+			options.notificationDelivery,
+			options.workspaceName,
+		);
 	};
 	const outboundTransport = createIrohRemoteOutboundFilteredRpcTransport({
 		decorate: options.decorateOutbound,
@@ -95,6 +118,14 @@ export function runIrohRemoteRpcMode(
 		transport: createIrohRpcTransport(options),
 		workspacePath: options.workspacePath,
 	});
+	const attachTranscriptEntryEvents = () => {
+		detachTranscriptEntryEvents?.();
+		detachTranscriptEntryEvents = attachIrohRemoteTranscriptEntryEvents(runtimeHost, outboundTransport, {
+			remoteWorkspacePath: options.remoteWorkspacePath,
+			workspacePath: options.workspacePath,
+		});
+	};
+	attachTranscriptEntryEvents();
 	const deliverCompletionNotification = async (notification: IrohRemoteNotificationRequest): Promise<void> => {
 		if (options.notificationDelivery) {
 			const deliveryStatus = await options.notificationDelivery.deliverNotification(notification);
@@ -108,42 +139,245 @@ export function runIrohRemoteRpcMode(
 		transport: outboundTransport,
 		getCompletionState: () => getIrohRemoteCompletionState(runtimeHost),
 		onCommandCompleted: async (completion) => {
-			const notification = createIrohRemoteCompletionNotification(completion);
+			const notification = createIrohRemoteCompletionNotification(completion, options.workspaceName);
 			if (!notification || sentNotificationEventIds.has(notification.eventId)) {
 				return;
 			}
 			sentNotificationEventIds.add(notification.eventId);
 			await deliverCompletionNotification(notification);
 		},
+		onResponseWritten: options.onResponseWritten,
 		waitForPromptCompletion: () => runtimeHost.session.waitForIdle(),
 	});
+
+	const filteredTransport = createIrohRemoteFilteredRpcTransport({
+		transport: closeDeferringTransport,
+	});
+	const remoteHostCommandTransport = options.remoteCommandHandler
+		? createIrohRemoteHostCommandRpcTransport({
+				handleCommand: options.remoteCommandHandler,
+				transport: filteredTransport,
+			})
+		: filteredTransport;
 
 	return runRpcMode(runtimeHost, {
 		allowUiActionInvocation: true,
 		disposeRuntimeOnClose: options.disposeRuntimeOnClose,
 		onSessionChanged: async (session) => {
-			attachLiveActivityUpdates();
+			if (!transportClosed) {
+				attachLiveActivityUpdates();
+				attachTranscriptEntryEvents();
+			}
 			await options.onSessionChanged?.(session);
 		},
+		onWorkflowEvent: options.onWorkflowEvent,
 		requireRemoteSafeUiActions: true,
-		transport: createIrohRemoteFilteredRpcTransport({
-			transport: closeDeferringTransport,
-		}),
+		transport: remoteHostCommandTransport,
 		exitProcess: false,
 		registerPushTarget: options.registerPushTarget,
 	}).finally(() => {
+		transportClosed = true;
+		detachTranscriptEntryEvents?.();
 		detachLiveActivityUpdates?.();
 	});
+}
+
+interface IrohRemoteTranscriptEventOptions {
+	remoteWorkspacePath?: string;
+	workspacePath: string;
+}
+
+function attachIrohRemoteTranscriptEntryEvents(
+	runtimeHost: AgentSessionRuntime,
+	transport: RpcTransport,
+	options: IrohRemoteTranscriptEventOptions,
+): () => void {
+	const emittedFinalEntryIds = new Set<string>();
+	return runtimeHost.session.subscribe((event) => {
+		if (event.type !== "message_end") {
+			return;
+		}
+		const message = event.message;
+		queueMicrotask(() => {
+			const entry = findPersistedMessageEntry(runtimeHost, message);
+			if (!entry || emittedFinalEntryIds.has(entry.id)) {
+				return;
+			}
+			const transcriptEvent = createIrohRemoteTranscriptEntryEvent(entry, options);
+			if (!transcriptEvent) {
+				return;
+			}
+			emittedFinalEntryIds.add(entry.id);
+			void Promise.resolve(transport.write(transcriptEvent)).catch(() => {});
+		});
+	});
+}
+
+type IrohRemoteTranscriptSourceEntry = SessionMessageEntry | CustomMessageEntry;
+
+function findPersistedMessageEntry(
+	runtimeHost: AgentSessionRuntime,
+	message: unknown,
+): IrohRemoteTranscriptSourceEntry | undefined {
+	const branch = runtimeHost.session.sessionManager.getBranch();
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry.type === "message" && entry.message === message) {
+			return entry;
+		}
+		if (entry.type === "custom_message" && isMatchingReviewCustomMessageEntry(entry, message)) {
+			return entry;
+		}
+	}
+	return undefined;
+}
+
+function isMatchingReviewCustomMessageEntry(entry: CustomMessageEntry, message: unknown): message is CustomMessage {
+	if (entry.customType !== "review" || entry.display !== true || !isReviewCustomMessage(message)) {
+		return false;
+	}
+	return customMessageContentMatches(entry.content, message.content);
+}
+
+function isReviewCustomMessage(message: unknown): message is CustomMessage {
+	if (typeof message !== "object" || message === null || Array.isArray(message)) {
+		return false;
+	}
+	const candidate = message as Partial<CustomMessage>;
+	return candidate.role === "custom" && candidate.customType === "review" && candidate.display === true;
+}
+
+function customMessageContentMatches(left: CustomMessageEntry["content"], right: CustomMessage["content"]): boolean {
+	if (typeof left === "string" || typeof right === "string") {
+		return left === right;
+	}
+	try {
+		return JSON.stringify(left) === JSON.stringify(right);
+	} catch {
+		return false;
+	}
+}
+
+function createIrohRemoteTranscriptEntryEvent(
+	entry: IrohRemoteTranscriptSourceEntry,
+	options: IrohRemoteTranscriptEventOptions,
+): Record<string, unknown> | undefined {
+	if (entry.type === "custom_message") {
+		if (entry.customType !== "review" || entry.display !== true) {
+			return undefined;
+		}
+		const text = extractIrohRemoteTranscriptContentText(entry.content);
+		return text ? createIrohRemoteTranscriptEntryEventValue(entry, "assistant", text, options) : undefined;
+	}
+	const message = entry.message;
+	if (message.role === "user" || message.role === "assistant") {
+		const text = extractIrohRemoteTranscriptContentText(message.content);
+		if (!text) {
+			return undefined;
+		}
+		return createIrohRemoteTranscriptEntryEventValue(entry, message.role, text, options);
+	}
+	if (message.role === "toolResult") {
+		const status = message.isError ? "failed" : "completed";
+		const toolName =
+			typeof message.toolName === "string" && message.toolName.trim() ? message.toolName.trim() : "tool";
+		return createIrohRemoteTranscriptEntryEventValue(entry, "tool", `${toolName} ${status}`, options);
+	}
+	if (message.role === "bashExecution") {
+		const failed = message.cancelled || (message.exitCode !== undefined && message.exitCode !== 0);
+		const status = failed ? "failed" : "completed";
+		const exit = message.cancelled
+			? "cancelled"
+			: message.exitCode === undefined
+				? status
+				: `exit ${message.exitCode}`;
+		return createIrohRemoteTranscriptEntryEventValue(entry, "tool", `bash ${exit}`, options);
+	}
+	return undefined;
+}
+
+function createIrohRemoteTranscriptEntryEventValue(
+	entry: SessionEntry,
+	role: "user" | "assistant" | "system" | "tool",
+	text: string,
+	options: IrohRemoteTranscriptEventOptions,
+): Record<string, unknown> {
+	const sanitized = sanitizeIrohRemoteTranscriptText(text, options);
+	return {
+		type: "transcript_entry",
+		entry: {
+			entryId: entry.id,
+			createdAt: normalizeIrohRemoteTranscriptTimestamp(entry.timestamp),
+			role,
+			text: sanitized.text,
+			truncated: sanitized.truncated,
+		},
+		final: true,
+	};
+}
+
+function extractIrohRemoteTranscriptContentText(content: unknown): string {
+	if (typeof content === "string") {
+		return content;
+	}
+	if (!Array.isArray(content)) {
+		return "";
+	}
+	return content
+		.filter(
+			(part): part is { type: "text"; text: string } =>
+				typeof part === "object" &&
+				part !== null &&
+				(part as { type?: unknown }).type === "text" &&
+				typeof (part as { text?: unknown }).text === "string",
+		)
+		.map((part) => part.text)
+		.join("");
+}
+
+function sanitizeIrohRemoteTranscriptText(
+	value: string,
+	options: IrohRemoteTranscriptEventOptions,
+): { text: string; truncated: boolean } {
+	const normalized = value
+		.replace(/\r\n?/g, "\n")
+		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+		.replace(/[\n\t]/g, " ")
+		.replace(/\s+/gu, " ")
+		.trim();
+	const sanitizedValue = sanitizeIrohRemoteOutbound(
+		{ value: normalized },
+		{
+			remoteWorkspacePath: options.remoteWorkspacePath,
+			workspacePath: options.workspacePath,
+		},
+	) as { value?: unknown };
+	const sanitized = sanitizedValue.value;
+	const text = (typeof sanitized === "string" ? sanitized : "").replace(/\s+/gu, " ").trim();
+	const scalars = Array.from(text);
+	if (scalars.length <= IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS) {
+		return { text, truncated: false };
+	}
+	return {
+		text: scalars.slice(0, IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS).join(""),
+		truncated: true,
+	};
+}
+
+function normalizeIrohRemoteTranscriptTimestamp(timestamp: string): string {
+	const date = new Date(timestamp);
+	return Number.isNaN(date.getTime()) ? new Date(0).toISOString() : date.toISOString();
 }
 
 function attachIrohRemoteLiveActivityUpdates(
 	runtimeHost: AgentSessionRuntime,
 	delivery: IrohRemotePushNotificationDelivery | undefined,
+	workspaceName: string | undefined,
 ): () => void {
 	if (!delivery?.deliverLiveActivityUpdate) {
 		return () => {};
 	}
-	const updater = new IrohRemoteLiveActivityUpdater(runtimeHost, delivery);
+	const updater = new IrohRemoteLiveActivityUpdater(runtimeHost, delivery, workspaceName);
 	return runtimeHost.session.subscribe((event) => {
 		void updater.handle(event).catch(() => {});
 	});
@@ -152,18 +386,24 @@ function attachIrohRemoteLiveActivityUpdates(
 class IrohRemoteLiveActivityUpdater {
 	private readonly delivery: Required<Pick<IrohRemotePushNotificationDelivery, "deliverLiveActivityUpdate">>;
 	private readonly runtimeHost: AgentSessionRuntime;
+	private readonly workspaceName: string | undefined;
 	private readonly toolIndexesByCallId = new Map<string, number>();
 	private deliveryQueue: Promise<void> = Promise.resolve();
 	private recentTools: IrohRemoteLiveActivityToolGlyph[] = [];
 	private sequence = 0;
 	private active = false;
 
-	constructor(runtimeHost: AgentSessionRuntime, delivery: IrohRemotePushNotificationDelivery) {
+	constructor(
+		runtimeHost: AgentSessionRuntime,
+		delivery: IrohRemotePushNotificationDelivery,
+		workspaceName: string | undefined,
+	) {
 		if (!delivery.deliverLiveActivityUpdate) {
 			throw new Error("live activity delivery is unavailable");
 		}
 		this.runtimeHost = runtimeHost;
 		this.delivery = { deliverLiveActivityUpdate: delivery.deliverLiveActivityUpdate.bind(delivery) };
+		this.workspaceName = workspaceName;
 	}
 
 	async handle(event: AgentSessionEvent): Promise<void> {
@@ -246,6 +486,7 @@ class IrohRemoteLiveActivityUpdater {
 			...(currentTool === undefined ? {} : { currentTool }),
 			recentTools: this.recentTools.slice(-6),
 			sessionID: completionState.sessionId,
+			...(this.workspaceName === undefined ? {} : { workspaceName: this.workspaceName }),
 			updatedAtEpochSeconds: nowSeconds,
 		};
 		const update: IrohRemoteLiveActivityUpdateIntent = {
@@ -284,6 +525,105 @@ function sanitizeLiveActivityToolName(toolName: string | undefined): string {
 		return "tool";
 	}
 	return trimmed.slice(0, 32);
+}
+
+export function createIrohRemoteHostCommandRpcTransport(
+	options: IrohRemoteHostCommandRpcTransportOptions,
+): RpcTransport {
+	let pendingInboundCommand = Promise.resolve();
+
+	const waitForPendingInboundCommand = async (): Promise<void> => {
+		await pendingInboundCommand;
+	};
+
+	const writeHandlerError = async (line: string, error: unknown): Promise<void> => {
+		const target = getIrohRemoteRpcErrorTarget(line);
+		await options.transport.write(
+			createIrohRemoteRpcErrorResponse(
+				target.id,
+				target.command,
+				error instanceof Error ? error.message : String(error),
+			),
+		);
+	};
+
+	const handleLine = async (line: string, handler: RpcLineHandler): Promise<void> => {
+		const command = parseIrohRemoteHostCommandLine(line);
+		if (!command) {
+			handler(line);
+			return;
+		}
+		let response: object | undefined;
+		try {
+			response = await options.handleCommand(command);
+		} catch (error: unknown) {
+			await writeHandlerError(line, error);
+			return;
+		}
+		if (response === undefined) {
+			handler(line);
+			return;
+		}
+		await options.transport.write(response);
+	};
+
+	return {
+		write(value) {
+			return options.transport.write(value);
+		},
+		onLine(handler: RpcLineHandler): () => void {
+			return options.transport.onLine((line) => {
+				pendingInboundCommand = pendingInboundCommand.then(
+					() => handleLine(line, handler),
+					() => handleLine(line, handler),
+				);
+				void pendingInboundCommand.catch(() => {});
+			});
+		},
+		onClose(handler: RpcCloseHandler): () => void {
+			return options.transport.onClose?.(handler) ?? (() => {});
+		},
+		async waitForBackpressure() {
+			await waitForPendingInboundCommand();
+			await options.transport.waitForBackpressure?.();
+		},
+		async flush() {
+			await waitForPendingInboundCommand();
+			await options.transport.flush?.();
+		},
+		async close() {
+			await waitForPendingInboundCommand();
+			await options.transport.close();
+		},
+	};
+}
+
+function parseIrohRemoteHostCommandLine(line: string): Record<string, unknown> | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(line);
+	} catch {
+		return undefined;
+	}
+	if (!isRecord(parsed) || typeof parsed.type !== "string") {
+		return undefined;
+	}
+	return parsed;
+}
+
+function getIrohRemoteRpcErrorTarget(line: string): { id: string | undefined; command: string } {
+	try {
+		const parsed: unknown = JSON.parse(line);
+		if (!isRecord(parsed)) {
+			return { id: undefined, command: "unknown" };
+		}
+		return {
+			id: typeof parsed.id === "string" ? parsed.id : undefined,
+			command: typeof parsed.type === "string" ? parsed.type : "unknown",
+		};
+	} catch {
+		return { id: undefined, command: "parse" };
+	}
 }
 
 function liveActivityStatusText(
@@ -483,6 +823,15 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 		}
 	};
 
+	const notifyResponseWritten = async (value: object, writeResult: void | Promise<void>): Promise<void> => {
+		await writeResult;
+		const response = value as Record<string, unknown>;
+		if (response.type !== "response") {
+			return;
+		}
+		await options.onResponseWritten?.(response);
+	};
+
 	const transport: IrohRemoteCloseDeferringRpcTransport = {
 		setRpcModeStartupComplete(startupComplete) {
 			rpcModeStartupComplete = startupComplete;
@@ -507,6 +856,9 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 				throw error;
 			}
 			trackOutboundResponse(value);
+			if (options.onResponseWritten && (value as Record<string, unknown>).type === "response") {
+				return notifyResponseWritten(value, result);
+			}
 			return result;
 		},
 		onLine(handler: RpcLineHandler): () => void {
@@ -573,19 +925,23 @@ function getIrohRemoteCompletionState(runtimeHost: AgentSessionRuntime): IrohRem
 
 function createIrohRemoteCompletionNotification(
 	completion: IrohRemoteCompletedCommand,
+	workspaceName: string | undefined,
 ): IrohRemoteNotificationRequest | undefined {
 	const finalState = getChangedFinalCompletionState(completion);
 	if (!finalState) {
 		return undefined;
 	}
+	const workspace = getSafeNotificationWorkspace(workspaceName);
+	const workspaceDetails = workspace === undefined ? {} : { workspace };
 	if (isConversationCompletionCommand(completion.command)) {
 		return {
 			type: "notification_request",
 			eventId: `conversation:${finalState.sessionId}:${finalState.runId}:completed`,
 			kind: "conversation_completed",
-			title: "Volt finished",
+			title: workspace === undefined ? "Volt finished" : `Volt finished in ${workspace}`,
 			body: "Your conversation is ready.",
 			sessionId: finalState.sessionId,
+			...workspaceDetails,
 		};
 	}
 	if (isCompletedReviewInvocationResponse(completion.command, completion.response)) {
@@ -593,12 +949,24 @@ function createIrohRemoteCompletionNotification(
 			type: "notification_request",
 			eventId: `review:${finalState.sessionId}:${finalState.runId}:completed`,
 			kind: "review_completed",
-			title: "Review complete",
+			title: workspace === undefined ? "Review complete" : `Review complete in ${workspace}`,
 			body: "Open Volt to see the findings.",
 			sessionId: finalState.sessionId,
+			...workspaceDetails,
 		};
 	}
 	return undefined;
+}
+
+function getSafeNotificationWorkspace(workspaceName: string | undefined): string | undefined {
+	if (workspaceName === undefined) {
+		return undefined;
+	}
+	const trimmed = workspaceName.trim();
+	if (trimmed.length === 0 || trimmed.includes("/") || trimmed.includes("\\") || trimmed.includes("\0")) {
+		return undefined;
+	}
+	return trimmed;
 }
 
 function getChangedFinalCompletionState(

@@ -38,6 +38,7 @@ import {
 	DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
 	formatIrohRemoteTicketQrCode,
 	getIrohRemoteUnsafeAllowedTools,
+	getIrohRemoteWorkspaceAvailabilityStatus,
 	IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE,
 	IROH_REMOTE_REVOKE_CONTROL_REQUEST_TYPE,
 	IrohRemoteAuditLogger,
@@ -48,6 +49,7 @@ import {
 	type IrohRemoteRevokedClient,
 	type IrohRemoteUnsafeApproval,
 	type IrohRemoteWorkspace,
+	type IrohRemoteWorkspaceAvailabilityStatus,
 	isIrohRemoteRelayMode,
 	requestIrohRemoteActiveRevocation,
 	requestIrohRemotePairingTicket,
@@ -98,6 +100,7 @@ function printRemoteCommandHelp(): void {
 	console.error(`Usage:
   volt remote host [options]
   volt remote host --register-workspace [path|name=path] [options]
+  volt remote host --unregister-workspace <name> [options]
   volt remote pair [options]
   volt remote status [options]
   volt remote clients [options]
@@ -107,13 +110,11 @@ function printRemoteCommandHelp(): void {
 Host options are forwarded to the integrated Iroh remote host. Common options:
   --workspace <name=path>       Workspace exposed to the client
   --register-workspace [spec]   Register cwd, path, or name=path in host state and exit
+  --unregister-workspace <name> Remove a registered workspace from host state without deleting files
   --mobile                      Mobile-facing host mode. Skips startup pairing; relay already defaults to default
   --relay <disabled|default>    Iroh relay preset. Defaults to default; use disabled for LAN-only testing
   --state <path>                Host state path
   --audit <path>                Host audit JSONL path
-  --use-volt                    Spawn volt --mode rpc instead of the integrated runtime
-  --source-volt <repo-root>     Spawn Volt from a source checkout. Implies --use-volt
-  --volt-bin <path>             Volt executable for --use-volt
   --allow-tools <list>          Remote tool allowlist. Defaults to the saved workspace allowlist or default remote tools.
                                 bash/edit/write can mutate host state; web_search can make network requests with host credentials.
                                 These grants require confirmation.
@@ -163,10 +164,19 @@ interface RemotePairArgs {
 	yes: boolean;
 }
 
+interface RemoteHostUnregisterArgs {
+	error?: string;
+	help: boolean;
+	positionals: string[];
+	statePath: string;
+	workspaceName?: string;
+}
+
 interface IrohRemoteStatusWorkspaceView {
 	allowedTools?: string;
 	name: string;
 	path: string;
+	status: IrohRemoteWorkspaceAvailabilityStatus;
 }
 
 interface IrohRemoteStatusClientView {
@@ -241,14 +251,7 @@ function addDefaultRemoteHostStateArgs(args: readonly string[]): string[] {
 }
 
 function addDefaultRemoteHostRuntimeArgs(args: readonly string[]): string[] {
-	if (
-		argsIncludeOption(args, "--integrated-volt") ||
-		argsIncludeOption(args, "--source-volt") ||
-		argsIncludeOption(args, "--use-volt")
-	) {
-		return [...args];
-	}
-	return ["--integrated-volt", ...args];
+	return [...args];
 }
 
 function parseRemoteManagementArgs(args: readonly string[]): RemoteManagementArgs {
@@ -288,6 +291,54 @@ function parseRemoteManagementArgs(args: readonly string[]): RemoteManagementArg
 	}
 
 	return { auditPath, help: false, positionals, statePath: resolvePath(statePath) };
+}
+
+function parseRemoteHostUnregisterArgs(args: readonly string[]): RemoteHostUnregisterArgs {
+	const positionals: string[] = [];
+	let statePath = getDefaultIrohRemoteStatePath();
+	let workspaceName: string | undefined;
+
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index];
+		if (arg === "--help" || arg === "-h") {
+			return { help: true, positionals, statePath };
+		}
+
+		const eqIndex = arg.indexOf("=");
+		const flag = eqIndex === -1 ? arg : arg.slice(0, eqIndex);
+		const inlineValue = eqIndex === -1 ? undefined : arg.slice(eqIndex + 1);
+		if (flag === "--state" || flag === "--unregister-workspace") {
+			const value = inlineValue ?? args[index + 1];
+			if (value === undefined || value.startsWith("-")) {
+				return { error: `${flag} requires a value`, help: false, positionals, statePath };
+			}
+			if (inlineValue === undefined) {
+				index++;
+			}
+			if (flag === "--state") {
+				statePath = resolvePath(value);
+			} else {
+				workspaceName = value;
+			}
+			continue;
+		}
+
+		if (arg.startsWith("-")) {
+			return { error: `Unknown remote host unregister option: ${arg}`, help: false, positionals, statePath };
+		}
+		positionals.push(arg);
+	}
+
+	if (workspaceName === undefined || workspaceName.trim().length === 0) {
+		return { error: "--unregister-workspace requires a value", help: false, positionals, statePath };
+	}
+
+	return {
+		help: false,
+		positionals,
+		statePath: resolvePath(statePath),
+		workspaceName,
+	};
 }
 
 function parseRemotePairArgs(args: readonly string[]): RemotePairArgs {
@@ -521,10 +572,11 @@ async function handleRemotePairCommand(args: readonly string[]): Promise<void> {
 	}
 }
 
-function formatRemoteStatusWorkspace(workspace: IrohRemoteWorkspace): IrohRemoteStatusWorkspaceView {
+async function formatRemoteStatusWorkspace(workspace: IrohRemoteWorkspace): Promise<IrohRemoteStatusWorkspaceView> {
 	return {
 		name: workspace.name,
 		path: workspace.path,
+		status: await getIrohRemoteWorkspaceAvailabilityStatus(workspace),
 		...(workspace.allowedTools === undefined ? {} : { allowedTools: workspace.allowedTools }),
 	};
 }
@@ -575,19 +627,22 @@ function formatRemoteStatusRevokedClient(client: IrohRemoteRevokedClient): IrohR
 	};
 }
 
-function createRemoteStatusView(options: {
+async function createRemoteStatusView(options: {
 	auditPath: string;
 	clients: readonly IrohRemoteClient[];
 	revokedClients: readonly IrohRemoteRevokedClient[];
 	statePath: string;
 	workspaces: readonly IrohRemoteWorkspace[];
-}): IrohRemoteStatusView {
+}): Promise<IrohRemoteStatusView> {
 	const clients = options.clients
 		.map((client) => formatRemoteStatusClient(client))
 		.sort((left, right) => left.nodeId.localeCompare(right.nodeId));
 	const revokedClients = options.revokedClients
 		.map((client) => formatRemoteStatusRevokedClient(client))
 		.sort((left, right) => left.nodeId.localeCompare(right.nodeId));
+	const workspaces = (
+		await Promise.all(options.workspaces.map((workspace) => formatRemoteStatusWorkspace(workspace)))
+	).sort((left, right) => left.name.localeCompare(right.name));
 	return {
 		statePath: options.statePath,
 		auditPath: options.auditPath,
@@ -596,14 +651,45 @@ function createRemoteStatusView(options: {
 			available: false,
 			warning: IROH_REMOTE_PERSISTED_STATUS_WARNING,
 		},
-		workspaces: options.workspaces
-			.map((workspace) => formatRemoteStatusWorkspace(workspace))
-			.sort((left, right) => left.name.localeCompare(right.name)),
+		workspaces,
 		clientCount: clients.length,
 		clients,
 		revokedClientCount: revokedClients.length,
 		revokedClients,
 	};
+}
+
+async function handleRemoteHostUnregisterCommand(args: readonly string[]): Promise<void> {
+	const parsed = parseRemoteHostUnregisterArgs(args);
+	if (parsed.help) {
+		printRemoteCommandHelp();
+		return;
+	}
+	if (parsed.error) {
+		console.error(chalk.red(`Error: ${parsed.error}`));
+		process.exitCode = 1;
+		return;
+	}
+	if (parsed.positionals.length > 0) {
+		console.error(chalk.red(`Error: Unexpected remote host unregister argument: ${parsed.positionals[0]}`));
+		process.exitCode = 1;
+		return;
+	}
+	const workspaceName = parsed.workspaceName;
+	if (workspaceName === undefined) {
+		console.error(chalk.red("Error: --unregister-workspace requires a value"));
+		process.exitCode = 1;
+		return;
+	}
+
+	const stateManager = new IrohRemoteHostStateManager({ statePath: parsed.statePath });
+	const removedWorkspace = await stateManager.unregisterWorkspace(workspaceName);
+	if (!removedWorkspace) {
+		console.error(chalk.red(`Error: No registered Iroh remote workspace named ${workspaceName}`));
+		process.exitCode = 1;
+		return;
+	}
+	console.error(`Unregistered workspace ${workspaceName}`);
 }
 
 async function handleRemoteStatusCommand(args: readonly string[]): Promise<void> {
@@ -627,7 +713,7 @@ async function handleRemoteStatusCommand(args: readonly string[]): Promise<void>
 	const state = await stateManager.getState();
 	console.log(
 		JSON.stringify(
-			createRemoteStatusView({
+			await createRemoteStatusView({
 				auditPath: parsed.auditPath ?? getDefaultIrohRemoteAuditPath(parsed.statePath),
 				clients: state.clients,
 				revokedClients: state.revokedClients ?? [],
@@ -841,9 +927,14 @@ async function handleRemoteCommand(args: string[], options: { profile?: string }
 		process.exitCode = 1;
 		return true;
 	}
-	const hostArgs = addDefaultRemoteHostStateArgs(args.slice(2));
+	const rawHostArgs = args.slice(2);
+	const hostArgs = addDefaultRemoteHostStateArgs(rawHostArgs);
 	if (hostArgs.includes("--help") || hostArgs.includes("-h")) {
 		printRemoteCommandHelp();
+		return true;
+	}
+	if (argsIncludeOption(rawHostArgs, "--unregister-workspace")) {
+		await handleRemoteHostUnregisterCommand(rawHostArgs);
 		return true;
 	}
 	if (isBunBinary) {

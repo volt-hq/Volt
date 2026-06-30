@@ -13,6 +13,43 @@ Volt is a local coding-agent monorepo with a CLI, agent runtime, provider API, a
 | **[@earendil-works/volt-ai](packages/ai)** | Unified multi-provider LLM API |
 | **[@earendil-works/volt-tui](packages/tui)** | Terminal UI library with differential rendering |
 
+## Remote Access Preview
+
+`volt remote host` can expose a local Volt runtime to a paired phone over Iroh
+without moving provider credentials or repository files off the host. Pairing is
+workstation-scoped: register local workspaces by name, pair the phone once with
+`volt remote pair`, then the phone can open known workspace names without another
+QR scan.
+
+Integrated hosts advertise `multi_streams.v1` and `conversation_streams.v1`.
+Mobile streams bind during the Iroh handshake to one workspace/session
+conversation: `target:last`, `target:new`, or `target:session`. The iOS app
+renders those conversations as pinned agent tabs, including multiple sessions
+inside the same registered workspace. Commands, transcripts, native actions,
+host actions, notifications, Live Activity registration, and `/workspace` path
+mapping stay scoped to the bound conversation stream.
+
+Workspace discovery and management use short-lived utility streams. Discovery
+permits only `list_sessions`; management permits only authorized
+`unregister_workspace`. Mobile conversation streams no longer use direct
+`new_session`, `switch_session_by_id`, or raw `get_messages`; new and resumed
+agents are selected by opening a targeted conversation stream, and transcript
+recovery uses bounded `get_transcript` plus sanitized `transcript_entry` events.
+
+Closing a stream, switching tabs, app backgrounding, or network loss is detach
+only. User cancellation is the selected stream's `abort` RPC command. Same
+client/workspace/session duplicates fail with `duplicate_conversation_connection`
+and retry metadata; another client owning the same conversation fails with
+`conversation_in_use`. Revocation, workspace authorization removal, and
+workspace unregister close only affected streams and retained runtimes. Host
+process exit is not durable active-work recovery, and large hidden-agent sets may
+need future resource controls.
+
+See [Using Volt](packages/coding-agent/docs/usage.md#remote-access-over-iroh-preview),
+[Security](packages/coding-agent/docs/security.md#remote-access-over-iroh-preview),
+and [Iroh Remote Protocol v1](packages/coding-agent/docs/iroh-remote-protocol.md)
+for setup commands, fallback behavior for old hosts, and the wire contract.
+
 ## Permissions And Containerization
 
 Volt does not include a built-in permission system for restricting filesystem, process, network, or credential access. By default, it runs with the permissions of the user and process that launched it.

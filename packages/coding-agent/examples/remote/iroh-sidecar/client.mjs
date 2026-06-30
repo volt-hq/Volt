@@ -506,7 +506,8 @@ async function main() {
 		clientNodeId: endpoint.id().toString(),
 	});
 
-	await clientEngine.writeHello(stream, payload);
+	const hello = clientEngine.createHello(payload);
+	await writeIrohStream(stream.send, Buffer.from(serializeJsonLine(hello), "utf8"));
 	const handshake = await clientEngine.readHandshakeResponse(stream.recv, { expectedHostNodeId: payload.nodeId });
 	if (!handshake.response.success) {
 		const outcomePrefix = handshake.response.outcome ? `${handshake.response.outcome}: ` : "";

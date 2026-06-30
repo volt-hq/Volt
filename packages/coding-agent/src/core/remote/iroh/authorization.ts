@@ -9,15 +9,18 @@ import type {
 	IrohRemoteRevokedClient,
 	IrohRemoteWorkspace,
 } from "./state.ts";
+import type { IrohRemoteWorkspaceAvailabilityClassifier, IrohRemoteWorkspaceStatus } from "./workspace.ts";
 
 export const DEFAULT_IROH_REMOTE_PAIRING_SECRET_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface AuthorizeIrohRemoteClientOptions {
 	allowTools: string;
+	classifyWorkspaceAvailability?: IrohRemoteWorkspaceAvailabilityClassifier;
 	pairingExpiresAt?: number;
 	pairingSecret?: string;
 	validateWorkspace?: (workspace: IrohRemoteWorkspace) => boolean | Promise<boolean>;
 	workspace?: IrohRemoteWorkspace;
+	workspaceStatuses?: readonly IrohRemoteWorkspaceStatus[];
 	now?: number;
 }
 
@@ -31,14 +34,17 @@ export interface IrohRemoteClientAuthorizationSuccess {
 	pairingSecretConsumed: boolean;
 	workspace: IrohRemoteWorkspace;
 	workspaceNames: string[];
+	workspaces: IrohRemoteWorkspaceStatus[];
 }
 
 export interface IrohRemoteClientAuthorizationFailure {
 	ok: false;
+	client?: IrohRemoteClient;
 	error: string;
 	expiredPairingTickets?: IrohRemotePendingPairingTicket[];
 	outcome: IrohRemoteHostHandshakeFailureOutcome;
 	pairingSecretExpired: boolean;
+	workspace?: IrohRemoteWorkspace;
 }
 
 export type IrohRemoteClientAuthorizationResult =
@@ -51,9 +57,13 @@ export function authorizeIrohRemoteClient(
 	remoteNodeId: string,
 	options: AuthorizeIrohRemoteClientOptions,
 ): IrohRemoteClientAuthorizationResult {
-	const workspace = options.workspace;
-	const workspaceName = workspace?.name ?? hello.workspace;
-	const workspaceNames = state.workspaces.map((entry) => entry.name);
+	const workspace = options.workspace?.name === hello.workspace ? options.workspace : undefined;
+	const registeredWorkspace =
+		state.workspaces.find((entry) => entry.name === hello.workspace) ??
+		(options.workspace?.name === hello.workspace ? options.workspace : undefined);
+	const workspaceName = registeredWorkspace?.name ?? options.workspace?.name ?? hello.workspace;
+	const workspaces = getIrohRemoteWorkspaceStatuses(state, options.workspaceStatuses);
+	const workspaceNames = workspaces.filter((entry) => entry.status === "available").map((entry) => entry.name);
 	const now = options.now ?? Date.now();
 	const revokedClient = findIrohRemoteRevokedClient(state, remoteNodeId);
 	const existingClient = revokedClient ? undefined : findIrohRemoteClient(state, remoteNodeId);
@@ -126,13 +136,35 @@ export function authorizeIrohRemoteClient(
 		};
 	}
 
-	if (!workspace || hello.workspace !== workspace.name) {
+	if (!registeredWorkspace) {
 		return {
 			ok: false,
-			error: `workspace not allowed: ${hello.workspace}`,
+			error: `workspace is not registered: ${hello.workspace}`,
+			...(expiredResultTickets ? { expiredPairingTickets: expiredResultTickets } : {}),
+			outcome: "workspace_unregistered",
+			pairingSecretExpired: false,
+		};
+	}
+
+	if (!workspace) {
+		return {
+			ok: false,
+			error: `workspace path is unavailable: ${hello.workspace}`,
 			...(expiredResultTickets ? { expiredPairingTickets: expiredResultTickets } : {}),
 			outcome: "workspace_unavailable",
 			pairingSecretExpired: false,
+		};
+	}
+
+	if (existingClient && !isIrohRemoteClientAllowedForWorkspace(existingClient, workspace.name)) {
+		return {
+			ok: false,
+			client: existingClient,
+			error: `workspace authorization has been removed: ${workspace.name}`,
+			...(expiredResultTickets ? { expiredPairingTickets: expiredResultTickets } : {}),
+			outcome: "workspace_authorization_removed",
+			pairingSecretExpired: false,
+			workspace,
 		};
 	}
 
@@ -171,7 +203,7 @@ export function authorizeIrohRemoteClient(
 				ok: false,
 				error: `pairing ticket is not valid for workspace: ${workspace.name}`,
 				...(expiredResultTickets ? { expiredPairingTickets: expiredResultTickets } : {}),
-				outcome: "workspace_forbidden",
+				outcome: "workspace_authorization_removed",
 				pairingSecretExpired: false,
 			};
 		}
@@ -221,12 +253,12 @@ export function authorizeIrohRemoteClient(
 			pairingSecretConsumed: true,
 			workspace,
 			workspaceNames,
+			workspaces,
 		};
 	}
 
 	const persistedAllowedTools = existingClient.allowedTools ?? DEFAULT_IROH_REMOTE_ALLOW_TOOLS;
 	existingClient.lastSeenAt = now;
-	existingClient.allowedWorkspaces = [];
 	existingClient.allowedTools = persistedAllowedTools;
 	if (hello.clientLabel) {
 		existingClient.label = hello.clientLabel;
@@ -240,7 +272,18 @@ export function authorizeIrohRemoteClient(
 		pairingSecretConsumed: false,
 		workspace,
 		workspaceNames,
+		workspaces,
 	};
+}
+
+function getIrohRemoteWorkspaceStatuses(
+	state: IrohRemoteHostState,
+	workspaceStatuses: readonly IrohRemoteWorkspaceStatus[] | undefined,
+): IrohRemoteWorkspaceStatus[] {
+	return state.workspaces.map((workspace) => ({
+		name: workspace.name,
+		status: workspaceStatuses?.find((entry) => entry.name === workspace.name)?.status ?? "available",
+	}));
 }
 
 export function findIrohRemoteClient(state: IrohRemoteHostState, nodeId: string): IrohRemoteClient | undefined {

@@ -1,4 +1,8 @@
 export {
+	type IrohRemoteActiveStreamEntry,
+	IrohRemoteActiveStreamRegistry,
+} from "./active-stream-registry.ts";
+export {
 	type IrohRemoteAuditEvent,
 	type IrohRemoteAuditEventInput,
 	IrohRemoteAuditLogger,
@@ -62,10 +66,21 @@ export {
 	assertIrohRemoteHandshakeHostIdentity,
 	createIrohRemoteHandshakeFailure,
 	createIrohRemoteHandshakeSuccess,
+	IROH_REMOTE_SESSION_ID_PATTERN,
+	type IrohRemoteConversationHandshakeMetadata,
+	type IrohRemoteConversationSelection,
+	type IrohRemoteConversationTarget,
+	IrohRemoteHandshakeError,
 	type IrohRemoteHandshakeFailure,
 	type IrohRemoteHandshakeResponse,
 	type IrohRemoteHandshakeSuccess,
 	type IrohRemoteHello,
+	type IrohRemoteHelloMode,
+	type IrohRemoteHostHandshakeMetadata,
+	type IrohRemoteWorkspaceDiscoveryTarget,
+	type IrohRemoteWorkspaceManagementTarget,
+	isIrohRemoteSessionId,
+	isIrohRemoteWorkspaceName,
 	parseIrohRemoteHandshakeResponse,
 	parseIrohRemoteHandshakeResponseLine,
 	parseIrohRemoteHello,
@@ -87,6 +102,11 @@ export {
 	shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization,
 } from "./host-policy.ts";
 export {
+	type CreateIrohRemoteHostMetadataOptions,
+	createIrohRemoteHostMetadata,
+	type IrohRemoteHostMetadata,
+} from "./metadata.ts";
+export {
 	createIrohRemoteOutboundFilteredRpcTransport,
 	IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH,
 	IROH_REMOTE_REDACTED_EXPORT_PATH,
@@ -102,14 +122,17 @@ export {
 export {
 	DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
 	getIrohRemoteUnsafeAllowedTools,
-	getIrohRemoteVoltRpcToolArgs,
 	IROH_REMOTE_ALPN,
+	IROH_REMOTE_CONVERSATION_STREAMS_FEATURE,
 	IROH_REMOTE_HANDSHAKE_TYPE,
 	IROH_REMOTE_HELLO_TYPE,
+	IROH_REMOTE_HOST_FEATURES,
 	IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES,
+	IROH_REMOTE_MULTI_STREAMS_FEATURE,
 	IROH_REMOTE_OUTCOMES,
 	IROH_REMOTE_TICKET_PREFIX,
 	IROH_REMOTE_UNSAFE_TOOL_NAMES,
+	type IrohRemoteHostFeature,
 	type IrohRemoteHostHandshakeFailureOutcome,
 	type IrohRemoteOutcome,
 	IrohRemoteOutcomeError,
@@ -173,6 +196,7 @@ export {
 	createEmptyIrohRemoteHostState,
 	type IrohRemoteClient,
 	type IrohRemoteHostState,
+	type IrohRemoteLiveActivityRegistration,
 	type IrohRemoteLiveActivityTarget,
 	type IrohRemotePairingSecretTombstone,
 	type IrohRemotePairingSecretTombstoneOutcome,
@@ -180,10 +204,12 @@ export {
 	type IrohRemotePushTarget,
 	type IrohRemotePushTargetPlatform,
 	type IrohRemotePushTargetProvider,
+	type IrohRemotePushTokenEnvironment,
 	type IrohRemoteRevokedClient,
 	type IrohRemoteWorkspace,
 	parseIrohRemoteClient,
 	parseIrohRemoteHostState,
+	parseIrohRemoteLiveActivityRegistration,
 	parseIrohRemotePairingSecretTombstone,
 	parseIrohRemotePendingPairingTicket,
 	parseIrohRemotePushTarget,
@@ -197,6 +223,8 @@ export {
 	type IrohRemoteClientRevocationResult,
 	IrohRemoteHostStateManager,
 	type IrohRemoteHostStateManagerOptions,
+	type IrohRemoteLiveActivityDeliveryChannelLookup,
+	type IrohRemoteLiveActivityRegistrationResult,
 } from "./state-manager.ts";
 export {
 	assertIrohRemoteTicketNotExpired,
@@ -210,7 +238,22 @@ export {
 	parseIrohRemoteTicketPayload,
 } from "./ticket.ts";
 export {
+	getAvailableIrohRemoteWorkspaceNames,
+	getIrohRemoteWorkspaceAvailabilityStatus,
+	getIrohRemoteWorkspaceStatuses,
+	type IrohRemoteWorkspaceAvailabilityClassifier,
+	type IrohRemoteWorkspaceAvailabilityStatus,
+	type IrohRemoteWorkspaceStatus,
 	parseIrohRemoteWorkspaceSpec,
 	selectIrohRemoteWorkspace,
 	upsertIrohRemoteWorkspace,
 } from "./workspace.ts";
+export {
+	type HandleIrohRemoteWorkspaceUnregisterRpcCommandOptions,
+	handleIrohRemoteWorkspaceUnregisterRpcCommand,
+	IROH_REMOTE_UNREGISTER_WORKSPACE_RPC_TYPE,
+	type IrohRemoteWorkspaceMetadataSnapshot,
+	type IrohRemoteWorkspaceUnregisterRpcData,
+	type IrohRemoteWorkspaceUnregisterRpcResponse,
+	type IrohRemoteWorkspaceUnregisterRpcResult,
+} from "./workspace-rpc.ts";

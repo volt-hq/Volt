@@ -2,26 +2,48 @@ export const IROH_REMOTE_ALPN = "volt-rpc/0";
 export const IROH_REMOTE_TICKET_PREFIX = "volt+iroh://v1/";
 export const IROH_REMOTE_HELLO_TYPE = "volt_iroh_hello";
 export const IROH_REMOTE_HANDSHAKE_TYPE = "volt_iroh_handshake";
+export const IROH_REMOTE_MULTI_STREAMS_FEATURE = "multi_streams.v1";
+export const IROH_REMOTE_CONVERSATION_STREAMS_FEATURE = "conversation_streams.v1";
+export const IROH_REMOTE_HOST_FEATURES = [
+	IROH_REMOTE_MULTI_STREAMS_FEATURE,
+	IROH_REMOTE_CONVERSATION_STREAMS_FEATURE,
+] as const;
 export const DEFAULT_IROH_REMOTE_ALLOW_TOOLS = "read,bash,edit,write,web_search,grep,find,ls";
 export const IROH_REMOTE_UNSAFE_TOOL_NAMES = ["bash", "edit", "write", "web_search"] as const;
 export const IROH_REMOTE_OUTCOMES = [
 	"host_unreachable",
+	"invalid_workspace",
+	"invalid_conversation_target",
+	"conversation_streams_unsupported",
 	"pairing_secret_expired",
 	"pairing_secret_consumed",
 	"client_unknown",
 	"client_revoked",
 	"workspace_unavailable",
 	"workspace_forbidden",
+	"workspace_authorization_removed",
+	"workspace_unregistered",
+	"session_unavailable",
+	"duplicate_conversation_connection",
+	"conversation_in_use",
 	"host_identity_mismatch",
 	"saved_host_invalid",
 ] as const;
 export const IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES = [
+	"invalid_workspace",
+	"invalid_conversation_target",
+	"conversation_streams_unsupported",
 	"pairing_secret_expired",
 	"pairing_secret_consumed",
 	"client_unknown",
 	"client_revoked",
 	"workspace_unavailable",
 	"workspace_forbidden",
+	"workspace_authorization_removed",
+	"workspace_unregistered",
+	"session_unavailable",
+	"duplicate_conversation_connection",
+	"conversation_in_use",
 ] as const;
 
 const IROH_REMOTE_UNSAFE_TOOL_NAME_SET = new Set<string>(IROH_REMOTE_UNSAFE_TOOL_NAMES);
@@ -29,6 +51,7 @@ const IROH_REMOTE_OUTCOME_SET = new Set<string>(IROH_REMOTE_OUTCOMES);
 const IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOME_SET = new Set<string>(IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES);
 
 export type IrohRemoteRelayMode = "disabled" | "default";
+export type IrohRemoteHostFeature = (typeof IROH_REMOTE_HOST_FEATURES)[number];
 export type IrohRemoteOutcome = (typeof IROH_REMOTE_OUTCOMES)[number];
 export type IrohRemoteHostHandshakeFailureOutcome = (typeof IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES)[number];
 
@@ -69,15 +92,6 @@ export function usesDefaultIrohRemoteAllowTools(allowTools: string | undefined):
 	const tools = parseIrohRemoteAllowTools(allowTools);
 	const defaultTools = new Set(DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(","));
 	return tools.length === defaultTools.size && tools.every((tool) => defaultTools.has(tool));
-}
-
-export function getIrohRemoteVoltRpcToolArgs(allowTools: string | undefined): string[] {
-	const normalizedAllowTools = parseIrohRemoteAllowTools(allowTools).join(",");
-	const args = ["--tools", normalizedAllowTools];
-	if (usesDefaultIrohRemoteAllowTools(normalizedAllowTools)) {
-		args.push("--allow-unlisted-extension-tools");
-	}
-	return args;
 }
 
 export function getIrohRemoteUnsafeAllowedTools(allowTools: string): string[] {

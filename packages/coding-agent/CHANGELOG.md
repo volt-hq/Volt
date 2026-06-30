@@ -5,6 +5,7 @@
 ### Added
 
 - Added a built-in `web_search` tool, enabled by default across SDK, CLI/RPC, and Iroh remote sessions. It uses the OpenAI/Codex search backend for authenticated OpenAI models, supports a custom Volt JSON endpoint via `VOLT_WEB_SEARCH_URL`, and falls back to Brave Search via `BRAVE_SEARCH_API_KEY`.
+- Added active tool executions to RPC `get_state` responses so remote clients can restore in-flight tool cards after reconnecting.
 - Added host-initiated RPC action requests so clients can approve blocking host workflows; missing trusted LSP server binaries can now prompt for installation, run the host-owned install command, and retry diagnostics.
 - Added Pi extension package compatibility: `volt install` now reads `pi` manifests when no `volt` manifest is present and aliases Pi core imports to Volt modules at extension load time.
 - Added an experimental first-time setup flow behind `PI_EXPERIMENTAL=1` that asks for a dark/light theme choice (preselecting the detected appearance) and opt-in analytics data sharing on first launch with the default agent directory; opting in stores a `trackingId` in `settings.json`.
@@ -49,6 +50,7 @@
 ### Fixed
 
 - Fixed `get_ui_actions` palette scope responses so they return only palette descriptors instead of all actions.
+- Fixed `volt remote host` source entrypoint startup by exporting the Iroh remote workspace unregister RPC helpers from the package root, and added a source export check to keep the host entrypoint imports in sync.
 - Fixed `volt remote host` source entrypoint startup by exporting the Iroh remote RPC tool-argument helper from the package root.
 - Fixed Iroh remote host default tool grants to keep loaded extension tools available to the remote runtime.
 - Fixed fuzzy `edit` matches so they only replace the targeted range and no longer normalize unrelated file content.

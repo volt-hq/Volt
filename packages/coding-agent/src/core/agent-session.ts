@@ -111,6 +111,13 @@ export interface ParsedSkillBlock {
 	userMessage: string | undefined;
 }
 
+export type CompactionReason = "manual" | "threshold" | "overflow";
+
+export interface ActiveCompaction {
+	reason: CompactionReason;
+	startedAt: number;
+}
+
 /**
  * Parse a skill block from message text.
  * Returns null if the text doesn't contain a skill block.
@@ -139,12 +146,12 @@ export type AgentSessionEvent =
 			steering: readonly string[];
 			followUp: readonly string[];
 	  }
-	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
+	| { type: "compaction_start"; reason: CompactionReason }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| {
 			type: "compaction_end";
-			reason: "manual" | "threshold" | "overflow";
+			reason: CompactionReason;
 			result: CompactionResult | undefined;
 			aborted: boolean;
 			willRetry: boolean;
@@ -291,6 +298,7 @@ export class AgentSession {
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
+	private _activeCompaction: ActiveCompaction | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
 
 	// Branch summarization state
@@ -884,6 +892,11 @@ export class AgentSession {
 			this._compactionAbortController !== undefined ||
 			this._branchSummaryAbortController !== undefined
 		);
+	}
+
+	/** Active context compaction metadata, if compaction is currently running. */
+	get activeCompaction(): ActiveCompaction | undefined {
+		return this._activeCompaction ? { ...this._activeCompaction } : undefined;
 	}
 
 	/** All messages including custom types like BashExecutionMessage */
@@ -1747,6 +1760,7 @@ export class AgentSession {
 		this._disconnectFromAgent();
 		await this.abort();
 		this._compactionAbortController = new AbortController();
+		this._activeCompaction = { reason: "manual", startedAt: Date.now() };
 		this._emit({ type: "compaction_start", reason: "manual" });
 
 		try {
@@ -1870,6 +1884,7 @@ export class AgentSession {
 			});
 			throw error;
 		} finally {
+			this._activeCompaction = undefined;
 			this._compactionAbortController = undefined;
 			this._reconnectToAgent();
 		}
@@ -1987,8 +2002,9 @@ export class AgentSession {
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
 
-		this._emit({ type: "compaction_start", reason });
 		this._autoCompactionAbortController = new AbortController();
+		this._activeCompaction = { reason, startedAt: Date.now() };
+		this._emit({ type: "compaction_start", reason });
 
 		try {
 			if (!this.model) {
@@ -2161,6 +2177,7 @@ export class AgentSession {
 			});
 			return false;
 		} finally {
+			this._activeCompaction = undefined;
 			this._autoCompactionAbortController = undefined;
 		}
 	}
