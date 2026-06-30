@@ -58,6 +58,12 @@ export interface IrohRemoteLiveActivityRegistrationResult {
 	replacedRegistration?: IrohRemoteLiveActivityRegistration;
 }
 
+export interface IrohRemoteLiveActivityPruneResult {
+	liveActivityRemoved: boolean;
+	registrationsRemoved: number;
+	pushTarget?: IrohRemotePushTarget;
+}
+
 export class IrohRemoteHostStateManager {
 	private readonly statePath: string | undefined;
 	private operationQueue: Promise<void> = Promise.resolve();
@@ -326,6 +332,55 @@ export class IrohRemoteHostStateManager {
 				await this.saveUnlocked(state);
 			}
 			return removed;
+		});
+	}
+
+	async pruneClientLiveActivityDeliveryChannel(
+		nodeId: string,
+		registration: IrohRemoteLiveActivityRegistration,
+		now = Date.now(),
+	): Promise<IrohRemoteLiveActivityPruneResult> {
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			const client = state.clients.find((entry) => entry.nodeId === nodeId);
+			if (!client) {
+				return { liveActivityRemoved: false, registrationsRemoved: 0 };
+			}
+
+			let registrationsRemoved = 0;
+			if (client.liveActivities) {
+				const beforeCount = client.liveActivities.length;
+				client.liveActivities = client.liveActivities.filter(
+					(entry) => !isSameLiveActivityRegistration(entry, registration),
+				);
+				registrationsRemoved = beforeCount - client.liveActivities.length;
+				if (client.liveActivities.length === 0) {
+					delete client.liveActivities;
+				}
+			}
+
+			const pushTarget = client.pushTargets?.find((entry) => {
+				return (
+					entry.id === registration.pushTargetId &&
+					entry.platform === registration.platform &&
+					entry.liveActivity?.tokenHash === registration.tokenHash &&
+					entry.liveActivity.tokenEnvironment === registration.tokenEnvironment
+				);
+			});
+			const liveActivityRemoved = pushTarget?.liveActivity !== undefined;
+			if (liveActivityRemoved && pushTarget) {
+				delete pushTarget.liveActivity;
+				pushTarget.updatedAt = now;
+			}
+
+			if (registrationsRemoved > 0 || liveActivityRemoved) {
+				await this.saveUnlocked(state);
+			}
+			return {
+				liveActivityRemoved,
+				registrationsRemoved,
+				...(pushTarget ? { pushTarget: clonePushTarget(pushTarget) } : {}),
+			};
 		});
 	}
 
@@ -608,4 +663,19 @@ function getRevokedClients(state: IrohRemoteHostState): IrohRemoteRevokedClient[
 
 function isSamePushTargetSlot(a: IrohRemotePushTarget, b: IrohRemotePushTarget): boolean {
 	return a.id === b.id || (a.provider === b.provider && a.platform === b.platform);
+}
+
+function isSameLiveActivityRegistration(
+	a: IrohRemoteLiveActivityRegistration,
+	b: IrohRemoteLiveActivityRegistration,
+): boolean {
+	return (
+		a.workspaceName === b.workspaceName &&
+		a.sessionId === b.sessionId &&
+		a.activityId === b.activityId &&
+		a.tokenHash === b.tokenHash &&
+		a.tokenEnvironment === b.tokenEnvironment &&
+		a.platform === b.platform &&
+		a.pushTargetId === b.pushTargetId
+	);
 }
