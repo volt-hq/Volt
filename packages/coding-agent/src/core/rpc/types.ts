@@ -440,6 +440,8 @@ export interface RpcTranscriptToolItem extends RpcTranscriptBaseItem {
 	status: RpcTranscriptToolStatus;
 	path?: string;
 	summary: string;
+	args?: Record<string, unknown>;
+	details?: Record<string, unknown>;
 	diffPreview?: string;
 	patchPreview?: string;
 }
