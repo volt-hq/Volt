@@ -354,7 +354,7 @@ function createRemoteTranscriptItem(entry, role, text, authorization) {
 	};
 }
 
-function projectRemoteTranscriptEntry(entry, authorization) {
+function projectRemoteTranscriptEntry(entry, authorization, toolCallsById) {
 	if (!entry || typeof entry !== "object") {
 		return undefined;
 	}
@@ -379,7 +379,22 @@ function projectRemoteTranscriptEntry(entry, authorization) {
 	if (message.role === "toolResult") {
 		const status = message.isError ? "failed" : "completed";
 		const toolName = typeof message.toolName === "string" && message.toolName.trim() ? message.toolName.trim() : "tool";
-		return createRemoteTranscriptItem(entry, "tool", `${toolName} ${status}`, authorization);
+		const toolCall = typeof message.toolCallId === "string" ? toolCallsById.get(message.toolCallId) : undefined;
+		const item = createRemoteTranscriptItem(entry, "tool", `${toolName} ${status}`, authorization);
+		item.toolName = toolName;
+		item.status = status;
+		item.summary = `${toolName} ${status}`;
+		if (toolName === "subagent") {
+			const args = projectRemoteSubagentArgs(toolCall?.arguments, authorization);
+			if (args) {
+				item.args = args;
+			}
+			const details = projectRemoteSubagentDetails(message.details, authorization);
+			if (details) {
+				item.details = details;
+			}
+		}
+		return item;
 	}
 	if (message.role === "bashExecution") {
 		const failed = message.cancelled || (message.exitCode !== undefined && message.exitCode !== 0);
@@ -395,10 +410,204 @@ function projectRemoteTranscriptEntry(entry, authorization) {
 }
 
 function projectRemoteTranscriptItems(sessionManager, authorization) {
-	return sessionManager
-		.getBranch()
-		.map((entry) => projectRemoteTranscriptEntry(entry, authorization))
+	const branch = sessionManager.getBranch();
+	const toolCallsById = collectRemoteToolCalls(branch);
+	return branch.map((entry) => projectRemoteTranscriptEntry(entry, authorization, toolCallsById)).filter(Boolean);
+}
+
+function collectRemoteToolCalls(entries) {
+	const toolCallsById = new Map();
+	for (const entry of entries) {
+		if (entry.type !== "message" || entry.message?.role !== "assistant" || !Array.isArray(entry.message.content)) {
+			continue;
+		}
+		for (const block of entry.message.content) {
+			if (
+				block &&
+				typeof block === "object" &&
+				block.type === "toolCall" &&
+				typeof block.id === "string" &&
+				typeof block.name === "string" &&
+				block.arguments &&
+				typeof block.arguments === "object" &&
+				!Array.isArray(block.arguments)
+			) {
+				toolCallsById.set(block.id, block);
+			}
+		}
+	}
+	return toolCallsById;
+}
+
+function projectRemoteSubagentArgs(args, authorization) {
+	if (!args || typeof args !== "object" || Array.isArray(args)) {
+		return undefined;
+	}
+	const projected = {};
+	copyRemoteString(args, projected, "agent", authorization, 200);
+	copyRemoteString(args, projected, "task", authorization, 1000);
+	const tasks = projectRemoteSubagentInputArray(args.tasks, authorization);
+	if (tasks) {
+		projected.tasks = tasks;
+	}
+	const chain = projectRemoteSubagentInputArray(args.chain, authorization);
+	if (chain) {
+		projected.chain = chain;
+	}
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentInputArray(value, authorization) {
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const projected = value
+		.map((item) => {
+			if (!item || typeof item !== "object" || Array.isArray(item)) {
+				return undefined;
+			}
+			const agent = remoteString(item.agent, authorization, 200);
+			const task = remoteString(item.task, authorization, 1000);
+			return agent && task ? { agent, task } : undefined;
+		})
 		.filter(Boolean);
+	return projected.length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentDetails(value, authorization) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return undefined;
+	}
+	const projected = {};
+	copyRemoteString(value, projected, "mode", authorization, 200);
+	copyRemoteString(value, projected, "status", authorization, 200);
+	copyRemoteString(value, projected, "subagentId", authorization, 200);
+	copyRemoteString(value, projected, "sessionId", authorization, 200);
+	const summary = projectRemoteSubagentSummary(value.summary);
+	if (summary) {
+		projected.summary = summary;
+	}
+	const childSessions = projectRemoteSubagentDetailArray(value.childSessions, authorization);
+	if (childSessions) {
+		projected.childSessions = childSessions;
+	}
+	const agent = projectRemoteSubagentAgent(value.agent, authorization);
+	if (agent) {
+		projected.agent = agent;
+	}
+	const output = projectRemoteSubagentOutput(value.output, authorization);
+	if (output) {
+		projected.output = output;
+	}
+	const error = projectRemoteSubagentError(value.error, authorization);
+	if (error) {
+		projected.error = error;
+	}
+	const tasks = projectRemoteSubagentDetailArray(value.tasks, authorization);
+	if (tasks) {
+		projected.tasks = tasks;
+	}
+	const steps = projectRemoteSubagentDetailArray(value.steps, authorization);
+	if (steps) {
+		projected.steps = steps;
+	}
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentSummary(value) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return undefined;
+	}
+	const projected = {};
+	for (const key of ["total", "completed", "failed", "aborted", "running", "maxTasks", "maxConcurrency", "stoppedAt"]) {
+		const numberValue = remoteFiniteNumber(value[key]);
+		if (numberValue !== undefined) {
+			projected[key] = numberValue;
+		}
+	}
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentDetailArray(value, authorization) {
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const projected = value.map((item) => projectRemoteSubagentTask(item, authorization)).filter(Boolean);
+	return projected.length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentTask(value, authorization) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return undefined;
+	}
+	const projected = {};
+	const index = remoteFiniteNumber(value.index);
+	if (index !== undefined) {
+		projected.index = index;
+	}
+	copyRemoteString(value, projected, "subagentId", authorization, 200);
+	copyRemoteString(value, projected, "sessionId", authorization, 200);
+	const agent = projectRemoteSubagentAgent(value.agent, authorization);
+	if (agent) {
+		projected.agent = agent;
+	}
+	copyRemoteString(value, projected, "status", authorization, 200);
+	const error = projectRemoteSubagentError(value.error, authorization);
+	if (error) {
+		projected.error = error;
+	}
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentAgent(value, authorization) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return undefined;
+	}
+	const projected = {};
+	copyRemoteString(value, projected, "name", authorization, 200);
+	copyRemoteString(value, projected, "source", authorization, 200);
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentOutput(value, authorization) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return undefined;
+	}
+	const projected = {};
+	copyRemoteString(value, projected, "text", authorization, 1000);
+	for (const key of ["bytes", "omittedBytes", "maxBytes"]) {
+		const numberValue = remoteFiniteNumber(value[key]);
+		if (numberValue !== undefined) {
+			projected[key] = numberValue;
+		}
+	}
+	if (typeof value.truncated === "boolean") {
+		projected.truncated = value.truncated;
+	}
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentError(value, authorization) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return undefined;
+	}
+	const message = remoteString(value.message, authorization, 1000);
+	return message ? { message } : undefined;
+}
+
+function remoteString(value, authorization, maxLength) {
+	return typeof value === "string" && value.trim() ? sanitizeRemoteTextField(value, maxLength, authorization) : undefined;
+}
+
+function copyRemoteString(from, to, key, authorization, maxLength) {
+	const value = remoteString(from[key], authorization, maxLength);
+	if (value) {
+		to[key] = value;
+	}
+}
+
+function remoteFiniteNumber(value) {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function createRemoteTranscriptPage(items, request) {
@@ -1949,6 +2158,24 @@ async function logIntegratedRuntimeAudit(options, entry, type, details = {}, suc
 	});
 }
 
+function createIntegratedRuntimeEntryRecord(options) {
+	return {
+		key: getIntegratedRuntimeRegistryKey(options.clientNodeId, options.workspaceName, options.sessionId),
+		clientNodeId: options.clientNodeId,
+		workspaceName: options.workspaceName,
+		sessionId: options.sessionId,
+		runtime: options.runtime,
+		recordedSessionId: options.sessionId,
+		previousSessionIds: new Set(),
+		activeWorkflows: new Map(),
+		subscribers: new Set(),
+		detachedAt: undefined,
+		detachedRuntimeRetention: undefined,
+		...(options.parentSessionId === undefined ? {} : { parentSessionId: options.parentSessionId }),
+		...(options.subagentId === undefined ? {} : { subagentId: options.subagentId }),
+	};
+}
+
 async function createIntegratedRuntimeEntry(handshake, authorization, options) {
 	let runtime;
 	let sessionSelection;
@@ -1958,6 +2185,7 @@ async function createIntegratedRuntimeEntry(handshake, authorization, options) {
 			allowTools: authorization.allowTools,
 			conversationTarget: createIrohRuntimeConversationTarget(handshake.hello, authorization),
 			cwd: authorization.workspace.path,
+			onSubagentRuntimeCreated: (event) => registerIntegratedSubagentRuntime(event, authorization, options),
 			profile: options.profile,
 			projectTrusted: getProjectTrustedForWorkspace(options, authorization.workspace),
 		});
@@ -1975,23 +2203,12 @@ async function createIntegratedRuntimeEntry(handshake, authorization, options) {
 			await cleanupUncommittedRuntime(runtime, sessionSelection);
 			return { entry: owner, created: false, sessionSelection: createConversationSessionSelectionFromEntry(owner) };
 		}
-		const entry = {
-			key: getIntegratedRuntimeRegistryKey(
-				authorization.client.nodeId,
-				authorization.workspace.name,
-				sessionId,
-			),
+		const entry = createIntegratedRuntimeEntryRecord({
 			clientNodeId: authorization.client.nodeId,
 			workspaceName: authorization.workspace.name,
 			sessionId,
 			runtime,
-			recordedSessionId: sessionId,
-			previousSessionIds: new Set(),
-			activeWorkflows: new Map(),
-			subscribers: new Set(),
-			detachedAt: undefined,
-			detachedRuntimeRetention: undefined,
-		};
+		});
 		return { entry, created: true, sessionSelection };
 	} catch (error) {
 		if (runtime) {
@@ -1999,6 +2216,44 @@ async function createIntegratedRuntimeEntry(handshake, authorization, options) {
 		}
 		throw error;
 	}
+}
+
+async function registerIntegratedSubagentRuntime(event, authorization, options) {
+	const parentEntry = findIntegratedRuntimeEntry(
+		options,
+		authorization.client.nodeId,
+		authorization.workspace.name,
+		event.parentSessionId,
+	);
+	if (!parentEntry) {
+		throw new Error(`Parent runtime is not active for subagent session ${event.sessionId}`);
+	}
+	const owner = findIntegratedRuntimeOwner(options, authorization.workspace.name, event.sessionId);
+	if (owner && owner.clientNodeId !== authorization.client.nodeId) {
+		throw createConversationOpenError("conversation_in_use", "conversation is already in use", {
+			workspace: authorization.workspace.name,
+			sessionId: event.sessionId,
+		});
+	}
+	if (owner) {
+		return;
+	}
+	const entry = createIntegratedRuntimeEntryRecord({
+		clientNodeId: authorization.client.nodeId,
+		workspaceName: authorization.workspace.name,
+		sessionId: event.sessionId,
+		runtime: event.runtime,
+		parentSessionId: event.parentSessionId,
+		subagentId: event.id,
+	});
+	entry.detachedAt = Date.now();
+	options.integratedRuntimes.set(entry.key, entry);
+	await logIntegratedRuntimeAudit(options, entry, "remote_runtime_started", {
+		parentSessionId: event.parentSessionId,
+		reason: "subagent_created",
+		subagentId: event.id,
+	});
+	scheduleIntegratedRuntimeRetention(entry, options, "subagent_created");
 }
 
 async function commitIntegratedRuntimeEntry(entry, sessionSelection, authorization, options) {

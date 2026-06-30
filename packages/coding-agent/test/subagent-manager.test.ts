@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,12 +15,14 @@ import {
 } from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ResourceDiagnostic, ResourceLoader } from "../src/core/resource-loader.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import {
 	type SubagentDefinition,
 	SubagentDefinitionConfigurationError,
 	SubagentDefinitionNotFoundError,
 	SubagentManager,
+	type SubagentRuntimeCreatedEvent,
 } from "../src/core/subagents/index.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
@@ -37,6 +39,9 @@ interface CreateTestManagerOptions {
 	noTools?: "all" | false;
 	resourceLoader?: ResourceLoader;
 	allowedTools?: string[];
+	parentSessionManager?: SessionManager;
+	retainRuntimeOnDispose?: boolean;
+	onRuntimeCreated?: (event: SubagentRuntimeCreatedEvent) => void | Promise<void>;
 }
 
 function createDefinition(
@@ -151,6 +156,9 @@ describe("SubagentManager", () => {
 			agentDir: tempDir,
 			resourceLoader: options.resourceLoader,
 			allowedTools: options.allowedTools,
+			parentSessionManager: options.parentSessionManager,
+			retainRuntimeOnDispose: options.retainRuntimeOnDispose,
+			onRuntimeCreated: options.onRuntimeCreated,
 			requestTimeoutMs: 5_000,
 		});
 
@@ -175,6 +183,66 @@ describe("SubagentManager", () => {
 		expect(handle.id).toMatch(/^sa_/);
 		expect(handle.sessionId).toBeTruthy();
 		await expect(handle.getState()).resolves.toMatchObject({ sessionId: handle.sessionId });
+	});
+
+	it("persists child sessions beside a persisted parent and records the parent session", async () => {
+		const parentRoot = join(tmpdir(), `subagent-manager-parent-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(parentRoot, { recursive: true });
+		cleanups.push(() => {
+			if (existsSync(parentRoot)) {
+				rmSync(parentRoot, { recursive: true, force: true });
+			}
+		});
+		const parentSessionManager = SessionManager.create(parentRoot, join(parentRoot, "sessions"));
+		parentSessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "parent prompt" }],
+			timestamp: 1,
+		});
+		const parentSessionFile = parentSessionManager.getSessionFile();
+		const { manager } = await createTestManager({ parentSessionManager, responseText: "persisted child" });
+		const handle = await manager.start();
+
+		const completion = handle.waitForEnd();
+		await handle.prompt("write child transcript");
+		await completion;
+		const stats = await handle.getSessionStats();
+
+		expect(stats.sessionFile).toBeTruthy();
+		if (!stats.sessionFile) {
+			throw new Error("expected persisted child session file");
+		}
+		expect(stats.sessionFile.startsWith(parentSessionManager.getSessionDir())).toBe(true);
+		const headerLine = readFileSync(stats.sessionFile, "utf-8").split("\n")[0];
+		if (!headerLine) {
+			throw new Error("expected child session header");
+		}
+		const header = JSON.parse(headerLine) as { id?: string; parentSession?: string; type?: string };
+		expect(header).toMatchObject({ type: "session", id: handle.sessionId, parentSession: parentSessionFile });
+		const reopened = SessionManager.open(stats.sessionFile);
+		expect(reopened.getBranch().some((entry) => entry.type === "message" && entry.message.role === "assistant")).toBe(
+			true,
+		);
+	});
+
+	it("emits runtime-created metadata and can retain child runtimes after loopback dispose", async () => {
+		const events: SubagentRuntimeCreatedEvent[] = [];
+		const { manager, getDisposedSessionCount } = await createTestManager({
+			retainRuntimeOnDispose: true,
+			onRuntimeCreated: (event) => {
+				events.push(event);
+			},
+		});
+		const handle = await manager.start();
+
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({ id: handle.id, sessionId: handle.sessionId });
+
+		await handle.dispose();
+		expect(getDisposedSessionCount()).toBe(0);
+
+		await events[0]?.runtime.dispose();
+		expect(getDisposedSessionCount()).toBe(1);
 	});
 
 	it("prompts the child and waits for terminal agent_end", async () => {

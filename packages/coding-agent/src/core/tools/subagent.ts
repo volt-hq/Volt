@@ -101,6 +101,14 @@ export interface SubagentToolTaskDetails {
 	error?: SubagentToolErrorDetails;
 }
 
+export interface SubagentToolChildSessionDetails {
+	index: number;
+	subagentId: string;
+	sessionId: string;
+	agent: SubagentToolAgentDetails;
+	status: SubagentToolStatus;
+}
+
 export interface SubagentToolDetails {
 	mode: SubagentToolMode;
 	status: SubagentToolOverallStatus;
@@ -126,6 +134,8 @@ export interface SubagentToolDetails {
 		maxConcurrency?: number;
 		stoppedAt?: number;
 	};
+	/** Normalized attach targets for child conversations created by this tool call. */
+	childSessions?: SubagentToolChildSessionDetails[];
 	tasks?: SubagentToolTaskDetails[];
 	steps?: SubagentToolTaskDetails[];
 }
@@ -300,7 +310,26 @@ function createRunningTaskDetails(options: {
 	};
 }
 
+function createChildSessions(tasks: readonly SubagentToolTaskDetails[]): SubagentToolChildSessionDetails[] | undefined {
+	const childSessions = tasks
+		.map((task): SubagentToolChildSessionDetails | undefined => {
+			if (!task.subagentId || !task.sessionId) {
+				return undefined;
+			}
+			return {
+				index: task.index,
+				subagentId: task.subagentId,
+				sessionId: task.sessionId,
+				agent: task.agent,
+				status: task.status,
+			};
+		})
+		.filter((child): child is SubagentToolChildSessionDetails => child !== undefined);
+	return childSessions.length > 0 ? childSessions : undefined;
+}
+
 function createSingleDetails(task: SubagentToolTaskDetails): SubagentToolDetails {
+	const childSessions = createChildSessions([task]);
 	return {
 		mode: "single",
 		subagentId: task.subagentId,
@@ -310,6 +339,7 @@ function createSingleDetails(task: SubagentToolTaskDetails): SubagentToolDetails
 		usage: task.usage,
 		output: task.output,
 		error: task.error,
+		...(childSessions ? { childSessions } : {}),
 	};
 }
 
@@ -360,10 +390,12 @@ function getAggregateStatus(summary: NonNullable<SubagentToolDetails["summary"]>
 function createParallelDetails(results: SubagentTaskExecutionResult[]): SubagentToolDetails {
 	const tasks = results.map((result) => result.details);
 	const summary = summarizeTaskDetails(tasks, { includeParallelLimits: true });
+	const childSessions = createChildSessions(tasks);
 	return {
 		mode: "parallel",
 		status: getAggregateStatus(summary),
 		summary,
+		...(childSessions ? { childSessions } : {}),
 		tasks,
 	};
 }
@@ -372,10 +404,12 @@ function createChainDetails(results: SubagentTaskExecutionResult[]): SubagentToo
 	const steps = results.map((result) => result.details);
 	const failedStep = steps.find((step) => step.status !== "completed");
 	const summary = summarizeTaskDetails(steps, failedStep ? { stoppedAt: failedStep.index } : {});
+	const childSessions = createChildSessions(steps);
 	return {
 		mode: "chain",
 		status: getAggregateStatus(summary),
 		summary,
+		...(childSessions ? { childSessions } : {}),
 		steps,
 	};
 }
@@ -383,10 +417,12 @@ function createChainDetails(results: SubagentTaskExecutionResult[]): SubagentToo
 function createParallelProgressDetails(tasks: SubagentToolTaskDetails[]): SubagentToolDetails {
 	const taskSnapshot = tasks.slice();
 	const summary = summarizeTaskDetails(taskSnapshot, { includeParallelLimits: true });
+	const childSessions = createChildSessions(taskSnapshot);
 	return {
 		mode: "parallel",
 		status: getAggregateStatus(summary),
 		summary,
+		...(childSessions ? { childSessions } : {}),
 		tasks: taskSnapshot,
 	};
 }
@@ -398,10 +434,12 @@ function createChainProgressDetails(steps: SubagentToolTaskDetails[], total: num
 		...baseSummary,
 		total,
 	};
+	const childSessions = createChildSessions(stepSnapshot);
 	return {
 		mode: "chain",
 		status: getAggregateStatus(summary),
 		summary,
+		...(childSessions ? { childSessions } : {}),
 		steps: stepSnapshot,
 	};
 }

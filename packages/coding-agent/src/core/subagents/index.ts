@@ -323,6 +323,7 @@ export {
 	SubagentManager,
 	type SubagentManagerOptions,
 	type SubagentResult,
+	type SubagentRuntimeCreatedEvent,
 	type SubagentStartByNameOptions,
 	type SubagentStartOptions,
 } from "./manager.ts";

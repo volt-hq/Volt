@@ -16,6 +16,7 @@ export {
 	type IrohRemoteAgentRuntimeOptions,
 	type IrohRemoteAgentRuntimeResult,
 	type IrohRemoteAgentRuntimeSessionSelection,
+	type IrohRemoteSubagentRuntimeCreatedEvent,
 } from "./rpc/iroh-remote-agent-runtime.ts";
 export {
 	type IrohRemoteCompletedCommand,

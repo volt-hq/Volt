@@ -167,8 +167,17 @@ describe("RPC transcript projection", () => {
 		const subagentResult: ToolResultMessage<{
 			mode: string;
 			status: string;
+			subagentId: string;
+			sessionId: string;
 			agent: { name: string; source: string };
 			summary: { total: number; completed: number; failed: number; aborted: number; running: number };
+			childSessions: Array<{
+				index: number;
+				subagentId: string;
+				sessionId: string;
+				agent: { name: string; source: string };
+				status: string;
+			}>;
 			output: { text: string; bytes: number; truncated: boolean; maxBytes: number };
 		}> = {
 			role: "toolResult",
@@ -178,8 +187,19 @@ describe("RPC transcript projection", () => {
 			details: {
 				mode: "single",
 				status: "completed",
+				subagentId: "sa_child",
+				sessionId: "child-session",
 				agent: { name: "general", source: "built-in" },
 				summary: { total: 1, completed: 1, failed: 0, aborted: 0, running: 0 },
+				childSessions: [
+					{
+						index: 0,
+						subagentId: "sa_child",
+						sessionId: "child-session",
+						agent: { name: "general", source: "built-in" },
+						status: "completed",
+					},
+				],
 				output: {
 					text: `Child answer ${"x".repeat(1_500)}`,
 					bytes: 1_513,
@@ -203,8 +223,19 @@ describe("RPC transcript projection", () => {
 			details: {
 				mode: "single",
 				status: "completed",
+				subagentId: "sa_child",
+				sessionId: "child-session",
 				agent: { name: "general", source: "built-in" },
 				summary: { total: 1, completed: 1, failed: 0, aborted: 0, running: 0 },
+				childSessions: [
+					{
+						index: 0,
+						subagentId: "sa_child",
+						sessionId: "child-session",
+						agent: { name: "general", source: "built-in" },
+						status: "completed",
+					},
+				],
 				output: {
 					bytes: 1_513,
 					truncated: false,

@@ -38,14 +38,29 @@ export interface SubagentHandle {
 	onEvent(listener: SubagentEventListener): () => void;
 }
 
+export interface SubagentRuntimeCreatedEvent {
+	id: string;
+	sessionId: string;
+	runtime: AgentSessionRuntime;
+	definition?: SubagentDefinition;
+	parentSessionId?: string;
+	parentSessionFile?: string;
+}
+
 export interface SubagentManagerOptions {
 	createRuntime: CreateAgentSessionRuntimeFactory;
 	cwd: string;
 	agentDir: string;
 	resourceLoader?: ResourceLoader;
+	/** Parent session used to create durable child sessions when start options do not supply one. */
+	parentSessionManager?: SessionManager;
 	/** Maximum tool policy inherited from the parent context. Definition tools are intersected with this list. */
 	allowedTools?: string[];
 	requestTimeoutMs?: number;
+	/** Keep child runtimes alive after the hidden loopback client detaches. Another owner must retain/dispose them. */
+	retainRuntimeOnDispose?: boolean;
+	/** Called after a child runtime is ready so hosts can register it for live attachment. */
+	onRuntimeCreated?: (event: SubagentRuntimeCreatedEvent) => void | Promise<void>;
 }
 
 export interface SubagentStartOptions {
@@ -224,8 +239,11 @@ export class SubagentManager {
 	private readonly cwd: string;
 	private readonly agentDir: string;
 	private readonly resourceLoader?: ResourceLoader;
+	private readonly parentSessionManager?: SessionManager;
 	private readonly allowedTools?: string[];
 	private readonly requestTimeoutMs?: number;
+	private readonly retainRuntimeOnDispose: boolean;
+	private readonly onRuntimeCreated?: (event: SubagentRuntimeCreatedEvent) => void | Promise<void>;
 	private readonly handles = new Map<string, LocalSubagentHandle>();
 
 	constructor(options: SubagentManagerOptions) {
@@ -233,8 +251,11 @@ export class SubagentManager {
 		this.cwd = options.cwd;
 		this.agentDir = options.agentDir;
 		this.resourceLoader = options.resourceLoader;
+		this.parentSessionManager = options.parentSessionManager;
 		this.allowedTools = normalizeUniqueNames(options.allowedTools);
 		this.requestTimeoutMs = options.requestTimeoutMs;
+		this.retainRuntimeOnDispose = options.retainRuntimeOnDispose ?? false;
+		this.onRuntimeCreated = options.onRuntimeCreated;
 	}
 
 	async start(options: SubagentStartOptions = {}): Promise<SubagentHandle> {
@@ -272,21 +293,24 @@ export class SubagentManager {
 	): Promise<SubagentHandle> {
 		const cwd = options.cwd ?? this.cwd;
 		const agentDir = options.agentDir ?? this.agentDir;
-		const sessionManager = options.sessionManager ?? SessionManager.inMemory(cwd);
+		const sessionManager = options.sessionManager ?? this.createDefaultChildSessionManager(cwd);
+		const id = `sa_${randomUUID()}`;
 		const runtime = await this.createChildRuntime({ cwd, agentDir, sessionManager });
+		let client: InProcessRpcClient | undefined;
 		try {
 			if (definitionOptions) {
 				await this.applyDefinitionToRuntime(runtime, definitionOptions.definition, definitionOptions.allowedTools);
 			}
 
-			const id = `sa_${randomUUID()}`;
 			let handle: LocalSubagentHandle | undefined;
-			const client = await createInProcessRpcClient(runtime, {
+			client = await createInProcessRpcClient(runtime, {
+				disposeRuntimeOnClose: !this.retainRuntimeOnDispose,
 				requestTimeoutMs: options.requestTimeoutMs ?? this.requestTimeoutMs,
 				onEvent: (event) => {
 					handle?.handleEvent(event);
 				},
 			});
+			await this.notifyRuntimeCreated({ id, runtime, definition: definitionOptions?.definition });
 			handle = new LocalSubagentHandle({
 				id,
 				sessionId: runtime.session.sessionId,
@@ -298,9 +322,42 @@ export class SubagentManager {
 			this.handles.set(id, handle);
 			return handle;
 		} catch (error) {
+			await client?.stop().catch(() => undefined);
 			await runtime.dispose().catch(() => undefined);
 			throw error;
 		}
+	}
+
+	private createDefaultChildSessionManager(cwd: string): SessionManager {
+		if (!this.parentSessionManager?.isPersisted()) {
+			return SessionManager.inMemory(cwd);
+		}
+		const parentSession = this.parentSessionManager.getSessionFile();
+		return SessionManager.create(
+			cwd,
+			this.parentSessionManager.getSessionDir(),
+			parentSession ? { parentSession } : undefined,
+		);
+	}
+
+	private async notifyRuntimeCreated(options: {
+		id: string;
+		runtime: AgentSessionRuntime;
+		definition?: SubagentDefinition;
+	}): Promise<void> {
+		if (!this.onRuntimeCreated) {
+			return;
+		}
+		await this.onRuntimeCreated({
+			id: options.id,
+			sessionId: options.runtime.session.sessionId,
+			runtime: options.runtime,
+			...(options.definition ? { definition: options.definition } : {}),
+			...(this.parentSessionManager ? { parentSessionId: this.parentSessionManager.getSessionId() } : {}),
+			...(this.parentSessionManager?.getSessionFile()
+				? { parentSessionFile: this.parentSessionManager.getSessionFile() }
+				: {}),
+		});
 	}
 
 	private resolveDefinition(

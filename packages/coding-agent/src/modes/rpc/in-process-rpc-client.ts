@@ -9,6 +9,8 @@ export type InProcessRpcClientEventListener = (event: RpcClientEvent, client: In
 export interface InProcessRpcClientOptions {
 	/** Milliseconds to wait for a command response. Defaults to 30 seconds. */
 	requestTimeoutMs?: number;
+	/** Defaults to true. Set false when another owner retains the runtime after this loopback client stops. */
+	disposeRuntimeOnClose?: boolean;
 	/** Initial event listener registered before startup completes. */
 	onEvent?: InProcessRpcClientEventListener;
 }
@@ -20,8 +22,8 @@ interface InProcessRpcClientConstructorOptions extends InProcessRpcClientOptions
 /**
  * RPC client backed by runRpcMode in the same Node.js process.
  *
- * stop() closes the client transport and waits for RPC mode shutdown, which also
- * disposes the supplied AgentSessionRuntime.
+ * stop() closes the client transport and waits for RPC mode shutdown. By default
+ * shutdown also disposes the supplied AgentSessionRuntime.
  */
 export class InProcessRpcClient extends RpcTransportClient {
 	private readonly modeClosed: Promise<void>;
@@ -55,6 +57,7 @@ export class InProcessRpcClient extends RpcTransportClient {
 
 		this.modeClosed = runRpcMode(options.runtimeHost, {
 			transport: pair.server,
+			disposeRuntimeOnClose: options.disposeRuntimeOnClose,
 			exitProcess: false,
 			onReady: resolveReady,
 		});

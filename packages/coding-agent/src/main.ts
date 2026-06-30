@@ -1785,6 +1785,7 @@ export async function main(args: string[], options?: MainOptions) {
 			cwd,
 			agentDir,
 			resourceLoader,
+			parentSessionManager: sessionManager,
 		});
 		const created = await createAgentSessionFromServices({
 			services,

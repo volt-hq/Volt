@@ -203,7 +203,7 @@ function attachIrohRemoteTranscriptEntryEvents(
 			if (!entry || emittedFinalEntryIds.has(entry.id)) {
 				return;
 			}
-			const transcriptEvent = createIrohRemoteTranscriptEntryEvent(entry, options);
+			const transcriptEvent = createIrohRemoteTranscriptEntryEvent(entry, runtimeHost, options);
 			if (!transcriptEvent) {
 				return;
 			}
@@ -214,6 +214,12 @@ function attachIrohRemoteTranscriptEntryEvents(
 }
 
 type IrohRemoteTranscriptSourceEntry = SessionMessageEntry | CustomMessageEntry;
+
+interface IrohRemoteStoredToolCall {
+	id: string;
+	name: string;
+	arguments: Record<string, unknown>;
+}
 
 function findPersistedMessageEntry(
 	runtimeHost: AgentSessionRuntime,
@@ -260,6 +266,7 @@ function customMessageContentMatches(left: CustomMessageEntry["content"], right:
 
 function createIrohRemoteTranscriptEntryEvent(
 	entry: IrohRemoteTranscriptSourceEntry,
+	runtimeHost: AgentSessionRuntime,
 	options: IrohRemoteTranscriptEventOptions,
 ): Record<string, unknown> | undefined {
 	if (entry.type === "custom_message") {
@@ -281,7 +288,20 @@ function createIrohRemoteTranscriptEntryEvent(
 		const status = message.isError ? "failed" : "completed";
 		const toolName =
 			typeof message.toolName === "string" && message.toolName.trim() ? message.toolName.trim() : "tool";
-		return createIrohRemoteTranscriptEntryEventValue(entry, "tool", `${toolName} ${status}`, options);
+		const toolCall = collectIrohRemoteToolCalls(runtimeHost.session.sessionManager.getBranch()).get(
+			message.toolCallId,
+		);
+		return createIrohRemoteTranscriptEntryEventValue(entry, "tool", `${toolName} ${status}`, options, {
+			toolName,
+			status,
+			summary: `${toolName} ${status}`,
+			...(toolName === "subagent"
+				? {
+						...projectIrohRemoteSubagentTranscriptArgs(toolCall?.arguments, options),
+						...projectIrohRemoteSubagentTranscriptDetails(message.details, options),
+					}
+				: {}),
+		});
 	}
 	if (message.role === "bashExecution") {
 		const failed = message.cancelled || (message.exitCode !== undefined && message.exitCode !== 0);
@@ -301,6 +321,7 @@ function createIrohRemoteTranscriptEntryEventValue(
 	role: "user" | "assistant" | "system" | "tool",
 	text: string,
 	options: IrohRemoteTranscriptEventOptions,
+	extraEntryFields: Record<string, unknown> = {},
 ): Record<string, unknown> {
 	const sanitized = sanitizeIrohRemoteTranscriptText(text, options);
 	return {
@@ -311,9 +332,259 @@ function createIrohRemoteTranscriptEntryEventValue(
 			role,
 			text: sanitized.text,
 			truncated: sanitized.truncated,
+			...extraEntryFields,
 		},
 		final: true,
 	};
+}
+
+function collectIrohRemoteToolCalls(entries: SessionEntry[]): Map<string, IrohRemoteStoredToolCall> {
+	const toolCalls = new Map<string, IrohRemoteStoredToolCall>();
+	for (const entry of entries) {
+		if (entry.type !== "message" || entry.message.role !== "assistant") {
+			continue;
+		}
+		for (const block of entry.message.content) {
+			if (isIrohRemoteStoredToolCall(block)) {
+				toolCalls.set(block.id, block);
+			}
+		}
+	}
+	return toolCalls;
+}
+
+function isIrohRemoteStoredToolCall(value: unknown): value is IrohRemoteStoredToolCall {
+	return (
+		isRecord(value) &&
+		value.type === "toolCall" &&
+		typeof value.id === "string" &&
+		typeof value.name === "string" &&
+		isRecord(value.arguments)
+	);
+}
+
+function projectIrohRemoteSubagentTranscriptArgs(
+	args: Record<string, unknown> | undefined,
+	options: IrohRemoteTranscriptEventOptions,
+): Record<string, unknown> {
+	if (!args) {
+		return {};
+	}
+	const projected: Record<string, unknown> = {};
+	copyIrohRemoteBoundedString(args, projected, "agent", options, 200);
+	copyIrohRemoteBoundedString(args, projected, "task", options, 1_000);
+	const tasks = projectIrohRemoteSubagentInputArray(args.tasks, options);
+	if (tasks) {
+		projected.tasks = tasks;
+	}
+	const chain = projectIrohRemoteSubagentInputArray(args.chain, options);
+	if (chain) {
+		projected.chain = chain;
+	}
+	return Object.keys(projected).length > 0 ? { args: projected } : {};
+}
+
+function projectIrohRemoteSubagentInputArray(
+	value: unknown,
+	options: IrohRemoteTranscriptEventOptions,
+): Array<{ agent: string; task: string }> | undefined {
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const projected = value
+		.map((item) => {
+			if (!isRecord(item)) {
+				return undefined;
+			}
+			const agent = getIrohRemoteBoundedString(item.agent, options, 200);
+			const task = getIrohRemoteBoundedString(item.task, options, 1_000);
+			return agent && task ? { agent, task } : undefined;
+		})
+		.filter((item): item is { agent: string; task: string } => item !== undefined);
+	return projected.length > 0 ? projected : undefined;
+}
+
+function projectIrohRemoteSubagentTranscriptDetails(
+	details: unknown,
+	options: IrohRemoteTranscriptEventOptions,
+): Record<string, unknown> {
+	if (!isRecord(details)) {
+		return {};
+	}
+	const projected: Record<string, unknown> = {};
+	copyIrohRemoteBoundedString(details, projected, "mode", options, 200);
+	copyIrohRemoteBoundedString(details, projected, "status", options, 200);
+	copyIrohRemoteBoundedString(details, projected, "subagentId", options, 200);
+	copyIrohRemoteBoundedString(details, projected, "sessionId", options, 200);
+	const summary = projectIrohRemoteSubagentSummary(details.summary);
+	if (summary) {
+		projected.summary = summary;
+	}
+	const childSessions = projectIrohRemoteSubagentDetailArray(details.childSessions, options);
+	if (childSessions) {
+		projected.childSessions = childSessions;
+	}
+	const agent = projectIrohRemoteSubagentAgent(details.agent, options);
+	if (agent) {
+		projected.agent = agent;
+	}
+	const output = projectIrohRemoteSubagentOutput(details.output, options);
+	if (output) {
+		projected.output = output;
+	}
+	const error = projectIrohRemoteSubagentError(details.error, options);
+	if (error) {
+		projected.error = error;
+	}
+	const tasks = projectIrohRemoteSubagentDetailArray(details.tasks, options);
+	if (tasks) {
+		projected.tasks = tasks;
+	}
+	const steps = projectIrohRemoteSubagentDetailArray(details.steps, options);
+	if (steps) {
+		projected.steps = steps;
+	}
+	return Object.keys(projected).length > 0 ? { details: projected } : {};
+}
+
+function projectIrohRemoteSubagentSummary(value: unknown): Record<string, number> | undefined {
+	if (!isRecord(value)) {
+		return undefined;
+	}
+	const projected: Record<string, number> = {};
+	for (const key of [
+		"total",
+		"completed",
+		"failed",
+		"aborted",
+		"running",
+		"maxTasks",
+		"maxConcurrency",
+		"stoppedAt",
+	]) {
+		const numberValue = getIrohRemoteFiniteNumber(value[key]);
+		if (numberValue !== undefined) {
+			projected[key] = numberValue;
+		}
+	}
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectIrohRemoteSubagentDetailArray(
+	value: unknown,
+	options: IrohRemoteTranscriptEventOptions,
+): Array<Record<string, unknown>> | undefined {
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const projected = value
+		.map((item) => projectIrohRemoteSubagentTask(item, options))
+		.filter((item): item is Record<string, unknown> => item !== undefined);
+	return projected.length > 0 ? projected : undefined;
+}
+
+function projectIrohRemoteSubagentTask(
+	value: unknown,
+	options: IrohRemoteTranscriptEventOptions,
+): Record<string, unknown> | undefined {
+	if (!isRecord(value)) {
+		return undefined;
+	}
+	const projected: Record<string, unknown> = {};
+	const index = getIrohRemoteFiniteNumber(value.index);
+	if (index !== undefined) {
+		projected.index = index;
+	}
+	copyIrohRemoteBoundedString(value, projected, "subagentId", options, 200);
+	copyIrohRemoteBoundedString(value, projected, "sessionId", options, 200);
+	const agent = projectIrohRemoteSubagentAgent(value.agent, options);
+	if (agent) {
+		projected.agent = agent;
+	}
+	copyIrohRemoteBoundedString(value, projected, "status", options, 200);
+	const error = projectIrohRemoteSubagentError(value.error, options);
+	if (error) {
+		projected.error = error;
+	}
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectIrohRemoteSubagentAgent(
+	value: unknown,
+	options: IrohRemoteTranscriptEventOptions,
+): Record<string, string> | undefined {
+	if (!isRecord(value)) {
+		return undefined;
+	}
+	const projected: Record<string, string> = {};
+	copyIrohRemoteBoundedString(value, projected, "name", options, 200);
+	copyIrohRemoteBoundedString(value, projected, "source", options, 200);
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectIrohRemoteSubagentOutput(
+	value: unknown,
+	options: IrohRemoteTranscriptEventOptions,
+): Record<string, unknown> | undefined {
+	if (!isRecord(value)) {
+		return undefined;
+	}
+	const projected: Record<string, unknown> = {};
+	copyIrohRemoteBoundedString(value, projected, "text", options, 1_000);
+	for (const key of ["bytes", "omittedBytes", "maxBytes"]) {
+		const numberValue = getIrohRemoteFiniteNumber(value[key]);
+		if (numberValue !== undefined) {
+			projected[key] = numberValue;
+		}
+	}
+	if (typeof value.truncated === "boolean") {
+		projected.truncated = value.truncated;
+	}
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectIrohRemoteSubagentError(
+	value: unknown,
+	options: IrohRemoteTranscriptEventOptions,
+): Record<string, string> | undefined {
+	if (!isRecord(value)) {
+		return undefined;
+	}
+	const message = getIrohRemoteBoundedString(value.message, options, 1_000);
+	return message ? { message } : undefined;
+}
+
+function copyIrohRemoteBoundedString(
+	from: Record<string, unknown>,
+	to: Record<string, unknown>,
+	key: string,
+	options: IrohRemoteTranscriptEventOptions,
+	maxScalars: number,
+): void {
+	const value = getIrohRemoteBoundedString(from[key], options, maxScalars);
+	if (value) {
+		to[key] = value;
+	}
+}
+
+function getIrohRemoteBoundedString(
+	value: unknown,
+	options: IrohRemoteTranscriptEventOptions,
+	maxScalars: number,
+): string | undefined {
+	if (typeof value !== "string" || value.trim().length === 0) {
+		return undefined;
+	}
+	return truncateUnicodeScalars(sanitizeIrohRemoteTranscriptText(value, options).text, maxScalars);
+}
+
+function getIrohRemoteFiniteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function truncateUnicodeScalars(value: string, maxLength: number): string {
+	const scalars = Array.from(value);
+	return scalars.length <= maxLength ? value : scalars.slice(0, maxLength).join("");
 }
 
 function extractIrohRemoteTranscriptContentText(content: unknown): string {

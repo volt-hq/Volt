@@ -17,6 +17,7 @@ const TOOL_SUMMARY_LIMIT = 1_000;
 const TOOL_COMMAND_LIMIT = 500;
 const MUTATION_PREVIEW_LIMIT = 4_000;
 const SUBAGENT_AGENT_LIMIT = 200;
+const SUBAGENT_ID_LIMIT = 200;
 const SUBAGENT_TASK_LIMIT = 1_000;
 const SUBAGENT_ERROR_LIMIT = 1_000;
 const SUBAGENT_OUTPUT_LIMIT = 1_000;
@@ -241,9 +242,15 @@ function projectSubagentDetails(details: Record<string, unknown> | undefined): R
 	const projected: Record<string, unknown> = {};
 	copyBoundedString(details, projected, "mode", SUBAGENT_AGENT_LIMIT);
 	copyBoundedString(details, projected, "status", SUBAGENT_AGENT_LIMIT);
+	copyBoundedString(details, projected, "subagentId", SUBAGENT_ID_LIMIT);
+	copyBoundedString(details, projected, "sessionId", SUBAGENT_ID_LIMIT);
 	const summary = projectSubagentSummary(details.summary);
 	if (summary) {
 		projected.summary = summary;
+	}
+	const childSessions = projectSubagentDetailArray(details.childSessions);
+	if (childSessions) {
+		projected.childSessions = childSessions;
 	}
 	const agent = projectSubagentAgent(details.agent);
 	if (agent) {
@@ -307,6 +314,8 @@ function projectSubagentTaskDetails(item: Record<string, unknown>): Record<strin
 	if (index !== undefined) {
 		projected.index = index;
 	}
+	copyBoundedString(item, projected, "subagentId", SUBAGENT_ID_LIMIT);
+	copyBoundedString(item, projected, "sessionId", SUBAGENT_ID_LIMIT);
 	const agent = projectSubagentAgent(item.agent);
 	if (agent) {
 		projected.agent = agent;

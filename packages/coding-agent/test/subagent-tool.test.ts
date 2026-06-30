@@ -378,9 +378,18 @@ describe("subagent tool", () => {
 		expect(result.details).toMatchObject({
 			agent: { name: "scout", source: "project" },
 			status: "completed",
+			childSessions: [
+				{
+					index: 0,
+					agent: { name: "scout", source: "project" },
+					status: "completed",
+				},
+			],
 		});
 		expect(result.details.subagentId).toMatch(/^sa_/);
 		expect(result.details.sessionId).toBeTruthy();
+		expect(result.details.childSessions?.[0]?.subagentId).toBe(result.details.subagentId);
+		expect(result.details.childSessions?.[0]?.sessionId).toBe(result.details.sessionId);
 		expect(result.details.usage?.messages.assistant).toBe(1);
 	});
 
@@ -417,6 +426,14 @@ describe("subagent tool", () => {
 			status: "running",
 			subagentId: "sa_scout",
 			agent: { name: "scout", source: "project" },
+			childSessions: [
+				{
+					index: 0,
+					subagentId: "sa_scout",
+					sessionId: "session_scout",
+					status: "running",
+				},
+			],
 		});
 		expect(updates.some((update) => textFromResult(update).includes("tool read started"))).toBe(true);
 		expect(lastUpdate).toBeDefined();
@@ -428,6 +445,13 @@ describe("subagent tool", () => {
 			mode: "single",
 			status: "completed",
 			output: { text: "child final answer" },
+			childSessions: [
+				{
+					subagentId: "sa_scout",
+					sessionId: "session_scout",
+					status: "completed",
+				},
+			],
 		});
 	});
 
@@ -464,9 +488,16 @@ describe("subagent tool", () => {
 		await waitUntil(() => prompts.length === 2);
 
 		const runningUpdate = updates.find(
-			(update) => update.details.mode === "parallel" && update.details.summary?.running === 2,
+			(update) =>
+				update.details.mode === "parallel" &&
+				update.details.summary?.running === 2 &&
+				update.details.childSessions?.length === 2,
 		);
 		expect(runningUpdate?.details.tasks?.map((task) => task.agent.name)).toEqual(["first", "second"]);
+		expect(runningUpdate?.details.childSessions?.map((child) => child.sessionId)).toEqual([
+			"session_first",
+			"session_second",
+		]);
 		controls
 			.get("second")
 			?.complete(createSubagentResult({ id: "sa_second", sessionId: "session_second", text: "second done" }));
@@ -499,6 +530,7 @@ describe("subagent tool", () => {
 			summary: { total: 2, completed: 2, failed: 0, aborted: 0 },
 		});
 		expect(lastUpdate.details.tasks?.map((task) => task.agent.name)).toEqual(["first", "second"]);
+		expect(lastUpdate.details.childSessions?.map((child) => child.status)).toEqual(["completed", "completed"]);
 	});
 
 	it("emits chain progress with completed prior steps and the current running step", async () => {
@@ -551,6 +583,10 @@ describe("subagent tool", () => {
 		);
 		expect(secondRunning?.details.summary).toMatchObject({ total: 2, completed: 1, running: 1 });
 		expect(secondRunning?.details.steps?.map((step) => step.agent.name)).toEqual(["first", "second"]);
+		expect(secondRunning?.details.childSessions?.map((child) => child.sessionId)).toEqual([
+			"session_first",
+			"session_second",
+		]);
 		expect(prompts[1]).toEqual({ agent: "second", task: "use first output" });
 
 		controls
@@ -570,6 +606,10 @@ describe("subagent tool", () => {
 			mode: "chain",
 			status: "completed",
 			summary: { total: 2, completed: 2, failed: 0, aborted: 0 },
+			childSessions: [
+				{ subagentId: "sa_first", sessionId: "session_first", status: "completed" },
+				{ subagentId: "sa_second", sessionId: "session_second", status: "completed" },
+			],
 		});
 	});
 
@@ -602,6 +642,10 @@ describe("subagent tool", () => {
 			mode: "parallel",
 			status: "completed",
 			summary: { total: 2, completed: 2, failed: 0, aborted: 0 },
+			childSessions: [
+				{ index: 0, subagentId: "sa_scout", sessionId: "session_scout", status: "completed" },
+				{ index: 1, subagentId: "sa_planner", sessionId: "session_planner", status: "completed" },
+			],
 			tasks: [
 				{
 					index: 0,
@@ -896,6 +940,11 @@ describe("subagent tool", () => {
 			mode: "chain",
 			status: "completed",
 			summary: { total: 3, completed: 3, failed: 0, aborted: 0 },
+			childSessions: [
+				{ index: 0, subagentId: "sa_first", sessionId: "session_first", status: "completed" },
+				{ index: 1, subagentId: "sa_second", sessionId: "session_second", status: "completed" },
+				{ index: 2, subagentId: "sa_third", sessionId: "session_third", status: "completed" },
+			],
 			steps: [
 				{ index: 0, subagentId: "sa_first", agent: { name: "first", source: "user" }, status: "completed" },
 				{ index: 1, subagentId: "sa_second", agent: { name: "second", source: "project" }, status: "completed" },

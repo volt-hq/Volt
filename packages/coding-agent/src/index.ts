@@ -553,6 +553,7 @@ export {
 	SubagentManager,
 	type SubagentManagerOptions,
 	type SubagentResult,
+	type SubagentRuntimeCreatedEvent,
 	type SubagentStartByNameOptions,
 	type SubagentStartOptions,
 } from "./core/subagents/index.ts";
@@ -664,6 +665,7 @@ export {
 	type IrohRemoteNotificationKind,
 	type IrohRemoteNotificationRequest,
 	type IrohRemoteRpcModeOptions,
+	type IrohRemoteSubagentRuntimeCreatedEvent,
 	type ModelInfo,
 	type PrintModeOptions,
 	type RpcActiveCompaction,

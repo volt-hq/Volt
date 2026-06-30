@@ -18,7 +18,7 @@ import {
 } from "../../core/remote/iroh/index.ts";
 import { getDefaultSessionDir, SessionManager } from "../../core/session-manager.ts";
 import { SettingsManager } from "../../core/settings-manager.ts";
-import { SubagentManager } from "../../core/subagents/index.ts";
+import { SubagentManager, type SubagentRuntimeCreatedEvent } from "../../core/subagents/index.ts";
 import { runMigrations } from "../../migrations.ts";
 import { resolvePath } from "../../utils/paths.ts";
 
@@ -27,10 +27,16 @@ export interface IrohRemoteAgentRuntimeOptions {
 	agentDir?: string;
 	conversationTarget?: IrohRemoteAgentRuntimeConversationTarget;
 	cwd: string;
+	onSubagentRuntimeCreated?: (event: IrohRemoteSubagentRuntimeCreatedEvent) => void | Promise<void>;
 	profile?: string;
 	projectTrusted?: boolean;
 	resumeSessionId?: string;
 	sessionDir?: string;
+}
+
+export interface IrohRemoteSubagentRuntimeCreatedEvent extends SubagentRuntimeCreatedEvent {
+	parentSessionId: string;
+	parentSessionFile?: string;
 }
 
 export type IrohRemoteAgentRuntimeConversationTarget =
@@ -105,6 +111,18 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 			cwd: runtimeOptions.cwd,
 			agentDir: runtimeOptions.agentDir,
 			resourceLoader: services.resourceLoader,
+			parentSessionManager: runtimeOptions.sessionManager,
+			retainRuntimeOnDispose: options.onSubagentRuntimeCreated !== undefined,
+			onRuntimeCreated: options.onSubagentRuntimeCreated
+				? (event) =>
+						options.onSubagentRuntimeCreated?.({
+							...event,
+							parentSessionId: runtimeOptions.sessionManager.getSessionId(),
+							...(runtimeOptions.sessionManager.getSessionFile()
+								? { parentSessionFile: runtimeOptions.sessionManager.getSessionFile() }
+								: {}),
+						})
+				: undefined,
 		});
 		const created = await createAgentSessionFromServices({
 			services,

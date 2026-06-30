@@ -1,13 +1,15 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/volt-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS } from "../src/core/remote/iroh/index.ts";
 import { CURRENT_SESSION_VERSION } from "../src/core/session-manager.ts";
 import {
 	createIrohRemoteAgentRuntime,
 	createIrohRemoteAgentRuntimeWithSessionSelection,
+	type IrohRemoteSubagentRuntimeCreatedEvent,
 } from "../src/modes/rpc/iroh-remote-agent-runtime.ts";
 
 const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY"] as const;
@@ -78,24 +80,18 @@ export default function (volt) {
 		);
 	}
 
+	function writeAgent(dir: string, filename: string, frontmatter: string, body: string): void {
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, filename), `---\n${frontmatter}\n---\n\n${body}`);
+	}
+
 	function writeRuntimeConfig(settings: Record<string, unknown>): void {
-		writeFileSync(
-			join(agentDir, "models.json"),
-			`${JSON.stringify(
-				{
-					providers: {
-						"iroh-runtime-test": {
-							api: "openai-completions",
-							apiKey: "test-key",
-							baseUrl: "http://127.0.0.1:9/v1",
-							models: [{ id: "fake-runtime", name: "Fake Runtime" }],
-						},
-					},
-				},
-				null,
-				2,
-			)}\n`,
-		);
+		writeRuntimeModelConfig({
+			api: "openai-completions",
+			apiKey: "test-key",
+			baseUrl: "http://127.0.0.1:9/v1",
+			models: [{ id: "fake-runtime", name: "Fake Runtime" }],
+		});
 		writeFileSync(
 			join(agentDir, "settings.json"),
 			`${JSON.stringify(
@@ -103,6 +99,21 @@ export default function (volt) {
 					defaultProvider: "iroh-runtime-test",
 					defaultModel: "fake-runtime",
 					...settings,
+				},
+				null,
+				2,
+			)}\n`,
+		);
+	}
+
+	function writeRuntimeModelConfig(providerConfig: Record<string, unknown>, providerName = "iroh-runtime-test"): void {
+		writeFileSync(
+			join(agentDir, "models.json"),
+			`${JSON.stringify(
+				{
+					providers: {
+						[providerName]: providerConfig,
+					},
 				},
 				null,
 				2,
@@ -153,6 +164,83 @@ export default function (volt) {
 		} finally {
 			errorSpy.mockRestore();
 			await runtime?.dispose();
+		}
+	});
+
+	it("creates persistent attachable child runtimes for tool-created remote subagents", async () => {
+		const faux = registerFauxProvider();
+		const model = faux.getModel();
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("subagent", { agent: "scout", task: "Inspect the remote child" }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("child finished"),
+			fauxAssistantMessage("parent finished"),
+		]);
+		writeRuntimeModelConfig(
+			{
+				api: faux.api,
+				apiKey: "faux-key",
+				baseUrl: "http://localhost:0",
+				models: faux.models,
+			},
+			model.provider,
+		);
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			`${JSON.stringify({ defaultProvider: model.provider, defaultModel: model.id }, null, 2)}\n`,
+		);
+		writeAgent(join(agentDir, "agents"), "scout.md", "name: scout\ndescription: Scout child", "Scout prompt");
+		const subagentEvents: IrohRemoteSubagentRuntimeCreatedEvent[] = [];
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
+		try {
+			runtime = await createIrohRemoteAgentRuntime({
+				agentDir,
+				cwd,
+				onSubagentRuntimeCreated: (event) => {
+					subagentEvents.push(event);
+				},
+			});
+
+			await runtime.session.prompt("delegate to scout");
+
+			expect(subagentEvents).toHaveLength(1);
+			const child = subagentEvents[0];
+			expect(child).toMatchObject({ parentSessionId: runtime.session.sessionId });
+			expect(child.parentSessionFile).toBe(runtime.session.sessionFile);
+			expect(child.sessionId).toBe(child.runtime.session.sessionId);
+			expect(child.runtime.session.sessionFile).toBeTruthy();
+			if (!child.runtime.session.sessionFile) {
+				throw new Error("expected child session file");
+			}
+			const childHeaderLine = readFileSync(child.runtime.session.sessionFile, "utf-8").split("\n")[0];
+			if (!childHeaderLine) {
+				throw new Error("expected child session header");
+			}
+			const childHeader = JSON.parse(childHeaderLine) as { parentSession?: string };
+			expect(childHeader.parentSession).toBe(runtime.session.sessionFile);
+			const parentToolResult = runtime.session.sessionManager.getBranch().find((entry) => {
+				return (
+					entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "subagent"
+				);
+			});
+			if (parentToolResult?.type !== "message" || parentToolResult.message.role !== "toolResult") {
+				throw new Error("expected parent subagent tool result");
+			}
+			const details = parentToolResult.message.details as
+				| { childSessions?: Array<{ sessionId?: string; subagentId?: string }> }
+				| undefined;
+			expect(details?.childSessions?.[0]).toMatchObject({
+				sessionId: child.sessionId,
+				subagentId: child.id,
+			});
+		} finally {
+			errorSpy.mockRestore();
+			await runtime?.dispose();
+			await subagentEvents[0]?.runtime.dispose().catch(() => undefined);
+			faux.unregister();
 		}
 	});
 
