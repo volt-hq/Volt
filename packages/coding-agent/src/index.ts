@@ -386,6 +386,7 @@ export {
 	isIrohRemoteSessionId,
 	isIrohRemoteWorkspaceName,
 	listenIrohRemoteControlServer,
+	normalizeIrohRemoteAllowTools,
 	parseIrohRemoteAllowTools,
 	parseIrohRemoteClient,
 	parseIrohRemoteControlRequest,
@@ -425,7 +426,12 @@ export {
 	writeIrohRemoteHello,
 	writeIrohRemoteHostState,
 } from "./core/remote/iroh/index.ts";
-export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.ts";
+export type {
+	ResourceCollision,
+	ResourceDiagnostic,
+	ResourceLoader,
+	ResourceLoaderSubagentsResult,
+} from "./core/resource-loader.ts";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.ts";
 export {
 	attachJsonlLineReader,
@@ -473,6 +479,7 @@ export {
 	createLsTool,
 	createReadOnlyTools,
 	createReadTool,
+	createSubagentTool,
 	createWriteTool,
 	type PromptTemplate,
 } from "./core/sdk.ts";
@@ -522,6 +529,29 @@ export {
 	type SkillFrontmatter,
 } from "./core/skills.ts";
 export { createSyntheticSourceInfo } from "./core/source-info.ts";
+export {
+	createBuiltInSubagentDefinitions,
+	type DiscoverSubagentDefinitionsOptions,
+	discoverSubagentDefinitions,
+	type FileSubagentDefinitionSource,
+	type ParseSubagentDefinitionOptions,
+	type ParseSubagentDefinitionResult,
+	parseSubagentDefinition,
+	type SubagentDefinition,
+	SubagentDefinitionConfigurationError,
+	SubagentDefinitionNotFoundError,
+	type SubagentDefinitionSource,
+	type SubagentDiscoveryResult,
+	type SubagentEndEvent,
+	type SubagentEvent,
+	type SubagentEventListener,
+	type SubagentHandle,
+	SubagentManager,
+	type SubagentManagerOptions,
+	type SubagentResult,
+	type SubagentStartByNameOptions,
+	type SubagentStartOptions,
+} from "./core/subagents/index.ts";
 // Tools
 export {
 	type BashOperations,
@@ -538,9 +568,11 @@ export {
 	createLspToolDefinition,
 	createLsToolDefinition,
 	createReadToolDefinition,
+	createSubagentToolDefinition,
 	createWriteToolDefinition,
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
+	DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES,
 	type EditOperations,
 	type EditToolDetails,
 	type EditToolInput,
@@ -567,6 +599,12 @@ export {
 	type ReadToolDetails,
 	type ReadToolInput,
 	type ReadToolOptions,
+	type SubagentToolDetails,
+	type SubagentToolInput,
+	type SubagentToolManager,
+	type SubagentToolOptions,
+	type SubagentToolStatus,
+	type SubagentToolUsageDetails,
 	type ToolDiagnosticsProvider,
 	type ToolsOptions,
 	type TruncationOptions,
@@ -623,6 +661,7 @@ export {
 	type RpcHostActionRequest,
 	type RpcHostActionResponse,
 	type RpcHostActionUpdate,
+	type RpcListSubagentsResponse,
 	type RpcModeOptions,
 	type RpcPendingHostActionsResponse,
 	type RpcPushPlatform,
@@ -633,6 +672,12 @@ export {
 	type RpcSessionChange,
 	type RpcSessionListItem,
 	type RpcSessionState,
+	type RpcSubagentDefinition,
+	type RpcSubagentDefinitionSource,
+	type RpcSubagentEndEvent,
+	type RpcSubagentEvent,
+	type RpcSubagentSourceInfo,
+	type RpcSubagentStartResponse,
 	type RpcTranscriptItem,
 	type RpcTranscriptResponse,
 	type RpcTranscriptToolStatus,

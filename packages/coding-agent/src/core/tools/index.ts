@@ -61,6 +61,26 @@ export {
 	type ReadToolOptions,
 } from "./read.ts";
 export {
+	createSubagentTool,
+	createSubagentToolDefinition,
+	DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES,
+	DEFAULT_SUBAGENT_PARALLEL_MAX_CONCURRENCY,
+	DEFAULT_SUBAGENT_PARALLEL_MAX_TASKS,
+	type SubagentToolAgentDetails,
+	type SubagentToolDetails,
+	type SubagentToolErrorDetails,
+	type SubagentToolInput,
+	type SubagentToolManager,
+	type SubagentToolMode,
+	type SubagentToolOptions,
+	type SubagentToolOutputDetails,
+	type SubagentToolOverallStatus,
+	type SubagentToolStatus,
+	type SubagentToolTaskDetails,
+	type SubagentToolTaskInput,
+	type SubagentToolUsageDetails,
+} from "./subagent.ts";
+export {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	formatSize,
@@ -88,12 +108,24 @@ import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createLspTool, createLspToolDefinition, type LspToolOptions } from "./lsp.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
+import { createSubagentTool, createSubagentToolDefinition, type SubagentToolOptions } from "./subagent.ts";
 import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
-export type ToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls" | "lsp";
-export const allToolNames: Set<ToolName> = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "lsp"]);
+export type CoreToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls" | "lsp";
+export type ToolName = CoreToolName | "subagent";
+export const allToolNames: Set<ToolName> = new Set([
+	"read",
+	"bash",
+	"edit",
+	"write",
+	"grep",
+	"find",
+	"ls",
+	"lsp",
+	"subagent",
+]);
 
 export interface ToolsOptions {
 	read?: ReadToolOptions;
@@ -104,6 +136,7 @@ export interface ToolsOptions {
 	find?: FindToolOptions;
 	ls?: LsToolOptions;
 	lsp?: LspToolOptions;
+	subagent?: SubagentToolOptions;
 }
 
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
@@ -124,6 +157,11 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 			return createLsToolDefinition(cwd, options?.ls);
 		case "lsp":
 			return createLspToolDefinition(cwd, options?.lsp);
+		case "subagent":
+			if (!options?.subagent) {
+				throw new Error("Subagent tool requires SubagentToolOptions");
+			}
+			return createSubagentToolDefinition(options.subagent);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -147,6 +185,11 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			return createLsTool(cwd, options?.ls);
 		case "lsp":
 			return createLspTool(cwd, options?.lsp);
+		case "subagent":
+			if (!options?.subagent) {
+				throw new Error("Subagent tool requires SubagentToolOptions");
+			}
+			return createSubagentTool(cwd, options.subagent);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -170,7 +213,10 @@ export function createReadOnlyToolDefinitions(cwd: string, options?: ToolsOption
 	];
 }
 
-export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): Record<ToolName, ToolDef> {
+export function createAllToolDefinitions(
+	cwd: string,
+	options?: ToolsOptions,
+): Record<CoreToolName, ToolDef> & Partial<Record<"subagent", ToolDef>> {
 	return {
 		read: createReadToolDefinition(cwd, options?.read),
 		bash: createBashToolDefinition(cwd, options?.bash),
@@ -180,6 +226,7 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 		find: createFindToolDefinition(cwd, options?.find),
 		ls: createLsToolDefinition(cwd, options?.ls),
 		lsp: createLspToolDefinition(cwd, options?.lsp),
+		...(options?.subagent ? { subagent: createSubagentToolDefinition(options.subagent) } : {}),
 	};
 }
 
@@ -201,7 +248,10 @@ export function createReadOnlyTools(cwd: string, options?: ToolsOptions): Tool[]
 	];
 }
 
-export function createAllTools(cwd: string, options?: ToolsOptions): Record<ToolName, Tool> {
+export function createAllTools(
+	cwd: string,
+	options?: ToolsOptions,
+): Record<CoreToolName, Tool> & Partial<Record<"subagent", Tool>> {
 	return {
 		read: createReadTool(cwd, options?.read),
 		bash: createBashTool(cwd, options?.bash),
@@ -211,5 +261,6 @@ export function createAllTools(cwd: string, options?: ToolsOptions): Record<Tool
 		find: createFindTool(cwd, options?.find),
 		ls: createLsTool(cwd, options?.ls),
 		lsp: createLspTool(cwd, options?.lsp),
+		...(options?.subagent ? { subagent: createSubagentTool(cwd, options.subagent) } : {}),
 	};
 }

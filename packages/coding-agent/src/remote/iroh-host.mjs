@@ -23,6 +23,7 @@ import {
 	getIrohRemoteControlPath,
 	getIrohRemoteUnsafeAllowedTools,
 	getIrohRemoteWorkspaceAvailabilityStatus,
+	normalizeIrohRemoteAllowTools,
 	handleIrohRemoteWorkspaceUnregisterRpcCommand,
 	hasTrustRequiringProjectResources,
 	IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE,
@@ -645,7 +646,7 @@ Serve options:
   --state <path>             Host state path. Defaults to ~/.volt/agent/remote/iroh-host.json.
   --audit <path>             Host audit JSONL path. Defaults to <state>.audit.jsonl.
   --integrated-volt          Accepted for compatibility; the host always runs Volt in-process.
-  --allow-tools <list>       Tool allowlist passed to Volt. Defaults to the saved workspace allowlist or read,bash,edit,write,grep,find,ls.
+  --allow-tools <list>       Tool allowlist passed to Volt. Defaults to the saved workspace allowlist or read,bash,edit,write,grep,find,ls,subagent.
                               bash, edit, or write can modify host state and require confirmation.
   --profile <name>           Volt settings profile for integrated Volt runtime.
   --agent-dir <path>         Volt agent config directory for integrated Volt runtime.
@@ -2856,7 +2857,7 @@ async function createPairControlSuccessResponse(request, endpoint, options) {
 		);
 	}
 
-	const allowTools = request.allowTools ?? workspace.allowedTools ?? options.allowTools;
+	const allowTools = normalizeIrohRemoteAllowTools(request.allowTools ?? workspace.allowedTools ?? options.allowTools);
 	const unsafeTools = getIrohRemoteUnsafeAllowedTools(allowTools);
 	if (unsafeTools.length > 0) {
 		if (!request.unsafeApproval) {
@@ -3045,7 +3046,9 @@ async function serve(flags) {
 	const state = await stateManager.load();
 	const allowToolsFlag = getFlag(flags, "allow-tools");
 	const workspace = selectServeWorkspace(state, getFlag(flags, "workspace"), allowToolsFlag, process.cwd());
-	const allowTools = allowToolsFlag ?? workspace.allowedTools ?? DEFAULT_IROH_REMOTE_ALLOW_TOOLS;
+	const allowTools = normalizeIrohRemoteAllowTools(
+		allowToolsFlag ?? workspace.allowedTools ?? DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+	);
 
 	const relayMode = getRelayMode(flags);
 	const startupTicketMode = getStartupTicketMode(flags);
