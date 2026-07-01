@@ -1,6 +1,5 @@
 import type { AgentMessage } from "@earendil-works/volt-agent-core";
-import type { TextContent } from "@earendil-works/volt-ai";
-import type { BashExecutionMessage } from "../messages.ts";
+import { type BashExecutionMessage, extractVisibleTextContent } from "../messages.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
 import type {
 	RpcTranscriptItem,
@@ -94,7 +93,7 @@ function projectTranscriptItems(entries: SessionEntry[]): RpcTranscriptItem[] {
 
 		const message = entry.message;
 		if (message.role === "user") {
-			const text = boundText(extractTextContent(message.content), MESSAGE_TEXT_LIMIT);
+			const text = boundText(extractVisibleTextContent(message.content), MESSAGE_TEXT_LIMIT);
 			if (text) {
 				items.push({ id: entry.id, role: "user", text, timestamp: normalizeTimestamp(entry.timestamp) });
 			}
@@ -102,7 +101,7 @@ function projectTranscriptItems(entries: SessionEntry[]): RpcTranscriptItem[] {
 		}
 
 		if (message.role === "assistant") {
-			const text = boundText(extractTextContent(message.content), MESSAGE_TEXT_LIMIT);
+			const text = boundText(extractVisibleTextContent(message.content), MESSAGE_TEXT_LIMIT);
 			if (text) {
 				items.push({ id: entry.id, role: "assistant", text, timestamp: normalizeTimestamp(entry.timestamp) });
 			}
@@ -126,7 +125,7 @@ function projectCustomMessage(entry: Extract<SessionEntry, { type: "custom_messa
 	if (!entry.display || entry.customType !== "review") {
 		return undefined;
 	}
-	const text = boundText(extractTextContent(entry.content), MESSAGE_TEXT_LIMIT);
+	const text = boundText(extractVisibleTextContent(entry.content), MESSAGE_TEXT_LIMIT);
 	if (!text) {
 		return undefined;
 	}
@@ -603,19 +602,6 @@ function getStringArg(args: Record<string, unknown> | undefined, key: string): s
 function getBoundedString(record: Record<string, unknown> | undefined, key: string, limit: number): string | undefined {
 	const value = record?.[key];
 	return typeof value === "string" && value.length > 0 ? boundText(value, limit) : undefined;
-}
-
-function extractTextContent(content: unknown): string {
-	if (typeof content === "string") {
-		return content;
-	}
-	if (!Array.isArray(content)) {
-		return "";
-	}
-	return content
-		.filter((part): part is TextContent => isRecord(part) && part.type === "text" && typeof part.text === "string")
-		.map((part) => part.text)
-		.join("");
 }
 
 function boundSummary(text: string, limit: number): string {

@@ -7,6 +7,7 @@ import {
 	type AgentSessionRuntime,
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionRuntime,
+	type SubagentRuntimeContext,
 } from "../agent-session-runtime.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import { parseModelPattern } from "../model-resolver.ts";
@@ -56,6 +57,8 @@ export interface SubagentManagerOptions {
 	parentSessionManager?: SessionManager;
 	/** Maximum tool policy inherited from the parent context. Definition tools are intersected with this list. */
 	allowedTools?: string[];
+	/** Current subagent identity and delegation policy when this manager belongs to a child runtime. */
+	subagentContext?: SubagentRuntimeContext;
 	requestTimeoutMs?: number;
 	/** Keep child runtimes alive after the hidden loopback client detaches. Another owner must retain/dispose them. */
 	retainRuntimeOnDispose?: boolean;
@@ -117,20 +120,34 @@ function normalizeUniqueNames(names: readonly string[] | undefined): string[] | 
 	return Array.from(new Set(names.map((name) => name.trim()).filter((name) => name.length > 0)));
 }
 
-function intersectTools(
-	requestedTools: string[] | undefined,
-	allowedTools: string[] | undefined,
-): string[] | undefined {
-	const normalizedRequested = normalizeUniqueNames(requestedTools);
-	const normalizedAllowed = normalizeUniqueNames(allowedTools);
-	if (!normalizedAllowed) {
-		return normalizedRequested;
+function resolveEffectiveTools(options: {
+	requestedTools: string[] | undefined;
+	excludedTools: string[] | undefined;
+	allowedTools: string[] | undefined;
+	defaultTools: string[];
+}): string[] | undefined {
+	const normalizedRequested = normalizeUniqueNames(options.requestedTools);
+	const normalizedAllowed = normalizeUniqueNames(options.allowedTools);
+	const normalizedExcluded = normalizeUniqueNames(options.excludedTools);
+	let effectiveTools: string[] | undefined;
+
+	if (normalizedRequested && normalizedAllowed) {
+		const allowed = new Set(normalizedAllowed);
+		effectiveTools = normalizedRequested.filter((toolName) => allowed.has(toolName));
+	} else if (normalizedRequested) {
+		effectiveTools = normalizedRequested;
+	} else if (normalizedAllowed) {
+		effectiveTools = normalizedAllowed;
+	} else if (normalizedExcluded) {
+		effectiveTools = normalizeUniqueNames(options.defaultTools);
 	}
-	if (!normalizedRequested) {
-		return normalizedAllowed;
+
+	if (!effectiveTools || !normalizedExcluded) {
+		return effectiveTools;
 	}
-	const allowed = new Set(normalizedAllowed);
-	return normalizedRequested.filter((toolName) => allowed.has(toolName));
+
+	const excluded = new Set(normalizedExcluded);
+	return effectiveTools.filter((toolName) => !excluded.has(toolName));
 }
 
 class LocalSubagentHandle implements SubagentHandle {
@@ -241,10 +258,12 @@ export class SubagentManager {
 	private readonly resourceLoader?: ResourceLoader;
 	private readonly parentSessionManager?: SessionManager;
 	private readonly allowedTools?: string[];
+	private readonly subagentContext?: SubagentRuntimeContext;
 	private readonly requestTimeoutMs?: number;
 	private readonly retainRuntimeOnDispose: boolean;
 	private readonly onRuntimeCreated?: (event: SubagentRuntimeCreatedEvent) => void | Promise<void>;
 	private readonly handles = new Map<string, LocalSubagentHandle>();
+	private childStartCount = 0;
 
 	constructor(options: SubagentManagerOptions) {
 		this.createRuntime = options.createRuntime;
@@ -253,13 +272,20 @@ export class SubagentManager {
 		this.resourceLoader = options.resourceLoader;
 		this.parentSessionManager = options.parentSessionManager;
 		this.allowedTools = normalizeUniqueNames(options.allowedTools);
+		this.subagentContext = options.subagentContext;
 		this.requestTimeoutMs = options.requestTimeoutMs;
 		this.retainRuntimeOnDispose = options.retainRuntimeOnDispose ?? false;
 		this.onRuntimeCreated = options.onRuntimeCreated;
 	}
 
 	async start(options: SubagentStartOptions = {}): Promise<SubagentHandle> {
-		return this.startRuntime(options);
+		const releaseReservation = this.reserveChildStart(undefined);
+		try {
+			return await this.startRuntime(options);
+		} catch (error) {
+			releaseReservation();
+			throw error;
+		}
 	}
 
 	listDefinitions(options: { resourceLoader?: ResourceLoader } = {}): SubagentDefinition[] {
@@ -273,15 +299,89 @@ export class SubagentManager {
 
 	async startByName(agentName: string, options: SubagentStartByNameOptions = {}): Promise<SubagentHandle> {
 		const definition = this.getDefinition(agentName, { resourceLoader: options.resourceLoader });
-		return this.startRuntime(options, {
-			definition,
-			allowedTools: options.allowedTools ?? this.allowedTools,
-		});
+		const releaseReservation = this.reserveChildStart(definition.name);
+		try {
+			return await this.startRuntime(options, {
+				definition,
+				allowedTools: options.allowedTools ?? this.allowedTools,
+			});
+		} catch (error) {
+			releaseReservation();
+			throw error;
+		}
 	}
 
 	async dispose(): Promise<void> {
 		const handles = Array.from(this.handles.values());
 		await Promise.all(handles.map((handle) => handle.dispose()));
+	}
+
+	private reserveChildStart(agentName: string | undefined): () => void {
+		const context = this.subagentContext;
+		if (!context) {
+			return () => undefined;
+		}
+
+		if (!agentName) {
+			throw new Error(`Subagent "${context.agentName}" cannot start unnamed child subagents.`);
+		}
+
+		if (context.maxSubagentDepth !== undefined && context.depth >= context.maxSubagentDepth) {
+			throw new Error(
+				`Subagent "${context.agentName}" cannot delegate to "${agentName}": maxSubagentDepth ${context.maxSubagentDepth} reached at depth ${context.depth}.`,
+			);
+		}
+
+		const allowedSubagents = normalizeUniqueNames(context.allowedSubagents);
+		if (allowedSubagents && allowedSubagents.length === 0) {
+			throw new Error(
+				`Subagent "${context.agentName}" cannot delegate to "${agentName}": no child subagents are allowed.`,
+			);
+		}
+		if (allowedSubagents && !allowedSubagents.includes(agentName)) {
+			throw new Error(
+				`Subagent "${context.agentName}" cannot delegate to "${agentName}". Allowed subagents: ${allowedSubagents.join(", ")}.`,
+			);
+		}
+
+		if (context.maxChildAgents !== undefined && this.childStartCount >= context.maxChildAgents) {
+			throw new Error(
+				`Subagent "${context.agentName}" cannot start more than ${context.maxChildAgents} child subagent${context.maxChildAgents === 1 ? "" : "s"}.`,
+			);
+		}
+
+		this.childStartCount += 1;
+		let released = false;
+		return () => {
+			if (released) {
+				return;
+			}
+			released = true;
+			this.childStartCount = Math.max(0, this.childStartCount - 1);
+		};
+	}
+
+	private createChildSubagentContext(definition: SubagentDefinition | undefined): SubagentRuntimeContext | undefined {
+		if (!definition) {
+			return undefined;
+		}
+		const parentPath = this.subagentContext?.path ?? [];
+		const inheritedMaxDepth = this.subagentContext?.maxSubagentDepth;
+		const definitionMaxDepth = definition.maxSubagentDepth;
+		const maxSubagentDepth =
+			inheritedMaxDepth === undefined
+				? definitionMaxDepth
+				: definitionMaxDepth === undefined
+					? inheritedMaxDepth
+					: Math.min(inheritedMaxDepth, definitionMaxDepth);
+		return {
+			depth: (this.subagentContext?.depth ?? 0) + 1,
+			agentName: definition.name,
+			path: [...parentPath, definition.name],
+			...(definition.allowedSubagents ? { allowedSubagents: definition.allowedSubagents } : {}),
+			...(maxSubagentDepth !== undefined ? { maxSubagentDepth } : {}),
+			...(definition.maxChildAgents !== undefined ? { maxChildAgents: definition.maxChildAgents } : {}),
+		};
 	}
 
 	private async startRuntime(
@@ -295,7 +395,8 @@ export class SubagentManager {
 		const agentDir = options.agentDir ?? this.agentDir;
 		const sessionManager = options.sessionManager ?? this.createDefaultChildSessionManager(cwd);
 		const id = `sa_${randomUUID()}`;
-		const runtime = await this.createChildRuntime({ cwd, agentDir, sessionManager });
+		const subagentContext = this.createChildSubagentContext(definitionOptions?.definition);
+		const runtime = await this.createChildRuntime({ cwd, agentDir, sessionManager, subagentContext });
 		let client: InProcessRpcClient | undefined;
 		try {
 			if (definitionOptions) {
@@ -386,7 +487,12 @@ export class SubagentManager {
 		definition: SubagentDefinition,
 		allowedTools: string[] | undefined,
 	): Promise<void> {
-		const activeTools = intersectTools(definition.tools, allowedTools);
+		const activeTools = resolveEffectiveTools({
+			requestedTools: definition.tools,
+			excludedTools: definition.excludedTools,
+			allowedTools,
+			defaultTools: runtime.session.getActiveToolNames(),
+		});
 		if (activeTools) {
 			runtime.session.setActiveToolsByName(activeTools);
 		}
@@ -434,11 +540,13 @@ export class SubagentManager {
 		cwd: string;
 		agentDir: string;
 		sessionManager: SessionManager;
+		subagentContext?: SubagentRuntimeContext;
 	}): Promise<AgentSessionRuntime> {
 		return createAgentSessionRuntime(this.createRuntime, {
 			cwd: options.cwd,
 			agentDir: options.agentDir,
 			sessionManager: options.sessionManager,
+			...(options.subagentContext ? { subagentContext: options.subagentContext } : {}),
 		});
 	}
 }

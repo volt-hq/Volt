@@ -13,6 +13,10 @@ export interface SubagentDefinition {
 	name: string;
 	description: string;
 	tools?: string[];
+	excludedTools?: string[];
+	allowedSubagents?: string[];
+	maxSubagentDepth?: number;
+	maxChildAgents?: number;
 	model?: string;
 	thinking?: string;
 	systemPrompt: string;
@@ -47,15 +51,25 @@ export interface SubagentDiscoveryResult {
 }
 
 const BUILT_IN_GENERAL_SUBAGENT_FILE_PATH = "builtin:general";
+const BUILT_IN_RESEARCHER_SUBAGENT_FILE_PATH = "builtin:researcher";
+const BUILT_IN_DESIGN_DOC_SUBAGENT_FILE_PATH = "builtin:design-doc";
+const BUILT_IN_SECURITY_REVIEWER_SUBAGENT_FILE_PATH = "builtin:security-reviewer";
+const BUILT_IN_READ_ONLY_TOOLS = ["read", "web_search", "grep", "find", "ls"];
+const BUILT_IN_DELEGATING_READ_ONLY_TOOLS = [...BUILT_IN_READ_ONLY_TOOLS, "subagent"];
 
 export function createBuiltInSubagentDefinitions(): SubagentDefinition[] {
 	return [
 		{
 			name: "general",
 			description: "General-purpose isolated child agent for ad hoc delegated tasks",
+			excludedTools: ["subagent"],
+			allowedSubagents: [],
+			maxChildAgents: 0,
 			systemPrompt: [
 				"You are the built-in general-purpose Volt subagent.",
 				"Complete the delegated task independently using only the task prompt and available tools.",
+				"You are one contributor in a larger workflow, not the final decision-maker.",
+				"Do not delegate to other subagents; the subagent tool is intentionally unavailable for this role.",
 				"For code or research tasks, return concise findings, evidence, blockers, and next steps.",
 				"For writing or creative tasks, return the requested artifact directly.",
 				"Do not assume parent conversation context beyond the delegated task prompt.",
@@ -63,6 +77,67 @@ export function createBuiltInSubagentDefinitions(): SubagentDefinition[] {
 			source: "built-in",
 			sourceInfo: createSyntheticSourceInfo(BUILT_IN_GENERAL_SUBAGENT_FILE_PATH, { source: "built-in" }),
 			filePath: BUILT_IN_GENERAL_SUBAGENT_FILE_PATH,
+		},
+		{
+			name: "researcher",
+			description: "Non-mutating research scout for web and codebase evidence gathering",
+			tools: [...BUILT_IN_DELEGATING_READ_ONLY_TOOLS],
+			allowedSubagents: ["researcher"],
+			maxSubagentDepth: 3,
+			maxChildAgents: 2,
+			systemPrompt: [
+				"You are the built-in Volt researcher subagent.",
+				"Gather source-backed evidence from the web and/or codebase for the delegated question.",
+				"You are one contributor in a larger workflow, not the final decision-maker.",
+				"Do not modify files or run shell commands; this role has non-mutating local tools plus web_search.",
+				"Use the subagent tool only when you discover a distinct follow-up question that would benefit from a fresh, narrower researcher context.",
+				"Delegate only to researcher subagents and keep recursive research bounded.",
+				"Return concise findings with source URLs or file paths, assumptions, uncertainty, and open questions.",
+			].join("\n"),
+			source: "built-in",
+			sourceInfo: createSyntheticSourceInfo(BUILT_IN_RESEARCHER_SUBAGENT_FILE_PATH, { source: "built-in" }),
+			filePath: BUILT_IN_RESEARCHER_SUBAGENT_FILE_PATH,
+		},
+		{
+			name: "design-doc",
+			description: "Design document planner and synthesizer that aggressively delegates independent research",
+			allowedSubagents: ["researcher", "security-reviewer", "general"],
+			maxSubagentDepth: 3,
+			maxChildAgents: 8,
+			systemPrompt: [
+				"You are the built-in Volt design-document coordinator.",
+				"Your job is to turn an ambiguous technical goal into a sourced design/RFC, decision memo, or implementation plan.",
+				"Use the subagent tool aggressively for broad or uncertain work: delegate independent product, architecture, migration, operations, security, performance, prior-art, and skeptical review research before synthesis.",
+				"Prefer parallel delegation for independent research questions and chain delegation only when later steps depend on prior output.",
+				"Preserve minority reports and unresolved objections; do not collapse disagreement into false consensus.",
+				"When external or current claims matter, perform or delegate web research and cite source URLs.",
+				"When editing files, keep changes scoped to the requested design artifact unless the parent task explicitly asks for code changes.",
+				"Return or write a structured document with context, goals, non-goals, proposal, alternatives, risks, rollout, verification, and open questions.",
+			].join("\n"),
+			source: "built-in",
+			sourceInfo: createSyntheticSourceInfo(BUILT_IN_DESIGN_DOC_SUBAGENT_FILE_PATH, { source: "built-in" }),
+			filePath: BUILT_IN_DESIGN_DOC_SUBAGENT_FILE_PATH,
+		},
+		{
+			name: "security-reviewer",
+			description:
+				"Non-mutating security review coordinator for threat modeling, code review, and verification planning",
+			tools: [...BUILT_IN_DELEGATING_READ_ONLY_TOOLS],
+			allowedSubagents: ["researcher"],
+			maxSubagentDepth: 3,
+			maxChildAgents: 4,
+			systemPrompt: [
+				"You are the built-in Volt security-reviewer subagent.",
+				"Analyze code, design, dependencies, configuration, and agent/tool workflows for security risk.",
+				"You are one contributor in a larger workflow, not the final decision-maker.",
+				"Do not edit files, write files, run shell commands, or invoke mutating refactors; this role has non-mutating local tools plus web_search and bounded read-only delegation.",
+				"Use researcher subagents for independent research or second-opinion review when it improves coverage, but keep delegation bounded and evidence-focused.",
+				"For exploit verification or regression tests that require file writes or shell commands, return a precise test plan for the parent to authorize outside this read-only role.",
+				"Report findings with file paths, severity, exploit preconditions, evidence, confidence, remediation, and verification steps.",
+			].join("\n"),
+			source: "built-in",
+			sourceInfo: createSyntheticSourceInfo(BUILT_IN_SECURITY_REVIEWER_SUBAGENT_FILE_PATH, { source: "built-in" }),
+			filePath: BUILT_IN_SECURITY_REVIEWER_SUBAGENT_FILE_PATH,
 		},
 	];
 }
@@ -107,25 +182,88 @@ function readOptionalStringField(
 	return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function readToolsField(
+function readCommaSeparatedListField(
+	frontmatter: Record<string, unknown>,
+	key: "tools" | "excludedTools",
+	filePath: string,
+	diagnostics: ResourceDiagnostic[],
+): string[] | undefined {
+	if (!Object.hasOwn(frontmatter, key)) {
+		return undefined;
+	}
+	const value = frontmatter[key];
+	if (value === undefined || value === null) {
+		return [];
+	}
+	if (typeof value !== "string") {
+		diagnostics.push({ type: "warning", message: `${key} must be a comma-separated string`, path: filePath });
+		return undefined;
+	}
+
+	return value
+		.split(",")
+		.map((item) => item.trim())
+		.filter((item) => item.length > 0);
+}
+
+function readAllowedSubagentsField(
 	frontmatter: Record<string, unknown>,
 	filePath: string,
 	diagnostics: ResourceDiagnostic[],
 ): string[] | undefined {
-	const value = frontmatter.tools;
-	if (value === undefined || value === null) {
+	if (!Object.hasOwn(frontmatter, "allowedSubagents")) {
 		return undefined;
 	}
+	const value = frontmatter.allowedSubagents;
+	if (value === undefined || value === null) {
+		return [];
+	}
 	if (typeof value !== "string") {
-		diagnostics.push({ type: "warning", message: "tools must be a comma-separated string", path: filePath });
+		diagnostics.push({
+			type: "warning",
+			message: "allowedSubagents must be a comma-separated string",
+			path: filePath,
+		});
 		return undefined;
 	}
 
-	const tools = value
+	return value
 		.split(",")
-		.map((tool) => tool.trim())
-		.filter((tool) => tool.length > 0);
-	return tools.length > 0 ? tools : undefined;
+		.map((item) => item.trim())
+		.filter((item) => item.length > 0);
+}
+
+function readOptionalNonNegativeIntegerField(
+	frontmatter: Record<string, unknown>,
+	key: "maxSubagentDepth" | "maxChildAgents",
+	filePath: string,
+	diagnostics: ResourceDiagnostic[],
+): number | undefined {
+	if (!Object.hasOwn(frontmatter, key)) {
+		return undefined;
+	}
+	const value = frontmatter[key];
+	const parsed = parseOptionalNonNegativeInteger(value);
+	if (parsed === undefined) {
+		diagnostics.push({ type: "warning", message: `${key} must be a non-negative integer`, path: filePath });
+		return undefined;
+	}
+	return parsed;
+}
+
+function parseOptionalNonNegativeInteger(value: unknown): number | undefined {
+	if (typeof value === "number") {
+		return Number.isInteger(value) && value >= 0 ? value : undefined;
+	}
+	if (typeof value !== "string") {
+		return undefined;
+	}
+	const trimmed = value.trim();
+	if (trimmed.length === 0) {
+		return undefined;
+	}
+	const parsed = Number(trimmed);
+	return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 export function parseSubagentDefinition(options: ParseSubagentDefinitionOptions): ParseSubagentDefinitionResult {
@@ -157,11 +295,27 @@ export function parseSubagentDefinition(options: ParseSubagentDefinitionOptions)
 		diagnostics.push({ type: "warning", message: "system prompt body is required", path: options.filePath });
 	}
 
-	const tools = readToolsField(frontmatter, options.filePath, diagnostics);
+	const policyDiagnosticStart = diagnostics.length;
+	const tools = readCommaSeparatedListField(frontmatter, "tools", options.filePath, diagnostics);
+	const excludedTools = readCommaSeparatedListField(frontmatter, "excludedTools", options.filePath, diagnostics);
+	const allowedSubagents = readAllowedSubagentsField(frontmatter, options.filePath, diagnostics);
+	const maxSubagentDepth = readOptionalNonNegativeIntegerField(
+		frontmatter,
+		"maxSubagentDepth",
+		options.filePath,
+		diagnostics,
+	);
+	const maxChildAgents = readOptionalNonNegativeIntegerField(
+		frontmatter,
+		"maxChildAgents",
+		options.filePath,
+		diagnostics,
+	);
+	const hasMalformedPolicyField = diagnostics.length > policyDiagnosticStart;
 	const model = readOptionalStringField(frontmatter, "model", options.filePath, diagnostics);
 	const thinking = readOptionalStringField(frontmatter, "thinking", options.filePath, diagnostics);
 
-	if (!name || !description || systemPrompt.length === 0) {
+	if (!name || !description || systemPrompt.length === 0 || hasMalformedPolicyField) {
 		return { definition: null, diagnostics };
 	}
 
@@ -170,6 +324,10 @@ export function parseSubagentDefinition(options: ParseSubagentDefinitionOptions)
 			name,
 			description,
 			...(tools ? { tools } : {}),
+			...(excludedTools ? { excludedTools } : {}),
+			...(allowedSubagents ? { allowedSubagents } : {}),
+			...(maxSubagentDepth !== undefined ? { maxSubagentDepth } : {}),
+			...(maxChildAgents !== undefined ? { maxChildAgents } : {}),
 			...(model ? { model } : {}),
 			...(thinking ? { thinking } : {}),
 			systemPrompt,
@@ -276,9 +434,19 @@ export function discoverSubagentDefinitions(options: DiscoverSubagentDefinitions
 	const diagnostics: ResourceDiagnostic[] = [];
 	const definitionsByName = new Map<string, SubagentDefinition>();
 	const seenBySource = new Set<string>();
+	const builtInDefinitions = createBuiltInSubagentDefinitions();
+	const reservedBuiltInNames = new Set(builtInDefinitions.map((definition) => definition.name));
 
 	function addDefinitions(definitions: SubagentDefinition[]): void {
 		for (const definition of definitions) {
+			if (definition.source !== "built-in" && reservedBuiltInNames.has(definition.name)) {
+				diagnostics.push({
+					type: "warning",
+					message: `subagent definition "${definition.name}" cannot override a built-in subagent and was ignored`,
+					path: definition.filePath,
+				});
+				continue;
+			}
 			const sourceKey = `${definition.source}:${definition.name}`;
 			if (seenBySource.has(sourceKey)) {
 				diagnostics.push({
@@ -293,7 +461,7 @@ export function discoverSubagentDefinitions(options: DiscoverSubagentDefinitions
 		}
 	}
 
-	addDefinitions(createBuiltInSubagentDefinitions());
+	addDefinitions(builtInDefinitions);
 
 	const userResult = loadSubagentDefinitionsFromDir(userAgentsDir, "user");
 	addDefinitions(userResult.definitions);

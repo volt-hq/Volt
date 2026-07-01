@@ -111,12 +111,21 @@ Set the `reviewModel` setting (e.g. `"anthropic/claude-opus-4-5"`) to review wit
 
 ## Subagents (MVP)
 
-Subagents are named child Volt sessions with isolated context. Volt includes a built-in `general` subagent for ad hoc delegated tasks. Additional subagents are discovered from markdown files:
+Subagents are named child Volt sessions with isolated context. Volt includes built-in subagents for common workflows:
+
+| Name | Purpose | Tool posture |
+| --- | --- | --- |
+| `general` | Ad hoc delegated tasks | Broad normal tools, no `subagent` tool |
+| `researcher` | Web/codebase evidence gathering | Enforced non-mutating local tools plus `web_search` network egress and bounded `researcher` delegation; no shell or LSP mutation |
+| `design-doc` | RFC/design-document planning and synthesis | Broad inherited tools plus bounded delegation to `researcher`, `security-reviewer`, and `general` |
+| `security-reviewer` | Threat modeling and security/code review | Enforced non-mutating local tools plus `web_search` network egress and bounded read-only delegation to `researcher` |
+
+Additional subagents are discovered from markdown files:
 
 - `~/.volt/agent/agents/*.md` for user agents
 - `.volt/agents/*.md` for project agents, only when the project is trusted
 
-File-backed definitions override built-in definitions with the same `name`. Project agents with the same `name` override user agents only after project trust is active. Without trust, project definitions are ignored.
+Built-in subagent names are reserved and file-backed definitions using those names are ignored with a diagnostic; use a distinct name for custom agents. Project agents with the same non-built-in `name` override user agents only after project trust is active. Without trust, project definitions are ignored. Tool lists are requests: effective child tools are still clamped by the parent session's active tool policy, so a child cannot gain tools the parent did not expose. The built-in research and security-review roles are non-mutating locally, but they can call `web_search`, which may send query text to the configured external search provider.
 
 Definition format:
 
@@ -124,7 +133,10 @@ Definition format:
 ---
 name: scout
 description: Fast codebase reconnaissance
-tools: read, grep, find, ls
+tools: read, grep, find, ls, web_search, subagent
+allowedSubagents: researcher
+maxSubagentDepth: 2
+maxChildAgents: 2
 model: claude-haiku-4-5
 thinking: off
 ---
@@ -132,7 +144,7 @@ thinking: off
 You are a scout. Find relevant files and return concise findings.
 ```
 
-Required fields are `name`, `description`, and the markdown body. Optional `tools` is a comma-separated list, `model` is a model pattern/id, and `thinking` is a thinking level. Child tools are clamped by the parent session's active tool policy, so a subagent cannot gain tools the parent did not expose.
+Required fields are `name`, `description`, and the markdown body. Optional `tools` is a comma-separated allowlist, `excludedTools` is a comma-separated subtraction list, `allowedSubagents` is a comma-separated child-name allowlist, `maxSubagentDepth` is the deepest nested subagent depth this agent may create (top-level user session is depth 0, and descendants inherit the strictest ancestor cap), `maxChildAgents` is this agent runtime's child-start quota, `model` is a model pattern/id, and `thinking` is a thinking level. Omit `subagent` from `tools`, set `excludedTools: subagent` when inheriting the parent tool set, or set an explicit empty `allowedSubagents:`/`maxChildAgents: 0` if that agent should not spawn child agents. Malformed tool/delegation policy fields reject the affected definition instead of silently dropping restrictions.
 
 The built-in `subagent` tool is active by default when a `SubagentManager` is available, including normal CLI sessions. If you pass an explicit `--tools` allowlist, include `subagent` to keep delegation available; disable it with `--exclude-tools subagent`, `--no-builtin-tools`, or `--no-tools`.
 
@@ -160,7 +172,7 @@ The current built-in tool supports three modes. Provide exactly one mode per cal
 }
 ```
 
-Parallel mode is limited to 8 tasks with max concurrency 4. Results are returned in input order, and mixed success/failure runs return a combined status summary instead of hiding partial results. Chain mode runs steps sequentially, replaces `{previous}` with the prior successful step output, returns the final successful step output when all steps complete, and stops at the first failed step with details for executed steps. Tool-style child sessions are ephemeral, use isolated context, and return child final assistant text to the parent. Model-visible subagent output is capped at 50 KB per task or chain step; metadata such as subagent ID, session ID, source, status, usage, and truncation/error details is kept in tool details.
+Parallel mode is limited to 8 tasks with max concurrency 4. Results are returned in input order, and mixed success/failure runs return a combined status summary instead of hiding partial results. Chain mode is limited to 8 steps, runs steps sequentially, replaces `{previous}` with bounded prior successful step output that is XML-escaped and delimited as untrusted data, returns the final successful step output when all steps complete, and stops at the first failed step with details for executed steps. Tool-style child sessions are ephemeral, use isolated context, and return child final assistant text to the parent. Model-visible subagent output is capped at 50 KB per task or chain step; metadata such as subagent ID, session ID, source, status, usage, and truncation/error details is kept in tool details.
 
 ## Context Files
 

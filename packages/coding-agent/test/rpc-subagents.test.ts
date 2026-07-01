@@ -42,7 +42,11 @@ function createDeferred<T>(): Deferred<T> {
 	return { promise, resolve, reject };
 }
 
-function createDefinition(name: string, filePath: string): SubagentDefinition {
+function createDefinition(
+	name: string,
+	filePath: string,
+	overrides: Partial<SubagentDefinition> = {},
+): SubagentDefinition {
 	return {
 		name,
 		description: `${name} description`,
@@ -57,6 +61,7 @@ function createDefinition(name: string, filePath: string): SubagentDefinition {
 			baseDir: join(filePath, ".."),
 		}),
 		filePath,
+		...overrides,
 	};
 }
 
@@ -236,9 +241,13 @@ describe("local RPC subagent lifecycle commands", () => {
 			getDefinition: () => createDefinition("scout", filePath),
 			startByName: async () => createControlledSubagent("sa_unused", "child-unused").handle,
 		} satisfies SubagentToolManager;
-		const rpc = await startHarness(
-			createRuntimeHost({ definitions: [createDefinition("scout", filePath)], manager }),
-		);
+		const definition = createDefinition("scout", filePath, {
+			excludedTools: ["subagent"],
+			allowedSubagents: ["researcher"],
+			maxSubagentDepth: 2,
+			maxChildAgents: 3,
+		});
+		const rpc = await startHarness(createRuntimeHost({ definitions: [definition], manager }));
 		try {
 			rpc.send({ id: "list-1", type: "list_subagents" });
 			await vi.waitFor(() =>
@@ -255,6 +264,10 @@ describe("local RPC subagent lifecycle commands", () => {
 								source: "project",
 								sourceInfo: { source: "local", scope: "project", origin: "top-level" },
 								tools: ["read", "grep"],
+								excludedTools: ["subagent"],
+								allowedSubagents: ["researcher"],
+								maxSubagentDepth: 2,
+								maxChildAgents: 3,
 								model: "faux/model",
 								thinking: "off",
 							},

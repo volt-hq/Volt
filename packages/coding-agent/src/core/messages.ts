@@ -137,6 +137,25 @@ export function createCustomMessage(
 	};
 }
 
+export function extractVisibleTextContent(content: unknown, textPartSeparator = "\n"): string {
+	if (typeof content === "string") {
+		return content;
+	}
+	if (!Array.isArray(content)) {
+		return "";
+	}
+	return content
+		.filter(
+			(part): part is TextContent =>
+				typeof part === "object" &&
+				part !== null &&
+				(part as { type?: unknown }).type === "text" &&
+				typeof (part as { text?: unknown }).text === "string",
+		)
+		.map((part) => part.text)
+		.join(textPartSeparator);
+}
+
 /**
  * Transform AgentMessages (including custom types) to LLM-compatible Messages.
  *

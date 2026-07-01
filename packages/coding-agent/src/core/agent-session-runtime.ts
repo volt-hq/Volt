@@ -25,6 +25,15 @@ export interface CreateAgentSessionRuntimeResult extends CreateAgentSessionResul
 	diagnostics: AgentSessionRuntimeDiagnostic[];
 }
 
+export interface SubagentRuntimeContext {
+	depth: number;
+	agentName: string;
+	path: string[];
+	allowedSubagents?: string[];
+	maxSubagentDepth?: number;
+	maxChildAgents?: number;
+}
+
 export interface WorkspaceSessionSummary {
 	sessionId: string;
 	sessionName?: string;
@@ -55,6 +64,7 @@ export type CreateAgentSessionRuntimeFactory = (options: {
 	sessionStartEvent?: SessionStartEvent;
 	projectTrustContext?: ProjectTrustContext;
 	profile?: string;
+	subagentContext?: SubagentRuntimeContext;
 }) => Promise<CreateAgentSessionRuntimeResult>;
 
 /**
@@ -116,6 +126,7 @@ export class AgentSessionRuntime {
 	private readonly createRuntime: CreateAgentSessionRuntimeFactory;
 	private _diagnostics: AgentSessionRuntimeDiagnostic[];
 	private _modelFallbackMessage?: string;
+	private readonly subagentContext?: SubagentRuntimeContext;
 
 	constructor(
 		_session: AgentSession,
@@ -123,12 +134,14 @@ export class AgentSessionRuntime {
 		createRuntime: CreateAgentSessionRuntimeFactory,
 		_diagnostics: AgentSessionRuntimeDiagnostic[] = [],
 		_modelFallbackMessage?: string,
+		subagentContext?: SubagentRuntimeContext,
 	) {
 		this._session = _session;
 		this._services = _services;
 		this.createRuntime = createRuntime;
 		this._diagnostics = _diagnostics;
 		this._modelFallbackMessage = _modelFallbackMessage;
+		this.subagentContext = subagentContext;
 	}
 
 	get services(): AgentSessionServices {
@@ -297,6 +310,7 @@ export class AgentSessionRuntime {
 				sessionStartEvent: { type: "session_start", reason: "resume", previousSessionFile },
 				projectTrustContext: options?.projectTrustContextFactory?.(sessionManager.getCwd()),
 				profile: this.getReplacementProfile(),
+				subagentContext: this.subagentContext,
 			}),
 		);
 		await this.finishSessionReplacement(options?.withSession);
@@ -330,6 +344,7 @@ export class AgentSessionRuntime {
 				sessionManager,
 				sessionStartEvent: { type: "session_start", reason: "new", previousSessionFile },
 				profile: this.getReplacementProfile(),
+				subagentContext: this.subagentContext,
 			}),
 		);
 		if (options?.setup) {
@@ -385,6 +400,7 @@ export class AgentSessionRuntime {
 						sessionManager,
 						sessionStartEvent: { type: "session_start", reason: "fork", previousSessionFile },
 						profile: this.getReplacementProfile(),
+						subagentContext: this.subagentContext,
 					}),
 				);
 				await this.finishSessionReplacement(options?.withSession);
@@ -404,6 +420,7 @@ export class AgentSessionRuntime {
 					sessionManager,
 					sessionStartEvent: { type: "session_start", reason: "fork", previousSessionFile },
 					profile: this.getReplacementProfile(),
+					subagentContext: this.subagentContext,
 				}),
 			);
 			await this.finishSessionReplacement(options?.withSession);
@@ -424,6 +441,7 @@ export class AgentSessionRuntime {
 				sessionManager,
 				sessionStartEvent: { type: "session_start", reason: "fork", previousSessionFile },
 				profile: this.getReplacementProfile(),
+				subagentContext: this.subagentContext,
 			}),
 		);
 		await this.finishSessionReplacement(options?.withSession);
@@ -469,6 +487,7 @@ export class AgentSessionRuntime {
 				sessionManager,
 				sessionStartEvent: { type: "session_start", reason: "resume", previousSessionFile },
 				profile: this.getReplacementProfile(),
+				subagentContext: this.subagentContext,
 			}),
 		);
 		await this.finishSessionReplacement();
@@ -499,6 +518,7 @@ export async function createAgentSessionRuntime(
 		sessionManager: SessionManager;
 		sessionStartEvent?: SessionStartEvent;
 		profile?: string;
+		subagentContext?: SubagentRuntimeContext;
 	},
 ): Promise<AgentSessionRuntime> {
 	assertSessionCwdExists(options.sessionManager, options.cwd);
@@ -509,6 +529,7 @@ export async function createAgentSessionRuntime(
 		createRuntime,
 		result.diagnostics,
 		result.modelFallbackMessage,
+		options.subagentContext,
 	);
 }
 

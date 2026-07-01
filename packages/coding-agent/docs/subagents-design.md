@@ -6,7 +6,7 @@ Local MVP implemented. This document records the supported boundary for core sub
 
 Implemented surfaces:
 
-- Built-in `general` definition and markdown definition discovery through `ResourceLoader.getSubagents()`.
+- Built-in `general`, `researcher`, `design-doc`, and `security-reviewer` definitions and markdown definition discovery through `ResourceLoader.getSubagents()`.
 - `SubagentManager` for isolated in-process child runtimes.
 - Built-in `subagent` tool with single, parallel, and chain modes, active by default when a `SubagentManager` exists.
 - Local RPC lifecycle commands for definition-backed subagents.
@@ -67,7 +67,10 @@ Core subagents use the markdown frontmatter shape from the extension prototype:
 ---
 name: scout
 description: Fast codebase reconnaissance
-tools: read, grep, find, ls
+tools: read, grep, find, ls, web_search, subagent
+allowedSubagents: researcher
+maxSubagentDepth: 2
+maxChildAgents: 2
 model: claude-haiku-4-5
 thinking: off
 ---
@@ -82,19 +85,23 @@ Initial fields:
 | `name` | yes | Stable invocation name. |
 | `description` | yes | Shown to users and the parent model. |
 | `tools` | no | Requested child tool names. Effective tools are policy-clamped. |
+| `excludedTools` | no | Child tool names to subtract after inheritance or `tools`/policy intersection. |
+| `allowedSubagents` | no | Child subagent names this definition may start when it has the `subagent` tool. |
+| `maxSubagentDepth` | no | Deepest nested subagent depth this definition may create; top-level user sessions are depth 0 and descendants inherit the strictest ancestor cap. |
+| `maxChildAgents` | no | Maximum child subagent starts allowed for one runtime of this definition. |
 | `model` | no | Optional model pattern/id for the child. |
 | `thinking` | no | Optional child thinking level. |
 | body | yes | Child system prompt context appended to the normal Volt system prompt. |
 
 Definition sources:
 
-- Built-in `general` subagent for ad hoc delegated tasks.
+- Built-in subagents for ad hoc delegation, research, design-document planning, and security review.
 - `~/.volt/agent/agents/*.md` for user agents.
 - `.volt/agents/*.md` for project agents, only when the project is trusted.
 
 Package-managed agent definitions are outside the MVP. If package support is added later, it should use a separately designed `agents` package resource type next to `extensions`, `skills`, `prompts`, and `themes`.
 
-Conflict policy for the MVP matches the extension prototype, with built-ins at the lowest precedence: user agents override built-in agents, and project agents override user agents with the same name only when project agents are enabled and trusted. If package support is added, use normal package resource ordering and surface conflicts as diagnostics.
+Conflict policy for the MVP reserves built-in names: user and project definitions that use a built-in name are ignored with diagnostics. Project agents override user agents with the same non-built-in name only when project agents are enabled and trusted. If package support is added, use normal package resource ordering for non-built-in names and surface conflicts as diagnostics.
 
 ## Architecture
 
@@ -189,10 +196,10 @@ A child runtime is a normal Volt runtime with narrowed configuration:
 Effective tool policy is:
 
 ```text
-effective child tools = requested child tools ∩ parent allowed tools ∩ host allowed tools - excluded tools
+effective child tools = (requested child tools OR inherited parent tools) ∩ parent allowed tools ∩ host allowed tools - excluded tools
 ```
 
-If no child tools are requested, inherit the parent's active tool set. Any future tool escalation must be an explicit host/SDK option, not the default.
+If no child tools are requested, inherit the parent's active tool set. `excludedTools` can remove dangerous or recursive capabilities such as `subagent` while preserving the rest of the inherited parent tool posture. Delegation controls are enforced by the current runtime's `SubagentManager`: `allowedSubagents` restricts target names, an explicit empty `allowedSubagents:` allows no child names, `maxSubagentDepth` stops recursion at or beyond the configured depth and propagates to descendants as the strictest inherited cap, and `maxChildAgents` caps total child starts for that runtime. Malformed tool/delegation policy fields reject the affected definition instead of silently dropping restrictions. Built-in research and security-review roles are non-mutating locally but include `web_search`, so they can send query text to the configured external search provider. Any future tool escalation must be an explicit host/SDK option, not the default.
 
 ## RPC lifecycle
 
@@ -228,7 +235,7 @@ Supported MVP modes:
 
 - Single: `{ "agent": "scout", "task": "Find auth code" }`
 - Parallel: `{ "tasks": [{ "agent": "scout", "task": "..." }] }`
-- Chain: `{ "chain": [{ "agent": "scout", "task": "... {previous}" }] }`
+- Chain: `{ "chain": [{ "agent": "scout", "task": "... {previous}" }] }`, capped at 8 steps
 
 The tool result returns:
 
@@ -239,7 +246,7 @@ The tool result returns:
 - bounded transcript/tool summary
 - usage and cost when available
 
-Model-visible output is capped at 50 KB per task/step. Full child output remains in child session state when available; tool details include status, usage, truncation, and error metadata.
+Model-visible output is capped at 50 KB per task/step. Chain `{previous}` substitution uses that bounded output, XML-escapes it, and wraps it as untrusted prior data instead of forwarding raw child text. Full child output remains in child session state when available; tool details include status, usage, truncation, and error metadata.
 
 ## Public RPC surface
 
@@ -319,7 +326,7 @@ Required rules:
 - Child tools are clamped by parent and host tool policy.
 - Remote paired-client `allowedTools` continues to apply to any child or visible agent in that workspace.
 - Child cwd defaults to parent cwd; remote children stay within the host-selected workspace model.
-- Agent definitions are prompts and can contain prompt injection. Treat project definitions like other project resources.
+- Agent definitions are prompts and can contain prompt injection. Treat project definitions like other project resources. Built-in names are reserved so trusted projects cannot silently replace built-in role semantics.
 - Do not expose definition file paths, host session file paths, provider credentials, or raw tool output through remote-safe discovery.
 - Explicit cancellation is `abort`; stream/transport close should not silently cancel retained remote work.
 
@@ -342,7 +349,7 @@ Deferred options:
 
 ### Implemented in the local MVP
 
-- Built-in `general` subagent plus agent definition parsing and discovery for user/project markdown files.
+- Built-in `general`, `researcher`, `design-doc`, and `security-reviewer` subagents plus agent definition parsing and discovery for user/project markdown files.
 - `ResourceLoader.getSubagents()` with diagnostics and source info.
 - `SubagentManager` using `createInProcessRpcClient()` and isolated child runtimes.
 - Definition-backed starts with system prompt, tools, model, and thinking configuration applied to child sessions.
@@ -395,6 +402,7 @@ Remote/app tests:
 ## Remaining design questions
 
 - Should child sessions ever be persisted by default for auditability despite extra session noise?
+- Should core support path-scoped write/edit policy for future writable roles beyond today's tool-name allowlists?
 - Should package-managed subagents use package resource ordering exactly, or a narrower precedence policy?
 - What CLI-visible child-agent command surface is worth adding beyond local RPC and the built-in tool?
 - What remote policy would make subagent discovery and lifecycle commands safe over Iroh without exposing local paths, prompts, raw tool output, or extra cancellation authority?

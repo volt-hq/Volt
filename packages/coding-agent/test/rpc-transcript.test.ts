@@ -147,6 +147,32 @@ describe("RPC transcript projection", () => {
 		expect(serialized).not.toContain("image-bytes");
 	});
 
+	test("preserves assistant Markdown text across multiple text content parts", () => {
+		const session = SessionManager.inMemory("/workspace");
+		const expectedText = ["Here is a plan:", "- Step one", "- Step two", "```swift", "\tlet value = 1", "```"].join(
+			"\n",
+		);
+		const entryId = session.appendMessage(
+			assistant(
+				[
+					{ type: "text", text: "Here is a plan:\n- Step one" },
+					{ type: "text", text: "- Step two\n```swift\n\tlet value = 1\n```" },
+				],
+				20,
+			),
+		);
+
+		const transcript = projectSessionTranscript(session);
+
+		expect(transcript.items).toContainEqual({
+			id: entryId,
+			role: "assistant",
+			text: expectedText,
+			timestamp: expect.any(String),
+		});
+		expect(JSON.stringify(transcript)).not.toContain("Here is a plan: - Step one - Step two");
+	});
+
 	test("projects bounded subagent args and details for rich remote transcript rendering", () => {
 		const session = SessionManager.inMemory("/workspace");
 		session.appendMessage(

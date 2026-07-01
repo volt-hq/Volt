@@ -20,6 +20,12 @@ function writeAgent(dir: string, filename: string, frontmatter: string, body: st
 	return filePath;
 }
 
+const BUILT_IN_SUBAGENT_NAMES = ["design-doc", "general", "researcher", "security-reviewer"];
+
+function expectedNamesWithBuiltIns(...names: string[]): string[] {
+	return [...BUILT_IN_SUBAGENT_NAMES, ...names].sort();
+}
+
 function sourceInfo(filePath: string, source: FileSubagentDefinitionSource) {
 	return createSyntheticSourceInfo(filePath, {
 		source: "local",
@@ -71,7 +77,7 @@ describe("subagent definitions", () => {
 		expect(result.definition?.sourceInfo.scope).toBe("user");
 	});
 
-	it("reports malformed tool lists without dropping otherwise valid definitions", () => {
+	it("rejects malformed tool lists instead of inheriting broader tools", () => {
 		const filePath = join(agentDir, "agents", "bad-tools.md");
 		const result = parseSubagentDefinition({
 			content: agentMarkdown(
@@ -83,43 +89,168 @@ describe("subagent definitions", () => {
 			sourceInfo: sourceInfo(filePath, "user"),
 		});
 
-		expect(result.definition).toMatchObject({ name: "bad-tools" });
-		expect(result.definition?.tools).toBeUndefined();
+		expect(result.definition).toBeNull();
 		expect(result.diagnostics).toEqual([
 			{ type: "warning", message: "tools must be a comma-separated string", path: filePath },
 		]);
 	});
 
-	it("returns the built-in general definition when no files are present", () => {
-		const result = discoverSubagentDefinitions({ cwd, agentDir, projectTrusted: true });
+	it("parses delegation controls from frontmatter", () => {
+		const filePath = join(agentDir, "agents", "non-delegating.md");
+		const result = parseSubagentDefinition({
+			content: agentMarkdown(
+				[
+					"name: non-delegating",
+					"description: No delegation",
+					"excludedTools: subagent, deploy",
+					"allowedSubagents: researcher, analyst",
+					"maxSubagentDepth: 3",
+					"maxChildAgents: 2",
+				].join("\n"),
+				"No delegation prompt",
+			),
+			filePath,
+			source: "user",
+			sourceInfo: sourceInfo(filePath, "user"),
+		});
 
-		expect(result.definitions).toHaveLength(1);
-		expect(result.definitions[0]).toMatchObject({
+		expect(result.diagnostics).toEqual([]);
+		expect(result.definition?.excludedTools).toEqual(["subagent", "deploy"]);
+		expect(result.definition?.allowedSubagents).toEqual(["researcher", "analyst"]);
+		expect(result.definition?.maxSubagentDepth).toBe(3);
+		expect(result.definition?.maxChildAgents).toBe(2);
+	});
+
+	it("parses explicit empty allowedSubagents as no delegated child names", () => {
+		const filePath = join(agentDir, "agents", "no-children.md");
+		const result = parseSubagentDefinition({
+			content: agentMarkdown(
+				["name: no-children", "description: No child delegation", "allowedSubagents:"].join("\n"),
+				"No child delegation prompt",
+			),
+			filePath,
+			source: "user",
+			sourceInfo: sourceInfo(filePath, "user"),
+		});
+
+		expect(result.diagnostics).toEqual([]);
+		expect(result.definition?.allowedSubagents).toEqual([]);
+	});
+
+	it("parses explicit empty tools as no child tools", () => {
+		const filePath = join(agentDir, "agents", "no-tools.md");
+		const result = parseSubagentDefinition({
+			content: agentMarkdown(
+				["name: no-tools", "description: No child tools", "tools:"].join("\n"),
+				"No tool prompt",
+			),
+			filePath,
+			source: "user",
+			sourceInfo: sourceInfo(filePath, "user"),
+		});
+
+		expect(result.diagnostics).toEqual([]);
+		expect(result.definition?.tools).toEqual([]);
+	});
+
+	it("rejects malformed delegation controls instead of allowing unrestricted delegation", () => {
+		const filePath = join(agentDir, "agents", "bad-delegation.md");
+		const result = parseSubagentDefinition({
+			content: agentMarkdown(
+				[
+					"name: bad-delegation",
+					"description: Bad delegation",
+					"allowedSubagents:",
+					"  - researcher",
+					"maxSubagentDepth: -1",
+					"maxChildAgents: many",
+				].join("\n"),
+				"Still valid prompt",
+			),
+			filePath,
+			source: "user",
+			sourceInfo: sourceInfo(filePath, "user"),
+		});
+
+		expect(result.definition).toBeNull();
+		expect(result.diagnostics).toEqual([
+			{ type: "warning", message: "allowedSubagents must be a comma-separated string", path: filePath },
+			{ type: "warning", message: "maxSubagentDepth must be a non-negative integer", path: filePath },
+			{ type: "warning", message: "maxChildAgents must be a non-negative integer", path: filePath },
+		]);
+	});
+
+	it("returns the built-in subagent definitions when no files are present", () => {
+		const result = discoverSubagentDefinitions({ cwd, agentDir, projectTrusted: true });
+		const general = result.definitions.find((definition) => definition.name === "general");
+		const researcher = result.definitions.find((definition) => definition.name === "researcher");
+		const designDoc = result.definitions.find((definition) => definition.name === "design-doc");
+		const securityReviewer = result.definitions.find((definition) => definition.name === "security-reviewer");
+		expect(result.definitions.map((definition) => definition.name).sort()).toEqual(BUILT_IN_SUBAGENT_NAMES);
+		expect(general).toMatchObject({
 			name: "general",
 			description: "General-purpose isolated child agent for ad hoc delegated tasks",
 			source: "built-in",
 			filePath: "builtin:general",
 			sourceInfo: { source: "built-in", scope: "temporary", origin: "top-level" },
 		});
-		expect(result.definitions[0]?.systemPrompt).toContain("general-purpose Volt subagent");
+		expect(general?.tools).toBeUndefined();
+		expect(general?.excludedTools).toEqual(["subagent"]);
+		expect(general?.allowedSubagents).toEqual([]);
+		expect(general?.maxChildAgents).toBe(0);
+		expect(general?.systemPrompt).toContain("general-purpose Volt subagent");
+		expect(researcher).toMatchObject({
+			allowedSubagents: ["researcher"],
+			maxSubagentDepth: 3,
+			maxChildAgents: 2,
+		});
+		expect(researcher?.tools).toContain("subagent");
+		expect(researcher?.tools).not.toContain("bash");
+		expect(researcher?.tools).not.toContain("lsp");
+		expect(designDoc).toMatchObject({
+			allowedSubagents: ["researcher", "security-reviewer", "general"],
+			maxSubagentDepth: 3,
+			maxChildAgents: 8,
+		});
+		expect(designDoc?.tools).toBeUndefined();
+		expect(securityReviewer).toMatchObject({
+			allowedSubagents: ["researcher"],
+			maxSubagentDepth: 3,
+			maxChildAgents: 4,
+		});
+		expect(securityReviewer?.tools).toContain("subagent");
+		expect(securityReviewer?.tools).not.toContain("bash");
+		expect(securityReviewer?.tools).not.toContain("lsp");
+		expect(securityReviewer?.tools).not.toContain("write");
 		expect(result.diagnostics).toEqual([]);
 		expect(result.userAgentsDir).toBe(join(agentDir, "agents"));
 		expect(result.projectAgentsDir).toBe(join(cwd, ".volt", "agents"));
 	});
 
-	it("lets file definitions override the built-in general definition", () => {
+	it("ignores file definitions that try to override built-in names", () => {
 		const userDir = join(agentDir, "agents");
-		writeAgent(userDir, "general.md", "name: general\ndescription: User general", "User general prompt");
+		const userPath = writeAgent(
+			userDir,
+			"general.md",
+			"name: general\ndescription: User general",
+			"User general prompt",
+		);
 
 		const result = discoverSubagentDefinitions({ cwd, agentDir, projectTrusted: true });
 		const general = result.definitions.find((definition) => definition.name === "general");
 
-		expect(result.diagnostics).toEqual([]);
+		expect(result.diagnostics).toEqual([
+			{
+				type: "warning",
+				message: 'subagent definition "general" cannot override a built-in subagent and was ignored',
+				path: userPath,
+			},
+		]);
 		expect(general).toMatchObject({
 			name: "general",
-			description: "User general",
-			systemPrompt: "User general prompt",
-			source: "user",
+			description: "General-purpose isolated child agent for ad hoc delegated tasks",
+			source: "built-in",
+			filePath: "builtin:general",
 		});
 	});
 
@@ -134,7 +265,9 @@ describe("subagent definitions", () => {
 		expect(result.userAgentsDir).toBe(userDir);
 		expect(result.projectAgentsDir).toBe(projectDir);
 		expect(result.diagnostics).toEqual([]);
-		expect(result.definitions.map((definition) => definition.name).sort()).toEqual(["general", "planner", "scout"]);
+		expect(result.definitions.map((definition) => definition.name).sort()).toEqual(
+			expectedNamesWithBuiltIns("planner", "scout"),
+		);
 		expect(result.definitions.find((definition) => definition.name === "scout")?.source).toBe("user");
 		expect(result.definitions.find((definition) => definition.name === "planner")?.sourceInfo.scope).toBe("project");
 	});
@@ -149,9 +282,13 @@ describe("subagent definitions", () => {
 		const untrusted = discoverSubagentDefinitions({ cwd, agentDir, projectTrusted: false });
 		const trusted = discoverSubagentDefinitions({ cwd, agentDir, projectTrusted: true });
 
-		expect(untrusted.definitions.map((definition) => definition.name)).toEqual(["general", "scout"]);
+		expect(untrusted.definitions.map((definition) => definition.name).sort()).toEqual(
+			expectedNamesWithBuiltIns("scout"),
+		);
 		expect(untrusted.diagnostics).toEqual([]);
-		expect(trusted.definitions.map((definition) => definition.name).sort()).toEqual(["general", "planner", "scout"]);
+		expect(trusted.definitions.map((definition) => definition.name).sort()).toEqual(
+			expectedNamesWithBuiltIns("planner", "scout"),
+		);
 		expect(trusted.diagnostics.some((diagnostic) => diagnostic.path === join(projectDir, "invalid.md"))).toBe(true);
 	});
 
@@ -210,7 +347,9 @@ describe("subagent definitions", () => {
 
 		const result = discoverSubagentDefinitions({ cwd, agentDir, projectTrusted: true });
 
-		expect(result.definitions.map((definition) => definition.name)).toEqual(["general", "valid"]);
+		expect(result.definitions.map((definition) => definition.name).sort()).toEqual(
+			expectedNamesWithBuiltIns("valid"),
+		);
 		expect(result.diagnostics).toHaveLength(3);
 		expect(result.diagnostics.map((diagnostic) => diagnostic.path).sort()).toEqual([
 			join(userDir, "bad-yaml.md"),
@@ -232,7 +371,8 @@ describe("subagent definitions", () => {
 
 		const result = discoverSubagentDefinitions({ cwd: nestedCwd, agentDir, projectTrusted: true });
 
-		expect(result.definitions).toMatchObject([{ name: "general", source: "built-in" }]);
+		expect(result.definitions.map((definition) => definition.name).sort()).toEqual(BUILT_IN_SUBAGENT_NAMES);
+		expect(result.definitions.every((definition) => definition.source === "built-in")).toBe(true);
 		expect(result.projectAgentsDir).toBe(join(nestedCwd, ".volt", "agents"));
 	});
 });

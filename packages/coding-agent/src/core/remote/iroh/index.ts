@@ -239,6 +239,11 @@ export {
 	parseIrohRemoteTicketPayload,
 } from "./ticket.ts";
 export {
+	type IrohRemoteSanitizedTranscriptText,
+	type IrohRemoteTranscriptTextLayout,
+	sanitizeIrohRemoteTranscriptText,
+} from "./transcript-text.ts";
+export {
 	getAvailableIrohRemoteWorkspaceNames,
 	getIrohRemoteWorkspaceAvailabilityStatus,
 	getIrohRemoteWorkspaceStatuses,

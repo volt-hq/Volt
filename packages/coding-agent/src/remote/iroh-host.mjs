@@ -51,6 +51,7 @@ import {
 	readIrohRemoteHostState,
 	requestIrohRemoteActiveRevocation,
 	sanitizeIrohRemoteOutbound,
+	sanitizeIrohRemoteTranscriptText,
 	selectIrohRemoteWorkspace,
 	serializeJsonLine,
 	SessionManager,
@@ -89,7 +90,6 @@ const REMOTE_TRANSCRIPT_DEFAULT_LIMIT = 200;
 const REMOTE_TRANSCRIPT_MAX_LIMIT = 200;
 const REMOTE_TRANSCRIPT_CURSOR_MAX_BYTES = 2048;
 const REMOTE_TRANSCRIPT_CURSOR_MAX_SCALARS = 512;
-const REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS = 12_000;
 const REMOTE_TOOL_COMMAND_MAX_SCALARS = 500;
 const REMOTE_TOOL_ARGUMENT_MAX_SCALARS = 500;
 const REMOTE_TOOL_ARGUMENT_KEYS_MAX = 12;
@@ -283,24 +283,12 @@ function sanitizeRemoteTextField(value, maxLength, authorization) {
 	return truncateUnicodeScalars(typeof sanitized === "string" ? sanitized : "", maxLength);
 }
 
-function sanitizeRemoteTranscriptText(value, authorization) {
-	const raw = typeof value === "string" ? value : "";
-	const normalized = raw
-		.replace(/\r\n?/g, "\n")
-		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
-		.replace(/[\n\t]/g, " ")
-		.replace(/\s+/gu, " ")
-		.trim();
-	const sanitized = sanitizeIrohRemoteOutbound({ value: normalized }, getRemoteSanitizerOptions(authorization)).value;
-	const text = (typeof sanitized === "string" ? sanitized : "").replace(/\s+/gu, " ").trim();
-	const scalars = Array.from(text);
-	if (scalars.length <= REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS) {
-		return { text, truncated: false };
-	}
-	return {
-		text: scalars.slice(0, REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS).join(""),
-		truncated: true,
-	};
+function sanitizeRemoteTranscriptText(value, authorization, layout = "preserve") {
+	return sanitizeIrohRemoteTranscriptText(
+		typeof value === "string" ? value : "",
+		getRemoteSanitizerOptions(authorization),
+		layout,
+	);
 }
 
 function parseRemoteTranscriptLimit(command) {
@@ -346,8 +334,8 @@ function extractTranscriptContentText(content) {
 		.join("");
 }
 
-function createRemoteTranscriptItem(entry, role, text, authorization) {
-	const sanitized = sanitizeRemoteTranscriptText(text, authorization);
+function createRemoteTranscriptItem(entry, role, text, authorization, layout = role === "tool" ? "summary" : "preserve") {
+	const sanitized = sanitizeRemoteTranscriptText(text, authorization, layout);
 	return {
 		entryId: entry.id,
 		createdAt: toRemoteSessionTimestamp(entry.timestamp),

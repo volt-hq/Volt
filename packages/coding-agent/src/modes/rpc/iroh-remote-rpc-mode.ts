@@ -1,7 +1,7 @@
 import type { AgentSessionEvent } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import { REVIEW_BRANCH_ACTION_ID, REVIEW_UNCOMMITTED_ACTION_ID } from "../../core/host-actions.ts";
-import type { CustomMessage } from "../../core/messages.ts";
+import { type CustomMessage, extractVisibleTextContent } from "../../core/messages.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
 	createIrohRemoteOutboundFilteredRpcTransport,
@@ -11,7 +11,7 @@ import {
 	type IrohRemoteLiveActivityUpdateIntent,
 	type IrohRemoteOutboundValueDecorator,
 	type IrohRemotePushNotificationDelivery,
-	sanitizeIrohRemoteOutbound,
+	sanitizeIrohRemoteTranscriptText,
 } from "../../core/remote/iroh/index.ts";
 import {
 	createIrohRpcTransport,
@@ -94,8 +94,6 @@ interface IrohRemoteHostCommandRpcTransportOptions {
 	handleCommand: (command: Record<string, unknown>) => object | Promise<object | undefined> | undefined;
 	transport: RpcTransport;
 }
-
-const IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS = 12_000;
 
 /** Run Volt RPC in-process over an authorized Iroh bidirectional stream. */
 export function runIrohRemoteRpcMode(
@@ -280,12 +278,12 @@ function createIrohRemoteTranscriptEntryEvent(
 		if (entry.customType !== "review" || entry.display !== true) {
 			return undefined;
 		}
-		const text = extractIrohRemoteTranscriptContentText(entry.content);
+		const text = extractVisibleTextContent(entry.content);
 		return text ? createIrohRemoteTranscriptEntryEventValue(entry, "assistant", text, options) : undefined;
 	}
 	const message = entry.message;
 	if (message.role === "user" || message.role === "assistant") {
-		const text = extractIrohRemoteTranscriptContentText(message.content);
+		const text = extractVisibleTextContent(message.content);
 		if (!text) {
 			return undefined;
 		}
@@ -350,7 +348,7 @@ function createIrohRemoteProjectedTranscriptEntryFields(
 	options: IrohRemoteTranscriptEventOptions,
 ): Record<string, unknown> {
 	if (item.role === "tool") {
-		const summary = sanitizeIrohRemoteTranscriptText(item.summary, options);
+		const summary = sanitizeIrohRemoteTranscriptText(item.summary, options, "summary");
 		const fields: Record<string, unknown> = {
 			role: "tool",
 			text: summary.text,
@@ -396,7 +394,7 @@ function createIrohRemoteTranscriptEntryEventValue(
 	options: IrohRemoteTranscriptEventOptions,
 	extraEntryFields: Record<string, unknown> = {},
 ): Record<string, unknown> {
-	const sanitized = sanitizeIrohRemoteTranscriptText(text, options);
+	const sanitized = sanitizeIrohRemoteTranscriptText(text, options, role === "tool" ? "summary" : "preserve");
 	return {
 		type: "transcript_entry",
 		entry: {
@@ -648,7 +646,7 @@ function getIrohRemoteBoundedString(
 	if (typeof value !== "string" || value.trim().length === 0) {
 		return undefined;
 	}
-	return truncateUnicodeScalars(sanitizeIrohRemoteTranscriptText(value, options).text, maxScalars);
+	return truncateUnicodeScalars(sanitizeIrohRemoteTranscriptText(value, options, "summary").text, maxScalars);
 }
 
 function getIrohRemoteFiniteNumber(value: unknown): number | undefined {
@@ -658,54 +656,6 @@ function getIrohRemoteFiniteNumber(value: unknown): number | undefined {
 function truncateUnicodeScalars(value: string, maxLength: number): string {
 	const scalars = Array.from(value);
 	return scalars.length <= maxLength ? value : scalars.slice(0, maxLength).join("");
-}
-
-function extractIrohRemoteTranscriptContentText(content: unknown): string {
-	if (typeof content === "string") {
-		return content;
-	}
-	if (!Array.isArray(content)) {
-		return "";
-	}
-	return content
-		.filter(
-			(part): part is { type: "text"; text: string } =>
-				typeof part === "object" &&
-				part !== null &&
-				(part as { type?: unknown }).type === "text" &&
-				typeof (part as { text?: unknown }).text === "string",
-		)
-		.map((part) => part.text)
-		.join("");
-}
-
-function sanitizeIrohRemoteTranscriptText(
-	value: string,
-	options: IrohRemoteTranscriptEventOptions,
-): { text: string; truncated: boolean } {
-	const normalized = value
-		.replace(/\r\n?/g, "\n")
-		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
-		.replace(/[\n\t]/g, " ")
-		.replace(/\s+/gu, " ")
-		.trim();
-	const sanitizedValue = sanitizeIrohRemoteOutbound(
-		{ value: normalized },
-		{
-			remoteWorkspacePath: options.remoteWorkspacePath,
-			workspacePath: options.workspacePath,
-		},
-	) as { value?: unknown };
-	const sanitized = sanitizedValue.value;
-	const text = (typeof sanitized === "string" ? sanitized : "").replace(/\s+/gu, " ").trim();
-	const scalars = Array.from(text);
-	if (scalars.length <= IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS) {
-		return { text, truncated: false };
-	}
-	return {
-		text: scalars.slice(0, IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS).join(""),
-		truncated: true,
-	};
 }
 
 function normalizeIrohRemoteTranscriptTimestamp(timestamp: string): string {

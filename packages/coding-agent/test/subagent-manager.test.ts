@@ -12,6 +12,7 @@ import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
 	createAgentSessionServices,
+	type SubagentRuntimeContext,
 } from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ResourceDiagnostic, ResourceLoader } from "../src/core/resource-loader.ts";
@@ -39,9 +40,11 @@ interface CreateTestManagerOptions {
 	noTools?: "all" | false;
 	resourceLoader?: ResourceLoader;
 	allowedTools?: string[];
+	subagentContext?: SubagentRuntimeContext;
 	parentSessionManager?: SessionManager;
 	retainRuntimeOnDispose?: boolean;
 	onRuntimeCreated?: (event: SubagentRuntimeCreatedEvent) => void | Promise<void>;
+	onCreateRuntime?: (subagentContext: SubagentRuntimeContext | undefined) => void;
 }
 
 function createDefinition(
@@ -56,6 +59,10 @@ function createDefinition(
 		sourceInfo: overrides.sourceInfo ?? createSyntheticSourceInfo(filePath, { source: "local", scope: "user" }),
 		filePath,
 		...(overrides.tools ? { tools: overrides.tools } : {}),
+		...(overrides.excludedTools ? { excludedTools: overrides.excludedTools } : {}),
+		...(overrides.allowedSubagents ? { allowedSubagents: overrides.allowedSubagents } : {}),
+		...(overrides.maxSubagentDepth !== undefined ? { maxSubagentDepth: overrides.maxSubagentDepth } : {}),
+		...(overrides.maxChildAgents !== undefined ? { maxChildAgents: overrides.maxChildAgents } : {}),
 		...(overrides.model ? { model: overrides.model } : {}),
 		...(overrides.thinking ? { thinking: overrides.thinking } : {}),
 	};
@@ -118,7 +125,9 @@ describe("SubagentManager", () => {
 			agentDir,
 			sessionManager,
 			sessionStartEvent,
+			subagentContext,
 		}) => {
+			options.onCreateRuntime?.(subagentContext);
 			const services = await createAgentSessionServices({
 				cwd,
 				agentDir,
@@ -156,6 +165,7 @@ describe("SubagentManager", () => {
 			agentDir: tempDir,
 			resourceLoader: options.resourceLoader,
 			allowedTools: options.allowedTools,
+			...(options.subagentContext ? { subagentContext: options.subagentContext } : {}),
 			parentSessionManager: options.parentSessionManager,
 			retainRuntimeOnDispose: options.retainRuntimeOnDispose,
 			onRuntimeCreated: options.onRuntimeCreated,
@@ -318,6 +328,247 @@ describe("SubagentManager", () => {
 		await completion;
 
 		expect(observedToolNames).toEqual(["read"]);
+	});
+
+	it("inherits allowed tools then removes definition excluded tools", async () => {
+		let observedToolNames: string[] = [];
+		const resourceLoader = createSubagentResourceLoader([
+			createDefinition({ name: "general", excludedTools: ["subagent"] }),
+		]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			allowedTools: ["read", "subagent", "write"],
+			noTools: false,
+			responses: [
+				(context) => {
+					observedToolNames = context.tools?.map((tool) => tool.name).sort() ?? [];
+					return fauxAssistantMessage("tools captured");
+				},
+			],
+		});
+
+		const handle = await manager.startByName("general");
+		const completion = handle.waitForEnd();
+		await handle.prompt("list tools");
+		await completion;
+
+		expect(observedToolNames).toEqual(["read", "write"]);
+	});
+
+	it("passes definition delegation policy to the child runtime context", async () => {
+		const observedContexts: Array<SubagentRuntimeContext | undefined> = [];
+		const resourceLoader = createSubagentResourceLoader([
+			createDefinition({
+				name: "researcher",
+				allowedSubagents: ["researcher"],
+				maxSubagentDepth: 3,
+				maxChildAgents: 2,
+			}),
+		]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			onCreateRuntime: (context) => {
+				observedContexts.push(context);
+			},
+		});
+
+		const handle = await manager.startByName("researcher");
+
+		expect(observedContexts).toEqual([
+			{
+				depth: 1,
+				agentName: "researcher",
+				path: ["researcher"],
+				allowedSubagents: ["researcher"],
+				maxSubagentDepth: 3,
+				maxChildAgents: 2,
+			},
+		]);
+		await handle.dispose();
+	});
+
+	it("passes nested delegation paths to child runtime context", async () => {
+		const observedContexts: Array<SubagentRuntimeContext | undefined> = [];
+		const resourceLoader = createSubagentResourceLoader([
+			createDefinition({
+				name: "researcher",
+				allowedSubagents: ["researcher"],
+				maxSubagentDepth: 3,
+				maxChildAgents: 2,
+			}),
+		]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			subagentContext: {
+				depth: 1,
+				agentName: "design-doc",
+				path: ["design-doc"],
+				allowedSubagents: ["researcher"],
+				maxSubagentDepth: 3,
+				maxChildAgents: 8,
+			},
+			onCreateRuntime: (context) => {
+				observedContexts.push(context);
+			},
+		});
+
+		const handle = await manager.startByName("researcher");
+
+		expect(observedContexts).toEqual([
+			{
+				depth: 2,
+				agentName: "researcher",
+				path: ["design-doc", "researcher"],
+				allowedSubagents: ["researcher"],
+				maxSubagentDepth: 3,
+				maxChildAgents: 2,
+			},
+		]);
+		await handle.dispose();
+	});
+
+	it("clamps child max depth to the inherited ancestor cap", async () => {
+		const observedContexts: Array<SubagentRuntimeContext | undefined> = [];
+		const resourceLoader = createSubagentResourceLoader([
+			createDefinition({
+				name: "researcher",
+				allowedSubagents: ["researcher"],
+				maxSubagentDepth: 5,
+				maxChildAgents: 2,
+			}),
+			createDefinition({
+				name: "analyst",
+				allowedSubagents: ["researcher"],
+				maxChildAgents: 2,
+			}),
+		]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			subagentContext: {
+				depth: 1,
+				agentName: "design-doc",
+				path: ["design-doc"],
+				allowedSubagents: ["researcher", "analyst"],
+				maxSubagentDepth: 2,
+				maxChildAgents: 8,
+			},
+			onCreateRuntime: (context) => {
+				observedContexts.push(context);
+			},
+		});
+
+		const researcher = await manager.startByName("researcher");
+		const analyst = await manager.startByName("analyst");
+
+		expect(observedContexts).toEqual([
+			{
+				depth: 2,
+				agentName: "researcher",
+				path: ["design-doc", "researcher"],
+				allowedSubagents: ["researcher"],
+				maxSubagentDepth: 2,
+				maxChildAgents: 2,
+			},
+			{
+				depth: 2,
+				agentName: "analyst",
+				path: ["design-doc", "analyst"],
+				allowedSubagents: ["researcher"],
+				maxSubagentDepth: 2,
+				maxChildAgents: 2,
+			},
+		]);
+		await researcher.dispose();
+		await analyst.dispose();
+	});
+
+	it("blocks delegated subagent names outside the current policy", async () => {
+		const resourceLoader = createSubagentResourceLoader([
+			createDefinition({ name: "researcher" }),
+			createDefinition({ name: "approved-child" }),
+		]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			subagentContext: {
+				depth: 1,
+				agentName: "security-reviewer",
+				path: ["security-reviewer"],
+				allowedSubagents: ["approved-child"],
+				maxSubagentDepth: 3,
+				maxChildAgents: 2,
+			},
+		});
+
+		await expect(manager.startByName("researcher")).rejects.toThrow("Allowed subagents: approved-child");
+		const handle = await manager.startByName("approved-child");
+		await handle.dispose();
+	});
+
+	it("blocks unnamed delegated child runtimes from subagent contexts", async () => {
+		const { manager } = await createTestManager({
+			subagentContext: {
+				depth: 1,
+				agentName: "researcher",
+				path: ["researcher"],
+				allowedSubagents: ["researcher"],
+				maxSubagentDepth: 3,
+				maxChildAgents: 2,
+			},
+		});
+
+		await expect(manager.start()).rejects.toThrow("cannot start unnamed child subagents");
+	});
+
+	it("blocks all named delegation when no child subagents are allowed", async () => {
+		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			subagentContext: {
+				depth: 1,
+				agentName: "general",
+				path: ["general"],
+				allowedSubagents: [],
+				maxChildAgents: 0,
+			},
+		});
+
+		await expect(manager.startByName("researcher")).rejects.toThrow("no child subagents are allowed");
+	});
+
+	it("blocks delegation after max depth is reached", async () => {
+		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			subagentContext: {
+				depth: 2,
+				agentName: "researcher",
+				path: ["design-doc", "researcher"],
+				allowedSubagents: ["researcher"],
+				maxSubagentDepth: 2,
+				maxChildAgents: 2,
+			},
+		});
+
+		await expect(manager.startByName("researcher")).rejects.toThrow("maxSubagentDepth 2 reached");
+	});
+
+	it("blocks delegation after max child count is reached", async () => {
+		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			subagentContext: {
+				depth: 1,
+				agentName: "researcher",
+				path: ["researcher"],
+				allowedSubagents: ["researcher"],
+				maxSubagentDepth: 3,
+				maxChildAgents: 1,
+			},
+		});
+
+		const handle = await manager.startByName("researcher");
+		await expect(manager.startByName("researcher")).rejects.toThrow("cannot start more than 1 child subagent");
+		await handle.dispose();
 	});
 
 	it("applies definition model and thinking before the child starts", async () => {

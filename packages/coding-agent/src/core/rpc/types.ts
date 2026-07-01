@@ -307,6 +307,10 @@ export interface RpcSubagentDefinition {
 	source: RpcSubagentDefinitionSource;
 	sourceInfo: RpcSubagentSourceInfo;
 	tools?: string[];
+	excludedTools?: string[];
+	allowedSubagents?: string[];
+	maxSubagentDepth?: number;
+	maxChildAgents?: number;
 	model?: string;
 	thinking?: string;
 }

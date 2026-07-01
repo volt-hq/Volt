@@ -1123,6 +1123,146 @@ describe("Iroh remote notification requests", () => {
 		await expect(modePromise).resolves.toBeUndefined();
 	});
 
+	test("streams assistant transcript entries with preserved Markdown formatting", async () => {
+		const session = createTestSession("session-one", "leaf-one");
+		const formattedText =
+			"Here is the plan:\n\n- Keep Markdown lists\n- Preserve code fences\n\n```swift\nlet value = 1\n```";
+		const assistantMessage = {
+			role: "assistant",
+			content: [{ type: "text" as const, text: formattedText }],
+			timestamp: 1,
+		};
+		session.sessionManager.getBranch.mockReturnValue([
+			{
+				type: "message",
+				id: "assistant-entry",
+				parentId: null,
+				timestamp: "2026-06-27T00:00:00.000Z",
+				message: assistantMessage,
+			},
+		]);
+		const sessionHandlers: Array<(event: AgentSessionEvent) => void> = [];
+		session.subscribe.mockImplementation((handler: (event: AgentSessionEvent) => void) => {
+			sessionHandlers.push(handler);
+			return () => {};
+		});
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
+
+		for (const handler of sessionHandlers) {
+			handler({ type: "message_end", message: assistantMessage } as AgentSessionEvent);
+		}
+
+		await vi.waitFor(() =>
+			expect(parseWrittenObjects(send)).toContainEqual({
+				type: "transcript_entry",
+				entry: {
+					entryId: "assistant-entry",
+					createdAt: "2026-06-27T00:00:00.000Z",
+					role: "assistant",
+					text: formattedText,
+					truncated: false,
+				},
+				final: true,
+			}),
+		);
+
+		expect(JSON.stringify(parseWrittenObjects(send))).not.toContain(
+			"Here is the plan: - Keep Markdown lists - Preserve code fences",
+		);
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("streams assistant transcript entries with canonical text across multiple text parts", async () => {
+		const session = createTestSession("session-one", "leaf-one");
+		const expectedText = ["Here is a plan:", "- Step one", "- Step two", "```swift", "\tlet value = 1", "```"].join(
+			"\n",
+		);
+		const assistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "text" as const, text: "Here is a plan:\n- Step one" },
+				{ type: "text" as const, text: "- Step two\n```swift\n\tlet value = 1\n```" },
+			],
+			timestamp: 1,
+		};
+		session.sessionManager.getBranch.mockReturnValue([
+			{
+				type: "message",
+				id: "assistant-entry",
+				parentId: null,
+				timestamp: "2026-06-27T00:00:00.000Z",
+				message: assistantMessage,
+			},
+		]);
+		const sessionHandlers: Array<(event: AgentSessionEvent) => void> = [];
+		session.subscribe.mockImplementation((handler: (event: AgentSessionEvent) => void) => {
+			sessionHandlers.push(handler);
+			return () => {};
+		});
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
+
+		for (const handler of sessionHandlers) {
+			handler({ type: "message_end", message: assistantMessage } as AgentSessionEvent);
+		}
+
+		await vi.waitFor(() =>
+			expect(parseWrittenObjects(send)).toContainEqual({
+				type: "transcript_entry",
+				entry: {
+					entryId: "assistant-entry",
+					createdAt: "2026-06-27T00:00:00.000Z",
+					role: "assistant",
+					text: expectedText,
+					truncated: false,
+				},
+				final: true,
+			}),
+		);
+
+		recv.pushLine(JSON.stringify({ id: "transcript-1", type: "get_transcript", limit: 10 }));
+		await vi.waitFor(() =>
+			expect(parseWrittenObjects(send)).toContainEqual({
+				id: "transcript-1",
+				type: "response",
+				command: "get_transcript",
+				success: true,
+				data: {
+					sessionId: "session-one",
+					items: [
+						{
+							id: "assistant-entry",
+							role: "assistant",
+							text: expectedText,
+							timestamp: "2026-06-27T00:00:00.000Z",
+						},
+					],
+					hasMore: false,
+					nextBeforeEntryId: null,
+				},
+			}),
+		);
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
 	test("streams completed tool transcript entries with projected metadata", async () => {
 		const session = createTestSession("session-one", "leaf-one");
 		const assistantMessage = {

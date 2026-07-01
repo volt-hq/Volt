@@ -16,6 +16,12 @@ function writeAgent(dir: string, filename: string, frontmatter: string, body: st
 	return filePath;
 }
 
+const BUILT_IN_SUBAGENT_NAMES = ["design-doc", "general", "researcher", "security-reviewer"];
+
+function expectedNamesWithBuiltIns(...names: string[]): string[] {
+	return [...BUILT_IN_SUBAGENT_NAMES, ...names].sort();
+}
+
 describe("DefaultResourceLoader subagents", () => {
 	let tempDir: string;
 	let agentDir: string;
@@ -49,7 +55,9 @@ describe("DefaultResourceLoader subagents", () => {
 
 		const { definitions, diagnostics } = loader.getSubagents();
 		expect(diagnostics).toEqual([]);
-		expect(definitions.map((definition) => definition.name).sort()).toEqual(["general", "planner", "scout"]);
+		expect(definitions.map((definition) => definition.name).sort()).toEqual(
+			expectedNamesWithBuiltIns("planner", "scout"),
+		);
 		expect(definitions.find((definition) => definition.name === "general")).toMatchObject({
 			filePath: "builtin:general",
 			source: "built-in",
@@ -80,14 +88,18 @@ describe("DefaultResourceLoader subagents", () => {
 		await loader.reload();
 
 		const untrusted = loader.getSubagents();
-		expect(untrusted.definitions.map((definition) => definition.name)).toEqual(["general", "scout"]);
+		expect(untrusted.definitions.map((definition) => definition.name).sort()).toEqual(
+			expectedNamesWithBuiltIns("scout"),
+		);
 		expect(untrusted.diagnostics).toEqual([]);
 
 		settingsManager.setProjectTrusted(true);
 		await loader.reload();
 
 		const trusted = loader.getSubagents();
-		expect(trusted.definitions.map((definition) => definition.name).sort()).toEqual(["general", "planner", "scout"]);
+		expect(trusted.definitions.map((definition) => definition.name).sort()).toEqual(
+			expectedNamesWithBuiltIns("planner", "scout"),
+		);
 		expect(trusted.diagnostics.some((diagnostic) => diagnostic.path === join(projectDir, "invalid.md"))).toBe(true);
 	});
 
@@ -101,7 +113,7 @@ describe("DefaultResourceLoader subagents", () => {
 		await loader.reload();
 
 		const { definitions, diagnostics } = loader.getSubagents();
-		expect(definitions.map((definition) => definition.name)).toEqual(["general", "valid"]);
+		expect(definitions.map((definition) => definition.name).sort()).toEqual(expectedNamesWithBuiltIns("valid"));
 		expect(diagnostics).toHaveLength(2);
 		expect(diagnostics.map((diagnostic) => diagnostic.message).sort()).toEqual([
 			"description is required",
@@ -125,7 +137,9 @@ describe("DefaultResourceLoader subagents", () => {
 		await loader.reload();
 
 		const definitions = loader.getSubagents().definitions;
-		expect(definitions.map((definition) => definition.name).sort()).toEqual(["general", "planner", "scout"]);
+		expect(definitions.map((definition) => definition.name).sort()).toEqual(
+			expectedNamesWithBuiltIns("planner", "scout"),
+		);
 		expect(definitions.find((definition) => definition.name === "scout")?.description).toBe("Updated scout");
 		expect(definitions.find((definition) => definition.name === "scout")?.systemPrompt).toBe("Updated prompt");
 	});

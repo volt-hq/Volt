@@ -16,6 +16,7 @@ export {
 	type CreateAgentSessionRuntimeFactory,
 	type CreateAgentSessionRuntimeResult,
 	createAgentSessionRuntime,
+	type SubagentRuntimeContext,
 } from "./agent-session-runtime.ts";
 export {
 	type AgentSessionRuntimeDiagnostic,

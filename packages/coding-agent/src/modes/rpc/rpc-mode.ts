@@ -27,6 +27,7 @@ import type {
 	HostActionUpdate,
 	HostInteraction,
 } from "../../core/host-interaction.ts";
+import { extractVisibleTextContent } from "../../core/messages.ts";
 import {
 	flushRawStdout,
 	restoreStdout,
@@ -318,6 +319,31 @@ interface RpcSubagentEntry {
 	disposed: boolean;
 }
 
+function createRpcSessionEventPayload(event: object): object {
+	if (!isRecord(event) || event.type !== "message_update") {
+		return event;
+	}
+	const assistantMessageEvent = event.assistantMessageEvent;
+	const message = event.message;
+	if (!isRecord(assistantMessageEvent) || assistantMessageEvent.type !== "text_end" || !isRecord(message)) {
+		return event;
+	}
+	if (message.role !== "assistant") {
+		return event;
+	}
+	return {
+		...event,
+		assistantMessageEvent: {
+			...assistantMessageEvent,
+			message: extractVisibleTextContent(message.content),
+		},
+	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function toRpcSubagentDefinition(definition: SubagentDefinition): RpcSubagentDefinition {
 	return {
 		name: definition.name,
@@ -329,6 +355,10 @@ function toRpcSubagentDefinition(definition: SubagentDefinition): RpcSubagentDef
 			origin: definition.sourceInfo.origin,
 		},
 		...(definition.tools ? { tools: definition.tools } : {}),
+		...(definition.excludedTools ? { excludedTools: definition.excludedTools } : {}),
+		...(definition.allowedSubagents ? { allowedSubagents: definition.allowedSubagents } : {}),
+		...(definition.maxSubagentDepth !== undefined ? { maxSubagentDepth: definition.maxSubagentDepth } : {}),
+		...(definition.maxChildAgents !== undefined ? { maxChildAgents: definition.maxChildAgents } : {}),
 		...(definition.model ? { model: definition.model } : {}),
 		...(definition.thinking ? { thinking: definition.thinking } : {}),
 	};
@@ -363,7 +393,7 @@ class RpcSubagentLifecycle implements RpcSubagentLifecycleController {
 			if (entry?.disposed) {
 				return;
 			}
-			this.output({ type: "subagent_event", subagentId: handle.id, event });
+			this.output({ type: "subagent_event", subagentId: handle.id, event: createRpcSessionEventPayload(event) });
 		});
 		entry = { handle, unsubscribe, disposed: false };
 		this.active.set(handle.id, entry);
@@ -858,7 +888,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		unsubscribe = session.subscribe((event) => {
-			output(event);
+			output(createRpcSessionEventPayload(event));
 		});
 		unsubscribeBackpressure = session.agent.subscribe(async () => {
 			try {

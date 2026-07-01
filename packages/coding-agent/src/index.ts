@@ -367,9 +367,11 @@ export {
 	type IrohRemoteRpcErrorResponse,
 	type IrohRemoteRpcFilterResult,
 	type IrohRemoteSanitizedReconnectTicketPayload,
+	type IrohRemoteSanitizedTranscriptText,
 	type IrohRemoteTicketPayload,
 	type IrohRemoteTicketQrCode,
 	type IrohRemoteTicketQrCodeFormatOptions,
+	type IrohRemoteTranscriptTextLayout,
 	type IrohRemoteUnsafeApproval,
 	type IrohRemoteWorkspace,
 	type IrohRemoteWorkspaceAvailabilityClassifier,
@@ -420,6 +422,7 @@ export {
 	resolveIrohRemoteWorkspaceProjectTrusted,
 	sanitizeIrohRemoteOutbound,
 	sanitizeIrohRemoteOutboundJsonLine,
+	sanitizeIrohRemoteTranscriptText,
 	selectIrohRemoteWorkspace,
 	serializeIrohRemoteRpcFilterRejection,
 	shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization,
@@ -486,6 +489,7 @@ export {
 	createWebSearchTool,
 	createWriteTool,
 	type PromptTemplate,
+	type SubagentRuntimeContext,
 } from "./core/sdk.ts";
 export {
 	type BranchSummaryEntry,

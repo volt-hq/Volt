@@ -1677,7 +1677,7 @@ export async function main(args: string[], options?: MainOptions) {
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
 	const authStorage = AuthStorage.create();
 	const createRuntime: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
-		const { cwd, agentDir, sessionManager, sessionStartEvent, projectTrustContext } = runtimeOptions;
+		const { cwd, agentDir, sessionManager, sessionStartEvent, projectTrustContext, subagentContext } = runtimeOptions;
 		const runtimeProfile = Object.hasOwn(runtimeOptions, "profile") ? runtimeOptions.profile : requestedProfile;
 		const isInitialRuntime = sessionStartEvent === undefined;
 		const projectTrustDiagnostics: AgentSessionRuntimeDiagnostic[] = [];
@@ -1786,6 +1786,7 @@ export async function main(args: string[], options?: MainOptions) {
 			agentDir,
 			resourceLoader,
 			parentSessionManager: sessionManager,
+			...(subagentContext ? { subagentContext } : {}),
 		});
 		const created = await createAgentSessionFromServices({
 			services,
