@@ -18,8 +18,10 @@ import {
 	type IrohRpcTransportOptions,
 	type RpcCloseHandler,
 	type RpcLineHandler,
+	type RpcTranscriptItem,
 	type RpcTransport,
 } from "../../core/rpc/index.ts";
+import { projectSessionTranscript } from "../../core/rpc/transcript.ts";
 import type { CustomMessageEntry, SessionEntry, SessionMessageEntry } from "../../core/session-manager.ts";
 import { type RpcModeOptions, type RpcSessionChange, runRpcMode } from "./rpc-mode.ts";
 import type { RpcRegisterPushTargetResponse } from "./rpc-types.ts";
@@ -269,6 +271,11 @@ function createIrohRemoteTranscriptEntryEvent(
 	runtimeHost: AgentSessionRuntime,
 	options: IrohRemoteTranscriptEventOptions,
 ): Record<string, unknown> | undefined {
+	const projectedEvent = createIrohRemoteProjectedTranscriptEntryEvent(entry, runtimeHost, options);
+	if (projectedEvent) {
+		return projectedEvent;
+	}
+
 	if (entry.type === "custom_message") {
 		if (entry.customType !== "review" || entry.display !== true) {
 			return undefined;
@@ -314,6 +321,72 @@ function createIrohRemoteTranscriptEntryEvent(
 		return createIrohRemoteTranscriptEntryEventValue(entry, "tool", `bash ${exit}`, options);
 	}
 	return undefined;
+}
+
+function createIrohRemoteProjectedTranscriptEntryEvent(
+	entry: IrohRemoteTranscriptSourceEntry,
+	runtimeHost: AgentSessionRuntime,
+	options: IrohRemoteTranscriptEventOptions,
+): Record<string, unknown> | undefined {
+	const item = projectSessionTranscript(runtimeHost.session.sessionManager, { limit: 200 }).items.find(
+		(transcriptItem) => transcriptItem.id === entry.id,
+	);
+	if (!item) {
+		return undefined;
+	}
+	return {
+		type: "transcript_entry",
+		entry: {
+			entryId: item.id,
+			createdAt: item.timestamp,
+			...createIrohRemoteProjectedTranscriptEntryFields(item, options),
+		},
+		final: true,
+	};
+}
+
+function createIrohRemoteProjectedTranscriptEntryFields(
+	item: RpcTranscriptItem,
+	options: IrohRemoteTranscriptEventOptions,
+): Record<string, unknown> {
+	if (item.role === "tool") {
+		const summary = sanitizeIrohRemoteTranscriptText(item.summary, options);
+		const fields: Record<string, unknown> = {
+			role: "tool",
+			text: summary.text,
+			truncated: summary.truncated,
+			toolName: item.toolName,
+			status: item.status,
+			summary: summary.text,
+		};
+		if (item.path) {
+			fields.path = item.path;
+		}
+		if (item.args) {
+			fields.args = item.args;
+		}
+		if (item.details) {
+			fields.details = item.details;
+		}
+		if (item.diffPreview) {
+			fields.diffPreview = item.diffPreview;
+		}
+		if (item.patchPreview) {
+			fields.patchPreview = item.patchPreview;
+		}
+		return fields;
+	}
+
+	const text = sanitizeIrohRemoteTranscriptText(item.text, options);
+	const fields: Record<string, unknown> = {
+		role: item.role,
+		text: text.text,
+		truncated: text.truncated,
+	};
+	if (item.role === "summary") {
+		fields.title = item.title;
+	}
+	return fields;
 }
 
 function createIrohRemoteTranscriptEntryEventValue(

@@ -122,6 +122,7 @@ describe("RPC transcript projection", () => {
 			toolName: "read",
 			status: "completed",
 			path: "/Users/jordan/project/src/secret.ts",
+			args: { path: "/Users/jordan/project/src/secret.ts" },
 			summary: "Read /Users/jordan/project/src/secret.ts (completed)",
 		});
 		expect(transcript.items[3]).toMatchObject({ role: "summary", title: "Conversation compacted" });
@@ -135,6 +136,7 @@ describe("RPC transcript projection", () => {
 			role: "tool",
 			toolName: "bash",
 			status: "completed",
+			args: { command: "cat /Users/jordan/project/src/secret.ts" },
 			summary: "Ran command: cat /Users/jordan/project/src/secret.ts; exit 0",
 		});
 

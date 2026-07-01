@@ -140,6 +140,7 @@ function createTestSession(sessionId: string, leafId: string | null) {
 		sessionManager: {
 			getBranch: vi.fn((): object[] => []),
 			getLeafId: (): string | null => session.leafId,
+			getSessionId: (): string => sessionId,
 		},
 		settingsManager: {},
 		steeringMode: "all" as const,
@@ -1117,6 +1118,122 @@ describe("Iroh remote notification requests", () => {
 				final: true,
 			}),
 		);
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("streams completed tool transcript entries with projected metadata", async () => {
+		const session = createTestSession("session-one", "leaf-one");
+		const assistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "bash-call",
+					name: "bash",
+					arguments: { command: "pwd && cat /workspace/src/index.ts", timeout: 5 },
+				},
+				{
+					type: "toolCall",
+					id: "read-call",
+					name: "read",
+					arguments: { path: "/workspace/src/index.ts", offset: 3 },
+				},
+			],
+			timestamp: 1,
+		};
+		const bashResult = {
+			role: "toolResult",
+			toolCallId: "bash-call",
+			toolName: "bash",
+			content: [{ type: "text", text: "private output" }],
+			isError: false,
+			timestamp: 2,
+		};
+		const readResult = {
+			role: "toolResult",
+			toolCallId: "read-call",
+			toolName: "read",
+			content: [{ type: "text", text: "private file contents" }],
+			isError: false,
+			timestamp: 3,
+		};
+		session.sessionManager.getBranch.mockReturnValue([
+			{
+				type: "message",
+				id: "assistant-entry",
+				parentId: null,
+				timestamp: "2026-06-27T00:00:00.000Z",
+				message: assistantMessage,
+			},
+			{
+				type: "message",
+				id: "bash-entry",
+				parentId: "assistant-entry",
+				timestamp: "2026-06-27T00:00:01.000Z",
+				message: bashResult,
+			},
+			{
+				type: "message",
+				id: "read-entry",
+				parentId: "bash-entry",
+				timestamp: "2026-06-27T00:00:02.000Z",
+				message: readResult,
+			},
+		]);
+		const sessionHandlers: Array<(event: AgentSessionEvent) => void> = [];
+		session.subscribe.mockImplementation((handler: (event: AgentSessionEvent) => void) => {
+			sessionHandlers.push(handler);
+			return () => {};
+		});
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
+
+		for (const handler of sessionHandlers) {
+			handler({ type: "message_end", message: bashResult } as AgentSessionEvent);
+			handler({ type: "message_end", message: readResult } as AgentSessionEvent);
+		}
+
+		await vi.waitFor(() => {
+			const objects = parseWrittenObjects(send);
+			const transcriptEntries = objects.filter((record) => record.type === "transcript_entry");
+			expect(transcriptEntries).toContainEqual(
+				expect.objectContaining({
+					type: "transcript_entry",
+					entry: expect.objectContaining({
+						entryId: "bash-entry",
+						role: "tool",
+						toolName: "bash",
+						status: "completed",
+						summary: "Ran command: pwd && cat /workspace/src/index.ts (completed)",
+						args: { command: "pwd && cat /workspace/src/index.ts", timeout: 5 },
+					}),
+				}),
+			);
+			expect(transcriptEntries).toContainEqual(
+				expect.objectContaining({
+					type: "transcript_entry",
+					entry: expect.objectContaining({
+						entryId: "read-entry",
+						role: "tool",
+						toolName: "read",
+						status: "completed",
+						path: "/workspace/src/index.ts",
+						args: { path: "/workspace/src/index.ts", offset: 3 },
+					}),
+				}),
+			);
+			expect(JSON.stringify(transcriptEntries)).not.toContain("private output");
+			expect(JSON.stringify(transcriptEntries)).not.toContain("private file contents");
+		});
 
 		recv.end();
 		await expect(modePromise).resolves.toBeUndefined();

@@ -15,6 +15,8 @@ const MESSAGE_TEXT_LIMIT = 16_000;
 const SUMMARY_TEXT_LIMIT = 1_000;
 const TOOL_SUMMARY_LIMIT = 1_000;
 const TOOL_COMMAND_LIMIT = 500;
+const TOOL_ARGUMENT_STRING_LIMIT = 500;
+const TOOL_ARGUMENT_KEYS_LIMIT = 12;
 const MUTATION_PREVIEW_LIMIT = 4_000;
 const SUBAGENT_AGENT_LIMIT = 200;
 const SUBAGENT_ID_LIMIT = 200;
@@ -175,17 +177,127 @@ function projectToolResult(
 	if (patchPreview) {
 		item.patchPreview = patchPreview;
 	}
+	const projectedArgs = projectToolArgs(message.toolName, args);
+	if (projectedArgs) {
+		item.args = projectedArgs;
+	}
 	if (message.toolName === "subagent") {
-		const subagentArgs = projectSubagentArgs(args);
-		if (subagentArgs) {
-			item.args = subagentArgs;
-		}
 		const subagentDetails = projectSubagentDetails(details);
 		if (subagentDetails) {
 			item.details = subagentDetails;
 		}
 	}
 	return item;
+}
+
+function projectToolArgs(
+	toolName: string,
+	args: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+	if (toolName === "subagent") {
+		return projectSubagentArgs(args);
+	}
+	if (!args) {
+		return undefined;
+	}
+
+	const projected: Record<string, unknown> = {};
+	switch (toolName) {
+		case "bash":
+			copyStringArg(args, projected, "command", TOOL_COMMAND_LIMIT);
+			copyNumberArg(args, projected, "timeout");
+			break;
+		case "read":
+			copyStringArg(args, projected, "path");
+			copyStringArg(args, projected, "file_path");
+			copyNumberArg(args, projected, "offset");
+			copyNumberArg(args, projected, "limit");
+			break;
+		case "edit":
+		case "write":
+			copyStringArg(args, projected, "path");
+			copyStringArg(args, projected, "file_path");
+			break;
+		case "grep":
+			copyStringArg(args, projected, "pattern");
+			copyStringArg(args, projected, "path");
+			copyStringArg(args, projected, "glob");
+			copyStringArg(args, projected, "include");
+			copyStringArg(args, projected, "exclude");
+			copyBooleanArg(args, projected, "ignoreCase");
+			copyBooleanArg(args, projected, "literal");
+			copyNumberArg(args, projected, "context");
+			break;
+		case "find":
+			copyStringArg(args, projected, "query");
+			copyStringArg(args, projected, "pattern");
+			copyStringArg(args, projected, "path");
+			copyStringArg(args, projected, "glob");
+			copyStringArg(args, projected, "name");
+			copyNumberArg(args, projected, "limit");
+			break;
+		case "ls":
+			copyStringArg(args, projected, "path");
+			copyNumberArg(args, projected, "limit");
+			break;
+		case "lsp":
+			copyStringArg(args, projected, "action");
+			copyStringArg(args, projected, "symbol");
+			copyStringArg(args, projected, "path");
+			copyStringArg(args, projected, "file_path");
+			copyNumberArg(args, projected, "line");
+			break;
+		case "web_search":
+			copyStringArg(args, projected, "query");
+			copyStringArrayArg(args, projected, "domains");
+			copyNumberArg(args, projected, "limit");
+			copyNumberArg(args, projected, "recencyDays");
+			break;
+		default:
+			break;
+	}
+
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function copyStringArg(
+	from: Record<string, unknown>,
+	to: Record<string, unknown>,
+	key: string,
+	limit = TOOL_ARGUMENT_STRING_LIMIT,
+): void {
+	const value = getStringArg(from, key);
+	if (value) {
+		to[key] = boundText(value, limit);
+	}
+}
+
+function copyNumberArg(from: Record<string, unknown>, to: Record<string, unknown>, key: string): void {
+	const value = getFiniteNumber(from, key);
+	if (value !== undefined) {
+		to[key] = value;
+	}
+}
+
+function copyBooleanArg(from: Record<string, unknown>, to: Record<string, unknown>, key: string): void {
+	const value = from[key];
+	if (typeof value === "boolean") {
+		to[key] = value;
+	}
+}
+
+function copyStringArrayArg(from: Record<string, unknown>, to: Record<string, unknown>, key: string): void {
+	const value = from[key];
+	if (!Array.isArray(value)) {
+		return;
+	}
+	const strings = value
+		.map((item) => (typeof item === "string" ? boundText(item, TOOL_ARGUMENT_STRING_LIMIT) : undefined))
+		.filter((item): item is string => item !== undefined && item.trim().length > 0)
+		.slice(0, TOOL_ARGUMENT_KEYS_LIMIT);
+	if (strings.length > 0) {
+		to[key] = strings;
+	}
 }
 
 function projectSubagentArgs(args: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
@@ -407,7 +519,7 @@ function projectBashExecution(
 	} else if (message.exitCode !== undefined) {
 		summaryParts.push(`exit ${message.exitCode}`);
 	}
-	return {
+	const item: RpcTranscriptToolItem = {
 		id: entryId,
 		role: "tool",
 		toolName: "bash",
@@ -415,6 +527,10 @@ function projectBashExecution(
 		summary: boundSummary(summaryParts.join("; "), TOOL_SUMMARY_LIMIT),
 		timestamp: normalizeTimestamp(timestamp),
 	};
+	if (message.command.trim().length > 0) {
+		item.args = { command: boundText(message.command, TOOL_COMMAND_LIMIT) };
+	}
+	return item;
 }
 
 function summarizeToolResult(

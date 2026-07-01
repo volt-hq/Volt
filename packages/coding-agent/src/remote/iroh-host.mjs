@@ -90,6 +90,9 @@ const REMOTE_TRANSCRIPT_MAX_LIMIT = 200;
 const REMOTE_TRANSCRIPT_CURSOR_MAX_BYTES = 2048;
 const REMOTE_TRANSCRIPT_CURSOR_MAX_SCALARS = 512;
 const REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS = 12_000;
+const REMOTE_TOOL_COMMAND_MAX_SCALARS = 500;
+const REMOTE_TOOL_ARGUMENT_MAX_SCALARS = 500;
+const REMOTE_TOOL_ARGUMENT_KEYS_MAX = 12;
 let activeConnectionSequence = 0;
 let activeStreamSequence = 0;
 const INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES = new Set([
@@ -380,15 +383,21 @@ function projectRemoteTranscriptEntry(entry, authorization, toolCallsById) {
 		const status = message.isError ? "failed" : "completed";
 		const toolName = typeof message.toolName === "string" && message.toolName.trim() ? message.toolName.trim() : "tool";
 		const toolCall = typeof message.toolCallId === "string" ? toolCallsById.get(message.toolCallId) : undefined;
-		const item = createRemoteTranscriptItem(entry, "tool", `${toolName} ${status}`, authorization);
+		const args = isRemoteRecord(toolCall?.arguments) ? toolCall.arguments : undefined;
+		const path = getRemoteToolPath(toolName, args, authorization);
+		const summary = summarizeRemoteToolResult(toolName, status, args, path, authorization);
+		const item = createRemoteTranscriptItem(entry, "tool", summary, authorization);
 		item.toolName = toolName;
 		item.status = status;
-		item.summary = `${toolName} ${status}`;
+		item.summary = summary;
+		if (path) {
+			item.path = path;
+		}
+		const projectedArgs = projectRemoteToolArgs(toolName, args, authorization);
+		if (projectedArgs) {
+			item.args = projectedArgs;
+		}
 		if (toolName === "subagent") {
-			const args = projectRemoteSubagentArgs(toolCall?.arguments, authorization);
-			if (args) {
-				item.args = args;
-			}
 			const details = projectRemoteSubagentDetails(message.details, authorization);
 			if (details) {
 				item.details = details;
@@ -404,7 +413,16 @@ function projectRemoteTranscriptEntry(entry, authorization, toolCallsById) {
 			: message.exitCode === undefined
 				? status
 				: `exit ${message.exitCode}`;
-		return createRemoteTranscriptItem(entry, "tool", `bash ${exit}`, authorization);
+		const command = remoteString(message.command, authorization, REMOTE_TOOL_COMMAND_MAX_SCALARS);
+		const summary = command ? `Ran command: ${command} (${exit})` : `bash ${exit}`;
+		const item = createRemoteTranscriptItem(entry, "tool", summary, authorization);
+		item.toolName = "bash";
+		item.status = status;
+		item.summary = summary;
+		if (command) {
+			item.args = { command };
+		}
+		return item;
 	}
 	return undefined;
 }
@@ -439,8 +457,112 @@ function collectRemoteToolCalls(entries) {
 	return toolCallsById;
 }
 
+function projectRemoteToolArgs(toolName, args, authorization) {
+	if (toolName === "subagent") {
+		return projectRemoteSubagentArgs(args, authorization);
+	}
+	if (!isRemoteRecord(args)) {
+		return undefined;
+	}
+
+	const projected = {};
+	switch (toolName) {
+		case "bash":
+			copyRemoteString(args, projected, "command", authorization, REMOTE_TOOL_COMMAND_MAX_SCALARS);
+			copyRemoteNumber(args, projected, "timeout");
+			break;
+		case "read":
+			copyRemoteString(args, projected, "path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "file_path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteNumber(args, projected, "offset");
+			copyRemoteNumber(args, projected, "limit");
+			break;
+		case "edit":
+		case "write":
+			copyRemoteString(args, projected, "path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "file_path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			break;
+		case "grep":
+			copyRemoteString(args, projected, "pattern", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "glob", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "include", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "exclude", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteBoolean(args, projected, "ignoreCase");
+			copyRemoteBoolean(args, projected, "literal");
+			copyRemoteNumber(args, projected, "context");
+			break;
+		case "find":
+			copyRemoteString(args, projected, "query", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "pattern", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "glob", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "name", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteNumber(args, projected, "limit");
+			break;
+		case "ls":
+			copyRemoteString(args, projected, "path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteNumber(args, projected, "limit");
+			break;
+		case "lsp":
+			copyRemoteString(args, projected, "action", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "symbol", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "file_path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteNumber(args, projected, "line");
+			break;
+		case "web_search":
+			copyRemoteString(args, projected, "query", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteStringArray(args, projected, "domains", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteNumber(args, projected, "limit");
+			copyRemoteNumber(args, projected, "recencyDays");
+			break;
+		default:
+			break;
+	}
+
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function getRemoteToolPath(toolName, args, authorization) {
+	if (!isRemoteRecord(args)) {
+		return undefined;
+	}
+	switch (toolName) {
+		case "read":
+		case "edit":
+		case "write":
+		case "lsp":
+			return remoteString(args.path, authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS)
+				?? remoteString(args.file_path, authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+		case "grep":
+		case "find":
+		case "ls":
+			return remoteString(args.path, authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+		default:
+			return undefined;
+	}
+}
+
+function summarizeRemoteToolResult(toolName, status, args, path, authorization) {
+	const statusText = status === "failed" ? "failed" : "completed";
+	if (toolName === "bash") {
+		const command = remoteString(args?.command, authorization, REMOTE_TOOL_COMMAND_MAX_SCALARS);
+		if (command) {
+			return `Ran command: ${command} (${statusText})`;
+		}
+	}
+	if (toolName === "read" && path) {
+		return `Read ${path} (${statusText})`;
+	}
+	if (path) {
+		return `${toolName} ${path} (${statusText})`;
+	}
+	return `${toolName} ${statusText}`;
+}
+
 function projectRemoteSubagentArgs(args, authorization) {
-	if (!args || typeof args !== "object" || Array.isArray(args)) {
+	if (!isRemoteRecord(args)) {
 		return undefined;
 	}
 	const projected = {};
@@ -606,8 +728,39 @@ function copyRemoteString(from, to, key, authorization, maxLength) {
 	}
 }
 
+function copyRemoteNumber(from, to, key) {
+	const value = remoteFiniteNumber(from[key]);
+	if (value !== undefined) {
+		to[key] = value;
+	}
+}
+
+function copyRemoteBoolean(from, to, key) {
+	if (typeof from[key] === "boolean") {
+		to[key] = from[key];
+	}
+}
+
+function copyRemoteStringArray(from, to, key, authorization, maxLength) {
+	const value = from[key];
+	if (!Array.isArray(value)) {
+		return;
+	}
+	const projected = value
+		.slice(0, REMOTE_TOOL_ARGUMENT_KEYS_MAX)
+		.map((entry) => remoteString(entry, authorization, maxLength))
+		.filter(Boolean);
+	if (projected.length > 0) {
+		to[key] = projected;
+	}
+}
+
 function remoteFiniteNumber(value) {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function isRemoteRecord(value) {
+	return value && typeof value === "object" && !Array.isArray(value);
 }
 
 function createRemoteTranscriptPage(items, request) {
