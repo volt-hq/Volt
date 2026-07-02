@@ -416,6 +416,8 @@ volt.on("session_before_switch", async (event, ctx) => {
 After a successful switch or new-session action, volt emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "new" | "resume"` and `previousSessionFile`.
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
 
+A live-shared-session handoff between the background daemon and a desktop TUI (see [Background daemon](daemon.md)) looks like an ordinary quit + resume from an extension's perspective: the losing owner emits `session_shutdown` (reason `"quit"`), and the gaining owner loads the session from file and emits `session_start` (reason `"resume"`). Extensions need zero code changes for handoffs; keep `session_shutdown` idempotent and rebuild in-memory state on `session_start` as usual.
+
 #### session_before_fork
 
 Fired when forking via `/fork` or cloning via `/clone`.

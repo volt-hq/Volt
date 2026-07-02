@@ -267,6 +267,16 @@ See [LSP Diagnostics](lsp.md) for the full reference, including built-in server 
 | `lsp.maxDiagnostics` | number | `20` | Maximum diagnostics reported per tool call |
 | `lsp.severity` | string | `"error"` | Minimum severity to report: `error`, `warning`, `information`, or `hint` |
 
+### Remote Access (daemon)
+
+Settings for the background daemon and live shared sessions; see [Background daemon](daemon.md).
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `remote.background` | boolean | `false` | Interactive Volt starts/uses the daemon: it auto-registers the working directory as a workspace and acquires a conversation lease so a paired phone can co-attach to the open session live |
+| `remote.detachedRuntimeTtlMs` | number | `1800000` | How long the daemon retains an idle detached headless runtime (30 minutes) |
+| `remote.allowTools` | string[] | - | Tool allowlist for daemon-owned headless runtimes only; TUI-owned conversations use the TUI session's full tool set |
+
 ### Resources
 
 These settings define where to load extensions, skills, prompts, and themes from.

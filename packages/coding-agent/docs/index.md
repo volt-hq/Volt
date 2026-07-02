@@ -38,6 +38,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [Security](security.md) - project trust, sandbox boundaries, remote access warnings, and vulnerability reporting.
 - [Containerization](containerization.md) - sandbox volt with OpenShell, Gondolin, or Docker.
 - [Settings](settings.md) - global and project settings.
+- [Background daemon](daemon.md) - the voltd daemon: remote access, conversation leases, and live shared sessions.
 - [Keybindings](keybindings.md) - default shortcuts and custom keybindings.
 - [Sessions](sessions.md) - session management, branching, and tree navigation.
 - [Compaction](compaction.md) - context compaction and branch summarization.

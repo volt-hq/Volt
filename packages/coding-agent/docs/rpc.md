@@ -1527,9 +1527,10 @@ Some `ExtensionUIContext` methods are not supported or degraded in RPC mode beca
 - `getEditorText()` returns `""`
 - `getToolsExpanded()` returns `false`
 - `pasteToEditor()` delegates to `setEditorText()` (no paste/collapse handling)
-- `getAllThemes()` returns `[]`
-- `getTheme()` returns `undefined`
-- `setTheme()` returns `{ success: false, error: "..." }`
+
+The theme facade is fully functional in RPC mode: `getAllThemes()` returns the real theme list (builtin plus extension-registered), `getTheme()` resolves by name, and `setTheme()` applies the theme to the process and persists the choice. Under the background daemon, a successful `setTheme()` also broadcasts a `theme_snapshot` to connected desktop TUIs, which apply it unless the user explicitly picked a theme in that TUI session.
+
+For conversations owned by a desktop TUI and served to phones over the daemon's byte relay, `extension_ui_request` frames are suppressed on the relayed stream: dialogs are answered on the desktop where the extension's UI actually lives, and phones receive none of them.
 
 Note: `ctx.mode` is `"rpc"` and `ctx.hasUI` is `true` in RPC mode because the dialog and fire-and-forget methods are functional via the extension UI sub-protocol. Use `ctx.mode === "tui"` to guard TUI-specific features like `custom()` that require a real terminal.
 

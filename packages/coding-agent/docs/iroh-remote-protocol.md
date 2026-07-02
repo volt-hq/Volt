@@ -4,7 +4,7 @@ Iroh remote access tunnels Volt RPC JSONL over an Iroh QUIC bidirectional stream
 
 This protocol is preview-stable for external client authors. Clients must reject unsupported required values, ignore unknown fields unless this document says otherwise, and treat secrets as one-time credentials.
 
-For user-facing setup, run `volt remote host` on a trusted host workspace, create tickets with `volt remote pair`, inspect `volt remote status`, revoke clients with `volt remote revoke <node-id>` or `volt remote revoke --all`, and approve same-device re-pairing with `volt remote approve-repair <node-id>`. The host-side management workflow, state/audit paths, unsafe tool warnings, relay mode, and Node-only/Bun-binary limitation are documented in [Using Volt](usage.md#remote-access-over-iroh-preview) and [Security](security.md#remote-access-over-iroh-preview). This document defines the wire contract only.
+For user-facing setup, start the background daemon with `volt daemon start` (see [Background daemon](daemon.md)), create tickets with `volt remote pair`, inspect `volt remote status`, revoke clients with `volt remote revoke <node-id>`, and approve same-device re-pairing with `volt remote approve-repair <node-id>`. The host-side management workflow, state/audit paths, unsafe tool warnings, relay mode, and Node-only/Bun-binary limitation are documented in [Using Volt](usage.md#remote-access-over-iroh-preview) and [Security](security.md#remote-access-over-iroh-preview). This document defines the wire contract only.
 
 ## Version and ALPN
 
@@ -111,7 +111,7 @@ Host handshake failure outcomes:
 | --- | --- |
 | `invalid_workspace` | The workspace field is malformed. |
 | `invalid_conversation_target` | The stream mode, target, purpose, or session ID syntax is malformed or unsupported. |
-| `conversation_streams_unsupported` | Reserved for hosts that cannot provide conversation-bound mobile streams. Current `volt remote host` builds are conversation-only. |
+| `conversation_streams_unsupported` | Reserved for hosts that cannot provide conversation-bound mobile streams. Current daemon builds are conversation-only. |
 | `pairing_secret_expired` | The supplied pairing secret matches an expired pending ticket or retained expired tombstone. |
 | `pairing_secret_consumed` | The supplied pairing secret matches a retained consumed tombstone and this client is not the paired recovery node. |
 | `client_unknown` | The host does not know this client node ID and no active, expired, or consumed pairing secret applies. |
@@ -189,7 +189,7 @@ The successful response uses the normal RPC response shape:
 
 `abort` is the only direct remote cancellation command in v1. Command names such as `cancel`, `cancel_run`, `detach`, and `disconnect` are not forwarded by the remote command allowlist. App-level disconnect without stop should close the stream only; clients reconnect by opening a new authorized stream, then calling `get_state` and `get_transcript`.
 
-The integrated `volt remote host` runtime treats an authorized stream as a subscriber to host-owned session state. When the only subscriber detaches during active work, the prompt continues on the host. The same authoritative Iroh node ID, workspace, and session can reconnect to the detached runtime; `get_state.isStreaming` reports whether work is still active, and `get_transcript` recovers persisted output. Idle detached integrated runtimes are retained for 30 minutes by default, configurable with `--detached-runtime-ttl-ms`.
+The daemon's integrated runtime treats an authorized stream as a subscriber to host-owned session state. When the only subscriber detaches during active work, the prompt continues on the host. The same authoritative Iroh node ID, workspace, and session can reconnect to the detached runtime; `get_state.isStreaming` reports whether work is still active, and `get_transcript` recovers persisted output. Idle detached runtimes are retained for 30 minutes by default, configurable with the `remote.detachedRuntimeTtlMs` setting. Distinct paired devices may co-attach to one runtime, and when a desktop TUI owns the conversation lease the daemon transparently relays the stream to it; `remote_terminal` reasons `lease_transferred` and `session_rekeyed_reconnect` signal expected closures the client should reconnect through immediately. Prompt-class commands during an ownership drain fail with the transient error code `lease_draining` (with `retryAfterMs`).
 
 Host process exit, host crash, or explicit host shutdown are separate from client detach and can stop in-memory work because the runtime is gone. A reconnect after host exit requires a new host process and can recover only persisted session state.
 

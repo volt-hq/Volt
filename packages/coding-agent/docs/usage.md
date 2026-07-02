@@ -240,11 +240,11 @@ See [Volt Packages](packages.md) for package sources and security notes.
 
 ### Remote Access over Iroh (Preview)
 
-`volt remote host` exposes a local Volt runtime over Iroh. The feature is opt-in and host-controlled: provider credentials, workspace files, tool execution, sessions, state, and audit logs remain on the host machine.
+Remote access is served by the background daemon (`voltd`); see [Background daemon](daemon.md). The daemon owns the stable Iroh endpoint identity, pairing, workspace registration, push dispatch, and the conversation runtimes phones attach to. The feature is opt-in and host-controlled: provider credentials, workspace files, tool execution, sessions, state, and audit logs remain on the host machine. Start it with `volt daemon start`, or set `remote.background: true` so interactive Volt manages it automatically — with that setting on, a paired phone can attach to the SAME live conversation a desktop TUI has open, and the conversation survives closing the TUI.
 
-Phone setup uses a Pair Phone flow. For mobile-facing setup, start the host with `volt remote host --mobile`, then run `volt remote pair` only when adding a phone. That QR/ticket is a short-lived, one-time invitation. After the first successful pairing, the host records the phone's authoritative Iroh node ID in the host state file and the app saves a secret-free saved-host record. Later reconnects use that saved host and do not need another QR scan as long as the host restarts with the same state path and host identity.
+Phone setup uses a Pair Phone flow: run `volt remote pair` when adding a phone. That QR/ticket is a short-lived, one-time invitation. After the first successful pairing, the daemon records the phone's authoritative Iroh node ID in its state file and the app saves a secret-free saved-host record. Later reconnects use that saved host and do not need another QR scan; the daemon's persistent identity means pairings also survive daemon restarts.
 
-Workspace access is workstation-scoped in this preview. Register local desktop directories by name in the host state file, then pair the phone once. The app can later select only those registered workspace names; it cannot request host paths. Registering another workspace under the same state file makes that name available to already paired clients without another QR scan. The client's persisted tool grant applies across every registered workspace, and revocation blocks that phone from every workspace.
+Workspace access is workstation-scoped in this preview. Register local desktop directories by name with `volt remote workspace add` (or let a `remote.background` TUI auto-register its working directory), then pair the phone once. The app can later select only those registered workspace names; it cannot request host paths. Registering another workspace with the same daemon makes that name available to already paired clients without another QR scan. The client's persisted tool grant applies across every registered workspace, and revocation blocks that phone from every workspace.
 
 Integrated hosts advertise both `multi_streams.v1` and `conversation_streams.v1`. Mobile clients open a conversation-targeted stream by putting one stream mode in the Iroh hello:
 
@@ -263,13 +263,12 @@ Closing a stream, switching pinned tabs, app backgrounding, or network loss is d
 Happy path:
 
 ```bash
-# Terminal 1: register one or more named workspaces, then start the mobile-facing host.
-volt remote host --register-workspace volt=. --allow-tools read,grep,find,ls
-volt remote host --register-workspace app=<workspace-dir>
-cd <workspace-dir>
-volt remote host --mobile --yes
+# Start the daemon and register one or more named workspaces.
+volt daemon start
+volt remote workspace add . --name volt
+volt remote workspace add <workspace-dir> --name app
 
-# Terminal 2: ask the running host for a short-lived one-time pairing ticket.
+# Ask the daemon for a short-lived one-time pairing ticket.
 volt remote pair --workspace volt
 
 # From a source checkout demo client, connect with the printed ticket.
@@ -277,45 +276,41 @@ npm run iroh:poc:client -- "<ticket>" --get-state
 npm run iroh:poc:client -- "<ticket>" --message "List the top-level files."
 
 # Later: register another local workspace for the same paired phone.
-volt remote host --register-workspace other=<workspace-dir>
+volt remote workspace add <workspace-dir> --name other
 ```
 
 Common management commands:
 
 ```bash
-volt remote status                         # persisted state, workspaces, clients, tools, state/audit paths
-volt remote clients                        # paired client JSON without secrets
-volt remote revoke <node-id>               # revoke one client; live hosts also close active streams/connections
-volt remote revoke --all                   # revoke every paired client
-volt remote approve-repair <node-id>       # allow a revoked phone identity to re-pair with a fresh ticket
-volt remote host --register-workspace .    # register current directory by basename
-volt remote host --register-workspace other=<workspace-dir>
-volt remote host --unregister-workspace other
-volt remote pair --workspace volt --label "Jordan iPhone"
-volt remote host --workspace volt=<workspace-dir> --no-pairing
-
-# Mobile-facing startup does not create a pairing invite; pair explicitly.
-volt remote host --mobile --workspace volt=<workspace-dir> --yes
-volt remote pair --workspace volt --label "Jordan iPhone"
+volt daemon status                        # daemon health, workspaces, clients, leases
+volt daemon logs -f                       # follow the daemon log
+volt remote status                        # same status view as volt daemon status
+volt remote clients                       # paired client JSON without secrets
+volt remote revoke <node-id>              # revoke one client; closes its active streams
+volt remote approve-repair <node-id>      # allow a revoked phone identity to re-pair
+volt remote workspace add . --name volt   # register current directory
+volt remote workspace remove other        # unregister a workspace name
+volt remote workspace list
+volt remote pair --workspace volt
 ```
 
 Options to know:
 
-- Host: `--workspace <name=path>`, `--register-workspace [path|name=path]`, `--unregister-workspace <name>`, `--mobile`, `--relay <disabled|default>`, `--state <path>`, `--audit <path>`, `--allow-tools <list>`, `--profile <name>`, `--agent-dir <path>`, `--push-relay-url <url>`, `--push-relay-auth-token <token>`, `--detached-runtime-ttl-ms <ms>`, `--approve`, `--no-pairing`, `--once`, `--yes`.
-- Pair: `--workspace <name>`, `--allow-tools <list>`, `--label <label>`, `--ttl <duration>`, `--state <path>`, `--relay <disabled|default>`, `--yes`.
-- Management: `--state <path>` and `--audit <path>` for `status`, `clients`, `revoke`, and `approve-repair`.
+- Daemon behavior is settings-driven (see [Settings](settings.md)): `remote.background` starts and uses the daemon from interactive Volt, `remote.detachedRuntimeTtlMs` controls how long idle detached runtimes are retained (default 30 minutes), and `remote.allowTools` restricts tools for daemon-owned headless runtimes.
+- Pair: `--workspace <name>` selects the initial workspace for the ticket.
+- Daemon file layout, lease model, and troubleshooting live in [Background daemon](daemon.md).
 
 Security and support boundary:
 
-- The default remote tool grant enables the built-in tools `read,bash,edit,write,grep,find,ls,subagent` plus active tools registered by loaded extensions. Custom `--allow-tools` grants that differ from the default built-in list are strict; name extension tools explicitly when using one. The `subagent` tool can only run built-in or discovered named definitions, and child tools are clamped by the remote session's active tool grant.
-- Granting `bash`, `edit`, or `write` can modify host files or run shell commands. Extension tools run code installed on the host and may do the same. TTY host startup asks for confirmation and offers `trust` to continue while trusting project-local workspace resources; noninteractive unsafe grants, including the default grant, require `--yes`.
-- `--register-workspace` is a local desktop action. It stores a workspace name and realpath in the selected host state file, without starting a remote API for clients to create, rename, browse, or path-map workspaces. In a TTY, registration also offers `trust` when the workspace has project-local Volt resources; `--register-workspace --approve` saves workspace trust noninteractively. Removing a workspace unregisters the saved name from host state only; it does not delete files.
-- Bare `volt remote host` exposes the current working directory. If that directory is already registered, the saved workspace name and tool defaults are reused; otherwise the host registers it by basename.
-- If a host state file has multiple registered workspaces, `volt remote pair --workspace <name>` chooses the initial workspace for the ticket. It does not restrict that paired phone to only that workspace.
-- Pairing tickets are short-lived and one-time. Bare preview `volt remote host` shows a startup ticket as a terminal QR code by default when stderr is a TTY. `volt remote host --mobile` starts without an active startup pairing invite; use `volt remote pair` to create the QR/ticket when adding or explicitly re-pairing a phone. The QR is not used for ordinary reconnects, workspace registration changes, New Agent, Resume Agent, or pinned-tab changes. `volt remote pair` is mediated by a running host control channel; offline pairing from persisted state is not supported.
-- Saved-host reconnects omit the pairing secret and verify the host node ID. App restart, foreground reconnect after network loss, and host restart with the same host state path should use the saved-host path instead of asking for another QR.
-- A paired phone is authorized for the workstation represented by the host state file. It can reconnect to any registered workspace name in that state file, including names registered later, without scanning another QR.
-- On integrated hosts that advertise `multi_streams.v1` and `conversation_streams.v1`, that paired phone can open multiple conversation streams, including different sessions in the same workspace. The host rejects the same client opening the same workspace/session twice on one live Iroh connection with `duplicate_conversation_connection` and retry metadata. The first conversation stream on a new same-client connection can replace a stale active stream for the same workspace/session and reattach to the retained integrated runtime. If another client owns the requested workspace/session runtime, the host rejects with `conversation_in_use`.
+- The default remote tool grant enables the built-in tools `read,bash,edit,write,grep,find,ls,subagent` plus active tools registered by loaded extensions. A custom `remote.allowTools` list restricts daemon-owned headless runtimes only; name extension tools explicitly when using one. When a desktop TUI owns the conversation lease, phone prompts run with the TUI session's full local tool set (see [Security](security.md)). The `subagent` tool can only run built-in or discovered named definitions, and child tools are clamped by the remote session's active tool grant.
+- Granting `bash`, `edit`, or `write` can modify host files or run shell commands. Extension tools run code installed on the host and may do the same. Pairing a phone grants it desktop-equivalent power over the workspaces it can reach; pair only devices you control.
+- `volt remote workspace add` is a local desktop action. It stores a workspace name and realpath in the daemon's state file, without starting a remote API for clients to create, rename, browse, or path-map workspaces. Removing a workspace unregisters the saved name from daemon state only; it does not delete files.
+- With `remote.background: true`, interactive Volt auto-registers its working directory when it is not inside a registered workspace (named by basename, with a numeric suffix on collision).
+- If the daemon has multiple registered workspaces, `volt remote pair --workspace <name>` chooses the initial workspace for the ticket. It does not restrict that paired phone to only that workspace.
+- Pairing tickets are short-lived and one-time. The daemon never creates a pairing invite at startup; use `volt remote pair` to create the QR/ticket when adding or explicitly re-pairing a phone. The QR is not used for ordinary reconnects, workspace registration changes, New Agent, Resume Agent, or pinned-tab changes. `volt remote pair` talks to the running daemon; offline pairing from persisted state is not supported.
+- Saved-host reconnects omit the pairing secret and verify the host node ID. App restart, foreground reconnect after network loss, and daemon restart all use the saved-host path instead of asking for another QR (the daemon keeps a stable Iroh identity in its state file).
+- A paired phone is authorized for the workstation represented by the daemon's state file. It can reconnect to any registered workspace name, including names registered later, without scanning another QR.
+- On integrated hosts that advertise `multi_streams.v1` and `conversation_streams.v1`, that paired phone can open multiple conversation streams, including different sessions in the same workspace. The host rejects the same client opening the same workspace/session twice on one live Iroh connection with `duplicate_conversation_connection` and retry metadata. The first conversation stream on a new same-client connection can replace a stale active stream for the same workspace/session and reattach to the retained runtime. Distinct paired devices co-attach to one shared conversation runtime; the old `conversation_in_use` handshake rejection is retired (all paired devices belong to the same user).
 - Hosts that do not advertise `conversation_streams.v1` are incompatible with the mobile pinned-agent model. The app keeps the saved host and shows an update/integrated-host-required state rather than falling back to mobile mutation commands.
 - Registering a workspace does not add built-in tools to a client. The persisted client `allowedTools` grant applies across all registered workspaces until the client is revoked and paired again with a different grant; when that grant is the default built-in list, active extension tools in the selected workspace are also exposed.
 - Revoked clients cannot reconnect or silently re-pair. Live hosts close active streams and runtimes for that phone across all workspaces. To trust the same phone identity again, run `volt remote approve-repair <node-id>` on the desktop host, then create a fresh pairing ticket.
@@ -324,14 +319,14 @@ Security and support boundary:
 - Remote sessions do not bypass project trust. A saved trust decision for the workspace is honored; otherwise the host runs project resources untrusted unless the host user chooses `trust` in the prompt or passes `--approve`.
 - In the default integrated runtime, app backgrounding, network loss, or stream close detaches the client and does not send `abort`. Active work continues on the host; the same paired client/workspace/session can reconnect and refresh with `get_state` and `get_transcript`. A pinned-agent client should reopen only the selected saved agent on foreground recovery; hidden pins remain detached until selected and then catch up from state/transcript.
 - Remote stop/cancel controls must send the `abort` RPC command. Closing the stream without `abort` is disconnect only.
-- Idle detached integrated runtimes are retained for 30 minutes by default; change this with `--detached-runtime-ttl-ms <ms>`. Host exit, crash, explicit shutdown, or `--once` is not durable recovery for active work.
-- State and audit JSONL are stored under the Volt agent config directory by default, or under the paths passed with `--state` and `--audit`.
-- Remote push notifications use the managed Volt push relay by default. The mobile app registers its FCM token with the relay and sends the host target-scoped relay credentials over Iroh; the host does not store raw FCM tokens. Use `--push-relay-url` or `VOLT_PUSH_RELAY_URL` only for a custom relay, and `--push-relay-auth-token` or `VOLT_PUSH_RELAY_AUTH_TOKEN` only when that custom relay requires shared bearer auth.
+- Idle detached runtimes are retained for 30 minutes by default; change this with the `remote.detachedRuntimeTtlMs` setting. Daemon exit, crash, or explicit shutdown is not durable recovery for active work.
+- State and audit JSONL are stored under `~/.volt/agent/daemon/` (`state.json`, `audit.jsonl`); see [Background daemon](daemon.md).
+- Remote push notifications use the managed Volt push relay by default. The mobile app registers its FCM token with the relay and sends the host target-scoped relay credentials over Iroh; the host does not store raw FCM tokens. Use `VOLT_PUSH_RELAY_URL` only for a custom relay, and `VOLT_PUSH_RELAY_AUTH_TOKEN` only when that custom relay requires shared bearer auth.
 - Live Activity updates are bound to the selected conversation stream. When an ActivityKit push token is available, the app first sends it to the host as `register_push_target.args.liveActivity` with the activity ID, token environment, and lowercase SHA-256 hash. After that delivery channel is acknowledged, the app sends `register_live_activity` with workspace name, session ID, activity ID, platform, token environment, and the ActivityKit token hash. The host validates the hash against the existing delivery channel and cleans registrations up on unregister, selected-stream abort, replacement, revocation, workspace unregister/authorization removal, or retained-runtime disposal.
-- `volt remote host` uses `--relay default` by default so saved-host reconnects can survive host restarts. `volt remote host --mobile` remains the mobile-facing mode because it skips startup pairing. Use `--relay disabled` only as an explicit LAN-only opt-out.
-- `volt remote pair` creates pairing tickets with the live host relay mode unless `--relay <disabled|default>` is supplied as an expectation check; it cannot change a running host's relay mode.
-- `volt remote host` requires a Node.js npm install or source checkout with optional `@number0/iroh` available for the platform. Bun binary builds reject it because the native Iroh adapter is not bundled.
-- Known preview limitations: host process exit is not durable active-work recovery, idle detached runtime retention is time-limited, very large hidden-agent sets may need future host/app resource controls, per-workspace client grants are deferred, remote workspace creation/rename/path browsing stays local to the desktop host, `volt remote status` is a persisted-state view, and default relay/discovery should be validated in the target cross-network environment.
+- The daemon uses the default Iroh relay mode so saved-host reconnects survive restarts and network changes.
+- `volt remote pair` creates pairing tickets with the daemon's live relay mode; it cannot change a running daemon's relay mode.
+- The daemon requires a Node.js npm install or source checkout with optional `@number0/iroh` available for the platform. Bun binary builds reject `volt daemon` because the native Iroh adapter is not bundled.
+- Known preview limitations: daemon exit is not durable active-work recovery, idle detached runtime retention is time-limited, very large hidden-agent sets may need future host/app resource controls, per-workspace client grants are deferred, remote workspace creation/rename/path browsing stays local to the desktop host, and default relay/discovery should be validated in the target cross-network environment.
 
 See [Iroh remote protocol v1](iroh-remote-protocol.md), [Iroh remote access design](iroh-remote-access-design.md), and [Security](security.md#remote-access-over-iroh-preview).
 

@@ -509,16 +509,16 @@ volt config                    # Enable/disable package resources
 
 ### Remote Access over Iroh (Preview)
 
-`volt remote host` exposes a local Volt runtime over Iroh. Remote access is opt-in: nothing listens until you start the host. The host keeps provider credentials, files, tools, settings, sessions, state, and audit logs on the host machine.
+Remote access is served by a background daemon (`voltd`). It is opt-in: nothing listens until you start the daemon. The host keeps provider credentials, files, tools, settings, sessions, state, and audit logs on the host machine, and the daemon's persistent Iroh identity means phones stay paired across restarts.
 
 Copy-pastable happy path:
 
 ```bash
-# Terminal 1: start a host for one named workspace.
-# The host prints a scannable pairing-ticket QR code when stderr is a TTY.
-volt remote host --workspace volt=/path/to/repo --allow-tools read,grep,find,ls
+# Start the daemon and register a workspace.
+volt daemon start
+volt remote workspace add /path/to/repo --name volt
 
-# Terminal 2: create a pairing ticket from the running host.
+# Create a short-lived one-time pairing ticket (QR when stderr is a TTY).
 volt remote pair --workspace volt
 
 # From a source checkout demo client, connect with the printed ticket.
@@ -526,28 +526,30 @@ npm run iroh:poc:client -- "<ticket>" --get-state
 npm run iroh:poc:client -- "<ticket>" --message "List the top-level files."
 ```
 
+Set `remote.background: true` in settings and interactive Volt manages the daemon automatically: a paired phone can then attach to the SAME live conversation your desktop TUI has open (the footer shows `📱 n`), keep the conversation when you quit the TUI, and hand it back at the next turn boundary when you reopen it.
+
 Management commands:
 
 ```bash
-volt remote status                         # persisted state, workspaces, clients, tools, state/audit paths
-volt remote clients                        # paired client JSON
-volt remote revoke <node-id>               # revoke one client and close active connections when the host is live
-volt remote revoke --all                   # revoke every paired client
-volt remote host --workspace volt=/path/to/repo --no-pairing
+volt daemon status                        # daemon health, workspaces, clients, leases
+volt remote status                        # same status view
+volt remote clients                       # paired client JSON
+volt remote revoke <node-id>              # revoke one client and close its connections
+volt remote workspace add . --name volt
+volt remote workspace remove volt
 ```
 
 Security defaults and limitations:
 
-- The default remote tool grant enables built-in `read,bash,edit,write,grep,find,ls,subagent` plus active tools registered by loaded extensions. Custom grants that differ from the default built-in list are strict; name extension tools explicitly when using one. The `subagent` tool only starts built-in or discovered named definitions, and child tools are clamped by the remote session's active tool grant.
-- Granting `bash`, `edit`, or `write` can modify the host or run shell commands. Extension tools run code installed on the host and may do the same. TTY host startup asks for confirmation and offers `trust` to continue while trusting workspace resources; noninteractive unsafe grants require `--yes`.
-- Pairing tickets are short-lived, one-time credentials. `volt remote host` shows the startup ticket as a terminal QR code by default when stderr is a TTY. `volt remote pair` requires a running host control channel; it does not generate offline tickets from persisted state.
+- The default remote tool grant enables built-in `read,bash,edit,write,grep,find,ls,subagent` plus active tools registered by loaded extensions. A custom `remote.allowTools` list restricts daemon-owned headless runtimes; when a desktop TUI owns the conversation, phone prompts use the TUI session's full local tool set.
+- Granting `bash`, `edit`, or `write` can modify the host or run shell commands. Extension tools run code installed on the host and may do the same. Pair only devices you control.
+- Pairing tickets are short-lived, one-time credentials. `volt remote pair` talks to the running daemon; it does not generate offline tickets from persisted state.
 - Remote workspaces are selected by saved name, not arbitrary client-provided paths.
-- Remote sessions do not bypass project trust. Saved workspace trust is honored; otherwise use the host prompt's `trust` option or `--approve` only when the host user trusts the workspace resources.
-- Default paths are `~/.volt/agent/remote/iroh-host.json` for state and `~/.volt/agent/remote/iroh-host.audit.jsonl` for audit JSONL.
-- Iroh relay/discovery defaults to `--relay default` so saved-host reconnects survive host restarts. Use `--relay disabled` only for explicit LAN-only testing.
-- Remote host support requires a Node.js npm package install or source checkout with optional `@number0/iroh` available for the platform. Bun binary builds reject `volt remote host` because the native Iroh adapter is not bundled.
+- Remote sessions do not bypass project trust. Saved workspace trust is honored; otherwise project resources run untrusted.
+- Daemon files live under `~/.volt/agent/daemon/` (`state.json`, `audit.jsonl`, `voltd.log`); legacy `remote/iroh-host.json` state migrates automatically with pairings intact.
+- The daemon requires a Node.js npm package install or source checkout with optional `@number0/iroh` available for the platform. Bun binary builds reject `volt daemon` because the native Iroh adapter is not bundled.
 
-See [Iroh remote protocol v1](docs/iroh-remote-protocol.md), [Iroh remote access design](docs/iroh-remote-access-design.md), and [Security](docs/security.md#remote-access-over-iroh-preview).
+See [Background daemon](docs/daemon.md), [Iroh remote protocol v1](docs/iroh-remote-protocol.md), and [Security](docs/security.md#remote-access-over-iroh-preview).
 
 ### Print Mode Stdin
 

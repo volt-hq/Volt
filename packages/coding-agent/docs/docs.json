@@ -32,6 +32,10 @@
           "path": "settings.md"
         },
         {
+          "title": "Background Daemon",
+          "path": "daemon.md"
+        },
+        {
           "title": "LSP Diagnostics & Navigation",
           "path": "lsp.md"
         },
