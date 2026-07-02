@@ -52,7 +52,7 @@ export async function probeDaemon(agentDir: string = getAgentDir()): Promise<Dae
 	return { healthy: false, socketPath: paths.socketPath };
 }
 
-function resolveDaemonCliInvocation(): { nodeArgs: string[]; entry: string } {
+export function resolveDaemonCliInvocation(): { nodeArgs: string[]; entry: string } {
 	const packageDir = getPackageDir();
 	const sourceEntry = join(packageDir, "src", "cli.ts");
 	if (existsSync(sourceEntry)) {

@@ -32,6 +32,8 @@ volt daemon stop                  Graceful shutdown (state flushed, phones notif
 volt daemon status [--json]       Status; exit 0 when running, 1 when not.
 volt daemon restart               Stop then start; persistent state survives.
 volt daemon logs [-f] [-n N]      Tail the daemon log.
+volt daemon install-service       Register a login service (launchd/systemd).
+volt daemon uninstall-service     Remove the login service.
 volt daemon run --foreground      Run in this process (internal; used by start).
 
 volt remote pair [--workspace <name>]   Create a pairing ticket, wait for the phone.
@@ -47,6 +49,12 @@ volt remote workspace list
 `volt remote host` is gone; running it prints a pointer to `volt daemon
 start`. The daemon requires Node.js with the optional `@number0/iroh` native
 adapter (Bun binary builds cannot host it, matching the old restriction).
+
+`volt daemon install-service` writes a launchd LaunchAgent (macOS) or a
+systemd user unit (Linux) that starts the daemon at login. The service does
+not auto-restart after a graceful `volt daemon stop`; on Linux, run
+`loginctl enable-linger` if the daemon should also run without an active
+login session.
 
 ## File layout
 

@@ -7,6 +7,7 @@ import { probeControlSocket } from "./control-server.ts";
 import { createIrohDaemonService } from "./iroh-service.ts";
 import { readPidfile, runVoltDaemon } from "./main.ts";
 import { getDaemonPaths } from "./paths.ts";
+import { installDaemonService, uninstallDaemonService } from "./service-install.ts";
 import { ensureDaemonRunning, probeDaemon } from "./spawn.ts";
 
 const STOP_TIMEOUT_MS = 75_000; // 60s drain cap + margin
@@ -23,6 +24,8 @@ Commands:
   status [--json]       Show daemon status; exit 0 when running, 1 when not.
   restart               Stop then start; persistent state survives.
   logs [-f] [-n N]      Tail the daemon log (default ${DEFAULT_LOG_TAIL_LINES} lines).
+  install-service       Register a login service (launchd/systemd) that starts the daemon.
+  uninstall-service     Remove the login service.
   run --foreground      Run the daemon in this process (internal; used by start).
 `);
 }
@@ -249,6 +252,26 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 		case "logs":
 			await daemonLogs(agentDir, rest);
 			return true;
+		case "install-service": {
+			const result = await installDaemonService({ agentDir });
+			for (const message of result.messages) {
+				console.error(message);
+			}
+			if (!result.ok) {
+				process.exitCode = 1;
+			}
+			return true;
+		}
+		case "uninstall-service": {
+			const result = await uninstallDaemonService({ agentDir });
+			for (const message of result.messages) {
+				console.error(message);
+			}
+			if (!result.ok) {
+				process.exitCode = 1;
+			}
+			return true;
+		}
 		case "run": {
 			if (!rest.includes("--foreground")) {
 				console.error("Error: volt daemon run requires --foreground");
