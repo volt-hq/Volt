@@ -1,5 +1,6 @@
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
+import type { Socket } from "node:net";
 import { getAgentDir, VERSION } from "../config.ts";
 import { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
@@ -76,7 +77,9 @@ export interface VoltdServiceExtensionInstance {
 	/** Extra request handling; return true when the request was handled. */
 	handleRequest?(connection: ControlConnection, request: ControlRequest): Promise<boolean> | boolean;
 	onConnectionClosed?(connection: ControlConnection): void;
-	statusExtras?(): { leases?: ControlLeaseStatus[]; phoneConnections?: number };
+	statusExtras?(): { leases?: ControlLeaseStatus[]; phoneConnections?: number; relayCount?: number };
+	/** Redeem a relay hello token; true when the socket was taken over. */
+	admitRelay?(relayId: string, relayToken: string, socket: Socket, bufferedRemainder: Buffer): boolean;
 	shutdown?(): Promise<void>;
 }
 
@@ -307,6 +310,16 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			handlers: {
 				onRequest: handleRequest,
 				isShuttingDown: () => shuttingDown,
+				relayAdmission: {
+					admitRelay(hello, socket, bufferedRemainder) {
+						for (const extension of extensionInstances) {
+							if (extension.admitRelay?.(hello.relayId, hello.relayToken, socket, bufferedRemainder)) {
+								return true;
+							}
+						}
+						return false;
+					},
+				},
 				onConnectionClosed(connection) {
 					for (const extension of extensionInstances) {
 						extension.onConnectionClosed?.(connection);

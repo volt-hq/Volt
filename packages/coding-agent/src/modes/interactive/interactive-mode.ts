@@ -56,6 +56,7 @@ import {
 	getDebugLogPath,
 	getDocsPath,
 	getShareViewerUrl,
+	isBunBinary,
 	VERSION,
 } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
@@ -89,6 +90,10 @@ import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
 import { type ConfiguredPackage, DefaultPackageManager } from "../../core/package-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
+import type { IrohRemoteClientAuthorizationSuccess } from "../../core/remote/iroh/authorization.ts";
+import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../../core/remote/iroh/handshake.ts";
+import { writeIrohRemoteHandshakeResponse } from "../../core/remote/iroh/handshake-reader.ts";
+import { IrohRemoteHostStateManager } from "../../core/remote/iroh/state-manager.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import {
 	formatReviewWorkflowSummary,
@@ -109,6 +114,15 @@ import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
+import {
+	handleIntegratedConversationRpcCommand,
+	REMOTE_SESSION_LIST_CURSOR_TTL_MS,
+} from "../../daemon/conversation-commands.ts";
+import {
+	createIntegratedConversationHandshakeResponse,
+	decorateRemoteHostState,
+	type IntegratedConversationSessionSelection,
+} from "../../daemon/handshake-responses.ts";
 import {
 	findCatalogPackage,
 	loadDefaultStoreCatalog,
@@ -142,6 +156,7 @@ import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewVoltVersion, type LatestVoltRelease } from "../../utils/version-check.ts";
 import { getVoltUserAgent } from "../../utils/volt-user-agent.ts";
+import { runIrohRemoteRpcMode } from "../rpc/iroh-remote-rpc-mode.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
@@ -158,6 +173,21 @@ import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
+import {
+	type AcquireOutcome,
+	createDaemonAttach,
+	createDisabledDaemonAttach,
+	type DaemonAttach,
+	type DaemonRelayOffer,
+	type OpenedRelay,
+} from "./daemon-attach.ts";
+import { adaptRelaySocketToIrohStream } from "./relay-stream-adapter.ts";
+
+function isAsciiOnlyTerminal(): boolean {
+	const termProgram = process.env.TERM_PROGRAM ?? "";
+	return process.env.VOLT_ASCII === "1" || process.env.TERM === "linux" || termProgram === "";
+}
+
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { renderLogo } from "./components/logo.ts";
@@ -397,6 +427,12 @@ export class InteractiveMode {
 	// Shutdown state
 	private shutdownRequested = false;
 	private turnDoneAlertTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+
+	// Daemon integration (conversation leases + byte relay). No-op when
+	// remote.background is off or the daemon is unreachable.
+	private daemonAttach: DaemonAttach = createDisabledDaemonAttach();
+	private daemonRelayServers = new Set<Promise<void>>();
+	private daemonLeaseSessionId: string | undefined;
 
 	// Extension UI state
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
@@ -835,6 +871,10 @@ export class InteractiveMode {
 
 		// Initialize available provider count for footer display
 		await this.updateAvailableProviderCount();
+
+		// Start the daemon integration (conversation leases + byte relay). Never
+		// blocks startup: failures are silent no-ops.
+		await this.initDaemonAttach().catch(() => {});
 	}
 
 	/**
@@ -1715,6 +1755,178 @@ export class InteractiveMode {
 		this.showStartupNoticesIfNeeded();
 	}
 
+	/**
+	 * Start the daemon integration (conversation leases + byte relay). No-ops
+	 * unless remote.background is on and the platform supports the daemon.
+	 */
+	private async initDaemonAttach(): Promise<void> {
+		const remoteBackground = this.settingsManager.getRemoteSettings().background === true;
+		if (!remoteBackground || process.platform === "win32" || isBunBinary) {
+			return;
+		}
+		this.daemonAttach = createDaemonAttach({
+			cwd: this.sessionManager.getCwd(),
+			agentDir: getAgentDir(),
+			autoStart: true,
+		});
+		this.daemonAttach.onRelayOffer((offer, openRelay) => {
+			void this.serveRelayConversation(offer, openRelay);
+		});
+		this.daemonAttach.onRelayCountChange(() => this.updatePhoneFooterIndicator());
+		this.daemonAttach.onReacquired((_sessionId, outcome) => {
+			void this.handleReacquireOutcome(outcome);
+		});
+		await this.daemonAttach.start();
+		await this.acquireCurrentSessionLease();
+	}
+
+	private async acquireCurrentSessionLease(): Promise<void> {
+		if (this.daemonAttach.connectionState() === "disabled") {
+			return;
+		}
+		this.daemonLeaseSessionId = this.session.sessionId;
+		const outcome = await this.daemonAttach.acquire(this.session.sessionId);
+		if (outcome.kind === "denied") {
+			// Multi-TUI is a non-goal: another TUI owns the session. Continue in a
+			// plain read-from-file open (no live view); the user may retry on action.
+			this.showWarning("This conversation is open in another desktop window; live sharing is disabled here.");
+		}
+		// Pending (drain) rendering lands with the handoff milestone; for now the
+		// lease resolves warm at the next turn boundary.
+		this.updatePhoneFooterIndicator();
+	}
+
+	private async handleReacquireOutcome(outcome: AcquireOutcome): Promise<void> {
+		if (outcome.kind === "granted" && (outcome.handoff === "warm" || outcome.handoff === "cold")) {
+			// The daemon spun up a runtime during the reconnect gap; absorb any file
+			// changes it appended.
+			await this.session.reload().catch(() => {});
+			this.renderCurrentSessionState();
+			this.ui.requestRender();
+		}
+	}
+
+	/**
+	 * Serve a relayed phone conversation from this TUI's in-process runtime
+	 * (§5.6 step 7-9). The daemon has already authenticated the phone and
+	 * resolved the session target; the TUI writes the handshake response itself.
+	 */
+	private async serveRelayConversation(offer: DaemonRelayOffer, openRelay: () => Promise<OpenedRelay>): Promise<void> {
+		let opened: OpenedRelay;
+		try {
+			opened = await openRelay();
+		} catch {
+			return;
+		}
+		const relayedStream = adaptRelaySocketToIrohStream(opened.stream);
+		const preamble = opened.preamble;
+		const handshake = preamble.handshake as {
+			hello: IrohRemoteHello;
+			response: IrohRemoteHandshakeSuccess;
+			initialInput?: number[];
+		};
+		const authorizationSubset = preamble.authorization;
+		const authorization = {
+			ok: true as const,
+			allowTools: "",
+			client: {
+				nodeId: authorizationSubset.clientNodeId,
+				label: authorizationSubset.clientNodeId,
+				allowedWorkspaces: [authorizationSubset.workspaceName],
+				allowedTools: "",
+				pairedAt: 0,
+				lastSeenAt: 0,
+			},
+			paired: true,
+			pairingSecretConsumed: false,
+			workspace: { name: authorizationSubset.workspaceName, path: authorizationSubset.workspacePath },
+			workspaceNames: [authorizationSubset.workspaceName],
+			workspaces: [{ name: authorizationSubset.workspaceName, status: "available" as const }],
+		} satisfies IrohRemoteClientAuthorizationSuccess;
+
+		const responseContext = { hostNodeId: undefined, relayMode: undefined };
+		const sessionSelection: IntegratedConversationSessionSelection =
+			preamble.resolvedTarget.selection === "created"
+				? { kind: "created", sessionId: preamble.resolvedTarget.sessionId }
+				: {
+						kind: preamble.resolvedTarget.selection,
+						requestedSessionId: preamble.resolvedTarget.requestedSessionId ?? preamble.resolvedTarget.sessionId,
+						sessionId: preamble.resolvedTarget.sessionId,
+					};
+
+		const server = (async () => {
+			try {
+				// The TUI writes the handshake success response itself, keeping
+				// construction identical to the daemon-owned path.
+				const handshakeResponse = createIntegratedConversationHandshakeResponse(
+					{ hello: handshake.hello, response: handshake.response },
+					authorization,
+					this.session.sessionId,
+					sessionSelection,
+					responseContext,
+				);
+				await writeIrohRemoteHandshakeResponse(relayedStream.send, handshakeResponse);
+
+				await runIrohRemoteRpcMode(this.runtimeHost, {
+					stream: relayedStream,
+					disposeRuntimeOnClose: false,
+					workspaceName: authorization.workspace.name,
+					workspacePath: authorization.workspace.path,
+					suppressExtensionUiRequests: true,
+					decorateOutbound: (value) => decorateRemoteHostState(value, authorization, responseContext),
+					initialInput: handshake.initialInput,
+					remoteCommandHandler: (command) =>
+						handleIntegratedConversationRpcCommand(
+							command as { type: string } & Record<string, unknown>,
+							authorization,
+							{
+								stateManager: new IrohRemoteHostStateManager(),
+								sessionListCursors: new Map(),
+								sessionListCursorTtlMs: REMOTE_SESSION_LIST_CURSOR_TTL_MS,
+							},
+							this.runtimeHost,
+						),
+					onSessionChanged: async (session) => {
+						await this.daemonAttach.rekey(offer.sessionId, session.sessionId);
+					},
+					registerPushTarget: async (args) => {
+						await this.daemonAttach.forwardPushRegister(offer.sessionId, "push_target", args);
+						return { type: "response", command: "register_push_target", success: true } as never;
+					},
+				});
+			} catch {
+				// Relay teardown surfaces to the phone via the daemon's close reason.
+			} finally {
+				relayedStream.close();
+				opened.finished();
+			}
+		})();
+		this.daemonRelayServers.add(server);
+		void server.finally(() => this.daemonRelayServers.delete(server));
+		this.updatePhoneFooterIndicator();
+		await server;
+	}
+
+	private updatePhoneFooterIndicator(): void {
+		const count = this.daemonAttach.relayCount();
+		const label = count >= 1 ? (isAsciiOnlyTerminal() ? `[phone ${count}]` : `📱 ${count}`) : undefined;
+		this.footerDataProvider.setExtensionStatus("__phone_attached", label);
+		this.footer.invalidate();
+		this.ui.requestRender();
+	}
+
+	private async releaseDaemonLeaseOnQuit(): Promise<void> {
+		if (this.daemonAttach.connectionState() === "disabled") {
+			return;
+		}
+		try {
+			await this.daemonAttach.release(this.session.sessionId);
+			await this.daemonAttach.dispose();
+		} catch {
+			// Daemon-side implicit release on disconnect covers any failure here.
+		}
+	}
+
 	private applyRuntimeSettings(): void {
 		configureHttpDispatcher(this.settingsManager.getHttpIdleTimeoutMs());
 		this.footer.setSession(this.session);
@@ -1743,6 +1955,28 @@ export class InteractiveMode {
 		await this.updateAvailableProviderCount();
 		this.updateEditorBorderColor();
 		this.updateTerminalTitle();
+		await this.reconcileDaemonLease();
+	}
+
+	/**
+	 * Keep the daemon lease pointed at the currently open session. Called after
+	 * every session (re)bind: releases the previous lease and acquires the new
+	 * one when the session id changed (/new, resume, fork, tree navigation).
+	 */
+	private async reconcileDaemonLease(): Promise<void> {
+		if (this.daemonAttach.connectionState() === "disabled") {
+			return;
+		}
+		const sessionId = this.session.sessionId;
+		if (this.daemonLeaseSessionId === sessionId) {
+			return;
+		}
+		const previous = this.daemonLeaseSessionId;
+		this.daemonLeaseSessionId = sessionId;
+		if (previous !== undefined) {
+			await this.daemonAttach.release(previous).catch(() => {});
+		}
+		await this.acquireCurrentSessionLease();
 	}
 
 	private async handleFatalRuntimeError(prefix: string, error: unknown): Promise<never> {
@@ -3602,6 +3836,9 @@ export class InteractiveMode {
 			// which the stdout/stderr error handler turns into emergencyTerminalExit;
 			// the render loop is already idle, so this cannot hot-spin (see #4144).
 			await this.runtimeHost.dispose();
+			// Hand the session back to the daemon only after the runtime finished
+			// writing the session file, so the daemon's lazy resume sees final state.
+			await this.releaseDaemonLeaseOnQuit();
 			await rememberActiveProfile();
 			await this.ui.terminal.drainInput(1000);
 			this.stop();
@@ -3617,6 +3854,9 @@ export class InteractiveMode {
 
 		this.stop();
 		await this.runtimeHost.dispose();
+		// Hand the session back to the daemon only after the runtime finished
+		// writing the session file, so the daemon's lazy resume sees final state.
+		await this.releaseDaemonLeaseOnQuit();
 		await rememberActiveProfile();
 
 		const resumeCommand = formatResumeCommand(this.sessionManager);

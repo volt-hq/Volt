@@ -240,6 +240,37 @@ export class ControlLineDecoder {
 		}
 	}
 
+	/**
+	 * Parse complete lines one at a time, invoking handle per message. When
+	 * handle returns "stop" (relay handoff), decoding halts immediately and any
+	 * bytes past the consumed line stay buffered for drainRemainder(). Unlike
+	 * push(), bytes arriving after a stop are never JSON-decoded — required for
+	 * relay hellos, where everything after the hello line is opaque payload.
+	 */
+	pushEach(chunk: Buffer, handle: (message: unknown) => "continue" | "stop"): void {
+		this.buffered = this.buffered.length === 0 ? Buffer.from(chunk) : Buffer.concat([this.buffered, chunk]);
+		while (true) {
+			const newlineIndex = this.buffered.indexOf(0x0a);
+			if (newlineIndex === -1) {
+				if (this.buffered.length > CONTROL_MAX_LINE_BYTES) {
+					throw new ControlFrameTooLargeError(this.buffered.length);
+				}
+				return;
+			}
+			if (newlineIndex > CONTROL_MAX_LINE_BYTES) {
+				throw new ControlFrameTooLargeError(newlineIndex);
+			}
+			const line = this.buffered.subarray(0, newlineIndex).toString("utf8");
+			this.buffered = this.buffered.subarray(newlineIndex + 1);
+			if (line.trim().length === 0) {
+				continue;
+			}
+			if (handle(JSON.parse(line)) === "stop") {
+				return;
+			}
+		}
+	}
+
 	/** Bytes buffered past the last complete line (used when switching a relay conn to raw mode). */
 	drainRemainder(): Buffer {
 		const remainder = this.buffered;

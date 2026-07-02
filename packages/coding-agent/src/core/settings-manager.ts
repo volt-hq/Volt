@@ -152,6 +152,16 @@ export interface Settings {
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
 	lsp?: LspSettings; // LSP diagnostics after edit/write (see docs/lsp.md)
+	remote?: RemoteSettings; // voltd daemon / remote access (see docs/daemon.md)
+}
+
+export interface RemoteSettings {
+	/** Auto-spawn the voltd daemon at startup and integrate conversation leases. Default: false. */
+	background?: boolean;
+	/** Detached headless runtime retention TTL in milliseconds (daemon-side). */
+	detachedRuntimeTtlMs?: number;
+	/** Tool allowlist for daemon-owned headless runtimes only. */
+	allowTools?: string[];
 }
 
 /** Deep merge records: overrides take precedence, nested objects merge recursively, arrays replace. */
@@ -1252,6 +1262,10 @@ export class SettingsManager {
 
 	getHttpIdleTimeoutMs(): number {
 		return parseTimeoutSetting(this.settings.httpIdleTimeoutMs, "httpIdleTimeoutMs") ?? DEFAULT_HTTP_IDLE_TIMEOUT_MS;
+	}
+
+	getRemoteSettings(): RemoteSettings {
+		return this.settings.remote ?? {};
 	}
 
 	setHttpIdleTimeoutMs(timeoutMs: number): void {

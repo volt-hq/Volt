@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
+import type { Socket } from "node:net";
 import type { IrohRemoteActiveStreamEntry } from "../core/remote/iroh/active-stream-registry.ts";
 import { IrohRemoteActiveStreamRegistry } from "../core/remote/iroh/active-stream-registry.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
@@ -26,6 +27,7 @@ import type { IrohRemoteWorkspace } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import { getIrohRemoteWorkspaceAvailabilityStatus } from "../core/remote/iroh/workspace.ts";
 import type { IrohBiStreamLike } from "../core/rpc/iroh-transport.ts";
+import { getDefaultSessionDir } from "../core/session-manager.ts";
 import { ProjectTrustStore } from "../core/trust-manager.ts";
 import { runIrohRemoteRpcMode } from "../modes/rpc/iroh-remote-rpc-mode.ts";
 import type { ControlLeaseStatus, ControlRequest } from "./control-protocol.ts";
@@ -56,6 +58,12 @@ import {
 } from "./iroh-native.ts";
 import { LeaseBroker } from "./lease-broker.ts";
 import type { VoltdRuntimeServices, VoltdServiceExtension } from "./main.ts";
+import { RELAY_TOKEN_TTL_MS, RelayRegistry } from "./relay-stream.ts";
+import {
+	createSessionManagerTargetStore,
+	type IrohRemoteSessionTarget,
+	resolveIrohRemoteSessionTarget,
+} from "./session-target.ts";
 import {
 	runWorkspaceDiscoveryStream,
 	runWorkspaceManagementStream,
@@ -187,6 +195,8 @@ export function createIrohDaemonService(config: IrohDaemonServiceConfig = {}): V
 			handleRequest: (connection, request) => service.handleRequest(connection, request),
 			onConnectionClosed: (connection) => service.onControlConnectionClosed(connection),
 			statusExtras: () => service.statusExtras(),
+			admitRelay: (relayId, relayToken, socket, bufferedRemainder) =>
+				service.admitRelay(relayId, relayToken, socket, bufferedRemainder),
 			shutdown: () => service.shutdown(),
 		};
 	};
@@ -208,6 +218,7 @@ class IrohDaemonService {
 	private readonly trustStore: ProjectTrustStore;
 	private readonly runtimes: IntegratedRuntimeRegistry;
 	private readonly leaseBroker: LeaseBroker;
+	private readonly relays = new RelayRegistry();
 	private endpoint: IrohEndpointLike | undefined;
 	private engine: IrohRemoteHostEngine | undefined;
 	private hostNodeId: string | undefined;
@@ -258,8 +269,10 @@ class IrohDaemonService {
 			closePhoneStreams: async (workspaceName, sessionId, reason) => {
 				await this.closeActiveStreamsForConversationKey(workspaceName, sessionId, reason);
 			},
-			closeRelays: () => {
-				// Relays land with the TUI byte-relay milestone.
+			closeRelays: (record, reason) => {
+				for (const relayId of Array.from(record.relayIds)) {
+					this.relays.closeActive(relayId, reason);
+				}
 			},
 			audit: (event) => {
 				void this.logAudit({
@@ -769,6 +782,170 @@ class IrohDaemonService {
 		});
 	}
 
+	/**
+	 * Relay a phone conversation stream to the owning TUI (§5.6): the daemon
+	 * has already authenticated the phone; the TUI serves the framed RPC from
+	 * its in-process runtime over a dedicated relay unix connection.
+	 */
+	private async relayConversationToTui(
+		stream: IrohBiStreamLike,
+		handshake: Extract<IrohRemoteHostHandshakeResult, { ok: true }>,
+		connectionId: string,
+		streamId: string,
+		targetSessionId: string,
+		tuiConnectionId: string,
+		replaceExistingConversationStream: boolean,
+	): Promise<void> {
+		const authorization = handshake.authorization;
+		const workspaceName = authorization.workspace.name;
+
+		// Duplicate handling per clientNodeId + key: replace stale relays on a
+		// fresh connection's first stream, otherwise reject with retryAfterMs.
+		const liveRelays = this.relays.activeForConversation(authorization.client.nodeId, workspaceName, targetSessionId);
+		if (liveRelays.length > 0) {
+			if (!replaceExistingConversationStream) {
+				await this.rejectDuplicateActiveConnection(stream, authorization, targetSessionId);
+				return;
+			}
+			for (const relay of liveRelays) {
+				relay.close("error");
+			}
+		}
+		// Unredeemed offers for the same conversation are superseded by this one.
+		for (const pending of this.relays.pendingForConversation(
+			authorization.client.nodeId,
+			workspaceName,
+			targetSessionId,
+		)) {
+			this.relays.invalidatePending(pending.relayId);
+			this.services.controlServer.sendTo(tuiConnectionId, {
+				type: "relay_closed",
+				relayId: pending.relayId,
+				reason: "error",
+			});
+		}
+
+		// Resolve the concrete session target for the preamble (§3.7).
+		const target: IrohRemoteSessionTarget =
+			handshake.hello.mode === "conversation" && handshake.hello.conversation.target === "session"
+				? { kind: "session", sessionId: handshake.hello.conversation.sessionId }
+				: { kind: "last", resumeSessionId: targetSessionId };
+		let resolvedTarget: Awaited<ReturnType<typeof resolveIrohRemoteSessionTarget>>;
+		try {
+			resolvedTarget = await resolveIrohRemoteSessionTarget(
+				target,
+				{ name: workspaceName, path: authorization.workspace.path },
+				createSessionManagerTargetStore(
+					authorization.workspace.path,
+					getDefaultSessionDir(authorization.workspace.path, this.services.agentDir),
+				),
+			);
+		} catch (error) {
+			await this.sendHandshakeError(stream, error);
+			return;
+		}
+
+		const settled = new Promise<void>((resolveSettled) => {
+			const relay = this.relays.mint({
+				workspaceName,
+				sessionId: targetSessionId,
+				clientNodeId: authorization.client.nodeId,
+				connectionId,
+				streamId,
+				stream,
+				preamble: {
+					handshake: {
+						hello: handshake.hello,
+						response: handshake.response,
+						initialInput: Array.from(handshake.initialInput),
+					},
+					authorization: {
+						clientNodeId: authorization.client.nodeId,
+						workspaceName,
+						workspacePath: authorization.workspace.path,
+					},
+					connectionId,
+					streamId,
+					resolvedTarget: {
+						sessionId: resolvedTarget.sessionId,
+						...(resolvedTarget.sessionFilePath === undefined
+							? {}
+							: { sessionFilePath: resolvedTarget.sessionFilePath }),
+						selection: resolvedTarget.selection,
+						...(resolvedTarget.requestedSessionId === undefined
+							? {}
+							: { requestedSessionId: resolvedTarget.requestedSessionId }),
+						workspaceName: resolvedTarget.workspaceName,
+						workspacePath: resolvedTarget.workspacePath,
+					},
+				},
+				settle: (outcome) => {
+					this.leaseBroker.unregisterRelay(workspaceName, targetSessionId, relay.relayId);
+					this.services.controlServer.sendTo(tuiConnectionId, {
+						type: "relay_closed",
+						relayId: relay.relayId,
+						reason: outcome.reason,
+					});
+					void this.logAudit({
+						type: "relay_closed",
+						clientNodeId: authorization.client.nodeId,
+						workspace: workspaceName,
+						success: outcome.error === undefined,
+						error: outcome.error,
+						details: {
+							relayId: relay.relayId,
+							reason: outcome.reason,
+							bytesUp: outcome.bytesUp,
+							bytesDown: outcome.bytesDown,
+							durationMs: outcome.durationMs,
+						},
+					});
+					resolveSettled();
+				},
+			});
+
+			// The offer is single-use with a 10s expiry; the phone's handshake
+			// response is deferred until the TUI redeems the token.
+			const expiryTimer = setTimeout(() => {
+				const pending = this.relays.invalidatePending(relay.relayId);
+				if (!pending) {
+					return;
+				}
+				void this.sendHandshakeError(stream, {
+					message: "relay offer expired; retry",
+					retryAfterMs: 1000,
+				}).finally(() => resolveSettled());
+			}, RELAY_TOKEN_TTL_MS);
+			expiryTimer.unref?.();
+
+			this.leaseBroker.registerRelay(workspaceName, targetSessionId, relay.relayId);
+			void this.logAudit({
+				type: "relay_opened",
+				clientNodeId: authorization.client.nodeId,
+				workspace: workspaceName,
+				success: true,
+				details: {
+					relayId: relay.relayId,
+					workspaceName,
+					sessionId: targetSessionId,
+					connectionId,
+					streamId,
+				},
+			});
+			this.services.controlServer.sendTo(tuiConnectionId, {
+				type: "relay_offer",
+				relayId: relay.relayId,
+				relayToken: relay.relayToken,
+				workspaceName,
+				sessionId: targetSessionId,
+				clientNodeId: authorization.client.nodeId,
+				connectionId,
+				streamId,
+			});
+		});
+		await settled;
+	}
+
 	private async runIntegratedConversation(
 		stream: IrohBiStreamLike,
 		handshake: Extract<IrohRemoteHostHandshakeResult, { ok: true }>,
@@ -783,13 +960,16 @@ class IrohDaemonService {
 			const targetSessionId = getResolvedTargetSessionId(handshake.hello, authorization);
 			if (targetSessionId !== undefined) {
 				const lease = this.leaseBroker.lookup(authorization.workspace.name, targetSessionId);
-				if (lease?.state === "tui-owned") {
-					// Byte relay to the owning TUI lands with the next milestone; until
-					// then the phone retries against a transient failure.
-					await this.sendHandshakeError(stream, {
-						message: "conversation is owned by the desktop TUI",
-						retryAfterMs: 1000,
-					});
+				if (lease?.state === "tui-owned" && lease.tuiConnectionId) {
+					await this.relayConversationToTui(
+						stream,
+						handshake,
+						connectionId,
+						streamId,
+						targetSessionId,
+						lease.tuiConnectionId,
+						replaceExistingConversationStream,
+					);
 					return;
 				}
 			}
@@ -1382,7 +1562,11 @@ class IrohDaemonService {
 		}
 	}
 
-	statusExtras(): { leases: ControlLeaseStatus[]; phoneConnections: number } {
+	admitRelay(relayId: string, relayToken: string, socket: Socket, bufferedRemainder: Buffer): boolean {
+		return this.relays.admit(relayId, relayToken, socket, bufferedRemainder);
+	}
+
+	statusExtras(): { leases: ControlLeaseStatus[]; phoneConnections: number; relayCount: number } {
 		const leases: ControlLeaseStatus[] = this.leaseBroker.list().map((record) => ({
 			workspaceName: record.workspaceName,
 			sessionId: record.sessionId,
@@ -1390,7 +1574,7 @@ class IrohDaemonService {
 			relayCount: record.relayIds.size,
 			streamCount: record.streamCount,
 		}));
-		return { leases, phoneConnections: this.clientConnections.size };
+		return { leases, phoneConnections: this.clientConnections.size, relayCount: this.relays.activeCount() };
 	}
 
 	async shutdown(): Promise<void> {

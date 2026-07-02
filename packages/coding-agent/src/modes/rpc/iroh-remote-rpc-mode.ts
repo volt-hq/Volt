@@ -36,6 +36,8 @@ export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	registerPushTarget?: (args: unknown) => Promise<RpcRegisterPushTargetResponse>;
 	remoteCommandHandler?: (command: Record<string, unknown>) => object | Promise<object | undefined> | undefined;
 	remoteWorkspacePath?: string;
+	/** Drop extension_ui_request frames (relayed streams: dialogs are answered in the owning TUI). */
+	suppressExtensionUiRequests?: boolean;
 	workspaceName?: string;
 	workspacePath: string;
 }
@@ -112,12 +114,27 @@ export function runIrohRemoteRpcMode(
 			options.workspaceName,
 		);
 	};
-	const outboundTransport = createIrohRemoteOutboundFilteredRpcTransport({
+	const filteredOutboundTransport = createIrohRemoteOutboundFilteredRpcTransport({
 		decorate: options.decorateOutbound,
 		remoteWorkspacePath: options.remoteWorkspacePath,
 		transport: createIrohRpcTransport(options),
 		workspacePath: options.workspacePath,
 	});
+	const outboundTransport: RpcTransport = options.suppressExtensionUiRequests
+		? {
+				...filteredOutboundTransport,
+				write: (value) => {
+					if (
+						typeof value === "object" &&
+						value !== null &&
+						(value as { type?: unknown }).type === "extension_ui_request"
+					) {
+						return Promise.resolve();
+					}
+					return filteredOutboundTransport.write(value);
+				},
+			}
+		: filteredOutboundTransport;
 	const attachTranscriptEntryEvents = () => {
 		detachTranscriptEntryEvents?.();
 		detachTranscriptEntryEvents = attachIrohRemoteTranscriptEntryEvents(runtimeHost, outboundTransport, {

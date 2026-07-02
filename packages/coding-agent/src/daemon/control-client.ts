@@ -272,35 +272,34 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 				};
 
 				const onData = (chunk: Buffer) => {
-					let messages: unknown[];
 					try {
-						messages = decoder.push(chunk);
+						// One line at a time: bytes after the preamble are raw relay
+						// payload and must never be JSON-decoded.
+						decoder.pushEach(chunk, (message) => {
+							if (!acked) {
+								if (!isHelloAck(message) || !message.ok) {
+									fail(new Error("relay hello rejected"));
+									return "stop";
+								}
+								acked = true;
+								return "continue";
+							}
+							if (!isRelayPreamble(message)) {
+								fail(new Error("expected relay preamble"));
+								return "stop";
+							}
+							settled = true;
+							relaySocket.removeListener("data", onData);
+							relaySocket.pause();
+							const remainder = decoder.drainRemainder();
+							if (remainder.length > 0) {
+								relaySocket.unshift(remainder);
+							}
+							resolve({ preamble: message, stream: relaySocket });
+							return "stop";
+						});
 					} catch (error) {
 						fail(error instanceof Error ? error : new Error(String(error)));
-						return;
-					}
-					for (const message of messages) {
-						if (!acked) {
-							if (!isHelloAck(message) || !message.ok) {
-								fail(new Error("relay hello rejected"));
-								return;
-							}
-							acked = true;
-							continue;
-						}
-						if (!isRelayPreamble(message)) {
-							fail(new Error("expected relay preamble"));
-							return;
-						}
-						settled = true;
-						relaySocket.removeListener("data", onData);
-						relaySocket.pause();
-						const remainder = decoder.drainRemainder();
-						if (remainder.length > 0) {
-							relaySocket.unshift(remainder);
-						}
-						resolve({ preamble: message, stream: relaySocket });
-						return;
 					}
 				};
 

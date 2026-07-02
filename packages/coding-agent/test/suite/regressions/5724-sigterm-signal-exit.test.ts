@@ -15,6 +15,7 @@ type ShutdownThis = {
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	stop: () => void;
 	settingsManager: { rememberActiveProfile: () => void; flush: () => Promise<void> };
+	releaseDaemonLeaseOnQuit: () => Promise<void>;
 };
 
 type InteractiveModePrototypeWithShutdown = {
@@ -81,6 +82,7 @@ describe("InteractiveMode SIGTERM shutdown with signal-exit (#5724)", () => {
 				rememberActiveProfile: vi.fn(),
 				flush: vi.fn(async () => {}),
 			},
+			releaseDaemonLeaseOnQuit: vi.fn(async () => {}),
 		};
 
 		const shutdownPromise = callShutdown(context, { fromSignal: true });

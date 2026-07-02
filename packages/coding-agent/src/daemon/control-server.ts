@@ -174,18 +174,15 @@ export async function startControlServer(options: ControlServerOptions): Promise
 		};
 
 		const onData = (chunk: Buffer) => {
-			let messages: unknown[];
 			try {
-				messages = decoder.push(chunk);
+				// One line at a time: a relay hello hands the socket off mid-chunk and
+				// any trailing bytes must stay undecoded (they are raw relay payload).
+				decoder.pushEach(chunk, (message) => {
+					handleMessage(message);
+					return handedOffToRelay ? "stop" : "continue";
+				});
 			} catch {
 				fatal("frame_too_large");
-				return;
-			}
-			for (const message of messages) {
-				handleMessage(message);
-				if (handedOffToRelay) {
-					return;
-				}
 			}
 		};
 
