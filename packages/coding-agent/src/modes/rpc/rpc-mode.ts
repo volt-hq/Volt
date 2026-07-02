@@ -28,6 +28,7 @@ import type {
 	HostInteraction,
 } from "../../core/host-interaction.ts";
 import { extractVisibleTextContent } from "../../core/messages.ts";
+import { startModelCatalogWatcher } from "../../core/model-catalog-watcher.ts";
 import {
 	flushRawStdout,
 	restoreStdout,
@@ -547,6 +548,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	let lastNotifiedSessionId: string | undefined;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
+	let stopModelCatalogWatcher: () => void = () => {};
 
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
 		if (shuttingDown || hasPendingWriteError) {
@@ -999,6 +1001,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	const cleanupStartupFailure = async (): Promise<void> => {
 		shuttingDown = true;
 		try {
+			stopModelCatalogWatcher();
 			cancelPendingExtensionRequests();
 			detachHostActionBridge();
 			await rpcSubagents.disposeAll();
@@ -1047,6 +1050,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				}
 			}
 		}
+		stopModelCatalogWatcher();
 		cancelPendingExtensionRequests();
 		detachHostActionBridge();
 		if (shouldDisposeRuntimeOnClose) {
@@ -1263,6 +1267,13 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	}
 	startupComplete = true;
 	startupAwareTransport.setRpcModeStartupComplete?.(true);
+	// Notify connected clients when logins or API keys saved by other volt
+	// processes change the selectable model catalog on disk.
+	stopModelCatalogWatcher = startModelCatalogWatcher({
+		agentDir: runtimeHost.services?.agentDir,
+		getModelRegistry: () => session.modelRegistry,
+		onCatalogChanged: () => output({ type: "models_changed" }),
+	});
 	for (const line of queuedStartupCommandLines.splice(0)) {
 		processInputLine(line);
 	}

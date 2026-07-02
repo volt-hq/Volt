@@ -387,6 +387,9 @@ export async function handleRpcCommand(
 		}
 
 		case "get_available_models": {
+			// Reload credentials and models from disk so logins, logouts, and API keys
+			// saved by other volt processes become selectable without a host restart.
+			session.modelRegistry.refreshFromDisk();
 			const models = await session.modelRegistry.getAvailable();
 			return createRpcSuccessResponse(id, "get_available_models", { models: models.map(toCatalogModel) });
 		}

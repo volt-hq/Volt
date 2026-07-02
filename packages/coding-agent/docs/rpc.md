@@ -703,7 +703,7 @@ The `model` field is a full [Model](#model) object.
 
 #### get_available_models
 
-List all configured models.
+List all configured models. The host reloads `auth.json` and `models.json` from disk before answering, so logins, logouts, and API keys saved by other volt processes become selectable without restarting the host.
 
 ```json
 {"type": "get_available_models"}
@@ -1262,6 +1262,7 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | `subagent_event` | Wrapped child event from a local RPC-managed subagent |
 | `subagent_end` | Terminal completion result for a local RPC-managed subagent |
 | `extension_error` | Extension threw an error |
+| `models_changed` | Available model catalog changed on disk (login, logout, or API key save) |
 
 ### agent_start
 
@@ -1499,6 +1500,14 @@ Emitted when an extension throws an error.
   "event": "tool_call",
   "error": "Error message..."
 }
+```
+
+### models_changed
+
+Emitted when the host detects that the available model catalog changed on disk — for example after `/login`, `/logout`, or an API key save in another volt process rewrote `auth.json` or `models.json`. The event carries no payload; clients should re-request `get_available_models` to fetch the updated catalog. Rewrites that do not change the available catalog (such as OAuth token refreshes) do not emit this event.
+
+```json
+{"type": "models_changed"}
 ```
 
 ## Extension UI Protocol

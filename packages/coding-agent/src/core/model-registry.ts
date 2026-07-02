@@ -374,6 +374,15 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Reload credentials from disk and rebuild the model catalog.
+	 * Picks up logins, logouts, and API keys saved by other volt processes.
+	 */
+	refreshFromDisk(): void {
+		this.authStorage.reload();
+		this.refresh();
+	}
+
+	/**
 	 * Get any error from loading models.json (undefined if no error).
 	 */
 	getError(): string | undefined {

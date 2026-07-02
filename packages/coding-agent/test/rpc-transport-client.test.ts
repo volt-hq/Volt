@@ -1906,6 +1906,7 @@ function createRuntimeHost(
 	const modelRegistry = {
 		authStorage,
 		refresh: vi.fn(),
+		refreshFromDisk: vi.fn(),
 		getAvailable: vi.fn(() => resources.availableModels ?? []),
 	};
 	const settingsManager = {

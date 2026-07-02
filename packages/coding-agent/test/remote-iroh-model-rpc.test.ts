@@ -27,6 +27,7 @@ describe("Iroh remote model RPC", () => {
 			modelRegistry: {
 				authStorage: {},
 				getAvailable: vi.fn(() => [modelOne, modelTwo]),
+				refreshFromDisk: vi.fn(),
 			},
 			getAvailableThinkingLevels: vi.fn(() => ["off", "minimal", "low", "medium", "high"]),
 			setModel,
@@ -96,6 +97,7 @@ describe("Iroh remote model RPC", () => {
 				],
 			},
 		});
+		expect(session.modelRegistry.refreshFromDisk).toHaveBeenCalled();
 		expect(byId.get("set-1")).toMatchObject({
 			command: "set_model",
 			success: true,

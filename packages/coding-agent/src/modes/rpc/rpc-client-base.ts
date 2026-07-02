@@ -58,8 +58,11 @@ export interface ModelInfo {
 export type RpcExtensionErrorEvent = { type: "extension_error" } & ExtensionError;
 export type RpcSubagentEvent = { type: "subagent_event"; subagentId: string; event: SubagentEvent };
 export type RpcSubagentEndEvent = { type: "subagent_end"; subagentId: string; result: SubagentResult };
+/** Emitted when the host's available model catalog changed on disk (login, logout, or API key save). */
+export type RpcModelsChangedEvent = { type: "models_changed" };
 export type RpcClientEvent =
 	| AgentSessionEvent
+	| RpcModelsChangedEvent
 	| RpcWorkflowEvent
 	| RpcWorkflowToolEvent
 	| RpcExtensionUIRequest

@@ -5,6 +5,7 @@
 ### Added
 
 - Added an `upload_device_logs` RPC command to Iroh remote conversation streams so paired mobile clients can store diagnostic logs in the workspace under `.volt/device-logs/` (validated single-component file name, 4 MiB content cap, atomic write, audit-logged).
+- Added live model catalog updates for RPC and Iroh remote clients: `get_available_models` now reloads `auth.json`/`models.json` from disk before answering, and RPC mode watches both files and emits a `models_changed` event when logins, logouts, or API key saves from other volt processes change the available catalog, so paired clients can offer new models without restarting the host.
 
 - Added a built-in `web_search` tool, enabled by default across SDK, CLI/RPC, and Iroh remote sessions. It uses the OpenAI/Codex search backend for authenticated OpenAI models, supports a custom Volt JSON endpoint via `VOLT_WEB_SEARCH_URL`, and falls back to Brave Search via `BRAVE_SEARCH_API_KEY`.
 - Added core subagent definition parsing, trusted user/project discovery plumbing, ResourceLoader exposure, and a local in-process SubagentManager skeleton.
