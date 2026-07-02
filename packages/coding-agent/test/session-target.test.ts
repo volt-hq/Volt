@@ -1,0 +1,138 @@
+import { describe, expect, it } from "vitest";
+import { IrohRemoteOutcomeError } from "../src/core/remote/iroh/protocol.ts";
+import {
+	type IrohRemoteSessionTarget,
+	resolveIrohRemoteSessionTarget,
+	type SessionTargetSessionStore,
+} from "../src/daemon/session-target.ts";
+
+interface FakeHandle {
+	getSessionId(): string;
+	getSessionFile(): string | undefined;
+}
+
+interface FakeStore extends SessionTargetSessionStore<FakeHandle> {
+	createdIds: string[];
+	openedPaths: string[];
+}
+
+const WORKSPACE = { name: "volt", path: "/tmp/volt-workspace" };
+
+function createFakeStore(existing: Array<{ id: string; path: string }> = []): FakeStore {
+	let createSequence = 0;
+	const store: FakeStore = {
+		createdIds: [],
+		openedPaths: [],
+		async list() {
+			return existing;
+		},
+		open(path: string) {
+			store.openedPaths.push(path);
+			const session = existing.find((entry) => entry.path === path);
+			if (!session) {
+				throw new Error(`unexpected open: ${path}`);
+			}
+			return {
+				getSessionId: () => session.id,
+				getSessionFile: () => session.path,
+			};
+		},
+		create() {
+			const id = `fresh-${++createSequence}`;
+			store.createdIds.push(id);
+			return {
+				getSessionId: () => id,
+				getSessionFile: () => undefined,
+			};
+		},
+	};
+	return store;
+}
+
+async function resolve(target: IrohRemoteSessionTarget, store: FakeStore) {
+	return resolveIrohRemoteSessionTarget(target, WORKSPACE, store);
+}
+
+describe("resolveIrohRemoteSessionTarget", () => {
+	it("creates a fresh session for target new", async () => {
+		const store = createFakeStore([{ id: "existing", path: "/s/existing.jsonl" }]);
+		const resolved = await resolve({ kind: "new" }, store);
+		expect(resolved.selection).toBe("created");
+		expect(resolved.sessionId).toBe("fresh-1");
+		expect(resolved.requestedSessionId).toBeUndefined();
+		expect(resolved.sessionFilePath).toBeUndefined();
+		expect(resolved.workspaceName).toBe("volt");
+		expect(resolved.workspacePath).toBe("/tmp/volt-workspace");
+		expect(store.createdIds).toEqual(["fresh-1"]);
+		expect(store.openedPaths).toEqual([]);
+	});
+
+	it("creates a fresh session for target last without a remembered id", async () => {
+		const store = createFakeStore([{ id: "existing", path: "/s/existing.jsonl" }]);
+		const resolved = await resolve({ kind: "last" }, store);
+		expect(resolved.selection).toBe("created");
+		expect(resolved.requestedSessionId).toBeUndefined();
+		expect(store.createdIds).toEqual(["fresh-1"]);
+	});
+
+	it("resumes target last when the remembered session exists", async () => {
+		const store = createFakeStore([{ id: "existing", path: "/s/existing.jsonl" }]);
+		const resolved = await resolve({ kind: "last", resumeSessionId: "existing" }, store);
+		expect(resolved.selection).toBe("resumed");
+		expect(resolved.sessionId).toBe("existing");
+		expect(resolved.requestedSessionId).toBe("existing");
+		expect(resolved.sessionFilePath).toBe("/s/existing.jsonl");
+		expect(store.openedPaths).toEqual(["/s/existing.jsonl"]);
+		expect(store.createdIds).toEqual([]);
+	});
+
+	it("creates after missing for target last when the remembered session is gone", async () => {
+		const store = createFakeStore([]);
+		const resolved = await resolve({ kind: "last", resumeSessionId: "gone" }, store);
+		expect(resolved.selection).toBe("created_after_missing");
+		expect(resolved.sessionId).toBe("fresh-1");
+		expect(resolved.requestedSessionId).toBe("gone");
+	});
+
+	it("creates after missing for target last with an invalid remembered id", async () => {
+		const store = createFakeStore([]);
+		const resolved = await resolve({ kind: "last", resumeSessionId: "NOT VALID!" }, store);
+		expect(resolved.selection).toBe("created_after_missing");
+		expect(resolved.requestedSessionId).toBe("NOT VALID!");
+		// Invalid syntax must not even hit the session list.
+		expect(store.openedPaths).toEqual([]);
+	});
+
+	it("resumes target session when the session exists", async () => {
+		const store = createFakeStore([
+			{ id: "one", path: "/s/one.jsonl" },
+			{ id: "two", path: "/s/two.jsonl" },
+		]);
+		const resolved = await resolve({ kind: "session", sessionId: "two" }, store);
+		expect(resolved.selection).toBe("resumed");
+		expect(resolved.sessionId).toBe("two");
+		expect(resolved.requestedSessionId).toBe("two");
+		expect(store.openedPaths).toEqual(["/s/two.jsonl"]);
+	});
+
+	it("throws session_unavailable for target session naming a missing id", async () => {
+		const store = createFakeStore([]);
+		const error = await resolve({ kind: "session", sessionId: "missing" }, store).catch((thrown) => thrown);
+		expect(error).toBeInstanceOf(IrohRemoteOutcomeError);
+		expect((error as IrohRemoteOutcomeError).outcome).toBe("session_unavailable");
+		expect(store.createdIds).toEqual([]);
+	});
+
+	it("throws session_unavailable for target session with invalid id syntax", async () => {
+		const store = createFakeStore([]);
+		const error = await resolve({ kind: "session", sessionId: "NOT VALID!" }, store).catch((thrown) => thrown);
+		expect(error).toBeInstanceOf(IrohRemoteOutcomeError);
+		expect((error as IrohRemoteOutcomeError).outcome).toBe("session_unavailable");
+	});
+
+	it("returns the session manager handle it resolved", async () => {
+		const store = createFakeStore([{ id: "existing", path: "/s/existing.jsonl" }]);
+		const resolved = await resolve({ kind: "session", sessionId: "existing" }, store);
+		expect(resolved.sessionManager.getSessionId()).toBe("existing");
+	});
+});

@@ -1,0 +1,1339 @@
+import { Buffer } from "node:buffer";
+import { randomUUID } from "node:crypto";
+import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
+import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
+import { handleIrohRemoteDeviceLogUploadRpcCommand } from "../core/remote/iroh/device-log-rpc.ts";
+import { sanitizeIrohRemoteOutbound } from "../core/remote/iroh/outbound-filter.ts";
+import { createIrohRemoteRpcErrorResponse } from "../core/remote/iroh/rpc-command-filter.ts";
+import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
+import {
+	type IrohRemoteTranscriptTextLayout,
+	sanitizeIrohRemoteTranscriptText,
+} from "../core/remote/iroh/transcript-text.ts";
+import { getIrohRemoteWorkspaceAvailabilityStatus } from "../core/remote/iroh/workspace.ts";
+import { handleIrohRemoteWorkspaceUnregisterRpcCommand } from "../core/remote/iroh/workspace-rpc.ts";
+import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../core/session-manager.ts";
+
+export const INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES: ReadonlySet<string> = new Set([
+	"new_session",
+	"switch_session_by_id",
+	"get_messages",
+]);
+
+export const REMOTE_SESSION_LIST_DEFAULT_LIMIT = 50;
+export const REMOTE_SESSION_LIST_MAX_LIMIT = 200;
+export const REMOTE_SESSION_LIST_CURSOR_TTL_MS = 10 * 60 * 1000;
+export const REMOTE_SESSION_LIST_CURSOR_MAX_BYTES = 512;
+const REMOTE_TRANSCRIPT_DEFAULT_LIMIT = 200;
+const REMOTE_TRANSCRIPT_MAX_LIMIT = 200;
+const REMOTE_TRANSCRIPT_CURSOR_MAX_BYTES = 2048;
+const REMOTE_TRANSCRIPT_CURSOR_MAX_SCALARS = 512;
+const REMOTE_TOOL_COMMAND_MAX_SCALARS = 500;
+const REMOTE_TOOL_ARGUMENT_MAX_SCALARS = 500;
+const REMOTE_TOOL_ARGUMENT_KEYS_MAX = 12;
+
+export type RemoteRpcCommand = Record<string, unknown> & { type: string };
+
+export interface RemoteSessionListEntry {
+	sessionId: string;
+	title: string;
+	createdAt: string;
+	updatedAt: string;
+	messageCount: number;
+}
+
+export interface RemoteSessionListCursorEntry {
+	clientNodeId: string;
+	workspaceName: string;
+	sessions: RemoteSessionListEntry[];
+	nextIndex: number;
+	expiresAt: number;
+}
+
+/** Minimal runtime surface the conversation command handlers consume. */
+export interface ConversationCommandRuntime {
+	session: {
+		sessionId: string;
+		sessionManager: Pick<SessionManager, "getBranch">;
+	};
+	listSessions(): Promise<
+		Array<{
+			sessionId: string;
+			sessionName?: string;
+			createdAt: string;
+			modifiedAt: string;
+			messageCount: number;
+			firstMessage: string;
+		}>
+	>;
+}
+
+export interface ConversationCommandContext {
+	agentDir?: string;
+	auditLogger?: IrohRemoteAuditLogger;
+	hostEngine?: { clearPairingSecretForWorkspace(workspaceName: string): void };
+	stateManager: IrohRemoteHostStateManager;
+	sessionListCursors: Map<string, RemoteSessionListCursorEntry>;
+	sessionListCursorTtlMs: number;
+	now?: () => number;
+}
+
+function contextNow(context: ConversationCommandContext): number {
+	return (context.now ?? Date.now)();
+}
+
+async function logAudit(
+	auditLogger: IrohRemoteAuditLogger | undefined,
+	event: Parameters<IrohRemoteAuditLogger["log"]>[0],
+): Promise<void> {
+	try {
+		await auditLogger?.log(event);
+	} catch {
+		// Audit logging is best-effort and must not change remote runtime behavior.
+	}
+}
+
+export function getRpcResponseId(command: Record<string, unknown>): string | undefined {
+	return typeof command.id === "string" ? command.id : undefined;
+}
+
+export function createRpcSuccessResponse(
+	id: string | undefined,
+	command: string,
+	data?: Record<string, unknown>,
+): Record<string, unknown> {
+	return {
+		...(id === undefined ? {} : { id }),
+		type: "response",
+		command,
+		success: true,
+		...(data === undefined ? {} : { data }),
+	};
+}
+
+function getRemoteSanitizerOptions(authorization: IrohRemoteClientAuthorizationSuccess) {
+	return {
+		remoteWorkspacePath: "/workspace",
+		workspacePath: authorization.workspace.path,
+	};
+}
+
+function truncateUnicodeScalars(value: string, maxLength: number): string {
+	const scalars = Array.from(value);
+	return scalars.length <= maxLength ? value : scalars.slice(0, maxLength).join("");
+}
+
+function sanitizeRemoteTextField(
+	value: string,
+	maxLength: number,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): string {
+	const sanitized = (
+		sanitizeIrohRemoteOutbound({ value }, getRemoteSanitizerOptions(authorization)) as { value?: unknown }
+	).value;
+	return truncateUnicodeScalars(typeof sanitized === "string" ? sanitized : "", maxLength);
+}
+
+function sanitizeRemoteTranscriptText(
+	value: unknown,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	layout: IrohRemoteTranscriptTextLayout = "preserve",
+) {
+	return sanitizeIrohRemoteTranscriptText(
+		typeof value === "string" ? value : "",
+		getRemoteSanitizerOptions(authorization),
+		layout,
+	);
+}
+
+// ============================================================================
+// Transcript projection
+// ============================================================================
+
+interface RemoteTranscriptRequest {
+	limit: number;
+	beforeEntryId?: string;
+}
+
+function parseRemoteTranscriptLimit(
+	command: Record<string, unknown>,
+): { ok: true; limit: number } | { ok: false; error: string } {
+	if (command.limit === undefined) {
+		return { ok: true, limit: REMOTE_TRANSCRIPT_DEFAULT_LIMIT };
+	}
+	if (
+		typeof command.limit !== "number" ||
+		!Number.isFinite(command.limit) ||
+		!Number.isInteger(command.limit) ||
+		command.limit <= 0
+	) {
+		return { ok: false, error: "invalid_limit" };
+	}
+	return { ok: true, limit: Math.min(command.limit, REMOTE_TRANSCRIPT_MAX_LIMIT) };
+}
+
+function isValidRemoteTranscriptCursor(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		Array.from(value).length <= REMOTE_TRANSCRIPT_CURSOR_MAX_SCALARS &&
+		Buffer.byteLength(value, "utf8") <= REMOTE_TRANSCRIPT_CURSOR_MAX_BYTES
+	);
+}
+
+function parseRemoteTranscriptRequest(
+	command: Record<string, unknown>,
+): ({ ok: true } & RemoteTranscriptRequest) | { ok: false; error: string } {
+	const limit = parseRemoteTranscriptLimit(command);
+	if (!limit.ok) {
+		return limit;
+	}
+	if (command.beforeEntryId !== undefined && !isValidRemoteTranscriptCursor(command.beforeEntryId)) {
+		return { ok: false, error: "invalid_cursor" };
+	}
+	return {
+		ok: true,
+		limit: limit.limit,
+		...(command.beforeEntryId === undefined ? {} : { beforeEntryId: command.beforeEntryId as string }),
+	};
+}
+
+function extractTranscriptContentText(content: unknown): string {
+	if (typeof content === "string") {
+		return content;
+	}
+	if (!Array.isArray(content)) {
+		return "";
+	}
+	return content
+		.filter(
+			(part): part is { type: "text"; text: string } =>
+				isRemoteRecord(part) && part.type === "text" && typeof part.text === "string",
+		)
+		.map((part) => part.text)
+		.join("");
+}
+
+export interface RemoteTranscriptItem {
+	entryId: string;
+	createdAt: string;
+	role: "user" | "assistant" | "system" | "tool";
+	text: string;
+	truncated: boolean;
+	toolName?: string;
+	status?: "completed" | "failed";
+	summary?: string;
+	path?: string;
+	args?: Record<string, unknown>;
+	details?: Record<string, unknown>;
+}
+
+function createRemoteTranscriptItem(
+	entry: SessionEntry,
+	role: RemoteTranscriptItem["role"],
+	text: unknown,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	layout: IrohRemoteTranscriptTextLayout = role === "tool" ? "summary" : "preserve",
+): RemoteTranscriptItem {
+	const sanitized = sanitizeRemoteTranscriptText(text, authorization, layout);
+	return {
+		entryId: entry.id,
+		createdAt: toRemoteSessionTimestamp(entry.timestamp),
+		role,
+		text: sanitized.text,
+		truncated: sanitized.truncated,
+	};
+}
+
+interface RemoteToolCallRecord {
+	id: string;
+	name: string;
+	arguments: Record<string, unknown>;
+}
+
+function projectRemoteTranscriptEntry(
+	entry: SessionEntry,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	toolCallsById: Map<string, RemoteToolCallRecord>,
+): RemoteTranscriptItem | undefined {
+	if (!entry || typeof entry !== "object") {
+		return undefined;
+	}
+	if (entry.type === "compaction") {
+		return createRemoteTranscriptItem(entry, "system", entry.summary, authorization);
+	}
+	if (entry.type === "custom_message") {
+		if (entry.customType !== "review" || entry.display !== true) {
+			return undefined;
+		}
+		const text = extractTranscriptContentText(entry.content);
+		return text ? createRemoteTranscriptItem(entry, "assistant", text, authorization) : undefined;
+	}
+	if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") {
+		return undefined;
+	}
+	const message = entry.message as unknown as Record<string, unknown>;
+	if (message.role === "user" || message.role === "assistant") {
+		const text = extractTranscriptContentText(message.content);
+		return text ? createRemoteTranscriptItem(entry, message.role, text, authorization) : undefined;
+	}
+	if (message.role === "toolResult") {
+		const status = message.isError ? "failed" : "completed";
+		const toolName =
+			typeof message.toolName === "string" && message.toolName.trim() ? message.toolName.trim() : "tool";
+		const toolCall = typeof message.toolCallId === "string" ? toolCallsById.get(message.toolCallId) : undefined;
+		const args = isRemoteRecord(toolCall?.arguments) ? toolCall.arguments : undefined;
+		const path = getRemoteToolPath(toolName, args, authorization);
+		const summary = summarizeRemoteToolResult(toolName, status, args, path, authorization);
+		const item = createRemoteTranscriptItem(entry, "tool", summary, authorization);
+		item.toolName = toolName;
+		item.status = status;
+		item.summary = summary;
+		if (path) {
+			item.path = path;
+		}
+		const projectedArgs = projectRemoteToolArgs(toolName, args, authorization);
+		if (projectedArgs) {
+			item.args = projectedArgs;
+		}
+		if (toolName === "subagent") {
+			const details = projectRemoteSubagentDetails(message.details, authorization);
+			if (details) {
+				item.details = details;
+			}
+		}
+		return item;
+	}
+	if (message.role === "bashExecution") {
+		const failed = message.cancelled === true || (message.exitCode !== undefined && message.exitCode !== 0);
+		const status = failed ? "failed" : "completed";
+		const exit = message.cancelled
+			? "cancelled"
+			: message.exitCode === undefined
+				? status
+				: `exit ${message.exitCode}`;
+		const command = remoteString(message.command, authorization, REMOTE_TOOL_COMMAND_MAX_SCALARS);
+		const summary = command ? `Ran command: ${command} (${exit})` : `bash ${exit}`;
+		const item = createRemoteTranscriptItem(entry, "tool", summary, authorization);
+		item.toolName = "bash";
+		item.status = status;
+		item.summary = summary;
+		if (command) {
+			item.args = { command };
+		}
+		return item;
+	}
+	return undefined;
+}
+
+function projectRemoteTranscriptItems(
+	sessionManager: Pick<SessionManager, "getBranch">,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): RemoteTranscriptItem[] {
+	const branch = sessionManager.getBranch();
+	const toolCallsById = collectRemoteToolCalls(branch);
+	return branch
+		.map((entry) => projectRemoteTranscriptEntry(entry, authorization, toolCallsById))
+		.filter((item): item is RemoteTranscriptItem => item !== undefined);
+}
+
+function collectRemoteToolCalls(entries: SessionEntry[]): Map<string, RemoteToolCallRecord> {
+	const toolCallsById = new Map<string, RemoteToolCallRecord>();
+	for (const entry of entries) {
+		if (entry.type !== "message") {
+			continue;
+		}
+		const message = entry.message as unknown as Record<string, unknown>;
+		if (message?.role !== "assistant" || !Array.isArray(message.content)) {
+			continue;
+		}
+		for (const block of message.content) {
+			if (
+				isRemoteRecord(block) &&
+				block.type === "toolCall" &&
+				typeof block.id === "string" &&
+				typeof block.name === "string" &&
+				isRemoteRecord(block.arguments)
+			) {
+				toolCallsById.set(block.id, {
+					id: block.id,
+					name: block.name,
+					arguments: block.arguments,
+				});
+			}
+		}
+	}
+	return toolCallsById;
+}
+
+function projectRemoteToolArgs(
+	toolName: string,
+	args: Record<string, unknown> | undefined,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): Record<string, unknown> | undefined {
+	if (toolName === "subagent") {
+		return projectRemoteSubagentArgs(args, authorization);
+	}
+	if (!isRemoteRecord(args)) {
+		return undefined;
+	}
+
+	const projected: Record<string, unknown> = {};
+	switch (toolName) {
+		case "bash":
+			copyRemoteString(args, projected, "command", authorization, REMOTE_TOOL_COMMAND_MAX_SCALARS);
+			copyRemoteNumber(args, projected, "timeout");
+			break;
+		case "read":
+			copyRemoteString(args, projected, "path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "file_path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteNumber(args, projected, "offset");
+			copyRemoteNumber(args, projected, "limit");
+			break;
+		case "edit":
+		case "write":
+			copyRemoteString(args, projected, "path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "file_path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			break;
+		case "grep":
+			copyRemoteString(args, projected, "pattern", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "glob", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "include", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "exclude", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteBoolean(args, projected, "ignoreCase");
+			copyRemoteBoolean(args, projected, "literal");
+			copyRemoteNumber(args, projected, "context");
+			break;
+		case "find":
+			copyRemoteString(args, projected, "query", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "pattern", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "glob", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "name", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteNumber(args, projected, "limit");
+			break;
+		case "ls":
+			copyRemoteString(args, projected, "path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteNumber(args, projected, "limit");
+			break;
+		case "lsp":
+			copyRemoteString(args, projected, "action", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "symbol", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "file_path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteNumber(args, projected, "line");
+			break;
+		case "web_search":
+			copyRemoteString(args, projected, "query", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteStringArray(args, projected, "domains", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteNumber(args, projected, "limit");
+			copyRemoteNumber(args, projected, "recencyDays");
+			break;
+		default:
+			break;
+	}
+
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function getRemoteToolPath(
+	toolName: string,
+	args: Record<string, unknown> | undefined,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): string | undefined {
+	if (!isRemoteRecord(args)) {
+		return undefined;
+	}
+	switch (toolName) {
+		case "read":
+		case "edit":
+		case "write":
+		case "lsp":
+			return (
+				remoteString(args.path, authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS) ??
+				remoteString(args.file_path, authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS)
+			);
+		case "grep":
+		case "find":
+		case "ls":
+			return remoteString(args.path, authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+		default:
+			return undefined;
+	}
+}
+
+function summarizeRemoteToolResult(
+	toolName: string,
+	status: "completed" | "failed",
+	args: Record<string, unknown> | undefined,
+	path: string | undefined,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): string {
+	const statusText = status === "failed" ? "failed" : "completed";
+	if (toolName === "bash") {
+		const command = remoteString(args?.command, authorization, REMOTE_TOOL_COMMAND_MAX_SCALARS);
+		if (command) {
+			return `Ran command: ${command} (${statusText})`;
+		}
+	}
+	if (toolName === "read" && path) {
+		return `Read ${path} (${statusText})`;
+	}
+	if (path) {
+		return `${toolName} ${path} (${statusText})`;
+	}
+	return `${toolName} ${statusText}`;
+}
+
+function projectRemoteSubagentArgs(
+	args: unknown,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): Record<string, unknown> | undefined {
+	if (!isRemoteRecord(args)) {
+		return undefined;
+	}
+	const projected: Record<string, unknown> = {};
+	copyRemoteString(args, projected, "agent", authorization, 200);
+	copyRemoteString(args, projected, "task", authorization, 1000);
+	const tasks = projectRemoteSubagentInputArray(args.tasks, authorization);
+	if (tasks) {
+		projected.tasks = tasks;
+	}
+	const chain = projectRemoteSubagentInputArray(args.chain, authorization);
+	if (chain) {
+		projected.chain = chain;
+	}
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentInputArray(
+	value: unknown,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): Array<{ agent: string; task: string }> | undefined {
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const projected = value
+		.map((item) => {
+			if (!isRemoteRecord(item)) {
+				return undefined;
+			}
+			const agent = remoteString(item.agent, authorization, 200);
+			const task = remoteString(item.task, authorization, 1000);
+			return agent && task ? { agent, task } : undefined;
+		})
+		.filter((item): item is { agent: string; task: string } => item !== undefined);
+	return projected.length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentDetails(
+	value: unknown,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): Record<string, unknown> | undefined {
+	if (!isRemoteRecord(value)) {
+		return undefined;
+	}
+	const projected: Record<string, unknown> = {};
+	copyRemoteString(value, projected, "mode", authorization, 200);
+	copyRemoteString(value, projected, "status", authorization, 200);
+	copyRemoteString(value, projected, "subagentId", authorization, 200);
+	copyRemoteString(value, projected, "sessionId", authorization, 200);
+	const summary = projectRemoteSubagentSummary(value.summary);
+	if (summary) {
+		projected.summary = summary;
+	}
+	const childSessions = projectRemoteSubagentDetailArray(value.childSessions, authorization);
+	if (childSessions) {
+		projected.childSessions = childSessions;
+	}
+	const agent = projectRemoteSubagentAgent(value.agent, authorization);
+	if (agent) {
+		projected.agent = agent;
+	}
+	const output = projectRemoteSubagentOutput(value.output, authorization);
+	if (output) {
+		projected.output = output;
+	}
+	const error = projectRemoteSubagentError(value.error, authorization);
+	if (error) {
+		projected.error = error;
+	}
+	const tasks = projectRemoteSubagentDetailArray(value.tasks, authorization);
+	if (tasks) {
+		projected.tasks = tasks;
+	}
+	const steps = projectRemoteSubagentDetailArray(value.steps, authorization);
+	if (steps) {
+		projected.steps = steps;
+	}
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentSummary(value: unknown): Record<string, number> | undefined {
+	if (!isRemoteRecord(value)) {
+		return undefined;
+	}
+	const projected: Record<string, number> = {};
+	for (const key of [
+		"total",
+		"completed",
+		"failed",
+		"aborted",
+		"running",
+		"maxTasks",
+		"maxConcurrency",
+		"stoppedAt",
+	]) {
+		const numberValue = remoteFiniteNumber(value[key]);
+		if (numberValue !== undefined) {
+			projected[key] = numberValue;
+		}
+	}
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentDetailArray(
+	value: unknown,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): Array<Record<string, unknown>> | undefined {
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const projected = value
+		.map((item) => projectRemoteSubagentTask(item, authorization))
+		.filter((item): item is Record<string, unknown> => item !== undefined);
+	return projected.length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentTask(
+	value: unknown,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): Record<string, unknown> | undefined {
+	if (!isRemoteRecord(value)) {
+		return undefined;
+	}
+	const projected: Record<string, unknown> = {};
+	const index = remoteFiniteNumber(value.index);
+	if (index !== undefined) {
+		projected.index = index;
+	}
+	copyRemoteString(value, projected, "subagentId", authorization, 200);
+	copyRemoteString(value, projected, "sessionId", authorization, 200);
+	const agent = projectRemoteSubagentAgent(value.agent, authorization);
+	if (agent) {
+		projected.agent = agent;
+	}
+	copyRemoteString(value, projected, "status", authorization, 200);
+	const error = projectRemoteSubagentError(value.error, authorization);
+	if (error) {
+		projected.error = error;
+	}
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentAgent(
+	value: unknown,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): Record<string, unknown> | undefined {
+	if (!isRemoteRecord(value)) {
+		return undefined;
+	}
+	const projected: Record<string, unknown> = {};
+	copyRemoteString(value, projected, "name", authorization, 200);
+	copyRemoteString(value, projected, "source", authorization, 200);
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentOutput(
+	value: unknown,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): Record<string, unknown> | undefined {
+	if (!isRemoteRecord(value)) {
+		return undefined;
+	}
+	const projected: Record<string, unknown> = {};
+	copyRemoteString(value, projected, "text", authorization, 1000);
+	for (const key of ["bytes", "omittedBytes", "maxBytes"]) {
+		const numberValue = remoteFiniteNumber(value[key]);
+		if (numberValue !== undefined) {
+			projected[key] = numberValue;
+		}
+	}
+	if (typeof value.truncated === "boolean") {
+		projected.truncated = value.truncated;
+	}
+	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectRemoteSubagentError(
+	value: unknown,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): { message: string } | undefined {
+	if (!isRemoteRecord(value)) {
+		return undefined;
+	}
+	const message = remoteString(value.message, authorization, 1000);
+	return message ? { message } : undefined;
+}
+
+function remoteString(
+	value: unknown,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	maxLength: number,
+): string | undefined {
+	return typeof value === "string" && value.trim()
+		? sanitizeRemoteTextField(value, maxLength, authorization)
+		: undefined;
+}
+
+function copyRemoteString(
+	from: Record<string, unknown>,
+	to: Record<string, unknown>,
+	key: string,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	maxLength: number,
+): void {
+	const value = remoteString(from[key], authorization, maxLength);
+	if (value) {
+		to[key] = value;
+	}
+}
+
+function copyRemoteNumber(from: Record<string, unknown>, to: Record<string, unknown>, key: string): void {
+	const value = remoteFiniteNumber(from[key]);
+	if (value !== undefined) {
+		to[key] = value;
+	}
+}
+
+function copyRemoteBoolean(from: Record<string, unknown>, to: Record<string, unknown>, key: string): void {
+	if (typeof from[key] === "boolean") {
+		to[key] = from[key];
+	}
+}
+
+function copyRemoteStringArray(
+	from: Record<string, unknown>,
+	to: Record<string, unknown>,
+	key: string,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	maxLength: number,
+): void {
+	const value = from[key];
+	if (!Array.isArray(value)) {
+		return;
+	}
+	const projected = value
+		.slice(0, REMOTE_TOOL_ARGUMENT_KEYS_MAX)
+		.map((entry) => remoteString(entry, authorization, maxLength))
+		.filter((entry): entry is string => entry !== undefined);
+	if (projected.length > 0) {
+		to[key] = projected;
+	}
+}
+
+function remoteFiniteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function isRemoteRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function createRemoteTranscriptPage(items: RemoteTranscriptItem[], request: RemoteTranscriptRequest) {
+	const beforeIndex =
+		request.beforeEntryId === undefined
+			? items.length
+			: items.findIndex((item) => item.entryId === request.beforeEntryId);
+	if (beforeIndex === -1) {
+		return undefined;
+	}
+	const eligibleItems = items.slice(0, beforeIndex);
+	const pageStart = Math.max(0, eligibleItems.length - request.limit);
+	const pageItems = eligibleItems.slice(pageStart);
+	const hasMore = pageStart > 0;
+	return {
+		items: pageItems,
+		hasMore,
+		nextBeforeEntryId: hasMore ? (pageItems[0]?.entryId ?? null) : null,
+	};
+}
+
+export function createRemoteGetTranscriptRpcResponse(
+	command: RemoteRpcCommand,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	runtime: ConversationCommandRuntime,
+): object {
+	const id = getRpcResponseId(command);
+	const request = parseRemoteTranscriptRequest(command);
+	if (!request.ok) {
+		return createIrohRemoteRpcErrorResponse(id, "get_transcript", request.error);
+	}
+	const items = projectRemoteTranscriptItems(runtime.session.sessionManager, authorization);
+	const page = createRemoteTranscriptPage(items, request);
+	if (!page) {
+		return createIrohRemoteRpcErrorResponse(id, "get_transcript", "invalid_cursor");
+	}
+	return createRpcSuccessResponse(id, "get_transcript", {
+		workspaceName: authorization.workspace.name,
+		sessionId: runtime.session.sessionId,
+		...page,
+	});
+}
+
+// ============================================================================
+// Session listing
+// ============================================================================
+
+function toRemoteSessionTimestamp(value: string | number | Date): string {
+	const date = value instanceof Date ? value : new Date(value);
+	return Number.isNaN(date.getTime()) ? new Date(0).toISOString() : date.toISOString();
+}
+
+function getRemoteSessionTimestampMs(value: string): number {
+	const date = new Date(value);
+	return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+}
+
+interface RemoteSessionSummaryInput {
+	sessionId: string;
+	title: unknown;
+	createdAt: string | Date;
+	updatedAt: string | Date;
+	messageCount: number;
+}
+
+function createRemoteSessionSummary(
+	input: RemoteSessionSummaryInput,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): { sortUpdatedAtMs: number; session: RemoteSessionListEntry } {
+	const createdAt = toRemoteSessionTimestamp(input.createdAt);
+	const updatedAt = toRemoteSessionTimestamp(input.updatedAt);
+	return {
+		sortUpdatedAtMs: getRemoteSessionTimestampMs(updatedAt),
+		session: {
+			sessionId: input.sessionId,
+			title: sanitizeRemoteTextField(typeof input.title === "string" ? input.title : "", 160, authorization),
+			createdAt,
+			updatedAt,
+			messageCount: input.messageCount,
+		},
+	};
+}
+
+function sortRemoteSessionSummaries(
+	left: { sortUpdatedAtMs: number; session: RemoteSessionListEntry },
+	right: { sortUpdatedAtMs: number; session: RemoteSessionListEntry },
+): number {
+	return right.sortUpdatedAtMs - left.sortUpdatedAtMs || left.session.sessionId.localeCompare(right.session.sessionId);
+}
+
+export async function listRemoteWorkspaceSessionSummaries(
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	context: ConversationCommandContext,
+	runtime?: ConversationCommandRuntime,
+): Promise<Array<{ sortUpdatedAtMs: number; session: RemoteSessionListEntry }>> {
+	const summaries =
+		runtime === undefined
+			? (
+					await SessionManager.list(
+						authorization.workspace.path,
+						getDefaultSessionDir(authorization.workspace.path, context.agentDir),
+					)
+				).map((info) =>
+					createRemoteSessionSummary(
+						{
+							sessionId: info.id,
+							title: info.name ?? info.firstMessage,
+							createdAt: info.created,
+							updatedAt: info.modified,
+							messageCount: info.messageCount,
+						},
+						authorization,
+					),
+				)
+			: (await runtime.listSessions()).map((summary) =>
+					createRemoteSessionSummary(
+						{
+							sessionId: summary.sessionId,
+							title: summary.sessionName ?? summary.firstMessage,
+							createdAt: summary.createdAt,
+							updatedAt: summary.modifiedAt,
+							messageCount: summary.messageCount,
+						},
+						authorization,
+					),
+				);
+	const bySessionId = new Map<string, { sortUpdatedAtMs: number; session: RemoteSessionListEntry }>();
+	for (const summary of summaries) {
+		bySessionId.set(summary.session.sessionId, summary);
+	}
+	return Array.from(bySessionId.values()).sort(sortRemoteSessionSummaries);
+}
+
+function cleanupExpiredSessionListCursors(context: ConversationCommandContext, now = contextNow(context)): void {
+	for (const [cursor, entry] of context.sessionListCursors) {
+		if (entry.expiresAt <= now) {
+			context.sessionListCursors.delete(cursor);
+		}
+	}
+}
+
+function createSessionListCursor(
+	context: ConversationCommandContext,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	sessions: RemoteSessionListEntry[],
+	nextIndex: number,
+): string {
+	const cursor = randomUUID();
+	context.sessionListCursors.set(cursor, {
+		clientNodeId: authorization.client.nodeId,
+		workspaceName: authorization.workspace.name,
+		sessions,
+		nextIndex,
+		expiresAt: contextNow(context) + context.sessionListCursorTtlMs,
+	});
+	return cursor;
+}
+
+function getSessionListCursorEntry(
+	context: ConversationCommandContext,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	cursor: string,
+): RemoteSessionListCursorEntry | undefined {
+	cleanupExpiredSessionListCursors(context);
+	const entry = context.sessionListCursors.get(cursor);
+	if (
+		!entry ||
+		entry.clientNodeId !== authorization.client.nodeId ||
+		entry.workspaceName !== authorization.workspace.name
+	) {
+		return undefined;
+	}
+	return entry;
+}
+
+function parseRemoteSessionListLimit(
+	command: Record<string, unknown>,
+): { ok: true; limit: number } | { ok: false; error: string } {
+	if (command.limit === undefined) {
+		return { ok: true, limit: REMOTE_SESSION_LIST_DEFAULT_LIMIT };
+	}
+	if (typeof command.limit !== "number" || !Number.isInteger(command.limit) || command.limit <= 0) {
+		return { ok: false, error: "invalid_limit" };
+	}
+	return { ok: true, limit: Math.min(command.limit, REMOTE_SESSION_LIST_MAX_LIMIT) };
+}
+
+function parseRemoteSessionListRequest(
+	command: Record<string, unknown>,
+): { ok: true; limit: number; cursor?: string } | { ok: false; error: string } {
+	if (Object.hasOwn(command, "sessionId")) {
+		return { ok: false, error: "unexpected_session_id" };
+	}
+	for (const field of ["workspace", "workspaceName", "clientNodeId", "hostNodeId"]) {
+		if (Object.hasOwn(command, field)) {
+			return { ok: false, error: "session_mismatch" };
+		}
+	}
+	for (const field of Object.keys(command)) {
+		if (field !== "id" && field !== "type" && field !== "limit" && field !== "cursor") {
+			return { ok: false, error: "invalid_request" };
+		}
+	}
+	const limit = parseRemoteSessionListLimit(command);
+	if (!limit.ok) {
+		return limit;
+	}
+	if (command.cursor !== undefined) {
+		if (
+			typeof command.cursor !== "string" ||
+			command.cursor.length === 0 ||
+			Buffer.byteLength(command.cursor, "utf8") > REMOTE_SESSION_LIST_CURSOR_MAX_BYTES
+		) {
+			return { ok: false, error: "invalid_cursor" };
+		}
+	}
+	return {
+		ok: true,
+		limit: limit.limit,
+		...(command.cursor === undefined ? {} : { cursor: command.cursor as string }),
+	};
+}
+
+export async function createRemoteListSessionsRpcResponse(
+	command: RemoteRpcCommand,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	context: ConversationCommandContext,
+	runtime?: ConversationCommandRuntime,
+): Promise<object> {
+	const id = getRpcResponseId(command);
+	const request = parseRemoteSessionListRequest(command);
+	if (!request.ok) {
+		return createIrohRemoteRpcErrorResponse(id, "list_sessions", request.error);
+	}
+
+	let sessions: RemoteSessionListEntry[];
+	let startIndex: number;
+	if (request.cursor) {
+		const cursorEntry = getSessionListCursorEntry(context, authorization, request.cursor);
+		if (!cursorEntry) {
+			return createIrohRemoteRpcErrorResponse(id, "list_sessions", "invalid_cursor");
+		}
+		sessions = cursorEntry.sessions;
+		startIndex = cursorEntry.nextIndex;
+	} else {
+		sessions = (await listRemoteWorkspaceSessionSummaries(authorization, context, runtime)).map(
+			(summary) => summary.session,
+		);
+		startIndex = 0;
+	}
+
+	const nextIndex = startIndex + request.limit;
+	const page = sessions.slice(startIndex, nextIndex);
+	const hasMore = nextIndex < sessions.length;
+	return createRpcSuccessResponse(id, "list_sessions", {
+		sessions: page,
+		hasMore,
+		nextCursor: hasMore ? createSessionListCursor(context, authorization, sessions, nextIndex) : null,
+	});
+}
+
+// ============================================================================
+// Live Activities
+// ============================================================================
+
+interface RemoteLiveActivityCommandScope {
+	workspaceName: string;
+	sessionId: string;
+	activityId: string;
+}
+
+interface RemoteLiveActivityRegistrationRequest extends RemoteLiveActivityCommandScope {
+	tokenHash: string;
+	tokenEnvironment: "development" | "production";
+	platform: "ios";
+}
+
+function parseRemoteLiveActivityRegistrationCommand(
+	command: Record<string, unknown>,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	runtime: ConversationCommandRuntime,
+): ({ ok: true } & RemoteLiveActivityRegistrationRequest) | { ok: false; error: string } {
+	const common = parseRemoteLiveActivityCommandScope(command, authorization, runtime);
+	if (!common.ok) {
+		return common;
+	}
+	if (typeof command.tokenHash !== "string") {
+		return { ok: false, error: "invalid_live_activity_token" };
+	}
+	if (!/^[0-9a-f]{64}$/.test(command.tokenHash)) {
+		return { ok: false, error: "invalid_live_activity_token" };
+	}
+	if (command.tokenEnvironment !== "development" && command.tokenEnvironment !== "production") {
+		return { ok: false, error: "invalid_live_activity_registration" };
+	}
+	if (command.platform !== "ios") {
+		return { ok: false, error: "invalid_live_activity_registration" };
+	}
+	return {
+		...common,
+		tokenHash: command.tokenHash,
+		tokenEnvironment: command.tokenEnvironment,
+		platform: command.platform,
+	};
+}
+
+function parseRemoteLiveActivityUnregistrationCommand(
+	command: Record<string, unknown>,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	runtime: ConversationCommandRuntime,
+): ({ ok: true } & RemoteLiveActivityCommandScope) | { ok: false; error: string } {
+	return parseRemoteLiveActivityCommandScope(command, authorization, runtime);
+}
+
+function parseRemoteLiveActivityCommandScope(
+	command: Record<string, unknown>,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	runtime: ConversationCommandRuntime,
+): ({ ok: true } & RemoteLiveActivityCommandScope) | { ok: false; error: string } {
+	if (
+		typeof command.workspaceName !== "string" ||
+		typeof command.sessionId !== "string" ||
+		typeof command.activityId !== "string"
+	) {
+		return { ok: false, error: "invalid_live_activity_registration" };
+	}
+	if (command.workspaceName !== authorization.workspace.name || command.sessionId !== runtime.session.sessionId) {
+		return { ok: false, error: "session_mismatch" };
+	}
+	if (!isValidLiveActivityId(command.activityId)) {
+		return { ok: false, error: "invalid_live_activity_registration" };
+	}
+	return {
+		ok: true,
+		workspaceName: command.workspaceName,
+		sessionId: command.sessionId,
+		activityId: command.activityId,
+	};
+}
+
+function isValidLiveActivityId(activityId: string): boolean {
+	return activityId.length > 0 && Array.from(activityId).length <= 128 && Buffer.byteLength(activityId, "utf8") <= 512;
+}
+
+async function logLiveActivityRegistrationAudit(
+	context: ConversationCommandContext,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	command: RemoteRpcCommand,
+	success: boolean,
+	error?: string,
+	request?: Partial<RemoteLiveActivityRegistrationRequest>,
+	extraDetails: Record<string, unknown> = {},
+): Promise<void> {
+	const details: Record<string, unknown> = {
+		command: command.type,
+		...(request
+			? {
+					sessionId: request.sessionId,
+					activityId: request.activityId,
+					tokenHash: request.tokenHash,
+					tokenEnvironment: request.tokenEnvironment,
+					platform: request.platform,
+				}
+			: {}),
+		...extraDetails,
+	};
+	await logAudit(context.auditLogger, {
+		type: command.type === "unregister_live_activity" ? "live_activity_unregistered" : "live_activity_registered",
+		clientNodeId: authorization.client.nodeId,
+		workspace: request?.workspaceName ?? authorization.workspace.name,
+		success,
+		error,
+		details,
+	});
+}
+
+export async function createRemoteRegisterLiveActivityRpcResponse(
+	command: RemoteRpcCommand,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	context: ConversationCommandContext,
+	runtime: ConversationCommandRuntime,
+): Promise<object> {
+	const id = getRpcResponseId(command);
+	const request = parseRemoteLiveActivityRegistrationCommand(command, authorization, runtime);
+	if (!request.ok) {
+		await logLiveActivityRegistrationAudit(context, authorization, command, false, request.error);
+		return createIrohRemoteRpcErrorResponse(id, "register_live_activity", request.error);
+	}
+	const deliveryChannel = await context.stateManager.findClientLiveActivityDeliveryChannel(
+		authorization.client.nodeId,
+		{
+			tokenHash: request.tokenHash,
+			tokenEnvironment: request.tokenEnvironment,
+			platform: request.platform,
+		},
+	);
+	if (!deliveryChannel?.liveActivity) {
+		await logLiveActivityRegistrationAudit(
+			context,
+			authorization,
+			command,
+			false,
+			"unknown_live_activity_token",
+			request,
+		);
+		return createIrohRemoteRpcErrorResponse(id, "register_live_activity", "unknown_live_activity_token");
+	}
+	const now = contextNow(context);
+	const result = await context.stateManager.registerClientLiveActivity(authorization.client.nodeId, {
+		workspaceName: request.workspaceName,
+		sessionId: request.sessionId,
+		activityId: request.activityId,
+		tokenHash: request.tokenHash,
+		tokenEnvironment: request.tokenEnvironment,
+		platform: request.platform,
+		pushTargetId: deliveryChannel.id,
+		createdAt: now,
+		updatedAt: now,
+	});
+	if (!result.registration) {
+		await logLiveActivityRegistrationAudit(
+			context,
+			authorization,
+			command,
+			false,
+			"unknown_live_activity_token",
+			request,
+		);
+		return createIrohRemoteRpcErrorResponse(id, "register_live_activity", "unknown_live_activity_token");
+	}
+	await logLiveActivityRegistrationAudit(context, authorization, command, true, undefined, request, {
+		pushTargetId: deliveryChannel.id,
+		replaced: result.replacedRegistration !== undefined,
+	});
+	return createRpcSuccessResponse(id, "register_live_activity", {
+		status: "registered",
+		activityId: request.activityId,
+	});
+}
+
+export async function createRemoteUnregisterLiveActivityRpcResponse(
+	command: RemoteRpcCommand,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	context: ConversationCommandContext,
+	runtime: ConversationCommandRuntime,
+): Promise<object> {
+	const id = getRpcResponseId(command);
+	const request = parseRemoteLiveActivityUnregistrationCommand(command, authorization, runtime);
+	if (!request.ok) {
+		await logLiveActivityRegistrationAudit(context, authorization, command, false, request.error);
+		return createIrohRemoteRpcErrorResponse(id, "unregister_live_activity", request.error);
+	}
+	const removed = await context.stateManager.unregisterClientLiveActivity(
+		authorization.client.nodeId,
+		request.workspaceName,
+		request.sessionId,
+		request.activityId,
+	);
+	await logLiveActivityRegistrationAudit(context, authorization, command, true, undefined, request, { removed });
+	return createRpcSuccessResponse(id, "unregister_live_activity", {
+		status: "unregistered",
+		activityId: request.activityId,
+	});
+}
+
+// ============================================================================
+// Identity checks, device logs, host commands
+// ============================================================================
+
+export function getIntegratedConversationIdentityError(
+	command: Record<string, unknown>,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	runtime: ConversationCommandRuntime,
+): string | undefined {
+	const expectedWorkspaceName = authorization.workspace.name;
+	for (const field of ["workspace", "workspaceName"]) {
+		if (
+			Object.hasOwn(command, field) &&
+			(typeof command[field] !== "string" || command[field] !== expectedWorkspaceName)
+		) {
+			return "session_mismatch";
+		}
+	}
+	if (
+		Object.hasOwn(command, "sessionId") &&
+		(typeof command.sessionId !== "string" || command.sessionId !== runtime.session.sessionId)
+	) {
+		return "session_mismatch";
+	}
+	return undefined;
+}
+
+async function createRemoteUploadDeviceLogsRpcResponse(
+	command: RemoteRpcCommand,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	context: ConversationCommandContext,
+): Promise<object> {
+	const response = await handleIrohRemoteDeviceLogUploadRpcCommand(command, {
+		workspacePath: authorization.workspace.path,
+	});
+	await logAudit(context.auditLogger, {
+		type: "device_log_uploaded",
+		clientNodeId: authorization.client.nodeId,
+		workspace: authorization.workspace.name,
+		success: response.success === true,
+		error: response.success === true ? undefined : response.error,
+		details: response.success === true ? { path: response.data.path, byteCount: response.data.byteCount } : undefined,
+	});
+	return response;
+}
+
+function updateAuthorizationWorkspaceMetadata(
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	metadata: { workspaceNames: string[]; workspaces: Array<{ name: string; status: string }> },
+): void {
+	authorization.workspaceNames = [...metadata.workspaceNames];
+	authorization.workspaces = metadata.workspaces.map((workspace) => ({
+		...workspace,
+	})) as typeof authorization.workspaces;
+}
+
+export async function handleRemoteHostRpcCommand(
+	command: RemoteRpcCommand,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	context: ConversationCommandContext,
+): Promise<object | undefined> {
+	let result: Awaited<ReturnType<typeof handleIrohRemoteWorkspaceUnregisterRpcCommand>>;
+	try {
+		result = await handleIrohRemoteWorkspaceUnregisterRpcCommand(command, {
+			classifyWorkspaceAvailability: getIrohRemoteWorkspaceAvailabilityStatus,
+			stateManager: context.stateManager,
+		});
+	} catch (error) {
+		return createIrohRemoteRpcErrorResponse(
+			getRpcResponseId(command),
+			command.type,
+			error instanceof Error ? error.message : String(error),
+		);
+	}
+	if (!result.handled) {
+		return undefined;
+	}
+	if (result.metadata) {
+		updateAuthorizationWorkspaceMetadata(authorization, result.metadata);
+	}
+	if (result.response.success === true && typeof command.name === "string") {
+		context.hostEngine?.clearPairingSecretForWorkspace(command.name);
+	}
+	await logAudit(context.auditLogger, {
+		type: "workspace_unregistered",
+		clientNodeId: authorization.client.nodeId,
+		workspace: typeof command.name === "string" ? command.name : undefined,
+		success: result.response.success === true,
+		error: result.response.success === true ? undefined : result.response.error,
+		details: { source: "remote_rpc" },
+	});
+	return result.response;
+}
+
+// ============================================================================
+// Dispatch
+// ============================================================================
+
+/**
+ * Host-side handler for conversation-stream RPC commands that are not served
+ * directly by the runtime's rpc mode. Returns undefined for commands the rpc
+ * mode should handle itself.
+ */
+export async function handleIntegratedConversationRpcCommand(
+	command: RemoteRpcCommand,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	context: ConversationCommandContext,
+	runtime: ConversationCommandRuntime,
+): Promise<object | undefined> {
+	if (command.type === "list_sessions") {
+		return await createRemoteListSessionsRpcResponse(command, authorization, context, runtime);
+	}
+	if (INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES.has(command.type)) {
+		return createIrohRemoteRpcErrorResponse(getRpcResponseId(command), command.type, "unsupported_remote_command");
+	}
+	if (command.type === "register_live_activity") {
+		return await createRemoteRegisterLiveActivityRpcResponse(command, authorization, context, runtime);
+	}
+	if (command.type === "unregister_live_activity") {
+		return await createRemoteUnregisterLiveActivityRpcResponse(command, authorization, context, runtime);
+	}
+	const identityError = getIntegratedConversationIdentityError(command, authorization, runtime);
+	if (identityError) {
+		return createIrohRemoteRpcErrorResponse(getRpcResponseId(command), command.type, identityError);
+	}
+	if (command.type === "upload_device_logs") {
+		return await createRemoteUploadDeviceLogsRpcResponse(command, authorization, context);
+	}
+	if (command.type === "get_transcript") {
+		return createRemoteGetTranscriptRpcResponse(command, authorization, runtime);
+	}
+	return await handleRemoteHostRpcCommand(command, authorization, context);
+}
