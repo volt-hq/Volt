@@ -156,6 +156,8 @@ export interface RpcModeOptions {
 	requireRemoteSafeUiActions?: boolean;
 	/** Remote host callback for registering platform push notification targets. */
 	registerPushTarget?: (args: unknown) => Promise<RpcRegisterPushTargetResponse>;
+	/** Observes set_client_capabilities feature lists (remote hosts gate optional pushes on these). */
+	onClientCapabilitiesChanged?: (features: string[]) => void;
 }
 
 type RpcModeStartupAwareTransport = RpcTransport & {
@@ -990,6 +992,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			clientCapabilities = new Set(
 				features.filter((feature): feature is RpcClientCapabilityFeature => typeof feature === "string"),
 			);
+			options.onClientCapabilitiesChanged?.(Array.from(clientCapabilities));
 		},
 		getPendingHostActionRequests: () => hostActionBridge.getPendingRequests(),
 		cancelPendingHostActionRequests,

@@ -4,6 +4,8 @@ export interface IrohRemoteActiveStreamEntry {
 	sessionId: string;
 	readonly connectionId: string;
 	readonly streamId: string;
+	/** Feature strings from the client's last set_client_capabilities. */
+	capabilities?: Set<string>;
 	close(reason: string): Promise<void> | void;
 	write?(value: object): Promise<void> | void;
 	closeConnection?(reason: string): Promise<void> | void;
@@ -42,6 +44,14 @@ export class IrohRemoteActiveStreamRegistry {
 
 	entriesForClientNodeId(clientNodeId: string): IrohRemoteActiveStreamEntry[] {
 		return Array.from(this.entriesByClientNodeId.get(clientNodeId) ?? []);
+	}
+
+	allEntries(): IrohRemoteActiveStreamEntry[] {
+		const entries: IrohRemoteActiveStreamEntry[] = [];
+		for (const clientEntries of this.entriesByClientNodeId.values()) {
+			entries.push(...clientEntries);
+		}
+		return entries;
 	}
 
 	entriesForWorkspace(clientNodeId: string, workspaceName: string): IrohRemoteActiveStreamEntry[] {

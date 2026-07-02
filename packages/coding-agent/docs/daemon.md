@@ -98,6 +98,15 @@ When the TUI owns the lease, phone prompts run with the TUI session's full
 local tool set. `remote.allowTools` applies only to daemon-owned headless
 runtimes — see [Security](security.md).
 
+## Optional: theme token push (experimental)
+
+With `VOLT_HOST_THEME_TOKENS=1` in the daemon's environment (or
+`settings.themeTokenPush` in `state.json`), the daemon pushes its resolved
+theme colors to phones that advertise the `host_theme_tokens.v1` capability as
+`host_theme_tokens` frames (hex color values only — nothing path-like ever
+crosses the wire). Off by default; clients that ignore the frame are fully
+supported.
+
 ## Troubleshooting
 
 - `volt daemon status` exits 1 → the daemon is not running; `volt daemon

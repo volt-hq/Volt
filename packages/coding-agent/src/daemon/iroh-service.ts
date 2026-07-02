@@ -28,6 +28,7 @@ import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manag
 import { getIrohRemoteWorkspaceAvailabilityStatus } from "../core/remote/iroh/workspace.ts";
 import type { IrohBiStreamLike } from "../core/rpc/iroh-transport.ts";
 import { getDefaultSessionDir } from "../core/session-manager.ts";
+import { getCurrentThemeName, getResolvedThemeColors } from "../core/theme/runtime.ts";
 import { ProjectTrustStore } from "../core/trust-manager.ts";
 import { runIrohRemoteRpcMode } from "../modes/rpc/iroh-remote-rpc-mode.ts";
 import type { ControlLeaseStatus, ControlRequest } from "./control-protocol.ts";
@@ -64,6 +65,7 @@ import {
 	type IrohRemoteSessionTarget,
 	resolveIrohRemoteSessionTarget,
 } from "./session-target.ts";
+import { createHostThemeTokensFrame, HOST_THEME_TOKENS_FEATURE } from "./theme-push.ts";
 import { ViewerFeedRegistry } from "./viewer-feed.ts";
 import {
 	runWorkspaceDiscoveryStream,
@@ -195,6 +197,7 @@ export function createIrohDaemonService(config: IrohDaemonServiceConfig = {}): V
 		return {
 			handleRequest: (connection, request) => service.handleRequest(connection, request),
 			onConnectionClosed: (connection) => service.onControlConnectionClosed(connection),
+			onThemeChanged: () => service.onThemeChanged(),
 			statusExtras: () => service.statusExtras(),
 			admitRelay: (relayId, relayToken, socket, bufferedRemainder) =>
 				service.admitRelay(relayId, relayToken, socket, bufferedRemainder),
@@ -582,6 +585,33 @@ class IrohDaemonService {
 		};
 		const remove = this.activeStreams.register(entry);
 		return { entry, remove };
+	}
+
+	// ==========================================================================
+	// iOS theme token push (§9.5) — flag off by default, capability gated
+	// ==========================================================================
+
+	private isThemeTokenPushEnabled(): boolean {
+		return this.services.state.state.settings.themeTokenPush === true || process.env.VOLT_HOST_THEME_TOKENS === "1";
+	}
+
+	/** Send the current sanitized theme tokens to one capable stream. */
+	private pushThemeTokensToStream(entry: IrohRemoteActiveStreamEntry): void {
+		if (!this.isThemeTokenPushEnabled() || !entry.capabilities?.has(HOST_THEME_TOKENS_FEATURE)) {
+			return;
+		}
+		const frame = createHostThemeTokensFrame(getCurrentThemeName() ?? "dark", getResolvedThemeColors());
+		void Promise.resolve(entry.write?.(frame)).catch(() => {});
+	}
+
+	/** Theme changed: fan the new tokens out to every capable phone stream. */
+	onThemeChanged(): void {
+		if (!this.isThemeTokenPushEnabled()) {
+			return;
+		}
+		for (const entry of this.activeStreams.allEntries()) {
+			this.pushThemeTokensToStream(entry);
+		}
 	}
 
 	private async closeStreamWithTerminal(
@@ -1087,6 +1117,13 @@ class IrohDaemonService {
 				decorateOutbound: (value) => decorateRemoteHostState(value, authorization, this.getResponseContext()),
 				disposeRuntimeOnClose: false,
 				notificationDelivery: pushDispatcher,
+				onClientCapabilitiesChanged: (features) => {
+					const streamEntry = activeStream?.entry;
+					if (streamEntry) {
+						streamEntry.capabilities = new Set(features);
+						this.pushThemeTokensToStream(streamEntry);
+					}
+				},
 				onSessionChanged: async (session) => {
 					await this.runtimes.handleSessionChanged(entry, activeStream?.entry, session, authorization);
 				},

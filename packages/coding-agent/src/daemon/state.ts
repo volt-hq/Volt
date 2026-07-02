@@ -36,6 +36,8 @@ export interface VoltdStateFileV1 {
 		allowTools: string[] | null;
 		/** Active daemon theme (theme_set); undefined falls back to the default theme. */
 		themeName?: string;
+		/** Push sanitized resolved theme tokens to capable phones (§9.5); OFF by default. */
+		themeTokenPush?: boolean;
 	};
 }
 
@@ -106,10 +108,12 @@ export function parseVoltdState(value: unknown): VoltdStateFileV1 {
 		? settingsRecord.allowTools.filter((tool): tool is string => typeof tool === "string")
 		: null;
 	const themeName = typeof settingsRecord.themeName === "string" ? settingsRecord.themeName : undefined;
+	const themeTokenPush = settingsRecord.themeTokenPush === true;
 	return hostStateToVoltdState(hostState, {
 		detachedRuntimeTtlMs,
 		allowTools,
 		...(themeName === undefined ? {} : { themeName }),
+		...(themeTokenPush ? { themeTokenPush } : {}),
 	});
 }
 

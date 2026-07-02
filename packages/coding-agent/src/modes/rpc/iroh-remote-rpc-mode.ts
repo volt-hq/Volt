@@ -30,6 +30,7 @@ export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	decorateOutbound?: IrohRemoteOutboundValueDecorator;
 	disposeRuntimeOnClose?: boolean;
 	notificationDelivery?: IrohRemotePushNotificationDelivery;
+	onClientCapabilitiesChanged?: (features: string[]) => void;
 	onResponseWritten?: (response: Record<string, unknown>) => void | Promise<void>;
 	onSessionChanged?: (session: RpcSessionChange) => void | Promise<void>;
 	onWorkflowEvent?: RpcModeOptions["onWorkflowEvent"];
@@ -187,6 +188,7 @@ export function runIrohRemoteRpcMode(
 			}
 			await options.onSessionChanged?.(session);
 		},
+		onClientCapabilitiesChanged: options.onClientCapabilitiesChanged,
 		onWorkflowEvent: options.onWorkflowEvent,
 		requireRemoteSafeUiActions: true,
 		transport: remoteHostCommandTransport,

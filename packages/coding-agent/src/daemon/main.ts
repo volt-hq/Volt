@@ -85,6 +85,8 @@ export interface VoltdServiceExtensionInstance {
 	/** Extra request handling; return true when the request was handled. */
 	handleRequest?(connection: ControlConnection, request: ControlRequest): Promise<boolean> | boolean;
 	onConnectionClosed?(connection: ControlConnection): void;
+	/** The daemon's active theme changed (theme_set or an extension setTheme). */
+	onThemeChanged?(): void;
 	statusExtras?(): { leases?: ControlLeaseStatus[]; phoneConnections?: number; relayCount?: number };
 	/** Redeem a relay hello token; true when the socket was taken over. */
 	admitRelay?(relayId: string, relayToken: string, socket: Socket, bufferedRemainder: Buffer): boolean;
@@ -401,13 +403,17 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 
 	// Broadcast every successful theme change (control theme_set, or an extension
 	// calling ctx.ui.setTheme inside a daemon-owned runtime) to all control
-	// clients as a resolved-token snapshot.
+	// clients as a resolved-token snapshot, and let service extensions push it
+	// onward (e.g. host_theme_tokens frames to capable phones, §9.5).
 	onThemeChange(() => {
 		controlServer?.broadcast({
 			type: "theme_snapshot",
 			themeName: getCurrentThemeName() ?? "dark",
 			tokens: getResolvedThemeColors(),
 		});
+		for (const extension of extensionInstances) {
+			extension.onThemeChanged?.();
+		}
 	});
 
 	const services: VoltdRuntimeServices = {
