@@ -56,7 +56,7 @@ function createHarness(): Harness {
 		onDrainStarted: (_record, viewerFeedId) => {
 			drainStarted.push(viewerFeedId);
 		},
-		onDrainEnded: (record, reason) => {
+		onDrainEnded: (record, _viewerFeedId, reason) => {
 			drainEnded.push({ key: key(record.workspaceName, record.sessionId), reason });
 		},
 		audit: (event) => {

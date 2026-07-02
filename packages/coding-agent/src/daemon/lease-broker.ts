@@ -59,7 +59,7 @@ export interface LeaseBrokerEffects {
 		reason: "lease_transferred" | "session_rekeyed_reconnect" | "host_shutdown" | "error",
 	): void;
 	onDrainStarted?(record: LeaseRecord, viewerFeedId: string): void;
-	onDrainEnded?(record: LeaseRecord, reason: "granted" | "cancelled" | "error"): void;
+	onDrainEnded?(record: LeaseRecord, viewerFeedId: string, reason: "granted" | "cancelled" | "error"): void;
 	audit(event: {
 		type: "lease_acquired" | "lease_released" | "lease_denied";
 		workspaceName: string;
@@ -244,7 +244,7 @@ export class LeaseBroker {
 				record.drain = undefined;
 				record.state = record.streamCount > 0 ? "daemon-active" : "daemon-detached";
 				record.tuiConnectionId = undefined;
-				this.effects.onDrainEnded?.(record, "error");
+				this.effects.onDrainEnded?.(record, drain.viewerFeedId, "error");
 				drain.rejectGranted(error instanceof Error ? error : new Error(String(error)));
 			}
 			return;
@@ -257,7 +257,7 @@ export class LeaseBroker {
 		await this.effects.closePhoneStreams(record.workspaceName, record.sessionId, LEASE_TRANSFERRED_CLOSE_REASON);
 		record.streamCount = 0;
 		record.state = "tui-owned";
-		this.effects.onDrainEnded?.(record, "granted");
+		this.effects.onDrainEnded?.(record, drain.viewerFeedId, "granted");
 		this.effects.audit({
 			type: "lease_acquired",
 			workspaceName: record.workspaceName,
@@ -276,7 +276,7 @@ export class LeaseBroker {
 		record.drain = undefined;
 		record.tuiConnectionId = undefined;
 		record.state = record.streamCount > 0 ? "daemon-active" : "daemon-detached";
-		this.effects.onDrainEnded?.(record, "cancelled");
+		this.effects.onDrainEnded?.(record, drain.viewerFeedId, "cancelled");
 		drain.rejectGranted(new Error("drain cancelled"));
 	}
 

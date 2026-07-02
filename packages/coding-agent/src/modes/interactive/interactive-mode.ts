@@ -181,6 +181,7 @@ import {
 	type DaemonRelayOffer,
 	type OpenedRelay,
 } from "./daemon-attach.ts";
+import { DrainViewerComponent } from "./drain-viewer.ts";
 import { adaptRelaySocketToIrohStream } from "./relay-stream-adapter.ts";
 
 function isAsciiOnlyTerminal(): boolean {
@@ -436,6 +437,11 @@ export class InteractiveMode {
 	private daemonLeaseSessionId: string | undefined;
 	/** Set once the user explicitly picks a theme this session; daemon theme_snapshot broadcasts then stop applying (local explicit choice wins). */
 	private localThemeOverride = false;
+	/** Read-only attach overlay while a remote turn drains (§6.3). */
+	private drainViewer: DrainViewerComponent | undefined;
+	private drainViewerFeedId: string | undefined;
+	/** Timestamp of the last quit warning (phone attached + turn streaming). */
+	private lastQuitWarningAt = 0;
 
 	// Extension UI state
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
@@ -1783,6 +1789,17 @@ export class InteractiveMode {
 			if (event.type === "theme_snapshot") {
 				this.applyDaemonThemeSnapshot(event.themeName);
 			}
+			if (event.type === "viewer_event" && event.viewerFeedId === this.drainViewerFeedId) {
+				this.drainViewer?.handleViewerEvent(event.event);
+				this.ui.requestRender();
+			}
+			if (
+				event.type === "viewer_end" &&
+				event.viewerFeedId === this.drainViewerFeedId &&
+				event.reason !== "granted"
+			) {
+				this.exitDrainViewer(event.reason);
+			}
 		});
 		await this.daemonAttach.start();
 		await this.acquireCurrentSessionLease();
@@ -1799,8 +1816,9 @@ export class InteractiveMode {
 			// plain read-from-file open (no live view); the user may retry on action.
 			this.showWarning("This conversation is open in another desktop window; live sharing is disabled here.");
 		}
-		// Pending (drain) rendering lands with the handoff milestone; for now the
-		// lease resolves warm at the next turn boundary.
+		if (outcome.kind === "pending") {
+			this.enterDrainViewer(outcome);
+		}
 		this.updatePhoneFooterIndicator();
 	}
 
@@ -1812,6 +1830,78 @@ export class InteractiveMode {
 			this.renderCurrentSessionState();
 			this.ui.requestRender();
 		}
+		if (outcome.kind === "pending") {
+			// A remote turn is mid-flight; watch it finish behind the current
+			// transcript, then take over warm.
+			this.enterDrainViewer(outcome);
+		}
+	}
+
+	/**
+	 * Read-only attach overlay while the daemon drains a mid-flight remote turn
+	 * (§6.3): viewer events render through the normal message/tool components;
+	 * the editor keeps accepting text but never submits; esc stops the remote
+	 * turn. On grant the session file is reloaded (authoritative) and whatever
+	 * was typed stays in the editor, un-submitted.
+	 */
+	private enterDrainViewer(pending: Extract<AcquireOutcome, { kind: "pending" }>): void {
+		if (this.drainViewer) {
+			return;
+		}
+		this.drainViewerFeedId = pending.viewerFeedId;
+		this.drainViewer = new DrainViewerComponent(this.ui, {
+			markdownTheme: this.getMarkdownThemeWithSettings(),
+			hideThinkingBlock: this.hideThinkingBlock,
+			hiddenThinkingLabel: this.hiddenThinkingLabel,
+			showImages: this.settingsManager.getShowImages(),
+			imageWidthCells: this.settingsManager.getImageWidthCells(),
+			cwd: this.sessionManager.getCwd(),
+			getToolDefinition: (toolName) => this.getRegisteredToolDefinition(toolName),
+		});
+		this.chatContainer.addChild(this.drainViewer);
+		this.ui.requestRender();
+		void this.daemonAttach.viewerSubscribe(pending.viewerFeedId);
+		pending.granted.then(
+			() => {
+				void this.finishDrainViewerGrant();
+			},
+			() => {
+				this.exitDrainViewer("error");
+			},
+		);
+	}
+
+	private async finishDrainViewerGrant(): Promise<void> {
+		const viewer = this.drainViewer;
+		this.drainViewer = undefined;
+		this.drainViewerFeedId = undefined;
+		viewer?.finish("Remote turn finished — taking over…");
+		// Load what the remote turn wrote; the file is the source of truth. The
+		// re-render drops the viewer component; editor text survives un-submitted.
+		await this.session.reload().catch(() => {});
+		this.renderCurrentSessionState();
+		this.showStatus("Attached — the remote turn finished and this desktop now owns the session.");
+		this.ui.requestRender();
+	}
+
+	private exitDrainViewer(reason: "cancelled" | "error"): void {
+		const viewer = this.drainViewer;
+		if (!viewer) {
+			return;
+		}
+		this.drainViewer = undefined;
+		this.drainViewerFeedId = undefined;
+		viewer.finish();
+		if (reason === "error") {
+			this.showWarning(
+				"Attaching failed while a remote turn was streaming; the phone keeps the session. Use /reload to retry.",
+			);
+		}
+		this.ui.requestRender();
+	}
+
+	private isDrainViewerActive(): boolean {
+		return this.drainViewer !== undefined;
 	}
 
 	/**
@@ -2883,6 +2973,16 @@ export class InteractiveMode {
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
+			if (this.isDrainViewerActive()) {
+				// Stop the draining remote turn (non-destructive abort); the drain
+				// then completes and the handoff proceeds.
+				const feedId = this.drainViewerFeedId;
+				if (feedId) {
+					void this.daemonAttach.viewerAbort(feedId);
+					this.showStatus("Stopping the remote turn…");
+				}
+				return;
+			}
 			if (this.session.isStreaming) {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			} else if (this.session.isBashRunning) {
@@ -2995,6 +3095,13 @@ export class InteractiveMode {
 		this.defaultEditor.onSubmit = async (text: string) => {
 			text = text.trim();
 			if (!text) return;
+
+			if (this.isDrainViewerActive()) {
+				// Read-only while the remote turn drains: keep the text in the editor
+				// (it lands un-submitted once the handoff completes).
+				this.showStatus("Attaching — input will stay in the editor until the remote turn finishes.");
+				return;
+			}
 
 			// Handle commands
 			if (text === "/settings") {
@@ -3149,6 +3256,9 @@ export class InteractiveMode {
 			}
 			if (text === "/quit") {
 				this.editor.setText("");
+				if (!this.confirmQuitWithAttachedPhone()) {
+					return;
+				}
 				await this.shutdown();
 				return;
 			}
@@ -3831,7 +3941,30 @@ export class InteractiveMode {
 
 	private handleCtrlD(): void {
 		// Only called when editor is empty (enforced by CustomEditor)
+		if (!this.confirmQuitWithAttachedPhone()) {
+			return;
+		}
 		void this.shutdown();
+	}
+
+	/**
+	 * Quit seam (§6.2): when a phone is attached over a relay and a turn is
+	 * streaming, quitting kills the turn (the daemon resumes from the file, not
+	 * the in-flight state). Require a second quit within 3s to confirm.
+	 */
+	private confirmQuitWithAttachedPhone(): boolean {
+		if (!this.session.isStreaming || this.daemonAttach.relayCount() < 1) {
+			return true;
+		}
+		const now = Date.now();
+		if (now - this.lastQuitWarningAt < 3000) {
+			return true;
+		}
+		this.lastQuitWarningAt = now;
+		this.showWarning(
+			"A phone is attached and a turn is streaming; quitting will kill the turn. Quit again to confirm.",
+		);
+		return false;
 	}
 
 	/**

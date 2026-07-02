@@ -64,6 +64,7 @@ import {
 	type IrohRemoteSessionTarget,
 	resolveIrohRemoteSessionTarget,
 } from "./session-target.ts";
+import { ViewerFeedRegistry } from "./viewer-feed.ts";
 import {
 	runWorkspaceDiscoveryStream,
 	runWorkspaceManagementStream,
@@ -218,6 +219,7 @@ class IrohDaemonService {
 	private readonly trustStore: ProjectTrustStore;
 	private readonly runtimes: IntegratedRuntimeRegistry;
 	private readonly leaseBroker: LeaseBroker;
+	private readonly viewerFeeds: ViewerFeedRegistry;
 	private readonly relays = new RelayRegistry();
 	private endpoint: IrohEndpointLike | undefined;
 	private engine: IrohRemoteHostEngine | undefined;
@@ -254,6 +256,9 @@ class IrohDaemonService {
 			onRuntimeDisposed: (entry, reason) =>
 				this.leaseBroker.onDaemonRuntimeDisposed(entry.workspaceName, entry.sessionId, reason),
 		});
+		this.viewerFeeds = new ViewerFeedRegistry({
+			sendTo: (connectionId, event) => services.controlServer.sendTo(connectionId, event),
+		});
 		this.leaseBroker = new LeaseBroker({
 			isRuntimeStreaming: (workspaceName, sessionId) =>
 				this.runtimes.findOwner(workspaceName, sessionId)?.runtime.session.isStreaming ?? false,
@@ -273,6 +278,15 @@ class IrohDaemonService {
 				for (const relayId of Array.from(record.relayIds)) {
 					this.relays.closeActive(relayId, reason);
 				}
+			},
+			onDrainStarted: (record, viewerFeedId) => {
+				const owner = this.runtimes.findOwner(record.workspaceName, record.sessionId);
+				if (owner && record.tuiConnectionId) {
+					this.viewerFeeds.start(viewerFeedId, record.tuiConnectionId, owner.runtime.session);
+				}
+			},
+			onDrainEnded: (_record, viewerFeedId, reason) => {
+				this.viewerFeeds.end(viewerFeedId, reason);
 			},
 			audit: (event) => {
 				void this.logAudit({
@@ -1487,6 +1501,30 @@ class IrohDaemonService {
 			}
 			case "lease_rekey": {
 				this.leaseBroker.rekey(request.workspaceName, request.oldSessionId, request.newSessionId);
+				connection.send({ type: "ok", id: request.id });
+				return true;
+			}
+			case "viewer_subscribe": {
+				if (!this.viewerFeeds.subscribe(request.viewerFeedId, connection.connectionId)) {
+					connection.send({ type: "error", id: request.id, code: "not_found", message: "unknown viewer feed" });
+					return true;
+				}
+				connection.send({ type: "ok", id: request.id });
+				return true;
+			}
+			case "viewer_unsubscribe": {
+				if (!this.viewerFeeds.unsubscribe(request.viewerFeedId, connection.connectionId)) {
+					connection.send({ type: "error", id: request.id, code: "not_found", message: "unknown viewer feed" });
+					return true;
+				}
+				connection.send({ type: "ok", id: request.id });
+				return true;
+			}
+			case "viewer_abort": {
+				if (!(await this.viewerFeeds.abort(request.viewerFeedId, connection.connectionId))) {
+					connection.send({ type: "error", id: request.id, code: "not_found", message: "unknown viewer feed" });
+					return true;
+				}
 				connection.send({ type: "ok", id: request.id });
 				return true;
 			}

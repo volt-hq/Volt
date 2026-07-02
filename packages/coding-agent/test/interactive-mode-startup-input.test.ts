@@ -16,6 +16,7 @@ type SubmitContext = {
 	flushPendingBashComponents: () => void;
 	onInputCallback?: (text: string) => void;
 	pendingUserInputs: string[];
+	isDrainViewerActive: () => boolean;
 };
 
 type InputContext = {
@@ -45,6 +46,7 @@ function createSubmitContext(): SubmitContext {
 		},
 		flushPendingBashComponents: vi.fn(),
 		pendingUserInputs: [],
+		isDrainViewerActive: () => false,
 	};
 }
 
