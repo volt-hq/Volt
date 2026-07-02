@@ -186,6 +186,7 @@ Response:
   "data": {
     "model": {...},
     "thinkingLevel": "medium",
+    "availableThinkingLevels": ["off", "minimal", "low", "medium", "high"],
     "isStreaming": false,
     "isCompacting": true,
     "steeringMode": "all",
@@ -201,7 +202,7 @@ Response:
 }
 ```
 
-The `model` field is a full [Model](#model) object or `null`. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `activeCompaction` is present only while context compaction is currently running; `startedAt` is Unix epoch milliseconds.
+The `model` field is a full [Model](#model) object or `null`. `availableThinkingLevels` lists the thinking levels the current model supports (`["off"]` for non-reasoning models). The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `activeCompaction` is present only while context compaction is currently running; `startedAt` is Unix epoch milliseconds.
 
 #### get_transcript
 
@@ -512,7 +513,7 @@ Unsupported or deferred native surfaces in v1:
 
 - Extension commands project as palette actions only. First-class extension cards/toggles are deferred until a future `volt.registerAction()` policy defines stable extension-owned ids, trust, descriptor validation, and remote safety.
 - Prompt templates and skills project as palette actions; descriptors omit prompt bodies, skill bodies, file paths, and base directories.
-- Direct model selection, profile switching, scoped-model editing, login/logout, package management, and local settings screens are not exposed over Iroh as native actions. Remote clients should use reviewed actions such as `thinking.fast_mode` and host-approved future preference descriptors instead of raw model/settings RPC.
+- Model selection is not a native action; remote clients use the direct `get_available_models`/`set_model`/`set_thinking_level` RPC commands, which are forwarded over Iroh conversation streams. Profile switching, scoped-model editing, login/logout, package management, and local settings screens remain unexposed over Iroh.
 - Local-only built-ins such as `context.compact` and `session.rename` may appear in local RPC descriptors but are blocked over Iroh until separate remote policy exists.
 
 #### get_ui_action_completions
@@ -593,7 +594,7 @@ For projected dynamic actions, invocation uses the host's existing prompt semant
 - Dynamic action ids are opaque and tied to the current action catalog. After a reload, session replacement, or catalog change, clients must refresh descriptors; stale ids are rejected instead of being remapped to another action.
 - `thinking.fast_mode` uses a required boolean `enabled` argument. Enabling captures the current thinking level, applies the fastest supported lower thinking level among `off`, `minimal`, and `low`, and returns updated boolean state. Disabling restores the captured thinking level after host clamping. It never switches models, exposes model catalogs, changes scoped-model/profile settings, or persists model/thinking defaults. Manual thinking/model/profile/scoped-model changes clear the session-local restore marker.
 - Review actions run a host workflow: the host resolves git targets, applies review-model settings, runs an isolated review session with the approved tool policy, and creates a fresh session seeded with findings. Responses do not include raw diffs, review prompts, configured model names, auth state, or raw tool output. While the workflow runs, hosts may emit sanitized `workflow_*` and `tool_execution_*` activity events so clients can show progress. Remote review actions require confirmation and use the host-owned read-only tool set (`read`, `grep`, `find`, `ls`).
-- Over Iroh, v1 invocation is allowlist-based and forwards only exact reviewed built-in ids (`session.new`, `run.cancel`, `thinking.fast_mode`, `review.uncommitted`, `review.branch`) plus projected dynamic ids under `extension.command.*`, `prompt.template.*`, and `skill.*`. Local-only built-ins such as `context.compact`, `session.rename`, deferred review/model actions, direct model/thinking RPC commands, and unreviewed prefixes are rejected with a normal RPC error.
+- Over Iroh, v1 invocation is allowlist-based and forwards only exact reviewed built-in ids (`session.new`, `run.cancel`, `thinking.fast_mode`, `review.uncommitted`, `review.branch`) plus projected dynamic ids under `extension.command.*`, `prompt.template.*`, and `skill.*`. Local-only built-ins such as `context.compact`, `session.rename`, deferred review actions, and unreviewed prefixes are rejected with a normal RPC error. Model and thinking changes use the direct `set_model`/`set_thinking_level` RPC commands, which are forwarded over Iroh conversation streams.
 
 #### Native UI Action Security
 
@@ -660,19 +661,19 @@ Clients approve only the advertised host-owned action; they cannot alter the com
 
 #### set_model
 
-Switch to a specific model.
+Switch to a specific model. Matches CLI `/model` behavior: the change is recorded in the session and persisted as the default model and provider for future sessions. Pass `"persistDefault": false` to change the current session's model without rewriting the host default (used e.g. for per-agent model overrides). Switching models re-clamps the thinking level to the new model's capabilities (emitting `thinking_level_changed` when it changes) and clears any active Fast mode overlay. Unknown provider/model pairs fail with `Model not found: <provider>/<modelId>`.
 
 ```json
 {"type": "set_model", "provider": "anthropic", "modelId": "claude-sonnet-4-20250514"}
 ```
 
-Response contains the full [Model](#model) object:
+Response contains the full [Model](#model) object plus `availableThinkingLevels`, the thinking levels the model supports:
 ```json
 {
   "type": "response",
   "command": "set_model",
   "success": true,
-  "data": {...}
+  "data": {..., "availableThinkingLevels": ["off", "minimal", "low", "medium", "high"]}
 }
 ```
 
@@ -708,7 +709,7 @@ List all configured models.
 {"type": "get_available_models"}
 ```
 
-Response contains an array of full [Model](#model) objects:
+Response contains an array of full [Model](#model) objects, each enriched with `availableThinkingLevels` (the thinking levels that model supports, `["off"]` for non-reasoning models) so clients can present valid choices without provider capability matrices:
 ```json
 {
   "type": "response",
@@ -724,7 +725,7 @@ Response contains an array of full [Model](#model) objects:
 
 #### set_thinking_level
 
-Set the reasoning/thinking level for models that support it.
+Set the reasoning/thinking level for models that support it. Pass `"persistDefault": false` to apply the level to the current session without persisting it as the host default.
 
 ```json
 {"type": "set_thinking_level", "level": "high"}
@@ -734,9 +735,11 @@ Levels: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`
 
 Note: `"xhigh"` is only supported by OpenAI codex-max models.
 
+Levels the current model does not support are silently clamped to the nearest supported level, not rejected. The response reports the effective post-clamp level, and a `thinking_level_changed` event fires only when the effective level actually changes. Use `get_state`'s `availableThinkingLevels` to present valid choices.
+
 Response:
 ```json
-{"type": "response", "command": "set_thinking_level", "success": true}
+{"type": "response", "command": "set_thinking_level", "success": true, "data": {"level": "high"}}
 ```
 
 #### cycle_thinking_level

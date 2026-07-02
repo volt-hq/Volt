@@ -78,6 +78,32 @@ describe("AgentSession model and extension characterization", () => {
 		expect(harness.session.cycleThinkingLevel()).toBeUndefined();
 	});
 
+	it("clamps xhigh to the highest supported level and excludes xhigh from available levels", async () => {
+		const harness = await createHarness({ models: [{ id: "faux-1", reasoning: true }] });
+		harnesses.push(harness);
+
+		expect(harness.session.getAvailableThinkingLevels()).toEqual(["off", "minimal", "low", "medium", "high"]);
+		harness.session.setThinkingLevel("xhigh");
+		expect(harness.session.thinkingLevel).toBe("high");
+		expect(harness.eventsOfType("thinking_level_changed").map((event) => event.level)).toEqual(["high"]);
+	});
+
+	it("setModel persists the choice as the default model and provider", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "faux-1", name: "One", reasoning: true },
+				{ id: "faux-2", name: "Two", reasoning: true },
+			],
+		});
+		harnesses.push(harness);
+		const nextModel = harness.getModel("faux-2")!;
+
+		await harness.session.setModel(nextModel);
+
+		expect(harness.settingsManager.getDefaultProvider()).toBe(nextModel.provider);
+		expect(harness.settingsManager.getDefaultModel()).toBe("faux-2");
+	});
+
 	it("clears the Fast mode restore marker on manual model and thinking changes", async () => {
 		const harness = await createHarness({
 			models: [

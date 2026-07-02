@@ -56,6 +56,10 @@
 - Added Iroh remote push target registration and generic completion delivery through the managed Volt push relay, with mobile-issued relay credentials persisted on the host instead of raw FCM registration tokens.
 - Added a Firebase Cloud Functions managed push relay implementation for app-side FCM token registration and target-scoped host delivery auth.
 - Added native UI action argument schema validation and `get_ui_action_completions` RPC support for descriptor-backed command arguments.
+- Allowed `get_available_models`, `set_model`, and `set_thinking_level` over Iroh remote conversation streams so paired mobile clients can list models and change the model or thinking level for the bound session. Remote `set_model` matches CLI `/model` behavior, including persisting the choice as the host default model/provider for future sessions; `cycle_model` and `cycle_thinking_level` stay blocked remotely.
+- Added an optional `persistDefault` field to `set_model` and `set_thinking_level` so clients can change the current session's model or thinking level without rewriting the host defaults (used for per-agent overrides).
+- Added `availableThinkingLevels` to RPC `get_state` responses and returned the effective (post-clamp) `level` from `set_thinking_level` so clients can render valid thinking-level choices and detect silent clamping.
+- Added `availableThinkingLevels` to each model in `get_available_models` and to the `set_model` response so clients can render per-model thinking-level choices without mirroring host capability rules.
 
 ### Fixed
 

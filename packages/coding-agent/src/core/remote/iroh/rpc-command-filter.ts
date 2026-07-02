@@ -26,6 +26,9 @@ export const IROH_REMOTE_RPC_PASSTHROUGH_TYPES = new Set([
 	"unregister_workspace",
 	"upload_device_logs",
 	"extension_ui_response",
+	"get_available_models",
+	"set_model",
+	"set_thinking_level",
 ]);
 
 const IROH_REMOTE_UI_ACTION_PREFIXES = ["extension.command.", "prompt.template.", "skill."] as const;

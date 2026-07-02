@@ -188,10 +188,14 @@ export function validateRpcCommandPayload(value: unknown): string | undefined {
 		case "set_model":
 			return (
 				validateRequiredField(value, "provider", isString, "a string") ??
-				validateRequiredField(value, "modelId", isString, "a string")
+				validateRequiredField(value, "modelId", isString, "a string") ??
+				validateOptionalField(value, "persistDefault", isBoolean, "a boolean")
 			);
 		case "set_thinking_level":
-			return validateRequiredField(value, "level", isRpcThinkingLevel, "a supported thinking level");
+			return (
+				validateRequiredField(value, "level", isRpcThinkingLevel, "a supported thinking level") ??
+				validateOptionalField(value, "persistDefault", isBoolean, "a boolean")
+			);
 		case "set_steering_mode":
 		case "set_follow_up_mode":
 			return validateRequiredField(value, "mode", isRpcQueueMode, '"all" or "one-at-a-time"');

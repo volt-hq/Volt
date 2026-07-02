@@ -1488,6 +1488,20 @@ Explicit limitations remain intentional future work rather than open implementat
 - Direct remote model listing/selection stays blocked until a remote-safe model option policy, session preference storage, and sanitizer/allowlist tests exist.
 - Raw slash prompt compatibility remains supported for extension commands, skills, and prompt templates while native descriptors are used opportunistically.
 
+## Resolved 2026-07-02: Direct Remote Model/Thinking RPC Unblocked
+
+Owner decision 2026-07-02: per-agent model selection ships by forwarding the direct model/thinking RPC commands over Iroh, superseding the 2026-06-23 resolutions that kept them local-only (the "Fast Mode Policy Boundary" boundary on direct model RPC, the `/model` classification row, and the "Model/thinking" RPC-surface row). The earlier entries remain unedited as history.
+
+Concrete behavior:
+
+- The Iroh conversation-stream allowlist now forwards `get_available_models`, `set_model`, and `set_thinking_level`. `cycle_model` and `cycle_thinking_level` remain blocked; native clients have the full catalog and select explicitly.
+- `get_available_models` exposes the auth-configured model catalog (full `Model` objects) to paired clients. This is an accepted widening of the earlier "no model catalogs over Iroh" boundary: remote `get_state` already shipped the full current `Model` object, custom-model API keys and custom request headers verifiably never reach `Model` objects, and pairing already grants prompt-level access to the workspace.
+- Remote `set_model` matches CLI `/model` behavior exactly, including persisting the selection as the host default model/provider for future sessions (owner-chosen CLI parity; a phone-initiated change alters what new desktop sessions start with, and this is documented in the remote protocol doc). Both `set_model` and `set_thinking_level` accept an optional `persistDefault: false` for session-scoped changes that must not rewrite host defaults.
+- `set_thinking_level` keeps host-side clamping. RPC `get_state` now reports `availableThinkingLevels` for the current model, `get_available_models` and the `set_model` response report them per model, and `set_thinking_level` returns the effective post-clamp `data.level`, so clients can render valid choices and detect clamping without provider capability matrices.
+- Creation-time model selection needs no handshake change: the conversation hello is unchanged, and clients pipeline `set_model`/`set_thinking_level` (sent with `persistDefault: false`, since a per-agent override is not an owner-chosen new default) after the hello and before the first `prompt`; rpc-mode's sequential command queue guarantees ordering.
+- `thinking.fast_mode` is unchanged and still session-local/non-persistent. Manual remote model/thinking changes clear the Fast mode restore marker through the same session paths as local changes.
+- The E.5 preference-descriptor abstraction (global defaults, per-chat overrides, inheritance metadata) remains future work; this decision covers only direct selection for the bound session.
+
 ## Host Implementation Plan
 
 ### Phase A: Design and Inventory

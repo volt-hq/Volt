@@ -68,6 +68,7 @@ function createDefinition(
 function createState(sessionId: string): RpcSessionState {
 	return {
 		thinkingLevel: "off",
+		availableThinkingLevels: ["off"],
 		isStreaming: false,
 		isCompacting: false,
 		steeringMode: "one-at-a-time",

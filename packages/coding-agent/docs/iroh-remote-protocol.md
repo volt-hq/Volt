@@ -224,6 +224,9 @@ Conversation streams forward or handle these remote commands:
 - `list_sessions`
 - `upload_device_logs`
 - `extension_ui_response`
+- `get_available_models`
+- `set_model`
+- `set_thinking_level`
 
 Conversation streams reject `new_session`, `switch_session_by_id`, and raw `get_messages` with `unsupported_remote_command`. Command-level `workspace`, `workspaceName`, or `sessionId` values on conversation commands are assertions only; values that do not match the stream-bound workspace/session fail with `session_mismatch`.
 
@@ -324,19 +327,25 @@ Projected extension command, prompt-template, and skill actions execute through 
 
 Remote review descriptors expose only bounded card metadata. Review invocation responses do not include raw diffs, GitHub metadata, configured review model values, auth state, or raw tool output. While review runs, the host may emit `workflow_start`, sanitized workflow-scoped `tool_execution_start`/`tool_execution_end`, `workflow_update`, and `workflow_end` events so clients can render a live progress timeline. These activity events include bounded tool names and arguments only; raw read contents, grep output, review prompts, and diffs remain hidden. The remote review workflow uses the host-owned read-only review tool set (`read`, `grep`, `find`, `ls`) and creates a fresh session seeded with findings when the review completes.
 
-Remote Fast mode descriptors expose only bounded toggle metadata and current boolean state. `thinking.fast_mode` invocation accepts a boolean `enabled` argument, changes only the current session's thinking level without persisting defaults or switching models, and returns updated action state. Direct model and thinking RPC commands, including `get_available_models`, `set_model`, `set_thinking_level`, and `cycle_thinking_level`, remain outside the remote allowlist.
+Remote Fast mode descriptors expose only bounded toggle metadata and current boolean state. `thinking.fast_mode` invocation accepts a boolean `enabled` argument, changes only the current session's thinking level without persisting defaults or switching models, and returns updated action state.
 
-First-class extension-provided native cards, persisted chat/global Fast mode defaults, remote model selection, profile switching, scoped-model editing, package management, provider login/logout, and project settings mutation are deferred. They require separate host-owned policy, storage, descriptor, and allowlist work before they can be exposed over Iroh.
+Direct model and thinking RPC commands `get_available_models`, `set_model`, and `set_thinking_level` are forwarded on conversation streams so paired clients can render a native model picker and change the model or thinking level for the bound session:
 
-The preview RPC surface intentionally stays narrow. It excludes local tools such as `bash`, `edit`, and `write`; those tools can only be used through the normal model/tool flow and host-side permission policy. It also excludes read-only local RPC commands such as `get_messages`, `get_commands`, `get_last_assistant_text`, and `get_available_models` for v1 preview.
+- `get_available_models` returns the auth-configured model catalog (`data.models`), the same objects local RPC clients receive, each enriched with `availableThinkingLevels` so clients can render per-model thinking choices without provider capability matrices. Custom-model API keys and custom request headers never reach these model objects, but the catalog does expose model ids, display names, providers, base URLs, costs, and capability metadata to the paired client.
+- `set_model` matches CLI `/model` behavior exactly: it switches the bound session's model, records the change in the session, and persists the choice as the host's default model and provider for future sessions. A model change from a paired phone therefore also changes what new desktop CLI sessions start with. Clients can send `persistDefault: false` to scope the change to the bound session (used for per-agent model overrides). Unknown provider/model pairs fail with `Model not found: <provider>/<modelId>`. `set_model` also clears any active Fast mode overlay and re-clamps the session thinking level to the new model (emitting `thinking_level_changed` when it changes); its response echoes the model with `availableThinkingLevels`.
+- `set_thinking_level` accepts `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`, plus optional `persistDefault: false` to skip persisting the level as the host default. Levels the current model does not support are silently clamped, not rejected; the response `data.level` reports the effective post-clamp level, and a `thinking_level_changed` event fires only when the effective level actually changes. `get_state` reports the current model's valid levels in `availableThinkingLevels`.
+- `cycle_model` and `cycle_thinking_level` remain blocked remotely; native clients have the full catalog and select explicitly.
+
+First-class extension-provided native cards, persisted chat/global Fast mode defaults, profile switching, scoped-model editing, package management, provider login/logout, and project settings mutation are deferred. They require separate host-owned policy, storage, descriptor, and allowlist work before they can be exposed over Iroh.
+
+The preview RPC surface intentionally stays narrow. It excludes local tools such as `bash`, `edit`, and `write`; those tools can only be used through the normal model/tool flow and host-side permission policy. It also excludes read-only local RPC commands such as `get_messages`, `get_commands`, and `get_last_assistant_text` for v1 preview.
 
 The path-based `switch_session` command remains blocked remotely, and mobile conversation streams also reject direct `switch_session_by_id`; clients select another session by opening a new `conversation.target:"session"` stream. `get_transcript` is the remote-safe transcript read: it returns only the bound session's projected user, assistant, tool-summary, and compaction-summary items, ordered oldest-to-newest, with server-bounded page sizes. Host session file paths, raw `get_messages` payloads, thinking blocks, raw tool output, full file contents, provider payloads, and extension-private custom data are not returned. Transcript path and text fields still pass through the outbound redaction layer below.
 
 - `get_messages` can return the full raw transcript, including prompts, tool output, file excerpts, provider payloads, and extension content beyond the projected transcript needed for reconnect.
 - `get_commands` exposes installed extension, prompt-template, and skill metadata; remote clients must use the sanitized `get_ui_actions` discovery surface instead.
 - `get_last_assistant_text` duplicates streamed assistant output and is superseded remotely by the projected transcript surface.
-- `get_available_models` exposes provider/model availability while remote model selection remains unsupported.
-- `set_model`, `set_thinking_level`, and `cycle_thinking_level` directly mutate local model/thinking state; remote clients must use reviewed native actions such as `thinking.fast_mode` instead.
+- `cycle_model` and `cycle_thinking_level` blind-cycle host state; remote clients use `get_available_models` plus explicit `set_model`/`set_thinking_level` instead.
 
 Tool access and RPC command access are separate surfaces. `allowedTools` controls which listed built-in or extension tools the host-side model may invoke, with active extension tools also exposed for the default built-in grant; this allowlist controls which JSONL commands a remote client may send directly.
 

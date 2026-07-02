@@ -861,7 +861,11 @@ describe("Iroh remote core helpers", () => {
 			"register_live_activity",
 			"unregister_live_activity",
 			"unregister_workspace",
+			"upload_device_logs",
 			"extension_ui_response",
+			"get_available_models",
+			"set_model",
+			"set_thinking_level",
 		]);
 		for (const type of IROH_REMOTE_RPC_PASSTHROUGH_TYPES) {
 			const result = getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${type}-1`, type }));
@@ -990,13 +994,17 @@ describe("Iroh remote core helpers", () => {
 				error: "unsupported_remote_command",
 			},
 		});
+		for (const command of ["get_available_models", "set_model", "set_thinking_level"] as const) {
+			expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${command}-1`, type: command }))).toEqual({
+				allowed: true,
+				command: { id: `${command}-1`, type: command },
+			});
+		}
 		for (const command of [
 			"switch_session",
 			"get_commands",
 			"get_last_assistant_text",
-			"get_available_models",
-			"set_model",
-			"set_thinking_level",
+			"cycle_model",
 			"cycle_thinking_level",
 		] as const) {
 			expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${command}-1`, type: command }))).toEqual({

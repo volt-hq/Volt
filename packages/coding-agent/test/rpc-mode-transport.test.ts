@@ -56,6 +56,7 @@ function createStateSession(sessionId: string) {
 		steeringMode: "one-at-a-time" as const,
 		subscribe: vi.fn(() => () => {}),
 		thinkingLevel: "off" as const,
+		getAvailableThinkingLevels: vi.fn(() => ["off"]),
 	};
 }
 

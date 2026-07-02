@@ -14,6 +14,8 @@ import type { HostActionDecisionKind, HostActionRequest, HostActionUpdate } from
 import type { SourceInfo } from "../source-info.ts";
 
 export type RpcModel = Model<Api>;
+/** A model as reported to clients: the raw model plus the thinking levels it supports. */
+export type RpcCatalogModel = RpcModel & { availableThinkingLevels: ThinkingLevel[] };
 export type RpcSubagentDefinitionSource = "built-in" | "user" | "project";
 
 // ============================================================================
@@ -83,12 +85,12 @@ export type RpcCommand =
 	| { id?: string; type: "subagent_dispose"; subagentId: string }
 
 	// Model
-	| { id?: string; type: "set_model"; provider: string; modelId: string }
+	| { id?: string; type: "set_model"; provider: string; modelId: string; persistDefault?: boolean }
 	| { id?: string; type: "cycle_model" }
 	| { id?: string; type: "get_available_models" }
 
 	// Thinking
-	| { id?: string; type: "set_thinking_level"; level: ThinkingLevel }
+	| { id?: string; type: "set_thinking_level"; level: ThinkingLevel; persistDefault?: boolean }
 	| { id?: string; type: "cycle_thinking_level" }
 
 	// Queue modes
@@ -414,6 +416,7 @@ export interface RpcActiveCompaction {
 export interface RpcSessionState {
 	model?: RpcModel;
 	thinkingLevel: ThinkingLevel;
+	availableThinkingLevels: ThinkingLevel[];
 	isStreaming: boolean;
 	isCompacting: boolean;
 	steeringMode: "all" | "one-at-a-time";
@@ -578,7 +581,7 @@ export type RpcResponse =
 			type: "response";
 			command: "set_model";
 			success: true;
-			data: RpcModel;
+			data: RpcCatalogModel;
 	  }
 	| {
 			id?: string;
@@ -592,11 +595,17 @@ export type RpcResponse =
 			type: "response";
 			command: "get_available_models";
 			success: true;
-			data: { models: RpcModel[] };
+			data: { models: RpcCatalogModel[] };
 	  }
 
 	// Thinking
-	| { id?: string; type: "response"; command: "set_thinking_level"; success: true }
+	| {
+			id?: string;
+			type: "response";
+			command: "set_thinking_level";
+			success: true;
+			data: { level: ThinkingLevel };
+	  }
 	| {
 			id?: string;
 			type: "response";

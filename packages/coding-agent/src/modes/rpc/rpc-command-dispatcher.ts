@@ -1,3 +1,5 @@
+import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
+import { getSupportedThinkingLevels } from "@earendil-works/volt-ai";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import {
@@ -16,10 +18,12 @@ import {
 } from "../../core/rpc/ui-actions.ts";
 import type {
 	RpcActiveToolExecution,
+	RpcCatalogModel,
 	RpcClientCapabilityFeature,
 	RpcCommand,
 	RpcHostActionRequest,
 	RpcListSubagentsResponse,
+	RpcModel,
 	RpcPendingHostActionsResponse,
 	RpcRegisterPushTargetResponse,
 	RpcResponse,
@@ -75,6 +79,10 @@ function getUiActionCapabilities(invocationEnabled: boolean): UiActionCapabiliti
 		maxActions: 200,
 		maxDescriptorBytes: 65_536,
 	};
+}
+
+function toCatalogModel(model: RpcModel): RpcCatalogModel {
+	return { ...model, availableThinkingLevels: getSupportedThinkingLevels(model) as ThinkingLevel[] };
 }
 
 export function createRpcSuccessResponse<T extends RpcCommand["type"]>(
@@ -285,6 +293,7 @@ export async function handleRpcCommand(
 			const state: RpcSessionState = {
 				model: session.model,
 				thinkingLevel: session.thinkingLevel,
+				availableThinkingLevels: session.getAvailableThinkingLevels(),
 				isStreaming: session.isStreaming,
 				isCompacting: session.isCompacting,
 				steeringMode: session.steeringMode,
@@ -365,8 +374,8 @@ export async function handleRpcCommand(
 			if (!model) {
 				return createRpcErrorResponse(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
 			}
-			await session.setModel(model);
-			return createRpcSuccessResponse(id, "set_model", model);
+			await session.setModel(model, { persistDefault: command.persistDefault });
+			return createRpcSuccessResponse(id, "set_model", toCatalogModel(model));
 		}
 
 		case "cycle_model": {
@@ -379,7 +388,7 @@ export async function handleRpcCommand(
 
 		case "get_available_models": {
 			const models = await session.modelRegistry.getAvailable();
-			return createRpcSuccessResponse(id, "get_available_models", { models });
+			return createRpcSuccessResponse(id, "get_available_models", { models: models.map(toCatalogModel) });
 		}
 
 		// =================================================================
@@ -387,8 +396,8 @@ export async function handleRpcCommand(
 		// =================================================================
 
 		case "set_thinking_level": {
-			session.setThinkingLevel(command.level);
-			return createRpcSuccessResponse(id, "set_thinking_level");
+			session.setThinkingLevel(command.level, { persistDefault: command.persistDefault });
+			return createRpcSuccessResponse(id, "set_thinking_level", { level: session.thinkingLevel });
 		}
 
 		case "cycle_thinking_level": {

@@ -33,6 +33,7 @@ import { createInProcessRpcClient } from "../src/modes/rpc/in-process-rpc-client
 import { createIrohRemoteCloseDeferringRpcTransport } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { RpcTransportClient } from "../src/modes/rpc/rpc-transport-client.ts";
+import { createTestModel } from "./iroh-stream-doubles.ts";
 
 describe("loopback RPC transport", () => {
 	test("buffers writes until a peer line handler attaches and preserves JSON string separators", () => {
@@ -534,12 +535,16 @@ describe("Iroh remote RPC filter", () => {
 				},
 			});
 		}
+		for (const type of ["get_available_models", "set_model", "set_thinking_level"]) {
+			expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${type}-1`, type }))).toEqual({
+				allowed: true,
+				command: { id: `${type}-1`, type },
+			});
+		}
 		for (const type of [
 			"get_commands",
 			"switch_session",
-			"get_available_models",
-			"set_model",
-			"set_thinking_level",
+			"cycle_model",
 			"cycle_thinking_level",
 			"bash",
 			"export_html",
@@ -610,6 +615,29 @@ describe("Iroh remote RPC filter", () => {
 		expect(serialized).not.toContain(workspacePath);
 		expect(serialized).not.toContain("private-project");
 		expect(serialized).toContain("/workspace");
+	});
+
+	test("passes model catalog responses through the remote outbound sanitizer intact", () => {
+		const workspacePath = "/Users/jordan/private-project";
+		const model = createTestModel("model-one");
+		const sanitized = sanitizeIrohRemoteOutbound(
+			{
+				id: "models-1",
+				type: "response",
+				command: "get_available_models",
+				success: true,
+				data: { models: [model] },
+			},
+			{ workspacePath, remoteWorkspacePath: "/workspace" },
+		);
+
+		expect(sanitized).toEqual({
+			id: "models-1",
+			type: "response",
+			command: "get_available_models",
+			success: true,
+			data: { models: [model] },
+		});
 	});
 });
 
@@ -1087,6 +1115,43 @@ describe("createInProcessRpcClient", () => {
 		});
 
 		await client.stop();
+		expect(dispose).toHaveBeenCalledOnce();
+	});
+
+	test("exposes model catalog, model switching, and thinking level RPC", async () => {
+		const dispose = vi.fn(async () => {});
+		const modelOne = createTestModel("model-one");
+		const modelTwo = createTestModel("model-two");
+		const runtimeHost = createRuntimeHost(dispose, async () => {}, {
+			model: modelOne,
+			availableModels: [modelOne, modelTwo],
+			availableThinkingLevels: ["off", "minimal", "low", "medium", "high"],
+			thinkingLevel: "medium",
+		});
+		const client = await createInProcessRpcClient(runtimeHost);
+
+		try {
+			await expect(client.getState()).resolves.toMatchObject({
+				thinkingLevel: "medium",
+				availableThinkingLevels: ["off", "minimal", "low", "medium", "high"],
+				model: expect.objectContaining({ id: "model-one" }),
+			});
+			await expect(client.getAvailableModels()).resolves.toEqual([
+				expect.objectContaining({ id: "model-one" }),
+				expect.objectContaining({ id: "model-two" }),
+			]);
+			await expect(client.setModel("anthropic", "model-two")).resolves.toMatchObject({
+				provider: "anthropic",
+				id: "model-two",
+			});
+			await expect(client.getState()).resolves.toMatchObject({
+				model: expect.objectContaining({ id: "model-two" }),
+			});
+			await expect(client.setModel("anthropic", "missing")).rejects.toThrow("Model not found: anthropic/missing");
+			await expect(client.setThinkingLevel("low")).resolves.toEqual({ level: "low" });
+		} finally {
+			await client.stop();
+		}
 		expect(dispose).toHaveBeenCalledOnce();
 	});
 
@@ -1817,6 +1882,9 @@ function createRuntimeHost(
 		isCompacting?: boolean;
 		isStreaming?: boolean;
 		model?: Model<Api>;
+		availableModels?: Model<Api>[];
+		availableThinkingLevels?: ThinkingLevel[];
+		setModel?: (model: Model<Api>) => Promise<void>;
 		newSession?: (options?: { parentSession?: string }) => Promise<{ cancelled: boolean }>;
 		prompt?: (message: string, options?: PromptOptions) => Promise<void>;
 		prompts?: PromptTemplate[];
@@ -1833,11 +1901,12 @@ function createRuntimeHost(
 ): AgentSessionRuntime {
 	let thinkingLevel = resources.thinkingLevel ?? "off";
 	let fastModeRestoreThinkingLevel = resources.fastModeRestoreThinkingLevel;
+	let currentModel = resources.model;
 	const authStorage = {};
 	const modelRegistry = {
 		authStorage,
 		refresh: vi.fn(),
-		getAvailable: vi.fn(() => []),
+		getAvailable: vi.fn(() => resources.availableModels ?? []),
 	};
 	const settingsManager = {
 		getReviewModel: vi.fn(() => undefined),
@@ -1877,11 +1946,16 @@ function createRuntimeHost(
 				return resources.activeCompaction;
 			},
 			get model() {
-				return resources.model;
+				return currentModel;
 			},
 			get thinkingLevel() {
 				return thinkingLevel;
 			},
+			getAvailableThinkingLevels: vi.fn(() => resources.availableThinkingLevels ?? ["off"]),
+			setModel: vi.fn(async (model: Model<Api>) => {
+				currentModel = model;
+				await resources.setModel?.(model);
+			}),
 			get fastModeRestoreThinkingLevel() {
 				return fastModeRestoreThinkingLevel;
 			},

@@ -235,9 +235,18 @@ export abstract class RpcClientBase {
 		await this.send({ type: "subagent_dispose", subagentId });
 	}
 
-	/** Set model by provider and ID. */
-	async setModel(provider: string, modelId: string): Promise<{ provider: string; id: string }> {
-		const response = await this.send({ type: "set_model", provider, modelId });
+	/** Set model by provider and ID. Pass persistDefault: false to change the session's model without rewriting the host's default. */
+	async setModel(
+		provider: string,
+		modelId: string,
+		options?: { persistDefault?: boolean },
+	): Promise<{ provider: string; id: string }> {
+		const response = await this.send({
+			type: "set_model",
+			provider,
+			modelId,
+			persistDefault: options?.persistDefault,
+		});
 		return this.getData(response);
 	}
 
@@ -257,9 +266,13 @@ export abstract class RpcClientBase {
 		return this.getData<{ models: ModelInfo[] }>(response).models;
 	}
 
-	/** Set thinking level. */
-	async setThinkingLevel(level: ThinkingLevel): Promise<void> {
-		await this.send({ type: "set_thinking_level", level });
+	/** Set thinking level. Returns the effective (possibly clamped) level. Pass persistDefault: false to skip persisting it as the host default. */
+	async setThinkingLevel(
+		level: ThinkingLevel,
+		options?: { persistDefault?: boolean },
+	): Promise<{ level: ThinkingLevel }> {
+		const response = await this.send({ type: "set_thinking_level", level, persistDefault: options?.persistDefault });
+		return this.getData(response);
 	}
 
 	/** Cycle thinking level. */
