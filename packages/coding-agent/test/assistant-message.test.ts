@@ -1,7 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/volt-ai";
 import { describe, expect, test } from "vitest";
+import { initTheme } from "../src/core/theme/runtime.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";

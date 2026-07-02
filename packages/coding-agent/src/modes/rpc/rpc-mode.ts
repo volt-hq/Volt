@@ -44,8 +44,16 @@ import {
 } from "../../core/review.ts";
 import type { RpcTransport } from "../../core/rpc/transport.ts";
 import type { SubagentDefinition, SubagentHandle } from "../../core/subagents/index.ts";
+import {
+	getAvailableThemesWithPaths,
+	getThemeByName,
+	setRegisteredThemes,
+	setTheme,
+	setThemeInstance,
+	Theme,
+	theme,
+} from "../../core/theme/runtime.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
-import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import {
 	createRpcErrorResponse,
@@ -810,16 +818,26 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		},
 
 		getAllThemes() {
-			return [];
+			return getAvailableThemesWithPaths();
 		},
 
-		getTheme(_name: string) {
-			return undefined;
+		getTheme(name: string) {
+			return getThemeByName(name);
 		},
 
-		setTheme(_theme: string | Theme) {
-			// Theme switching not supported in RPC mode
-			return { success: false, error: "Theme switching not supported in RPC mode" };
+		setTheme(themeOrName: string | Theme) {
+			// Applies to this process's theme instance and persists the choice; a
+			// daemon host observes the change and broadcasts a theme_snapshot. No
+			// hot-reload watcher in rpc mode (that is the rendering TUI's job).
+			if (themeOrName instanceof Theme) {
+				setThemeInstance(themeOrName);
+				return { success: true };
+			}
+			const result = setTheme(themeOrName, false);
+			if (result.success && session.settingsManager.getTheme() !== themeOrName) {
+				session.settingsManager.setTheme(themeOrName);
+			}
+			return result;
 		},
 
 		getToolsExpanded() {
@@ -851,6 +869,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			return;
 		}
 		setSessionHostInteraction(session);
+		// Extension-provided themes resolve by name in rpc mode too (getAllThemes /
+		// getTheme / setTheme), mirroring the TUI's registration at bind time.
+		const resourceThemes = session.resourceLoader?.getThemes?.().themes;
+		if (resourceThemes) {
+			setRegisteredThemes(resourceThemes);
+		}
 		await session.bindExtensions({
 			uiContext: createExtensionUIContext(),
 			mode: "rpc",

@@ -3,7 +3,6 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@earen
 import type { AssistantMessage, TextContent } from "@earendil-works/volt-ai";
 import { Container, Markdown, Text } from "@earendil-works/volt-tui";
 import { type Static, Type } from "typebox";
-import { getMarkdownTheme, type Theme } from "../../modes/interactive/theme/theme.ts";
 import type { SessionStats } from "../agent-session.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type {
@@ -14,6 +13,7 @@ import type {
 	SubagentResult,
 	SubagentStartByNameOptions,
 } from "../subagents/index.ts";
+import { getMarkdownTheme, type Theme } from "../theme/runtime.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 export const DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES = 50 * 1024;

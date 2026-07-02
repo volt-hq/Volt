@@ -1,5 +1,5 @@
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@earendil-works/volt-tui";
-import { getAvailableThemes, getSelectListTheme } from "../theme/theme.ts";
+import { getAvailableThemes, getSelectListTheme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 
 const THEME_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {

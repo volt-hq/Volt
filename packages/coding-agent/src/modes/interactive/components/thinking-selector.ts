@@ -1,6 +1,6 @@
 import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@earendil-works/volt-tui";
-import { getSelectListTheme } from "../theme/theme.ts";
+import { getSelectListTheme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 
 const THINKING_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {

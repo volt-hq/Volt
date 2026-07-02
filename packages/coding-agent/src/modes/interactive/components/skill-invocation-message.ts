@@ -1,6 +1,6 @@
 import { Box, Markdown, type MarkdownTheme, Text } from "@earendil-works/volt-tui";
 import type { ParsedSkillBlock } from "../../../core/agent-session.ts";
-import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
 import { keyText } from "./keybinding-hints.ts";
 
 /**

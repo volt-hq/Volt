@@ -5,8 +5,8 @@
 import { ProcessTerminal, TUI } from "@earendil-works/volt-tui";
 import type { ResolvedPaths } from "../core/package-manager.ts";
 import type { SettingsManager } from "../core/settings-manager.ts";
+import { initTheme, stopThemeWatcher } from "../core/theme/runtime.ts";
 import { ConfigSelectorComponent } from "../modes/interactive/components/config-selector.ts";
-import { initTheme, stopThemeWatcher } from "../modes/interactive/theme/theme.ts";
 
 export interface ConfigSelectorOptions {
 	resolvedPaths: ResolvedPaths;

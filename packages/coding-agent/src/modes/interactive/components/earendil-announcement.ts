@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import { Container, Image, Spacer, Text } from "@earendil-works/volt-tui";
 import { getBundledInteractiveAssetPath } from "../../../config.ts";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 
 const IMAGE_FILENAME = "clankolas.png";

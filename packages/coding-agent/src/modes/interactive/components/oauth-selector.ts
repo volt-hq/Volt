@@ -8,7 +8,7 @@ import {
 	TruncatedText,
 } from "@earendil-works/volt-tui";
 import type { AuthStatus, AuthStorage } from "../../../core/auth-storage.ts";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 
 export type AuthSelectorProvider = {

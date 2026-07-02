@@ -3,7 +3,7 @@
  */
 
 import { getKeybindings, type Keybinding, type KeyId } from "@earendil-works/volt-tui";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../core/theme/runtime.ts";
 
 export interface KeyTextFormatOptions {
 	capitalize?: boolean;

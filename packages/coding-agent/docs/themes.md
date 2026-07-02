@@ -52,7 +52,7 @@ vim ~/.volt/agent/themes/my-theme.json
 
 ```json
 {
-  "$schema": "../src/modes/interactive/theme/theme-schema.json",
+  "$schema": "../src/core/theme/theme-schema.json",
   "name": "my-theme",
   "vars": {
     "primary": "#00aaff",
@@ -122,7 +122,7 @@ vim ~/.volt/agent/themes/my-theme.json
 
 ```json
 {
-  "$schema": "../src/modes/interactive/theme/theme-schema.json",
+  "$schema": "../src/core/theme/theme-schema.json",
   "name": "my-theme",
   "vars": {
     "blue": "#0066cc",
@@ -291,5 +291,5 @@ echo $COLORTERM  # Should output "truecolor" or "24bit"
 ## Examples
 
 See the built-in themes:
-- [dark.json](../src/modes/interactive/theme/dark.json)
-- [light.json](../src/modes/interactive/theme/light.json)
+- [dark.json](../src/core/theme/dark.json)
+- [light.json](../src/core/theme/light.json)

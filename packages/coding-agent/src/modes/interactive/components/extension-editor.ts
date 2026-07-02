@@ -18,7 +18,7 @@ import {
 	type TUI,
 } from "@earendil-works/volt-tui";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
-import { getEditorTheme, theme } from "../theme/theme.ts";
+import { getEditorTheme, theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
 

@@ -3,7 +3,7 @@
  */
 
 import type { Component, TUI } from "@earendil-works/volt-tui";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../core/theme/runtime.ts";
 
 // XBM image: 31x36 pixels, LSB first, 1=background, 0=foreground
 const WIDTH = 31;

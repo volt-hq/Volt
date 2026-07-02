@@ -1,5 +1,5 @@
 import { APP_NAME } from "../../../config.ts";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../core/theme/runtime.ts";
 
 const VOLT_WORDMARK = [
 	"__          __   ______    _        _________ ",

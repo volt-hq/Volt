@@ -2,8 +2,8 @@ import { setKeybindings } from "@earendil-works/volt-tui";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { SessionInfo } from "../src/core/session-manager.ts";
+import { initTheme } from "../src/core/theme/runtime.ts";
 import { SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 async function flushPromises(): Promise<void> {
 	await new Promise<void>((resolve) => {

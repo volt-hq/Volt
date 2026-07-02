@@ -5,7 +5,7 @@
  */
 
 import type { Component, TUI } from "@earendil-works/volt-tui";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../core/theme/runtime.ts";
 
 // 32x32 RGB image of dax, hex encoded (3 bytes per pixel)
 const DAX_HEX =

@@ -4,6 +4,14 @@ import type { Socket } from "node:net";
 import { getAgentDir, VERSION } from "../config.ts";
 import { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
+import {
+	getCurrentThemeName,
+	getResolvedThemeColors,
+	getThemeByName,
+	initTheme,
+	onThemeChange,
+	setTheme,
+} from "../core/theme/runtime.ts";
 import type {
 	ControlClientStatus,
 	ControlLeaseStatus,
@@ -111,6 +119,9 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		log("error", `failed to load state: ${error instanceof Error ? error.message : String(error)}`);
 		return 1;
 	}
+	// The daemon's theme instance: persisted name from voltd state, no hot-reload
+	// watcher (that is the rendering TUI's job).
+	initTheme(state.state.settings.themeName, false);
 	const stateManager = new IrohRemoteHostStateManager({
 		store: {
 			read: () => state.getHostState(),
@@ -270,6 +281,32 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				connection.send({ type: "ok", id: request.id });
 				return;
 			}
+			case "theme_set": {
+				// Validate before applying: runtime setTheme falls back to dark on
+				// failure, which must not clobber the active theme on a bad request.
+				if (!getThemeByName(request.theme)) {
+					connection.send({
+						type: "error",
+						id: request.id,
+						code: "invalid_theme",
+						message: `unknown theme: ${request.theme}`,
+					});
+					return;
+				}
+				const result = setTheme(request.theme, false);
+				if (!result.success) {
+					connection.send({
+						type: "error",
+						id: request.id,
+						code: "invalid_theme",
+						message: result.error ?? `unknown theme: ${request.theme}`,
+					});
+					return;
+				}
+				state.updateSettings({ themeName: request.theme });
+				connection.send({ type: "ok", id: request.id });
+				return;
+			}
 			case "client_approve_repair": {
 				const result = await stateManager.approveClientRePair(request.clientNodeId);
 				await auditLogger
@@ -361,6 +398,17 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		`${JSON.stringify({ pid: process.pid, version: VERSION, startedAtMs, socketPath: paths.socketPath } satisfies PidfileContents)}\n`,
 		{ mode: 0o600 },
 	);
+
+	// Broadcast every successful theme change (control theme_set, or an extension
+	// calling ctx.ui.setTheme inside a daemon-owned runtime) to all control
+	// clients as a resolved-token snapshot.
+	onThemeChange(() => {
+		controlServer?.broadcast({
+			type: "theme_snapshot",
+			themeName: getCurrentThemeName() ?? "dark",
+			tokens: getResolvedThemeColors(),
+		});
+	});
 
 	const services: VoltdRuntimeServices = {
 		agentDir,

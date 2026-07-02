@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getThemesDir } from "../src/config.ts";
 import { getResolvedThemeColors, loadThemeJson } from "../src/core/theme/discovery.ts";
+import { getResolvedThemeColors as legacyGetResolvedThemeColors } from "../src/core/theme/runtime.ts";
 import { Theme } from "../src/core/theme/theme.ts";
 import { createThemeService, type ThemeService } from "../src/core/theme/theme-service.ts";
-import { getResolvedThemeColors as legacyGetResolvedThemeColors } from "../src/modes/interactive/theme/theme.ts";
 
 const HEX_PATTERN = /^#[0-9a-f]{6}$/i;
 

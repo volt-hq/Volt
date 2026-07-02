@@ -4,8 +4,8 @@ import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.ts";
-import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import type { Theme } from "../theme/runtime.ts";
 import type { ToolDiagnosticsProvider } from "./diagnostics-provider.ts";
 import {
 	applyEditsToNormalizedContent,

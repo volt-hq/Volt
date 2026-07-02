@@ -34,6 +34,8 @@ export interface VoltdStateFileV1 {
 		detachedRuntimeTtlMs: number;
 		/** Tool allowlist applied ONLY to daemon-owned headless runtimes. */
 		allowTools: string[] | null;
+		/** Active daemon theme (theme_set); undefined falls back to the default theme. */
+		themeName?: string;
 	};
 }
 
@@ -103,7 +105,12 @@ export function parseVoltdState(value: unknown): VoltdStateFileV1 {
 	const allowTools = Array.isArray(settingsRecord.allowTools)
 		? settingsRecord.allowTools.filter((tool): tool is string => typeof tool === "string")
 		: null;
-	return hostStateToVoltdState(hostState, { detachedRuntimeTtlMs, allowTools });
+	const themeName = typeof settingsRecord.themeName === "string" ? settingsRecord.themeName : undefined;
+	return hostStateToVoltdState(hostState, {
+		detachedRuntimeTtlMs,
+		allowTools,
+		...(themeName === undefined ? {} : { themeName }),
+	});
 }
 
 export function getLegacyRemoteStatePath(agentDir: string): string {

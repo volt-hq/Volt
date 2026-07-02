@@ -2,18 +2,18 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { EditorTheme, MarkdownTheme, SelectListTheme, SettingsListTheme } from "@earendil-works/volt-tui";
 import chalk from "chalk";
-import { getCustomThemesDir } from "../../../config.ts";
+import { getCustomThemesDir } from "../../config.ts";
+import { closeWatcher, watchWithErrorHandler } from "../../utils/fs-watch.ts";
+import { highlight, supportsLanguage } from "../../utils/syntax-highlight.ts";
 import {
 	getAvailableThemesWithPaths as coreGetAvailableThemesWithPaths,
 	getResolvedThemeColors as coreGetResolvedThemeColors,
 	getThemeExportColors as coreGetThemeExportColors,
 	loadTheme,
 	loadThemeFromPath,
-} from "../../../core/theme/discovery.ts";
-import type { Theme } from "../../../core/theme/theme.ts";
-import type { ThemeInfo } from "../../../core/theme/types.ts";
-import { closeWatcher, watchWithErrorHandler } from "../../../utils/fs-watch.ts";
-import { highlight, supportsLanguage } from "../../../utils/syntax-highlight.ts";
+} from "./discovery.ts";
+import type { Theme } from "./theme.ts";
+import type { ThemeInfo } from "./types.ts";
 
 export {
 	detectTerminalBackgroundFromEnv,
@@ -24,17 +24,17 @@ export {
 	type TerminalBackgroundThemeDetectionOptions,
 	type TerminalBackgroundThemeDetector,
 	type TerminalThemeDetectionOptions,
-} from "../../../core/theme/discovery.ts";
-export { Theme } from "../../../core/theme/theme.ts";
+} from "./discovery.ts";
+export { Theme } from "./theme.ts";
 export type {
 	TerminalTheme,
 	TerminalThemeDetection,
 	ThemeBg,
 	ThemeColor,
 	ThemeInfo,
-} from "../../../core/theme/types.ts";
+} from "./types.ts";
 
-import { getDefaultTheme } from "../../../core/theme/discovery.ts";
+import { getDefaultTheme } from "./discovery.ts";
 
 // ============================================================================
 // Theme Discovery (module-level registry view)
@@ -84,6 +84,11 @@ let themeWatcher: fs.FSWatcher | undefined;
 let themeReloadTimer: NodeJS.Timeout | undefined;
 let onThemeChangeCallback: (() => void) | undefined;
 const registeredThemes = new Map<string, Theme>();
+
+/** Name of the theme most recently applied via initTheme/setTheme ("<in-memory>" for direct instances). */
+export function getCurrentThemeName(): string | undefined {
+	return currentThemeName;
+}
 
 export function setRegisteredThemes(themes: Theme[]): void {
 	registeredThemes.clear();

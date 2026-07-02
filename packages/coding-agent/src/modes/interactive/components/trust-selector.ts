@@ -1,10 +1,10 @@
 import { Container, getKeybindings, Spacer, Text } from "@earendil-works/volt-tui";
+import { theme } from "../../../core/theme/runtime.ts";
 import {
 	getProjectTrustOptions,
 	type ProjectTrustOption,
 	type ProjectTrustStoreEntry,
 } from "../../../core/trust-manager.ts";
-import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, rawKeyHint } from "./keybinding-hints.ts";
 

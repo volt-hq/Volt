@@ -188,6 +188,24 @@ function isAsciiOnlyTerminal(): boolean {
 	return process.env.VOLT_ASCII === "1" || process.env.TERM === "linux" || termProgram === "";
 }
 
+import {
+	detectTerminalBackgroundTheme,
+	getAvailableThemes,
+	getAvailableThemesWithPaths,
+	getCurrentThemeName,
+	getEditorTheme,
+	getMarkdownTheme,
+	getThemeByName,
+	initTheme,
+	onThemeChange,
+	setRegisteredThemes,
+	setTheme,
+	setThemeInstance,
+	stopThemeWatcher,
+	Theme,
+	type ThemeColor,
+	theme,
+} from "../../core/theme/runtime.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { renderLogo } from "./components/logo.ts";
@@ -203,23 +221,6 @@ import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
-import {
-	detectTerminalBackgroundTheme,
-	getAvailableThemes,
-	getAvailableThemesWithPaths,
-	getEditorTheme,
-	getMarkdownTheme,
-	getThemeByName,
-	initTheme,
-	onThemeChange,
-	setRegisteredThemes,
-	setTheme,
-	setThemeInstance,
-	stopThemeWatcher,
-	Theme,
-	type ThemeColor,
-	theme,
-} from "./theme/theme.ts";
 
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
@@ -433,6 +434,8 @@ export class InteractiveMode {
 	private daemonAttach: DaemonAttach = createDisabledDaemonAttach();
 	private daemonRelayServers = new Set<Promise<void>>();
 	private daemonLeaseSessionId: string | undefined;
+	/** Set once the user explicitly picks a theme this session; daemon theme_snapshot broadcasts then stop applying (local explicit choice wins). */
+	private localThemeOverride = false;
 
 	// Extension UI state
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
@@ -1776,6 +1779,11 @@ export class InteractiveMode {
 		this.daemonAttach.onReacquired((_sessionId, outcome) => {
 			void this.handleReacquireOutcome(outcome);
 		});
+		this.daemonAttach.onEvent((event) => {
+			if (event.type === "theme_snapshot") {
+				this.applyDaemonThemeSnapshot(event.themeName);
+			}
+		});
 		await this.daemonAttach.start();
 		await this.acquireCurrentSessionLease();
 	}
@@ -1905,6 +1913,22 @@ export class InteractiveMode {
 		void server.finally(() => this.daemonRelayServers.delete(server));
 		this.updatePhoneFooterIndicator();
 		await server;
+	}
+
+	/**
+	 * Apply a daemon-broadcast theme change (theme_set control request or an
+	 * extension setTheme in a daemon-owned runtime) unless the user explicitly
+	 * picked a theme in this TUI session.
+	 */
+	private applyDaemonThemeSnapshot(themeName: string): void {
+		if (this.localThemeOverride || getCurrentThemeName() === themeName) {
+			return;
+		}
+		const result = setTheme(themeName, true);
+		if (result.success) {
+			this.ui.invalidate();
+			this.ui.requestRender();
+		}
 	}
 
 	private updatePhoneFooterIndicator(): void {
@@ -2481,6 +2505,7 @@ export class InteractiveMode {
 			setTheme: (themeOrName) => {
 				if (themeOrName instanceof Theme) {
 					setThemeInstance(themeOrName);
+					this.localThemeOverride = true;
 					this.ui.requestRender();
 					return { success: true };
 				}
@@ -2489,6 +2514,7 @@ export class InteractiveMode {
 					if (this.settingsManager.getTheme() !== themeOrName) {
 						this.settingsManager.setTheme(themeOrName);
 					}
+					this.localThemeOverride = true;
 					this.ui.requestRender();
 				}
 				return result;
@@ -4530,6 +4556,7 @@ export class InteractiveMode {
 					onThemeChange: (themeName) => {
 						const result = setTheme(themeName, true);
 						this.settingsManager.setTheme(themeName);
+						this.localThemeOverride = true;
 						this.ui.invalidate();
 						if (!result.success) {
 							this.showError(`Failed to load theme "${themeName}": ${result.error}\nFell back to dark theme.`);

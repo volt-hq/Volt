@@ -568,6 +568,17 @@ export {
 	type SubagentStartByNameOptions,
 	type SubagentStartOptions,
 } from "./core/subagents/index.ts";
+// Theme utilities for custom tools and extensions
+export {
+	getLanguageFromPath,
+	getMarkdownTheme,
+	getSelectListTheme,
+	getSettingsListTheme,
+	highlightCode,
+	initTheme,
+	Theme,
+	type ThemeColor,
+} from "./core/theme/runtime.ts";
 // Tools
 export {
 	type BashOperations,
@@ -762,17 +773,6 @@ export {
 	UserMessageSelectorComponent,
 	type VisualTruncateResult,
 } from "./modes/interactive/components/index.ts";
-// Theme utilities for custom tools and extensions
-export {
-	getLanguageFromPath,
-	getMarkdownTheme,
-	getSelectListTheme,
-	getSettingsListTheme,
-	highlightCode,
-	initTheme,
-	Theme,
-	type ThemeColor,
-} from "./modes/interactive/theme/theme.ts";
 export {
 	DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS,
 	type DetachedRuntimeRetentionHandle,

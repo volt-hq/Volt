@@ -8,8 +8,8 @@ import type {
 	SessionMessageEntry,
 	SessionTreeNode,
 } from "../src/core/session-manager.ts";
+import { initTheme } from "../src/core/theme/runtime.ts";
 import { TreeSelectorComponent } from "../src/modes/interactive/components/tree-selector.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 beforeAll(() => {
 	initTheme("dark");

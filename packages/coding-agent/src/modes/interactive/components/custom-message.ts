@@ -3,7 +3,7 @@ import type { Component } from "@earendil-works/volt-tui";
 import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/volt-tui";
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
-import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
 
 /**
  * Component that renders a custom message entry from extensions.

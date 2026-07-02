@@ -10,7 +10,7 @@ import {
 	Spacer,
 	Text,
 } from "@earendil-works/volt-tui";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyText } from "./keybinding-hints.ts";
 

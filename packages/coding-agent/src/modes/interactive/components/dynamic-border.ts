@@ -1,5 +1,5 @@
 import type { Component } from "@earendil-works/volt-tui";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../core/theme/runtime.ts";
 
 /**
  * Dynamic border component that adjusts to viewport width.

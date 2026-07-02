@@ -3,7 +3,7 @@ import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/v
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../core/theme/runtime.ts";
 
 /**
  * Sanitize text for display in a single-line status.

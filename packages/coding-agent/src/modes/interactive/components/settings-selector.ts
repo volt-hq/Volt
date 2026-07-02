@@ -13,7 +13,7 @@ import {
 } from "@earendil-works/volt-tui";
 import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
 import type { DefaultProjectTrust, TurnDoneAlert, WarningSettings } from "../../../core/settings-manager.ts";
-import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
+import { getSelectListTheme, getSettingsListTheme, theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
 

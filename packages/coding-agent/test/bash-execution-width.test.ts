@@ -4,8 +4,8 @@
  */
 import { visibleWidth } from "@earendil-works/volt-tui";
 import { beforeAll, describe, expect, it } from "vitest";
+import { initTheme } from "../src/core/theme/runtime.ts";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 /** Minimal TUI stub that only exposes terminal.columns */
 function createTuiStub(columns: number): { columns: number; stub: any } {

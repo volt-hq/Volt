@@ -5,12 +5,12 @@
 import type { AgentMessage } from "@earendil-works/volt-agent-core";
 import type { ImageContent, Model } from "@earendil-works/volt-ai";
 import type { KeyId } from "@earendil-works/volt-tui";
-import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { SessionManager } from "../session-manager.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
+import { type Theme, theme } from "../theme/runtime.ts";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
