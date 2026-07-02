@@ -60,9 +60,10 @@ export type ControlRequest =
 	  }
 	| { type: "lease_release"; id: string; workspaceName: string; sessionId: string }
 	| { type: "lease_rekey"; id: string; workspaceName: string; oldSessionId: string; newSessionId: string }
-	| { type: "pair_request"; id: string } // progress arrives as pairing_progress events
+	| { type: "pair_request"; id: string; workspaceName?: string } // progress arrives as pairing_progress events
 	| { type: "clients_list"; id: string }
 	| { type: "client_revoke"; id: string; clientNodeId: string }
+	| { type: "client_approve_repair"; id: string; clientNodeId: string }
 	| { type: "workspace_register"; id: string; name: string; path: string }
 	| { type: "workspace_unregister"; id: string; name: string }
 	| { type: "theme_set"; id: string; theme: string } // name; daemon resolves + broadcasts
@@ -310,6 +311,7 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 				typeof value.newSessionId === "string"
 			);
 		case "client_revoke":
+		case "client_approve_repair":
 			return typeof value.clientNodeId === "string";
 		case "workspace_register":
 			return typeof value.name === "string" && typeof value.path === "string";

@@ -2,7 +2,7 @@
 
 This example tunnels Volt RPC JSONL over an Iroh QUIC bidirectional stream.
 
-The supported preview host lives in Volt itself: `volt remote host` launches `packages/coding-agent/src/remote/iroh-host.mjs` from source checkouts, or the copied `dist/remote/iroh-host.mjs` from package installs. This directory keeps demo clients and wrappers for local remote-host testing.
+The supported preview host lives in Volt itself: the background daemon (`volt daemon start`, see `docs/daemon.md`) owns the Iroh endpoint. This directory keeps demo clients for local remote testing.
 
 ## Install
 
@@ -70,7 +70,7 @@ npm run iroh:poc:client -- "<ticket>" --interactive
 The first successful connection persists the host key, client key, registered workspaces, and paired client allowlist in state files:
 
 ```text
-~/.volt/agent/remote/iroh-host.json
+~/.volt/agent/daemon/state.json
 ~/.volt/agent/remote/iroh-sidecar-client.json
 ```
 
@@ -116,7 +116,7 @@ Inspect persisted host state, workspaces, clients, client tool grants, and state
 
 ```bash
 volt remote status
-volt remote status --state ~/.volt/agent/remote/iroh-host.json
+volt remote status
 ```
 
 `volt remote status` prints persisted state only and includes that warning in its output; it does not print pairing secrets or secret hashes.
@@ -205,7 +205,7 @@ Remote host support is a preview feature and should be treated as remote access 
 - `--allow-tools` grants that include `bash`, `edit`, or `write` can modify host files or run shell commands; extension tools run code installed on the host and may do the same. TTY host and pair commands ask for confirmation on unsafe built-in grants, and noninteractive commands must pass `--yes`.
 - Workspaces are registered locally and selected by saved name, not arbitrary client-provided paths. Remote clients cannot register, edit, delete, or map workspace paths.
 - Remote sessions do not bypass project trust. Saved workspace trust is honored; otherwise choose `trust` in the host prompt or use `--approve` only when the host user trusts project-local resources.
-- Default state and audit paths are `~/.volt/agent/remote/iroh-host.json` and `~/.volt/agent/remote/iroh-host.audit.jsonl`.
+- Default state and audit paths are `~/.volt/agent/daemon/state.json` and `~/.volt/agent/remote/iroh-host.audit.jsonl`.
 - Do not expose sensitive workspaces or run with `bash,edit,write` unless the client is trusted.
 
 See [Using Volt](../../../docs/usage.md#remote-access-over-iroh-preview), [Security](../../../docs/security.md#remote-access-over-iroh-preview), and [the design document](../../../docs/iroh-remote-access-design.md) for the product security model.

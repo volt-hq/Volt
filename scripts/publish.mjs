@@ -11,7 +11,7 @@ const packages = [
 	{
 		directory: "packages/coding-agent",
 		name: "@earendil-works/volt-coding-agent",
-		requiredPackFiles: ["dist/remote/iroh-host.mjs", "dist/remote/iroh-native-adapter.cjs"],
+		requiredPackFiles: ["dist/remote/iroh-native-adapter.cjs"],
 	},
 ];
 

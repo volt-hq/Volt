@@ -9,7 +9,6 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..");
 const requireModule = createRequire(import.meta.url);
 const sidecarDir = join(repoRoot, "packages", "coding-agent", "examples", "remote", "iroh-sidecar");
-const hostScript = join(repoRoot, "packages", "coding-agent", "src", "remote", "iroh-host.mjs");
 const SOURCE_IMPORT_CONDITION_ARGS = ["--conditions", "volt-source"];
 
 async function assertClientNativeDependencyInstalled() {
@@ -27,7 +26,11 @@ async function assertClientNativeDependencyInstalled() {
 }
 
 function resolveEntrypoint(command) {
-	if (command === "host") return hostScript;
+	if (command === "host") {
+		throw new Error(
+			'The standalone Iroh host was replaced by the background daemon. Run "volt daemon start" (see docs/daemon.md).',
+		);
+	}
 	if (command === "client") return join(sidecarDir, "client.mjs");
 	throw new Error(`Unknown Iroh remote command: ${command}`);
 }

@@ -1,0 +1,279 @@
+import { Buffer } from "node:buffer";
+import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
+import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
+import { isIrohRemoteWorkspaceName } from "../core/remote/iroh/handshake.ts";
+import { sanitizeIrohRemoteOutbound } from "../core/remote/iroh/outbound-filter.ts";
+import { createIrohRemoteRpcErrorResponse } from "../core/remote/iroh/rpc-command-filter.ts";
+import {
+	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
+	type IrohBiStreamLike,
+	type IrohBytes,
+	type IrohRecvStreamLike,
+} from "../core/rpc/iroh-transport.ts";
+import { serializeJsonLine } from "../core/rpc/jsonl.ts";
+import {
+	type ConversationCommandContext,
+	createRemoteListSessionsRpcResponse,
+	createRpcSuccessResponse,
+	getRpcResponseId,
+	type RemoteRpcCommand,
+} from "./conversation-commands.ts";
+
+const DEFAULT_READ_LIMIT = 64 * 1024;
+
+export const WORKSPACE_UNREGISTERED_CLOSE_REASON = "workspace_unregistered";
+
+export async function readLineFromIroh(
+	recv: IrohRecvStreamLike,
+	initial: Buffer = Buffer.alloc(0),
+	options: { maxLineBytes?: number } = {},
+): Promise<{ line: string | undefined; rest: Buffer }> {
+	const maxLineBytes = options.maxLineBytes;
+	const readLimit = Math.min(DEFAULT_READ_LIMIT, maxLineBytes === undefined ? DEFAULT_READ_LIMIT : maxLineBytes + 1);
+	let buffer = Buffer.from(initial);
+
+	while (true) {
+		const newlineIndex = buffer.indexOf(10);
+		if (newlineIndex !== -1) {
+			let lineBuffer = buffer.subarray(0, newlineIndex);
+			if (lineBuffer.length > 0 && lineBuffer[lineBuffer.length - 1] === 13) {
+				lineBuffer = lineBuffer.subarray(0, lineBuffer.length - 1);
+			}
+			if (maxLineBytes !== undefined && lineBuffer.length > maxLineBytes) {
+				throw new Error(`Line exceeds maximum size of ${maxLineBytes} bytes`);
+			}
+			return {
+				line: lineBuffer.toString("utf8"),
+				rest: buffer.subarray(newlineIndex + 1),
+			};
+		}
+
+		if (maxLineBytes !== undefined && buffer.length > maxLineBytes) {
+			throw new Error(`Line exceeds maximum size of ${maxLineBytes} bytes`);
+		}
+
+		const chunk = await recv.read(readLimit);
+		if (!chunk || chunk.length === 0) {
+			return { line: undefined, rest: buffer };
+		}
+		buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
+	}
+}
+
+export function getRemoteSanitizerOptions(authorization: IrohRemoteClientAuthorizationSuccess): {
+	remoteWorkspacePath: string;
+	workspacePath: string;
+} {
+	return {
+		remoteWorkspacePath: "/workspace",
+		workspacePath: authorization.workspace.path,
+	};
+}
+
+export async function writeIrohRemoteJsonLine(
+	send: IrohBiStreamLike["send"],
+	value: object,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): Promise<void> {
+	const sanitized = sanitizeIrohRemoteOutbound(value, getRemoteSanitizerOptions(authorization));
+	await send.writeAll(Array.from(Buffer.from(serializeJsonLine(sanitized), "utf8")));
+}
+
+export function parseRemoteRpcCommandLine(
+	line: string,
+): { ok: true; command: RemoteRpcCommand } | { ok: false; response: object } {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(line);
+	} catch {
+		return {
+			ok: false,
+			response: createIrohRemoteRpcErrorResponse(undefined, "parse", "invalid_request"),
+		};
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		return {
+			ok: false,
+			response: createIrohRemoteRpcErrorResponse(undefined, "unknown", "invalid_request"),
+		};
+	}
+	const record = parsed as Record<string, unknown>;
+	if (typeof record.type !== "string") {
+		return {
+			ok: false,
+			response: createIrohRemoteRpcErrorResponse(getRpcResponseId(record), "unknown", "invalid_request"),
+		};
+	}
+	return { ok: true, command: record as RemoteRpcCommand };
+}
+
+async function runWorkspaceUtilityRpcLoop(
+	stream: IrohBiStreamLike,
+	initialInput: IrohBytes,
+	handleCommand: (line: string) => Promise<boolean>,
+): Promise<void> {
+	let buffer: Buffer = Buffer.from(Array.from(initialInput));
+	while (true) {
+		const result = await readLineFromIroh(stream.recv, buffer, {
+			maxLineBytes: DEFAULT_IROH_RPC_MAX_LINE_BYTES,
+		});
+		if (result.line === undefined) {
+			if (result.rest.length > 0) {
+				const shouldClose = await handleCommand(result.rest.toString("utf8"));
+				if (shouldClose) {
+					return;
+				}
+			}
+			return;
+		}
+
+		const shouldClose = await handleCommand(result.line);
+		if (shouldClose) {
+			return;
+		}
+		buffer = result.rest;
+	}
+}
+
+export interface WorkspaceStreamHooks {
+	auditLogger: IrohRemoteAuditLogger;
+	commandContext: ConversationCommandContext;
+	/** Unregister the workspace and tear down its streams/runtimes. Returns close counts. */
+	unregisterWorkspace(
+		workspaceName: string,
+		excludedStreamClose: () => void,
+	): Promise<{ ok: true; closedStreamCount: number; stoppedRuntimeCount: number } | { ok: false; error: string }>;
+}
+
+export interface WorkspaceStreamContext {
+	stream: IrohBiStreamLike;
+	initialInput: IrohBytes;
+	authorization: IrohRemoteClientAuthorizationSuccess;
+	closeStream(reason?: string): void;
+}
+
+/** Serve a workspaceDiscovery stream: list_sessions only. */
+export async function runWorkspaceDiscoveryStream(
+	context: WorkspaceStreamContext,
+	hooks: Pick<WorkspaceStreamHooks, "commandContext">,
+): Promise<void> {
+	const { stream, authorization } = context;
+	await runWorkspaceUtilityRpcLoop(stream, context.initialInput, async (line) => {
+		const parsed = parseRemoteRpcCommandLine(line);
+		if (!parsed.ok) {
+			await writeIrohRemoteJsonLine(stream.send, parsed.response, authorization);
+			return false;
+		}
+		if (parsed.command.type !== "list_sessions") {
+			await writeIrohRemoteJsonLine(
+				stream.send,
+				createIrohRemoteRpcErrorResponse(
+					getRpcResponseId(parsed.command),
+					parsed.command.type,
+					"unsupported_on_workspace_discovery_stream",
+				),
+				authorization,
+			);
+			return false;
+		}
+		await writeIrohRemoteJsonLine(
+			stream.send,
+			await createRemoteListSessionsRpcResponse(parsed.command, authorization, hooks.commandContext),
+			authorization,
+		);
+		return false;
+	});
+}
+
+function parseWorkspaceManagementUnregisterRequest(
+	command: RemoteRpcCommand,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): { ok: true; workspaceName: string } | { ok: false; error: string } {
+	if (typeof command.workspaceName !== "string" || !isIrohRemoteWorkspaceName(command.workspaceName)) {
+		return { ok: false, error: "invalid_workspace_payload" };
+	}
+	if (command.workspaceName !== authorization.workspace.name) {
+		return { ok: false, error: "session_mismatch" };
+	}
+	for (const field of Object.keys(command)) {
+		if (field !== "id" && field !== "type" && field !== "workspaceName") {
+			return { ok: false, error: "invalid_request" };
+		}
+	}
+	return { ok: true, workspaceName: command.workspaceName };
+}
+
+/** Serve a workspaceManagement stream: unregister_workspace only. */
+export async function runWorkspaceManagementStream(
+	context: WorkspaceStreamContext,
+	hooks: WorkspaceStreamHooks,
+): Promise<void> {
+	const { stream, authorization } = context;
+	await runWorkspaceUtilityRpcLoop(stream, context.initialInput, async (line) => {
+		const parsed = parseRemoteRpcCommandLine(line);
+		if (!parsed.ok) {
+			await writeIrohRemoteJsonLine(stream.send, parsed.response, authorization);
+			return false;
+		}
+		if (parsed.command.type !== "unregister_workspace") {
+			await writeIrohRemoteJsonLine(
+				stream.send,
+				createIrohRemoteRpcErrorResponse(
+					getRpcResponseId(parsed.command),
+					parsed.command.type,
+					"unsupported_on_workspace_management_stream",
+				),
+				authorization,
+			);
+			return false;
+		}
+		const id = getRpcResponseId(parsed.command);
+		const request = parseWorkspaceManagementUnregisterRequest(parsed.command, authorization);
+		if (!request.ok) {
+			await writeIrohRemoteJsonLine(
+				stream.send,
+				createIrohRemoteRpcErrorResponse(id, "unregister_workspace", request.error),
+				authorization,
+			);
+			return false;
+		}
+
+		let excludedClosed = false;
+		const result = await hooks.unregisterWorkspace(request.workspaceName, () => {
+			excludedClosed = true;
+		});
+		if (!result.ok) {
+			await writeIrohRemoteJsonLine(
+				stream.send,
+				createIrohRemoteRpcErrorResponse(id, "unregister_workspace", result.error),
+				authorization,
+			);
+			return false;
+		}
+		await hooks.auditLogger
+			.log({
+				type: "workspace_unregistered",
+				clientNodeId: authorization.client.nodeId,
+				workspace: request.workspaceName,
+				success: true,
+				details: {
+					closedStreamCount: result.closedStreamCount,
+					source: "remote_workspace_management_stream",
+					stoppedRuntimeCount: result.stoppedRuntimeCount,
+				},
+			})
+			.catch(() => {});
+		await writeIrohRemoteJsonLine(
+			stream.send,
+			createRpcSuccessResponse(id, "unregister_workspace", {
+				workspaceName: request.workspaceName,
+				unregistered: true,
+			}),
+			authorization,
+		);
+		if (!excludedClosed) {
+			context.closeStream(WORKSPACE_UNREGISTERED_CLOSE_REASON);
+		}
+		return true;
+	});
+}

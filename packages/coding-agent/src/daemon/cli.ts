@@ -4,6 +4,7 @@ import { getAgentDir, VERSION } from "../config.ts";
 import { createDaemonClient } from "./control-client.ts";
 import type { ControlResponse } from "./control-protocol.ts";
 import { probeControlSocket } from "./control-server.ts";
+import { createIrohDaemonService } from "./iroh-service.ts";
 import { readPidfile, runVoltDaemon } from "./main.ts";
 import { getDaemonPaths } from "./paths.ts";
 import { ensureDaemonRunning, probeDaemon } from "./spawn.ts";
@@ -157,7 +158,7 @@ async function daemonLogs(agentDir: string, args: string[]): Promise<void> {
 	const paths = getDaemonPaths(agentDir);
 	const follow = args.includes("-f") || args.includes("--follow");
 	let lineCount = DEFAULT_LOG_TAIL_LINES;
-	const nIndex = args.findIndex((arg) => arg === "-n");
+	const nIndex = args.indexOf("-n");
 	if (nIndex !== -1) {
 		const parsed = Number(args[nIndex + 1]);
 		if (!Number.isInteger(parsed) || parsed <= 0) {
@@ -254,7 +255,7 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 				process.exitCode = 1;
 				return true;
 			}
-			const code = await runVoltDaemon({ agentDir, foreground: true });
+			const code = await runVoltDaemon({ agentDir, foreground: true }, [createIrohDaemonService()]);
 			process.exitCode = code;
 			return true;
 		}

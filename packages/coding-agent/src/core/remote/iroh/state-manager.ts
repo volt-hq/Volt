@@ -30,9 +30,16 @@ import {
 	upsertIrohRemoteWorkspace,
 } from "./workspace.ts";
 
+export interface IrohRemoteHostStateStore {
+	read(): IrohRemoteHostState | Promise<IrohRemoteHostState>;
+	write(state: IrohRemoteHostState): void | Promise<void>;
+}
+
 export interface IrohRemoteHostStateManagerOptions {
 	initialState?: IrohRemoteHostState;
 	statePath?: string;
+	/** Custom persistence (e.g. the voltd state envelope); mutually exclusive with statePath. */
+	store?: IrohRemoteHostStateStore;
 }
 
 export interface IrohRemoteClientRevocationResult {
@@ -66,6 +73,7 @@ export interface IrohRemoteLiveActivityPruneResult {
 
 export class IrohRemoteHostStateManager {
 	private readonly statePath: string | undefined;
+	private readonly store: IrohRemoteHostStateStore | undefined;
 	private operationQueue: Promise<void> = Promise.resolve();
 	private state: IrohRemoteHostState | undefined;
 
@@ -73,7 +81,13 @@ export class IrohRemoteHostStateManager {
 		if (options.initialState && options.statePath) {
 			throw new Error("Cannot provide both initialState and statePath for Iroh remote host state manager");
 		}
+		if (options.store && (options.statePath || options.initialState)) {
+			throw new Error(
+				"Cannot combine a custom store with statePath/initialState for Iroh remote host state manager",
+			);
+		}
 		this.statePath = options.statePath;
+		this.store = options.store;
 		this.state = options.initialState ? cloneHostState(options.initialState) : undefined;
 	}
 
@@ -532,6 +546,10 @@ export class IrohRemoteHostStateManager {
 	}
 
 	private async loadUnlocked(): Promise<IrohRemoteHostState> {
+		if (this.store) {
+			this.state = cloneHostState(await this.store.read());
+			return this.state;
+		}
 		if (this.statePath) {
 			this.state = await readIrohRemoteHostState(this.statePath);
 			return this.state;
@@ -543,6 +561,10 @@ export class IrohRemoteHostStateManager {
 	private async saveUnlocked(state: IrohRemoteHostState | undefined): Promise<void> {
 		const stateToSave = state ? cloneHostState(state) : createEmptyIrohRemoteHostState();
 		this.state = stateToSave;
+		if (this.store) {
+			await this.store.write(cloneHostState(stateToSave));
+			return;
+		}
 		if (this.statePath) {
 			await writeIrohRemoteHostState(this.statePath, stateToSave);
 		}

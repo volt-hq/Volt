@@ -1,7 +1,14 @@
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { realpath, stat } from "node:fs/promises";
 import { getAgentDir, VERSION } from "../config.ts";
 import { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
-import type { ControlClientStatus, ControlRequest, ControlWorkspaceStatus } from "./control-protocol.ts";
+import { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
+import type {
+	ControlClientStatus,
+	ControlLeaseStatus,
+	ControlRequest,
+	ControlWorkspaceStatus,
+} from "./control-protocol.ts";
 import { PROTOCOL_VERSION } from "./control-protocol.ts";
 import {
 	type ControlConnection,
@@ -53,23 +60,27 @@ export function readPidfile(pidfilePath: string): PidfileContents | undefined {
 export const VOLTD_EXIT_ALREADY_RUNNING = 3;
 export const VOLTD_EXIT_BIND_FAILED = 4;
 
-/** Extension seam: later milestones register runtime/lease/engine facilities here. */
+/** Facilities later milestones build on (lease broker, Iroh host, theme service). */
 export interface VoltdRuntimeServices {
+	agentDir: string;
 	paths: DaemonPaths;
 	logger: DaemonLogger;
 	state: VoltdStateStore;
+	stateManager: IrohRemoteHostStateManager;
 	auditLogger: IrohRemoteAuditLogger;
 	controlServer: ControlServer;
 	requestShutdown(reason: "cli" | "signal"): void;
 }
 
-export type VoltdServiceExtension = (services: VoltdRuntimeServices) => {
+export interface VoltdServiceExtensionInstance {
 	/** Extra request handling; return true when the request was handled. */
 	handleRequest?(connection: ControlConnection, request: ControlRequest): Promise<boolean> | boolean;
 	onConnectionClosed?(connection: ControlConnection): void;
-	statusExtras?(): { leases?: never[] } | Record<string, unknown>;
+	statusExtras?(): { leases?: ControlLeaseStatus[]; phoneConnections?: number };
 	shutdown?(): Promise<void>;
-};
+}
+
+export type VoltdServiceExtension = (services: VoltdRuntimeServices) => VoltdServiceExtensionInstance;
 
 export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServiceExtension[] = []): Promise<number> {
 	process.title = "voltd";
@@ -97,6 +108,14 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		log("error", `failed to load state: ${error instanceof Error ? error.message : String(error)}`);
 		return 1;
 	}
+	const stateManager = new IrohRemoteHostStateManager({
+		store: {
+			read: () => state.getHostState(),
+			write: (hostState) => {
+				state.setHostState(hostState);
+			},
+		},
+	});
 	const auditLogger = new IrohRemoteAuditLogger({ path: paths.auditPath });
 
 	let shuttingDown = false;
@@ -105,8 +124,8 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		resolveExit = resolve;
 	});
 
+	const extensionInstances: VoltdServiceExtensionInstance[] = [];
 	let controlServer: ControlServer | undefined;
-	let extensionInstances: ReturnType<VoltdServiceExtension>[] = [];
 
 	const shutdown = async (reason: "cli" | "signal") => {
 		if (shuttingDown) {
@@ -134,6 +153,13 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		void shutdown(reason);
 	};
 
+	const toClientStatuses = (): ControlClientStatus[] =>
+		state.state.clients.map((client) => ({
+			clientNodeId: client.nodeId,
+			...(client.label === undefined ? {} : { label: client.label }),
+			pairedAtMs: client.pairedAt ?? 0,
+		}));
+
 	const handleRequest = async (connection: ControlConnection, request: ControlRequest): Promise<void> => {
 		for (const extension of extensionInstances) {
 			if (await extension.handleRequest?.(connection, request)) {
@@ -142,16 +168,19 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		}
 		switch (request.type) {
 			case "status": {
-				const currentState = state.state;
-				const workspaces: ControlWorkspaceStatus[] = currentState.workspaces.map((workspace) => ({
+				const workspaces: ControlWorkspaceStatus[] = state.state.workspaces.map((workspace) => ({
 					name: workspace.name,
 					path: workspace.path,
 				}));
-				const clients: ControlClientStatus[] = currentState.clients.map((client) => ({
-					clientNodeId: client.nodeId,
-					...(client.label === undefined ? {} : { label: client.label }),
-					pairedAtMs: client.pairedAt ?? 0,
-				}));
+				let leases: ControlLeaseStatus[] = [];
+				let phoneConnections = 0;
+				for (const extension of extensionInstances) {
+					const extras = extension.statusExtras?.();
+					if (extras?.leases) {
+						leases = leases.concat(extras.leases);
+					}
+					phoneConnections += extras?.phoneConnections ?? 0;
+				}
 				connection.send({
 					type: "status_result",
 					id: request.id,
@@ -159,10 +188,10 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					protocolVersion: PROTOCOL_VERSION,
 					pid: process.pid,
 					startedAtMs,
-					leases: [],
-					phoneConnections: 0,
+					leases,
+					phoneConnections,
 					workspaces,
-					clients,
+					clients: toClientStatuses(),
 				});
 				return;
 			}
@@ -172,28 +201,94 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				return;
 			}
 			case "clients_list": {
-				connection.send({
-					type: "clients_result",
-					id: request.id,
-					clients: state.state.clients.map((client) => ({
-						clientNodeId: client.nodeId,
-						...(client.label === undefined ? {} : { label: client.label }),
-						pairedAtMs: client.pairedAt ?? 0,
-					})),
-				});
+				connection.send({ type: "clients_result", id: request.id, clients: toClientStatuses() });
 				return;
 			}
-			case "lease_acquire":
-			case "lease_release":
-			case "lease_rekey":
-				// Lease integration lands with the broker; absent-daemon semantics apply.
-				connection.send({
-					type: "error",
-					id: request.id,
-					code: "unsupported",
-					message: "lease broker is not available in this daemon build",
-				});
+			case "workspace_register": {
+				let workspacePath: string;
+				try {
+					const stats = await stat(request.path);
+					if (!stats.isDirectory()) {
+						throw new Error(`Workspace path is not a directory: ${request.path}`);
+					}
+					workspacePath = await realpath(request.path);
+				} catch (error) {
+					connection.send({
+						type: "error",
+						id: request.id,
+						code: "invalid_workspace",
+						message: error instanceof Error ? error.message : String(error),
+					});
+					return;
+				}
+				await stateManager.upsertWorkspace({ name: request.name, path: workspacePath });
+				await auditLogger
+					.log({
+						type: "workspace_registered",
+						workspace: request.name,
+						success: true,
+						details: { path: workspacePath, source: "control" },
+					})
+					.catch(() => {});
+				connection.send({ type: "ok", id: request.id });
 				return;
+			}
+			case "workspace_unregister": {
+				// State-only fallback (no Iroh extension running).
+				const removedWorkspace = await stateManager.unregisterWorkspace(request.name);
+				if (!removedWorkspace) {
+					connection.send({
+						type: "error",
+						id: request.id,
+						code: "not_found",
+						message: `No registered workspace named ${request.name}`,
+					});
+					return;
+				}
+				await stateManager.removeLiveActivitiesForWorkspace(request.name);
+				connection.send({ type: "ok", id: request.id });
+				return;
+			}
+			case "client_revoke": {
+				// State-only fallback (no Iroh extension running).
+				const result = await stateManager.revokeClient(request.clientNodeId);
+				await auditLogger
+					.log({
+						type: "client_revoked",
+						clientNodeId: request.clientNodeId,
+						success: result.revoked,
+						error: result.revoked ? undefined : "client not found",
+					})
+					.catch(() => {});
+				if (!result.revoked) {
+					connection.send({ type: "error", id: request.id, code: "not_found", message: "client not found" });
+					return;
+				}
+				connection.send({ type: "ok", id: request.id });
+				return;
+			}
+			case "client_approve_repair": {
+				const result = await stateManager.approveClientRePair(request.clientNodeId);
+				await auditLogger
+					.log({
+						type: "client_repair_approved",
+						clientNodeId: request.clientNodeId,
+						success: result.approved,
+						error: result.approved ? undefined : "revoked client not found",
+					})
+					.catch(() => {});
+				if (!result.approved) {
+					connection.send({
+						type: "error",
+						id: request.id,
+						code: "not_found",
+						message: "revoked client not found",
+					});
+					return;
+				}
+				connection.send({ type: "ok", id: request.id });
+				return;
+			}
 			default:
 				connection.send({
 					type: "error",
@@ -205,9 +300,27 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		}
 	};
 
+	const bindControlServer = () =>
+		startControlServer({
+			socketPath: paths.socketPath,
+			version: VERSION,
+			handlers: {
+				onRequest: handleRequest,
+				isShuttingDown: () => shuttingDown,
+				onConnectionClosed(connection) {
+					for (const extension of extensionInstances) {
+						extension.onConnectionClosed?.(connection);
+					}
+				},
+				log(level, message) {
+					logger.log(level === "info" ? "info" : level, "control", message);
+				},
+			},
+		});
+
 	// Single instance is guaranteed by the socket bind.
 	try {
-		controlServer = await bindControlServer(paths, logger, handleRequest, () => shuttingDown, extensionInstances);
+		controlServer = await bindControlServer();
 	} catch (error) {
 		if (isErrnoException(error) && error.code === "EADDRINUSE") {
 			const healthy = await probeControlSocket(paths.socketPath, { version: VERSION });
@@ -218,13 +331,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			log("warn", "stale socket detected; unlinking and retrying bind once");
 			rmSync(paths.socketPath, { force: true });
 			try {
-				controlServer = await bindControlServer(
-					paths,
-					logger,
-					handleRequest,
-					() => shuttingDown,
-					extensionInstances,
-				);
+				controlServer = await bindControlServer();
 			} catch (retryError) {
 				log("error", `bind retry failed: ${retryError instanceof Error ? retryError.message : String(retryError)}`);
 				return VOLTD_EXIT_BIND_FAILED;
@@ -243,14 +350,18 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	);
 
 	const services: VoltdRuntimeServices = {
+		agentDir,
 		paths,
 		logger,
 		state,
+		stateManager,
 		auditLogger,
 		controlServer,
 		requestShutdown,
 	};
-	extensionInstances = extensions.map((extension) => extension(services));
+	for (const extension of extensions) {
+		extensionInstances.push(extension(services));
+	}
 
 	const onSignal = () => requestShutdown("signal");
 	process.on("SIGTERM", onSignal);
@@ -265,31 +376,6 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	process.off("SIGTERM", onSignal);
 	process.off("SIGINT", onSignal);
 	return code;
-}
-
-async function bindControlServer(
-	paths: DaemonPaths,
-	logger: DaemonLogger,
-	onRequest: (connection: ControlConnection, request: ControlRequest) => Promise<void>,
-	isShuttingDown: () => boolean,
-	extensionInstances: ReturnType<VoltdServiceExtension>[],
-): Promise<ControlServer> {
-	return startControlServer({
-		socketPath: paths.socketPath,
-		version: VERSION,
-		handlers: {
-			onRequest,
-			isShuttingDown,
-			onConnectionClosed(connection) {
-				for (const extension of extensionInstances) {
-					extension.onConnectionClosed?.(connection);
-				}
-			},
-			log(level, message) {
-				logger.log(level === "info" ? "info" : level, "control", message);
-			},
-		},
-	});
 }
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {

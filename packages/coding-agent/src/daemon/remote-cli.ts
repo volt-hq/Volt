@@ -1,0 +1,422 @@
+import { basename, resolve } from "node:path";
+import { getAgentDir, VERSION } from "../config.ts";
+import { formatIrohRemoteTicketQrCode } from "../core/remote/iroh/qr.ts";
+import { createDaemonClient, type DaemonClient } from "./control-client.ts";
+import type { ControlEvent, ControlResponse } from "./control-protocol.ts";
+import { ensureDaemonRunning, probeDaemon } from "./spawn.ts";
+
+function printRemoteUsage(): void {
+	console.error(`Usage: volt remote <command>
+
+Commands:
+  pair [--workspace <name>]     Create a pairing ticket and wait for the phone to pair.
+  status [--json]               Show daemon status (workspaces, clients, leases).
+  clients                       List paired clients.
+  revoke <node-id>              Revoke a paired client and close its connections.
+  approve-repair <node-id>      Allow a revoked client node ID to re-pair.
+  workspace add [path] [--name <name>]
+                                Register a workspace with the daemon.
+  workspace remove <name>       Unregister a workspace.
+  workspace list                List registered workspaces.
+
+"volt remote host" has been replaced by the background daemon. Run "volt daemon start"
+(or enable remote.background). See docs/daemon.md.
+`);
+}
+
+interface RemoteControlSession {
+	client: DaemonClient;
+	events: (handler: (event: ControlEvent) => void) => void;
+	close(): Promise<void>;
+}
+
+async function connectToDaemon(options: { autoStart: boolean }): Promise<RemoteControlSession | undefined> {
+	const agentDir = getAgentDir();
+	let probe = await probeDaemon(agentDir);
+	if (!probe.healthy && options.autoStart) {
+		const ensured = await ensureDaemonRunning(agentDir);
+		probe = { healthy: ensured.healthy, socketPath: ensured.socketPath };
+	}
+	if (!probe.healthy) {
+		console.error("voltd is not running. Start it with: volt daemon start");
+		process.exitCode = 1;
+		return undefined;
+	}
+	const handlers = new Set<(event: ControlEvent) => void>();
+	const client = createDaemonClient({
+		socketPath: probe.socketPath,
+		client: "cli",
+		version: VERSION,
+		reconnect: false,
+		onEvent: (event) => {
+			for (const handler of handlers) {
+				handler(event);
+			}
+		},
+	});
+	try {
+		await client.connect();
+	} catch (error) {
+		console.error(`Error: could not connect to voltd: ${error instanceof Error ? error.message : String(error)}`);
+		process.exitCode = 1;
+		return undefined;
+	}
+	return {
+		client,
+		events: (handler) => {
+			handlers.add(handler);
+		},
+		close: () => client.close(),
+	};
+}
+
+function reportControlError(response: ControlResponse, context: string): boolean {
+	if (response.type === "error") {
+		console.error(`Error: ${context}: ${response.message}`);
+		process.exitCode = 1;
+		return true;
+	}
+	return false;
+}
+
+async function handlePairCommand(args: string[]): Promise<void> {
+	let workspaceName: string | undefined;
+	const workspaceIndex = args.indexOf("--workspace");
+	if (workspaceIndex !== -1) {
+		workspaceName = args[workspaceIndex + 1];
+		if (!workspaceName) {
+			console.error("Error: --workspace requires a value");
+			process.exitCode = 1;
+			return;
+		}
+	}
+
+	const session = await connectToDaemon({ autoStart: true });
+	if (!session) {
+		return;
+	}
+	try {
+		// Default the pairing workspace to the daemon workspace registered for the cwd,
+		// registering the cwd when nothing matches (name = basename).
+		if (workspaceName === undefined) {
+			const status = await session.client.request({ type: "status" });
+			if (status.type !== "status_result") {
+				reportControlError(status, "status");
+				return;
+			}
+			const cwd = resolve(process.cwd());
+			const match = status.workspaces
+				.filter((workspace) => cwd === workspace.path || cwd.startsWith(`${workspace.path}/`))
+				.sort((left, right) => right.path.length - left.path.length)[0];
+			if (match) {
+				workspaceName = match.name;
+			} else {
+				workspaceName = basename(cwd) || "workspace";
+				const registered = await session.client.request({
+					type: "workspace_register",
+					name: workspaceName,
+					path: cwd,
+				});
+				if (reportControlError(registered, "workspace register")) {
+					return;
+				}
+				console.error(`registered workspace: ${workspaceName} -> ${cwd}`);
+			}
+		}
+
+		const done = new Promise<void>((resolveDone) => {
+			session.events((event) => {
+				if (event.type !== "pairing_progress") {
+					return;
+				}
+				if (event.phase === "ticket" && event.ticket) {
+					if (process.stderr.isTTY) {
+						try {
+							console.error("pairing ticket QR:");
+							console.error(formatIrohRemoteTicketQrCode(event.ticket));
+						} catch (error) {
+							console.error(
+								`Could not render pairing QR: ${error instanceof Error ? error.message : String(error)}`,
+							);
+						}
+					}
+					console.error("pairing ticket:");
+					console.log(event.ticket);
+					return;
+				}
+				if (event.phase === "waiting") {
+					console.error("waiting for the phone to pair (Ctrl-C to stop waiting)...");
+					return;
+				}
+				if (event.phase === "completed") {
+					console.error(`paired: ${event.clientNodeId ?? "client"}`);
+					resolveDone();
+					return;
+				}
+				if (event.phase === "failed") {
+					console.error(`pairing failed: ${event.error ?? "unknown error"}`);
+					process.exitCode = 1;
+					resolveDone();
+				}
+			});
+		});
+
+		const response = await session.client.request({
+			type: "pair_request",
+			...(workspaceName === undefined ? {} : { workspaceName }),
+		});
+		if (reportControlError(response, "pair")) {
+			return;
+		}
+		await done;
+	} finally {
+		await session.close();
+	}
+}
+
+async function handleStatusCommand(args: string[]): Promise<void> {
+	const session = await connectToDaemon({ autoStart: false });
+	if (!session) {
+		return;
+	}
+	try {
+		const response = await session.client.request({ type: "status" });
+		if (response.type !== "status_result") {
+			reportControlError(response, "status");
+			return;
+		}
+		if (args.includes("--json")) {
+			console.log(JSON.stringify({ ...response, id: undefined, type: undefined }, null, 2));
+			return;
+		}
+		console.error(`voltd ${response.version} (pid ${response.pid})`);
+		console.error(`workspaces: ${response.workspaces.length}`);
+		for (const workspace of response.workspaces) {
+			console.error(`  ${workspace.name} -> ${workspace.path}`);
+		}
+		console.error(`paired clients: ${response.clients.length}`);
+		for (const client of response.clients) {
+			console.error(`  ${client.clientNodeId}${client.label ? ` (${client.label})` : ""}`);
+		}
+		console.error(`phone connections: ${response.phoneConnections}`);
+		console.error(`leases: ${response.leases.length}`);
+		for (const lease of response.leases) {
+			console.error(
+				`  ${lease.workspaceName}/${lease.sessionId}: ${lease.state} (streams ${lease.streamCount}, relays ${lease.relayCount})`,
+			);
+		}
+	} finally {
+		await session.close();
+	}
+}
+
+async function handleClientsCommand(): Promise<void> {
+	const session = await connectToDaemon({ autoStart: false });
+	if (!session) {
+		return;
+	}
+	try {
+		const response = await session.client.request({ type: "clients_list" });
+		if (response.type !== "clients_result") {
+			reportControlError(response, "clients");
+			return;
+		}
+		console.log(JSON.stringify(response.clients, null, 2));
+	} finally {
+		await session.close();
+	}
+}
+
+async function handleRevokeCommand(args: string[]): Promise<void> {
+	const all = args.includes("--all");
+	const positionals = args.filter((arg) => !arg.startsWith("--"));
+	if (!all && positionals.length === 0) {
+		console.error("Error: Missing node id to revoke");
+		process.exitCode = 1;
+		return;
+	}
+	const session = await connectToDaemon({ autoStart: false });
+	if (!session) {
+		return;
+	}
+	try {
+		let nodeIds = positionals;
+		if (all) {
+			const clients = await session.client.request({ type: "clients_list" });
+			if (clients.type !== "clients_result") {
+				reportControlError(clients, "clients");
+				return;
+			}
+			nodeIds = clients.clients.map((client) => client.clientNodeId);
+			if (nodeIds.length === 0) {
+				console.error("No paired clients to revoke");
+				return;
+			}
+		}
+		let revokedCount = 0;
+		for (const nodeId of nodeIds) {
+			const response = await session.client.request({ type: "client_revoke", clientNodeId: nodeId });
+			if (response.type === "error") {
+				console.error(`Error: revoke ${nodeId}: ${response.message}`);
+				process.exitCode = 1;
+				continue;
+			}
+			revokedCount++;
+			console.error(`Revoked ${nodeId}`);
+		}
+		if (all) {
+			console.error(`Revoked ${revokedCount} client${revokedCount === 1 ? "" : "s"}`);
+		}
+	} finally {
+		await session.close();
+	}
+}
+
+async function handleApproveRepairCommand(args: string[]): Promise<void> {
+	const nodeId = args[0];
+	if (!nodeId) {
+		console.error("Error: Missing node id to approve for re-pair");
+		process.exitCode = 1;
+		return;
+	}
+	const session = await connectToDaemon({ autoStart: false });
+	if (!session) {
+		return;
+	}
+	try {
+		const response = await session.client.request({ type: "client_approve_repair", clientNodeId: nodeId });
+		if (reportControlError(response, "approve-repair")) {
+			return;
+		}
+		console.error(`Approved re-pair for ${nodeId}`);
+	} finally {
+		await session.close();
+	}
+}
+
+async function handleWorkspaceCommand(args: string[]): Promise<void> {
+	const subcommand = args[0];
+	if (subcommand === "add") {
+		const rest = args.slice(1);
+		let name: string | undefined;
+		const nameIndex = rest.indexOf("--name");
+		if (nameIndex !== -1) {
+			name = rest[nameIndex + 1];
+			if (!name) {
+				console.error("Error: --name requires a value");
+				process.exitCode = 1;
+				return;
+			}
+			rest.splice(nameIndex, 2);
+		}
+		const path = resolve(rest[0] ?? process.cwd());
+		const workspaceName = name ?? basename(path) ?? "workspace";
+		const session = await connectToDaemon({ autoStart: true });
+		if (!session) {
+			return;
+		}
+		try {
+			const response = await session.client.request({ type: "workspace_register", name: workspaceName, path });
+			if (reportControlError(response, "workspace add")) {
+				return;
+			}
+			console.error(`registered workspace: ${workspaceName} -> ${path}`);
+		} finally {
+			await session.close();
+		}
+		return;
+	}
+	if (subcommand === "remove") {
+		const name = args[1];
+		if (!name) {
+			console.error("Error: workspace remove requires a name");
+			process.exitCode = 1;
+			return;
+		}
+		const session = await connectToDaemon({ autoStart: false });
+		if (!session) {
+			return;
+		}
+		try {
+			const response = await session.client.request({ type: "workspace_unregister", name });
+			if (reportControlError(response, "workspace remove")) {
+				return;
+			}
+			console.error(`unregistered workspace: ${name}`);
+		} finally {
+			await session.close();
+		}
+		return;
+	}
+	if (subcommand === "list") {
+		const session = await connectToDaemon({ autoStart: false });
+		if (!session) {
+			return;
+		}
+		try {
+			const response = await session.client.request({ type: "status" });
+			if (response.type !== "status_result") {
+				reportControlError(response, "workspace list");
+				return;
+			}
+			console.log(JSON.stringify(response.workspaces, null, 2));
+		} finally {
+			await session.close();
+		}
+		return;
+	}
+	console.error(`Error: Unknown workspace command: ${subcommand ?? "<missing>"}`);
+	printRemoteUsage();
+	process.exitCode = 1;
+}
+
+/** Router for `volt remote <command>` (daemon control clients); returns true when handled. */
+export async function handleRemoteControlCommand(args: string[], options: { isBunBinary: boolean }): Promise<boolean> {
+	if (args[0] !== "remote") {
+		return false;
+	}
+	const command = args[1];
+	if (command === undefined || command === "--help" || command === "-h") {
+		printRemoteUsage();
+		return true;
+	}
+	if (command === "host") {
+		console.error(
+			'"volt remote host" has been replaced by the background daemon. Run "volt daemon start" (or enable remote.background). See docs/daemon.md.',
+		);
+		process.exitCode = 1;
+		return true;
+	}
+	if (options.isBunBinary) {
+		console.error("Error: volt remote is not available from the Bun binary release yet.");
+		console.error("Use a Node.js npm install or a source checkout with optional @number0/iroh dependencies.");
+		process.exitCode = 1;
+		return true;
+	}
+	const rest = args.slice(2);
+	switch (command) {
+		case "pair":
+			await handlePairCommand(rest);
+			return true;
+		case "status":
+			await handleStatusCommand(rest);
+			return true;
+		case "clients":
+			await handleClientsCommand();
+			return true;
+		case "revoke":
+			await handleRevokeCommand(rest);
+			return true;
+		case "approve-repair":
+			await handleApproveRepairCommand(rest);
+			return true;
+		case "workspace":
+			await handleWorkspaceCommand(rest);
+			return true;
+		default:
+			console.error(`Error: Unknown remote command: ${command}`);
+			printRemoteUsage();
+			process.exitCode = 1;
+			return true;
+	}
+}
