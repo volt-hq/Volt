@@ -1,0 +1,384 @@
+import { Buffer } from "node:buffer";
+
+/**
+ * Wire types and framing for the voltd control plane: JSONL over the unix
+ * socket ~/.volt/agent/daemon/voltd.sock. Shared by the daemon, the TUI, and
+ * the CLI. Zero runtime deps beyond node:buffer.
+ */
+
+export const PROTOCOL_VERSION = 1;
+
+/** Hard cap per JSONL line; longer lines close the connection with a fatal frame. */
+export const CONTROL_MAX_LINE_BYTES = 8 * 1024 * 1024;
+
+export type LeaseState = "unowned" | "daemon-active" | "daemon-detached" | "daemon-draining" | "tui-owned";
+
+export type ControlClientKind = "tui" | "cli";
+
+export type HelloMessage =
+	| {
+			type: "hello";
+			role: "control";
+			protocolVersion: number;
+			pid: number;
+			version: string;
+			client: ControlClientKind;
+	  }
+	| {
+			type: "hello";
+			role: "relay";
+			protocolVersion: number;
+			relayId: string;
+			relayToken: string;
+	  };
+
+export interface HelloAck {
+	type: "hello_ack";
+	ok: boolean;
+	error?: "protocol_mismatch" | "shutting_down" | "bad_relay_token";
+	/** daemon-assigned, present when ok (control role) */
+	connectionId?: string;
+	/** daemon package version */
+	version?: string;
+	protocolVersion?: number;
+}
+
+// ============================================================================
+// Requests and responses (control role)
+// ============================================================================
+
+export type ControlRequest =
+	| { type: "status"; id: string }
+	| { type: "shutdown"; id: string }
+	| {
+			type: "lease_acquire";
+			id: string;
+			workspaceName: string;
+			sessionId: string;
+			/** reserved; true => lease_denied{force_unsupported} */
+			force?: boolean;
+	  }
+	| { type: "lease_release"; id: string; workspaceName: string; sessionId: string }
+	| { type: "lease_rekey"; id: string; workspaceName: string; oldSessionId: string; newSessionId: string }
+	| { type: "pair_request"; id: string } // progress arrives as pairing_progress events
+	| { type: "clients_list"; id: string }
+	| { type: "client_revoke"; id: string; clientNodeId: string }
+	| { type: "workspace_register"; id: string; name: string; path: string }
+	| { type: "workspace_unregister"; id: string; name: string }
+	| { type: "theme_set"; id: string; theme: string } // name; daemon resolves + broadcasts
+	| { type: "viewer_subscribe"; id: string; viewerFeedId: string }
+	| { type: "viewer_unsubscribe"; id: string; viewerFeedId: string }
+	| { type: "viewer_abort"; id: string; viewerFeedId: string }
+	| {
+			type: "push_register";
+			id: string;
+			workspaceName: string;
+			sessionId: string;
+			/** verbatim register_push_target / register_live_activity RPC payloads forwarded
+			 *  from a TUI-owned conversation */
+			kind: "push_target" | "live_activity";
+			payload: unknown;
+	  };
+
+export interface ControlLeaseStatus {
+	workspaceName: string;
+	sessionId: string;
+	state: LeaseState;
+	relayCount: number;
+	streamCount: number;
+}
+
+export interface ControlWorkspaceStatus {
+	name: string;
+	path: string;
+}
+
+export interface ControlClientStatus {
+	clientNodeId: string;
+	label?: string;
+	pairedAtMs: number;
+}
+
+export type ControlResponse =
+	| { type: "ok"; id: string }
+	| { type: "error"; id: string; code: string; message: string }
+	| { type: "lease_granted"; id: string; workspaceName: string; sessionId: string; handoff: "cold" | "warm" | "none" }
+	| { type: "lease_pending"; id: string; viewerFeedId: string }
+	// lease_pending is provisional; the terminal response for the same id arrives
+	// when the drain completes (lease_granted) or fails (error{drain_failed})
+	| { type: "lease_denied"; id: string; reason: "held_by_tui" | "force_unsupported" | "draining_elsewhere" }
+	| {
+			type: "status_result";
+			id: string;
+			version: string;
+			protocolVersion: number;
+			pid: number;
+			startedAtMs: number;
+			leases: ControlLeaseStatus[];
+			phoneConnections: number;
+			workspaces: ControlWorkspaceStatus[];
+			clients: ControlClientStatus[];
+	  }
+	| { type: "clients_result"; id: string; clients: ControlClientStatus[] }
+	| { type: "pair_started"; id: string; requestId: string };
+
+// ============================================================================
+// Unsolicited events (daemon -> control clients)
+// ============================================================================
+
+export type RelayCloseReason =
+	| "phone_disconnected"
+	| "lease_transferred"
+	| "session_rekeyed_reconnect"
+	| "host_shutdown"
+	| "error";
+
+export type ControlEvent =
+	| {
+			type: "relay_offer";
+			relayId: string;
+			/** single-use, 10s expiry */
+			relayToken: string;
+			workspaceName: string;
+			sessionId: string;
+			clientNodeId: string;
+			connectionId: string;
+			streamId: string;
+	  }
+	| { type: "relay_closed"; relayId: string; reason: RelayCloseReason }
+	| {
+			type: "viewer_event";
+			viewerFeedId: string;
+			seq: number;
+			/** AgentSessionEvent JSON, or {kind:"truncated"} when the buffer overflowed */
+			event: unknown;
+	  }
+	| { type: "viewer_end"; viewerFeedId: string; reason: "granted" | "cancelled" | "error" }
+	| { type: "theme_snapshot"; themeName: string; tokens: Record<string, string> }
+	| {
+			type: "pairing_progress";
+			requestId: string;
+			phase: "ticket" | "qr" | "waiting" | "completed" | "failed";
+			ticket?: string;
+			qrLines?: string[];
+			clientNodeId?: string;
+			error?: string;
+	  }
+	| { type: "daemon_shutdown" };
+
+export interface ControlFatal {
+	type: "fatal";
+	error: string;
+}
+
+export type ControlMessage = HelloMessage | HelloAck | ControlRequest | ControlResponse | ControlEvent | ControlFatal;
+
+/** One JSONL relay preamble line follows a successful relay hello_ack. */
+export interface RelayPreamble {
+	type: "relay_preamble";
+	relayId: string;
+	/** verbatim phone handshake JSON as received (parsed object, re-serialized) */
+	handshake: unknown;
+	/** authorization subset — everything the TUI needs to serve the stream */
+	authorization: { clientNodeId: string; workspaceName: string; workspacePath: string };
+	connectionId: string;
+	streamId: string;
+	resolvedTarget: {
+		sessionId: string;
+		sessionFilePath?: string;
+		selection: "created" | "created_after_missing" | "resumed";
+		requestedSessionId?: string;
+		workspaceName: string;
+		workspacePath: string;
+	};
+}
+
+// ============================================================================
+// Framing
+// ============================================================================
+
+export function encodeControlLine(message: object): Buffer {
+	return Buffer.from(`${JSON.stringify(message)}\n`, "utf8");
+}
+
+export class ControlFrameTooLargeError extends Error {
+	constructor(byteLength: number) {
+		super(`control frame of ${byteLength} bytes exceeds the ${CONTROL_MAX_LINE_BYTES} byte cap`);
+		this.name = "ControlFrameTooLargeError";
+	}
+}
+
+/**
+ * Incremental JSONL decoder with the 8 MiB line cap. Feed raw socket chunks;
+ * complete lines come back parsed. Throws ControlFrameTooLargeError when the
+ * buffered partial line exceeds the cap (callers must close the connection).
+ */
+export class ControlLineDecoder {
+	private buffered: Buffer = Buffer.alloc(0);
+
+	push(chunk: Buffer): unknown[] {
+		this.buffered = this.buffered.length === 0 ? Buffer.from(chunk) : Buffer.concat([this.buffered, chunk]);
+		const messages: unknown[] = [];
+		while (true) {
+			const newlineIndex = this.buffered.indexOf(0x0a);
+			if (newlineIndex === -1) {
+				if (this.buffered.length > CONTROL_MAX_LINE_BYTES) {
+					throw new ControlFrameTooLargeError(this.buffered.length);
+				}
+				return messages;
+			}
+			if (newlineIndex > CONTROL_MAX_LINE_BYTES) {
+				throw new ControlFrameTooLargeError(newlineIndex);
+			}
+			const line = this.buffered.subarray(0, newlineIndex).toString("utf8");
+			this.buffered = this.buffered.subarray(newlineIndex + 1);
+			if (line.trim().length === 0) {
+				continue;
+			}
+			messages.push(JSON.parse(line));
+		}
+	}
+
+	/** Bytes buffered past the last complete line (used when switching a relay conn to raw mode). */
+	drainRemainder(): Buffer {
+		const remainder = this.buffered;
+		this.buffered = Buffer.alloc(0);
+		return remainder;
+	}
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function parseHelloMessage(value: unknown): HelloMessage | undefined {
+	if (!isRecord(value) || value.type !== "hello") {
+		return undefined;
+	}
+	if (typeof value.protocolVersion !== "number") {
+		return undefined;
+	}
+	if (value.role === "control") {
+		if (
+			typeof value.pid !== "number" ||
+			typeof value.version !== "string" ||
+			(value.client !== "tui" && value.client !== "cli")
+		) {
+			return undefined;
+		}
+		return {
+			type: "hello",
+			role: "control",
+			protocolVersion: value.protocolVersion,
+			pid: value.pid,
+			version: value.version,
+			client: value.client,
+		};
+	}
+	if (value.role === "relay") {
+		if (typeof value.relayId !== "string" || typeof value.relayToken !== "string") {
+			return undefined;
+		}
+		return {
+			type: "hello",
+			role: "relay",
+			protocolVersion: value.protocolVersion,
+			relayId: value.relayId,
+			relayToken: value.relayToken,
+		};
+	}
+	return undefined;
+}
+
+export function isControlRequest(value: unknown): value is ControlRequest {
+	if (!isRecord(value) || typeof value.type !== "string" || typeof value.id !== "string") {
+		return false;
+	}
+	switch (value.type) {
+		case "status":
+		case "shutdown":
+		case "pair_request":
+		case "clients_list":
+			return true;
+		case "lease_acquire":
+		case "lease_release":
+			return typeof value.workspaceName === "string" && typeof value.sessionId === "string";
+		case "lease_rekey":
+			return (
+				typeof value.workspaceName === "string" &&
+				typeof value.oldSessionId === "string" &&
+				typeof value.newSessionId === "string"
+			);
+		case "client_revoke":
+			return typeof value.clientNodeId === "string";
+		case "workspace_register":
+			return typeof value.name === "string" && typeof value.path === "string";
+		case "workspace_unregister":
+			return typeof value.name === "string";
+		case "theme_set":
+			return typeof value.theme === "string";
+		case "viewer_subscribe":
+		case "viewer_unsubscribe":
+		case "viewer_abort":
+			return typeof value.viewerFeedId === "string";
+		case "push_register":
+			return (
+				typeof value.workspaceName === "string" &&
+				typeof value.sessionId === "string" &&
+				(value.kind === "push_target" || value.kind === "live_activity")
+			);
+		default:
+			return false;
+	}
+}
+
+export function isControlResponse(value: unknown): value is ControlResponse {
+	if (!isRecord(value) || typeof value.type !== "string" || typeof value.id !== "string") {
+		return false;
+	}
+	switch (value.type) {
+		case "ok":
+		case "error":
+		case "lease_granted":
+		case "lease_pending":
+		case "lease_denied":
+		case "status_result":
+		case "clients_result":
+		case "pair_started":
+			return true;
+		default:
+			return false;
+	}
+}
+
+export function isControlEvent(value: unknown): value is ControlEvent {
+	if (!isRecord(value) || typeof value.type !== "string") {
+		return false;
+	}
+	switch (value.type) {
+		case "relay_offer":
+		case "relay_closed":
+		case "viewer_event":
+		case "viewer_end":
+		case "theme_snapshot":
+		case "pairing_progress":
+		case "daemon_shutdown":
+			return true;
+		default:
+			return false;
+	}
+}
+
+export function isHelloAck(value: unknown): value is HelloAck {
+	return isRecord(value) && value.type === "hello_ack" && typeof value.ok === "boolean";
+}
+
+export function isRelayPreamble(value: unknown): value is RelayPreamble {
+	return (
+		isRecord(value) &&
+		value.type === "relay_preamble" &&
+		typeof value.relayId === "string" &&
+		isRecord(value.authorization) &&
+		isRecord(value.resolvedTarget)
+	);
+}

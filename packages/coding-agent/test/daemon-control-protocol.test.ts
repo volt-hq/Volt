@@ -1,0 +1,190 @@
+import { Buffer } from "node:buffer";
+import { describe, expect, it } from "vitest";
+import {
+	CONTROL_MAX_LINE_BYTES,
+	type ControlEvent,
+	ControlFrameTooLargeError,
+	ControlLineDecoder,
+	type ControlRequest,
+	type ControlResponse,
+	encodeControlLine,
+	type HelloAck,
+	type HelloMessage,
+	isControlEvent,
+	isControlRequest,
+	isControlResponse,
+	isHelloAck,
+	isRelayPreamble,
+	PROTOCOL_VERSION,
+	parseHelloMessage,
+	type RelayPreamble,
+} from "../src/daemon/control-protocol.ts";
+
+function roundTrip(message: object): unknown {
+	const decoder = new ControlLineDecoder();
+	const messages = decoder.push(encodeControlLine(message));
+	expect(messages).toHaveLength(1);
+	return messages[0];
+}
+
+describe("control protocol framing", () => {
+	it("round-trips every request type", () => {
+		const requests: ControlRequest[] = [
+			{ type: "status", id: "1" },
+			{ type: "shutdown", id: "2" },
+			{ type: "lease_acquire", id: "3", workspaceName: "volt", sessionId: "s-1" },
+			{ type: "lease_acquire", id: "3b", workspaceName: "volt", sessionId: "s-1", force: true },
+			{ type: "lease_release", id: "4", workspaceName: "volt", sessionId: "s-1" },
+			{ type: "lease_rekey", id: "5", workspaceName: "volt", oldSessionId: "s-1", newSessionId: "s-2" },
+			{ type: "pair_request", id: "6" },
+			{ type: "clients_list", id: "7" },
+			{ type: "client_revoke", id: "8", clientNodeId: "n-1" },
+			{ type: "workspace_register", id: "9", name: "volt", path: "/tmp/volt" },
+			{ type: "workspace_unregister", id: "10", name: "volt" },
+			{ type: "theme_set", id: "11", theme: "dark" },
+			{ type: "viewer_subscribe", id: "12", viewerFeedId: "vf-1" },
+			{ type: "viewer_unsubscribe", id: "13", viewerFeedId: "vf-1" },
+			{ type: "viewer_abort", id: "14", viewerFeedId: "vf-1" },
+			{
+				type: "push_register",
+				id: "15",
+				workspaceName: "volt",
+				sessionId: "s-1",
+				kind: "push_target",
+				payload: { token: "t" },
+			},
+		];
+		for (const request of requests) {
+			const decoded = roundTrip(request);
+			expect(decoded).toEqual(request);
+			expect(isControlRequest(decoded), `request ${request.type}`).toBe(true);
+		}
+	});
+
+	it("round-trips every response type", () => {
+		const responses: ControlResponse[] = [
+			{ type: "ok", id: "1" },
+			{ type: "error", id: "2", code: "not_held", message: "lease not held" },
+			{ type: "lease_granted", id: "3", workspaceName: "volt", sessionId: "s-1", handoff: "warm" },
+			{ type: "lease_pending", id: "4", viewerFeedId: "vf-1" },
+			{ type: "lease_denied", id: "5", reason: "held_by_tui" },
+			{
+				type: "status_result",
+				id: "6",
+				version: "1.0.0",
+				protocolVersion: PROTOCOL_VERSION,
+				pid: 42,
+				startedAtMs: 1000,
+				leases: [{ workspaceName: "volt", sessionId: "s-1", state: "tui-owned", relayCount: 1, streamCount: 0 }],
+				phoneConnections: 1,
+				workspaces: [{ name: "volt", path: "/tmp/volt" }],
+				clients: [{ clientNodeId: "n-1", label: "phone", pairedAtMs: 5 }],
+			},
+			{ type: "clients_result", id: "7", clients: [] },
+			{ type: "pair_started", id: "8", requestId: "pr-1" },
+		];
+		for (const response of responses) {
+			const decoded = roundTrip(response);
+			expect(decoded).toEqual(response);
+			expect(isControlResponse(decoded), `response ${response.type}`).toBe(true);
+		}
+	});
+
+	it("round-trips every event type", () => {
+		const events: ControlEvent[] = [
+			{
+				type: "relay_offer",
+				relayId: "rl-1",
+				relayToken: "tok",
+				workspaceName: "volt",
+				sessionId: "s-1",
+				clientNodeId: "n-1",
+				connectionId: "ic-1",
+				streamId: "st-1",
+			},
+			{ type: "relay_closed", relayId: "rl-1", reason: "phone_disconnected" },
+			{ type: "viewer_event", viewerFeedId: "vf-1", seq: 0, event: { type: "agent_end" } },
+			{ type: "viewer_end", viewerFeedId: "vf-1", reason: "granted" },
+			{ type: "theme_snapshot", themeName: "dark", tokens: { accent: "#ff0000" } },
+			{ type: "pairing_progress", requestId: "pr-1", phase: "waiting" },
+			{ type: "daemon_shutdown" },
+		];
+		for (const event of events) {
+			const decoded = roundTrip(event);
+			expect(decoded).toEqual(event);
+			expect(isControlEvent(decoded), `event ${event.type}`).toBe(true);
+		}
+	});
+
+	it("round-trips hellos, acks, and relay preambles", () => {
+		const controlHello: HelloMessage = {
+			type: "hello",
+			role: "control",
+			protocolVersion: PROTOCOL_VERSION,
+			pid: 4242,
+			version: "0.9.0",
+			client: "tui",
+		};
+		const relayHello: HelloMessage = {
+			type: "hello",
+			role: "relay",
+			protocolVersion: PROTOCOL_VERSION,
+			relayId: "rl-7",
+			relayToken: "tK",
+		};
+		expect(parseHelloMessage(roundTrip(controlHello))).toEqual(controlHello);
+		expect(parseHelloMessage(roundTrip(relayHello))).toEqual(relayHello);
+		expect(parseHelloMessage({ type: "hello", role: "control" })).toBeUndefined();
+		expect(parseHelloMessage({ type: "nope" })).toBeUndefined();
+
+		const ack: HelloAck = { type: "hello_ack", ok: true, connectionId: "c-1", version: "0.9.0", protocolVersion: 1 };
+		expect(isHelloAck(roundTrip(ack))).toBe(true);
+
+		const preamble: RelayPreamble = {
+			type: "relay_preamble",
+			relayId: "rl-7",
+			handshake: { workspace: "volt" },
+			authorization: { clientNodeId: "n-1", workspaceName: "volt", workspacePath: "/tmp/volt" },
+			connectionId: "ic-3",
+			streamId: "st-9",
+			resolvedTarget: {
+				sessionId: "s-abc",
+				selection: "resumed",
+				requestedSessionId: "s-abc",
+				workspaceName: "volt",
+				workspacePath: "/tmp/volt",
+			},
+		};
+		expect(isRelayPreamble(roundTrip(preamble))).toBe(true);
+	});
+
+	it("buffers partial lines across pushes", () => {
+		const decoder = new ControlLineDecoder();
+		const line = encodeControlLine({ type: "status", id: "1" });
+		const first = line.subarray(0, 5);
+		const second = line.subarray(5);
+		expect(decoder.push(first)).toEqual([]);
+		expect(decoder.push(Buffer.concat([second, encodeControlLine({ type: "ok", id: "2" })]))).toEqual([
+			{ type: "status", id: "1" },
+			{ type: "ok", id: "2" },
+		]);
+	});
+
+	it("skips blank lines and exposes the raw remainder", () => {
+		const decoder = new ControlLineDecoder();
+		const messages = decoder.push(Buffer.from('\n{"type":"ok","id":"1"}\nRAWBYTES', "utf8"));
+		expect(messages).toEqual([{ type: "ok", id: "1" }]);
+		expect(decoder.drainRemainder().toString("utf8")).toBe("RAWBYTES");
+		expect(decoder.drainRemainder().length).toBe(0);
+	});
+
+	it("enforces the 8 MiB line cap", () => {
+		const decoder = new ControlLineDecoder();
+		const oversized = Buffer.alloc(CONTROL_MAX_LINE_BYTES + 2, 0x61);
+		expect(() => decoder.push(oversized)).toThrow(ControlFrameTooLargeError);
+
+		const withNewline = Buffer.concat([Buffer.alloc(CONTROL_MAX_LINE_BYTES + 1, 0x61), Buffer.from("\n")]);
+		const freshDecoder = new ControlLineDecoder();
+		expect(() => freshDecoder.push(withNewline)).toThrow(ControlFrameTooLargeError);
+	});
+});
