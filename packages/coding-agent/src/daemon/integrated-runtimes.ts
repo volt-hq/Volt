@@ -59,6 +59,8 @@ export interface IntegratedRuntimeStreamWriter {
 export interface IntegratedRuntimeRegistryOptions {
 	agentDir?: string;
 	profile?: string;
+	/** Injectable runtime factory (tests); defaults to the real iroh remote runtime. */
+	createRuntime?: typeof createIrohRemoteAgentRuntimeWithSessionSelection;
 	auditLogger: IrohRemoteAuditLogger;
 	stateManager: IrohRemoteHostStateManager;
 	activeStreams: IrohRemoteActiveStreamRegistry;
@@ -143,9 +145,9 @@ export class IntegratedRuntimeRegistry {
 		this.options = options;
 	}
 
-	/** The conversation runtime key. clientNodeId is part of the key until the lease broker lands. */
-	getRegistryKey(clientNodeId: string, workspaceName: string, sessionId: string): string {
-		return `${clientNodeId}\0${workspaceName}\0${sessionId}`;
+	/** The conversation runtime key: one runtime per (workspaceName, sessionId). */
+	getRegistryKey(workspaceName: string, sessionId: string): string {
+		return `${workspaceName}\0${sessionId}`;
 	}
 
 	get size(): number {
@@ -156,26 +158,13 @@ export class IntegratedRuntimeRegistry {
 		return Array.from(this.entries.values());
 	}
 
-	findEntry(clientNodeId: string, workspaceName: string, sessionId: string): IntegratedRuntimeEntry | undefined {
-		const direct = this.entries.get(this.getRegistryKey(clientNodeId, workspaceName, sessionId));
+	findOwner(workspaceName: string, sessionId: string): IntegratedRuntimeEntry | undefined {
+		const direct = this.entries.get(this.getRegistryKey(workspaceName, sessionId));
 		if (direct) {
 			return direct;
 		}
 		for (const entry of this.entries.values()) {
-			if (
-				entry.clientNodeId === clientNodeId &&
-				entry.workspaceName === workspaceName &&
-				entry.previousSessionIds.has(sessionId)
-			) {
-				return entry;
-			}
-		}
-		return undefined;
-	}
-
-	findOwner(workspaceName: string, sessionId: string): IntegratedRuntimeEntry | undefined {
-		for (const entry of this.entries.values()) {
-			if (entry.workspaceName === workspaceName && entry.sessionId === sessionId) {
+			if (entry.workspaceName === workspaceName && entry.previousSessionIds.has(sessionId)) {
 				return entry;
 			}
 		}
@@ -192,14 +181,9 @@ export class IntegratedRuntimeRegistry {
 	}> {
 		const targetSessionId = getResolvedTargetSessionId(handshake.hello, authorization);
 		if (targetSessionId !== undefined) {
-			const owner = this.findOwner(authorization.workspace.name, targetSessionId);
-			if (owner && owner.clientNodeId !== authorization.client.nodeId) {
-				throw createConversationOpenError("conversation_in_use", "conversation is already in use", {
-					workspace: authorization.workspace.name,
-					sessionId: targetSessionId,
-				});
-			}
-			const existing = this.findEntry(authorization.client.nodeId, authorization.workspace.name, targetSessionId);
+			// One runtime per conversation: any paired client attaches to an existing
+			// runtime for the target (conversation_in_use is retired; single-user model).
+			const existing = this.findOwner(authorization.workspace.name, targetSessionId);
 			if (existing) {
 				if (!shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization(authorization)) {
 					const requestedSessionId =
@@ -229,7 +213,7 @@ export class IntegratedRuntimeRegistry {
 		let runtime: AgentSessionRuntime | undefined;
 		let sessionSelection: IntegratedConversationSessionSelection | undefined;
 		try {
-			const runtimeResult = await createIrohRemoteAgentRuntimeWithSessionSelection({
+			const runtimeResult = await (this.options.createRuntime ?? createIrohRemoteAgentRuntimeWithSessionSelection)({
 				agentDir: this.options.agentDir,
 				allowTools: this.options.getAllowTools(authorization.workspace) ?? authorization.allowTools,
 				conversationTarget: createIrohRuntimeConversationTarget(handshake.hello, authorization),
@@ -242,12 +226,6 @@ export class IntegratedRuntimeRegistry {
 			sessionSelection = runtimeResult.sessionSelection;
 			const sessionId = runtime.session.sessionId;
 			const owner = this.findOwner(authorization.workspace.name, sessionId);
-			if (owner && owner.clientNodeId !== authorization.client.nodeId) {
-				throw createConversationOpenError("conversation_in_use", "conversation is already in use", {
-					workspace: authorization.workspace.name,
-					sessionId,
-				});
-			}
 			if (owner) {
 				await cleanupUncommittedRuntime(runtime, sessionSelection);
 				return {
@@ -280,7 +258,7 @@ export class IntegratedRuntimeRegistry {
 		subagentId?: string;
 	}): IntegratedRuntimeEntry {
 		return {
-			key: this.getRegistryKey(options.clientNodeId, options.workspaceName, options.sessionId),
+			key: this.getRegistryKey(options.workspaceName, options.sessionId),
 			clientNodeId: options.clientNodeId,
 			workspaceName: options.workspaceName,
 			sessionId: options.sessionId,
@@ -300,21 +278,11 @@ export class IntegratedRuntimeRegistry {
 		event: IrohRemoteSubagentRuntimeCreatedEvent,
 		authorization: IrohRemoteClientAuthorizationSuccess,
 	): Promise<void> {
-		const parentEntry = this.findEntry(
-			authorization.client.nodeId,
-			authorization.workspace.name,
-			event.parentSessionId,
-		);
+		const parentEntry = this.findOwner(authorization.workspace.name, event.parentSessionId);
 		if (!parentEntry) {
 			throw new Error(`Parent runtime is not active for subagent session ${event.sessionId}`);
 		}
 		const owner = this.findOwner(authorization.workspace.name, event.sessionId);
-		if (owner && owner.clientNodeId !== authorization.client.nodeId) {
-			throw createConversationOpenError("conversation_in_use", "conversation is already in use", {
-				workspace: authorization.workspace.name,
-				sessionId: event.sessionId,
-			});
-		}
 		if (owner) {
 			return;
 		}
@@ -343,9 +311,12 @@ export class IntegratedRuntimeRegistry {
 	): Promise<void> {
 		const owner = this.findOwner(authorization.workspace.name, entry.sessionId);
 		if (owner && owner !== entry) {
-			throw createConversationOpenError("conversation_in_use", "conversation is already in use", {
+			// Two attaches raced to create the same conversation runtime; the loser
+			// retries and attaches to the winner.
+			throw createConversationOpenError("duplicate_conversation_connection", "conversation runtime already active", {
 				workspace: authorization.workspace.name,
 				sessionId: entry.sessionId,
+				retryAfterMs: 500,
 			});
 		}
 
@@ -553,7 +524,7 @@ export class IntegratedRuntimeRegistry {
 	): Promise<void> {
 		const previousSessionId = entry.sessionId;
 		const previousKey = entry.key;
-		const nextKey = this.getRegistryKey(entry.clientNodeId, entry.workspaceName, nextSessionId);
+		const nextKey = this.getRegistryKey(entry.workspaceName, nextSessionId);
 		const existing = this.entries.get(nextKey);
 		if (existing && existing !== entry) {
 			await this.stopEntry(existing, "session_change_replaced_runtime");

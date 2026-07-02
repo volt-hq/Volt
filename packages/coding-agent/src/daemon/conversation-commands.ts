@@ -20,6 +20,15 @@ export const INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES: ReadonlySet<string> 
 	"get_messages",
 ]);
 
+/**
+ * Commands that start or extend a turn. While a lease is draining to a TUI,
+ * these are rejected with `lease_draining` so the drain converges; read-only
+ * commands and abort pass through.
+ */
+export const TURN_INITIATING_RPC_TYPES: ReadonlySet<string> = new Set(["prompt", "invoke_ui_action"]);
+
+export const LEASE_DRAINING_RETRY_AFTER_MS = 1000;
+
 export const REMOTE_SESSION_LIST_DEFAULT_LIMIT = 50;
 export const REMOTE_SESSION_LIST_MAX_LIMIT = 200;
 export const REMOTE_SESSION_LIST_CURSOR_TTL_MS = 10 * 60 * 1000;
@@ -76,6 +85,23 @@ export interface ConversationCommandContext {
 	sessionListCursors: Map<string, RemoteSessionListCursorEntry>;
 	sessionListCursorTtlMs: number;
 	now?: () => number;
+	/** True while this conversation's lease is draining to a TUI (§4.5 rejection). */
+	isDraining?: () => boolean;
+}
+
+export function createLeaseDrainingRpcErrorResponse(command: RemoteRpcCommand): Record<string, unknown> {
+	const id = getRpcResponseId(command);
+	return {
+		...(id === undefined ? {} : { id }),
+		type: "response",
+		command: command.type,
+		success: false,
+		error: {
+			code: "lease_draining",
+			message: "Handing off to the desktop TUI; retry shortly.",
+			retryAfterMs: LEASE_DRAINING_RETRY_AFTER_MS,
+		},
+	};
 }
 
 function contextNow(context: ConversationCommandContext): number {
@@ -1305,7 +1331,8 @@ export async function handleRemoteHostRpcCommand(
 /**
  * Host-side handler for conversation-stream RPC commands that are not served
  * directly by the runtime's rpc mode. Returns undefined for commands the rpc
- * mode should handle itself.
+ * mode should handle itself — including abort, which stops the turn while the
+ * stream stays open and the runtime stays live.
  */
 export async function handleIntegratedConversationRpcCommand(
 	command: RemoteRpcCommand,
@@ -1313,6 +1340,9 @@ export async function handleIntegratedConversationRpcCommand(
 	context: ConversationCommandContext,
 	runtime: ConversationCommandRuntime,
 ): Promise<object | undefined> {
+	if (context.isDraining?.() && TURN_INITIATING_RPC_TYPES.has(command.type)) {
+		return createLeaseDrainingRpcErrorResponse(command);
+	}
 	if (command.type === "list_sessions") {
 		return await createRemoteListSessionsRpcResponse(command, authorization, context, runtime);
 	}

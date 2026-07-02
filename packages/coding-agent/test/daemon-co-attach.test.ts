@@ -1,0 +1,165 @@
+import { describe, expect, it, vi } from "vitest";
+import type { AgentSessionEvent } from "../src/core/agent-session.ts";
+import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { IrohRemoteActiveStreamRegistry } from "../src/core/remote/iroh/active-stream-registry.ts";
+import { IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
+import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
+import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
+import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
+import { IntegratedRuntimeRegistry } from "../src/daemon/integrated-runtimes.ts";
+import { createTestSession, parseWrittenObjects, startIrohRpcMode } from "./iroh-stream-doubles.ts";
+
+function createFanoutSession(sessionId: string) {
+	const session = createTestSession(sessionId, null);
+	const subscribers = new Set<(event: AgentSessionEvent) => void>();
+	session.subscribe = vi.fn((handler: (event: AgentSessionEvent) => void) => {
+		subscribers.add(handler);
+		return () => {
+			subscribers.delete(handler);
+		};
+	});
+	const abort = vi.fn(async () => {});
+	return {
+		session: Object.assign(session, { abort }),
+		abort,
+		emit(event: AgentSessionEvent) {
+			for (const handler of Array.from(subscribers)) {
+				handler(event);
+			}
+		},
+	};
+}
+
+function createAuthorization(clientNodeId: string): IrohRemoteClientAuthorizationSuccess {
+	return {
+		ok: true,
+		allowTools: "read",
+		client: {
+			nodeId: clientNodeId,
+			label: clientNodeId,
+			allowedWorkspaces: ["ws"],
+			allowedTools: "read",
+			pairedAt: 1,
+			lastSeenAt: 2,
+		},
+		paired: false,
+		pairingSecretConsumed: false,
+		workspace: { name: "ws", path: "/tmp/ws" },
+		workspaceNames: ["ws"],
+		workspaces: [{ name: "ws", status: "available" }],
+	};
+}
+
+function createHello(
+	target: IrohRemoteHello["mode"] extends never ? never : { target: "new" } | { target: "session"; sessionId: string },
+): IrohRemoteHello {
+	return {
+		type: "volt_iroh_hello",
+		protocol: "volt-rpc/0",
+		workspace: "ws",
+		mode: "conversation",
+		conversation: target,
+	} as IrohRemoteHello;
+}
+
+const HANDSHAKE_RESPONSE = {
+	child: "volt",
+	features: ["multi_streams.v1", "conversation_streams.v1"],
+} as unknown as IrohRemoteHandshakeSuccess;
+
+describe("daemon co-attach (one runtime per conversation)", () => {
+	it("two phones with distinct clientNodeIds share one runtime, both stream, and abort keeps streams open", async () => {
+		const fanout = createFanoutSession("s-co");
+		const dispose = vi.fn(async () => {});
+		const runtimeHost = {
+			session: fanout.session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose,
+			setRebindSession: vi.fn(),
+			listSessions: vi.fn(async () => []),
+		} as unknown as AgentSessionRuntime;
+
+		const registry = new IntegratedRuntimeRegistry({
+			auditLogger: new IrohRemoteAuditLogger(),
+			stateManager: new IrohRemoteHostStateManager(),
+			activeStreams: new IrohRemoteActiveStreamRegistry(),
+			detachedRuntimeTtlMs: () => 60_000,
+			getAllowTools: () => undefined,
+			getProjectTrustedForWorkspace: () => false,
+			setClientLastSessionId: vi.fn(async () => undefined),
+			createRuntime: async () => ({
+				runtime: runtimeHost,
+				sessionSelection: { kind: "created", sessionId: "s-co" },
+			}),
+		});
+
+		const phoneA = createAuthorization("n-phone-a");
+		const phoneB = createAuthorization("n-phone-b");
+
+		// Phone A creates the runtime.
+		const first = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
+			phoneA,
+		);
+		expect(first.created).toBe(true);
+		await registry.commitEntry(first.entry, first.sessionSelection, phoneA);
+
+		// Phone B (different clientNodeId) attaches to the SAME runtime — no
+		// conversation_in_use rejection.
+		const second = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "session", sessionId: "s-co" }), response: HANDSHAKE_RESPONSE },
+			phoneB,
+		);
+		expect(second.created).toBe(false);
+		expect(second.entry).toBe(first.entry);
+		expect(second.sessionSelection).toEqual({
+			kind: "resumed",
+			requestedSessionId: "s-co",
+			sessionId: "s-co",
+		});
+
+		await registry.attachSubscriber(first.entry);
+		await registry.attachSubscriber(first.entry);
+		expect(first.entry.subscribers.size).toBe(2);
+
+		// Serve both phones from the same runtime.
+		const modeA = await startIrohRpcMode(runtimeHost, fanout.session);
+		fanout.session.bindExtensions.mockClear();
+		const modeB = await startIrohRpcMode(runtimeHost, fanout.session);
+
+		// A session event fans out to both streams.
+		fanout.emit({ type: "agent_start" } as AgentSessionEvent);
+		await vi.waitFor(() => {
+			expect(parseWrittenObjects(modeA.send).some((frame) => frame.type === "agent_start")).toBe(true);
+			expect(parseWrittenObjects(modeB.send).some((frame) => frame.type === "agent_start")).toBe(true);
+		});
+
+		// Abort from phone B stops the turn; BOTH streams stay open and the
+		// runtime stays live (no dispose, no stream invalidation).
+		modeB.recv.pushLine(JSON.stringify({ id: "a1", type: "abort" }));
+		await vi.waitFor(() => {
+			const responses = parseWrittenObjects(modeB.send).filter((frame) => frame.command === "abort");
+			expect(responses).toHaveLength(1);
+			expect(responses[0]?.success).toBe(true);
+		});
+		expect(fanout.abort).toHaveBeenCalled();
+		expect(modeA.send.finished).toBe(false);
+		expect(modeB.send.finished).toBe(false);
+		expect(dispose).not.toHaveBeenCalled();
+
+		// Both streams still receive events after the abort.
+		fanout.emit({ type: "agent_end" } as unknown as AgentSessionEvent);
+		await vi.waitFor(() => {
+			expect(parseWrittenObjects(modeA.send).some((frame) => frame.type === "agent_end")).toBe(true);
+			expect(parseWrittenObjects(modeB.send).some((frame) => frame.type === "agent_end")).toBe(true);
+		});
+
+		modeA.recv.end();
+		modeB.recv.end();
+		await modeA.modePromise;
+		await modeB.modePromise;
+		expect(dispose).not.toHaveBeenCalled();
+	});
+});

@@ -42,6 +42,7 @@ import {
 	type RemoteHostResponseContext,
 } from "./handshake-responses.ts";
 import {
+	getResolvedTargetSessionId,
 	type IntegratedRuntimeEntry,
 	IntegratedRuntimeRegistry,
 	type IntegratedRuntimeSubscriber,
@@ -53,6 +54,7 @@ import {
 	type IrohModuleLike,
 	loadIrohModule,
 } from "./iroh-native.ts";
+import { LeaseBroker } from "./lease-broker.ts";
 import type { VoltdRuntimeServices, VoltdServiceExtension } from "./main.ts";
 import {
 	runWorkspaceDiscoveryStream,
@@ -141,7 +143,12 @@ function getRemoteTerminalReason(reason: string): string | undefined {
 	if (reason === ACTIVE_REVOKE_CLOSE_REASON) {
 		return "client_revoked";
 	}
-	if (reason === WORKSPACE_UNREGISTERED_CLOSE_REASON || reason === "workspace_authorization_removed") {
+	if (
+		reason === WORKSPACE_UNREGISTERED_CLOSE_REASON ||
+		reason === "workspace_authorization_removed" ||
+		reason === "lease_transferred" ||
+		reason === "session_rekeyed_reconnect"
+	) {
 		return reason;
 	}
 	return undefined;
@@ -200,6 +207,7 @@ class IrohDaemonService {
 	private readonly pushNotificationDeduper = new IrohRemoteInMemoryPushNotificationDeduper();
 	private readonly trustStore: ProjectTrustStore;
 	private readonly runtimes: IntegratedRuntimeRegistry;
+	private readonly leaseBroker: LeaseBroker;
 	private endpoint: IrohEndpointLike | undefined;
 	private engine: IrohRemoteHostEngine | undefined;
 	private hostNodeId: string | undefined;
@@ -230,6 +238,37 @@ class IrohDaemonService {
 				resolveIrohRemoteWorkspaceProjectTrusted(workspace, { trustStore: this.trustStore }),
 			setClientLastSessionId: (nodeId, workspace, sessionId) =>
 				this.requireEngine().setClientLastSessionId(nodeId, workspace, sessionId),
+			onRuntimeRekeyed: (workspaceName, previousSessionId, sessionId) =>
+				this.leaseBroker.rekey(workspaceName, previousSessionId, sessionId),
+			onRuntimeDisposed: (entry, reason) =>
+				this.leaseBroker.onDaemonRuntimeDisposed(entry.workspaceName, entry.sessionId, reason),
+		});
+		this.leaseBroker = new LeaseBroker({
+			isRuntimeStreaming: (workspaceName, sessionId) =>
+				this.runtimes.findOwner(workspaceName, sessionId)?.runtime.session.isStreaming ?? false,
+			waitForRuntimeIdle: async (workspaceName, sessionId) => {
+				await this.runtimes.findOwner(workspaceName, sessionId)?.runtime.session.waitForIdle();
+			},
+			disposeRuntime: async (workspaceName, sessionId, reason) => {
+				const owner = this.runtimes.findOwner(workspaceName, sessionId);
+				if (owner) {
+					await this.runtimes.stopEntry(owner, reason);
+				}
+			},
+			closePhoneStreams: async (workspaceName, sessionId, reason) => {
+				await this.closeActiveStreamsForConversationKey(workspaceName, sessionId, reason);
+			},
+			closeRelays: () => {
+				// Relays land with the TUI byte-relay milestone.
+			},
+			audit: (event) => {
+				void this.logAudit({
+					type: event.type,
+					workspace: event.workspaceName,
+					success: true,
+					details: { sessionId: event.sessionId, ...event.details },
+				});
+			},
 		});
 		let readyResolve: () => void = () => {};
 		let readyReject: (error: unknown) => void = () => {};
@@ -260,7 +299,10 @@ class IrohDaemonService {
 		return { hostNodeId: this.hostNodeId, relayMode: this.relayMode };
 	}
 
-	private getCommandContext(): ConversationCommandContext {
+	private getCommandContext(conversation?: {
+		workspaceName: string;
+		entry: IntegratedRuntimeEntry;
+	}): ConversationCommandContext {
 		return {
 			agentDir: this.services.agentDir,
 			auditLogger: this.services.auditLogger,
@@ -268,6 +310,12 @@ class IrohDaemonService {
 			stateManager: this.stateManager,
 			sessionListCursors: this.sessionListCursors,
 			sessionListCursorTtlMs: REMOTE_SESSION_LIST_CURSOR_TTL_MS,
+			...(conversation === undefined
+				? {}
+				: {
+						isDraining: () =>
+							this.leaseBroker.isDraining(conversation.workspaceName, conversation.entry.sessionId),
+					}),
 		};
 	}
 
@@ -730,6 +778,22 @@ class IrohDaemonService {
 		replaceExistingConversationStream: boolean,
 	): Promise<void> {
 		const authorization = handshake.authorization;
+		{
+			// Lease routing: the broker decides which process terminates this stream.
+			const targetSessionId = getResolvedTargetSessionId(handshake.hello, authorization);
+			if (targetSessionId !== undefined) {
+				const lease = this.leaseBroker.lookup(authorization.workspace.name, targetSessionId);
+				if (lease?.state === "tui-owned") {
+					// Byte relay to the owning TUI lands with the next milestone; until
+					// then the phone retries against a transient failure.
+					await this.sendHandshakeError(stream, {
+						message: "conversation is owned by the desktop TUI",
+						retryAfterMs: 1000,
+					});
+					return;
+				}
+			}
+		}
 		let entry: IntegratedRuntimeEntry;
 		let sessionSelection: Awaited<ReturnType<IntegratedRuntimeRegistry["getOrCreateEntry"]>>["sessionSelection"];
 		let createdRuntime = false;
@@ -794,18 +858,9 @@ class IrohDaemonService {
 		let subscriber: IntegratedRuntimeSubscriber | undefined;
 		let subscriberError: unknown;
 		let handshakeCommitted = false;
-		let abortStreamInvalidated = false;
-		const invalidateStreamAfterAbortResponse = async (response: Record<string, unknown>) => {
-			if (response.command !== "abort" || response.success !== true || abortStreamInvalidated) {
-				return;
-			}
-			abortStreamInvalidated = true;
-			activeStream?.remove();
-			await this.runtimes.stopEntry(entry, "abort");
-			closeIrohRemoteStream(stream, "abort");
-		};
 		try {
 			await this.runtimes.commitEntry(entry, sessionSelection, authorization);
+			this.leaseBroker.onDaemonRuntimeAttached(authorization.workspace.name, entry.sessionId);
 			handshakeCommitted = true;
 			activeStream = this.registerActiveStream(
 				authorization,
@@ -827,13 +882,17 @@ class IrohDaemonService {
 				),
 			);
 			subscriber = await this.runtimes.attachSubscriber(entry);
+			this.leaseBroker.onDaemonRuntimeStreamCountChanged(
+				authorization.workspace.name,
+				entry.sessionId,
+				entry.subscribers.size,
+			);
 			await this.runtimes.replayWorkflowEvents(activeStream.entry, entry);
 			const pushDispatcher = this.createPushNotificationDispatcher(authorization);
 			await runIrohRemoteRpcMode(entry.runtime, {
 				decorateOutbound: (value) => decorateRemoteHostState(value, authorization, this.getResponseContext()),
 				disposeRuntimeOnClose: false,
 				notificationDelivery: pushDispatcher,
-				onResponseWritten: invalidateStreamAfterAbortResponse,
 				onSessionChanged: async (session) => {
 					await this.runtimes.handleSessionChanged(entry, activeStream?.entry, session, authorization);
 				},
@@ -849,7 +908,7 @@ class IrohDaemonService {
 					handleIntegratedConversationRpcCommand(
 						command as { type: string } & Record<string, unknown>,
 						authorization,
-						this.getCommandContext(),
+						this.getCommandContext({ workspaceName: authorization.workspace.name, entry }),
 						entry.runtime,
 					),
 				stream,
@@ -872,7 +931,12 @@ class IrohDaemonService {
 					subscriberError ? "transport_error" : "transport_closed",
 					subscriberError,
 				);
-			} else if (handshakeCommitted && !abortStreamInvalidated) {
+				this.leaseBroker.onDaemonRuntimeStreamCountChanged(
+					authorization.workspace.name,
+					entry.sessionId,
+					entry.subscribers.size,
+				);
+			} else if (handshakeCommitted) {
 				await this.runtimes.detachWithoutSubscriber(
 					entry,
 					subscriberError ? "transport_error" : "transport_closed",
@@ -954,6 +1018,22 @@ class IrohDaemonService {
 			this.activeStreams.unregister(entry);
 			await Promise.resolve(entry.close(reason)).catch(() => {});
 		}
+	}
+
+	private async closeActiveStreamsForConversationKey(
+		workspaceName: string,
+		sessionId: string,
+		reason: string,
+	): Promise<number> {
+		const entries = this.activeStreams
+			.entriesForWorkspaceName(workspaceName)
+			.filter((entry) => entry.sessionId === sessionId);
+		for (const entry of entries) {
+			this.activeStreams.unregister(entry);
+			await Promise.resolve(entry.close(reason)).catch(() => {});
+		}
+		await this.closeIdleConnectionsForEntries(entries, reason);
+		return entries.length;
 	}
 
 	private async closeActiveStreamsForWorkspace(
@@ -1169,6 +1249,67 @@ class IrohDaemonService {
 
 	async handleRequest(connection: ControlConnection, request: ControlRequest): Promise<boolean> {
 		switch (request.type) {
+			case "lease_acquire": {
+				const outcome = await this.leaseBroker.acquireForTui({
+					connectionId: connection.connectionId,
+					workspaceName: request.workspaceName,
+					sessionId: request.sessionId,
+					force: request.force,
+				});
+				if (outcome.kind === "granted") {
+					connection.send({
+						type: "lease_granted",
+						id: request.id,
+						workspaceName: request.workspaceName,
+						sessionId: request.sessionId,
+						handoff: outcome.handoff,
+					});
+					return true;
+				}
+				if (outcome.kind === "denied") {
+					connection.send({ type: "lease_denied", id: request.id, reason: outcome.reason });
+					return true;
+				}
+				connection.send({ type: "lease_pending", id: request.id, viewerFeedId: outcome.viewerFeedId });
+				outcome.granted.then(
+					(granted) => {
+						connection.send({
+							type: "lease_granted",
+							id: request.id,
+							workspaceName: request.workspaceName,
+							sessionId: request.sessionId,
+							handoff: granted.handoff,
+						});
+					},
+					(error: unknown) => {
+						connection.send({
+							type: "error",
+							id: request.id,
+							code: "drain_failed",
+							message: error instanceof Error ? error.message : String(error),
+						});
+					},
+				);
+				return true;
+			}
+			case "lease_release": {
+				const result = this.leaseBroker.releaseFromTui(
+					connection.connectionId,
+					request.workspaceName,
+					request.sessionId,
+				);
+				if (!result.ok) {
+					connection.send({ type: "error", id: request.id, code: result.code, message: "lease not held" });
+					return true;
+				}
+				connection.send({ type: "ok", id: request.id });
+				return true;
+			}
+			case "lease_rekey": {
+				this.leaseBroker.rekey(request.workspaceName, request.oldSessionId, request.newSessionId);
+				connection.send({ type: "ok", id: request.id });
+				return true;
+			}
 			case "pair_request":
 				await this.handlePairRequest(connection, request);
 				return true;
@@ -1231,6 +1372,7 @@ class IrohDaemonService {
 	}
 
 	onControlConnectionClosed(connection: ControlConnection): void {
+		this.leaseBroker.releaseAllForConnection(connection.connectionId);
 		for (const [requestId, pending] of this.pendingPairRequests) {
 			if (pending.connectionId !== connection.connectionId) {
 				continue;
@@ -1241,12 +1383,12 @@ class IrohDaemonService {
 	}
 
 	statusExtras(): { leases: ControlLeaseStatus[]; phoneConnections: number } {
-		const leases: ControlLeaseStatus[] = this.runtimes.values().map((entry) => ({
-			workspaceName: entry.workspaceName,
-			sessionId: entry.sessionId,
-			state: entry.subscribers.size > 0 ? "daemon-active" : "daemon-detached",
-			relayCount: 0,
-			streamCount: entry.subscribers.size,
+		const leases: ControlLeaseStatus[] = this.leaseBroker.list().map((record) => ({
+			workspaceName: record.workspaceName,
+			sessionId: record.sessionId,
+			state: record.state,
+			relayCount: record.relayIds.size,
+			streamCount: record.streamCount,
 		}));
 		return { leases, phoneConnections: this.clientConnections.size };
 	}
