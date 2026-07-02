@@ -24,6 +24,7 @@ import {
 	getIrohRemoteUnsafeAllowedTools,
 	getIrohRemoteWorkspaceAvailabilityStatus,
 	normalizeIrohRemoteAllowTools,
+	handleIrohRemoteDeviceLogUploadRpcCommand,
 	handleIrohRemoteWorkspaceUnregisterRpcCommand,
 	hasTrustRequiringProjectResources,
 	IROH_REMOTE_PAIR_CONTROL_REQUEST_TYPE,
@@ -1649,10 +1650,29 @@ async function handleIntegratedConversationRpcCommand(command, authorization, op
 	if (identityError) {
 		return createIrohRemoteRpcErrorResponse(getRpcResponseId(command), command.type, identityError);
 	}
+	if (command.type === "upload_device_logs") {
+		return await createRemoteUploadDeviceLogsRpcResponse(command, authorization, options);
+	}
 	if (command.type === "get_transcript") {
 		return createRemoteGetTranscriptRpcResponse(command, authorization, runtime);
 	}
 	return await handleRemoteHostRpcCommand(command, authorization, options);
+}
+
+async function createRemoteUploadDeviceLogsRpcResponse(command, authorization, options) {
+	const response = await handleIrohRemoteDeviceLogUploadRpcCommand(command, {
+		workspacePath: authorization.workspace.path,
+	});
+	await logAudit(options.auditLogger, {
+		type: "device_log_uploaded",
+		clientNodeId: authorization.client.nodeId,
+		workspace: authorization.workspace.name,
+		success: response.success === true,
+		error: response.success === true ? undefined : response.error,
+		details:
+			response.success === true ? { path: response.data.path, byteCount: response.data.byteCount } : undefined,
+	});
+	return response;
 }
 
 async function createRemoteRegisterLiveActivityRpcResponse(command, authorization, options, runtime) {

@@ -24,6 +24,7 @@ export const IROH_REMOTE_RPC_PASSTHROUGH_TYPES = new Set([
 	"register_live_activity",
 	"unregister_live_activity",
 	"unregister_workspace",
+	"upload_device_logs",
 	"extension_ui_response",
 ]);
 

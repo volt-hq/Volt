@@ -222,6 +222,7 @@ Conversation streams forward or handle these remote commands:
 - `register_live_activity`
 - `unregister_live_activity`
 - `list_sessions`
+- `upload_device_logs`
 - `extension_ui_response`
 
 Conversation streams reject `new_session`, `switch_session_by_id`, and raw `get_messages` with `unsupported_remote_command`. Command-level `workspace`, `workspaceName`, or `sessionId` values on conversation commands are assertions only; values that do not match the stream-bound workspace/session fail with `session_mismatch`.
@@ -300,6 +301,18 @@ The host rejects missing or malformed names, names that do not match the managem
 ```
 
 This command is host-state metadata management only. It does not create, rename, browse, path-map, or delete host workspace directories, and response data must contain registered names and availability statuses only, never host-local paths.
+
+`upload_device_logs` on a conversation stream stores client diagnostic logs inside the stream-bound workspace so host-side tooling and agents can read them:
+
+```json
+{"id":"logs-1","type":"upload_device_logs","fileName":"volt-device.log","content":"+0.1s info app: App did finish launching\n"}
+```
+
+`content` must be a non-empty UTF-8 string of at most 4 MiB (and must fit the 16 MiB RPC line limit after JSON encoding). `fileName` is optional; when present it must be a single path component of letters, digits, `.`, `_`, or `-` that does not start with a dot, and when absent the host generates a UTC-timestamped `device-<timestamp>.log` name. The host writes the file atomically under `.volt/device-logs/` inside the workspace root, overwriting any file with the same name, and never writes outside the workspace. A successful response echoes the workspace-relative path only, never a host-local absolute path:
+
+```json
+{"id":"logs-1","type":"response","command":"upload_device_logs","success":true,"data":{"path":".volt/device-logs/volt-device.log","byteCount":42}}
+```
 
 `get_ui_capabilities`, `get_ui_actions`, `get_ui_action_completions`, and `invoke_ui_action` expose the v1 native UI action protocol for the narrow remote-safe action set. Remote `get_ui_capabilities` advertises `ui_action_invocation.v1` only when the host accepts invocation and `ui_action_completions.v1` when action argument completions are available. Descriptor responses omit prompt bodies, skill content, raw `sourceInfo`, extension source paths, prompt and skill file paths, skill base directories, host session files, provider metadata, and secrets. They still pass through the outbound path handling layer below before being written to the remote stream.
 

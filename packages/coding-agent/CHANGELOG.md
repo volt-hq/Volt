@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added an `upload_device_logs` RPC command to Iroh remote conversation streams so paired mobile clients can store diagnostic logs in the workspace under `.volt/device-logs/` (validated single-component file name, 4 MiB content cap, atomic write, audit-logged).
+
 - Added a built-in `web_search` tool, enabled by default across SDK, CLI/RPC, and Iroh remote sessions. It uses the OpenAI/Codex search backend for authenticated OpenAI models, supports a custom Volt JSON endpoint via `VOLT_WEB_SEARCH_URL`, and falls back to Brave Search via `BRAVE_SEARCH_API_KEY`.
 - Added core subagent definition parsing, trusted user/project discovery plumbing, ResourceLoader exposure, and a local in-process SubagentManager skeleton.
 - Added definition-backed `SubagentManager.startByName()` support that applies discovered subagent prompts, tool policy intersections, excluded tool subtraction, delegation controls, model selection, and thinking levels to child runtimes.

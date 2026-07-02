@@ -49,6 +49,15 @@ export {
 	requestIrohRemotePairingTicket,
 } from "./control.ts";
 export {
+	DEFAULT_IROH_REMOTE_DEVICE_LOG_MAX_CONTENT_BYTES,
+	type HandleIrohRemoteDeviceLogUploadRpcCommandOptions,
+	handleIrohRemoteDeviceLogUploadRpcCommand,
+	IROH_REMOTE_DEVICE_LOGS_DIR_SEGMENTS,
+	IROH_REMOTE_UPLOAD_DEVICE_LOGS_RPC_TYPE,
+	type IrohRemoteDeviceLogUploadRpcData,
+	type IrohRemoteDeviceLogUploadRpcResponse,
+} from "./device-log-rpc.ts";
+export {
 	DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS,
 	IrohRemoteClientEngine,
 	type IrohRemoteClientEngineOptions,

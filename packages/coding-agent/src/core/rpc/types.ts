@@ -67,6 +67,9 @@ export type RpcCommand =
 	// Remote host management
 	| { id?: string; type: "unregister_workspace"; name: string }
 
+	// Device diagnostics
+	| { id?: string; type: "upload_device_logs"; fileName?: string; content: string }
+
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "get_transcript"; limit?: number; beforeEntryId?: string }
@@ -540,6 +543,15 @@ export type RpcResponse =
 				workspaceNames: string[];
 				workspaces: Array<{ name: string; status: string }>;
 			};
+	  }
+
+	// Device diagnostics
+	| {
+			id?: string;
+			type: "response";
+			command: "upload_device_logs";
+			success: true;
+			data: { path: string; byteCount: number };
 	  }
 
 	// State
