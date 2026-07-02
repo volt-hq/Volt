@@ -147,6 +147,10 @@
         {
           "title": "Core Subagents",
           "path": "subagents-design.md"
+        },
+        {
+          "title": "Live Shared Sessions (voltd)",
+          "path": "live-shared-session-daemon-design.md"
         }
       ]
     }
