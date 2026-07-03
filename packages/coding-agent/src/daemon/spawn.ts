@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, openSync } from "node:fs";
+import { closeSync, existsSync, openSync } from "node:fs";
 import { join } from "node:path";
 import { ENV_AGENT_DIR, getAgentDir, getPackageDir, VERSION } from "../config.ts";
 import { probeControlSocket } from "./control-server.ts";
@@ -80,10 +80,21 @@ export async function spawnDetachedDaemon(agentDir: string = getAgentDir()): Pro
 		cwd: agentDir,
 		env: { ...process.env, [ENV_AGENT_DIR]: agentDir },
 	});
+	// An unhandled "error" event would crash the calling CLI process; capture it
+	// and surface it through the health-wait result instead.
+	let spawnError: Error | undefined;
+	child.once("error", (error) => {
+		spawnError = error;
+	});
 	child.unref();
+	// The child received duplicated descriptors at spawn; close the parent copy.
+	closeSync(logFd);
 
 	const deadline = Date.now() + SPAWN_HEALTH_TIMEOUT_MS;
 	while (Date.now() < deadline) {
+		if (spawnError) {
+			return { ok: false, socketPath: paths.socketPath, error: `failed to spawn voltd: ${spawnError.message}` };
+		}
 		const probe = await probeDaemon(agentDir);
 		if (probe.healthy) {
 			return { ok: true, pid: probe.pid, socketPath: probe.socketPath };

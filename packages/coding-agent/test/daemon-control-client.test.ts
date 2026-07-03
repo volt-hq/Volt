@@ -112,3 +112,73 @@ describe("daemon control client provisional responses", () => {
 		expect(terminal).toMatchObject({ type: "error", code: "drain_failed" });
 	});
 });
+
+describe("daemon control client reconnect", () => {
+	it("does not stack a second connection when the backoff timer races a manual reconnect", async () => {
+		// Regression: after a disconnect, a manual connect() (e.g. from request())
+		// re-established the socket, and the still-armed backoff timer then dialed
+		// AGAIN, orphaning the healthy connection and delivering every daemon
+		// event twice.
+		const socketPath = tempSocketPath();
+		const serverSockets: Socket[] = [];
+		let helloCount = 0;
+		const server = await new Promise<Server>((resolve) => {
+			const created = createServer((socket: Socket) => {
+				serverSockets.push(socket);
+				const decoder = new ControlLineDecoder();
+				socket.on("data", (chunk) => {
+					for (const message of decoder.push(chunk)) {
+						if ((message as Record<string, unknown>).type === "hello") {
+							helloCount++;
+							socket.write(
+								encodeControlLine({
+									type: "hello_ack",
+									ok: true,
+									connectionId: `c-${helloCount}`,
+									version: "0.0.0-test",
+									protocolVersion: PROTOCOL_VERSION,
+								}),
+							);
+						}
+					}
+				});
+				socket.on("error", () => {});
+			});
+			created.listen(socketPath, () => resolve(created));
+		});
+		cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+
+		const client = createDaemonClient({
+			socketPath,
+			client: "tui",
+			version: "0.0.0-test",
+			reconnect: true,
+			// Large enough that the manual reconnect below reliably wins the race.
+			minBackoffMs: 300,
+			maxBackoffMs: 300,
+		});
+		cleanups.push(() => client.close());
+		await client.connect();
+		expect(helloCount).toBe(1);
+
+		// Server drops the connection; the client arms a ~300ms backoff dial.
+		serverSockets[0]?.destroy();
+		const disconnectDeadline = Date.now() + 2000;
+		while (Date.now() < disconnectDeadline && client.connectionState === "connected") {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+		expect(client.connectionState).toBe("reconnecting");
+		// Manual reconnect wins the race before the timer fires.
+		const deadline = Date.now() + 2000;
+		while (Date.now() < deadline && client.connectionState !== "connected") {
+			await client.connect().catch(() => {});
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		expect(client.connectionState).toBe("connected");
+		expect(helloCount).toBe(2);
+
+		// Give the backoff timer ample time to fire; it must not dial again.
+		await new Promise((resolve) => setTimeout(resolve, 800));
+		expect(helloCount).toBe(2);
+	});
+});

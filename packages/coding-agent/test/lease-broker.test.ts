@@ -294,4 +294,108 @@ describe("LeaseBroker", () => {
 		broker.onDaemonRuntimeStreamCountChanged("ws", "s1", 1);
 		expect(broker.lookup("ws", "s1")?.state).toBe("daemon-active");
 	});
+
+	it("returns the lease to unowned when the connection dies during drain disposal", async () => {
+		// Regression: cancellation used to no-op once runDrain cleared record.drain
+		// before its disposal awaits, leaving the lease permanently tui-owned by a
+		// dead connection.
+		const streaming = new Set<string>(["s1"]);
+		let releaseIdle: () => void = () => {};
+		let releaseDispose: () => void = () => {};
+		let disposeEntered: () => void = () => {};
+		const disposeEnteredPromise = new Promise<void>((resolve) => {
+			disposeEntered = resolve;
+		});
+		const drainEnded: string[] = [];
+		const audits: string[] = [];
+		const broker = new LeaseBroker({
+			isRuntimeStreaming: () => streaming.has("s1"),
+			waitForRuntimeIdle: () =>
+				new Promise((resolve) => {
+					releaseIdle = resolve;
+				}),
+			disposeRuntime: async () => {
+				disposeEntered();
+				await new Promise<void>((resolve) => {
+					releaseDispose = resolve;
+				});
+			},
+			closePhoneStreams: () => {},
+			closeRelays: () => {},
+			onDrainEnded: (_record, _viewerFeedId, reason) => {
+				drainEnded.push(reason);
+			},
+			audit: (event) => {
+				audits.push(event.type);
+			},
+		});
+		broker.onDaemonRuntimeAttached("ws", "s1");
+		broker.onDaemonRuntimeStreamCountChanged("ws", "s1", 1);
+
+		const outcome = await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "s1" });
+		expect(outcome.kind).toBe("pending");
+		const granted = outcome.kind === "pending" ? outcome.granted : Promise.reject(new Error("unreachable"));
+		const grantedRejected = vi.fn();
+		granted.catch(grantedRejected);
+
+		// The turn ends; runDrain passes its cancelled-check and enters disposal.
+		streaming.delete("s1");
+		releaseIdle();
+		await disposeEnteredPromise;
+
+		// The requesting TUI's control connection dies mid-disposal.
+		broker.releaseAllForConnection("c-1");
+		expect(drainEnded).toEqual(["cancelled"]);
+
+		// Disposal completes: the lease must NOT be granted to the dead owner.
+		releaseDispose();
+		await new Promise((resolve) => setImmediate(resolve));
+		await new Promise((resolve) => setImmediate(resolve));
+
+		expect(grantedRejected).toHaveBeenCalled();
+		expect(broker.lookup("ws", "s1")).toBeUndefined();
+		expect(audits.at(-1)).toBe("lease_released");
+
+		// The conversation is acquirable again.
+		const again = await broker.acquireForTui({ connectionId: "c-2", workspaceName: "ws", sessionId: "s1" });
+		expect(again).toEqual({ kind: "granted", handoff: "none" });
+	});
+
+	it("drops the lease when the connection dies while an idle runtime is disposed during acquire", async () => {
+		let releaseDispose: () => void = () => {};
+		let disposeEntered: () => void = () => {};
+		const disposeEnteredPromise = new Promise<void>((resolve) => {
+			disposeEntered = resolve;
+		});
+		const audits: string[] = [];
+		const broker = new LeaseBroker({
+			isRuntimeStreaming: () => false,
+			waitForRuntimeIdle: async () => {},
+			disposeRuntime: async () => {
+				disposeEntered();
+				await new Promise<void>((resolve) => {
+					releaseDispose = resolve;
+				});
+			},
+			closePhoneStreams: () => {},
+			closeRelays: () => {},
+			audit: (event) => {
+				audits.push(event.type);
+			},
+		});
+		broker.onDaemonRuntimeAttached("ws", "s1");
+		broker.onDaemonRuntimeStreamCountChanged("ws", "s1", 0); // daemon-detached
+
+		const acquire = broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "s1" });
+		await disposeEnteredPromise;
+		broker.releaseAllForConnection("c-1");
+		releaseDispose();
+
+		const outcome = await acquire;
+		expect(outcome).toEqual({ kind: "granted", handoff: "warm" });
+		expect(broker.lookup("ws", "s1")).toBeUndefined();
+		// No lease_acquired must be recorded for the dead connection after the
+		// implicit release.
+		expect(audits.at(-1)).toBe("lease_released");
+	});
 });

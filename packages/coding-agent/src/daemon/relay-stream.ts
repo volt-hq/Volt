@@ -178,28 +178,35 @@ export class RelayRegistry {
 		};
 		this.active.set(relay.relayId, activeRelay);
 
-		// TUI -> phone: socket bytes go straight to the Iroh send stream.
+		// TUI -> phone: socket bytes go straight to the Iroh send stream. The
+		// socket is paused while a chunk is in flight so a slow phone link cannot
+		// buffer unbounded data in the write queue.
 		let writeQueue: Promise<void> = Promise.resolve();
-		socket.on("data", (chunk: Buffer) => {
+		const enqueueWrite = (chunk: Buffer, pauseSocket: boolean) => {
 			bytesUp += chunk.length;
+			if (pauseSocket) {
+				socket.pause();
+			}
 			const bytes = Array.from(chunk);
 			writeQueue = writeQueue
 				.then(() => relay.stream.send.writeAll(bytes))
+				.then(() => {
+					if (pauseSocket && !settled) {
+						socket.resume();
+					}
+				})
 				.catch((error: unknown) => {
 					finish("error", error instanceof Error ? error.message : String(error));
 				});
-		});
+		};
 		if (bufferedRemainder.length > 0) {
-			bytesUp += bufferedRemainder.length;
-			const bytes = Array.from(bufferedRemainder);
-			writeQueue = writeQueue
-				.then(() => relay.stream.send.writeAll(bytes))
-				.catch((error: unknown) => {
-					finish("error", error instanceof Error ? error.message : String(error));
-				});
+			enqueueWrite(bufferedRemainder, false);
 		}
+		socket.on("data", (chunk: Buffer) => enqueueWrite(chunk, true));
 		socket.on("error", () => finish("error"));
-		socket.on("close", () => finish(closeReason ?? "error"));
+		// A close without a daemon-initiated reason or a socket error is the TUI
+		// going away (process exit, socket destroy).
+		socket.on("close", () => finish(closeReason ?? "tui_disconnected"));
 		socket.on("end", () => {
 			// TUI half-closed: propagate to the phone's send side.
 			void writeQueue.then(() => Promise.resolve(relay.stream.send.finish?.())).catch(() => {});
@@ -228,18 +235,5 @@ export class RelayRegistry {
 		})();
 
 		return true;
-	}
-
-	/** Expire pending offers whose tokens were never redeemed. */
-	expirePending(now = Date.now()): PendingRelay[] {
-		const expired: PendingRelay[] = [];
-		for (const relay of Array.from(this.pending.values())) {
-			if (now > relay.expiresAt) {
-				relay.used = true;
-				this.pending.delete(relay.relayId);
-				expired.push(relay);
-			}
-		}
-		return expired;
 	}
 }

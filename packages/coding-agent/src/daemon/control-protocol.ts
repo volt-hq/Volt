@@ -151,6 +151,7 @@ export type ControlResponse =
 
 export type RelayCloseReason =
 	| "phone_disconnected"
+	| "tui_disconnected"
 	| "lease_transferred"
 	| "session_rekeyed_reconnect"
 	| "workspace_unregistered"

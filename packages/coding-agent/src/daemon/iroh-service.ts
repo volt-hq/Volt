@@ -764,7 +764,10 @@ class IrohDaemonService {
 
 	private async sendHandshakeError(stream: IrohBiStreamLike, error: unknown): Promise<void> {
 		const record = (error ?? {}) as Record<string, unknown>;
-		const message = error instanceof Error ? error.message : String(error);
+		// Plain {message, ...} records (abortPendingRelay, lease re-check) must not
+		// stringify to "[object Object]".
+		const message =
+			error instanceof Error ? error.message : typeof record.message === "string" ? record.message : String(error);
 		const outcome = typeof record.outcome === "string" ? record.outcome : undefined;
 		const workspace = typeof record.workspace === "string" ? record.workspace : undefined;
 		const sessionId = typeof record.sessionId === "string" ? record.sessionId : undefined;
@@ -907,6 +910,18 @@ class IrohDaemonService {
 			return;
 		}
 
+		// Session-target resolution awaited; the lease can have moved (release,
+		// rekey, connection loss) in the meantime. Re-check before minting so the
+		// offer cannot go to a stale or dead owner.
+		const lease = this.leaseBroker.lookup(workspaceName, targetSessionId);
+		if (lease?.state !== "tui-owned" || lease.tuiConnectionId !== tuiConnectionId) {
+			await this.sendHandshakeError(stream, {
+				message: "conversation lease owner changed; retry",
+				retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
+			});
+			return;
+		}
+
 		const settled = new Promise<void>((resolveSettled) => {
 			const relay = this.relays.mint({
 				workspaceName,
@@ -992,7 +1007,7 @@ class IrohDaemonService {
 					streamId,
 				},
 			});
-			this.services.controlServer.sendTo(tuiConnectionId, {
+			const delivered = this.services.controlServer.sendTo(tuiConnectionId, {
 				type: "relay_offer",
 				relayId: relay.relayId,
 				relayToken: relay.relayToken,
@@ -1002,6 +1017,16 @@ class IrohDaemonService {
 				connectionId,
 				streamId,
 			});
+			if (!delivered) {
+				// The TUI connection vanished between the lease check and the offer;
+				// fail the phone's deferred handshake now instead of after the TTL.
+				this.abortPendingRelay(
+					relay.relayId,
+					"error",
+					"relay offer undeliverable; retry",
+					RELAY_OFFER_RETRY_AFTER_MS,
+				);
+			}
 		});
 		await settled;
 	}
@@ -1848,7 +1873,16 @@ class IrohDaemonService {
 	async shutdown(): Promise<void> {
 		this.shuttingDown = true;
 		// 1. Stop accepting: close the endpoint accept loop lazily; new hellos are
-		//    rejected by the control server's shutting-down gate.
+		//    rejected by the control server's shutting-down gate. Close relays and
+		//    unredeemed offers up front with the dedicated host_shutdown reason —
+		//    otherwise they die with the endpoint and TUIs see a misleading
+		//    relay_closed{error}.
+		for (const relay of this.relays.activeRelays()) {
+			relay.close("host_shutdown");
+		}
+		for (const pending of this.relays.pendingRelays()) {
+			this.abortPendingRelay(pending.relayId, "host_shutdown", "daemon shutting down");
+		}
 		// 2. Wait for streaming runtimes to go idle (60s cap each, concurrently);
 		//    never abort a turn from shutdown.
 		const drainResults = await Promise.allSettled(

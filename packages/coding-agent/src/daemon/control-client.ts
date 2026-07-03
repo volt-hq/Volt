@@ -136,6 +136,12 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 		if (connectPromise) {
 			return connectPromise;
 		}
+		if (socket && !socket.destroyed) {
+			// A racing dial (manual connect vs the backoff timer) must never stack
+			// a second live connection: the orphaned socket would keep delivering
+			// duplicate events and hold a phantom daemon connection open.
+			return Promise.resolve();
+		}
 		connectPromise = new Promise<void>((resolve, reject) => {
 			const dialed = createConnection(options.socketPath);
 			const decoder = new ControlLineDecoder();
@@ -190,6 +196,12 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 							connectionId: ack.connectionId,
 						};
 						backoffMs = minBackoffMs;
+						// A pending backoff dial is now redundant (and dial()'s live-socket
+						// guard would make it a no-op anyway); drop it.
+						if (reconnectTimer) {
+							clearTimeout(reconnectTimer);
+							reconnectTimer = undefined;
+						}
 						connectPromise = undefined;
 						setState("connected");
 						resolve();

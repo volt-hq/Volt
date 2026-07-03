@@ -7,6 +7,7 @@ import { probeControlSocket } from "./control-server.ts";
 import { createIrohDaemonService } from "./iroh-service.ts";
 import { readPidfile, runVoltDaemon } from "./main.ts";
 import { getDaemonPaths } from "./paths.ts";
+import { verifyPidfileProcess } from "./process-identity.ts";
 import { installDaemonService, uninstallDaemonService } from "./service-install.ts";
 import { ensureDaemonRunning, probeDaemon } from "./spawn.ts";
 
@@ -52,19 +53,45 @@ async function daemonStart(agentDir: string): Promise<void> {
 	console.error(`socket: ${result.socketPath}`);
 }
 
+/**
+ * SIGTERM a pidfile-recorded daemon, but only after verifying the pid still
+ * refers to the voltd that wrote the pidfile (a recycled pid must never
+ * receive the signal). Returns true when a signal was sent or the refusal was
+ * reported; false when the process is simply gone.
+ */
+async function signalPidfileDaemon(pidfilePath: string, context: string): Promise<boolean> {
+	const pidfile = readPidfile(pidfilePath);
+	if (!pidfile) {
+		return false;
+	}
+	const verification = await verifyPidfileProcess(pidfile);
+	if (verification === "mismatch") {
+		console.error(
+			`Error: pid ${pidfile.pid} from the pidfile is not verifiable as voltd (recycled pid?); not sending SIGTERM.`,
+		);
+		console.error(`Remove ${pidfilePath} if it is stale.`);
+		process.exitCode = 1;
+		return true;
+	}
+	if (verification === "gone") {
+		return false;
+	}
+	try {
+		process.kill(pidfile.pid, "SIGTERM");
+		console.error(`${context}; sent SIGTERM to pid ${pidfile.pid}`);
+		return true;
+	} catch {
+		// Process exited between verification and signal.
+		return false;
+	}
+}
+
 async function daemonStop(agentDir: string): Promise<void> {
 	const paths = getDaemonPaths(agentDir);
 	const probe = await probeDaemon(agentDir);
 	if (!probe.healthy) {
-		const pidfile = readPidfile(paths.pidfilePath);
-		if (pidfile) {
-			try {
-				process.kill(pidfile.pid, "SIGTERM");
-				console.error(`voltd socket unreachable; sent SIGTERM to pid ${pidfile.pid}`);
-				return;
-			} catch {
-				// Process already gone.
-			}
+		if (await signalPidfileDaemon(paths.pidfilePath, "voltd socket unreachable")) {
+			return;
 		}
 		console.error("voltd is not running");
 		return;
@@ -92,15 +119,8 @@ async function daemonStop(agentDir: string): Promise<void> {
 		}
 		await new Promise((resolve) => setTimeout(resolve, 200));
 	}
-	const pidfile = readPidfile(paths.pidfilePath);
-	if (pidfile) {
-		try {
-			process.kill(pidfile.pid, "SIGTERM");
-			console.error(`voltd did not stop over the control socket; sent SIGTERM to pid ${pidfile.pid}`);
-			return;
-		} catch {
-			// Process already gone.
-		}
+	if (await signalPidfileDaemon(paths.pidfilePath, "voltd did not stop over the control socket")) {
+		return;
 	}
 	console.error("Error: voltd did not stop within the timeout");
 	process.exitCode = 1;
@@ -126,7 +146,7 @@ async function daemonStatus(agentDir: string, json: boolean): Promise<void> {
 		return;
 	}
 	if (json) {
-		console.log(JSON.stringify({ running: true, ...status, id: undefined }));
+		console.log(JSON.stringify({ running: true, ...status, id: undefined, type: undefined }));
 		return;
 	}
 	console.error(`voltd ${status.version} (protocol ${status.protocolVersion})`);

@@ -250,19 +250,61 @@ describe("relay framing (§12.2.3)", () => {
 		expect(unknown.messages).toEqual([{ type: "hello_ack", ok: false, error: "bad_relay_token" }]);
 	});
 
-	it("expires unredeemed pending offers and invalidates them single-use", () => {
+	it("invalidates pending offers single-use", () => {
 		const registry = new RelayRegistry();
 		const phone = new FakePhoneIrohStream();
-		const relay = mintTestRelay(registry, phone, vi.fn(), 1_000);
+		const relay = mintTestRelay(registry, phone, vi.fn());
 
 		expect(registry.pendingForConversation("n-phone-a", "ws", "s-1")).toHaveLength(1);
-		expect(registry.expirePending(1_000 + RELAY_TOKEN_TTL_MS)).toHaveLength(0);
-		const expired = registry.expirePending(1_000 + RELAY_TOKEN_TTL_MS + 1);
-		expect(expired.map((entry) => entry.relayId)).toEqual([relay.relayId]);
+		expect(registry.invalidatePending(relay.relayId)?.relayId).toBe(relay.relayId);
 		expect(registry.pendingForConversation("n-phone-a", "ws", "s-1")).toHaveLength(0);
+		expect(registry.invalidatePending(relay.relayId)).toBeUndefined();
+	});
 
-		const other = mintTestRelay(registry, phone, vi.fn());
-		expect(registry.invalidatePending(other.relayId)?.relayId).toBe(other.relayId);
-		expect(registry.invalidatePending(other.relayId)).toBeUndefined();
+	it("settles with tui_disconnected when the TUI destroys the relay socket", async () => {
+		const { socketPath, registry } = await startRelayHarness();
+		const phone = new FakePhoneIrohStream();
+		const settle = vi.fn();
+		const relay = mintTestRelay(registry, phone, settle);
+		const client = connectRawRelayClient(socketPath, relay);
+		await vi.waitFor(() => expect(client.messages).toHaveLength(2)); // ack + preamble
+
+		client.socket.destroy();
+		await vi.waitFor(() => expect(settle).toHaveBeenCalled());
+		const outcome = settle.mock.calls[0]?.[0] as RelayOutcome;
+		expect(outcome.reason).toBe("tui_disconnected");
+	});
+
+	it("pauses the TUI socket while a phone write is in flight (backpressure)", async () => {
+		const { socketPath, registry } = await startRelayHarness();
+		const phone = new FakePhoneIrohStream();
+		// Gate writeAll so a second chunk can only be pulled once the first write
+		// completes; without backpressure the pump reads ahead unboundedly.
+		const writeGates: Array<() => void> = [];
+		const writtenChunks: Buffer[] = [];
+		phone.send.writeAll = (bytes: Array<number>) => {
+			writtenChunks.push(Buffer.from(bytes));
+			return new Promise<void>((resolve) => {
+				writeGates.push(resolve);
+			});
+		};
+		const relay = mintTestRelay(registry, phone, vi.fn());
+		const client = connectRawRelayClient(socketPath, relay);
+		await vi.waitFor(() => expect(client.messages).toHaveLength(2)); // ack + preamble
+
+		client.socket.write("first");
+		await vi.waitFor(() => expect(writtenChunks).toHaveLength(1));
+		client.socket.write("second");
+		// The daemon-side socket is paused while "first" is in flight; "second"
+		// must stay buffered in the socket, not in the write queue.
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(writtenChunks).toHaveLength(1);
+
+		writeGates.shift()?.();
+		await vi.waitFor(() => expect(writtenChunks).toHaveLength(2));
+		expect(Buffer.concat(writtenChunks).toString("utf8")).toBe("firstsecond");
+		for (const gate of writeGates.splice(0)) {
+			gate();
+		}
 	});
 });

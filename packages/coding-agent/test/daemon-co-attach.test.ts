@@ -162,4 +162,59 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		await modeB.modePromise;
 		expect(dispose).not.toHaveBeenCalled();
 	});
+
+	it("ignores stopEntry for a stale reference whose key now belongs to a replacement runtime", async () => {
+		// Regression guard: stopEntry used to delete by key alone, so a stale
+		// entry reference could evict a replacement runtime from the registry
+		// while leaving it running unmanaged.
+		const makeRuntimeHost = (sessionId: string, dispose: ReturnType<typeof vi.fn>) =>
+			({
+				session: createTestSession(sessionId, null),
+				dispose,
+				setRebindSession: vi.fn(),
+				listSessions: vi.fn(async () => []),
+			}) as unknown as AgentSessionRuntime;
+		const disposeA = vi.fn(async () => {});
+		const disposeB = vi.fn(async () => {});
+		let nextRuntime = makeRuntimeHost("s-stale", disposeA);
+
+		const registry = new IntegratedRuntimeRegistry({
+			auditLogger: new IrohRemoteAuditLogger(),
+			stateManager: new IrohRemoteHostStateManager(),
+			activeStreams: new IrohRemoteActiveStreamRegistry(),
+			detachedRuntimeTtlMs: () => 60_000,
+			getAllowTools: () => undefined,
+			getProjectTrustedForWorkspace: () => false,
+			setClientLastSessionId: vi.fn(async () => undefined),
+			createRuntime: async () => ({
+				runtime: nextRuntime,
+				sessionSelection: { kind: "created", sessionId: "s-stale" },
+			}),
+		});
+		const phone = createAuthorization("n-phone-a");
+
+		const first = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
+			phone,
+		);
+		await registry.commitEntry(first.entry, first.sessionSelection, phone);
+		await registry.stopEntry(first.entry, "test_stop");
+		expect(disposeA).toHaveBeenCalledTimes(1);
+		expect(registry.findOwner("ws", "s-stale")).toBeUndefined();
+
+		// A replacement runtime takes over the same (workspace, sessionId) key.
+		nextRuntime = makeRuntimeHost("s-stale", disposeB);
+		const second = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
+			phone,
+		);
+		await registry.commitEntry(second.entry, second.sessionSelection, phone);
+		expect(second.entry).not.toBe(first.entry);
+
+		// A stale stop of the FIRST entry must not evict the replacement.
+		await registry.stopEntry(first.entry, "stale_stop");
+		expect(registry.findOwner("ws", "s-stale")).toBe(second.entry);
+		expect(disposeB).not.toHaveBeenCalled();
+		expect(disposeA).toHaveBeenCalledTimes(1);
+	});
 });

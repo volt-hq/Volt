@@ -115,6 +115,54 @@ describe("voltd lifecycle", () => {
 		await client.close();
 		await expect(daemon).resolves.toBe(0);
 	}, 20_000);
+
+	it("broadcasts daemon_shutdown before extension shutdown completes", async () => {
+		// Regression: the broadcast used to run AFTER the extension shutdown loop,
+		// which can drain streaming runtimes for up to 60s — control clients
+		// waited blind for the whole drain.
+		const paths = getDaemonPaths(agentDir);
+		let releaseExtension: () => void = () => {};
+		const extensionGate = new Promise<void>((resolve) => {
+			releaseExtension = resolve;
+		});
+		let extensionShutdownStarted = false;
+		const daemon = runVoltDaemon({ agentDir, foreground: false }, [
+			() => ({
+				async shutdown() {
+					extensionShutdownStarted = true;
+					await extensionGate;
+				},
+			}),
+		]);
+		let healthy = await probeControlSocket(paths.socketPath, { version: "test" });
+		for (let attempt = 0; !healthy && attempt < 50; attempt++) {
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			healthy = await probeControlSocket(paths.socketPath, { version: "test" });
+		}
+		expect(healthy).toBeDefined();
+
+		const events: ControlEvent[] = [];
+		const client = createDaemonClient({
+			socketPath: paths.socketPath,
+			client: "cli",
+			version: "test",
+			reconnect: false,
+			onEvent: (event) => events.push(event),
+		});
+		await client.request({ type: "shutdown" });
+
+		// The broadcast must arrive while the extension is still draining.
+		const deadline = Date.now() + 5000;
+		while (Date.now() < deadline && !events.some((event) => event.type === "daemon_shutdown")) {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		expect(events.some((event) => event.type === "daemon_shutdown")).toBe(true);
+		expect(extensionShutdownStarted).toBe(true);
+
+		releaseExtension();
+		await expect(daemon).resolves.toBe(0);
+		await client.close();
+	}, 20_000);
 });
 
 describe("daemon log rotation", () => {

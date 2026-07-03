@@ -32,6 +32,12 @@ export interface LeaseRecord {
 		viewerFeedId: string;
 		startedAtMs: number;
 		cancelled: boolean;
+		/**
+		 * Runtime disposal has started; the drain can no longer revert to a
+		 * daemon-owned state, so a cancellation must defer the final transition
+		 * to runDrain's continuation.
+		 */
+		disposing: boolean;
 		resolveGranted: (result: { handoff: "warm" }) => void;
 		rejectGranted: (error: Error) => void;
 	};
@@ -198,6 +204,13 @@ export class LeaseBroker {
 				await this.effects.disposeRuntime(workspaceName, sessionId, "lease_transferred_to_tui");
 				await this.effects.closePhoneStreams(workspaceName, sessionId, LEASE_TRANSFERRED_CLOSE_REASON);
 				record.streamCount = 0;
+				if ((record.state as LeaseState) !== "tui-owned" || record.tuiConnectionId !== connectionId) {
+					// The connection died while the disposal effects ran and the lease
+					// was already released (releaseAllForConnection). The release path
+					// audited; there is no live owner left to grant to.
+					this.dropIfUnowned(record);
+					return { kind: "granted", handoff: "warm" };
+				}
 				this.effects.audit({
 					type: "lease_acquired",
 					workspaceName,
@@ -224,6 +237,7 @@ export class LeaseBroker {
 			viewerFeedId,
 			startedAtMs: Date.now(),
 			cancelled: false,
+			disposing: false,
 			resolveGranted,
 			rejectGranted,
 		};
@@ -252,10 +266,28 @@ export class LeaseBroker {
 		if (drain.cancelled || record.drain !== drain) {
 			return;
 		}
-		record.drain = undefined;
+		// From here disposal is irreversible: record.drain stays set so a
+		// cancellation landing during these awaits is visible afterwards, and
+		// cancelDrain defers the final transition to this continuation.
+		drain.disposing = true;
 		await this.effects.disposeRuntime(record.workspaceName, record.sessionId, "lease_transferred_to_tui");
 		await this.effects.closePhoneStreams(record.workspaceName, record.sessionId, LEASE_TRANSFERRED_CLOSE_REASON);
+		record.drain = undefined;
 		record.streamCount = 0;
+		if (drain.cancelled) {
+			// The requesting connection died mid-disposal. The runtime is gone, so
+			// the lease returns to unowned instead of granting to a dead owner.
+			record.state = "unowned";
+			record.tuiConnectionId = undefined;
+			this.effects.audit({
+				type: "lease_released",
+				workspaceName: record.workspaceName,
+				sessionId: record.sessionId,
+				details: { owner: "daemon", reason: "connection_lost", drainCancelledDuringDisposal: true },
+			});
+			this.dropIfUnowned(record);
+			return;
+		}
 		record.state = "tui-owned";
 		this.effects.onDrainEnded?.(record, drain.viewerFeedId, "granted");
 		this.effects.audit({
@@ -269,10 +301,18 @@ export class LeaseBroker {
 
 	private cancelDrain(record: LeaseRecord): void {
 		const drain = record.drain;
-		if (!drain) {
+		if (!drain || drain.cancelled) {
 			return;
 		}
 		drain.cancelled = true;
+		if (drain.disposing) {
+			// Runtime disposal already started and cannot be reverted; fail the
+			// grant now and let runDrain's continuation finish the transition
+			// (to unowned) once the disposal effects settle.
+			this.effects.onDrainEnded?.(record, drain.viewerFeedId, "cancelled");
+			drain.rejectGranted(new Error("drain cancelled"));
+			return;
+		}
 		record.drain = undefined;
 		record.tuiConnectionId = undefined;
 		record.state = record.streamCount > 0 ? "daemon-active" : "daemon-detached";

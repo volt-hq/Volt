@@ -419,7 +419,10 @@ export class IntegratedRuntimeRegistry {
 	}
 
 	async stopEntry(entry: IntegratedRuntimeEntry, reason: string): Promise<void> {
-		if (!this.entries.has(entry.key)) {
+		if (this.entries.get(entry.key) !== entry) {
+			// Stale reference: the key may now belong to a replacement runtime, and
+			// deleting by key alone would evict that runtime from the registry while
+			// leaving it running unmanaged.
 			return;
 		}
 		this.cancelRetention(entry);

@@ -149,6 +149,10 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		}
 		shuttingDown = true;
 		log("info", `shutting down (${reason})`);
+		// Tell control clients up front: extension shutdown can drain streaming
+		// runtimes for up to 60s and clients must not wait blind. New hellos are
+		// already rejected via the isShuttingDown gate.
+		controlServer?.broadcast({ type: "daemon_shutdown" });
 		for (const extension of extensionInstances) {
 			try {
 				await extension.shutdown?.();
@@ -156,7 +160,6 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				log("error", `extension shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
-		controlServer?.broadcast({ type: "daemon_shutdown" });
 		await state.close().catch(() => {});
 		await auditLogger.log({ type: "daemon_shutdown", success: true, details: { reason } }).catch(() => {});
 		await controlServer?.close().catch(() => {});
