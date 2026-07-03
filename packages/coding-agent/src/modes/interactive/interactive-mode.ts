@@ -1942,7 +1942,9 @@ export class InteractiveMode {
 			workspaces: [{ name: authorizationSubset.workspaceName, status: "available" as const }],
 		} satisfies IrohRemoteClientAuthorizationSuccess;
 
-		const responseContext = { hostNodeId: undefined, relayMode: undefined };
+		// The daemon's identity from the preamble: the phone verifies the saved
+		// host node id in the handshake response we write over the relay.
+		const responseContext = { hostNodeId: preamble.hostNodeId, relayMode: preamble.relayMode };
 		const sessionSelection: IntegratedConversationSessionSelection =
 			preamble.resolvedTarget.selection === "created"
 				? { kind: "created", sessionId: preamble.resolvedTarget.sessionId }

@@ -908,6 +908,11 @@ class IrohDaemonService {
 						workspaceName,
 						workspacePath: authorization.workspace.path,
 					},
+					// The phone verifies the saved host's node id in the handshake
+					// response the TUI writes; without this the relay path fails the
+					// client's identity check.
+					...(this.hostNodeId === undefined ? {} : { hostNodeId: this.hostNodeId }),
+					relayMode: this.relayMode,
 					connectionId,
 					streamId,
 					resolvedTarget: {

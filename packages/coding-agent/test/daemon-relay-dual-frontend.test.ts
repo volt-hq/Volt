@@ -145,6 +145,8 @@ function mintPhoneRelay(registry: RelayRegistry, clientNodeId: string, streamId:
 		preamble: {
 			handshake: { hello: createPhoneHello(SESSION_ID), response: HANDSHAKE_RESPONSE },
 			authorization: { clientNodeId, workspaceName: WORKSPACE.name, workspacePath: WORKSPACE.path },
+			hostNodeId: "n-daemon-host",
+			relayMode: "default",
 			connectionId: `conn-${clientNodeId}`,
 			streamId,
 			resolvedTarget: {
@@ -176,7 +178,9 @@ async function serveRelayFromTui(
 	const handshake = opened.preamble.handshake as { hello: IrohRemoteHello; response: IrohRemoteHandshakeSuccess };
 	const authorizationSubset = opened.preamble.authorization;
 	const authorization = createAuthorization(authorizationSubset.clientNodeId);
-	const responseContext = { hostNodeId: undefined, relayMode: undefined };
+	// The phone verifies the saved host node id in the relayed handshake
+	// response, so the TUI must echo the daemon's identity from the preamble.
+	const responseContext = { hostNodeId: opened.preamble.hostNodeId, relayMode: opened.preamble.relayMode };
 	const resolvedTarget = opened.preamble.resolvedTarget;
 	const sessionSelection: IntegratedConversationSessionSelection =
 		resolvedTarget.selection === "created"
@@ -259,6 +263,9 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 				const first = attach.phone.receivedFrames()[0];
 				expect(first?.success).toBe(true);
 				expect(first?.sessionId).toBe(SESSION_ID);
+				// Saved-host identity verification: the relayed handshake response
+				// must prove the daemon's node id, not the TUI's absence of one.
+				expect(first?.hostNodeId).toBe("n-daemon-host");
 			}
 		});
 

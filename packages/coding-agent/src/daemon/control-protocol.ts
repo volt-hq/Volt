@@ -182,6 +182,12 @@ export interface RelayPreamble {
 	handshake: unknown;
 	/** authorization subset — everything the TUI needs to serve the stream */
 	authorization: { clientNodeId: string; workspaceName: string; workspacePath: string };
+	/**
+	 * The daemon's Iroh node id: the TUI writes it into the handshake response
+	 * so the phone's saved-host identity verification passes over the relay.
+	 */
+	hostNodeId?: string;
+	relayMode?: "disabled" | "default";
 	connectionId: string;
 	streamId: string;
 	resolvedTarget: {

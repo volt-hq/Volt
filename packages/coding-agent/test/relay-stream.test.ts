@@ -77,6 +77,8 @@ function mintTestRelay(
 		preamble: {
 			handshake: HANDSHAKE_VERBATIM,
 			authorization: { clientNodeId: "n-phone-a", workspaceName: "ws", workspacePath: "/tmp/ws" },
+			hostNodeId: "n-host-1",
+			relayMode: "default",
 			connectionId: "conn-1",
 			streamId: "st-1",
 			resolvedTarget: {
@@ -109,6 +111,8 @@ describe("relay framing (§12.2.3)", () => {
 			relayId: relay.relayId,
 			handshake: HANDSHAKE_VERBATIM,
 			authorization: { clientNodeId: "n-phone-a", workspaceName: "ws", workspacePath: "/tmp/ws" },
+			hostNodeId: "n-host-1",
+			relayMode: "default",
 			connectionId: "conn-1",
 			streamId: "st-1",
 			resolvedTarget: {
