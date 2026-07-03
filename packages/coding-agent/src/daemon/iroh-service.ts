@@ -23,6 +23,7 @@ import {
 	IrohRemotePushNotificationDispatcher,
 	IrohRemotePushRelayHttpClient,
 } from "../core/remote/iroh/push.ts";
+import { createIrohRemoteRpcErrorResponse } from "../core/remote/iroh/rpc-command-filter.ts";
 import type { IrohRemoteWorkspace } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import { getIrohRemoteWorkspaceAvailabilityStatus } from "../core/remote/iroh/workspace.ts";
@@ -31,11 +32,21 @@ import { getDefaultSessionDir } from "../core/session-manager.ts";
 import { getCurrentThemeName, getResolvedThemeColors } from "../core/theme/runtime.ts";
 import { ProjectTrustStore } from "../core/trust-manager.ts";
 import { runIrohRemoteRpcMode } from "../modes/rpc/iroh-remote-rpc-mode.ts";
-import type { ControlLeaseStatus, ControlRequest } from "./control-protocol.ts";
+import {
+	type ControlLeaseStatus,
+	type ControlRequest,
+	RELAY_RPC_COMMAND_TYPES,
+	type RelayCloseReason,
+} from "./control-protocol.ts";
 import type { ControlConnection } from "./control-server.ts";
 import {
 	type ConversationCommandContext,
+	createRemoteRegisterLiveActivityRpcResponse,
+	createRemoteUnregisterLiveActivityRpcResponse,
+	createRpcSuccessResponse,
+	getRpcResponseId,
 	handleIntegratedConversationRpcCommand,
+	handleRemoteHostRpcCommand,
 	REMOTE_SESSION_LIST_CURSOR_TTL_MS,
 	type RemoteSessionListCursorEntry,
 } from "./conversation-commands.ts";
@@ -77,6 +88,7 @@ import {
 const ACTIVE_REVOKE_CLOSE_REASON = "revoked";
 const ACTIVE_REPLACE_CLOSE_REASON = "replaced";
 const DUPLICATE_CONVERSATION_RETRY_AFTER_MS = 500;
+const RELAY_OFFER_RETRY_AFTER_MS = 1000;
 const WORKSPACE_DISCOVERY_STREAM_SESSION_ID = "$workspace-discovery";
 const WORKSPACE_MANAGEMENT_STREAM_SESSION_ID = "$workspace-management";
 const SHUTDOWN_RUNTIME_IDLE_CAP_MS = 60_000;
@@ -280,6 +292,10 @@ class IrohDaemonService {
 			closeRelays: (record, reason) => {
 				for (const relayId of Array.from(record.relayIds)) {
 					this.relays.closeActive(relayId, reason);
+					// Unredeemed offers must not linger until the 10s token expiry:
+					// fail the phone's deferred handshake immediately so it retries
+					// against the new lease owner.
+					this.abortPendingRelay(relayId, reason, "relay offer cancelled; retry", RELAY_OFFER_RETRY_AFTER_MS);
 				}
 			},
 			onDrainStarted: (record, viewerFeedId) => {
@@ -332,6 +348,7 @@ class IrohDaemonService {
 	private getCommandContext(conversation?: {
 		workspaceName: string;
 		entry: IntegratedRuntimeEntry;
+		streamEntry?: IrohRemoteActiveStreamEntry;
 	}): ConversationCommandContext {
 		return {
 			agentDir: this.services.agentDir,
@@ -340,6 +357,16 @@ class IrohDaemonService {
 			stateManager: this.stateManager,
 			sessionListCursors: this.sessionListCursors,
 			sessionListCursorTtlMs: REMOTE_SESSION_LIST_CURSOR_TTL_MS,
+			onWorkspaceUnregistered: async (workspaceName) => {
+				// Unregistering the conversation's own workspace keeps the requesting
+				// stream and runtime alive so the response can still be delivered
+				// (mirrors the workspace-management stream path).
+				const excludeOwn = conversation !== undefined && workspaceName === conversation.workspaceName;
+				await this.cleanupUnregisteredWorkspace(
+					workspaceName,
+					excludeOwn ? { streamEntry: conversation.streamEntry, runtimeEntry: conversation.entry } : {},
+				);
+			},
 			...(conversation === undefined
 				? {}
 				: {
@@ -705,16 +732,10 @@ class IrohDaemonService {
 							return { ok: false, error: "workspace_unregistered" };
 						}
 						this.engine?.clearPairingSecretForWorkspace(workspaceName);
-						const closedStreamCount = await this.closeActiveStreamsForWorkspace(
+						const { closedStreamCount, stoppedRuntimeCount } = await this.cleanupUnregisteredWorkspace(
 							workspaceName,
-							WORKSPACE_UNREGISTERED_CLOSE_REASON,
-							activeStream.entry,
+							{ streamEntry: activeStream.entry },
 						);
-						const stoppedRuntimeCount = await this.runtimes.stopForWorkspace(
-							workspaceName,
-							WORKSPACE_UNREGISTERED_CLOSE_REASON,
-						);
-						await this.stateManager.removeLiveActivitiesForWorkspace(workspaceName);
 						return { ok: true, closedStreamCount, stoppedRuntimeCount };
 					},
 				},
@@ -855,18 +876,15 @@ class IrohDaemonService {
 				relay.close("error");
 			}
 		}
-		// Unredeemed offers for the same conversation are superseded by this one.
+		// Unredeemed offers for the same conversation are superseded by this one:
+		// fail their deferred handshakes and settle them (relay_closed to the TUI,
+		// lease bookkeeping) instead of leaking their stream tasks.
 		for (const pending of this.relays.pendingForConversation(
 			authorization.client.nodeId,
 			workspaceName,
 			targetSessionId,
 		)) {
-			this.relays.invalidatePending(pending.relayId);
-			this.services.controlServer.sendTo(tuiConnectionId, {
-				type: "relay_closed",
-				relayId: pending.relayId,
-				reason: "error",
-			});
+			this.abortPendingRelay(pending.relayId, "error", "relay offer superseded; retry", RELAY_OFFER_RETRY_AFTER_MS);
 		}
 
 		// Resolve the concrete session target for the preamble (§3.7).
@@ -956,14 +974,7 @@ class IrohDaemonService {
 			// The offer is single-use with a 10s expiry; the phone's handshake
 			// response is deferred until the TUI redeems the token.
 			const expiryTimer = setTimeout(() => {
-				const pending = this.relays.invalidatePending(relay.relayId);
-				if (!pending) {
-					return;
-				}
-				void this.sendHandshakeError(stream, {
-					message: "relay offer expired; retry",
-					retryAfterMs: 1000,
-				}).finally(() => resolveSettled());
+				this.abortPendingRelay(relay.relayId, "error", "relay offer expired; retry", RELAY_OFFER_RETRY_AFTER_MS);
 			}, RELAY_TOKEN_TTL_MS);
 			expiryTimer.unref?.();
 
@@ -1144,7 +1155,11 @@ class IrohDaemonService {
 					handleIntegratedConversationRpcCommand(
 						command as { type: string } & Record<string, unknown>,
 						authorization,
-						this.getCommandContext({ workspaceName: authorization.workspace.name, entry }),
+						this.getCommandContext({
+							workspaceName: authorization.workspace.name,
+							entry,
+							streamEntry: activeStream?.entry,
+						}),
 						entry.runtime,
 					),
 				stream,
@@ -1289,6 +1304,65 @@ class IrohDaemonService {
 		}
 		await this.closeIdleConnectionsForEntries(entries, reason);
 		return entries.length;
+	}
+
+	/**
+	 * Invalidate an unredeemed relay offer: fail the phone's deferred handshake
+	 * immediately and settle the relay (lease bookkeeping, relay_closed to the
+	 * TUI, audit).
+	 */
+	private abortPendingRelay(relayId: string, reason: RelayCloseReason, message: string, retryAfterMs?: number): void {
+		const pending = this.relays.invalidatePending(relayId);
+		if (!pending) {
+			return;
+		}
+		void this.sendHandshakeError(pending.stream, {
+			message,
+			...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+		}).finally(() => pending.settle({ reason, bytesUp: 0, bytesDown: 0, durationMs: 0 }));
+	}
+
+	private closeRelaysForWorkspace(workspaceName: string, excludeRelayIds?: ReadonlySet<string>): void {
+		for (const relay of this.relays.activeRelays()) {
+			if (relay.workspaceName === workspaceName && !excludeRelayIds?.has(relay.relayId)) {
+				relay.close("workspace_unregistered");
+			}
+		}
+		for (const pending of this.relays.pendingRelays()) {
+			if (pending.workspaceName === workspaceName && !excludeRelayIds?.has(pending.relayId)) {
+				this.abortPendingRelay(pending.relayId, "workspace_unregistered", "workspace unregistered");
+			}
+		}
+	}
+
+	/**
+	 * Post-unregister host cleanup shared by the control, workspace-management,
+	 * and conversation RPC unregister paths: closes phone streams, stops
+	 * runtimes, drops live activities, and closes TUI relays for the workspace.
+	 * Exclusions keep the requesting stream/runtime/relays alive so the
+	 * unregister response can still be delivered.
+	 */
+	private async cleanupUnregisteredWorkspace(
+		workspaceName: string,
+		exclusions: {
+			streamEntry?: IrohRemoteActiveStreamEntry;
+			runtimeEntry?: IntegratedRuntimeEntry;
+			relayIds?: ReadonlySet<string>;
+		} = {},
+	): Promise<{ closedStreamCount: number; stoppedRuntimeCount: number }> {
+		const closedStreamCount = await this.closeActiveStreamsForWorkspace(
+			workspaceName,
+			WORKSPACE_UNREGISTERED_CLOSE_REASON,
+			exclusions.streamEntry,
+		);
+		const stoppedRuntimeCount = await this.runtimes.stopForWorkspace(
+			workspaceName,
+			WORKSPACE_UNREGISTERED_CLOSE_REASON,
+			exclusions.runtimeEntry,
+		);
+		await this.stateManager.removeLiveActivitiesForWorkspace(workspaceName);
+		this.closeRelaysForWorkspace(workspaceName, exclusions.relayIds);
+		return { closedStreamCount, stoppedRuntimeCount };
 	}
 
 	private async closeActiveStreamsForClientWorkspace(
@@ -1573,6 +1647,20 @@ class IrohDaemonService {
 			case "pair_request":
 				await this.handlePairRequest(connection, request);
 				return true;
+			case "relay_rpc": {
+				const result = await this.handleRelayRpc(request);
+				if (!result.ok) {
+					connection.send({ type: "error", id: request.id, code: result.code, message: result.message });
+					return true;
+				}
+				connection.send({
+					type: "relay_rpc_result",
+					id: request.id,
+					response: result.response,
+					...(result.workspaceMetadata === undefined ? {} : { workspaceMetadata: result.workspaceMetadata }),
+				});
+				return true;
+			}
 			case "client_revoke": {
 				const result = await this.requireEngineSafe();
 				if (!result.ok) {
@@ -1600,9 +1688,7 @@ class IrohDaemonService {
 					return true;
 				}
 				this.engine?.clearPairingSecretForWorkspace(request.name);
-				await this.closeActiveStreamsForWorkspace(request.name, WORKSPACE_UNREGISTERED_CLOSE_REASON);
-				await this.runtimes.stopForWorkspace(request.name, WORKSPACE_UNREGISTERED_CLOSE_REASON);
-				await this.stateManager.removeLiveActivitiesForWorkspace(request.name);
+				await this.cleanupUnregisteredWorkspace(request.name);
 				await this.logAudit({
 					type: "workspace_unregistered",
 					workspace: request.name,
@@ -1615,6 +1701,108 @@ class IrohDaemonService {
 			default:
 				return false;
 		}
+	}
+
+	/**
+	 * Execute a state-touching RPC command forwarded from a TUI-owned relay
+	 * against the daemon's real state (§5.6): push targets, live activities,
+	 * and workspace unregistration must land here, not in the TUI's in-memory
+	 * state copy.
+	 */
+	private async handleRelayRpc(request: Extract<ControlRequest, { type: "relay_rpc" }>): Promise<
+		| {
+				ok: true;
+				response: Record<string, unknown>;
+				workspaceMetadata?: { workspaceNames: string[]; workspaces: Array<{ name: string; status: string }> };
+		  }
+		| { ok: false; code: string; message: string }
+	> {
+		const command = request.command;
+		if (!RELAY_RPC_COMMAND_TYPES.has(command.type)) {
+			return { ok: false, code: "unsupported", message: `unsupported relay rpc command: ${command.type}` };
+		}
+		const client = await this.stateManager.getClient(request.clientNodeId);
+		if (!client) {
+			return { ok: false, code: "not_found", message: "paired client not found" };
+		}
+		const workspace = (await this.stateManager.getState()).workspaces.find(
+			(candidate) => candidate.name === request.workspaceName,
+		);
+		if (!workspace) {
+			return { ok: false, code: "not_found", message: `no registered workspace named ${request.workspaceName}` };
+		}
+		const authorization: IrohRemoteClientAuthorizationSuccess = {
+			ok: true,
+			allowTools: this.getWorkspaceAllowTools(workspace) ?? "",
+			client,
+			paired: true,
+			pairingSecretConsumed: false,
+			workspace,
+			workspaceNames: [workspace.name],
+			workspaces: [{ name: workspace.name, status: "available" }],
+		};
+		const responseId = getRpcResponseId(command);
+		if (command.type === "register_push_target") {
+			try {
+				const data = await this.createPushNotificationDispatcher(authorization).registerPushTarget(command.args);
+				return { ok: true, response: createRpcSuccessResponse(responseId, command.type, { ...data }) };
+			} catch (error) {
+				return {
+					ok: true,
+					response: {
+						...createIrohRemoteRpcErrorResponse(
+							responseId,
+							command.type,
+							error instanceof Error ? error.message : String(error),
+						),
+					},
+				};
+			}
+		}
+		if (command.type === "register_live_activity") {
+			const response = await createRemoteRegisterLiveActivityRpcResponse(
+				command,
+				authorization,
+				this.getCommandContext(),
+				request.sessionId,
+			);
+			return { ok: true, response: response as Record<string, unknown> };
+		}
+		if (command.type === "unregister_live_activity") {
+			const response = await createRemoteUnregisterLiveActivityRpcResponse(
+				command,
+				authorization,
+				this.getCommandContext(),
+				request.sessionId,
+			);
+			return { ok: true, response: response as Record<string, unknown> };
+		}
+		// unregister_workspace: run against the daemon state with the shared host
+		// cleanup, keeping the requesting conversation's own relays open so the
+		// response can still be delivered over them.
+		const excludeRelayIds = new Set(
+			this.relays
+				.activeForConversation(request.clientNodeId, request.workspaceName, request.sessionId)
+				.map((relay) => relay.relayId),
+		);
+		const context: ConversationCommandContext = {
+			...this.getCommandContext(),
+			onWorkspaceUnregistered: async (workspaceName) => {
+				await this.cleanupUnregisteredWorkspace(workspaceName, { relayIds: excludeRelayIds });
+			},
+		};
+		const response = await handleRemoteHostRpcCommand(command, authorization, context);
+		if (!response) {
+			return { ok: false, code: "unsupported", message: `unsupported relay rpc command: ${command.type}` };
+		}
+		return {
+			ok: true,
+			response: response as Record<string, unknown>,
+			workspaceMetadata: {
+				workspaceNames: [...authorization.workspaceNames],
+				workspaces: authorization.workspaces.map((entry) => ({ name: entry.name, status: entry.status })),
+			},
+		};
 	}
 
 	private async requireEngineSafe(): Promise<

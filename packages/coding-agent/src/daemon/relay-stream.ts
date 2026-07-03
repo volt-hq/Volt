@@ -114,6 +114,10 @@ export class RelayRegistry {
 		return Array.from(this.active.values());
 	}
 
+	pendingRelays(): PendingRelay[] {
+		return Array.from(this.pending.values());
+	}
+
 	activeCount(): number {
 		return this.active.size;
 	}

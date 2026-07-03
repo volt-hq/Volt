@@ -477,10 +477,14 @@ export class IntegratedRuntimeRegistry {
 		return stoppedCount;
 	}
 
-	async stopForWorkspace(workspaceName: string, reason: string): Promise<number> {
+	async stopForWorkspace(
+		workspaceName: string,
+		reason: string,
+		excludeEntry?: IntegratedRuntimeEntry,
+	): Promise<number> {
 		let stoppedCount = 0;
 		for (const entry of this.values()) {
-			if (entry.workspaceName !== workspaceName) {
+			if (entry.workspaceName !== workspaceName || entry === excludeEntry) {
 				continue;
 			}
 			await this.stopEntry(entry, reason);

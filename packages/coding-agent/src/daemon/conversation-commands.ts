@@ -87,6 +87,8 @@ export interface ConversationCommandContext {
 	now?: () => number;
 	/** True while this conversation's lease is draining to a TUI (§4.5 rejection). */
 	isDraining?: () => boolean;
+	/** Host cleanup after a successful workspace unregister (streams, runtimes, live activities, relays). */
+	onWorkspaceUnregistered?: (workspaceName: string) => Promise<void>;
 }
 
 export function createLeaseDrainingRpcErrorResponse(command: RemoteRpcCommand): Record<string, unknown> {
@@ -1045,9 +1047,9 @@ interface RemoteLiveActivityRegistrationRequest extends RemoteLiveActivityComman
 function parseRemoteLiveActivityRegistrationCommand(
 	command: Record<string, unknown>,
 	authorization: IrohRemoteClientAuthorizationSuccess,
-	runtime: ConversationCommandRuntime,
+	expectedSessionId: string,
 ): ({ ok: true } & RemoteLiveActivityRegistrationRequest) | { ok: false; error: string } {
-	const common = parseRemoteLiveActivityCommandScope(command, authorization, runtime);
+	const common = parseRemoteLiveActivityCommandScope(command, authorization, expectedSessionId);
 	if (!common.ok) {
 		return common;
 	}
@@ -1074,15 +1076,15 @@ function parseRemoteLiveActivityRegistrationCommand(
 function parseRemoteLiveActivityUnregistrationCommand(
 	command: Record<string, unknown>,
 	authorization: IrohRemoteClientAuthorizationSuccess,
-	runtime: ConversationCommandRuntime,
+	expectedSessionId: string,
 ): ({ ok: true } & RemoteLiveActivityCommandScope) | { ok: false; error: string } {
-	return parseRemoteLiveActivityCommandScope(command, authorization, runtime);
+	return parseRemoteLiveActivityCommandScope(command, authorization, expectedSessionId);
 }
 
 function parseRemoteLiveActivityCommandScope(
 	command: Record<string, unknown>,
 	authorization: IrohRemoteClientAuthorizationSuccess,
-	runtime: ConversationCommandRuntime,
+	expectedSessionId: string,
 ): ({ ok: true } & RemoteLiveActivityCommandScope) | { ok: false; error: string } {
 	if (
 		typeof command.workspaceName !== "string" ||
@@ -1091,7 +1093,7 @@ function parseRemoteLiveActivityCommandScope(
 	) {
 		return { ok: false, error: "invalid_live_activity_registration" };
 	}
-	if (command.workspaceName !== authorization.workspace.name || command.sessionId !== runtime.session.sessionId) {
+	if (command.workspaceName !== authorization.workspace.name || command.sessionId !== expectedSessionId) {
 		return { ok: false, error: "session_mismatch" };
 	}
 	if (!isValidLiveActivityId(command.activityId)) {
@@ -1145,10 +1147,10 @@ export async function createRemoteRegisterLiveActivityRpcResponse(
 	command: RemoteRpcCommand,
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	context: ConversationCommandContext,
-	runtime: ConversationCommandRuntime,
+	expectedSessionId: string,
 ): Promise<object> {
 	const id = getRpcResponseId(command);
-	const request = parseRemoteLiveActivityRegistrationCommand(command, authorization, runtime);
+	const request = parseRemoteLiveActivityRegistrationCommand(command, authorization, expectedSessionId);
 	if (!request.ok) {
 		await logLiveActivityRegistrationAudit(context, authorization, command, false, request.error);
 		return createIrohRemoteRpcErrorResponse(id, "register_live_activity", request.error);
@@ -1209,10 +1211,10 @@ export async function createRemoteUnregisterLiveActivityRpcResponse(
 	command: RemoteRpcCommand,
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	context: ConversationCommandContext,
-	runtime: ConversationCommandRuntime,
+	expectedSessionId: string,
 ): Promise<object> {
 	const id = getRpcResponseId(command);
-	const request = parseRemoteLiveActivityUnregistrationCommand(command, authorization, runtime);
+	const request = parseRemoteLiveActivityUnregistrationCommand(command, authorization, expectedSessionId);
 	if (!request.ok) {
 		await logLiveActivityRegistrationAudit(context, authorization, command, false, request.error);
 		return createIrohRemoteRpcErrorResponse(id, "unregister_live_activity", request.error);
@@ -1312,6 +1314,7 @@ export async function handleRemoteHostRpcCommand(
 	}
 	if (result.response.success === true && typeof command.name === "string") {
 		context.hostEngine?.clearPairingSecretForWorkspace(command.name);
+		await context.onWorkspaceUnregistered?.(command.name);
 	}
 	await logAudit(context.auditLogger, {
 		type: "workspace_unregistered",
@@ -1350,10 +1353,20 @@ export async function handleIntegratedConversationRpcCommand(
 		return createIrohRemoteRpcErrorResponse(getRpcResponseId(command), command.type, "unsupported_remote_command");
 	}
 	if (command.type === "register_live_activity") {
-		return await createRemoteRegisterLiveActivityRpcResponse(command, authorization, context, runtime);
+		return await createRemoteRegisterLiveActivityRpcResponse(
+			command,
+			authorization,
+			context,
+			runtime.session.sessionId,
+		);
 	}
 	if (command.type === "unregister_live_activity") {
-		return await createRemoteUnregisterLiveActivityRpcResponse(command, authorization, context, runtime);
+		return await createRemoteUnregisterLiveActivityRpcResponse(
+			command,
+			authorization,
+			context,
+			runtime.session.sessionId,
+		);
 	}
 	const identityError = getIntegratedConversationIdentityError(command, authorization, runtime);
 	if (identityError) {

@@ -31,6 +31,13 @@ export interface OpenedRelay {
 	finished(): void;
 }
 
+export interface RelayRpcForwardResult {
+	/** verbatim RPC response object to forward to the phone */
+	response: Record<string, unknown>;
+	/** refreshed workspace metadata after a successful unregister_workspace */
+	workspaceMetadata?: { workspaceNames: string[]; workspaces: Array<{ name: string; status: string }> };
+}
+
 /**
  * TUI-side daemon integration façade. Every method resolves successfully as a
  * no-op when the daemon is off or unreachable: InteractiveMode never throws or
@@ -42,7 +49,16 @@ export interface DaemonAttach {
 	acquire(sessionId: string): Promise<AcquireOutcome>;
 	release(sessionId: string): Promise<void>;
 	rekey(oldSessionId: string, newSessionId: string): Promise<void>;
-	forwardPushRegister(sessionId: string, kind: "push_target" | "live_activity", payload: unknown): Promise<void>;
+	/**
+	 * Forward a state-touching RPC command from a relayed phone conversation to
+	 * the daemon (push targets, live activities, workspace unregister). Returns
+	 * undefined when the daemon is unreachable or rejected the request.
+	 */
+	forwardRelayRpc(
+		clientNodeId: string,
+		sessionId: string,
+		command: Record<string, unknown> & { type: string },
+	): Promise<RelayRpcForwardResult | undefined>;
 	/** Viewer feed subscription (drain overlay). */
 	viewerSubscribe(viewerFeedId: string): Promise<void>;
 	viewerUnsubscribe(viewerFeedId: string): Promise<void>;
@@ -68,7 +84,9 @@ export function createDisabledDaemonAttach(): DaemonAttach {
 		},
 		async release() {},
 		async rekey() {},
-		async forwardPushRegister() {},
+		async forwardRelayRpc() {
+			return undefined;
+		},
 		async viewerSubscribe() {},
 		async viewerUnsubscribe() {},
 		async viewerAbort() {},
@@ -322,16 +340,33 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 				// Reconnect re-acquires with the new id.
 			}
 		},
-		async forwardPushRegister(sessionId: string, kind: "push_target" | "live_activity", payload: unknown) {
+		async forwardRelayRpc(
+			clientNodeId: string,
+			sessionId: string,
+			command: Record<string, unknown> & { type: string },
+		) {
 			const workspaceName = resolvedWorkspaceName;
 			const activeClient = client;
 			if (!activeClient || !workspaceName) {
-				return;
+				return undefined;
 			}
 			try {
-				await activeClient.request({ type: "push_register", workspaceName, sessionId, kind, payload });
+				const response = await activeClient.request({
+					type: "relay_rpc",
+					clientNodeId,
+					workspaceName,
+					sessionId,
+					command,
+				});
+				if (response.type !== "relay_rpc_result") {
+					return undefined;
+				}
+				return {
+					response: response.response,
+					...(response.workspaceMetadata === undefined ? {} : { workspaceMetadata: response.workspaceMetadata }),
+				};
 			} catch {
-				// Push forwarding is best-effort.
+				return undefined;
 			}
 		},
 		async viewerSubscribe(viewerFeedId: string) {

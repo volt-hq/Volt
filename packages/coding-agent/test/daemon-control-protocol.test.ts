@@ -46,12 +46,12 @@ describe("control protocol framing", () => {
 			{ type: "viewer_unsubscribe", id: "13", viewerFeedId: "vf-1" },
 			{ type: "viewer_abort", id: "14", viewerFeedId: "vf-1" },
 			{
-				type: "push_register",
+				type: "relay_rpc",
 				id: "15",
+				clientNodeId: "n-1",
 				workspaceName: "volt",
 				sessionId: "s-1",
-				kind: "push_target",
-				payload: { token: "t" },
+				command: { type: "register_push_target", id: "rpc-1", args: { token: "t" } },
 			},
 		];
 		for (const request of requests) {
@@ -82,6 +82,12 @@ describe("control protocol framing", () => {
 			},
 			{ type: "clients_result", id: "7", clients: [] },
 			{ type: "pair_started", id: "8", requestId: "pr-1" },
+			{
+				type: "relay_rpc_result",
+				id: "9",
+				response: { type: "response", command: "register_push_target", success: true },
+				workspaceMetadata: { workspaceNames: ["volt"], workspaces: [{ name: "volt", status: "available" }] },
+			},
 		];
 		for (const response of responses) {
 			const decoded = roundTrip(response);

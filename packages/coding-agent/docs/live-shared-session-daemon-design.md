@@ -80,7 +80,7 @@ Three processes participate: **voltd** (persistent), **volt TUI** (per-terminal,
    |                              volt TUI (InteractiveMode)                              |
    |  - in-process AgentSessionRuntime + ExtensionRunner (ctx.mode = "tui")               |
    |  - DaemonClient (control-client.ts): lease_acquire/release/rekey, relay accept,      |
-   |    viewer feed during drain, push_register forwarding, theme_set                     |
+   |    viewer feed during drain, relay_rpc forwarding, theme_set                         |
    |  - per-relay: runIrohRemoteRpcMode(runtime, {stream: relayedStream,                  |
    |               disposeRuntimeOnClose:false, ...}) — one per attached phone            |
    +--------------------------------------------------------------------------------------+
@@ -486,10 +486,13 @@ export type ControlRequest =
   | { type: "theme_set"; id: string; theme: string }  // name; daemon resolves + broadcasts
   | { type: "viewer_subscribe"; id: string; viewerFeedId: string }
   | { type: "viewer_unsubscribe"; id: string; viewerFeedId: string }
-  | { type: "push_register"; id: string; workspaceName: string; sessionId: string;
-      /** verbatim register_push_target / register_live_activity RPC payloads forwarded
-       *  from a TUI-owned conversation (§6.6) */
-      kind: "push_target" | "live_activity"; payload: unknown };
+  | { type: "relay_rpc"; id: string; clientNodeId: string; workspaceName: string;
+      sessionId: string;
+      /** verbatim state-touching RPC command (register_push_target,
+       *  register/unregister_live_activity, unregister_workspace) forwarded from a
+       *  TUI-owned conversation (§6.6); the daemon replies relay_rpc_result with the
+       *  verbatim RPC response for the phone */
+      command: Record<string, unknown> & { type: string } };
 
 export type ControlResponse =
   | { type: "ok"; id: string }
@@ -716,9 +719,9 @@ When `onSessionChanged` fires inside a TUI-served relay (or the TUI itself rekey
 
 On DaemonClient reconnect, `daemon-attach` re-sends `lease_acquire` for the currently open session. If the response is `granted{handoff:"warm"}` (daemon had spun up a runtime during the gap), the TUI calls `session.reload()` (agent-session.ts L2657-2681) to absorb file changes; extension lifecycle follows reload semantics (reason `"reload"`). `pending` follows the drain viewer path with the current transcript kept on screen behind the overlay.
 
-### 6.6 Push / Live Activity forwarding
+### 6.6 Push / Live Activity / workspace forwarding
 
-Relayed conversations must keep push working after TUI exit, so push state lives in the daemon. In the relay's `runIrohRemoteRpcMode` options, `registerPushTarget` and the `notificationDelivery` dispatcher forward to `push_register` control requests (`kind:"push_target"` / `"live_activity"`, verbatim payloads). The daemon preserves the **`register_push_target`-before-`register_live_activity` ordering** invariant per client (it already sequences these in `push.ts`; the control handler enqueues per-client to keep ordering even across a relay + a direct stream). Actual APNs dispatch always happens daemon-side.
+Relayed conversations must keep push working after TUI exit, so push state lives in the daemon. The relay's `remoteCommandHandler` intercepts the state-touching RPC commands (`RELAY_RPC_COMMAND_TYPES`: `register_push_target`, `register_live_activity`, `unregister_live_activity`, `unregister_workspace`) and forwards them verbatim as `relay_rpc` control requests carrying the phone's `clientNodeId` and the TUI's current session id. The daemon executes them against its real state (push dispatcher, live-activity delivery channels, workspace registry with full unregister cleanup) and returns the verbatim RPC response in `relay_rpc_result`, which the TUI relays to the phone; `unregister_workspace` results also carry refreshed workspace metadata for the TUI's authorization decoration. Actual APNs dispatch always happens daemon-side.
 
 ### 6.7 Abort symmetry and command handling
 
@@ -965,7 +968,7 @@ Each milestone leaves `./test.sh` green. Branch implements M1-M8 (+M10 docs) in 
 **Accept**: §12.2.1 and §12.2.7 pass; two fake phones (distinct clientNodeIds) co-attach to one daemon runtime and both stream; abort keeps streams open; retention interplay test passes.
 
 ### M5 — Relay path + TUI integration
-**Files**: `src/daemon/relay-stream.ts`; relay admission in `control-server.ts`; `src/modes/interactive/daemon-attach.ts`; `src/modes/interactive/drain-viewer.ts`; surgical edits to `src/modes/interactive/interactive-mode.ts` (seams §6.2, footer indicator §6.8, exit warning, relay serving with `runIrohRemoteRpcMode` §5.6 step 9, `suppressExtensionUiRequests` option added to iroh-remote-rpc-mode outbound filter); push forwarding (`push_register`) §6.6.
+**Files**: `src/daemon/relay-stream.ts`; relay admission in `control-server.ts`; `src/modes/interactive/daemon-attach.ts`; `src/modes/interactive/drain-viewer.ts`; surgical edits to `src/modes/interactive/interactive-mode.ts` (seams §6.2, footer indicator §6.8, exit warning, relay serving with `runIrohRemoteRpcMode` §5.6 step 9, `suppressExtensionUiRequests` option added to iroh-remote-rpc-mode outbound filter); push forwarding (`relay_rpc`) §6.6.
 **Accept**: §12.2.3 passes; dual-frontend integration §12.3.3 passes; with daemon stopped or `remote.background:false`, InteractiveMode behavior is byte-identical to pre-branch (snapshot/regression run); footer indicator toggles.
 
 ### M6 — Theme migration completion
@@ -1028,7 +1031,7 @@ Every exported/major function in the dissolved script must land somewhere or be 
 | `replayIntegratedRuntimeWorkflowEvents` / `handleIntegratedRuntimeWorkflowEvent` | `integrated-runtimes.ts` |
 | duplicate rejection (L2912-2939) | `lease-broker.ts` routing layer (§4.6), semantics preserved incl. retryAfterMs 500 + replace-stale |
 | `startPairControlServer` (L3357) | **DELETED**; replaced by `pair_request` control flow (§3.6) |
-| push dispatcher creation (`createPushNotificationDispatcher`) | daemon-side dispatcher in `integrated-runtimes.ts` reusing `core/remote/iroh/push.ts`; TUI relays forward via `push_register` (§6.6) |
+| push dispatcher creation (`createPushNotificationDispatcher`) | daemon-side dispatcher in `integrated-runtimes.ts` reusing `core/remote/iroh/push.ts`; TUI relays forward via `relay_rpc` (§6.6) |
 | workspace/device-log stream serving | `workspace-streams.ts` on `workspace-rpc.ts` / `device-log-rpc.ts` |
 | audit emission sites | preserved 1:1; new events per §3.10 |
 | `cleanupUncommittedIntegratedRuntimeEntry` / `commitIntegratedRuntimeEntry` / `closeReplacedActiveStreams` / `registerActiveStream` | `integrated-runtimes.ts` on `active-stream-registry.ts` |

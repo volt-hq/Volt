@@ -93,6 +93,7 @@ import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-nam
 import type { IrohRemoteClientAuthorizationSuccess } from "../../core/remote/iroh/authorization.ts";
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../../core/remote/iroh/handshake.ts";
 import { writeIrohRemoteHandshakeResponse } from "../../core/remote/iroh/handshake-reader.ts";
+import { createIrohRemoteRpcErrorResponse } from "../../core/remote/iroh/rpc-command-filter.ts";
 import { IrohRemoteHostStateManager } from "../../core/remote/iroh/state-manager.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import {
@@ -114,9 +115,12 @@ import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
+import { RELAY_RPC_COMMAND_TYPES } from "../../daemon/control-protocol.ts";
 import {
+	getRpcResponseId,
 	handleIntegratedConversationRpcCommand,
 	REMOTE_SESSION_LIST_CURSOR_TTL_MS,
+	type RemoteSessionListCursorEntry,
 } from "../../daemon/conversation-commands.ts";
 import {
 	createIntegratedConversationHandshakeResponse,
@@ -434,6 +438,14 @@ export class InteractiveMode {
 	// remote.background is off or the daemon is unreachable.
 	private daemonAttach: DaemonAttach = createDisabledDaemonAttach();
 	private daemonRelayServers = new Set<Promise<void>>();
+	/** list_sessions cursor state shared across relayed phone conversations. */
+	private readonly relaySessionListCursors = new Map<string, RemoteSessionListCursorEntry>();
+	/**
+	 * Inert state manager for relayed conversation commands: state-touching
+	 * commands (RELAY_RPC_COMMAND_TYPES) are forwarded to the daemon; nothing
+	 * served locally reads or writes host state.
+	 */
+	private readonly relayStateManager = new IrohRemoteHostStateManager();
 	private daemonLeaseSessionId: string | undefined;
 	/** Set once the user explicitly picks a theme this session; daemon theme_snapshot broadcasts then stop applying (local explicit choice wins). */
 	private localThemeOverride = false;
@@ -1975,23 +1987,45 @@ export class InteractiveMode {
 					suppressExtensionUiRequests: true,
 					decorateOutbound: (value) => decorateRemoteHostState(value, authorization, responseContext),
 					initialInput: handshake.initialInput,
-					remoteCommandHandler: (command) =>
-						handleIntegratedConversationRpcCommand(
-							command as { type: string } & Record<string, unknown>,
+					remoteCommandHandler: async (command) => {
+						const rpcCommand = command as { type: string } & Record<string, unknown>;
+						if (RELAY_RPC_COMMAND_TYPES.has(rpcCommand.type)) {
+							// State-touching commands (push targets, live activities,
+							// workspace unregister) must run against the daemon's state;
+							// the TUI has no host state of its own.
+							const forwarded = await this.daemonAttach.forwardRelayRpc(
+								authorizationSubset.clientNodeId,
+								this.session.sessionId,
+								rpcCommand,
+							);
+							if (!forwarded) {
+								return createIrohRemoteRpcErrorResponse(
+									getRpcResponseId(rpcCommand),
+									rpcCommand.type,
+									"daemon_unavailable",
+								);
+							}
+							if (forwarded.workspaceMetadata) {
+								authorization.workspaceNames = [...forwarded.workspaceMetadata.workspaceNames];
+								authorization.workspaces = forwarded.workspaceMetadata.workspaces.map((workspace) => ({
+									...workspace,
+								})) as typeof authorization.workspaces;
+							}
+							return forwarded.response;
+						}
+						return handleIntegratedConversationRpcCommand(
+							rpcCommand,
 							authorization,
 							{
-								stateManager: new IrohRemoteHostStateManager(),
-								sessionListCursors: new Map(),
+								stateManager: this.relayStateManager,
+								sessionListCursors: this.relaySessionListCursors,
 								sessionListCursorTtlMs: REMOTE_SESSION_LIST_CURSOR_TTL_MS,
 							},
 							this.runtimeHost,
-						),
+						);
+					},
 					onSessionChanged: async (session) => {
 						await this.daemonAttach.rekey(offer.sessionId, session.sessionId);
-					},
-					registerPushTarget: async (args) => {
-						await this.daemonAttach.forwardPushRegister(offer.sessionId, "push_target", args);
-						return { type: "response", command: "register_push_target", success: true } as never;
 					},
 				});
 			} catch {

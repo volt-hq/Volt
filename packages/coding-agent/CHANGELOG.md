@@ -64,7 +64,11 @@
 
 ### Fixed
 
-- Fixed malformed subagent policy frontmatter to reject affected definitions instead of silently dropping tool and delegation limits.
+- Fixed a daemon control-client race where a `lease_pending` and its terminal `lease_granted`/`error` response arriving in one socket read dropped the terminal response, leaving the TUI drain viewer waiting forever.
+- Fixed TUI-relayed phone conversations reporting push target registration success without persisting anything: state-touching RPC commands (`register_push_target`, `register_live_activity`, `unregister_live_activity`, `unregister_workspace`) are now forwarded to the daemon over a `relay_rpc` control request (carrying the paired client's node id) and executed against real daemon state, returning the daemon's actual response to the phone.
+- Fixed TUI-relayed conversation commands losing `list_sessions` pagination cursors between requests by reusing one command context per TUI instead of rebuilding it per command.
+- Fixed workspace unregister cleanup inconsistencies: the control, workspace-management, and conversation RPC unregister paths now share one cleanup that closes phone streams, stops runtimes, removes live activities, and closes active and pending TUI relays for the workspace.
+- Fixed unredeemed relay offers lingering until the 10s token expiry after the owning TUI released or rekeyed its lease; the phone's deferred handshake now fails immediately with a retry hint, and superseded or expired offers settle their relay bookkeeping instead of leaking the stream task.
 - Fixed chain-mode subagent previous-output substitution to XML-escape child output before wrapping it as untrusted data.
 - Fixed legacy Iroh remote default tool grants so saved workspaces, clients, and pairing tickets are upgraded to include the built-in `subagent` tool.
 - Fixed `get_ui_actions` palette scope responses so they return only palette descriptors instead of all actions.

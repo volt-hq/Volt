@@ -65,8 +65,11 @@ export type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T,
 interface PendingRequest {
 	resolve(response: ControlResponse): void;
 	reject(error: Error): void;
-	/** keep the entry alive after a provisional response */
-	provisionalSeen?: boolean;
+}
+
+/** Responses that announce a later terminal response for the same id. */
+function isProvisionalControlResponse(response: ControlResponse): boolean {
+	return response.type === "lease_pending" || response.type === "pair_started";
 }
 
 const DEFAULT_MIN_BACKOFF_MS = 250;
@@ -85,6 +88,15 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 	let reconnectTimer: NodeJS.Timeout | undefined;
 	let connectPromise: Promise<void> | undefined;
 	const pending = new Map<string, PendingRequest>();
+	/**
+	 * Terminal-response promises armed when a provisional response resolves the
+	 * original request. Armed synchronously inside the data handler: the
+	 * provisional and terminal frames can arrive in one socket read, while the
+	 * caller's waitForResponse only runs after the resolve's microtask — without
+	 * this, the terminal response would resolve the already-resolved original
+	 * promise and be lost.
+	 */
+	const followUps = new Map<string, Promise<ControlResponse>>();
 
 	const setState = (next: DaemonClientConnectionState) => {
 		if (state === next) {
@@ -97,6 +109,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 	const failPending = () => {
 		const entries = Array.from(pending.values());
 		pending.clear();
+		followUps.clear();
 		for (const entry of entries) {
 			entry.reject(new DaemonClientClosedError());
 		}
@@ -185,7 +198,15 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 					if (isControlResponse(message)) {
 						const entry = pending.get(message.id);
 						if (entry) {
-							if (message.type !== "lease_pending" && message.type !== "pair_started") {
+							if (isProvisionalControlResponse(message)) {
+								const followUp = registerPending(message.id);
+								// Unclaimed on disconnect is fine; waitForResponse consumers
+								// still observe the rejection through the same promise.
+								followUp.catch(() => {});
+								followUps.set(message.id, followUp);
+							} else {
+								// Keep any armed followUps entry: the terminal response may
+								// resolve it before waitForResponse claims it.
 								pending.delete(message.id);
 							}
 							entry.resolve(message);
@@ -253,6 +274,11 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 			return responsePromise;
 		},
 		waitForResponse(id: string) {
+			const followUp = followUps.get(id);
+			if (followUp) {
+				followUps.delete(id);
+				return followUp;
+			}
 			return registerPending(id);
 		},
 		openRelay(offer: RelayOfferInfo) {

@@ -71,15 +71,29 @@ export type ControlRequest =
 	| { type: "viewer_unsubscribe"; id: string; viewerFeedId: string }
 	| { type: "viewer_abort"; id: string; viewerFeedId: string }
 	| {
-			type: "push_register";
+			type: "relay_rpc";
 			id: string;
+			/** paired phone client the relayed conversation belongs to */
+			clientNodeId: string;
 			workspaceName: string;
+			/** the TUI's current session id for the relayed conversation */
 			sessionId: string;
-			/** verbatim register_push_target / register_live_activity RPC payloads forwarded
-			 *  from a TUI-owned conversation */
-			kind: "push_target" | "live_activity";
-			payload: unknown;
+			/**
+			 * Verbatim phone RPC command forwarded from a TUI-owned conversation.
+			 * The daemon executes it against its real state (push targets, live
+			 * activities, workspace registry) and returns the RPC response in
+			 * relay_rpc_result.
+			 */
+			command: Record<string, unknown> & { type: string };
 	  };
+
+/** RPC command types the daemon executes on behalf of a TUI relay. */
+export const RELAY_RPC_COMMAND_TYPES: ReadonlySet<string> = new Set([
+	"register_push_target",
+	"register_live_activity",
+	"unregister_live_activity",
+	"unregister_workspace",
+]);
 
 export interface ControlLeaseStatus {
 	workspaceName: string;
@@ -121,7 +135,15 @@ export type ControlResponse =
 			clients: ControlClientStatus[];
 	  }
 	| { type: "clients_result"; id: string; clients: ControlClientStatus[] }
-	| { type: "pair_started"; id: string; requestId: string };
+	| { type: "pair_started"; id: string; requestId: string }
+	| {
+			type: "relay_rpc_result";
+			id: string;
+			/** verbatim RPC response object for the TUI to forward to the phone */
+			response: Record<string, unknown>;
+			/** refreshed workspace metadata after a successful unregister_workspace */
+			workspaceMetadata?: { workspaceNames: string[]; workspaces: Array<{ name: string; status: string }> };
+	  };
 
 // ============================================================================
 // Unsolicited events (daemon -> control clients)
@@ -131,6 +153,7 @@ export type RelayCloseReason =
 	| "phone_disconnected"
 	| "lease_transferred"
 	| "session_rekeyed_reconnect"
+	| "workspace_unregistered"
 	| "host_shutdown"
 	| "error";
 
@@ -360,11 +383,13 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 		case "viewer_unsubscribe":
 		case "viewer_abort":
 			return typeof value.viewerFeedId === "string";
-		case "push_register":
+		case "relay_rpc":
 			return (
+				typeof value.clientNodeId === "string" &&
 				typeof value.workspaceName === "string" &&
 				typeof value.sessionId === "string" &&
-				(value.kind === "push_target" || value.kind === "live_activity")
+				isRecord(value.command) &&
+				typeof value.command.type === "string"
 			);
 		default:
 			return false;
@@ -385,6 +410,8 @@ export function isControlResponse(value: unknown): value is ControlResponse {
 		case "clients_result":
 		case "pair_started":
 			return true;
+		case "relay_rpc_result":
+			return isRecord(value.response);
 		default:
 			return false;
 	}

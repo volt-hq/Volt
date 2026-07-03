@@ -40,12 +40,21 @@ function createRuntime(sessionId = "s-1"): ConversationCommandRuntime {
 	};
 }
 
-function createContext(options: { isDraining?: () => boolean } = {}): ConversationCommandContext {
+function createContext(
+	options: {
+		isDraining?: () => boolean;
+		stateManager?: IrohRemoteHostStateManager;
+		onWorkspaceUnregistered?: (workspaceName: string) => Promise<void>;
+	} = {},
+): ConversationCommandContext {
 	return {
-		stateManager: new IrohRemoteHostStateManager(),
+		stateManager: options.stateManager ?? new IrohRemoteHostStateManager(),
 		sessionListCursors: new Map(),
 		sessionListCursorTtlMs: 60_000,
 		...(options.isDraining === undefined ? {} : { isDraining: options.isDraining }),
+		...(options.onWorkspaceUnregistered === undefined
+			? {}
+			: { onWorkspaceUnregistered: options.onWorkspaceUnregistered }),
 	};
 }
 
@@ -156,5 +165,35 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		)) as { success: boolean; data: { sessions: unknown[] } };
 		expect(response.success).toBe(true);
 		expect(response.data.sessions).toEqual([]);
+	});
+
+	it("runs the host cleanup hook after a successful workspace unregister only", async () => {
+		const stateManager = new IrohRemoteHostStateManager();
+		await stateManager.upsertWorkspace({ name: "other", path: "/tmp/other" });
+		const cleanedUp: string[] = [];
+		const context = createContext({
+			stateManager,
+			onWorkspaceUnregistered: async (workspaceName) => {
+				cleanedUp.push(workspaceName);
+			},
+		});
+
+		const missing = (await handleIntegratedConversationRpcCommand(
+			{ id: "8", type: "unregister_workspace", name: "missing" },
+			createAuthorization(),
+			context,
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(missing).toMatchObject({ success: false });
+		expect(cleanedUp).toEqual([]);
+
+		const removed = (await handleIntegratedConversationRpcCommand(
+			{ id: "9", type: "unregister_workspace", name: "other" },
+			createAuthorization(),
+			context,
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(removed).toMatchObject({ success: true });
+		expect(cleanedUp).toEqual(["other"]);
 	});
 });
