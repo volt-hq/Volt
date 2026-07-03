@@ -516,6 +516,29 @@ export class ExtensionRunner {
 		}
 	}
 
+	/**
+	 * Invalidate this runner because a new runner generation replaced it (reload).
+	 * No-op when the replacement shares this runner's runtime (e.g. the
+	 * project-trust reload path reuses the pre-trust runtime), so a live
+	 * generation is never invalidated by mistake.
+	 */
+	invalidateStaleGeneration(nextRuntime: ExtensionRuntime): void {
+		if (this.runtime === nextRuntime) {
+			return;
+		}
+		this.invalidate();
+	}
+
+	/**
+	 * Whether this runner belongs to a dead generation (disposed session or
+	 * pre-reload runner). Inert runners must produce no side effects: emits
+	 * pass values through unchanged, handlers never run, and errors never
+	 * reach listeners (which may be wired to a live transport).
+	 */
+	private get isInert(): boolean {
+		return this.staleMessage !== undefined;
+	}
+
 	private assertActive(): void {
 		if (this.staleMessage) {
 			throw new Error(this.staleMessage);
@@ -528,12 +551,20 @@ export class ExtensionRunner {
 	}
 
 	emitError(error: ExtensionError): void {
+		// A stale runner's error listeners may still be wired to a live transport
+		// (e.g. the RPC extension_error stream). Dead generations must stay silent.
+		if (this.isInert) {
+			return;
+		}
 		for (const listener of this.errorListeners) {
 			listener(error);
 		}
 	}
 
 	hasHandlers(eventType: string): boolean {
+		if (this.isInert) {
+			return false;
+		}
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(eventType);
 			if (handlers && handlers.length > 0) {
@@ -607,6 +638,9 @@ export class ExtensionRunner {
 	 * The actual shutdown behavior is provided by the mode via bindExtensions().
 	 */
 	shutdown(): void {
+		if (this.isInert) {
+			return;
+		}
 		this.shutdownHandler();
 	}
 
@@ -734,6 +768,9 @@ export class ExtensionRunner {
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
+		if (this.isInert) {
+			return undefined as RunnerEmitResult<TEvent>;
+		}
 		const ctx = this.createContext();
 		let result: SessionBeforeEventResult | undefined;
 
@@ -768,6 +805,9 @@ export class ExtensionRunner {
 	}
 
 	async emitMessageEnd(event: MessageEndEvent): Promise<AgentMessage | undefined> {
+		if (this.isInert) {
+			return undefined;
+		}
 		const ctx = this.createContext();
 		let currentMessage = event.message;
 		let modified = false;
@@ -810,6 +850,9 @@ export class ExtensionRunner {
 	}
 
 	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
+		if (this.isInert) {
+			return undefined;
+		}
 		const ctx = this.createContext();
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
@@ -860,6 +903,9 @@ export class ExtensionRunner {
 	}
 
 	async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined> {
+		if (this.isInert) {
+			return undefined;
+		}
 		const ctx = this.createContext();
 		let result: ToolCallEventResult | undefined;
 
@@ -883,6 +929,9 @@ export class ExtensionRunner {
 	}
 
 	async emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined> {
+		if (this.isInert) {
+			return undefined;
+		}
 		const ctx = this.createContext();
 
 		for (const ext of this.extensions) {
@@ -912,6 +961,9 @@ export class ExtensionRunner {
 	}
 
 	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
+		if (this.isInert) {
+			return messages;
+		}
 		const ctx = this.createContext();
 		let currentMessages = structuredClone(messages);
 
@@ -944,6 +996,9 @@ export class ExtensionRunner {
 	}
 
 	async emitBeforeProviderRequest(payload: unknown): Promise<unknown> {
+		if (this.isInert) {
+			return payload;
+		}
 		const ctx = this.createContext();
 		let currentPayload = payload;
 
@@ -983,6 +1038,9 @@ export class ExtensionRunner {
 		systemPrompt: string,
 		systemPromptOptions: BuildSystemPromptOptions,
 	): Promise<BeforeAgentStartCombinedResult | undefined> {
+		if (this.isInert) {
+			return undefined;
+		}
 		let currentSystemPrompt = systemPrompt;
 		const ctx = Object.defineProperties(
 			{},
@@ -1051,6 +1109,9 @@ export class ExtensionRunner {
 		promptPaths: Array<{ path: string; extensionPath: string }>;
 		themePaths: Array<{ path: string; extensionPath: string }>;
 	}> {
+		if (this.isInert) {
+			return { skillPaths: [], promptPaths: [], themePaths: [] };
+		}
 		const ctx = this.createContext();
 		const skillPaths: Array<{ path: string; extensionPath: string }> = [];
 		const promptPaths: Array<{ path: string; extensionPath: string }> = [];
@@ -1098,6 +1159,9 @@ export class ExtensionRunner {
 		source: InputSource,
 		streamingBehavior?: "steer" | "followUp",
 	): Promise<InputEventResult> {
+		if (this.isInert) {
+			return { action: "continue" };
+		}
 		const ctx = this.createContext();
 		let currentText = text;
 		let currentImages = images;

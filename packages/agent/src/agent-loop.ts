@@ -172,6 +172,16 @@ async function runLoop(
 
 		// Inner loop: process tool calls and steering messages
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
+			// An aborted run must not silently start another turn: without this
+			// guard the loop would call transformContext/streamFn (a fresh provider
+			// request) after abort() — e.g. when a tool finished after the run was
+			// aborted. Pending (steering) messages still get delivered: queued user
+			// input survives abort by contract, and the provider stream itself
+			// observes the aborted signal.
+			if (signal?.aborted && pendingMessages.length === 0) {
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
 			if (!firstTurn) {
 				await emit({ type: "turn_start" });
 			} else {

@@ -68,7 +68,7 @@ import {
 	type IrohModuleLike,
 	loadIrohModule,
 } from "./iroh-native.ts";
-import { LeaseBroker } from "./lease-broker.ts";
+import { type DaemonAttachClaim, LeaseBroker } from "./lease-broker.ts";
 import type { VoltdRuntimeServices, VoltdServiceExtension } from "./main.ts";
 import { RELAY_TOKEN_TTL_MS, RelayRegistry } from "./relay-stream.ts";
 import {
@@ -1040,25 +1040,35 @@ class IrohDaemonService {
 		replaceExistingConversationStream: boolean,
 	): Promise<void> {
 		const authorization = handshake.authorization;
-		{
-			// Lease routing: the broker decides which process terminates this stream.
-			const targetSessionId = getResolvedTargetSessionId(handshake.hello, authorization);
-			if (targetSessionId !== undefined) {
-				const lease = this.leaseBroker.lookup(authorization.workspace.name, targetSessionId);
-				if (lease?.state === "tui-owned" && lease.tuiConnectionId) {
-					await this.relayConversationToTui(
-						stream,
-						handshake,
-						connectionId,
-						streamId,
-						targetSessionId,
-						lease.tuiConnectionId,
-						replaceExistingConversationStream,
-					);
-					return;
-				}
+		const targetSessionId = getResolvedTargetSessionId(handshake.hello, authorization);
+		const daemonAttach = this.leaseBroker.beginDaemonAttach(authorization.workspace.name, targetSessionId);
+		if (daemonAttach.kind === "relay") {
+			if (!targetSessionId) {
+				await this.sendHandshakeError(stream, {
+					message: "conversation lease owner changed; retry",
+					retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
+				});
+				return;
 			}
+			await this.relayConversationToTui(
+				stream,
+				handshake,
+				connectionId,
+				streamId,
+				targetSessionId,
+				daemonAttach.tuiConnectionId,
+				replaceExistingConversationStream,
+			);
+			return;
 		}
+		if (daemonAttach.kind === "retry") {
+			await this.sendHandshakeError(stream, {
+				message: "conversation lease is draining; retry",
+				retryAfterMs: daemonAttach.retryAfterMs,
+			});
+			return;
+		}
+		const daemonAttachClaim: DaemonAttachClaim = daemonAttach.claim;
 		let entry: IntegratedRuntimeEntry;
 		let sessionSelection: Awaited<ReturnType<IntegratedRuntimeRegistry["getOrCreateEntry"]>>["sessionSelection"];
 		let createdRuntime = false;
@@ -1072,6 +1082,7 @@ class IrohDaemonService {
 				authorization,
 			));
 		} catch (error) {
+			this.leaseBroker.abortDaemonAttach(daemonAttachClaim);
 			await this.logAudit({
 				type: "runtime_failure",
 				clientNodeId: authorization.client.nodeId,
@@ -1092,6 +1103,7 @@ class IrohDaemonService {
 				connectionId,
 			)
 		) {
+			this.leaseBroker.abortDaemonAttach(daemonAttachClaim);
 			if (createdRuntime) {
 				await this.runtimes.cleanupUncommittedEntry(entry, sessionSelection);
 			}
@@ -1105,28 +1117,68 @@ class IrohDaemonService {
 			entry.sessionId,
 		);
 		if (matchingActiveStreams.length > 0 && !replaceExistingConversationStream) {
+			this.leaseBroker.abortDaemonAttach(daemonAttachClaim);
 			if (createdRuntime) {
 				await this.runtimes.cleanupUncommittedEntry(entry, sessionSelection);
 			}
 			await this.rejectDuplicateActiveConnection(stream, authorization, entry.sessionId);
 			return;
 		}
-		const replacedEntries = replaceExistingConversationStream
-			? this.activeStreams.takeEntriesForConversation(
-					authorization.client.nodeId,
-					authorization.workspace.name,
-					entry.sessionId,
-				)
-			: [];
 
 		let activeStream: { entry: IrohRemoteActiveStreamEntry; remove: () => void } | undefined;
 		let subscriber: IntegratedRuntimeSubscriber | undefined;
 		let subscriberError: unknown;
 		let handshakeCommitted = false;
 		try {
-			await this.runtimes.commitEntry(entry, sessionSelection, authorization);
-			this.leaseBroker.onDaemonRuntimeAttached(authorization.workspace.name, entry.sessionId);
+			const brokerCommit = this.leaseBroker.commitDaemonRuntime(
+				daemonAttachClaim,
+				authorization.workspace.name,
+				entry.sessionId,
+			);
+			if (!brokerCommit.ok) {
+				if (createdRuntime) {
+					await this.runtimes.cleanupUncommittedEntry(entry, sessionSelection);
+				}
+				if (
+					brokerCommit.reason === "tui_owned" &&
+					brokerCommit.tuiConnectionId &&
+					targetSessionId === entry.sessionId
+				) {
+					await this.relayConversationToTui(
+						stream,
+						handshake,
+						connectionId,
+						streamId,
+						entry.sessionId,
+						brokerCommit.tuiConnectionId,
+						replaceExistingConversationStream,
+					);
+					return;
+				}
+				await this.sendHandshakeError(stream, {
+					message: "conversation lease owner changed; retry",
+					retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
+				});
+				return;
+			}
+			try {
+				await this.runtimes.commitEntry(entry, sessionSelection, authorization);
+			} catch (error) {
+				this.leaseBroker.rollbackDaemonRuntimeCommit(
+					authorization.workspace.name,
+					entry.sessionId,
+					brokerCommit.previousState,
+				);
+				throw error;
+			}
 			handshakeCommitted = true;
+			const replacedEntries = replaceExistingConversationStream
+				? this.activeStreams.takeEntriesForConversation(
+						authorization.client.nodeId,
+						authorization.workspace.name,
+						entry.sessionId,
+					)
+				: [];
 			activeStream = this.registerActiveStream(
 				authorization,
 				entry.sessionId,
@@ -1195,7 +1247,9 @@ class IrohDaemonService {
 		} catch (error) {
 			subscriberError = error;
 			if (!handshakeCommitted) {
-				await this.runtimes.cleanupUncommittedEntry(entry, sessionSelection);
+				if (createdRuntime) {
+					await this.runtimes.cleanupUncommittedEntry(entry, sessionSelection);
+				}
 				await this.sendHandshakeError(stream, error);
 				return;
 			}

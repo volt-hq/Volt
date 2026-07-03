@@ -110,6 +110,35 @@ describe("LeaseBroker", () => {
 		expect(other).toEqual({ kind: "denied", reason: "held_by_tui" });
 	});
 
+	it("lets a TUI preempt a provisional daemon attach before commit", async () => {
+		const { broker } = createHarness();
+		const begun = broker.beginDaemonAttach("ws", "s1");
+		expect(begun.kind).toBe("proceed");
+		if (begun.kind !== "proceed") {
+			return;
+		}
+		const outcome = await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "s1" });
+		expect(outcome).toEqual({ kind: "granted", handoff: "none" });
+		const committed = broker.commitDaemonRuntime(begun.claim, "ws", "s1");
+		expect(committed).toEqual({ ok: false, reason: "tui_owned", tuiConnectionId: "c-1" });
+		expect(broker.lookup("ws", "s1")?.state).toBe("tui-owned");
+	});
+
+	it("pins an unowned lease while a provisional daemon attach is in flight", async () => {
+		const { broker } = createHarness();
+		const begun = broker.beginDaemonAttach("ws", "s1");
+		expect(begun.kind).toBe("proceed");
+		if (begun.kind !== "proceed") {
+			return;
+		}
+		await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "s1" });
+		broker.releaseFromTui("c-1", "ws", "s1");
+		expect(broker.lookup("ws", "s1")?.state).toBe("unowned");
+		const committed = broker.commitDaemonRuntime(begun.claim, "ws", "s1");
+		expect(committed.ok).toBe(true);
+		expect(broker.lookup("ws", "s1")?.state).toBe("daemon-active");
+	});
+
 	it("tracks daemon runtime attach/stream-count/dispose transitions", () => {
 		const { broker, effects } = createHarness();
 		broker.onDaemonRuntimeAttached("ws", "s1");

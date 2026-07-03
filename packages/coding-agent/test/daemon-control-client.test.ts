@@ -114,6 +114,100 @@ describe("daemon control client provisional responses", () => {
 });
 
 describe("daemon control client reconnect", () => {
+	it("keeps retrying after the initial dial fails", async () => {
+		const socketPath = tempSocketPath();
+		const stateChanges: string[] = [];
+		const client = createDaemonClient({
+			socketPath,
+			client: "tui",
+			version: "0.0.0-test",
+			reconnect: true,
+			minBackoffMs: 20,
+			maxBackoffMs: 20,
+			onConnectionStateChange: (state) => stateChanges.push(state),
+		});
+
+		await expect(client.connect()).rejects.toThrow();
+		expect(client.connectionState).toBe("reconnecting");
+
+		let helloCount = 0;
+		const server = await new Promise<Server>((resolve) => {
+			const created = createServer((socket: Socket) => {
+				const decoder = new ControlLineDecoder();
+				socket.on("data", (chunk) => {
+					for (const message of decoder.push(chunk)) {
+						if ((message as Record<string, unknown>).type === "hello") {
+							helloCount++;
+							socket.write(
+								encodeControlLine({
+									type: "hello_ack",
+									ok: true,
+									connectionId: `c-${helloCount}`,
+									version: "0.0.0-test",
+									protocolVersion: PROTOCOL_VERSION,
+								}),
+							);
+						}
+					}
+				});
+			});
+			created.listen(socketPath, () => resolve(created));
+		});
+		cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+		cleanups.push(() => client.close());
+
+		const deadline = Date.now() + 2000;
+		while (Date.now() < deadline && client.connectionState !== "connected") {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		expect(client.connectionState).toBe("connected");
+		expect(helloCount).toBeGreaterThanOrEqual(1);
+		expect(stateChanges).toContain("connected");
+	});
+
+	it("stops reconnecting after a protocol mismatch", async () => {
+		const socketPath = tempSocketPath();
+		let helloCount = 0;
+		const server = await new Promise<Server>((resolve) => {
+			const created = createServer((socket: Socket) => {
+				const decoder = new ControlLineDecoder();
+				socket.on("data", (chunk) => {
+					for (const message of decoder.push(chunk)) {
+						if ((message as Record<string, unknown>).type === "hello") {
+							helloCount++;
+							socket.end(
+								encodeControlLine({
+									type: "hello_ack",
+									ok: false,
+									error: "protocol_mismatch",
+									version: "older",
+									protocolVersion: PROTOCOL_VERSION + 1,
+								}),
+							);
+						}
+					}
+				});
+			});
+			created.listen(socketPath, () => resolve(created));
+		});
+		cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+		const client = createDaemonClient({
+			socketPath,
+			client: "tui",
+			version: "0.0.0-test",
+			reconnect: true,
+			minBackoffMs: 20,
+			maxBackoffMs: 20,
+		});
+		cleanups.push(() => client.close());
+
+		await expect(client.connect()).rejects.toThrow(/protocol_mismatch/);
+		expect(client.connectionState).toBe("gone");
+		expect(client.goneReason).toBe("protocol_mismatch");
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(helloCount).toBe(1);
+	});
+
 	it("does not stack a second connection when the backoff timer races a manual reconnect", async () => {
 		// Regression: after a disconnect, a manual connect() (e.g. from request())
 		// re-established the socket, and the still-armed backoff timer then dialed

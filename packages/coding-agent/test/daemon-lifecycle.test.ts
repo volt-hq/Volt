@@ -26,12 +26,12 @@ describe("voltd lifecycle", () => {
 
 		// Probe until healthy.
 		let status = await probeControlSocket(paths.socketPath, { version: "test" });
-		for (let attempt = 0; !status && attempt < 50; attempt++) {
+		for (let attempt = 0; status.kind !== "healthy" && attempt < 50; attempt++) {
 			await new Promise((resolve) => setTimeout(resolve, 100));
 			status = await probeControlSocket(paths.socketPath, { version: "test" });
 		}
-		expect(status).toBeDefined();
-		expect(status?.pid).toBe(process.pid);
+		expect(status.kind).toBe("healthy");
+		expect(status.kind === "healthy" ? status.status.pid : undefined).toBe(process.pid);
 
 		// Pidfile is advisory but present and truthful.
 		const pidfile = readPidfile(paths.pidfilePath);
@@ -73,11 +73,11 @@ describe("voltd lifecycle", () => {
 		writeFileSync(paths.socketPath, "", { mode: 0o600 });
 		const daemon = runVoltDaemon({ agentDir, foreground: false });
 		let status = await probeControlSocket(paths.socketPath, { version: "test" });
-		for (let attempt = 0; !status && attempt < 50; attempt++) {
+		for (let attempt = 0; status.kind !== "healthy" && attempt < 50; attempt++) {
 			await new Promise((resolve) => setTimeout(resolve, 100));
 			status = await probeControlSocket(paths.socketPath, { version: "test" });
 		}
-		expect(status).toBeDefined();
+		expect(status.kind).toBe("healthy");
 		const client = createDaemonClient({
 			socketPath: paths.socketPath,
 			client: "cli",
@@ -93,10 +93,11 @@ describe("voltd lifecycle", () => {
 		const paths = getDaemonPaths(agentDir);
 		const daemon = runVoltDaemon({ agentDir, foreground: false });
 		let healthy = await probeControlSocket(paths.socketPath, { version: "test" });
-		for (let attempt = 0; !healthy && attempt < 50; attempt++) {
+		for (let attempt = 0; healthy.kind !== "healthy" && attempt < 50; attempt++) {
 			await new Promise((resolve) => setTimeout(resolve, 100));
 			healthy = await probeControlSocket(paths.socketPath, { version: "test" });
 		}
+		expect(healthy.kind).toBe("healthy");
 		const client = createDaemonClient({
 			socketPath: paths.socketPath,
 			client: "tui",
@@ -135,11 +136,11 @@ describe("voltd lifecycle", () => {
 			}),
 		]);
 		let healthy = await probeControlSocket(paths.socketPath, { version: "test" });
-		for (let attempt = 0; !healthy && attempt < 50; attempt++) {
+		for (let attempt = 0; healthy.kind !== "healthy" && attempt < 50; attempt++) {
 			await new Promise((resolve) => setTimeout(resolve, 100));
 			healthy = await probeControlSocket(paths.socketPath, { version: "test" });
 		}
-		expect(healthy).toBeDefined();
+		expect(healthy.kind).toBe("healthy");
 
 		const events: ControlEvent[] = [];
 		const client = createDaemonClient({

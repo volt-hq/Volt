@@ -72,11 +72,11 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		daemon = runVoltDaemon({ agentDir, foreground: false }, [createIrohDaemonService({ relayMode: "disabled" })]);
 		const paths = getDaemonPaths(agentDir);
 		let status = await probeControlSocket(paths.socketPath, { version: "test" });
-		for (let attempt = 0; !status && attempt < 100; attempt++) {
+		for (let attempt = 0; status.kind !== "healthy" && attempt < 100; attempt++) {
 			await new Promise((resolve) => setTimeout(resolve, 100));
 			status = await probeControlSocket(paths.socketPath, { version: "test" });
 		}
-		expect(status).toBeDefined();
+		expect(status.kind).toBe("healthy");
 		control = createDaemonClient({
 			socketPath: paths.socketPath,
 			client: "cli",

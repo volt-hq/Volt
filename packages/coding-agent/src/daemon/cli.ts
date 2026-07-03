@@ -3,15 +3,14 @@ import { open } from "node:fs/promises";
 import { getAgentDir, VERSION } from "../config.ts";
 import { createDaemonClient } from "./control-client.ts";
 import type { ControlResponse } from "./control-protocol.ts";
-import { probeControlSocket } from "./control-server.ts";
 import { createIrohDaemonService } from "./iroh-service.ts";
 import { readPidfile, runVoltDaemon } from "./main.ts";
 import { getDaemonPaths } from "./paths.ts";
 import { verifyPidfileProcess } from "./process-identity.ts";
 import { installDaemonService, uninstallDaemonService } from "./service-install.ts";
-import { ensureDaemonRunning, probeDaemon } from "./spawn.ts";
+import { DAEMON_SHUTDOWN_TIMEOUT_MS, ensureDaemonRunning, probeDaemon, waitForDaemonExit } from "./spawn.ts";
 
-const STOP_TIMEOUT_MS = 75_000; // 60s drain cap + margin
+const STOP_TIMEOUT_MS = DAEMON_SHUTDOWN_TIMEOUT_MS; // 60s drain cap + margin
 const DEFAULT_LOG_TAIL_LINES = 200;
 
 type StatusResult = ControlResponse & { type: "status_result" };
@@ -36,13 +35,34 @@ async function requestStatus(agentDir: string): Promise<StatusResult | undefined
 	if (!probe.healthy) {
 		return undefined;
 	}
-	return probeControlSocket(probe.socketPath, { version: VERSION });
+	const client = createDaemonClient({
+		socketPath: probe.socketPath,
+		client: "cli",
+		version: VERSION,
+		reconnect: false,
+	});
+	try {
+		const statusProbe = await client.request({ type: "status" });
+		return statusProbe.type === "status_result" ? statusProbe : undefined;
+	} finally {
+		await client.close();
+	}
 }
 
 async function daemonStart(agentDir: string): Promise<void> {
 	const result = await ensureDaemonRunning(agentDir);
 	if (!result.healthy) {
-		console.error("Error: failed to start voltd (daemon did not become healthy within 5s).");
+		if (result.state === "protocol-mismatch") {
+			console.error(
+				"Error: a different voltd protocol version is already running; stop it before starting this version.",
+			);
+		} else if (result.state === "unresponsive") {
+			console.error("Error: voltd socket is occupied but not responding; not starting a second daemon.");
+		} else if (result.state === "shutting-down") {
+			console.error("Error: existing voltd did not finish shutting down within the timeout.");
+		} else {
+			console.error("Error: failed to start voltd (daemon did not become healthy within 5s).");
+		}
 		console.error(`Check the log: ${getDaemonPaths(agentDir).logPath}`);
 		process.exitCode = 1;
 		return;
@@ -56,13 +76,13 @@ async function daemonStart(agentDir: string): Promise<void> {
 /**
  * SIGTERM a pidfile-recorded daemon, but only after verifying the pid still
  * refers to the voltd that wrote the pidfile (a recycled pid must never
- * receive the signal). Returns true when a signal was sent or the refusal was
- * reported; false when the process is simply gone.
+ * receive the signal). Returns whether SIGTERM was sent, refused, or the
+ * process was already gone.
  */
-async function signalPidfileDaemon(pidfilePath: string, context: string): Promise<boolean> {
+async function signalPidfileDaemon(pidfilePath: string, context: string): Promise<"sent" | "refused" | "gone"> {
 	const pidfile = readPidfile(pidfilePath);
 	if (!pidfile) {
-		return false;
+		return "gone";
 	}
 	const verification = await verifyPidfileProcess(pidfile);
 	if (verification === "mismatch") {
@@ -71,26 +91,51 @@ async function signalPidfileDaemon(pidfilePath: string, context: string): Promis
 		);
 		console.error(`Remove ${pidfilePath} if it is stale.`);
 		process.exitCode = 1;
-		return true;
+		return "refused";
 	}
 	if (verification === "gone") {
-		return false;
+		return "gone";
 	}
 	try {
 		process.kill(pidfile.pid, "SIGTERM");
 		console.error(`${context}; sent SIGTERM to pid ${pidfile.pid}`);
-		return true;
+		return "sent";
 	} catch {
 		// Process exited between verification and signal.
-		return false;
+		return "gone";
 	}
 }
 
 async function daemonStop(agentDir: string): Promise<void> {
 	const paths = getDaemonPaths(agentDir);
 	const probe = await probeDaemon(agentDir);
+	const pidfile = readPidfile(paths.pidfilePath);
 	if (!probe.healthy) {
-		if (await signalPidfileDaemon(paths.pidfilePath, "voltd socket unreachable")) {
+		if (probe.state === "shutting-down") {
+			console.error("voltd is already draining; waiting for exit");
+			if (
+				(await waitForDaemonExit({
+					agentDir,
+					pidfile,
+					socketPath: probe.socketPath,
+					timeoutMs: STOP_TIMEOUT_MS,
+				})) === "exited"
+			) {
+				console.error("voltd stopped");
+				return;
+			}
+		}
+		const signalResult = await signalPidfileDaemon(paths.pidfilePath, "voltd socket unreachable");
+		if (signalResult === "sent") {
+			if ((await waitForDaemonExit({ agentDir, pidfile, timeoutMs: STOP_TIMEOUT_MS })) === "exited") {
+				console.error("voltd stopped");
+				return;
+			}
+			console.error("Error: voltd did not stop after SIGTERM");
+			process.exitCode = 1;
+			return;
+		}
+		if (signalResult === "refused") {
 			return;
 		}
 		console.error("voltd is not running");
@@ -111,15 +156,32 @@ async function daemonStop(agentDir: string): Promise<void> {
 		await client.close();
 	}
 
-	const deadline = Date.now() + STOP_TIMEOUT_MS;
-	while (Date.now() < deadline) {
-		if (!(await probeDaemon(agentDir)).healthy) {
+	if (
+		(await waitForDaemonExit({
+			agentDir,
+			pid: probe.pid,
+			pidfile,
+			socketPath: probe.socketPath,
+			timeoutMs: STOP_TIMEOUT_MS,
+		})) === "exited"
+	) {
+		console.error("voltd stopped");
+		return;
+	}
+	const signalResult = await signalPidfileDaemon(paths.pidfilePath, "voltd did not stop over the control socket");
+	if (signalResult === "sent") {
+		if (
+			(await waitForDaemonExit({ agentDir, pidfile, socketPath: probe.socketPath, timeoutMs: STOP_TIMEOUT_MS })) ===
+			"exited"
+		) {
 			console.error("voltd stopped");
 			return;
 		}
-		await new Promise((resolve) => setTimeout(resolve, 200));
+		console.error("Error: voltd did not stop after SIGTERM");
+		process.exitCode = 1;
+		return;
 	}
-	if (await signalPidfileDaemon(paths.pidfilePath, "voltd did not stop over the control socket")) {
+	if (signalResult === "refused") {
 		return;
 	}
 	console.error("Error: voltd did not stop within the timeout");

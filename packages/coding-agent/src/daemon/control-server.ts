@@ -1,4 +1,4 @@
-import { chmodSync, rmSync } from "node:fs";
+import { chmodSync, lstatSync, rmSync, type Stats } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import {
 	CONTROL_MAX_LINE_BYTES,
@@ -11,6 +11,7 @@ import {
 	type HelloAck,
 	type HelloMessage,
 	isControlRequest,
+	isHelloAck,
 	PROTOCOL_VERSION,
 	parseHelloMessage,
 } from "./control-protocol.ts";
@@ -55,6 +56,20 @@ export interface ControlServer {
 	sendTo(connectionId: string, event: ControlEvent): boolean;
 	close(): Promise<void>;
 }
+
+type ControlStatusProbe = ControlResponse & { type: "status_result" };
+
+export type ControlSocketProbe =
+	| { kind: "healthy"; status: ControlStatusProbe }
+	| {
+			kind: "live-rejected";
+			reason: "shutting_down" | "protocol_mismatch" | "bad_relay_token" | "fatal" | "other";
+			error?: string;
+			version?: string;
+			protocolVersion?: number;
+	  }
+	| { kind: "unresponsive"; error?: string }
+	| { kind: "no-listener"; cause: "not-found" | "refused" | "reset" | "error"; error?: string };
 
 let controlConnectionSequence = 0;
 
@@ -108,7 +123,13 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				return false;
 			}
 			if (handlers.isShuttingDown?.()) {
-				const ack: HelloAck = { type: "hello_ack", ok: false, error: "shutting_down" };
+				const ack: HelloAck = {
+					type: "hello_ack",
+					ok: false,
+					error: "shutting_down",
+					version,
+					protocolVersion: PROTOCOL_VERSION,
+				};
 				socket.end(encodeControlLine(ack));
 				return false;
 			}
@@ -207,6 +228,13 @@ export async function startControlServer(options: ControlServerOptions): Promise
 			resolve();
 		});
 	});
+	let boundSocketStats: Stats | undefined;
+	try {
+		boundSocketStats = lstatSync(socketPath);
+	} catch {
+		// Best-effort ownership check: close() will skip unlinking when it cannot
+		// prove the path still belongs to this server.
+	}
 	try {
 		chmodSync(socketPath, 0o600);
 	} catch {
@@ -238,25 +266,52 @@ export async function startControlServer(options: ControlServerOptions): Promise
 			await new Promise<void>((resolve) => {
 				server.close(() => resolve());
 			});
-			if (process.platform !== "win32") {
-				rmSync(socketPath, { force: true });
+			if (process.platform !== "win32" && boundSocketStats) {
+				try {
+					const currentStats = lstatSync(socketPath);
+					if (
+						currentStats.isSocket() &&
+						currentStats.dev === boundSocketStats.dev &&
+						currentStats.ino === boundSocketStats.ino
+					) {
+						rmSync(socketPath, { force: true });
+					}
+				} catch {
+					// Already gone or not ours.
+				}
 			}
 		},
 	};
 }
 
 /**
- * Probe an existing socket with a status request. Returns the status_result
- * payload, or undefined when nothing healthy answers within timeoutMs.
+ * Probe an existing socket with a status request. The result distinguishes a
+ * provably dead/stale path from a live daemon that answered but rejected us;
+ * callers must only unlink a socket after a no-listener result.
  */
 export async function probeControlSocket(
 	socketPath: string,
 	options: { version: string; timeoutMs?: number } = { version: "0.0.0" },
-): Promise<(ControlResponse & { type: "status_result" }) | undefined> {
+): Promise<ControlSocketProbe> {
 	const timeoutMs = options.timeoutMs ?? 2000;
 	return new Promise((resolve) => {
 		let settled = false;
-		const settle = (value: (ControlResponse & { type: "status_result" }) | undefined) => {
+		let connected = false;
+		let lastError: Error | undefined;
+		const classifyNoListener = (error: Error | undefined): ControlSocketProbe => {
+			const code = error instanceof Error && "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
+			if (code === "ENOENT") {
+				return { kind: "no-listener", cause: "not-found", ...(error ? { error: error.message } : {}) };
+			}
+			if (code === "ECONNREFUSED") {
+				return { kind: "no-listener", cause: "refused", ...(error ? { error: error.message } : {}) };
+			}
+			if (code === "ECONNRESET") {
+				return { kind: "no-listener", cause: "reset", ...(error ? { error: error.message } : {}) };
+			}
+			return { kind: "no-listener", cause: "error", ...(error ? { error: error.message } : {}) };
+		};
+		const settle = (value: ControlSocketProbe) => {
 			if (settled) {
 				return;
 			}
@@ -265,12 +320,22 @@ export async function probeControlSocket(
 			socket.destroy();
 			resolve(value);
 		};
-		const timer = setTimeout(() => settle(undefined), timeoutMs);
+		const timer = setTimeout(() => settle({ kind: "unresponsive" }), timeoutMs);
 		const socket = createConnection(socketPath);
 		const decoder = new ControlLineDecoder();
-		socket.on("error", () => settle(undefined));
-		socket.on("close", () => settle(undefined));
+		socket.on("error", (error) => {
+			lastError = error instanceof Error ? error : new Error(String(error));
+			settle(connected ? { kind: "unresponsive", error: lastError.message } : classifyNoListener(lastError));
+		});
+		socket.on("close", () => {
+			settle(
+				connected
+					? { kind: "unresponsive", ...(lastError ? { error: lastError.message } : {}) }
+					: classifyNoListener(lastError),
+			);
+		});
 		socket.on("connect", () => {
+			connected = true;
 			const hello: HelloMessage = {
 				type: "hello",
 				role: "control",
@@ -286,31 +351,37 @@ export async function probeControlSocket(
 			let messages: unknown[];
 			try {
 				messages = decoder.push(chunk);
-			} catch {
-				settle(undefined);
+			} catch (error) {
+				settle({ kind: "unresponsive", error: error instanceof Error ? error.message : String(error) });
 				return;
 			}
 			for (const message of messages) {
-				if (
-					typeof message === "object" &&
-					message !== null &&
-					(message as { type?: unknown }).type === "status_result"
-				) {
-					settle(message as ControlResponse & { type: "status_result" });
+				if (isControlStatusProbe(message)) {
+					settle({ kind: "healthy", status: message });
 					return;
 				}
-				if (
-					typeof message === "object" &&
-					message !== null &&
-					(message as { type?: unknown }).type === "hello_ack" &&
-					(message as { ok?: unknown }).ok === false
-				) {
-					settle(undefined);
+				if (isHelloAck(message) && !message.ok) {
+					settle({
+						kind: "live-rejected",
+						reason: message.error ?? "other",
+						...(message.error === undefined ? {} : { error: message.error }),
+						...(message.version === undefined ? {} : { version: message.version }),
+						...(message.protocolVersion === undefined ? {} : { protocolVersion: message.protocolVersion }),
+					});
+					return;
+				}
+				if (typeof message === "object" && message !== null && (message as { type?: unknown }).type === "fatal") {
+					const error = (message as { error?: unknown }).error;
+					settle({ kind: "live-rejected", reason: "fatal", ...(typeof error === "string" ? { error } : {}) });
 					return;
 				}
 			}
 		});
 	});
+}
+
+function isControlStatusProbe(value: unknown): value is ControlStatusProbe {
+	return typeof value === "object" && value !== null && (value as { type?: unknown }).type === "status_result";
 }
 
 export { CONTROL_MAX_LINE_BYTES };

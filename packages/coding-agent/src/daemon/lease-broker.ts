@@ -13,6 +13,7 @@ export type LeaseState = "unowned" | "daemon-active" | "daemon-detached" | "daem
 export type LeaseHandoff = "cold" | "warm" | "none";
 
 export type LeaseDenyReason = "held_by_tui" | "force_unsupported" | "draining_elsewhere";
+export type DaemonAttachRejectionReason = "tui_owned" | "draining";
 
 export type LeaseReleaseReason = "quit" | "switch" | "connection_lost" | "rekey" | "shutdown" | "retention_expired";
 
@@ -41,9 +42,26 @@ export interface LeaseRecord {
 		resolveGranted: (result: { handoff: "warm" }) => void;
 		rejectGranted: (error: Error) => void;
 	};
+	/** Provisional daemon runtime creations that have not committed ownership. */
+	pendingDaemonAttaches: number;
 	/** pending lazy-resume shared by racing attaches (daemon-active sub-flag) */
 	resuming?: Promise<void>;
 }
+
+export interface DaemonAttachClaim {
+	readonly id: string;
+	readonly workspaceName: string;
+	readonly sessionId?: string;
+}
+
+export type DaemonAttachBeginOutcome =
+	| { kind: "proceed"; claim: DaemonAttachClaim }
+	| { kind: "relay"; tuiConnectionId: string }
+	| { kind: "retry"; retryAfterMs: number };
+
+export type DaemonAttachCommitOutcome =
+	| { ok: true; previousState: LeaseState }
+	| { ok: false; reason: DaemonAttachRejectionReason; tuiConnectionId?: string };
 
 export type LeaseAcquireOutcome =
 	| { kind: "granted"; handoff: LeaseHandoff }
@@ -108,6 +126,7 @@ export class LeaseBroker {
 				state: "unowned",
 				streamCount: 0,
 				relayIds: new Set(),
+				pendingDaemonAttaches: 0,
 			};
 			this.records.set(key, record);
 		}
@@ -115,8 +134,87 @@ export class LeaseBroker {
 	}
 
 	private dropIfUnowned(record: LeaseRecord): void {
-		if (record.state === "unowned" && record.relayIds.size === 0 && record.streamCount === 0) {
+		if (
+			record.state === "unowned" &&
+			record.relayIds.size === 0 &&
+			record.streamCount === 0 &&
+			record.pendingDaemonAttaches === 0
+		) {
 			this.records.delete(record.key);
+		}
+	}
+
+	beginDaemonAttach(workspaceName: string, sessionId: string | undefined): DaemonAttachBeginOutcome {
+		const claim: DaemonAttachClaim = {
+			id: randomUUID(),
+			workspaceName,
+			...(sessionId === undefined ? {} : { sessionId }),
+		};
+		if (sessionId === undefined) {
+			return { kind: "proceed", claim };
+		}
+		const record = this.getOrCreateRecord(workspaceName, sessionId);
+		if (record.state === "tui-owned" && record.tuiConnectionId) {
+			this.dropIfUnowned(record);
+			return { kind: "relay", tuiConnectionId: record.tuiConnectionId };
+		}
+		if (record.state === "daemon-draining") {
+			this.dropIfUnowned(record);
+			return { kind: "retry", retryAfterMs: 1000 };
+		}
+		record.pendingDaemonAttaches++;
+		return { kind: "proceed", claim };
+	}
+
+	abortDaemonAttach(claim: DaemonAttachClaim): void {
+		if (claim.sessionId === undefined) {
+			return;
+		}
+		const record = this.lookup(claim.workspaceName, claim.sessionId);
+		if (!record) {
+			return;
+		}
+		record.pendingDaemonAttaches = Math.max(0, record.pendingDaemonAttaches - 1);
+		this.dropIfUnowned(record);
+	}
+
+	commitDaemonRuntime(claim: DaemonAttachClaim, workspaceName: string, sessionId: string): DaemonAttachCommitOutcome {
+		this.abortDaemonAttach(claim);
+		const record = this.getOrCreateRecord(workspaceName, sessionId);
+		if (record.state === "tui-owned") {
+			return {
+				ok: false,
+				reason: "tui_owned",
+				...(record.tuiConnectionId ? { tuiConnectionId: record.tuiConnectionId } : {}),
+			};
+		}
+		if (record.state === "daemon-draining") {
+			return { ok: false, reason: "draining" };
+		}
+		const previousState = record.state;
+		if (record.state === "unowned" || record.state === "daemon-detached") {
+			record.state = "daemon-active";
+			this.effects.audit({
+				type: "lease_acquired",
+				workspaceName,
+				sessionId,
+				details: { owner: "daemon", handoff: "none" },
+			});
+		} else if (record.state === "daemon-active") {
+			record.state = "daemon-active";
+		}
+		return { ok: true, previousState };
+	}
+
+	rollbackDaemonRuntimeCommit(workspaceName: string, sessionId: string, previousState: LeaseState): void {
+		const record = this.lookup(workspaceName, sessionId);
+		if (!record || record.state === "tui-owned" || record.state === "daemon-draining") {
+			return;
+		}
+		record.state = previousState;
+		if (previousState === "unowned") {
+			record.streamCount = 0;
+			this.dropIfUnowned(record);
 		}
 	}
 

@@ -29,11 +29,11 @@ describe("voltd theme_set + theme_snapshot", () => {
 
 	async function waitForHealthy(socketPath: string): Promise<void> {
 		let status = await probeControlSocket(socketPath, { version: "test" });
-		for (let attempt = 0; !status && attempt < 50; attempt++) {
+		for (let attempt = 0; status.kind !== "healthy" && attempt < 50; attempt++) {
 			await new Promise((resolve) => setTimeout(resolve, 100));
 			status = await probeControlSocket(socketPath, { version: "test" });
 		}
-		expect(status).toBeDefined();
+		expect(status.kind).toBe("healthy");
 	}
 
 	it("applies, persists, and broadcasts theme changes; rejects unknown themes", async () => {

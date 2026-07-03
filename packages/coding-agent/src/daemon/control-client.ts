@@ -18,6 +18,7 @@ import {
 } from "./control-protocol.ts";
 
 export type DaemonClientConnectionState = "connected" | "reconnecting" | "gone";
+export type DaemonClientGoneReason = "closed" | "protocol_mismatch" | "dial_failed";
 
 export interface DaemonClientOptions {
 	socketPath: string;
@@ -29,6 +30,7 @@ export interface DaemonClientOptions {
 	reconnect?: boolean;
 	minBackoffMs?: number;
 	maxBackoffMs?: number;
+	helloTimeoutMs?: number;
 }
 
 export interface RelayOfferInfo {
@@ -47,6 +49,7 @@ export interface DaemonClient {
 	readonly connectionState: DaemonClientConnectionState;
 	/** hello_ack payload of the current connection, when connected. */
 	readonly serverInfo: { version?: string; protocolVersion?: number; connectionId?: string } | undefined;
+	readonly goneReason: DaemonClientGoneReason | undefined;
 	/** Connect (or await the in-flight connect). Rejects when reconnect is off and the dial fails. */
 	connect(): Promise<void>;
 	request(req: DistributiveOmit<ControlRequest, "id">): Promise<ControlResponse>;
@@ -74,16 +77,19 @@ function isProvisionalControlResponse(response: ControlResponse): boolean {
 
 const DEFAULT_MIN_BACKOFF_MS = 250;
 const DEFAULT_MAX_BACKOFF_MS = 5000;
+const DEFAULT_HELLO_TIMEOUT_MS = 5000;
 
 export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 	const reconnectEnabled = options.reconnect ?? true;
 	const minBackoffMs = options.minBackoffMs ?? DEFAULT_MIN_BACKOFF_MS;
 	const maxBackoffMs = options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
+	const helloTimeoutMs = options.helloTimeoutMs ?? DEFAULT_HELLO_TIMEOUT_MS;
 
 	let state: DaemonClientConnectionState = "reconnecting";
 	let socket: Socket | undefined;
 	let serverInfo: { version?: string; protocolVersion?: number; connectionId?: string } | undefined;
 	let closed = false;
+	let goneReason: DaemonClientGoneReason | undefined;
 	let backoffMs = minBackoffMs;
 	let reconnectTimer: NodeJS.Timeout | undefined;
 	let connectPromise: Promise<void> | undefined;
@@ -146,10 +152,30 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 			const dialed = createConnection(options.socketPath);
 			const decoder = new ControlLineDecoder();
 			let acked = false;
+			let dialSettled = false;
+			const helloTimer = setTimeout(() => {
+				failDial(new Error("daemon hello timed out"));
+			}, helloTimeoutMs);
+			helloTimer.unref?.();
 
-			const failDial = (error: Error) => {
+			const failDial = (error: Error, fatalReason?: DaemonClientGoneReason) => {
+				if (dialSettled) {
+					return;
+				}
+				dialSettled = true;
+				clearTimeout(helloTimer);
 				connectPromise = undefined;
 				dialed.destroy();
+				if (fatalReason) {
+					closed = true;
+					goneReason = fatalReason;
+					setState("gone");
+				} else if (reconnectEnabled && !closed) {
+					scheduleReconnect();
+				} else {
+					goneReason = "dial_failed";
+					setState("gone");
+				}
 				reject(error);
 			};
 
@@ -181,14 +207,15 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 						}
 						const ack: HelloAck = message;
 						if (!ack.ok) {
-							if (ack.error === "protocol_mismatch") {
-								closed = true;
-								setState("gone");
-							}
-							failDial(new Error(`daemon rejected hello: ${ack.error ?? "unknown"}`));
+							failDial(
+								new Error(`daemon rejected hello: ${ack.error ?? "unknown"}`),
+								ack.error === "protocol_mismatch" ? "protocol_mismatch" : undefined,
+							);
 							return;
 						}
 						acked = true;
+						dialSettled = true;
+						clearTimeout(helloTimer);
 						socket = dialed;
 						serverInfo = {
 							version: ack.version,
@@ -203,6 +230,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 							reconnectTimer = undefined;
 						}
 						connectPromise = undefined;
+						goneReason = undefined;
 						setState("connected");
 						resolve();
 						continue;
@@ -236,6 +264,10 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 				}
 			});
 			dialed.on("close", () => {
+				if (!acked) {
+					failDial(new DaemonClientClosedError("daemon connection closed before hello"));
+					return;
+				}
 				if (socket === dialed) {
 					socket = undefined;
 					serverInfo = undefined;
@@ -269,6 +301,9 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 		get serverInfo() {
 			return serverInfo;
 		},
+		get goneReason() {
+			return goneReason;
+		},
 		async connect() {
 			if (closed) {
 				throw new DaemonClientClosedError();
@@ -279,7 +314,12 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 			await dial();
 		},
 		async request(req) {
-			await this.connect();
+			if (!socket || socket.destroyed) {
+				if (reconnectTimer && !connectPromise) {
+					throw new DaemonClientClosedError("not connected to daemon");
+				}
+				await this.connect();
+			}
 			const id = randomUUID();
 			const responsePromise = registerPending(id);
 			send({ ...req, id } as ControlRequest);
@@ -359,6 +399,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 		},
 		async close() {
 			closed = true;
+			goneReason = "closed";
 			if (reconnectTimer) {
 				clearTimeout(reconnectTimer);
 				reconnectTimer = undefined;

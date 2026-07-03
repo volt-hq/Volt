@@ -34,8 +34,7 @@ async function connectToDaemon(options: { autoStart: boolean }): Promise<RemoteC
 	const agentDir = getAgentDir();
 	let probe = await probeDaemon(agentDir);
 	if (!probe.healthy && options.autoStart) {
-		const ensured = await ensureDaemonRunning(agentDir);
-		probe = { healthy: ensured.healthy, socketPath: ensured.socketPath };
+		probe = await ensureDaemonRunning(agentDir);
 	}
 	if (!probe.healthy) {
 		console.error("voltd is not running. Start it with: volt daemon start");

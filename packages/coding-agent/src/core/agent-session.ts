@@ -337,6 +337,7 @@ export class AgentSession {
 	private _extensionShutdownHandler?: ShutdownHandler;
 	private _extensionErrorListener?: ExtensionErrorListener;
 	private _extensionErrorUnsubscriber?: () => void;
+	private _disposed = false;
 
 	// Model registry for API key resolution
 	private _modelRegistry: ModelRegistry;
@@ -779,12 +780,20 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		if (this._disposed) {
+			return;
+		}
+		this._disposed = true;
+
 		try {
 			this.abortRetry();
 			this.abortCompaction();
 			this.abortBranchSummary();
 			this.abortBash();
 			this.agent.abort();
+			// Drain queued steering/follow-up messages so a run that settles after
+			// dispose cannot restart via the queued-message continuation path.
+			this.agent.clearAllQueues();
 			this._lspManager?.dispose();
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
@@ -793,6 +802,16 @@ export class AgentSession {
 		this._extensionRunner.invalidate(
 			"This extension ctx is stale after session replacement or reload. Do not use a captured volt or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 		);
+		// Unsubscribe the extension error listener: it may be wired to a live
+		// transport (RPC extension_error stream), and this session's generation
+		// must not surface anything there after dispose.
+		this._extensionErrorUnsubscriber?.();
+		this._extensionErrorUnsubscriber = undefined;
+		// Detach the Agent's payload/context hooks from this generation's runner.
+		// Guarded so a replacement generation's runner is never cleared.
+		if (this._extensionRunnerRef?.current === this._extensionRunner) {
+			this._extensionRunnerRef.current = undefined;
+		}
 		this._disconnectFromAgent();
 		this._eventListeners = [];
 		cleanupSessionResources(this.sessionId);
@@ -1032,6 +1051,9 @@ export class AgentSession {
 	// =========================================================================
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		if (this._disposed) {
+			return;
+		}
 		const run = (async () => {
 			try {
 				await this.agent.prompt(messages);
@@ -1067,6 +1089,11 @@ export class AgentSession {
 	}
 
 	private async _handlePostAgentRun(): Promise<boolean> {
+		// A disposed session must never continue the agent (continue() creates a
+		// fresh AbortController, resurrecting a run that dispose() aborted).
+		if (this._disposed) {
+			return false;
+		}
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
 		if (!msg) {
@@ -2627,6 +2654,8 @@ export class AgentSession {
 			}
 		}
 
+		// May be undefined during construction (first _buildRuntime call).
+		const previousRunner: ExtensionRunner | undefined = this._extensionRunner;
 		this._extensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
 			extensionsResult.runtime,
@@ -2637,6 +2666,10 @@ export class AgentSession {
 		if (this._extensionRunnerRef) {
 			this._extensionRunnerRef.current = this._extensionRunner;
 		}
+		// Honor the documented contract: a ctx/volt captured before reload must
+		// not be used after reload. No-ops when the new runner shares the old
+		// runtime (project-trust rebuild), so live generations are unaffected.
+		previousRunner?.invalidateStaleGeneration(extensionsResult.runtime);
 		this._bindExtensionCore(this._extensionRunner);
 		this._applyExtensionBindings(this._extensionRunner);
 

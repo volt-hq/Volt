@@ -4,7 +4,7 @@ import { VERSION } from "../../config.ts";
 import { createDaemonClient, type DaemonClient } from "../../daemon/control-client.ts";
 import type { ControlEvent, RelayPreamble } from "../../daemon/control-protocol.ts";
 import { getDaemonSocketPath } from "../../daemon/paths.ts";
-import { ensureDaemonRunning } from "../../daemon/spawn.ts";
+import { ensureDaemonRunning, probeDaemon } from "../../daemon/spawn.ts";
 
 export type DaemonAttachConnectionState = "connected" | "reconnecting" | "gone" | "disabled";
 
@@ -124,7 +124,7 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 	let activeRelays = 0;
 	let currentSessionId: string | undefined;
 	let disposed = false;
-	let hadConnection = false;
+	let resolvingWorkspace: Promise<void> | undefined;
 	const eventHandlers = new Set<(event: ControlEvent) => void>();
 	const relayCountCallbacks = new Set<(count: number) => void>();
 	let relayOfferHandler: ((offer: DaemonRelayOffer, openRelay: () => Promise<OpenedRelay>) => void) | undefined;
@@ -190,37 +190,46 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 	};
 
 	const resolveWorkspace = async (): Promise<void> => {
-		const activeClient = client;
-		if (!activeClient) {
-			return;
+		if (resolvingWorkspace) {
+			return resolvingWorkspace;
 		}
-		const status = await activeClient.request({ type: "status" });
-		if (status.type !== "status_result") {
-			return;
-		}
-		const cwd = resolve(options.cwd);
-		const match = status.workspaces
-			.filter((workspace) => cwd === workspace.path || cwd.startsWith(`${workspace.path}/`))
-			.sort((left, right) => right.path.length - left.path.length)[0];
-		if (match) {
-			resolvedWorkspaceName = match.name;
-			return;
-		}
-		// Auto-register the cwd so phones can reach sessions opened here.
-		const takenNames = new Set(status.workspaces.map((workspace) => workspace.name));
-		const base = basename(cwd) || "workspace";
-		let candidate = base;
-		for (let suffix = 2; takenNames.has(candidate); suffix++) {
-			candidate = `${base}-${suffix}`;
-		}
-		const registered = await activeClient.request({ type: "workspace_register", name: candidate, path: cwd });
-		if (registered.type === "ok") {
-			resolvedWorkspaceName = candidate;
-			log(`registered workspace ${candidate} -> ${cwd}`);
-		}
+		resolvingWorkspace = (async () => {
+			const activeClient = client;
+			if (!activeClient) {
+				return;
+			}
+			const status = await activeClient.request({ type: "status" });
+			if (status.type !== "status_result") {
+				return;
+			}
+			const cwd = resolve(options.cwd);
+			const match = status.workspaces
+				.filter((workspace) => cwd === workspace.path || cwd.startsWith(`${workspace.path}/`))
+				.sort((left, right) => right.path.length - left.path.length)[0];
+			if (match) {
+				resolvedWorkspaceName = match.name;
+				return;
+			}
+			// Auto-register the cwd so phones can reach sessions opened here.
+			const takenNames = new Set(status.workspaces.map((workspace) => workspace.name));
+			const base = basename(cwd) || "workspace";
+			let candidate = base;
+			for (let suffix = 2; takenNames.has(candidate); suffix++) {
+				candidate = `${base}-${suffix}`;
+			}
+			const registered = await activeClient.request({ type: "workspace_register", name: candidate, path: cwd });
+			if (registered.type === "ok") {
+				resolvedWorkspaceName = candidate;
+				log(`registered workspace ${candidate} -> ${cwd}`);
+			}
+		})().finally(() => {
+			resolvingWorkspace = undefined;
+		});
+		return resolvingWorkspace;
 	};
 
-	const reacquireAfterReconnect = async (): Promise<void> => {
+	const ensureLeaseAfterConnected = async (): Promise<void> => {
+		await resolveWorkspace();
 		const sessionId = currentSessionId;
 		const workspaceName = resolvedWorkspaceName;
 		const activeClient = client;
@@ -247,10 +256,10 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 			try {
 				const ensured = options.autoStart
 					? await ensureDaemonRunning(options.agentDir)
-					: { healthy: true, socketPath: undefined as string | undefined };
+					: await probeDaemon(options.agentDir);
 				const socketPath = ensured.socketPath;
 				if (options.autoStart && !ensured.healthy) {
-					state = "gone";
+					state = ensured.state === "protocol-mismatch" ? "gone" : "reconnecting";
 					return;
 				}
 				client = createDaemonClient({
@@ -274,23 +283,18 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 						}
 					},
 					onConnectionStateChange: (next) => {
-						const wasConnected = hadConnection;
 						state = next;
 						if (next === "connected") {
-							hadConnection = true;
-							void resolveWorkspace()
-								.then(() => (wasConnected ? reacquireAfterReconnect() : undefined))
-								.catch(() => {});
+							void ensureLeaseAfterConnected().catch(() => {});
 						}
 					},
 				});
 				await client.connect();
 				state = "connected";
-				hadConnection = true;
-				await resolveWorkspace();
+				await ensureLeaseAfterConnected();
 			} catch (error) {
 				log(`daemon unavailable: ${error instanceof Error ? error.message : String(error)}`);
-				state = client ? "reconnecting" : "gone";
+				state = client?.connectionState ?? "gone";
 			}
 		},
 		async acquire(sessionId: string) {

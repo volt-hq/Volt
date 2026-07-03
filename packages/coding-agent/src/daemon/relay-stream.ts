@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { randomBytes, randomUUID } from "node:crypto";
 import type { Socket } from "node:net";
+import { DuplexWriteGate, StreamClosedError } from "../core/rpc/duplex-write-gate.ts";
 import type { IrohBiStreamLike } from "../core/rpc/iroh-transport.ts";
 import { encodeControlLine, type RelayCloseReason, type RelayPreamble } from "./control-protocol.ts";
 
@@ -143,6 +144,7 @@ export class RelayRegistry {
 		socket.write(encodeControlLine(relay.preamble));
 
 		const startedAt = now;
+		const writeGate = new DuplexWriteGate(socket);
 		let bytesUp = 0; // TUI -> phone
 		let bytesDown = 0; // phone -> TUI
 		let settled = false;
@@ -154,6 +156,7 @@ export class RelayRegistry {
 			}
 			settled = true;
 			this.active.delete(relay.relayId);
+			writeGate.dispose();
 			socket.destroy();
 			void Promise.resolve(relay.stream.send.finish?.()).catch(() => {});
 			void Promise.resolve(relay.stream.recv.stop?.(0n)).catch(() => {});
@@ -203,7 +206,7 @@ export class RelayRegistry {
 			enqueueWrite(bufferedRemainder, false);
 		}
 		socket.on("data", (chunk: Buffer) => enqueueWrite(chunk, true));
-		socket.on("error", () => finish("error"));
+		socket.on("error", (error: Error) => finish("error", error.message));
 		// A close without a daemon-initiated reason or a socket error is the TUI
 		// going away (process exit, socket destroy).
 		socket.on("close", () => finish(closeReason ?? "tui_disconnected"));
@@ -222,14 +225,21 @@ export class RelayRegistry {
 					}
 					const buffer = Buffer.from(Array.from(chunk));
 					bytesDown += buffer.length;
-					if (!socket.write(buffer)) {
-						await new Promise<void>((resolve) => socket.once("drain", resolve));
+					await writeGate.write(buffer);
+					if (settled) {
+						break;
 					}
 				}
-				// Phone half-closed or ended: propagate EOF to the TUI.
-				socket.end();
-				finish(closeReason ?? "phone_disconnected");
+				if (!settled) {
+					// Phone half-closed or ended: propagate EOF to the TUI.
+					socket.end();
+					finish(closeReason ?? "phone_disconnected");
+				}
 			} catch (error) {
+				if (error instanceof StreamClosedError) {
+					finish(closeReason ?? "tui_disconnected");
+					return;
+				}
 				finish("error", error instanceof Error ? error.message : String(error));
 			}
 		})();

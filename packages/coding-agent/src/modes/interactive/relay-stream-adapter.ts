@@ -1,11 +1,12 @@
 import { Buffer } from "node:buffer";
 import type { Duplex } from "node:stream";
+import { DuplexWriteGate } from "../../core/rpc/duplex-write-gate.ts";
 import type { IrohBiStreamLike, IrohBytes } from "../../core/rpc/iroh-transport.ts";
 
 export interface RelayedIrohStreamLike extends IrohBiStreamLike {
 	/** Close both directions; maps to socket.destroy(). */
 	close(reason?: string): void;
-	readonly closed: Promise<{ reason?: string }>;
+	readonly closed: Promise<{ reason?: string; error?: Error }>;
 }
 
 /**
@@ -17,21 +18,32 @@ export interface RelayedIrohStreamLike extends IrohBiStreamLike {
  */
 export function adaptRelaySocketToIrohStream(socket: Duplex): RelayedIrohStreamLike {
 	const chunks: Buffer[] = [];
-	const readers: Array<(value: IrohBytes | undefined) => void> = [];
+	const readers: Array<{ resolve(value: IrohBytes | undefined): void; reject(error: Error): void }> = [];
+	const writeGate = new DuplexWriteGate(socket);
 	let ended = false;
 	let closeReason: string | undefined;
-	let resolveClosed: (value: { reason?: string }) => void = () => {};
-	const closed = new Promise<{ reason?: string }>((resolve) => {
+	let socketError: Error | undefined;
+	let resolveClosed: (value: { reason?: string; error?: Error }) => void = () => {};
+	const closed = new Promise<{ reason?: string; error?: Error }>((resolve) => {
 		resolveClosed = resolve;
 	});
 
 	const flush = () => {
-		while (readers.length > 0 && (chunks.length > 0 || ended)) {
+		while (readers.length > 0 && (chunks.length > 0 || ended || socketError)) {
 			const reader = readers.shift();
 			if (!reader) {
 				return;
 			}
-			reader(chunks.shift());
+			const chunk = chunks.shift();
+			if (chunk) {
+				reader.resolve(chunk);
+				continue;
+			}
+			if (socketError) {
+				reader.reject(socketError);
+				continue;
+			}
+			reader.resolve(undefined);
 		}
 	};
 
@@ -43,14 +55,19 @@ export function adaptRelaySocketToIrohStream(socket: Duplex): RelayedIrohStreamL
 		ended = true;
 		flush();
 	});
-	socket.on("error", () => {
+	socket.on("error", (error: Error) => {
+		socketError = error;
 		ended = true;
 		flush();
 	});
 	socket.on("close", () => {
 		ended = true;
 		flush();
-		resolveClosed({ ...(closeReason === undefined ? {} : { reason: closeReason }) });
+		writeGate.dispose();
+		resolveClosed({
+			...(closeReason === undefined ? {} : { reason: closeReason }),
+			...(socketError === undefined ? {} : { error: socketError }),
+		});
 	});
 	// The relay client hands the socket over explicitly paused (with the
 	// post-preamble remainder unshifted); a data listener alone does not
@@ -68,11 +85,14 @@ export function adaptRelaySocketToIrohStream(socket: Duplex): RelayedIrohStreamL
 					}
 					return Promise.resolve(queued);
 				}
+				if (socketError) {
+					return Promise.reject(socketError);
+				}
 				if (ended) {
 					return Promise.resolve(undefined);
 				}
-				return new Promise((resolve) => {
-					readers.push(resolve);
+				return new Promise((resolve, reject) => {
+					readers.push({ resolve, reject });
 				});
 			},
 			stop(_errorCode: bigint): void {
@@ -83,29 +103,10 @@ export function adaptRelaySocketToIrohStream(socket: Duplex): RelayedIrohStreamL
 		},
 		send: {
 			async writeAll(bytes: number[]): Promise<void> {
-				if (socket.destroyed || socket.writableEnded) {
-					throw new Error("relay socket is closed");
-				}
-				const buffer = Buffer.from(bytes);
-				if (!socket.write(buffer)) {
-					await new Promise<void>((resolve, reject) => {
-						const onDrain = () => {
-							socket.off("error", onError);
-							resolve();
-						};
-						const onError = (error: Error) => {
-							socket.off("drain", onDrain);
-							reject(error);
-						};
-						socket.once("drain", onDrain);
-						socket.once("error", onError);
-					});
-				}
+				await writeGate.write(Buffer.from(bytes));
 			},
 			async finish(): Promise<void> {
-				await new Promise<void>((resolve) => {
-					socket.end(resolve);
-				});
+				await writeGate.end();
 			},
 		},
 		close(reason?: string): void {

@@ -29,11 +29,11 @@ describe("remote CLI (daemon control client)", () => {
 		daemon = runVoltDaemon({ agentDir, foreground: false });
 		const paths = getDaemonPaths(agentDir);
 		let status = await probeControlSocket(paths.socketPath, { version: "test" });
-		for (let attempt = 0; !status && attempt < 100; attempt++) {
+		for (let attempt = 0; status.kind !== "healthy" && attempt < 100; attempt++) {
 			await new Promise((resolve) => setTimeout(resolve, 100));
 			status = await probeControlSocket(paths.socketPath, { version: "test" });
 		}
-		expect(status).toBeDefined();
+		expect(status.kind).toBe("healthy");
 	}, 30_000);
 
 	afterAll(async () => {

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import type { Socket } from "node:net";
@@ -28,6 +29,7 @@ import {
 import type { DaemonLogger } from "./log.ts";
 import { createDaemonLogger } from "./log.ts";
 import { type DaemonPaths, ensureDaemonDirs, getDaemonPaths } from "./paths.ts";
+import { verifyPidfileProcess } from "./process-identity.ts";
 import { VoltdStateStore } from "./state.ts";
 
 export interface Clock {
@@ -47,6 +49,8 @@ export interface PidfileContents {
 	version: string;
 	startedAtMs: number;
 	socketPath: string;
+	/** Per-daemon instance token; optional for pidfiles written by older versions. */
+	token?: string;
 }
 
 export function readPidfile(pidfilePath: string): PidfileContents | undefined {
@@ -60,6 +64,7 @@ export function readPidfile(pidfilePath: string): PidfileContents | undefined {
 			version: typeof parsed.version === "string" ? parsed.version : "unknown",
 			startedAtMs: typeof parsed.startedAtMs === "number" ? parsed.startedAtMs : 0,
 			socketPath: parsed.socketPath,
+			...(typeof parsed.token === "string" ? { token: parsed.token } : {}),
 		};
 	} catch {
 		return undefined;
@@ -68,6 +73,14 @@ export function readPidfile(pidfilePath: string): PidfileContents | undefined {
 
 export const VOLTD_EXIT_ALREADY_RUNNING = 3;
 export const VOLTD_EXIT_BIND_FAILED = 4;
+export const VOLTD_EXIT_INCOMPATIBLE_RUNNING = 5;
+
+const DAEMON_BIND_WAIT_TIMEOUT_MS = 75_000;
+const DAEMON_BIND_WAIT_POLL_MS = 200;
+
+async function sleep(ms: number): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /** Facilities later milestones build on (lease broker, Iroh host, theme service). */
 export interface VoltdRuntimeServices {
@@ -112,6 +125,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	const log = logger.child("daemon");
 	const clock: Clock = config.clock ?? { now: () => Date.now() };
 	const startedAtMs = clock.now();
+	const pidfileToken = randomUUID();
 
 	const state = new VoltdStateStore({ agentDir, statePath: paths.statePath });
 	let migratedFromLegacyState = false;
@@ -136,6 +150,16 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 
 	let shuttingDown = false;
 	let resolveExit: ((code: number) => void) | undefined;
+	const removeOwnedPidfile = () => {
+		const current = readPidfile(paths.pidfilePath);
+		if (!current) {
+			return;
+		}
+		const owned = current.token === pidfileToken || (current.token === undefined && current.pid === process.pid);
+		if (owned) {
+			rmSync(paths.pidfilePath, { force: true });
+		}
+	};
 	const exitPromise = new Promise<number>((resolve) => {
 		resolveExit = resolve;
 	});
@@ -163,7 +187,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		await state.close().catch(() => {});
 		await auditLogger.log({ type: "daemon_shutdown", success: true, details: { reason } }).catch(() => {});
 		await controlServer?.close().catch(() => {});
-		rmSync(paths.pidfilePath, { force: true });
+		removeOwnedPidfile();
 		log("info", "shutdown complete");
 		resolveExit?.(0);
 	};
@@ -378,10 +402,40 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		controlServer = await bindControlServer();
 	} catch (error) {
 		if (isErrnoException(error) && error.code === "EADDRINUSE") {
-			const healthy = await probeControlSocket(paths.socketPath, { version: VERSION });
-			if (healthy) {
-				log("info", `another daemon is healthy (pid ${healthy.pid}); exiting`);
+			const deadline = Date.now() + DAEMON_BIND_WAIT_TIMEOUT_MS;
+			let socketProbe = await probeControlSocket(paths.socketPath, { version: VERSION });
+			let loggedShutdownWait = false;
+			while (
+				socketProbe.kind === "live-rejected" &&
+				socketProbe.reason === "shutting_down" &&
+				Date.now() < deadline
+			) {
+				if (!loggedShutdownWait) {
+					loggedShutdownWait = true;
+					log("info", "another daemon is shutting down; waiting for socket release");
+				}
+				await sleep(DAEMON_BIND_WAIT_POLL_MS);
+				socketProbe = await probeControlSocket(paths.socketPath, { version: VERSION, timeoutMs: 500 });
+			}
+			if (socketProbe.kind === "healthy") {
+				log("info", `another daemon is healthy (pid ${socketProbe.status.pid}); exiting`);
 				return VOLTD_EXIT_ALREADY_RUNNING;
+			}
+			if (socketProbe.kind === "live-rejected" && socketProbe.reason === "protocol_mismatch") {
+				log(
+					"error",
+					`another daemon is running with protocol ${socketProbe.protocolVersion ?? "unknown"}; not removing its socket`,
+				);
+				return VOLTD_EXIT_INCOMPATIBLE_RUNNING;
+			}
+			if (socketProbe.kind === "live-rejected" || socketProbe.kind === "unresponsive") {
+				log("error", "control socket is owned by a live daemon that is not healthy; not removing it");
+				return VOLTD_EXIT_BIND_FAILED;
+			}
+			const pidfile = readPidfile(paths.pidfilePath);
+			if (pidfile && (await verifyPidfileProcess(pidfile)) === "match") {
+				log("error", `pidfile still verifies live daemon pid ${pidfile.pid}; not removing socket`);
+				return VOLTD_EXIT_BIND_FAILED;
 			}
 			log("warn", "stale socket detected; unlinking and retrying bind once");
 			rmSync(paths.socketPath, { force: true });
@@ -400,7 +454,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	// Pidfile is advisory; liveness truth is always the socket probe.
 	writeFileSync(
 		paths.pidfilePath,
-		`${JSON.stringify({ pid: process.pid, version: VERSION, startedAtMs, socketPath: paths.socketPath } satisfies PidfileContents)}\n`,
+		`${JSON.stringify({ pid: process.pid, version: VERSION, startedAtMs, socketPath: paths.socketPath, token: pidfileToken } satisfies PidfileContents)}\n`,
 		{ mode: 0o600 },
 	);
 
