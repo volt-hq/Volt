@@ -132,6 +132,10 @@ export interface IrohRemotePushRelayHttpClientOptions {
 	timeoutMs?: number;
 }
 
+// The deduper lives for the daemon's whole lifetime, so the per-client id set is
+// bounded. Re-marking an evicted id at most re-sends one very old notification.
+const MAX_SENT_EVENT_IDS_PER_CLIENT = 1000;
+
 export class IrohRemoteInMemoryPushNotificationDeduper implements IrohRemotePushNotificationDeduper {
 	private readonly sentEventIdsByClient = new Map<string, Set<string>>();
 
@@ -145,6 +149,14 @@ export class IrohRemoteInMemoryPushNotificationDeduper implements IrohRemotePush
 			return false;
 		}
 		sentEventIds.add(eventId);
+		// Evict oldest ids (Sets preserve insertion order) once over the cap.
+		while (sentEventIds.size > MAX_SENT_EVENT_IDS_PER_CLIENT) {
+			const oldest = sentEventIds.values().next().value;
+			if (oldest === undefined) {
+				break;
+			}
+			sentEventIds.delete(oldest);
+		}
 		return true;
 	}
 
