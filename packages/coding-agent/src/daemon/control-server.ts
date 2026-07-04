@@ -148,7 +148,23 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				const remainder = decoder.drainRemainder();
 				socket.removeListener("data", onData);
 				handedOffToRelay = true;
-				const admitted = handlers.relayAdmission?.admitRelay(hello, socket, remainder) ?? false;
+				let admitted = false;
+				try {
+					admitted = handlers.relayAdmission?.admitRelay(hello, socket, remainder) ?? false;
+				} catch (error) {
+					// admitRelay may have partly taken ownership of the socket before
+					// throwing, and the socket now carries raw relay bytes — so a
+					// synchronous failure must NOT fall through to onData's generic catch,
+					// which would inject a misleading fatal("frame_too_large") control
+					// frame into the raw stream and destroy a socket the relay path may
+					// own. Log the real reason and tear down cleanly instead.
+					handlers.log?.(
+						"error",
+						`relay admission threw: ${error instanceof Error ? error.message : String(error)}`,
+					);
+					socket.destroy();
+					return false;
+				}
 				if (!admitted) {
 					const ack: HelloAck = { type: "hello_ack", ok: false, error: "bad_relay_token" };
 					socket.end(encodeControlLine(ack));

@@ -86,7 +86,11 @@ export class DrainViewerComponent extends Container {
 			this.pendingTools.clear();
 			return;
 		}
-		if (this.truncated) {
+		if (this.truncated && event.type !== "agent_end") {
+			// After truncation we only show the spinner and skip content replay, but
+			// agent_end merely advances the loader label — let it through so the
+			// overlay reflects the remote turn finishing instead of staying stuck on
+			// "finishing remote turn…".
 			return;
 		}
 		switch (event.type) {

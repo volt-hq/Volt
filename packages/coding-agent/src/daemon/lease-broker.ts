@@ -460,6 +460,15 @@ export class LeaseBroker {
 		reason: LeaseReleaseReason = "quit",
 	): { ok: true } | { ok: false; code: "not_held" } {
 		const record = this.lookup(workspaceName, sessionId);
+		if (record?.state === "daemon-draining" && record.tuiConnectionId === connectionId) {
+			// The requesting TUI is abandoning its own pending drain (a change of
+			// mind). Cancel it rather than letting runDrain complete and force-grant
+			// an unwanted warm lease — which would needlessly dispose the daemon
+			// runtime and close every phone stream for a handoff no one wants.
+			this.cancelDrain(record);
+			this.dropIfUnowned(record);
+			return { ok: true };
+		}
 		if (!record || record.state !== "tui-owned" || record.tuiConnectionId !== connectionId) {
 			return { ok: false, code: "not_held" };
 		}

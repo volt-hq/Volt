@@ -98,6 +98,13 @@ interface IrohRemoteHostCommandRpcTransportOptions {
 	transport: RpcTransport;
 }
 
+/**
+ * Cap on the per-stream completion-notification dedup set. Duplicate suppression
+ * only needs recent history, so a very long-lived relay stream doing thousands of
+ * turns evicts oldest-first rather than growing the set without bound.
+ */
+const MAX_SENT_NOTIFICATION_EVENT_IDS = 512;
+
 /** Run Volt RPC in-process over an authorized Iroh bidirectional stream. */
 export function runIrohRemoteRpcMode(
 	runtimeHost: AgentSessionRuntime,
@@ -160,6 +167,13 @@ export function runIrohRemoteRpcMode(
 			const notification = createIrohRemoteCompletionNotification(completion, options.workspaceName);
 			if (!notification || sentNotificationEventIds.has(notification.eventId)) {
 				return;
+			}
+			if (sentNotificationEventIds.size >= MAX_SENT_NOTIFICATION_EVENT_IDS) {
+				// Set preserves insertion order, so the first value is the oldest.
+				const oldest = sentNotificationEventIds.values().next().value;
+				if (oldest !== undefined) {
+					sentNotificationEventIds.delete(oldest);
+				}
 			}
 			sentNotificationEventIds.add(notification.eventId);
 			await deliverCompletionNotification(notification);
