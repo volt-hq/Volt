@@ -27,6 +27,8 @@ Commands:
 interface RemoteControlSession {
 	client: DaemonClient;
 	events: (handler: (event: ControlEvent) => void) => void;
+	/** Resolves if the daemon control connection is lost before close() is called. */
+	whenConnectionLost: Promise<void>;
 	close(): Promise<void>;
 }
 
@@ -42,6 +44,11 @@ async function connectToDaemon(options: { autoStart: boolean }): Promise<RemoteC
 		return undefined;
 	}
 	const handlers = new Set<(event: ControlEvent) => void>();
+	let closing = false;
+	let resolveConnectionLost: () => void = () => {};
+	const whenConnectionLost = new Promise<void>((resolve) => {
+		resolveConnectionLost = resolve;
+	});
 	const client = createDaemonClient({
 		socketPath: probe.socketPath,
 		client: "cli",
@@ -50,6 +57,11 @@ async function connectToDaemon(options: { autoStart: boolean }): Promise<RemoteC
 		onEvent: (event) => {
 			for (const handler of handlers) {
 				handler(event);
+			}
+		},
+		onConnectionStateChange: (nextState) => {
+			if (nextState === "gone" && !closing) {
+				resolveConnectionLost();
 			}
 		},
 	});
@@ -65,7 +77,11 @@ async function connectToDaemon(options: { autoStart: boolean }): Promise<RemoteC
 		events: (handler) => {
 			handlers.add(handler);
 		},
-		close: () => client.close(),
+		whenConnectionLost,
+		close: () => {
+			closing = true;
+			return client.close();
+		},
 	};
 }
 
@@ -167,7 +183,13 @@ async function handlePairCommand(args: string[]): Promise<void> {
 		if (reportControlError(response, "pair")) {
 			return;
 		}
-		await done;
+		await Promise.race([
+			done,
+			session.whenConnectionLost.then(() => {
+				console.error("Error: lost connection to voltd while waiting for the phone to pair");
+				process.exitCode = 1;
+			}),
+		]);
 	} finally {
 		await session.close();
 	}
