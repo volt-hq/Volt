@@ -377,6 +377,7 @@ class IrohDaemonService {
 	}
 
 	async start(): Promise<void> {
+		let endpoint: IrohEndpointLike | undefined;
 		try {
 			const builder = this.iroh.Endpoint.builder();
 			if (this.relayMode === "default") {
@@ -390,7 +391,7 @@ class IrohDaemonService {
 				builder.secretKey(secretKey);
 			}
 			builder.alpns([Array.from(Buffer.from(IROH_REMOTE_ALPN, "utf8"))]);
-			const endpoint = await builder.bind();
+			endpoint = await builder.bind();
 			if (!secretKey) {
 				const boundKey = endpoint.secretKey().toBytes();
 				this.services.state.setHostState({
@@ -417,6 +418,16 @@ class IrohDaemonService {
 			this.log("info", `iroh endpoint online`, { hostNodeId: this.hostNodeId, relayMode: this.relayMode });
 			void this.acceptLoop(endpoint);
 		} catch (error) {
+			if (endpoint) {
+				// bind() succeeded but a later start step (e.g. online()) failed before
+				// the endpoint was adopted; close it so its QUIC socket is not leaked.
+				try {
+					await endpoint.close();
+				} catch {}
+				if (this.endpoint === endpoint) {
+					this.endpoint = undefined;
+				}
+			}
 			this.ready.reject(error);
 			this.log("error", `failed to start iroh endpoint: ${error instanceof Error ? error.message : String(error)}`);
 		}
