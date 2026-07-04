@@ -1297,6 +1297,15 @@ class IrohDaemonService {
 					entry,
 					subscriberError ? "transport_error" : "transport_closed",
 				);
+				// Sync the lease's stream count to reality. Without this, a handshake
+				// write that failed after commitDaemonRuntime but before attachSubscriber
+				// leaves the lease stuck at daemon-active with no live stream until the
+				// detached-runtime retention TTL expires.
+				this.leaseBroker.onDaemonRuntimeStreamCountChanged(
+					authorization.workspace.name,
+					entry.sessionId,
+					entry.subscribers.size,
+				);
 			}
 			activeStream?.remove();
 		}
