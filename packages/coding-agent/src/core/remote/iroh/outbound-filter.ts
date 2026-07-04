@@ -370,7 +370,12 @@ function sanitizePathToken(value: string, context: IrohRemoteOutboundSanitizerCo
 		isWindowsUncPath(path) ||
 		isFileUrl(path)
 	) {
-		return `${path}${suffix}`;
+		// The path is outside the workspace (or unresolvable as a subpath), but it may
+		// still embed the workspace root glued to a non-separator delimiter (e.g.
+		// "<workspace>:extra"), which normalizeWorkspacePath treats as a sibling and
+		// would otherwise leak the real host path verbatim. Redact any embedded
+		// workspace-path prefix before returning.
+		return `${normalizeWorkspacePathOccurrences(path, context)}${suffix}`;
 	}
 	return `${normalizeWorkspacePathOccurrences(path, context)}${suffix}`;
 }
