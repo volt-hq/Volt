@@ -1838,7 +1838,7 @@ export class InteractiveMode {
 		if (outcome.kind === "granted" && (outcome.handoff === "warm" || outcome.handoff === "cold")) {
 			// The daemon spun up a runtime during the reconnect gap; absorb any file
 			// changes it appended.
-			await this.session.reload().catch(() => {});
+			await this.absorbRemoteSessionChangesFromDisk();
 			this.renderCurrentSessionState();
 			this.ui.requestRender();
 		}
@@ -1883,6 +1883,32 @@ export class InteractiveMode {
 		);
 	}
 
+	/**
+	 * Absorb transcript entries another owner (the daemon, during a drain handoff
+	 * or a reconnect gap) appended to the session file. session.reload() only
+	 * reloads settings/resources — NOT the conversation — so re-open the session
+	 * file to pull in the appended turns, rebuilding the in-process transcript and
+	 * model context. Falls back to a settings reload when there is no session file
+	 * or the re-open is cancelled.
+	 */
+	private async absorbRemoteSessionChangesFromDisk(): Promise<void> {
+		const sessionFile = this.session.sessionFile;
+		if (!sessionFile) {
+			await this.session.reload().catch(() => {});
+			return;
+		}
+		try {
+			const result = await this.runtimeHost.switchSession(sessionFile, {
+				projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
+			});
+			if (result.cancelled) {
+				await this.session.reload().catch(() => {});
+			}
+		} catch {
+			await this.session.reload().catch(() => {});
+		}
+	}
+
 	private async finishDrainViewerGrant(): Promise<void> {
 		const viewer = this.drainViewer;
 		this.drainViewer = undefined;
@@ -1890,7 +1916,7 @@ export class InteractiveMode {
 		viewer?.finish("Remote turn finished — taking over…");
 		// Load what the remote turn wrote; the file is the source of truth. The
 		// re-render drops the viewer component; editor text survives un-submitted.
-		await this.session.reload().catch(() => {});
+		await this.absorbRemoteSessionChangesFromDisk();
 		this.renderCurrentSessionState();
 		this.showStatus("Attached — the remote turn finished and this desktop now owns the session.");
 		this.ui.requestRender();
