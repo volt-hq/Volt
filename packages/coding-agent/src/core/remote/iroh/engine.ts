@@ -583,8 +583,15 @@ export class IrohRemoteHostEngine {
 	private async log(event: IrohRemoteAuditEventInput): Promise<void> {
 		try {
 			await this.auditLogger.log(event);
-		} catch {
-			// Remote authorization side effects should not be reinterpreted as handshake failures if audit I/O fails.
+		} catch (error) {
+			// A valid handshake must not be reclassified as a failure when audit I/O
+			// fails, but a dropped security-relevant event must not vanish silently.
+			// Surface it to the daemon log (captured stderr) so the omission is visible.
+			console.error(
+				`[iroh-remote] failed to write audit event ${event.type}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
 		}
 	}
 }

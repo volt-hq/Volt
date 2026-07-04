@@ -113,6 +113,11 @@ export function authorizeIrohRemoteClient(
 	const expiredResultTickets = expiredPairingTickets.length > 0 ? expiredPairingTickets : undefined;
 	const rePairApprovalActive =
 		revokedClient?.rePairApprovedAt !== undefined &&
+		// Fail closed on a future timestamp (host clock moved back, or state carried
+		// across a clock change): without the lower bound a negative delta always
+		// satisfies the TTL and keeps a revoked client's re-pair approval alive
+		// indefinitely.
+		now >= revokedClient.rePairApprovedAt &&
 		now - revokedClient.rePairApprovedAt <= DEFAULT_IROH_REMOTE_RE_PAIR_APPROVAL_TTL_MS;
 	const hasActivePairingSecretForRevokedClient =
 		rePairApprovalActive &&

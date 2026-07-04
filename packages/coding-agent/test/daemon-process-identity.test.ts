@@ -69,6 +69,28 @@ describe("verifyPidfileProcess (posix)", () => {
 		expect(verification).toBe("mismatch");
 	});
 
+	it("rejects a recycled pid whose argv merely contains the voltd substring", async () => {
+		for (const argv of ["tail -f /var/log/voltd.log", "vim voltd.ts", "node /repo/voltd-cli/index.js watch"]) {
+			const verification = await verifyPidfileProcess(pidfile, {
+				runner: posixRunner(`01:00:00 ${argv}`),
+				platform: "linux",
+				now: NOW,
+				isProcessAlive: alive,
+			});
+			expect(verification, argv).toBe("mismatch");
+		}
+	});
+
+	it("matches a voltd binary invoked from an absolute path", async () => {
+		const verification = await verifyPidfileProcess(pidfile, {
+			runner: posixRunner("01:00:00 /usr/local/bin/voltd"),
+			platform: "linux",
+			now: NOW,
+			isProcessAlive: alive,
+		});
+		expect(verification).toBe("match");
+	});
+
 	it("tolerates spawn-to-record skew within the tolerance window", async () => {
 		const verification = await verifyPidfileProcess(
 			{ pid: 4242, startedAtMs: NOW - ONE_HOUR_MS + 5_000 },

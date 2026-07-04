@@ -555,7 +555,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		await transport.waitForBackpressure?.();
 	};
 	let session = runtimeHost.session;
-	let lastNotifiedSessionId: string | undefined;
+	let lastNotifiedSession: AgentSession | undefined;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
 	let stopModelCatalogWatcher: () => void = () => {};
@@ -852,13 +852,28 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		},
 	});
 
+	// When a phone relays through a running TUI the SAME runtimeHost is shared and
+	// survives this mode (shouldDisposeRuntimeOnClose === false). Capture the TUI's
+	// own rebind handler so it can be restored on exit; otherwise the TUI's session
+	// changes would keep running this RPC-mode handler after the phone disconnects.
+	const previousRebindSession = runtimeHost.getRebindSession?.();
 	runtimeHost.setRebindSession(async () => {
 		await rebindSession();
 	});
+	const restoreRebindSession = (): void => {
+		if (!shouldDisposeRuntimeOnClose) {
+			runtimeHost.setRebindSession(previousRebindSession);
+		}
+	};
 
 	const notifySessionChanged = async (): Promise<void> => {
-		if (options.onSessionChanged && session.sessionId !== lastNotifiedSessionId) {
-			lastNotifiedSessionId = session.sessionId;
+		// Fire on a new session OBJECT, not just a new sessionId. A same-file
+		// drain/reacquire reload produces a fresh AgentSession with the identical
+		// sessionId; consumers (notably the iroh transcript-entry / live-activity
+		// subscriptions) must rekey to the new object or they stay bound to the
+		// disposed one and silently stop delivering. Same-id consumers no-op safely.
+		if (options.onSessionChanged && session !== lastNotifiedSession) {
+			lastNotifiedSession = session;
 			await options.onSessionChanged({ sessionFile: session.sessionFile, sessionId: session.sessionId });
 		}
 	};
@@ -1028,6 +1043,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	const cleanupStartupFailure = async (): Promise<void> => {
 		shuttingDown = true;
 		try {
+			restoreRebindSession();
 			stopModelCatalogWatcher();
 			cancelPendingExtensionRequests();
 			detachHostActionBridge();
@@ -1095,6 +1111,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				let hasShutdownError = failure !== undefined;
 				let shutdownError: unknown = failure?.error;
 				try {
+					restoreRebindSession();
 					for (const cleanup of signalCleanupHandlers) {
 						cleanup();
 					}

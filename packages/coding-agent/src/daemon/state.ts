@@ -195,7 +195,18 @@ export class VoltdStateStore {
 			this.migrated = true;
 			await this.writeNow();
 			const legacyPath = getLegacyRemoteStatePath(this.agentDir);
-			await rename(legacyPath, `${legacyPath}.migrated`);
+			try {
+				await rename(legacyPath, `${legacyPath}.migrated`);
+			} catch (error) {
+				// A daemon started concurrently (before the single-instance socket bind)
+				// may have already migrated and renamed the legacy file. Its absence is
+				// benign: the migrated content is identical and already persisted, so a
+				// racing start must not crash here — it will fail cleanly at the socket
+				// bind instead.
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+					throw error;
+				}
+			}
 			return { state: this.current, migratedFromLegacyState: true };
 		}
 		if (existsSync(this.statePath)) {
@@ -275,8 +286,12 @@ export class VoltdStateStore {
 		this.flushTimer.unref?.();
 	}
 
-	/** Flush pending changes and stop the debounce timer (graceful shutdown). */
-	async close(): Promise<void> {
+	/**
+	 * Force an immediate durable write, cancelling any pending debounce. Use after
+	 * minting state that must survive a crash the moment it exists (e.g. the freshly
+	 * generated Iroh identity, before the endpoint starts accepting pairings).
+	 */
+	async flush(): Promise<void> {
 		if (this.flushTimer) {
 			clearTimeout(this.flushTimer);
 			this.flushTimer = undefined;
@@ -285,6 +300,11 @@ export class VoltdStateStore {
 		if (this.current) {
 			await this.writeNow();
 		}
+	}
+
+	/** Flush pending changes and stop the debounce timer (graceful shutdown). */
+	async close(): Promise<void> {
+		await this.flush();
 	}
 
 	private async writeNow(): Promise<void> {

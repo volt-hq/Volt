@@ -208,6 +208,61 @@ describe("daemon control client reconnect", () => {
 		expect(helloCount).toBe(1);
 	});
 
+	it("goes gone when a reconnect-disabled connection drops after hello", async () => {
+		// Regression: `volt remote pair` uses a reconnect-disabled client and awaits
+		// onConnectionStateChange("gone"). When the established connection dropped,
+		// the close handler called scheduleReconnect(), which early-returns for a
+		// reconnect-disabled client WITHOUT emitting a state change — so the pair
+		// command hung forever.
+		const socketPath = tempSocketPath();
+		const serverSockets: Socket[] = [];
+		const server = await new Promise<Server>((resolve) => {
+			const created = createServer((socket: Socket) => {
+				serverSockets.push(socket);
+				const decoder = new ControlLineDecoder();
+				socket.on("error", () => {});
+				socket.on("data", (chunk) => {
+					for (const message of decoder.push(chunk)) {
+						if ((message as Record<string, unknown>).type === "hello") {
+							socket.write(
+								encodeControlLine({
+									type: "hello_ack",
+									ok: true,
+									connectionId: "c-1",
+									version: "0.0.0-test",
+									protocolVersion: PROTOCOL_VERSION,
+								}),
+							);
+						}
+					}
+				});
+			});
+			created.listen(socketPath, () => resolve(created));
+		});
+		cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+
+		const stateChanges: string[] = [];
+		const client = createDaemonClient({
+			socketPath,
+			client: "tui",
+			version: "0.0.0-test",
+			reconnect: false,
+			onConnectionStateChange: (state) => stateChanges.push(state),
+		});
+		cleanups.push(() => client.close());
+		await client.connect();
+		expect(client.connectionState).toBe("connected");
+
+		serverSockets[0]?.destroy();
+		const deadline = Date.now() + 2000;
+		while (Date.now() < deadline && client.connectionState !== "gone") {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+		expect(client.connectionState).toBe("gone");
+		expect(client.goneReason).toBe("closed");
+		expect(stateChanges).toContain("gone");
+	});
+
 	it("does not stack a second connection when the backoff timer races a manual reconnect", async () => {
 		// Regression: after a disconnect, a manual connect() (e.g. from request())
 		// re-established the socket, and the still-armed backoff timer then dialed

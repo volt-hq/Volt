@@ -422,9 +422,13 @@ export class IntegratedRuntimeRegistry {
 		if (entry.detachedAt !== undefined) {
 			// Already detached. A reattach that cancelled retention but then failed
 			// before attachSubscriber ran can leave a detached entry with no timer;
-			// re-arm so it is still swept at TTL rather than lingering forever.
+			// re-arm so it is still swept rather than lingering forever. Honor the
+			// ORIGINAL detach deadline (remaining TTL from detachedAt) instead of a
+			// fresh full TTL, so repeated reconnect-then-abort cycles cannot keep
+			// resetting the retention clock.
 			if (!entry.detachedRuntimeRetention) {
-				this.scheduleRetention(entry, reason);
+				const remainingTtlMs = Math.max(0, this.options.detachedRuntimeTtlMs() - (Date.now() - entry.detachedAt));
+				this.scheduleRetention(entry, reason, remainingTtlMs);
 			}
 			return;
 		}
@@ -695,10 +699,14 @@ export class IntegratedRuntimeRegistry {
 		return this.entries.get(entry.key) === entry && entry.subscribers.size === 0 && entry.detachedAt !== undefined;
 	}
 
-	scheduleRetention(entry: IntegratedRuntimeEntry, detachReason: string): void {
+	scheduleRetention(entry: IntegratedRuntimeEntry, detachReason: string, ttlOverrideMs?: number): void {
 		this.cancelRetention(entry);
-		const ttlMs = this.options.detachedRuntimeTtlMs();
-		entry.detachedRuntimeRetention = scheduleDetachedRuntimeRetention({
+		// A re-arm for an already-detached entry (reattach cancelled retention then
+		// aborted before attach) honors the ORIGINAL detach deadline via an override
+		// rather than restarting a full TTL, so a flaky reconnect-then-abort loop
+		// cannot keep resetting the clock and pin a detached runtime open forever.
+		const ttlMs = ttlOverrideMs ?? this.options.detachedRuntimeTtlMs();
+		const handle = scheduleDetachedRuntimeRetention({
 			ttlMs,
 			isDetached: () => this.isDetached(entry),
 			isActive: () => entry.runtime.session.isStreaming,
@@ -713,6 +721,18 @@ export class IntegratedRuntimeRegistry {
 					reason: "detached_runtime_ttl_expired",
 					ttlMs,
 				});
+				// A reattach handshake can commit during the audit-write await above,
+				// clearing detachedAt / adding a subscriber, or cancel and replace this
+				// retention. Re-check (and confirm this retention is still the active
+				// one) before disposing, so the sweep never tears down a runtime that
+				// was just reattached.
+				if (
+					!this.isDetached(entry) ||
+					entry.runtime.session.isStreaming ||
+					entry.detachedRuntimeRetention !== handle
+				) {
+					return;
+				}
 				await this.stopEntry(entry, "detached_runtime_ttl_expired");
 			},
 			onError: (error) => {
@@ -730,6 +750,7 @@ export class IntegratedRuntimeRegistry {
 				);
 			},
 		});
+		entry.detachedRuntimeRetention = handle;
 	}
 
 	// ==========================================================================

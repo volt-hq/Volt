@@ -36,6 +36,15 @@ export const REMOTE_SESSION_LIST_DEFAULT_LIMIT = 50;
 export const REMOTE_SESSION_LIST_MAX_LIMIT = 200;
 export const REMOTE_SESSION_LIST_CURSOR_TTL_MS = 10 * 60 * 1000;
 export const REMOTE_SESSION_LIST_CURSOR_MAX_BYTES = 512;
+/**
+ * Per-client cap on retained pagination cursors. The cursor map is shared across
+ * every stream on the daemon; without a bound a client that never echoes the
+ * returned cursor (each no-cursor list_sessions mints a fresh snapshot of up to
+ * REMOTE_SESSION_LIST_MAX_LIMIT summaries) would grow it without limit for the
+ * whole TTL window. Bounding per client (rather than globally) prevents one client
+ * from evicting another's cursors — mirrors the push deduper's per-client cap.
+ */
+export const REMOTE_SESSION_LIST_MAX_CURSORS_PER_CLIENT = 64;
 const REMOTE_TRANSCRIPT_DEFAULT_LIMIT = 200;
 const REMOTE_TRANSCRIPT_MAX_LIMIT = 200;
 const REMOTE_TRANSCRIPT_CURSOR_MAX_BYTES = 2048;
@@ -911,12 +920,35 @@ function cleanupExpiredSessionListCursors(context: ConversationCommandContext, n
 	}
 }
 
+function evictExcessSessionListCursors(
+	context: ConversationCommandContext,
+	clientNodeId: string,
+	maxForClient: number,
+): void {
+	// Map iteration is insertion order, so this client's oldest cursors come first.
+	const clientCursors: string[] = [];
+	for (const [cursor, entry] of context.sessionListCursors) {
+		if (entry.clientNodeId === clientNodeId) {
+			clientCursors.push(cursor);
+		}
+	}
+	// Drop oldest until inserting one more keeps this client within the cap.
+	for (let index = 0; index <= clientCursors.length - maxForClient; index++) {
+		context.sessionListCursors.delete(clientCursors[index]);
+	}
+}
+
 function createSessionListCursor(
 	context: ConversationCommandContext,
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	sessions: RemoteSessionListEntry[],
 	nextIndex: number,
 ): string {
+	// Sweep expired entries on every insert (not only on the cursored read path) and
+	// bound this client's retained cursors so a client that never echoes the returned
+	// cursor cannot grow the shared, daemon-wide map without limit.
+	cleanupExpiredSessionListCursors(context);
+	evictExcessSessionListCursors(context, authorization.client.nodeId, REMOTE_SESSION_LIST_MAX_CURSORS_PER_CLIENT);
 	const cursor = randomUUID();
 	context.sessionListCursors.set(cursor, {
 		clientNodeId: authorization.client.nodeId,

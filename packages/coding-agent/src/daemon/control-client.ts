@@ -289,8 +289,19 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 					socket = undefined;
 					serverInfo = undefined;
 					failPending();
-					if (!closed) {
+					if (closed) {
+						return;
+					}
+					if (reconnectEnabled) {
 						scheduleReconnect();
+					} else {
+						// A reconnect-disabled client (e.g. `volt remote pair`) has no path
+						// back to the daemon once its established connection drops.
+						// Transition to "gone" so onConnectionStateChange fires and callers
+						// awaiting the connection (whenConnectionLost) unblock instead of
+						// hanging forever.
+						goneReason = "closed";
+						setState("gone");
 					}
 				}
 			});

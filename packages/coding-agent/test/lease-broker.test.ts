@@ -15,6 +15,8 @@ interface Harness {
 	};
 	/** Resolve all pending waitForRuntimeIdle calls for a key. */
 	finishTurn(workspaceName: string, sessionId: string): Promise<void>;
+	/** Make the next disposeRuntime call reject with the given error. */
+	failNextDispose(error: Error): void;
 }
 
 function key(workspaceName: string, sessionId: string): string {
@@ -31,6 +33,7 @@ function createHarness(): Harness {
 	const drainStarted: string[] = [];
 	const drainEnded: Array<{ key: string; reason: string }> = [];
 	let viewerFeedSequence = 0;
+	let pendingDisposeError: Error | undefined;
 
 	const effects: LeaseBrokerEffects = {
 		isRuntimeStreaming: (ws, sid) => streaming.has(key(ws, sid)),
@@ -45,6 +48,11 @@ function createHarness(): Harness {
 			});
 		},
 		disposeRuntime: async (ws, sid, reason) => {
+			if (pendingDisposeError) {
+				const error = pendingDisposeError;
+				pendingDisposeError = undefined;
+				throw error;
+			}
 			disposed.push({ key: key(ws, sid), reason });
 		},
 		closePhoneStreams: (ws, sid, reason) => {
@@ -77,6 +85,9 @@ function createHarness(): Harness {
 			// Let the drain continuation run.
 			await new Promise((resolve) => setImmediate(resolve));
 			await new Promise((resolve) => setImmediate(resolve));
+		},
+		failNextDispose(error: Error) {
+			pendingDisposeError = error;
 		},
 	};
 }
@@ -426,5 +437,56 @@ describe("LeaseBroker", () => {
 		// No lease_acquired must be recorded for the dead connection after the
 		// implicit release.
 		expect(audits.at(-1)).toBe("lease_released");
+	});
+
+	it("does not wedge the lease when drain disposal fails", async () => {
+		const harness = createHarness();
+		const { broker, effects } = harness;
+		broker.onDaemonRuntimeAttached("ws", "s1");
+		broker.onDaemonRuntimeStreamCountChanged("ws", "s1", 1); // daemon-active
+		effects.streaming.add(key("ws", "s1"));
+
+		const outcome = await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "s1" });
+		expect(outcome.kind).toBe("pending");
+		if (outcome.kind !== "pending") {
+			return;
+		}
+		let grantSettled: "resolved" | "rejected" | undefined;
+		void outcome.granted.then(
+			() => {
+				grantSettled = "resolved";
+			},
+			() => {
+				grantSettled = "rejected";
+			},
+		);
+
+		harness.failNextDispose(new Error("state-manager write failed"));
+		await harness.finishTurn("ws", "s1");
+
+		// The grant promise must settle (rejected) rather than hang forever, and the
+		// lease must not be stuck in daemon-draining.
+		expect(grantSettled).toBe("rejected");
+		const record = broker.lookup("ws", "s1");
+		expect(record?.state).not.toBe("daemon-draining");
+		expect(record?.drain).toBeUndefined();
+		expect(effects.drainEnded.at(-1)?.reason).toBe("error");
+	});
+
+	it("reverts to daemon-owned when an idle-grant disposal fails", async () => {
+		const harness = createHarness();
+		const { broker } = harness;
+		broker.onDaemonRuntimeAttached("ws", "s1");
+		broker.onDaemonRuntimeStreamCountChanged("ws", "s1", 0); // daemon-detached, idle
+
+		harness.failNextDispose(new Error("state-manager write failed"));
+		await expect(broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "s1" })).rejects.toThrow(
+			"state-manager write failed",
+		);
+
+		// The premature tui-owned flip must not survive the disposal failure.
+		const record = broker.lookup("ws", "s1");
+		expect(record?.state).not.toBe("tui-owned");
+		expect(record?.tuiConnectionId).toBeUndefined();
 	});
 });

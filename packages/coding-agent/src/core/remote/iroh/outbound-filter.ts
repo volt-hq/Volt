@@ -120,8 +120,20 @@ export async function pipeIrohRemoteOutboundJsonlReadable(
 }
 
 function createSanitizerContext(options: IrohRemoteOutboundSanitizerOptions): IrohRemoteOutboundSanitizerContext {
-	const workspacePath = resolve(options.workspacePath);
-	const workspacePathVariants = [...new Set([workspacePath, toPosixPath(workspacePath), toWindowsPath(workspacePath)])]
+	const resolvedWorkspacePath = resolve(options.workspacePath);
+	// Compare and redact in a Unicode-normalization-insensitive way: macOS surfaces
+	// on-disk paths in NFD while a configured root may be NFC (or vice versa), and a
+	// byte-exact compare would let a differently-composed form of an in-workspace path
+	// bypass redaction and leak the real host path. Canonicalize the compared root to
+	// NFC, and match embedded occurrences against both NFC and NFD forms.
+	const workspacePath = resolvedWorkspacePath.normalize("NFC");
+	const workspacePathVariants = [
+		...new Set(
+			[resolvedWorkspacePath, toPosixPath(resolvedWorkspacePath), toWindowsPath(resolvedWorkspacePath)].flatMap(
+				(value) => [value.normalize("NFC"), value.normalize("NFD")],
+			),
+		),
+	]
 		.filter((value) => value.length > 0)
 		.sort((left, right) => right.length - left.length);
 	return {
@@ -283,7 +295,7 @@ function normalizeWorkspacePath(value: string, context: IrohRemoteOutboundSaniti
 	if (!isAbsolute(value)) {
 		return undefined;
 	}
-	const candidatePath = resolve(value);
+	const candidatePath = resolve(value).normalize("NFC");
 	const relativePath = relative(context.workspacePath, candidatePath);
 	if (relativePath === "") {
 		return context.remoteWorkspacePath;

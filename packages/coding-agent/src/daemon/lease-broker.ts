@@ -296,11 +296,25 @@ export class LeaseBroker {
 				if (record.state === "daemon-active" && this.effects.isRuntimeStreaming(workspaceName, sessionId)) {
 					return this.beginDrain(record, connectionId);
 				}
-				// Idle daemon runtime: dispose and grant immediately.
+				// Idle daemon runtime: dispose and grant immediately. The flip to
+				// tui-owned happens BEFORE disposal so the disposal's
+				// onDaemonRuntimeDisposed callback no-ops (it is part of this grant).
 				record.state = "tui-owned";
 				record.tuiConnectionId = connectionId;
-				await this.effects.disposeRuntime(workspaceName, sessionId, "lease_transferred_to_tui");
-				await this.effects.closePhoneStreams(workspaceName, sessionId, LEASE_TRANSFERRED_CLOSE_REASON);
+				try {
+					await this.effects.disposeRuntime(workspaceName, sessionId, "lease_transferred_to_tui");
+					await this.effects.closePhoneStreams(workspaceName, sessionId, LEASE_TRANSFERRED_CLOSE_REASON);
+				} catch (error) {
+					// Disposal failed after the premature tui-owned flip. Leaving the
+					// lease tui-owned would strand the still-alive daemon runtime and
+					// phone streams. Revert to a daemon-owned state and fail the acquire
+					// (unless the connection already died and released the lease).
+					if (record.state === "tui-owned" && record.tuiConnectionId === connectionId) {
+						record.state = record.streamCount > 0 ? "daemon-active" : "daemon-detached";
+						record.tuiConnectionId = undefined;
+					}
+					throw error;
+				}
 				record.streamCount = 0;
 				if ((record.state as LeaseState) !== "tui-owned" || record.tuiConnectionId !== connectionId) {
 					// The connection died while the disposal effects ran and the lease
@@ -368,8 +382,29 @@ export class LeaseBroker {
 		// cancellation landing during these awaits is visible afterwards, and
 		// cancelDrain defers the final transition to this continuation.
 		drain.disposing = true;
-		await this.effects.disposeRuntime(record.workspaceName, record.sessionId, "lease_transferred_to_tui");
-		await this.effects.closePhoneStreams(record.workspaceName, record.sessionId, LEASE_TRANSFERRED_CLOSE_REASON);
+		try {
+			await this.effects.disposeRuntime(record.workspaceName, record.sessionId, "lease_transferred_to_tui");
+			await this.effects.closePhoneStreams(record.workspaceName, record.sessionId, LEASE_TRANSFERRED_CLOSE_REASON);
+		} catch (error) {
+			// This phase is otherwise unguarded, so a disposal failure (e.g. a
+			// state-manager IO error) would wedge the lease in daemon-draining forever
+			// and leave the acquiring TUI's grant promise unsettled. Recover: clear the
+			// drain, settle the grant, and move to a state a later acquire can retry
+			// from (unowned when the requester already gave up, else daemon-owned).
+			if (record.drain === drain) {
+				record.drain = undefined;
+				record.tuiConnectionId = undefined;
+			}
+			if (drain.cancelled) {
+				record.state = "unowned";
+				this.dropIfUnowned(record);
+			} else {
+				record.state = record.streamCount > 0 ? "daemon-active" : "daemon-detached";
+				this.effects.onDrainEnded?.(record, drain.viewerFeedId, "error");
+				drain.rejectGranted(error instanceof Error ? error : new Error(String(error)));
+			}
+			return;
+		}
 		record.drain = undefined;
 		record.streamCount = 0;
 		if (drain.cancelled) {

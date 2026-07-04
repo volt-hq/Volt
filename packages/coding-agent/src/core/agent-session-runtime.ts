@@ -168,6 +168,11 @@ export class AgentSessionRuntime {
 		this.rebindSession = rebindSession;
 	}
 
+	/** The currently installed rebind handler, so a temporary owner can restore it. */
+	getRebindSession(): ((session: AgentSession) => Promise<void>) | undefined {
+		return this.rebindSession;
+	}
+
 	/**
 	 * Set a synchronous callback that runs after `session_shutdown` handlers finish
 	 * but before the current session is invalidated.

@@ -92,6 +92,14 @@ const RELAY_OFFER_RETRY_AFTER_MS = 1000;
 const WORKSPACE_DISCOVERY_STREAM_SESSION_ID = "$workspace-discovery";
 const WORKSPACE_MANAGEMENT_STREAM_SESSION_ID = "$workspace-management";
 const SHUTDOWN_RUNTIME_IDLE_CAP_MS = 60_000;
+/**
+ * Defensive cap on concurrent in-flight bi-streams per client connection. A
+ * well-behaved client keeps only a handful open (one conversation + a few
+ * utility streams); an authenticated-but-misbehaving client could otherwise open
+ * unbounded concurrent streams, each spawning a runtime attach, and exhaust
+ * daemon resources. Hitting the cap closes the connection.
+ */
+const MAX_CONCURRENT_STREAMS_PER_CONNECTION = 64;
 
 let activeConnectionSequence = 0;
 let activeStreamSequence = 0;
@@ -398,6 +406,12 @@ class IrohDaemonService {
 					...this.services.state.getHostState(),
 					hostSecretKey: boundKey,
 				});
+				// Persist the freshly minted identity synchronously before the accept
+				// loop starts taking pairings. A crash/SIGKILL inside the 250ms debounce
+				// window would otherwise lose the key, and every phone paired against
+				// this endpoint would be talking to a node id the daemon can never
+				// reproduce on restart.
+				await this.services.state.flush();
 			}
 			if (this.relayMode === "default") {
 				await endpoint.online();
@@ -497,6 +511,20 @@ class IrohDaemonService {
 					? withTimeout(connection.acceptBi(), DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS, "handshake timed out")
 					: connection.acceptBi());
 				acceptedStreamCount++;
+				if (streamTasks.size >= MAX_CONCURRENT_STREAMS_PER_CONNECTION) {
+					// One authenticated client is holding too many concurrent streams
+					// open. Refuse further work and close the connection rather than let
+					// it exhaust daemon resources; the just-accepted stream is torn down
+					// with the connection. A legitimate client never reaches this.
+					this.log(
+						"error",
+						`client ${remoteId} (${connectionId}) exceeded concurrent stream cap ` +
+							`(${MAX_CONCURRENT_STREAMS_PER_CONNECTION}); closing connection`,
+					);
+					closeRequested = true;
+					closeConnection(connection, "stream_limit_exceeded");
+					break;
+				}
 				const streamId = `stream-${++activeStreamSequence}`;
 				const replaceExistingConversationStream = acceptedStreamCount === 1;
 				const task = this.handleConnectionStream(

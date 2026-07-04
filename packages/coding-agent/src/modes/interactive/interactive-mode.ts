@@ -115,6 +115,7 @@ import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
+import { DaemonClientClosedError } from "../../daemon/control-client.ts";
 import { RELAY_RPC_COMMAND_TYPES } from "../../daemon/control-protocol.ts";
 import {
 	getRpcResponseId,
@@ -1877,8 +1878,14 @@ export class InteractiveMode {
 			() => {
 				void this.finishDrainViewerGrant();
 			},
-			() => {
-				this.exitDrainViewer("error");
+			(error: unknown) => {
+				// A transient control-socket drop rejects the grant with
+				// DaemonClientClosedError, but the reconnect path
+				// (ensureLeaseAfterConnected) re-acquires and re-enters the drain
+				// viewer. Tear down the current overlay so that re-enter's guard
+				// passes, but do NOT tell the user the handoff failed — it is still in
+				// progress. Only a genuine drain failure (a plain Error) surfaces.
+				this.exitDrainViewer(error instanceof DaemonClientClosedError ? "reconnecting" : "error");
 			},
 		);
 	}
@@ -1922,7 +1929,7 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private exitDrainViewer(reason: "cancelled" | "error"): void {
+	private exitDrainViewer(reason: "cancelled" | "error" | "reconnecting"): void {
 		const viewer = this.drainViewer;
 		if (!viewer) {
 			return;

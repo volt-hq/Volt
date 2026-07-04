@@ -34,11 +34,16 @@ export interface VerifyPidfileOptions {
 export const DEFAULT_START_TIME_TOLERANCE_MS = 15_000;
 
 /**
- * Command-line substrings that identify a voltd process. Linux rewrites argv
- * to the process title ("voltd"); macOS and Windows report the original
- * invocation (`... daemon run --foreground`).
+ * Command-line markers that identify a voltd process. Linux rewrites argv to the
+ * process title ("voltd"); macOS and Windows report the original invocation
+ * (`... daemon run --foreground`).
+ *
+ * The bare "voltd" marker is matched as a whole path/argv token, not a bare
+ * substring: an unrelated but same-user process whose command line merely
+ * contains the string (e.g. `tail -f /var/log/voltd.log`, `vim voltd.ts`,
+ * `node .../voltd-cli/x.js`) must not satisfy the identity check and be signalled.
  */
-const VOLTD_COMMAND_MARKERS = ["voltd", "daemon run --foreground"] as const;
+const VOLTD_COMMAND_MARKERS = [/(?:^|[\s/\\])voltd(?=$|[\s/\\])/, "daemon run --foreground"] as const;
 
 const defaultRunner: ProcessQueryRunner = (command, args) =>
 	new Promise((resolve) => {
@@ -127,7 +132,9 @@ async function queryWindowsProcess(pid: number, runner: ProcessQueryRunner): Pro
 }
 
 function commandLineLooksLikeVoltd(commandLine: string): boolean {
-	return VOLTD_COMMAND_MARKERS.some((marker) => commandLine.includes(marker));
+	return VOLTD_COMMAND_MARKERS.some((marker) =>
+		typeof marker === "string" ? commandLine.includes(marker) : marker.test(commandLine),
+	);
 }
 
 /**

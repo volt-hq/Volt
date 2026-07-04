@@ -3906,6 +3906,44 @@ describe("Iroh remote core helpers", () => {
 		});
 	});
 
+	test("redacts in-workspace paths regardless of Unicode normalization form", () => {
+		// A workspace root with precomposable characters can be registered in one
+		// Unicode form (NFC) while nested paths surface from disk in another (NFD on
+		// macOS). Redaction must not be byte-exact, or the differently-composed form
+		// leaks the real host path (username + tree) to the phone.
+		const workspacePathNfc = "/Users/josé/café-proj"; // precomposed (NFC)
+		const workspacePathNfd = workspacePathNfc.normalize("NFD"); // decomposed (NFD)
+
+		for (const [rootForm, valueForm] of [
+			[workspacePathNfc, workspacePathNfd],
+			[workspacePathNfd, workspacePathNfc],
+		]) {
+			const sanitized = sanitizeIrohRemoteOutbound(
+				{
+					type: "response",
+					command: "get_state",
+					success: true,
+					data: {
+						cwd: `${valueForm}/src`,
+						filePath: `${valueForm}/src/index.ts`,
+						message: `Read ${valueForm}/src/index.ts`,
+					},
+				},
+				{ workspacePath: rootForm },
+			);
+			expect(sanitized).toEqual({
+				type: "response",
+				command: "get_state",
+				success: true,
+				data: {
+					cwd: "/workspace/src",
+					filePath: "/workspace/src/index.ts",
+					message: "Read /workspace/src/index.ts",
+				},
+			});
+		}
+	});
+
 	test("maps outbound paths for the selected stream workspace only", () => {
 		const alphaPath = "/Users/jordan/alpha";
 		const betaPath = "/Users/jordan/beta";
