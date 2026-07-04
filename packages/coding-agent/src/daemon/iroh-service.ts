@@ -1106,6 +1106,11 @@ class IrohDaemonService {
 			this.leaseBroker.abortDaemonAttach(daemonAttachClaim);
 			if (createdRuntime) {
 				await this.runtimes.cleanupUncommittedEntry(entry, sessionSelection);
+			} else {
+				// Reattach: getOrCreateEntry cancelled the detached-runtime retention
+				// timer up front. Re-arm it (no-op unless the entry is still detached
+				// with no timer) so aborting here never leaves the runtime unswept.
+				await this.runtimes.detachWithoutSubscriber(entry, "reattach_superseded");
 			}
 			await this.rejectDuplicateActiveConnection(stream, authorization, entry.sessionId);
 			return;
@@ -1120,6 +1125,11 @@ class IrohDaemonService {
 			this.leaseBroker.abortDaemonAttach(daemonAttachClaim);
 			if (createdRuntime) {
 				await this.runtimes.cleanupUncommittedEntry(entry, sessionSelection);
+			} else {
+				// Reattach: getOrCreateEntry cancelled the detached-runtime retention
+				// timer up front. Re-arm it (no-op unless the entry is still detached
+				// with no timer) so aborting here never leaves the runtime unswept.
+				await this.runtimes.detachWithoutSubscriber(entry, "reattach_superseded");
 			}
 			await this.rejectDuplicateActiveConnection(stream, authorization, entry.sessionId);
 			return;
@@ -1266,7 +1276,12 @@ class IrohDaemonService {
 					entry.sessionId,
 					entry.subscribers.size,
 				);
-			} else if (handshakeCommitted) {
+			} else if (handshakeCommitted || !createdRuntime) {
+				// handshakeCommitted: normal detach after the runtime ran. !createdRuntime:
+				// a reattach that failed before attachSubscriber, whose retention timer
+				// getOrCreateEntry cancelled up front — re-arm it so the runtime is still
+				// swept at TTL instead of leaking forever. detachWithoutSubscriber no-ops
+				// when the entry was replaced or still has other subscribers.
 				await this.runtimes.detachWithoutSubscriber(
 					entry,
 					subscriberError ? "transport_error" : "transport_closed",
