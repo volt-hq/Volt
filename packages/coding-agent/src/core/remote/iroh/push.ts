@@ -109,6 +109,8 @@ export interface IrohRemotePushNotificationDelivery {
 
 export interface IrohRemotePushNotificationDeduper {
 	tryMark(clientNodeId: string, eventId: string): boolean;
+	/** Release a mark claimed by tryMark when the corresponding delivery did not succeed. */
+	unmark(clientNodeId: string, eventId: string): void;
 }
 
 export interface IrohRemotePushNotificationDispatcherOptions {
@@ -144,6 +146,10 @@ export class IrohRemoteInMemoryPushNotificationDeduper implements IrohRemotePush
 		}
 		sentEventIds.add(eventId);
 		return true;
+	}
+
+	unmark(clientNodeId: string, eventId: string): void {
+		this.sentEventIdsByClient.get(clientNodeId)?.delete(eventId);
 	}
 }
 
@@ -375,6 +381,9 @@ export class IrohRemotePushNotificationDispatcher implements IrohRemotePushNotif
 			await this.logPushDelivery(pushTarget, notification.eventId, notification.kind, true);
 			return "sent";
 		} catch (error: unknown) {
+			// Release the dedup claim so a transient relay failure can be retried on a
+			// later re-emission instead of being permanently suppressed as delivered.
+			this.deduper.unmark(this.clientNodeId, notification.eventId);
 			await this.logPushDelivery(pushTarget, notification.eventId, notification.kind, false, toErrorMessage(error));
 			return "failed";
 		}
@@ -413,6 +422,9 @@ export class IrohRemotePushNotificationDispatcher implements IrohRemotePushNotif
 			await this.logPushDelivery(pushTarget, update.eventId, update.kind, true, undefined, registration.tokenHash);
 			return "sent";
 		} catch (error: unknown) {
+			// Release the dedup claim so a transient relay failure can be retried on a
+			// later re-emission instead of being permanently suppressed as delivered.
+			this.deduper.unmark(this.clientNodeId, update.eventId);
 			await this.logPushDelivery(
 				pushTarget,
 				update.eventId,
