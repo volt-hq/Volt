@@ -231,8 +231,12 @@ export class RelayRegistry {
 					}
 				}
 				if (!settled) {
-					// Phone half-closed or ended: propagate EOF to the TUI.
-					socket.end();
+					// Phone half-closed or ended: flush any bytes still buffered in the
+					// socket write queue and send FIN to the TUI, waiting for the write
+					// side to drain before finish() destroys the socket. A bare
+					// socket.end() + immediate destroy discards the unflushed tail of the
+					// phone's final response.
+					await writeGate.end().catch(() => {});
 					finish(closeReason ?? "phone_disconnected");
 				}
 			} catch (error) {
