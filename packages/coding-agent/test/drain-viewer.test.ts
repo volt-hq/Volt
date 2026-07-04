@@ -38,6 +38,9 @@ function createContext() {
 		lastQuitWarningAt: 0,
 		enterDrainViewer: proto.enterDrainViewer,
 		finishDrainViewerGrant: proto.finishDrainViewerGrant,
+		// finishDrainViewerGrant reloads the session through this; the mock session
+		// has no sessionFile, so it takes the settings-reload fallback (session.reload).
+		absorbRemoteSessionChangesFromDisk: proto.absorbRemoteSessionChangesFromDisk,
 		exitDrainViewer: proto.exitDrainViewer,
 		isDrainViewerActive: proto.isDrainViewerActive,
 		confirmQuitWithAttachedPhone: proto.confirmQuitWithAttachedPhone,
