@@ -149,6 +149,13 @@ export interface VoltdStateStoreOptions {
 export interface LoadVoltdStateResult {
 	state: VoltdStateFileV1;
 	migratedFromLegacyState: boolean;
+	/**
+	 * Set when an unparseable state (or legacy) file was quarantined and the daemon
+	 * started from empty state instead of failing to start. The value is the path
+	 * the corrupt file was moved to. Callers should log this loudly: the persisted
+	 * Iroh secret key and paired clients in the bad file were lost.
+	 */
+	recoveredFromCorruptStatePath?: string;
 }
 
 const DEFAULT_STATE_DEBOUNCE_MS = 250;
@@ -162,6 +169,7 @@ export class VoltdStateStore {
 	private flushTimer: NodeJS.Timeout | undefined;
 	private pendingFlush: Promise<void> = Promise.resolve();
 	private migrated = false;
+	private recoveredFromCorruptStatePath: string | undefined;
 
 	constructor(options: VoltdStateStoreOptions) {
 		this.statePath = options.statePath;
@@ -173,7 +181,15 @@ export class VoltdStateStore {
 		if (this.current) {
 			return { state: this.current, migratedFromLegacyState: this.migrated };
 		}
-		const migratedState = migrateLegacyRemoteState(this.agentDir, this.statePath);
+		let migratedState: VoltdStateFileV1 | null = null;
+		try {
+			migratedState = migrateLegacyRemoteState(this.agentDir, this.statePath);
+		} catch {
+			// A corrupt legacy file must not brick first start; quarantine and skip it.
+			this.recoveredFromCorruptStatePath = await this.quarantineCorruptStateFile(
+				getLegacyRemoteStatePath(this.agentDir),
+			);
+		}
 		if (migratedState) {
 			this.current = migratedState;
 			this.migrated = true;
@@ -183,12 +199,47 @@ export class VoltdStateStore {
 			return { state: this.current, migratedFromLegacyState: true };
 		}
 		if (existsSync(this.statePath)) {
-			this.current = parseVoltdState(JSON.parse(readFileSync(this.statePath, "utf8")));
+			try {
+				this.current = parseVoltdState(JSON.parse(readFileSync(this.statePath, "utf8")));
+			} catch {
+				// An unparseable state file would otherwise make every start throw,
+				// permanently bricking the daemon with no automated recovery. Quarantine
+				// it and start from empty state so the daemon can bind. The persisted
+				// Iroh secret key and pairings in the bad file are lost; that is surfaced
+				// to the caller for a loud log.
+				this.recoveredFromCorruptStatePath = await this.quarantineCorruptStateFile(this.statePath);
+				this.current = createEmptyVoltdState();
+				await this.writeNow();
+			}
 		} else {
 			this.current = createEmptyVoltdState();
 			await this.writeNow();
 		}
-		return { state: this.current, migratedFromLegacyState: false };
+		return {
+			state: this.current,
+			migratedFromLegacyState: false,
+			...(this.recoveredFromCorruptStatePath === undefined
+				? {}
+				: { recoveredFromCorruptStatePath: this.recoveredFromCorruptStatePath }),
+		};
+	}
+
+	/**
+	 * Move an unparseable state file aside so a fresh start can proceed. Returns the
+	 * quarantine path, or undefined when the file is absent or could not be moved
+	 * (in which case the next writeNow() overwrites it in place with valid state).
+	 */
+	private async quarantineCorruptStateFile(path: string): Promise<string | undefined> {
+		if (!existsSync(path)) {
+			return undefined;
+		}
+		const quarantinePath = `${path}.corrupt-${Date.now()}`;
+		try {
+			await rename(path, quarantinePath);
+			return quarantinePath;
+		} catch {
+			return undefined;
+		}
 	}
 
 	get state(): VoltdStateFileV1 {

@@ -95,6 +95,33 @@ describe("IrohRemoteActiveStreamRegistry", () => {
 		expect(registry.hasWorkspaceOnConnection("client-a", "missing", "conn-1")).toBe(false);
 	});
 
+	test("entriesForConversationKey spans every client node id on the conversation", () => {
+		const registry = new IrohRemoteActiveStreamRegistry();
+		const deviceA = makeEntry({ clientNodeId: "client-a", sessionId: "session-1", streamId: "stream-a" });
+		const deviceB = makeEntry({
+			clientNodeId: "client-b",
+			sessionId: "session-1",
+			connectionId: "conn-2",
+			streamId: "stream-b",
+		});
+		const otherSession = makeEntry({
+			clientNodeId: "client-b",
+			sessionId: "session-2",
+			connectionId: "conn-3",
+			streamId: "stream-c",
+		});
+
+		registry.register(deviceA);
+		registry.register(deviceB);
+		registry.register(otherSession);
+
+		// Cross-device fan-out sees both co-attached devices, not just the creator's bucket.
+		expect(new Set(registry.entriesForConversationKey("alpha", "session-1"))).toEqual(new Set([deviceA, deviceB]));
+		// The single-client lookup only sees its own node id.
+		expect(registry.entriesForConversation("client-a", "alpha", "session-1")).toEqual([deviceA]);
+		expect(registry.entriesForConversationKey("alpha", "session-2")).toEqual([otherSession]);
+	});
+
 	test("takes conversation entries for replacement without touching unrelated streams", () => {
 		const registry = new IrohRemoteActiveStreamRegistry();
 		const staleConversation = makeEntry({ connectionId: "conn-1", streamId: "stream-stale" });

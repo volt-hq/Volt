@@ -98,12 +98,14 @@ function parseIrohRemoteWorkspaceUnregisterName(
 	if (command.path !== undefined || command.workspacePath !== undefined) {
 		return { ok: false, error: "Workspace unregister accepts a workspace name only, not a path" };
 	}
-	if (typeof command.name !== "string") {
-		return { ok: false, error: 'Invalid RPC command payload: "name" must be a non-empty workspace name' };
+	// The wire contract (iroh-remote-protocol.md) uses `workspaceName`, matching the
+	// workspaceManagement stream; the legacy `name` field is not part of the protocol.
+	if (typeof command.workspaceName !== "string") {
+		return { ok: false, error: 'Invalid RPC command payload: "workspaceName" must be a non-empty workspace name' };
 	}
-	const name = command.name.trim();
+	const name = command.workspaceName.trim();
 	if (name.length === 0) {
-		return { ok: false, error: 'Invalid RPC command payload: "name" must be a non-empty workspace name' };
+		return { ok: false, error: 'Invalid RPC command payload: "workspaceName" must be a non-empty workspace name' };
 	}
 	return { ok: true, value: name };
 }

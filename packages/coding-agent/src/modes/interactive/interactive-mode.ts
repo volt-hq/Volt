@@ -1979,6 +1979,12 @@ export class InteractiveMode {
 				);
 				await writeIrohRemoteHandshakeResponse(relayedStream.send, handshakeResponse);
 
+				// The relayed runtime's session id can change in place (resume/new/fork
+				// over the same relay). Track the rolling id so each rekey passes the
+				// correct previous id; the immutable offer.sessionId would be stale after
+				// the first change and the daemon's lookup would silently no-op, leaving
+				// the lease keyed on an old session id.
+				let relayedSessionId = offer.sessionId;
 				await runIrohRemoteRpcMode(this.runtimeHost, {
 					stream: relayedStream,
 					disposeRuntimeOnClose: false,
@@ -2025,7 +2031,8 @@ export class InteractiveMode {
 						);
 					},
 					onSessionChanged: async (session) => {
-						await this.daemonAttach.rekey(offer.sessionId, session.sessionId);
+						await this.daemonAttach.rekey(relayedSessionId, session.sessionId);
+						relayedSessionId = session.sessionId;
 					},
 				});
 			} catch {

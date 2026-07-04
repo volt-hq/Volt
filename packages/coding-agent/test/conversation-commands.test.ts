@@ -167,8 +167,9 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		expect(response.data.sessions).toEqual([]);
 	});
 
-	it("runs the host cleanup hook after a successful workspace unregister only", async () => {
+	it("only unregisters the stream-bound workspace and runs the cleanup hook", async () => {
 		const stateManager = new IrohRemoteHostStateManager();
+		await stateManager.upsertWorkspace({ name: "ws", path: "/tmp/ws" });
 		await stateManager.upsertWorkspace({ name: "other", path: "/tmp/other" });
 		const cleanedUp: string[] = [];
 		const context = createContext({
@@ -178,22 +179,34 @@ describe("handleIntegratedConversationRpcCommand", () => {
 			},
 		});
 
-		const missing = (await handleIntegratedConversationRpcCommand(
-			{ id: "8", type: "unregister_workspace", name: "missing" },
+		// A client bound to "ws" may not unregister an unrelated workspace by name.
+		const otherWorkspace = (await handleIntegratedConversationRpcCommand(
+			{ id: "8", type: "unregister_workspace", workspaceName: "other" },
 			createAuthorization(),
 			context,
 			createRuntime(),
 		)) as Record<string, unknown>;
-		expect(missing).toMatchObject({ success: false });
+		expect(otherWorkspace).toMatchObject({ success: false, error: "session_mismatch" });
 		expect(cleanedUp).toEqual([]);
 
+		// The legacy/undocumented `name` field is not honored; only `workspaceName` is.
+		const legacyField = (await handleIntegratedConversationRpcCommand(
+			{ id: "9", type: "unregister_workspace", name: "ws" },
+			createAuthorization(),
+			context,
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(legacyField).toMatchObject({ success: false, error: "session_mismatch" });
+		expect(cleanedUp).toEqual([]);
+
+		// Unregistering the bound workspace succeeds and fires the cleanup hook for it.
 		const removed = (await handleIntegratedConversationRpcCommand(
-			{ id: "9", type: "unregister_workspace", name: "other" },
+			{ id: "10", type: "unregister_workspace", workspaceName: "ws" },
 			createAuthorization(),
 			context,
 			createRuntime(),
 		)) as Record<string, unknown>;
 		expect(removed).toMatchObject({ success: true });
-		expect(cleanedUp).toEqual(["other"]);
+		expect(cleanedUp).toEqual(["ws"]);
 	});
 });

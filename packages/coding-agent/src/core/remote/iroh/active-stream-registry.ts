@@ -78,6 +78,16 @@ export class IrohRemoteActiveStreamRegistry {
 		return this.entriesForWorkspace(clientNodeId, workspaceName).filter((entry) => entry.sessionId === sessionId);
 	}
 
+	/**
+	 * All streams bound to (workspaceName, sessionId) regardless of client node id.
+	 * A single conversation runtime is shared by co-attached devices, so cross-device
+	 * fan-out (e.g. live workflow events) must span every client's bucket, not just
+	 * the runtime creator's.
+	 */
+	entriesForConversationKey(workspaceName: string, sessionId: string): IrohRemoteActiveStreamEntry[] {
+		return this.entriesForWorkspaceName(workspaceName).filter((entry) => entry.sessionId === sessionId);
+	}
+
 	takeEntriesForConversation(
 		clientNodeId: string,
 		workspaceName: string,

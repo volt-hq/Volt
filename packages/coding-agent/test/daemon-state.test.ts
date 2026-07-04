@@ -144,4 +144,22 @@ describe("voltd state migration", () => {
 		expect(parsed.irohSecretKey).toEqual(SECRET_KEY_BYTES);
 		expect(store.getHostState().hostSecretKey).toEqual(SECRET_KEY_BYTES);
 	});
+
+	it("recovers from an unparseable state file instead of failing to load", async () => {
+		mkdirSync(join(agentDir, "daemon"), { recursive: true });
+		writeFileSync(statePath, "{ this is : not valid json");
+
+		const store = new VoltdStateStore({ agentDir, statePath, debounceMs: 1 });
+		const result = await store.load();
+
+		// The daemon starts from empty state rather than throwing (which would brick it).
+		expect(result.migratedFromLegacyState).toBe(false);
+		expect(result.recoveredFromCorruptStatePath).toBeDefined();
+		expect(result.state.clients).toEqual([]);
+		expect(result.state.workspaces).toEqual([]);
+		// The bad file was quarantined, and state.json now holds valid, reparseable state.
+		expect(existsSync(result.recoveredFromCorruptStatePath as string)).toBe(true);
+		expect(() => parseVoltdState(JSON.parse(readFileSync(statePath, "utf8")))).not.toThrow();
+		await store.close();
+	});
 });

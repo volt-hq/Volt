@@ -11,7 +11,10 @@ import {
 	sanitizeIrohRemoteTranscriptText,
 } from "../core/remote/iroh/transcript-text.ts";
 import { getIrohRemoteWorkspaceAvailabilityStatus } from "../core/remote/iroh/workspace.ts";
-import { handleIrohRemoteWorkspaceUnregisterRpcCommand } from "../core/remote/iroh/workspace-rpc.ts";
+import {
+	handleIrohRemoteWorkspaceUnregisterRpcCommand,
+	IROH_REMOTE_UNREGISTER_WORKSPACE_RPC_TYPE,
+} from "../core/remote/iroh/workspace-rpc.ts";
 import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../core/session-manager.ts";
 
 export const INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES: ReadonlySet<string> = new Set([
@@ -1293,6 +1296,17 @@ export async function handleRemoteHostRpcCommand(
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	context: ConversationCommandContext,
 ): Promise<object | undefined> {
+	if (command.type === IROH_REMOTE_UNREGISTER_WORKSPACE_RPC_TYPE) {
+		// Conversation and relay unregister is scoped to the stream-bound workspace:
+		// the documented `workspaceName` must be present and equal the authorized
+		// workspace, so a client cannot unregister an unrelated registered workspace
+		// by name. The relay path bypasses getIntegratedConversationIdentityError, so
+		// this is the authoritative scope check for it; the dedicated
+		// workspaceManagement stream enforces the same rule (workspace-streams.ts).
+		if (typeof command.workspaceName !== "string" || command.workspaceName !== authorization.workspace.name) {
+			return createIrohRemoteRpcErrorResponse(getRpcResponseId(command), command.type, "session_mismatch");
+		}
+	}
 	let result: Awaited<ReturnType<typeof handleIrohRemoteWorkspaceUnregisterRpcCommand>>;
 	try {
 		result = await handleIrohRemoteWorkspaceUnregisterRpcCommand(command, {
@@ -1312,14 +1326,14 @@ export async function handleRemoteHostRpcCommand(
 	if (result.metadata) {
 		updateAuthorizationWorkspaceMetadata(authorization, result.metadata);
 	}
-	if (result.response.success === true && typeof command.name === "string") {
-		context.hostEngine?.clearPairingSecretForWorkspace(command.name);
-		await context.onWorkspaceUnregistered?.(command.name);
+	if (result.response.success === true) {
+		context.hostEngine?.clearPairingSecretForWorkspace(authorization.workspace.name);
+		await context.onWorkspaceUnregistered?.(authorization.workspace.name);
 	}
 	await logAudit(context.auditLogger, {
 		type: "workspace_unregistered",
 		clientNodeId: authorization.client.nodeId,
-		workspace: typeof command.name === "string" ? command.name : undefined,
+		workspace: authorization.workspace.name,
 		success: result.response.success === true,
 		error: result.response.success === true ? undefined : result.response.error,
 		details: { source: "remote_rpc" },

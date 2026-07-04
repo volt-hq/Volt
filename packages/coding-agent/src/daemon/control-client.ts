@@ -87,6 +87,9 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 
 	let state: DaemonClientConnectionState = "reconnecting";
 	let socket: Socket | undefined;
+	// The socket for an in-flight dial (before hello_ack promotes it to `socket`).
+	// Tracked so close() can destroy a mid-handshake dial instead of leaking it.
+	let dialing: Socket | undefined;
 	let serverInfo: { version?: string; protocolVersion?: number; connectionId?: string } | undefined;
 	let closed = false;
 	let goneReason: DaemonClientGoneReason | undefined;
@@ -150,6 +153,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 		}
 		connectPromise = new Promise<void>((resolve, reject) => {
 			const dialed = createConnection(options.socketPath);
+			dialing = dialed;
 			const decoder = new ControlLineDecoder();
 			let acked = false;
 			let dialSettled = false;
@@ -165,6 +169,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 				dialSettled = true;
 				clearTimeout(helloTimer);
 				connectPromise = undefined;
+				dialing = undefined;
 				dialed.destroy();
 				if (fatalReason) {
 					closed = true;
@@ -213,9 +218,21 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 							);
 							return;
 						}
+						if (closed) {
+							// close() ran while this dial was mid-handshake. Do not adopt
+							// the socket or flip to "connected"; drop the late ack and the
+							// now-orphaned connection instead of leaking it.
+							dialSettled = true;
+							clearTimeout(helloTimer);
+							connectPromise = undefined;
+							dialing = undefined;
+							dialed.destroy();
+							return;
+						}
 						acked = true;
 						dialSettled = true;
 						clearTimeout(helloTimer);
+						dialing = undefined;
 						socket = dialed;
 						serverInfo = {
 							version: ack.version,
@@ -407,6 +424,11 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 			failPending();
 			socket?.destroy();
 			socket = undefined;
+			// Destroy a dial that is still mid-handshake; otherwise a late hello_ack
+			// would leave a live, owner-less daemon connection open.
+			dialing?.destroy();
+			dialing = undefined;
+			connectPromise = undefined;
 			setState("gone");
 		},
 	};

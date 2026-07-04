@@ -1355,9 +1355,7 @@ class IrohDaemonService {
 		sessionId: string,
 		reason: string,
 	): Promise<number> {
-		const entries = this.activeStreams
-			.entriesForWorkspaceName(workspaceName)
-			.filter((entry) => entry.sessionId === sessionId);
+		const entries = this.activeStreams.entriesForConversationKey(workspaceName, sessionId);
 		for (const entry of entries) {
 			this.activeStreams.unregister(entry);
 			await Promise.resolve(entry.close(reason)).catch(() => {});

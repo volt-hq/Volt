@@ -130,7 +130,15 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	const state = new VoltdStateStore({ agentDir, statePath: paths.statePath });
 	let migratedFromLegacyState = false;
 	try {
-		migratedFromLegacyState = (await state.load()).migratedFromLegacyState;
+		const loadResult = await state.load();
+		migratedFromLegacyState = loadResult.migratedFromLegacyState;
+		if (loadResult.recoveredFromCorruptStatePath) {
+			log(
+				"error",
+				`state file was unparseable and was quarantined to ${loadResult.recoveredFromCorruptStatePath}; ` +
+					`started from empty state (Iroh identity and paired clients were reset, phones must pair again)`,
+			);
+		}
 	} catch (error) {
 		log("error", `failed to load state: ${error instanceof Error ? error.message : String(error)}`);
 		return 1;

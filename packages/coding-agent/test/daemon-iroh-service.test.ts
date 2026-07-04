@@ -265,8 +265,8 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		});
 		expect(unknownClient.type).toBe("error");
 
-		// unregister_workspace over relay_rpc removes the workspace from daemon
-		// state and reports refreshed workspace metadata for the TUI.
+		// unregister_workspace over relay_rpc is scoped to the bound workspace and only
+		// honors the documented `workspaceName` field.
 		const scratchWorkspaceDir = join(agentDir, "ws2");
 		mkdirSync(scratchWorkspaceDir, { recursive: true });
 		const scratchRegistered = await control.request({
@@ -275,12 +275,40 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 			path: scratchWorkspaceDir,
 		});
 		expect(scratchRegistered.type).toBe("ok");
-		const workspaceUnregister = await control.request({
+
+		// A relay bound to "ws" cannot unregister the unrelated workspace "ws2".
+		const crossWorkspaceUnregister = await control.request({
 			type: "relay_rpc",
 			clientNodeId: pairedClientNodeId,
 			workspaceName: "ws",
 			sessionId: "s-relay",
-			command: { type: "unregister_workspace", id: "uw-1", name: "ws2" },
+			command: { type: "unregister_workspace", id: "uw-x", workspaceName: "ws2" },
+		});
+		expect(crossWorkspaceUnregister.type).toBe("relay_rpc_result");
+		if (crossWorkspaceUnregister.type === "relay_rpc_result") {
+			expect(crossWorkspaceUnregister.response).toMatchObject({ success: false, error: "session_mismatch" });
+		}
+
+		// The legacy/undocumented `name` field is not honored.
+		const legacyFieldUnregister = await control.request({
+			type: "relay_rpc",
+			clientNodeId: pairedClientNodeId,
+			workspaceName: "ws2",
+			sessionId: "s-relay",
+			command: { type: "unregister_workspace", id: "uw-y", name: "ws2" },
+		});
+		expect(legacyFieldUnregister.type).toBe("relay_rpc_result");
+		if (legacyFieldUnregister.type === "relay_rpc_result") {
+			expect(legacyFieldUnregister.response).toMatchObject({ success: false, error: "session_mismatch" });
+		}
+
+		// A relay bound to "ws2" may unregister "ws2" and reports refreshed metadata.
+		const workspaceUnregister = await control.request({
+			type: "relay_rpc",
+			clientNodeId: pairedClientNodeId,
+			workspaceName: "ws2",
+			sessionId: "s-relay",
+			command: { type: "unregister_workspace", id: "uw-1", workspaceName: "ws2" },
 		});
 		expect(workspaceUnregister.type).toBe("relay_rpc_result");
 		if (workspaceUnregister.type === "relay_rpc_result") {

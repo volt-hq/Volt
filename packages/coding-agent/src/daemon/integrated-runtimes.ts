@@ -186,6 +186,15 @@ export class IntegratedRuntimeRegistry {
 			const existing = this.findOwner(authorization.workspace.name, targetSessionId);
 			if (existing) {
 				if (!shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization(authorization)) {
+					// Reattach recognized: cancel the pending detached-runtime TTL sweep
+					// synchronously, before the caller's multi-await commit window. The
+					// broker flips to daemon-active immediately (commitDaemonRuntime) but
+					// attachSubscriber (which normally cancels retention) only runs after
+					// several awaits; if the TTL timer elapsed in that window it would
+					// dispose this very runtime mid-reattach (use-after-dispose + split
+					// lease/registry ownership). detachedAt stays set so attachSubscriber
+					// still logs the reattach and a pre-subscriber failure re-arms retention.
+					this.cancelRetention(existing);
 					const requestedSessionId =
 						handshake.hello.mode === "conversation" && handshake.hello.conversation.target === "session"
 							? targetSessionId
@@ -411,6 +420,12 @@ export class IntegratedRuntimeRegistry {
 			return;
 		}
 		if (entry.detachedAt !== undefined) {
+			// Already detached. A reattach that cancelled retention but then failed
+			// before attachSubscriber ran can leave a detached entry with no timer;
+			// re-arm so it is still swept at TTL rather than lingering forever.
+			if (!entry.detachedRuntimeRetention) {
+				this.scheduleRetention(entry, reason);
+			}
 			return;
 		}
 		entry.detachedAt = Date.now();
@@ -627,11 +642,10 @@ export class IntegratedRuntimeRegistry {
 		excludedActiveStreamEntry: IntegratedRuntimeStreamWriter | undefined,
 	): Promise<void> {
 		this.recordWorkflowEvent(entry, event);
-		const activeStreams = this.options.activeStreams.entriesForConversation(
-			entry.clientNodeId,
-			entry.workspaceName,
-			entry.sessionId,
-		);
+		// Fan out across every co-attached device on this conversation, not just the
+		// runtime creator's clientNodeId — the runtime is shared by (workspace, session),
+		// so a second paired device must also receive live workflow events.
+		const activeStreams = this.options.activeStreams.entriesForConversationKey(entry.workspaceName, entry.sessionId);
 		await Promise.allSettled(
 			activeStreams
 				.filter((activeStream) => activeStream !== excludedActiveStreamEntry && activeStream.write)

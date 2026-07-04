@@ -1215,6 +1215,13 @@ export class AgentSession {
 			// Check if we need to compact before sending (catches aborted responses)
 			const lastAssistant = this._findLastAssistantMessage();
 			if (lastAssistant && (await this._checkCompaction(lastAssistant, false))) {
+				// dispose() can land during the _checkCompaction await (teardown does not
+				// wait for idle). agent.continue() mints a fresh, non-aborted controller,
+				// so it must not run on a disposed generation — mirrors the _disposed
+				// guards in _runAgentPrompt/_handlePostAgentRun (stale-runner-inertness).
+				if (this._disposed) {
+					return;
+				}
 				try {
 					await this.agent.continue();
 					while (await this._handlePostAgentRun()) {
