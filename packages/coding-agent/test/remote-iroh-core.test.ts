@@ -2869,7 +2869,7 @@ describe("Iroh remote core helpers", () => {
 			});
 
 			const result = await handleIrohRemoteWorkspaceUnregisterRpcCommand(
-				{ id: "remove-beta", type: "unregister_workspace", name: "beta" },
+				{ id: "remove-beta", type: "unregister_workspace", workspaceName: "beta" },
 				{
 					classifyWorkspaceAvailability: getIrohRemoteWorkspaceAvailabilityStatus,
 					stateManager,
@@ -2923,7 +2923,7 @@ describe("Iroh remote core helpers", () => {
 
 		await expect(
 			handleIrohRemoteWorkspaceUnregisterRpcCommand(
-				{ id: "remove-missing", type: "unregister_workspace", name: "missing" },
+				{ id: "remove-missing", type: "unregister_workspace", workspaceName: "missing" },
 				{ stateManager },
 			),
 		).resolves.toEqual({
@@ -2939,7 +2939,7 @@ describe("Iroh remote core helpers", () => {
 		expect(await stateManager.getState()).toEqual(before);
 		await expect(
 			handleIrohRemoteWorkspaceUnregisterRpcCommand(
-				{ id: "remove-path", type: "unregister_workspace", name: "alpha", path: "/alpha" },
+				{ id: "remove-path", type: "unregister_workspace", workspaceName: "alpha", path: "/alpha" },
 				{ stateManager },
 			),
 		).resolves.toEqual({
@@ -3646,7 +3646,7 @@ describe("Iroh remote core helpers", () => {
 			forwardedLines.push(line);
 		});
 
-		inner.emitLine(JSON.stringify({ id: "remove-beta", type: "unregister_workspace", name: "beta" }));
+		inner.emitLine(JSON.stringify({ id: "remove-beta", type: "unregister_workspace", workspaceName: "beta" }));
 		const getStateLine = JSON.stringify({ id: "state-after-remove", type: "get_state" });
 		inner.emitLine(getStateLine);
 		inner.emitLine(JSON.stringify({ id: "unsafe", type: "bash", command: "pwd" }));
