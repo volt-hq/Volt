@@ -558,7 +558,19 @@ export class IntegratedRuntimeRegistry {
 		entry.sessionId = nextSessionId;
 		entry.key = nextKey;
 		this.entries.set(nextKey, entry);
+		// Re-key EVERY stream bound to the old conversation id, not just the one
+		// that drove this session change. Workflow-event fan-out matches streams by
+		// the runtime's current sessionId, so a co-attached device left on the stale
+		// id would be silently dropped from all future events.
+		for (const stream of this.options.activeStreams.entriesForConversationKey(
+			entry.workspaceName,
+			previousSessionId,
+		)) {
+			stream.sessionId = nextSessionId;
+		}
 		if (activeStreamEntry) {
+			// Defensive: the driving stream is normally already in the registry, but
+			// keep it consistent even if this runs before it was registered.
 			activeStreamEntry.sessionId = nextSessionId;
 		}
 		await this.logEntryAudit(entry, "remote_runtime_session_changed", {
