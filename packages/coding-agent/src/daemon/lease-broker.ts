@@ -463,16 +463,27 @@ export class LeaseBroker {
 		if (!record) {
 			return;
 		}
+		const newKey = getLeaseKey(workspaceName, newSessionId);
+		const displaced = this.records.get(newKey);
+		if (displaced) {
+			// The target session id already has its own lease record. A destructive
+			// rekey would either orphan `record` (its old key removed but never
+			// re-inserted) or silently drop the live `displaced` record from all
+			// lease accounting, stranding its runtime/streams/relays. Refuse instead
+			// and leave both records on their current keys; the caller re-acquires
+			// under the new id on its next reconnect.
+			this.effects.audit({
+				type: "lease_denied",
+				workspaceName,
+				sessionId: newSessionId,
+				details: { reason: "rekey_target_in_use", oldSessionId, displacedState: displaced.state },
+			});
+			return;
+		}
 		this.records.delete(record.key);
 		record.sessionId = newSessionId;
-		record.key = getLeaseKey(workspaceName, newSessionId);
-		const displaced = this.records.get(record.key);
-		if (displaced && displaced.state === "tui-owned") {
-			// The rekey target is already tui-owned elsewhere; keep the displaced record.
-			this.records.set(record.key, displaced);
-		} else {
-			this.records.set(record.key, record);
-		}
+		record.key = newKey;
+		this.records.set(newKey, record);
 		if (record.state === "tui-owned" && record.relayIds.size > 0) {
 			this.effects.closeRelays(record, "session_rekeyed_reconnect");
 			record.relayIds.clear();
