@@ -164,11 +164,15 @@ export async function verifyPidfileProcess(
 		// otherwise it is alive but unverifiable — refuse to signal it.
 		return isProcessAlive(pidfile.pid) === "gone" ? "gone" : "mismatch";
 	}
-	if (
+	// A match REQUIRES verifying the process start time against the pidfile, not
+	// just a voltd-looking command line. Without that check (a legacy pidfile
+	// missing startedAtMs, or the OS not reporting a start time) a recycled pid
+	// whose command line merely contains a voltd marker must not be signalled.
+	const startTimeVerified =
 		identity.startTimeMs !== undefined &&
 		pidfile.startedAtMs > 0 &&
-		Math.abs(identity.startTimeMs - pidfile.startedAtMs) > toleranceMs
-	) {
+		Math.abs(identity.startTimeMs - pidfile.startedAtMs) <= toleranceMs;
+	if (!startTimeVerified) {
 		return "mismatch";
 	}
 	return commandLineLooksLikeVoltd(identity.commandLine) ? "match" : "mismatch";
