@@ -17,6 +17,14 @@ import type { IrohRemoteWorkspaceAvailabilityClassifier, IrohRemoteWorkspaceStat
 
 export const DEFAULT_IROH_REMOTE_PAIRING_SECRET_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
+// A re-pair approval for a revoked client is a standing grant to consume a
+// pairing secret again. Bound it so a stale, unused approval cannot silently
+// hijack an unrelated pairing ticket minted much later for a different device;
+// the approval is otherwise cleared only when the revoked client actually
+// re-pairs. The window comfortably covers a deliberate approve -> mint ticket
+// -> scan operator flow.
+export const DEFAULT_IROH_REMOTE_RE_PAIR_APPROVAL_TTL_MS = 30 * 60 * 1000;
+
 export interface AuthorizeIrohRemoteClientOptions {
 	allowTools: string;
 	classifyWorkspaceAvailability?: IrohRemoteWorkspaceAvailabilityClassifier;
@@ -103,8 +111,11 @@ export function authorizeIrohRemoteClient(
 		matchingExpiredPairingTicket !== undefined ||
 		matchingExpiredPairingSecret !== undefined;
 	const expiredResultTickets = expiredPairingTickets.length > 0 ? expiredPairingTickets : undefined;
-	const hasActivePairingSecretForRevokedClient =
+	const rePairApprovalActive =
 		revokedClient?.rePairApprovedAt !== undefined &&
+		now - revokedClient.rePairApprovedAt <= DEFAULT_IROH_REMOTE_RE_PAIR_APPROVAL_TTL_MS;
+	const hasActivePairingSecretForRevokedClient =
+		rePairApprovalActive &&
 		hasPairingSecret &&
 		!pairingSecretExpired &&
 		matchingConsumedPairingSecret === undefined &&
