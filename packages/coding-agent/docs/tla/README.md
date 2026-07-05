@@ -13,9 +13,9 @@ executable description of the rules; a checker (TLC) then explores **every**
 reachable interleaving and reports the first one that breaks a rule. It's a way
 to test the *design* exhaustively before trusting it in code.
 
-We build it one piece at a time, hardest-and-most-valuable first. The first
-piece — the conversation **lease broker** — is written and reviewed; the rest
-are planned below.
+All six modules are now written and model-checked green with TLC. The suite spans
+the daemon, the TUI, and the phone; each module is checkable on its own in seconds
+via `./check.sh <Module>`.
 
 > Keep these files beside the RFC (`docs/live-shared-session-daemon-design.md`).
 > When the design changes, change the model first, watch the check break, then
@@ -30,9 +30,9 @@ are planned below.
 | **`LeaseBroker`** | Who holds a conversation (daemon vs terminal) and how it hands off. | **Verified green** (40,804 states). `LeaseBroker.tla` / `.cfg` |
 | **`RelayViewer`** | The relay token + the "watch the turn finish" viewer feed during a hand-off. | **Verified green** (207,025 states). `RelayViewer.tla` / `.cfg` |
 | **`SessionTarget`** | Picking the right session on connect, so a phone never pins the wrong one. | **Verified green** (28 states). `SessionTarget.tla` / `.cfg` |
-| `ClientAuth` | Pairing, revoking, and re-pairing a phone. | Planned |
-| `ClientConn` | The phone's own connect / reconnect / detach / abort behavior. | Planned |
-| `PushOrdering` | Push + Live Activity registration must happen in the right order. | Planned |
+| **`ClientAuth`** | Pairing, revoking, and re-pairing a phone. | **Verified green** (9,678 states). `ClientAuth.tla` / `.cfg` |
+| **`ClientConn`** | The phone's own connect / reconnect / detach / abort behavior. | **Verified green** (176 states). `ClientConn.tla` / `.cfg` |
+| **`PushOrdering`** | Push + Live Activity registration must happen in the right order. | **Verified green** (63 states). `PushOrdering.tla` / `.cfg` |
 
 **Running the checker.** `./check.sh` runs TLC on `LeaseBroker` (it auto-downloads
 `tla2tools.jar` on first run; needs a JDK 17+ via `JAVA_HOME` or `java` on PATH).

@@ -118,7 +118,14 @@ resolve → validate → commit/reject pipeline, checking `NoGhostSession`,
 **Liveness** — `HandshakeTerminates` (every valid target reaches exactly one of
 `PinCommitted` / `RolledBack`; no partial pin persists), `RekeySurfacesToClient`.
 
-### 3.4 `ClientAuth`
+### 3.4 `ClientAuth` — written + verified green
+
+Implemented in `ClientAuth.tla` (9,678 states). Models the host authorization
+decision (`authorization.ts`) evolving through pair / revoke / approve-re-pair /
+expire-secret and a clock that moves backwards, checking `NoIllegitimatePairing`
+(covers revoked re-entry, one-time-secret replay by another node, expired-secret
+pairing, and the fail-closed backwards-clock case) and `WorkspacePerRequest`. The
+prose below is the original design intent.
 
 **Safety**
 
@@ -143,7 +150,14 @@ resolve → validate → commit/reject pipeline, checking `NoGhostSession`,
 and assert `RevokedNeedsApprovedRePair` still holds — a future-dated approval must
 fail closed. **Liveness** — `PendingTicketResolves`, `TombstonesReclaimed`.
 
-### 3.5 `ClientConn`
+### 3.5 `ClientConn` — written + verified green
+
+Implemented in `ClientConn.tla` (176 states). Models the phone reconnect loop and
+network-path handling, checking `SingleReconnectDial` (the anti-double-loop race:
+a network blip during a dial never spawns a second concurrent dial),
+`UserDiscSuppresses`, `TerminalAbsorbing`, and `AbortKeepsLive`. The generation
+guards, snapshots, and backoff timing are abstracted; the prose below is the fuller
+design intent.
 
 **Safety**
 
@@ -171,7 +185,13 @@ fail closed. **Liveness** — `PendingTicketResolves`, `TombstonesReclaimed`.
 to `LeaseBroker`/`RelayViewer` close reasons), `BoundedRetryLoops` (duplicate ≤5,
 lease_draining ≤3 both terminate).
 
-### 3.6 `PushOrdering`
+### 3.6 `PushOrdering` — written + verified green
+
+Implemented in `PushOrdering.tla` (63 states). Models the phone/daemon two-phase
+registration, checking `OrderingGate` (the daemon never registers a Live Activity
+without a matching stored delivery channel), `SendAfterConfirm` (the phone never
+sends the LA registration before its channel is confirmed), and
+`StaleChannelInvalidated`. The prose below is the original design intent.
 
 **Safety**
 
