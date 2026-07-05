@@ -235,14 +235,14 @@ DrainDispose(k) ==
             /\ owner' = owner
     /\ UNCHANGED << relayCount, runtimeStreaming, disposePending, drainCancelled, pendingAttaches >>
 
-\* runDrain step 2 ERROR: dispose/closePhoneStreams throw.  (lease-broker.ts L388-407)
-\*   cancelled -> unowned  *** and record.streamCount is NEVER zeroed here ***
+\* runDrain step 2 ERROR: dispose/closePhoneStreams throw.  (lease-broker.ts L388-408)
+\*   cancelled -> unowned, streamCount zeroed so the record is droppable
 \*   else       -> revert to daemon-*, reject grant, runtime still alive.
 \*
-\* The cancelled branch deliberately does NOT zero streamCount, faithfully
-\* reproducing the real bug at lease-broker.ts ~L399 (the sibling success path
-\* L409 zeroes it; this catch branch does not).  With that leak present,
-\* NoStreamLeak (below, off by default in the .cfg) yields a counterexample.
+\* The cancelled branch zeroes streamCount (the lease-broker.ts fix): without it the
+\* record would be stranded as an undroppable "unowned" ghost carrying a phantom
+\* stream count, since dropIfUnowned requires streamCount === 0.  NoStreamLeak
+\* (below, in the baseline .cfg) guards this.
 DrainDisposeError(k) ==
     /\ Lease[k] = "daemon-draining"
     /\ drainPhase[k] = "disposing"
@@ -252,12 +252,13 @@ DrainDisposeError(k) ==
     /\ \/ /\ drainCancelled[k] = TRUE
           /\ Lease'        = [Lease        EXCEPT ![k] = "unowned"]
           /\ runtimeEntry' = [runtimeEntry EXCEPT ![k] = FALSE]
-          \* streamCount intentionally UNCHANGED here -> the leak.
+          /\ streamCount'  = [streamCount  EXCEPT ![k] = 0]
        \/ /\ drainCancelled[k] = FALSE
           /\ Lease'        = [Lease EXCEPT ![k] = IF streamCount[k] > 0 THEN "daemon-active"
                                                                         ELSE "daemon-detached"]
           /\ runtimeEntry' = runtimeEntry
-    /\ UNCHANGED << streamCount, relayCount, runtimeStreaming, disposePending,
+          /\ streamCount'  = streamCount
+    /\ UNCHANGED << relayCount, runtimeStreaming, disposePending,
                     drainCancelled, pendingAttaches >>
 
 \* cancelDrain while WAITING (releaseFromTui change-of-mind, or the owner's
@@ -518,14 +519,11 @@ DrainNoNewTurn ==
     \A k \in Keys :
         (Lease[k] = "daemon-draining" /\ drainPhase[k] = "disposing") => (runtimeStreaming[k] = FALSE)
 
-\* --- Bug detector (OFF in the default .cfg; turn it on to reproduce the leak) ---
-\* A positive stream count implies a live daemon runtime backing it.  This FAILS
-\* on the real implementation bug: DrainDisposeError's cancelled branch drops the
-\* lease to "unowned" without zeroing record.streamCount (lease-broker.ts ~L399),
-\* so an unowned/tui-owned key can carry a phantom stream count -- and because
-\* dropIfUnowned requires streamCount === 0, that record can never be dropped.
-\* Fix the code (zero streamCount in that catch branch), then enable this invariant
-\* in LeaseBroker.cfg to keep it fixed.
+\* A positive stream count implies a live daemon runtime backing it.  Guards the
+\* lease-broker.ts fix: the cancelled + disposal-error branch of runDrain must zero
+\* record.streamCount, or an "unowned" key keeps a phantom count and (since
+\* dropIfUnowned requires streamCount === 0) becomes an undroppable ghost.  Enabled
+\* in the baseline LeaseBroker.cfg.
 NoStreamLeak ==
     \A k \in Keys : (streamCount[k] > 0) => runtimeEntry[k]
 

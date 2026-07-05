@@ -396,6 +396,12 @@ export class LeaseBroker {
 				record.tuiConnectionId = undefined;
 			}
 			if (drain.cancelled) {
+				// Zero the stream count before dropping. dropIfUnowned requires
+				// streamCount === 0, so leaving it stale here (the success path resets it
+				// at the bottom of runDrain, but this early return skips that) would
+				// strand the record in `records` as an undroppable "unowned" ghost that
+				// then hands a phantom stream count to the next acquire.
+				record.streamCount = 0;
 				record.state = "unowned";
 				this.dropIfUnowned(record);
 			} else {

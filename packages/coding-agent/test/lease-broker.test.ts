@@ -401,6 +401,69 @@ describe("LeaseBroker", () => {
 		expect(again).toEqual({ kind: "granted", handoff: "none" });
 	});
 
+	it("drops the lease when a cancelled drain then fails disposal", async () => {
+		// Regression: the cancelled + disposal-error branch of runDrain set the state
+		// to "unowned" but did not zero record.streamCount, so dropIfUnowned (which
+		// requires streamCount === 0) left an undroppable ghost record that handed a
+		// phantom stream count to the next acquire.
+		const streaming = new Set<string>(["s1"]);
+		let releaseIdle: () => void = () => {};
+		let rejectDispose: (error: Error) => void = () => {};
+		let disposeEntered: () => void = () => {};
+		const disposeEnteredPromise = new Promise<void>((resolve) => {
+			disposeEntered = resolve;
+		});
+		const drainEnded: string[] = [];
+		const broker = new LeaseBroker({
+			isRuntimeStreaming: () => streaming.has("s1"),
+			waitForRuntimeIdle: () =>
+				new Promise((resolve) => {
+					releaseIdle = resolve;
+				}),
+			disposeRuntime: () =>
+				new Promise<void>((_resolve, reject) => {
+					disposeEntered();
+					rejectDispose = reject;
+				}),
+			closePhoneStreams: () => {},
+			closeRelays: () => {},
+			onDrainEnded: (_record, _viewerFeedId, reason) => {
+				drainEnded.push(reason);
+			},
+			audit: () => {},
+		});
+		broker.onDaemonRuntimeAttached("ws", "s1");
+		broker.onDaemonRuntimeStreamCountChanged("ws", "s1", 1);
+
+		const outcome = await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "s1" });
+		expect(outcome.kind).toBe("pending");
+		const granted = outcome.kind === "pending" ? outcome.granted : Promise.reject(new Error("unreachable"));
+		const grantedRejected = vi.fn();
+		granted.catch(grantedRejected);
+
+		// The turn ends; runDrain passes its cancelled-check and enters disposal.
+		streaming.delete("s1");
+		releaseIdle();
+		await disposeEnteredPromise;
+
+		// The requesting TUI dies mid-disposal, then disposal itself fails.
+		broker.releaseAllForConnection("c-1");
+		rejectDispose(new Error("state-manager write failed"));
+		await new Promise((resolve) => setImmediate(resolve));
+		await new Promise((resolve) => setImmediate(resolve));
+
+		expect(grantedRejected).toHaveBeenCalled();
+		expect(drainEnded).toEqual(["cancelled"]);
+		// The record must be dropped, not stranded as an unowned ghost with a stale
+		// stream count.
+		expect(broker.lookup("ws", "s1")).toBeUndefined();
+
+		// A fresh acquire starts from a clean record (no phantom stream count).
+		const again = await broker.acquireForTui({ connectionId: "c-2", workspaceName: "ws", sessionId: "s1" });
+		expect(again).toEqual({ kind: "granted", handoff: "none" });
+		expect(broker.lookup("ws", "s1")?.streamCount).toBe(0);
+	});
+
 	it("drops the lease when the connection dies while an idle runtime is disposed during acquire", async () => {
 		let releaseDispose: () => void = () => {};
 		let disposeEntered: () => void = () => {};

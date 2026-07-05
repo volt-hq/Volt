@@ -47,15 +47,17 @@ Modeling `LeaseBroker` surfaced **two real issues** in `lease-broker.ts`, each
 reproduced by TLC as a concrete trace (both invariants ship in `LeaseBroker.tla`,
 off by default so the baseline stays green; add either to the `.cfg` to see it):
 
-**1 — `streamCount` leak (mechanical bug, one-line fix).**
-In `runDrain`'s disposal-error recovery (~L388–407), the cancelled branch drops
-the lease to `unowned` but **never zeroes `record.streamCount`** — unlike the
+**1 — `streamCount` leak (fixed).**
+In `runDrain`'s disposal-error recovery (~L388–408), the cancelled branch dropped
+the lease to `unowned` but **never zeroed `record.streamCount`** — unlike the
 success path (L409). Since `dropIfUnowned` requires `streamCount === 0`, the
-record can never be dropped: a leaked `unowned` ghost that hands a phantom stream
-count to the next acquirer. Detector: `NoStreamLeak`. TLC trace:
-`CommitDaemonAttach → PhoneStreamAttach → RuntimeStartTurn → AcquireDrainStart →
-DrainRuntimeIdle → DrainCancelDisposing → DrainDisposeError`, ending in `unowned`
-with `streamCount = 1`.
+record could never be dropped: a leaked `unowned` ghost that handed a phantom
+stream count to the next acquirer. TLC trace: `CommitDaemonAttach →
+PhoneStreamAttach → RuntimeStartTurn → AcquireDrainStart → DrainRuntimeIdle →
+DrainCancelDisposing → DrainDisposeError`, ending in `unowned` with
+`streamCount = 1`. **Fixed** in `lease-broker.ts` (zero `streamCount` in that catch
+branch) with a regression test; `NoStreamLeak` is now in the baseline `.cfg` so it
+stays fixed.
 
 **2 — turn killed on TUI open after the phone walks away (design gap).**
 `acquireForTui` only *drains* when the state is `daemon-active` (L296). But a turn
@@ -110,8 +112,8 @@ Each maps to a real prose invariant or a §4.8 race row. Names match
 | `DrainHasAcquirer` (I4) | A draining conversation always has a waiting acquirer and a live pump. |
 | `StreamingCoherent` | A turn only runs while the daemon owns a live runtime. |
 | `DrainNoNewTurn` (I6) | Once a hand-off is disposing, no new turn can start (the `lease_draining` rejection). |
-| `NoStreamLeak` | *(off by default)* a stream count implies a live runtime — **fails on finding 1.** |
-| `IdleAcquireOnlyWhenIdle` | *(off by default)* an idle-acquire never disposes a mid-turn runtime — **fails on finding 2.** |
+| `NoStreamLeak` | a stream count implies a live runtime — guards the finding-1 fix (in the baseline). |
+| `IdleAcquireOnlyWhenIdle` | *(off by default)* an idle-acquire never disposes a mid-turn runtime — **fails on finding 2** (design decision). |
 
 ### Properties checked (liveness, needs fairness)
 
