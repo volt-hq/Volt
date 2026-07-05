@@ -119,6 +119,7 @@
 
 ### Changed
 
+- Changed the default coding-agent prompt to use XML-delimited workflow, trust-boundary, and subagent-delegation guidance while preserving dynamic tool, project-context, skill, date, and working-directory injection.
 - Changed the built-in `general` subagent to inherit the parent tool posture while excluding `subagent`, preventing recursive delegation by default without dropping other active tools.
 - Changed nested subagent delegation to inherit the strictest ancestor `maxSubagentDepth` cap.
 - Changed chain-mode subagent delegation to cap chain length and substitute bounded, XML-escaped, untrusted-delimited prior step output instead of raw child output.
