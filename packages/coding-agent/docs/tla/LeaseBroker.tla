@@ -527,17 +527,16 @@ DrainNoNewTurn ==
 NoStreamLeak ==
     \A k \in Keys : (streamCount[k] > 0) => runtimeEntry[k]
 
-\* --- Design finding (OFF in the default .cfg) ---
-\* The idle-acquire path should only ever dispose a runtime that is NOT mid-turn.
-\* This FAILS: acquireForTui only DRAINS when the state is "daemon-active"
-\* (lease-broker.ts L296); for "daemon-detached" it falls through to immediate
-\* dispose even if a turn is still running.  A turn keeps running after the last
-\* phone detaches (RFC: "the prompt continues on the host"), so opening the TUI on
-\* a walked-away-but-still-running session disposes the runtime mid-turn -- killing
-\* the turn instead of draining it, unlike the phone-still-attached case.  Enable
-\* this invariant to see the trace (detach-mid-turn -> AcquireIdleFlip).  It is a
-\* design question to resolve in the RFC (should detached+streaming also drain?),
-\* not a mechanical one-line fix like NoStreamLeak.
+\* --- Documented INTENTIONAL behavior (OFF in the default .cfg) ---
+\* "An idle-acquire only ever disposes a runtime that is NOT mid-turn." This
+\* predicate INTENTIONALLY DOES NOT HOLD, by design (decided; see
+\* docs/live-shared-session-daemon-design.md §4.2). acquireForTui only DRAINS when
+\* the state is "daemon-active" (lease-broker.ts L296); a "daemon-detached" runtime
+\* still streaming a turn (the last phone left mid-turn) is disposed on TUI acquire,
+\* abandoning that turn -- once no device is receiving it, there is nothing to
+\* watch. It is kept OUT of the baseline and defined here only so the behavior is
+\* explicit and any FUTURE change back to "always drain" can be checked. Enable it
+\* to see the trace: detach-mid-turn -> AcquireIdleFlip.
 IdleAcquireOnlyWhenIdle ==
     \A k \in Keys : disposePending[k] => (runtimeStreaming[k] = FALSE)
 

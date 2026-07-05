@@ -59,15 +59,17 @@ DrainCancelDisposing → DrainDisposeError`, ending in `unowned` with
 branch) with a regression test; `NoStreamLeak` is now in the baseline `.cfg` so it
 stays fixed.
 
-**2 — turn killed on TUI open after the phone walks away (design gap).**
-`acquireForTui` only *drains* when the state is `daemon-active` (L296). But a turn
+**2 — turn killed on TUI open after the phone walks away (resolved: intended).**
+`acquireForTui` only *drains* when the state is `daemon-active` (L296). A turn
 keeps running after the last phone detaches (RFC: "the prompt continues on the
-host"), leaving a `daemon-detached` runtime that is still mid-turn. Opening the
-TUI then hits the immediate-dispose path and **kills the turn instead of draining
-it** — the code assumes "detached ⇒ idle," which is false. Detector:
-`IdleAcquireOnlyWhenIdle`. TLC trace: `RuntimeStartTurn → PhoneStreamDetach →
-AcquireIdleFlip`, reaching `tui-owned` with the turn still streaming. This one is
-a design decision (should detached-and-streaming also drain?), not a one-line fix.
+host"), leaving a `daemon-detached` runtime that is still mid-turn; opening the TUI
+then disposes it, killing that turn instead of draining it. The model surfaced this
+(`IdleAcquireOnlyWhenIdle`, TLC trace `RuntimeStartTurn → PhoneStreamDetach →
+AcquireIdleFlip`), and the decision came back: **this is intended** — once no
+device is receiving the turn there is nothing to watch, so it is abandonable (the
+same as closing a TUI mid-turn). Documented in the RFC §4.2 and the
+`lease-broker.ts` comment; `IdleAcquireOnlyWhenIdle` stays off in the baseline as a
+marker of that deliberate choice.
 
 ---
 
@@ -113,7 +115,7 @@ Each maps to a real prose invariant or a §4.8 race row. Names match
 | `StreamingCoherent` | A turn only runs while the daemon owns a live runtime. |
 | `DrainNoNewTurn` (I6) | Once a hand-off is disposing, no new turn can start (the `lease_draining` rejection). |
 | `NoStreamLeak` | a stream count implies a live runtime — guards the finding-1 fix (in the baseline). |
-| `IdleAcquireOnlyWhenIdle` | *(off by default)* an idle-acquire never disposes a mid-turn runtime — **fails on finding 2** (design decision). |
+| `IdleAcquireOnlyWhenIdle` | *(off by default)* an idle-acquire never disposes a mid-turn runtime — intentionally does **not** hold; detached turns are abandonable (RFC §4.2). |
 
 ### Properties checked (liveness, needs fairness)
 

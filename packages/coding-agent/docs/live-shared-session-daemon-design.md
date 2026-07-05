@@ -361,7 +361,7 @@ export interface LeaseBroker {
 |---|---|---|---|---|---|---|---|
 | **unowned** | → `tui-owned`, `lease_granted{handoff:"none"}` | n/a | daemon lazily resumes runtime from session file → `daemon-active` | n/a | n/a | n/a | n/a |
 | **daemon-active** | if `session.isStreaming`: → `daemon-draining` + `lease_pending{viewerFeedId}`; else immediate: dispose runtime (shutdown reason `"quit"`), → `tui-owned`, `lease_granted{handoff:"warm"}`, phone streams closed reason `lease_transferred` then re-routed as relays on reconnect | n/a | attach additional subscriber (multi-device) | → `daemon-detached`, start retention timer | n/a | n/a | rekey key, keep state |
-| **daemon-detached** | cancel timer; same as daemon-active acquire (runtime is idle by definition → immediate grant, `handoff:"warm"`) | n/a | cancel timer → `daemon-active` | n/a | dispose runtime (shutdown reason `"quit"`) → `unowned` | n/a | rekey key, keep state |
+| **daemon-detached** | cancel timer; dispose runtime + immediate grant `handoff:"warm"`. A turn still streaming on a detached runtime is intentionally abandoned, not drained (see note below) | n/a | cancel timer → `daemon-active` | n/a | dispose runtime (shutdown reason `"quit"`) → `unowned` | n/a | rekey key, keep state |
 | **daemon-draining** | same TUI conn: idempotent (same pending). Different TUI conn: `lease_denied{draining_elsewhere}` | pending TUI conn lost: cancel drain → `daemon-active` (or `daemon-detached` if 0 streams); viewer feed ends `viewer_end{reason:"cancelled"}` | attach subscriber; prompt-class commands rejected `lease_draining` (§4.5) | stream count may hit 0; stay `daemon-draining` (drain completes regardless) | timer not armed in this state | flush + dispose runtime (shutdown `"quit"`), close phone streams `lease_transferred`, → `tui-owned`, resolve `lease_granted{handoff:"warm"}`, `viewer_end{reason:"granted"}` | rekey key + notify pending TUI via granted payload sessionId |
 | **tui-owned** | same conn: idempotent ok. Other conn: `lease_denied{held_by_tui}` | flush (TUI-side) + release → `unowned`; all relays closed reason `lease_transferred`; phones auto-reconnect and lazily resume (§4.4) | daemon mints relay to owning TUI (§5.6) | (relay closed; no state change) | n/a | n/a | TUI sends `lease_rekey`; broker rekeys; open relays for the old key are closed reason `session_rekeyed_reconnect` (phone revalidates via its existing `session_rekeyed` selection logic) |
 
@@ -369,6 +369,21 @@ export interface LeaseBroker {
 - `"none"`: nothing was running in the daemon; TUI proceeds without any reload (its normal open path).
 - `"warm"`: the daemon had a runtime and disposed it; the TUI MUST (re)load the session from file before serving (its normal resume path already does this on open; on an already-open TUI reacquiring after reconnect, it triggers `session.reload()` — agent-session.ts L2657-2681 — if the daemon reports it owned a runtime in the gap).
 - `"cold"`: reserved for future use (grant where daemon never had state but the session file changed externally); implement as an alias of `"warm"` on the TUI side.
+
+**Drain is `daemon-active`-only; detached turns are abandonable (decided).** The
+`session.isStreaming` drain gate fires only for `daemon-active` — i.e. a phone is
+attached and can watch the turn finish. A `daemon-detached` runtime whose turn is
+still running (the last phone left mid-turn; the turn continued on the host per
+§Lifecycle) is disposed immediately on TUI acquire, killing that in-flight turn
+rather than draining it. This is intentional, not an oversight: the drain exists
+to hand a *watched* turn off gracefully, so once no device is receiving the turn
+(no attached phone, and the desktop is only now acquiring) there is nothing to
+watch and the turn is abandonable — the same way closing a TUI mid-turn loses that
+turn (§1.3 non-goal). The tradeoff is a mild asymmetry: whether a walked-away turn
+survives opening the desktop depends on whether a phone was still attached. We
+accept it; draining an unwatched detached runtime would add a viewer feed with no
+viewer for marginal benefit. (Formalized as the `IdleAcquireOnlyWhenIdle`
+predicate in `docs/tla/LeaseBroker.tla`, which intentionally does NOT hold.)
 
 ### 4.3 Draining protocol detail (daemon side)
 

@@ -296,8 +296,15 @@ export class LeaseBroker {
 				if (record.state === "daemon-active" && this.effects.isRuntimeStreaming(workspaceName, sessionId)) {
 					return this.beginDrain(record, connectionId);
 				}
-				// Idle daemon runtime: dispose and grant immediately. The flip to
-				// tui-owned happens BEFORE disposal so the disposal's
+				// Not draining: dispose and grant immediately. A daemon-active runtime
+				// that is mid-turn drained above; everything else is disposed now,
+				// INCLUDING a daemon-detached runtime that is still streaming a turn
+				// after every phone has left. That is intentional: the drain (let the
+				// TUI watch the turn finish) is a courtesy to a device that is actively
+				// attached; once nothing is receiving the turn, acquiring the TUI
+				// abandons it rather than blocking the handoff on work no one is
+				// watching. See docs/live-shared-session-daemon-design.md §4.2.
+				// The flip to tui-owned happens BEFORE disposal so the disposal's
 				// onDaemonRuntimeDisposed callback no-ops (it is part of this grant).
 				record.state = "tui-owned";
 				record.tuiConnectionId = connectionId;
