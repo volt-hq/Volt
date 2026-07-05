@@ -150,6 +150,30 @@ describe("IrohRemoteActiveStreamRegistry", () => {
 		expect(registry.entriesForConnection("conn-2")).toEqual([sameSessionOtherClient]);
 	});
 
+	test("takes replacement entries only from older connections for one conversation", () => {
+		const registry = new IrohRemoteActiveStreamRegistry();
+		const staleMain = makeEntry({ connectionId: "conn-old", streamId: "stream-main-old" });
+		const currentMain = makeEntry({ connectionId: "conn-new", streamId: "stream-main-new" });
+		const staleSubagent = makeEntry({
+			connectionId: "conn-old",
+			sessionId: "session-child",
+			streamId: "stream-child-old",
+		});
+
+		registry.register(staleMain);
+		registry.register(currentMain);
+		registry.register(staleSubagent);
+
+		expect(
+			registry.takeEntriesForConversationOnOtherConnections("client-a", "alpha", "session-1", "conn-new"),
+		).toEqual([staleMain]);
+
+		// The duplicate already on the new connection remains for the caller to
+		// reject, and unrelated subagent streams are not touched.
+		expect(registry.entriesForConversation("client-a", "alpha", "session-1")).toEqual([currentMain]);
+		expect(registry.entriesForConversation("client-a", "alpha", "session-child")).toEqual([staleSubagent]);
+	});
+
 	test("removes only the affected connection entries during connection cleanup", () => {
 		const registry = new IrohRemoteActiveStreamRegistry();
 		const alpha = makeEntry({ connectionId: "conn-1", workspaceName: "alpha", streamId: "stream-alpha" });

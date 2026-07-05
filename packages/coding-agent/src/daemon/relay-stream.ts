@@ -39,6 +39,8 @@ export interface ActiveRelay {
 	workspaceName: string;
 	sessionId: string;
 	clientNodeId: string;
+	connectionId: string;
+	streamId: string;
 	close(reason: RelayCloseReason): void;
 }
 
@@ -174,6 +176,8 @@ export class RelayRegistry {
 			workspaceName: relay.workspaceName,
 			sessionId: relay.sessionId,
 			clientNodeId: relay.clientNodeId,
+			connectionId: relay.connectionId,
+			streamId: relay.streamId,
 			close: (reason: RelayCloseReason) => {
 				closeReason = reason;
 				finish(reason);

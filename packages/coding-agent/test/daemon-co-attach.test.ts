@@ -163,6 +163,72 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		expect(dispose).not.toHaveBeenCalled();
 	});
 
+	it("does not let attachable subagent sessions overwrite the client's last top-level session", async () => {
+		const parentRuntime = {
+			session: createTestSession("parent-session", null),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+			listSessions: vi.fn(async () => []),
+		} as unknown as AgentSessionRuntime;
+		const childRuntime = {
+			session: createTestSession("child-session", null),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+			listSessions: vi.fn(async () => []),
+		} as unknown as AgentSessionRuntime;
+		const setClientLastSessionId = vi.fn(async () => undefined);
+		const registry = new IntegratedRuntimeRegistry({
+			auditLogger: new IrohRemoteAuditLogger(),
+			stateManager: new IrohRemoteHostStateManager(),
+			activeStreams: new IrohRemoteActiveStreamRegistry(),
+			detachedRuntimeTtlMs: () => 60_000,
+			getAllowTools: () => undefined,
+			getProjectTrustedForWorkspace: () => false,
+			setClientLastSessionId,
+			createRuntime: async () => ({
+				runtime: parentRuntime,
+				sessionSelection: { kind: "created", sessionId: "parent-session" },
+			}),
+		});
+		const phone = createAuthorization("n-phone-a");
+
+		const parent = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
+			phone,
+		);
+		await registry.commitEntry(parent.entry, parent.sessionSelection, phone);
+		expect(setClientLastSessionId).toHaveBeenLastCalledWith("n-phone-a", "ws", "parent-session");
+
+		setClientLastSessionId.mockClear();
+		await (
+			registry as unknown as {
+				registerSubagentRuntime(
+					event: { id: string; parentSessionId: string; runtime: AgentSessionRuntime; sessionId: string },
+					authorization: IrohRemoteClientAuthorizationSuccess,
+				): Promise<void>;
+			}
+		).registerSubagentRuntime(
+			{ id: "sa-child", parentSessionId: "parent-session", runtime: childRuntime, sessionId: "child-session" },
+			phone,
+		);
+		expect(setClientLastSessionId).not.toHaveBeenCalled();
+
+		setClientLastSessionId.mockClear();
+		const child = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "session", sessionId: "child-session" }), response: HANDSHAKE_RESPONSE },
+			phone,
+		);
+		expect(child.created).toBe(false);
+		expect(child.entry).toMatchObject({ parentSessionId: "parent-session", subagentId: "sa-child" });
+		await registry.commitEntry(child.entry, child.sessionSelection, phone);
+		expect(setClientLastSessionId).not.toHaveBeenCalled();
+
+		await registry.handleSessionChanged(child.entry, undefined, { sessionId: "child-session-rekeyed" }, phone);
+		expect(setClientLastSessionId).not.toHaveBeenCalled();
+
+		await registry.stopAll("test_cleanup");
+	});
+
 	it("ignores stopEntry for a stale reference whose key now belongs to a replacement runtime", async () => {
 		// Regression guard: stopEntry used to delete by key alone, so a stale
 		// entry reference could evict a replacement runtime from the registry

@@ -335,11 +335,13 @@ export class IntegratedRuntimeRegistry {
 		}
 
 		try {
-			await this.options.setClientLastSessionId(
-				authorization.client.nodeId,
-				authorization.workspace.name,
-				entry.sessionId,
-			);
+			if (entry.parentSessionId === undefined) {
+				await this.options.setClientLastSessionId(
+					authorization.client.nodeId,
+					authorization.workspace.name,
+					entry.sessionId,
+				);
+			}
 			await this.logSessionSelection(sessionSelection, authorization);
 			if (inserted) {
 				await this.logAudit({
@@ -540,7 +542,7 @@ export class IntegratedRuntimeRegistry {
 			return;
 		}
 		entry.recordedSessionId = session.sessionId;
-		await this.recordSessionChange(session.sessionId, authorization);
+		await this.recordSessionChange(entry, session.sessionId, authorization);
 	}
 
 	private async rekeyEntry(
@@ -585,9 +587,27 @@ export class IntegratedRuntimeRegistry {
 	}
 
 	private async recordSessionChange(
+		entry: IntegratedRuntimeEntry,
 		sessionId: string,
 		authorization: IrohRemoteClientAuthorizationSuccess,
 	): Promise<void> {
+		if (entry.parentSessionId !== undefined) {
+			await this.logAudit({
+				type: "session_changed",
+				clientNodeId: authorization.client.nodeId,
+				workspace: authorization.workspace.name,
+				success: true,
+				details: {
+					reason: "remote_rpc_session_change",
+					sessionId,
+					parentSessionId: entry.parentSessionId,
+					...(entry.subagentId === undefined ? {} : { subagentId: entry.subagentId }),
+					lastSessionUpdated: false,
+				},
+			});
+			return;
+		}
+
 		try {
 			const client = await this.options.setClientLastSessionId(
 				authorization.client.nodeId,

@@ -526,15 +526,7 @@ class IrohDaemonService {
 					break;
 				}
 				const streamId = `stream-${++activeStreamSequence}`;
-				const replaceExistingConversationStream = acceptedStreamCount === 1;
-				const task = this.handleConnectionStream(
-					stream,
-					connection,
-					remoteId,
-					connectionId,
-					streamId,
-					replaceExistingConversationStream,
-				)
+				const task = this.handleConnectionStream(stream, connection, remoteId, connectionId, streamId)
 					.catch((error) => {
 						if (!isExpectedApplicationClose(error)) {
 							this.log(
@@ -577,7 +569,6 @@ class IrohDaemonService {
 		remoteId: string,
 		connectionId: string,
 		streamId: string,
-		replaceExistingConversationStream: boolean,
 	): Promise<void> {
 		const engine = this.requireEngine();
 		const handshake = await engine.readHandshake(stream, remoteId, {
@@ -612,14 +603,7 @@ class IrohDaemonService {
 			await this.runWorkspaceManagement(stream, handshake, connection, connectionId, streamId);
 			return;
 		}
-		await this.runIntegratedConversation(
-			stream,
-			handshake,
-			connection,
-			connectionId,
-			streamId,
-			replaceExistingConversationStream,
-		);
+		await this.runIntegratedConversation(stream, handshake, connection, connectionId, streamId);
 	}
 
 	// ==========================================================================
@@ -829,6 +813,7 @@ class IrohDaemonService {
 		stream: IrohBiStreamLike,
 		authorization: IrohRemoteClientAuthorizationSuccess,
 		sessionId: string,
+		source = "active_stream_registry",
 	): Promise<void> {
 		const error = "duplicate conversation connection";
 		await this.logAudit({
@@ -840,7 +825,7 @@ class IrohDaemonService {
 			details: {
 				retryAfterMs: DUPLICATE_CONVERSATION_RETRY_AFTER_MS,
 				sessionId,
-				source: "active_stream_registry",
+				source,
 			},
 		});
 		await writeIrohRemoteHandshakeResponse(
@@ -901,31 +886,34 @@ class IrohDaemonService {
 		streamId: string,
 		targetSessionId: string,
 		tuiConnectionId: string,
-		replaceExistingConversationStream: boolean,
 	): Promise<void> {
 		const authorization = handshake.authorization;
 		const workspaceName = authorization.workspace.name;
 
-		// Duplicate handling per clientNodeId + key: replace stale relays on a
-		// fresh connection's first stream, otherwise reject with retryAfterMs.
+		// Duplicate handling per clientNodeId + key: duplicates already on this
+		// Iroh connection are real duplicates; entries on older connections are
+		// stale for this conversation and may be replaced independently of any
+		// sibling subagent streams that opened first on the new connection.
 		const liveRelays = this.relays.activeForConversation(authorization.client.nodeId, workspaceName, targetSessionId);
-		if (liveRelays.length > 0) {
-			if (!replaceExistingConversationStream) {
-				await this.rejectDuplicateActiveConnection(stream, authorization, targetSessionId);
-				return;
-			}
-			for (const relay of liveRelays) {
-				relay.close("error");
-			}
-		}
-		// Unredeemed offers for the same conversation are superseded by this one:
-		// fail their deferred handshakes and settle them (relay_closed to the TUI,
-		// lease bookkeeping) instead of leaking their stream tasks.
-		for (const pending of this.relays.pendingForConversation(
+		const pendingRelays = this.relays.pendingForConversation(
 			authorization.client.nodeId,
 			workspaceName,
 			targetSessionId,
-		)) {
+		);
+		if (
+			liveRelays.some((relay) => relay.connectionId === connectionId) ||
+			pendingRelays.some((pending) => pending.connectionId === connectionId)
+		) {
+			await this.rejectDuplicateActiveConnection(stream, authorization, targetSessionId, "relay_registry");
+			return;
+		}
+		for (const relay of liveRelays) {
+			relay.close("error");
+		}
+		// Unredeemed offers for the same conversation on older connections are
+		// superseded by this one: fail their deferred handshakes and settle them
+		// (relay_closed to the TUI, lease bookkeeping) instead of leaking tasks.
+		for (const pending of pendingRelays) {
 			this.abortPendingRelay(pending.relayId, "error", "relay offer superseded; retry", RELAY_OFFER_RETRY_AFTER_MS);
 		}
 
@@ -959,6 +947,32 @@ class IrohDaemonService {
 				retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
 			});
 			return;
+		}
+
+		// A sibling stream can resolve/redeem while this stream awaits target
+		// resolution. Re-check immediately before minting the offer.
+		const currentLiveRelays = this.relays.activeForConversation(
+			authorization.client.nodeId,
+			workspaceName,
+			targetSessionId,
+		);
+		const currentPendingRelays = this.relays.pendingForConversation(
+			authorization.client.nodeId,
+			workspaceName,
+			targetSessionId,
+		);
+		if (
+			currentLiveRelays.some((relay) => relay.connectionId === connectionId) ||
+			currentPendingRelays.some((pending) => pending.connectionId === connectionId)
+		) {
+			await this.rejectDuplicateActiveConnection(stream, authorization, targetSessionId, "relay_registry");
+			return;
+		}
+		for (const relay of currentLiveRelays) {
+			relay.close("error");
+		}
+		for (const pending of currentPendingRelays) {
+			this.abortPendingRelay(pending.relayId, "error", "relay offer superseded; retry", RELAY_OFFER_RETRY_AFTER_MS);
 		}
 
 		const settled = new Promise<void>((resolveSettled) => {
@@ -1076,7 +1090,6 @@ class IrohDaemonService {
 		connection: IrohConnectionLike,
 		connectionId: string,
 		streamId: string,
-		replaceExistingConversationStream: boolean,
 	): Promise<void> {
 		const authorization = handshake.authorization;
 		const targetSessionId = getResolvedTargetSessionId(handshake.hello, authorization);
@@ -1096,7 +1109,6 @@ class IrohDaemonService {
 				streamId,
 				targetSessionId,
 				daemonAttach.tuiConnectionId,
-				replaceExistingConversationStream,
 			);
 			return;
 		}
@@ -1155,25 +1167,6 @@ class IrohDaemonService {
 			return;
 		}
 
-		const matchingActiveStreams = this.activeStreams.entriesForConversation(
-			authorization.client.nodeId,
-			authorization.workspace.name,
-			entry.sessionId,
-		);
-		if (matchingActiveStreams.length > 0 && !replaceExistingConversationStream) {
-			this.leaseBroker.abortDaemonAttach(daemonAttachClaim);
-			if (createdRuntime) {
-				await this.runtimes.cleanupUncommittedEntry(entry, sessionSelection);
-			} else {
-				// Reattach: getOrCreateEntry cancelled the detached-runtime retention
-				// timer up front. Re-arm it (no-op unless the entry is still detached
-				// with no timer) so aborting here never leaves the runtime unswept.
-				await this.runtimes.detachWithoutSubscriber(entry, "reattach_superseded");
-			}
-			await this.rejectDuplicateActiveConnection(stream, authorization, entry.sessionId);
-			return;
-		}
-
 		let activeStream: { entry: IrohRemoteActiveStreamEntry; remove: () => void } | undefined;
 		let subscriber: IntegratedRuntimeSubscriber | undefined;
 		let subscriberError: unknown;
@@ -1200,7 +1193,6 @@ class IrohDaemonService {
 						streamId,
 						entry.sessionId,
 						brokerCommit.tuiConnectionId,
-						replaceExistingConversationStream,
 					);
 					return;
 				}
@@ -1220,14 +1212,34 @@ class IrohDaemonService {
 				);
 				throw error;
 			}
+			if (
+				this.activeStreams.hasConversationOnConnection(
+					authorization.client.nodeId,
+					authorization.workspace.name,
+					entry.sessionId,
+					connectionId,
+				)
+			) {
+				this.leaseBroker.rollbackDaemonRuntimeCommit(
+					authorization.workspace.name,
+					entry.sessionId,
+					brokerCommit.previousState,
+				);
+				if (createdRuntime) {
+					await this.runtimes.cleanupUncommittedEntry(entry, sessionSelection);
+				} else {
+					await this.runtimes.detachWithoutSubscriber(entry, "reattach_superseded");
+				}
+				await this.rejectDuplicateActiveConnection(stream, authorization, entry.sessionId);
+				return;
+			}
 			handshakeCommitted = true;
-			const replacedEntries = replaceExistingConversationStream
-				? this.activeStreams.takeEntriesForConversation(
-						authorization.client.nodeId,
-						authorization.workspace.name,
-						entry.sessionId,
-					)
-				: [];
+			const replacedEntries = this.activeStreams.takeEntriesForConversationOnOtherConnections(
+				authorization.client.nodeId,
+				authorization.workspace.name,
+				entry.sessionId,
+				connectionId,
+			);
 			activeStream = this.registerActiveStream(
 				authorization,
 				entry.sessionId,

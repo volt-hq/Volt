@@ -125,6 +125,10 @@ describe("relay framing (§12.2.3)", () => {
 			},
 		});
 		expect(registry.activeCount()).toBe(1);
+		expect(registry.activeForConversation("n-phone-a", "ws", "s-1")[0]).toMatchObject({
+			connectionId: "conn-1",
+			streamId: "st-1",
+		});
 		expect(settle).not.toHaveBeenCalled();
 	});
 

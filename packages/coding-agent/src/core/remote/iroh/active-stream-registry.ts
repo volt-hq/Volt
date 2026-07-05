@@ -100,6 +100,21 @@ export class IrohRemoteActiveStreamRegistry {
 		return entries;
 	}
 
+	takeEntriesForConversationOnOtherConnections(
+		clientNodeId: string,
+		workspaceName: string,
+		sessionId: string,
+		connectionId: string,
+	): IrohRemoteActiveStreamEntry[] {
+		const entries = this.entriesForConversation(clientNodeId, workspaceName, sessionId).filter(
+			(entry) => entry.connectionId !== connectionId,
+		);
+		for (const entry of entries) {
+			this.unregister(entry);
+		}
+		return entries;
+	}
+
 	entriesForConnection(connectionId: string): IrohRemoteActiveStreamEntry[] {
 		return Array.from(this.entriesByConnectionId.get(connectionId) ?? []);
 	}
