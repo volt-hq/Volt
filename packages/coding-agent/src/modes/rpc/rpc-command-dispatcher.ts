@@ -76,8 +76,6 @@ function createRpcMcpExecutionContext(): McpGatewayExecutionContext {
 	return {
 		mode: "rpc",
 		caller: "user",
-		hasUI: true,
-		confirm: async () => false,
 	};
 }
 

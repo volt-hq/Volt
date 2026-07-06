@@ -88,13 +88,6 @@ function createExecutionContext(ctx: ExtensionContext | undefined): McpGatewayEx
 	return {
 		mode: ctx?.mode ?? "unknown",
 		caller: "model",
-		hasUI: ctx?.hasUI ?? false,
-		confirm: (title, message, options) => {
-			if (!ctx?.hasUI) {
-				return Promise.resolve(false);
-			}
-			return ctx.ui.confirm(title, message, options);
-		},
 	};
 }
 

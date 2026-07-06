@@ -13,7 +13,7 @@ import {
 } from "./oauth-flow.ts";
 import type { McpOAuthStore } from "./oauth-store.ts";
 import type { McpOutputStore } from "./output-store.ts";
-import { assertMcpToolAllowed, classifyMcpToolRisk } from "./permissions.ts";
+import { classifyMcpToolRisk } from "./safety.ts";
 import { searchMcpMetadata } from "./search.ts";
 import { McpServerSupervisor } from "./server-supervisor.ts";
 import type {
@@ -26,6 +26,7 @@ import type {
 	McpPromptSummary,
 	McpRecentCallStatus,
 	McpResolvedConfig,
+	McpResolvedServerConfig,
 	McpResourceSummary,
 	McpRisk,
 	McpSearchMatch,
@@ -121,7 +122,7 @@ function isDirectToolEnabled(
 function toToolSummary(
 	serverId: string,
 	metadata: McpServerMetadata,
-	server: Parameters<typeof classifyMcpToolRisk>[0],
+	server: McpResolvedServerConfig,
 	settingsDirectTools: boolean,
 	stale: boolean,
 ): McpToolSummary[] {
@@ -130,7 +131,7 @@ function toToolSummary(
 		name: tool.name,
 		...(tool.title ? { title: tool.title } : {}),
 		...(tool.description ? { description: compactText(tool.description, 800) } : {}),
-		risk: classifyMcpToolRisk(server, tool),
+		risk: classifyMcpToolRisk(tool),
 		inputSchema: tool.inputSchema,
 		...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
 		...(tool.annotations ? { annotations: tool.annotations } : {}),
@@ -280,7 +281,7 @@ export class McpManager {
 				candidates.push({
 					server: supervisor.server.id,
 					tool,
-					risk: classifyMcpToolRisk(supervisor.server, tool),
+					risk: classifyMcpToolRisk(tool),
 					metadataHash: metadata.metadataHash,
 					lastSeenAt: metadata.lastSeenAt,
 					directToolName: getMcpDirectToolName(supervisor.server.id, tool.name),
@@ -593,7 +594,7 @@ export class McpManager {
 			server: serverId,
 			tool: tool.name,
 			description: tool.description ?? "",
-			risk: classifyMcpToolRisk(supervisor.server, tool),
+			risk: classifyMcpToolRisk(tool),
 			inputSchema: tool.inputSchema,
 			annotations: tool.annotations ?? {},
 			metadataHash: metadata.metadataHash,
@@ -786,8 +787,7 @@ export class McpManager {
 		if (!tool || !serverMatchesToolFilters(supervisor.server, tool.name)) {
 			throw new Error(`MCP tool not available: ${serverId}.${toolName}`);
 		}
-		const risk = classifyMcpToolRisk(supervisor.server, tool);
-		await assertMcpToolAllowed({ server: supervisor.server, tool, risk, arguments: args, context, signal });
+		const risk = classifyMcpToolRisk(tool);
 		const callId = makeCallId();
 		const startedAt = Date.now();
 		let status: McpRecentCallStatus = "completed";

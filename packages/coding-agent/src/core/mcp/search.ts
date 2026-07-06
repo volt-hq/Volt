@@ -1,5 +1,5 @@
 import { serverMatchesToolFilters } from "./config.ts";
-import { classifyMcpToolRisk } from "./permissions.ts";
+import { classifyMcpToolRisk } from "./safety.ts";
 import type { McpResolvedServerConfig, McpSearchMatch, McpServerMetadata } from "./types.ts";
 
 const DEFAULT_MCP_SEARCH_LIMIT = 8;
@@ -85,7 +85,7 @@ export function searchMcpMetadata(options: {
 				tool: tool.name,
 				title,
 				summary: boundedSummary(tool.description),
-				risk: classifyMcpToolRisk(server, tool),
+				risk: classifyMcpToolRisk(tool),
 				metadataHash: metadata.metadataHash,
 				call: callSnippet(metadata.server, tool.name),
 				describe: describeSnippet(metadata.server, tool.name),

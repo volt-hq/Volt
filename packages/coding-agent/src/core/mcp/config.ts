@@ -7,10 +7,8 @@ import type {
 	McpConfigDiagnostic,
 	McpConfigSource,
 	McpLifecycle,
-	McpPolicy,
 	McpResolvedConfig,
 	McpResolvedServerConfig,
-	McpServerPermissions,
 	McpSettings,
 	McpTransportKind,
 } from "./types.ts";
@@ -28,13 +26,6 @@ export const DEFAULT_MCP_SETTINGS: McpSettings = {
 	resources: "explicit",
 	prompts: "user-preview",
 	metadataRefreshMs: 24 * 60 * 60 * 1000,
-};
-
-export const DEFAULT_MCP_SERVER_PERMISSIONS: Required<McpServerPermissions> = {
-	read: "allow",
-	write: "ask",
-	destructive: "ask",
-	unknown: "ask",
 };
 
 export interface McpRawConfigFile {
@@ -83,10 +74,6 @@ function asStringRecord(value: unknown): Record<string, string> {
 		}
 	}
 	return result;
-}
-
-function asPolicy(value: unknown): McpPolicy | undefined {
-	return value === "allow" || value === "ask" || value === "deny" ? value : undefined;
 }
 
 function asTransport(value: unknown, fallback: McpTransportKind): McpTransportKind {
@@ -148,22 +135,6 @@ function asAuthConfig(value: unknown): McpAuthConfig | undefined {
 		auth.tokenEndpointAuthMethod = value.tokenEndpointAuthMethod;
 	}
 	return Object.keys(auth).length > 0 ? auth : undefined;
-}
-
-function asPermissions(value: unknown): McpServerPermissions {
-	if (!isRecord(value)) {
-		return {};
-	}
-	const permissions: McpServerPermissions = {};
-	const read = asPolicy(value.read);
-	const write = asPolicy(value.write);
-	const destructive = asPolicy(value.destructive);
-	const unknown = asPolicy(value.unknown);
-	if (read) permissions.read = read;
-	if (write) permissions.write = write;
-	if (destructive) permissions.destructive = destructive;
-	if (unknown) permissions.unknown = unknown;
-	return permissions;
 }
 
 function clampMs(value: unknown, fallback: number, min: number, max: number): number {
@@ -380,7 +351,6 @@ function normalizeServer(
 		includeTools: isStringArray(server.includeTools) ? [...server.includeTools] : [],
 		excludeTools: isStringArray(server.excludeTools) ? [...server.excludeTools] : [],
 		directTools: asDirectTools(server.directTools),
-		permissions: { ...asPermissions(server.permissions) },
 		connectTimeoutMs: asFiniteNumber(server.connectTimeoutMs),
 		callTimeoutMs: asFiniteNumber(server.callTimeoutMs),
 		idleTimeoutMs: asFiniteNumber(server.idleTimeoutMs),
@@ -473,7 +443,6 @@ export function hashMcpServerConfig(server: McpResolvedServerConfig): string {
 		includeTools: server.includeTools,
 		excludeTools: server.excludeTools,
 		directTools: server.directTools,
-		permissions: server.permissions,
 		connectTimeoutMs: server.connectTimeoutMs,
 		callTimeoutMs: server.callTimeoutMs,
 		idleTimeoutMs: server.idleTimeoutMs,

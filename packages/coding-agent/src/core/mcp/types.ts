@@ -12,7 +12,6 @@ import type {
 
 export type McpTransportKind = "stdio" | "streamable-http" | "sse";
 export type McpLifecycle = "lazy" | "eager" | "keep-alive";
-export type McpPolicy = "allow" | "ask" | "deny";
 export type McpRisk = "read" | "write" | "destructive" | "unknown";
 export type McpSourceScope = "user" | "project" | "temporary";
 export type McpServerStatus =
@@ -60,13 +59,6 @@ export interface McpAuthConfig {
 	tokenEndpointAuthMethod?: "client_secret_basic" | "client_secret_post" | "none";
 }
 
-export interface McpServerPermissions {
-	read?: McpPolicy;
-	write?: McpPolicy;
-	destructive?: McpPolicy;
-	unknown?: McpPolicy;
-}
-
 export interface McpServerConfig {
 	enabled: boolean;
 	displayName?: string;
@@ -75,7 +67,6 @@ export interface McpServerConfig {
 	includeTools: string[];
 	excludeTools: string[];
 	directTools: boolean | string[];
-	permissions: McpServerPermissions;
 	connectTimeoutMs?: number;
 	callTimeoutMs?: number;
 	idleTimeoutMs?: number;
@@ -325,6 +316,4 @@ export interface McpClientFactory {
 export interface McpGatewayExecutionContext {
 	mode: "tui" | "rpc" | "json" | "print" | "unknown";
 	caller?: "model" | "user";
-	hasUI: boolean;
-	confirm(title: string, message: string, options?: { signal?: AbortSignal; timeout?: number }): Promise<boolean>;
 }

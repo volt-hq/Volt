@@ -16,7 +16,7 @@ import {
 import { VERSION } from "../../config.ts";
 import { VoltMcpOAuthProvider } from "./oauth-provider.ts";
 import type { McpOAuthStore } from "./oauth-store.ts";
-import { redactMcpText } from "./permissions.ts";
+import { redactMcpText } from "./safety.ts";
 import type { McpResolvedServerConfig } from "./types.ts";
 
 const DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";

@@ -196,7 +196,6 @@ export {
 } from "./core/lsp/index.ts";
 export {
 	createMcpDirectToolDefinitions,
-	DEFAULT_MCP_SERVER_PERMISSIONS,
 	DEFAULT_MCP_SETTINGS,
 	DefaultMcpClientFactory,
 	finalizeMcpConfig,

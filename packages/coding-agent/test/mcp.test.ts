@@ -19,7 +19,7 @@ import { McpMetadataCache } from "../src/core/mcp/metadata-cache.ts";
 import { pollMcpOAuthDeviceAuth, startMcpOAuthDeviceAuth } from "../src/core/mcp/oauth-flow.ts";
 import { McpOAuthStore } from "../src/core/mcp/oauth-store.ts";
 import { McpOutputStore } from "../src/core/mcp/output-store.ts";
-import { classifyMcpToolRisk, sanitizeMcpArguments } from "../src/core/mcp/permissions.ts";
+import { classifyMcpToolRisk, sanitizeMcpArguments } from "../src/core/mcp/safety.ts";
 import type {
 	McpClientConnection,
 	McpClientFactory,
@@ -47,7 +47,6 @@ function createTestConfig(tempDir: string, serverOverrides: Record<string, unkno
 				fake: {
 					command: "fake-mcp",
 					lifecycle: "keep-alive",
-					permissions: { read: "allow", write: "deny", destructive: "deny", unknown: "deny" },
 					...serverOverrides,
 				},
 			},
@@ -60,8 +59,6 @@ function createTestConfig(tempDir: string, serverOverrides: Record<string, unkno
 function createGatewayContext(): McpGatewayExecutionContext {
 	return {
 		mode: "rpc",
-		hasUI: false,
-		confirm: async () => false,
 	};
 }
 
@@ -159,7 +156,7 @@ describe("MCP support", () => {
 		expect(server.auth).toBeUndefined();
 	});
 
-	it("discovers tools, enforces policy, records calls, and caches oversized outputs", async () => {
+	it("discovers tools, records calls, and caches oversized outputs", async () => {
 		const tempDir = makeTempDir();
 		tempDirs.push(tempDir);
 		const manager = new McpManager({
@@ -193,12 +190,12 @@ describe("MCP support", () => {
 		expect(cached).toMatchObject({ action: "read_cache", cacheId: callResult.cache?.id, startByte: 0 });
 		expect(JSON.stringify(cached)).toContain("read_note");
 
-		await expect(
-			manager.callTool(
-				{ action: "call", server: "fake", tool: "update_note", arguments: { value: 1 } },
-				createGatewayContext(),
-			),
-		).rejects.toThrow("denied by policy");
+		const writeCallResult = await manager.callTool(
+			{ action: "call", server: "fake", tool: "update_note", arguments: { value: 1 } },
+			createGatewayContext(),
+		);
+		expect(writeCallResult.status).toBe("completed");
+		expect(writeCallResult.risk).toBe("write");
 
 		await manager.disconnectServer("fake");
 	});
@@ -353,10 +350,8 @@ describe("MCP support", () => {
 		expect(server).toBeDefined();
 		tempDirs.push(server.source.baseDir);
 
-		expect(classifyMcpToolRisk(server, { name: "delete_file", description: "", annotations: {} })).toBe(
-			"destructive",
-		);
-		expect(classifyMcpToolRisk(server, { name: "read_file", description: "", annotations: {} })).toBe("read");
+		expect(classifyMcpToolRisk({ name: "delete_file", description: "", annotations: {} })).toBe("destructive");
+		expect(classifyMcpToolRisk({ name: "read_file", description: "", annotations: {} })).toBe("read");
 		expect(sanitizeMcpArguments({ apiKey: "secret", nested: { password: "p", keep: "visible" } })).toEqual({
 			apiKey: "[redacted]",
 			nested: { password: "[redacted]", keep: "visible" },

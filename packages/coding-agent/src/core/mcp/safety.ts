@@ -1,6 +1,5 @@
 import type { Tool as SdkTool } from "@modelcontextprotocol/sdk/types.js";
-import { DEFAULT_MCP_SERVER_PERMISSIONS } from "./config.ts";
-import type { McpGatewayExecutionContext, McpResolvedServerConfig, McpRisk } from "./types.ts";
+import type { McpRisk } from "./types.ts";
 
 const TOKEN_START = "(?:^|[^a-z0-9])";
 const TOKEN_END = "(?:$|[^a-z0-9])";
@@ -20,11 +19,7 @@ const SECRET_KEY_PATTERN = /token|secret|password|passwd|api[-_]?key|authorizati
 const SECRET_VALUE_PATTERN =
 	/(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:token|secret|password|passwd|api[-_]?key|authorization|credential|private)[\s:=]+)[^\s,;]+/gi;
 
-export function classifyMcpToolRisk(
-	server: McpResolvedServerConfig,
-	tool: Pick<SdkTool, "name" | "description" | "annotations">,
-): McpRisk {
-	const override = server.permissions.unknown;
+export function classifyMcpToolRisk(tool: Pick<SdkTool, "name" | "description" | "annotations">): McpRisk {
 	if (tool.annotations?.destructiveHint === true) {
 		return "destructive";
 	}
@@ -41,7 +36,7 @@ export function classifyMcpToolRisk(
 	if (tool.annotations?.readOnlyHint === true) {
 		return "read";
 	}
-	return override === "allow" ? "read" : "unknown";
+	return "unknown";
 }
 
 export function redactMcpText(value: string): string {
@@ -84,39 +79,4 @@ export function sanitizeMcpArguments(value: unknown, depth = 0): unknown {
 		}
 	}
 	return result;
-}
-
-export async function assertMcpToolAllowed(options: {
-	server: McpResolvedServerConfig;
-	tool: Pick<SdkTool, "name" | "description" | "annotations">;
-	risk: McpRisk;
-	arguments: Record<string, unknown>;
-	context: McpGatewayExecutionContext;
-	signal?: AbortSignal;
-}): Promise<void> {
-	const policy = options.server.permissions[options.risk] ?? DEFAULT_MCP_SERVER_PERMISSIONS[options.risk];
-	if (policy === "allow") {
-		return;
-	}
-	if (policy === "deny") {
-		throw new Error(`MCP tool denied by policy: ${options.server.id}.${options.tool.name} (${options.risk})`);
-	}
-	if (!options.context.hasUI || options.context.mode === "print" || options.context.mode === "json") {
-		throw new Error(
-			`MCP tool requires approval but this mode cannot prompt: ${options.server.id}.${options.tool.name} (${options.risk})`,
-		);
-	}
-	const approved = await options.context.confirm(
-		`Approve MCP ${options.risk} tool?`,
-		[
-			`Server: ${options.server.displayName} (${options.server.id})`,
-			`Tool: ${options.tool.name}`,
-			`Risk: ${options.risk}`,
-			`Arguments: ${JSON.stringify(sanitizeMcpArguments(options.arguments))}`,
-		].join("\n"),
-		{ signal: options.signal, timeout: 5 * 60 * 1000 },
-	);
-	if (!approved) {
-		throw new Error(`MCP tool approval denied: ${options.server.id}.${options.tool.name}`);
-	}
 }

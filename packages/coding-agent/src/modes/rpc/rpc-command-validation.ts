@@ -177,9 +177,13 @@ export function validateRpcCommandPayload(value: unknown): string | undefined {
 		case "cancel_mcp_server_auth":
 		case "logout_mcp_server":
 		case "list_mcp_tools":
+			return validateRequiredField(value, "server", isString, "a string");
 		case "list_mcp_resources":
 		case "list_mcp_prompts":
-			return validateRequiredField(value, "server", isString, "a string");
+			return (
+				validateRequiredField(value, "server", isString, "a string") ??
+				validateOptionalField(value, "cursor", isString, "a string")
+			);
 		case "set_mcp_server_enabled":
 			return (
 				validateRequiredField(value, "server", isString, "a string") ??

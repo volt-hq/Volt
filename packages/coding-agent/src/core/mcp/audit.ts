@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { redactMcpText, sanitizeMcpArguments } from "./permissions.ts";
+import { redactMcpText, sanitizeMcpArguments } from "./safety.ts";
 import type { McpCallerSurface, McpRecentCallStatus, McpRisk } from "./types.ts";
 
 export interface McpAuditEventInput {

@@ -7,7 +7,6 @@ export {
 } from "./auth.ts";
 export { DefaultMcpClientFactory, type DefaultMcpClientFactoryOptions } from "./client-factory.ts";
 export {
-	DEFAULT_MCP_SERVER_PERMISSIONS,
 	DEFAULT_MCP_SETTINGS,
 	finalizeMcpConfig,
 	getMcpDirectToolName,
@@ -46,8 +45,8 @@ export {
 } from "./oauth-flow.ts";
 export { McpOAuthStore, type McpOAuthStoredRecord } from "./oauth-store.ts";
 export { McpOutputStore, type McpOutputStoreOptions, type McpStoredOutputChunk } from "./output-store.ts";
-export { assertMcpToolAllowed, classifyMcpToolRisk, sanitizeMcpArguments } from "./permissions.ts";
 export { getMcpRpcCapabilities, listMcpRpcServers, type McpRpcCapabilities } from "./rpc.ts";
+export { classifyMcpToolRisk, sanitizeMcpArguments } from "./safety.ts";
 export { searchMcpMetadata } from "./search.ts";
 export { McpServerSupervisor, type McpServerSupervisorOptions } from "./server-supervisor.ts";
 export type {
@@ -66,7 +65,6 @@ export type {
 	McpLifecycle,
 	McpMetadataRefreshResult,
 	McpOutputTruncation,
-	McpPolicy,
 	McpPromptSummary,
 	McpRecentCallStatus,
 	McpRecentCallSummary,
@@ -78,7 +76,6 @@ export type {
 	McpSearchMatch,
 	McpServerConfig,
 	McpServerMetadata,
-	McpServerPermissions,
 	McpServerStatus,
 	McpServerSummary,
 	McpSettings,

@@ -18,11 +18,21 @@ export function getMcpRpcCapabilities(): McpRpcCapabilities {
 		remoteSafeByDefault: [
 			"list_mcp_servers",
 			"get_mcp_server",
+			"connect_mcp_server",
+			"refresh_mcp_server",
+			"set_mcp_server_enabled",
 			"list_mcp_recent_calls",
+			"list_mcp_tools",
+			"get_mcp_tool",
+			"list_mcp_resources",
+			"read_mcp_resource",
+			"list_mcp_prompts",
+			"get_mcp_prompt",
 			"disconnect_mcp_server",
 			"start_mcp_server_auth",
 			"poll_mcp_server_auth",
 			"cancel_mcp_server_auth",
+			"logout_mcp_server",
 		],
 	};
 }

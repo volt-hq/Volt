@@ -19,7 +19,7 @@ import {
 } from "./config.ts";
 import type { McpMetadataCache } from "./metadata-cache.ts";
 import type { McpOAuthStore } from "./oauth-store.ts";
-import { redactMcpText } from "./permissions.ts";
+import { redactMcpText } from "./safety.ts";
 import type {
 	McpAuthState,
 	McpClientConnection,

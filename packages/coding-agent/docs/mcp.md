@@ -7,13 +7,13 @@ Implemented today:
 - config loading from `~/.config/mcp/mcp.json`, `~/.volt/agent/mcp.json`, trusted project `.mcp.json`, and trusted project `.volt/mcp.json`
 - one model-visible `mcp` gateway tool for status, server listing, cached search/describe, tool calls, resources, prompts (when enabled), and large-output cache reads
 - stdio, Streamable HTTP, and legacy SSE transports through the official TypeScript MCP SDK
-- project trust gating, restricted stdio env inheritance, per-server permissions, output truncation/cache, metadata cache with stale refresh on detail/call paths, recent calls, audit logs, and local/RPC server status management
+- project trust gating, restricted stdio env inheritance, include/exclude tool filters, output truncation/cache, metadata cache with stale refresh on detail/call paths, recent calls, audit logs, and local/RPC server status management
 - `volt mcp` CLI inspection/management commands and lightweight `/mcp` interactive status/actions
 - browser OAuth authorization-code + PKCE and OAuth device-code auth for HTTP/SSE MCP servers, with host-side token storage
 - persisted enable/disable overlays in Volt-owned MCP config files
 - optional direct tool promotion from fresh cached metadata via `directTools`
 
-Not yet implemented from the roadmap sections below: full-screen `/mcp` TUI manager, direct-tool metadata reapproval UI, MCP lifecycle event streaming, and broad mobile management beyond the remote-safe RPC subset.
+Not yet implemented from the roadmap sections below: full-screen `/mcp` TUI manager, direct-tool metadata demotion UI, and MCP lifecycle event streaming.
 
 ## Summary
 
@@ -40,14 +40,14 @@ Prior art:
 - Let mobile clients see and manage MCP servers connected to the selected agent/session.
 - Respect Volt project trust before loading project-local executable MCP configuration.
 - Treat MCP tool metadata, results, resources, and prompts as untrusted content.
-- Provide first-class auth, permissions, approvals, audit, output truncation, and large-output retrieval.
+- Provide first-class auth, tool filtering, audit, output truncation, and large-output retrieval.
 
 ## Non-goals
 
 - Do not require users to install a separate MCP extension.
 - Do not register every upstream MCP tool directly by default.
 - Do not make provider-specific tool search a requirement.
-- Do not let mobile clients add arbitrary local stdio commands without an explicit host-local approval flow.
+- Do not let mobile clients add arbitrary local stdio commands.
 - Do not treat MCP resources or prompts as trusted instructions.
 - Do not silently inherit ambient host secrets into MCP stdio processes.
 
@@ -106,7 +106,7 @@ Tool rendering:
 
 - Load global MCP config and trusted project MCP config only.
 - Do not prompt for project trust in non-interactive modes; follow existing `defaultProjectTrust`, `--approve`, and `--no-approve` behavior.
-- Do not prompt for tool approvals in print/json. Calls that require approval fail unless pre-approved by config or CLI.
+- Do not apply nested MCP tool approvals. If the top-level `mcp` tool is available and the exact server/tool passes include/exclude filters, the call executes.
 - JSON/RPC event streams include MCP status, auth, and call lifecycle events.
 
 ### Daemon and mobile
@@ -125,7 +125,7 @@ Mobile views:
 
 Mobile must not store MCP credentials. OAuth tokens, bearer tokens, and env secrets stay on the host. Mobile can participate in auth flows by displaying a URL/device code and sending completion/cancel events back to the host.
 
-Mobile must not add or edit arbitrary stdio commands by default. It can enable, disable, connect, disconnect, refresh, and authenticate servers already present in trusted host config, subject to host policy.
+Mobile must not add or edit arbitrary stdio commands by default. It can enable, disable, connect, disconnect, refresh, and authenticate servers already present in trusted host config, subject to the remote-safe command allowlist.
 
 ## Config model
 
@@ -174,12 +174,7 @@ Editing shared files requires an explicit command or UI choice.
       },
       "lifecycle": "lazy",
       "includeTools": [],
-      "excludeTools": [],
-      "permissions": {
-        "read": "allow",
-        "write": "ask",
-        "destructive": "ask"
-      }
+      "excludeTools": []
     },
     "linear": {
       "enabled": true,
@@ -202,7 +197,6 @@ Common fields:
 - `includeTools?: string[]`
 - `excludeTools?: string[]`
 - `directTools?: boolean | string[]`
-- `permissions?: { read?: Policy; write?: Policy; destructive?: Policy }`
 - `connectTimeoutMs?: number`
 - `callTimeoutMs?: number`
 - `idleTimeoutMs?: number`
@@ -222,12 +216,6 @@ HTTP/SSE fields:
 - `headers?: Record<string, string>`
 - `auth?: { type: "none" | "bearer" | "oauth" | "env"; ... }`
 - OAuth auth also supports `flow?: "browser" | "device" | "auto"`, `scope?: string`, `clientId?: string`, `clientSecret?: string`, `clientMetadataUrl?: string`, `resourceMetadataUrl?: string`, and `tokenEndpointAuthMethod?: "client_secret_basic" | "client_secret_post" | "none"`.
-
-Policy values:
-
-- `allow`
-- `ask`
-- `deny`
 
 ### Merge rules
 
@@ -272,8 +260,8 @@ packages/coding-agent/src/core/mcp/
   manager.ts
   metadata-cache.ts
   output-store.ts
-  permissions.ts
   rpc.ts
+  safety.ts
   search.ts
   server-supervisor.ts
   types.ts
@@ -329,10 +317,10 @@ packages/coding-agent/src/core/mcp/
 - Provides the native `mcp` `ToolDefinition`.
 - Handles action validation, result shaping, rendering, and truncation notices.
 
-`permissions.ts`
+`safety.ts`
 
-- Classifies tools as read/write/destructive using annotations, name heuristics, and config overrides.
-- Applies policy by caller surface and runtime mode.
+- Classifies tools as read/write/destructive/unknown for display, search, recent calls, and audit metadata.
+- Redacts secret-looking arguments and text before audit/log presentation.
 
 `auth.ts`
 
@@ -363,7 +351,7 @@ Startup:
 2. Load metadata cache.
 3. Construct MCP manager.
 4. Register only the native `mcp` tool when MCP is enabled.
-5. Start eager/keep-alive servers only if policy allows startup.
+5. Start eager/keep-alive servers from trusted config.
 6. Lazy servers remain cold.
 
 Search/describe:
@@ -377,11 +365,10 @@ Call:
 1. Resolve exact server and tool.
 2. Ensure server is connected.
 3. Refresh metadata if needed.
-4. Apply permissions and approvals.
-5. Call tool with timeout and cancellation.
-6. Truncate/cache output.
-7. Emit events and audit.
-8. Reset idle timer.
+4. Call tool with timeout and cancellation.
+5. Truncate/cache output.
+6. Emit events and audit.
+7. Reset idle timer.
 
 Shutdown:
 
@@ -545,7 +532,7 @@ Direct tools must:
 - be sourced from cached metadata
 - include a token estimate before enabling in TUI/mobile
 - be pinned to a metadata hash
-- be demoted or require reapproval when metadata changes
+- be demoted when metadata changes
 - use names like `mcp__github__search_issues`
 
 ## RPC, daemon, and mobile API
@@ -569,9 +556,11 @@ read_mcp_resource
 list_mcp_prompts
 get_mcp_prompt
 list_mcp_recent_calls
-start_mcp_auth
-cancel_mcp_auth
-complete_mcp_auth
+start_mcp_server_auth
+poll_mcp_server_auth
+cancel_mcp_server_auth
+complete_mcp_server_auth
+logout_mcp_server
 ```
 
 ### Events
@@ -648,7 +637,7 @@ Likely app-side files to add or change:
 - `volt-app/Packages/VoltClient/Sources/VoltCore/VoltSession+MCP.swift` for session state/actions.
 - `volt-app/Packages/VoltClient/Sources/VoltCore/VoltSession+EventRouting.swift` for MCP event handling.
 - `volt-app/Volt/Settings/MCPServersView.swift` for server management UI.
-- `volt-app/Volt/HostAction/` or a new MCP auth sheet for auth/approval prompts.
+- `volt-app/Volt/HostAction/` or a new MCP auth sheet for auth prompts.
 - `volt-app/Volt/Chat/ToolEvents/` for MCP call card presentation.
 - `volt-app/Packages/VoltClient/Tests/VoltCoreTests/` for command/event routing tests.
 
@@ -660,31 +649,35 @@ Add an Iroh/daemon feature flag:
 mcp_management.v1
 ```
 
-Remote-safe MCP commands should be allowlisted deliberately. Management commands that do not start arbitrary new stdio commands are remote-safe when the server already exists in trusted config and the command respects policy.
+Remote-safe MCP commands should be allowlisted deliberately. Management commands that do not add or edit arbitrary stdio commands are remote-safe when the server already exists in trusted config.
 
 Remote-safe by default:
 
 - list servers
 - get server
+- connect existing configured servers
+- refresh metadata for existing configured servers
+- enable/disable existing configured servers through persisted Volt-owned overlays
 - list recent calls
+- list/get tools
+- list/read resources
+- list/get prompts
 - disconnect
-- cancel auth
+- start device-code auth
+- poll/cancel auth
+- logout
 
 Conditionally remote-safe:
 
-- connect
-- refresh
-- enable/disable
-- start/complete auth
+- browser redirect auth completion, only for local/same-device RPC flows with explicit redirect handling
 
 Not remote-safe by default:
 
 - adding arbitrary stdio server commands
 - editing command/args/env
 - changing env allowlists
-- approving destructive calls forever
 
-## Security and permissions
+## Security
 
 ### Threat model
 
@@ -711,14 +704,13 @@ For stdio servers:
 - redact env values in UI/RPC/mobile
 - show command preview before first start when interactive
 
-### Permission classification
+### Risk classification
 
-Classify each MCP tool:
+Classify each MCP tool for display, search ranking context, recent calls, and audit metadata:
 
-1. config override
-2. MCP annotations, such as `readOnlyHint` and `destructiveHint`
-3. name/description heuristics
-4. default unknown policy
+1. MCP annotations, such as `readOnlyHint` and `destructiveHint`
+2. name/description heuristics
+3. `unknown` fallback
 
 Risk classes:
 
@@ -727,37 +719,7 @@ Risk classes:
 - `destructive`
 - `unknown`
 
-Default policy:
-
-- read: allow
-- write: ask
-- destructive: ask
-- unknown: ask
-
-Headless default:
-
-- read: allow
-- write/destructive/unknown: deny unless pre-approved
-
-### Approvals
-
-Approvals should include:
-
-- server id
-- tool name
-- risk class
-- sanitized arguments
-- source of request: model, TUI, RPC, mobile
-- policy that triggered approval
-- one-shot / session / persistent choices where supported
-
-Persistent approvals must be stored host-side and scoped to:
-
-- server id
-- tool id
-- metadata hash
-- config source
-- project trust hash if project-local
+Risk is informational only. Volt does not apply nested MCP tool permissions or approval prompts; availability is controlled by the top-level `mcp` tool plus server `includeTools`/`excludeTools`, project trust, auth, and transport/remote-safety rules.
 
 ### Audit
 
@@ -771,7 +733,6 @@ Fields:
 - server id
 - tool/resource/prompt id
 - risk class
-- approval id/decision
 - status
 - duration
 - result size
@@ -890,7 +851,7 @@ Sidecar rules:
 - local file permissions 0600 where applicable
 - retention/TTL setting
 - mobile sees opaque ids only, not host paths
-- cache ids scoped to workspace/session permissions
+- cache ids scoped to workspace/session ownership
 - binary/image outputs require explicit product handling before model exposure
 
 ## Implementation plan
@@ -952,20 +913,18 @@ Likely files:
 - `packages/coding-agent/src/core/agent-session.ts`
 - `packages/coding-agent/src/modes/interactive/components/tool-execution.ts`
 
-### 5. Permissions, approvals, audit, output store
+### 5. Risk metadata, audit, output store
 
-- Add risk classification.
-- Add approval policy by mode/surface.
+- Add risk classification for metadata/audit.
 - Add audit log.
 - Add output truncation and sidecar storage.
-- Add tests for destructive calls, headless denial, and redaction.
+- Add tests for risk classification and redaction.
 
 Likely files:
 
-- `packages/coding-agent/src/core/mcp/permissions.ts`
+- `packages/coding-agent/src/core/mcp/safety.ts`
 - `packages/coding-agent/src/core/mcp/audit.ts`
 - `packages/coding-agent/src/core/mcp/output-store.ts`
-- `packages/coding-agent/src/core/host-actions.ts`
 
 ### 6. Auth
 
@@ -1007,7 +966,7 @@ Likely files:
 - Add MCP RPC command/response/event types.
 - Add dispatch handlers.
 - Add daemon/Iroh allowlist updates and `mcp_management.v1` feature.
-- Add remote-safe policy tests.
+- Add remote-safe allowlist tests.
 
 Likely files:
 
@@ -1021,7 +980,7 @@ Likely files:
 - Add Swift DTOs and RPC commands.
 - Add `VoltSession` MCP state and event routing.
 - Add MCP server settings view.
-- Add auth/approval sheets.
+- Add auth sheets.
 - Add tool event presentation for MCP gateway calls.
 - Add mock transport tests.
 
@@ -1075,7 +1034,6 @@ Verification:
 
 ## Open questions
 
-- Should global user MCP config require first-run approval before starting each stdio command, even though it is user-scoped?
 - Should OAuth token storage live in the existing Volt auth storage or a separate MCP token store?
 - Should metadata discovery for cold lazy servers ever auto-start stdio servers, or should it require explicit refresh/connect?
 - What is the exact mobile affordance for auth redirects on iOS?

@@ -63,6 +63,16 @@ const invalidPayloadCases: Array<{ name: string; payload: unknown; error: string
 		error: 'Invalid RPC command payload: "limit" must be a number',
 	},
 	{
+		name: "rejects invalid MCP resource cursor",
+		payload: { type: "list_mcp_resources", server: "docs", cursor: 1 },
+		error: 'Invalid RPC command payload: "cursor" must be a string',
+	},
+	{
+		name: "rejects invalid MCP prompt cursor",
+		payload: { type: "list_mcp_prompts", server: "docs", cursor: 1 },
+		error: 'Invalid RPC command payload: "cursor" must be a string',
+	},
+	{
 		name: "rejects invalid model providers",
 		payload: { type: "set_model", provider: 1, modelId: "model" },
 		error: 'Invalid RPC command payload: "provider" must be a string',
