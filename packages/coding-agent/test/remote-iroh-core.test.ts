@@ -1261,10 +1261,12 @@ describe("Iroh remote core helpers", () => {
 		]);
 	});
 
-	test("normalizes legacy default remote tool grants to include subagent", () => {
+	test("normalizes legacy default remote tool grants to include current default tools", () => {
 		const legacyDefaultGrant = "read,bash,edit,write,grep,find,ls";
+		const previousDefaultGrant = "read,bash,edit,write,web_search,grep,find,ls,subagent";
 
 		expect(normalizeIrohRemoteAllowTools(legacyDefaultGrant)).toBe(DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
+		expect(normalizeIrohRemoteAllowTools(previousDefaultGrant)).toBe(DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
 		expect(normalizeIrohRemoteAllowTools("read")).toBe("read");
 		expect(
 			parseIrohRemoteHostState({

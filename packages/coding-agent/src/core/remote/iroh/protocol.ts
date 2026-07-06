@@ -8,11 +8,12 @@ export const IROH_REMOTE_HOST_FEATURES = [
 	IROH_REMOTE_MULTI_STREAMS_FEATURE,
 	IROH_REMOTE_CONVERSATION_STREAMS_FEATURE,
 ] as const;
-export const DEFAULT_IROH_REMOTE_ALLOW_TOOLS = "read,bash,edit,write,web_search,grep,find,ls,subagent";
+export const DEFAULT_IROH_REMOTE_ALLOW_TOOLS = "read,bash,edit,write,web_search,grep,find,ls,subagent,mcp";
 const LEGACY_DEFAULT_IROH_REMOTE_ALLOW_TOOL_SETS: readonly string[][] = [
 	["read", "bash", "edit", "write", "grep", "find", "ls"],
 	["read", "bash", "edit", "write", "web_search", "grep", "find", "ls"],
 	["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"],
+	["read", "bash", "edit", "write", "web_search", "grep", "find", "ls", "subagent"],
 ];
 export const IROH_REMOTE_UNSAFE_TOOL_NAMES = ["bash", "edit", "write", "web_search"] as const;
 export const IROH_REMOTE_OUTCOMES = [
