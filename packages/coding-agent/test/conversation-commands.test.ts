@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
+import type { SessionEntry } from "../src/core/session-manager.ts";
 import {
 	type ConversationCommandContext,
 	type ConversationCommandRuntime,
 	handleIntegratedConversationRpcCommand,
 	INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES,
 	LEASE_DRAINING_RETRY_AFTER_MS,
+	REMOTE_TOOL_OUTPUT_MAX_SCALARS,
 	TURN_INITIATING_RPC_TYPES,
 } from "../src/daemon/conversation-commands.ts";
 
@@ -154,6 +156,51 @@ describe("handleIntegratedConversationRpcCommand", () => {
 			createRuntime("s-1"),
 		)) as Record<string, unknown>;
 		expect(wrongSession).toMatchObject({ success: false, error: "session_mismatch" });
+	});
+
+	it("projects sanitized, truncated tool output onto transcript tool items", async () => {
+		const branch = [
+			{
+				type: "message",
+				id: "e-call",
+				timestamp: "2026-07-06T00:00:00.000Z",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "tc-1", name: "read", arguments: { path: "/tmp/ws/README.md" } }],
+				},
+			},
+			{
+				type: "message",
+				id: "e-result",
+				timestamp: "2026-07-06T00:00:01.000Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "tc-1",
+					toolName: "read",
+					isError: false,
+					content: [{ type: "text", text: `README at /tmp/ws/README.md\n${"x".repeat(9_000)}` }],
+				},
+			},
+		] as unknown as SessionEntry[];
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-1", sessionManager: { getBranch: () => branch } },
+			listSessions: async () => [],
+		};
+
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "11", type: "get_transcript" },
+			createAuthorization(),
+			createContext(),
+			runtime,
+		)) as { success: boolean; data: { items: Array<Record<string, unknown>> } };
+		expect(response.success).toBe(true);
+		const tool = response.data.items.find((item) => item.role === "tool");
+		expect(tool).toBeDefined();
+		const output = tool?.output as string;
+		expect(output).toContain("README at /workspace/README.md");
+		expect(output).not.toContain("/tmp/ws");
+		expect(Array.from(output)).toHaveLength(REMOTE_TOOL_OUTPUT_MAX_SCALARS);
+		expect(tool?.outputTruncated).toBe(true);
 	});
 
 	it("serves list_sessions with the current session summary", async () => {

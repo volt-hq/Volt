@@ -52,6 +52,7 @@ const REMOTE_TRANSCRIPT_CURSOR_MAX_SCALARS = 512;
 const REMOTE_TOOL_COMMAND_MAX_SCALARS = 500;
 const REMOTE_TOOL_ARGUMENT_MAX_SCALARS = 500;
 const REMOTE_TOOL_ARGUMENT_KEYS_MAX = 12;
+export const REMOTE_TOOL_OUTPUT_MAX_SCALARS = 8_000;
 
 export type RemoteRpcCommand = Record<string, unknown> & { type: string };
 
@@ -266,6 +267,33 @@ export interface RemoteTranscriptItem {
 	path?: string;
 	args?: Record<string, unknown>;
 	details?: Record<string, unknown>;
+	output?: string;
+	outputTruncated?: boolean;
+}
+
+/**
+ * Sanitized, bounded tool result text for remote clients. Layout is preserved
+ * (unlike tool summaries) so the phone can render real output; the scalar cap
+ * keeps a single transcript item within remote stream size expectations.
+ */
+function sanitizeRemoteToolOutput(
+	value: unknown,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	hostTruncated = false,
+): { text: string; truncated: boolean } | undefined {
+	if (typeof value !== "string" || value.trim().length === 0) {
+		return undefined;
+	}
+	const sanitized = sanitizeRemoteTranscriptText(value, authorization, "preserve");
+	const scalars = Array.from(sanitized.text);
+	const truncated = sanitized.truncated || hostTruncated || scalars.length > REMOTE_TOOL_OUTPUT_MAX_SCALARS;
+	return {
+		text:
+			scalars.length > REMOTE_TOOL_OUTPUT_MAX_SCALARS
+				? scalars.slice(0, REMOTE_TOOL_OUTPUT_MAX_SCALARS).join("")
+				: sanitized.text,
+		truncated,
+	};
 }
 
 function createRemoteTranscriptItem(
@@ -342,6 +370,11 @@ function projectRemoteTranscriptEntry(
 				item.details = details;
 			}
 		}
+		const output = sanitizeRemoteToolOutput(extractTranscriptContentText(message.content), authorization);
+		if (output) {
+			item.output = output.text;
+			item.outputTruncated = output.truncated;
+		}
 		return item;
 	}
 	if (message.role === "bashExecution") {
@@ -360,6 +393,11 @@ function projectRemoteTranscriptEntry(
 		item.summary = summary;
 		if (command) {
 			item.args = { command };
+		}
+		const output = sanitizeRemoteToolOutput(message.output, authorization, message.truncated === true);
+		if (output) {
+			item.output = output.text;
+			item.outputTruncated = output.truncated;
 		}
 		return item;
 	}

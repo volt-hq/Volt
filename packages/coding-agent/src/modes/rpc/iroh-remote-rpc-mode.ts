@@ -105,6 +105,13 @@ interface IrohRemoteHostCommandRpcTransportOptions {
  */
 const MAX_SENT_NOTIFICATION_EVENT_IDS = 512;
 
+/**
+ * Scalar cap for tool result text shipped to remote clients (transcript entries
+ * and tool_execution_end frames). Mirrors REMOTE_TOOL_OUTPUT_MAX_SCALARS in
+ * daemon/conversation-commands.ts so live events and fetched history agree.
+ */
+const IROH_REMOTE_TOOL_OUTPUT_MAX_SCALARS = 8_000;
+
 /** Run Volt RPC in-process over an authorized Iroh bidirectional stream. */
 export function runIrohRemoteRpcMode(
 	runtimeHost: AgentSessionRuntime,
@@ -128,7 +135,7 @@ export function runIrohRemoteRpcMode(
 		transport: createIrohRpcTransport(options),
 		workspacePath: options.workspacePath,
 	});
-	const outboundTransport: RpcTransport = options.suppressExtensionUiRequests
+	const suppressingTransport: RpcTransport = options.suppressExtensionUiRequests
 		? {
 				...filteredOutboundTransport,
 				write: (value) => {
@@ -143,6 +150,18 @@ export function runIrohRemoteRpcMode(
 				},
 			}
 		: filteredOutboundTransport;
+	// Attach bounded, sanitized tool result text to live tool_execution_end
+	// frames so remote clients can show real output in tool details.
+	const outboundTransport: RpcTransport = {
+		...suppressingTransport,
+		write: (value) =>
+			suppressingTransport.write(
+				decorateIrohRemoteToolExecutionEnd(value, {
+					remoteWorkspacePath: options.remoteWorkspacePath,
+					workspacePath: options.workspacePath,
+				}),
+			),
+	};
 	const attachTranscriptEntryEvents = () => {
 		detachTranscriptEntryEvents?.();
 		detachTranscriptEntryEvents = attachIrohRemoteTranscriptEntryEvents(runtimeHost, outboundTransport, {
@@ -339,6 +358,7 @@ function createIrohRemoteTranscriptEntryEvent(
 						...projectIrohRemoteSubagentTranscriptDetails(message.details, options),
 					}
 				: {}),
+			...sanitizeIrohRemoteToolOutputFields(extractVisibleTextContent(message.content), options),
 		});
 	}
 	if (message.role === "bashExecution") {
@@ -349,7 +369,13 @@ function createIrohRemoteTranscriptEntryEvent(
 			: message.exitCode === undefined
 				? status
 				: `exit ${message.exitCode}`;
-		return createIrohRemoteTranscriptEntryEventValue(entry, "tool", `bash ${exit}`, options);
+		return createIrohRemoteTranscriptEntryEventValue(
+			entry,
+			"tool",
+			`bash ${exit}`,
+			options,
+			sanitizeIrohRemoteToolOutputFields(message.output, options, message.truncated === true),
+		);
 	}
 	return undefined;
 }
@@ -371,9 +397,65 @@ function createIrohRemoteProjectedTranscriptEntryEvent(
 			entryId: item.id,
 			createdAt: item.timestamp,
 			...createIrohRemoteProjectedTranscriptEntryFields(item, options),
+			...(item.role === "tool" ? getIrohRemoteToolOutputFields(entry, options) : {}),
 		},
 		final: true,
 	};
+}
+
+/** Sanitized, bounded tool result text for a persisted tool transcript entry. */
+function getIrohRemoteToolOutputFields(
+	entry: IrohRemoteTranscriptSourceEntry,
+	options: IrohRemoteTranscriptEventOptions,
+): Record<string, unknown> {
+	if (entry.type !== "message") {
+		return {};
+	}
+	const message = entry.message;
+	if (message.role === "toolResult") {
+		return sanitizeIrohRemoteToolOutputFields(extractVisibleTextContent(message.content), options);
+	}
+	if (message.role === "bashExecution") {
+		return sanitizeIrohRemoteToolOutputFields(message.output, options, message.truncated === true);
+	}
+	return {};
+}
+
+function sanitizeIrohRemoteToolOutputFields(
+	value: unknown,
+	options: IrohRemoteTranscriptEventOptions,
+	hostTruncated = false,
+): Record<string, unknown> {
+	if (typeof value !== "string" || value.trim().length === 0) {
+		return {};
+	}
+	const sanitized = sanitizeIrohRemoteTranscriptText(value, options, "preserve");
+	const scalars = Array.from(sanitized.text);
+	const truncated = sanitized.truncated || hostTruncated || scalars.length > IROH_REMOTE_TOOL_OUTPUT_MAX_SCALARS;
+	return {
+		output:
+			scalars.length > IROH_REMOTE_TOOL_OUTPUT_MAX_SCALARS
+				? scalars.slice(0, IROH_REMOTE_TOOL_OUTPUT_MAX_SCALARS).join("")
+				: sanitized.text,
+		outputTruncated: truncated,
+	};
+}
+
+/**
+ * Adds `output`/`outputTruncated` to outbound tool_execution_end frames. The
+ * generic outbound filter still sanitizes the whole frame afterwards; the text
+ * is pre-sanitized and truncated here so the added field is bounded regardless.
+ */
+function decorateIrohRemoteToolExecutionEnd(value: object, options: IrohRemoteTranscriptEventOptions): object {
+	if (!isRecord(value) || value.type !== "tool_execution_end" || "output" in value) {
+		return value;
+	}
+	const result = value.result;
+	if (!isRecord(result)) {
+		return value;
+	}
+	const outputFields = sanitizeIrohRemoteToolOutputFields(extractVisibleTextContent(result.content), options);
+	return Object.keys(outputFields).length > 0 ? { ...value, ...outputFields } : value;
 }
 
 function createIrohRemoteProjectedTranscriptEntryFields(
