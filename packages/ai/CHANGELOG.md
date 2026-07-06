@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed the faux provider to serve `streamSimple`/`completeSimple` requests from a separate response queue (`setSimpleResponses`/`appendSimpleResponses`/`getPendingSimpleResponseCount`), so background simple completions (session naming, compaction, branch summaries) can no longer steal queued turn responses in tests.
+
 ## [0.79.6] - 2026-06-16
 
 ### Changed

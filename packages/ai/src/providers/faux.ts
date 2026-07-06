@@ -93,10 +93,17 @@ export function fauxAssistantMessage(
 	};
 }
 
+export interface FauxProviderState {
+	/** Turn requests: `stream`/`complete` calls and agent turns via `streamSimple`. */
+	callCount: number;
+	/** Auxiliary simple completions (no `context.tools`): naming, compaction, summaries. */
+	simpleCallCount: number;
+}
+
 export type FauxResponseFactory = (
 	context: Context,
 	options: StreamOptions | undefined,
-	state: { callCount: number },
+	state: FauxProviderState,
 	model: Model<string>,
 ) => AssistantMessage | Promise<AssistantMessage>;
 
@@ -118,10 +125,20 @@ export interface FauxProviderRegistration {
 	models: [Model<string>, ...Model<string>[]];
 	getModel(): Model<string>;
 	getModel(modelId: string): Model<string> | undefined;
-	state: { callCount: number };
+	state: FauxProviderState;
 	setResponses: (responses: FauxResponseStep[]) => void;
 	appendResponses: (responses: FauxResponseStep[]) => void;
 	getPendingResponseCount: () => number;
+	/**
+	 * Responses served to `streamSimple`/`completeSimple` consumers (session
+	 * naming, compaction, branch summaries). These run on a separate queue so a
+	 * fire-and-forget background completion can never steal a queued turn
+	 * response from `setResponses`; when this queue is empty the simple request
+	 * resolves to an error message, which those consumers treat as a no-op.
+	 */
+	setSimpleResponses: (responses: FauxResponseStep[]) => void;
+	appendSimpleResponses: (responses: FauxResponseStep[]) => void;
+	getPendingSimpleResponseCount: () => number;
 	unregister: () => void;
 }
 
@@ -398,8 +415,9 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 	);
 	const maxTokenSize = Math.max(minTokenSize, options.tokenSize?.max ?? DEFAULT_MAX_TOKEN_SIZE);
 	let pendingResponses: FauxResponseStep[] = [];
+	let pendingSimpleResponses: FauxResponseStep[] = [];
 	const tokensPerSecond = options.tokensPerSecond;
-	const state = { callCount: 0 };
+	const state: FauxProviderState = { callCount: 0, simpleCallCount: 0 };
 	const promptCache = new Map<string, string>();
 
 	const modelDefinitions = options.models?.length
@@ -428,44 +446,70 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 		maxTokens: definition.maxTokens ?? 16384,
 	})) as [Model<string>, ...Model<string>[]];
 
-	const stream: StreamFunction<string, StreamOptions> = (requestModel, context, streamOptions) => {
-		const outer = createAssistantMessageEventStream();
-		const step = pendingResponses.shift();
-		state.callCount++;
+	const createQueueStream =
+		(takeStep: () => FauxResponseStep | undefined, recordCall: () => void): StreamFunction<string, StreamOptions> =>
+		(requestModel, context, streamOptions) => {
+			const outer = createAssistantMessageEventStream();
+			const step = takeStep();
+			recordCall();
 
-		queueMicrotask(async () => {
-			try {
-				await streamOptions?.onResponse?.({ status: 200, headers: {} }, requestModel);
-				if (!step) {
-					let message = createErrorMessage(
-						new Error("No more faux responses queued"),
-						api,
-						provider,
-						requestModel.id,
-					);
+			queueMicrotask(async () => {
+				try {
+					await streamOptions?.onResponse?.({ status: 200, headers: {} }, requestModel);
+					if (!step) {
+						let message = createErrorMessage(
+							new Error("No more faux responses queued"),
+							api,
+							provider,
+							requestModel.id,
+						);
+						message = withUsageEstimate(message, context, streamOptions, promptCache);
+						outer.push({ type: "error", reason: "error", error: message });
+						outer.end(message);
+						return;
+					}
+
+					const resolved =
+						typeof step === "function" ? await step(context, streamOptions, state, requestModel) : step;
+					let message = cloneMessage(resolved, api, provider, requestModel.id);
 					message = withUsageEstimate(message, context, streamOptions, promptCache);
+					await streamWithDeltas(
+						outer,
+						message,
+						minTokenSize,
+						maxTokenSize,
+						tokensPerSecond,
+						streamOptions?.signal,
+					);
+				} catch (error) {
+					const message = createErrorMessage(error, api, provider, requestModel.id);
 					outer.push({ type: "error", reason: "error", error: message });
 					outer.end(message);
-					return;
 				}
+			});
 
-				const resolved =
-					typeof step === "function" ? await step(context, streamOptions, state, requestModel) : step;
-				let message = cloneMessage(resolved, api, provider, requestModel.id);
-				message = withUsageEstimate(message, context, streamOptions, promptCache);
-				await streamWithDeltas(outer, message, minTokenSize, maxTokenSize, tokensPerSecond, streamOptions?.signal);
-			} catch (error) {
-				const message = createErrorMessage(error, api, provider, requestModel.id);
-				outer.push({ type: "error", reason: "error", error: message });
-				outer.end(message);
-			}
-		});
+			return outer;
+		};
 
-		return outer;
-	};
-
-	const streamSimple: StreamFunction<string, SimpleStreamOptions> = (streamModel, context, streamOptions) =>
-		stream(streamModel, context, streamOptions);
+	const stream = createQueueStream(
+		() => pendingResponses.shift(),
+		() => state.callCount++,
+	);
+	// Agent turns also arrive via streamSimple (agent-core's StreamFn), always
+	// with a tools array in the context. Auxiliary simple completions (session
+	// naming, compaction, branch summaries) never set context.tools; route them
+	// to their own queue and counter so a fire-and-forget background completion
+	// can never race a test's queued turn responses or call-count assertions.
+	// Empty simple queue = error message, which best-effort callers treat as a
+	// no-op.
+	const streamAuxiliary = createQueueStream(
+		() => pendingSimpleResponses.shift(),
+		() => state.simpleCallCount++,
+	);
+	const streamSimple: StreamFunction<string, SimpleStreamOptions> = (requestModel, context, streamOptions) =>
+		context.tools === undefined
+			? streamAuxiliary(requestModel, context, streamOptions)
+			: stream(requestModel, context, streamOptions);
 
 	registerApiProvider({ api, stream, streamSimple }, sourceId);
 
@@ -491,6 +535,15 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 		},
 		getPendingResponseCount() {
 			return pendingResponses.length;
+		},
+		setSimpleResponses(responses) {
+			pendingSimpleResponses = [...responses];
+		},
+		appendSimpleResponses(responses) {
+			pendingSimpleResponses.push(...responses);
+		},
+		getPendingSimpleResponseCount() {
+			return pendingSimpleResponses.length;
 		},
 		unregister() {
 			unregisterApiProviders(sourceId);

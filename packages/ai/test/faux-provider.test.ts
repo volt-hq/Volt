@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	complete,
+	completeSimple,
 	fauxAssistantMessage,
 	fauxText,
 	fauxThinking,
@@ -133,6 +134,34 @@ describe("faux provider", () => {
 		expect(exhausted.errorMessage).toBe("No more faux responses queued");
 		expect(registration.getPendingResponseCount()).toBe(0);
 		expect(registration.state.callCount).toBe(3);
+	});
+
+	it("serves simple completions from a separate queue that never steals turn responses", async () => {
+		const registration = registerFauxProvider();
+		registrations.push(registration);
+		registration.setResponses([fauxAssistantMessage("turn response")]);
+		registration.setSimpleResponses([fauxAssistantMessage("simple response")]);
+
+		const context: Context = {
+			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+		};
+
+		// A background simple completion (session naming, compaction) must not
+		// consume the queued turn response.
+		const simple = await completeSimple(registration.getModel(), context);
+		expect(simple.content).toEqual([{ type: "text", text: "simple response" }]);
+		expect(registration.getPendingResponseCount()).toBe(1);
+		expect(registration.getPendingSimpleResponseCount()).toBe(0);
+
+		// An exhausted simple queue resolves to an error message (a no-op for
+		// best-effort consumers) and still leaves turn responses untouched.
+		const exhausted = await completeSimple(registration.getModel(), context);
+		expect(exhausted.stopReason).toBe("error");
+		expect(exhausted.errorMessage).toBe("No more faux responses queued");
+		expect(registration.getPendingResponseCount()).toBe(1);
+
+		const turn = await complete(registration.getModel(), context);
+		expect(turn.content).toEqual([{ type: "text", text: "turn response" }]);
 	});
 
 	it("can replace and append queued responses", async () => {

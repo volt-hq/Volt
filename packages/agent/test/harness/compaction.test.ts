@@ -438,7 +438,7 @@ describe("harness compaction", () => {
 		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
 		const seenOptions: Array<Record<string, unknown> | undefined> = [];
 		const { faux: fauxReasoning, model: reasoningModel } = createFauxModel(true);
-		fauxReasoning.setResponses([
+		fauxReasoning.setSimpleResponses([
 			(_context, options) => {
 				seenOptions.push(options as Record<string, unknown> | undefined);
 				return fauxAssistantMessage("## Goal\nTest summary");
@@ -460,7 +460,7 @@ describe("harness compaction", () => {
 		expect(seenOptions[0]).toMatchObject({ reasoning: "medium", apiKey: "test-key" });
 
 		const { faux: fauxOff, model: offModel } = createFauxModel(true);
-		fauxOff.setResponses([
+		fauxOff.setSimpleResponses([
 			(_context, options) => {
 				seenOptions.push(options as Record<string, unknown> | undefined);
 				return fauxAssistantMessage("## Goal\nTest summary");
@@ -472,7 +472,7 @@ describe("harness compaction", () => {
 		expect(seenOptions[1]).not.toHaveProperty("reasoning");
 
 		const { faux: fauxNonReasoning, model: nonReasoningModel } = createFauxModel(false);
-		fauxNonReasoning.setResponses([
+		fauxNonReasoning.setSimpleResponses([
 			(_context, options) => {
 				seenOptions.push(options as Record<string, unknown> | undefined);
 				return fauxAssistantMessage("## Goal\nTest summary");
@@ -498,7 +498,7 @@ describe("harness compaction", () => {
 		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
 		let promptText = "";
 		const { faux, model } = createFauxModel(false);
-		faux.setResponses([
+		faux.setSimpleResponses([
 			(context) => {
 				const message = context.messages[0];
 				const content = message?.role === "user" ? message.content : [];
@@ -528,7 +528,7 @@ describe("harness compaction", () => {
 	it("returns error results for failed or aborted summary generations", async () => {
 		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
 		const { faux: errorFaux, model: errorModel } = createFauxModel(false);
-		errorFaux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "boom" })]);
+		errorFaux.setSimpleResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "boom" })]);
 		const errorResult = await generateSummary(messages, errorModel, 2000, "test-key");
 		expect(errorResult).toMatchObject({
 			ok: false,
@@ -536,7 +536,7 @@ describe("harness compaction", () => {
 		});
 
 		const { faux: abortedFaux, model: abortedModel } = createFauxModel(false);
-		abortedFaux.setResponses([fauxAssistantMessage("", { stopReason: "aborted", errorMessage: "stopped" })]);
+		abortedFaux.setSimpleResponses([fauxAssistantMessage("", { stopReason: "aborted", errorMessage: "stopped" })]);
 		const abortedResult = await generateSummary(messages, abortedModel, 2000, "test-key");
 		expect(abortedResult).toMatchObject({ ok: false, error: { code: "aborted", message: "stopped" } });
 	});
@@ -545,7 +545,7 @@ describe("harness compaction", () => {
 		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
 		const seenOptions: Array<Record<string, unknown> | undefined> = [];
 		const { faux, model } = createFauxModel(false, 128000);
-		faux.setResponses([
+		faux.setSimpleResponses([
 			(_context, options) => {
 				seenOptions.push(options as Record<string, unknown> | undefined);
 				return fauxAssistantMessage("## Goal\nTest summary");
@@ -582,7 +582,9 @@ describe("harness compaction", () => {
 			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
 		};
 		const { faux: historyFaux, model: historyModel } = createFauxModel(false);
-		historyFaux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "history failed" })]);
+		historyFaux.setSimpleResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "history failed" }),
+		]);
 		expect(await compact(preparation, historyModel, "test-key")).toMatchObject({
 			ok: false,
 			error: { code: "summarization_failed", message: "Summarization failed: history failed" },
@@ -601,7 +603,7 @@ describe("harness compaction", () => {
 		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
 		const seenOptions: Array<Record<string, unknown> | undefined> = [];
 		const { faux, model } = createFauxModel(true);
-		faux.setResponses([
+		faux.setSimpleResponses([
 			(_context, options) => {
 				seenOptions.push(options as Record<string, unknown> | undefined);
 				return fauxAssistantMessage("## Original Request\nTest summary");
@@ -634,7 +636,7 @@ describe("harness compaction", () => {
 			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
 		};
 		const { faux, model } = createFauxModel(false);
-		faux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "prefix failed" })]);
+		faux.setSimpleResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "prefix failed" })]);
 
 		expect(await compact(preparation, model, "test-key")).toMatchObject({
 			ok: false,
@@ -642,7 +644,9 @@ describe("harness compaction", () => {
 		});
 
 		const { faux: abortedFaux, model: abortedModel } = createFauxModel(false);
-		abortedFaux.setResponses([fauxAssistantMessage("", { stopReason: "aborted", errorMessage: "prefix stopped" })]);
+		abortedFaux.setSimpleResponses([
+			fauxAssistantMessage("", { stopReason: "aborted", errorMessage: "prefix stopped" }),
+		]);
 		expect(await compact(preparation, abortedModel, "test-key")).toMatchObject({
 			ok: false,
 			error: { code: "aborted", message: "prefix stopped" },
@@ -661,7 +665,7 @@ describe("harness compaction", () => {
 		const preparation = getOrThrow(prepareCompaction([u1, a1, u2, a2], DEFAULT_COMPACTION_SETTINGS));
 		expect(preparation).toBeDefined();
 		const { faux, model } = createFauxModel(false);
-		faux.setResponses([fauxAssistantMessage("## Goal\nTest summary")]);
+		faux.setSimpleResponses([fauxAssistantMessage("## Goal\nTest summary")]);
 		const result = getOrThrow(await compact(preparation!, model, "test-key"));
 		expect(result.summary.length).toBeGreaterThan(0);
 		expect(result.firstKeptEntryId).toBeTruthy();

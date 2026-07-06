@@ -137,6 +137,10 @@ describe("AgentSession reload invalidates the previous extension generation", ()
 		expect(voltGenerations).toHaveLength(1);
 		const oldVolt = voltGenerations[0];
 
+		// Pin a name so session auto-naming (a fire-and-forget completeSimple on
+		// the first prompt) cannot consume one of the scripted replies.
+		runtime.session.setSessionName("reload invalidation test");
+
 		await runtime.session.prompt("first");
 
 		await runtime.session.reload();
