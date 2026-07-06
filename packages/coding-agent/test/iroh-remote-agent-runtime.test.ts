@@ -12,13 +12,14 @@ import {
 	type IrohRemoteSubagentRuntimeCreatedEvent,
 } from "../src/modes/rpc/iroh-remote-agent-runtime.ts";
 
+const SAVED_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "HOME"] as const;
 const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY"] as const;
 
 describe("createIrohRemoteAgentRuntime", () => {
 	let tempDir: string;
 	let cwd: string;
 	let agentDir: string;
-	let savedEnv: Record<(typeof PROXY_ENV_KEYS)[number], string | undefined>;
+	let savedEnv: Record<(typeof SAVED_ENV_KEYS)[number], string | undefined>;
 
 	beforeEach(() => {
 		tempDir = mkdtempSync(join(tmpdir(), "volt-iroh-remote-runtime-"));
@@ -26,20 +27,23 @@ describe("createIrohRemoteAgentRuntime", () => {
 		agentDir = join(tempDir, "agent");
 		mkdirSync(cwd, { recursive: true });
 		mkdirSync(agentDir, { recursive: true });
-		savedEnv = Object.fromEntries(PROXY_ENV_KEYS.map((key) => [key, process.env[key]])) as Record<
-			(typeof PROXY_ENV_KEYS)[number],
+		savedEnv = Object.fromEntries(SAVED_ENV_KEYS.map((key) => [key, process.env[key]])) as Record<
+			(typeof SAVED_ENV_KEYS)[number],
 			string | undefined
 		>;
 		for (const key of PROXY_ENV_KEYS) {
 			delete process.env[key];
 		}
+		// Keep the runtime hermetic: MCP config resolution reads the shared
+		// user config under homedir (~/.config/mcp/mcp.json).
+		process.env.HOME = tempDir;
 	});
 
 	afterEach(() => {
 		if (tempDir) {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
-		for (const key of PROXY_ENV_KEYS) {
+		for (const key of SAVED_ENV_KEYS) {
 			const value = savedEnv[key];
 			if (value === undefined) {
 				delete process.env[key];
@@ -85,6 +89,15 @@ export default function (volt) {
 		writeFileSync(join(dir, filename), `---\n${frontmatter}\n---\n\n${body}`);
 	}
 
+	function writeMcpConfig(): void {
+		// A lazy stdio server is enough for the runtime to wire an McpManager
+		// (and expose the "mcp" tool) without ever spawning the process.
+		writeFileSync(
+			join(agentDir, "mcp.json"),
+			`${JSON.stringify({ servers: { "test-server": { command: "true", lifecycle: "lazy" } } }, null, 2)}\n`,
+		);
+	}
+
 	function writeRuntimeConfig(settings: Record<string, unknown>): void {
 		writeRuntimeModelConfig({
 			api: "openai-completions",
@@ -123,6 +136,7 @@ export default function (volt) {
 
 	it("applies HTTP proxy settings before creating the runtime", async () => {
 		writeRuntimeConfig({ httpProxy: "http://127.0.0.1:7890" });
+		writeMcpConfig();
 		mkdirSync(join(agentDir, "commands"), { recursive: true });
 		writeFileSync(join(agentDir, "commands", "remote.md"), "remote prompt\n");
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -144,6 +158,7 @@ export default function (volt) {
 
 	it("keeps active user extension tools available with the default remote grant", async () => {
 		writeRuntimeConfig({});
+		writeMcpConfig();
 		writeToolExtension();
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
