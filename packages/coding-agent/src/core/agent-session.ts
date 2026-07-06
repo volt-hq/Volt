@@ -23,10 +23,18 @@ import type {
 	AgentTool,
 	ThinkingLevel,
 } from "@earendil-works/volt-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@earendil-works/volt-ai";
+import type {
+	AssistantMessage,
+	ImageContent,
+	Message,
+	Model,
+	SimpleStreamOptions,
+	TextContent,
+} from "@earendil-works/volt-ai";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
+	completeSimple,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	modelsAreEqual,
@@ -1232,6 +1240,9 @@ export class AgentSession {
 				}
 				throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 			}
+
+			// Name the session from its first prompt, concurrently with the turn.
+			this._maybeGenerateSessionName(expandedText);
 
 			// Check if we need to compact before sending (catches aborted responses)
 			const lastAssistant = this._findLastAssistantMessage();
@@ -3012,6 +3023,74 @@ export class AgentSession {
 	setSessionName(name: string): void {
 		this.sessionManager.appendSessionInfo(name);
 		this._emit({ type: "session_info_changed", name: this.sessionManager.getSessionName() });
+	}
+
+	private _sessionNameGenerationInFlight = false;
+
+	/**
+	 * Best-effort, fire-and-forget: name an unnamed session from the user's
+	 * prompt with a single tiny completion, so session lists show "Fix login
+	 * crash" instead of a session-id prefix. Runs concurrently with the turn;
+	 * an explicit name set in the meantime wins (checked again before commit).
+	 * Never throws and never blocks or fails the prompt itself.
+	 */
+	private _maybeGenerateSessionName(userText: string): void {
+		if (this._sessionNameGenerationInFlight || this.sessionManager.getSessionName()) {
+			return;
+		}
+		const model = this.model;
+		const request = userText.trim();
+		if (!model || !request) {
+			return;
+		}
+
+		this._sessionNameGenerationInFlight = true;
+		void (async () => {
+			try {
+				const { apiKey, headers, env } = await this._getCompactionRequestAuth(model);
+				const promptText =
+					`Write a short title (3-6 words, plain text, no quotes, no trailing punctuation) ` +
+					`for a coding session that starts with this request:\n\n<request>\n${request.slice(0, 2000)}\n</request>\n\n` +
+					`Reply with only the title.`;
+				const options: SimpleStreamOptions = { maxTokens: 64, apiKey, headers, env };
+				const response = await completeSimple(
+					model,
+					{
+						systemPrompt: "You title coding assistant sessions.",
+						messages: [{ role: "user", content: [{ type: "text", text: promptText }], timestamp: Date.now() }],
+					},
+					options,
+				);
+				if (response.stopReason === "error") {
+					return;
+				}
+				const name = AgentSession._sanitizeGeneratedSessionName(
+					response.content
+						.filter((c): c is TextContent => c.type === "text")
+						.map((c) => c.text)
+						.join(" "),
+				);
+				if (name && !this._disposed && !this.sessionManager.getSessionName()) {
+					this.setSessionName(name);
+				}
+			} catch {
+				// Naming is cosmetic; the session keeps its id-derived fallback.
+			} finally {
+				this._sessionNameGenerationInFlight = false;
+			}
+		})();
+	}
+
+	private static _sanitizeGeneratedSessionName(raw: string): string | undefined {
+		const firstLine = raw.split("\n").find((line) => line.trim().length > 0) ?? "";
+		const name = firstLine
+			.trim()
+			.replace(/^["'`#*\s]+|["'`*\s.]+$/g, "")
+			.replace(/\s+/g, " ");
+		if (!name) {
+			return undefined;
+		}
+		return name.length > 60 ? `${name.slice(0, 57)}…` : name;
 	}
 
 	// =========================================================================
