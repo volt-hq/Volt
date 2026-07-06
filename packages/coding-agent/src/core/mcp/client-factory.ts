@@ -77,7 +77,20 @@ class SdkMcpClientConnection implements McpClientConnection {
 		params: { name: string; arguments?: Record<string, unknown> },
 		options: McpRequestOptions,
 	): Promise<CallToolResult> {
-		const result = await this.client.callTool(params, CallToolResultSchema, options);
+		const { onProgress, ...sdkOptions } = options;
+		const result = await this.client.callTool(params, CallToolResultSchema, {
+			...sdkOptions,
+			...(onProgress
+				? {
+						onprogress: (progress: { progress: number; total?: number; message?: string }) =>
+							onProgress({
+								progress: progress.progress,
+								...(progress.total !== undefined ? { total: progress.total } : {}),
+								...(progress.message !== undefined ? { message: progress.message } : {}),
+							}),
+					}
+				: {}),
+		});
 		if (isCallToolResult(result)) {
 			return result;
 		}

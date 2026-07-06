@@ -51,9 +51,11 @@ export { searchMcpMetadata } from "./search.ts";
 export { McpServerSupervisor, type McpServerSupervisorOptions } from "./server-supervisor.ts";
 export type {
 	McpAuthConfig,
+	McpAuthRequestDetails,
 	McpAuthState,
 	McpCacheReference,
 	McpCallerSurface,
+	McpCallProgress,
 	McpClientConnection,
 	McpClientFactory,
 	McpConfigDiagnostic,
@@ -63,6 +65,8 @@ export type {
 	McpGatewayExecutionContext,
 	McpGatewayInput,
 	McpLifecycle,
+	McpManagerEvent,
+	McpManagerEventListener,
 	McpMetadataRefreshResult,
 	McpOutputTruncation,
 	McpPromptSummary,

@@ -23,6 +23,8 @@ import type {
 	McpGatewayCallResult,
 	McpGatewayExecutionContext,
 	McpGatewayInput,
+	McpManagerEvent,
+	McpManagerEventListener,
 	McpPromptSummary,
 	McpRecentCallStatus,
 	McpResolvedConfig,
@@ -221,6 +223,7 @@ export class McpManager {
 	private pendingDeviceAuth: Map<string, McpOAuthPendingDeviceFlow> = new Map();
 	private sessionId: string | undefined;
 	private workspaceId: string | undefined;
+	private eventListeners: Set<McpManagerEventListener> = new Set();
 
 	constructor(options: McpManagerOptions) {
 		this.config = options.config;
@@ -240,9 +243,41 @@ export class McpManager {
 					clientFactory: options.clientFactory,
 					metadataCache: this.metadataCache,
 					oauthStore: this.oauthStore,
+					onStateChanged: (supervisor) =>
+						this.emit({ type: "mcp_server_status_changed", server: supervisor.getSummary() }),
 				}),
 			]),
 		);
+	}
+
+	/** Subscribe to MCP lifecycle events. Returns an unsubscribe function. */
+	subscribe(listener: McpManagerEventListener): () => void {
+		this.eventListeners.add(listener);
+		return () => {
+			this.eventListeners.delete(listener);
+		};
+	}
+
+	private emit(event: McpManagerEvent): void {
+		for (const listener of this.eventListeners) {
+			try {
+				listener(event);
+			} catch {
+				// Listener failures must never break MCP operations.
+			}
+		}
+	}
+
+	private emitAuthUpdate(serverId: string, status: string, message?: string): void {
+		const supervisor = this.supervisors.get(serverId);
+		this.emit({
+			type: "mcp_auth_update",
+			serverId,
+			status,
+			authState: supervisor?.authState ?? "none",
+			...(message ? { message } : {}),
+			...(supervisor ? { server: supervisor.getSummary() } : {}),
+		});
 	}
 
 	isEnabled(): boolean {
@@ -403,6 +438,7 @@ export class McpManager {
 		}
 		const persisted = this.configWriter.setServerEnabled(supervisor.server, enabled);
 		await supervisor.setEnabled(enabled);
+		this.emit({ type: "mcp_servers_changed", servers: this.listServers() });
 		return { action: "set_enabled", server: supervisor.getSummary(), persisted };
 	}
 
@@ -425,6 +461,19 @@ export class McpManager {
 			});
 			this.pendingDeviceAuth.set(serverId, pending);
 			supervisor.refreshAuthState();
+			this.emit({
+				type: "mcp_auth_request",
+				serverId: supervisor.server.id,
+				auth: {
+					flow: "device",
+					verificationUri: result.verificationUri,
+					...(result.verificationUriComplete ? { verificationUriComplete: result.verificationUriComplete } : {}),
+					userCode: result.userCode,
+					expiresAt: result.expiresAt,
+					intervalMs: result.intervalMs,
+					message: result.message,
+				},
+			});
 			return result;
 		}
 		const redirectUrl = options.redirectUrl?.trim();
@@ -437,6 +486,20 @@ export class McpManager {
 			redirectUrl,
 		});
 		supervisor.refreshAuthState();
+		if (result.status === "pending") {
+			this.emit({
+				type: "mcp_auth_request",
+				serverId: supervisor.server.id,
+				auth: {
+					flow: "browser",
+					...(result.authorizationUrl ? { authorizationUrl: result.authorizationUrl } : {}),
+					redirectUrl: result.redirectUrl,
+					message: result.message,
+				},
+			});
+		} else {
+			this.emitAuthUpdate(supervisor.server.id, result.status, result.message);
+		}
 		return result;
 	}
 
@@ -456,6 +519,7 @@ export class McpManager {
 			state: options.state,
 		});
 		supervisor.refreshAuthState();
+		this.emitAuthUpdate(supervisor.server.id, result.status, result.message);
 		return result;
 	}
 
@@ -479,11 +543,15 @@ export class McpManager {
 			this.pendingDeviceAuth.delete(serverId);
 		}
 		supervisor.refreshAuthState();
+		if (result.status !== "pending") {
+			this.emitAuthUpdate(supervisor.server.id, result.status, result.message);
+		}
 		return result;
 	}
 
 	cancelServerAuth(serverId: string): { action: "auth"; server: string; status: "cancelled"; message: string } {
 		this.pendingDeviceAuth.delete(serverId);
+		this.emitAuthUpdate(serverId, "cancelled", "MCP OAuth flow cancelled.");
 		return { action: "auth", server: serverId, status: "cancelled", message: "MCP OAuth flow cancelled." };
 	}
 
@@ -501,6 +569,7 @@ export class McpManager {
 		this.oauthStore.clear(supervisor.server, "all");
 		this.pendingDeviceAuth.delete(serverId);
 		supervisor.refreshAuthState();
+		this.emitAuthUpdate(supervisor.server.id, "logged_out");
 		return {
 			action: "auth",
 			server: serverId,
@@ -791,8 +860,25 @@ export class McpManager {
 		const callId = makeCallId();
 		const startedAt = Date.now();
 		let status: McpRecentCallStatus = "completed";
+		this.emit({
+			type: "mcp_call_start",
+			call: {
+				id: callId,
+				timestamp: new Date(startedAt).toISOString(),
+				server: serverId,
+				tool: toolName,
+				risk,
+				status: "started",
+			},
+		});
 		try {
-			const result = await supervisor.callTool(toolName, args, signal);
+			const result = await supervisor.callTool(toolName, args, signal, (progress) =>
+				this.emit({
+					type: "mcp_call_update",
+					call: { id: callId, server: serverId, tool: toolName },
+					progress,
+				}),
+			);
 			const text = callToolResultToText(result);
 			const shaped = this.outputStore.shapeOutput(text);
 			status = result.isError ? "failed" : "completed";
@@ -809,6 +895,11 @@ export class McpManager {
 				truncated: shaped.truncation?.truncated ?? false,
 			};
 			supervisor.recordCall(recent);
+			this.emit({
+				type: "mcp_call_end",
+				call: recent,
+				...(shaped.cache ? { cacheId: shaped.cache.id } : {}),
+			});
 			await this.writeAudit({
 				callerSurface: getCallerSurface(context),
 				server: serverId,
@@ -835,7 +926,7 @@ export class McpManager {
 		} catch (error) {
 			status = signal?.aborted ? "cancelled" : "failed";
 			const durationMs = Date.now() - startedAt;
-			supervisor.recordCall({
+			const recent = {
 				id: callId,
 				timestamp: new Date(startedAt).toISOString(),
 				server: serverId,
@@ -843,7 +934,9 @@ export class McpManager {
 				risk,
 				status,
 				durationMs,
-			});
+			};
+			supervisor.recordCall(recent);
+			this.emit({ type: "mcp_call_end", call: recent });
 			await this.writeAudit({
 				callerSurface: getCallerSurface(context),
 				server: serverId,

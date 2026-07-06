@@ -391,7 +391,7 @@ Local RPC clients can inspect and manage configured MCP servers. Iroh remote tra
 Response data:
 
 ```json
-{"protocolVersion": 1, "features": ["mcp_management.v1", "mcp_oauth.v1", "mcp_device_auth.v1"], "remoteSafeByDefault": ["list_mcp_servers", "get_mcp_server", "list_mcp_recent_calls", "disconnect_mcp_server", "start_mcp_server_auth", "poll_mcp_server_auth", "cancel_mcp_server_auth"]}
+{"protocolVersion": 1, "features": ["mcp_management.v1", "mcp_oauth.v1", "mcp_device_auth.v1", "mcp_events.v1"], "remoteSafeByDefault": ["list_mcp_servers", "get_mcp_server", "list_mcp_recent_calls", "disconnect_mcp_server", "start_mcp_server_auth", "poll_mcp_server_auth", "cancel_mcp_server_auth"]}
 ```
 
 #### list_mcp_servers / get_mcp_server
@@ -1354,6 +1354,13 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | `subagent_end` | Terminal completion result for a local RPC-managed subagent |
 | `extension_error` | Extension threw an error |
 | `models_changed` | Available model catalog changed on disk (login, logout, or API key save) |
+| `mcp_servers_changed` | MCP server list or enablement changed (`servers`: full summary list) |
+| `mcp_server_status_changed` | An MCP server's status or auth state changed (`server`: full summary) |
+| `mcp_auth_request` | An MCP OAuth flow needs user action (`serverId`, `auth`: flow, URL/device-code details) |
+| `mcp_auth_update` | An MCP OAuth flow progressed (`serverId`, `status`, `authState`, optional `server` summary) |
+| `mcp_call_start` | MCP gateway tool call began (`call`: id, server, tool, risk) |
+| `mcp_call_update` | MCP tool call progress notification (`call`, `progress`) |
+| `mcp_call_end` | MCP tool call completed, failed, or was cancelled (`call`, optional `cacheId`) |
 
 ### agent_start
 

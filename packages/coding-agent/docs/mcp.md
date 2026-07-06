@@ -12,8 +12,10 @@ Implemented today:
 - browser OAuth authorization-code + PKCE and OAuth device-code auth for HTTP/SSE MCP servers, with host-side token storage
 - persisted enable/disable overlays in Volt-owned MCP config files
 - optional direct tool promotion from fresh cached metadata via `directTools`
+- MCP lifecycle event streaming (`mcp_events.v1`): the manager emits `mcp_servers_changed`, `mcp_server_status_changed`, `mcp_auth_request`, `mcp_auth_update`, and `mcp_call_start`/`mcp_call_update`/`mcp_call_end` through the AgentSession event stream, so TUI, RPC, daemon, and mobile clients observe MCP state without polling; the iOS app routes these into live server/auth/call state
+- iOS MCP surfaces: a host-approval card for pushed auth requests (mirroring LSP install approvals), live active-call display in the MCP servers view, and chat transcript tool cards that render gateway and direct-tool calls as `mcp <server>.<tool>` with risk, truncation, and cache-id visibility
 
-Not yet implemented from the roadmap sections below: full-screen `/mcp` TUI manager, direct-tool metadata demotion UI, and MCP lifecycle event streaming.
+Not yet implemented from the roadmap sections below: full-screen `/mcp` TUI manager and direct-tool metadata demotion UI.
 
 ## Summary
 
@@ -936,9 +938,10 @@ Implemented:
 - OAuth device-code auth via `volt mcp auth-device <server>` and local/remote-safe RPC `start_mcp_server_auth` with `flow: "device"`, `poll_mcp_server_auth`, and `cancel_mcp_server_auth`.
 - Logout/credential clearing via `volt mcp logout <server>` and local RPC `logout_mcp_server`.
 
+Implemented since: first-class streaming auth events (`mcp_auth_request` / `mcp_auth_update`) for TUI/RPC/mobile via `mcp_events.v1`.
+
 Still to do:
 
-- First-class streaming auth events for TUI/RPC/mobile.
 - Rich interactive `/mcp` auth UX beyond the lightweight command surface.
 
 Likely files:

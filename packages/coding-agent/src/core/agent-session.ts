@@ -82,6 +82,7 @@ import { resolveLspConfig } from "./lsp/config.ts";
 import { LspManager, type LspServerStatus } from "./lsp/manager.ts";
 import { createMcpDirectToolDefinitions } from "./mcp/direct-tools.ts";
 import type { McpManager } from "./mcp/manager.ts";
+import type { McpManagerEvent } from "./mcp/types.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -161,7 +162,8 @@ export type AgentSessionEvent =
 			errorMessage?: string;
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
+	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| McpManagerEvent;
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -355,6 +357,7 @@ export class AgentSession {
 	private _subagentToolManager?: SubagentToolManager;
 	private _mcpManager?: McpManager;
 	private _mcpManagerFactory?: () => Promise<McpManager | undefined> | McpManager | undefined;
+	private _unsubscribeMcpManager?: () => void;
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -386,6 +389,7 @@ export class AgentSession {
 		this._subagentToolManager = config.subagentToolManager;
 		this._mcpManager = config.mcpManager;
 		this._mcpManagerFactory = config.mcpManagerFactory;
+		this._attachMcpManagerEvents();
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -805,6 +809,8 @@ export class AgentSession {
 			// dispose cannot restart via the queued-message continuation path.
 			this.agent.clearAllQueues();
 			this._lspManager?.dispose();
+			this._unsubscribeMcpManager?.();
+			this._unsubscribeMcpManager = undefined;
 			void this._mcpManager?.dispose();
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
@@ -2766,6 +2772,18 @@ export class AgentSession {
 			await previousManager.dispose();
 		}
 		this._mcpManager = nextManager;
+		this._attachMcpManagerEvents();
+		if (previousManager !== nextManager) {
+			this._emit({ type: "mcp_servers_changed", servers: nextManager?.listServers() ?? [] });
+		}
+	}
+
+	/** Forward MCP manager lifecycle events into the session event stream. */
+	private _attachMcpManagerEvents(): void {
+		this._unsubscribeMcpManager?.();
+		this._unsubscribeMcpManager = this._mcpManager?.subscribe((event) => {
+			this._emit(event);
+		});
 	}
 
 	// =========================================================================

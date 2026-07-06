@@ -24,6 +24,7 @@ import type {
 	McpClientConnection,
 	McpClientFactory,
 	McpGatewayExecutionContext,
+	McpManagerEvent,
 	McpResolvedConfig,
 } from "../src/core/mcp/types.ts";
 
@@ -198,6 +199,98 @@ describe("MCP support", () => {
 		expect(writeCallResult.risk).toBe("write");
 
 		await manager.disconnectServer("fake");
+	});
+
+	it("streams lifecycle events for status changes, tool calls, enablement, and auth", async () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const progressFactory: McpClientFactory = {
+			connect: async () =>
+				({
+					getServerVersion: () => ({ name: "fake", version: "1.0.0" }),
+					listTools: async () => ({
+						tools: [
+							{
+								name: "read_note",
+								description: "Read a note",
+								inputSchema: { type: "object" },
+								annotations: { readOnlyHint: true },
+							},
+						],
+					}),
+					listResources: async () => ({ resources: [] }),
+					readResource: async () => ({ contents: [] }),
+					listPrompts: async () => ({ prompts: [] }),
+					getPrompt: async () => ({ messages: [] }),
+					callTool: async ({ name }, options) => {
+						options.onProgress?.({ progress: 1, total: 2, message: "halfway" });
+						return { content: [{ type: "text", text: `${name}:done` }] };
+					},
+					close: async () => undefined,
+				}) as McpClientConnection,
+		};
+		const manager = new McpManager({
+			config: createTestConfig(tempDir),
+			clientFactory: progressFactory,
+			metadataCache: new McpMetadataCache({ agentDir: tempDir }),
+			outputStore: new McpOutputStore({ agentDir: tempDir, maxOutputBytes: 1024, maxOutputLines: 10 }),
+			configWriter: new McpConfigWriter({ cwd: tempDir, agentDir: tempDir, projectTrusted: true }),
+		});
+		const events: McpManagerEvent[] = [];
+		const unsubscribe = manager.subscribe((event) => events.push(event));
+
+		await manager.connectServer("fake");
+		const statusTrail = events
+			.filter((event) => event.type === "mcp_server_status_changed")
+			.map((event) => event.server.status);
+		expect(statusTrail).toEqual(["connecting", "connected", "discovering", "ready"]);
+
+		events.length = 0;
+		await manager.callTool(
+			{ action: "call", server: "fake", tool: "read_note", arguments: {} },
+			createGatewayContext(),
+		);
+		expect(events.map((event) => event.type)).toEqual(["mcp_call_start", "mcp_call_update", "mcp_call_end"]);
+		const callStart = events[0];
+		const callUpdate = events[1];
+		const callEnd = events[2];
+		if (
+			callStart.type !== "mcp_call_start" ||
+			callUpdate.type !== "mcp_call_update" ||
+			callEnd.type !== "mcp_call_end"
+		) {
+			throw new Error("unexpected event order");
+		}
+		expect(callStart.call).toMatchObject({ server: "fake", tool: "read_note", status: "started", risk: "read" });
+		expect(callUpdate.progress).toEqual({ progress: 1, total: 2, message: "halfway" });
+		expect(callEnd.call).toMatchObject({ id: callStart.call.id, status: "completed" });
+		expect(callEnd.call.durationMs).toBeDefined();
+
+		events.length = 0;
+		await manager.setServerEnabled("fake", false);
+		const eventTypes = events.map((event) => event.type);
+		expect(eventTypes).toContain("mcp_servers_changed");
+		expect(eventTypes).toContain("mcp_server_status_changed");
+		const serversChanged = events.find((event) => event.type === "mcp_servers_changed");
+		if (serversChanged?.type !== "mcp_servers_changed") {
+			throw new Error("missing servers changed event");
+		}
+		expect(serversChanged.servers[0]?.enabled).toBe(false);
+
+		events.length = 0;
+		manager.cancelServerAuth("fake");
+		expect(events).toHaveLength(1);
+		const authUpdate = events[0];
+		if (authUpdate.type !== "mcp_auth_update") {
+			throw new Error("expected auth update event");
+		}
+		expect(authUpdate).toMatchObject({ serverId: "fake", status: "cancelled" });
+
+		unsubscribe();
+		events.length = 0;
+		await manager.setServerEnabled("fake", true);
+		expect(events).toEqual([]);
+		await manager.dispose();
 	});
 
 	it("persists enablement overlays and exposes configured direct tools", async () => {

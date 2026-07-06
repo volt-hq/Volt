@@ -22,6 +22,7 @@ import type { McpOAuthStore } from "./oauth-store.ts";
 import { redactMcpText } from "./safety.ts";
 import type {
 	McpAuthState,
+	McpCallProgress,
 	McpClientConnection,
 	McpClientFactory,
 	McpRecentCallSummary,
@@ -41,6 +42,8 @@ export interface McpServerSupervisorOptions {
 	clientFactory: McpClientFactory;
 	metadataCache: McpMetadataCache;
 	oauthStore?: McpOAuthStore;
+	/** Fired whenever status or auth state actually changes value. */
+	onStateChanged?: (supervisor: McpServerSupervisor) => void;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -84,6 +87,7 @@ export class McpServerSupervisor {
 	private connecting: Promise<McpClientConnection> | undefined;
 	private connectGeneration = 0;
 	private recentCallsValue: McpRecentCallSummary[] = [];
+	private onStateChanged: ((supervisor: McpServerSupervisor) => void) | undefined;
 
 	constructor(options: McpServerSupervisorOptions) {
 		this.server = options.server;
@@ -91,8 +95,28 @@ export class McpServerSupervisor {
 		this.clientFactory = options.clientFactory;
 		this.metadataCache = options.metadataCache;
 		this.oauthStore = options.oauthStore;
+		this.onStateChanged = options.onStateChanged;
 		this.authStateValue = getMcpServerAuthState(this.server, process.env, this.oauthStore);
 		this.statusValue = this.server.enabled ? "cold" : "disabled";
+	}
+
+	setStateChangedListener(listener: ((supervisor: McpServerSupervisor) => void) | undefined): void {
+		this.onStateChanged = listener;
+	}
+
+	private setState(next: { status?: McpServerStatus; authState?: McpAuthState }): void {
+		let changed = false;
+		if (next.status !== undefined && next.status !== this.statusValue) {
+			this.statusValue = next.status;
+			changed = true;
+		}
+		if (next.authState !== undefined && next.authState !== this.authStateValue) {
+			this.authStateValue = next.authState;
+			changed = true;
+		}
+		if (changed) {
+			this.onStateChanged?.(this);
+		}
 	}
 
 	get status(): McpServerStatus {
@@ -120,12 +144,14 @@ export class McpServerSupervisor {
 	}
 
 	refreshAuthState(): McpAuthState {
-		this.authStateValue = getMcpServerAuthState(this.server, process.env, this.oauthStore);
-		if (this.authStateValue === "required" && this.server.enabled) {
-			this.statusValue = "needs_auth";
+		const authState = getMcpServerAuthState(this.server, process.env, this.oauthStore);
+		let status = this.statusValue;
+		if (authState === "required" && this.server.enabled) {
+			status = "needs_auth";
 		} else if (this.statusValue === "needs_auth" && this.server.enabled) {
-			this.statusValue = "cold";
+			status = "cold";
 		}
+		this.setState({ status, authState });
 		return this.authStateValue;
 	}
 
@@ -140,12 +166,12 @@ export class McpServerSupervisor {
 		if (this.connecting) {
 			return this.connecting;
 		}
-		this.authStateValue = getMcpServerAuthState(this.server, process.env, this.oauthStore);
-		if (this.authStateValue === "required") {
-			this.statusValue = "needs_auth";
+		const preConnectAuthState = getMcpServerAuthState(this.server, process.env, this.oauthStore);
+		if (preConnectAuthState === "required") {
+			this.setState({ status: "needs_auth", authState: preConnectAuthState });
 			throw new Error(`MCP server needs authentication: ${this.server.id}`);
 		}
-		this.statusValue = "connecting";
+		this.setState({ status: "connecting", authState: preConnectAuthState });
 		this.lastErrorValue = undefined;
 		const timeout = getServerTimeoutMs(this.server, this.settings, "connect");
 		const generation = ++this.connectGeneration;
@@ -160,9 +186,11 @@ export class McpServerSupervisor {
 				}
 				this.connection = connection;
 				this.connecting = undefined;
-				this.statusValue = "connected";
-				this.authStateValue = this.authStateValue === "none" ? "none" : "authenticated";
 				this.lastConnectedAtValue = new Date().toISOString();
+				this.setState({
+					status: "connected",
+					authState: this.authStateValue === "none" ? "none" : "authenticated",
+				});
 				this.resetIdleTimer();
 				return connection;
 			})
@@ -170,11 +198,11 @@ export class McpServerSupervisor {
 				this.connecting = undefined;
 				this.connection = undefined;
 				if (generation !== this.connectGeneration || isAbortError(error)) {
-					this.statusValue = this.server.enabled ? "disconnected" : "disabled";
+					this.setState({ status: this.server.enabled ? "disconnected" : "disabled" });
 					throw error;
 				}
 				this.lastErrorValue = messageFromError(error);
-				this.statusValue = this.authStateValue === "required" ? "needs_auth" : "error";
+				this.setState({ status: this.authStateValue === "required" ? "needs_auth" : "error" });
 				throw error;
 			});
 		return this.connecting;
@@ -187,12 +215,11 @@ export class McpServerSupervisor {
 		this.server.enabled = enabled;
 		if (!enabled) {
 			await this.disconnect();
-			this.statusValue = "disabled";
+			this.setState({ status: "disabled" });
 			return;
 		}
-		this.statusValue = "cold";
 		this.lastErrorValue = undefined;
-		this.authStateValue = getMcpServerAuthState(this.server, process.env, this.oauthStore);
+		this.setState({ status: "cold", authState: getMcpServerAuthState(this.server, process.env, this.oauthStore) });
 	}
 
 	async disconnect(): Promise<void> {
@@ -200,24 +227,24 @@ export class McpServerSupervisor {
 		this.connectGeneration++;
 		this.connecting = undefined;
 		if (!this.connection) {
-			this.statusValue = this.server.enabled ? "disconnected" : "disabled";
+			this.setState({ status: this.server.enabled ? "disconnected" : "disabled" });
 			return;
 		}
 		const connection = this.connection;
 		this.connection = undefined;
-		this.statusValue = "disconnecting";
+		this.setState({ status: "disconnecting" });
 		try {
 			await connection.close();
-			this.statusValue = this.server.enabled ? "disconnected" : "disabled";
+			this.setState({ status: this.server.enabled ? "disconnected" : "disabled" });
 		} catch (error) {
 			this.lastErrorValue = messageFromError(error);
-			this.statusValue = "error";
+			this.setState({ status: "error" });
 		}
 	}
 
 	async refreshMetadata(signal?: AbortSignal): Promise<McpServerMetadata> {
 		const connection = await this.connect(signal);
-		this.statusValue = "discovering";
+		this.setState({ status: "discovering" });
 		try {
 			const tools = await this.listAllTools(connection, signal);
 			const resources = await this.listAllResources(connection, signal).catch((): Resource[] => []);
@@ -232,12 +259,12 @@ export class McpServerSupervisor {
 				prompts,
 			});
 			this.liveToolCountValue = metadata.tools.length;
-			this.statusValue = "ready";
+			this.setState({ status: "ready" });
 			this.resetIdleTimer();
 			return metadata;
 		} catch (error) {
 			this.lastErrorValue = messageFromError(error);
-			this.statusValue = isAbortError(error) ? "disconnected" : "error";
+			this.setState({ status: isAbortError(error) ? "disconnected" : "error" });
 			throw error;
 		}
 	}
@@ -286,11 +313,19 @@ export class McpServerSupervisor {
 		return result;
 	}
 
-	async callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<CallToolResult> {
+	async callTool(
+		name: string,
+		args: Record<string, unknown>,
+		signal?: AbortSignal,
+		onProgress?: (progress: McpCallProgress) => void,
+	): Promise<CallToolResult> {
 		const connection = await this.connect(signal);
 		const result = await connection.callTool(
 			{ name, arguments: args },
-			requestOptions(signal, getServerTimeoutMs(this.server, this.settings, "call")),
+			{
+				...requestOptions(signal, getServerTimeoutMs(this.server, this.settings, "call")),
+				...(onProgress ? { onProgress } : {}),
+			},
 		);
 		this.resetIdleTimer();
 		return result;

@@ -212,6 +212,51 @@ export interface McpServerSummary {
 	};
 }
 
+export interface McpCallProgress {
+	progress: number;
+	total?: number;
+	message?: string;
+}
+
+export interface McpAuthRequestDetails {
+	flow: "browser" | "device";
+	authorizationUrl?: string;
+	redirectUrl?: string;
+	verificationUri?: string;
+	verificationUriComplete?: string;
+	userCode?: string;
+	expiresAt?: string;
+	intervalMs?: number;
+	message?: string;
+}
+
+/**
+ * Lifecycle events emitted by the MCP manager. These flow through
+ * AgentSession's event stream so TUI, RPC, daemon, and mobile clients
+ * observe MCP state changes without polling.
+ */
+export type McpManagerEvent =
+	| { type: "mcp_servers_changed"; servers: McpServerSummary[] }
+	| { type: "mcp_server_status_changed"; server: McpServerSummary }
+	| { type: "mcp_auth_request"; serverId: string; auth: McpAuthRequestDetails }
+	| {
+			type: "mcp_auth_update";
+			serverId: string;
+			status: string;
+			authState: McpAuthState;
+			message?: string;
+			server?: McpServerSummary;
+	  }
+	| { type: "mcp_call_start"; call: McpRecentCallSummary }
+	| {
+			type: "mcp_call_update";
+			call: Pick<McpRecentCallSummary, "id" | "server" | "tool">;
+			progress: McpCallProgress;
+	  }
+	| { type: "mcp_call_end"; call: McpRecentCallSummary; cacheId?: string };
+
+export type McpManagerEventListener = (event: McpManagerEvent) => void;
+
 export interface McpGatewayInput {
 	action:
 		| "status"
@@ -307,6 +352,7 @@ export interface McpRequestOptions {
 	signal?: AbortSignal;
 	timeout?: number;
 	resetTimeoutOnProgress?: boolean;
+	onProgress?: (progress: McpCallProgress) => void;
 }
 
 export interface McpClientFactory {

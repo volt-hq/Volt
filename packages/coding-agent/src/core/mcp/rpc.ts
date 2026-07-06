@@ -14,7 +14,7 @@ export interface McpRpcServerListResponse {
 export function getMcpRpcCapabilities(): McpRpcCapabilities {
 	return {
 		protocolVersion: 1,
-		features: ["mcp_management.v1", "mcp_oauth.v1", "mcp_device_auth.v1"],
+		features: ["mcp_management.v1", "mcp_oauth.v1", "mcp_device_auth.v1", "mcp_events.v1"],
 		remoteSafeByDefault: [
 			"list_mcp_servers",
 			"get_mcp_server",
