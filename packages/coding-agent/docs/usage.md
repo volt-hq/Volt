@@ -378,7 +378,7 @@ cat README.md | volt -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
 
-Built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`. The `subagent` tool is active by default when a manager is available and only runs built-in or discovered named definitions from the ResourceLoader.
+Built-in tools include `read`, `bash`, `edit`, `write`, `web_search`, `grep`, `find`, `ls`, `lsp` (when enabled), `subagent` (when available), and `mcp` (when MCP servers are configured). The `subagent` tool only runs built-in or discovered named definitions from the ResourceLoader; the `mcp` tool is a single gateway for configured MCP servers.
 
 ### Resource Options
 
@@ -476,6 +476,6 @@ volt --exclude-tools ask_question
 
 Volt keeps the core small and pushes workflow-specific behavior into extensions, skills, prompt templates, and packages.
 
-It intentionally does not include built-in MCP, permission popups, plan mode, to-dos, background bash, or advanced subagent orchestration. The core subagent MVP is limited to built-in/discovered named agents and the single/parallel/chain `subagent` tool; richer workflows can be built as extensions or external tools.
+Native MCP support is intentionally explicit: configured servers are exposed through a single `mcp` gateway tool and project MCP config follows project trust. HTTP/SSE MCP servers that require OAuth can be authenticated with `volt mcp auth <server>` or `volt mcp auth-device <server>`; tokens stay on the host. Volt still avoids permission popups, plan mode, built-in to-dos, background bash, or advanced subagent orchestration. The core subagent MVP is limited to built-in/discovered named agents and the single/parallel/chain `subagent` tool; richer workflows can be built as extensions or external tools.
 
 For the full rationale, see the project documentation and extension examples.

@@ -46,6 +46,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	SESSION_RENAME_SLASH_COMMAND,
 	{ name: "session", description: "Show session info and stats" },
 	{ name: "lsp", description: "Show LSP server status (/lsp restart, /lsp trace [path|off])" },
+	{ name: "mcp", description: "Show MCP server status (/mcp connect|disconnect|refresh <server>)" },
 	{ name: "changelog", description: "Show changelog entries" },
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },
 	{ name: "fork", description: "Create a new fork from a previous user message" },

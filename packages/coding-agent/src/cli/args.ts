@@ -247,6 +247,7 @@ ${chalk.bold("Commands:")}
   ${APP_NAME} update [source|self|volt]   Update volt and installed extensions
   ${APP_NAME} list                      List installed extensions from settings
   ${APP_NAME} config                    Open TUI to enable/disable package resources
+  ${APP_NAME} mcp <command> [options]   Inspect and manage MCP servers
   ${APP_NAME} remote host [options]     Host Volt RPC over Iroh (Node package/source installs only)
   ${APP_NAME} remote pair [options]     Create a pairing ticket from a running Iroh remote host
   ${APP_NAME} remote status [options]   Inspect persisted Iroh remote host state
@@ -417,5 +418,7 @@ ${chalk.bold("Built-in Tool Names:")}
   find   - Find files by glob pattern (read-only, off by default)
   ls     - List directory contents (read-only, off by default)
   lsp    - Language server navigation and diagnostics (on by default unless lsp.enabled=false)
+  subagent - Delegate to built-in or discovered child agents (when available)
+  mcp    - Gateway for configured MCP servers (when configured)
 `);
 }

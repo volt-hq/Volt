@@ -10,6 +10,14 @@ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import type { HostInteraction } from "./host-interaction.ts";
 import { resolveLspConfig } from "./lsp/config.ts";
+import { McpAuditLogger } from "./mcp/audit.ts";
+import { DefaultMcpClientFactory } from "./mcp/client-factory.ts";
+import { loadMcpConfig } from "./mcp/config-loader.ts";
+import { McpConfigWriter } from "./mcp/config-writer.ts";
+import { McpManager } from "./mcp/manager.ts";
+import { McpMetadataCache } from "./mcp/metadata-cache.ts";
+import { McpOAuthStore } from "./mcp/oauth-store.ts";
+import { McpOutputStore } from "./mcp/output-store.ts";
 import { convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel } from "./model-resolver.ts";
@@ -34,7 +42,6 @@ import {
 	createWriteTool,
 	DEFAULT_ACTIVE_TOOL_NAMES,
 	type SubagentToolManager,
-	type ToolName,
 	withFileMutationQueue,
 } from "./tools/index.ts";
 
@@ -88,6 +95,12 @@ export interface CreateAgentSessionOptions {
 
 	/** Settings profile to apply when creating the default SettingsManager. */
 	profile?: string;
+	/**
+	 * Whether project-local resources should be trusted when this SDK call creates
+	 * trust-sensitive runtime helpers. CLI modes pass an already-resolved
+	 * SettingsManager; bare SDK calls default MCP project config to untrusted.
+	 */
+	projectTrusted?: boolean;
 	/** Settings manager. Default: SettingsManager.create(cwd, agentDir) */
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
@@ -96,6 +109,8 @@ export interface CreateAgentSessionOptions {
 	hostInteraction?: HostInteraction;
 	/** Optional manager enabling the built-in subagent tool when selected. */
 	subagentToolManager?: SubagentToolManager;
+	/** Optional manager enabling the native MCP gateway tool when selected. */
+	mcpManager?: McpManager;
 }
 
 /** Result from createAgentSession */
@@ -194,7 +209,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, modelsPath);
 
 	const settingsManager =
-		options.settingsManager ?? SettingsManager.create(cwd, agentDir, { profile: options.profile });
+		options.settingsManager ??
+		SettingsManager.create(cwd, agentDir, {
+			profile: options.profile,
+			...(options.projectTrusted !== undefined ? { projectTrusted: options.projectTrusted } : {}),
+		});
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 
 	if (!resourceLoader) {
@@ -261,9 +280,43 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
 	}
 
-	const defaultActiveToolNames: ToolName[] = [...DEFAULT_ACTIVE_TOOL_NAMES];
+	const createDefaultMcpManager = async (): Promise<McpManager | undefined> => {
+		const mcpProjectTrusted =
+			options.projectTrusted ?? (options.settingsManager ? settingsManager.isProjectTrusted() : false);
+		const mcpConfig = loadMcpConfig({ cwd, agentDir, projectTrusted: mcpProjectTrusted });
+		if (!mcpConfig.settings.enabled || Object.keys(mcpConfig.servers).length === 0) {
+			return undefined;
+		}
+		const mcpOAuthStore = McpOAuthStore.create(agentDir);
+		const manager = new McpManager({
+			config: mcpConfig,
+			clientFactory: new DefaultMcpClientFactory({ cwd, oauthStore: mcpOAuthStore }),
+			metadataCache: new McpMetadataCache({ agentDir }),
+			outputStore: new McpOutputStore({
+				agentDir,
+				maxOutputBytes: mcpConfig.settings.maxOutputBytes,
+				maxOutputLines: mcpConfig.settings.maxOutputLines,
+				sessionId: sessionManager.getSessionId(),
+				workspaceId: cwd,
+			}),
+			auditLogger: new McpAuditLogger(agentDir),
+			configWriter: new McpConfigWriter({ cwd, agentDir, projectTrusted: mcpProjectTrusted }),
+			oauthStore: mcpOAuthStore,
+			sessionId: sessionManager.getSessionId(),
+			workspaceId: cwd,
+		});
+		await manager.startEagerServers().catch(() => undefined);
+		return manager;
+	};
+	const mcpManager = options.mcpManager ?? (await createDefaultMcpManager());
+
+	const defaultActiveToolNames: string[] = [...DEFAULT_ACTIVE_TOOL_NAMES];
 	if (options.subagentToolManager) {
 		defaultActiveToolNames.push("subagent");
+	}
+	if (mcpManager?.isEnabled()) {
+		defaultActiveToolNames.push("mcp");
+		defaultActiveToolNames.push(...mcpManager.getDirectToolCandidates().map((candidate) => candidate.directToolName));
 	}
 	if (resolveLspConfig(settingsManager.getLspSettings()).enabled) {
 		defaultActiveToolNames.push("lsp");
@@ -417,6 +470,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionStartEvent: options.sessionStartEvent,
 		hostInteraction: options.hostInteraction,
 		subagentToolManager: options.subagentToolManager,
+		mcpManager,
+		mcpManagerFactory: options.mcpManager ? undefined : createDefaultMcpManager,
 	});
 	const extensionsResult = resourceLoader.getExtensions();
 

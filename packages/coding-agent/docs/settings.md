@@ -11,7 +11,7 @@ Edit directly or use `/settings` for common options.
 
 ## Project Trust
 
-On interactive startup, volt asks before trusting a project folder that contains project-local settings, resources, or project `.agents/skills` and has no saved decision for the folder or a parent folder in `~/.volt/agent/trust.json`. Trusting a project allows volt to load `.volt/settings.json` and `.volt` resources, install missing project packages, and execute project extensions.
+On interactive startup, volt asks before trusting a project folder that contains project-local settings, MCP server config, resources, or project `.agents/skills` and has no saved decision for the folder or a parent folder in `~/.volt/agent/trust.json`. Trusting a project allows volt to load `.volt/settings.json`, `.mcp.json`/`.volt/mcp.json`, and `.volt` resources, install missing project packages, and execute project extensions.
 
 Non-interactive modes (`-p`, `--mode json`, and `--mode rpc`) do not show a trust prompt. Without an applicable saved trust decision, they use `defaultProjectTrust` from global settings: `ask` (default) and `never` ignore those project resources, while `always` trusts them. Pass `--approve`/`-a` or `--no-approve`/`-na` to override project trust for one run.
 
@@ -20,6 +20,8 @@ If no extension or saved decision applies, `defaultProjectTrust` controls the fa
 `volt config` and package commands use the same project trust flow, except `volt update` never prompts. Pass `--approve` to trust project-local settings for one command or `--no-approve` to ignore them.
 
 Use `/trust` in interactive mode to save a project trust decision for future sessions, including trust for the immediate parent folder. It writes `~/.volt/agent/trust.json` only; the current session is not reloaded, so restart volt for changes to take effect.
+
+MCP server configuration is not stored in `settings.json`; use `~/.volt/agent/mcp.json` for user-local servers, shared `~/.config/mcp/mcp.json`, trusted project `.mcp.json`, or trusted project `.volt/mcp.json`. OAuth tokens for MCP HTTP/SSE servers are stored separately in `~/.volt/agent/mcp-auth.json`. See [MCP](mcp.md).
 
 ## Profiles
 

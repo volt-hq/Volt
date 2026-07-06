@@ -3237,6 +3237,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/mcp" || text.startsWith("/mcp ")) {
+				await this.handleMcpCommand(text.startsWith("/mcp ") ? text.slice(5).trim() : undefined);
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/changelog") {
 				this.handleChangelogCommand();
 				this.editor.setText("");
@@ -6960,6 +6965,62 @@ export class InteractiveMode {
 			info += `\n${theme.fg("dim", "Use /lsp restart to restart servers, /lsp trace [path|off] to toggle tracing.")}`;
 		}
 
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(info, 1, 0));
+		this.ui.requestRender();
+	}
+
+	private async handleMcpCommand(args?: string): Promise<void> {
+		const manager = this.session.getMcpManager();
+		let info: string;
+		if (!manager) {
+			info = "MCP is not configured. Add servers to ~/.volt/agent/mcp.json, .mcp.json, or .volt/mcp.json.";
+		} else {
+			const [action, server] = (args ?? "").split(/\s+/, 2);
+			try {
+				if ((action === "connect" || action === "refresh") && server) {
+					await manager.connectServer(server);
+					await this.session.reload();
+				} else if (action === "disconnect" && server) {
+					await manager.disconnectServer(server);
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				info = `${theme.bold("MCP Servers")}\n\n${theme.fg("error", message)}`;
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(new Text(info, 1, 0));
+				this.ui.requestRender();
+				return;
+			}
+
+			const currentManager = this.session.getMcpManager() ?? manager;
+			const servers = currentManager.listServers();
+			info = `${theme.bold("MCP Servers")}\n`;
+			if (servers.length === 0) {
+				info += "\nNo MCP servers configured.";
+			} else {
+				for (const entry of servers) {
+					const statusColor =
+						entry.status === "ready" || entry.status === "connected"
+							? "success"
+							: entry.status === "error" || entry.status === "needs_auth"
+								? "error"
+								: "muted";
+					info += `\n${theme.bold(entry.displayName)} ${theme.fg("dim", `(${entry.id})`)} ${theme.fg(statusColor, entry.status)}\n`;
+					info += `${theme.fg("dim", "Source:")} ${entry.sourceLabel} (${entry.sourceScope})\n`;
+					info += `${theme.fg("dim", "Transport:")} ${entry.transport} ${theme.fg("dim", "Lifecycle:")} ${entry.lifecycle}\n`;
+					info += `${theme.fg("dim", "Tools:")} ${entry.toolCounts.enabled ?? entry.toolCounts.cached} enabled / ${entry.toolCounts.cached} cached`;
+					if (entry.resourceCount !== undefined || entry.promptCount !== undefined) {
+						info += ` ${theme.fg("dim", "Resources:")} ${entry.resourceCount ?? 0} ${theme.fg("dim", "Prompts:")} ${entry.promptCount ?? 0}`;
+					}
+					if (entry.lastError) {
+						info += `\n${theme.fg("error", entry.lastError)}`;
+					}
+					info += "\n";
+				}
+				info += `\n${theme.fg("dim", "Use /mcp connect <server>, /mcp refresh <server>, or /mcp disconnect <server>.")}`;
+			}
+		}
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(info, 1, 0));
 		this.ui.requestRender();

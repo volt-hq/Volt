@@ -28,6 +28,7 @@ type TrustFile = Record<string, boolean | null | undefined>;
 
 const TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES = [
 	"settings.json",
+	"mcp.json",
 	"extensions",
 	"skills",
 	"prompts",
@@ -190,6 +191,9 @@ export function hasTrustRequiringProjectResources(cwd: string): boolean {
 	let currentDir = canonicalizePath(resolvePath(cwd));
 
 	const configDir = join(currentDir, CONFIG_DIR_NAME);
+	if (existsSync(join(currentDir, ".mcp.json"))) {
+		return true;
+	}
 	if (TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES.some((entry) => existsSync(join(configDir, entry)))) {
 		return true;
 	}

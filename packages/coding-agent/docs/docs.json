@@ -36,6 +36,10 @@
           "path": "daemon.md"
         },
         {
+          "title": "Native MCP Support",
+          "path": "mcp.md"
+        },
+        {
           "title": "LSP Diagnostics & Navigation",
           "path": "lsp.md"
         },

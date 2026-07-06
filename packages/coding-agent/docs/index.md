@@ -39,6 +39,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [Containerization](containerization.md) - sandbox volt with OpenShell, Gondolin, or Docker.
 - [Settings](settings.md) - global and project settings.
 - [Background daemon](daemon.md) - the voltd daemon: remote access, conversation leases, and live shared sessions.
+- [Native MCP support](mcp.md) - built-in token-efficient MCP gateway support and roadmap.
 - [Keybindings](keybindings.md) - default shortcuts and custom keybindings.
 - [Sessions](sessions.md) - session management, branching, and tree navigation.
 - [Compaction](compaction.md) - context compaction and branch summarization.

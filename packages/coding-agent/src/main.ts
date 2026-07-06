@@ -46,6 +46,7 @@ import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { handleDaemonCommand } from "./daemon/cli.ts";
 import { handleRemoteControlCommand } from "./daemon/remote-cli.ts";
+import { handleMcpCommand } from "./mcp-cli.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
@@ -549,6 +550,10 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	if (await handleConfigCommand(commandProfileArgs.args, commandRuntimeOptions)) {
+		return;
+	}
+
+	if (await handleMcpCommand(commandProfileArgs.args, commandRuntimeOptions)) {
 		return;
 	}
 

@@ -11,6 +11,20 @@ import type { SessionStats } from "../agent-session.ts";
 import type { BashResult } from "../bash-executor.ts";
 import type { CompactionResult } from "../compaction/index.ts";
 import type { HostActionDecisionKind, HostActionRequest, HostActionUpdate } from "../host-interaction.ts";
+import type {
+	McpOAuthBrowserCompleteResult,
+	McpOAuthBrowserStartResult,
+	McpOAuthDevicePollResult,
+	McpOAuthDeviceStartResult,
+} from "../mcp/oauth-flow.ts";
+import type { McpRpcCapabilities } from "../mcp/rpc.ts";
+import type {
+	McpPromptSummary,
+	McpRecentCallSummary,
+	McpResourceSummary,
+	McpServerSummary,
+	McpToolSummary,
+} from "../mcp/types.ts";
 import type { SourceInfo } from "../source-info.ts";
 
 export type RpcModel = Model<Api>;
@@ -71,6 +85,41 @@ export type RpcCommand =
 
 	// Device diagnostics
 	| { id?: string; type: "upload_device_logs"; fileName?: string; content: string }
+
+	// MCP management
+	| { id?: string; type: "get_mcp_capabilities" }
+	| { id?: string; type: "list_mcp_servers" }
+	| { id?: string; type: "get_mcp_server"; server: string }
+	| { id?: string; type: "connect_mcp_server"; server: string }
+	| { id?: string; type: "disconnect_mcp_server"; server: string }
+	| { id?: string; type: "refresh_mcp_server"; server: string }
+	| { id?: string; type: "start_mcp_server_auth"; server: string; flow?: "browser" | "device"; redirectUrl?: string }
+	| {
+			id?: string;
+			type: "complete_mcp_server_auth";
+			server: string;
+			redirectUrl: string;
+			code: string;
+			state?: string;
+	  }
+	| { id?: string; type: "poll_mcp_server_auth"; server: string }
+	| { id?: string; type: "cancel_mcp_server_auth"; server: string }
+	| { id?: string; type: "logout_mcp_server"; server: string }
+	| { id?: string; type: "set_mcp_server_enabled"; server: string; enabled: boolean }
+	| { id?: string; type: "list_mcp_tools"; server: string }
+	| { id?: string; type: "get_mcp_tool"; server: string; tool: string }
+	| { id?: string; type: "list_mcp_resources"; server: string; cursor?: string }
+	| { id?: string; type: "read_mcp_resource"; server: string; resourceUri: string }
+	| { id?: string; type: "list_mcp_prompts"; server: string; cursor?: string }
+	| {
+			id?: string;
+			type: "get_mcp_prompt";
+			server: string;
+			prompt: string;
+			arguments?: Record<string, unknown>;
+			argumentsJson?: string;
+	  }
+	| { id?: string; type: "list_mcp_recent_calls"; server?: string }
 
 	// State
 	| { id?: string; type: "get_state" }
@@ -375,6 +424,65 @@ export interface RpcUnregisterLiveActivityResponse {
 // ============================================================================
 
 /** A command available for invocation via prompt */
+export interface RpcMcpCapabilitiesResponse extends McpRpcCapabilities {}
+
+export interface RpcMcpServersResponse {
+	servers: McpServerSummary[];
+}
+
+export interface RpcMcpServerResponse {
+	server: McpServerSummary;
+	persisted?: { path: string; scope: string };
+}
+
+export interface RpcMcpToolsResponse {
+	server: string;
+	tools: McpToolSummary[];
+	metadataHash?: string;
+	stale: boolean;
+}
+
+export interface RpcMcpToolResponse {
+	tool: McpToolSummary;
+}
+
+export interface RpcMcpResourcesResponse {
+	server: string;
+	resources: McpResourceSummary[];
+	nextCursor?: string;
+}
+
+export interface RpcMcpResourceContentResponse {
+	result: unknown;
+}
+
+export interface RpcMcpPromptsResponse {
+	server: string;
+	prompts: McpPromptSummary[];
+	nextCursor?: string;
+}
+
+export interface RpcMcpPromptContentResponse {
+	result: unknown;
+}
+
+export interface RpcMcpRecentCallsResponse {
+	calls: McpRecentCallSummary[];
+}
+
+export type RpcMcpAuthResponse =
+	| McpOAuthBrowserStartResult
+	| McpOAuthBrowserCompleteResult
+	| McpOAuthDeviceStartResult
+	| McpOAuthDevicePollResult
+	| {
+			action: "auth";
+			server: string;
+			status: "cancelled" | "logged_out";
+			message?: string;
+			serverSummary?: McpServerSummary;
+	  };
+
 export interface RpcSlashCommand {
 	/** Command name (without leading slash) */
 	name: string;
@@ -555,6 +663,45 @@ export type RpcResponse =
 			command: "upload_device_logs";
 			success: true;
 			data: { path: string; byteCount: number };
+	  }
+
+	// MCP management
+	| {
+			id?: string;
+			type: "response";
+			command: "get_mcp_capabilities";
+			success: true;
+			data: RpcMcpCapabilitiesResponse;
+	  }
+	| { id?: string; type: "response"; command: "list_mcp_servers"; success: true; data: RpcMcpServersResponse }
+	| { id?: string; type: "response"; command: "get_mcp_server"; success: true; data: RpcMcpServerResponse }
+	| { id?: string; type: "response"; command: "connect_mcp_server"; success: true; data: RpcMcpServerResponse }
+	| { id?: string; type: "response"; command: "disconnect_mcp_server"; success: true; data: RpcMcpServerResponse }
+	| { id?: string; type: "response"; command: "refresh_mcp_server"; success: true; data: RpcMcpServerResponse }
+	| { id?: string; type: "response"; command: "start_mcp_server_auth"; success: true; data: RpcMcpAuthResponse }
+	| { id?: string; type: "response"; command: "complete_mcp_server_auth"; success: true; data: RpcMcpAuthResponse }
+	| { id?: string; type: "response"; command: "poll_mcp_server_auth"; success: true; data: RpcMcpAuthResponse }
+	| { id?: string; type: "response"; command: "cancel_mcp_server_auth"; success: true; data: RpcMcpAuthResponse }
+	| { id?: string; type: "response"; command: "logout_mcp_server"; success: true; data: RpcMcpAuthResponse }
+	| { id?: string; type: "response"; command: "set_mcp_server_enabled"; success: true; data: RpcMcpServerResponse }
+	| { id?: string; type: "response"; command: "list_mcp_tools"; success: true; data: RpcMcpToolsResponse }
+	| { id?: string; type: "response"; command: "get_mcp_tool"; success: true; data: RpcMcpToolResponse }
+	| { id?: string; type: "response"; command: "list_mcp_resources"; success: true; data: RpcMcpResourcesResponse }
+	| {
+			id?: string;
+			type: "response";
+			command: "read_mcp_resource";
+			success: true;
+			data: RpcMcpResourceContentResponse;
+	  }
+	| { id?: string; type: "response"; command: "list_mcp_prompts"; success: true; data: RpcMcpPromptsResponse }
+	| { id?: string; type: "response"; command: "get_mcp_prompt"; success: true; data: RpcMcpPromptContentResponse }
+	| {
+			id?: string;
+			type: "response";
+			command: "list_mcp_recent_calls";
+			success: true;
+			data: RpcMcpRecentCallsResponse;
 	  }
 
 	// State

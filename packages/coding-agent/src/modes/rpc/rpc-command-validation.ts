@@ -25,6 +25,10 @@ function isBoolean(value: unknown): value is boolean {
 	return typeof value === "boolean";
 }
 
+function isMcpAuthFlow(value: unknown): value is "browser" | "device" {
+	return value === "browser" || value === "device";
+}
+
 function isNumber(value: unknown): value is number {
 	return typeof value === "number";
 }
@@ -165,6 +169,54 @@ export function validateRpcCommandPayload(value: unknown): string | undefined {
 				validateOptionalField(value, "path", () => false, "omitted") ??
 				validateOptionalField(value, "workspacePath", () => false, "omitted")
 			);
+		case "get_mcp_server":
+		case "connect_mcp_server":
+		case "disconnect_mcp_server":
+		case "refresh_mcp_server":
+		case "poll_mcp_server_auth":
+		case "cancel_mcp_server_auth":
+		case "logout_mcp_server":
+		case "list_mcp_tools":
+		case "list_mcp_resources":
+		case "list_mcp_prompts":
+			return validateRequiredField(value, "server", isString, "a string");
+		case "set_mcp_server_enabled":
+			return (
+				validateRequiredField(value, "server", isString, "a string") ??
+				validateRequiredField(value, "enabled", isBoolean, "a boolean")
+			);
+		case "start_mcp_server_auth":
+			return (
+				validateRequiredField(value, "server", isString, "a string") ??
+				validateOptionalField(value, "flow", isMcpAuthFlow, '"browser" or "device"') ??
+				validateOptionalField(value, "redirectUrl", isString, "a string")
+			);
+		case "complete_mcp_server_auth":
+			return (
+				validateRequiredField(value, "server", isString, "a string") ??
+				validateRequiredField(value, "redirectUrl", isString, "a string") ??
+				validateRequiredField(value, "code", isString, "a string") ??
+				validateOptionalField(value, "state", isString, "a string")
+			);
+		case "get_mcp_tool":
+			return (
+				validateRequiredField(value, "server", isString, "a string") ??
+				validateRequiredField(value, "tool", isString, "a string")
+			);
+		case "read_mcp_resource":
+			return (
+				validateRequiredField(value, "server", isString, "a string") ??
+				validateRequiredField(value, "resourceUri", isString, "a string")
+			);
+		case "get_mcp_prompt":
+			return (
+				validateRequiredField(value, "server", isString, "a string") ??
+				validateRequiredField(value, "prompt", isString, "a string") ??
+				validateOptionalField(value, "arguments", isRecord, "an object") ??
+				validateOptionalField(value, "argumentsJson", isString, "a string")
+			);
+		case "list_mcp_recent_calls":
+			return validateOptionalField(value, "server", isString, "a string");
 		case "get_transcript":
 			return (
 				validateOptionalField(value, "beforeEntryId", isString, "a string") ??

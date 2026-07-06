@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added native MCP support with trusted config loading, a built-in `mcp` gateway tool, stdio/Streamable HTTP/SSE client transports, metadata/output/audit storage, and local RPC server management commands.
+- Added MCP OAuth authentication for HTTP/SSE servers, including browser authorization-code + PKCE, device-code auth, host-side token storage, CLI commands, and RPC management hooks.
 - Added an `upload_device_logs` RPC command to Iroh remote conversation streams so paired mobile clients can store diagnostic logs in the workspace under `.volt/device-logs/` (validated single-component file name, 4 MiB content cap, atomic write, audit-logged).
 - Added live model catalog updates for RPC and Iroh remote clients: `get_available_models` now reloads `auth.json`/`models.json` from disk before answering, and RPC mode watches both files and emits a `models_changed` event when logins, logouts, or API key saves from other volt processes change the available catalog, so paired clients can offer new models without restarting the host.
 

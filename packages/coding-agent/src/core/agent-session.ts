@@ -80,6 +80,8 @@ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { HostInteraction } from "./host-interaction.ts";
 import { resolveLspConfig } from "./lsp/config.ts";
 import { LspManager, type LspServerStatus } from "./lsp/manager.ts";
+import { createMcpDirectToolDefinitions } from "./mcp/direct-tools.ts";
+import type { McpManager } from "./mcp/manager.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -204,6 +206,10 @@ export interface AgentSessionConfig {
 	hostInteraction?: HostInteraction;
 	/** Optional manager enabling the built-in subagent tool when selected. */
 	subagentToolManager?: SubagentToolManager;
+	/** Optional manager enabling the native MCP gateway tool when configured. */
+	mcpManager?: McpManager;
+	/** Factory used to rebuild the default MCP manager on session reload. */
+	mcpManagerFactory?: () => Promise<McpManager | undefined> | McpManager | undefined;
 }
 
 export interface ExtensionBindings {
@@ -347,6 +353,8 @@ export class AgentSession {
 	private _lspManager?: LspManager;
 	private _hostInteraction?: HostInteraction;
 	private _subagentToolManager?: SubagentToolManager;
+	private _mcpManager?: McpManager;
+	private _mcpManagerFactory?: () => Promise<McpManager | undefined> | McpManager | undefined;
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -376,6 +384,8 @@ export class AgentSession {
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		this._hostInteraction = config.hostInteraction;
 		this._subagentToolManager = config.subagentToolManager;
+		this._mcpManager = config.mcpManager;
+		this._mcpManagerFactory = config.mcpManagerFactory;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -795,6 +805,7 @@ export class AgentSession {
 			// dispose cannot restart via the queued-message continuation path.
 			this.agent.clearAllQueues();
 			this._lspManager?.dispose();
+			void this._mcpManager?.dispose();
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
 		}
@@ -884,6 +895,10 @@ export class AgentSession {
 
 	getSubagentToolManager(): SubagentToolManager | undefined {
 		return this._subagentToolManager;
+	}
+
+	getMcpManager(): McpManager | undefined {
+		return this._mcpManager;
 	}
 
 	/**
@@ -2604,6 +2619,7 @@ export class AgentSession {
 			});
 		}
 
+		const directMcpToolDefinitions = this._mcpManager ? createMcpDirectToolDefinitions(this._mcpManager) : [];
 		const baseToolDefinitions = this._baseToolsOverride
 			? Object.fromEntries(
 					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
@@ -2648,11 +2664,15 @@ export class AgentSession {
 								},
 							}
 						: {}),
+					...(this._mcpManager ? { mcp: { manager: this._mcpManager } } : {}),
 				});
 
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
+		for (const definition of directMcpToolDefinitions) {
+			this._baseToolDefinitions.set(definition.name, definition as ToolDefinition);
+		}
 
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
@@ -2685,6 +2705,8 @@ export class AgentSession {
 			: [
 					...DEFAULT_ACTIVE_TOOL_NAMES,
 					...(this._subagentToolManager ? ["subagent"] : []),
+					...(this._mcpManager ? ["mcp"] : []),
+					...directMcpToolDefinitions.map((definition) => definition.name),
 					...(this._lspManager ? ["lsp"] : []),
 				];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
@@ -2701,8 +2723,23 @@ export class AgentSession {
 		this.syncAgentRuntimeSettingsFromSettings();
 		this._modelRegistry.clearRegisteredProviders();
 		await this._resourceLoader.reload();
+		await this._reloadMcpManager();
+		const activeToolNames = this.getActiveToolNames();
+		if (this._mcpManager?.isEnabled() && !this._allowedToolNames && !this._excludedToolNames?.has("mcp")) {
+			if (!activeToolNames.includes("mcp")) {
+				activeToolNames.push("mcp");
+			}
+			for (const candidate of this._mcpManager.getDirectToolCandidates()) {
+				if (
+					!this._excludedToolNames?.has(candidate.directToolName) &&
+					!activeToolNames.includes(candidate.directToolName)
+				) {
+					activeToolNames.push(candidate.directToolName);
+				}
+			}
+		}
 		this._buildRuntime({
-			activeToolNames: this.getActiveToolNames(),
+			activeToolNames,
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});
@@ -2717,6 +2754,18 @@ export class AgentSession {
 			await this._extensionRunner.emit({ type: "session_start", reason: "reload" });
 			await this.extendResourcesFromExtensions("reload");
 		}
+	}
+
+	private async _reloadMcpManager(): Promise<void> {
+		if (!this._mcpManagerFactory) {
+			return;
+		}
+		const previousManager = this._mcpManager;
+		const nextManager = await this._mcpManagerFactory();
+		if (previousManager && previousManager !== nextManager) {
+			await previousManager.dispose();
+		}
+		this._mcpManager = nextManager;
 	}
 
 	// =========================================================================

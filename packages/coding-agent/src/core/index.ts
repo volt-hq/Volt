@@ -86,6 +86,7 @@ export type {
 	HostActionUpdate,
 	HostInteraction,
 } from "./host-interaction.ts";
+export * from "./mcp/index.ts";
 export * from "./remote/iroh/index.ts";
 export {
 	attachJsonlLineReader,
@@ -113,6 +114,10 @@ export {
 	type RpcHostActionUpdate,
 	type RpcLineHandler,
 	type RpcListSubagentsResponse,
+	type RpcMcpCapabilitiesResponse,
+	type RpcMcpRecentCallsResponse,
+	type RpcMcpServerResponse,
+	type RpcMcpServersResponse,
 	type RpcModel,
 	type RpcPendingHostActionsResponse,
 	type RpcResponse,

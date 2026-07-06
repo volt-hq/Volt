@@ -1,4 +1,11 @@
 export {
+	createMcpTool,
+	createMcpToolDefinition,
+	type McpGatewayToolDetails,
+	type McpGatewayToolInput,
+	type McpGatewayToolOptions,
+} from "../mcp/gateway-tool.ts";
+export {
 	type BashOperations,
 	type BashSpawnContext,
 	type BashSpawnHook,
@@ -118,6 +125,7 @@ export {
 
 import type { AgentTool } from "@earendil-works/volt-agent-core";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { createMcpTool, createMcpToolDefinition, type McpGatewayToolOptions } from "../mcp/gateway-tool.ts";
 import { type BashToolOptions, createBashTool, createBashToolDefinition } from "./bash.ts";
 import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.ts";
 import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.ts";
@@ -132,7 +140,7 @@ import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } fro
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
 export type CoreToolName = "read" | "bash" | "edit" | "write" | "web_search" | "grep" | "find" | "ls" | "lsp";
-export type ToolName = CoreToolName | "subagent";
+export type ToolName = CoreToolName | "subagent" | "mcp";
 export const DEFAULT_ACTIVE_TOOL_NAMES: readonly CoreToolName[] = ["read", "bash", "edit", "write", "web_search"];
 export const READ_ONLY_TOOL_NAMES: readonly CoreToolName[] = ["read", "web_search", "grep", "find", "ls"];
 export const allToolNames: Set<ToolName> = new Set([
@@ -146,6 +154,7 @@ export const allToolNames: Set<ToolName> = new Set([
 	"ls",
 	"lsp",
 	"subagent",
+	"mcp",
 ]);
 
 export interface ToolsOptions {
@@ -159,6 +168,7 @@ export interface ToolsOptions {
 	ls?: LsToolOptions;
 	lsp?: LspToolOptions;
 	subagent?: SubagentToolOptions;
+	mcp?: McpGatewayToolOptions;
 }
 
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
@@ -186,6 +196,11 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 				throw new Error("Subagent tool requires SubagentToolOptions");
 			}
 			return createSubagentToolDefinition(options.subagent);
+		case "mcp":
+			if (!options?.mcp) {
+				throw new Error("MCP tool requires McpGatewayToolOptions");
+			}
+			return createMcpToolDefinition(options.mcp);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -216,6 +231,11 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 				throw new Error("Subagent tool requires SubagentToolOptions");
 			}
 			return createSubagentTool(cwd, options.subagent);
+		case "mcp":
+			if (!options?.mcp) {
+				throw new Error("MCP tool requires McpGatewayToolOptions");
+			}
+			return createMcpTool(options.mcp);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -244,7 +264,7 @@ export function createReadOnlyToolDefinitions(cwd: string, options?: ToolsOption
 export function createAllToolDefinitions(
 	cwd: string,
 	options?: ToolsOptions,
-): Record<CoreToolName, ToolDef> & Partial<Record<"subagent", ToolDef>> {
+): Record<CoreToolName, ToolDef> & Partial<Record<"subagent" | "mcp", ToolDef>> {
 	return {
 		read: createReadToolDefinition(cwd, options?.read),
 		bash: createBashToolDefinition(cwd, options?.bash),
@@ -256,6 +276,7 @@ export function createAllToolDefinitions(
 		ls: createLsToolDefinition(cwd, options?.ls),
 		lsp: createLspToolDefinition(cwd, options?.lsp),
 		...(options?.subagent ? { subagent: createSubagentToolDefinition(options.subagent) } : {}),
+		...(options?.mcp ? { mcp: createMcpToolDefinition(options.mcp) } : {}),
 	};
 }
 
@@ -282,7 +303,7 @@ export function createReadOnlyTools(cwd: string, options?: ToolsOptions): Tool[]
 export function createAllTools(
 	cwd: string,
 	options?: ToolsOptions,
-): Record<CoreToolName, Tool> & Partial<Record<"subagent", Tool>> {
+): Record<CoreToolName, Tool> & Partial<Record<"subagent" | "mcp", Tool>> {
 	return {
 		read: createReadTool(cwd, options?.read),
 		bash: createBashTool(cwd, options?.bash),
@@ -294,5 +315,6 @@ export function createAllTools(
 		ls: createLsTool(cwd, options?.ls),
 		lsp: createLspTool(cwd, options?.lsp),
 		...(options?.subagent ? { subagent: createSubagentTool(cwd, options.subagent) } : {}),
+		...(options?.mcp ? { mcp: createMcpTool(options.mcp) } : {}),
 	};
 }

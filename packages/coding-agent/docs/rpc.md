@@ -378,6 +378,97 @@ Response:
 
 Active RPC-started subagents are scoped to the RPC connection/runtime and are disposed on RPC shutdown and session replacement.
 
+### MCP management
+
+Local RPC clients can inspect and manage configured MCP servers. Iroh remote transports allow only the remote-safe subset: capabilities, list/get server status, recent calls, disconnect, and device-code auth start/poll/cancel.
+
+#### get_mcp_capabilities
+
+```json
+{"type": "get_mcp_capabilities"}
+```
+
+Response data:
+
+```json
+{"protocolVersion": 1, "features": ["mcp_management.v1", "mcp_oauth.v1", "mcp_device_auth.v1"], "remoteSafeByDefault": ["list_mcp_servers", "get_mcp_server", "list_mcp_recent_calls", "disconnect_mcp_server", "start_mcp_server_auth", "poll_mcp_server_auth", "cancel_mcp_server_auth"]}
+```
+
+#### list_mcp_servers / get_mcp_server
+
+```json
+{"type": "list_mcp_servers"}
+{"type": "get_mcp_server", "server": "github"}
+```
+
+Responses return sanitized server summaries with status, auth state, transport/lifecycle, tool counts, capabilities, and recent call summaries. File paths, raw env, headers, tokens, and schemas are omitted.
+
+#### connect_mcp_server / refresh_mcp_server / disconnect_mcp_server / set_mcp_server_enabled
+
+```json
+{"type": "connect_mcp_server", "server": "github"}
+{"type": "refresh_mcp_server", "server": "github"}
+{"type": "disconnect_mcp_server", "server": "github"}
+{"type": "set_mcp_server_enabled", "server": "github", "enabled": false}
+```
+
+`connect_mcp_server` and `refresh_mcp_server` connect to the MCP server and refresh cached metadata; they are local RPC only. `disconnect_mcp_server` closes a live connection. `set_mcp_server_enabled` persists an overlay in the relevant Volt-owned MCP config file and is local RPC only.
+
+#### MCP OAuth auth
+
+Browser auth-code + PKCE is local RPC only:
+
+```json
+{"type": "start_mcp_server_auth", "server": "linear", "flow": "browser", "redirectUrl": "http://127.0.0.1:49152/mcp/oauth/callback/random"}
+{"type": "complete_mcp_server_auth", "server": "linear", "redirectUrl": "http://127.0.0.1:49152/mcp/oauth/callback/random", "code": "...", "state": "..."}
+```
+
+Device-code auth can be started and polled over local RPC or Iroh remote transports:
+
+```json
+{"type": "start_mcp_server_auth", "server": "linear", "flow": "device"}
+{"type": "poll_mcp_server_auth", "server": "linear"}
+{"type": "cancel_mcp_server_auth", "server": "linear"}
+```
+
+`start_mcp_server_auth` with `flow: "device"` returns `verificationUri`, optional `verificationUriComplete`, `userCode`, `expiresAt`, and `intervalMs`; it never returns the OAuth `device_code`. Tokens stay on the host in MCP OAuth storage. `logout_mcp_server` clears stored OAuth credentials and is local RPC only.
+
+#### list_mcp_tools / get_mcp_tool
+
+```json
+{"type": "list_mcp_tools", "server": "github"}
+{"type": "get_mcp_tool", "server": "github", "tool": "search_issues"}
+```
+
+Returns sanitized tool metadata, risk classification, metadata hash, stale flag, and whether the tool is currently promoted as a direct tool.
+
+#### list_mcp_resources / read_mcp_resource
+
+```json
+{"type": "list_mcp_resources", "server": "docs"}
+{"type": "read_mcp_resource", "server": "docs", "resourceUri": "file:///guide.md"}
+```
+
+Resource contents are returned through the same truncation/cache shaping as the `mcp` gateway. Remote transports do not expose resource listing or content reads by default because those operations can start MCP backends.
+
+#### list_mcp_prompts / get_mcp_prompt
+
+```json
+{"type": "list_mcp_prompts", "server": "prompts"}
+{"type": "get_mcp_prompt", "server": "prompts", "prompt": "review", "arguments": {"focus": "security"}}
+```
+
+Prompt content is available for user-initiated preview when prompts are not disabled; model-initiated access still requires `settings.prompts: "model"`. Remote transports do not expose prompt listing or content reads by default because those operations can start MCP backends.
+
+#### list_mcp_recent_calls
+
+```json
+{"type": "list_mcp_recent_calls"}
+{"type": "list_mcp_recent_calls", "server": "github"}
+```
+
+Returns bounded recent MCP tool-call summaries for one server or all servers.
+
 ### Native UI Actions
 
 Native UI action commands let typed clients discover host-owned actions for native cards, buttons, toggles, pickers, and command palettes. They are distinct from raw slash command strings: slash commands are presentation aliases, while action ids are the invocation contract.

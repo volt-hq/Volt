@@ -9,6 +9,7 @@ Project trust controls whether volt loads project-local settings, resources, pac
 Volt considers a project to have resources that require trust when it finds any of these from the current working directory:
 
 - `.volt/settings.json`
+- `.mcp.json` or `.volt/mcp.json`
 - `.volt/extensions`, `.volt/skills`, `.volt/prompts`, or `.volt/themes`
 - `.volt/SYSTEM.md` or `.volt/APPEND_SYSTEM.md`
 - project `.agents/skills` in the current directory or an ancestor directory
@@ -20,6 +21,7 @@ When an interactive session starts in a project with resources that require trus
 Trusting a project allows volt to load project resources that require trust, including:
 
 - `.volt/settings.json`
+- project MCP server config in `.mcp.json` or `.volt/mcp.json`
 - `.volt` resources such as extensions, skills, prompt templates, themes, and system prompt files
 - missing project packages configured through project settings
 - project-local extensions and project package-managed extensions
@@ -34,7 +36,17 @@ Volt does not include a built-in sandbox. Built-in tools can read files, write f
 
 This is intentional. Volt is designed to operate on local source trees, invoke project toolchains, and integrate with the user's existing development environment. A partial in-process sandbox would be easy to misunderstand as a security boundary while still depending on the host shell, filesystem, package managers, credentials, and extension code. Real isolation needs to come from the operating system or a virtualization/container boundary.
 
-Project trust is only an input-loading guard. It prevents a repository from silently changing volt's settings or extensions before you approve it. It does not make untrusted code, untrusted prompts, or untrusted model output safe. Prompt injection from repository files, comments, documentation, context files, or build output is expected local-agent risk and cannot be reliably prevented by volt.
+Project trust is only an input-loading guard. It prevents a repository from silently changing volt's settings, MCP servers, or extensions before you approve it. It does not make untrusted code, untrusted prompts, or untrusted model output safe. Prompt injection from repository files, comments, documentation, context files, or build output is expected local-agent risk and cannot be reliably prevented by volt.
+
+## MCP Servers
+
+Native MCP support can spawn local stdio server commands or connect to configured HTTP/SSE endpoints. User MCP config lives in `~/.volt/agent/mcp.json` and shared `~/.config/mcp/mcp.json`; project `.mcp.json` and `.volt/mcp.json` are loaded only after project trust. Project definitions with the same server id replace, rather than inherit, user-scope definitions so project endpoints cannot reuse user auth/env config by id collision.
+
+MCP server metadata and output are untrusted. Volt exposes MCP through one `mcp` gateway tool, applies per-server read/write/destructive/unknown policies, redacts obvious secrets in audit arguments/errors, and stores audit records under `~/.volt/agent/mcp/audit.jsonl`. Large outputs may be cached under `~/.volt/agent/mcp/output/` and are scoped to the creating session/workspace when Volt constructs the default MCP manager.
+
+Avoid putting long-lived secrets in project MCP config. Auth headers and OAuth-protected remote MCP servers are rejected over non-HTTPS URLs except loopback HTTP. OAuth authorization/token/device/registration endpoints must use HTTPS; browser auth uses PKCE S256 and a loopback callback, and device auth exposes only the verification URL and user code (never the OAuth device code). OAuth tokens are stored host-side in `~/.volt/agent/mcp-auth.json` with owner-only permissions and are never sent to the model or mobile client.
+
+Stdio server environments start from the MCP SDK default safe environment plus explicit `envAllowlist` and configured `env` templates.
 
 ## Running Untrusted or Unmonitored Work
 

@@ -853,6 +853,13 @@ describe("Iroh remote core helpers", () => {
 			"host_action_response",
 			"get_state",
 			"get_transcript",
+			"get_mcp_capabilities",
+			"list_mcp_servers",
+			"get_mcp_server",
+			"list_mcp_recent_calls",
+			"disconnect_mcp_server",
+			"poll_mcp_server_auth",
+			"cancel_mcp_server_auth",
 			"get_ui_capabilities",
 			"get_ui_actions",
 			"list_sessions",
@@ -871,6 +878,33 @@ describe("Iroh remote core helpers", () => {
 			const result = getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${type}-1`, type }));
 			expect(result).toEqual({ allowed: true, command: { id: `${type}-1`, type } });
 		}
+		expect(
+			getIrohRemoteRpcFilterResult(
+				JSON.stringify({ id: "mcp-auth-1", type: "start_mcp_server_auth", server: "github", flow: "device" }),
+			),
+		).toEqual({
+			allowed: true,
+			command: { id: "mcp-auth-1", type: "start_mcp_server_auth", server: "github", flow: "device" },
+		});
+		expect(
+			getIrohRemoteRpcFilterResult(
+				JSON.stringify({
+					id: "mcp-auth-browser-1",
+					type: "start_mcp_server_auth",
+					server: "github",
+					flow: "browser",
+				}),
+			),
+		).toEqual({
+			allowed: false,
+			response: {
+				id: "mcp-auth-browser-1",
+				type: "response",
+				command: "start_mcp_server_auth",
+				success: false,
+				error: "Only MCP device-code auth can be started over remote host",
+			},
+		});
 		expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: "bash-1", type: "bash" }))).toEqual({
 			allowed: false,
 			response: {

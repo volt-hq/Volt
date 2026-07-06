@@ -16,6 +16,13 @@ export const IROH_REMOTE_RPC_PASSTHROUGH_TYPES = new Set([
 	"host_action_response",
 	"get_state",
 	"get_transcript",
+	"get_mcp_capabilities",
+	"list_mcp_servers",
+	"get_mcp_server",
+	"list_mcp_recent_calls",
+	"disconnect_mcp_server",
+	"poll_mcp_server_auth",
+	"cancel_mcp_server_auth",
 	"get_ui_capabilities",
 	"get_ui_actions",
 	"list_sessions",
@@ -91,6 +98,10 @@ export function getIrohRemoteRpcFilterResult(line: string): IrohRemoteRpcFilterR
 		return getIrohRemoteUiActionCommandResult(command, responseId, command.type);
 	}
 
+	if (command.type === "start_mcp_server_auth") {
+		return getIrohRemoteMcpAuthCommandResult(command, responseId);
+	}
+
 	if (IROH_REMOTE_RPC_UNSUPPORTED_TYPES.has(command.type)) {
 		return {
 			allowed: false,
@@ -110,6 +121,33 @@ export function getIrohRemoteRpcFilterResult(line: string): IrohRemoteRpcFilterR
 			`RPC command not allowed over remote host: ${command.type}`,
 		),
 	};
+}
+
+function getIrohRemoteMcpAuthCommandResult(
+	command: Record<string, unknown>,
+	responseId: string | undefined,
+): IrohRemoteRpcFilterResult {
+	if (command.flow !== "device") {
+		return {
+			allowed: false,
+			response: createIrohRemoteRpcErrorResponse(
+				responseId,
+				"start_mcp_server_auth",
+				"Only MCP device-code auth can be started over remote host",
+			),
+		};
+	}
+	if (typeof command.redirectUrl === "string") {
+		return {
+			allowed: false,
+			response: createIrohRemoteRpcErrorResponse(
+				responseId,
+				"start_mcp_server_auth",
+				"MCP browser redirect auth is not available over remote host",
+			),
+		};
+	}
+	return { allowed: true, command: command as IrohRemoteRpcCommand };
 }
 
 function getIrohRemoteUiActionCommandResult(

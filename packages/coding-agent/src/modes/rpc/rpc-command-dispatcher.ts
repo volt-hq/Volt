@@ -10,6 +10,8 @@ import {
 	runSessionNewHostAction,
 	runSessionRenameHostAction,
 } from "../../core/host-actions.ts";
+import { getMcpRpcCapabilities, listMcpRpcServers } from "../../core/mcp/rpc.ts";
+import type { McpGatewayExecutionContext } from "../../core/mcp/types.ts";
 import { projectSessionTranscript } from "../../core/rpc/transcript.ts";
 import {
 	createUiActionInvocationPlan,
@@ -68,6 +70,15 @@ export interface RpcCommandDispatcherContext {
 	getPendingHostActionRequests(): RpcHostActionRequest[];
 	cancelPendingHostActionRequests(message?: string): void;
 	subagents: RpcSubagentLifecycleController;
+}
+
+function createRpcMcpExecutionContext(): McpGatewayExecutionContext {
+	return {
+		mode: "rpc",
+		caller: "user",
+		hasUI: true,
+		confirm: async () => false,
+	};
 }
 
 function getUiActionCapabilities(invocationEnabled: boolean): UiActionCapabilities {
@@ -274,6 +285,189 @@ export async function handleRpcCommand(
 				);
 			}
 			return createRpcSuccessResponse(id, "register_push_target", await options.registerPushTarget(command.args));
+		}
+
+		// =================================================================
+		// MCP management
+		// =================================================================
+
+		case "get_mcp_capabilities": {
+			return createRpcSuccessResponse(id, "get_mcp_capabilities", getMcpRpcCapabilities());
+		}
+
+		case "list_mcp_servers": {
+			return createRpcSuccessResponse(id, "list_mcp_servers", listMcpRpcServers(session.getMcpManager()));
+		}
+
+		case "get_mcp_server": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcErrorResponse(id, "get_mcp_server", "MCP is not configured");
+			}
+			return createRpcSuccessResponse(id, "get_mcp_server", { server: manager.getServer(command.server) });
+		}
+
+		case "connect_mcp_server":
+		case "refresh_mcp_server": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcErrorResponse(id, command.type, "MCP is not configured");
+			}
+			const result = await manager.connectServer(command.server);
+			return createRpcSuccessResponse(id, command.type, { server: result.server });
+		}
+
+		case "disconnect_mcp_server": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcErrorResponse(id, "disconnect_mcp_server", "MCP is not configured");
+			}
+			const result = await manager.disconnectServer(command.server);
+			return createRpcSuccessResponse(id, "disconnect_mcp_server", { server: result.server });
+		}
+
+		case "start_mcp_server_auth": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcErrorResponse(id, "start_mcp_server_auth", "MCP is not configured");
+			}
+			const result = await manager.startServerAuth(command.server, {
+				flow: command.flow,
+				redirectUrl: command.redirectUrl,
+			});
+			return createRpcSuccessResponse(id, "start_mcp_server_auth", result as object);
+		}
+
+		case "complete_mcp_server_auth": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcErrorResponse(id, "complete_mcp_server_auth", "MCP is not configured");
+			}
+			const result = await manager.completeServerBrowserAuth(command.server, {
+				redirectUrl: command.redirectUrl,
+				code: command.code,
+				state: command.state,
+			});
+			return createRpcSuccessResponse(id, "complete_mcp_server_auth", result as object);
+		}
+
+		case "poll_mcp_server_auth": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcErrorResponse(id, "poll_mcp_server_auth", "MCP is not configured");
+			}
+			return createRpcSuccessResponse(
+				id,
+				"poll_mcp_server_auth",
+				(await manager.pollServerAuth(command.server)) as object,
+			);
+		}
+
+		case "cancel_mcp_server_auth": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcErrorResponse(id, "cancel_mcp_server_auth", "MCP is not configured");
+			}
+			return createRpcSuccessResponse(id, "cancel_mcp_server_auth", manager.cancelServerAuth(command.server));
+		}
+
+		case "logout_mcp_server": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcErrorResponse(id, "logout_mcp_server", "MCP is not configured");
+			}
+			return createRpcSuccessResponse(id, "logout_mcp_server", await manager.logoutServer(command.server));
+		}
+
+		case "set_mcp_server_enabled": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcErrorResponse(id, "set_mcp_server_enabled", "MCP is not configured");
+			}
+			const result = await manager.setServerEnabled(command.server, command.enabled);
+			return createRpcSuccessResponse(id, "set_mcp_server_enabled", {
+				server: result.server,
+				...(result.persisted ? { persisted: result.persisted } : {}),
+			});
+		}
+
+		case "list_mcp_tools": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcErrorResponse(id, "list_mcp_tools", "MCP is not configured");
+			}
+			return createRpcSuccessResponse(id, "list_mcp_tools", await manager.listTools(command.server));
+		}
+
+		case "get_mcp_tool": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcErrorResponse(id, "get_mcp_tool", "MCP is not configured");
+			}
+			const tools = await manager.listTools(command.server);
+			const tool = tools.tools.find((entry) => entry.name === command.tool);
+			if (!tool) {
+				return createRpcErrorResponse(id, "get_mcp_tool", `MCP tool not found: ${command.server}.${command.tool}`);
+			}
+			return createRpcSuccessResponse(id, "get_mcp_tool", { tool });
+		}
+
+		case "list_mcp_resources": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcErrorResponse(id, "list_mcp_resources", "MCP is not configured");
+			}
+			return createRpcSuccessResponse(
+				id,
+				"list_mcp_resources",
+				await manager.listResources(command.server, command.cursor),
+			);
+		}
+
+		case "read_mcp_resource": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcErrorResponse(id, "read_mcp_resource", "MCP is not configured");
+			}
+			const result = await manager.readResource(command.server, command.resourceUri, createRpcMcpExecutionContext());
+			return createRpcSuccessResponse(id, "read_mcp_resource", { result });
+		}
+
+		case "list_mcp_prompts": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcErrorResponse(id, "list_mcp_prompts", "MCP is not configured");
+			}
+			return createRpcSuccessResponse(
+				id,
+				"list_mcp_prompts",
+				await manager.listPrompts(command.server, command.cursor),
+			);
+		}
+
+		case "get_mcp_prompt": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcErrorResponse(id, "get_mcp_prompt", "MCP is not configured");
+			}
+			const result = await manager.getPrompt(
+				command.server,
+				command.prompt,
+				{ action: "get_prompt", arguments: command.arguments, argumentsJson: command.argumentsJson },
+				createRpcMcpExecutionContext(),
+			);
+			return createRpcSuccessResponse(id, "get_mcp_prompt", { result });
+		}
+
+		case "list_mcp_recent_calls": {
+			const manager = session.getMcpManager();
+			if (!manager) {
+				return createRpcSuccessResponse(id, "list_mcp_recent_calls", { calls: [] });
+			}
+			const calls = command.server
+				? manager.getServer(command.server).recentCalls
+				: manager.listServers().flatMap((server) => server.recentCalls);
+			return createRpcSuccessResponse(id, "list_mcp_recent_calls", { calls });
 		}
 
 		// =================================================================

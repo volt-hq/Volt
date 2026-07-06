@@ -43,6 +43,7 @@
 		"@earendil-works/volt-agent-core": "^0.79.6",
 		"@earendil-works/volt-ai": "^0.79.6",
 		"@earendil-works/volt-tui": "^0.79.6",
+		"@modelcontextprotocol/sdk": "1.29.0",
 		"@silvia-odwyer/photon-node": "0.3.4",
 		"chalk": "5.6.2",
 		"cross-spawn": "7.0.6",

@@ -259,7 +259,7 @@ See [docs/settings.md](docs/settings.md) for all options.
 
 ### Project Trust
 
-On interactive startup, volt asks before trusting a project folder that contains project-local settings, resources, or project `.agents/skills` and has no saved decision for the folder or a parent folder in `~/.volt/agent/trust.json`. Trusting a project allows volt to load `.volt/settings.json` and `.volt` resources, install missing project packages, and execute project extensions.
+On interactive startup, volt asks before trusting a project folder that contains project-local settings, MCP server config, resources, or project `.agents/skills` and has no saved decision for the folder or a parent folder in `~/.volt/agent/trust.json`. Trusting a project allows volt to load `.volt/settings.json`, `.mcp.json`/`.volt/mcp.json`, and `.volt` resources, install missing project packages, and execute project extensions.
 
 Before the trust decision, volt loads only context files, user/global extensions, and CLI `-e` extensions so they can handle the `project_trust` event. Project-local extensions, project package-managed extensions, and project settings are loaded only after the project is trusted. This split also applies when switching to a session from a different cwd whose trust has not been resolved in the current process.
 
@@ -361,6 +361,14 @@ The default export can also be `async`. volt waits for async extension factories
 
 Place in `~/.volt/agent/extensions/`, `.volt/extensions/`, or a [volt package](#volt-packages) to share with others. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).
 
+### MCP Servers
+
+Volt can connect to Model Context Protocol (MCP) servers using native config files at `~/.volt/agent/mcp.json`, shared `~/.config/mcp/mcp.json`, trusted project `.mcp.json`, or trusted project `.volt/mcp.json`. Configured servers are exposed to the model through one `mcp` gateway tool for status, discovery/search, tool calls, resources, prompts, and cached large-output reads.
+
+HTTP/SSE MCP servers with `auth: { "type": "oauth" }` can be authenticated with `volt mcp auth <server>` for browser PKCE or `volt mcp auth-device <server>` for device-code auth. Tokens stay on the host in MCP auth storage.
+
+See [docs/mcp.md](docs/mcp.md) for config format, trust rules, and current limitations.
+
 ### Themes
 
 Built-in: `dark`, `light`. Themes hot-reload: modify the active theme file and volt immediately applies changes.
@@ -458,7 +466,7 @@ See [docs/rpc.md](docs/rpc.md) for the protocol.
 
 Volt is aggressively extensible so it doesn't have to dictate your workflow. Features that other tools bake in can be built with [extensions](#extensions), [skills](#skills), or installed from third-party [volt packages](#volt-packages). This keeps the core minimal while letting you shape volt to fit how you work.
 
-**No MCP.** Build CLI tools with READMEs (see [Skills](#skills)), or build an extension that adds MCP support.
+**MCP stays explicit.** Native MCP support is available through `.mcp.json` or `.volt/mcp.json` and a single gateway tool; project MCP configs follow project trust and MCP server outputs are treated as untrusted data.
 
 **No sub-agents.** There's many ways to do this. Spawn volt instances via tmux, or build your own with [extensions](#extensions), or install a package that does it your way.
 
@@ -592,7 +600,7 @@ cat README.md | volt -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
 
-Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`
+Available built-in tools: `read`, `bash`, `edit`, `write`, `web_search`, `grep`, `find`, `ls`, `lsp` (when enabled), `subagent` (when available), `mcp` (when MCP servers are configured)
 
 ### Resource Options
 
