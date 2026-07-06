@@ -1234,6 +1234,8 @@ describe("Iroh remote notification requests", () => {
 						status: "completed",
 						summary: "Ran command: pwd && cat /workspace/src/index.ts (completed)",
 						args: { command: "pwd && cat /workspace/src/index.ts", timeout: 5 },
+						output: "private output",
+						outputTruncated: false,
 					}),
 				}),
 			);
@@ -1247,11 +1249,11 @@ describe("Iroh remote notification requests", () => {
 						status: "completed",
 						path: "/workspace/src/index.ts",
 						args: { path: "/workspace/src/index.ts", offset: 3 },
+						output: "private file contents",
+						outputTruncated: false,
 					}),
 				}),
 			);
-			expect(JSON.stringify(transcriptEntries)).not.toContain("private output");
-			expect(JSON.stringify(transcriptEntries)).not.toContain("private file contents");
 		});
 
 		recv.end();
