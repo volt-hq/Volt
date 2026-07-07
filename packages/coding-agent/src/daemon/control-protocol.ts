@@ -230,6 +230,7 @@ export interface RelayPreamble {
 	 */
 	hostNodeId?: string;
 	relayMode?: "disabled" | "default" | "custom";
+	relayUrls?: string[];
 	connectionId: string;
 	streamId: string;
 	resolvedTarget: {

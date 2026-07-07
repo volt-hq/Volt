@@ -1991,7 +1991,11 @@ export class InteractiveMode {
 
 		// The daemon's identity from the preamble: the phone verifies the saved
 		// host node id in the handshake response we write over the relay.
-		const responseContext = { hostNodeId: preamble.hostNodeId, relayMode: preamble.relayMode };
+		const responseContext = {
+			hostNodeId: preamble.hostNodeId,
+			relayMode: preamble.relayMode,
+			relayUrls: preamble.relayUrls,
+		};
 		const sessionSelection: IntegratedConversationSessionSelection =
 			preamble.resolvedTarget.selection === "created"
 				? { kind: "created", sessionId: preamble.resolvedTarget.sessionId }

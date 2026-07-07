@@ -1,9 +1,30 @@
 # Self-hosted iroh relay
 
-Volt uses [iroh](https://www.iroh.computer/) for the daemon ↔ phone transport. By
-default the endpoint binds with the n0 production preset, which uses n0's public
-relay servers. This guide sets up your own relay on a cheap VPS and points both
-sides of Volt at it, so no Volt traffic transits the public relays.
+Volt uses [iroh](https://www.iroh.computer/) for the daemon ↔ phone transport.
+**Production default:** the daemon binds against the Volt relay fleet
+(`VOLT_PRODUCTION_RELAY_URLS` in `daemon/iroh-service.ts`, currently
+`iroh-relay-us-central.volt-cli.dev`) and pairing tickets carry those URLs to
+the app. The n0 public relays are development-only: opt in with
+`VOLT_IROH_RELAY_MODE=default` (the daemon logs a warning when they're in use).
+
+This guide covers running a relay of your own — the fleet is deployed with
+`scripts/deploy-iroh-relay.sh`, which automates everything below:
+
+```sh
+# fresh relay (DNS A record must already point at the server)
+scripts/deploy-iroh-relay.sh root@<server> relay-name.volt-cli.dev \
+  --contact you@example.com \
+  --allowlist "<daemon endpoint id>,<phone endpoint id>"
+
+# allow one more device on an existing relay
+scripts/deploy-iroh-relay.sh root@<server> --add-allow <endpoint id>
+```
+
+Multiple relays need no client-side changes beyond listing the URLs: iroh
+latency-probes every relay in the map and picks the closest as each endpoint's
+home relay, and peers on different home relays still reach each other (the
+sender dials the receiver's relay). Add a region by deploying a relay and
+appending its URL to `VOLT_PRODUCTION_RELAY_URLS` (or `VOLT_IROH_RELAY_URLS`).
 
 Relayed traffic is end-to-end encrypted by iroh (the relay only forwards opaque
 QUIC packets between node ids), so this is about infrastructure ownership and
@@ -134,25 +155,31 @@ restart the unit after DNS resolves.
 
 ## 7. Point Volt at it
 
-Restart the daemon with the relay URL(s); comma-separate to run more than one:
+The Volt production relays are the default — a daemon started with no relay
+configuration binds against `VOLT_PRODUCTION_RELAY_URLS` in `custom` mode. To
+use a different fleet, set the URLs explicitly (comma-separate for more than
+one):
 
 ```sh
 VOLT_IROH_RELAY_URLS=https://relay.example.com volt daemon run
 ```
 
-When `VOLT_IROH_RELAY_URLS` is set, voltd binds its endpoint with a custom
-relay map (relay mode `custom`) instead of the n0 relays, and every pairing
-ticket it mints carries the relay URLs. The startup log line
-`iroh endpoint online` shows `relayMode: "custom"` and the URLs.
+Every pairing ticket the daemon mints carries the active relay URLs, so paired
+apps bind against the same fleet. The startup log line `iroh endpoint online`
+shows `relayMode: "custom"` and the URLs.
 
-On the phone: **re-pair once** (scan a fresh QR). The ticket's `relayUrls`
-travel into the saved-host record, so reconnects — including cold starts — bind
-against your relay from then on. Hosts saved before the switch still reference
-the old relay mode; delete and re-pair them.
+Relay-fleet changes propagate to paired phones automatically: the handshake
+metadata carries the current `relayUrls` on every connection, the app persists
+them into its saved-host record, and new relays are inserted into the live
+endpoint on the fly. Keep the old relay serving until all devices have
+reconnected at least once, then retire it (removed relays drop out of a
+phone's endpoint on its next cold start). Re-pairing is only needed for hosts
+saved before relay support existed or when the host's relay *mode* changes.
 
-Config precedence: an explicit `createIrohDaemonService({ relayMode, relayUrls })`
-beats the env var; with neither, the n0 default preset is used, and
-`relayMode: "disabled"` still disables relaying entirely.
+Config precedence: explicit `createIrohDaemonService({ relayMode, relayUrls })`
+beats `VOLT_IROH_RELAY_MODE` / `VOLT_IROH_RELAY_URLS`, which beat the built-in
+production default. `VOLT_IROH_RELAY_MODE=default` selects the n0 public relays
+(development only); `disabled` turns relaying off entirely.
 
 ## Scope note: discovery is separate
 

@@ -109,18 +109,57 @@ let activeStreamSequence = 0;
 
 export type IrohRelayMode = "disabled" | "default" | "custom";
 
+/**
+ * The Volt-operated relay fleet. Production endpoints bind against these by
+ * default; the n0 public relays ("default" mode) are for development only and
+ * must be opted into via VOLT_IROH_RELAY_MODE=default.
+ */
+export const VOLT_PRODUCTION_RELAY_URLS = ["https://iroh-relay-us-central.volt-cli.dev"];
+
 export interface IrohDaemonServiceConfig {
 	relayMode?: IrohRelayMode;
 	/**
 	 * Self-hosted relay server URLs (e.g. "https://relay.example.com"). When
 	 * set (or via VOLT_IROH_RELAY_URLS, comma-separated), the endpoint binds
-	 * with a custom relay map instead of the n0 public relays, and pairing
-	 * tickets carry the URLs so clients bind against the same relays.
+	 * with a custom relay map instead of the Volt production relays, and
+	 * pairing tickets carry the URLs so clients bind against the same relays.
 	 */
 	relayUrls?: string[];
 	pushRelayUrl?: string;
 	pushRelayAuthToken?: string;
 	profile?: string;
+}
+
+export interface ResolvedIrohRelayConfig {
+	relayMode: IrohRelayMode;
+	relayUrls: string[];
+	warning?: string;
+}
+
+/**
+ * Resolves the effective relay configuration. Precedence: explicit service
+ * config, then VOLT_IROH_RELAY_MODE / VOLT_IROH_RELAY_URLS, then the Volt
+ * production relays ("custom" mode).
+ */
+export function resolveIrohRelayConfig(
+	config: Pick<IrohDaemonServiceConfig, "relayMode" | "relayUrls">,
+	env: Record<string, string | undefined> = process.env,
+): ResolvedIrohRelayConfig {
+	const envUrls = parseRelayUrlsEnv(env.VOLT_IROH_RELAY_URLS);
+	const envModeValue = env.VOLT_IROH_RELAY_MODE?.trim();
+	let envMode: IrohRelayMode | undefined;
+	let warning: string | undefined;
+	if (envModeValue !== undefined && envModeValue !== "") {
+		if (envModeValue === "disabled" || envModeValue === "default" || envModeValue === "custom") {
+			envMode = envModeValue;
+		} else {
+			warning = `ignoring invalid VOLT_IROH_RELAY_MODE "${envModeValue}" (expected disabled, default, or custom)`;
+		}
+	}
+	const relayMode = config.relayMode ?? envMode ?? "custom";
+	const configuredUrls = config.relayUrls ?? envUrls;
+	const relayUrls = relayMode === "custom" ? (configuredUrls ?? VOLT_PRODUCTION_RELAY_URLS) : (configuredUrls ?? []);
+	return { relayMode, relayUrls, ...(warning === undefined ? {} : { warning }) };
 }
 
 function parseRelayUrlsEnv(value: string | undefined): string[] | undefined {
@@ -253,6 +292,7 @@ class IrohDaemonService {
 	private readonly services: VoltdRuntimeServices;
 	private readonly relayMode: IrohRelayMode;
 	private readonly relayUrls: string[];
+	private readonly relayConfigWarning: string | undefined;
 	private readonly log: ReturnType<VoltdRuntimeServices["logger"]["child"]>;
 	private readonly stateManager: IrohRemoteHostStateManager;
 	private readonly activeStreams = new IrohRemoteActiveStreamRegistry();
@@ -277,8 +317,10 @@ class IrohDaemonService {
 	constructor(iroh: IrohModuleLike, services: VoltdRuntimeServices, config: IrohDaemonServiceConfig) {
 		this.iroh = iroh;
 		this.services = services;
-		this.relayUrls = config.relayUrls ?? parseRelayUrlsEnv(process.env.VOLT_IROH_RELAY_URLS) ?? [];
-		this.relayMode = config.relayMode ?? (this.relayUrls.length > 0 ? "custom" : "default");
+		const relayConfig = resolveIrohRelayConfig(config);
+		this.relayMode = relayConfig.relayMode;
+		this.relayUrls = relayConfig.relayUrls;
+		this.relayConfigWarning = relayConfig.warning;
 		this.log = services.logger.child("iroh");
 		this.stateManager = services.stateManager;
 		this.trustStore = new ProjectTrustStore(services.agentDir);
@@ -374,7 +416,11 @@ class IrohDaemonService {
 	}
 
 	private getResponseContext(): RemoteHostResponseContext {
-		return { hostNodeId: this.hostNodeId, relayMode: this.relayMode };
+		return {
+			hostNodeId: this.hostNodeId,
+			relayMode: this.relayMode,
+			...(this.relayMode === "custom" ? { relayUrls: this.relayUrls } : {}),
+		};
 	}
 
 	private getCommandContext(conversation?: {
@@ -413,9 +459,16 @@ class IrohDaemonService {
 
 	async start(): Promise<void> {
 		let endpoint: IrohEndpointLike | undefined;
+		if (this.relayConfigWarning !== undefined) {
+			this.log("warn", this.relayConfigWarning);
+		}
 		try {
 			const builder = this.iroh.Endpoint.builder();
 			if (this.relayMode === "default") {
+				this.log(
+					"warn",
+					"using public n0 relays (development only; unset VOLT_IROH_RELAY_MODE for the Volt relays)",
+				);
 				this.iroh.presetN0(builder);
 			} else if (this.relayMode === "custom") {
 				if (this.relayUrls.length === 0) {
@@ -456,6 +509,8 @@ class IrohDaemonService {
 				auditLogger: this.services.auditLogger,
 				classifyWorkspaceAvailability: getIrohRemoteWorkspaceAvailabilityStatus,
 				hostNodeId: this.hostNodeId,
+				relayMode: this.relayMode,
+				...(this.relayMode === "custom" ? { relayUrls: this.relayUrls } : {}),
 				stateManager: this.stateManager,
 				validateWorkspace: async (workspace) =>
 					(await getIrohRemoteWorkspaceAvailabilityStatus(workspace)) === "available",
@@ -1051,6 +1106,7 @@ class IrohDaemonService {
 					// client's identity check.
 					...(this.hostNodeId === undefined ? {} : { hostNodeId: this.hostNodeId }),
 					relayMode: this.relayMode,
+					...(this.relayMode === "custom" ? { relayUrls: this.relayUrls } : {}),
 					connectionId,
 					streamId,
 					resolvedTarget: {

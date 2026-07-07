@@ -10,7 +10,11 @@ import { createDaemonClient, type DaemonClient } from "../src/daemon/control-cli
 import type { ControlEvent } from "../src/daemon/control-protocol.ts";
 import { probeControlSocket } from "../src/daemon/control-server.ts";
 import { loadIrohModule } from "../src/daemon/iroh-native.ts";
-import { createIrohDaemonService } from "../src/daemon/iroh-service.ts";
+import {
+	createIrohDaemonService,
+	resolveIrohRelayConfig,
+	VOLT_PRODUCTION_RELAY_URLS,
+} from "../src/daemon/iroh-service.ts";
 import { runVoltDaemon } from "../src/daemon/main.ts";
 import { getDaemonPaths } from "../src/daemon/paths.ts";
 import { readLineFromIroh } from "../src/daemon/workspace-streams.ts";
@@ -57,6 +61,57 @@ async function readJsonLine(
 	}
 	return { value: JSON.parse(result.line) as Record<string, unknown>, rest: result.rest };
 }
+
+describe("relay config resolution", () => {
+	it("defaults to the Volt production relays", () => {
+		expect(resolveIrohRelayConfig({}, {})).toEqual({
+			relayMode: "custom",
+			relayUrls: VOLT_PRODUCTION_RELAY_URLS,
+		});
+	});
+
+	it("uses VOLT_IROH_RELAY_URLS for a custom relay fleet", () => {
+		expect(
+			resolveIrohRelayConfig({}, { VOLT_IROH_RELAY_URLS: " https://r1.example.com , https://r2.example.com ," }),
+		).toEqual({
+			relayMode: "custom",
+			relayUrls: ["https://r1.example.com", "https://r2.example.com"],
+		});
+	});
+
+	it("opts into the n0 public relays only via VOLT_IROH_RELAY_MODE=default", () => {
+		expect(resolveIrohRelayConfig({}, { VOLT_IROH_RELAY_MODE: "default" })).toEqual({
+			relayMode: "default",
+			relayUrls: [],
+		});
+		expect(resolveIrohRelayConfig({}, { VOLT_IROH_RELAY_MODE: "disabled" })).toEqual({
+			relayMode: "disabled",
+			relayUrls: [],
+		});
+	});
+
+	it("prefers explicit service config over the environment", () => {
+		expect(
+			resolveIrohRelayConfig(
+				{ relayMode: "disabled" },
+				{ VOLT_IROH_RELAY_MODE: "default", VOLT_IROH_RELAY_URLS: "https://ignored.example.com" },
+			),
+		).toEqual({ relayMode: "disabled", relayUrls: ["https://ignored.example.com"] });
+		expect(
+			resolveIrohRelayConfig(
+				{ relayUrls: ["https://config.example.com"] },
+				{ VOLT_IROH_RELAY_URLS: "https://env.example.com" },
+			),
+		).toEqual({ relayMode: "custom", relayUrls: ["https://config.example.com"] });
+	});
+
+	it("warns on an invalid VOLT_IROH_RELAY_MODE and falls back to the default", () => {
+		const resolved = resolveIrohRelayConfig({}, { VOLT_IROH_RELAY_MODE: "n0" });
+		expect(resolved.relayMode).toBe("custom");
+		expect(resolved.relayUrls).toEqual(VOLT_PRODUCTION_RELAY_URLS);
+		expect(resolved.warning).toContain("VOLT_IROH_RELAY_MODE");
+	});
+});
 
 describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 	let agentDir: string;

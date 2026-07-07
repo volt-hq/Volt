@@ -63,6 +63,8 @@ export interface IrohRemoteHostEngineOptions {
 	now?: () => number;
 	pairingExpiresAt?: number;
 	pairingSecret?: string;
+	relayMode?: IrohRemoteRelayMode;
+	relayUrls?: string[];
 	stateManager: IrohRemoteHostStateManager;
 	classifyWorkspaceAvailability?: IrohRemoteWorkspaceAvailabilityClassifier;
 	validateWorkspace?: (workspace: IrohRemoteWorkspace) => boolean | Promise<boolean>;
@@ -170,6 +172,8 @@ export class IrohRemoteHostEngine {
 	private readonly auditLogger: IrohRemoteAuditLogger;
 	private readonly classifyWorkspaceAvailability: IrohRemoteWorkspaceAvailabilityClassifier | undefined;
 	private readonly hostNodeId: string | undefined;
+	private readonly relayMode: IrohRemoteRelayMode | undefined;
+	private readonly relayUrls: string[] | undefined;
 	private readonly now: () => number;
 	private readonly stateManager: IrohRemoteHostStateManager;
 	private readonly validateWorkspace: ((workspace: IrohRemoteWorkspace) => boolean | Promise<boolean>) | undefined;
@@ -186,6 +190,8 @@ export class IrohRemoteHostEngine {
 		this.auditLogger = options.auditLogger ?? new IrohRemoteAuditLogger();
 		this.classifyWorkspaceAvailability = options.classifyWorkspaceAvailability;
 		this.hostNodeId = options.hostNodeId;
+		this.relayMode = options.relayMode;
+		this.relayUrls = options.relayUrls;
 		this.now = options.now ?? Date.now;
 		this.pairingExpiresAt = options.pairingExpiresAt;
 		this.pairingSecret = options.pairingSecret;
@@ -481,6 +487,8 @@ export class IrohRemoteHostEngine {
 			remoteHost: createIrohRemoteHostMetadata({
 				authorization,
 				hostNodeId: this.hostNodeId,
+				relayMode: this.relayMode,
+				relayUrls: this.relayUrls,
 				features: [...IROH_REMOTE_HOST_FEATURES],
 			}),
 			workspace: authorization.workspace.name,

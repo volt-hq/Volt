@@ -24,6 +24,7 @@ export type IntegratedConversationSessionSelection =
 export interface RemoteHostResponseContext {
 	hostNodeId?: string;
 	relayMode?: IrohRemoteRelayMode;
+	relayUrls?: string[];
 }
 
 function getCurrentUserName(): string | undefined {
@@ -42,6 +43,7 @@ export function createRemoteHostMetadata(
 		authorization,
 		hostNodeId: context.hostNodeId,
 		relayMode: context.relayMode,
+		relayUrls: context.relayUrls,
 		hostName: hostname(),
 		userName: getCurrentUserName(),
 		cwd: "/workspace",

@@ -9,6 +9,8 @@ export interface IrohRemoteHostMetadata {
 	features: string[];
 	hostNodeId?: string;
 	relayMode?: IrohRemoteRelayMode;
+	/** Current relay fleet; lets clients refresh their relay list without re-pairing. */
+	relayUrls?: string[];
 	hostName?: string;
 	userName?: string;
 	cwd: string;
@@ -18,6 +20,7 @@ export interface CreateIrohRemoteHostMetadataOptions {
 	authorization: IrohRemoteClientAuthorizationSuccess;
 	hostNodeId?: string;
 	relayMode?: IrohRemoteRelayMode;
+	relayUrls?: string[];
 	hostName?: string;
 	userName?: string;
 	cwd?: string;
@@ -32,6 +35,7 @@ export function createIrohRemoteHostMetadata(options: CreateIrohRemoteHostMetada
 		features: [...(options.features ?? IROH_REMOTE_HOST_FEATURES)],
 		hostNodeId: options.hostNodeId,
 		relayMode: options.relayMode,
+		relayUrls: options.relayUrls,
 		hostName: options.hostName,
 		userName: options.userName,
 		cwd: options.cwd ?? "/workspace",

@@ -655,6 +655,8 @@ describe("Iroh remote core helpers", () => {
 			workspaces: [{ name: "volt", status: "available" }],
 			features: [IROH_REMOTE_MULTI_STREAMS_FEATURE],
 			hostNodeId: "host-node",
+			relayMode: "custom",
+			relayUrls: ["https://relay.example.com"],
 			cwd: "/workspace",
 		};
 		expect(

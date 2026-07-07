@@ -11,6 +11,7 @@ import {
 	type IrohRemoteRelayMode,
 	isIrohRemoteOutcome,
 	isIrohRemoteRelayMode,
+	isIrohRemoteRelayUrls,
 } from "./protocol.ts";
 import type { IrohRemoteWorkspaceStatus } from "./workspace.ts";
 
@@ -50,6 +51,7 @@ export interface IrohRemoteHostHandshakeMetadata {
 	features: string[];
 	hostNodeId?: string;
 	relayMode?: IrohRemoteRelayMode;
+	relayUrls?: string[];
 	hostName?: string;
 	userName?: string;
 	cwd: string;
@@ -292,6 +294,7 @@ function cloneRemoteHostHandshakeMetadata(metadata: IrohRemoteHostHandshakeMetad
 		features: [...metadata.features],
 		...(metadata.hostNodeId === undefined ? {} : { hostNodeId: metadata.hostNodeId }),
 		...(metadata.relayMode === undefined ? {} : { relayMode: metadata.relayMode }),
+		...(metadata.relayUrls === undefined ? {} : { relayUrls: [...metadata.relayUrls] }),
 		...(metadata.hostName === undefined ? {} : { hostName: metadata.hostName }),
 		...(metadata.userName === undefined ? {} : { userName: metadata.userName }),
 		cwd: metadata.cwd,
@@ -573,6 +576,7 @@ function parseOptionalRemoteHostHandshakeMetadata(value: unknown): IrohRemoteHos
 		"features",
 		"hostNodeId",
 		"relayMode",
+		"relayUrls",
 		"hostName",
 		"userName",
 		"cwd",
@@ -588,6 +592,9 @@ function parseOptionalRemoteHostHandshakeMetadata(value: unknown): IrohRemoteHos
 		...(metadata.relayMode === undefined
 			? {}
 			: { relayMode: expectRelayMode(metadata.relayMode, "handshake response remoteHost relayMode") }),
+		...(metadata.relayUrls === undefined
+			? {}
+			: { relayUrls: expectRelayUrls(metadata.relayUrls, "handshake response remoteHost relayUrls") }),
 		...(metadata.hostName === undefined
 			? {}
 			: { hostName: expectString(metadata.hostName, "handshake response remoteHost hostName") }),
@@ -641,6 +648,13 @@ function expectRelayMode(value: unknown, label: string): IrohRemoteRelayMode {
 		return value;
 	}
 	throw new Error(`${label} must be a supported relay mode`);
+}
+
+function expectRelayUrls(value: unknown, label: string): string[] {
+	if (isIrohRemoteRelayUrls(value)) {
+		return [...value];
+	}
+	throw new Error(`${label} must be a non-empty array of relay URLs`);
 }
 
 function parseOptionalHandshakeSuccessMode(
