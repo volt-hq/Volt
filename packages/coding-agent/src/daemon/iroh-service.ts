@@ -107,22 +107,22 @@ const MAX_CONCURRENT_STREAMS_PER_CONNECTION = 64;
 let activeConnectionSequence = 0;
 let activeStreamSequence = 0;
 
-export type IrohRelayMode = "disabled" | "default" | "custom";
+export type IrohRelayMode = "disabled" | "development" | "production";
 
 /**
- * The Volt-operated relay fleet. Production endpoints bind against these by
- * default; the n0 public relays ("default" mode) are for development only and
- * must be opted into via VOLT_IROH_RELAY_MODE=default.
+ * The Volt-operated relay fleet. Endpoints bind against these by default
+ * ("production" mode); the n0 public relays ("development" mode) are for
+ * development only and must be opted into via VOLT_IROH_RELAY_MODE=development.
  */
 export const VOLT_PRODUCTION_RELAY_URLS = ["https://iroh-relay-us-central.volt-cli.dev"];
 
 export interface IrohDaemonServiceConfig {
 	relayMode?: IrohRelayMode;
 	/**
-	 * Self-hosted relay server URLs (e.g. "https://relay.example.com"). When
-	 * set (or via VOLT_IROH_RELAY_URLS, comma-separated), the endpoint binds
-	 * with a custom relay map instead of the Volt production relays, and
-	 * pairing tickets carry the URLs so clients bind against the same relays.
+	 * Relay server URLs (e.g. "https://relay.example.com"). When set (or via
+	 * VOLT_IROH_RELAY_URLS, comma-separated), production mode binds against
+	 * these instead of the built-in Volt fleet, and pairing tickets carry the
+	 * URLs so clients bind against the same relays.
 	 */
 	relayUrls?: string[];
 	pushRelayUrl?: string;
@@ -139,7 +139,7 @@ export interface ResolvedIrohRelayConfig {
 /**
  * Resolves the effective relay configuration. Precedence: explicit service
  * config, then VOLT_IROH_RELAY_MODE / VOLT_IROH_RELAY_URLS, then the Volt
- * production relays ("custom" mode).
+ * production relay fleet.
  */
 export function resolveIrohRelayConfig(
 	config: Pick<IrohDaemonServiceConfig, "relayMode" | "relayUrls">,
@@ -150,15 +150,16 @@ export function resolveIrohRelayConfig(
 	let envMode: IrohRelayMode | undefined;
 	let warning: string | undefined;
 	if (envModeValue !== undefined && envModeValue !== "") {
-		if (envModeValue === "disabled" || envModeValue === "default" || envModeValue === "custom") {
+		if (envModeValue === "disabled" || envModeValue === "development" || envModeValue === "production") {
 			envMode = envModeValue;
 		} else {
-			warning = `ignoring invalid VOLT_IROH_RELAY_MODE "${envModeValue}" (expected disabled, default, or custom)`;
+			warning = `ignoring invalid VOLT_IROH_RELAY_MODE "${envModeValue}" (expected disabled, development, or production)`;
 		}
 	}
-	const relayMode = config.relayMode ?? envMode ?? "custom";
+	const relayMode = config.relayMode ?? envMode ?? "production";
 	const configuredUrls = config.relayUrls ?? envUrls;
-	const relayUrls = relayMode === "custom" ? (configuredUrls ?? VOLT_PRODUCTION_RELAY_URLS) : (configuredUrls ?? []);
+	const relayUrls =
+		relayMode === "production" ? (configuredUrls ?? VOLT_PRODUCTION_RELAY_URLS) : (configuredUrls ?? []);
 	return { relayMode, relayUrls, ...(warning === undefined ? {} : { warning }) };
 }
 
@@ -419,7 +420,7 @@ class IrohDaemonService {
 		return {
 			hostNodeId: this.hostNodeId,
 			relayMode: this.relayMode,
-			...(this.relayMode === "custom" ? { relayUrls: this.relayUrls } : {}),
+			...(this.relayMode === "production" ? { relayUrls: this.relayUrls } : {}),
 		};
 	}
 
@@ -464,15 +465,15 @@ class IrohDaemonService {
 		}
 		try {
 			const builder = this.iroh.Endpoint.builder();
-			if (this.relayMode === "default") {
+			if (this.relayMode === "development") {
 				this.log(
 					"warn",
 					"using public n0 relays (development only; unset VOLT_IROH_RELAY_MODE for the Volt relays)",
 				);
 				this.iroh.presetN0(builder);
-			} else if (this.relayMode === "custom") {
+			} else if (this.relayMode === "production") {
 				if (this.relayUrls.length === 0) {
-					throw new Error("relayMode custom requires relay URLs (config.relayUrls or VOLT_IROH_RELAY_URLS)");
+					throw new Error("relayMode production requires relay URLs (config.relayUrls or VOLT_IROH_RELAY_URLS)");
 				}
 				this.iroh.presetN0DisableRelay(builder);
 				builder.relayMode(this.iroh.RelayMode.customFromUrls(this.relayUrls));
@@ -510,7 +511,7 @@ class IrohDaemonService {
 				classifyWorkspaceAvailability: getIrohRemoteWorkspaceAvailabilityStatus,
 				hostNodeId: this.hostNodeId,
 				relayMode: this.relayMode,
-				...(this.relayMode === "custom" ? { relayUrls: this.relayUrls } : {}),
+				...(this.relayMode === "production" ? { relayUrls: this.relayUrls } : {}),
 				stateManager: this.stateManager,
 				validateWorkspace: async (workspace) =>
 					(await getIrohRemoteWorkspaceAvailabilityStatus(workspace)) === "available",
@@ -520,7 +521,7 @@ class IrohDaemonService {
 			this.log("info", `iroh endpoint online`, {
 				hostNodeId: this.hostNodeId,
 				relayMode: this.relayMode,
-				...(this.relayMode === "custom" ? { relayUrls: this.relayUrls } : {}),
+				...(this.relayMode === "production" ? { relayUrls: this.relayUrls } : {}),
 			});
 			void this.acceptLoop(endpoint);
 		} catch (error) {
@@ -1106,7 +1107,7 @@ class IrohDaemonService {
 					// client's identity check.
 					...(this.hostNodeId === undefined ? {} : { hostNodeId: this.hostNodeId }),
 					relayMode: this.relayMode,
-					...(this.relayMode === "custom" ? { relayUrls: this.relayUrls } : {}),
+					...(this.relayMode === "production" ? { relayUrls: this.relayUrls } : {}),
 					connectionId,
 					streamId,
 					resolvedTarget: {
@@ -1770,7 +1771,7 @@ class IrohDaemonService {
 				irohTicket: this.endpointTicket,
 				nodeId: this.hostNodeId,
 				relayMode: this.relayMode,
-				...(this.relayMode === "custom" ? { relayUrls: this.relayUrls } : {}),
+				...(this.relayMode === "production" ? { relayUrls: this.relayUrls } : {}),
 				...(workspaceName === undefined ? {} : { workspace: workspaceName }),
 			});
 			connection.send({ type: "pair_started", id: request.id, requestId });

@@ -291,7 +291,7 @@ describe("Iroh remote core helpers", () => {
 			expiresAt: 1000,
 			irohTicket: "iroh-endpoint-ticket",
 			nodeId: "host-node",
-			relayMode: "default",
+			relayMode: "development",
 			secret: "pairing-secret",
 			workspace: "volt",
 		};
@@ -303,18 +303,18 @@ describe("Iroh remote core helpers", () => {
 		expect(() => decodeIrohRemoteTicketPayload("not-a-ticket")).toThrow("Expected ticket prefix");
 		expect(() => parseIrohRemoteTicketPayload({ ...payload, alpn: "other" })).toThrow("Unsupported ticket ALPN");
 		expect(() => parseIrohRemoteTicketPayload({ ...payload, relayMode: "relayed" })).toThrow(
-			"ticket relayMode must be disabled, default, or custom",
+			"ticket relayMode must be disabled, development, or production",
 		);
 		expect(() => assertIrohRemoteTicketNotExpired(payload, 1001)).toThrow("Pairing ticket has expired");
 	});
 
-	test("round-trips custom relay tickets and validates relayUrls", () => {
+	test("round-trips production relay tickets and validates relayUrls", () => {
 		const payload: IrohRemoteTicketPayload = {
 			alpn: IROH_REMOTE_ALPN,
 			expiresAt: 1000,
 			irohTicket: "iroh-endpoint-ticket",
 			nodeId: "host-node",
-			relayMode: "custom",
+			relayMode: "production",
 			relayUrls: ["https://relay.example.com"],
 			secret: "pairing-secret",
 			workspace: "volt",
@@ -322,7 +322,7 @@ describe("Iroh remote core helpers", () => {
 
 		expect(decodeIrohRemoteTicketPayload(encodeIrohRemoteTicketPayload(payload))).toEqual(payload);
 		expect(() => parseIrohRemoteTicketPayload({ ...payload, relayUrls: undefined })).toThrow(
-			"ticket relayMode custom requires relayUrls",
+			"ticket relayMode production requires relayUrls",
 		);
 		expect(() => parseIrohRemoteTicketPayload({ ...payload, relayUrls: [] })).toThrow(
 			"ticket relayUrls must be a non-empty array of relay URLs",
@@ -334,12 +334,12 @@ describe("Iroh remote core helpers", () => {
 			alpn: IROH_REMOTE_ALPN,
 			irohTicket: "iroh-endpoint-ticket",
 			nodeId: "host-node",
-			relayMode: "custom",
+			relayMode: "production",
 			relayUrls: ["https://relay.example.com"],
 			workspace: "volt",
 		});
 		expect(() => createIrohRemoteSanitizedReconnectTicketPayload({ ...payload, relayUrls: undefined })).toThrow(
-			"saved_host_invalid: ticket relayUrls are required for custom relayMode",
+			"saved_host_invalid: ticket relayUrls are required for production relayMode",
 		);
 	});
 
@@ -349,7 +349,7 @@ describe("Iroh remote core helpers", () => {
 			expiresAt: 1000,
 			irohTicket: "iroh-endpoint-ticket",
 			nodeId: "host-node",
-			relayMode: "default",
+			relayMode: "development",
 			secret: "pairing-secret",
 			workspace: "volt",
 		};
@@ -359,7 +359,7 @@ describe("Iroh remote core helpers", () => {
 			alpn: IROH_REMOTE_ALPN,
 			irohTicket: "iroh-endpoint-ticket",
 			nodeId: "host-node",
-			relayMode: "default",
+			relayMode: "development",
 			workspace: "volt",
 		});
 		expect(JSON.stringify(sanitizedPayload)).not.toContain("pairing-secret");
@@ -655,7 +655,7 @@ describe("Iroh remote core helpers", () => {
 			workspaces: [{ name: "volt", status: "available" }],
 			features: [IROH_REMOTE_MULTI_STREAMS_FEATURE],
 			hostNodeId: "host-node",
-			relayMode: "custom",
+			relayMode: "production",
 			relayUrls: ["https://relay.example.com"],
 			cwd: "/workspace",
 		};
@@ -2220,14 +2220,14 @@ describe("Iroh remote core helpers", () => {
 			irohTicket: "iroh-endpoint-ticket",
 			labelHint: "tablet",
 			nodeId: "host-node",
-			relayMode: "default",
+			relayMode: "development",
 			secret: "secret",
 			ttlMs: 25,
 		});
 
 		expect(pairing.payload).toMatchObject({
 			expiresAt: 125,
-			relayMode: "default",
+			relayMode: "development",
 			workspace: "volt",
 		});
 		expect(await stateManager.getState()).toMatchObject({
@@ -2670,7 +2670,7 @@ describe("Iroh remote core helpers", () => {
 			const metadata = createIrohRemoteHostMetadata({
 				authorization: authorized,
 				hostNodeId: "host-node",
-				relayMode: "default",
+				relayMode: "development",
 				hostName: "mac",
 				userName: "jordan",
 			});

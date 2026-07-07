@@ -146,7 +146,7 @@ function mintPhoneRelay(registry: RelayRegistry, clientNodeId: string, streamId:
 			handshake: { hello: createPhoneHello(SESSION_ID), response: HANDSHAKE_RESPONSE },
 			authorization: { clientNodeId, workspaceName: WORKSPACE.name, workspacePath: WORKSPACE.path },
 			hostNodeId: "n-daemon-host",
-			relayMode: "default",
+			relayMode: "development",
 			connectionId: `conn-${clientNodeId}`,
 			streamId,
 			resolvedTarget: {

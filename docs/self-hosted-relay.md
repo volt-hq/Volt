@@ -5,7 +5,7 @@ Volt uses [iroh](https://www.iroh.computer/) for the daemon ↔ phone transport.
 (`VOLT_PRODUCTION_RELAY_URLS` in `daemon/iroh-service.ts`, currently
 `iroh-relay-us-central.volt-cli.dev`) and pairing tickets carry those URLs to
 the app. The n0 public relays are development-only: opt in with
-`VOLT_IROH_RELAY_MODE=default` (the daemon logs a warning when they're in use).
+`VOLT_IROH_RELAY_MODE=development` (the daemon logs a warning when they're in use).
 
 This guide covers running a relay of your own — the fleet is deployed with
 `scripts/deploy-iroh-relay.sh`, which automates everything below:
@@ -156,7 +156,7 @@ restart the unit after DNS resolves.
 ## 7. Point Volt at it
 
 The Volt production relays are the default — a daemon started with no relay
-configuration binds against `VOLT_PRODUCTION_RELAY_URLS` in `custom` mode. To
+configuration binds against `VOLT_PRODUCTION_RELAY_URLS` in `production` mode. To
 use a different fleet, set the URLs explicitly (comma-separate for more than
 one):
 
@@ -166,7 +166,7 @@ VOLT_IROH_RELAY_URLS=https://relay.example.com volt daemon run
 
 Every pairing ticket the daemon mints carries the active relay URLs, so paired
 apps bind against the same fleet. The startup log line `iroh endpoint online`
-shows `relayMode: "custom"` and the URLs.
+shows `relayMode: "production"` and the URLs.
 
 Relay-fleet changes propagate to paired phones automatically: the handshake
 metadata carries the current `relayUrls` on every connection, the app persists
@@ -178,7 +178,7 @@ saved before relay support existed or when the host's relay *mode* changes.
 
 Config precedence: explicit `createIrohDaemonService({ relayMode, relayUrls })`
 beats `VOLT_IROH_RELAY_MODE` / `VOLT_IROH_RELAY_URLS`, which beat the built-in
-production default. `VOLT_IROH_RELAY_MODE=default` selects the n0 public relays
+production default. `VOLT_IROH_RELAY_MODE=development` selects the n0 public relays
 (development only); `disabled` turns relaying off entirely.
 
 ## Scope note: discovery is separate

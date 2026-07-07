@@ -14,7 +14,7 @@ export interface IrohRemoteTicketPayload {
 	irohTicket: string;
 	nodeId?: string;
 	relayMode?: IrohRemoteRelayMode;
-	/** Relay server URLs the client should use; required when relayMode is "custom". */
+	/** Relay server URLs the client should use; required when relayMode is "production". */
 	relayUrls?: string[];
 	secret?: string;
 	workspace: string;
@@ -56,14 +56,14 @@ export function parseIrohRemoteTicketPayload(value: unknown): IrohRemoteTicketPa
 	const nodeId = expectOptionalString(payload.nodeId, "ticket nodeId");
 	const relayModeValue = payload.relayMode;
 	if (relayModeValue !== undefined && !isIrohRemoteRelayMode(relayModeValue)) {
-		throw new Error("ticket relayMode must be disabled, default, or custom");
+		throw new Error("ticket relayMode must be disabled, development, or production");
 	}
 	const relayUrlsValue = payload.relayUrls;
 	if (relayUrlsValue !== undefined && !isIrohRemoteRelayUrls(relayUrlsValue)) {
 		throw new Error("ticket relayUrls must be a non-empty array of relay URLs");
 	}
-	if (relayModeValue === "custom" && relayUrlsValue === undefined) {
-		throw new Error("ticket relayMode custom requires relayUrls");
+	if (relayModeValue === "production" && relayUrlsValue === undefined) {
+		throw new Error("ticket relayMode production requires relayUrls");
 	}
 	const secret = expectOptionalString(payload.secret, "ticket secret");
 	const workspace = expectString(payload.workspace, "ticket workspace");
@@ -95,8 +95,8 @@ export function createIrohRemoteSanitizedReconnectTicketPayload(
 	if (payload.relayMode === undefined) {
 		throw new IrohRemoteOutcomeError("saved_host_invalid", "ticket relayMode is required for saved-host reconnect");
 	}
-	if (payload.relayMode === "custom" && payload.relayUrls === undefined) {
-		throw new IrohRemoteOutcomeError("saved_host_invalid", "ticket relayUrls are required for custom relayMode");
+	if (payload.relayMode === "production" && payload.relayUrls === undefined) {
+		throw new IrohRemoteOutcomeError("saved_host_invalid", "ticket relayUrls are required for production relayMode");
 	}
 	return {
 		alpn: payload.alpn,

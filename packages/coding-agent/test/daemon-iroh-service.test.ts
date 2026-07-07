@@ -65,23 +65,23 @@ async function readJsonLine(
 describe("relay config resolution", () => {
 	it("defaults to the Volt production relays", () => {
 		expect(resolveIrohRelayConfig({}, {})).toEqual({
-			relayMode: "custom",
+			relayMode: "production",
 			relayUrls: VOLT_PRODUCTION_RELAY_URLS,
 		});
 	});
 
-	it("uses VOLT_IROH_RELAY_URLS for a custom relay fleet", () => {
+	it("uses VOLT_IROH_RELAY_URLS for a self-managed relay fleet", () => {
 		expect(
 			resolveIrohRelayConfig({}, { VOLT_IROH_RELAY_URLS: " https://r1.example.com , https://r2.example.com ," }),
 		).toEqual({
-			relayMode: "custom",
+			relayMode: "production",
 			relayUrls: ["https://r1.example.com", "https://r2.example.com"],
 		});
 	});
 
-	it("opts into the n0 public relays only via VOLT_IROH_RELAY_MODE=default", () => {
-		expect(resolveIrohRelayConfig({}, { VOLT_IROH_RELAY_MODE: "default" })).toEqual({
-			relayMode: "default",
+	it("opts into the n0 public relays only via VOLT_IROH_RELAY_MODE=development", () => {
+		expect(resolveIrohRelayConfig({}, { VOLT_IROH_RELAY_MODE: "development" })).toEqual({
+			relayMode: "development",
 			relayUrls: [],
 		});
 		expect(resolveIrohRelayConfig({}, { VOLT_IROH_RELAY_MODE: "disabled" })).toEqual({
@@ -94,7 +94,7 @@ describe("relay config resolution", () => {
 		expect(
 			resolveIrohRelayConfig(
 				{ relayMode: "disabled" },
-				{ VOLT_IROH_RELAY_MODE: "default", VOLT_IROH_RELAY_URLS: "https://ignored.example.com" },
+				{ VOLT_IROH_RELAY_MODE: "development", VOLT_IROH_RELAY_URLS: "https://ignored.example.com" },
 			),
 		).toEqual({ relayMode: "disabled", relayUrls: ["https://ignored.example.com"] });
 		expect(
@@ -102,12 +102,12 @@ describe("relay config resolution", () => {
 				{ relayUrls: ["https://config.example.com"] },
 				{ VOLT_IROH_RELAY_URLS: "https://env.example.com" },
 			),
-		).toEqual({ relayMode: "custom", relayUrls: ["https://config.example.com"] });
+		).toEqual({ relayMode: "production", relayUrls: ["https://config.example.com"] });
 	});
 
 	it("warns on an invalid VOLT_IROH_RELAY_MODE and falls back to the default", () => {
 		const resolved = resolveIrohRelayConfig({}, { VOLT_IROH_RELAY_MODE: "n0" });
-		expect(resolved.relayMode).toBe("custom");
+		expect(resolved.relayMode).toBe("production");
 		expect(resolved.relayUrls).toEqual(VOLT_PRODUCTION_RELAY_URLS);
 		expect(resolved.warning).toContain("VOLT_IROH_RELAY_MODE");
 	});
