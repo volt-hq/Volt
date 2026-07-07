@@ -96,6 +96,8 @@ export const RELAY_RPC_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"unregister_workspace",
 	"set_keep_awake",
 	"get_keep_awake",
+	"set_web_search_key",
+	"get_web_search_status",
 ]);
 
 /** Host keep-awake assertion state as reported over the control plane. */

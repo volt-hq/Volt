@@ -881,6 +881,8 @@ describe("Iroh remote core helpers", () => {
 			"unregister_workspace",
 			"set_keep_awake",
 			"get_keep_awake",
+			"set_web_search_key",
+			"get_web_search_status",
 			"upload_device_logs",
 			"extension_ui_response",
 			"get_available_models",

@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import type { Socket } from "node:net";
+import { join } from "node:path";
 import { getAgentDir, VERSION } from "../config.ts";
+import { AuthStorage } from "../core/auth-storage.ts";
 import { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import {
@@ -13,6 +15,7 @@ import {
 	onThemeChange,
 	setTheme,
 } from "../core/theme/runtime.ts";
+import { BRAVE_SEARCH_AUTH_PROVIDER } from "../core/tools/web-search.ts";
 import type {
 	ControlClientStatus,
 	ControlLeaseStatus,
@@ -95,6 +98,8 @@ export interface VoltdRuntimeServices {
 	auditLogger: IrohRemoteAuditLogger;
 	controlServer: ControlServer;
 	keepAwake: KeepAwakeController;
+	/** Stored Brave Search API key for the web_search tool, persisted in auth.json. */
+	webSearchKey: { set(apiKey: string | null): void; readonly configured: boolean };
 	requestShutdown(reason: "cli" | "signal"): void;
 }
 
@@ -192,6 +197,31 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			}
 		},
 	});
+
+	// Brave Search key storage for phone RPC: persisted in auth.json (never in
+	// daemon state.json) so the web_search tool's fallback sees it.
+	let webSearchAuthStorage: AuthStorage | undefined;
+	const getWebSearchAuthStorage = (): AuthStorage => {
+		webSearchAuthStorage ??= AuthStorage.create(join(agentDir, "auth.json"));
+		return webSearchAuthStorage;
+	};
+	const webSearchKey: VoltdRuntimeServices["webSearchKey"] = {
+		set(apiKey: string | null): void {
+			const authStorage = getWebSearchAuthStorage();
+			if (apiKey === null) {
+				authStorage.remove(BRAVE_SEARCH_AUTH_PROVIDER);
+			} else {
+				authStorage.set(BRAVE_SEARCH_AUTH_PROVIDER, { type: "api_key", key: apiKey });
+			}
+		},
+		get configured(): boolean {
+			const authStorage = getWebSearchAuthStorage();
+			// Other processes may write auth.json; re-read before reporting.
+			authStorage.reload();
+			const cred = authStorage.get(BRAVE_SEARCH_AUTH_PROVIDER);
+			return cred?.type === "api_key" && cred.key.trim().length > 0;
+		},
+	};
 
 	const shutdown = async (reason: "cli" | "signal") => {
 		if (shuttingDown) {
@@ -516,6 +546,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		auditLogger,
 		controlServer,
 		keepAwake,
+		webSearchKey,
 		requestShutdown,
 	};
 	for (const extension of extensions) {

@@ -115,6 +115,11 @@ export interface ConversationCommandContext {
 	};
 	/** Persist the desired keep-awake setting after a successful set_keep_awake. */
 	onKeepAwakeSetting?: (enabled: boolean) => void;
+	/** Host web-search key control; absent when no daemon owns the host (e.g. plain rpc mode). */
+	webSearchKey?: {
+		set(apiKey: string | null): void;
+		readonly configured: boolean;
+	};
 }
 
 export function createLeaseDrainingRpcErrorResponse(command: RemoteRpcCommand): Record<string, unknown> {
@@ -1494,6 +1499,35 @@ export function createKeepAwakeRpcResponse(
 	return createRpcSuccessResponse(id, command.type, { keepAwake: toRpcKeepAwakeStatus(keepAwake.status) });
 }
 
+/**
+ * `set_web_search_key` / `get_web_search_status` from a phone. Host-level (not
+ * conversation-level): any paired client with stream access may set it. The
+ * wire status never includes the key itself, only whether one is stored.
+ */
+export function createWebSearchKeyRpcResponse(
+	command: RemoteRpcCommand,
+	context: ConversationCommandContext,
+): Record<string, unknown> | IrohRemoteRpcErrorResponse {
+	const id = getRpcResponseId(command);
+	const webSearchKey = context.webSearchKey;
+	if (!webSearchKey) {
+		return createIrohRemoteRpcErrorResponse(id, command.type, "unsupported_remote_command");
+	}
+	if (command.type === "set_web_search_key") {
+		const apiKey = command.apiKey;
+		if (apiKey !== undefined && apiKey !== null && typeof apiKey !== "string") {
+			return createIrohRemoteRpcErrorResponse(
+				id,
+				command.type,
+				"set_web_search_key requires apiKey to be a string or null",
+			);
+		}
+		const normalized = typeof apiKey === "string" ? apiKey.trim() : "";
+		webSearchKey.set(normalized.length > 0 ? normalized : null);
+	}
+	return createRpcSuccessResponse(id, command.type, { webSearch: { configured: webSearchKey.configured } });
+}
+
 export function toRpcKeepAwakeStatus(status: KeepAwakeStatus): RpcKeepAwakeStatus {
 	return {
 		enabled: status.enabled,
@@ -1526,6 +1560,9 @@ export async function handleIntegratedConversationRpcCommand(
 	}
 	if (command.type === "set_keep_awake" || command.type === "get_keep_awake") {
 		return createKeepAwakeRpcResponse(command, context);
+	}
+	if (command.type === "set_web_search_key" || command.type === "get_web_search_status") {
+		return createWebSearchKeyRpcResponse(command, context);
 	}
 	if (INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES.has(command.type)) {
 		return createIrohRemoteRpcErrorResponse(getRpcResponseId(command), command.type, "unsupported_remote_command");

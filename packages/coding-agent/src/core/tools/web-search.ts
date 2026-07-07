@@ -16,6 +16,9 @@ const MAX_LIMIT = 10;
 const DEFAULT_TIMEOUT_MS = 20_000;
 const MAX_DOMAINS = 10;
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
+
+/** auth.json provider slot for a stored Brave Search API key. */
+export const BRAVE_SEARCH_AUTH_PROVIDER = "brave-search";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 
 const webSearchSchema = Type.Object({
@@ -97,6 +100,8 @@ export interface DefaultWebSearchOperationsOptions {
 	modelContext?: WebSearchModelContextProvider;
 	timeoutMs?: number;
 	now?: () => Date;
+	/** Stored Brave key fallback used when BRAVE_SEARCH_API_KEY is not set. */
+	fallbackBraveApiKey?: () => Promise<string | undefined> | string | undefined;
 }
 
 export interface WebSearchToolOptions {
@@ -601,7 +606,7 @@ export function createDefaultWebSearchOperations(options: DefaultWebSearchOperat
 				return searchOpenAIBackend(context, request, env, fetcher, signal, timeoutMs);
 			}
 
-			const braveApiKey = env.BRAVE_SEARCH_API_KEY?.trim();
+			const braveApiKey = env.BRAVE_SEARCH_API_KEY?.trim() || (await options.fallbackBraveApiKey?.())?.trim();
 			if (braveApiKey) {
 				return searchBrave(braveApiKey, request, fetcher, signal, timeoutMs, now);
 			}

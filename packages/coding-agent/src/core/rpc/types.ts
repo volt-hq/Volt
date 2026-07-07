@@ -84,6 +84,8 @@ export type RpcCommand =
 	| { id?: string; type: "unregister_workspace"; name: string }
 	| { id?: string; type: "set_keep_awake"; enabled: boolean }
 	| { id?: string; type: "get_keep_awake" }
+	| { id?: string; type: "set_web_search_key"; apiKey?: string | null }
+	| { id?: string; type: "get_web_search_status" }
 
 	// Device diagnostics
 	| { id?: string; type: "upload_device_logs"; fileName?: string; content: string }
@@ -612,6 +614,14 @@ export interface RpcKeepAwakeStatus {
 	reason?: string;
 }
 
+/**
+ * Host web-search key state as reported to phones. Deliberately omits the key
+ * itself; only whether one is stored.
+ */
+export interface RpcWebSearchStatus {
+	configured: boolean;
+}
+
 // ============================================================================
 // RPC Responses
 // ============================================================================
@@ -701,6 +711,20 @@ export type RpcResponse =
 			command: "get_keep_awake";
 			success: true;
 			data: { keepAwake: RpcKeepAwakeStatus };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "set_web_search_key";
+			success: true;
+			data: { webSearch: RpcWebSearchStatus };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_web_search_status";
+			success: true;
+			data: { webSearch: RpcWebSearchStatus };
 	  }
 
 	// Device diagnostics

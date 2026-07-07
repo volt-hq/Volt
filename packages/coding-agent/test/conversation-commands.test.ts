@@ -47,6 +47,7 @@ function createContext(
 		isDraining?: () => boolean;
 		stateManager?: IrohRemoteHostStateManager;
 		onWorkspaceUnregistered?: (workspaceName: string) => Promise<void>;
+		webSearchKey?: ConversationCommandContext["webSearchKey"];
 	} = {},
 ): ConversationCommandContext {
 	return {
@@ -57,6 +58,27 @@ function createContext(
 		...(options.onWorkspaceUnregistered === undefined
 			? {}
 			: { onWorkspaceUnregistered: options.onWorkspaceUnregistered }),
+		...(options.webSearchKey === undefined ? {} : { webSearchKey: options.webSearchKey }),
+	};
+}
+
+function createFakeWebSearchKeyService(): {
+	service: NonNullable<ConversationCommandContext["webSearchKey"]>;
+	calls: Array<string | null>;
+} {
+	const calls: Array<string | null> = [];
+	let stored: string | null = null;
+	return {
+		service: {
+			set(apiKey: string | null) {
+				calls.push(apiKey);
+				stored = apiKey;
+			},
+			get configured() {
+				return stored !== null;
+			},
+		},
+		calls,
 	};
 }
 
@@ -379,5 +401,108 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		)) as Record<string, unknown>;
 		expect(removed).toMatchObject({ success: true });
 		expect(cleanedUp).toEqual(["ws"]);
+	});
+
+	it("stores a trimmed web-search key and reports configured without echoing the key", async () => {
+		const { service, calls } = createFakeWebSearchKeyService();
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "30", type: "set_web_search_key", apiKey: "  brave-key-123  " },
+			createAuthorization(),
+			createContext({ webSearchKey: service }),
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(response).toEqual({
+			id: "30",
+			type: "response",
+			command: "set_web_search_key",
+			success: true,
+			data: { webSearch: { configured: true } },
+		});
+		expect(calls).toEqual(["brave-key-123"]);
+		expect(JSON.stringify(response)).not.toContain("brave-key-123");
+	});
+
+	it("clears the web-search key when apiKey is null, omitted, or blank", async () => {
+		for (const command of [
+			{ id: "31", type: "set_web_search_key", apiKey: null },
+			{ id: "32", type: "set_web_search_key" },
+			{ id: "33", type: "set_web_search_key", apiKey: "   " },
+		]) {
+			const { service, calls } = createFakeWebSearchKeyService();
+			const response = (await handleIntegratedConversationRpcCommand(
+				command,
+				createAuthorization(),
+				createContext({ webSearchKey: service }),
+				createRuntime(),
+			)) as Record<string, unknown>;
+			expect(response).toEqual({
+				id: command.id,
+				type: "response",
+				command: "set_web_search_key",
+				success: true,
+				data: { webSearch: { configured: false } },
+			});
+			expect(calls).toEqual([null]);
+		}
+	});
+
+	it("rejects set_web_search_key when apiKey is not a string or null", async () => {
+		const { service, calls } = createFakeWebSearchKeyService();
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "34", type: "set_web_search_key", apiKey: 42 },
+			createAuthorization(),
+			createContext({ webSearchKey: service }),
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(response).toMatchObject({
+			id: "34",
+			command: "set_web_search_key",
+			success: false,
+			error: "set_web_search_key requires apiKey to be a string or null",
+		});
+		expect(calls).toEqual([]);
+	});
+
+	it("reports web-search key status from the service via get_web_search_status", async () => {
+		const { service } = createFakeWebSearchKeyService();
+		const unconfigured = (await handleIntegratedConversationRpcCommand(
+			{ id: "35", type: "get_web_search_status" },
+			createAuthorization(),
+			createContext({ webSearchKey: service }),
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(unconfigured).toEqual({
+			id: "35",
+			type: "response",
+			command: "get_web_search_status",
+			success: true,
+			data: { webSearch: { configured: false } },
+		});
+
+		service.set("brave-key");
+		const configured = (await handleIntegratedConversationRpcCommand(
+			{ id: "36", type: "get_web_search_status" },
+			createAuthorization(),
+			createContext({ webSearchKey: service }),
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(configured).toMatchObject({ success: true, data: { webSearch: { configured: true } } });
+	});
+
+	it("rejects web-search key commands when no service is available", async () => {
+		for (const type of ["set_web_search_key", "get_web_search_status"]) {
+			const response = (await handleIntegratedConversationRpcCommand(
+				{ id: "37", type },
+				createAuthorization(),
+				createContext(),
+				createRuntime(),
+			)) as Record<string, unknown>;
+			expect(response).toMatchObject({
+				id: "37",
+				command: type,
+				success: false,
+				error: "unsupported_remote_command",
+			});
+		}
 	});
 });

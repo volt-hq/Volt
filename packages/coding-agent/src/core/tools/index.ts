@@ -99,6 +99,7 @@ export {
 	truncateTail,
 } from "./truncate.ts";
 export {
+	BRAVE_SEARCH_AUTH_PROVIDER,
 	createDefaultWebSearchOperations,
 	createWebSearchTool,
 	createWebSearchToolDefinition,

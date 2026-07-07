@@ -428,4 +428,59 @@ describe("web_search tool", () => {
 			],
 		});
 	});
+
+	it("falls back to fallbackBraveApiKey when BRAVE_SEARCH_API_KEY is not set", async () => {
+		let subscriptionToken: string | undefined;
+		const fetcher: WebSearchFetcher = async (input, init) => {
+			const url = new URL(input);
+			expect(`${url.origin}${url.pathname}`).toBe("https://api.search.brave.com/res/v1/web/search");
+			subscriptionToken = getHeader(init.headers, "X-Subscription-Token");
+			return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 });
+		};
+		const operations = createDefaultWebSearchOperations({
+			env: {},
+			fetcher,
+			fallbackBraveApiKey: async () => "stored-brave-key",
+		});
+
+		const result = await operations.search({ query: "Volt AI", limit: 3 });
+
+		expect(subscriptionToken).toBe("stored-brave-key");
+		expect(result.provider).toBe("brave");
+	});
+
+	it("prefers env BRAVE_SEARCH_API_KEY over fallbackBraveApiKey", async () => {
+		let subscriptionToken: string | undefined;
+		const fetcher: WebSearchFetcher = async (_input, init) => {
+			subscriptionToken = getHeader(init.headers, "X-Subscription-Token");
+			return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 });
+		};
+		const operations = createDefaultWebSearchOperations({
+			env: { BRAVE_SEARCH_API_KEY: "env-brave-key" },
+			fetcher,
+			fallbackBraveApiKey: () => "stored-brave-key",
+		});
+
+		await operations.search({ query: "Volt AI", limit: 3 });
+
+		expect(subscriptionToken).toBe("env-brave-key");
+	});
+
+	it("still reports not configured when the fallback returns undefined", async () => {
+		let called = false;
+		const fetcher: WebSearchFetcher = async () => {
+			called = true;
+			return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 });
+		};
+		const operations = createDefaultWebSearchOperations({
+			env: {},
+			fetcher,
+			fallbackBraveApiKey: () => undefined,
+		});
+
+		await expect(operations.search({ query: "Volt AI", limit: 3 })).rejects.toThrow(
+			"web_search is not configured. Use an authenticated OpenAI/OpenAI Codex model, set VOLT_WEB_SEARCH_URL, or set BRAVE_SEARCH_API_KEY.",
+		);
+		expect(called).toBe(false);
+	});
 });

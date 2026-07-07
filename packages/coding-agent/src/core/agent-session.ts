@@ -104,6 +104,7 @@ import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-promp
 import { getThemeByName, theme } from "./theme/runtime.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import {
+	BRAVE_SEARCH_AUTH_PROVIDER,
 	createAllToolDefinitions,
 	createDefaultWebSearchOperations,
 	DEFAULT_ACTIVE_TOOL_NAMES,
@@ -2651,6 +2652,10 @@ export class AgentSession {
 					write: { diagnosticsProvider: this._lspManager },
 					webSearch: {
 						operations: createDefaultWebSearchOperations({
+							fallbackBraveApiKey: () =>
+								this._modelRegistry.authStorage.getApiKey(BRAVE_SEARCH_AUTH_PROVIDER, {
+									includeFallback: false,
+								}),
 							modelContext: async () => {
 								const model = this.model;
 								if (!model) {

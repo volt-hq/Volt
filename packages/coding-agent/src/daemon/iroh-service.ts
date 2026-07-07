@@ -45,6 +45,7 @@ import {
 	createRemoteRegisterLiveActivityRpcResponse,
 	createRemoteUnregisterLiveActivityRpcResponse,
 	createRpcSuccessResponse,
+	createWebSearchKeyRpcResponse,
 	getRpcResponseId,
 	handleIntegratedConversationRpcCommand,
 	handleRemoteHostRpcCommand,
@@ -370,6 +371,7 @@ class IrohDaemonService {
 			sessionListCursorTtlMs: REMOTE_SESSION_LIST_CURSOR_TTL_MS,
 			keepAwake: this.services.keepAwake,
 			onKeepAwakeSetting: (enabled) => this.services.state.updateSettings({ keepAwakeEnabled: enabled }),
+			webSearchKey: this.services.webSearchKey,
 			onWorkspaceUnregistered: async (workspaceName) => {
 				// Unregistering the conversation's own workspace keeps the requesting
 				// stream and runtime alive so the response can still be delivered
@@ -1916,6 +1918,10 @@ class IrohDaemonService {
 		const responseId = getRpcResponseId(command);
 		if (command.type === "set_keep_awake" || command.type === "get_keep_awake") {
 			const response = createKeepAwakeRpcResponse(command, this.getCommandContext());
+			return { ok: true, response: response as Record<string, unknown> };
+		}
+		if (command.type === "set_web_search_key" || command.type === "get_web_search_status") {
+			const response = createWebSearchKeyRpcResponse(command, this.getCommandContext());
 			return { ok: true, response: response as Record<string, unknown> };
 		}
 		if (command.type === "register_push_target") {
