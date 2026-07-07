@@ -49,9 +49,10 @@ export interface IrohEndpointBuilderLike {
 export interface IrohModuleLike {
 	Endpoint: { builder(): IrohEndpointBuilderLike };
 	EndpointTicket: { fromAddr(addr: unknown): { toString(): string } };
-	RelayMode: { disabled(): unknown };
+	RelayMode: { disabled(): unknown; customFromUrls(urls: string[]): unknown };
 	presetMinimal(builder: IrohEndpointBuilderLike): void;
 	presetN0(builder: IrohEndpointBuilderLike): void;
+	presetN0DisableRelay(builder: IrohEndpointBuilderLike): void;
 }
 
 export interface IrohNativeLoadResult {

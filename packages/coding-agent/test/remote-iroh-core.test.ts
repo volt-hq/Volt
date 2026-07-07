@@ -302,10 +302,45 @@ describe("Iroh remote core helpers", () => {
 		expect(decodeIrohRemoteTicketPayload(ticket)).toEqual(payload);
 		expect(() => decodeIrohRemoteTicketPayload("not-a-ticket")).toThrow("Expected ticket prefix");
 		expect(() => parseIrohRemoteTicketPayload({ ...payload, alpn: "other" })).toThrow("Unsupported ticket ALPN");
-		expect(() => parseIrohRemoteTicketPayload({ ...payload, relayMode: "custom" })).toThrow(
-			"ticket relayMode must be disabled or default",
+		expect(() => parseIrohRemoteTicketPayload({ ...payload, relayMode: "relayed" })).toThrow(
+			"ticket relayMode must be disabled, default, or custom",
 		);
 		expect(() => assertIrohRemoteTicketNotExpired(payload, 1001)).toThrow("Pairing ticket has expired");
+	});
+
+	test("round-trips custom relay tickets and validates relayUrls", () => {
+		const payload: IrohRemoteTicketPayload = {
+			alpn: IROH_REMOTE_ALPN,
+			expiresAt: 1000,
+			irohTicket: "iroh-endpoint-ticket",
+			nodeId: "host-node",
+			relayMode: "custom",
+			relayUrls: ["https://relay.example.com"],
+			secret: "pairing-secret",
+			workspace: "volt",
+		};
+
+		expect(decodeIrohRemoteTicketPayload(encodeIrohRemoteTicketPayload(payload))).toEqual(payload);
+		expect(() => parseIrohRemoteTicketPayload({ ...payload, relayUrls: undefined })).toThrow(
+			"ticket relayMode custom requires relayUrls",
+		);
+		expect(() => parseIrohRemoteTicketPayload({ ...payload, relayUrls: [] })).toThrow(
+			"ticket relayUrls must be a non-empty array of relay URLs",
+		);
+		expect(() => parseIrohRemoteTicketPayload({ ...payload, relayUrls: [42] })).toThrow(
+			"ticket relayUrls must be a non-empty array of relay URLs",
+		);
+		expect(createIrohRemoteSanitizedReconnectTicketPayload(payload)).toEqual({
+			alpn: IROH_REMOTE_ALPN,
+			irohTicket: "iroh-endpoint-ticket",
+			nodeId: "host-node",
+			relayMode: "custom",
+			relayUrls: ["https://relay.example.com"],
+			workspace: "volt",
+		});
+		expect(() => createIrohRemoteSanitizedReconnectTicketPayload({ ...payload, relayUrls: undefined })).toThrow(
+			"saved_host_invalid: ticket relayUrls are required for custom relayMode",
+		);
 	});
 
 	test("creates sanitized reconnect tickets and verifies ticket host identity", () => {

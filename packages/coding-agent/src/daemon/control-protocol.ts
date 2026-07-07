@@ -229,7 +229,7 @@ export interface RelayPreamble {
 	 * so the phone's saved-host identity verification passes over the relay.
 	 */
 	hostNodeId?: string;
-	relayMode?: "disabled" | "default";
+	relayMode?: "disabled" | "default" | "custom";
 	connectionId: string;
 	streamId: string;
 	resolvedTarget: {

@@ -107,13 +107,31 @@ const MAX_CONCURRENT_STREAMS_PER_CONNECTION = 64;
 let activeConnectionSequence = 0;
 let activeStreamSequence = 0;
 
-export type IrohRelayMode = "disabled" | "default";
+export type IrohRelayMode = "disabled" | "default" | "custom";
 
 export interface IrohDaemonServiceConfig {
 	relayMode?: IrohRelayMode;
+	/**
+	 * Self-hosted relay server URLs (e.g. "https://relay.example.com"). When
+	 * set (or via VOLT_IROH_RELAY_URLS, comma-separated), the endpoint binds
+	 * with a custom relay map instead of the n0 public relays, and pairing
+	 * tickets carry the URLs so clients bind against the same relays.
+	 */
+	relayUrls?: string[];
 	pushRelayUrl?: string;
 	pushRelayAuthToken?: string;
 	profile?: string;
+}
+
+function parseRelayUrlsEnv(value: string | undefined): string[] | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	const urls = value
+		.split(",")
+		.map((url) => url.trim())
+		.filter((url) => url.length > 0);
+	return urls.length > 0 ? urls : undefined;
 }
 
 interface PendingPairRequest {
@@ -234,6 +252,7 @@ class IrohDaemonService {
 	private readonly iroh: IrohModuleLike;
 	private readonly services: VoltdRuntimeServices;
 	private readonly relayMode: IrohRelayMode;
+	private readonly relayUrls: string[];
 	private readonly log: ReturnType<VoltdRuntimeServices["logger"]["child"]>;
 	private readonly stateManager: IrohRemoteHostStateManager;
 	private readonly activeStreams = new IrohRemoteActiveStreamRegistry();
@@ -258,7 +277,8 @@ class IrohDaemonService {
 	constructor(iroh: IrohModuleLike, services: VoltdRuntimeServices, config: IrohDaemonServiceConfig) {
 		this.iroh = iroh;
 		this.services = services;
-		this.relayMode = config.relayMode ?? "default";
+		this.relayUrls = config.relayUrls ?? parseRelayUrlsEnv(process.env.VOLT_IROH_RELAY_URLS) ?? [];
+		this.relayMode = config.relayMode ?? (this.relayUrls.length > 0 ? "custom" : "default");
 		this.log = services.logger.child("iroh");
 		this.stateManager = services.stateManager;
 		this.trustStore = new ProjectTrustStore(services.agentDir);
@@ -397,6 +417,12 @@ class IrohDaemonService {
 			const builder = this.iroh.Endpoint.builder();
 			if (this.relayMode === "default") {
 				this.iroh.presetN0(builder);
+			} else if (this.relayMode === "custom") {
+				if (this.relayUrls.length === 0) {
+					throw new Error("relayMode custom requires relay URLs (config.relayUrls or VOLT_IROH_RELAY_URLS)");
+				}
+				this.iroh.presetN0DisableRelay(builder);
+				builder.relayMode(this.iroh.RelayMode.customFromUrls(this.relayUrls));
 			} else {
 				this.iroh.presetMinimal(builder);
 				builder.relayMode(this.iroh.RelayMode.disabled());
@@ -420,7 +446,7 @@ class IrohDaemonService {
 				// reproduce on restart.
 				await this.services.state.flush();
 			}
-			if (this.relayMode === "default") {
+			if (this.relayMode !== "disabled") {
 				await endpoint.online();
 			}
 			this.endpoint = endpoint;
@@ -436,7 +462,11 @@ class IrohDaemonService {
 				workspace: { name: "voltd", path: this.services.agentDir },
 			});
 			this.ready.resolve();
-			this.log("info", `iroh endpoint online`, { hostNodeId: this.hostNodeId, relayMode: this.relayMode });
+			this.log("info", `iroh endpoint online`, {
+				hostNodeId: this.hostNodeId,
+				relayMode: this.relayMode,
+				...(this.relayMode === "custom" ? { relayUrls: this.relayUrls } : {}),
+			});
 			void this.acceptLoop(endpoint);
 		} catch (error) {
 			if (endpoint) {
@@ -1684,6 +1714,7 @@ class IrohDaemonService {
 				irohTicket: this.endpointTicket,
 				nodeId: this.hostNodeId,
 				relayMode: this.relayMode,
+				...(this.relayMode === "custom" ? { relayUrls: this.relayUrls } : {}),
 				...(workspaceName === undefined ? {} : { workspace: workspaceName }),
 			});
 			connection.send({ type: "pair_started", id: request.id, requestId });

@@ -76,6 +76,7 @@ export interface IrohRemoteHostPairOptions {
 	labelHint?: string;
 	nodeId?: string;
 	relayMode?: IrohRemoteRelayMode;
+	relayUrls?: string[];
 	secret?: string;
 	ttlMs?: number;
 	workspace?: string;
@@ -225,6 +226,7 @@ export class IrohRemoteHostEngine {
 				irohTicket: options.irohTicket,
 				nodeId: options.nodeId,
 				relayMode: options.relayMode,
+				...(options.relayUrls === undefined ? {} : { relayUrls: options.relayUrls }),
 				secret,
 				workspace: workspace.name,
 			};

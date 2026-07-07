@@ -56,13 +56,17 @@ const IROH_REMOTE_UNSAFE_TOOL_NAME_SET = new Set<string>(IROH_REMOTE_UNSAFE_TOOL
 const IROH_REMOTE_OUTCOME_SET = new Set<string>(IROH_REMOTE_OUTCOMES);
 const IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOME_SET = new Set<string>(IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES);
 
-export type IrohRemoteRelayMode = "disabled" | "default";
+export type IrohRemoteRelayMode = "disabled" | "default" | "custom";
 export type IrohRemoteHostFeature = (typeof IROH_REMOTE_HOST_FEATURES)[number];
 export type IrohRemoteOutcome = (typeof IROH_REMOTE_OUTCOMES)[number];
 export type IrohRemoteHostHandshakeFailureOutcome = (typeof IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES)[number];
 
 export function isIrohRemoteRelayMode(value: unknown): value is IrohRemoteRelayMode {
-	return value === "disabled" || value === "default";
+	return value === "disabled" || value === "default" || value === "custom";
+}
+
+export function isIrohRemoteRelayUrls(value: unknown): value is string[] {
+	return Array.isArray(value) && value.length > 0 && value.every((url) => typeof url === "string" && url.length > 0);
 }
 
 export function isIrohRemoteOutcome(value: unknown): value is IrohRemoteOutcome {

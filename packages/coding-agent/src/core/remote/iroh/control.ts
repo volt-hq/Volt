@@ -403,7 +403,7 @@ function expectOptionalPositiveNumber(value: unknown, description: string): numb
 function expectOptionalRelayMode(value: unknown, description: string): IrohRemoteRelayMode | undefined {
 	if (value === undefined) return undefined;
 	if (!isIrohRemoteRelayMode(value)) {
-		throw new Error(`${description} must be disabled or default`);
+		throw new Error(`${description} must be disabled, default, or custom`);
 	}
 	return value;
 }
