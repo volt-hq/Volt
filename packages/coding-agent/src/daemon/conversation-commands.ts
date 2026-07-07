@@ -4,7 +4,10 @@ import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
 import { handleIrohRemoteDeviceLogUploadRpcCommand } from "../core/remote/iroh/device-log-rpc.ts";
 import { sanitizeIrohRemoteOutbound } from "../core/remote/iroh/outbound-filter.ts";
-import { createIrohRemoteRpcErrorResponse } from "../core/remote/iroh/rpc-command-filter.ts";
+import {
+	createIrohRemoteRpcErrorResponse,
+	type IrohRemoteRpcErrorResponse,
+} from "../core/remote/iroh/rpc-command-filter.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import {
 	type IrohRemoteTranscriptTextLayout,
@@ -16,7 +19,9 @@ import {
 	IROH_REMOTE_UNREGISTER_WORKSPACE_RPC_TYPE,
 } from "../core/remote/iroh/workspace-rpc.ts";
 import { extractMessageImages, projectMessageImages } from "../core/rpc/transcript.ts";
+import type { RpcKeepAwakeStatus } from "../core/rpc/types.ts";
 import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../core/session-manager.ts";
+import type { KeepAwakeStatus } from "./keep-awake.ts";
 
 export const INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES: ReadonlySet<string> = new Set([
 	"new_session",
@@ -103,6 +108,13 @@ export interface ConversationCommandContext {
 	isDraining?: () => boolean;
 	/** Host cleanup after a successful workspace unregister (streams, runtimes, live activities, relays). */
 	onWorkspaceUnregistered?: (workspaceName: string) => Promise<void>;
+	/** Host keep-awake control; absent when no daemon owns the host (e.g. plain rpc mode). */
+	keepAwake?: {
+		setEnabled(enabled: boolean): KeepAwakeStatus;
+		readonly status: KeepAwakeStatus;
+	};
+	/** Persist the desired keep-awake setting after a successful set_keep_awake. */
+	onKeepAwakeSetting?: (enabled: boolean) => void;
 }
 
 export function createLeaseDrainingRpcErrorResponse(command: RemoteRpcCommand): Record<string, unknown> {
@@ -1457,6 +1469,39 @@ export async function handleRemoteHostRpcCommand(
 	return result.response;
 }
 
+/**
+ * `set_keep_awake` / `get_keep_awake` from a phone. Host-level (not
+ * conversation-level): any paired client with stream access may toggle it. The
+ * wire status strips the host-local mechanism name.
+ */
+export function createKeepAwakeRpcResponse(
+	command: RemoteRpcCommand,
+	context: ConversationCommandContext,
+): Record<string, unknown> | IrohRemoteRpcErrorResponse {
+	const id = getRpcResponseId(command);
+	const keepAwake = context.keepAwake;
+	if (!keepAwake) {
+		return createIrohRemoteRpcErrorResponse(id, command.type, "unsupported_remote_command");
+	}
+	if (command.type === "set_keep_awake") {
+		if (typeof command.enabled !== "boolean") {
+			return createIrohRemoteRpcErrorResponse(id, command.type, "set_keep_awake requires a boolean enabled");
+		}
+		const status = keepAwake.setEnabled(command.enabled);
+		context.onKeepAwakeSetting?.(command.enabled);
+		return createRpcSuccessResponse(id, command.type, { keepAwake: toRpcKeepAwakeStatus(status) });
+	}
+	return createRpcSuccessResponse(id, command.type, { keepAwake: toRpcKeepAwakeStatus(keepAwake.status) });
+}
+
+export function toRpcKeepAwakeStatus(status: KeepAwakeStatus): RpcKeepAwakeStatus {
+	return {
+		enabled: status.enabled,
+		state: status.state,
+		...(status.reason === undefined ? {} : { reason: status.reason }),
+	};
+}
+
 // ============================================================================
 // Dispatch
 // ============================================================================
@@ -1478,6 +1523,9 @@ export async function handleIntegratedConversationRpcCommand(
 	}
 	if (command.type === "list_sessions") {
 		return await createRemoteListSessionsRpcResponse(command, authorization, context, runtime);
+	}
+	if (command.type === "set_keep_awake" || command.type === "get_keep_awake") {
+		return createKeepAwakeRpcResponse(command, context);
 	}
 	if (INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES.has(command.type)) {
 		return createIrohRemoteRpcErrorResponse(getRpcResponseId(command), command.type, "unsupported_remote_command");

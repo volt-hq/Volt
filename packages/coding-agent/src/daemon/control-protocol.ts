@@ -67,6 +67,7 @@ export type ControlRequest =
 	| { type: "workspace_register"; id: string; name: string; path: string }
 	| { type: "workspace_unregister"; id: string; name: string }
 	| { type: "theme_set"; id: string; theme: string } // name; daemon resolves + broadcasts
+	| { type: "keep_awake_set"; id: string; enabled: boolean } // hold/release the host sleep-prevention assertion
 	| { type: "viewer_subscribe"; id: string; viewerFeedId: string }
 	| { type: "viewer_unsubscribe"; id: string; viewerFeedId: string }
 	| { type: "viewer_abort"; id: string; viewerFeedId: string }
@@ -93,7 +94,19 @@ export const RELAY_RPC_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"register_live_activity",
 	"unregister_live_activity",
 	"unregister_workspace",
+	"set_keep_awake",
+	"get_keep_awake",
 ]);
+
+/** Host keep-awake assertion state as reported over the control plane. */
+export interface ControlKeepAwakeStatus {
+	/** Desired (persisted) state. */
+	enabled: boolean;
+	/** Actual state; `degraded` means enabled but the assertion is not held. */
+	state: "disabled" | "active" | "degraded";
+	method?: string;
+	reason?: string;
+}
 
 export interface ControlLeaseStatus {
 	workspaceName: string;
@@ -133,7 +146,9 @@ export type ControlResponse =
 			phoneConnections: number;
 			workspaces: ControlWorkspaceStatus[];
 			clients: ControlClientStatus[];
+			keepAwake: ControlKeepAwakeStatus;
 	  }
+	| { type: "keep_awake_result"; id: string; keepAwake: ControlKeepAwakeStatus }
 	| { type: "clients_result"; id: string; clients: ControlClientStatus[] }
 	| { type: "pair_started"; id: string; requestId: string }
 	| {
@@ -180,6 +195,7 @@ export type ControlEvent =
 	  }
 	| { type: "viewer_end"; viewerFeedId: string; reason: "granted" | "cancelled" | "error" }
 	| { type: "theme_snapshot"; themeName: string; tokens: Record<string, string> }
+	| { type: "keep_awake_changed"; keepAwake: ControlKeepAwakeStatus }
 	| {
 			type: "pairing_progress";
 			requestId: string;
@@ -380,6 +396,8 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 			return typeof value.name === "string";
 		case "theme_set":
 			return typeof value.theme === "string";
+		case "keep_awake_set":
+			return typeof value.enabled === "boolean";
 		case "viewer_subscribe":
 		case "viewer_unsubscribe":
 		case "viewer_abort":
@@ -411,6 +429,8 @@ export function isControlResponse(value: unknown): value is ControlResponse {
 		case "clients_result":
 		case "pair_started":
 			return true;
+		case "keep_awake_result":
+			return isRecord(value.keepAwake);
 		case "relay_rpc_result":
 			return isRecord(value.response);
 		default:
@@ -431,6 +451,8 @@ export function isControlEvent(value: unknown): value is ControlEvent {
 		case "pairing_progress":
 		case "daemon_shutdown":
 			return true;
+		case "keep_awake_changed":
+			return isRecord(value.keepAwake);
 		default:
 			return false;
 	}

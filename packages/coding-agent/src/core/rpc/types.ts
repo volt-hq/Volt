@@ -82,6 +82,8 @@ export type RpcCommand =
 
 	// Remote host management
 	| { id?: string; type: "unregister_workspace"; name: string }
+	| { id?: string; type: "set_keep_awake"; enabled: boolean }
+	| { id?: string; type: "get_keep_awake" }
 
 	// Device diagnostics
 	| { id?: string; type: "upload_device_logs"; fileName?: string; content: string }
@@ -599,6 +601,17 @@ export interface RpcMessageImagesResponse {
 	nextImageIndex: number | null;
 }
 
+/**
+ * Host keep-awake (prevent sleep) state as reported to phones. Deliberately
+ * omits the host-local mechanism (caffeinate etc.); `reason` is generic wording
+ * present only when degraded.
+ */
+export interface RpcKeepAwakeStatus {
+	enabled: boolean;
+	state: "disabled" | "active" | "degraded";
+	reason?: string;
+}
+
 // ============================================================================
 // RPC Responses
 // ============================================================================
@@ -674,6 +687,20 @@ export type RpcResponse =
 				workspaceNames: string[];
 				workspaces: Array<{ name: string; status: string }>;
 			};
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "set_keep_awake";
+			success: true;
+			data: { keepAwake: RpcKeepAwakeStatus };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_keep_awake";
+			success: true;
+			data: { keepAwake: RpcKeepAwakeStatus };
 	  }
 
 	// Device diagnostics

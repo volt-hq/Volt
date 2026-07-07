@@ -41,6 +41,7 @@ import {
 import type { ControlConnection } from "./control-server.ts";
 import {
 	type ConversationCommandContext,
+	createKeepAwakeRpcResponse,
 	createRemoteRegisterLiveActivityRpcResponse,
 	createRemoteUnregisterLiveActivityRpcResponse,
 	createRpcSuccessResponse,
@@ -49,6 +50,7 @@ import {
 	handleRemoteHostRpcCommand,
 	REMOTE_SESSION_LIST_CURSOR_TTL_MS,
 	type RemoteSessionListCursorEntry,
+	toRpcKeepAwakeStatus,
 } from "./conversation-commands.ts";
 import {
 	createIntegratedConversationHandshakeResponse,
@@ -218,6 +220,7 @@ export function createIrohDaemonService(config: IrohDaemonServiceConfig = {}): V
 			handleRequest: (connection, request) => service.handleRequest(connection, request),
 			onConnectionClosed: (connection) => service.onControlConnectionClosed(connection),
 			onThemeChanged: () => service.onThemeChanged(),
+			onKeepAwakeChanged: () => service.onKeepAwakeChanged(),
 			statusExtras: () => service.statusExtras(),
 			admitRelay: (relayId, relayToken, socket, bufferedRemainder) =>
 				service.admitRelay(relayId, relayToken, socket, bufferedRemainder),
@@ -365,6 +368,8 @@ class IrohDaemonService {
 			stateManager: this.stateManager,
 			sessionListCursors: this.sessionListCursors,
 			sessionListCursorTtlMs: REMOTE_SESSION_LIST_CURSOR_TTL_MS,
+			keepAwake: this.services.keepAwake,
+			onKeepAwakeSetting: (enabled) => this.services.state.updateSettings({ keepAwakeEnabled: enabled }),
 			onWorkspaceUnregistered: async (workspaceName) => {
 				// Unregistering the conversation's own workspace keeps the requesting
 				// stream and runtime alive so the response can still be delivered
@@ -661,6 +666,21 @@ class IrohDaemonService {
 		}
 		for (const entry of this.activeStreams.allEntries()) {
 			this.pushThemeTokensToStream(entry);
+		}
+	}
+
+	/**
+	 * Keep-awake status changed (control toggle, phone toggle, or degradation):
+	 * fan the new state to every phone stream. Clients that ignore the frame are
+	 * fully supported, so no capability gating.
+	 */
+	onKeepAwakeChanged(): void {
+		const frame = {
+			type: "keep_awake_changed",
+			data: { keepAwake: toRpcKeepAwakeStatus(this.services.keepAwake.status) },
+		};
+		for (const entry of this.activeStreams.allEntries()) {
+			void Promise.resolve(entry.write?.(frame)).catch(() => {});
 		}
 	}
 
@@ -1894,6 +1914,10 @@ class IrohDaemonService {
 			workspaces: [{ name: workspace.name, status: "available" }],
 		};
 		const responseId = getRpcResponseId(command);
+		if (command.type === "set_keep_awake" || command.type === "get_keep_awake") {
+			const response = createKeepAwakeRpcResponse(command, this.getCommandContext());
+			return { ok: true, response: response as Record<string, unknown> };
+		}
 		if (command.type === "register_push_target") {
 			try {
 				const data = await this.createPushNotificationDispatcher(authorization).registerPushTarget(command.args);

@@ -38,6 +38,8 @@ export interface VoltdStateFileV1 {
 		themeName?: string;
 		/** Push sanitized resolved theme tokens to capable phones (§9.5); OFF by default. */
 		themeTokenPush?: boolean;
+		/** Hold a keep-awake (prevent system sleep) assertion while the daemon runs; OFF by default. */
+		keepAwakeEnabled?: boolean;
 	};
 }
 
@@ -109,11 +111,13 @@ export function parseVoltdState(value: unknown): VoltdStateFileV1 {
 		: null;
 	const themeName = typeof settingsRecord.themeName === "string" ? settingsRecord.themeName : undefined;
 	const themeTokenPush = settingsRecord.themeTokenPush === true;
+	const keepAwakeEnabled = settingsRecord.keepAwakeEnabled === true;
 	return hostStateToVoltdState(hostState, {
 		detachedRuntimeTtlMs,
 		allowTools,
 		...(themeName === undefined ? {} : { themeName }),
 		...(themeTokenPush ? { themeTokenPush } : {}),
+		...(keepAwakeEnabled ? { keepAwakeEnabled } : {}),
 	});
 }
 

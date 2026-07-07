@@ -42,6 +42,8 @@ describe("control protocol framing", () => {
 			{ type: "workspace_register", id: "9", name: "volt", path: "/tmp/volt" },
 			{ type: "workspace_unregister", id: "10", name: "volt" },
 			{ type: "theme_set", id: "11", theme: "dark" },
+			{ type: "keep_awake_set", id: "11b", enabled: true },
+			{ type: "keep_awake_set", id: "11c", enabled: false },
 			{ type: "viewer_subscribe", id: "12", viewerFeedId: "vf-1" },
 			{ type: "viewer_unsubscribe", id: "13", viewerFeedId: "vf-1" },
 			{ type: "viewer_abort", id: "14", viewerFeedId: "vf-1" },
@@ -79,6 +81,12 @@ describe("control protocol framing", () => {
 				phoneConnections: 1,
 				workspaces: [{ name: "volt", path: "/tmp/volt" }],
 				clients: [{ clientNodeId: "n-1", label: "phone", pairedAtMs: 5 }],
+				keepAwake: { enabled: true, state: "active", method: "caffeinate" },
+			},
+			{
+				type: "keep_awake_result",
+				id: "6b",
+				keepAwake: { enabled: true, state: "degraded", reason: "caffeinate exited" },
 			},
 			{ type: "clients_result", id: "7", clients: [] },
 			{ type: "pair_started", id: "8", requestId: "pr-1" },
@@ -94,6 +102,11 @@ describe("control protocol framing", () => {
 			expect(decoded).toEqual(response);
 			expect(isControlResponse(decoded), `response ${response.type}`).toBe(true);
 		}
+	});
+
+	it("rejects keep_awake_set without a boolean enabled", () => {
+		expect(isControlRequest({ type: "keep_awake_set", id: "x", enabled: "yes" })).toBe(false);
+		expect(isControlRequest({ type: "keep_awake_set", id: "x" })).toBe(false);
 	});
 
 	it("round-trips every event type", () => {
@@ -112,6 +125,7 @@ describe("control protocol framing", () => {
 			{ type: "viewer_event", viewerFeedId: "vf-1", seq: 0, event: { type: "agent_end" } },
 			{ type: "viewer_end", viewerFeedId: "vf-1", reason: "granted" },
 			{ type: "theme_snapshot", themeName: "dark", tokens: { accent: "#ff0000" } },
+			{ type: "keep_awake_changed", keepAwake: { enabled: true, state: "active", method: "caffeinate" } },
 			{ type: "pairing_progress", requestId: "pr-1", phase: "waiting" },
 			{ type: "daemon_shutdown" },
 		];

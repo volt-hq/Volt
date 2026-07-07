@@ -2,7 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { getAgentDir, VERSION } from "../config.ts";
 import { createDaemonClient } from "./control-client.ts";
-import type { ControlResponse } from "./control-protocol.ts";
+import type { ControlKeepAwakeStatus, ControlResponse } from "./control-protocol.ts";
 import { createIrohDaemonService } from "./iroh-service.ts";
 import { readPidfile, runVoltDaemon } from "./main.ts";
 import { getDaemonPaths } from "./paths.ts";
@@ -23,6 +23,7 @@ Commands:
   stop                  Ask the daemon to shut down gracefully.
   status [--json]       Show daemon status; exit 0 when running, 1 when not.
   restart               Stop then start; persistent state survives.
+  keep-awake [on|off]   Prevent the host from sleeping while voltd runs; no arg prints state.
   logs [-f] [-n N]      Tail the daemon log (default ${DEFAULT_LOG_TAIL_LINES} lines).
   install-service       Register a login service (launchd/systemd) that starts the daemon.
   uninstall-service     Remove the login service.
@@ -188,6 +189,17 @@ async function daemonStop(agentDir: string): Promise<void> {
 	process.exitCode = 1;
 }
 
+function formatKeepAwake(keepAwake: ControlKeepAwakeStatus | undefined): string {
+	// Older daemons predate the field; report that instead of guessing "off".
+	if (!keepAwake) {
+		return "unknown (daemon predates keep-awake)";
+	}
+	if (!keepAwake.enabled) {
+		return "off";
+	}
+	return keepAwake.state === "active" ? "on (active)" : `on (degraded: ${keepAwake.reason ?? "unknown"})`;
+}
+
 function formatUptime(startedAtMs: number): string {
 	const totalSeconds = Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
 	const hours = Math.floor(totalSeconds / 3600);
@@ -214,6 +226,7 @@ async function daemonStatus(agentDir: string, json: boolean): Promise<void> {
 	console.error(`voltd ${status.version} (protocol ${status.protocolVersion})`);
 	console.error(`pid: ${status.pid}`);
 	console.error(`uptime: ${formatUptime(status.startedAtMs)}`);
+	console.error(`keep awake: ${formatKeepAwake(status.keepAwake)}`);
 	console.error(`phone connections: ${status.phoneConnections}`);
 	console.error(`workspaces: ${status.workspaces.length}`);
 	for (const workspace of status.workspaces) {
@@ -228,6 +241,56 @@ async function daemonStatus(agentDir: string, json: boolean): Promise<void> {
 		console.error(
 			`  ${lease.workspaceName}/${lease.sessionId}: ${lease.state} (streams ${lease.streamCount}, relays ${lease.relayCount})`,
 		);
+	}
+}
+
+async function daemonKeepAwake(agentDir: string, args: string[]): Promise<void> {
+	const mode = args[0];
+	if (mode !== undefined && mode !== "on" && mode !== "off" && mode !== "status") {
+		console.error("Error: volt daemon keep-awake takes on, off, or no argument");
+		process.exitCode = 1;
+		return;
+	}
+	if (mode === undefined || mode === "status") {
+		const status = await requestStatus(agentDir);
+		if (!status) {
+			console.error("voltd is not running");
+			process.exitCode = 1;
+			return;
+		}
+		console.error(`keep awake: ${formatKeepAwake(status.keepAwake)}`);
+		return;
+	}
+	const probe = await probeDaemon(agentDir);
+	if (!probe.healthy) {
+		console.error("voltd is not running");
+		process.exitCode = 1;
+		return;
+	}
+	const client = createDaemonClient({
+		socketPath: probe.socketPath,
+		client: "cli",
+		version: VERSION,
+		reconnect: false,
+	});
+	try {
+		const response = await client.request({ type: "keep_awake_set", enabled: mode === "on" });
+		if (response.type === "error") {
+			console.error(`Error: ${response.message}`);
+			process.exitCode = 1;
+			return;
+		}
+		if (response.type !== "keep_awake_result") {
+			console.error("Error: this voltd version does not support keep-awake; restart the daemon after upgrading");
+			process.exitCode = 1;
+			return;
+		}
+		console.error(`keep awake: ${formatKeepAwake(response.keepAwake)}`);
+		if (response.keepAwake.enabled && response.keepAwake.state === "degraded") {
+			process.exitCode = 1;
+		}
+	} finally {
+		await client.close();
 	}
 }
 
@@ -330,6 +393,9 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 			if ((process.exitCode ?? 0) === 0) {
 				await daemonStart(agentDir);
 			}
+			return true;
+		case "keep-awake":
+			await daemonKeepAwake(agentDir, rest);
 			return true;
 		case "logs":
 			await daemonLogs(agentDir, rest);

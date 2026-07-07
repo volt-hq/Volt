@@ -126,6 +126,7 @@ async function startDaemonHalf(
 					phoneConnections: 0,
 					workspaces,
 					clients: [],
+					keepAwake: { enabled: false, state: "disabled" },
 				});
 				return;
 			case "workspace_register":

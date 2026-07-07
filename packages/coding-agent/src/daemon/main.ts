@@ -26,6 +26,7 @@ import {
 	probeControlSocket,
 	startControlServer,
 } from "./control-server.ts";
+import { KeepAwakeController, type KeepAwakeControllerOptions } from "./keep-awake.ts";
 import type { DaemonLogger } from "./log.ts";
 import { createDaemonLogger } from "./log.ts";
 import { type DaemonPaths, ensureDaemonDirs, getDaemonPaths } from "./paths.ts";
@@ -42,6 +43,8 @@ export interface VoltdConfig {
 	logPath?: string;
 	foreground: boolean;
 	clock?: Clock;
+	/** Keep-awake controller overrides (tests inject a fake spawn here). */
+	keepAwake?: KeepAwakeControllerOptions;
 }
 
 export interface PidfileContents {
@@ -91,6 +94,7 @@ export interface VoltdRuntimeServices {
 	stateManager: IrohRemoteHostStateManager;
 	auditLogger: IrohRemoteAuditLogger;
 	controlServer: ControlServer;
+	keepAwake: KeepAwakeController;
 	requestShutdown(reason: "cli" | "signal"): void;
 }
 
@@ -100,6 +104,8 @@ export interface VoltdServiceExtensionInstance {
 	onConnectionClosed?(connection: ControlConnection): void;
 	/** The daemon's active theme changed (theme_set or an extension setTheme). */
 	onThemeChanged?(): void;
+	/** Keep-awake status changed (control toggle, phone RPC toggle, or degradation). */
+	onKeepAwakeChanged?(): void;
 	statusExtras?(): { leases?: ControlLeaseStatus[]; phoneConnections?: number; relayCount?: number };
 	/** Redeem a relay hello token; true when the socket was taken over. */
 	admitRelay?(relayId: string, relayToken: string, socket: Socket, bufferedRemainder: Buffer): boolean;
@@ -175,6 +181,18 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	const extensionInstances: VoltdServiceExtensionInstance[] = [];
 	let controlServer: ControlServer | undefined;
 
+	const keepAwake = new KeepAwakeController({
+		...config.keepAwake,
+		log: (level, message) => logger.log(level, "keep-awake", message),
+		onStatusChanged: (status) => {
+			config.keepAwake?.onStatusChanged?.(status);
+			controlServer?.broadcast({ type: "keep_awake_changed", keepAwake: status });
+			for (const extension of extensionInstances) {
+				extension.onKeepAwakeChanged?.();
+			}
+		},
+	});
+
 	const shutdown = async (reason: "cli" | "signal") => {
 		if (shuttingDown) {
 			return;
@@ -192,6 +210,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				log("error", `extension shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
+		await keepAwake.shutdown().catch(() => {});
 		await state.close().catch(() => {});
 		await auditLogger.log({ type: "daemon_shutdown", success: true, details: { reason } }).catch(() => {});
 		await controlServer?.close().catch(() => {});
@@ -243,6 +262,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					phoneConnections,
 					workspaces,
 					clients: toClientStatuses(),
+					keepAwake: keepAwake.status,
 				});
 				return;
 			}
@@ -342,6 +362,12 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				}
 				state.updateSettings({ themeName: request.theme });
 				connection.send({ type: "ok", id: request.id });
+				return;
+			}
+			case "keep_awake_set": {
+				const status = keepAwake.setEnabled(request.enabled);
+				state.updateSettings({ keepAwakeEnabled: request.enabled });
+				connection.send({ type: "keep_awake_result", id: request.id, keepAwake: status });
 				return;
 			}
 			case "client_approve_repair": {
@@ -489,10 +515,17 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		stateManager,
 		auditLogger,
 		controlServer,
+		keepAwake,
 		requestShutdown,
 	};
 	for (const extension of extensions) {
 		extensionInstances.push(extension(services));
+	}
+
+	// Re-apply the persisted keep-awake assertion now that extensions exist, so
+	// their onKeepAwakeChanged hooks observe the startup transition.
+	if (state.state.settings.keepAwakeEnabled === true) {
+		keepAwake.setEnabled(true);
 	}
 
 	const onSignal = () => requestShutdown("signal");
