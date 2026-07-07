@@ -15,6 +15,13 @@ export type LeaseState = "unowned" | "daemon-active" | "daemon-detached" | "daem
 
 export type ControlClientKind = "tui" | "cli";
 
+/**
+ * Control-hello capability advertised by TUIs that can serve worktree-bound
+ * conversations over the byte relay (worktree-cwd sanitization). The daemon
+ * never offers worktree-session relays to control clients without it.
+ */
+export const CONTROL_WORKTREES_CAPABILITY = "worktrees";
+
 export type HelloMessage =
 	| {
 			type: "hello";
@@ -23,6 +30,8 @@ export type HelloMessage =
 			pid: number;
 			version: string;
 			client: ControlClientKind;
+			/** Optional client capabilities (e.g. "worktrees"); absent for old clients. */
+			capabilities?: string[];
 	  }
 	| {
 			type: "hello";
@@ -66,6 +75,21 @@ export type ControlRequest =
 	| { type: "client_approve_repair"; id: string; clientNodeId: string }
 	| { type: "workspace_register"; id: string; name: string; path: string }
 	| { type: "workspace_unregister"; id: string; name: string }
+	| {
+			type: "worktree_create";
+			id: string;
+			workspaceName: string;
+			worktreeName?: string;
+			branch?: string;
+			baseRef?: string;
+	  }
+	| { type: "worktree_list"; id: string; workspaceName?: string }
+	| { type: "worktree_remove"; id: string; workspaceName: string; worktreeId: string; force?: boolean }
+	| { type: "worktree_prune"; id: string; workspaceName?: string }
+	/** Resolve a filesystem path to the daemon-managed worktree containing it. */
+	| { type: "worktree_resolve"; id: string; path: string }
+	/** Bind a session id to a worktree (TUI-created worktree sessions). */
+	| { type: "worktree_bind"; id: string; workspaceName: string; worktreeId: string; sessionId: string }
 	| { type: "theme_set"; id: string; theme: string } // name; daemon resolves + broadcasts
 	| { type: "keep_awake_set"; id: string; enabled: boolean } // hold/release the host sleep-prevention assertion
 	| { type: "viewer_subscribe"; id: string; viewerFeedId: string }
@@ -123,6 +147,25 @@ export interface ControlWorkspaceStatus {
 	path: string;
 }
 
+/**
+ * Worktree status over the LOCAL control socket. Unlike the iroh wire, the
+ * control plane is trusted (same user), so checkout paths are included for
+ * display.
+ */
+export interface ControlWorktreeStatus {
+	id: string;
+	workspaceName: string;
+	path: string;
+	branch: string;
+	baseRef?: string;
+	createdAt: number;
+	sessionIds: string[];
+	available?: boolean;
+	dirty?: boolean;
+	/** Branch commits vs the base ref (merge-back guidance). */
+	aheadBehind?: { ahead: number; behind: number };
+}
+
 export interface ControlClientStatus {
 	clientNodeId: string;
 	label?: string;
@@ -152,6 +195,23 @@ export type ControlResponse =
 	  }
 	| { type: "keep_awake_result"; id: string; keepAwake: ControlKeepAwakeStatus }
 	| { type: "clients_result"; id: string; clients: ControlClientStatus[] }
+	| { type: "worktree_result"; id: string; worktree: ControlWorktreeStatus }
+	| { type: "worktrees_result"; id: string; worktrees: ControlWorktreeStatus[] }
+	| {
+			type: "worktree_resolve_result";
+			id: string;
+			/** Parent workspace the worktree belongs to. */
+			workspaceName: string;
+			/** Parent workspace checkout path (control plane is local/trusted). */
+			workspacePath: string;
+			worktreeId: string;
+			worktreePath: string;
+	  }
+	| {
+			type: "worktree_prune_result";
+			id: string;
+			results: Array<{ workspaceName: string; removedRecords: string[]; orphanCheckouts: string[] }>;
+	  }
 	| { type: "pair_started"; id: string; requestId: string }
 	| {
 			type: "relay_rpc_result";
@@ -223,7 +283,15 @@ export interface RelayPreamble {
 	/** verbatim phone handshake JSON as received (parsed object, re-serialized) */
 	handshake: unknown;
 	/** authorization subset — everything the TUI needs to serve the stream */
-	authorization: { clientNodeId: string; workspaceName: string; workspacePath: string };
+	authorization: {
+		clientNodeId: string;
+		workspaceName: string;
+		workspacePath: string;
+		/** Present when the conversation is bound to a daemon-managed worktree. */
+		worktreeId?: string;
+		/** Worktree checkout path — the TUI sanitizes with this as the root. */
+		worktreePath?: string;
+	};
 	/**
 	 * The daemon's Iroh node id: the TUI writes it into the handshake response
 	 * so the phone's saved-host identity verification passes over the relay.
@@ -240,6 +308,7 @@ export interface RelayPreamble {
 		requestedSessionId?: string;
 		workspaceName: string;
 		workspacePath: string;
+		worktreeId?: string;
 	};
 }
 
@@ -347,6 +416,12 @@ export function parseHelloMessage(value: unknown): HelloMessage | undefined {
 		) {
 			return undefined;
 		}
+		if (
+			value.capabilities !== undefined &&
+			(!Array.isArray(value.capabilities) || !value.capabilities.every((entry) => typeof entry === "string"))
+		) {
+			return undefined;
+		}
 		return {
 			type: "hello",
 			role: "control",
@@ -354,6 +429,7 @@ export function parseHelloMessage(value: unknown): HelloMessage | undefined {
 			pid: value.pid,
 			version: value.version,
 			client: value.client,
+			...(value.capabilities === undefined ? {} : { capabilities: value.capabilities as string[] }),
 		};
 	}
 	if (value.role === "relay") {
@@ -397,6 +473,30 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 			return typeof value.name === "string" && typeof value.path === "string";
 		case "workspace_unregister":
 			return typeof value.name === "string";
+		case "worktree_create":
+			return (
+				typeof value.workspaceName === "string" &&
+				(value.worktreeName === undefined || typeof value.worktreeName === "string") &&
+				(value.branch === undefined || typeof value.branch === "string") &&
+				(value.baseRef === undefined || typeof value.baseRef === "string")
+			);
+		case "worktree_list":
+		case "worktree_prune":
+			return value.workspaceName === undefined || typeof value.workspaceName === "string";
+		case "worktree_remove":
+			return (
+				typeof value.workspaceName === "string" &&
+				typeof value.worktreeId === "string" &&
+				(value.force === undefined || typeof value.force === "boolean")
+			);
+		case "worktree_resolve":
+			return typeof value.path === "string";
+		case "worktree_bind":
+			return (
+				typeof value.workspaceName === "string" &&
+				typeof value.worktreeId === "string" &&
+				typeof value.sessionId === "string"
+			);
 		case "theme_set":
 			return typeof value.theme === "string";
 		case "keep_awake_set":
@@ -432,6 +532,19 @@ export function isControlResponse(value: unknown): value is ControlResponse {
 		case "clients_result":
 		case "pair_started":
 			return true;
+		case "worktree_result":
+			return isRecord(value.worktree);
+		case "worktrees_result":
+			return Array.isArray(value.worktrees);
+		case "worktree_prune_result":
+			return Array.isArray(value.results);
+		case "worktree_resolve_result":
+			return (
+				typeof value.workspaceName === "string" &&
+				typeof value.workspacePath === "string" &&
+				typeof value.worktreeId === "string" &&
+				typeof value.worktreePath === "string"
+			);
 		case "keep_awake_result":
 			return isRecord(value.keepAwake);
 		case "relay_rpc_result":

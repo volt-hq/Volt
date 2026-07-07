@@ -5,6 +5,11 @@ import { isIrohRemoteWorkspaceName } from "../core/remote/iroh/handshake.ts";
 import { sanitizeIrohRemoteOutbound } from "../core/remote/iroh/outbound-filter.ts";
 import { createIrohRemoteRpcErrorResponse } from "../core/remote/iroh/rpc-command-filter.ts";
 import {
+	handleIrohRemoteWorktreeRpcCommand,
+	IROH_REMOTE_WORKTREE_RPC_TYPES,
+	type IrohRemoteWorktreeRpcBackend,
+} from "../core/remote/iroh/worktree-rpc.ts";
+import {
 	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
 	type IrohBiStreamLike,
 	type IrohBytes,
@@ -60,13 +65,27 @@ export async function readLineFromIroh(
 	}
 }
 
-export function getRemoteSanitizerOptions(authorization: IrohRemoteClientAuthorizationSuccess): {
+export interface RemoteSanitizerOverrides {
+	/** Sanitizer root override (worktree-bound streams use the worktree path). */
+	workspacePath?: string;
+	/** Extra roots (parent checkout, worktrees root) redacted to /workspace. */
+	additionalRedactedPaths?: string[];
+}
+
+export function getRemoteSanitizerOptions(
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	overrides: RemoteSanitizerOverrides = {},
+): {
 	remoteWorkspacePath: string;
 	workspacePath: string;
+	additionalRedactedPaths?: string[];
 } {
 	return {
 		remoteWorkspacePath: "/workspace",
-		workspacePath: authorization.workspace.path,
+		workspacePath: overrides.workspacePath ?? authorization.workspace.path,
+		...(overrides.additionalRedactedPaths === undefined
+			? {}
+			: { additionalRedactedPaths: overrides.additionalRedactedPaths }),
 	};
 }
 
@@ -74,8 +93,9 @@ export async function writeIrohRemoteJsonLine(
 	send: IrohBiStreamLike["send"],
 	value: object,
 	authorization: IrohRemoteClientAuthorizationSuccess,
+	sanitizerOverrides: RemoteSanitizerOverrides = {},
 ): Promise<void> {
-	const sanitized = sanitizeIrohRemoteOutbound(value, getRemoteSanitizerOptions(authorization));
+	const sanitized = sanitizeIrohRemoteOutbound(value, getRemoteSanitizerOptions(authorization, sanitizerOverrides));
 	await send.writeAll(Array.from(Buffer.from(serializeJsonLine(sanitized), "utf8")));
 }
 
@@ -275,5 +295,64 @@ export async function runWorkspaceManagementStream(
 			context.closeStream(WORKSPACE_UNREGISTERED_CLOSE_REASON);
 		}
 		return true;
+	});
+}
+
+export interface WorktreeStreamHooks {
+	auditLogger: IrohRemoteAuditLogger;
+	worktrees: IrohRemoteWorktreeRpcBackend;
+	/** Extra roots redacted on every frame of this stream (worktrees root). */
+	additionalRedactedPaths?: string[];
+}
+
+/** Serve a manage_worktrees workspaceManagement stream: create/list/remove worktrees only. */
+export async function runWorktreeManagementStream(
+	context: WorkspaceStreamContext,
+	hooks: WorktreeStreamHooks,
+): Promise<void> {
+	const { stream, authorization } = context;
+	const sanitizerOverrides = { additionalRedactedPaths: hooks.additionalRedactedPaths };
+	await runWorkspaceUtilityRpcLoop(stream, context.initialInput, async (line) => {
+		const parsed = parseRemoteRpcCommandLine(line);
+		if (!parsed.ok) {
+			await writeIrohRemoteJsonLine(stream.send, parsed.response, authorization, sanitizerOverrides);
+			return false;
+		}
+		if (!IROH_REMOTE_WORKTREE_RPC_TYPES.has(parsed.command.type)) {
+			await writeIrohRemoteJsonLine(
+				stream.send,
+				createIrohRemoteRpcErrorResponse(
+					getRpcResponseId(parsed.command),
+					parsed.command.type,
+					"unsupported_on_workspace_management_stream",
+				),
+				authorization,
+				sanitizerOverrides,
+			);
+			return false;
+		}
+		const result = await handleIrohRemoteWorktreeRpcCommand(parsed.command, {
+			authorizedWorkspaceName: authorization.workspace.name,
+			backend: hooks.worktrees,
+		});
+		if (!result.handled) {
+			return false;
+		}
+		if (parsed.command.type !== "list_worktrees") {
+			await hooks.auditLogger
+				.log({
+					type:
+						result.audit?.type ??
+						(parsed.command.type === "create_worktree" ? "worktree_created" : "worktree_removed"),
+					clientNodeId: authorization.client.nodeId,
+					workspace: authorization.workspace.name,
+					success: result.response.success,
+					...(result.response.success ? {} : { error: result.response.error }),
+					details: { source: "remote_worktree_management_stream", ...(result.audit?.details ?? {}) },
+				})
+				.catch(() => {});
+		}
+		await writeIrohRemoteJsonLine(stream.send, result.response, authorization, sanitizerOverrides);
+		return false;
 	});
 }

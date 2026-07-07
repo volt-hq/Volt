@@ -1,12 +1,26 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS, normalizeIrohRemoteAllowTools } from "./protocol.ts";
+import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS, isIrohRemoteWorktreeId, normalizeIrohRemoteAllowTools } from "./protocol.ts";
 
 export interface IrohRemoteWorkspace {
 	name: string;
 	path: string;
 	allowedTools?: string;
+}
+
+/** A daemon-managed git worktree, keyed under its parent workspace. */
+export interface IrohRemoteWorkspaceWorktree {
+	/** ^[a-z0-9][a-z0-9._-]{0,63}$ — unique per workspace. */
+	id: string;
+	workspaceName: string;
+	/** Absolute checkout path under the worktrees root; host-local, never sent on the wire. */
+	path: string;
+	branch: string;
+	baseRef?: string;
+	createdAt: number;
+	/** Sessions bound to this worktree (usually exactly one). */
+	sessionIds: string[];
 }
 
 export type IrohRemotePushTargetProvider = "fcm";
@@ -98,6 +112,7 @@ export interface IrohRemoteHostState {
 	hostSecretKey?: number[];
 	pairingSecretTombstones?: IrohRemotePairingSecretTombstone[];
 	workspaces: IrohRemoteWorkspace[];
+	worktrees?: IrohRemoteWorkspaceWorktree[];
 	clients: IrohRemoteClient[];
 	revokedClients?: IrohRemoteRevokedClient[];
 	pendingPairingTickets?: IrohRemotePendingPairingTicket[];
@@ -108,6 +123,7 @@ export function createEmptyIrohRemoteHostState(): IrohRemoteHostState {
 		hostSecretKey: undefined,
 		pairingSecretTombstones: [],
 		workspaces: [],
+		worktrees: [],
 		clients: [],
 		revokedClients: [],
 		pendingPairingTickets: [],
@@ -144,6 +160,7 @@ export function parseIrohRemoteHostState(value: unknown): IrohRemoteHostState {
 			parseIrohRemotePairingSecretTombstone,
 		),
 		workspaces: parseArray(state.workspaces, "workspaces", parseIrohRemoteWorkspace),
+		worktrees: parseOptionalArray(state.worktrees, "worktrees", parseIrohRemoteWorkspaceWorktree),
 		clients: parseArray(state.clients, "clients", parseIrohRemoteClient),
 		revokedClients: parseOptionalArray(state.revokedClients, "revokedClients", parseIrohRemoteRevokedClient),
 		pendingPairingTickets: parseOptionalArray(
@@ -159,6 +176,7 @@ function serializeIrohRemoteHostState(state: IrohRemoteHostState): IrohRemoteHos
 		hostSecretKey: state.hostSecretKey ? [...state.hostSecretKey] : undefined,
 		pairingSecretTombstones: (state.pairingSecretTombstones ?? []).map((tombstone) => ({ ...tombstone })),
 		workspaces: state.workspaces.map((workspace) => ({ ...workspace })),
+		worktrees: (state.worktrees ?? []).map((worktree) => ({ ...worktree, sessionIds: [...worktree.sessionIds] })),
 		clients: state.clients.map((client) => ({
 			...client,
 			allowedWorkspaces: [...client.allowedWorkspaces],
@@ -196,6 +214,29 @@ export function parseIrohRemoteWorkspace(value: unknown): IrohRemoteWorkspace {
 		path: expectString(workspace.path, "workspace path"),
 		allowedTools: allowedTools === undefined ? undefined : normalizeIrohRemoteAllowTools(allowedTools),
 	};
+}
+
+export function parseIrohRemoteWorkspaceWorktree(value: unknown): IrohRemoteWorkspaceWorktree {
+	const worktree = expectRecord(value, "Iroh remote worktree");
+	const baseRef = expectOptionalString(worktree.baseRef, "worktree baseRef");
+	return {
+		id: expectWorktreeId(worktree.id),
+		workspaceName: expectString(worktree.workspaceName, "worktree workspaceName"),
+		path: expectString(worktree.path, "worktree path"),
+		branch: expectString(worktree.branch, "worktree branch"),
+		...(baseRef === undefined ? {} : { baseRef }),
+		createdAt: expectNumber(worktree.createdAt, "worktree createdAt"),
+		sessionIds: parseArray(worktree.sessionIds, "worktree sessionIds", (entry) =>
+			expectString(entry, "worktree session id"),
+		),
+	};
+}
+
+function expectWorktreeId(value: unknown): string {
+	if (!isIrohRemoteWorktreeId(value)) {
+		throw new Error("worktree id must match lowercase worktree id syntax");
+	}
+	return value;
 }
 
 export function parseIrohRemoteClient(value: unknown): IrohRemoteClient {

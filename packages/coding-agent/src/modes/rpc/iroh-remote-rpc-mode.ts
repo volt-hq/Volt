@@ -41,6 +41,8 @@ export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	suppressExtensionUiRequests?: boolean;
 	workspaceName?: string;
 	workspacePath: string;
+	/** Extra roots (worktree parent checkout, worktrees root) redacted on every outbound frame. */
+	additionalRedactedPaths?: string[];
 }
 
 export type IrohRemoteNotificationKind =
@@ -134,6 +136,7 @@ export function runIrohRemoteRpcMode(
 		remoteWorkspacePath: options.remoteWorkspacePath,
 		transport: createIrohRpcTransport(options),
 		workspacePath: options.workspacePath,
+		additionalRedactedPaths: options.additionalRedactedPaths,
 	});
 	const suppressingTransport: RpcTransport = options.suppressExtensionUiRequests
 		? {

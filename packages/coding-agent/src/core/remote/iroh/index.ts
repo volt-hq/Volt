@@ -141,6 +141,8 @@ export {
 	IROH_REMOTE_OUTCOMES,
 	IROH_REMOTE_TICKET_PREFIX,
 	IROH_REMOTE_UNSAFE_TOOL_NAMES,
+	IROH_REMOTE_WORKTREE_ID_PATTERN,
+	IROH_REMOTE_WORKTREES_FEATURE,
 	type IrohRemoteHostFeature,
 	type IrohRemoteHostHandshakeFailureOutcome,
 	type IrohRemoteOutcome,
@@ -149,6 +151,7 @@ export {
 	isIrohRemoteHostHandshakeFailureOutcome,
 	isIrohRemoteOutcome,
 	isIrohRemoteRelayMode,
+	isIrohRemoteWorktreeId,
 	normalizeIrohRemoteAllowTools,
 	parseIrohRemoteAllowTools,
 	usesDefaultIrohRemoteAllowTools,
@@ -217,6 +220,7 @@ export {
 	type IrohRemotePushTokenEnvironment,
 	type IrohRemoteRevokedClient,
 	type IrohRemoteWorkspace,
+	type IrohRemoteWorkspaceWorktree,
 	parseIrohRemoteClient,
 	parseIrohRemoteHostState,
 	parseIrohRemoteLiveActivityRegistration,
@@ -225,6 +229,7 @@ export {
 	parseIrohRemotePushTarget,
 	parseIrohRemoteRevokedClient,
 	parseIrohRemoteWorkspace,
+	parseIrohRemoteWorkspaceWorktree,
 	readIrohRemoteHostState,
 	writeIrohRemoteHostState,
 } from "./state.ts";
@@ -272,3 +277,15 @@ export {
 	type IrohRemoteWorkspaceUnregisterRpcResponse,
 	type IrohRemoteWorkspaceUnregisterRpcResult,
 } from "./workspace-rpc.ts";
+export {
+	type HandleIrohRemoteWorktreeRpcCommandOptions,
+	handleIrohRemoteWorktreeRpcCommand,
+	IROH_REMOTE_CREATE_WORKTREE_RPC_TYPE,
+	IROH_REMOTE_LIST_WORKTREES_RPC_TYPE,
+	IROH_REMOTE_REMOVE_WORKTREE_RPC_TYPE,
+	IROH_REMOTE_WORKTREE_RPC_TYPES,
+	type IrohRemoteWorktreeRpcBackend,
+	type IrohRemoteWorktreeRpcResponse,
+	type IrohRemoteWorktreeRpcResult,
+	type IrohRemoteWorktreeSummary,
+} from "./worktree-rpc.ts";

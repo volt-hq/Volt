@@ -4,10 +4,19 @@ export const IROH_REMOTE_HELLO_TYPE = "volt_iroh_hello";
 export const IROH_REMOTE_HANDSHAKE_TYPE = "volt_iroh_handshake";
 export const IROH_REMOTE_MULTI_STREAMS_FEATURE = "multi_streams.v1";
 export const IROH_REMOTE_CONVERSATION_STREAMS_FEATURE = "conversation_streams.v1";
+export const IROH_REMOTE_WORKTREES_FEATURE = "worktrees.v1";
 export const IROH_REMOTE_HOST_FEATURES = [
 	IROH_REMOTE_MULTI_STREAMS_FEATURE,
 	IROH_REMOTE_CONVERSATION_STREAMS_FEATURE,
+	IROH_REMOTE_WORKTREES_FEATURE,
 ] as const;
+
+/** Daemon-managed worktree ids: lowercase slug, unique per workspace. */
+export const IROH_REMOTE_WORKTREE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+export function isIrohRemoteWorktreeId(value: unknown): value is string {
+	return typeof value === "string" && IROH_REMOTE_WORKTREE_ID_PATTERN.test(value);
+}
 export const DEFAULT_IROH_REMOTE_ALLOW_TOOLS = "read,bash,edit,write,web_search,grep,find,ls,subagent,mcp";
 const LEGACY_DEFAULT_IROH_REMOTE_ALLOW_TOOL_SETS: readonly string[][] = [
 	["read", "bash", "edit", "write", "grep", "find", "ls"],

@@ -21,6 +21,8 @@ export interface ControlConnection {
 	readonly client: ControlClientKind;
 	readonly pid: number;
 	readonly version: string;
+	/** Capabilities from the control hello (empty for old clients). */
+	readonly capabilities: ReadonlySet<string>;
 	send(message: ControlResponse | ControlEvent): void;
 	close(): void;
 }
@@ -82,6 +84,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 		readonly client: ControlClientKind;
 		readonly pid: number;
 		readonly version: string;
+		readonly capabilities: ReadonlySet<string>;
 		private readonly socket: Socket;
 
 		constructor(socket: Socket, hello: Extract<HelloMessage, { role: "control" }>) {
@@ -89,6 +92,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 			this.client = hello.client;
 			this.pid = hello.pid;
 			this.version = hello.version;
+			this.capabilities = new Set(hello.capabilities ?? []);
 			this.socket = socket;
 		}
 

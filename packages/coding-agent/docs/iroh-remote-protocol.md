@@ -72,14 +72,14 @@ Fields:
 | `type` | yes | Must be `volt_iroh_hello`. |
 | `protocol` | yes | Must be `volt-rpc/0`. |
 | `workspace` | yes | Registered workspace name requested by the client. |
-| `conversation` | one mode required | Conversation stream target: `{ "target": "last" }`, `{ "target": "new" }`, or `{ "target": "session", "sessionId": "..." }`. |
+| `conversation` | one mode required | Conversation stream target: `{ "target": "last" }`, `{ "target": "new" }`, or `{ "target": "session", "sessionId": "..." }`. A `new` target may include a `worktreeId` on `worktrees.v1` hosts. |
 | `workspaceDiscovery` | one mode required | Utility stream target. The only v1 payload is `{ "purpose": "list_sessions" }`. |
-| `workspaceManagement` | one mode required | Utility stream target. The only v1 payload is `{ "purpose": "unregister_workspace" }`. |
+| `workspaceManagement` | one mode required | Utility stream target. Payloads are `{ "purpose": "unregister_workspace" }` or, on `worktrees.v1` hosts, `{ "purpose": "manage_worktrees" }`. |
 | `secret` | no | Pairing secret when completing a pairing ticket. Omitted for already-paired clients. |
 | `clientLabel` | no | Human-readable client label requested during pairing. |
 | `clientNodeId` | no | Client-claimed node ID for diagnostics only. It is not authoritative. |
 
-Mobile clients must include exactly one stream mode: `conversation`, `workspaceDiscovery`, or `workspaceManagement`. A `conversation.target:"session"` payload must include a strict lowercase remote session ID. `last` and `new` targets must not include a session ID. Discovery and management payloads reject unknown purposes and unexpected fields.
+Mobile clients must include exactly one stream mode: `conversation`, `workspaceDiscovery`, or `workspaceManagement`. A `conversation.target:"session"` payload must include a strict lowercase remote session ID. `last` and `new` targets must not include a session ID. A `worktreeId` (lowercase worktree id syntax) is accepted only on `target:"new"` and only by hosts advertising `worktrees.v1`; `last` and `session` targets must not include one — resumes derive the worktree from the host's persisted session binding, never from the client. Discovery and management payloads reject unknown purposes and unexpected fields.
 
 The authoritative client identity is the remote Iroh node ID observed by the host on the accepted connection, not `clientNodeId` from the hello. Unknown top-level hello fields are ignored.
 
@@ -88,7 +88,7 @@ The host responds with one UTF-8 JSON object followed by LF.
 Success:
 
 ```json
-{"type":"volt_iroh_handshake","success":true,"workspace":"volt","hostNodeId":"<authoritative-host-node-id>","clientNodeId":"<authoritative-client-node-id>","features":["multi_streams.v1","conversation_streams.v1"],"sessionId":"abc123","conversation":{"target":"last","sessionId":"abc123","selection":"resumed"},"child":"volt"}
+{"type":"volt_iroh_handshake","success":true,"workspace":"volt","hostNodeId":"<authoritative-host-node-id>","clientNodeId":"<authoritative-client-node-id>","features":["multi_streams.v1","conversation_streams.v1","worktrees.v1"],"sessionId":"abc123","conversation":{"target":"last","sessionId":"abc123","selection":"resumed"},"child":"volt"}
 ```
 
 Failure:
@@ -141,6 +141,8 @@ If the duplicate is the first conversation stream on a new Iroh connection from 
 ## Stream feature compatibility
 
 `multi_streams.v1` and `conversation_streams.v1` are optional host features, not a protocol version bump. Mobile pinned-agent clients require both features on successful stream-mode handshakes. Missing or malformed feature metadata for those modes means the host is incompatible with conversation streams. Clients should keep the saved host and surface an update/integrated-host-required state rather than asking for another QR scan.
+
+`worktrees.v1` is an additional optional host feature. Clients must check for it before sending `worktreeId` in a conversation hello or opening a `manage_worktrees` management stream; hosts without the feature reject both with `invalid_conversation_target`. Conversation successes for worktree-bound sessions echo `conversation.worktreeId`.
 
 Missing stream features, `conversation_streams_unsupported`, `workspace_unavailable`, `workspace_unregistered`, `workspace_authorization_removed`, `session_unavailable`, `duplicate_conversation_connection`, and `conversation_in_use` are not QR re-pair requirements by themselves. `host_identity_mismatch`, malformed saved-host data, `client_unknown`, and `client_revoked` still require explicit Pair Again or Forget Host style UX.
 
@@ -232,7 +234,7 @@ Conversation streams reject `new_session`, `switch_session_by_id`, and raw `get_
 
 Workspace discovery streams accept only `list_sessions`. Any other valid RPC command receives `unsupported_on_workspace_discovery_stream`. Discovery streams create no conversation runtime and do not update last-session state.
 
-Workspace management streams accept only `unregister_workspace`. Any other valid RPC command receives `unsupported_on_workspace_management_stream`. `unregister_workspace` must include a `workspaceName` matching the stream workspace and may not include extra fields.
+Workspace management streams with purpose `unregister_workspace` accept only `unregister_workspace`. Management streams with purpose `manage_worktrees` (worktrees.v1) accept only `create_worktree`, `list_worktrees`, and `remove_worktree`. Any other valid RPC command receives `unsupported_on_workspace_management_stream`. Every management command must include a `workspaceName` matching the stream workspace (`session_mismatch` otherwise) and may not include extra fields (`invalid_request`); inbound `path`/`workspacePath` fields are always rejected.
 
 All other command types receive a JSONL `response` with `success:false` and are not forwarded to the local Volt RPC process. This includes local-only subagent lifecycle commands such as `list_subagents`, `subagent_start`, `subagent_abort`, `subagent_get_state`, `subagent_get_transcript`, and `subagent_dispose`. Within the remote surface, only `abort` is a direct cancellation command.
 
@@ -304,6 +306,44 @@ The host rejects missing or malformed names, names that do not match the managem
 ```
 
 This command is host-state metadata management only. It does not create, rename, browse, path-map, or delete host workspace directories, and response data must contain registered names and availability statuses only, never host-local paths.
+
+### Worktree management (`manage_worktrees`, worktrees.v1)
+
+A `manage_worktrees` management stream drives daemon-managed git worktrees for the stream workspace. Checkout paths are computed host-side under the agent dir and never cross the wire in either direction; requests carry ids and git refs only.
+
+`create_worktree` runs `git worktree add` in the registered checkout on a new branch (default `volt/<id>`; the base defaults to the checkout's current branch and is recorded for later merge-back guidance):
+
+```json
+{"id":"1","type":"create_worktree","workspaceName":"myrepo","worktreeName":"fix-login","baseRef":"main"}
+```
+
+```json
+{"id":"1","type":"response","command":"create_worktree","success":true,"data":{"worktree":{"id":"fix-login","branch":"volt/fix-login","baseRef":"main","createdAt":1751900000000,"sessionIds":[]}}}
+```
+
+Failures use the standard error response with reasons such as `not_a_git_repository`, `worktree_exists`, `worktree_branch_conflict`, `worktree_limit_reached`, `invalid_worktree_id`, or `git_failed`.
+
+`list_worktrees` reports each worktree with availability, dirtiness, bound session ids, and merge-back counts (`aheadBehind` compares the worktree branch against its recorded base ref):
+
+```json
+{"id":"2","type":"list_worktrees","workspaceName":"myrepo"}
+```
+
+```json
+{"id":"2","type":"response","command":"list_worktrees","success":true,"data":{"worktrees":[{"id":"fix-login","branch":"volt/fix-login","baseRef":"main","createdAt":1751900000000,"sessionIds":["s-abc"],"available":true,"dirty":false,"aheadBehind":{"ahead":1,"behind":0}}]}}
+```
+
+`remove_worktree` refuses dirty or in-use worktrees unless `force:true`, which stops bound runtimes first:
+
+```json
+{"id":"3","type":"remove_worktree","workspaceName":"myrepo","worktreeId":"fix-login","force":false}
+```
+
+```json
+{"id":"3","type":"response","command":"remove_worktree","success":true,"data":{"worktreeId":"fix-login","removed":true,"stoppedRuntimeCount":0,"closedStreamCount":0}}
+```
+
+A conversation hello with `{"target":"new","worktreeId":"fix-login"}` opens the new session with the worktree checkout as its working directory; the daemon persists the session→worktree binding so later `session`/`last` resumes land in the same checkout. Worktree runtimes inherit the parent workspace's trust decision and tool allowlist — never wider — and their outbound frames sanitize the worktree path, the parent checkout path, and the worktrees root to `/workspace`.
 
 `upload_device_logs` on a conversation stream stores client diagnostic logs inside the stream-bound workspace so host-side tooling and agents can read them:
 

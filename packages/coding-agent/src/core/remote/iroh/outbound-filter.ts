@@ -23,12 +23,16 @@ export interface IrohRemoteOutboundFilterOptions {
 	remoteWorkspacePath?: string;
 	transport: RpcTransport;
 	workspacePath: string;
+	/** Extra roots (e.g. a worktree's parent checkout) redacted to remoteWorkspacePath. */
+	additionalRedactedPaths?: string[];
 }
 
 export interface IrohRemoteOutboundSanitizerOptions {
 	decorate?: IrohRemoteOutboundValueDecorator;
 	remoteWorkspacePath?: string;
 	workspacePath: string;
+	/** Extra roots (e.g. a worktree's parent checkout) redacted to remoteWorkspacePath. */
+	additionalRedactedPaths?: string[];
 }
 
 export interface IrohRemoteOutboundJsonlReadablePipeOptions extends IrohRemoteOutboundSanitizerOptions {
@@ -51,6 +55,7 @@ export function createIrohRemoteOutboundFilteredRpcTransport(options: IrohRemote
 		decorate: options.decorate,
 		remoteWorkspacePath: options.remoteWorkspacePath,
 		workspacePath: options.workspacePath,
+		additionalRedactedPaths: options.additionalRedactedPaths,
 	};
 	return {
 		write(value) {
@@ -127,11 +132,17 @@ function createSanitizerContext(options: IrohRemoteOutboundSanitizerOptions): Ir
 	// bypass redaction and leak the real host path. Canonicalize the compared root to
 	// NFC, and match embedded occurrences against both NFC and NFD forms.
 	const workspacePath = resolvedWorkspacePath.normalize("NFC");
+	// Additional roots (worktree parent checkout, worktrees root) fold into the
+	// same variant list: every occurrence maps to remoteWorkspacePath.
+	const redactedRoots = [
+		resolvedWorkspacePath,
+		...(options.additionalRedactedPaths ?? []).map((value) => resolve(value)),
+	];
 	const workspacePathVariants = [
 		...new Set(
-			[resolvedWorkspacePath, toPosixPath(resolvedWorkspacePath), toWindowsPath(resolvedWorkspacePath)].flatMap(
-				(value) => [value.normalize("NFC"), value.normalize("NFD")],
-			),
+			redactedRoots
+				.flatMap((root) => [root, toPosixPath(root), toWindowsPath(root)])
+				.flatMap((value) => [value.normalize("NFC"), value.normalize("NFD")]),
 		),
 	]
 		.filter((value) => value.length > 0)

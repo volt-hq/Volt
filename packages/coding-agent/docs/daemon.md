@@ -44,6 +44,11 @@ volt remote approve-repair <node-id>    Allow a revoked node ID to re-pair.
 volt remote workspace add [path] [--name <name>]
 volt remote workspace remove <name>
 volt remote workspace list
+volt remote worktree add [--workspace <name>] [--name <id>] [--branch <ref>] [--base <ref>]
+volt remote worktree list [--workspace <name>] [--json]
+volt remote worktree remove <id> [--workspace <name>] [--force]
+volt remote worktree prune [--workspace <name>]
+volt remote worktree diff <id> [--workspace <name>]
 ```
 
 `volt remote host` is gone; running it prints a pointer to `volt daemon
@@ -97,6 +102,58 @@ stopping a turn never closes streams or disposes runtimes.
 When the TUI owns the lease, phone prompts run with the TUI session's full
 local tool set. `remote.allowTools` applies only to daemon-owned headless
 runtimes — see [Security](security.md).
+
+## Git worktrees
+
+Concurrent sessions in one workspace share one checkout by default — two
+agents will step on each other's files and branches. The daemon can instead
+run a session inside a **daemon-managed git worktree**: an isolated checkout
+on its own branch under `~/.volt/agent/worktrees/` (0700). Create worktrees
+with `volt remote worktree add`, from the TUI's `/worktree` command, or from a
+paired phone (`manage_worktrees` stream, gated on the `worktrees.v1` feature);
+then open a conversation with `target:"new"` plus a `worktreeId`.
+
+Key behaviors:
+
+- **Sessions stay with the parent workspace.** Worktree sessions are stored
+  and listed under the parent workspace; leases, push notifications, and
+  `list_sessions` are unchanged. The daemon persists a session→worktree
+  binding so resumes (phone reattach, daemon restart, TUI takeover) land back
+  in the worktree checkout.
+- **Policy inheritance.** A worktree runtime uses exactly the parent
+  workspace's trust decision and tool allowlist — never wider. Trust is never
+  prompted for or persisted on worktree paths.
+- **Branch layout.** Each worktree gets its own branch (default
+  `volt/<id>`) off the recorded base ref (default: the checkout's current
+  branch). `volt remote worktree list` shows dirtiness and ahead/behind counts
+  against the base; `volt remote worktree diff <id>` shows the branch diff.
+  Merging back is always a user action — the daemon never mutates the main
+  checkout.
+- **Removal safety.** `worktree remove` refuses dirty or in-use worktrees
+  without `--force`; force stops bound runtimes first. `worktree prune`
+  reconciles records against the filesystem and quarantines unrecognized
+  directories by renaming (never deleting) them.
+- **Fresh checkouts are fresh.** Worktrees share git objects but not
+  untracked files: `node_modules`, virtualenvs, and build caches must be
+  reinstalled per worktree.
+
+Cleanup policies live in `state.json` under `settings.worktreeCleanup`:
+
+```json
+{ "worktreeCleanup": { "retention": { "enabled": true, "ttlMs": 3600000 }, "pruneOnStart": true } }
+```
+
+- `retention` (off by default): after a worktree-bound runtime is disposed,
+  remove the worktree once the TTL expires — but only when it is clean and its
+  branch is fully merged into the base ref. Skips are recorded in the audit
+  log as `worktree_retention_skipped_dirty`; uncommitted work is never
+  deleted.
+- `pruneOnStart` (default `true`): reconcile worktree records and checkouts
+  during daemon startup.
+
+Downgrade caveat: older daemons drop the `worktrees` state collection on
+their next write. Checkouts survive on disk as orphans; re-upgrading and
+running `volt remote worktree prune` quarantines them.
 
 ## Optional: theme token push (experimental)
 

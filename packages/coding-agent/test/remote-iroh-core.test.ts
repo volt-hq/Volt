@@ -1215,6 +1215,7 @@ describe("Iroh remote core helpers", () => {
 					},
 				],
 				workspaces: [{ name: "volt", path: stateDir, allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS }],
+				worktrees: [],
 				clients: [
 					{
 						nodeId: "client-node",
@@ -2566,6 +2567,7 @@ describe("Iroh remote core helpers", () => {
 				},
 			],
 			workspaces: [{ name: "volt", path: "/workspace" }],
+			worktrees: [],
 			clients: [
 				{
 					nodeId: "client-node",

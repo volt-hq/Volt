@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import type { Socket } from "node:net";
 import type { IrohRemoteActiveStreamEntry } from "../core/remote/iroh/active-stream-registry.ts";
 import { IrohRemoteActiveStreamRegistry } from "../core/remote/iroh/active-stream-registry.ts";
@@ -10,7 +11,7 @@ import {
 	IrohRemoteHostEngine,
 	type IrohRemoteHostHandshakeResult,
 } from "../core/remote/iroh/engine.ts";
-import { createIrohRemoteHandshakeFailure } from "../core/remote/iroh/handshake.ts";
+import { createIrohRemoteHandshakeFailure, type IrohRemoteHello } from "../core/remote/iroh/handshake.ts";
 import {
 	DEFAULT_IROH_REMOTE_HANDSHAKE_MAX_LINE_BYTES,
 	DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS,
@@ -24,15 +25,17 @@ import {
 	IrohRemotePushRelayHttpClient,
 } from "../core/remote/iroh/push.ts";
 import { createIrohRemoteRpcErrorResponse } from "../core/remote/iroh/rpc-command-filter.ts";
-import type { IrohRemoteWorkspace } from "../core/remote/iroh/state.ts";
+import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import { getIrohRemoteWorkspaceAvailabilityStatus } from "../core/remote/iroh/workspace.ts";
+import type { IrohRemoteWorktreeRpcBackend } from "../core/remote/iroh/worktree-rpc.ts";
 import type { IrohBiStreamLike } from "../core/rpc/iroh-transport.ts";
 import { getDefaultSessionDir } from "../core/session-manager.ts";
 import { getCurrentThemeName, getResolvedThemeColors } from "../core/theme/runtime.ts";
 import { ProjectTrustStore } from "../core/trust-manager.ts";
 import { runIrohRemoteRpcMode } from "../modes/rpc/iroh-remote-rpc-mode.ts";
 import {
+	CONTROL_WORKTREES_CAPABILITY,
 	type ControlLeaseStatus,
 	type ControlRequest,
 	RELAY_RPC_COMMAND_TYPES,
@@ -59,6 +62,7 @@ import {
 	type RemoteHostResponseContext,
 } from "./handshake-responses.ts";
 import {
+	createConversationOpenError,
 	getResolvedTargetSessionId,
 	type IntegratedRuntimeEntry,
 	IntegratedRuntimeRegistry,
@@ -79,14 +83,27 @@ import {
 	type IrohRemoteSessionTarget,
 	resolveIrohRemoteSessionTarget,
 } from "./session-target.ts";
+import { resolveWorktreeCleanupPolicy } from "./state.ts";
 import { createHostThemeTokensFrame, HOST_THEME_TOKENS_FEATURE } from "./theme-push.ts";
 import { ViewerFeedRegistry } from "./viewer-feed.ts";
 import {
+	type RemoteSanitizerOverrides,
 	runWorkspaceDiscoveryStream,
 	runWorkspaceManagementStream,
+	runWorktreeManagementStream,
 	WORKSPACE_UNREGISTERED_CLOSE_REASON,
 	writeIrohRemoteJsonLine,
 } from "./workspace-streams.ts";
+import {
+	evaluateWorktreeRelayGate,
+	getWorkspaceWorktreesDir,
+	getWorktreesRoot,
+	handleWorktreeControlRequest,
+	isWorktreeControlRequest,
+	WorktreeManager,
+	type WorktreeResult,
+	WorktreeRetentionSweeper,
+} from "./worktree-manager.ts";
 
 const ACTIVE_REVOKE_CLOSE_REASON = "revoked";
 const ACTIVE_REPLACE_CLOSE_REASON = "replaced";
@@ -312,6 +329,8 @@ class IrohDaemonService {
 	private readonly pushNotificationDeduper = new IrohRemoteInMemoryPushNotificationDeduper();
 	private readonly trustStore: ProjectTrustStore;
 	private readonly runtimes: IntegratedRuntimeRegistry;
+	private readonly worktrees: WorktreeManager;
+	private readonly worktreeRetention: WorktreeRetentionSweeper;
 	private readonly leaseBroker: LeaseBroker;
 	private readonly viewerFeeds: ViewerFeedRegistry;
 	private readonly relays = new RelayRegistry();
@@ -358,10 +377,32 @@ class IrohDaemonService {
 				resolveIrohRemoteWorkspaceProjectTrusted(workspace, { trustStore: this.trustStore }),
 			setClientLastSessionId: (nodeId, workspace, sessionId) =>
 				this.requireEngine().setClientLastSessionId(nodeId, workspace, sessionId),
+			resolveWorktree: (workspaceName, hello, targetSessionId) =>
+				this.resolveConversationWorktree(workspaceName, hello, targetSessionId),
+			bindWorktreeSession: (workspaceName, worktreeId, sessionId) =>
+				this.worktrees.bindSession(workspaceName, worktreeId, sessionId),
 			onRuntimeRekeyed: (workspaceName, previousSessionId, sessionId) =>
 				this.leaseBroker.rekey(workspaceName, previousSessionId, sessionId),
-			onRuntimeDisposed: (entry, reason) =>
-				this.leaseBroker.onDaemonRuntimeDisposed(entry.workspaceName, entry.sessionId, reason),
+			onRuntimeDisposed: (entry, reason) => {
+				this.leaseBroker.onDaemonRuntimeDisposed(entry.workspaceName, entry.sessionId, reason);
+				if (entry.worktreeId !== undefined) {
+					this.worktreeRetention.onRuntimeDisposed(entry.workspaceName, entry.worktreeId);
+				}
+			},
+		});
+		this.worktrees = new WorktreeManager({
+			agentDir: services.agentDir,
+			stateManager: this.stateManager,
+			auditLogger: services.auditLogger,
+			hasActiveRuntimeForSession: (workspaceName, sessionId) =>
+				this.runtimes.findOwner(workspaceName, sessionId) !== undefined,
+			flushState: () => services.state.flush(),
+		});
+		this.worktreeRetention = new WorktreeRetentionSweeper({
+			manager: this.worktrees,
+			stateManager: this.stateManager,
+			auditLogger: services.auditLogger,
+			getRetentionPolicy: () => resolveWorktreeCleanupPolicy(services.state.state.settings).retention,
 		});
 		this.viewerFeeds = new ViewerFeedRegistry({
 			sendTo: (connectionId, event) => services.controlServer.sendTo(connectionId, event),
@@ -425,6 +466,36 @@ class IrohDaemonService {
 		return this.engine;
 	}
 
+	private async pruneWorktreesOnStart(): Promise<void> {
+		if (!resolveWorktreeCleanupPolicy(this.services.state.state.settings).pruneOnStart) {
+			return;
+		}
+		try {
+			const state = await this.stateManager.getState();
+			const workspacesWithRecords = new Set((state.worktrees ?? []).map((worktree) => worktree.workspaceName));
+			for (const workspace of state.workspaces) {
+				// Skip workspaces with neither records nor checkout directories: no git
+				// subprocesses or audit noise on the common no-worktrees start.
+				if (
+					!workspacesWithRecords.has(workspace.name) &&
+					!existsSync(getWorkspaceWorktreesDir(this.services.agentDir, workspace.path))
+				) {
+					continue;
+				}
+				try {
+					await this.worktrees.prune(workspace);
+				} catch (error) {
+					this.log("warn", "worktree prune failed on start", {
+						workspace: workspace.name,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+		} catch {
+			// Startup prune is best-effort; a manual `volt remote worktree prune` covers it.
+		}
+	}
+
 	private getWorkspaceAllowTools(workspace: IrohRemoteWorkspace): string | undefined {
 		const allowTools = this.services.state.state.settings.allowTools;
 		if (allowTools && allowTools.length > 0) {
@@ -443,6 +514,7 @@ class IrohDaemonService {
 
 	private getCommandContext(conversation?: {
 		workspaceName: string;
+		workspacePath?: string;
 		entry: IntegratedRuntimeEntry;
 		streamEntry?: IrohRemoteActiveStreamEntry;
 	}): ConversationCommandContext {
@@ -461,9 +533,12 @@ class IrohDaemonService {
 				// stream and runtime alive so the response can still be delivered
 				// (mirrors the workspace-management stream path).
 				const excludeOwn = conversation !== undefined && workspaceName === conversation.workspaceName;
+				const workspacePath = excludeOwn ? conversation.workspacePath : undefined;
 				await this.cleanupUnregisteredWorkspace(
 					workspaceName,
-					excludeOwn ? { streamEntry: conversation.streamEntry, runtimeEntry: conversation.entry } : {},
+					excludeOwn
+						? { streamEntry: conversation.streamEntry, runtimeEntry: conversation.entry, workspacePath }
+						: {},
 				);
 			},
 			...(conversation === undefined
@@ -480,6 +555,9 @@ class IrohDaemonService {
 		if (this.relayConfigWarning !== undefined) {
 			this.log("warn", this.relayConfigWarning);
 		}
+		// Reconcile worktree records/checkouts before the endpoint starts taking
+		// conversations (design §5.3 pruneOnStart; default on, quarantine-only).
+		await this.pruneWorktreesOnStart();
 		try {
 			const builder = this.iroh.Endpoint.builder();
 			if (this.relayMode === "development") {
@@ -718,6 +796,10 @@ class IrohDaemonService {
 			return;
 		}
 		if (handshake.hello.mode === "workspaceManagement") {
+			if (handshake.hello.workspaceManagement.purpose === "manage_worktrees") {
+				await this.runWorktreeManagement(stream, handshake, connection, connectionId, streamId);
+				return;
+			}
 			await this.runWorkspaceManagement(stream, handshake, connection, connectionId, streamId);
 			return;
 		}
@@ -735,7 +817,7 @@ class IrohDaemonService {
 		connection: IrohConnectionLike,
 		connectionId: string,
 		streamId: string,
-		details: { terminalSessionId?: string | undefined } = {},
+		details: { terminalSessionId?: string | undefined; sanitizerOverrides?: RemoteSanitizerOverrides } = {},
 	): { entry: IrohRemoteActiveStreamEntry; remove: () => void } {
 		const entry: IrohRemoteActiveStreamEntry = {
 			clientNodeId: authorization.client.nodeId,
@@ -749,7 +831,8 @@ class IrohDaemonService {
 					sessionId: Object.hasOwn(details, "terminalSessionId") ? details.terminalSessionId : entry.sessionId,
 				}),
 			closeConnection: (reason: string) => closeConnection(connection, reason),
-			write: (value: object) => writeIrohRemoteJsonLine(stream.send, value, authorization),
+			write: (value: object) =>
+				writeIrohRemoteJsonLine(stream.send, value, authorization, details.sanitizerOverrides ?? {}),
 		};
 		const remove = this.activeStreams.register(entry);
 		return { entry, remove };
@@ -890,7 +973,7 @@ class IrohDaemonService {
 						this.engine?.clearPairingSecretForWorkspace(workspaceName);
 						const { closedStreamCount, stoppedRuntimeCount } = await this.cleanupUnregisteredWorkspace(
 							workspaceName,
-							{ streamEntry: activeStream.entry },
+							{ streamEntry: activeStream.entry, workspacePath: removedWorkspace.path },
 						);
 						return { ok: true, closedStreamCount, stoppedRuntimeCount };
 					},
@@ -899,6 +982,148 @@ class IrohDaemonService {
 		} finally {
 			activeStream.remove();
 		}
+	}
+
+	/** Serve a manage_worktrees workspaceManagement stream (worktrees.v1). */
+	private async runWorktreeManagement(
+		stream: IrohBiStreamLike,
+		handshake: Extract<IrohRemoteHostHandshakeResult, { ok: true }>,
+		connection: IrohConnectionLike,
+		connectionId: string,
+		streamId: string,
+	): Promise<void> {
+		await writeIrohRemoteHandshakeResponse(stream.send, handshake.response);
+		const sanitizerOverrides: RemoteSanitizerOverrides = {
+			additionalRedactedPaths: [getWorktreesRoot(this.services.agentDir)],
+		};
+		const activeStream = this.registerActiveStream(
+			handshake.authorization,
+			WORKSPACE_MANAGEMENT_STREAM_SESSION_ID,
+			stream,
+			connection,
+			connectionId,
+			streamId,
+			{ terminalSessionId: undefined, sanitizerOverrides },
+		);
+		try {
+			await runWorktreeManagementStream(
+				{
+					stream,
+					initialInput: handshake.initialInput,
+					authorization: handshake.authorization,
+					closeStream: (reason) => closeIrohRemoteStream(stream, reason),
+				},
+				{
+					auditLogger: this.services.auditLogger,
+					additionalRedactedPaths: sanitizerOverrides.additionalRedactedPaths,
+					worktrees: this.createWorktreeRpcBackend(handshake.authorization.workspace),
+				},
+			);
+		} finally {
+			activeStream.remove();
+		}
+	}
+
+	/** Backend for the worktree RPC helpers, bound to the stream's authorized workspace. */
+	private createWorktreeRpcBackend(workspace: IrohRemoteWorkspace): IrohRemoteWorktreeRpcBackend {
+		return {
+			createWorktree: async (_workspaceName, options) => {
+				const created = await this.worktrees.create(workspace, options);
+				if (!created.ok) {
+					return {
+						ok: false,
+						error: created.error,
+						...(created.detail === undefined ? {} : { detail: created.detail }),
+					};
+				}
+				return { ok: true, worktree: created.worktree };
+			},
+			listWorktrees: async () => ({ ok: true, worktrees: await this.worktrees.list(workspace) }),
+			removeWorktree: async (_workspaceName, worktreeId, force) =>
+				this.removeWorkspaceWorktree(workspace, worktreeId, force),
+		};
+	}
+
+	/**
+	 * Runtime-aware worktree removal: refuses busy worktrees without force; with
+	 * force, closes bound phone streams and stops bound runtimes first.
+	 */
+	private async removeWorkspaceWorktree(
+		workspace: IrohRemoteWorkspace,
+		worktreeId: string,
+		force: boolean,
+	): Promise<WorktreeResult<{ stoppedRuntimeCount: number; closedStreamCount: number }>> {
+		const record = await this.worktrees.findWorktree(workspace.name, worktreeId);
+		if (!record) {
+			return { ok: false, error: "worktree_not_found" };
+		}
+		let stoppedRuntimeCount = 0;
+		let closedStreamCount = 0;
+		const boundEntries = record.sessionIds
+			.map((sessionId) => this.runtimes.findOwner(workspace.name, sessionId))
+			.filter((entry): entry is IntegratedRuntimeEntry => entry !== undefined);
+		if (boundEntries.length > 0) {
+			if (!force) {
+				return { ok: false, error: "worktree_busy" };
+			}
+			for (const entry of boundEntries) {
+				closedStreamCount += await this.closeActiveStreamsForConversationKey(
+					workspace.name,
+					entry.sessionId,
+					"worktree_removed",
+				);
+				await this.runtimes.stopEntry(entry, "worktree_removed");
+				stoppedRuntimeCount++;
+			}
+		}
+		const removed = await this.worktrees.remove(workspace, worktreeId, { force });
+		if (!removed.ok) {
+			return removed;
+		}
+		return { ok: true, stoppedRuntimeCount, closedStreamCount };
+	}
+
+	/**
+	 * Worktree resolution for conversation opens: explicit worktreeId on "new"
+	 * (must exist AND be on disk), persisted binding on resume (missing checkout
+	 * fails with session_unavailable). Availability is an open-time failure, not
+	 * an authorization failure.
+	 */
+	private async resolveConversationWorktree(
+		workspaceName: string,
+		hello: IrohRemoteHello,
+		targetSessionId: string | undefined,
+	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
+		if (hello.mode !== "conversation") {
+			return undefined;
+		}
+		if (hello.conversation.target === "new") {
+			const worktreeId = hello.conversation.worktreeId;
+			if (worktreeId === undefined) {
+				return undefined;
+			}
+			const worktree = await this.worktrees.findWorktree(workspaceName, worktreeId);
+			if (!worktree || !existsSync(worktree.path)) {
+				throw createConversationOpenError("invalid_conversation_target", "unknown or unavailable worktree", {
+					workspace: workspaceName,
+				});
+			}
+			return worktree;
+		}
+		if (targetSessionId === undefined) {
+			return undefined;
+		}
+		const worktree = await this.worktrees.resolveSessionWorktree(workspaceName, targetSessionId);
+		if (worktree === undefined) {
+			return undefined;
+		}
+		if (!existsSync(worktree.path)) {
+			throw createConversationOpenError("session_unavailable", "worktree checkout is unavailable", {
+				workspace: workspaceName,
+				sessionId: targetSessionId,
+			});
+		}
+		return worktree;
 	}
 
 	// ==========================================================================
@@ -1055,13 +1280,43 @@ class IrohDaemonService {
 			handshake.hello.mode === "conversation" && handshake.hello.conversation.target === "session"
 				? { kind: "session", sessionId: handshake.hello.conversation.sessionId }
 				: { kind: "last", resumeSessionId: targetSessionId };
+		// A worktree-bound session must resolve against the worktree cwd (the
+		// parent-keyed session dir plus a non-matching cwd makes SessionManager.list
+		// filter by header cwd, restricting resolution to that worktree's sessions).
+		const boundWorktree = await this.stateManager.findWorktreeForSession(workspaceName, targetSessionId);
+		// Worktree-bound conversations are only relayed to TUIs that advertised the
+		// worktrees control capability (an old TUI would sanitize with the parent
+		// root and leak host paths), and never when the checkout has vanished.
+		const relayGate = evaluateWorktreeRelayGate(
+			boundWorktree,
+			this.services.controlServer
+				.connections()
+				.find((controlConnection) => controlConnection.connectionId === tuiConnectionId)?.capabilities,
+			CONTROL_WORKTREES_CAPABILITY,
+		);
+		if (!relayGate.ok) {
+			if (relayGate.reason === "checkout_missing") {
+				await this.sendHandshakeError(stream, {
+					message: "worktree checkout is unavailable",
+					outcome: "session_unavailable",
+					workspace: workspaceName,
+					sessionId: targetSessionId,
+				});
+				return;
+			}
+			await this.sendHandshakeError(stream, {
+				message: "conversation owner cannot serve worktree sessions; retry",
+				retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
+			});
+			return;
+		}
 		let resolvedTarget: Awaited<ReturnType<typeof resolveIrohRemoteSessionTarget>>;
 		try {
 			resolvedTarget = await resolveIrohRemoteSessionTarget(
 				target,
 				{ name: workspaceName, path: authorization.workspace.path },
 				createSessionManagerTargetStore(
-					authorization.workspace.path,
+					boundWorktree?.path ?? authorization.workspace.path,
 					getDefaultSessionDir(authorization.workspace.path, this.services.agentDir),
 				),
 			);
@@ -1126,6 +1381,9 @@ class IrohDaemonService {
 						clientNodeId: authorization.client.nodeId,
 						workspaceName,
 						workspacePath: authorization.workspace.path,
+						...(boundWorktree === undefined
+							? {}
+							: { worktreeId: boundWorktree.id, worktreePath: boundWorktree.path }),
 					},
 					// The phone verifies the saved host's node id in the handshake
 					// response the TUI writes; without this the relay path fails the
@@ -1146,6 +1404,7 @@ class IrohDaemonService {
 							: { requestedSessionId: resolvedTarget.requestedSessionId }),
 						workspaceName: resolvedTarget.workspaceName,
 						workspacePath: resolvedTarget.workspacePath,
+						...(boundWorktree === undefined ? {} : { worktreeId: boundWorktree.id }),
 					},
 				},
 				settle: (outcome) => {
@@ -1368,6 +1627,16 @@ class IrohDaemonService {
 				return;
 			}
 			handshakeCommitted = true;
+			// Worktree-bound conversations sanitize with the worktree checkout as the
+			// root; the parent checkout and the worktrees root must ALSO redact (bash
+			// output like `git worktree list` prints both).
+			const worktreeSanitizerOverrides: RemoteSanitizerOverrides | undefined =
+				entry.worktreePath === undefined
+					? undefined
+					: {
+							workspacePath: entry.worktreePath,
+							additionalRedactedPaths: [authorization.workspace.path, getWorktreesRoot(this.services.agentDir)],
+						};
 			const replacedEntries = this.activeStreams.takeEntriesForConversationOnOtherConnections(
 				authorization.client.nodeId,
 				authorization.workspace.name,
@@ -1381,6 +1650,7 @@ class IrohDaemonService {
 				connection,
 				connectionId,
 				streamId,
+				worktreeSanitizerOverrides === undefined ? {} : { sanitizerOverrides: worktreeSanitizerOverrides },
 			);
 			await this.closeReplacedActiveStreams(authorization, streamId, replacedEntries);
 			await writeIrohRemoteHandshakeResponse(
@@ -1391,6 +1661,7 @@ class IrohDaemonService {
 					entry.sessionId,
 					sessionSelection,
 					this.getResponseContext(),
+					entry.worktreeId,
 				),
 			);
 			subscriber = await this.runtimes.attachSubscriber(entry);
@@ -1429,6 +1700,7 @@ class IrohDaemonService {
 						authorization,
 						this.getCommandContext({
 							workspaceName: authorization.workspace.name,
+							workspacePath: authorization.workspace.path,
 							entry,
 							streamEntry: activeStream?.entry,
 						}),
@@ -1437,7 +1709,10 @@ class IrohDaemonService {
 				stream,
 				initialInput: handshake.initialInput,
 				workspaceName: authorization.workspace.name,
-				workspacePath: authorization.workspace.path,
+				workspacePath: entry.worktreePath ?? authorization.workspace.path,
+				...(worktreeSanitizerOverrides?.additionalRedactedPaths === undefined
+					? {}
+					: { additionalRedactedPaths: worktreeSanitizerOverrides.additionalRedactedPaths }),
 			});
 		} catch (error) {
 			subscriberError = error;
@@ -1634,6 +1909,8 @@ class IrohDaemonService {
 			streamEntry?: IrohRemoteActiveStreamEntry;
 			runtimeEntry?: IntegratedRuntimeEntry;
 			relayIds?: ReadonlySet<string>;
+			/** Enables best-effort worktree checkout removal (records are already gone). */
+			workspacePath?: string;
 		} = {},
 	): Promise<{ closedStreamCount: number; stoppedRuntimeCount: number }> {
 		const closedStreamCount = await this.closeActiveStreamsForWorkspace(
@@ -1648,6 +1925,11 @@ class IrohDaemonService {
 		);
 		await this.stateManager.removeLiveActivitiesForWorkspace(workspaceName);
 		this.closeRelaysForWorkspace(workspaceName, exclusions.relayIds);
+		if (exclusions.workspacePath !== undefined) {
+			await this.worktrees
+				.cleanupUnregisteredWorkspace({ name: workspaceName, path: exclusions.workspacePath })
+				.catch(() => {});
+		}
 		return { closedStreamCount, stoppedRuntimeCount };
 	}
 
@@ -1978,7 +2260,7 @@ class IrohDaemonService {
 					return true;
 				}
 				this.engine?.clearPairingSecretForWorkspace(request.name);
-				await this.cleanupUnregisteredWorkspace(request.name);
+				await this.cleanupUnregisteredWorkspace(request.name, { workspacePath: removedWorkspace.path });
 				await this.logAudit({
 					type: "workspace_unregistered",
 					workspace: request.name,
@@ -1989,6 +2271,15 @@ class IrohDaemonService {
 				return true;
 			}
 			default:
+				if (isWorktreeControlRequest(request)) {
+					await handleWorktreeControlRequest(connection, request, {
+						manager: this.worktrees,
+						stateManager: this.stateManager,
+						removeWorktree: (workspace, worktreeId, force) =>
+							this.removeWorkspaceWorktree(workspace, worktreeId, force),
+					});
+					return true;
+				}
 				return false;
 		}
 	}
@@ -2086,7 +2377,10 @@ class IrohDaemonService {
 		const context: ConversationCommandContext = {
 			...this.getCommandContext(),
 			onWorkspaceUnregistered: async (workspaceName) => {
-				await this.cleanupUnregisteredWorkspace(workspaceName, { relayIds: excludeRelayIds });
+				await this.cleanupUnregisteredWorkspace(workspaceName, {
+					relayIds: excludeRelayIds,
+					workspacePath: workspace.path,
+				});
 			},
 		};
 		const response = await handleRemoteHostRpcCommand(command, authorization, context);
@@ -2145,6 +2439,7 @@ class IrohDaemonService {
 
 	async shutdown(): Promise<void> {
 		this.shuttingDown = true;
+		this.worktreeRetention.dispose();
 		// 1. Stop accepting: close the endpoint accept loop lazily; new hellos are
 		//    rejected by the control server's shutting-down gate. Close relays and
 		//    unredeemed offers up front with the dedicated host_shutdown reason —

@@ -1,6 +1,7 @@
 import { basename, resolve } from "node:path";
 import { getAgentDir, VERSION } from "../config.ts";
 import { formatIrohRemoteTicketQrCode } from "../core/remote/iroh/qr.ts";
+import { spawnProcess, waitForChildProcess } from "../utils/child-process.ts";
 import { createDaemonClient, type DaemonClient } from "./control-client.ts";
 import type { ControlEvent, ControlResponse } from "./control-protocol.ts";
 import { ensureDaemonRunning, probeDaemon } from "./spawn.ts";
@@ -18,6 +19,16 @@ Commands:
                                 Register a workspace with the daemon.
   workspace remove <name>       Unregister a workspace.
   workspace list                List registered workspaces.
+  worktree add [--workspace <name>] [--name <id>] [--branch <ref>] [--base <ref>]
+                                Create a daemon-managed git worktree.
+  worktree list [--workspace <name>] [--json]
+                                List daemon-managed worktrees.
+  worktree remove <id> [--workspace <name>] [--force]
+                                Remove a worktree (refuses dirty/busy without --force).
+  worktree prune [--workspace <name>]
+                                Reconcile worktree records against the filesystem.
+  worktree diff <id> [--workspace <name>]
+                                Show the worktree branch's diff against its base ref.
 
 "volt remote host" has been replaced by the background daemon. Run "volt daemon start"
 (or enable remote.background). See docs/daemon.md.
@@ -391,6 +402,220 @@ async function handleWorkspaceCommand(args: string[]): Promise<void> {
 	process.exitCode = 1;
 }
 
+function takeFlagValue(args: string[], flag: string): { ok: true; value: string | undefined } | { ok: false } {
+	const index = args.indexOf(flag);
+	if (index === -1) {
+		return { ok: true, value: undefined };
+	}
+	const value = args[index + 1];
+	if (!value) {
+		console.error(`Error: ${flag} requires a value`);
+		process.exitCode = 1;
+		return { ok: false };
+	}
+	args.splice(index, 2);
+	return { ok: true, value };
+}
+
+/**
+ * Default the workspace to the daemon workspace registered for the cwd (same
+ * prefix match as pairing), without auto-registering on miss.
+ */
+async function resolveWorkspaceNameForCwd(session: RemoteControlSession): Promise<string | undefined> {
+	const status = await session.client.request({ type: "status" });
+	if (status.type !== "status_result") {
+		reportControlError(status, "status");
+		return undefined;
+	}
+	const cwd = resolve(process.cwd());
+	const match = status.workspaces
+		.filter((workspace) => cwd === workspace.path || cwd.startsWith(`${workspace.path}/`))
+		.sort((left, right) => right.path.length - left.path.length)[0];
+	if (!match) {
+		console.error("Error: no registered workspace matches the current directory; pass --workspace <name>");
+		process.exitCode = 1;
+		return undefined;
+	}
+	return match.name;
+}
+
+async function handleWorktreeCommand(args: string[]): Promise<void> {
+	const subcommand = args[0];
+	if (
+		subcommand !== "add" &&
+		subcommand !== "list" &&
+		subcommand !== "remove" &&
+		subcommand !== "prune" &&
+		subcommand !== "diff"
+	) {
+		console.error(`Error: Unknown worktree command: ${subcommand ?? "<missing>"}`);
+		printRemoteUsage();
+		process.exitCode = 1;
+		return;
+	}
+	const rest = args.slice(1);
+	const workspaceFlag = takeFlagValue(rest, "--workspace");
+	if (!workspaceFlag.ok) {
+		return;
+	}
+	const session = await connectToDaemon({ autoStart: false });
+	if (!session) {
+		return;
+	}
+	try {
+		let workspaceName = workspaceFlag.value;
+		if (workspaceName === undefined && (subcommand === "add" || subcommand === "remove" || subcommand === "diff")) {
+			workspaceName = await resolveWorkspaceNameForCwd(session);
+			if (workspaceName === undefined) {
+				return;
+			}
+		}
+		if (subcommand === "add") {
+			const nameFlag = takeFlagValue(rest, "--name");
+			const branchFlag = takeFlagValue(rest, "--branch");
+			const baseFlag = takeFlagValue(rest, "--base");
+			if (!nameFlag.ok || !branchFlag.ok || !baseFlag.ok || workspaceName === undefined) {
+				return;
+			}
+			const response = await session.client.request({
+				type: "worktree_create",
+				workspaceName,
+				...(nameFlag.value === undefined ? {} : { worktreeName: nameFlag.value }),
+				...(branchFlag.value === undefined ? {} : { branch: branchFlag.value }),
+				...(baseFlag.value === undefined ? {} : { baseRef: baseFlag.value }),
+			});
+			if (reportControlError(response, "worktree add")) {
+				return;
+			}
+			if (response.type !== "worktree_result") {
+				console.error("Error: unexpected daemon response for worktree add");
+				process.exitCode = 1;
+				return;
+			}
+			console.error(
+				`created worktree ${response.worktree.id} (branch ${response.worktree.branch}) -> ${response.worktree.path}`,
+			);
+			return;
+		}
+		if (subcommand === "list") {
+			const response = await session.client.request({
+				type: "worktree_list",
+				...(workspaceName === undefined ? {} : { workspaceName }),
+			});
+			if (reportControlError(response, "worktree list")) {
+				return;
+			}
+			if (response.type !== "worktrees_result") {
+				console.error("Error: unexpected daemon response for worktree list");
+				process.exitCode = 1;
+				return;
+			}
+			if (rest.includes("--json")) {
+				console.log(JSON.stringify(response.worktrees, null, 2));
+				return;
+			}
+			for (const worktree of response.worktrees) {
+				const aheadBehind =
+					worktree.aheadBehind === undefined
+						? ""
+						: ` (+${worktree.aheadBehind.ahead}/-${worktree.aheadBehind.behind})`;
+				console.error(
+					`${worktree.workspaceName}/${worktree.id}: ${worktree.branch}${aheadBehind}` +
+						`${worktree.available === false ? " (missing)" : ""}${worktree.dirty === true ? " (dirty)" : ""}` +
+						` -> ${worktree.path}`,
+				);
+			}
+			if (response.worktrees.length === 0) {
+				console.error("no worktrees");
+			}
+			return;
+		}
+		if (subcommand === "diff") {
+			const worktreeId = rest.filter((arg) => !arg.startsWith("--"))[0];
+			if (!worktreeId || workspaceName === undefined) {
+				if (!worktreeId) {
+					console.error("Error: worktree diff requires a worktree id");
+					process.exitCode = 1;
+				}
+				return;
+			}
+			const response = await session.client.request({ type: "worktree_list", workspaceName });
+			if (reportControlError(response, "worktree diff")) {
+				return;
+			}
+			if (response.type !== "worktrees_result") {
+				console.error("Error: unexpected daemon response for worktree diff");
+				process.exitCode = 1;
+				return;
+			}
+			const worktree = response.worktrees.find((entry) => entry.id === worktreeId);
+			if (!worktree) {
+				console.error(`Error: no worktree ${worktreeId} in workspace ${workspaceName}`);
+				process.exitCode = 1;
+				return;
+			}
+			if (worktree.available === false) {
+				console.error(`Error: worktree ${worktreeId} checkout is missing (${worktree.path})`);
+				process.exitCode = 1;
+				return;
+			}
+			// Read-only, run locally in the user's terminal; the daemon never mutates
+			// the main checkout (design §5.3).
+			const child = spawnProcess("git", ["-C", worktree.path, "diff", `${worktree.baseRef ?? "HEAD"}...HEAD`], {
+				stdio: ["ignore", "inherit", "inherit"],
+			});
+			const code = await waitForChildProcess(child);
+			if (code !== 0) {
+				process.exitCode = 1;
+			}
+			return;
+		}
+		if (subcommand === "remove") {
+			const force = rest.includes("--force");
+			const worktreeId = rest.filter((arg) => !arg.startsWith("--"))[0];
+			if (!worktreeId) {
+				console.error("Error: worktree remove requires a worktree id");
+				process.exitCode = 1;
+				return;
+			}
+			if (workspaceName === undefined) {
+				return;
+			}
+			const response = await session.client.request({
+				type: "worktree_remove",
+				workspaceName,
+				worktreeId,
+				...(force ? { force } : {}),
+			});
+			if (reportControlError(response, "worktree remove")) {
+				return;
+			}
+			console.error(`removed worktree ${worktreeId}`);
+			return;
+		}
+		const response = await session.client.request({
+			type: "worktree_prune",
+			...(workspaceName === undefined ? {} : { workspaceName }),
+		});
+		if (reportControlError(response, "worktree prune")) {
+			return;
+		}
+		if (response.type !== "worktree_prune_result") {
+			console.error("Error: unexpected daemon response for worktree prune");
+			process.exitCode = 1;
+			return;
+		}
+		for (const result of response.results) {
+			console.error(
+				`${result.workspaceName}: removed ${result.removedRecords.length} record(s), ` +
+					`quarantined ${result.orphanCheckouts.length} orphan checkout(s)`,
+			);
+		}
+	} finally {
+		await session.close();
+	}
+}
+
 /** Router for `volt remote <command>` (daemon control clients); returns true when handled. */
 export async function handleRemoteControlCommand(args: string[], options: { isBunBinary: boolean }): Promise<boolean> {
 	if (args[0] !== "remote") {
@@ -433,6 +658,9 @@ export async function handleRemoteControlCommand(args: string[], options: { isBu
 			return true;
 		case "workspace":
 			await handleWorkspaceCommand(rest);
+			return true;
+		case "worktree":
+			await handleWorktreeCommand(rest);
 			return true;
 		default:
 			console.error(`Error: Unknown remote command: ${command}`);

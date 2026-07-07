@@ -1,0 +1,936 @@
+import { createHash, randomInt } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, readdir, rename, rm } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
+import { IROH_REMOTE_WORKTREE_ID_PATTERN } from "../core/remote/iroh/protocol.ts";
+import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
+import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
+import { spawnProcess, waitForChildProcess } from "../utils/child-process.ts";
+import type { ControlRequest, ControlWorktreeStatus } from "./control-protocol.ts";
+import type { ControlConnection } from "./control-server.ts";
+
+/** join(agentDir, "worktrees") — sibling of sessions/, daemon/, trust.json. */
+export function getWorktreesRoot(agentDir: string): string {
+	return join(resolve(agentDir), "worktrees");
+}
+
+export const WORKTREE_ID_PATTERN = IROH_REMOTE_WORKTREE_ID_PATTERN;
+
+/**
+ * Encode a workspace path into the per-workspace worktrees directory segment,
+ * reusing the `--<encoded-cwd>--` scheme from the session dirs so the layout
+ * survives workspace renames. Long encodings are shortened with a hash suffix
+ * to stay clear of Windows MAX_PATH limits.
+ */
+function getWorkspaceWorktreesSegment(workspacePath: string): string {
+	const encoded = resolve(workspacePath)
+		.replace(/^[/\\]/, "")
+		.replace(/[/\\:]/g, "-");
+	if (encoded.length <= 80) {
+		return `--${encoded}--`;
+	}
+	const digest = createHash("sha1").update(encoded).digest("hex").slice(0, 8);
+	return `--${encoded.slice(0, 72)}-${digest}--`;
+}
+
+/** Per-workspace directory holding that workspace's worktree checkouts. */
+export function getWorkspaceWorktreesDir(agentDir: string, workspacePath: string): string {
+	return join(getWorktreesRoot(agentDir), getWorkspaceWorktreesSegment(workspacePath));
+}
+
+/**
+ * Deterministic checkout path; the ONLY producer of checkout paths. Validates
+ * the id and asserts the resolved path stays under the worktrees root — never
+ * accepts a caller-supplied path.
+ */
+export function getWorktreeCheckoutPath(agentDir: string, workspacePath: string, worktreeId: string): string {
+	if (!WORKTREE_ID_PATTERN.test(worktreeId)) {
+		throw new Error(`invalid worktree id: ${worktreeId}`);
+	}
+	const root = resolve(getWorktreesRoot(agentDir));
+	const checkoutPath = resolve(join(getWorkspaceWorktreesDir(agentDir, workspacePath), worktreeId));
+	const rootPrefix = `${root}${sep}`;
+	const contained =
+		process.platform === "win32"
+			? checkoutPath.toLowerCase().startsWith(rootPrefix.toLowerCase())
+			: checkoutPath.startsWith(rootPrefix);
+	if (!contained) {
+		throw new Error("worktree checkout path escapes the worktrees root");
+	}
+	return checkoutPath;
+}
+
+/** win32-aware "path is inside root" prefix check on resolved paths. */
+function isPathContained(root: string, path: string): boolean {
+	const resolvedRoot = resolve(root);
+	const resolvedPath = resolve(path);
+	const rootPrefix = `${resolvedRoot}${sep}`;
+	if (process.platform === "win32") {
+		const lowerPath = resolvedPath.toLowerCase();
+		return lowerPath === resolvedRoot.toLowerCase() || lowerPath.startsWith(rootPrefix.toLowerCase());
+	}
+	return resolvedPath === resolvedRoot || resolvedPath.startsWith(rootPrefix);
+}
+
+/** True when path is inside the daemon's worktrees root (a daemon-managed checkout or below). */
+export function isPathUnderWorktreesRoot(agentDir: string, path: string): boolean {
+	const root = resolve(getWorktreesRoot(agentDir));
+	const resolved = resolve(path);
+	return resolved !== root && isPathContained(root, resolved);
+}
+
+/**
+ * Resolve the PARENT checkout of a daemon-managed worktree from the checkout's
+ * `.git` gitdir pointer (`gitdir: <parent>/.git/worktrees/<id>`), without a
+ * daemon round-trip or a git subprocess. Returns undefined when the path is
+ * not under the worktrees root or the pointer cannot be parsed. Used by the
+ * TUI to pin trust decisions to the parent workspace path — trust entries are
+ * never prompted for or persisted on worktree paths (design §5.1.9/§5.2.1).
+ */
+export function resolveWorktreeParentCheckout(agentDir: string, path: string): string | undefined {
+	if (!isPathUnderWorktreesRoot(agentDir, path)) {
+		return undefined;
+	}
+	const root = resolve(getWorktreesRoot(agentDir));
+	const relativeSegments = resolve(path)
+		.slice(root.length + 1)
+		.split(sep)
+		.filter((segment) => segment.length > 0);
+	if (relativeSegments.length < 2) {
+		return undefined;
+	}
+	// Layout: <root>/<encoded-workspace-segment>/<worktreeId>/...
+	const checkoutPath = join(root, relativeSegments[0] ?? "", relativeSegments[1] ?? "");
+	let gitFileContents: string;
+	try {
+		gitFileContents = readFileSync(join(checkoutPath, ".git"), "utf8");
+	} catch {
+		return undefined;
+	}
+	const match = gitFileContents.match(/^gitdir:\s*(.+)\s*$/m);
+	if (!match?.[1]) {
+		return undefined;
+	}
+	const gitDir = match[1].trim();
+	if (!isAbsolute(gitDir)) {
+		return undefined;
+	}
+	// gitDir is <parent>/.git/worktrees/<name>; the parent checkout is three levels up.
+	const worktreesDir = dirname(resolve(gitDir));
+	const dotGitDir = dirname(worktreesDir);
+	if (worktreesDir.split(sep).pop() !== "worktrees" || dotGitDir.split(sep).pop() !== ".git") {
+		return undefined;
+	}
+	return dirname(dotGitDir);
+}
+
+export type WorktreeRelayGate = { ok: true } | { ok: false; reason: "checkout_missing" | "tui_not_capable" };
+
+/**
+ * Gate a worktree-bound conversation relay: the checkout must exist and the
+ * owning TUI must have advertised the worktrees control capability. Old TUIs
+ * (no capability) are never offered worktree-session relays (design §5.2.3).
+ */
+export function evaluateWorktreeRelayGate(
+	worktree: { path: string } | undefined,
+	tuiCapabilities: ReadonlySet<string> | undefined,
+	worktreesCapability: string,
+): WorktreeRelayGate {
+	if (worktree === undefined) {
+		return { ok: true };
+	}
+	if (!existsSync(worktree.path)) {
+		return { ok: false, reason: "checkout_missing" };
+	}
+	if (tuiCapabilities === undefined || !tuiCapabilities.has(worktreesCapability)) {
+		return { ok: false, reason: "tui_not_capable" };
+	}
+	return { ok: true };
+}
+
+export type WorktreeError =
+	| "not_a_git_repository"
+	| "worktree_exists"
+	| "worktree_branch_conflict"
+	| "worktree_not_found"
+	| "worktree_dirty"
+	| "worktree_busy"
+	| "worktree_limit_reached"
+	| "invalid_worktree_id"
+	| "git_failed";
+
+export type WorktreeGitRunner = (
+	args: string[],
+	cwd: string,
+) => Promise<{ ok: boolean; code: number | null; stdout: string; stderr: string }>;
+
+export interface WorktreeManagerOptions {
+	agentDir: string;
+	stateManager: IrohRemoteHostStateManager;
+	auditLogger: IrohRemoteAuditLogger;
+	/** Injectable for tests; defaults to a spawnProcess/waitForChildProcess wrapper. */
+	runGit?: WorktreeGitRunner;
+	/** Max worktrees per workspace (default 16). */
+	maxWorktreesPerWorkspace?: number;
+	/** Seam for "is a runtime using this worktree" (wired to IntegratedRuntimeRegistry). */
+	hasActiveRuntimeForSession?: (workspaceName: string, sessionId: string) => boolean;
+	/** Durable-write seam (VoltdStateStore.flush); records must survive a crash the moment they exist. */
+	flushState?: () => Promise<void>;
+	now?: () => number;
+}
+
+export interface WorktreeStatus extends IrohRemoteWorkspaceWorktree {
+	/** Checkout directory exists and `git worktree list` still knows it. */
+	available: boolean;
+	/** `git status --porcelain` non-empty, i.e. has uncommitted work (best-effort; undefined when unavailable). */
+	dirty?: boolean;
+	/** Branch commits vs the base ref (`git rev-list --left-right --count`); undefined when unavailable. */
+	aheadBehind?: { ahead: number; behind: number };
+}
+
+export type WorktreeResult<T> = ({ ok: true } & T) | { ok: false; error: WorktreeError; detail?: string };
+
+const DEFAULT_MAX_WORKTREES_PER_WORKSPACE = 16;
+
+const SLUG_ADJECTIVES = ["amber", "brisk", "calm", "dusky", "eager", "fresh", "keen", "lucid", "quiet", "swift"];
+const SLUG_NOUNS = ["basin", "cedar", "delta", "ember", "grove", "harbor", "mesa", "ridge", "summit", "vale"];
+
+function generateWorktreeIdSlug(): string {
+	const adjective = SLUG_ADJECTIVES[randomInt(SLUG_ADJECTIVES.length)];
+	const noun = SLUG_NOUNS[randomInt(SLUG_NOUNS.length)];
+	return `${adjective}-${noun}-${String(randomInt(100)).padStart(2, "0")}`;
+}
+
+/** Default runner: no shell, argv only, captured stdio. */
+export function createDefaultWorktreeGitRunner(): WorktreeGitRunner {
+	return async (args, cwd) => {
+		try {
+			const child = spawnProcess("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+			let stdout = "";
+			let stderr = "";
+			child.stdout?.setEncoding("utf8");
+			child.stderr?.setEncoding("utf8");
+			child.stdout?.on("data", (chunk: string) => {
+				stdout += chunk;
+			});
+			child.stderr?.on("data", (chunk: string) => {
+				stderr += chunk;
+			});
+			const code = await waitForChildProcess(child);
+			return { ok: code === 0, code, stdout, stderr };
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const detail = message.includes("ENOENT") ? "git not found on daemon PATH; see docs/daemon.md" : message;
+			return { ok: false, code: null, stdout: "", stderr: detail };
+		}
+	};
+}
+
+/**
+ * Basic `git check-ref-format`-equivalent syntax gate for branch/baseRef
+ * values. Rejects option injection (leading '-') and git-invalid ref
+ * sequences; values are always passed as separate argv entries.
+ */
+export function isValidGitRefSyntax(ref: string): boolean {
+	if (ref.length === 0 || ref.length > 255 || ref.startsWith("-")) {
+		return false;
+	}
+	if (/[\s~^:?*[\\\x00-\x1f\x7f]/.test(ref)) {
+		return false;
+	}
+	if (ref.includes("..") || ref.includes("@{") || ref.includes("//")) {
+		return false;
+	}
+	if (ref.startsWith("/") || ref.endsWith("/") || ref.endsWith(".") || ref.endsWith(".lock")) {
+		return false;
+	}
+	return true;
+}
+
+export class WorktreeManager {
+	private readonly agentDir: string;
+	private readonly stateManager: IrohRemoteHostStateManager;
+	private readonly auditLogger: IrohRemoteAuditLogger;
+	private readonly runGit: WorktreeGitRunner;
+	private readonly maxWorktreesPerWorkspace: number;
+	private readonly hasActiveRuntimeForSession: ((workspaceName: string, sessionId: string) => boolean) | undefined;
+	private readonly flushState: (() => Promise<void>) | undefined;
+	private readonly now: () => number;
+
+	constructor(options: WorktreeManagerOptions) {
+		this.agentDir = options.agentDir;
+		this.stateManager = options.stateManager;
+		this.auditLogger = options.auditLogger;
+		this.runGit = options.runGit ?? createDefaultWorktreeGitRunner();
+		this.maxWorktreesPerWorkspace = options.maxWorktreesPerWorkspace ?? DEFAULT_MAX_WORKTREES_PER_WORKSPACE;
+		this.hasActiveRuntimeForSession = options.hasActiveRuntimeForSession;
+		this.flushState = options.flushState;
+		this.now = options.now ?? Date.now;
+	}
+
+	/** git worktree add; persists the record durably after git succeeds. */
+	async create(
+		workspace: IrohRemoteWorkspace,
+		options: { id?: string; branch?: string; baseRef?: string } = {},
+	): Promise<WorktreeResult<{ worktree: IrohRemoteWorkspaceWorktree }>> {
+		const id = options.id ?? generateWorktreeIdSlug();
+		if (!WORKTREE_ID_PATTERN.test(id)) {
+			return { ok: false, error: "invalid_worktree_id" };
+		}
+		const branch = options.branch ?? `volt/${id}`;
+		const baseRef = options.baseRef ?? "HEAD";
+		if (!isValidGitRefSyntax(branch)) {
+			return { ok: false, error: "git_failed", detail: "invalid branch ref syntax" };
+		}
+		if (!isValidGitRefSyntax(baseRef)) {
+			return { ok: false, error: "git_failed", detail: "invalid baseRef ref syntax" };
+		}
+
+		const existing = await this.stateManager.listWorktrees(workspace.name);
+		if (existing.length >= this.maxWorktreesPerWorkspace) {
+			return { ok: false, error: "worktree_limit_reached" };
+		}
+		const checkoutPath = getWorktreeCheckoutPath(this.agentDir, workspace.path, id);
+		if (existing.some((entry) => entry.id === id) || existsSync(checkoutPath)) {
+			return { ok: false, error: "worktree_exists" };
+		}
+
+		const repoCheck = await this.runGit(["rev-parse", "--git-common-dir"], workspace.path);
+		if (!repoCheck.ok) {
+			return this.mapGitFailure(repoCheck.stderr, workspace, checkoutPath);
+		}
+
+		// Resolve a defaulted base to a concrete ref (the main checkout's branch,
+		// falling back to its commit sha) so merge-back guidance — aheadBehind,
+		// retention merge checks, `worktree diff` — has a stable base later.
+		const recordedBaseRef = options.baseRef ?? (await this.resolveDefaultBaseRef(workspace));
+
+		await mkdir(getWorkspaceWorktreesDir(this.agentDir, workspace.path), { recursive: true, mode: 0o700 });
+		const added = await this.runGit(["worktree", "add", checkoutPath, "-b", branch, baseRef], workspace.path);
+		if (!added.ok) {
+			return this.mapGitFailure(added.stderr, workspace, checkoutPath);
+		}
+
+		const worktree: IrohRemoteWorkspaceWorktree = {
+			id,
+			workspaceName: workspace.name,
+			path: checkoutPath,
+			branch,
+			...(recordedBaseRef === undefined ? {} : { baseRef: recordedBaseRef }),
+			createdAt: this.now(),
+			sessionIds: [],
+		};
+		await this.stateManager.upsertWorktree(worktree);
+		await this.flushState?.();
+		return { ok: true, worktree };
+	}
+
+	async list(workspace: IrohRemoteWorkspace): Promise<WorktreeStatus[]> {
+		const records = await this.stateManager.listWorktrees(workspace.name);
+		const gitList = await this.runGit(["worktree", "list", "--porcelain"], workspace.path);
+		const knownCheckouts = gitList.ok ? parseWorktreeListCheckouts(gitList.stdout) : undefined;
+		const statuses: WorktreeStatus[] = [];
+		for (const record of records) {
+			const onDisk = existsSync(record.path);
+			const available = onDisk && (knownCheckouts === undefined || knownCheckouts.has(resolve(record.path)));
+			let dirty: boolean | undefined;
+			let aheadBehind: { ahead: number; behind: number } | undefined;
+			if (available) {
+				// --no-optional-locks is a git-level option and must precede the subcommand.
+				const status = await this.runGit(
+					["-C", record.path, "--no-optional-locks", "status", "--porcelain"],
+					workspace.path,
+				);
+				dirty = status.ok ? status.stdout.trim().length > 0 : undefined;
+				aheadBehind = await this.computeAheadBehind(workspace, record);
+			}
+			statuses.push({
+				...record,
+				available,
+				...(dirty === undefined ? {} : { dirty }),
+				...(aheadBehind === undefined ? {} : { aheadBehind }),
+			});
+		}
+		return statuses;
+	}
+
+	/** Concrete base for a defaulted create: current branch name, else commit sha. */
+	private async resolveDefaultBaseRef(workspace: IrohRemoteWorkspace): Promise<string | undefined> {
+		const symbolic = await this.runGit(["symbolic-ref", "--short", "-q", "HEAD"], workspace.path);
+		const shortRef = symbolic.ok ? symbolic.stdout.trim() : "";
+		if (shortRef.length > 0 && isValidGitRefSyntax(shortRef)) {
+			return shortRef;
+		}
+		const sha = await this.runGit(["rev-parse", "HEAD"], workspace.path);
+		const shaValue = sha.ok ? sha.stdout.trim() : "";
+		return /^[0-9a-f]{4,64}$/i.test(shaValue) ? shaValue : undefined;
+	}
+
+	/**
+	 * Merge-back guidance (design §5.3): branch commits relative to the base
+	 * ref, computed read-only in the main checkout. `left...right` with
+	 * left = base and right = branch yields "behind<TAB>ahead".
+	 */
+	private async computeAheadBehind(
+		workspace: IrohRemoteWorkspace,
+		record: IrohRemoteWorkspaceWorktree,
+	): Promise<{ ahead: number; behind: number } | undefined> {
+		const baseRef = record.baseRef ?? "HEAD";
+		const counted = await this.runGit(
+			["rev-list", "--left-right", "--count", `${baseRef}...${record.branch}`],
+			workspace.path,
+		);
+		if (!counted.ok) {
+			return undefined;
+		}
+		const match = counted.stdout.trim().match(/^(\d+)\s+(\d+)$/);
+		if (!match?.[1] || !match[2]) {
+			return undefined;
+		}
+		return { behind: Number.parseInt(match[1], 10), ahead: Number.parseInt(match[2], 10) };
+	}
+
+	/** Refuses dirty/busy unless force; `git worktree remove [--force]`, then drops the record. */
+	async remove(
+		workspace: IrohRemoteWorkspace,
+		worktreeId: string,
+		options: { force?: boolean } = {},
+	): Promise<WorktreeResult<Record<never, never>>> {
+		const force = options.force === true;
+		const records = await this.stateManager.listWorktrees(workspace.name);
+		const record = records.find((entry) => entry.id === worktreeId);
+		if (!record) {
+			return { ok: false, error: "worktree_not_found" };
+		}
+		if (!force && this.hasActiveRuntimeForSession) {
+			const busy = record.sessionIds.some((sessionId) =>
+				this.hasActiveRuntimeForSession?.(workspace.name, sessionId),
+			);
+			if (busy) {
+				return { ok: false, error: "worktree_busy" };
+			}
+		}
+		if (existsSync(record.path)) {
+			if (!force) {
+				const status = await this.runGit(
+					["-C", record.path, "--no-optional-locks", "status", "--porcelain"],
+					workspace.path,
+				);
+				if (status.ok && status.stdout.trim().length > 0) {
+					return { ok: false, error: "worktree_dirty", detail: "dirty" };
+				}
+			}
+			const args = force ? ["worktree", "remove", "--force", record.path] : ["worktree", "remove", record.path];
+			const removed = await this.runGit(args, workspace.path);
+			if (!removed.ok) {
+				return this.mapGitFailure(removed.stderr, workspace, record.path);
+			}
+		} else {
+			// Checkout vanished out-of-band: clear the stale gitdir entry best-effort.
+			await this.runGit(["worktree", "prune"], workspace.path).catch(() => undefined);
+		}
+		await this.stateManager.removeWorktree(workspace.name, worktreeId);
+		await this.flushState?.();
+		return { ok: true };
+	}
+
+	/**
+	 * Reconcile persisted records vs filesystem vs `git worktree list`. Drops
+	 * records without checkouts, quarantines unrecognized checkout directories
+	 * (rename, never delete), and runs `git worktree prune` in the main checkout.
+	 */
+	async prune(workspace: IrohRemoteWorkspace): Promise<{ removedRecords: string[]; orphanCheckouts: string[] }> {
+		const records = await this.stateManager.listWorktrees(workspace.name);
+		const removedRecords: string[] = [];
+		for (const record of records) {
+			if (!existsSync(record.path)) {
+				await this.stateManager.removeWorktree(workspace.name, record.id);
+				removedRecords.push(record.id);
+			}
+		}
+		const orphanCheckouts: string[] = [];
+		const workspaceDir = getWorkspaceWorktreesDir(this.agentDir, workspace.path);
+		const recordedPaths = new Set(records.map((record) => resolve(record.path)));
+		if (existsSync(workspaceDir)) {
+			for (const entry of await readdir(workspaceDir, { withFileTypes: true })) {
+				if (!entry.isDirectory() || entry.name.includes(".orphan-")) {
+					continue;
+				}
+				const entryPath = resolve(join(workspaceDir, entry.name));
+				if (recordedPaths.has(entryPath)) {
+					continue;
+				}
+				const quarantinePath = `${entryPath}.orphan-${this.now()}`;
+				try {
+					await rename(entryPath, quarantinePath);
+					orphanCheckouts.push(entry.name);
+				} catch {
+					// Quarantine is best-effort; a busy directory stays put for the next prune.
+				}
+			}
+		}
+		await this.runGit(["worktree", "prune"], workspace.path).catch(() => undefined);
+		if (removedRecords.length > 0) {
+			await this.flushState?.();
+		}
+		await this.logAudit({
+			type: "worktree_pruned",
+			workspace: workspace.name,
+			success: true,
+			details: { removedRecords, orphanCheckouts },
+		});
+		return { removedRecords, orphanCheckouts };
+	}
+
+	/**
+	 * Retention removal (design §5.3): remove a worktree ONLY when it is not
+	 * busy, has no uncommitted work, and its branch is fully merged into the
+	 * base ref. Never forces; a skip returns the reason for the audit trail.
+	 */
+	async removeIfCleanAndMerged(
+		workspace: IrohRemoteWorkspace,
+		worktreeId: string,
+	): Promise<{ removed: true } | { removed: false; reason: string }> {
+		const record = (await this.stateManager.listWorktrees(workspace.name)).find((entry) => entry.id === worktreeId);
+		if (!record) {
+			return { removed: false, reason: "worktree_not_found" };
+		}
+		if (
+			this.hasActiveRuntimeForSession &&
+			record.sessionIds.some((sessionId) => this.hasActiveRuntimeForSession?.(workspace.name, sessionId))
+		) {
+			return { removed: false, reason: "busy" };
+		}
+		if (!existsSync(record.path)) {
+			return { removed: false, reason: "checkout_missing" };
+		}
+		const status = await this.runGit(
+			["-C", record.path, "--no-optional-locks", "status", "--porcelain"],
+			workspace.path,
+		);
+		if (!status.ok || status.stdout.trim().length > 0) {
+			return { removed: false, reason: "dirty" };
+		}
+		const merged = await this.runGit(
+			["merge-base", "--is-ancestor", record.branch, record.baseRef ?? "HEAD"],
+			workspace.path,
+		);
+		if (!merged.ok) {
+			return { removed: false, reason: "unmerged" };
+		}
+		const removedResult = await this.remove(workspace, worktreeId, { force: false });
+		if (!removedResult.ok) {
+			return { removed: false, reason: removedResult.error };
+		}
+		return { removed: true };
+	}
+
+	/** Lookup used by conversation open/resume and relay preamble resolution. */
+	async resolveSessionWorktree(
+		workspaceName: string,
+		sessionId: string,
+	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
+		return this.stateManager.findWorktreeForSession(workspaceName, sessionId);
+	}
+
+	async bindSession(workspaceName: string, worktreeId: string, sessionId: string): Promise<void> {
+		await this.stateManager.bindWorktreeSession(workspaceName, worktreeId, sessionId);
+		await this.flushState?.();
+	}
+
+	async findWorktree(workspaceName: string, worktreeId: string): Promise<IrohRemoteWorkspaceWorktree | undefined> {
+		const records = await this.stateManager.listWorktrees(workspaceName);
+		return records.find((entry) => entry.id === worktreeId);
+	}
+
+	/**
+	 * Best-effort checkout removal after a workspace unregister (records were
+	 * already dropped by the state manager). Uses git when the main checkout
+	 * still exists, plain directory removal otherwise.
+	 */
+	async cleanupUnregisteredWorkspace(workspace: IrohRemoteWorkspace): Promise<void> {
+		const workspaceDir = getWorkspaceWorktreesDir(this.agentDir, workspace.path);
+		if (!existsSync(workspaceDir)) {
+			return;
+		}
+		const mainCheckoutExists = existsSync(workspace.path);
+		let removedCheckoutCount = 0;
+		try {
+			for (const entry of await readdir(workspaceDir, { withFileTypes: true })) {
+				if (!entry.isDirectory()) {
+					continue;
+				}
+				const entryPath = join(workspaceDir, entry.name);
+				if (mainCheckoutExists) {
+					await this.runGit(["worktree", "remove", "--force", entryPath], workspace.path).catch(() => undefined);
+				}
+				await rm(entryPath, { recursive: true, force: true }).catch(() => undefined);
+				removedCheckoutCount++;
+			}
+			await rm(workspaceDir, { recursive: true, force: true });
+		} catch {
+			// Best-effort: leftover directories are reconciled by a later prune.
+		}
+		await this.logAudit({
+			type: "worktree_removed",
+			workspace: workspace.name,
+			success: true,
+			details: { reason: "workspace_unregistered", removedCheckoutCount },
+		});
+	}
+
+	private mapGitFailure(
+		stderr: string,
+		workspace: IrohRemoteWorkspace,
+		checkoutPath: string,
+	): { ok: false; error: WorktreeError; detail: string } {
+		const detail = sanitizeGitDetail(stderr, [checkoutPath, workspace.path, getWorktreesRoot(this.agentDir)]);
+		const lower = stderr.toLowerCase();
+		if (lower.includes("not a git repository")) {
+			return { ok: false, error: "not_a_git_repository", detail };
+		}
+		if (lower.includes("already exists")) {
+			return lower.includes("branch") || lower.includes("-b")
+				? { ok: false, error: "worktree_branch_conflict", detail }
+				: { ok: false, error: "worktree_exists", detail };
+		}
+		if (lower.includes("contains modified or untracked files")) {
+			return { ok: false, error: "worktree_dirty", detail };
+		}
+		return { ok: false, error: "git_failed", detail };
+	}
+
+	private async logAudit(event: Parameters<IrohRemoteAuditLogger["log"]>[0]): Promise<void> {
+		try {
+			await this.auditLogger.log(event);
+		} catch {
+			// Audit logging is best-effort.
+		}
+	}
+}
+
+function parseWorktreeListCheckouts(porcelainOutput: string): Set<string> {
+	const checkouts = new Set<string>();
+	for (const line of porcelainOutput.split("\n")) {
+		if (line.startsWith("worktree ")) {
+			checkouts.add(resolve(line.slice("worktree ".length).trim()));
+		}
+	}
+	return checkouts;
+}
+
+/** Strip host paths from git stderr before it lands in an RPC detail field. */
+function sanitizeGitDetail(stderr: string, paths: string[]): string {
+	let detail = stderr.trim();
+	for (const path of paths) {
+		while (detail.includes(path)) {
+			detail = detail.replace(path, "<redacted>");
+		}
+	}
+	return detail;
+}
+
+export interface WorktreeRetentionSweeperOptions {
+	manager: WorktreeManager;
+	stateManager: IrohRemoteHostStateManager;
+	auditLogger: IrohRemoteAuditLogger;
+	/** Resolved at sweep time so settings changes apply without a restart. */
+	getRetentionPolicy: () => { enabled: boolean; ttlMs: number } | undefined;
+	/** Injectable timers (tests). */
+	setTimer?: (callback: () => void, ttlMs: number) => NodeJS.Timeout;
+	clearTimer?: (timer: NodeJS.Timeout) => void;
+}
+
+/**
+ * Opt-in worktree retention (design §5.3): when a worktree-bound runtime is
+ * disposed, schedule a TTL sweep that removes the worktree ONLY when it is
+ * clean and fully merged into its base ref; otherwise the skip is audited as
+ * worktree_retention_skipped_dirty and the checkout stays put.
+ */
+export class WorktreeRetentionSweeper {
+	private readonly options: WorktreeRetentionSweeperOptions;
+	private readonly timers = new Map<string, NodeJS.Timeout>();
+	private disposed = false;
+
+	constructor(options: WorktreeRetentionSweeperOptions) {
+		this.options = options;
+	}
+
+	/** Hooked to IntegratedRuntimeRegistry.onRuntimeDisposed for worktree-bound entries. */
+	onRuntimeDisposed(workspaceName: string, worktreeId: string): void {
+		if (this.disposed) {
+			return;
+		}
+		const policy = this.options.getRetentionPolicy();
+		if (policy === undefined || !policy.enabled) {
+			return;
+		}
+		const key = `${workspaceName}\0${worktreeId}`;
+		const existing = this.timers.get(key);
+		if (existing !== undefined) {
+			(this.options.clearTimer ?? clearTimeout)(existing);
+		}
+		const timer = (this.options.setTimer ?? setTimeout)(() => {
+			this.timers.delete(key);
+			void this.sweep(workspaceName, worktreeId);
+		}, policy.ttlMs);
+		timer.unref?.();
+		this.timers.set(key, timer);
+	}
+
+	private async sweep(workspaceName: string, worktreeId: string): Promise<void> {
+		if (this.disposed) {
+			return;
+		}
+		try {
+			const state = await this.options.stateManager.getState();
+			const workspace = state.workspaces.find((entry) => entry.name === workspaceName);
+			if (!workspace) {
+				return;
+			}
+			const result = await this.options.manager.removeIfCleanAndMerged(workspace, worktreeId);
+			if (result.removed) {
+				await this.options.auditLogger.log({
+					type: "worktree_retention_removed",
+					workspace: workspaceName,
+					success: true,
+					details: { worktreeId },
+				});
+				return;
+			}
+			if (result.reason === "worktree_not_found") {
+				return;
+			}
+			await this.options.auditLogger.log({
+				type: "worktree_retention_skipped_dirty",
+				workspace: workspaceName,
+				success: false,
+				details: { worktreeId, reason: result.reason },
+			});
+		} catch {
+			// Retention is best-effort; the next disposal reschedules.
+		}
+	}
+
+	dispose(): void {
+		this.disposed = true;
+		for (const timer of this.timers.values()) {
+			(this.options.clearTimer ?? clearTimeout)(timer);
+		}
+		this.timers.clear();
+	}
+}
+
+export type WorktreeControlRequest = Extract<
+	ControlRequest,
+	{
+		type:
+			| "worktree_create"
+			| "worktree_list"
+			| "worktree_remove"
+			| "worktree_prune"
+			| "worktree_resolve"
+			| "worktree_bind";
+	}
+>;
+
+export interface WorktreeControlRequestHooks {
+	manager: WorktreeManager;
+	stateManager: IrohRemoteHostStateManager;
+	/** Force-remove hook that stops bound runtimes first (wired by the iroh service). */
+	removeWorktree?: (
+		workspace: IrohRemoteWorkspace,
+		worktreeId: string,
+		force: boolean,
+	) => Promise<WorktreeResult<Record<never, never>>>;
+}
+
+export function isWorktreeControlRequest(request: ControlRequest): request is WorktreeControlRequest {
+	return (
+		request.type === "worktree_create" ||
+		request.type === "worktree_list" ||
+		request.type === "worktree_remove" ||
+		request.type === "worktree_prune" ||
+		request.type === "worktree_resolve" ||
+		request.type === "worktree_bind"
+	);
+}
+
+/**
+ * Shared `worktree_*` control-socket handler: used by the daemon skeleton
+ * (main.ts fallback) and the iroh service (which layers runtime-aware remove
+ * on top via hooks.removeWorktree). Control responses MAY include checkout
+ * paths — the no-paths rule applies to the iroh wire, not the local socket.
+ */
+export async function handleWorktreeControlRequest(
+	connection: ControlConnection,
+	request: WorktreeControlRequest,
+	hooks: WorktreeControlRequestHooks,
+): Promise<void> {
+	const state = await hooks.stateManager.getState();
+	const findWorkspace = (name: string): IrohRemoteWorkspace | undefined =>
+		state.workspaces.find((workspace) => workspace.name === name);
+	const sendWorkspaceNotFound = (name: string) => {
+		connection.send({
+			type: "error",
+			id: request.id,
+			code: "not_found",
+			message: `No registered workspace named ${name}`,
+		});
+	};
+
+	if (request.type === "worktree_create") {
+		const workspace = findWorkspace(request.workspaceName);
+		if (!workspace) {
+			sendWorkspaceNotFound(request.workspaceName);
+			return;
+		}
+		const created = await hooks.manager.create(workspace, {
+			...(request.worktreeName === undefined ? {} : { id: request.worktreeName }),
+			...(request.branch === undefined ? {} : { branch: request.branch }),
+			...(request.baseRef === undefined ? {} : { baseRef: request.baseRef }),
+		});
+		if (!created.ok) {
+			connection.send({
+				type: "error",
+				id: request.id,
+				code: created.error,
+				message: created.detail ?? created.error,
+			});
+			return;
+		}
+		connection.send({
+			type: "worktree_result",
+			id: request.id,
+			worktree: toControlWorktreeStatus(created.worktree, true),
+		});
+		return;
+	}
+
+	if (request.type === "worktree_list") {
+		const workspaces = resolveRequestWorkspaces(state.workspaces, request.workspaceName);
+		if (!workspaces.ok) {
+			sendWorkspaceNotFound(workspaces.missing);
+			return;
+		}
+		const worktrees: ControlWorktreeStatus[] = [];
+		for (const workspace of workspaces.workspaces) {
+			for (const status of await hooks.manager.list(workspace)) {
+				worktrees.push(toControlWorktreeStatus(status, status.available, status.dirty));
+			}
+		}
+		connection.send({ type: "worktrees_result", id: request.id, worktrees });
+		return;
+	}
+
+	if (request.type === "worktree_resolve") {
+		const worktrees = await hooks.stateManager.listWorktrees();
+		const match = worktrees.find((worktree) => isPathContained(worktree.path, request.path));
+		const workspace = match ? findWorkspace(match.workspaceName) : undefined;
+		if (!match || !workspace) {
+			connection.send({
+				type: "error",
+				id: request.id,
+				code: "not_found",
+				message: "path is not inside a daemon-managed worktree",
+			});
+			return;
+		}
+		connection.send({
+			type: "worktree_resolve_result",
+			id: request.id,
+			workspaceName: workspace.name,
+			workspacePath: workspace.path,
+			worktreeId: match.id,
+			worktreePath: match.path,
+		});
+		return;
+	}
+
+	if (request.type === "worktree_bind") {
+		const workspace = findWorkspace(request.workspaceName);
+		if (!workspace) {
+			sendWorkspaceNotFound(request.workspaceName);
+			return;
+		}
+		const record = await hooks.manager.findWorktree(request.workspaceName, request.worktreeId);
+		if (!record) {
+			connection.send({
+				type: "error",
+				id: request.id,
+				code: "worktree_not_found",
+				message: `No worktree ${request.worktreeId} in workspace ${request.workspaceName}`,
+			});
+			return;
+		}
+		await hooks.manager.bindSession(request.workspaceName, request.worktreeId, request.sessionId);
+		connection.send({ type: "ok", id: request.id });
+		return;
+	}
+
+	if (request.type === "worktree_remove") {
+		const workspace = findWorkspace(request.workspaceName);
+		if (!workspace) {
+			sendWorkspaceNotFound(request.workspaceName);
+			return;
+		}
+		const force = request.force === true;
+		const removed = hooks.removeWorktree
+			? await hooks.removeWorktree(workspace, request.worktreeId, force)
+			: await hooks.manager.remove(workspace, request.worktreeId, { force });
+		if (!removed.ok) {
+			connection.send({
+				type: "error",
+				id: request.id,
+				code: removed.error,
+				message: removed.detail ?? removed.error,
+			});
+			return;
+		}
+		connection.send({ type: "ok", id: request.id });
+		return;
+	}
+
+	const workspaces = resolveRequestWorkspaces(state.workspaces, request.workspaceName);
+	if (!workspaces.ok) {
+		sendWorkspaceNotFound(workspaces.missing);
+		return;
+	}
+	const results: Array<{ workspaceName: string; removedRecords: string[]; orphanCheckouts: string[] }> = [];
+	for (const workspace of workspaces.workspaces) {
+		const pruned = await hooks.manager.prune(workspace);
+		results.push({ workspaceName: workspace.name, ...pruned });
+	}
+	connection.send({ type: "worktree_prune_result", id: request.id, results });
+}
+
+function resolveRequestWorkspaces(
+	workspaces: IrohRemoteWorkspace[],
+	workspaceName: string | undefined,
+): { ok: true; workspaces: IrohRemoteWorkspace[] } | { ok: false; missing: string } {
+	if (workspaceName === undefined) {
+		return { ok: true, workspaces };
+	}
+	const workspace = workspaces.find((entry) => entry.name === workspaceName);
+	return workspace ? { ok: true, workspaces: [workspace] } : { ok: false, missing: workspaceName };
+}
+
+function toControlWorktreeStatus(
+	worktree: IrohRemoteWorkspaceWorktree & Partial<Pick<WorktreeStatus, "aheadBehind">>,
+	available?: boolean,
+	dirty?: boolean,
+): ControlWorktreeStatus {
+	return {
+		id: worktree.id,
+		workspaceName: worktree.workspaceName,
+		path: worktree.path,
+		branch: worktree.branch,
+		...(worktree.baseRef === undefined ? {} : { baseRef: worktree.baseRef }),
+		createdAt: worktree.createdAt,
+		sessionIds: [...worktree.sessionIds],
+		...(available === undefined ? {} : { available }),
+		...(dirty === undefined ? {} : { dirty }),
+		...(worktree.aheadBehind === undefined ? {} : { aheadBehind: worktree.aheadBehind }),
+	};
+}

@@ -10,6 +10,7 @@ import {
 	type IrohRemotePendingPairingTicket,
 	type IrohRemoteRevokedClient,
 	type IrohRemoteWorkspace,
+	type IrohRemoteWorkspaceWorktree,
 	parseIrohRemoteHostState,
 } from "../core/remote/iroh/state.ts";
 import { DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS } from "../remote/integrated-runtime-retention.ts";
@@ -27,6 +28,7 @@ export interface VoltdStateFileV1 {
 	clients: IrohRemoteClient[];
 	revokedClients: IrohRemoteRevokedClient[];
 	workspaces: IrohRemoteWorkspace[];
+	worktrees: IrohRemoteWorkspaceWorktree[];
 	pendingPairingTickets: IrohRemotePendingPairingTicket[];
 	pairingSecretTombstones: IrohRemotePairingSecretTombstone[];
 	settings: {
@@ -46,6 +48,59 @@ export interface VoltdStateFileV1 {
 		 * authenticating; pairing tickets carry it to phones.
 		 */
 		relayAuthToken?: string;
+		/** Worktree cleanup policies (design §5.3); all opt-in except pruneOnStart. */
+		worktreeCleanup?: WorktreeCleanupSettings;
+	};
+}
+
+export interface WorktreeCleanupSettings {
+	/** Remove clean, fully merged worktrees after the TTL once their runtime is disposed. */
+	retention?: { enabled: boolean; ttlMs: number };
+	/** Reconcile worktree records/checkouts during daemon startup (default true). */
+	pruneOnStart?: boolean;
+}
+
+export interface ResolvedWorktreeCleanupPolicy {
+	retention: { enabled: boolean; ttlMs: number } | undefined;
+	pruneOnStart: boolean;
+}
+
+/** Apply worktree-cleanup defaults: retention off, pruneOnStart on. */
+export function resolveWorktreeCleanupPolicy(
+	settings: Pick<VoltdStateFileV1["settings"], "worktreeCleanup">,
+): ResolvedWorktreeCleanupPolicy {
+	const cleanup = settings.worktreeCleanup;
+	const retention =
+		cleanup?.retention?.enabled && cleanup.retention.ttlMs > 0
+			? { enabled: true, ttlMs: cleanup.retention.ttlMs }
+			: undefined;
+	return { retention, pruneOnStart: cleanup?.pruneOnStart !== false };
+}
+
+function parseWorktreeCleanupSettings(value: unknown): WorktreeCleanupSettings | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return undefined;
+	}
+	const record = value as Record<string, unknown>;
+	const retentionRecord =
+		typeof record.retention === "object" && record.retention !== null && !Array.isArray(record.retention)
+			? (record.retention as Record<string, unknown>)
+			: undefined;
+	const retention =
+		retentionRecord !== undefined &&
+		typeof retentionRecord.enabled === "boolean" &&
+		typeof retentionRecord.ttlMs === "number" &&
+		Number.isInteger(retentionRecord.ttlMs) &&
+		retentionRecord.ttlMs > 0
+			? { enabled: retentionRecord.enabled, ttlMs: retentionRecord.ttlMs }
+			: undefined;
+	const pruneOnStart = typeof record.pruneOnStart === "boolean" ? record.pruneOnStart : undefined;
+	if (retention === undefined && pruneOnStart === undefined) {
+		return undefined;
+	}
+	return {
+		...(retention === undefined ? {} : { retention }),
+		...(pruneOnStart === undefined ? {} : { pruneOnStart }),
 	};
 }
 
@@ -56,6 +111,7 @@ export function createEmptyVoltdState(): VoltdStateFileV1 {
 		clients: [],
 		revokedClients: [],
 		workspaces: [],
+		worktrees: [],
 		pendingPairingTickets: [],
 		pairingSecretTombstones: [],
 		settings: {
@@ -71,6 +127,7 @@ export function voltdStateToHostState(state: VoltdStateFileV1): IrohRemoteHostSt
 		clients: state.clients,
 		revokedClients: state.revokedClients,
 		workspaces: state.workspaces,
+		worktrees: state.worktrees,
 		pendingPairingTickets: state.pendingPairingTickets,
 		pairingSecretTombstones: state.pairingSecretTombstones,
 	};
@@ -86,6 +143,7 @@ export function hostStateToVoltdState(
 		clients: hostState.clients,
 		revokedClients: hostState.revokedClients ?? [],
 		workspaces: hostState.workspaces,
+		worktrees: hostState.worktrees ?? [],
 		pendingPairingTickets: hostState.pendingPairingTickets ?? [],
 		pairingSecretTombstones: hostState.pairingSecretTombstones ?? [],
 		settings,
@@ -122,6 +180,7 @@ export function parseVoltdState(value: unknown): VoltdStateFileV1 {
 		typeof settingsRecord.relayAuthToken === "string" && settingsRecord.relayAuthToken.length > 0
 			? settingsRecord.relayAuthToken
 			: undefined;
+	const worktreeCleanup = parseWorktreeCleanupSettings(settingsRecord.worktreeCleanup);
 	return hostStateToVoltdState(hostState, {
 		detachedRuntimeTtlMs,
 		allowTools,
@@ -129,6 +188,7 @@ export function parseVoltdState(value: unknown): VoltdStateFileV1 {
 		...(themeTokenPush ? { themeTokenPush } : {}),
 		...(keepAwakeEnabled ? { keepAwakeEnabled } : {}),
 		...(relayAuthToken === undefined ? {} : { relayAuthToken }),
+		...(worktreeCleanup === undefined ? {} : { worktreeCleanup }),
 	});
 }
 

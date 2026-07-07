@@ -46,6 +46,7 @@ import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { handleDaemonCommand } from "./daemon/cli.ts";
 import { handleRemoteControlCommand } from "./daemon/remote-cli.ts";
+import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "./daemon/worktree-manager.ts";
 import { handleMcpCommand } from "./mcp-cli.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
@@ -670,15 +671,25 @@ export async function main(args: string[], options?: MainOptions) {
 		const runtimeProfile = Object.hasOwn(runtimeOptions, "profile") ? runtimeOptions.profile : requestedProfile;
 		const isInitialRuntime = sessionStartEvent === undefined;
 		const projectTrustDiagnostics: AgentSessionRuntimeDiagnostic[] = [];
-		const cachedProjectTrust = projectTrustByCwd.get(cwd);
+		// Daemon-managed worktree checkouts pin trust to the PARENT checkout:
+		// prompts and trust.json entries always target the parent workspace path,
+		// never a path under ~/.volt/agent/worktrees (worktrees-design §5.2.1).
+		// When the parent cannot be resolved, the worktree runs untrusted rather
+		// than prompting for (or persisting) the worktree path.
+		const worktreeParentPath = resolveWorktreeParentCheckout(agentDir, cwd);
+		const trustPath = worktreeParentPath ?? (isPathUnderWorktreesRoot(agentDir, cwd) ? undefined : cwd);
+		const cachedProjectTrust = trustPath === undefined ? undefined : projectTrustByCwd.get(trustPath);
 		const hasTrustRequiringResources = hasTrustRequiringProjectResources(cwd);
 		const shouldResolveProjectTrust =
-			parsed.projectTrustOverride === undefined && cachedProjectTrust === undefined && hasTrustRequiringResources;
+			parsed.projectTrustOverride === undefined &&
+			cachedProjectTrust === undefined &&
+			hasTrustRequiringResources &&
+			trustPath !== undefined;
 		const projectTrusted = shouldResolveProjectTrust
 			? false
 			: (cachedProjectTrust ??
 				parsed.projectTrustOverride ??
-				(!hasTrustRequiringResources || trustStore.get(cwd) === true));
+				(!hasTrustRequiringResources || (trustPath !== undefined && trustStore.get(trustPath) === true)));
 		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, {
 			projectTrusted,
 			profile: runtimeProfile,
@@ -689,30 +700,31 @@ export async function main(args: string[], options?: MainOptions) {
 			authStorage,
 			settingsManager: runtimeSettingsManager,
 			extensionFlagValues: parsed.unknownFlags,
-			resourceLoaderReloadOptions: shouldResolveProjectTrust
-				? {
-						resolveProjectTrust: async ({ extensionsResult }) => {
-							const trusted = await resolveProjectTrusted({
-								cwd,
-								trustStore,
-								trustOverride: parsed.projectTrustOverride,
-								defaultProjectTrust: startupSettingsManager.getDefaultProjectTrust(),
-								extensionsResult,
-								projectTrustContext:
-									projectTrustContext ??
-									createProjectTrustContext({
-										cwd,
-										mode: isInitialRuntime ? trustPromptMode : appMode,
-										settingsManager: startupSettingsManager,
-										hasUI: isInitialRuntime && trustPromptMode === "interactive",
-									}),
-								onExtensionError: (message) => projectTrustDiagnostics.push({ type: "warning", message }),
-							});
-							projectTrustByCwd.set(cwd, trusted);
-							return trusted;
-						},
-					}
-				: undefined,
+			resourceLoaderReloadOptions:
+				shouldResolveProjectTrust && trustPath !== undefined
+					? {
+							resolveProjectTrust: async ({ extensionsResult }) => {
+								const trusted = await resolveProjectTrusted({
+									cwd: trustPath,
+									trustStore,
+									trustOverride: parsed.projectTrustOverride,
+									defaultProjectTrust: startupSettingsManager.getDefaultProjectTrust(),
+									extensionsResult,
+									projectTrustContext:
+										projectTrustContext ??
+										createProjectTrustContext({
+											cwd: trustPath,
+											mode: isInitialRuntime ? trustPromptMode : appMode,
+											settingsManager: startupSettingsManager,
+											hasUI: isInitialRuntime && trustPromptMode === "interactive",
+										}),
+									onExtensionError: (message) => projectTrustDiagnostics.push({ type: "warning", message }),
+								});
+								projectTrustByCwd.set(trustPath, trusted);
+								return trusted;
+							},
+						}
+					: undefined,
 			resourceLoaderOptions: {
 				additionalExtensionPaths: resolvedExtensionPaths,
 				additionalSkillPaths: resolvedSkillPaths,

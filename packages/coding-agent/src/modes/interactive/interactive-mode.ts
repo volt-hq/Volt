@@ -109,7 +109,7 @@ import {
 	runReviewWorkflow,
 } from "../../core/review.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
-import { type SessionContext, SessionManager } from "../../core/session-manager.ts";
+import { getDefaultSessionDir, type SessionContext, SessionManager } from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
@@ -128,6 +128,7 @@ import {
 	decorateRemoteHostState,
 	type IntegratedConversationSessionSelection,
 } from "../../daemon/handshake-responses.ts";
+import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "../../daemon/worktree-manager.ts";
 import {
 	findCatalogPackage,
 	loadDefaultStoreCatalog,
@@ -184,7 +185,10 @@ import {
 	createDisabledDaemonAttach,
 	type DaemonAttach,
 	type DaemonRelayOffer,
+	type DaemonWorktreeControl,
+	getRelayServingSanitizerOptions,
 	type OpenedRelay,
+	openDaemonWorktreeControl,
 } from "./daemon-attach.ts";
 import { DrainViewerComponent } from "./drain-viewer.ts";
 import { collectPromptImageAttachments, MAX_PROMPT_IMAGE_ATTACHMENTS } from "./prompt-image-attachments.ts";
@@ -1971,6 +1975,9 @@ export class InteractiveMode {
 			initialInput?: number[];
 		};
 		const authorizationSubset = preamble.authorization;
+		// Worktree-bound conversations sanitize with the worktree checkout as the
+		// root; the parent checkout and the worktrees root must also redact.
+		const sanitizerOptions = getRelayServingSanitizerOptions(authorizationSubset, getAgentDir());
 		const authorization = {
 			ok: true as const,
 			allowTools: "",
@@ -2015,6 +2022,7 @@ export class InteractiveMode {
 					this.session.sessionId,
 					sessionSelection,
 					responseContext,
+					preamble.resolvedTarget.worktreeId,
 				);
 				await writeIrohRemoteHandshakeResponse(relayedStream.send, handshakeResponse);
 
@@ -2028,7 +2036,10 @@ export class InteractiveMode {
 					stream: relayedStream,
 					disposeRuntimeOnClose: false,
 					workspaceName: authorization.workspace.name,
-					workspacePath: authorization.workspace.path,
+					workspacePath: sanitizerOptions.workspacePath,
+					...(sanitizerOptions.additionalRedactedPaths === undefined
+						? {}
+						: { additionalRedactedPaths: sanitizerOptions.additionalRedactedPaths }),
 					suppressExtensionUiRequests: true,
 					decorateOutbound: (value) => decorateRemoteHostState(value, authorization, responseContext),
 					initialInput: handshake.initialInput,
@@ -2764,6 +2775,15 @@ export class InteractiveMode {
 	}
 
 	private async promptForMissingSessionCwd(error: MissingSessionCwdError): Promise<string | undefined> {
+		// A missing daemon-managed worktree checkout refuses takeover with a clear
+		// error instead of resurrecting the session in another directory (§5.2.3).
+		if (isPathUnderWorktreesRoot(this.runtimeHost.services.agentDir, error.issue.sessionCwd)) {
+			this.showError(
+				`This session ran in a daemon-managed worktree whose checkout is missing: ${error.issue.sessionCwd}. ` +
+					"Recreate the worktree (volt remote worktree add) or remove the session; refusing to open it in another directory.",
+			);
+			return undefined;
+		}
 		const confirmed = await this.showExtensionConfirm(
 			"Session cwd not found",
 			formatMissingSessionCwdPrompt(error.issue),
@@ -3311,6 +3331,12 @@ export class InteractiveMode {
 			if (text === "/trust") {
 				this.showTrustSelector();
 				this.editor.setText("");
+				return;
+			}
+			if (text === "/worktree" || text.startsWith("/worktree ")) {
+				const worktreeArgs = text === "/worktree" ? "" : text.slice("/worktree ".length).trim();
+				this.editor.setText("");
+				await this.handleWorktreeCommand(worktreeArgs);
 				return;
 			}
 			if (text === "/store" || text.startsWith("/store ")) {
@@ -5749,6 +5775,10 @@ export class InteractiveMode {
 		if (this.autoTrustOnReloadCwd !== cwd) {
 			return false;
 		}
+		// Trust entries are never persisted for daemon-managed worktree paths.
+		if (isPathUnderWorktreesRoot(this.runtimeHost.services.agentDir, cwd)) {
+			return false;
+		}
 		if (!this.settingsManager.isProjectTrusted() || !hasTrustRequiringProjectResources(cwd)) {
 			return false;
 		}
@@ -5770,8 +5800,107 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * /worktree — open a new session inside a daemon-managed git worktree
+	 * (§5.2.1): ensures the daemon is running, creates (or picks) a worktree via
+	 * the control socket, then starts a new session with cwd = the worktree
+	 * checkout and sessionDir = the PARENT workspace's default session dir, so
+	 * the session stays listed and lease-keyed under the parent workspace.
+	 */
+	private async handleWorktreeCommand(args: string): Promise<void> {
+		if (this.session.isStreaming || this.session.isCompacting) {
+			this.showWarning("Wait for the current response to finish before switching to a worktree.");
+			return;
+		}
+		const parts = args.split(/\s+/).filter((part) => part.length > 0);
+		let createRequested = false;
+		let requestedName: string | undefined;
+		if (parts.length > 0) {
+			if (parts[0] !== "new" || parts.length > 2) {
+				this.showWarning("Usage: /worktree [new [name]]");
+				return;
+			}
+			createRequested = true;
+			requestedName = parts[1];
+		}
+
+		const agentDir = this.runtimeHost.services.agentDir;
+		this.showStatus("Contacting voltd…");
+		const opened = await openDaemonWorktreeControl({ cwd: this.sessionManager.getCwd(), agentDir });
+		if (!opened.ok) {
+			this.showError(`Worktrees need the volt daemon: ${opened.error}`);
+			return;
+		}
+		const control: DaemonWorktreeControl = opened.control;
+		try {
+			let target: { id: string; path: string; branch: string } | undefined;
+			if (createRequested) {
+				const created = await control.createWorktree(requestedName);
+				if (!created.ok) {
+					this.showError(`Failed to create worktree: ${created.error}`);
+					return;
+				}
+				target = created.worktree;
+			} else {
+				const worktrees = (await control.listWorktrees()).filter((worktree) => worktree.available !== false);
+				const createLabel = "Create new worktree";
+				const labels = worktrees.map((worktree) => `${worktree.id} (${worktree.branch})`);
+				const selection = await this.showExtensionSelector(
+					`Open a session in a worktree of ${control.workspaceName}`,
+					[createLabel, ...labels],
+				);
+				if (selection === undefined) {
+					this.showStatus("Worktree selection cancelled");
+					return;
+				}
+				if (selection === createLabel) {
+					const created = await control.createWorktree(undefined);
+					if (!created.ok) {
+						this.showError(`Failed to create worktree: ${created.error}`);
+						return;
+					}
+					target = created.worktree;
+				} else {
+					target = worktrees[labels.indexOf(selection)];
+				}
+			}
+			if (!target) {
+				this.showError("No worktree selected");
+				return;
+			}
+
+			const sessionDir = getDefaultSessionDir(control.workspacePath, agentDir);
+			const result = await this.runtimeHost.newSession({ cwd: target.path, sessionDir });
+			if (result.cancelled) {
+				this.showStatus("Worktree session cancelled");
+				return;
+			}
+			// Record the session→worktree binding so daemon resume/relay follows the
+			// worktree cwd (best-effort; the header cwd is authoritative locally).
+			await control.bindSession(target.id, this.session.sessionId);
+			this.renderCurrentSessionState();
+			this.showStatus(`New session in worktree ${target.id} (branch ${target.branch}) — ${target.path}`);
+			this.ui.requestRender();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		} finally {
+			await control.close().catch(() => {});
+		}
+	}
+
 	private showTrustSelector(): void {
-		const cwd = this.sessionManager.getCwd();
+		const agentDir = this.runtimeHost.services.agentDir;
+		const sessionCwd = this.sessionManager.getCwd();
+		// Worktree sessions pin trust to the PARENT checkout; entries are never
+		// prompted for or persisted on worktree paths (§5.2.1).
+		const worktreeParent = resolveWorktreeParentCheckout(agentDir, sessionCwd);
+		if (worktreeParent === undefined && isPathUnderWorktreesRoot(agentDir, sessionCwd)) {
+			this.showWarning(
+				"This session runs in a daemon-managed worktree and its parent checkout could not be resolved; trust decisions are managed on the parent workspace.",
+			);
+			return;
+		}
+		const cwd = worktreeParent ?? sessionCwd;
 		const trustStore = new ProjectTrustStore(this.runtimeHost.services.agentDir);
 		const savedDecision = trustStore.getEntry(cwd);
 		this.showSelector((done) => {

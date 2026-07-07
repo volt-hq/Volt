@@ -12,8 +12,9 @@ import {
 } from "../core/remote/iroh/handshake.ts";
 import { shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization } from "../core/remote/iroh/host-policy.ts";
 import type { IrohRemoteHostHandshakeFailureOutcome } from "../core/remote/iroh/protocol.ts";
-import type { IrohRemoteWorkspace } from "../core/remote/iroh/state.ts";
+import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
+import { getDefaultSessionDir } from "../core/session-manager.ts";
 import {
 	createIrohRemoteAgentRuntimeWithSessionSelection,
 	type IrohRemoteAgentRuntimeConversationTarget,
@@ -49,6 +50,10 @@ export interface IntegratedRuntimeEntry {
 	detachedRuntimeRetention: DetachedRuntimeRetentionHandle | undefined;
 	parentSessionId?: string;
 	subagentId?: string;
+	/** Set when the runtime cwd is a daemon-managed worktree checkout. */
+	worktreeId?: string;
+	/** Host-local checkout path (sanitizer root); never sent on the wire. */
+	worktreePath?: string;
 }
 
 export interface IntegratedRuntimeStreamWriter {
@@ -68,6 +73,17 @@ export interface IntegratedRuntimeRegistryOptions {
 	getAllowTools: (workspace: IrohRemoteWorkspace) => string | undefined;
 	getProjectTrustedForWorkspace: (workspace: IrohRemoteWorkspace) => boolean;
 	setClientLastSessionId: IrohRemoteHostEngine["setClientLastSessionId"];
+	/**
+	 * Worktree resolution seam (wired to the daemon's WorktreeManager). Must
+	 * throw a conversation-open error for an unknown/unavailable worktree.
+	 */
+	resolveWorktree?: (
+		workspaceName: string,
+		hello: IrohRemoteHello,
+		targetSessionId: string | undefined,
+	) => Promise<IrohRemoteWorkspaceWorktree | undefined>;
+	/** Persist the sessionId → worktree binding after a created worktree conversation. */
+	bindWorktreeSession?: (workspaceName: string, worktreeId: string, sessionId: string) => Promise<void>;
 	/** Lease-broker seam: invoked when a runtime's session id changes (rekey). */
 	onRuntimeRekeyed?: (workspaceName: string, previousSessionId: string, sessionId: string) => void;
 	onRuntimeDisposed?: (entry: IntegratedRuntimeEntry, reason: string) => void;
@@ -222,11 +238,21 @@ export class IntegratedRuntimeRegistry {
 		let runtime: AgentSessionRuntime | undefined;
 		let sessionSelection: IntegratedConversationSessionSelection | undefined;
 		try {
+			// Resolve any worktree binding first: explicit worktreeId on "new", or a
+			// persisted sessionId binding on resume. Trust and allowTools stay pinned
+			// to the PARENT workspace; only cwd changes. The session dir is ALWAYS
+			// parent-keyed so worktree sessions stay listed under the workspace.
+			const worktree = await this.options.resolveWorktree?.(
+				authorization.workspace.name,
+				handshake.hello,
+				getResolvedTargetSessionId(handshake.hello, authorization),
+			);
 			const runtimeResult = await (this.options.createRuntime ?? createIrohRemoteAgentRuntimeWithSessionSelection)({
 				agentDir: this.options.agentDir,
 				allowTools: this.options.getAllowTools(authorization.workspace) ?? authorization.allowTools,
 				conversationTarget: createIrohRuntimeConversationTarget(handshake.hello, authorization),
-				cwd: authorization.workspace.path,
+				cwd: worktree?.path ?? authorization.workspace.path,
+				sessionDir: getDefaultSessionDir(authorization.workspace.path, this.options.agentDir),
 				onSubagentRuntimeCreated: (event) => this.registerSubagentRuntime(event, authorization),
 				profile: this.options.profile,
 				projectTrusted: this.options.getProjectTrustedForWorkspace(authorization.workspace),
@@ -248,7 +274,16 @@ export class IntegratedRuntimeRegistry {
 				workspaceName: authorization.workspace.name,
 				sessionId,
 				runtime,
+				...(worktree === undefined ? {} : { worktreeId: worktree.id, worktreePath: worktree.path }),
 			});
+			if (
+				worktree !== undefined &&
+				sessionSelection.kind === "created" &&
+				handshake.hello.mode === "conversation" &&
+				handshake.hello.conversation.target === "new"
+			) {
+				await this.options.bindWorktreeSession?.(authorization.workspace.name, worktree.id, sessionId);
+			}
 			return { entry, created: true, sessionSelection };
 		} catch (error) {
 			if (runtime) {
@@ -265,6 +300,8 @@ export class IntegratedRuntimeRegistry {
 		runtime: AgentSessionRuntime;
 		parentSessionId?: string;
 		subagentId?: string;
+		worktreeId?: string;
+		worktreePath?: string;
 	}): IntegratedRuntimeEntry {
 		return {
 			key: this.getRegistryKey(options.workspaceName, options.sessionId),
@@ -280,6 +317,8 @@ export class IntegratedRuntimeRegistry {
 			detachedRuntimeRetention: undefined,
 			...(options.parentSessionId === undefined ? {} : { parentSessionId: options.parentSessionId }),
 			...(options.subagentId === undefined ? {} : { subagentId: options.subagentId }),
+			...(options.worktreeId === undefined ? {} : { worktreeId: options.worktreeId }),
+			...(options.worktreePath === undefined ? {} : { worktreePath: options.worktreePath }),
 		};
 	}
 

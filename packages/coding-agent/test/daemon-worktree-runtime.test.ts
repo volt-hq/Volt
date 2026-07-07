@@ -1,0 +1,296 @@
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ENV_AGENT_DIR } from "../src/config.ts";
+import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { IrohRemoteActiveStreamRegistry } from "../src/core/remote/iroh/active-stream-registry.ts";
+import { IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
+import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
+import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
+import type { IrohRemoteWorkspaceWorktree } from "../src/core/remote/iroh/state.ts";
+import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
+import { getDefaultSessionDir, SessionManager } from "../src/core/session-manager.ts";
+import { createConversationOpenError, IntegratedRuntimeRegistry } from "../src/daemon/integrated-runtimes.ts";
+import { createTestSession } from "./iroh-stream-doubles.ts";
+
+type CreateRuntimeOptions = Parameters<
+	NonNullable<ConstructorParameters<typeof IntegratedRuntimeRegistry>[0]["createRuntime"]>
+>[0];
+
+const HANDSHAKE_RESPONSE = {
+	child: "volt",
+	features: ["multi_streams.v1", "conversation_streams.v1", "worktrees.v1"],
+} as unknown as IrohRemoteHandshakeSuccess;
+
+function createConversationHello(conversation: Record<string, unknown>): IrohRemoteHello {
+	return {
+		type: "volt_iroh_hello",
+		protocol: "volt-rpc/0",
+		workspace: "ws",
+		mode: "conversation",
+		conversation,
+	} as unknown as IrohRemoteHello;
+}
+
+describe("worktree runtime plumbing (createRuntime seam)", () => {
+	let agentDir: string;
+	let workspacePath: string;
+	let worktreePath: string;
+	let worktree: IrohRemoteWorkspaceWorktree;
+	let authorization: IrohRemoteClientAuthorizationSuccess;
+
+	beforeEach(() => {
+		agentDir = realpathSync(mkdtempSync(join(tmpdir(), "volt-worktree-runtime-")));
+		workspacePath = join(agentDir, "repo");
+		worktreePath = join(agentDir, "worktrees", "--repo--", "fix-login");
+		mkdirSync(workspacePath, { recursive: true });
+		mkdirSync(worktreePath, { recursive: true });
+		worktree = {
+			id: "fix-login",
+			workspaceName: "ws",
+			path: worktreePath,
+			branch: "volt/fix-login",
+			createdAt: 1,
+			sessionIds: [],
+		};
+		authorization = {
+			ok: true,
+			allowTools: "read",
+			client: {
+				nodeId: "n-phone",
+				label: "phone",
+				allowedWorkspaces: ["ws"],
+				allowedTools: "read",
+				pairedAt: 1,
+				lastSeenAt: 2,
+				lastSessionIdByWorkspace: { ws: "s-last" },
+			},
+			paired: false,
+			pairingSecretConsumed: false,
+			workspace: { name: "ws", path: workspacePath },
+			workspaceNames: ["ws"],
+			workspaces: [{ name: "ws", status: "available" }],
+		};
+	});
+
+	afterEach(() => {
+		rmSync(agentDir, { recursive: true, force: true });
+	});
+
+	function createRegistry(options: {
+		sessionId: string;
+		selectionKind?: "created" | "resumed";
+		resolveWorktree?: ConstructorParameters<typeof IntegratedRuntimeRegistry>[0]["resolveWorktree"];
+		bindWorktreeSession?: ConstructorParameters<typeof IntegratedRuntimeRegistry>[0]["bindWorktreeSession"];
+	}) {
+		const createRuntimeCalls: CreateRuntimeOptions[] = [];
+		const runtime = {
+			session: createTestSession(options.sessionId, null),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+			listSessions: vi.fn(async () => []),
+		} as unknown as AgentSessionRuntime;
+		const selectionKind = options.selectionKind ?? "created";
+		const registry = new IntegratedRuntimeRegistry({
+			agentDir,
+			auditLogger: new IrohRemoteAuditLogger(),
+			stateManager: new IrohRemoteHostStateManager(),
+			activeStreams: new IrohRemoteActiveStreamRegistry(),
+			detachedRuntimeTtlMs: () => 60_000,
+			getAllowTools: () => "read,bash",
+			getProjectTrustedForWorkspace: () => true,
+			setClientLastSessionId: vi.fn(async () => undefined),
+			createRuntime: async (runtimeOptions) => {
+				createRuntimeCalls.push(runtimeOptions);
+				return {
+					runtime,
+					sessionSelection:
+						selectionKind === "created"
+							? { kind: "created", sessionId: options.sessionId }
+							: { kind: "resumed", requestedSessionId: options.sessionId, sessionId: options.sessionId },
+				};
+			},
+			resolveWorktree: options.resolveWorktree,
+			bindWorktreeSession: options.bindWorktreeSession,
+		});
+		return { registry, createRuntimeCalls };
+	}
+
+	it("worktree-bound new passes the worktree cwd and the parent-keyed session dir; binds once after created", async () => {
+		const resolveWorktree = vi.fn(async () => worktree);
+		const bindWorktreeSession = vi.fn(async () => {});
+		const { registry, createRuntimeCalls } = createRegistry({
+			sessionId: "s-wt",
+			resolveWorktree,
+			bindWorktreeSession,
+		});
+		const hello = createConversationHello({ target: "new", worktreeId: "fix-login" });
+
+		const created = await registry.getOrCreateEntry({ hello, response: HANDSHAKE_RESPONSE }, authorization);
+		expect(created.created).toBe(true);
+		expect(resolveWorktree).toHaveBeenCalledExactlyOnceWith("ws", hello, undefined);
+		expect(createRuntimeCalls).toHaveLength(1);
+		expect(createRuntimeCalls[0]).toMatchObject({
+			agentDir,
+			allowTools: "read,bash", // parent workspace policy, never per-worktree
+			conversationTarget: { target: "new" },
+			cwd: worktreePath,
+			sessionDir: getDefaultSessionDir(workspacePath, agentDir),
+			projectTrusted: true, // evaluated against the PARENT path
+			profile: undefined,
+		});
+		expect(created.entry).toMatchObject({ worktreeId: "fix-login", worktreePath });
+		expect(bindWorktreeSession).toHaveBeenCalledExactlyOnceWith("ws", "fix-login", "s-wt");
+		await registry.commitEntry(created.entry, created.sessionSelection, authorization);
+
+		// A reattach to the same conversation must not re-bind.
+		const reattach = await registry.getOrCreateEntry(
+			{ hello: createConversationHello({ target: "session", sessionId: "s-wt" }), response: HANDSHAKE_RESPONSE },
+			authorization,
+		);
+		expect(reattach.created).toBe(false);
+		expect(reattach.entry).toBe(created.entry);
+		expect(bindWorktreeSession).toHaveBeenCalledTimes(1);
+		await registry.stopAll("test_cleanup");
+	});
+
+	it("non-worktree new keeps the parent cwd and the same derived session dir as before", async () => {
+		const resolveWorktree = vi.fn(async () => undefined);
+		const bindWorktreeSession = vi.fn(async () => {});
+		const { registry, createRuntimeCalls } = createRegistry({
+			sessionId: "s-plain",
+			resolveWorktree,
+			bindWorktreeSession,
+		});
+
+		const created = await registry.getOrCreateEntry(
+			{ hello: createConversationHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
+			authorization,
+		);
+		expect(created.created).toBe(true);
+		expect(createRuntimeCalls[0]).toMatchObject({
+			cwd: workspacePath,
+			sessionDir: getDefaultSessionDir(workspacePath, agentDir),
+			allowTools: "read,bash",
+			projectTrusted: true,
+		});
+		expect(created.entry.worktreeId).toBeUndefined();
+		expect(created.entry.worktreePath).toBeUndefined();
+		expect(bindWorktreeSession).not.toHaveBeenCalled();
+		await registry.stopAll("test_cleanup");
+	});
+
+	it("resume of a bound session resolves the persisted binding into the worktree cwd without re-binding", async () => {
+		const resolveWorktree = vi.fn(async () => worktree);
+		const bindWorktreeSession = vi.fn(async () => {});
+		const { registry, createRuntimeCalls } = createRegistry({
+			sessionId: "s-resume",
+			selectionKind: "resumed",
+			resolveWorktree,
+			bindWorktreeSession,
+		});
+		const hello = createConversationHello({ target: "session", sessionId: "s-resume" });
+
+		const resumed = await registry.getOrCreateEntry({ hello, response: HANDSHAKE_RESPONSE }, authorization);
+		expect(resumed.created).toBe(true);
+		expect(resolveWorktree).toHaveBeenCalledExactlyOnceWith("ws", hello, "s-resume");
+		expect(createRuntimeCalls[0]).toMatchObject({
+			cwd: worktreePath,
+			sessionDir: getDefaultSessionDir(workspacePath, agentDir),
+		});
+		expect(resumed.entry).toMatchObject({ worktreeId: "fix-login", worktreePath });
+		expect(bindWorktreeSession).not.toHaveBeenCalled();
+		await registry.stopAll("test_cleanup");
+	});
+
+	it("target last resolves the binding via the client's last session id", async () => {
+		const resolveWorktree = vi.fn(async () => worktree);
+		const { registry } = createRegistry({ sessionId: "s-last", selectionKind: "resumed", resolveWorktree });
+		const hello = createConversationHello({ target: "last" });
+		await registry.getOrCreateEntry({ hello, response: HANDSHAKE_RESPONSE }, authorization);
+		expect(resolveWorktree).toHaveBeenCalledExactlyOnceWith("ws", hello, "s-last");
+		await registry.stopAll("test_cleanup");
+	});
+
+	it("propagates conversation-open errors from worktree resolution (missing checkout)", async () => {
+		const invalidTarget = createRegistry({
+			sessionId: "s-x",
+			resolveWorktree: async () => {
+				throw createConversationOpenError("invalid_conversation_target", "unknown or unavailable worktree");
+			},
+		});
+		await expect(
+			invalidTarget.registry.getOrCreateEntry(
+				{ hello: createConversationHello({ target: "new", worktreeId: "ghost" }), response: HANDSHAKE_RESPONSE },
+				authorization,
+			),
+		).rejects.toMatchObject({ outcome: "invalid_conversation_target" });
+		expect(invalidTarget.createRuntimeCalls).toHaveLength(0);
+
+		const unavailable = createRegistry({
+			sessionId: "s-y",
+			resolveWorktree: async () => {
+				throw createConversationOpenError("session_unavailable", "worktree checkout is unavailable");
+			},
+		});
+		await expect(
+			unavailable.registry.getOrCreateEntry(
+				{ hello: createConversationHello({ target: "session", sessionId: "s-y" }), response: HANDSHAKE_RESPONSE },
+				authorization,
+			),
+		).rejects.toMatchObject({ outcome: "session_unavailable" });
+		expect(unavailable.createRuntimeCalls).toHaveLength(0);
+	});
+});
+
+describe("worktree session-dir keying (§5.1.7 filterCwd pin)", () => {
+	it("a session with a worktree cwd in the parent session dir stays visible in the parent listing", async () => {
+		const agentDir = realpathSync(mkdtempSync(join(tmpdir(), "volt-worktree-sessiondir-")));
+		const originalAgentDir = process.env[ENV_AGENT_DIR];
+		try {
+			// The daemon always uses the env-aware agent dir; pin that setup here so
+			// SessionManager.list's filterCwd stays OFF for the parent's default dir.
+			process.env[ENV_AGENT_DIR] = agentDir;
+			const parentPath = join(agentDir, "repo");
+			const worktreePath = join(agentDir, "worktrees", "--repo--", "fix-login");
+			mkdirSync(parentPath, { recursive: true });
+			mkdirSync(worktreePath, { recursive: true });
+
+			const parentSessionDir = getDefaultSessionDir(parentPath, agentDir);
+			writeFileSync(
+				join(parentSessionDir, "worktree-session.jsonl"),
+				`${JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "s-worktree",
+					timestamp: new Date().toISOString(),
+					cwd: worktreePath,
+				})}\n`,
+			);
+			writeFileSync(
+				join(parentSessionDir, "parent-session.jsonl"),
+				`${JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "s-parent",
+					timestamp: new Date().toISOString(),
+					cwd: parentPath,
+				})}\n`,
+			);
+
+			// The daemon's list_sessions call shape: parent cwd + parent default dir.
+			const sessions = await SessionManager.list(parentPath, parentSessionDir);
+			const ids = sessions.map((session) => session.id);
+			expect(ids).toContain("s-worktree");
+			expect(ids).toContain("s-parent");
+		} finally {
+			if (originalAgentDir === undefined) {
+				delete process.env[ENV_AGENT_DIR];
+			} else {
+				process.env[ENV_AGENT_DIR] = originalAgentDir;
+			}
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+});
