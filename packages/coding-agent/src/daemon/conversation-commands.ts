@@ -15,6 +15,7 @@ import {
 	handleIrohRemoteWorkspaceUnregisterRpcCommand,
 	IROH_REMOTE_UNREGISTER_WORKSPACE_RPC_TYPE,
 } from "../core/remote/iroh/workspace-rpc.ts";
+import { extractMessageImages, projectMessageImages } from "../core/rpc/transcript.ts";
 import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../core/session-manager.ts";
 
 export const INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES: ReadonlySet<string> = new Set([
@@ -261,6 +262,9 @@ export interface RemoteTranscriptItem {
 	role: "user" | "assistant" | "system" | "tool";
 	text: string;
 	truncated: boolean;
+	/** Inline image blocks persisted on the user message; recoverable per entry
+	 *  via get_message_images. */
+	imageCount?: number;
 	toolName?: string;
 	status?: "completed" | "failed";
 	summary?: string;
@@ -343,7 +347,15 @@ function projectRemoteTranscriptEntry(
 	const message = entry.message as unknown as Record<string, unknown>;
 	if (message.role === "user" || message.role === "assistant") {
 		const text = extractTranscriptContentText(message.content);
-		return text ? createRemoteTranscriptItem(entry, message.role, text, authorization) : undefined;
+		const imageCount = message.role === "user" ? extractMessageImages(message.content).length : 0;
+		if (!text && imageCount === 0) {
+			return undefined;
+		}
+		const item = createRemoteTranscriptItem(entry, message.role, text, authorization);
+		if (imageCount > 0) {
+			item.imageCount = imageCount;
+		}
+		return item;
 	}
 	if (message.role === "toolResult") {
 		const status = message.isError ? "failed" : "completed";
@@ -857,6 +869,40 @@ export function createRemoteGetTranscriptRpcResponse(
 		workspaceName: authorization.workspace.name,
 		sessionId: runtime.session.sessionId,
 		...page,
+	});
+}
+
+export function createRemoteGetMessageImagesRpcResponse(
+	command: RemoteRpcCommand,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	runtime: ConversationCommandRuntime,
+): object {
+	const id = getRpcResponseId(command);
+	if (!isValidRemoteTranscriptCursor(command.entryId)) {
+		return createIrohRemoteRpcErrorResponse(id, "get_message_images", "invalid_cursor");
+	}
+	let startImageIndex = 0;
+	if (command.startImageIndex !== undefined) {
+		if (
+			typeof command.startImageIndex !== "number" ||
+			!Number.isInteger(command.startImageIndex) ||
+			command.startImageIndex < 0
+		) {
+			return createIrohRemoteRpcErrorResponse(id, "get_message_images", "invalid_request");
+		}
+		startImageIndex = command.startImageIndex;
+	}
+	const result = projectMessageImages(runtime.session.sessionManager.getBranch(), command.entryId, startImageIndex);
+	if (!result.ok) {
+		return createIrohRemoteRpcErrorResponse(id, "get_message_images", result.error);
+	}
+	return createRpcSuccessResponse(id, "get_message_images", {
+		workspaceName: authorization.workspace.name,
+		sessionId: runtime.session.sessionId,
+		entryId: result.entryId,
+		totalImages: result.totalImages,
+		images: result.images,
+		nextImageIndex: result.nextImageIndex,
 	});
 }
 
@@ -1461,6 +1507,9 @@ export async function handleIntegratedConversationRpcCommand(
 	}
 	if (command.type === "get_transcript") {
 		return createRemoteGetTranscriptRpcResponse(command, authorization, runtime);
+	}
+	if (command.type === "get_message_images") {
+		return createRemoteGetMessageImagesRpcResponse(command, authorization, runtime);
 	}
 	return await handleRemoteHostRpcCommand(command, authorization, context);
 }

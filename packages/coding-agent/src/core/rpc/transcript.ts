@@ -1,7 +1,9 @@
 import type { AgentMessage } from "@earendil-works/volt-agent-core";
+import type { ImageContent } from "@earendil-works/volt-ai";
 import { type BashExecutionMessage, extractVisibleTextContent } from "../messages.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
 import type {
+	RpcMessageImage,
 	RpcTranscriptItem,
 	RpcTranscriptResponse,
 	RpcTranscriptToolItem,
@@ -56,6 +58,66 @@ export function projectSessionTranscript(
 	};
 }
 
+/**
+ * Serialized-size budget for one get_message_images response. Keeps the frame
+ * under the daemon control protocol's 8 MB line cap (the tightest transport on
+ * any relay path) with headroom for JSON envelope overhead. The first image of
+ * a page is always included so pagination cannot stall on a single large image.
+ */
+export const MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES = 6 * 1024 * 1024;
+
+export type ProjectMessageImagesResult =
+	| { ok: true; entryId: string; totalImages: number; images: RpcMessageImage[]; nextImageIndex: number | null }
+	| { ok: false; error: "unknown_entry" };
+
+/**
+ * Recovers the inline image blocks persisted on a session entry, paged from
+ * `startImageIndex` under `budgetBytes`. Text-only transcript projections
+ * advertise `imageCount`; reconnecting clients call this per entry to restore
+ * user-message images after a cold restart.
+ */
+export function projectMessageImages(
+	entries: SessionEntry[],
+	entryId: string,
+	startImageIndex = 0,
+	budgetBytes = MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES,
+): ProjectMessageImagesResult {
+	const entry = entries.find((candidate) => candidate.id === entryId);
+	if (!entry || entry.type !== "message") {
+		return { ok: false, error: "unknown_entry" };
+	}
+	const allImages = extractMessageImages((entry.message as { content?: unknown }).content);
+	const start = Math.max(0, Math.floor(startImageIndex));
+	const images: RpcMessageImage[] = [];
+	let usedBytes = 0;
+	let nextImageIndex: number | null = null;
+	for (let index = start; index < allImages.length; index++) {
+		const image = allImages[index];
+		if (images.length > 0 && usedBytes + image.data.length > budgetBytes) {
+			nextImageIndex = index;
+			break;
+		}
+		images.push({ ...image, index });
+		usedBytes += image.data.length;
+	}
+	return { ok: true, entryId, totalImages: allImages.length, images, nextImageIndex };
+}
+
+/** Inline image blocks on a persisted message's content array. */
+export function extractMessageImages(content: unknown): ImageContent[] {
+	if (!Array.isArray(content)) {
+		return [];
+	}
+	return content.filter(
+		(block): block is ImageContent =>
+			isRecord(block) &&
+			block.type === "image" &&
+			typeof block.data === "string" &&
+			block.data.length > 0 &&
+			typeof block.mimeType === "string",
+	);
+}
+
 function normalizeLimit(limit: number | undefined): number {
 	if (limit === undefined || !Number.isFinite(limit) || limit <= 0) {
 		return DEFAULT_TRANSCRIPT_LIMIT;
@@ -94,8 +156,15 @@ function projectTranscriptItems(entries: SessionEntry[]): RpcTranscriptItem[] {
 		const message = entry.message;
 		if (message.role === "user") {
 			const text = boundText(extractVisibleTextContent(message.content), MESSAGE_TEXT_LIMIT);
-			if (text) {
-				items.push({ id: entry.id, role: "user", text, timestamp: normalizeTimestamp(entry.timestamp) });
+			const imageCount = extractMessageImages(message.content).length;
+			if (text || imageCount > 0) {
+				items.push({
+					id: entry.id,
+					role: "user",
+					text,
+					timestamp: normalizeTimestamp(entry.timestamp),
+					...(imageCount > 0 ? { imageCount } : {}),
+				});
 			}
 			continue;
 		}

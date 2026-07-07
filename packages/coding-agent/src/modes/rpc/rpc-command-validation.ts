@@ -226,6 +226,11 @@ export function validateRpcCommandPayload(value: unknown): string | undefined {
 				validateOptionalField(value, "beforeEntryId", isString, "a string") ??
 				validateOptionalField(value, "limit", isNumber, "a number")
 			);
+		case "get_message_images":
+			return (
+				validateRequiredField(value, "entryId", isString, "a string") ??
+				validateOptionalField(value, "startImageIndex", isNumber, "a number")
+			);
 		case "subagent_start":
 			return (
 				validateRequiredField(value, "agent", isString, "a string") ??

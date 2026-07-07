@@ -124,6 +124,7 @@ export type RpcCommand =
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "get_transcript"; limit?: number; beforeEntryId?: string }
+	| { id?: string; type: "get_message_images"; entryId: string; startImageIndex?: number }
 
 	// Subagents (local RPC only)
 	| { id?: string; type: "list_subagents" }
@@ -550,6 +551,10 @@ export interface RpcTranscriptBaseItem {
 export interface RpcTranscriptTextItem extends RpcTranscriptBaseItem {
 	role: "user" | "assistant";
 	text: string;
+	/** Number of inline image blocks on the persisted user message. Transcript
+	 *  projections are text-only; clients recover the blocks per entry via
+	 *  `get_message_images`. */
+	imageCount?: number;
 }
 
 export interface RpcTranscriptToolItem extends RpcTranscriptBaseItem {
@@ -577,6 +582,21 @@ export interface RpcTranscriptResponse {
 	items: RpcTranscriptItem[];
 	hasMore: boolean;
 	nextBeforeEntryId: string | null;
+}
+
+/** One recovered image block. Shaped as an ImageContent record (plus its
+ *  position on the message) so remote outbound sanitizers pass the base64
+ *  payload through untouched. */
+export type RpcMessageImage = ImageContent & { index: number };
+
+export interface RpcMessageImagesResponse {
+	sessionId: string;
+	entryId: string;
+	/** Total image blocks on the entry, including any not in this page. */
+	totalImages: number;
+	images: RpcMessageImage[];
+	/** Cursor for the next page, or null when all images have been returned. */
+	nextImageIndex: number | null;
 }
 
 // ============================================================================
@@ -707,6 +727,13 @@ export type RpcResponse =
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
 	| { id?: string; type: "response"; command: "get_transcript"; success: true; data: RpcTranscriptResponse }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_message_images";
+			success: true;
+			data: RpcMessageImagesResponse;
+	  }
 
 	// Subagents (local RPC only)
 	| { id?: string; type: "response"; command: "list_subagents"; success: true; data: RpcListSubagentsResponse }

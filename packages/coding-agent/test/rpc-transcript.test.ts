@@ -1,7 +1,7 @@
 import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil-works/volt-ai";
 import { describe, expect, test } from "vitest";
 import type { BashExecutionMessage } from "../src/core/messages.ts";
-import { projectSessionTranscript } from "../src/core/rpc/transcript.ts";
+import { projectMessageImages, projectSessionTranscript } from "../src/core/rpc/transcript.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 
 const emptyUsage = {
@@ -326,5 +326,129 @@ describe("RPC transcript projection", () => {
 		]);
 		expect(older.hasMore).toBe(true);
 		expect(older.nextBeforeEntryId).toBe(older.items[0].id);
+	});
+
+	test("advertises imageCount on user items and keeps image-only user messages", () => {
+		const session = SessionManager.inMemory("/workspace");
+		const withTextEntryId = session.appendMessage({
+			role: "user",
+			content: [
+				{ type: "text", text: "look at this" },
+				{ type: "image", data: "aGVsbG8=", mimeType: "image/jpeg" },
+				{ type: "image", data: "d29ybGQ=", mimeType: "image/png" },
+			],
+			timestamp: 10,
+		});
+		const imageOnlyEntryId = session.appendMessage({
+			role: "user",
+			content: [{ type: "image", data: "b25seQ==", mimeType: "image/jpeg" }],
+			timestamp: 20,
+		});
+		session.appendMessage(user("plain", 30));
+
+		const transcript = projectSessionTranscript(session);
+
+		expect(transcript.items).toEqual([
+			{
+				id: withTextEntryId,
+				role: "user",
+				text: "look at this",
+				timestamp: expect.any(String),
+				imageCount: 2,
+			},
+			{ id: imageOnlyEntryId, role: "user", text: "", timestamp: expect.any(String), imageCount: 1 },
+			expect.objectContaining({ role: "user", text: "plain" }),
+		]);
+		expect(JSON.stringify(transcript)).not.toContain("aGVsbG8=");
+	});
+});
+
+describe("message image recovery", () => {
+	test("returns the image blocks for an entry with paging metadata", () => {
+		const session = SessionManager.inMemory("/workspace");
+		const entryId = session.appendMessage({
+			role: "user",
+			content: [
+				{ type: "text", text: "two shots" },
+				{ type: "image", data: "Zmlyc3Q=", mimeType: "image/jpeg" },
+				{ type: "image", data: "c2Vjb25k", mimeType: "image/png" },
+			],
+			timestamp: 10,
+		});
+
+		const result = projectMessageImages(session.getBranch(), entryId);
+
+		expect(result).toEqual({
+			ok: true,
+			entryId,
+			totalImages: 2,
+			images: [
+				{ type: "image", data: "Zmlyc3Q=", mimeType: "image/jpeg", index: 0 },
+				{ type: "image", data: "c2Vjb25k", mimeType: "image/png", index: 1 },
+			],
+			nextImageIndex: null,
+		});
+	});
+
+	test("pages under the byte budget and always includes the first requested image", () => {
+		const session = SessionManager.inMemory("/workspace");
+		const bigImage = "A".repeat(100);
+		const entryId = session.appendMessage({
+			role: "user",
+			content: [
+				{ type: "image", data: bigImage, mimeType: "image/jpeg" },
+				{ type: "image", data: bigImage, mimeType: "image/jpeg" },
+				{ type: "image", data: "small", mimeType: "image/jpeg" },
+			],
+			timestamp: 10,
+		});
+
+		const firstPage = projectMessageImages(session.getBranch(), entryId, 0, 100);
+		expect(firstPage.ok).toBe(true);
+		if (!firstPage.ok) {
+			throw new Error("expected ok result");
+		}
+		expect(firstPage.totalImages).toBe(3);
+		expect(firstPage.images.map((image) => image.index)).toEqual([0]);
+		expect(firstPage.nextImageIndex).toBe(1);
+
+		const secondPage = projectMessageImages(session.getBranch(), entryId, firstPage.nextImageIndex ?? 0, 100);
+		expect(secondPage.ok).toBe(true);
+		if (!secondPage.ok) {
+			throw new Error("expected ok result");
+		}
+		expect(secondPage.images.map((image) => image.index)).toEqual([1]);
+		expect(secondPage.nextImageIndex).toBe(2);
+
+		const finalPage = projectMessageImages(session.getBranch(), entryId, secondPage.nextImageIndex ?? 0, 100);
+		expect(finalPage.ok).toBe(true);
+		if (!finalPage.ok) {
+			throw new Error("expected ok result");
+		}
+		expect(finalPage.images.map((image) => image.index)).toEqual([2]);
+		expect(finalPage.nextImageIndex).toBeNull();
+	});
+
+	test("returns an empty page for entries without images", () => {
+		const session = SessionManager.inMemory("/workspace");
+		const entryId = session.appendMessage(user("no images here", 10));
+
+		expect(projectMessageImages(session.getBranch(), entryId)).toEqual({
+			ok: true,
+			entryId,
+			totalImages: 0,
+			images: [],
+			nextImageIndex: null,
+		});
+	});
+
+	test("rejects unknown entries", () => {
+		const session = SessionManager.inMemory("/workspace");
+		session.appendMessage(user("hello", 10));
+
+		expect(projectMessageImages(session.getBranch(), "missing-entry")).toEqual({
+			ok: false,
+			error: "unknown_entry",
+		});
 	});
 });

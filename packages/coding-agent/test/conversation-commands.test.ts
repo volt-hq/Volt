@@ -203,6 +203,130 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		expect(tool?.outputTruncated).toBe(true);
 	});
 
+	it("advertises imageCount on user transcript items and keeps image-only user messages", async () => {
+		const branch = [
+			{
+				type: "message",
+				id: "e-images",
+				timestamp: "2026-07-06T00:00:00.000Z",
+				message: {
+					role: "user",
+					content: [
+						{ type: "text", text: "see screenshots" },
+						{ type: "image", data: "Zmlyc3Q=", mimeType: "image/jpeg" },
+						{ type: "image", data: "c2Vjb25k", mimeType: "image/png" },
+					],
+				},
+			},
+			{
+				type: "message",
+				id: "e-image-only",
+				timestamp: "2026-07-06T00:00:01.000Z",
+				message: {
+					role: "user",
+					content: [{ type: "image", data: "b25seQ==", mimeType: "image/jpeg" }],
+				},
+			},
+		] as unknown as SessionEntry[];
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-1", sessionManager: { getBranch: () => branch } },
+			listSessions: async () => [],
+		};
+
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "20", type: "get_transcript" },
+			createAuthorization(),
+			createContext(),
+			runtime,
+		)) as { success: boolean; data: { items: Array<Record<string, unknown>> } };
+		expect(response.success).toBe(true);
+		expect(response.data.items).toEqual([
+			expect.objectContaining({ entryId: "e-images", role: "user", text: "see screenshots", imageCount: 2 }),
+			expect.objectContaining({ entryId: "e-image-only", role: "user", text: "", imageCount: 1 }),
+		]);
+		// The transcript page itself stays text-only; images are fetched per entry.
+		expect(JSON.stringify(response)).not.toContain("Zmlyc3Q=");
+	});
+
+	it("serves get_message_images for a user entry with workspace and session identity", async () => {
+		const branch = [
+			{
+				type: "message",
+				id: "e-images",
+				timestamp: "2026-07-06T00:00:00.000Z",
+				message: {
+					role: "user",
+					content: [
+						{ type: "text", text: "see screenshots" },
+						{ type: "image", data: "Zmlyc3Q=", mimeType: "image/jpeg" },
+						{ type: "image", data: "c2Vjb25k", mimeType: "image/png" },
+					],
+				},
+			},
+		] as unknown as SessionEntry[];
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-1", sessionManager: { getBranch: () => branch } },
+			listSessions: async () => [],
+		};
+
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "21", type: "get_message_images", entryId: "e-images" },
+			createAuthorization(),
+			createContext(),
+			runtime,
+		)) as Record<string, unknown>;
+		expect(response).toMatchObject({
+			id: "21",
+			command: "get_message_images",
+			success: true,
+			data: {
+				workspaceName: "ws",
+				sessionId: "s-1",
+				entryId: "e-images",
+				totalImages: 2,
+				images: [
+					{ type: "image", data: "Zmlyc3Q=", mimeType: "image/jpeg", index: 0 },
+					{ type: "image", data: "c2Vjb25k", mimeType: "image/png", index: 1 },
+				],
+				nextImageIndex: null,
+			},
+		});
+
+		const paged = (await handleIntegratedConversationRpcCommand(
+			{ id: "22", type: "get_message_images", entryId: "e-images", startImageIndex: 1 },
+			createAuthorization(),
+			createContext(),
+			runtime,
+		)) as { data: { images: Array<{ index: number }> } };
+		expect(paged.data.images.map((image) => image.index)).toEqual([1]);
+	});
+
+	it("rejects get_message_images for unknown entries and invalid arguments", async () => {
+		const unknownEntry = (await handleIntegratedConversationRpcCommand(
+			{ id: "23", type: "get_message_images", entryId: "missing" },
+			createAuthorization(),
+			createContext(),
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(unknownEntry).toMatchObject({ success: false, error: "unknown_entry" });
+
+		const missingEntryId = (await handleIntegratedConversationRpcCommand(
+			{ id: "24", type: "get_message_images" },
+			createAuthorization(),
+			createContext(),
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(missingEntryId).toMatchObject({ success: false, error: "invalid_cursor" });
+
+		const badIndex = (await handleIntegratedConversationRpcCommand(
+			{ id: "25", type: "get_message_images", entryId: "e-1", startImageIndex: -2 },
+			createAuthorization(),
+			createContext(),
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(badIndex).toMatchObject({ success: false, error: "invalid_request" });
+	});
+
 	it("serves list_sessions with the current session summary", async () => {
 		const response = (await handleIntegratedConversationRpcCommand(
 			{ id: "7", type: "list_sessions" },

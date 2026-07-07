@@ -12,7 +12,7 @@ import {
 } from "../../core/host-actions.ts";
 import { getMcpRpcCapabilities, listMcpRpcServers } from "../../core/mcp/rpc.ts";
 import type { McpGatewayExecutionContext } from "../../core/mcp/types.ts";
-import { projectSessionTranscript } from "../../core/rpc/transcript.ts";
+import { projectMessageImages, projectSessionTranscript } from "../../core/rpc/transcript.ts";
 import {
 	createUiActionInvocationPlan,
 	getUiActionCompletions,
@@ -508,6 +508,24 @@ export async function handleRpcCommand(
 				limit: command.limit,
 			});
 			return createRpcSuccessResponse(id, "get_transcript", transcript);
+		}
+
+		case "get_message_images": {
+			const result = projectMessageImages(
+				session.sessionManager.getBranch(),
+				command.entryId,
+				command.startImageIndex,
+			);
+			if (!result.ok) {
+				return createRpcErrorResponse(id, "get_message_images", result.error);
+			}
+			return createRpcSuccessResponse(id, "get_message_images", {
+				sessionId: session.sessionManager.getSessionId(),
+				entryId: result.entryId,
+				totalImages: result.totalImages,
+				images: result.images,
+				nextImageIndex: result.nextImageIndex,
+			});
 		}
 
 		// =================================================================

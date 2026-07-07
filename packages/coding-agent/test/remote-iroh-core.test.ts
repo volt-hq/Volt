@@ -853,6 +853,7 @@ describe("Iroh remote core helpers", () => {
 			"host_action_response",
 			"get_state",
 			"get_transcript",
+			"get_message_images",
 			"get_mcp_capabilities",
 			"list_mcp_servers",
 			"get_mcp_server",

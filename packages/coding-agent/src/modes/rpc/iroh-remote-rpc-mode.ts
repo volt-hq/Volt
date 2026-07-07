@@ -21,7 +21,7 @@ import {
 	type RpcTranscriptItem,
 	type RpcTransport,
 } from "../../core/rpc/index.ts";
-import { projectSessionTranscript } from "../../core/rpc/transcript.ts";
+import { extractMessageImages, projectSessionTranscript } from "../../core/rpc/transcript.ts";
 import type { CustomMessageEntry, SessionEntry, SessionMessageEntry } from "../../core/session-manager.ts";
 import { type RpcModeOptions, type RpcSessionChange, runRpcMode } from "./rpc-mode.ts";
 import type { RpcRegisterPushTargetResponse } from "./rpc-types.ts";
@@ -336,10 +336,17 @@ function createIrohRemoteTranscriptEntryEvent(
 	const message = entry.message;
 	if (message.role === "user" || message.role === "assistant") {
 		const text = extractVisibleTextContent(message.content);
-		if (!text) {
+		const imageCount = message.role === "user" ? extractMessageImages(message.content).length : 0;
+		if (!text && imageCount === 0) {
 			return undefined;
 		}
-		return createIrohRemoteTranscriptEntryEventValue(entry, message.role, text, options);
+		return createIrohRemoteTranscriptEntryEventValue(
+			entry,
+			message.role,
+			text,
+			options,
+			imageCount > 0 ? { imageCount } : {},
+		);
 	}
 	if (message.role === "toolResult") {
 		const status = message.isError ? "failed" : "completed";
@@ -498,6 +505,9 @@ function createIrohRemoteProjectedTranscriptEntryFields(
 	};
 	if (item.role === "summary") {
 		fields.title = item.title;
+	}
+	if (item.role === "user" && item.imageCount) {
+		fields.imageCount = item.imageCount;
 	}
 	return fields;
 }

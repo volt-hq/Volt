@@ -23,6 +23,8 @@ export type {
 	RpcMcpServersResponse,
 	RpcMcpToolResponse,
 	RpcMcpToolsResponse,
+	RpcMessageImage,
+	RpcMessageImagesResponse,
 	RpcModel,
 	RpcPendingHostActionsResponse,
 	RpcPushPlatform,
