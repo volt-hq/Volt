@@ -355,6 +355,7 @@ function createIrohRemoteTranscriptEntryEvent(
 		const toolCall = collectIrohRemoteToolCalls(runtimeHost.session.sessionManager.getBranch()).get(
 			message.toolCallId,
 		);
+		const imageCount = extractMessageImages(message.content).length;
 		return createIrohRemoteTranscriptEntryEventValue(entry, "tool", `${toolName} ${status}`, options, {
 			toolName,
 			status,
@@ -366,6 +367,7 @@ function createIrohRemoteTranscriptEntryEvent(
 					}
 				: {}),
 			...sanitizeIrohRemoteToolOutputFields(extractVisibleTextContent(message.content), options),
+			...(imageCount > 0 ? { imageCount } : {}),
 		});
 	}
 	if (message.role === "bashExecution") {
@@ -493,6 +495,9 @@ function createIrohRemoteProjectedTranscriptEntryFields(
 		}
 		if (item.patchPreview) {
 			fields.patchPreview = item.patchPreview;
+		}
+		if (item.imageCount) {
+			fields.imageCount = item.imageCount;
 		}
 		return fields;
 	}

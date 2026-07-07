@@ -225,6 +225,104 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		expect(tool?.outputTruncated).toBe(true);
 	});
 
+	it("advertises imageCount on tool transcript items with image results", async () => {
+		const branch = [
+			{
+				type: "message",
+				id: "e-call",
+				timestamp: "2026-07-06T00:00:00.000Z",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "tc-1", name: "read", arguments: { path: "logo.png" } }],
+				},
+			},
+			{
+				type: "message",
+				id: "e-image-result",
+				timestamp: "2026-07-06T00:00:01.000Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "tc-1",
+					toolName: "read",
+					isError: false,
+					content: [
+						{ type: "text", text: "Read image file [image/png]" },
+						{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+					],
+				},
+			},
+			{
+				type: "message",
+				id: "e-text-result",
+				timestamp: "2026-07-06T00:00:02.000Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "tc-1",
+					toolName: "read",
+					isError: false,
+					content: [{ type: "text", text: "plain text" }],
+				},
+			},
+		] as unknown as SessionEntry[];
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-1", sessionManager: { getBranch: () => branch } },
+			listSessions: async () => [],
+		};
+
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "21", type: "get_transcript" },
+			createAuthorization(),
+			createContext(),
+			runtime,
+		)) as { success: boolean; data: { items: Array<Record<string, unknown>> } };
+		expect(response.success).toBe(true);
+		const toolItems = response.data.items.filter((item) => item.role === "tool");
+		expect(toolItems[0]).toEqual(
+			expect.objectContaining({ entryId: "e-image-result", role: "tool", toolName: "read", imageCount: 1 }),
+		);
+		expect(toolItems[1]).not.toHaveProperty("imageCount");
+		// The transcript page itself stays text-only; images are fetched per entry.
+		expect(JSON.stringify(response)).not.toContain("aW1hZ2U=");
+	});
+
+	it("serves get_message_images for a tool result entry", async () => {
+		const branch = [
+			{
+				type: "message",
+				id: "e-image-result",
+				timestamp: "2026-07-06T00:00:00.000Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "tc-1",
+					toolName: "read",
+					isError: false,
+					content: [
+						{ type: "text", text: "Read image file [image/png]" },
+						{ type: "image", data: "dG9vbA==", mimeType: "image/png" },
+					],
+				},
+			},
+		] as unknown as SessionEntry[];
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-1", sessionManager: { getBranch: () => branch } },
+			listSessions: async () => [],
+		};
+
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "22", type: "get_message_images", entryId: "e-image-result" },
+			createAuthorization(),
+			createContext(),
+			runtime,
+		)) as { success: boolean; data: Record<string, unknown> };
+		expect(response.success).toBe(true);
+		expect(response.data).toMatchObject({
+			entryId: "e-image-result",
+			totalImages: 1,
+			images: [{ type: "image", data: "dG9vbA==", mimeType: "image/png", index: 0 }],
+			nextImageIndex: null,
+		});
+	});
+
 	it("advertises imageCount on user transcript items and keeps image-only user messages", async () => {
 		const branch = [
 			{

@@ -237,6 +237,10 @@ function projectToolResult(
 	if (path) {
 		item.path = path;
 	}
+	const imageCount = extractMessageImages(message.content).length;
+	if (imageCount > 0) {
+		item.imageCount = imageCount;
+	}
 	const diffPreview = getBoundedString(details, "diff", MUTATION_PREVIEW_LIMIT);
 	if (diffPreview) {
 		item.diffPreview = diffPreview;

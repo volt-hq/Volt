@@ -361,6 +361,51 @@ describe("RPC transcript projection", () => {
 		]);
 		expect(JSON.stringify(transcript)).not.toContain("aGVsbG8=");
 	});
+
+	test("advertises imageCount on tool items with image results and keeps projections text-only", () => {
+		const session = SessionManager.inMemory("/workspace");
+		session.appendMessage(
+			assistant(
+				[
+					{
+						type: "toolCall",
+						id: "read-image-call",
+						name: "read",
+						arguments: { path: "logo.png" },
+					},
+				],
+				10,
+			),
+		);
+		const imageReadResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "read-image-call",
+			toolName: "read",
+			content: [
+				{ type: "text", text: "Read image file [image/png]" },
+				{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+			],
+			isError: false,
+			timestamp: 20,
+		};
+		const toolEntryId = session.appendMessage(imageReadResult);
+		const textReadResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "read-image-call",
+			toolName: "read",
+			content: [{ type: "text", text: "plain text" }],
+			isError: false,
+			timestamp: 30,
+		};
+		session.appendMessage(textReadResult);
+
+		const transcript = projectSessionTranscript(session);
+		const toolItems = transcript.items.filter((item) => item.role === "tool");
+
+		expect(toolItems[0]).toMatchObject({ id: toolEntryId, role: "tool", toolName: "read", imageCount: 1 });
+		expect(toolItems[1]).not.toHaveProperty("imageCount");
+		expect(JSON.stringify(transcript)).not.toContain("aW1hZ2U=");
+	});
 });
 
 describe("message image recovery", () => {
@@ -438,6 +483,30 @@ describe("message image recovery", () => {
 			entryId,
 			totalImages: 0,
 			images: [],
+			nextImageIndex: null,
+		});
+	});
+
+	test("recovers image blocks persisted on a tool result entry", () => {
+		const session = SessionManager.inMemory("/workspace");
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "read-image-call",
+			toolName: "read",
+			content: [
+				{ type: "text", text: "Read image file [image/png]" },
+				{ type: "image", data: "dG9vbA==", mimeType: "image/png" },
+			],
+			isError: false,
+			timestamp: 10,
+		};
+		const entryId = session.appendMessage(toolResult);
+
+		expect(projectMessageImages(session.getBranch(), entryId)).toEqual({
+			ok: true,
+			entryId,
+			totalImages: 1,
+			images: [{ type: "image", data: "dG9vbA==", mimeType: "image/png", index: 0 }],
 			nextImageIndex: null,
 		});
 	});

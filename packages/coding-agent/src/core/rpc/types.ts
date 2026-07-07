@@ -567,6 +567,10 @@ export interface RpcTranscriptToolItem extends RpcTranscriptBaseItem {
 	status: RpcTranscriptToolStatus;
 	path?: string;
 	summary: string;
+	/** Number of inline image blocks on the persisted tool result (for example
+	 *  a `read` of an image file). Transcript projections are text-only;
+	 *  clients recover the blocks per entry via `get_message_images`. */
+	imageCount?: number;
 	args?: Record<string, unknown>;
 	details?: Record<string, unknown>;
 	diffPreview?: string;

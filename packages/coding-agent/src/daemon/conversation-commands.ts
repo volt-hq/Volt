@@ -279,8 +279,9 @@ export interface RemoteTranscriptItem {
 	role: "user" | "assistant" | "system" | "tool";
 	text: string;
 	truncated: boolean;
-	/** Inline image blocks persisted on the user message; recoverable per entry
-	 *  via get_message_images. */
+	/** Inline image blocks persisted on the message (user attachments or tool
+	 *  results such as image reads); recoverable per entry via
+	 *  get_message_images. */
 	imageCount?: number;
 	toolName?: string;
 	status?: "completed" | "failed";
@@ -403,6 +404,10 @@ function projectRemoteTranscriptEntry(
 		if (output) {
 			item.output = output.text;
 			item.outputTruncated = output.truncated;
+		}
+		const imageCount = extractMessageImages(message.content).length;
+		if (imageCount > 0) {
+			item.imageCount = imageCount;
 		}
 		return item;
 	}

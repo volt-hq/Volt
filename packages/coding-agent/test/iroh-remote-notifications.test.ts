@@ -1260,6 +1260,90 @@ describe("Iroh remote notification requests", () => {
 		await expect(modePromise).resolves.toBeUndefined();
 	});
 
+	test("streams tool transcript entries advertising imageCount without inline image data", async () => {
+		const session = createTestSession("session-one", "leaf-one");
+		const assistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "read-image-call",
+					name: "read",
+					arguments: { path: "/workspace/logo.png" },
+				},
+			],
+			timestamp: 1,
+		};
+		const imageReadResult = {
+			role: "toolResult",
+			toolCallId: "read-image-call",
+			toolName: "read",
+			content: [
+				{ type: "text", text: "Read image file [image/png]" },
+				{ type: "image", data: "aW1hZ2UtYnl0ZXM=", mimeType: "image/png" },
+			],
+			isError: false,
+			timestamp: 2,
+		};
+		session.sessionManager.getBranch.mockReturnValue([
+			{
+				type: "message",
+				id: "assistant-entry",
+				parentId: null,
+				timestamp: "2026-06-27T00:00:00.000Z",
+				message: assistantMessage,
+			},
+			{
+				type: "message",
+				id: "read-image-entry",
+				parentId: "assistant-entry",
+				timestamp: "2026-06-27T00:00:01.000Z",
+				message: imageReadResult,
+			},
+		]);
+		const sessionHandlers: Array<(event: AgentSessionEvent) => void> = [];
+		session.subscribe.mockImplementation((handler: (event: AgentSessionEvent) => void) => {
+			sessionHandlers.push(handler);
+			return () => {};
+		});
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
+
+		for (const handler of sessionHandlers) {
+			handler({ type: "message_end", message: imageReadResult } as AgentSessionEvent);
+		}
+
+		await vi.waitFor(() => {
+			const objects = parseWrittenObjects(send);
+			const transcriptEntries = objects.filter((record) => record.type === "transcript_entry");
+			expect(transcriptEntries).toContainEqual(
+				expect.objectContaining({
+					type: "transcript_entry",
+					entry: expect.objectContaining({
+						entryId: "read-image-entry",
+						role: "tool",
+						toolName: "read",
+						status: "completed",
+						imageCount: 1,
+					}),
+				}),
+			);
+			// Live transcript frames stay text-only; the blocks are fetched per
+			// entry via get_message_images.
+			expect(JSON.stringify(transcriptEntries)).not.toContain("aW1hZ2UtYnl0ZXM=");
+		});
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
 	test("falls back to Iroh notification_request when no push target exists", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
