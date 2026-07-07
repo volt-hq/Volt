@@ -187,6 +187,7 @@ import {
 	type OpenedRelay,
 } from "./daemon-attach.ts";
 import { DrainViewerComponent } from "./drain-viewer.ts";
+import { collectPromptImageAttachments, MAX_PROMPT_IMAGE_ATTACHMENTS } from "./prompt-image-attachments.ts";
 import { adaptRelaySocketToIrohStream } from "./relay-stream-adapter.ts";
 
 function isAsciiOnlyTerminal(): boolean {
@@ -983,7 +984,8 @@ export class InteractiveMode {
 		while (true) {
 			const userInput = await this.getUserInput();
 			try {
-				await this.session.prompt(userInput);
+				const images = await this.collectPromptImages(userInput);
+				await this.session.prompt(userInput, images ? { images } : undefined);
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
@@ -3167,6 +3169,41 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * Scan submitted prompt text for image file paths and load them as
+	 * attachments. Returns undefined for text-only models (paths stay plain
+	 * text) and for extension commands, which manage their own input.
+	 */
+	private async collectPromptImages(text: string): Promise<ImageContent[] | undefined> {
+		if (this.isExtensionCommand(text)) {
+			return undefined;
+		}
+		let result: Awaited<ReturnType<typeof collectPromptImageAttachments>>;
+		try {
+			result = await collectPromptImageAttachments(text, process.cwd(), this.session.model);
+		} catch {
+			return undefined;
+		}
+		if (!result) {
+			return undefined;
+		}
+		if (result.attachedPaths.length > 0) {
+			const names = result.attachedPaths.map((filePath) => path.basename(filePath));
+			this.showStatus(`[attached ${names.join(", ")} as image${names.length > 1 ? "s" : ""}]`);
+		}
+		if (result.cappedPaths.length > 0) {
+			this.showWarning(
+				`Only the first ${MAX_PROMPT_IMAGE_ATTACHMENTS} images were attached; ${result.cappedPaths.length} more left as plain text.`,
+			);
+		}
+		if (result.failedPaths.length > 0) {
+			this.showWarning(
+				`Could not attach ${result.failedPaths.map((filePath) => path.basename(filePath)).join(", ")} (unreadable or too large); left as plain text.`,
+			);
+		}
+		return result.images.length > 0 ? result.images : undefined;
+	}
+
 	private setupEditorSubmitHandler(): void {
 		this.defaultEditor.onSubmit = async (text: string) => {
 			text = text.trim();
@@ -3379,7 +3416,8 @@ export class InteractiveMode {
 			if (this.session.isStreaming) {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
-				await this.session.prompt(text, { streamingBehavior: "steer" });
+				const images = await this.collectPromptImages(text);
+				await this.session.prompt(text, { streamingBehavior: "steer", images });
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
 				return;
@@ -4259,7 +4297,8 @@ export class InteractiveMode {
 		if (this.session.isStreaming) {
 			this.editor.addToHistory?.(text);
 			this.editor.setText("");
-			await this.session.prompt(text, { streamingBehavior: "followUp" });
+			const images = await this.collectPromptImages(text);
+			await this.session.prompt(text, { streamingBehavior: "followUp", images });
 			this.updatePendingMessagesDisplay();
 			this.ui.requestRender();
 		}
@@ -4595,9 +4634,9 @@ export class InteractiveMode {
 					if (this.isExtensionCommand(message.text)) {
 						await this.session.prompt(message.text);
 					} else if (message.mode === "followUp") {
-						await this.session.followUp(message.text);
+						await this.session.followUp(message.text, await this.collectPromptImages(message.text));
 					} else {
-						await this.session.steer(message.text);
+						await this.session.steer(message.text, await this.collectPromptImages(message.text));
 					}
 				}
 				this.updatePendingMessagesDisplay();
@@ -4624,18 +4663,21 @@ export class InteractiveMode {
 			}
 
 			// Send first prompt (starts streaming)
-			const promptPromise = this.session.prompt(firstPrompt.text).catch((error) => {
-				restoreQueue(error);
-			});
+			const firstPromptImages = await this.collectPromptImages(firstPrompt.text);
+			const promptPromise = this.session
+				.prompt(firstPrompt.text, firstPromptImages ? { images: firstPromptImages } : undefined)
+				.catch((error) => {
+					restoreQueue(error);
+				});
 
 			// Queue remaining messages
 			for (const message of rest) {
 				if (this.isExtensionCommand(message.text)) {
 					await this.session.prompt(message.text);
 				} else if (message.mode === "followUp") {
-					await this.session.followUp(message.text);
+					await this.session.followUp(message.text, await this.collectPromptImages(message.text));
 				} else {
-					await this.session.steer(message.text);
+					await this.session.steer(message.text, await this.collectPromptImages(message.text));
 				}
 			}
 			this.updatePendingMessagesDisplay();
