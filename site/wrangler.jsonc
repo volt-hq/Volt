@@ -2,7 +2,7 @@
 // Assets-only Worker: no script, just the static build output from dist/.
 // _headers and _redirects in dist/ (copied from public/) are honored.
 {
-  "name": "volt-site",
+  "name": "volt",
   "compatibility_date": "2026-07-07",
   "assets": {
     "directory": "./dist",
