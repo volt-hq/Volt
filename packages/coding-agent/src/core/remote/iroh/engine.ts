@@ -79,6 +79,7 @@ export interface IrohRemoteHostPairOptions {
 	nodeId?: string;
 	relayMode?: IrohRemoteRelayMode;
 	relayUrls?: string[];
+	relayAuthToken?: string;
 	secret?: string;
 	ttlMs?: number;
 	workspace?: string;
@@ -233,6 +234,7 @@ export class IrohRemoteHostEngine {
 				nodeId: options.nodeId,
 				relayMode: options.relayMode,
 				...(options.relayUrls === undefined ? {} : { relayUrls: options.relayUrls }),
+				...(options.relayAuthToken === undefined ? {} : { relayAuthToken: options.relayAuthToken }),
 				secret,
 				workspace: workspace.name,
 			};

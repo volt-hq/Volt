@@ -14,11 +14,16 @@ This guide covers running a relay of your own — the fleet is deployed with
 # fresh relay (DNS A record must already point at the server)
 scripts/deploy-iroh-relay.sh root@<server> relay-name.volt-cli.dev \
   --contact you@example.com \
-  --allowlist "<daemon endpoint id>,<phone endpoint id>"
-
-# allow one more device on an existing relay
-scripts/deploy-iroh-relay.sh root@<server> --add-allow <endpoint id>
+  --shared-token "$(openssl rand -base64 30 | tr '+/' '-_' | tr -d '=')"
 ```
+
+Access control is a shared bearer token (`access.shared_token`): the daemon
+presents it on its relay connections (`VOLT_IROH_RELAY_AUTH_TOKEN`, persisted
+in daemon state after first start), pairing tickets carry it to phones, and
+phones keep it in the Keychain — so new devices need **no relay-side changes**.
+An endpoint-id `--allowlist` (with `--add-allow <id>` to grow it) remains
+available as a per-device alternative; token rotation currently means
+re-pairing devices.
 
 Multiple relays need no client-side changes beyond listing the URLs: iroh
 latency-probes every relay in the map and picks the closest as each endpoint's
@@ -89,12 +94,16 @@ contact = "you@example.com"     # Let's Encrypt account email
 prod_tls = true
 cert_dir = "/var/lib/iroh-relay/certs"
 
-# Optional: lock the relay down to your own endpoints once you know their ids
+# Lock the relay down to Volt clients presenting the shared bearer token.
+# NB: must be an [access] TABLE at the end of the file — a dotted
+# "access.shared_token" key after [tls] silently attaches to the tls table.
+# [access]
+# shared_token = ["<token>"]
+#
+# Alternative: per-device endpoint-id allowlist
 # (voltd logs its id as hostNodeId; anything not listed is rejected).
-# access.allowlist = [
-#   "<daemon endpoint id>",
-#   "<phone endpoint id>",
-# ]
+# [access]
+# allowlist = ["<daemon endpoint id>", "<phone endpoint id>"]
 ```
 
 Metrics are served on port 9090 by default; leave it firewalled and query it
@@ -161,12 +170,19 @@ use a different fleet, set the URLs explicitly (comma-separate for more than
 one):
 
 ```sh
-VOLT_IROH_RELAY_URLS=https://relay.example.com volt daemon run
+VOLT_IROH_RELAY_URLS=https://relay.example.com \
+VOLT_IROH_RELAY_AUTH_TOKEN=<shared token> volt daemon run
 ```
 
-Every pairing ticket the daemon mints carries the active relay URLs, so paired
-apps bind against the same fleet. The startup log line `iroh endpoint online`
-shows `relayMode: "production"` and the URLs.
+Both values persist in daemon state after the first start, so later bare
+restarts keep the same fleet and keep authenticating (the token, at least —
+export the URLs or rely on the built-in default).
+
+Every pairing ticket the daemon mints carries the active relay URLs and the
+auth token, so paired apps bind against the same fleet and authenticate
+automatically; the phone stores the token in its Keychain and sanitized
+reconnect tickets never contain it. The startup log line
+`iroh endpoint online` shows `relayMode: "production"` and the URLs.
 
 Relay-fleet changes propagate to paired phones automatically: the handshake
 metadata carries the current `relayUrls` on every connection, the app persists

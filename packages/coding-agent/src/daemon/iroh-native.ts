@@ -46,10 +46,21 @@ export interface IrohEndpointBuilderLike {
 	bind(): Promise<IrohEndpointLike>;
 }
 
+export interface IrohRelayConfigLike {
+	url: string;
+	quicPort?: number;
+	authToken?: string;
+}
+
+export interface IrohRelayMapLike {
+	insert(config: IrohRelayConfigLike): void;
+}
+
 export interface IrohModuleLike {
 	Endpoint: { builder(): IrohEndpointBuilderLike };
 	EndpointTicket: { fromAddr(addr: unknown): { toString(): string } };
-	RelayMode: { disabled(): unknown; customFromUrls(urls: string[]): unknown };
+	RelayMap: { empty(): IrohRelayMapLike };
+	RelayMode: { disabled(): unknown; custom(map: IrohRelayMapLike): unknown; customFromUrls(urls: string[]): unknown };
 	presetMinimal(builder: IrohEndpointBuilderLike): void;
 	presetN0(builder: IrohEndpointBuilderLike): void;
 	presetN0DisableRelay(builder: IrohEndpointBuilderLike): void;

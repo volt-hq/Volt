@@ -316,6 +316,7 @@ describe("Iroh remote core helpers", () => {
 			nodeId: "host-node",
 			relayMode: "production",
 			relayUrls: ["https://relay.example.com"],
+			relayAuthToken: "relay-shared-token",
 			secret: "pairing-secret",
 			workspace: "volt",
 		};
@@ -330,7 +331,10 @@ describe("Iroh remote core helpers", () => {
 		expect(() => parseIrohRemoteTicketPayload({ ...payload, relayUrls: [42] })).toThrow(
 			"ticket relayUrls must be a non-empty array of relay URLs",
 		);
-		expect(createIrohRemoteSanitizedReconnectTicketPayload(payload)).toEqual({
+		// Sanitized reconnect tickets strip secret-like fields: the pairing
+		// secret AND the relay auth token (clients keychain the token instead).
+		const sanitized = createIrohRemoteSanitizedReconnectTicketPayload(payload);
+		expect(sanitized).toEqual({
 			alpn: IROH_REMOTE_ALPN,
 			irohTicket: "iroh-endpoint-ticket",
 			nodeId: "host-node",
@@ -338,6 +342,7 @@ describe("Iroh remote core helpers", () => {
 			relayUrls: ["https://relay.example.com"],
 			workspace: "volt",
 		});
+		expect(JSON.stringify(sanitized)).not.toContain("relay-shared-token");
 		expect(() => createIrohRemoteSanitizedReconnectTicketPayload({ ...payload, relayUrls: undefined })).toThrow(
 			"saved_host_invalid: ticket relayUrls are required for production relayMode",
 		);

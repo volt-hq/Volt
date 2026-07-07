@@ -125,6 +125,12 @@ export interface IrohDaemonServiceConfig {
 	 * URLs so clients bind against the same relays.
 	 */
 	relayUrls?: string[];
+	/**
+	 * Bearer token presented to relay servers configured with
+	 * access.shared_token. Falls back to VOLT_IROH_RELAY_AUTH_TOKEN, then the
+	 * token persisted in daemon state from a previous start.
+	 */
+	relayAuthToken?: string;
 	pushRelayUrl?: string;
 	pushRelayAuthToken?: string;
 	profile?: string;
@@ -293,6 +299,7 @@ class IrohDaemonService {
 	private readonly services: VoltdRuntimeServices;
 	private readonly relayMode: IrohRelayMode;
 	private readonly relayUrls: string[];
+	private readonly relayAuthToken: string | undefined;
 	private readonly relayConfigWarning: string | undefined;
 	private readonly log: ReturnType<VoltdRuntimeServices["logger"]["child"]>;
 	private readonly stateManager: IrohRemoteHostStateManager;
@@ -322,6 +329,16 @@ class IrohDaemonService {
 		this.relayMode = relayConfig.relayMode;
 		this.relayUrls = relayConfig.relayUrls;
 		this.relayConfigWarning = relayConfig.warning;
+		const envRelayAuthToken = process.env.VOLT_IROH_RELAY_AUTH_TOKEN?.trim();
+		this.relayAuthToken =
+			config.relayAuthToken ??
+			(envRelayAuthToken !== undefined && envRelayAuthToken !== "" ? envRelayAuthToken : undefined) ??
+			services.state.state.settings.relayAuthToken;
+		// Persist a newly seen token so bare restarts keep authenticating against
+		// the relay without re-exporting the env var.
+		if (this.relayAuthToken !== undefined && this.relayAuthToken !== services.state.state.settings.relayAuthToken) {
+			services.state.updateSettings({ relayAuthToken: this.relayAuthToken });
+		}
 		this.log = services.logger.child("iroh");
 		this.stateManager = services.stateManager;
 		this.trustStore = new ProjectTrustStore(services.agentDir);
@@ -476,7 +493,15 @@ class IrohDaemonService {
 					throw new Error("relayMode production requires relay URLs (config.relayUrls or VOLT_IROH_RELAY_URLS)");
 				}
 				this.iroh.presetN0DisableRelay(builder);
-				builder.relayMode(this.iroh.RelayMode.customFromUrls(this.relayUrls));
+				if (this.relayAuthToken !== undefined) {
+					const relayMap = this.iroh.RelayMap.empty();
+					for (const url of this.relayUrls) {
+						relayMap.insert({ url, authToken: this.relayAuthToken });
+					}
+					builder.relayMode(this.iroh.RelayMode.custom(relayMap));
+				} else {
+					builder.relayMode(this.iroh.RelayMode.customFromUrls(this.relayUrls));
+				}
 			} else {
 				this.iroh.presetMinimal(builder);
 				builder.relayMode(this.iroh.RelayMode.disabled());
@@ -1772,6 +1797,9 @@ class IrohDaemonService {
 				nodeId: this.hostNodeId,
 				relayMode: this.relayMode,
 				...(this.relayMode === "production" ? { relayUrls: this.relayUrls } : {}),
+				...(this.relayMode === "production" && this.relayAuthToken !== undefined
+					? { relayAuthToken: this.relayAuthToken }
+					: {}),
 				...(workspaceName === undefined ? {} : { workspace: workspaceName }),
 			});
 			connection.send({ type: "pair_started", id: request.id, requestId });

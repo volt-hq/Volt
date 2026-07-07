@@ -15,8 +15,12 @@
 #
 # Options:
 #   --contact <email>      Let's Encrypt contact email (default: none)
-#   --allowlist <id,id,..> restrict relay access to these endpoint ids;
-#                          omit to allow everyone (lock down later!)
+#   --shared-token <tok>   restrict relay access to clients presenting this
+#                          bearer token (Volt's default auth; the daemon reads
+#                          VOLT_IROH_RELAY_AUTH_TOKEN and pairing tickets carry
+#                          it to phones)
+#   --allowlist <id,id,..> restrict relay access to these endpoint ids instead
+#                          of a token; omit both to allow everyone
 #   --version <vX.Y.Z>     iroh-relay release tag (default: v1.0.2)
 #   --add-allow <id>       append one endpoint id to an existing relay's
 #                          allowlist and restart (no other changes)
@@ -25,6 +29,7 @@ set -euo pipefail
 VERSION="v1.0.2"
 CONTACT=""
 ALLOWLIST=""
+SHARED_TOKEN=""
 ADD_ALLOW=""
 
 SSH_TARGET="${1:?usage: deploy-iroh-relay.sh <ssh-target> <hostname> [options]}"
@@ -38,12 +43,18 @@ fi
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--contact) CONTACT="$2"; shift 2 ;;
+		--shared-token) SHARED_TOKEN="$2"; shift 2 ;;
 		--allowlist) ALLOWLIST="$2"; shift 2 ;;
 		--version) VERSION="$2"; shift 2 ;;
 		--add-allow) ADD_ALLOW="$2"; shift 2 ;;
 		*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
+
+if [[ -n "$SHARED_TOKEN" && -n "$ALLOWLIST" ]]; then
+	echo "error: --shared-token and --allowlist are mutually exclusive" >&2
+	exit 2
+fi
 
 run() { ssh "$SSH_TARGET" "$@"; }
 
@@ -116,6 +127,11 @@ prod_tls = true
 cert_dir = \"/var/lib/iroh-relay/certs\""
 if [[ -n "$CONTACT" ]]; then
 	CONFIG+=$'\n'"contact = \"$CONTACT\""
+fi
+if [[ -n "$SHARED_TOKEN" ]]; then
+	# NB: must be a [access] table header — a dotted "access.shared_token" key
+	# here would attach to the preceding [tls] table and be silently ignored.
+	CONFIG+=$'\n\n'"# Only clients presenting this bearer token may use this relay."$'\n'"[access]"$'\n'"shared_token = [\"$SHARED_TOKEN\"]"
 fi
 if [[ -n "$ALLOWLIST" ]]; then
 	CONFIG+=$'\n\n'"# Only these Volt endpoints may use this relay."$'\n'"[access]"$'\n'"allowlist = ["

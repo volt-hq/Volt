@@ -40,6 +40,12 @@ export interface VoltdStateFileV1 {
 		themeTokenPush?: boolean;
 		/** Hold a keep-awake (prevent system sleep) assertion while the daemon runs; OFF by default. */
 		keepAwakeEnabled?: boolean;
+		/**
+		 * Bearer token presented to relay servers (access.shared_token). Seeded
+		 * from VOLT_IROH_RELAY_AUTH_TOKEN and persisted so bare restarts keep
+		 * authenticating; pairing tickets carry it to phones.
+		 */
+		relayAuthToken?: string;
 	};
 }
 
@@ -112,12 +118,17 @@ export function parseVoltdState(value: unknown): VoltdStateFileV1 {
 	const themeName = typeof settingsRecord.themeName === "string" ? settingsRecord.themeName : undefined;
 	const themeTokenPush = settingsRecord.themeTokenPush === true;
 	const keepAwakeEnabled = settingsRecord.keepAwakeEnabled === true;
+	const relayAuthToken =
+		typeof settingsRecord.relayAuthToken === "string" && settingsRecord.relayAuthToken.length > 0
+			? settingsRecord.relayAuthToken
+			: undefined;
 	return hostStateToVoltdState(hostState, {
 		detachedRuntimeTtlMs,
 		allowTools,
 		...(themeName === undefined ? {} : { themeName }),
 		...(themeTokenPush ? { themeTokenPush } : {}),
 		...(keepAwakeEnabled ? { keepAwakeEnabled } : {}),
+		...(relayAuthToken === undefined ? {} : { relayAuthToken }),
 	});
 }
 

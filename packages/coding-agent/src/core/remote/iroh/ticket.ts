@@ -16,6 +16,12 @@ export interface IrohRemoteTicketPayload {
 	relayMode?: IrohRemoteRelayMode;
 	/** Relay server URLs the client should use; required when relayMode is "production". */
 	relayUrls?: string[];
+	/**
+	 * Bearer token for relays behind access.shared_token. Secret-like: carried
+	 * in pairing tickets (clients keychain it) and stripped from sanitized
+	 * reconnect tickets.
+	 */
+	relayAuthToken?: string;
 	secret?: string;
 	workspace: string;
 }
@@ -65,6 +71,7 @@ export function parseIrohRemoteTicketPayload(value: unknown): IrohRemoteTicketPa
 	if (relayModeValue === "production" && relayUrlsValue === undefined) {
 		throw new Error("ticket relayMode production requires relayUrls");
 	}
+	const relayAuthToken = expectOptionalString(payload.relayAuthToken, "ticket relayAuthToken");
 	const secret = expectOptionalString(payload.secret, "ticket secret");
 	const workspace = expectString(payload.workspace, "ticket workspace");
 
@@ -75,6 +82,7 @@ export function parseIrohRemoteTicketPayload(value: unknown): IrohRemoteTicketPa
 		nodeId,
 		relayMode: relayModeValue,
 		relayUrls: relayUrlsValue,
+		relayAuthToken,
 		secret,
 		workspace,
 	};
