@@ -7,7 +7,7 @@ import { createTestModel, createTestSession, parseWrittenObjects, startIrohRpcMo
 describe("Iroh remote model RPC", () => {
 	test("forwards model catalog, set_model, and set_thinking_level while rejecting cycle commands", async () => {
 		const modelOne = createTestModel("model-one");
-		const modelTwo = createTestModel("model-two");
+		const modelTwo = createTestModel("model-two", { input: ["text", "image"] });
 		let currentModel = modelOne;
 		let thinkingLevel: ThinkingLevel = "medium";
 		const setModel = vi.fn(async (model: Model<Api>) => {
@@ -92,8 +92,16 @@ describe("Iroh remote model RPC", () => {
 			success: true,
 			data: {
 				models: [
-					expect.objectContaining({ id: "model-one", availableThinkingLevels: catalogLevels }),
-					expect.objectContaining({ id: "model-two", availableThinkingLevels: catalogLevels }),
+					expect.objectContaining({
+						id: "model-one",
+						availableThinkingLevels: catalogLevels,
+						input: ["text"],
+					}),
+					expect.objectContaining({
+						id: "model-two",
+						availableThinkingLevels: catalogLevels,
+						input: ["text", "image"],
+					}),
 				],
 			},
 		});
@@ -105,6 +113,7 @@ describe("Iroh remote model RPC", () => {
 				provider: "anthropic",
 				id: "model-two",
 				availableThinkingLevels: catalogLevels,
+				input: ["text", "image"],
 			}),
 		});
 		expect(setModel).toHaveBeenCalledWith(expect.objectContaining({ id: "model-two" }), {
@@ -131,7 +140,7 @@ describe("Iroh remote model RPC", () => {
 			command: "get_state",
 			success: true,
 			data: expect.objectContaining({
-				model: expect.objectContaining({ id: "model-two" }),
+				model: expect.objectContaining({ id: "model-two", input: ["text", "image"] }),
 				thinkingLevel: "low",
 				availableThinkingLevels: ["off", "minimal", "low", "medium", "high"],
 			}),

@@ -143,7 +143,7 @@ export async function startIrohRpcMode(
 	return { modePromise, recv, send };
 }
 
-export function createTestModel(id: string): Model<Api> {
+export function createTestModel(id: string, overrides: Partial<Model<Api>> = {}): Model<Api> {
 	return {
 		id,
 		name: id,
@@ -155,5 +155,6 @@ export function createTestModel(id: string): Model<Api> {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 200_000,
 		maxTokens: 8192,
+		...overrides,
 	} as Model<Api>;
 }
