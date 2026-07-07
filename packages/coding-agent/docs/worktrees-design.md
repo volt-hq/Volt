@@ -595,9 +595,9 @@ Suggested flag strategy: none needed — the feature is inert unless a client cr
 
 ## 11. Open questions
 
-1. **Conversation-stream exposure.** Should `create_worktree`/`list_worktrees` also be accepted on conversation streams (like `unregister_workspace` is today via `handleRemoteHostRpcCommand`), so the app can create a worktree without opening a second stream? The pure helpers in `worktree-rpc.ts` make this cheap; deferred to keep the Phase 1 wire surface minimal.
+1. **Conversation-stream exposure.** ~~Should `create_worktree`/`list_worktrees` also be accepted on conversation streams?~~ **Resolved: implemented.** Conversation streams (and the TUI-owned relay path via `RELAY_RPC_COMMAND_TYPES`) accept `create_worktree` and `list_worktrees`, dispatched through `handleRemoteHostRpcCommand` with the daemon's backend (`ConversationCommandContext.createWorktreeBackend`). `remove_worktree` stays management-stream-only.
 2. **Inline create at handshake (`worktrees.v2`).** `{"target":"new","worktree":{"create":true,…}}` would save a round trip but puts git latency inside the handshake timeout. Revisit with a longer per-mode timeout or an async "creating" handshake state.
 3. **Dedicated `worktree_unavailable` outcome.** `IROH_REMOTE_OUTCOMES` is a closed enum on both ends; adding a value breaks old clients that parse strictly. Bundle with the next protocol revision.
 4. **Post-create bootstrap hook.** `.volt/worktree-init` (deps install) executes repo-controlled code under daemon identity — needs a trust story first. Phase 3+ at earliest.
 5. **Worktree id slugs.** Generated default (`adjective-noun-nn`) vs. requiring an explicit name from clients. Current design: generated default, explicit override allowed.
-6. **`worktreeId` on session summaries.** Adding it to `RemoteSessionListEntry` is host-constructed and compatible; do it when the app UI needs per-row badges instead of joining `list_worktrees.sessionIds`.
+6. **`worktreeId` on session summaries.** **Resolved: implemented.** `RemoteSessionListEntry.worktreeId` is joined from the persisted bindings in `listRemoteWorkspaceSessionSummaries` (ids only, best-effort). Attribution may be absent while a TUI owns the lease (the relay-side state manager has no worktree records).

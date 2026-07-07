@@ -224,6 +224,8 @@ Conversation streams forward or handle these remote commands:
 - `register_live_activity`
 - `unregister_live_activity`
 - `list_sessions`
+- `create_worktree` (worktrees.v1)
+- `list_worktrees` (worktrees.v1)
 - `upload_device_logs`
 - `extension_ui_response`
 - `get_available_models`
@@ -231,6 +233,10 @@ Conversation streams forward or handle these remote commands:
 - `set_thinking_level`
 
 Conversation streams reject `new_session`, `switch_session_by_id`, and raw `get_messages` with `unsupported_remote_command`. Command-level `workspace`, `workspaceName`, or `sessionId` values on conversation commands are assertions only; values that do not match the stream-bound workspace/session fail with `session_mismatch`.
+
+Conversation streams on `worktrees.v1` hosts also accept `create_worktree` and `list_worktrees` (same shapes and validation as the `manage_worktrees` stream, scoped to the stream-bound workspace), so a client can create a worktree and open a new isolated conversation without a separate management stream. `remove_worktree` remains management-stream-only. Hosts without a daemon backend answer both with `unsupported_remote_command`.
+
+`list_sessions` entries include an optional `worktreeId` when the session is bound to a daemon-managed worktree, so clients can badge worktree sessions without a `list_worktrees` join. Worktree attribution may be absent while a desktop TUI owns the conversation lease.
 
 Workspace discovery streams accept only `list_sessions`. Any other valid RPC command receives `unsupported_on_workspace_discovery_stream`. Discovery streams create no conversation runtime and do not update last-session state.
 
@@ -342,6 +348,8 @@ Failures use the standard error response with reasons such as `not_a_git_reposit
 ```json
 {"id":"3","type":"response","command":"remove_worktree","success":true,"data":{"worktreeId":"fix-login","removed":true,"stoppedRuntimeCount":0,"closedStreamCount":0}}
 ```
+
+`create_worktree` and `list_worktrees` (but not `remove_worktree`) are also accepted on conversation streams — see the command allowlist above.
 
 A conversation hello with `{"target":"new","worktreeId":"fix-login"}` opens the new session with the worktree checkout as its working directory; the daemon persists the session→worktree binding so later `session`/`last` resumes land in the same checkout. Worktree runtimes inherit the parent workspace's trust decision and tool allowlist — never wider — and their outbound frames sanitize the worktree path, the parent checkout path, and the worktrees root to `/workspace`.
 

@@ -528,6 +528,7 @@ class IrohDaemonService {
 			keepAwake: this.services.keepAwake,
 			onKeepAwakeSetting: (enabled) => this.services.state.updateSettings({ keepAwakeEnabled: enabled }),
 			webSearchKey: this.services.webSearchKey,
+			createWorktreeBackend: (workspace) => this.createWorktreeRpcBackend(workspace),
 			onWorkspaceUnregistered: async (workspaceName) => {
 				// Unregistering the conversation's own workspace keeps the requesting
 				// stream and runtime alive so the response can still be delivered

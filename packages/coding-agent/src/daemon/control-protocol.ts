@@ -118,6 +118,9 @@ export const RELAY_RPC_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"register_live_activity",
 	"unregister_live_activity",
 	"unregister_workspace",
+	// worktrees.v1: create/list only — remove_worktree is management-stream-only.
+	"create_worktree",
+	"list_worktrees",
 	"set_keep_awake",
 	"get_keep_awake",
 	"set_web_search_key",

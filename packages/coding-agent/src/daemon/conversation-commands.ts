@@ -18,6 +18,12 @@ import {
 	handleIrohRemoteWorkspaceUnregisterRpcCommand,
 	IROH_REMOTE_UNREGISTER_WORKSPACE_RPC_TYPE,
 } from "../core/remote/iroh/workspace-rpc.ts";
+import {
+	handleIrohRemoteWorktreeRpcCommand,
+	IROH_REMOTE_CREATE_WORKTREE_RPC_TYPE,
+	IROH_REMOTE_LIST_WORKTREES_RPC_TYPE,
+	type IrohRemoteWorktreeRpcBackend,
+} from "../core/remote/iroh/worktree-rpc.ts";
 import { extractMessageImages, projectMessageImages } from "../core/rpc/transcript.ts";
 import type { RpcKeepAwakeStatus } from "../core/rpc/types.ts";
 import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../core/session-manager.ts";
@@ -68,6 +74,8 @@ export interface RemoteSessionListEntry {
 	createdAt: string;
 	updatedAt: string;
 	messageCount: number;
+	/** Present when the session is bound to a daemon-managed worktree (worktrees.v1). */
+	worktreeId?: string;
 }
 
 export interface RemoteSessionListCursorEntry {
@@ -120,6 +128,12 @@ export interface ConversationCommandContext {
 		set(apiKey: string | null): void;
 		readonly configured: boolean;
 	};
+	/**
+	 * Worktree RPC backend for the stream-bound workspace (worktrees.v1);
+	 * absent when no daemon owns the host (create/list_worktrees then fail
+	 * with unsupported_remote_command).
+	 */
+	createWorktreeBackend?: (workspace: { name: string; path: string }) => IrohRemoteWorktreeRpcBackend;
 }
 
 export function createLeaseDrainingRpcErrorResponse(command: RemoteRpcCommand): Record<string, unknown> {
@@ -1015,6 +1029,21 @@ export async function listRemoteWorkspaceSessionSummaries(
 	for (const summary of summaries) {
 		bySessionId.set(summary.session.sessionId, summary);
 	}
+	// Worktree attribution (worktrees.v1): join the persisted session bindings so
+	// clients can badge worktree-bound sessions without a separate list_worktrees
+	// round trip. Ids only — checkout paths never reach the wire.
+	try {
+		for (const worktree of await context.stateManager.listWorktrees(authorization.workspace.name)) {
+			for (const sessionId of worktree.sessionIds) {
+				const summary = bySessionId.get(sessionId);
+				if (summary) {
+					summary.session.worktreeId = worktree.id;
+				}
+			}
+		}
+	} catch {
+		// Attribution is best-effort; the session list itself stays authoritative.
+	}
 	return Array.from(bySessionId.values()).sort(sortRemoteSessionSummaries);
 }
 
@@ -1434,6 +1463,34 @@ export async function handleRemoteHostRpcCommand(
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	context: ConversationCommandContext,
 ): Promise<object | undefined> {
+	// create_worktree / list_worktrees are accepted on conversation streams so a
+	// phone can spin up a parallel isolated session without opening a separate
+	// manage_worktrees stream. remove_worktree stays management-stream-only (a
+	// destructive op keeps the narrower surface); the passthrough filter and the
+	// relay command set never admit it here.
+	if (command.type === IROH_REMOTE_CREATE_WORKTREE_RPC_TYPE || command.type === IROH_REMOTE_LIST_WORKTREES_RPC_TYPE) {
+		const backend = context.createWorktreeBackend?.(authorization.workspace);
+		if (!backend) {
+			return createIrohRemoteRpcErrorResponse(getRpcResponseId(command), command.type, "unsupported_remote_command");
+		}
+		const worktreeResult = await handleIrohRemoteWorktreeRpcCommand(command, {
+			authorizedWorkspaceName: authorization.workspace.name,
+			backend,
+		});
+		if (!worktreeResult.handled) {
+			return undefined;
+		}
+		if (worktreeResult.audit) {
+			await logAudit(context.auditLogger, {
+				type: worktreeResult.audit.type,
+				clientNodeId: authorization.client.nodeId,
+				workspace: authorization.workspace.name,
+				success: true,
+				details: { ...worktreeResult.audit.details, source: "remote_rpc" },
+			});
+		}
+		return worktreeResult.response;
+	}
 	if (command.type === IROH_REMOTE_UNREGISTER_WORKSPACE_RPC_TYPE) {
 		// Conversation and relay unregister is scoped to the stream-bound workspace:
 		// the documented `workspaceName` must be present and equal the authorized

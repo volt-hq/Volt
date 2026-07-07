@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
+import { getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/rpc-command-filter.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
+import type { IrohRemoteWorktreeRpcBackend } from "../src/core/remote/iroh/worktree-rpc.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 import {
 	type ConversationCommandContext,
@@ -48,6 +50,7 @@ function createContext(
 		stateManager?: IrohRemoteHostStateManager;
 		onWorkspaceUnregistered?: (workspaceName: string) => Promise<void>;
 		webSearchKey?: ConversationCommandContext["webSearchKey"];
+		createWorktreeBackend?: ConversationCommandContext["createWorktreeBackend"];
 	} = {},
 ): ConversationCommandContext {
 	return {
@@ -59,6 +62,7 @@ function createContext(
 			? {}
 			: { onWorkspaceUnregistered: options.onWorkspaceUnregistered }),
 		...(options.webSearchKey === undefined ? {} : { webSearchKey: options.webSearchKey }),
+		...(options.createWorktreeBackend === undefined ? {} : { createWorktreeBackend: options.createWorktreeBackend }),
 	};
 }
 
@@ -447,6 +451,52 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		expect(badIndex).toMatchObject({ success: false, error: "invalid_request" });
 	});
 
+	it("joins worktree bindings onto list_sessions summaries (worktrees.v1)", async () => {
+		const stateManager = new IrohRemoteHostStateManager();
+		await stateManager.upsertWorkspace({ name: "ws", path: "/tmp/ws" });
+		await stateManager.upsertWorktree({
+			id: "fix-login",
+			workspaceName: "ws",
+			path: "/tmp/agent/worktrees/--ws--/fix-login",
+			branch: "volt/fix-login",
+			createdAt: 1,
+			sessionIds: [],
+		});
+		await stateManager.bindWorktreeSession("ws", "fix-login", "s-worktree");
+		const runtime = createRuntime("s-worktree");
+		runtime.listSessions = async () => [
+			{
+				sessionId: "s-worktree",
+				sessionName: "worktree session",
+				firstMessage: "hi",
+				createdAt: new Date(1).toISOString(),
+				modifiedAt: new Date(2).toISOString(),
+				messageCount: 1,
+			},
+			{
+				sessionId: "s-plain",
+				sessionName: "plain session",
+				firstMessage: "hi",
+				createdAt: new Date(1).toISOString(),
+				modifiedAt: new Date(1).toISOString(),
+				messageCount: 1,
+			},
+		];
+
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "7", type: "list_sessions" },
+			createAuthorization(),
+			createContext({ stateManager }),
+			runtime,
+		)) as { success: boolean; data: { sessions: Array<Record<string, unknown>> } };
+		expect(response.success).toBe(true);
+		const bySession = new Map(response.data.sessions.map((session) => [session.sessionId, session]));
+		expect(bySession.get("s-worktree")?.worktreeId).toBe("fix-login");
+		expect(bySession.get("s-plain")).not.toHaveProperty("worktreeId");
+		// Ids only — no checkout path may reach the wire.
+		expect(JSON.stringify(response)).not.toContain("/tmp/agent/worktrees");
+	});
+
 	it("serves list_sessions with the current session summary", async () => {
 		const response = (await handleIntegratedConversationRpcCommand(
 			{ id: "7", type: "list_sessions" },
@@ -602,5 +652,125 @@ describe("handleIntegratedConversationRpcCommand", () => {
 				error: "unsupported_remote_command",
 			});
 		}
+	});
+});
+
+describe("worktree RPCs on conversation streams (worktrees.v1)", () => {
+	const HOST_CHECKOUT_PATH = "/tmp/agent/worktrees/--ws--/fix-login";
+
+	function createWorktreeBackend(): {
+		backend: IrohRemoteWorktreeRpcBackend;
+		createdFor: string[];
+	} {
+		const createdFor: string[] = [];
+		const record = {
+			id: "fix-login",
+			workspaceName: "ws",
+			path: HOST_CHECKOUT_PATH,
+			branch: "volt/fix-login",
+			baseRef: "main",
+			createdAt: 1,
+			sessionIds: [],
+		};
+		return {
+			createdFor,
+			backend: {
+				createWorktree: vi.fn(async () => ({ ok: true as const, worktree: record })),
+				listWorktrees: vi.fn(async () => ({
+					ok: true as const,
+					worktrees: [{ ...record, available: true, dirty: false, aheadBehind: { ahead: 1, behind: 0 } }],
+				})),
+				removeWorktree: vi.fn(async () => ({ ok: true as const, stoppedRuntimeCount: 0, closedStreamCount: 0 })),
+			},
+		};
+	}
+
+	function createWorktreeContext(backend?: IrohRemoteWorktreeRpcBackend): ConversationCommandContext {
+		return createContext(backend === undefined ? {} : { createWorktreeBackend: () => backend });
+	}
+
+	it("create_worktree succeeds scoped to the stream workspace with no paths on the wire", async () => {
+		const { backend } = createWorktreeBackend();
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "1", type: "create_worktree", workspaceName: "ws", worktreeName: "fix-login" },
+			createAuthorization(),
+			createWorktreeContext(backend),
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(response).toMatchObject({
+			id: "1",
+			type: "response",
+			command: "create_worktree",
+			success: true,
+			data: { worktree: { id: "fix-login", branch: "volt/fix-login" } },
+		});
+		expect(backend.createWorktree).toHaveBeenCalledWith("ws", { id: "fix-login" });
+		expect(JSON.stringify(response)).not.toContain(HOST_CHECKOUT_PATH);
+	});
+
+	it("list_worktrees returns summaries with aheadBehind and no paths", async () => {
+		const { backend } = createWorktreeBackend();
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "2", type: "list_worktrees", workspaceName: "ws" },
+			createAuthorization(),
+			createWorktreeContext(backend),
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(response).toMatchObject({
+			success: true,
+			data: {
+				worktrees: [{ id: "fix-login", available: true, dirty: false, aheadBehind: { ahead: 1, behind: 0 } }],
+			},
+		});
+		expect(JSON.stringify(response)).not.toContain(HOST_CHECKOUT_PATH);
+	});
+
+	it("rejects cross-workspace requests with session_mismatch", async () => {
+		const { backend } = createWorktreeBackend();
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "3", type: "create_worktree", workspaceName: "other" },
+			createAuthorization(),
+			createWorktreeContext(backend),
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(response).toMatchObject({ success: false, error: "session_mismatch" });
+		expect(backend.createWorktree).not.toHaveBeenCalled();
+	});
+
+	it("fails with unsupported_remote_command when no daemon backend exists", async () => {
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "4", type: "list_worktrees", workspaceName: "ws" },
+			createAuthorization(),
+			createWorktreeContext(),
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(response).toMatchObject({ success: false, error: "unsupported_remote_command" });
+	});
+
+	it("keeps remove_worktree off conversation streams", async () => {
+		// The inbound passthrough filter admits create/list but not remove.
+		const allowed = getIrohRemoteRpcFilterResult(
+			JSON.stringify({ id: "5", type: "create_worktree", workspaceName: "ws" }),
+		);
+		expect(allowed).toMatchObject({ allowed: true });
+		const listAllowed = getIrohRemoteRpcFilterResult(
+			JSON.stringify({ id: "5", type: "list_worktrees", workspaceName: "ws" }),
+		);
+		expect(listAllowed).toMatchObject({ allowed: true });
+		const removed = getIrohRemoteRpcFilterResult(
+			JSON.stringify({ id: "5", type: "remove_worktree", workspaceName: "ws", worktreeId: "fix-login" }),
+		);
+		expect(removed).toMatchObject({ allowed: false });
+
+		// Even if a remove reached the host handler, it is not dispatched there.
+		const { backend } = createWorktreeBackend();
+		const response = await handleIntegratedConversationRpcCommand(
+			{ id: "6", type: "remove_worktree", workspaceName: "ws", worktreeId: "fix-login" },
+			createAuthorization(),
+			createWorktreeContext(backend),
+			createRuntime(),
+		);
+		expect(response).toBeUndefined();
+		expect(backend.removeWorktree).not.toHaveBeenCalled();
 	});
 });
