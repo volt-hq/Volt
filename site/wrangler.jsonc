@@ -1,0 +1,12 @@
+// Cloudflare Workers config for the volt-cli.dev site.
+// Assets-only Worker: no script, just the static build output from dist/.
+// _headers and _redirects in dist/ (copied from public/) are honored.
+{
+  "name": "volt-site",
+  "compatibility_date": "2026-07-07",
+  "assets": {
+    "directory": "./dist",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  }
+}

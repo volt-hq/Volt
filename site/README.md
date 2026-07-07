@@ -18,18 +18,19 @@ npm run build      # syncs docs, then builds to dist/
 
 Docs edits go in `packages/coding-agent/docs/`; re-run `npm run sync-docs` (or restart dev) to pick them up. New pages must be added to `docs.json` to appear in the sidebar.
 
-## Deploying to Cloudflare Pages
+## Deploying to Cloudflare (Workers Builds)
 
-One-time setup in the Cloudflare dashboard (Workers & Pages → Create → Pages → Connect to Git):
+The site deploys as an assets-only Worker (`wrangler.jsonc`, no server code). One-time setup in the Cloudflare dashboard (Workers & Pages → Create → import the `hansjm10/Volt` repository):
 
-1. Select the `hansjm10/Volt` repository.
+1. Project name: `volt-site`.
 2. Build configuration:
-   - Build command: `cd site && npm install --ignore-scripts && npm run build`
-   - Build output directory: `site/dist`
+   - Root directory: `site`
+   - Build command: `npm ci --ignore-scripts && npm run build`
+   - Deploy command: `npx wrangler deploy`
 3. Set the production branch to `main`. Optionally restrict builds to the `site/` and `packages/coding-agent/docs/` paths (Settings → Builds → Build watch paths) so unrelated commits don't redeploy.
-4. Custom domain: add `volt-cli.dev` under the project's Custom domains tab and follow the DNS instructions (the domain must be on Cloudflare DNS or delegated there).
+4. Custom domain: after the first deploy, add `volt-cli.dev` under the Worker's Settings → Domains & Routes (the domain must be on Cloudflare DNS or delegated there).
 
-Every push to `main` that touches the site or docs then deploys automatically; PRs get preview URLs.
+Every push to `main` that touches the site or docs then deploys automatically; PRs get preview URLs. Manual deploys also work locally with `npm run deploy` (needs `wrangler login`).
 
 ## Beta launch checklist
 
