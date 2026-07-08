@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -84,6 +84,38 @@ describe("model catalog watcher", () => {
 				},
 				{ timeout: 5000 },
 			);
+			expect(onCatalogChanged).not.toHaveBeenCalled();
+		} finally {
+			stop();
+		}
+	});
+
+	test("does not drop the catalog when auth.json is temporarily moved", async () => {
+		const registry = createRegistry();
+		saveApiKeyFromAnotherProcess("sk-original");
+		registry.refreshFromDisk();
+		expect(registry.getAvailable().some((model) => model.provider === "anthropic")).toBe(true);
+
+		const refreshFromDisk = vi.spyOn(registry, "refreshFromDisk");
+		const onCatalogChanged = vi.fn();
+		const stop = startModelCatalogWatcher({
+			agentDir,
+			getModelRegistry: () => registry,
+			onCatalogChanged,
+			debounceMs: 25,
+		});
+
+		try {
+			renameSync(join(agentDir, "auth.json"), join(agentDir, "auth.json.bak"));
+
+			await vi.waitFor(
+				() => {
+					expect(refreshFromDisk).toHaveBeenCalled();
+				},
+				{ timeout: 5000 },
+			);
+			expect(existsSync(join(agentDir, "auth.json"))).toBe(false);
+			expect(registry.getAvailable().some((model) => model.provider === "anthropic")).toBe(true);
 			expect(onCatalogChanged).not.toHaveBeenCalled();
 		} finally {
 			stop();

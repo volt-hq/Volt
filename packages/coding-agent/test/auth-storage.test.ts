@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerOAuthProvider } from "@earendil-works/volt-ai/oauth";
@@ -590,6 +590,28 @@ describe("AuthStorage", () => {
 
 			const secondDrain = authStorage.drainErrors();
 			expect(secondDrain).toHaveLength(0);
+		});
+
+		test("reload preserves in-memory credentials while auth file is temporarily missing", async () => {
+			writeAuthJson({
+				anthropic: { type: "api_key", key: "anthropic-key" },
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+			const backupPath = join(tempDir, "auth.json.bak");
+			renameSync(authJsonPath, backupPath);
+
+			authStorage.reload();
+
+			expect(existsSync(authJsonPath)).toBe(false);
+			expect(authStorage.get("anthropic")).toEqual({ type: "api_key", key: "anthropic-key" });
+			expect(await authStorage.getApiKey("anthropic")).toBe("anthropic-key");
+
+			writeFileSync(backupPath, JSON.stringify({ anthropic: { type: "api_key", key: "restored-key" } }));
+			renameSync(backupPath, authJsonPath);
+			authStorage.reload();
+
+			expect(await authStorage.getApiKey("anthropic")).toBe("restored-key");
 		});
 	});
 

@@ -49,6 +49,7 @@ type LockResult<T> = {
 const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
 
 export interface AuthStorageBackend {
+	readCurrent(): string | undefined;
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T;
 	withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T>;
 }
@@ -99,6 +100,32 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		}
 
 		throw (lastError as Error) ?? new Error("Failed to acquire auth storage lock");
+	}
+
+	readCurrent(): string | undefined {
+		this.ensureParentDir();
+		if (!existsSync(this.authPath)) {
+			return undefined;
+		}
+
+		let release: (() => void) | undefined;
+		try {
+			release = this.acquireLockSyncWithRetry(this.authPath);
+			return existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
+		} catch (error) {
+			const code =
+				typeof error === "object" && error !== null && "code" in error
+					? String((error as { code?: unknown }).code)
+					: undefined;
+			if (code === "ENOENT") {
+				return undefined;
+			}
+			throw error;
+		} finally {
+			if (release) {
+				release();
+			}
+		}
 	}
 
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
@@ -175,6 +202,10 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 	private value: string | undefined;
+
+	readCurrent(): string | undefined {
+		return this.value;
+	}
 
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
 		const { result, next } = fn(this.value);
@@ -262,12 +293,15 @@ export class AuthStorage {
 	 * Reload credentials from storage.
 	 */
 	reload(): void {
-		let content: string | undefined;
 		try {
-			this.storage.withLock((current) => {
-				content = current;
-				return { result: undefined };
-			});
+			const content = this.storage.readCurrent();
+			if (content === undefined && Object.keys(this.data).length > 0) {
+				// auth.json may be temporarily moved aside by another process (for example
+				// test.sh). Keep the last known credentials until the file reappears or a
+				// parseable replacement is written.
+				this.loadError = null;
+				return;
+			}
 			this.data = this.parseStorageData(content);
 			this.loadError = null;
 		} catch (error) {
