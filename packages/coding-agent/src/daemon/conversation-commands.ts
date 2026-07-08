@@ -42,7 +42,12 @@ export const INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES: ReadonlySet<string> 
  * these are rejected with `lease_draining` so the drain converges; read-only
  * commands and abort pass through.
  */
-export const TURN_INITIATING_RPC_TYPES: ReadonlySet<string> = new Set(["prompt", "invoke_ui_action"]);
+export const TURN_INITIATING_RPC_TYPES: ReadonlySet<string> = new Set([
+	"prompt",
+	"invoke_ui_action",
+	"steer",
+	"follow_up",
+]);
 
 export const LEASE_DRAINING_RETRY_AFTER_MS = 1000;
 

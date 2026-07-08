@@ -1,4 +1,9 @@
 import { Buffer } from "node:buffer";
+import type {
+	IrohRemoteLiveActivityUpdateIntent,
+	IrohRemotePushNotificationDeliveryStatus,
+	IrohRemotePushNotificationIntent,
+} from "../core/remote/iroh/push.ts";
 
 /**
  * Wire types and framing for the voltd control plane: JSONL over the unix
@@ -110,6 +115,26 @@ export type ControlRequest =
 			 * relay_rpc_result.
 			 */
 			command: Record<string, unknown> & { type: string };
+	  }
+	| {
+			type: "relay_notification_delivery";
+			id: string;
+			/** paired phone client the relayed conversation belongs to */
+			clientNodeId: string;
+			workspaceName: string;
+			/** the TUI's current session id for the relayed conversation */
+			sessionId: string;
+			notification: IrohRemotePushNotificationIntent;
+	  }
+	| {
+			type: "relay_live_activity_delivery";
+			id: string;
+			/** paired phone client the relayed conversation belongs to */
+			clientNodeId: string;
+			workspaceName: string;
+			/** the TUI's current session id for the relayed conversation */
+			sessionId: string;
+			update: IrohRemoteLiveActivityUpdateIntent;
 	  };
 
 /** RPC command types the daemon executes on behalf of a TUI relay. */
@@ -223,7 +248,8 @@ export type ControlResponse =
 			response: Record<string, unknown>;
 			/** refreshed workspace metadata after a successful unregister_workspace */
 			workspaceMetadata?: { workspaceNames: string[]; workspaces: Array<{ name: string; status: string }> };
-	  };
+	  }
+	| { type: "relay_push_delivery_result"; id: string; status: IrohRemotePushNotificationDeliveryStatus };
 
 // ============================================================================
 // Unsolicited events (daemon -> control clients)
@@ -408,6 +434,74 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isOptionalString(value: unknown): boolean {
+	return value === undefined || typeof value === "string";
+}
+
+function isOptionalNumber(value: unknown): boolean {
+	return value === undefined || typeof value === "number";
+}
+
+function isPushDeliveryStatus(value: unknown): value is IrohRemotePushNotificationDeliveryStatus {
+	return (
+		value === "sent" ||
+		value === "no_push_target" ||
+		value === "duplicate" ||
+		value === "failed" ||
+		value === "invalid_target"
+	);
+}
+
+function isLiveActivityToolGlyph(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		typeof value.name === "string" &&
+		typeof value.symbolName === "string" &&
+		(value.status === "started" || value.status === "completed" || value.status === "failed")
+	);
+}
+
+function isLiveActivityContentState(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		(value.status === "running" ||
+			value.status === "completed" ||
+			value.status === "failed" ||
+			value.status === "waiting") &&
+		typeof value.statusText === "string" &&
+		(value.currentTool === undefined || isLiveActivityToolGlyph(value.currentTool)) &&
+		Array.isArray(value.recentTools) &&
+		value.recentTools.every(isLiveActivityToolGlyph) &&
+		isOptionalString(value.sessionID) &&
+		isOptionalString(value.workspaceName) &&
+		typeof value.updatedAtEpochSeconds === "number"
+	);
+}
+
+function isPushNotificationIntent(value: unknown): value is IrohRemotePushNotificationIntent {
+	return (
+		isRecord(value) &&
+		typeof value.eventId === "string" &&
+		typeof value.kind === "string" &&
+		typeof value.title === "string" &&
+		typeof value.body === "string" &&
+		isOptionalString(value.sessionId) &&
+		isOptionalString(value.workspace)
+	);
+}
+
+function isLiveActivityUpdateIntent(value: unknown): value is IrohRemoteLiveActivityUpdateIntent {
+	return (
+		isRecord(value) &&
+		typeof value.eventId === "string" &&
+		typeof value.kind === "string" &&
+		(value.activityEvent === undefined || value.activityEvent === "update" || value.activityEvent === "end") &&
+		isLiveActivityContentState(value.contentState) &&
+		isOptionalNumber(value.staleDateEpochSeconds) &&
+		isOptionalNumber(value.dismissalDateEpochSeconds)
+	);
+}
+
 export function parseHelloMessage(value: unknown): HelloMessage | undefined {
 	if (!isRecord(value) || value.type !== "hello") {
 		return undefined;
@@ -520,6 +614,20 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 				isRecord(value.command) &&
 				typeof value.command.type === "string"
 			);
+		case "relay_notification_delivery":
+			return (
+				typeof value.clientNodeId === "string" &&
+				typeof value.workspaceName === "string" &&
+				typeof value.sessionId === "string" &&
+				isPushNotificationIntent(value.notification)
+			);
+		case "relay_live_activity_delivery":
+			return (
+				typeof value.clientNodeId === "string" &&
+				typeof value.workspaceName === "string" &&
+				typeof value.sessionId === "string" &&
+				isLiveActivityUpdateIntent(value.update)
+			);
 		default:
 			return false;
 	}
@@ -556,6 +664,8 @@ export function isControlResponse(value: unknown): value is ControlResponse {
 			return isRecord(value.keepAwake);
 		case "relay_rpc_result":
 			return isRecord(value.response);
+		case "relay_push_delivery_result":
+			return isPushDeliveryStatus(value.status);
 		default:
 			return false;
 	}

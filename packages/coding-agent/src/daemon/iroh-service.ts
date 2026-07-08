@@ -22,7 +22,10 @@ import { resolveIrohRemoteWorkspaceProjectTrusted } from "../core/remote/iroh/ho
 import { IROH_REMOTE_ALPN } from "../core/remote/iroh/protocol.ts";
 import {
 	IrohRemoteInMemoryPushNotificationDeduper,
+	type IrohRemoteLiveActivityUpdateIntent,
+	type IrohRemotePushNotificationDeliveryStatus,
 	IrohRemotePushNotificationDispatcher,
+	type IrohRemotePushNotificationIntent,
 	IrohRemotePushRelayHttpClient,
 } from "../core/remote/iroh/push.ts";
 import { createIrohRemoteRpcErrorResponse } from "../core/remote/iroh/rpc-command-filter.ts";
@@ -223,6 +226,10 @@ interface ClientConnectionRecord {
 	connectionId: string;
 	close(reason: string): void;
 }
+
+type RelayPushDeliveryResult =
+	| { ok: true; status: IrohRemotePushNotificationDeliveryStatus }
+	| { ok: false; code: string; message: string };
 
 function isExpectedApplicationClose(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
@@ -2322,6 +2329,24 @@ class IrohDaemonService {
 				});
 				return true;
 			}
+			case "relay_notification_delivery": {
+				const result = await this.handleRelayNotificationDelivery(connection, request);
+				if (!result.ok) {
+					connection.send({ type: "error", id: request.id, code: result.code, message: result.message });
+					return true;
+				}
+				connection.send({ type: "relay_push_delivery_result", id: request.id, status: result.status });
+				return true;
+			}
+			case "relay_live_activity_delivery": {
+				const result = await this.handleRelayLiveActivityDelivery(connection, request);
+				if (!result.ok) {
+					connection.send({ type: "error", id: request.id, code: result.code, message: result.message });
+					return true;
+				}
+				connection.send({ type: "relay_push_delivery_result", id: request.id, status: result.status });
+				return true;
+			}
 			case "client_revoke": {
 				const result = await this.requireEngineSafe();
 				if (!result.ok) {
@@ -2370,6 +2395,116 @@ class IrohDaemonService {
 					return true;
 				}
 				return false;
+		}
+	}
+
+	private async createRelayDeliveryAuthorization(
+		connection: ControlConnection,
+		request: { clientNodeId: string; workspaceName: string; sessionId: string },
+	): Promise<
+		{ ok: true; authorization: IrohRemoteClientAuthorizationSuccess } | { ok: false; code: string; message: string }
+	> {
+		const lease = this.leaseBroker.lookup(request.workspaceName, request.sessionId);
+		if (!lease || lease.state !== "tui-owned" || lease.tuiConnectionId !== connection.connectionId) {
+			return {
+				ok: false,
+				code: "not_held",
+				message: "relay lease is not held by this control connection",
+			};
+		}
+		const client = await this.stateManager.getClient(request.clientNodeId);
+		if (!client) {
+			return { ok: false, code: "not_found", message: "paired client not found" };
+		}
+		const workspace = (await this.stateManager.getState()).workspaces.find(
+			(candidate) => candidate.name === request.workspaceName,
+		);
+		if (!workspace) {
+			return { ok: false, code: "not_found", message: `no registered workspace named ${request.workspaceName}` };
+		}
+		return {
+			ok: true,
+			authorization: {
+				ok: true,
+				allowTools: this.getWorkspaceAllowTools(workspace) ?? "",
+				client,
+				paired: true,
+				pairingSecretConsumed: false,
+				workspace,
+				workspaceNames: [workspace.name],
+				workspaces: [{ name: workspace.name, status: "available" }],
+			},
+		};
+	}
+
+	private async handleRelayNotificationDelivery(
+		connection: ControlConnection,
+		request: Extract<ControlRequest, { type: "relay_notification_delivery" }>,
+	): Promise<RelayPushDeliveryResult> {
+		const notification = request.notification;
+		if (notification.sessionId !== undefined && notification.sessionId !== request.sessionId) {
+			return { ok: false, code: "session_mismatch", message: "notification session does not match relay session" };
+		}
+		if (notification.workspace !== undefined && notification.workspace !== request.workspaceName) {
+			return {
+				ok: false,
+				code: "workspace_mismatch",
+				message: "notification workspace does not match relay workspace",
+			};
+		}
+		const authorization = await this.createRelayDeliveryAuthorization(connection, request);
+		if (!authorization.ok) {
+			return authorization;
+		}
+		const scopedNotification: IrohRemotePushNotificationIntent = {
+			...notification,
+			sessionId: notification.sessionId ?? request.sessionId,
+			workspace: notification.workspace ?? request.workspaceName,
+		};
+		try {
+			const status = await this.createPushNotificationDispatcher(authorization.authorization).deliverNotification(
+				scopedNotification,
+			);
+			return { ok: true, status };
+		} catch {
+			return { ok: true, status: "failed" };
+		}
+	}
+
+	private async handleRelayLiveActivityDelivery(
+		connection: ControlConnection,
+		request: Extract<ControlRequest, { type: "relay_live_activity_delivery" }>,
+	): Promise<RelayPushDeliveryResult> {
+		const contentState = request.update.contentState;
+		if (contentState.sessionID !== undefined && contentState.sessionID !== request.sessionId) {
+			return { ok: false, code: "session_mismatch", message: "Live Activity session does not match relay session" };
+		}
+		if (contentState.workspaceName !== undefined && contentState.workspaceName !== request.workspaceName) {
+			return {
+				ok: false,
+				code: "workspace_mismatch",
+				message: "Live Activity workspace does not match relay workspace",
+			};
+		}
+		const authorization = await this.createRelayDeliveryAuthorization(connection, request);
+		if (!authorization.ok) {
+			return authorization;
+		}
+		const scopedUpdate: IrohRemoteLiveActivityUpdateIntent = {
+			...request.update,
+			contentState: {
+				...contentState,
+				sessionID: contentState.sessionID ?? request.sessionId,
+				workspaceName: contentState.workspaceName ?? request.workspaceName,
+			},
+		};
+		try {
+			const status = await this.createPushNotificationDispatcher(
+				authorization.authorization,
+			).deliverLiveActivityUpdate(scopedUpdate);
+			return { ok: true, status };
+		} catch {
+			return { ok: true, status: "failed" };
 		}
 	}
 

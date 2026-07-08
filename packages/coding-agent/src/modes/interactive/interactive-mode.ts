@@ -2047,6 +2047,20 @@ export class InteractiveMode {
 					suppressExtensionUiRequests: true,
 					decorateOutbound: (value) => decorateRemoteHostState(value, authorization, responseContext),
 					initialInput: handshake.initialInput,
+					notificationDelivery: {
+						deliverNotification: (notification) =>
+							this.daemonAttach.relayNotificationDelivery.deliverNotification(
+								authorizationSubset.clientNodeId,
+								relayedSessionId,
+								notification,
+							),
+						deliverLiveActivityUpdate: (update) =>
+							this.daemonAttach.relayNotificationDelivery.deliverLiveActivityUpdate(
+								authorizationSubset.clientNodeId,
+								relayedSessionId,
+								update,
+							),
+					},
 					remoteCommandHandler: async (command) => {
 						const rpcCommand = command as { type: string } & Record<string, unknown>;
 						if (RELAY_RPC_COMMAND_TYPES.has(rpcCommand.type)) {
@@ -2055,7 +2069,7 @@ export class InteractiveMode {
 							// the TUI has no host state of its own.
 							const forwarded = await this.daemonAttach.forwardRelayRpc(
 								authorizationSubset.clientNodeId,
-								this.session.sessionId,
+								relayedSessionId,
 								rpcCommand,
 							);
 							if (!forwarded) {

@@ -1,6 +1,11 @@
 import { basename, resolve } from "node:path";
 import type { Duplex } from "node:stream";
 import { VERSION } from "../../config.ts";
+import type {
+	IrohRemoteLiveActivityUpdateIntent,
+	IrohRemotePushNotificationDeliveryStatus,
+	IrohRemotePushNotificationIntent,
+} from "../../core/remote/iroh/push.ts";
 import { createDaemonClient, type DaemonClient } from "../../daemon/control-client.ts";
 import {
 	CONTROL_WORKTREES_CAPABILITY,
@@ -44,6 +49,19 @@ export interface RelayRpcForwardResult {
 	workspaceMetadata?: { workspaceNames: string[]; workspaces: Array<{ name: string; status: string }> };
 }
 
+export interface RelayNotificationDeliveryForwarder {
+	deliverNotification(
+		clientNodeId: string,
+		sessionId: string,
+		notification: IrohRemotePushNotificationIntent,
+	): Promise<IrohRemotePushNotificationDeliveryStatus>;
+	deliverLiveActivityUpdate(
+		clientNodeId: string,
+		sessionId: string,
+		update: IrohRemoteLiveActivityUpdateIntent,
+	): Promise<IrohRemotePushNotificationDeliveryStatus>;
+}
+
 /**
  * TUI-side daemon integration façade. Every method resolves successfully as a
  * no-op when the daemon is off or unreachable: InteractiveMode never throws or
@@ -65,6 +83,8 @@ export interface DaemonAttach {
 		sessionId: string,
 		command: Record<string, unknown> & { type: string },
 	): Promise<RelayRpcForwardResult | undefined>;
+	/** Deliver relayed completion pushes and Live Activity APNs through the daemon-owned push backend. */
+	relayNotificationDelivery: RelayNotificationDeliveryForwarder;
 	/** Viewer feed subscription (drain overlay). */
 	viewerSubscribe(viewerFeedId: string): Promise<void>;
 	viewerUnsubscribe(viewerFeedId: string): Promise<void>;
@@ -254,6 +274,14 @@ export function createDisabledDaemonAttach(): DaemonAttach {
 		async rekey() {},
 		async forwardRelayRpc() {
 			return undefined;
+		},
+		relayNotificationDelivery: {
+			async deliverNotification() {
+				return "failed";
+			},
+			async deliverLiveActivityUpdate() {
+				return "failed";
+			},
 		},
 		async viewerSubscribe() {},
 		async viewerUnsubscribe() {},
@@ -521,6 +549,46 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 			} catch {
 				return undefined;
 			}
+		},
+		relayNotificationDelivery: {
+			async deliverNotification(clientNodeId, sessionId, notification) {
+				const workspaceName = resolvedWorkspaceName;
+				const activeClient = client;
+				if (!activeClient || !workspaceName) {
+					return "failed";
+				}
+				try {
+					const response = await activeClient.request({
+						type: "relay_notification_delivery",
+						clientNodeId,
+						workspaceName,
+						sessionId,
+						notification,
+					});
+					return response.type === "relay_push_delivery_result" ? response.status : "failed";
+				} catch {
+					return "failed";
+				}
+			},
+			async deliverLiveActivityUpdate(clientNodeId, sessionId, update) {
+				const workspaceName = resolvedWorkspaceName;
+				const activeClient = client;
+				if (!activeClient || !workspaceName) {
+					return "failed";
+				}
+				try {
+					const response = await activeClient.request({
+						type: "relay_live_activity_delivery",
+						clientNodeId,
+						workspaceName,
+						sessionId,
+						update,
+					});
+					return response.type === "relay_push_delivery_result" ? response.status : "failed";
+				} catch {
+					return "failed";
+				}
+			},
 		},
 		async viewerSubscribe(viewerFeedId: string) {
 			try {

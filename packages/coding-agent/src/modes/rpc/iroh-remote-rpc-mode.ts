@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { AgentSessionEvent } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import { REVIEW_BRANCH_ACTION_ID, REVIEW_UNCOMMITTED_ACTION_ID } from "../../core/host-actions.ts";
@@ -176,7 +177,7 @@ export function runIrohRemoteRpcMode(
 	const deliverCompletionNotification = async (notification: IrohRemoteNotificationRequest): Promise<void> => {
 		if (options.notificationDelivery) {
 			const deliveryStatus = await options.notificationDelivery.deliverNotification(notification);
-			if (deliveryStatus !== "no_push_target") {
+			if (deliveryStatus === "sent" || deliveryStatus === "duplicate") {
 				return;
 			}
 		}
@@ -198,7 +199,12 @@ export function runIrohRemoteRpcMode(
 				}
 			}
 			sentNotificationEventIds.add(notification.eventId);
-			await deliverCompletionNotification(notification);
+			try {
+				await deliverCompletionNotification(notification);
+			} catch (error: unknown) {
+				sentNotificationEventIds.delete(notification.eventId);
+				throw error;
+			}
 		},
 		onResponseWritten: options.onResponseWritten,
 		waitForPromptCompletion: () => runtimeHost.session.waitForIdle(),
@@ -805,9 +811,11 @@ function attachIrohRemoteLiveActivityUpdates(
 		return () => {};
 	}
 	const updater = new IrohRemoteLiveActivityUpdater(runtimeHost, delivery, workspaceName);
-	return runtimeHost.session.subscribe((event) => {
+	const unsubscribe = runtimeHost.session.subscribe((event) => {
 		void updater.handle(event).catch(() => {});
 	});
+	updater.start();
+	return unsubscribe;
 }
 
 class IrohRemoteLiveActivityUpdater {
@@ -815,6 +823,7 @@ class IrohRemoteLiveActivityUpdater {
 	private readonly runtimeHost: AgentSessionRuntime;
 	private readonly workspaceName: string | undefined;
 	private readonly toolIndexesByCallId = new Map<string, number>();
+	private readonly instanceId = randomUUID();
 	private deliveryQueue: Promise<void> = Promise.resolve();
 	private recentTools: IrohRemoteLiveActivityToolGlyph[] = [];
 	private sequence = 0;
@@ -831,6 +840,14 @@ class IrohRemoteLiveActivityUpdater {
 		this.runtimeHost = runtimeHost;
 		this.delivery = { deliverLiveActivityUpdate: delivery.deliverLiveActivityUpdate.bind(delivery) };
 		this.workspaceName = workspaceName;
+	}
+
+	start(): void {
+		if (!this.runtimeHost.session.isStreaming) {
+			return;
+		}
+		this.active = true;
+		void this.sendUpdate("running").catch(() => {});
 	}
 
 	async handle(event: AgentSessionEvent): Promise<void> {
@@ -917,7 +934,7 @@ class IrohRemoteLiveActivityUpdater {
 			updatedAtEpochSeconds: nowSeconds,
 		};
 		const update: IrohRemoteLiveActivityUpdateIntent = {
-			eventId: `live-activity:${completionState.sessionId}:${completionState.runId ?? "active"}:${++this.sequence}`,
+			eventId: `live-activity:${completionState.sessionId}:${completionState.runId ?? "active"}:${this.instanceId}:${++this.sequence}`,
 			kind: activityEvent === "end" ? "live_activity_end" : "live_activity_update",
 			activityEvent,
 			contentState,
@@ -956,8 +973,11 @@ function sanitizeLiveActivityToolName(toolName: string | undefined): string {
 
 export function createIrohRemoteHostCommandRpcTransport(
 	options: IrohRemoteHostCommandRpcTransportOptions,
-): RpcTransport {
+): RpcTransport & { setRpcModeStartupComplete?(startupComplete: boolean): void } {
 	let pendingInboundCommand = Promise.resolve();
+	const startupAwareTransport = options.transport as {
+		setRpcModeStartupComplete?: (startupComplete: boolean) => void;
+	};
 
 	const waitForPendingInboundCommand = async (): Promise<void> => {
 		await pendingInboundCommand;
@@ -995,6 +1015,9 @@ export function createIrohRemoteHostCommandRpcTransport(
 	};
 
 	return {
+		setRpcModeStartupComplete(startupComplete: boolean) {
+			startupAwareTransport.setRpcModeStartupComplete?.(startupComplete);
+		},
 		write(value) {
 			return options.transport.write(value);
 		},
@@ -1238,18 +1261,6 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 		pending.finish();
 	};
 
-	const finishPendingResponseAfterWriteFailure = (value: object): void => {
-		const response = value as Record<string, unknown>;
-		if (response.type !== "response" || typeof response.command !== "string") {
-			return;
-		}
-		const pending = findPendingCommand(response.command, typeof response.id === "string" ? response.id : undefined);
-		if (pending) {
-			pending.responseMatched = true;
-			pending.finish();
-		}
-	};
-
 	const notifyResponseWritten = async (value: object, writeResult: void | Promise<void>): Promise<void> => {
 		await writeResult;
 		const response = value as Record<string, unknown>;
@@ -1275,14 +1286,8 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 			}
 		},
 		write(value) {
-			let result: void | Promise<void>;
-			try {
-				result = options.transport.write(value);
-			} catch (error: unknown) {
-				finishPendingResponseAfterWriteFailure(value);
-				throw error;
-			}
 			trackOutboundResponse(value);
+			const result = options.transport.write(value);
 			if (options.onResponseWritten && (value as Record<string, unknown>).type === "response") {
 				return notifyResponseWritten(value, result);
 			}

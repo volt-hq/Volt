@@ -352,6 +352,66 @@ describe("createDaemonAttach + control server integration", () => {
 		expect(leasePair?.connection.capabilities.has(CONTROL_WORKTREES_CAPABILITY)).toBe(true);
 	});
 
+	it("forwards relayed push and Live Activity delivery through the resolved workspace", async () => {
+		const harness = await startControlHarness((connection, request) => {
+			if (request.type === "status") {
+				connection.send(statusResult(request.id, [{ name: "repo", path: "/tmp/parent-repo" }]));
+				return;
+			}
+			if (request.type === "relay_notification_delivery") {
+				connection.send({ type: "relay_push_delivery_result", id: request.id, status: "sent" });
+				return;
+			}
+			if (request.type === "relay_live_activity_delivery") {
+				connection.send({ type: "relay_push_delivery_result", id: request.id, status: "invalid_target" });
+				return;
+			}
+			connection.send({ type: "ok", id: request.id });
+		});
+		const attach = createDaemonAttach({ cwd: "/tmp/parent-repo/sub", agentDir: harness.agentDir });
+		cleanups.push(() => attach.dispose());
+		await attach.start();
+
+		await expect(
+			attach.relayNotificationDelivery.deliverNotification("n-1", "s-relay", {
+				eventId: "conversation:s-relay:run-1:completed",
+				kind: "conversation_completed",
+				title: "Volt finished",
+				body: "Your conversation is ready.",
+				sessionId: "s-relay",
+				workspace: "repo",
+			}),
+		).resolves.toBe("sent");
+		await expect(
+			attach.relayNotificationDelivery.deliverLiveActivityUpdate("n-1", "s-relay", {
+				eventId: "live-activity:s-relay:run-1:1",
+				kind: "live_activity_update",
+				activityEvent: "update",
+				contentState: {
+					status: "running",
+					statusText: "Volt is thinking",
+					recentTools: [],
+					sessionID: "s-relay",
+					workspaceName: "repo",
+					updatedAtEpochSeconds: 123,
+				},
+			}),
+		).resolves.toBe("invalid_target");
+
+		const notificationRequest = harness.requests.find((request) => request.type === "relay_notification_delivery");
+		expect(notificationRequest).toMatchObject({
+			clientNodeId: "n-1",
+			workspaceName: "repo",
+			sessionId: "s-relay",
+		});
+		const liveActivityRequest = harness.requests.find((request) => request.type === "relay_live_activity_delivery");
+		expect(liveActivityRequest).toMatchObject({
+			clientNodeId: "n-1",
+			workspaceName: "repo",
+			sessionId: "s-relay",
+		});
+	});
+
 	it("exposes an empty capability set for clients that do not advertise one", async () => {
 		const harness = await startControlHarness((connection, request) => {
 			connection.send(statusResult(request.id, []));
