@@ -224,11 +224,11 @@ export function runIrohRemoteRpcMode(
 		allowUiActionInvocation: true,
 		disposeRuntimeOnClose: options.disposeRuntimeOnClose,
 		onSessionChanged: async (session) => {
+			await options.onSessionChanged?.(session);
 			if (!transportClosed) {
 				attachLiveActivityUpdates();
 				attachTranscriptEntryEvents();
 			}
-			await options.onSessionChanged?.(session);
 		},
 		onClientCapabilitiesChanged: options.onClientCapabilitiesChanged,
 		onWorkflowEvent: options.onWorkflowEvent,

@@ -939,6 +939,52 @@ describe("Iroh remote notification requests", () => {
 		await expect(modePromise).resolves.toBeUndefined();
 	});
 
+	test("updates relayed session id before active Live Activity reattach delivery", async () => {
+		let currentSession = createTestSession("session-one", "run-one");
+		const setRebindSession = vi.fn();
+		let relayedSessionId = currentSession.sessionId;
+		const deliveries: Array<{ payloadSessionId: string | undefined; relayedSessionId: string }> = [];
+		const runtimeHost = {
+			get session() {
+				return currentSession;
+			},
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession,
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv } = await startIrohRpcMode(runtimeHost, currentSession, {
+			notificationDelivery: {
+				deliverNotification: vi.fn(async () => "no_push_target" as const),
+				deliverLiveActivityUpdate: vi.fn(async (update: IrohRemoteLiveActivityUpdateIntent) => {
+					deliveries.push({ payloadSessionId: update.contentState.sessionID, relayedSessionId });
+					return "sent" as const;
+				}),
+			},
+			onSessionChanged: async (session) => {
+				relayedSessionId = session.sessionId;
+			},
+			workspaceName: "volt-app",
+		});
+		const rebindSession = setRebindSession.mock.calls[0]?.[0] as (() => Promise<void>) | undefined;
+		if (!rebindSession) {
+			throw new Error("Expected runIrohRemoteRpcMode to register a session rebind callback");
+		}
+
+		const reattachedSession = createTestSession("session-two", "run-two");
+		reattachedSession.isStreaming = true;
+		currentSession = reattachedSession;
+		await rebindSession();
+
+		await vi.waitFor(() =>
+			expect(deliveries).toEqual([{ payloadSessionId: "session-two", relayedSessionId: "session-two" }]),
+		);
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
 	test("sends conversation completion notifications through the push relay when a target exists", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
