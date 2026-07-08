@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/volt-agent-core";
-import { type AssistantMessage, getModel } from "@earendil-works/volt-ai";
+import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@earendil-works/volt-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -52,6 +52,19 @@ vi.mock("../src/core/compaction/index.js", () => ({
 		settings: { enabled: boolean; reserveTokens: number },
 	) => settings.enabled && contextTokens > contextWindow - settings.reserveTokens,
 }));
+
+class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
+	constructor() {
+		super(
+			(event) => event.type === "done" || event.type === "error",
+			(event) => {
+				if (event.type === "done") return event.message;
+				if (event.type === "error") return event.error;
+				throw new Error("Unexpected event type");
+			},
+		);
+	}
+}
 
 describe("AgentSession auto-compaction queue resume", () => {
 	let session: AgentSession;
@@ -120,6 +133,65 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await expect(runAutoCompaction("threshold", false)).resolves.toBe(true);
 
 		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
+	it("should continue after threshold compaction when a length stop has no visible response", async () => {
+		const model = session.model!;
+		let streamCallCount = 0;
+
+		session.agent.streamFn = () => {
+			const callNumber = ++streamCallCount;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callNumber === 1) {
+					const message: AssistantMessage = {
+						role: "assistant",
+						content: [{ type: "thinking", thinking: "still reasoning" }],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: {
+							input: 180_000,
+							output: 10_000,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 190_000,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "length",
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: "length", message });
+					return;
+				}
+
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "text", text: "continued" }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 100,
+						output: 10,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 110,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+
+		await session.prompt("trigger length continuation");
+
+		expect(streamCallCount).toBe(2);
 	});
 
 	it("should not compact repeatedly after overflow recovery already attempted", async () => {

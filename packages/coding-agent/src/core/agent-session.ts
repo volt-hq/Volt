@@ -2000,7 +2000,7 @@ export class AgentSession {
 	 *
 	 * Two cases:
 	 * 1. Overflow: LLM returned context overflow error, remove error message from agent state, compact, auto-retry
-	 * 2. Threshold: Context over threshold, compact, NO auto-retry (user continues manually)
+	 * 2. Threshold: Context over threshold, compact; continue only when a length stop produced no visible output
 	 *
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
@@ -2080,6 +2080,14 @@ export class AgentSession {
 			contextTokens = calculateContextTokens(assistantMessage.usage);
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
+			const continueAfterCompaction =
+				assistantMessage.stopReason === "length" &&
+				!assistantMessage.content.some(
+					(content) => (content.type === "text" && content.text.trim().length > 0) || content.type === "toolCall",
+				);
+			if (continueAfterCompaction) {
+				return await this._runAutoCompaction("threshold", false, true);
+			}
 			return await this._runAutoCompaction("threshold", false);
 		}
 		return false;
@@ -2088,7 +2096,11 @@ export class AgentSession {
 	/**
 	 * Internal: Run auto-compaction with events.
 	 */
-	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+	private async _runAutoCompaction(
+		reason: "overflow" | "threshold",
+		willRetry: boolean,
+		continueAfterCompaction = false,
+	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
 
 		this._autoCompactionAbortController = new AbortController();
@@ -2245,6 +2257,10 @@ export class AgentSession {
 				if (lastMsg?.role === "assistant" && (lastMsg as AssistantMessage).stopReason === "error") {
 					this.agent.state.messages = messages.slice(0, -1);
 				}
+				return true;
+			}
+
+			if (continueAfterCompaction) {
 				return true;
 			}
 
