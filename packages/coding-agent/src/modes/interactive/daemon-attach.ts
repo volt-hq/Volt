@@ -140,11 +140,14 @@ export async function resolveDaemonWorkspaceForCwd(
 export function getRelayServingSanitizerOptions(
 	authorization: RelayPreamble["authorization"],
 	agentDir: string,
-): { workspacePath: string; additionalRedactedPaths?: string[] } {
+): { remoteWorkspacePath?: string; workspacePath: string; additionalRedactedPaths?: string[] } {
 	if (authorization.worktreePath === undefined) {
 		return { workspacePath: authorization.workspacePath };
 	}
 	return {
+		...(authorization.worktreeSourceRootRelativePath === undefined
+			? {}
+			: { remoteWorkspacePath: `/workspace/${authorization.worktreeSourceRootRelativePath}` }),
 		workspacePath: authorization.worktreePath,
 		additionalRedactedPaths: [authorization.workspacePath, getWorktreesRoot(agentDir)],
 	};

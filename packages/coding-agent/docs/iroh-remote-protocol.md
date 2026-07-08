@@ -318,9 +318,9 @@ This command is host-state metadata management only. It does not create, rename,
 
 ### Worktree management (`manage_worktrees`, worktrees.v1)
 
-A `manage_worktrees` management stream drives daemon-managed git worktrees for the stream workspace. Checkout paths are computed host-side under the agent dir and never cross the wire in either direction; requests carry ids and git refs only.
+A `manage_worktrees` management stream drives daemon-managed git worktrees for the stream workspace. Checkout paths are computed host-side under the agent dir and never cross the wire in either direction; requests carry ids and git refs only. If `workingDirectory` is inside a nested git repository or submodule under the registered workspace, the daemon creates the worktree from that nested repository root while keeping the worktree record and sessions under the registered parent workspace.
 
-`create_worktree` runs `git worktree add` in the registered checkout on a new branch (default `volt/<id>`; the base defaults to the checkout's current branch and is recorded for later merge-back guidance):
+`create_worktree` runs `git worktree add` in the selected source checkout on a new branch (default `volt/<id>`; the base defaults to the source checkout's current branch and is recorded for later merge-back guidance):
 
 ```json
 {"id":"1","type":"create_worktree","workspaceName":"myrepo","worktreeName":"fix-login","baseRef":"main"}
@@ -330,7 +330,7 @@ A `manage_worktrees` management stream drives daemon-managed git worktrees for t
 {"id":"1","type":"response","command":"create_worktree","success":true,"data":{"worktree":{"id":"fix-login","branch":"volt/fix-login","baseRef":"main","createdAt":1751900000000,"sessionIds":[]}}}
 ```
 
-Failures use the standard error response with reasons such as `not_a_git_repository`, `worktree_exists`, `worktree_branch_conflict`, `worktree_limit_reached`, `invalid_worktree_id`, `invalid_working_directory`, `nested_git_repository_unsupported`, or `git_failed`. If `workingDirectory` points at a nested git repository or submodule, clients should ask the user to register that nested repository as its own workspace before using isolated worktrees.
+Failures use the standard error response with reasons such as `not_a_git_repository`, `worktree_exists`, `worktree_branch_conflict`, `worktree_limit_reached`, `invalid_worktree_id`, `invalid_working_directory`, or `git_failed`. The wire `workingDirectory` remains registered-workspace-relative for both root and nested-repo worktrees; host-local nested repo roots and checkout paths are never exposed.
 
 `list_worktrees` reports each worktree with availability, dirtiness, bound session ids, and merge-back counts (`aheadBehind` compares the worktree branch against its recorded base ref):
 
@@ -354,7 +354,7 @@ Failures use the standard error response with reasons such as `not_a_git_reposit
 
 `create_worktree` and `list_worktrees` (but not `remove_worktree`) are also accepted on conversation streams — see the command allowlist above.
 
-A conversation hello with `{"target":"new","worktreeId":"fix-login"}` opens the new session with the worktree checkout as its working directory; `{"target":"new","workingDirectory":"packages/app"}` opens at `/workspace/packages/app` while project resources still load from the workspace root. Combining both creates/uses a worktree for the workspace root and runs the agent at `<worktree>/packages/app`. The daemon persists the session→worktree binding so later `session`/`last` resumes land in the same checkout and subfolder. Worktree runtimes inherit the parent workspace's trust decision and tool allowlist — never wider — and their outbound frames sanitize the worktree path, the parent checkout path, and the worktrees root to `/workspace`.
+A conversation hello with `{"target":"new","worktreeId":"fix-login"}` opens the new session with the worktree checkout as its working directory; `{"target":"new","workingDirectory":"packages/app"}` opens at `/workspace/packages/app` while project resources still load from the workspace root. Combining both maps the registered-workspace-relative `workingDirectory` into the worktree's source repo: for a nested source root `Volt` and selected folder `Volt/packages/coding-agent`, the checkout is created from the host's nested `Volt` repo and the agent cwd is `<worktree>/packages/coding-agent`, while the handshake/session-list `workingDirectory` remains `Volt/packages/coding-agent`. Worktree runtimes use the source checkout root as `projectCwd`, so `.volt`, settings, prompts, and MCP config are read from that isolated repo checkout; sessions are still stored under the parent registered workspace. The daemon persists the session→worktree binding so later `session`/`last` resumes land in the same checkout and subfolder. Worktree runtimes inherit the parent workspace's trust decision and tool allowlist — never wider — and their outbound frames sanitize the worktree path, the parent checkout path, and the worktrees root to `/workspace` (or `/workspace/<nested-source-root>` for nested repo worktrees).
 
 `upload_device_logs` on a conversation stream stores client diagnostic logs inside the stream-bound workspace so host-side tooling and agents can read them:
 

@@ -27,6 +27,7 @@ import {
 } from "../remote/integrated-runtime-retention.ts";
 import type { IntegratedConversationSessionSelection } from "./handshake-responses.ts";
 import { isPathInside, resolveWorkspaceDirectory, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
+import { getRegisteredWorkingDirectoryForWorktree } from "./worktree-manager.ts";
 
 export interface IntegratedRuntimeSubscriber {
 	id: string;
@@ -56,7 +57,9 @@ export interface IntegratedRuntimeEntry {
 	worktreeId?: string;
 	/** Host-local checkout path (sanitizer root); never sent on the wire. */
 	worktreePath?: string;
-	/** POSIX-style path relative to the workspace/worktree root. Omitted for root. */
+	/** Registered-workspace-relative git source root for nested repo worktrees. */
+	worktreeSourceRootRelativePath?: string;
+	/** POSIX-style path relative to the registered workspace root. Omitted for root. */
 	workingDirectory?: string;
 }
 
@@ -329,6 +332,16 @@ export class IntegratedRuntimeRegistry {
 			runtime = runtimeResult.runtime;
 			sessionSelection = runtimeResult.sessionSelection;
 			const runtimeDirectory = await resolveRuntimeWorkingDirectory(rootPath, runtime.cwd);
+			const remoteWorkingDirectory =
+				worktree === undefined
+					? runtimeDirectory.relativePath
+					: getRegisteredWorkingDirectoryForWorktree(worktree, runtimeDirectory.relativePath);
+			const echoedWorkingDirectory =
+				handshake.hello.mode === "conversation" &&
+				handshake.hello.conversation.target === "new" &&
+				requestedWorkingDirectory === undefined
+					? undefined
+					: remoteWorkingDirectory;
 			const sessionId = runtime.session.sessionId;
 			const owner = this.findOwner(authorization.workspace.name, sessionId);
 			if (owner) {
@@ -344,8 +357,16 @@ export class IntegratedRuntimeRegistry {
 				workspaceName: authorization.workspace.name,
 				sessionId,
 				runtime,
-				...(worktree === undefined ? {} : { worktreeId: worktree.id, worktreePath: worktree.path }),
-				...(runtimeDirectory.relativePath === undefined ? {} : { workingDirectory: runtimeDirectory.relativePath }),
+				...(worktree === undefined
+					? {}
+					: {
+							worktreeId: worktree.id,
+							worktreePath: worktree.path,
+							...(worktree.sourceRootRelativePath === undefined
+								? {}
+								: { worktreeSourceRootRelativePath: worktree.sourceRootRelativePath }),
+						}),
+				...(echoedWorkingDirectory === undefined ? {} : { workingDirectory: echoedWorkingDirectory }),
 			});
 			if (
 				worktree !== undefined &&
@@ -373,6 +394,7 @@ export class IntegratedRuntimeRegistry {
 		subagentId?: string;
 		worktreeId?: string;
 		worktreePath?: string;
+		worktreeSourceRootRelativePath?: string;
 		workingDirectory?: string;
 	}): IntegratedRuntimeEntry {
 		return {
@@ -391,6 +413,9 @@ export class IntegratedRuntimeRegistry {
 			...(options.subagentId === undefined ? {} : { subagentId: options.subagentId }),
 			...(options.worktreeId === undefined ? {} : { worktreeId: options.worktreeId }),
 			...(options.worktreePath === undefined ? {} : { worktreePath: options.worktreePath }),
+			...(options.worktreeSourceRootRelativePath === undefined
+				? {}
+				: { worktreeSourceRootRelativePath: options.worktreeSourceRootRelativePath }),
 			...(options.workingDirectory === undefined ? {} : { workingDirectory: options.workingDirectory }),
 		};
 	}

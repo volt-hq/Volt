@@ -87,7 +87,7 @@ import {
 import { resolveWorktreeCleanupPolicy } from "./state.ts";
 import { createHostThemeTokensFrame, HOST_THEME_TOKENS_FEATURE } from "./theme-push.ts";
 import { ViewerFeedRegistry } from "./viewer-feed.ts";
-import { isPathInside, resolveWorkspaceDirectory, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
+import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import {
 	type RemoteSanitizerOverrides,
 	runWorkspaceDiscoveryStream,
@@ -98,6 +98,7 @@ import {
 } from "./workspace-streams.ts";
 import {
 	evaluateWorktreeRelayGate,
+	getRegisteredWorkingDirectoryForWorktree,
 	getWorkspaceWorktreesDir,
 	getWorktreesRoot,
 	handleWorktreeControlRequest,
@@ -1147,30 +1148,35 @@ class IrohDaemonService {
 		workingDirectory?: string;
 		worktree?: IrohRemoteWorkspaceWorktree;
 	}): Promise<WorkspaceDirectoryResolution> {
-		const parentDirectory = await this.worktrees.validateWorkingDirectory(
-			options.workspace,
-			options.workingDirectory,
-		);
-		if (!parentDirectory.ok) {
-			const message = parentDirectory.detail ?? parentDirectory.error;
-			throw createConversationOpenError("invalid_conversation_target", message, {
-				workspace: options.workspace.name,
-			});
-		}
 		if (options.worktree === undefined) {
+			const parentDirectory = await this.worktrees.validateWorkingDirectory(
+				options.workspace,
+				options.workingDirectory,
+			);
+			if (!parentDirectory.ok) {
+				const message = parentDirectory.detail ?? parentDirectory.error;
+				throw createConversationOpenError("invalid_conversation_target", message, {
+					workspace: options.workspace.name,
+				});
+			}
 			return parentDirectory.directory;
 		}
-		const worktreeDirectory = await resolveWorkspaceDirectory(
-			options.rootPath,
-			parentDirectory.directory.relativePath,
+		const worktreeDirectory = await this.worktrees.resolveWorktreeWorkingDirectory(
+			options.workspace,
+			options.worktree,
+			options.workingDirectory,
 		);
 		if (!worktreeDirectory.ok) {
-			throw createConversationOpenError("session_unavailable", worktreeDirectory.error, {
-				workspace: options.workspace.name,
-				worktreeId: options.worktree.id,
-			});
+			throw createConversationOpenError(
+				"invalid_conversation_target",
+				worktreeDirectory.detail ?? worktreeDirectory.error,
+				{
+					workspace: options.workspace.name,
+					worktreeId: options.worktree.id,
+				},
+			);
 		}
-		return worktreeDirectory.value;
+		return worktreeDirectory.directory;
 	}
 
 	// ==========================================================================
@@ -1375,11 +1381,11 @@ class IrohDaemonService {
 		const resolvedSessionManager = resolvedTarget.sessionManager as { getCwd?: () => string };
 		const resolvedSessionCwd =
 			resolvedSessionManager.getCwd?.() ?? boundWorktree?.path ?? authorization.workspace.path;
-		const relayWorkingDirectory = getRelativeWorkingDirectoryForRoot(
+		const relayWorkingDirectoryRelativeToRoot = getRelativeWorkingDirectoryForRoot(
 			boundWorktree?.path ?? authorization.workspace.path,
 			resolvedSessionCwd,
 		);
-		if (relayWorkingDirectory === null) {
+		if (relayWorkingDirectoryRelativeToRoot === null) {
 			await this.sendHandshakeError(stream, {
 				message: "stored session working directory is outside the authorized workspace",
 				outcome: "session_unavailable",
@@ -1388,6 +1394,10 @@ class IrohDaemonService {
 			});
 			return;
 		}
+		const relayWorkingDirectory =
+			boundWorktree === undefined
+				? relayWorkingDirectoryRelativeToRoot
+				: getRegisteredWorkingDirectoryForWorktree(boundWorktree, relayWorkingDirectoryRelativeToRoot);
 
 		// Session-target resolution awaited; the lease can have moved (release,
 		// rekey, connection loss) in the meantime. Re-check before minting so the
@@ -1447,7 +1457,13 @@ class IrohDaemonService {
 						workspacePath: authorization.workspace.path,
 						...(boundWorktree === undefined
 							? {}
-							: { worktreeId: boundWorktree.id, worktreePath: boundWorktree.path }),
+							: {
+									worktreeId: boundWorktree.id,
+									worktreePath: boundWorktree.path,
+									...(boundWorktree.sourceRootRelativePath === undefined
+										? {}
+										: { worktreeSourceRootRelativePath: boundWorktree.sourceRootRelativePath }),
+								}),
 					},
 					// The phone verifies the saved host's node id in the handshake
 					// response the TUI writes; without this the relay path fails the
@@ -1699,6 +1715,10 @@ class IrohDaemonService {
 				entry.worktreePath === undefined
 					? undefined
 					: {
+							remoteWorkspacePath:
+								entry.worktreeSourceRootRelativePath === undefined
+									? "/workspace"
+									: `/workspace/${entry.worktreeSourceRootRelativePath}`,
 							workspacePath: entry.worktreePath,
 							additionalRedactedPaths: [authorization.workspace.path, getWorktreesRoot(this.services.agentDir)],
 						};
@@ -1776,6 +1796,9 @@ class IrohDaemonService {
 				initialInput: handshake.initialInput,
 				workspaceName: authorization.workspace.name,
 				workspacePath: entry.worktreePath ?? authorization.workspace.path,
+				...(worktreeSanitizerOverrides?.remoteWorkspacePath === undefined
+					? {}
+					: { remoteWorkspacePath: worktreeSanitizerOverrides.remoteWorkspacePath }),
 				...(worktreeSanitizerOverrides?.additionalRedactedPaths === undefined
 					? {}
 					: { additionalRedactedPaths: worktreeSanitizerOverrides.additionalRedactedPaths }),

@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS, isIrohRemoteWorktreeId, normalizeIrohRemoteAllowTools } from "./protocol.ts";
+import {
+	DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+	isIrohRemoteWorkingDirectory,
+	isIrohRemoteWorktreeId,
+	normalizeIrohRemoteAllowTools,
+} from "./protocol.ts";
 
 export interface IrohRemoteWorkspace {
 	name: string;
@@ -16,6 +21,8 @@ export interface IrohRemoteWorkspaceWorktree {
 	workspaceName: string;
 	/** Absolute checkout path under the worktrees root; host-local, never sent on the wire. */
 	path: string;
+	/** Registered-workspace-relative git repo root this worktree was created from. Omitted for the workspace root. */
+	sourceRootRelativePath?: string;
 	branch: string;
 	baseRef?: string;
 	createdAt: number;
@@ -219,10 +226,15 @@ export function parseIrohRemoteWorkspace(value: unknown): IrohRemoteWorkspace {
 export function parseIrohRemoteWorkspaceWorktree(value: unknown): IrohRemoteWorkspaceWorktree {
 	const worktree = expectRecord(value, "Iroh remote worktree");
 	const baseRef = expectOptionalString(worktree.baseRef, "worktree baseRef");
+	const sourceRootRelativePath = expectOptionalWorkspaceRelativePath(
+		worktree.sourceRootRelativePath,
+		"worktree sourceRootRelativePath",
+	);
 	return {
 		id: expectWorktreeId(worktree.id),
 		workspaceName: expectString(worktree.workspaceName, "worktree workspaceName"),
 		path: expectString(worktree.path, "worktree path"),
+		...(sourceRootRelativePath === undefined ? {} : { sourceRootRelativePath }),
 		branch: expectString(worktree.branch, "worktree branch"),
 		...(baseRef === undefined ? {} : { baseRef }),
 		createdAt: expectNumber(worktree.createdAt, "worktree createdAt"),
@@ -235,6 +247,16 @@ export function parseIrohRemoteWorkspaceWorktree(value: unknown): IrohRemoteWork
 function expectWorktreeId(value: unknown): string {
 	if (!isIrohRemoteWorktreeId(value)) {
 		throw new Error("worktree id must match lowercase worktree id syntax");
+	}
+	return value;
+}
+
+function expectOptionalWorkspaceRelativePath(value: unknown, label: string): string | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (!isIrohRemoteWorkingDirectory(value)) {
+		throw new Error(`${label} must be a relative workspace path`);
 	}
 	return value;
 }

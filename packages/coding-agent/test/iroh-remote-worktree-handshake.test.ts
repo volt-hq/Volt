@@ -121,6 +121,7 @@ describe("hello: worktreeId on conversation targets", () => {
 			"packages/../app",
 			"packages//app",
 			"packages/.git",
+			"packages/.Git",
 			"packages/\tapp",
 			"C:/repo",
 			42,

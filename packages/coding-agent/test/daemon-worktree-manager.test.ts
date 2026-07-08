@@ -29,10 +29,19 @@ function createFakeGit(
 	const runGit: WorktreeGitRunner = async (args, cwd) => {
 		calls.push({ args, cwd });
 		const result = handler(args, cwd);
+		const defaultStdout =
+			result.ok &&
+			(result.stdout === undefined || result.stdout.length === 0) &&
+			args[0] === "-C" &&
+			args[2] === "rev-parse" &&
+			args[3] === "--show-toplevel" &&
+			typeof args[1] === "string"
+				? `${args[1]}\n`
+				: "";
 		return {
 			ok: result.ok,
 			code: result.code ?? (result.ok ? 0 : 1),
-			stdout: result.stdout ?? "",
+			stdout: result.stdout === undefined || result.stdout.length === 0 ? defaultStdout : result.stdout,
 			stderr: result.stderr ?? "",
 		};
 	};
@@ -99,12 +108,14 @@ describe("worktree manager (fake git)", () => {
 			sessionIds: [],
 		});
 		const expectedCheckout = getWorktreeCheckoutPath(agentDir, workspaceDir, "fix-login");
+		const realWorkspaceDir = realpathSync(workspaceDir);
 		expect(result.worktree.path).toBe(expectedCheckout);
 		expect(expectedCheckout.startsWith(`${resolve(getWorktreesRoot(agentDir))}${sep}`)).toBe(true);
-		// Exact argv: repo validation then worktree add, both cwd = main checkout.
+		// Exact argv: source resolution, repo validation, then worktree add, all from the source checkout.
 		expect(git.calls).toEqual([
-			{ args: ["rev-parse", "--git-common-dir"], cwd: workspaceDir },
-			{ args: ["worktree", "add", expectedCheckout, "-b", "volt/fix-login", "main"], cwd: workspaceDir },
+			{ args: ["-C", realWorkspaceDir, "rev-parse", "--show-toplevel"], cwd: workspaceDir },
+			{ args: ["rev-parse", "--git-common-dir"], cwd: realWorkspaceDir },
+			{ args: ["worktree", "add", expectedCheckout, "-b", "volt/fix-login", "main"], cwd: realWorkspaceDir },
 		]);
 		expect(flushState).toHaveBeenCalledTimes(1);
 		const records = await stateManager.listWorktrees("repo");
@@ -112,13 +123,10 @@ describe("worktree manager (fake git)", () => {
 		expect(records[0]?.id).toBe("fix-login");
 	});
 
-	it("validates selected working directories and rejects nested git repositories before adding worktrees", async () => {
+	it("validates selected working directories and creates from nested git repositories", async () => {
 		const selected = join(workspaceDir, "packages", "app");
 		mkdirSync(selected, { recursive: true });
 		const nestedGit = createFakeGit((args) => {
-			if (args[0] === "rev-parse" && args[1] === "--git-common-dir") {
-				return { ok: true };
-			}
 			if (args[0] === "-C") {
 				return { ok: true, stdout: `${selected}\n` };
 			}
@@ -127,15 +135,20 @@ describe("worktree manager (fake git)", () => {
 
 		const nested = await createManager(nestedGit.runGit).create(workspace, {
 			id: "nested",
+			baseRef: "main",
 			workingDirectory: "packages/app",
 		});
-		expect(nested).toMatchObject({ ok: false, error: "nested_git_repository_unsupported" });
-		expect(nestedGit.calls.some((call) => call.args[0] === "worktree")).toBe(false);
+		expect(nested.ok).toBe(true);
+		if (nested.ok) {
+			expect(nested.worktree.sourceRootRelativePath).toBe("packages/app");
+		}
+		const nestedCheckout = getWorktreeCheckoutPath(agentDir, workspaceDir, "nested");
+		expect(nestedGit.calls).toContainEqual({
+			args: ["worktree", "add", nestedCheckout, "-b", "volt/nested", "main"],
+			cwd: realpathSync(selected),
+		});
 
 		const sameRepo = createFakeGit((args) => {
-			if (args[0] === "rev-parse" && args[1] === "--git-common-dir") {
-				return { ok: true };
-			}
 			if (args[0] === "-C") {
 				return { ok: true, stdout: `${workspaceDir}\n` };
 			}
@@ -143,32 +156,50 @@ describe("worktree manager (fake git)", () => {
 		});
 		const ok = await createManager(sameRepo.runGit).create(workspace, {
 			id: "subdir",
+			baseRef: "main",
 			workingDirectory: "packages/app",
 		});
 		expect(ok.ok).toBe(true);
-		expect(sameRepo.calls.some((call) => call.args[0] === "worktree")).toBe(true);
+		if (ok.ok) {
+			expect(ok.worktree.sourceRootRelativePath).toBeUndefined();
+		}
+		expect(
+			sameRepo.calls.some((call) => call.args[0] === "worktree" && call.cwd === realpathSync(workspaceDir)),
+		).toBe(true);
 	});
 
-	it("reports nested git repository selections before the parent workspace git check", async () => {
+	it("creates nested repo worktrees before any parent workspace git check", async () => {
 		const selected = join(workspaceDir, "Volt");
 		mkdirSync(selected, { recursive: true });
-		const git = createFakeGit((args) => {
+		const git = createFakeGit((args, cwd) => {
 			if (args[0] === "-C") {
 				return { ok: true, stdout: `${selected}\n` };
 			}
-			if (args[0] === "rev-parse" && args[1] === "--git-common-dir") {
-				return { ok: false, stderr: "fatal: not a git repository" };
+			if (args[0] === "rev-parse" && args[1] === "--git-common-dir" && cwd === workspaceDir) {
+				return { ok: false, stderr: "fatal: parent should not be checked" };
 			}
 			return { ok: true };
 		});
 
 		const result = await createManager(git.runGit).create(workspace, {
 			id: "nested",
+			baseRef: "main",
 			workingDirectory: "Volt",
 		});
 
-		expect(result).toMatchObject({ ok: false, error: "nested_git_repository_unsupported" });
-		expect(git.calls.some((call) => call.args[0] === "worktree")).toBe(false);
+		expect(result.ok).toBe(true);
+		expect(git.calls).not.toContainEqual({ args: ["rev-parse", "--git-common-dir"], cwd: workspaceDir });
+		expect(git.calls).toContainEqual({
+			args: [
+				"worktree",
+				"add",
+				getWorktreeCheckoutPath(agentDir, workspaceDir, "nested"),
+				"-b",
+				"volt/nested",
+				"main",
+			],
+			cwd: realpathSync(selected),
+		});
 	});
 
 	it("rejects duplicate ids from state before touching git", async () => {
@@ -275,7 +306,9 @@ describe("worktree manager (fake git)", () => {
 
 		git.calls.length = 0;
 		expect(await manager.remove(workspace, "dirty", { force: true })).toEqual({ ok: true });
-		expect(git.calls).toEqual([{ args: ["worktree", "remove", "--force", checkout], cwd: workspaceDir }]);
+		expect(git.calls).toEqual([
+			{ args: ["worktree", "remove", "--force", checkout], cwd: realpathSync(workspaceDir) },
+		]);
 		expect(await stateManager.listWorktrees("repo")).toHaveLength(0);
 	});
 
@@ -319,7 +352,7 @@ describe("worktree manager (fake git)", () => {
 		const quarantined = readdirSync(workspaceWorktreesDir).filter((name) => name.startsWith("stray.orphan-"));
 		expect(quarantined).toHaveLength(1);
 		expect(existsSync(join(workspaceWorktreesDir, quarantined[0] ?? "", "keep.txt"))).toBe(true);
-		expect(git.calls.at(-1)).toEqual({ args: ["worktree", "prune"], cwd: workspaceDir });
+		expect(git.calls.at(-1)).toEqual({ args: ["worktree", "prune"], cwd: realpathSync(workspaceDir) });
 	});
 
 	it("cleanupUnregisteredWorkspace force-removes checkouts via git and deletes the workspace worktrees dir", async () => {
@@ -360,7 +393,7 @@ describe("worktree manager (fake git)", () => {
 		expect(created.worktree.baseRef).toBe("main");
 		// The add itself still targets HEAD (the same commit); only the RECORD
 		// stores the resolved base for later guidance.
-		expect(git.calls.map((call) => call.args[0])).toEqual(["rev-parse", "symbolic-ref", "worktree"]);
+		expect(git.calls.map((call) => call.args[0])).toEqual(["-C", "rev-parse", "symbolic-ref", "worktree"]);
 
 		// Detached HEAD: falls back to the commit sha.
 		const detached = createFakeGit((args) =>
@@ -398,7 +431,7 @@ describe("worktree manager (fake git)", () => {
 		expect(listed[0]?.aheadBehind).toEqual({ ahead: 5, behind: 2 });
 		expect(git.calls).toContainEqual({
 			args: ["rev-list", "--left-right", "--count", "main...volt/counted"],
-			cwd: workspaceDir,
+			cwd: realpathSync(workspaceDir),
 		});
 
 		// A failing rev-list degrades to "no aheadBehind", never an error.
@@ -634,6 +667,54 @@ describe("worktree manager (real git integration)", () => {
 			expect(git(["rev-parse", "--show-toplevel"], created.worktree.path).trim()).toBe(
 				realpathSync(created.worktree.path),
 			);
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("creates a worktree from a nested repo under a registered parent workspace", async () => {
+		const agentDir = realpathSync(mkdtempSync(join(tmpdir(), "volt-worktree-git-nested-")));
+		const workspaceDir = join(agentDir, "workspace");
+		const nestedRepoDir = join(workspaceDir, "Volt");
+		mkdirSync(join(nestedRepoDir, "packages", "coding-agent"), { recursive: true });
+		try {
+			const git = (args: string[], cwd: string = nestedRepoDir) =>
+				execFileSync("git", args, {
+					cwd,
+					encoding: "utf8",
+					env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" },
+				});
+			git(["init", "--initial-branch=main"]);
+			git(["config", "user.email", "test@example.com"]);
+			git(["config", "user.name", "Test"]);
+			writeFileSync(join(nestedRepoDir, "packages", "coding-agent", "readme.md"), "hello\n");
+			git(["add", "packages/coding-agent/readme.md"]);
+			git(["commit", "-m", "init"]);
+
+			const stateManager = new IrohRemoteHostStateManager({
+				initialState: { workspaces: [{ name: "workspace", path: workspaceDir }], worktrees: [], clients: [] },
+			});
+			const workspace: IrohRemoteWorkspace = { name: "workspace", path: workspaceDir };
+			const manager = new WorktreeManager({
+				agentDir,
+				stateManager,
+				auditLogger: new IrohRemoteAuditLogger(),
+			});
+
+			const created = await manager.create(workspace, {
+				id: "nested",
+				workingDirectory: "Volt/packages/coding-agent",
+			});
+			expect(created.ok).toBe(true);
+			if (!created.ok) {
+				return;
+			}
+			expect(created.worktree.sourceRootRelativePath).toBe("Volt");
+			expect(existsSync(join(created.worktree.path, "packages", "coding-agent"))).toBe(true);
+			expect(git(["rev-parse", "--show-toplevel"], created.worktree.path).trim()).toBe(
+				realpathSync(created.worktree.path),
+			);
+			expect(git(["worktree", "list", "--porcelain"], nestedRepoDir)).toContain(realpathSync(created.worktree.path));
 		} finally {
 			rmSync(agentDir, { recursive: true, force: true });
 		}

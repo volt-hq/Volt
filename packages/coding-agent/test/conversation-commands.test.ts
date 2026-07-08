@@ -463,6 +463,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 			id: "fix-login",
 			workspaceName: "ws",
 			path: "/tmp/agent/worktrees/--ws--/fix-login",
+			sourceRootRelativePath: "Volt",
 			branch: "volt/fix-login",
 			createdAt: 1,
 			sessionIds: [],
@@ -477,6 +478,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 				createdAt: new Date(1).toISOString(),
 				modifiedAt: new Date(2).toISOString(),
 				messageCount: 1,
+				cwd: "/tmp/agent/worktrees/--ws--/fix-login/packages/coding-agent",
 			},
 			{
 				sessionId: "s-plain",
@@ -497,6 +499,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		expect(response.success).toBe(true);
 		const bySession = new Map(response.data.sessions.map((session) => [session.sessionId, session]));
 		expect(bySession.get("s-worktree")?.worktreeId).toBe("fix-login");
+		expect(bySession.get("s-worktree")?.workingDirectory).toBe("Volt/packages/coding-agent");
 		expect(bySession.get("s-plain")).not.toHaveProperty("worktreeId");
 		// Ids only — no checkout path may reach the wire.
 		expect(JSON.stringify(response)).not.toContain("/tmp/agent/worktrees");

@@ -43,7 +43,7 @@ export function normalizeWorkspaceRelativeDirectory(
 		return { ok: false, error: "invalid_working_directory" };
 	}
 	for (const segment of value.split("/")) {
-		if (segment === "" || segment === "." || segment === ".." || segment === ".git") {
+		if (segment === "" || segment === "." || segment === ".." || segment.toLowerCase() === ".git") {
 			return { ok: false, error: "invalid_working_directory" };
 		}
 	}
@@ -109,7 +109,7 @@ export async function listWorkspaceDirectories(
 	try {
 		const entries = await readdir(resolved.value.absolutePath, { withFileTypes: true });
 		const directories = entries
-			.filter((entry) => entry.isDirectory() && entry.name !== ".git")
+			.filter((entry) => entry.isDirectory() && entry.name.toLowerCase() !== ".git")
 			.map((entry) => ({
 				name: entry.name,
 				path: resolved.value.relativePath ? posix.join(resolved.value.relativePath, entry.name) : entry.name,

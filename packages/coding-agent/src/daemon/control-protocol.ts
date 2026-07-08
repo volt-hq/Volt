@@ -294,6 +294,8 @@ export interface RelayPreamble {
 		worktreeId?: string;
 		/** Worktree checkout path — the TUI sanitizes with this as the root. */
 		worktreePath?: string;
+		/** Registered-workspace-relative git source root for nested repo worktrees. */
+		worktreeSourceRootRelativePath?: string;
 	};
 	/**
 	 * The daemon's Iroh node id: the TUI writes it into the handshake response
@@ -312,7 +314,7 @@ export interface RelayPreamble {
 		workspaceName: string;
 		workspacePath: string;
 		worktreeId?: string;
-		/** POSIX-style path relative to the workspace/worktree root. */
+		/** POSIX-style path relative to the registered workspace root. */
 		workingDirectory?: string;
 	};
 }

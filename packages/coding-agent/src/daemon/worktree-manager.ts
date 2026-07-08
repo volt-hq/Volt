@@ -1,7 +1,7 @@
 import { createHash, randomInt } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readdir, realpath, rename, rm } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import { IROH_REMOTE_WORKTREE_ID_PATTERN } from "../core/remote/iroh/protocol.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
@@ -60,6 +60,24 @@ export function getWorktreeCheckoutPath(agentDir: string, workspacePath: string,
 		throw new Error("worktree checkout path escapes the worktrees root");
 	}
 	return checkoutPath;
+}
+
+/**
+ * Convert a path relative to a daemon-managed worktree checkout back into the
+ * registered-workspace-relative path used on the remote protocol. Nested repo
+ * worktrees store sourceRootRelativePath (e.g. `Volt`), so a worktree cwd of
+ * `packages/coding-agent` displays as `Volt/packages/coding-agent`.
+ */
+export function getRegisteredWorkingDirectoryForWorktree(
+	worktree: Pick<IrohRemoteWorkspaceWorktree, "sourceRootRelativePath">,
+	worktreeRelativePath?: string,
+): string | undefined {
+	if (worktree.sourceRootRelativePath === undefined) {
+		return worktreeRelativePath;
+	}
+	return worktreeRelativePath === undefined
+		? worktree.sourceRootRelativePath
+		: posix.join(worktree.sourceRootRelativePath, worktreeRelativePath);
 }
 
 /** win32-aware "path is inside root" prefix check on resolved paths. */
@@ -194,6 +212,17 @@ export interface WorktreeStatus extends IrohRemoteWorkspaceWorktree {
 
 export type WorktreeResult<T> = ({ ok: true } & T) | { ok: false; error: WorktreeError; detail?: string };
 
+interface WorktreeSourceResolution {
+	/** Selected directory under the registered workspace, preserving the remote relative path. */
+	workspaceDirectory: WorkspaceDirectoryResolution;
+	/** Git repository root used as `git worktree add` cwd. Host-local; never sent on the wire. */
+	sourceRootPath: string;
+	/** Registered-workspace-relative git repository root. Undefined means the registered workspace root. */
+	sourceRootRelativePath?: string;
+	/** Selected cwd relative to the git repository root. Undefined means the repo root. */
+	workingDirectoryRelativePath?: string;
+}
+
 const DEFAULT_MAX_WORKTREES_PER_WORKSPACE = 16;
 
 const SLUG_ADJECTIVES = ["amber", "brisk", "calm", "dusky", "eager", "fresh", "keen", "lucid", "quiet", "swift"];
@@ -299,30 +328,36 @@ export class WorktreeManager {
 			return { ok: false, error: "worktree_exists" };
 		}
 
-		const workingDirectory = await this.validateWorkingDirectory(workspace, options.workingDirectory);
-		if (!workingDirectory.ok) {
-			return workingDirectory;
+		const source = await this.resolveCreateSource(workspace, options.workingDirectory);
+		if (!source.ok) {
+			return source;
 		}
-		const repoCheck = await this.runGit(["rev-parse", "--git-common-dir"], workspace.path);
+		const repoCheck = await this.runGit(["rev-parse", "--git-common-dir"], source.source.sourceRootPath);
 		if (!repoCheck.ok) {
-			return this.mapGitFailure(repoCheck.stderr, workspace, checkoutPath);
+			return this.mapGitFailure(repoCheck.stderr, workspace, checkoutPath, [source.source.sourceRootPath]);
 		}
 
-		// Resolve a defaulted base to a concrete ref (the main checkout's branch,
+		// Resolve a defaulted base to a concrete ref (the source checkout's branch,
 		// falling back to its commit sha) so merge-back guidance — aheadBehind,
 		// retention merge checks, `worktree diff` — has a stable base later.
-		const recordedBaseRef = options.baseRef ?? (await this.resolveDefaultBaseRef(workspace));
+		const recordedBaseRef = options.baseRef ?? (await this.resolveDefaultBaseRef(source.source.sourceRootPath));
 
 		await mkdir(getWorkspaceWorktreesDir(this.agentDir, workspace.path), { recursive: true, mode: 0o700 });
-		const added = await this.runGit(["worktree", "add", checkoutPath, "-b", branch, baseRef], workspace.path);
+		const added = await this.runGit(
+			["worktree", "add", checkoutPath, "-b", branch, baseRef],
+			source.source.sourceRootPath,
+		);
 		if (!added.ok) {
-			return this.mapGitFailure(added.stderr, workspace, checkoutPath);
+			return this.mapGitFailure(added.stderr, workspace, checkoutPath, [source.source.sourceRootPath]);
 		}
 
 		const worktree: IrohRemoteWorkspaceWorktree = {
 			id,
 			workspaceName: workspace.name,
 			path: checkoutPath,
+			...(source.source.sourceRootRelativePath === undefined
+				? {}
+				: { sourceRootRelativePath: source.source.sourceRootRelativePath }),
 			branch,
 			...(recordedBaseRef === undefined ? {} : { baseRef: recordedBaseRef }),
 			createdAt: this.now(),
@@ -341,57 +376,140 @@ export class WorktreeManager {
 		if (!resolved.ok) {
 			return { ok: false, error: "invalid_working_directory", detail: resolved.error };
 		}
-		if (await this.isNestedGitRepository(workspace, resolved.value)) {
-			return {
-				ok: false,
-				error: "nested_git_repository_unsupported",
-				detail: "Register this nested repo as its own workspace to use isolated worktrees.",
-			};
-		}
 		return { ok: true, directory: resolved.value };
 	}
 
-	private async isNestedGitRepository(
+	async resolveWorktreeWorkingDirectory(
 		workspace: IrohRemoteWorkspace,
-		directory: WorkspaceDirectoryResolution,
-	): Promise<boolean> {
-		if (directory.relativePath === undefined) {
-			return false;
+		worktree: IrohRemoteWorkspaceWorktree,
+		workingDirectory?: string,
+	): Promise<WorktreeResult<{ directory: WorkspaceDirectoryResolution }>> {
+		if (workingDirectory === undefined) {
+			const rootDirectory = await resolveWorkspaceDirectory(worktree.path);
+			return rootDirectory.ok
+				? { ok: true, directory: rootDirectory.value }
+				: { ok: false, error: "invalid_working_directory", detail: rootDirectory.error };
+		}
+		const parentDirectory = await this.validateWorkingDirectory(workspace, workingDirectory);
+		if (!parentDirectory.ok) {
+			return parentDirectory;
+		}
+		const sourceRootPath = await this.resolveRecordSourceRootPath(workspace, worktree);
+		if (sourceRootPath === undefined || !isPathContained(sourceRootPath, parentDirectory.directory.absolutePath)) {
+			return {
+				ok: false,
+				error: "invalid_working_directory",
+				detail: "workingDirectory is outside the worktree source repository",
+			};
+		}
+		const worktreeRelativePath = getContainedRelativePath(sourceRootPath, parentDirectory.directory.absolutePath);
+		if (worktreeRelativePath === null) {
+			return {
+				ok: false,
+				error: "invalid_working_directory",
+				detail: "workingDirectory is outside the worktree source repository",
+			};
+		}
+		const worktreeDirectory = await resolveWorkspaceDirectory(worktree.path, worktreeRelativePath);
+		return worktreeDirectory.ok
+			? { ok: true, directory: worktreeDirectory.value }
+			: { ok: false, error: "invalid_working_directory", detail: worktreeDirectory.error };
+	}
+
+	private async resolveCreateSource(
+		workspace: IrohRemoteWorkspace,
+		workingDirectory?: string,
+	): Promise<WorktreeResult<{ source: WorktreeSourceResolution }>> {
+		const workspaceDirectory = await this.validateWorkingDirectory(workspace, workingDirectory);
+		if (!workspaceDirectory.ok) {
+			return workspaceDirectory;
 		}
 		const topLevel = await this.runGit(
-			["-C", directory.absolutePath, "rev-parse", "--show-toplevel"],
+			["-C", workspaceDirectory.directory.absolutePath, "rev-parse", "--show-toplevel"],
 			workspace.path,
 		);
 		if (!topLevel.ok) {
-			return false;
+			const detail = sanitizeGitDetail(topLevel.stderr, [
+				workspace.path,
+				workspaceDirectory.directory.absolutePath,
+				getWorktreesRoot(this.agentDir),
+			]);
+			return {
+				ok: false,
+				error: topLevel.stderr.toLowerCase().includes("not a git repository")
+					? "not_a_git_repository"
+					: "git_failed",
+				...(detail.length === 0 ? {} : { detail }),
+			};
 		}
-		try {
-			const workspaceRoot = await realpath(workspace.path);
-			const selectedRoot = await realpath(topLevel.stdout.trim());
-			return workspaceRoot !== selectedRoot;
-		} catch {
-			return resolve(workspace.path) !== resolve(topLevel.stdout.trim());
+		const workspaceRootPath = await realpathOrResolve(workspace.path);
+		const sourceRootPath = await realpathOrResolve(topLevel.stdout.trim());
+		if (!isPathContained(workspaceRootPath, sourceRootPath)) {
+			return {
+				ok: false,
+				error: "invalid_working_directory",
+				detail: "git repository is outside the registered workspace",
+			};
 		}
+		const sourceRootRelativePath = await findWorkspaceRelativePathForRealpath(
+			workspaceRootPath,
+			workspaceDirectory.directory.relativePath,
+			sourceRootPath,
+		);
+		if (sourceRootRelativePath === null) {
+			return {
+				ok: false,
+				error: "invalid_working_directory",
+				detail: "git repository is outside the registered workspace",
+			};
+		}
+		const workingDirectoryRelativePath = getContainedRelativePath(
+			sourceRootPath,
+			workspaceDirectory.directory.absolutePath,
+		);
+		if (workingDirectoryRelativePath === null) {
+			return {
+				ok: false,
+				error: "invalid_working_directory",
+				detail: "workingDirectory is outside the source repository",
+			};
+		}
+		return {
+			ok: true,
+			source: {
+				workspaceDirectory: workspaceDirectory.directory,
+				sourceRootPath,
+				...(sourceRootRelativePath === undefined ? {} : { sourceRootRelativePath }),
+				...(workingDirectoryRelativePath === undefined ? {} : { workingDirectoryRelativePath }),
+			},
+		};
 	}
 
 	async list(workspace: IrohRemoteWorkspace): Promise<WorktreeStatus[]> {
 		const records = await this.stateManager.listWorktrees(workspace.name);
-		const gitList = await this.runGit(["worktree", "list", "--porcelain"], workspace.path);
-		const knownCheckouts = gitList.ok ? parseWorktreeListCheckouts(gitList.stdout) : undefined;
+		const gitListBySourceRoot = new Map<string, Set<string> | undefined>();
 		const statuses: WorktreeStatus[] = [];
 		for (const record of records) {
+			const sourceRootPath = await this.resolveRecordSourceRootPath(workspace, record);
+			const knownCheckouts =
+				sourceRootPath === undefined
+					? undefined
+					: await this.getKnownWorktreeCheckouts(sourceRootPath, gitListBySourceRoot);
 			const onDisk = existsSync(record.path);
-			const available = onDisk && (knownCheckouts === undefined || knownCheckouts.has(resolve(record.path)));
+			const available =
+				onDisk &&
+				sourceRootPath !== undefined &&
+				(knownCheckouts === undefined || knownCheckouts.has(resolve(record.path)));
 			let dirty: boolean | undefined;
 			let aheadBehind: { ahead: number; behind: number } | undefined;
 			if (available) {
 				// --no-optional-locks is a git-level option and must precede the subcommand.
 				const status = await this.runGit(
 					["-C", record.path, "--no-optional-locks", "status", "--porcelain"],
-					workspace.path,
+					sourceRootPath,
 				);
 				dirty = status.ok ? status.stdout.trim().length > 0 : undefined;
-				aheadBehind = await this.computeAheadBehind(workspace, record);
+				aheadBehind = await this.computeAheadBehind(sourceRootPath, record);
 			}
 			statuses.push({
 				...record,
@@ -403,31 +521,53 @@ export class WorktreeManager {
 		return statuses;
 	}
 
+	private async getKnownWorktreeCheckouts(
+		sourceRootPath: string,
+		cache: Map<string, Set<string> | undefined>,
+	): Promise<Set<string> | undefined> {
+		const key = resolve(sourceRootPath);
+		if (cache.has(key)) {
+			return cache.get(key);
+		}
+		const gitList = await this.runGit(["worktree", "list", "--porcelain"], sourceRootPath);
+		const knownCheckouts = gitList.ok ? parseWorktreeListCheckouts(gitList.stdout) : undefined;
+		cache.set(key, knownCheckouts);
+		return knownCheckouts;
+	}
+
+	private async resolveRecordSourceRootPath(
+		workspace: IrohRemoteWorkspace,
+		record: IrohRemoteWorkspaceWorktree,
+	): Promise<string | undefined> {
+		const resolved = await resolveWorkspaceDirectory(workspace.path, record.sourceRootRelativePath);
+		return resolved.ok ? resolved.value.absolutePath : undefined;
+	}
+
 	/** Concrete base for a defaulted create: current branch name, else commit sha. */
-	private async resolveDefaultBaseRef(workspace: IrohRemoteWorkspace): Promise<string | undefined> {
-		const symbolic = await this.runGit(["symbolic-ref", "--short", "-q", "HEAD"], workspace.path);
+	private async resolveDefaultBaseRef(sourceRootPath: string): Promise<string | undefined> {
+		const symbolic = await this.runGit(["symbolic-ref", "--short", "-q", "HEAD"], sourceRootPath);
 		const shortRef = symbolic.ok ? symbolic.stdout.trim() : "";
 		if (shortRef.length > 0 && isValidGitRefSyntax(shortRef)) {
 			return shortRef;
 		}
-		const sha = await this.runGit(["rev-parse", "HEAD"], workspace.path);
+		const sha = await this.runGit(["rev-parse", "HEAD"], sourceRootPath);
 		const shaValue = sha.ok ? sha.stdout.trim() : "";
 		return /^[0-9a-f]{4,64}$/i.test(shaValue) ? shaValue : undefined;
 	}
 
 	/**
 	 * Merge-back guidance (design §5.3): branch commits relative to the base
-	 * ref, computed read-only in the main checkout. `left...right` with
+	 * ref, computed read-only in the source checkout. `left...right` with
 	 * left = base and right = branch yields "behind<TAB>ahead".
 	 */
 	private async computeAheadBehind(
-		workspace: IrohRemoteWorkspace,
+		sourceRootPath: string,
 		record: IrohRemoteWorkspaceWorktree,
 	): Promise<{ ahead: number; behind: number } | undefined> {
 		const baseRef = record.baseRef ?? "HEAD";
 		const counted = await this.runGit(
 			["rev-list", "--left-right", "--count", `${baseRef}...${record.branch}`],
-			workspace.path,
+			sourceRootPath,
 		);
 		if (!counted.ok) {
 			return undefined;
@@ -459,24 +599,30 @@ export class WorktreeManager {
 				return { ok: false, error: "worktree_busy" };
 			}
 		}
+		const sourceRootPath = await this.resolveRecordSourceRootPath(workspace, record);
 		if (existsSync(record.path)) {
+			if (sourceRootPath === undefined) {
+				return { ok: false, error: "not_a_git_repository", detail: "worktree source repository is unavailable" };
+			}
 			if (!force) {
 				const status = await this.runGit(
 					["-C", record.path, "--no-optional-locks", "status", "--porcelain"],
-					workspace.path,
+					sourceRootPath,
 				);
 				if (status.ok && status.stdout.trim().length > 0) {
 					return { ok: false, error: "worktree_dirty", detail: "dirty" };
 				}
 			}
 			const args = force ? ["worktree", "remove", "--force", record.path] : ["worktree", "remove", record.path];
-			const removed = await this.runGit(args, workspace.path);
+			const removed = await this.runGit(args, sourceRootPath);
 			if (!removed.ok) {
-				return this.mapGitFailure(removed.stderr, workspace, record.path);
+				return this.mapGitFailure(removed.stderr, workspace, record.path, [sourceRootPath]);
 			}
 		} else {
 			// Checkout vanished out-of-band: clear the stale gitdir entry best-effort.
-			await this.runGit(["worktree", "prune"], workspace.path).catch(() => undefined);
+			if (sourceRootPath !== undefined) {
+				await this.runGit(["worktree", "prune"], sourceRootPath).catch(() => undefined);
+			}
 		}
 		await this.stateManager.removeWorktree(workspace.name, worktreeId);
 		await this.flushState?.();
@@ -486,16 +632,32 @@ export class WorktreeManager {
 	/**
 	 * Reconcile persisted records vs filesystem vs `git worktree list`. Drops
 	 * records without checkouts, quarantines unrecognized checkout directories
-	 * (rename, never delete), and runs `git worktree prune` in the main checkout.
+	 * (rename, never delete), and runs `git worktree prune` in each known source checkout.
 	 */
 	async prune(workspace: IrohRemoteWorkspace): Promise<{ removedRecords: string[]; orphanCheckouts: string[] }> {
 		const records = await this.stateManager.listWorktrees(workspace.name);
 		const removedRecords: string[] = [];
+		const sourceRootPaths = new Set<string>();
 		for (const record of records) {
+			const sourceRootPath = await this.resolveRecordSourceRootPath(workspace, record);
+			if (sourceRootPath !== undefined) {
+				sourceRootPaths.add(sourceRootPath);
+			}
 			if (!existsSync(record.path)) {
 				await this.stateManager.removeWorktree(workspace.name, record.id);
 				removedRecords.push(record.id);
 			}
+		}
+		const parentSourceRootPath = await this.resolveRecordSourceRootPath(workspace, {
+			id: "root",
+			workspaceName: workspace.name,
+			path: workspace.path,
+			branch: "HEAD",
+			createdAt: 0,
+			sessionIds: [],
+		});
+		if (parentSourceRootPath !== undefined) {
+			sourceRootPaths.add(parentSourceRootPath);
 		}
 		const orphanCheckouts: string[] = [];
 		const workspaceDir = getWorkspaceWorktreesDir(this.agentDir, workspace.path);
@@ -518,7 +680,9 @@ export class WorktreeManager {
 				}
 			}
 		}
-		await this.runGit(["worktree", "prune"], workspace.path).catch(() => undefined);
+		for (const sourceRootPath of sourceRootPaths) {
+			await this.runGit(["worktree", "prune"], sourceRootPath).catch(() => undefined);
+		}
 		if (removedRecords.length > 0) {
 			await this.flushState?.();
 		}
@@ -553,16 +717,20 @@ export class WorktreeManager {
 		if (!existsSync(record.path)) {
 			return { removed: false, reason: "checkout_missing" };
 		}
+		const sourceRootPath = await this.resolveRecordSourceRootPath(workspace, record);
+		if (sourceRootPath === undefined) {
+			return { removed: false, reason: "source_unavailable" };
+		}
 		const status = await this.runGit(
 			["-C", record.path, "--no-optional-locks", "status", "--porcelain"],
-			workspace.path,
+			sourceRootPath,
 		);
 		if (!status.ok || status.stdout.trim().length > 0) {
 			return { removed: false, reason: "dirty" };
 		}
 		const merged = await this.runGit(
 			["merge-base", "--is-ancestor", record.branch, record.baseRef ?? "HEAD"],
-			workspace.path,
+			sourceRootPath,
 		);
 		if (!merged.ok) {
 			return { removed: false, reason: "unmerged" };
@@ -632,8 +800,14 @@ export class WorktreeManager {
 		stderr: string,
 		workspace: IrohRemoteWorkspace,
 		checkoutPath: string,
+		extraPaths: string[] = [],
 	): { ok: false; error: WorktreeError; detail: string } {
-		const detail = sanitizeGitDetail(stderr, [checkoutPath, workspace.path, getWorktreesRoot(this.agentDir)]);
+		const detail = sanitizeGitDetail(stderr, [
+			checkoutPath,
+			workspace.path,
+			...extraPaths,
+			getWorktreesRoot(this.agentDir),
+		]);
 		const lower = stderr.toLowerCase();
 		if (lower.includes("not a git repository")) {
 			return { ok: false, error: "not_a_git_repository", detail };
@@ -656,6 +830,55 @@ export class WorktreeManager {
 			// Audit logging is best-effort.
 		}
 	}
+}
+
+async function realpathOrResolve(path: string): Promise<string> {
+	try {
+		return await realpath(path);
+	} catch {
+		return resolve(path);
+	}
+}
+
+function getContainedRelativePath(root: string, child: string): string | null | undefined {
+	const relativePath = relative(resolve(root), resolve(child));
+	if (relativePath.length === 0 || relativePath === ".") {
+		return undefined;
+	}
+	if (relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+		return null;
+	}
+	return relativePath.split(sep).join("/");
+}
+
+async function findWorkspaceRelativePathForRealpath(
+	workspaceRootPath: string,
+	selectedRelativePath: string | undefined,
+	targetRealpath: string,
+): Promise<string | null | undefined> {
+	const selectedSegments = selectedRelativePath?.split("/") ?? [];
+	for (let count = selectedSegments.length; count >= 0; count -= 1) {
+		const candidateRelativePath = count === 0 ? undefined : selectedSegments.slice(0, count).join("/");
+		const candidatePath =
+			candidateRelativePath === undefined ? workspaceRootPath : resolve(workspaceRootPath, candidateRelativePath);
+		try {
+			const candidateRealpath = await realpath(candidatePath);
+			if (isSamePath(candidateRealpath, targetRealpath)) {
+				return candidateRelativePath;
+			}
+		} catch {
+			// Ignore missing ancestors and fall back to the canonical realpath-relative form below.
+		}
+	}
+	return getContainedRelativePath(workspaceRootPath, targetRealpath);
+}
+
+function isSamePath(left: string, right: string): boolean {
+	const resolvedLeft = resolve(left);
+	const resolvedRight = resolve(right);
+	return process.platform === "win32"
+		? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
+		: resolvedLeft === resolvedRight;
 }
 
 function parseWorktreeListCheckouts(porcelainOutput: string): Set<string> {

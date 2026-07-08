@@ -82,6 +82,7 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		sessionId: string;
 		selectionKind?: "created" | "resumed";
 		resolveWorktree?: ConstructorParameters<typeof IntegratedRuntimeRegistry>[0]["resolveWorktree"];
+		resolveWorkingDirectory?: ConstructorParameters<typeof IntegratedRuntimeRegistry>[0]["resolveWorkingDirectory"];
 		bindWorktreeSession?: ConstructorParameters<typeof IntegratedRuntimeRegistry>[0]["bindWorktreeSession"];
 	}) {
 		const createRuntimeCalls: CreateRuntimeOptions[] = [];
@@ -113,6 +114,7 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 				};
 			},
 			resolveWorktree: options.resolveWorktree,
+			resolveWorkingDirectory: options.resolveWorkingDirectory,
 			bindWorktreeSession: options.bindWorktreeSession,
 		});
 		return { registry, createRuntimeCalls };
@@ -179,6 +181,50 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 			worktreeId: "fix-login",
 			worktreePath,
 			workingDirectory: "packages/app",
+		});
+		await registry.stopAll("test_cleanup");
+	});
+
+	it("nested-repo worktree new uses the nested checkout root for project config and preserves remote cwd", async () => {
+		const nestedWorktree: IrohRemoteWorkspaceWorktree = {
+			...worktree,
+			sourceRootRelativePath: "Volt",
+		};
+		mkdirSync(join(worktreePath, "packages", "coding-agent"), { recursive: true });
+		const resolveWorktree = vi.fn(async () => nestedWorktree);
+		const resolveWorkingDirectory = vi.fn(async () => ({
+			absolutePath: join(worktreePath, "packages", "coding-agent"),
+			relativePath: "packages/coding-agent",
+		}));
+		const { registry, createRuntimeCalls } = createRegistry({
+			sessionId: "s-wt-nested",
+			resolveWorktree,
+			resolveWorkingDirectory,
+		});
+		const hello = createConversationHello({
+			target: "new",
+			worktreeId: "fix-login",
+			workingDirectory: "Volt/packages/coding-agent",
+		});
+
+		const created = await registry.getOrCreateEntry({ hello, response: HANDSHAKE_RESPONSE }, authorization);
+
+		expect(resolveWorkingDirectory).toHaveBeenCalledWith({
+			workspace: authorization.workspace,
+			rootPath: worktreePath,
+			workingDirectory: "Volt/packages/coding-agent",
+			worktree: nestedWorktree,
+		});
+		expect(createRuntimeCalls[0]).toMatchObject({
+			cwd: join(worktreePath, "packages", "coding-agent"),
+			projectCwd: worktreePath,
+			sessionDir: getDefaultSessionDir(workspacePath, agentDir),
+		});
+		expect(created.entry).toMatchObject({
+			worktreeId: "fix-login",
+			worktreePath,
+			worktreeSourceRootRelativePath: "Volt",
+			workingDirectory: "Volt/packages/coding-agent",
 		});
 		await registry.stopAll("test_cleanup");
 	});

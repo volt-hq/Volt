@@ -2038,6 +2038,9 @@ export class InteractiveMode {
 					disposeRuntimeOnClose: false,
 					workspaceName: authorization.workspace.name,
 					workspacePath: sanitizerOptions.workspacePath,
+					...(sanitizerOptions.remoteWorkspacePath === undefined
+						? {}
+						: { remoteWorkspacePath: sanitizerOptions.remoteWorkspacePath }),
 					...(sanitizerOptions.additionalRedactedPaths === undefined
 						? {}
 						: { additionalRedactedPaths: sanitizerOptions.additionalRedactedPaths }),

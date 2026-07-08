@@ -467,6 +467,23 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 		});
 	});
 
+	it("maps nested worktree relay roots back under the registered workspace", () => {
+		const options = getRelayServingSanitizerOptions(
+			{
+				...authorizationBase,
+				worktreeId: "fix-login",
+				worktreePath: "/home/user/.volt/agent/worktrees/--repo--/fix-login",
+				worktreeSourceRootRelativePath: "Volt",
+			},
+			"/home/user/.volt/agent",
+		);
+		expect(options).toEqual({
+			remoteWorkspacePath: "/workspace/Volt",
+			workspacePath: "/home/user/.volt/agent/worktrees/--repo--/fix-login",
+			additionalRedactedPaths: ["/home/user/parent-repo", "/home/user/.volt/agent/worktrees"],
+		});
+	});
+
 	it("redacts worktree, parent, and worktrees-root paths on served relay frames", async () => {
 		const parentPath = "/home/user/parent-repo";
 		const agentDir = "/home/user/.volt/agent";

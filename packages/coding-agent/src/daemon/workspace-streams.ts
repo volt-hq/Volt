@@ -69,9 +69,11 @@ export async function readLineFromIroh(
 }
 
 export interface RemoteSanitizerOverrides {
+	/** Remote root for the sanitizer. Nested-repo worktrees map to /workspace/<source-root>. */
+	remoteWorkspacePath?: string;
 	/** Sanitizer root override (worktree-bound streams use the worktree path). */
 	workspacePath?: string;
-	/** Extra roots (parent checkout, worktrees root) redacted to /workspace. */
+	/** Extra roots (parent checkout, worktrees root) redacted to remoteWorkspacePath. */
 	additionalRedactedPaths?: string[];
 }
 
@@ -84,7 +86,7 @@ export function getRemoteSanitizerOptions(
 	additionalRedactedPaths?: string[];
 } {
 	return {
-		remoteWorkspacePath: "/workspace",
+		remoteWorkspacePath: overrides.remoteWorkspacePath ?? "/workspace",
 		workspacePath: overrides.workspacePath ?? authorization.workspace.path,
 		...(overrides.additionalRedactedPaths === undefined
 			? {}

@@ -40,7 +40,7 @@ export function getIrohRemoteWorkingDirectoryValidationError(value: string): str
 		return "workingDirectory must be a relative POSIX path";
 	}
 	for (const segment of value.split("/")) {
-		if (segment === "" || segment === "." || segment === ".." || segment === ".git") {
+		if (segment === "" || segment === "." || segment === ".." || segment.toLowerCase() === ".git") {
 			return "workingDirectory must not contain empty, '.', '..', or '.git' path segments";
 		}
 	}

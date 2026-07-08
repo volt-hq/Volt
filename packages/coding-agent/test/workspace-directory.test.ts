@@ -57,6 +57,10 @@ describe("workspace directory validation", () => {
 			ok: false,
 			error: "invalid_working_directory",
 		});
+		await expect(resolveWorkspaceDirectory(root, ".Git")).resolves.toMatchObject({
+			ok: false,
+			error: "invalid_working_directory",
+		});
 		await expect(resolveWorkspaceDirectory(root, "escape")).resolves.toMatchObject({
 			ok: false,
 			error: "workspace_directory_escape",

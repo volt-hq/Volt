@@ -29,6 +29,7 @@ import { extractMessageImages, projectMessageImages } from "../core/rpc/transcri
 import type { RpcKeepAwakeStatus } from "../core/rpc/types.ts";
 import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../core/session-manager.ts";
 import type { KeepAwakeStatus } from "./keep-awake.ts";
+import { getRegisteredWorkingDirectoryForWorktree } from "./worktree-manager.ts";
 
 export const INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES: ReadonlySet<string> = new Set([
 	"new_session",
@@ -77,7 +78,7 @@ export interface RemoteSessionListEntry {
 	messageCount: number;
 	/** Present when the session is bound to a daemon-managed worktree (worktrees.v1). */
 	worktreeId?: string;
-	/** POSIX-style path relative to the workspace/worktree root. Omitted for root. */
+	/** POSIX-style path relative to the registered workspace root. Omitted for root. */
 	workingDirectory?: string;
 }
 
@@ -969,7 +970,7 @@ interface RemoteSessionSummaryInput {
 	cwd?: string;
 }
 
-function getRelativeWorkingDirectory(rootPath: string, cwd: string | undefined): string | undefined {
+function getRelativeWorkingDirectory(rootPath: string, cwd: string | undefined): string | null | undefined {
 	if (!cwd) {
 		return undefined;
 	}
@@ -980,7 +981,7 @@ function getRelativeWorkingDirectory(rootPath: string, cwd: string | undefined):
 		return undefined;
 	}
 	if (relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
-		return undefined;
+		return null;
 	}
 	return relativePath.split(sep).join("/");
 }
@@ -1006,7 +1007,7 @@ function createRemoteSessionSummary(
 			createdAt,
 			updatedAt,
 			messageCount: input.messageCount,
-			...(workingDirectory === undefined ? {} : { workingDirectory }),
+			...(workingDirectory === undefined || workingDirectory === null ? {} : { workingDirectory }),
 		},
 		...(input.cwd === undefined ? {} : { cwd: input.cwd }),
 	};
@@ -1066,7 +1067,12 @@ export async function listRemoteWorkspaceSessionSummaries(
 				const summary = bySessionId.get(sessionId);
 				if (summary) {
 					summary.session.worktreeId = worktree.id;
-					const workingDirectory = getRelativeWorkingDirectory(worktree.path, summary.cwd);
+					const worktreeRelativeDirectory = getRelativeWorkingDirectory(worktree.path, summary.cwd);
+					if (worktreeRelativeDirectory === null) {
+						delete summary.session.workingDirectory;
+						continue;
+					}
+					const workingDirectory = getRegisteredWorkingDirectoryForWorktree(worktree, worktreeRelativeDirectory);
 					if (workingDirectory === undefined) {
 						delete summary.session.workingDirectory;
 					} else {
