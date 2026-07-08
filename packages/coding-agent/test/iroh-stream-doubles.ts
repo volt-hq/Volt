@@ -9,6 +9,7 @@
  */
 
 import { Buffer } from "node:buffer";
+import type { AgentMessage } from "@earendil-works/volt-agent-core";
 import type { Api, Model } from "@earendil-works/volt-ai";
 import { expect, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
@@ -97,7 +98,7 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 		followUpMode: "all" as const,
 		isCompacting: false,
 		isStreaming: false,
-		messages: [],
+		messages: [] as AgentMessage[],
 		model: undefined,
 		modelRegistry: { authStorage: {} },
 		pendingMessageCount: 0,

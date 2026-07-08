@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { AgentMessage } from "@earendil-works/volt-agent-core";
 import type { AgentSessionEvent } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import { REVIEW_BRANCH_ACTION_ID, REVIEW_UNCOMMITTED_ACTION_ID } from "../../core/host-actions.ts";
@@ -62,9 +63,12 @@ export interface IrohRemoteNotificationRequest {
 	workspace?: string;
 }
 
+type IrohRemoteRunTerminalOutcome = "completed" | "failed" | "aborted";
+
 export interface IrohRemoteCompletionState {
 	sessionId: string;
 	runId?: string;
+	terminalOutcome?: IrohRemoteRunTerminalOutcome;
 }
 
 export interface IrohRemoteCompletedCommand {
@@ -879,7 +883,7 @@ class IrohRemoteLiveActivityUpdater {
 				if (!this.active || event.willRetry) {
 					return;
 				}
-				await this.sendUpdate("completed");
+				await this.sendUpdate(getRunTerminalOutcome(event.messages) === "completed" ? "completed" : "failed");
 				this.active = false;
 				this.toolIndexesByCallId.clear();
 				break;
@@ -1352,6 +1356,7 @@ function getIrohRemoteCompletionState(runtimeHost: AgentSessionRuntime): IrohRem
 	return {
 		sessionId: runtimeHost.session.sessionId,
 		runId: runtimeHost.session.sessionManager.getLeafId() ?? undefined,
+		terminalOutcome: getRunTerminalOutcome(runtimeHost.session.messages),
 	};
 }
 
@@ -1366,15 +1371,30 @@ function createIrohRemoteCompletionNotification(
 	const workspace = getSafeNotificationWorkspace(workspaceName);
 	const workspaceDetails = workspace === undefined ? {} : { workspace };
 	if (isConversationCompletionCommand(completion.command)) {
-		return {
-			type: "notification_request",
-			eventId: `conversation:${finalState.sessionId}:${finalState.runId}:completed`,
-			kind: "conversation_completed",
-			title: workspace === undefined ? "Volt finished" : `Volt finished in ${workspace}`,
-			body: "Your conversation is ready.",
-			sessionId: finalState.sessionId,
-			...workspaceDetails,
-		};
+		switch (finalState.terminalOutcome) {
+			case "failed":
+				return {
+					type: "notification_request",
+					eventId: `conversation:${finalState.sessionId}:${finalState.runId}:failed`,
+					kind: "host_notice",
+					title: workspace === undefined ? "Volt needs attention" : `Volt needs attention in ${workspace}`,
+					body: "Open Volt to view the error.",
+					sessionId: finalState.sessionId,
+					...workspaceDetails,
+				};
+			case "aborted":
+				return undefined;
+			case "completed":
+				return {
+					type: "notification_request",
+					eventId: `conversation:${finalState.sessionId}:${finalState.runId}:completed`,
+					kind: "conversation_completed",
+					title: workspace === undefined ? "Volt finished" : `Volt finished in ${workspace}`,
+					body: "Your conversation is ready.",
+					sessionId: finalState.sessionId,
+					...workspaceDetails,
+				};
+		}
 	}
 	if (isCompletedReviewInvocationResponse(completion.command, completion.response)) {
 		return {
@@ -1403,7 +1423,7 @@ function getSafeNotificationWorkspace(workspaceName: string | undefined): string
 
 function getChangedFinalCompletionState(
 	completion: IrohRemoteCompletedCommand,
-): Required<IrohRemoteCompletionState> | undefined {
+): { sessionId: string; runId: string; terminalOutcome: IrohRemoteRunTerminalOutcome } | undefined {
 	const finalState = completion.finalState;
 	if (!finalState?.runId) {
 		return undefined;
@@ -1412,7 +1432,28 @@ function getChangedFinalCompletionState(
 	if (initialState?.sessionId === finalState.sessionId && initialState.runId === finalState.runId) {
 		return undefined;
 	}
-	return { sessionId: finalState.sessionId, runId: finalState.runId };
+	return {
+		sessionId: finalState.sessionId,
+		runId: finalState.runId,
+		terminalOutcome: finalState.terminalOutcome ?? "completed",
+	};
+}
+
+function getRunTerminalOutcome(messages: readonly AgentMessage[]): IrohRemoteRunTerminalOutcome {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message.role !== "assistant") {
+			continue;
+		}
+		if (message.stopReason === "error") {
+			return "failed";
+		}
+		if (message.stopReason === "aborted") {
+			return "aborted";
+		}
+		return "completed";
+	}
+	return "completed";
 }
 
 function isConversationCompletionCommand(command: string): boolean {

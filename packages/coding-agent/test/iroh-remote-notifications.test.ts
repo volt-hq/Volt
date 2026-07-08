@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@earendil-works/volt-agent-core";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
@@ -59,6 +60,29 @@ class ThrowingIrohSendStream extends ManualIrohSendStream {
 }
 
 const LIVE_ACTIVITY_TOKEN_HASH = "a".repeat(64);
+
+type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
+
+function createAssistantMessage(overrides: Partial<AssistantAgentMessage> = {}): AssistantAgentMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "" }],
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		model: "gpt-5.5",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 1,
+		...overrides,
+	};
+}
 
 function createLiveActivityRegistration(
 	overrides: Partial<IrohRemoteLiveActivityRegistration> = {},
@@ -878,6 +902,66 @@ describe("Iroh remote notification requests", () => {
 		await expect(modePromise).resolves.toBeUndefined();
 	});
 
+	test("Live Activity updater reports terminal assistant errors as failed", async () => {
+		const session = createTestSession("session-one", "conversation-run");
+		const updates: Array<IrohRemoteLiveActivityUpdateIntent> = [];
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv } = await startIrohRpcMode(runtimeHost, session, {
+			notificationDelivery: {
+				deliverNotification: vi.fn(async () => "no_push_target" as const),
+				deliverLiveActivityUpdate: vi.fn(async (update: IrohRemoteLiveActivityUpdateIntent) => {
+					updates.push(update);
+					return "sent" as const;
+				}),
+			},
+			workspaceName: "volt-app",
+		});
+		const sessionHandlers = session.subscribe.mock.calls.map((call) => call[0] as (event: AgentSessionEvent) => void);
+		if (sessionHandlers.length === 0) {
+			throw new Error("Expected Live Activity session subscription");
+		}
+
+		for (const handler of sessionHandlers) {
+			handler({ type: "agent_start" });
+		}
+		await vi.waitFor(() =>
+			expect(updates).toContainEqual(
+				expect.objectContaining({ contentState: expect.objectContaining({ status: "running" }) }),
+			),
+		);
+		for (const handler of sessionHandlers) {
+			handler({
+				type: "agent_end",
+				messages: [
+					createAssistantMessage({ stopReason: "error", errorMessage: "No API key for provider: openai-codex" }),
+				],
+				willRetry: false,
+			});
+		}
+		await vi.waitFor(() =>
+			expect(updates).toContainEqual(
+				expect.objectContaining({
+					activityEvent: "update",
+					contentState: expect.objectContaining({ status: "failed", statusText: "Volt needs attention" }),
+					kind: "live_activity_update",
+				}),
+			),
+		);
+		expect(updates).not.toContainEqual(
+			expect.objectContaining({ contentState: expect.objectContaining({ status: "completed" }) }),
+		);
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
 	test("Live Activity updater reattaches to active runs without reusing event IDs", async () => {
 		let currentSession = createTestSession("session-one", "conversation-run");
 		const initialHandlers: Array<(event: AgentSessionEvent) => void> = [];
@@ -1034,6 +1118,94 @@ describe("Iroh remote notification requests", () => {
 			},
 		};
 		await vi.waitFor(() => expect(relayClient.sendNotification).toHaveBeenCalledWith(expectedNotification));
+		expect(getNotifications(send)).toEqual([]);
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("sends failure notice instead of completion notification when a prompt ends with an assistant error", async () => {
+		const session = createTestSession("session-one", "before-run");
+		session.prompt.mockImplementation(
+			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
+				options?.preflightResult?.(true);
+				session.leafId = "conversation-run";
+				session.messages = [
+					createAssistantMessage({ stopReason: "error", errorMessage: "No API key for provider: openai-codex" }),
+				];
+			},
+		);
+		const stateManager = createStateManagerWithClient([
+			createEnabledPushTarget({ relayUrl: "https://attacker.example.test/steal" }),
+		]);
+		const relayClient = createRelayClient();
+		const dispatcher = new IrohRemotePushNotificationDispatcher({
+			clientNodeId: "paired-client",
+			relayClient,
+			retryDelayMs: 0,
+			stateManager,
+		});
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+			notificationDelivery: dispatcher,
+			workspaceName: "volt-app",
+		});
+
+		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
+
+		await vi.waitFor(() =>
+			expect(relayClient.sendNotification).toHaveBeenCalledWith(
+				expect.objectContaining({
+					eventId: "conversation:session-one:conversation-run:failed",
+					kind: "host_notice",
+					title: "Volt needs attention in volt-app",
+					body: "Open Volt to view the error.",
+				}),
+			),
+		);
+		expect(relayClient.sendNotification).not.toHaveBeenCalledWith(
+			expect.objectContaining({ kind: "conversation_completed" }),
+		);
+		expect(getNotifications(send)).toEqual([]);
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("does not send a completion notification when a prompt is aborted", async () => {
+		const session = createTestSession("session-one", "before-run");
+		session.prompt.mockImplementation(
+			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
+				options?.preflightResult?.(true);
+				session.leafId = "conversation-run";
+				session.messages = [createAssistantMessage({ stopReason: "aborted" })];
+			},
+		);
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
+
+		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
+
+		await vi.waitFor(() =>
+			expect(parseWrittenObjects(send)).toContainEqual(
+				expect.objectContaining({ id: "prompt-1", type: "response", command: "prompt", success: true }),
+			),
+		);
+		await new Promise((resolve) => setImmediate(resolve));
 		expect(getNotifications(send)).toEqual([]);
 
 		recv.end();
