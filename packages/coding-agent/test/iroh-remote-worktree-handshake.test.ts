@@ -10,6 +10,7 @@ import {
 import {
 	IROH_REMOTE_ALPN,
 	IROH_REMOTE_HOST_FEATURES,
+	IROH_REMOTE_WORKING_DIRECTORIES_FEATURE,
 	IROH_REMOTE_WORKTREE_ID_PATTERN,
 	IROH_REMOTE_WORKTREES_FEATURE,
 	isIrohRemoteWorktreeId,
@@ -43,6 +44,8 @@ describe("worktrees.v1 capability flag", () => {
 	test("worktrees.v1 is advertised as an optional host feature", () => {
 		expect(IROH_REMOTE_WORKTREES_FEATURE).toBe("worktrees.v1");
 		expect([...IROH_REMOTE_HOST_FEATURES]).toContain("worktrees.v1");
+		expect(IROH_REMOTE_WORKING_DIRECTORIES_FEATURE).toBe("working_directories.v1");
+		expect([...IROH_REMOTE_HOST_FEATURES]).toContain("working_directories.v1");
 	});
 
 	test("worktrees.v1 is NOT a required handshake feature (old hosts still parse)", () => {
@@ -105,6 +108,30 @@ describe("hello: worktreeId on conversation targets", () => {
 		expect(() => parseHello({ conversation: { target: "new", worktreeId: "fix-login", extra: true } })).toThrow();
 	});
 
+	test("accepts workingDirectory only on target new and validates relative POSIX paths", () => {
+		expect(parseHello({ conversation: { target: "new", workingDirectory: "packages/app" } })).toMatchObject({
+			mode: "conversation",
+			conversation: { target: "new", workingDirectory: "packages/app" },
+		});
+		for (const invalid of [
+			"",
+			".",
+			"../app",
+			"/tmp",
+			"packages/../app",
+			"packages//app",
+			"packages/.git",
+			"packages/\tapp",
+			"C:/repo",
+			42,
+		]) {
+			expect(() => parseHello({ conversation: { target: "new", workingDirectory: invalid } })).toThrow();
+		}
+		expect(() => parseHello({ conversation: { target: "last", workingDirectory: "packages/app" } })).toThrow(
+			"must not include workingDirectory",
+		);
+	});
+
 	test("accepts the manage_worktrees management purpose and rejects unknown purposes", () => {
 		expect(parseHello({ workspaceManagement: { purpose: "manage_worktrees" } })).toMatchObject({
 			mode: "workspaceManagement",
@@ -118,16 +145,28 @@ describe("hello: worktreeId on conversation targets", () => {
 });
 
 describe("handshake response: worktreeId echo", () => {
-	test("round-trips worktreeId in conversation metadata", () => {
+	test("round-trips worktreeId and workingDirectory in conversation metadata", () => {
 		const parsed = parseIrohRemoteHandshakeResponseLine(
 			responseLine({
 				sessionId: "abc123",
-				conversation: { target: "new", sessionId: "abc123", selection: "created", worktreeId: "fix-login" },
+				conversation: {
+					target: "new",
+					sessionId: "abc123",
+					selection: "created",
+					worktreeId: "fix-login",
+					workingDirectory: "packages/app",
+				},
 			}),
 		);
 		expect(parsed).toMatchObject({
 			success: true,
-			conversation: { target: "new", sessionId: "abc123", selection: "created", worktreeId: "fix-login" },
+			conversation: {
+				target: "new",
+				sessionId: "abc123",
+				selection: "created",
+				worktreeId: "fix-login",
+				workingDirectory: "packages/app",
+			},
 		});
 	});
 
@@ -166,12 +205,24 @@ describe("handshake response: worktreeId echo", () => {
 			clientNodeId: "client-node",
 			features: [...IROH_REMOTE_HOST_FEATURES],
 			sessionId: "abc123",
-			conversation: { target: "new", sessionId: "abc123", selection: "created", worktreeId: "fix-login" },
+			conversation: {
+				target: "new",
+				sessionId: "abc123",
+				selection: "created",
+				worktreeId: "fix-login",
+				workingDirectory: "packages/app",
+			},
 		});
 		const parsed = parseIrohRemoteHandshakeResponseLine(JSON.stringify(success));
 		expect(parsed).toMatchObject({
 			success: true,
-			conversation: { target: "new", sessionId: "abc123", selection: "created", worktreeId: "fix-login" },
+			conversation: {
+				target: "new",
+				sessionId: "abc123",
+				selection: "created",
+				worktreeId: "fix-login",
+				workingDirectory: "packages/app",
+			},
 		});
 	});
 });
@@ -206,7 +257,7 @@ describe("integrated conversation handshake response echo", () => {
 		features: [...IROH_REMOTE_HOST_FEATURES],
 	} as unknown as IrohRemoteHandshakeSuccess;
 
-	test("echoes worktreeId only for worktree-bound conversations", () => {
+	test("echoes worktreeId and workingDirectory for bound conversations", () => {
 		const bound = createIntegratedConversationHandshakeResponse(
 			{ hello, response: handshakeResponse },
 			authorization,
@@ -214,12 +265,14 @@ describe("integrated conversation handshake response echo", () => {
 			{ kind: "created", sessionId: "abc123" },
 			{},
 			"fix-login",
+			"packages/app",
 		);
 		expect(bound.conversation).toMatchObject({
 			target: "new",
 			sessionId: "abc123",
 			selection: "created",
 			worktreeId: "fix-login",
+			workingDirectory: "packages/app",
 		});
 
 		const unbound = createIntegratedConversationHandshakeResponse(

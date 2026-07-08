@@ -46,8 +46,10 @@ import {
 } from "./tools/index.ts";
 
 export interface CreateAgentSessionOptions {
-	/** Working directory for project-local discovery. Default: process.cwd() */
+	/** Runtime working directory for tools and session metadata. Default: process.cwd() */
 	cwd?: string;
+	/** Project/config root for .volt resources. Defaults to cwd. */
+	projectCwd?: string;
 	/** Global config directory. Default: ~/.volt/agent */
 	agentDir?: string;
 
@@ -101,7 +103,7 @@ export interface CreateAgentSessionOptions {
 	 * SettingsManager; bare SDK calls default MCP project config to untrusted.
 	 */
 	projectTrusted?: boolean;
-	/** Settings manager. Default: SettingsManager.create(cwd, agentDir) */
+	/** Settings manager. Default: SettingsManager.create(projectCwd, agentDir) */
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
@@ -199,6 +201,7 @@ function getDefaultAgentDir(): string {
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
 	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
+	const projectCwd = resolvePath(options.projectCwd ?? cwd);
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getDefaultAgentDir();
 	let resourceLoader = options.resourceLoader;
 
@@ -210,14 +213,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const settingsManager =
 		options.settingsManager ??
-		SettingsManager.create(cwd, agentDir, {
+		SettingsManager.create(projectCwd, agentDir, {
 			profile: options.profile,
 			...(options.projectTrusted !== undefined ? { projectTrusted: options.projectTrusted } : {}),
 		});
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 
 	if (!resourceLoader) {
-		resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+		resourceLoader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, settingsManager });
 		await resourceLoader.reload();
 		time("resourceLoader.reload");
 	}
@@ -283,27 +286,27 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const createDefaultMcpManager = async (): Promise<McpManager | undefined> => {
 		const mcpProjectTrusted =
 			options.projectTrusted ?? (options.settingsManager ? settingsManager.isProjectTrusted() : false);
-		const mcpConfig = loadMcpConfig({ cwd, agentDir, projectTrusted: mcpProjectTrusted });
+		const mcpConfig = loadMcpConfig({ cwd: projectCwd, agentDir, projectTrusted: mcpProjectTrusted });
 		if (!mcpConfig.settings.enabled || Object.keys(mcpConfig.servers).length === 0) {
 			return undefined;
 		}
 		const mcpOAuthStore = McpOAuthStore.create(agentDir);
 		const manager = new McpManager({
 			config: mcpConfig,
-			clientFactory: new DefaultMcpClientFactory({ cwd, oauthStore: mcpOAuthStore }),
+			clientFactory: new DefaultMcpClientFactory({ cwd: projectCwd, oauthStore: mcpOAuthStore }),
 			metadataCache: new McpMetadataCache({ agentDir }),
 			outputStore: new McpOutputStore({
 				agentDir,
 				maxOutputBytes: mcpConfig.settings.maxOutputBytes,
 				maxOutputLines: mcpConfig.settings.maxOutputLines,
 				sessionId: sessionManager.getSessionId(),
-				workspaceId: cwd,
+				workspaceId: projectCwd,
 			}),
 			auditLogger: new McpAuditLogger(agentDir),
-			configWriter: new McpConfigWriter({ cwd, agentDir, projectTrusted: mcpProjectTrusted }),
+			configWriter: new McpConfigWriter({ cwd: projectCwd, agentDir, projectTrusted: mcpProjectTrusted }),
 			oauthStore: mcpOAuthStore,
 			sessionId: sessionManager.getSessionId(),
-			workspaceId: cwd,
+			workspaceId: projectCwd,
 		});
 		await manager.startEagerServers().catch(() => undefined);
 		return manager;

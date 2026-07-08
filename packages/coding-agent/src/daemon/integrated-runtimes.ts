@@ -1,4 +1,5 @@
-import { rm } from "node:fs/promises";
+import { realpath, rm } from "node:fs/promises";
+import { relative, sep } from "node:path";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import type { IrohRemoteActiveStreamRegistry } from "../core/remote/iroh/active-stream-registry.ts";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
@@ -25,6 +26,7 @@ import {
 	scheduleDetachedRuntimeRetention,
 } from "../remote/integrated-runtime-retention.ts";
 import type { IntegratedConversationSessionSelection } from "./handshake-responses.ts";
+import { isPathInside, resolveWorkspaceDirectory, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 
 export interface IntegratedRuntimeSubscriber {
 	id: string;
@@ -54,6 +56,8 @@ export interface IntegratedRuntimeEntry {
 	worktreeId?: string;
 	/** Host-local checkout path (sanitizer root); never sent on the wire. */
 	worktreePath?: string;
+	/** POSIX-style path relative to the workspace/worktree root. Omitted for root. */
+	workingDirectory?: string;
 }
 
 export interface IntegratedRuntimeStreamWriter {
@@ -82,6 +86,13 @@ export interface IntegratedRuntimeRegistryOptions {
 		hello: IrohRemoteHello,
 		targetSessionId: string | undefined,
 	) => Promise<IrohRemoteWorkspaceWorktree | undefined>;
+	/** Resolve/validate a selected working directory before creating a runtime. */
+	resolveWorkingDirectory?: (options: {
+		workspace: IrohRemoteWorkspace;
+		rootPath: string;
+		workingDirectory?: string;
+		worktree?: IrohRemoteWorkspaceWorktree;
+	}) => Promise<WorkspaceDirectoryResolution>;
 	/** Persist the sessionId → worktree binding after a created worktree conversation. */
 	bindWorktreeSession?: (workspaceName: string, worktreeId: string, sessionId: string) => Promise<void>;
 	/** Lease-broker seam: invoked when a runtime's session id changes (rekey). */
@@ -152,6 +163,34 @@ export function createConversationSessionSelectionFromEntry(
 }
 
 let integratedRuntimeSubscriberSequence = 0;
+
+function getRequestedWorkingDirectory(hello: IrohRemoteHello): string | undefined {
+	return hello.mode === "conversation" && hello.conversation.target === "new"
+		? hello.conversation.workingDirectory
+		: undefined;
+}
+
+async function resolveRuntimeWorkingDirectory(rootPath: string, cwd: string): Promise<WorkspaceDirectoryResolution> {
+	let rootReal: string;
+	let cwdReal: string;
+	try {
+		rootReal = await realpath(rootPath);
+		cwdReal = await realpath(cwd);
+	} catch {
+		throw createConversationOpenError("session_unavailable", "session working directory is unavailable");
+	}
+	if (!isPathInside(rootReal, cwdReal)) {
+		throw createConversationOpenError(
+			"session_unavailable",
+			"stored session working directory is outside the authorized workspace",
+		);
+	}
+	const relativePath = relative(rootReal, cwdReal).split(sep).join("/");
+	return {
+		absolutePath: cwdReal,
+		...(relativePath.length === 0 ? {} : { relativePath }),
+	};
+}
 
 export class IntegratedRuntimeRegistry {
 	private readonly options: IntegratedRuntimeRegistryOptions;
@@ -227,6 +266,24 @@ export class IntegratedRuntimeRegistry {
 		return this.createEntry(handshake, authorization);
 	}
 
+	private async resolveInitialWorkingDirectory(options: {
+		workspace: IrohRemoteWorkspace;
+		rootPath: string;
+		workingDirectory?: string;
+		worktree?: IrohRemoteWorkspaceWorktree;
+	}): Promise<WorkspaceDirectoryResolution> {
+		if (this.options.resolveWorkingDirectory) {
+			return this.options.resolveWorkingDirectory(options);
+		}
+		const resolved = await resolveWorkspaceDirectory(options.rootPath, options.workingDirectory);
+		if (!resolved.ok) {
+			throw createConversationOpenError("invalid_conversation_target", resolved.error, {
+				workspace: options.workspace.name,
+			});
+		}
+		return resolved.value;
+	}
+
 	private async createEntry(
 		handshake: { hello: IrohRemoteHello },
 		authorization: IrohRemoteClientAuthorizationSuccess,
@@ -247,18 +304,31 @@ export class IntegratedRuntimeRegistry {
 				handshake.hello,
 				getResolvedTargetSessionId(handshake.hello, authorization),
 			);
+			const rootPath = worktree?.path ?? authorization.workspace.path;
+			const requestedWorkingDirectory = getRequestedWorkingDirectory(handshake.hello);
+			const initialDirectory = await this.resolveInitialWorkingDirectory({
+				workspace: authorization.workspace,
+				rootPath,
+				workingDirectory: requestedWorkingDirectory,
+				...(worktree === undefined ? {} : { worktree }),
+			});
 			const runtimeResult = await (this.options.createRuntime ?? createIrohRemoteAgentRuntimeWithSessionSelection)({
 				agentDir: this.options.agentDir,
 				allowTools: this.options.getAllowTools(authorization.workspace) ?? authorization.allowTools,
 				conversationTarget: createIrohRuntimeConversationTarget(handshake.hello, authorization),
-				cwd: worktree?.path ?? authorization.workspace.path,
+				cwd: initialDirectory.absolutePath,
+				projectCwd: rootPath,
 				sessionDir: getDefaultSessionDir(authorization.workspace.path, this.options.agentDir),
+				validateCwd: async (cwd) => {
+					await resolveRuntimeWorkingDirectory(rootPath, cwd);
+				},
 				onSubagentRuntimeCreated: (event) => this.registerSubagentRuntime(event, authorization),
 				profile: this.options.profile,
 				projectTrusted: this.options.getProjectTrustedForWorkspace(authorization.workspace),
 			});
 			runtime = runtimeResult.runtime;
 			sessionSelection = runtimeResult.sessionSelection;
+			const runtimeDirectory = await resolveRuntimeWorkingDirectory(rootPath, runtime.cwd);
 			const sessionId = runtime.session.sessionId;
 			const owner = this.findOwner(authorization.workspace.name, sessionId);
 			if (owner) {
@@ -275,6 +345,7 @@ export class IntegratedRuntimeRegistry {
 				sessionId,
 				runtime,
 				...(worktree === undefined ? {} : { worktreeId: worktree.id, worktreePath: worktree.path }),
+				...(runtimeDirectory.relativePath === undefined ? {} : { workingDirectory: runtimeDirectory.relativePath }),
 			});
 			if (
 				worktree !== undefined &&
@@ -302,6 +373,7 @@ export class IntegratedRuntimeRegistry {
 		subagentId?: string;
 		worktreeId?: string;
 		worktreePath?: string;
+		workingDirectory?: string;
 	}): IntegratedRuntimeEntry {
 		return {
 			key: this.getRegistryKey(options.workspaceName, options.sessionId),
@@ -319,6 +391,7 @@ export class IntegratedRuntimeRegistry {
 			...(options.subagentId === undefined ? {} : { subagentId: options.subagentId }),
 			...(options.worktreeId === undefined ? {} : { worktreeId: options.worktreeId }),
 			...(options.worktreePath === undefined ? {} : { worktreePath: options.worktreePath }),
+			...(options.workingDirectory === undefined ? {} : { workingDirectory: options.workingDirectory }),
 		};
 	}
 

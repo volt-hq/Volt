@@ -141,6 +141,7 @@ describe("worktree RPC command helpers", () => {
 			{ id: "1", type: "create_worktree", workspaceName: "ws", worktreeName: "UPPER" },
 			{ id: "1", type: "create_worktree", workspaceName: "ws", branch: 42 },
 			{ id: "1", type: "create_worktree", workspaceName: "ws", baseRef: 42 },
+			{ id: "1", type: "create_worktree", workspaceName: "ws", workingDirectory: "../escape" },
 			{ id: "2", type: "remove_worktree", workspaceName: "ws", worktreeId: "../evil" },
 			{ id: "2", type: "remove_worktree", workspaceName: "ws", worktreeId: "fix-login", force: "yes" },
 		]) {
@@ -152,6 +153,26 @@ describe("worktree RPC command helpers", () => {
 		}
 		expect(backend.createWorktree).not.toHaveBeenCalled();
 		expect(backend.removeWorktree).not.toHaveBeenCalled();
+	});
+
+	it("passes relative workingDirectory to create backend", async () => {
+		const backend = createBackend();
+		const result = await handleIrohRemoteWorktreeRpcCommand(
+			{
+				id: "1",
+				type: "create_worktree",
+				workspaceName: "ws",
+				worktreeName: "fix-login",
+				workingDirectory: "packages/app",
+			},
+			{ authorizedWorkspaceName: "ws", backend },
+		);
+
+		expect(result).toMatchObject({ handled: true, response: { success: true } });
+		expect(backend.createWorktree).toHaveBeenCalledExactlyOnceWith("ws", {
+			id: "fix-login",
+			workingDirectory: "packages/app",
+		});
 	});
 
 	it("maps backend failures to error responses without detail leakage", async () => {

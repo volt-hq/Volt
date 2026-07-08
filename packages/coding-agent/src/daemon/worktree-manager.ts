@@ -1,6 +1,6 @@
 import { createHash, randomInt } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, readdir, rename, rm } from "node:fs/promises";
+import { mkdir, readdir, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import { IROH_REMOTE_WORKTREE_ID_PATTERN } from "../core/remote/iroh/protocol.ts";
@@ -9,6 +9,7 @@ import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manag
 import { spawnProcess, waitForChildProcess } from "../utils/child-process.ts";
 import type { ControlRequest, ControlWorktreeStatus } from "./control-protocol.ts";
 import type { ControlConnection } from "./control-server.ts";
+import { resolveWorkspaceDirectory, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 
 /** join(agentDir, "worktrees") — sibling of sessions/, daemon/, trust.json. */
 export function getWorktreesRoot(agentDir: string): string {
@@ -158,6 +159,8 @@ export type WorktreeError =
 	| "worktree_busy"
 	| "worktree_limit_reached"
 	| "invalid_worktree_id"
+	| "invalid_working_directory"
+	| "nested_git_repository_unsupported"
 	| "git_failed";
 
 export type WorktreeGitRunner = (
@@ -272,7 +275,7 @@ export class WorktreeManager {
 	/** git worktree add; persists the record durably after git succeeds. */
 	async create(
 		workspace: IrohRemoteWorkspace,
-		options: { id?: string; branch?: string; baseRef?: string } = {},
+		options: { id?: string; branch?: string; baseRef?: string; workingDirectory?: string } = {},
 	): Promise<WorktreeResult<{ worktree: IrohRemoteWorkspaceWorktree }>> {
 		const id = options.id ?? generateWorktreeIdSlug();
 		if (!WORKTREE_ID_PATTERN.test(id)) {
@@ -296,6 +299,10 @@ export class WorktreeManager {
 			return { ok: false, error: "worktree_exists" };
 		}
 
+		const workingDirectory = await this.validateWorkingDirectory(workspace, options.workingDirectory);
+		if (!workingDirectory.ok) {
+			return workingDirectory;
+		}
 		const repoCheck = await this.runGit(["rev-parse", "--git-common-dir"], workspace.path);
 		if (!repoCheck.ok) {
 			return this.mapGitFailure(repoCheck.stderr, workspace, checkoutPath);
@@ -324,6 +331,47 @@ export class WorktreeManager {
 		await this.stateManager.upsertWorktree(worktree);
 		await this.flushState?.();
 		return { ok: true, worktree };
+	}
+
+	async validateWorkingDirectory(
+		workspace: IrohRemoteWorkspace,
+		workingDirectory?: string,
+	): Promise<WorktreeResult<{ directory: WorkspaceDirectoryResolution }>> {
+		const resolved = await resolveWorkspaceDirectory(workspace.path, workingDirectory);
+		if (!resolved.ok) {
+			return { ok: false, error: "invalid_working_directory", detail: resolved.error };
+		}
+		if (await this.isNestedGitRepository(workspace, resolved.value)) {
+			return {
+				ok: false,
+				error: "nested_git_repository_unsupported",
+				detail: "Register this nested repo as its own workspace to use isolated worktrees.",
+			};
+		}
+		return { ok: true, directory: resolved.value };
+	}
+
+	private async isNestedGitRepository(
+		workspace: IrohRemoteWorkspace,
+		directory: WorkspaceDirectoryResolution,
+	): Promise<boolean> {
+		if (directory.relativePath === undefined) {
+			return false;
+		}
+		const topLevel = await this.runGit(
+			["-C", directory.absolutePath, "rev-parse", "--show-toplevel"],
+			workspace.path,
+		);
+		if (!topLevel.ok) {
+			return false;
+		}
+		try {
+			const workspaceRoot = await realpath(workspace.path);
+			const selectedRoot = await realpath(topLevel.stdout.trim());
+			return workspaceRoot !== selectedRoot;
+		} catch {
+			return resolve(workspace.path) !== resolve(topLevel.stdout.trim());
+		}
 	}
 
 	async list(workspace: IrohRemoteWorkspace): Promise<WorktreeStatus[]> {

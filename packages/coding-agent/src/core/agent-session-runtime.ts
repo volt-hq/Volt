@@ -42,6 +42,7 @@ export interface WorkspaceSessionSummary {
 	messageCount: number;
 	firstMessage: string;
 	current: boolean;
+	cwd: string;
 }
 
 export interface AgentSessionSwitchOptions {
@@ -108,6 +109,7 @@ function sessionInfoToSummary(info: SessionInfo, currentSessionId: string): Work
 		messageCount: info.messageCount,
 		firstMessage: info.firstMessage,
 		current: info.id === currentSessionId,
+		cwd: info.cwd,
 	};
 }
 
@@ -269,6 +271,7 @@ export class AgentSessionRuntime {
 			messageCount: summary.messageCount,
 			firstMessage: summary.firstMessage,
 			current: true,
+			cwd: header?.cwd ?? this.cwd,
 		};
 	}
 

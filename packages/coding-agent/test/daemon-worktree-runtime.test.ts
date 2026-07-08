@@ -103,6 +103,7 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 			setClientLastSessionId: vi.fn(async () => undefined),
 			createRuntime: async (runtimeOptions) => {
 				createRuntimeCalls.push(runtimeOptions);
+				(runtime as AgentSessionRuntime & { cwd: string }).cwd = runtimeOptions.cwd;
 				return {
 					runtime,
 					sessionSelection:
@@ -136,6 +137,7 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 			allowTools: "read,bash", // parent workspace policy, never per-worktree
 			conversationTarget: { target: "new" },
 			cwd: worktreePath,
+			projectCwd: worktreePath,
 			sessionDir: getDefaultSessionDir(workspacePath, agentDir),
 			projectTrusted: true, // evaluated against the PARENT path
 			profile: undefined,
@@ -155,6 +157,32 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		await registry.stopAll("test_cleanup");
 	});
 
+	it("worktree-bound new preserves a selected workspace-relative subfolder under the checkout", async () => {
+		mkdirSync(join(workspacePath, "packages", "app"), { recursive: true });
+		mkdirSync(join(worktreePath, "packages", "app"), { recursive: true });
+		const resolveWorktree = vi.fn(async () => worktree);
+		const { registry, createRuntimeCalls } = createRegistry({ sessionId: "s-wt-subdir", resolveWorktree });
+		const hello = createConversationHello({
+			target: "new",
+			worktreeId: "fix-login",
+			workingDirectory: "packages/app",
+		});
+
+		const created = await registry.getOrCreateEntry({ hello, response: HANDSHAKE_RESPONSE }, authorization);
+
+		expect(createRuntimeCalls[0]).toMatchObject({
+			cwd: join(worktreePath, "packages", "app"),
+			projectCwd: worktreePath,
+			sessionDir: getDefaultSessionDir(workspacePath, agentDir),
+		});
+		expect(created.entry).toMatchObject({
+			worktreeId: "fix-login",
+			worktreePath,
+			workingDirectory: "packages/app",
+		});
+		await registry.stopAll("test_cleanup");
+	});
+
 	it("non-worktree new keeps the parent cwd and the same derived session dir as before", async () => {
 		const resolveWorktree = vi.fn(async () => undefined);
 		const bindWorktreeSession = vi.fn(async () => {});
@@ -171,6 +199,7 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		expect(created.created).toBe(true);
 		expect(createRuntimeCalls[0]).toMatchObject({
 			cwd: workspacePath,
+			projectCwd: workspacePath,
 			sessionDir: getDefaultSessionDir(workspacePath, agentDir),
 			allowTools: "read,bash",
 			projectTrusted: true,
@@ -178,6 +207,30 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		expect(created.entry.worktreeId).toBeUndefined();
 		expect(created.entry.worktreePath).toBeUndefined();
 		expect(bindWorktreeSession).not.toHaveBeenCalled();
+		await registry.stopAll("test_cleanup");
+	});
+
+	it("non-worktree new can run from a selected workspace-relative subfolder while keeping projectCwd at the root", async () => {
+		mkdirSync(join(workspacePath, "packages", "app"), { recursive: true });
+		const { registry, createRuntimeCalls } = createRegistry({
+			sessionId: "s-plain-subdir",
+			resolveWorktree: async () => undefined,
+		});
+
+		const created = await registry.getOrCreateEntry(
+			{
+				hello: createConversationHello({ target: "new", workingDirectory: "packages/app" }),
+				response: HANDSHAKE_RESPONSE,
+			},
+			authorization,
+		);
+
+		expect(createRuntimeCalls[0]).toMatchObject({
+			cwd: join(workspacePath, "packages", "app"),
+			projectCwd: workspacePath,
+			sessionDir: getDefaultSessionDir(workspacePath, agentDir),
+		});
+		expect(created.entry.workingDirectory).toBe("packages/app");
 		await registry.stopAll("test_cleanup");
 	});
 
@@ -197,6 +250,7 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		expect(resolveWorktree).toHaveBeenCalledExactlyOnceWith("ws", hello, "s-resume");
 		expect(createRuntimeCalls[0]).toMatchObject({
 			cwd: worktreePath,
+			projectCwd: worktreePath,
 			sessionDir: getDefaultSessionDir(workspacePath, agentDir),
 		});
 		expect(resumed.entry).toMatchObject({ worktreeId: "fix-login", worktreePath });

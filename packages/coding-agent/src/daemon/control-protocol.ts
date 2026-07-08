@@ -312,6 +312,8 @@ export interface RelayPreamble {
 		workspaceName: string;
 		workspacePath: string;
 		worktreeId?: string;
+		/** POSIX-style path relative to the workspace/worktree root. */
+		workingDirectory?: string;
 	};
 }
 

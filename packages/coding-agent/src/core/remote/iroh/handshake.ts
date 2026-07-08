@@ -12,6 +12,7 @@ import {
 	isIrohRemoteOutcome,
 	isIrohRemoteRelayMode,
 	isIrohRemoteRelayUrls,
+	isIrohRemoteWorkingDirectory,
 	isIrohRemoteWorktreeId,
 } from "./protocol.ts";
 import type { IrohRemoteWorkspaceStatus } from "./workspace.ts";
@@ -23,6 +24,8 @@ export type IrohRemoteConversationTarget =
 	| {
 			target: "new";
 			worktreeId?: string;
+			/** POSIX-style path relative to the registered workspace root. */
+			workingDirectory?: string;
 	  }
 	| {
 			target: "session";
@@ -38,6 +41,8 @@ export interface IrohRemoteConversationHandshakeMetadata {
 	requestedSessionId?: string;
 	/** Echoed only for worktree-bound conversations (worktrees.v1). */
 	worktreeId?: string;
+	/** POSIX-style path relative to the workspace root. Omitted for workspace root. */
+	workingDirectory?: string;
 }
 
 export interface IrohRemoteWorkspaceDiscoveryTarget {
@@ -441,7 +446,7 @@ function parseIrohRemoteHelloMode(hello: Record<string, unknown>): IrohRemoteHel
 
 function parseConversationTarget(value: unknown): IrohRemoteConversationTarget {
 	const target = expectRecordForOutcome(value, "handshake conversation", "invalid_conversation_target");
-	expectKnownFields(target, "handshake conversation", ["target", "sessionId", "worktreeId"]);
+	expectKnownFields(target, "handshake conversation", ["target", "sessionId", "worktreeId", "workingDirectory"]);
 	const targetKind = expectStringForOutcome(
 		target.target,
 		"handshake conversation target",
@@ -455,6 +460,12 @@ function parseConversationTarget(value: unknown): IrohRemoteConversationTarget {
 			`handshake conversation ${targetKind} target must not include worktreeId`,
 		);
 	}
+	if (targetKind !== "new" && target.workingDirectory !== undefined) {
+		throw new IrohRemoteHandshakeError(
+			"invalid_conversation_target",
+			`handshake conversation ${targetKind} target must not include workingDirectory`,
+		);
+	}
 	if (targetKind === "last" || targetKind === "new") {
 		if (target.sessionId !== undefined) {
 			throw new IrohRemoteHandshakeError(
@@ -462,8 +473,20 @@ function parseConversationTarget(value: unknown): IrohRemoteConversationTarget {
 				`handshake conversation ${targetKind} target must not include sessionId`,
 			);
 		}
-		if (targetKind === "new" && target.worktreeId !== undefined) {
-			return { target: "new", worktreeId: expectWorktreeId(target.worktreeId, "handshake conversation worktreeId") };
+		if (targetKind === "new") {
+			const worktreeId =
+				target.worktreeId === undefined
+					? undefined
+					: expectWorktreeId(target.worktreeId, "handshake conversation worktreeId");
+			const workingDirectory =
+				target.workingDirectory === undefined
+					? undefined
+					: expectWorkingDirectory(target.workingDirectory, "handshake conversation workingDirectory");
+			return {
+				target: "new",
+				...(worktreeId === undefined ? {} : { worktreeId }),
+				...(workingDirectory === undefined ? {} : { workingDirectory }),
+			};
 		}
 		return { target: targetKind };
 	}
@@ -546,6 +569,17 @@ function expectWorktreeId(value: unknown, label: string): string {
 		);
 	}
 	return worktreeId;
+}
+
+function expectWorkingDirectory(value: unknown, label: string): string {
+	const workingDirectory = expectStringForOutcome(value, label, "invalid_conversation_target");
+	if (!isIrohRemoteWorkingDirectory(workingDirectory)) {
+		throw new IrohRemoteHandshakeError(
+			"invalid_conversation_target",
+			`${label} must be a relative POSIX path inside the workspace`,
+		);
+	}
+	return workingDirectory;
 }
 
 function expectOptionalRemoteSessionId(value: unknown, label: string): string | undefined {
@@ -745,6 +779,7 @@ function parseConversationHandshakeMetadata(value: unknown): IrohRemoteConversat
 		"selection",
 		"requestedSessionId",
 		"worktreeId",
+		"workingDirectory",
 	]);
 	const requestedSessionId = expectOptionalRemoteSessionId(
 		metadata.requestedSessionId,
@@ -754,12 +789,17 @@ function parseConversationHandshakeMetadata(value: unknown): IrohRemoteConversat
 		metadata.worktreeId,
 		"handshake response conversation worktreeId",
 	);
+	const workingDirectory = expectOptionalWorkingDirectoryForResponse(
+		metadata.workingDirectory,
+		"handshake response conversation workingDirectory",
+	);
 	const conversation: IrohRemoteConversationHandshakeMetadata = {
 		target: expectConversationTargetKind(metadata.target, "handshake response conversation target"),
 		sessionId: expectRemoteSessionIdForResponse(metadata.sessionId, "handshake response conversation sessionId"),
 		selection: expectConversationSelection(metadata.selection, "handshake response conversation selection"),
 		...(requestedSessionId === undefined ? {} : { requestedSessionId }),
 		...(worktreeId === undefined ? {} : { worktreeId }),
+		...(workingDirectory === undefined ? {} : { workingDirectory }),
 	};
 	assertConversationTargetSelection(conversation);
 	return conversation;
@@ -808,6 +848,16 @@ function assertConversationTargetSelection(conversation: IrohRemoteConversationH
 	if (conversation.target === "session" && conversation.selection !== "resumed") {
 		throw new Error("handshake response session target must use resumed selection");
 	}
+}
+
+function expectOptionalWorkingDirectoryForResponse(value: unknown, label: string): string | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (!isIrohRemoteWorkingDirectory(value)) {
+		throw new Error(`${label} must be a relative POSIX path inside the workspace`);
+	}
+	return value;
 }
 
 function expectRemoteSessionIdForResponse(value: unknown, label: string): string {

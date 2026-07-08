@@ -1,4 +1,4 @@
-import { isIrohRemoteWorktreeId } from "./protocol.ts";
+import { isIrohRemoteWorkingDirectory, isIrohRemoteWorktreeId } from "./protocol.ts";
 import { createIrohRemoteRpcErrorResponse, type IrohRemoteRpcErrorResponse } from "./rpc-command-filter.ts";
 
 export const IROH_REMOTE_CREATE_WORKTREE_RPC_TYPE = "create_worktree";
@@ -32,7 +32,7 @@ export interface IrohRemoteWorktreeSummary {
 export interface IrohRemoteWorktreeRpcBackend {
 	createWorktree(
 		workspaceName: string,
-		options: { id?: string; branch?: string; baseRef?: string },
+		options: { id?: string; branch?: string; baseRef?: string; workingDirectory?: string },
 	): Promise<{ ok: true; worktree: IrohRemoteWorktreeSummary } | { ok: false; error: string; detail?: string }>;
 	listWorktrees(
 		workspaceName: string,
@@ -72,7 +72,15 @@ export type IrohRemoteWorktreeRpcResult =
 			audit?: { type: string; details: Record<string, unknown> };
 	  };
 
-const CREATE_WORKTREE_ALLOWED_FIELDS = new Set(["id", "type", "workspaceName", "worktreeName", "branch", "baseRef"]);
+const CREATE_WORKTREE_ALLOWED_FIELDS = new Set([
+	"id",
+	"type",
+	"workspaceName",
+	"worktreeName",
+	"branch",
+	"baseRef",
+	"workingDirectory",
+]);
 const LIST_WORKTREES_ALLOWED_FIELDS = new Set(["id", "type", "workspaceName"]);
 const REMOVE_WORKTREE_ALLOWED_FIELDS = new Set(["id", "type", "workspaceName", "worktreeId", "force"]);
 
@@ -119,10 +127,14 @@ export async function handleIrohRemoteWorktreeRpcCommand(
 		if (command.baseRef !== undefined && typeof command.baseRef !== "string") {
 			return fail("invalid_request");
 		}
+		if (command.workingDirectory !== undefined && !isIrohRemoteWorkingDirectory(command.workingDirectory)) {
+			return fail("invalid_request");
+		}
 		const created = await options.backend.createWorktree(command.workspaceName, {
 			...(command.worktreeName === undefined ? {} : { id: command.worktreeName }),
 			...(command.branch === undefined ? {} : { branch: command.branch }),
 			...(command.baseRef === undefined ? {} : { baseRef: command.baseRef }),
+			...(command.workingDirectory === undefined ? {} : { workingDirectory: command.workingDirectory }),
 		});
 		if (!created.ok) {
 			return fail(created.error);

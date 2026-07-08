@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
 import { handleIrohRemoteDeviceLogUploadRpcCommand } from "../core/remote/iroh/device-log-rpc.ts";
@@ -76,6 +77,8 @@ export interface RemoteSessionListEntry {
 	messageCount: number;
 	/** Present when the session is bound to a daemon-managed worktree (worktrees.v1). */
 	worktreeId?: string;
+	/** POSIX-style path relative to the workspace/worktree root. Omitted for root. */
+	workingDirectory?: string;
 }
 
 export interface RemoteSessionListCursorEntry {
@@ -100,6 +103,7 @@ export interface ConversationCommandRuntime {
 			modifiedAt: string;
 			messageCount: number;
 			firstMessage: string;
+			cwd?: string;
 		}>
 	>;
 }
@@ -962,14 +966,38 @@ interface RemoteSessionSummaryInput {
 	createdAt: string | Date;
 	updatedAt: string | Date;
 	messageCount: number;
+	cwd?: string;
+}
+
+function getRelativeWorkingDirectory(rootPath: string, cwd: string | undefined): string | undefined {
+	if (!cwd) {
+		return undefined;
+	}
+	const root = resolve(rootPath);
+	const child = resolve(cwd);
+	const relativePath = relative(root, child);
+	if (relativePath === "" || relativePath === ".") {
+		return undefined;
+	}
+	if (relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+		return undefined;
+	}
+	return relativePath.split(sep).join("/");
+}
+
+interface RemoteSessionSummary {
+	sortUpdatedAtMs: number;
+	session: RemoteSessionListEntry;
+	cwd?: string;
 }
 
 function createRemoteSessionSummary(
 	input: RemoteSessionSummaryInput,
 	authorization: IrohRemoteClientAuthorizationSuccess,
-): { sortUpdatedAtMs: number; session: RemoteSessionListEntry } {
+): RemoteSessionSummary {
 	const createdAt = toRemoteSessionTimestamp(input.createdAt);
 	const updatedAt = toRemoteSessionTimestamp(input.updatedAt);
+	const workingDirectory = getRelativeWorkingDirectory(authorization.workspace.path, input.cwd);
 	return {
 		sortUpdatedAtMs: getRemoteSessionTimestampMs(updatedAt),
 		session: {
@@ -978,14 +1006,13 @@ function createRemoteSessionSummary(
 			createdAt,
 			updatedAt,
 			messageCount: input.messageCount,
+			...(workingDirectory === undefined ? {} : { workingDirectory }),
 		},
+		...(input.cwd === undefined ? {} : { cwd: input.cwd }),
 	};
 }
 
-function sortRemoteSessionSummaries(
-	left: { sortUpdatedAtMs: number; session: RemoteSessionListEntry },
-	right: { sortUpdatedAtMs: number; session: RemoteSessionListEntry },
-): number {
+function sortRemoteSessionSummaries(left: RemoteSessionSummary, right: RemoteSessionSummary): number {
 	return right.sortUpdatedAtMs - left.sortUpdatedAtMs || left.session.sessionId.localeCompare(right.session.sessionId);
 }
 
@@ -993,41 +1020,42 @@ export async function listRemoteWorkspaceSessionSummaries(
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	context: ConversationCommandContext,
 	runtime?: ConversationCommandRuntime,
-): Promise<Array<{ sortUpdatedAtMs: number; session: RemoteSessionListEntry }>> {
-	const summaries =
-		runtime === undefined
-			? (
-					await SessionManager.list(
-						authorization.workspace.path,
-						getDefaultSessionDir(authorization.workspace.path, context.agentDir),
-					)
-				).map((info) =>
-					createRemoteSessionSummary(
-						{
-							sessionId: info.id,
-							title: info.name ?? info.firstMessage,
-							createdAt: info.created,
-							updatedAt: info.modified,
-							messageCount: info.messageCount,
-						},
-						authorization,
-					),
-				)
-			: (await runtime.listSessions()).map((summary) =>
-					createRemoteSessionSummary(
-						{
-							sessionId: summary.sessionId,
-							title: summary.sessionName ?? summary.firstMessage,
-							createdAt: summary.createdAt,
-							updatedAt: summary.modifiedAt,
-							messageCount: summary.messageCount,
-						},
-						authorization,
-					),
-				);
-	const bySessionId = new Map<string, { sortUpdatedAtMs: number; session: RemoteSessionListEntry }>();
-	for (const summary of summaries) {
-		bySessionId.set(summary.session.sessionId, summary);
+): Promise<RemoteSessionSummary[]> {
+	const bySessionId = new Map<string, RemoteSessionSummary>();
+	if (runtime === undefined || context.agentDir !== undefined) {
+		for (const info of await SessionManager.list(
+			authorization.workspace.path,
+			getDefaultSessionDir(authorization.workspace.path, context.agentDir),
+		)) {
+			const summary = createRemoteSessionSummary(
+				{
+					sessionId: info.id,
+					title: info.name ?? info.firstMessage,
+					createdAt: info.created,
+					updatedAt: info.modified,
+					messageCount: info.messageCount,
+					cwd: info.cwd,
+				},
+				authorization,
+			);
+			bySessionId.set(summary.session.sessionId, summary);
+		}
+	}
+	if (runtime !== undefined) {
+		for (const liveSummary of await runtime.listSessions()) {
+			const summary = createRemoteSessionSummary(
+				{
+					sessionId: liveSummary.sessionId,
+					title: liveSummary.sessionName ?? liveSummary.firstMessage,
+					createdAt: liveSummary.createdAt,
+					updatedAt: liveSummary.modifiedAt,
+					messageCount: liveSummary.messageCount,
+					cwd: liveSummary.cwd,
+				},
+				authorization,
+			);
+			bySessionId.set(summary.session.sessionId, summary);
+		}
 	}
 	// Worktree attribution (worktrees.v1): join the persisted session bindings so
 	// clients can badge worktree-bound sessions without a separate list_worktrees
@@ -1038,6 +1066,12 @@ export async function listRemoteWorkspaceSessionSummaries(
 				const summary = bySessionId.get(sessionId);
 				if (summary) {
 					summary.session.worktreeId = worktree.id;
+					const workingDirectory = getRelativeWorkingDirectory(worktree.path, summary.cwd);
+					if (workingDirectory === undefined) {
+						delete summary.session.workingDirectory;
+					} else {
+						summary.session.workingDirectory = workingDirectory;
+					}
 				}
 			}
 		}

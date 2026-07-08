@@ -2023,6 +2023,7 @@ export class InteractiveMode {
 					sessionSelection,
 					responseContext,
 					preamble.resolvedTarget.worktreeId,
+					preamble.resolvedTarget.workingDirectory,
 				);
 				await writeIrohRemoteHandshakeResponse(relayedStream.send, handshakeResponse);
 

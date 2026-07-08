@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+
 export const IROH_REMOTE_ALPN = "volt-rpc/0";
 export const IROH_REMOTE_TICKET_PREFIX = "volt+iroh://v1/";
 export const IROH_REMOTE_HELLO_TYPE = "volt_iroh_hello";
@@ -5,10 +7,12 @@ export const IROH_REMOTE_HANDSHAKE_TYPE = "volt_iroh_handshake";
 export const IROH_REMOTE_MULTI_STREAMS_FEATURE = "multi_streams.v1";
 export const IROH_REMOTE_CONVERSATION_STREAMS_FEATURE = "conversation_streams.v1";
 export const IROH_REMOTE_WORKTREES_FEATURE = "worktrees.v1";
+export const IROH_REMOTE_WORKING_DIRECTORIES_FEATURE = "working_directories.v1";
 export const IROH_REMOTE_HOST_FEATURES = [
 	IROH_REMOTE_MULTI_STREAMS_FEATURE,
 	IROH_REMOTE_CONVERSATION_STREAMS_FEATURE,
 	IROH_REMOTE_WORKTREES_FEATURE,
+	IROH_REMOTE_WORKING_DIRECTORIES_FEATURE,
 ] as const;
 
 /** Daemon-managed worktree ids: lowercase slug, unique per workspace. */
@@ -16,6 +20,31 @@ export const IROH_REMOTE_WORKTREE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 export function isIrohRemoteWorktreeId(value: unknown): value is string {
 	return typeof value === "string" && IROH_REMOTE_WORKTREE_ID_PATTERN.test(value);
+}
+
+export function isIrohRemoteWorkingDirectory(value: unknown): value is string {
+	return typeof value === "string" && getIrohRemoteWorkingDirectoryValidationError(value) === undefined;
+}
+
+export function getIrohRemoteWorkingDirectoryValidationError(value: string): string | undefined {
+	if (value.length === 0) {
+		return "workingDirectory must be omitted for the workspace root";
+	}
+	if (value.length > 4096 || Buffer.byteLength(value, "utf8") > 8192) {
+		return "workingDirectory exceeds maximum length";
+	}
+	if (value.includes("\0") || hasAsciiControlCharacter(value)) {
+		return "workingDirectory must not contain control characters";
+	}
+	if (value.startsWith("/") || value.startsWith("//") || value.includes("\\") || /^[A-Za-z]:/.test(value)) {
+		return "workingDirectory must be a relative POSIX path";
+	}
+	for (const segment of value.split("/")) {
+		if (segment === "" || segment === "." || segment === ".." || segment === ".git") {
+			return "workingDirectory must not contain empty, '.', '..', or '.git' path segments";
+		}
+	}
+	return undefined;
 }
 export const DEFAULT_IROH_REMOTE_ALLOW_TOOLS = "read,bash,edit,write,web_search,grep,find,ls,subagent,mcp";
 const LEGACY_DEFAULT_IROH_REMOTE_ALLOW_TOOL_SETS: readonly string[][] = [
@@ -117,6 +146,16 @@ export function usesDefaultIrohRemoteAllowTools(allowTools: string | undefined):
 	const tools = parseIrohRemoteAllowTools(allowTools);
 	const defaultTools = new Set(DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(","));
 	return tools.length === defaultTools.size && tools.every((tool) => defaultTools.has(tool));
+}
+
+function hasAsciiControlCharacter(value: string): boolean {
+	for (const char of value) {
+		const code = char.charCodeAt(0);
+		if (code <= 0x1f || code === 0x7f) {
+			return true;
+		}
+	}
+	return false;
 }
 
 function parseIrohRemoteAllowToolNames(allowTools: string): string[] {

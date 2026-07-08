@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { Socket } from "node:net";
+import { relative, resolve, sep } from "node:path";
 import type { IrohRemoteActiveStreamEntry } from "../core/remote/iroh/active-stream-registry.ts";
 import { IrohRemoteActiveStreamRegistry } from "../core/remote/iroh/active-stream-registry.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
@@ -86,6 +87,7 @@ import {
 import { resolveWorktreeCleanupPolicy } from "./state.ts";
 import { createHostThemeTokensFrame, HOST_THEME_TOKENS_FEATURE } from "./theme-push.ts";
 import { ViewerFeedRegistry } from "./viewer-feed.ts";
+import { isPathInside, resolveWorkspaceDirectory, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import {
 	type RemoteSanitizerOverrides,
 	runWorkspaceDiscoveryStream,
@@ -112,6 +114,17 @@ const RELAY_OFFER_RETRY_AFTER_MS = 1000;
 const WORKSPACE_DISCOVERY_STREAM_SESSION_ID = "$workspace-discovery";
 const WORKSPACE_MANAGEMENT_STREAM_SESSION_ID = "$workspace-management";
 const SHUTDOWN_RUNTIME_IDLE_CAP_MS = 60_000;
+
+function getRelativeWorkingDirectoryForRoot(rootPath: string, cwd: string): string | null | undefined {
+	const root = resolve(rootPath);
+	const child = resolve(cwd);
+	if (!isPathInside(root, child)) {
+		return null;
+	}
+	const relativePath = relative(root, child);
+	return relativePath.length === 0 || relativePath === "." ? undefined : relativePath.split(sep).join("/");
+}
+
 /**
  * Defensive cap on concurrent in-flight bi-streams per client connection. A
  * well-behaved client keeps only a handful open (one conversation + a few
@@ -379,6 +392,7 @@ class IrohDaemonService {
 				this.requireEngine().setClientLastSessionId(nodeId, workspace, sessionId),
 			resolveWorktree: (workspaceName, hello, targetSessionId) =>
 				this.resolveConversationWorktree(workspaceName, hello, targetSessionId),
+			resolveWorkingDirectory: (options) => this.resolveConversationWorkingDirectory(options),
 			bindWorktreeSession: (workspaceName, worktreeId, sessionId) =>
 				this.worktrees.bindSession(workspaceName, worktreeId, sessionId),
 			onRuntimeRekeyed: (workspaceName, previousSessionId, sessionId) =>
@@ -1127,6 +1141,38 @@ class IrohDaemonService {
 		return worktree;
 	}
 
+	private async resolveConversationWorkingDirectory(options: {
+		workspace: IrohRemoteWorkspace;
+		rootPath: string;
+		workingDirectory?: string;
+		worktree?: IrohRemoteWorkspaceWorktree;
+	}): Promise<WorkspaceDirectoryResolution> {
+		const parentDirectory = await this.worktrees.validateWorkingDirectory(
+			options.workspace,
+			options.workingDirectory,
+		);
+		if (!parentDirectory.ok) {
+			const message = parentDirectory.detail ?? parentDirectory.error;
+			throw createConversationOpenError("invalid_conversation_target", message, {
+				workspace: options.workspace.name,
+			});
+		}
+		if (options.worktree === undefined) {
+			return parentDirectory.directory;
+		}
+		const worktreeDirectory = await resolveWorkspaceDirectory(
+			options.rootPath,
+			parentDirectory.directory.relativePath,
+		);
+		if (!worktreeDirectory.ok) {
+			throw createConversationOpenError("session_unavailable", worktreeDirectory.error, {
+				workspace: options.workspace.name,
+				worktreeId: options.worktree.id,
+			});
+		}
+		return worktreeDirectory.value;
+	}
+
 	// ==========================================================================
 	// Integrated conversation serving
 	// ==========================================================================
@@ -1319,10 +1365,27 @@ class IrohDaemonService {
 				createSessionManagerTargetStore(
 					boundWorktree?.path ?? authorization.workspace.path,
 					getDefaultSessionDir(authorization.workspace.path, this.services.agentDir),
+					{ listAll: true, preserveSessionCwd: true },
 				),
 			);
 		} catch (error) {
 			await this.sendHandshakeError(stream, error);
+			return;
+		}
+		const resolvedSessionManager = resolvedTarget.sessionManager as { getCwd?: () => string };
+		const resolvedSessionCwd =
+			resolvedSessionManager.getCwd?.() ?? boundWorktree?.path ?? authorization.workspace.path;
+		const relayWorkingDirectory = getRelativeWorkingDirectoryForRoot(
+			boundWorktree?.path ?? authorization.workspace.path,
+			resolvedSessionCwd,
+		);
+		if (relayWorkingDirectory === null) {
+			await this.sendHandshakeError(stream, {
+				message: "stored session working directory is outside the authorized workspace",
+				outcome: "session_unavailable",
+				workspace: workspaceName,
+				sessionId: targetSessionId,
+			});
 			return;
 		}
 
@@ -1406,6 +1469,7 @@ class IrohDaemonService {
 						workspaceName: resolvedTarget.workspaceName,
 						workspacePath: resolvedTarget.workspacePath,
 						...(boundWorktree === undefined ? {} : { worktreeId: boundWorktree.id }),
+						...(relayWorkingDirectory === undefined ? {} : { workingDirectory: relayWorkingDirectory }),
 					},
 				},
 				settle: (outcome) => {
@@ -1663,6 +1727,7 @@ class IrohDaemonService {
 					sessionSelection,
 					this.getResponseContext(),
 					entry.worktreeId,
+					entry.workingDirectory,
 				),
 			);
 			subscriber = await this.runtimes.attachSubscriber(entry);

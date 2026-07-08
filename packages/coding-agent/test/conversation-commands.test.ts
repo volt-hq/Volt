@@ -1,9 +1,12 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import { getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/rpc-command-filter.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../src/core/remote/iroh/worktree-rpc.ts";
-import type { SessionEntry } from "../src/core/session-manager.ts";
+import { getDefaultSessionDir, type SessionEntry } from "../src/core/session-manager.ts";
 import {
 	type ConversationCommandContext,
 	type ConversationCommandRuntime,
@@ -14,7 +17,7 @@ import {
 	TURN_INITIATING_RPC_TYPES,
 } from "../src/daemon/conversation-commands.ts";
 
-function createAuthorization(): IrohRemoteClientAuthorizationSuccess {
+function createAuthorization(options: { workspacePath?: string } = {}): IrohRemoteClientAuthorizationSuccess {
 	return {
 		ok: true,
 		allowTools: "read",
@@ -28,7 +31,7 @@ function createAuthorization(): IrohRemoteClientAuthorizationSuccess {
 		},
 		paired: false,
 		pairingSecretConsumed: false,
-		workspace: { name: "ws", path: "/tmp/ws" },
+		workspace: { name: "ws", path: options.workspacePath ?? "/tmp/ws" },
 		workspaceNames: ["ws"],
 		workspaces: [{ name: "ws", status: "available" }],
 	};
@@ -51,6 +54,7 @@ function createContext(
 		onWorkspaceUnregistered?: (workspaceName: string) => Promise<void>;
 		webSearchKey?: ConversationCommandContext["webSearchKey"];
 		createWorktreeBackend?: ConversationCommandContext["createWorktreeBackend"];
+		agentDir?: string;
 	} = {},
 ): ConversationCommandContext {
 	return {
@@ -63,6 +67,7 @@ function createContext(
 			: { onWorkspaceUnregistered: options.onWorkspaceUnregistered }),
 		...(options.webSearchKey === undefined ? {} : { webSearchKey: options.webSearchKey }),
 		...(options.createWorktreeBackend === undefined ? {} : { createWorktreeBackend: options.createWorktreeBackend }),
+		...(options.agentDir === undefined ? {} : { agentDir: options.agentDir }),
 	};
 }
 
@@ -495,6 +500,53 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		expect(bySession.get("s-plain")).not.toHaveProperty("worktreeId");
 		// Ids only — no checkout path may reach the wire.
 		expect(JSON.stringify(response)).not.toContain("/tmp/agent/worktrees");
+	});
+
+	it("includes parent workspace sessions when the active runtime cwd is a subfolder", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "volt-conversation-list-"));
+		try {
+			const workspacePath = join(tempDir, "repo");
+			const subfolderPath = join(workspacePath, "packages", "app");
+			const agentDir = join(tempDir, "agent");
+			mkdirSync(subfolderPath, { recursive: true });
+			const sessionDir = getDefaultSessionDir(workspacePath, agentDir);
+			writeFileSync(
+				join(sessionDir, "root-session.jsonl"),
+				`${JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "s-root",
+					timestamp: new Date(1).toISOString(),
+					cwd: workspacePath,
+				})}\n`,
+			);
+			const runtime = createRuntime("s-subfolder");
+			runtime.listSessions = async () => [
+				{
+					sessionId: "s-subfolder",
+					sessionName: "subfolder session",
+					firstMessage: "hi",
+					createdAt: new Date(2).toISOString(),
+					modifiedAt: new Date(3).toISOString(),
+					messageCount: 1,
+					cwd: subfolderPath,
+				},
+			];
+
+			const response = (await handleIntegratedConversationRpcCommand(
+				{ id: "7", type: "list_sessions" },
+				createAuthorization({ workspacePath }),
+				createContext({ agentDir }),
+				runtime,
+			)) as { success: boolean; data: { sessions: Array<Record<string, unknown>> } };
+
+			expect(response.success).toBe(true);
+			const bySessionId = new Map(response.data.sessions.map((session) => [session.sessionId, session]));
+			expect(bySessionId.get("s-root")).toBeDefined();
+			expect(bySessionId.get("s-subfolder")?.workingDirectory).toBe("packages/app");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("serves list_sessions with the current session summary", async () => {

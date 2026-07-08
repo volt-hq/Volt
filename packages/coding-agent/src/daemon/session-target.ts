@@ -103,15 +103,19 @@ export async function resolveIrohRemoteSessionTarget<H extends SessionTargetSess
 export function createSessionManagerTargetStore(
 	cwd: string,
 	sessionDir: string,
+	options: { listAll?: boolean; preserveSessionCwd?: boolean } = {},
 ): SessionTargetSessionStore<SessionManager> {
 	return {
 		async list() {
-			return (await SessionManager.list(cwd, sessionDir))
+			const sessions = options.listAll
+				? await SessionManager.listAll(sessionDir)
+				: await SessionManager.list(cwd, sessionDir);
+			return sessions
 				.filter((session) => existsSync(session.path))
 				.map((session) => ({ id: session.id, path: session.path }));
 		},
 		open(path: string) {
-			return SessionManager.open(path, sessionDir, cwd);
+			return SessionManager.open(path, sessionDir, options.preserveSessionCwd ? undefined : cwd);
 		},
 		create() {
 			return SessionManager.create(cwd, sessionDir);

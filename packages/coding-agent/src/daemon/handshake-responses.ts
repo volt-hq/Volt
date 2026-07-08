@@ -72,6 +72,7 @@ export function createIntegratedConversationHandshakeResponse(
 	sessionSelection: IntegratedConversationSessionSelection,
 	context: RemoteHostResponseContext,
 	worktreeId?: string,
+	workingDirectory?: string,
 ): IrohRemoteHandshakeSuccess {
 	if (handshake.hello.mode !== "conversation") {
 		throw new Error("integrated conversation handshake response requires a conversation hello");
@@ -93,6 +94,7 @@ export function createIntegratedConversationHandshakeResponse(
 			...(requestedSessionId === undefined ? {} : { requestedSessionId }),
 			// Echoed only for worktree-bound conversations; old clients never see it.
 			...(worktreeId === undefined ? {} : { worktreeId }),
+			...(workingDirectory === undefined ? {} : { workingDirectory }),
 		},
 	});
 }
