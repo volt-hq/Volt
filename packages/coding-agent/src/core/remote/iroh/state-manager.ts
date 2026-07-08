@@ -19,6 +19,7 @@ import {
 	type IrohRemotePushTokenEnvironment,
 	type IrohRemoteRevokedClient,
 	type IrohRemoteWorkspace,
+	type IrohRemoteWorkspaceWorktree,
 	readIrohRemoteHostState,
 	writeIrohRemoteHostState,
 } from "./state.ts";
@@ -131,8 +132,74 @@ export class IrohRemoteHostStateManager {
 			state.pendingPairingTickets = (state.pendingPairingTickets ?? []).filter(
 				(ticket) => ticket.workspace !== name,
 			);
+			// Records only; checkout deletion is the daemon's best-effort cleanup.
+			state.worktrees = (state.worktrees ?? []).filter((worktree) => worktree.workspaceName !== name);
 			await this.saveUnlocked(state);
 			return removedWorkspace ? cloneWorkspace(removedWorkspace) : undefined;
+		});
+	}
+
+	async upsertWorktree(worktree: IrohRemoteWorkspaceWorktree): Promise<IrohRemoteWorkspaceWorktree> {
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			state.worktrees = [
+				...(state.worktrees ?? []).filter(
+					(entry) => entry.workspaceName !== worktree.workspaceName || entry.id !== worktree.id,
+				),
+				cloneWorktree(worktree),
+			];
+			await this.saveUnlocked(state);
+			return cloneWorktree(worktree);
+		});
+	}
+
+	async removeWorktree(workspaceName: string, worktreeId: string): Promise<IrohRemoteWorkspaceWorktree | undefined> {
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			const worktrees = state.worktrees ?? [];
+			const removed = worktrees.find((entry) => entry.workspaceName === workspaceName && entry.id === worktreeId);
+			if (!removed) {
+				return undefined;
+			}
+			state.worktrees = worktrees.filter((entry) => entry !== removed);
+			await this.saveUnlocked(state);
+			return cloneWorktree(removed);
+		});
+	}
+
+	async listWorktrees(workspaceName?: string): Promise<IrohRemoteWorkspaceWorktree[]> {
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			return (state.worktrees ?? [])
+				.filter((entry) => workspaceName === undefined || entry.workspaceName === workspaceName)
+				.map((entry) => cloneWorktree(entry));
+		});
+	}
+
+	async bindWorktreeSession(workspaceName: string, worktreeId: string, sessionId: string): Promise<void> {
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			const worktree = (state.worktrees ?? []).find(
+				(entry) => entry.workspaceName === workspaceName && entry.id === worktreeId,
+			);
+			if (!worktree || worktree.sessionIds.includes(sessionId)) {
+				return;
+			}
+			worktree.sessionIds = [...worktree.sessionIds, sessionId];
+			await this.saveUnlocked(state);
+		});
+	}
+
+	async findWorktreeForSession(
+		workspaceName: string,
+		sessionId: string,
+	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			const worktree = (state.worktrees ?? []).find(
+				(entry) => entry.workspaceName === workspaceName && entry.sessionIds.includes(sessionId),
+			);
+			return worktree ? cloneWorktree(worktree) : undefined;
 		});
 	}
 
@@ -639,6 +706,7 @@ function cloneHostState(state: IrohRemoteHostState): IrohRemoteHostState {
 			clonePairingSecretTombstone(tombstone),
 		),
 		workspaces: state.workspaces.map((workspace) => cloneWorkspace(workspace)),
+		worktrees: (state.worktrees ?? []).map((worktree) => cloneWorktree(worktree)),
 		clients: state.clients.map((client) => cloneClient(client)),
 		revokedClients: (state.revokedClients ?? []).map((client) => cloneRevokedClient(client)),
 		pendingPairingTickets: (state.pendingPairingTickets ?? []).map((ticket) => clonePendingPairingTicket(ticket)),
@@ -676,6 +744,10 @@ function cloneRevokedClient(client: IrohRemoteRevokedClient): IrohRemoteRevokedC
 
 function cloneWorkspace(workspace: IrohRemoteWorkspace): IrohRemoteWorkspace {
 	return { ...workspace };
+}
+
+function cloneWorktree(worktree: IrohRemoteWorkspaceWorktree): IrohRemoteWorkspaceWorktree {
+	return { ...worktree, sessionIds: [...worktree.sessionIds] };
 }
 
 function getRevokedClients(state: IrohRemoteHostState): IrohRemoteRevokedClient[] {

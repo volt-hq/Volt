@@ -26,7 +26,10 @@ export interface IrohRemoteAgentRuntimeOptions {
 	allowTools?: string;
 	agentDir?: string;
 	conversationTarget?: IrohRemoteAgentRuntimeConversationTarget;
+	/** Runtime working directory for tools/session state. */
 	cwd: string;
+	/** Project/config root for .volt resources. Defaults to cwd. */
+	projectCwd?: string;
 	onSubagentRuntimeCreated?: (event: IrohRemoteSubagentRuntimeCreatedEvent) => void | Promise<void>;
 	profile?: string;
 	projectTrusted?: boolean;
@@ -34,6 +37,8 @@ export interface IrohRemoteAgentRuntimeOptions {
 	resolvedSessionTarget?: ResolvedSessionTargetWithManager<SessionManager>;
 	resumeSessionId?: string;
 	sessionDir?: string;
+	/** Validate the resolved session cwd before services/tools are created. */
+	validateCwd?: (cwd: string) => Promise<void> | void;
 }
 
 export interface IrohRemoteSubagentRuntimeCreatedEvent extends SubagentRuntimeCreatedEvent {
@@ -88,7 +93,8 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 	options: IrohRemoteAgentRuntimeOptions,
 ): Promise<IrohRemoteAgentRuntimeResult> {
 	const agentDir = resolvePath(options.agentDir ?? getAgentDir());
-	runIrohRemoteStartupMigrations(options.cwd, agentDir);
+	const projectCwd = resolvePath(options.projectCwd ?? options.cwd);
+	runIrohRemoteStartupMigrations(projectCwd, agentDir);
 	const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 	const tools = parseIrohRemoteAllowTools(options.allowTools);
 	const allowUnlistedExtensionTools = usesDefaultIrohRemoteAllowTools(options.allowTools);
@@ -96,7 +102,7 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 
 	const createRuntime: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
 		const profile = Object.hasOwn(runtimeOptions, "profile") ? runtimeOptions.profile : options.profile;
-		const settingsManager = SettingsManager.create(runtimeOptions.cwd, runtimeOptions.agentDir, {
+		const settingsManager = SettingsManager.create(projectCwd, runtimeOptions.agentDir, {
 			profile,
 			projectTrusted,
 		});
@@ -105,6 +111,7 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 		const services = await createAgentSessionServices({
 			authStorage,
 			cwd: runtimeOptions.cwd,
+			projectCwd,
 			agentDir: runtimeOptions.agentDir,
 			settingsManager,
 		});
@@ -143,8 +150,9 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 	};
 
 	const sessionTarget = await createIrohRemoteSessionManager(options, agentDir);
+	await options.validateCwd?.(sessionTarget.sessionManager.getCwd());
 	const runtime = await createAgentSessionRuntime(createRuntime, {
-		cwd: options.cwd,
+		cwd: sessionTarget.sessionManager.getCwd(),
 		agentDir,
 		sessionManager: sessionTarget.sessionManager,
 		profile: options.profile,
@@ -172,7 +180,8 @@ async function createIrohRemoteSessionManager(
 			{ name: "", path: options.cwd },
 			createSessionManagerTargetStore(
 				options.cwd,
-				options.sessionDir ?? getDefaultSessionDir(options.cwd, agentDir),
+				options.sessionDir ?? getDefaultSessionDir(options.projectCwd ?? options.cwd, agentDir),
+				{ listAll: true, preserveSessionCwd: true },
 			),
 		));
 	return {

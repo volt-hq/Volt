@@ -14,7 +14,7 @@ import {
 	writeFileSync,
 } from "fs";
 import { readdir, stat } from "fs/promises";
-import { join, resolve } from "path";
+import { basename, join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
@@ -431,15 +431,28 @@ export function buildSessionContext(
 	return { messages, thinkingLevel, model };
 }
 
+/** Encode a cwd into the safe `--…--` session-directory name. */
+function encodeSessionDirName(cwd: string): string {
+	const resolvedCwd = resolvePath(cwd);
+	return `--${resolvedCwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+}
+
+/**
+ * True when a session directory is the default-shaped directory for a cwd
+ * (under ANY agent dir). Such directories hold every session of that
+ * workspace — including worktree-bound sessions whose header cwd differs —
+ * so cwd filtering must not apply to them.
+ */
+function isDefaultShapedSessionDir(dir: string, cwd: string): boolean {
+	return basename(dir) === encodeSessionDirName(cwd);
+}
+
 /**
  * Compute the default session directory for a cwd.
  * Encodes cwd into a safe directory name under ~/.volt/agent/sessions/.
  */
 function getDefaultSessionDirPath(cwd: string, agentDir: string = getDefaultAgentDir()): string {
-	const resolvedCwd = resolvePath(cwd);
-	const resolvedAgentDir = resolvePath(agentDir);
-	const safePath = `--${resolvedCwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-	return join(resolvedAgentDir, "sessions", safePath);
+	return join(resolvePath(agentDir), "sessions", encodeSessionDirName(cwd));
 }
 
 export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultAgentDir()): string {
@@ -1487,7 +1500,7 @@ export class SessionManager {
 	 */
 	static continueRecent(cwd: string, sessionDir?: string): SessionManager {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
+		const filterCwd = sessionDir !== undefined && !isDefaultShapedSessionDir(dir, cwd);
 		const mostRecent = findMostRecentSession(dir, filterCwd ? cwd : undefined);
 		if (mostRecent) {
 			return new SessionManager(cwd, dir, mostRecent, true);
@@ -1568,7 +1581,7 @@ export class SessionManager {
 	 */
 	static async list(cwd: string, sessionDir?: string, onProgress?: SessionListProgress): Promise<SessionInfo[]> {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
+		const filterCwd = sessionDir !== undefined && !isDefaultShapedSessionDir(dir, cwd);
 		const resolvedCwd = resolvePath(cwd);
 		const sessions = (await listSessionsFromDir(dir, onProgress)).filter(
 			(session) => !filterCwd || sessionCwdMatches(session.cwd, resolvedCwd),

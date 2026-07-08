@@ -42,6 +42,7 @@ export interface WorkspaceSessionSummary {
 	messageCount: number;
 	firstMessage: string;
 	current: boolean;
+	cwd: string;
 }
 
 export interface AgentSessionSwitchOptions {
@@ -108,6 +109,7 @@ function sessionInfoToSummary(info: SessionInfo, currentSessionId: string): Work
 		messageCount: info.messageCount,
 		firstMessage: info.firstMessage,
 		current: info.id === currentSessionId,
+		cwd: info.cwd,
 	};
 }
 
@@ -269,6 +271,7 @@ export class AgentSessionRuntime {
 			messageCount: summary.messageCount,
 			firstMessage: summary.firstMessage,
 			current: true,
+			cwd: header?.cwd ?? this.cwd,
 		};
 	}
 
@@ -324,6 +327,10 @@ export class AgentSessionRuntime {
 
 	async newSession(options?: {
 		parentSession?: string;
+		/** Override the new session's cwd (e.g. a daemon-managed worktree checkout). */
+		cwd?: string;
+		/** Override the session dir (e.g. the parent workspace's default dir for worktree sessions). */
+		sessionDir?: string;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}): Promise<{ cancelled: boolean }> {
@@ -333,10 +340,11 @@ export class AgentSessionRuntime {
 		}
 
 		const previousSessionFile = this.session.sessionFile;
-		const sessionDir = this.session.sessionManager.getSessionDir();
+		const cwd = options?.cwd ?? this.cwd;
+		const sessionDir = options?.sessionDir ?? this.session.sessionManager.getSessionDir();
 		const sessionManager = this.session.sessionManager.isPersisted()
-			? SessionManager.create(this.cwd, sessionDir)
-			: SessionManager.inMemory(this.cwd);
+			? SessionManager.create(cwd, sessionDir)
+			: SessionManager.inMemory(cwd);
 		if (options?.parentSession) {
 			sessionManager.newSession({ parentSession: options.parentSession });
 		}
@@ -344,7 +352,7 @@ export class AgentSessionRuntime {
 		await this.teardownCurrent("new", sessionManager.getSessionFile());
 		this.apply(
 			await this.createRuntime({
-				cwd: this.cwd,
+				cwd,
 				agentDir: this.services.agentDir,
 				sessionManager,
 				sessionStartEvent: { type: "session_start", reason: "new", previousSessionFile },

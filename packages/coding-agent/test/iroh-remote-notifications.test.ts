@@ -8,6 +8,7 @@ import {
 	IrohRemoteAuditLogger,
 	IrohRemoteHostStateManager,
 	type IrohRemoteLiveActivityRegistration,
+	type IrohRemoteLiveActivityUpdateIntent,
 	IrohRemotePushNotificationDispatcher,
 	type IrohRemotePushRelayClient,
 	IrohRemotePushRelayHttpClient,
@@ -49,6 +50,12 @@ import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 
 function getNotifications(send: ManualIrohSendStream): Array<Record<string, unknown>> {
 	return parseWrittenObjects(send).filter((record) => record.type === "notification_request");
+}
+
+class ThrowingIrohSendStream extends ManualIrohSendStream {
+	writeAll(_bytes: Array<number>): Promise<void> {
+		throw new Error("send closed");
+	}
 }
 
 const LIVE_ACTIVITY_TOKEN_HASH = "a".repeat(64);
@@ -871,6 +878,113 @@ describe("Iroh remote notification requests", () => {
 		await expect(modePromise).resolves.toBeUndefined();
 	});
 
+	test("Live Activity updater reattaches to active runs without reusing event IDs", async () => {
+		let currentSession = createTestSession("session-one", "conversation-run");
+		const initialHandlers: Array<(event: AgentSessionEvent) => void> = [];
+		currentSession.subscribe.mockImplementation((handler: (event: AgentSessionEvent) => void) => {
+			initialHandlers.push(handler);
+			return () => {};
+		});
+		const setRebindSession = vi.fn();
+		const updates: Array<{ eventId: string; status: string }> = [];
+		const runtimeHost = {
+			get session() {
+				return currentSession;
+			},
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession,
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv } = await startIrohRpcMode(runtimeHost, currentSession, {
+			notificationDelivery: {
+				deliverNotification: vi.fn(async () => "no_push_target" as const),
+				deliverLiveActivityUpdate: vi.fn(async (update: IrohRemoteLiveActivityUpdateIntent) => {
+					updates.push({ eventId: update.eventId, status: update.contentState.status });
+					return "sent" as const;
+				}),
+			},
+			workspaceName: "volt-app",
+		});
+		const rebindSession = setRebindSession.mock.calls[0]?.[0] as (() => Promise<void>) | undefined;
+		if (!rebindSession) {
+			throw new Error("Expected runIrohRemoteRpcMode to register a session rebind callback");
+		}
+		await vi.waitFor(() => expect(initialHandlers.length).toBeGreaterThan(0));
+
+		for (const handler of initialHandlers) {
+			handler({ type: "agent_start" });
+		}
+		await vi.waitFor(() => expect(updates).toContainEqual(expect.objectContaining({ status: "running" })));
+
+		const reattachedSession = createTestSession("session-one", "conversation-run");
+		reattachedSession.isStreaming = true;
+		const reattachedHandlers: Array<(event: AgentSessionEvent) => void> = [];
+		reattachedSession.subscribe.mockImplementation((handler: (event: AgentSessionEvent) => void) => {
+			reattachedHandlers.push(handler);
+			return () => {};
+		});
+		currentSession = reattachedSession;
+		await rebindSession();
+		await vi.waitFor(() => expect(updates.filter((update) => update.status === "running")).toHaveLength(2));
+
+		for (const handler of reattachedHandlers) {
+			handler({ type: "agent_end", messages: [], willRetry: false });
+		}
+		await vi.waitFor(() => expect(updates).toContainEqual(expect.objectContaining({ status: "completed" })));
+		expect(new Set(updates.map((update) => update.eventId)).size).toBe(updates.length);
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("updates relayed session id before active Live Activity reattach delivery", async () => {
+		let currentSession = createTestSession("session-one", "run-one");
+		const setRebindSession = vi.fn();
+		let relayedSessionId = currentSession.sessionId;
+		const deliveries: Array<{ payloadSessionId: string | undefined; relayedSessionId: string }> = [];
+		const runtimeHost = {
+			get session() {
+				return currentSession;
+			},
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession,
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv } = await startIrohRpcMode(runtimeHost, currentSession, {
+			notificationDelivery: {
+				deliverNotification: vi.fn(async () => "no_push_target" as const),
+				deliverLiveActivityUpdate: vi.fn(async (update: IrohRemoteLiveActivityUpdateIntent) => {
+					deliveries.push({ payloadSessionId: update.contentState.sessionID, relayedSessionId });
+					return "sent" as const;
+				}),
+			},
+			onSessionChanged: async (session) => {
+				relayedSessionId = session.sessionId;
+			},
+			workspaceName: "volt-app",
+		});
+		const rebindSession = setRebindSession.mock.calls[0]?.[0] as (() => Promise<void>) | undefined;
+		if (!rebindSession) {
+			throw new Error("Expected runIrohRemoteRpcMode to register a session rebind callback");
+		}
+
+		const reattachedSession = createTestSession("session-two", "run-two");
+		reattachedSession.isStreaming = true;
+		currentSession = reattachedSession;
+		await rebindSession();
+
+		await vi.waitFor(() =>
+			expect(deliveries).toEqual([{ payloadSessionId: "session-two", relayedSessionId: "session-two" }]),
+		);
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
 	test("sends conversation completion notifications through the push relay when a target exists", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
@@ -924,6 +1038,50 @@ describe("Iroh remote notification requests", () => {
 
 		recv.end();
 		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("sends push completion notification when accepted prompt response cannot be written", async () => {
+		const session = createTestSession("session-one", "before-run");
+		session.prompt.mockImplementation(
+			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
+				options?.preflightResult?.(true);
+				session.leafId = "conversation-run";
+			},
+		);
+		const stateManager = createStateManagerWithClient([createEnabledPushTarget()]);
+		const relayClient = createRelayClient();
+		const dispatcher = new IrohRemotePushNotificationDispatcher({
+			clientNodeId: "paired-client",
+			relayClient,
+			retryDelayMs: 0,
+			stateManager,
+		});
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const recv = new ManualIrohRecvStream();
+		const modePromise = runIrohRemoteRpcMode(runtimeHost, {
+			disposeRuntimeOnClose: false,
+			notificationDelivery: dispatcher,
+			stream: { recv, send: new ThrowingIrohSendStream() },
+			workspacePath: "/workspace",
+		});
+		void modePromise.catch(() => {});
+		await vi.waitFor(() => expect(session.bindExtensions).toHaveBeenCalledOnce());
+
+		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
+
+		await vi.waitFor(() =>
+			expect(relayClient.sendNotification).toHaveBeenCalledWith(
+				expect.objectContaining({ eventId: "conversation:session-one:conversation-run:completed" }),
+			),
+		);
+		await expect(modePromise).rejects.toThrow("send closed");
 	});
 
 	test("streams displayed review custom messages as transcript entries after session rebind", async () => {
@@ -1481,7 +1639,18 @@ describe("Iroh remote notification requests", () => {
 			expect(state.clients[0].pushTargets?.[0]).toMatchObject({ enabled: false, updatedAt: 500 });
 			expect(state.clients[0].pushTargets?.[0]).not.toHaveProperty("liveActivity");
 		});
-		expect(getNotifications(send)).toEqual([]);
+		await vi.waitFor(() =>
+			expect(getNotifications(send)).toEqual([
+				{
+					type: "notification_request",
+					eventId: "conversation:session-one:conversation-run:completed",
+					kind: "conversation_completed",
+					title: "Volt finished",
+					body: "Your conversation is ready.",
+					sessionId: "session-one",
+				},
+			]),
+		);
 
 		recv.end();
 		await expect(modePromise).resolves.toBeUndefined();

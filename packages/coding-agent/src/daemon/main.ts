@@ -35,6 +35,7 @@ import { createDaemonLogger } from "./log.ts";
 import { type DaemonPaths, ensureDaemonDirs, getDaemonPaths } from "./paths.ts";
 import { verifyPidfileProcess } from "./process-identity.ts";
 import { VoltdStateStore } from "./state.ts";
+import { handleWorktreeControlRequest, isWorktreeControlRequest, WorktreeManager } from "./worktree-manager.ts";
 
 export interface Clock {
 	now(): number;
@@ -260,11 +261,31 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			pairedAtMs: client.pairedAt ?? 0,
 		}));
 
+	// Worktree control fallback (no iroh extension running / request not handled
+	// there): records via the shared state manager, no runtime awareness.
+	let fallbackWorktreeManager: WorktreeManager | undefined;
+	const getFallbackWorktreeManager = (): WorktreeManager => {
+		fallbackWorktreeManager ??= new WorktreeManager({
+			agentDir,
+			stateManager,
+			auditLogger,
+			flushState: () => state.flush(),
+		});
+		return fallbackWorktreeManager;
+	};
+
 	const handleRequest = async (connection: ControlConnection, request: ControlRequest): Promise<void> => {
 		for (const extension of extensionInstances) {
 			if (await extension.handleRequest?.(connection, request)) {
 				return;
 			}
+		}
+		if (isWorktreeControlRequest(request)) {
+			await handleWorktreeControlRequest(connection, request, {
+				manager: getFallbackWorktreeManager(),
+				stateManager,
+			});
+			return;
 		}
 		switch (request.type) {
 			case "status": {

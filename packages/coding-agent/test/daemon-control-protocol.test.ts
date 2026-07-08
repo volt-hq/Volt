@@ -55,6 +55,41 @@ describe("control protocol framing", () => {
 				sessionId: "s-1",
 				command: { type: "register_push_target", id: "rpc-1", args: { token: "t" } },
 			},
+			{
+				type: "relay_notification_delivery",
+				id: "16",
+				clientNodeId: "n-1",
+				workspaceName: "volt",
+				sessionId: "s-1",
+				notification: {
+					eventId: "conversation:s-1:run-1:completed",
+					kind: "conversation_completed",
+					title: "Volt finished",
+					body: "Your conversation is ready.",
+					sessionId: "s-1",
+					workspace: "volt",
+				},
+			},
+			{
+				type: "relay_live_activity_delivery",
+				id: "17",
+				clientNodeId: "n-1",
+				workspaceName: "volt",
+				sessionId: "s-1",
+				update: {
+					eventId: "live-activity:s-1:run-1:1",
+					kind: "live_activity_update",
+					activityEvent: "update",
+					contentState: {
+						status: "running",
+						statusText: "Volt is thinking",
+						recentTools: [],
+						sessionID: "s-1",
+						workspaceName: "volt",
+						updatedAtEpochSeconds: 123,
+					},
+				},
+			},
 		];
 		for (const request of requests) {
 			const decoded = roundTrip(request);
@@ -96,6 +131,7 @@ describe("control protocol framing", () => {
 				response: { type: "response", command: "register_push_target", success: true },
 				workspaceMetadata: { workspaceNames: ["volt"], workspaces: [{ name: "volt", status: "available" }] },
 			},
+			{ type: "relay_push_delivery_result", id: "10", status: "sent" },
 		];
 		for (const response of responses) {
 			const decoded = roundTrip(response);
@@ -107,6 +143,20 @@ describe("control protocol framing", () => {
 	it("rejects keep_awake_set without a boolean enabled", () => {
 		expect(isControlRequest({ type: "keep_awake_set", id: "x", enabled: "yes" })).toBe(false);
 		expect(isControlRequest({ type: "keep_awake_set", id: "x" })).toBe(false);
+	});
+
+	it("rejects malformed relay delivery messages", () => {
+		expect(
+			isControlRequest({
+				type: "relay_notification_delivery",
+				id: "x",
+				clientNodeId: "n-1",
+				workspaceName: "volt",
+				sessionId: "s-1",
+				notification: { eventId: "e-1", kind: "conversation_completed", title: "Volt finished" },
+			}),
+		).toBe(false);
+		expect(isControlResponse({ type: "relay_push_delivery_result", id: "x", status: "maybe" })).toBe(false);
 	});
 
 	it("round-trips every event type", () => {

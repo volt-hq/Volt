@@ -921,6 +921,8 @@ describe("Iroh remote core helpers", () => {
 			"register_live_activity",
 			"unregister_live_activity",
 			"unregister_workspace",
+			"create_worktree",
+			"list_worktrees",
 			"set_keep_awake",
 			"get_keep_awake",
 			"set_web_search_key",
@@ -1215,6 +1217,7 @@ describe("Iroh remote core helpers", () => {
 					},
 				],
 				workspaces: [{ name: "volt", path: stateDir, allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS }],
+				worktrees: [],
 				clients: [
 					{
 						nodeId: "client-node",
@@ -2566,6 +2569,7 @@ describe("Iroh remote core helpers", () => {
 				},
 			],
 			workspaces: [{ name: "volt", path: "/workspace" }],
+			worktrees: [],
 			clients: [
 				{
 					nodeId: "client-node",

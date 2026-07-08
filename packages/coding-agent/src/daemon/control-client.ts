@@ -24,6 +24,8 @@ export interface DaemonClientOptions {
 	socketPath: string;
 	client: ControlClientKind;
 	version: string;
+	/** Capabilities advertised in the control hello (e.g. "worktrees"). */
+	capabilities?: string[];
 	onEvent?(event: ControlEvent): void;
 	onConnectionStateChange?(state: DaemonClientConnectionState): void;
 	/** Reconnect forever with backoff (default true for TUI clients). */
@@ -193,6 +195,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 						pid: process.pid,
 						version: options.version,
 						client: options.client,
+						...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
 					}),
 				);
 			});

@@ -3,7 +3,13 @@ import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
 import { isIrohRemoteWorkspaceName } from "../core/remote/iroh/handshake.ts";
 import { sanitizeIrohRemoteOutbound } from "../core/remote/iroh/outbound-filter.ts";
+import { isIrohRemoteWorkingDirectory } from "../core/remote/iroh/protocol.ts";
 import { createIrohRemoteRpcErrorResponse } from "../core/remote/iroh/rpc-command-filter.ts";
+import {
+	handleIrohRemoteWorktreeRpcCommand,
+	IROH_REMOTE_WORKTREE_RPC_TYPES,
+	type IrohRemoteWorktreeRpcBackend,
+} from "../core/remote/iroh/worktree-rpc.ts";
 import {
 	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
 	type IrohBiStreamLike,
@@ -18,10 +24,12 @@ import {
 	getRpcResponseId,
 	type RemoteRpcCommand,
 } from "./conversation-commands.ts";
+import { listWorkspaceDirectories } from "./workspace-directory.ts";
 
 const DEFAULT_READ_LIMIT = 64 * 1024;
 
 export const WORKSPACE_UNREGISTERED_CLOSE_REASON = "workspace_unregistered";
+const LIST_WORKSPACE_DIRECTORIES_RPC_TYPE = "list_workspace_directories";
 
 export async function readLineFromIroh(
 	recv: IrohRecvStreamLike,
@@ -60,13 +68,29 @@ export async function readLineFromIroh(
 	}
 }
 
-export function getRemoteSanitizerOptions(authorization: IrohRemoteClientAuthorizationSuccess): {
+export interface RemoteSanitizerOverrides {
+	/** Remote root for the sanitizer. Nested-repo worktrees map to /workspace/<source-root>. */
+	remoteWorkspacePath?: string;
+	/** Sanitizer root override (worktree-bound streams use the worktree path). */
+	workspacePath?: string;
+	/** Extra roots (parent checkout, worktrees root) redacted to remoteWorkspacePath. */
+	additionalRedactedPaths?: string[];
+}
+
+export function getRemoteSanitizerOptions(
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	overrides: RemoteSanitizerOverrides = {},
+): {
 	remoteWorkspacePath: string;
 	workspacePath: string;
+	additionalRedactedPaths?: string[];
 } {
 	return {
-		remoteWorkspacePath: "/workspace",
-		workspacePath: authorization.workspace.path,
+		remoteWorkspacePath: overrides.remoteWorkspacePath ?? "/workspace",
+		workspacePath: overrides.workspacePath ?? authorization.workspace.path,
+		...(overrides.additionalRedactedPaths === undefined
+			? {}
+			: { additionalRedactedPaths: overrides.additionalRedactedPaths }),
 	};
 }
 
@@ -74,8 +98,9 @@ export async function writeIrohRemoteJsonLine(
 	send: IrohBiStreamLike["send"],
 	value: object,
 	authorization: IrohRemoteClientAuthorizationSuccess,
+	sanitizerOverrides: RemoteSanitizerOverrides = {},
 ): Promise<void> {
-	const sanitized = sanitizeIrohRemoteOutbound(value, getRemoteSanitizerOptions(authorization));
+	const sanitized = sanitizeIrohRemoteOutbound(value, getRemoteSanitizerOptions(authorization, sanitizerOverrides));
 	await send.writeAll(Array.from(Buffer.from(serializeJsonLine(sanitized), "utf8")));
 }
 
@@ -185,9 +210,10 @@ export async function runWorkspaceDiscoveryStream(
 	});
 }
 
-function parseWorkspaceManagementUnregisterRequest(
+function parseWorkspaceManagementWorkspaceRequest(
 	command: RemoteRpcCommand,
 	authorization: IrohRemoteClientAuthorizationSuccess,
+	allowedFields: readonly string[],
 ): { ok: true; workspaceName: string } | { ok: false; error: string } {
 	if (typeof command.workspaceName !== "string" || !isIrohRemoteWorkspaceName(command.workspaceName)) {
 		return { ok: false, error: "invalid_workspace_payload" };
@@ -195,15 +221,26 @@ function parseWorkspaceManagementUnregisterRequest(
 	if (command.workspaceName !== authorization.workspace.name) {
 		return { ok: false, error: "session_mismatch" };
 	}
+	const allowed = new Set(allowedFields);
 	for (const field of Object.keys(command)) {
-		if (field !== "id" && field !== "type" && field !== "workspaceName") {
+		if (!allowed.has(field)) {
 			return { ok: false, error: "invalid_request" };
 		}
 	}
 	return { ok: true, workspaceName: command.workspaceName };
 }
 
-/** Serve a workspaceManagement stream: unregister_workspace only. */
+function parseWorkspaceDirectoryPath(command: RemoteRpcCommand): string | undefined | { error: string } {
+	if (command.path === undefined) {
+		return undefined;
+	}
+	if (typeof command.path !== "string" || !isIrohRemoteWorkingDirectory(command.path)) {
+		return { error: "invalid_working_directory" };
+	}
+	return command.path;
+}
+
+/** Serve a workspaceManagement stream: workspace management RPCs. */
 export async function runWorkspaceManagementStream(
 	context: WorkspaceStreamContext,
 	hooks: WorkspaceStreamHooks,
@@ -215,7 +252,10 @@ export async function runWorkspaceManagementStream(
 			await writeIrohRemoteJsonLine(stream.send, parsed.response, authorization);
 			return false;
 		}
-		if (parsed.command.type !== "unregister_workspace") {
+		if (
+			parsed.command.type !== "unregister_workspace" &&
+			parsed.command.type !== LIST_WORKSPACE_DIRECTORIES_RPC_TYPE
+		) {
 			await writeIrohRemoteJsonLine(
 				stream.send,
 				createIrohRemoteRpcErrorResponse(
@@ -228,7 +268,55 @@ export async function runWorkspaceManagementStream(
 			return false;
 		}
 		const id = getRpcResponseId(parsed.command);
-		const request = parseWorkspaceManagementUnregisterRequest(parsed.command, authorization);
+		if (parsed.command.type === LIST_WORKSPACE_DIRECTORIES_RPC_TYPE) {
+			const request = parseWorkspaceManagementWorkspaceRequest(parsed.command, authorization, [
+				"id",
+				"type",
+				"workspaceName",
+				"path",
+			]);
+			if (!request.ok) {
+				await writeIrohRemoteJsonLine(
+					stream.send,
+					createIrohRemoteRpcErrorResponse(id, LIST_WORKSPACE_DIRECTORIES_RPC_TYPE, request.error),
+					authorization,
+				);
+				return false;
+			}
+			const path = parseWorkspaceDirectoryPath(parsed.command);
+			if (typeof path === "object") {
+				await writeIrohRemoteJsonLine(
+					stream.send,
+					createIrohRemoteRpcErrorResponse(id, LIST_WORKSPACE_DIRECTORIES_RPC_TYPE, path.error),
+					authorization,
+				);
+				return false;
+			}
+			const listed = await listWorkspaceDirectories(authorization.workspace.path, path);
+			if (!listed.ok) {
+				await writeIrohRemoteJsonLine(
+					stream.send,
+					createIrohRemoteRpcErrorResponse(id, LIST_WORKSPACE_DIRECTORIES_RPC_TYPE, listed.error),
+					authorization,
+				);
+				return false;
+			}
+			await writeIrohRemoteJsonLine(
+				stream.send,
+				createRpcSuccessResponse(id, LIST_WORKSPACE_DIRECTORIES_RPC_TYPE, {
+					workspaceName: request.workspaceName,
+					...(listed.currentPath === undefined ? {} : { path: listed.currentPath }),
+					directories: listed.directories,
+				}),
+				authorization,
+			);
+			return false;
+		}
+		const request = parseWorkspaceManagementWorkspaceRequest(parsed.command, authorization, [
+			"id",
+			"type",
+			"workspaceName",
+		]);
 		if (!request.ok) {
 			await writeIrohRemoteJsonLine(
 				stream.send,
@@ -275,5 +363,64 @@ export async function runWorkspaceManagementStream(
 			context.closeStream(WORKSPACE_UNREGISTERED_CLOSE_REASON);
 		}
 		return true;
+	});
+}
+
+export interface WorktreeStreamHooks {
+	auditLogger: IrohRemoteAuditLogger;
+	worktrees: IrohRemoteWorktreeRpcBackend;
+	/** Extra roots redacted on every frame of this stream (worktrees root). */
+	additionalRedactedPaths?: string[];
+}
+
+/** Serve a manage_worktrees workspaceManagement stream: create/list/remove worktrees only. */
+export async function runWorktreeManagementStream(
+	context: WorkspaceStreamContext,
+	hooks: WorktreeStreamHooks,
+): Promise<void> {
+	const { stream, authorization } = context;
+	const sanitizerOverrides = { additionalRedactedPaths: hooks.additionalRedactedPaths };
+	await runWorkspaceUtilityRpcLoop(stream, context.initialInput, async (line) => {
+		const parsed = parseRemoteRpcCommandLine(line);
+		if (!parsed.ok) {
+			await writeIrohRemoteJsonLine(stream.send, parsed.response, authorization, sanitizerOverrides);
+			return false;
+		}
+		if (!IROH_REMOTE_WORKTREE_RPC_TYPES.has(parsed.command.type)) {
+			await writeIrohRemoteJsonLine(
+				stream.send,
+				createIrohRemoteRpcErrorResponse(
+					getRpcResponseId(parsed.command),
+					parsed.command.type,
+					"unsupported_on_workspace_management_stream",
+				),
+				authorization,
+				sanitizerOverrides,
+			);
+			return false;
+		}
+		const result = await handleIrohRemoteWorktreeRpcCommand(parsed.command, {
+			authorizedWorkspaceName: authorization.workspace.name,
+			backend: hooks.worktrees,
+		});
+		if (!result.handled) {
+			return false;
+		}
+		if (parsed.command.type !== "list_worktrees") {
+			await hooks.auditLogger
+				.log({
+					type:
+						result.audit?.type ??
+						(parsed.command.type === "create_worktree" ? "worktree_created" : "worktree_removed"),
+					clientNodeId: authorization.client.nodeId,
+					workspace: authorization.workspace.name,
+					success: result.response.success,
+					...(result.response.success ? {} : { error: result.response.error }),
+					details: { source: "remote_worktree_management_stream", ...(result.audit?.details ?? {}) },
+				})
+				.catch(() => {});
+		}
+		await writeIrohRemoteJsonLine(stream.send, result.response, authorization, sanitizerOverrides);
+		return false;
 	});
 }

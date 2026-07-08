@@ -12,6 +12,8 @@ import {
 	isIrohRemoteOutcome,
 	isIrohRemoteRelayMode,
 	isIrohRemoteRelayUrls,
+	isIrohRemoteWorkingDirectory,
+	isIrohRemoteWorktreeId,
 } from "./protocol.ts";
 import type { IrohRemoteWorkspaceStatus } from "./workspace.ts";
 
@@ -21,6 +23,9 @@ export type IrohRemoteConversationTarget =
 	  }
 	| {
 			target: "new";
+			worktreeId?: string;
+			/** POSIX-style path relative to the registered workspace root. */
+			workingDirectory?: string;
 	  }
 	| {
 			target: "session";
@@ -34,6 +39,10 @@ export interface IrohRemoteConversationHandshakeMetadata {
 	sessionId: string;
 	selection: IrohRemoteConversationSelection;
 	requestedSessionId?: string;
+	/** Echoed only for worktree-bound conversations (worktrees.v1). */
+	worktreeId?: string;
+	/** POSIX-style path relative to the workspace root. Omitted for workspace root. */
+	workingDirectory?: string;
 }
 
 export interface IrohRemoteWorkspaceDiscoveryTarget {
@@ -41,7 +50,7 @@ export interface IrohRemoteWorkspaceDiscoveryTarget {
 }
 
 export interface IrohRemoteWorkspaceManagementTarget {
-	purpose: "unregister_workspace";
+	purpose: "unregister_workspace" | "manage_worktrees";
 }
 
 export interface IrohRemoteHostHandshakeMetadata {
@@ -437,18 +446,47 @@ function parseIrohRemoteHelloMode(hello: Record<string, unknown>): IrohRemoteHel
 
 function parseConversationTarget(value: unknown): IrohRemoteConversationTarget {
 	const target = expectRecordForOutcome(value, "handshake conversation", "invalid_conversation_target");
-	expectKnownFields(target, "handshake conversation", ["target", "sessionId"]);
+	expectKnownFields(target, "handshake conversation", ["target", "sessionId", "worktreeId", "workingDirectory"]);
 	const targetKind = expectStringForOutcome(
 		target.target,
 		"handshake conversation target",
 		"invalid_conversation_target",
 	);
+	// worktreeId is only accepted on target "new": resume targets derive the
+	// worktree from the persisted binding, never from the client.
+	if (targetKind !== "new" && target.worktreeId !== undefined) {
+		throw new IrohRemoteHandshakeError(
+			"invalid_conversation_target",
+			`handshake conversation ${targetKind} target must not include worktreeId`,
+		);
+	}
+	if (targetKind !== "new" && target.workingDirectory !== undefined) {
+		throw new IrohRemoteHandshakeError(
+			"invalid_conversation_target",
+			`handshake conversation ${targetKind} target must not include workingDirectory`,
+		);
+	}
 	if (targetKind === "last" || targetKind === "new") {
 		if (target.sessionId !== undefined) {
 			throw new IrohRemoteHandshakeError(
 				"invalid_conversation_target",
 				`handshake conversation ${targetKind} target must not include sessionId`,
 			);
+		}
+		if (targetKind === "new") {
+			const worktreeId =
+				target.worktreeId === undefined
+					? undefined
+					: expectWorktreeId(target.worktreeId, "handshake conversation worktreeId");
+			const workingDirectory =
+				target.workingDirectory === undefined
+					? undefined
+					: expectWorkingDirectory(target.workingDirectory, "handshake conversation workingDirectory");
+			return {
+				target: "new",
+				...(worktreeId === undefined ? {} : { worktreeId }),
+				...(workingDirectory === undefined ? {} : { workingDirectory }),
+			};
 		}
 		return { target: targetKind };
 	}
@@ -483,7 +521,7 @@ function parseWorkspaceManagementTarget(value: unknown): IrohRemoteWorkspaceMana
 		"handshake workspaceManagement purpose",
 		"invalid_conversation_target",
 	);
-	if (purpose !== "unregister_workspace") {
+	if (purpose !== "unregister_workspace" && purpose !== "manage_worktrees") {
 		throw new IrohRemoteHandshakeError("invalid_conversation_target", "unsupported workspaceManagement purpose");
 	}
 	return { purpose };
@@ -520,6 +558,28 @@ function expectRemoteSessionId(value: unknown, label: string): string {
 		);
 	}
 	return sessionId;
+}
+
+function expectWorktreeId(value: unknown, label: string): string {
+	const worktreeId = expectStringForOutcome(value, label, "invalid_conversation_target");
+	if (!isIrohRemoteWorktreeId(worktreeId)) {
+		throw new IrohRemoteHandshakeError(
+			"invalid_conversation_target",
+			`${label} must match lowercase worktree id syntax`,
+		);
+	}
+	return worktreeId;
+}
+
+function expectWorkingDirectory(value: unknown, label: string): string {
+	const workingDirectory = expectStringForOutcome(value, label, "invalid_conversation_target");
+	if (!isIrohRemoteWorkingDirectory(workingDirectory)) {
+		throw new IrohRemoteHandshakeError(
+			"invalid_conversation_target",
+			`${label} must be a relative POSIX path inside the workspace`,
+		);
+	}
+	return workingDirectory;
 }
 
 function expectOptionalRemoteSessionId(value: unknown, label: string): string | undefined {
@@ -718,16 +778,28 @@ function parseConversationHandshakeMetadata(value: unknown): IrohRemoteConversat
 		"sessionId",
 		"selection",
 		"requestedSessionId",
+		"worktreeId",
+		"workingDirectory",
 	]);
 	const requestedSessionId = expectOptionalRemoteSessionId(
 		metadata.requestedSessionId,
 		"handshake response conversation requestedSessionId",
+	);
+	const worktreeId = expectOptionalWorktreeIdForResponse(
+		metadata.worktreeId,
+		"handshake response conversation worktreeId",
+	);
+	const workingDirectory = expectOptionalWorkingDirectoryForResponse(
+		metadata.workingDirectory,
+		"handshake response conversation workingDirectory",
 	);
 	const conversation: IrohRemoteConversationHandshakeMetadata = {
 		target: expectConversationTargetKind(metadata.target, "handshake response conversation target"),
 		sessionId: expectRemoteSessionIdForResponse(metadata.sessionId, "handshake response conversation sessionId"),
 		selection: expectConversationSelection(metadata.selection, "handshake response conversation selection"),
 		...(requestedSessionId === undefined ? {} : { requestedSessionId }),
+		...(worktreeId === undefined ? {} : { worktreeId }),
+		...(workingDirectory === undefined ? {} : { workingDirectory }),
 	};
 	assertConversationTargetSelection(conversation);
 	return conversation;
@@ -778,12 +850,32 @@ function assertConversationTargetSelection(conversation: IrohRemoteConversationH
 	}
 }
 
+function expectOptionalWorkingDirectoryForResponse(value: unknown, label: string): string | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (!isIrohRemoteWorkingDirectory(value)) {
+		throw new Error(`${label} must be a relative POSIX path inside the workspace`);
+	}
+	return value;
+}
+
 function expectRemoteSessionIdForResponse(value: unknown, label: string): string {
 	const sessionId = expectString(value, label);
 	if (!isIrohRemoteSessionId(sessionId)) {
 		throw new Error(`${label} must match lowercase remote session ID syntax`);
 	}
 	return sessionId;
+}
+
+function expectOptionalWorktreeIdForResponse(value: unknown, label: string): string | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (!isIrohRemoteWorktreeId(value)) {
+		throw new Error(`${label} must match lowercase worktree id syntax`);
+	}
+	return value;
 }
 
 function parseWorkspaceDiscoveryResponseMetadata(value: unknown): IrohRemoteWorkspaceDiscoveryTarget {
@@ -798,8 +890,8 @@ function parseWorkspaceDiscoveryResponseMetadata(value: unknown): IrohRemoteWork
 function parseWorkspaceManagementResponseMetadata(value: unknown): IrohRemoteWorkspaceManagementTarget {
 	const metadata = expectRecord(value, "handshake response workspaceManagement");
 	expectKnownResponseFields(metadata, "handshake response workspaceManagement", ["purpose"]);
-	if (metadata.purpose !== "unregister_workspace") {
-		throw new Error("handshake response workspaceManagement purpose must be unregister_workspace");
+	if (metadata.purpose !== "unregister_workspace" && metadata.purpose !== "manage_worktrees") {
+		throw new Error("handshake response workspaceManagement purpose must be a supported management purpose");
 	}
-	return { purpose: "unregister_workspace" };
+	return { purpose: metadata.purpose };
 }

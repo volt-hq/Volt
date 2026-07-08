@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
 import { handleIrohRemoteDeviceLogUploadRpcCommand } from "../core/remote/iroh/device-log-rpc.ts";
@@ -18,10 +19,17 @@ import {
 	handleIrohRemoteWorkspaceUnregisterRpcCommand,
 	IROH_REMOTE_UNREGISTER_WORKSPACE_RPC_TYPE,
 } from "../core/remote/iroh/workspace-rpc.ts";
+import {
+	handleIrohRemoteWorktreeRpcCommand,
+	IROH_REMOTE_CREATE_WORKTREE_RPC_TYPE,
+	IROH_REMOTE_LIST_WORKTREES_RPC_TYPE,
+	type IrohRemoteWorktreeRpcBackend,
+} from "../core/remote/iroh/worktree-rpc.ts";
 import { extractMessageImages, projectMessageImages } from "../core/rpc/transcript.ts";
 import type { RpcKeepAwakeStatus } from "../core/rpc/types.ts";
 import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../core/session-manager.ts";
 import type { KeepAwakeStatus } from "./keep-awake.ts";
+import { getRegisteredWorkingDirectoryForWorktree } from "./worktree-manager.ts";
 
 export const INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES: ReadonlySet<string> = new Set([
 	"new_session",
@@ -34,7 +42,12 @@ export const INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES: ReadonlySet<string> 
  * these are rejected with `lease_draining` so the drain converges; read-only
  * commands and abort pass through.
  */
-export const TURN_INITIATING_RPC_TYPES: ReadonlySet<string> = new Set(["prompt", "invoke_ui_action"]);
+export const TURN_INITIATING_RPC_TYPES: ReadonlySet<string> = new Set([
+	"prompt",
+	"invoke_ui_action",
+	"steer",
+	"follow_up",
+]);
 
 export const LEASE_DRAINING_RETRY_AFTER_MS = 1000;
 
@@ -68,6 +81,10 @@ export interface RemoteSessionListEntry {
 	createdAt: string;
 	updatedAt: string;
 	messageCount: number;
+	/** Present when the session is bound to a daemon-managed worktree (worktrees.v1). */
+	worktreeId?: string;
+	/** POSIX-style path relative to the registered workspace root. Omitted for root. */
+	workingDirectory?: string;
 }
 
 export interface RemoteSessionListCursorEntry {
@@ -92,6 +109,7 @@ export interface ConversationCommandRuntime {
 			modifiedAt: string;
 			messageCount: number;
 			firstMessage: string;
+			cwd?: string;
 		}>
 	>;
 }
@@ -120,6 +138,12 @@ export interface ConversationCommandContext {
 		set(apiKey: string | null): void;
 		readonly configured: boolean;
 	};
+	/**
+	 * Worktree RPC backend for the stream-bound workspace (worktrees.v1);
+	 * absent when no daemon owns the host (create/list_worktrees then fail
+	 * with unsupported_remote_command).
+	 */
+	createWorktreeBackend?: (workspace: { name: string; path: string }) => IrohRemoteWorktreeRpcBackend;
 }
 
 export function createLeaseDrainingRpcErrorResponse(command: RemoteRpcCommand): Record<string, unknown> {
@@ -948,14 +972,38 @@ interface RemoteSessionSummaryInput {
 	createdAt: string | Date;
 	updatedAt: string | Date;
 	messageCount: number;
+	cwd?: string;
+}
+
+function getRelativeWorkingDirectory(rootPath: string, cwd: string | undefined): string | null | undefined {
+	if (!cwd) {
+		return undefined;
+	}
+	const root = resolve(rootPath);
+	const child = resolve(cwd);
+	const relativePath = relative(root, child);
+	if (relativePath === "" || relativePath === ".") {
+		return undefined;
+	}
+	if (relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+		return null;
+	}
+	return relativePath.split(sep).join("/");
+}
+
+interface RemoteSessionSummary {
+	sortUpdatedAtMs: number;
+	session: RemoteSessionListEntry;
+	cwd?: string;
 }
 
 function createRemoteSessionSummary(
 	input: RemoteSessionSummaryInput,
 	authorization: IrohRemoteClientAuthorizationSuccess,
-): { sortUpdatedAtMs: number; session: RemoteSessionListEntry } {
+): RemoteSessionSummary {
 	const createdAt = toRemoteSessionTimestamp(input.createdAt);
 	const updatedAt = toRemoteSessionTimestamp(input.updatedAt);
+	const workingDirectory = getRelativeWorkingDirectory(authorization.workspace.path, input.cwd);
 	return {
 		sortUpdatedAtMs: getRemoteSessionTimestampMs(updatedAt),
 		session: {
@@ -964,14 +1012,13 @@ function createRemoteSessionSummary(
 			createdAt,
 			updatedAt,
 			messageCount: input.messageCount,
+			...(workingDirectory === undefined || workingDirectory === null ? {} : { workingDirectory }),
 		},
+		...(input.cwd === undefined ? {} : { cwd: input.cwd }),
 	};
 }
 
-function sortRemoteSessionSummaries(
-	left: { sortUpdatedAtMs: number; session: RemoteSessionListEntry },
-	right: { sortUpdatedAtMs: number; session: RemoteSessionListEntry },
-): number {
+function sortRemoteSessionSummaries(left: RemoteSessionSummary, right: RemoteSessionSummary): number {
 	return right.sortUpdatedAtMs - left.sortUpdatedAtMs || left.session.sessionId.localeCompare(right.session.sessionId);
 }
 
@@ -979,41 +1026,68 @@ export async function listRemoteWorkspaceSessionSummaries(
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	context: ConversationCommandContext,
 	runtime?: ConversationCommandRuntime,
-): Promise<Array<{ sortUpdatedAtMs: number; session: RemoteSessionListEntry }>> {
-	const summaries =
-		runtime === undefined
-			? (
-					await SessionManager.list(
-						authorization.workspace.path,
-						getDefaultSessionDir(authorization.workspace.path, context.agentDir),
-					)
-				).map((info) =>
-					createRemoteSessionSummary(
-						{
-							sessionId: info.id,
-							title: info.name ?? info.firstMessage,
-							createdAt: info.created,
-							updatedAt: info.modified,
-							messageCount: info.messageCount,
-						},
-						authorization,
-					),
-				)
-			: (await runtime.listSessions()).map((summary) =>
-					createRemoteSessionSummary(
-						{
-							sessionId: summary.sessionId,
-							title: summary.sessionName ?? summary.firstMessage,
-							createdAt: summary.createdAt,
-							updatedAt: summary.modifiedAt,
-							messageCount: summary.messageCount,
-						},
-						authorization,
-					),
-				);
-	const bySessionId = new Map<string, { sortUpdatedAtMs: number; session: RemoteSessionListEntry }>();
-	for (const summary of summaries) {
-		bySessionId.set(summary.session.sessionId, summary);
+): Promise<RemoteSessionSummary[]> {
+	const bySessionId = new Map<string, RemoteSessionSummary>();
+	if (runtime === undefined || context.agentDir !== undefined) {
+		for (const info of await SessionManager.list(
+			authorization.workspace.path,
+			getDefaultSessionDir(authorization.workspace.path, context.agentDir),
+		)) {
+			const summary = createRemoteSessionSummary(
+				{
+					sessionId: info.id,
+					title: info.name ?? info.firstMessage,
+					createdAt: info.created,
+					updatedAt: info.modified,
+					messageCount: info.messageCount,
+					cwd: info.cwd,
+				},
+				authorization,
+			);
+			bySessionId.set(summary.session.sessionId, summary);
+		}
+	}
+	if (runtime !== undefined) {
+		for (const liveSummary of await runtime.listSessions()) {
+			const summary = createRemoteSessionSummary(
+				{
+					sessionId: liveSummary.sessionId,
+					title: liveSummary.sessionName ?? liveSummary.firstMessage,
+					createdAt: liveSummary.createdAt,
+					updatedAt: liveSummary.modifiedAt,
+					messageCount: liveSummary.messageCount,
+					cwd: liveSummary.cwd,
+				},
+				authorization,
+			);
+			bySessionId.set(summary.session.sessionId, summary);
+		}
+	}
+	// Worktree attribution (worktrees.v1): join the persisted session bindings so
+	// clients can badge worktree-bound sessions without a separate list_worktrees
+	// round trip. Ids only — checkout paths never reach the wire.
+	try {
+		for (const worktree of await context.stateManager.listWorktrees(authorization.workspace.name)) {
+			for (const sessionId of worktree.sessionIds) {
+				const summary = bySessionId.get(sessionId);
+				if (summary) {
+					summary.session.worktreeId = worktree.id;
+					const worktreeRelativeDirectory = getRelativeWorkingDirectory(worktree.path, summary.cwd);
+					if (worktreeRelativeDirectory === null) {
+						delete summary.session.workingDirectory;
+						continue;
+					}
+					const workingDirectory = getRegisteredWorkingDirectoryForWorktree(worktree, worktreeRelativeDirectory);
+					if (workingDirectory === undefined) {
+						delete summary.session.workingDirectory;
+					} else {
+						summary.session.workingDirectory = workingDirectory;
+					}
+				}
+			}
+		}
+	} catch {
+		// Attribution is best-effort; the session list itself stays authoritative.
 	}
 	return Array.from(bySessionId.values()).sort(sortRemoteSessionSummaries);
 }
@@ -1434,6 +1508,34 @@ export async function handleRemoteHostRpcCommand(
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	context: ConversationCommandContext,
 ): Promise<object | undefined> {
+	// create_worktree / list_worktrees are accepted on conversation streams so a
+	// phone can spin up a parallel isolated session without opening a separate
+	// manage_worktrees stream. remove_worktree stays management-stream-only (a
+	// destructive op keeps the narrower surface); the passthrough filter and the
+	// relay command set never admit it here.
+	if (command.type === IROH_REMOTE_CREATE_WORKTREE_RPC_TYPE || command.type === IROH_REMOTE_LIST_WORKTREES_RPC_TYPE) {
+		const backend = context.createWorktreeBackend?.(authorization.workspace);
+		if (!backend) {
+			return createIrohRemoteRpcErrorResponse(getRpcResponseId(command), command.type, "unsupported_remote_command");
+		}
+		const worktreeResult = await handleIrohRemoteWorktreeRpcCommand(command, {
+			authorizedWorkspaceName: authorization.workspace.name,
+			backend,
+		});
+		if (!worktreeResult.handled) {
+			return undefined;
+		}
+		if (worktreeResult.audit) {
+			await logAudit(context.auditLogger, {
+				type: worktreeResult.audit.type,
+				clientNodeId: authorization.client.nodeId,
+				workspace: authorization.workspace.name,
+				success: true,
+				details: { ...worktreeResult.audit.details, source: "remote_rpc" },
+			});
+		}
+		return worktreeResult.response;
+	}
 	if (command.type === IROH_REMOTE_UNREGISTER_WORKSPACE_RPC_TYPE) {
 		// Conversation and relay unregister is scoped to the stream-bound workspace:
 		// the documented `workspaceName` must be present and equal the authorized

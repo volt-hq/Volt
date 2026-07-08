@@ -1,10 +1,21 @@
 import { basename, resolve } from "node:path";
 import type { Duplex } from "node:stream";
 import { VERSION } from "../../config.ts";
+import type {
+	IrohRemoteLiveActivityUpdateIntent,
+	IrohRemotePushNotificationDeliveryStatus,
+	IrohRemotePushNotificationIntent,
+} from "../../core/remote/iroh/push.ts";
 import { createDaemonClient, type DaemonClient } from "../../daemon/control-client.ts";
-import type { ControlEvent, RelayPreamble } from "../../daemon/control-protocol.ts";
+import {
+	CONTROL_WORKTREES_CAPABILITY,
+	type ControlEvent,
+	type ControlWorktreeStatus,
+	type RelayPreamble,
+} from "../../daemon/control-protocol.ts";
 import { getDaemonSocketPath } from "../../daemon/paths.ts";
-import { ensureDaemonRunning, probeDaemon } from "../../daemon/spawn.ts";
+import { type EnsureDaemonResult, ensureDaemonRunning, probeDaemon } from "../../daemon/spawn.ts";
+import { getWorktreesRoot } from "../../daemon/worktree-manager.ts";
 
 export type DaemonAttachConnectionState = "connected" | "reconnecting" | "gone" | "disabled";
 
@@ -38,6 +49,19 @@ export interface RelayRpcForwardResult {
 	workspaceMetadata?: { workspaceNames: string[]; workspaces: Array<{ name: string; status: string }> };
 }
 
+export interface RelayNotificationDeliveryForwarder {
+	deliverNotification(
+		clientNodeId: string,
+		sessionId: string,
+		notification: IrohRemotePushNotificationIntent,
+	): Promise<IrohRemotePushNotificationDeliveryStatus>;
+	deliverLiveActivityUpdate(
+		clientNodeId: string,
+		sessionId: string,
+		update: IrohRemoteLiveActivityUpdateIntent,
+	): Promise<IrohRemotePushNotificationDeliveryStatus>;
+}
+
 /**
  * TUI-side daemon integration façade. Every method resolves successfully as a
  * no-op when the daemon is off or unreachable: InteractiveMode never throws or
@@ -59,6 +83,8 @@ export interface DaemonAttach {
 		sessionId: string,
 		command: Record<string, unknown> & { type: string },
 	): Promise<RelayRpcForwardResult | undefined>;
+	/** Deliver relayed completion pushes and Live Activity APNs through the daemon-owned push backend. */
+	relayNotificationDelivery: RelayNotificationDeliveryForwarder;
 	/** Viewer feed subscription (drain overlay). */
 	viewerSubscribe(viewerFeedId: string): Promise<void>;
 	viewerUnsubscribe(viewerFeedId: string): Promise<void>;
@@ -76,6 +102,168 @@ export interface DaemonAttach {
 
 const NOOP_OUTCOME: AcquireOutcome = { kind: "noop" };
 
+/**
+ * Resolve the registered workspace for a cwd against the daemon: longest
+ * path-prefix match first, then (§5.2.2) a worktree_resolve lookup so a TUI
+ * launched inside a daemon-managed worktree binds to the PARENT workspace
+ * instead of auto-registering a bogus workspace under ~/.volt/agent/worktrees.
+ * Only when both miss is the cwd auto-registered.
+ */
+export async function resolveDaemonWorkspaceForCwd(
+	client: Pick<DaemonClient, "request">,
+	cwd: string,
+	log: (message: string) => void = () => {},
+): Promise<{ name: string; path: string } | undefined> {
+	const status = await client.request({ type: "status" });
+	if (status.type !== "status_result") {
+		return undefined;
+	}
+	const resolvedCwd = resolve(cwd);
+	const match = status.workspaces
+		.filter((workspace) => resolvedCwd === workspace.path || resolvedCwd.startsWith(`${workspace.path}/`))
+		.sort((left, right) => right.path.length - left.path.length)[0];
+	if (match) {
+		return { name: match.name, path: match.path };
+	}
+	// A cwd inside a daemon-managed worktree belongs to the worktree's parent
+	// workspace; auto-registering it would split lease keys from the daemon's
+	// conversations for the same sessions.
+	try {
+		const resolved = await client.request({ type: "worktree_resolve", path: resolvedCwd });
+		if (resolved.type === "worktree_resolve_result") {
+			return { name: resolved.workspaceName, path: resolved.workspacePath };
+		}
+	} catch {
+		// Old daemon (unknown request) or transient failure: fall through.
+	}
+	// Auto-register the cwd so phones can reach sessions opened here.
+	const takenNames = new Set(status.workspaces.map((workspace) => workspace.name));
+	const base = basename(resolvedCwd) || "workspace";
+	let candidate = base;
+	for (let suffix = 2; takenNames.has(candidate); suffix++) {
+		candidate = `${base}-${suffix}`;
+	}
+	const registered = await client.request({ type: "workspace_register", name: candidate, path: resolvedCwd });
+	if (registered.type === "ok") {
+		log(`registered workspace ${candidate} -> ${resolvedCwd}`);
+		return { name: candidate, path: resolvedCwd };
+	}
+	return undefined;
+}
+
+/**
+ * Sanitizer roots for serving a relayed conversation from the TUI: a
+ * worktree-bound conversation sanitizes with the worktree checkout as the
+ * root, and the parent checkout plus the worktrees root must ALSO redact
+ * (bash output like `git worktree list` prints both). §5.2.3.
+ */
+export function getRelayServingSanitizerOptions(
+	authorization: RelayPreamble["authorization"],
+	agentDir: string,
+): { remoteWorkspacePath?: string; workspacePath: string; additionalRedactedPaths?: string[] } {
+	if (authorization.worktreePath === undefined) {
+		return { workspacePath: authorization.workspacePath };
+	}
+	return {
+		...(authorization.worktreeSourceRootRelativePath === undefined
+			? {}
+			: { remoteWorkspacePath: `/workspace/${authorization.worktreeSourceRootRelativePath}` }),
+		workspacePath: authorization.worktreePath,
+		additionalRedactedPaths: [authorization.workspacePath, getWorktreesRoot(agentDir)],
+	};
+}
+
+export interface DaemonWorktreeControl {
+	workspaceName: string;
+	workspacePath: string;
+	listWorktrees(): Promise<ControlWorktreeStatus[]>;
+	createWorktree(name?: string): Promise<{ ok: true; worktree: ControlWorktreeStatus } | { ok: false; error: string }>;
+	/** Best-effort: records the session→worktree binding in daemon state. */
+	bindSession(worktreeId: string, sessionId: string): Promise<boolean>;
+	close(): Promise<void>;
+}
+
+export interface OpenDaemonWorktreeControlOptions {
+	cwd: string;
+	agentDir: string;
+	/** Injectable for tests; defaults to ensureDaemonRunning. */
+	ensureDaemon?: (agentDir: string) => Promise<EnsureDaemonResult>;
+}
+
+/**
+ * Control-plane handle for the TUI /worktree command (§5.2.1): ensures the
+ * daemon is running, resolves (or registers) the parent workspace for the
+ * cwd, and exposes worktree list/create/bind over the control socket.
+ */
+export async function openDaemonWorktreeControl(
+	options: OpenDaemonWorktreeControlOptions,
+): Promise<{ ok: true; control: DaemonWorktreeControl } | { ok: false; error: string }> {
+	const ensureDaemon = options.ensureDaemon ?? ensureDaemonRunning;
+	let ensured: EnsureDaemonResult;
+	try {
+		ensured = await ensureDaemon(options.agentDir);
+	} catch (error) {
+		return { ok: false, error: error instanceof Error ? error.message : String(error) };
+	}
+	if (!ensured.healthy) {
+		return { ok: false, error: `voltd is not available (${ensured.state}); try \`volt daemon start\`` };
+	}
+	const client = createDaemonClient({
+		socketPath: ensured.socketPath ?? getDaemonSocketPath(options.agentDir),
+		client: "tui",
+		version: VERSION,
+		reconnect: false,
+		capabilities: [CONTROL_WORKTREES_CAPABILITY],
+	});
+	try {
+		await client.connect();
+		const workspace = await resolveDaemonWorkspaceForCwd(client, options.cwd);
+		if (!workspace) {
+			await client.close();
+			return { ok: false, error: "could not resolve or register a workspace for the current directory" };
+		}
+		const control: DaemonWorktreeControl = {
+			workspaceName: workspace.name,
+			workspacePath: workspace.path,
+			async listWorktrees() {
+				const response = await client.request({ type: "worktree_list", workspaceName: workspace.name });
+				return response.type === "worktrees_result" ? response.worktrees : [];
+			},
+			async createWorktree(name?: string) {
+				const response = await client.request({
+					type: "worktree_create",
+					workspaceName: workspace.name,
+					...(name === undefined ? {} : { worktreeName: name }),
+				});
+				if (response.type === "worktree_result") {
+					return { ok: true, worktree: response.worktree };
+				}
+				const error =
+					response.type === "error" ? `${response.code}: ${response.message}` : "unexpected daemon response";
+				return { ok: false, error };
+			},
+			async bindSession(worktreeId: string, sessionId: string) {
+				try {
+					const response = await client.request({
+						type: "worktree_bind",
+						workspaceName: workspace.name,
+						worktreeId,
+						sessionId,
+					});
+					return response.type === "ok";
+				} catch {
+					return false;
+				}
+			},
+			close: () => client.close(),
+		};
+		return { ok: true, control };
+	} catch (error) {
+		await client.close().catch(() => {});
+		return { ok: false, error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
 export function createDisabledDaemonAttach(): DaemonAttach {
 	return {
 		async start() {},
@@ -86,6 +274,14 @@ export function createDisabledDaemonAttach(): DaemonAttach {
 		async rekey() {},
 		async forwardRelayRpc() {
 			return undefined;
+		},
+		relayNotificationDelivery: {
+			async deliverNotification() {
+				return "failed";
+			},
+			async deliverLiveActivityUpdate() {
+				return "failed";
+			},
 		},
 		async viewerSubscribe() {},
 		async viewerUnsubscribe() {},
@@ -198,29 +394,9 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 			if (!activeClient) {
 				return;
 			}
-			const status = await activeClient.request({ type: "status" });
-			if (status.type !== "status_result") {
-				return;
-			}
-			const cwd = resolve(options.cwd);
-			const match = status.workspaces
-				.filter((workspace) => cwd === workspace.path || cwd.startsWith(`${workspace.path}/`))
-				.sort((left, right) => right.path.length - left.path.length)[0];
-			if (match) {
-				resolvedWorkspaceName = match.name;
-				return;
-			}
-			// Auto-register the cwd so phones can reach sessions opened here.
-			const takenNames = new Set(status.workspaces.map((workspace) => workspace.name));
-			const base = basename(cwd) || "workspace";
-			let candidate = base;
-			for (let suffix = 2; takenNames.has(candidate); suffix++) {
-				candidate = `${base}-${suffix}`;
-			}
-			const registered = await activeClient.request({ type: "workspace_register", name: candidate, path: cwd });
-			if (registered.type === "ok") {
-				resolvedWorkspaceName = candidate;
-				log(`registered workspace ${candidate} -> ${cwd}`);
+			const workspace = await resolveDaemonWorkspaceForCwd(activeClient, options.cwd, log);
+			if (workspace) {
+				resolvedWorkspaceName = workspace.name;
 			}
 		})().finally(() => {
 			resolvingWorkspace = undefined;
@@ -266,6 +442,7 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 					socketPath: socketPath ?? getDaemonSocketPath(options.agentDir),
 					client: "tui",
 					version: VERSION,
+					capabilities: [CONTROL_WORKTREES_CAPABILITY],
 					reconnect: true,
 					onEvent: (event) => {
 						if (event.type === "relay_offer") {
@@ -372,6 +549,46 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 			} catch {
 				return undefined;
 			}
+		},
+		relayNotificationDelivery: {
+			async deliverNotification(clientNodeId, sessionId, notification) {
+				const workspaceName = resolvedWorkspaceName;
+				const activeClient = client;
+				if (!activeClient || !workspaceName) {
+					return "failed";
+				}
+				try {
+					const response = await activeClient.request({
+						type: "relay_notification_delivery",
+						clientNodeId,
+						workspaceName,
+						sessionId,
+						notification,
+					});
+					return response.type === "relay_push_delivery_result" ? response.status : "failed";
+				} catch {
+					return "failed";
+				}
+			},
+			async deliverLiveActivityUpdate(clientNodeId, sessionId, update) {
+				const workspaceName = resolvedWorkspaceName;
+				const activeClient = client;
+				if (!activeClient || !workspaceName) {
+					return "failed";
+				}
+				try {
+					const response = await activeClient.request({
+						type: "relay_live_activity_delivery",
+						clientNodeId,
+						workspaceName,
+						sessionId,
+						update,
+					});
+					return response.type === "relay_push_delivery_result" ? response.status : "failed";
+				} catch {
+					return "failed";
+				}
+			},
 		},
 		async viewerSubscribe(viewerFeedId: string) {
 			try {

@@ -38,7 +38,10 @@ export interface AgentSessionRuntimeDiagnostic {
  * reach this function, so later cwd switches do not reinterpret them.
  */
 export interface CreateAgentSessionServicesOptions {
+	/** Runtime working directory for tools and session metadata. */
 	cwd: string;
+	/** Project/config root for .volt resources. Defaults to cwd. */
+	projectCwd?: string;
 	agentDir?: string;
 	authStorage?: AuthStorage;
 	settingsManager?: SettingsManager;
@@ -79,6 +82,7 @@ export interface CreateAgentSessionFromServicesOptions {
  */
 export interface AgentSessionServices {
 	cwd: string;
+	projectCwd: string;
 	agentDir: string;
 	authStorage: AuthStorage;
 	settingsManager: SettingsManager;
@@ -144,14 +148,15 @@ export async function createAgentSessionServices(
 	options: CreateAgentSessionServicesOptions,
 ): Promise<AgentSessionServices> {
 	const cwd = resolvePath(options.cwd);
+	const projectCwd = resolvePath(options.projectCwd ?? cwd);
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getAgentDir();
 	const authStorage = options.authStorage ?? AuthStorage.create(join(agentDir, "auth.json"));
 	const settingsManager =
-		options.settingsManager ?? SettingsManager.create(cwd, agentDir, { profile: options.profile });
+		options.settingsManager ?? SettingsManager.create(projectCwd, agentDir, { profile: options.profile });
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, join(agentDir, "models.json"));
 	const resourceLoader = new DefaultResourceLoader({
 		...(options.resourceLoaderOptions ?? {}),
-		cwd,
+		cwd: projectCwd,
 		agentDir,
 		settingsManager,
 	});
@@ -175,6 +180,7 @@ export async function createAgentSessionServices(
 
 	return {
 		cwd,
+		projectCwd,
 		agentDir,
 		authStorage,
 		settingsManager,
@@ -196,6 +202,7 @@ export async function createAgentSessionFromServices(
 ): Promise<CreateAgentSessionResult> {
 	return createAgentSession({
 		cwd: options.services.cwd,
+		projectCwd: options.services.projectCwd,
 		agentDir: options.services.agentDir,
 		authStorage: options.services.authStorage,
 		settingsManager: options.services.settingsManager,
