@@ -88,6 +88,14 @@ export type ControlRequest =
 			branch?: string;
 			baseRef?: string;
 	  }
+	| {
+			type: "worktree_adopt";
+			id: string;
+			workspaceName: string;
+			path: string;
+			worktreeName?: string;
+			baseRef?: string;
+	  }
 	| { type: "worktree_list"; id: string; workspaceName?: string }
 	| { type: "worktree_remove"; id: string; workspaceName: string; worktreeId: string; force?: boolean }
 	| { type: "worktree_prune"; id: string; workspaceName?: string }
@@ -579,6 +587,13 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 				typeof value.workspaceName === "string" &&
 				(value.worktreeName === undefined || typeof value.worktreeName === "string") &&
 				(value.branch === undefined || typeof value.branch === "string") &&
+				(value.baseRef === undefined || typeof value.baseRef === "string")
+			);
+		case "worktree_adopt":
+			return (
+				typeof value.workspaceName === "string" &&
+				typeof value.path === "string" &&
+				(value.worktreeName === undefined || typeof value.worktreeName === "string") &&
 				(value.baseRef === undefined || typeof value.baseRef === "string")
 			);
 		case "worktree_list":

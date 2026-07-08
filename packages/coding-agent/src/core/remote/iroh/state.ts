@@ -19,7 +19,7 @@ export interface IrohRemoteWorkspaceWorktree {
 	/** ^[a-z0-9][a-z0-9._-]{0,63}$ — unique per workspace. */
 	id: string;
 	workspaceName: string;
-	/** Absolute checkout path under the worktrees root; host-local, never sent on the wire. */
+	/** Absolute checkout path; host-local, never sent on the wire. */
 	path: string;
 	/** Registered-workspace-relative git repo root this worktree was created from. Omitted for the workspace root. */
 	sourceRootRelativePath?: string;

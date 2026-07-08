@@ -123,6 +123,79 @@ describe("worktree manager (fake git)", () => {
 		expect(records[0]?.id).toBe("fix-login");
 	});
 
+	it("adopts an existing git worktree without creating a checkout", async () => {
+		const externalCheckout = join(agentDir, "manual-worktree");
+		mkdirSync(externalCheckout, { recursive: true });
+		const realWorkspaceDir = realpathSync(workspaceDir);
+		const realExternalCheckout = realpathSync(externalCheckout);
+		const git = createFakeGit((args, cwd) => {
+			if (args[0] === "rev-parse" && args[1] === "--show-toplevel") {
+				expect(cwd).toBe(resolve(externalCheckout));
+				return { ok: true, stdout: `${realExternalCheckout}\n` };
+			}
+			if (args[0] === "worktree" && args[1] === "list") {
+				return {
+					ok: true,
+					stdout:
+						`worktree ${realWorkspaceDir}\nHEAD abc123\nbranch refs/heads/main\n\n` +
+						`worktree ${realExternalCheckout}\nHEAD def456\nbranch refs/heads/feature/manual\n`,
+				};
+			}
+			if (args[0] === "symbolic-ref") {
+				return { ok: true, stdout: "main\n" };
+			}
+			return { ok: true };
+		});
+		const manager = createManager(git.runGit);
+
+		const adopted = await manager.adopt(workspace, { path: externalCheckout, id: "manual" });
+
+		expect(adopted.ok).toBe(true);
+		if (!adopted.ok) {
+			return;
+		}
+		expect(adopted.worktree).toMatchObject({
+			id: "manual",
+			workspaceName: "repo",
+			path: realExternalCheckout,
+			branch: "feature/manual",
+			baseRef: "main",
+			sessionIds: [],
+		});
+		expect(git.calls.map((call) => call.args[0])).toEqual(["rev-parse", "worktree", "symbolic-ref"]);
+		expect(flushState).toHaveBeenCalledTimes(1);
+		expect(await stateManager.listWorktrees("repo")).toHaveLength(1);
+	});
+
+	it("rejects adopt when the worktree source checkout is not registered", async () => {
+		const externalCheckout = join(agentDir, "manual-worktree");
+		const sourceCheckout = join(agentDir, "other-source");
+		mkdirSync(externalCheckout, { recursive: true });
+		mkdirSync(sourceCheckout, { recursive: true });
+		const realExternalCheckout = realpathSync(externalCheckout);
+		const realSourceCheckout = realpathSync(sourceCheckout);
+		const git = createFakeGit((args) => {
+			if (args[0] === "rev-parse" && args[1] === "--show-toplevel") {
+				return { ok: true, stdout: `${realExternalCheckout}\n` };
+			}
+			if (args[0] === "worktree" && args[1] === "list") {
+				return {
+					ok: true,
+					stdout:
+						`worktree ${realSourceCheckout}\nHEAD abc123\nbranch refs/heads/main\n\n` +
+						`worktree ${realExternalCheckout}\nHEAD def456\nbranch refs/heads/feature/manual\n`,
+				};
+			}
+			return { ok: true };
+		});
+
+		expect(await createManager(git.runGit).adopt(workspace, { path: externalCheckout, id: "manual" })).toMatchObject({
+			ok: false,
+			error: "worktree_source_unregistered",
+		});
+		expect(await stateManager.listWorktrees("repo")).toHaveLength(0);
+	});
+
 	it("validates selected working directories and creates from nested git repositories", async () => {
 		const selected = join(workspaceDir, "packages", "app");
 		mkdirSync(selected, { recursive: true });

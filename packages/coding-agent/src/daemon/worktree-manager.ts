@@ -1,7 +1,7 @@
 import { createHash, randomInt } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readdir, realpath, rename, rm } from "node:fs/promises";
-import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import { IROH_REMOTE_WORKTREE_ID_PATTERN } from "../core/remote/iroh/protocol.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
@@ -176,6 +176,7 @@ export type WorktreeError =
 	| "worktree_dirty"
 	| "worktree_busy"
 	| "worktree_limit_reached"
+	| "worktree_source_unregistered"
 	| "invalid_worktree_id"
 	| "invalid_working_directory"
 	| "nested_git_repository_unsupported"
@@ -360,6 +361,91 @@ export class WorktreeManager {
 				: { sourceRootRelativePath: source.source.sourceRootRelativePath }),
 			branch,
 			...(recordedBaseRef === undefined ? {} : { baseRef: recordedBaseRef }),
+			createdAt: this.now(),
+			sessionIds: [],
+		};
+		await this.stateManager.upsertWorktree(worktree);
+		await this.flushState?.();
+		return { ok: true, worktree };
+	}
+
+	/** Adopt an existing git worktree checkout into daemon state; local control socket only. */
+	async adopt(
+		workspace: IrohRemoteWorkspace,
+		options: { path: string; id?: string; baseRef?: string },
+	): Promise<WorktreeResult<{ worktree: IrohRemoteWorkspaceWorktree }>> {
+		const requestedPath = resolve(options.path);
+		if (options.id !== undefined && !WORKTREE_ID_PATTERN.test(options.id)) {
+			return { ok: false, error: "invalid_worktree_id" };
+		}
+		if (options.baseRef !== undefined && !isValidGitRefSyntax(options.baseRef)) {
+			return { ok: false, error: "git_failed", detail: "invalid baseRef ref syntax" };
+		}
+		if (!existsSync(requestedPath)) {
+			return { ok: false, error: "worktree_not_found", detail: "checkout path does not exist" };
+		}
+
+		const existing = await this.stateManager.listWorktrees(workspace.name);
+		if (existing.length >= this.maxWorktreesPerWorkspace) {
+			return { ok: false, error: "worktree_limit_reached" };
+		}
+
+		const topLevel = await this.runGit(["rev-parse", "--show-toplevel"], requestedPath);
+		if (!topLevel.ok) {
+			return this.mapGitFailure(topLevel.stderr, workspace, requestedPath, [requestedPath]);
+		}
+		const targetRootPath = await realpathOrResolve(topLevel.stdout.trim());
+		if (existing.some((entry) => entry.id === options.id || isSamePath(entry.path, targetRootPath))) {
+			return { ok: false, error: "worktree_exists" };
+		}
+		const id = options.id ?? deriveAdoptedWorktreeId(targetRootPath, new Set(existing.map((entry) => entry.id)));
+		if (!WORKTREE_ID_PATTERN.test(id)) {
+			return { ok: false, error: "invalid_worktree_id" };
+		}
+
+		const gitList = await this.runGit(["worktree", "list", "--porcelain"], targetRootPath);
+		if (!gitList.ok) {
+			return this.mapGitFailure(gitList.stderr, workspace, targetRootPath, [requestedPath, targetRootPath]);
+		}
+		const entries = parseWorktreeListEntries(gitList.stdout);
+		const targetEntry = await findWorktreeListEntryByPath(entries, targetRootPath);
+		if (targetEntry === undefined) {
+			return { ok: false, error: "worktree_not_found", detail: "checkout is not listed by git worktree" };
+		}
+		const workspaceRootPath = await realpathOrResolve(workspace.path);
+		const sourceRootPath = await findAdoptSourceRootPath(entries, workspaceRootPath, targetRootPath);
+		if (sourceRootPath === undefined) {
+			return {
+				ok: false,
+				error: "worktree_source_unregistered",
+				detail: "worktree source checkout is not inside the registered workspace",
+			};
+		}
+		const sourceRootRelativePath = await findWorkspaceRelativePathForRealpath(
+			workspaceRootPath,
+			undefined,
+			sourceRootPath,
+		);
+		if (sourceRootRelativePath === null) {
+			return {
+				ok: false,
+				error: "worktree_source_unregistered",
+				detail: "worktree source checkout is not inside the registered workspace",
+			};
+		}
+		const branch = targetEntry.branch ?? targetEntry.detached ?? "HEAD";
+		if (!isValidGitRefSyntax(branch)) {
+			return { ok: false, error: "git_failed", detail: "invalid worktree branch ref syntax" };
+		}
+		const baseRef = options.baseRef ?? (await this.resolveDefaultBaseRef(sourceRootPath));
+
+		const worktree: IrohRemoteWorkspaceWorktree = {
+			id,
+			workspaceName: workspace.name,
+			path: targetRootPath,
+			...(sourceRootRelativePath === undefined ? {} : { sourceRootRelativePath }),
+			branch,
+			...(baseRef === undefined ? {} : { baseRef }),
 			createdAt: this.now(),
 			sessionIds: [],
 		};
@@ -881,14 +967,92 @@ function isSamePath(left: string, right: string): boolean {
 		: resolvedLeft === resolvedRight;
 }
 
-function parseWorktreeListCheckouts(porcelainOutput: string): Set<string> {
-	const checkouts = new Set<string>();
+interface GitWorktreeListEntry {
+	path: string;
+	branch?: string;
+	detached?: string;
+}
+
+function parseWorktreeListEntries(porcelainOutput: string): GitWorktreeListEntry[] {
+	const entries: GitWorktreeListEntry[] = [];
+	let current: GitWorktreeListEntry | undefined;
+	const pushCurrent = () => {
+		if (current !== undefined) {
+			entries.push(current);
+			current = undefined;
+		}
+	};
 	for (const line of porcelainOutput.split("\n")) {
+		if (line.length === 0) {
+			pushCurrent();
+			continue;
+		}
 		if (line.startsWith("worktree ")) {
-			checkouts.add(resolve(line.slice("worktree ".length).trim()));
+			pushCurrent();
+			current = { path: line.slice("worktree ".length).trim() };
+			continue;
+		}
+		if (current === undefined) {
+			continue;
+		}
+		if (line.startsWith("branch ")) {
+			const ref = line.slice("branch ".length).trim();
+			current.branch = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref;
+			continue;
+		}
+		if (line.startsWith("detached ")) {
+			current.detached = line.slice("detached ".length).trim();
 		}
 	}
-	return checkouts;
+	pushCurrent();
+	return entries;
+}
+
+function parseWorktreeListCheckouts(porcelainOutput: string): Set<string> {
+	return new Set(parseWorktreeListEntries(porcelainOutput).map((entry) => resolve(entry.path)));
+}
+
+async function findWorktreeListEntryByPath(
+	entries: readonly GitWorktreeListEntry[],
+	path: string,
+): Promise<GitWorktreeListEntry | undefined> {
+	for (const entry of entries) {
+		if (isSamePath(await realpathOrResolve(entry.path), path)) {
+			return entry;
+		}
+	}
+	return undefined;
+}
+
+async function findAdoptSourceRootPath(
+	entries: readonly GitWorktreeListEntry[],
+	workspaceRootPath: string,
+	targetRootPath: string,
+): Promise<string | undefined> {
+	for (const entry of entries) {
+		const entryPath = await realpathOrResolve(entry.path);
+		if (!isSamePath(entryPath, targetRootPath) && isPathContained(workspaceRootPath, entryPath)) {
+			return entryPath;
+		}
+	}
+	return undefined;
+}
+
+function deriveAdoptedWorktreeId(path: string, usedIds: ReadonlySet<string>): string {
+	const baseName = basename(path)
+		.toLowerCase()
+		.replace(/[^a-z0-9._-]+/g, "-")
+		.replace(/^[^a-z0-9]+/, "")
+		.slice(0, 64);
+	const base = WORKTREE_ID_PATTERN.test(baseName) ? baseName : "adopted";
+	for (let index = 0; index < 100; index++) {
+		const suffix = index === 0 ? "" : `-${index}`;
+		const candidate = `${base.slice(0, 64 - suffix.length)}${suffix}`;
+		if (WORKTREE_ID_PATTERN.test(candidate) && !usedIds.has(candidate)) {
+			return candidate;
+		}
+	}
+	return generateWorktreeIdSlug();
 }
 
 /** Strip host paths from git stderr before it lands in an RPC detail field. */
@@ -998,6 +1162,7 @@ export type WorktreeControlRequest = Extract<
 	{
 		type:
 			| "worktree_create"
+			| "worktree_adopt"
 			| "worktree_list"
 			| "worktree_remove"
 			| "worktree_prune"
@@ -1020,6 +1185,7 @@ export interface WorktreeControlRequestHooks {
 export function isWorktreeControlRequest(request: ControlRequest): request is WorktreeControlRequest {
 	return (
 		request.type === "worktree_create" ||
+		request.type === "worktree_adopt" ||
 		request.type === "worktree_list" ||
 		request.type === "worktree_remove" ||
 		request.type === "worktree_prune" ||
@@ -1075,6 +1241,34 @@ export async function handleWorktreeControlRequest(
 			type: "worktree_result",
 			id: request.id,
 			worktree: toControlWorktreeStatus(created.worktree, true),
+		});
+		return;
+	}
+
+	if (request.type === "worktree_adopt") {
+		const workspace = findWorkspace(request.workspaceName);
+		if (!workspace) {
+			sendWorkspaceNotFound(request.workspaceName);
+			return;
+		}
+		const adopted = await hooks.manager.adopt(workspace, {
+			path: request.path,
+			...(request.worktreeName === undefined ? {} : { id: request.worktreeName }),
+			...(request.baseRef === undefined ? {} : { baseRef: request.baseRef }),
+		});
+		if (!adopted.ok) {
+			connection.send({
+				type: "error",
+				id: request.id,
+				code: adopted.error,
+				message: adopted.detail ?? adopted.error,
+			});
+			return;
+		}
+		connection.send({
+			type: "worktree_result",
+			id: request.id,
+			worktree: toControlWorktreeStatus(adopted.worktree, true),
 		});
 		return;
 	}

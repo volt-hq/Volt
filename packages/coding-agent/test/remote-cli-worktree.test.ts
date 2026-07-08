@@ -27,6 +27,20 @@ describe("worktree control protocol shapes", () => {
 		expect(isControlRequest({ type: "worktree_create", id: "1" })).toBe(false);
 		expect(isControlRequest({ type: "worktree_create", id: "1", workspaceName: "ws", branch: 42 })).toBe(false);
 
+		expect(isControlRequest({ type: "worktree_adopt", id: "1", workspaceName: "ws", path: "/tmp/wt" })).toBe(true);
+		expect(
+			isControlRequest({
+				type: "worktree_adopt",
+				id: "1",
+				workspaceName: "ws",
+				path: "/tmp/wt",
+				worktreeName: "manual",
+				baseRef: "main",
+			}),
+		).toBe(true);
+		expect(isControlRequest({ type: "worktree_adopt", id: "1", workspaceName: "ws" })).toBe(false);
+		expect(isControlRequest({ type: "worktree_adopt", id: "1", workspaceName: "ws", path: 42 })).toBe(false);
+
 		expect(isControlRequest({ type: "worktree_list", id: "1" })).toBe(true);
 		expect(isControlRequest({ type: "worktree_list", id: "1", workspaceName: "ws" })).toBe(true);
 		expect(isControlRequest({ type: "worktree_list", id: "1", workspaceName: 42 })).toBe(false);
@@ -175,6 +189,39 @@ describe("remote CLI worktree commands (daemon control client)", () => {
 		expect(loggedLines(errorSpy)).toContain("repo: removed 0 record(s), quarantined 0 orphan checkout(s)");
 	}, 30_000);
 
+	it("adopts a manually-created git worktree", async () => {
+		const manualPath = join(agentDir, "manual-existing");
+		const git = (args: string[], cwd: string = workspaceDir) =>
+			execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } });
+		git(["worktree", "add", manualPath, "-b", "manual-existing", "main"]);
+
+		await main([
+			"remote",
+			"worktree",
+			"adopt",
+			manualPath,
+			"--workspace",
+			"repo",
+			"--name",
+			"manual-existing",
+			"--base",
+			"main",
+		]);
+		expect(process.exitCode ?? 0).toBe(0);
+		expect(loggedLines(errorSpy)).toContain("adopted worktree manual-existing (branch manual-existing)");
+
+		logSpy.mockClear();
+		await main(["remote", "worktree", "list", "--workspace", "repo", "--json"]);
+		const listed = JSON.parse(loggedLines(logSpy)) as Array<{ id: string; path: string; available?: boolean }>;
+		const adopted = listed.find((entry) => entry.id === "manual-existing");
+		expect(adopted).toMatchObject({ id: "manual-existing", path: realpathSync(manualPath), available: true });
+
+		process.exitCode = undefined;
+		await main(["remote", "worktree", "remove", "manual-existing", "--workspace", "repo"]);
+		expect(process.exitCode ?? 0).toBe(0);
+		expect(existsSync(manualPath)).toBe(false);
+	}, 30_000);
+
 	it("diff shows the worktree branch against its recorded base and errors on unknown ids", async () => {
 		await main(["remote", "worktree", "add", "--workspace", "repo", "--name", "diff-me", "--base", "main"]);
 		expect(process.exitCode ?? 0).toBe(0);
@@ -256,6 +303,7 @@ describe("remote CLI worktree commands (daemon control client)", () => {
 		const usage = loggedLines(errorSpy);
 		expect(usage).toContain("Unknown worktree command");
 		expect(usage).toContain("worktree add [--workspace <name>] [--name <id>] [--branch <ref>] [--base <ref>]");
+		expect(usage).toContain("worktree adopt <path> [--workspace <name>] [--name <id>] [--base <ref>]");
 		expect(usage).toContain("worktree list [--workspace <name>] [--json]");
 		expect(usage).toContain("worktree remove <id> [--workspace <name>] [--force]");
 		expect(usage).toContain("worktree prune [--workspace <name>]");

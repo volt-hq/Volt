@@ -21,6 +21,8 @@ Commands:
   workspace list                List registered workspaces.
   worktree add [--workspace <name>] [--name <id>] [--branch <ref>] [--base <ref>]
                                 Create a daemon-managed git worktree.
+  worktree adopt <path> [--workspace <name>] [--name <id>] [--base <ref>]
+                                Adopt an existing git worktree checkout.
   worktree list [--workspace <name>] [--json]
                                 List daemon-managed worktrees.
   worktree remove <id> [--workspace <name>] [--force]
@@ -443,6 +445,7 @@ async function handleWorktreeCommand(args: string[]): Promise<void> {
 	const subcommand = args[0];
 	if (
 		subcommand !== "add" &&
+		subcommand !== "adopt" &&
 		subcommand !== "list" &&
 		subcommand !== "remove" &&
 		subcommand !== "prune" &&
@@ -464,7 +467,10 @@ async function handleWorktreeCommand(args: string[]): Promise<void> {
 	}
 	try {
 		let workspaceName = workspaceFlag.value;
-		if (workspaceName === undefined && (subcommand === "add" || subcommand === "remove" || subcommand === "diff")) {
+		if (
+			workspaceName === undefined &&
+			(subcommand === "add" || subcommand === "adopt" || subcommand === "remove" || subcommand === "diff")
+		) {
 			workspaceName = await resolveWorkspaceNameForCwd(session);
 			if (workspaceName === undefined) {
 				return;
@@ -494,6 +500,38 @@ async function handleWorktreeCommand(args: string[]): Promise<void> {
 			}
 			console.error(
 				`created worktree ${response.worktree.id} (branch ${response.worktree.branch}) -> ${response.worktree.path}`,
+			);
+			return;
+		}
+		if (subcommand === "adopt") {
+			const nameFlag = takeFlagValue(rest, "--name");
+			const baseFlag = takeFlagValue(rest, "--base");
+			const path = rest.filter((arg) => !arg.startsWith("--"))[0];
+			if (!nameFlag.ok || !baseFlag.ok || workspaceName === undefined) {
+				return;
+			}
+			if (!path) {
+				console.error("Error: worktree adopt requires a path");
+				process.exitCode = 1;
+				return;
+			}
+			const response = await session.client.request({
+				type: "worktree_adopt",
+				workspaceName,
+				path: resolve(path),
+				...(nameFlag.value === undefined ? {} : { worktreeName: nameFlag.value }),
+				...(baseFlag.value === undefined ? {} : { baseRef: baseFlag.value }),
+			});
+			if (reportControlError(response, "worktree adopt")) {
+				return;
+			}
+			if (response.type !== "worktree_result") {
+				console.error("Error: unexpected daemon response for worktree adopt");
+				process.exitCode = 1;
+				return;
+			}
+			console.error(
+				`adopted worktree ${response.worktree.id} (branch ${response.worktree.branch}) -> ${response.worktree.path}`,
 			);
 			return;
 		}

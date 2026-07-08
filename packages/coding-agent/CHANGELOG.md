@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `volt remote worktree adopt <path>` to register existing git worktree checkouts with the daemon when their source checkout is a registered workspace.
 - Added native MCP support with trusted config loading, a built-in `mcp` gateway tool, stdio/Streamable HTTP/SSE client transports, metadata/output/audit storage, and local RPC server management commands.
 - Added MCP OAuth authentication for HTTP/SSE servers, including browser authorization-code + PKCE, device-code auth, host-side token storage, CLI commands, and RPC management hooks.
 - Added an `upload_device_logs` RPC command to Iroh remote conversation streams so paired mobile clients can store diagnostic logs in the workspace under `.volt/device-logs/` (validated single-component file name, 4 MiB content cap, atomic write, audit-logged).
