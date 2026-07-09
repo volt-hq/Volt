@@ -397,7 +397,13 @@ export abstract class RpcClientBase {
 		return this.getData<{ commands: RpcSlashCommand[] }>(response).commands;
 	}
 
-	/** Wait for agent to become idle. */
+	/**
+	 * Wait for agent to become idle.
+	 *
+	 * Resolves on `agent_settled`, which the host emits only after `agent_end`
+	 * plus any automatic retries, compaction continuations, and queued-message
+	 * continuations have finished.
+	 */
 	waitForIdle(timeout = 60_000): Promise<void> {
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
@@ -406,7 +412,7 @@ export abstract class RpcClientBase {
 			}, timeout);
 
 			const unsubscribe = this.onEvent((event) => {
-				if (event.type === "agent_end") {
+				if (event.type === "agent_settled") {
 					clearTimeout(timer);
 					unsubscribe();
 					resolve();
@@ -415,7 +421,7 @@ export abstract class RpcClientBase {
 		});
 	}
 
-	/** Collect events until agent becomes idle. */
+	/** Collect events until the agent settles (`agent_settled`). */
 	collectEvents(timeout = 60_000): Promise<RpcClientEvent[]> {
 		return new Promise((resolve, reject) => {
 			const events: RpcClientEvent[] = [];
@@ -426,7 +432,7 @@ export abstract class RpcClientBase {
 
 			const unsubscribe = this.onEvent((event) => {
 				events.push(event);
-				if (event.type === "agent_end") {
+				if (event.type === "agent_settled") {
 					clearTimeout(timer);
 					unsubscribe();
 					resolve(events);
@@ -435,11 +441,11 @@ export abstract class RpcClientBase {
 		});
 	}
 
-	/** Send prompt and wait for completion, returning all events. */
+	/** Send prompt and wait for the run to settle (`agent_settled`), returning all events. */
 	async promptAndWait(message: string, images?: ImageContent[], timeout = 60_000): Promise<RpcClientEvent[]> {
 		return new Promise((resolve, reject) => {
 			const events: RpcClientEvent[] = [];
-			let agentEnded = false;
+			let agentSettled = false;
 			let promptAccepted = false;
 			let settled = false;
 			let unsubscribe = (): void => {};
@@ -468,7 +474,7 @@ export abstract class RpcClientBase {
 			};
 
 			const resolveIfComplete = (): void => {
-				if (settled || !agentEnded || !promptAccepted) {
+				if (settled || !agentSettled || !promptAccepted) {
 					return;
 				}
 				settled = true;
@@ -478,8 +484,8 @@ export abstract class RpcClientBase {
 
 			unsubscribe = this.onEvent((event) => {
 				events.push(event);
-				if (event.type === "agent_end") {
-					agentEnded = true;
+				if (event.type === "agent_settled") {
+					agentSettled = true;
 					resolveIfComplete();
 				}
 			});

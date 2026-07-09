@@ -21,6 +21,7 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	ShouldStopAfterTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/volt-agent-core";
 import type {
@@ -153,6 +154,14 @@ export type AgentSessionEvent =
 			type: "agent_end";
 			messages: AgentMessage[];
 			willRetry: boolean;
+	  }
+	| {
+			/**
+			 * Emitted once a prompt run fully settles: after `agent_end` plus any
+			 * automatic retries, overflow/threshold compaction continuations, and
+			 * queued-message continuations. Equivalent to `waitForIdle()` resolving.
+			 */
+			type: "agent_settled";
 	  }
 	| {
 			type: "queue_update";
@@ -320,6 +329,13 @@ export class AgentSession {
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _activeCompaction: ActiveCompaction | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
+	/** Set when shouldStopAfterTurn interrupted the run for a threshold compaction. */
+	private _proactiveCompactionStopped = false;
+	/**
+	 * Guards against repeated proactive stops when compaction cannot make progress.
+	 * Re-armed by a successful compaction or the next user prompt.
+	 */
+	private _proactiveCompactionAttempted = false;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -404,6 +420,7 @@ export class AgentSession {
 		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
+		this.agent.shouldStopAfterTurn = (context) => this._shouldStopForProactiveCompaction(context);
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -566,6 +583,7 @@ export class AgentSession {
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
 			this._overflowRecoveryAttempted = false;
+			this._proactiveCompactionAttempted = false;
 			const messageText = this._getUserMessageText(event.message);
 			if (messageText) {
 				// Check steering queue first
@@ -1084,6 +1102,7 @@ export class AgentSession {
 		if (this._disposed) {
 			return;
 		}
+		this._proactiveCompactionStopped = false;
 		const run = (async () => {
 			try {
 				await this.agent.prompt(messages);
@@ -1099,6 +1118,12 @@ export class AgentSession {
 			await run;
 		} finally {
 			this._activePromptRuns.delete(run);
+			// The run promise resolves only after agent_end listeners settle and all
+			// session-level continuations (retry, compaction, queued messages) finish,
+			// so this is the session equivalent of waitForIdle() resolving.
+			if (this._activePromptRuns.size === 0) {
+				this._emit({ type: "agent_settled" });
+			}
 		}
 	}
 
@@ -1128,6 +1153,14 @@ export class AgentSession {
 		this._lastAssistantMessage = undefined;
 		if (!msg) {
 			return false;
+		}
+
+		if (this._proactiveCompactionStopped) {
+			this._proactiveCompactionStopped = false;
+			// The run was interrupted mid-task by _shouldStopForProactiveCompaction,
+			// so always resume it, even when compaction bails or fails.
+			await this._runAutoCompaction("threshold", false, true);
+			return true;
 		}
 
 		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
@@ -1929,6 +1962,7 @@ export class AgentSession {
 			}
 
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension);
+			this._proactiveCompactionAttempted = false;
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
@@ -1992,6 +2026,37 @@ export class AgentSession {
 	 */
 	abortBranchSummary(): void {
 		this._branchSummaryAbortController?.abort();
+	}
+
+	/**
+	 * Agent-loop hook: stop the run after the current turn when live context
+	 * usage crosses the compaction threshold, so threshold compaction runs
+	 * mid-task instead of only after the full agent/tool loop finishes.
+	 * _handlePostAgentRun always resumes an interrupted run.
+	 *
+	 * Contract: must not throw (see AgentLoopConfig.shouldStopAfterTurn).
+	 */
+	private _shouldStopForProactiveCompaction(context: ShouldStopAfterTurnContext): boolean {
+		try {
+			if (this._disposed || this._proactiveCompactionAttempted) return false;
+			// Only interrupt turns that would otherwise continue with another LLM
+			// call. When the turn produced no tool results the run ends anyway and
+			// the ordinary post-run threshold check applies.
+			if (context.toolResults.length === 0) return false;
+			const message = context.message;
+			if (message.stopReason === "aborted" || message.stopReason === "error") return false;
+			const settings = this.settingsManager.getCompactionSettings();
+			if (!settings.enabled) return false;
+			const model = this.model;
+			if (!model || message.provider !== model.provider || message.model !== model.id) return false;
+			const contextTokens = calculateContextTokens(message.usage);
+			if (!shouldCompact(contextTokens, model.contextWindow ?? 0, settings)) return false;
+			this._proactiveCompactionAttempted = true;
+			this._proactiveCompactionStopped = true;
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	/**
@@ -2226,6 +2291,7 @@ export class AgentSession {
 			}
 
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension);
+			this._proactiveCompactionAttempted = false;
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;

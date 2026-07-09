@@ -379,7 +379,11 @@ session.subscribe((event) => {
       // Agent started processing prompt
       break;
     case "agent_end":
-      // Agent finished (event.messages contains new messages)
+      // Agent run finished (event.messages contains new messages).
+      // A retry or compaction/queued continuation may still follow.
+      break;
+    case "agent_settled":
+      // Prompt fully settled: no further retries or continuations.
       break;
     
     // Turn lifecycle (one LLM response + tool calls)

@@ -670,7 +670,7 @@ Successful response data reports the command disposition:
 ```
 
 Possible statuses:
-- `"accepted"`: a prompt-like action was accepted while idle. Normal agent events, including `agent_end`, report completion.
+- `"accepted"`: a prompt-like action was accepted while idle. Normal agent events report completion; wait for `agent_settled` for final settlement.
 - `"queued"`: a prompt-like action was queued while another turn is streaming. `queuedAs` is `"steer"` or `"followUp"`.
 - `"completed"`: the action finished synchronously. No `agent_end` is expected for this invocation.
 - `"handled"`: the host, extension command, or input hook handled the action without starting an agent turn.
@@ -1333,7 +1333,8 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | Event | Description |
 |-------|-------------|
 | `agent_start` | Agent begins processing |
-| `agent_end` | Agent completes (includes all generated messages) |
+| `agent_end` | Agent run completes (includes all generated messages); a retry or continuation may still follow |
+| `agent_settled` | Prompt fully settles: no further automatic retries, compaction continuations, or queued continuations |
 | `turn_start` | New turn begins |
 | `turn_end` | Turn completes (includes assistant message and tool results) |
 | `message_start` | Message begins |
@@ -1372,13 +1373,23 @@ Emitted when the agent begins processing a prompt.
 
 ### agent_end
 
-Emitted when the agent completes. Contains all messages generated during this run.
+Emitted when an agent run completes. Contains all messages generated during this run.
 
 ```json
 {
   "type": "agent_end",
   "messages": [...]
 }
+```
+
+A single prompt can produce multiple `agent_end` events: automatic retries, overflow/threshold compaction, and queued follow-up messages each continue the run after a raw `agent_end`. Wait for `agent_settled` to know the prompt is finished.
+
+### agent_settled
+
+Emitted exactly once per prompt, after the final `agent_end` and after all automatic retries, compaction continuations, and queued-message continuations have finished. Client helpers such as `waitForIdle`, `collectEvents`, and `promptAndWait` terminate on this event.
+
+```json
+{"type": "agent_settled"}
 ```
 
 ### turn_start / turn_end
@@ -1974,7 +1985,7 @@ for event in read_events():
         if delta.get("type") == "text_delta":
             print(delta["delta"], end="", flush=True)
     
-    if event.get("type") == "agent_end":
+    if event.get("type") == "agent_settled":
         print()
         break
 ```

@@ -204,12 +204,12 @@ describe("RpcTransportClient", () => {
 		}
 	});
 
-	test("promptAndWait waits for prompt response before resolving on agent_end", async () => {
+	test("promptAndWait waits for prompt response before resolving on agent_settled", async () => {
 		const pair = createLoopbackRpcTransportPair();
 		const client = new RpcTransportClient({ transport: pair.client });
 		pair.server.onLine((line) => {
 			const command = parseCommandLine(line);
-			pair.server.write({ type: "agent_end" });
+			pair.server.write({ type: "agent_settled" });
 			pair.server.write({
 				id: command.id,
 				type: "response",
@@ -227,13 +227,13 @@ describe("RpcTransportClient", () => {
 		}
 	});
 
-	test("promptAndWait resolves when a successful prompt response follows agent_end", async () => {
+	test("promptAndWait resolves when a successful prompt response follows agent_settled", async () => {
 		const pair = createLoopbackRpcTransportPair();
 		const client = new RpcTransportClient({ transport: pair.client });
 		let command: { id: string; type: string } | undefined;
 		pair.server.onLine((line) => {
 			command = parseCommandLine(line);
-			pair.server.write({ type: "agent_end" });
+			pair.server.write({ type: "agent_settled" });
 		});
 
 		await client.start();
@@ -257,7 +257,7 @@ describe("RpcTransportClient", () => {
 				command: acceptedCommand.type,
 				success: true,
 			});
-			await expect(eventsPromise).resolves.toEqual([{ type: "agent_end" }]);
+			await expect(eventsPromise).resolves.toEqual([{ type: "agent_settled" }]);
 		} finally {
 			await client.stop();
 		}

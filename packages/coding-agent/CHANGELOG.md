@@ -4,6 +4,10 @@
 
 ### Added
 
+- Added an `agent_settled` session/RPC event emitted exactly once per prompt after the final `agent_end`, when automatic retries, overflow/threshold compaction continuations, and queued-message continuations have finished. RPC client `waitForIdle()`, `collectEvents()`, and `promptAndWait()` now terminate on `agent_settled` instead of a raw `agent_end`.
+- Added proactive mid-run compaction: when a turn with tool calls pushes live context usage over the compaction threshold, the session stops the agent loop after that turn (via a new `Agent.shouldStopAfterTurn` hook wired through to the agent-loop), runs threshold compaction, and resumes the interrupted run, instead of waiting for the full agent/tool loop to finish. A failed attempt does not retrigger until a compaction succeeds or the next user prompt.
+- Added an aggregate character budget for compaction/branch-summary summarization input: serialized conversations are capped (keeping the opening goal plus the newest contiguous parts with an omission marker), in addition to the existing per-tool-result truncation.
+
 - Added `volt remote worktree adopt <path>` to register existing git worktree checkouts with the daemon when their source checkout is a registered workspace.
 - Added native MCP support with trusted config loading, a built-in `mcp` gateway tool, stdio/Streamable HTTP/SSE client transports, metadata/output/audit storage, and local RPC server management commands.
 - Added MCP OAuth authentication for HTTP/SSE servers, including browser authorization-code + PKCE, device-code auth, host-side token storage, CLI commands, and RPC management hooks.

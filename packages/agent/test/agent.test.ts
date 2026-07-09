@@ -630,6 +630,64 @@ describe("Agent", () => {
 		expect(responseCount).toBe(2);
 	});
 
+	it("stops after the current turn when shouldStopAfterTurn returns true", async () => {
+		const toolSchema = Type.Object({});
+		const tool: AgentTool<typeof toolSchema, undefined> = {
+			name: "noop_tool",
+			label: "Noop Tool",
+			description: "Returns ok",
+			parameters: toolSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }], details: undefined };
+			},
+		};
+		let llmCalls = 0;
+		const agent = new Agent({
+			initialState: { tools: [tool] },
+			streamFn: () => {
+				llmCalls++;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantToolUseMessage([
+							{ type: "toolCall", id: `call-${llmCalls}`, name: "noop_tool", arguments: {} },
+						]),
+					});
+				});
+				return stream;
+			},
+		});
+
+		// Assigned after construction, mirroring how hosts install session hooks.
+		const hookCalls: Array<{ toolResultCount: number; hasSignal: boolean }> = [];
+		agent.shouldStopAfterTurn = (context, signal) => {
+			hookCalls.push({ toolResultCount: context.toolResults.length, hasSignal: signal !== undefined });
+			return true;
+		};
+
+		agent.followUp({
+			role: "user",
+			content: [{ type: "text", text: "queued follow-up" }],
+			timestamp: Date.now(),
+		});
+
+		const events: AgentEvent[] = [];
+		agent.subscribe((event) => {
+			events.push(event);
+		});
+
+		await agent.prompt("run tool");
+
+		// The loop exits after the first turn: one LLM call, no queue polling.
+		expect(llmCalls).toBe(1);
+		expect(hookCalls).toEqual([{ toolResultCount: 1, hasSignal: true }]);
+		expect(agent.hasQueuedMessages()).toBe(true);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+		expect(agent.state.messages.at(-1)?.role).toBe("toolResult");
+	});
+
 	it("forwards sessionId to streamFn options", async () => {
 		let receivedSessionId: string | undefined;
 		const agent = new Agent({

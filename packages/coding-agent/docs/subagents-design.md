@@ -24,13 +24,13 @@ The implementation reuses Volt's existing primitives instead of introducing a se
 - `runRpcMode()` runs a runtime over a transport.
 - `createLoopbackRpcTransportPair()` and `createInProcessRpcClient()` provide same-process RPC for local subagents.
 - Iroh conversation streams already provide remote multi-agent streams for the app.
-- Existing RPC `prompt`, `abort`, `get_state`, `get_transcript`, and `agent_end` events remain the transport contract; local handles additionally wait for session-level settlement before releasing child ownership.
+- Existing RPC `prompt`, `abort`, `get_state`, `get_transcript`, and `agent_end` events remain the transport contract; the session additionally emits `agent_settled` once retries, compaction continuations, and queued continuations finish, and local handles wait for that settlement before releasing child ownership.
 
 The [`examples/extensions/subagent/`](../examples/extensions/subagent/) implementation remains the reference prototype for workflow shape. The core MVP avoids subprocess and JSON-mode parsing fallback.
 
 ## Existing building blocks
 
-- **RPC mode** ([rpc.md](rpc.md)): accepts prompts, streams events, and reports completion with `agent_end`.
+- **RPC mode** ([rpc.md](rpc.md)): accepts prompts, streams events, and reports run completion with `agent_end` and final settlement with `agent_settled`.
 - **SDK runtime** ([sdk.md](sdk.md)): creates and replaces `AgentSessionRuntime` instances.
 - **In-process RPC client**: `createInProcessRpcClient()` runs `runRpcMode()` over an in-memory loopback transport.
 - **Iroh remote conversation streams** ([iroh-remote-protocol.md](iroh-remote-protocol.md)): mobile clients can open `conversation.target: "new"` or `"session"` streams. Stream close is detach; `abort` is cancellation.

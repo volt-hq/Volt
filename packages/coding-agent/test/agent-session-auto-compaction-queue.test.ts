@@ -151,11 +151,11 @@ describe("AgentSession auto-compaction queue resume", () => {
 						provider: model.provider,
 						model: model.id,
 						usage: {
-							input: 180_000,
+							input: model.contextWindow - 20_000,
 							output: 10_000,
 							cacheRead: 0,
 							cacheWrite: 0,
-							totalTokens: 190_000,
+							totalTokens: model.contextWindow - 10_000,
 							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 						},
 						stopReason: "length",
@@ -192,6 +192,118 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await session.prompt("trigger length continuation");
 
 		expect(streamCallCount).toBe(2);
+	});
+
+	it("should compact mid-run when a turn with tool calls crosses the threshold", async () => {
+		const model = session.model!;
+		let streamCallCount = 0;
+		let streamCallsAtCompactionStart = -1;
+		const agentEnds: string[] = [];
+		session.subscribe((event) => {
+			if (event.type === "compaction_start") {
+				streamCallsAtCompactionStart = streamCallCount;
+			}
+			if (event.type === "agent_end") {
+				agentEnds.push(event.type);
+			}
+		});
+
+		session.agent.streamFn = () => {
+			const callNumber = ++streamCallCount;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callNumber === 1) {
+					// Tool-call turn whose usage already exceeds the compaction threshold.
+					const message: AssistantMessage = {
+						role: "assistant",
+						content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "missing-file.txt" } }],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: {
+							input: model.contextWindow - 20_000,
+							output: 10_000,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: model.contextWindow - 10_000,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "toolUse",
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: "toolUse", message });
+					return;
+				}
+
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "text", text: "finished after compaction" }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 100,
+						output: 10,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 110,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+
+		await session.prompt("trigger proactive mid-run compaction");
+
+		// Compaction ran between the tool-call turn and the continuation, not
+		// after the full agent/tool loop finished.
+		expect(streamCallsAtCompactionStart).toBe(1);
+		expect(streamCallCount).toBe(2);
+		expect(agentEnds).toHaveLength(2);
+		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
+	});
+
+	it("should stop proactively only once until a compaction succeeds", async () => {
+		const model = session.model!;
+		const context = {
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "x" } }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: {
+					input: model.contextWindow - 10_000,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: model.contextWindow - 10_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			},
+			toolResults: [{ role: "toolResult", toolCallId: "call-1", toolName: "read", content: [], isError: true }],
+			context: { systemPrompt: "", messages: [], tools: [] },
+			newMessages: [],
+		};
+
+		const hook = (
+			session as unknown as {
+				_shouldStopForProactiveCompaction: (context: unknown) => boolean;
+			}
+		)._shouldStopForProactiveCompaction.bind(session);
+
+		expect(hook(context)).toBe(true);
+		// A second threshold crossing before any successful compaction must not
+		// interrupt the run again (prevents stop/fail/continue churn every turn).
+		expect(hook(context)).toBe(false);
 	});
 
 	it("should not compact repeatedly after overflow recovery already attempted", async () => {
@@ -317,11 +429,11 @@ describe("AgentSession auto-compaction queue resume", () => {
 			provider: model.provider,
 			model: model.id,
 			usage: {
-				input: 180_000,
+				input: model.contextWindow - 20_000,
 				output: 10_000,
 				cacheRead: 0,
 				cacheWrite: 0,
-				totalTokens: 190_000,
+				totalTokens: model.contextWindow - 10_000,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "stop",
@@ -436,11 +548,11 @@ describe("AgentSession auto-compaction queue resume", () => {
 			provider: model.provider,
 			model: model.id,
 			usage: {
-				input: 180_000,
+				input: model.contextWindow - 20_000,
 				output: 10_000,
 				cacheRead: 0,
 				cacheWrite: 0,
-				totalTokens: 190_000,
+				totalTokens: model.contextWindow - 10_000,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "stop",

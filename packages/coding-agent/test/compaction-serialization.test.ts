@@ -1,6 +1,14 @@
 import type { Message } from "@earendil-works/volt-ai";
 import { describe, expect, it } from "vitest";
-import { serializeConversation } from "../src/core/compaction/utils.ts";
+import { CONVERSATION_MAX_CHARS, serializeConversation } from "../src/core/compaction/utils.ts";
+
+function userMessage(text: string): Message {
+	return {
+		role: "user",
+		content: [{ type: "text", text }],
+		timestamp: Date.now(),
+	};
+}
 
 describe("serializeConversation", () => {
 	it("should truncate long tool results", () => {
@@ -75,5 +83,47 @@ describe("serializeConversation", () => {
 
 		expect(result).not.toContain("truncated");
 		expect(result).toContain(longText);
+	});
+
+	it("should cap the aggregate serialized conversation", () => {
+		const messages: Message[] = [userMessage(`GOAL ${"g".repeat(500)}`)];
+		for (let i = 0; i < 300; i++) {
+			messages.push(userMessage(`part-${i} ${"m".repeat(1900)}`));
+		}
+		messages.push(userMessage(`NEWEST ${"n".repeat(500)}`));
+
+		const result = serializeConversation(messages);
+
+		expect(result.length).toBeLessThanOrEqual(CONVERSATION_MAX_CHARS);
+		// Keeps the opening goal and the newest parts, omitting the middle.
+		expect(result).toContain("GOAL");
+		expect(result).toContain("NEWEST");
+		expect(result).toMatch(
+			/\[\.\.\. \d+ earlier conversation parts omitted to fit the summarization budget \.\.\.\]/,
+		);
+		expect(result).not.toContain("part-0 ");
+		// The kept tail is contiguous with the end of the conversation.
+		expect(result).toContain("part-299 ");
+	});
+
+	it("should honor a custom aggregate budget", () => {
+		const messages: Message[] = [
+			userMessage(`GOAL ${"g".repeat(100)}`),
+			userMessage(`middle ${"m".repeat(400)}`),
+			userMessage(`NEWEST ${"n".repeat(100)}`),
+		];
+
+		const result = serializeConversation(messages, { maxChars: 400 });
+
+		expect(result.length).toBeLessThanOrEqual(400);
+		expect(result).toContain("GOAL");
+		expect(result).toContain("NEWEST");
+		expect(result).toContain("1 earlier conversation part omitted");
+		expect(result).not.toContain("middle ");
+	});
+
+	it("should not add an omission marker when under budget", () => {
+		const result = serializeConversation([userMessage("short one"), userMessage("short two")]);
+		expect(result).toBe("[User]: short one\n\n[User]: short two");
 	});
 });

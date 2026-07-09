@@ -367,6 +367,40 @@ describe("SubagentManager", () => {
 		expect(getDisposedSessionCount()).toBe(1);
 	});
 
+	it("emits agent_settled once, after the final continuation agent_end", async () => {
+		const settledObserved = createDeferred();
+		const lifecycle: string[] = [];
+		const { manager } = await createTestManager({
+			responses: [
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" }),
+				fauxAssistantMessage("continued after compaction"),
+			],
+			simpleResponses: [fauxAssistantMessage("compacted context")],
+			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
+			onRuntimeCreated: (event) => {
+				event.runtime.session.setSessionName("settlement child");
+			},
+		});
+		const handle = await manager.start();
+		handle.onEvent((event) => {
+			if (event.type === "agent_end" || event.type === "agent_settled") {
+				lifecycle.push(event.type);
+				if (event.type === "agent_settled") {
+					settledObserved.resolve();
+				}
+			}
+		});
+
+		const completion = handle.waitForEnd();
+		await handle.prompt("overflow the child context");
+		await completion;
+		await settledObserved.promise;
+
+		// The raw agent_end from the overflow error must not settle the run; the
+		// session emits agent_settled only after the compaction continuation ends.
+		expect(lifecycle).toEqual(["agent_end", "agent_end", "agent_settled"]);
+	});
+
 	it("ignores recovery agent_end events emitted before the delegated prompt starts", async () => {
 		const taskResponseStarted = createDeferred();
 		const finishTaskResponse = createDeferred();

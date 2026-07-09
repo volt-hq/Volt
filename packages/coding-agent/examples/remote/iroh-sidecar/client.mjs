@@ -281,6 +281,15 @@ function printRpcLine(line, state) {
 		return;
 	}
 
+	if (event.type === "agent_settled") {
+		// Deterministic settlement: the host emits this only after retries,
+		// compaction continuations, and queued continuations finish.
+		state.waitingForContinuation = false;
+		state.pendingCompaction = false;
+		finishPrompt(state);
+		return;
+	}
+
 	if (event.type === "tool_execution_start") {
 		console.error(`\n[tool:start] ${event.toolName}${formatToolArgs(event.args)}`);
 		return;

@@ -89,6 +89,18 @@ export function formatFileOperations(readFiles: string[], modifiedFiles: string[
 const TOOL_RESULT_MAX_CHARS = 2000;
 
 /**
+ * Aggregate character budget for a serialized conversation (~50k tokens).
+ *
+ * Per-part truncation alone does not bound the request: a long session can
+ * accumulate thousands of parts. The aggregate cap keeps the summarization
+ * request within a conservative budget for any compaction model.
+ */
+export const CONVERSATION_MAX_CHARS = 200_000;
+
+/** Budget share reserved for the opening of the conversation (the original goal). */
+const CONVERSATION_HEAD_BUDGET_RATIO = 0.25;
+
+/**
  * Truncate text to a maximum character length for summarization.
  * Keeps the beginning and appends a truncation marker.
  */
@@ -103,10 +115,11 @@ function truncateForSummary(text: string, maxChars: number): string {
  * This prevents the model from treating it as a conversation to continue.
  * Call convertToLlm() first to handle custom message types.
  *
- * Tool results are truncated to keep the summarization request within
- * reasonable token budgets. Full content is not needed for summarization.
+ * Tool results are truncated per part, and the joined output is capped by an
+ * aggregate budget that keeps the opening of the conversation plus the most
+ * recent parts. Full content is not needed for summarization.
  */
-export function serializeConversation(messages: Message[]): string {
+export function serializeConversation(messages: Message[], options?: { maxChars?: number }): string {
 	const parts: string[] = [];
 
 	for (const msg of messages) {
@@ -158,7 +171,47 @@ export function serializeConversation(messages: Message[]): string {
 		}
 	}
 
-	return parts.join("\n\n");
+	return joinPartsWithinBudget(parts, options?.maxChars ?? CONVERSATION_MAX_CHARS);
+}
+
+/**
+ * Join serialized conversation parts under an aggregate character budget.
+ *
+ * When over budget, keeps the opening part (which usually states the user's
+ * goal) and a contiguous run of the newest parts, replacing the omitted middle
+ * with a marker. Contiguity is preserved so the summary model never sees a
+ * misleading, cherry-picked narrative.
+ */
+function joinPartsWithinBudget(parts: string[], maxChars: number): string {
+	const full = parts.join("\n\n");
+	if (full.length <= maxChars) {
+		return full;
+	}
+
+	const head = truncateForSummary(parts[0], Math.floor(maxChars * CONVERSATION_HEAD_BUDGET_RATIO));
+	// Reserve room for the omission marker and separators so the joined output
+	// stays within maxChars even after head truncation appends its own marker.
+	const tailBudget = maxChars - head.length - 100;
+	const tail: string[] = [];
+	let used = 0;
+	let omittedCount = parts.length - 1;
+	for (let i = parts.length - 1; i >= 1; i--) {
+		const part = parts[i];
+		if (used + part.length + 2 > tailBudget) {
+			break;
+		}
+		tail.unshift(part);
+		used += part.length + 2;
+		omittedCount = i - 1;
+	}
+
+	if (omittedCount === 0) {
+		// Over budget only because the opening part itself was huge; its own
+		// truncation marker already explains the cut.
+		return [head, ...tail].join("\n\n");
+	}
+	const marker = `[... ${omittedCount} earlier conversation ${omittedCount === 1 ? "part" : "parts"} omitted to fit the summarization budget ...]`;
+	return [head, marker, ...tail].join("\n\n");
 }
 
 // ============================================================================
