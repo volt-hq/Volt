@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/volt-ai";
@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionFactory } from "../../src/core/extensions/index.ts";
 import {
 	buildReviewPrompt,
+	createWorkingTreeGuard,
 	formatReviewForNewSession,
 	listBaseBranches,
 	listRecentCommits,
@@ -706,5 +707,111 @@ describe("runReview", () => {
 
 		expect(result.aborted).toBe(true);
 		expect(prompted).toBe(false);
+	});
+});
+
+describe("createWorkingTreeGuard", () => {
+	const tempDirs: string[] = [];
+
+	afterEach(() => {
+		while (tempDirs.length > 0) {
+			const dir = tempDirs.pop();
+			if (dir) {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		}
+	});
+
+	function git(cwd: string, ...args: string[]): void {
+		const result = spawnSync("git", args, { cwd, encoding: "utf-8" });
+		if (result.status !== 0) {
+			throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+		}
+	}
+
+	function createRepo(): string {
+		const dir = join(tmpdir(), `volt-guard-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(dir, { recursive: true });
+		tempDirs.push(dir);
+		git(dir, "init", "--initial-branch=main");
+		git(dir, "config", "user.email", "test@example.com");
+		git(dir, "config", "user.name", "Test");
+		git(dir, "config", "commit.gpgsign", "false");
+		writeFileSync(join(dir, "tracked.txt"), "committed\n");
+		git(dir, "add", "tracked.txt");
+		git(dir, "commit", "-m", "initial");
+		return dir;
+	}
+
+	it("removes files the reviewer created", async () => {
+		const repo = createRepo();
+		const guard = await createWorkingTreeGuard(repo);
+		writeFileSync(join(repo, "scratch.test.js"), "console.log('temp')\n");
+		await guard.restore();
+		expect(existsSync(join(repo, "scratch.test.js"))).toBe(false);
+	});
+
+	it("reverts reviewer edits while preserving the uncommitted changes under review", async () => {
+		const repo = createRepo();
+		// The uncommitted change that is the subject of the review.
+		writeFileSync(join(repo, "tracked.txt"), "under review\n");
+		const guard = await createWorkingTreeGuard(repo);
+		// Reviewer overwrites the file to test a hypothesis and forgets to revert.
+		writeFileSync(join(repo, "tracked.txt"), "reviewer edit\n");
+		await guard.restore();
+		expect(readFileSync(join(repo, "tracked.txt"), "utf-8")).toBe("under review\n");
+	});
+
+	it("restores files the reviewer deleted", async () => {
+		const repo = createRepo();
+		const guard = await createWorkingTreeGuard(repo);
+		rmSync(join(repo, "tracked.txt"));
+		await guard.restore();
+		expect(existsSync(join(repo, "tracked.txt"))).toBe(true);
+		expect(readFileSync(join(repo, "tracked.txt"), "utf-8")).toBe("committed\n");
+	});
+
+	it("is a no-op when the reviewer leaves the tree unchanged", async () => {
+		const repo = createRepo();
+		writeFileSync(join(repo, "tracked.txt"), "under review\n");
+		writeFileSync(join(repo, "untracked.txt"), "user scratch\n");
+		const guard = await createWorkingTreeGuard(repo);
+		await guard.restore();
+		expect(readFileSync(join(repo, "tracked.txt"), "utf-8")).toBe("under review\n");
+		expect(readFileSync(join(repo, "untracked.txt"), "utf-8")).toBe("user scratch\n");
+	});
+
+	it("leaves git-ignored files untouched", async () => {
+		const repo = createRepo();
+		writeFileSync(join(repo, ".gitignore"), "ignored/\n");
+		git(repo, "add", ".gitignore");
+		git(repo, "commit", "-m", "ignore");
+		const guard = await createWorkingTreeGuard(repo);
+		mkdirSync(join(repo, "ignored"), { recursive: true });
+		writeFileSync(join(repo, "ignored", "build.out"), "artifact\n");
+		await guard.restore();
+		expect(existsSync(join(repo, "ignored", "build.out"))).toBe(true);
+	});
+
+	it("only restores once", async () => {
+		const repo = createRepo();
+		const guard = await createWorkingTreeGuard(repo);
+		writeFileSync(join(repo, "scratch.txt"), "temp\n");
+		await guard.restore();
+		expect(existsSync(join(repo, "scratch.txt"))).toBe(false);
+		// A file created after the first restore is not touched by a second call.
+		writeFileSync(join(repo, "scratch.txt"), "temp2\n");
+		await guard.restore();
+		expect(existsSync(join(repo, "scratch.txt"))).toBe(true);
+	});
+
+	it("does nothing outside a git repository", async () => {
+		const dir = join(tmpdir(), `volt-guard-norepo-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(dir, { recursive: true });
+		tempDirs.push(dir);
+		const guard = await createWorkingTreeGuard(dir);
+		writeFileSync(join(dir, "scratch.txt"), "temp\n");
+		await guard.restore();
+		expect(existsSync(join(dir, "scratch.txt"))).toBe(true);
 	});
 });

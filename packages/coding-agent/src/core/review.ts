@@ -13,6 +13,9 @@
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
 import type { AssistantMessage, Model } from "@earendil-works/volt-ai";
 import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
@@ -105,9 +108,18 @@ interface CommandResult {
 	stderr: string;
 }
 
-function runCommand(command: string, args: string[], cwd: string): Promise<CommandResult> {
+function runCommand(
+	command: string,
+	args: string[],
+	cwd: string,
+	env?: Record<string, string>,
+): Promise<CommandResult> {
 	return new Promise((resolve) => {
-		const proc = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+		const proc = spawn(command, args, {
+			cwd,
+			stdio: ["ignore", "pipe", "pipe"],
+			env: env ? { ...process.env, ...env } : process.env,
+		});
 		let stdout = "";
 		let stderr = "";
 		proc.stdout.on("data", (data) => {
@@ -1333,11 +1345,140 @@ function emitReviewWorkflowToolEvent(
 	}
 }
 
+// ============================================================================
+// Working-tree guard
+// ============================================================================
+
+/**
+ * Snapshot/restore guard for the reviewer's working tree.
+ *
+ * The reviewer runs in the user's real cwd so it can execute the project's
+ * tests and reproduce bugs with the real dependencies (node_modules, build
+ * caches, ...). To keep that safe, we snapshot the full working state before
+ * the review and afterward — including on error or abort — revert anything the
+ * reviewer added, modified, or deleted, while preserving the uncommitted
+ * changes that were under review.
+ *
+ * Caveats: files edited by another process during the review may also be
+ * reverted, since the guard cannot distinguish those from reviewer edits;
+ * git-ignored files (e.g. node_modules, build output) are never touched.
+ */
+interface WorkingTreeGuard {
+	restore(): Promise<void>;
+}
+
+export async function createWorkingTreeGuard(cwd: string): Promise<WorkingTreeGuard> {
+	const root = await gitRepoRoot(cwd);
+	const snapshot = root ? await captureWorkingTree(root) : undefined;
+	let restored = false;
+	return {
+		async restore() {
+			if (restored || !root || !snapshot) {
+				return;
+			}
+			restored = true;
+			await restoreWorkingTree(root, snapshot);
+		},
+	};
+}
+
+async function gitRepoRoot(cwd: string): Promise<string | undefined> {
+	const result = await runCommand("git", ["rev-parse", "--show-toplevel"], cwd);
+	return result.ok ? result.stdout.trim() || undefined : undefined;
+}
+
+/** Write a tree object capturing every non-ignored file in the working tree. */
+async function captureWorkingTree(root: string): Promise<string | undefined> {
+	return withTempIndex(async (indexFile) => {
+		const env = { GIT_INDEX_FILE: indexFile };
+		const add = await runCommand("git", ["add", "-A"], root, env);
+		if (!add.ok) {
+			return undefined;
+		}
+		const tree = await runCommand("git", ["write-tree"], root, env);
+		return tree.ok ? tree.stdout.trim() || undefined : undefined;
+	});
+}
+
+/** Revert the working tree back to the snapshot, touching only changed paths. */
+async function restoreWorkingTree(root: string, snapshotTree: string): Promise<void> {
+	await withTempIndex(async (indexFile) => {
+		const env = { GIT_INDEX_FILE: indexFile };
+		const add = await runCommand("git", ["add", "-A"], root, env);
+		if (!add.ok) {
+			return;
+		}
+		const endTreeResult = await runCommand("git", ["write-tree"], root, env);
+		const endTree = endTreeResult.ok ? endTreeResult.stdout.trim() : "";
+		if (!endTree || endTree === snapshotTree) {
+			return; // The reviewer left the working tree as it found it.
+		}
+		const diff = await runCommand(
+			"git",
+			["diff-tree", "-r", "-z", "--no-renames", "--name-status", snapshotTree, endTree],
+			root,
+		);
+		if (!diff.ok) {
+			return;
+		}
+		const { added, changed } = parseNameStatusZ(diff.stdout);
+		// Restore modified/deleted paths from the snapshot, then remove additions.
+		if (changed.length > 0) {
+			await runCommand("git", ["read-tree", snapshotTree], root, env);
+			await runCommand("git", ["checkout-index", "-f", "--", ...changed], root, env);
+		}
+		for (const path of added) {
+			await rm(join(root, path), { force: true });
+		}
+	});
+}
+
+/** Split a `-z --name-status` diff-tree stream into added vs modified/deleted paths. */
+function parseNameStatusZ(stdout: string): { added: string[]; changed: string[] } {
+	const tokens = stdout.split("\0").filter((token) => token.length > 0);
+	const added: string[] = [];
+	const changed: string[] = [];
+	for (let i = 0; i + 1 < tokens.length; i += 2) {
+		const status = tokens[i];
+		const path = tokens[i + 1];
+		if (status.startsWith("A")) {
+			added.push(path);
+		} else {
+			changed.push(path);
+		}
+	}
+	return { added, changed };
+}
+
+async function withTempIndex<T>(fn: (indexFile: string) => Promise<T>): Promise<T> {
+	const dir = await mkdtemp(join(tmpdir(), "volt-review-index-"));
+	const indexFile = join(dir, "index");
+	try {
+		return await fn(indexFile);
+	} finally {
+		await rm(dir, { recursive: true, force: true }).catch(() => {});
+	}
+}
+
 /**
  * Run a review in an isolated in-process agent session.
  * The session is in-memory (not persisted) and disposed when done.
+ *
+ * The reviewer executes in the user's real cwd so it can run the project's
+ * tests and reproduce bugs with real dependencies. A working-tree guard
+ * snapshots the tree first and reverts anything the reviewer adds, modifies,
+ * or deletes once the review finishes — including on error or abort.
  */
 export async function runReview(options: RunReviewOptions): Promise<ReviewRunResult> {
+	const guard = await createWorkingTreeGuard(options.cwd);
+	try {
+		return await runReviewSession(options);
+	} finally {
+		await guard.restore();
+	}
+}
+
+async function runReviewSession(options: RunReviewOptions): Promise<ReviewRunResult> {
 	const inheritedTools = collectParentExtensionTools(options.parentResourceLoader);
 	const resourceLoader = createReviewResourceLoader(options.cwd, options.agentDir);
 	const { session } = await createAgentSession({
