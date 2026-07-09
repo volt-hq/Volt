@@ -137,13 +137,36 @@ async function detectBaseBranch(cwd: string): Promise<string | undefined> {
 	if (originHead.ok) {
 		const ref = originHead.stdout.trim();
 		if (ref) {
-			return ref.replace(/^origin\//, "");
+			// Keep the remote-tracking ref (e.g. "origin/main") rather than stripping
+			// to "main": it always resolves and reflects the fetched upstream instead
+			// of a possibly stale or missing local branch (single-branch/shallow checkouts).
+			return ref;
 		}
 	}
 	for (const candidate of ["main", "master"]) {
 		const exists = await runCommand("git", ["rev-parse", "--verify", "--quiet", candidate], cwd);
 		if (exists.ok) {
 			return candidate;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Resolve a base ref to something that exists. Returns the ref itself when it
+ * resolves, otherwise the matching remote-tracking ref (`origin/<base>`) when
+ * only that exists (e.g. a checkout that has no local copy of the base branch).
+ */
+async function resolveBaseRef(base: string, cwd: string): Promise<string | undefined> {
+	const direct = await runCommand("git", ["rev-parse", "--verify", "--quiet", base], cwd);
+	if (direct.ok) {
+		return base;
+	}
+	if (!base.startsWith("origin/")) {
+		const remote = `origin/${base}`;
+		const remoteExists = await runCommand("git", ["rev-parse", "--verify", "--quiet", remote], cwd);
+		if (remoteExists.ok) {
+			return remote;
 		}
 	}
 	return undefined;
@@ -201,13 +224,13 @@ export async function resolveReviewTarget(
 			};
 		}
 		case "branch": {
-			const base = target.base ?? (await detectBaseBranch(cwd));
-			if (!base) {
+			const requestedBase = target.base ?? (await detectBaseBranch(cwd));
+			if (!requestedBase) {
 				return { error: "Could not detect a base branch. Use /review branch <base>." };
 			}
-			const baseExists = await runCommand("git", ["rev-parse", "--verify", "--quiet", base], cwd);
-			if (!baseExists.ok) {
-				return { error: `Base branch "${base}" not found.` };
+			const base = await resolveBaseRef(requestedBase, cwd);
+			if (!base) {
+				return { error: `Base branch "${requestedBase}" not found.` };
 			}
 			const diffResult = await runCommand("git", ["diff", `${base}...HEAD`], cwd);
 			if (!diffResult.ok) {
@@ -313,29 +336,57 @@ export interface RecentCommit {
 	date: string;
 }
 
-function prioritizeBaseBranches(branches: string[]): string[] {
-	const priority = new Map([
-		["main", 0],
-		["master", 1],
-	]);
-	return [...branches].sort((a, b) => {
-		const aPriority = priority.get(a) ?? 2;
-		const bPriority = priority.get(b) ?? 2;
-		return aPriority === bPriority ? a.localeCompare(b) : aPriority - bPriority;
-	});
+/**
+ * Order base-branch candidates for the picker. Canonical bases come first
+ * (local main/master, then their origin/ equivalents), then other local
+ * branches, then other remote-tracking branches; each tier is sorted
+ * alphabetically. Local vs remote is known from the source lists, so branch
+ * names containing slashes (e.g. `feature/login`) are classified correctly.
+ */
+function orderBaseBranches(local: string[], remote: string[]): string[] {
+	const scored: Array<{ ref: string; tier: number }> = [];
+	const seen = new Set<string>();
+	const add = (ref: string, tier: number): void => {
+		if (!ref || seen.has(ref)) {
+			return;
+		}
+		seen.add(ref);
+		scored.push({ ref, tier });
+	};
+	for (const ref of local) {
+		add(ref, ref === "main" ? 0 : ref === "master" ? 1 : 4);
+	}
+	for (const ref of remote) {
+		add(ref, ref === "origin/main" ? 2 : ref === "origin/master" ? 3 : 5);
+	}
+	return scored
+		.sort((a, b) => (a.tier === b.tier ? a.ref.localeCompare(b.ref) : a.tier - b.tier))
+		.map((entry) => entry.ref);
 }
 
-/** List local branches for the /review base-branch picker. */
-export async function listLocalBranches(cwd: string): Promise<string[] | { error: string }> {
-	const result = await runCommand("git", ["for-each-ref", "--format=%(refname:short)", "refs/heads"], cwd);
-	if (!result.ok) {
-		return { error: `git branch failed: ${result.stderr.trim()}` };
-	}
-	const branches = result.stdout
+function splitBranchLines(stdout: string): string[] {
+	return stdout
 		.split("\n")
 		.map((line) => line.trim())
 		.filter(Boolean);
-	return prioritizeBaseBranches(branches);
+}
+
+/**
+ * List candidate base branches for the /review base-branch picker: local
+ * branches plus remote-tracking branches (e.g. `origin/main`). The `origin/HEAD`
+ * alias (which `%(refname:short)` renders as the bare remote name) is skipped.
+ */
+export async function listBaseBranches(cwd: string): Promise<string[] | { error: string }> {
+	const localResult = await runCommand("git", ["for-each-ref", "--format=%(refname:short)", "refs/heads"], cwd);
+	if (!localResult.ok) {
+		return { error: `git branch failed: ${localResult.stderr.trim()}` };
+	}
+	const local = splitBranchLines(localResult.stdout);
+	const remoteResult = await runCommand("git", ["for-each-ref", "--format=%(refname:short)", "refs/remotes"], cwd);
+	const remote = remoteResult.ok
+		? splitBranchLines(remoteResult.stdout).filter((ref) => ref.includes("/") && !ref.endsWith("/HEAD"))
+		: [];
+	return orderBaseBranches(local, remote);
 }
 
 /** List recent commits on HEAD for the /review commit picker. */

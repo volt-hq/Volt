@@ -98,7 +98,7 @@ import { IrohRemoteHostStateManager } from "../../core/remote/iroh/state-manager
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import {
 	formatReviewWorkflowSummary,
-	listLocalBranches,
+	listBaseBranches,
 	listRecentCommits,
 	parseReviewCommandArgs,
 	REMOTE_REVIEW_TOOL_NAMES,
@@ -7578,13 +7578,13 @@ export class InteractiveMode {
 
 	/** Show a local-branch picker and return the selected base branch. */
 	private async promptForReviewBaseBranch(): Promise<string | undefined> {
-		const branches = await listLocalBranches(this.sessionManager.getCwd());
+		const branches = await listBaseBranches(this.sessionManager.getCwd());
 		if ("error" in branches) {
 			this.showError(branches.error);
 			return undefined;
 		}
 		if (branches.length === 0) {
-			this.showError("No local branches to review against.");
+			this.showError("No branches to review against.");
 			return undefined;
 		}
 		return this.showExtensionSelector("Select base branch", branches);

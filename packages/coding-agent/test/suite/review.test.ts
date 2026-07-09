@@ -9,7 +9,7 @@ import type { ExtensionFactory } from "../../src/core/extensions/index.ts";
 import {
 	buildReviewPrompt,
 	formatReviewForNewSession,
-	listLocalBranches,
+	listBaseBranches,
 	listRecentCommits,
 	MAX_REVIEW_DIFF_CHARS,
 	parseReviewCommandArgs,
@@ -363,6 +363,52 @@ describe("resolveReviewTarget", () => {
 		expect(result).toEqual({ error: 'Base branch "nope" not found.' });
 	});
 
+	/** Publish main to a fresh bare remote and point origin/HEAD at it. */
+	function publishMainToRemote(repo: string): void {
+		const remote = join(tmpdir(), `volt-review-remote-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(remote, { recursive: true });
+		tempDirs.push(remote);
+		git(remote, "init", "--bare", "--initial-branch=main");
+		git(repo, "remote", "add", "origin", remote);
+		git(repo, "push", "origin", "main");
+		git(repo, "remote", "set-head", "origin", "main");
+	}
+
+	it("falls back to the remote-tracking base when the local base branch is absent", async () => {
+		const repo = createRepo();
+		publishMainToRemote(repo);
+		git(repo, "checkout", "-b", "feature");
+		writeFileSync(join(repo, "file.txt"), "one\nfeature\n");
+		git(repo, "add", "file.txt");
+		git(repo, "commit", "-m", "feature change");
+		// Mimic a single-branch/shallow checkout that never created a local `main`.
+		git(repo, "branch", "-D", "main");
+		const result = await resolveReviewTarget({ kind: "branch", base: "main" }, repo);
+		if ("error" in result) {
+			throw new Error(result.error);
+		}
+		expect(result.description).toBe("branch changes vs origin/main");
+		expect(result.diffCommand).toBe("git diff origin/main...HEAD");
+		expect(result.diff).toContain("+feature");
+	});
+
+	it("auto-detects the remote-tracking base from origin/HEAD", async () => {
+		const repo = createRepo();
+		publishMainToRemote(repo);
+		git(repo, "checkout", "-b", "feature");
+		writeFileSync(join(repo, "file.txt"), "one\nfeature\n");
+		git(repo, "add", "file.txt");
+		git(repo, "commit", "-m", "feature change");
+		git(repo, "branch", "-D", "main");
+		const result = await resolveReviewTarget({ kind: "branch" }, repo);
+		if ("error" in result) {
+			throw new Error(result.error);
+		}
+		expect(result.description).toBe("branch changes vs origin/main");
+		expect(result.diffCommand).toBe("git diff origin/main...HEAD");
+		expect(result.diff).toContain("+feature");
+	});
+
 	it("resolves a single commit", async () => {
 		const repo = createRepo();
 		writeFileSync(join(repo, "file.txt"), "one\ntwo\n");
@@ -404,11 +450,29 @@ describe("resolveReviewTarget", () => {
 		git(repo, "checkout", "-b", "master");
 		git(repo, "checkout", "main");
 		git(repo, "checkout", "-b", "alpha");
-		const branches = await listLocalBranches(repo);
+		const branches = await listBaseBranches(repo);
 		if ("error" in branches) {
 			throw new Error(branches.error);
 		}
 		expect(branches).toEqual(["main", "master", "alpha", "zeta"]);
+	});
+
+	it("includes remote-tracking branches after local ones and skips origin/HEAD", async () => {
+		const repo = createRepo();
+		git(repo, "checkout", "-b", "dev");
+		git(repo, "checkout", "-b", "feature/login");
+		git(repo, "checkout", "main");
+		publishMainToRemote(repo);
+		git(repo, "push", "origin", "dev", "feature/login");
+		const branches = await listBaseBranches(repo);
+		if ("error" in branches) {
+			throw new Error(branches.error);
+		}
+		// Canonical bases first (local main, then origin/main), then other locals,
+		// then other remote-tracking branches; the origin/HEAD alias is omitted.
+		expect(branches).toEqual(["main", "origin/main", "dev", "feature/login", "origin/dev", "origin/feature/login"]);
+		expect(branches).not.toContain("origin");
+		expect(branches).not.toContain("origin/HEAD");
 	});
 
 	it("lists recent commits for the picker", async () => {
