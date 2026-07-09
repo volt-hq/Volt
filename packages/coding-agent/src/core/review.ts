@@ -61,23 +61,24 @@ export function parseReviewCommandArgs(argsText: string): {
 	}
 
 	const keyword = tokens[0].toLowerCase();
+	// Reject trailing tokens beyond the keyword's expected arity so mistakes like
+	// `/review pr 42 foo` fail loudly instead of silently dropping the extra args.
+	const tooManyArgs = (max: number): { error: string } | undefined =>
+		tokens.length > max ? { error: `Unexpected arguments after "${tokens[0]}". ${REVIEW_USAGE}` } : undefined;
 	switch (keyword) {
 		case "tools":
-			if (tokens.length > 1) {
-				return { error: `Unexpected arguments after "tools". ${REVIEW_USAGE}` };
-			}
-			return { configureTools: true };
+			return tooManyArgs(1) ?? { configureTools: true };
 		case "uncommitted":
 		case "unstaged":
 		case "working":
-			return { target: { kind: "uncommitted" } };
+			return tooManyArgs(1) ?? { target: { kind: "uncommitted" } };
 		case "branch":
-			return { target: { kind: "branch", base: tokens[1] } };
+			return tooManyArgs(2) ?? { target: { kind: "branch", base: tokens[1] } };
 		case "pr":
-			return { target: { kind: "pr", number: tokens[1] } };
+			return tooManyArgs(2) ?? { target: { kind: "pr", number: tokens[1] } };
 		case "commit":
 			// Without a SHA the caller shows a commit picker.
-			return { target: { kind: "commit", sha: tokens[1] } };
+			return tooManyArgs(2) ?? { target: { kind: "commit", sha: tokens[1] } };
 		default:
 			return { error: `Unknown review target "${tokens[0]}". ${REVIEW_USAGE}` };
 	}

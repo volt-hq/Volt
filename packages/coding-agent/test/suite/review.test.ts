@@ -57,6 +57,17 @@ describe("parseReviewCommandArgs", () => {
 	it("errors on unknown targets", () => {
 		expect(parseReviewCommandArgs("everything").error).toMatch(/Unknown review target/);
 	});
+
+	it("rejects unexpected trailing arguments for every target", () => {
+		expect(parseReviewCommandArgs("uncommitted now").error).toMatch(/Unexpected arguments/);
+		expect(parseReviewCommandArgs("working extra").error).toMatch(/Unexpected arguments/);
+		expect(parseReviewCommandArgs("branch main extra").error).toMatch(/Unexpected arguments/);
+		expect(parseReviewCommandArgs("pr 42 foo").error).toMatch(/Unexpected arguments/);
+		expect(parseReviewCommandArgs("commit abc def").error).toMatch(/Unexpected arguments/);
+		// The single expected argument is still accepted.
+		expect(parseReviewCommandArgs("branch main").target).toEqual({ kind: "branch", base: "main" });
+		expect(parseReviewCommandArgs("pr 42").target).toEqual({ kind: "pr", number: "42" });
+	});
 });
 
 describe("parseReviewOutput", () => {
