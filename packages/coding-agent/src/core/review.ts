@@ -643,13 +643,35 @@ interface JsonCandidate {
 	text: string;
 }
 
+const NAMED_XML_ENTITIES: Record<string, string> = {
+	quot: '"',
+	apos: "'",
+	lt: "<",
+	gt: ">",
+	amp: "&",
+};
+
+// Matches the five named entities plus decimal (&#38;) and hex (&#x26;/&#X26;)
+// character references. A single global pass decodes each reference exactly once
+// left-to-right, so `&amp;lt;` yields `&lt;` (no double-decode).
+const XML_ENTITY_PATTERN = /&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|(quot|apos|lt|gt|amp));/g;
+
 function decodeXmlEntities(value: string): string {
-	return value
-		.replace(/&quot;/g, '"')
-		.replace(/&apos;/g, "'")
-		.replace(/&lt;/g, "<")
-		.replace(/&gt;/g, ">")
-		.replace(/&amp;/g, "&");
+	return value.replace(
+		XML_ENTITY_PATTERN,
+		(match, dec: string | undefined, hex: string | undefined, named: string | undefined) => {
+			if (named !== undefined) {
+				return NAMED_XML_ENTITIES[named] ?? match;
+			}
+			const code = dec !== undefined ? Number.parseInt(dec, 10) : Number.parseInt(hex ?? "", 16);
+			// Leave invalid, out-of-range, or surrogate code points as-is rather than
+			// producing replacement or lone-surrogate characters that could break JSON.
+			if (!Number.isFinite(code) || code < 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) {
+				return match;
+			}
+			return String.fromCodePoint(code);
+		},
+	);
 }
 
 /** Unwrap CDATA sections; the enclosed text is literal and needs no entity decoding. */

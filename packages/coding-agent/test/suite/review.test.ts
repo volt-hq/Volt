@@ -206,14 +206,14 @@ describe("parseReviewOutput", () => {
 		expect(parseReviewOutput(text)?.findings[0]?.body).toBe(intendedBody);
 	});
 
-	it("drops a payload escaped with numeric character references (known limitation)", () => {
+	it("recovers a payload escaped with numeric and hex character references", () => {
 		const raw = JSON.stringify({ findings: [{ title: "num", body: "a<b" }] });
+		// Decimal for the structural quotes, hex for the angle bracket.
 		const numericEscaped = raw.replace(/"/g, "&#34;").replace(/</g, "&#x3C;");
 		const text = ["<response>", "  <payload>", numericEscaped, "  </payload>", "</response>"].join("\n");
-		// decodeXmlEntities only handles the five named entities, so numeric/hex
-		// references cannot be recovered and the payload is dropped. Pinned so a
-		// future decoder change that adds numeric support updates this deliberately.
-		expect(parseReviewOutput(text)).toBeUndefined();
+		const parsed = parseReviewOutput(text);
+		expect(parsed?.findings[0]?.title).toBe("num");
+		expect(parsed?.findings[0]?.body).toBe("a<b");
 	});
 
 	it("uses the last parseable json block", () => {
