@@ -113,6 +113,14 @@ export interface CreateAgentSessionOptions {
 	subagentToolManager?: SubagentToolManager;
 	/** Optional manager enabling the native MCP gateway tool when selected. */
 	mcpManager?: McpManager;
+	/**
+	 * Skip MCP entirely for this session: no default MCP manager is created, no
+	 * MCP servers are started, and the native MCP gateway/direct tools are
+	 * unavailable. Overrides `mcpManager` when both are set. Used by isolated
+	 * sessions (e.g. the built-in reviewer) that must not spin up the user's MCP
+	 * servers.
+	 */
+	disableMcp?: boolean;
 }
 
 /** Result from createAgentSession */
@@ -311,7 +319,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		await manager.startEagerServers().catch(() => undefined);
 		return manager;
 	};
-	const mcpManager = options.mcpManager ?? (await createDefaultMcpManager());
+	const mcpManager = options.disableMcp ? undefined : (options.mcpManager ?? (await createDefaultMcpManager()));
 
 	const defaultActiveToolNames: string[] = [...DEFAULT_ACTIVE_TOOL_NAMES];
 	if (options.subagentToolManager) {
@@ -474,7 +482,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		hostInteraction: options.hostInteraction,
 		subagentToolManager: options.subagentToolManager,
 		mcpManager,
-		mcpManagerFactory: options.mcpManager ? undefined : createDefaultMcpManager,
+		mcpManagerFactory: options.disableMcp || options.mcpManager ? undefined : createDefaultMcpManager,
 	});
 	const extensionsResult = resourceLoader.getExtensions();
 

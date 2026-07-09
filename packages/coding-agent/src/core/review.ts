@@ -6,9 +6,11 @@
  * it, and parses the structured findings from the reviewer's final message.
  *
  * The review session is intentionally separate from the user's session: it has
- * its own context window, its own system prompt, and no extensions, skills, or
- * prompt templates. After the review completes the caller starts a fresh
- * session seeded only with the findings.
+ * its own context window and its own reviewer system prompt. It loads the
+ * project's context files (AGENTS.md) and inherits the user's configured
+ * extension tools, but excludes user extensions, skills, prompt templates,
+ * themes, and subagents, and does not start MCP servers. After the review
+ * completes the caller starts a fresh session seeded only with the findings.
  */
 
 import { spawn } from "node:child_process";
@@ -818,7 +820,13 @@ export function formatReviewForNewSession(
 // Running the review
 // ============================================================================
 
-/** Minimal resource loader for the isolated review session: no extensions by default, no skills, prompts, or themes. */
+/**
+ * Minimal resource loader for the isolated review session: it loads the
+ * project's context files (AGENTS.md) but provides no user extensions, skills,
+ * prompt templates, themes, or subagents. Configured extension *tools* are
+ * inherited separately (see collectParentExtensionTools) and passed as
+ * customTools in runReviewSession.
+ */
 export function createReviewResourceLoader(cwd: string, agentDir: string): ResourceLoader {
 	const extensionsResult = { extensions: [], errors: [], runtime: createExtensionRuntime() };
 	const agentsFiles = loadProjectContextFiles({ cwd, agentDir });
@@ -1493,6 +1501,8 @@ async function runReviewSession(options: RunReviewOptions): Promise<ReviewRunRes
 		resourceLoader,
 		customTools: inheritedTools.length > 0 ? inheritedTools : undefined,
 		tools: options.tools,
+		// Isolated reviewer: never spin up (or tear down) the user's MCP servers.
+		disableMcp: true,
 	});
 
 	// An abort during session creation fires before the listener below is
