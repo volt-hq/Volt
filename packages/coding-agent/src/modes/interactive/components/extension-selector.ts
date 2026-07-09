@@ -18,6 +18,7 @@ export interface ExtensionSelectorOptions {
 export class ExtensionSelectorComponent extends Container {
 	private options: string[];
 	private selectedIndex = 0;
+	private maxVisible: number;
 	private listContainer: Container;
 	private onSelectCallback: (option: string) => void;
 	private onCancelCallback: () => void;
@@ -40,6 +41,14 @@ export class ExtensionSelectorComponent extends Container {
 		this.onCancelCallback = onCancel;
 		this.onToggleToolsExpanded = opts?.onToggleToolsExpanded;
 		this.baseTitle = title;
+
+		// Cap the visible window so long lists (e.g. many branches) don't fill the
+		// terminal; the list scrolls around the selection instead. Chrome accounts
+		// for the two borders, three spacers, the title block, the hint row, and the
+		// scroll indicator, leaving at least a few rows on tiny terminals.
+		const rows = opts?.tui?.terminal.rows ?? 24;
+		const titleLines = title.split("\n").length;
+		this.maxVisible = Math.max(5, rows - (titleLines + 8));
 
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
@@ -79,12 +88,25 @@ export class ExtensionSelectorComponent extends Container {
 
 	private updateList(): void {
 		this.listContainer.clear();
-		for (let i = 0; i < this.options.length; i++) {
+
+		const total = this.options.length;
+		const startIndex = Math.max(
+			0,
+			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), total - this.maxVisible),
+		);
+		const endIndex = Math.min(startIndex + this.maxVisible, total);
+
+		for (let i = startIndex; i < endIndex; i++) {
 			const isSelected = i === this.selectedIndex;
 			const text = isSelected
 				? theme.fg("accent", "→ ") + theme.fg("accent", this.options[i])
 				: `  ${theme.fg("text", this.options[i])}`;
 			this.listContainer.addChild(new Text(text, 1, 0));
+		}
+
+		// Show a position indicator when the list is scrolled/windowed.
+		if (startIndex > 0 || endIndex < total) {
+			this.listContainer.addChild(new Text(theme.fg("muted", `  (${this.selectedIndex + 1}/${total})`), 1, 0));
 		}
 	}
 
