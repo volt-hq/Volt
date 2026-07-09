@@ -40,6 +40,7 @@ async function requestStatus(agentDir: string): Promise<StatusResult | undefined
 		socketPath: probe.socketPath,
 		client: "cli",
 		version: VERSION,
+		authToken: probe.authToken,
 		reconnect: false,
 	});
 	try {
@@ -59,6 +60,8 @@ async function daemonStart(agentDir: string): Promise<void> {
 			);
 		} else if (result.state === "unresponsive") {
 			console.error("Error: voltd socket is occupied but not responding; not starting a second daemon.");
+		} else if (result.state === "auth-failed") {
+			console.error("Error: voltd rejected the local daemon metadata; not starting a second daemon.");
 		} else if (result.state === "shutting-down") {
 			console.error("Error: existing voltd did not finish shutting down within the timeout.");
 		} else {
@@ -147,6 +150,7 @@ async function daemonStop(agentDir: string): Promise<void> {
 		socketPath: probe.socketPath,
 		client: "cli",
 		version: VERSION,
+		authToken: probe.authToken,
 		reconnect: false,
 	});
 	try {
@@ -271,6 +275,7 @@ async function daemonKeepAwake(agentDir: string, args: string[]): Promise<void> 
 		socketPath: probe.socketPath,
 		client: "cli",
 		version: VERSION,
+		authToken: probe.authToken,
 		reconnect: false,
 	});
 	try {
@@ -427,7 +432,11 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 				return true;
 			}
 			const code = await runVoltDaemon({ agentDir, foreground: true }, [createIrohDaemonService()]);
-			process.exitCode = code;
+			// The run loop resolves only after shutdown() has awaited all cleanup, but
+			// the native iroh handle can keep the event loop alive afterwards (notably
+			// on Windows), leaving a zombie that clients still probe as "draining".
+			// Exit deterministically now that teardown is complete.
+			process.exit(code);
 			return true;
 		}
 		default:

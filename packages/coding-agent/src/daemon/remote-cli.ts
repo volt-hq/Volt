@@ -66,6 +66,7 @@ async function connectToDaemon(options: { autoStart: boolean }): Promise<RemoteC
 		socketPath: probe.socketPath,
 		client: "cli",
 		version: VERSION,
+		authToken: probe.authToken,
 		reconnect: false,
 		onEvent: (event) => {
 			for (const handler of handlers) {

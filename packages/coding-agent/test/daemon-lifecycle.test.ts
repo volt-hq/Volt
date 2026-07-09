@@ -1,13 +1,20 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createDaemonClient } from "../src/daemon/control-client.ts";
 import type { ControlEvent } from "../src/daemon/control-protocol.ts";
-import { probeControlSocket } from "../src/daemon/control-server.ts";
 import { createDaemonLogger } from "../src/daemon/log.ts";
 import { readPidfile, runVoltDaemon, VOLTD_EXIT_ALREADY_RUNNING } from "../src/daemon/main.ts";
 import { getDaemonPaths } from "../src/daemon/paths.ts";
+import { type DaemonProbeResult, ensureDaemonRunning, probeDaemon, waitForDaemonExit } from "../src/daemon/spawn.ts";
+
+// A leftover regular file at the socket path is a POSIX-only failure mode:
+// Windows control sockets are named pipes (\\.\pipe\...) with no on-disk
+// entry, and the OS removes the pipe when the owning process exits.
+const posixIt = process.platform === "win32" ? it.skip : it;
+const win32It = process.platform === "win32" ? it : it.skip;
 
 describe("voltd lifecycle", () => {
 	let agentDir: string;
@@ -20,23 +27,28 @@ describe("voltd lifecycle", () => {
 		rmSync(agentDir, { recursive: true, force: true });
 	});
 
+	async function waitForDaemon(): Promise<DaemonProbeResult> {
+		let status = await probeDaemon(agentDir);
+		for (let attempt = 0; !status.healthy && attempt < 50; attempt++) {
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			status = await probeDaemon(agentDir);
+		}
+		expect(status.healthy).toBe(true);
+		return status;
+	}
+
 	it("serves status, rejects a second instance, and shuts down gracefully", async () => {
 		const paths = getDaemonPaths(agentDir);
 		const daemon = runVoltDaemon({ agentDir, foreground: false });
 
 		// Probe until healthy.
-		let status = await probeControlSocket(paths.socketPath, { version: "test" });
-		for (let attempt = 0; status.kind !== "healthy" && attempt < 50; attempt++) {
-			await new Promise((resolve) => setTimeout(resolve, 100));
-			status = await probeControlSocket(paths.socketPath, { version: "test" });
-		}
-		expect(status.kind).toBe("healthy");
-		expect(status.kind === "healthy" ? status.status.pid : undefined).toBe(process.pid);
+		const status = await waitForDaemon();
+		expect(status.pid).toBe(process.pid);
 
 		// Pidfile is advisory but present and truthful.
 		const pidfile = readPidfile(paths.pidfilePath);
 		expect(pidfile?.pid).toBe(process.pid);
-		expect(pidfile?.socketPath).toBe(paths.socketPath);
+		expect(pidfile?.socketPath).toBe(status.socketPath);
 
 		// A second daemon on the same agent dir exits with already_running.
 		await expect(runVoltDaemon({ agentDir, foreground: false })).resolves.toBe(VOLTD_EXIT_ALREADY_RUNNING);
@@ -44,9 +56,10 @@ describe("voltd lifecycle", () => {
 		// Control client sees the shutdown broadcast on graceful shutdown.
 		const events: ControlEvent[] = [];
 		const client = createDaemonClient({
-			socketPath: paths.socketPath,
+			socketPath: status.socketPath,
 			client: "cli",
 			version: "test",
+			authToken: status.authToken,
 			reconnect: false,
 			onEvent: (event) => events.push(event),
 		});
@@ -66,42 +79,143 @@ describe("voltd lifecycle", () => {
 		expect(auditLines.map((line) => line.type)).toEqual(["daemon_started", "daemon_shutdown"]);
 	}, 20_000);
 
-	it("recovers from a stale socket file", async () => {
-		const paths = getDaemonPaths(agentDir);
-		mkdirSync(paths.daemonDir, { recursive: true, mode: 0o700 });
-		// A leftover regular file at the socket path produces EADDRINUSE on bind.
-		writeFileSync(paths.socketPath, "", { mode: 0o600 });
-		const daemon = runVoltDaemon({ agentDir, foreground: false });
-		let status = await probeControlSocket(paths.socketPath, { version: "test" });
-		for (let attempt = 0; status.kind !== "healthy" && attempt < 50; attempt++) {
-			await new Promise((resolve) => setTimeout(resolve, 100));
-			status = await probeControlSocket(paths.socketPath, { version: "test" });
-		}
-		expect(status.kind).toBe("healthy");
-		const client = createDaemonClient({
-			socketPath: paths.socketPath,
-			client: "cli",
-			version: "test",
-			reconnect: false,
-		});
-		await client.request({ type: "shutdown" });
-		await client.close();
-		await expect(daemon).resolves.toBe(0);
-	}, 20_000);
+	posixIt(
+		"recovers from a stale socket file",
+		async () => {
+			const paths = getDaemonPaths(agentDir);
+			mkdirSync(paths.daemonDir, { recursive: true, mode: 0o700 });
+			// A leftover regular file at the socket path produces EADDRINUSE on bind.
+			writeFileSync(paths.socketPath, "", { mode: 0o600 });
+			const daemon = runVoltDaemon({ agentDir, foreground: false });
+			const status = await waitForDaemon();
+			const client = createDaemonClient({
+				socketPath: status.socketPath,
+				client: "cli",
+				version: "test",
+				authToken: status.authToken,
+				reconnect: false,
+			});
+			await client.request({ type: "shutdown" });
+			await client.close();
+			await expect(daemon).resolves.toBe(0);
+		},
+		20_000,
+	);
+
+	win32It(
+		"uses a fresh Windows pipe when the legacy default pipe was pre-created",
+		async () => {
+			const paths = getDaemonPaths(agentDir);
+			const precreatedPipe = createServer((socket) => {
+				socket.destroy();
+			});
+			await new Promise<void>((resolve, reject) => {
+				precreatedPipe.once("error", reject);
+				precreatedPipe.listen(paths.socketPath, () => {
+					precreatedPipe.off("error", reject);
+					resolve();
+				});
+			});
+
+			let daemon: Promise<number> | undefined;
+			let daemonSocketPath: string | undefined;
+			let daemonAuthToken: string | undefined;
+			let shutdownRequested = false;
+			try {
+				daemon = runVoltDaemon({ agentDir, foreground: false });
+				const status = await waitForDaemon();
+				daemonSocketPath = status.socketPath;
+				daemonAuthToken = status.authToken;
+				expect(daemonSocketPath).toBeDefined();
+				expect(daemonSocketPath).not.toBe(paths.socketPath);
+				const client = createDaemonClient({
+					socketPath: daemonSocketPath,
+					client: "cli",
+					version: "test",
+					authToken: daemonAuthToken,
+					reconnect: false,
+				});
+				try {
+					await client.request({ type: "shutdown" });
+					shutdownRequested = true;
+				} finally {
+					await client.close();
+				}
+				await expect(daemon).resolves.toBe(0);
+			} finally {
+				if (!shutdownRequested && daemonSocketPath) {
+					const client = createDaemonClient({
+						socketPath: daemonSocketPath,
+						client: "cli",
+						version: "test",
+						authToken: daemonAuthToken,
+						reconnect: false,
+					});
+					await client.request({ type: "shutdown" }).catch(() => {});
+					await client.close().catch(() => {});
+					await daemon?.catch(() => {});
+				}
+				await new Promise<void>((resolve) => {
+					precreatedPipe.close(() => resolve());
+				});
+			}
+		},
+		20_000,
+	);
+
+	win32It(
+		"auto-starts on a fresh pipe when the legacy default pipe is unresponsive",
+		async () => {
+			const paths = getDaemonPaths(agentDir);
+			const precreatedPipe = createServer((socket) => {
+				socket.destroy();
+			});
+			await new Promise<void>((resolve, reject) => {
+				precreatedPipe.once("error", reject);
+				precreatedPipe.listen(paths.socketPath, () => {
+					precreatedPipe.off("error", reject);
+					resolve();
+				});
+			});
+			try {
+				const result = await ensureDaemonRunning(agentDir);
+				expect(result.healthy).toBe(true);
+				expect(result.spawned).toBe(true);
+				expect(result.socketPath).not.toBe(paths.socketPath);
+				const client = createDaemonClient({
+					socketPath: result.socketPath,
+					client: "cli",
+					version: "test",
+					authToken: result.authToken,
+					reconnect: false,
+				});
+				await client.request({ type: "shutdown" });
+				await client.close();
+				expect(
+					await waitForDaemonExit({
+						agentDir,
+						pid: result.pid,
+						socketPath: result.socketPath,
+						timeoutMs: 10_000,
+					}),
+				).toBe("exited");
+			} finally {
+				await new Promise<void>((resolve) => {
+					precreatedPipe.close(() => resolve());
+				});
+			}
+		},
+		30_000,
+	);
 
 	it("request/response correlation works over the control client", async () => {
-		const paths = getDaemonPaths(agentDir);
 		const daemon = runVoltDaemon({ agentDir, foreground: false });
-		let healthy = await probeControlSocket(paths.socketPath, { version: "test" });
-		for (let attempt = 0; healthy.kind !== "healthy" && attempt < 50; attempt++) {
-			await new Promise((resolve) => setTimeout(resolve, 100));
-			healthy = await probeControlSocket(paths.socketPath, { version: "test" });
-		}
-		expect(healthy.kind).toBe("healthy");
+		const healthy = await waitForDaemon();
 		const client = createDaemonClient({
-			socketPath: paths.socketPath,
+			socketPath: healthy.socketPath,
 			client: "tui",
 			version: "test",
+			authToken: healthy.authToken,
 			reconnect: false,
 		});
 		const [statusResponse, clientsResponse, unsupported] = await Promise.all([
@@ -121,7 +235,6 @@ describe("voltd lifecycle", () => {
 		// Regression: the broadcast used to run AFTER the extension shutdown loop,
 		// which can drain streaming runtimes for up to 60s — control clients
 		// waited blind for the whole drain.
-		const paths = getDaemonPaths(agentDir);
 		let releaseExtension: () => void = () => {};
 		const extensionGate = new Promise<void>((resolve) => {
 			releaseExtension = resolve;
@@ -135,18 +248,14 @@ describe("voltd lifecycle", () => {
 				},
 			}),
 		]);
-		let healthy = await probeControlSocket(paths.socketPath, { version: "test" });
-		for (let attempt = 0; healthy.kind !== "healthy" && attempt < 50; attempt++) {
-			await new Promise((resolve) => setTimeout(resolve, 100));
-			healthy = await probeControlSocket(paths.socketPath, { version: "test" });
-		}
-		expect(healthy.kind).toBe("healthy");
+		const healthy = await waitForDaemon();
 
 		const events: ControlEvent[] = [];
 		const client = createDaemonClient({
-			socketPath: paths.socketPath,
+			socketPath: healthy.socketPath,
 			client: "cli",
 			version: "test",
+			authToken: healthy.authToken,
 			reconnect: false,
 			onEvent: (event) => events.push(event),
 		});

@@ -12,9 +12,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDaemonClient } from "../src/daemon/control-client.ts";
 import type { ControlEvent, ControlResponse } from "../src/daemon/control-protocol.ts";
-import { probeControlSocket } from "../src/daemon/control-server.ts";
 import { runVoltDaemon } from "../src/daemon/main.ts";
 import { getDaemonPaths } from "../src/daemon/paths.ts";
+import { type DaemonProbeResult, probeDaemon } from "../src/daemon/spawn.ts";
 
 class FakeChild extends EventEmitter {
 	pid = 4242;
@@ -49,13 +49,14 @@ describe("voltd keep_awake_set", () => {
 		rmSync(agentDir, { recursive: true, force: true });
 	});
 
-	async function waitForHealthy(socketPath: string): Promise<void> {
-		let status = await probeControlSocket(socketPath, { version: "test" });
-		for (let attempt = 0; status.kind !== "healthy" && attempt < 50; attempt++) {
+	async function waitForHealthy(): Promise<DaemonProbeResult> {
+		let status = await probeDaemon(agentDir);
+		for (let attempt = 0; !status.healthy && attempt < 50; attempt++) {
 			await new Promise((resolve) => setTimeout(resolve, 100));
-			status = await probeControlSocket(socketPath, { version: "test" });
+			status = await probeDaemon(agentDir);
 		}
-		expect(status.kind).toBe("healthy");
+		expect(status.healthy).toBe(true);
+		return status;
 	}
 
 	it("toggles, broadcasts, persists, and re-applies on restart", async () => {
@@ -66,14 +67,15 @@ describe("voltd keep_awake_set", () => {
 			foreground: false,
 			keepAwake: { platform: "darwin", spawn: fake.spawn },
 		});
-		await waitForHealthy(paths.socketPath);
+		const daemonStatus = await waitForHealthy();
 		expect(fake.spawn).not.toHaveBeenCalled();
 
 		const events: ControlEvent[] = [];
 		const client = createDaemonClient({
-			socketPath: paths.socketPath,
+			socketPath: daemonStatus.socketPath,
 			client: "tui",
 			version: "test",
+			authToken: daemonStatus.authToken,
 			reconnect: false,
 			onEvent: (event) => events.push(event),
 		});
@@ -119,14 +121,15 @@ describe("voltd keep_awake_set", () => {
 			foreground: false,
 			keepAwake: { platform: "darwin", spawn: restartFake.spawn },
 		});
-		await waitForHealthy(paths.socketPath);
+		const restartStatus = await waitForHealthy();
 		expect(restartFake.spawn).toHaveBeenCalledTimes(1);
 
 		// Disable: child killed, persisted off.
 		const stopClient = createDaemonClient({
-			socketPath: paths.socketPath,
+			socketPath: restartStatus.socketPath,
 			client: "cli",
 			version: "test",
+			authToken: restartStatus.authToken,
 			reconnect: false,
 		});
 		const disabled = await stopClient.request({ type: "keep_awake_set", enabled: false });

@@ -8,7 +8,6 @@ import { decodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts
 import type { IrohBiStreamLike } from "../src/core/rpc/iroh-transport.ts";
 import { createDaemonClient, type DaemonClient } from "../src/daemon/control-client.ts";
 import type { ControlEvent } from "../src/daemon/control-protocol.ts";
-import { probeControlSocket } from "../src/daemon/control-server.ts";
 import { loadIrohModule } from "../src/daemon/iroh-native.ts";
 import {
 	createIrohDaemonService,
@@ -16,7 +15,7 @@ import {
 	VOLT_PRODUCTION_RELAY_URLS,
 } from "../src/daemon/iroh-service.ts";
 import { runVoltDaemon } from "../src/daemon/main.ts";
-import { getDaemonPaths } from "../src/daemon/paths.ts";
+import { type DaemonProbeResult, probeDaemon } from "../src/daemon/spawn.ts";
 import { readLineFromIroh } from "../src/daemon/workspace-streams.ts";
 
 const native = loadIrohModule();
@@ -125,17 +124,17 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		workspaceDir = join(agentDir, "ws");
 		mkdirSync(workspaceDir, { recursive: true });
 		daemon = runVoltDaemon({ agentDir, foreground: false }, [createIrohDaemonService({ relayMode: "disabled" })]);
-		const paths = getDaemonPaths(agentDir);
-		let status = await probeControlSocket(paths.socketPath, { version: "test" });
-		for (let attempt = 0; status.kind !== "healthy" && attempt < 100; attempt++) {
+		let status: DaemonProbeResult = await probeDaemon(agentDir);
+		for (let attempt = 0; !status.healthy && attempt < 100; attempt++) {
 			await new Promise((resolve) => setTimeout(resolve, 100));
-			status = await probeControlSocket(paths.socketPath, { version: "test" });
+			status = await probeDaemon(agentDir);
 		}
-		expect(status.kind).toBe("healthy");
+		expect(status.healthy).toBe(true);
 		control = createDaemonClient({
-			socketPath: paths.socketPath,
+			socketPath: status.socketPath,
 			client: "cli",
 			version: "test",
+			authToken: status.authToken,
 			reconnect: false,
 			onEvent: (event) => controlEvents.push(event),
 		});

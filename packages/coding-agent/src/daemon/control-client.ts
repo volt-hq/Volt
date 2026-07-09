@@ -24,6 +24,8 @@ export interface DaemonClientOptions {
 	socketPath: string;
 	client: ControlClientKind;
 	version: string;
+	/** Per-daemon instance token read from the local pidfile. */
+	authToken?: string;
 	/** Capabilities advertised in the control hello (e.g. "worktrees"). */
 	capabilities?: string[];
 	onEvent?(event: ControlEvent): void;
@@ -195,6 +197,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 						pid: process.pid,
 						version: options.version,
 						client: options.client,
+						...(options.authToken === undefined ? {} : { controlToken: options.authToken }),
 						...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
 					}),
 				);

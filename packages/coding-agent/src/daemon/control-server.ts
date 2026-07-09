@@ -48,6 +48,8 @@ export interface ControlServerHandlers {
 export interface ControlServerOptions {
 	socketPath: string;
 	version: string;
+	/** Optional local control-plane token published in the daemon pidfile. */
+	authToken?: string;
 	handlers: ControlServerHandlers;
 }
 
@@ -65,7 +67,7 @@ export type ControlSocketProbe =
 	| { kind: "healthy"; status: ControlStatusProbe }
 	| {
 			kind: "live-rejected";
-			reason: "shutting_down" | "protocol_mismatch" | "bad_relay_token" | "fatal" | "other";
+			reason: "shutting_down" | "protocol_mismatch" | "bad_relay_token" | "auth_failed" | "fatal" | "other";
 			error?: string;
 			version?: string;
 			protocolVersion?: number;
@@ -76,7 +78,7 @@ export type ControlSocketProbe =
 let controlConnectionSequence = 0;
 
 export async function startControlServer(options: ControlServerOptions): Promise<ControlServer> {
-	const { socketPath, version, handlers } = options;
+	const { socketPath, version, authToken, handlers } = options;
 	const connections = new Map<string, ControlConnectionImpl>();
 
 	class ControlConnectionImpl implements ControlConnection {
@@ -142,6 +144,17 @@ export async function startControlServer(options: ControlServerOptions): Promise
 					type: "hello_ack",
 					ok: false,
 					error: "protocol_mismatch",
+					version,
+					protocolVersion: PROTOCOL_VERSION,
+				};
+				socket.end(encodeControlLine(ack));
+				return false;
+			}
+			if (hello.role === "control" && authToken !== undefined && hello.controlToken !== authToken) {
+				const ack: HelloAck = {
+					type: "hello_ack",
+					ok: false,
+					error: "auth_failed",
 					version,
 					protocolVersion: PROTOCOL_VERSION,
 				};
@@ -311,7 +324,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
  */
 export async function probeControlSocket(
 	socketPath: string,
-	options: { version: string; timeoutMs?: number } = { version: "0.0.0" },
+	options: { version: string; timeoutMs?: number; authToken?: string } = { version: "0.0.0" },
 ): Promise<ControlSocketProbe> {
 	const timeoutMs = options.timeoutMs ?? 2000;
 	return new Promise((resolve) => {
@@ -363,6 +376,7 @@ export async function probeControlSocket(
 				pid: process.pid,
 				version: options.version,
 				client: "cli",
+				...(options.authToken === undefined ? {} : { controlToken: options.authToken }),
 			};
 			socket.write(encodeControlLine(hello));
 			socket.write(encodeControlLine({ type: "status", id: "probe" }));

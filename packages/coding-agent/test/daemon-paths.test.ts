@@ -2,10 +2,17 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } fr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ensureDaemonDirs, getDaemonPaths } from "../src/daemon/paths.ts";
+import {
+	createDaemonControlSocketPath,
+	ensureDaemonDirs,
+	getDaemonPaths,
+	getDaemonSocketPath,
+	isWindowsNamedPipePath,
+} from "../src/daemon/paths.ts";
 
 // Unix permission semantics only.
 const posixIt = process.platform === "win32" ? it.skip : it;
+const win32It = process.platform === "win32" ? it : it.skip;
 
 describe("daemon fallback socket dir hardening", () => {
 	let dir: string | undefined;
@@ -37,5 +44,50 @@ describe("daemon fallback socket dir hardening", () => {
 		writeFileSync(socketDir, "not a dir");
 		const paths = { ...getDaemonPaths(agentDir), socketPath: join(socketDir, "voltd.sock") };
 		expect(() => ensureDaemonDirs(paths)).toThrow();
+	});
+});
+
+describe("windows named-pipe control socket", () => {
+	let dir: string | undefined;
+
+	afterEach(() => {
+		if (dir) {
+			rmSync(dir, { recursive: true, force: true });
+			dir = undefined;
+		}
+	});
+
+	it("classifies named-pipe paths and rejects filesystem paths", () => {
+		expect(isWindowsNamedPipePath("\\\\.\\pipe\\voltd-abc123")).toBe(true);
+		expect(isWindowsNamedPipePath("\\\\?\\pipe\\voltd-abc123")).toBe(true);
+		expect(isWindowsNamedPipePath("C:\\Users\\x\\.volt\\agent\\daemon\\voltd.sock")).toBe(false);
+		expect(isWindowsNamedPipePath("/home/x/.volt/agent/daemon/voltd.sock")).toBe(false);
+	});
+
+	it("ensureDaemonDirs skips the (nonexistent) pipe parent directory", () => {
+		dir = mkdtempSync(join(tmpdir(), "voltd-paths-"));
+		const agentDir = join(dir, "agent");
+		const paths = { ...getDaemonPaths(agentDir), socketPath: "\\\\.\\pipe\\voltd-regression" };
+		expect(() => ensureDaemonDirs(paths)).not.toThrow();
+		expect(statSync(paths.daemonDir).isDirectory()).toBe(true);
+	});
+
+	win32It("getDaemonSocketPath returns a stable secret-derived pipe path per agent dir", () => {
+		dir = mkdtempSync(join(tmpdir(), "voltd-paths-"));
+		const agentDir = join(dir, "agent");
+		const socketPath = getDaemonSocketPath(agentDir);
+		expect(isWindowsNamedPipePath(socketPath)).toBe(true);
+		expect(getDaemonSocketPath(agentDir)).toBe(socketPath);
+		expect(getDaemonSocketPath(join(dir, "other-agent"))).not.toBe(socketPath);
+	});
+
+	win32It("createDaemonControlSocketPath returns fresh per-instance pipe paths", () => {
+		dir = mkdtempSync(join(tmpdir(), "voltd-paths-"));
+		const agentDir = join(dir, "agent");
+		const first = createDaemonControlSocketPath(agentDir);
+		const second = createDaemonControlSocketPath(agentDir);
+		expect(isWindowsNamedPipePath(first)).toBe(true);
+		expect(isWindowsNamedPipePath(second)).toBe(true);
+		expect(first).not.toBe(second);
 	});
 });

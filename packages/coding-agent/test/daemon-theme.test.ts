@@ -12,9 +12,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getCurrentThemeName } from "../src/core/theme/runtime.ts";
 import { createDaemonClient } from "../src/daemon/control-client.ts";
 import type { ControlEvent } from "../src/daemon/control-protocol.ts";
-import { probeControlSocket } from "../src/daemon/control-server.ts";
 import { runVoltDaemon } from "../src/daemon/main.ts";
 import { getDaemonPaths } from "../src/daemon/paths.ts";
+import { type DaemonProbeResult, probeDaemon } from "../src/daemon/spawn.ts";
 
 describe("voltd theme_set + theme_snapshot", () => {
 	let agentDir: string;
@@ -27,25 +27,27 @@ describe("voltd theme_set + theme_snapshot", () => {
 		rmSync(agentDir, { recursive: true, force: true });
 	});
 
-	async function waitForHealthy(socketPath: string): Promise<void> {
-		let status = await probeControlSocket(socketPath, { version: "test" });
-		for (let attempt = 0; status.kind !== "healthy" && attempt < 50; attempt++) {
+	async function waitForHealthy(): Promise<DaemonProbeResult> {
+		let status = await probeDaemon(agentDir);
+		for (let attempt = 0; !status.healthy && attempt < 50; attempt++) {
 			await new Promise((resolve) => setTimeout(resolve, 100));
-			status = await probeControlSocket(socketPath, { version: "test" });
+			status = await probeDaemon(agentDir);
 		}
-		expect(status.kind).toBe("healthy");
+		expect(status.healthy).toBe(true);
+		return status;
 	}
 
 	it("applies, persists, and broadcasts theme changes; rejects unknown themes", async () => {
 		const paths = getDaemonPaths(agentDir);
 		const daemon = runVoltDaemon({ agentDir, foreground: false });
-		await waitForHealthy(paths.socketPath);
+		const status = await waitForHealthy();
 
 		const events: ControlEvent[] = [];
 		const client = createDaemonClient({
-			socketPath: paths.socketPath,
+			socketPath: status.socketPath,
 			client: "tui",
 			version: "test",
+			authToken: status.authToken,
 			reconnect: false,
 			onEvent: (event) => events.push(event),
 		});
@@ -88,12 +90,13 @@ describe("voltd theme_set + theme_snapshot", () => {
 
 		// ...and re-applied on the next daemon start.
 		const restarted = runVoltDaemon({ agentDir, foreground: false });
-		await waitForHealthy(paths.socketPath);
+		const restartedStatus = await waitForHealthy();
 		expect(getCurrentThemeName()).toBe("light");
 		const stopClient = createDaemonClient({
-			socketPath: paths.socketPath,
+			socketPath: restartedStatus.socketPath,
 			client: "cli",
 			version: "test",
+			authToken: restartedStatus.authToken,
 			reconnect: false,
 		});
 		await stopClient.request({ type: "shutdown" });

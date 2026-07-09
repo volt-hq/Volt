@@ -29,10 +29,17 @@ import {
 	probeControlSocket,
 	startControlServer,
 } from "./control-server.ts";
+import { acquireDaemonLock, type DaemonLock } from "./daemon-lock.ts";
 import { KeepAwakeController, type KeepAwakeControllerOptions } from "./keep-awake.ts";
 import type { DaemonLogger } from "./log.ts";
 import { createDaemonLogger } from "./log.ts";
-import { type DaemonPaths, ensureDaemonDirs, getDaemonPaths } from "./paths.ts";
+import {
+	createDaemonControlSocketPath,
+	type DaemonPaths,
+	ensureDaemonDirs,
+	getDaemonPaths,
+	isWindowsNamedPipePath,
+} from "./paths.ts";
 import { verifyPidfileProcess } from "./process-identity.ts";
 import { VoltdStateStore } from "./state.ts";
 import { handleWorktreeControlRequest, isWorktreeControlRequest, WorktreeManager } from "./worktree-manager.ts";
@@ -123,12 +130,17 @@ export type VoltdServiceExtension = (services: VoltdRuntimeServices) => VoltdSer
 export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServiceExtension[] = []): Promise<number> {
 	process.title = "voltd";
 	const agentDir = config.agentDir ?? getAgentDir();
-	const basePaths = getDaemonPaths(agentDir);
-	const paths: DaemonPaths = {
-		...basePaths,
-		socketPath: config.socketPath ?? basePaths.socketPath,
-		logPath: config.logPath ?? basePaths.logPath,
+	const usingDefaultSocketPath = config.socketPath === undefined;
+	let selectedSocketPath = config.socketPath;
+	const resolvePaths = (): DaemonPaths => {
+		const basePaths = getDaemonPaths(agentDir);
+		return {
+			...basePaths,
+			socketPath: selectedSocketPath ?? basePaths.socketPath,
+			logPath: config.logPath ?? basePaths.logPath,
+		};
 	};
+	let paths: DaemonPaths = resolvePaths();
 	ensureDaemonDirs(paths);
 	const logger = createDaemonLogger({
 		logPath: paths.logPath,
@@ -138,6 +150,48 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	const clock: Clock = config.clock ?? { now: () => Date.now() };
 	const startedAtMs = clock.now();
 	const pidfileToken = randomUUID();
+	let daemonLock: DaemonLock | undefined;
+	const releaseDaemonLock = () => {
+		daemonLock?.release();
+		daemonLock = undefined;
+	};
+	const finishBeforeServing = (code: number): number => {
+		releaseDaemonLock();
+		return code;
+	};
+	if (usingDefaultSocketPath) {
+		const lockResult = acquireDaemonLock(paths.lockDirPath, startedAtMs);
+		if (!lockResult.ok) {
+			const pidfile = readPidfile(paths.pidfilePath);
+			if (pidfile) {
+				const socketProbe = await probeControlSocket(pidfile.socketPath, {
+					version: VERSION,
+					timeoutMs: 500,
+					...(pidfile.token === undefined ? {} : { authToken: pidfile.token }),
+				});
+				if (socketProbe.kind === "healthy") {
+					log("info", `another daemon is healthy (pid ${socketProbe.status.pid}); exiting`);
+					return VOLTD_EXIT_ALREADY_RUNNING;
+				}
+				if (socketProbe.kind === "live-rejected" && socketProbe.reason === "protocol_mismatch") {
+					log(
+						"error",
+						`another daemon is running with protocol ${socketProbe.protocolVersion ?? "unknown"}; not starting`,
+					);
+					return VOLTD_EXIT_INCOMPATIBLE_RUNNING;
+				}
+			}
+			const owner = lockResult.owner ? ` by pid ${lockResult.owner.pid}` : "";
+			log("error", `daemon startup lock is held${owner}; not starting a second daemon`);
+			return VOLTD_EXIT_BIND_FAILED;
+		}
+		daemonLock = lockResult.lock;
+		if (process.platform === "win32") {
+			selectedSocketPath = createDaemonControlSocketPath(agentDir);
+			paths = resolvePaths();
+			ensureDaemonDirs(paths);
+		}
+	}
 
 	const state = new VoltdStateStore({ agentDir, statePath: paths.statePath });
 	let migratedFromLegacyState = false;
@@ -153,7 +207,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		}
 	} catch (error) {
 		log("error", `failed to load state: ${error instanceof Error ? error.message : String(error)}`);
-		return 1;
+		return finishBeforeServing(1);
 	}
 	// The daemon's theme instance: persisted name from voltd state, no hot-reload
 	// watcher (that is the rendering TUI's job).
@@ -246,6 +300,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		await auditLogger.log({ type: "daemon_shutdown", success: true, details: { reason } }).catch(() => {});
 		await controlServer?.close().catch(() => {});
 		removeOwnedPidfile();
+		releaseDaemonLock();
 		log("info", "shutdown complete");
 		resolveExit?.(0);
 	};
@@ -458,6 +513,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		startControlServer({
 			socketPath: paths.socketPath,
 			version: VERSION,
+			authToken: pidfileToken,
 			handlers: {
 				onRequest: handleRequest,
 				isShuttingDown: () => shuttingDown,
@@ -482,13 +538,21 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			},
 		});
 
-	// Single instance is guaranteed by the socket bind.
+	// Default daemon instances are serialized by the daemon lock; custom socket
+	// paths still rely on the bind result as their single-instance guard.
 	try {
 		controlServer = await bindControlServer();
 	} catch (error) {
 		if (isErrnoException(error) && error.code === "EADDRINUSE") {
 			const deadline = Date.now() + DAEMON_BIND_WAIT_TIMEOUT_MS;
-			let socketProbe = await probeControlSocket(paths.socketPath, { version: VERSION });
+			const pidfile = readPidfile(paths.pidfilePath);
+			const probeOptions = {
+				version: VERSION,
+				...(pidfile?.socketPath === paths.socketPath && pidfile.token !== undefined
+					? { authToken: pidfile.token }
+					: {}),
+			};
+			let socketProbe = await probeControlSocket(paths.socketPath, probeOptions);
 			let loggedShutdownWait = false;
 			while (
 				socketProbe.kind === "live-rejected" &&
@@ -500,43 +564,84 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					log("info", "another daemon is shutting down; waiting for socket release");
 				}
 				await sleep(DAEMON_BIND_WAIT_POLL_MS);
-				socketProbe = await probeControlSocket(paths.socketPath, { version: VERSION, timeoutMs: 500 });
+				socketProbe = await probeControlSocket(paths.socketPath, { ...probeOptions, timeoutMs: 500 });
 			}
 			if (socketProbe.kind === "healthy") {
 				log("info", `another daemon is healthy (pid ${socketProbe.status.pid}); exiting`);
-				return VOLTD_EXIT_ALREADY_RUNNING;
+				return finishBeforeServing(VOLTD_EXIT_ALREADY_RUNNING);
 			}
 			if (socketProbe.kind === "live-rejected" && socketProbe.reason === "protocol_mismatch") {
 				log(
 					"error",
 					`another daemon is running with protocol ${socketProbe.protocolVersion ?? "unknown"}; not removing its socket`,
 				);
-				return VOLTD_EXIT_INCOMPATIBLE_RUNNING;
+				return finishBeforeServing(VOLTD_EXIT_INCOMPATIBLE_RUNNING);
 			}
-			if (socketProbe.kind === "live-rejected" || socketProbe.kind === "unresponsive") {
-				log("error", "control socket is owned by a live daemon that is not healthy; not removing it");
-				return VOLTD_EXIT_BIND_FAILED;
-			}
-			const pidfile = readPidfile(paths.pidfilePath);
 			if (pidfile && (await verifyPidfileProcess(pidfile)) === "match") {
 				log("error", `pidfile still verifies live daemon pid ${pidfile.pid}; not removing socket`);
-				return VOLTD_EXIT_BIND_FAILED;
+				return finishBeforeServing(VOLTD_EXIT_BIND_FAILED);
 			}
-			log("warn", "stale socket detected; unlinking and retrying bind once");
-			rmSync(paths.socketPath, { force: true });
-			try {
-				controlServer = await bindControlServer();
-			} catch (retryError) {
-				log("error", `bind retry failed: ${retryError instanceof Error ? retryError.message : String(retryError)}`);
-				return VOLTD_EXIT_BIND_FAILED;
+			const canRegenerateWindowsPipe =
+				process.platform === "win32" && usingDefaultSocketPath && isWindowsNamedPipePath(paths.socketPath);
+			const canUnlinkSocketPath = !isWindowsNamedPipePath(paths.socketPath);
+			const retryBind = async (message: string): Promise<boolean> => {
+				log("warn", message);
+				if (canRegenerateWindowsPipe) {
+					selectedSocketPath = createDaemonControlSocketPath(agentDir);
+					paths = resolvePaths();
+					ensureDaemonDirs(paths);
+				} else if (canUnlinkSocketPath) {
+					rmSync(paths.socketPath, { force: true });
+				} else {
+					log("error", "control pipe is occupied and cannot be unlinked; not retrying bind");
+					return false;
+				}
+				try {
+					controlServer = await bindControlServer();
+					return true;
+				} catch (retryError) {
+					log(
+						"error",
+						`bind retry failed: ${retryError instanceof Error ? retryError.message : String(retryError)}`,
+					);
+					return false;
+				}
+			};
+			if (socketProbe.kind === "live-rejected" || socketProbe.kind === "unresponsive") {
+				if (
+					!canRegenerateWindowsPipe ||
+					(socketProbe.kind === "live-rejected" && socketProbe.reason === "shutting_down")
+				) {
+					log("error", "control socket is owned by a live daemon that is not healthy; not removing it");
+					return finishBeforeServing(VOLTD_EXIT_BIND_FAILED);
+				}
+				if (
+					!(await retryBind(
+						"control pipe is occupied by a non-Volt listener; choosing a fresh pipe name and retrying bind once",
+					))
+				) {
+					return finishBeforeServing(VOLTD_EXIT_BIND_FAILED);
+				}
+			} else if (
+				!(await retryBind(
+					canRegenerateWindowsPipe
+						? "stale or pre-created control pipe detected; choosing a fresh pipe name and retrying bind once"
+						: "stale socket detected; unlinking and retrying bind once",
+				))
+			) {
+				return finishBeforeServing(VOLTD_EXIT_BIND_FAILED);
 			}
 		} else {
 			log("error", `bind failed: ${error instanceof Error ? error.message : String(error)}`);
-			return VOLTD_EXIT_BIND_FAILED;
+			return finishBeforeServing(VOLTD_EXIT_BIND_FAILED);
 		}
 	}
+	if (!controlServer) {
+		log("error", "bind failed: control server was not created");
+		return finishBeforeServing(VOLTD_EXIT_BIND_FAILED);
+	}
 
-	// Pidfile is advisory; liveness truth is always the socket probe.
+	// Pidfile is discovery metadata; liveness truth is the authenticated socket probe.
 	writeFileSync(
 		paths.pidfilePath,
 		`${JSON.stringify({ pid: process.pid, version: VERSION, startedAtMs, socketPath: paths.socketPath, token: pidfileToken } satisfies PidfileContents)}\n`,

@@ -5,13 +5,20 @@ import { ENV_AGENT_DIR, getAgentDir, getPackageDir, VERSION } from "../config.ts
 import { type ControlSocketProbe, probeControlSocket } from "./control-server.ts";
 import { type PidfileContents, readPidfile } from "./main.ts";
 import { type DaemonPaths, ensureDaemonDirs, getDaemonPaths } from "./paths.ts";
+import { verifyPidfileProcess } from "./process-identity.ts";
 
 const SPAWN_HEALTH_TIMEOUT_MS = 5000;
 const SPAWN_HEALTH_POLL_MS = 100;
 export const DAEMON_SHUTDOWN_TIMEOUT_MS = 75_000;
 const DAEMON_EXIT_POLL_MS = 200;
 
-export type DaemonProbeState = "healthy" | "shutting-down" | "protocol-mismatch" | "unresponsive" | "not-running";
+export type DaemonProbeState =
+	| "healthy"
+	| "shutting-down"
+	| "protocol-mismatch"
+	| "auth-failed"
+	| "unresponsive"
+	| "not-running";
 
 export interface DaemonProbeResult {
 	healthy: boolean;
@@ -21,9 +28,14 @@ export interface DaemonProbeResult {
 	protocolVersion?: number;
 	startedAtMs?: number;
 	socketPath: string;
+	authToken?: string;
 }
 
-function daemonProbeFromSocketProbe(socketPath: string, probe: ControlSocketProbe): DaemonProbeResult {
+function daemonProbeFromSocketProbe(
+	socketPath: string,
+	probe: ControlSocketProbe,
+	authToken: string | undefined,
+): DaemonProbeResult {
 	if (probe.kind === "healthy") {
 		return {
 			healthy: true,
@@ -33,41 +45,54 @@ function daemonProbeFromSocketProbe(socketPath: string, probe: ControlSocketProb
 			protocolVersion: probe.status.protocolVersion,
 			startedAtMs: probe.status.startedAtMs,
 			socketPath,
+			...(authToken === undefined ? {} : { authToken }),
 		};
 	}
 	if (probe.kind === "live-rejected") {
+		const state: DaemonProbeState =
+			probe.reason === "protocol_mismatch"
+				? "protocol-mismatch"
+				: probe.reason === "auth_failed"
+					? "auth-failed"
+					: probe.reason === "shutting_down"
+						? "shutting-down"
+						: "unresponsive";
 		return {
 			healthy: false,
-			state: probe.reason === "protocol_mismatch" ? "protocol-mismatch" : "shutting-down",
+			state,
 			...(probe.version === undefined ? {} : { version: probe.version }),
 			...(probe.protocolVersion === undefined ? {} : { protocolVersion: probe.protocolVersion }),
 			socketPath,
+			...(authToken === undefined ? {} : { authToken }),
 		};
 	}
 	if (probe.kind === "unresponsive") {
-		return { healthy: false, state: "unresponsive", socketPath };
+		return { healthy: false, state: "unresponsive", socketPath, ...(authToken === undefined ? {} : { authToken }) };
 	}
-	return { healthy: false, state: "not-running", socketPath };
+	return { healthy: false, state: "not-running", socketPath, ...(authToken === undefined ? {} : { authToken }) };
 }
 
 /**
- * Probe the daemon socket (default path, falling back to the pidfile-recorded
- * socket path when the default answers nothing).
+ * Probe the pidfile-published daemon endpoint first, then fall back to the
+ * legacy default socket path for older daemons and pre-start diagnostics.
  */
 export async function probeDaemon(agentDir: string = getAgentDir()): Promise<DaemonProbeResult> {
 	const paths = getDaemonPaths(agentDir);
+	const pidfile = readPidfile(paths.pidfilePath);
+	if (pidfile) {
+		const pidfileProbe = await probeControlSocket(pidfile.socketPath, {
+			version: VERSION,
+			...(pidfile.token === undefined ? {} : { authToken: pidfile.token }),
+		});
+		const pidfileResult = daemonProbeFromSocketProbe(pidfile.socketPath, pidfileProbe, pidfile.token);
+		if (pidfileResult.state !== "not-running") {
+			return pidfileResult;
+		}
+	}
 	const probe = await probeControlSocket(paths.socketPath, { version: VERSION });
-	const result = daemonProbeFromSocketProbe(paths.socketPath, probe);
+	const result = daemonProbeFromSocketProbe(paths.socketPath, probe, undefined);
 	if (result.state !== "not-running") {
 		return result;
-	}
-	const pidfile = readPidfile(paths.pidfilePath);
-	if (pidfile && pidfile.socketPath !== paths.socketPath) {
-		const fallbackProbe = await probeControlSocket(pidfile.socketPath, { version: VERSION });
-		const fallbackResult = daemonProbeFromSocketProbe(pidfile.socketPath, fallbackProbe);
-		if (fallbackResult.state !== "not-running") {
-			return fallbackResult;
-		}
 	}
 	return { healthy: false, state: "not-running", socketPath: paths.socketPath };
 }
@@ -115,7 +140,11 @@ export async function waitForDaemonExit(options: WaitForDaemonExitOptions = {}):
 	const targetPid = options.pid ?? options.pidfile?.pid;
 	const socketPath = options.socketPath ?? options.pidfile?.socketPath ?? paths.socketPath;
 	while (Date.now() < deadline) {
-		const socketProbe = await probeControlSocket(socketPath, { version: VERSION, timeoutMs: 500 });
+		const socketProbe = await probeControlSocket(socketPath, {
+			version: VERSION,
+			timeoutMs: 500,
+			...(options.pidfile?.token === undefined ? {} : { authToken: options.pidfile.token }),
+		});
 		if (processIsGone(targetPid) && socketProbe.kind === "no-listener") {
 			return "exited";
 		}
@@ -170,8 +199,15 @@ export async function ensureDaemonRunning(agentDir: string = getAgentDir()): Pro
 	if (probe.healthy) {
 		return { ...probe, spawned: false };
 	}
-	if (probe.state === "protocol-mismatch" || probe.state === "unresponsive") {
+	if (probe.state === "protocol-mismatch" || probe.state === "auth-failed") {
 		return { ...probe, spawned: false };
+	}
+	if (probe.state === "unresponsive") {
+		const paths = getDaemonPaths(agentDir);
+		const pidfile = readPidfile(paths.pidfilePath);
+		if (pidfile?.socketPath === probe.socketPath && (await verifyPidfileProcess(pidfile)) === "match") {
+			return { ...probe, spawned: false };
+		}
 	}
 	if (probe.state === "shutting-down") {
 		await waitForDaemonExit({ agentDir, socketPath: probe.socketPath });

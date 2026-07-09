@@ -212,6 +212,7 @@ export async function openDaemonWorktreeControl(
 		socketPath: ensured.socketPath ?? getDaemonSocketPath(options.agentDir),
 		client: "tui",
 		version: VERSION,
+		authToken: ensured.authToken,
 		reconnect: false,
 		capabilities: [CONTROL_WORKTREES_CAPABILITY],
 	});
@@ -442,6 +443,7 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 					socketPath: socketPath ?? getDaemonSocketPath(options.agentDir),
 					client: "tui",
 					version: VERSION,
+					authToken: ensured.authToken,
 					capabilities: [CONTROL_WORKTREES_CAPABILITY],
 					reconnect: true,
 					onEvent: (event) => {

@@ -3,9 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import { probeControlSocket } from "../src/daemon/control-server.ts";
 import { runVoltDaemon } from "../src/daemon/main.ts";
-import { getDaemonPaths } from "../src/daemon/paths.ts";
+import { probeDaemon } from "../src/daemon/spawn.ts";
 import { main } from "../src/main.ts";
 
 /**
@@ -27,13 +26,12 @@ describe("remote CLI (daemon control client)", () => {
 		workspaceDir = join(agentDir, "ws");
 		mkdirSync(workspaceDir, { recursive: true });
 		daemon = runVoltDaemon({ agentDir, foreground: false });
-		const paths = getDaemonPaths(agentDir);
-		let status = await probeControlSocket(paths.socketPath, { version: "test" });
-		for (let attempt = 0; status.kind !== "healthy" && attempt < 100; attempt++) {
+		let status = await probeDaemon(agentDir);
+		for (let attempt = 0; !status.healthy && attempt < 100; attempt++) {
 			await new Promise((resolve) => setTimeout(resolve, 100));
-			status = await probeControlSocket(paths.socketPath, { version: "test" });
+			status = await probeDaemon(agentDir);
 		}
-		expect(status.kind).toBe("healthy");
+		expect(status.healthy).toBe(true);
 	}, 30_000);
 
 	afterAll(async () => {

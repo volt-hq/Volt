@@ -35,6 +35,8 @@ export type HelloMessage =
 			pid: number;
 			version: string;
 			client: ControlClientKind;
+			/** Per-daemon instance token read from the local pidfile. */
+			controlToken?: string;
 			/** Optional client capabilities (e.g. "worktrees"); absent for old clients. */
 			capabilities?: string[];
 	  }
@@ -49,7 +51,7 @@ export type HelloMessage =
 export interface HelloAck {
 	type: "hello_ack";
 	ok: boolean;
-	error?: "protocol_mismatch" | "shutting_down" | "bad_relay_token";
+	error?: "protocol_mismatch" | "shutting_down" | "bad_relay_token" | "auth_failed";
 	/** daemon-assigned, present when ok (control role) */
 	connectionId?: string;
 	/** daemon package version */
@@ -531,6 +533,9 @@ export function parseHelloMessage(value: unknown): HelloMessage | undefined {
 		) {
 			return undefined;
 		}
+		if (value.controlToken !== undefined && typeof value.controlToken !== "string") {
+			return undefined;
+		}
 		return {
 			type: "hello",
 			role: "control",
@@ -538,6 +543,7 @@ export function parseHelloMessage(value: unknown): HelloMessage | undefined {
 			pid: value.pid,
 			version: value.version,
 			client: value.client,
+			...(value.controlToken === undefined ? {} : { controlToken: value.controlToken }),
 			...(value.capabilities === undefined ? {} : { capabilities: value.capabilities as string[] }),
 		};
 	}
