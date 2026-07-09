@@ -328,7 +328,7 @@ Child events are wrapped on the parent RPC stream:
 {"type": "subagent_end", "subagentId": "sa_123", "result": {"id": "sa_123", "sessionId": "child-session-id", "event": {"type": "agent_end", "messages": [], "willRetry": false}}}
 ```
 
-`subagent_event.event` is the child RPC event. `subagent_end.result` is emitted after the terminal child `agent_end` where `willRetry !== true`.
+`subagent_event.event` is the child RPC event. `subagent_end.result` is emitted after the child session settles, including automatic retries, overflow compaction, and queued continuations. The result contains the latest low-level `agent_end` event; `willRetry` is normalized to `false` if a planned retry was cancelled before another run started.
 
 #### subagent_abort
 

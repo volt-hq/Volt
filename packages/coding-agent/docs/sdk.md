@@ -235,6 +235,8 @@ try {
 }
 ```
 
+`waitForEnd()` resolves after the child session settles, including automatic retries, overflow compaction, and queued continuations. Its result contains the latest low-level `agent_end` event.
+
 To expose the built-in `subagent` tool in an SDK-created parent session, pass the manager as `subagentToolManager`. It is active by default when no explicit tool allowlist is provided:
 
 ```typescript

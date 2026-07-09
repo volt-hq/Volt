@@ -17,11 +17,13 @@ import {
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ResourceDiagnostic, ResourceLoader } from "../src/core/resource-loader.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import type { Settings } from "../src/core/settings-manager.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import {
 	type SubagentDefinition,
 	SubagentDefinitionConfigurationError,
 	SubagentDefinitionNotFoundError,
+	type SubagentEndEvent,
 	SubagentManager,
 	type SubagentRuntimeCreatedEvent,
 } from "../src/core/subagents/index.ts";
@@ -35,6 +37,7 @@ interface TestManagerContext {
 interface CreateTestManagerOptions {
 	responseText?: string;
 	responses?: FauxResponseStep[];
+	simpleResponses?: FauxResponseStep[];
 	models?: FauxModelDefinition[];
 	initialModelId?: string;
 	noTools?: "all" | false;
@@ -42,6 +45,7 @@ interface CreateTestManagerOptions {
 	allowedTools?: string[];
 	subagentContext?: SubagentRuntimeContext;
 	parentSessionManager?: SessionManager;
+	settings?: Partial<Settings>;
 	retainRuntimeOnDispose?: boolean;
 	onRuntimeCreated?: (event: SubagentRuntimeCreatedEvent) => void | Promise<void>;
 	onCreateRuntime?: (subagentContext: SubagentRuntimeContext | undefined) => void;
@@ -78,6 +82,14 @@ function createSubagentResourceLoader(
 	};
 }
 
+function createDeferred(): { promise: Promise<void>; resolve(): void } {
+	let resolve: () => void = () => undefined;
+	const promise = new Promise<void>((promiseResolve) => {
+		resolve = promiseResolve;
+	});
+	return { promise, resolve };
+}
+
 describe("SubagentManager", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -109,6 +121,9 @@ describe("SubagentManager", () => {
 			);
 		}
 		faux.setResponses(options.responses ?? [fauxAssistantMessage(options.responseText ?? "child complete")]);
+		if (options.simpleResponses) {
+			faux.setSimpleResponses(options.simpleResponses);
+		}
 		const initialModel = options.initialModelId ? faux.getModel(options.initialModelId) : faux.getModel();
 		if (!initialModel) {
 			throw new Error(`Missing faux model ${options.initialModelId}`);
@@ -140,6 +155,9 @@ describe("SubagentManager", () => {
 					noContextFiles: true,
 				},
 			});
+			if (options.settings) {
+				services.settingsManager.applyOverrides(options.settings);
+			}
 			const result = await createAgentSessionFromServices({
 				services,
 				sessionManager,
@@ -273,6 +291,283 @@ describe("SubagentManager", () => {
 		expect(
 			transcript.items.some((item) => item.role === "assistant" && item.text.includes("child result text")),
 		).toBe(true);
+	});
+
+	it("waits through overflow compaction and returns the continuation agent_end", async () => {
+		const compactionStarted = createDeferred();
+		const finishCompaction = createDeferred();
+		const agentEnds: SubagentEndEvent[] = [];
+		let childSessionManager: SessionManager | undefined;
+		const { manager, getDisposedSessionCount } = await createTestManager({
+			responses: [
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" }),
+				fauxAssistantMessage("continued after compaction"),
+			],
+			simpleResponses: [
+				async () => {
+					compactionStarted.resolve();
+					await finishCompaction.promise;
+					return fauxAssistantMessage("compacted context");
+				},
+			],
+			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
+			onRuntimeCreated: (event) => {
+				event.runtime.session.setSessionName("overflow child");
+				childSessionManager = event.runtime.session.sessionManager;
+			},
+		});
+		cleanups.push(() => finishCompaction.resolve());
+		const handle = await manager.start();
+		handle.onEvent((event) => {
+			if (event.type === "agent_end") {
+				agentEnds.push(event);
+			}
+		});
+
+		const completion = handle.waitForEnd();
+		let completionSettled = false;
+		void completion.then(
+			() => {
+				completionSettled = true;
+			},
+			() => {
+				completionSettled = true;
+			},
+		);
+		await handle.prompt("overflow the child context");
+		await compactionStarted.promise;
+
+		let disposalStarted = false;
+		const completedAndDisposed = completion.then(async (result) => {
+			disposalStarted = true;
+			await handle.dispose();
+			return result;
+		});
+		void completedAndDisposed.catch(() => undefined);
+		try {
+			await Promise.resolve();
+			expect(agentEnds.map((event) => event.willRetry)).toEqual([false]);
+			expect(completionSettled).toBe(false);
+			expect(disposalStarted).toBe(false);
+			expect(getDisposedSessionCount()).toBe(0);
+		} finally {
+			finishCompaction.resolve();
+		}
+
+		const result = await completedAndDisposed;
+		expect(agentEnds.map((event) => event.willRetry)).toEqual([false, false]);
+		expect(result.event.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "continued after compaction" }],
+		});
+		if (!childSessionManager) {
+			throw new Error("expected child session manager");
+		}
+		expect(childSessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		expect(getDisposedSessionCount()).toBe(1);
+	});
+
+	it("ignores recovery agent_end events emitted before the delegated prompt starts", async () => {
+		const taskResponseStarted = createDeferred();
+		const finishTaskResponse = createDeferred();
+		const agentEnds: SubagentEndEvent[] = [];
+		const resumedSession = SessionManager.inMemory(tmpdir());
+		resumedSession.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "previous child task" }],
+			timestamp: Date.now() - 1,
+		});
+		resumedSession.appendMessage(
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" }),
+		);
+		const { manager } = await createTestManager({
+			responses: [
+				fauxAssistantMessage("recovered previous child turn"),
+				async () => {
+					taskResponseStarted.resolve();
+					await finishTaskResponse.promise;
+					return fauxAssistantMessage("completed delegated task");
+				},
+			],
+			simpleResponses: [fauxAssistantMessage("compacted previous child context")],
+			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
+			onRuntimeCreated: (event) => {
+				event.runtime.session.setSessionName("resumed child");
+			},
+		});
+		cleanups.push(() => finishTaskResponse.resolve());
+		const handle = await manager.start({ sessionManager: resumedSession });
+		handle.onEvent((event) => {
+			if (event.type === "agent_end") {
+				agentEnds.push(event);
+			}
+		});
+
+		const completion = handle.waitForEnd();
+		let completionSettled = false;
+		void completion.then(
+			() => {
+				completionSettled = true;
+			},
+			() => {
+				completionSettled = true;
+			},
+		);
+		await handle.prompt("new delegated task");
+		await taskResponseStarted.promise;
+		try {
+			expect(agentEnds).toHaveLength(1);
+			expect(completionSettled).toBe(false);
+		} finally {
+			finishTaskResponse.resolve();
+		}
+
+		const result = await completion;
+		expect(agentEnds).toHaveLength(2);
+		expect(result.event.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "completed delegated task" }],
+		});
+	});
+
+	it("settles from the overflow agent_end when compaction fails without a continuation", async () => {
+		const agentEnds: SubagentEndEvent[] = [];
+		const compactionErrors: string[] = [];
+		let childSessionManager: SessionManager | undefined;
+		const { manager } = await createTestManager({
+			responses: [fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" })],
+			simpleResponses: [
+				() => {
+					throw new Error("summary unavailable");
+				},
+			],
+			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
+			onRuntimeCreated: (event) => {
+				event.runtime.session.setSessionName("failing compaction child");
+				childSessionManager = event.runtime.session.sessionManager;
+			},
+		});
+		const handle = await manager.start();
+		handle.onEvent((event) => {
+			if (event.type === "agent_end") {
+				agentEnds.push(event);
+			}
+			if (event.type === "compaction_end" && event.errorMessage) {
+				compactionErrors.push(event.errorMessage);
+			}
+		});
+
+		const completion = handle.waitForEnd();
+		await handle.prompt("fail child compaction");
+		const result = await completion;
+
+		expect(agentEnds.map((event) => event.willRetry)).toEqual([false]);
+		expect(result.event.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			stopReason: "error",
+			errorMessage: "prompt is too long",
+		});
+		expect(compactionErrors).toHaveLength(1);
+		expect(compactionErrors[0]).toContain("Context overflow recovery failed");
+		if (!childSessionManager) {
+			throw new Error("expected child session manager");
+		}
+		expect(childSessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+	});
+
+	it("waits through an ordinary retry and returns its final agent_end", async () => {
+		const retryResponseStarted = createDeferred();
+		const finishRetryResponse = createDeferred();
+		const agentEnds: SubagentEndEvent[] = [];
+		const { manager } = await createTestManager({
+			responses: [
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+				async () => {
+					retryResponseStarted.resolve();
+					await finishRetryResponse.promise;
+					return fauxAssistantMessage("recovered after retry");
+				},
+			],
+			settings: {
+				compaction: { enabled: false },
+				retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 },
+			},
+			onRuntimeCreated: (event) => {
+				event.runtime.session.setSessionName("retry child");
+			},
+		});
+		cleanups.push(() => finishRetryResponse.resolve());
+		const handle = await manager.start();
+		handle.onEvent((event) => {
+			if (event.type === "agent_end") {
+				agentEnds.push(event);
+			}
+		});
+
+		const completion = handle.waitForEnd();
+		let completionSettled = false;
+		void completion.then(
+			() => {
+				completionSettled = true;
+			},
+			() => {
+				completionSettled = true;
+			},
+		);
+		await handle.prompt("retry child task");
+		await retryResponseStarted.promise;
+		try {
+			expect(agentEnds.map((event) => event.willRetry)).toEqual([true]);
+			expect(completionSettled).toBe(false);
+		} finally {
+			finishRetryResponse.resolve();
+		}
+		const result = await completion;
+
+		expect(agentEnds.map((event) => event.willRetry)).toEqual([true, false]);
+		expect(result.event.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "recovered after retry" }],
+		});
+	});
+
+	it("normalizes an aborted retry candidate as terminal after settlement", async () => {
+		const retryStarted = createDeferred();
+		const agentEnds: SubagentEndEvent[] = [];
+		const { manager } = await createTestManager({
+			responses: [fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })],
+			settings: {
+				compaction: { enabled: false },
+				retry: { enabled: true, maxRetries: 1, baseDelayMs: 60_000 },
+			},
+			onRuntimeCreated: (event) => {
+				event.runtime.session.setSessionName("aborted retry child");
+			},
+		});
+		const handle = await manager.start();
+		handle.onEvent((event) => {
+			if (event.type === "agent_end") {
+				agentEnds.push(event);
+			}
+			if (event.type === "auto_retry_start") {
+				retryStarted.resolve();
+			}
+		});
+
+		const completion = handle.waitForEnd();
+		await handle.prompt("abort retry backoff");
+		await retryStarted.promise;
+		expect(agentEnds.map((event) => event.willRetry)).toEqual([true]);
+
+		await handle.abort();
+		const result = await completion;
+
+		expect(result.event.willRetry).toBe(false);
+		expect(result.event.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			stopReason: "error",
+			errorMessage: "overloaded_error",
+		});
 	});
 
 	it("starts by definition name and applies the definition body as child prompt context", async () => {
@@ -650,14 +945,79 @@ describe("SubagentManager", () => {
 		await expect(handle.abort()).resolves.toBeUndefined();
 	});
 
-	it("disposes the child runtime through the RPC client", async () => {
-		const { manager, getDisposedSessionCount } = await createTestManager();
+	it("rejects unfinished completion before concurrent disposal finishes and ignores late settlement", async () => {
+		const retryResponseStarted = createDeferred();
+		const finishRetryResponse = createDeferred();
+		const runtimeStopStarted = createDeferred();
+		const finishRuntimeStop = createDeferred();
+		const settlementIdleCompleted = createDeferred();
+		const { manager, getDisposedSessionCount } = await createTestManager({
+			responses: [
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+				async () => {
+					retryResponseStarted.resolve();
+					await finishRetryResponse.promise;
+					return fauxAssistantMessage("late retry result");
+				},
+			],
+			settings: {
+				compaction: { enabled: false },
+				retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 },
+			},
+			onRuntimeCreated: (event) => {
+				event.runtime.session.setSessionName("disposed retry child");
+				const waitForIdle = event.runtime.session.waitForIdle.bind(event.runtime.session);
+				event.runtime.session.waitForIdle = async () => {
+					await waitForIdle();
+					settlementIdleCompleted.resolve();
+				};
+				const disposeRuntime = event.runtime.dispose.bind(event.runtime);
+				event.runtime.dispose = async () => {
+					runtimeStopStarted.resolve();
+					await finishRuntimeStop.promise;
+					await disposeRuntime();
+				};
+			},
+		});
+		cleanups.push(() => {
+			finishRuntimeStop.resolve();
+			finishRetryResponse.resolve();
+		});
 		const handle = await manager.start();
+		const completion = handle.waitForEnd();
+		let completionResolved = false;
+		let completionError: Error | undefined;
+		void completion.then(
+			() => {
+				completionResolved = true;
+			},
+			(error: unknown) => {
+				completionError = error instanceof Error ? error : new Error(String(error));
+			},
+		);
 
-		await handle.dispose();
+		await handle.prompt("dispose during retry");
+		await retryResponseStarted.promise;
+		const disposal = handle.dispose();
+		const concurrentDisposal = handle.dispose();
+		expect(concurrentDisposal).toBe(disposal);
+		await runtimeStopStarted.promise;
+		try {
+			await Promise.resolve();
+			expect(completionResolved).toBe(false);
+			expect(completionError?.message).toBe(`Subagent ${handle.id} was disposed before completion`);
+			expect(getDisposedSessionCount()).toBe(0);
+		} finally {
+			finishRuntimeStop.resolve();
+			finishRetryResponse.resolve();
+		}
 
+		await Promise.all([disposal, concurrentDisposal]);
+		await settlementIdleCompleted.promise;
+		await Promise.resolve();
 		expect(getDisposedSessionCount()).toBe(1);
+		expect(completionResolved).toBe(false);
+		await expect(completion).rejects.toThrow(`Subagent ${handle.id} was disposed before completion`);
 		await expect(handle.getState()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
-		await expect(handle.waitForEnd()).rejects.toThrow(`Subagent ${handle.id} was disposed before completion`);
 	});
 });

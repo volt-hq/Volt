@@ -16,7 +16,7 @@ Not implemented in this MVP: package-manager `agents` resources, subprocess fall
 
 ## Summary
 
-Core subagents are isolated Volt agent runtimes controlled through the existing RPC stack. A local caller in the TUI, SDK, CLI, extension system, or local RPC mode can request a child agent, pass it a prompt, stream its events, and wait for a terminal `agent_end` or cancellation signal.
+Core subagents are isolated Volt agent runtimes controlled through the existing RPC stack. A local caller in the TUI, SDK, CLI, extension system, or local RPC mode can request a child agent, pass it a prompt, stream its events, and wait for session-level settlement or cancellation.
 
 The implementation reuses Volt's existing primitives instead of introducing a second agent protocol:
 
@@ -24,7 +24,7 @@ The implementation reuses Volt's existing primitives instead of introducing a se
 - `runRpcMode()` runs a runtime over a transport.
 - `createLoopbackRpcTransportPair()` and `createInProcessRpcClient()` provide same-process RPC for local subagents.
 - Iroh conversation streams already provide remote multi-agent streams for the app.
-- Existing RPC `prompt`, `abort`, `get_state`, `get_transcript`, and `agent_end` semantics remain the lifecycle contract.
+- Existing RPC `prompt`, `abort`, `get_state`, `get_transcript`, and `agent_end` events remain the transport contract; local handles additionally wait for session-level settlement before releasing child ownership.
 
 The [`examples/extensions/subagent/`](../examples/extensions/subagent/) implementation remains the reference prototype for workflow shape. The core MVP avoids subprocess and JSON-mode parsing fallback.
 
@@ -209,7 +209,7 @@ Local core subagents use in-process RPC:
 2. Create `InProcessRpcClient` for that runtime.
 3. Send `prompt` with the child prompt.
 4. Stream child RPC events to the caller.
-5. Treat `agent_end` with `willRetry !== true` as run completion.
+5. Retain the latest `agent_end`, then wait for the child `AgentSession` to settle through retries, compaction, and queued continuations.
 6. Optionally call `get_state`, `get_transcript`, and `get_session_stats` for final metadata.
 7. Dispose or retain the child runtime according to persistence policy.
 

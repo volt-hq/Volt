@@ -82,6 +82,7 @@
 - Fixed workspace unregister cleanup inconsistencies: the control, workspace-management, and conversation RPC unregister paths now share one cleanup that closes phone streams, stops runtimes, removes live activities, and closes active and pending TUI relays for the workspace.
 - Fixed unredeemed relay offers lingering until the 10s token expiry after the owning TUI released or rekeyed its lease; the phone's deferred handshake now fails immediately with a retry hint, and superseded or expired offers settle their relay bookkeeping instead of leaking the stream task.
 - Fixed chain-mode subagent previous-output substitution to XML-escape child output before wrapping it as untrusted data.
+- Fixed subagents treating the first non-retrying `agent_end` as terminal before overflow compaction and continuation settled, which could dispose the child and return its recoverable context-limit error.
 - Fixed legacy Iroh remote default tool grants so saved workspaces, clients, and pairing tickets are upgraded to include the built-in `subagent` tool.
 - Fixed `get_ui_actions` palette scope responses so they return only palette descriptors instead of all actions.
 - Fixed `volt remote host` source entrypoint startup by exporting the Iroh remote workspace unregister RPC helpers from the package root, and added a source export check to keep the host entrypoint imports in sync.
