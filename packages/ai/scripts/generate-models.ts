@@ -68,6 +68,25 @@ const KIMI_STATIC_HEADERS = {
 	"User-Agent": "KimiCLI/1.5",
 } as const;
 
+const GPT_5_6_MODELS = [
+	{
+		id: "gpt-5.6-sol",
+		name: "GPT-5.6 Sol",
+		cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
+	},
+	{
+		id: "gpt-5.6-terra",
+		name: "GPT-5.6 Terra",
+		cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 3.125 },
+	},
+	{
+		id: "gpt-5.6-luna",
+		name: "GPT-5.6 Luna",
+		cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 1.25 },
+	},
+] as const;
+const GPT_5_6_MODEL_IDS = new Set<string>(GPT_5_6_MODELS.map((model) => model.id));
+
 const MOONSHOT_CN_MIRRORED_MODEL_IDS = new Set(["kimi-k2.7-code", "kimi-k2.7-code-highspeed"]);
 
 const TOGETHER_BASE_URL = "https://api.together.ai/v1";
@@ -195,6 +214,7 @@ const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
 	"gpt-5.4-mini",
 	"gpt-5.4-nano",
 	"gpt-5.5",
+	...GPT_5_6_MODEL_IDS,
 ]);
 
 const OPENCODE_OPENAI_COMPLETIONS_LONG_CACHE_RETENTION_UNSUPPORTED_MODELS = new Set([
@@ -208,11 +228,11 @@ const OPENCODE_OPENAI_COMPLETIONS_LONG_CACHE_RETENTION_UNSUPPORTED_MODELS = new 
 
 // Checked manually against the authenticated GitHub Copilot /models endpoint on 2026-06-15.
 // Keep this to narrow corrections over models.dev metadata instead of snapshotting Copilot's catalog.
-const GITHUB_COPILOT_THINKING_LEVEL_OVERRIDES = {
+const GITHUB_COPILOT_THINKING_LEVEL_OVERRIDES: Record<string, NonNullable<Model<Api>["thinkingLevelMap"]>> = {
 	"claude-opus-4.7": { minimal: "low" },
 	"claude-opus-4.8": { minimal: "low" },
 	"claude-sonnet-4.6": { minimal: "low", xhigh: "max" },
-} satisfies Record<string, NonNullable<Model<Api>["thinkingLevelMap"]>>;
+};
 
 function mergeThinkingLevelMap(model: Model<any>, map: NonNullable<Model<any>["thinkingLevelMap"]>): void {
 	model.thinkingLevelMap = { ...model.thinkingLevelMap, ...map };
@@ -305,6 +325,12 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	}
 	if (supportsOpenAiXhigh(model.id)) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
+	}
+	if (model.id === "gpt-5.6-sol") {
+		mergeThinkingLevelMap(model, { xhigh: "max" });
+	}
+	if (GPT_5_6_MODEL_IDS.has(model.id)) {
+		mergeThinkingLevelMap(model, { minimal: model.provider === "openai-codex" ? "low" : null });
 	}
 	if (model.provider === "openai" && model.id === "gpt-5.5") {
 		mergeThinkingLevelMap(model, { minimal: null });
@@ -1756,6 +1782,23 @@ async function generateModels() {
 		});
 	}
 
+	for (const model of GPT_5_6_MODELS) {
+		if (!allModels.some((m) => m.provider === "openai" && m.id === model.id)) {
+			allModels.push({
+				id: model.id,
+				name: model.name,
+				api: "openai-responses",
+				baseUrl: "https://api.openai.com/v1",
+				provider: "openai",
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { ...model.cost },
+				contextWindow: 272000,
+				maxTokens: 128000,
+			});
+		}
+	}
+
 	const deepseekCompat: OpenAICompletionsCompat = {
 		requiresReasoningContentOnAssistantMessages: true,
 		thinkingFormat: "deepseek",
@@ -1934,6 +1977,20 @@ async function generateModels() {
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 	];
+	for (const model of GPT_5_6_MODELS) {
+		codexModels.push({
+			id: model.id,
+			name: model.name,
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { ...model.cost },
+			contextWindow: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		});
+	}
 	allModels.push(...codexModels);
 
 	// Add missing Grok models
