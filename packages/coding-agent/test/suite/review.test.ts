@@ -18,6 +18,7 @@ import {
 	type ResolvedReview,
 	resolveReviewTarget,
 	runReview,
+	truncateDiff,
 } from "../../src/core/review.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
@@ -306,6 +307,12 @@ describe("formatReviewForNewSession", () => {
 	it("reports a clean review", () => {
 		const content = formatReviewForNewSession(resolved, { findings: [] }, "raw");
 		expect(content).toContain("no issues worth flagging");
+	});
+
+	it("separates the footer with exactly one blank line after findings", () => {
+		const content = formatReviewForNewSession(resolved, { findings: [{ title: "Bug", body: "Body" }] }, "raw");
+		expect(content).not.toContain("\n\n\n");
+		expect(content).toContain("Body\n\nReproduce the reviewed diff");
 	});
 
 	it("falls back to the raw report when parsing failed", () => {
@@ -599,9 +606,45 @@ describe("resolveReviewTarget", () => {
 			throw new Error(result.error);
 		}
 		expect(result.truncated).toBe(true);
-		expect(result.diff.length).toBe(MAX_REVIEW_DIFF_CHARS);
+		expect(result.diff.length).toBeLessThanOrEqual(MAX_REVIEW_DIFF_CHARS);
+		// The preview ends on a whole-line boundary, not a partial hunk line.
+		expect(result.diff.endsWith("\n")).toBe(true);
 	});
 });
+
+describe("truncateDiff", () => {
+	it("returns the diff unchanged when under the limit", () => {
+		expect(truncateDiff("small diff\n")).toEqual({ diff: "small diff\n", truncated: false });
+	});
+
+	it("truncates on a line boundary", () => {
+		const line = `${"x".repeat(100)}\n`;
+		const { diff, truncated } = truncateDiff(line.repeat(2000));
+		expect(truncated).toBe(true);
+		expect(diff.length).toBeLessThanOrEqual(MAX_REVIEW_DIFF_CHARS);
+		expect(diff.length).toBeGreaterThan(MAX_REVIEW_DIFF_CHARS - line.length);
+		expect(diff.endsWith("\n")).toBe(true);
+	});
+
+	it("cuts a single oversized line at the limit", () => {
+		const { diff, truncated } = truncateDiff("a".repeat(MAX_REVIEW_DIFF_CHARS + 100));
+		expect(truncated).toBe(true);
+		expect(diff.length).toBe(MAX_REVIEW_DIFF_CHARS);
+	});
+
+	it("does not split a surrogate pair when there is no line boundary", () => {
+		const filler = "a".repeat(MAX_REVIEW_DIFF_CHARS - 1);
+		// The emoji's high surrogate lands exactly on the cut index (MAX - 1).
+		const { diff, truncated } = truncateDiff(`${filler}\u{1F600}${"a".repeat(10)}`);
+		expect(truncated).toBe(true);
+		expect(diff).toBe(filler);
+		expect(isHighSurrogateCode(diff.charCodeAt(diff.length - 1))).toBe(false);
+	});
+});
+
+function isHighSurrogateCode(codeUnit: number): boolean {
+	return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
 
 describe("runReview", () => {
 	const harnesses: Harness[] = [];

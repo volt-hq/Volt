@@ -140,11 +140,25 @@ function runCommand(
 	});
 }
 
-function truncateDiff(diff: string): { diff: string; truncated: boolean } {
+function isHighSurrogate(codeUnit: number): boolean {
+	return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+export function truncateDiff(diff: string): { diff: string; truncated: boolean } {
 	if (diff.length <= MAX_REVIEW_DIFF_CHARS) {
 		return { diff, truncated: false };
 	}
-	return { diff: diff.slice(0, MAX_REVIEW_DIFF_CHARS), truncated: true };
+	let end = MAX_REVIEW_DIFF_CHARS;
+	// Prefer cutting on a line boundary so the preview ends with whole diff lines
+	// rather than a partial hunk. For a single line longer than the limit there is
+	// no boundary, so fall back to a raw cut that does not split a surrogate pair.
+	const lastNewline = diff.lastIndexOf("\n", end - 1);
+	if (lastNewline >= 0) {
+		end = lastNewline + 1;
+	} else if (isHighSurrogate(diff.charCodeAt(end - 1))) {
+		end -= 1;
+	}
+	return { diff: diff.slice(0, end), truncated: true };
 }
 
 async function detectBaseBranch(cwd: string): Promise<string | undefined> {
@@ -855,6 +869,11 @@ export function formatReviewForNewSession(
 		}
 	}
 
+	// Collapse any trailing blank lines (the findings loop appends one after each
+	// entry) so the footer is always separated by exactly one blank line.
+	while (lines.length > 0 && lines[lines.length - 1] === "") {
+		lines.pop();
+	}
 	lines.push(
 		"",
 		`Reproduce the reviewed diff with \`${resolved.diffCommand}\`.`,
