@@ -157,9 +157,10 @@ export type AgentSessionEvent =
 	  }
 	| {
 			/**
-			 * Emitted once a prompt run fully settles: after `agent_end` plus any
-			 * automatic retries, overflow/threshold compaction continuations, and
-			 * queued-message continuations. Equivalent to `waitForIdle()` resolving.
+			 * Emitted once tracked prompt work fully settles. When an agent run starts,
+			 * this follows its final `agent_end` plus any automatic retries,
+			 * overflow/threshold compaction, and queued-message continuations.
+			 * Equivalent to `waitForIdle()` resolving for that work.
 			 */
 			type: "agent_settled";
 	  }
@@ -321,8 +322,10 @@ export class AgentSession {
 	private _followUpMessages: string[] = [];
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
-	/** Tracks session-level prompt work, including post-agent continuations. */
+	/** Tracks core agent runs, including retry and compaction continuations. */
 	private _activePromptRuns = new Set<Promise<void>>();
+	/** Tracks complete prompt calls, including pre-prompt recovery and message construction. */
+	private _activePromptTransactions = new Set<Promise<void>>();
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -343,6 +346,9 @@ export class AgentSession {
 	// Retry state
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
+	/** Incremented by abort() so in-flight session continuations cannot start a new core run. */
+	private _abortGeneration = 0;
+	private _abortPromise: Promise<void> | undefined;
 
 	// Bash execution state
 	private _bashAbortController: AbortController | undefined = undefined;
@@ -890,9 +896,14 @@ export class AgentSession {
 		this._fastModeRestoreThinkingLevel = level;
 	}
 
-	/** Whether agent is currently streaming a response */
+	/** Whether the session is processing a response or a session-level continuation. */
 	get isStreaming(): boolean {
-		return this.agent.state.isStreaming;
+		return this.agent.state.isStreaming || this._activePromptRuns.size > 0;
+	}
+
+	/** Whether any tracked prompt work, including preflight, is still active. */
+	get isBusy(): boolean {
+		return this.isStreaming || this._activePromptTransactions.size > 0;
 	}
 
 	/** Current effective system prompt (includes any per-turn extension modifications) */
@@ -1098,15 +1109,18 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
-	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
-		if (this._disposed) {
+	private async _runAgentPrompt(
+		messages: AgentMessage | AgentMessage[],
+		abortGeneration = this._abortGeneration,
+	): Promise<void> {
+		if (this._disposed || abortGeneration !== this._abortGeneration) {
 			return;
 		}
 		this._proactiveCompactionStopped = false;
 		const run = (async () => {
 			try {
 				await this.agent.prompt(messages);
-				while (await this._handlePostAgentRun()) {
+				while (await this._handlePostAgentRun(abortGeneration)) {
 					await this.agent.continue();
 				}
 			} finally {
@@ -1118,36 +1132,50 @@ export class AgentSession {
 			await run;
 		} finally {
 			this._activePromptRuns.delete(run);
-			// The run promise resolves only after agent_end listeners settle and all
-			// session-level continuations (retry, compaction, queued messages) finish,
-			// so this is the session equivalent of waitForIdle() resolving.
-			if (this._activePromptRuns.size === 0) {
-				this._emit({ type: "agent_settled" });
-			}
+			this._emitAgentSettledIfIdle();
 		}
 	}
 
-	/** Wait for the agent and any session-level prompt continuations to settle. */
+	private _trackPromptTransaction(operation: () => Promise<void>): Promise<void> {
+		const transaction = Promise.resolve().then(operation);
+		this._activePromptTransactions.add(transaction);
+		return transaction.finally(() => {
+			this._activePromptTransactions.delete(transaction);
+			this._emitAgentSettledIfIdle();
+		});
+	}
+
+	private _emitAgentSettledIfIdle(): void {
+		if (this._activePromptRuns.size === 0 && this._activePromptTransactions.size === 0) {
+			this._emit({ type: "agent_settled" });
+		}
+	}
+
+	/** Wait for the agent and any session-level prompt work to settle. */
 	async waitForIdle(): Promise<void> {
 		while (true) {
-			const promptRuns = [...this._activePromptRuns];
-			if (promptRuns.length > 0) {
-				await Promise.allSettled(promptRuns);
+			const promptWork = [...this._activePromptRuns, ...this._activePromptTransactions];
+			if (promptWork.length > 0) {
+				await Promise.allSettled(promptWork);
 				continue;
 			}
 
 			await this.agent.waitForIdle();
-			if (this._activePromptRuns.size === 0) {
+			if (this._activePromptRuns.size === 0 && this._activePromptTransactions.size === 0) {
 				return;
 			}
 		}
 	}
 
-	private async _handlePostAgentRun(): Promise<boolean> {
-		// A disposed session must never continue the agent (continue() creates a
-		// fresh AbortController, resurrecting a run that dispose() aborted).
+	private async _handlePostAgentRun(abortGeneration = this._abortGeneration): Promise<boolean> {
+		// Disposal stops all continuations. Abort stops automatic retry/compaction
+		// resurrection, but intentionally preserves messages queued before abort.
 		if (this._disposed) {
 			return false;
+		}
+		if (abortGeneration !== this._abortGeneration) {
+			this._lastAssistantMessage = undefined;
+			return this.agent.hasQueuedMessages();
 		}
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
@@ -1158,13 +1186,20 @@ export class AgentSession {
 		if (this._proactiveCompactionStopped) {
 			this._proactiveCompactionStopped = false;
 			// The run was interrupted mid-task by _shouldStopForProactiveCompaction,
-			// so always resume it, even when compaction bails or fails.
+			// so always resume it, even when compaction bails or fails, unless the
+			// session was disposed while compaction was in flight.
 			await this._runAutoCompaction("threshold", false, true);
-			return true;
+			return !this._disposed && (abortGeneration === this._abortGeneration || this.agent.hasQueuedMessages());
 		}
 
-		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
-			return true;
+		if (this._isRetryableError(msg) && (await this._prepareRetry(msg, abortGeneration))) {
+			return !this._disposed && abortGeneration === this._abortGeneration;
+		}
+		if (this._disposed) {
+			return false;
+		}
+		if (abortGeneration !== this._abortGeneration) {
+			return this.agent.hasQueuedMessages();
 		}
 
 		if (msg.stopReason === "error" && this._retryAttempt > 0) {
@@ -1178,12 +1213,13 @@ export class AgentSession {
 		}
 
 		if (await this._checkCompaction(msg)) {
-			return true;
+			return !this._disposed && (abortGeneration === this._abortGeneration || this.agent.hasQueuedMessages());
 		}
 
 		// The agent loop drains both queues before emitting agent_end. Any messages
-		// here were queued by agent_end extension handlers and need a continuation.
-		return this.agent.hasQueuedMessages();
+		// here were queued by agent_end extension handlers and need a continuation,
+		// including messages that were already queued when the run was aborted.
+		return !this._disposed && this.agent.hasQueuedMessages();
 	}
 
 	/**
@@ -1195,7 +1231,21 @@ export class AgentSession {
 	 * @throws Error if streaming and no streamingBehavior specified
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
-	async prompt(text: string, options?: PromptOptions): Promise<void> {
+	prompt(text: string, options?: PromptOptions): Promise<void> {
+		const isRunning = this.isStreaming;
+		const shouldQueue = isRunning || this._activePromptTransactions.size > 0 || this._abortPromise !== undefined;
+		const allowQueue = isRunning && this._abortPromise === undefined;
+		const abortGeneration = this._abortGeneration;
+		return this._trackPromptTransaction(() => this._prompt(text, options, shouldQueue, allowQueue, abortGeneration));
+	}
+
+	private async _prompt(
+		text: string,
+		options: PromptOptions | undefined,
+		shouldQueue: boolean,
+		allowQueue: boolean,
+		abortGeneration: number,
+	): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
@@ -1220,7 +1270,7 @@ export class AgentSession {
 					currentText,
 					currentImages,
 					options?.source ?? "interactive",
-					this.isStreaming ? options?.streamingBehavior : undefined,
+					shouldQueue ? options?.streamingBehavior : undefined,
 				);
 				if (inputResult.action === "handled") {
 					preflightResult?.(true);
@@ -1239,9 +1289,10 @@ export class AgentSession {
 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 			}
 
-			// If streaming, queue via steer() or followUp() based on option
-			if (this.isStreaming) {
-				if (!options?.streamingBehavior) {
+			// Queue only behind an active agent run. During preflight or abort,
+			// reject promptly so an accepted message cannot be stranded.
+			if (shouldQueue) {
+				if (!allowQueue || !options?.streamingBehavior) {
 					throw new Error(
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 					);
@@ -1281,21 +1332,23 @@ export class AgentSession {
 			// Check if we need to compact before sending (catches aborted responses)
 			const lastAssistant = this._findLastAssistantMessage();
 			if (lastAssistant && (await this._checkCompaction(lastAssistant, false))) {
-				// dispose() can land during the _checkCompaction await (teardown does not
-				// wait for idle). agent.continue() mints a fresh, non-aborted controller,
-				// so it must not run on a disposed generation — mirrors the _disposed
-				// guards in _runAgentPrompt/_handlePostAgentRun (stale-runner-inertness).
-				if (this._disposed) {
-					return;
+				// dispose() or abort() can land during the _checkCompaction await.
+				// agent.continue() mints a fresh controller, so it must not run for a
+				// disposed generation or an aborted prompt transaction.
+				if (this._disposed || abortGeneration !== this._abortGeneration) {
+					throw new Error("Prompt aborted before recovery could continue");
 				}
 				try {
 					await this.agent.continue();
-					while (await this._handlePostAgentRun()) {
+					while (await this._handlePostAgentRun(abortGeneration)) {
 						await this.agent.continue();
 					}
 				} finally {
 					this._flushPendingBashMessages();
 				}
+			}
+			if (this._disposed || abortGeneration !== this._abortGeneration) {
+				throw new Error("Prompt aborted before the agent run started");
 			}
 
 			// Build messages array (custom message if any, then user message)
@@ -1354,8 +1407,12 @@ export class AgentSession {
 			return;
 		}
 
+		if (this._disposed || abortGeneration !== this._abortGeneration) {
+			preflightResult?.(false);
+			throw new Error("Prompt aborted before the agent run started");
+		}
 		preflightResult?.(true);
-		await this._runAgentPrompt(messages);
+		await this._runAgentPrompt(messages, abortGeneration);
 	}
 
 	/**
@@ -1632,10 +1689,22 @@ export class AgentSession {
 	/**
 	 * Abort current operation and wait for agent to become idle.
 	 */
-	async abort(): Promise<void> {
+	abort(): Promise<void> {
+		if (this._abortPromise) {
+			return this._abortPromise;
+		}
+		this._abortGeneration += 1;
 		this.abortRetry();
+		this.abortCompaction();
 		this.agent.abort();
-		await this.agent.waitForIdle();
+		const idlePromise = this.waitForIdle();
+		const abortPromise = idlePromise.finally(() => {
+			if (this._abortPromise === abortPromise) {
+				this._abortPromise = undefined;
+			}
+		});
+		this._abortPromise = abortPromise;
+		return abortPromise;
 	}
 
 	// =========================================================================
@@ -2917,9 +2986,9 @@ export class AgentSession {
 	 * Prepare a retryable error for continuation with exponential backoff.
 	 * @returns true if the caller should continue the agent, false otherwise
 	 */
-	private async _prepareRetry(message: AssistantMessage): Promise<boolean> {
+	private async _prepareRetry(message: AssistantMessage, abortGeneration: number): Promise<boolean> {
 		const settings = this.settingsManager.getRetrySettings();
-		if (!settings.enabled) {
+		if (!settings.enabled || this._disposed || abortGeneration !== this._abortGeneration) {
 			return false;
 		}
 
@@ -2940,6 +3009,18 @@ export class AgentSession {
 			delayMs,
 			errorMessage: message.errorMessage || "Unknown error",
 		});
+
+		if (this._disposed || abortGeneration !== this._abortGeneration) {
+			const attempt = this._retryAttempt;
+			this._retryAttempt = 0;
+			this._emit({
+				type: "auto_retry_end",
+				success: false,
+				attempt,
+				finalError: "Retry cancelled",
+			});
+			return false;
+		}
 
 		// Remove error message from agent state (keep in session for history)
 		const messages = this.agent.state.messages;
@@ -2966,7 +3047,7 @@ export class AgentSession {
 			this._retryAbortController = undefined;
 		}
 
-		return true;
+		return !this._disposed && abortGeneration === this._abortGeneration;
 	}
 
 	/**

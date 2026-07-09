@@ -262,13 +262,10 @@ class LocalSubagentHandle implements SubagentHandle {
 				// Listener failures should not break the child RPC event stream.
 			}
 		}
-		if (
-			event.type === "agent_end" &&
-			this.promptMessageObserved &&
-			!this.settlementWatcherStarted &&
-			!this.disposed &&
-			!this.endSettled
-		) {
+		const shouldWatchSettlement =
+			(event.type === "agent_end" && this.promptMessageObserved) ||
+			(event.type === "agent_settled" && this.promptStarted);
+		if (shouldWatchSettlement && !this.settlementWatcherStarted && !this.disposed && !this.endSettled) {
 			this.settlementWatcherStarted = true;
 			void this.settleAfterIdle();
 		}
@@ -290,8 +287,13 @@ class LocalSubagentHandle implements SubagentHandle {
 			return;
 		}
 
+		if (this.disposed || this.endSettled) {
+			return;
+		}
 		const latestEndEvent = this.latestEndEvent;
-		if (this.disposed || this.endSettled || !latestEndEvent) {
+		if (!this.promptMessageObserved || !latestEndEvent) {
+			this.endSettled = true;
+			this.rejectEnd(new Error(`Subagent ${this.id} settled without an agent result`));
 			return;
 		}
 		this.endSettled = true;

@@ -400,24 +400,42 @@ export abstract class RpcClientBase {
 	/**
 	 * Wait for agent to become idle.
 	 *
-	 * Resolves on `agent_settled`, which the host emits only after `agent_end`
-	 * plus any automatic retries, compaction continuations, and queued-message
-	 * continuations have finished.
+	 * Resolves on `agent_settled`, which the host emits after all tracked prompt
+	 * work, including any agent run, automatic retries, compaction continuations,
+	 * and queued-message continuations, has finished.
 	 */
 	waitForIdle(timeout = 60_000): Promise<void> {
 		return new Promise((resolve, reject) => {
-			const timer = setTimeout(() => {
+			let settled = false;
+			let unsubscribe = (): void => {};
+			const finish = (error?: Error): void => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
 				unsubscribe();
-				reject(new Error(this.formatError("Timeout waiting for agent to become idle")));
-			}, timeout);
-
-			const unsubscribe = this.onEvent((event) => {
-				if (event.type === "agent_settled") {
-					clearTimeout(timer);
-					unsubscribe();
+				if (error) {
+					reject(error);
+				} else {
 					resolve();
 				}
+			};
+			const timer = setTimeout(() => {
+				finish(new Error(this.formatError("Timeout waiting for agent to become idle")));
+			}, timeout);
+
+			unsubscribe = this.onEvent((event) => {
+				if (event.type === "agent_settled") {
+					finish();
+				}
 			});
+			// Subscribe before querying state so settlement cannot be lost between
+			// the idle snapshot and listener installation.
+			void this.getState().then(
+				(state) => {
+					if (!state.isStreaming) finish();
+				},
+				(error: unknown) => finish(toError(error)),
+			);
 		});
 	}
 

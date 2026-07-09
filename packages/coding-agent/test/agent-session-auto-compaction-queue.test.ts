@@ -66,6 +66,14 @@ class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMe
 	}
 }
 
+function createDeferred(): { promise: Promise<void>; resolve(): void } {
+	let resolve: () => void = () => undefined;
+	const promise = new Promise<void>((promiseResolve) => {
+		resolve = promiseResolve;
+	});
+	return { promise, resolve };
+}
+
 describe("AgentSession auto-compaction queue resume", () => {
 	let session: AgentSession;
 	let sessionManager: SessionManager;
@@ -267,6 +275,64 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(streamCallCount).toBe(2);
 		expect(agentEnds).toHaveLength(2);
 		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
+	});
+
+	it("should not continue after disposal during proactive compaction", async () => {
+		const model = session.model!;
+		const compactionStarted = createDeferred();
+		const finishCompaction = createDeferred();
+		let streamCallCount = 0;
+		const continueSpy = vi.spyOn(session.agent, "continue");
+		vi.spyOn(
+			session as unknown as {
+				_runAutoCompaction: (
+					reason: "overflow" | "threshold",
+					willRetry: boolean,
+					continueAfterCompaction?: boolean,
+				) => Promise<boolean>;
+			},
+			"_runAutoCompaction",
+		).mockImplementation(async () => {
+			compactionStarted.resolve();
+			await finishCompaction.promise;
+			return false;
+		});
+
+		session.agent.streamFn = () => {
+			streamCallCount += 1;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "missing.txt" } }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: model.contextWindow - 20_000,
+						output: 10_000,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: model.contextWindow - 10_000,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "toolUse", message });
+			});
+			return stream;
+		};
+
+		const promptPromise = session.prompt("trigger proactive compaction");
+		await compactionStarted.promise;
+		session.dispose();
+		finishCompaction.resolve();
+		await promptPromise;
+
+		expect(continueSpy).not.toHaveBeenCalled();
+		expect(streamCallCount).toBe(1);
 	});
 
 	it("should stop proactively only once until a compaction succeeds", async () => {

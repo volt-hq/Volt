@@ -401,6 +401,23 @@ describe("SubagentManager", () => {
 		expect(lifecycle).toEqual(["agent_end", "agent_end", "agent_settled"]);
 	});
 
+	it("rejects completion when the delegated prompt settles without an agent result", async () => {
+		const { manager } = await createTestManager({
+			onRuntimeCreated: (event) => {
+				const runner = event.runtime.session.extensionRunner;
+				const hasHandlers = runner.hasHandlers.bind(runner);
+				runner.hasHandlers = (eventType) => eventType === "input" || hasHandlers(eventType);
+				runner.emitInput = async () => ({ action: "handled" });
+			},
+		});
+		const handle = await manager.start();
+		const completion = handle.waitForEnd();
+
+		await handle.prompt("handled by child input extension");
+
+		await expect(completion).rejects.toThrow(`Subagent ${handle.id} settled without an agent result`);
+	});
+
 	it("ignores recovery agent_end events emitted before the delegated prompt starts", async () => {
 		const taskResponseStarted = createDeferred();
 		const finishTaskResponse = createDeferred();

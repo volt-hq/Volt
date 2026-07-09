@@ -263,6 +263,28 @@ describe("RpcTransportClient", () => {
 		}
 	});
 
+	test("waitForIdle resolves immediately when the session is already idle", async () => {
+		const pair = createLoopbackRpcTransportPair();
+		const client = new RpcTransportClient({ transport: pair.client });
+		pair.server.onLine((line) => {
+			const command = parseCommandLine(line);
+			pair.server.write({
+				id: command.id,
+				type: "response",
+				command: command.type,
+				success: true,
+				data: { isStreaming: false },
+			});
+		});
+
+		await client.start();
+		try {
+			await expect(client.waitForIdle(100)).resolves.toBeUndefined();
+		} finally {
+			await client.stop();
+		}
+	});
+
 	test("rejects in-flight requests when the transport closes", async () => {
 		const pair = createLoopbackRpcTransportPair();
 		const client = new RpcTransportClient({ transport: pair.client });
@@ -1961,6 +1983,7 @@ function createRuntimeHost(
 				return fastModeRestoreThinkingLevel;
 			},
 			isStreaming: resources.isStreaming ?? false,
+			isBusy: resources.isStreaming ?? false,
 			isCompacting: resources.isCompacting ?? false,
 			steeringMode: "one-at-a-time",
 			followUpMode: "one-at-a-time",

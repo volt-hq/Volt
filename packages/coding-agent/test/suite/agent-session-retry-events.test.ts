@@ -1,7 +1,7 @@
-import type { AgentTool } from "@earendil-works/volt-agent-core";
+import type { AgentMessage, AgentTool } from "@earendil-works/volt-agent-core";
 import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/volt-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, type Harness } from "./harness.ts";
 
 function normalizeEventOrder(events: Harness["events"]): string[] {
@@ -165,6 +165,73 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.session.isRetrying).toBe(false);
 		expect(harness.eventsOfType("auto_retry_end").map((event) => event.finalError)).toContain("Retry cancelled");
 		expect(harness.faux.state.callCount).toBe(1);
+	});
+
+	it("does not start a retry when abort arrives from the retry candidate agent_end", async () => {
+		const harness = await createHarness({
+			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 60_000 } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })]);
+
+		let abortPromise: Promise<void> | undefined;
+		harness.session.subscribe((event) => {
+			if (event.type === "agent_end") {
+				abortPromise = harness.session.abort();
+			}
+		});
+
+		await harness.session.prompt("abort before retry setup");
+		await abortPromise;
+
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.eventsOfType("auto_retry_start")).toEqual([]);
+		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
+	});
+
+	it("keeps the session busy during retry backoff and rejects an overlapping prompt", async () => {
+		const harness = await createHarness({
+			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 60_000 } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })]);
+
+		const sawRetryStart = new Promise<void>((resolve) => {
+			const unsubscribe = harness.session.subscribe((event) => {
+				if (event.type === "auto_retry_start") {
+					unsubscribe();
+					resolve();
+				}
+			});
+		});
+
+		const checkCompaction = vi.spyOn(
+			harness.session as unknown as {
+				_checkCompaction: (message: unknown, skipAbortedCheck?: boolean) => Promise<boolean>;
+			},
+			"_checkCompaction",
+		);
+		const promptPromise = harness.session.prompt("first prompt");
+		await sawRetryStart;
+
+		expect(harness.session.isStreaming).toBe(true);
+		await expect(harness.session.prompt("overlapping prompt")).rejects.toThrow(
+			"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+		);
+
+		const abortPromise = harness.session.abort();
+		await expect(
+			harness.session.prompt("do not strand this prompt", { streamingBehavior: "followUp" }),
+		).rejects.toThrow(
+			"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+		);
+		expect(harness.session.pendingMessageCount).toBe(0);
+		await abortPromise;
+		await promptPromise;
+
+		expect(checkCompaction).not.toHaveBeenCalled();
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 	});
 
 	it("waits for the full loop when retry recovery produces tool calls", async () => {
@@ -332,6 +399,51 @@ describe("AgentSession retry and event characterization", () => {
 
 		expect(harness.events[harness.events.length - 2]?.type).toBe("agent_end");
 		expect(harness.events[harness.events.length - 1]?.type).toBe("agent_settled");
+	});
+
+	it("settles after resumed overflow recovery when new prompt construction fails", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
+		});
+		harnesses.push(harness);
+		harness.session.setSessionName("resumed recovery test");
+
+		const previousUser = {
+			role: "user",
+			content: [{ type: "text", text: "previous prompt" }],
+			timestamp: Date.now() - 1,
+		} satisfies AgentMessage;
+		const overflow = fauxAssistantMessage("", {
+			stopReason: "error",
+			errorMessage: "prompt is too long",
+		});
+		harness.sessionManager.appendMessage(previousUser);
+		harness.sessionManager.appendMessage(overflow);
+		harness.session.agent.state.messages = [previousUser, overflow];
+		harness.faux.setSimpleResponses([fauxAssistantMessage("compacted context")]);
+		harness.setResponses([fauxAssistantMessage("recovered previous turn")]);
+
+		const beforeAgentStart = vi
+			.spyOn(harness.session.extensionRunner, "emitBeforeAgentStart")
+			.mockRejectedValue(new Error("message construction failed"));
+		const lifecycle: string[] = [];
+		harness.session.subscribe((event) => {
+			if (event.type === "agent_end" || event.type === "agent_settled") {
+				lifecycle.push(event.type);
+			}
+		});
+
+		try {
+			const promptPromise = harness.session.prompt("new prompt");
+			const idlePromise = harness.session.waitForIdle();
+
+			expect(harness.session.isBusy).toBe(true);
+			await expect(promptPromise).rejects.toThrow("message construction failed");
+			await expect(idlePromise).resolves.toBeUndefined();
+			expect(lifecycle).toEqual(["agent_end", "agent_settled"]);
+		} finally {
+			beforeAgentStart.mockRestore();
+		}
 	});
 
 	it("emits agent_end then agent_settled for aborted runs and persists the aborted assistant message", async () => {
