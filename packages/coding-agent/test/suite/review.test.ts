@@ -165,6 +165,57 @@ describe("parseReviewOutput", () => {
 		expect(parsed?.findings[0]?.body).toBe("a < b && c > d");
 	});
 
+	it("keeps an earlier valid payload when a later payload is invalid JSON", () => {
+		const text = [
+			"<response>",
+			'  <payload>{"findings":[{"title":"first","body":"good"}]}</payload>',
+			'  <payload>{"findings": [oops not json}</payload>',
+			"</response>",
+		].join("\n");
+		// The last payload is tried first; when it fails to parse the loop must fall
+		// back to the earlier valid one rather than giving up.
+		expect(parseReviewOutput(text)?.findings[0]?.title).toBe("first");
+	});
+
+	it("preserves literal angle brackets and ampersands in a raw JSON payload", () => {
+		const body = "compare a < b and c > d and x & y";
+		const text = [
+			"<response>",
+			"  <payload>",
+			JSON.stringify({ findings: [{ title: "chars", body }] }),
+			"  </payload>",
+			"</response>",
+		].join("\n");
+		expect(parseReviewOutput(text)?.findings[0]?.body).toBe(body);
+	});
+
+	it("parses a payload split across adjacent CDATA sections", () => {
+		const payload = `<![CDATA[{"findings":[{"title":"cd",]]><![CDATA["body":"ok"}]}]]>`;
+		const text = ["<response>", `  <payload>${payload}</payload>`, "</response>"].join("\n");
+		expect(parseReviewOutput(text)?.findings[0]?.title).toBe("cd");
+	});
+
+	it("decodes an XML-escaped payload only one level", () => {
+		// The author's finding body literally contains the text "&lt;".
+		const intendedBody = "x &lt; y";
+		const raw = JSON.stringify({ findings: [{ title: "once", body: intendedBody }] });
+		const escaped = raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+		const text = ["<response>", "  <payload>", escaped, "  </payload>", "</response>"].join("\n");
+		// Fallback decoding runs once (&amp; is decoded last), so the literal entity
+		// text survives instead of collapsing to "<".
+		expect(parseReviewOutput(text)?.findings[0]?.body).toBe(intendedBody);
+	});
+
+	it("drops a payload escaped with numeric character references (known limitation)", () => {
+		const raw = JSON.stringify({ findings: [{ title: "num", body: "a<b" }] });
+		const numericEscaped = raw.replace(/"/g, "&#34;").replace(/</g, "&#x3C;");
+		const text = ["<response>", "  <payload>", numericEscaped, "  </payload>", "</response>"].join("\n");
+		// decodeXmlEntities only handles the five named entities, so numeric/hex
+		// references cannot be recovered and the payload is dropped. Pinned so a
+		// future decoder change that adds numeric support updates this deliberately.
+		expect(parseReviewOutput(text)).toBeUndefined();
+	});
+
 	it("uses the last parseable json block", () => {
 		const text = [
 			"```json",
