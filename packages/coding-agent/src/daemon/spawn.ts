@@ -113,6 +113,23 @@ export interface SpawnDaemonResult {
 	error?: string;
 }
 
+export interface PublishedDaemonEndpoint {
+	socketPath: string;
+	authToken?: string;
+}
+
+/** Read the latest complete pidfile endpoint without probing or auto-starting. */
+export function readPublishedDaemonEndpoint(agentDir: string = getAgentDir()): PublishedDaemonEndpoint | undefined {
+	const pidfile = readPidfile(getDaemonPaths(agentDir).pidfilePath);
+	if (!pidfile) {
+		return undefined;
+	}
+	return {
+		socketPath: pidfile.socketPath,
+		...(pidfile.token === undefined ? {} : { authToken: pidfile.token }),
+	};
+}
+
 export interface WaitForDaemonExitOptions {
 	agentDir?: string;
 	pid?: number;
@@ -161,6 +178,7 @@ export async function spawnDetachedDaemon(agentDir: string = getAgentDir()): Pro
 	const logFd = openSync(paths.logPath, "a", 0o600);
 	const child = spawn(process.execPath, [...nodeArgs, entry, "daemon", "run", "--foreground"], {
 		detached: true,
+		windowsHide: true,
 		stdio: ["ignore", logFd, logFd],
 		cwd: agentDir,
 		env: { ...process.env, [ENV_AGENT_DIR]: agentDir },

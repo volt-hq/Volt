@@ -1,5 +1,12 @@
+import { spawn } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
-import { type ProcessQueryRunner, parseElapsedTime, verifyPidfileProcess } from "../src/daemon/process-identity.ts";
+import {
+	type ProcessQueryRunner,
+	parseElapsedTime,
+	verifyPidfileProcess,
+	verifyProcessCreationTime,
+	verifyVoltdProcessIdentity,
+} from "../src/daemon/process-identity.ts";
 
 const NOW = 1_800_000_000_000;
 const ONE_HOUR_MS = 3_600_000;
@@ -69,6 +76,57 @@ describe("verifyPidfileProcess (posix)", () => {
 		expect(verification).toBe("mismatch");
 	});
 
+	it("matches creation time independently and fails closed on a foreign lock-owner command", async () => {
+		const creationVerification = await verifyProcessCreationTime(pidfile, {
+			runner: posixRunner("01:00:00 /usr/bin/postgres -D /var/db"),
+			platform: "linux",
+			now: NOW,
+			isProcessAlive: alive,
+		});
+		const daemonVerification = await verifyVoltdProcessIdentity(pidfile, {
+			runner: posixRunner("01:00:00 /usr/bin/postgres -D /var/db"),
+			platform: "linux",
+			now: NOW,
+			isProcessAlive: alive,
+		});
+		expect(creationVerification).toBe("match");
+		expect(daemonVerification).toBe("unknown");
+	});
+
+	it("uses creation mismatch even when a live POSIX process has no command-line data", async () => {
+		const matching = await verifyVoltdProcessIdentity(pidfile, {
+			runner: posixRunner("01:00:00"),
+			platform: "linux",
+			now: NOW,
+			isProcessAlive: alive,
+		});
+		const recycled = await verifyVoltdProcessIdentity(pidfile, {
+			runner: posixRunner("05:00"),
+			platform: "linux",
+			now: NOW,
+			isProcessAlive: alive,
+		});
+		expect(matching).toBe("unknown");
+		expect(recycled).toBe("mismatch");
+	});
+
+	it("distinguishes an unavailable creation-time query from a recycled pid", async () => {
+		const unavailable = await verifyProcessCreationTime(pidfile, {
+			runner: async () => ({ code: 127, output: "spawn ps ENOENT" }),
+			platform: "linux",
+			now: NOW,
+			isProcessAlive: alive,
+		});
+		const recycled = await verifyProcessCreationTime(pidfile, {
+			runner: posixRunner("05:00 /usr/bin/postgres"),
+			platform: "linux",
+			now: NOW,
+			isProcessAlive: alive,
+		});
+		expect(unavailable).toBe("unknown");
+		expect(recycled).toBe("mismatch");
+	});
+
 	it("rejects a recycled pid whose argv merely contains the voltd substring", async () => {
 		for (const argv of ["tail -f /var/log/voltd.log", "vim voltd.ts", "node /repo/voltd-cli/index.js watch"]) {
 			const verification = await verifyPidfileProcess(pidfile, {
@@ -89,6 +147,17 @@ describe("verifyPidfileProcess (posix)", () => {
 			isProcessAlive: alive,
 		});
 		expect(verification).toBe("match");
+	});
+
+	it("rejects a rapidly recycled voltd pid outside a lock-specific tolerance", async () => {
+		const verification = await verifyVoltdProcessIdentity(pidfile, {
+			runner: posixRunner("59:50 voltd"),
+			platform: "linux",
+			now: NOW,
+			isProcessAlive: alive,
+			toleranceMs: 2_000,
+		});
+		expect(verification).toBe("mismatch");
 	});
 
 	it("tolerates spawn-to-record skew within the tolerance window", async () => {
@@ -188,6 +257,16 @@ describe("verifyPidfileProcess (windows)", () => {
 		});
 		expect(verification).toBe("mismatch");
 	});
+
+	it("fails closed when CIM omits the live process command line", async () => {
+		const verification = await verifyVoltdProcessIdentity(pidfile, {
+			runner: windowsRunner({ startMs: NOW - ONE_HOUR_MS, commandLine: null }),
+			platform: "win32",
+			now: NOW,
+			isProcessAlive: alive,
+		});
+		expect(verification).toBe("unknown");
+	});
 });
 
 describe("verifyPidfileProcess (real ps)", () => {
@@ -204,7 +283,6 @@ describe("verifyPidfileProcess (real ps)", () => {
 	});
 
 	posixOnly("reports a freshly exited child as gone", async () => {
-		const { spawn } = await import("node:child_process");
 		const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
 		await new Promise<void>((resolve) => child.once("exit", () => resolve()));
 		const verification = await verifyPidfileProcess({ pid: child.pid ?? -1, startedAtMs: Date.now() });

@@ -14,7 +14,12 @@ import {
 	type RelayPreamble,
 } from "../../daemon/control-protocol.ts";
 import { getDaemonSocketPath } from "../../daemon/paths.ts";
-import { type EnsureDaemonResult, ensureDaemonRunning, probeDaemon } from "../../daemon/spawn.ts";
+import {
+	type EnsureDaemonResult,
+	ensureDaemonRunning,
+	probeDaemon,
+	readPublishedDaemonEndpoint,
+} from "../../daemon/spawn.ts";
 import { getWorktreesRoot } from "../../daemon/worktree-manager.ts";
 
 export type DaemonAttachConnectionState = "connected" | "reconnecting" | "gone" | "disabled";
@@ -434,16 +439,20 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 				const ensured = options.autoStart
 					? await ensureDaemonRunning(options.agentDir)
 					: await probeDaemon(options.agentDir);
-				const socketPath = ensured.socketPath;
-				if (options.autoStart && !ensured.healthy) {
-					state = ensured.state === "protocol-mismatch" ? "gone" : "reconnecting";
+				if (disposed) {
 					return;
 				}
-				client = createDaemonClient({
+				const socketPath = ensured.socketPath;
+				if (options.autoStart && ensured.state === "protocol-mismatch") {
+					state = "gone";
+					return;
+				}
+				const startingClient = createDaemonClient({
 					socketPath: socketPath ?? getDaemonSocketPath(options.agentDir),
 					client: "tui",
 					version: VERSION,
 					authToken: ensured.authToken,
+					refreshEndpoint: () => readPublishedDaemonEndpoint(options.agentDir),
 					capabilities: [CONTROL_WORKTREES_CAPABILITY],
 					reconnect: true,
 					onEvent: (event) => {
@@ -468,7 +477,12 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 						}
 					},
 				});
-				await client.connect();
+				client = startingClient;
+				await startingClient.connect();
+				if (disposed || client !== startingClient) {
+					await startingClient.close();
+					return;
+				}
 				state = "connected";
 				await ensureLeaseAfterConnected();
 			} catch (error) {

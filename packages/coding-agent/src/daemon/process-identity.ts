@@ -20,6 +20,7 @@ export interface ProcessIdentity {
 }
 
 export type PidfileVerification = "match" | "mismatch" | "gone";
+export type ProcessCreationVerification = "match" | "mismatch" | "gone" | "unknown";
 
 export interface VerifyPidfileOptions {
 	runner?: ProcessQueryRunner;
@@ -82,7 +83,7 @@ export function parseElapsedTime(value: string): number | undefined {
 async function queryPosixProcess(
 	pid: number,
 	runner: ProcessQueryRunner,
-	now: number,
+	now: () => number,
 ): Promise<ProcessIdentity | undefined> {
 	// etime (not the Linux-only etimes) is in the POSIX ps keyword set and has a
 	// fixed, locale-independent format.
@@ -100,7 +101,7 @@ async function queryPosixProcess(
 	const commandLine = separatorIndex === -1 ? "" : trimmed.slice(separatorIndex + 1).trim();
 	const elapsedMs = parseElapsedTime(etime);
 	return {
-		...(elapsedMs === undefined ? {} : { startTimeMs: now - elapsedMs }),
+		...(elapsedMs === undefined ? {} : { startTimeMs: now() - elapsedMs }),
 		commandLine,
 	};
 }
@@ -137,6 +138,82 @@ function commandLineLooksLikeVoltd(commandLine: string): boolean {
 	);
 }
 
+type ProcessIdentityLookup = { kind: "found"; identity: ProcessIdentity } | { kind: "gone" } | { kind: "unknown" };
+
+async function lookupProcessIdentity(pid: number, options: VerifyPidfileOptions): Promise<ProcessIdentityLookup> {
+	const runner = options.runner ?? defaultRunner;
+	const platform = options.platform ?? process.platform;
+	const now = () => options.now ?? Date.now();
+	const isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
+	if (isProcessAlive(pid) === "gone") {
+		return { kind: "gone" };
+	}
+	const identity =
+		platform === "win32" ? await queryWindowsProcess(pid, runner) : await queryPosixProcess(pid, runner, now);
+	if (identity) {
+		return { kind: "found", identity };
+	}
+	// The process may have exited between the liveness probe and the query.
+	// Otherwise its identity is unavailable and callers must fail closed.
+	return isProcessAlive(pid) === "gone" ? { kind: "gone" } : { kind: "unknown" };
+}
+
+function processStartTimeMatches(startedAtMs: number, identity: ProcessIdentity, toleranceMs: number): boolean {
+	return (
+		identity.startTimeMs !== undefined &&
+		startedAtMs > 0 &&
+		Math.abs(identity.startTimeMs - startedAtMs) <= toleranceMs
+	);
+}
+
+/**
+ * Verify only process creation identity. Unlike pidfile verification, this
+ * distinguishes a verifiable recycled PID from an unavailable OS query so
+ * startup-lock recovery can reap the former while failing closed on the latter.
+ */
+export async function verifyProcessCreationTime(
+	record: { pid: number; startedAtMs: number },
+	options: VerifyPidfileOptions = {},
+): Promise<ProcessCreationVerification> {
+	if (!Number.isInteger(record.pid) || record.pid <= 0) {
+		return "mismatch";
+	}
+	const lookup = await lookupProcessIdentity(record.pid, options);
+	if (lookup.kind !== "found") {
+		return lookup.kind;
+	}
+	if (record.startedAtMs <= 0 || lookup.identity.startTimeMs === undefined) {
+		return "unknown";
+	}
+	const toleranceMs = options.toleranceMs ?? DEFAULT_START_TIME_TOLERANCE_MS;
+	return processStartTimeMatches(record.startedAtMs, lookup.identity, toleranceMs) ? "match" : "mismatch";
+}
+
+/** Verify both process creation identity and the voltd command marker. */
+export async function verifyVoltdProcessIdentity(
+	record: { pid: number; startedAtMs: number },
+	options: VerifyPidfileOptions = {},
+): Promise<ProcessCreationVerification> {
+	if (!Number.isInteger(record.pid) || record.pid <= 0) {
+		return "mismatch";
+	}
+	const lookup = await lookupProcessIdentity(record.pid, options);
+	if (lookup.kind !== "found") {
+		return lookup.kind;
+	}
+	if (record.startedAtMs <= 0 || lookup.identity.startTimeMs === undefined) {
+		return "unknown";
+	}
+	const toleranceMs = options.toleranceMs ?? DEFAULT_START_TIME_TOLERANCE_MS;
+	if (!processStartTimeMatches(record.startedAtMs, lookup.identity, toleranceMs)) {
+		return "mismatch";
+	}
+	// Matching creation evidence is conclusive enough to fail closed, but some
+	// supported hosts (notably direct runVoltDaemon() calls on Windows) do not
+	// expose a voltd marker in the immutable process command line.
+	return commandLineLooksLikeVoltd(lookup.identity.commandLine) ? "match" : "unknown";
+}
+
 /**
  * Verify that pidfile.pid still refers to the daemon that wrote the pidfile.
  *
@@ -153,34 +230,20 @@ export async function verifyPidfileProcess(
 	if (!Number.isInteger(pidfile.pid) || pidfile.pid <= 0) {
 		return "mismatch";
 	}
-	const runner = options.runner ?? defaultRunner;
-	const platform = options.platform ?? process.platform;
-	const now = options.now ?? Date.now();
-	const toleranceMs = options.toleranceMs ?? DEFAULT_START_TIME_TOLERANCE_MS;
-	const isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
-
-	if (isProcessAlive(pidfile.pid) === "gone") {
+	const lookup = await lookupProcessIdentity(pidfile.pid, options);
+	if (lookup.kind === "gone") {
 		return "gone";
 	}
-	const identity =
-		platform === "win32"
-			? await queryWindowsProcess(pidfile.pid, runner)
-			: await queryPosixProcess(pidfile.pid, runner, now);
-	if (!identity) {
-		// The process may have exited between the liveness probe and the query;
-		// otherwise it is alive but unverifiable — refuse to signal it.
-		return isProcessAlive(pidfile.pid) === "gone" ? "gone" : "mismatch";
+	if (lookup.kind === "unknown") {
+		return "mismatch";
 	}
 	// A match REQUIRES verifying the process start time against the pidfile, not
 	// just a voltd-looking command line. Without that check (a legacy pidfile
 	// missing startedAtMs, or the OS not reporting a start time) a recycled pid
 	// whose command line merely contains a voltd marker must not be signalled.
-	const startTimeVerified =
-		identity.startTimeMs !== undefined &&
-		pidfile.startedAtMs > 0 &&
-		Math.abs(identity.startTimeMs - pidfile.startedAtMs) <= toleranceMs;
-	if (!startTimeVerified) {
+	const toleranceMs = options.toleranceMs ?? DEFAULT_START_TIME_TOLERANCE_MS;
+	if (!processStartTimeMatches(pidfile.startedAtMs, lookup.identity, toleranceMs)) {
 		return "mismatch";
 	}
-	return commandLineLooksLikeVoltd(identity.commandLine) ? "match" : "mismatch";
+	return commandLineLooksLikeVoltd(lookup.identity.commandLine) ? "match" : "mismatch";
 }

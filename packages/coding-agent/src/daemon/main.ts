@@ -29,7 +29,12 @@ import {
 	probeControlSocket,
 	startControlServer,
 } from "./control-server.ts";
-import { acquireDaemonLock, type DaemonLock } from "./daemon-lock.ts";
+import {
+	acquireDaemonLock,
+	DAEMON_LOCK_START_TIME_TOLERANCE_MS,
+	type DaemonLock,
+	type DaemonLockOwner,
+} from "./daemon-lock.ts";
 import { KeepAwakeController, type KeepAwakeControllerOptions } from "./keep-awake.ts";
 import type { DaemonLogger } from "./log.ts";
 import { createDaemonLogger } from "./log.ts";
@@ -40,7 +45,7 @@ import {
 	getDaemonPaths,
 	isWindowsNamedPipePath,
 } from "./paths.ts";
-import { verifyPidfileProcess } from "./process-identity.ts";
+import { verifyPidfileProcess, verifyVoltdProcessIdentity } from "./process-identity.ts";
 import { VoltdStateStore } from "./state.ts";
 import { handleWorktreeControlRequest, isWorktreeControlRequest, WorktreeManager } from "./worktree-manager.ts";
 
@@ -159,38 +164,53 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		releaseDaemonLock();
 		return code;
 	};
-	if (usingDefaultSocketPath) {
-		const lockResult = acquireDaemonLock(paths.lockDirPath, startedAtMs);
-		if (!lockResult.ok) {
-			const pidfile = readPidfile(paths.pidfilePath);
-			if (pidfile) {
-				const socketProbe = await probeControlSocket(pidfile.socketPath, {
-					version: VERSION,
-					timeoutMs: 500,
-					...(pidfile.token === undefined ? {} : { authToken: pidfile.token }),
-				});
-				if (socketProbe.kind === "healthy") {
-					log("info", `another daemon is healthy (pid ${socketProbe.status.pid}); exiting`);
-					return VOLTD_EXIT_ALREADY_RUNNING;
-				}
-				if (socketProbe.kind === "live-rejected" && socketProbe.reason === "protocol_mismatch") {
-					log(
-						"error",
-						`another daemon is running with protocol ${socketProbe.protocolVersion ?? "unknown"}; not starting`,
-					);
-					return VOLTD_EXIT_INCOMPATIBLE_RUNNING;
-				}
+	const verifyLockOwner = async (owner: DaemonLockOwner) => {
+		const pidfile = readPidfile(paths.pidfilePath);
+		if (pidfile?.pid === owner.pid) {
+			const socketProbe = await probeControlSocket(pidfile.socketPath, {
+				version: VERSION,
+				timeoutMs: 500,
+				...(pidfile.token === undefined ? {} : { authToken: pidfile.token }),
+			});
+			if (socketProbe.kind === "healthy" && socketProbe.status.pid === owner.pid) {
+				return "match" as const;
 			}
-			const owner = lockResult.owner ? ` by pid ${lockResult.owner.pid}` : "";
-			log("error", `daemon startup lock is held${owner}; not starting a second daemon`);
-			return VOLTD_EXIT_BIND_FAILED;
+			if (socketProbe.kind === "live-rejected" || socketProbe.kind === "unresponsive") {
+				return "unknown" as const;
+			}
 		}
-		daemonLock = lockResult.lock;
-		if (process.platform === "win32") {
-			selectedSocketPath = createDaemonControlSocketPath(agentDir);
-			paths = resolvePaths();
-			ensureDaemonDirs(paths);
+		return verifyVoltdProcessIdentity(owner, { toleranceMs: DAEMON_LOCK_START_TIME_TOLERANCE_MS });
+	};
+	const lockResult = await acquireDaemonLock(paths.lockDirPath, { verifyOwner: verifyLockOwner });
+	if (!lockResult.ok) {
+		const pidfile = readPidfile(paths.pidfilePath);
+		if (pidfile) {
+			const socketProbe = await probeControlSocket(pidfile.socketPath, {
+				version: VERSION,
+				timeoutMs: 500,
+				...(pidfile.token === undefined ? {} : { authToken: pidfile.token }),
+			});
+			if (socketProbe.kind === "healthy") {
+				log("info", `another daemon is healthy (pid ${socketProbe.status.pid}); exiting`);
+				return VOLTD_EXIT_ALREADY_RUNNING;
+			}
+			if (socketProbe.kind === "live-rejected" && socketProbe.reason === "protocol_mismatch") {
+				log(
+					"error",
+					`another daemon is running with protocol ${socketProbe.protocolVersion ?? "unknown"}; not starting`,
+				);
+				return VOLTD_EXIT_INCOMPATIBLE_RUNNING;
+			}
 		}
+		const owner = lockResult.owner ? ` by pid ${lockResult.owner.pid}` : "";
+		log("error", `daemon startup lock is held${owner}; not starting a second daemon`);
+		return VOLTD_EXIT_BIND_FAILED;
+	}
+	daemonLock = lockResult.lock;
+	if (usingDefaultSocketPath && process.platform === "win32") {
+		selectedSocketPath = createDaemonControlSocketPath(agentDir);
+		paths = resolvePaths();
+		ensureDaemonDirs(paths);
 	}
 
 	const state = new VoltdStateStore({ agentDir, statePath: paths.statePath });
@@ -538,8 +558,8 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			},
 		});
 
-	// Default daemon instances are serialized by the daemon lock; custom socket
-	// paths still rely on the bind result as their single-instance guard.
+	// All daemon instances sharing an agent directory are serialized before bind;
+	// the socket bind remains a final guard against external listeners.
 	try {
 		controlServer = await bindControlServer();
 	} catch (error) {

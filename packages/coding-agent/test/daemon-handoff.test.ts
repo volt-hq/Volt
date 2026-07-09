@@ -6,14 +6,15 @@
  * double with a controllable turn.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ControlEvent, ControlRequest } from "../src/daemon/control-protocol.ts";
 import { type ControlConnection, type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
 import { LeaseBroker } from "../src/daemon/lease-broker.ts";
-import { ensureDaemonDirs, getDaemonPaths } from "../src/daemon/paths.ts";
+import { type DaemonPaths, ensureDaemonDirs, getDaemonPaths } from "../src/daemon/paths.ts";
 import { ViewerFeedRegistry } from "../src/daemon/viewer-feed.ts";
 import { type AcquireOutcome, createDaemonAttach, type DaemonAttach } from "../src/modes/interactive/daemon-attach.ts";
 
@@ -81,7 +82,7 @@ afterEach(async () => {
  */
 async function startDaemonHalf(
 	socketPath: string,
-	options: { workspaces?: Array<{ name: string; path: string }> } = {},
+	options: { authToken?: string; workspaces?: Array<{ name: string; path: string }> } = {},
 ): Promise<DaemonHalf> {
 	const session = createDrainableSession();
 	const disposed: Array<{ reason: string }> = [];
@@ -207,6 +208,7 @@ async function startDaemonHalf(
 	server = await startControlServer({
 		socketPath,
 		version: "0.0.0-test",
+		authToken: options.authToken,
 		handlers: {
 			onRequest: handleRequest,
 			onConnectionClosed: (connection) => broker.releaseAllForConnection(connection.connectionId),
@@ -224,6 +226,21 @@ async function startDaemonHalf(
 		},
 	};
 	return half;
+}
+
+function freshControlSocketPath(paths: DaemonPaths, label: string): string {
+	if (process.platform === "win32") {
+		return `\\\\.\\pipe\\voltd-handoff-${label}-${randomUUID()}`;
+	}
+	return join(paths.daemonDir, `voltd-handoff-${label}.sock`);
+}
+
+function publishDaemonEndpoint(paths: DaemonPaths, socketPath: string, token: string): void {
+	writeFileSync(
+		paths.pidfilePath,
+		`${JSON.stringify({ pid: process.pid, version: "0.0.0-test", startedAtMs: Date.now(), socketPath, token })}\n`,
+		{ mode: 0o600 },
+	);
 }
 
 async function startTuiHalf(
@@ -306,7 +323,37 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		expect(daemon.broker.lookup(workspaceName as string, "s-1")?.state).toBe("daemon-active");
 	}, 20_000);
 
-	it("re-acquires after a daemon restart and reports the warm handoff (§12.3.6)", async () => {
+	it("keeps reconnecting when auto-start probes stale discovery credentials", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "volt-ar-"));
+		const cwd = mkdtempSync(join(tmpdir(), "volt-ar-ws-"));
+		cleanups.push(() => {
+			rmSync(agentDir, { recursive: true, force: true });
+			rmSync(cwd, { recursive: true, force: true });
+		});
+		const paths = getDaemonPaths(agentDir);
+		ensureDaemonDirs(paths);
+		const socketPath = freshControlSocketPath(paths, "a");
+		const currentToken = randomUUID();
+		const daemon = await startDaemonHalf(socketPath, { authToken: currentToken });
+		cleanups.push(() => daemon.close());
+		publishDaemonEndpoint(paths, socketPath, "stale-token");
+
+		const attach = createDaemonAttach({ cwd, agentDir, autoStart: true });
+		cleanups.push(() => attach.dispose());
+		await attach.start();
+		expect(attach.connectionState()).toBe("reconnecting");
+
+		publishDaemonEndpoint(paths, socketPath, currentToken);
+		await vi.waitFor(
+			() => {
+				expect(attach.connectionState()).toBe("connected");
+				expect(attach.workspaceName()).toBeDefined();
+			},
+			{ timeout: 10_000 },
+		);
+	}, 20_000);
+
+	it("re-discovers rotated endpoint credentials and re-acquires after a daemon restart (§12.3.6)", async () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "volt-reacq-"));
 		const cwd = mkdtempSync(join(tmpdir(), "volt-reacq-ws-"));
 		cleanups.push(() => {
@@ -315,22 +362,31 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		});
 		const paths = getDaemonPaths(agentDir);
 		ensureDaemonDirs(paths);
-		const first = await startDaemonHalf(paths.socketPath);
+		const firstSocketPath = freshControlSocketPath(paths, "first");
+		const firstToken = randomUUID();
+		const first = await startDaemonHalf(firstSocketPath, { authToken: firstToken });
+		publishDaemonEndpoint(paths, firstSocketPath, firstToken);
 
 		const { attach, reacquired } = await startTuiHalf(agentDir, cwd);
 		const workspaceName = attach.workspaceName() as string;
 		const initial = await attach.acquire("s-1");
 		expect(initial).toEqual({ kind: "granted", handoff: "none" });
 
-		// Daemon dies; while it is away it spins up a runtime for the phone, so
-		// the restarted daemon reports daemon-active and the re-acquire lands as
-		// a warm grant (idle runtime disposed for the TUI).
+		// Daemon dies and removes its discovery metadata. The replacement rotates
+		// both its control endpoint (as Windows always does) and auth token. While
+		// the TUI is disconnected, the replacement also spins up a runtime for the
+		// phone, so re-acquisition lands as a warm grant.
 		await first.close();
-		const second = await startDaemonHalf(paths.socketPath, {
+		rmSync(paths.pidfilePath, { force: true });
+		const secondSocketPath = freshControlSocketPath(paths, "second");
+		const secondToken = randomUUID();
+		const second = await startDaemonHalf(secondSocketPath, {
+			authToken: secondToken,
 			workspaces: [{ name: workspaceName, path: cwd }],
 		});
 		cleanups.push(() => second.close());
 		second.broker.onDaemonRuntimeAttached(workspaceName, "s-1");
+		publishDaemonEndpoint(paths, secondSocketPath, secondToken);
 
 		await vi.waitFor(
 			() => {

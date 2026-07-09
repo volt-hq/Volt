@@ -20,12 +20,19 @@ import {
 export type DaemonClientConnectionState = "connected" | "reconnecting" | "gone";
 export type DaemonClientGoneReason = "closed" | "protocol_mismatch" | "dial_failed";
 
+export interface DaemonClientEndpoint {
+	socketPath: string;
+	authToken?: string;
+}
+
 export interface DaemonClientOptions {
 	socketPath: string;
 	client: ControlClientKind;
 	version: string;
 	/** Per-daemon instance token read from the local pidfile. */
 	authToken?: string;
+	/** Re-read daemon discovery metadata before every dial after the first. */
+	refreshEndpoint?(): DaemonClientEndpoint | undefined;
 	/** Capabilities advertised in the control hello (e.g. "worktrees"). */
 	capabilities?: string[];
 	onEvent?(event: ControlEvent): void;
@@ -62,7 +69,7 @@ export interface DaemonClient {
 	 * lease_pending). Rejects with DaemonClientClosedError on disconnect.
 	 */
 	waitForResponse(id: string): Promise<ControlResponse>;
-	/** Dial a fresh unix connection with role:"relay"; returns the raw duplex after the preamble. */
+	/** Dial a fresh control endpoint with role:"relay"; returns the raw duplex after the preamble. */
 	openRelay(offer: RelayOfferInfo): Promise<{ preamble: RelayPreamble; stream: Duplex }>;
 	close(): Promise<void>;
 }
@@ -91,6 +98,12 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 
 	let state: DaemonClientConnectionState = "reconnecting";
 	let socket: Socket | undefined;
+	let endpoint: DaemonClientEndpoint = {
+		socketPath: options.socketPath,
+		...(options.authToken === undefined ? {} : { authToken: options.authToken }),
+	};
+	let connectedEndpoint: DaemonClientEndpoint | undefined;
+	let hasAttemptedDial = false;
 	// The socket for an in-flight dial (before hello_ack promotes it to `socket`).
 	// Tracked so close() can destroy a mid-handshake dial instead of leaking it.
 	let dialing: Socket | undefined;
@@ -146,6 +159,9 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 	};
 
 	const dial = (): Promise<void> => {
+		if (closed) {
+			return Promise.reject(new DaemonClientClosedError());
+		}
 		if (connectPromise) {
 			return connectPromise;
 		}
@@ -155,8 +171,32 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 			// duplicate events and hold a phantom daemon connection open.
 			return Promise.resolve();
 		}
+		if (hasAttemptedDial && options.refreshEndpoint) {
+			try {
+				const refreshed = options.refreshEndpoint();
+				if (refreshed) {
+					// Replace the complete endpoint so a tokenless legacy pidfile also
+					// clears credentials from the previous daemon instance.
+					endpoint = {
+						socketPath: refreshed.socketPath,
+						...(refreshed.authToken === undefined ? {} : { authToken: refreshed.authToken }),
+					};
+				}
+			} catch (error) {
+				const refreshError = error instanceof Error ? error : new Error(String(error));
+				if (reconnectEnabled) {
+					scheduleReconnect();
+				} else {
+					goneReason = "dial_failed";
+					setState("gone");
+				}
+				return Promise.reject(refreshError);
+			}
+		}
+		hasAttemptedDial = true;
+		const dialEndpoint = endpoint;
 		connectPromise = new Promise<void>((resolve, reject) => {
-			const dialed = createConnection(options.socketPath);
+			const dialed = createConnection(dialEndpoint.socketPath);
 			dialing = dialed;
 			const decoder = new ControlLineDecoder();
 			let acked = false;
@@ -197,7 +237,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 						pid: process.pid,
 						version: options.version,
 						client: options.client,
-						...(options.authToken === undefined ? {} : { controlToken: options.authToken }),
+						...(dialEndpoint.authToken === undefined ? {} : { controlToken: dialEndpoint.authToken }),
 						...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
 					}),
 				);
@@ -240,6 +280,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 						clearTimeout(helloTimer);
 						dialing = undefined;
 						socket = dialed;
+						connectedEndpoint = dialEndpoint;
 						serverInfo = {
 							version: ack.version,
 							protocolVersion: ack.protocolVersion,
@@ -293,6 +334,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 				}
 				if (socket === dialed) {
 					socket = undefined;
+					connectedEndpoint = undefined;
 					serverInfo = undefined;
 					failPending();
 					if (closed) {
@@ -368,8 +410,11 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 			return registerPending(id);
 		},
 		openRelay(offer: RelayOfferInfo) {
+			// Established clients use the exact endpoint that issued the offer;
+			// direct relay-only clients retain the original static endpoint.
+			const relayEndpoint = connectedEndpoint ?? endpoint;
 			return new Promise((resolve, reject) => {
-				const relaySocket = createConnection(options.socketPath);
+				const relaySocket = createConnection(relayEndpoint.socketPath);
 				const decoder = new ControlLineDecoder();
 				let acked = false;
 				let settled = false;
@@ -441,6 +486,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 			failPending();
 			socket?.destroy();
 			socket = undefined;
+			connectedEndpoint = undefined;
 			// Destroy a dial that is still mid-handshake; otherwise a late hello_ack
 			// would leave a live, owner-less daemon connection open.
 			dialing?.destroy();

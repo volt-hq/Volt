@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -77,6 +78,33 @@ describe("voltd lifecycle", () => {
 			.split("\n")
 			.map((line) => JSON.parse(line) as { type: string });
 		expect(auditLines.map((line) => line.type)).toEqual(["daemon_started", "daemon_shutdown"]);
+	}, 20_000);
+
+	it("serializes instances that request different custom socket paths", async () => {
+		const paths = getDaemonPaths(agentDir);
+		const customSocketPath = (label: string) =>
+			process.platform === "win32"
+				? `\\\\.\\pipe\\voltd-custom-${label}-${randomUUID()}`
+				: join(paths.daemonDir, `custom-${label}.sock`);
+		const firstSocketPath = customSocketPath("first");
+		const daemon = runVoltDaemon({ agentDir, foreground: false, socketPath: firstSocketPath });
+		const status = await waitForDaemon();
+		expect(status.socketPath).toBe(firstSocketPath);
+
+		await expect(
+			runVoltDaemon({ agentDir, foreground: false, socketPath: customSocketPath("second") }),
+		).resolves.toBe(VOLTD_EXIT_ALREADY_RUNNING);
+
+		const client = createDaemonClient({
+			socketPath: status.socketPath,
+			client: "cli",
+			version: "test",
+			authToken: status.authToken,
+			reconnect: false,
+		});
+		await client.request({ type: "shutdown" });
+		await client.close();
+		await expect(daemon).resolves.toBe(0);
 	}, 20_000);
 
 	posixIt(
