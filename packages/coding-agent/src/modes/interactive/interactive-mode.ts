@@ -107,6 +107,7 @@ import {
 	type ReviewTarget,
 	type ReviewWorkflowHooks,
 	runReviewWorkflow,
+	stripReviewEnvelopeForDisplay,
 } from "../../core/review.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { getDefaultSessionDir, type SessionContext, SessionManager } from "../../core/session-manager.ts";
@@ -7761,6 +7762,12 @@ export class InteractiveMode {
 		this.editorContainer.clear();
 		this.editorContainer.addChild(loader);
 		this.ui.setFocus(loader);
+
+		// Render the isolated review session live in the transcript so it reads like
+		// a normal conversation. This is display-only and transient: the review runs
+		// in its own session, and the handoff (or the next full re-render) rebuilds
+		// the transcript, at which point this group is gone.
+		const reviewRenderer = this.createReviewInlineRenderer(`Reviewing ${resolution.description} with ${model.id}`);
 		this.ui.requestRender();
 
 		const abortController = new AbortController();
@@ -7768,7 +7775,8 @@ export class InteractiveMode {
 			abortController.abort();
 		};
 
-		const restoreEditor = () => {
+		const cleanup = () => {
+			reviewRenderer.dispose();
 			loader.dispose();
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.editor);
@@ -7782,7 +7790,139 @@ export class InteractiveMode {
 				loader.setMessage(`${baseMessage} ${message}`);
 				this.ui.requestRender();
 			},
-			cleanup: restoreEditor,
+			onSessionEvent: reviewRenderer.onSessionEvent,
+			cleanup,
+		};
+	}
+
+	/**
+	 * Build a scoped, display-only renderer for the isolated review session's
+	 * event stream. It reuses the normal assistant/tool components but keeps its
+	 * own streaming/pending-tool state so it never collides with the main
+	 * session's live rendering. The machine `<response>` envelope is stripped from
+	 * displayed text; the formatted findings are surfaced later via the handoff.
+	 */
+	private createReviewInlineRenderer(headerText: string): {
+		onSessionEvent: (event: AgentSessionEvent) => void;
+		dispose: () => void;
+	} {
+		const group = new Container();
+		group.addChild(new Spacer(1));
+		group.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
+		group.addChild(new Text(theme.fg("accent", headerText), 1, 0));
+		group.addChild(new Spacer(1));
+		this.chatContainer.addChild(group);
+
+		let streaming: AssistantMessageComponent | undefined;
+		const pending = new Map<string, ToolExecutionComponent>();
+		const toolOptions = () => ({
+			showImages: this.settingsManager.getShowImages(),
+			imageWidthCells: this.settingsManager.getImageWidthCells(),
+		});
+
+		const forDisplay = (message: AssistantMessage): AssistantMessage => ({
+			...message,
+			content: message.content.map((part) =>
+				part.type === "text" ? { ...part, text: stripReviewEnvelopeForDisplay(part.text) } : part,
+			),
+		});
+
+		const upsertToolCalls = (message: AssistantMessage): void => {
+			for (const part of message.content) {
+				if (part.type !== "toolCall") continue;
+				const existing = pending.get(part.id);
+				if (existing) {
+					existing.updateArgs(part.arguments);
+					continue;
+				}
+				const component = new ToolExecutionComponent(
+					part.name,
+					part.id,
+					part.arguments,
+					toolOptions(),
+					this.getRegisteredToolDefinition(part.name),
+					this.ui,
+					this.sessionManager.getCwd(),
+				);
+				component.setExpanded(this.toolOutputExpanded);
+				group.addChild(component);
+				pending.set(part.id, component);
+			}
+		};
+
+		const onSessionEvent = (event: AgentSessionEvent): void => {
+			switch (event.type) {
+				case "message_start":
+					if (event.message.role === "assistant") {
+						streaming = new AssistantMessageComponent(
+							undefined,
+							this.hideThinkingBlock,
+							this.getMarkdownThemeWithSettings(),
+							this.hiddenThinkingLabel,
+						);
+						group.addChild(streaming);
+						streaming.updateContent(forDisplay(event.message));
+					}
+					break;
+				case "message_update":
+					if (streaming && event.message.role === "assistant") {
+						streaming.updateContent(forDisplay(event.message));
+						upsertToolCalls(event.message);
+					}
+					break;
+				case "message_end":
+					if (streaming && event.message.role === "assistant") {
+						streaming.updateContent(forDisplay(event.message));
+						for (const component of pending.values()) {
+							component.setArgsComplete();
+						}
+						streaming = undefined;
+					}
+					break;
+				case "tool_execution_start": {
+					let component = pending.get(event.toolCallId);
+					if (!component) {
+						component = new ToolExecutionComponent(
+							event.toolName,
+							event.toolCallId,
+							event.args,
+							toolOptions(),
+							this.getRegisteredToolDefinition(event.toolName),
+							this.ui,
+							this.sessionManager.getCwd(),
+						);
+						component.setExpanded(this.toolOutputExpanded);
+						group.addChild(component);
+						pending.set(event.toolCallId, component);
+					}
+					component.markExecutionStarted();
+					break;
+				}
+				case "tool_execution_update": {
+					pending.get(event.toolCallId)?.updateResult({ ...event.partialResult, isError: false }, true);
+					break;
+				}
+				case "tool_execution_end": {
+					const component = pending.get(event.toolCallId);
+					if (component) {
+						component.updateResult({ ...event.result, isError: event.isError });
+						pending.delete(event.toolCallId);
+					}
+					break;
+				}
+				default:
+					return;
+			}
+			this.ui.requestRender();
+		};
+
+		return {
+			onSessionEvent,
+			dispose: () => {
+				pending.clear();
+				this.chatContainer.removeChild(group);
+				this.ui.requestRender();
+			},
 		};
 	}
 

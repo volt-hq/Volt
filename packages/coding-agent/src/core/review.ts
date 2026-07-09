@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
 import type { AssistantMessage, Model } from "@earendil-works/volt-ai";
+import type { AgentSessionEvent } from "./agent-session.ts";
 import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
 import type { AuthStorage } from "./auth-storage.ts";
 import { createExtensionRuntime } from "./extensions/loader.ts";
@@ -812,6 +813,20 @@ export function parseReviewOutput(text: string): ParsedReview | undefined {
 // ============================================================================
 
 /**
+ * Strip the machine-readable `<response>…</response>` envelope (summary + JSON
+ * payload) from reviewer assistant text so a live in-process render shows the
+ * reviewer's prose and tool activity instead of raw markup. Also drops a
+ * trailing unterminated `<response>` so a mid-stream partial envelope never
+ * flashes. The formatted findings are surfaced separately after the handoff.
+ */
+export function stripReviewEnvelopeForDisplay(text: string): string {
+	return text
+		.replace(/<response\b[\s\S]*?<\/response>/gi, "")
+		.replace(/<response\b[\s\S]*$/i, "")
+		.trim();
+}
+
+/**
  * Format the review result as the seed message for the fresh post-review session.
  * This text is both displayed and sent to the LLM as context.
  */
@@ -946,6 +961,12 @@ export interface RunReviewOptions {
 	onProgress?: (message: string) => void;
 	/** Emits sanitized review tool lifecycle events while the review runs. */
 	onEvent?: (event: ReviewWorkflowToolEvent) => void;
+	/**
+	 * Full in-process review-session event stream, for rich local rendering.
+	 * In-process (TUI) only; never forwarded over RPC, where only the sanitized
+	 * `onEvent` stream is exposed.
+	 */
+	onSessionEvent?: (event: AgentSessionEvent) => void;
 	workflowId?: string;
 	workflowAction?: string;
 }
@@ -1031,6 +1052,8 @@ export interface ReviewWorkflowHooks {
 	signal?: AbortSignal;
 	onProgress?: (message: string) => void;
 	onEvent?: (event: ReviewWorkflowEvent | ReviewWorkflowToolEvent) => void;
+	/** Full in-process review-session event stream, for rich local rendering. */
+	onSessionEvent?: (event: AgentSessionEvent) => void;
 	cleanup?: () => void;
 }
 
@@ -1194,6 +1217,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 				tools: options.tools ? [...options.tools] : undefined,
 				signal: hooks?.signal,
 				onProgress: hooks?.onProgress,
+				onSessionEvent: hooks?.onSessionEvent,
 				onEvent: emitEvent,
 				workflowId,
 				workflowAction,
@@ -1584,6 +1608,7 @@ async function runReviewSession(options: RunReviewOptions): Promise<ReviewRunRes
 	options.signal?.addEventListener("abort", onAbort, { once: true });
 
 	const unsubscribe = session.subscribe((event) => {
+		options.onSessionEvent?.(event);
 		if (event.type === "tool_execution_start") {
 			const summary = summarizeToolArgs(event.args);
 			options.onProgress?.(summary ? `${event.toolName}: ${summary}` : event.toolName);

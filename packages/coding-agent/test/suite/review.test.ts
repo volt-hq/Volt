@@ -18,6 +18,7 @@ import {
 	type ResolvedReview,
 	resolveReviewTarget,
 	runReview,
+	stripReviewEnvelopeForDisplay,
 	truncateDiff,
 } from "../../src/core/review.ts";
 import { createHarness, type Harness } from "./harness.ts";
@@ -646,6 +647,35 @@ function isHighSurrogateCode(codeUnit: number): boolean {
 	return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
 }
 
+describe("stripReviewEnvelopeForDisplay", () => {
+	it("removes a complete response envelope but keeps surrounding prose", () => {
+		const text = [
+			"I traced the call sites and ran the tests.",
+			"<response>",
+			"  <summary>All good.</summary>",
+			'  <payload>{"findings":[]}</payload>',
+			"</response>",
+		].join("\n");
+		expect(stripReviewEnvelopeForDisplay(text)).toBe("I traced the call sites and ran the tests.");
+	});
+
+	it("strips a mid-stream unterminated envelope so no raw markup flashes", () => {
+		const text = "Done reviewing.\n<response>\n  <summary>Wr";
+		expect(stripReviewEnvelopeForDisplay(text)).toBe("Done reviewing.");
+	});
+
+	it("returns empty string when the message is only the envelope", () => {
+		const text = '<response><payload>{"findings":[]}</payload></response>';
+		expect(stripReviewEnvelopeForDisplay(text)).toBe("");
+	});
+
+	it("leaves envelope-free prose untouched", () => {
+		expect(stripReviewEnvelopeForDisplay("Reading src/foo.ts to check the bounds.")).toBe(
+			"Reading src/foo.ts to check the bounds.",
+		);
+	});
+});
+
 describe("runReview", () => {
 	const harnesses: Harness[] = [];
 
@@ -694,6 +724,30 @@ describe("runReview", () => {
 		expect(result.parsed?.findings[0]?.title).toBe("Bug in file.txt");
 		// The review runs in its own session: the harness session is untouched.
 		expect(harness.session.messages).toHaveLength(0);
+	});
+
+	it("forwards the review session's full event stream via onSessionEvent", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage(JSON.stringify({ findings: [] }))]);
+
+		const eventTypes: string[] = [];
+		const result = await runReview({
+			cwd: harness.tempDir,
+			agentDir: join(harness.tempDir, "agent"),
+			model: harness.getModel(),
+			authStorage: harness.authStorage,
+			modelRegistry: harness.session.modelRegistry,
+			settingsManager: harness.settingsManager,
+			resolved,
+			onSessionEvent: (event) => eventTypes.push(event.type),
+		});
+
+		expect(result.aborted).toBe(false);
+		// The full AgentSessionEvent stream flows through (not just tool events),
+		// which is what the TUI needs to render the review as a live conversation.
+		expect(eventTypes).toContain("message_start");
+		expect(eventTypes).toContain("message_end");
 	});
 
 	it("can inherit extension tools from the parent session", async () => {
