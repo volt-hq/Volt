@@ -652,9 +652,9 @@ function decodeXmlEntities(value: string): string {
 		.replace(/&amp;/g, "&");
 }
 
-function decodeXmlPayloadText(value: string): string {
-	const decodedCdata = value.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1");
-	return (decodedCdata === value ? decodeXmlEntities(value) : decodedCdata).trim();
+/** Unwrap CDATA sections; the enclosed text is literal and needs no entity decoding. */
+function unwrapCdata(value: string): string {
+	return value.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1");
 }
 
 function stripJsonMarkdownFence(value: string): string {
@@ -668,10 +668,52 @@ function collectXmlPayloadCandidates(text: string): JsonCandidate[] {
 	const payloadRegex = /<payload\b[^>]*>([\s\S]*?)<\/payload>/gi;
 	let match = payloadRegex.exec(text);
 	while (match !== null) {
-		candidates.push({ index: match.index, text: decodeXmlPayloadText(match[1] ?? "") });
+		candidates.push({ index: match.index, text: unwrapCdata(match[1] ?? "").trim() });
 		match = payloadRegex.exec(text);
 	}
 	return candidates;
+}
+
+/** Parse one JSON candidate into a ParsedReview, or undefined if it lacks a findings array. */
+function tryParseFindingsObject(candidate: string): ParsedReview | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(candidate);
+	} catch {
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null) {
+		return undefined;
+	}
+	const record = parsed as Record<string, unknown>;
+	if (!Array.isArray(record.findings)) {
+		return undefined;
+	}
+	const findings = record.findings
+		.map(coerceFinding)
+		.filter((finding): finding is ReviewFinding => finding !== undefined);
+	return {
+		findings,
+		coverage: coerceCoverage(record.coverage),
+		overallCorrectness: typeof record.overall_correctness === "string" ? record.overall_correctness : undefined,
+		overallExplanation: typeof record.overall_explanation === "string" ? record.overall_explanation : undefined,
+	};
+}
+
+/**
+ * Parse a JSON candidate, retrying with XML entities decoded only when the raw
+ * text does not parse. Trying raw first avoids corrupting payloads whose string
+ * values legitimately contain entity-like text (e.g. a finding that mentions
+ * `&amp;` or `&quot;`), while still recovering payloads that a model XML-escaped
+ * to keep them valid inside the <payload> tag.
+ */
+function parseFindingsCandidate(candidate: string): ParsedReview | undefined {
+	const parsed = tryParseFindingsObject(candidate);
+	if (parsed) {
+		return parsed;
+	}
+	const decoded = decodeXmlEntities(candidate);
+	return decoded === candidate ? undefined : tryParseFindingsObject(decoded);
 }
 
 /**
@@ -721,28 +763,10 @@ export function parseReviewOutput(text: string): ParsedReview | undefined {
 		if (!candidate.startsWith("{")) {
 			continue;
 		}
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(candidate);
-		} catch {
-			continue;
+		const parsed = parseFindingsCandidate(candidate);
+		if (parsed) {
+			return parsed;
 		}
-		if (typeof parsed !== "object" || parsed === null) {
-			continue;
-		}
-		const record = parsed as Record<string, unknown>;
-		if (!Array.isArray(record.findings)) {
-			continue;
-		}
-		const findings = record.findings
-			.map(coerceFinding)
-			.filter((finding): finding is ReviewFinding => finding !== undefined);
-		return {
-			findings,
-			coverage: coerceCoverage(record.coverage),
-			overallCorrectness: typeof record.overall_correctness === "string" ? record.overall_correctness : undefined,
-			overallExplanation: typeof record.overall_explanation === "string" ? record.overall_explanation : undefined,
-		};
 	}
 	return undefined;
 }

@@ -137,6 +137,34 @@ describe("parseReviewOutput", () => {
 		expect(parsed?.overallCorrectness).toBe("incorrect");
 	});
 
+	it("preserves entity-like text in a raw JSON payload", () => {
+		const body = "Escape &amp; and &quot; in the rendered output";
+		const text = [
+			"<response>",
+			"  <summary>Reviewed output escaping.</summary>",
+			"  <payload>",
+			JSON.stringify({ findings: [{ title: "escaping", body }] }),
+			"  </payload>",
+			"</response>",
+		].join("\n");
+		// Raw JSON parses directly, so the literal entity text must survive verbatim
+		// (previously eager entity-decoding turned &quot; into a quote and dropped
+		// the whole payload as invalid JSON).
+		const parsed = parseReviewOutput(text);
+		expect(parsed?.findings[0]?.title).toBe("escaping");
+		expect(parsed?.findings[0]?.body).toBe(body);
+	});
+
+	it("recovers a payload whose JSON was XML-escaped", () => {
+		const raw = JSON.stringify({ findings: [{ title: "compare", body: "a < b && c > d" }] });
+		const escaped = raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+		const text = ["<response>", "  <payload>", escaped, "  </payload>", "</response>"].join("\n");
+		// The raw text is not valid JSON, so parsing falls back to decoding entities.
+		const parsed = parseReviewOutput(text);
+		expect(parsed?.findings[0]?.title).toBe("compare");
+		expect(parsed?.findings[0]?.body).toBe("a < b && c > d");
+	});
+
 	it("uses the last parseable json block", () => {
 		const text = [
 			"```json",
