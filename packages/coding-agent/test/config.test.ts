@@ -4,6 +4,7 @@ import { delimiter, join } from "path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
 	detectInstallMethod,
+	getPackageSourceOrDistDir,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
 	getUpdateInstruction,
@@ -145,6 +146,18 @@ function createFakeBunScript(bunBin: string): string {
 	const escapedBunBin = bunBin.replaceAll("'", "'\\''");
 	return `#!/bin/sh\nif [ "$1" = "pm" ] && [ "$2" = "bin" ] && [ "$3" = "-g" ]; then\n\tprintf '%s\\n' '${escapedBunBin}'\n\texit 0\nfi\nexit 1\n`;
 }
+
+describe("package asset paths", () => {
+	test("resolves package assets from the runtime dist directory in linked source checkouts", () => {
+		const packageDir = mkdtempSync(join(tmpdir(), "volt-linked-package-"));
+		tempDir = packageDir;
+		mkdirSync(join(packageDir, "src"), { recursive: true });
+		mkdirSync(join(packageDir, "dist"), { recursive: true });
+
+		expect(getPackageSourceOrDistDir(packageDir, join(packageDir, "dist"))).toBe(join(packageDir, "dist"));
+		expect(getPackageSourceOrDistDir(packageDir, join(packageDir, "src"))).toBe(join(packageDir, "src"));
+	});
+});
 
 describe("detectInstallMethod", () => {
 	test("detects pnpm from Windows .pnpm install paths", () => {

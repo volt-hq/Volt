@@ -1,6 +1,6 @@
 import { accessSync, constants, existsSync, readFileSync, realpathSync } from "fs";
 import { homedir } from "os";
-import { basename, dirname, join, resolve, sep, win32 } from "path";
+import { basename, dirname, join, relative, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
 import { spawnProcessSync } from "./utils/child-process.ts";
 import { normalizePath } from "./utils/paths.ts";
@@ -345,10 +345,9 @@ export function getUpdateInstruction(packageName: string): string {
 // =============================================================================
 
 /**
- * Get the base directory for resolving package assets (themes, package.json, README.md, CHANGELOG.md).
+ * Get the package root for resolving package metadata and asset roots.
  * - For Bun binary: returns the directory containing the executable
- * - For Node.js (dist/): returns __dirname (the dist/ directory)
- * - For tsx (src/): returns parent directory (the package root)
+ * - For Node.js/tsx: returns the nearest parent directory containing package.json
  */
 export function getPackageDir(): string {
 	// Allow override via environment variable (useful for Nix/Guix where store paths tokenize poorly)
@@ -373,6 +372,21 @@ export function getPackageDir(): string {
 	return __dirname;
 }
 
+/** Get the runtime source tree for Node package assets, preserving dist when an npm link points at a source checkout. */
+export function getPackageSourceOrDistDir(packageDir: string = getPackageDir(), moduleDir: string = __dirname): string {
+	const relativeModuleDir = relative(resolve(packageDir), resolve(moduleDir));
+	const runtimeDir = relativeModuleDir.split(/[\\/]/, 1)[0];
+	if (runtimeDir === "src" || runtimeDir === "dist") {
+		return join(packageDir, runtimeDir);
+	}
+
+	const distDir = join(packageDir, "dist");
+	if (existsSync(distDir)) {
+		return distDir;
+	}
+	return join(packageDir, "src");
+}
+
 /**
  * Get path to built-in themes directory (shipped with package)
  * - For Bun binary: theme/ next to executable
@@ -383,10 +397,8 @@ export function getThemesDir(): string {
 	if (isBunBinary) {
 		return join(getPackageDir(), "theme");
 	}
-	// Theme assets ship in core/theme/ relative to src/ or dist/
-	const packageDir = getPackageDir();
-	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
-	return join(packageDir, srcOrDist, "core", "theme");
+	// Theme assets ship in core/theme/ relative to the runtime src/ or dist/ tree.
+	return join(getPackageSourceOrDistDir(), "core", "theme");
 }
 
 /**
@@ -399,9 +411,7 @@ export function getExportTemplateDir(): string {
 	if (isBunBinary) {
 		return join(getPackageDir(), "export-html");
 	}
-	const packageDir = getPackageDir();
-	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
-	return join(packageDir, srcOrDist, "core", "export-html");
+	return join(getPackageSourceOrDistDir(), "core", "export-html");
 }
 
 /** Get path to package.json */
@@ -439,9 +449,7 @@ export function getInteractiveAssetsDir(): string {
 	if (isBunBinary) {
 		return join(getPackageDir(), "assets");
 	}
-	const packageDir = getPackageDir();
-	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
-	return join(packageDir, srcOrDist, "modes", "interactive", "assets");
+	return join(getPackageSourceOrDistDir(), "modes", "interactive", "assets");
 }
 
 /** Get path to a bundled interactive asset */
