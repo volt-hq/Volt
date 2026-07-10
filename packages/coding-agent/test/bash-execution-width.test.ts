@@ -6,6 +6,7 @@ import { visibleWidth } from "@earendil-works/volt-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
 
 /** Minimal TUI stub that only exposes terminal.columns */
 function createTuiStub(columns: number): { columns: number; stub: any } {
@@ -54,6 +55,23 @@ describe("BashExecutionComponent width handling (#2569)", () => {
 			const w = visibleWidth(lines[i]);
 			expect(w, `Line ${i} visibleWidth=${w} > ${narrowWidth}`).toBeLessThanOrEqual(narrowWidth);
 		}
+	});
+
+	it("renders command outcomes explicitly with a structural output rail", () => {
+		const { stub } = createTuiStub(120);
+		const success = new BashExecutionComponent("npm run check", stub);
+		success.appendOutput("No errors found");
+		success.setComplete(0, false);
+		const successLines = success.render(120).map(stripAnsi);
+		expect(successLines.join("\n")).toContain("$ npm run check [success]");
+		expect(successLines.filter((line) => line.trim()).every((line) => line.startsWith("│ "))).toBe(true);
+
+		const failure = new BashExecutionComponent("npm run check", stub);
+		failure.appendOutput("Type error");
+		failure.setComplete(1, false);
+		const failed = failure.render(120).map(stripAnsi).join("\n");
+		expect(failed).toContain("$ npm run check [failure]");
+		expect(failed).toContain("Exit code: 1");
 	});
 
 	it("re-computes lines when width changes between renders", () => {

@@ -2,8 +2,9 @@
  * Component for displaying bash command execution with streaming output.
  */
 
-import { Container, Loader, Spacer, Text, type TUI } from "@earendil-works/volt-tui";
+import { type Component, Container, Loader, Spacer, Text, type TUI } from "@earendil-works/volt-tui";
 import { theme } from "../../../core/theme/runtime.ts";
+import { formatDuration } from "../../../core/tools/render-utils.ts";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -11,12 +12,31 @@ import {
 	truncateTail,
 } from "../../../core/tools/truncate.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
 import { truncateToVisualLines } from "./visual-truncate.ts";
 
 // Preview line limit when not expanded (matches tool execution behavior)
 const PREVIEW_LINES = 20;
+
+class BashOutputRail implements Component {
+	private component: Component;
+	private colorKey: "bashMode" | "dim";
+
+	constructor(component: Component, colorKey: "bashMode" | "dim") {
+		this.component = component;
+		this.colorKey = colorKey;
+	}
+
+	render(width: number): string[] {
+		if (width <= 2) return this.component.render(width);
+		const prefix = `${theme.fg(this.colorKey, "│")} `;
+		return this.component.render(width - 2).map((line) => prefix + line);
+	}
+
+	invalidate(): void {
+		this.component.invalidate();
+	}
+}
 
 export class BashExecutionComponent extends Container {
 	private command: string;
@@ -28,40 +48,27 @@ export class BashExecutionComponent extends Container {
 	private fullOutputPath?: string;
 	private expanded = false;
 	private contentContainer: Container;
+	private colorKey: "bashMode" | "dim";
+	private startedAt = Date.now();
+	private durationMs?: number;
 
 	constructor(command: string, ui: TUI, excludeFromContext = false) {
 		super();
 		this.command = command;
 
-		// Use dim border for excluded-from-context commands (!! prefix)
-		const colorKey = excludeFromContext ? "dim" : "bashMode";
-		const borderColor = (str: string) => theme.fg(colorKey, str);
-
-		// Add spacer
+		this.colorKey = excludeFromContext ? "dim" : "bashMode";
 		this.addChild(new Spacer(1));
 
-		// Top border
-		this.addChild(new DynamicBorder(borderColor));
-
-		// Content container (holds dynamic content between borders)
 		this.contentContainer = new Container();
-		this.addChild(this.contentContainer);
+		this.addChild(new BashOutputRail(this.contentContainer, this.colorKey));
 
-		// Command header
-		const header = new Text(theme.fg(colorKey, theme.bold(`$ ${command}`)), 1, 0);
-		this.contentContainer.addChild(header);
-
-		// Loader
 		this.loader = new Loader(
 			ui,
-			(spinner) => theme.fg(colorKey, spinner),
+			(spinner) => theme.fg(this.colorKey, spinner),
 			(text) => theme.fg("muted", text),
-			`Running... (${keyText("tui.select.cancel")} to cancel)`, // Plain text for loader
+			`Running (${keyText("tui.select.cancel")} to cancel)`,
 		);
-		this.contentContainer.addChild(this.loader);
-
-		// Bottom border
-		this.addChild(new DynamicBorder(borderColor));
+		this.updateDisplay();
 	}
 
 	/**
@@ -109,6 +116,7 @@ export class BashExecutionComponent extends Container {
 				: "complete";
 		this.truncationResult = truncationResult;
 		this.fullOutputPath = fullOutputPath;
+		this.durationMs ??= Date.now() - this.startedAt;
 
 		// Stop loader
 		this.loader.stop();
@@ -134,8 +142,22 @@ export class BashExecutionComponent extends Container {
 		// Rebuild content container
 		this.contentContainer.clear();
 
-		// Command header
-		const header = new Text(theme.fg("bashMode", theme.bold(`$ ${this.command}`)), 1, 0);
+		// Command, state, and duration form a compact semantic header.
+		let state: string;
+		if (this.status === "running") {
+			state = theme.fg("warning", "[running]");
+		} else if (this.status === "complete") {
+			state = theme.fg("success", "[success]");
+		} else if (this.status === "cancelled") {
+			state = theme.fg("warning", "[cancelled]");
+		} else {
+			state = theme.fg("error", "[failure]");
+		}
+		const duration =
+			this.durationMs !== undefined && this.durationMs >= 1000
+				? ` ${theme.fg("dim", `(${formatDuration(this.durationMs)})`)}`
+				: "";
+		const header = new Text(`${theme.fg(this.colorKey, theme.bold(`$ ${this.command}`))} ${state}${duration}`, 1, 0);
 		this.contentContainer.addChild(header);
 
 		// Output
@@ -187,9 +209,9 @@ export class BashExecutionComponent extends Container {
 			}
 
 			if (this.status === "cancelled") {
-				statusParts.push(theme.fg("warning", "(cancelled)"));
+				statusParts.push(theme.fg("warning", "Cancelled"));
 			} else if (this.status === "error") {
-				statusParts.push(theme.fg("error", `(exit ${this.exitCode})`));
+				statusParts.push(theme.fg("error", `Exit code: ${this.exitCode}`));
 			}
 
 			// Add truncation warning (context truncation, not preview truncation)

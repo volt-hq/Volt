@@ -1,6 +1,6 @@
 import type { TextContent } from "@earendil-works/volt-ai";
 import type { Component } from "@earendil-works/volt-tui";
-import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/volt-tui";
+import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/volt-tui";
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
@@ -12,7 +12,7 @@ import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
 export class CustomMessageComponent extends Container {
 	private message: CustomMessage<unknown>;
 	private customRenderer?: MessageRenderer;
-	private box: Box;
+	private defaultContainer: Container;
 	private customComponent?: Component;
 	private markdownTheme: MarkdownTheme;
 	private _expanded = false;
@@ -29,8 +29,7 @@ export class CustomMessageComponent extends Container {
 
 		this.addChild(new Spacer(1));
 
-		// Create box with purple background (used for default rendering)
-		this.box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
+		this.defaultContainer = new Container();
 
 		this.rebuild();
 	}
@@ -53,7 +52,7 @@ export class CustomMessageComponent extends Container {
 			this.removeChild(this.customComponent);
 			this.customComponent = undefined;
 		}
-		this.removeChild(this.box);
+		this.removeChild(this.defaultContainer);
 
 		// Try custom renderer first - it handles its own styling
 		if (this.customRenderer) {
@@ -70,14 +69,15 @@ export class CustomMessageComponent extends Container {
 			}
 		}
 
-		// Default rendering uses our box
-		this.addChild(this.box);
-		this.box.clear();
+		// Default rendering uses a compact label and unboxed prose.
+		this.addChild(this.defaultContainer);
+		this.defaultContainer.clear();
 
-		// Default rendering: label + content
-		const label = theme.fg("customMessageLabel", `\x1b[1m[${this.message.customType}]\x1b[22m`);
-		this.box.addChild(new Text(label, 0, 0));
-		this.box.addChild(new Spacer(1));
+		const label = theme.bg(
+			"customMessageBg",
+			theme.fg("customMessageLabel", theme.bold(` ${this.message.customType} `)),
+		);
+		this.defaultContainer.addChild(new Text(label, 1, 0));
 
 		// Extract text content
 		let text: string;
@@ -90,8 +90,8 @@ export class CustomMessageComponent extends Container {
 				.join("\n");
 		}
 
-		this.box.addChild(
-			new Markdown(text, 0, 0, this.markdownTheme, {
+		this.defaultContainer.addChild(
+			new Markdown(text, 1, 0, this.markdownTheme, {
 				color: (text: string) => theme.fg("customMessageText", text),
 			}),
 		);

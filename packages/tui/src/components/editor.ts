@@ -226,6 +226,7 @@ export interface EditorTheme {
 export interface EditorOptions {
 	paddingX?: number;
 	autocompleteMaxVisible?: number;
+	topBorderLabel?: string;
 }
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -262,6 +263,7 @@ export class Editor implements Component, Focusable {
 	protected tui: TUI;
 	private theme: EditorTheme;
 	private paddingX: number = 0;
+	private topBorderLabel: string | undefined;
 
 	// Store last render width for cursor navigation
 	private lastWidth: number = 80;
@@ -332,6 +334,15 @@ export class Editor implements Component, Focusable {
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
 		const maxVisible = options.autocompleteMaxVisible ?? 5;
 		this.autocompleteMaxVisible = Number.isFinite(maxVisible) ? Math.max(3, Math.min(20, Math.floor(maxVisible))) : 5;
+		this.topBorderLabel = options.topBorderLabel?.trim() || undefined;
+	}
+
+	setTopBorderLabel(label: string | undefined): void {
+		const nextLabel = label?.trim() || undefined;
+		if (this.topBorderLabel !== nextLabel) {
+			this.topBorderLabel = nextLabel;
+			this.tui.requestRender();
+		}
 	}
 
 	/** Set of currently valid paste IDs, for marker-aware segmentation. */
@@ -506,15 +517,18 @@ export class Editor implements Component, Focusable {
 		const leftPadding = " ".repeat(paddingX);
 		const rightPadding = leftPadding;
 
-		// Render top border (with scroll indicator if scrolled down)
+		// Render a labeled top border, including the scroll state when needed.
+		const topBorderParts: string[] = [];
+		if (this.topBorderLabel) {
+			topBorderParts.push(this.topBorderLabel);
+		}
 		if (this.scrollOffset > 0) {
-			const indicator = `─── ↑ ${this.scrollOffset} more `;
-			const remaining = innerWidth - visibleWidth(indicator);
-			if (remaining >= 0) {
-				result.push(this.borderColor(`╭${indicator}${"─".repeat(remaining)}╮`));
-			} else {
-				result.push(this.borderColor(truncateToWidth(`╭${indicator}`, width)));
-			}
+			topBorderParts.push(`↑ ${this.scrollOffset} more`);
+		}
+		if (topBorderParts.length > 0) {
+			const prefix = truncateToWidth(`─ ${topBorderParts.join(" · ")} `, innerWidth, "");
+			const remaining = Math.max(0, innerWidth - visibleWidth(prefix));
+			result.push(this.borderColor(`╭${prefix}${"─".repeat(remaining)}╮`));
 		} else {
 			result.push(this.borderColor(`╭${"─".repeat(innerWidth)}╮`));
 		}

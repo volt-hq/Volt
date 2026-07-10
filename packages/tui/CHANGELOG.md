@@ -14,6 +14,7 @@
 
 ### Changed
 
+- Added an optional responsive label to the editor's top border.
 - Changed the editor input to render as a full rounded box with side borders instead of only horizontal rules above and below the content.
 
 ## [0.79.6] - 2026-06-16

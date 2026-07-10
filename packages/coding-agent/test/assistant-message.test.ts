@@ -2,6 +2,7 @@ import type { AssistantMessage } from "@earendil-works/volt-ai";
 import { describe, expect, test } from "vitest";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -37,6 +38,30 @@ describe("AssistantMessageComponent", () => {
 		expect(lines).not.toHaveLength(0);
 		expect(lines[0]).toContain(OSC133_ZONE_START);
 		expect(lines[lines.length - 1].startsWith(OSC133_ZONE_END + OSC133_ZONE_FINAL)).toBe(true);
+	});
+
+	test("labels visible and hidden thinking blocks", () => {
+		initTheme("dark");
+		const message = createAssistantMessage([{ type: "thinking", thinking: "Check the render hierarchy" }]);
+
+		const visible = new AssistantMessageComponent(message).render(60).join("\n");
+		expect(visible).toContain("[thinking]");
+		expect(visible).toContain("Check the render hierarchy");
+
+		const hidden = stripAnsi(new AssistantMessageComponent(message, true).render(60).join("\n"));
+		expect(hidden).toContain("[thinking] Thinking...");
+		expect(hidden).not.toContain("Check the render hierarchy");
+	});
+
+	test("renders failure state as text instead of relying on error color", () => {
+		initTheme("dark");
+
+		const message = createAssistantMessage([{ type: "text", text: "Partial response" }]);
+		message.stopReason = "error";
+		message.errorMessage = "Provider disconnected";
+		const rendered = new AssistantMessageComponent(message).render(60).join("\n");
+
+		expect(rendered).toContain("[failure] Provider disconnected");
 	});
 
 	test("does not add OSC 133 zone markers when assistant message contains tool calls", () => {

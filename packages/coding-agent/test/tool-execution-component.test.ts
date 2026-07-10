@@ -656,6 +656,73 @@ describe("ToolExecutionComponent parity", () => {
 		expect(expanded).toContain("second output");
 	});
 
+	test("renders pending, running, partial, success, and failure states as text", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text("inspect target.ts", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-states",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("inspect target.ts [pending]");
+		component.markExecutionStarted();
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("inspect target.ts [running]");
+		component.updateResult({ content: [{ type: "text", text: "working" }], isError: false }, true);
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("inspect target.ts [partial]");
+		component.updateResult({ content: [{ type: "text", text: "done" }], isError: false }, false);
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("inspect target.ts [success]");
+		component.updateResult({ content: [{ type: "text", text: "broken" }], isError: true }, false);
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("inspect target.ts [failure]");
+	});
+
+	test("renders lifecycle colors without state background bands", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text("inspect target.ts", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-no-state-background",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "done" }], isError: false }, false);
+
+		const rendered = component.render(120).join("\n");
+		expect(stripAnsi(rendered)).toContain("[success]");
+		expect(rendered).not.toContain("\x1b[48;");
+	});
+
+	test("keeps lifecycle state visible when header metadata wraps", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text("inspect a-very-long-target-name.ts", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-state-wrap",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "done" }], isError: false }, false);
+
+		const lines = component.render(32).map(stripAnsi);
+		expect(lines.some((line) => line.includes("[success]"))).toBe(true);
+	});
+
 	test("appends a dim duration to the call header once execution completes", () => {
 		const toolDefinition: ToolDefinition = {
 			...createBaseToolDefinition(),
@@ -684,12 +751,12 @@ describe("ToolExecutionComponent parity", () => {
 		now.mockReturnValue(5_200);
 		component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
 		const rendered = stripAnsi(component.render(120).join("\n"));
-		expect(rendered).toContain("custom call (4.2s)");
+		expect(rendered).toContain("custom call [success] (4.2s)");
 
 		// Duration is frozen at completion; later renders keep the same value
 		now.mockReturnValue(99_000);
 		component.invalidate();
-		expect(stripAnsi(component.render(120).join("\n"))).toContain("custom call (4.2s)");
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("custom call [success] (4.2s)");
 	});
 
 	test("hides sub-second durations", () => {
@@ -734,7 +801,7 @@ describe("ToolExecutionComponent parity", () => {
 		fallbackComponent.markExecutionStarted();
 		now.mockReturnValue(4_500);
 		fallbackComponent.updateResult({ content: [{ type: "text", text: "done" }], isError: false }, false);
-		expect(stripAnsi(fallbackComponent.render(120).join("\n"))).toContain("mystery_tool (3.5s)");
+		expect(stripAnsi(fallbackComponent.render(120).join("\n"))).toContain("mystery_tool [success] (3.5s)");
 
 		// Restored history never calls markExecutionStarted -> no duration
 		const restoredComponent = new ToolExecutionComponent(
@@ -775,7 +842,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).not.toContain("(5.0s)");
 	});
 
-	test("skips the duration suffix when the header line has no room", () => {
+	test("wraps state and duration metadata when the header line has no room", () => {
 		const longHeader = "x".repeat(60);
 		const toolDefinition: ToolDefinition = {
 			...createBaseToolDefinition(),
@@ -798,10 +865,12 @@ describe("ToolExecutionComponent parity", () => {
 		now.mockReturnValue(3_500);
 		component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
 
-		// Box paddingX=1 leaves 62 columns for the header at width 64; the
-		// 60-char header plus " (2.5s)" does not fit and is dropped.
-		expect(stripAnsi(component.render(64).join("\n"))).not.toContain("(2.5s)");
-		expect(stripAnsi(component.render(120).join("\n"))).toContain(`${longHeader} (2.5s)`);
+		// Box padding leaves the narrow header without room for metadata, so
+		// state and duration move to the next line rather than disappearing.
+		const narrow = stripAnsi(component.render(64).join("\n"));
+		expect(narrow).toContain(longHeader);
+		expect(narrow).toContain("[success] (2.5s)");
+		expect(stripAnsi(component.render(120).join("\n"))).toContain(`${longHeader} [success] (2.5s)`);
 	});
 
 	test("falls back when custom renderers are absent", () => {

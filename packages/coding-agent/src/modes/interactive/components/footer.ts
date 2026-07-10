@@ -1,4 +1,4 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/volt-tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
@@ -81,9 +81,8 @@ export class FooterComponent implements Component {
 	}
 
 	render(width: number): string[] {
+		if (width <= 0) return [];
 		const state = this.session.state;
-
-		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
 		let totalInput = 0;
 		let totalOutput = 0;
 		let totalCacheRead = 0;
@@ -98,7 +97,6 @@ export class FooterComponent implements Component {
 				totalCacheRead += entry.message.usage.cacheRead;
 				totalCacheWrite += entry.message.usage.cacheWrite;
 				totalCost += entry.message.usage.cost.total;
-
 				const latestPromptTokens =
 					entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
 				latestCacheHitRate =
@@ -106,139 +104,75 @@ export class FooterComponent implements Component {
 			}
 		}
 
-		// Calculate context usage from session (handles compaction correctly).
-		// After compaction, tokens are unknown until the next LLM response.
+		const cwd = this.session.sessionManager.getCwd();
+		const workspace =
+			width < 100
+				? basename(resolve(cwd)) || cwd
+				: formatCwdForFooter(cwd, process.env.HOME || process.env.USERPROFILE);
+		const workspaceParts = [workspace];
+		const branch = this.footerData.getGitBranch();
+		if (branch) workspaceParts.push(branch);
+		const sessionName = this.session.sessionManager.getSessionName();
+		if (sessionName) workspaceParts.push(sessionName);
+
+		const workspaceSide =
+			theme.fg("text", workspaceParts[0]!) +
+			(workspaceParts.length > 1 ? theme.fg("dim", ` · ${workspaceParts.slice(1).join(" · ")}`) : "");
+		const modelName = state.model?.id || "no-model";
+		const provider =
+			width >= 100 && this.footerData.getAvailableProviderCount() > 1 && state.model
+				? theme.fg("dim", `(${state.model.provider}) `)
+				: "";
+		const thinking = state.model?.reasoning ? theme.fg("dim", ` · ${state.thinkingLevel || "off"}`) : "";
+		let modelSide = `${provider}${theme.fg("text", modelName)}${thinking}`;
+		if (visibleWidth(modelSide) >= width) {
+			modelSide = truncateToWidth(modelSide, width, "");
+		}
+
+		const modelWidth = visibleWidth(modelSide);
+		const availableWorkspaceWidth = Math.max(0, width - modelWidth - (modelWidth > 0 ? 2 : 0));
+		const fittedWorkspace = truncateToWidth(workspaceSide, availableWorkspaceWidth, theme.fg("dim", "…"));
+		const workspaceWidth = visibleWidth(fittedWorkspace);
+		const workspacePadding = " ".repeat(Math.max(0, width - workspaceWidth - modelWidth));
+		const workspaceLine = `${fittedWorkspace}${workspacePadding}${modelSide}`;
+
 		const contextUsage = this.session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
+		const autoIndicator = this.autoCompactEnabled ? " auto" : "";
+		const contextDisplay = `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`.replace("?%", "?");
+		const contextValue =
+			contextPercentValue > 90
+				? theme.fg("error", contextDisplay)
+				: contextPercentValue > 70
+					? theme.fg("warning", contextDisplay)
+					: theme.fg("muted", contextDisplay);
 
-		// Replace home directory with ~
-		let pwd = formatCwdForFooter(this.session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
-
-		// Add git branch if available
-		const branch = this.footerData.getGitBranch();
-		if (branch) {
-			pwd = `${pwd} (${branch})`;
-		}
-
-		// Add session name if set
-		const sessionName = this.session.sessionManager.getSessionName();
-		if (sessionName) {
-			pwd = `${pwd} • ${sessionName}`;
-		}
-
-		// Build stats line
-		const statsParts = [];
-		if (totalInput) statsParts.push(`↑${formatTokens(totalInput)}`);
-		if (totalOutput) statsParts.push(`↓${formatTokens(totalOutput)}`);
-		if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
-		if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
-		if ((totalCacheRead > 0 || totalCacheWrite > 0) && latestCacheHitRate !== undefined) {
-			statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
-		}
-
-		// Show cost with "(sub)" indicator if using OAuth subscription
+		const detailParts = [`${theme.fg("dim", "context")} ${contextValue}`];
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
 		if (totalCost || usingSubscription) {
-			const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
-			statsParts.push(costStr);
+			detailParts.push(theme.fg("dim", `$${totalCost.toFixed(3)}${usingSubscription ? " sub" : ""}`));
 		}
-
-		// Colorize context percentage based on usage
-		let contextPercentStr: string;
-		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
-		const contextPercentDisplay =
-			contextPercent === "?"
-				? `?/${formatTokens(contextWindow)}${autoIndicator}`
-				: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
-		if (contextPercentValue > 90) {
-			contextPercentStr = theme.fg("error", contextPercentDisplay);
-		} else if (contextPercentValue > 70) {
-			contextPercentStr = theme.fg("warning", contextPercentDisplay);
-		} else {
-			contextPercentStr = contextPercentDisplay;
+		if (totalInput) detailParts.push(theme.fg("dim", `↑${formatTokens(totalInput)}`));
+		if (totalOutput) detailParts.push(theme.fg("dim", `↓${formatTokens(totalOutput)}`));
+		if (totalCacheRead) detailParts.push(theme.fg("dim", `R${formatTokens(totalCacheRead)}`));
+		if (totalCacheWrite) detailParts.push(theme.fg("dim", `W${formatTokens(totalCacheWrite)}`));
+		if ((totalCacheRead > 0 || totalCacheWrite > 0) && latestCacheHitRate !== undefined) {
+			detailParts.push(theme.fg("dim", `CH${latestCacheHitRate.toFixed(1)}%`));
 		}
-		statsParts.push(contextPercentStr);
 		if (areExperimentalFeaturesEnabled()) {
-			statsParts.push(`${theme.fg("dim", "•")} ${theme.bold(theme.fg("warning", "xp"))}`);
+			detailParts.push(theme.bold(theme.fg("warning", "xp")));
 		}
+		const detailLine = truncateToWidth(detailParts.join(theme.fg("dim", " · ")), width, theme.fg("dim", "…"));
+		const lines = [workspaceLine, detailLine];
 
-		let statsLeft = statsParts.join(" ");
-
-		// Add model name on the right side, plus thinking level if model supports it
-		const modelName = state.model?.id || "no-model";
-
-		let statsLeftWidth = visibleWidth(statsLeft);
-
-		// If statsLeft is too wide, truncate it
-		if (statsLeftWidth > width) {
-			statsLeft = truncateToWidth(statsLeft, width, "...");
-			statsLeftWidth = visibleWidth(statsLeft);
-		}
-
-		// Calculate available space for padding (minimum 2 spaces between stats and model)
-		const minPadding = 2;
-
-		// Add thinking level indicator if model supports reasoning
-		let rightSideWithoutProvider = modelName;
-		if (state.model?.reasoning) {
-			const thinkingLevel = state.thinkingLevel || "off";
-			rightSideWithoutProvider =
-				thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
-		}
-
-		// Prepend the provider in parentheses if there are multiple providers and there's enough room
-		let rightSide = rightSideWithoutProvider;
-		if (this.footerData.getAvailableProviderCount() > 1 && state.model) {
-			rightSide = `(${state.model!.provider}) ${rightSideWithoutProvider}`;
-			if (statsLeftWidth + minPadding + visibleWidth(rightSide) > width) {
-				// Too wide, fall back
-				rightSide = rightSideWithoutProvider;
-			}
-		}
-
-		const rightSideWidth = visibleWidth(rightSide);
-		const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
-
-		let statsLine: string;
-		if (totalNeeded <= width) {
-			// Both fit - add padding to right-align model
-			const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
-			statsLine = statsLeft + padding + rightSide;
-		} else {
-			// Need to truncate right side
-			const availableForRight = width - statsLeftWidth - minPadding;
-			if (availableForRight > 0) {
-				const truncatedRight = truncateToWidth(rightSide, availableForRight, "");
-				const truncatedRightWidth = visibleWidth(truncatedRight);
-				const padding = " ".repeat(Math.max(0, width - statsLeftWidth - truncatedRightWidth));
-				statsLine = statsLeft + padding + truncatedRight;
-			} else {
-				// Not enough space for right side at all
-				statsLine = statsLeft;
-			}
-		}
-
-		// Apply dim to each part separately. statsLeft may contain color codes (for context %)
-		// that end with a reset, which would clear an outer dim wrapper. So we dim the parts
-		// before and after the colored section independently.
-		const dimStatsLeft = theme.fg("dim", statsLeft);
-		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
-		const dimRemainder = theme.fg("dim", remainder);
-
-		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
-		const lines = [pwdLine, dimStatsLeft + dimRemainder];
-
-		// Add extension statuses on a single line, sorted by key alphabetically
 		const extensionStatuses = this.footerData.getExtensionStatuses();
 		if (extensionStatuses.size > 0) {
 			const sortedStatuses = Array.from(extensionStatuses.entries())
 				.sort(([a], [b]) => a.localeCompare(b))
 				.map(([, text]) => sanitizeStatusText(text));
-			const statusLine = sortedStatuses.join(" ");
-			// Truncate to terminal width with dim ellipsis for consistency with footer style
-			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+			lines.push(truncateToWidth(sortedStatuses.join(" "), width, theme.fg("dim", "…")));
 		}
 
 		return lines;

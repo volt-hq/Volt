@@ -69,6 +69,9 @@ export interface EditorComponent extends Component {
 	/** Set horizontal padding */
 	setPaddingX?(padding: number): void;
 
+	/** Set a label embedded in the editor's top border */
+	setTopBorderLabel?(label: string | undefined): void;
+
 	/** Set max visible items in autocomplete dropdown */
 	setAutocompleteMaxVisible?(maxVisible: number): void;
 }

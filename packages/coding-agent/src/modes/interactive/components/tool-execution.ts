@@ -22,30 +22,34 @@ export interface ToolExecutionOptions {
 }
 
 /**
- * Wraps a component and appends a suffix (e.g. a dim duration) to its first
- * non-empty rendered line when the suffix fits within the width.
+ * Wraps a tool call renderer and appends explicit lifecycle metadata to its
+ * first non-empty line. If the metadata does not fit, it gets its own line so
+ * state is never communicated by color alone.
  */
-class FirstLineSuffix implements Component {
+class ToolHeaderMetadata implements Component {
 	private component: Component;
-	private getSuffix: () => string | undefined;
+	private getMetadata: () => string;
 
-	constructor(component: Component, getSuffix: () => string | undefined) {
+	constructor(component: Component, getMetadata: () => string) {
 		this.component = component;
-		this.getSuffix = getSuffix;
+		this.getMetadata = getMetadata;
 	}
 
 	render(width: number): string[] {
 		const lines = this.component.render(width);
-		const suffix = this.getSuffix();
-		if (!suffix || lines.length === 0) return lines;
+		if (lines.length === 0) return lines;
 		// Components like Text pad lines to full width with trailing spaces;
 		// strip that padding before measuring (the parent Box re-pads).
 		const index = lines.findIndex((line) => visibleWidth(line.replace(/ +$/, "")) > 0);
 		if (index === -1) return lines;
 		const line = lines[index]!.replace(/ +$/, "");
-		if (visibleWidth(line) + visibleWidth(suffix) + 1 > width) return lines;
+		const metadata = this.getMetadata();
 		const result = lines.slice();
-		result[index] = `${line} ${suffix}`;
+		if (visibleWidth(line) + visibleWidth(metadata) + 1 <= width) {
+			result[index] = `${line} ${metadata}`;
+		} else {
+			result.splice(index + 1, 0, metadata);
+		}
 		return result;
 	}
 
@@ -111,8 +115,8 @@ export class ToolExecutionComponent extends Container {
 		// Always create all shell variants. contentBox is used for default renderer-based composition.
 		// selfRenderContainer is used when the tool renders its own framing.
 		// contentText is reserved for generic fallback rendering when no tool definition exists.
-		this.contentBox = new Box(1, 1, (text: string) => theme.bg("toolPendingBg", text));
-		this.contentText = new Text("", 1, 1, (text: string) => theme.bg("toolPendingBg", text));
+		this.contentBox = new Box(1, 0);
+		this.contentText = new Text("", 1, 0);
 		this.selfRenderContainer = new Container();
 
 		if (this.hasRendererDefinition()) {
@@ -324,34 +328,25 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private updateDisplay(): void {
-		const bgFn = this.isPartial
-			? (text: string) => theme.bg("toolPendingBg", text)
-			: this.result?.isError
-				? (text: string) => theme.bg("toolErrorBg", text)
-				: (text: string) => theme.bg("toolSuccessBg", text);
-
 		let hasContent = false;
 		this.hideComponent = false;
 		if (this.hasRendererDefinition()) {
 			const renderContainer = this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox;
-			if (renderContainer instanceof Box) {
-				renderContainer.setBgFn(bgFn);
-			}
 			renderContainer.clear();
 
 			const callRenderer = this.getCallRenderer();
 			if (!callRenderer) {
-				renderContainer.addChild(this.withDurationSuffix(this.createCallFallback()));
+				renderContainer.addChild(this.withHeaderMetadata(this.createCallFallback()));
 				hasContent = true;
 			} else {
 				try {
 					const component = callRenderer(this.args, theme, this.getRenderContext(this.callRendererComponent));
 					this.callRendererComponent = component;
-					renderContainer.addChild(this.withDurationSuffix(component));
+					renderContainer.addChild(this.withHeaderMetadata(component));
 					hasContent = true;
 				} catch {
 					this.callRendererComponent = undefined;
-					renderContainer.addChild(this.withDurationSuffix(this.createCallFallback()));
+					renderContainer.addChild(this.withHeaderMetadata(this.createCallFallback()));
 					hasContent = true;
 				}
 			}
@@ -390,7 +385,6 @@ export class ToolExecutionComponent extends Container {
 				hasContent = true;
 			}
 		} else {
-			this.contentText.setCustomBgFn(bgFn);
 			this.contentText.setText(this.formatToolExecution());
 			hasContent = true;
 		}
@@ -442,8 +436,26 @@ export class ToolExecutionComponent extends Container {
 	/** Minimum completed duration before the tool header shows a duration suffix. */
 	private static readonly DURATION_DISPLAY_THRESHOLD_MS = 1000;
 
-	private withDurationSuffix(component: Component): Component {
-		return new FirstLineSuffix(component, () => this.getDurationSuffix());
+	private withHeaderMetadata(component: Component): Component {
+		return new ToolHeaderMetadata(component, () => this.getHeaderMetadata());
+	}
+
+	private getHeaderMetadata(): string {
+		let state: string;
+		if (this.result?.isError) {
+			state = theme.fg("error", "[failure]");
+		} else if (this.result && this.isPartial) {
+			state = theme.fg("warning", "[partial]");
+		} else if (this.result) {
+			state = theme.fg("success", "[success]");
+		} else if (this.executionStarted) {
+			state = theme.fg("warning", "[running]");
+		} else {
+			state = theme.fg("muted", "[pending]");
+		}
+
+		const duration = this.getDurationSuffix();
+		return duration ? `${state} ${duration}` : state;
 	}
 
 	private getDurationSuffix(): string | undefined {
@@ -470,11 +482,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private formatToolExecution(): string {
-		let text = theme.fg("toolTitle", theme.bold(this.toolName));
-		const durationSuffix = this.getDurationSuffix();
-		if (durationSuffix) {
-			text += ` ${durationSuffix}`;
-		}
+		let text = `${theme.fg("toolTitle", theme.bold(this.toolName))} ${this.getHeaderMetadata()}`;
 		const content = JSON.stringify(this.args, null, 2);
 		if (content) {
 			text += `\n\n${content}`;
