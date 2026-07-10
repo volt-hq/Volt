@@ -37,6 +37,7 @@ type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : n
 type RpcCommandBody = DistributiveOmit<RpcCommand, "id">;
 
 interface PendingRpcRequest {
+	command: string;
 	resolve(response: RpcResponse): void;
 	reject(error: Error): void;
 }
@@ -119,8 +120,8 @@ export abstract class RpcClientBase {
 	}
 
 	/** Send a prompt to the agent. */
-	async prompt(message: string, images?: ImageContent[]): Promise<void> {
-		await this.send({ type: "prompt", message, images });
+	async prompt(message: string, images?: ImageContent[], onAccepted?: () => void): Promise<void> {
+		await this.send({ type: "prompt", message, images }, onAccepted);
 	}
 
 	/** Queue a steering message to interrupt the agent mid-run. */
@@ -502,7 +503,9 @@ export abstract class RpcClientBase {
 
 			unsubscribe = this.onEvent((event) => {
 				events.push(event);
-				if (event.type === "agent_settled") {
+				// Settlement predating this prompt's success response belongs to older
+				// work and must not complete this request.
+				if (event.type === "agent_settled" && promptAccepted) {
 					agentSettled = true;
 					resolveIfComplete();
 				}
@@ -604,6 +607,7 @@ export abstract class RpcClientBase {
 			};
 
 			this.pendingRequests.set(id, {
+				command: command.type,
 				resolve: (response) => {
 					clearTimeout(timeout);
 					if (!response.success) {
@@ -658,6 +662,14 @@ export abstract class RpcClientBase {
 		const pending = this.pendingRequests.get(response.id);
 		if (!pending) {
 			this.failInboundProtocol(`Invalid inbound RPC response: unknown id ${JSON.stringify(response.id)}`, line);
+			return;
+		}
+
+		if (response.command !== pending.command) {
+			this.failInboundProtocol(
+				`Invalid inbound RPC response: command ${JSON.stringify(response.command)} does not match request ${JSON.stringify(pending.command)}`,
+				line,
+			);
 			return;
 		}
 

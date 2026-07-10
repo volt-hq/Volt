@@ -97,6 +97,46 @@ const TOOL_RESULT_MAX_CHARS = 2000;
  */
 export const CONVERSATION_MAX_CHARS = 200_000;
 
+/** Conservative upper bound for code, JSON, identifiers, and multilingual text. */
+const SERIALIZED_CHARS_PER_TOKEN = 1;
+/** Request framing, provider-added tokens, and token-estimation safety margin. */
+const SUMMARIZATION_OVERHEAD_TOKENS = 1024;
+
+/** Clamp requested output so mandatory prompt text still fits the model context. */
+export function getSummarizationOutputTokenBudget(
+	contextWindow: number,
+	requestedOutputTokens: number,
+	fixedPromptChars = 0,
+): number {
+	const requested = Number.isFinite(requestedOutputTokens) ? Math.max(0, Math.floor(requestedOutputTokens)) : 0;
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+		return requested;
+	}
+	const available = Math.floor(contextWindow) - SUMMARIZATION_OVERHEAD_TOKENS - Math.max(0, fixedPromptChars);
+	return Math.min(requested, Math.max(0, available));
+}
+
+/**
+ * Derive a conversation serialization budget from the selected model.
+ * Unknown context windows retain the aggregate safety cap.
+ */
+export function getConversationCharBudget(
+	contextWindow: number,
+	maxOutputTokens: number,
+	fixedPromptChars = 0,
+): number {
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+		return CONVERSATION_MAX_CHARS;
+	}
+	const outputTokens = Number.isFinite(maxOutputTokens) ? Math.max(0, maxOutputTokens) : 0;
+	const inputTokens = Math.max(
+		0,
+		Math.floor(contextWindow) - Math.floor(outputTokens) - SUMMARIZATION_OVERHEAD_TOKENS,
+	);
+	const availableChars = inputTokens * SERIALIZED_CHARS_PER_TOKEN - Math.max(0, fixedPromptChars);
+	return Math.min(CONVERSATION_MAX_CHARS, Math.max(0, Math.floor(availableChars)));
+}
+
 /** Budget share reserved for the opening of the conversation (the original goal). */
 const CONVERSATION_HEAD_BUDGET_RATIO = 0.25;
 

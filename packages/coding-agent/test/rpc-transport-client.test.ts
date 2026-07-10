@@ -227,7 +227,7 @@ describe("RpcTransportClient", () => {
 		}
 	});
 
-	test("promptAndWait resolves when a successful prompt response follows agent_settled", async () => {
+	test("promptAndWait ignores agent_settled events that predate prompt acceptance", async () => {
 		const pair = createLoopbackRpcTransportPair();
 		const client = new RpcTransportClient({ transport: pair.client });
 		let command: { id: string; type: string } | undefined;
@@ -257,7 +257,11 @@ describe("RpcTransportClient", () => {
 				command: acceptedCommand.type,
 				success: true,
 			});
-			await expect(eventsPromise).resolves.toEqual([{ type: "agent_settled" }]);
+			await Promise.resolve();
+			expect(resolved).toBe(false);
+
+			pair.server.write({ type: "agent_settled" });
+			await expect(eventsPromise).resolves.toEqual([{ type: "agent_settled" }, { type: "agent_settled" }]);
 		} finally {
 			await client.stop();
 		}

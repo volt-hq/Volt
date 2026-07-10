@@ -1383,7 +1383,89 @@ describe("subagent tool", () => {
 		await expect(execution).rejects.toThrow("Operation aborted");
 		expect(promptStarted).toBe(true);
 		expect(abortCalled).toBe(true);
-		expect(disposeCalled).toBe(true);
+		await vi.waitFor(() => expect(disposeCalled).toBe(true));
+	});
+
+	it("rejects parent cancellation without waiting for hung child cleanup", async () => {
+		let abortCalled = false;
+		let resolvePromptStarted: () => void = () => undefined;
+		const promptStarted = new Promise<void>((resolve) => {
+			resolvePromptStarted = resolve;
+		});
+		const never = new Promise<never>(() => undefined);
+		const handle: SubagentHandle = {
+			id: "sa_hung_abort",
+			sessionId: "session_hung_abort",
+			prompt: async () => {
+				resolvePromptStarted();
+				await never;
+			},
+			abort: async () => {
+				abortCalled = true;
+				await never;
+			},
+			getState: async (): Promise<RpcSessionState> => {
+				throw new Error("not used");
+			},
+			getTranscript: async (): Promise<RpcTranscriptResponse> => {
+				throw new Error("not used");
+			},
+			getSessionStats: async () => {
+				throw new Error("not used");
+			},
+			waitForEnd: async () => never,
+			dispose: async () => {
+				await never;
+			},
+			onEvent: () => () => undefined,
+		};
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			startByName: async () => handle,
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager });
+		const controller = new AbortController();
+		const execution = tool.execute("call-1", { agent: "scout", task: "slow" }, controller.signal);
+		await promptStarted;
+
+		controller.abort();
+		const outcome = await Promise.race([
+			execution.then(
+				() => "resolved" as const,
+				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			),
+			new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 100)),
+		]);
+
+		expect(outcome).toBe("Operation aborted");
+		expect(abortCalled).toBe(true);
+	});
+
+	it("rejects cancellation that arrives after child disposal starts", async () => {
+		let notifyDisposeStarted: () => void = () => undefined;
+		const disposeStarted = new Promise<void>((resolve) => {
+			notifyDisposeStarted = resolve;
+		});
+		const never = new Promise<never>(() => undefined);
+		const completed = createCompletedHandle("done");
+		const handle: SubagentHandle = {
+			...completed,
+			dispose: async () => {
+				notifyDisposeStarted();
+				await never;
+			},
+		};
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			startByName: async () => handle,
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager });
+		const controller = new AbortController();
+		const execution = tool.execute("call-1", { agent: "scout", task: "finish then hang" }, controller.signal);
+		await disposeStarted;
+
+		controller.abort();
+		await expect(execution).rejects.toThrow("Operation aborted");
 	});
 
 	it("disposes the child after terminal failure details are returned", async () => {

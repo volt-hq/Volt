@@ -7,6 +7,7 @@ describe("InteractiveMode extension settlement", () => {
 		const agentWaitForIdle = vi.fn(async () => undefined);
 		const session = {
 			agent: { waitForIdle: agentWaitForIdle },
+			isBusy: true,
 			bindExtensions: vi.fn(
 				async (_options: { commandContextActions: { waitForIdle(): Promise<void> } }) => undefined,
 			),
@@ -21,6 +22,8 @@ describe("InteractiveMode extension settlement", () => {
 			setupExtensionShortcuts: vi.fn(),
 			showLoadedResources: vi.fn(),
 			showStartupNoticesIfNeeded: vi.fn(),
+			shutdownRequested: false,
+			shutdown: vi.fn(async () => undefined),
 		};
 		const bindCurrentSessionExtensions = Reflect.get(InteractiveMode.prototype, "bindCurrentSessionExtensions") as (
 			this: typeof fakeThis,
@@ -29,11 +32,19 @@ describe("InteractiveMode extension settlement", () => {
 		await bindCurrentSessionExtensions.call(fakeThis);
 		const options = session.bindExtensions.mock.calls[0]?.[0] as {
 			commandContextActions: { waitForIdle(): Promise<void> };
+			shutdownHandler(): void;
 		};
 		await options.commandContextActions.waitForIdle();
 
 		expect(sessionWaitForIdle).toHaveBeenCalledOnce();
 		expect(agentWaitForIdle).not.toHaveBeenCalled();
+
+		options.shutdownHandler();
+		expect(fakeThis.shutdownRequested).toBe(true);
+		expect(fakeThis.shutdown).not.toHaveBeenCalled();
+		session.isBusy = false;
+		options.shutdownHandler();
+		expect(fakeThis.shutdown).toHaveBeenCalledOnce();
 	});
 });
 
@@ -90,6 +101,42 @@ describe("InteractiveMode compaction events", () => {
 			}),
 		);
 		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
+	});
+
+	test("waits for the compaction transaction to settle before flushing a new prompt", async () => {
+		let releaseIdle: () => void = () => undefined;
+		const idle = new Promise<void>((resolve) => {
+			releaseIdle = resolve;
+		});
+		const session = {
+			waitForIdle: vi.fn(() => idle),
+			prompt: vi.fn(async () => undefined),
+			followUp: vi.fn(async () => undefined),
+			steer: vi.fn(async () => undefined),
+			clearQueue: vi.fn(),
+		};
+		const fakeThis = {
+			compactionQueuedMessages: [{ text: "queued after compaction", mode: "steer" as const }],
+			updatePendingMessagesDisplay: vi.fn(),
+			showError: vi.fn(),
+			session,
+			isExtensionCommand: vi.fn(() => false),
+			collectPromptImages: vi.fn(async () => undefined),
+		};
+		const flushCompactionQueue = Reflect.get(InteractiveMode.prototype, "flushCompactionQueue") as (
+			this: typeof fakeThis,
+			options?: { willRetry?: boolean },
+		) => Promise<void>;
+
+		const flushing = flushCompactionQueue.call(fakeThis, { willRetry: false });
+		await Promise.resolve();
+		expect(session.waitForIdle).toHaveBeenCalledOnce();
+		expect(session.prompt).not.toHaveBeenCalled();
+
+		releaseIdle();
+		await flushing;
+		expect(session.prompt).toHaveBeenCalledWith("queued after compaction", undefined);
+		expect(fakeThis.compactionQueuedMessages).toEqual([]);
 	});
 
 	test("defers requested shutdown from agent_end until the session settles", async () => {

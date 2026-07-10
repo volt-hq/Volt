@@ -1766,7 +1766,7 @@ export class InteractiveMode {
 			},
 			shutdownHandler: () => {
 				this.shutdownRequested = true;
-				if (!this.session.isStreaming) {
+				if (!this.session.isBusy) {
 					void this.shutdown();
 				}
 			},
@@ -2246,7 +2246,7 @@ export class InteractiveMode {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.session.modelRegistry,
 			model: this.session.model,
-			isIdle: () => !this.session.isStreaming,
+			isIdle: () => !this.session.isBusy,
 			isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
 			signal: this.session.agent.signal,
 			abort: () => {
@@ -4680,6 +4680,13 @@ export class InteractiveMode {
 		};
 
 		try {
+			if (!options?.willRetry) {
+				// compaction_end is emitted before the active prompt transaction is
+				// released. Wait for that boundary so the first queued input is not
+				// rejected as a concurrent prompt and left without another flush trigger.
+				await this.session.waitForIdle();
+			}
+
 			if (options?.willRetry) {
 				// When retry is pending, queue messages for the retry turn
 				for (const message of queuedMessages) {

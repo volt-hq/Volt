@@ -316,6 +316,87 @@ describe("AgentSession model and extension characterization", () => {
 		expect(extensionApi).toBeDefined();
 	});
 
+	it("does not start a custom turn from an input hook during prompt preflight", async () => {
+		const harness = await createHarness({
+			extensionFactories: [
+				(volt) => {
+					volt.on("input", async () => {
+						volt.sendMessage(
+							{ customType: "preflight", content: "must not race", display: false },
+							{ triggerTurn: true },
+						);
+						return { action: "continue" };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("original prompt"), fauxAssistantMessage("must not run")]);
+
+		await harness.session.prompt("hello");
+		await Promise.resolve();
+
+		expect(getAssistantTexts(harness)).toEqual(["original prompt"]);
+		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it.each(["input", "before_agent_start"] as const)(
+		"aborting during %s preflight starts no run and preserves nextTurn context",
+		async (hook) => {
+			let shouldAbort = true;
+			const harness = await createHarness({
+				extensionFactories: [
+					(volt) => {
+						if (hook === "input") {
+							volt.on("input", async (_event, ctx) => {
+								if (shouldAbort) {
+									shouldAbort = false;
+									ctx.abort();
+								}
+								return { action: "continue" };
+							});
+						} else {
+							volt.on("before_agent_start", async (_event, ctx) => {
+								if (shouldAbort) {
+									shouldAbort = false;
+									ctx.abort();
+								}
+							});
+						}
+					},
+				],
+			});
+			harnesses.push(harness);
+			await harness.session.sendCustomMessage(
+				{ customType: "next-turn", content: "carry this", display: true, details: {} },
+				{ deliverAs: "nextTurn" },
+			);
+			let sawCarriedContext = false;
+			harness.setResponses([
+				(context) => {
+					sawCarriedContext = context.messages.some(
+						(message) =>
+							message.role === "user" &&
+							typeof message.content !== "string" &&
+							message.content.some((part) => part.type === "text" && part.text === "carry this"),
+					);
+					return fauxAssistantMessage("done");
+				},
+			]);
+
+			await expect(harness.session.prompt("aborted prompt")).rejects.toThrow("Prompt aborted");
+			await harness.session.abort();
+			expect(harness.eventsOfType("agent_start")).toHaveLength(0);
+			expect(harness.session.messages).toEqual([]);
+			expect(harness.sessionManager.getSessionName()).toBeUndefined();
+			expect(harness.getPendingResponseCount()).toBe(1);
+
+			harness.session.setSessionName("accepted prompt");
+			await harness.session.prompt("accepted prompt");
+			expect(sawCarriedContext).toBe(true);
+		},
+	);
+
 	it("allows extension commands to inspect live system prompt options", async () => {
 		const seenOptions: BuildSystemPromptOptions[] = [];
 		const harness = await createHarness({

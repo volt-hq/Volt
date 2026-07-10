@@ -586,6 +586,45 @@ describe("Agent", () => {
 		expect(agent.state.messages[agent.state.messages.length - 1].role).toBe("assistant");
 	});
 
+	it("continue() can drain a queued follow-up after a terminating tool batch", async () => {
+		let sawFollowUp = false;
+		const agent = new Agent({
+			streamFn: (_model, context) => {
+				sawFollowUp = context.messages.some(
+					(message) =>
+						message.role === "user" &&
+						typeof message.content !== "string" &&
+						message.content.some((part) => part.type === "text" && part.text === "Queued follow-up"),
+				);
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Processed") });
+				});
+				return stream;
+			},
+		});
+		agent.state.messages = [
+			{
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "terminate",
+				content: [{ type: "text", text: "done" }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+		];
+		agent.followUp({
+			role: "user",
+			content: [{ type: "text", text: "Queued follow-up" }],
+			timestamp: Date.now(),
+		});
+
+		await agent.continue({ drainFollowUps: true });
+
+		expect(sawFollowUp).toBe(true);
+		expect(agent.state.messages.map((message) => message.role)).toEqual(["toolResult", "user", "assistant"]);
+	});
+
 	it("continue() should keep one-at-a-time steering semantics from assistant tail", async () => {
 		let responseCount = 0;
 		const agent = new Agent({

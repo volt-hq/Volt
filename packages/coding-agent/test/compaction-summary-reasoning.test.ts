@@ -15,7 +15,7 @@ vi.mock("@earendil-works/volt-ai", async (importOriginal) => {
 	};
 });
 
-function createModel(reasoning: boolean, maxTokens = 8192): Model<"anthropic-messages"> {
+function createModel(reasoning: boolean, maxTokens = 8192, contextWindow = 200000): Model<"anthropic-messages"> {
 	return {
 		id: reasoning ? "reasoning-model" : "non-reasoning-model",
 		name: reasoning ? "Reasoning Model" : "Non-reasoning Model",
@@ -25,7 +25,7 @@ function createModel(reasoning: boolean, maxTokens = 8192): Model<"anthropic-mes
 		reasoning,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 200000,
+		contextWindow,
 		maxTokens,
 	};
 }
@@ -114,6 +114,55 @@ describe("generateSummary reasoning options", () => {
 			apiKey: "test-key",
 		});
 		expect(completeSimpleMock.mock.calls[0][2]).not.toHaveProperty("reasoning");
+	});
+
+	it("bounds serialized summary input to the selected model context", async () => {
+		const contextWindow = 16_000;
+		const maxOutputTokens = 2_000;
+		await generateSummary(
+			[{ role: "user", content: "x".repeat(200_000), timestamp: Date.now() }],
+			createModel(false, maxOutputTokens, contextWindow),
+			2_500,
+			"test-key",
+		);
+
+		const requestContext = completeSimpleMock.mock.calls[0][1];
+		const userContent = requestContext.messages[0].content[0].text as string;
+		expect(userContent).toContain("characters truncated");
+		expect(requestContext.systemPrompt.length + userContent.length).toBeLessThanOrEqual(
+			contextWindow - maxOutputTokens - 1024,
+		);
+	});
+
+	it("preserves source conversation and clamps output on 8k models", async () => {
+		await generateSummary(
+			[{ role: "user", content: "SOURCE ".repeat(10_000), timestamp: Date.now() }],
+			createModel(false, 8_192, 8_192),
+			16_384,
+			"test-key",
+		);
+
+		const requestContext = completeSimpleMock.mock.calls[0][1];
+		const userContent = requestContext.messages[0].content[0].text as string;
+		expect(userContent).toContain("[User]: SOURCE");
+		expect(completeSimpleMock.mock.calls[0][2]?.maxTokens).toBeLessThan(8_192);
+	});
+
+	it("reduces text output to preserve constrained reasoning", async () => {
+		await generateSummary(
+			messages,
+			createModel(true, 16_384, 16_384),
+			16_384,
+			"test-key",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			"medium",
+		);
+
+		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({ reasoning: "medium" });
+		expect(completeSimpleMock.mock.calls[0][2]?.maxTokens).toBeLessThan(8_192);
 	});
 
 	it("clamps compaction summary maxTokens to the model output cap", async () => {

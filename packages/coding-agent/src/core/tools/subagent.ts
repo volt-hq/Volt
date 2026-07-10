@@ -1002,9 +1002,10 @@ export function createSubagentToolDefinition(
 				await Promise.all(Array.from(activeHandles, (handle) => abortHandle(handle)));
 			};
 			const onAbort = () => {
-				void abortActiveHandles().finally(() => {
-					abortReject(new Error("Operation aborted"));
-				});
+				// Parent cancellation wins immediately; child transport cleanup is
+				// best-effort and must not delay or hang the parent tool call.
+				abortReject(new Error("Operation aborted"));
+				void abortActiveHandles();
 			};
 
 			signal?.addEventListener("abort", onAbort, { once: true });
@@ -1054,12 +1055,18 @@ export function createSubagentToolDefinition(
 						const completion = handle.waitForEnd();
 						await Promise.race([handle.prompt(task.task), abortPromise]);
 						const result = await Promise.race([completion, abortPromise]);
+						if (signal?.aborted) {
+							throw new Error("Operation aborted");
+						}
 						const assistantMessage = getLastAssistantMessage(result);
 						const status = getStatus(assistantMessage);
 						const errorMessage = status === "completed" ? undefined : assistantMessage?.errorMessage;
 						const rawOutput = getAssistantText(assistantMessage) || errorMessage || "(no output)";
 						const output = truncateModelVisibleOutput(rawOutput, maxOutputBytes);
 						const stats = await Promise.race([handle.getSessionStats().catch(() => undefined), abortPromise]);
+						if (signal?.aborted) {
+							throw new Error("Operation aborted");
+						}
 						return {
 							outputText: output.text,
 							details: createTaskDetails({
@@ -1101,7 +1108,11 @@ export function createSubagentToolDefinition(
 						unsubscribeEvents?.();
 						if (handle) {
 							activeHandles.delete(handle);
-							await disposeHandle(handle);
+							if (signal?.aborted) {
+								void disposeHandle(handle);
+							} else {
+								await Promise.race([disposeHandle(handle), abortPromise]);
+							}
 						}
 					}
 				};
@@ -1187,13 +1198,18 @@ export function createSubagentToolDefinition(
 			} catch (error) {
 				acceptingUpdates = false;
 				if (signal?.aborted) {
-					await abortActiveHandles();
+					void abortActiveHandles();
 				}
 				throw error;
 			} finally {
 				acceptingUpdates = false;
 				signal?.removeEventListener("abort", onAbort);
-				await Promise.all(Array.from(activeHandles, (handle) => disposeHandle(handle)));
+				const cleanup = Promise.all(Array.from(activeHandles, (handle) => disposeHandle(handle)));
+				if (signal?.aborted) {
+					void cleanup;
+				} else {
+					await Promise.race([cleanup, abortPromise]);
+				}
 			}
 		},
 		renderCall(args, theme, context) {

@@ -162,7 +162,7 @@ class LocalSubagentHandle implements SubagentHandle {
 	private rejectEnd: (error: Error) => void = () => {};
 	private latestEndEvent: SubagentEndEvent | undefined;
 	private settlementWatcherStarted = false;
-	private promptStarted = false;
+	private promptAccepted = false;
 	private promptMessageObserved = false;
 	private endSettled = false;
 	private disposed = false;
@@ -189,8 +189,9 @@ class LocalSubagentHandle implements SubagentHandle {
 
 	async prompt(message: string): Promise<void> {
 		this.assertOpen();
-		this.promptStarted = true;
-		await this.client.prompt(message);
+		await this.client.prompt(message, undefined, () => {
+			this.promptAccepted = true;
+		});
 	}
 
 	async abort(): Promise<void> {
@@ -249,10 +250,10 @@ class LocalSubagentHandle implements SubagentHandle {
 		if (this.disposed) {
 			return;
 		}
-		if (event.type === "message_start" && event.message.role === "user" && this.promptStarted) {
+		if (event.type === "message_start" && event.message.role === "user" && this.promptAccepted) {
 			this.promptMessageObserved = true;
 		}
-		if (event.type === "agent_end") {
+		if (event.type === "agent_end" && this.promptMessageObserved) {
 			this.latestEndEvent = event;
 		}
 		for (const listener of this.eventListeners) {
@@ -264,7 +265,7 @@ class LocalSubagentHandle implements SubagentHandle {
 		}
 		const shouldWatchSettlement =
 			(event.type === "agent_end" && this.promptMessageObserved) ||
-			(event.type === "agent_settled" && this.promptStarted);
+			(event.type === "agent_settled" && this.promptAccepted);
 		if (shouldWatchSettlement && !this.settlementWatcherStarted && !this.disposed && !this.endSettled) {
 			this.settlementWatcherStarted = true;
 			void this.settleAfterIdle();

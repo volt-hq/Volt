@@ -15,6 +15,7 @@ For user-facing setup, start the background daemon with `volt daemon start` (see
 - Host feature: `multi_streams.v1`
 - Host feature: `conversation_streams.v1`
 - Host feature: `working_directories.v1`
+- Host feature: `agent_settled.v1`
 
 The URL prefix selects protocol v1. The `alpn` ticket field and `protocol` hello field must be exactly `volt-rpc/0`.
 

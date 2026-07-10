@@ -1,6 +1,11 @@
 import type { Message } from "@earendil-works/volt-ai";
 import { describe, expect, it } from "vitest";
-import { CONVERSATION_MAX_CHARS, serializeConversation } from "../src/core/compaction/utils.ts";
+import {
+	CONVERSATION_MAX_CHARS,
+	getConversationCharBudget,
+	getSummarizationOutputTokenBudget,
+	serializeConversation,
+} from "../src/core/compaction/utils.ts";
 
 function userMessage(text: string): Message {
 	return {
@@ -9,6 +14,18 @@ function userMessage(text: string): Message {
 		timestamp: Date.now(),
 	};
 }
+
+describe("getConversationCharBudget", () => {
+	it("derives a conservative input budget from the selected model", () => {
+		expect(getConversationCharBudget(10_000, 2_000, 500)).toBe(6_476);
+		expect(getConversationCharBudget(200_000, 8_192, 1_000)).toBe(189_784);
+		expect(getConversationCharBudget(300_000, 8_192, 1_000)).toBe(CONVERSATION_MAX_CHARS);
+		expect(getConversationCharBudget(2_000, 2_000, 500)).toBe(0);
+		expect(getConversationCharBudget(0, 2_000, 500)).toBe(CONVERSATION_MAX_CHARS);
+		expect(getSummarizationOutputTokenBudget(8_192, 8_192, 3_000)).toBe(4_168);
+		expect(getSummarizationOutputTokenBudget(2_000, 2_000, 1_000)).toBe(0);
+	});
+});
 
 describe("serializeConversation", () => {
 	it("should truncate long tool results", () => {

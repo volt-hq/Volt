@@ -334,9 +334,11 @@ session.agent.state.messages = messages; // copies the top-level array
 // Replace tools
 session.agent.state.tools = tools; // copies the top-level array
 
-// Wait for agent to finish processing
-await session.agent.waitForIdle();
+// Wait for the full session prompt transaction to settle
+await session.waitForIdle();
 ```
+
+Prefer `session.waitForIdle()` when coordinating application work. It includes prompt preflight, retries, compaction, and queued continuations. `session.agent.waitForIdle()` only observes the core agent loop and can resolve while session-level prompt work is still pending.
 
 ### Events
 

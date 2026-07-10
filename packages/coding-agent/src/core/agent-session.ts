@@ -325,7 +325,9 @@ export class AgentSession {
 	/** Tracks core agent runs, including retry and compaction continuations. */
 	private _activePromptRuns = new Set<Promise<void>>();
 	/** Tracks complete prompt calls, including pre-prompt recovery and message construction. */
-	private _activePromptTransactions = new Set<Promise<void>>();
+	private _activePromptTransactions = new Map<symbol, Promise<void>>();
+	private _extensionCommandTransactions = new Set<symbol>();
+	private _activeExtensionCommandHandlers = 0;
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -339,6 +341,7 @@ export class AgentSession {
 	 * Re-armed by a successful compaction or the next user prompt.
 	 */
 	private _proactiveCompactionAttempted = false;
+	private _drainFollowUpsOnNextContinuation = false;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -1117,11 +1120,12 @@ export class AgentSession {
 			return;
 		}
 		this._proactiveCompactionStopped = false;
+		this._drainFollowUpsOnNextContinuation = false;
 		const run = (async () => {
 			try {
 				await this.agent.prompt(messages);
 				while (await this._handlePostAgentRun(abortGeneration)) {
-					await this.agent.continue();
+					await this._continueAgent();
 				}
 			} finally {
 				this._flushPendingBashMessages();
@@ -1136,11 +1140,19 @@ export class AgentSession {
 		}
 	}
 
-	private _trackPromptTransaction(operation: () => Promise<void>): Promise<void> {
-		const transaction = Promise.resolve().then(operation);
-		this._activePromptTransactions.add(transaction);
+	private async _continueAgent(): Promise<void> {
+		const drainFollowUps = this._drainFollowUpsOnNextContinuation;
+		this._drainFollowUpsOnNextContinuation = false;
+		await this.agent.continue({ drainFollowUps });
+	}
+
+	private _trackPromptTransaction(operation: (transactionId: symbol) => Promise<void>): Promise<void> {
+		const transactionId = Symbol("promptTransaction");
+		const transaction = Promise.resolve().then(() => operation(transactionId));
+		this._activePromptTransactions.set(transactionId, transaction);
 		return transaction.finally(() => {
-			this._activePromptTransactions.delete(transaction);
+			this._activePromptTransactions.delete(transactionId);
+			this._extensionCommandTransactions.delete(transactionId);
 			this._emitAgentSettledIfIdle();
 		});
 	}
@@ -1153,15 +1165,27 @@ export class AgentSession {
 
 	/** Wait for the agent and any session-level prompt work to settle. */
 	async waitForIdle(): Promise<void> {
+		await this._waitForIdle();
+	}
+
+	private async _waitForIdle(excludeExtensionCommands = false): Promise<void> {
 		while (true) {
-			const promptWork = [...this._activePromptRuns, ...this._activePromptTransactions];
+			const promptTransactions = [...this._activePromptTransactions.entries()]
+				.filter(
+					([transactionId]) => !excludeExtensionCommands || !this._extensionCommandTransactions.has(transactionId),
+				)
+				.map(([, transaction]) => transaction);
+			const promptWork = [...this._activePromptRuns, ...promptTransactions];
 			if (promptWork.length > 0) {
 				await Promise.allSettled(promptWork);
 				continue;
 			}
 
 			await this.agent.waitForIdle();
-			if (this._activePromptRuns.size === 0 && this._activePromptTransactions.size === 0) {
+			const hasOtherTransactions = [...this._activePromptTransactions.keys()].some(
+				(transactionId) => !excludeExtensionCommands || !this._extensionCommandTransactions.has(transactionId),
+			);
+			if (this._activePromptRuns.size === 0 && !hasOtherTransactions) {
 				return;
 			}
 		}
@@ -1236,7 +1260,9 @@ export class AgentSession {
 		const shouldQueue = isRunning || this._activePromptTransactions.size > 0 || this._abortPromise !== undefined;
 		const allowQueue = isRunning && this._abortPromise === undefined;
 		const abortGeneration = this._abortGeneration;
-		return this._trackPromptTransaction(() => this._prompt(text, options, shouldQueue, allowQueue, abortGeneration));
+		return this._trackPromptTransaction((transactionId) =>
+			this._prompt(text, options, shouldQueue, allowQueue, abortGeneration, transactionId),
+		);
 	}
 
 	private async _prompt(
@@ -1245,16 +1271,21 @@ export class AgentSession {
 		shouldQueue: boolean,
 		allowQueue: boolean,
 		abortGeneration: number,
+		transactionId: symbol,
 	): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
 
 		try {
+			if (this._disposed || abortGeneration !== this._abortGeneration) {
+				throw new Error("Prompt aborted before preflight started");
+			}
+
 			// Handle extension commands first (execute immediately, even during streaming)
 			// Extension commands manage their own LLM interaction via volt.sendMessage()
 			if (expandPromptTemplates && text.startsWith("/")) {
-				const handled = await this._tryExecuteExtensionCommand(text);
+				const handled = await this._tryExecuteExtensionCommand(text, transactionId);
 				if (handled) {
 					// Extension command executed, no prompt to send
 					preflightResult?.(true);
@@ -1272,6 +1303,9 @@ export class AgentSession {
 					options?.source ?? "interactive",
 					shouldQueue ? options?.streamingBehavior : undefined,
 				);
+				if (this._disposed || abortGeneration !== this._abortGeneration) {
+					throw new Error("Prompt aborted during input preflight");
+				}
 				if (inputResult.action === "handled") {
 					preflightResult?.(true);
 					return;
@@ -1326,9 +1360,6 @@ export class AgentSession {
 				throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 			}
 
-			// Name the session from its first prompt, concurrently with the turn.
-			this._maybeGenerateSessionName(expandedText);
-
 			// Check if we need to compact before sending (catches aborted responses)
 			const lastAssistant = this._findLastAssistantMessage();
 			if (lastAssistant && (await this._checkCompaction(lastAssistant, false))) {
@@ -1339,9 +1370,9 @@ export class AgentSession {
 					throw new Error("Prompt aborted before recovery could continue");
 				}
 				try {
-					await this.agent.continue();
+					await this._continueAgent();
 					while (await this._handlePostAgentRun(abortGeneration)) {
-						await this.agent.continue();
+						await this._continueAgent();
 					}
 				} finally {
 					this._flushPendingBashMessages();
@@ -1365,11 +1396,10 @@ export class AgentSession {
 				timestamp: Date.now(),
 			});
 
-			// Inject any pending "nextTurn" messages as context alongside the user message
-			for (const msg of this._pendingNextTurnMessages) {
-				messages.push(msg);
-			}
-			this._pendingNextTurnMessages = [];
+			// Snapshot pending "nextTurn" context. It is consumed only after preflight
+			// is accepted so aborting an extension hook cannot lose queued context.
+			const pendingNextTurnMessages = [...this._pendingNextTurnMessages];
+			messages.push(...pendingNextTurnMessages);
 
 			// Emit before_agent_start extension event
 			const result = await this._extensionRunner.emitBeforeAgentStart(
@@ -1378,6 +1408,10 @@ export class AgentSession {
 				this._baseSystemPrompt,
 				this._baseSystemPromptOptions,
 			);
+			if (this._disposed || abortGeneration !== this._abortGeneration) {
+				throw new Error("Prompt aborted before the agent run started");
+			}
+
 			// Add all custom messages from extensions
 			if (result?.messages) {
 				for (const msg of result.messages) {
@@ -1398,6 +1432,10 @@ export class AgentSession {
 				// Ensure we're using the base prompt (in case previous turn had modifications)
 				this.agent.state.systemPrompt = this._baseSystemPrompt;
 			}
+
+			this._pendingNextTurnMessages.splice(0, pendingNextTurnMessages.length);
+			// Name the session only after all abortable preflight work is accepted.
+			this._maybeGenerateSessionName(expandedText);
 		} catch (error) {
 			preflightResult?.(false);
 			throw error;
@@ -1418,7 +1456,7 @@ export class AgentSession {
 	/**
 	 * Try to execute an extension command. Returns true if command was found and executed.
 	 */
-	private async _tryExecuteExtensionCommand(text: string): Promise<boolean> {
+	private async _tryExecuteExtensionCommand(text: string, transactionId: symbol): Promise<boolean> {
 		// Parse command name and args
 		const spaceIndex = text.indexOf(" ");
 		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
@@ -1426,11 +1464,14 @@ export class AgentSession {
 
 		const command = this._extensionRunner.getCommand(commandName);
 		if (!command) return false;
+		this._extensionCommandTransactions.add(transactionId);
 
-		// Get command context from extension runner (includes session control methods)
-		const ctx = this._extensionRunner.createCommandContext();
+		// Command transactions must not wait on themselves or each other.
+		// waitForIdle still waits for active runs and non-command prompt work.
+		const ctx = this._extensionRunner.createCommandContext(() => this._waitForIdle(true));
 
 		try {
+			this._activeExtensionCommandHandlers++;
 			await command.handler(args, ctx);
 			return true;
 		} catch (err) {
@@ -1441,6 +1482,8 @@ export class AgentSession {
 				error: err instanceof Error ? err.message : String(err),
 			});
 			return true;
+		} finally {
+			this._activeExtensionCommandHandlers--;
 		}
 	}
 
@@ -1581,6 +1624,14 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<void> {
+		await this._sendCustomMessage(message, options, false);
+	}
+
+	private async _sendCustomMessage<T = unknown>(
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+		options: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" } | undefined,
+		allowDuringPromptTransaction: boolean,
+	): Promise<void> {
 		const appMessage = {
 			role: "custom" as const,
 			customType: message.customType,
@@ -1598,7 +1649,15 @@ export class AgentSession {
 				this.agent.steer(appMessage);
 			}
 		} else if (options?.triggerTurn) {
-			await this._runAgentPrompt(appMessage);
+			if (this._activePromptTransactions.size > 0 && !allowDuringPromptTransaction) {
+				throw new Error("Agent is already processing a prompt transaction");
+			}
+			if (allowDuringPromptTransaction) {
+				await this._runAgentPrompt(appMessage);
+			} else {
+				const abortGeneration = this._abortGeneration;
+				await this._trackPromptTransaction(() => this._runAgentPrompt(appMessage, abortGeneration));
+			}
 		} else {
 			this.agent.state.messages.push(appMessage);
 			this.sessionManager.appendCustomMessageEntry(
@@ -2107,12 +2166,17 @@ export class AgentSession {
 	 */
 	private _shouldStopForProactiveCompaction(context: ShouldStopAfterTurnContext): boolean {
 		try {
-			if (this._disposed || this._proactiveCompactionAttempted) return false;
+			if (this._disposed) return false;
+			const hasQueuedMessages = this.agent.hasQueuedMessages();
+			if (context.toolBatchTerminated && hasQueuedMessages) {
+				this._drainFollowUpsOnNextContinuation = true;
+			}
+			if (this._proactiveCompactionAttempted) return false;
 			// Only interrupt turns that would otherwise continue with another LLM
-			// call. When the turn produced no tool results or every tool requested
-			// termination, the run ends anyway and the ordinary post-run threshold
-			// check applies without forcing a continuation.
-			if (context.toolResults.length === 0 || context.toolBatchTerminated) return false;
+			// call. Queued steering/follow-up messages also force a continuation,
+			// including after a plain response or a terminating tool batch.
+			const willContinueForTools = context.toolResults.length > 0 && !context.toolBatchTerminated;
+			if (!willContinueForTools && !hasQueuedMessages) return false;
 			const message = context.message;
 			if (message.stopReason === "aborted" || message.stopReason === "error") return false;
 			const settings = this.settingsManager.getCompactionSettings();
@@ -2595,7 +2659,7 @@ export class AgentSession {
 		runner.bindCore(
 			{
 				sendMessage: (message, options) => {
-					this.sendCustomMessage(message, options).catch((err) => {
+					this._sendCustomMessage(message, options, this._activeExtensionCommandHandlers > 0).catch((err) => {
 						runner.emitError({
 							extensionPath: "<runtime>",
 							event: "send_message",
@@ -2639,7 +2703,7 @@ export class AgentSession {
 			},
 			{
 				getModel: () => this.model,
-				isIdle: () => !this.isStreaming,
+				isIdle: () => !this.isBusy,
 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
 				getSignal: () => this.agent.signal,
 				abort: () => {
@@ -3708,7 +3772,7 @@ export class AgentSession {
 			{},
 			Object.getOwnPropertyDescriptors(this._extensionRunner.createCommandContext()),
 		) as ReplacedSessionContext;
-		context.sendMessage = (message, options) => this.sendCustomMessage(message, options);
+		context.sendMessage = (message, options) => this._sendCustomMessage(message, options, true);
 		context.sendUserMessage = (content, options) => this.sendUserMessage(content, options);
 		return context;
 	}

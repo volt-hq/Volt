@@ -8,11 +8,13 @@ export const IROH_REMOTE_MULTI_STREAMS_FEATURE = "multi_streams.v1";
 export const IROH_REMOTE_CONVERSATION_STREAMS_FEATURE = "conversation_streams.v1";
 export const IROH_REMOTE_WORKTREES_FEATURE = "worktrees.v1";
 export const IROH_REMOTE_WORKING_DIRECTORIES_FEATURE = "working_directories.v1";
+export const IROH_REMOTE_AGENT_SETTLED_FEATURE = "agent_settled.v1";
 export const IROH_REMOTE_HOST_FEATURES = [
 	IROH_REMOTE_MULTI_STREAMS_FEATURE,
 	IROH_REMOTE_CONVERSATION_STREAMS_FEATURE,
 	IROH_REMOTE_WORKTREES_FEATURE,
 	IROH_REMOTE_WORKING_DIRECTORIES_FEATURE,
+	IROH_REMOTE_AGENT_SETTLED_FEATURE,
 ] as const;
 
 /** Daemon-managed worktree ids: lowercase slug, unique per workspace. */
