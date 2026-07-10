@@ -6,6 +6,8 @@ import { type Static, Type } from "typebox";
 import type { SessionStats } from "../agent-session.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type {
+	SubagentActivity,
+	SubagentActivityListener,
 	SubagentDefinition,
 	SubagentDefinitionSource,
 	SubagentEvent,
@@ -148,6 +150,9 @@ export interface SubagentToolDetails {
 export interface SubagentToolManager {
 	getDefinition(agentName: string): SubagentDefinition;
 	startByName(agentName: string, options?: SubagentStartByNameOptions): Promise<SubagentHandle>;
+	/** Optional live activity feed used by interactive hosts. */
+	listActivities?(): readonly SubagentActivity[];
+	subscribeActivities?(listener: SubagentActivityListener): () => void;
 }
 
 export interface SubagentToolOptions {

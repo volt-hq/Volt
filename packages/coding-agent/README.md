@@ -152,6 +152,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/name <name>` | Set session display name |
 | `/session` | Show session info (file, ID, messages, tokens, cost) |
 | `/tree` | Jump to any point in the session and continue from there |
+| `/subagents` | Inspect active or completed subagent conversations and tool flow |
 | `/trust` | Save project trust decision for future sessions (restart required) |
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
@@ -181,6 +182,7 @@ See `/hotkeys` for the full list. Customize via `~/.volt/agent/keybindings.json`
 | Shift+Tab | Cycle thinking level |
 | Ctrl+O | Collapse/expand tool output |
 | Ctrl+T | Collapse/expand thinking blocks |
+| Alt+A | Open the subagent inspector |
 
 ### Message Queue
 

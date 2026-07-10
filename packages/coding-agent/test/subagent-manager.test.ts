@@ -1032,6 +1032,38 @@ describe("SubagentManager", () => {
 		expect(eventTypes).toContain("agent_end");
 	});
 
+	it("retains inspectable activity after a completed handle is disposed", async () => {
+		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "scout" })]);
+		const { manager } = await createTestManager({ resourceLoader, responseText: "scout findings" });
+		const observedStatuses: string[] = [];
+		const unsubscribe = manager.subscribeActivities((activityId) => {
+			const activity = manager.listActivities().find((candidate) => candidate.id === activityId);
+			if (activity) observedStatuses.push(activity.status);
+		});
+
+		const handle = await manager.startByName("scout");
+		const completion = handle.waitForEnd();
+		await handle.prompt("inspect the auth flow");
+		await completion;
+		await handle.dispose();
+		unsubscribe();
+
+		const activity = manager.listActivities()[0];
+		expect(activity).toMatchObject({
+			id: handle.id,
+			sessionId: handle.sessionId,
+			agent: { name: "scout", source: "user" },
+			task: "inspect the auth flow",
+			status: "completed",
+		});
+		expect(observedStatuses).toContain("running");
+		expect(observedStatuses).toContain("completed");
+		expect(activity?.events.map((entry) => entry.event.type)).toContain("agent_end");
+		expect(activity?.transcript.some((message) => message.role === "user")).toBe(true);
+		expect(activity?.transcript.some((message) => message.role === "assistant")).toBe(true);
+		expect(activity?.sessionStats?.assistantMessages).toBe(1);
+	});
+
 	it("allows abort calls through the handle", async () => {
 		const { manager } = await createTestManager();
 		const handle = await manager.start();

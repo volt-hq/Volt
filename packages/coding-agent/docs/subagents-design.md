@@ -290,13 +290,20 @@ These lifecycle commands are local RPC only. Iroh remote transports reject them 
 
 ## TUI behavior
 
-The initial TUI surface can be tool rendering only:
+The parent tool row stays compact:
 
 - Show child agent name, status, model, and task.
-- Stream child tool calls and text deltas into the parent tool row.
-- Support collapsed and expanded views.
+- Stream aggregate progress for single, parallel, and chain calls.
+- Support collapsed and expanded result views.
 - Show usage summary when complete.
 - Propagate Escape/Ctrl+C through the parent abort path to active ephemeral children.
+
+The interactive TUI also owns a bounded activity ledger for the current runtime. `/subagents` or `Alt+A` opens a live inspector that:
+
+- lists active children first while retaining recently completed children after their handles are disposed;
+- drills into a child conversation with chronological assistant messages, tool arguments, status, and bounded output previews;
+- follows a running child until the user scrolls away;
+- uses the configurable selection, paging, and cancel keybindings and bounds its viewport for narrow terminals.
 
 Later TUI commands can add:
 
@@ -357,6 +364,7 @@ Deferred options:
 - Built-in `subagent` tool backed by `SubagentManager`.
 - Single, parallel, and chain modes with output truncation and usage/status details.
 - Compact TUI rendering and live progress updates for built-in `subagent` tool calls.
+- Live `/subagents` inspector with bounded active/completed activity retention, conversation drill-down, and tool-flow rendering.
 - Local RPC commands: `list_subagents`, `subagent_start`, `subagent_abort`, `subagent_get_state`, `subagent_get_transcript`, and `subagent_dispose`.
 - App convenience for "new agent with initial prompt" using the existing open-stream-then-prompt sequence.
 
@@ -380,6 +388,7 @@ Unit tests:
 - output truncation
 - abort propagation
 - child cleanup on parent shutdown
+- retained activity snapshots and live/narrow TUI inspector navigation
 
 Integration tests:
 

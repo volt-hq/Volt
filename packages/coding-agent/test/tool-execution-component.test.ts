@@ -408,6 +408,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(collapsed).toContain("scout (user) completed");
 		expect(collapsed).toContain("Inspect the auth flow");
 		expect(collapsed).toContain("1 turn");
+		expect(collapsed).toContain("inspect conversation");
 		expect(collapsed).not.toContain("final answer");
 
 		component.setExpanded(true);

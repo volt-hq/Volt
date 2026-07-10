@@ -482,6 +482,10 @@ export function discoverSubagentDefinitions(options: DiscoverSubagentDefinitions
 }
 
 export {
+	type SubagentActivity,
+	type SubagentActivityEvent,
+	type SubagentActivityListener,
+	type SubagentActivityStatus,
 	SubagentDefinitionConfigurationError,
 	SubagentDefinitionNotFoundError,
 	type SubagentEndEvent,

@@ -13,6 +13,7 @@ import { theme } from "../../../core/theme/runtime.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
+import { keyHint } from "./keybinding-hints.ts";
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
@@ -320,6 +321,10 @@ export class ToolExecutionComponent extends Container {
 						}
 					}
 				}
+			}
+			if (this.toolName === "subagent") {
+				renderContainer.addChild(new Text(keyHint("app.subagents.open", "inspect conversation"), 0, 0));
+				hasContent = true;
 			}
 		} else {
 			this.contentText.setCustomBgFn(bgFn);

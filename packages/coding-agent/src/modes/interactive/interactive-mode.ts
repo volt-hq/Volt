@@ -228,6 +228,7 @@ import { ScopedModelsSelectorComponent } from "./components/scoped-models-select
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
+import { SubagentInspectorComponent } from "./components/subagent-inspector.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
@@ -460,6 +461,7 @@ export class InteractiveMode {
 	/** Read-only attach overlay while a remote turn drains (§6.3). */
 	private drainViewer: DrainViewerComponent | undefined;
 	private drainViewerFeedId: string | undefined;
+	private dismissSubagentInspector: (() => void) | undefined;
 	/** Timestamp of the last quit warning (phone attached + turn streaming). */
 	private lastQuitWarningAt = 0;
 
@@ -509,6 +511,7 @@ export class InteractiveMode {
 		this.options = options;
 		this.autoTrustOnReloadCwd = options.autoTrustOnReloadCwd;
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
+			this.dismissSubagentInspector?.();
 			this.resetExtensionUI();
 		});
 		this.runtimeHost.setRebindSession(async () => {
@@ -3154,6 +3157,7 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.session.tree", () => this.showTreeSelector());
 		this.defaultEditor.onAction("app.session.fork", () => this.showUserMessageSelector());
 		this.defaultEditor.onAction("app.session.resume", () => this.showSessionSelector());
+		this.defaultEditor.onAction("app.subagents.open", () => this.showSubagentInspector());
 
 		this.defaultEditor.onChange = (text: string) => {
 			const wasBashMode = this.isBashMode;
@@ -3347,6 +3351,11 @@ export class InteractiveMode {
 			}
 			if (text === "/tree") {
 				this.showTreeSelector();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/subagents") {
+				this.showSubagentInspector();
 				this.editor.setText("");
 				return;
 			}
@@ -4767,6 +4776,7 @@ export class InteractiveMode {
 	 * @param create Factory that receives a `done` callback and returns the component and focus target
 	 */
 	private showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
+		this.dismissSubagentInspector?.();
 		const done = () => {
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.editor);
@@ -4777,6 +4787,39 @@ export class InteractiveMode {
 		this.editorContainer.addChild(component);
 		this.ui.setFocus(focus);
 		this.ui.requestRender();
+	}
+
+	private showSubagentInspector(): void {
+		const manager = this.session.getSubagentToolManager();
+		if (!manager?.listActivities || !manager.subscribeActivities) {
+			this.showWarning("Subagent inspection is unavailable for this session.");
+			return;
+		}
+
+		this.showSelector((done) => {
+			let closed = false;
+			let selector: SubagentInspectorComponent;
+			const close = () => {
+				if (closed) return;
+				closed = true;
+				selector.dispose();
+				if (this.dismissSubagentInspector === close) {
+					this.dismissSubagentInspector = undefined;
+				}
+				done();
+				this.ui.requestRender();
+			};
+			selector = new SubagentInspectorComponent(
+				{
+					listActivities: () => manager.listActivities?.() ?? [],
+					subscribeActivities: (listener) => manager.subscribeActivities?.(listener) ?? (() => undefined),
+				},
+				this.ui,
+				close,
+			);
+			this.dismissSubagentInspector = close;
+			return { component: selector, focus: selector };
+		});
 	}
 
 	private showSettingsSelector(): void {
@@ -7310,6 +7353,7 @@ export class InteractiveMode {
 		const followUp = this.getAppKeyDisplay("app.message.followUp");
 		const dequeue = this.getAppKeyDisplay("app.message.dequeue");
 		const pasteImage = this.getAppKeyDisplay("app.clipboard.pasteImage");
+		const openSubagents = this.getAppKeyDisplay("app.subagents.open");
 
 		let hotkeys = `
 **Navigation**
@@ -7353,6 +7397,7 @@ export class InteractiveMode {
 | \`${followUp}\` | Queue follow-up message |
 | \`${dequeue}\` | Restore queued messages |
 | \`${pasteImage}\` | Paste image from clipboard |
+| \`${openSubagents}\` | Inspect subagent conversations and tool flow |
 | \`/\` | Slash commands |
 | \`!\` | Run bash command |
 | \`!!\` | Run bash command (excluded from context) |
@@ -8021,6 +8066,7 @@ export class InteractiveMode {
 			this.loadingAnimation = undefined;
 		}
 		this.clearExtensionTerminalInputListeners();
+		this.dismissSubagentInspector?.();
 		this.footer.dispose();
 		this.footerDataProvider.dispose();
 		if (this.unsubscribe) {

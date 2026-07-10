@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
+import type { AgentMessage, ThinkingLevel } from "@earendil-works/volt-agent-core";
 import { createInProcessRpcClient, type InProcessRpcClient } from "../../modes/rpc/in-process-rpc-client.ts";
 import type { RpcClientEvent } from "../../modes/rpc/rpc-client-base.ts";
 import type { SessionStats } from "../agent-session.ts";
@@ -19,6 +19,36 @@ import type { SubagentDefinition } from "./index.ts";
 export type SubagentEvent = RpcClientEvent;
 export type SubagentEndEvent = Extract<SubagentEvent, { type: "agent_end" }>;
 export type SubagentEventListener = (event: SubagentEvent) => void;
+export type SubagentActivityStatus = "running" | "completed" | "failed" | "aborted";
+
+export interface SubagentActivityEvent {
+	sequence: number;
+	timestamp: number;
+	event: SubagentEvent;
+}
+
+/** Retained view of a child run, including its live event flow and completed transcript. */
+export interface SubagentActivity {
+	id: string;
+	sessionId: string;
+	agent: {
+		name: string;
+		source: SubagentDefinition["source"] | undefined;
+	};
+	task?: string;
+	status: SubagentActivityStatus;
+	startedAt: number;
+	updatedAt: number;
+	finishedAt?: number;
+	abortRequested: boolean;
+	events: readonly SubagentActivityEvent[];
+	droppedEvents: number;
+	transcript: readonly AgentMessage[];
+	sessionStats?: SessionStats;
+	error?: string;
+}
+
+export type SubagentActivityListener = (activityId: string) => void;
 
 export interface SubagentResult {
 	id: string;
@@ -108,6 +138,55 @@ export class SubagentDefinitionConfigurationError extends Error {
 }
 
 const VALID_THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const MAX_RETAINED_ACTIVITIES = 50;
+const MAX_RETAINED_ACTIVITY_EVENTS = 2_000;
+
+interface MutableSubagentActivity {
+	id: string;
+	sessionId: string;
+	agent: SubagentActivity["agent"];
+	task: string | undefined;
+	status: SubagentActivityStatus;
+	startedAt: number;
+	updatedAt: number;
+	finishedAt: number | undefined;
+	abortRequested: boolean;
+	events: SubagentActivityEvent[];
+	droppedEvents: number;
+	transcript: AgentMessage[];
+	sessionStats: SessionStats | undefined;
+	error: string | undefined;
+	runtime: AgentSessionRuntime | undefined;
+	nextSequence: number;
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function getTerminalActivityResult(event: SubagentEndEvent): {
+	status: Extract<SubagentActivityStatus, "completed" | "failed" | "aborted">;
+	error?: string;
+} {
+	for (let index = event.messages.length - 1; index >= 0; index -= 1) {
+		const message = event.messages[index];
+		if (!message || message.role !== "assistant") {
+			continue;
+		}
+		const assistant = message as { stopReason?: unknown; errorMessage?: unknown };
+		if (assistant.stopReason === "aborted") {
+			return { status: "aborted" };
+		}
+		if (assistant.stopReason === "error") {
+			return {
+				status: "failed",
+				...(typeof assistant.errorMessage === "string" ? { error: assistant.errorMessage } : {}),
+			};
+		}
+		return { status: "completed" };
+	}
+	return { status: "completed" };
+}
 
 function isThinkingLevel(value: string): value is ThinkingLevel {
 	return VALID_THINKING_LEVELS.includes(value as ThinkingLevel);
@@ -156,6 +235,9 @@ class LocalSubagentHandle implements SubagentHandle {
 	private readonly client: InProcessRpcClient;
 	private readonly abortRuntime: () => Promise<void>;
 	private readonly removeFromManager: (id: string) => void;
+	private readonly onPromptStarted: (message: string) => void;
+	private readonly onPromptFailed: (error: unknown) => void;
+	private readonly onAbortRequested: () => void;
 	private waitForIdle: (() => Promise<void>) | undefined;
 	private readonly eventListeners = new Set<SubagentEventListener>();
 	private readonly endPromise: Promise<SubagentResult>;
@@ -176,6 +258,9 @@ class LocalSubagentHandle implements SubagentHandle {
 		client: InProcessRpcClient;
 		abortRuntime: () => Promise<void>;
 		removeFromManager: (id: string) => void;
+		onPromptStarted: (message: string) => void;
+		onPromptFailed: (error: unknown) => void;
+		onAbortRequested: () => void;
 		waitForIdle: () => Promise<void>;
 	}) {
 		this.id = options.id;
@@ -183,6 +268,9 @@ class LocalSubagentHandle implements SubagentHandle {
 		this.client = options.client;
 		this.abortRuntime = options.abortRuntime;
 		this.removeFromManager = options.removeFromManager;
+		this.onPromptStarted = options.onPromptStarted;
+		this.onPromptFailed = options.onPromptFailed;
+		this.onAbortRequested = options.onAbortRequested;
 		this.waitForIdle = options.waitForIdle;
 		this.endPromise = new Promise<SubagentResult>((resolve, reject) => {
 			this.resolveEnd = resolve;
@@ -194,13 +282,20 @@ class LocalSubagentHandle implements SubagentHandle {
 	async prompt(message: string): Promise<void> {
 		this.assertOpen();
 		this.promptStarted = true;
-		await this.client.prompt(message, undefined, () => {
-			this.promptAccepted = true;
-		});
+		this.onPromptStarted(message);
+		try {
+			await this.client.prompt(message, undefined, () => {
+				this.promptAccepted = true;
+			});
+		} catch (error) {
+			this.onPromptFailed(error);
+			throw error;
+		}
 	}
 
 	async abort(): Promise<void> {
 		this.assertOpen();
+		this.onAbortRequested();
 		// Abort the in-process runtime directly so cancellation is signalled before
 		// concurrent disposal can close the loopback transport.
 		await this.abortRuntime();
@@ -332,6 +427,8 @@ export class SubagentManager {
 	private readonly retainRuntimeOnDispose: boolean;
 	private readonly onRuntimeCreated?: (event: SubagentRuntimeCreatedEvent) => void | Promise<void>;
 	private readonly handles = new Map<string, LocalSubagentHandle>();
+	private readonly activities = new Map<string, MutableSubagentActivity>();
+	private readonly activityListeners = new Set<SubagentActivityListener>();
 	private childStartCount = 0;
 
 	constructor(options: SubagentManagerOptions) {
@@ -362,6 +459,25 @@ export class SubagentManager {
 		return resourceLoader?.getSubagents().definitions ?? [];
 	}
 
+	/** List active and recently completed child runs, newest and active first. */
+	listActivities(): SubagentActivity[] {
+		return Array.from(this.activities.values())
+			.sort((left, right) => {
+				if (left.status === "running" && right.status !== "running") return -1;
+				if (left.status !== "running" && right.status === "running") return 1;
+				return right.startedAt - left.startedAt;
+			})
+			.map((activity) => this.snapshotActivity(activity));
+	}
+
+	/** Subscribe to live child activity changes. Snapshots remain available after handle disposal. */
+	subscribeActivities(listener: SubagentActivityListener): () => void {
+		this.activityListeners.add(listener);
+		return () => {
+			this.activityListeners.delete(listener);
+		};
+	}
+
 	getDefinition(agentName: string, options: { resourceLoader?: ResourceLoader } = {}): SubagentDefinition {
 		return this.resolveDefinition(agentName, options.resourceLoader);
 	}
@@ -383,6 +499,7 @@ export class SubagentManager {
 	async dispose(): Promise<void> {
 		const handles = Array.from(this.handles.values());
 		await Promise.all(handles.map((handle) => handle.dispose()));
+		this.activityListeners.clear();
 	}
 
 	private reserveChildStart(agentName: string | undefined): () => void {
@@ -477,10 +594,12 @@ export class SubagentManager {
 				disposeRuntimeOnClose: !this.retainRuntimeOnDispose,
 				requestTimeoutMs: options.requestTimeoutMs ?? this.requestTimeoutMs,
 				onEvent: (event) => {
+					this.recordActivityEvent(id, event);
 					handle?.handleEvent(event);
 				},
 			});
 			await this.notifyRuntimeCreated({ id, runtime, definition: definitionOptions?.definition });
+			this.registerActivity(id, runtime, definitionOptions?.definition);
 			handle = new LocalSubagentHandle({
 				id,
 				sessionId: runtime.session.sessionId,
@@ -489,14 +608,165 @@ export class SubagentManager {
 				removeFromManager: (handleId) => {
 					this.handles.delete(handleId);
 				},
+				onPromptStarted: (message) => this.updateActivityTask(id, message),
+				onPromptFailed: (error) => this.finishActivity(id, "failed", errorMessage(error)),
+				onAbortRequested: () => this.markActivityAbortRequested(id),
 				waitForIdle: () => runtime.session.waitForIdle(),
 			});
 			this.handles.set(id, handle);
+			void handle.waitForEnd().then(
+				(result) => {
+					const terminal = getTerminalActivityResult(result.event);
+					this.finishActivity(id, terminal.status, terminal.error);
+				},
+				(error: unknown) => {
+					const activity = this.activities.get(id);
+					const status = activity?.abortRequested ? "aborted" : "failed";
+					this.finishActivity(id, status, status === "failed" ? errorMessage(error) : undefined);
+				},
+			);
 			return handle;
 		} catch (error) {
 			await client?.stop().catch(() => undefined);
 			await runtime.dispose().catch(() => undefined);
 			throw error;
+		}
+	}
+
+	private registerActivity(
+		id: string,
+		runtime: AgentSessionRuntime,
+		definition: SubagentDefinition | undefined,
+	): void {
+		const now = Date.now();
+		const activity: MutableSubagentActivity = {
+			id,
+			sessionId: runtime.session.sessionId,
+			agent: {
+				name: definition?.name ?? "subagent",
+				source: definition?.source,
+			},
+			task: undefined,
+			status: "running",
+			startedAt: now,
+			updatedAt: now,
+			finishedAt: undefined,
+			abortRequested: false,
+			events: [],
+			droppedEvents: 0,
+			transcript: [],
+			sessionStats: undefined,
+			error: undefined,
+			runtime,
+			nextSequence: 0,
+		};
+		this.activities.set(id, activity);
+		this.trimActivities();
+		this.notifyActivity(activity);
+	}
+
+	private updateActivityTask(id: string, task: string): void {
+		const activity = this.activities.get(id);
+		if (!activity || activity.status !== "running") return;
+		activity.task = task;
+		activity.updatedAt = Date.now();
+		this.notifyActivity(activity);
+	}
+
+	private markActivityAbortRequested(id: string): void {
+		const activity = this.activities.get(id);
+		if (!activity || activity.status !== "running") return;
+		activity.abortRequested = true;
+		activity.updatedAt = Date.now();
+		this.notifyActivity(activity);
+	}
+
+	private recordActivityEvent(id: string, event: SubagentEvent): void {
+		const activity = this.activities.get(id);
+		if (!activity) return;
+		const now = Date.now();
+		const previous = activity.events[activity.events.length - 1];
+		const coalesceMessageUpdate = previous?.event.type === "message_update" && event.type === "message_update";
+		const coalesceToolUpdate =
+			previous?.event.type === "tool_execution_update" &&
+			event.type === "tool_execution_update" &&
+			previous.event.toolCallId === event.toolCallId;
+		if (previous && (coalesceMessageUpdate || coalesceToolUpdate)) {
+			previous.timestamp = now;
+			previous.event = event;
+		} else {
+			activity.events.push({ sequence: activity.nextSequence, timestamp: now, event });
+			activity.nextSequence += 1;
+			if (activity.events.length > MAX_RETAINED_ACTIVITY_EVENTS) {
+				activity.events.shift();
+				activity.droppedEvents += 1;
+			}
+		}
+		activity.updatedAt = now;
+		this.notifyActivity(activity);
+	}
+
+	private finishActivity(id: string, status: Exclude<SubagentActivityStatus, "running">, error?: string): void {
+		const activity = this.activities.get(id);
+		if (!activity || activity.status !== "running") return;
+		const runtime = activity.runtime;
+		if (runtime) {
+			activity.transcript = [...runtime.session.messages];
+			activity.sessionStats = runtime.session.getSessionStats();
+		}
+		const now = Date.now();
+		activity.runtime = undefined;
+		activity.status = status;
+		activity.finishedAt = now;
+		activity.updatedAt = now;
+		activity.error = error;
+		this.notifyActivity(activity);
+		this.trimActivities();
+	}
+
+	private snapshotActivity(activity: MutableSubagentActivity): SubagentActivity {
+		const runtime = activity.runtime;
+		const transcript = runtime ? [...runtime.session.messages] : [...activity.transcript];
+		const sessionStats = runtime ? runtime.session.getSessionStats() : activity.sessionStats;
+		return {
+			id: activity.id,
+			sessionId: activity.sessionId,
+			agent: { ...activity.agent },
+			...(activity.task !== undefined ? { task: activity.task } : {}),
+			status: activity.status,
+			startedAt: activity.startedAt,
+			updatedAt: activity.updatedAt,
+			...(activity.finishedAt !== undefined ? { finishedAt: activity.finishedAt } : {}),
+			abortRequested: activity.abortRequested,
+			events: activity.events.map((entry) => ({ ...entry })),
+			droppedEvents: activity.droppedEvents,
+			transcript,
+			...(sessionStats ? { sessionStats } : {}),
+			...(activity.error ? { error: activity.error } : {}),
+		};
+	}
+
+	private notifyActivity(activity: MutableSubagentActivity): void {
+		for (const listener of this.activityListeners) {
+			try {
+				listener(activity.id);
+			} catch {
+				// Observer failures must not affect child execution.
+			}
+		}
+	}
+
+	private trimActivities(): void {
+		while (this.activities.size > MAX_RETAINED_ACTIVITIES) {
+			let oldestTerminal: MutableSubagentActivity | undefined;
+			for (const activity of this.activities.values()) {
+				if (activity.status !== "running") {
+					oldestTerminal = activity;
+					break;
+				}
+			}
+			if (!oldestTerminal) return;
+			this.activities.delete(oldestTerminal.id);
 		}
 	}
 
