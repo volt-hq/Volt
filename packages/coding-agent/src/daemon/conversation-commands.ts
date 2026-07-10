@@ -29,6 +29,7 @@ import { extractMessageImages, projectMessageImages } from "../core/rpc/transcri
 import type { RpcKeepAwakeStatus } from "../core/rpc/types.ts";
 import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../core/session-manager.ts";
 import type { KeepAwakeStatus } from "./keep-awake.ts";
+import type { LeaseState } from "./lease-broker.ts";
 import { getRegisteredWorkingDirectoryForWorktree } from "./worktree-manager.ts";
 
 export const INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES: ReadonlySet<string> = new Set([
@@ -75,12 +76,16 @@ export const REMOTE_TOOL_OUTPUT_MAX_SCALARS = 8_000;
 
 export type RemoteRpcCommand = Record<string, unknown> & { type: string };
 
+export type RemoteSessionRuntimeState = Exclude<LeaseState, "unowned">;
+
 export interface RemoteSessionListEntry {
 	sessionId: string;
 	title: string;
 	createdAt: string;
 	updatedAt: string;
 	messageCount: number;
+	/** Live host ownership for this session. Omitted when no runtime is currently owned. */
+	runtimeState?: RemoteSessionRuntimeState;
 	/** Present when the session is bound to a daemon-managed worktree (worktrees.v1). */
 	worktreeId?: string;
 	/** POSIX-style path relative to the registered workspace root. Omitted for root. */
@@ -122,6 +127,10 @@ export interface ConversationCommandContext {
 	sessionListCursors: Map<string, RemoteSessionListCursorEntry>;
 	sessionListCursorTtlMs: number;
 	now?: () => number;
+	/** Batch live-runtime presence for list_sessions; absent on hosts without a daemon broker. */
+	listRuntimeStates?: (
+		workspaceName: string,
+	) => Promise<ReadonlyMap<string, RemoteSessionRuntimeState>> | ReadonlyMap<string, RemoteSessionRuntimeState>;
 	/** True while this conversation's lease is draining to a TUI (§4.5 rejection). */
 	isDraining?: () => boolean;
 	/** Host cleanup after a successful workspace unregister (streams, runtimes, live activities, relays). */
@@ -1088,6 +1097,19 @@ export async function listRemoteWorkspaceSessionSummaries(
 		}
 	} catch {
 		// Attribution is best-effort; the session list itself stays authoritative.
+	}
+	try {
+		const runtimeStates = await context.listRuntimeStates?.(authorization.workspace.name);
+		if (runtimeStates) {
+			for (const [sessionId, runtimeState] of runtimeStates) {
+				const summary = bySessionId.get(sessionId);
+				if (summary) {
+					summary.session.runtimeState = runtimeState;
+				}
+			}
+		}
+	} catch {
+		// Presence is best-effort; persisted session discovery remains authoritative.
 	}
 	return Array.from(bySessionId.values()).sort(sortRemoteSessionSummaries);
 }

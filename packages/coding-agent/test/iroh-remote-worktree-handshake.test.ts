@@ -11,6 +11,7 @@ import {
 	IROH_REMOTE_AGENT_SETTLED_FEATURE,
 	IROH_REMOTE_ALPN,
 	IROH_REMOTE_HOST_FEATURES,
+	IROH_REMOTE_SESSION_RUNTIME_STATE_FEATURE,
 	IROH_REMOTE_WORKING_DIRECTORIES_FEATURE,
 	IROH_REMOTE_WORKTREE_ID_PATTERN,
 	IROH_REMOTE_WORKTREES_FEATURE,
@@ -49,6 +50,8 @@ describe("worktrees.v1 capability flag", () => {
 		expect([...IROH_REMOTE_HOST_FEATURES]).toContain("working_directories.v1");
 		expect(IROH_REMOTE_AGENT_SETTLED_FEATURE).toBe("agent_settled.v1");
 		expect([...IROH_REMOTE_HOST_FEATURES]).toContain("agent_settled.v1");
+		expect(IROH_REMOTE_SESSION_RUNTIME_STATE_FEATURE).toBe("session_runtime_state.v1");
+		expect([...IROH_REMOTE_HOST_FEATURES]).toContain("session_runtime_state.v1");
 	});
 
 	test("worktrees.v1 is NOT a required handshake feature (old hosts still parse)", () => {

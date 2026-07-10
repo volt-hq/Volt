@@ -79,7 +79,7 @@ import {
 	type IrohModuleLike,
 	loadIrohModule,
 } from "./iroh-native.ts";
-import { type DaemonAttachClaim, LeaseBroker } from "./lease-broker.ts";
+import { type DaemonAttachClaim, LeaseBroker, type LeaseState } from "./lease-broker.ts";
 import type { VoltdRuntimeServices, VoltdServiceExtension } from "./main.ts";
 import { RELAY_TOKEN_TTL_MS, RelayRegistry } from "./relay-stream.ts";
 import {
@@ -547,6 +547,15 @@ class IrohDaemonService {
 			stateManager: this.stateManager,
 			sessionListCursors: this.sessionListCursors,
 			sessionListCursorTtlMs: REMOTE_SESSION_LIST_CURSOR_TTL_MS,
+			listRuntimeStates: (workspaceName) => {
+				const states = new Map<string, Exclude<LeaseState, "unowned">>();
+				for (const record of this.leaseBroker.list()) {
+					if (record.workspaceName === workspaceName && record.state !== "unowned") {
+						states.set(record.sessionId, record.state);
+					}
+				}
+				return states;
+			},
 			keepAwake: this.services.keepAwake,
 			onKeepAwakeSetting: (enabled) => this.services.state.updateSettings({ keepAwakeEnabled: enabled }),
 			webSearchKey: this.services.webSearchKey,

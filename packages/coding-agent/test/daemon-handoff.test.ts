@@ -123,7 +123,13 @@ async function startDaemonHalf(
 					protocolVersion: 1,
 					pid: process.pid,
 					startedAtMs: 0,
-					leases: [],
+					leases: broker.list().map((record) => ({
+						workspaceName: record.workspaceName,
+						sessionId: record.sessionId,
+						state: record.state,
+						relayCount: record.relayIds.size,
+						streamCount: record.streamCount,
+					})),
 					phoneConnections: 0,
 					workspaces,
 					clients: [],
@@ -262,6 +268,45 @@ async function startTuiHalf(
 }
 
 describe("turn-boundary handoff (§12.3.2)", () => {
+	it("connects every already-running TUI when a daemon appears without auto-start", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "volt-late-daemon-"));
+		const cwd = mkdtempSync(join(tmpdir(), "volt-late-daemon-ws-"));
+		cleanups.push(() => {
+			rmSync(agentDir, { recursive: true, force: true });
+			rmSync(cwd, { recursive: true, force: true });
+		});
+		const paths = getDaemonPaths(agentDir);
+		ensureDaemonDirs(paths);
+
+		const first = await startTuiHalf(agentDir, cwd);
+		const second = await startTuiHalf(agentDir, cwd);
+		expect(first.attach.connectionState()).toBe("reconnecting");
+		expect(second.attach.connectionState()).toBe("reconnecting");
+		expect(await first.attach.acquire("s-1")).toEqual({ kind: "noop" });
+		expect(await second.attach.acquire("s-2")).toEqual({ kind: "noop" });
+
+		const daemon = await startDaemonHalf(paths.socketPath, {
+			workspaces: [{ name: "ws", path: cwd }],
+		});
+		cleanups.push(() => daemon.close());
+
+		await vi.waitFor(
+			() => {
+				expect(first.reacquired.at(-1)).toMatchObject({ sessionId: "s-1", outcome: { kind: "granted" } });
+				expect(second.reacquired.at(-1)).toMatchObject({ sessionId: "s-2", outcome: { kind: "granted" } });
+			},
+			{ timeout: 10_000 },
+		);
+		expect(daemon.broker.lookup("ws", "s-1")?.state).toBe("tui-owned");
+		expect(daemon.broker.lookup("ws", "s-2")?.state).toBe("tui-owned");
+		expect(await first.attach.listRuntimeStates("ws")).toEqual(
+			new Map([
+				["s-1", "tui-owned"],
+				["s-2", "tui-owned"],
+			]),
+		);
+	}, 20_000);
+
 	it("drains a mid-turn daemon runtime to the TUI: pending, viewer feed, abort, warm grant, phone streams transferred", async () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "volt-handoff-"));
 		const cwd = mkdtempSync(join(tmpdir(), "volt-handoff-ws-"));

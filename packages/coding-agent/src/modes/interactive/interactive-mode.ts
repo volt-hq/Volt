@@ -441,8 +441,9 @@ export class InteractiveMode {
 	private shutdownRequested = false;
 	private turnDoneAlertTimer: ReturnType<typeof setTimeout> | undefined = undefined;
 
-	// Daemon integration (conversation leases + byte relay). No-op when
-	// remote.background is off or the daemon is unreachable.
+	// Daemon integration (conversation leases + byte relay). Supported TUIs keep
+	// a reconnecting client even when auto-start is off, so a daemon started by
+	// another process can discover every already-running agent.
 	private daemonAttach: DaemonAttach = createDisabledDaemonAttach();
 	private daemonRelayServers = new Set<Promise<void>>();
 	/** list_sessions cursor state shared across relayed phone conversations. */
@@ -1785,18 +1786,19 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Start the daemon integration (conversation leases + byte relay). No-ops
-	 * unless remote.background is on and the platform supports the daemon.
+	 * Start the daemon integration (conversation leases + byte relay). On
+	 * supported platforms, remote.background controls auto-start only; the TUI
+	 * still waits for a daemon started later by another process.
 	 */
 	private async initDaemonAttach(): Promise<void> {
 		const remoteBackground = this.settingsManager.getRemoteSettings().background === true;
-		if (!remoteBackground || process.platform === "win32" || isBunBinary) {
+		if (process.platform === "win32" || isBunBinary) {
 			return;
 		}
 		this.daemonAttach = createDaemonAttach({
 			cwd: this.sessionManager.getCwd(),
 			agentDir: getAgentDir(),
-			autoStart: true,
+			autoStart: remoteBackground,
 		});
 		this.daemonAttach.onRelayOffer((offer, openRelay) => {
 			void this.serveRelayConversation(offer, openRelay);
@@ -2095,6 +2097,7 @@ export class InteractiveMode {
 								stateManager: this.relayStateManager,
 								sessionListCursors: this.relaySessionListCursors,
 								sessionListCursorTtlMs: REMOTE_SESSION_LIST_CURSOR_TTL_MS,
+								listRuntimeStates: (workspaceName) => this.daemonAttach.listRuntimeStates(workspaceName),
 							},
 							this.runtimeHost,
 						);

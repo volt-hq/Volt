@@ -11,6 +11,7 @@ import {
 	CONTROL_WORKTREES_CAPABILITY,
 	type ControlEvent,
 	type ControlWorktreeStatus,
+	type LeaseState,
 	type RelayPreamble,
 } from "../../daemon/control-protocol.ts";
 import { getDaemonSocketPath } from "../../daemon/paths.ts";
@@ -102,6 +103,8 @@ export interface DaemonAttach {
 	onRelayCountChange(callback: (count: number) => void): void;
 	connectionState(): DaemonAttachConnectionState;
 	workspaceName(): string | undefined;
+	/** Live runtime ownership for sessions in a workspace, sourced from daemon status. */
+	listRuntimeStates(workspaceName: string): Promise<ReadonlyMap<string, Exclude<LeaseState, "unowned">>>;
 	dispose(): Promise<void>;
 }
 
@@ -306,6 +309,9 @@ export function createDisabledDaemonAttach(): DaemonAttach {
 		},
 		workspaceName() {
 			return undefined;
+		},
+		async listRuntimeStates() {
+			return new Map();
 		},
 		async dispose() {},
 	};
@@ -650,6 +656,27 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 		},
 		workspaceName() {
 			return resolvedWorkspaceName;
+		},
+		async listRuntimeStates(workspaceName: string) {
+			const states = new Map<string, Exclude<LeaseState, "unowned">>();
+			const activeClient = client;
+			if (!activeClient || state !== "connected") {
+				return states;
+			}
+			try {
+				const response = await activeClient.request({ type: "status" });
+				if (response.type !== "status_result") {
+					return states;
+				}
+				for (const lease of response.leases) {
+					if (lease.workspaceName === workspaceName && lease.state !== "unowned") {
+						states.set(lease.sessionId, lease.state);
+					}
+				}
+			} catch {
+				// Presence is best-effort; list_sessions remains available from local state.
+			}
+			return states;
 		},
 		async dispose() {
 			disposed = true;

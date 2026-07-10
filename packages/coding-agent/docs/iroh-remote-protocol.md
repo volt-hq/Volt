@@ -16,6 +16,7 @@ For user-facing setup, start the background daemon with `volt daemon start` (see
 - Host feature: `conversation_streams.v1`
 - Host feature: `working_directories.v1`
 - Host feature: `agent_settled.v1`
+- Host feature: `session_runtime_state.v1`
 
 The URL prefix selects protocol v1. The `alpn` ticket field and `protocol` hello field must be exactly `volt-rpc/0`.
 
@@ -144,6 +145,8 @@ If the duplicate is the first conversation stream on a new Iroh connection from 
 
 `multi_streams.v1` and `conversation_streams.v1` are optional host features, not a protocol version bump. Mobile pinned-agent clients require both features on successful stream-mode handshakes. Missing or malformed feature metadata for those modes means the host is incompatible with conversation streams. Clients should keep the saved host and surface an update/integrated-host-required state rather than asking for another QR scan.
 
+`session_runtime_state.v1` is an optional discovery feature. Hosts advertising it may add `runtimeState` to `list_sessions` entries. Older clients must ignore the field; clients must not assume its absence means a session is stopped when the feature is not advertised.
+
 `worktrees.v1` is an additional optional host feature. Clients must check for it before sending `worktreeId` in a conversation hello or opening a `manage_worktrees` management stream; hosts without the feature reject both with `invalid_conversation_target`. Conversation successes for worktree-bound sessions echo `conversation.worktreeId`.
 
 `working_directories.v1` is an additional optional host feature for starting a new conversation in a workspace-relative subfolder while keeping project configuration rooted at the registered workspace (or at the matching worktree checkout root for worktree sessions). Conversation successes echo `conversation.workingDirectory` when the effective cwd is not the root. The wire value is always relative; host-local absolute paths never cross the protocol.
@@ -241,6 +244,8 @@ Conversation streams reject `new_session`, `switch_session_by_id`, and raw `get_
 Conversation streams on `worktrees.v1` hosts also accept `create_worktree` and `list_worktrees` (same shapes and validation as the `manage_worktrees` stream, scoped to the stream-bound workspace), so a client can create a worktree and open a new isolated conversation without a separate management stream. `remove_worktree` remains management-stream-only. Hosts without a daemon backend answer both with `unsupported_remote_command`.
 
 `list_sessions` entries include an optional `worktreeId` when the session is bound to a daemon-managed worktree, so clients can badge worktree sessions without a `list_worktrees` join. Entries also include optional `workingDirectory` when the session cwd is below the workspace/worktree root. Worktree attribution may be absent while a desktop TUI owns the conversation lease.
+
+On hosts advertising `session_runtime_state.v1`, an entry may also include `runtimeState` with one of `tui-owned`, `daemon-active`, `daemon-detached`, or `daemon-draining`. The field is omitted when the session has no live lease/runtime. `tui-owned` means a desktop TUI process currently owns the conversation. `daemon-active` means a daemon runtime has at least one attached phone stream. `daemon-detached` means the daemon still retains the runtime with no attached streams and may represent idle warm retention rather than active work. `daemon-draining` means the daemon runtime is handing ownership to a TUI. Clients should therefore use the exact state, not mere field presence, when deciding which hidden sessions to auto-connect.
 
 Workspace discovery streams accept only `list_sessions`. Any other valid RPC command receives `unsupported_on_workspace_discovery_stream`. Discovery streams create no conversation runtime and do not update last-session state.
 
