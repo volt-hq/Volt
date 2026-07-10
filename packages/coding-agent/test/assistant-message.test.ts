@@ -1,6 +1,6 @@
 import type { AssistantMessage } from "@earendil-works/volt-ai";
 import { describe, expect, test } from "vitest";
-import { initTheme } from "../src/core/theme/runtime.ts";
+import { initTheme, theme } from "../src/core/theme/runtime.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -45,7 +45,7 @@ describe("AssistantMessageComponent", () => {
 		const message = createAssistantMessage([{ type: "thinking", thinking: "Check the render hierarchy" }]);
 
 		const visible = new AssistantMessageComponent(message).render(60).join("\n");
-		expect(visible).toContain("[thinking]");
+		expect(visible).toContain(theme.italic(theme.fg("accent", "[thinking]")));
 		expect(visible).toContain("Check the render hierarchy");
 
 		const hidden = stripAnsi(new AssistantMessageComponent(message, true).render(60).join("\n"));

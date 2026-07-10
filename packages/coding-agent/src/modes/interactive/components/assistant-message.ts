@@ -98,7 +98,7 @@ export class AssistantMessageComponent extends Container {
 					.slice(i + 1)
 					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
 
-				const thinkingLabel = theme.italic(theme.fg("thinkingText", "[thinking]"));
+				const thinkingLabel = theme.italic(theme.fg("accent", "[thinking]"));
 				if (this.hideThinkingBlock) {
 					this.contentContainer.addChild(
 						new Text(
