@@ -28,7 +28,8 @@ const FIRE_AND_FORGET_EXTENSION_UI_METHODS = new Set([
 	"setTitle",
 	"set_editor_text",
 ]);
-const PROMPT_COMPLETION_SETTLE_MS = 100;
+const PROMPT_COMPLETION_SETTLE_MS = 1000;
+const AGENT_SETTLED_FEATURE = "agent_settled.v1";
 
 function printUsage() {
 	console.error(`Usage: npm run client -- <ticket> [options]
@@ -93,17 +94,19 @@ function createCommand(flags) {
 	return { id: "prompt-1", type: "prompt", message };
 }
 
-function createRpcState(flags) {
+function createRpcState(flags, supportsAgentSettled) {
 	return {
 		currentPrompt: undefined,
 		done: false,
 		failed: false,
 		pendingCompaction: false,
 		pendingQueueMessages: false,
+		promptAccepted: false,
 		promptCompletionTimer: undefined,
 		responseResolvers: new Map(),
 		retryInProgress: false,
 		sawText: false,
+		supportsAgentSettled,
 		verbose: hasFlag(flags, "verbose"),
 		waitingForContinuation: false,
 	};
@@ -161,7 +164,7 @@ function schedulePromptCompletion(state) {
 	clearPromptCompletionTimer(state);
 	state.promptCompletionTimer = setTimeout(() => {
 		state.promptCompletionTimer = undefined;
-		if (hasPendingPromptContinuation(state)) return;
+		if (!state.promptAccepted || hasPendingPromptContinuation(state)) return;
 		finishPrompt(state);
 	}, PROMPT_COMPLETION_SETTLE_MS);
 }
@@ -213,6 +216,8 @@ function printRpcLine(line, state) {
 		if (event.command === "get_state") {
 			console.log(JSON.stringify(event.data, null, 2));
 			markDone(state);
+		} else if (event.command === "prompt") {
+			state.promptAccepted = true;
 		}
 		return;
 	}
@@ -249,7 +254,9 @@ function printRpcLine(line, state) {
 	if (event.type === "auto_retry_end") {
 		state.retryInProgress = false;
 		state.waitingForContinuation = false;
-		if (event.success === false && !hasPendingPromptContinuation(state)) schedulePromptCompletion(state);
+		if (event.success === false && state.promptAccepted && !hasPendingPromptContinuation(state)) {
+			schedulePromptCompletion(state);
+		}
 		if (state.verbose) console.error(JSON.stringify(event));
 		return;
 	}
@@ -265,19 +272,34 @@ function printRpcLine(line, state) {
 	if (event.type === "compaction_end") {
 		state.pendingCompaction = false;
 		state.waitingForContinuation = event.willRetry === true;
-		if (!state.waitingForContinuation && !hasPendingPromptContinuation(state)) schedulePromptCompletion(state);
+		if (state.promptAccepted && !state.waitingForContinuation && !hasPendingPromptContinuation(state)) {
+			schedulePromptCompletion(state);
+		}
 		if (state.verbose) console.error(JSON.stringify(event));
 		return;
 	}
 
 	if (event.type === "agent_end") {
-		if (event.willRetry) {
-			state.waitingForContinuation = true;
+		// New hosts provide the authoritative agent_settled boundary. Retain the
+		// short quiescence fallback for volt-rpc/0 hosts that predate that event;
+		// any retry, compaction, queue, or subsequent run cancels the timer.
+		state.waitingForContinuation = event.willRetry === true;
+		if (hasPendingPromptContinuation(state) || !state.promptAccepted || state.supportsAgentSettled) {
 			clearPromptCompletionTimer(state);
-			return;
+		} else {
+			schedulePromptCompletion(state);
 		}
+		return;
+	}
+
+	if (event.type === "agent_settled") {
+		// Deterministic settlement: the host emits this only after retries,
+		// compaction continuations, and queued continuations finish. Ignore an
+		// older transaction's settlement until this prompt is accepted.
+		if (!state.promptAccepted) return;
 		state.waitingForContinuation = false;
-		if (!hasPendingPromptContinuation(state)) schedulePromptCompletion(state);
+		state.pendingCompaction = false;
+		finishPrompt(state);
 		return;
 	}
 
@@ -327,6 +349,7 @@ async function sendPromptAndWait(send, state, text, id) {
 		throw new Error("Cannot send a prompt while another prompt is running");
 	}
 
+	state.promptAccepted = false;
 	const completion = new Promise((resolvePrompt) => {
 		state.currentPrompt = { id, resolve: resolvePrompt, sawText: false, abortRequested: false };
 	});
@@ -340,8 +363,8 @@ async function sendPromptAndWait(send, state, text, id) {
 	await completion;
 }
 
-async function runOneShot(stream, flags, initialRest) {
-	const state = createRpcState(flags);
+async function runOneShot(stream, flags, initialRest, supportsAgentSettled) {
+	const state = createRpcState(flags, supportsAgentSettled);
 	let readerDone = false;
 	let resolveDone;
 	const done = new Promise((resolve) => {
@@ -393,8 +416,8 @@ async function runOneShot(stream, flags, initialRest) {
 	if (state.failed) process.exitCode = 1;
 }
 
-async function runInteractive(stream, flags, initialRest) {
-	const state = createRpcState(flags);
+async function runInteractive(stream, flags, initialRest, supportsAgentSettled) {
+	const state = createRpcState(flags, supportsAgentSettled);
 	let nextId = 1;
 	let closing = false;
 	let rl;
@@ -514,10 +537,11 @@ async function main() {
 		throw new Error(`${outcomePrefix}${handshake.response.error}`);
 	}
 
+	const supportsAgentSettled = handshake.response.features?.includes(AGENT_SETTLED_FEATURE) === true;
 	if (hasFlag(flags, "interactive")) {
-		await runInteractive(stream, flags, handshake.initialInput);
+		await runInteractive(stream, flags, handshake.initialInput, supportsAgentSettled);
 	} else {
-		await runOneShot(stream, flags, handshake.initialInput);
+		await runOneShot(stream, flags, handshake.initialInput, supportsAgentSettled);
 	}
 
 	connection.close(0n, Array.from(Buffer.from("done", "utf8")));

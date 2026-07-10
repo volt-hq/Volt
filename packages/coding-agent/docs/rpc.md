@@ -188,6 +188,7 @@ Response:
     "thinkingLevel": "medium",
     "availableThinkingLevels": ["off", "minimal", "low", "medium", "high"],
     "isStreaming": false,
+    "isBusy": true,
     "isCompacting": true,
     "steeringMode": "all",
     "followUpMode": "one-at-a-time",
@@ -202,7 +203,7 @@ Response:
 }
 ```
 
-The `model` field is a full [Model](#model) object or `null`. `availableThinkingLevels` lists the thinking levels the current model supports (`["off"]` for non-reasoning models). The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `activeCompaction` is present only while context compaction is currently running; `startedAt` is Unix epoch milliseconds.
+The `model` field is a full [Model](#model) object or `null`. `availableThinkingLevels` lists the thinking levels the current model supports (`["off"]` for non-reasoning models). `isStreaming` indicates an active provider run or session-level continuation; `isBusy` also includes asynchronous prompt preflight and standalone session operations such as manual compaction and tree navigation. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `activeCompaction` is present only while context compaction is currently running; `startedAt` is Unix epoch milliseconds.
 
 #### get_transcript
 
@@ -328,7 +329,7 @@ Child events are wrapped on the parent RPC stream:
 {"type": "subagent_end", "subagentId": "sa_123", "result": {"id": "sa_123", "sessionId": "child-session-id", "event": {"type": "agent_end", "messages": [], "willRetry": false}}}
 ```
 
-`subagent_event.event` is the child RPC event. `subagent_end.result` is emitted after the terminal child `agent_end` where `willRetry !== true`.
+`subagent_event.event` is the child RPC event. `subagent_end.result` is emitted after the child session settles, including automatic retries, overflow compaction, and queued continuations. The result contains the latest low-level `agent_end` event; `willRetry` is normalized to `false` if a planned retry was cancelled before another run started.
 
 #### subagent_abort
 
@@ -670,7 +671,7 @@ Successful response data reports the command disposition:
 ```
 
 Possible statuses:
-- `"accepted"`: a prompt-like action was accepted while idle. Normal agent events, including `agent_end`, report completion.
+- `"accepted"`: a prompt-like action was accepted while idle. Normal agent events report completion; wait for `agent_settled` for final settlement.
 - `"queued"`: a prompt-like action was queued while another turn is streaming. `queuedAs` is `"steer"` or `"followUp"`.
 - `"completed"`: the action finished synchronously. No `agent_end` is expected for this invocation.
 - `"handled"`: the host, extension command, or input hook handled the action without starting an agent turn.
@@ -1333,7 +1334,8 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | Event | Description |
 |-------|-------------|
 | `agent_start` | Agent begins processing |
-| `agent_end` | Agent completes (includes all generated messages) |
+| `agent_end` | Agent run completes (includes all generated messages); a retry or continuation may still follow |
+| `agent_settled` | Prompt fully settles: no further automatic retries, compaction continuations, or queued continuations |
 | `turn_start` | New turn begins |
 | `turn_end` | Turn completes (includes assistant message and tool results) |
 | `message_start` | Message begins |
@@ -1372,13 +1374,23 @@ Emitted when the agent begins processing a prompt.
 
 ### agent_end
 
-Emitted when the agent completes. Contains all messages generated during this run.
+Emitted when an agent run completes. Contains all messages generated during this run.
 
 ```json
 {
   "type": "agent_end",
   "messages": [...]
 }
+```
+
+A single prompt can produce multiple `agent_end` events: automatic retries, overflow/threshold compaction, and queued follow-up messages each continue the run after a raw `agent_end`. Wait for `agent_settled` to know the prompt is finished.
+
+### agent_settled
+
+Emitted when all tracked prompt work reaches a global idle boundary, after any final `agent_end`, automatic retries, compaction continuations, and queued-message continuations have finished. Overlapping prompt transactions share one boundary, and handled or rejected preflight can settle without an `agent_end`; this event does not carry a prompt correlation id. Client helpers such as `waitForIdle`, `collectEvents`, and `promptAndWait` terminate on this event.
+
+```json
+{"type": "agent_settled"}
 ```
 
 ### turn_start / turn_end
@@ -1974,7 +1986,7 @@ for event in read_events():
         if delta.get("type") == "text_delta":
             print(delta["delta"], end="", flush=True)
     
-    if event.get("type") == "agent_end":
+    if event.get("type") == "agent_settled":
         print()
         break
 ```

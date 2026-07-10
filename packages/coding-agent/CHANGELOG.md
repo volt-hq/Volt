@@ -4,6 +4,10 @@
 
 ### Added
 
+- Added an `agent_settled` session/RPC event emitted when all tracked prompt work reaches a global idle boundary, after any final `agent_end`, automatic retries, overflow/threshold compaction continuations, and queued-message continuations have finished. A boundary may settle multiple overlapping prompt transactions, and handled/rejected preflight may settle without an `agent_end`. RPC client `waitForIdle()`, `collectEvents()`, and `promptAndWait()` now terminate on `agent_settled` instead of a raw `agent_end`.
+- Added proactive mid-run compaction: when a turn with tool calls pushes live context usage over the compaction threshold, the session stops the agent loop after that turn (via a new `Agent.shouldStopAfterTurn` hook wired through to the agent-loop), runs threshold compaction, and resumes the interrupted run, instead of waiting for the full agent/tool loop to finish. A failed attempt does not retrigger until a compaction succeeds or the next user prompt.
+- Added an aggregate character budget for compaction/branch-summary summarization input: serialized conversations are capped (keeping the opening goal plus the newest contiguous parts with an omission marker), in addition to the existing per-tool-result truncation.
+
 - Added `volt remote worktree adopt <path>` to register existing git worktree checkouts with the daemon when their source checkout is a registered workspace.
 - Added native MCP support with trusted config loading, a built-in `mcp` gateway tool, stdio/Streamable HTTP/SSE client transports, metadata/output/audit storage, and local RPC server management commands.
 - Added MCP OAuth authentication for HTTP/SSE servers, including browser authorization-code + PKCE, device-code auth, host-side token storage, CLI commands, and RPC management hooks.
@@ -67,6 +71,12 @@
 
 ### Fixed
 
+- Fixed delayed queued-prompt preflight from accepting and stranding a message after the active run had already settled.
+- Fixed aborted compaction summaries from being committed as successful context checkpoints.
+- Fixed retry cancellation from reporting success or retaining stale retry-attempt state.
+- Fixed extension-command subagents losing valid custom-turn results, and ensured child disposal is attempted even when child abort hangs.
+- Fixed RPC state conflating asynchronous prompt preflight with provider streaming by exposing `isBusy` separately, and included standalone compaction and tree operations in idle settlement.
+- Fixed delayed Live Activity terminal delivery from deactivating a newer run.
 - Fixed `volt daemon` failing to start on Windows with `listen EACCES` because the control socket used a filesystem `.sock` path, which Node's `net` module treats as a named pipe on Windows. The daemon now publishes a fresh per-instance `\\.\pipe\voltd-<hash>-<random>` named pipe through the pidfile, authenticates local control clients with the pidfile token, and uses a daemon lock so pre-created legacy pipes do not block normal start or auto-start.
 - Fixed `volt daemon stop`/`restart` hanging on Windows (and reporting a false timeout) because the foreground daemon process stayed alive after a clean shutdown when the native Iroh handle kept the event loop from draining; the daemon now exits deterministically once shutdown completes.
 - Fixed daemon restart recovery and single-instance safety across platforms: long-lived TUI clients now rediscover rotated control endpoints and tokens, stale startup locks are claimed atomically and validate process creation identity, and detached Windows starts no longer open a persistent console window.
@@ -83,6 +93,7 @@
 - Fixed workspace unregister cleanup inconsistencies: the control, workspace-management, and conversation RPC unregister paths now share one cleanup that closes phone streams, stops runtimes, removes live activities, and closes active and pending TUI relays for the workspace.
 - Fixed unredeemed relay offers lingering until the 10s token expiry after the owning TUI released or rekeyed its lease; the phone's deferred handshake now fails immediately with a retry hint, and superseded or expired offers settle their relay bookkeeping instead of leaking the stream task.
 - Fixed chain-mode subagent previous-output substitution to XML-escape child output before wrapping it as untrusted data.
+- Fixed subagents treating the first non-retrying `agent_end` as terminal before overflow compaction and continuation settled, which could dispose the child and return its recoverable context-limit error.
 - Fixed legacy Iroh remote default tool grants so saved workspaces, clients, and pairing tickets are upgraded to include the built-in `subagent` tool.
 - Fixed `get_ui_actions` palette scope responses so they return only palette descriptors instead of all actions.
 - Fixed `volt remote host` source entrypoint startup by exporting the Iroh remote workspace unregister RPC helpers from the package root, and added a source export check to keep the host entrypoint imports in sync.

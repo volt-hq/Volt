@@ -12,7 +12,9 @@ Events are defined in [`AgentSessionEvent`](../src/core/agent-session.ts#L102):
 
 ```typescript
 type AgentSessionEvent =
-  | AgentEvent
+  | Exclude<AgentEvent, { type: "agent_end" }>
+  | { type: "agent_end"; messages: AgentMessage[]; willRetry: boolean }
+  | { type: "agent_settled" }
   | { type: "queue_update"; steering: readonly string[]; followUp: readonly string[] }
   | { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
   | { type: "compaction_end"; reason: "manual" | "threshold" | "overflow"; result: CompactionResult | undefined; aborted: boolean; willRetry: boolean; errorMessage?: string }
@@ -20,7 +22,7 @@ type AgentSessionEvent =
   | { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
 ```
 
-`queue_update` emits the full pending steering and follow-up queues whenever they change. `compaction_start` and `compaction_end` cover both manual and automatic compaction.
+`queue_update` emits the full pending steering and follow-up queues whenever they change. `compaction_start` and `compaction_end` cover both manual and automatic compaction. Each low-level agent run emits `agent_end`; retries and compaction or queued-message continuations can produce additional runs. `agent_settled` is emitted once after all such work finishes and is the terminal event for the prompt.
 
 Base events from [`AgentEvent`](../../agent/src/types.ts#L179):
 
@@ -72,8 +74,11 @@ Followed by events as they occur:
 {"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_delta","delta":"Hello",...}}
 {"type":"message_end","message":{...}}
 {"type":"turn_end","message":{...},"toolResults":[]}
-{"type":"agent_end","messages":[...]}
+{"type":"agent_end","messages":[...],"willRetry":false}
+{"type":"agent_settled"}
 ```
+
+When `agent_end.willRetry` is true, another agent run will follow. Even when it is false, use `agent_settled` rather than `agent_end` as the prompt-completion signal.
 
 ## Example
 

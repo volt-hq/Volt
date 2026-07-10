@@ -21,6 +21,8 @@ import {
 	extractFileOpsFromMessage,
 	type FileOperations,
 	formatFileOperations,
+	getConversationCharBudget,
+	getSummarizationOutputTokenBudget,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
 } from "./utils.ts";
@@ -539,6 +541,38 @@ function createSummarizationOptions(
 	return options;
 }
 
+const MIN_SUMMARIZATION_SOURCE_CHARS = 2048;
+const DEFAULT_SUMMARIZATION_CONTEXT_WINDOW = 128_000;
+
+function createSummarizationTokenPlan(
+	model: Model<any>,
+	requestedMaxTokens: number,
+	outputCapacity: number,
+	thinkingLevel: ThinkingLevel | undefined,
+): { maxTokens: number; effectiveOutputTokens: number; thinkingLevel: ThinkingLevel | undefined } {
+	if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
+		const thinkingBudget =
+			thinkingLevel === "minimal"
+				? 1024
+				: thinkingLevel === "low"
+					? 2048
+					: thinkingLevel === "medium"
+						? 8192
+						: 16384;
+		const maxTokens = Math.min(requestedMaxTokens, Math.max(0, outputCapacity - thinkingBudget));
+		const effectiveOutputTokens = Math.min(
+			maxTokens + thinkingBudget,
+			model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
+		);
+		if (maxTokens >= 1 && effectiveOutputTokens <= outputCapacity) {
+			return { maxTokens, effectiveOutputTokens, thinkingLevel };
+		}
+	}
+
+	const maxTokens = Math.min(requestedMaxTokens, outputCapacity);
+	return { maxTokens, effectiveOutputTokens: maxTokens, thinkingLevel: undefined };
+}
+
 async function completeSummarization(
 	model: Model<any>,
 	context: Context,
@@ -550,6 +584,21 @@ async function completeSummarization(
 	}
 	const stream = await streamFn(model, context, options);
 	return stream.result();
+}
+
+function getSummarizationText(response: AssistantMessage, operation: string): string {
+	if (response.stopReason === "error") {
+		throw new Error(`${operation} failed: ${response.errorMessage || "Unknown error"}`);
+	}
+	if (response.stopReason === "aborted") {
+		const error = new Error(`${operation} cancelled`);
+		error.name = "AbortError";
+		throw error;
+	}
+	return response.content
+		.filter((content): content is { type: "text"; text: string } => content.type === "text")
+		.map((content) => content.text)
+		.join("\n");
 }
 
 /**
@@ -569,7 +618,7 @@ export async function generateSummary(
 	streamFn?: StreamFn,
 	env?: Record<string, string>,
 ): Promise<string> {
-	const maxTokens = Math.min(
+	const requestedMaxTokens = Math.min(
 		Math.floor(0.8 * reserveTokens),
 		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
 	);
@@ -580,10 +629,24 @@ export async function generateSummary(
 		basePrompt = `${basePrompt}\n\nAdditional focus: ${customInstructions}`;
 	}
 
-	// Serialize conversation to text so model doesn't try to continue it
-	// Convert to LLM messages first (handles custom types like bashExecution, custom, etc.)
+	// Serialize conversation to text so model doesn't try to continue it.
+	// Leave model-specific room for instructions, prior summary, and output.
 	const llmMessages = convertToLlm(currentMessages);
-	const conversationText = serializeConversation(llmMessages);
+	const fixedPromptChars =
+		SUMMARIZATION_SYSTEM_PROMPT.length + basePrompt.length + (previousSummary?.length ?? 0) + 128;
+	const contextWindow = model.contextWindow > 0 ? model.contextWindow : DEFAULT_SUMMARIZATION_CONTEXT_WINDOW;
+	const outputCapacity = getSummarizationOutputTokenBudget(
+		contextWindow,
+		Number.MAX_SAFE_INTEGER,
+		fixedPromptChars + MIN_SUMMARIZATION_SOURCE_CHARS,
+	);
+	if (outputCapacity < 1) {
+		throw new Error("Summarization instructions exceed the selected model context window");
+	}
+	const tokenPlan = createSummarizationTokenPlan(model, requestedMaxTokens, outputCapacity, thinkingLevel);
+	const conversationText = serializeConversation(llmMessages, {
+		maxChars: getConversationCharBudget(contextWindow, tokenPlan.effectiveOutputTokens, fixedPromptChars),
+	});
 
 	// Build the prompt with conversation wrapped in tags
 	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
@@ -600,7 +663,15 @@ export async function generateSummary(
 		},
 	];
 
-	const completionOptions = createSummarizationOptions(model, maxTokens, apiKey, headers, env, signal, thinkingLevel);
+	const completionOptions = createSummarizationOptions(
+		model,
+		tokenPlan.maxTokens,
+		apiKey,
+		headers,
+		env,
+		signal,
+		tokenPlan.thinkingLevel,
+	);
 
 	const response = await completeSummarization(
 		model,
@@ -609,16 +680,7 @@ export async function generateSummary(
 		streamFn,
 	);
 
-	if (response.stopReason === "error") {
-		throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
-	}
-
-	const textContent = response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("\n");
-
-	return textContent;
+	return getSummarizationText(response, "Summarization");
 }
 
 // ============================================================================
@@ -850,12 +912,25 @@ async function generateTurnPrefixSummary(
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
 ): Promise<string> {
-	const maxTokens = Math.min(
+	const requestedMaxTokens = Math.min(
 		Math.floor(0.5 * reserveTokens),
 		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
 	); // Smaller budget for turn prefix
 	const llmMessages = convertToLlm(messages);
-	const conversationText = serializeConversation(llmMessages);
+	const fixedPromptChars = SUMMARIZATION_SYSTEM_PROMPT.length + TURN_PREFIX_SUMMARIZATION_PROMPT.length + 64;
+	const contextWindow = model.contextWindow > 0 ? model.contextWindow : DEFAULT_SUMMARIZATION_CONTEXT_WINDOW;
+	const outputCapacity = getSummarizationOutputTokenBudget(
+		contextWindow,
+		Number.MAX_SAFE_INTEGER,
+		fixedPromptChars + MIN_SUMMARIZATION_SOURCE_CHARS,
+	);
+	if (outputCapacity < 1) {
+		throw new Error("Summarization instructions exceed the selected model context window");
+	}
+	const tokenPlan = createSummarizationTokenPlan(model, requestedMaxTokens, outputCapacity, thinkingLevel);
+	const conversationText = serializeConversation(llmMessages, {
+		maxChars: getConversationCharBudget(contextWindow, tokenPlan.effectiveOutputTokens, fixedPromptChars),
+	});
 	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
 	const summarizationMessages = [
 		{
@@ -868,16 +943,9 @@ async function generateTurnPrefixSummary(
 	const response = await completeSummarization(
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		createSummarizationOptions(model, maxTokens, apiKey, headers, env, signal, thinkingLevel),
+		createSummarizationOptions(model, tokenPlan.maxTokens, apiKey, headers, env, signal, tokenPlan.thinkingLevel),
 		streamFn,
 	);
 
-	if (response.stopReason === "error") {
-		throw new Error(`Turn prefix summarization failed: ${response.errorMessage || "Unknown error"}`);
-	}
-
-	return response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("\n");
+	return getSummarizationText(response, "Turn prefix summarization");
 }

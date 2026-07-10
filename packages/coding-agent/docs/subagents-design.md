@@ -16,7 +16,7 @@ Not implemented in this MVP: package-manager `agents` resources, subprocess fall
 
 ## Summary
 
-Core subagents are isolated Volt agent runtimes controlled through the existing RPC stack. A local caller in the TUI, SDK, CLI, extension system, or local RPC mode can request a child agent, pass it a prompt, stream its events, and wait for a terminal `agent_end` or cancellation signal.
+Core subagents are isolated Volt agent runtimes controlled through the existing RPC stack. A local caller in the TUI, SDK, CLI, extension system, or local RPC mode can request a child agent, pass it a prompt, stream its events, and wait for session-level settlement or cancellation.
 
 The implementation reuses Volt's existing primitives instead of introducing a second agent protocol:
 
@@ -24,13 +24,13 @@ The implementation reuses Volt's existing primitives instead of introducing a se
 - `runRpcMode()` runs a runtime over a transport.
 - `createLoopbackRpcTransportPair()` and `createInProcessRpcClient()` provide same-process RPC for local subagents.
 - Iroh conversation streams already provide remote multi-agent streams for the app.
-- Existing RPC `prompt`, `abort`, `get_state`, `get_transcript`, and `agent_end` semantics remain the lifecycle contract.
+- Existing RPC `prompt`, `abort`, `get_state`, `get_transcript`, and `agent_end` events remain the transport contract; the session additionally emits `agent_settled` once retries, compaction continuations, and queued continuations finish, and local handles wait for that settlement before releasing child ownership.
 
 The [`examples/extensions/subagent/`](../examples/extensions/subagent/) implementation remains the reference prototype for workflow shape. The core MVP avoids subprocess and JSON-mode parsing fallback.
 
 ## Existing building blocks
 
-- **RPC mode** ([rpc.md](rpc.md)): accepts prompts, streams events, and reports completion with `agent_end`.
+- **RPC mode** ([rpc.md](rpc.md)): accepts prompts, streams events, and reports run completion with `agent_end` and final settlement with `agent_settled`.
 - **SDK runtime** ([sdk.md](sdk.md)): creates and replaces `AgentSessionRuntime` instances.
 - **In-process RPC client**: `createInProcessRpcClient()` runs `runRpcMode()` over an in-memory loopback transport.
 - **Iroh remote conversation streams** ([iroh-remote-protocol.md](iroh-remote-protocol.md)): mobile clients can open `conversation.target: "new"` or `"session"` streams. Stream close is detach; `abort` is cancellation.
@@ -209,7 +209,7 @@ Local core subagents use in-process RPC:
 2. Create `InProcessRpcClient` for that runtime.
 3. Send `prompt` with the child prompt.
 4. Stream child RPC events to the caller.
-5. Treat `agent_end` with `willRetry !== true` as run completion.
+5. Retain the latest `agent_end`, then wait for the child `AgentSession` to settle through retries, compaction, and queued continuations.
 6. Optionally call `get_state`, `get_transcript`, and `get_session_stats` for final metadata.
 7. Dispose or retain the child runtime according to persistence policy.
 
@@ -260,7 +260,7 @@ App-visible agents use existing Iroh conversation streams:
 2. Host returns the concrete workspace/session identity.
 3. App validates with `get_state` and `get_transcript`.
 4. App sends `prompt` when an initial prompt is provided.
-5. App listens for `agent_end` and transcript updates.
+5. App uses `agent_end` for per-run transcript updates and `agent_settled` as the terminal signal after retries, compaction, and queued continuations.
 
 The MVP intentionally avoids an `initialPrompt` handshake field or any other Iroh protocol change.
 
@@ -312,7 +312,7 @@ The iOS app uses `IrohHostConnectionPool.openConversationStream(target: .new | .
 2. validate `get_state` and `get_transcript` against the stream identity;
 3. send `prompt` on that stream when the optional initial prompt is non-empty;
 4. render events in the new pinned agent tab;
-5. listen for `agent_end` or notification completion.
+5. use `agent_end` for per-run transcript updates and `agent_settled` or notification completion as the terminal boundary.
 
 This keeps stream selection, identity validation, detach, reconnect, and abort behavior aligned with the existing remote protocol. If the prompt send fails after agent creation, the selected new agent remains active and the app records a clear system message.
 
@@ -391,7 +391,7 @@ Integration tests:
 
 Remote/app tests:
 
-- open new conversation stream, send optional initial prompt, receive `agent_end`
+- open new conversation stream, send optional initial prompt, receive per-run `agent_end` and terminal `agent_settled`
 - empty initial prompt preserves no-prompt new-agent behavior
 - initial prompt send failure keeps the new agent selected and records a system message
 - stream close detaches without aborting

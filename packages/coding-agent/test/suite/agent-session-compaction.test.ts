@@ -2,6 +2,7 @@ import {
 	type AssistantMessage,
 	createAssistantMessageEventStream,
 	fauxAssistantMessage,
+	fauxToolCall,
 	type Model,
 } from "@earendil-works/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +11,7 @@ import { createHarness, type Harness } from "./harness.ts";
 type SessionWithCompactionInternals = {
 	_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<boolean>;
 	_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
+	_shouldStopForProactiveCompaction: (context: unknown) => boolean;
 };
 
 function createUsage(totalTokens: number) {
@@ -221,6 +223,52 @@ describe("AgentSession compaction characterization", () => {
 
 		await expect(sessionInternals._runAutoCompaction("threshold", false)).resolves.toBe(true);
 	});
+
+	it.each(["plain response", "terminating tool batch"] as const)(
+		"stops for proactive compaction after a %s when a message is queued",
+		async (kind) => {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const model = harness.getModel();
+			const toolCall = fauxToolCall("read", { path: "large.txt" });
+			const message: AssistantMessage = {
+				...createAssistant(harness, {
+					stopReason: kind === "plain response" ? "stop" : "toolUse",
+					totalTokens: model.contextWindow,
+				}),
+				content: kind === "plain response" ? [{ type: "text", text: "done" }] : [toolCall],
+			};
+			const toolResults =
+				kind === "plain response"
+					? []
+					: [
+							{
+								role: "toolResult" as const,
+								toolCallId: toolCall.id,
+								toolName: toolCall.name,
+								content: [{ type: "text" as const, text: "terminated" }],
+								isError: false,
+								timestamp: Date.now(),
+							},
+						];
+			harness.session.agent.followUp({
+				role: "user",
+				content: [{ type: "text", text: "queued follow-up" }],
+				timestamp: Date.now(),
+			});
+
+			const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+			expect(
+				sessionInternals._shouldStopForProactiveCompaction({
+					message,
+					toolResults,
+					toolBatchTerminated: kind === "terminating tool batch",
+					context: { systemPrompt: "", messages: [message, ...toolResults], tools: [] },
+					newMessages: [],
+				}),
+			).toBe(true);
+		},
+	);
 
 	it("does not retry overflow recovery more than once", async () => {
 		const harness = await createHarness();

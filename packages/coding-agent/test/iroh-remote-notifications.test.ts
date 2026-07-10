@@ -875,8 +875,27 @@ describe("Iroh remote notification requests", () => {
 			isError: false,
 		});
 		await vi.waitFor(() => expect(relayClient.sendLiveActivityUpdate).toHaveBeenCalledTimes(4));
+		// A raw agent_end may be followed by proactive compaction and another
+		// agent run, so it must not publish a terminal state yet.
 		emitSessionEvent({ type: "agent_end", messages: [], willRetry: false });
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(relayClient.sendLiveActivityUpdate).toHaveBeenCalledTimes(4);
+
+		emitSessionEvent({ type: "agent_start" });
 		await vi.waitFor(() => expect(relayClient.sendLiveActivityUpdate).toHaveBeenCalledTimes(5));
+		expect(relayClient.sendLiveActivityUpdate).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				activityEvent: "update",
+				contentState: expect.objectContaining({ status: "running", statusText: "Volt is thinking" }),
+				kind: "live_activity_update",
+			}),
+		);
+
+		emitSessionEvent({ type: "agent_end", messages: [], willRetry: false });
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(relayClient.sendLiveActivityUpdate).toHaveBeenCalledTimes(5);
+		emitSessionEvent({ type: "agent_settled" });
+		await vi.waitFor(() => expect(relayClient.sendLiveActivityUpdate).toHaveBeenCalledTimes(6));
 		expect(relayClient.sendLiveActivityUpdate).toHaveBeenLastCalledWith(
 			expect.objectContaining({
 				activityEvent: "update",
@@ -889,13 +908,69 @@ describe("Iroh remote notification requests", () => {
 		);
 
 		emitSessionEvent({ type: "agent_start" });
-		await vi.waitFor(() => expect(relayClient.sendLiveActivityUpdate).toHaveBeenCalledTimes(6));
-		expect(relayClient.sendLiveActivityUpdate).toHaveBeenLastCalledWith(
-			expect.objectContaining({
-				activityEvent: "update",
-				contentState: expect.objectContaining({ status: "running", statusText: "Volt is thinking" }),
-				kind: "live_activity_update",
-			}),
+		await vi.waitFor(() => expect(relayClient.sendLiveActivityUpdate).toHaveBeenCalledTimes(7));
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("delayed Live Activity settlement cannot deactivate a newer run", async () => {
+		const session = createTestSession("session-one", "conversation-run");
+		const updates: IrohRemoteLiveActivityUpdateIntent[] = [];
+		let releaseFirstTerminal: () => void = () => undefined;
+		const firstTerminalRelease = new Promise<void>((resolve) => {
+			releaseFirstTerminal = resolve;
+		});
+		let notifyFirstTerminalStarted: () => void = () => undefined;
+		const firstTerminalStarted = new Promise<void>((resolve) => {
+			notifyFirstTerminalStarted = resolve;
+		});
+		let terminalCount = 0;
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const { modePromise, recv } = await startIrohRpcMode(runtimeHost, session, {
+			notificationDelivery: {
+				deliverNotification: vi.fn(async () => "no_push_target" as const),
+				deliverLiveActivityUpdate: vi.fn(async (update: IrohRemoteLiveActivityUpdateIntent) => {
+					updates.push(update);
+					if (update.contentState.status === "completed" && ++terminalCount === 1) {
+						notifyFirstTerminalStarted();
+						await firstTerminalRelease;
+					}
+					return "sent" as const;
+				}),
+			},
+		});
+		const handlers = session.subscribe.mock.calls.map((call) => call[0] as (event: AgentSessionEvent) => void);
+		const emit = (event: AgentSessionEvent) => {
+			for (const handler of handlers) {
+				handler(event);
+			}
+		};
+
+		emit({ type: "agent_start" });
+		await vi.waitFor(() =>
+			expect(updates.filter((update) => update.contentState.status === "running")).toHaveLength(1),
+		);
+		emit({ type: "agent_end", messages: [], willRetry: false });
+		emit({ type: "agent_settled" });
+		await firstTerminalStarted;
+
+		emit({ type: "agent_start" });
+		releaseFirstTerminal();
+		await vi.waitFor(() =>
+			expect(updates.filter((update) => update.contentState.status === "running")).toHaveLength(2),
+		);
+		emit({ type: "agent_end", messages: [], willRetry: false });
+		emit({ type: "agent_settled" });
+		await vi.waitFor(() =>
+			expect(updates.filter((update) => update.contentState.status === "completed")).toHaveLength(2),
 		);
 
 		recv.end();
@@ -944,6 +1019,7 @@ describe("Iroh remote notification requests", () => {
 				],
 				willRetry: false,
 			});
+			handler({ type: "agent_settled" });
 		}
 		await vi.waitFor(() =>
 			expect(updates).toContainEqual(
@@ -1015,6 +1091,7 @@ describe("Iroh remote notification requests", () => {
 
 		for (const handler of reattachedHandlers) {
 			handler({ type: "agent_end", messages: [], willRetry: false });
+			handler({ type: "agent_settled" });
 		}
 		await vi.waitFor(() => expect(updates).toContainEqual(expect.objectContaining({ status: "completed" })));
 		expect(new Set(updates.map((update) => update.eventId)).size).toBe(updates.length);

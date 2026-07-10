@@ -89,6 +89,168 @@ describe("AgentSession queue characterization", () => {
 		expect(harness.session.messages).toEqual([]);
 	});
 
+	it("does not run an extension command after its prompt generation is aborted", async () => {
+		let commandRuns = 0;
+		const harness = await createHarness({
+			extensionFactories: [
+				(volt) => {
+					volt.registerCommand("must-not-run", {
+						description: "Must not run",
+						handler: async () => {
+							commandRuns++;
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+
+		const prompt = harness.session.prompt("/must-not-run");
+		const abort = harness.session.abort();
+
+		await expect(prompt).rejects.toThrow("Prompt aborted before preflight started");
+		await abort;
+		expect(commandRuns).toBe(0);
+	});
+
+	it("does not start a public custom turn after its generation is aborted", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("must not run")]);
+
+		const customTurn = harness.session.sendCustomMessage(
+			{ customType: "abort", content: "must not run", display: false },
+			{ triggerTurn: true },
+		);
+		const abort = harness.session.abort();
+
+		await customTurn;
+		await abort;
+		expect(harness.eventsOfType("agent_start")).toHaveLength(0);
+		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it("allows extension commands to trigger a turn and await agent idle without self-deadlocking", async () => {
+		const idleStates: boolean[] = [];
+		let commandCompleted = false;
+		const harness = await createHarness({
+			extensionFactories: [
+				(volt) => {
+					volt.registerCommand("custom-turn", {
+						description: "Start a custom turn",
+						handler: async (_args, ctx) => {
+							idleStates.push(ctx.isIdle());
+							volt.sendMessage(
+								{ customType: "command", content: "custom turn", display: true },
+								{ triggerTurn: true },
+							);
+							await ctx.waitForIdle();
+							commandCompleted = true;
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("custom turn response")]);
+
+		const outcome = await Promise.race([
+			harness.session.prompt("/custom-turn").then(() => "completed" as const),
+			new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 500)),
+		]);
+
+		expect(outcome).toBe("completed");
+		expect(commandCompleted).toBe(true);
+		expect(idleStates).toEqual([false]);
+		expect(getAssistantTexts(harness)).toContain("custom turn response");
+		expect(harness.session.isBusy).toBe(false);
+	});
+
+	it("rejects a queued prompt when its delayed preflight outlives the active run", async () => {
+		let releaseQueuedInput: () => void = () => undefined;
+		const queuedInputRelease = new Promise<void>((resolve) => {
+			releaseQueuedInput = resolve;
+		});
+		let notifyQueuedInputStarted: () => void = () => undefined;
+		const queuedInputStarted = new Promise<void>((resolve) => {
+			notifyQueuedInputStarted = resolve;
+		});
+		const waiting = await createWaitingHarness({
+			extensionFactories: [
+				(volt) => {
+					volt.on("input", async (event) => {
+						if (event.text === "queued after delayed input") {
+							notifyQueuedInputStarted();
+							await queuedInputRelease;
+						}
+						return { action: "continue" };
+					});
+				},
+			],
+		});
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("original run complete"),
+		]);
+
+		await waitForToolStart;
+		const queuedPrompt = harness.session.prompt("queued after delayed input", { streamingBehavior: "followUp" });
+		await queuedInputStarted;
+		releaseToolExecution();
+		await promptPromise;
+		expect(harness.session.isStreaming).toBe(false);
+
+		releaseQueuedInput();
+		await expect(queuedPrompt).rejects.toThrow(
+			"Agent finished processing while queued prompt preflight was running. Resubmit the prompt.",
+		);
+		expect(harness.session.pendingMessageCount).toBe(0);
+		expect(getUserTexts(harness)).toEqual(["start"]);
+	});
+
+	it("rejects public custom turns during prompt preflight instead of racing the prompt", async () => {
+		let releaseCommand: () => void = () => undefined;
+		const commandRelease = new Promise<void>((resolve) => {
+			releaseCommand = resolve;
+		});
+		let notifyCommandStarted: () => void = () => undefined;
+		const commandStarted = new Promise<void>((resolve) => {
+			notifyCommandStarted = resolve;
+		});
+		const harness = await createHarness({
+			extensionFactories: [
+				(volt) => {
+					volt.registerCommand("block", {
+						description: "Block preflight",
+						handler: async () => {
+							notifyCommandStarted();
+							await commandRelease;
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+
+		const command = harness.session.prompt("/block");
+		await commandStarted;
+		expect(harness.session.isBusy).toBe(true);
+		expect(harness.session.isStreaming).toBe(false);
+
+		await expect(
+			harness.session.sendCustomMessage(
+				{ customType: "race", content: "must not run", display: false },
+				{ triggerTurn: true },
+			),
+		).rejects.toThrow("Agent is already processing a prompt transaction");
+
+		releaseCommand();
+		await command;
+		expect(harness.getPendingResponseCount()).toBe(0);
+	});
+
 	it("delivers extension-origin steering messages before the next LLM call", async () => {
 		let extensionApi: ExtensionAPI | undefined;
 		const waiting = await createWaitingHarness({

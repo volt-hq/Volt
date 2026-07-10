@@ -487,6 +487,7 @@ export async function handleRpcCommand(
 				thinkingLevel: session.thinkingLevel,
 				availableThinkingLevels: session.getAvailableThinkingLevels(),
 				isStreaming: session.isStreaming,
+				isBusy: session.isBusy,
 				isCompacting: session.isCompacting,
 				steeringMode: session.steeringMode,
 				followUpMode: session.followUpMode,

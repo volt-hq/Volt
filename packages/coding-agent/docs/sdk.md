@@ -98,7 +98,8 @@ interface AgentSession {
   model: Model | undefined;
   thinkingLevel: ThinkingLevel;
   messages: AgentMessage[];
-  isStreaming: boolean;
+  isStreaming: boolean; // provider run or session continuation
+  isBusy: boolean;      // also includes prompt preflight and standalone session operations
 
   // In-place tree navigation within the current session file
   navigateTree(targetId: string, options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }): Promise<{ editorText?: string; cancelled: boolean }>;
@@ -235,6 +236,8 @@ try {
 }
 ```
 
+`waitForEnd()` resolves after the child session settles, including automatic retries, overflow compaction, and queued continuations. Its result contains the latest low-level `agent_end` event.
+
 To expose the built-in `subagent` tool in an SDK-created parent session, pass the manager as `subagentToolManager`. It is active by default when no explicit tool allowlist is provided:
 
 ```typescript
@@ -332,9 +335,11 @@ session.agent.state.messages = messages; // copies the top-level array
 // Replace tools
 session.agent.state.tools = tools; // copies the top-level array
 
-// Wait for agent to finish processing
-await session.agent.waitForIdle();
+// Wait for the full session prompt transaction to settle
+await session.waitForIdle();
 ```
+
+Prefer `session.waitForIdle()` when coordinating application work. It includes prompt preflight, retries, compaction, and queued continuations. `session.agent.waitForIdle()` only observes the core agent loop and can resolve while session-level prompt work is still pending.
 
 ### Events
 
@@ -377,7 +382,11 @@ session.subscribe((event) => {
       // Agent started processing prompt
       break;
     case "agent_end":
-      // Agent finished (event.messages contains new messages)
+      // Agent run finished (event.messages contains new messages).
+      // A retry or compaction/queued continuation may still follow.
+      break;
+    case "agent_settled":
+      // Prompt fully settled: no further retries or continuations.
       break;
     
     // Turn lifecycle (one LLM response + tool calls)

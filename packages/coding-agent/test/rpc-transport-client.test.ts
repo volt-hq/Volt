@@ -204,12 +204,12 @@ describe("RpcTransportClient", () => {
 		}
 	});
 
-	test("promptAndWait waits for prompt response before resolving on agent_end", async () => {
+	test("promptAndWait waits for prompt response before resolving on agent_settled", async () => {
 		const pair = createLoopbackRpcTransportPair();
 		const client = new RpcTransportClient({ transport: pair.client });
 		pair.server.onLine((line) => {
 			const command = parseCommandLine(line);
-			pair.server.write({ type: "agent_end" });
+			pair.server.write({ type: "agent_settled" });
 			pair.server.write({
 				id: command.id,
 				type: "response",
@@ -227,13 +227,13 @@ describe("RpcTransportClient", () => {
 		}
 	});
 
-	test("promptAndWait resolves when a successful prompt response follows agent_end", async () => {
+	test("promptAndWait ignores agent_settled events that predate prompt acceptance", async () => {
 		const pair = createLoopbackRpcTransportPair();
 		const client = new RpcTransportClient({ transport: pair.client });
 		let command: { id: string; type: string } | undefined;
 		pair.server.onLine((line) => {
 			command = parseCommandLine(line);
-			pair.server.write({ type: "agent_end" });
+			pair.server.write({ type: "agent_settled" });
 		});
 
 		await client.start();
@@ -257,7 +257,33 @@ describe("RpcTransportClient", () => {
 				command: acceptedCommand.type,
 				success: true,
 			});
-			await expect(eventsPromise).resolves.toEqual([{ type: "agent_end" }]);
+			await Promise.resolve();
+			expect(resolved).toBe(false);
+
+			pair.server.write({ type: "agent_settled" });
+			await expect(eventsPromise).resolves.toEqual([{ type: "agent_settled" }, { type: "agent_settled" }]);
+		} finally {
+			await client.stop();
+		}
+	});
+
+	test("waitForIdle resolves immediately when the session is already idle", async () => {
+		const pair = createLoopbackRpcTransportPair();
+		const client = new RpcTransportClient({ transport: pair.client });
+		pair.server.onLine((line) => {
+			const command = parseCommandLine(line);
+			pair.server.write({
+				id: command.id,
+				type: "response",
+				command: command.type,
+				success: true,
+				data: { isStreaming: false },
+			});
+		});
+
+		await client.start();
+		try {
+			await expect(client.waitForIdle(100)).resolves.toBeUndefined();
 		} finally {
 			await client.stop();
 		}
@@ -1961,6 +1987,7 @@ function createRuntimeHost(
 				return fastModeRestoreThinkingLevel;
 			},
 			isStreaming: resources.isStreaming ?? false,
+			isBusy: resources.isStreaming ?? false,
 			isCompacting: resources.isCompacting ?? false,
 			steeringMode: "one-at-a-time",
 			followUpMode: "one-at-a-time",

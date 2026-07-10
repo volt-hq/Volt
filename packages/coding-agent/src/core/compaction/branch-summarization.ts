@@ -22,6 +22,8 @@ import {
 	extractFileOpsFromMessage,
 	type FileOperations,
 	formatFileOperations,
+	getConversationCharBudget,
+	getSummarizationOutputTokenBudget,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
 } from "./utils.ts";
@@ -310,11 +312,6 @@ export async function generateBranchSummary(
 		return { summary: "No content to summarize" };
 	}
 
-	// Transform to LLM-compatible messages, then serialize to text
-	// Serialization prevents the model from treating it as a conversation to continue
-	const llmMessages = convertToLlm(messages);
-	const conversationText = serializeConversation(llmMessages);
-
 	// Build prompt
 	let instructions: string;
 	if (replaceInstructions && customInstructions) {
@@ -324,6 +321,23 @@ export async function generateBranchSummary(
 	} else {
 		instructions = BRANCH_SUMMARY_PROMPT;
 	}
+
+	// Transform to LLM-compatible messages, then serialize to text. Keep the
+	// request within this model's context after instructions and output space.
+	const llmMessages = convertToLlm(messages);
+	const requestedOutputTokens = Math.min(2048, model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY);
+	const fixedPromptChars = SUMMARIZATION_SYSTEM_PROMPT.length + instructions.length + 64;
+	const maxOutputTokens = getSummarizationOutputTokenBudget(
+		contextWindow,
+		requestedOutputTokens,
+		fixedPromptChars + 2048,
+	);
+	if (maxOutputTokens < 1) {
+		return { error: "Summarization instructions exceed the selected model context window" };
+	}
+	const conversationText = serializeConversation(llmMessages, {
+		maxChars: getConversationCharBudget(contextWindow, maxOutputTokens, fixedPromptChars),
+	});
 	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${instructions}`;
 
 	const summarizationMessages = [
@@ -338,7 +352,7 @@ export async function generateBranchSummary(
 	// request behavior (timeouts, retries, attribution headers) stays consistent
 	// without running through agent state/events.
 	const context = { systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages };
-	const requestOptions: SimpleStreamOptions = { apiKey, headers, env, signal, maxTokens: 2048 };
+	const requestOptions: SimpleStreamOptions = { apiKey, headers, env, signal, maxTokens: maxOutputTokens };
 	const response = streamFn
 		? await (await streamFn(model, context, requestOptions)).result()
 		: await completeSimple(model, context, requestOptions);

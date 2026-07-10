@@ -19,14 +19,17 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
 import type { RpcSessionState, RpcTranscriptResponse } from "../src/core/rpc/types.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import type { Settings } from "../src/core/settings-manager.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import {
 	type SubagentDefinition,
 	SubagentDefinitionNotFoundError,
+	type SubagentEndEvent,
 	type SubagentEvent,
 	type SubagentHandle,
 	SubagentManager,
 	type SubagentResult,
+	type SubagentRuntimeCreatedEvent,
 } from "../src/core/subagents/index.ts";
 import {
 	createSubagentTool,
@@ -213,11 +216,20 @@ describe("subagent tool", () => {
 		return created.session;
 	}
 
-	async function createRealManager(options: { definitions: SubagentDefinition[]; responses: FauxResponseStep[] }) {
+	async function createRealManager(options: {
+		definitions: SubagentDefinition[];
+		responses: FauxResponseStep[];
+		simpleResponses?: FauxResponseStep[];
+		settings?: Partial<Settings>;
+		onRuntimeCreated?: (event: SubagentRuntimeCreatedEvent) => void | Promise<void>;
+	}) {
 		const tempDir = join(tmpdir(), `subagent-tool-manager-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		const faux = registerFauxProvider();
 		faux.setResponses(options.responses);
+		if (options.simpleResponses) {
+			faux.setSimpleResponses(options.simpleResponses);
+		}
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 		const resourceLoader = createSubagentResourceLoader(options.definitions);
@@ -235,12 +247,16 @@ describe("subagent tool", () => {
 					noContextFiles: true,
 				},
 			});
+			if (options.settings) {
+				services.settingsManager.applyOverrides(options.settings);
+			}
 			const result = await createAgentSessionFromServices({
 				services,
 				sessionManager,
 				model: faux.getModel(),
 				noTools: "all",
 			});
+			result.session.setSessionName("subagent tool test child");
 			return { ...result, services, diagnostics: services.diagnostics };
 		};
 
@@ -249,6 +265,7 @@ describe("subagent tool", () => {
 			cwd: tempDir,
 			agentDir: tempDir,
 			resourceLoader,
+			onRuntimeCreated: options.onRuntimeCreated,
 			requestTimeoutMs: 5_000,
 		});
 		cleanups.push({
@@ -409,6 +426,91 @@ describe("subagent tool", () => {
 		expect(result.details.childSessions?.[0]?.subagentId).toBe(result.details.subagentId);
 		expect(result.details.childSessions?.[0]?.sessionId).toBe(result.details.sessionId);
 		expect(result.details.usage?.messages.assistant).toBe(1);
+	});
+
+	it("returns recovered child output after overflow compaction before default cleanup", async () => {
+		const continuationStarted = createDeferred<void>();
+		const finishContinuation = createDeferred<void>();
+		const childAgentEnds: SubagentEndEvent[] = [];
+		let childSessionManager: SessionManager | undefined;
+		let childDisposeCount = 0;
+		let childEndCountAtDispose: number | undefined;
+		const manager = await createRealManager({
+			definitions: [createDefinition("scout", { source: "project" })],
+			responses: [
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" }),
+				async () => {
+					continuationStarted.resolve(undefined);
+					await finishContinuation.promise;
+					return fauxAssistantMessage("recovered child answer");
+				},
+			],
+			simpleResponses: [fauxAssistantMessage("compacted child context")],
+			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
+			onRuntimeCreated: (event) => {
+				childSessionManager = event.runtime.session.sessionManager;
+				event.runtime.session.subscribe((sessionEvent) => {
+					if (sessionEvent.type === "agent_end") {
+						childAgentEnds.push(sessionEvent);
+					}
+				});
+				const dispose = event.runtime.session.dispose.bind(event.runtime.session);
+				event.runtime.session.dispose = () => {
+					childDisposeCount += 1;
+					childEndCountAtDispose = childAgentEnds.length;
+					dispose();
+				};
+			},
+		});
+		cleanups.push({ cleanup: () => finishContinuation.resolve(undefined) });
+		const tool = createSubagentTool(process.cwd(), { manager, getAllowedTools: () => [] });
+		let executionSettled = false;
+		const execution = tool.execute("call-overflow", { agent: "scout", task: "recover from overflow" });
+		void execution.then(
+			() => {
+				executionSettled = true;
+			},
+			() => {
+				executionSettled = true;
+			},
+		);
+
+		const continuationWonRace = await Promise.race([
+			continuationStarted.promise.then(() => true),
+			execution.then(() => false),
+		]);
+		try {
+			expect(continuationWonRace).toBe(true);
+			expect(childAgentEnds).toHaveLength(1);
+			expect(childAgentEnds[0]?.willRetry).toBe(false);
+			expect(childAgentEnds[0]?.messages.at(-1)).toMatchObject({
+				role: "assistant",
+				stopReason: "error",
+				errorMessage: "prompt is too long",
+			});
+			if (!childSessionManager) {
+				throw new Error("expected child session manager");
+			}
+			const compactions = childSessionManager.getEntries().filter((entry) => entry.type === "compaction");
+			expect(compactions).toHaveLength(1);
+			expect(compactions[0]).toMatchObject({ summary: "compacted child context" });
+			expect(executionSettled).toBe(false);
+			expect(childDisposeCount).toBe(0);
+		} finally {
+			finishContinuation.resolve(undefined);
+		}
+
+		const result = await execution;
+
+		expect(childAgentEnds.map((event) => event.willRetry)).toEqual([false, false]);
+		expect(textFromResult(result)).toBe("recovered child answer");
+		expect(result.details).toMatchObject({
+			status: "completed",
+			output: { text: "recovered child answer" },
+			childSessions: [{ status: "completed" }],
+		});
+		expect(childDisposeCount).toBe(1);
+		expect(childEndCountAtDispose).toBe(2);
 	});
 
 	it("emits live progress updates for a single child and a final partial", async () => {
@@ -1281,7 +1383,92 @@ describe("subagent tool", () => {
 		await expect(execution).rejects.toThrow("Operation aborted");
 		expect(promptStarted).toBe(true);
 		expect(abortCalled).toBe(true);
-		expect(disposeCalled).toBe(true);
+		await vi.waitFor(() => expect(disposeCalled).toBe(true));
+	});
+
+	it("rejects parent cancellation without waiting for hung child cleanup", async () => {
+		let abortCalled = false;
+		let disposeCalled = false;
+		let resolvePromptStarted: () => void = () => undefined;
+		const promptStarted = new Promise<void>((resolve) => {
+			resolvePromptStarted = resolve;
+		});
+		const never = new Promise<never>(() => undefined);
+		const handle: SubagentHandle = {
+			id: "sa_hung_abort",
+			sessionId: "session_hung_abort",
+			prompt: async () => {
+				resolvePromptStarted();
+				await never;
+			},
+			abort: async () => {
+				abortCalled = true;
+				await never;
+			},
+			getState: async (): Promise<RpcSessionState> => {
+				throw new Error("not used");
+			},
+			getTranscript: async (): Promise<RpcTranscriptResponse> => {
+				throw new Error("not used");
+			},
+			getSessionStats: async () => {
+				throw new Error("not used");
+			},
+			waitForEnd: async () => never,
+			dispose: async () => {
+				disposeCalled = true;
+				await never;
+			},
+			onEvent: () => () => undefined,
+		};
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			startByName: async () => handle,
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager });
+		const controller = new AbortController();
+		const execution = tool.execute("call-1", { agent: "scout", task: "slow" }, controller.signal);
+		await promptStarted;
+
+		controller.abort();
+		const outcome = await Promise.race([
+			execution.then(
+				() => "resolved" as const,
+				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			),
+			new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 100)),
+		]);
+
+		expect(outcome).toBe("Operation aborted");
+		expect(abortCalled).toBe(true);
+		await vi.waitFor(() => expect(disposeCalled).toBe(true));
+	});
+
+	it("rejects cancellation that arrives after child disposal starts", async () => {
+		let notifyDisposeStarted: () => void = () => undefined;
+		const disposeStarted = new Promise<void>((resolve) => {
+			notifyDisposeStarted = resolve;
+		});
+		const never = new Promise<never>(() => undefined);
+		const completed = createCompletedHandle("done");
+		const handle: SubagentHandle = {
+			...completed,
+			dispose: async () => {
+				notifyDisposeStarted();
+				await never;
+			},
+		};
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			startByName: async () => handle,
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager });
+		const controller = new AbortController();
+		const execution = tool.execute("call-1", { agent: "scout", task: "finish then hang" }, controller.signal);
+		await disposeStarted;
+
+		controller.abort();
+		await expect(execution).rejects.toThrow("Operation aborted");
 	});
 
 	it("disposes the child after terminal failure details are returned", async () => {

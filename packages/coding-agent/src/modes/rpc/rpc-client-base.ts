@@ -37,6 +37,7 @@ type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : n
 type RpcCommandBody = DistributiveOmit<RpcCommand, "id">;
 
 interface PendingRpcRequest {
+	command: string;
 	resolve(response: RpcResponse): void;
 	reject(error: Error): void;
 }
@@ -119,8 +120,8 @@ export abstract class RpcClientBase {
 	}
 
 	/** Send a prompt to the agent. */
-	async prompt(message: string, images?: ImageContent[]): Promise<void> {
-		await this.send({ type: "prompt", message, images });
+	async prompt(message: string, images?: ImageContent[], onAccepted?: () => void): Promise<void> {
+		await this.send({ type: "prompt", message, images }, onAccepted);
 	}
 
 	/** Queue a steering message to interrupt the agent mid-run. */
@@ -397,25 +398,49 @@ export abstract class RpcClientBase {
 		return this.getData<{ commands: RpcSlashCommand[] }>(response).commands;
 	}
 
-	/** Wait for agent to become idle. */
+	/**
+	 * Wait for agent to become idle.
+	 *
+	 * Resolves on `agent_settled`, which the host emits after all tracked prompt
+	 * work, including any agent run, automatic retries, compaction continuations,
+	 * and queued-message continuations, has finished.
+	 */
 	waitForIdle(timeout = 60_000): Promise<void> {
 		return new Promise((resolve, reject) => {
-			const timer = setTimeout(() => {
+			let settled = false;
+			let unsubscribe = (): void => {};
+			const finish = (error?: Error): void => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
 				unsubscribe();
-				reject(new Error(this.formatError("Timeout waiting for agent to become idle")));
-			}, timeout);
-
-			const unsubscribe = this.onEvent((event) => {
-				if (event.type === "agent_end") {
-					clearTimeout(timer);
-					unsubscribe();
+				if (error) {
+					reject(error);
+				} else {
 					resolve();
 				}
+			};
+			const timer = setTimeout(() => {
+				finish(new Error(this.formatError("Timeout waiting for agent to become idle")));
+			}, timeout);
+
+			unsubscribe = this.onEvent((event) => {
+				if (event.type === "agent_settled") {
+					finish();
+				}
 			});
+			// Subscribe before querying state so settlement cannot be lost between
+			// the idle snapshot and listener installation.
+			void this.getState().then(
+				(state) => {
+					if (!(state.isBusy ?? state.isStreaming)) finish();
+				},
+				(error: unknown) => finish(toError(error)),
+			);
 		});
 	}
 
-	/** Collect events until agent becomes idle. */
+	/** Collect events until the agent settles (`agent_settled`). */
 	collectEvents(timeout = 60_000): Promise<RpcClientEvent[]> {
 		return new Promise((resolve, reject) => {
 			const events: RpcClientEvent[] = [];
@@ -426,7 +451,7 @@ export abstract class RpcClientBase {
 
 			const unsubscribe = this.onEvent((event) => {
 				events.push(event);
-				if (event.type === "agent_end") {
+				if (event.type === "agent_settled") {
 					clearTimeout(timer);
 					unsubscribe();
 					resolve(events);
@@ -435,11 +460,11 @@ export abstract class RpcClientBase {
 		});
 	}
 
-	/** Send prompt and wait for completion, returning all events. */
+	/** Send prompt and wait for the run to settle (`agent_settled`), returning all events. */
 	async promptAndWait(message: string, images?: ImageContent[], timeout = 60_000): Promise<RpcClientEvent[]> {
 		return new Promise((resolve, reject) => {
 			const events: RpcClientEvent[] = [];
-			let agentEnded = false;
+			let agentSettled = false;
 			let promptAccepted = false;
 			let settled = false;
 			let unsubscribe = (): void => {};
@@ -468,7 +493,7 @@ export abstract class RpcClientBase {
 			};
 
 			const resolveIfComplete = (): void => {
-				if (settled || !agentEnded || !promptAccepted) {
+				if (settled || !agentSettled || !promptAccepted) {
 					return;
 				}
 				settled = true;
@@ -478,8 +503,10 @@ export abstract class RpcClientBase {
 
 			unsubscribe = this.onEvent((event) => {
 				events.push(event);
-				if (event.type === "agent_end") {
-					agentEnded = true;
+				// Settlement predating this prompt's success response belongs to older
+				// work and must not complete this request.
+				if (event.type === "agent_settled" && promptAccepted) {
+					agentSettled = true;
 					resolveIfComplete();
 				}
 			});
@@ -580,6 +607,7 @@ export abstract class RpcClientBase {
 			};
 
 			this.pendingRequests.set(id, {
+				command: command.type,
 				resolve: (response) => {
 					clearTimeout(timeout);
 					if (!response.success) {
@@ -634,6 +662,14 @@ export abstract class RpcClientBase {
 		const pending = this.pendingRequests.get(response.id);
 		if (!pending) {
 			this.failInboundProtocol(`Invalid inbound RPC response: unknown id ${JSON.stringify(response.id)}`, line);
+			return;
+		}
+
+		if (response.command !== pending.command) {
+			this.failInboundProtocol(
+				`Invalid inbound RPC response: command ${JSON.stringify(response.command)} does not match request ${JSON.stringify(pending.command)}`,
+				line,
+			);
 			return;
 		}
 

@@ -832,6 +832,7 @@ class IrohRemoteLiveActivityUpdater {
 	private recentTools: IrohRemoteLiveActivityToolGlyph[] = [];
 	private sequence = 0;
 	private active = false;
+	private pendingTerminalStatus: "completed" | "failed" | undefined;
 
 	constructor(
 		runtimeHost: AgentSessionRuntime,
@@ -858,6 +859,7 @@ class IrohRemoteLiveActivityUpdater {
 		switch (event.type) {
 			case "agent_start":
 				this.active = true;
+				this.pendingTerminalStatus = undefined;
 				this.recentTools = [];
 				this.toolIndexesByCallId.clear();
 				await this.sendUpdate("running");
@@ -880,13 +882,24 @@ class IrohRemoteLiveActivityUpdater {
 				}
 				break;
 			case "agent_end":
-				if (!this.active || event.willRetry) {
+				if (!this.active) {
 					return;
 				}
-				await this.sendUpdate(getRunTerminalOutcome(event.messages) === "completed" ? "completed" : "failed");
-				this.active = false;
-				this.toolIndexesByCallId.clear();
+				this.pendingTerminalStatus = getRunTerminalOutcome(event.messages) === "completed" ? "completed" : "failed";
 				break;
+			case "agent_settled": {
+				if (!this.active || this.pendingTerminalStatus === undefined) {
+					return;
+				}
+				const terminalStatus = this.pendingTerminalStatus;
+				// End the old run synchronously so delayed delivery cannot clear state
+				// established by a newer agent_start handler.
+				this.active = false;
+				this.pendingTerminalStatus = undefined;
+				this.toolIndexesByCallId.clear();
+				await this.sendUpdate(terminalStatus);
+				break;
+			}
 			default:
 				break;
 		}

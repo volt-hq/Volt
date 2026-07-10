@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/volt-agent-core";
@@ -29,20 +29,33 @@ vi.mock("../src/core/compaction/index.js", () => ({
 	estimateContextTokens: (
 		messages: Array<{
 			role: string;
+			content?: Array<{ type: string; text?: string; thinking?: string }>;
 			usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens?: number };
 			stopReason?: string;
 		}>,
 	) => {
-		// Walk backwards to find last non-error, non-aborted assistant with usage
+		const estimateMessageTokens = (message: (typeof messages)[number]) =>
+			Math.ceil(
+				(message.content ?? []).reduce(
+					(chars, part) => chars + (part.text?.length ?? 0) + (part.thinking?.length ?? 0),
+					0,
+				) / 4,
+			);
+		// Walk backwards to find last non-error, non-aborted assistant with usage,
+		// then include tool results and other messages appended after that request.
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const msg = messages[i];
 			if (msg.role === "assistant" && msg.stopReason !== "error" && msg.stopReason !== "aborted" && msg.usage) {
-				const tokens =
+				const usageTokens =
 					msg.usage.totalTokens ?? msg.usage.input + msg.usage.output + msg.usage.cacheRead + msg.usage.cacheWrite;
-				return { tokens, usageTokens: tokens, trailingTokens: 0, lastUsageIndex: i };
+				const trailingTokens = messages
+					.slice(i + 1)
+					.reduce((total, message) => total + estimateMessageTokens(message), 0);
+				return { tokens: usageTokens + trailingTokens, usageTokens, trailingTokens, lastUsageIndex: i };
 			}
 		}
-		return { tokens: 0, usageTokens: 0, trailingTokens: 0, lastUsageIndex: null };
+		const tokens = messages.reduce((total, message) => total + estimateMessageTokens(message), 0);
+		return { tokens, usageTokens: 0, trailingTokens: tokens, lastUsageIndex: null };
 	},
 	generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
 	prepareCompaction: () => ({ dummy: true }),
@@ -64,6 +77,14 @@ class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMe
 			},
 		);
 	}
+}
+
+function createDeferred(): { promise: Promise<void>; resolve(): void } {
+	let resolve: () => void = () => undefined;
+	const promise = new Promise<void>((promiseResolve) => {
+		resolve = promiseResolve;
+	});
+	return { promise, resolve };
 }
 
 describe("AgentSession auto-compaction queue resume", () => {
@@ -151,11 +172,11 @@ describe("AgentSession auto-compaction queue resume", () => {
 						provider: model.provider,
 						model: model.id,
 						usage: {
-							input: 180_000,
+							input: model.contextWindow - 20_000,
 							output: 10_000,
 							cacheRead: 0,
 							cacheWrite: 0,
-							totalTokens: 190_000,
+							totalTokens: model.contextWindow - 10_000,
 							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 						},
 						stopReason: "length",
@@ -192,6 +213,387 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await session.prompt("trigger length continuation");
 
 		expect(streamCallCount).toBe(2);
+	});
+
+	it("should compact mid-run when a turn with tool calls crosses the threshold", async () => {
+		const model = session.model!;
+		let streamCallCount = 0;
+		let streamCallsAtCompactionStart = -1;
+		const agentEnds: string[] = [];
+		const compactionContinuations: boolean[] = [];
+		session.subscribe((event) => {
+			if (event.type === "compaction_start") {
+				streamCallsAtCompactionStart = streamCallCount;
+			}
+			if (event.type === "compaction_end") {
+				compactionContinuations.push(event.willRetry);
+			}
+			if (event.type === "agent_end") {
+				agentEnds.push(event.type);
+			}
+		});
+
+		session.agent.streamFn = () => {
+			const callNumber = ++streamCallCount;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callNumber === 1) {
+					// Tool-call turn whose usage already exceeds the compaction threshold.
+					const message: AssistantMessage = {
+						role: "assistant",
+						content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "missing-file.txt" } }],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: {
+							input: model.contextWindow - 20_000,
+							output: 10_000,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: model.contextWindow - 10_000,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "toolUse",
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: "toolUse", message });
+					return;
+				}
+
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "text", text: "finished after compaction" }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 100,
+						output: 10,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 110,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+
+		await session.prompt("trigger proactive mid-run compaction");
+
+		// Compaction ran between the tool-call turn and the continuation, not
+		// after the full agent/tool loop finished.
+		expect(streamCallsAtCompactionStart).toBe(1);
+		expect(streamCallCount).toBe(2);
+		expect(agentEnds).toHaveLength(2);
+		expect(compactionContinuations).toEqual([true]);
+		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
+	});
+
+	it("should include newly appended tool results in proactive threshold checks", async () => {
+		const model = session.model!;
+		writeFileSync(join(tempDir, "large-result.txt"), "x".repeat(40_000));
+		let streamCallCount = 0;
+		let streamCallsAtCompactionStart = -1;
+		session.subscribe((event) => {
+			if (event.type === "compaction_start") {
+				streamCallsAtCompactionStart = streamCallCount;
+			}
+		});
+
+		session.agent.streamFn = () => {
+			const callNumber = ++streamCallCount;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message: AssistantMessage = {
+					role: "assistant",
+					content:
+						callNumber === 1
+							? [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "large-result.txt" } }]
+							: [{ type: "text", text: "finished after tool-result compaction" }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: callNumber === 1 ? model.contextWindow - 20_000 : 100,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: callNumber === 1 ? model.contextWindow - 20_000 : 100,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: callNumber === 1 ? "toolUse" : "stop",
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: message.stopReason === "toolUse" ? "toolUse" : "stop", message });
+			});
+			return stream;
+		};
+
+		await session.prompt("trigger compaction from a large tool result");
+
+		expect(streamCallsAtCompactionStart).toBe(1);
+		expect(streamCallCount).toBe(2);
+	});
+
+	it("should compact a terminating tool batch using its live tool-result context without resuming", async () => {
+		const model = session.model!;
+		writeFileSync(join(tempDir, "large-terminating-result.txt"), "x".repeat(40_000));
+		let streamCallCount = 0;
+		session.agent.afterToolCall = async () => ({ terminate: true });
+		session.agent.streamFn = () => {
+			streamCallCount += 1;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "call-1",
+							name: "read",
+							arguments: { path: "large-terminating-result.txt" },
+						},
+					],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: model.contextWindow - 20_000,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: model.contextWindow - 20_000,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "toolUse", message });
+			});
+			return stream;
+		};
+
+		await session.prompt("run terminating tool");
+
+		expect(streamCallCount).toBe(1);
+		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
+	});
+
+	it("keeps session busy and waitForIdle pending during manual compaction", async () => {
+		const model = session.model!;
+		session.agent.streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "text", text: "ready" }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 10,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 11,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		await session.prompt("seed compaction history");
+
+		const beforeCompactStarted = createDeferred();
+		const finishBeforeCompact = createDeferred();
+		vi.spyOn(session.extensionRunner, "hasHandlers").mockImplementation(
+			(eventType) => eventType === "session_before_compact",
+		);
+		vi.spyOn(session.extensionRunner, "emit").mockImplementation(async (event) => {
+			if (event.type === "session_before_compact") {
+				beforeCompactStarted.resolve();
+				await finishBeforeCompact.promise;
+			}
+			return undefined;
+		});
+
+		const compaction = session.compact();
+		await beforeCompactStarted.promise;
+		expect(session.isBusy).toBe(true);
+		let idleResolved = false;
+		const idle = session.waitForIdle().then(() => {
+			idleResolved = true;
+		});
+		await Promise.resolve();
+		expect(idleResolved).toBe(false);
+
+		finishBeforeCompact.resolve();
+		await compaction;
+		await idle;
+		expect(idleResolved).toBe(true);
+		expect(session.isBusy).toBe(false);
+	});
+
+	it("reports no continuation when session abort cancels proactive compaction", async () => {
+		const authStarted = createDeferred();
+		const finishAuth = createDeferred();
+		session.agent.streamFn = () => {
+			throw new Error("not used");
+		};
+		vi.spyOn(
+			session as unknown as {
+				_getCompactionRequestAuth: () => Promise<{
+					apiKey?: string;
+					headers?: Record<string, string>;
+					env?: Record<string, string>;
+				}>;
+			},
+			"_getCompactionRequestAuth",
+		).mockImplementation(async () => {
+			authStarted.resolve();
+			await finishAuth.promise;
+			return { apiKey: "test-key" };
+		});
+		const compactionEnds: Array<{ aborted: boolean; willRetry: boolean }> = [];
+		session.subscribe((event) => {
+			if (event.type === "compaction_end") {
+				compactionEnds.push({ aborted: event.aborted, willRetry: event.willRetry });
+			}
+		});
+		const runAutoCompaction = (
+			session as unknown as {
+				_runAutoCompaction(
+					reason: "threshold",
+					willRetry: boolean,
+					continueAfterCompaction: boolean,
+					continueWithoutCompaction: boolean,
+				): Promise<boolean>;
+			}
+		)._runAutoCompaction("threshold", false, true, true);
+		await authStarted.promise;
+
+		await session.abort();
+		finishAuth.resolve();
+		await runAutoCompaction;
+
+		expect(compactionEnds).toEqual([{ aborted: true, willRetry: false }]);
+	});
+
+	it("should not continue after disposal during proactive compaction", async () => {
+		const model = session.model!;
+		const compactionStarted = createDeferred();
+		const finishCompaction = createDeferred();
+		let streamCallCount = 0;
+		const continueSpy = vi.spyOn(session.agent, "continue");
+		vi.spyOn(
+			session as unknown as {
+				_runAutoCompaction: (
+					reason: "overflow" | "threshold",
+					willRetry: boolean,
+					continueAfterCompaction?: boolean,
+				) => Promise<boolean>;
+			},
+			"_runAutoCompaction",
+		).mockImplementation(async () => {
+			compactionStarted.resolve();
+			await finishCompaction.promise;
+			return false;
+		});
+
+		session.agent.streamFn = () => {
+			streamCallCount += 1;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "missing.txt" } }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: model.contextWindow - 20_000,
+						output: 10_000,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: model.contextWindow - 10_000,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "toolUse", message });
+			});
+			return stream;
+		};
+
+		const promptPromise = session.prompt("trigger proactive compaction");
+		await compactionStarted.promise;
+		session.dispose();
+		finishCompaction.resolve();
+		await promptPromise;
+
+		expect(continueSpy).not.toHaveBeenCalled();
+		expect(streamCallCount).toBe(1);
+	});
+
+	it("should stop proactively only once until a compaction succeeds", async () => {
+		const model = session.model!;
+		const message = {
+			role: "assistant" as const,
+			content: [{ type: "toolCall" as const, id: "call-1", name: "read", arguments: { path: "x" } }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: model.contextWindow - 10_000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: model.contextWindow - 10_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse" as const,
+			timestamp: Date.now(),
+		};
+		const toolResult = {
+			role: "toolResult" as const,
+			toolCallId: "call-1",
+			toolName: "read",
+			content: [],
+			isError: true,
+			timestamp: Date.now(),
+		};
+		const context = {
+			message,
+			toolResults: [toolResult],
+			toolBatchTerminated: false,
+			context: { systemPrompt: "", messages: [message, toolResult], tools: [] },
+			newMessages: [],
+		};
+
+		const hook = (
+			session as unknown as {
+				_shouldStopForProactiveCompaction: (context: unknown) => boolean;
+			}
+		)._shouldStopForProactiveCompaction.bind(session);
+
+		expect(hook(context)).toBe(true);
+		// A second threshold crossing before any successful compaction must not
+		// interrupt the run again (prevents stop/fail/continue churn every turn).
+		expect(hook(context)).toBe(false);
 	});
 
 	it("should not compact repeatedly after overflow recovery already attempted", async () => {
@@ -317,11 +719,11 @@ describe("AgentSession auto-compaction queue resume", () => {
 			provider: model.provider,
 			model: model.id,
 			usage: {
-				input: 180_000,
+				input: model.contextWindow - 20_000,
 				output: 10_000,
 				cacheRead: 0,
 				cacheWrite: 0,
-				totalTokens: 190_000,
+				totalTokens: model.contextWindow - 10_000,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "stop",
@@ -436,11 +838,11 @@ describe("AgentSession auto-compaction queue resume", () => {
 			provider: model.provider,
 			model: model.id,
 			usage: {
-				input: 180_000,
+				input: model.contextWindow - 20_000,
 				output: 10_000,
 				cacheRead: 0,
 				cacheWrite: 0,
-				totalTokens: 190_000,
+				totalTokens: model.contextWindow - 10_000,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "stop",

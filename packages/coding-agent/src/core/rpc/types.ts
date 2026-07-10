@@ -530,7 +530,10 @@ export interface RpcSessionState {
 	model?: RpcModel;
 	thinkingLevel: ThinkingLevel;
 	availableThinkingLevels: ThinkingLevel[];
+	/** Whether a provider run or session-level continuation is active. */
 	isStreaming: boolean;
+	/** Whether any prompt work, including asynchronous preflight, is active. */
+	isBusy?: boolean;
 	isCompacting: boolean;
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";

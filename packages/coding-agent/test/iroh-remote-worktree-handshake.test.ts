@@ -8,6 +8,7 @@ import {
 	parseIrohRemoteHelloLine,
 } from "../src/core/remote/iroh/handshake.ts";
 import {
+	IROH_REMOTE_AGENT_SETTLED_FEATURE,
 	IROH_REMOTE_ALPN,
 	IROH_REMOTE_HOST_FEATURES,
 	IROH_REMOTE_WORKING_DIRECTORIES_FEATURE,
@@ -46,6 +47,8 @@ describe("worktrees.v1 capability flag", () => {
 		expect([...IROH_REMOTE_HOST_FEATURES]).toContain("worktrees.v1");
 		expect(IROH_REMOTE_WORKING_DIRECTORIES_FEATURE).toBe("working_directories.v1");
 		expect([...IROH_REMOTE_HOST_FEATURES]).toContain("working_directories.v1");
+		expect(IROH_REMOTE_AGENT_SETTLED_FEATURE).toBe("agent_settled.v1");
+		expect([...IROH_REMOTE_HOST_FEATURES]).toContain("agent_settled.v1");
 	});
 
 	test("worktrees.v1 is NOT a required handshake feature (old hosts still parse)", () => {

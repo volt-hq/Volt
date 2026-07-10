@@ -29,6 +29,7 @@ export interface UiActionDiscoverySession {
 	extensionRunner: {
 		getRegisteredCommands(): ResolvedCommand[];
 	};
+	isBusy?: boolean;
 	isCompacting?: boolean;
 	isStreaming?: boolean;
 	model?: Model<Api>;
@@ -69,6 +70,7 @@ export function getUiActionDescriptors(
 ): UiActionDescriptor[] {
 	const builtinDescriptors = BUILTIN_HOST_ACTION_REGISTRY.getDescriptors({
 		session: {
+			isBusy: session.isBusy ?? session.isStreaming ?? false,
 			isCompacting: session.isCompacting ?? false,
 			isStreaming: session.isStreaming ?? false,
 			model: session.model,

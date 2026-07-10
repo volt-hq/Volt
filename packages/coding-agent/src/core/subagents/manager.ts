@@ -154,23 +154,36 @@ class LocalSubagentHandle implements SubagentHandle {
 	readonly id: string;
 	readonly sessionId: string;
 	private readonly client: InProcessRpcClient;
+	private readonly abortRuntime: () => Promise<void>;
 	private readonly removeFromManager: (id: string) => void;
+	private waitForIdle: (() => Promise<void>) | undefined;
 	private readonly eventListeners = new Set<SubagentEventListener>();
 	private readonly endPromise: Promise<SubagentResult>;
 	private resolveEnd: (result: SubagentResult) => void = () => {};
 	private rejectEnd: (error: Error) => void = () => {};
+	private latestEndEvent: SubagentEndEvent | undefined;
+	private settlementWatcherStarted = false;
+	private promptStarted = false;
+	private promptAccepted = false;
+	private promptMessageObserved = false;
+	private endSettled = false;
 	private disposed = false;
+	private disposePromise: Promise<void> | undefined;
 
 	constructor(options: {
 		id: string;
 		sessionId: string;
 		client: InProcessRpcClient;
+		abortRuntime: () => Promise<void>;
 		removeFromManager: (id: string) => void;
+		waitForIdle: () => Promise<void>;
 	}) {
 		this.id = options.id;
 		this.sessionId = options.sessionId;
 		this.client = options.client;
+		this.abortRuntime = options.abortRuntime;
 		this.removeFromManager = options.removeFromManager;
+		this.waitForIdle = options.waitForIdle;
 		this.endPromise = new Promise<SubagentResult>((resolve, reject) => {
 			this.resolveEnd = resolve;
 			this.rejectEnd = reject;
@@ -180,12 +193,17 @@ class LocalSubagentHandle implements SubagentHandle {
 
 	async prompt(message: string): Promise<void> {
 		this.assertOpen();
-		await this.client.prompt(message);
+		this.promptStarted = true;
+		await this.client.prompt(message, undefined, () => {
+			this.promptAccepted = true;
+		});
 	}
 
 	async abort(): Promise<void> {
 		this.assertOpen();
-		await this.client.abort();
+		// Abort the in-process runtime directly so cancellation is signalled before
+		// concurrent disposal can close the loopback transport.
+		await this.abortRuntime();
 	}
 
 	async getState(): Promise<RpcSessionState> {
@@ -214,23 +232,40 @@ class LocalSubagentHandle implements SubagentHandle {
 		};
 	}
 
-	async dispose(): Promise<void> {
-		if (this.disposed) {
-			return;
+	dispose(): Promise<void> {
+		if (this.disposePromise) {
+			return this.disposePromise;
 		}
 		this.disposed = true;
-		try {
-			await this.client.stop();
-		} finally {
-			this.eventListeners.clear();
-			this.removeFromManager(this.id);
+		this.waitForIdle = undefined;
+		if (!this.endSettled) {
+			this.endSettled = true;
 			this.rejectEnd(new Error(`Subagent ${this.id} was disposed before completion`));
 		}
+		this.disposePromise = Promise.resolve().then(async () => {
+			try {
+				await this.client.stop();
+			} finally {
+				this.eventListeners.clear();
+				this.removeFromManager(this.id);
+			}
+		});
+		return this.disposePromise;
 	}
 
 	handleEvent(event: SubagentEvent): void {
 		if (this.disposed) {
 			return;
+		}
+		if (
+			event.type === "message_start" &&
+			(event.message.role === "user" || event.message.role === "custom") &&
+			this.promptStarted
+		) {
+			this.promptMessageObserved = true;
+		}
+		if (event.type === "agent_end" && this.promptMessageObserved) {
+			this.latestEndEvent = event;
 		}
 		for (const listener of this.eventListeners) {
 			try {
@@ -239,9 +274,43 @@ class LocalSubagentHandle implements SubagentHandle {
 				// Listener failures should not break the child RPC event stream.
 			}
 		}
-		if (event.type === "agent_end" && event.willRetry !== true) {
-			this.resolveEnd({ id: this.id, sessionId: this.sessionId, event });
+		const shouldWatchSettlement =
+			(event.type === "agent_end" && this.promptMessageObserved) ||
+			(event.type === "agent_settled" && this.promptAccepted);
+		if (shouldWatchSettlement && !this.settlementWatcherStarted && !this.disposed && !this.endSettled) {
+			this.settlementWatcherStarted = true;
+			void this.settleAfterIdle();
 		}
+	}
+
+	private async settleAfterIdle(): Promise<void> {
+		const waitForIdle = this.waitForIdle;
+		this.waitForIdle = undefined;
+		if (!waitForIdle) {
+			return;
+		}
+		try {
+			await waitForIdle();
+		} catch (error) {
+			if (!this.disposed && !this.endSettled) {
+				this.endSettled = true;
+				this.rejectEnd(error instanceof Error ? error : new Error(String(error)));
+			}
+			return;
+		}
+
+		if (this.disposed || this.endSettled) {
+			return;
+		}
+		const latestEndEvent = this.latestEndEvent;
+		if (!this.promptMessageObserved || !latestEndEvent) {
+			this.endSettled = true;
+			this.rejectEnd(new Error(`Subagent ${this.id} settled without an agent result`));
+			return;
+		}
+		this.endSettled = true;
+		const event = latestEndEvent.willRetry ? { ...latestEndEvent, willRetry: false } : latestEndEvent;
+		this.resolveEnd({ id: this.id, sessionId: this.sessionId, event });
 	}
 
 	private assertOpen(): void {
@@ -416,9 +485,11 @@ export class SubagentManager {
 				id,
 				sessionId: runtime.session.sessionId,
 				client,
+				abortRuntime: () => runtime.session.abort(),
 				removeFromManager: (handleId) => {
 					this.handles.delete(handleId);
 				},
+				waitForIdle: () => runtime.session.waitForIdle(),
 			});
 			this.handles.set(id, handle);
 			return handle;
