@@ -12,6 +12,7 @@ class FakeTerminal implements Terminal {
 	columns = 80;
 	rows = 24;
 	kittyProtocolActive = true;
+	readonly focusState = "unknown" as const;
 	writes: string[] = [];
 
 	start(): void {}

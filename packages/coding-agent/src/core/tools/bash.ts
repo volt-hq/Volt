@@ -17,7 +17,7 @@ import {
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { theme } from "../theme/runtime.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
-import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
+import { formatDuration, getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
 
@@ -170,10 +170,6 @@ class BashResultRenderComponent extends Container {
 		cachedLines: undefined,
 		cachedSkipped: undefined,
 	};
-}
-
-function formatDuration(ms: number): string {
-	return `${(ms / 1000).toFixed(1)}s`;
 }
 
 function formatBashCall(args: { command?: string; timeout?: number } | undefined): string {
@@ -405,6 +401,9 @@ export function createBashToolDefinition(
 				clearUpdateTimer();
 			}
 		},
+		// The result renderer shows its own "Elapsed/Took" duration line, so the
+		// generic tool-header duration suffix is suppressed.
+		rendersDuration: true,
 		renderCall(args, _theme, context) {
 			const state = context.state;
 			if (context.executionStarted && state.startedAt === undefined) {

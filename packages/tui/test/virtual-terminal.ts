@@ -1,6 +1,6 @@
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import xterm from "@xterm/headless";
-import type { Terminal } from "../src/terminal.ts";
+import type { Terminal, TerminalFocusState } from "../src/terminal.ts";
 
 // Extract Terminal class from the module
 const XtermTerminal = xterm.Terminal;
@@ -14,6 +14,8 @@ export class VirtualTerminal implements Terminal {
 	private resizeHandler?: () => void;
 	private _columns: number;
 	private _rows: number;
+	private _focusState: TerminalFocusState = "unknown";
+	public onFocusChange?: (focused: boolean) => void;
 
 	constructor(columns = 80, rows = 24) {
 		this._columns = columns;
@@ -111,7 +113,19 @@ export class VirtualTerminal implements Terminal {
 		this.xterm.write("\x07");
 	}
 
+	get focusState(): TerminalFocusState {
+		return this._focusState;
+	}
+
 	// Test-specific methods not in Terminal interface
+
+	/**
+	 * Simulate a terminal focus change (focus reporting, DECSET 1004)
+	 */
+	setFocus(focused: boolean): void {
+		this._focusState = focused ? "focused" : "unfocused";
+		this.onFocusChange?.(focused);
+	}
 
 	/**
 	 * Simulate keyboard input

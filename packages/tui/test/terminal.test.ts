@@ -1,7 +1,7 @@
 import assert from "node:assert";
 import { describe, it, mock } from "node:test";
 import { setKittyProtocolActive } from "../src/keys.ts";
-import { normalizeAppleTerminalInput, ProcessTerminal } from "../src/terminal.ts";
+import { normalizeAppleTerminalInput, ProcessTerminal, parseFocusEvent } from "../src/terminal.ts";
 
 describe("normalizeAppleTerminalInput", () => {
 	it("rewrites Apple Terminal Return to CSI-u Shift+Enter when Shift is pressed", () => {
@@ -186,6 +186,140 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 		} finally {
 			harness.cleanup();
 			mock.timers.reset();
+		}
+	});
+});
+
+describe("parseFocusEvent", () => {
+	it("parses focus-in and focus-out events", () => {
+		assert.equal(parseFocusEvent("\x1b[I"), "in");
+		assert.equal(parseFocusEvent("\x1b[O"), "out");
+	});
+
+	it("ignores other sequences", () => {
+		assert.equal(parseFocusEvent("I"), undefined);
+		assert.equal(parseFocusEvent("\x1b[1I"), undefined);
+		assert.equal(parseFocusEvent("\x1b[Ix"), undefined);
+		assert.equal(parseFocusEvent("\x1b[A"), undefined);
+		assert.equal(parseFocusEvent(""), undefined);
+	});
+});
+
+describe("ProcessTerminal focus reporting", () => {
+	type FocusHarness = {
+		terminal: ProcessTerminal;
+		writes: string[];
+		inputs: string[];
+		focusChanges: boolean[];
+		send(data: string): void;
+		cleanup(): void;
+	};
+
+	function setupFocusHarness(): FocusHarness {
+		const terminal = new ProcessTerminal();
+		const writes: string[] = [];
+		const inputs: string[] = [];
+		const focusChanges: boolean[] = [];
+		let dataHandler: ((data: string) => void) | undefined;
+		let cleaned = false;
+		const previousWrite = process.stdout.write;
+		const previousOn = process.stdin.on;
+
+		process.stdout.write = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stdout.write;
+		process.stdin.on = ((event: string | symbol, listener: (...args: unknown[]) => void) => {
+			if (event === "data") dataHandler = listener as (data: string) => void;
+			return process.stdin;
+		}) as typeof process.stdin.on;
+
+		terminal.onFocusChange = (focused) => {
+			focusChanges.push(focused);
+		};
+		(terminal as unknown as { inputHandler?: (data: string) => void }).inputHandler = (data) => {
+			inputs.push(data);
+		};
+		(terminal as unknown as { queryAndEnableKittyProtocol(): void }).queryAndEnableKittyProtocol();
+
+		return {
+			terminal,
+			writes,
+			inputs,
+			focusChanges,
+			send(data: string): void {
+				dataHandler?.(data);
+			},
+			cleanup(): void {
+				if (cleaned) return;
+				cleaned = true;
+				try {
+					terminal.stop();
+				} finally {
+					process.stdout.write = previousWrite;
+					process.stdin.on = previousOn;
+					setKittyProtocolActive(false);
+				}
+			},
+		};
+	}
+
+	it("starts with unknown focus state", () => {
+		const harness = setupFocusHarness();
+		try {
+			assert.equal(harness.terminal.focusState, "unknown");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("tracks focus events without forwarding them as input", () => {
+		const harness = setupFocusHarness();
+		try {
+			harness.send("\x1b[O");
+			assert.equal(harness.terminal.focusState, "unfocused");
+
+			harness.send("\x1b[I");
+			assert.equal(harness.terminal.focusState, "focused");
+
+			assert.deepEqual(harness.focusChanges, [false, true]);
+			assert.deepEqual(harness.inputs, []);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("does not fire onFocusChange for repeated focus events", () => {
+		const harness = setupFocusHarness();
+		try {
+			harness.send("\x1b[I");
+			harness.send("\x1b[I");
+			assert.deepEqual(harness.focusChanges, [true]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("still forwards normal input", () => {
+		const harness = setupFocusHarness();
+		try {
+			harness.send("\x1b[I");
+			harness.send("a");
+			assert.deepEqual(harness.inputs, ["a"]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("disables focus reporting and resets state on stop", () => {
+		const harness = setupFocusHarness();
+		try {
+			harness.send("\x1b[I");
+			harness.cleanup();
+			assert.equal(harness.writes.includes("\x1b[?1004l"), true);
+			assert.equal(harness.terminal.focusState, "unknown");
+		} finally {
+			harness.cleanup();
 		}
 	});
 });

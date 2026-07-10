@@ -5,9 +5,11 @@
 ### Breaking Changes
 
 - Added required `Terminal.alert()` bell hook; custom `Terminal` implementations must implement it.
+- Added required `Terminal.focusState` getter (`"focused" | "unfocused" | "unknown"`); custom `Terminal` implementations must implement it.
 
 ### Added
 
+- Added terminal focus tracking to `ProcessTerminal`: focus reporting (DECSET 1004) is enabled while the terminal is started, focus events (`\x1b[I`/`\x1b[O`) are consumed instead of forwarded as input, and an optional `Terminal.onFocusChange` callback fires on changes. Exported `parseFocusEvent` and `TerminalFocusState`.
 - Exported `sliceByColumn` for ANSI-aware horizontal column slicing.
 
 ### Changed

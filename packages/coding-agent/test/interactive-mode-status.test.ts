@@ -122,6 +122,7 @@ describe("InteractiveMode.scheduleTurnDoneAlert", () => {
 		streaming?: boolean;
 		compacting?: boolean;
 		retrying?: boolean;
+		focusState?: "focused" | "unfocused" | "unknown";
 	}) {
 		return {
 			settingsManager: { getTurnDoneAlert: vi.fn(() => options?.alertMode ?? "bell") },
@@ -130,7 +131,7 @@ describe("InteractiveMode.scheduleTurnDoneAlert", () => {
 				isCompacting: options?.compacting ?? false,
 				isRetrying: options?.retrying ?? false,
 			},
-			ui: { terminal: { alert: vi.fn() } },
+			ui: { terminal: { alert: vi.fn(), focusState: options?.focusState ?? "unknown" } },
 			shutdownRequested: false,
 			isShuttingDown: false,
 			turnDoneAlertTimer: undefined,
@@ -216,6 +217,44 @@ describe("InteractiveMode.scheduleTurnDoneAlert", () => {
 			fakeThis.session.isCompacting = false;
 			vi.advanceTimersByTime(250);
 			expect(fakeThis.ui.terminal.alert).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("suppresses the alert while the terminal reports focus", () => {
+		vi.useFakeTimers();
+		try {
+			const fakeThis = createFakeThis({ focusState: "focused" });
+
+			(InteractiveMode as any).prototype.scheduleTurnDoneAlert.call(fakeThis, {
+				type: "agent_end",
+				willRetry: false,
+				messages: [{ role: "assistant", stopReason: "stop" }],
+			});
+
+			vi.runOnlyPendingTimers();
+			expect(fakeThis.ui.terminal.alert).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("alerts when the terminal is unfocused or focus reporting is unsupported", () => {
+		vi.useFakeTimers();
+		try {
+			for (const focusState of ["unfocused", "unknown"] as const) {
+				const fakeThis = createFakeThis({ focusState });
+
+				(InteractiveMode as any).prototype.scheduleTurnDoneAlert.call(fakeThis, {
+					type: "agent_end",
+					willRetry: false,
+					messages: [{ role: "assistant", stopReason: "stop" }],
+				});
+
+				vi.runOnlyPendingTimers();
+				expect(fakeThis.ui.terminal.alert).toHaveBeenCalledTimes(1);
+			}
 		} finally {
 			vi.useRealTimers();
 		}

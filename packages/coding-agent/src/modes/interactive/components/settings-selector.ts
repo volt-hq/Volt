@@ -519,7 +519,8 @@ export class SettingsSelectorComponent extends Container {
 			items.splice(terminalProgressIndex + 1, 0, {
 				id: "turn-done-alert",
 				label: "Turn done alert",
-				description: "Alert when Volt finishes a response: terminal bell or desktop notification",
+				description:
+					"Alert when Volt finishes a response while the terminal is unfocused: bell or desktop notification",
 				currentValue: config.turnDoneAlert ?? "off",
 				values: ["off", "bell", "notify"],
 			});

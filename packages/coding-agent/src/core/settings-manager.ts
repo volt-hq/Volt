@@ -39,7 +39,7 @@ export interface TerminalSettings {
 	imageWidthCells?: number; // default: 60 (preferred inline image width in terminal cells)
 	clearOnShrink?: boolean; // default: false (clear empty rows when content shrinks)
 	showTerminalProgress?: boolean; // default: false (OSC 9;4 terminal progress indicators)
-	turnDoneAlert?: TurnDoneAlert; // default: "off" (bell or desktop notification when a turn finishes)
+	turnDoneAlert?: TurnDoneAlert; // default: "off" (bell or desktop notification when a turn finishes while the terminal is unfocused)
 }
 
 export interface ImageSettings {

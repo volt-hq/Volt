@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added a dim duration suffix (e.g. `(3.2s)`) to the tool header once a tool call finishes, for executions of 1s or longer. Tool definitions whose renderers already display a duration (like the built-in bash tool) can opt out with the new `rendersDuration` flag.
+
 - Added `session_runtime_state.v1` discovery metadata: `list_sessions` can now identify desktop-owned, daemon-active, retained-detached, and draining session runtimes so clients can reconnect currently running agents without reviving every dormant session.
 - Added an `agent_settled` session/RPC event emitted when all tracked prompt work reaches a global idle boundary, after any final `agent_end`, automatic retries, overflow/threshold compaction continuations, and queued-message continuations have finished. A boundary may settle multiple overlapping prompt transactions, and handled/rejected preflight may settle without an `agent_end`. RPC client `waitForIdle()`, `collectEvents()`, and `promptAndWait()` now terminate on `agent_settled` instead of a raw `agent_end`.
 - Added proactive mid-run compaction: when a turn with tool calls pushes live context usage over the compaction threshold, the session stops the agent loop after that turn (via a new `Agent.shouldStopAfterTurn` hook wired through to the agent-loop), runs threshold compaction, and resumes the interrupted run, instead of waiting for the full agent/tool loop to finish. A failed attempt does not retrigger until a compaction succeeds or the next user prompt.
@@ -139,6 +141,7 @@
 
 ### Changed
 
+- Changed `terminal.turnDoneAlert` bell/notification alerts to be suppressed while the terminal window reports focus (via focus reporting, DECSET 1004). Terminals without focus reporting keep alerting as before.
 - Changed supported interactive Volt sessions to maintain a reconnecting daemon control client even when `remote.background` auto-start is disabled, so agents that were already running attach when another process starts the daemon.
 - Changed the default coding-agent prompt to use XML-delimited workflow, trust-boundary, and subagent-delegation guidance while preserving dynamic tool, project-context, skill, date, and working-directory injection.
 - Changed the built-in `general` subagent to inherit the parent tool posture while excluding `subagent`, preventing recursive delegation by default without dropping other active tools.

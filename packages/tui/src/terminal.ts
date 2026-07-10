@@ -18,6 +18,28 @@ const MAX_NOTIFICATION_TEXT_LENGTH = 200;
 export type NotificationProtocol = "osc99" | "osc777" | "osc9" | "bell";
 
 /**
+ * Focus state reported by the terminal via focus reporting (DECSET 1004).
+ * "unknown" until the terminal reports a focus event; terminals without
+ * focus reporting support never leave "unknown".
+ */
+export type TerminalFocusState = "focused" | "unfocused" | "unknown";
+
+const FOCUS_REPORTING_ENABLE_SEQUENCE = "\x1b[?1004h";
+const FOCUS_REPORTING_DISABLE_SEQUENCE = "\x1b[?1004l";
+const FOCUS_IN_SEQUENCE = "\x1b[I";
+const FOCUS_OUT_SEQUENCE = "\x1b[O";
+
+/**
+ * Parse a focus reporting event sent by terminals when focus reporting
+ * (DECSET 1004) is enabled. Returns undefined for any other sequence.
+ */
+export function parseFocusEvent(sequence: string): "in" | "out" | undefined {
+	if (sequence === FOCUS_IN_SEQUENCE) return "in";
+	if (sequence === FOCUS_OUT_SEQUENCE) return "out";
+	return undefined;
+}
+
+/**
  * Strip control characters (C0/C1, ESC, BEL) so notification text can never
  * break out of the OSC sequence, then collapse whitespace and cap the length.
  */
@@ -175,6 +197,16 @@ export interface Terminal {
 
 	// Desktop notification (falls back to the terminal bell when unsupported)
 	notify(title: string, body: string): void;
+
+	/**
+	 * Focus state reported by the terminal (focus reporting, DECSET 1004).
+	 * Stays "unknown" until the terminal reports a focus event, so callers can
+	 * distinguish "definitely focused" from "focus reporting unsupported".
+	 */
+	get focusState(): TerminalFocusState;
+
+	// Optional callback invoked when the terminal reports a focus change
+	onFocusChange?: (focused: boolean) => void;
 }
 
 /**
@@ -186,6 +218,8 @@ export class ProcessTerminal implements Terminal {
 	private resizeHandler?: () => void;
 	private _kittyProtocolActive = false;
 	private _modifyOtherKeysActive = false;
+	private _focusState: TerminalFocusState = "unknown";
+	public onFocusChange?: (focused: boolean) => void;
 	private keyboardProtocolPushed = false;
 	private keyboardProtocolNegotiationBuffer = "";
 	private keyboardProtocolBufferFlushTimer?: ReturnType<typeof setTimeout>;
@@ -215,6 +249,10 @@ export class ProcessTerminal implements Terminal {
 		return this._modifyOtherKeysActive;
 	}
 
+	get focusState(): TerminalFocusState {
+		return this._focusState;
+	}
+
 	start(onInput: (data: string) => void, onResize: () => void): void {
 		this.inputHandler = onInput;
 		this.resizeHandler = onResize;
@@ -229,6 +267,10 @@ export class ProcessTerminal implements Terminal {
 
 		// Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
 		process.stdout.write("\x1b[?2004h");
+
+		// Enable focus reporting - terminal sends \x1b[I / \x1b[O on focus changes.
+		// Terminals without support ignore this and focusState stays "unknown".
+		process.stdout.write(FOCUS_REPORTING_ENABLE_SEQUENCE);
 
 		// Set up resize handler immediately
 		process.stdout.on("resize", this.resizeHandler);
@@ -391,6 +433,11 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	private forwardInputSequence(sequence: string): void {
+		const focusEvent = parseFocusEvent(sequence);
+		if (focusEvent) {
+			this.handleFocusEvent(focusEvent === "in");
+			return;
+		}
 		if (!this.inputHandler) return;
 		const isAppleTerminal = sequence === "\r" && isAppleTerminalSession();
 		const input = normalizeAppleTerminalInput(
@@ -399,6 +446,13 @@ export class ProcessTerminal implements Terminal {
 			isAppleTerminal && isNativeModifierPressed("shift"),
 		);
 		this.inputHandler(input);
+	}
+
+	private handleFocusEvent(focused: boolean): void {
+		const next: TerminalFocusState = focused ? "focused" : "unfocused";
+		if (this._focusState === next) return;
+		this._focusState = next;
+		this.onFocusChange?.(focused);
 	}
 
 	private enableModifyOtherKeys(): void {
@@ -494,6 +548,10 @@ export class ProcessTerminal implements Terminal {
 
 		// Disable bracketed paste mode
 		process.stdout.write("\x1b[?2004l");
+
+		// Disable focus reporting
+		process.stdout.write(FOCUS_REPORTING_DISABLE_SEQUENCE);
+		this._focusState = "unknown";
 
 		const shouldDisableKittyProtocol = this.keyboardProtocolPushed || this._kittyProtocolActive;
 		this.clearKeyboardProtocolNegotiationBuffer();

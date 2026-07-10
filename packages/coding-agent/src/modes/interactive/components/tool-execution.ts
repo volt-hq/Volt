@@ -7,17 +7,51 @@ import {
 	Spacer,
 	Text,
 	type TUI,
+	visibleWidth,
 } from "@earendil-works/volt-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
-import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
+import { formatDuration, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { keyHint } from "./keybinding-hints.ts";
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
 	imageWidthCells?: number;
+}
+
+/**
+ * Wraps a component and appends a suffix (e.g. a dim duration) to its first
+ * non-empty rendered line when the suffix fits within the width.
+ */
+class FirstLineSuffix implements Component {
+	private component: Component;
+	private getSuffix: () => string | undefined;
+
+	constructor(component: Component, getSuffix: () => string | undefined) {
+		this.component = component;
+		this.getSuffix = getSuffix;
+	}
+
+	render(width: number): string[] {
+		const lines = this.component.render(width);
+		const suffix = this.getSuffix();
+		if (!suffix || lines.length === 0) return lines;
+		// Components like Text pad lines to full width with trailing spaces;
+		// strip that padding before measuring (the parent Box re-pads).
+		const index = lines.findIndex((line) => visibleWidth(line.replace(/ +$/, "")) > 0);
+		if (index === -1) return lines;
+		const line = lines[index]!.replace(/ +$/, "");
+		if (visibleWidth(line) + visibleWidth(suffix) + 1 > width) return lines;
+		const result = lines.slice();
+		result[index] = `${line} ${suffix}`;
+		return result;
+	}
+
+	invalidate(): void {
+		this.component.invalidate?.();
+	}
 }
 
 export class ToolExecutionComponent extends Container {
@@ -41,6 +75,8 @@ export class ToolExecutionComponent extends Container {
 	private ui: TUI;
 	private cwd: string;
 	private executionStarted = false;
+	private executionStartedAt?: number;
+	private executionDurationMs?: number;
 	private argsComplete = false;
 	private result?: {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
@@ -183,6 +219,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	markExecutionStarted(): void {
+		this.executionStartedAt ??= Date.now();
 		this.executionStarted = true;
 		this.updateDisplay();
 		this.ui.requestRender();
@@ -202,6 +239,9 @@ export class ToolExecutionComponent extends Container {
 		},
 		isPartial = false,
 	): void {
+		if (!isPartial && this.executionStartedAt !== undefined && this.executionDurationMs === undefined) {
+			this.executionDurationMs = Date.now() - this.executionStartedAt;
+		}
 		this.result = result;
 		this.isPartial = isPartial;
 		this.updateDisplay();
@@ -301,17 +341,17 @@ export class ToolExecutionComponent extends Container {
 
 			const callRenderer = this.getCallRenderer();
 			if (!callRenderer) {
-				renderContainer.addChild(this.createCallFallback());
+				renderContainer.addChild(this.withDurationSuffix(this.createCallFallback()));
 				hasContent = true;
 			} else {
 				try {
 					const component = callRenderer(this.args, theme, this.getRenderContext(this.callRendererComponent));
 					this.callRendererComponent = component;
-					renderContainer.addChild(component);
+					renderContainer.addChild(this.withDurationSuffix(component));
 					hasContent = true;
 				} catch {
 					this.callRendererComponent = undefined;
-					renderContainer.addChild(this.createCallFallback());
+					renderContainer.addChild(this.withDurationSuffix(this.createCallFallback()));
 					hasContent = true;
 				}
 			}
@@ -399,8 +439,42 @@ export class ToolExecutionComponent extends Container {
 		return getRenderedTextOutput(this.result, this.showImages);
 	}
 
+	/** Minimum completed duration before the tool header shows a duration suffix. */
+	private static readonly DURATION_DISPLAY_THRESHOLD_MS = 1000;
+
+	private withDurationSuffix(component: Component): Component {
+		return new FirstLineSuffix(component, () => this.getDurationSuffix());
+	}
+
+	private getDurationSuffix(): string | undefined {
+		if (
+			this.executionDurationMs === undefined ||
+			this.executionDurationMs < ToolExecutionComponent.DURATION_DISPLAY_THRESHOLD_MS ||
+			this.rendersOwnDuration()
+		) {
+			return undefined;
+		}
+		return theme.fg("dim", `(${formatDuration(this.executionDurationMs)})`);
+	}
+
+	/**
+	 * Whether the active result renderer already displays its own duration
+	 * (e.g. the built-in bash tool's "Elapsed/Took" line), indicated by the
+	 * rendersDuration flag on the definition that provides the renderer.
+	 */
+	private rendersOwnDuration(): boolean {
+		if (this.toolDefinition?.renderResult) {
+			return this.toolDefinition.rendersDuration === true;
+		}
+		return this.builtInToolDefinition?.rendersDuration === true;
+	}
+
 	private formatToolExecution(): string {
 		let text = theme.fg("toolTitle", theme.bold(this.toolName));
+		const durationSuffix = this.getDurationSuffix();
+		if (durationSuffix) {
+			text += ` ${durationSuffix}`;
+		}
 		const content = JSON.stringify(this.args, null, 2);
 		if (content) {
 			text += `\n\n${content}`;

@@ -2443,6 +2443,13 @@ export class InteractiveMode {
 				return;
 			}
 
+			// Skip the alert when the terminal reports that it is focused - the user
+			// is already looking at it. Terminals without focus reporting stay
+			// "unknown" and keep alerting as before.
+			if (this.ui.terminal.focusState === "focused") {
+				return;
+			}
+
 			if (this.settingsManager.getTurnDoneAlert() === "notify") {
 				const dir = path.basename(this.sessionManager.getCwd());
 				this.ui.terminal.notify("Volt", `Finished responding · ${dir}`);

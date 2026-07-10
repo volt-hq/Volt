@@ -65,8 +65,10 @@ export {
 	detectNotificationProtocol,
 	type NotificationProtocol,
 	ProcessTerminal,
+	parseFocusEvent,
 	sanitizeNotificationText,
 	type Terminal,
+	type TerminalFocusState,
 } from "./terminal.ts";
 // Terminal colors
 export { parseOsc11BackgroundColor, type RgbColor } from "./terminal-colors.ts";

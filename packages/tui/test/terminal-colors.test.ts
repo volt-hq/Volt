@@ -42,6 +42,10 @@ class TestTerminal implements Terminal {
 		return false;
 	}
 
+	get focusState(): "focused" | "unfocused" | "unknown" {
+		return "unknown";
+	}
+
 	moveBy(_lines: number): void {}
 
 	hideCursor(): void {}

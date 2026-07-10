@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { Text, type TUI } from "@earendil-works/volt-tui";
 import { Type } from "typebox";
-import { beforeAll, describe, expect, test } from "vitest";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { getReadmePath } from "../src/config.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
@@ -65,6 +65,10 @@ function createSubagentOutput(text: string): NonNullable<NonNullable<SubagentToo
 describe("ToolExecutionComponent parity", () => {
 	beforeAll(() => {
 		initTheme("dark");
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
 	});
 
 	test("stacks custom call and result renderers like the old implementation", () => {
@@ -635,6 +639,154 @@ describe("ToolExecutionComponent parity", () => {
 		expect(expanded).toContain("Step 2: second (user) completed");
 		expect(expanded).toContain("Task: Use {previous} to decide");
 		expect(expanded).toContain("second output");
+	});
+
+	test("appends a dim duration to the call header once execution completes", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text("custom call", 0, 0),
+			renderResult: () => new Text("custom result", 0, 0),
+		};
+
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-duration",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		const now = vi.spyOn(Date, "now");
+		now.mockReturnValue(1_000);
+		component.markExecutionStarted();
+
+		now.mockReturnValue(3_000);
+		component.updateResult({ content: [{ type: "text", text: "working" }], details: {}, isError: false }, true);
+		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("(2.0s)");
+
+		now.mockReturnValue(5_200);
+		component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("custom call (4.2s)");
+
+		// Duration is frozen at completion; later renders keep the same value
+		now.mockReturnValue(99_000);
+		component.invalidate();
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("custom call (4.2s)");
+	});
+
+	test("hides sub-second durations", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text("custom call", 0, 0),
+		};
+
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-duration-fast",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		const now = vi.spyOn(Date, "now");
+		now.mockReturnValue(1_000);
+		component.markExecutionStarted();
+		now.mockReturnValue(1_400);
+		component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
+
+		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("(0.4s)");
+	});
+
+	test("shows durations for tools without renderers and for restored history only when execution was observed", () => {
+		const now = vi.spyOn(Date, "now");
+
+		// No tool definition -> generic fallback rendering still gets the suffix
+		const fallbackComponent = new ToolExecutionComponent(
+			"mystery_tool",
+			"tool-duration-fallback",
+			{ foo: "bar" },
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+		now.mockReturnValue(1_000);
+		fallbackComponent.markExecutionStarted();
+		now.mockReturnValue(4_500);
+		fallbackComponent.updateResult({ content: [{ type: "text", text: "done" }], isError: false }, false);
+		expect(stripAnsi(fallbackComponent.render(120).join("\n"))).toContain("mystery_tool (3.5s)");
+
+		// Restored history never calls markExecutionStarted -> no duration
+		const restoredComponent = new ToolExecutionComponent(
+			"mystery_tool",
+			"tool-duration-restored",
+			{ foo: "bar" },
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+		now.mockReturnValue(9_000);
+		restoredComponent.updateResult({ content: [{ type: "text", text: "done" }], isError: false }, false);
+		expect(stripAnsi(restoredComponent.render(120).join("\n"))).not.toContain("s)");
+	});
+
+	test("does not add a second duration for the built-in bash renderer", () => {
+		const tool = createBashToolDefinition(process.cwd(), { operations: { exec: async () => ({ exitCode: 0 }) } });
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-duration-bash",
+			{ command: "sleep 5" },
+			{},
+			tool,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		const now = vi.spyOn(Date, "now");
+		now.mockReturnValue(1_000);
+		component.markExecutionStarted();
+		now.mockReturnValue(6_000);
+		component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
+
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("Took 5.0s");
+		expect(rendered.match(/5\.0s/g)?.length ?? 0).toBe(1);
+		expect(rendered).not.toContain("(5.0s)");
+	});
+
+	test("skips the duration suffix when the header line has no room", () => {
+		const longHeader = "x".repeat(60);
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text(longHeader, 0, 0),
+		};
+
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-duration-narrow",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		const now = vi.spyOn(Date, "now");
+		now.mockReturnValue(1_000);
+		component.markExecutionStarted();
+		now.mockReturnValue(3_500);
+		component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
+
+		// Box paddingX=1 leaves 62 columns for the header at width 64; the
+		// 60-char header plus " (2.5s)" does not fit and is dropped.
+		expect(stripAnsi(component.render(64).join("\n"))).not.toContain("(2.5s)");
+		expect(stripAnsi(component.render(120).join("\n"))).toContain(`${longHeader} (2.5s)`);
 	});
 
 	test("falls back when custom renderers are absent", () => {
