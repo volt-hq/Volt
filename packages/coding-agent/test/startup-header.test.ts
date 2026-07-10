@@ -39,6 +39,21 @@ describe("StartupHeaderComponent", () => {
 		}
 	});
 
+	it("uses the compact lockup when terminal height is constrained", () => {
+		const header = new StartupHeaderComponent({
+			version: "1.2.3",
+			compactInstructions: "esc interrupt · / commands",
+			expandedInstructions: "escape to interrupt",
+			expansionHint: "Press ctrl+o for more.",
+			onboarding: "Ask Volt to inspect, build, explain, or ship.",
+			getTerminalRows: () => 24,
+		});
+		const lines = header.render(120).map(stripAnsi);
+
+		expect(lines[0]).toContain("VOLT v1.2.3");
+		expect(lines.some((line) => line.includes("______"))).toBe(false);
+	});
+
 	it("prioritizes command details when expanded", () => {
 		const header = createHeader();
 		header.setExpanded(true);

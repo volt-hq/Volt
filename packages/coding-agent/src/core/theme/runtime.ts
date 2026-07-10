@@ -616,6 +616,7 @@ export function getEditorTheme(): EditorTheme {
 	return {
 		borderColor: (text: string) => theme.fg("borderMuted", text),
 		selectList: getSelectListTheme(),
+		placeholder: (text: string) => theme.fg("dim", text),
 	};
 }
 
@@ -626,5 +627,6 @@ export function getSettingsListTheme(): SettingsListTheme {
 		description: (text: string) => theme.fg("dim", text),
 		cursor: theme.fg("accent", "→ "),
 		hint: (text: string) => theme.fg("dim", text),
+		section: (text: string) => theme.bold(theme.fg("muted", text)),
 	};
 }

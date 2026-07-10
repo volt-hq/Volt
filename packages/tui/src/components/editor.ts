@@ -221,12 +221,14 @@ interface LayoutLine {
 export interface EditorTheme {
 	borderColor: (str: string) => string;
 	selectList: SelectListTheme;
+	placeholder?: (str: string) => string;
 }
 
 export interface EditorOptions {
 	paddingX?: number;
 	autocompleteMaxVisible?: number;
 	topBorderLabel?: string;
+	placeholder?: string;
 }
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -264,6 +266,7 @@ export class Editor implements Component, Focusable {
 	private theme: EditorTheme;
 	private paddingX: number = 0;
 	private topBorderLabel: string | undefined;
+	private placeholder: string | undefined;
 
 	// Store last render width for cursor navigation
 	private lastWidth: number = 80;
@@ -335,6 +338,7 @@ export class Editor implements Component, Focusable {
 		const maxVisible = options.autocompleteMaxVisible ?? 5;
 		this.autocompleteMaxVisible = Number.isFinite(maxVisible) ? Math.max(3, Math.min(20, Math.floor(maxVisible))) : 5;
 		this.topBorderLabel = options.topBorderLabel?.trim() || undefined;
+		this.placeholder = options.placeholder?.trim() || undefined;
 	}
 
 	setTopBorderLabel(label: string | undefined): void {
@@ -566,6 +570,12 @@ export class Editor implements Component, Focusable {
 					const cursor = "\x1b[7m \x1b[0m";
 					displayText = before + marker + cursor;
 					lineVisibleWidth = lineVisibleWidth + 1;
+					if (this.isEditorEmpty() && this.placeholder && lineVisibleWidth < contentWidth) {
+						const availablePlaceholderWidth = contentWidth - lineVisibleWidth;
+						const placeholder = truncateToWidth(` ${this.placeholder}`, availablePlaceholderWidth, "");
+						displayText += this.theme.placeholder?.(placeholder) ?? placeholder;
+						lineVisibleWidth += visibleWidth(placeholder);
+					}
 					// If cursor overflows content width into the padding, flag it
 					if (lineVisibleWidth > contentWidth && paddingX > 0) {
 						cursorInPadding = true;

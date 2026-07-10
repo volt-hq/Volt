@@ -32,6 +32,7 @@ export interface StartupHeaderOptions {
 	expansionHint: string;
 	onboarding: string;
 	expanded?: boolean;
+	getTerminalRows?: () => number;
 }
 
 /** Responsive Volt startup lockup and command deck. */
@@ -65,7 +66,8 @@ export class StartupHeaderComponent implements Component {
 			}
 		};
 
-		if (!this.expanded && width >= 100) {
+		const terminalRows = this.options.getTerminalRows?.() ?? 30;
+		if (!this.expanded && width >= 100 && terminalRows >= 30) {
 			for (const line of renderLogo(this.options.version).split("\n")) {
 				addLine(line);
 			}

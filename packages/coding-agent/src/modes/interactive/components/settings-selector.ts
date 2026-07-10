@@ -225,7 +225,7 @@ class SelectSubmenu extends Container {
 export class SettingsSelectorComponent extends Container {
 	private settingsList: SettingsList;
 
-	constructor(config: SettingsConfig, callbacks: SettingsCallbacks) {
+	constructor(config: SettingsConfig, callbacks: SettingsCallbacks, terminalRows: number = 24) {
 		super();
 
 		const supportsImages = getCapabilities().images;
@@ -526,12 +526,51 @@ export class SettingsSelectorComponent extends Container {
 			});
 		}
 
-		// Add borders
+		const sectionById: Record<string, string> = {
+			autocompact: "Agent",
+			thinking: "Agent",
+			"review-model": "Agent",
+			"hide-thinking": "Agent",
+			"steering-mode": "Messages",
+			"follow-up-mode": "Messages",
+			transport: "Messages",
+			"http-idle-timeout": "Messages",
+			theme: "Interface",
+			"collapse-changelog": "Interface",
+			"quiet-startup": "Interface",
+			"double-escape-action": "Interface",
+			"tree-filter-mode": "Interface",
+			"skill-commands": "Interface",
+			"show-hardware-cursor": "Interface",
+			"editor-padding": "Interface",
+			"autocomplete-max-visible": "Interface",
+			"show-images": "Images",
+			"image-width-cells": "Images",
+			"auto-resize-images": "Images",
+			"block-images": "Images",
+			"clear-on-shrink": "Terminal",
+			"terminal-progress": "Terminal",
+			"turn-done-alert": "Terminal",
+			"install-telemetry": "Privacy & trust",
+			"default-project-trust": "Privacy & trust",
+			warnings: "Privacy & trust",
+		};
+		const sectionOrder = ["Agent", "Messages", "Interface", "Images", "Terminal", "Privacy & trust"];
+		for (const item of items) {
+			item.section = sectionById[item.id];
+		}
+		items.sort((a, b) => sectionOrder.indexOf(a.section ?? "") - sectionOrder.indexOf(b.section ?? ""));
+
+		// Add borders and persistent wayfinding.
 		this.addChild(new DynamicBorder());
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.bold(theme.fg("accent", "Settings")), 1, 0));
+		this.addChild(new Text(theme.fg("dim", `${items.length} options · type to search`), 1, 0));
+		this.addChild(new Spacer(1));
 
 		this.settingsList = new SettingsList(
 			items,
-			10,
+			Math.max(5, Math.min(12, terminalRows - 16)),
 			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {

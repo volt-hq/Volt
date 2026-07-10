@@ -13,6 +13,8 @@ export interface SettingItem {
 	description?: string;
 	/** Current value to display (right side) */
 	currentValue: string;
+	/** Optional section heading used to group related settings */
+	section?: string;
 	/** If provided, Enter/Space cycles through these values */
 	values?: string[];
 	/** If provided, Enter opens this submenu. Receives current value and done callback. */
@@ -25,6 +27,7 @@ export interface SettingsListTheme {
 	description: (text: string) => string;
 	cursor: string;
 	hint: (text: string) => string;
+	section?: (text: string) => string;
 }
 
 export interface SettingsListOptions {
@@ -124,6 +127,13 @@ export class SettingsList implements Component {
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = displayItems[i];
 			if (!item) continue;
+
+			const previousSection = i > startIndex ? displayItems[i - 1]?.section : undefined;
+			if (item.section && (i === startIndex || item.section !== previousSection)) {
+				if (i > startIndex) lines.push("");
+				const sectionText = `  ${item.section.toUpperCase()}`;
+				lines.push(truncateToWidth(this.theme.section?.(sectionText) ?? this.theme.hint(sectionText), width));
+			}
 
 			const isSelected = i === this.selectedIndex;
 			const prefix = isSelected ? this.theme.cursor : "  ";

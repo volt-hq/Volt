@@ -181,6 +181,7 @@ import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
+import { type HotkeySection, HotkeysComponent } from "./components/hotkeys.ts";
 import {
 	type AcquireOutcome,
 	createDaemonAttach,
@@ -572,6 +573,8 @@ export class InteractiveMode {
 		this.defaultEditor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
 			paddingX: editorPaddingX,
 			autocompleteMaxVisible,
+			topBorderLabel: "ASK VOLT",
+			placeholder: "Type a request or / for commands",
 		});
 		this.editor = this.defaultEditor;
 		this.editorContainer = new Container();
@@ -908,6 +911,7 @@ export class InteractiveMode {
 				expansionHint: compactOnboarding,
 				onboarding,
 				expanded: this.getStartupExpansionState(),
+				getTerminalRows: () => this.ui.terminal.rows,
 			});
 
 			// Setup UI layout
@@ -2887,7 +2891,7 @@ export class InteractiveMode {
 			if (newEditor.setPaddingX !== undefined) {
 				newEditor.setPaddingX(this.defaultEditor.getPaddingX());
 			}
-			newEditor.setTopBorderLabel?.(this.isBashMode ? "SHELL" : undefined);
+			newEditor.setTopBorderLabel?.(this.isBashMode ? "SHELL" : "ASK VOLT");
 
 			// Set autocomplete if supported
 			if (newEditor.setAutocompleteProvider && this.autocompleteProvider) {
@@ -4342,7 +4346,7 @@ export class InteractiveMode {
 		} else {
 			const level = this.session.thinkingLevel || "off";
 			this.editor.borderColor = theme.getThinkingBorderColor(level);
-			this.editor.setTopBorderLabel?.(undefined);
+			this.editor.setTopBorderLabel?.("ASK VOLT");
 		}
 		this.ui.requestRender();
 	}
@@ -4950,6 +4954,7 @@ export class InteractiveMode {
 						this.ui.requestRender();
 					},
 				},
+				this.ui.terminal.rows,
 			);
 			return { component: selector, focus: selector.getSettingsList() };
 		});
@@ -7310,77 +7315,86 @@ export class InteractiveMode {
 		const pasteImage = this.getAppKeyDisplay("app.clipboard.pasteImage");
 		const openSubagents = this.getAppKeyDisplay("app.subagents.open");
 
-		let hotkeys = `
-**Navigation**
-| Key | Action |
-|-----|--------|
-| \`${cursorUp}\` / \`${cursorDown}\` / \`${cursorLeft}\` / \`${cursorRight}\` | Move cursor / browse history |
-| \`${cursorWordLeft}\` / \`${cursorWordRight}\` | Move by word |
-| \`${cursorLineStart}\` | Start of line |
-| \`${cursorLineEnd}\` | End of line |
-| \`${jumpForward}\` | Jump forward to character |
-| \`${jumpBackward}\` | Jump backward to character |
-| \`${pageUp}\` / \`${pageDown}\` | Scroll by page |
+		const sections: HotkeySection[] = [
+			{
+				title: "Navigation",
+				entries: [
+					{ key: `${cursorUp} / ${cursorDown}`, action: "Move vertically / browse history" },
+					{ key: `${cursorLeft} / ${cursorRight}`, action: "Move horizontally" },
+					{ key: cursorWordLeft, action: "Move one word left" },
+					{ key: cursorWordRight, action: "Move one word right" },
+					{ key: cursorLineStart, action: "Start of line" },
+					{ key: cursorLineEnd, action: "End of line" },
+					{ key: jumpForward, action: "Jump forward to character" },
+					{ key: jumpBackward, action: "Jump backward to character" },
+					{ key: `${pageUp} / ${pageDown}`, action: "Scroll by page" },
+				],
+			},
+			{
+				title: "Editing",
+				entries: [
+					{ key: submit, action: "Send message" },
+					{
+						key: newLine,
+						action: `New line${process.platform === "win32" ? " (Ctrl+Enter on Windows Terminal)" : ""}`,
+					},
+					{ key: deleteWordBackward, action: "Delete word backwards" },
+					{ key: deleteWordForward, action: "Delete word forwards" },
+					{ key: deleteToLineStart, action: "Delete to start of line" },
+					{ key: deleteToLineEnd, action: "Delete to end of line" },
+					{ key: yank, action: "Paste the most-recently-deleted text" },
+					{ key: yankPop, action: "Cycle through deleted text after pasting" },
+					{ key: undo, action: "Undo" },
+				],
+			},
+			{
+				title: "Application",
+				entries: [
+					{ key: tab, action: "Path completion / accept autocomplete" },
+					{ key: interrupt, action: "Cancel autocomplete / abort streaming" },
+					{ key: clear, action: "Clear editor (first) / exit (second)" },
+					{ key: exit, action: "Exit when editor is empty" },
+					{ key: suspend, action: "Suspend to background" },
+					{ key: cycleThinkingLevel, action: "Cycle thinking level" },
+					{ key: `${cycleModelForward} / ${cycleModelBackward}`, action: "Cycle models" },
+					{ key: selectModel, action: "Open model selector" },
+					{ key: expandTools, action: "Toggle tool output expansion" },
+					{ key: toggleThinking, action: "Toggle thinking block visibility" },
+					{ key: externalEditor, action: "Edit message in external editor" },
+					{ key: followUp, action: "Queue follow-up message" },
+					{ key: dequeue, action: "Restore queued messages" },
+					{ key: pasteImage, action: "Paste image from clipboard" },
+					{ key: openSubagents, action: "Inspect subagent conversations and tool flow" },
+					{ key: "/", action: "Slash commands" },
+					{ key: "!", action: "Run bash command" },
+					{ key: "!!", action: "Run bash command (excluded from context)" },
+				],
+			},
+		];
 
-**Editing**
-| Key | Action |
-|-----|--------|
-| \`${submit}\` | Send message |
-| \`${newLine}\` | New line${process.platform === "win32" ? " (Ctrl+Enter on Windows Terminal)" : ""} |
-| \`${deleteWordBackward}\` | Delete word backwards |
-| \`${deleteWordForward}\` | Delete word forwards |
-| \`${deleteToLineStart}\` | Delete to start of line |
-| \`${deleteToLineEnd}\` | Delete to end of line |
-| \`${yank}\` | Paste the most-recently-deleted text |
-| \`${yankPop}\` | Cycle through the deleted text after pasting |
-| \`${undo}\` | Undo |
-
-**Other**
-| Key | Action |
-|-----|--------|
-| \`${tab}\` | Path completion / accept autocomplete |
-| \`${interrupt}\` | Cancel autocomplete / abort streaming |
-| \`${clear}\` | Clear editor (first) / exit (second) |
-| \`${exit}\` | Exit (when editor is empty) |
-| \`${suspend}\` | Suspend to background |
-| \`${cycleThinkingLevel}\` | Cycle thinking level |
-| \`${cycleModelForward}\` / \`${cycleModelBackward}\` | Cycle models |
-| \`${selectModel}\` | Open model selector |
-| \`${expandTools}\` | Toggle tool output expansion |
-| \`${toggleThinking}\` | Toggle thinking block visibility |
-| \`${externalEditor}\` | Edit message in external editor |
-| \`${followUp}\` | Queue follow-up message |
-| \`${dequeue}\` | Restore queued messages |
-| \`${pasteImage}\` | Paste image from clipboard |
-| \`${openSubagents}\` | Inspect subagent conversations and tool flow |
-| \`/\` | Slash commands |
-| \`!\` | Run bash command |
-| \`!!\` | Run bash command (excluded from context) |
-`;
-
-		// Add extension-registered shortcuts
-		const extensionRunner = this.session.extensionRunner;
-		const shortcuts = extensionRunner.getShortcuts(this.keybindings.getEffectiveConfig());
+		const shortcuts = this.session.extensionRunner.getShortcuts(this.keybindings.getEffectiveConfig());
 		if (shortcuts.size > 0) {
-			hotkeys += `
-**Extensions**
-| Key | Action |
-|-----|--------|
-`;
-			for (const [key, shortcut] of shortcuts) {
-				const description = shortcut.description ?? shortcut.extensionPath;
-				const keyDisplay = formatKeyText(key, { capitalize: true });
-				hotkeys += `| \`${keyDisplay}\` | ${description} |\n`;
-			}
+			sections.push({
+				title: "Extensions",
+				entries: Array.from(shortcuts, ([key, shortcut]) => ({
+					key: formatKeyText(key, { capitalize: true }),
+					action: shortcut.description ?? shortcut.extensionPath,
+				})),
+			});
 		}
 
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder());
-		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Keyboard Shortcuts")), 1, 0));
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Markdown(hotkeys.trim(), 1, 1, this.getMarkdownThemeWithSettings()));
-		this.chatContainer.addChild(new DynamicBorder());
-		this.ui.requestRender();
+		this.showSelector((done) => {
+			const hotkeys = new HotkeysComponent(
+				sections,
+				() => this.ui.terminal.rows,
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+				() => this.ui.requestRender(),
+			);
+			return { component: hotkeys, focus: hotkeys };
+		});
 	}
 
 	private async handleClearCommand(): Promise<void> {
