@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/volt-agent-core";
@@ -29,20 +29,33 @@ vi.mock("../src/core/compaction/index.js", () => ({
 	estimateContextTokens: (
 		messages: Array<{
 			role: string;
+			content?: Array<{ type: string; text?: string; thinking?: string }>;
 			usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens?: number };
 			stopReason?: string;
 		}>,
 	) => {
-		// Walk backwards to find last non-error, non-aborted assistant with usage
+		const estimateMessageTokens = (message: (typeof messages)[number]) =>
+			Math.ceil(
+				(message.content ?? []).reduce(
+					(chars, part) => chars + (part.text?.length ?? 0) + (part.thinking?.length ?? 0),
+					0,
+				) / 4,
+			);
+		// Walk backwards to find last non-error, non-aborted assistant with usage,
+		// then include tool results and other messages appended after that request.
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const msg = messages[i];
 			if (msg.role === "assistant" && msg.stopReason !== "error" && msg.stopReason !== "aborted" && msg.usage) {
-				const tokens =
+				const usageTokens =
 					msg.usage.totalTokens ?? msg.usage.input + msg.usage.output + msg.usage.cacheRead + msg.usage.cacheWrite;
-				return { tokens, usageTokens: tokens, trailingTokens: 0, lastUsageIndex: i };
+				const trailingTokens = messages
+					.slice(i + 1)
+					.reduce((total, message) => total + estimateMessageTokens(message), 0);
+				return { tokens: usageTokens + trailingTokens, usageTokens, trailingTokens, lastUsageIndex: i };
 			}
 		}
-		return { tokens: 0, usageTokens: 0, trailingTokens: 0, lastUsageIndex: null };
+		const tokens = messages.reduce((total, message) => total + estimateMessageTokens(message), 0);
+		return { tokens, usageTokens: 0, trailingTokens: tokens, lastUsageIndex: null };
 	},
 	generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
 	prepareCompaction: () => ({ dummy: true }),
@@ -277,6 +290,90 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
 	});
 
+	it("should include newly appended tool results in proactive threshold checks", async () => {
+		const model = session.model!;
+		writeFileSync(join(tempDir, "large-result.txt"), "x".repeat(40_000));
+		let streamCallCount = 0;
+		let streamCallsAtCompactionStart = -1;
+		session.subscribe((event) => {
+			if (event.type === "compaction_start") {
+				streamCallsAtCompactionStart = streamCallCount;
+			}
+		});
+
+		session.agent.streamFn = () => {
+			const callNumber = ++streamCallCount;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message: AssistantMessage = {
+					role: "assistant",
+					content:
+						callNumber === 1
+							? [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "large-result.txt" } }]
+							: [{ type: "text", text: "finished after tool-result compaction" }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: callNumber === 1 ? model.contextWindow - 20_000 : 100,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: callNumber === 1 ? model.contextWindow - 20_000 : 100,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: callNumber === 1 ? "toolUse" : "stop",
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: message.stopReason === "toolUse" ? "toolUse" : "stop", message });
+			});
+			return stream;
+		};
+
+		await session.prompt("trigger compaction from a large tool result");
+
+		expect(streamCallsAtCompactionStart).toBe(1);
+		expect(streamCallCount).toBe(2);
+	});
+
+	it("should not resume after proactive checks for a terminating tool batch", async () => {
+		const model = session.model!;
+		let streamCallCount = 0;
+		session.agent.afterToolCall = async () => ({ terminate: true });
+		session.agent.streamFn = () => {
+			streamCallCount += 1;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "missing.txt" } }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: model.contextWindow - 10_000,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: model.contextWindow - 10_000,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "toolUse", message });
+			});
+			return stream;
+		};
+
+		await session.prompt("run terminating tool");
+
+		expect(streamCallCount).toBe(1);
+		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
+	});
+
 	it("should not continue after disposal during proactive compaction", async () => {
 		const model = session.model!;
 		const compactionStarted = createDeferred();
@@ -337,26 +434,36 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 	it("should stop proactively only once until a compaction succeeds", async () => {
 		const model = session.model!;
-		const context = {
-			message: {
-				role: "assistant",
-				content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "x" } }],
-				api: model.api,
-				provider: model.provider,
-				model: model.id,
-				usage: {
-					input: model.contextWindow - 10_000,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: model.contextWindow - 10_000,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				stopReason: "toolUse",
-				timestamp: Date.now(),
+		const message = {
+			role: "assistant" as const,
+			content: [{ type: "toolCall" as const, id: "call-1", name: "read", arguments: { path: "x" } }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: model.contextWindow - 10_000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: model.contextWindow - 10_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
-			toolResults: [{ role: "toolResult", toolCallId: "call-1", toolName: "read", content: [], isError: true }],
-			context: { systemPrompt: "", messages: [], tools: [] },
+			stopReason: "toolUse" as const,
+			timestamp: Date.now(),
+		};
+		const toolResult = {
+			role: "toolResult" as const,
+			toolCallId: "call-1",
+			toolName: "read",
+			content: [],
+			isError: true,
+			timestamp: Date.now(),
+		};
+		const context = {
+			message,
+			toolResults: [toolResult],
+			toolBatchTerminated: false,
+			context: { systemPrompt: "", messages: [message, toolResult], tools: [] },
 			newMessages: [],
 		};
 

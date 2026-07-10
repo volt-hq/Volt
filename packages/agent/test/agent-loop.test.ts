@@ -994,6 +994,7 @@ describe("agentLoop with AgentMessage", () => {
 		let followUpPolls = 0;
 		let callbackToolResultIds: string[] = [];
 		let callbackContextRoles: string[] = [];
+		let callbackToolBatchTerminated: boolean | undefined;
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
@@ -1005,10 +1006,11 @@ describe("agentLoop with AgentMessage", () => {
 				followUpPolls++;
 				return [createUserMessage("follow up should stay queued")];
 			},
-			shouldStopAfterTurn: async ({ message, toolResults, context }) => {
+			shouldStopAfterTurn: async ({ message, toolResults, toolBatchTerminated, context }) => {
 				expect(message.role).toBe("assistant");
 				callbackToolResultIds = toolResults.map((toolResult) => toolResult.toolCallId);
 				callbackContextRoles = context.messages.map((contextMessage) => contextMessage.role);
+				callbackToolBatchTerminated = toolBatchTerminated;
 				return true;
 			},
 		};
@@ -1047,6 +1049,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(followUpPolls).toBe(0);
 		expect(callbackToolResultIds).toEqual(["tool-1"]);
 		expect(callbackContextRoles).toEqual(["user", "assistant", "toolResult"]);
+		expect(callbackToolBatchTerminated).toBe(false);
 		expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
 		expect(events.map((event) => event.type)).toEqual([
 			"agent_start",
@@ -1086,9 +1089,14 @@ describe("agentLoop with AgentMessage", () => {
 			tools: [tool],
 		};
 
+		let toolBatchTerminated: boolean | undefined;
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
+			shouldStopAfterTurn: (turn) => {
+				toolBatchTerminated = turn.toolBatchTerminated;
+				return false;
+			},
 		};
 
 		let llmCalls = 0;
@@ -1112,6 +1120,7 @@ describe("agentLoop with AgentMessage", () => {
 
 		const messages = await stream.result();
 		expect(llmCalls).toBe(1);
+		expect(toolBatchTerminated).toBe(true);
 		expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
 		expect(events.filter((event) => event.type === "turn_end")).toHaveLength(1);
 	});

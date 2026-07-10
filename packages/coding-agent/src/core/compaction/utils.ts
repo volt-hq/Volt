@@ -102,12 +102,27 @@ const CONVERSATION_HEAD_BUDGET_RATIO = 0.25;
 
 /**
  * Truncate text to a maximum character length for summarization.
- * Keeps the beginning and appends a truncation marker.
+ * Keeps the beginning and appends a truncation marker when the budget permits.
  */
 function truncateForSummary(text: string, maxChars: number): string {
-	if (text.length <= maxChars) return text;
-	const truncatedChars = text.length - maxChars;
-	return `${text.slice(0, maxChars)}\n\n[... ${truncatedChars} more characters truncated]`;
+	const budget = Number.isFinite(maxChars) ? Math.max(0, Math.floor(maxChars)) : text.length;
+	if (text.length <= budget) return text;
+
+	let keptChars = budget;
+	while (keptChars >= 0) {
+		const truncatedChars = text.length - keptChars;
+		const marker = `\n\n[... ${truncatedChars} more characters truncated]`;
+		if (marker.length > budget) {
+			return text.slice(0, budget);
+		}
+		const nextKeptChars = Math.min(keptChars, budget - marker.length);
+		if (nextKeptChars === keptChars) {
+			return `${text.slice(0, keptChars)}${marker}`;
+		}
+		keptChars = nextKeptChars;
+	}
+
+	return "";
 }
 
 /**
@@ -183,35 +198,59 @@ export function serializeConversation(messages: Message[], options?: { maxChars?
  * misleading, cherry-picked narrative.
  */
 function joinPartsWithinBudget(parts: string[], maxChars: number): string {
+	const budget = Number.isFinite(maxChars) ? Math.max(0, Math.floor(maxChars)) : Number.MAX_SAFE_INTEGER;
 	const full = parts.join("\n\n");
-	if (full.length <= maxChars) {
+	if (full.length <= budget) {
 		return full;
 	}
+	if (parts.length === 0 || budget === 0) {
+		return "";
+	}
+	if (parts.length === 1) {
+		return truncateForSummary(parts[0], budget);
+	}
 
-	const head = truncateForSummary(parts[0], Math.floor(maxChars * CONVERSATION_HEAD_BUDGET_RATIO));
-	// Reserve room for the omission marker and separators so the joined output
-	// stays within maxChars even after head truncation appends its own marker.
-	const tailBudget = maxChars - head.length - 100;
+	const head = truncateForSummary(parts[0], Math.max(1, Math.floor(budget * CONVERSATION_HEAD_BUDGET_RATIO)));
 	const tail: string[] = [];
-	let used = 0;
 	let omittedCount = parts.length - 1;
+	let marker = createConversationOmissionMarker(omittedCount, head, tail, budget);
+	if (marker === undefined) {
+		return truncateForSummary(parts[0], budget);
+	}
+
 	for (let i = parts.length - 1; i >= 1; i--) {
-		const part = parts[i];
-		if (used + part.length + 2 > tailBudget) {
+		const candidateTail = [parts[i], ...tail];
+		const candidateOmittedCount = i - 1;
+		const candidateMarker = createConversationOmissionMarker(candidateOmittedCount, head, candidateTail, budget);
+		if (candidateMarker === undefined) {
 			break;
 		}
-		tail.unshift(part);
-		used += part.length + 2;
-		omittedCount = i - 1;
+		tail.unshift(parts[i]);
+		omittedCount = candidateOmittedCount;
+		marker = candidateMarker;
 	}
 
+	return [head, ...(omittedCount === 0 ? [] : [marker]), ...tail].join("\n\n");
+}
+
+function createConversationOmissionMarker(
+	omittedCount: number,
+	head: string,
+	tail: string[],
+	budget: number,
+): string | undefined {
 	if (omittedCount === 0) {
-		// Over budget only because the opening part itself was huge; its own
-		// truncation marker already explains the cut.
-		return [head, ...tail].join("\n\n");
+		return [head, ...tail].join("\n\n").length <= budget ? "" : undefined;
 	}
-	const marker = `[... ${omittedCount} earlier conversation ${omittedCount === 1 ? "part" : "parts"} omitted to fit the summarization budget ...]`;
-	return [head, marker, ...tail].join("\n\n");
+
+	const fullMarker = `[... ${omittedCount} earlier conversation ${omittedCount === 1 ? "part" : "parts"} omitted to fit the summarization budget ...]`;
+	const compactMarker = `[... ${omittedCount} earlier ${omittedCount === 1 ? "part" : "parts"} omitted ...]`;
+	for (const marker of [fullMarker, compactMarker]) {
+		if ([head, marker, ...tail].join("\n\n").length <= budget) {
+			return marker;
+		}
+	}
+	return undefined;
 }
 
 // ============================================================================

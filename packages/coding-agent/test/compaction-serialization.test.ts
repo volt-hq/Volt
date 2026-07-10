@@ -27,10 +27,10 @@ describe("serializeConversation", () => {
 		const result = serializeConversation(messages);
 
 		expect(result).toContain("[Tool result]:");
-		expect(result).toContain("[... 3000 more characters truncated]");
-		expect(result).not.toContain("x".repeat(3000));
-		// First 2000 chars should be present
-		expect(result).toContain("x".repeat(2000));
+		expect(result).toMatch(/\[\.\.\. \d+ more characters truncated\]/);
+		expect(result.length).toBeLessThanOrEqual(2000 + "[Tool result]: ".length);
+		expect(result).toContain("x".repeat(1900));
+		expect(result).not.toContain("x".repeat(2000));
 	});
 
 	it("should not truncate short tool results", () => {
@@ -120,6 +120,14 @@ describe("serializeConversation", () => {
 		expect(result).toContain("NEWEST");
 		expect(result).toContain("1 earlier conversation part omitted");
 		expect(result).not.toContain("middle ");
+	});
+
+	it.each([0, 1, 50, 100])("should honor a small aggregate budget of %i characters", (maxChars) => {
+		const messages = [userMessage("g".repeat(500)), userMessage("n".repeat(500))];
+
+		const result = serializeConversation(messages, { maxChars });
+
+		expect(result.length).toBeLessThanOrEqual(maxChars);
 	});
 
 	it("should not add an omission marker when under budget", () => {

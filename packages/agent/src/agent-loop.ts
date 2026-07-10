@@ -213,11 +213,13 @@ async function runLoop(
 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
 
 			const toolResults: ToolResultMessage[] = [];
+			let toolBatchTerminated = false;
 			hasMoreToolCalls = false;
 			if (toolCalls.length > 0) {
 				const executedToolBatch = await executeToolCalls(currentContext, message, config, signal, emit);
 				toolResults.push(...executedToolBatch.messages);
-				hasMoreToolCalls = !executedToolBatch.terminate;
+				toolBatchTerminated = executedToolBatch.terminate;
+				hasMoreToolCalls = !toolBatchTerminated;
 
 				for (const result of toolResults) {
 					currentContext.messages.push(result);
@@ -230,6 +232,7 @@ async function runLoop(
 			const nextTurnContext = {
 				message,
 				toolResults,
+				toolBatchTerminated,
 				context: currentContext,
 				newMessages,
 			};
@@ -252,6 +255,7 @@ async function runLoop(
 				await config.shouldStopAfterTurn?.({
 					message,
 					toolResults,
+					toolBatchTerminated,
 					context: currentContext,
 					newMessages,
 				})

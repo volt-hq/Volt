@@ -2109,16 +2109,20 @@ export class AgentSession {
 		try {
 			if (this._disposed || this._proactiveCompactionAttempted) return false;
 			// Only interrupt turns that would otherwise continue with another LLM
-			// call. When the turn produced no tool results the run ends anyway and
-			// the ordinary post-run threshold check applies.
-			if (context.toolResults.length === 0) return false;
+			// call. When the turn produced no tool results or every tool requested
+			// termination, the run ends anyway and the ordinary post-run threshold
+			// check applies without forcing a continuation.
+			if (context.toolResults.length === 0 || context.toolBatchTerminated) return false;
 			const message = context.message;
 			if (message.stopReason === "aborted" || message.stopReason === "error") return false;
 			const settings = this.settingsManager.getCompactionSettings();
 			if (!settings.enabled) return false;
 			const model = this.model;
 			if (!model || message.provider !== model.provider || message.model !== model.id) return false;
-			const contextTokens = calculateContextTokens(message.usage);
+			// Provider usage predates this turn's tool execution. Estimate from the
+			// live context so newly appended tool results are included before the
+			// loop starts another provider request.
+			const contextTokens = estimateContextTokens(context.context.messages).tokens;
 			if (!shouldCompact(contextTokens, model.contextWindow ?? 0, settings)) return false;
 			this._proactiveCompactionAttempted = true;
 			this._proactiveCompactionStopped = true;
