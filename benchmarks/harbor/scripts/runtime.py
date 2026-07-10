@@ -35,6 +35,8 @@ BASE_ENV_NAMES = frozenset(
         "PATH",
         "PATHEXT",
         "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMW6432",
         "SHELL",
         "SYSTEMROOT",
         "TEMP",

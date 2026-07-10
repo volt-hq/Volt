@@ -312,7 +312,7 @@ class VoltAgent(BaseInstalledAgent):
         reasoning_effort: str = "high",
         custom_provider: bool = True,
         auth_path_env: str | None = None,
-        package_dir_env: str = "VOLT_PACKAGE_DIR",
+        package_dir_env: str = "VOLT_HARBOR_PACKAGE_DIR",
         base_url_env: str = "OPENAI_BASE_URL",
         api_key_env: str = "OPENAI_API_KEY",
         api: str = "openai-responses",

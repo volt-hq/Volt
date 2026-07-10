@@ -43,6 +43,8 @@ class RuntimeTests(unittest.TestCase):
         child = minimal_child_environment(
             {
                 "PATH": "path",
+                "ProgramFiles": "program-files",
+                "ProgramW6432": "program-w6432",
                 "AWS_SECRET_ACCESS_KEY": "secret",
                 "GITHUB_PAT": "also-secret",
                 "CI_JOB_JWT": "also-secret",
@@ -51,7 +53,12 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(
             child,
-            {"PATH": "path", "PILOT_GATEWAY_KEY": "allowed"},
+            {
+                "PATH": "path",
+                "ProgramFiles": "program-files",
+                "ProgramW6432": "program-w6432",
+                "PILOT_GATEWAY_KEY": "allowed",
+            },
         )
         self.assertEqual(validate_job_name("pilot-2026.07_10"), "pilot-2026.07_10")
         with self.assertRaises(ValueError):

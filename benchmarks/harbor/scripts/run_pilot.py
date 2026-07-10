@@ -408,7 +408,7 @@ def main() -> int:
         "PILOT_ANTHROPIC_BASE_URL": container_url,
     }
     if args.volt_package_dir:
-        additions["VOLT_PACKAGE_DIR"] = str(args.volt_package_dir.resolve())
+        additions["VOLT_HARBOR_PACKAGE_DIR"] = str(args.volt_package_dir.resolve())
     child_env = minimal_child_environment(os.environ, additions=additions)
 
     job_name = validate_job_name(

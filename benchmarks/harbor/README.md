@@ -56,7 +56,7 @@ npm run release:local -- \
   --out /tmp/volt-eval-release --force --skip-install --skip-bun-install
 ```
 
-Use `/tmp/volt-eval-release/tarballs` as `VOLT_PACKAGE_DIR` or `--volt-package-dir`. Launchers validate every package name/version and record every SHA-256 digest.
+Use `/tmp/volt-eval-release/tarballs` as `VOLT_HARBOR_PACKAGE_DIR` or `--volt-package-dir`. Launchers validate every package name/version and record every SHA-256 digest. `VOLT_HARBOR_PACKAGE_DIR` is intentionally distinct from Volt's own `VOLT_PACKAGE_DIR` runtime asset override.
 
 ## Reproduce the task manifest
 
@@ -124,7 +124,7 @@ export PILOT_OPENAI_BASE_URL="$PILOT_GATEWAY_URL/v1"
 export OPENAI_BASE_URL="$PILOT_OPENAI_BASE_URL"
 export OPENAI_API_KEY="$PILOT_GATEWAY_KEY"
 # Required until all four exact workspace packages are published:
-export VOLT_PACKAGE_DIR='/tmp/volt-eval-release/tarballs'
+export VOLT_HARBOR_PACKAGE_DIR='/tmp/volt-eval-release/tarballs'
 
 uv run --project benchmarks/harbor --frozen harbor run \
   --config benchmarks/harbor/configs/smoke-volt.yaml --yes

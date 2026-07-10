@@ -12,7 +12,7 @@ agents:
     model_name: anthropic/claude-sonnet-4-5
     env:
       VOLT_AUTH_JSON_PATH: ${VOLT_AUTH_JSON_PATH}
-      VOLT_PACKAGE_DIR: ${VOLT_PACKAGE_DIR:-}
+      VOLT_HARBOR_PACKAGE_DIR: ${VOLT_HARBOR_PACKAGE_DIR:-}
     kwargs:
       version: 0.79.6
       node_version: 22.22.0

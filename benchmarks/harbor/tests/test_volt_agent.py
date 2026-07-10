@@ -167,7 +167,7 @@ class VoltAgentTests(unittest.TestCase):
                 version="0.79.6",
                 extra_env={
                     "OPENAI_API_KEY": "test-key",
-                    "VOLT_PACKAGE_DIR": str(package_dir),
+                    "VOLT_HARBOR_PACKAGE_DIR": str(package_dir),
                 },
             )
             environment = FakeEnvironment()

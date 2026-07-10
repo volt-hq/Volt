@@ -16,7 +16,7 @@ agents:
     env:
       OPENAI_API_KEY: ${PILOT_GATEWAY_KEY}
       OPENAI_BASE_URL: ${PILOT_OPENAI_BASE_URL}
-      VOLT_PACKAGE_DIR: ${VOLT_PACKAGE_DIR:-}
+      VOLT_HARBOR_PACKAGE_DIR: ${VOLT_HARBOR_PACKAGE_DIR:-}
     kwargs:
       version: 0.79.6
       node_version: 22.22.0
