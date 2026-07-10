@@ -106,6 +106,11 @@ export class VirtualTerminal implements Terminal {
 		this.xterm.write("\x07");
 	}
 
+	notify(_title: string, _body: string): void {
+		// Virtual terminal has no host to notify; emit a bell for parity
+		this.xterm.write("\x07");
+	}
+
 	// Test-specific methods not in Terminal interface
 
 	/**

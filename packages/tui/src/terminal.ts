@@ -12,6 +12,83 @@ const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const TERMINAL_ALERT_SEQUENCE = "\x07";
+const MAX_NOTIFICATION_TEXT_LENGTH = 200;
+
+/** Notification transport picked for the current terminal. */
+export type NotificationProtocol = "osc99" | "osc777" | "osc9" | "bell";
+
+/**
+ * Strip control characters (C0/C1, ESC, BEL) so notification text can never
+ * break out of the OSC sequence, then collapse whitespace and cap the length.
+ */
+export function sanitizeNotificationText(text: string): string {
+	let out = "";
+	for (const ch of text) {
+		const code = ch.codePointAt(0) ?? 0;
+		const isControl = code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f);
+		out += isControl ? " " : ch;
+	}
+	out = out.replace(/\s+/g, " ").trim();
+	if (out.length > MAX_NOTIFICATION_TEXT_LENGTH) {
+		out = `${out.slice(0, MAX_NOTIFICATION_TEXT_LENGTH - 1)}…`;
+	}
+	return out;
+}
+
+/**
+ * Pick the best desktop-notification escape protocol for the current terminal.
+ *
+ * - kitty → OSC 99 (kitty desktop notification protocol)
+ * - WezTerm, Ghostty, foot, urxvt → OSC 777 (urxvt-style notify)
+ * - iTerm2, ConEmu → OSC 9 (Growl-style notification)
+ * - tmux/screen and everything else (Windows Terminal, Apple Terminal,
+ *   VS Code, unknown) → BEL, which those hosts surface as a taskbar flash,
+ *   dock bounce, or bell indicator and which multiplexers forward reliably.
+ */
+export function detectNotificationProtocol(env: NodeJS.ProcessEnv = process.env): NotificationProtocol {
+	const term = env.TERM ?? "";
+	const termProgram = env.TERM_PROGRAM ?? "";
+
+	// Multiplexers drop unknown OSC sequences by default (tmux needs
+	// allow-passthrough); BEL is always forwarded to the outer terminal.
+	if (env.TMUX || termProgram === "tmux" || term.startsWith("screen") || term.startsWith("tmux")) {
+		return "bell";
+	}
+
+	if (term.includes("kitty") || env.KITTY_WINDOW_ID) return "osc99";
+	if (termProgram === "WezTerm") return "osc777";
+	if (termProgram === "ghostty" || term.includes("ghostty")) return "osc777";
+	if (term.startsWith("foot") || term.includes("rxvt")) return "osc777";
+	if (termProgram === "iTerm.app") return "osc9";
+	if (env.ConEmuANSI === "ON") return "osc9";
+	return "bell";
+}
+
+/**
+ * Build the escape sequence for a desktop notification on the current
+ * terminal, falling back to the terminal bell when no notification
+ * protocol is supported.
+ */
+export function buildNotificationSequence(title: string, body: string, env: NodeJS.ProcessEnv = process.env): string {
+	const safeTitle = sanitizeNotificationText(title);
+	const safeBody = sanitizeNotificationText(body);
+
+	switch (detectNotificationProtocol(env)) {
+		case "osc99":
+			// kitty desktop notification protocol: title part (d=0, more to come)
+			// followed by the body part (d=1, done).
+			return `\x1b]99;i=volt:d=0:p=title;${safeTitle}\x1b\\\x1b]99;i=volt:d=1:p=body;${safeBody}\x1b\\`;
+		case "osc777":
+			// urxvt-style notify. Title is not the final field, so it must not
+			// contain the field separator.
+			return `\x1b]777;notify;${safeTitle.replaceAll(";", ",")};${safeBody}\x1b\\`;
+		case "osc9":
+			// iTerm2/ConEmu Growl-style notification (single text field).
+			return `\x1b]9;${safeTitle ? `${safeTitle}: ` : ""}${safeBody}\x07`;
+		default:
+			return TERMINAL_ALERT_SEQUENCE;
+	}
+}
 const APPLE_TERMINAL_SHIFT_ENTER_SEQUENCE = "\x1b[13;2u";
 const DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS = 7;
 const KEYBOARD_PROTOCOL_RESPONSE_FRAGMENT_TIMEOUT_MS = 150;
@@ -95,6 +172,9 @@ export interface Terminal {
 
 	// Terminal alert/bell
 	alert(): void;
+
+	// Desktop notification (falls back to the terminal bell when unsupported)
+	notify(title: string, body: string): void;
 }
 
 /**
@@ -530,6 +610,10 @@ export class ProcessTerminal implements Terminal {
 		// BEL is the most portable terminal alert: local terminals, Windows Terminal,
 		// Apple Terminal, Linux terminal emulators, and tmux all handle or forward it.
 		process.stdout.write(TERMINAL_ALERT_SEQUENCE);
+	}
+
+	notify(title: string, body: string): void {
+		process.stdout.write(buildNotificationSequence(title, body));
 	}
 
 	private clearProgressInterval(): boolean {

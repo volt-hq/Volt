@@ -146,12 +146,35 @@ export class ToolExecutionComponent extends Container {
 		return new Text(theme.fg("toolTitle", theme.bold(this.toolName)), 0, 0);
 	}
 
+	/** Collapsed line budget for tools without their own result renderer. */
+	private static readonly FALLBACK_COLLAPSED_LINES = 10;
+
+	/**
+	 * Collapse fallback output to a line budget when not expanded, appending the
+	 * standard "... (N more lines, ctrl+o to expand)" hint used by built-in tools.
+	 */
+	private collapseFallbackOutput(output: string, colorFn?: (line: string) => string): string {
+		const lines = output.split("\n");
+		const maxLines = this.expanded ? lines.length : ToolExecutionComponent.FALLBACK_COLLAPSED_LINES;
+		const displayLines = lines.slice(0, maxLines);
+		const rendered = colorFn ? displayLines.map(colorFn).join("\n") : displayLines.join("\n");
+		const remaining = lines.length - displayLines.length;
+		if (remaining <= 0) {
+			return rendered;
+		}
+		return `${rendered}\n${theme.fg("muted", `... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+	}
+
 	private createResultFallback(): Component | undefined {
 		const output = this.getTextOutput();
 		if (!output) {
 			return undefined;
 		}
-		return new Text(theme.fg("toolOutput", output), 0, 0);
+		return new Text(
+			this.collapseFallbackOutput(output, (line) => theme.fg("toolOutput", line)),
+			0,
+			0,
+		);
 	}
 
 	updateArgs(args: any): void {
@@ -384,7 +407,7 @@ export class ToolExecutionComponent extends Container {
 		}
 		const output = this.getTextOutput();
 		if (output) {
-			text += `\n${output}`;
+			text += `\n${this.collapseFallbackOutput(output)}`;
 		}
 		return text;
 	}

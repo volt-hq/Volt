@@ -130,6 +130,54 @@ describe("ToolExecutionComponent parity", () => {
 		expect(component.render(120)).toEqual([]);
 	});
 
+	test("collapses fallback output for tools without result renderers and shows expand hint", () => {
+		const toolDefinition: ToolDefinition = createBaseToolDefinition();
+		const output = Array.from({ length: 30 }, (_, i) => `line-${i + 1}`).join("\n");
+
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-fallback-collapse",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: output }], details: {}, isError: false }, false);
+
+		const collapsed = stripAnsi(component.render(120).join("\n"));
+		expect(collapsed).toContain("line-10");
+		expect(collapsed).not.toContain("line-11");
+		expect(collapsed).toContain("20 more lines");
+		expect(collapsed).toContain("to expand");
+
+		component.setExpanded(true);
+		const expanded = stripAnsi(component.render(120).join("\n"));
+		expect(expanded).toContain("line-11");
+		expect(expanded).toContain("line-30");
+		expect(expanded).not.toContain("more lines");
+	});
+
+	test("does not collapse short fallback output", () => {
+		const toolDefinition: ToolDefinition = createBaseToolDefinition();
+		const output = Array.from({ length: 5 }, (_, i) => `short-${i + 1}`).join("\n");
+
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-fallback-short",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: output }], details: {}, isError: false }, false);
+
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("short-5");
+		expect(rendered).not.toContain("more lines");
+	});
+
 	test("uses built-in rendering for built-in overrides without custom renderers", () => {
 		const overrideDefinition: ToolDefinition = {
 			...createBaseToolDefinition("edit"),

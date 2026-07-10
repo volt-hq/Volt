@@ -32,14 +32,14 @@ export interface RetrySettings {
 	provider?: ProviderRetrySettings;
 }
 
-export type TurnDoneAlert = "off" | "bell";
+export type TurnDoneAlert = "off" | "bell" | "notify";
 
 export interface TerminalSettings {
 	showImages?: boolean; // default: true (only relevant if terminal supports images)
 	imageWidthCells?: number; // default: 60 (preferred inline image width in terminal cells)
 	clearOnShrink?: boolean; // default: false (clear empty rows when content shrinks)
 	showTerminalProgress?: boolean; // default: false (OSC 9;4 terminal progress indicators)
-	turnDoneAlert?: TurnDoneAlert; // default: "off" (terminal alert when a turn finishes)
+	turnDoneAlert?: TurnDoneAlert; // default: "off" (bell or desktop notification when a turn finishes)
 }
 
 export interface ImageSettings {
@@ -1560,7 +1560,8 @@ export class SettingsManager {
 	}
 
 	getTurnDoneAlert(): TurnDoneAlert {
-		return this.settings.terminal?.turnDoneAlert === "bell" ? "bell" : "off";
+		const mode = this.settings.terminal?.turnDoneAlert;
+		return mode === "bell" || mode === "notify" ? mode : "off";
 	}
 
 	setTurnDoneAlert(mode: TurnDoneAlert): void {

@@ -59,6 +59,7 @@ class TestTerminal implements Terminal {
 	setProgress(_active: boolean): void {}
 
 	alert(): void {}
+	notify(_title: string, _body: string): void {}
 
 	sendInput(data: string): void {
 		this.inputHandler?.(data);

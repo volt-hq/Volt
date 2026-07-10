@@ -29,6 +29,7 @@ class FakeTerminal implements Terminal {
 	setTitle(_title: string): void {}
 	setProgress(_active: boolean): void {}
 	alert(): void {}
+	notify(_title: string, _body: string): void {}
 
 	get fullClearCount(): number {
 		return this.writes.filter((write) => write.includes("\x1b[2J\x1b[H\x1b[3J")).length;

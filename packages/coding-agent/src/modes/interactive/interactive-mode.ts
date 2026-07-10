@@ -306,6 +306,16 @@ const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING =
 	"Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage.";
 const TURN_DONE_ALERT_BUSY_RETRY_MS = 250;
 
+/** Format an elapsed duration for the working indicator, e.g. "42s", "3m 12s", "1h 4m". */
+function formatElapsedDuration(ms: number): string {
+	const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+	if (totalSeconds < 60) return `${totalSeconds}s`;
+	const minutes = Math.floor(totalSeconds / 60);
+	const seconds = totalSeconds % 60;
+	if (minutes < 60) return `${minutes}m ${seconds}s`;
+	return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
 function isAnthropicSubscriptionAuthKey(apiKey: string | undefined): boolean {
 	return typeof apiKey === "string" && apiKey.startsWith("sk-ant-oat");
 }
@@ -405,6 +415,8 @@ export class InteractiveMode {
 	private workingMessage: string | undefined = undefined;
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
+	private turnStartedAt: number | undefined = undefined;
+	private workingElapsedTimer: ReturnType<typeof setInterval> | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working...";
 	private readonly defaultHiddenThinkingLabel = "Thinking...";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
@@ -2334,7 +2346,24 @@ export class InteractiveMode {
 	}
 
 	private getWorkingLoaderMessage(): string {
-		return this.workingMessage ?? this.defaultWorkingMessage;
+		const base = this.workingMessage ?? this.defaultWorkingMessage;
+		if (this.turnStartedAt === undefined) return base;
+		const elapsed = formatElapsedDuration(Date.now() - this.turnStartedAt);
+		return `${base} (${elapsed} · ${keyText("app.interrupt")} to interrupt)`;
+	}
+
+	private startWorkingElapsedTicker(): void {
+		this.stopWorkingElapsedTicker();
+		this.workingElapsedTimer = setInterval(() => {
+			this.loadingAnimation?.setMessage(this.getWorkingLoaderMessage());
+		}, 1000);
+	}
+
+	private stopWorkingElapsedTicker(): void {
+		if (this.workingElapsedTimer) {
+			clearInterval(this.workingElapsedTimer);
+			this.workingElapsedTimer = undefined;
+		}
 	}
 
 	private createWorkingLoader(): Loader {
@@ -2414,7 +2443,12 @@ export class InteractiveMode {
 				return;
 			}
 
-			this.ui.terminal.alert();
+			if (this.settingsManager.getTurnDoneAlert() === "notify") {
+				const dir = path.basename(this.sessionManager.getCwd());
+				this.ui.terminal.notify("Volt", `Finished responding · ${dir}`);
+			} else {
+				this.ui.terminal.alert();
+			}
 		}, delayMs);
 	}
 
@@ -2515,7 +2549,7 @@ export class InteractiveMode {
 		this.workingVisible = true;
 		this.setWorkingIndicator();
 		if (this.loadingAnimation) {
-			this.loadingAnimation.setMessage(`${this.defaultWorkingMessage} (${keyText("app.interrupt")} to interrupt)`);
+			this.loadingAnimation.setMessage(this.getWorkingLoaderMessage());
 		}
 		this.setHiddenThinkingLabel();
 	}
@@ -2716,7 +2750,7 @@ export class InteractiveMode {
 			setWorkingMessage: (message) => {
 				this.workingMessage = message;
 				if (this.loadingAnimation) {
-					this.loadingAnimation.setMessage(message ?? this.defaultWorkingMessage);
+					this.loadingAnimation.setMessage(this.getWorkingLoaderMessage());
 				}
 			},
 			setWorkingVisible: (visible) => this.setWorkingVisible(visible),
@@ -3545,6 +3579,8 @@ export class InteractiveMode {
 		switch (event.type) {
 			case "agent_start":
 				this.pendingTools.clear();
+				this.turnStartedAt = Date.now();
+				this.startWorkingElapsedTicker();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -3726,6 +3762,8 @@ export class InteractiveMode {
 			}
 
 			case "agent_end":
+				this.stopWorkingElapsedTicker();
+				this.turnStartedAt = undefined;
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
@@ -8159,6 +8197,7 @@ export class InteractiveMode {
 
 	stop(): void {
 		this.clearTurnDoneAlertTimer();
+		this.stopWorkingElapsedTicker();
 		if (this.settingsManager.getShowTerminalProgress()) {
 			this.ui.terminal.setProgress(false);
 		}
