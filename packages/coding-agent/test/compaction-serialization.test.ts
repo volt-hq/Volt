@@ -122,6 +122,39 @@ describe("serializeConversation", () => {
 		expect(result).not.toContain("middle ");
 	});
 
+	it("should truncate and retain an oversized newest conversation part", () => {
+		const messages: Message[] = [
+			userMessage(`GOAL ${"g".repeat(100)}`),
+			userMessage(`middle ${"m".repeat(100)}`),
+			{
+				role: "assistant",
+				content: [{ type: "text", text: `NEWEST ${"n".repeat(1000)}` }],
+				api: "anthropic",
+				provider: "anthropic",
+				model: "test",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			},
+		];
+
+		const result = serializeConversation(messages, { maxChars: 400 });
+
+		expect(result.length).toBeLessThanOrEqual(400);
+		expect(result).toContain("GOAL");
+		expect(result).toContain("1 earlier conversation part omitted");
+		expect(result).toContain("[Assistant]: NEWEST");
+		expect(result).toMatch(/\[\.\.\. \d+ more characters truncated\]/);
+		expect(result).not.toContain("middle ");
+	});
+
 	it.each([0, 1, 50, 100])("should honor a small aggregate budget of %i characters", (maxChars) => {
 		const messages = [userMessage("g".repeat(500)), userMessage("n".repeat(500))];
 

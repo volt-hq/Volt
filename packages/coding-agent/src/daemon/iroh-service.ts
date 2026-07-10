@@ -431,7 +431,7 @@ class IrohDaemonService {
 		});
 		this.leaseBroker = new LeaseBroker({
 			isRuntimeStreaming: (workspaceName, sessionId) =>
-				this.runtimes.findOwner(workspaceName, sessionId)?.runtime.session.isStreaming ?? false,
+				this.runtimes.findOwner(workspaceName, sessionId)?.runtime.session.isBusy ?? false,
 			waitForRuntimeIdle: async (workspaceName, sessionId) => {
 				await this.runtimes.findOwner(workspaceName, sessionId)?.runtime.session.waitForIdle();
 			},
@@ -2675,12 +2675,12 @@ class IrohDaemonService {
 		for (const pending of this.relays.pendingRelays()) {
 			this.abortPendingRelay(pending.relayId, "host_shutdown", "daemon shutting down");
 		}
-		// 2. Wait for streaming runtimes to go idle (60s cap each, concurrently);
-		//    never abort a turn from shutdown.
+		// 2. Wait for busy runtimes to go idle (60s cap each, concurrently);
+		//    never abort prompt preflight or a turn from shutdown.
 		const drainResults = await Promise.allSettled(
 			this.runtimes
 				.values()
-				.filter((entry) => entry.runtime.session.isStreaming)
+				.filter((entry) => entry.runtime.session.isBusy)
 				.map((entry) =>
 					withTimeout(entry.runtime.session.waitForIdle(), SHUTDOWN_RUNTIME_IDLE_CAP_MS, "drain cap"),
 				),

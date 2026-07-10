@@ -72,6 +72,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		const fanout = createFanoutSession("s-co");
 		const dispose = vi.fn(async () => {});
 		const runtimeHost = {
+			cwd: "/tmp/ws",
 			session: fanout.session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -165,12 +166,14 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 
 	it("does not let attachable subagent sessions overwrite the client's last top-level session", async () => {
 		const parentRuntime = {
+			cwd: "/tmp/ws",
 			session: createTestSession("parent-session", null),
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),
 			listSessions: vi.fn(async () => []),
 		} as unknown as AgentSessionRuntime;
 		const childRuntime = {
+			cwd: "/tmp/ws",
 			session: createTestSession("child-session", null),
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),
@@ -229,12 +232,70 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		await registry.stopAll("test_cleanup");
 	});
 
+	it("retains a detached runtime while prompt preflight is busy", async () => {
+		vi.useFakeTimers();
+		try {
+			let resolveIdle = () => {};
+			const idle = new Promise<void>((resolve) => {
+				resolveIdle = resolve;
+			});
+			const session = Object.assign(createTestSession("s-busy", null), {
+				isBusy: true,
+				isStreaming: false,
+				waitForIdle: vi.fn(() => idle),
+			});
+			const dispose = vi.fn(async () => {});
+			const runtimeHost = {
+				cwd: "/tmp/ws",
+				session,
+				dispose,
+				setRebindSession: vi.fn(),
+				listSessions: vi.fn(async () => []),
+			} as unknown as AgentSessionRuntime;
+			const registry = new IntegratedRuntimeRegistry({
+				auditLogger: new IrohRemoteAuditLogger(),
+				stateManager: new IrohRemoteHostStateManager(),
+				activeStreams: new IrohRemoteActiveStreamRegistry(),
+				detachedRuntimeTtlMs: () => 1000,
+				getAllowTools: () => undefined,
+				getProjectTrustedForWorkspace: () => false,
+				setClientLastSessionId: vi.fn(async () => undefined),
+				createRuntime: async () => ({
+					runtime: runtimeHost,
+					sessionSelection: { kind: "created", sessionId: "s-busy" },
+				}),
+			});
+			const phone = createAuthorization("n-phone-a");
+			const created = await registry.getOrCreateEntry(
+				{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
+				phone,
+			);
+			await registry.commitEntry(created.entry, created.sessionSelection, phone);
+			const subscriber = await registry.attachSubscriber(created.entry);
+			await registry.detachSubscriber(created.entry, subscriber, "test_detach");
+
+			expect(session.waitForIdle).toHaveBeenCalledOnce();
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(dispose).not.toHaveBeenCalled();
+
+			session.isBusy = false;
+			resolveIdle();
+			await vi.advanceTimersByTimeAsync(999);
+			expect(dispose).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(1);
+			expect(dispose).toHaveBeenCalledOnce();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("ignores stopEntry for a stale reference whose key now belongs to a replacement runtime", async () => {
 		// Regression guard: stopEntry used to delete by key alone, so a stale
 		// entry reference could evict a replacement runtime from the registry
 		// while leaving it running unmanaged.
 		const makeRuntimeHost = (sessionId: string, dispose: ReturnType<typeof vi.fn>) =>
 			({
+				cwd: "/tmp/ws",
 				session: createTestSession(sessionId, null),
 				dispose,
 				setRebindSession: vi.fn(),

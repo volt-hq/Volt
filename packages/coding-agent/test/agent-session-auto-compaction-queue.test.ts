@@ -337,8 +337,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(streamCallCount).toBe(2);
 	});
 
-	it("should not resume after proactive checks for a terminating tool batch", async () => {
+	it("should compact a terminating tool batch using its live tool-result context without resuming", async () => {
 		const model = session.model!;
+		writeFileSync(join(tempDir, "large-terminating-result.txt"), "x".repeat(40_000));
 		let streamCallCount = 0;
 		session.agent.afterToolCall = async () => ({ terminate: true });
 		session.agent.streamFn = () => {
@@ -347,16 +348,23 @@ describe("AgentSession auto-compaction queue resume", () => {
 			queueMicrotask(() => {
 				const message: AssistantMessage = {
 					role: "assistant",
-					content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "missing.txt" } }],
+					content: [
+						{
+							type: "toolCall",
+							id: "call-1",
+							name: "read",
+							arguments: { path: "large-terminating-result.txt" },
+						},
+					],
 					api: model.api,
 					provider: model.provider,
 					model: model.id,
 					usage: {
-						input: model.contextWindow - 10_000,
+						input: model.contextWindow - 20_000,
 						output: 0,
 						cacheRead: 0,
 						cacheWrite: 0,
-						totalTokens: model.contextWindow - 10_000,
+						totalTokens: model.contextWindow - 20_000,
 						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 					},
 					stopReason: "toolUse",

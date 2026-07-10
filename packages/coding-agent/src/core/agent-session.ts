@@ -2194,13 +2194,13 @@ export class AgentSession {
 			return await this._runAutoCompaction("overflow", true);
 		}
 
-		// Case 2: Threshold - context is getting large
-		// For error messages (no usage data), estimate from last successful response.
-		// This ensures sessions that hit persistent API errors (e.g. 529) can still compact.
+		// Case 2: Threshold - context is getting large. Estimate from the live
+		// context so tool results and other messages appended after provider usage
+		// are included. For error messages, require a prior successful usage source.
+		const messages = this.agent.state.messages;
+		const estimate = estimateContextTokens(messages);
 		let contextTokens: number;
 		if (assistantMessage.stopReason === "error") {
-			const messages = this.agent.state.messages;
-			const estimate = estimateContextTokens(messages);
 			if (estimate.lastUsageIndex === null) return false; // No usage data at all
 			// Verify the usage source is post-compaction. Kept pre-compaction messages
 			// have stale usage reflecting the old (larger) context and would falsely
@@ -2215,7 +2215,11 @@ export class AgentSession {
 			}
 			contextTokens = estimate.tokens;
 		} else {
-			contextTokens = calculateContextTokens(assistantMessage.usage);
+			// A lone aborted response may not be considered a trustworthy estimate
+			// source, but its provider usage is still better than a character-only
+			// fallback for the pre-prompt recovery check.
+			contextTokens =
+				estimate.lastUsageIndex === null ? calculateContextTokens(assistantMessage.usage) : estimate.tokens;
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
 			const continueAfterCompaction =

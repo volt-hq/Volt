@@ -271,13 +271,11 @@ function printRpcLine(line, state) {
 	}
 
 	if (event.type === "agent_end") {
-		if (event.willRetry) {
-			state.waitingForContinuation = true;
-			clearPromptCompletionTimer(state);
-			return;
-		}
-		state.waitingForContinuation = false;
-		if (!hasPendingPromptContinuation(state)) schedulePromptCompletion(state);
+		// agent_end describes one core run, not the full prompt transaction.
+		// Completion is driven only by agent_settled so delayed compaction or
+		// continuation events cannot race a local fallback timer.
+		state.waitingForContinuation = event.willRetry === true;
+		clearPromptCompletionTimer(state);
 		return;
 	}
 

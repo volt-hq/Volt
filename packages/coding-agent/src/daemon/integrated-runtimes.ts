@@ -588,7 +588,7 @@ export class IntegratedRuntimeRegistry {
 		entry.subscribers.clear();
 		entry.activeWorkflows.clear();
 		entry.detachedAt = undefined;
-		const wasActive = entry.runtime.session.isStreaming;
+		const wasActive = entry.runtime.session.isBusy;
 		const removedLiveActivityCount = await this.options.stateManager.removeClientLiveActivitiesForSession(
 			entry.clientNodeId,
 			entry.workspaceName,
@@ -866,10 +866,10 @@ export class IntegratedRuntimeRegistry {
 		const handle = scheduleDetachedRuntimeRetention({
 			ttlMs,
 			isDetached: () => this.isDetached(entry),
-			isActive: () => entry.runtime.session.isStreaming,
+			isActive: () => entry.runtime.session.isBusy,
 			waitForIdle: () => entry.runtime.session.waitForIdle(),
 			onExpire: async () => {
-				if (!this.isDetached(entry) || entry.runtime.session.isStreaming) {
+				if (!this.isDetached(entry) || entry.runtime.session.isBusy) {
 					return;
 				}
 				await this.logEntryAudit(entry, "remote_runtime_retention_expired", {
@@ -883,11 +883,7 @@ export class IntegratedRuntimeRegistry {
 				// retention. Re-check (and confirm this retention is still the active
 				// one) before disposing, so the sweep never tears down a runtime that
 				// was just reattached.
-				if (
-					!this.isDetached(entry) ||
-					entry.runtime.session.isStreaming ||
-					entry.detachedRuntimeRetention !== handle
-				) {
+				if (!this.isDetached(entry) || entry.runtime.session.isBusy || entry.detachedRuntimeRetention !== handle) {
 					return;
 				}
 				await this.stopEntry(entry, "detached_runtime_ttl_expired");
@@ -919,7 +915,7 @@ export class IntegratedRuntimeRegistry {
 			runtime: "integrated-volt",
 			sessionId: entry.sessionId,
 			subscriberCount: entry.subscribers.size,
-			active: entry.runtime.session.isStreaming,
+			active: entry.runtime.session.isBusy,
 			...extraDetails,
 		};
 	}

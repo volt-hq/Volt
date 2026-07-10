@@ -223,6 +223,21 @@ function joinPartsWithinBudget(parts: string[], maxChars: number): string {
 		const candidateOmittedCount = i - 1;
 		const candidateMarker = createConversationOmissionMarker(candidateOmittedCount, head, candidateTail, budget);
 		if (candidateMarker === undefined) {
+			if (tail.length === 0) {
+				// The newest part is more important than retaining it intact. Reserve
+				// at least one character for it, then truncate it into the remaining
+				// tail budget instead of returning only the head and omission marker.
+				const fittedMarker = createConversationOmissionMarker(candidateOmittedCount, head, [""], budget - 1);
+				if (fittedMarker !== undefined) {
+					const prefix = [head, ...(candidateOmittedCount === 0 ? [] : [fittedMarker]), ""].join("\n\n");
+					const fittedPart = truncateForSummary(parts[i], budget - prefix.length);
+					if (fittedPart.length > 0) {
+						tail.unshift(fittedPart);
+						omittedCount = candidateOmittedCount;
+						marker = fittedMarker;
+					}
+				}
+			}
 			break;
 		}
 		tail.unshift(parts[i]);
