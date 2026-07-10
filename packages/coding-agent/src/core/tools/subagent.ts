@@ -16,6 +16,7 @@ import type {
 	SubagentStartByNameOptions,
 } from "../subagents/index.ts";
 import { getMarkdownTheme, type Theme } from "../theme/runtime.ts";
+import { formatDuration } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 export const DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES = 50 * 1024;
@@ -103,6 +104,10 @@ export interface SubagentToolTaskDetails {
 	sessionId?: string;
 	agent: SubagentToolAgentDetails;
 	status: SubagentToolStatus;
+	/** Epoch ms when the task started running. */
+	startedAt?: number;
+	/** Total task duration in ms once the task reaches a terminal status. */
+	durationMs?: number;
 	usage?: SubagentToolUsageDetails;
 	output?: SubagentToolOutputDetails;
 	error?: SubagentToolErrorDetails;
@@ -131,6 +136,10 @@ export interface SubagentToolDetails {
 	output?: SubagentToolOutputDetails;
 	/** Present for single mode for backward-compatible consumers. */
 	error?: SubagentToolErrorDetails;
+	/** Epoch ms when execution started (single: task start; parallel/chain: overall start). */
+	startedAt?: number;
+	/** Overall duration in ms once execution reaches a terminal status. */
+	durationMs?: number;
 	summary?: {
 		total: number;
 		completed: number;
@@ -183,6 +192,15 @@ interface TruncatedText {
 interface SubagentTaskExecutionResult {
 	details: SubagentToolTaskDetails;
 	outputText: string;
+}
+
+interface SubagentExecutionTiming {
+	startedAt: number;
+	durationMs?: number;
+}
+
+interface SubagentRenderState {
+	interval?: ReturnType<typeof setInterval>;
 }
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
@@ -283,6 +301,7 @@ function createTaskDetails(options: {
 	agentName: string;
 	handle: SubagentHandle | undefined;
 	status: SubagentToolStatus;
+	startedAt: number;
 	stats: SessionStats | undefined;
 	output: TruncatedText;
 	maxOutputBytes: number;
@@ -296,6 +315,8 @@ function createTaskDetails(options: {
 			...(options.definition ? { source: options.definition.source } : {}),
 		},
 		status: options.status,
+		startedAt: options.startedAt,
+		durationMs: Date.now() - options.startedAt,
 		...(options.stats ? { usage: summarizeStats(options.stats) } : {}),
 		output: createOutputDetails(options.output, options.maxOutputBytes),
 		...(options.errorMessage ? { error: { message: options.errorMessage } } : {}),
@@ -307,6 +328,7 @@ function createRunningTaskDetails(options: {
 	definition: SubagentDefinition | undefined;
 	agentName: string;
 	handle: SubagentHandle | undefined;
+	startedAt?: number;
 }): SubagentToolTaskDetails {
 	return {
 		index: options.index,
@@ -316,6 +338,7 @@ function createRunningTaskDetails(options: {
 			...(options.definition ? { source: options.definition.source } : {}),
 		},
 		status: "running",
+		...(options.startedAt !== undefined ? { startedAt: options.startedAt } : {}),
 	};
 }
 
@@ -348,6 +371,8 @@ function createSingleDetails(task: SubagentToolTaskDetails): SubagentToolDetails
 		usage: task.usage,
 		output: task.output,
 		error: task.error,
+		...(task.startedAt !== undefined ? { startedAt: task.startedAt } : {}),
+		...(task.durationMs !== undefined ? { durationMs: task.durationMs } : {}),
 		...(childSessions ? { childSessions } : {}),
 	};
 }
@@ -396,7 +421,22 @@ function getAggregateStatus(summary: NonNullable<SubagentToolDetails["summary"]>
 	return "partial";
 }
 
-function createParallelDetails(results: SubagentTaskExecutionResult[]): SubagentToolDetails {
+function timingDetails(
+	timing: SubagentExecutionTiming | undefined,
+): Pick<SubagentToolDetails, "startedAt" | "durationMs"> {
+	if (!timing) {
+		return {};
+	}
+	return {
+		startedAt: timing.startedAt,
+		...(timing.durationMs !== undefined ? { durationMs: timing.durationMs } : {}),
+	};
+}
+
+function createParallelDetails(
+	results: SubagentTaskExecutionResult[],
+	timing: SubagentExecutionTiming,
+): SubagentToolDetails {
 	const tasks = results.map((result) => result.details);
 	const summary = summarizeTaskDetails(tasks, { includeParallelLimits: true });
 	const childSessions = createChildSessions(tasks);
@@ -404,12 +444,16 @@ function createParallelDetails(results: SubagentTaskExecutionResult[]): Subagent
 		mode: "parallel",
 		status: getAggregateStatus(summary),
 		summary,
+		...timingDetails(timing),
 		...(childSessions ? { childSessions } : {}),
 		tasks,
 	};
 }
 
-function createChainDetails(results: SubagentTaskExecutionResult[]): SubagentToolDetails {
+function createChainDetails(
+	results: SubagentTaskExecutionResult[],
+	timing: SubagentExecutionTiming,
+): SubagentToolDetails {
 	const steps = results.map((result) => result.details);
 	const failedStep = steps.find((step) => step.status !== "completed");
 	const summary = summarizeTaskDetails(steps, failedStep ? { stoppedAt: failedStep.index } : {});
@@ -418,12 +462,16 @@ function createChainDetails(results: SubagentTaskExecutionResult[]): SubagentToo
 		mode: "chain",
 		status: getAggregateStatus(summary),
 		summary,
+		...timingDetails(timing),
 		...(childSessions ? { childSessions } : {}),
 		steps,
 	};
 }
 
-function createParallelProgressDetails(tasks: SubagentToolTaskDetails[]): SubagentToolDetails {
+function createParallelProgressDetails(
+	tasks: SubagentToolTaskDetails[],
+	timing: SubagentExecutionTiming,
+): SubagentToolDetails {
 	const taskSnapshot = tasks.slice();
 	const summary = summarizeTaskDetails(taskSnapshot, { includeParallelLimits: true });
 	const childSessions = createChildSessions(taskSnapshot);
@@ -431,12 +479,17 @@ function createParallelProgressDetails(tasks: SubagentToolTaskDetails[]): Subage
 		mode: "parallel",
 		status: getAggregateStatus(summary),
 		summary,
+		...timingDetails(timing),
 		...(childSessions ? { childSessions } : {}),
 		tasks: taskSnapshot,
 	};
 }
 
-function createChainProgressDetails(steps: SubagentToolTaskDetails[], total: number): SubagentToolDetails {
+function createChainProgressDetails(
+	steps: SubagentToolTaskDetails[],
+	total: number,
+	timing: SubagentExecutionTiming,
+): SubagentToolDetails {
 	const stepSnapshot = steps.slice();
 	const baseSummary = summarizeTaskDetails(stepSnapshot);
 	const summary = {
@@ -448,6 +501,7 @@ function createChainProgressDetails(steps: SubagentToolTaskDetails[], total: num
 		mode: "chain",
 		status: getAggregateStatus(summary),
 		summary,
+		...timingDetails(timing),
 		...(childSessions ? { childSessions } : {}),
 		steps: stepSnapshot,
 	};
@@ -804,6 +858,23 @@ function formatSummary(details: SubagentToolDetails): string {
 	return parts.join(", ");
 }
 
+function formatTimingSuffix(
+	timing: { startedAt?: number; durationMs?: number } | undefined,
+	isPartial: boolean,
+	theme: Theme,
+): string {
+	if (!timing) {
+		return "";
+	}
+	if (timing.durationMs !== undefined) {
+		return theme.fg("dim", ` (${formatDuration(timing.durationMs)})`);
+	}
+	if (isPartial && timing.startedAt !== undefined) {
+		return theme.fg("dim", ` (${formatDuration(Date.now() - timing.startedAt)})`);
+	}
+	return "";
+}
+
 function outputWarning(output: SubagentToolOutputDetails | undefined, theme: Theme): string | undefined {
 	if (!output?.truncated) {
 		return undefined;
@@ -826,12 +897,13 @@ function addTaskDetails(options: {
 	item: SubagentToolTaskDetails;
 	input: SubagentToolTaskInput | undefined;
 	expanded: boolean;
+	isPartial: boolean;
 }): void {
-	const { container, theme, label, item, input, expanded } = options;
+	const { container, theme, label, item, input, expanded, isPartial } = options;
 	const usage = formatUsageSummary(item.usage);
 	container.addChild(
 		new Text(
-			`${statusIcon(item.status, theme)} ${theme.fg("muted", `${label} ${item.index + 1}:`)} ${formatAgent(item.agent, input?.agent, theme)} ${statusText(item.status, theme)}${usage ? theme.fg("dim", `  ${usage}`) : ""}`,
+			`${statusIcon(item.status, theme)} ${theme.fg("muted", `${label} ${item.index + 1}:`)} ${formatAgent(item.agent, input?.agent, theme)} ${statusText(item.status, theme)}${formatTimingSuffix(item, isPartial, theme)}${usage ? theme.fg("dim", `  ${usage}`) : ""}`,
 			0,
 			0,
 		),
@@ -865,10 +937,11 @@ function addTaskDetails(options: {
 
 function renderSubagentResult(
 	result: AgentToolResult<SubagentToolDetails>,
-	expanded: boolean,
+	options: { expanded: boolean; isPartial: boolean },
 	theme: Theme,
 	args: SubagentToolInput | undefined,
 ): Container {
+	const { expanded, isPartial } = options;
 	const container = new Container();
 	const details = result.details;
 	if (!details) {
@@ -881,7 +954,7 @@ function renderSubagentResult(
 		const usage = formatUsageSummary(details.usage);
 		container.addChild(
 			new Text(
-				`${statusIcon(details.status, theme)} ${formatAgent(details.agent, input?.agent, theme)} ${statusText(details.status, theme)}${usage ? theme.fg("dim", `  ${usage}`) : ""}`,
+				`${statusIcon(details.status, theme)} ${formatAgent(details.agent, input?.agent, theme)} ${statusText(details.status, theme)}${formatTimingSuffix(details, isPartial, theme)}${usage ? theme.fg("dim", `  ${usage}`) : ""}`,
 				0,
 				0,
 			),
@@ -907,7 +980,7 @@ function renderSubagentResult(
 	const items = details.mode === "chain" ? (details.steps ?? []) : (details.tasks ?? []);
 	container.addChild(
 		new Text(
-			`${statusIcon(details.status, theme)} ${theme.fg("toolTitle", theme.bold(`subagent ${details.mode}`))} ${theme.fg("accent", formatSummary(details))}`,
+			`${statusIcon(details.status, theme)} ${theme.fg("toolTitle", theme.bold(`subagent ${details.mode}`))} ${theme.fg("accent", formatSummary(details))}${formatTimingSuffix(details, isPartial, theme)}`,
 			0,
 			0,
 		),
@@ -926,6 +999,7 @@ function renderSubagentResult(
 			item,
 			input: getTaskInput(args, details.mode, item.index),
 			expanded,
+			isPartial,
 		});
 	}
 	if (!expanded && items.length > visibleItems.length) {
@@ -936,7 +1010,7 @@ function renderSubagentResult(
 
 export function createSubagentToolDefinition(
 	_options: SubagentToolOptions,
-): ToolDefinition<typeof subagentSchema, SubagentToolDetails> {
+): ToolDefinition<typeof subagentSchema, SubagentToolDetails, SubagentRenderState> {
 	const options = _options;
 	const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES;
 	return {
@@ -971,6 +1045,7 @@ export function createSubagentToolDefinition(
 			}
 
 			const normalized = normalizeSubagentToolInput(params);
+			const executionStartedAt = Date.now();
 			const activeHandles = new Set<SubagentHandle>();
 			const disposedHandles = new Set<SubagentHandle>();
 			let acceptingUpdates = true;
@@ -1022,6 +1097,7 @@ export function createSubagentToolDefinition(
 					let handle: SubagentHandle | undefined;
 					let definition: SubagentDefinition | undefined;
 					let unsubscribeEvents: (() => void) | undefined;
+					const taskStartedAt = Date.now();
 					try {
 						if (signal?.aborted) {
 							throw new Error("Operation aborted");
@@ -1048,6 +1124,7 @@ export function createSubagentToolDefinition(
 							definition,
 							agentName: task.agent,
 							handle,
+							startedAt: taskStartedAt,
 						});
 						unsubscribeEvents = handle.onEvent((event) => {
 							const message = describeSubagentProgressEvent(event);
@@ -1079,6 +1156,7 @@ export function createSubagentToolDefinition(
 								agentName: task.agent,
 								handle,
 								status,
+								startedAt: taskStartedAt,
 								stats,
 								output,
 								maxOutputBytes,
@@ -1102,6 +1180,7 @@ export function createSubagentToolDefinition(
 								agentName: task.agent,
 								handle,
 								status: "failed",
+								startedAt: taskStartedAt,
 								stats: undefined,
 								output,
 								maxOutputBytes,
@@ -1145,17 +1224,21 @@ export function createSubagentToolDefinition(
 									createChainProgressDetails(
 										[...results.map((completed) => completed.details), details],
 										normalized.tasks.length,
+										{ startedAt: executionStartedAt },
 									),
 									message,
 								);
 							},
 						);
 						results.push(result);
-						emitProgressUpdate(createChainDetails(results), undefined);
+						emitProgressUpdate(createChainDetails(results, { startedAt: executionStartedAt }), undefined);
 						if (result.details.status !== "completed") {
 							const finalResult: AgentToolResult<SubagentToolDetails> = {
 								content: [{ type: "text", text: formatChainFailureSummary(results) }],
-								details: createChainDetails(results),
+								details: createChainDetails(results, {
+									startedAt: executionStartedAt,
+									durationMs: Date.now() - executionStartedAt,
+								}),
 							};
 							emitFinalUpdate(finalResult);
 							return finalResult;
@@ -1164,7 +1247,10 @@ export function createSubagentToolDefinition(
 					}
 					const finalResult: AgentToolResult<SubagentToolDetails> = {
 						content: [{ type: "text", text: results.at(-1)?.outputText ?? "(no output)" }],
-						details: createChainDetails(results),
+						details: createChainDetails(results, {
+							startedAt: executionStartedAt,
+							durationMs: Date.now() - executionStartedAt,
+						}),
 					};
 					emitFinalUpdate(finalResult);
 					return finalResult;
@@ -1180,7 +1266,10 @@ export function createSubagentToolDefinition(
 				);
 				const emitParallelTaskUpdate = (details: SubagentToolTaskDetails, message: string | undefined): void => {
 					parallelProgressTasks[details.index] = details;
-					emitProgressUpdate(createParallelProgressDetails(parallelProgressTasks), message);
+					emitProgressUpdate(
+						createParallelProgressDetails(parallelProgressTasks, { startedAt: executionStartedAt }),
+						message,
+					);
 				};
 				const results = await mapWithConcurrencyLimit(
 					normalized.tasks,
@@ -1192,7 +1281,10 @@ export function createSubagentToolDefinition(
 					},
 					signal,
 				);
-				const details = createParallelDetails(results);
+				const details = createParallelDetails(results, {
+					startedAt: executionStartedAt,
+					durationMs: Date.now() - executionStartedAt,
+				});
 				const finalResult: AgentToolResult<SubagentToolDetails> = {
 					content: [{ type: "text", text: formatParallelSummary(results, details) }],
 					details,
@@ -1216,13 +1308,29 @@ export function createSubagentToolDefinition(
 				}
 			}
 		},
+		// The result renderer shows per-subagent running/completed durations, so
+		// the generic tool-header duration suffix is suppressed.
+		rendersDuration: true,
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			text.setText(formatCallLines(args, theme).join("\n"));
 			return text;
 		},
 		renderResult(result, options, theme, context) {
-			return renderSubagentResult(result, options.expanded, theme, context.args);
+			const state = context.state;
+			if (options.isPartial && !context.isError) {
+				// Tick once a second while running so elapsed times update live.
+				state.interval ??= setInterval(() => context.invalidate(), 1000);
+			} else if (state.interval) {
+				clearInterval(state.interval);
+				state.interval = undefined;
+			}
+			return renderSubagentResult(
+				result,
+				{ expanded: options.expanded, isPartial: options.isPartial },
+				theme,
+				context.args,
+			);
 		},
 	};
 }

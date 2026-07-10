@@ -423,6 +423,8 @@ describe("subagent tool", () => {
 		});
 		expect(result.details.subagentId).toMatch(/^sa_/);
 		expect(result.details.sessionId).toBeTruthy();
+		expect(typeof result.details.startedAt).toBe("number");
+		expect(result.details.durationMs).toBeGreaterThanOrEqual(0);
 		expect(result.details.childSessions?.[0]?.subagentId).toBe(result.details.subagentId);
 		expect(result.details.childSessions?.[0]?.sessionId).toBe(result.details.sessionId);
 		expect(result.details.usage?.messages.assistant).toBe(1);
@@ -786,6 +788,12 @@ describe("subagent tool", () => {
 				},
 			],
 		});
+		expect(typeof result.details.startedAt).toBe("number");
+		expect(result.details.durationMs).toBeGreaterThanOrEqual(0);
+		for (const task of result.details.tasks ?? []) {
+			expect(typeof task.startedAt).toBe("number");
+			expect(task.durationMs).toBeGreaterThanOrEqual(0);
+		}
 	});
 
 	it("keeps parallel results in input order even when children finish out of order", async () => {

@@ -447,6 +447,7 @@ describe("ToolExecutionComponent parity", () => {
 					subagentId: "sa_1",
 					sessionId: "session_1",
 					agent: { name: "scout", source: "user" },
+					durationMs: 32_100,
 					usage: createSubagentUsage(),
 					output: createSubagentOutput("final answer"),
 				} satisfies SubagentToolDetails,
@@ -457,7 +458,7 @@ describe("ToolExecutionComponent parity", () => {
 
 		const collapsed = stripAnsi(component.render(120).join("\n"));
 		expect(collapsed).toContain("subagent scout");
-		expect(collapsed).toContain("scout (user) completed");
+		expect(collapsed).toContain("scout (user) completed (32.1s)");
 		expect(collapsed).toContain("Inspect the auth flow");
 		expect(collapsed).toContain("1 turn");
 		expect(collapsed).toContain("inspect conversation");
@@ -552,6 +553,7 @@ describe("ToolExecutionComponent parity", () => {
 					mode: "parallel",
 					status: "running",
 					summary: { total: 2, completed: 0, failed: 0, aborted: 0, running: 2, maxTasks: 8, maxConcurrency: 4 },
+					startedAt: Date.now() - 65_000,
 					tasks: [
 						{
 							index: 0,
@@ -559,6 +561,7 @@ describe("ToolExecutionComponent parity", () => {
 							sessionId: "session_alpha",
 							agent: { name: "alpha", source: "user" },
 							status: "running",
+							startedAt: Date.now() - 65_000,
 						},
 						{
 							index: 1,
@@ -575,11 +578,23 @@ describe("ToolExecutionComponent parity", () => {
 		);
 
 		const collapsed = stripAnsi(component.render(140).join("\n"));
-		expect(collapsed).toContain("subagent parallel 0/2 completed, 2 running");
-		expect(collapsed).toContain("Task 1: alpha (user) running");
+		expect(collapsed).toMatch(/subagent parallel 0\/2 completed, 2 running \(6[45]\.\ds\)/);
+		expect(collapsed).toMatch(/Task 1: alpha \(user\) running \(6[45]\.\ds\)/);
+		// Tasks without a startedAt render no elapsed time.
 		expect(collapsed).toContain("Task 2: beta (project) running");
+		expect(collapsed).not.toMatch(/Task 2: beta \(project\) running \(/);
 		expect(collapsed).toContain("First task");
 		expect(collapsed).toContain("Second task");
+
+		// Completing the tool clears the live-elapsed refresh interval.
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "combined" }],
+				details: { mode: "parallel", status: "completed" } satisfies SubagentToolDetails,
+				isError: false,
+			},
+			false,
+		);
 	});
 
 	test("renders built-in subagent chain steps with expanded outputs", () => {
