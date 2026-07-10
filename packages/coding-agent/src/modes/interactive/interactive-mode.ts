@@ -113,6 +113,7 @@ import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../cor
 import { getDefaultSessionDir, type SessionContext, SessionManager } from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
+import type { SubagentActivity, SubagentEvent } from "../../core/subagents/index.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
@@ -269,6 +270,27 @@ type CompactionQueuedMessage = {
 	text: string;
 	mode: "steer" | "followUp";
 };
+
+/** Display-only renderer for an isolated child session streamed inline into the transcript. */
+interface InlineSessionRenderer {
+	onSessionEvent: (event: AgentSessionEvent) => void;
+	setHeaderText: (text: string) => void;
+	dispose: () => void;
+}
+
+const INLINE_SESSION_EVENT_TYPES = new Set<string>([
+	"message_start",
+	"message_update",
+	"message_end",
+	"tool_execution_start",
+	"tool_execution_update",
+	"tool_execution_end",
+]);
+
+/** Narrow a subagent activity event to the session-event subset the inline renderer understands. */
+function toInlineSessionEvent(event: SubagentEvent): AgentSessionEvent | undefined {
+	return INLINE_SESSION_EVENT_TYPES.has(event.type) ? (event as AgentSessionEvent) : undefined;
+}
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 
@@ -462,6 +484,12 @@ export class InteractiveMode {
 	private drainViewer: DrainViewerComponent | undefined;
 	private drainViewerFeedId: string | undefined;
 	private dismissSubagentInspector: (() => void) | undefined;
+	/** Live inline transcript groups for running subagents, keyed by activity id. */
+	private subagentInlineRenderers = new Map<
+		string,
+		{ renderer: InlineSessionRenderer; lastSequence: number; task: string | undefined }
+	>();
+	private unsubscribeSubagentActivities: (() => void) | undefined;
 	/** Timestamp of the last quit warning (phone attached + turn streaming). */
 	private lastQuitWarningAt = 0;
 
@@ -2184,6 +2212,7 @@ export class InteractiveMode {
 		this.session.setHostInteraction(this.createHostInteraction());
 		await this.bindCurrentSessionExtensions();
 		this.subscribeToAgent();
+		this.bindSubagentActivityRendering();
 		await this.updateAvailableProviderCount();
 		this.updateEditorBorderColor();
 		this.updateTerminalTitle();
@@ -2221,6 +2250,9 @@ export class InteractiveMode {
 
 	private renderCurrentSessionState(): void {
 		this.chatContainer.clear();
+		// Inline subagent groups live in the chat container; drop them so running
+		// activities rebuild from their retained events on the next notification.
+		this.resetSubagentInlineRenderers();
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
@@ -7824,8 +7856,18 @@ export class InteractiveMode {
 		// Render the isolated review session live in the transcript so it reads like
 		// a normal conversation. This is display-only and transient: the review runs
 		// in its own session, and the handoff (or the next full re-render) rebuilds
-		// the transcript, at which point this group is gone.
-		const reviewRenderer = this.createReviewInlineRenderer(`Reviewing ${resolution.description} with ${model.id}`);
+		// the transcript, at which point this group is gone. The machine `<response>`
+		// envelope is stripped from displayed text; the formatted findings are
+		// surfaced later via the handoff.
+		const reviewRenderer = this.createInlineSessionRenderer({
+			headerText: theme.fg("accent", `Reviewing ${resolution.description} with ${model.id}`),
+			transformAssistantMessage: (message) => ({
+				...message,
+				content: message.content.map((part) =>
+					part.type === "text" ? { ...part, text: stripReviewEnvelopeForDisplay(part.text) } : part,
+				),
+			}),
+		});
 		this.ui.requestRender();
 
 		const abortController = new AbortController();
@@ -7854,20 +7896,20 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Build a scoped, display-only renderer for the isolated review session's
-	 * event stream. It reuses the normal assistant/tool components but keeps its
-	 * own streaming/pending-tool state so it never collides with the main
-	 * session's live rendering. The machine `<response>` envelope is stripped from
-	 * displayed text; the formatted findings are surfaced later via the handoff.
+	 * Build a scoped, display-only renderer for an isolated child session's event
+	 * stream (review runs and subagent conversations). It reuses the normal
+	 * assistant/tool components but keeps its own streaming/pending-tool state so
+	 * it never collides with the main session's live rendering.
 	 */
-	private createReviewInlineRenderer(headerText: string): {
-		onSessionEvent: (event: AgentSessionEvent) => void;
-		dispose: () => void;
-	} {
+	private createInlineSessionRenderer(options: {
+		headerText: string;
+		transformAssistantMessage?: (message: AssistantMessage) => AssistantMessage;
+	}): InlineSessionRenderer {
 		const group = new Container();
+		const header = new Text(options.headerText, 1, 0);
 		group.addChild(new Spacer(1));
 		group.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
-		group.addChild(new Text(theme.fg("accent", headerText), 1, 0));
+		group.addChild(header);
 		group.addChild(new Spacer(1));
 		this.chatContainer.addChild(group);
 
@@ -7878,12 +7920,7 @@ export class InteractiveMode {
 			imageWidthCells: this.settingsManager.getImageWidthCells(),
 		});
 
-		const forDisplay = (message: AssistantMessage): AssistantMessage => ({
-			...message,
-			content: message.content.map((part) =>
-				part.type === "text" ? { ...part, text: stripReviewEnvelopeForDisplay(part.text) } : part,
-			),
-		});
+		const forDisplay = options.transformAssistantMessage ?? ((message: AssistantMessage) => message);
 
 		const upsertToolCalls = (message: AssistantMessage): void => {
 			for (const part of message.content) {
@@ -7976,12 +8013,76 @@ export class InteractiveMode {
 
 		return {
 			onSessionEvent,
+			setHeaderText: (text: string) => {
+				header.setText(text);
+				this.ui.requestRender();
+			},
 			dispose: () => {
 				pending.clear();
 				this.chatContainer.removeChild(group);
 				this.ui.requestRender();
 			},
 		};
+	}
+
+	/**
+	 * Stream running subagent conversations live into the transcript, mirroring
+	 * how /review renders its isolated session. Each running activity gets its
+	 * own bordered inline group; the group is transient and is removed when the
+	 * subagent finishes (the subagent tool result then summarizes the outcome,
+	 * and past runs stay inspectable via /subagents).
+	 */
+	private bindSubagentActivityRendering(): void {
+		this.unsubscribeSubagentActivities?.();
+		this.unsubscribeSubagentActivities = undefined;
+		this.resetSubagentInlineRenderers();
+		const manager = this.session.getSubagentToolManager();
+		if (!manager?.listActivities || !manager.subscribeActivities) return;
+		this.unsubscribeSubagentActivities = manager.subscribeActivities((activityId) => {
+			const activity = manager.listActivities?.().find((candidate) => candidate.id === activityId);
+			if (activity) this.renderSubagentActivityInline(activity);
+		});
+	}
+
+	private resetSubagentInlineRenderers(): void {
+		for (const entry of this.subagentInlineRenderers.values()) {
+			entry.renderer.dispose();
+		}
+		this.subagentInlineRenderers.clear();
+	}
+
+	private formatSubagentInlineHeader(activity: SubagentActivity): string {
+		const name = theme.fg("accent", `Subagent ${activity.agent.name}`);
+		const task = activity.task?.split("\n")[0]?.trim();
+		return task ? `${name}${theme.fg("muted", ` — ${task}`)}` : name;
+	}
+
+	private renderSubagentActivityInline(activity: SubagentActivity): void {
+		let entry = this.subagentInlineRenderers.get(activity.id);
+		if (!entry) {
+			// Only start inline rendering for live runs; finished activities are
+			// summarized by the subagent tool result and the /subagents inspector.
+			if (activity.status !== "running") return;
+			entry = {
+				renderer: this.createInlineSessionRenderer({ headerText: this.formatSubagentInlineHeader(activity) }),
+				lastSequence: -1,
+				task: activity.task,
+			};
+			this.subagentInlineRenderers.set(activity.id, entry);
+		} else if (entry.task !== activity.task) {
+			entry.task = activity.task;
+			entry.renderer.setHeaderText(this.formatSubagentInlineHeader(activity));
+		}
+		for (const activityEvent of activity.events) {
+			if (activityEvent.sequence <= entry.lastSequence) continue;
+			entry.lastSequence = activityEvent.sequence;
+			const sessionEvent = toInlineSessionEvent(activityEvent.event);
+			if (sessionEvent) entry.renderer.onSessionEvent(sessionEvent);
+		}
+		if (activity.status !== "running") {
+			entry.renderer.dispose();
+			this.subagentInlineRenderers.delete(activity.id);
+		}
 	}
 
 	private async runInteractiveReviewWorkflow(
@@ -8066,6 +8167,9 @@ export class InteractiveMode {
 			this.loadingAnimation = undefined;
 		}
 		this.clearExtensionTerminalInputListeners();
+		this.unsubscribeSubagentActivities?.();
+		this.unsubscribeSubagentActivities = undefined;
+		this.resetSubagentInlineRenderers();
 		this.dismissSubagentInspector?.();
 		this.footer.dispose();
 		this.footerDataProvider.dispose();

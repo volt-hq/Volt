@@ -298,6 +298,8 @@ The parent tool row stays compact:
 - Show usage summary when complete.
 - Propagate Escape/Ctrl+C through the parent abort path to active ephemeral children.
 
+While a child runs, the interactive TUI streams its conversation live inline in the transcript, mirroring how `/review` renders its isolated session: each running activity gets a bordered group (agent name plus first task line in the header) that reuses the normal assistant-message and tool-execution components. The group is display-only and transient — it is removed when the child finishes, at which point the parent tool result summarizes the outcome. If a full transcript re-render drops a live group mid-run, it is rebuilt from the activity's retained events on the next notification.
+
 The interactive TUI also owns a bounded activity ledger for the current runtime. `/subagents` or `Alt+A` opens a live inspector that:
 
 - lists active children first while retaining recently completed children after their handles are disposed;

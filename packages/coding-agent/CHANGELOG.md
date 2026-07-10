@@ -21,6 +21,7 @@
 - Added a built-in `subagent` tool for MVP single-task, parallel, and chain delegation to discovered child agents, with bounded per-task/step model-visible output and child metadata details.
 - Added built-in `general`, `researcher`, `design-doc`, and `security-reviewer` subagents for common delegation, research, design-document, and security review workflows under reserved names that file-backed definitions cannot override, including bounded delegation policies and enforced non-mutating local grants for research/security roles.
 - Added custom interactive rendering for built-in `subagent` tool calls and single/parallel/chain results.
+- Added live inline rendering of running subagent conversations in the interactive TUI: each running child streams into a transient bordered transcript group (like `/review`), which is removed when the child finishes and its tool result summary lands; `/subagents` remains available for inspecting past runs.
 - Added live progress partial updates for built-in `subagent` tool single, parallel, and chain delegation.
 - Added local RPC subagent lifecycle commands for listing, starting, observing, aborting, inspecting, and disposing definition-backed child agents.
 - Added MVP subagent usage and SDK documentation covering definition discovery, project trust, explicit tool enablement, child isolation, and output limits.
