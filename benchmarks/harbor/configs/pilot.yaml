@@ -1,0 +1,97 @@
+job_name: volt-fixed-model-pilot
+jobs_dir: jobs/volt-harbor
+n_attempts: 1
+n_concurrent_trials: 4
+timeout_multiplier: 1.0
+retry:
+  max_retries: 0
+environment:
+  type: docker
+  delete: true
+agents:
+  - import_path: benchmarks.harbor.agents.volt:VoltAgent
+    model_name: openai/pilot-model
+    extra_allowed_hosts:
+      - host.docker.internal
+    env:
+      OPENAI_API_KEY: ${PILOT_GATEWAY_KEY}
+      OPENAI_BASE_URL: ${PILOT_OPENAI_BASE_URL}
+      VOLT_PACKAGE_DIR: ${VOLT_PACKAGE_DIR:-}
+    kwargs:
+      version: 0.79.6
+      node_version: 22.22.0
+      package_name: "@earendil-works/volt-coding-agent"
+      provider: pilot
+      reasoning_effort: high
+      api: openai-responses
+      input_cost_per_million: 3.0
+      output_cost_per_million: 15.0
+      cache_read_cost_per_million: 0.3
+      cache_write_cost_per_million: 3.75
+  - import_path: benchmarks.harbor.agents.run_only_secrets:RunOnlySecretClaudeCode
+    model_name: openai/pilot-model
+    extra_allowed_hosts:
+      - host.docker.internal
+    env:
+      ANTHROPIC_API_KEY: ${PILOT_GATEWAY_KEY}
+      ANTHROPIC_BASE_URL: ${PILOT_ANTHROPIC_BASE_URL}
+    kwargs:
+      version: 2.1.206
+      reasoning_effort: high
+      thinking: adaptive
+  - import_path: benchmarks.harbor.agents.run_only_secrets:RunOnlySecretCodex
+    model_name: openai/pilot-model
+    extra_allowed_hosts:
+      - host.docker.internal
+    env:
+      OPENAI_API_KEY: ${PILOT_GATEWAY_KEY}
+      OPENAI_BASE_URL: ${PILOT_OPENAI_BASE_URL}
+    kwargs:
+      version: 0.144.1
+      reasoning_effort: high
+      reasoning_summary: auto
+  - import_path: benchmarks.harbor.agents.run_only_secrets:RunOnlySecretOpenCode
+    model_name: openai/pilot-model
+    extra_allowed_hosts:
+      - host.docker.internal
+    env:
+      OPENAI_API_KEY: ${PILOT_GATEWAY_KEY}
+      OPENAI_BASE_URL: ${PILOT_OPENAI_BASE_URL}
+    kwargs:
+      version: 1.17.18
+      opencode_config:
+        provider:
+          openai:
+            models:
+              pilot-model:
+                options:
+                  reasoningEffort: high
+datasets:
+  - name: terminal-bench/terminal-bench-2-1
+    ref: sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a
+    task_names:
+      - terminal-bench/build-cython-ext
+      - terminal-bench/build-pov-ray
+      - terminal-bench/cancel-async-tasks
+      - terminal-bench/distribution-search
+      - terminal-bench/fix-code-vulnerability
+      - terminal-bench/fix-git
+      - terminal-bench/gcode-to-text
+      - terminal-bench/git-multibranch
+      - terminal-bench/install-windows-3.11
+      - terminal-bench/model-extraction-relu-logits
+      - terminal-bench/mteb-leaderboard
+      - terminal-bench/multi-source-data-merger
+      - terminal-bench/nginx-request-logging
+      - terminal-bench/openssl-selfsigned-cert
+      - terminal-bench/path-tracing
+      - terminal-bench/protein-assembly
+      - terminal-bench/pypi-server
+      - terminal-bench/pytorch-model-recovery
+      - terminal-bench/raman-fitting
+      - terminal-bench/reshard-c4-data
+      - terminal-bench/sam-cell-seg
+      - terminal-bench/sanitize-git-repo
+      - terminal-bench/torch-pipeline-parallelism
+      - terminal-bench/winning-avg-corewars
+      - terminal-bench/write-compressor

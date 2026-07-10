@@ -1,0 +1,38 @@
+job_name: volt-adapter-smoke
+jobs_dir: jobs/volt-harbor
+n_attempts: 1
+n_concurrent_trials: 2
+retry:
+  max_retries: 0
+environment:
+  type: docker
+  delete: true
+agents:
+  - import_path: benchmarks.harbor.agents.volt:VoltAgent
+    model_name: openai/pilot-model
+    extra_allowed_hosts:
+      - host.docker.internal
+    env:
+      OPENAI_API_KEY: ${PILOT_GATEWAY_KEY}
+      OPENAI_BASE_URL: ${PILOT_OPENAI_BASE_URL}
+      VOLT_PACKAGE_DIR: ${VOLT_PACKAGE_DIR:-}
+    kwargs:
+      version: 0.79.6
+      node_version: 22.22.0
+      package_name: "@earendil-works/volt-coding-agent"
+      provider: pilot
+      reasoning_effort: high
+      api: openai-responses
+      input_cost_per_million: 3.0
+      output_cost_per_million: 15.0
+      cache_read_cost_per_million: 0.3
+      cache_write_cost_per_million: 3.75
+datasets:
+  - name: terminal-bench/terminal-bench-2-1
+    ref: sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a
+    task_names:
+      - terminal-bench/fix-git
+      - terminal-bench/build-cython-ext
+      - terminal-bench/nginx-request-logging
+      - terminal-bench/cancel-async-tasks
+      - terminal-bench/write-compressor

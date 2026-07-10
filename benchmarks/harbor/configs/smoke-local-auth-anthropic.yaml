@@ -1,0 +1,38 @@
+job_name: local-auth-anthropic-smoke
+jobs_dir: jobs/volt-harbor
+n_attempts: 1
+n_concurrent_trials: 1
+retry:
+  max_retries: 0
+environment:
+  type: docker
+  delete: true
+agents:
+  - import_path: benchmarks.harbor.agents.volt:VoltAgent
+    model_name: anthropic/claude-sonnet-4-5
+    env:
+      VOLT_AUTH_JSON_PATH: ${VOLT_AUTH_JSON_PATH}
+      VOLT_PACKAGE_DIR: ${VOLT_PACKAGE_DIR:-}
+    kwargs:
+      version: 0.79.6
+      node_version: 22.22.0
+      package_name: "@earendil-works/volt-coding-agent"
+      provider: anthropic
+      reasoning_effort: high
+      custom_provider: false
+      auth_path_env: VOLT_AUTH_JSON_PATH
+  - import_path: benchmarks.harbor.agents.run_only_secrets:RunOnlySecretClaudeCode
+    model_name: anthropic/claude-sonnet-4-5
+    env:
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
+      CLAUDE_FORCE_OAUTH: "true"
+    kwargs:
+      version: 2.1.206
+      reasoning_effort: high
+      thinking: enabled
+      max_thinking_tokens: 32000
+datasets:
+  - name: terminal-bench/terminal-bench-2-1
+    ref: sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a
+    task_names:
+      - terminal-bench/fix-git

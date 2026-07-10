@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "dataset": "terminal-bench/terminal-bench-2-1",
+  "dataset_ref": "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a",
+  "population_size": 89,
+  "sample_size": 25,
+  "seed": "volt-tbench-2.1-pilot-v1",
+  "algorithm": "hamilton-category-difficulty-sha256-v1",
+  "task_set_sha256": "70377e77120ca8970339afb593afd2b54bf62fd151720021d0012cd51f726026",
+  "stratum_quotas": {
+    "data-processing:medium": 1,
+    "data-science:hard": 1,
+    "data-science:medium": 2,
+    "debugging:medium": 1,
+    "file-operations:medium": 1,
+    "machine-learning:medium": 1,
+    "mathematics:hard": 1,
+    "model-training:medium": 1,
+    "scientific-computing:hard": 1,
+    "scientific-computing:medium": 1,
+    "security:hard": 1,
+    "security:medium": 2,
+    "software-engineering:easy": 1,
+    "software-engineering:hard": 4,
+    "software-engineering:medium": 3,
+    "system-administration:hard": 1,
+    "system-administration:medium": 2
+  },
+  "category_counts": {
+    "data-processing": 1,
+    "data-science": 3,
+    "debugging": 1,
+    "file-operations": 1,
+    "machine-learning": 1,
+    "mathematics": 1,
+    "model-training": 1,
+    "scientific-computing": 2,
+    "security": 3,
+    "software-engineering": 8,
+    "system-administration": 3
+  },
+  "difficulty_counts": {
+    "easy": 1,
+    "hard": 9,
+    "medium": 15
+  },
+  "tasks": [
+    {
+      "id": "terminal-bench/build-cython-ext",
+      "name": "build-cython-ext",
+      "category": "debugging",
+      "difficulty": "medium",
+      "selection_hash": "2491fa975f75728d94a7af867361126e188055101a6e0053cda88b32041d1c6d"
+    },
+    {
+      "id": "terminal-bench/build-pov-ray",
+      "name": "build-pov-ray",
+      "category": "software-engineering",
+      "difficulty": "medium",
+      "selection_hash": "24462f17544d3ce80de5b8b8d1f3314300cc095b76e2b2fbba9f7eec78118fec"
+    },
+    {
+      "id": "terminal-bench/cancel-async-tasks",
+      "name": "cancel-async-tasks",
+      "category": "software-engineering",
+      "difficulty": "hard",
+      "selection_hash": "05f65f942e8aee7756c27b91605b1478b1a3145b4bc1876ac27340ee3e94bd9a"
+    },
+    {
+      "id": "terminal-bench/distribution-search",
+      "name": "distribution-search",
+      "category": "machine-learning",
+      "difficulty": "medium",
+      "selection_hash": "07288465cd814f7190400cd4e48d230bcf40f6ec54f1aa8fe35aa81717d6044f"
+    },
+    {
+      "id": "terminal-bench/fix-code-vulnerability",
+      "name": "fix-code-vulnerability",
+      "category": "security",
+      "difficulty": "hard",
+      "selection_hash": "3e80c8a7890d0aa56507c131a8c8b3b9a77b830e30cb368af4d831355dffa2c3"
+    },
+    {
+      "id": "terminal-bench/fix-git",
+      "name": "fix-git",
+      "category": "software-engineering",
+      "difficulty": "easy",
+      "selection_hash": "2429887e00447dbb60e542585d6c527aad14ced5d0f4d1bfd85e45fc3ca64d37"
+    },
+    {
+      "id": "terminal-bench/gcode-to-text",
+      "name": "gcode-to-text",
+      "category": "file-operations",
+      "difficulty": "medium",
+      "selection_hash": "2e4a260d4f3cb4f37b2b73a3c5b6ab9d7c7d3bf26352bc7543f2ece19e551f5c"
+    },
+    {
+      "id": "terminal-bench/git-multibranch",
+      "name": "git-multibranch",
+      "category": "system-administration",
+      "difficulty": "medium",
+      "selection_hash": "2d4393e48e6e4e89353be79f0032cbb616659174f9b5a3cfb99665fcabd3cc98"
+    },
+    {
+      "id": "terminal-bench/install-windows-3.11",
+      "name": "install-windows-3.11",
+      "category": "system-administration",
+      "difficulty": "hard",
+      "selection_hash": "505d23376c0e34a7236733044c46ba185eff918b4716bc33599927941a71f603"
+    },
+    {
+      "id": "terminal-bench/model-extraction-relu-logits",
+      "name": "model-extraction-relu-logits",
+      "category": "mathematics",
+      "difficulty": "hard",
+      "selection_hash": "3de16673bde091a59b3a18243fa96301e5b522e7fcec285fd2ac7878f3224ba1"
+    },
+    {
+      "id": "terminal-bench/mteb-leaderboard",
+      "name": "mteb-leaderboard",
+      "category": "data-science",
+      "difficulty": "medium",
+      "selection_hash": "3be9dbc850bec43d9726a223c9dccdefd7827d82a3e95d9990f2fb9c8622116d"
+    },
+    {
+      "id": "terminal-bench/multi-source-data-merger",
+      "name": "multi-source-data-merger",
+      "category": "data-processing",
+      "difficulty": "medium",
+      "selection_hash": "6a9183a6fce59672d46553fda60d0a7e8b55263102a07e6c214533467dd36c76"
+    },
+    {
+      "id": "terminal-bench/nginx-request-logging",
+      "name": "nginx-request-logging",
+      "category": "system-administration",
+      "difficulty": "medium",
+      "selection_hash": "2c324d1e84b683d5b664e98b148a85905164aae2f1a84226a672709afdb711f7"
+    },
+    {
+      "id": "terminal-bench/openssl-selfsigned-cert",
+      "name": "openssl-selfsigned-cert",
+      "category": "security",
+      "difficulty": "medium",
+      "selection_hash": "5be98d918a9bc7ceb101aa1d2f337e33bb9067baa4188f396756d66e45e76ec0"
+    },
+    {
+      "id": "terminal-bench/path-tracing",
+      "name": "path-tracing",
+      "category": "software-engineering",
+      "difficulty": "hard",
+      "selection_hash": "26e561ed5dd1208a8962f5d16643b0e5834f60f34132af0872429841a62f02b3"
+    },
+    {
+      "id": "terminal-bench/protein-assembly",
+      "name": "protein-assembly",
+      "category": "scientific-computing",
+      "difficulty": "hard",
+      "selection_hash": "4c2e773cbada915815e8622a961968429845dd478edbaa52890842cec2fb9f25"
+    },
+    {
+      "id": "terminal-bench/pypi-server",
+      "name": "pypi-server",
+      "category": "software-engineering",
+      "difficulty": "medium",
+      "selection_hash": "0ee9c8cec0cf6ebf55a39eb5f58089c44ae4e078d86adbe49ab28833b6229016"
+    },
+    {
+      "id": "terminal-bench/pytorch-model-recovery",
+      "name": "pytorch-model-recovery",
+      "category": "model-training",
+      "difficulty": "medium",
+      "selection_hash": "0e068843a738f0bfe9d679356239757799d90cf0c13b792f3bede807fc1064b6"
+    },
+    {
+      "id": "terminal-bench/raman-fitting",
+      "name": "raman-fitting",
+      "category": "scientific-computing",
+      "difficulty": "medium",
+      "selection_hash": "0c3d20fe0b9200eb3a476e880d902c5fdca189dca6ca5d76376ef4cf83723e1b"
+    },
+    {
+      "id": "terminal-bench/reshard-c4-data",
+      "name": "reshard-c4-data",
+      "category": "data-science",
+      "difficulty": "medium",
+      "selection_hash": "7f105e8a982e642fce3895459cd1d96e336643020b263295b61b588f70d06fec"
+    },
+    {
+      "id": "terminal-bench/sam-cell-seg",
+      "name": "sam-cell-seg",
+      "category": "data-science",
+      "difficulty": "hard",
+      "selection_hash": "930c6f19ebc0d8c3ab3c06fc3d3ac6ed2e033945a5bd44a09776eb4c6a501b6c"
+    },
+    {
+      "id": "terminal-bench/sanitize-git-repo",
+      "name": "sanitize-git-repo",
+      "category": "security",
+      "difficulty": "medium",
+      "selection_hash": "0fef050c6d6b6830223871f3ce7938bd499b78d6bf39fecacb94f24afd6ff3e8"
+    },
+    {
+      "id": "terminal-bench/torch-pipeline-parallelism",
+      "name": "torch-pipeline-parallelism",
+      "category": "software-engineering",
+      "difficulty": "hard",
+      "selection_hash": "2c11f6b063b4a565cac72a06a6d6526f8fa14ae5bdf4ad5768b9a12ace5d1bcb"
+    },
+    {
+      "id": "terminal-bench/winning-avg-corewars",
+      "name": "winning-avg-corewars",
+      "category": "software-engineering",
+      "difficulty": "medium",
+      "selection_hash": "1172906646dd9caefba44a03d61fb689c3233ac841e2e81fd27ccee476ed5a2a"
+    },
+    {
+      "id": "terminal-bench/write-compressor",
+      "name": "write-compressor",
+      "category": "software-engineering",
+      "difficulty": "hard",
+      "selection_hash": "15189b0897d258225e9e2a96bb9dd71e71e44c7c5fca2357758708c3ebf7616c"
+    }
+  ]
+}
