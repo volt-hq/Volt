@@ -104,7 +104,12 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number; model?: Model<any> }): {
+function createRuntimeHost(options: {
+	withAuth: boolean;
+	responseDelayMs: number;
+	model?: Model<any>;
+	configureSession?: (session: AgentSession) => void;
+}): {
 	runtimeHost: AgentSessionRuntime;
 	cleanup: () => Promise<void>;
 } {
@@ -152,6 +157,8 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 		resourceLoader: createTestResourceLoader(),
 	});
 
+	options.configureSession?.(session);
+
 	const runtimeHost = {
 		session,
 		newSession: vi.fn(async () => ({ cancelled: true })),
@@ -179,7 +186,12 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 	};
 }
 
-async function startRpcMode(options: { withAuth: boolean; responseDelayMs: number; model?: Model<any> }): Promise<{
+async function startRpcMode(options: {
+	withAuth: boolean;
+	responseDelayMs: number;
+	model?: Model<any>;
+	configureSession?: (session: AgentSession) => void;
+}): Promise<{
 	lineHandler: (line: string) => void;
 	cleanup: () => Promise<void>;
 }> {
@@ -255,6 +267,50 @@ describe("RPC prompt response semantics", () => {
 				});
 			});
 		} finally {
+			await cleanup();
+		}
+	});
+
+	it("reports busy preflight separately from provider streaming", async () => {
+		let releaseInput: () => void = () => undefined;
+		const inputRelease = new Promise<void>((resolve) => {
+			releaseInput = resolve;
+		});
+		let notifyInputStarted: () => void = () => undefined;
+		const inputStarted = new Promise<void>((resolve) => {
+			notifyInputStarted = resolve;
+		});
+		const { lineHandler, cleanup } = await startRpcMode({
+			withAuth: true,
+			responseDelayMs: 0,
+			configureSession: (session) => {
+				const runner = session.extensionRunner;
+				const hasHandlers = runner.hasHandlers.bind(runner);
+				runner.hasHandlers = (eventType) => eventType === "input" || hasHandlers(eventType);
+				runner.emitInput = async () => {
+					notifyInputStarted();
+					await inputRelease;
+					return { action: "handled" };
+				};
+			},
+		});
+
+		try {
+			lineHandler(JSON.stringify({ id: "busy-prompt", type: "prompt", message: "Wait in preflight" }));
+			await inputStarted;
+			lineHandler(JSON.stringify({ id: "busy-state", type: "get_state" }));
+
+			await vi.waitFor(() => {
+				const response = parseOutputLines(rpcIo.outputLines).find((record) => record.id === "busy-state");
+				expect(response).toMatchObject({
+					type: "response",
+					command: "get_state",
+					success: true,
+					data: { isStreaming: false, isBusy: true },
+				});
+			});
+		} finally {
+			releaseInput();
 			await cleanup();
 		}
 	});

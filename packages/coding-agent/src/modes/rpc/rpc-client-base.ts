@@ -433,7 +433,7 @@ export abstract class RpcClientBase {
 			// the idle snapshot and listener installation.
 			void this.getState().then(
 				(state) => {
-					if (!state.isStreaming) finish();
+					if (!(state.isBusy ?? state.isStreaming)) finish();
 				},
 				(error: unknown) => finish(toError(error)),
 			);

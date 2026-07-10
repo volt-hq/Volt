@@ -401,6 +401,49 @@ describe("SubagentManager", () => {
 		expect(lifecycle).toEqual(["agent_end", "agent_end", "agent_settled"]);
 	});
 
+	it("returns the result from an extension command that triggers a custom turn", async () => {
+		const { manager } = await createTestManager({
+			responseText: "extension command result",
+			onRuntimeCreated: (event) => {
+				const runner = event.runtime.session.extensionRunner;
+				const session = event.runtime.session as unknown as {
+					_sendCustomMessage(
+						message: { customType: string; content: string; display: boolean },
+						options: { triggerTurn: true },
+						allowDuringPromptTransaction: true,
+					): Promise<void>;
+				};
+				runner.getCommand = (name) =>
+					name === "custom-turn"
+						? {
+								name,
+								invocationName: name,
+								description: "Trigger a custom child turn",
+								sourceInfo: createSyntheticSourceInfo("<test-command>", { source: "sdk" }),
+								handler: async (_args, ctx) => {
+									void session._sendCustomMessage(
+										{ customType: "command", content: "custom child turn", display: true },
+										{ triggerTurn: true },
+										true,
+									);
+									await ctx.waitForIdle();
+								},
+							}
+						: undefined;
+			},
+		});
+		const handle = await manager.start();
+		const completion = handle.waitForEnd();
+
+		await handle.prompt("/custom-turn");
+		const result = await completion;
+
+		expect(result.event.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "extension command result" }],
+		});
+	});
+
 	it("rejects completion when the delegated prompt settles without an agent result", async () => {
 		const { manager } = await createTestManager({
 			onRuntimeCreated: (event) => {
@@ -994,6 +1037,27 @@ describe("SubagentManager", () => {
 		const handle = await manager.start();
 
 		await expect(handle.abort()).resolves.toBeUndefined();
+	});
+
+	it("signals a retained runtime before concurrent handle disposal closes its transport", async () => {
+		let abortCalls = 0;
+		const { manager } = await createTestManager({
+			retainRuntimeOnDispose: true,
+			onRuntimeCreated: (event) => {
+				const abortRuntime = event.runtime.session.abort.bind(event.runtime.session);
+				event.runtime.session.abort = async () => {
+					abortCalls += 1;
+					await abortRuntime();
+				};
+			},
+		});
+		const handle = await manager.start();
+
+		const abort = handle.abort();
+		const disposal = handle.dispose();
+
+		expect(abortCalls).toBe(1);
+		await Promise.all([abort, disposal]);
 	});
 
 	it("rejects unfinished completion before concurrent disposal finishes and ignores late settlement", async () => {

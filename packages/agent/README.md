@@ -210,6 +210,9 @@ const agent = new Agent({
     }
   },
 
+  // Stop gracefully after a completed turn, before queue polling or another model call.
+  shouldStopAfterTurn: async ({ context }) => shouldCompactBeforeNextTurn(context.messages),
+
   // Custom thinking budgets for token-based providers
   thinkingBudgets: {
     minimal: 128,
@@ -260,8 +263,12 @@ await agent.prompt("What's in this image?", [
 // AgentMessage directly
 await agent.prompt({ role: "user", content: "Hello", timestamp: Date.now() });
 
-// Continue from current context (last message must be user or toolResult)
+// Continue from current context (last message must normally be user or toolResult)
 await agent.continue();
+
+// If the transcript ends with an assistant message, explicitly drain one/all queued
+// follow-ups (according to followUpMode) as the continuation input.
+await agent.continue({ drainFollowUps: true });
 ```
 
 ### State Management
@@ -274,6 +281,7 @@ agent.state.tools = [myTool];
 agent.toolExecution = "sequential";
 agent.beforeToolCall = async ({ toolCall }) => undefined;
 agent.afterToolCall = async ({ toolCall, result }) => undefined;
+agent.shouldStopAfterTurn = async ({ context }) => shouldCompactBeforeNextTurn(context.messages);
 agent.state.messages = newMessages; // top-level array is copied
 agent.state.messages.push(message);
 agent.reset();

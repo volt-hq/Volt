@@ -98,7 +98,8 @@ interface AgentSession {
   model: Model | undefined;
   thinkingLevel: ThinkingLevel;
   messages: AgentMessage[];
-  isStreaming: boolean;
+  isStreaming: boolean; // provider run or session continuation
+  isBusy: boolean;      // also includes prompt preflight and standalone session operations
 
   // In-place tree navigation within the current session file
   navigateTree(targetId: string, options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }): Promise<{ editorText?: string; cancelled: boolean }>;

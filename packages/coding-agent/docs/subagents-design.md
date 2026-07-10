@@ -260,7 +260,7 @@ App-visible agents use existing Iroh conversation streams:
 2. Host returns the concrete workspace/session identity.
 3. App validates with `get_state` and `get_transcript`.
 4. App sends `prompt` when an initial prompt is provided.
-5. App listens for `agent_end` and transcript updates.
+5. App uses `agent_end` for per-run transcript updates and `agent_settled` as the terminal signal after retries, compaction, and queued continuations.
 
 The MVP intentionally avoids an `initialPrompt` handshake field or any other Iroh protocol change.
 
@@ -312,7 +312,7 @@ The iOS app uses `IrohHostConnectionPool.openConversationStream(target: .new | .
 2. validate `get_state` and `get_transcript` against the stream identity;
 3. send `prompt` on that stream when the optional initial prompt is non-empty;
 4. render events in the new pinned agent tab;
-5. listen for `agent_end` or notification completion.
+5. use `agent_end` for per-run transcript updates and `agent_settled` or notification completion as the terminal boundary.
 
 This keeps stream selection, identity validation, detach, reconnect, and abort behavior aligned with the existing remote protocol. If the prompt send fails after agent creation, the selected new agent remains active and the app records a clear system message.
 
@@ -391,7 +391,7 @@ Integration tests:
 
 Remote/app tests:
 
-- open new conversation stream, send optional initial prompt, receive `agent_end`
+- open new conversation stream, send optional initial prompt, receive per-run `agent_end` and terminal `agent_settled`
 - empty initial prompt preserves no-prompt new-agent behavior
 - initial prompt send failure keeps the new agent selected and records a system message
 - stream close detaches without aborting

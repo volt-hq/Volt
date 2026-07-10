@@ -586,6 +586,21 @@ async function completeSummarization(
 	return stream.result();
 }
 
+function getSummarizationText(response: AssistantMessage, operation: string): string {
+	if (response.stopReason === "error") {
+		throw new Error(`${operation} failed: ${response.errorMessage || "Unknown error"}`);
+	}
+	if (response.stopReason === "aborted") {
+		const error = new Error(`${operation} cancelled`);
+		error.name = "AbortError";
+		throw error;
+	}
+	return response.content
+		.filter((content): content is { type: "text"; text: string } => content.type === "text")
+		.map((content) => content.text)
+		.join("\n");
+}
+
 /**
  * Generate a summary of the conversation using the LLM.
  * If previousSummary is provided, uses the update prompt to merge.
@@ -665,16 +680,7 @@ export async function generateSummary(
 		streamFn,
 	);
 
-	if (response.stopReason === "error") {
-		throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
-	}
-
-	const textContent = response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("\n");
-
-	return textContent;
+	return getSummarizationText(response, "Summarization");
 }
 
 // ============================================================================
@@ -941,12 +947,5 @@ async function generateTurnPrefixSummary(
 		streamFn,
 	);
 
-	if (response.stopReason === "error") {
-		throw new Error(`Turn prefix summarization failed: ${response.errorMessage || "Unknown error"}`);
-	}
-
-	return response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("\n");
+	return getSummarizationText(response, "Turn prefix summarization");
 }

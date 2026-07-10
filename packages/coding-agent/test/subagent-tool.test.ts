@@ -1388,6 +1388,7 @@ describe("subagent tool", () => {
 
 	it("rejects parent cancellation without waiting for hung child cleanup", async () => {
 		let abortCalled = false;
+		let disposeCalled = false;
 		let resolvePromptStarted: () => void = () => undefined;
 		const promptStarted = new Promise<void>((resolve) => {
 			resolvePromptStarted = resolve;
@@ -1415,6 +1416,7 @@ describe("subagent tool", () => {
 			},
 			waitForEnd: async () => never,
 			dispose: async () => {
+				disposeCalled = true;
 				await never;
 			},
 			onEvent: () => () => undefined,
@@ -1439,6 +1441,7 @@ describe("subagent tool", () => {
 
 		expect(outcome).toBe("Operation aborted");
 		expect(abortCalled).toBe(true);
+		await vi.waitFor(() => expect(disposeCalled).toBe(true));
 	});
 
 	it("rejects cancellation that arrives after child disposal starts", async () => {

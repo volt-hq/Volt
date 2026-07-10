@@ -887,15 +887,19 @@ class IrohRemoteLiveActivityUpdater {
 				}
 				this.pendingTerminalStatus = getRunTerminalOutcome(event.messages) === "completed" ? "completed" : "failed";
 				break;
-			case "agent_settled":
+			case "agent_settled": {
 				if (!this.active || this.pendingTerminalStatus === undefined) {
 					return;
 				}
-				await this.sendUpdate(this.pendingTerminalStatus);
+				const terminalStatus = this.pendingTerminalStatus;
+				// End the old run synchronously so delayed delivery cannot clear state
+				// established by a newer agent_start handler.
 				this.active = false;
 				this.pendingTerminalStatus = undefined;
 				this.toolIndexesByCallId.clear();
+				await this.sendUpdate(terminalStatus);
 				break;
+			}
 			default:
 				break;
 		}

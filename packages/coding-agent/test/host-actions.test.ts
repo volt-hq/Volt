@@ -434,6 +434,21 @@ describe("HostActionRegistry", () => {
 		};
 
 		await expect(registry.invoke(RUN_CANCEL_ACTION_ID, idleContext, {})).rejects.toThrow("No active run to cancel");
+
+		const preflightContext = {
+			...idleContext,
+			session: { isBusy: true, isStreaming: false, isCompacting: false },
+		};
+		await expect(registry.invoke(RUN_CANCEL_ACTION_ID, preflightContext, {})).resolves.toEqual(
+			expect.objectContaining({ status: "completed" }),
+		);
+		await expect(registry.invoke(REVIEW_UNCOMMITTED_ACTION_ID, preflightContext, {})).rejects.toThrow(
+			"Review is not available while an agent operation is running",
+		);
+		await expect(registry.invoke(THINKING_FAST_MODE_ACTION_ID, preflightContext, { enabled: true })).rejects.toThrow(
+			"Fast mode is not available while an agent operation is running",
+		);
+
 		await expect(
 			registry.invokeBySlashAlias(SESSION_RENAME_SLASH_ALIAS, idleContext, { name: "   " }),
 		).rejects.toThrow("Session name cannot be empty");

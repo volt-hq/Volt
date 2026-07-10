@@ -165,6 +165,42 @@ describe("generateSummary reasoning options", () => {
 		expect(completeSimpleMock.mock.calls[0][2]?.maxTokens).toBeLessThan(8_192);
 	});
 
+	it("rejects an aborted history summary instead of returning partial text", async () => {
+		completeSimpleMock.mockResolvedValue({
+			...mockSummaryResponse,
+			content: [{ type: "text", text: "partial summary" }],
+			stopReason: "aborted",
+		});
+
+		const summary = generateSummary(messages, createModel(false), 2_000, "test-key");
+
+		await expect(summary).rejects.toMatchObject({ name: "AbortError", message: "Summarization cancelled" });
+	});
+
+	it("rejects an aborted turn-prefix summary instead of compacting with partial text", async () => {
+		completeSimpleMock.mockResolvedValue({
+			...mockSummaryResponse,
+			content: [{ type: "text", text: "partial turn prefix" }],
+			stopReason: "aborted",
+		});
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: [],
+			turnPrefixMessages: messages,
+			isSplitTurn: true,
+			tokensBefore: 60_000,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { enabled: true, reserveTokens: 2_000, keepRecentTokens: 1_000 },
+		};
+
+		const result = compact(preparation, createModel(false), "test-key");
+
+		await expect(result).rejects.toMatchObject({
+			name: "AbortError",
+			message: "Turn prefix summarization cancelled",
+		});
+	});
+
 	it("clamps compaction summary maxTokens to the model output cap", async () => {
 		const preparation: CompactionPreparation = {
 			firstKeptEntryId: "entry-keep",

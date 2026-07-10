@@ -326,6 +326,8 @@ export class AgentSession {
 	private _activePromptRuns = new Set<Promise<void>>();
 	/** Tracks complete prompt calls, including pre-prompt recovery and message construction. */
 	private _activePromptTransactions = new Map<symbol, Promise<void>>();
+	/** Tracks standalone session operations such as manual compaction and tree navigation. */
+	private _activeSessionOperations = new Set<Promise<unknown>>();
 	private _extensionCommandTransactions = new Set<symbol>();
 	private _activeExtensionCommandHandlers = 0;
 
@@ -647,15 +649,11 @@ export class AgentSession {
 					this._overflowRecoveryAttempted = false;
 				}
 
-				// Reset retry counter immediately on successful assistant response
-				// This prevents accumulation across multiple LLM calls within a turn
-				if (assistantMsg.stopReason !== "error" && this._retryAttempt > 0) {
-					this._emit({
-						type: "auto_retry_end",
-						success: true,
-						attempt: this._retryAttempt,
-					});
-					this._retryAttempt = 0;
+				// Reset retry state immediately when the retry response completes.
+				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted") {
+					this._settleRetry(true);
+				} else if (assistantMsg.stopReason === "aborted") {
+					this._settleRetry(false, "Retry cancelled");
 				}
 			}
 		}
@@ -674,6 +672,20 @@ export class AgentSession {
 			}
 		}
 		return false;
+	}
+
+	private _settleRetry(success: boolean, finalError?: string): void {
+		if (this._retryAttempt === 0) {
+			return;
+		}
+		const attempt = this._retryAttempt;
+		this._retryAttempt = 0;
+		this._emit({
+			type: "auto_retry_end",
+			success,
+			attempt,
+			...(finalError ? { finalError } : {}),
+		});
 	}
 
 	/** Extract text content from a message */
@@ -904,9 +916,9 @@ export class AgentSession {
 		return this.agent.state.isStreaming || this._activePromptRuns.size > 0;
 	}
 
-	/** Whether any tracked prompt work, including preflight, is still active. */
+	/** Whether any tracked prompt or standalone session operation is still active. */
 	get isBusy(): boolean {
-		return this.isStreaming || this._activePromptTransactions.size > 0;
+		return this.isStreaming || this._activePromptTransactions.size > 0 || this._activeSessionOperations.size > 0;
 	}
 
 	/** Current effective system prompt (includes any per-turn extension modifications) */
@@ -1157,8 +1169,21 @@ export class AgentSession {
 		});
 	}
 
+	private _trackSessionOperation<T>(operation: () => Promise<T>): Promise<T> {
+		const tracked = Promise.resolve().then(operation);
+		this._activeSessionOperations.add(tracked);
+		return tracked.finally(() => {
+			this._activeSessionOperations.delete(tracked);
+			this._emitAgentSettledIfIdle();
+		});
+	}
+
 	private _emitAgentSettledIfIdle(): void {
-		if (this._activePromptRuns.size === 0 && this._activePromptTransactions.size === 0) {
+		if (
+			this._activePromptRuns.size === 0 &&
+			this._activePromptTransactions.size === 0 &&
+			this._activeSessionOperations.size === 0
+		) {
 			this._emit({ type: "agent_settled" });
 		}
 	}
@@ -1175,9 +1200,9 @@ export class AgentSession {
 					([transactionId]) => !excludeExtensionCommands || !this._extensionCommandTransactions.has(transactionId),
 				)
 				.map(([, transaction]) => transaction);
-			const promptWork = [...this._activePromptRuns, ...promptTransactions];
-			if (promptWork.length > 0) {
-				await Promise.allSettled(promptWork);
+			const sessionWork = [...this._activePromptRuns, ...promptTransactions, ...this._activeSessionOperations];
+			if (sessionWork.length > 0) {
+				await Promise.allSettled(sessionWork);
 				continue;
 			}
 
@@ -1185,7 +1210,7 @@ export class AgentSession {
 			const hasOtherTransactions = [...this._activePromptTransactions.keys()].some(
 				(transactionId) => !excludeExtensionCommands || !this._extensionCommandTransactions.has(transactionId),
 			);
-			if (this._activePromptRuns.size === 0 && !hasOtherTransactions) {
+			if (this._activePromptRuns.size === 0 && !hasOtherTransactions && this._activeSessionOperations.size === 0) {
 				return;
 			}
 		}
@@ -1199,6 +1224,7 @@ export class AgentSession {
 		}
 		if (abortGeneration !== this._abortGeneration) {
 			this._lastAssistantMessage = undefined;
+			this._settleRetry(false, "Retry cancelled");
 			return this.agent.hasQueuedMessages();
 		}
 		const msg = this._lastAssistantMessage;
@@ -1226,14 +1252,8 @@ export class AgentSession {
 			return this.agent.hasQueuedMessages();
 		}
 
-		if (msg.stopReason === "error" && this._retryAttempt > 0) {
-			this._emit({
-				type: "auto_retry_end",
-				success: false,
-				attempt: this._retryAttempt,
-				finalError: msg.errorMessage,
-			});
-			this._retryAttempt = 0;
+		if (msg.stopReason === "error") {
+			this._settleRetry(false, msg.errorMessage);
 		}
 
 		if (await this._checkCompaction(msg)) {
@@ -1326,6 +1346,11 @@ export class AgentSession {
 			// Queue only behind an active agent run. During preflight or abort,
 			// reject promptly so an accepted message cannot be stranded.
 			if (shouldQueue) {
+				if (allowQueue && !this.isStreaming) {
+					throw new Error(
+						"Agent finished processing while queued prompt preflight was running. Resubmit the prompt.",
+					);
+				}
 				if (!allowQueue || !options?.streamingBehavior) {
 					throw new Error(
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
@@ -2009,6 +2034,10 @@ export class AgentSession {
 	async compact(customInstructions?: string): Promise<CompactionResult> {
 		this._disconnectFromAgent();
 		await this.abort();
+		return this._trackSessionOperation(() => this._compact(customInstructions));
+	}
+
+	private async _compact(customInstructions?: string): Promise<CompactionResult> {
 		this._compactionAbortController = new AbortController();
 		this._activeCompaction = { reason: "manual", startedAt: Date.now() };
 		this._emit({ type: "compaction_start", reason: "manual" });
@@ -2309,6 +2338,8 @@ export class AgentSession {
 		continueWithoutCompaction = false,
 	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
+		const abortGeneration = this._abortGeneration;
+		const canContinue = (): boolean => !this._disposed && abortGeneration === this._abortGeneration;
 
 		this._autoCompactionAbortController = new AbortController();
 		this._activeCompaction = { reason, startedAt: Date.now() };
@@ -2321,7 +2352,7 @@ export class AgentSession {
 					reason,
 					result: undefined,
 					aborted: false,
-					willRetry: continueWithoutCompaction,
+					willRetry: canContinue() && continueWithoutCompaction,
 				});
 				return false;
 			}
@@ -2337,7 +2368,7 @@ export class AgentSession {
 						reason,
 						result: undefined,
 						aborted: false,
-						willRetry: continueWithoutCompaction,
+						willRetry: canContinue() && continueWithoutCompaction,
 					});
 					return false;
 				}
@@ -2357,7 +2388,7 @@ export class AgentSession {
 					reason,
 					result: undefined,
 					aborted: false,
-					willRetry: continueWithoutCompaction,
+					willRetry: canContinue() && continueWithoutCompaction,
 				});
 				return false;
 			}
@@ -2380,7 +2411,7 @@ export class AgentSession {
 						reason,
 						result: undefined,
 						aborted: true,
-						willRetry: continueWithoutCompaction,
+						willRetry: canContinue() && continueWithoutCompaction,
 					});
 					return false;
 				}
@@ -2427,7 +2458,7 @@ export class AgentSession {
 					reason,
 					result: undefined,
 					aborted: true,
-					willRetry: continueWithoutCompaction,
+					willRetry: canContinue() && continueWithoutCompaction,
 				});
 				return false;
 			}
@@ -2462,7 +2493,7 @@ export class AgentSession {
 				reason,
 				result,
 				aborted: false,
-				willRetry: willRetry || continueAfterCompaction,
+				willRetry: canContinue() && (willRetry || continueAfterCompaction),
 			});
 
 			if (willRetry) {
@@ -2482,17 +2513,24 @@ export class AgentSession {
 			// Continue once so queued messages are delivered.
 			return this.agent.hasQueuedMessages();
 		} catch (error) {
+			const aborted =
+				this._autoCompactionAbortController.signal.aborted ||
+				(error instanceof Error && error.name === "AbortError");
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			this._emit({
 				type: "compaction_end",
 				reason,
 				result: undefined,
-				aborted: false,
-				willRetry: continueWithoutCompaction,
-				errorMessage:
-					reason === "overflow"
-						? `Context overflow recovery failed: ${errorMessage}`
-						: `Auto-compaction failed: ${errorMessage}`,
+				aborted,
+				willRetry: canContinue() && continueWithoutCompaction,
+				...(aborted
+					? {}
+					: {
+							errorMessage:
+								reason === "overflow"
+									? `Context overflow recovery failed: ${errorMessage}`
+									: `Auto-compaction failed: ${errorMessage}`,
+						}),
 			});
 			return false;
 		} finally {
@@ -3090,14 +3128,7 @@ export class AgentSession {
 		});
 
 		if (this._disposed || abortGeneration !== this._abortGeneration) {
-			const attempt = this._retryAttempt;
-			this._retryAttempt = 0;
-			this._emit({
-				type: "auto_retry_end",
-				success: false,
-				attempt,
-				finalError: "Retry cancelled",
-			});
+			this._settleRetry(false, "Retry cancelled");
 			return false;
 		}
 
@@ -3113,14 +3144,7 @@ export class AgentSession {
 			await sleep(delayMs, this._retryAbortController.signal);
 		} catch {
 			// Aborted during sleep - emit end event so UI can clean up
-			const attempt = this._retryAttempt;
-			this._retryAttempt = 0;
-			this._emit({
-				type: "auto_retry_end",
-				success: false,
-				attempt,
-				finalError: "Retry cancelled",
-			});
+			this._settleRetry(false, "Retry cancelled");
 			return false;
 		} finally {
 			this._retryAbortController = undefined;
@@ -3355,9 +3379,16 @@ export class AgentSession {
 	 * @param options.label Label to attach to the branch summary entry
 	 * @returns Result with editorText (if user message) and cancelled status
 	 */
-	async navigateTree(
+	navigateTree(
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
+	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
+		return this._trackSessionOperation(() => this._navigateTree(targetId, options));
+	}
+
+	private async _navigateTree(
+		targetId: string,
+		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
 		const oldLeafId = this.sessionManager.getLeafId();
 

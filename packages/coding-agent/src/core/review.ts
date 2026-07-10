@@ -980,6 +980,8 @@ export interface ReviewRunResult {
 }
 
 export interface ReviewWorkflowSession {
+	/** Falls back to isStreaming for legacy workflow integrations. */
+	isBusy?: boolean;
 	isStreaming: boolean;
 	isCompacting: boolean;
 	model?: Model<any>;
@@ -1315,8 +1317,8 @@ export function formatReviewWorkflowSummary(result: Extract<ReviewWorkflowResult
 	return `Review complete: ${findingCount} finding${findingCount === 1 ? "" : "s"}.`;
 }
 
-function assertReviewCanStart(session: Pick<ReviewWorkflowSession, "isStreaming" | "isCompacting">): void {
-	if (session.isStreaming || session.isCompacting) {
+function assertReviewCanStart(session: Pick<ReviewWorkflowSession, "isBusy" | "isStreaming" | "isCompacting">): void {
+	if ((session.isBusy ?? session.isStreaming) || session.isCompacting) {
 		throw new Error("Wait for the current response to finish before starting a review.");
 	}
 }

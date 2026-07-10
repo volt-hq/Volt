@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added an `agent_settled` session/RPC event emitted exactly once per prompt after the final `agent_end`, when automatic retries, overflow/threshold compaction continuations, and queued-message continuations have finished. RPC client `waitForIdle()`, `collectEvents()`, and `promptAndWait()` now terminate on `agent_settled` instead of a raw `agent_end`.
+- Added an `agent_settled` session/RPC event emitted when all tracked prompt work reaches a global idle boundary, after any final `agent_end`, automatic retries, overflow/threshold compaction continuations, and queued-message continuations have finished. A boundary may settle multiple overlapping prompt transactions, and handled/rejected preflight may settle without an `agent_end`. RPC client `waitForIdle()`, `collectEvents()`, and `promptAndWait()` now terminate on `agent_settled` instead of a raw `agent_end`.
 - Added proactive mid-run compaction: when a turn with tool calls pushes live context usage over the compaction threshold, the session stops the agent loop after that turn (via a new `Agent.shouldStopAfterTurn` hook wired through to the agent-loop), runs threshold compaction, and resumes the interrupted run, instead of waiting for the full agent/tool loop to finish. A failed attempt does not retrigger until a compaction succeeds or the next user prompt.
 - Added an aggregate character budget for compaction/branch-summary summarization input: serialized conversations are capped (keeping the opening goal plus the newest contiguous parts with an omission marker), in addition to the existing per-tool-result truncation.
 
@@ -71,6 +71,12 @@
 
 ### Fixed
 
+- Fixed delayed queued-prompt preflight from accepting and stranding a message after the active run had already settled.
+- Fixed aborted compaction summaries from being committed as successful context checkpoints.
+- Fixed retry cancellation from reporting success or retaining stale retry-attempt state.
+- Fixed extension-command subagents losing valid custom-turn results, and ensured child disposal is attempted even when child abort hangs.
+- Fixed RPC state conflating asynchronous prompt preflight with provider streaming by exposing `isBusy` separately, and included standalone compaction and tree operations in idle settlement.
+- Fixed delayed Live Activity terminal delivery from deactivating a newer run.
 - Fixed `volt daemon` failing to start on Windows with `listen EACCES` because the control socket used a filesystem `.sock` path, which Node's `net` module treats as a named pipe on Windows. The daemon now publishes a fresh per-instance `\\.\pipe\voltd-<hash>-<random>` named pipe through the pidfile, authenticates local control clients with the pidfile token, and uses a daemon lock so pre-created legacy pipes do not block normal start or auto-start.
 - Fixed `volt daemon stop`/`restart` hanging on Windows (and reporting a false timeout) because the foreground daemon process stayed alive after a clean shutdown when the native Iroh handle kept the event loop from draining; the daemon now exits deterministically once shutdown completes.
 - Fixed a detached-runtime retention race where a phone reattaching to its daemon runtime just as the 30-minute TTL elapsed could dispose the live runtime mid-reattach, serving the phone from a disposed runtime and flipping the conversation lease to unowned so a desktop TUI could seize a session a phone was still using. The retention timer is now cancelled synchronously when a reattach is recognized.

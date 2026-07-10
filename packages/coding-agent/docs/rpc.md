@@ -188,6 +188,7 @@ Response:
     "thinkingLevel": "medium",
     "availableThinkingLevels": ["off", "minimal", "low", "medium", "high"],
     "isStreaming": false,
+    "isBusy": true,
     "isCompacting": true,
     "steeringMode": "all",
     "followUpMode": "one-at-a-time",
@@ -202,7 +203,7 @@ Response:
 }
 ```
 
-The `model` field is a full [Model](#model) object or `null`. `availableThinkingLevels` lists the thinking levels the current model supports (`["off"]` for non-reasoning models). The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `activeCompaction` is present only while context compaction is currently running; `startedAt` is Unix epoch milliseconds.
+The `model` field is a full [Model](#model) object or `null`. `availableThinkingLevels` lists the thinking levels the current model supports (`["off"]` for non-reasoning models). `isStreaming` indicates an active provider run or session-level continuation; `isBusy` also includes asynchronous prompt preflight and standalone session operations such as manual compaction and tree navigation. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `activeCompaction` is present only while context compaction is currently running; `startedAt` is Unix epoch milliseconds.
 
 #### get_transcript
 
@@ -1386,7 +1387,7 @@ A single prompt can produce multiple `agent_end` events: automatic retries, over
 
 ### agent_settled
 
-Emitted exactly once per prompt, after the final `agent_end` and after all automatic retries, compaction continuations, and queued-message continuations have finished. Client helpers such as `waitForIdle`, `collectEvents`, and `promptAndWait` terminate on this event.
+Emitted when all tracked prompt work reaches a global idle boundary, after any final `agent_end`, automatic retries, compaction continuations, and queued-message continuations have finished. Overlapping prompt transactions share one boundary, and handled or rejected preflight can settle without an `agent_end`; this event does not carry a prompt correlation id. Client helpers such as `waitForIdle`, `collectEvents`, and `promptAndWait` terminate on this event.
 
 ```json
 {"type": "agent_settled"}

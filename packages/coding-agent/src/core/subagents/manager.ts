@@ -154,6 +154,7 @@ class LocalSubagentHandle implements SubagentHandle {
 	readonly id: string;
 	readonly sessionId: string;
 	private readonly client: InProcessRpcClient;
+	private readonly abortRuntime: () => Promise<void>;
 	private readonly removeFromManager: (id: string) => void;
 	private waitForIdle: (() => Promise<void>) | undefined;
 	private readonly eventListeners = new Set<SubagentEventListener>();
@@ -162,6 +163,7 @@ class LocalSubagentHandle implements SubagentHandle {
 	private rejectEnd: (error: Error) => void = () => {};
 	private latestEndEvent: SubagentEndEvent | undefined;
 	private settlementWatcherStarted = false;
+	private promptStarted = false;
 	private promptAccepted = false;
 	private promptMessageObserved = false;
 	private endSettled = false;
@@ -172,12 +174,14 @@ class LocalSubagentHandle implements SubagentHandle {
 		id: string;
 		sessionId: string;
 		client: InProcessRpcClient;
+		abortRuntime: () => Promise<void>;
 		removeFromManager: (id: string) => void;
 		waitForIdle: () => Promise<void>;
 	}) {
 		this.id = options.id;
 		this.sessionId = options.sessionId;
 		this.client = options.client;
+		this.abortRuntime = options.abortRuntime;
 		this.removeFromManager = options.removeFromManager;
 		this.waitForIdle = options.waitForIdle;
 		this.endPromise = new Promise<SubagentResult>((resolve, reject) => {
@@ -189,6 +193,7 @@ class LocalSubagentHandle implements SubagentHandle {
 
 	async prompt(message: string): Promise<void> {
 		this.assertOpen();
+		this.promptStarted = true;
 		await this.client.prompt(message, undefined, () => {
 			this.promptAccepted = true;
 		});
@@ -196,7 +201,9 @@ class LocalSubagentHandle implements SubagentHandle {
 
 	async abort(): Promise<void> {
 		this.assertOpen();
-		await this.client.abort();
+		// Abort the in-process runtime directly so cancellation is signalled before
+		// concurrent disposal can close the loopback transport.
+		await this.abortRuntime();
 	}
 
 	async getState(): Promise<RpcSessionState> {
@@ -250,7 +257,11 @@ class LocalSubagentHandle implements SubagentHandle {
 		if (this.disposed) {
 			return;
 		}
-		if (event.type === "message_start" && event.message.role === "user" && this.promptAccepted) {
+		if (
+			event.type === "message_start" &&
+			(event.message.role === "user" || event.message.role === "custom") &&
+			this.promptStarted
+		) {
 			this.promptMessageObserved = true;
 		}
 		if (event.type === "agent_end" && this.promptMessageObserved) {
@@ -474,6 +485,7 @@ export class SubagentManager {
 				id,
 				sessionId: runtime.session.sessionId,
 				client,
+				abortRuntime: () => runtime.session.abort(),
 				removeFromManager: (handleId) => {
 					this.handles.delete(handleId);
 				},

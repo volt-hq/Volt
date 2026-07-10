@@ -166,6 +166,50 @@ describe("AgentSession queue characterization", () => {
 		expect(harness.session.isBusy).toBe(false);
 	});
 
+	it("rejects a queued prompt when its delayed preflight outlives the active run", async () => {
+		let releaseQueuedInput: () => void = () => undefined;
+		const queuedInputRelease = new Promise<void>((resolve) => {
+			releaseQueuedInput = resolve;
+		});
+		let notifyQueuedInputStarted: () => void = () => undefined;
+		const queuedInputStarted = new Promise<void>((resolve) => {
+			notifyQueuedInputStarted = resolve;
+		});
+		const waiting = await createWaitingHarness({
+			extensionFactories: [
+				(volt) => {
+					volt.on("input", async (event) => {
+						if (event.text === "queued after delayed input") {
+							notifyQueuedInputStarted();
+							await queuedInputRelease;
+						}
+						return { action: "continue" };
+					});
+				},
+			],
+		});
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("original run complete"),
+		]);
+
+		await waitForToolStart;
+		const queuedPrompt = harness.session.prompt("queued after delayed input", { streamingBehavior: "followUp" });
+		await queuedInputStarted;
+		releaseToolExecution();
+		await promptPromise;
+		expect(harness.session.isStreaming).toBe(false);
+
+		releaseQueuedInput();
+		await expect(queuedPrompt).rejects.toThrow(
+			"Agent finished processing while queued prompt preflight was running. Resubmit the prompt.",
+		);
+		expect(harness.session.pendingMessageCount).toBe(0);
+		expect(getUserTexts(harness)).toEqual(["start"]);
+	});
+
 	it("rejects public custom turns during prompt preflight instead of racing the prompt", async () => {
 		let releaseCommand: () => void = () => undefined;
 		const commandRelease = new Promise<void>((resolve) => {

@@ -995,8 +995,7 @@ export function createSubagentToolDefinition(
 				await handle.dispose().catch(() => undefined);
 			};
 			const abortHandle = async (handle: SubagentHandle): Promise<void> => {
-				await handle.abort().catch(() => undefined);
-				await disposeHandle(handle);
+				await Promise.all([handle.abort().catch(() => undefined), disposeHandle(handle)]);
 			};
 			const abortActiveHandles = async (): Promise<void> => {
 				await Promise.all(Array.from(activeHandles, (handle) => abortHandle(handle)));

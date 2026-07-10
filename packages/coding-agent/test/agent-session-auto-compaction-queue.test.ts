@@ -387,6 +387,110 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
 	});
 
+	it("keeps session busy and waitForIdle pending during manual compaction", async () => {
+		const model = session.model!;
+		session.agent.streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "text", text: "ready" }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 10,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 11,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		await session.prompt("seed compaction history");
+
+		const beforeCompactStarted = createDeferred();
+		const finishBeforeCompact = createDeferred();
+		vi.spyOn(session.extensionRunner, "hasHandlers").mockImplementation(
+			(eventType) => eventType === "session_before_compact",
+		);
+		vi.spyOn(session.extensionRunner, "emit").mockImplementation(async (event) => {
+			if (event.type === "session_before_compact") {
+				beforeCompactStarted.resolve();
+				await finishBeforeCompact.promise;
+			}
+			return undefined;
+		});
+
+		const compaction = session.compact();
+		await beforeCompactStarted.promise;
+		expect(session.isBusy).toBe(true);
+		let idleResolved = false;
+		const idle = session.waitForIdle().then(() => {
+			idleResolved = true;
+		});
+		await Promise.resolve();
+		expect(idleResolved).toBe(false);
+
+		finishBeforeCompact.resolve();
+		await compaction;
+		await idle;
+		expect(idleResolved).toBe(true);
+		expect(session.isBusy).toBe(false);
+	});
+
+	it("reports no continuation when session abort cancels proactive compaction", async () => {
+		const authStarted = createDeferred();
+		const finishAuth = createDeferred();
+		session.agent.streamFn = () => {
+			throw new Error("not used");
+		};
+		vi.spyOn(
+			session as unknown as {
+				_getCompactionRequestAuth: () => Promise<{
+					apiKey?: string;
+					headers?: Record<string, string>;
+					env?: Record<string, string>;
+				}>;
+			},
+			"_getCompactionRequestAuth",
+		).mockImplementation(async () => {
+			authStarted.resolve();
+			await finishAuth.promise;
+			return { apiKey: "test-key" };
+		});
+		const compactionEnds: Array<{ aborted: boolean; willRetry: boolean }> = [];
+		session.subscribe((event) => {
+			if (event.type === "compaction_end") {
+				compactionEnds.push({ aborted: event.aborted, willRetry: event.willRetry });
+			}
+		});
+		const runAutoCompaction = (
+			session as unknown as {
+				_runAutoCompaction(
+					reason: "threshold",
+					willRetry: boolean,
+					continueAfterCompaction: boolean,
+					continueWithoutCompaction: boolean,
+				): Promise<boolean>;
+			}
+		)._runAutoCompaction("threshold", false, true, true);
+		await authStarted.promise;
+
+		await session.abort();
+		finishAuth.resolve();
+		await runAutoCompaction;
+
+		expect(compactionEnds).toEqual([{ aborted: true, willRetry: false }]);
+	});
+
 	it("should not continue after disposal during proactive compaction", async () => {
 		const model = session.model!;
 		const compactionStarted = createDeferred();

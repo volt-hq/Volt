@@ -167,6 +167,67 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.faux.state.callCount).toBe(1);
 	});
 
+	it("reports cancellation when aborting an active retry response", async () => {
+		const harness = await createHarness({
+			settings: { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+			fauxAssistantMessage("x".repeat(20_000)),
+		]);
+
+		let retryStarted = false;
+		const retryUpdate = new Promise<void>((resolve) => {
+			const unsubscribe = harness.session.subscribe((event) => {
+				if (event.type === "auto_retry_start") {
+					retryStarted = true;
+				}
+				if (retryStarted && event.type === "message_update") {
+					unsubscribe();
+					resolve();
+				}
+			});
+		});
+		const prompt = harness.session.prompt("abort retry response");
+		await retryUpdate;
+		await harness.session.abort();
+		await prompt;
+
+		expect(harness.eventsOfType("auto_retry_end")).toEqual([
+			expect.objectContaining({ success: false, attempt: 1, finalError: "Retry cancelled" }),
+		]);
+		expect(harness.session.retryAttempt).toBe(0);
+	});
+
+	it("clears retry state when abort arrives from a later retry candidate agent_end", async () => {
+		const harness = await createHarness({
+			settings: { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+		]);
+
+		let endCount = 0;
+		let abortPromise: Promise<void> | undefined;
+		harness.session.subscribe((event) => {
+			if (event.type === "agent_end" && ++endCount === 2) {
+				abortPromise = harness.session.abort();
+			}
+		});
+
+		await harness.session.prompt("abort second retry candidate");
+		await abortPromise;
+
+		expect(harness.eventsOfType("auto_retry_end")).toEqual([
+			expect.objectContaining({ success: false, attempt: 1, finalError: "Retry cancelled" }),
+		]);
+		expect(harness.session.retryAttempt).toBe(0);
+		expect(harness.faux.state.callCount).toBe(2);
+	});
+
 	it("does not start a retry when abort arrives from the retry candidate agent_end", async () => {
 		const harness = await createHarness({
 			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 60_000 } },

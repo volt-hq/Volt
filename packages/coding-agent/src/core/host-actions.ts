@@ -20,6 +20,8 @@ export type HostActionNewSessionResult = Awaited<ReturnType<RuntimeNewSession>>;
 export type HostActionCompactResult = Awaited<ReturnType<RuntimeSession["compact"]>>;
 
 export interface HostActionSessionState {
+	/** Falls back to isStreaming for legacy host integrations. */
+	isBusy?: boolean;
 	isStreaming: boolean;
 	isCompacting: boolean;
 	model?: Model<Api>;
@@ -301,7 +303,7 @@ export function registerBuiltinHostActions(registry: HostActionRegistry): HostAc
 		streamingBehavior: "immediate",
 		remoteSafe: true,
 		availability: (context) =>
-			context.session.isStreaming
+			isHostSessionBusy(context.session) || context.session.isCompacting
 				? { enabled: true }
 				: { enabled: false, disabledReason: "No active run to cancel" },
 		handler: invokeRunCancelAction,
@@ -606,6 +608,9 @@ function reviewAvailability(context: HostActionDescriptorContext): HostActionAva
 	if (context.session.isStreaming) {
 		return { enabled: false, disabledReason: "Review is not available while the agent is streaming" };
 	}
+	if (isHostSessionBusy(context.session)) {
+		return { enabled: false, disabledReason: "Review is not available while an agent operation is running" };
+	}
 	if (context.session.isCompacting) {
 		return { enabled: false, disabledReason: "Review is not available while compaction is running" };
 	}
@@ -615,6 +620,9 @@ function reviewAvailability(context: HostActionDescriptorContext): HostActionAva
 function thinkingFastModeAvailability(context: HostActionDescriptorContext): HostActionAvailability {
 	if (context.session.isStreaming) {
 		return { enabled: false, disabledReason: "Fast mode is not available while the agent is streaming" };
+	}
+	if (isHostSessionBusy(context.session)) {
+		return { enabled: false, disabledReason: "Fast mode is not available while an agent operation is running" };
 	}
 	if (context.session.isCompacting) {
 		return { enabled: false, disabledReason: "Fast mode is not available while compaction is running" };
@@ -700,6 +708,10 @@ function createThinkingFastModeState(context: HostActionDescriptorContext): UiAc
 		value: enabled,
 		label: enabled ? `Fast: ${formatThinkingLevelLabel(context.session.thinkingLevel)}` : "Normal reasoning",
 	};
+}
+
+function isHostSessionBusy(session: HostActionSessionState): boolean {
+	return session.isBusy ?? session.isStreaming;
 }
 
 function isThinkingFastModeEnabled(session: HostActionSessionState): boolean {
