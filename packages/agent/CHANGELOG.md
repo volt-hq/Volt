@@ -6,6 +6,7 @@
 
 - Added `AgentState.pendingToolExecutions` so host integrations can inspect the names and arguments for currently running tool calls.
 - Added `Agent.shouldStopAfterTurn` (constructor option and mutable field) that forwards to the existing `AgentLoopConfig.shouldStopAfterTurn` hook, so hosts can stop a run gracefully after the current turn (e.g. for proactive context compaction).
+- Added `max` as a distinct thinking level for models that explicitly advertise maximum reasoning support.
 
 ### Changed
 

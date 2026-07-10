@@ -326,11 +326,12 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (supportsOpenAiXhigh(model.id)) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
 	}
-	if (model.id === "gpt-5.6-sol") {
-		mergeThinkingLevelMap(model, { xhigh: "max" });
-	}
 	if (GPT_5_6_MODEL_IDS.has(model.id)) {
-		mergeThinkingLevelMap(model, { minimal: model.provider === "openai-codex" ? "low" : null });
+		mergeThinkingLevelMap(model, {
+			minimal: model.provider === "openai-codex" ? "low" : null,
+			xhigh: "xhigh",
+			max: "max",
+		});
 	}
 	if (model.provider === "openai" && model.id === "gpt-5.5") {
 		mergeThinkingLevelMap(model, { minimal: null });

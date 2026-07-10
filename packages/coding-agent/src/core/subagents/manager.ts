@@ -107,7 +107,7 @@ export class SubagentDefinitionConfigurationError extends Error {
 	}
 }
 
-const VALID_THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const VALID_THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 function isThinkingLevel(value: string): value is ThinkingLevel {
 	return VALID_THINKING_LEVELS.includes(value as ThinkingLevel);

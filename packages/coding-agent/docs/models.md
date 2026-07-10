@@ -214,7 +214,7 @@ Current behavior:
 
 ### Thinking Level Map
 
-Use `thinkingLevelMap` on a model to describe model-specific thinking controls. Keys are volt thinking levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`.
+Use `thinkingLevelMap` on a model to describe model-specific thinking controls. Keys are volt thinking levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
 
 Values are tristate:
 
@@ -235,7 +235,8 @@ Example for a model that only supports off, high, and max reasoning:
     "low": null,
     "medium": null,
     "high": "high",
-    "xhigh": "max"
+    "xhigh": null,
+    "max": "max"
   }
 }
 ```

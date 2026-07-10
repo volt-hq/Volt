@@ -637,66 +637,69 @@ describe("openai-codex streaming", () => {
 		expect(capturedPayload?.prompt_cache_key).toBe("x".repeat(64));
 	});
 
-	it("preserves gpt-5.5 xhigh reasoning effort from simple options", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "volt-codex-stream-"));
-		process.env.VOLT_CODING_AGENT_DIR = tempDir;
-		const token = mockToken();
-		const sse = buildSSEPayload({ status: "completed" });
-		const encoder = new TextEncoder();
-		const stream = new ReadableStream<Uint8Array>({
-			start(controller) {
-				controller.enqueue(encoder.encode(sse));
-				controller.close();
-			},
-		});
-		let requestedReasoning: unknown;
+	it.each(["xhigh", "max"] as const)(
+		"preserves GPT-5.6 %s reasoning effort from simple options",
+		async (reasoningLevel) => {
+			const tempDir = mkdtempSync(join(tmpdir(), "volt-codex-stream-"));
+			process.env.VOLT_CODING_AGENT_DIR = tempDir;
+			const token = mockToken();
+			const sse = buildSSEPayload({ status: "completed" });
+			const encoder = new TextEncoder();
+			const stream = new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(encoder.encode(sse));
+					controller.close();
+				},
+			});
+			let requestedReasoning: unknown;
 
-		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
-			const url = typeof input === "string" ? input : input.toString();
-			if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
-				return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
-			}
-			if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
-				return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
-			}
-			if (url === "https://chatgpt.com/backend-api/codex/responses") {
-				const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
-				requestedReasoning = body?.reasoning;
-				return new Response(stream, {
-					status: 200,
-					headers: { "content-type": "text/event-stream" },
-				});
-			}
-			return new Response("not found", { status: 404 });
-		});
-		vi.stubGlobal("fetch", fetchMock);
+			const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
+					return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
+				}
+				if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
+					return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
+				}
+				if (url === "https://chatgpt.com/backend-api/codex/responses") {
+					const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+					requestedReasoning = body?.reasoning;
+					return new Response(stream, {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					});
+				}
+				return new Response("not found", { status: 404 });
+			});
+			vi.stubGlobal("fetch", fetchMock);
 
-		const model: Model<"openai-codex-responses"> = {
-			id: "gpt-5.5",
-			name: "GPT-5.5",
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: "https://chatgpt.com/backend-api",
-			reasoning: true,
-			thinkingLevelMap: { xhigh: "xhigh" },
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 400000,
-			maxTokens: 128000,
-		};
-		const context: Context = {
-			systemPrompt: "You are a helpful assistant.",
-			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
-		};
+			const model: Model<"openai-codex-responses"> = {
+				id: "gpt-5.6-sol",
+				name: "GPT-5.6 Sol",
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				baseUrl: "https://chatgpt.com/backend-api",
+				reasoning: true,
+				thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 400000,
+				maxTokens: 128000,
+			};
+			const context: Context = {
+				systemPrompt: "You are a helpful assistant.",
+				messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+			};
 
-		await streamSimpleOpenAICodexResponses(model, context, {
-			apiKey: token,
-			reasoning: "xhigh",
-			transport: "sse",
-		}).result();
+			await streamSimpleOpenAICodexResponses(model, context, {
+				apiKey: token,
+				reasoning: reasoningLevel,
+				transport: "sse",
+			}).result();
 
-		expect(requestedReasoning).toEqual({ effort: "xhigh", summary: "auto" });
-	});
+			expect(requestedReasoning).toEqual({ effort: reasoningLevel, summary: "auto" });
+		},
+	);
 
 	it.each(["gpt-5.3-codex", "gpt-5.4", "gpt-5.5"])("clamps %s minimal reasoning effort to low", async (modelId) => {
 		const tempDir = mkdtempSync(join(tmpdir(), "volt-codex-stream-"));

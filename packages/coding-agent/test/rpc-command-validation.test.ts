@@ -137,6 +137,7 @@ describe("RPC command payload validation", () => {
 	test("allows non-command and valid command payloads to continue through dispatch", () => {
 		expect(validateRpcCommandPayload("not an object")).toBeUndefined();
 		expect(validateRpcCommandPayload({ type: "future_command", message: 1 })).toBeUndefined();
+		expect(validateRpcCommandPayload({ type: "set_thinking_level", level: "max" })).toBeUndefined();
 		expect(
 			validateRpcCommandPayload({
 				type: "register_push_target",

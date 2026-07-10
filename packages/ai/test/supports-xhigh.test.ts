@@ -27,10 +27,11 @@ describe("getSupportedThinkingLevels", () => {
 		expect(getSupportedThinkingLevels(model!)).not.toContain("off");
 	});
 
-	it("does not include xhigh for Claude Sonnet 4.5", () => {
+	it("does not include extended levels without explicit metadata", () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5");
 		expect(model).toBeDefined();
 		expect(getSupportedThinkingLevels(model!)).not.toContain("xhigh");
+		expect(getSupportedThinkingLevels(model!)).not.toContain("max");
 	});
 
 	it.each(["gpt-5.4", "gpt-5.5"] as const)("includes xhigh for %s models", (modelId) => {
@@ -39,27 +40,38 @@ describe("getSupportedThinkingLevels", () => {
 		expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
 	});
 
-	it("includes GPT-5.6 Sol, Terra, and Luna for OpenAI", () => {
-		const sol = getModel("openai", "gpt-5.6-sol");
-		const terra = getModel("openai", "gpt-5.6-terra");
-		const luna = getModel("openai", "gpt-5.6-luna");
+	it.each(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const)(
+		"includes distinct xhigh and max levels for OpenAI %s",
+		(modelId) => {
+			const model = getModel("openai", modelId);
+			expect(model).toBeDefined();
+			expect(model.thinkingLevelMap?.xhigh).toBe("xhigh");
+			expect(model.thinkingLevelMap?.max).toBe("max");
+			expect(getSupportedThinkingLevels(model)).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
+		},
+	);
 
-		expect(sol).toBeDefined();
-		expect(terra).toBeDefined();
-		expect(luna).toBeDefined();
-		expect(sol.thinkingLevelMap?.xhigh).toBe("max");
-	});
+	it.each(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const)(
+		"includes distinct xhigh and max levels for Azure OpenAI %s",
+		(modelId) => {
+			const model = getModel("azure-openai-responses", modelId);
+			expect(model).toBeDefined();
+			expect(model.thinkingLevelMap?.xhigh).toBe("xhigh");
+			expect(model.thinkingLevelMap?.max).toBe("max");
+			expect(getSupportedThinkingLevels(model)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+		},
+	);
 
-	it("includes GPT-5.6 Sol, Terra, and Luna for OpenAI Codex", () => {
-		const sol = getModel("openai-codex", "gpt-5.6-sol");
-		const terra = getModel("openai-codex", "gpt-5.6-terra");
-		const luna = getModel("openai-codex", "gpt-5.6-luna");
-
-		expect(sol).toBeDefined();
-		expect(terra).toBeDefined();
-		expect(luna).toBeDefined();
-		expect(sol.thinkingLevelMap?.xhigh).toBe("max");
-	});
+	it.each(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const)(
+		"includes distinct xhigh and max levels for OpenAI Codex %s",
+		(modelId) => {
+			const model = getModel("openai-codex", modelId);
+			expect(model).toBeDefined();
+			expect(model.thinkingLevelMap?.xhigh).toBe("xhigh");
+			expect(model.thinkingLevelMap?.max).toBe("max");
+			expect(getSupportedThinkingLevels(model)).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+		},
+	);
 
 	it("includes only medium/high/xhigh for OpenAI GPT-5.5 Pro", () => {
 		const model = getModel("openai", "gpt-5.5-pro");

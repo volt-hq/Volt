@@ -823,9 +823,9 @@ Set the reasoning/thinking level for models that support it. Pass `"persistDefau
 {"type": "set_thinking_level", "level": "high"}
 ```
 
-Levels: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`
+Levels: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`
 
-Note: `"xhigh"` is only supported by OpenAI codex-max models.
+`"xhigh"` and `"max"` are advertised only for models whose metadata explicitly supports them. GPT-5.6 Sol, Terra, and Luna expose both as distinct efforts.
 
 Levels the current model does not support are silently clamped to the nearest supported level, not rejected. The response reports the effective post-clamp level, and a `thinking_level_changed` event fires only when the effective level actually changes. Use `get_state`'s `availableThinkingLevels` to present valid choices.
 

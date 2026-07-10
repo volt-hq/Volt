@@ -7,7 +7,7 @@ import type {
 	RawMessageStreamEvent,
 	RefusalStopDetails,
 } from "@anthropic-ai/sdk/resources/messages.js";
-import { calculateCost } from "../models.ts";
+import { calculateCost, clampThinkingLevel } from "../models.ts";
 import type {
 	AnthropicMessagesCompat,
 	Api,
@@ -727,10 +727,11 @@ function mapThinkingLevelToEffort(
 	model: Model<"anthropic-messages">,
 	level: SimpleStreamOptions["reasoning"],
 ): AnthropicEffort {
-	const mapped = level ? model.thinkingLevelMap?.[level] : undefined;
+	const effectiveLevel = level === "max" ? clampThinkingLevel(model, level) : level;
+	const mapped = effectiveLevel ? model.thinkingLevelMap?.[effectiveLevel] : undefined;
 	if (typeof mapped === "string") return mapped as AnthropicEffort;
 
-	switch (level) {
+	switch (effectiveLevel) {
 		case "minimal":
 		case "low":
 			return "low";

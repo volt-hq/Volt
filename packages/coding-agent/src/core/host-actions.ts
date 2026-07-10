@@ -698,7 +698,7 @@ function createDescriptor(action: HostActionDefinition, context: HostActionDescr
 	return descriptor;
 }
 
-const THINKING_LEVEL_ORDER: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const THINKING_LEVEL_ORDER: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const FAST_MODE_TARGET_ORDER: ThinkingLevel[] = ["off", "minimal", "low"];
 
 function createThinkingFastModeState(context: HostActionDescriptorContext): UiActionStateDescriptor {

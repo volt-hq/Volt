@@ -9,6 +9,7 @@ const RPC_THINKING_LEVELS = [
 	"medium",
 	"high",
 	"xhigh",
+	"max",
 ] as const satisfies readonly ThinkingLevel[];
 const RPC_STREAMING_BEHAVIORS = ["steer", "followUp"] as const;
 const RPC_UI_ACTION_SCOPES = ["primary", "palette", "all"] as const;

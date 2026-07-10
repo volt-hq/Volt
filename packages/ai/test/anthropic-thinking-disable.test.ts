@@ -146,12 +146,15 @@ describe("Anthropic thinking disable payload", () => {
 		expect(payload.output_config).toEqual({ effort: "high" });
 	});
 
-	it("maps xhigh reasoning to effort=xhigh for Claude Opus 4.8", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-opus-4-8"), { reasoning: "xhigh" });
+	it.each(["xhigh", "max"] as const)(
+		"maps %s reasoning to the highest supported effort for Claude Opus 4.8",
+		async (reasoning) => {
+			const payload = await capturePayload(getModel("anthropic", "claude-opus-4-8"), { reasoning });
 
-		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
-		expect(payload.output_config).toEqual({ effort: "xhigh" });
-	});
+			expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
+			expect(payload.output_config).toEqual({ effort: "xhigh" });
+		},
+	);
 });
 
 describe.skipIf(!process.env.ANTHROPIC_API_KEY)("Anthropic thinking disable E2E", () => {

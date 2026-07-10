@@ -69,6 +69,7 @@
 - Added an optional `persistDefault` field to `set_model` and `set_thinking_level` so clients can change the current session's model or thinking level without rewriting the host defaults (used for per-agent overrides).
 - Added `availableThinkingLevels` to RPC `get_state` responses and returned the effective (post-clamp) `level` from `set_thinking_level` so clients can render valid thinking-level choices and detect silent clamping.
 - Added `availableThinkingLevels` to each model in `get_available_models` and to the `set_model` response so clients can render per-model thinking-level choices without mirroring host capability rules.
+- Added `max` as a selectable CLI, settings, SDK, extension, subagent, and RPC thinking level when model metadata explicitly supports it.
 
 ### Fixed
 

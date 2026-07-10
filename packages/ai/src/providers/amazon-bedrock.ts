@@ -26,7 +26,7 @@ import { NodeHttpHandler } from "@smithy/node-http-handler";
 import type { BuildMiddleware, DocumentType, MetadataBearer } from "@smithy/types";
 import { HttpProxyAgent } from "http-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
-import { calculateCost } from "../models.ts";
+import { calculateCost, clampThinkingLevel } from "../models.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -571,12 +571,13 @@ function mapThinkingLevelToEffort(
 	model: Model<"bedrock-converse-stream">,
 	level: SimpleStreamOptions["reasoning"],
 ): "low" | "medium" | "high" | "xhigh" | "max" {
-	if (level === "xhigh" && supportsNativeXhighEffort(model)) return "xhigh";
+	const effectiveLevel = level === "max" ? clampThinkingLevel(model, level) : level;
+	if (effectiveLevel === "xhigh" && supportsNativeXhighEffort(model)) return "xhigh";
 
-	const mapped = level ? model.thinkingLevelMap?.[level] : undefined;
+	const mapped = effectiveLevel ? model.thinkingLevelMap?.[effectiveLevel] : undefined;
 	if (typeof mapped === "string") return mapped as "low" | "medium" | "high" | "xhigh" | "max";
 
-	switch (level) {
+	switch (effectiveLevel) {
 		case "minimal":
 		case "low":
 			return "low";
@@ -1005,11 +1006,12 @@ function buildAdditionalModelRequestFields(
 						low: 2048,
 						medium: 8192,
 						high: 16384,
-						xhigh: 16384, // Claude doesn't support xhigh, clamp to high
+						xhigh: 16384, // Claude doesn't support xhigh here, clamp to high
+						max: 16384, // Token-budget providers don't support max, clamp to high
 					};
 
-					// Custom budgets override defaults (xhigh not in ThinkingBudgets, use high)
-					const level = options.reasoning === "xhigh" ? "high" : options.reasoning;
+					// Custom budgets omit native-effort-only levels, so use high for xhigh/max.
+					const level = options.reasoning === "xhigh" || options.reasoning === "max" ? "high" : options.reasoning;
 					const budget = options.thinkingBudgets?.[level] ?? defaultBudgets[options.reasoning];
 
 					return {
