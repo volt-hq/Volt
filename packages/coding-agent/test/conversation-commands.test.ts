@@ -14,6 +14,7 @@ import {
 	INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES,
 	LEASE_DRAINING_RETRY_AFTER_MS,
 	REMOTE_TOOL_OUTPUT_MAX_SCALARS,
+	type RemoteSessionRuntimeState,
 	TURN_INITIATING_RPC_TYPES,
 } from "../src/daemon/conversation-commands.ts";
 
@@ -54,6 +55,7 @@ function createContext(
 		onWorkspaceUnregistered?: (workspaceName: string) => Promise<void>;
 		webSearchKey?: ConversationCommandContext["webSearchKey"];
 		createWorktreeBackend?: ConversationCommandContext["createWorktreeBackend"];
+		listRuntimeStates?: ConversationCommandContext["listRuntimeStates"];
 		agentDir?: string;
 	} = {},
 ): ConversationCommandContext {
@@ -67,6 +69,7 @@ function createContext(
 			: { onWorkspaceUnregistered: options.onWorkspaceUnregistered }),
 		...(options.webSearchKey === undefined ? {} : { webSearchKey: options.webSearchKey }),
 		...(options.createWorktreeBackend === undefined ? {} : { createWorktreeBackend: options.createWorktreeBackend }),
+		...(options.listRuntimeStates === undefined ? {} : { listRuntimeStates: options.listRuntimeStates }),
 		...(options.agentDir === undefined ? {} : { agentDir: options.agentDir }),
 	};
 }
@@ -550,6 +553,43 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
+	});
+
+	it("adds optional daemon runtime ownership to list_sessions entries", async () => {
+		const runtime = createRuntime();
+		runtime.listSessions = async () =>
+			["s-tui", "s-active", "s-detached", "s-draining", "s-saved"].map((sessionId, index) => ({
+				sessionId,
+				sessionName: sessionId,
+				firstMessage: "hi",
+				createdAt: new Date(index + 1).toISOString(),
+				modifiedAt: new Date(index + 1).toISOString(),
+				messageCount: 1,
+			}));
+		const runtimeStates = new Map<string, RemoteSessionRuntimeState>([
+			["s-tui", "tui-owned"],
+			["s-active", "daemon-active"],
+			["s-detached", "daemon-detached"],
+			["s-draining", "daemon-draining"],
+		]);
+		const listRuntimeStates = vi.fn(async () => runtimeStates);
+
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "runtime-states", type: "list_sessions" },
+			createAuthorization(),
+			createContext({ listRuntimeStates }),
+			runtime,
+		)) as { success: boolean; data: { sessions: Array<Record<string, unknown>> } };
+
+		expect(response.success).toBe(true);
+		expect(listRuntimeStates).toHaveBeenCalledOnce();
+		expect(listRuntimeStates).toHaveBeenCalledWith("ws");
+		const bySessionId = new Map(response.data.sessions.map((session) => [session.sessionId, session]));
+		expect(bySessionId.get("s-tui")?.runtimeState).toBe("tui-owned");
+		expect(bySessionId.get("s-active")?.runtimeState).toBe("daemon-active");
+		expect(bySessionId.get("s-detached")?.runtimeState).toBe("daemon-detached");
+		expect(bySessionId.get("s-draining")?.runtimeState).toBe("daemon-draining");
+		expect(bySessionId.get("s-saved")).not.toHaveProperty("runtimeState");
 	});
 
 	it("serves list_sessions with the current session summary", async () => {

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `session_runtime_state.v1` discovery metadata: `list_sessions` can now identify desktop-owned, daemon-active, retained-detached, and draining session runtimes so clients can reconnect currently running agents without reviving every dormant session.
 - Added an `agent_settled` session/RPC event emitted when all tracked prompt work reaches a global idle boundary, after any final `agent_end`, automatic retries, overflow/threshold compaction continuations, and queued-message continuations have finished. A boundary may settle multiple overlapping prompt transactions, and handled/rejected preflight may settle without an `agent_end`. RPC client `waitForIdle()`, `collectEvents()`, and `promptAndWait()` now terminate on `agent_settled` instead of a raw `agent_end`.
 - Added proactive mid-run compaction: when a turn with tool calls pushes live context usage over the compaction threshold, the session stops the agent loop after that turn (via a new `Agent.shouldStopAfterTurn` hook wired through to the agent-loop), runs threshold compaction, and resumes the interrupted run, instead of waiting for the full agent/tool loop to finish. A failed attempt does not retrigger until a compaction succeeds or the next user prompt.
 - Added an aggregate character budget for compaction/branch-summary summarization input: serialized conversations are capped (keeping the opening goal plus the newest contiguous parts with an omission marker), in addition to the existing per-tool-result truncation.
@@ -136,6 +137,7 @@
 
 ### Changed
 
+- Changed supported interactive Volt sessions to maintain a reconnecting daemon control client even when `remote.background` auto-start is disabled, so agents that were already running attach when another process starts the daemon.
 - Changed the default coding-agent prompt to use XML-delimited workflow, trust-boundary, and subagent-delegation guidance while preserving dynamic tool, project-context, skill, date, and working-directory injection.
 - Changed the built-in `general` subagent to inherit the parent tool posture while excluding `subagent`, preventing recursive delegation by default without dropping other active tools.
 - Changed nested subagent delegation to inherit the strictest ancestor `maxSubagentDepth` cap.

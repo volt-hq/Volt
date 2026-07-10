@@ -19,10 +19,12 @@ volt remote pair           # pair a phone (QR / ticket)
 volt daemon status         # inspect workspaces, clients, leases
 ```
 
-Set `remote.background: true` in settings to make interactive Volt manage the
-daemon automatically: the TUI starts it on demand, registers its working
-directory as a workspace, and acquires a conversation lease for the open
-session so a paired phone can co-attach to it live.
+Every supported interactive Volt process connects to a running daemon,
+registers its working directory as a workspace, and acquires a conversation
+lease for the open session so a paired phone can co-attach to it live. Set
+`remote.background: true` to additionally start the daemon on demand. A TUI
+that was already open while the daemon was stopped reconnects automatically
+when another process starts it.
 
 ## CLI
 

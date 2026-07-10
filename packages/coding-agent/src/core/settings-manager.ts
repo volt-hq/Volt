@@ -156,7 +156,7 @@ export interface Settings {
 }
 
 export interface RemoteSettings {
-	/** Auto-spawn the voltd daemon at startup and integrate conversation leases. Default: false. */
+	/** Auto-spawn the voltd daemon at startup. Supported TUIs join any running daemon. Default: false. */
 	background?: boolean;
 	/** Detached headless runtime retention TTL in milliseconds (daemon-side). */
 	detachedRuntimeTtlMs?: number;

@@ -5,6 +5,7 @@ import {
 	createIrohRemoteHandshakeSuccess,
 	IROH_REMOTE_ALPN,
 	IROH_REMOTE_HOST_FEATURES,
+	IROH_REMOTE_SESSION_RUNTIME_STATE_FEATURE,
 	type IrohRemoteHello,
 	IrohRemoteHostEngine,
 	IrohRemoteHostStateManager,
@@ -370,6 +371,7 @@ describe("Iroh remote handshake stream modes", () => {
 			ok: true,
 			response: {
 				success: true,
+				features: expect.arrayContaining([IROH_REMOTE_SESSION_RUNTIME_STATE_FEATURE]),
 				workspaceDiscovery: { purpose: "list_sessions" },
 			},
 		});

@@ -97,7 +97,7 @@ Lease ownership decides which box terminates the phone's conversation stream:
 2. **Extensions co-locate with the runtime.** Handoff = dispose old runtime (`session_shutdown`) + fresh load in the new owner (`session_start` from the session file). Never state migration. There is no `session_switched` event in the codebase and none is added.
 3. **The session file is the source of truth across handoffs.** Both owners flush via the existing session persistence (JSONL tree format, `docs/session-format.md`, dir `join(agentDir, "sessions", "--<cwd-mangled>--")`, `SessionManager` in `src/core/session-manager.ts`).
 4. **The daemon always terminates Iroh.** The TUI never runs an Iroh node. Auth, handshake parsing, target resolution, and lease lookup happen in the daemon before any bytes reach the TUI.
-5. **Daemon integration is strictly additive for the TUI.** If the daemon is unreachable or `remote.background` is off, every lease/relay/push-forward call silently no-ops and the TUI behaves exactly as today.
+5. **Daemon integration is strictly additive for the TUI.** If the daemon is unreachable, every lease/relay/push-forward call silently no-ops and the TUI behaves exactly as today. `remote.background` controls auto-spawn; supported TUIs may still join a daemon started by another process.
 
 ### 2.3 Stream routing decision (daemon, per phone conversation stream)
 
@@ -704,7 +704,7 @@ export interface DaemonAttach {
 }
 ```
 
-Constructed at TUI startup only when `remote.background === true` and platform supports it; otherwise a `disabledDaemonAttach` stub where every method is an immediate no-op. **No InteractiveMode code path may throw or block on daemon absence.**
+Constructed at TUI startup whenever the platform supports it. `remote.background === true` enables auto-spawn; otherwise the attach remains in reconnect backoff until another process starts the daemon. Unsupported platforms use a `disabledDaemonAttach` stub where every method is an immediate no-op. **No InteractiveMode code path may throw or block on daemon absence.**
 
 ### 6.2 Lifecycle seams (exact insertion points)
 
@@ -715,7 +715,7 @@ Constructed at TUI startup only when `remote.background === true` and platform s
 | Session id change in place (compaction/rekey without shutdown) | wherever `session.id` changes without the shutdown/start pair | `rekey(ws, oldId, newId)` |
 | Quit | TUI shutdown path (after final flush, before process exit) | if `session.isStreaming` && `relayCount() > 0` → exit warning prompt ("A phone is attached and a turn is streaming; quitting will kill the turn. Quit anyway?"); then `release(ws, id)`; `dispose()` |
 
-`ws` (workspaceName) resolution: the daemon's workspace registry maps registered names→paths; the TUI resolves its cwd against `status_result.workspaces` (longest-prefix match on real paths). If the cwd is not a registered workspace, ALL lease calls no-op (the phone can't reach this session anyway). Optionally (decided: yes, implement) the TUI sends `workspace_register` automatically for its cwd when `remote.background` is on and the cwd is inside no registered workspace — name = basename with numeric suffix on collision.
+`ws` (workspaceName) resolution: the daemon's workspace registry maps registered names→paths; the TUI resolves its cwd against `status_result.workspaces` (longest-prefix match on real paths). When connected, the TUI sends `workspace_register` automatically if its cwd is inside no registered workspace — name = basename with numeric suffix on collision.
 
 ### 6.3 Drain viewer ("Attaching — finishing remote turn…")
 
@@ -952,7 +952,7 @@ Volt entry point: `./test.sh` (repo root of Volt). iOS: VoltClient package tests
 
 Add `docs/daemon.md` appendix + `scripts/manual-walkaway.md` checklist:
 
-1. `remote.background: true` in settings; open TUI in a registered workspace; confirm `volt daemon status` shows tui-owned lease.
+1. Start the daemon manually or set `remote.background: true`; open TUI in a registered workspace; confirm `volt daemon status` shows a tui-owned lease.
 2. Pair phone (`volt remote pair`), open the same conversation on phone; footer shows 📱1.
 3. Phone prompt → appears live in TUI; TUI prompt → appears on phone.
 4. Quit TUI → phone continues within ~2s (lease_transferred reconnect); run another turn from phone.
@@ -984,7 +984,7 @@ Each milestone leaves `./test.sh` green. Branch implements M1-M8 (+M10 docs) in 
 
 ### M5 — Relay path + TUI integration
 **Files**: `src/daemon/relay-stream.ts`; relay admission in `control-server.ts`; `src/modes/interactive/daemon-attach.ts`; `src/modes/interactive/drain-viewer.ts`; surgical edits to `src/modes/interactive/interactive-mode.ts` (seams §6.2, footer indicator §6.8, exit warning, relay serving with `runIrohRemoteRpcMode` §5.6 step 9, `suppressExtensionUiRequests` option added to iroh-remote-rpc-mode outbound filter); push forwarding (`relay_rpc`) §6.6.
-**Accept**: §12.2.3 passes; dual-frontend integration §12.3.3 passes; with daemon stopped or `remote.background:false`, InteractiveMode behavior is byte-identical to pre-branch (snapshot/regression run); footer indicator toggles.
+**Accept**: §12.2.3 passes; dual-frontend integration §12.3.3 passes; with the daemon stopped, InteractiveMode behavior remains unchanged apart from the dormant reconnect client; footer indicator toggles.
 
 ### M6 — Theme migration completion
 **Files**: migrate ALL importers listed in §9.3; delete `src/modes/interactive/theme/theme.ts` singleton + shim (move remaining pure logic into core/theme); daemon `theme_set` + `theme_snapshot` broadcast; rpc-mode facade (getAllThemes real, setTheme persists) in runner UI-context wiring.
@@ -1059,7 +1059,7 @@ Acceptance for the checklist: an M3 review artifact (PR description table) lists
 
 | Setting | Type | Default | Effect |
 |---|---|---|---|
-| `remote.background` | boolean | `false` | Enables daemon auto-spawn at `volt` startup, DaemonClient connection, lease integration, auto workspace registration. Off ⇒ all daemon integration no-ops. |
+| `remote.background` | boolean | `false` | Enables daemon auto-spawn at `volt` startup. On supported platforms the DaemonClient, lease integration, and auto workspace registration activate whenever any process starts the daemon. |
 | `remote.detachedRuntimeTtlMs` | number | 1800000 | Mirrors daemon `settings.detachedRuntimeTtlMs`; `volt daemon start` syncs CLI-side setting → daemon state on connect (daemon state is authoritative at runtime). |
 | `remote.allowTools` | string[] \| null | null | Tool allowlist for daemon-owned headless runtimes ONLY (§11.3). Ignored for TUI-owned co-attached conversations by design. |
 
