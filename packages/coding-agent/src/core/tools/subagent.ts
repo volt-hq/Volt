@@ -10,7 +10,6 @@ import type {
 	SubagentActivityListener,
 	SubagentDefinition,
 	SubagentDefinitionSource,
-	SubagentDelegationLimits,
 	SubagentDelegationScopeLease,
 	SubagentDelegationScopeOptions,
 	SubagentDelegationScopeSnapshot,
@@ -19,7 +18,6 @@ import type {
 	SubagentResult,
 	SubagentStartByNameOptions,
 } from "../subagents/index.ts";
-import { DEFAULT_SUBAGENT_RUN_TIMEOUT_MS } from "../subagents/index.ts";
 import { getMarkdownTheme, type Theme } from "../theme/runtime.ts";
 import { formatDuration } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -144,7 +142,7 @@ export interface SubagentToolDetails {
 	error?: SubagentToolErrorDetails;
 	/** Total model-visible result after combining parallel child outputs. */
 	aggregateOutput?: SubagentToolOutputDetails;
-	/** Root-scoped recursive delegation budget and final consumption. */
+	/** Root-scoped recursive delegation accounting and final consumption. */
 	delegation?: SubagentDelegationScopeSnapshot;
 	/** Epoch ms when execution started (single: task start; parallel/chain: overall start). */
 	startedAt?: number;
@@ -182,8 +180,7 @@ export interface SubagentToolOptions {
 	getAllowedTools?: () => string[] | undefined;
 	maxOutputBytes?: number;
 	maxAggregateOutputBytes?: number;
-	/** Optional lower tree limits; hard process ceilings still apply. */
-	delegationLimits?: Partial<SubagentDelegationLimits>;
+	/** Optional caller-specified timeout. Delegation has no automatic deadline by default. */
 	runTimeoutMs?: number;
 }
 
@@ -1081,13 +1078,8 @@ export function createSubagentToolDefinition(
 		),
 		DEFAULT_SUBAGENT_AGGREGATE_OUTPUT_MAX_BYTES,
 	);
-	const runTimeoutMs = Math.min(
-		requirePositiveInteger(
-			options.runTimeoutMs ?? options.delegationLimits?.timeoutMs ?? DEFAULT_SUBAGENT_RUN_TIMEOUT_MS,
-			"runTimeoutMs",
-		),
-		DEFAULT_SUBAGENT_RUN_TIMEOUT_MS,
-	);
+	const runTimeoutMs =
+		options.runTimeoutMs === undefined ? undefined : requirePositiveInteger(options.runTimeoutMs, "runTimeoutMs");
 	return {
 		name: "subagent",
 		label: "subagent",
@@ -1122,10 +1114,7 @@ export function createSubagentToolDefinition(
 
 			const normalized = normalizeSubagentToolInput(params);
 			const executionStartedAt = Date.now();
-			const delegationLease = options.manager.createDelegationScope?.({
-				signal,
-				limits: { ...options.delegationLimits, timeoutMs: runTimeoutMs },
-			});
+			const delegationLease = options.manager.createDelegationScope?.({ signal });
 			const activeHandles = new Set<SubagentHandle>();
 			const disposedHandles = new Set<SubagentHandle>();
 			let acceptingUpdates = true;
@@ -1173,10 +1162,13 @@ export function createSubagentToolDefinition(
 				const reason = delegationLease?.scope.signal.reason;
 				requestAbort(reason instanceof Error ? reason : new Error(String(reason ?? "Subagent delegation aborted")));
 			};
-			const timeout = setTimeout(() => {
-				requestAbort(new Error(`Subagent run timed out after ${runTimeoutMs}ms`));
-			}, runTimeoutMs);
-			timeout.unref?.();
+			const timeout =
+				runTimeoutMs === undefined
+					? undefined
+					: setTimeout(() => {
+							requestAbort(new Error(`Subagent run timed out after ${runTimeoutMs}ms`));
+						}, runTimeoutMs);
+			timeout?.unref?.();
 
 			signal?.addEventListener("abort", onAbort, { once: true });
 			delegationLease?.scope.signal.addEventListener("abort", onScopeAbort, { once: true });
@@ -1402,7 +1394,7 @@ export function createSubagentToolDefinition(
 				throw error;
 			} finally {
 				acceptingUpdates = false;
-				clearTimeout(timeout);
+				if (timeout) clearTimeout(timeout);
 				signal?.removeEventListener("abort", onAbort);
 				delegationLease?.scope.signal.removeEventListener("abort", onScopeAbort);
 				const cleanup = Promise.all(Array.from(activeHandles, (handle) => disposeHandle(handle)));

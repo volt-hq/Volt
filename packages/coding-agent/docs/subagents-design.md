@@ -136,7 +136,7 @@ Responsibilities:
 
 #### SubagentManager
 
-Owns child runtime creation, limits, and lifecycle.
+Owns child runtime creation, accounting, and lifecycle.
 
 Responsibilities:
 
@@ -199,7 +199,7 @@ Effective tool policy is:
 effective child tools = (requested child tools OR inherited parent tools) ∩ parent allowed tools ∩ host allowed tools - excluded tools
 ```
 
-If no child tools are requested, inherit the parent's active tool set. `excludedTools` can remove dangerous or recursive capabilities such as `subagent` while preserving the rest of the inherited parent tool posture. Delegation is fail-closed: omitting `allowedSubagents` allows no child names and removes the `subagent` tool from that child. Explicit delegation is additionally clamped by a shared root scope with hard ceilings of depth 4, 64 total starts, 16 active descendants, 200 turns, one million tokens, $25, and 15 minutes. Callers may request lower limits but cannot raise these ceilings. Every descendant uses the same atomic counters and cancellation signal, so nested managers cannot reset the tree budget. Definition `maxSubagentDepth` values still propagate as the strictest inherited cap, while `maxChildAgents` caps total starts for one runtime. Malformed tool/delegation policy fields reject the affected definition instead of silently dropping restrictions. Built-in research and security-review roles are non-mutating locally but include `web_search`, so they can send query text to the configured external search provider. Any future tool escalation must be an explicit host/SDK option, not the default.
+If no child tools are requested, inherit the parent's active tool set. `excludedTools` can remove dangerous or recursive capabilities such as `subagent` while preserving the rest of the inherited parent tool posture. Delegation is fail-closed: omitting `allowedSubagents` allows no child names and removes the `subagent` tool from that child. Every descendant shares one root accounting and cancellation scope, but the scope does not impose automatic depth, start, active-descendant, turn, token, cost, or time ceilings. Definition `maxSubagentDepth` values still propagate as the strictest inherited cap, while `maxChildAgents` caps total starts for one runtime. Malformed tool/delegation policy fields reject the affected definition instead of silently dropping restrictions. Built-in research and security-review roles are non-mutating locally but include `web_search`, so they can send query text to the configured external search provider. Any future tool escalation must be an explicit host/SDK option, not the default.
 
 ## RPC lifecycle
 
@@ -246,7 +246,7 @@ The tool result returns:
 - bounded transcript/tool summary
 - usage and cost when available
 
-Model-visible output is capped at 50 KB per task/step and parallel results have an additional 100 KB aggregate cap. Chain `{previous}` substitution uses that bounded output, XML-escapes it, and wraps it as untrusted prior data instead of forwarding raw child text. A delegation tool call times out after 15 minutes by default. Full child output remains in child session state when available; tool details include status, usage, truncation, error metadata, and a final snapshot of tree-wide budget consumption.
+Model-visible output is capped at 50 KB per task/step and parallel results have an additional 100 KB aggregate cap. Chain `{previous}` substitution uses that bounded output, XML-escapes it, and wraps it as untrusted prior data instead of forwarding raw child text. Delegation tool calls have no automatic deadline; SDK callers may opt into a call-specific `runTimeoutMs`, and users or parents can cancel explicitly. Full child output remains in child session state when available; tool details include status, usage, truncation, error metadata, and a final snapshot of tree-wide accounting.
 
 ## Public RPC surface
 

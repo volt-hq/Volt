@@ -599,13 +599,6 @@ export {
 export { createSyntheticSourceInfo } from "./core/source-info.ts";
 export {
 	createBuiltInSubagentDefinitions,
-	DEFAULT_SUBAGENT_MAX_ACTIVE_DESCENDANTS,
-	DEFAULT_SUBAGENT_MAX_COST_USD,
-	DEFAULT_SUBAGENT_MAX_DEPTH,
-	DEFAULT_SUBAGENT_MAX_TOTAL_STARTS,
-	DEFAULT_SUBAGENT_MAX_TOTAL_TOKENS,
-	DEFAULT_SUBAGENT_MAX_TOTAL_TURNS,
-	DEFAULT_SUBAGENT_RUN_TIMEOUT_MS,
 	type DiscoverSubagentDefinitionsOptions,
 	discoverSubagentDefinitions,
 	type FileSubagentDefinitionSource,
@@ -620,7 +613,6 @@ export {
 	SubagentDefinitionConfigurationError,
 	SubagentDefinitionNotFoundError,
 	type SubagentDefinitionSource,
-	type SubagentDelegationLimits,
 	SubagentDelegationScope,
 	type SubagentDelegationScopeLease,
 	type SubagentDelegationScopeOptions,

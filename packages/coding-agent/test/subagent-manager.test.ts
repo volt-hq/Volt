@@ -20,7 +20,6 @@ import { SessionManager } from "../src/core/session-manager.ts";
 import type { Settings } from "../src/core/settings-manager.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import {
-	DEFAULT_SUBAGENT_MAX_DEPTH,
 	type SubagentDefinition,
 	SubagentDefinitionConfigurationError,
 	SubagentDefinitionNotFoundError,
@@ -869,72 +868,54 @@ describe("SubagentManager", () => {
 		await handle.dispose();
 	});
 
-	it("shares concurrency limits across every child using one root delegation scope", async () => {
+	it("shares accounting across every child using one root delegation scope", async () => {
 		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "worker" })]);
 		const { manager } = await createTestManager({ resourceLoader });
-		const scope = new SubagentDelegationScope({
-			limits: { maxActiveDescendants: 2, maxTotalStarts: 4 },
-		});
+		const scope = new SubagentDelegationScope();
 		cleanups.push(() => scope.dispose());
 
 		const first = await manager.startByName("worker", { delegationScope: scope });
 		const second = await manager.startByName("worker", { delegationScope: scope });
-		await expect(manager.startByName("worker", { delegationScope: scope })).rejects.toThrow(
-			"tree concurrency limit 2",
-		);
-		expect(scope.snapshot()).toMatchObject({ startsUsed: 2, activeDescendants: 2 });
-
-		await first.dispose();
 		const third = await manager.startByName("worker", { delegationScope: scope });
-		expect(scope.snapshot()).toMatchObject({ startsUsed: 3, activeDescendants: 2 });
-		await Promise.all([second.dispose(), third.dispose()]);
-	});
+		expect(scope.snapshot()).toMatchObject({
+			startsUsed: 3,
+			activeDescendants: 3,
+			peakActiveDescendants: 3,
+			maxDepthReached: 1,
+		});
 
-	it("keeps the total tree-start budget consumed after children finish", async () => {
-		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "worker" })]);
-		const { manager } = await createTestManager({ resourceLoader });
-		const scope = new SubagentDelegationScope({ limits: { maxTotalStarts: 2 } });
-		cleanups.push(() => scope.dispose());
-
-		const first = await manager.startByName("worker", { delegationScope: scope });
 		await first.dispose();
-		const second = await manager.startByName("worker", { delegationScope: scope });
-		await second.dispose();
-
-		await expect(manager.startByName("worker", { delegationScope: scope })).rejects.toThrow("tree start limit 2");
-		expect(scope.snapshot()).toMatchObject({ startsUsed: 2, activeDescendants: 0 });
+		const fourth = await manager.startByName("worker", { delegationScope: scope });
+		expect(scope.snapshot()).toMatchObject({ startsUsed: 4, activeDescendants: 3 });
+		await Promise.all([second.dispose(), third.dispose(), fourth.dispose()]);
+		expect(scope.snapshot()).toMatchObject({ startsUsed: 4, activeDescendants: 0 });
 	});
 
-	it("enforces a non-overridable tree depth ceiling", () => {
-		const scope = new SubagentDelegationScope({ limits: { maxDepth: 2 } });
+	it("records arbitrarily large tree activity without aborting or rejecting reservations", () => {
+		const scope = new SubagentDelegationScope();
 		cleanups.push(() => scope.dispose());
-		const attemptedOverride = new SubagentDelegationScope({ limits: { maxDepth: 999 } });
-		cleanups.push(() => attemptedOverride.dispose());
-
-		expect(() => scope.reserve("researcher", 3)).toThrow("tree max depth 2");
-		expect(scope.snapshot()).toMatchObject({ startsUsed: 0, activeDescendants: 0 });
-		expect(attemptedOverride.snapshot().limits.maxDepth).toBe(DEFAULT_SUBAGENT_MAX_DEPTH);
-	});
-
-	it("aborts the shared tree when turn, token, or cost budgets are exhausted", () => {
-		const turnScope = new SubagentDelegationScope({ limits: { maxTotalTurns: 1 } });
-		const tokenScope = new SubagentDelegationScope({ limits: { maxTotalTokens: 10 } });
-		const costScope = new SubagentDelegationScope({ limits: { maxCostUsd: 0.5 } });
-		cleanups.push(() => turnScope.dispose());
-		cleanups.push(() => tokenScope.dispose());
-		cleanups.push(() => costScope.dispose());
-
-		turnScope.recordTurn();
-		tokenScope.recordUsage(10, 0);
-		costScope.recordUsage(0, 0.5);
-
-		expect(turnScope.signal.reason).toMatchObject({ message: "Subagent delegation exceeded the tree turn limit 1" });
-		expect(tokenScope.signal.reason).toMatchObject({
-			message: "Subagent delegation exceeded the tree token limit 10",
+		const reservations = Array.from({ length: 100 }, (_, index) => {
+			const reservation = scope.reserve(`worker-${index}`, 100 + index);
+			reservation.commit(`sa_${index}`, () => undefined);
+			return reservation;
 		});
-		expect(costScope.signal.reason).toMatchObject({
-			message: "Subagent delegation exceeded the tree cost limit $0.5",
+		for (let index = 0; index < 500; index += 1) scope.recordTurn();
+		scope.recordUsage(2_000_000, 100);
+
+		expect(scope.signal.aborted).toBe(false);
+		expect(scope.snapshot()).toMatchObject({
+			startsUsed: 100,
+			activeDescendants: 100,
+			peakActiveDescendants: 100,
+			maxDepthReached: 199,
+			turnsUsed: 500,
+			tokensUsed: 2_000_000,
+			costUsd: 100,
+			aborted: false,
 		});
+
+		for (const reservation of reservations) reservation.release();
+		expect(scope.snapshot()).toMatchObject({ startsUsed: 100, activeDescendants: 0 });
 	});
 
 	it("passes nested delegation paths to child runtime context", async () => {

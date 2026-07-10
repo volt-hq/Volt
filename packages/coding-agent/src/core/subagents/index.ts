@@ -484,14 +484,6 @@ export function discoverSubagentDefinitions(options: DiscoverSubagentDefinitions
 }
 
 export {
-	DEFAULT_SUBAGENT_MAX_ACTIVE_DESCENDANTS,
-	DEFAULT_SUBAGENT_MAX_COST_USD,
-	DEFAULT_SUBAGENT_MAX_DEPTH,
-	DEFAULT_SUBAGENT_MAX_TOTAL_STARTS,
-	DEFAULT_SUBAGENT_MAX_TOTAL_TOKENS,
-	DEFAULT_SUBAGENT_MAX_TOTAL_TURNS,
-	DEFAULT_SUBAGENT_RUN_TIMEOUT_MS,
-	type SubagentDelegationLimits,
 	type SubagentDelegationReservation,
 	SubagentDelegationScope,
 	type SubagentDelegationScopeOptions,
