@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { getReadmePath } from "../src/config.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
-import { initTheme } from "../src/core/theme/runtime.ts";
+import { initTheme, theme } from "../src/core/theme/runtime.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
 import { createSubagentToolDefinition, type SubagentToolDetails } from "../src/core/tools/subagent.ts";
@@ -816,6 +816,24 @@ describe("ToolExecutionComponent parity", () => {
 		now.mockReturnValue(9_000);
 		restoredComponent.updateResult({ content: [{ type: "text", text: "done" }], isError: false }, false);
 		expect(stripAnsi(restoredComponent.render(120).join("\n"))).not.toContain("s)");
+	});
+
+	test("highlights built-in bash tool commands", () => {
+		const tool = createBashToolDefinition(process.cwd(), { operations: { exec: async () => ({ exitCode: 0 }) } });
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-highlight-bash",
+			{ command: `cd src && python -c 'print("hello")'` },
+			{},
+			tool,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		const rendered = component.render(120).join("\n");
+		expect(rendered).toContain(theme.fg("syntaxFunction", "cd"));
+		expect(rendered).toContain(theme.fg("syntaxFunction", "python"));
+		expect(stripAnsi(rendered)).toContain(`$ cd src && python -c 'print("hello")' [pending]`);
 	});
 
 	test("does not add a second duration for the built-in bash renderer", () => {

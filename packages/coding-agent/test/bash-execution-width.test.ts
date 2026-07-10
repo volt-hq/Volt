@@ -4,7 +4,7 @@
  */
 import { visibleWidth } from "@earendil-works/volt-tui";
 import { beforeAll, describe, expect, it } from "vitest";
-import { initTheme } from "../src/core/theme/runtime.ts";
+import { initTheme, theme } from "../src/core/theme/runtime.ts";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -54,6 +54,20 @@ describe("BashExecutionComponent width handling (#2569)", () => {
 		for (let i = 0; i < lines.length; i++) {
 			const w = visibleWidth(lines[i]);
 			expect(w, `Line ${i} visibleWidth=${w} > ${narrowWidth}`).toBeLessThanOrEqual(narrowWidth);
+		}
+	});
+
+	it("renders direct commands with shell syntax highlighting", () => {
+		const { stub } = createTuiStub(120);
+		const component = new BashExecutionComponent(`cd src && python -c 'print("hello")'`, stub);
+		component.setComplete(0, false);
+		const rendered = component.render(120).join("\n");
+
+		expect(rendered).toContain(theme.fg("syntaxFunction", "cd"));
+		expect(rendered).toContain(theme.fg("syntaxFunction", "python"));
+		expect(stripAnsi(rendered)).toContain(`$ cd src && python -c 'print("hello")' [success]`);
+		for (const line of component.render(32)) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(32);
 		}
 	});
 

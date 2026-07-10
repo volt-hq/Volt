@@ -4,10 +4,17 @@ import { decodeHtmlEntityAt } from "./html.ts";
 export type HighlightFormatter = (text: string) => string;
 export type HighlightTheme = Partial<Record<string, HighlightFormatter>>;
 
+export interface HighlightOverlay {
+	start: number;
+	end: number;
+	formatter: HighlightFormatter;
+}
+
 export interface HighlightOptions {
 	language?: string;
 	ignoreIllegals?: boolean;
 	languageSubset?: string[];
+	styleOverlays?: HighlightOverlay[];
 	theme?: HighlightTheme;
 }
 
@@ -77,17 +84,40 @@ function isSpanOpenTagStart(html: string, index: number): boolean {
 	return nextChar === ">" || nextChar === " " || nextChar === "\t" || nextChar === "\n" || nextChar === "\r";
 }
 
-export function renderHighlightedHtml(html: string, theme: HighlightTheme = {}): string {
+export function renderHighlightedHtml(
+	html: string,
+	theme: HighlightTheme = {},
+	styleOverlays: HighlightOverlay[] = [],
+): string {
 	let output = "";
+	let sourceOffset = 0;
 	let textBuffer = "";
 	const scopes: Array<string | undefined> = [];
+	const overlays = [...styleOverlays].sort((a, b) => a.start - b.start);
 
 	const flushText = () => {
 		if (!textBuffer) {
 			return;
 		}
 		const formatter = getActiveFormatter(scopes, theme);
-		output += formatter ? formatter(textBuffer) : textBuffer;
+		const bufferStart = sourceOffset;
+		const bufferEnd = bufferStart + textBuffer.length;
+		let cursor = 0;
+		for (const overlay of overlays) {
+			const overlapStart = Math.max(bufferStart + cursor, overlay.start);
+			const overlapEnd = Math.min(bufferEnd, overlay.end);
+			if (overlapStart >= overlapEnd) continue;
+
+			const localStart = overlapStart - bufferStart;
+			const localEnd = overlapEnd - bufferStart;
+			const before = textBuffer.slice(cursor, localStart);
+			if (before) output += formatter ? formatter(before) : before;
+			output += overlay.formatter(textBuffer.slice(localStart, localEnd));
+			cursor = localEnd;
+		}
+		const remaining = textBuffer.slice(cursor);
+		if (remaining) output += formatter ? formatter(remaining) : remaining;
+		sourceOffset = bufferEnd;
 		textBuffer = "";
 	};
 
@@ -138,7 +168,7 @@ export function highlight(code: string, options: HighlightOptions = {}): string 
 				ignoreIllegals: options.ignoreIllegals,
 			}).value
 		: hljs.highlightAuto(code, options.languageSubset).value;
-	return renderHighlightedHtml(html, options.theme);
+	return renderHighlightedHtml(html, options.theme, options.styleOverlays);
 }
 
 export function supportsLanguage(name: string): boolean {

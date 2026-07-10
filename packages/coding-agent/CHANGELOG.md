@@ -142,6 +142,7 @@
 ### Changed
 
 - Redesigned the interactive shell with a responsive startup lockup, compact resource summary, mode-aware editor frame, prioritized workspace/model/context status rail, and explicit transcript and tool-state hierarchy.
+- Added theme-aware Bash syntax highlighting to direct shell executions and built-in Bash tool headers, with a conservative overlay for external executable names.
 - Changed `terminal.turnDoneAlert` bell/notification alerts to be suppressed while the terminal window reports focus (via focus reporting, DECSET 1004). Terminals without focus reporting keep alerting as before.
 - Changed supported interactive Volt sessions to maintain a reconnecting daemon control client even when `remote.background` auto-start is disabled, so agents that were already running attach when another process starts the daemon.
 - Changed the default coding-agent prompt to use XML-delimited workflow, trust-boundary, and subagent-delegation guidance while preserving dynamic tool, project-context, skill, date, and working-directory injection.

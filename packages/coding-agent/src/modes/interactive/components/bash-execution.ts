@@ -3,7 +3,7 @@
  */
 
 import { type Component, Container, Loader, Spacer, Text, type TUI } from "@earendil-works/volt-tui";
-import { theme } from "../../../core/theme/runtime.ts";
+import { highlightShellCommand, theme } from "../../../core/theme/runtime.ts";
 import { formatDuration } from "../../../core/tools/render-utils.ts";
 import {
 	DEFAULT_MAX_BYTES,
@@ -157,7 +157,11 @@ export class BashExecutionComponent extends Container {
 			this.durationMs !== undefined && this.durationMs >= 1000
 				? ` ${theme.fg("dim", `(${formatDuration(this.durationMs)})`)}`
 				: "";
-		const header = new Text(`${theme.fg(this.colorKey, theme.bold(`$ ${this.command}`))} ${state}${duration}`, 1, 0);
+		const command =
+			this.colorKey === "dim"
+				? theme.fg("dim", this.command)
+				: highlightShellCommand(this.command, "bashMode").join("\n");
+		const header = new Text(`${theme.fg(this.colorKey, theme.bold("$ "))}${command} ${state}${duration}`, 1, 0);
 		this.contentContainer.addChild(header);
 
 		// Output

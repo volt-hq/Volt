@@ -15,7 +15,7 @@ import {
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import { theme } from "../theme/runtime.ts";
+import { highlightShellCommand, theme } from "../theme/runtime.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { formatDuration, getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -176,8 +176,13 @@ function formatBashCall(args: { command?: string; timeout?: number } | undefined
 	const command = str(args?.command);
 	const timeout = args?.timeout as number | undefined;
 	const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
-	const commandDisplay = command === null ? invalidArgText(theme) : command ? command : theme.fg("toolOutput", "...");
-	return theme.fg("toolTitle", theme.bold(`$ ${commandDisplay}`)) + timeoutSuffix;
+	const commandDisplay =
+		command === null
+			? invalidArgText(theme)
+			: command
+				? highlightShellCommand(command, "toolTitle").join("\n")
+				: theme.fg("toolOutput", "...");
+	return theme.fg("toolTitle", theme.bold("$ ")) + commandDisplay + timeoutSuffix;
 }
 
 function rebuildBashResultRenderComponent(

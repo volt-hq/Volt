@@ -13,7 +13,7 @@ import {
 	loadThemeFromPath,
 } from "./discovery.ts";
 import type { Theme } from "./theme.ts";
-import type { ThemeInfo } from "./types.ts";
+import type { ThemeColor, ThemeInfo } from "./types.ts";
 
 export {
 	detectTerminalBackgroundFromEnv,
@@ -336,6 +336,159 @@ export function highlightCode(code: string, lang?: string): string[] {
 		return highlight(code, opts).split("\n");
 	} catch {
 		return code.split("\n");
+	}
+}
+
+const SHELL_CONTROL_WORDS = new Set([
+	"case",
+	"coproc",
+	"do",
+	"done",
+	"elif",
+	"else",
+	"esac",
+	"fi",
+	"for",
+	"function",
+	"if",
+	"in",
+	"select",
+	"then",
+	"time",
+	"until",
+	"while",
+]);
+const SHELL_LIST_OPERATORS = new Set(["&", "&&", ";", ";&", ";;&", ";;", "|", "|&", "||"]);
+const SHELL_REDIRECTION_PATTERN = /^(?:\d+)?(?:<<<|<<-|<<|>>|<>|>&|<&|>\||&>|>|<)/;
+
+type ShellHighlightToken = {
+	kind: "newline" | "operator" | "word";
+	start: number;
+	end: number;
+	value: string;
+};
+
+function tokenizeShellCommand(command: string): ShellHighlightToken[] | undefined {
+	const tokens: ShellHighlightToken[] = [];
+	let index = 0;
+
+	while (index < command.length) {
+		const char = command[index]!;
+		if (char === "\n") {
+			tokens.push({ kind: "newline", start: index, end: index + 1, value: char });
+			index++;
+			continue;
+		}
+		if (/\s/.test(char)) {
+			index++;
+			continue;
+		}
+		if (char === "#") {
+			const newline = command.indexOf("\n", index);
+			index = newline === -1 ? command.length : newline;
+			continue;
+		}
+		if (char === "`" || "(){}".includes(char) || command.startsWith("$(", index)) return undefined;
+		if ((char === "<" || char === ">") && command[index + 1] === "(") return undefined;
+
+		const redirection = SHELL_REDIRECTION_PATTERN.exec(command.slice(index))?.[0];
+		if (redirection) {
+			if (redirection.includes("<<")) return undefined;
+			tokens.push({ kind: "operator", start: index, end: index + redirection.length, value: redirection });
+			index += redirection.length;
+			continue;
+		}
+
+		const listOperator = [";;&", "&&", "||", "|&", ";;", ";&", ";", "|", "&"].find((operator) =>
+			command.startsWith(operator, index),
+		);
+		const negationOperator = char === "!" && (index + 1 === command.length || /\s/.test(command[index + 1]!));
+		if (listOperator || negationOperator) {
+			const operator = listOperator ?? "!";
+			tokens.push({ kind: "operator", start: index, end: index + operator.length, value: operator });
+			index += operator.length;
+			continue;
+		}
+
+		const start = index;
+		let quote: "'" | '"' | undefined;
+		while (index < command.length) {
+			const current = command[index]!;
+			if (current === "\\" && quote !== "'") {
+				index += Math.min(2, command.length - index);
+				continue;
+			}
+			if (quote) {
+				if (quote === '"' && (current === "`" || command.startsWith("$(", index))) return undefined;
+				if (current === quote) quote = undefined;
+				index++;
+				continue;
+			}
+			if (current === "'" || current === '"') {
+				quote = current;
+				index++;
+				continue;
+			}
+			if (current === "`" || "(){}".includes(current) || command.startsWith("$(", index)) return undefined;
+			if (/\s/.test(current) || SHELL_REDIRECTION_PATTERN.test(command.slice(index))) break;
+			if ([";", "|", "&"].includes(current)) break;
+			index++;
+		}
+		if (quote) return undefined;
+		tokens.push({ kind: "word", start, end: index, value: command.slice(start, index) });
+	}
+
+	return tokens;
+}
+
+function findShellCommandRanges(command: string): Array<{ start: number; end: number }> {
+	const tokens = tokenizeShellCommand(command);
+	if (!tokens) return [];
+
+	const ranges: Array<{ start: number; end: number }> = [];
+	let expectsCommand = true;
+	let expectsRedirectionTarget = false;
+	for (const token of tokens) {
+		if (token.kind === "newline" || (token.kind === "operator" && SHELL_LIST_OPERATORS.has(token.value))) {
+			expectsCommand = true;
+			expectsRedirectionTarget = false;
+			continue;
+		}
+		if (token.kind === "operator") {
+			if (token.value === "!") continue;
+			expectsRedirectionTarget = true;
+			continue;
+		}
+		if (expectsRedirectionTarget) {
+			expectsRedirectionTarget = false;
+			continue;
+		}
+		if (!expectsCommand || /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(token.value)) continue;
+		if (SHELL_CONTROL_WORDS.has(token.value) || token.value.startsWith("-")) return [];
+		ranges.push({ start: token.start, end: token.end });
+		expectsCommand = false;
+	}
+	return ranges;
+}
+
+/** Highlight Bash syntax, with a conservative command-name overlay for arbitrary executables. */
+export function highlightShellCommand(command: string, baseColor: ThemeColor = "toolTitle"): string[] {
+	try {
+		return highlight(command, {
+			language: "bash",
+			ignoreIllegals: true,
+			styleOverlays: findShellCommandRanges(command).map(({ start, end }) => ({
+				start,
+				end,
+				formatter: (text) => theme.fg("syntaxFunction", text),
+			})),
+			theme: {
+				...getCliHighlightTheme(theme),
+				default: (text) => theme.fg(baseColor, text),
+			},
+		}).split("\n");
+	} catch {
+		return command.split("\n").map((line) => theme.fg(baseColor, line));
 	}
 }
 

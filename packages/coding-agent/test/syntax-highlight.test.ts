@@ -1,6 +1,7 @@
 import { resetCapabilitiesCache, setCapabilities } from "@earendil-works/volt-tui";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { highlightCode, initTheme } from "../src/core/theme/runtime.ts";
+import { highlightCode, highlightShellCommand, initTheme, theme } from "../src/core/theme/runtime.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
 import { highlight, renderHighlightedHtml, supportsLanguage } from "../src/utils/syntax-highlight.ts";
 
 describe("syntax highlight renderer", () => {
@@ -32,6 +33,19 @@ describe("syntax highlight renderer", () => {
 			string: (text) => `[string:${text}]`,
 		});
 		expect(rendered).toBe("[string:a][string:b][string:c]");
+	});
+
+	it("applies source-offset overlays without changing highlighted text", () => {
+		const rendered = renderHighlightedHtml(
+			'echo <span class="hljs-string">&quot;a&amp;b&quot;</span>',
+			{
+				default: (text) => `[default:${text}]`,
+				string: (text) => `[string:${text}]`,
+			},
+			[{ start: 0, end: 4, formatter: (text) => `[command:${text}]` }],
+		);
+
+		expect(rendered).toBe('[command:echo][default: ][string:"a&b"]');
 	});
 
 	it("highlights code through highlight.js", () => {
@@ -72,5 +86,49 @@ describe("theme syntax highlighting", () => {
 		);
 		expect(highlightCode("@decorator", "python")[0]).toBe("\x1b[38;2;128;128;128m@decorator\x1b[39m");
 		expect(highlightCode("<div></div>", "html")[0]).toContain("\x1b[38;2;86;156;214mdiv\x1b[39m");
+	});
+
+	it("highlights shell executables alongside Bash syntax", () => {
+		const command = `cd packages/coding-agent && python -c 'print("hello")'`;
+		const rendered = highlightShellCommand(command).join("\n");
+
+		expect(stripAnsi(rendered)).toBe(command);
+		expect(rendered).toContain(theme.fg("syntaxFunction", "cd"));
+		expect(rendered).toContain(theme.fg("syntaxFunction", "python"));
+		expect(rendered).toContain(theme.fg("syntaxString", `'print("hello")'`));
+		expect(rendered).toContain(theme.fg("toolTitle", " packages/coding-agent && "));
+	});
+
+	it("preserves source text while handling assignments and leading redirections", () => {
+		const command = "TOKEN=voltcommandtoken0x >output.txt python --version";
+		const rendered = highlightShellCommand(command).join("\n");
+
+		expect(stripAnsi(rendered)).toBe(command);
+		expect(rendered).toContain(theme.fg("syntaxFunction", "python"));
+		expect(rendered).not.toContain(theme.fg("syntaxFunction", ">output.txt"));
+	});
+
+	it("uses the terminal's 256-color capability without changing command text", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: false });
+		initTheme("dark");
+		const command = `python -c 'print("hello")'`;
+		const rendered = highlightShellCommand(command).join("\n");
+
+		expect(stripAnsi(rendered)).toBe(command);
+		expect(rendered).toMatch(/\x1b\[38;5;\d+m/);
+	});
+
+	it("omits the command overlay for ambiguous shell structures", () => {
+		const cases = [
+			{ command: "echo $(git status) tail", executable: "git" },
+			{ command: "cat <<'EOF'\nhello\nEOF", executable: "cat" },
+			{ command: "if test -f file; then echo yes; fi", executable: "test" },
+		];
+
+		for (const { command, executable } of cases) {
+			const rendered = highlightShellCommand(command).join("\n");
+			expect(stripAnsi(rendered)).toBe(command);
+			expect(rendered).not.toContain(theme.fg("syntaxFunction", executable));
+		}
 	});
 });
