@@ -137,6 +137,9 @@ session.subscribe((event) => {
       console.log(`Result: ${event.result}`);
       break;
     case "agent_end":
+      console.log("Agent run finished");
+      break;
+    case "agent_settled":
       console.log("Done");
       break;
   }

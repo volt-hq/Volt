@@ -220,9 +220,13 @@ describe("AgentSession auto-compaction queue resume", () => {
 		let streamCallCount = 0;
 		let streamCallsAtCompactionStart = -1;
 		const agentEnds: string[] = [];
+		const compactionContinuations: boolean[] = [];
 		session.subscribe((event) => {
 			if (event.type === "compaction_start") {
 				streamCallsAtCompactionStart = streamCallCount;
+			}
+			if (event.type === "compaction_end") {
+				compactionContinuations.push(event.willRetry);
 			}
 			if (event.type === "agent_end") {
 				agentEnds.push(event.type);
@@ -287,6 +291,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(streamCallsAtCompactionStart).toBe(1);
 		expect(streamCallCount).toBe(2);
 		expect(agentEnds).toHaveLength(2);
+		expect(compactionContinuations).toEqual([true]);
 		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
 	});
 

@@ -1706,7 +1706,7 @@ export class InteractiveMode {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			},
 			commandContextActions: {
-				waitForIdle: () => this.session.agent.waitForIdle(),
+				waitForIdle: () => this.session.waitForIdle(),
 				newSession: async (options) => {
 					if (this.loadingAnimation) {
 						this.loadingAnimation.stop();
@@ -3697,10 +3697,13 @@ export class InteractiveMode {
 				}
 				this.pendingTools.clear();
 
-				await this.checkShutdownRequested();
 				this.scheduleTurnDoneAlert(event);
 
 				this.ui.requestRender();
+				break;
+
+			case "agent_settled":
+				await this.checkShutdownRequested();
 				break;
 
 			case "compaction_start": {

@@ -13,7 +13,13 @@ import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 
 function createSession() {
 	return {
-		bindExtensions: vi.fn(async (_options: { uiContext: ExtensionUIContext; mode: string }) => undefined),
+		bindExtensions: vi.fn(
+			async (_options: {
+				uiContext: ExtensionUIContext;
+				mode: string;
+				commandContextActions: { waitForIdle(): Promise<void> };
+			}) => undefined,
+		),
 		subscribe: vi.fn(() => () => undefined),
 		agent: {
 			state: { pendingToolExecutions: new Map() },
@@ -25,6 +31,7 @@ function createSession() {
 		},
 		getSubagentToolManager: () => undefined,
 		getActiveToolNames: () => ["read"],
+		waitForIdle: vi.fn(async () => undefined),
 		sessionId: "s-theme",
 		sessionFile: undefined,
 		settingsManager: {
@@ -71,8 +78,11 @@ describe("rpc-mode extension theme facade", () => {
 		await ready;
 		await vi.waitFor(() => expect(session.bindExtensions).toHaveBeenCalled());
 
-		const uiContext = session.bindExtensions.mock.calls[0]?.[0]?.uiContext as ExtensionUIContext;
-		expect(session.bindExtensions.mock.calls[0]?.[0]?.mode).toBe("rpc");
+		const bindOptions = session.bindExtensions.mock.calls[0]?.[0];
+		const uiContext = bindOptions?.uiContext as ExtensionUIContext;
+		expect(bindOptions?.mode).toBe("rpc");
+		await bindOptions?.commandContextActions.waitForIdle();
+		expect(session.waitForIdle).toHaveBeenCalledOnce();
 
 		// Theme rows (§12.3.4): the full list is visible in rpc mode.
 		const allThemes = uiContext.getAllThemes();

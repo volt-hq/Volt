@@ -1188,7 +1188,7 @@ export class AgentSession {
 			// The run was interrupted mid-task by _shouldStopForProactiveCompaction,
 			// so always resume it, even when compaction bails or fails, unless the
 			// session was disposed while compaction was in flight.
-			await this._runAutoCompaction("threshold", false, true);
+			await this._runAutoCompaction("threshold", false, true, true);
 			return !this._disposed && (abortGeneration === this._abortGeneration || this.agent.hasQueuedMessages());
 		}
 
@@ -2242,6 +2242,7 @@ export class AgentSession {
 		reason: "overflow" | "threshold",
 		willRetry: boolean,
 		continueAfterCompaction = false,
+		continueWithoutCompaction = false,
 	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
 
@@ -2256,7 +2257,7 @@ export class AgentSession {
 					reason,
 					result: undefined,
 					aborted: false,
-					willRetry: false,
+					willRetry: continueWithoutCompaction,
 				});
 				return false;
 			}
@@ -2272,7 +2273,7 @@ export class AgentSession {
 						reason,
 						result: undefined,
 						aborted: false,
-						willRetry: false,
+						willRetry: continueWithoutCompaction,
 					});
 					return false;
 				}
@@ -2292,7 +2293,7 @@ export class AgentSession {
 					reason,
 					result: undefined,
 					aborted: false,
-					willRetry: false,
+					willRetry: continueWithoutCompaction,
 				});
 				return false;
 			}
@@ -2315,7 +2316,7 @@ export class AgentSession {
 						reason,
 						result: undefined,
 						aborted: true,
-						willRetry: false,
+						willRetry: continueWithoutCompaction,
 					});
 					return false;
 				}
@@ -2362,7 +2363,7 @@ export class AgentSession {
 					reason,
 					result: undefined,
 					aborted: true,
-					willRetry: false,
+					willRetry: continueWithoutCompaction,
 				});
 				return false;
 			}
@@ -2392,7 +2393,13 @@ export class AgentSession {
 				tokensBefore,
 				details,
 			};
-			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
+			this._emit({
+				type: "compaction_end",
+				reason,
+				result,
+				aborted: false,
+				willRetry: willRetry || continueAfterCompaction,
+			});
 
 			if (willRetry) {
 				const messages = this.agent.state.messages;
@@ -2417,7 +2424,7 @@ export class AgentSession {
 				reason,
 				result: undefined,
 				aborted: false,
-				willRetry: false,
+				willRetry: continueWithoutCompaction,
 				errorMessage:
 					reason === "overflow"
 						? `Context overflow recovery failed: ${errorMessage}`
