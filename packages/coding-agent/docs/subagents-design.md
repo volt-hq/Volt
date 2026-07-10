@@ -86,7 +86,7 @@ Initial fields:
 | `description` | yes | Shown to users and the parent model. |
 | `tools` | no | Requested child tool names. Effective tools are policy-clamped. |
 | `excludedTools` | no | Child tool names to subtract after inheritance or `tools`/policy intersection. |
-| `allowedSubagents` | no | Child subagent names this definition may start when it has the `subagent` tool. |
+| `allowedSubagents` | no | Child subagent names this definition may start. Omission is fail-closed and allows no child names. |
 | `maxSubagentDepth` | no | Deepest nested subagent depth this definition may create; top-level user sessions are depth 0 and descendants inherit the strictest ancestor cap. |
 | `maxChildAgents` | no | Maximum child subagent starts allowed for one runtime of this definition. |
 | `model` | no | Optional model pattern/id for the child. |
@@ -185,8 +185,8 @@ The implementation uses exported RPC types for state and transcript access.
 
 A child runtime is a normal Volt runtime with narrowed configuration:
 
-- **Session**: in-memory by default for tool-style delegation; persistent when visible to app/CLI or when requested.
-- **Parent tracking**: persistent children should set `parentSession` to the parent session file when that mode is added.
+- **Session**: in-memory when the parent is in-memory; persisted beside a persisted parent so child transcripts remain attachable and auditable.
+- **Parent tracking**: persisted children set `parentSession` to the parent session file.
 - **cwd**: default to parent cwd. Remote visible agents use the stream-bound workspace cwd.
 - **Resource loader**: inherit normal user/project resources for the child cwd, subject to project trust.
 - **System prompt**: use Volt's normal base prompt plus the selected agent definition appended as extra context.
@@ -199,7 +199,7 @@ Effective tool policy is:
 effective child tools = (requested child tools OR inherited parent tools) ∩ parent allowed tools ∩ host allowed tools - excluded tools
 ```
 
-If no child tools are requested, inherit the parent's active tool set. `excludedTools` can remove dangerous or recursive capabilities such as `subagent` while preserving the rest of the inherited parent tool posture. Delegation controls are enforced by the current runtime's `SubagentManager`: `allowedSubagents` restricts target names, an explicit empty `allowedSubagents:` allows no child names, `maxSubagentDepth` stops recursion at or beyond the configured depth and propagates to descendants as the strictest inherited cap, and `maxChildAgents` caps total child starts for that runtime. Malformed tool/delegation policy fields reject the affected definition instead of silently dropping restrictions. Built-in research and security-review roles are non-mutating locally but include `web_search`, so they can send query text to the configured external search provider. Any future tool escalation must be an explicit host/SDK option, not the default.
+If no child tools are requested, inherit the parent's active tool set. `excludedTools` can remove dangerous or recursive capabilities such as `subagent` while preserving the rest of the inherited parent tool posture. Delegation is fail-closed: omitting `allowedSubagents` allows no child names and removes the `subagent` tool from that child. Explicit delegation is additionally clamped by a shared root scope with hard ceilings of depth 4, 64 total starts, 16 active descendants, 200 turns, one million tokens, $25, and 15 minutes. Callers may request lower limits but cannot raise these ceilings. Every descendant uses the same atomic counters and cancellation signal, so nested managers cannot reset the tree budget. Definition `maxSubagentDepth` values still propagate as the strictest inherited cap, while `maxChildAgents` caps total starts for one runtime. Malformed tool/delegation policy fields reject the affected definition instead of silently dropping restrictions. Built-in research and security-review roles are non-mutating locally but include `web_search`, so they can send query text to the configured external search provider. Any future tool escalation must be an explicit host/SDK option, not the default.
 
 ## RPC lifecycle
 
@@ -246,7 +246,7 @@ The tool result returns:
 - bounded transcript/tool summary
 - usage and cost when available
 
-Model-visible output is capped at 50 KB per task/step. Chain `{previous}` substitution uses that bounded output, XML-escapes it, and wraps it as untrusted prior data instead of forwarding raw child text. Full child output remains in child session state when available; tool details include status, usage, truncation, and error metadata.
+Model-visible output is capped at 50 KB per task/step and parallel results have an additional 100 KB aggregate cap. Chain `{previous}` substitution uses that bounded output, XML-escapes it, and wraps it as untrusted prior data instead of forwarding raw child text. A delegation tool call times out after 15 minutes by default. Full child output remains in child session state when available; tool details include status, usage, truncation, error metadata, and a final snapshot of tree-wide budget consumption.
 
 ## Public RPC surface
 
@@ -343,9 +343,9 @@ Required rules:
 
 MVP defaults:
 
-- Tool-style child subagents are ephemeral/in-memory.
+- Tool-style child subagents follow parent persistence: in-memory parents create in-memory children, while persisted parents create persisted child sessions with parent linkage.
 - App-visible agents are persistent normal sessions, because reconnect and transcript recovery depend on session files.
-- Persistent child sessions should record `parentSession` when that mode is added and a parent session file exists.
+- Persistent child sessions record `parentSession` when a parent session file exists.
 - Parent tool results include child `sessionId` but do not rely on child session files for correctness.
 
 Deferred options:

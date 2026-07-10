@@ -14,6 +14,11 @@ import { parseModelPattern } from "../model-resolver.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import type { RpcSessionState, RpcTranscriptResponse } from "../rpc/types.ts";
 import { SessionManager } from "../session-manager.ts";
+import {
+	type SubagentDelegationReservation,
+	SubagentDelegationScope,
+	type SubagentDelegationScopeOptions,
+} from "./delegation-scope.ts";
 import type { SubagentDefinition } from "./index.ts";
 
 export type SubagentEvent = RpcClientEvent;
@@ -96,11 +101,18 @@ export interface SubagentManagerOptions {
 	onRuntimeCreated?: (event: SubagentRuntimeCreatedEvent) => void | Promise<void>;
 }
 
+export interface SubagentDelegationScopeLease {
+	scope: SubagentDelegationScope;
+	owned: boolean;
+}
+
 export interface SubagentStartOptions {
 	cwd?: string;
 	agentDir?: string;
 	sessionManager?: SessionManager;
 	requestTimeoutMs?: number;
+	/** Shared root budget for all descendants created by one delegation tool call. */
+	delegationScope?: SubagentDelegationScope;
 }
 
 export interface SubagentStartByNameOptions extends SubagentStartOptions {
@@ -238,6 +250,7 @@ class LocalSubagentHandle implements SubagentHandle {
 	private readonly onPromptStarted: (message: string) => void;
 	private readonly onPromptFailed: (error: unknown) => void;
 	private readonly onAbortRequested: () => void;
+	private readonly onTerminal: () => void;
 	private waitForIdle: (() => Promise<void>) | undefined;
 	private readonly eventListeners = new Set<SubagentEventListener>();
 	private readonly endPromise: Promise<SubagentResult>;
@@ -249,6 +262,7 @@ class LocalSubagentHandle implements SubagentHandle {
 	private promptAccepted = false;
 	private promptMessageObserved = false;
 	private endSettled = false;
+	private ownershipSettled = false;
 	private disposed = false;
 	private disposePromise: Promise<void> | undefined;
 
@@ -261,6 +275,7 @@ class LocalSubagentHandle implements SubagentHandle {
 		onPromptStarted: (message: string) => void;
 		onPromptFailed: (error: unknown) => void;
 		onAbortRequested: () => void;
+		onTerminal: () => void;
 		waitForIdle: () => Promise<void>;
 	}) {
 		this.id = options.id;
@@ -271,6 +286,7 @@ class LocalSubagentHandle implements SubagentHandle {
 		this.onPromptStarted = options.onPromptStarted;
 		this.onPromptFailed = options.onPromptFailed;
 		this.onAbortRequested = options.onAbortRequested;
+		this.onTerminal = options.onTerminal;
 		this.waitForIdle = options.waitForIdle;
 		this.endPromise = new Promise<SubagentResult>((resolve, reject) => {
 			this.resolveEnd = resolve;
@@ -289,6 +305,7 @@ class LocalSubagentHandle implements SubagentHandle {
 			});
 		} catch (error) {
 			this.onPromptFailed(error);
+			this.settleOwnership();
 			throw error;
 		}
 	}
@@ -333,6 +350,7 @@ class LocalSubagentHandle implements SubagentHandle {
 		}
 		this.disposed = true;
 		this.waitForIdle = undefined;
+		this.settleOwnership();
 		if (!this.endSettled) {
 			this.endSettled = true;
 			this.rejectEnd(new Error(`Subagent ${this.id} was disposed before completion`));
@@ -389,6 +407,7 @@ class LocalSubagentHandle implements SubagentHandle {
 		} catch (error) {
 			if (!this.disposed && !this.endSettled) {
 				this.endSettled = true;
+				this.settleOwnership();
 				this.rejectEnd(error instanceof Error ? error : new Error(String(error)));
 			}
 			return;
@@ -400,10 +419,12 @@ class LocalSubagentHandle implements SubagentHandle {
 		const latestEndEvent = this.latestEndEvent;
 		if (!this.promptMessageObserved || !latestEndEvent) {
 			this.endSettled = true;
+			this.settleOwnership();
 			this.rejectEnd(new Error(`Subagent ${this.id} settled without an agent result`));
 			return;
 		}
 		this.endSettled = true;
+		this.settleOwnership();
 		const event = latestEndEvent.willRetry ? { ...latestEndEvent, willRetry: false } : latestEndEvent;
 		this.resolveEnd({ id: this.id, sessionId: this.sessionId, event });
 	}
@@ -412,6 +433,12 @@ class LocalSubagentHandle implements SubagentHandle {
 		if (this.disposed) {
 			throw new Error(`Subagent ${this.id} is disposed`);
 		}
+	}
+
+	private settleOwnership(): void {
+		if (this.ownershipSettled) return;
+		this.ownershipSettled = true;
+		this.onTerminal();
 	}
 }
 
@@ -430,6 +457,9 @@ export class SubagentManager {
 	private readonly activities = new Map<string, MutableSubagentActivity>();
 	private readonly activityListeners = new Set<SubagentActivityListener>();
 	private childStartCount = 0;
+	private disposePromise: Promise<void> | undefined;
+	private pendingStartCount = 0;
+	private readonly pendingStartWaiters = new Set<() => void>();
 
 	constructor(options: SubagentManagerOptions) {
 		this.createRuntime = options.createRuntime;
@@ -444,13 +474,35 @@ export class SubagentManager {
 		this.onRuntimeCreated = options.onRuntimeCreated;
 	}
 
+	createDelegationScope(options: SubagentDelegationScopeOptions = {}): SubagentDelegationScopeLease {
+		this.assertNotDisposed();
+		const inherited = this.subagentContext?.delegationScope;
+		if (inherited) {
+			return { scope: inherited, owned: false };
+		}
+		return { scope: new SubagentDelegationScope(options), owned: true };
+	}
+
 	async start(options: SubagentStartOptions = {}): Promise<SubagentHandle> {
-		const releaseReservation = this.reserveChildStart(undefined);
+		const finishStart = this.beginStart();
+		let releaseReservation = (): void => undefined;
+		let scopeLease: SubagentDelegationScopeLease | undefined;
+		let treeReservation: SubagentDelegationReservation | undefined;
 		try {
-			return await this.startRuntime(options);
+			releaseReservation = this.reserveChildStart(undefined);
+			scopeLease = this.resolveDelegationScope(options.delegationScope);
+			treeReservation = scopeLease.scope.reserve("subagent", (this.subagentContext?.depth ?? 0) + 1);
+			return await this.startRuntime(options, undefined, {
+				scopeLease,
+				reservation: treeReservation,
+			});
 		} catch (error) {
 			releaseReservation();
+			treeReservation?.rollback();
+			if (scopeLease?.owned) scopeLease.scope.dispose();
 			throw error;
+		} finally {
+			finishStart();
 		}
 	}
 
@@ -483,23 +535,49 @@ export class SubagentManager {
 	}
 
 	async startByName(agentName: string, options: SubagentStartByNameOptions = {}): Promise<SubagentHandle> {
-		const definition = this.getDefinition(agentName, { resourceLoader: options.resourceLoader });
-		const releaseReservation = this.reserveChildStart(definition.name);
+		const finishStart = this.beginStart();
+		let releaseReservation = (): void => undefined;
+		let scopeLease: SubagentDelegationScopeLease | undefined;
+		let treeReservation: SubagentDelegationReservation | undefined;
 		try {
-			return await this.startRuntime(options, {
-				definition,
-				allowedTools: options.allowedTools ?? this.allowedTools,
-			});
+			const definition = this.getDefinition(agentName, { resourceLoader: options.resourceLoader });
+			releaseReservation = this.reserveChildStart(definition.name);
+			scopeLease = this.resolveDelegationScope(options.delegationScope);
+			treeReservation = scopeLease.scope.reserve(definition.name, (this.subagentContext?.depth ?? 0) + 1);
+			return await this.startRuntime(
+				options,
+				{
+					definition,
+					allowedTools: options.allowedTools ?? this.allowedTools,
+				},
+				{
+					scopeLease,
+					reservation: treeReservation,
+				},
+			);
 		} catch (error) {
 			releaseReservation();
+			treeReservation?.rollback();
+			if (scopeLease?.owned) scopeLease.scope.dispose();
 			throw error;
+		} finally {
+			finishStart();
 		}
 	}
 
 	async dispose(): Promise<void> {
-		const handles = Array.from(this.handles.values());
-		await Promise.all(handles.map((handle) => handle.dispose()));
-		this.activityListeners.clear();
+		if (!this.disposePromise) {
+			this.disposePromise = (async () => {
+				await this.waitForPendingStarts();
+				const handles = Array.from(this.handles.values());
+				try {
+					await Promise.allSettled(handles.map((handle) => handle.dispose()));
+				} finally {
+					this.activityListeners.clear();
+				}
+			})();
+		}
+		await this.disposePromise;
 	}
 
 	private reserveChildStart(agentName: string | undefined): () => void {
@@ -547,7 +625,41 @@ export class SubagentManager {
 		};
 	}
 
-	private createChildSubagentContext(definition: SubagentDefinition | undefined): SubagentRuntimeContext | undefined {
+	private assertNotDisposed(): void {
+		if (this.disposePromise) throw new Error("Subagent manager is disposed");
+	}
+
+	private beginStart(): () => void {
+		this.assertNotDisposed();
+		this.pendingStartCount += 1;
+		let finished = false;
+		return () => {
+			if (finished) return;
+			finished = true;
+			this.pendingStartCount = Math.max(0, this.pendingStartCount - 1);
+			if (this.pendingStartCount === 0) {
+				for (const resolve of this.pendingStartWaiters) resolve();
+				this.pendingStartWaiters.clear();
+			}
+		};
+	}
+
+	private waitForPendingStarts(): Promise<void> {
+		if (this.pendingStartCount === 0) return Promise.resolve();
+		return new Promise((resolve) => this.pendingStartWaiters.add(resolve));
+	}
+
+	private resolveDelegationScope(requested: SubagentDelegationScope | undefined): SubagentDelegationScopeLease {
+		const inherited = this.subagentContext?.delegationScope;
+		if (inherited) return { scope: inherited, owned: false };
+		if (requested) return { scope: requested, owned: false };
+		return { scope: new SubagentDelegationScope(), owned: true };
+	}
+
+	private createChildSubagentContext(
+		definition: SubagentDefinition | undefined,
+		delegationScope: SubagentDelegationScope,
+	): SubagentRuntimeContext | undefined {
 		if (!definition) {
 			return undefined;
 		}
@@ -564,7 +676,8 @@ export class SubagentManager {
 			depth: (this.subagentContext?.depth ?? 0) + 1,
 			agentName: definition.name,
 			path: [...parentPath, definition.name],
-			...(definition.allowedSubagents ? { allowedSubagents: definition.allowedSubagents } : {}),
+			delegationScope,
+			allowedSubagents: definition.allowedSubagents ?? [],
 			...(maxSubagentDepth !== undefined ? { maxSubagentDepth } : {}),
 			...(definition.maxChildAgents !== undefined ? { maxChildAgents: definition.maxChildAgents } : {}),
 		};
@@ -576,13 +689,35 @@ export class SubagentManager {
 			definition: SubagentDefinition;
 			allowedTools?: string[];
 		},
+		delegation?: {
+			scopeLease: SubagentDelegationScopeLease;
+			reservation: SubagentDelegationReservation;
+		},
 	): Promise<SubagentHandle> {
 		const cwd = options.cwd ?? this.cwd;
 		const agentDir = options.agentDir ?? this.agentDir;
 		const sessionManager = options.sessionManager ?? this.createDefaultChildSessionManager(cwd);
 		const id = `sa_${randomUUID()}`;
-		const subagentContext = this.createChildSubagentContext(definitionOptions?.definition);
+		if (!delegation) {
+			throw new Error("Subagent delegation scope is required");
+		}
+		const subagentContext = this.createChildSubagentContext(
+			definitionOptions?.definition,
+			delegation.scopeLease.scope,
+		);
 		const runtime = await this.createChildRuntime({ cwd, agentDir, sessionManager, subagentContext });
+		const unsubscribeScopeAccounting = runtime.session.subscribe((event) => {
+			if (event.type === "turn_end") {
+				delegation.scopeLease.scope.recordTurn();
+				return;
+			}
+			if (event.type !== "message_end" || event.message.role !== "assistant") return;
+			const usage = event.message.usage;
+			delegation.scopeLease.scope.recordUsage(
+				usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
+				usage.cost.total,
+			);
+		});
 		let client: InProcessRpcClient | undefined;
 		try {
 			if (definitionOptions) {
@@ -611,7 +746,15 @@ export class SubagentManager {
 				onPromptStarted: (message) => this.updateActivityTask(id, message),
 				onPromptFailed: (error) => this.finishActivity(id, "failed", errorMessage(error)),
 				onAbortRequested: () => this.markActivityAbortRequested(id),
+				onTerminal: () => {
+					unsubscribeScopeAccounting();
+					delegation.reservation.release();
+					if (delegation.scopeLease.owned) delegation.scopeLease.scope.dispose();
+				},
 				waitForIdle: () => runtime.session.waitForIdle(),
+			});
+			delegation.reservation.commit(id, () => {
+				void runtime.session.abort();
 			});
 			this.handles.set(id, handle);
 			void handle.waitForEnd().then(
@@ -627,6 +770,7 @@ export class SubagentManager {
 			);
 			return handle;
 		} catch (error) {
+			unsubscribeScopeAccounting();
 			await client?.stop().catch(() => undefined);
 			await runtime.dispose().catch(() => undefined);
 			throw error;
@@ -828,9 +972,13 @@ export class SubagentManager {
 		definition: SubagentDefinition,
 		allowedTools: string[] | undefined,
 	): Promise<void> {
+		const allowedSubagents = normalizeUniqueNames(definition.allowedSubagents) ?? [];
 		const activeTools = resolveEffectiveTools({
 			requestedTools: definition.tools,
-			excludedTools: definition.excludedTools,
+			excludedTools:
+				allowedSubagents.length === 0
+					? [...(definition.excludedTools ?? []), "subagent"]
+					: definition.excludedTools,
 			allowedTools,
 			defaultTools: runtime.session.getActiveToolNames(),
 		});

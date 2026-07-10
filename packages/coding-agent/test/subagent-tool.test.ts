@@ -400,6 +400,20 @@ describe("subagent tool", () => {
 		expect(strictReadSession.getActiveToolNames()).toEqual(["read"]);
 	});
 
+	it("disposes the subagent manager when the parent session is disposed", async () => {
+		const dispose = vi.fn(async () => undefined);
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			startByName: async () => createCompletedHandle("unused"),
+			dispose,
+		} satisfies SubagentToolManager;
+		const session = await createSession({ manager });
+
+		session.dispose();
+
+		expect(dispose).toHaveBeenCalledOnce();
+	});
+
 	it("delegates a single task and returns the child final text", async () => {
 		const manager = await createRealManager({
 			definitions: [createDefinition("scout", { source: "project" })],
@@ -428,6 +442,12 @@ describe("subagent tool", () => {
 		expect(result.details.childSessions?.[0]?.subagentId).toBe(result.details.subagentId);
 		expect(result.details.childSessions?.[0]?.sessionId).toBe(result.details.sessionId);
 		expect(result.details.usage?.messages.assistant).toBe(1);
+		expect(result.details.delegation).toMatchObject({
+			startsUsed: 1,
+			activeDescendants: 0,
+			peakActiveDescendants: 1,
+			maxDepthReached: 1,
+		});
 	});
 
 	it("returns recovered child output after overflow compaction before default cleanup", async () => {
@@ -1015,6 +1035,39 @@ describe("subagent tool", () => {
 		expect(result.details.tasks?.map((task) => task.output?.maxBytes)).toEqual([32, 32]);
 	});
 
+	it("caps aggregate parallel output returned to the parent model", async () => {
+		const manager = {
+			getDefinition: (agentName: string) => createDefinition(agentName),
+			startByName: vi.fn(async (agentName: string) =>
+				createCompletedHandle(`${agentName}:${"x".repeat(96)}`, {
+					id: `sa_${agentName}`,
+					sessionId: `session_${agentName}`,
+				}),
+			),
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), {
+			manager,
+			maxOutputBytes: 128,
+			maxAggregateOutputBytes: 80,
+		});
+
+		const result = await tool.execute("call-aggregate", {
+			tasks: [
+				{ agent: "one", task: "summarize one" },
+				{ agent: "two", task: "summarize two" },
+			],
+		});
+
+		const aggregateText = textFromResult(result);
+		expect(aggregateText).toContain("[Subagent output truncated:");
+		expect(Buffer.byteLength(aggregateText, "utf8")).toBeLessThanOrEqual(80);
+		expect(result.details.aggregateOutput).toMatchObject({
+			truncated: true,
+			maxBytes: 80,
+		});
+		expect(result.details.tasks?.every((task) => task.output?.truncated === false)).toBe(true);
+	});
+
 	it("runs chain steps sequentially and substitutes previous output", async () => {
 		const completions = new Map<string, Deferred<SubagentResult>>();
 		const prompts: Array<{ agent: string; task: string }> = [];
@@ -1182,7 +1235,8 @@ describe("subagent tool", () => {
 
 		expect(textFromResult(result)).toBe("second output");
 		expect(prompts[1]?.task).toContain("Previous subagent output");
-		expect(prompts[1]?.task).toContain("[Subagent output truncated:");
+		expect(prompts[1]?.task).toContain("[Subagent output");
+		expect(Buffer.byteLength(result.details.steps?.[0]?.output?.text ?? "", "utf8")).toBeLessThanOrEqual(16);
 		expect(prompts[1]?.task).not.toContain("x".repeat(64));
 	});
 
@@ -1450,6 +1504,49 @@ describe("subagent tool", () => {
 		expect(outcome).toBe("Operation aborted");
 		expect(abortCalled).toBe(true);
 		await vi.waitFor(() => expect(disposeCalled).toBe(true));
+	});
+
+	it("times out a hung child run and starts best-effort cleanup", async () => {
+		let abortCalled = false;
+		let disposeCalled = false;
+		const never = new Promise<never>(() => undefined);
+		const handle = createCompletedHandle("never", {
+			resultPromise: never,
+			onAbort: () => {
+				abortCalled = true;
+			},
+			onDispose: () => {
+				disposeCalled = true;
+			},
+		});
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			startByName: async () => handle,
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager, runTimeoutMs: 10 });
+
+		await expect(tool.execute("call-timeout", { agent: "scout", task: "hang" })).rejects.toThrow(
+			"Subagent run timed out after 10ms",
+		);
+		expect(abortCalled).toBe(true);
+		expect(disposeCalled).toBe(true);
+	});
+
+	it("rejects invalid resource-limit options before creating the tool", () => {
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			startByName: async () => createCompletedHandle("unused"),
+		} satisfies SubagentToolManager;
+
+		expect(() => createSubagentToolDefinition({ manager, maxOutputBytes: -1 })).toThrow(
+			"maxOutputBytes must be a positive integer",
+		);
+		expect(() => createSubagentToolDefinition({ manager, maxAggregateOutputBytes: 0 })).toThrow(
+			"maxAggregateOutputBytes must be a positive integer",
+		);
+		expect(() => createSubagentToolDefinition({ manager, runTimeoutMs: Number.NaN })).toThrow(
+			"runTimeoutMs must be a positive integer",
+		);
 	});
 
 	it("rejects cancellation that arrives after child disposal starts", async () => {

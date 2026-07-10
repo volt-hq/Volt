@@ -100,14 +100,16 @@ export function createBuiltInSubagentDefinitions(): SubagentDefinition[] {
 		},
 		{
 			name: "design-doc",
-			description: "Design document planner and synthesizer that aggressively delegates independent research",
+			description: "Design document planner and synthesizer that delegates independent research when warranted",
 			allowedSubagents: ["researcher", "security-reviewer", "general"],
 			maxSubagentDepth: 3,
 			maxChildAgents: 8,
 			systemPrompt: [
 				"You are the built-in Volt design-document coordinator.",
 				"Your job is to turn an ambiguous technical goal into a sourced design/RFC, decision memo, or implementation plan.",
-				"Use the subagent tool aggressively for broad or uncertain work: delegate independent product, architecture, migration, operations, security, performance, prior-art, and skeptical review research before synthesis.",
+				"Use the subagent tool for broad or uncertain work that benefits from independent product, architecture, migration, operations, security, performance, prior-art, or skeptical review research before synthesis.",
+				"Scale delegation to complexity: handle simple questions directly, use 1 child for one focused gap, use 2-4 children for independent medium-sized questions, and exceed 4 only for genuinely broad work with non-overlapping assignments.",
+				"Do not delegate duplicate work, and stop spawning once the available evidence is sufficient to make the design decision.",
 				"Prefer parallel delegation for independent research questions and chain delegation only when later steps depend on prior output.",
 				"Preserve minority reports and unresolved objections; do not collapse disagreement into false consensus.",
 				"When external or current claims matter, perform or delegate web research and cite source URLs.",
@@ -325,7 +327,7 @@ export function parseSubagentDefinition(options: ParseSubagentDefinitionOptions)
 			description,
 			...(tools ? { tools } : {}),
 			...(excludedTools ? { excludedTools } : {}),
-			...(allowedSubagents ? { allowedSubagents } : {}),
+			allowedSubagents: allowedSubagents ?? [],
 			...(maxSubagentDepth !== undefined ? { maxSubagentDepth } : {}),
 			...(maxChildAgents !== undefined ? { maxChildAgents } : {}),
 			...(model ? { model } : {}),
@@ -482,12 +484,28 @@ export function discoverSubagentDefinitions(options: DiscoverSubagentDefinitions
 }
 
 export {
+	DEFAULT_SUBAGENT_MAX_ACTIVE_DESCENDANTS,
+	DEFAULT_SUBAGENT_MAX_COST_USD,
+	DEFAULT_SUBAGENT_MAX_DEPTH,
+	DEFAULT_SUBAGENT_MAX_TOTAL_STARTS,
+	DEFAULT_SUBAGENT_MAX_TOTAL_TOKENS,
+	DEFAULT_SUBAGENT_MAX_TOTAL_TURNS,
+	DEFAULT_SUBAGENT_RUN_TIMEOUT_MS,
+	type SubagentDelegationLimits,
+	type SubagentDelegationReservation,
+	SubagentDelegationScope,
+	type SubagentDelegationScopeOptions,
+	type SubagentDelegationScopeSnapshot,
+} from "./delegation-scope.ts";
+
+export {
 	type SubagentActivity,
 	type SubagentActivityEvent,
 	type SubagentActivityListener,
 	type SubagentActivityStatus,
 	SubagentDefinitionConfigurationError,
 	SubagentDefinitionNotFoundError,
+	type SubagentDelegationScopeLease,
 	type SubagentEndEvent,
 	type SubagentEvent,
 	type SubagentEventListener,

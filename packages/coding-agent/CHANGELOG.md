@@ -76,6 +76,7 @@
 
 ### Fixed
 
+- Fixed parent runtime teardown leaving directly-started SDK subagent managers alive after session replacement or disposal.
 - Fixed delayed queued-prompt preflight from accepting and stranding a message after the active run had already settled.
 - Fixed aborted compaction summaries from being committed as successful context checkpoints.
 - Fixed retry cancellation from reporting success or retaining stale retry-attempt state.
@@ -141,6 +142,7 @@
 
 ### Changed
 
+- Changed recursive subagent delegation to fail closed for definitions without `allowedSubagents`, share hard depth/start/concurrency/turn/token/cost/deadline limits across the entire descendant tree, cap combined parallel output, and report tree-budget consumption in tool details.
 - Redesigned the interactive shell with a responsive startup lockup, compact resource summary, mode-aware editor frame, prioritized workspace/model/context status rail, and explicit transcript and tool-state hierarchy.
 - Added theme-aware Bash syntax highlighting to direct shell executions and built-in Bash tool headers, with a conservative overlay for external executable names.
 - Changed `terminal.turnDoneAlert` bell/notification alerts to be suppressed while the terminal window reports focus (via focus reporting, DECSET 1004). Terminals without focus reporting keep alerting as before.

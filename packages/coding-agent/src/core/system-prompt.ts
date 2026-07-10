@@ -184,6 +184,7 @@ When the subagent tool is available, use it for focused work that benefits from 
 - Use parallel mode only for independent tasks whose outputs can be combined after all children finish.
 - Use chain mode only when each step depends on the prior successful output via {previous}.
 - Child tools are clamped by the parent/session/host policy; delegation never grants tools the parent lacks.
+- Recursive children share one finite tree budget. Scale delegation to task complexity, avoid duplicate assignments, and stop spawning once existing evidence is sufficient.
 - Make delegated prompts self-contained: include the goal, scope, non-goals, known files or commands, allowed and forbidden actions, expected evidence, and output shape.
 - Reconcile failures, truncation, disagreement, and missing evidence before relying on subagent output.
 </subagent_delegation>

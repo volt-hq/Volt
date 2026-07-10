@@ -13,6 +13,7 @@ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import { assertValidSessionId, type SessionInfo, SessionManager, summarizeSessionEntries } from "./session-manager.ts";
+import type { SubagentDelegationScope } from "./subagents/delegation-scope.ts";
 
 /**
  * Result returned by runtime creation.
@@ -29,6 +30,7 @@ export interface SubagentRuntimeContext {
 	depth: number;
 	agentName: string;
 	path: string[];
+	delegationScope: SubagentDelegationScope;
 	allowedSubagents?: string[];
 	maxSubagentDepth?: number;
 	maxChildAgents?: number;
@@ -232,7 +234,11 @@ export class AgentSessionRuntime {
 			targetSessionFile,
 		});
 		this.beforeSessionInvalidate?.();
-		this.session.dispose();
+		try {
+			await this.session.getSubagentToolManager()?.dispose?.();
+		} finally {
+			this.session.dispose();
+		}
 	}
 
 	private apply(result: CreateAgentSessionRuntimeResult): void {
@@ -513,7 +519,11 @@ export class AgentSessionRuntime {
 			reason: "quit",
 		});
 		this.beforeSessionInvalidate?.();
-		this.session.dispose();
+		try {
+			await this.session.getSubagentToolManager()?.dispose?.();
+		} finally {
+			this.session.dispose();
+		}
 	}
 }
 

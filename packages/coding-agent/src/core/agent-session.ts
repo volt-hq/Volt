@@ -859,6 +859,7 @@ export class AgentSession {
 			this._lspManager?.dispose();
 			this._unsubscribeMcpManager?.();
 			this._unsubscribeMcpManager = undefined;
+			void this._subagentToolManager?.dispose?.().catch(() => undefined);
 			void this._mcpManager?.dispose();
 		} catch {
 			// Dispose must succeed even if an abort hook throws.

@@ -20,9 +20,11 @@ import { SessionManager } from "../src/core/session-manager.ts";
 import type { Settings } from "../src/core/settings-manager.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import {
+	DEFAULT_SUBAGENT_MAX_DEPTH,
 	type SubagentDefinition,
 	SubagentDefinitionConfigurationError,
 	SubagentDefinitionNotFoundError,
+	SubagentDelegationScope,
 	type SubagentEndEvent,
 	SubagentManager,
 	type SubagentRuntimeCreatedEvent,
@@ -92,6 +94,11 @@ function createDeferred(): { promise: Promise<void>; resolve(): void } {
 
 describe("SubagentManager", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
+	const createTestDelegationScope = (): SubagentDelegationScope => {
+		const scope = new SubagentDelegationScope();
+		cleanups.push(() => scope.dispose());
+		return scope;
+	};
 
 	afterEach(async () => {
 		while (cleanups.length > 0) {
@@ -163,6 +170,22 @@ describe("SubagentManager", () => {
 				sessionManager,
 				sessionStartEvent,
 				model: initialModel,
+				...(options.noTools === false
+					? {
+							subagentToolManager: {
+								getDefinition: (name: string) => {
+									const definition = options.resourceLoader
+										?.getSubagents()
+										.definitions.find((candidate) => candidate.name === name);
+									if (!definition) throw new Error(`Missing test subagent ${name}`);
+									return definition;
+								},
+								startByName: async () => {
+									throw new Error("Nested test subagent start is not implemented");
+								},
+							},
+						}
+					: {}),
 				...(options.noTools === false ? {} : { noTools: options.noTools ?? "all" }),
 			});
 			const originalDispose = result.session.dispose.bind(result.session);
@@ -271,6 +294,33 @@ describe("SubagentManager", () => {
 
 		await events[0]?.runtime.dispose();
 		expect(getDisposedSessionCount()).toBe(1);
+	});
+
+	it("waits for an in-flight child start before disposing the manager", async () => {
+		const runtimeCreated = createDeferred();
+		const finishRegistration = createDeferred();
+		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "scout" })]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			onRuntimeCreated: async () => {
+				runtimeCreated.resolve();
+				await finishRegistration.promise;
+			},
+		});
+		const starting = manager.startByName("scout");
+		await runtimeCreated.promise;
+
+		let disposalFinished = false;
+		const disposal = manager.dispose().then(() => {
+			disposalFinished = true;
+		});
+		await Promise.resolve();
+		expect(disposalFinished).toBe(false);
+
+		finishRegistration.resolve();
+		const handle = await starting;
+		await disposal;
+		await expect(handle.getState()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
 	});
 
 	it("prompts the child and waits for terminal agent_end", async () => {
@@ -762,18 +812,129 @@ describe("SubagentManager", () => {
 		});
 
 		const handle = await manager.startByName("researcher");
+		const delegationScope = observedContexts[0]?.delegationScope;
+		expect(delegationScope).toBeInstanceOf(SubagentDelegationScope);
 
 		expect(observedContexts).toEqual([
 			{
 				depth: 1,
 				agentName: "researcher",
 				path: ["researcher"],
+				delegationScope,
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 3,
 				maxChildAgents: 2,
 			},
 		]);
 		await handle.dispose();
+	});
+
+	it("defaults custom definitions to a non-delegating child policy", async () => {
+		const observedContexts: Array<SubagentRuntimeContext | undefined> = [];
+		let observedTools: string[] = [];
+		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "custom" })]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			noTools: false,
+			onCreateRuntime: (context) => observedContexts.push(context),
+			onRuntimeCreated: (event) => {
+				observedTools = event.runtime.session.getActiveToolNames();
+			},
+		});
+
+		const handle = await manager.startByName("custom");
+
+		expect(observedContexts[0]?.allowedSubagents).toEqual([]);
+		expect(observedTools).not.toContain("subagent");
+		await handle.dispose();
+	});
+
+	it("keeps the subagent tool for definitions with an explicit child allowlist", async () => {
+		let observedTools: string[] = [];
+		const resourceLoader = createSubagentResourceLoader([
+			createDefinition({ name: "coordinator", allowedSubagents: ["researcher"] }),
+			createDefinition({ name: "researcher" }),
+		]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			noTools: false,
+			onRuntimeCreated: (event) => {
+				observedTools = event.runtime.session.getActiveToolNames();
+			},
+		});
+
+		const handle = await manager.startByName("coordinator");
+
+		expect(observedTools).toContain("subagent");
+		await handle.dispose();
+	});
+
+	it("shares concurrency limits across every child using one root delegation scope", async () => {
+		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "worker" })]);
+		const { manager } = await createTestManager({ resourceLoader });
+		const scope = new SubagentDelegationScope({
+			limits: { maxActiveDescendants: 2, maxTotalStarts: 4 },
+		});
+		cleanups.push(() => scope.dispose());
+
+		const first = await manager.startByName("worker", { delegationScope: scope });
+		const second = await manager.startByName("worker", { delegationScope: scope });
+		await expect(manager.startByName("worker", { delegationScope: scope })).rejects.toThrow(
+			"tree concurrency limit 2",
+		);
+		expect(scope.snapshot()).toMatchObject({ startsUsed: 2, activeDescendants: 2 });
+
+		await first.dispose();
+		const third = await manager.startByName("worker", { delegationScope: scope });
+		expect(scope.snapshot()).toMatchObject({ startsUsed: 3, activeDescendants: 2 });
+		await Promise.all([second.dispose(), third.dispose()]);
+	});
+
+	it("keeps the total tree-start budget consumed after children finish", async () => {
+		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "worker" })]);
+		const { manager } = await createTestManager({ resourceLoader });
+		const scope = new SubagentDelegationScope({ limits: { maxTotalStarts: 2 } });
+		cleanups.push(() => scope.dispose());
+
+		const first = await manager.startByName("worker", { delegationScope: scope });
+		await first.dispose();
+		const second = await manager.startByName("worker", { delegationScope: scope });
+		await second.dispose();
+
+		await expect(manager.startByName("worker", { delegationScope: scope })).rejects.toThrow("tree start limit 2");
+		expect(scope.snapshot()).toMatchObject({ startsUsed: 2, activeDescendants: 0 });
+	});
+
+	it("enforces a non-overridable tree depth ceiling", () => {
+		const scope = new SubagentDelegationScope({ limits: { maxDepth: 2 } });
+		cleanups.push(() => scope.dispose());
+		const attemptedOverride = new SubagentDelegationScope({ limits: { maxDepth: 999 } });
+		cleanups.push(() => attemptedOverride.dispose());
+
+		expect(() => scope.reserve("researcher", 3)).toThrow("tree max depth 2");
+		expect(scope.snapshot()).toMatchObject({ startsUsed: 0, activeDescendants: 0 });
+		expect(attemptedOverride.snapshot().limits.maxDepth).toBe(DEFAULT_SUBAGENT_MAX_DEPTH);
+	});
+
+	it("aborts the shared tree when turn, token, or cost budgets are exhausted", () => {
+		const turnScope = new SubagentDelegationScope({ limits: { maxTotalTurns: 1 } });
+		const tokenScope = new SubagentDelegationScope({ limits: { maxTotalTokens: 10 } });
+		const costScope = new SubagentDelegationScope({ limits: { maxCostUsd: 0.5 } });
+		cleanups.push(() => turnScope.dispose());
+		cleanups.push(() => tokenScope.dispose());
+		cleanups.push(() => costScope.dispose());
+
+		turnScope.recordTurn();
+		tokenScope.recordUsage(10, 0);
+		costScope.recordUsage(0, 0.5);
+
+		expect(turnScope.signal.reason).toMatchObject({ message: "Subagent delegation exceeded the tree turn limit 1" });
+		expect(tokenScope.signal.reason).toMatchObject({
+			message: "Subagent delegation exceeded the tree token limit 10",
+		});
+		expect(costScope.signal.reason).toMatchObject({
+			message: "Subagent delegation exceeded the tree cost limit $0.5",
+		});
 	});
 
 	it("passes nested delegation paths to child runtime context", async () => {
@@ -792,6 +953,7 @@ describe("SubagentManager", () => {
 				depth: 1,
 				agentName: "design-doc",
 				path: ["design-doc"],
+				delegationScope: createTestDelegationScope(),
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 3,
 				maxChildAgents: 8,
@@ -802,12 +964,14 @@ describe("SubagentManager", () => {
 		});
 
 		const handle = await manager.startByName("researcher");
+		const delegationScope = observedContexts[0]?.delegationScope;
 
 		expect(observedContexts).toEqual([
 			{
 				depth: 2,
 				agentName: "researcher",
 				path: ["design-doc", "researcher"],
+				delegationScope,
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 3,
 				maxChildAgents: 2,
@@ -837,6 +1001,7 @@ describe("SubagentManager", () => {
 				depth: 1,
 				agentName: "design-doc",
 				path: ["design-doc"],
+				delegationScope: createTestDelegationScope(),
 				allowedSubagents: ["researcher", "analyst"],
 				maxSubagentDepth: 2,
 				maxChildAgents: 8,
@@ -848,12 +1013,15 @@ describe("SubagentManager", () => {
 
 		const researcher = await manager.startByName("researcher");
 		const analyst = await manager.startByName("analyst");
+		const delegationScope = observedContexts[0]?.delegationScope;
+		expect(observedContexts[1]?.delegationScope).toBe(delegationScope);
 
 		expect(observedContexts).toEqual([
 			{
 				depth: 2,
 				agentName: "researcher",
 				path: ["design-doc", "researcher"],
+				delegationScope,
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 2,
 				maxChildAgents: 2,
@@ -862,6 +1030,7 @@ describe("SubagentManager", () => {
 				depth: 2,
 				agentName: "analyst",
 				path: ["design-doc", "analyst"],
+				delegationScope,
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 2,
 				maxChildAgents: 2,
@@ -882,6 +1051,7 @@ describe("SubagentManager", () => {
 				depth: 1,
 				agentName: "security-reviewer",
 				path: ["security-reviewer"],
+				delegationScope: createTestDelegationScope(),
 				allowedSubagents: ["approved-child"],
 				maxSubagentDepth: 3,
 				maxChildAgents: 2,
@@ -899,6 +1069,7 @@ describe("SubagentManager", () => {
 				depth: 1,
 				agentName: "researcher",
 				path: ["researcher"],
+				delegationScope: createTestDelegationScope(),
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 3,
 				maxChildAgents: 2,
@@ -916,6 +1087,7 @@ describe("SubagentManager", () => {
 				depth: 1,
 				agentName: "general",
 				path: ["general"],
+				delegationScope: createTestDelegationScope(),
 				allowedSubagents: [],
 				maxChildAgents: 0,
 			},
@@ -932,6 +1104,7 @@ describe("SubagentManager", () => {
 				depth: 2,
 				agentName: "researcher",
 				path: ["design-doc", "researcher"],
+				delegationScope: createTestDelegationScope(),
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 2,
 				maxChildAgents: 2,
@@ -949,6 +1122,7 @@ describe("SubagentManager", () => {
 				depth: 1,
 				agentName: "researcher",
 				path: ["researcher"],
+				delegationScope: createTestDelegationScope(),
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 3,
 				maxChildAgents: 1,

@@ -255,7 +255,7 @@ const { session } = await createAgentSession({
 });
 ```
 
-The built-in tool supports single `{ agent: string, task: string }`, parallel `{ tasks: Array<{ agent: string, task: string }> }`, and chain `{ chain: Array<{ agent: string, task: string }> }` calls. Parallel mode is capped at 8 tasks with max concurrency 4, keeps result ordering stable, and returns mixed-status details for partial failures. Chain mode runs sequentially, replaces `{previous}` with the prior successful step output, returns the final successful step output on full success, and stops at the first failed step. It caps model-visible child output at 50 KB per task/step and stores subagent ID, session ID, source, status, usage, truncation, and error metadata in tool details.
+The built-in tool supports single `{ agent: string, task: string }`, parallel `{ tasks: Array<{ agent: string, task: string }> }`, and chain `{ chain: Array<{ agent: string, task: string }> }` calls. Parallel mode is capped at 8 tasks with max concurrency 4, keeps result ordering stable, and returns mixed-status details for partial failures. Chain mode runs sequentially, replaces `{previous}` with the prior successful step output, returns the final successful step output on full success, and stops at the first failed step. Recursive delegation is fail-closed unless `allowedSubagents` is explicit, and every descendant shares the root scope's hard depth, start, concurrency, turn, token, cost, deadline, and cancellation limits. Model-visible output is capped at 50 KB per task/step and 100 KB in aggregate for parallel mode; tool details also store the final tree-budget snapshot.
 
 ### Prompting and Message Queueing
 

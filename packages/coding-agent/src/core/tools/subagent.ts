@@ -10,16 +10,22 @@ import type {
 	SubagentActivityListener,
 	SubagentDefinition,
 	SubagentDefinitionSource,
+	SubagentDelegationLimits,
+	SubagentDelegationScopeLease,
+	SubagentDelegationScopeOptions,
+	SubagentDelegationScopeSnapshot,
 	SubagentEvent,
 	SubagentHandle,
 	SubagentResult,
 	SubagentStartByNameOptions,
 } from "../subagents/index.ts";
+import { DEFAULT_SUBAGENT_RUN_TIMEOUT_MS } from "../subagents/index.ts";
 import { getMarkdownTheme, type Theme } from "../theme/runtime.ts";
 import { formatDuration } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 export const DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES = 50 * 1024;
+export const DEFAULT_SUBAGENT_AGGREGATE_OUTPUT_MAX_BYTES = 100 * 1024;
 export const DEFAULT_SUBAGENT_PARALLEL_MAX_TASKS = 8;
 export const DEFAULT_SUBAGENT_PARALLEL_MAX_CONCURRENCY = 4;
 export const DEFAULT_SUBAGENT_CHAIN_MAX_STEPS = 8;
@@ -136,6 +142,10 @@ export interface SubagentToolDetails {
 	output?: SubagentToolOutputDetails;
 	/** Present for single mode for backward-compatible consumers. */
 	error?: SubagentToolErrorDetails;
+	/** Total model-visible result after combining parallel child outputs. */
+	aggregateOutput?: SubagentToolOutputDetails;
+	/** Root-scoped recursive delegation budget and final consumption. */
+	delegation?: SubagentDelegationScopeSnapshot;
 	/** Epoch ms when execution started (single: task start; parallel/chain: overall start). */
 	startedAt?: number;
 	/** Overall duration in ms once execution reaches a terminal status. */
@@ -159,6 +169,8 @@ export interface SubagentToolDetails {
 export interface SubagentToolManager {
 	getDefinition(agentName: string): SubagentDefinition;
 	startByName(agentName: string, options?: SubagentStartByNameOptions): Promise<SubagentHandle>;
+	createDelegationScope?(options?: SubagentDelegationScopeOptions): SubagentDelegationScopeLease;
+	dispose?(): Promise<void>;
 	/** Optional live activity feed used by interactive hosts. */
 	listActivities?(): readonly SubagentActivity[];
 	subscribeActivities?(listener: SubagentActivityListener): () => void;
@@ -169,6 +181,10 @@ export interface SubagentToolOptions {
 	/** Return the parent/session tool policy to clamp child tools at execution time. */
 	getAllowedTools?: () => string[] | undefined;
 	maxOutputBytes?: number;
+	maxAggregateOutputBytes?: number;
+	/** Optional lower tree limits; hard process ceilings still apply. */
+	delegationLimits?: Partial<SubagentDelegationLimits>;
+	runTimeoutMs?: number;
 }
 
 interface NormalizedSubagentTaskInput {
@@ -265,20 +281,45 @@ function getErrorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+function requirePositiveInteger(value: number, field: string): number {
+	if (!Number.isInteger(value) || value <= 0) {
+		throw new Error(`${field} must be a positive integer`);
+	}
+	return value;
+}
+
+function sliceToUtf8ByteLength(text: string, maxBytes: number): string {
+	let low = 0;
+	let high = text.length;
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2);
+		if (Buffer.byteLength(text.slice(0, middle), "utf8") <= maxBytes) {
+			low = middle;
+		} else {
+			high = middle - 1;
+		}
+	}
+	return text.slice(0, low);
+}
+
 function truncateModelVisibleOutput(text: string, maxBytes: number): TruncatedText {
 	const originalBytes = Buffer.byteLength(text, "utf8");
 	if (originalBytes <= maxBytes) {
 		return { text, bytes: originalBytes, truncated: false };
 	}
 
-	let truncated = text.slice(0, maxBytes);
-	while (Buffer.byteLength(truncated, "utf8") > maxBytes) {
-		truncated = truncated.slice(0, -1);
-	}
+	const longestMarker = `\n\n[Subagent output truncated: ${originalBytes} bytes omitted.]`;
+	const markerBytes = Buffer.byteLength(longestMarker, "utf8");
+	const truncated = sliceToUtf8ByteLength(text, Math.max(0, maxBytes - markerBytes));
 	const truncatedBytes = Buffer.byteLength(truncated, "utf8");
 	const omittedBytes = originalBytes - truncatedBytes;
+	const marker = `\n\n[Subagent output truncated: ${omittedBytes} bytes omitted.]`;
+	const visibleText =
+		markerBytes <= maxBytes
+			? `${truncated}${marker}`
+			: sliceToUtf8ByteLength("[Subagent output truncated:]", maxBytes);
 	return {
-		text: `${truncated}\n\n[Subagent output truncated: ${omittedBytes} bytes omitted.]`,
+		text: visibleText,
 		bytes: originalBytes,
 		truncated: true,
 		omittedBytes,
@@ -719,6 +760,19 @@ function formatUsageSummary(usage: SubagentToolUsageDetails | undefined): string
 	return parts.join(" ");
 }
 
+function formatDelegationSummary(snapshot: SubagentDelegationScopeSnapshot | undefined): string {
+	if (!snapshot) return "";
+	const parts = [
+		`${snapshot.startsUsed} start${snapshot.startsUsed === 1 ? "" : "s"}`,
+		`peak ${snapshot.peakActiveDescendants}`,
+		`depth ${snapshot.maxDepthReached}`,
+		`${snapshot.turnsUsed} turn${snapshot.turnsUsed === 1 ? "" : "s"}`,
+	];
+	if (snapshot.tokensUsed > 0) parts.push(`${formatTokens(snapshot.tokensUsed)} tokens`);
+	if (snapshot.costUsd > 0) parts.push(`$${snapshot.costUsd.toFixed(4)}`);
+	return parts.join(" · ");
+}
+
 function aggregateUsage(items: readonly SubagentToolTaskDetails[]): SubagentToolUsageDetails | undefined {
 	const withUsage = items.filter((item) => item.usage);
 	if (withUsage.length === 0) {
@@ -959,6 +1013,8 @@ function renderSubagentResult(
 				0,
 			),
 		);
+		const delegation = formatDelegationSummary(details.delegation);
+		if (delegation) container.addChild(new Text(theme.fg("dim", `Tree: ${delegation}`), 0, 0));
 		const taskPreview = truncatePreview(input?.task, 100);
 		if (taskPreview !== "...") {
 			container.addChild(new Text(theme.fg("dim", taskPreview), 0, 0));
@@ -985,6 +1041,8 @@ function renderSubagentResult(
 			0,
 		),
 	);
+	const delegation = formatDelegationSummary(details.delegation);
+	if (delegation) container.addChild(new Text(theme.fg("dim", `Tree: ${delegation}`), 0, 0));
 	const totalUsage = formatUsageSummary(aggregateUsage(items));
 	if (totalUsage) {
 		container.addChild(new Text(theme.fg("dim", `Total: ${totalUsage}`), 0, 0));
@@ -1012,7 +1070,24 @@ export function createSubagentToolDefinition(
 	_options: SubagentToolOptions,
 ): ToolDefinition<typeof subagentSchema, SubagentToolDetails, SubagentRenderState> {
 	const options = _options;
-	const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES;
+	const maxOutputBytes = Math.min(
+		requirePositiveInteger(options.maxOutputBytes ?? DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES, "maxOutputBytes"),
+		DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES,
+	);
+	const maxAggregateOutputBytes = Math.min(
+		requirePositiveInteger(
+			options.maxAggregateOutputBytes ?? DEFAULT_SUBAGENT_AGGREGATE_OUTPUT_MAX_BYTES,
+			"maxAggregateOutputBytes",
+		),
+		DEFAULT_SUBAGENT_AGGREGATE_OUTPUT_MAX_BYTES,
+	);
+	const runTimeoutMs = Math.min(
+		requirePositiveInteger(
+			options.runTimeoutMs ?? options.delegationLimits?.timeoutMs ?? DEFAULT_SUBAGENT_RUN_TIMEOUT_MS,
+			"runTimeoutMs",
+		),
+		DEFAULT_SUBAGENT_RUN_TIMEOUT_MS,
+	);
 	return {
 		name: "subagent",
 		label: "subagent",
@@ -1029,6 +1104,7 @@ export function createSubagentToolDefinition(
 		promptGuidelines: [
 			"Use subagent when a named specialized agent should handle focused work in an isolated context.",
 			"Prefer specialized built-ins when they fit: researcher for evidence, design-doc for planning/RFCs, security-reviewer for security review, and general for ad hoc delegation.",
+			"Scale delegation to task complexity, avoid duplicate assignments, and stop spawning once existing evidence is sufficient.",
 			"Use parallel mode only for independent tasks whose outputs can be combined after all children finish.",
 			"Use chain mode only when each step depends on the prior successful output via {previous}.",
 		],
@@ -1046,6 +1122,10 @@ export function createSubagentToolDefinition(
 
 			const normalized = normalizeSubagentToolInput(params);
 			const executionStartedAt = Date.now();
+			const delegationLease = options.manager.createDelegationScope?.({
+				signal,
+				limits: { ...options.delegationLimits, timeoutMs: runTimeoutMs },
+			});
 			const activeHandles = new Set<SubagentHandle>();
 			const disposedHandles = new Set<SubagentHandle>();
 			let acceptingUpdates = true;
@@ -1053,12 +1133,14 @@ export function createSubagentToolDefinition(
 			const abortPromise = new Promise<never>((_resolve, reject) => {
 				abortReject = reject;
 			});
+			const withDelegation = (details: SubagentToolDetails): SubagentToolDetails =>
+				delegationLease ? { ...details, delegation: delegationLease.scope.snapshot() } : details;
 
 			const emitToolUpdate = (details: SubagentToolDetails, text: string): void => {
 				if (!onUpdate || !acceptingUpdates || signal?.aborted) {
 					return;
 				}
-				onUpdate({ content: [{ type: "text", text }], details });
+				onUpdate({ content: [{ type: "text", text }], details: withDelegation(details) });
 			};
 			const emitProgressUpdate = (details: SubagentToolDetails, message: string | undefined): void => {
 				emitToolUpdate(details, formatProgressContent(details, message));
@@ -1080,14 +1162,25 @@ export function createSubagentToolDefinition(
 			const abortActiveHandles = async (): Promise<void> => {
 				await Promise.all(Array.from(activeHandles, (handle) => abortHandle(handle)));
 			};
-			const onAbort = () => {
+			const requestAbort = (error: Error): void => {
 				// Parent cancellation wins immediately; child transport cleanup is
 				// best-effort and must not delay or hang the parent tool call.
-				abortReject(new Error("Operation aborted"));
+				abortReject(error);
 				void abortActiveHandles();
 			};
+			const onAbort = () => requestAbort(new Error("Operation aborted"));
+			const onScopeAbort = () => {
+				const reason = delegationLease?.scope.signal.reason;
+				requestAbort(reason instanceof Error ? reason : new Error(String(reason ?? "Subagent delegation aborted")));
+			};
+			const timeout = setTimeout(() => {
+				requestAbort(new Error(`Subagent run timed out after ${runTimeoutMs}ms`));
+			}, runTimeoutMs);
+			timeout.unref?.();
 
 			signal?.addEventListener("abort", onAbort, { once: true });
+			delegationLease?.scope.signal.addEventListener("abort", onScopeAbort, { once: true });
+			if (delegationLease?.scope.signal.aborted) onScopeAbort();
 			try {
 				const runTask = async (
 					task: NormalizedSubagentTaskInput,
@@ -1105,6 +1198,7 @@ export function createSubagentToolDefinition(
 						definition = options.manager.getDefinition(task.agent);
 						const startPromise = options.manager.startByName(task.agent, {
 							allowedTools: options.getAllowedTools?.(),
+							...(delegationLease ? { delegationScope: delegationLease.scope } : {}),
 						});
 						void startPromise
 							.then((startedHandle) => {
@@ -1206,7 +1300,7 @@ export function createSubagentToolDefinition(
 					});
 					const finalResult: AgentToolResult<SubagentToolDetails> = {
 						content: [{ type: "text", text: result.outputText }],
-						details: createSingleDetails(result.details),
+						details: withDelegation(createSingleDetails(result.details)),
 					};
 					emitFinalUpdate(finalResult);
 					return finalResult;
@@ -1235,10 +1329,12 @@ export function createSubagentToolDefinition(
 						if (result.details.status !== "completed") {
 							const finalResult: AgentToolResult<SubagentToolDetails> = {
 								content: [{ type: "text", text: formatChainFailureSummary(results) }],
-								details: createChainDetails(results, {
-									startedAt: executionStartedAt,
-									durationMs: Date.now() - executionStartedAt,
-								}),
+								details: withDelegation(
+									createChainDetails(results, {
+										startedAt: executionStartedAt,
+										durationMs: Date.now() - executionStartedAt,
+									}),
+								),
 							};
 							emitFinalUpdate(finalResult);
 							return finalResult;
@@ -1247,10 +1343,12 @@ export function createSubagentToolDefinition(
 					}
 					const finalResult: AgentToolResult<SubagentToolDetails> = {
 						content: [{ type: "text", text: results.at(-1)?.outputText ?? "(no output)" }],
-						details: createChainDetails(results, {
-							startedAt: executionStartedAt,
-							durationMs: Date.now() - executionStartedAt,
-						}),
+						details: withDelegation(
+							createChainDetails(results, {
+								startedAt: executionStartedAt,
+								durationMs: Date.now() - executionStartedAt,
+							}),
+						),
 					};
 					emitFinalUpdate(finalResult);
 					return finalResult;
@@ -1285,9 +1383,14 @@ export function createSubagentToolDefinition(
 					startedAt: executionStartedAt,
 					durationMs: Date.now() - executionStartedAt,
 				});
+				const aggregateOutput = truncateModelVisibleOutput(
+					formatParallelSummary(results, details),
+					maxAggregateOutputBytes,
+				);
+				details.aggregateOutput = createOutputDetails(aggregateOutput, maxAggregateOutputBytes);
 				const finalResult: AgentToolResult<SubagentToolDetails> = {
-					content: [{ type: "text", text: formatParallelSummary(results, details) }],
-					details,
+					content: [{ type: "text", text: aggregateOutput.text }],
+					details: withDelegation(details),
 				};
 				emitFinalUpdate(finalResult);
 				return finalResult;
@@ -1299,12 +1402,18 @@ export function createSubagentToolDefinition(
 				throw error;
 			} finally {
 				acceptingUpdates = false;
+				clearTimeout(timeout);
 				signal?.removeEventListener("abort", onAbort);
+				delegationLease?.scope.signal.removeEventListener("abort", onScopeAbort);
 				const cleanup = Promise.all(Array.from(activeHandles, (handle) => disposeHandle(handle)));
-				if (signal?.aborted) {
-					void cleanup;
-				} else {
-					await Promise.race([cleanup, abortPromise]);
+				try {
+					if (signal?.aborted || delegationLease?.scope.signal.aborted) {
+						void cleanup;
+					} else {
+						await Promise.race([cleanup, abortPromise]);
+					}
+				} finally {
+					if (delegationLease?.owned) delegationLease.scope.dispose();
 				}
 			}
 		},

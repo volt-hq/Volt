@@ -75,6 +75,7 @@ describe("subagent definitions", () => {
 			filePath,
 		});
 		expect(result.definition?.sourceInfo.scope).toBe("user");
+		expect(result.definition?.allowedSubagents).toEqual([]);
 	});
 
 	it("rejects malformed tool lists instead of inheriting broader tools", () => {
@@ -208,6 +209,7 @@ describe("subagent definitions", () => {
 		expect(researcher?.tools).not.toContain("bash");
 		expect(researcher?.tools).not.toContain("lsp");
 		expect(designDoc).toMatchObject({
+			description: "Design document planner and synthesizer that delegates independent research when warranted",
 			allowedSubagents: ["researcher", "security-reviewer", "general"],
 			maxSubagentDepth: 3,
 			maxChildAgents: 8,
