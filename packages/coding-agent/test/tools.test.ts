@@ -981,6 +981,84 @@ describe("edit tool fuzzy matching", () => {
 		).rejects.toThrow(/Found 2 occurrences/);
 	});
 
+	it("should apply a unique exact match even when fuzzy normalization creates duplicates", async () => {
+		const testFile = join(testDir, "exact-unique-fuzzy-dup.txt");
+		// First block has a trailing space after "foo();", second block matches oldText
+		// byte-for-byte. The exact match is unique and must win; fuzzy normalization
+		// would see two identical occurrences.
+		writeFileSync(testFile, "\tfoo(); \n\tbaz();\n\tother();\n\tfoo();\n\tbaz();\n");
+
+		const result = await editTool.execute("test-exact-unique-1", {
+			path: testFile,
+			edits: [{ oldText: "\tfoo();\n\tbaz();", newText: "\tqux();" }],
+		});
+
+		expect(getTextOutput(result)).toContain("Successfully replaced");
+		expect(readFileSync(testFile, "utf-8")).toBe("\tfoo(); \n\tbaz();\n\tother();\n\tqux();\n");
+	});
+
+	it("should report occurrence line numbers in duplicate errors", async () => {
+		const testFile = join(testDir, "dup-line-numbers.txt");
+		writeFileSync(testFile, "alpha\ntarget\nbeta\ntarget\ngamma\n");
+
+		await expect(
+			editTool.execute("test-dup-lines-1", {
+				path: testFile,
+				edits: [{ oldText: "target\n", newText: "replaced\n" }],
+			}),
+		).rejects.toThrow(/Found 2 occurrences of the text in .* \(lines 2, 4\)/);
+	});
+
+	it("should include a closest-match snippet in not-found errors", async () => {
+		const testFile = join(testDir, "closest-match.txt");
+		writeFileSync(testFile, 'function greet(name) {\n\tconsole.log("hi " + name);\n\treturn name;\n}\n');
+
+		// Model misremembers the middle line, but the block is clearly recognizable.
+		const promise = editTool.execute("test-closest-1", {
+			path: testFile,
+			edits: [
+				{
+					oldText: 'function greet(name) {\n\tconsole.log("hello " + name);\n\treturn name;\n}',
+					newText: "function greet(name) {\n\treturn name;\n}",
+				},
+			],
+		});
+
+		await expect(promise).rejects.toThrow(/Could not find the exact text/);
+		await expect(promise).rejects.toThrow(/closest match in the file starts at line 1/);
+		await expect(promise).rejects.toThrow(/console\.log\("hi " \+ name\);/);
+		await expect(promise).rejects.toThrow(/re-read it/);
+	});
+
+	it("should omit the closest-match snippet when nothing is similar", async () => {
+		const testFile = join(testDir, "no-closest-match.txt");
+		writeFileSync(testFile, "completely different content\n");
+
+		const promise = editTool.execute("test-closest-2", {
+			path: testFile,
+			edits: [{ oldText: "zzz qqq xxx", newText: "replacement" }],
+		});
+
+		await expect(promise).rejects.toThrow(/Could not find the exact text/);
+		await expect(promise).rejects.not.toThrow(/closest match/);
+		await expect(promise).rejects.toThrow(/re-read it/);
+	});
+
+	it("should reference the failing edit index in multi-edit not-found errors", async () => {
+		const testFile = join(testDir, "multi-not-found.txt");
+		writeFileSync(testFile, "alpha\nbeta\ngamma\n");
+
+		await expect(
+			editTool.execute("test-multi-nf-1", {
+				path: testFile,
+				edits: [
+					{ oldText: "alpha\n", newText: "ALPHA\n" },
+					{ oldText: "missing\n", newText: "MISSING\n" },
+				],
+			}),
+		).rejects.toThrow(/Could not find edits\[1\]/);
+	});
+
 	it("should support fuzzy matching in multi-edit mode", async () => {
 		const testFile = join(testDir, "fuzzy-multi.txt");
 		writeFileSync(testFile, "console.log(\u2018hello\u2019);\nhello\u00A0world\n");

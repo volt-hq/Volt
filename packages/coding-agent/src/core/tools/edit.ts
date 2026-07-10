@@ -96,6 +96,15 @@ export interface EditToolOptions {
 	diagnosticsProvider?: ToolDiagnosticsProvider;
 }
 
+function isEditLikeItem(item: unknown): item is Edit {
+	return (
+		typeof item === "object" &&
+		item !== null &&
+		typeof (item as Edit).oldText === "string" &&
+		typeof (item as Edit).newText === "string"
+	);
+}
+
 function prepareEditArguments(input: unknown): EditToolInput {
 	if (!input || typeof input !== "object") {
 		return input as EditToolInput;
@@ -109,6 +118,18 @@ function prepareEditArguments(input: unknown): EditToolInput {
 			const parsed = JSON.parse(args.edits);
 			if (Array.isArray(parsed)) args.edits = parsed;
 		} catch {}
+	}
+
+	// Some models emit junk extra keys in edit items (e.g. newText2, endOfEditText)
+	// when generating long JSON tool calls. Strip unknown keys from items that have
+	// valid oldText/newText so the whole call is not rejected by schema validation.
+	if (Array.isArray(args.edits)) {
+		const hasJunkKeys = args.edits.some((item) => isEditLikeItem(item) && Object.keys(item).length > 2);
+		if (hasJunkKeys) {
+			args.edits = args.edits.map((item) =>
+				isEditLikeItem(item) ? { oldText: item.oldText, newText: item.newText } : item,
+			);
+		}
 	}
 
 	const legacy = args as LegacyEditToolInput;

@@ -89,6 +89,57 @@ describe("edit tool prepareArguments", () => {
 	});
 });
 
+describe("edit tool junk keys in edits", () => {
+	it("strips unknown extra keys from edit items with valid oldText/newText", () => {
+		const definition = createEditToolDefinition(process.cwd());
+		const prepared = definition.prepareArguments!({
+			path: "file.txt",
+			edits: [
+				{ oldText: "a", newText: "b", newText2: "junk" },
+				{ oldText: "c", newText: "d", endOfEditText: true, "\n": "noise" },
+			],
+		}) as { path: string; edits: unknown[] };
+		expect(prepared.edits).toEqual([
+			{ oldText: "a", newText: "b" },
+			{ oldText: "c", newText: "d" },
+		]);
+	});
+
+	it("strips junk keys from stringified edits too", () => {
+		const definition = createEditToolDefinition(process.cwd());
+		const prepared = definition.prepareArguments!({
+			path: "file.txt",
+			edits: JSON.stringify([{ oldText: "a", newText: "b", newText_dup_guard: "junk" }]),
+		});
+		expect(prepared).toEqual({
+			path: "file.txt",
+			edits: [{ oldText: "a", newText: "b" }],
+		});
+	});
+
+	it("leaves items without valid oldText/newText untouched so validation still reports them", () => {
+		const definition = createEditToolDefinition(process.cwd());
+		const prepared = definition.prepareArguments!({
+			path: "file.txt",
+			edits: [
+				{ oldText: "a", newText: "b", junk: 1 },
+				{ oldText: "c", extraKey: "junk" },
+			],
+		}) as { edits: unknown[] };
+		expect(prepared.edits).toEqual([
+			{ oldText: "a", newText: "b" },
+			{ oldText: "c", extraKey: "junk" },
+		]);
+	});
+
+	it("does not rebuild edits when no junk keys are present", () => {
+		const definition = createEditToolDefinition(process.cwd());
+		const edits = [{ oldText: "a", newText: "b" }];
+		const prepared = definition.prepareArguments!({ path: "file.txt", edits }) as { edits: unknown };
+		expect(prepared.edits).toBe(edits);
+	});
+});
+
 describe("edit tool stringified edits", () => {
 	it("parses edits from a JSON string", () => {
 		const definition = createEditToolDefinition(process.cwd());

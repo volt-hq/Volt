@@ -148,19 +148,6 @@ export function normalizeForFuzzyMatch(text: string): string {
 	return normalizeForFuzzyMatchWithMap(text).text;
 }
 
-export interface FuzzyMatchResult {
-	/** Whether a match was found */
-	found: boolean;
-	/** The index where the match starts in the original content */
-	index: number;
-	/** Length of the matched text in the original content */
-	matchLength: number;
-	/** Whether fuzzy matching was used (false = exact match) */
-	usedFuzzyMatch: boolean;
-	/** Original content retained for compatibility with existing callers. */
-	contentForReplacement: string;
-}
-
 export interface Edit {
 	oldText: string;
 	newText: string;
@@ -178,101 +165,178 @@ export interface AppliedEditsResult {
 	newContent: string;
 }
 
-/**
- * Find oldText in content, trying exact match first, then fuzzy match.
- * Fuzzy matches are found in normalized text, but the returned replacement
- * range points back into the original content so unrelated text is preserved.
- */
-export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResult {
-	// Try exact match first
-	const exactIndex = content.indexOf(oldText);
-	if (exactIndex !== -1) {
-		return {
-			found: true,
-			index: exactIndex,
-			matchLength: oldText.length,
-			usedFuzzyMatch: false,
-			contentForReplacement: content,
-		};
-	}
-
-	const fuzzyContent = normalizeForFuzzyMatchWithMap(content);
-	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
-	if (fuzzyOldText.length === 0) {
-		return {
-			found: false,
-			index: -1,
-			matchLength: 0,
-			usedFuzzyMatch: false,
-			contentForReplacement: content,
-		};
-	}
-	const fuzzyIndex = fuzzyContent.text.indexOf(fuzzyOldText);
-
-	if (fuzzyIndex === -1) {
-		return {
-			found: false,
-			index: -1,
-			matchLength: 0,
-			usedFuzzyMatch: false,
-			contentForReplacement: content,
-		};
-	}
-
-	const start = fuzzyContent.ranges[fuzzyIndex];
-	const end = fuzzyContent.ranges[fuzzyIndex + fuzzyOldText.length - 1];
-	if (!start || !end) {
-		return {
-			found: false,
-			index: -1,
-			matchLength: 0,
-			usedFuzzyMatch: false,
-			contentForReplacement: content,
-		};
-	}
-
-	return {
-		found: true,
-		index: start.start,
-		matchLength: end.end - start.start,
-		usedFuzzyMatch: true,
-		contentForReplacement: content,
-	};
-}
-
 /** Strip UTF-8 BOM if present, return both the BOM (if any) and the text without it */
 export function stripBom(content: string): { bom: string; text: string } {
 	return content.startsWith("\uFEFF") ? { bom: "\uFEFF", text: content.slice(1) } : { bom: "", text: content };
 }
 
-function countOccurrences(content: string, oldText: string): number {
-	const fuzzyContent = normalizeForFuzzyMatch(content);
-	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
-	if (fuzzyOldText.length === 0) {
-		return 0;
+/** Find all non-overlapping occurrences of needle in haystack. */
+function findOccurrences(haystack: string, needle: string): number[] {
+	const indices: number[] = [];
+	let index = haystack.indexOf(needle);
+	while (index !== -1) {
+		indices.push(index);
+		index = haystack.indexOf(needle, index + needle.length);
 	}
-	return fuzzyContent.split(fuzzyOldText).length - 1;
+	return indices;
 }
 
-function getNotFoundError(path: string, editIndex: number, totalEdits: number): Error {
-	if (totalEdits === 1) {
-		return new Error(
-			`Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`,
-		);
+/** Convert character indices into 1-based line numbers. */
+function lineNumbersFor(content: string, indices: number[]): number[] {
+	const sorted = [...indices].sort((a, b) => a - b);
+	const lines: number[] = [];
+	let line = 1;
+	let pos = 0;
+	for (const index of sorted) {
+		for (; pos < index && pos < content.length; pos++) {
+			if (content.charCodeAt(pos) === 10) line++;
+		}
+		lines.push(line);
+	}
+	return lines;
+}
+
+function formatOccurrenceLines(lines: number[], max = 6): string {
+	const unique = [...new Set(lines)];
+	const shown = unique.slice(0, max).join(", ");
+	const suffix = unique.length > max ? ", …" : "";
+	const label = unique.length === 1 ? "line" : "lines";
+	return `${label} ${shown}${suffix}`;
+}
+
+const CLOSEST_MATCH_MIN_SCORE = 0.5;
+const CLOSEST_MATCH_MAX_TOKENS = 500_000;
+const CLOSEST_MATCH_MAX_SNIPPET_LINES = 20;
+
+/** Split text into whitespace-delimited tokens, recording each token's 1-based line. */
+function tokenizeWithLines(text: string): { tokens: string[]; lines: number[] } {
+	const tokens: string[] = [];
+	const lines: number[] = [];
+	let line = 1;
+	let current = "";
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+		if (ch === "\n" || ch === " " || ch === "\t" || ch === "\r") {
+			if (current) {
+				tokens.push(current);
+				lines.push(line);
+				current = "";
+			}
+			if (ch === "\n") line++;
+		} else {
+			current += ch;
+		}
+	}
+	if (current) {
+		tokens.push(current);
+		lines.push(line);
+	}
+	return { tokens, lines };
+}
+
+interface ClosestMatch {
+	startLine: number;
+	snippet: string;
+}
+
+/**
+ * Find the region of content that most closely resembles oldText, so a failed
+ * edit can report what the file actually contains. Uses a sliding token-bag
+ * window with Dice similarity, which tolerates re-indentation and line wrapping
+ * (e.g. a formatter splitting one line across several).
+ */
+export function findClosestMatch(content: string, oldText: string): ClosestMatch | undefined {
+	const target = tokenizeWithLines(normalizeForFuzzyMatch(oldText)).tokens;
+	if (target.length === 0) {
+		return undefined;
+	}
+	// Line numbers are stable across fuzzy normalization: it never adds or removes newlines.
+	const { tokens, lines } = tokenizeWithLines(normalizeForFuzzyMatch(content));
+	if (tokens.length === 0 || tokens.length > CLOSEST_MATCH_MAX_TOKENS) {
+		return undefined;
+	}
+
+	const targetCounts = new Map<string, number>();
+	for (const token of target) {
+		targetCounts.set(token, (targetCounts.get(token) ?? 0) + 1);
+	}
+
+	// Slide a fixed-size token window across the content, tracking the multiset
+	// overlap with the target incrementally so the scan is O(tokens).
+	const windowSize = Math.min(target.length, tokens.length);
+	const windowCounts = new Map<string, number>();
+	let overlap = 0;
+	const add = (token: string): void => {
+		const count = (windowCounts.get(token) ?? 0) + 1;
+		windowCounts.set(token, count);
+		if (count <= (targetCounts.get(token) ?? 0)) overlap++;
+	};
+	const remove = (token: string): void => {
+		const count = (windowCounts.get(token) ?? 0) - 1;
+		windowCounts.set(token, count);
+		if (count < (targetCounts.get(token) ?? 0)) overlap--;
+	};
+
+	for (let i = 0; i < windowSize; i++) {
+		add(tokens[i]);
+	}
+	let bestOverlap = overlap;
+	let bestStart = 0;
+	for (let start = 1; start + windowSize <= tokens.length; start++) {
+		remove(tokens[start - 1]);
+		add(tokens[start + windowSize - 1]);
+		if (overlap > bestOverlap) {
+			bestOverlap = overlap;
+			bestStart = start;
+		}
+	}
+
+	const score = (2 * bestOverlap) / (target.length + windowSize);
+	if (score < CLOSEST_MATCH_MIN_SCORE) {
+		return undefined;
+	}
+
+	// Include one line of context on each side so wrapped constructs are shown whole.
+	const contentLines = content.split("\n");
+	const startLine = Math.max(1, lines[bestStart] - 1);
+	const endLine = Math.min(
+		Math.min(lines[bestStart + windowSize - 1] + 1, contentLines.length),
+		startLine + CLOSEST_MATCH_MAX_SNIPPET_LINES - 1,
+	);
+	return { startLine, snippet: contentLines.slice(startLine - 1, endLine).join("\n") };
+}
+
+const RE_READ_HINT =
+	"If the file has changed since you last read it (e.g. it was reformatted), re-read it and base oldText on the current content.";
+
+function getNotFoundError(path: string, editIndex: number, totalEdits: number, closest?: ClosestMatch): Error {
+	const base =
+		totalEdits === 1
+			? `Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`
+			: `Could not find edits[${editIndex}] in ${path}. The oldText must match exactly including all whitespace and newlines.`;
+	if (!closest) {
+		return new Error(`${base} ${RE_READ_HINT}`);
 	}
 	return new Error(
-		`Could not find edits[${editIndex}] in ${path}. The oldText must match exactly including all whitespace and newlines.`,
+		`${base}\n\nThe closest match in the file starts at line ${closest.startLine} and differs from your oldText:\n${closest.snippet}\n\n${RE_READ_HINT}`,
 	);
 }
 
-function getDuplicateError(path: string, editIndex: number, totalEdits: number, occurrences: number): Error {
+function getDuplicateError(
+	path: string,
+	editIndex: number,
+	totalEdits: number,
+	occurrences: number,
+	lines: number[],
+): Error {
+	const location = lines.length > 0 ? ` (${formatOccurrenceLines(lines)})` : "";
 	if (totalEdits === 1) {
 		return new Error(
-			`Found ${occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context to make it unique.`,
+			`Found ${occurrences} occurrences of the text in ${path}${location}. The text must be unique. Add more surrounding lines to oldText to disambiguate which occurrence to replace.`,
 		);
 	}
 	return new Error(
-		`Found ${occurrences} occurrences of edits[${editIndex}] in ${path}. Each oldText must be unique. Please provide more context to make it unique.`,
+		`Found ${occurrences} occurrences of edits[${editIndex}] in ${path}${location}. Each oldText must be unique. Add more surrounding lines to oldText to disambiguate which occurrence to replace.`,
 	);
 }
 
@@ -317,23 +381,63 @@ export function applyEditsToNormalizedContent(
 	}
 
 	const baseContent = normalizedContent;
+	let fuzzyContent: FuzzyNormalizedText | undefined;
 	const matchedEdits: MatchedEdit[] = [];
 	for (let i = 0; i < normalizedEdits.length; i++) {
 		const edit = normalizedEdits[i];
-		const matchResult = fuzzyFindText(baseContent, edit.oldText);
-		if (!matchResult.found) {
-			throw getNotFoundError(path, i, normalizedEdits.length);
+
+		// Exact matching first: a unique exact match always wins, even when fuzzy
+		// normalization would make additional regions look identical.
+		const exactIndices = findOccurrences(baseContent, edit.oldText);
+		if (exactIndices.length > 1) {
+			throw getDuplicateError(
+				path,
+				i,
+				normalizedEdits.length,
+				exactIndices.length,
+				lineNumbersFor(baseContent, exactIndices),
+			);
+		}
+		if (exactIndices.length === 1) {
+			matchedEdits.push({
+				editIndex: i,
+				matchIndex: exactIndices[0],
+				matchLength: edit.oldText.length,
+				newText: edit.newText,
+			});
+			continue;
 		}
 
-		const occurrences = countOccurrences(baseContent, edit.oldText);
-		if (occurrences > 1) {
-			throw getDuplicateError(path, i, normalizedEdits.length, occurrences);
+		// No exact match: fall back to fuzzy matching in normalized space.
+		fuzzyContent ??= normalizeForFuzzyMatchWithMap(baseContent);
+		const fuzzyOldText = normalizeForFuzzyMatch(edit.oldText);
+		const fuzzyIndices = fuzzyOldText.length === 0 ? [] : findOccurrences(fuzzyContent.text, fuzzyOldText);
+		if (fuzzyIndices.length === 0) {
+			throw getNotFoundError(path, i, normalizedEdits.length, findClosestMatch(baseContent, edit.oldText));
+		}
+		if (fuzzyIndices.length > 1) {
+			const originalIndices = fuzzyIndices
+				.map((index) => fuzzyContent!.ranges[index]?.start)
+				.filter((start): start is number => start !== undefined);
+			throw getDuplicateError(
+				path,
+				i,
+				normalizedEdits.length,
+				fuzzyIndices.length,
+				lineNumbersFor(baseContent, originalIndices),
+			);
 		}
 
+		const fuzzyIndex = fuzzyIndices[0];
+		const start = fuzzyContent.ranges[fuzzyIndex];
+		const end = fuzzyContent.ranges[fuzzyIndex + fuzzyOldText.length - 1];
+		if (!start || !end) {
+			throw getNotFoundError(path, i, normalizedEdits.length, findClosestMatch(baseContent, edit.oldText));
+		}
 		matchedEdits.push({
 			editIndex: i,
-			matchIndex: matchResult.index,
-			matchLength: matchResult.matchLength,
+			matchIndex: start.start,
+			matchLength: end.end - start.start,
 			newText: edit.newText,
 		});
 	}
