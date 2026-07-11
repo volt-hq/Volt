@@ -10,6 +10,8 @@ from harbor.agents.installed.opencode import OpenCode
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from benchmarks.harbor.agents.secret_environment import run_only_secret_environment
+
 
 class _RunOnlySecrets:
     SECRET_NAMES: ClassVar[frozenset[str]]
@@ -35,7 +37,11 @@ class _RunOnlySecrets:
     ) -> None:
         self._extra_env.update(self._run_only_secrets)
         try:
-            await run(instruction, environment, context)
+            async with run_only_secret_environment(
+                environment,
+                self._run_only_secrets,
+            ) as secure_environment:
+                await run(instruction, secure_environment, context)
         finally:
             for name in self._run_only_secrets:
                 self._extra_env.pop(name, None)
@@ -105,6 +111,7 @@ class RunOnlySecretCodex(_RunOnlySecrets, Codex):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        primary_error: BaseException | None = None
         try:
             await self._run_with_secrets(
                 super().run,
@@ -112,11 +119,19 @@ class RunOnlySecretCodex(_RunOnlySecrets, Codex):
                 environment,
                 context,
             )
+        except BaseException as error:
+            primary_error = error
+            raise
         finally:
-            await self.exec_as_agent(
-                environment,
-                command="rm -rf /tmp/codex-secrets /tmp/codex-home",
-            )
+            try:
+                await self.exec_as_agent(
+                    environment,
+                    command="rm -rf /tmp/codex-secrets /tmp/codex-home",
+                )
+            except BaseException as cleanup_error:
+                if primary_error is None:
+                    raise
+                primary_error.add_note(f"Codex cleanup failed: {cleanup_error}")
 
 
 class RunOnlySecretOpenCode(_RunOnlySecrets, OpenCode):

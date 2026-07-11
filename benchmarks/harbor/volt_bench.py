@@ -1,0 +1,16 @@
+"""Installed entry point for the repository-local volt-bench CLI."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from benchmarks.harbor.cli import main as cli_main  # noqa: E402
+
+
+def main() -> int:
+    return cli_main()

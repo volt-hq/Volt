@@ -25,6 +25,7 @@ from harbor.models.trajectories import (
 from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.trajectory_utils import format_trajectory_json
 
+from benchmarks.harbor.agents.secret_environment import run_only_secret_environment
 from benchmarks.harbor.scripts.runtime import check_volt_package_bundle
 
 
@@ -493,14 +494,16 @@ class VoltAgent(BaseInstalledAgent):
             "NO_COLOR": "1",
         }
         run_env = dict(env)
-        if self._custom_provider and api_key:
-            run_env[self._api_key_env] = api_key
+        run_secrets = (
+            {self._api_key_env: api_key} if self._custom_provider and api_key else {}
+        )
 
         await self.exec_as_agent(
             environment,
             command=f"rm -rf {shlex.quote(volt_home)}; mkdir -p {shlex.quote(volt_home)} {shlex.quote(agent_dir)}",
             env=env,
         )
+        primary_error: BaseException | None = None
         try:
             if auth_path:
                 remote_auth_path = f"{volt_home}/auth.json"
@@ -519,44 +522,58 @@ class VoltAgent(BaseInstalledAgent):
                 config = shlex.quote(self._models_config(base_url))
                 config_command = f"printf '%s' {config} > {shlex.quote(volt_home + '/models.json')}; "
 
-            await self.exec_as_agent(
+            async with run_only_secret_environment(
                 environment,
-                command=(
-                    "set -euo pipefail; "
-                    f"{config_command}"
-                    "if git -C /app rev-parse --is-inside-work-tree >/dev/null 2>&1; then "
-                    f"git -C /app rev-parse HEAD > {shlex.quote(agent_dir + '/workspace-base.txt')}; "
-                    f"git -C /app status --porcelain=v1 > {shlex.quote(agent_dir + '/workspace-before.txt')}; "
-                    "else "
-                    f"(find /app -xdev -type f -printf '%P\\t%s\\t%T@\\n' 2>/dev/null || find /app -xdev -type f -print) | LC_ALL=C sort > {shlex.quote(agent_dir + '/workspace-before.txt')}; "
-                    "fi; "
-                    "set +e; "
-                    '. "$HOME/.nvm/nvm.sh"; '
-                    "volt --mode json --no-session --name harbor-eval "
-                    f"--provider {shlex.quote(self._provider)} "
-                    f"--model {shlex.quote(self._model_id())} "
-                    f"--thinking {shlex.quote(self._reasoning_effort)} "
-                    f"{escaped_instruction} > {shlex.quote(output_path)} 2> {shlex.quote(stderr_path)}; "
-                    "status=$?; "
-                    "if git -C /app rev-parse --is-inside-work-tree >/dev/null 2>&1; then "
-                    f"git -C /app diff --binary --no-ext-diff > {shlex.quote(agent_dir + '/final.patch')}; "
-                    f"git -C /app status --porcelain=v1 > {shlex.quote(agent_dir + '/workspace-after.txt')}; "
-                    "else "
-                    f": > {shlex.quote(agent_dir + '/final.patch')}; "
-                    f"(find /app -xdev -type f -printf '%P\\t%s\\t%T@\\n' 2>/dev/null || find /app -xdev -type f -print) | LC_ALL=C sort > {shlex.quote(agent_dir + '/workspace-after.txt')}; "
-                    "fi; "
-                    'if [ "$status" -ne 0 ]; then exit "$status"; fi; '
-                    f'if grep -Eq \'"stopReason":"(error|aborted)"\' {shlex.quote(output_path)}; then exit 1; fi; '
-                    f'grep -q \'"type":"agent_settled"\' {shlex.quote(output_path)}'
-                ),
-                env=run_env,
-            )
+                run_secrets,
+            ) as secure_environment:
+                await self.exec_as_agent(
+                    secure_environment,
+                    command=(
+                        "set -euo pipefail; "
+                        f"{config_command}"
+                        "if git -C /app rev-parse --is-inside-work-tree >/dev/null 2>&1; then "
+                        f"git -C /app rev-parse HEAD > {shlex.quote(agent_dir + '/workspace-base.txt')}; "
+                        f"git -C /app status --porcelain=v1 > {shlex.quote(agent_dir + '/workspace-before.txt')}; "
+                        "else "
+                        f"(find /app -xdev -type f -printf '%P\\t%s\\t%T@\\n' 2>/dev/null || find /app -xdev -type f -print) | LC_ALL=C sort > {shlex.quote(agent_dir + '/workspace-before.txt')}; "
+                        "fi; "
+                        "set +e; "
+                        '. "$HOME/.nvm/nvm.sh"; '
+                        "volt --mode json --no-session --name harbor-eval "
+                        f"--provider {shlex.quote(self._provider)} "
+                        f"--model {shlex.quote(self._model_id())} "
+                        f"--thinking {shlex.quote(self._reasoning_effort)} "
+                        f"{escaped_instruction} > {shlex.quote(output_path)} 2> {shlex.quote(stderr_path)}; "
+                        "status=$?; "
+                        "if git -C /app rev-parse --is-inside-work-tree >/dev/null 2>&1; then "
+                        f"git -C /app diff --binary --no-ext-diff > {shlex.quote(agent_dir + '/final.patch')}; "
+                        f"git -C /app status --porcelain=v1 > {shlex.quote(agent_dir + '/workspace-after.txt')}; "
+                        "else "
+                        f": > {shlex.quote(agent_dir + '/final.patch')}; "
+                        f"(find /app -xdev -type f -printf '%P\\t%s\\t%T@\\n' 2>/dev/null || find /app -xdev -type f -print) | LC_ALL=C sort > {shlex.quote(agent_dir + '/workspace-after.txt')}; "
+                        "fi; "
+                        'if [ "$status" -ne 0 ]; then exit "$status"; fi; '
+                        f'if grep -Eq \'"stopReason":"(error|aborted)"\' {shlex.quote(output_path)}; then exit 1; fi; '
+                        f'grep -q \'"type":"agent_settled"\' {shlex.quote(output_path)}'
+                    ),
+                    env=run_env,
+                )
+        except BaseException as error:
+            primary_error = error
+            raise
         finally:
-            await self.exec_as_agent(
-                environment,
-                command=f"rm -rf {shlex.quote(volt_home)}",
-                env=env,
-            )
+            try:
+                await self.exec_as_agent(
+                    environment,
+                    command=f"rm -rf {shlex.quote(volt_home)}",
+                    env=env,
+                )
+            except BaseException as cleanup_error:
+                if primary_error is None:
+                    raise
+                primary_error.add_note(
+                    f"Volt credential cleanup failed: {cleanup_error}"
+                )
 
     def populate_context_post_run(self, context: AgentContext) -> None:
         output_path = self.logs_dir / self._OUTPUT_FILENAME

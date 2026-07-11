@@ -9,6 +9,7 @@ import math
 import os
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ from benchmarks.harbor.scripts.analyze import load_trials, summarize
 from benchmarks.harbor.scripts.runtime import (
     check_volt_package_bundle,
     minimal_child_environment,
+    run_owned_process,
     validate_job_name,
 )
 from benchmarks.harbor.scripts.validate_protocol import (
@@ -33,6 +35,7 @@ CURL_PROBE_IMAGE = (
     "curlimages/curl:8.16.0@"
     "sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6"
 )
+_WORKER_KEY_REVOKED = False
 PACKAGE_PINS = {
     "@earendil-works/volt-coding-agent": "0.79.6",
     "@anthropic-ai/claude-code": "2.1.206",
@@ -54,21 +57,29 @@ def _read_json(url: str, key: str) -> Any:
         return json.load(response)
 
 
-def _container_read_json(url: str, key: str) -> Any:
+def _container_read_json(url: str, key: str, network: str) -> Any:
+    if any(character in key for character in ('"', "\r", "\n")):
+        raise ValueError("Gateway key contains characters unsafe for curl config input")
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "-i",
+        "--network",
+        network,
+        CURL_PROBE_IMAGE,
+        "-fsS",
+        "--config",
+        "-",
+        url,
+    ]
     result = subprocess.run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            CURL_PROBE_IMAGE,
-            "-fsS",
-            "-H",
-            f"Authorization: Bearer {key}",
-            url,
-        ],
+        command,
+        input=f'header = "Authorization: Bearer {key}"\n',
         capture_output=True,
         text=True,
         check=False,
+        env=minimal_child_environment(os.environ, additions={}),
     )
     if result.returncode != 0:
         detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else ""
@@ -93,10 +104,29 @@ def _post_json(url: str, key: str, payload: dict[str, object]) -> Any:
         return json.load(response)
 
 
+def _delete_worker_key(url: str, master_key: str, worker_key: str) -> None:
+    _post_json(url, master_key, {"keys": [worker_key]})
+    request = urllib.request.Request(
+        url.rsplit("/", 1)[0] + "/info",
+        headers={"Authorization": f"Bearer {worker_key}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10):
+            pass
+    except urllib.error.HTTPError as error:
+        if error.code in {401, 403}:
+            return
+        raise RuntimeError(
+            f"Worker-key rejection check returned HTTP {error.code}"
+        ) from error
+    raise RuntimeError("Worker key remains authorized after deletion")
+
+
 def _check_gateway(
     container_url: str,
     health_url: str,
     key: str,
+    gateway_network: str,
     expected_budget_usd: float,
 ) -> dict[str, object]:
     _read_json(f"{health_url.rstrip('/')}/health/liveliness", key)
@@ -192,6 +222,7 @@ def _check_gateway(
     container_model_info = _container_read_json(
         f"{container_url.rstrip('/')}/v1/model/info",
         key,
+        gateway_network,
     )
     if not isinstance(container_model_info, dict):
         raise RuntimeError("Container gateway model-info response is not an object")
@@ -216,6 +247,7 @@ def _check_gateway(
     container_key_response = _container_read_json(
         f"{container_url.rstrip('/')}/key/info",
         key,
+        gateway_network,
     )
     if not isinstance(container_key_response, dict):
         raise RuntimeError("Container gateway key-info response is not an object")
@@ -251,6 +283,7 @@ def _check_packages(*, skip_volt: bool) -> None:
             capture_output=True,
             text=True,
             check=False,
+            env=minimal_child_environment(os.environ, additions={}),
         )
         if result.returncode != 0 or result.stdout.strip() != version:
             detail = (
@@ -297,6 +330,7 @@ def _git_value(root: Path, *args: str) -> str | None:
         capture_output=True,
         text=True,
         check=False,
+        env=minimal_child_environment(os.environ, additions={}),
     )
     return result.stdout.strip() if result.returncode == 0 else None
 
@@ -320,7 +354,9 @@ def _load_agents(config_path: Path) -> list[dict[str, object]]:
     return result
 
 
-def main() -> int:
+def _main() -> int:
+    global _WORKER_KEY_REVOKED
+
     root = Path(__file__).resolve().parents[3]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -373,12 +409,15 @@ def main() -> int:
         )
     if gateway_master_key == gateway_key:
         raise RuntimeError("Gateway master and worker keys must differ")
+    gateway_network = os.environ.get("PILOT_GATEWAY_NETWORK", "").strip()
+    if not gateway_network:
+        raise RuntimeError("PILOT_GATEWAY_NETWORK is required")
     container_url = os.environ.get(
-        "PILOT_GATEWAY_URL", "http://host.docker.internal:4000"
+        "PILOT_GATEWAY_URL", "http://volt-bench-gateway-proxy:4000"
     ).rstrip("/")
+    probe_url = "http://volt-bench-gateway:4000"
     health_url = os.environ.get(
-        "PILOT_GATEWAY_HEALTH_URL",
-        container_url.replace("host.docker.internal", "127.0.0.1"),
+        "PILOT_GATEWAY_HEALTH_URL", "http://127.0.0.1:4000"
     ).rstrip("/")
 
     budget_value = os.environ.get("PILOT_MAX_BUDGET_USD", "").strip()
@@ -389,9 +428,10 @@ def main() -> int:
     if not math.isfinite(expected_budget_usd) or expected_budget_usd <= 0:
         raise RuntimeError("PILOT_MAX_BUDGET_USD must be finite and positive")
     observed_gateway = _check_gateway(
-        container_url,
+        probe_url,
         health_url,
         gateway_key,
+        gateway_network,
         expected_budget_usd,
     )
     volt_package_info = (
@@ -445,7 +485,9 @@ def main() -> int:
         "observed_gateway": observed_gateway,
         "gateway_container_probe_image": CURL_PROBE_IMAGE,
         "gateway_container_url": container_url,
+        "gateway_probe_url": probe_url,
         "gateway_health_url": health_url,
+        "gateway_network": gateway_network,
         "pilot_config_sha256": _sha256(args.config),
         "task_manifest_sha256": _sha256(args.manifest),
         "gateway_config_sha256": _sha256(args.gateway_config),
@@ -464,14 +506,19 @@ def main() -> int:
 
     revocation_error: str | None = None
     try:
-        result = subprocess.run(command, cwd=root, env=child_env, check=False)
+        result = run_owned_process(
+            command,
+            cwd=root,
+            environment=child_env,
+        )
     finally:
         try:
-            _post_json(
+            _delete_worker_key(
                 f"{health_url.rstrip('/')}/key/delete",
                 gateway_master_key,
-                {"keys": [gateway_key]},
+                gateway_key,
             )
+            _WORKER_KEY_REVOKED = True
         except Exception as error:
             revocation_error = f"Worker-key revocation failed: {error}"
     task_manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
@@ -504,6 +551,7 @@ def main() -> int:
             "harbor_exit_code": result.returncode,
             "exit_code": exit_code,
             "post_run_validation_errors": validation_errors,
+            "worker_key_revocation_owner": "launcher",
             "worker_key_revoked": revocation_error is None,
         }
     )
@@ -512,6 +560,39 @@ def main() -> int:
     )
     print(f"Run manifest: {manifest_path}")
     return exit_code
+
+
+def main() -> int:
+    global _WORKER_KEY_REVOKED
+
+    _WORKER_KEY_REVOKED = False
+    active_error = False
+    try:
+        return _main()
+    except BaseException:
+        active_error = True
+        raise
+    finally:
+        if not _WORKER_KEY_REVOKED and "--validate-only" not in sys.argv[1:]:
+            gateway_key = os.environ.get("PILOT_GATEWAY_KEY", "").strip()
+            master_key = os.environ.get("PILOT_GATEWAY_MASTER_KEY", "").strip()
+            if gateway_key and master_key:
+                health_url = os.environ.get(
+                    "PILOT_GATEWAY_HEALTH_URL", "http://127.0.0.1:4000"
+                ).rstrip("/")
+                try:
+                    _delete_worker_key(
+                        f"{health_url}/key/delete",
+                        master_key,
+                        gateway_key,
+                    )
+                    _WORKER_KEY_REVOKED = True
+                except Exception as error:
+                    message = f"Worker-key revocation after preflight failed: {error}"
+                    if active_error:
+                        print(message, file=sys.stderr)
+                    else:
+                        raise RuntimeError(message) from error
 
 
 if __name__ == "__main__":

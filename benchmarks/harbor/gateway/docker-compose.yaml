@@ -1,0 +1,45 @@
+services:
+  database:
+    image: postgres:17.5-alpine@sha256:6567bca8d7bc8c82c5922425a0baee57be8402df92bae5eacad5f01ae9544daa
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: ${VOLT_BENCH_POSTGRES_PASSWORD:?required}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - database-data:/var/lib/postgresql/data
+    networks:
+      - backend
+
+  gateway:
+    image: ghcr.io/berriai/litellm-database:v1.91.1@sha256:a0952ba673e930ff6fcf4c78e291a7fe60ce0f9cd0d0d0f5a1fe6fa3d0624c89
+    command: ["--config", "/app/config.yaml", "--host", "0.0.0.0", "--port", "4000"]
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://litellm:${VOLT_BENCH_POSTGRES_PASSWORD:?required}@database:5432/litellm
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:?required}
+      PILOT_GATEWAY_MASTER_KEY: ${PILOT_GATEWAY_MASTER_KEY:?required}
+      UPSTREAM_ANTHROPIC_API_KEY: ${UPSTREAM_ANTHROPIC_API_KEY:?required}
+    ports:
+      - "${VOLT_BENCH_GATEWAY_BIND:-127.0.0.1}:${VOLT_BENCH_GATEWAY_PORT:-4000}:4000"
+    volumes:
+      - ./litellm.yaml:/app/config.yaml:ro
+    networks:
+      backend:
+      benchmark:
+        aliases:
+          - volt-bench-gateway
+
+networks:
+  backend:
+  benchmark:
+    name: ${VOLT_BENCH_GATEWAY_NETWORK:?required}
+
+volumes:
+  database-data:

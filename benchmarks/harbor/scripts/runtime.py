@@ -4,8 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import signal
+import subprocess
+import sys
 import tarfile
+import time
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 JOB_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -111,6 +118,200 @@ def minimal_child_environment(
     }
     result.update(additions)
     return result
+
+
+def _compose_project_name(name: str) -> str:
+    sanitized = re.sub(r"[^a-z0-9_-]", "-", name.lower())
+    return sanitized if sanitized[:1].isalnum() else f"0{sanitized}"
+
+
+def cleanup_harbor_trial_resources(job_dir: Path) -> list[str]:
+    errors: list[str] = []
+    environment = minimal_child_environment(dict(os.environ), additions={})
+    projects = {
+        _compose_project_name(path.name) for path in job_dir.iterdir() if path.is_dir()
+    }
+    resource_commands = (
+        ("container", ["docker", "ps", "-aq"], ["docker", "rm", "-f"]),
+        ("volume", ["docker", "volume", "ls", "-q"], ["docker", "volume", "rm", "-f"]),
+        ("network", ["docker", "network", "ls", "-q"], ["docker", "network", "rm"]),
+    )
+    for project in sorted(projects):
+        label = f"com.docker.compose.project={project}"
+        for resource, list_command, remove_command in resource_commands:
+            listed = subprocess.run(
+                [*list_command, "--filter", f"label={label}"],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=environment,
+                timeout=10,
+            )
+            if listed.returncode != 0:
+                errors.append(f"could not list {resource}s for {project}")
+                continue
+            identifiers = listed.stdout.split()
+            if identifiers:
+                removed = subprocess.run(
+                    [*remove_command, *identifiers],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=environment,
+                    timeout=10,
+                )
+                if removed.returncode != 0:
+                    errors.append(f"could not remove {resource}s for {project}")
+            verified = subprocess.run(
+                [*list_command, "--filter", f"label={label}"],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=environment,
+                timeout=10,
+            )
+            if verified.returncode != 0 or verified.stdout.split():
+                errors.append(f"{resource}s remain for {project}")
+    return errors
+
+
+def normalize_return_code(return_code: int) -> int:
+    return 128 + abs(return_code) if return_code < 0 else return_code
+
+
+def _stop_process_tree(process: subprocess.Popen[bytes], signum: int) -> None:
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+            env=minimal_child_environment(dict(os.environ), additions={}),
+            timeout=10,
+        )
+        process.wait()
+        return
+    try:
+        os.killpg(process.pid, signum)
+        process.wait(timeout=10)
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+
+
+@contextmanager
+def defer_termination_signals() -> Iterator[list[int]]:
+    pending: list[int] = []
+
+    def defer(signum: int, _frame: object) -> None:
+        pending.append(signum)
+
+    previous = {
+        signal.SIGINT: signal.getsignal(signal.SIGINT),
+        signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+    }
+    for signum in previous:
+        signal.signal(signum, defer)
+    try:
+        yield pending
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def run_owned_process(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+    pending_signals: list[int] | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    terminated_by: int | None = None
+    process: subprocess.Popen[bytes] | None = None
+    windows_tree_kill: subprocess.Popen[bytes] | None = None
+
+    def terminate(signum: int, _frame: object) -> None:
+        nonlocal terminated_by, windows_tree_kill
+        terminated_by = signum
+        if pending_signals is not None:
+            pending_signals.append(signum)
+        if process is None:
+            return
+        try:
+            if sys.platform == "win32" and windows_tree_kill is None:
+                windows_tree_kill = subprocess.Popen(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=minimal_child_environment(dict(os.environ), additions={}),
+                )
+            elif sys.platform != "win32":
+                os.killpg(process.pid, signum)
+        except (OSError, ProcessLookupError):
+            pass
+
+    previous_handlers = {
+        signal.SIGINT: signal.getsignal(signal.SIGINT),
+        signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+    }
+    for signum in previous_handlers:
+        signal.signal(signum, terminate)
+    try:
+        if pending_signals:
+            return subprocess.CompletedProcess(list(command), 128 + pending_signals[-1])
+        creation_flags = (
+            subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+        )
+        process = subprocess.Popen(
+            list(command),
+            cwd=cwd,
+            env=environment,
+            start_new_session=sys.platform != "win32",
+            creationflags=creation_flags,
+        )
+        if pending_signals:
+            terminate(pending_signals[-1], None)
+        termination_deadline: float | None = None
+        tree_stopped = False
+        while True:
+            if terminated_by is not None and termination_deadline is None:
+                if sys.platform == "win32":
+                    if windows_tree_kill is not None:
+                        try:
+                            windows_tree_kill.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            windows_tree_kill.kill()
+                            windows_tree_kill.wait()
+                    _stop_process_tree(process, terminated_by)
+                    tree_stopped = True
+                termination_deadline = time.monotonic() + 10
+            try:
+                return_code = process.wait(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                if (
+                    termination_deadline is not None
+                    and time.monotonic() >= termination_deadline
+                ):
+                    _stop_process_tree(process, terminated_by or signal.SIGTERM)
+                    return_code = process.wait()
+                    break
+        if terminated_by is not None and not tree_stopped:
+            _stop_process_tree(process, terminated_by)
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+    if terminated_by is not None:
+        return_code = 128 + terminated_by
+    return subprocess.CompletedProcess(
+        list(command), normalize_return_code(return_code)
+    )
 
 
 def validate_job_name(job_name: str) -> str:

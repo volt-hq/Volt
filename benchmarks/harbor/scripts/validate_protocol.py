@@ -61,8 +61,12 @@ def validate_protocol(
         not isinstance(environment, dict)
         or environment.get("type") != "docker"
         or environment.get("delete") is not True
+        or environment.get("extra_docker_compose")
+        != ["benchmarks/harbor/gateway/harbor-gateway-network.yaml"]
     ):
-        errors.append("Pilot must delete its Docker environments")
+        errors.append(
+            "Pilot must delete Docker environments and attach the gateway network"
+        )
     retry = config.get("retry")
     if not isinstance(retry, dict) or retry.get("max_retries") != 0:
         errors.append("Pilot must disable Harbor-level retries")

@@ -7,6 +7,8 @@ retry:
 environment:
   type: docker
   delete: true
+  extra_docker_compose:
+    - benchmarks/harbor/gateway/harbor-gateway-network.yaml
 agents:
   - import_path: benchmarks.harbor.agents.volt:VoltAgent
     model_name: openai/pilot-model

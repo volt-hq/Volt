@@ -6,8 +6,11 @@ import argparse
 import base64
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,7 +21,10 @@ from harbor.models.job.config import JobConfig
 from benchmarks.harbor.scripts.analyze import load_trials, summarize
 from benchmarks.harbor.scripts.runtime import (
     check_volt_package_bundle,
+    cleanup_harbor_trial_resources,
+    defer_termination_signals,
     minimal_child_environment,
+    run_owned_process,
     validate_job_name,
 )
 from benchmarks.harbor.scripts.validate_protocol import EXPECTED_HARBOR_VERSION
@@ -220,6 +226,7 @@ def _check_packages(packages: dict[str, str], *, skip_volt: bool) -> None:
             capture_output=True,
             text=True,
             check=False,
+            env=minimal_child_environment(os.environ, additions={}),
         )
         if result.returncode != 0 or result.stdout.strip() != version:
             raise RuntimeError(f"Pinned package is unavailable: {package}@{version}")
@@ -341,22 +348,85 @@ def main() -> int:
     manifest_path = job_dir / "run-manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
-    with tempfile.TemporaryDirectory(prefix="volt-harbor-auth-") as temporary:
-        auth_snapshot_dir = Path(temporary)
-        auth_snapshot = auth_snapshot_dir / "auth.json"
-        auth_snapshot.write_text(
-            json.dumps({volt_provider: volt_credential}),
-            encoding="utf-8",
+    with defer_termination_signals() as pending_signals:
+        auth_snapshot_dir: Path | None = None
+        cleanup_errors: list[str] = []
+        primary_error: BaseException | None = None
+        result = subprocess.CompletedProcess(command, 1)
+        try:
+            auth_snapshot_dir = Path(tempfile.mkdtemp(prefix="volt-harbor-auth-"))
+            auth_snapshot_dir.chmod(0o700)
+            auth_snapshot = auth_snapshot_dir / "auth.json"
+            auth_snapshot.write_text(
+                json.dumps({volt_provider: volt_credential}),
+                encoding="utf-8",
+            )
+            auth_snapshot.chmod(0o600)
+            child_env["VOLT_AUTH_JSON_PATH"] = str(auth_snapshot)
+            if codex_auth_contents is not None:
+                codex_snapshot = auth_snapshot_dir / "codex-auth.json"
+                codex_snapshot.write_text(codex_auth_contents, encoding="utf-8")
+                codex_snapshot.chmod(0o600)
+                child_env["CODEX_AUTH_JSON_PATH"] = str(codex_snapshot)
+            result = run_owned_process(
+                command,
+                cwd=root,
+                environment=child_env,
+                pending_signals=pending_signals,
+            )
+        except BaseException as error:
+            primary_error = error
+        finally:
+            for attempt in range(3):
+                try:
+                    cleanup_errors = cleanup_harbor_trial_resources(job_dir)
+                except BaseException as cleanup_error:
+                    cleanup_errors = [str(cleanup_error)]
+                if not cleanup_errors:
+                    break
+                if attempt < 2:
+                    time.sleep(2)
+            if cleanup_errors:
+                snapshot_status = (
+                    f"; private credential snapshots retained at {auth_snapshot_dir}"
+                    if auth_snapshot_dir is not None
+                    else ""
+                )
+                print(
+                    f"Local-auth Docker cleanup is incomplete{snapshot_status}",
+                    file=sys.stderr,
+                )
+                detail = f"Local-auth Docker cleanup incomplete: {cleanup_errors}"
+                if primary_error is not None:
+                    primary_error.add_note(detail)
+            elif auth_snapshot_dir is not None:
+                try:
+                    shutil.rmtree(auth_snapshot_dir)
+                    child_env.pop("VOLT_AUTH_JSON_PATH", None)
+                    child_env.pop("CODEX_AUTH_JSON_PATH", None)
+                except BaseException as cleanup_error:
+                    cleanup_errors = [f"host snapshot deletion failed: {cleanup_error}"]
+                    print(
+                        f"Private credential snapshots retained at {auth_snapshot_dir}",
+                        file=sys.stderr,
+                    )
+                    if primary_error is not None:
+                        primary_error.add_note(cleanup_errors[0])
+    credential_snapshot_retained = bool(
+        cleanup_errors and auth_snapshot_dir is not None
+    )
+    if pending_signals:
+        result = subprocess.CompletedProcess(
+            result.args,
+            128 + pending_signals[-1],
         )
-        auth_snapshot.chmod(0o600)
-        child_env["VOLT_AUTH_JSON_PATH"] = str(auth_snapshot)
-        if codex_auth_contents is not None:
-            codex_snapshot = auth_snapshot_dir / "codex-auth.json"
-            codex_snapshot.write_text(codex_auth_contents, encoding="utf-8")
-            codex_snapshot.chmod(0o600)
-            child_env["CODEX_AUTH_JSON_PATH"] = str(codex_snapshot)
-        result = subprocess.run(command, cwd=root, env=child_env, check=False)
-    validation_errors: list[str] = []
+    validation_errors: list[str] = [
+        f"Local-auth Docker cleanup incomplete: {error}" for error in cleanup_errors
+    ]
+    if primary_error is not None:
+        validation_errors.append(
+            f"Local-auth launcher failed: {type(primary_error).__name__}"
+        )
     summary: dict[str, Any] | None = None
     try:
         summary = summarize(load_trials([job_dir]), expected_tasks=["fix-git"])
@@ -398,6 +468,7 @@ def main() -> int:
             "harbor_exit_code": result.returncode,
             "exit_code": exit_code,
             "post_run_validation_errors": validation_errors,
+            "credential_snapshot_retained": credential_snapshot_retained,
         }
     )
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

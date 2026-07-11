@@ -12,6 +12,62 @@ This directory contains Volt's repository-owned Harbor adapter and the first fix
 
 The four harnesses retain their native prompts, tools, context management, and client-side recovery. Those are harness behavior. Harbor conditions, task images, upstream model, routing, reasoning profile, attempt count, and external retry policy are fixed.
 
+## Operator quick start
+
+`volt-bench` is repository-only benchmark tooling. It is not part of the Volt CLI or published customer package.
+
+Install the pinned environment, configure the upstream key and an explicit maximum pilot budget, then run the 25-task × 4-agent pilot:
+
+```bash
+uv sync --project benchmarks/harbor --frozen
+export UPSTREAM_ANTHROPIC_API_KEY='sk-ant-...'
+export PILOT_MAX_BUDGET_USD='500'
+
+uv run --project benchmarks/harbor --frozen volt-bench doctor
+uv run --project benchmarks/harbor --frozen volt-bench run pilot
+```
+
+On the first run, the CLI builds and validates the exact four-package Volt bundle under the user cache directory (`%LOCALAPPDATA%/volt-bench` on Windows or `$XDG_CACHE_HOME/volt-bench`/`~/.cache/volt-bench`). Managed mode starts digest-pinned LiteLLM and PostgreSQL containers, creates a 24-hour model-, concurrency-, and budget-scoped worker key, launches the pilot, revokes the key, removes the containers and database volume, and runs strict analysis. The upstream key remains in the managed gateway and is never passed to Harbor agents.
+
+Inspect and analyze local jobs:
+
+```bash
+uv run --project benchmarks/harbor --frozen volt-bench jobs list
+uv run --project benchmarks/harbor --frozen volt-bench jobs show <job-name>
+uv run --project benchmarks/harbor --frozen volt-bench analyze <job-name> --strict
+uv run --project benchmarks/harbor --frozen volt-bench view <job-name>
+```
+
+`view` starts Harbor's local web viewer on `127.0.0.1:8080-8089`. Jobs and raw artifacts remain under `jobs/volt-harbor/` and are not committed. Put `--json` before the command for machine-readable `doctor`, `prepare`, and `jobs` output.
+
+Useful options:
+
+```bash
+# Build or refresh the local Volt bundle without launching trials.
+uv run --project benchmarks/harbor --frozen volt-bench prepare
+
+# Use an already managed LiteLLM gateway instead of ephemeral containers.
+uv run --project benchmarks/harbor --frozen volt-bench run pilot \
+  --gateway external --job-name my-pilot
+
+# Use another jobs directory or an existing bundle.
+uv run --project benchmarks/harbor --frozen volt-bench run pilot \
+  --jobs-dir /tmp/volt-jobs \
+  --volt-package-dir /tmp/volt-eval-release/tarballs
+
+# Deliberately use pinned registry packages instead of a local bundle.
+uv run --project benchmarks/harbor --frozen volt-bench run pilot --use-registry
+
+# Use an externally managed gateway on a dedicated Docker network.
+uv run --project benchmarks/harbor --frozen volt-bench run pilot \
+  --gateway external --gateway-network volt-bench-external \
+  --container-gateway-url http://volt-bench-gateway-proxy:4000
+```
+
+External mode reads `PILOT_GATEWAY_KEY`, `PILOT_GATEWAY_MASTER_KEY`, `PILOT_GATEWAY_NETWORK`, `PILOT_GATEWAY_URL`, and optional `PILOT_GATEWAY_HEALTH_URL`, and the configured pilot budget. `doctor` and `prepare` make no model calls. `run pilot` is noninteractive after its explicit budget is supplied, so agents and CI can use stable exit codes.
+
+Managed mode creates a per-run Docker network shared by the gateway and a pinned HAProxy sidecar for each trial. The task container reaches only its trial-local `volt-bench-gateway-proxy`; it is not attached to the shared gateway network or given a host-gateway mapping. The published host port is used only for operator preflight and defaults to loopback. Apply host firewall rules if overriding the loopback bind.
+
 ## Fairness boundary
 
 A local LiteLLM gateway exposes the same upstream deployment through both Anthropic Messages and OpenAI-compatible APIs. Claude Code uses the Anthropic surface; Volt, Codex, and OpenCode use OpenAI-compatible surfaces. This isolates the upstream model and route, but API-protocol differences remain part of each harness stack. Do not describe this as a raw model comparison or combine it with product-default results.
@@ -75,19 +131,27 @@ uv run --project benchmarks/harbor --frozen \
 
 Selection uses Hamilton apportionment over `(category, difficulty)` strata. Tasks within each stratum are ranked by `SHA-256("volt-tbench-2.1-pilot-v1\0" + task_name)`. The result contains 15 medium, 9 hard, and 1 easy task across 11 categories.
 
-## Start the fixed-model gateway
+## Start an external fixed-model gateway manually
 
-Use three distinct secrets: the upstream provider key, a host-only LiteLLM master key, and a scoped worker key for agents. Point `DATABASE_URL` at disposable PostgreSQL storage and keep `LITELLM_SALT_KEY` stable for that database:
+Use three distinct secrets: the upstream provider key, a host-only LiteLLM master key, and a scoped worker key for agents. Point `DATABASE_URL` at disposable PostgreSQL storage and keep `LITELLM_SALT_KEY` stable for that database. The gateway must be a container on a dedicated Docker network so trials do not receive a route to unrelated host services:
 
 ```bash
 export UPSTREAM_ANTHROPIC_API_KEY='sk-ant-...'
 export DATABASE_URL='postgresql://...'
-export PILOT_GATEWAY_MASTER_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export PILOT_GATEWAY_MASTER_KEY="$(python -c 'import secrets; print("sk-" + secrets.token_urlsafe(32))')"
 export LITELLM_SALT_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export PILOT_GATEWAY_NETWORK='volt-bench-external'
 
-uvx --from 'litellm[proxy]==1.91.1' litellm \
-  --config benchmarks/harbor/gateway/litellm.yaml \
-  --host 0.0.0.0 --port 4000
+docker network create "$PILOT_GATEWAY_NETWORK"
+docker run -d --name volt-bench-external-gateway \
+  --network "$PILOT_GATEWAY_NETWORK" \
+  --network-alias volt-bench-gateway \
+  -p 127.0.0.1:4000:4000 \
+  -e DATABASE_URL -e LITELLM_SALT_KEY -e PILOT_GATEWAY_MASTER_KEY \
+  -e UPSTREAM_ANTHROPIC_API_KEY \
+  -v "$PWD/benchmarks/harbor/gateway/litellm.yaml:/app/config.yaml:ro" \
+  ghcr.io/berriai/litellm-database:v1.91.1@sha256:a0952ba673e930ff6fcf4c78e291a7fe60ce0f9cd0d0d0f5a1fe6fa3d0624c89 \
+  --config /app/config.yaml --host 0.0.0.0 --port 4000
 ```
 
 In another shell, generate a time-, model-, concurrency-, and budget-limited virtual key with the host-only master key. Set the budget before running:
@@ -95,15 +159,15 @@ In another shell, generate a time-, model-, concurrency-, and budget-limited vir
 ```bash
 export PILOT_MAX_BUDGET_USD='500'
 export PILOT_GATEWAY_KEY="$(
-  curl -fsS http://127.0.0.1:4000/key/generate \
-    -H "Authorization: Bearer $PILOT_GATEWAY_MASTER_KEY" \
-    -H 'Content-Type: application/json' \
-    --data "{\"models\":[\"pilot-model\",\"openai/pilot-model\"],\"duration\":\"24h\",\"max_budget\":$PILOT_MAX_BUDGET_USD,\"max_parallel_requests\":16}" \
+  printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' \
+    "$PILOT_GATEWAY_MASTER_KEY" \
+  | curl -fsS --config - http://127.0.0.1:4000/key/generate \
+      --data "{\"models\":[\"pilot-model\",\"openai/pilot-model\"],\"duration\":\"24h\",\"max_budget\":$PILOT_MAX_BUDGET_USD,\"max_parallel_requests\":16}" \
   | python -c 'import json, sys; print(json.load(sys.stdin)["key"])'
 )"
 ```
 
-The master and upstream keys stay in the gateway process; Harbor receives only the scoped worker key. The default trial endpoint is `http://host.docker.internal:4000`. On Linux, set `PILOT_GATEWAY_URL` to a host address resolvable from Docker. `PILOT_GATEWAY_HEALTH_URL` is the host-side URL used for preflight and defaults to `http://127.0.0.1:4000` when the container URL uses `host.docker.internal`. Binding to `0.0.0.0` may be required for Docker Desktop; use host firewall rules so the gateway is not reachable from other machines. See LiteLLM's [virtual-key documentation](https://docs.litellm.ai/docs/proxy/virtual_keys).
+The master and upstream keys stay in the gateway process; Harbor receives only the scoped worker key. Trials use `http://volt-bench-gateway-proxy:4000`; the trusted probe uses `http://volt-bench-gateway:4000` on `PILOT_GATEWAY_NETWORK`. `PILOT_GATEWAY_HEALTH_URL` is the host-side preflight URL and defaults to `http://127.0.0.1:4000`. Do not attach the gateway network to unrelated host or infrastructure services. See LiteLLM's [virtual-key documentation](https://docs.litellm.ai/docs/proxy/virtual_keys).
 
 ## Adapter parity checks
 
@@ -119,7 +183,8 @@ uv run --project benchmarks/harbor --frozen harbor run \
 For the five-task Volt smoke, export the gateway values used by Harbor and its installed agents:
 
 ```bash
-export PILOT_GATEWAY_URL='http://host.docker.internal:4000'
+export PILOT_GATEWAY_NETWORK='volt-bench-external'
+export PILOT_GATEWAY_URL='http://volt-bench-gateway-proxy:4000'
 export PILOT_OPENAI_BASE_URL="$PILOT_GATEWAY_URL/v1"
 export OPENAI_BASE_URL="$PILOT_OPENAI_BASE_URL"
 export OPENAI_API_KEY="$PILOT_GATEWAY_KEY"
@@ -174,18 +239,19 @@ uv run --project benchmarks/harbor --frozen \
 
 This compares Volt and Claude Code on `anthropic/claude-sonnet-4-5`. Volt's third-party Anthropic subscription access may draw from billed extra usage rather than plan limits; confirm account billing before running.
 
-Use dedicated benchmark logins, not a primary personal or organization account. The launcher reads and validates each credential once, then creates private `0600` snapshots containing only the selected Volt provider and the exact validated Codex bytes. The adapters upload snapshots outside `/logs/agent`, enforce non-suppressed credential-file cleanup after the turn, and request Docker environment deletion. Credential values are not written to `run-manifest.json`. Refreshed credentials are not copied back to the host, so the launcher requires Volt and Codex access tokens to remain valid for at least 60 minutes and stops before launch otherwise. Refresh the dedicated host logins first rather than allowing benchmark containers to rotate shared credentials.
+Use dedicated benchmark logins, not a primary personal or organization account. The launcher reads and validates each credential once, then creates private `0600` snapshots containing only the selected Volt provider and the exact validated Codex bytes. The adapters upload snapshots outside `/logs/agent`, enforce non-suppressed credential-file cleanup after the turn, and request Docker environment deletion. The launcher also owns Harbor's process group and performs label-scoped removal and verification of any trial containers, volumes, and networks before deleting host snapshots. If Docker cleanup cannot be verified after retries, the run is invalid and the private snapshot directory is retained and reported for manual recovery rather than unlinking a still-mounted credential. Credential values are not written to `run-manifest.json`. Refreshed credentials are not copied back to the host, so the launcher requires Volt and Codex access tokens to remain valid for at least 60 minutes and stops before launch otherwise. Refresh the dedicated host logins first rather than allowing benchmark containers to rotate shared credentials.
 
-The selected provider credential necessarily enters the benchmark container and can reach arbitrary public hosts because Harbor's Docker backend does not enforce hostname allowlists. The run-only wrappers keep credentials out of downloaded package installers, but they cannot protect a credential from task code during the agent turn or from host process inspection of Docker command arguments. These launchers therefore require `--acknowledge-credential-risk` and are restricted to the reviewed one-task smoke. Use an external egress-enforcing proxy/firewall for stronger isolation. The fixed-model gateway track is preferable for broad task sets because it exposes only a short-lived, model- and budget-limited worker key.
+The selected provider credential necessarily enters the benchmark container and can reach arbitrary public hosts because Harbor's Docker backend does not enforce hostname allowlists. The run-only wrappers keep credentials out of downloaded package installers and Docker command arguments, but they cannot protect a credential from task code or privileged host inspection during the agent turn. These launchers therefore require `--acknowledge-credential-risk` and are restricted to the reviewed one-task smoke. Use an external egress-enforcing proxy/firewall for stronger isolation. The fixed-model gateway track is preferable for broad task sets because it exposes only a short-lived, model- and budget-limited worker key.
 
-## Run the 100-trial pilot
+## Run the 100-trial pilot manually
 
-With the gateway running:
+The `volt-bench run pilot` quick start above is preferred. To use the lower-level launcher with an external gateway:
 
 ```bash
 export PILOT_GATEWAY_KEY='sk-scoped-worker-...'
 export PILOT_GATEWAY_MASTER_KEY='the same host-only master used by LiteLLM'
-export PILOT_GATEWAY_URL='http://host.docker.internal:4000'
+export PILOT_GATEWAY_NETWORK='volt-bench-external'
+export PILOT_GATEWAY_URL='http://volt-bench-gateway-proxy:4000'
 export PILOT_GATEWAY_HEALTH_URL='http://127.0.0.1:4000'
 
 uv run --project benchmarks/harbor --frozen \

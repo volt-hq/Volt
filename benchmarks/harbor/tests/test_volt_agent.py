@@ -77,13 +77,22 @@ class FakeEnvironment:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
         self.uploads: list[tuple[Path, str]] = []
+        self.uploaded_text: list[str] = []
 
-    async def exec(self, **kwargs: object) -> SimpleNamespace:
+    async def exec(
+        self, command: str | None = None, **kwargs: object
+    ) -> SimpleNamespace:
+        if command is not None:
+            kwargs["command"] = command
         self.calls.append(kwargs)
         return SimpleNamespace(return_code=0, stdout="", stderr="")
 
     async def upload_file(self, source_path: Path, target_path: str) -> None:
         self.uploads.append((source_path, target_path))
+        try:
+            self.uploaded_text.append(source_path.read_text(encoding="utf-8"))
+        except UnicodeDecodeError:
+            pass
 
 
 class VoltAgentTests(unittest.TestCase):
@@ -132,7 +141,7 @@ class VoltAgentTests(unittest.TestCase):
             asyncio.run(agent.run("Fix the task", environment, context))
             agent.populate_context_post_run(context)
 
-            self.assertEqual(len(environment.calls), 3)
+            self.assertTrue(environment.calls)
             run_call = next(
                 call
                 for call in environment.calls
@@ -140,6 +149,14 @@ class VoltAgentTests(unittest.TestCase):
             )
             run_env = cast(dict[str, str], run_call["env"])
             self.assertEqual(run_env["VOLT_CODING_AGENT_DIR"], "/tmp/volt-coding-agent")
+            for call in environment.calls:
+                self.assertNotIn(
+                    "test-key", cast(dict[str, str], call.get("env") or {}).values()
+                )
+                self.assertNotIn("test-key", str(call.get("command", "")))
+            self.assertTrue(
+                any("test-key" in contents for contents in environment.uploaded_text)
+            )
             self.assertEqual(context.n_input_tokens, 15)
             self.assertEqual(context.n_cache_tokens, 2)
             self.assertEqual(context.n_output_tokens, 4)
