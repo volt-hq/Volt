@@ -179,7 +179,7 @@ ${guidelines}
 <subagent_delegation>
 When the subagent tool is available, use it for focused work that benefits from an isolated context window. Delegate only when it improves quality, coverage, or latency; do not delegate simple direct edits.
 
-- Prefer specialized built-ins when they fit: researcher for evidence, design-doc for planning/RFCs, security-reviewer for security review, and general for ad hoc delegation.
+- Choose only among the agent names exposed by the subagent tool, and prefer specialized available roles when they fit.
 - Use single mode for one focused delegated task.
 - Use parallel mode only for independent tasks whose outputs can be combined after all children finish.
 - Use chain mode only when each step depends on the prior successful output via {previous}.

@@ -31,31 +31,40 @@ export const DEFAULT_SUBAGENT_CHAIN_MAX_STEPS = 8;
 const BUILT_IN_SUBAGENT_SUMMARY =
 	"Built-in agents: general (ad hoc tasks), researcher (source-backed evidence gathering with web_search), design-doc (RFC/design synthesis), and security-reviewer (non-mutating security review with web_search).";
 
-const subagentTaskSchema = Type.Object({
-	agent: Type.String({ description: "Name of the subagent to invoke" }),
-	task: Type.String({ description: "Task prompt to send to the subagent" }),
-});
+function createSubagentSchema(availableNames?: readonly string[]) {
+	const enumConstraint = availableNames ? { enum: [...availableNames] } : {};
+	const subagentTaskSchema = Type.Object({
+		agent: Type.String({ description: "Name of the subagent to invoke", ...enumConstraint }),
+		task: Type.String({ description: "Task prompt to send to the subagent" }),
+	});
+	return Type.Object({
+		agent: Type.Optional(
+			Type.String({ description: "Name of the subagent to invoke for single mode", ...enumConstraint }),
+		),
+		task: Type.Optional(Type.String({ description: "Task prompt to send to the subagent for single mode" })),
+		tasks: Type.Optional(
+			Type.Array(subagentTaskSchema, {
+				description: "Parallel mode tasks. Each item is { agent, task }.",
+				minItems: 1,
+				maxItems: DEFAULT_SUBAGENT_PARALLEL_MAX_TASKS,
+			}),
+		),
+		chain: Type.Optional(
+			Type.Array(subagentTaskSchema, {
+				description: "Chain mode steps. Each item is { agent, task }; task may include {previous}.",
+				minItems: 1,
+				maxItems: DEFAULT_SUBAGENT_CHAIN_MAX_STEPS,
+			}),
+		),
+	});
+}
 
-const subagentSchema = Type.Object({
-	agent: Type.Optional(Type.String({ description: "Name of the subagent to invoke for single mode" })),
-	task: Type.Optional(Type.String({ description: "Task prompt to send to the subagent for single mode" })),
-	tasks: Type.Optional(
-		Type.Array(subagentTaskSchema, {
-			description: "Parallel mode tasks. Each item is { agent, task }.",
-			minItems: 1,
-			maxItems: DEFAULT_SUBAGENT_PARALLEL_MAX_TASKS,
-		}),
-	),
-	chain: Type.Optional(
-		Type.Array(subagentTaskSchema, {
-			description: "Chain mode steps. Each item is { agent, task }; task may include {previous}.",
-			minItems: 1,
-			maxItems: DEFAULT_SUBAGENT_CHAIN_MAX_STEPS,
-		}),
-	),
-});
+const subagentSchema = createSubagentSchema();
 
-export type SubagentToolTaskInput = Static<typeof subagentTaskSchema>;
+export interface SubagentToolTaskInput {
+	agent: string;
+	task: string;
+}
 export type SubagentToolInput = Static<typeof subagentSchema>;
 export type SubagentToolMode = "single" | "parallel" | "chain";
 export type SubagentToolStatus = "running" | "completed" | "failed" | "aborted";
@@ -166,6 +175,8 @@ export interface SubagentToolDetails {
 
 export interface SubagentToolManager {
 	getDefinition(agentName: string): SubagentDefinition;
+	/** Definitions this runtime is currently allowed to invoke. Omit for unrestricted legacy managers. */
+	listAvailableDefinitions?(): readonly SubagentDefinition[];
 	startByName(agentName: string, options?: SubagentStartByNameOptions): Promise<SubagentHandle>;
 	createDelegationScope?(options?: SubagentDelegationScopeOptions): SubagentDelegationScopeLease;
 	dispose?(): Promise<void>;
@@ -1022,6 +1033,19 @@ export function createSubagentToolDefinition(
 	_options: SubagentToolOptions,
 ): ToolDefinition<typeof subagentSchema, SubagentToolDetails, SubagentRenderState> {
 	const options = _options;
+	const availableDefinitions = options.manager.listAvailableDefinitions?.();
+	const availableNames = availableDefinitions?.map((definition) => definition.name);
+	const availableSummary = availableDefinitions
+		? `Available agents: ${
+				availableDefinitions.map((definition) => `${definition.name} (${definition.description})`).join(", ") ||
+				"none"
+			}.`
+		: BUILT_IN_SUBAGENT_SUMMARY;
+	const availableGuideline = availableNames
+		? availableNames.length > 0
+			? `Use only these available subagent names: ${availableNames.join(", ")}.`
+			: "No subagents are currently available for delegation."
+		: "Prefer specialized built-ins when they fit: researcher for evidence, design-doc for planning/RFCs, security-reviewer for security review, and general for ad hoc delegation.";
 	const maxOutputBytes = Math.min(
 		requirePositiveInteger(options.maxOutputBytes ?? DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES, "maxOutputBytes"),
 		DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES,
@@ -1040,7 +1064,7 @@ export function createSubagentToolDefinition(
 		label: "subagent",
 		description: [
 			"Delegate tasks to named Volt subagents with isolated context windows.",
-			BUILT_IN_SUBAGENT_SUMMARY,
+			availableSummary,
 			"User and project definitions may add custom names; built-in names are reserved.",
 			"Modes: single { agent, task }, parallel { tasks: [{ agent, task }, ...] }, or chain { chain: [{ agent, task }, ...] }.",
 			`Parallel mode runs up to ${DEFAULT_SUBAGENT_PARALLEL_MAX_TASKS} tasks with max concurrency ${DEFAULT_SUBAGENT_PARALLEL_MAX_CONCURRENCY}.`,
@@ -1050,12 +1074,12 @@ export function createSubagentToolDefinition(
 		promptSnippet: "Delegate tasks to named isolated subagents",
 		promptGuidelines: [
 			"Use subagent when a named specialized agent should handle focused work in an isolated context.",
-			"Prefer specialized built-ins when they fit: researcher for evidence, design-doc for planning/RFCs, security-reviewer for security review, and general for ad hoc delegation.",
+			availableGuideline,
 			"Scale delegation to task complexity, avoid duplicate assignments, and stop spawning once existing evidence is sufficient.",
 			"Use parallel mode only for independent tasks whose outputs can be combined after all children finish.",
 			"Use chain mode only when each step depends on the prior successful output via {previous}.",
 		],
-		parameters: subagentSchema,
+		parameters: createSubagentSchema(availableNames),
 		executionMode: "sequential",
 		async execute(
 			_toolCallId,
@@ -1068,6 +1092,21 @@ export function createSubagentToolDefinition(
 			}
 
 			const normalized = normalizeSubagentToolInput(params);
+			const currentAvailableDefinitions = options.manager.listAvailableDefinitions?.();
+			if (currentAvailableDefinitions) {
+				const currentAvailableNames = new Set(currentAvailableDefinitions.map((definition) => definition.name));
+				const unavailableNames = Array.from(
+					new Set(normalized.tasks.map((task) => task.agent).filter((name) => !currentAvailableNames.has(name))),
+				);
+				if (unavailableNames.length > 0) {
+					const available = Array.from(currentAvailableNames);
+					throw new Error(
+						available.length > 0
+							? `Subagent${unavailableNames.length === 1 ? "" : "s"} ${unavailableNames.map((name) => `"${name}"`).join(", ")} ${unavailableNames.length === 1 ? "is" : "are"} not available. Available subagents: ${available.join(", ")}.`
+							: "No subagents are currently available for delegation.",
+					);
+				}
+			}
 			const executionStartedAt = Date.now();
 			const delegationLease = options.manager.createDelegationScope?.({ signal });
 			const activeHandles = new Set<SubagentHandle>();

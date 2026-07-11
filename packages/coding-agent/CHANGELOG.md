@@ -78,6 +78,7 @@
 
 ### Fixed
 
+- Fixed child subagents seeing and attempting disallowed agent names: the `subagent` tool description, prompt guidance, and schema now expose only definitions permitted by the current delegation policy, reject unavailable names before starting work, and omit the tool when no child definition is available.
 - Fixed parent runtime teardown leaving directly-started SDK subagent managers alive after session replacement or disposal.
 - Fixed delayed queued-prompt preflight from accepting and stranding a message after the active run had already settled.
 - Fixed aborted compaction summaries from being committed as successful context checkpoints.

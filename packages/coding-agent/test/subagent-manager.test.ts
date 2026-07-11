@@ -1021,6 +1021,45 @@ describe("SubagentManager", () => {
 		await analyst.dispose();
 	});
 
+	it("lists only definitions allowed by the current delegation policy", async () => {
+		const resourceLoader = createSubagentResourceLoader([
+			createDefinition({ name: "researcher" }),
+			createDefinition({ name: "general" }),
+		]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			subagentContext: {
+				depth: 1,
+				agentName: "researcher",
+				path: ["researcher"],
+				delegationScope: createTestDelegationScope(),
+				allowedSubagents: ["researcher"],
+				maxSubagentDepth: 3,
+				maxChildAgents: 2,
+			},
+		});
+
+		expect(manager.listAvailableDefinitions().map((definition) => definition.name)).toEqual(["researcher"]);
+	});
+
+	it("lists no available definitions when the delegation depth is exhausted", async () => {
+		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			subagentContext: {
+				depth: 2,
+				agentName: "researcher",
+				path: ["researcher", "researcher"],
+				delegationScope: createTestDelegationScope(),
+				allowedSubagents: ["researcher"],
+				maxSubagentDepth: 2,
+				maxChildAgents: 2,
+			},
+		});
+
+		expect(manager.listAvailableDefinitions()).toEqual([]);
+	});
+
 	it("blocks delegated subagent names outside the current policy", async () => {
 		const resourceLoader = createSubagentResourceLoader([
 			createDefinition({ name: "researcher" }),
@@ -1111,6 +1150,7 @@ describe("SubagentManager", () => {
 		});
 
 		const handle = await manager.startByName("researcher");
+		expect(manager.listAvailableDefinitions()).toEqual([]);
 		await expect(manager.startByName("researcher")).rejects.toThrow("cannot start more than 1 child subagent");
 		await handle.dispose();
 	});

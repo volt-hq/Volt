@@ -511,6 +511,27 @@ export class SubagentManager {
 		return resourceLoader?.getSubagents().definitions ?? [];
 	}
 
+	/** Definitions this runtime may delegate to under its inherited child policy. */
+	listAvailableDefinitions(options: { resourceLoader?: ResourceLoader } = {}): SubagentDefinition[] {
+		const definitions = this.listDefinitions(options);
+		const context = this.subagentContext;
+		if (!context) {
+			return definitions;
+		}
+		if (
+			(context.maxSubagentDepth !== undefined && context.depth >= context.maxSubagentDepth) ||
+			(context.maxChildAgents !== undefined && this.childStartCount >= context.maxChildAgents)
+		) {
+			return [];
+		}
+		const allowedSubagents = normalizeUniqueNames(context.allowedSubagents);
+		if (!allowedSubagents) {
+			return definitions;
+		}
+		const allowedNames = new Set(allowedSubagents);
+		return definitions.filter((definition) => allowedNames.has(definition.name));
+	}
+
 	/** List active and recently completed child runs, newest and active first. */
 	listActivities(): SubagentActivity[] {
 		return Array.from(this.activities.values())

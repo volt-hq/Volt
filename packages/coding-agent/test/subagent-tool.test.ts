@@ -159,6 +159,35 @@ describe("subagent tool", () => {
 		expect(tool.description).not.toContain("red-test-runner");
 	});
 
+	it("exposes only subagents allowed by the current manager", async () => {
+		const researcher = createDefinition("researcher");
+		const startByName = vi.fn(async () => createCompletedHandle("unused"));
+		const manager = {
+			getDefinition: () => researcher,
+			listAvailableDefinitions: () => [researcher],
+			startByName,
+		} satisfies SubagentToolManager;
+		const definition = createSubagentToolDefinition({ manager });
+		const tool = createSubagentTool(process.cwd(), { manager });
+
+		expect(definition.description).toContain("researcher (researcher description)");
+		expect(definition.description).not.toContain("general");
+		expect(definition.description).not.toContain("design-doc");
+		expect(definition.description).not.toContain("security-reviewer");
+		expect(definition.promptGuidelines).toContain("Use only these available subagent names: researcher.");
+		expect(definition.parameters).toMatchObject({
+			properties: {
+				agent: { enum: ["researcher"] },
+				tasks: { items: { properties: { agent: { enum: ["researcher"] } } } },
+				chain: { items: { properties: { agent: { enum: ["researcher"] } } } },
+			},
+		});
+		await expect(tool.execute("call-disallowed", { agent: "general", task: "try it" })).rejects.toThrow(
+			'Subagent "general" is not available. Available subagents: researcher.',
+		);
+		expect(startByName).not.toHaveBeenCalled();
+	});
+
 	async function createSession(options: {
 		tools?: string[];
 		responses?: FauxResponseStep[];
@@ -369,7 +398,7 @@ describe("subagent tool", () => {
 		};
 	}
 
-	it("activates the built-in subagent tool by default when a manager is available", async () => {
+	it("activates the built-in subagent tool only when a manager has available definitions", async () => {
 		const defaultSession = await createSession({});
 		expect(defaultSession.getAllTools().map((tool) => tool.name)).toContain("subagent");
 		expect(defaultSession.getActiveToolNames()).toContain("subagent");
@@ -377,6 +406,17 @@ describe("subagent tool", () => {
 		const withoutManagerSession = await createSession({ manager: false });
 		expect(withoutManagerSession.getAllTools().map((tool) => tool.name)).not.toContain("subagent");
 		expect(withoutManagerSession.getActiveToolNames()).not.toContain("subagent");
+
+		const unavailableManager = {
+			getDefinition: () => createDefinition("researcher"),
+			listAvailableDefinitions: () => [],
+			startByName: async () => {
+				throw new Error("not implemented");
+			},
+		} satisfies SubagentToolManager;
+		const unavailableSession = await createSession({ manager: unavailableManager });
+		expect(unavailableSession.getAllTools().map((tool) => tool.name)).not.toContain("subagent");
+		expect(unavailableSession.getActiveToolNames()).not.toContain("subagent");
 	});
 
 	it("respects explicit subagent tool policy opt-outs and allowlists", async () => {

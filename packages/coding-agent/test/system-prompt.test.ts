@@ -122,6 +122,17 @@ describe("buildSystemPrompt", () => {
 				"Write tests against observable behavior and public contracts, not implementation text",
 			);
 		});
+
+		test("does not advertise unrestricted built-in subagents outside the tool contract", () => {
+			const prompt = buildSystemPrompt({
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("Choose only among the agent names exposed by the subagent tool");
+			expect(prompt).not.toContain("Prefer specialized built-ins when they fit: researcher");
+		});
 	});
 
 	describe("custom tool snippets", () => {

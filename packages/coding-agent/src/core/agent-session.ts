@@ -2907,6 +2907,12 @@ export class AgentSession {
 		}
 
 		const directMcpToolDefinitions = this._mcpManager ? createMcpDirectToolDefinitions(this._mcpManager) : [];
+		const subagentToolManager =
+			this._subagentToolManager &&
+			(this._subagentToolManager.listAvailableDefinitions === undefined ||
+				this._subagentToolManager.listAvailableDefinitions().length > 0)
+				? this._subagentToolManager
+				: undefined;
 		const baseToolDefinitions = this._baseToolsOverride
 			? Object.fromEntries(
 					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
@@ -2947,10 +2953,10 @@ export class AgentSession {
 						}),
 					},
 					lsp: { provider: this._lspManager },
-					...(this._subagentToolManager
+					...(subagentToolManager
 						? {
 								subagent: {
-									manager: this._subagentToolManager,
+									manager: subagentToolManager,
 									getAllowedTools: () => this.getActiveToolNames(),
 								},
 							}
@@ -2995,7 +3001,7 @@ export class AgentSession {
 			? Object.keys(this._baseToolsOverride)
 			: [
 					...DEFAULT_ACTIVE_TOOL_NAMES,
-					...(this._subagentToolManager ? ["subagent"] : []),
+					...(subagentToolManager ? ["subagent"] : []),
 					...(this._mcpManager ? ["mcp"] : []),
 					...directMcpToolDefinitions.map((definition) => definition.name),
 					...(this._lspManager ? ["lsp"] : []),

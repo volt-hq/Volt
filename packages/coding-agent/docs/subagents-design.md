@@ -199,7 +199,7 @@ Effective tool policy is:
 effective child tools = (requested child tools OR inherited parent tools) ∩ parent allowed tools ∩ host allowed tools - excluded tools
 ```
 
-If no child tools are requested, inherit the parent's active tool set. `excludedTools` can remove dangerous or recursive capabilities such as `subagent` while preserving the rest of the inherited parent tool posture. Delegation is fail-closed: omitting `allowedSubagents` allows no child names and removes the `subagent` tool from that child. Every descendant shares one root accounting and cancellation scope, but the scope does not impose automatic depth, start, active-descendant, turn, token, cost, or time ceilings. Definition `maxSubagentDepth` values still propagate as the strictest inherited cap, while `maxChildAgents` caps total starts for one runtime. Malformed tool/delegation policy fields reject the affected definition instead of silently dropping restrictions. Built-in research and security-review roles are non-mutating locally but include `web_search`, so they can send query text to the configured external search provider. Any future tool escalation must be an explicit host/SDK option, not the default.
+If no child tools are requested, inherit the parent's active tool set. `excludedTools` can remove dangerous or recursive capabilities such as `subagent` while preserving the rest of the inherited parent tool posture. Delegation is fail-closed: omitting `allowedSubagents` allows no child names and removes the `subagent` tool from that child. When delegation is available, the child-facing tool description, prompt guidelines, and JSON schema enumerate only definitions permitted by the inherited `allowedSubagents` policy; disallowed names are rejected before any child starts. The tool is omitted entirely when no definition is available, including at an inherited depth or zero-child limit. Every descendant shares one root accounting and cancellation scope, but the scope does not impose automatic depth, start, active-descendant, turn, token, cost, or time ceilings. Definition `maxSubagentDepth` values still propagate as the strictest inherited cap, while `maxChildAgents` caps total starts for one runtime. Malformed tool/delegation policy fields reject the affected definition instead of silently dropping restrictions. Built-in research and security-review roles are non-mutating locally but include `web_search`, so they can send query text to the configured external search provider. Any future tool escalation must be an explicit host/SDK option, not the default.
 
 ## RPC lifecycle
 
@@ -229,7 +229,7 @@ Failure semantics:
 
 ## Parent-facing tool
 
-Core exposes a `subagent` tool when a `SubagentManager` exists. The tool is active by default for normal local/SDK sessions with a manager, can be disabled through normal tool policy (`--exclude-tools subagent`, `--no-builtin-tools`, or `--no-tools`), and remains subject to strict explicit allowlists when callers pass `tools`.
+Core exposes a `subagent` tool when a `SubagentManager` exists and its current delegation policy has at least one available definition. The tool is active by default for normal local/SDK sessions with an eligible manager, can be disabled through normal tool policy (`--exclude-tools subagent`, `--no-builtin-tools`, or `--no-tools`), and remains subject to strict explicit allowlists when callers pass `tools`.
 
 Supported MVP modes:
 
