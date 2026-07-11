@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/volt-agent-core";
 import type { AssistantMessage, TextContent } from "@earendil-works/volt-ai";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/volt-tui";
+import { type Component, Markdown, Text, truncateToWidth, visibleWidth } from "@earendil-works/volt-tui";
 import { type Static, Type } from "typebox";
 import type { SessionStats } from "../agent-session.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
@@ -715,25 +715,40 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 	});
 }
 
-function statusIcon(status: SubagentToolOverallStatus, theme: Theme): string {
+type SubagentDisplayStatus = SubagentToolOverallStatus | "pending";
+
+function statusIcon(status: SubagentDisplayStatus, theme: Theme): string {
 	switch (status) {
 		case "completed":
 			return theme.fg("success", "✓");
 		case "failed":
-		case "aborted":
 			return theme.fg("error", "✗");
+		case "aborted":
+			return theme.fg("warning", "○");
 		case "running":
 			return theme.fg("accent", "…");
 		case "partial":
 			return theme.fg("warning", "◐");
+		case "pending":
+			return theme.fg("muted", "○");
 	}
 	return theme.fg("muted", "?");
 }
 
-function statusText(status: SubagentToolOverallStatus, theme: Theme): string {
+function statusText(status: SubagentDisplayStatus, theme: Theme): string {
 	const color =
-		status === "completed" ? "success" : status === "partial" || status === "running" ? "warning" : "error";
-	return theme.fg(color, status);
+		status === "completed"
+			? "success"
+			: status === "partial" || status === "running"
+				? "warning"
+				: status === "pending"
+					? "muted"
+					: status === "aborted"
+						? "warning"
+						: "error";
+	const label =
+		status === "completed" ? "done" : status === "aborted" ? "stopped" : status === "partial" ? "finishing" : status;
+	return theme.fg(color, label);
 }
 
 function getTextContent(result: AgentToolResult<SubagentToolDetails>): string {
@@ -758,16 +773,6 @@ function getTaskInput(
 	return mode === "parallel" ? args.tasks?.[index] : args.chain?.[index];
 }
 
-function subagentDisplayLabel(index: number): string {
-	let value = Math.max(0, index);
-	let suffix = "";
-	do {
-		suffix = String.fromCharCode(65 + (value % 26)) + suffix;
-		value = Math.floor(value / 26) - 1;
-	} while (value >= 0);
-	return `Subagent ${suffix}`;
-}
-
 function formatSummary(details: SubagentToolDetails): string {
 	const summary = details.summary;
 	if (!summary) {
@@ -786,7 +791,7 @@ function formatSummary(details: SubagentToolDetails): string {
 	return parts.join(", ");
 }
 
-function formatTimingSuffix(
+function formatTiming(
 	timing: { startedAt?: number; durationMs?: number } | undefined,
 	isPartial: boolean,
 	theme: Theme,
@@ -795,10 +800,10 @@ function formatTimingSuffix(
 		return "";
 	}
 	if (timing.durationMs !== undefined) {
-		return theme.fg("dim", ` (${formatDuration(timing.durationMs)})`);
+		return theme.fg("dim", formatDuration(timing.durationMs));
 	}
 	if (isPartial && timing.startedAt !== undefined) {
-		return theme.fg("dim", ` (${formatDuration(Date.now() - timing.startedAt)})`);
+		return theme.fg("dim", formatDuration(Date.now() - timing.startedAt));
 	}
 	return "";
 }
@@ -813,48 +818,94 @@ function outputWarning(output: SubagentToolOutputDetails | undefined, theme: The
 interface SubagentConversationItem {
 	index: number;
 	agent: SubagentToolAgentDetails;
-	status: SubagentToolOverallStatus;
+	status: SubagentDisplayStatus;
 	input?: SubagentToolTaskInput;
 	timing?: { startedAt?: number; durationMs?: number };
+	usage?: SubagentToolUsageDetails;
 	output?: SubagentToolOutputDetails;
 	error?: SubagentToolErrorDetails;
 }
 
-class SubagentConversationSummaryComponent extends Container {
+function formatCompactCount(value: number): string {
+	if (value < 1_000) return String(value);
+	if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 100_000 ? 1 : 0).replace(/\.0$/, "")}k`;
+	return `${(value / 1_000_000).toFixed(value < 100_000_000 ? 1 : 0).replace(/\.0$/, "")}m`;
+}
+
+function pluralize(count: number, singular: string, plural = `${singular}s`): string {
+	return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function renderRosterSummary(items: readonly SubagentConversationItem[], currentTheme: Theme): string {
+	const counts = { running: 0, done: 0, failed: 0, stopped: 0, pending: 0 };
+	for (const item of items) {
+		if (item.status === "completed") counts.done += 1;
+		else if (item.status === "failed") counts.failed += 1;
+		else if (item.status === "aborted") counts.stopped += 1;
+		else if (item.status === "pending") counts.pending += 1;
+		else counts.running += 1;
+	}
+	const parts: string[] = [];
+	if (counts.running > 0) parts.push(currentTheme.fg("warning", `${counts.running} running`));
+	if (counts.pending > 0) parts.push(currentTheme.fg("muted", `${counts.pending} pending`));
+	if (counts.done > 0) parts.push(currentTheme.fg("success", `${counts.done} done`));
+	if (counts.failed > 0) parts.push(currentTheme.fg("error", `${counts.failed} failed`));
+	if (counts.stopped > 0) parts.push(currentTheme.fg("warning", `${counts.stopped} stopped`));
+	return parts.join(currentTheme.fg("dim", " · "));
+}
+
+function appendIndentedMarkdown(
+	lines: string[],
+	text: string,
+	width: number,
+	currentTheme: Theme,
+	branchPrefix: string,
+): void {
+	const prefix = currentTheme.fg("muted", branchPrefix);
+	const rendered = new Markdown(text, 3, 0, getMarkdownTheme(), {
+		color: (value) => currentTheme.fg("toolOutput", value),
+	}).render(Math.max(1, width - visibleWidth(prefix)));
+	for (const line of rendered) {
+		lines.push(truncateToWidth(`${prefix}${line.replace(/ +$/, "")}`, width, currentTheme.fg("dim", "…")));
+	}
+}
+
+class SubagentConversationSummaryComponent implements Component {
 	private args: SubagentToolInput | undefined;
 	private details: SubagentToolDetails | undefined;
 	private resultText = "";
 	private isPartial = true;
+	private resultIsError = false;
+	private expanded = false;
+	private executionStarted = false;
 	private currentTheme: Theme;
 
 	constructor(args: SubagentToolInput | undefined, currentTheme: Theme) {
-		super();
 		this.args = args;
 		this.currentTheme = currentTheme;
-		this.rebuild();
 	}
 
 	setArgs(args: SubagentToolInput | undefined): void {
 		this.args = args;
-		this.rebuild();
 	}
 
 	setTheme(currentTheme: Theme): void {
 		this.currentTheme = currentTheme;
-		this.rebuild();
 	}
 
-	setResult(result: AgentToolResult<SubagentToolDetails>, isPartial: boolean): void {
+	setRenderState(expanded: boolean, executionStarted: boolean): void {
+		this.expanded = expanded;
+		this.executionStarted = executionStarted;
+	}
+
+	setResult(result: AgentToolResult<SubagentToolDetails>, isPartial: boolean, isError: boolean): void {
 		this.details = result.details;
 		this.resultText = getTextContent(result);
 		this.isPartial = isPartial;
-		this.rebuild();
+		this.resultIsError = isError;
 	}
 
-	override invalidate(): void {
-		super.invalidate();
-		this.rebuild();
-	}
+	invalidate(): void {}
 
 	private getItems(): SubagentConversationItem[] {
 		if (this.details?.mode === "single") {
@@ -865,6 +916,7 @@ class SubagentConversationSummaryComponent extends Container {
 					status: this.details.status,
 					input: getTaskInput(this.args, "single", 0),
 					timing: this.details,
+					usage: this.details.usage,
 					output: this.details.output,
 					error: this.details.error,
 				},
@@ -880,6 +932,7 @@ class SubagentConversationSummaryComponent extends Container {
 					status: item.status,
 					input: getTaskInput(this.args, this.details!.mode, item.index),
 					timing: item,
+					usage: item.usage,
 					output: item.output,
 					error: item.error,
 				}));
@@ -890,56 +943,78 @@ class SubagentConversationSummaryComponent extends Container {
 			this.args?.tasks ??
 			this.args?.chain ??
 			(this.args?.agent ? [{ agent: this.args.agent, task: this.args.task ?? "" }] : []);
-		return inputs.map((input, index) => ({
+		const displayInputs =
+			this.resultIsError && inputs.length === 0
+				? [{ agent: this.args?.agent ?? "subagent", task: this.args?.task ?? "" }]
+				: inputs;
+		return displayInputs.map((input, index) => ({
 			index,
 			agent: { name: input.agent },
-			status: this.details?.status ?? "running",
+			status: this.resultIsError
+				? index === 0
+					? "failed"
+					: "pending"
+				: (this.details?.status ?? (this.executionStarted ? "running" : "pending")),
 			input,
+			...(this.resultIsError && index === 0 && this.resultText ? { error: { message: this.resultText } } : {}),
 		}));
 	}
 
-	private rebuild(): void {
-		this.clear();
+	render(width: number): string[] {
+		const safeWidth = Math.max(1, width);
 		const items = this.getItems();
 		if (items.length === 0) {
-			this.addChild(new Text(this.currentTheme.fg("muted", "Preparing subagent…"), 1, 0));
-			return;
+			return [truncateToWidth(this.currentTheme.fg("muted", "  Preparing subagent…"), safeWidth, "")];
 		}
 
+		const lines: string[] = [];
+		const mode = this.details?.mode ?? (this.args?.tasks ? "parallel" : this.args?.chain ? "chain" : "single");
+		const title = this.currentTheme.bold(
+			this.currentTheme.fg("accent", items.length === 1 ? "Subagent" : "Subagents"),
+		);
+		const modeLabel = items.length > 1 ? this.currentTheme.fg("dim", ` · ${mode}`) : "";
+		const summary = renderRosterSummary(items, this.currentTheme);
+		lines.push(truncateToWidth(`${title}${modeLabel}${summary ? `  ${summary}` : ""}`, safeWidth, ""));
+
 		for (const [position, item] of items.entries()) {
-			if (position > 0) this.addChild(new Spacer(1));
-			const label = this.currentTheme.bold(this.currentTheme.fg("accent", subagentDisplayLabel(item.index)));
-			const agent = this.currentTheme.fg("muted", ` · ${item.agent.name}`);
-			const state = `${statusIcon(item.status, this.currentTheme)} ${statusText(item.status, this.currentTheme)}`;
-			this.addChild(
-				new Text(
-					`${label}${agent}  ${state}${formatTimingSuffix(item.timing, this.isPartial, this.currentTheme)}`,
-					1,
-					0,
+			const last = position === items.length - 1;
+			const branch = last ? "└─" : "├─";
+			const continuation = last ? "  " : "│ ";
+			const agentLabel = this.currentTheme.bold(this.currentTheme.fg("text", item.agent.name));
+			const task = item.input?.task?.replace(/\s+/g, " ").trim();
+			const taskPrefix = `${this.currentTheme.fg("muted", `${branch} `)}${statusIcon(item.status, this.currentTheme)} ${agentLabel}`;
+			const taskSuffix = task ? this.currentTheme.fg("muted", ` · ${task}`) : "";
+			lines.push(truncateToWidth(`${taskPrefix}${taskSuffix}`, safeWidth, this.currentTheme.fg("dim", "…")));
+
+			const metadata: string[] = [statusText(item.status, this.currentTheme)];
+			const toolCalls = item.usage?.messages.toolCalls;
+			if (toolCalls !== undefined) metadata.push(this.currentTheme.fg("muted", pluralize(toolCalls, "tool call")));
+			const timing = formatTiming(item.timing, this.isPartial, this.currentTheme);
+			if (timing) metadata.push(timing);
+			const tokens = item.usage?.tokens.total;
+			if (tokens !== undefined) metadata.push(this.currentTheme.fg("dim", `${formatCompactCount(tokens)} tokens`));
+			if (item.error?.message) metadata.push(this.currentTheme.fg("error", item.error.message.replace(/\s+/g, " ")));
+			lines.push(
+				truncateToWidth(
+					`${this.currentTheme.fg("muted", `${continuation}  `)}${metadata.join(this.currentTheme.fg("dim", " · "))}`,
+					safeWidth,
+					this.currentTheme.fg("dim", "…"),
 				),
 			);
-			if (item.input?.task) {
-				this.addChild(new Text(this.currentTheme.fg("dim", item.input.task), 2, 0));
-			}
-			if (item.error?.message) {
-				this.addChild(new Text(this.currentTheme.fg("error", item.error.message), 2, 0));
-			}
+
 			const warning = outputWarning(item.output, this.currentTheme);
-			if (warning) this.addChild(new Text(warning, 2, 0));
-			if (item.output?.text) {
-				this.addChild(
-					new Markdown(item.output.text, 1, 0, getMarkdownTheme(), {
-						color: (text) => this.currentTheme.fg("toolOutput", text),
-					}),
-				);
-			} else if (items.length === 1 && !this.isPartial && this.resultText) {
-				this.addChild(
-					new Markdown(this.resultText, 1, 0, getMarkdownTheme(), {
-						color: (text) => this.currentTheme.fg("toolOutput", text),
-					}),
-				);
+			if (warning) {
+				lines.push(truncateToWidth(`${continuation}  ${warning}`, safeWidth, this.currentTheme.fg("dim", "…")));
+			}
+			if (!this.expanded) continue;
+			const outputText = item.output?.text ?? (items.length === 1 && !this.isPartial ? this.resultText : undefined);
+			if (outputText && outputText.trim() !== item.error?.message?.trim()) {
+				appendIndentedMarkdown(lines, outputText, safeWidth, this.currentTheme, continuation);
 			}
 		}
+		return lines.map((line) =>
+			visibleWidth(line) > safeWidth ? truncateToWidth(line, safeWidth, this.currentTheme.fg("dim", "…")) : line,
+		);
 	}
 }
 
@@ -1298,11 +1373,12 @@ export function createSubagentToolDefinition(
 			context.state.summary = summary;
 			summary.setTheme(theme);
 			summary.setArgs(args);
+			summary.setRenderState(context.expanded, context.executionStarted);
 			return summary;
 		},
 		renderResult(result, options, _theme, context) {
 			const state = context.state;
-			state.summary?.setResult(result, options.isPartial);
+			state.summary?.setResult(result, options.isPartial, context.isError);
 			if (options.isPartial && !context.isError) {
 				// Tick once a second while running so elapsed times update live.
 				state.interval ??= setInterval(() => context.invalidate(), 1000);

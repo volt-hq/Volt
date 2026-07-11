@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import { Text, type TUI } from "@earendil-works/volt-tui";
+import { Text, type TUI, visibleWidth } from "@earendil-works/volt-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { getReadmePath } from "../src/config.ts";
@@ -457,16 +457,43 @@ describe("ToolExecutionComponent parity", () => {
 		);
 
 		const collapsed = stripAnsi(component.render(120).join("\n"));
-		expect(collapsed).toContain("Subagent A · scout");
-		expect(collapsed).toContain("completed (32.1s)");
-		expect(collapsed).toContain("Inspect the auth flow");
-		expect(collapsed).toContain("final answer");
-		expect(collapsed).toContain("subagents");
-		expect(collapsed).not.toContain("1 turn");
+		expect(collapsed).toContain("Subagent  1 done");
+		expect(collapsed).toContain("scout · Inspect the auth flow");
+		expect(collapsed).toContain("done · 0 tool calls · 32.1s · 30 tokens");
+		expect(collapsed).not.toContain("final answer");
+		expect(collapsed).toContain("inspect");
+		expect(collapsed).toContain("outputs");
 
 		component.setExpanded(true);
 		const expanded = stripAnsi(component.render(120).join("\n"));
 		expect(expanded).toContain("final answer");
+		expect(expanded).toContain("collapse outputs");
+	});
+
+	test("renders unstructured built-in subagent failures as terminal errors", () => {
+		const component = new ToolExecutionComponent(
+			"subagent",
+			"tool-subagent-error",
+			{ agent: "missing", task: "Inspect the auth flow" },
+			{},
+			createSubagentRenderDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "Unknown subagent: missing" }],
+				isError: true,
+			},
+			false,
+		);
+
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("Subagent  1 failed");
+		expect(rendered).toContain("✗ missing · Inspect the auth flow");
+		expect(rendered).toContain("failed · Unknown subagent: missing");
+		expect(rendered).not.toContain("running");
 	});
 
 	test("renders built-in subagent parallel statuses in stable order", () => {
@@ -518,14 +545,15 @@ describe("ToolExecutionComponent parity", () => {
 		);
 
 		const collapsed = stripAnsi(component.render(140).join("\n"));
-		expect(collapsed).not.toContain("subagent parallel");
-		expect(collapsed.indexOf("Subagent A · alpha")).toBeLessThan(collapsed.indexOf("Subagent B · beta"));
-		expect(collapsed).toContain("completed");
+		expect(collapsed).toContain("Subagents · parallel  1 done · 1 failed");
+		expect(collapsed.indexOf("alpha · First task")).toBeLessThan(collapsed.indexOf("beta · Second task"));
+		expect(collapsed).toContain("done");
 		expect(collapsed).toContain("failed");
 		expect(collapsed).toContain("First task");
 		expect(collapsed).toContain("Second task");
-		expect(collapsed).toContain("alpha output");
-		expect(collapsed).toContain("beta failed");
+		expect(collapsed).not.toContain("alpha output");
+		expect(collapsed.match(/beta failed/g)?.length).toBe(1);
+		for (const line of component.render(32)) expect(visibleWidth(line)).toBeLessThanOrEqual(32);
 
 		component.setExpanded(true);
 		const expanded = stripAnsi(component.render(140).join("\n"));
@@ -580,11 +608,12 @@ describe("ToolExecutionComponent parity", () => {
 		);
 
 		const collapsed = stripAnsi(component.render(140).join("\n"));
-		expect(collapsed).not.toContain("subagent parallel");
-		expect(collapsed).toMatch(/Subagent A · alpha {2}… running \(6[45]\.\ds\)/);
+		expect(collapsed).toContain("Subagents · parallel  2 running");
+		expect(collapsed).toContain("├─ … alpha · First task");
+		expect(collapsed).toMatch(/│ {3}running · 6[45]\.\ds/);
 		// Tasks without a startedAt render no elapsed time.
-		expect(collapsed).toContain("Subagent B · beta  … running");
-		expect(collapsed).not.toMatch(/Subagent B · beta {2}… running \(/);
+		expect(collapsed).toContain("└─ … beta · Second task");
+		expect(collapsed).toMatch(/\n {4}running\n/);
 		expect(collapsed).toContain("First task");
 		expect(collapsed).toContain("Second task");
 
@@ -649,11 +678,11 @@ describe("ToolExecutionComponent parity", () => {
 		);
 
 		const expanded = stripAnsi(component.render(140).join("\n"));
-		expect(expanded).not.toContain("subagent chain");
-		expect(expanded).toContain("Subagent A · first");
+		expect(expanded).toContain("Subagents · chain  2 done");
+		expect(expanded).toContain("first · Collect facts");
 		expect(expanded).toContain("Collect facts");
 		expect(expanded).toContain("first output");
-		expect(expanded).toContain("Subagent B · second");
+		expect(expanded).toContain("second · Use {previous} to decide");
 		expect(expanded).toContain("Use {previous} to decide");
 		expect(expanded).toContain("second output");
 	});

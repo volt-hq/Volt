@@ -120,7 +120,24 @@ function statusGlyph(status: SubagentActivityStatus): string {
 function statusLabel(status: SubagentActivityStatus): string {
 	const color =
 		status === "completed" ? "success" : status === "failed" ? "error" : status === "aborted" ? "warning" : "accent";
-	return theme.fg(color, status);
+	const label = status === "completed" ? "done" : status === "aborted" ? "stopped" : status;
+	return theme.fg(color, label);
+}
+
+function activitySummary(activities: readonly SubagentActivity[]): string {
+	const counts = { running: 0, done: 0, failed: 0, stopped: 0 };
+	for (const activity of activities) {
+		if (activity.status === "running") counts.running += 1;
+		else if (activity.status === "completed") counts.done += 1;
+		else if (activity.status === "failed") counts.failed += 1;
+		else counts.stopped += 1;
+	}
+	const parts: string[] = [];
+	if (counts.running > 0) parts.push(theme.fg("warning", `${counts.running} running`));
+	if (counts.done > 0) parts.push(theme.fg("success", `${counts.done} done`));
+	if (counts.failed > 0) parts.push(theme.fg("error", `${counts.failed} failed`));
+	if (counts.stopped > 0) parts.push(theme.fg("warning", `${counts.stopped} stopped`));
+	return parts.join(theme.fg("dim", " · "));
 }
 
 function toolStatusGlyph(status: ToolTimelineItem["status"]): string {
@@ -392,21 +409,22 @@ export class SubagentInspectorComponent implements Component {
 	private renderHeader(width: number): string[] {
 		const activity = this.activities[this.selectedIndex];
 		const position = this.activities.length > 0 ? `${this.selectedIndex + 1}/${this.activities.length}` : "0/0";
+		const summary = activitySummary(this.activities);
+		const overview = truncateToWidth(
+			`${theme.bold(theme.fg("accent", "Subagents"))}${summary ? `  ${summary}` : ""}`,
+			width,
+			"",
+		);
 		if (!activity) {
-			return [
-				truncateToWidth(
-					`${theme.bold(theme.fg("accent", "Subagents"))}  ${theme.fg("muted", position)}`,
-					width,
-					"",
-				),
-			];
+			return [overview];
 		}
-		const label = theme.bold(theme.fg("accent", subagentDisplayLabel(this.selectedIndex)));
+		const label = theme.bold(theme.fg("text", subagentDisplayLabel(this.selectedIndex)));
 		const name = theme.fg("muted", ` · ${cleanTerminalText(activity.agent.name)}`);
 		const state = `${statusGlyph(activity.status)} ${statusLabel(activity.status)}`;
 		return [
+			overview,
 			truncateToWidth(
-				`${theme.bold(theme.fg("accent", "Subagents"))}  ${label}${name}  ${state}${theme.fg("dim", ` · ${formatDuration(activity)} · ${position}`)}`,
+				`${label}${name}  ${state}${theme.fg("dim", ` · ${formatDuration(activity)} · ${position}`)}`,
 				width,
 				"",
 			),

@@ -502,6 +502,14 @@ tui.resetRenderMetrics();
 
 A low terminal byte count does not necessarily mean component rendering is cheap. If `generatedLines` grows much faster than `terminalWrites`, inspect component invalidation, caching, and update coalescing.
 
+Run the deterministic streaming Markdown benchmark from the repository root to compare eager and coalesced rendering with 0, 1,000, and 10,000 lines of transcript history:
+
+```bash
+npm run benchmark:streaming-markdown
+```
+
+The benchmark verifies identical final output, reduced frames and terminal writes, bounded logical line generation, and no full redraws when transcript history is present.
+
 ## Invalidation and Theme Changes
 
 When the theme changes, the TUI calls `invalidate()` on all components to clear their caches. Components must properly implement `invalidate()` to ensure theme changes take effect.

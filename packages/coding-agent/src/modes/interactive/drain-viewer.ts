@@ -2,6 +2,7 @@ import type { MarkdownTheme, TUI } from "@earendil-works/volt-tui";
 import { Container, Loader, Spacer, Text } from "@earendil-works/volt-tui";
 import { theme } from "../../core/theme/runtime.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
+import { isCoalescableAssistantUpdate, StreamingRenderCoalescer } from "./components/streaming-render-coalescer.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 
@@ -23,6 +24,7 @@ type ViewerEvent = {
 	/** {kind:"truncated"}: buffer overflowed daemon-side; spinner only. */
 	kind?: string;
 	message?: ViewerMessage;
+	assistantMessageEvent?: { type?: string };
 	toolCallId?: string;
 	toolName?: string;
 	args?: Record<string, unknown>;
@@ -48,6 +50,7 @@ export class DrainViewerComponent extends Container {
 	private readonly loader: Loader;
 	private readonly content = new Container();
 	private streamingComponent: AssistantMessageComponent | undefined;
+	private streamingRenderCoalescer: StreamingRenderCoalescer<ViewerMessage> | undefined;
 	private readonly pendingTools = new Map<string, ToolExecutionComponent>();
 	private truncated = false;
 	private finished = false;
@@ -81,9 +84,12 @@ export class DrainViewerComponent extends Container {
 			// Too much history to replay; show only the spinner and rely on the
 			// post-grant session file load.
 			this.truncated = true;
+			this.streamingRenderCoalescer?.dispose();
+			this.streamingRenderCoalescer = undefined;
 			this.content.clear();
 			this.streamingComponent = undefined;
 			this.pendingTools.clear();
+			this.tui.requestRender();
 			return;
 		}
 		if (this.truncated && event.type !== "agent_end") {
@@ -97,6 +103,7 @@ export class DrainViewerComponent extends Container {
 			case "message_start": {
 				const message = event.message;
 				if (message?.role === "assistant") {
+					this.streamingRenderCoalescer?.dispose();
 					this.streamingComponent = new AssistantMessageComponent(
 						undefined,
 						this.options.hideThinkingBlock,
@@ -104,7 +111,12 @@ export class DrainViewerComponent extends Container {
 						this.options.hiddenThinkingLabel,
 					);
 					this.content.addChild(this.streamingComponent);
-					this.updateStreaming(message);
+					this.streamingRenderCoalescer = new StreamingRenderCoalescer((latest) => {
+						this.streamingComponent?.updateContent(latest as never);
+						this.tui.requestRender();
+					});
+					this.streamingRenderCoalescer.commitNow(message);
+					this.upsertToolCalls(message);
 				} else if (message?.role === "user") {
 					const text = (message.content ?? [])
 						.filter((part) => part.type === "text" && typeof part.text === "string")
@@ -118,16 +130,25 @@ export class DrainViewerComponent extends Container {
 			}
 			case "message_update": {
 				if (event.message?.role === "assistant") {
-					this.updateStreaming(event.message);
+					if (isCoalescableAssistantUpdate(event.assistantMessageEvent?.type)) {
+						this.streamingRenderCoalescer?.update(event.message);
+					} else {
+						this.streamingRenderCoalescer?.commitNow(event.message);
+					}
+					if (event.assistantMessageEvent?.type?.startsWith("toolcall_")) {
+						this.upsertToolCalls(event.message);
+					}
 				}
-				break;
+				return;
 			}
 			case "message_end": {
 				if (event.message?.role === "assistant") {
-					this.updateStreaming(event.message);
+					this.streamingRenderCoalescer?.finish(event.message);
+					this.streamingRenderCoalescer = undefined;
+					this.upsertToolCalls(event.message);
 					this.streamingComponent = undefined;
 				}
-				break;
+				return;
 			}
 			case "tool_execution_start": {
 				if (typeof event.toolCallId === "string") {
@@ -159,14 +180,10 @@ export class DrainViewerComponent extends Container {
 			default:
 				break;
 		}
+		this.tui.requestRender();
 	}
 
-	private updateStreaming(message: ViewerMessage): void {
-		const component = this.streamingComponent;
-		if (!component) {
-			return;
-		}
-		component.updateContent(message as never);
+	private upsertToolCalls(message: ViewerMessage): void {
 		for (const part of message.content ?? []) {
 			if (part.type === "toolCall" && typeof part.id === "string") {
 				const existing = this.pendingTools.get(part.id);
@@ -204,6 +221,8 @@ export class DrainViewerComponent extends Container {
 	/** Stop the spinner; the component is removed by the post-grant re-render. */
 	finish(message?: string): void {
 		this.finished = true;
+		this.streamingRenderCoalescer?.dispose();
+		this.streamingRenderCoalescer = undefined;
 		if (message) {
 			this.loader.setMessage(message);
 		}

@@ -1,7 +1,11 @@
 import { KeybindingsManager, setKeybindings } from "@earendil-works/volt-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import { KEYBINDINGS } from "../src/core/keybindings.ts";
-import { editorTopBorderLabel, keyDisplayText } from "../src/modes/interactive/components/keybinding-hints.ts";
+import {
+	editorTopBorderLabel,
+	editorTopBorderLabelForState,
+	keyDisplayText,
+} from "../src/modes/interactive/components/keybinding-hints.ts";
 
 describe("editorTopBorderLabel", () => {
 	beforeAll(() => {
@@ -17,8 +21,14 @@ describe("editorTopBorderLabel", () => {
 		expect(label).toContain(`${keyDisplayText("app.interrupt")} stop`);
 	});
 
+	it("shows steering controls only while streaming with editor text", () => {
+		expect(editorTopBorderLabelForState({ bashMode: false, streaming: true, hasText: false })).toBe("ASK VOLT");
+		expect(editorTopBorderLabelForState({ bashMode: false, streaming: false, hasText: true })).toBe("ASK VOLT");
+		expect(editorTopBorderLabelForState({ bashMode: false, streaming: true, hasText: true })).toContain("STEER");
+	});
+
 	it("keeps idle and shell labels concise", () => {
 		expect(editorTopBorderLabel("ask")).toBe("ASK VOLT");
-		expect(editorTopBorderLabel("shell")).toBe("SHELL");
+		expect(editorTopBorderLabelForState({ bashMode: true, streaming: true, hasText: true })).toBe("SHELL");
 	});
 });

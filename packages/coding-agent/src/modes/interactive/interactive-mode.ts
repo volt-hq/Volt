@@ -181,6 +181,7 @@ import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
 import { type HotkeySection, HotkeysComponent } from "./components/hotkeys.ts";
+import { isCoalescableAssistantUpdate, StreamingRenderCoalescer } from "./components/streaming-render-coalescer.ts";
 import {
 	type AcquireOutcome,
 	createDaemonAttach,
@@ -219,7 +220,7 @@ import {
 	theme,
 } from "../../core/theme/runtime.ts";
 import {
-	editorTopBorderLabel,
+	editorTopBorderLabelForState,
 	formatKeyText,
 	keyDisplayText,
 	keyHint,
@@ -425,6 +426,7 @@ export class InteractiveMode {
 	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
 	private streamingMessage: AssistantMessage | undefined = undefined;
+	private streamingRenderCoalescer: StreamingRenderCoalescer<AssistantMessage> | undefined = undefined;
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
@@ -442,8 +444,9 @@ export class InteractiveMode {
 	private unsubscribe?: () => void;
 	private signalCleanupHandlers: Array<() => void> = [];
 
-	// Track if editor is in bash mode (text starts with !)
+	// Track editor modes that affect the border treatment and label.
 	private isBashMode = false;
+	private editorHasText = false;
 
 	// Track current bash execution component
 	private bashComponent: BashExecutionComponent | undefined = undefined;
@@ -1720,7 +1723,6 @@ export class InteractiveMode {
 			}
 			if (event.type === "viewer_event" && event.viewerFeedId === this.drainViewerFeedId) {
 				this.drainViewer?.handleViewerEvent(event.event);
-				this.ui.requestRender();
 			}
 			if (
 				event.type === "viewer_end" &&
@@ -2127,6 +2129,8 @@ export class InteractiveMode {
 		this.chatContainer.clear();
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
+		this.streamingRenderCoalescer?.dispose();
+		this.streamingRenderCoalescer = undefined;
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
@@ -2872,7 +2876,13 @@ export class InteractiveMode {
 			if (newEditor.setPaddingX !== undefined) {
 				newEditor.setPaddingX(this.defaultEditor.getPaddingX());
 			}
-			newEditor.setTopBorderLabel?.(this.isBashMode ? "SHELL" : "ASK VOLT");
+			newEditor.setTopBorderLabel?.(
+				editorTopBorderLabelForState({
+					bashMode: this.isBashMode,
+					streaming: this.session.isStreaming,
+					hasText: currentText.length > 0,
+				}),
+			);
 
 			// Set autocomplete if supported
 			if (newEditor.setAutocompleteProvider && this.autocompleteProvider) {
@@ -3095,8 +3105,10 @@ export class InteractiveMode {
 
 		this.defaultEditor.onChange = (text: string) => {
 			const wasBashMode = this.isBashMode;
+			const hadText = this.editorHasText;
 			this.isBashMode = text.trimStart().startsWith("!");
-			if (wasBashMode !== this.isBashMode) {
+			this.editorHasText = text.length > 0;
+			if (wasBashMode !== this.isBashMode || (this.session.isStreaming && hadText !== this.editorHasText)) {
 				this.updateEditorBorderColor();
 			}
 		};
@@ -3500,6 +3512,7 @@ export class InteractiveMode {
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
+					this.streamingRenderCoalescer?.dispose();
 					this.streamingComponent = new AssistantMessageComponent(
 						undefined,
 						this.hideThinkingBlock,
@@ -3508,43 +3521,49 @@ export class InteractiveMode {
 					);
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
-					this.streamingComponent.updateContent(this.streamingMessage);
-					this.ui.requestRender();
+					this.streamingRenderCoalescer = new StreamingRenderCoalescer((message) => {
+						this.streamingComponent?.updateContent(message);
+						this.ui.requestRender();
+					});
+					this.streamingRenderCoalescer.commitNow(this.streamingMessage);
 				}
 				break;
 
 			case "message_update":
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
-					this.streamingComponent.updateContent(this.streamingMessage);
+					if (isCoalescableAssistantUpdate(event.assistantMessageEvent.type)) {
+						this.streamingRenderCoalescer?.update(this.streamingMessage);
+					} else {
+						this.streamingRenderCoalescer?.commitNow(this.streamingMessage);
+					}
 
-					for (const content of this.streamingMessage.content) {
-						if (content.type === "toolCall") {
-							if (!this.pendingTools.has(content.id)) {
-								const component = new ToolExecutionComponent(
-									content.name,
-									content.id,
-									content.arguments,
-									{
-										showImages: this.settingsManager.getShowImages(),
-										imageWidthCells: this.settingsManager.getImageWidthCells(),
-									},
-									this.getRegisteredToolDefinition(content.name),
-									this.ui,
-									this.sessionManager.getCwd(),
-								);
-								component.setExpanded(this.toolOutputExpanded);
-								this.chatContainer.addChild(component);
-								this.pendingTools.set(content.id, component);
-							} else {
-								const component = this.pendingTools.get(content.id);
-								if (component) {
-									component.updateArgs(content.arguments);
+					if (event.assistantMessageEvent.type.startsWith("toolcall_")) {
+						for (const content of this.streamingMessage.content) {
+							if (content.type === "toolCall") {
+								if (!this.pendingTools.has(content.id)) {
+									const component = new ToolExecutionComponent(
+										content.name,
+										content.id,
+										content.arguments,
+										{
+											showImages: this.settingsManager.getShowImages(),
+											imageWidthCells: this.settingsManager.getImageWidthCells(),
+										},
+										this.getRegisteredToolDefinition(content.name),
+										this.ui,
+										this.sessionManager.getCwd(),
+									);
+									component.setExpanded(this.toolOutputExpanded);
+									this.chatContainer.addChild(component);
+									this.pendingTools.set(content.id, component);
+								} else {
+									const component = this.pendingTools.get(content.id);
+									component?.updateArgs(content.arguments);
 								}
 							}
 						}
 					}
-					this.ui.requestRender();
 				}
 				break;
 
@@ -3561,7 +3580,11 @@ export class InteractiveMode {
 								: "Operation aborted";
 						this.streamingMessage.errorMessage = errorMessage;
 					}
-					this.streamingComponent.updateContent(this.streamingMessage);
+					if (this.streamingRenderCoalescer) {
+						this.streamingRenderCoalescer.finish(this.streamingMessage);
+					} else {
+						this.streamingComponent.updateContent(this.streamingMessage);
+					}
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
 						if (!errorMessage) {
@@ -3580,6 +3603,7 @@ export class InteractiveMode {
 							component.setArgsComplete();
 						}
 					}
+					this.streamingRenderCoalescer = undefined;
 					this.streamingComponent = undefined;
 					this.streamingMessage = undefined;
 					this.footer.invalidate();
@@ -3641,6 +3665,8 @@ export class InteractiveMode {
 					this.loadingAnimation = undefined;
 					this.statusContainer.clear();
 				}
+				this.streamingRenderCoalescer?.dispose();
+				this.streamingRenderCoalescer = undefined;
 				if (this.streamingComponent) {
 					this.chatContainer.removeChild(this.streamingComponent);
 					this.streamingComponent = undefined;
@@ -4323,14 +4349,16 @@ export class InteractiveMode {
 	}
 
 	private updateEditorBorderColor(streaming = this.session.isStreaming): void {
-		if (this.isBashMode) {
-			this.editor.borderColor = theme.getBashModeBorderColor();
-			this.editor.setTopBorderLabel?.(editorTopBorderLabel("shell"));
-		} else {
-			const level = this.session.thinkingLevel || "off";
-			this.editor.borderColor = theme.getThinkingBorderColor(level);
-			this.editor.setTopBorderLabel?.(editorTopBorderLabel(streaming ? "steer" : "ask"));
-		}
+		this.editor.borderColor = this.isBashMode
+			? theme.getBashModeBorderColor()
+			: theme.getThinkingBorderColor(this.session.thinkingLevel || "off");
+		this.editor.setTopBorderLabel?.(
+			editorTopBorderLabelForState({
+				bashMode: this.isBashMode,
+				streaming,
+				hasText: this.editor.getText().length > 0,
+			}),
+		);
 		this.ui.requestRender();
 	}
 
@@ -4392,6 +4420,7 @@ export class InteractiveMode {
 
 		// If streaming, re-add the streaming component with updated visibility and re-render
 		if (this.streamingComponent && this.streamingMessage) {
+			this.streamingRenderCoalescer?.commitNow(this.streamingMessage);
 			this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
 			this.streamingComponent.updateContent(this.streamingMessage);
 			this.chatContainer.addChild(this.streamingComponent);
@@ -7874,6 +7903,7 @@ export class InteractiveMode {
 		this.chatContainer.addChild(group);
 
 		let streaming: AssistantMessageComponent | undefined;
+		let streamingRenderCoalescer: StreamingRenderCoalescer<AssistantMessage> | undefined;
 		const pending = new Map<string, ToolExecutionComponent>();
 		const toolOptions = () => ({
 			showImages: this.settingsManager.getShowImages(),
@@ -7909,6 +7939,7 @@ export class InteractiveMode {
 			switch (event.type) {
 				case "message_start":
 					if (event.message.role === "assistant") {
+						streamingRenderCoalescer?.dispose();
 						streaming = new AssistantMessageComponent(
 							undefined,
 							this.hideThinkingBlock,
@@ -7916,24 +7947,35 @@ export class InteractiveMode {
 							this.hiddenThinkingLabel,
 						);
 						group.addChild(streaming);
-						streaming.updateContent(forDisplay(event.message));
+						streamingRenderCoalescer = new StreamingRenderCoalescer((message: AssistantMessage) => {
+							streaming?.updateContent(forDisplay(message));
+							this.ui.requestRender();
+						});
+						streamingRenderCoalescer.commitNow(event.message);
 					}
 					break;
 				case "message_update":
 					if (streaming && event.message.role === "assistant") {
-						streaming.updateContent(forDisplay(event.message));
-						upsertToolCalls(event.message);
+						if (isCoalescableAssistantUpdate(event.assistantMessageEvent.type)) {
+							streamingRenderCoalescer?.update(event.message);
+						} else {
+							streamingRenderCoalescer?.commitNow(event.message);
+						}
+						if (event.assistantMessageEvent.type.startsWith("toolcall_")) {
+							upsertToolCalls(event.message);
+						}
 					}
-					break;
+					return;
 				case "message_end":
 					if (streaming && event.message.role === "assistant") {
-						streaming.updateContent(forDisplay(event.message));
+						streamingRenderCoalescer?.finish(event.message);
+						streamingRenderCoalescer = undefined;
 						for (const component of pending.values()) {
 							component.setArgsComplete();
 						}
 						streaming = undefined;
 					}
-					break;
+					return;
 				case "tool_execution_start": {
 					let component = pending.get(event.toolCallId);
 					if (!component) {
@@ -7974,6 +8016,8 @@ export class InteractiveMode {
 		return {
 			onSessionEvent,
 			dispose: () => {
+				streamingRenderCoalescer?.dispose();
+				streamingRenderCoalescer = undefined;
 				pending.clear();
 				this.chatContainer.removeChild(group);
 				this.ui.requestRender();
@@ -8056,6 +8100,8 @@ export class InteractiveMode {
 	stop(): void {
 		this.clearTurnDoneAlertTimer();
 		this.stopWorkingElapsedTicker();
+		this.streamingRenderCoalescer?.dispose();
+		this.streamingRenderCoalescer = undefined;
 		if (this.settingsManager.getShowTerminalProgress()) {
 			this.ui.terminal.setProgress(false);
 		}

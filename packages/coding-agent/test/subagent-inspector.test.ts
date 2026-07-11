@@ -125,7 +125,9 @@ describe("SubagentInspectorComponent", () => {
 		const inspector = new SubagentInspectorComponent(source, tui, close);
 
 		const running = stripAnsi(inspector.render(100).join("\n"));
-		expect(running).toContain("Subagents  Subagent B · reviewer");
+		expect(running).toContain("Subagents  1 running · 1 done");
+		expect(running).toContain("Subagent B · reviewer");
+		expect(running).toContain("● running");
 		expect(running).toContain("Review the tests");
 		expect(running).toContain("I am checking the test suite.");
 		expect(running).not.toContain("Assistant");
@@ -169,7 +171,8 @@ describe("SubagentInspectorComponent", () => {
 
 		expect(requestRender).toHaveBeenCalled();
 		const rendered = stripAnsi(inspector.render(80).join("\n"));
-		expect(rendered).toContain("completed");
+		expect(rendered).toContain("Subagents  1 done");
+		expect(rendered).toContain("✓ done");
 		expect(rendered).toContain("Live result arrived");
 	});
 

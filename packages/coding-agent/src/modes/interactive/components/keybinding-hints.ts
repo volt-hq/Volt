@@ -45,6 +45,15 @@ export function editorTopBorderLabel(mode: "ask" | "steer" | "shell"): string {
 	return `STEER · ${keyDisplayText("tui.input.submit")} now · ${keyDisplayText("app.message.followUp")} later · ${keyDisplayText("app.interrupt")} stop`;
 }
 
+export function editorTopBorderLabelForState(state: {
+	bashMode: boolean;
+	streaming: boolean;
+	hasText: boolean;
+}): string {
+	if (state.bashMode) return editorTopBorderLabel("shell");
+	return editorTopBorderLabel(state.streaming && state.hasText ? "steer" : "ask");
+}
+
 export function keyHint(keybinding: Keybinding, description: string): string {
 	return theme.fg("dim", keyText(keybinding)) + theme.fg("muted", ` ${description}`);
 }
