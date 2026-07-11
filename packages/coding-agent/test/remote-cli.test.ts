@@ -105,10 +105,12 @@ describe("remote CLI (daemon control client)", () => {
 			workspaces: Array<{ name: string }>;
 			clients: unknown[];
 			leases: unknown[];
+			remotePolicy: { allowTools: string[] | null; detachedRuntimeTtlMs: number };
 		};
 		expect(status.workspaces.some((workspace) => workspace.name === "status-ws")).toBe(true);
 		expect(Array.isArray(status.clients)).toBe(true);
 		expect(Array.isArray(status.leases)).toBe(true);
+		expect(status.remotePolicy).toEqual({ allowTools: null, detachedRuntimeTtlMs: 30 * 60 * 1000 });
 		await main(["remote", "workspace", "remove", "status-ws"]);
 	});
 

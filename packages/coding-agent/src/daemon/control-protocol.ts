@@ -26,6 +26,8 @@ export type ControlClientKind = "tui" | "cli";
  * never offers worktree-session relays to control clients without it.
  */
 export const CONTROL_WORKTREES_CAPABILITY = "worktrees";
+/** Status capability for cancellable, immediately-invalidated pairing tickets. */
+export const CONTROL_PAIR_CANCEL_CAPABILITY = "pair_cancel";
 
 export type HelloMessage =
 	| {
@@ -77,6 +79,7 @@ export type ControlRequest =
 	| { type: "lease_release"; id: string; workspaceName: string; sessionId: string }
 	| { type: "lease_rekey"; id: string; workspaceName: string; oldSessionId: string; newSessionId: string }
 	| { type: "pair_request"; id: string; workspaceName?: string } // progress arrives as pairing_progress events
+	| { type: "pair_cancel"; id: string; requestId: string }
 	| { type: "clients_list"; id: string }
 	| { type: "client_revoke"; id: string; clientNodeId: string }
 	| { type: "client_approve_repair"; id: string; clientNodeId: string }
@@ -183,6 +186,8 @@ export interface ControlLeaseStatus {
 export interface ControlWorkspaceStatus {
 	name: string;
 	path: string;
+	/** Workspace-specific headless tool grant, when configured. */
+	allowedTools?: string[];
 }
 
 /**
@@ -208,6 +213,27 @@ export interface ControlClientStatus {
 	clientNodeId: string;
 	label?: string;
 	pairedAtMs: number;
+	/** Added to protocol v1 after launch; absent on older running daemons. */
+	lastSeenAtMs?: number;
+	/** Persisted headless tool grant for this paired device. */
+	allowedTools?: string[];
+}
+
+export interface ControlRevokedClientStatus {
+	clientNodeId: string;
+	label?: string;
+	pairedAtMs: number;
+	lastSeenAtMs?: number;
+	revokedAtMs: number;
+	/** Present after the desktop explicitly allows this identity to use a fresh pairing ticket. */
+	rePairApprovedAtMs?: number;
+}
+
+export interface DaemonRemotePolicyStatus {
+	/** Daemon-wide override; null delegates to workspace and device grants. */
+	allowTools: string[] | null;
+	/** Retention window for idle, detached daemon-owned runtimes. */
+	detachedRuntimeTtlMs: number;
 }
 
 export type ControlResponse =
@@ -225,10 +251,16 @@ export type ControlResponse =
 			protocolVersion: number;
 			pid: number;
 			startedAtMs: number;
+			/** Optional feature flags for protocol-v1 additions. */
+			capabilities?: string[];
 			leases: ControlLeaseStatus[];
 			phoneConnections: number;
 			workspaces: ControlWorkspaceStatus[];
 			clients: ControlClientStatus[];
+			/** Revoked identities retained for explicit repair approval; absent on older running daemons. */
+			revokedClients?: ControlRevokedClientStatus[];
+			/** Added to protocol v1 after launch; absent on older running daemons. */
+			remotePolicy?: DaemonRemotePolicyStatus;
 			keepAwake: ControlKeepAwakeStatus;
 	  }
 	| { type: "keep_awake_result"; id: string; keepAwake: ControlKeepAwakeStatus }
@@ -569,9 +601,10 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 	switch (value.type) {
 		case "status":
 		case "shutdown":
-		case "pair_request":
 		case "clients_list":
 			return true;
+		case "pair_request":
+			return value.workspaceName === undefined || typeof value.workspaceName === "string";
 		case "lease_acquire":
 		case "lease_release":
 			return typeof value.workspaceName === "string" && typeof value.sessionId === "string";
@@ -581,6 +614,8 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 				typeof value.oldSessionId === "string" &&
 				typeof value.newSessionId === "string"
 			);
+		case "pair_cancel":
+			return typeof value.requestId === "string";
 		case "client_revoke":
 		case "client_approve_repair":
 			return typeof value.clientNodeId === "string";

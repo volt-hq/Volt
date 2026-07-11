@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added a built-in `/remote` TUI control center for daemon health and startup, current-directory workspace registration, current conversation ownership, attached phones, cancellable pairing QR/tickets, paired-device revocation and explicit re-pair approval, registered workspaces, active leases, and effective daemon-owned runtime tool/retention policy.
+
 - Added a dim duration suffix (e.g. `(3.2s)`) to the tool header once a tool call finishes, for executions of 1s or longer. Tool definitions whose renderers already display a duration (like the built-in bash tool) can opt out with the new `rendersDuration` flag.
 
 - Added `session_runtime_state.v1` discovery metadata: `list_sessions` can now identify desktop-owned, daemon-active, retained-detached, and draining session runtimes so clients can reconnect currently running agents without reviving every dormant session.

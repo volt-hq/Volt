@@ -428,6 +428,16 @@ export class IrohRemoteHostEngine {
 		return true;
 	}
 
+	async cancelPairingSecretByHash(secretHash: string): Promise<boolean> {
+		return this.runAuthorizationExclusive(async () => {
+			const liveSecretMatches =
+				this.pairingSecret !== undefined && hashIrohRemotePairingSecret(this.pairingSecret) === secretHash;
+			if (liveSecretMatches) this.clearPairingSecret();
+			const removedPendingTicket = await this.stateManager.removePendingPairingTicket(secretHash);
+			return liveSecretMatches || removedPendingTicket;
+		});
+	}
+
 	private async ensureRuntimePairingWorkspaceRegistered(): Promise<void> {
 		if (this.pairingSecret === undefined || this.pairingWorkspaceName !== this.workspace.name) {
 			return;

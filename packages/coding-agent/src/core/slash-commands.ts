@@ -49,6 +49,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "mcp", description: "Show MCP server status (/mcp connect|disconnect|refresh <server>)" },
 	{ name: "changelog", description: "Show changelog entries" },
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },
+	{ name: "remote", description: "Manage daemon status, phone pairing, and remote access" },
 	{ name: "fork", description: "Create a new fork from a previous user message" },
 	{ name: "clone", description: "Duplicate the current session at the current position" },
 	{ name: "tree", description: "Navigate session tree (switch branches)" },

@@ -181,6 +181,7 @@ import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
 import { type HotkeySection, HotkeysComponent } from "./components/hotkeys.ts";
+import { createRemoteControlBackend, RemoteControlCenterComponent } from "./components/remote-control-center.ts";
 import { isCoalescableAssistantUpdate, StreamingRenderCoalescer } from "./components/streaming-render-coalescer.ts";
 import {
 	type AcquireOutcome,
@@ -3285,6 +3286,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/remote") {
+				this.showRemoteControlCenter();
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/fork") {
 				this.showUserMessageSelector();
 				this.editor.setText("");
@@ -4747,14 +4753,18 @@ export class InteractiveMode {
 	 * cannot consume the rows needed for its title, controls, and close action.
 	 * @param create Factory that receives a `done` callback and returns the component and focus target
 	 */
-	private showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
+	private showSelector(
+		create: (done: () => void) => { component: Component; focus: Component; dispose?: () => void },
+	): void {
 		this.dismissSubagentInspector?.();
 		const mainComponents = this.getMainViewComponents();
 		let component: Component | undefined;
+		let dispose: (() => void) | undefined;
 		let closed = false;
 		const done = () => {
 			if (closed) return;
 			closed = true;
+			dispose?.();
 			if (!component) return;
 			this.ui.removeChild(component);
 			this.editorContainer.clear();
@@ -4765,7 +4775,11 @@ export class InteractiveMode {
 		};
 		const created = create(done);
 		component = created.component;
-		if (closed) return;
+		dispose = created.dispose;
+		if (closed) {
+			dispose?.();
+			return;
+		}
 		for (const mainComponent of mainComponents) this.ui.removeChild(mainComponent);
 		this.ui.addChild(component);
 		this.ui.setFocus(created.focus);
@@ -4818,6 +4832,22 @@ export class InteractiveMode {
 		this.ui.setFocus(view);
 		this.dismissSubagentInspector = close;
 		this.ui.requestRender(true);
+	}
+
+	private showRemoteControlCenter(): void {
+		this.showSelector((done) => {
+			const center = new RemoteControlCenterComponent(createRemoteControlBackend(getAgentDir()), {
+				getTerminalRows: () => this.ui.terminal.rows,
+				getCurrentWorkspaceName: () => this.daemonAttach.workspaceName(),
+				getCurrentWorkspacePath: () => this.runtimeHost.services.cwd,
+				currentSessionId: this.session.sessionId,
+				requestRender: () => this.ui.requestRender(),
+				copyText: copyToClipboard,
+				onClose: done,
+			});
+			void center.start();
+			return { component: center, focus: center, dispose: () => center.dispose() };
+		});
 	}
 
 	private showSettingsSelector(): void {

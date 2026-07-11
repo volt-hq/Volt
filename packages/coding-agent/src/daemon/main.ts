@@ -20,9 +20,10 @@ import type {
 	ControlClientStatus,
 	ControlLeaseStatus,
 	ControlRequest,
+	ControlRevokedClientStatus,
 	ControlWorkspaceStatus,
 } from "./control-protocol.ts";
-import { PROTOCOL_VERSION } from "./control-protocol.ts";
+import { CONTROL_PAIR_CANCEL_CAPABILITY, PROTOCOL_VERSION } from "./control-protocol.ts";
 import {
 	type ControlConnection,
 	type ControlServer,
@@ -334,6 +335,20 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			clientNodeId: client.nodeId,
 			...(client.label === undefined ? {} : { label: client.label }),
 			pairedAtMs: client.pairedAt ?? 0,
+			lastSeenAtMs: client.lastSeenAt ?? 0,
+			allowedTools: client.allowedTools
+				.split(",")
+				.map((tool) => tool.trim())
+				.filter((tool) => tool.length > 0),
+		}));
+	const toRevokedClientStatuses = (): ControlRevokedClientStatus[] =>
+		state.state.revokedClients.map((client) => ({
+			clientNodeId: client.nodeId,
+			...(client.label === undefined ? {} : { label: client.label }),
+			pairedAtMs: client.pairedAt ?? 0,
+			lastSeenAtMs: client.lastSeenAt ?? 0,
+			revokedAtMs: client.revokedAt,
+			...(client.rePairApprovedAt === undefined ? {} : { rePairApprovedAtMs: client.rePairApprovedAt }),
 		}));
 
 	// Worktree control fallback (no iroh extension running / request not handled
@@ -367,6 +382,14 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				const workspaces: ControlWorkspaceStatus[] = state.state.workspaces.map((workspace) => ({
 					name: workspace.name,
 					path: workspace.path,
+					...(workspace.allowedTools === undefined
+						? {}
+						: {
+								allowedTools: workspace.allowedTools
+									.split(",")
+									.map((tool) => tool.trim())
+									.filter((tool) => tool.length > 0),
+							}),
 				}));
 				let leases: ControlLeaseStatus[] = [];
 				let phoneConnections = 0;
@@ -384,10 +407,16 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					protocolVersion: PROTOCOL_VERSION,
 					pid: process.pid,
 					startedAtMs,
+					capabilities: [CONTROL_PAIR_CANCEL_CAPABILITY],
 					leases,
 					phoneConnections,
 					workspaces,
 					clients: toClientStatuses(),
+					revokedClients: toRevokedClientStatuses(),
+					remotePolicy: {
+						allowTools: state.state.settings.allowTools,
+						detachedRuntimeTtlMs: state.state.settings.detachedRuntimeTtlMs,
+					},
 					keepAwake: keepAwake.status,
 				});
 				return;
@@ -515,6 +544,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					});
 					return;
 				}
+				await state.flush();
 				connection.send({ type: "ok", id: request.id });
 				return;
 			}

@@ -2324,6 +2324,30 @@ class IrohDaemonService {
 			case "pair_request":
 				await this.handlePairRequest(connection, request);
 				return true;
+			case "pair_cancel": {
+				const pending = this.pendingPairRequests.get(request.requestId);
+				if (!pending || pending.connectionId !== connection.connectionId) {
+					connection.send({
+						type: "error",
+						id: request.id,
+						code: "not_found",
+						message: "pairing request not found",
+					});
+					return true;
+				}
+				try {
+					await this.cancelPendingPairing(request.requestId, pending);
+					connection.send({ type: "ok", id: request.id });
+				} catch (error) {
+					connection.send({
+						type: "error",
+						id: request.id,
+						code: "cancel_failed",
+						message: error instanceof Error ? error.message : String(error),
+					});
+				}
+				return true;
+			}
 			case "relay_rpc": {
 				const result = await this.handleRelayRpc(request);
 				if (!result.ok) {
@@ -2644,14 +2668,30 @@ class IrohDaemonService {
 		return { ok: true, engine: this.engine };
 	}
 
+	private async cancelPendingPairing(
+		requestId: string,
+		pending: { secretHash: string; timer: NodeJS.Timeout },
+	): Promise<void> {
+		clearTimeout(pending.timer);
+		if (this.engine) {
+			await this.engine.cancelPairingSecretByHash(pending.secretHash);
+		} else {
+			await this.stateManager.removePendingPairingTicket(pending.secretHash);
+		}
+		await this.services.state.flush();
+		this.pendingPairRequests.delete(requestId);
+	}
+
 	onControlConnectionClosed(connection: ControlConnection): void {
 		this.leaseBroker.releaseAllForConnection(connection.connectionId);
 		for (const [requestId, pending] of this.pendingPairRequests) {
-			if (pending.connectionId !== connection.connectionId) {
-				continue;
-			}
-			clearTimeout(pending.timer);
-			this.pendingPairRequests.delete(requestId);
+			if (pending.connectionId !== connection.connectionId) continue;
+			void this.cancelPendingPairing(requestId, pending).catch((error) => {
+				this.log("warn", "failed to cancel pairing after control disconnect", {
+					requestId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
 		}
 	}
 

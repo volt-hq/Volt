@@ -224,6 +224,18 @@ export class IrohRemoteHostStateManager {
 		});
 	}
 
+	async removePendingPairingTicket(secretHash: string): Promise<boolean> {
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			const pending = state.pendingPairingTickets ?? [];
+			const remaining = pending.filter((entry) => entry.secretHash !== secretHash);
+			if (remaining.length === pending.length) return false;
+			state.pendingPairingTickets = remaining;
+			await this.saveUnlocked(state);
+			return true;
+		});
+	}
+
 	async authorizeClient(
 		hello: IrohRemoteHello,
 		remoteNodeId: string,

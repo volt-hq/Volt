@@ -37,8 +37,10 @@ describe("control protocol framing", () => {
 			{ type: "lease_release", id: "4", workspaceName: "volt", sessionId: "s-1" },
 			{ type: "lease_rekey", id: "5", workspaceName: "volt", oldSessionId: "s-1", newSessionId: "s-2" },
 			{ type: "pair_request", id: "6" },
+			{ type: "pair_cancel", id: "6b", requestId: "pair-1" },
 			{ type: "clients_list", id: "7" },
 			{ type: "client_revoke", id: "8", clientNodeId: "n-1" },
+			{ type: "client_approve_repair", id: "8b", clientNodeId: "n-1" },
 			{ type: "workspace_register", id: "9", name: "volt", path: "/tmp/volt" },
 			{ type: "workspace_unregister", id: "10", name: "volt" },
 			{ type: "theme_set", id: "11", theme: "dark" },
@@ -112,10 +114,29 @@ describe("control protocol framing", () => {
 				protocolVersion: PROTOCOL_VERSION,
 				pid: 42,
 				startedAtMs: 1000,
+				capabilities: ["pair_cancel"],
 				leases: [{ workspaceName: "volt", sessionId: "s-1", state: "tui-owned", relayCount: 1, streamCount: 0 }],
 				phoneConnections: 1,
-				workspaces: [{ name: "volt", path: "/tmp/volt" }],
-				clients: [{ clientNodeId: "n-1", label: "phone", pairedAtMs: 5 }],
+				workspaces: [{ name: "volt", path: "/tmp/volt", allowedTools: ["read", "bash"] }],
+				clients: [
+					{
+						clientNodeId: "n-1",
+						label: "phone",
+						pairedAtMs: 5,
+						lastSeenAtMs: 10,
+						allowedTools: ["read"],
+					},
+				],
+				revokedClients: [
+					{
+						clientNodeId: "n-2",
+						label: "old phone",
+						pairedAtMs: 1,
+						lastSeenAtMs: 2,
+						revokedAtMs: 3,
+					},
+				],
+				remotePolicy: { allowTools: ["read", "bash"], detachedRuntimeTtlMs: 1_800_000 },
 				keepAwake: { enabled: true, state: "active", method: "caffeinate" },
 			},
 			{
@@ -138,6 +159,10 @@ describe("control protocol framing", () => {
 			expect(decoded).toEqual(response);
 			expect(isControlResponse(decoded), `response ${response.type}`).toBe(true);
 		}
+	});
+
+	it("rejects pair_request with a malformed workspace", () => {
+		expect(isControlRequest({ type: "pair_request", id: "x", workspaceName: 42 })).toBe(false);
 	});
 
 	it("rejects keep_awake_set without a boolean enabled", () => {

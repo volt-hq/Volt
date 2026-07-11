@@ -162,6 +162,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 | `/reload` | Reload keybindings, extensions, skills, prompts, and context files (themes hot-reload automatically) |
 | `/hotkeys` | Show all keyboard shortcuts |
+| `/remote` | Manage daemon status, phone pairing, devices, workspaces, leases, and policy |
 | `/changelog` | Display version history |
 | `/quit` | Quit volt |
 
@@ -519,7 +520,7 @@ volt config                    # Enable/disable package resources
 
 ### Remote Access over Iroh (Preview)
 
-Remote access is served by a background daemon (`voltd`). It is opt-in: nothing listens until you start the daemon. The host keeps provider credentials, files, tools, settings, sessions, state, and audit logs on the host machine, and the daemon's persistent Iroh identity means phones stay paired across restarts.
+Remote access is served by a background daemon (`voltd`). It is opt-in: nothing listens until you start the daemon. The host keeps provider credentials, files, tools, settings, sessions, state, and audit logs on the host machine, and the daemon's persistent Iroh identity means phones stay paired across restarts. In interactive Volt, `/remote` is the control center for daemon health, current-directory workspace registration, current lease ownership, attached phones, QR pairing and revocation, registered workspaces, and effective headless tool/retention policy. Its management connection is separate from the conversation lease.
 
 Copy-pastable happy path:
 
@@ -538,7 +539,7 @@ npm run iroh:poc:client -- "<ticket>" --message "List the top-level files."
 
 Set `remote.background: true` in settings and interactive Volt manages the daemon automatically: a paired phone can then attach to the SAME live conversation your desktop TUI has open (the footer shows `📱 n`), keep the conversation when you quit the TUI, and hand it back at the next turn boundary when you reopen it.
 
-Management commands:
+Use `/remote` for interactive management, including registering Volt's current directory, QR pairing, confirmed device revocation, and explicit approval before a revoked identity can re-pair. Equivalent shell commands are:
 
 ```bash
 volt daemon status                        # daemon health, workspaces, clients, leases

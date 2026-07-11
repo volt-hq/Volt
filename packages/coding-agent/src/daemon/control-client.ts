@@ -83,7 +83,7 @@ interface PendingRequest {
 
 /** Responses that announce a later terminal response for the same id. */
 function isProvisionalControlResponse(response: ControlResponse): boolean {
-	return response.type === "lease_pending" || response.type === "pair_started";
+	return response.type === "lease_pending";
 }
 
 const DEFAULT_MIN_BACKOFF_MS = 250;
