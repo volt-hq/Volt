@@ -55,6 +55,14 @@ function extractKittyImageRows(line: string): number {
 /**
  * Component interface - all components must implement this
  */
+export interface TuiRenderMetrics {
+	frames: number;
+	fullRedraws: number;
+	generatedLines: number;
+	terminalWrites: number;
+	terminalBytes: number;
+}
+
 export interface Component {
 	/**
 	 * Render the component to lines for the given viewport width
@@ -308,6 +316,10 @@ export class TUI extends Container {
 	private maxLinesRendered = 0; // Track terminal's working area (max lines ever rendered)
 	private previousViewportTop = 0; // Track previous viewport top for resize-aware cursor moves
 	private fullRedrawCount = 0;
+	private renderFrameCount = 0;
+	private generatedLineCount = 0;
+	private renderWriteCount = 0;
+	private renderByteCount = 0;
 	private stopped = false;
 	private timedOutOsc11BackgroundReplies = 0;
 	private pendingOsc11BackgroundQueries: PendingOsc11BackgroundQuery[] = [];
@@ -327,6 +339,30 @@ export class TUI extends Container {
 
 	get fullRedraws(): number {
 		return this.fullRedrawCount;
+	}
+
+	getRenderMetrics(): TuiRenderMetrics {
+		return {
+			frames: this.renderFrameCount,
+			fullRedraws: this.fullRedrawCount,
+			generatedLines: this.generatedLineCount,
+			terminalWrites: this.renderWriteCount,
+			terminalBytes: this.renderByteCount,
+		};
+	}
+
+	resetRenderMetrics(): void {
+		this.renderFrameCount = 0;
+		this.generatedLineCount = 0;
+		this.renderWriteCount = 0;
+		this.renderByteCount = 0;
+		this.fullRedrawCount = 0;
+	}
+
+	private writeRenderBuffer(data: string): void {
+		this.renderWriteCount++;
+		this.renderByteCount += Buffer.byteLength(data);
+		this.terminal.write(data);
 	}
 
 	getShowHardwareCursor(): boolean {
@@ -1215,6 +1251,7 @@ export class TUI extends Container {
 
 	private doRender(): void {
 		if (this.stopped) return;
+		this.renderFrameCount++;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
 		const widthChanged = this.previousWidth !== 0 && this.previousWidth !== width;
@@ -1236,6 +1273,7 @@ export class TUI extends Container {
 		if (this.overlayStack.length > 0) {
 			newLines = this.compositeOverlays(newLines, width, height);
 		}
+		this.generatedLineCount += newLines.length;
 
 		// Extract cursor position before applying line resets (marker must be found first)
 		const cursorPos = this.extractCursorPosition(newLines, height);
@@ -1268,7 +1306,7 @@ export class TUI extends Container {
 				buffer += line;
 			}
 			buffer += "\x1b[?2026l"; // End synchronized output
-			this.terminal.write(buffer);
+			this.writeRenderBuffer(buffer);
 			this.cursorRow = Math.max(0, newLines.length - 1);
 			this.hardwareCursorRow = this.cursorRow;
 			// Reset max lines when clearing, otherwise track growth
@@ -1399,7 +1437,7 @@ export class TUI extends Container {
 					buffer += `\x1b[${moveBack}A`;
 				}
 				buffer += "\x1b[?2026l";
-				this.terminal.write(buffer);
+				this.writeRenderBuffer(buffer);
 				this.cursorRow = targetRow;
 				this.hardwareCursorRow = targetRow;
 			}
@@ -1561,7 +1599,7 @@ export class TUI extends Container {
 		}
 
 		// Write entire buffer at once
-		this.terminal.write(buffer);
+		this.writeRenderBuffer(buffer);
 
 		// Track cursor position for next render
 		// cursorRow tracks end of content (for viewport calculation)
@@ -1608,7 +1646,7 @@ export class TUI extends Container {
 		buffer += `\x1b[${targetCol + 1}G`;
 
 		if (buffer) {
-			this.terminal.write(buffer);
+			this.writeRenderBuffer(buffer);
 		}
 
 		this.hardwareCursorRow = targetRow;

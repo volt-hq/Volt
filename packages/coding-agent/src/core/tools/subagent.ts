@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/volt-agent-core";
 import type { AssistantMessage, TextContent } from "@earendil-works/volt-ai";
-import { Container, Markdown, Text } from "@earendil-works/volt-tui";
+import { Container, Markdown, Spacer, Text } from "@earendil-works/volt-tui";
 import { type Static, Type } from "typebox";
 import type { SessionStats } from "../agent-session.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
@@ -214,6 +214,8 @@ interface SubagentExecutionTiming {
 
 interface SubagentRenderState {
 	interval?: ReturnType<typeof setInterval>;
+	summary?: SubagentConversationSummaryComponent;
+	placeholder?: Text;
 }
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
@@ -713,97 +715,6 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 	});
 }
 
-function truncatePreview(text: string | undefined, maxLength: number): string {
-	const normalized = (text ?? "").replace(/\s+/g, " ").trim();
-	if (normalized.length <= maxLength) {
-		return normalized || "...";
-	}
-	return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
-}
-
-function formatTokens(count: number): string {
-	if (count < 1_000) {
-		return String(count);
-	}
-	if (count < 1_000_000) {
-		return `${Math.round(count / 1_000)}k`;
-	}
-	return `${(count / 1_000_000).toFixed(1)}M`;
-}
-
-function formatUsageSummary(usage: SubagentToolUsageDetails | undefined): string {
-	if (!usage) {
-		return "";
-	}
-	const parts: string[] = [];
-	if (usage.turns > 0) {
-		parts.push(`${usage.turns} turn${usage.turns === 1 ? "" : "s"}`);
-	}
-	if (usage.tokens.input > 0) {
-		parts.push(`↑${formatTokens(usage.tokens.input)}`);
-	}
-	if (usage.tokens.output > 0) {
-		parts.push(`↓${formatTokens(usage.tokens.output)}`);
-	}
-	if (usage.tokens.cacheRead > 0) {
-		parts.push(`R${formatTokens(usage.tokens.cacheRead)}`);
-	}
-	if (usage.tokens.cacheWrite > 0) {
-		parts.push(`W${formatTokens(usage.tokens.cacheWrite)}`);
-	}
-	if (usage.cost > 0) {
-		parts.push(`$${usage.cost.toFixed(4)}`);
-	}
-	return parts.join(" ");
-}
-
-function formatDelegationSummary(snapshot: SubagentDelegationScopeSnapshot | undefined): string {
-	if (!snapshot) return "";
-	const parts = [
-		`${snapshot.startsUsed} start${snapshot.startsUsed === 1 ? "" : "s"}`,
-		`peak ${snapshot.peakActiveDescendants}`,
-		`depth ${snapshot.maxDepthReached}`,
-		`${snapshot.turnsUsed} turn${snapshot.turnsUsed === 1 ? "" : "s"}`,
-	];
-	if (snapshot.tokensUsed > 0) parts.push(`${formatTokens(snapshot.tokensUsed)} tokens`);
-	if (snapshot.costUsd > 0) parts.push(`$${snapshot.costUsd.toFixed(4)}`);
-	return parts.join(" · ");
-}
-
-function aggregateUsage(items: readonly SubagentToolTaskDetails[]): SubagentToolUsageDetails | undefined {
-	const withUsage = items.filter((item) => item.usage);
-	if (withUsage.length === 0) {
-		return undefined;
-	}
-	return withUsage.reduce<SubagentToolUsageDetails>(
-		(total, item) => {
-			const usage = item.usage;
-			if (!usage) {
-				return total;
-			}
-			total.turns += usage.turns;
-			total.messages.user += usage.messages.user;
-			total.messages.assistant += usage.messages.assistant;
-			total.messages.toolCalls += usage.messages.toolCalls;
-			total.messages.toolResults += usage.messages.toolResults;
-			total.messages.total += usage.messages.total;
-			total.tokens.input += usage.tokens.input;
-			total.tokens.output += usage.tokens.output;
-			total.tokens.cacheRead += usage.tokens.cacheRead;
-			total.tokens.cacheWrite += usage.tokens.cacheWrite;
-			total.tokens.total += usage.tokens.total;
-			total.cost += usage.cost;
-			return total;
-		},
-		{
-			turns: 0,
-			messages: { user: 0, assistant: 0, toolCalls: 0, toolResults: 0, total: 0 },
-			tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			cost: 0,
-		},
-	);
-}
-
 function statusIcon(status: SubagentToolOverallStatus, theme: Theme): string {
 	switch (status) {
 		case "completed":
@@ -823,15 +734,6 @@ function statusText(status: SubagentToolOverallStatus, theme: Theme): string {
 	const color =
 		status === "completed" ? "success" : status === "partial" || status === "running" ? "warning" : "error";
 	return theme.fg(color, status);
-}
-
-function formatAgent(
-	agent: SubagentToolAgentDetails | undefined,
-	fallbackName: string | undefined,
-	theme: Theme,
-): string {
-	const name = agent?.name ?? fallbackName ?? "...";
-	return theme.fg("accent", name) + (agent?.source ? theme.fg("muted", ` (${agent.source})`) : "");
 }
 
 function getTextContent(result: AgentToolResult<SubagentToolDetails>): string {
@@ -856,39 +758,14 @@ function getTaskInput(
 	return mode === "parallel" ? args.tasks?.[index] : args.chain?.[index];
 }
 
-function formatCallLines(args: SubagentToolInput | undefined, theme: Theme): string[] {
-	if (args?.chain && args.chain.length > 0) {
-		const lines = [
-			`${theme.fg("toolTitle", theme.bold("subagent"))} ${theme.fg("accent", `chain (${args.chain.length} steps)`)}`,
-		];
-		for (const [index, step] of args.chain.slice(0, 3).entries()) {
-			lines.push(
-				`${theme.fg("muted", `${index + 1}.`)} ${theme.fg("accent", step.agent)} ${theme.fg("dim", truncatePreview(step.task, 60))}`,
-			);
-		}
-		if (args.chain.length > 3) {
-			lines.push(theme.fg("muted", `... +${args.chain.length - 3} more`));
-		}
-		return lines;
-	}
-
-	if (args?.tasks && args.tasks.length > 0) {
-		const lines = [
-			`${theme.fg("toolTitle", theme.bold("subagent"))} ${theme.fg("accent", `parallel (${args.tasks.length} tasks)`)}`,
-		];
-		for (const task of args.tasks.slice(0, 3)) {
-			lines.push(`${theme.fg("accent", task.agent)} ${theme.fg("dim", truncatePreview(task.task, 60))}`);
-		}
-		if (args.tasks.length > 3) {
-			lines.push(theme.fg("muted", `... +${args.tasks.length - 3} more`));
-		}
-		return lines;
-	}
-
-	return [
-		`${theme.fg("toolTitle", theme.bold("subagent"))} ${theme.fg("accent", args?.agent ?? "...")}`,
-		theme.fg("dim", truncatePreview(args?.task, 80)),
-	];
+function subagentDisplayLabel(index: number): string {
+	let value = Math.max(0, index);
+	let suffix = "";
+	do {
+		suffix = String.fromCharCode(65 + (value % 26)) + suffix;
+		value = Math.floor(value / 26) - 1;
+	} while (value >= 0);
+	return `Subagent ${suffix}`;
 }
 
 function formatSummary(details: SubagentToolDetails): string {
@@ -933,134 +810,137 @@ function outputWarning(output: SubagentToolOutputDetails | undefined, theme: The
 	return theme.fg("warning", `[Truncated: ${output.omittedBytes ?? 0} bytes omitted]`);
 }
 
-function addOutput(container: Container, output: string, theme: Theme): void {
-	container.addChild(
-		new Markdown(output || "(no output)", 0, 0, getMarkdownTheme(), {
-			color: (text) => theme.fg("toolOutput", text),
-		}),
-	);
+interface SubagentConversationItem {
+	index: number;
+	agent: SubagentToolAgentDetails;
+	status: SubagentToolOverallStatus;
+	input?: SubagentToolTaskInput;
+	timing?: { startedAt?: number; durationMs?: number };
+	output?: SubagentToolOutputDetails;
+	error?: SubagentToolErrorDetails;
 }
 
-function addTaskDetails(options: {
-	container: Container;
-	theme: Theme;
-	label: string;
-	item: SubagentToolTaskDetails;
-	input: SubagentToolTaskInput | undefined;
-	expanded: boolean;
-	isPartial: boolean;
-}): void {
-	const { container, theme, label, item, input, expanded, isPartial } = options;
-	const usage = formatUsageSummary(item.usage);
-	container.addChild(
-		new Text(
-			`${statusIcon(item.status, theme)} ${theme.fg("muted", `${label} ${item.index + 1}:`)} ${formatAgent(item.agent, input?.agent, theme)} ${statusText(item.status, theme)}${formatTimingSuffix(item, isPartial, theme)}${usage ? theme.fg("dim", `  ${usage}`) : ""}`,
-			0,
-			0,
-		),
-	);
+class SubagentConversationSummaryComponent extends Container {
+	private args: SubagentToolInput | undefined;
+	private details: SubagentToolDetails | undefined;
+	private resultText = "";
+	private isPartial = true;
+	private currentTheme: Theme;
 
-	if (!expanded) {
-		const taskPreview = truncatePreview(input?.task, 80);
-		if (taskPreview !== "...") {
-			container.addChild(new Text(theme.fg("dim", `  ${taskPreview}`), 0, 0));
-		}
-		if (item.error?.message) {
-			container.addChild(new Text(theme.fg("error", `  ${truncatePreview(item.error.message, 100)}`), 0, 0));
-		}
-		return;
+	constructor(args: SubagentToolInput | undefined, currentTheme: Theme) {
+		super();
+		this.args = args;
+		this.currentTheme = currentTheme;
+		this.rebuild();
 	}
 
-	if (input?.task) {
-		container.addChild(new Text(`${theme.fg("muted", "Task:")} ${theme.fg("dim", input.task)}`, 0, 0));
-	}
-	if (item.error?.message) {
-		container.addChild(new Text(theme.fg("error", `Error: ${item.error.message}`), 0, 0));
-	}
-	const warning = outputWarning(item.output, theme);
-	if (warning) {
-		container.addChild(new Text(warning, 0, 0));
-	}
-	if (item.output?.text) {
-		addOutput(container, item.output.text, theme);
-	}
-}
-
-function renderSubagentResult(
-	result: AgentToolResult<SubagentToolDetails>,
-	options: { expanded: boolean; isPartial: boolean },
-	theme: Theme,
-	args: SubagentToolInput | undefined,
-): Container {
-	const { expanded, isPartial } = options;
-	const container = new Container();
-	const details = result.details;
-	if (!details) {
-		container.addChild(new Text(theme.fg("toolOutput", getTextContent(result) || "(no output)"), 0, 0));
-		return container;
+	setArgs(args: SubagentToolInput | undefined): void {
+		this.args = args;
+		this.rebuild();
 	}
 
-	if (details.mode === "single") {
-		const input = getTaskInput(args, "single", 0);
-		const usage = formatUsageSummary(details.usage);
-		container.addChild(
-			new Text(
-				`${statusIcon(details.status, theme)} ${formatAgent(details.agent, input?.agent, theme)} ${statusText(details.status, theme)}${formatTimingSuffix(details, isPartial, theme)}${usage ? theme.fg("dim", `  ${usage}`) : ""}`,
-				0,
-				0,
-			),
-		);
-		const delegation = formatDelegationSummary(details.delegation);
-		if (delegation) container.addChild(new Text(theme.fg("dim", `Tree: ${delegation}`), 0, 0));
-		const taskPreview = truncatePreview(input?.task, 100);
-		if (taskPreview !== "...") {
-			container.addChild(new Text(theme.fg("dim", taskPreview), 0, 0));
+	setTheme(currentTheme: Theme): void {
+		this.currentTheme = currentTheme;
+		this.rebuild();
+	}
+
+	setResult(result: AgentToolResult<SubagentToolDetails>, isPartial: boolean): void {
+		this.details = result.details;
+		this.resultText = getTextContent(result);
+		this.isPartial = isPartial;
+		this.rebuild();
+	}
+
+	override invalidate(): void {
+		super.invalidate();
+		this.rebuild();
+	}
+
+	private getItems(): SubagentConversationItem[] {
+		if (this.details?.mode === "single") {
+			return [
+				{
+					index: 0,
+					agent: this.details.agent ?? { name: this.args?.agent ?? "subagent" },
+					status: this.details.status,
+					input: getTaskInput(this.args, "single", 0),
+					timing: this.details,
+					output: this.details.output,
+					error: this.details.error,
+				},
+			];
 		}
-		if (details.error?.message) {
-			container.addChild(new Text(theme.fg("error", `Error: ${details.error.message}`), 0, 0));
-		}
-		if (expanded) {
-			const warning = outputWarning(details.output, theme);
-			if (warning) {
-				container.addChild(new Text(warning, 0, 0));
+
+		if (this.details) {
+			const items = this.details.mode === "chain" ? (this.details.steps ?? []) : (this.details.tasks ?? []);
+			if (items.length > 0) {
+				return items.map((item) => ({
+					index: item.index,
+					agent: item.agent,
+					status: item.status,
+					input: getTaskInput(this.args, this.details!.mode, item.index),
+					timing: item,
+					output: item.output,
+					error: item.error,
+				}));
 			}
-			const outputText = details.output?.text ?? getTextContent(result);
-			addOutput(container, outputText || "(no output)", theme);
 		}
-		return container;
+
+		const inputs =
+			this.args?.tasks ??
+			this.args?.chain ??
+			(this.args?.agent ? [{ agent: this.args.agent, task: this.args.task ?? "" }] : []);
+		return inputs.map((input, index) => ({
+			index,
+			agent: { name: input.agent },
+			status: this.details?.status ?? "running",
+			input,
+		}));
 	}
 
-	const items = details.mode === "chain" ? (details.steps ?? []) : (details.tasks ?? []);
-	container.addChild(
-		new Text(
-			`${statusIcon(details.status, theme)} ${theme.fg("toolTitle", theme.bold(`subagent ${details.mode}`))} ${theme.fg("accent", formatSummary(details))}${formatTimingSuffix(details, isPartial, theme)}`,
-			0,
-			0,
-		),
-	);
-	const delegation = formatDelegationSummary(details.delegation);
-	if (delegation) container.addChild(new Text(theme.fg("dim", `Tree: ${delegation}`), 0, 0));
-	const totalUsage = formatUsageSummary(aggregateUsage(items));
-	if (totalUsage) {
-		container.addChild(new Text(theme.fg("dim", `Total: ${totalUsage}`), 0, 0));
-	}
+	private rebuild(): void {
+		this.clear();
+		const items = this.getItems();
+		if (items.length === 0) {
+			this.addChild(new Text(this.currentTheme.fg("muted", "Preparing subagent…"), 1, 0));
+			return;
+		}
 
-	const visibleItems = expanded ? items : items.slice(0, 5);
-	for (const item of visibleItems) {
-		addTaskDetails({
-			container,
-			theme,
-			label: details.mode === "chain" ? "Step" : "Task",
-			item,
-			input: getTaskInput(args, details.mode, item.index),
-			expanded,
-			isPartial,
-		});
+		for (const [position, item] of items.entries()) {
+			if (position > 0) this.addChild(new Spacer(1));
+			const label = this.currentTheme.bold(this.currentTheme.fg("accent", subagentDisplayLabel(item.index)));
+			const agent = this.currentTheme.fg("muted", ` · ${item.agent.name}`);
+			const state = `${statusIcon(item.status, this.currentTheme)} ${statusText(item.status, this.currentTheme)}`;
+			this.addChild(
+				new Text(
+					`${label}${agent}  ${state}${formatTimingSuffix(item.timing, this.isPartial, this.currentTheme)}`,
+					1,
+					0,
+				),
+			);
+			if (item.input?.task) {
+				this.addChild(new Text(this.currentTheme.fg("dim", item.input.task), 2, 0));
+			}
+			if (item.error?.message) {
+				this.addChild(new Text(this.currentTheme.fg("error", item.error.message), 2, 0));
+			}
+			const warning = outputWarning(item.output, this.currentTheme);
+			if (warning) this.addChild(new Text(warning, 2, 0));
+			if (item.output?.text) {
+				this.addChild(
+					new Markdown(item.output.text, 1, 0, getMarkdownTheme(), {
+						color: (text) => this.currentTheme.fg("toolOutput", text),
+					}),
+				);
+			} else if (items.length === 1 && !this.isPartial && this.resultText) {
+				this.addChild(
+					new Markdown(this.resultText, 1, 0, getMarkdownTheme(), {
+						color: (text) => this.currentTheme.fg("toolOutput", text),
+					}),
+				);
+			}
+		}
 	}
-	if (!expanded && items.length > visibleItems.length) {
-		container.addChild(new Text(theme.fg("muted", `... +${items.length - visibleItems.length} more`), 0, 0));
-	}
-	return container;
 }
 
 export function createSubagentToolDefinition(
@@ -1412,13 +1292,17 @@ export function createSubagentToolDefinition(
 		// The result renderer shows per-subagent running/completed durations, so
 		// the generic tool-header duration suffix is suppressed.
 		rendersDuration: true,
+		renderShell: "self",
 		renderCall(args, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatCallLines(args, theme).join("\n"));
-			return text;
+			const summary = context.state.summary ?? new SubagentConversationSummaryComponent(args, theme);
+			context.state.summary = summary;
+			summary.setTheme(theme);
+			summary.setArgs(args);
+			return summary;
 		},
-		renderResult(result, options, theme, context) {
+		renderResult(result, options, _theme, context) {
 			const state = context.state;
+			state.summary?.setResult(result, options.isPartial);
 			if (options.isPartial && !context.isError) {
 				// Tick once a second while running so elapsed times update live.
 				state.interval ??= setInterval(() => context.invalidate(), 1000);
@@ -1426,12 +1310,8 @@ export function createSubagentToolDefinition(
 				clearInterval(state.interval);
 				state.interval = undefined;
 			}
-			return renderSubagentResult(
-				result,
-				{ expanded: options.expanded, isPartial: options.isPartial },
-				theme,
-				context.args,
-			);
+			state.placeholder ??= new Text("", 0, 0);
+			return state.placeholder;
 		},
 	};
 }

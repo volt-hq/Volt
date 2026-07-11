@@ -381,7 +381,7 @@ export class ToolExecutionComponent extends Container {
 				}
 			}
 			if (this.toolName === "subagent") {
-				renderContainer.addChild(new Text(keyHint("app.subagents.open", "inspect conversation"), 0, 0));
+				renderContainer.addChild(new Text(keyHint("app.subagents.open", "subagents"), 0, 0));
 				hasContent = true;
 			}
 		} else {
@@ -437,6 +437,9 @@ export class ToolExecutionComponent extends Container {
 	private static readonly DURATION_DISPLAY_THRESHOLD_MS = 1000;
 
 	private withHeaderMetadata(component: Component): Component {
+		// Subagents render as conversation participants with their own explicit
+		// lifecycle state instead of as a generic tool card.
+		if (this.toolName === "subagent") return component;
 		return new ToolHeaderMetadata(component, () => this.getHeaderMetadata());
 	}
 

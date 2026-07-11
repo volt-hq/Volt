@@ -1,4 +1,4 @@
-import { type Component, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/volt-tui";
+import { type Component, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/volt-tui";
 import { APP_NAME } from "../../../config.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 
@@ -60,14 +60,23 @@ export class StartupHeaderComponent implements Component {
 		const addLine = (line: string) => {
 			lines.push(truncateToWidth(` ${line}`, width, ""));
 		};
-		const addWrapped = (text: string) => {
-			for (const line of wrapTextWithAnsi(text, contentWidth)) {
+		const addWrapped = (text: string, balanceShortTail = false) => {
+			let wrapped = wrapTextWithAnsi(text, contentWidth);
+			if (
+				balanceShortTail &&
+				wrapped.length > 1 &&
+				visibleWidth(wrapped[wrapped.length - 1]!) < 12 &&
+				contentWidth > 40
+			) {
+				wrapped = wrapTextWithAnsi(text, contentWidth - 12);
+			}
+			for (const line of wrapped) {
 				addLine(line);
 			}
 		};
 
 		const terminalRows = this.options.getTerminalRows?.() ?? 30;
-		if (!this.expanded && width >= 100 && terminalRows >= 30) {
+		if (!this.expanded && width >= 140 && terminalRows >= 36) {
 			for (const line of renderLogo(this.options.version).split("\n")) {
 				addLine(line);
 			}
@@ -88,7 +97,7 @@ export class StartupHeaderComponent implements Component {
 			return lines;
 		}
 
-		addWrapped(this.options.compactInstructions);
+		addWrapped(this.options.compactInstructions, true);
 		addWrapped(this.options.expansionHint);
 		if (width >= 100) {
 			lines.push("");

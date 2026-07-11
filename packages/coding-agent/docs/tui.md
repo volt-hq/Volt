@@ -488,6 +488,20 @@ class CachedComponent {
 
 Call `invalidate()` when state changes, then `handle.requestRender()` to trigger re-render.
 
+For profiling, `TUI.getRenderMetrics()` separates logical render work from terminal output:
+
+```typescript
+const before = tui.getRenderMetrics();
+// Exercise the UI...
+const after = tui.getRenderMetrics();
+// after.frames, after.generatedLines, after.terminalWrites,
+// after.terminalBytes, after.fullRedraws
+
+tui.resetRenderMetrics();
+```
+
+A low terminal byte count does not necessarily mean component rendering is cheap. If `generatedLines` grows much faster than `terminalWrites`, inspect component invalidation, caching, and update coalescing.
+
 ## Invalidation and Theme Changes
 
 When the theme changes, the TUI calls `invalidate()` on all components to clear their caches. Components must properly implement `invalidate()` to ensure theme changes take effect.

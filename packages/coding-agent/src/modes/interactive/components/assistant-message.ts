@@ -15,6 +15,7 @@ export class AssistantMessageComponent extends Container {
 	private markdownTheme: MarkdownTheme;
 	private hiddenThinkingLabel: string;
 	private lastMessage?: AssistantMessage;
+	private contentDirty = false;
 	private hasToolCalls = false;
 
 	constructor(
@@ -40,26 +41,25 @@ export class AssistantMessageComponent extends Container {
 
 	override invalidate(): void {
 		super.invalidate();
-		if (this.lastMessage) {
-			this.updateContent(this.lastMessage);
-		}
+		this.contentDirty = true;
 	}
 
 	setHideThinkingBlock(hide: boolean): void {
+		if (this.hideThinkingBlock === hide) return;
 		this.hideThinkingBlock = hide;
-		if (this.lastMessage) {
-			this.updateContent(this.lastMessage);
-		}
+		this.contentDirty = true;
 	}
 
 	setHiddenThinkingLabel(label: string): void {
+		if (this.hiddenThinkingLabel === label) return;
 		this.hiddenThinkingLabel = label;
-		if (this.lastMessage) {
-			this.updateContent(this.lastMessage);
-		}
+		this.contentDirty = true;
 	}
 
 	override render(width: number): string[] {
+		if (this.contentDirty) {
+			this.rebuildContent();
+		}
 		const lines = super.render(width);
 		if (this.hasToolCalls || lines.length === 0) {
 			return lines;
@@ -72,9 +72,14 @@ export class AssistantMessageComponent extends Container {
 
 	updateContent(message: AssistantMessage): void {
 		this.lastMessage = message;
+		this.contentDirty = true;
+	}
 
-		// Clear content container
+	private rebuildContent(): void {
+		this.contentDirty = false;
 		this.contentContainer.clear();
+		const message = this.lastMessage;
+		if (!message) return;
 
 		const hasVisibleContent = message.content.some(
 			(c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()),

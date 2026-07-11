@@ -39,6 +39,12 @@ export function keyDisplayText(keybinding: Keybinding): string {
 	return formatKeys(getKeybindings().getKeys(keybinding), { capitalize: true });
 }
 
+export function editorTopBorderLabel(mode: "ask" | "steer" | "shell"): string {
+	if (mode === "shell") return "SHELL";
+	if (mode === "ask") return "ASK VOLT";
+	return `STEER · ${keyDisplayText("tui.input.submit")} now · ${keyDisplayText("app.message.followUp")} later · ${keyDisplayText("app.interrupt")} stop`;
+}
+
 export function keyHint(keybinding: Keybinding, description: string): string {
 	return theme.fg("dim", keyText(keybinding)) + theme.fg("muted", ` ${description}`);
 }

@@ -47,6 +47,7 @@ export class BashExecutionComponent extends Container {
 	private truncationResult?: TruncationResult;
 	private fullOutputPath?: string;
 	private expanded = false;
+	private displayDirty = true;
 	private contentContainer: Container;
 	private colorKey: "bashMode" | "dim";
 	private startedAt = Date.now();
@@ -68,20 +69,27 @@ export class BashExecutionComponent extends Container {
 			(text) => theme.fg("muted", text),
 			`Running (${keyText("tui.select.cancel")} to cancel)`,
 		);
-		this.updateDisplay();
 	}
 
 	/**
 	 * Set whether the output is expanded (shows full output) or collapsed (preview only).
 	 */
 	setExpanded(expanded: boolean): void {
+		if (this.expanded === expanded) return;
 		this.expanded = expanded;
-		this.updateDisplay();
+		this.displayDirty = true;
 	}
 
 	override invalidate(): void {
 		super.invalidate();
-		this.updateDisplay();
+		this.displayDirty = true;
+	}
+
+	override render(width: number): string[] {
+		if (this.displayDirty) {
+			this.updateDisplay();
+		}
+		return super.render(width);
 	}
 
 	appendOutput(chunk: string): void {
@@ -99,7 +107,7 @@ export class BashExecutionComponent extends Container {
 			this.outputLines.push(...newLines);
 		}
 
-		this.updateDisplay();
+		this.displayDirty = true;
 	}
 
 	setComplete(
@@ -120,11 +128,11 @@ export class BashExecutionComponent extends Container {
 
 		// Stop loader
 		this.loader.stop();
-
-		this.updateDisplay();
+		this.displayDirty = true;
 	}
 
 	private updateDisplay(): void {
+		this.displayDirty = false;
 		// Apply truncation for LLM context limits (same limits as bash tool)
 		const fullOutput = this.outputLines.join("\n");
 		const contextTruncation = truncateTail(fullOutput, {

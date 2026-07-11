@@ -21,6 +21,7 @@ function createSession(options: {
 	reasoning?: boolean;
 	thinkingLevel?: string;
 	usage?: AssistantUsage;
+	usingSubscription?: boolean;
 }): AgentSession {
 	const usage = options.usage;
 	const entries =
@@ -53,7 +54,7 @@ function createSession(options: {
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
 		modelRegistry: {
-			isUsingOAuth: () => false,
+			isUsingOAuth: () => options.usingSubscription ?? false,
 		},
 	};
 
@@ -123,6 +124,53 @@ describe("FooterComponent width handling", () => {
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		}
+	});
+
+	it("reuses session aggregates until invalidated", () => {
+		let entryReads = 0;
+		let contextReads = 0;
+		const session = createSession({
+			sessionName: "",
+			usage: {
+				input: 100,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: { total: 0 },
+			},
+		});
+		const getEntries = session.sessionManager.getEntries.bind(session.sessionManager);
+		session.sessionManager.getEntries = () => {
+			entryReads++;
+			return getEntries();
+		};
+		const getContextUsage = session.getContextUsage.bind(session);
+		session.getContextUsage = () => {
+			contextReads++;
+			return getContextUsage();
+		};
+		const footer = new FooterComponent(session, createFooterData(1));
+
+		footer.render(120);
+		footer.render(100);
+		expect(entryReads).toBe(1);
+		expect(contextReads).toBe(1);
+
+		footer.invalidate();
+		footer.render(120);
+		expect(entryReads).toBe(2);
+		expect(contextReads).toBe(2);
+	});
+
+	it("labels subscription billing without showing a misleading zero cost", () => {
+		const footer = new FooterComponent(
+			createSession({ sessionName: "", usingSubscription: true }),
+			createFooterData(1),
+		);
+
+		const statsLine = stripAnsi(footer.render(120)[1]);
+		expect(statsLine).toContain("subscription");
+		expect(statsLine).not.toContain("$0.000");
 	});
 
 	it("shows the latest cache hit rate when cache usage is present", () => {

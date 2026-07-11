@@ -113,7 +113,6 @@ import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../cor
 import { getDefaultSessionDir, type SessionContext, SessionManager } from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
-import type { SubagentActivity, SubagentEvent } from "../../core/subagents/index.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
@@ -219,7 +218,14 @@ import {
 	Theme,
 	theme,
 } from "../../core/theme/runtime.ts";
-import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
+import {
+	editorTopBorderLabel,
+	formatKeyText,
+	keyDisplayText,
+	keyHint,
+	keyText,
+	rawKeyHint,
+} from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { StartupHeaderComponent } from "./components/logo.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
@@ -274,22 +280,7 @@ type CompactionQueuedMessage = {
 /** Display-only renderer for an isolated child session streamed inline into the transcript. */
 interface InlineSessionRenderer {
 	onSessionEvent: (event: AgentSessionEvent) => void;
-	setHeaderText: (text: string) => void;
 	dispose: () => void;
-}
-
-const INLINE_SESSION_EVENT_TYPES = new Set<string>([
-	"message_start",
-	"message_update",
-	"message_end",
-	"tool_execution_start",
-	"tool_execution_update",
-	"tool_execution_end",
-]);
-
-/** Narrow a subagent activity event to the session-event subset the inline renderer understands. */
-function toInlineSessionEvent(event: SubagentEvent): AgentSessionEvent | undefined {
-	return INLINE_SESSION_EVENT_TYPES.has(event.type) ? (event as AgentSessionEvent) : undefined;
 }
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
@@ -496,12 +487,6 @@ export class InteractiveMode {
 	private drainViewer: DrainViewerComponent | undefined;
 	private drainViewerFeedId: string | undefined;
 	private dismissSubagentInspector: (() => void) | undefined;
-	/** Live inline transcript groups for running subagents, keyed by activity id. */
-	private subagentInlineRenderers = new Map<
-		string,
-		{ renderer: InlineSessionRenderer; lastSequence: number; task: string | undefined }
-	>();
-	private unsubscribeSubagentActivities: (() => void) | undefined;
 	/** Timestamp of the last quit warning (phone attached + turn streaming). */
 	private lastQuitWarningAt = 0;
 
@@ -2103,7 +2088,6 @@ export class InteractiveMode {
 		this.session.setHostInteraction(this.createHostInteraction());
 		await this.bindCurrentSessionExtensions();
 		this.subscribeToAgent();
-		this.bindSubagentActivityRendering();
 		await this.updateAvailableProviderCount();
 		this.updateEditorBorderColor();
 		this.updateTerminalTitle();
@@ -2141,9 +2125,6 @@ export class InteractiveMode {
 
 	private renderCurrentSessionState(): void {
 		this.chatContainer.clear();
-		// Inline subagent groups live in the chat container; drop them so running
-		// activities rebuild from their retained events on the next notification.
-		this.resetSubagentInlineRenderers();
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
@@ -3490,6 +3471,7 @@ export class InteractiveMode {
 					this.loadingAnimation = this.createWorkingLoader();
 					this.statusContainer.addChild(this.loadingAnimation);
 				}
+				this.updateEditorBorderColor(true);
 				this.ui.requestRender();
 				break;
 
@@ -3667,6 +3649,7 @@ export class InteractiveMode {
 				this.pendingTools.clear();
 
 				this.scheduleTurnDoneAlert(event);
+				this.updateEditorBorderColor(false);
 
 				this.ui.requestRender();
 				break;
@@ -4339,14 +4322,14 @@ export class InteractiveMode {
 		}
 	}
 
-	private updateEditorBorderColor(): void {
+	private updateEditorBorderColor(streaming = this.session.isStreaming): void {
 		if (this.isBashMode) {
 			this.editor.borderColor = theme.getBashModeBorderColor();
-			this.editor.setTopBorderLabel?.("SHELL");
+			this.editor.setTopBorderLabel?.(editorTopBorderLabel("shell"));
 		} else {
 			const level = this.session.thinkingLevel || "off";
 			this.editor.borderColor = theme.getThinkingBorderColor(level);
-			this.editor.setTopBorderLabel?.("ASK VOLT");
+			this.editor.setTopBorderLabel?.(editorTopBorderLabel(streaming ? "steer" : "ask"));
 		}
 		this.ui.requestRender();
 	}
@@ -4731,54 +4714,81 @@ export class InteractiveMode {
 	// =========================================================================
 
 	/**
-	 * Shows a selector component in place of the editor.
+	 * Shows a selector as a temporary viewport so transcript and startup content
+	 * cannot consume the rows needed for its title, controls, and close action.
 	 * @param create Factory that receives a `done` callback and returns the component and focus target
 	 */
 	private showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
 		this.dismissSubagentInspector?.();
+		const mainComponents = this.getMainViewComponents();
+		let component: Component | undefined;
+		let closed = false;
 		const done = () => {
+			if (closed) return;
+			closed = true;
+			if (!component) return;
+			this.ui.removeChild(component);
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.editor);
+			for (const mainComponent of mainComponents) this.ui.addChild(mainComponent);
 			this.ui.setFocus(this.editor);
+			this.ui.requestRender(true);
 		};
-		const { component, focus } = create(done);
-		this.editorContainer.clear();
-		this.editorContainer.addChild(component);
-		this.ui.setFocus(focus);
-		this.ui.requestRender();
+		const created = create(done);
+		component = created.component;
+		if (closed) return;
+		for (const mainComponent of mainComponents) this.ui.removeChild(mainComponent);
+		this.ui.addChild(component);
+		this.ui.setFocus(created.focus);
+		this.ui.requestRender(true);
+	}
+
+	private getMainViewComponents(): Component[] {
+		return [
+			this.headerContainer,
+			this.chatContainer,
+			this.pendingMessagesContainer,
+			this.statusContainer,
+			this.widgetContainerAbove,
+			this.editorContainer,
+			this.widgetContainerBelow,
+			this.customFooter ?? this.footer,
+		];
 	}
 
 	private showSubagentInspector(): void {
 		const manager = this.session.getSubagentToolManager();
 		if (!manager?.listActivities || !manager.subscribeActivities) {
-			this.showWarning("Subagent inspection is unavailable for this session.");
+			this.showWarning("Subagent conversations are unavailable for this session.");
 			return;
 		}
 
-		this.showSelector((done) => {
-			let closed = false;
-			let selector: SubagentInspectorComponent;
-			const close = () => {
-				if (closed) return;
-				closed = true;
-				selector.dispose();
-				if (this.dismissSubagentInspector === close) {
-					this.dismissSubagentInspector = undefined;
-				}
-				done();
-				this.ui.requestRender();
-			};
-			selector = new SubagentInspectorComponent(
-				{
-					listActivities: () => manager.listActivities?.() ?? [],
-					subscribeActivities: (listener) => manager.subscribeActivities?.(listener) ?? (() => undefined),
-				},
-				this.ui,
-				close,
-			);
-			this.dismissSubagentInspector = close;
-			return { component: selector, focus: selector };
-		});
+		let closed = false;
+		let view: SubagentInspectorComponent;
+		const close = () => {
+			if (closed) return;
+			closed = true;
+			view.dispose();
+			this.ui.removeChild(view);
+			for (const component of this.getMainViewComponents()) this.ui.addChild(component);
+			this.ui.setFocus(this.editor);
+			if (this.dismissSubagentInspector === close) this.dismissSubagentInspector = undefined;
+			this.ui.requestRender(true);
+		};
+		view = new SubagentInspectorComponent(
+			{
+				listActivities: () => manager.listActivities?.() ?? [],
+				subscribeActivities: (listener) => manager.subscribeActivities?.(listener) ?? (() => undefined),
+			},
+			this.ui,
+			close,
+		);
+
+		for (const component of this.getMainViewComponents()) this.ui.removeChild(component);
+		this.ui.addChild(view);
+		this.ui.setFocus(view);
+		this.dismissSubagentInspector = close;
+		this.ui.requestRender(true);
 	}
 
 	private showSettingsSelector(): void {
@@ -7317,6 +7327,19 @@ export class InteractiveMode {
 
 		const sections: HotkeySection[] = [
 			{
+				title: "Essential workflow",
+				entries: [
+					{ key: submit, action: "Send message / steer active turn" },
+					{ key: interrupt, action: "Stop current response or tool" },
+					{ key: followUp, action: "Queue follow-up message" },
+					{ key: dequeue, action: "Restore queued messages" },
+					{ key: expandTools, action: "Toggle tool output expansion" },
+					{ key: selectModel, action: "Open model selector" },
+					{ key: cycleThinkingLevel, action: "Cycle thinking level" },
+					{ key: openSubagents, action: "Switch to subagent conversations" },
+				],
+			},
+			{
 				title: "Navigation",
 				entries: [
 					{ key: `${cursorUp} / ${cursorDown}`, action: "Move vertically / browse history" },
@@ -7364,7 +7387,7 @@ export class InteractiveMode {
 					{ key: followUp, action: "Queue follow-up message" },
 					{ key: dequeue, action: "Restore queued messages" },
 					{ key: pasteImage, action: "Paste image from clipboard" },
-					{ key: openSubagents, action: "Inspect subagent conversations and tool flow" },
+					{ key: openSubagents, action: "Switch to subagent conversations" },
 					{ key: "/", action: "Slash commands" },
 					{ key: "!", action: "Run bash command" },
 					{ key: "!!", action: "Run bash command (excluded from context)" },
@@ -7950,76 +7973,12 @@ export class InteractiveMode {
 
 		return {
 			onSessionEvent,
-			setHeaderText: (text: string) => {
-				header.setText(text);
-				this.ui.requestRender();
-			},
 			dispose: () => {
 				pending.clear();
 				this.chatContainer.removeChild(group);
 				this.ui.requestRender();
 			},
 		};
-	}
-
-	/**
-	 * Stream running subagent conversations live into the transcript, mirroring
-	 * how /review renders its isolated session. Each running activity gets its
-	 * own bordered inline group; the group is transient and is removed when the
-	 * subagent finishes (the subagent tool result then summarizes the outcome,
-	 * and past runs stay inspectable via /subagents).
-	 */
-	private bindSubagentActivityRendering(): void {
-		this.unsubscribeSubagentActivities?.();
-		this.unsubscribeSubagentActivities = undefined;
-		this.resetSubagentInlineRenderers();
-		const manager = this.session.getSubagentToolManager();
-		if (!manager?.listActivities || !manager.subscribeActivities) return;
-		this.unsubscribeSubagentActivities = manager.subscribeActivities((activityId) => {
-			const activity = manager.listActivities?.().find((candidate) => candidate.id === activityId);
-			if (activity) this.renderSubagentActivityInline(activity);
-		});
-	}
-
-	private resetSubagentInlineRenderers(): void {
-		for (const entry of this.subagentInlineRenderers.values()) {
-			entry.renderer.dispose();
-		}
-		this.subagentInlineRenderers.clear();
-	}
-
-	private formatSubagentInlineHeader(activity: SubagentActivity): string {
-		const name = theme.fg("accent", `Subagent ${activity.agent.name}`);
-		const task = activity.task?.split("\n")[0]?.trim();
-		return task ? `${name}${theme.fg("muted", ` — ${task}`)}` : name;
-	}
-
-	private renderSubagentActivityInline(activity: SubagentActivity): void {
-		let entry = this.subagentInlineRenderers.get(activity.id);
-		if (!entry) {
-			// Only start inline rendering for live runs; finished activities are
-			// summarized by the subagent tool result and the /subagents inspector.
-			if (activity.status !== "running") return;
-			entry = {
-				renderer: this.createInlineSessionRenderer({ headerText: this.formatSubagentInlineHeader(activity) }),
-				lastSequence: -1,
-				task: activity.task,
-			};
-			this.subagentInlineRenderers.set(activity.id, entry);
-		} else if (entry.task !== activity.task) {
-			entry.task = activity.task;
-			entry.renderer.setHeaderText(this.formatSubagentInlineHeader(activity));
-		}
-		for (const activityEvent of activity.events) {
-			if (activityEvent.sequence <= entry.lastSequence) continue;
-			entry.lastSequence = activityEvent.sequence;
-			const sessionEvent = toInlineSessionEvent(activityEvent.event);
-			if (sessionEvent) entry.renderer.onSessionEvent(sessionEvent);
-		}
-		if (activity.status !== "running") {
-			entry.renderer.dispose();
-			this.subagentInlineRenderers.delete(activity.id);
-		}
 	}
 
 	private async runInteractiveReviewWorkflow(
@@ -8105,9 +8064,6 @@ export class InteractiveMode {
 			this.loadingAnimation = undefined;
 		}
 		this.clearExtensionTerminalInputListeners();
-		this.unsubscribeSubagentActivities?.();
-		this.unsubscribeSubagentActivities = undefined;
-		this.resetSubagentInlineRenderers();
 		this.dismissSubagentInspector?.();
 		this.footer.dispose();
 		this.footerDataProvider.dispose();

@@ -52,7 +52,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "fork", description: "Create a new fork from a previous user message" },
 	{ name: "clone", description: "Duplicate the current session at the current position" },
 	{ name: "tree", description: "Navigate session tree (switch branches)" },
-	{ name: "subagents", description: "Inspect subagent conversations and tool flow" },
+	{ name: "subagents", description: "Switch to the subagent conversations view" },
 	{ name: "trust", description: "Save project trust decision for future sessions" },
 	{ name: "worktree", description: "Open a new session in a daemon-managed git worktree (/worktree new [name])" },
 	{ name: "store", description: "Search, inspect, install, remove, and update extension store packages" },

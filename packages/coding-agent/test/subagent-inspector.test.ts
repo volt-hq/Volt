@@ -103,35 +103,48 @@ describe("SubagentInspectorComponent", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	it("navigates from the activity list into conversation and tool flow", () => {
-		const source = new TestActivitySource([createActivity()]);
+	it("opens directly as a normal subagent conversation and switches agents", () => {
+		const first = createActivity({ startedAt: 1_000, finishedAt: 2_000 });
+		const second = createActivity({
+			id: "sa_reviewer",
+			sessionId: "session_reviewer",
+			agent: { name: "reviewer", source: "project" },
+			task: "Review the tests",
+			status: "running",
+			startedAt: 3_000,
+			finishedAt: undefined,
+			events: [
+				event(0, messageEvent("message_start", "user", "Review the tests")),
+				event(1, messageEvent("message_end", "user", "Review the tests")),
+				event(2, messageEvent("message_start", "assistant", "I am checking the test suite.")),
+			],
+		});
+		const source = new TestActivitySource([second, first]);
 		const { tui } = createFakeTui();
 		const close = vi.fn();
 		const inspector = new SubagentInspectorComponent(source, tui, close);
 
-		const list = stripAnsi(inspector.render(100).join("\n"));
-		expect(list).toContain("Subagents");
-		expect(list).toContain("scout (user)");
-		expect(list).toContain("Inspect the auth flow");
-		expect(list).toContain("completed");
+		const running = stripAnsi(inspector.render(100).join("\n"));
+		expect(running).toContain("Subagents  Subagent B · reviewer");
+		expect(running).toContain("Review the tests");
+		expect(running).toContain("I am checking the test suite.");
+		expect(running).not.toContain("Assistant");
+		expect(running).not.toContain("args:");
+		expect(running).not.toContain("session_reviewer");
 
-		inspector.handleInput("\r");
-		const detail = stripAnsi(inspector.render(100).join("\n"));
-		expect(detail).toContain("Subagents / scout");
-		expect(detail).toContain("Assistant");
-		expect(detail).toContain("I will inspect the relevant files.");
-		expect(detail).toContain("read");
-		expect(detail).toContain("src/auth.ts");
-		expect(detail).toContain("export function authenticate()");
-		expect(detail).toContain("The auth flow lacks replay protection.");
+		inspector.handleInput("\x1b[D");
+		const completed = stripAnsi(inspector.render(100).join("\n"));
+		expect(completed).toContain("Subagent A · scout");
+		expect(completed).toContain("I will inspect the relevant files.");
+		expect(completed).toContain("read  src/auth.ts");
+		expect(completed).toContain("The auth flow lacks replay protection.");
+		expect(completed).not.toContain("export function authenticate()");
 
-		inspector.handleInput("\x1b");
-		expect(stripAnsi(inspector.render(100).join("\n"))).toContain("1 this session");
 		inspector.handleInput("\x1b");
 		expect(close).toHaveBeenCalledOnce();
 	});
 
-	it("refreshes an open running activity as new events arrive", () => {
+	it("refreshes a running conversation as new events arrive", () => {
 		const running = createActivity({
 			status: "running",
 			finishedAt: undefined,
@@ -140,7 +153,6 @@ describe("SubagentInspectorComponent", () => {
 		const source = new TestActivitySource([running]);
 		const { tui, requestRender } = createFakeTui(16);
 		const inspector = new SubagentInspectorComponent(source, tui, () => {});
-		inspector.handleInput("\r");
 
 		source.activities = [
 			createActivity({
@@ -161,7 +173,7 @@ describe("SubagentInspectorComponent", () => {
 		expect(rendered).toContain("Live result arrived");
 	});
 
-	it("clips list and detail rendering to narrow terminals", () => {
+	it("fills and clips the dedicated view at narrow terminal sizes", () => {
 		const source = new TestActivitySource([
 			createActivity({
 				task: "A very long delegated task with enough text to overflow a narrow terminal several times",
@@ -169,13 +181,9 @@ describe("SubagentInspectorComponent", () => {
 		]);
 		const { tui } = createFakeTui(12);
 		const inspector = new SubagentInspectorComponent(source, tui, () => {});
+		const lines = inspector.render(24);
 
-		for (const line of inspector.render(24)) {
-			expect(visibleWidth(line)).toBeLessThanOrEqual(24);
-		}
-		inspector.handleInput("\r");
-		for (const line of inspector.render(24)) {
-			expect(visibleWidth(line)).toBeLessThanOrEqual(24);
-		}
+		expect(lines).toHaveLength(12);
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(24);
 	});
 });

@@ -28,6 +28,16 @@ function formatTokens(count: number): string {
 	return `${Math.round(count / 1000000)}M`;
 }
 
+type FooterSnapshot = {
+	totalInput: number;
+	totalOutput: number;
+	totalCacheRead: number;
+	totalCacheWrite: number;
+	totalCost: number;
+	latestCacheHitRate: number | undefined;
+	contextUsage: ReturnType<AgentSession["getContextUsage"]>;
+};
+
 export function formatCwdForFooter(cwd: string, home: string | undefined): string {
 	if (!home) return cwd;
 
@@ -50,6 +60,7 @@ export class FooterComponent implements Component {
 	private autoCompactEnabled = true;
 	private session: AgentSession;
 	private footerData: ReadonlyFooterDataProvider;
+	private snapshot?: FooterSnapshot;
 
 	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
 		this.session = session;
@@ -58,18 +69,16 @@ export class FooterComponent implements Component {
 
 	setSession(session: AgentSession): void {
 		this.session = session;
+		this.snapshot = undefined;
 	}
 
 	setAutoCompactEnabled(enabled: boolean): void {
 		this.autoCompactEnabled = enabled;
 	}
 
-	/**
-	 * No-op: git branch caching now handled by provider.
-	 * Kept for compatibility with existing call sites in interactive-mode.
-	 */
+	/** Clear session-derived aggregates. Git branch caching is handled by the provider. */
 	invalidate(): void {
-		// No-op: git branch is cached/invalidated by provider
+		this.snapshot = undefined;
 	}
 
 	/**
@@ -80,16 +89,15 @@ export class FooterComponent implements Component {
 		// Git watcher cleanup handled by provider
 	}
 
-	render(width: number): string[] {
-		if (width <= 0) return [];
-		const state = this.session.state;
+	private getSnapshot(): FooterSnapshot {
+		if (this.snapshot) return this.snapshot;
+
 		let totalInput = 0;
 		let totalOutput = 0;
 		let totalCacheRead = 0;
 		let totalCacheWrite = 0;
 		let totalCost = 0;
 		let latestCacheHitRate: number | undefined;
-
 		for (const entry of this.session.sessionManager.getEntries()) {
 			if (entry.type === "message" && entry.message.role === "assistant") {
 				totalInput += entry.message.usage.input;
@@ -103,6 +111,23 @@ export class FooterComponent implements Component {
 					latestPromptTokens > 0 ? (entry.message.usage.cacheRead / latestPromptTokens) * 100 : undefined;
 			}
 		}
+		this.snapshot = {
+			totalInput,
+			totalOutput,
+			totalCacheRead,
+			totalCacheWrite,
+			totalCost,
+			latestCacheHitRate,
+			contextUsage: this.session.getContextUsage(),
+		};
+		return this.snapshot;
+	}
+
+	render(width: number): string[] {
+		if (width <= 0) return [];
+		const state = this.session.state;
+		const { totalInput, totalOutput, totalCacheRead, totalCacheWrite, totalCost, latestCacheHitRate, contextUsage } =
+			this.getSnapshot();
 
 		const cwd = this.session.sessionManager.getCwd();
 		const workspace =
@@ -136,7 +161,6 @@ export class FooterComponent implements Component {
 		const workspacePadding = " ".repeat(Math.max(0, width - workspaceWidth - modelWidth));
 		const workspaceLine = `${fittedWorkspace}${workspacePadding}${modelSide}`;
 
-		const contextUsage = this.session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
@@ -151,9 +175,8 @@ export class FooterComponent implements Component {
 
 		const detailParts = [`${theme.fg("dim", "context")} ${contextValue}`];
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
-		if (totalCost || usingSubscription) {
-			detailParts.push(theme.fg("dim", `$${totalCost.toFixed(3)}${usingSubscription ? " sub" : ""}`));
-		}
+		if (usingSubscription) detailParts.push(theme.fg("dim", "subscription"));
+		if (totalCost) detailParts.push(theme.fg("dim", `$${totalCost.toFixed(3)}`));
 		if (totalInput) detailParts.push(theme.fg("dim", `↑${formatTokens(totalInput)}`));
 		if (totalOutput) detailParts.push(theme.fg("dim", `↓${formatTokens(totalOutput)}`));
 		if (totalCacheRead) detailParts.push(theme.fg("dim", `R${formatTokens(totalCacheRead)}`));

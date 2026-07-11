@@ -31,6 +31,8 @@ export interface AppKeybindings {
 	"app.session.fork": true;
 	"app.session.resume": true;
 	"app.subagents.open": true;
+	"app.subagents.previous": true;
+	"app.subagents.next": true;
 	"app.tree.foldOrUp": true;
 	"app.tree.unfoldOrDown": true;
 	"app.tree.editLabel": true;
@@ -113,7 +115,9 @@ export const KEYBINDINGS = {
 	"app.session.tree": { defaultKeys: [], description: "Open session tree" },
 	"app.session.fork": { defaultKeys: [], description: "Fork current session" },
 	"app.session.resume": { defaultKeys: [], description: "Resume a session" },
-	"app.subagents.open": { defaultKeys: "alt+a", description: "Open subagent inspector" },
+	"app.subagents.open": { defaultKeys: "alt+a", description: "Switch between main and subagent views" },
+	"app.subagents.previous": { defaultKeys: "left", description: "Show previous subagent" },
+	"app.subagents.next": { defaultKeys: "right", description: "Show next subagent" },
 	"app.tree.foldOrUp": {
 		defaultKeys: ["ctrl+left", "alt+left"],
 		description: "Fold tree branch or move up",

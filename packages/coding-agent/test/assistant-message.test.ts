@@ -53,6 +53,20 @@ describe("AssistantMessageComponent", () => {
 		expect(hidden).not.toContain("Check the render hierarchy");
 	});
 
+	test("renders only the latest content after multiple updates before a frame", () => {
+		initTheme("dark");
+		const component = new AssistantMessageComponent();
+
+		component.updateContent(createAssistantMessage([{ type: "text", text: "stale first draft" }]));
+		component.updateContent(createAssistantMessage([{ type: "text", text: "stale second draft" }]));
+		component.updateContent(createAssistantMessage([{ type: "text", text: "latest response" }]));
+
+		const rendered = stripAnsi(component.render(60).join("\n"));
+		expect(rendered).toContain("latest response");
+		expect(rendered).not.toContain("stale first draft");
+		expect(rendered).not.toContain("stale second draft");
+	});
+
 	test("renders failure state as text instead of relying on error color", () => {
 		initTheme("dark");
 

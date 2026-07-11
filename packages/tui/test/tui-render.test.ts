@@ -483,6 +483,32 @@ describe("TUI content shrinkage", () => {
 });
 
 describe("TUI differential rendering", () => {
+	it("reports logical render work separately from terminal output", async () => {
+		const terminal = new LoggingVirtualTerminal(40, 10);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		component.lines = ["Header", "Body", "Footer"];
+		tui.addChild(component);
+
+		tui.start();
+		await terminal.waitForRender();
+		const initial = tui.getRenderMetrics();
+		assert.strictEqual(initial.frames, 1);
+		assert.strictEqual(initial.generatedLines, 3);
+		assert.ok(initial.terminalWrites > 0);
+		assert.ok(initial.terminalBytes > 0);
+
+		tui.requestRender();
+		await terminal.waitForRender();
+		const unchanged = tui.getRenderMetrics();
+		assert.strictEqual(unchanged.frames, 2);
+		assert.strictEqual(unchanged.generatedLines, 6);
+		assert.strictEqual(unchanged.terminalWrites, initial.terminalWrites);
+		assert.strictEqual(unchanged.terminalBytes, initial.terminalBytes);
+
+		tui.stop();
+	});
+
 	it("tracks cursor correctly when content shrinks with unchanged remaining lines", async () => {
 		const terminal = new VirtualTerminal(40, 10);
 		const tui = new TUI(terminal);
