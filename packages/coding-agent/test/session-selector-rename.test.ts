@@ -1,4 +1,4 @@
-import { setKeybindings } from "@earendil-works/volt-tui";
+import { setKeybindings } from "@hansjm10/volt-tui";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { SessionInfo } from "../src/core/session-manager.ts";

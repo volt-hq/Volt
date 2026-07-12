@@ -6,7 +6,7 @@ description: Workflow for merging upstream Pi (earendil-works/pi-mono) changes i
 # Merging Upstream Pi into Volt
 
 Volt is a fork of Pi (`earendil-works/pi-mono`) with packages renamed from
-`@earendil-works/pi-*` to `@earendil-works/volt-*`. Most merge conflicts come
+`@earendil-works/pi-*` to `@hansjm10/volt-*`. Most merge conflicts come
 from that rename colliding with upstream changes to import lines. Merge often;
 small merges stay trivial.
 
@@ -37,7 +37,7 @@ commit subject).
 
 Almost all conflicts are the package rename on import lines. Resolution rule:
 
-- Keep Volt package names (`@earendil-works/volt-ai`, `volt-agent-core`,
+- Keep Volt package names (`@hansjm10/volt-ai`, `volt-agent-core`,
   `volt-tui`, `volt-coding-agent`).
 - Adopt upstream's logic and any new imports it added.
 
@@ -53,7 +53,7 @@ New upstream files arrive with Pi package names. Run:
 node scripts/rename-upstream.mjs
 ```
 
-This rewrites `@earendil-works/pi-*` to `@earendil-works/volt-*` in tracked
+This rewrites `@earendil-works/pi-*` to `@hansjm10/volt-*` in tracked
 source files. It deliberately skips CHANGELOGs (upstream issue/PR links must
 keep pointing at `pi-mono`) and lockfiles.
 
@@ -81,7 +81,7 @@ cd packages/<pkg> && node ../../node_modules/vitest/dist/cli.js --run test/<file
 Caveats:
 
 - `packages/tui` uses Node's test runner: `node --test test/<file>.test.ts`.
-- `packages/agent` tests resolve `@earendil-works/volt-ai` through the package
+- `packages/agent` tests resolve `@hansjm10/volt-ai` through the package
   exports (`dist/`). If unbuilt, build that one dependency:
   `cd packages/ai && npm run build`. The build regenerates
   `models.generated.ts` / `image-models.generated.ts` as a side effect; restore

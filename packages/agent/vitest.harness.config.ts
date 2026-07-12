@@ -21,6 +21,6 @@ export default defineConfig({
 		},
 	},
 	resolve: {
-		alias: [{ find: /^@earendil-works\/volt-ai$/, replacement: aiSrcIndex }],
+		alias: [{ find: /^@hansjm10\/volt-ai$/, replacement: aiSrcIndex }],
 	},
 });

@@ -5,7 +5,7 @@
  * Requires: npm install in this directory
  */
 
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import ms from "ms";
 import { Type } from "typebox";
 

@@ -5,8 +5,8 @@
  * and converting the ANSI output to HTML.
  */
 
-import type { ImageContent, TextContent } from "@earendil-works/volt-ai";
-import type { Component } from "@earendil-works/volt-tui";
+import type { ImageContent, TextContent } from "@hansjm10/volt-ai";
+import type { Component } from "@hansjm10/volt-tui";
 import type { ToolDefinition, ToolRenderContext } from "../extensions/types.ts";
 import type { Theme } from "../theme/runtime.ts";
 import { ansiLinesToHtml } from "./ansi-to-html.ts";

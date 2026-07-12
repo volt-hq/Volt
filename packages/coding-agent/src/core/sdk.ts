@@ -1,6 +1,6 @@
 import { join } from "node:path";
-import { Agent, type AgentMessage, type ThinkingLevel } from "@earendil-works/volt-agent-core";
-import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/volt-ai";
+import { Agent, type AgentMessage, type ThinkingLevel } from "@hansjm10/volt-agent-core";
+import { clampThinkingLevel, type Message, type Model, streamSimple } from "@hansjm10/volt-ai";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
@@ -181,7 +181,7 @@ function getDefaultAgentDir(): string {
  * const { session } = await createAgentSession();
  *
  * // With explicit model
- * import { getModel } from '@earendil-works/volt-ai';
+ * import { getModel } from '@hansjm10/volt-ai';
  * const { session } = await createAgentSession({
  *   model: getModel('anthropic', 'claude-opus-4-5'),
  *   thinkingLevel: 'high',

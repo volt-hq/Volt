@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@hansjm10/volt-coding-agent";
 
 const COMPACT_THRESHOLD_TOKENS = 100_000;
 

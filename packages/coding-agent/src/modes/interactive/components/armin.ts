@@ -2,7 +2,7 @@
  * Armin says hi! A fun easter egg with animated XBM art.
  */
 
-import type { Component, TUI } from "@earendil-works/volt-tui";
+import type { Component, TUI } from "@hansjm10/volt-tui";
 import { theme } from "../../../core/theme/runtime.ts";
 
 // XBM image: 31x36 pixels, LSB first, 1=background, 0=foreground

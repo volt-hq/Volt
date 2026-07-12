@@ -9,7 +9,7 @@ import {
 	decodeIrohRemoteTicketPayload,
 	IrohRemoteClientEngine,
 	serializeJsonLine,
-} from "@earendil-works/volt-coding-agent";
+} from "@hansjm10/volt-coding-agent";
 import {
 	ALPN,
 	getFlag,

@@ -2,7 +2,7 @@
  * Component for displaying bash command execution with streaming output.
  */
 
-import { type Component, Container, Loader, Spacer, Text, type TUI } from "@earendil-works/volt-tui";
+import { type Component, Container, Loader, Spacer, Text, type TUI } from "@hansjm10/volt-tui";
 import { highlightShellCommand, theme } from "../../../core/theme/runtime.ts";
 import { formatDuration } from "../../../core/tools/render-utils.ts";
 import {

@@ -1,6 +1,6 @@
-import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
-import type { Api, Model } from "@earendil-works/volt-ai";
-import { getSupportedThinkingLevels } from "@earendil-works/volt-ai";
+import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type { Api, Model } from "@hansjm10/volt-ai";
+import { getSupportedThinkingLevels } from "@hansjm10/volt-ai";
 import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
 import type { ReviewTarget, ReviewWorkflowResult } from "./review.ts";
 import type {

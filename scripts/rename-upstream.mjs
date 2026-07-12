@@ -2,11 +2,12 @@
 // Rewrites upstream Pi package names to Volt package names after merging
 // from upstream (earendil-works/pi-mono).
 //
-//   @earendil-works/pi-*  ->  @earendil-works/volt-*
+//   @earendil-works/pi-*  ->  @hansjm10/volt-*
 //
 // Intentionally left alone:
 // - CHANGELOG.md files (upstream issue/PR links must keep pointing at pi-mono)
 // - .volt merge guidance (must describe the upstream Pi package names)
+// - extension compatibility aliases/docs/tests (must continue accepting Pi packages)
 // - package-lock.json / npm-shrinkwrap.json (regenerated, not hand-edited)
 // - github.com/earendil-works/pi-mono URLs (don't match the scoped-package pattern)
 //
@@ -15,7 +16,7 @@
 //   node scripts/rename-upstream.mjs --check   # report only, exit 1 if matches found
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const check = process.argv.includes("--check");
 const pattern = /@earendil-works\/pi-/g;
@@ -24,13 +25,17 @@ const extensions = [".ts", ".tsx", ".js", ".mjs", ".cjs", ".json", ".md"];
 const skip = (file) =>
 	file.endsWith("CHANGELOG.md") ||
 	file === ".volt/skills/merge-upstream.md" ||
+	file === "packages/coding-agent/docs/extensions.md" ||
+	file === "packages/coding-agent/docs/packages.md" ||
+	file === "packages/coding-agent/src/core/extensions/loader.ts" ||
+	file === "packages/coding-agent/test/pi-extension-compat.test.ts" ||
 	file.endsWith("package-lock.json") ||
 	file.endsWith("npm-shrinkwrap.json") ||
 	file === "scripts/rename-upstream.mjs";
 
 const files = execFileSync("git", ["ls-files"], { encoding: "utf8" })
 	.split("\n")
-	.filter((file) => file && extensions.some((ext) => file.endsWith(ext)) && !skip(file));
+	.filter((file) => file && existsSync(file) && extensions.some((ext) => file.endsWith(ext)) && !skip(file));
 
 const touched = [];
 for (const file of files) {
@@ -39,7 +44,7 @@ for (const file of files) {
 	pattern.lastIndex = 0;
 	touched.push(file);
 	if (!check) {
-		writeFileSync(file, content.replace(pattern, "@earendil-works/volt-"));
+		writeFileSync(file, content.replace(pattern, "@hansjm10/volt-"));
 	}
 }
 

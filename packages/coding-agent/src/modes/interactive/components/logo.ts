@@ -1,4 +1,4 @@
-import { type Component, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/volt-tui";
+import { type Component, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@hansjm10/volt-tui";
 import { APP_NAME } from "../../../config.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 

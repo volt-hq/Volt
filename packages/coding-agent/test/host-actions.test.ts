@@ -1,5 +1,5 @@
-import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
-import type { Api, Model, ThinkingLevelMap } from "@earendil-works/volt-ai";
+import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type { Api, Model, ThinkingLevelMap } from "@hansjm10/volt-ai";
 import { describe, expect, test, vi } from "vitest";
 import {
 	CONTEXT_COMPACT_ACTION_ID,

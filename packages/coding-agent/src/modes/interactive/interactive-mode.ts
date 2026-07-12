@@ -6,7 +6,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/volt-agent-core";
+import type { AgentMessage, ThinkingLevel } from "@hansjm10/volt-agent-core";
 import {
 	type AssistantMessage,
 	getProviders,
@@ -16,7 +16,7 @@ import {
 	modelsAreEqual,
 	type OAuthProviderId,
 	type OAuthSelectPrompt,
-} from "@earendil-works/volt-ai";
+} from "@hansjm10/volt-ai";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -27,7 +27,7 @@ import type {
 	OverlayHandle,
 	OverlayOptions,
 	SlashCommand,
-} from "@earendil-works/volt-tui";
+} from "@hansjm10/volt-tui";
 import {
 	CombinedAutocompleteProvider,
 	type Component,
@@ -44,7 +44,7 @@ import {
 	TruncatedText,
 	TUI,
 	visibleWidth,
-} from "@earendil-works/volt-tui";
+} from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import { spawn, spawnSync } from "child_process";
 import {
@@ -183,7 +183,6 @@ import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomMessageComponent } from "./components/custom-message.ts";
 import { DaxnutsComponent } from "./components/daxnuts.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
-import { EarendilAnnouncementComponent } from "./components/earendil-announcement.ts";
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
@@ -191,6 +190,7 @@ import { FooterComponent } from "./components/footer.ts";
 import { type HotkeySection, HotkeysComponent } from "./components/hotkeys.ts";
 import { createRemoteControlBackend, RemoteControlCenterComponent } from "./components/remote-control-center.ts";
 import { isCoalescableAssistantUpdate, StreamingRenderCoalescer } from "./components/streaming-render-coalescer.ts";
+import { VoltAnnouncementComponent } from "./components/volt-announcement.ts";
 import {
 	type AcquireOutcome,
 	createDaemonAttach,
@@ -3449,8 +3449,8 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/dementedelves") {
-				this.handleDementedDelves();
+			if (text === "/voltannouncement") {
+				this.handleVoltAnnouncement();
 				this.editor.setText("");
 				return;
 			}
@@ -7663,9 +7663,9 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private handleDementedDelves(): void {
+	private handleVoltAnnouncement(): void {
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new EarendilAnnouncementComponent());
+		this.chatContainer.addChild(new VoltAnnouncementComponent());
 		this.ui.requestRender();
 	}
 

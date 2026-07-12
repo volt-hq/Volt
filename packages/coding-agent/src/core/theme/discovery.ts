@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { RgbColor } from "@earendil-works/volt-tui";
+import type { RgbColor } from "@hansjm10/volt-tui";
 import { getCustomThemesDir, getThemesDir } from "../../config.ts";
 import { createThemeFromJson, parseThemeJsonContent, type Theme, type ThemeJson } from "./theme.ts";
 import { ansi256ToHex, hexToRgb, resolveVarRefs } from "./tokens.ts";

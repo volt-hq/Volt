@@ -31,7 +31,7 @@ describe("store inspector and install plan", () => {
 					license: "MIT",
 					repository: { url: "https://github.com/user/volt-example" },
 					dependencies: { leftpad: "1.0.0" },
-					peerDependencies: { "@earendil-works/volt-coding-agent": "*" },
+					peerDependencies: { "@hansjm10/volt-coding-agent": "*" },
 					optionalDependencies: { optional: "2.0.0" },
 					scripts: { postinstall: "node build.js" },
 					volt: { extensions: ["extensions/*.ts"] },
@@ -86,7 +86,7 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		expect(inspection.voltManifest?.extensions).toEqual(["extensions/*.ts"]);
 		expect(inspection.discoveredResources.extensions).toEqual(["extensions/example.ts"]);
 		expect(inspection.dependencies).toEqual({ leftpad: "1.0.0" });
-		expect(inspection.peerDependencies).toEqual({ "@earendil-works/volt-coding-agent": "*" });
+		expect(inspection.peerDependencies).toEqual({ "@hansjm10/volt-coding-agent": "*" });
 		expect(inspection.optionalDependencies).toEqual({ optional: "2.0.0" });
 		expect(inspection.scripts).toEqual({ postinstall: "node build.js" });
 		expect(existsSync(sentinelPath)).toBe(false);

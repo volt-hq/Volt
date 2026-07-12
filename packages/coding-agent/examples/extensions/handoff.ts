@@ -12,10 +12,10 @@
  * The generated prompt appears as a draft in the editor for review/editing.
  */
 
-import type { AgentMessage } from "@earendil-works/volt-agent-core";
-import { complete, type Message } from "@earendil-works/volt-ai";
-import type { ExtensionAPI, SessionEntry } from "@earendil-works/volt-coding-agent";
-import { BorderedLoader, convertToLlm, serializeConversation } from "@earendil-works/volt-coding-agent";
+import type { AgentMessage } from "@hansjm10/volt-agent-core";
+import { complete, type Message } from "@hansjm10/volt-ai";
+import type { ExtensionAPI, SessionEntry } from "@hansjm10/volt-coding-agent";
+import { BorderedLoader, convertToLlm, serializeConversation } from "@hansjm10/volt-coding-agent";
 
 const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused prompt that:
 

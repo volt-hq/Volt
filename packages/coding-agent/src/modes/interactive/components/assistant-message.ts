@@ -1,5 +1,5 @@
-import type { AssistantMessage } from "@earendil-works/volt-ai";
-import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/volt-tui";
+import type { AssistantMessage } from "@hansjm10/volt-ai";
+import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@hansjm10/volt-tui";
 import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";

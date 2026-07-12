@@ -11,7 +11,7 @@
  *   /followup And then?   - Sends while streaming with followUp delivery
  */
 
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 export default function (volt: ExtensionAPI) {
 	// Simple command that sends a user message

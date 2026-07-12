@@ -4,7 +4,7 @@
  * A heartfelt tribute to dax (@thdxr) for providing free Kimi K2.5 access via OpenCode.
  */
 
-import type { Component, TUI } from "@earendil-works/volt-tui";
+import type { Component, TUI } from "@hansjm10/volt-tui";
 import { theme } from "../../../core/theme/runtime.ts";
 
 // 32x32 RGB image of dax, hex encoded (3 bytes per pixel)

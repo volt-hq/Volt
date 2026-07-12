@@ -1,4 +1,4 @@
-import { setKeybindings, type TUI, visibleWidth } from "@earendil-works/volt-tui";
+import { setKeybindings, type TUI, visibleWidth } from "@hansjm10/volt-tui";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { SubagentActivity, SubagentEvent } from "../src/core/subagents/index.ts";

@@ -7,11 +7,11 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import * as _bundledVoltAgentCore from "@earendil-works/volt-agent-core";
-import * as _bundledVoltAi from "@earendil-works/volt-ai";
-import * as _bundledVoltAiOauth from "@earendil-works/volt-ai/oauth";
-import type { KeyId } from "@earendil-works/volt-tui";
-import * as _bundledVoltTui from "@earendil-works/volt-tui";
+import * as _bundledVoltAgentCore from "@hansjm10/volt-agent-core";
+import * as _bundledVoltAi from "@hansjm10/volt-ai";
+import * as _bundledVoltAiOauth from "@hansjm10/volt-ai/oauth";
+import type { KeyId } from "@hansjm10/volt-tui";
+import * as _bundledVoltTui from "@hansjm10/volt-tui";
 import { createJiti } from "jiti/static";
 // Static imports of packages that extensions may use.
 // These MUST be static so Bun bundles them into the compiled binary.
@@ -21,7 +21,7 @@ import * as _bundledTypeboxCompile from "typebox/compile";
 import * as _bundledTypeboxValue from "typebox/value";
 import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.ts";
 // NOTE: This import works because loader.ts exports are NOT re-exported from index.ts,
-// avoiding a circular dependency. Extensions can import from @earendil-works/volt-coding-agent.
+// avoiding a circular dependency. Extensions can import from @hansjm10/volt-coding-agent.
 import * as _bundledVoltCodingAgent from "../../index.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
@@ -48,11 +48,11 @@ const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@sinclair/typebox": _bundledTypebox,
 	"@sinclair/typebox/compile": _bundledTypeboxCompile,
 	"@sinclair/typebox/value": _bundledTypeboxValue,
-	"@earendil-works/volt-agent-core": _bundledVoltAgentCore,
-	"@earendil-works/volt-tui": _bundledVoltTui,
-	"@earendil-works/volt-ai": _bundledVoltAi,
-	"@earendil-works/volt-ai/oauth": _bundledVoltAiOauth,
-	"@earendil-works/volt-coding-agent": _bundledVoltCodingAgent,
+	"@hansjm10/volt-agent-core": _bundledVoltAgentCore,
+	"@hansjm10/volt-tui": _bundledVoltTui,
+	"@hansjm10/volt-ai": _bundledVoltAi,
+	"@hansjm10/volt-ai/oauth": _bundledVoltAiOauth,
+	"@hansjm10/volt-coding-agent": _bundledVoltCodingAgent,
 	"@earendil-works/pi-agent-core": _bundledVoltAgentCore,
 	"@earendil-works/pi-tui": _bundledVoltTui,
 	"@earendil-works/pi-ai": _bundledVoltAi,
@@ -118,22 +118,18 @@ function getAliases(): Record<string, string> {
 	const voltAgentCoreEntry = resolveWorkspaceOrImport(
 		"agent/dist/index.js",
 		"agent/src/index.ts",
-		"@earendil-works/volt-agent-core",
+		"@hansjm10/volt-agent-core",
 	);
-	const voltTuiEntry = resolveWorkspaceOrImport("tui/dist/index.js", "tui/src/index.ts", "@earendil-works/volt-tui");
-	const voltAiEntry = resolveWorkspaceOrImport("ai/dist/index.js", "ai/src/index.ts", "@earendil-works/volt-ai");
-	const voltAiOauthEntry = resolveWorkspaceOrImport(
-		"ai/dist/oauth.js",
-		"ai/src/oauth.ts",
-		"@earendil-works/volt-ai/oauth",
-	);
+	const voltTuiEntry = resolveWorkspaceOrImport("tui/dist/index.js", "tui/src/index.ts", "@hansjm10/volt-tui");
+	const voltAiEntry = resolveWorkspaceOrImport("ai/dist/index.js", "ai/src/index.ts", "@hansjm10/volt-ai");
+	const voltAiOauthEntry = resolveWorkspaceOrImport("ai/dist/oauth.js", "ai/src/oauth.ts", "@hansjm10/volt-ai/oauth");
 
 	_aliases = {
-		"@earendil-works/volt-coding-agent": voltCodingAgentEntry,
-		"@earendil-works/volt-agent-core": voltAgentCoreEntry,
-		"@earendil-works/volt-tui": voltTuiEntry,
-		"@earendil-works/volt-ai": voltAiEntry,
-		"@earendil-works/volt-ai/oauth": voltAiOauthEntry,
+		"@hansjm10/volt-coding-agent": voltCodingAgentEntry,
+		"@hansjm10/volt-agent-core": voltAgentCoreEntry,
+		"@hansjm10/volt-tui": voltTuiEntry,
+		"@hansjm10/volt-ai": voltAiEntry,
+		"@hansjm10/volt-ai/oauth": voltAiOauthEntry,
 		"@earendil-works/pi-coding-agent": voltCodingAgentEntry,
 		"@earendil-works/pi-agent-core": voltAgentCoreEntry,
 		"@earendil-works/pi-tui": voltTuiEntry,

@@ -1,6 +1,6 @@
-import type { AgentTool } from "@earendil-works/volt-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/volt-ai";
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
+import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, getAssistantTexts, getUserTexts, type Harness } from "../harness.ts";

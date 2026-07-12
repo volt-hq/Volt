@@ -1,4 +1,4 @@
-import { type Component, Container, Markdown, type MarkdownTheme, Spacer } from "@earendil-works/volt-tui";
+import { type Component, Container, Markdown, type MarkdownTheme, Spacer } from "@hansjm10/volt-tui";
 import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";

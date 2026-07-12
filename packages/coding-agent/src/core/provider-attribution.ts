@@ -1,4 +1,4 @@
-import type { Api, Model } from "@earendil-works/volt-ai";
+import type { Api, Model } from "@hansjm10/volt-ai";
 import type { SettingsManager } from "./settings-manager.ts";
 import { isInstallTelemetryEnabled } from "./telemetry.ts";
 
@@ -67,7 +67,7 @@ function getDefaultAttributionHeaders(
 
 	if (isVercelGatewayModel(model)) {
 		return {
-			"http-referer": "https://github.com/earendil-works/volt",
+			"http-referer": "https://github.com/hansjm10/Volt",
 			"x-title": "volt",
 		};
 	}

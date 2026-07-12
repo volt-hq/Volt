@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
-import type { Api, Model } from "@earendil-works/volt-ai";
+import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type { Api, Model } from "@hansjm10/volt-ai";
 import type { ResolvedCommand } from "../extensions/types.ts";
 import { BUILTIN_HOST_ACTION_REGISTRY } from "../host-actions.ts";
 import type { PromptTemplate } from "../prompt-templates.ts";

@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
-import type { AgentMessage } from "@earendil-works/volt-agent-core";
-import type { ImageContent } from "@earendil-works/volt-ai";
+import type { AgentMessage } from "@hansjm10/volt-agent-core";
+import type { ImageContent } from "@hansjm10/volt-ai";
 import { type BashExecutionMessage, extractVisibleTextContent } from "../messages.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
 import type {

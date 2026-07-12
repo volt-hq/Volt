@@ -1,4 +1,4 @@
-import { setBedrockProviderModule } from "@earendil-works/volt-ai";
-import { bedrockProviderModule } from "@earendil-works/volt-ai/bedrock-provider";
+import { setBedrockProviderModule } from "@hansjm10/volt-ai";
+import { bedrockProviderModule } from "@hansjm10/volt-ai/bedrock-provider";
 
 setBedrockProviderModule(bedrockProviderModule);

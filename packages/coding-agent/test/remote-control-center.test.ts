@@ -1,4 +1,4 @@
-import { visibleWidth } from "@earendil-works/volt-tui";
+import { visibleWidth } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { IrohRemoteAccessPresetName } from "../src/core/remote/iroh/access-grant.ts";
 import { IROH_REMOTE_ALPN } from "../src/core/remote/iroh/protocol.ts";

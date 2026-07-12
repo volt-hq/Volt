@@ -2,7 +2,7 @@
  * Multi-select component for persistent /review tool selection.
  */
 
-import { Container, getKeybindings, Spacer, Text, truncateToWidth } from "@earendil-works/volt-tui";
+import { Container, getKeybindings, Spacer, Text, truncateToWidth } from "@hansjm10/volt-tui";
 import { theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, rawKeyHint } from "./keybinding-hints.ts";

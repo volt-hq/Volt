@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { EditorTheme, MarkdownTheme, SelectListTheme, SettingsListTheme } from "@earendil-works/volt-tui";
+import type { EditorTheme, MarkdownTheme, SelectListTheme, SettingsListTheme } from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import { getCustomThemesDir } from "../../config.ts";
 import { closeWatcher, watchWithErrorHandler } from "../../utils/fs-watch.ts";
@@ -61,8 +61,8 @@ export function getThemeByName(name: string): Theme | undefined {
 // ============================================================================
 
 // Use globalThis to share theme across module loaders (tsx + jiti in dev mode)
-const THEME_KEY = Symbol.for("@earendil-works/volt-coding-agent:theme");
-const THEME_KEY_OLD = Symbol.for("@earendil-works/volt-coding-agent:theme");
+const THEME_KEY = Symbol.for("@hansjm10/volt-coding-agent:theme");
+const THEME_KEY_OLD = Symbol.for("@hansjm10/volt-coding-agent:theme");
 
 // Export theme as a getter that reads from globalThis
 // This ensures all module instances (tsx, jiti) see the same theme

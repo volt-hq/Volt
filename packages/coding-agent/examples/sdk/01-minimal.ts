@@ -5,7 +5,7 @@
  * from cwd and ~/.volt/agent. Model chosen from settings or first available.
  */
 
-import { createAgentSession } from "@earendil-works/volt-coding-agent";
+import { createAgentSession } from "@hansjm10/volt-coding-agent";
 
 const { session } = await createAgentSession();
 

@@ -3,10 +3,10 @@
 	"compilerOptions": {
 		"noEmit": true,
 		"paths": {
-			"@earendil-works/volt-coding-agent": ["./src/index.ts"],
-			"@earendil-works/volt-coding-agent/hooks": ["./src/core/hooks/index.ts"],
-			"@earendil-works/volt-tui": ["../tui/src/index.ts"],
-			"@earendil-works/volt-ai": ["../ai/src/index.ts"],
+			"@hansjm10/volt-coding-agent": ["./src/index.ts"],
+			"@hansjm10/volt-coding-agent/hooks": ["./src/core/hooks/index.ts"],
+			"@hansjm10/volt-tui": ["../tui/src/index.ts"],
+			"@hansjm10/volt-ai": ["../ai/src/index.ts"],
 			"typebox": ["../../node_modules/typebox"]
 		},
 		"skipLibCheck": true

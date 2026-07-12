@@ -3,9 +3,9 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	type KeybindingsManager,
-} from "@earendil-works/volt-coding-agent";
-import type { Component, EditorTheme, TUI } from "@earendil-works/volt-tui";
-import { truncateToWidth, visibleWidth } from "@earendil-works/volt-tui";
+} from "@hansjm10/volt-coding-agent";
+import type { Component, EditorTheme, TUI } from "@hansjm10/volt-tui";
+import { truncateToWidth, visibleWidth } from "@hansjm10/volt-tui";
 
 function fitBorder(
 	left: string,

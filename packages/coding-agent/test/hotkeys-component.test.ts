@@ -1,4 +1,4 @@
-import { visibleWidth } from "@earendil-works/volt-tui";
+import { visibleWidth } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { HotkeysComponent } from "../src/modes/interactive/components/hotkeys.ts";

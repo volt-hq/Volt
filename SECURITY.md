@@ -4,9 +4,9 @@ This document should guide you about understanding the security concept behind
 Volt and also where the boundaries are.
 
 In general Volt is a coding agent that runs locally within the security boundary
-of the user that is running it.  It's the responsibiltiy of the user to monitor
+of the user that is running it.  It is the responsibility of the user to monitor
 its operations or to contain it within a container, virtual machine or other
-Sandbox solution.
+sandbox solution.
 
 Volt treats the local user account and files writable by that account as inside
 the same trust boundary as the Volt process itself.  If an attacker can modify files
@@ -16,18 +16,16 @@ Reports that depend on such prior local write access are not security
 vulnerabilities unless they demonstrate how Volt grants that write access or crosses
 an operating-system privilege boundary.
 
-Volt relies on users installing trustworthy extensions and loading trustworthy
-skills and only to use volt within trusted repositories.  This is because files
-like `AGENTS.md` or instructions in comments can be used to prompt inject the
-coding agent trivially and this cannot be protected against.
+Volt relies on users installing trustworthy extensions, loading trustworthy
+skills, and using Volt only within trusted repositories. Files such as
+`AGENTS.md` and instructions in comments can inject prompts into the coding
+agent; this risk cannot be reliably eliminated.
 
 ## Reporting a Vulnerability
 
-If you believe you found a security vulnerability in volt or another package in
-this repository, please report it privately by either:
-
-- Emailing `security@earendil.com`, or
-- Opening a private report through GitHub Security Advisories for this repository
+If you believe you found a security vulnerability in Volt or another package in
+this repository, [open a private GitHub Security Advisory for
+`hansjm10/Volt`](https://github.com/hansjm10/Volt/security/advisories/new).
 
 Please include:
 
@@ -50,7 +48,7 @@ repository code are in scope.
 - Behavior of volt extensions or skills installed by the user
 - Risks from working in untrusted repositories
 - Risks from installing untrusted extensions, skills, packages, or tools
-- Isuses caused by non trustworthy MITM proxies
+- Issues caused by untrustworthy man-in-the-middle proxies
 - Public internet exposure of a Volt installation
 - Prompt injection attacks
 - Exposed secrets that are third-party/user-controlled credentials
@@ -62,7 +60,8 @@ repository code are in scope.
   profiles, or dotfile managers, unless the report shows how Volt itself grants
   that access.
 - Issues caused by intentionally weakened user configuration.
-- Resource/DOS claims that require trusted local input/config against the volt coding agent.
+- Resource-denial-of-service claims that require trusted local input or
+  configuration against the Volt coding agent.
 - Reports about malicious model output.
 - User-approved or user-initiated local actions presented as vulnerabilities.
 
@@ -82,5 +81,5 @@ When possible, include the exact affected path, package version or commit SHA,
 configuration, and a proof of concept against the latest release or latest
 `main`.  For dependency reports, include evidence that the shipped dependency is
 affected and that the issue is reachable through Volt.  For exposed-secret reports,
-include evidence that the credential is owned by Earendil or grants access to
-Earendil-operated infrastructure or services.
+include evidence that the credential belongs to the Volt project or grants
+access to its repository, npm packages, or release infrastructure.

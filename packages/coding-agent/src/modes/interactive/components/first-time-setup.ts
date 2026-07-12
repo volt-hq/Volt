@@ -1,4 +1,4 @@
-import { Container, getKeybindings, Spacer, Text } from "@earendil-works/volt-tui";
+import { Container, getKeybindings, Spacer, Text } from "@hansjm10/volt-tui";
 import { APP_NAME } from "../../../config.ts";
 import { type TerminalTheme, theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";

@@ -1,17 +1,17 @@
 {
-	"name": "@earendil-works/volt-coding-agent",
-	"version": "0.79.6",
+	"name": "@hansjm10/volt-coding-agent",
+	"version": "0.1.0",
 	"lockfileVersion": 3,
 	"requires": true,
 	"packages": {
 		"": {
-			"name": "@earendil-works/volt-coding-agent",
-			"version": "0.79.6",
+			"name": "@hansjm10/volt-coding-agent",
+			"version": "0.1.0",
 			"license": "MIT",
 			"dependencies": {
-				"@earendil-works/volt-agent-core": "^0.79.6",
-				"@earendil-works/volt-ai": "^0.79.6",
-				"@earendil-works/volt-tui": "^0.79.6",
+				"@hansjm10/volt-agent-core": "^0.1.0",
+				"@hansjm10/volt-ai": "^0.1.0",
+				"@hansjm10/volt-tui": "^0.1.0",
 				"@modelcontextprotocol/sdk": "1.29.0",
 				"@silvia-odwyer/photon-node": "0.3.4",
 				"chalk": "5.6.2",
@@ -476,55 +476,6 @@
 				"node": ">=6.9.0"
 			}
 		},
-		"node_modules/@earendil-works/volt-agent-core": {
-			"version": "0.79.6",
-			"resolved": "https://registry.npmjs.org/@earendil-works/volt-agent-core/-/volt-agent-core-0.79.6.tgz",
-			"license": "MIT",
-			"dependencies": {
-				"@earendil-works/volt-ai": "^0.79.6",
-				"ignore": "7.0.5",
-				"typebox": "1.1.38",
-				"yaml": "2.9.0"
-			},
-			"engines": {
-				"node": ">=22.19.0"
-			}
-		},
-		"node_modules/@earendil-works/volt-ai": {
-			"version": "0.79.6",
-			"resolved": "https://registry.npmjs.org/@earendil-works/volt-ai/-/volt-ai-0.79.6.tgz",
-			"license": "MIT",
-			"dependencies": {
-				"@anthropic-ai/sdk": "0.91.1",
-				"@aws-sdk/client-bedrock-runtime": "3.1048.0",
-				"@smithy/node-http-handler": "4.7.3",
-				"@google/genai": "1.52.0",
-				"@mistralai/mistralai": "2.2.1",
-				"http-proxy-agent": "7.0.2",
-				"https-proxy-agent": "7.0.6",
-				"openai": "6.26.0",
-				"partial-json": "0.1.7",
-				"typebox": "1.1.38"
-			},
-			"bin": {
-				"volt-ai": "./dist/cli.js"
-			},
-			"engines": {
-				"node": ">=22.19.0"
-			}
-		},
-		"node_modules/@earendil-works/volt-tui": {
-			"version": "0.79.6",
-			"resolved": "https://registry.npmjs.org/@earendil-works/volt-tui/-/volt-tui-0.79.6.tgz",
-			"license": "MIT",
-			"dependencies": {
-				"get-east-asian-width": "1.6.0",
-				"marked": "18.0.5"
-			},
-			"engines": {
-				"node": ">=22.19.0"
-			}
-		},
 		"node_modules/@google/genai": {
 			"version": "1.52.0",
 			"resolved": "https://registry.npmjs.org/@google/genai/-/genai-1.52.0.tgz",
@@ -548,6 +499,55 @@
 				"node": ">=20.0.0"
 			},
 			"hasInstallScript": true
+		},
+		"node_modules/@hansjm10/volt-agent-core": {
+			"version": "0.1.0",
+			"resolved": "https://registry.npmjs.org/@hansjm10/volt-agent-core/-/volt-agent-core-0.1.0.tgz",
+			"license": "MIT",
+			"dependencies": {
+				"@hansjm10/volt-ai": "^0.1.0",
+				"ignore": "7.0.5",
+				"typebox": "1.1.38",
+				"yaml": "2.9.0"
+			},
+			"engines": {
+				"node": ">=22.19.0"
+			}
+		},
+		"node_modules/@hansjm10/volt-ai": {
+			"version": "0.1.0",
+			"resolved": "https://registry.npmjs.org/@hansjm10/volt-ai/-/volt-ai-0.1.0.tgz",
+			"license": "MIT",
+			"dependencies": {
+				"@anthropic-ai/sdk": "0.91.1",
+				"@aws-sdk/client-bedrock-runtime": "3.1048.0",
+				"@smithy/node-http-handler": "4.7.3",
+				"@google/genai": "1.52.0",
+				"@mistralai/mistralai": "2.2.1",
+				"http-proxy-agent": "7.0.2",
+				"https-proxy-agent": "7.0.6",
+				"openai": "6.26.0",
+				"partial-json": "0.1.7",
+				"typebox": "1.1.38"
+			},
+			"bin": {
+				"volt-ai": "./dist/cli.js"
+			},
+			"engines": {
+				"node": ">=22.19.0"
+			}
+		},
+		"node_modules/@hansjm10/volt-tui": {
+			"version": "0.1.0",
+			"resolved": "https://registry.npmjs.org/@hansjm10/volt-tui/-/volt-tui-0.1.0.tgz",
+			"license": "MIT",
+			"dependencies": {
+				"get-east-asian-width": "1.6.0",
+				"marked": "18.0.5"
+			},
+			"engines": {
+				"node": ">=22.19.0"
+			}
 		},
 		"node_modules/@hono/node-server": {
 			"version": "1.19.14",

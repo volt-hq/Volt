@@ -1,4 +1,4 @@
-import type { ImageContent, Message, TextContent } from "@earendil-works/volt-ai";
+import type { ImageContent, Message, TextContent } from "@hansjm10/volt-ai";
 import type { AgentMessage } from "../types.ts";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:

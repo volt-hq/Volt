@@ -1,4 +1,4 @@
-import { Markdown, type MarkdownTheme } from "@earendil-works/volt-tui";
+import { Markdown, type MarkdownTheme } from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import { selectConfig } from "./cli/config-selector.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
@@ -324,9 +324,9 @@ function updateTargetIncludesExtensions(target: UpdateTarget): boolean {
 	return target.type === "all" || target.type === "extensions";
 }
 
-function printSelfUpdateUnavailable(npmCommand?: string[], updatePackageName = PACKAGE_NAME): void {
+function printSelfUpdateUnavailable(npmCommand?: string[], updatePackageSpec = PACKAGE_NAME): void {
 	console.error(`error: ${APP_NAME} cannot self-update this installation.`);
-	console.error(getSelfUpdateUnavailableInstruction(PACKAGE_NAME, npmCommand, updatePackageName));
+	console.error(getSelfUpdateUnavailableInstruction(PACKAGE_NAME, npmCommand, updatePackageSpec));
 
 	const entrypoint = process.argv[1];
 	if (entrypoint) {
@@ -360,50 +360,92 @@ function printSelfUpdateNote(note: string): void {
 }
 
 interface SelfUpdatePlan {
-	packageName: string;
+	packageSpec: string;
 	shouldRun: boolean;
 	note?: string;
 }
 
+const BETA_SELF_UPDATE_PACKAGE_SPEC = `${PACKAGE_NAME}@beta`;
+const HOSTED_PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+
+function normalizeHostedPackageName(packageName: string | undefined): string | undefined {
+	if (packageName === undefined) return undefined;
+	const normalized = packageName.trim();
+	if (normalized.length > 214 || !HOSTED_PACKAGE_NAME_RE.test(normalized)) {
+		throw new Error(`Hosted update packageName is not a bare npm package identity: ${packageName}`);
+	}
+	return normalized;
+}
+
 async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
 	if (force) {
-		return { packageName: PACKAGE_NAME, shouldRun: true };
+		return { packageSpec: BETA_SELF_UPDATE_PACKAGE_SPEC, shouldRun: true };
 	}
 
 	try {
 		const latestRelease = await getLatestVoltRelease(VERSION);
-		const packageName = latestRelease?.packageName ?? PACKAGE_NAME;
-		if (!latestRelease || packageName !== PACKAGE_NAME || isNewerPackageVersion(latestRelease.version, VERSION)) {
-			return { packageName, shouldRun: true, ...(latestRelease?.note ? { note: latestRelease.note } : {}) };
+		const hostedPackageName = normalizeHostedPackageName(latestRelease?.packageName);
+		const targetPackageName = hostedPackageName ?? PACKAGE_NAME;
+		const packageSpec = `${targetPackageName}@beta`;
+		if (
+			!latestRelease ||
+			(hostedPackageName !== undefined && hostedPackageName !== PACKAGE_NAME) ||
+			isNewerPackageVersion(latestRelease.version, VERSION)
+		) {
+			return { packageSpec, shouldRun: true, ...(latestRelease?.note ? { note: latestRelease.note } : {}) };
 		}
 	} catch {
-		return { packageName: PACKAGE_NAME, shouldRun: true };
+		return { packageSpec: BETA_SELF_UPDATE_PACKAGE_SPEC, shouldRun: true };
 	}
 
 	console.log(chalk.green(`${APP_NAME} is already up to date (v${VERSION})`));
-	return { packageName: PACKAGE_NAME, shouldRun: false };
+	return { packageSpec: BETA_SELF_UPDATE_PACKAGE_SPEC, shouldRun: false };
+}
+
+async function runSelfUpdateStep(step: Pick<SelfUpdateCommand, "command" | "args" | "display">): Promise<void> {
+	await new Promise<void>((resolve, reject) => {
+		const child = spawnProcess(step.command, step.args, {
+			stdio: "inherit",
+		});
+		child.on("error", (error) => {
+			reject(error);
+		});
+		child.on("close", (code, signal) => {
+			if (code === 0) {
+				resolve();
+			} else if (signal) {
+				reject(new Error(`${step.display} terminated by signal ${signal}`));
+			} else {
+				reject(new Error(`${step.display} exited with code ${code ?? "unknown"}`));
+			}
+		});
+	});
+}
+
+function selfUpdateErrorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 async function runSelfUpdate(command: SelfUpdateCommand): Promise<void> {
 	console.log(chalk.dim(`Updating ${APP_NAME} with ${command.display}...`));
+	let completedSteps = 0;
 	for (const step of command.steps ?? [command]) {
-		await new Promise<void>((resolve, reject) => {
-			const child = spawnProcess(step.command, step.args, {
-				stdio: "inherit",
-			});
-			child.on("error", (error) => {
-				reject(error);
-			});
-			child.on("close", (code, signal) => {
-				if (code === 0) {
-					resolve();
-				} else if (signal) {
-					reject(new Error(`${step.display} terminated by signal ${signal}`));
-				} else {
-					reject(new Error(`${step.display} exited with code ${code ?? "unknown"}`));
-				}
-			});
-		});
+		try {
+			await runSelfUpdateStep(step);
+			completedSteps++;
+		} catch (updateError) {
+			if (!command.rollbackStep || completedSteps === 0) throw updateError;
+			try {
+				await runSelfUpdateStep(command.rollbackStep);
+			} catch (rollbackError) {
+				throw new Error(
+					`${selfUpdateErrorMessage(updateError)}; rollback command ${command.rollbackStep.display} also failed: ${selfUpdateErrorMessage(rollbackError)}`,
+				);
+			}
+			throw new Error(
+				`${selfUpdateErrorMessage(updateError)}; restored the previous ${APP_NAME} version with ${command.rollbackStep.display}`,
+			);
+		}
 	}
 }
 
@@ -706,10 +748,10 @@ export async function handlePackageCommand(
 					const selfUpdateCommand = getSelfUpdateCommand(
 						PACKAGE_NAME,
 						selfUpdateNpmCommand,
-						selfUpdatePlan.packageName,
+						selfUpdatePlan.packageSpec,
 					);
 					if (!selfUpdateCommand) {
-						printSelfUpdateUnavailable(selfUpdateNpmCommand, selfUpdatePlan.packageName);
+						printSelfUpdateUnavailable(selfUpdateNpmCommand, selfUpdatePlan.packageSpec);
 						process.exitCode = 1;
 						return true;
 					}

@@ -1,5 +1,5 @@
-import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
-import { getSupportedThinkingLevels } from "@earendil-works/volt-ai";
+import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
+import { getSupportedThinkingLevels } from "@hansjm10/volt-ai";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import {

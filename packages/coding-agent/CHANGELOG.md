@@ -4,6 +4,8 @@
 
 ### Breaking Changes
 
+- Changed the Volt beta package identity to `@hansjm10/volt-coding-agent`, restarted the Volt release line at `0.1.0`, and moved npm beta installs to the `beta` dist-tag.
+- Replaced the old fork's hidden Earendil announcement with the Volt-owned `/voltannouncement` easter egg and removed the old branding asset.
 - Paired Iroh remote devices and pending pairing tickets now require a versioned per-device RPC grant in addition to `allowedTools`; state without a valid grant fails closed, so existing development pairings must re-pair. `volt remote pair --access coding|review|chat|full` defaults to `coding`, and `volt remote access <node-id> set <preset>` atomically updates both access planes.
 
 ### Added
@@ -84,7 +86,7 @@
 
 ### Fixed
 
-- Fixed beta distribution so Unix and Windows installers target the published `@earendil-works/volt-coding-agent` package, apply the full Node.js 22.19 floor, and verify release checksums before exact-path binary extraction. Release workflows now build only an existing matching semver tag, refuse to clobber different assets, create deterministic archives, and ship license, capability, shrinkwrap, and third-party notice files.
+- Fixed beta distribution so Unix and Windows installers target the published `@hansjm10/volt-coding-agent` package, apply the full Node.js 22.19 floor, and verify release checksums before exact-path binary extraction. Release workflows now build only an existing matching semver tag, refuse to clobber different assets, create deterministic archives, and ship license, capability, shrinkwrap, and third-party notice files.
 - Fixed beta security gaps across pairing, push delivery, MCP, and local persistence: pairing now requires comparable cryptographic host details and scoped HTTPS relay credentials; push targets use bounded App Check-protected registration, expiry, quotas, status, and transactional revocation; OAuth state and redirect handling fail closed; persistent caches are size/age/scope bounded; and sensitive state, logs, exports, sessions, and temporary artifacts use owner-only atomic storage with link-attack checks.
 - Fixed remote transcript framing so image pages respect the serialized control-line limit and reject an individually oversized image instead of emitting an over-limit frame, and improved the light theme's semantic text contrast to meet the 4.5:1 beta accessibility gate.
 - Fixed invalid or incompatible daemon state being silently quarantined and replaced, which could reset the Iroh identity and leave pairing stuck while relay authentication was lost. Startup now fails without modifying the file, and `/remote` offers an explicit confirmation that backs it up before regeneration; validated identity, workspace, and settings data are preserved when only legacy access records are incompatible. `volt daemon regenerate-state` provides the same guarded recovery from the CLI. Pairing now reports `iroh_unavailable` instead of waiting indefinitely when endpoint startup stalls, and `/remote` offers confirmed recovery and daemon restart when a validated pre-failure state backup is available.

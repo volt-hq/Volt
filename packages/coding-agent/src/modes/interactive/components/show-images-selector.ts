@@ -1,4 +1,4 @@
-import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@earendil-works/volt-tui";
+import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@hansjm10/volt-tui";
 import { getSelectListTheme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 

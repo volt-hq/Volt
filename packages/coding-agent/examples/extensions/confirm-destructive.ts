@@ -5,7 +5,7 @@
  * Demonstrates how to cancel session events using the before_* events.
  */
 
-import type { ExtensionAPI, SessionBeforeSwitchEvent, SessionMessageEntry } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI, SessionBeforeSwitchEvent, SessionMessageEntry } from "@hansjm10/volt-coding-agent";
 
 export default function (volt: ExtensionAPI) {
 	volt.on("session_before_switch", async (event: SessionBeforeSwitchEvent, ctx) => {

@@ -1,4 +1,4 @@
-import { ProcessTerminal, setKeybindings, TUI } from "@earendil-works/volt-tui";
+import { ProcessTerminal, setKeybindings, TUI } from "@hansjm10/volt-tui";
 import { existsSync } from "fs";
 import { APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, getSettingsPath, PACKAGE_NAME } from "../config.ts";
 import { areExperimentalFeaturesEnabled } from "../core/experimental.ts";
@@ -12,7 +12,7 @@ import {
 	type FirstTimeSetupResult,
 } from "../modes/interactive/components/first-time-setup.ts";
 
-const OFFICIAL_PACKAGE_NAME = "@earendil-works/volt-coding-agent";
+const OFFICIAL_PACKAGE_NAME = "@hansjm10/volt-coding-agent";
 const OFFICIAL_APP_NAME = "volt";
 const OFFICIAL_CONFIG_DIR_NAME = ".volt";
 

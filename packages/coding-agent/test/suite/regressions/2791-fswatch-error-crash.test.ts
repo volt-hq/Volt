@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 /**
- * Regression test for https://github.com/earendil-works/volt/issues/2791
+ * Regression test for https://github.com/earendil-works/pi-mono/issues/2791
  *
  * fs.watch() returns an FSWatcher (EventEmitter). If the watcher emits an
  * 'error' event after creation and no error handler is attached, Node.js
@@ -59,7 +59,7 @@ import { createJiti } from ${JSON.stringify(jitiModuleUrl)};
 
 const jiti = createJiti(import.meta.url, {
 	alias: {
-		"@earendil-works/volt-tui": ${JSON.stringify(tuiModulePath)},
+		"@hansjm10/volt-tui": ${JSON.stringify(tuiModulePath)},
 	},
 });
 const { setTheme, stopThemeWatcher } = await jiti.import(${JSON.stringify(themeModulePath)});

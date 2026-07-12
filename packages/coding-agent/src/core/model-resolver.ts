@@ -2,8 +2,8 @@
  * Model resolution, scoping, and initial selection
  */
 
-import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
-import { type Api, type KnownProvider, type Model, modelsAreEqual } from "@earendil-works/volt-ai";
+import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
+import { type Api, type KnownProvider, type Model, modelsAreEqual } from "@hansjm10/volt-ai";
 import chalk from "chalk";
 import { minimatch } from "minimatch";
 import { isValidThinkingLevel } from "../cli/args.ts";

@@ -8,7 +8,7 @@
  * disposed) session.
  */
 
-import { type AssistantMessage, type AssistantMessageEvent, EventStream } from "@earendil-works/volt-ai";
+import { type AssistantMessage, type AssistantMessageEvent, EventStream } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { Agent, type AgentEvent, type AgentTool } from "../src/index.ts";

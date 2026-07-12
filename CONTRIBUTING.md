@@ -22,7 +22,9 @@ If you use an agent, run it from the `volt` root directory so it picks up `AGENT
 
 All issues and PRs from new contributors are auto-closed by default.
 
-Issues submitted Friday through Sunday are not guaranteed to be reviewed.  If something is urgent, ask on Discord: https://discord.com/invite/3cU7Bz4UPx
+Issues submitted Friday through Sunday are not guaranteed to be reviewed.
+Security-sensitive reports must follow [SECURITY.md](SECURITY.md) instead of
+using the public issue tracker.
 
 Maintainers review auto-closed issues daily and reopen worthwhile ones. Issues that do not meet the quality bar below will not be reopened or receive a reply.
 
@@ -72,7 +74,8 @@ If you are adding a new provider to `packages/ai`, see `AGENTS.md` for required 
 
 ## Questions?
 
-Ask on [Discord](https://discord.com/invite/nKXTsAcmbT).
+Use the [GitHub issue tracker](https://github.com/hansjm10/Volt/issues) for
+concise, non-sensitive questions that meet the contribution gate above.
 
 ## FAQ
 
@@ -82,7 +85,7 @@ Volt receives more issues than the maintainers can responsibly review in real ti
 
 ### Why are weekend issues lower priority?
 
-We triage the tracker during working hours. That means more issues can accumulate over the weekend. Anything submitted Friday through Sunday may be missed or given lower priority in the Monday review queue. If a problem is urgent, ask on Discord and include the short version, a repro, and the relevant logs.
+We triage the tracker during working hours. That means more issues can accumulate over the weekend. Anything submitted Friday through Sunday may be missed or given lower priority in the Monday review queue.
 
 ### Why do some issues get no reply?
 
@@ -98,5 +101,7 @@ No. It is a guardrail against burnout and tracker spam. Short, concrete, reprodu
 
 ## Where can I learn about plans?
 
-Earendil uses RFCs to discuss larger changes.  Not all of them are public, but
-quite a few are.  They can be found at [rfc.earendil.com](https://rfc.earendil.com/keyword/pi/).
+Propose larger Volt changes in the
+[GitHub issue tracker](https://github.com/hansjm10/Volt/issues) before starting
+implementation. Historical Pi design material remains upstream and does not
+represent the Volt roadmap.

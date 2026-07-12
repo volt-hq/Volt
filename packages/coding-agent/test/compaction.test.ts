@@ -1,6 +1,6 @@
-import type { AgentMessage } from "@earendil-works/volt-agent-core";
-import type { AssistantMessage, Usage } from "@earendil-works/volt-ai";
-import { getModel } from "@earendil-works/volt-ai";
+import type { AgentMessage } from "@hansjm10/volt-agent-core";
+import type { AssistantMessage, Usage } from "@hansjm10/volt-ai";
+import { getModel } from "@hansjm10/volt-ai";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { beforeEach, describe, expect, it } from "vitest";

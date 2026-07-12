@@ -1,4 +1,4 @@
-import { type Model, modelsAreEqual } from "@earendil-works/volt-ai";
+import { type Model, modelsAreEqual } from "@hansjm10/volt-ai";
 import {
 	Container,
 	type Focusable,
@@ -8,7 +8,7 @@ import {
 	Spacer,
 	Text,
 	type TUI,
-} from "@earendil-works/volt-tui";
+} from "@hansjm10/volt-tui";
 import type { ModelRegistry } from "../../../core/model-registry.ts";
 import type { SettingsManager } from "../../../core/settings-manager.ts";
 import { theme } from "../../../core/theme/runtime.ts";

@@ -575,10 +575,10 @@ describe("package commands", () => {
 		}
 	});
 
-	it("uses global npmCommand and current package name for forced self updates without checking the api", async () => {
+	it("uses global npmCommand and the beta package spec for forced self updates without checking the api", async () => {
 		const globalPrefix = join(tempDir, "global-prefix");
 		const projectPrefix = join(tempDir, "project-prefix");
-		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@mariozechner", "volt-coding-agent");
+		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@hansjm10", "volt-coding-agent");
 		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
 		const recordPath = join(tempDir, "self-update.json");
 		mkdirSync(selfPackageDir, { recursive: true });
@@ -618,7 +618,8 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 			expect(fetchMock).not.toHaveBeenCalled();
 			const recordedArgs = JSON.parse(readFileSync(recordPath, "utf-8")) as string[];
 			expect(recordedArgs).toContain(globalPrefix);
-			expect(recordedArgs).toContain(PACKAGE_NAME);
+			expect(recordedArgs).toContain(`${PACKAGE_NAME}@beta`);
+			expect(recordedArgs).not.toContain(PACKAGE_NAME);
 			expect(recordedArgs).not.toContain(projectPrefix);
 		} finally {
 			logSpy.mockRestore();
@@ -626,9 +627,9 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 		}
 	});
 
-	it("uses profile npmCommand for forced self updates", async () => {
+	it("uses profile npmCommand and the beta package spec for forced self updates", async () => {
 		const selfUpdatePrefix = join(tempDir, "self-update-prefix");
-		const selfPackageDir = join(selfUpdatePrefix, "lib", "node_modules", "@mariozechner", "volt-coding-agent");
+		const selfPackageDir = join(selfUpdatePrefix, "lib", "node_modules", "@hansjm10", "volt-coding-agent");
 		const fakeGlobalNpmPath = join(tempDir, "fake-global-npm.cjs");
 		const fakeProfileNpmPath = join(tempDir, "fake-profile-npm.cjs");
 		const recordPath = join(tempDir, "profile-self-update.json");
@@ -673,16 +674,21 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify({label:${JSON
 			expect(fetchMock).not.toHaveBeenCalled();
 			const recorded = JSON.parse(readFileSync(recordPath, "utf-8")) as { label?: string; args?: string[] };
 			expect(recorded.label).toBe("profile");
-			expect(recorded.args).toContain(PACKAGE_NAME);
+			expect(recorded.args).toContain(`${PACKAGE_NAME}@beta`);
+			expect(recorded.args).not.toContain(PACKAGE_NAME);
 		} finally {
 			logSpy.mockRestore();
 			errorSpy.mockRestore();
 		}
 	});
 
-	it("uses the current package name when the update check omits packageName", async () => {
+	it.each([
+		{ description: "omits packageName", responsePackageName: undefined },
+		{ description: "returns the current package name", responsePackageName: PACKAGE_NAME },
+		{ description: "returns an invalid install spec", responsePackageName: "--registry=https://evil.example" },
+	])("uses the beta package spec when the hosted update check $description", async ({ responsePackageName }) => {
 		const globalPrefix = join(tempDir, "global-prefix");
-		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@mariozechner", "volt-coding-agent");
+		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@hansjm10", "volt-coding-agent");
 		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
 		const recordPath = join(tempDir, "self-update.json");
 		mkdirSync(selfPackageDir, { recursive: true });
@@ -703,7 +709,12 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 			value: join(selfPackageDir, "dist", "cli.js"),
 			configurable: true,
 		});
-		const fetchMock = vi.fn(async () => Response.json({ version: getNewerPatchVersion() }));
+		const fetchMock = vi.fn(async () =>
+			Response.json({
+				version: getNewerPatchVersion(),
+				...(responsePackageName ? { packageName: responsePackageName } : {}),
+			}),
+		);
 		vi.stubGlobal("fetch", fetchMock);
 
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -716,16 +727,20 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 			expect(errorSpy).not.toHaveBeenCalled();
 			expect(fetchMock).toHaveBeenCalledOnce();
 			const recordedArgs = JSON.parse(readFileSync(recordPath, "utf-8")) as string[];
-			expect(recordedArgs).toContain(PACKAGE_NAME);
+			expect(recordedArgs).toContain(`${PACKAGE_NAME}@beta`);
+			expect(recordedArgs).not.toContain(PACKAGE_NAME);
+			if (responsePackageName) {
+				expect(recordedArgs).not.toContain(responsePackageName);
+			}
 		} finally {
 			logSpy.mockRestore();
 			errorSpy.mockRestore();
 		}
 	});
 
-	it("installs the active package name from the update check during self-update", async () => {
+	it("migrates to the active beta package after removing the old package", async () => {
 		const globalPrefix = join(tempDir, "global-prefix");
-		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@mariozechner", "volt-coding-agent");
+		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@hansjm10", "volt-coding-agent");
 		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
 		const recordPath = join(tempDir, "self-update.json");
 		mkdirSync(selfPackageDir, { recursive: true });
@@ -767,7 +782,7 @@ else {
 			const recordedCalls = JSON.parse(readFileSync(recordPath, "utf-8")) as string[][];
 			expect(recordedCalls).toEqual([
 				expect.arrayContaining(["uninstall", "-g", PACKAGE_NAME]),
-				expect.arrayContaining(["install", "-g", activePackageName]),
+				expect.arrayContaining(["install", "-g", `${activePackageName}@beta`]),
 			]);
 		} finally {
 			logSpy.mockRestore();
@@ -775,11 +790,17 @@ else {
 		}
 	});
 
-	it("fails self-update when renamed npm package installation fails", async () => {
+	it.each([
+		{ description: "restores the old package when renamed npm package installation fails", rollbackFails: false },
+		{ description: "reports both failures when renamed package rollback also fails", rollbackFails: true },
+	])("$description", async ({ rollbackFails }) => {
 		const globalPrefix = join(tempDir, "global-prefix");
-		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@earendil-works", "volt-coding-agent");
+		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@hansjm10", "volt-coding-agent");
 		const fakeNpmPath = join(tempDir, "fake-npm-fail.cjs");
 		const recordPath = join(tempDir, "self-update-fail.json");
+		const activePackageName = PACKAGE_NAME === "@new-scope/volt" ? "@newer-scope/volt" : "@new-scope/volt";
+		const targetSpec = `${activePackageName}@beta`;
+		const rollbackSpec = `${PACKAGE_NAME}@${VERSION}`;
 		mkdirSync(selfPackageDir, { recursive: true });
 		writeFileSync(
 			fakeNpmPath,
@@ -791,7 +812,8 @@ if(args.includes("root")) {
 const records=fs.existsSync(${JSON.stringify(recordPath)})?JSON.parse(fs.readFileSync(${JSON.stringify(recordPath)},"utf-8")):[];
 records.push(args);
 fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(records));
-if(args.includes("install")) process.exit(23);
+if(args.includes(${JSON.stringify(targetSpec)})) process.exit(23);
+if(${JSON.stringify(rollbackFails)} && args.includes(${JSON.stringify(rollbackSpec)})) process.exit(29);
 `,
 		);
 		writeFileSync(
@@ -804,7 +826,6 @@ if(args.includes("install")) process.exit(23);
 			value: join(selfPackageDir, "dist", "cli.js"),
 			configurable: true,
 		});
-		const activePackageName = PACKAGE_NAME === "@new-scope/volt" ? "@newer-scope/volt" : "@new-scope/volt";
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async () => Response.json({ packageName: activePackageName, version: "0.73.0" })),
@@ -824,8 +845,16 @@ if(args.includes("install")) process.exit(23);
 			const recordedCalls = JSON.parse(readFileSync(recordPath, "utf-8")) as string[][];
 			expect(recordedCalls).toEqual([
 				expect.arrayContaining(["uninstall", "-g", PACKAGE_NAME]),
-				expect.arrayContaining(["install", "-g", activePackageName]),
+				expect.arrayContaining(["install", "-g", targetSpec]),
+				expect.arrayContaining(["install", "-g", rollbackSpec]),
 			]);
+			if (rollbackFails) {
+				expect(stderr).toContain("rollback command");
+				expect(stderr).toContain("exited with code 29");
+			} else {
+				expect(stderr).toContain("restored the previous volt version");
+				expect(stderr).not.toContain("also failed");
+			}
 		} finally {
 			logSpy.mockRestore();
 			errorSpy.mockRestore();

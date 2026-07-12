@@ -25,14 +25,9 @@
  *   volt -e ./built-in-tool-renderer.ts
  */
 
-import type {
-	BashToolDetails,
-	EditToolDetails,
-	ExtensionAPI,
-	ReadToolDetails,
-} from "@earendil-works/volt-coding-agent";
-import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@earendil-works/volt-coding-agent";
-import { Text } from "@earendil-works/volt-tui";
+import type { BashToolDetails, EditToolDetails, ExtensionAPI, ReadToolDetails } from "@hansjm10/volt-coding-agent";
+import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@hansjm10/volt-coding-agent";
+import { Text } from "@hansjm10/volt-tui";
 
 export default function (volt: ExtensionAPI) {
 	const cwd = process.cwd();

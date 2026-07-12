@@ -1,6 +1,6 @@
 {
-	"name": "@earendil-works/volt-agent-core",
-	"version": "0.79.6",
+	"name": "@hansjm10/volt-agent-core",
+	"version": "0.1.0",
 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -21,6 +21,10 @@
 		"README.md",
 		"LICENSE"
 	],
+	"publishConfig": {
+		"access": "public",
+		"tag": "beta"
+	},
 	"scripts": {
 		"clean": "shx rm -rf dist",
 		"build": "tsgo -p tsconfig.build.json",
@@ -30,7 +34,7 @@
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
-		"@earendil-works/volt-ai": "^0.79.6",
+		"@hansjm10/volt-ai": "^0.1.0",
 		"ignore": "7.0.5",
 		"typebox": "1.1.38",
 		"yaml": "2.9.0"

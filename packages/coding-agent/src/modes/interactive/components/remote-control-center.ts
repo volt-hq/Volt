@@ -1,11 +1,5 @@
 import { isAbsolute, relative, resolve } from "node:path";
-import {
-	type Component,
-	getKeybindings,
-	truncateToWidth,
-	visibleWidth,
-	wrapTextWithAnsi,
-} from "@earendil-works/volt-tui";
+import { type Component, getKeybindings, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@hansjm10/volt-tui";
 import { getAgentDir, VERSION } from "../../../config.ts";
 import {
 	IROH_REMOTE_ACCESS_PRESET_NAMES,

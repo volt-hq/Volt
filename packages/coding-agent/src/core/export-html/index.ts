@@ -1,4 +1,4 @@
-import type { AgentState } from "@earendil-works/volt-agent-core";
+import type { AgentState } from "@hansjm10/volt-agent-core";
 import { existsSync, readFileSync } from "fs";
 import { basename, join } from "path";
 import { APP_NAME, getExportTemplateDir } from "../../config.ts";

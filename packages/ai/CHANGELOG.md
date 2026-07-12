@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Changed the Volt beta package identity to `@hansjm10/volt-ai` and restarted the Volt release line at `0.1.0`.
+
 ### Added
 
 - Added distinct `xhigh` and `max` reasoning levels for OpenAI, Azure OpenAI, and OpenAI Codex GPT-5.6 Sol, Terra, and Luna models.

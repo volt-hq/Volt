@@ -1,6 +1,6 @@
 {
-	"name": "@earendil-works/volt-tui",
-	"version": "0.79.6",
+	"name": "@hansjm10/volt-tui",
+	"version": "0.1.0",
 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications",
 	"type": "module",
 	"main": "dist/index.js",
@@ -17,6 +17,10 @@
 		"README.md",
 		"LICENSE"
 	],
+	"publishConfig": {
+		"access": "public",
+		"tag": "beta"
+	},
 	"keywords": [
 		"tui",
 		"terminal",

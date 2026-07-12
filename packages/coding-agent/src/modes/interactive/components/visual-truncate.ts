@@ -3,7 +3,7 @@
  * Used by both tool-execution.ts and bash-execution.ts for consistent behavior.
  */
 
-import { Text } from "@earendil-works/volt-tui";
+import { Text } from "@hansjm10/volt-tui";
 
 export interface VisualTruncateResult {
 	/** The visual lines to display */

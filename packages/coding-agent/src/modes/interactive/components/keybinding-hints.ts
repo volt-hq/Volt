@@ -2,7 +2,7 @@
  * Utilities for formatting keybinding hints in the UI.
  */
 
-import { getKeybindings, type Keybinding, type KeyId } from "@earendil-works/volt-tui";
+import { getKeybindings, type Keybinding, type KeyId } from "@hansjm10/volt-tui";
 import { theme } from "../../../core/theme/runtime.ts";
 
 export interface KeyTextFormatOptions {

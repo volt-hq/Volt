@@ -6,6 +6,10 @@
 
 Volt is a minimal terminal coding harness. Adapt volt to your workflows, not the other way around, without having to fork and modify volt internals. Extend it with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), and [Themes](#themes). Put your extensions, skills, prompt templates, and themes in [Volt Packages](#volt-packages) and share them with others via npm or git.
 
+Volt is maintained and distributed by [Jordan Hans](https://github.com/hansjm10).
+It is derived from [Mario Zechner's Pi project](https://github.com/badlogic/pi-mono)
+under the MIT License.
+
 Volt ships with powerful defaults but skips features like sub agents and plan mode. Instead, you can ask volt to build what you want or install a third party volt package that matches your workflow.
 
 Volt runs in four modes: interactive, print or JSON, RPC for process integration, and an SDK for embedding in your own apps.
@@ -39,7 +43,7 @@ Volt runs in four modes: interactive, print or JSON, RPC for process integration
 ## Quick Start
 
 ```bash
-npm install -g --ignore-scripts @earendil-works/volt-coding-agent
+npm install -g --ignore-scripts @hansjm10/volt-coding-agent@beta
 ```
 
 `--ignore-scripts` disables dependency lifecycle scripts during install. Volt does not require install scripts for normal npm installs.
@@ -434,7 +438,7 @@ See [docs/packages.md](docs/packages.md).
 ### SDK
 
 ```typescript
-import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@earendil-works/volt-coding-agent";
+import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@hansjm10/volt-coding-agent";
 
 const authStorage = AuthStorage.create();
 const modelRegistry = ModelRegistry.create(authStorage);
@@ -711,6 +715,6 @@ MIT
 
 ## See Also
 
-- [@earendil-works/volt-ai](../ai): Core LLM toolkit
-- [@earendil-works/volt-agent-core](../agent): Agent framework
-- [@earendil-works/volt-tui](../tui): Terminal UI components
+- [@hansjm10/volt-ai](../ai): Core LLM toolkit
+- [@hansjm10/volt-agent-core](../agent): Agent framework
+- [@hansjm10/volt-tui](../tui): Terminal UI components

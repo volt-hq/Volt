@@ -1,5 +1,5 @@
-import type { AgentMessage, AgentTool } from "@earendil-works/volt-agent-core";
-import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/volt-ai";
+import type { AgentMessage, AgentTool } from "@hansjm10/volt-agent-core";
+import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, type Harness } from "./harness.ts";

@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil-works/volt-ai";
+import type { AssistantMessage, ToolResultMessage, UserMessage } from "@hansjm10/volt-ai";
 import { describe, expect, test } from "vitest";
 import type { BashExecutionMessage } from "../src/core/messages.ts";
 import { projectMessageImages, projectSessionTranscript } from "../src/core/rpc/transcript.ts";

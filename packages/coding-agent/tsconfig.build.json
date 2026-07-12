@@ -3,12 +3,12 @@
 	"compilerOptions": {
 		"outDir": "./dist",
 		"paths": {
-			"@earendil-works/volt-agent-core": ["../agent/dist/index.d.ts"],
-			"@earendil-works/volt-agent-core/*": ["../agent/dist/*.d.ts"],
-			"@earendil-works/volt-ai": ["../ai/dist/index.d.ts"],
-			"@earendil-works/volt-ai/*": ["../ai/dist/*.d.ts", "../ai/dist/providers/*.d.ts"],
-			"@earendil-works/volt-tui": ["../tui/dist/index.d.ts"],
-			"@earendil-works/volt-tui/*": ["../tui/dist/*.d.ts", "../tui/dist/components/*.d.ts"]
+			"@hansjm10/volt-agent-core": ["../agent/dist/index.d.ts"],
+			"@hansjm10/volt-agent-core/*": ["../agent/dist/*.d.ts"],
+			"@hansjm10/volt-ai": ["../ai/dist/index.d.ts"],
+			"@hansjm10/volt-ai/*": ["../ai/dist/*.d.ts", "../ai/dist/providers/*.d.ts"],
+			"@hansjm10/volt-tui": ["../tui/dist/index.d.ts"],
+			"@hansjm10/volt-tui/*": ["../tui/dist/*.d.ts", "../tui/dist/components/*.d.ts"]
 		},
 		"rootDir": "./src"
 	},

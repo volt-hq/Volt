@@ -27,14 +27,10 @@ export default defineConfig({
 	},
 	resolve: {
 		alias: [
-			{ find: /^@earendil-works\/volt-ai$/, replacement: aiSrcIndex },
-			{ find: /^@earendil-works\/volt-ai\/oauth$/, replacement: aiSrcOAuth },
-			{ find: /^@earendil-works\/volt-agent-core$/, replacement: agentSrcIndex },
-			{ find: /^@earendil-works\/volt-tui$/, replacement: tuiSrcIndex },
-			{ find: /^@mariozechner\/volt-ai$/, replacement: aiSrcIndex },
-			{ find: /^@mariozechner\/volt-ai\/oauth$/, replacement: aiSrcOAuth },
-			{ find: /^@mariozechner\/volt-agent-core$/, replacement: agentSrcIndex },
-			{ find: /^@mariozechner\/volt-tui$/, replacement: tuiSrcIndex },
+			{ find: /^@hansjm10\/volt-ai$/, replacement: aiSrcIndex },
+			{ find: /^@hansjm10\/volt-ai\/oauth$/, replacement: aiSrcOAuth },
+			{ find: /^@hansjm10\/volt-agent-core$/, replacement: agentSrcIndex },
+			{ find: /^@hansjm10\/volt-tui$/, replacement: tuiSrcIndex },
 		],
 	},
 });

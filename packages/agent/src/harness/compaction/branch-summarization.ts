@@ -1,5 +1,5 @@
-import type { Model } from "@earendil-works/volt-ai";
-import { completeSimple } from "@earendil-works/volt-ai";
+import type { Model } from "@hansjm10/volt-ai";
+import { completeSimple } from "@hansjm10/volt-ai";
 import type { AgentMessage } from "../../types.ts";
 import {
 	convertToLlm,

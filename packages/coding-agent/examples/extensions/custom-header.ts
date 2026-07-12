@@ -5,8 +5,8 @@
  * (logo + keybinding hints) with a custom component showing the volt mascot.
  */
 
-import type { ExtensionAPI, Theme } from "@earendil-works/volt-coding-agent";
-import { VERSION } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI, Theme } from "@hansjm10/volt-coding-agent";
+import { VERSION } from "@hansjm10/volt-coding-agent";
 
 // --- VOLT MASCOT ---
 function getVoltMascot(theme: Theme): string[] {

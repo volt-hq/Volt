@@ -17,7 +17,7 @@ pkg update && pkg upgrade
 pkg install nodejs termux-api git
 
 # Install volt
-npm install -g --ignore-scripts @earendil-works/volt-coding-agent
+npm install -g --ignore-scripts @hansjm10/volt-coding-agent@beta
 
 # Create config directory
 mkdir -p ~/.volt/agent

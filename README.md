@@ -2,16 +2,20 @@
 
 Volt is a local coding-agent monorepo with a CLI, agent runtime, provider API, and terminal UI package.
 
+Volt is maintained and distributed by [Jordan Hans](https://github.com/hansjm10).
+It is derived from [Mario Zechner's Pi project](https://github.com/badlogic/pi-mono)
+and remains available under the MIT License.
+
 > New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Packages
 
 | Package | Description |
 |---------|-------------|
-| **[@earendil-works/volt-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
-| **[@earendil-works/volt-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
-| **[@earendil-works/volt-ai](packages/ai)** | Unified multi-provider LLM API |
-| **[@earendil-works/volt-tui](packages/tui)** | Terminal UI library with differential rendering |
+| **[@hansjm10/volt-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
+| **[@hansjm10/volt-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
+| **[@hansjm10/volt-ai](packages/ai)** | Unified multi-provider LLM API |
+| **[@hansjm10/volt-tui](packages/tui)** | Terminal UI library with differential rendering |
 
 ## Remote Access Preview
 
@@ -86,4 +90,6 @@ We treat npm dependency changes as reviewed code changes.
 
 ## License
 
-MIT
+MIT. Volt preserves the copyright and license notices for the Pi project and
+other incorporated open-source software. See [LICENSE](LICENSE) and
+[THIRD-PARTY-NOTICES.md](packages/coding-agent/THIRD-PARTY-NOTICES.md).

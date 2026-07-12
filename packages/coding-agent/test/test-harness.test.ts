@@ -3,8 +3,8 @@
  * Validates that the faux provider and session factory work correctly.
  */
 
-import type { AgentTool } from "@earendil-works/volt-agent-core";
-import type { AssistantMessage } from "@earendil-works/volt-ai";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
+import type { AssistantMessage } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, createHarnessWithExtensions, type Harness } from "./test-harness.ts";

@@ -1,5 +1,5 @@
-import type { AssistantMessage } from "@earendil-works/volt-ai";
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { AssistantMessage } from "@hansjm10/volt-ai";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
 	if (!message || typeof message !== "object") return false;

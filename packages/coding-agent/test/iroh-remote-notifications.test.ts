@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@earendil-works/volt-agent-core";
+import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";

@@ -9,8 +9,8 @@
  */
 
 import { Buffer } from "node:buffer";
-import type { AgentMessage } from "@earendil-works/volt-agent-core";
-import type { Api, Model } from "@earendil-works/volt-ai";
+import type { AgentMessage } from "@hansjm10/volt-agent-core";
+import type { Api, Model } from "@hansjm10/volt-ai";
 import { expect, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";

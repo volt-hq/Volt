@@ -13,12 +13,7 @@
  *   export default function (volt: ExtensionAPI) { ... }
  */
 
-import {
-	createAgentSession,
-	DefaultResourceLoader,
-	getAgentDir,
-	SessionManager,
-} from "@earendil-works/volt-coding-agent";
+import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager } from "@hansjm10/volt-coding-agent";
 
 // Extensions are discovered automatically from standard locations.
 // You can also add paths via settings.json or DefaultResourceLoader options.
@@ -57,7 +52,7 @@ try {
 
 // Example extension file (./my-logging-extension.ts):
 /*
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 export default function (volt: ExtensionAPI) {
 	volt.on("agent_start", async () => {

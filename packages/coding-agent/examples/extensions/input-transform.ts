@@ -9,7 +9,7 @@
  *   ping                        → "pong" (instant, no LLM)
  *   time                        → current time (instant, no LLM)
  */
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 export default function (volt: ExtensionAPI) {
 	volt.on("input", async (event, ctx) => {

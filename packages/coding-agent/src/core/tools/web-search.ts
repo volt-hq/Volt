@@ -1,6 +1,6 @@
-import type { AgentTool } from "@earendil-works/volt-agent-core";
-import type { Api, Model } from "@earendil-works/volt-ai";
-import { Text } from "@earendil-works/volt-tui";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
+import type { Api, Model } from "@hansjm10/volt-ai";
+import { Text } from "@hansjm10/volt-tui";
 import { type Static, Type } from "typebox";
 import { VERSION } from "../../config.ts";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";

@@ -1,4 +1,4 @@
-import { type RgbColor, resetCapabilitiesCache, setCapabilities } from "@earendil-works/volt-tui";
+import { type RgbColor, resetCapabilitiesCache, setCapabilities } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	detectTerminalBackgroundFromEnv,

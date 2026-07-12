@@ -5,8 +5,8 @@
  * without paying for an extra follow-up LLM turn.
  */
 
-import { defineTool, type ExtensionAPI } from "@earendil-works/volt-coding-agent";
-import { Text } from "@earendil-works/volt-tui";
+import { defineTool, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { Text } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 
 interface StructuredOutputDetails {

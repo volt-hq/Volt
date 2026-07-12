@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/volt-agent-core";
+import type { AgentMessage, ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { createInProcessRpcClient, type InProcessRpcClient } from "../../modes/rpc/in-process-rpc-client.ts";
 import type { RpcClientEvent } from "../../modes/rpc/rpc-client-base.ts";
 import type { SessionStats } from "../agent-session.ts";

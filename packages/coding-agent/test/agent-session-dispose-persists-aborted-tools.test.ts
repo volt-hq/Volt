@@ -10,7 +10,7 @@
  * tree and the model was shown a synthetic "No result provided" stub.
  */
 
-import type { AgentTool } from "@earendil-works/volt-agent-core";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { type Static, Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { createHarness } from "./test-harness.ts";

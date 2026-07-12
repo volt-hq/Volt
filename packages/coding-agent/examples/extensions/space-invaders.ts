@@ -3,8 +3,8 @@
  * Uses Kitty keyboard protocol for smooth movement (press/release detection)
  */
 
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
-import { isKeyRelease, Key, matchesKey, visibleWidth } from "@earendil-works/volt-tui";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { isKeyRelease, Key, matchesKey, visibleWidth } from "@hansjm10/volt-tui";
 
 const GAME_WIDTH = 60;
 const GAME_HEIGHT = 24;

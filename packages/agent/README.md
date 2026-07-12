@@ -1,18 +1,22 @@
-# @earendil-works/volt-agent-core
+# @hansjm10/volt-agent-core
 
-Stateful agent with tool execution and event streaming. Built on `@earendil-works/volt-ai`.
+Stateful agent with tool execution and event streaming. Built on `@hansjm10/volt-ai`.
+
+Maintained and distributed as part of Volt by [Jordan Hans](https://github.com/hansjm10).
+Volt is derived from [Mario Zechner's Pi project](https://github.com/badlogic/pi-mono)
+under the MIT License.
 
 ## Installation
 
 ```bash
-npm install @earendil-works/volt-agent-core
+npm install @hansjm10/volt-agent-core@beta
 ```
 
 ## Quick Start
 
 ```typescript
-import { Agent } from "@earendil-works/volt-agent-core";
-import { getModel } from "@earendil-works/volt-ai";
+import { Agent } from "@hansjm10/volt-agent-core";
+import { getModel } from "@hansjm10/volt-ai";
 
 const agent = new Agent({
   initialState: {
@@ -363,7 +367,7 @@ Follow-up messages are checked only when there are no more tool calls and no ste
 Extend `AgentMessage` via declaration merging:
 
 ```typescript
-declare module "@earendil-works/volt-agent-core" {
+declare module "@hansjm10/volt-agent-core" {
   interface CustomAgentMessages {
     notification: { role: "notification"; text: string; timestamp: number };
   }
@@ -444,7 +448,7 @@ Return `terminate: true` from `execute()` or `afterToolCall` to hint that the ag
 For browser apps that proxy through a backend:
 
 ```typescript
-import { Agent, streamProxy } from "@earendil-works/volt-agent-core";
+import { Agent, streamProxy } from "@hansjm10/volt-agent-core";
 
 const agent = new Agent({
   streamFn: (model, context, options) =>
@@ -461,7 +465,7 @@ const agent = new Agent({
 For direct control without the Agent class:
 
 ```typescript
-import { agentLoop, agentLoopContinue } from "@earendil-works/volt-agent-core";
+import { agentLoop, agentLoopContinue } from "@hansjm10/volt-agent-core";
 
 const context: AgentContext = {
   systemPrompt: "You are helpful.",

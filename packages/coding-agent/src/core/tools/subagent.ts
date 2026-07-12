@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
-import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/volt-agent-core";
-import type { AssistantMessage, TextContent } from "@earendil-works/volt-ai";
-import { type Component, Markdown, Text, truncateToWidth, visibleWidth } from "@earendil-works/volt-tui";
+import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@hansjm10/volt-agent-core";
+import type { AssistantMessage, TextContent } from "@hansjm10/volt-ai";
+import { type Component, Markdown, Text, truncateToWidth, visibleWidth } from "@hansjm10/volt-tui";
 import { type Static, Type } from "typebox";
 import type { SessionStats } from "../agent-session.ts";
 import type { ToolDefinition } from "../extensions/types.ts";

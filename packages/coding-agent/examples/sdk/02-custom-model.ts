@@ -4,8 +4,8 @@
  * Shows how to select a specific model and thinking level.
  */
 
-import { getModel } from "@earendil-works/volt-ai";
-import { AuthStorage, createAgentSession, ModelRegistry } from "@earendil-works/volt-coding-agent";
+import { getModel } from "@hansjm10/volt-ai";
+import { AuthStorage, createAgentSession, ModelRegistry } from "@hansjm10/volt-coding-agent";
 
 // Set up auth storage and model registry
 const authStorage = AuthStorage.create();

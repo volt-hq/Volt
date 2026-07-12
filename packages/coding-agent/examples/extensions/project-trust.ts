@@ -13,7 +13,7 @@
  * Try it in a project containing .volt, AGENTS.md/CLAUDE.md, or .agents/skills.
  */
 
-import type { ExtensionAPI, ProjectTrustEventResult } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI, ProjectTrustEventResult } from "@hansjm10/volt-coding-agent";
 
 export default function (volt: ExtensionAPI) {
 	let loadCount = 0;

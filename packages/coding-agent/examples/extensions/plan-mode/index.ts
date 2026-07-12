@@ -12,10 +12,10 @@
  * - Progress tracking widget during execution
  */
 
-import type { AgentMessage } from "@earendil-works/volt-agent-core";
-import type { AssistantMessage, TextContent } from "@earendil-works/volt-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/volt-coding-agent";
-import { Key } from "@earendil-works/volt-tui";
+import type { AgentMessage } from "@hansjm10/volt-agent-core";
+import type { AssistantMessage, TextContent } from "@hansjm10/volt-ai";
+import type { ExtensionAPI, ExtensionContext } from "@hansjm10/volt-coding-agent";
+import { Key } from "@hansjm10/volt-tui";
 import { extractTodoItems, isSafeCommand, markCompletedSteps, type TodoItem } from "./utils.ts";
 
 // Tools

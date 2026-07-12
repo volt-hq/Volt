@@ -8,9 +8,9 @@
  * Token stats come from ctx.sessionManager/ctx.model (already accessible).
  */
 
-import type { AssistantMessage } from "@earendil-works/volt-ai";
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/volt-tui";
+import type { AssistantMessage } from "@hansjm10/volt-ai";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { truncateToWidth, visibleWidth } from "@hansjm10/volt-tui";
 
 export default function (volt: ExtensionAPI) {
 	let enabled = false;

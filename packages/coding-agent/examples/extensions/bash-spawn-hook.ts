@@ -7,8 +7,8 @@
  *   volt -e ./bash-spawn-hook.ts
  */
 
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
-import { createBashTool } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { createBashTool } from "@hansjm10/volt-coding-agent";
 
 export default function (volt: ExtensionAPI) {
 	const cwd = process.cwd();

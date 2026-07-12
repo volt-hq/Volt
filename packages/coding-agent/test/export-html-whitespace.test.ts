@@ -1,4 +1,4 @@
-import type { Component } from "@earendil-works/volt-tui";
+import type { Component } from "@hansjm10/volt-tui";
 import { readFileSync } from "fs";
 import { describe, expect, it } from "vitest";
 import { ansiLinesToHtml } from "../src/core/export-html/ansi-to-html.ts";

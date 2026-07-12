@@ -40,6 +40,7 @@ describe("daemon service install (M9)", () => {
 	});
 
 	it("renders a launchd plist that runs the daemon in the foreground with the agent dir pinned", () => {
+		expect(LAUNCHD_SERVICE_LABEL).toBe("com.github.hansjm10.voltd");
 		const invocation = getDaemonServiceInvocation(agentDir);
 		expect(invocation.programArguments[0]).toBe(process.execPath);
 		expect(invocation.programArguments.slice(-3)).toEqual(["daemon", "run", "--foreground"]);

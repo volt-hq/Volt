@@ -1,5 +1,5 @@
-import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
-import type { Transport } from "@earendil-works/volt-ai";
+import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type { Transport } from "@hansjm10/volt-ai";
 import {
 	Container,
 	getCapabilities,
@@ -10,7 +10,7 @@ import {
 	SettingsList,
 	Spacer,
 	Text,
-} from "@earendil-works/volt-tui";
+} from "@hansjm10/volt-tui";
 import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
 import type { DefaultProjectTrust, TurnDoneAlert, WarningSettings } from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../../../core/theme/runtime.ts";

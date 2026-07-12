@@ -7,7 +7,7 @@ This page gets you from install to a useful first volt session.
 Volt is distributed as an npm package:
 
 ```bash
-npm install -g --ignore-scripts @earendil-works/volt-coding-agent
+npm install -g --ignore-scripts @hansjm10/volt-coding-agent@beta
 ```
 
 `--ignore-scripts` disables dependency lifecycle scripts during install. Volt does not require install scripts for normal npm installs.
@@ -18,16 +18,16 @@ Use the package manager that installed volt. The curl installer uses npm globall
 
 ```bash
 # curl installer or npm install -g
-npm uninstall -g @earendil-works/volt-coding-agent
+npm uninstall -g @hansjm10/volt-coding-agent
 
 # pnpm
-pnpm remove -g @earendil-works/volt-coding-agent
+pnpm remove -g @hansjm10/volt-coding-agent
 
 # Yarn
-yarn global remove @earendil-works/volt-coding-agent
+yarn global remove @hansjm10/volt-coding-agent
 
 # Bun
-bun uninstall -g @earendil-works/volt-coding-agent
+bun uninstall -g @hansjm10/volt-coding-agent
 ```
 
 Uninstalling volt leaves settings, credentials, sessions, and installed volt packages in `~/.volt/agent/`.

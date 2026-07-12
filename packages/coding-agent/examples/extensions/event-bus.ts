@@ -7,7 +7,7 @@
  * Usage: /emit [event-name] [data] - emit an event on the bus
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@hansjm10/volt-coding-agent";
 
 export default function (volt: ExtensionAPI) {
 	// Store ctx for use in event handler

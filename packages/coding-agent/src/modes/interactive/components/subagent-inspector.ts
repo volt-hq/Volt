@@ -6,7 +6,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
-} from "@earendil-works/volt-tui";
+} from "@hansjm10/volt-tui";
 import type { SubagentActivity, SubagentActivityEvent, SubagentActivityStatus } from "../../../core/subagents/index.ts";
 import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";

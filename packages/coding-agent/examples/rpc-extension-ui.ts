@@ -18,15 +18,7 @@ import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import * as readline from "node:readline";
 import { fileURLToPath } from "node:url";
-import {
-	type Component,
-	Container,
-	Input,
-	matchesKey,
-	ProcessTerminal,
-	SelectList,
-	TUI,
-} from "@earendil-works/volt-tui";
+import { type Component, Container, Input, matchesKey, ProcessTerminal, SelectList, TUI } from "@hansjm10/volt-tui";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 

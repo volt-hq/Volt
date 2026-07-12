@@ -5,8 +5,8 @@
  * Responses and events are emitted as JSON lines by the transport.
  */
 
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/volt-agent-core";
-import type { Api, ImageContent, Model } from "@earendil-works/volt-ai";
+import type { AgentMessage, ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type { Api, ImageContent, Model } from "@hansjm10/volt-ai";
 import type { SessionStats } from "../agent-session.ts";
 import type { BashResult } from "../bash-executor.ts";
 import type { CompactionResult } from "../compaction/index.ts";

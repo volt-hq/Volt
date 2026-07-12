@@ -2,8 +2,8 @@
  * Hello Tool - Minimal custom tool example
  */
 
-import { Type } from "@earendil-works/volt-ai";
-import { defineTool, type ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import { Type } from "@hansjm10/volt-ai";
+import { defineTool, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 const helloTool = defineTool({
 	name: "hello",

@@ -1,5 +1,5 @@
-import { Agent, type ThinkingLevel } from "@earendil-works/volt-agent-core";
-import { type Model, registerFauxProvider } from "@earendil-works/volt-ai";
+import { Agent, type ThinkingLevel } from "@hansjm10/volt-agent-core";
+import { type Model, registerFauxProvider } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";

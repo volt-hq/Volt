@@ -4,7 +4,7 @@ import {
 	fauxAssistantMessage,
 	fauxToolCall,
 	type Model,
-} from "@earendil-works/volt-ai";
+} from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, type Harness } from "./harness.ts";
 

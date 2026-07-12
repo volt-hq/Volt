@@ -2,8 +2,8 @@
  * Shared utilities for compaction and branch summarization.
  */
 
-import type { AgentMessage } from "@earendil-works/volt-agent-core";
-import type { Message } from "@earendil-works/volt-ai";
+import type { AgentMessage } from "@hansjm10/volt-agent-core";
+import type { Message } from "@hansjm10/volt-ai";
 
 // ============================================================================
 // File Operation Tracking

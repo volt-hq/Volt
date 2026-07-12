@@ -9,9 +9,9 @@
  * 2. Use /tools to open the tool selector
  */
 
-import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@earendil-works/volt-coding-agent";
-import { getSettingsListTheme } from "@earendil-works/volt-coding-agent";
-import { Container, type SettingItem, SettingsList } from "@earendil-works/volt-tui";
+import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@hansjm10/volt-coding-agent";
+import { getSettingsListTheme } from "@hansjm10/volt-coding-agent";
+import { Container, type SettingItem, SettingsList } from "@hansjm10/volt-tui";
 
 // State persisted to session
 interface ToolsState {

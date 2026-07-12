@@ -4,7 +4,7 @@
  * Override settings using SettingsManager.
  */
 
-import { createAgentSession, SessionManager, SettingsManager } from "@earendil-works/volt-coding-agent";
+import { createAgentSession, SessionManager, SettingsManager } from "@hansjm10/volt-coding-agent";
 
 const cwd = process.cwd();
 

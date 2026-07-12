@@ -5,10 +5,10 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage, AgentTool } from "@earendil-works/volt-agent-core";
-import { Agent } from "@earendil-works/volt-agent-core";
-import type { FauxModelDefinition, FauxProviderRegistration, FauxResponseStep, Model } from "@earendil-works/volt-ai";
-import { registerFauxProvider } from "@earendil-works/volt-ai";
+import type { AgentMessage, AgentTool } from "@hansjm10/volt-agent-core";
+import { Agent } from "@hansjm10/volt-agent-core";
+import type { FauxModelDefinition, FauxProviderRegistration, FauxResponseStep, Model } from "@hansjm10/volt-ai";
+import { registerFauxProvider } from "@hansjm10/volt-ai";
 import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";

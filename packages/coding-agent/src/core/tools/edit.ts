@@ -1,5 +1,5 @@
-import type { AgentTool } from "@earendil-works/volt-agent-core";
-import { Box, Container, Spacer, Text } from "@earendil-works/volt-tui";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
+import { Box, Container, Spacer, Text } from "@hansjm10/volt-tui";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";

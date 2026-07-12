@@ -20,8 +20,8 @@
  *   volt -e ./tool-override.ts
  */
 
-import type { TextContent } from "@earendil-works/volt-ai";
-import { type ExtensionAPI, getAgentDir, withFileMutationQueue } from "@earendil-works/volt-coding-agent";
+import type { TextContent } from "@hansjm10/volt-ai";
+import { type ExtensionAPI, getAgentDir, withFileMutationQueue } from "@hansjm10/volt-coding-agent";
 import { constants, readFileSync } from "fs";
 import { access, appendFile, readFile } from "fs/promises";
 import { join, resolve } from "path";

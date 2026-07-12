@@ -2,8 +2,8 @@
  * Snake game extension - play snake with /snake command
  */
 
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
-import { matchesKey, visibleWidth } from "@earendil-works/volt-tui";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { matchesKey, visibleWidth } from "@hansjm10/volt-tui";
 
 const GAME_WIDTH = 40;
 const GAME_HEIGHT = 15;

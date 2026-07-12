@@ -1,6 +1,6 @@
-import type { AgentMessage } from "@earendil-works/volt-agent-core";
-import type { AssistantMessage, ToolResultMessage, Usage } from "@earendil-works/volt-ai";
-import { Container, Text, type TUI } from "@earendil-works/volt-tui";
+import type { AgentMessage } from "@hansjm10/volt-agent-core";
+import type { AssistantMessage, ToolResultMessage, Usage } from "@hansjm10/volt-ai";
+import { Container, Text, type TUI } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import type { SessionContext } from "../../../src/core/session-manager.ts";

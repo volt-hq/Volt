@@ -2,7 +2,7 @@
  * Simple text input component for extensions.
  */
 
-import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@earendil-works/volt-tui";
+import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@hansjm10/volt-tui";
 import { theme } from "../../../core/theme/runtime.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { DynamicBorder } from "./dynamic-border.ts";

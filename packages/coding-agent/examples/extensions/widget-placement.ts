@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 export default function widgetPlacementExtension(volt: ExtensionAPI) {
 	volt.on("session_start", (_event, ctx) => {

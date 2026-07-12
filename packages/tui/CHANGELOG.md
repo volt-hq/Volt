@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- Changed the Volt beta package identity to `@hansjm10/volt-tui` and restarted the Volt release line at `0.1.0`.
 - Added required `Terminal.alert()` bell hook; custom `Terminal` implementations must implement it.
 - Added required `Terminal.focusState` getter (`"focused" | "unfocused" | "unknown"`); custom `Terminal` implementations must implement it.
 

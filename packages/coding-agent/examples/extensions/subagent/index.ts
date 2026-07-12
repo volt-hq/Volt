@@ -16,11 +16,11 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@earendil-works/volt-agent-core";
-import type { Message } from "@earendil-works/volt-ai";
-import { StringEnum } from "@earendil-works/volt-ai";
-import { type ExtensionAPI, getMarkdownTheme, withFileMutationQueue } from "@earendil-works/volt-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/volt-tui";
+import type { AgentToolResult } from "@hansjm10/volt-agent-core";
+import type { Message } from "@hansjm10/volt-ai";
+import { StringEnum } from "@hansjm10/volt-ai";
+import { type ExtensionAPI, getMarkdownTheme, withFileMutationQueue } from "@hansjm10/volt-coding-agent";
+import { Container, Markdown, Spacer, Text } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
 

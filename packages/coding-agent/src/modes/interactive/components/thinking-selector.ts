@@ -1,5 +1,5 @@
-import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
-import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@earendil-works/volt-tui";
+import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
+import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@hansjm10/volt-tui";
 import { getSelectListTheme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 

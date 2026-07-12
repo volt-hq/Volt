@@ -13,9 +13,9 @@
  *   volt --extension examples/extensions/custom-compaction.ts
  */
 
-import { complete } from "@earendil-works/volt-ai";
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
-import { convertToLlm, serializeConversation } from "@earendil-works/volt-coding-agent";
+import { complete } from "@hansjm10/volt-ai";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { convertToLlm, serializeConversation } from "@hansjm10/volt-coding-agent";
 
 export default function (volt: ExtensionAPI) {
 	volt.on("session_before_compact", async (event, ctx) => {

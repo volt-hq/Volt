@@ -168,7 +168,7 @@ If no `volt` or compatible `pi` manifest is present, volt auto-discovers resourc
 
 Third party runtime dependencies belong in `dependencies` in `package.json`. Dependencies that do not register extensions, skills, prompt templates, or themes also belong in `dependencies`. When volt installs a package from npm or git, it runs `npm install`, so those dependencies are installed automatically.
 
-Volt bundles core packages for extensions and skills. If you import any of these, list them in `peerDependencies` with a `"*"` range and do not bundle them: `@earendil-works/volt-ai`, `@earendil-works/volt-agent-core`, `@earendil-works/volt-coding-agent`, `@earendil-works/volt-tui`, `typebox`.
+Volt bundles core packages for extensions and skills. If you import any of these, list them in `peerDependencies` with a `"*"` range and do not bundle them: `@hansjm10/volt-ai`, `@hansjm10/volt-agent-core`, `@hansjm10/volt-coding-agent`, `@hansjm10/volt-tui`, `typebox`.
 
 For Pi compatibility, Volt aliases `@earendil-works/pi-ai`, `@earendil-works/pi-agent-core`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, and the legacy `@mariozechner/pi-*` package names to the corresponding Volt modules when loading extensions.
 

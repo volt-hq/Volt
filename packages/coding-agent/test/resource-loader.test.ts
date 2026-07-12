@@ -663,7 +663,7 @@ Content`,
 			writeFileSync(
 				join(ext1Dir, "index.ts"),
 				`
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
 export default function(volt: ExtensionAPI) {
   volt.registerTool({
@@ -678,7 +678,7 @@ export default function(volt: ExtensionAPI) {
 			writeFileSync(
 				join(ext2Dir, "index.ts"),
 				`
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
 export default function(volt: ExtensionAPI) {
   volt.registerTool({
@@ -705,7 +705,7 @@ export default function(volt: ExtensionAPI) {
 			writeFileSync(
 				join(globalExtDir, "global.ts"),
 				`
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
 export default function(volt: ExtensionAPI) {
   volt.registerTool({
@@ -724,7 +724,7 @@ export default function(volt: ExtensionAPI) {
 			writeFileSync(
 				explicitExtPath,
 				`
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
 export default function(volt: ExtensionAPI) {
   volt.registerTool({

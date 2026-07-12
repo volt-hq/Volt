@@ -18,7 +18,7 @@
  *   /thinking-label          Reset to the default label
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@hansjm10/volt-coding-agent";
 
 const DEFAULT_LABEL = "Pondering...";
 

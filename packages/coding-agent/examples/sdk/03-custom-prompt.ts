@@ -4,12 +4,7 @@
  * Shows how to replace or modify the default system prompt.
  */
 
-import {
-	createAgentSession,
-	DefaultResourceLoader,
-	getAgentDir,
-	SessionManager,
-} from "@earendil-works/volt-coding-agent";
+import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager } from "@hansjm10/volt-coding-agent";
 
 const cwd = process.cwd();
 const agentDir = getAgentDir();

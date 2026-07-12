@@ -10,7 +10,7 @@
  * 3. Use /commands extensions to filter by source
  */
 
-import type { ExtensionAPI, SlashCommandInfo } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI, SlashCommandInfo } from "@hansjm10/volt-coding-agent";
 
 export default function commandsExtension(volt: ExtensionAPI) {
 	volt.registerCommand("commands", {

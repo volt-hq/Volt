@@ -5,16 +5,8 @@
  * Multiple questions: tab bar navigation between questions
  */
 
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
-import {
-	Editor,
-	type EditorTheme,
-	Key,
-	matchesKey,
-	Text,
-	visibleWidth,
-	wrapTextWithAnsi,
-} from "@earendil-works/volt-tui";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { Editor, type EditorTheme, Key, matchesKey, Text, visibleWidth, wrapTextWithAnsi } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 
 // Types

@@ -42,8 +42,8 @@ import {
 	type Tool,
 	type ToolCall,
 	type ToolResultMessage,
-} from "@earendil-works/volt-ai";
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+} from "@hansjm10/volt-ai";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 // =============================================================================
 // OAuth Implementation (copied from packages/ai/src/utils/oauth/anthropic.ts)

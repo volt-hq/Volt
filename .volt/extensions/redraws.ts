@@ -4,8 +4,8 @@
  * Exposes /tui to show TUI redraw stats.
  */
 
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
-import { Text } from "@earendil-works/volt-tui";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { Text } from "@hansjm10/volt-tui";
 
 export default function (volt: ExtensionAPI) {
 	volt.registerCommand("tui", {

@@ -1,4 +1,4 @@
-import { fuzzyMatch } from "@earendil-works/volt-tui";
+import { fuzzyMatch } from "@hansjm10/volt-tui";
 import type { SessionInfo } from "../../../core/session-manager.ts";
 
 export type SortMode = "threaded" | "recent" | "relevance";

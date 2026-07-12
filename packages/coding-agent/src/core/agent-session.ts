@@ -23,7 +23,7 @@ import type {
 	AgentTool,
 	ShouldStopAfterTurnContext,
 	ThinkingLevel,
-} from "@earendil-works/volt-agent-core";
+} from "@hansjm10/volt-agent-core";
 import type {
 	AssistantMessage,
 	ImageContent,
@@ -33,7 +33,7 @@ import type {
 	TextContent,
 	ToolCall,
 	ToolResultMessage,
-} from "@earendil-works/volt-ai";
+} from "@hansjm10/volt-ai";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
@@ -42,7 +42,7 @@ import {
 	isContextOverflow,
 	modelsAreEqual,
 	streamSimple,
-} from "@earendil-works/volt-ai";
+} from "@hansjm10/volt-ai";
 import { writeDurableAtomicFileSync } from "../utils/durable-atomic-write.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";

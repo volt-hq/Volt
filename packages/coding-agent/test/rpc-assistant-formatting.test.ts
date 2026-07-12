@@ -1,4 +1,4 @@
-import { fauxAssistantMessage } from "@earendil-works/volt-ai";
+import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";

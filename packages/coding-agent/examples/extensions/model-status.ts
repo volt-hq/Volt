@@ -7,7 +7,7 @@
  * Usage: volt -e ./model-status.ts
  */
 
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 export default function (volt: ExtensionAPI) {
 	volt.on("model_select", async (event, ctx) => {

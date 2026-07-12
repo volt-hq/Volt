@@ -1,7 +1,7 @@
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
-import type { ImageContent, TextContent } from "@earendil-works/volt-ai";
-import { getCapabilities, getImageDimensions, hyperlink, imageFallback } from "@earendil-works/volt-tui";
+import type { ImageContent, TextContent } from "@hansjm10/volt-ai";
+import { getCapabilities, getImageDimensions, hyperlink, imageFallback } from "@hansjm10/volt-tui";
 import { stripAnsi } from "../../utils/ansi.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { sanitizeBinaryOutput } from "../../utils/shell.ts";

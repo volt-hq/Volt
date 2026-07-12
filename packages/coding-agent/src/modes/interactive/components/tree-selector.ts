@@ -11,7 +11,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
-} from "@earendil-works/volt-tui";
+} from "@hansjm10/volt-tui";
 import type { SessionTreeNode } from "../../../core/session-manager.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";

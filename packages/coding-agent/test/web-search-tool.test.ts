@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import type { Api, Model } from "@earendil-works/volt-ai";
+import type { Api, Model } from "@hansjm10/volt-ai";
 import { describe, expect, it } from "vitest";
 import {
 	createDefaultWebSearchOperations,

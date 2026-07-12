@@ -1,7 +1,7 @@
 import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
-import type { AgentTool } from "@earendil-works/volt-agent-core";
-import type { Api, ImageContent, Model, TextContent } from "@earendil-works/volt-ai";
-import { Text } from "@earendil-works/volt-tui";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
+import type { Api, ImageContent, Model, TextContent } from "@hansjm10/volt-ai";
+import { Text } from "@hansjm10/volt-tui";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile } from "fs/promises";
 import { type Static, Type } from "typebox";

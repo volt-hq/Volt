@@ -9,7 +9,7 @@ const catalog: StoreCatalog = {
 			id: "rtk",
 			name: "RTK",
 			description: "Token optimized shell output",
-			source: "git:github.com/earendil-works/volt-rtk@v0.1.0",
+			source: "git:github.com/hansjm10/volt-rtk@v0.1.0",
 		},
 		{
 			id: "theme",
@@ -25,7 +25,7 @@ describe("store resolver", () => {
 		const resolved = await resolveStoreSource({ input: "rtk", catalog });
 
 		expect(resolved.kind).toBe("catalog");
-		expect(resolved.source).toBe("git:github.com/earendil-works/volt-rtk@v0.1.0");
+		expect(resolved.source).toBe("git:github.com/hansjm10/volt-rtk@v0.1.0");
 		expect(resolved.catalogPackage?.id).toBe("rtk");
 		expect(resolved.pinned).toBe(true);
 	});

@@ -4,7 +4,7 @@
  * Replace everything - no discovery, explicit configuration.
  */
 
-import { getModel } from "@earendil-works/volt-ai";
+import { getModel } from "@hansjm10/volt-ai";
 import {
 	AuthStorage,
 	createAgentSession,
@@ -13,7 +13,7 @@ import {
 	type ResourceLoader,
 	SessionManager,
 	SettingsManager,
-} from "@earendil-works/volt-coding-agent";
+} from "@hansjm10/volt-coding-agent";
 
 // Custom auth storage location
 const authStorage = AuthStorage.create("/tmp/my-agent/auth.json");

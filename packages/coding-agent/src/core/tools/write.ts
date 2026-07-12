@@ -1,5 +1,5 @@
-import type { AgentTool } from "@earendil-works/volt-agent-core";
-import { Container, Text } from "@earendil-works/volt-tui";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
+import { Container, Text } from "@hansjm10/volt-tui";
 import { mkdir as fsMkdir, writeFile as fsWriteFile } from "fs/promises";
 import { dirname } from "path";
 import { type Static, Type } from "typebox";

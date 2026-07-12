@@ -8,7 +8,7 @@ import {
 	Text,
 	type TUI,
 	visibleWidth,
-} from "@earendil-works/volt-tui";
+} from "@hansjm10/volt-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";

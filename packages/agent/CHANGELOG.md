@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Changed the Volt beta package identity to `@hansjm10/volt-agent-core` and restarted the Volt release line at `0.1.0`.
+
 ### Added
 
 - Added `AgentState.pendingToolExecutions` so host integrations can inspect the names and arguments for currently running tool calls.

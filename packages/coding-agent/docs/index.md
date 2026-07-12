@@ -7,7 +7,7 @@ Volt is a minimal terminal coding harness. It is designed to stay small at the c
 Install Volt with npm:
 
 ```bash
-npm install -g --ignore-scripts @earendil-works/volt-coding-agent
+npm install -g --ignore-scripts @hansjm10/volt-coding-agent@beta
 ```
 
 `--ignore-scripts` disables dependency lifecycle scripts during install. Volt does not require install scripts for normal npm installs.
@@ -15,10 +15,10 @@ npm install -g --ignore-scripts @earendil-works/volt-coding-agent
 To uninstall volt itself, use npm for curl and npm installs:
 
 ```bash
-npm uninstall -g @earendil-works/volt-coding-agent
+npm uninstall -g @hansjm10/volt-coding-agent
 ```
 
-For pnpm, Yarn, or Bun installs, use the matching global remove command: `pnpm remove -g @earendil-works/volt-coding-agent`, `yarn global remove @earendil-works/volt-coding-agent`, or `bun uninstall -g @earendil-works/volt-coding-agent`.
+For pnpm, Yarn, or Bun installs, use the matching global remove command: `pnpm remove -g @hansjm10/volt-coding-agent`, `yarn global remove @hansjm10/volt-coding-agent`, or `bun uninstall -g @hansjm10/volt-coding-agent`.
 
 Then run it in a project directory:
 

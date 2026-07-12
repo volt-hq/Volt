@@ -17,9 +17,9 @@
  * separate variables. Only the agent cursor is ever exposed to the agent.
  */
 
-import { StringEnum } from "@earendil-works/volt-ai";
-import type { ExtensionAPI, ExtensionContext, Theme, ToolExecutionMode } from "@earendil-works/volt-coding-agent";
-import { type Component, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/volt-tui";
+import { StringEnum } from "@hansjm10/volt-ai";
+import type { ExtensionAPI, ExtensionContext, Theme, ToolExecutionMode } from "@hansjm10/volt-coding-agent";
+import { type Component, matchesKey, Text, truncateToWidth, visibleWidth } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 
 // Thrown from the tool on illegal actions. The agent runtime surfaces thrown

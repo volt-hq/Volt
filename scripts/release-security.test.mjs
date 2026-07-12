@@ -6,6 +6,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+	assertPublishedPackageMatchesRelease,
+	NPM_PROVENANCE_PREDICATE_TYPE,
+	NPM_PUBLISHED_METADATA_FIELDS,
+} from "./npm-publish-verification.mjs";
+import {
+	BOOTSTRAP_VERSION,
+	npmViewPackageMetadata,
+	parseBootstrapVerificationArgs,
+	verifyPreflightPackageMetadata,
+	verifyTagWorkflowPackageMetadata,
+} from "./verify-npm-package-bootstrap.mjs";
+import { assertReleaseTagAvailable, getPlannedReleaseVersion, planReleaseTarget } from "./release-target.mjs";
+import {
+	RELEASE_PACKAGE_IDENTITIES,
 	RELEASE_PACKAGES,
 	verifyReleaseGitProvenance,
 	verifyReleasePackageMetadata,
@@ -13,18 +27,160 @@ import {
 } from "./verify-release-provenance.mjs";
 
 test("release tags are canonical semver tags", () => {
-	assert.equal(versionFromReleaseTag("v0.79.6"), "0.79.6");
-	for (const invalid of ["0.79.6", "v01.2.3", "v1.2", "main", "v1.2.3-rc.1", "v1.2.3\nmain"]) {
+	assert.equal(versionFromReleaseTag("v0.1.0"), "0.1.0");
+	for (const invalid of ["0.1.0", "v00.1.0", "v0.1", "main", "v0.1.0-rc.1", "v0.1.0\nmain"]) {
 		assert.throws(() => versionFromReleaseTag(invalid));
 	}
 });
 
+test("initial release can prepare the current version without changing normal release targets", () => {
+	assert.deepEqual(planReleaseTarget("0.1.0", "0.1.0"), { type: "current", value: "0.1.0" });
+	assert.deepEqual(planReleaseTarget("0.1.1", "0.1.0"), { type: "set", value: "0.1.1" });
+	assert.deepEqual(planReleaseTarget("patch", "0.1.0"), { type: "bump", value: "patch" });
+	assert.equal(getPlannedReleaseVersion("patch", "0.1.0"), "0.1.1");
+	assert.equal(getPlannedReleaseVersion("minor", "0.1.9"), "0.2.0");
+	assert.equal(getPlannedReleaseVersion("major", "9.8.7"), "10.0.0");
+	assert.throws(() => planReleaseTarget("0.0.9", "0.1.0"), /must not be lower/);
+	assert.throws(() => planReleaseTarget("0.2.0", "0.2.0"), /one-time 0\.1\.0 bootstrap/);
+	assert.throws(() => planReleaseTarget("00.1.0", "0.1.0"), /Invalid release target/);
+
+	const available = (_command, args) => ({ status: args[0] === "show-ref" ? 1 : 2 });
+	assert.doesNotThrow(() => assertReleaseTagAvailable("0.1.0", available));
+	assert.throws(
+		() => assertReleaseTagAvailable("0.1.0", (_command, args) => ({ status: args[0] === "show-ref" ? 0 : 2 })),
+		/already exists locally.*Refusing to rerun/s,
+	);
+	assert.throws(
+		() => assertReleaseTagAvailable("0.1.0", (_command, args) => ({ status: args[0] === "show-ref" ? 1 : 0 })),
+		/already exists on origin.*Refusing to rerun/s,
+	);
+	assert.throws(
+		() => assertReleaseTagAvailable("0.1.0", () => ({ status: 128, stderr: "network unavailable" })),
+		/network unavailable/,
+	);
+
+	const releaseScript = readFileSync("scripts/release.mjs", "utf8");
+	const mainFlow = releaseScript.slice(releaseScript.indexOf("// Main flow"));
+	assert.ok(mainFlow.indexOf("requireReleaseTagAvailable(plannedVersion)") < mainFlow.indexOf("bumpOrSetVersion(RELEASE_TARGET)"));
+	assert.ok(
+		mainFlow.indexOf("verify-npm-package-bootstrap.mjs preflight") < mainFlow.indexOf("bumpOrSetVersion(RELEASE_TARGET)"),
+	);
+});
+
+test("npm bootstrap verification reserves names without publishing the real initial version", () => {
+	assert.equal(BOOTSTRAP_VERSION, "0.0.0-bootstrap.0");
+	assert.deepEqual(parseBootstrapVerificationArgs(["preflight", "--version", "0.1.0", "--initial"]), {
+		initial: true,
+		mode: "preflight",
+		version: "0.1.0",
+	});
+	assert.deepEqual(parseBootstrapVerificationArgs(["tag", "--version", "0.1.0"]), {
+		initial: false,
+		mode: "tag",
+		version: "0.1.0",
+	});
+	assert.throws(
+		() => parseBootstrapVerificationArgs(["tag", "--version", "0.1.0", "--initial"]),
+		/only valid for the preflight/,
+	);
+
+	const name = "@hansjm10/volt-ai";
+	const placeholder = {
+		name,
+		versions: [BOOTSTRAP_VERSION],
+		"dist-tags": { bootstrap: BOOTSTRAP_VERSION },
+	};
+	assert.doesNotThrow(() => verifyPreflightPackageMetadata(name, "0.1.0", placeholder, { initial: true }));
+	assert.throws(
+		() =>
+			verifyPreflightPackageMetadata(
+				name,
+				"0.1.0",
+				{ ...placeholder, versions: [BOOTSTRAP_VERSION, "0.1.0"] },
+				{ initial: true },
+			),
+		/already published/,
+	);
+	assert.throws(
+		() =>
+			verifyPreflightPackageMetadata(
+				name,
+				"0.1.0",
+				{ ...placeholder, versions: [BOOTSTRAP_VERSION, "0.0.1"] },
+				{ initial: true },
+			),
+		/only placeholder version/,
+	);
+	assert.throws(
+		() =>
+			verifyPreflightPackageMetadata(
+				name,
+				"0.1.0",
+				{ ...placeholder, "dist-tags": { bootstrap: BOOTSTRAP_VERSION, latest: BOOTSTRAP_VERSION } },
+				{ initial: true },
+			),
+		/beta\/latest must be absent/,
+	);
+
+	let queriedArgs;
+	const queried = npmViewPackageMetadata(name, (_command, args) => {
+		queriedArgs = args;
+		return { status: 0, stdout: JSON.stringify(placeholder), stderr: "" };
+	});
+	assert.deepEqual(queried, placeholder);
+	assert.equal(queriedArgs[1], `${name}@${BOOTSTRAP_VERSION}`);
+	assert.doesNotThrow(() =>
+		verifyPreflightPackageMetadata(name, "0.1.1", {
+			name,
+			versions: [BOOTSTRAP_VERSION, "0.1.0"],
+			"dist-tags": { beta: "0.1.0", bootstrap: BOOTSTRAP_VERSION },
+		}),
+	);
+});
+
+test("tag workflow bootstrap verification supports absent, partial, and idempotent publication", () => {
+	const name = "@hansjm10/volt-ai";
+	assert.doesNotThrow(() =>
+		verifyTagWorkflowPackageMetadata(name, "0.1.0", {
+			name,
+			versions: [BOOTSTRAP_VERSION],
+			"dist-tags": { bootstrap: BOOTSTRAP_VERSION },
+		}),
+	);
+	assert.throws(
+		() =>
+			verifyTagWorkflowPackageMetadata(name, "0.1.0", {
+				name,
+				versions: [BOOTSTRAP_VERSION, "0.0.1"],
+				"dist-tags": { bootstrap: BOOTSTRAP_VERSION },
+			}),
+		/only placeholder version/,
+	);
+	assert.doesNotThrow(() =>
+		verifyTagWorkflowPackageMetadata(name, "0.1.0", {
+			name,
+			versions: [BOOTSTRAP_VERSION, "0.1.0"],
+			"dist-tags": { beta: "0.1.0", bootstrap: BOOTSTRAP_VERSION },
+		}),
+	);
+	assert.throws(
+		() =>
+			verifyTagWorkflowPackageMetadata(name, "0.1.0", {
+				name,
+				versions: [BOOTSTRAP_VERSION, "0.1.0"],
+				"dist-tags": { beta: BOOTSTRAP_VERSION, bootstrap: BOOTSTRAP_VERSION },
+			}),
+		/beta does not point to it/,
+	);
+});
+
 test("release package versions and changelogs must match the tag", () => {
 	const files = new Map();
-	for (const directory of RELEASE_PACKAGES) {
+	for (const { directory, name } of RELEASE_PACKAGE_IDENTITIES) {
 		files.set(
 			`${directory}/package.json`,
 			JSON.stringify({
+				name,
 				version: "1.2.3",
 				repository: { url: "git+https://github.com/hansjm10/Volt.git", directory },
 			}),
@@ -35,8 +191,83 @@ test("release package versions and changelogs must match the tag", () => {
 	files.set("packages/ai/CHANGELOG.md", "A link to ## [1.2.3] is not a release heading.\n");
 	assert.throws(() => verifyReleasePackageMetadata("v1.2.3", (path) => files.get(path)), /no release section/);
 	files.set("packages/ai/CHANGELOG.md", "# Changelog\n\n## [1.2.3] - 2026-07-12\n");
-	files.set("packages/ai/package.json", JSON.stringify({ version: "1.2.4" }));
+	files.set("packages/ai/package.json", JSON.stringify({ name: "@hansjm10/volt-ai", version: "1.2.4" }));
 	assert.throws(() => verifyReleasePackageMetadata("v1.2.3", (path) => files.get(path)), /expected 1\.2\.3/);
+	files.set("packages/ai/package.json", JSON.stringify({ name: "@earendil-works/volt-ai", version: "1.2.3" }));
+	assert.throws(() => verifyReleasePackageMetadata("v1.2.3", (path) => files.get(path)), /expected @hansjm10\/volt-ai/);
+});
+
+test("release tooling publishes only the canonical Volt package identities under the beta dist-tag", () => {
+	assert.deepEqual(RELEASE_PACKAGE_IDENTITIES, [
+		{ directory: "packages/ai", name: "@hansjm10/volt-ai" },
+		{ directory: "packages/tui", name: "@hansjm10/volt-tui" },
+		{ directory: "packages/agent", name: "@hansjm10/volt-agent-core" },
+		{ directory: "packages/coding-agent", name: "@hansjm10/volt-coding-agent" },
+	]);
+	const publishScript = readFileSync("scripts/publish.mjs", "utf8");
+	assert.match(publishScript, /const NPM_DIST_TAG = "beta";/);
+	assert.match(publishScript, /"--tag", NPM_DIST_TAG/);
+	assert.doesNotMatch(publishScript, /@earendil-works\/volt-/);
+	assert.doesNotMatch(publishScript, /@hansjm10\/volt-cli/);
+});
+
+test("idempotent npm publication requires exact release bytes and provenance", () => {
+	assert.deepEqual(NPM_PUBLISHED_METADATA_FIELDS, ["name", "version", "gitHead", "repository", "dist-tags", "dist"]);
+	const release = {
+		name: "@hansjm10/volt-ai",
+		version: "0.1.0",
+		directory: "packages/ai",
+		sourceCommit: "a".repeat(40),
+		packed: { integrity: "sha512-release" },
+		metadata: {
+			name: "@hansjm10/volt-ai",
+			version: "0.1.0",
+			gitHead: "a".repeat(40),
+			repository: {
+				url: "git+https://github.com/hansjm10/Volt.git",
+				directory: "packages/ai",
+			},
+			"dist-tags": { beta: "0.1.0", bootstrap: "0.0.0-bootstrap.0" },
+			dist: {
+				integrity: "sha512-release",
+				attestations: {
+					url: "https://registry.npmjs.org/-/npm/v1/attestations/example",
+					provenance: { predicateType: NPM_PROVENANCE_PREDICATE_TYPE },
+				},
+			},
+		},
+	};
+	assert.doesNotThrow(() => assertPublishedPackageMatchesRelease(release));
+	assert.throws(
+		() =>
+			assertPublishedPackageMatchesRelease({
+				...release,
+				metadata: { ...release.metadata, dist: { ...release.metadata.dist, integrity: "sha512-other" } },
+			}),
+		/does not match/,
+	);
+	assert.throws(
+		() =>
+			assertPublishedPackageMatchesRelease({
+				...release,
+				metadata: { ...release.metadata, dist: { integrity: "sha512-release" } },
+			}),
+		/no valid npm provenance/,
+	);
+	assert.throws(
+		() =>
+			assertPublishedPackageMatchesRelease({
+				...release,
+				metadata: { ...release.metadata, gitHead: "b".repeat(40) },
+			}),
+		/published from git commit/,
+	);
+	assert.doesNotThrow(() =>
+		assertPublishedPackageMatchesRelease({
+			...release,
+			metadata: { ...release.metadata, gitHead: undefined },
+		}),
+	);
 });
 
 test("release git provenance requires an annotated tag reachable from origin/main", () => {
@@ -74,14 +305,32 @@ test("release git provenance requires an annotated tag reachable from origin/mai
 
 test("workflow binds builds to tags and never clobbers release assets", () => {
 	const workflow = readFileSync(".github/workflows/build-binaries.yml", "utf8");
+	const buildJob = workflow.slice(workflow.indexOf("  build:"), workflow.indexOf("  publish-npm:"));
+	const publishJob = workflow.slice(workflow.indexOf("  publish-npm:"), workflow.indexOf("  release:"));
+	const releaseJob = workflow.slice(workflow.indexOf("  release:"));
 	assert.doesNotMatch(workflow, /source_ref|SOURCE_REF|--clobber/);
 	assert.doesNotMatch(workflow, /^\s*cache:\s*npm\s*$/m);
-	assert.equal(workflow.match(/actions\/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd/g)?.length, 2);
+	assert.equal(workflow.match(/actions\/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd/g)?.length, 3);
 	assert.equal(workflow.match(/actions\/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e/g)?.length, 2);
 	assert.equal(workflow.match(/package-manager-cache: false/g)?.length, 2);
+	assert.match(workflow, /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/);
+	assert.match(workflow, /actions\/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3/);
 	assert.match(workflow, /ref: refs\/tags\/\$\{\{ env\.RELEASE_TAG \}\}/);
 	assert.match(workflow, /verify-release-provenance\.mjs --tag/);
-	assert.match(workflow, /verify-npm-package-bootstrap\.mjs/);
+	assert.match(workflow, /verify-npm-package-bootstrap\.mjs tag --version/);
+	assert.match(buildJob, /permissions:\s+contents: read/);
+	assert.doesNotMatch(buildJob, /gh release (?:create|edit|upload)/);
+	assert.match(buildJob, /npm run check:release-security/);
+	assert.match(buildJob, /\.\/scripts\/build-binaries\.sh --skip-install/);
+	assert.ok(buildJob.indexOf("npm ci --ignore-scripts") < buildJob.indexOf("npm run check:release-security"));
+	assert.ok(buildJob.indexOf("npm run check:release-security") < buildJob.indexOf("./scripts/build-binaries.sh --skip-install"));
+	assert.match(publishJob, /needs: build/);
+	assert.ok(publishJob.indexOf("node scripts/publish.mjs") < publishJob.lastIndexOf("verify-npm-package-bootstrap.mjs tag --version"));
+	assert.match(releaseJob, /needs: \[build, publish-npm\]/);
+	assert.match(releaseJob, /environment: binary-release/);
+	assert.match(releaseJob, /permissions:\s+contents: write/);
+	assert.match(releaseJob, /source-commit\.txt/);
+	assert.match(releaseJob, /Release artifact commit .* does not match checked-out tag commit/);
 	assert.match(workflow, /Refusing to replace existing release asset with different bytes/);
 	assert.match(workflow, /cmp -s/);
 });
@@ -90,12 +339,14 @@ test("installers use the published package and verify binary checksums before ex
 	const shellInstaller = readFileSync("site/public/install.sh", "utf8");
 	const windowsInstaller = readFileSync("site/public/install.ps1", "utf8");
 	for (const installer of [shellInstaller, windowsInstaller]) {
-		assert.match(installer, /@earendil-works\/volt-coding-agent/);
+		assert.match(installer, /@hansjm10\/volt-coding-agent/);
 		assert.doesNotMatch(installer, /@hansjm10\/volt-cli/);
 		assert.match(installer, /SHA256SUMS/);
 		assert.match(installer, /SHA-256 verification failed/);
 		assert.match(installer, /local CLI\/TUI only/i);
 	}
+	assert.match(shellInstaller, /npm_spec="\$PACKAGE@beta"/);
+	assert.match(windowsInstaller, /\$npmSpec = "\$package@beta"/);
 	assert.match(shellInstaller, /tar -xzf .* volt\/volt/);
 	assert.match(shellInstaller, /release_tag="v\$\{VERSION#v\}"/);
 	assert.doesNotMatch(shellInstaller, /find .* -name volt/);
@@ -129,6 +380,7 @@ test("published packages and binary build include the repository license and not
 		assert.deepEqual(manifest.contributors, ["Mario Zechner", "Jordan Hans"]);
 		assert.equal(manifest.repository.url, "git+https://github.com/hansjm10/Volt.git");
 		assert.equal(manifest.repository.directory, directory);
+		assert.deepEqual(manifest.publishConfig, { access: "public", tag: "beta" });
 	}
 	const buildScript = readFileSync("scripts/build-binaries.sh", "utf8");
 	for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.md", "BINARY-CAPABILITIES.md", "npm-shrinkwrap.json"]) {
@@ -237,7 +489,7 @@ test("binary build refuses destructive output paths before invoking the compiler
 	assert.doesNotMatch(readFileSync("scripts/build-binaries.sh", "utf8"), /rm -rf "\$OUTPUT_DIR"(?:\s|$)/);
 });
 
-test("Unix npm installer does not promise daemon support on Darwin x64", () => {
+test("Unix npm installer defaults to the beta channel and does not promise daemon support on Darwin x64", () => {
 	const directory = mkdtempSync(join(tmpdir(), "volt-intel-installer-test-"));
 	try {
 		const fakeBin = join(directory, "bin");
@@ -257,7 +509,7 @@ esac
 		);
 		chmodSync(fakeNode, 0o755);
 		const fakeNpm = join(fakeBin, "npm");
-		writeFileSync(fakeNpm, "#!/bin/sh\nexit 0\n");
+		writeFileSync(fakeNpm, "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$VOLT_INSTALL_NPM_LOG\"\n");
 		chmodSync(fakeNpm, 0o755);
 		const fakeVolt = join(fakeBin, "volt");
 		writeFileSync(fakeVolt, "#!/bin/sh\nprintf 'volt 1.2.3\\n'\n");
@@ -265,15 +517,19 @@ esac
 
 		const result = spawnSync("sh", ["site/public/install.sh"], {
 			encoding: "utf8",
-			env: {
-				...process.env,
-				HOME: home,
-				PATH: `${fakeBin}:/usr/bin:/bin`,
-				VOLT_INSTALL_METHOD: "npm",
-				VOLT_VERSION: "1.2.3",
-			},
-		});
+				env: {
+					...process.env,
+					HOME: home,
+					PATH: `${fakeBin}:/usr/bin:/bin`,
+					VOLT_INSTALL_METHOD: "npm",
+					VOLT_INSTALL_NPM_LOG: join(directory, "npm-args.log"),
+				},
+			});
 		assert.equal(result.status, 0, result.stderr);
+		assert.equal(
+			readFileSync(join(directory, "npm-args.log"), "utf8").trim(),
+			"install -g --ignore-scripts @hansjm10/volt-coding-agent@beta",
+		);
 		assert.match(result.stdout, /unavailable on Intel macOS/);
 		assert.doesNotMatch(result.stdout, /This npm install supports 'volt daemon'/);
 	} finally {

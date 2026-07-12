@@ -5,7 +5,7 @@
  * Useful to ensure work is committed before switching context.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@hansjm10/volt-coding-agent";
 
 async function checkDirtyRepo(
 	volt: ExtensionAPI,

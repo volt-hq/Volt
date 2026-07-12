@@ -1,6 +1,6 @@
 {
-	"name": "@earendil-works/volt-ai",
-	"version": "0.79.6",
+	"name": "@hansjm10/volt-ai",
+	"version": "0.1.0",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -59,6 +59,10 @@
 		"README.md",
 		"LICENSE"
 	],
+	"publishConfig": {
+		"access": "public",
+		"tag": "beta"
+	},
 	"scripts": {
 		"clean": "shx rm -rf dist",
 		"generate-models": "node scripts/generate-models.ts",

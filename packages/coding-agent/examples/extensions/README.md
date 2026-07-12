@@ -140,7 +140,7 @@ cp permission-gate.ts ~/.volt/agent/extensions/
 See [docs/extensions.md](../../docs/extensions.md) for full documentation.
 
 ```typescript
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
 
 export default function (volt: ExtensionAPI) {
@@ -182,7 +182,7 @@ export default function (volt: ExtensionAPI) {
 
 **Use StringEnum for string parameters** (required for Google API compatibility):
 ```typescript
-import { StringEnum } from "@earendil-works/volt-ai";
+import { StringEnum } from "@hansjm10/volt-ai";
 
 // Good
 action: StringEnum(["list", "add"] as const)

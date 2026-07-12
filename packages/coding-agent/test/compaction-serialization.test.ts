@@ -1,4 +1,4 @@
-import type { Message } from "@earendil-works/volt-ai";
+import type { Message } from "@hansjm10/volt-ai";
 import { describe, expect, it } from "vitest";
 import {
 	CONVERSATION_MAX_CHARS,

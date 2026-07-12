@@ -18,7 +18,7 @@ import { resolveDaemonCliInvocation } from "./spawn.ts";
  * single-instance exit when something else already started one.
  */
 
-export const LAUNCHD_SERVICE_LABEL = "works.earendil.voltd";
+export const LAUNCHD_SERVICE_LABEL = "com.github.hansjm10.voltd";
 export const SYSTEMD_SERVICE_NAME = "voltd.service";
 
 export interface DaemonServiceInvocation {

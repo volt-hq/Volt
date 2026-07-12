@@ -2,9 +2,9 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
-import type { AgentMessage } from "@earendil-works/volt-agent-core";
-import type { ImageContent, Model } from "@earendil-works/volt-ai";
-import type { KeyId } from "@earendil-works/volt-tui";
+import type { AgentMessage } from "@hansjm10/volt-agent-core";
+import type { ImageContent, Model } from "@hansjm10/volt-ai";
+import type { KeyId } from "@hansjm10/volt-tui";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";

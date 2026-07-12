@@ -6,7 +6,7 @@ import {
 	encodeIrohRemoteTicketPayload,
 	IROH_REMOTE_ALPN,
 	IROH_REMOTE_TICKET_PREFIX,
-} from "@earendil-works/volt-coding-agent";
+} from "@hansjm10/volt-coding-agent";
 
 export const ALPN_TEXT = IROH_REMOTE_ALPN;
 export const ALPN = Array.from(Buffer.from(ALPN_TEXT, "utf8"));

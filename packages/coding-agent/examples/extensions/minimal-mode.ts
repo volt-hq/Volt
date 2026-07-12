@@ -16,7 +16,7 @@
  * Then use ctrl+o to toggle between minimal (collapsed) and full (expanded) views.
  */
 
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import {
 	createBashTool,
 	createEditTool,
@@ -25,8 +25,8 @@ import {
 	createLsTool,
 	createReadTool,
 	createWriteTool,
-} from "@earendil-works/volt-coding-agent";
-import { Text } from "@earendil-works/volt-tui";
+} from "@hansjm10/volt-coding-agent";
+import { Text } from "@hansjm10/volt-tui";
 import { homedir } from "os";
 
 /**

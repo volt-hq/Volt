@@ -5,9 +5,9 @@
  * and after compaction the session is reloaded.
  */
 
-import type { AgentMessage, StreamFn, ThinkingLevel } from "@earendil-works/volt-agent-core";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@earendil-works/volt-ai";
-import { completeSimple } from "@earendil-works/volt-ai";
+import type { AgentMessage, StreamFn, ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@hansjm10/volt-ai";
+import { completeSimple } from "@hansjm10/volt-ai";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,

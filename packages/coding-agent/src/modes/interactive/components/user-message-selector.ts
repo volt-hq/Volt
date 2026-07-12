@@ -1,4 +1,4 @@
-import { type Component, Container, getKeybindings, Spacer, Text, truncateToWidth } from "@earendil-works/volt-tui";
+import { type Component, Container, getKeybindings, Spacer, Text, truncateToWidth } from "@hansjm10/volt-tui";
 import { theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 

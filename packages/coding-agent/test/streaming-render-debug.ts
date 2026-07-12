@@ -4,8 +4,8 @@
  * Run with: npx tsx test/streaming-render-debug.ts
  */
 
-import type { AssistantMessage } from "@earendil-works/volt-ai";
-import { ProcessTerminal, TUI } from "@earendil-works/volt-tui";
+import type { AssistantMessage } from "@hansjm10/volt-ai";
+import { ProcessTerminal, TUI } from "@hansjm10/volt-tui";
 import { readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";

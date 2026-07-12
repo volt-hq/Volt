@@ -1,5 +1,5 @@
-import type { ThinkingLevel } from "@earendil-works/volt-agent-core";
-import type { ImageContent } from "@earendil-works/volt-ai";
+import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type { ImageContent } from "@hansjm10/volt-ai";
 
 const RPC_QUEUE_MODES = ["all", "one-at-a-time"] as const;
 const RPC_THINKING_LEVELS = [

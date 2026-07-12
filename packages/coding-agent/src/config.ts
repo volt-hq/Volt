@@ -36,17 +36,20 @@ interface SelfUpdateCommandStep {
 
 export interface SelfUpdateCommand extends SelfUpdateCommandStep {
 	steps?: SelfUpdateCommandStep[];
+	rollbackStep?: SelfUpdateCommandStep;
 }
 
 function makeSelfUpdateCommand(
 	installStep: SelfUpdateCommandStep,
 	uninstallStep?: SelfUpdateCommandStep,
+	rollbackStep?: SelfUpdateCommandStep,
 ): SelfUpdateCommand {
 	if (!uninstallStep) return installStep;
 	return {
 		...installStep,
 		display: `${uninstallStep.display} && ${installStep.display}`,
 		steps: [uninstallStep, installStep],
+		...(rollbackStep ? { rollbackStep } : {}),
 	};
 }
 
@@ -56,6 +59,19 @@ function makeSelfUpdateCommandStep(command: string, args: string[]): SelfUpdateC
 		args,
 		display: [command, ...args].map((arg) => (/\s/.test(arg) ? `"${arg}"` : arg)).join(" "),
 	};
+}
+
+function packageNameFromInstallSpec(spec: string): string {
+	const trimmed = spec.trim();
+	if (!trimmed.startsWith("@")) {
+		const versionSeparator = trimmed.indexOf("@");
+		return versionSeparator > 0 ? trimmed.slice(0, versionSeparator) : trimmed;
+	}
+
+	const scopeSeparator = trimmed.indexOf("/");
+	if (scopeSeparator === -1) return trimmed;
+	const versionSeparator = trimmed.indexOf("@", scopeSeparator + 1);
+	return versionSeparator === -1 ? trimmed : trimmed.slice(0, versionSeparator);
 }
 
 export function detectInstallMethod(): InstallMethod {
@@ -103,9 +119,10 @@ function getInferredNpmInstall(): { root: string; prefix: string } | undefined {
 function getSelfUpdateCommandForMethod(
 	method: InstallMethod,
 	installedPackageName: string,
-	updatePackageName = installedPackageName,
+	updatePackageSpec = installedPackageName,
 	npmCommand?: string[],
 ): SelfUpdateCommand | undefined {
+	const updatesInstalledPackage = packageNameFromInstallSpec(updatePackageSpec) === installedPackageName;
 	switch (method) {
 		case "bun-binary":
 			return undefined;
@@ -123,19 +140,37 @@ function getSelfUpdateCommandForMethod(
 					"--ignore-scripts",
 					"--config.minimumReleaseAge=0",
 					...binDirArgs,
-					updatePackageName,
+					updatePackageSpec,
 				]),
-				updatePackageName === installedPackageName
+				updatesInstalledPackage
 					? undefined
 					: makeSelfUpdateCommandStep("pnpm", ["remove", "-g", ...binDirArgs, installedPackageName]),
+				updatesInstalledPackage
+					? undefined
+					: makeSelfUpdateCommandStep("pnpm", [
+							"install",
+							"-g",
+							"--ignore-scripts",
+							"--config.minimumReleaseAge=0",
+							...binDirArgs,
+							`${installedPackageName}@${VERSION}`,
+						]),
 			);
 		}
 		case "yarn":
 			return makeSelfUpdateCommand(
-				makeSelfUpdateCommandStep("yarn", ["global", "add", "--ignore-scripts", updatePackageName]),
-				updatePackageName === installedPackageName
+				makeSelfUpdateCommandStep("yarn", ["global", "add", "--ignore-scripts", updatePackageSpec]),
+				updatesInstalledPackage
 					? undefined
 					: makeSelfUpdateCommandStep("yarn", ["global", "remove", installedPackageName]),
+				updatesInstalledPackage
+					? undefined
+					: makeSelfUpdateCommandStep("yarn", [
+							"global",
+							"add",
+							"--ignore-scripts",
+							`${installedPackageName}@${VERSION}`,
+						]),
 			);
 		case "bun":
 			return makeSelfUpdateCommand(
@@ -144,11 +179,20 @@ function getSelfUpdateCommandForMethod(
 					"-g",
 					"--ignore-scripts",
 					"--minimum-release-age=0",
-					updatePackageName,
+					updatePackageSpec,
 				]),
-				updatePackageName === installedPackageName
+				updatesInstalledPackage
 					? undefined
 					: makeSelfUpdateCommandStep("bun", ["uninstall", "-g", installedPackageName]),
+				updatesInstalledPackage
+					? undefined
+					: makeSelfUpdateCommandStep("bun", [
+							"install",
+							"-g",
+							"--ignore-scripts",
+							"--minimum-release-age=0",
+							`${installedPackageName}@${VERSION}`,
+						]),
 			);
 		case "npm": {
 			const [command = "npm", ...npmArgs] = npmCommand ?? [];
@@ -160,13 +204,22 @@ function getSelfUpdateCommandForMethod(
 				"-g",
 				"--ignore-scripts",
 				"--min-release-age=0",
-				updatePackageName,
+				updatePackageSpec,
 			]);
-			const uninstallStep =
-				updatePackageName === installedPackageName
-					? undefined
-					: makeSelfUpdateCommandStep(command, [...prefixArgs, "uninstall", "-g", installedPackageName]);
-			return makeSelfUpdateCommand(installStep, uninstallStep);
+			const uninstallStep = updatesInstalledPackage
+				? undefined
+				: makeSelfUpdateCommandStep(command, [...prefixArgs, "uninstall", "-g", installedPackageName]);
+			const rollbackStep = updatesInstalledPackage
+				? undefined
+				: makeSelfUpdateCommandStep(command, [
+						...prefixArgs,
+						"install",
+						"-g",
+						"--ignore-scripts",
+						"--min-release-age=0",
+						`${installedPackageName}@${VERSION}`,
+					]);
+			return makeSelfUpdateCommand(installStep, uninstallStep, rollbackStep);
 		}
 		case "unknown":
 			return undefined;
@@ -302,10 +355,10 @@ function isManagedByGlobalPackageManager(method: InstallMethod, packageName: str
 export function getSelfUpdateCommand(
 	packageName: string,
 	npmCommand?: string[],
-	updatePackageName = packageName,
+	updatePackageSpec = packageName,
 ): SelfUpdateCommand | undefined {
 	const method = detectInstallMethod();
-	const command = getSelfUpdateCommandForMethod(method, packageName, updatePackageName, npmCommand);
+	const command = getSelfUpdateCommandForMethod(method, packageName, updatePackageSpec, npmCommand);
 	if (!command || !isManagedByGlobalPackageManager(method, packageName, npmCommand) || !isSelfUpdatePathWritable()) {
 		return undefined;
 	}
@@ -315,20 +368,20 @@ export function getSelfUpdateCommand(
 export function getSelfUpdateUnavailableInstruction(
 	packageName: string,
 	npmCommand?: string[],
-	updatePackageName = packageName,
+	updatePackageSpec = packageName,
 ): string {
 	const method = detectInstallMethod();
 	if (method === "bun-binary") {
 		return "Download the latest Volt binary from your release channel.";
 	}
-	const command = getSelfUpdateCommandForMethod(method, packageName, updatePackageName, npmCommand);
+	const command = getSelfUpdateCommandForMethod(method, packageName, updatePackageSpec, npmCommand);
 	if (command) {
 		if (isManagedByGlobalPackageManager(method, packageName, npmCommand) && !isSelfUpdatePathWritable()) {
 			return `This installation is managed by a global ${method} install, but the install path is not writable. Update it yourself with: ${command.display}`;
 		}
 		return `This installation is not managed by a global ${method} install. Update it with the package manager, wrapper, or source checkout that provides it.`;
 	}
-	return `Update ${updatePackageName} using the package manager, wrapper, or source checkout that provides this installation.`;
+	return `Update ${updatePackageSpec} using the package manager, wrapper, or source checkout that provides this installation.`;
 }
 
 export function getUpdateInstruction(packageName: string): string {
@@ -439,24 +492,6 @@ export function getChangelogPath(): string {
 	return resolve(join(getPackageDir(), "CHANGELOG.md"));
 }
 
-/**
- * Get path to built-in interactive assets directory.
- * - For Bun binary: assets/ next to executable
- * - For Node.js (dist/): dist/modes/interactive/assets/
- * - For tsx (src/): src/modes/interactive/assets/
- */
-export function getInteractiveAssetsDir(): string {
-	if (isBunBinary) {
-		return join(getPackageDir(), "assets");
-	}
-	return join(getPackageSourceOrDistDir(), "modes", "interactive", "assets");
-}
-
-/** Get path to a bundled interactive asset */
-export function getBundledInteractiveAssetPath(name: string): string {
-	return join(getInteractiveAssetsDir(), name);
-}
-
 // =============================================================================
 // App Config (from package.json voltConfig)
 // =============================================================================
@@ -479,7 +514,7 @@ try {
 }
 
 const voltConfigName: string | undefined = pkg.voltConfig?.name;
-export const PACKAGE_NAME: string = pkg.name || "@earendil-works/volt-coding-agent";
+export const PACKAGE_NAME: string = pkg.name || "@hansjm10/volt-coding-agent";
 export const APP_NAME: string = voltConfigName || "volt";
 export const APP_TITLE: string = voltConfigName ? APP_NAME : "Volt";
 export const CONFIG_DIR_NAME: string = pkg.voltConfig?.configDir || ".volt";

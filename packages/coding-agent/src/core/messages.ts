@@ -5,8 +5,8 @@
  * and provides a transformer to convert them to LLM-compatible messages.
  */
 
-import type { AgentMessage } from "@earendil-works/volt-agent-core";
-import type { ImageContent, Message, TextContent } from "@earendil-works/volt-ai";
+import type { AgentMessage } from "@hansjm10/volt-agent-core";
+import type { ImageContent, Message, TextContent } from "@hansjm10/volt-ai";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
 
@@ -67,7 +67,7 @@ export interface CompactionSummaryMessage {
 }
 
 // Extend CustomAgentMessages via declaration merging
-declare module "@earendil-works/volt-agent-core" {
+declare module "@hansjm10/volt-agent-core" {
 	interface CustomAgentMessages {
 		bashExecution: BashExecutionMessage;
 		custom: CustomMessage;

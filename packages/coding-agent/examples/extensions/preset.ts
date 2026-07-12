@@ -40,10 +40,10 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Api, Model } from "@earendil-works/volt-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/volt-coding-agent";
-import { DynamicBorder, getAgentDir } from "@earendil-works/volt-coding-agent";
-import { Container, Key, type SelectItem, SelectList, Text } from "@earendil-works/volt-tui";
+import type { Api, Model } from "@hansjm10/volt-ai";
+import type { ExtensionAPI, ExtensionContext } from "@hansjm10/volt-coding-agent";
+import { DynamicBorder, getAgentDir } from "@hansjm10/volt-coding-agent";
+import { Container, Key, type SelectItem, SelectList, Text } from "@hansjm10/volt-tui";
 
 // Preset configuration
 interface Preset {

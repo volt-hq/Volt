@@ -1,7 +1,7 @@
-import { complete, getModel } from "@earendil-works/volt-ai";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/volt-coding-agent";
-import { DynamicBorder, getMarkdownTheme } from "@earendil-works/volt-coding-agent";
-import { Container, Markdown, matchesKey, Text } from "@earendil-works/volt-tui";
+import { complete, getModel } from "@hansjm10/volt-ai";
+import type { ExtensionAPI, ExtensionCommandContext } from "@hansjm10/volt-coding-agent";
+import { DynamicBorder, getMarkdownTheme } from "@hansjm10/volt-coding-agent";
+import { Container, Markdown, matchesKey, Text } from "@hansjm10/volt-tui";
 
 type ContentBlock = {
 	type?: string;

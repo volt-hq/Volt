@@ -10,10 +10,11 @@
 #                                adapter is available, daemon/remote/iOS access.
 #   VOLT_INSTALL_METHOD=binary   Standalone local CLI/TUI only. The binary does
 #                                not bundle Iroh and rejects `volt daemon`.
-#   VOLT_VERSION=v0.79.6         Pin a canonical release for either method.
+#   VOLT_VERSION=latest          Install the npm beta channel (default) or latest binary.
+#   VOLT_VERSION=v0.1.0          Pin a canonical release for either method.
 set -eu
 
-PACKAGE="@earendil-works/volt-coding-agent"
+PACKAGE="@hansjm10/volt-coding-agent"
 REPO="hansjm10/Volt"
 MIN_NODE_MAJOR=22
 MIN_NODE_MINOR=19
@@ -27,7 +28,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 validate_version() {
     [ "$VERSION" = "latest" ] && return
     printf '%s\n' "$VERSION" | grep -Eq '^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || \
-        fail "VOLT_VERSION must be 'latest' or a canonical version such as v0.79.6"
+        fail "VOLT_VERSION must be 'latest' or a canonical version such as v0.1.0"
 }
 
 install_npm() {
@@ -40,7 +41,7 @@ For a local CLI/TUI without daemon or remote/iOS support:
     [ "$node_supported" = "1" ] || fail "Node.js $(node --version) is too old. Volt requires Node.js >= 22.19."
     have npm || fail "npm not found. It normally ships with Node.js; install Node.js from https://nodejs.org."
 
-    npm_spec="$PACKAGE"
+    npm_spec="$PACKAGE@beta"
     if [ "$VERSION" != "latest" ]; then
         npm_spec="$PACKAGE@${VERSION#v}"
     fi

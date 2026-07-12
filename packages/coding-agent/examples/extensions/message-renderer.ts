@@ -7,8 +7,8 @@
  * Usage: /status [message] - sends a status message with custom rendering
  */
 
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
-import { Box, Text } from "@earendil-works/volt-tui";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { Box, Text } from "@hansjm10/volt-tui";
 
 export default function (volt: ExtensionAPI) {
 	// Register custom renderer for "status-update" messages

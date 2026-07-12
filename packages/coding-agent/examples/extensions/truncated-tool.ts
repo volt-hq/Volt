@@ -15,7 +15,7 @@
  */
 
 import { mkdtemp, writeFile } from "node:fs/promises";
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -23,8 +23,8 @@ import {
 	type TruncationResult,
 	truncateHead,
 	withFileMutationQueue,
-} from "@earendil-works/volt-coding-agent";
-import { Text } from "@earendil-works/volt-tui";
+} from "@hansjm10/volt-coding-agent";
+import { Text } from "@hansjm10/volt-tui";
 import { execSync } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";

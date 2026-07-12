@@ -3,8 +3,8 @@
 	"compilerOptions": {
 		"outDir": "./dist",
 		"paths": {
-			"@earendil-works/volt-ai": ["../ai/dist/index.d.ts"],
-			"@earendil-works/volt-ai/*": ["../ai/dist/*.d.ts", "../ai/dist/providers/*.d.ts"]
+			"@hansjm10/volt-ai": ["../ai/dist/index.d.ts"],
+			"@hansjm10/volt-ai/*": ["../ai/dist/*.d.ts", "../ai/dist/providers/*.d.ts"]
 		},
 		"rootDir": "./src"
 	},

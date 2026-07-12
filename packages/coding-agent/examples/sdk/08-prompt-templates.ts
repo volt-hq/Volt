@@ -11,7 +11,7 @@ import {
 	getAgentDir,
 	type PromptTemplate,
 	SessionManager,
-} from "@earendil-works/volt-coding-agent";
+} from "@hansjm10/volt-coding-agent";
 
 // Define custom templates
 const deployTemplate: PromptTemplate = {

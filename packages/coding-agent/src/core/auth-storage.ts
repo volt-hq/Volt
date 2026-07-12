@@ -12,8 +12,8 @@ import {
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
 	type OAuthProviderId,
-} from "@earendil-works/volt-ai";
-import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@earendil-works/volt-ai/oauth";
+} from "@hansjm10/volt-ai";
+import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@hansjm10/volt-ai/oauth";
 import { existsSync, lstatSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";

@@ -10,7 +10,7 @@ import {
 	streamSimple,
 	type ToolResultMessage,
 	validateToolArguments,
-} from "@earendil-works/volt-ai";
+} from "@hansjm10/volt-ai";
 import type {
 	AgentContext,
 	AgentEvent,

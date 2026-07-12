@@ -10,7 +10,7 @@
  */
 
 import { readFile, stat } from "node:fs/promises";
-import type { Api, ImageContent, Model } from "@earendil-works/volt-ai";
+import type { Api, ImageContent, Model } from "@hansjm10/volt-ai";
 import { resolveReadPathAsync } from "../../core/tools/path-utils.ts";
 import { resizeImage } from "../../utils/image-resize.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";

@@ -1,5 +1,5 @@
-import type { MarkdownTheme, TUI } from "@earendil-works/volt-tui";
-import { Container, Loader, Spacer, Text } from "@earendil-works/volt-tui";
+import type { MarkdownTheme, TUI } from "@hansjm10/volt-tui";
+import { Container, Loader, Spacer, Text } from "@hansjm10/volt-tui";
 import { theme } from "../../core/theme/runtime.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { isCoalescableAssistantUpdate, StreamingRenderCoalescer } from "./components/streaming-render-coalescer.ts";

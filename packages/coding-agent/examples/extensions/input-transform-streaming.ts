@@ -11,7 +11,7 @@
  * Start volt with this extension:
  *   volt -e ./examples/extensions/input-transform-streaming.ts
  */
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 const TRIGGER = /\b(changes?|diff|modified)\b/i;
 

@@ -16,7 +16,7 @@ import {
 	EventStream,
 	fauxAssistantMessage,
 	registerFauxProvider,
-} from "@earendil-works/volt-ai";
+} from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,

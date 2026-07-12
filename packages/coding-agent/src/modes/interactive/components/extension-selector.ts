@@ -3,7 +3,7 @@
  * Displays a list of string options with keyboard navigation.
  */
 
-import { Container, getKeybindings, Spacer, Text, type TUI } from "@earendil-works/volt-tui";
+import { Container, getKeybindings, Spacer, Text, type TUI } from "@hansjm10/volt-tui";
 import { theme } from "../../../core/theme/runtime.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { DynamicBorder } from "./dynamic-border.ts";

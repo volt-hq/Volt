@@ -117,8 +117,8 @@ Rules:
 
 Attribution:
 
-- Internal (from issues): `Fixed foo bar ([#123](https://github.com/earendil-works/volt/issues/123))`
-- External contributions: `Added feature X ([#456](https://github.com/earendil-works/volt/pull/456) by [@username](https://github.com/username))`
+- Internal (from issues): `Fixed foo bar ([#123](https://github.com/hansjm10/Volt/issues/123))`
+- External contributions: `Added feature X ([#456](https://github.com/hansjm10/Volt/pull/456) by [@username](https://github.com/username))`
 
 ## Releasing
 
@@ -127,6 +127,11 @@ ruleset that restricts creation, update, and deletion to release owners. The
 release script and CI validate an annotated tag on `main`, but checks loaded
 from a tag cannot defend against an actor who can replace that tag or its
 workflow without a repository-level rule.
+
+Configure the GitHub `binary-release` environment with a required compliance
+reviewer, prevent self-review, and restrict deployments to protected `v*` tags.
+The reviewer must not approve the final release-assets job until the standalone
+binary license gate in `BETA-READINESS.md` is complete.
 
 **Lockstep versioning**: all packages share one version; every release updates all together. `patch` = fixes + additions, `minor` = breaking changes. No major releases.
 
@@ -161,14 +166,22 @@ workflow without a repository-level rule.
    Use `npm_config_min_release_age=0` only for the release command. The repo's normal npm age gate can otherwise block the release lockfile refresh when the current workspace package version was published recently. Review any lockfile or shrinkwrap diffs the release creates before push.
 
    The release script first requires clean local `main` to exactly match
-   `origin/main`, then bumps all package versions, updates changelogs,
-   regenerates release artifacts, runs `npm run check`, commits `Release
-   vX.Y.Z`, creates an annotated `vX.Y.Z` tag, adds fresh `## [Unreleased]`
-   changelog sections, commits `Add [Unreleased] section for next cycle`, then
-   pushes `main` and the tag. Do not rerun the release script after a tag was
-   pushed.
+   `origin/main`, verifies that the planned tag and npm package versions are
+   still available before changing any files, then bumps all package versions,
+   updates changelogs, regenerates release artifacts, runs `npm run check`,
+   commits `Release vX.Y.Z`, creates an annotated `vX.Y.Z` tag, adds fresh
+   `## [Unreleased]` changelog sections, commits `Add [Unreleased] section for
+   next cycle`, then pushes `main` and the tag. Do not rerun the release script
+   after a tag was pushed.
 
-4. **CI publishes npm packages**: pushing the `vX.Y.Z` tag triggers `.github/workflows/build-binaries.yml`. The `publish-npm` job uses npm trusted publishing through GitHub Actions OIDC with environment `npm-publish`; no local `npm publish`, `npm whoami`, OTP, or WebAuthn flow is required.
+4. **CI publishes npm packages before exposing binaries**: pushing the
+   `vX.Y.Z` tag triggers `.github/workflows/build-binaries.yml`. The
+   `publish-npm` job uses npm trusted publishing through GitHub Actions OIDC
+   with environment `npm-publish`. The final GitHub release job runs only after
+   npm succeeds and requires approval through the `binary-release` environment;
+   approve it only after the standalone-binary compliance gate is complete.
+   Except for the documented one-time name-reservation placeholders, real
+   releases never use local `npm publish`, a long-lived token, OTP, or WebAuthn.
 
 5. **If CI publish fails**: inspect the failed `publish-npm` job. The publish helper is idempotent and skips package versions already present on npm, so rerun the tag workflow after fixing CI or transient npm issues. Do not rerun `npm run release:patch` or `npm run release:minor` for the same version.
 

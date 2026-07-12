@@ -17,8 +17,8 @@ import {
 	registerApiProvider,
 	resetApiProviders,
 	type SimpleStreamOptions,
-} from "@earendil-works/volt-ai";
-import { registerOAuthProvider, resetOAuthProviders } from "@earendil-works/volt-ai/oauth";
+} from "@hansjm10/volt-ai";
+import { registerOAuthProvider, resetOAuthProviders } from "@hansjm10/volt-ai/oauth";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { type Static, Type } from "typebox";

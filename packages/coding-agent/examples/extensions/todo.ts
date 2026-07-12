@@ -10,9 +10,9 @@
  * correct for that point in history.
  */
 
-import { StringEnum } from "@earendil-works/volt-ai";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/volt-coding-agent";
-import { matchesKey, Text, truncateToWidth } from "@earendil-works/volt-tui";
+import { StringEnum } from "@hansjm10/volt-ai";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@hansjm10/volt-coding-agent";
+import { matchesKey, Text, truncateToWidth } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 
 interface Todo {

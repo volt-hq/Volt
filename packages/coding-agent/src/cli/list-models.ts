@@ -2,8 +2,8 @@
  * List available models with optional fuzzy search
  */
 
-import type { Api, Model } from "@earendil-works/volt-ai";
-import { fuzzyFilter } from "@earendil-works/volt-tui";
+import type { Api, Model } from "@hansjm10/volt-ai";
+import { fuzzyFilter } from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import { formatNoModelsAvailableMessage } from "../core/auth-guidance.ts";
 import type { ModelRegistry } from "../core/model-registry.ts";

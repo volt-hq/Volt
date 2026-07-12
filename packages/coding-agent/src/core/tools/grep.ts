@@ -1,7 +1,7 @@
 import { readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import type { AgentTool } from "@earendil-works/volt-agent-core";
-import { Text } from "@earendil-works/volt-tui";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
+import { Text } from "@hansjm10/volt-tui";
 import { spawn } from "child_process";
 import path from "path";
 import { type Static, Type } from "typebox";

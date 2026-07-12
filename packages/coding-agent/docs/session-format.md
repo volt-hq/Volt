@@ -34,7 +34,7 @@ Source files:
 - [`packages/ai/src/types.ts`](../../ai/src/types.ts) - Base message types (UserMessage, AssistantMessage, ToolResultMessage)
 - [`packages/agent/src/types.ts`](../../agent/src/types.ts) - AgentMessage union type
 
-For TypeScript definitions in your project, inspect `node_modules/@earendil-works/volt-coding-agent/dist/` and `node_modules/@earendil-works/volt-ai/dist/`.
+For TypeScript definitions in your project, inspect `node_modules/@hansjm10/volt-coding-agent/dist/` and `node_modules/@hansjm10/volt-ai/dist/`.
 
 ## Message Types
 

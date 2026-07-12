@@ -1,5 +1,5 @@
-import type { AssistantMessage } from "@earendil-works/volt-ai";
-import { Container, type Component, type Terminal, TUI } from "@earendil-works/volt-tui";
+import type { AssistantMessage } from "@hansjm10/volt-ai";
+import { Container, type Component, type Terminal, TUI } from "@hansjm10/volt-tui";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import {

@@ -22,12 +22,16 @@
 import { execSync } from "child_process";
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
+import {
+	assertReleaseTagAvailable,
+	getPlannedReleaseVersion,
+	isReleaseTarget,
+	planReleaseTarget,
+} from "./release-target.mjs";
 
 const RELEASE_TARGET = process.argv[2];
-const BUMP_TYPES = new Set(["major", "minor", "patch"]);
-const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 
-if (!RELEASE_TARGET || (!BUMP_TYPES.has(RELEASE_TARGET) && !SEMVER_RE.test(RELEASE_TARGET))) {
+if (!isReleaseTarget(RELEASE_TARGET)) {
 	console.error("Usage: node scripts/release.mjs <major|minor|patch|x.y.z>");
 	process.exit(1);
 }
@@ -50,20 +54,6 @@ function getVersion() {
 	return pkg.version;
 }
 
-function compareVersions(a, b) {
-	const aParts = a.split(".").map(Number);
-	const bParts = b.split(".").map(Number);
-
-	for (let i = 0; i < 3; i++) {
-		const diff = (aParts[i] || 0) - (bParts[i] || 0);
-		if (diff !== 0) {
-			return diff;
-		}
-	}
-
-	return 0;
-}
-
 function shellQuote(value) {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -78,22 +68,32 @@ function stageChangedFiles() {
 	run(`git add -- ${paths.map(shellQuote).join(" ")}`);
 }
 
+function requireReleaseTagAvailable(version) {
+	try {
+		assertReleaseTagAvailable(version);
+	} catch (error) {
+		console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+		process.exit(1);
+	}
+}
+
 function bumpOrSetVersion(target) {
 	const currentVersion = getVersion();
+	const plan = planReleaseTarget(target, currentVersion);
 
-	if (BUMP_TYPES.has(target)) {
-		console.log(`Bumping version (${target})...`);
-		run(`npm run version:${target}`);
+	if (plan.type === "bump") {
+		console.log(`Bumping version (${plan.value})...`);
+		run(`npm run version:${plan.value}`);
 		return getVersion();
 	}
 
-	if (compareVersions(target, currentVersion) <= 0) {
-		console.error(`Error: explicit version ${target} must be greater than current version ${currentVersion}.`);
-		process.exit(1);
+	if (plan.type === "current") {
+		console.log(`Preparing current version (${plan.value}) without incrementing package manifests...`);
+		return currentVersion;
 	}
 
-	console.log(`Setting explicit version (${target})...`);
-	run(`npm version ${target} -ws --no-git-tag-version && node scripts/sync-versions.js && npm install --package-lock-only --ignore-scripts`);
+	console.log(`Setting explicit version (${plan.value})...`);
+	run(`npm version ${plan.value} -ws --no-git-tag-version && node scripts/sync-versions.js && npm install --package-lock-only --ignore-scripts`);
 	return getVersion();
 }
 
@@ -172,46 +172,61 @@ if (head !== originMain) {
 }
 console.log("  main matches origin/main\n");
 
-// 3. Bump or set version
+// 3. Prove the intended version is unpublished before changing release files
+const currentVersion = getVersion();
+const releasePlan = planReleaseTarget(RELEASE_TARGET, currentVersion);
+const plannedVersion = getPlannedReleaseVersion(RELEASE_TARGET, currentVersion);
+console.log(`Checking release target v${plannedVersion}...`);
+requireReleaseTagAvailable(plannedVersion);
+run(
+	`node scripts/verify-npm-package-bootstrap.mjs preflight --version ${shellQuote(plannedVersion)}${releasePlan.type === "current" ? " --initial" : ""}`,
+);
+console.log(`  v${plannedVersion} is available for release\n`);
+
+// 4. Bump or set version
 const version = bumpOrSetVersion(RELEASE_TARGET);
+if (version !== plannedVersion) {
+	console.error(`Error: version command produced ${version}; expected planned version ${plannedVersion}.`);
+	process.exit(1);
+}
 console.log(`  New version: ${version}\n`);
 
-// 4. Update changelogs
+// 5. Update changelogs
 console.log("Updating CHANGELOG.md files...");
 updateChangelogsForRelease(version);
 console.log();
 
-// 5. Regenerate release artifacts
+// 6. Regenerate release artifacts
 console.log("Regenerating release artifacts...");
 run("npm --prefix packages/ai run generate-models");
 run("npm --prefix packages/ai run generate-image-models");
 run("npm run shrinkwrap:coding-agent");
 console.log();
 
-// 6. Run checks
+// 7. Run checks
 console.log("Running checks...");
 run("npm run check");
 console.log();
 
-// 7. Commit and tag
+// 8. Commit and tag
 console.log("Committing and tagging...");
 stageChangedFiles();
 run(`git commit -m "Release v${version}"`);
 run(`git tag -a -m "Release v${version}" v${version}`);
 console.log();
 
-// 8. Add new [Unreleased] sections
+// 9. Add new [Unreleased] sections
 console.log("Adding [Unreleased] sections for next cycle...");
 addUnreleasedSection();
 console.log();
 
-// 9. Commit
+// 10. Commit
 console.log("Committing changelog updates...");
 stageChangedFiles();
 run(`git commit -m "Add [Unreleased] section for next cycle"`);
 console.log();
 
-// 10. Push
+// 11. Push
 console.log("Pushing to remote...");
 run("git push origin main");
 run(`git push origin v${version}`);

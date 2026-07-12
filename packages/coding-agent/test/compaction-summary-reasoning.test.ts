@@ -1,5 +1,5 @@
-import type { AgentMessage } from "@earendil-works/volt-agent-core";
-import type { AssistantMessage, Model } from "@earendil-works/volt-ai";
+import type { AgentMessage } from "@hansjm10/volt-agent-core";
+import type { AssistantMessage, Model } from "@hansjm10/volt-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { type CompactionPreparation, compact, generateSummary } from "../src/core/compaction/index.ts";
 
@@ -7,8 +7,8 @@ const { completeSimpleMock } = vi.hoisted(() => ({
 	completeSimpleMock: vi.fn(),
 }));
 
-vi.mock("@earendil-works/volt-ai", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("@earendil-works/volt-ai")>();
+vi.mock("@hansjm10/volt-ai", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("@hansjm10/volt-ai")>();
 	return {
 		...actual,
 		completeSimple: completeSimpleMock,

@@ -1,4 +1,4 @@
-import { CancellableLoader, Container, Loader, Spacer, Text, type TUI } from "@earendil-works/volt-tui";
+import { CancellableLoader, Container, Loader, Spacer, Text, type TUI } from "@hansjm10/volt-tui";
 import type { Theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";

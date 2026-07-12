@@ -1,5 +1,5 @@
-import type { AssistantMessage, ImageContent, Model, TextContent, Usage } from "@earendil-works/volt-ai";
-import { completeSimple } from "@earendil-works/volt-ai";
+import type { AssistantMessage, ImageContent, Model, TextContent, Usage } from "@hansjm10/volt-ai";
+import { completeSimple } from "@hansjm10/volt-ai";
 import type { AgentMessage, ThinkingLevel } from "../../types.ts";
 import {
 	convertToLlm,

@@ -9,7 +9,7 @@ LLMs have limited context windows. When conversations grow too long, volt uses c
 - [`packages/coding-agent/src/core/session-manager.ts`](../src/core/session-manager.ts) - Entry types (`CompactionEntry`, `BranchSummaryEntry`)
 - [`packages/coding-agent/src/core/extensions/types.ts`](../src/core/extensions/types.ts) - Extension event types
 
-For TypeScript definitions in your project, inspect `node_modules/@earendil-works/volt-coding-agent/dist/`.
+For TypeScript definitions in your project, inspect `node_modules/@hansjm10/volt-coding-agent/dist/`.
 
 ## Overview
 
@@ -309,7 +309,7 @@ volt.on("session_before_compact", async (event, ctx) => {
 To generate a summary with your own model, convert messages to text using `serializeConversation`:
 
 ```typescript
-import { convertToLlm, serializeConversation } from "@earendil-works/volt-coding-agent";
+import { convertToLlm, serializeConversation } from "@hansjm10/volt-coding-agent";
 
 volt.on("session_before_compact", async (event, ctx) => {
   const { preparation } = event;

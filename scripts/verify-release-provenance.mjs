@@ -4,12 +4,13 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-export const RELEASE_PACKAGES = [
-	"packages/ai",
-	"packages/tui",
-	"packages/agent",
-	"packages/coding-agent",
+export const RELEASE_PACKAGE_IDENTITIES = [
+	{ directory: "packages/ai", name: "@hansjm10/volt-ai" },
+	{ directory: "packages/tui", name: "@hansjm10/volt-tui" },
+	{ directory: "packages/agent", name: "@hansjm10/volt-agent-core" },
+	{ directory: "packages/coding-agent", name: "@hansjm10/volt-coding-agent" },
 ];
+export const RELEASE_PACKAGES = RELEASE_PACKAGE_IDENTITIES.map(({ directory }) => directory);
 const RELEASE_REPOSITORY_URL = "git+https://github.com/hansjm10/Volt.git";
 
 export function versionFromReleaseTag(tag) {
@@ -22,8 +23,11 @@ export function versionFromReleaseTag(tag) {
 
 export function verifyReleasePackageMetadata(tag, readText = (path) => readFileSync(path, "utf8")) {
 	const version = versionFromReleaseTag(tag);
-	for (const directory of RELEASE_PACKAGES) {
+	for (const { directory, name } of RELEASE_PACKAGE_IDENTITIES) {
 		const manifest = JSON.parse(readText(`${directory}/package.json`));
+		if (manifest.name !== name) {
+			throw new Error(`${directory}/package.json is named ${manifest.name}; expected ${name}`);
+		}
 		if (manifest.version !== version) {
 			throw new Error(`${directory}/package.json is ${manifest.version}; expected ${version} from ${tag}`);
 		}

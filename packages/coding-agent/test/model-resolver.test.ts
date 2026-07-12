@@ -1,4 +1,4 @@
-import type { Model } from "@earendil-works/volt-ai";
+import type { Model } from "@hansjm10/volt-ai";
 import { describe, expect, test } from "vitest";
 import {
 	defaultModelPerProvider,

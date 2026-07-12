@@ -8,8 +8,8 @@
  * - Edge case tests (wide chars, styled text, emoji)
  */
 
-import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/volt-coding-agent";
-import { CURSOR_MARKER, type Focusable, matchesKey, visibleWidth } from "@earendil-works/volt-tui";
+import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@hansjm10/volt-coding-agent";
+import { CURSOR_MARKER, type Focusable, matchesKey, visibleWidth } from "@hansjm10/volt-tui";
 
 export default function (volt: ExtensionAPI) {
 	volt.registerCommand("overlay-test", {

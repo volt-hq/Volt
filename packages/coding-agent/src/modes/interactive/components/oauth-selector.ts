@@ -6,7 +6,7 @@ import {
 	Input,
 	Spacer,
 	TruncatedText,
-} from "@earendil-works/volt-tui";
+} from "@hansjm10/volt-tui";
 import type { AuthStatus, AuthStorage } from "../../../core/auth-storage.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";

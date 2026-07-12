@@ -5,7 +5,7 @@
  * Demonstrates how extensions can use ctx.shutdown() to exit volt cleanly.
  */
 
-import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";
+import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
 
 export default function (volt: ExtensionAPI) {

@@ -32,7 +32,7 @@ npx tsx examples/sdk/01-minimal.ts
 ## Quick Reference
 
 ```typescript
-import { getModel } from "@earendil-works/volt-ai";
+import { getModel } from "@hansjm10/volt-ai";
 import {
   AuthStorage,
   createAgentSession,
@@ -40,7 +40,7 @@ import {
   ModelRegistry,
   SessionManager,
   SettingsManager,
-} from "@earendil-works/volt-coding-agent";
+} from "@hansjm10/volt-coding-agent";
 
 // Auth and models setup
 const authStorage = AuthStorage.create();

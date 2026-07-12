@@ -1,4 +1,4 @@
-import { type Component, getKeybindings, truncateToWidth, visibleWidth } from "@earendil-works/volt-tui";
+import { type Component, getKeybindings, truncateToWidth, visibleWidth } from "@hansjm10/volt-tui";
 import { theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, keyText, rawKeyHint } from "./keybinding-hints.ts";

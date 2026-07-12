@@ -1,5 +1,5 @@
-import { type AgentMessage, uuidv7 } from "@earendil-works/volt-agent-core";
-import type { ImageContent, Message, TextContent } from "@earendil-works/volt-ai";
+import { type AgentMessage, uuidv7 } from "@hansjm10/volt-agent-core";
+import type { ImageContent, Message, TextContent } from "@hansjm10/volt-ai";
 import { randomUUID } from "crypto";
 import { closeSync, createReadStream, existsSync, openSync, readdirSync, readSync, statSync } from "fs";
 import { readdir, stat } from "fs/promises";

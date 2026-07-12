@@ -6,10 +6,10 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const packages = [
-	{ directory: "packages/ai", name: "@earendil-works/volt-ai" },
-	{ directory: "packages/tui", name: "@earendil-works/volt-tui" },
-	{ directory: "packages/agent", name: "@earendil-works/volt-agent-core" },
-	{ directory: "packages/coding-agent", name: "@earendil-works/volt-coding-agent" },
+	{ directory: "packages/ai", name: "@hansjm10/volt-ai" },
+	{ directory: "packages/tui", name: "@hansjm10/volt-tui" },
+	{ directory: "packages/agent", name: "@hansjm10/volt-agent-core" },
+	{ directory: "packages/coding-agent", name: "@hansjm10/volt-coding-agent" },
 ];
 
 function printUsage() {

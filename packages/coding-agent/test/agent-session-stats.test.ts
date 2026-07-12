@@ -1,5 +1,5 @@
-import { Agent } from "@earendil-works/volt-agent-core";
-import { type AssistantMessage, getModel, type Usage } from "@earendil-works/volt-ai";
+import { Agent } from "@hansjm10/volt-agent-core";
+import { type AssistantMessage, getModel, type Usage } from "@hansjm10/volt-ai";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";

@@ -5,9 +5,9 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { AgentMessage, StreamFn } from "@earendil-works/volt-agent-core";
-import type { Model, SimpleStreamOptions } from "@earendil-works/volt-ai";
-import { completeSimple } from "@earendil-works/volt-ai";
+import type { AgentMessage, StreamFn } from "@hansjm10/volt-agent-core";
+import type { Model, SimpleStreamOptions } from "@hansjm10/volt-ai";
+import { completeSimple } from "@hansjm10/volt-ai";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,

@@ -3,44 +3,141 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { RELEASE_PACKAGES } from "./verify-release-provenance.mjs";
+import { fileURLToPath } from "node:url";
+import { RELEASE_PACKAGES, versionFromReleaseTag } from "./verify-release-provenance.mjs";
 
-function npmViewPackageName(name) {
-	const result = spawnSync(process.platform === "win32" ? "npm.cmd" : "npm", [
-		"view",
-		name,
-		"name",
-		"--json",
-		"--registry=https://registry.npmjs.org/",
-	], {
-		encoding: "utf8",
-		timeout: 30_000,
-	});
-	if (result.error) {
-		throw result.error;
+export const BOOTSTRAP_VERSION = "0.0.0-bootstrap.0";
+const INITIAL_RELEASE_VERSION = "0.1.0";
+
+function usage() {
+	return "Usage: node scripts/verify-npm-package-bootstrap.mjs <preflight|tag> --version X.Y.Z [--initial]";
+}
+
+export function parseBootstrapVerificationArgs(args) {
+	const [mode, ...rest] = args;
+	if (mode !== "preflight" && mode !== "tag") throw new Error(usage());
+
+	let version;
+	let initial = false;
+	for (let index = 0; index < rest.length; index++) {
+		const arg = rest[index];
+		if (arg === "--initial") {
+			initial = true;
+			continue;
+		}
+		if (arg === "--version") {
+			version = rest[++index];
+			if (!version) throw new Error("--version requires a value");
+			continue;
+		}
+		throw new Error(`Unknown argument: ${arg}\n${usage()}`);
 	}
+
+	if (!version) throw new Error(usage());
+	versionFromReleaseTag(`v${version}`);
+	if (initial && (mode !== "preflight" || version !== INITIAL_RELEASE_VERSION)) {
+		throw new Error("--initial is only valid for the preflight of the 0.1.0 release");
+	}
+	return { initial, mode, version };
+}
+
+function normalizedVersions(metadata) {
+	if (Array.isArray(metadata.versions)) return metadata.versions;
+	return typeof metadata.versions === "string" ? [metadata.versions] : [];
+}
+
+function validatePackageIdentity(expectedName, metadata) {
+	if (metadata.name !== expectedName) {
+		throw new Error(`npm returned unexpected package identity for ${expectedName}: ${String(metadata.name)}`);
+	}
+}
+
+export function verifyPreflightPackageMetadata(expectedName, targetVersion, metadata, options = {}) {
+	validatePackageIdentity(expectedName, metadata);
+	const versions = normalizedVersions(metadata);
+	if (versions.includes(targetVersion)) {
+		throw new Error(`${expectedName}@${targetVersion} is already published; refusing to create or replace its release tag`);
+	}
+
+	if (!options.initial) return;
+	if (versions.length !== 1 || versions[0] !== BOOTSTRAP_VERSION) {
+		throw new Error(`${expectedName} must contain only placeholder version ${BOOTSTRAP_VERSION} before the initial release`);
+	}
+	const distTags = metadata["dist-tags"];
+	if (
+		!distTags ||
+		typeof distTags !== "object" ||
+		Array.isArray(distTags) ||
+		Object.keys(distTags).length !== 1 ||
+		distTags.bootstrap !== BOOTSTRAP_VERSION
+	) {
+		throw new Error(
+			`${expectedName} must have only dist-tag bootstrap -> ${BOOTSTRAP_VERSION}; beta/latest must be absent before the initial release`,
+		);
+	}
+}
+
+export function verifyTagWorkflowPackageMetadata(expectedName, targetVersion, metadata) {
+	validatePackageIdentity(expectedName, metadata);
+	const versions = normalizedVersions(metadata);
+	if (!versions.includes(targetVersion) && targetVersion === INITIAL_RELEASE_VERSION) {
+		verifyPreflightPackageMetadata(expectedName, targetVersion, metadata, { initial: true });
+		return;
+	}
+	if (versions.includes(targetVersion) && metadata["dist-tags"]?.beta !== targetVersion) {
+		throw new Error(`${expectedName}@${targetVersion} is published but beta does not point to it`);
+	}
+}
+
+export function npmViewPackageMetadata(name, run = spawnSync) {
+	const result = run(
+		process.platform === "win32" ? "npm.cmd" : "npm",
+		[
+			"view",
+			`${name}@${BOOTSTRAP_VERSION}`,
+			"name",
+			"versions",
+			"dist-tags",
+			"--json",
+			"--registry=https://registry.npmjs.org/",
+		],
+		{
+			encoding: "utf8",
+			timeout: 30_000,
+		},
+	);
+	if (result.error) throw result.error;
 	if (result.status !== 0) {
 		const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
 		if (output.includes("E404") || output.includes("404 Not Found")) {
 			throw new Error(
-				`${name} does not exist on npm. Bootstrap the scoped public package and configure its trusted publisher before creating a release tag; see docs/npm-release-bootstrap.md.`,
+				`${name}@${BOOTSTRAP_VERSION} does not exist on npm. The name is either unreserved or contains unexpected content; follow docs/npm-release-bootstrap.md.`,
 			);
 		}
 		throw new Error(output || `npm view failed for ${name}`);
 	}
-	const registryName = JSON.parse(result.stdout);
-	if (registryName !== name) {
-		throw new Error(`npm returned unexpected package identity for ${name}: ${String(registryName)}`);
+	return JSON.parse(result.stdout);
+}
+
+function main() {
+	const options = parseBootstrapVerificationArgs(process.argv.slice(2));
+	for (const directory of RELEASE_PACKAGES) {
+		const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
+		const metadata = npmViewPackageMetadata(manifest.name);
+		if (options.mode === "preflight") {
+			verifyPreflightPackageMetadata(manifest.name, options.version, metadata, { initial: options.initial });
+		} else {
+			verifyTagWorkflowPackageMetadata(manifest.name, options.version, metadata);
+		}
+		process.stdout.write(`npm ${options.mode} verification passed: ${manifest.name}@${options.version}\n`);
 	}
 }
 
-try {
-	for (const directory of RELEASE_PACKAGES) {
-		const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
-		npmViewPackageName(manifest.name);
-		process.stdout.write(`npm package exists: ${manifest.name}\n`);
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+	try {
+		main();
+	} catch (error) {
+		process.stderr.write(`npm release bootstrap verification failed: ${error instanceof Error ? error.message : String(error)}\n`);
+		process.exitCode = 1;
 	}
-} catch (error) {
-	process.stderr.write(`npm release bootstrap verification failed: ${error instanceof Error ? error.message : String(error)}\n`);
-	process.exitCode = 1;
 }

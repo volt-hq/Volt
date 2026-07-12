@@ -1,6 +1,6 @@
-import type { TextContent } from "@earendil-works/volt-ai";
-import type { Component } from "@earendil-works/volt-tui";
-import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/volt-tui";
+import type { TextContent } from "@hansjm10/volt-ai";
+import type { Component } from "@hansjm10/volt-tui";
+import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@hansjm10/volt-tui";
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";

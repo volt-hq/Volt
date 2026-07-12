@@ -1,4 +1,4 @@
-import type { Model } from "@earendil-works/volt-ai";
+import type { Model } from "@hansjm10/volt-ai";
 import {
 	Container,
 	type Focusable,
@@ -9,7 +9,7 @@ import {
 	matchesKey,
 	Spacer,
 	Text,
-} from "@earendil-works/volt-tui";
+} from "@hansjm10/volt-tui";
 import { theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyText } from "./keybinding-hints.ts";

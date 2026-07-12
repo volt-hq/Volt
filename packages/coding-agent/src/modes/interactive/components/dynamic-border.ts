@@ -1,4 +1,4 @@
-import type { Component } from "@earendil-works/volt-tui";
+import type { Component } from "@hansjm10/volt-tui";
 import { theme } from "../../../core/theme/runtime.ts";
 
 /**

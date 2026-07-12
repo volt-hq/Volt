@@ -1,19 +1,24 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import {
+	assertPublishedPackageMatchesRelease,
+	NPM_PUBLISHED_METADATA_FIELDS,
+} from "./npm-publish-verification.mjs";
 
 const packages = [
-	{ directory: "packages/ai", name: "@earendil-works/volt-ai" },
-	{ directory: "packages/agent", name: "@earendil-works/volt-agent-core" },
-	{ directory: "packages/tui", name: "@earendil-works/volt-tui" },
+	{ directory: "packages/ai", name: "@hansjm10/volt-ai" },
+	{ directory: "packages/agent", name: "@hansjm10/volt-agent-core" },
+	{ directory: "packages/tui", name: "@hansjm10/volt-tui" },
 	{
 		directory: "packages/coding-agent",
-		name: "@earendil-works/volt-coding-agent",
+		name: "@hansjm10/volt-coding-agent",
 		requiredPackFiles: ["dist/remote/iroh-native-adapter.cjs"],
 	},
 ];
+const NPM_DIST_TAG = "beta";
 
 const dryRun = process.argv.includes("--dry-run");
 const unknownArgs = process.argv.slice(2).filter((arg) => arg !== "--dry-run");
@@ -64,25 +69,37 @@ function validatePack(pkg) {
 		}
 	}
 	console.log(`  ${packed.filename}: ${packed.files.length} files, ${packed.size} bytes packed, ${packed.unpackedSize} bytes unpacked`);
+	return packed;
 }
 
-function isPublished(name, version) {
-	const result = spawnSync(commandForPlatform("npm"), ["view", `${name}@${version}`, "version", "--json"], {
-		encoding: "utf8",
-		stdio: ["inherit", "pipe", "pipe"],
-	});
+function getPublishedMetadata(name, version) {
+	const result = spawnSync(
+		commandForPlatform("npm"),
+		[
+			"view",
+			`${name}@${version}`,
+			...NPM_PUBLISHED_METADATA_FIELDS,
+			"--json",
+		],
+		{
+			encoding: "utf8",
+			stdio: ["inherit", "pipe", "pipe"],
+		},
+	);
 
 	if (result.status === 0 && result.stdout.trim()) {
-		return true;
+		return JSON.parse(result.stdout);
 	}
 
 	const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
 	if (result.status !== 0 && (output.includes("E404") || output.includes("404 Not Found"))) {
-		return false;
+		return undefined;
 	}
 
 	throw new Error(output ? `Failed to query ${name}@${version}\n${output}` : `Failed to query ${name}@${version}`);
 }
+
+const sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
 const packageVersions = new Map();
 for (const pkg of packages) {
@@ -98,30 +115,59 @@ if (versions.length !== 1) {
 	throw new Error(`Publish packages are not lockstep versioned: ${versions.join(", ")}`);
 }
 
-console.log(`Publishing volt packages at ${versions[0]}${dryRun ? " (dry run)" : ""}\n`);
+console.log(`Publishing volt packages at ${versions[0]} with npm dist-tag ${NPM_DIST_TAG}${dryRun ? " (dry run)" : ""}\n`);
 
 for (const pkg of packages) {
 	const version = packageVersions.get(pkg.name);
 	assertBuildOutputExists(pkg.directory);
-	const published = isPublished(pkg.name, version);
+	const packed = validatePack(pkg);
+	const publishedMetadata = getPublishedMetadata(pkg.name, version);
 
 	if (dryRun) {
-		if (published) {
-			console.log(`${pkg.name}@${version} is already published; validating package contents only.`);
+		if (publishedMetadata) {
+			assertPublishedPackageMatchesRelease({
+				name: pkg.name,
+				version,
+				directory: pkg.directory,
+				sourceCommit,
+				packed,
+				metadata: publishedMetadata,
+			});
+			console.log(`${pkg.name}@${version} is already published and matches this release.`);
 		} else {
-			console.log(`${pkg.name}@${version} is not published; validating package contents before publish.`);
+			console.log(`${pkg.name}@${version} is not published; package contents are valid for publish.`);
 		}
-		validatePack(pkg);
 		console.log();
 		continue;
 	}
 
-	if (published) {
-		console.log(`Skipping ${pkg.name}@${version}: already published\n`);
+	if (publishedMetadata) {
+		assertPublishedPackageMatchesRelease({
+			name: pkg.name,
+			version,
+			directory: pkg.directory,
+			sourceCommit,
+			packed,
+			metadata: publishedMetadata,
+		});
+		console.log(`Skipping ${pkg.name}@${version}: already published from this exact release\n`);
 		continue;
 	}
 
-	validatePack(pkg);
-	run("npm", ["publish", "--access", "public", "--provenance", "--ignore-scripts"], { cwd: pkg.directory });
+	run("npm", ["publish", "--access", "public", "--provenance", "--ignore-scripts", "--tag", NPM_DIST_TAG], {
+		cwd: pkg.directory,
+	});
+	const published = getPublishedMetadata(pkg.name, version);
+	if (!published) {
+		throw new Error(`${pkg.name}@${version} is not visible on npm after publish`);
+	}
+	assertPublishedPackageMatchesRelease({
+		name: pkg.name,
+		version,
+		directory: pkg.directory,
+		sourceCommit,
+		packed,
+		metadata: published,
+	});
 	console.log();
 }

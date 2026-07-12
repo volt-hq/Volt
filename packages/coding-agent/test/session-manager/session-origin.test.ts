@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Message } from "@earendil-works/volt-ai";
+import type { Message } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.ts";
 

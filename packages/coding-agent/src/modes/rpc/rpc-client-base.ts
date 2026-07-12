@@ -1,5 +1,5 @@
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/volt-agent-core";
-import type { ImageContent } from "@earendil-works/volt-ai";
+import type { AgentMessage, ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type { ImageContent } from "@hansjm10/volt-ai";
 import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";

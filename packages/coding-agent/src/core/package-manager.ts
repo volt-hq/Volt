@@ -1958,7 +1958,7 @@ export class DefaultPackageManager implements PackageManager {
 		// Extension packages run inside volt and resolve volt APIs through loader aliases/virtual modules.
 		// Disable peer dependency resolution for managed installs (npm's --legacy-peer-deps, and
 		// equivalent bun/pnpm settings) so package managers do not install or solve host-provided
-		// @earendil-works/volt-* peers. Stale auto-installed volt peers can otherwise block updates.
+		// @hansjm10/volt-* peers. Stale auto-installed volt peers can otherwise block updates.
 		if (packageManagerName === "bun") {
 			return ["install", ...specs, "--cwd", installRoot, "--omit=peer", ...scriptArgs];
 		}

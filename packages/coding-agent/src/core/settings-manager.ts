@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import type { Transport } from "@earendil-works/volt-ai";
+import type { Transport } from "@hansjm10/volt-ai";
 import { randomUUID } from "crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join } from "path";

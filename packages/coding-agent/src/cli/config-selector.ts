@@ -2,7 +2,7 @@
  * TUI config selector for `volt config` command
  */
 
-import { ProcessTerminal, TUI } from "@earendil-works/volt-tui";
+import { ProcessTerminal, TUI } from "@hansjm10/volt-tui";
 import type { ResolvedPaths } from "../core/package-manager.ts";
 import type { SettingsManager } from "../core/settings-manager.ts";
 import { initTheme, stopThemeWatcher } from "../core/theme/runtime.ts";

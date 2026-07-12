@@ -18,7 +18,7 @@
 		"check:browser-smoke": "node scripts/check-browser-smoke.mjs",
 		"check:coding-agent-source-exports": "node scripts/check-coding-agent-source-exports.mjs",
 		"check:pinned-deps": "node scripts/check-pinned-deps.mjs",
-		"check:release-security": "node --test scripts/release-security.test.mjs",
+		"check:release-security": "node --test scripts/release-security.test.mjs scripts/bootstrap-npm-packages.test.mjs",
 		"check:shrinkwrap": "node scripts/generate-coding-agent-shrinkwrap.mjs --check",
 		"check:ts-imports": "node scripts/check-ts-relative-imports.mjs",
 		"iroh:poc:install": "npm install --ignore-scripts",
@@ -59,7 +59,7 @@
 	"engines": {
 		"node": ">=22.19.0"
 	},
-	"version": "0.0.3",
+	"version": "0.1.0",
 	"overrides": {
 		"rimraf": "6.1.2",
 		"gaxios": {

@@ -30,7 +30,7 @@ describe("store catalog", () => {
 					id: "rtk",
 					name: "RTK",
 					description: "Token optimized shell output",
-					source: "git:github.com/earendil-works/volt-rtk@v0.1.0",
+					source: "git:github.com/hansjm10/volt-rtk@v0.1.0",
 					resources: ["extensions"],
 				},
 				{
@@ -62,7 +62,7 @@ describe("store catalog", () => {
 					id: "rtk",
 					name: "RTK Output Compression",
 					description: "Token optimized shell output",
-					source: "git:github.com/earendil-works/volt-rtk@v0.1.0",
+					source: "git:github.com/hansjm10/volt-rtk@v0.1.0",
 					categories: ["Shell"],
 				},
 				{

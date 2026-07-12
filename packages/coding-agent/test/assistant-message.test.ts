@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "@earendil-works/volt-ai";
+import type { AssistantMessage } from "@hansjm10/volt-ai";
 import { describe, expect, test } from "vitest";
 import { initTheme, theme } from "../src/core/theme/runtime.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";

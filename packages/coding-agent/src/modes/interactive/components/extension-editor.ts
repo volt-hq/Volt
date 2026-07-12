@@ -16,7 +16,7 @@ import {
 	Spacer,
 	Text,
 	type TUI,
-} from "@earendil-works/volt-tui";
+} from "@hansjm10/volt-tui";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
 import { getEditorTheme, theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";

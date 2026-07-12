@@ -1,4 +1,4 @@
-import { getCapabilities } from "@earendil-works/volt-tui";
+import { getCapabilities } from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import { type Static, Type } from "typebox";
 import { Compile } from "typebox/compile";

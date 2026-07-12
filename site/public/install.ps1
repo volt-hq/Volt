@@ -6,12 +6,13 @@
 # Options (environment variables):
 #   VOLT_INSTALL_METHOD=npm      Full Node.js install (default), including daemon/remote.
 #   VOLT_INSTALL_METHOD=binary   Standalone local CLI/TUI only; no daemon/remote/iOS access.
-#   VOLT_VERSION=v0.79.6         Pin a canonical release for either method.
+#   VOLT_VERSION=latest          Install the npm beta channel (default) or latest binary.
+#   VOLT_VERSION=v0.1.0          Pin a canonical release for either method.
 
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$package = "@earendil-works/volt-coding-agent"
+$package = "@hansjm10/volt-coding-agent"
 $repo = "hansjm10/Volt"
 $method = if ([string]::IsNullOrWhiteSpace($env:VOLT_INSTALL_METHOD)) { "npm" } else { $env:VOLT_INSTALL_METHOD }
 $version = if ([string]::IsNullOrWhiteSpace($env:VOLT_VERSION)) { "latest" } else { $env:VOLT_VERSION }
@@ -22,7 +23,7 @@ function Fail([string]$message) {
 }
 
 if ($version -ne "latest" -and $version -notmatch '^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
-    Fail "VOLT_VERSION must be 'latest' or a canonical version such as v0.79.6"
+    Fail "VOLT_VERSION must be 'latest' or a canonical version such as v0.1.0"
 }
 
 function Install-NpmVolt {
@@ -38,7 +39,7 @@ function Install-NpmVolt {
         Fail "npm not found. It normally ships with Node.js; install Node.js from https://nodejs.org."
     }
 
-    $npmSpec = $package
+    $npmSpec = "$package@beta"
     if ($version -ne "latest") {
         $npmSpec = "$package@$($version.TrimStart('v'))"
     }

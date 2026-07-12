@@ -125,7 +125,7 @@ export {
 	type WriteToolOptions,
 } from "./write.ts";
 
-import type { AgentTool } from "@earendil-works/volt-agent-core";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { createMcpTool, createMcpToolDefinition, type McpGatewayToolOptions } from "../mcp/gateway-tool.ts";
 import { type BashToolOptions, createBashTool, createBashToolDefinition } from "./bash.ts";

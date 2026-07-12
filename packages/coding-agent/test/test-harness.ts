@@ -10,8 +10,8 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentTool } from "@earendil-works/volt-agent-core";
-import { Agent } from "@earendil-works/volt-agent-core";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
+import { Agent } from "@hansjm10/volt-agent-core";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
@@ -24,8 +24,8 @@ import type {
 	ThinkingContent,
 	ToolCall,
 	Usage,
-} from "@earendil-works/volt-ai";
-import { createAssistantMessageEventStream } from "@earendil-works/volt-ai";
+} from "@hansjm10/volt-ai";
+import { createAssistantMessageEventStream } from "@hansjm10/volt-ai";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";

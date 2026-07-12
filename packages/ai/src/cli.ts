@@ -78,7 +78,7 @@ async function main(): Promise<void> {
 
 	if (!command || command === "help" || command === "--help" || command === "-h") {
 		const providerList = PROVIDERS.map((p) => `  ${p.id.padEnd(20)} ${p.name}`).join("\n");
-		console.log(`Usage: npx @earendil-works/volt-ai <command> [provider]
+		console.log(`Usage: npx @hansjm10/volt-ai@beta <command> [provider]
 
 Commands:
   login [provider]  Login to an OAuth provider
@@ -88,9 +88,9 @@ Providers:
 ${providerList}
 
 Examples:
-  npx @earendil-works/volt-ai login              # interactive provider selection
-  npx @earendil-works/volt-ai login anthropic    # login to specific provider
-  npx @earendil-works/volt-ai list               # list providers
+  npx @hansjm10/volt-ai@beta login              # interactive provider selection
+  npx @hansjm10/volt-ai@beta login anthropic    # login to specific provider
+  npx @hansjm10/volt-ai@beta list               # list providers
 `);
 		return;
 	}
@@ -127,7 +127,7 @@ Examples:
 
 		if (!PROVIDERS.some((p) => p.id === provider)) {
 			console.error(`Unknown provider: ${provider}`);
-			console.error(`Use 'npx @earendil-works/volt-ai list' to see available providers`);
+			console.error(`Use 'npx @hansjm10/volt-ai@beta list' to see available providers`);
 			process.exit(1);
 		}
 
@@ -137,7 +137,7 @@ Examples:
 	}
 
 	console.error(`Unknown command: ${command}`);
-	console.error(`Use 'npx @earendil-works/volt-ai --help' for usage`);
+	console.error(`Use 'npx @hansjm10/volt-ai@beta --help' for usage`);
 	process.exit(1);
 }
 

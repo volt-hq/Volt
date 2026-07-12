@@ -1,13 +1,8 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage, AgentToolResult } from "@earendil-works/volt-agent-core";
-import {
-	type FauxResponseStep,
-	fauxAssistantMessage,
-	fauxToolCall,
-	registerFauxProvider,
-} from "@earendil-works/volt-ai";
+import type { AgentMessage, AgentToolResult } from "@hansjm10/volt-agent-core";
+import { type FauxResponseStep, fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionStats } from "../src/core/agent-session.ts";
 import {

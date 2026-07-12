@@ -1,5 +1,5 @@
-import { getOAuthProviders, type OAuthDeviceCodeInfo } from "@earendil-works/volt-ai/oauth";
-import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@earendil-works/volt-tui";
+import { getOAuthProviders, type OAuthDeviceCodeInfo } from "@hansjm10/volt-ai/oauth";
+import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@hansjm10/volt-tui";
 import { theme } from "../../../core/theme/runtime.ts";
 import { openBrowser } from "../../../utils/open-browser.ts";
 import { DynamicBorder } from "./dynamic-border.ts";

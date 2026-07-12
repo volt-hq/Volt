@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage } from "@earendil-works/volt-agent-core";
+import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { afterEach } from "vitest";
 
 export function createUserMessage(text: string): AgentMessage {

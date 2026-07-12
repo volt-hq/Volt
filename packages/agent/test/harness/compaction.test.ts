@@ -6,7 +6,7 @@ import {
 	type Model,
 	registerFauxProvider,
 	type Usage,
-} from "@earendil-works/volt-ai";
+} from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	type CompactionPreparation,

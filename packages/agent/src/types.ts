@@ -9,7 +9,7 @@ import type {
 	TextContent,
 	Tool,
 	ToolResultMessage,
-} from "@earendil-works/volt-ai";
+} from "@hansjm10/volt-ai";
 import type { Static, TSchema } from "typebox";
 
 /**
@@ -281,7 +281,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 /**
  * Thinking/reasoning level for models that support it.
  * Note: "xhigh" and "max" are only supported by selected model families. Use model thinking-level
- * metadata from @earendil-works/volt-ai to detect support for a concrete model.
+ * metadata from @hansjm10/volt-ai to detect support for a concrete model.
  */
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -291,7 +291,7 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhi
  *
  * @example
  * ```typescript
- * declare module "@mariozechner/agent" {
+ * declare module "@hansjm10/volt-agent-core" {
  *   interface CustomAgentMessages {
  *     artifact: ArtifactMessage;
  *     notification: NotificationMessage;

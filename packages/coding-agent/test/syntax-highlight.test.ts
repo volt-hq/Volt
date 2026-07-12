@@ -1,4 +1,4 @@
-import { resetCapabilitiesCache, setCapabilities } from "@earendil-works/volt-tui";
+import { resetCapabilitiesCache, setCapabilities } from "@hansjm10/volt-tui";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { highlightCode, highlightShellCommand, initTheme, theme } from "../src/core/theme/runtime.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";

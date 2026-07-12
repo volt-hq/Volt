@@ -1,4 +1,4 @@
-import { Box, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/volt-tui";
+import { Box, Markdown, type MarkdownTheme, Spacer, Text } from "@hansjm10/volt-tui";
 import type { BranchSummaryMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
 import { keyText } from "./keybinding-hints.ts";
