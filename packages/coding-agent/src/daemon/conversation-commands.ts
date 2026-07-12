@@ -133,6 +133,12 @@ export interface ConversationCommandContext {
 	) => Promise<ReadonlyMap<string, RemoteSessionRuntimeState>> | ReadonlyMap<string, RemoteSessionRuntimeState>;
 	/** True while this conversation's lease is draining to a TUI (§4.5 rejection). */
 	isDraining?: () => boolean;
+	/**
+	 * True when this conversation runtime is a subagent child session. Subagent
+	 * sessions are observe-only for remote clients: the parent agent owns the
+	 * delegated turn, so turn-initiating commands are rejected.
+	 */
+	isSubagentSession?: () => boolean;
 	/** Host cleanup after a successful workspace unregister (streams, runtimes, live activities, relays). */
 	onWorkspaceUnregistered?: (workspaceName: string) => Promise<void>;
 	/** Host keep-awake control; absent when no daemon owns the host (e.g. plain rpc mode). */
@@ -166,6 +172,20 @@ export function createLeaseDrainingRpcErrorResponse(command: RemoteRpcCommand): 
 			code: "lease_draining",
 			message: "Handing off to the desktop TUI; retry shortly.",
 			retryAfterMs: LEASE_DRAINING_RETRY_AFTER_MS,
+		},
+	};
+}
+
+export function createSubagentSessionReadOnlyRpcErrorResponse(command: RemoteRpcCommand): Record<string, unknown> {
+	const id = getRpcResponseId(command);
+	return {
+		...(id === undefined ? {} : { id }),
+		type: "response",
+		command: command.type,
+		success: false,
+		error: {
+			code: "subagent_session_read_only",
+			message: "Subagent sessions are observe-only; prompt the parent agent instead.",
 		},
 	};
 }
@@ -1710,6 +1730,11 @@ export async function handleIntegratedConversationRpcCommand(
 ): Promise<object | undefined> {
 	if (context.isDraining?.() && TURN_INITIATING_RPC_TYPES.has(command.type)) {
 		return createLeaseDrainingRpcErrorResponse(command);
+	}
+	// Defense in depth: the phone hides the composer for subagent tabs, but a
+	// stray client must not be able to inject turns into a delegated child run.
+	if (context.isSubagentSession?.() && TURN_INITIATING_RPC_TYPES.has(command.type)) {
+		return createSubagentSessionReadOnlyRpcErrorResponse(command);
 	}
 	if (command.type === "list_sessions") {
 		return await createRemoteListSessionsRpcResponse(command, authorization, context, runtime);

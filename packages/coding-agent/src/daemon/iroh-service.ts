@@ -629,6 +629,8 @@ class IrohDaemonService {
 				: {
 						isDraining: () =>
 							this.leaseBroker.isDraining(conversation.workspaceName, conversation.entry.sessionId),
+						isSubagentSession: () =>
+							conversation.entry.subagentId !== undefined || conversation.entry.parentSessionId !== undefined,
 					}),
 		};
 	}

@@ -53,6 +53,7 @@ function createRuntime(sessionId = "s-1"): ConversationCommandRuntime {
 function createContext(
 	options: {
 		isDraining?: () => boolean;
+		isSubagentSession?: () => boolean;
 		stateManager?: IrohRemoteHostStateManager;
 		onWorkspaceUnregistered?: (workspaceName: string) => Promise<void>;
 		webSearchKey?: ConversationCommandContext["webSearchKey"];
@@ -66,6 +67,7 @@ function createContext(
 		sessionListCursors: new Map(),
 		sessionListCursorTtlMs: 60_000,
 		...(options.isDraining === undefined ? {} : { isDraining: options.isDraining }),
+		...(options.isSubagentSession === undefined ? {} : { isSubagentSession: options.isSubagentSession }),
 		...(options.onWorkspaceUnregistered === undefined
 			? {}
 			: { onWorkspaceUnregistered: options.onWorkspaceUnregistered }),
@@ -164,6 +166,56 @@ describe("handleIntegratedConversationRpcCommand", () => {
 			createRuntime(),
 		);
 		expect(state).toBeUndefined();
+	});
+
+	it("rejects turn-initiating commands on subagent sessions", async () => {
+		for (const type of TURN_INITIATING_RPC_TYPES) {
+			const response = (await handleIntegratedConversationRpcCommand(
+				{ id: "7", type, message: "hi" },
+				createAuthorization(),
+				createContext({ isSubagentSession: () => true }),
+				createRuntime(),
+			)) as Record<string, unknown>;
+			expect(response).toEqual({
+				id: "7",
+				type: "response",
+				command: type,
+				success: false,
+				error: {
+					code: "subagent_session_read_only",
+					message: "Subagent sessions are observe-only; prompt the parent agent instead.",
+				},
+			});
+		}
+	});
+
+	it("lets observation and abort through on subagent sessions", async () => {
+		// abort passes through to the rpc mode so a phone can still stop the run.
+		const abort = await handleIntegratedConversationRpcCommand(
+			{ id: "8", type: "abort" },
+			createAuthorization(),
+			createContext({ isSubagentSession: () => true }),
+			createRuntime(),
+		);
+		expect(abort).toBeUndefined();
+
+		const transcript = (await handleIntegratedConversationRpcCommand(
+			{ id: "9", type: "get_transcript" },
+			createAuthorization(),
+			createContext({ isSubagentSession: () => true }),
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(transcript).toMatchObject({ command: "get_transcript", success: true });
+	});
+
+	it("does not reject prompts on non-subagent sessions", async () => {
+		const response = await handleIntegratedConversationRpcCommand(
+			{ id: "10", type: "prompt", message: "hi" },
+			createAuthorization(),
+			createContext({ isSubagentSession: () => false }),
+			createRuntime(),
+		);
+		expect(response).toBeUndefined();
 	});
 
 	it("does not reject prompts when the lease is not draining", async () => {
