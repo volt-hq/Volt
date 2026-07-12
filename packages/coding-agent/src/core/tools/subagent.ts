@@ -219,6 +219,11 @@ export interface SubagentToolManager {
 	getDefinition(agentName: string): SubagentDefinition;
 	/** Definitions this runtime is currently allowed to invoke. Omit for unrestricted legacy managers. */
 	listAvailableDefinitions?(): readonly SubagentDefinition[];
+	/**
+	 * Definitions permitted by delegation policy, ignoring exhaustible start budgets.
+	 * Falls back to listAvailableDefinitions when omitted.
+	 */
+	listPermittedDefinitions?(): readonly SubagentDefinition[];
 	startByName(agentName: string, options?: SubagentStartByNameOptions): Promise<SubagentHandle>;
 	createDelegationScope?(options?: SubagentDelegationScopeOptions): SubagentDelegationScopeLease;
 	dispose?(): Promise<void>;
@@ -1554,14 +1559,18 @@ export function createSubagentToolDefinition(
 			}
 
 			const normalized = normalizeSubagentToolInput(params);
-			const currentAvailableDefinitions = options.manager.listAvailableDefinitions?.();
-			if (currentAvailableDefinitions) {
-				const currentAvailableNames = new Set(currentAvailableDefinitions.map((definition) => definition.name));
+			// Validate names against the policy-permitted set, not the budget-filtered
+			// available set: when depth or child-start budgets are exhausted, startByName
+			// reports the precise limit error instead of a misleading "not available" one.
+			const permittedDefinitions =
+				options.manager.listPermittedDefinitions?.() ?? options.manager.listAvailableDefinitions?.();
+			if (permittedDefinitions) {
+				const permittedNames = new Set(permittedDefinitions.map((definition) => definition.name));
 				const unavailableNames = Array.from(
-					new Set(normalized.tasks.map((task) => task.agent).filter((name) => !currentAvailableNames.has(name))),
+					new Set(normalized.tasks.map((task) => task.agent).filter((name) => !permittedNames.has(name))),
 				);
 				if (unavailableNames.length > 0) {
-					const available = Array.from(currentAvailableNames);
+					const available = Array.from(permittedNames);
 					throw new Error(
 						available.length > 0
 							? `Subagent${unavailableNames.length === 1 ? "" : "s"} ${unavailableNames.map((name) => `"${name}"`).join(", ")} ${unavailableNames.length === 1 ? "is" : "are"} not available. Available subagents: ${available.join(", ")}.`

@@ -1040,6 +1040,7 @@ describe("SubagentManager", () => {
 		});
 
 		expect(manager.listAvailableDefinitions().map((definition) => definition.name)).toEqual(["researcher"]);
+		expect(manager.listPermittedDefinitions().map((definition) => definition.name)).toEqual(["researcher"]);
 	});
 
 	it("lists no available definitions when the delegation depth is exhausted", async () => {
@@ -1058,6 +1059,7 @@ describe("SubagentManager", () => {
 		});
 
 		expect(manager.listAvailableDefinitions()).toEqual([]);
+		expect(manager.listPermittedDefinitions().map((definition) => definition.name)).toEqual(["researcher"]);
 	});
 
 	it("blocks delegated subagent names outside the current policy", async () => {
@@ -1151,6 +1153,7 @@ describe("SubagentManager", () => {
 
 		const handle = await manager.startByName("researcher");
 		expect(manager.listAvailableDefinitions()).toEqual([]);
+		expect(manager.listPermittedDefinitions().map((definition) => definition.name)).toEqual(["researcher"]);
 		await expect(manager.startByName("researcher")).rejects.toThrow("cannot start more than 1 child subagent");
 		await handle.dispose();
 	});

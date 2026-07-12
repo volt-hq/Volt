@@ -188,6 +188,29 @@ describe("subagent tool", () => {
 		expect(startByName).not.toHaveBeenCalled();
 	});
 
+	it("surfaces the precise start-limit error when the child budget is exhausted", async () => {
+		const researcher = createDefinition("researcher");
+		const startByName = vi.fn(async () => {
+			throw new Error('Subagent "researcher" cannot start more than 2 child subagents.');
+		});
+		const manager = {
+			getDefinition: () => researcher,
+			// Budget exhaustion empties the available set while the name stays permitted.
+			listAvailableDefinitions: () => [],
+			listPermittedDefinitions: () => [researcher],
+			startByName,
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager });
+
+		await expect(tool.execute("call-exhausted", { agent: "researcher", task: "one more" })).rejects.toThrow(
+			'Subagent "researcher" cannot start more than 2 child subagents.',
+		);
+		expect(startByName).toHaveBeenCalledTimes(1);
+
+		const unknown = tool.execute("call-unknown", { agent: "missing", task: "nope" });
+		await expect(unknown).rejects.toThrow('Subagent "missing" is not available. Available subagents: researcher.');
+	});
+
 	async function createSession(options: {
 		tools?: string[];
 		responses?: FauxResponseStep[];
