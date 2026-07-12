@@ -9,7 +9,8 @@ completed.
 
 - [ ] **Bootstrap npm publishing.** Reserve the four public
   `@hansjm10/volt-*` names with the non-installable `0.0.0-bootstrap.0`
-  placeholder under only the `bootstrap` dist-tag, configure the
+  placeholder under `bootstrap`, with npm-required `latest` also pinned to that
+  inert placeholder, configure the
   `build-binaries.yml` trusted publisher for the `npm-publish` environment, and
   let tagged CI publish lockstep `0.1.0` under `beta` with provenance. Follow
   [Initial npm Release Bootstrap](docs/npm-release-bootstrap.md); do not publish

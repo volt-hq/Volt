@@ -88,7 +88,7 @@ test("npm bootstrap verification reserves names without publishing the real init
 	const placeholder = {
 		name,
 		versions: [BOOTSTRAP_VERSION],
-		"dist-tags": { bootstrap: BOOTSTRAP_VERSION },
+		"dist-tags": { bootstrap: BOOTSTRAP_VERSION, latest: BOOTSTRAP_VERSION },
 	};
 	assert.doesNotThrow(() => verifyPreflightPackageMetadata(name, "0.1.0", placeholder, { initial: true }));
 	assert.throws(
@@ -116,10 +116,10 @@ test("npm bootstrap verification reserves names without publishing the real init
 			verifyPreflightPackageMetadata(
 				name,
 				"0.1.0",
-				{ ...placeholder, "dist-tags": { bootstrap: BOOTSTRAP_VERSION, latest: BOOTSTRAP_VERSION } },
+				{ ...placeholder, "dist-tags": { bootstrap: BOOTSTRAP_VERSION, latest: "0.1.0" } },
 				{ initial: true },
 			),
-		/beta\/latest must be absent/,
+		/npm-required latest/,
 	);
 
 	let queriedArgs;
@@ -133,7 +133,7 @@ test("npm bootstrap verification reserves names without publishing the real init
 		verifyPreflightPackageMetadata(name, "0.1.1", {
 			name,
 			versions: [BOOTSTRAP_VERSION, "0.1.0"],
-			"dist-tags": { beta: "0.1.0", bootstrap: BOOTSTRAP_VERSION },
+			"dist-tags": { beta: "0.1.0", bootstrap: BOOTSTRAP_VERSION, latest: BOOTSTRAP_VERSION },
 		}),
 	);
 });
@@ -144,7 +144,7 @@ test("tag workflow bootstrap verification supports absent, partial, and idempote
 		verifyTagWorkflowPackageMetadata(name, "0.1.0", {
 			name,
 			versions: [BOOTSTRAP_VERSION],
-			"dist-tags": { bootstrap: BOOTSTRAP_VERSION },
+			"dist-tags": { bootstrap: BOOTSTRAP_VERSION, latest: BOOTSTRAP_VERSION },
 		}),
 	);
 	assert.throws(
@@ -152,7 +152,7 @@ test("tag workflow bootstrap verification supports absent, partial, and idempote
 			verifyTagWorkflowPackageMetadata(name, "0.1.0", {
 				name,
 				versions: [BOOTSTRAP_VERSION, "0.0.1"],
-				"dist-tags": { bootstrap: BOOTSTRAP_VERSION },
+				"dist-tags": { bootstrap: BOOTSTRAP_VERSION, latest: BOOTSTRAP_VERSION },
 			}),
 		/only placeholder version/,
 	);
@@ -160,7 +160,7 @@ test("tag workflow bootstrap verification supports absent, partial, and idempote
 		verifyTagWorkflowPackageMetadata(name, "0.1.0", {
 			name,
 			versions: [BOOTSTRAP_VERSION, "0.1.0"],
-			"dist-tags": { beta: "0.1.0", bootstrap: BOOTSTRAP_VERSION },
+			"dist-tags": { beta: "0.1.0", bootstrap: BOOTSTRAP_VERSION, latest: BOOTSTRAP_VERSION },
 		}),
 	);
 	assert.throws(
@@ -168,7 +168,7 @@ test("tag workflow bootstrap verification supports absent, partial, and idempote
 			verifyTagWorkflowPackageMetadata(name, "0.1.0", {
 				name,
 				versions: [BOOTSTRAP_VERSION, "0.1.0"],
-				"dist-tags": { beta: BOOTSTRAP_VERSION, bootstrap: BOOTSTRAP_VERSION },
+				"dist-tags": { beta: BOOTSTRAP_VERSION, bootstrap: BOOTSTRAP_VERSION, latest: BOOTSTRAP_VERSION },
 			}),
 		/beta does not point to it/,
 	);
@@ -227,7 +227,7 @@ test("idempotent npm publication requires exact release bytes and provenance", (
 				url: "git+https://github.com/hansjm10/Volt.git",
 				directory: "packages/ai",
 			},
-			"dist-tags": { beta: "0.1.0", bootstrap: "0.0.0-bootstrap.0" },
+			"dist-tags": { beta: "0.1.0", bootstrap: "0.0.0-bootstrap.0", latest: "0.0.0-bootstrap.0" },
 			dist: {
 				integrity: "sha512-release",
 				attestations: {

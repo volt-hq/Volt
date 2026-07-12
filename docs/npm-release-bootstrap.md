@@ -9,7 +9,9 @@ The four Volt package names are declared in their package manifests:
 
 The initial Volt beta uses lockstep version `0.1.0` and the npm `beta` dist-tag.
 Before releasing it, reserve the four names with a non-installable
-`0.0.0-bootstrap.0` placeholder under the `bootstrap` dist-tag. This creates the
+`0.0.0-bootstrap.0` placeholder under the `bootstrap` dist-tag. npm requires
+every package to have a `latest` tag, so `latest` also remains pinned to this
+inert placeholder throughout the beta. This creates the
 npm package settings needed for trusted publishing without consuming the real
 version or publishing release code outside the tagged CI workflow.
 
@@ -36,8 +38,9 @@ outside the automated release:
 
    The helper creates temporary minimal packages outside the repository source,
    publishes them as public in dependency order, verifies each result, and
-   removes the temporary files. It never publishes `0.1.0` and never creates
-   `beta` or `latest`. A partial network failure is safe to retry: exact
+   removes the temporary files. It never publishes `0.1.0` or creates `beta`;
+   npm automatically points its required `latest` tag at the inert placeholder.
+   A partial network failure is safe to retry: exact
    placeholders are verified and skipped.
 3. For each reserved package, configure npm trusted publishing for GitHub
    repository `hansjm10/Volt`, workflow filename `build-binaries.yml`,
@@ -54,10 +57,10 @@ outside the automated release:
    the exact binary compliance record is complete.
 6. Verify each package with
    `npm view <name>@0.0.0-bootstrap.0 name versions license dist-tags repository --json`.
-   The explicit selector matters because the reservation intentionally has no
-   `latest` tag. Before the real release, the only version must be
-   `0.0.0-bootstrap.0`, the only dist-tag must be `bootstrap`, and `0.1.0` must
-   be absent.
+   The explicit selector avoids resolving through `latest`. Before the real
+   release, the only version must be `0.0.0-bootstrap.0`; `bootstrap` and
+   npm-required `latest` must both point to it; `beta` and `0.1.0` must be
+   absent.
 7. Run the normal build, checks, tests, and package dry-run inspection, then
    commit the reviewed `0.1.0` migration on `main`.
 8. From a clean local `main` that exactly matches `origin/main`, prepare the
@@ -78,8 +81,10 @@ outside the automated release:
    it. Its final GitHub release job waits for `binary-release` approval.
 10. Verify each real package with
    `npm view <name>@0.1.0 name version license dist-tags repository --json`.
-   Confirm that `beta` resolves to `0.1.0`, `latest` is still absent, and the npm
-   provenance links to `hansjm10/Volt` and the release workflow.
+   Confirm that `beta` resolves to `0.1.0`, `latest` remains pinned to the inert
+   `0.0.0-bootstrap.0` placeholder, and the npm provenance links to
+   `hansjm10/Volt` and the release workflow. Beta users must install with
+   `@beta`; an unqualified install intentionally resolves to the placeholder.
 11. Complete the standalone-binary compliance record, approve the
     `binary-release` environment, and verify the final GitHub release assets and
     checksums.

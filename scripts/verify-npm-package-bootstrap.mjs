@@ -68,11 +68,12 @@ export function verifyPreflightPackageMetadata(expectedName, targetVersion, meta
 		!distTags ||
 		typeof distTags !== "object" ||
 		Array.isArray(distTags) ||
-		Object.keys(distTags).length !== 1 ||
-		distTags.bootstrap !== BOOTSTRAP_VERSION
+		Object.keys(distTags).length !== 2 ||
+		distTags.bootstrap !== BOOTSTRAP_VERSION ||
+		distTags.latest !== BOOTSTRAP_VERSION
 	) {
 		throw new Error(
-			`${expectedName} must have only dist-tag bootstrap -> ${BOOTSTRAP_VERSION}; beta/latest must be absent before the initial release`,
+			`${expectedName} must keep bootstrap and npm-required latest on ${BOOTSTRAP_VERSION}; beta must be absent before the initial release`,
 		);
 	}
 }
@@ -86,6 +87,12 @@ export function verifyTagWorkflowPackageMetadata(expectedName, targetVersion, me
 	}
 	if (versions.includes(targetVersion) && metadata["dist-tags"]?.beta !== targetVersion) {
 		throw new Error(`${expectedName}@${targetVersion} is published but beta does not point to it`);
+	}
+	if (
+		versions.includes(targetVersion) &&
+		(metadata["dist-tags"]?.bootstrap !== BOOTSTRAP_VERSION || metadata["dist-tags"]?.latest !== BOOTSTRAP_VERSION)
+	) {
+		throw new Error(`${expectedName}@${targetVersion} must keep bootstrap and latest on the inert placeholder`);
 	}
 }
 

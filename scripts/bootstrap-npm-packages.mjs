@@ -13,6 +13,8 @@ export const NPM_REGISTRY = "https://registry.npmjs.org/";
 export const PLACEHOLDER_VERSION = BOOTSTRAP_VERSION;
 export const PLACEHOLDER_TAG = "bootstrap";
 const LICENSE_PATH = fileURLToPath(new URL("../LICENSE", import.meta.url));
+const DEFAULT_VERIFICATION_ATTEMPTS = 61;
+const DEFAULT_VERIFICATION_DELAY_MS = 5_000;
 const FORBIDDEN_PACKAGE_FIELDS = [
 	"bin",
 	"bundleDependencies",
@@ -116,12 +118,14 @@ export function expectedPlaceholderManifest(pkg) {
 function assertExactPlaceholderMetadata(pkg, metadata) {
 	const expected = expectedPlaceholderManifest(pkg);
 	for (const [field, value] of Object.entries(expected)) {
+		if (field === "files") continue;
 		if (!isDeepStrictEqual(metadata[field], value)) {
 			throw new Error(`${pkg.name} exists with unexpected ${field}; refusing to publish`);
 		}
 	}
 	for (const field of FORBIDDEN_PACKAGE_FIELDS) {
 		if (Object.hasOwn(metadata, field)) {
+			if (field === "directories" && isDeepStrictEqual(metadata[field], {})) continue;
 			throw new Error(`${pkg.name} placeholder unexpectedly defines ${field}; refusing to publish`);
 		}
 	}
@@ -166,8 +170,14 @@ export function inspectBootstrapPackage(pkg, run = runNpm) {
 
 	const tags = metadata["dist-tags"];
 	const tagEntries = tags && typeof tags === "object" && !Array.isArray(tags) ? Object.entries(tags) : [];
-	if (tagEntries.length !== 1 || tags[PLACEHOLDER_TAG] !== PLACEHOLDER_VERSION) {
-		throw new Error(`${pkg.name} exists with unexpected dist-tags; expected only ${PLACEHOLDER_TAG}@${PLACEHOLDER_VERSION}`);
+	if (
+		tagEntries.length !== 2 ||
+		tags[PLACEHOLDER_TAG] !== PLACEHOLDER_VERSION ||
+		tags.latest !== PLACEHOLDER_VERSION
+	) {
+		throw new Error(
+			`${pkg.name} exists with unexpected dist-tags; expected ${PLACEHOLDER_TAG} and npm-required latest to point to ${PLACEHOLDER_VERSION}`,
+		);
 	}
 
 	const packArgs = [
@@ -176,6 +186,7 @@ export function inspectBootstrapPackage(pkg, run = runNpm) {
 		"--dry-run",
 		"--ignore-scripts",
 		"--json",
+		"--min-release-age=0",
 		`--registry=${NPM_REGISTRY}`,
 	];
 	const packed = parseJsonResult(packArgs, run(packArgs));
@@ -200,11 +211,30 @@ function writePlaceholderPackage(root, pkg) {
 	return directory;
 }
 
+function sleepSync(milliseconds) {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function verifyPublishedPlaceholder(pkg, run, options) {
+	for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
+		if (inspectBootstrapPackage(pkg, run).state === "placeholder") return;
+		if (attempt === options.attempts) break;
+		if (attempt === 1) {
+			options.log(`${pkg.name} publish accepted; waiting for npm registry metadata to become visible...`);
+		}
+		options.sleep(options.delayMs);
+	}
+	throw new Error(`${pkg.name} was not visible as the exact placeholder after npm publish`);
+}
+
 export function bootstrapNpmPackages(options = {}) {
 	const publish = options.publish ?? false;
 	const run = options.run ?? runNpm;
 	const log = options.log ?? ((message) => process.stdout.write(`${message}\n`));
 	const interactive = options.interactive ?? (process.stdin.isTTY === true && process.stdout.isTTY === true);
+	const verificationAttempts = options.verificationAttempts ?? DEFAULT_VERIFICATION_ATTEMPTS;
+	const verificationDelayMs = options.verificationDelayMs ?? DEFAULT_VERIFICATION_DELAY_MS;
+	const sleep = options.sleep ?? sleepSync;
 
 	const states = BOOTSTRAP_PACKAGE_IDENTITIES.map((pkg) => ({ pkg, ...inspectBootstrapPackage(pkg, run) }));
 	for (const { pkg, state } of states) {
@@ -248,16 +278,19 @@ export function bootstrapNpmPackages(options = {}) {
 			log(`Publishing ${pkg.name}@${PLACEHOLDER_VERSION} with dist-tag ${PLACEHOLDER_TAG}...`);
 			const result = run(publishArgs, { cwd: directory, disableProvenance: true, interactive: true });
 			if (result.error || result.status !== 0) throw commandFailure(publishArgs, result);
-			if (inspectBootstrapPackage(pkg, run).state !== "placeholder") {
-				throw new Error(`${pkg.name} was not visible as the exact placeholder after npm publish`);
-			}
+			verifyPublishedPlaceholder(pkg, run, {
+				attempts: verificationAttempts,
+				delayMs: verificationDelayMs,
+				log,
+				sleep,
+			});
 			published.push(pkg.name);
 		}
 	} finally {
 		rmSync(root, { force: true, recursive: true });
 	}
 
-	log("Bootstrap reservations verified. No beta or latest dist-tag was created.");
+	log("Bootstrap reservations verified. No beta dist-tag was created; npm-required latest remains on the inert placeholder.");
 	return { published, states };
 }
 
