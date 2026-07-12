@@ -2,7 +2,8 @@ import { describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
-	getIrohRemoteRpcFilterResult,
+	createIrohRemotePresetAccess,
+	getStaticIrohRemoteRpcFilterResult as getIrohRemoteRpcFilterResult,
 	IROH_REMOTE_RPC_CANCELLATION_TYPES,
 	IROH_REMOTE_RPC_PASSTHROUGH_TYPES,
 } from "../src/core/remote/iroh/index.ts";
@@ -331,6 +332,7 @@ describe("Iroh remote lifecycle command contract", () => {
 			},
 		});
 		const transport = createIrohRemoteFilteredRpcTransport({
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			transport: createIrohRemoteCloseDeferringRpcTransport({
 				transport: inner,
 				waitForPromptCompletion: () => runtime.promptCompleted,

@@ -1,5 +1,6 @@
 import { basename, resolve } from "node:path";
 import { getAgentDir, VERSION } from "../config.ts";
+import { type IrohRemoteAccessPresetName, isIrohRemoteAccessPresetName } from "../core/remote/iroh/access-grant.ts";
 import { formatIrohRemoteTicketQrCode } from "../core/remote/iroh/qr.ts";
 import { spawnProcess, waitForChildProcess } from "../utils/child-process.ts";
 import { createDaemonClient, type DaemonClient } from "./control-client.ts";
@@ -10,7 +11,9 @@ function printRemoteUsage(): void {
 	console.error(`Usage: volt remote <command>
 
 Commands:
-  pair [--workspace <name>]     Create a pairing ticket and wait for the phone to pair.
+  pair [--workspace <name>] [--access coding|review|chat|full]
+                                Create a pairing ticket (default access: coding).
+  access <node-id> set <preset> Update a paired device's tool and RPC access.
   status [--json]               Show daemon status (workspaces, clients, leases).
   clients                       List paired clients.
   revoke <node-id>              Revoke a paired client and close its connections.
@@ -110,6 +113,17 @@ function reportControlError(response: ControlResponse, context: string): boolean
 
 async function handlePairCommand(args: string[]): Promise<void> {
 	let workspaceName: string | undefined;
+	let access: IrohRemoteAccessPresetName = "coding";
+	const accessIndex = args.indexOf("--access");
+	if (accessIndex !== -1) {
+		const value = args[accessIndex + 1];
+		if (!isIrohRemoteAccessPresetName(value)) {
+			console.error("Error: --access requires coding, review, chat, or full");
+			process.exitCode = 1;
+			return;
+		}
+		access = value;
+	}
 	const workspaceIndex = args.indexOf("--workspace");
 	if (workspaceIndex !== -1) {
 		workspaceName = args[workspaceIndex + 1];
@@ -192,6 +206,7 @@ async function handlePairCommand(args: string[]): Promise<void> {
 
 		const response = await session.client.request({
 			type: "pair_request",
+			access,
 			...(workspaceName === undefined ? {} : { workspaceName }),
 		});
 		if (reportControlError(response, "pair")) {
@@ -257,6 +272,50 @@ async function handleClientsCommand(): Promise<void> {
 			return;
 		}
 		console.log(JSON.stringify(response.clients, null, 2));
+	} finally {
+		await session.close();
+	}
+}
+
+async function handleAccessCommand(args: string[]): Promise<void> {
+	const [nodeId, action, presetValue] = args;
+	if (!nodeId || action !== "set" || !isIrohRemoteAccessPresetName(presetValue)) {
+		console.error("Error: usage: volt remote access <node-id> set coding|review|chat|full");
+		process.exitCode = 1;
+		return;
+	}
+	const session = await connectToDaemon({ autoStart: false });
+	if (!session) return;
+	try {
+		const clients = await session.client.request({ type: "clients_list" });
+		if (clients.type !== "clients_result") {
+			reportControlError(clients, "clients");
+			return;
+		}
+		const client = clients.clients.find((entry) => entry.clientNodeId === nodeId);
+		if (!client) {
+			console.error(`Error: paired client not found: ${nodeId}`);
+			process.exitCode = 1;
+			return;
+		}
+		if (!client.rpcGrant) {
+			console.error(`Error: paired client has no RPC grant and must re-pair: ${nodeId}`);
+			process.exitCode = 1;
+			return;
+		}
+		const response = await session.client.request({
+			type: "client_access_update",
+			clientNodeId: nodeId,
+			expectedRevision: client.rpcGrant.revision,
+			access: presetValue,
+		});
+		if (reportControlError(response, "access set")) return;
+		if (response.type !== "client_access_updated" || response.client.rpcGrant === undefined) {
+			console.error("Error: unexpected daemon response for access set");
+			process.exitCode = 1;
+			return;
+		}
+		console.error(`updated access for ${nodeId}: ${presetValue} (revision ${response.client.rpcGrant.revision})`);
 	} finally {
 		await session.close();
 	}
@@ -688,6 +747,9 @@ export async function handleRemoteControlCommand(args: string[], options: { isBu
 			return true;
 		case "clients":
 			await handleClientsCommand();
+			return true;
+		case "access":
+			await handleAccessCommand(rest);
 			return true;
 		case "revoke":
 			await handleRevokeCommand(rest);

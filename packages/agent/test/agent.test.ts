@@ -752,4 +752,67 @@ describe("Agent", () => {
 		await agent.prompt("hello again");
 		expect(receivedSessionId).toBe("session-def");
 	});
+
+	it("should retain the latest tool update details on the pending execution", async () => {
+		const toolSchema = Type.Object({});
+		const updated = createDeferred();
+		const release = createDeferred();
+		const tool: AgentTool<typeof toolSchema, { step: string }> = {
+			name: "tracked_tool",
+			label: "Tracked Tool",
+			description: "Reports structured progress",
+			parameters: toolSchema,
+			async execute(_toolCallId, _params, _signal, onUpdate) {
+				onUpdate?.({
+					content: [{ type: "text", text: "first" }],
+					details: { step: "first" },
+				});
+				onUpdate?.({
+					content: [{ type: "text", text: "second" }],
+					details: { step: "second" },
+				});
+				updated.resolve();
+				await release.promise;
+				return {
+					content: [{ type: "text", text: "ok" }],
+					details: { step: "done" },
+				};
+			},
+		};
+		let streamCalls = 0;
+		const agent = new Agent({
+			initialState: { tools: [tool] },
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				streamCalls += 1;
+				const finalTurn = streamCalls > 1;
+				queueMicrotask(() => {
+					if (finalTurn) {
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+						return;
+					}
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantToolUseMessage([
+							{ type: "toolCall", id: "call-1", name: "tracked_tool", arguments: {} },
+						]),
+					});
+				});
+				return stream;
+			},
+		});
+
+		const prompting = agent.prompt("run tool");
+		await updated.promise;
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		const pending = agent.state.pendingToolExecutions.get("call-1");
+		expect(pending?.toolName).toBe("tracked_tool");
+		expect(pending?.latestDetails).toEqual({ step: "second" });
+
+		release.resolve();
+		await prompting;
+		expect(agent.state.pendingToolExecutions.size).toBe(0);
+	});
 });

@@ -277,7 +277,7 @@ Settings for the background daemon and live shared sessions; see [Background dae
 |---------|------|---------|-------------|
 | `remote.background` | boolean | `false` | Interactive Volt starts the daemon automatically. Supported TUIs connect to an already-running daemon regardless, auto-register their workspace, and acquire a conversation lease. |
 | `remote.detachedRuntimeTtlMs` | number | `1800000` | How long the daemon retains an idle detached headless runtime (30 minutes) |
-| `remote.allowTools` | string[] | - | Tool allowlist for daemon-owned headless runtimes only; TUI-owned conversations use the TUI session's full tool set |
+| `remote.allowTools` | string[] | - | Additional tool ceiling for daemon-owned headless runtimes, intersected with the paired client's persisted grant and any workspace ceiling; `[]` denies all tools. TUI-owned conversations use the TUI session's full tool set. |
 
 ### Resources
 

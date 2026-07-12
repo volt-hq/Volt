@@ -157,6 +157,12 @@ function getAliases(): Record<string, string> {
 
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 
+export function validateExtensionCommandName(name: string): void {
+	if (typeof name !== "string" || name.length === 0 || /[\s/]/u.test(name)) {
+		throw new Error("Extension command name must be non-empty and must not contain whitespace or '/'");
+	}
+}
+
 /**
  * Create a runtime with throwing stubs for action methods.
  * Runner.bindCore() replaces these with real implementations.
@@ -240,6 +246,7 @@ function createExtensionAPI(
 
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void {
 			runtime.assertActive();
+			validateExtensionCommandName(name);
 			extension.commands.set(name, {
 				name,
 				sourceInfo: extension.sourceInfo,

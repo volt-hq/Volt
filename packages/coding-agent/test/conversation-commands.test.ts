@@ -2,8 +2,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
-import { getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/rpc-command-filter.ts";
+import { getStaticIrohRemoteRpcFilterResult as getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/rpc-command-filter.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../src/core/remote/iroh/worktree-rpc.ts";
 import { getDefaultSessionDir, type SessionEntry } from "../src/core/session-manager.ts";
@@ -27,6 +28,7 @@ function createAuthorization(options: { workspacePath?: string } = {}): IrohRemo
 			label: "phone",
 			allowedWorkspaces: ["ws"],
 			allowedTools: "read",
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			pairedAt: 1,
 			lastSeenAt: 2,
 		},

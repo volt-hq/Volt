@@ -143,8 +143,9 @@ prose below is the original design intent.
 - `CheckOrderPreserved` — outcomes match the load-bearing order (revoked → expired
   → workspace_unregistered → workspace_unavailable → workspace_authorization_removed
   → consumed → client_unknown).
-- `RetiredOutcomesUnreachable` — TLC can never produce `conversation_in_use` or
-  `workspace_forbidden` (retired in current builds).
+- `RetiredOutcomesUnreachable` — the authorization-state model cannot produce
+  `conversation_in_use` or `workspace_forbidden`; runtime attach may separately
+  emit `conversation_in_use` for incompatible client tool grants.
 
 **Adversarial-clock note.** Model the logical clock as able to move **backward**
 and assert `RevokedNeedsApprovedRePair` still holds — a future-dated approval must

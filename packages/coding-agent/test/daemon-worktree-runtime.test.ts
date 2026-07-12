@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteActiveStreamRegistry } from "../src/core/remote/iroh/active-stream-registry.ts";
 import { IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
@@ -62,6 +63,7 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 				label: "phone",
 				allowedWorkspaces: ["ws"],
 				allowedTools: "read",
+				rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 				pairedAt: 1,
 				lastSeenAt: 2,
 				lastSessionIdByWorkspace: { ws: "s-last" },
@@ -136,7 +138,7 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		expect(createRuntimeCalls).toHaveLength(1);
 		expect(createRuntimeCalls[0]).toMatchObject({
 			agentDir,
-			allowTools: "read,bash", // parent workspace policy, never per-worktree
+			toolPolicy: { tools: ["read"], allowUnlistedExtensionTools: false },
 			conversationTarget: { target: "new" },
 			cwd: worktreePath,
 			projectCwd: worktreePath,
@@ -247,7 +249,7 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 			cwd: workspacePath,
 			projectCwd: workspacePath,
 			sessionDir: getDefaultSessionDir(workspacePath, agentDir),
-			allowTools: "read,bash",
+			toolPolicy: { tools: ["read"], allowUnlistedExtensionTools: false },
 			projectTrusted: true,
 		});
 		expect(created.entry.worktreeId).toBeUndefined();

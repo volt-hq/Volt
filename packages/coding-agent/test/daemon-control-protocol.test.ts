@@ -20,6 +20,12 @@ import {
 	type RelayPreamble,
 } from "../src/daemon/control-protocol.ts";
 
+const RPC_GRANT = {
+	schemaVersion: 1 as const,
+	revision: 1,
+	capabilities: ["conversation.observe.v1" as const],
+};
+
 function roundTrip(message: object): unknown {
 	const decoder = new ControlLineDecoder();
 	const messages = decoder.push(encodeControlLine(message));
@@ -36,7 +42,14 @@ describe("control protocol framing", () => {
 			{ type: "lease_acquire", id: "3b", workspaceName: "volt", sessionId: "s-1", force: true },
 			{ type: "lease_release", id: "4", workspaceName: "volt", sessionId: "s-1" },
 			{ type: "lease_rekey", id: "5", workspaceName: "volt", oldSessionId: "s-1", newSessionId: "s-2" },
-			{ type: "pair_request", id: "6" },
+			{ type: "pair_request", id: "6", access: "coding" },
+			{
+				type: "client_access_update",
+				id: "6a",
+				clientNodeId: "n-1",
+				expectedRevision: 1,
+				access: "review",
+			},
 			{ type: "pair_cancel", id: "6b", requestId: "pair-1" },
 			{ type: "clients_list", id: "7" },
 			{ type: "client_revoke", id: "8", clientNodeId: "n-1" },
@@ -52,6 +65,7 @@ describe("control protocol framing", () => {
 			{
 				type: "relay_rpc",
 				id: "15",
+				relayId: "rl-1",
 				clientNodeId: "n-1",
 				workspaceName: "volt",
 				sessionId: "s-1",
@@ -125,6 +139,7 @@ describe("control protocol framing", () => {
 						pairedAtMs: 5,
 						lastSeenAtMs: 10,
 						allowedTools: ["read"],
+						rpcGrant: RPC_GRANT,
 					},
 				],
 				revokedClients: [
@@ -134,6 +149,7 @@ describe("control protocol framing", () => {
 						pairedAtMs: 1,
 						lastSeenAtMs: 2,
 						revokedAtMs: 3,
+						rpcGrant: RPC_GRANT,
 					},
 				],
 				remotePolicy: { allowTools: ["read", "bash"], detachedRuntimeTtlMs: 1_800_000 },
@@ -145,6 +161,16 @@ describe("control protocol framing", () => {
 				keepAwake: { enabled: true, state: "degraded", reason: "caffeinate exited" },
 			},
 			{ type: "clients_result", id: "7", clients: [] },
+			{
+				type: "client_access_updated",
+				id: "7a",
+				client: {
+					clientNodeId: "n-1",
+					pairedAtMs: 5,
+					allowedTools: ["read"],
+					rpcGrant: { ...RPC_GRANT, revision: 2 },
+				},
+			},
 			{ type: "pair_started", id: "8", requestId: "pr-1" },
 			{
 				type: "relay_rpc_result",
@@ -239,7 +265,13 @@ describe("control protocol framing", () => {
 			type: "relay_preamble",
 			relayId: "rl-7",
 			handshake: { workspace: "volt" },
-			authorization: { clientNodeId: "n-1", workspaceName: "volt", workspacePath: "/tmp/volt" },
+			authorization: {
+				clientNodeId: "n-1",
+				workspaceName: "volt",
+				workspacePath: "/tmp/volt",
+				allowedTools: "read",
+				rpcGrant: RPC_GRANT,
+			},
 			connectionId: "ic-3",
 			streamId: "st-9",
 			resolvedTarget: {
@@ -251,6 +283,12 @@ describe("control protocol framing", () => {
 			},
 		};
 		expect(isRelayPreamble(roundTrip(preamble))).toBe(true);
+		expect(
+			isRelayPreamble({
+				...preamble,
+				authorization: { ...preamble.authorization, rpcGrant: undefined },
+			}),
+		).toBe(false);
 	});
 
 	it("buffers partial lines across pushes", () => {

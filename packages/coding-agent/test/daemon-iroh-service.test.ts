@@ -224,157 +224,17 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		}
 		const pairedClientNodeId = clients.type === "clients_result" ? (clients.clients[0]?.clientNodeId as string) : "";
 
-		// relay_rpc: state-touching RPC commands forwarded from a TUI relay run
-		// against the daemon's real state and return the verbatim RPC response.
-		const liveActivityTokenHash = "a".repeat(64);
-		const pushRegister = await control.request({
+		// relay_rpc is bound to a live relay and its owning TUI control connection;
+		// a regular control client cannot forge that authority.
+		const missingRelay = await control.request({
 			type: "relay_rpc",
+			relayId: "rl-missing",
 			clientNodeId: pairedClientNodeId,
 			workspaceName: "ws",
 			sessionId: "s-relay",
-			command: {
-				type: "register_push_target",
-				id: "rp-1",
-				args: {
-					provider: "fcm",
-					platform: "ios",
-					pushTargetId: "pt-1",
-					pushTargetAuthToken: "auth-token",
-					enabled: true,
-					liveActivity: {
-						activityId: "act-1",
-						pushToken: "live-token",
-						tokenHash: liveActivityTokenHash,
-						tokenEnvironment: "production",
-					},
-				},
-			},
+			command: { type: "register_push_target", id: "rp-1", args: {} },
 		});
-		expect(pushRegister.type).toBe("relay_rpc_result");
-		if (pushRegister.type === "relay_rpc_result") {
-			expect(pushRegister.response).toMatchObject({
-				id: "rp-1",
-				command: "register_push_target",
-				success: true,
-				data: { status: "registered", pushTargetId: "pt-1" },
-			});
-		}
-
-		// Live activity registration finds the delivery channel registered above.
-		const liveActivityRegister = await control.request({
-			type: "relay_rpc",
-			clientNodeId: pairedClientNodeId,
-			workspaceName: "ws",
-			sessionId: "s-relay",
-			command: {
-				type: "register_live_activity",
-				id: "la-1",
-				workspaceName: "ws",
-				sessionId: "s-relay",
-				activityId: "act-1",
-				tokenHash: liveActivityTokenHash,
-				tokenEnvironment: "production",
-				platform: "ios",
-			},
-		});
-		expect(liveActivityRegister.type).toBe("relay_rpc_result");
-		if (liveActivityRegister.type === "relay_rpc_result") {
-			expect(liveActivityRegister.response).toMatchObject({
-				id: "la-1",
-				command: "register_live_activity",
-				success: true,
-				data: { status: "registered", activityId: "act-1" },
-			});
-		}
-
-		// A session mismatch surfaces the real error instead of a blind success.
-		const mismatchedRegister = await control.request({
-			type: "relay_rpc",
-			clientNodeId: pairedClientNodeId,
-			workspaceName: "ws",
-			sessionId: "s-relay",
-			command: {
-				type: "register_live_activity",
-				id: "la-2",
-				workspaceName: "ws",
-				sessionId: "s-other",
-				activityId: "act-1",
-				tokenHash: liveActivityTokenHash,
-				tokenEnvironment: "production",
-				platform: "ios",
-			},
-		});
-		expect(mismatchedRegister.type).toBe("relay_rpc_result");
-		if (mismatchedRegister.type === "relay_rpc_result") {
-			expect(mismatchedRegister.response).toMatchObject({ success: false, error: "session_mismatch" });
-		}
-
-		// Unknown clients are rejected before touching state.
-		const unknownClient = await control.request({
-			type: "relay_rpc",
-			clientNodeId: "not-a-client",
-			workspaceName: "ws",
-			sessionId: "s-relay",
-			command: { type: "unregister_live_activity", id: "la-3", workspaceName: "ws", sessionId: "s-relay" },
-		});
-		expect(unknownClient.type).toBe("error");
-
-		// unregister_workspace over relay_rpc is scoped to the bound workspace and only
-		// honors the documented `workspaceName` field.
-		const scratchWorkspaceDir = join(agentDir, "ws2");
-		mkdirSync(scratchWorkspaceDir, { recursive: true });
-		const scratchRegistered = await control.request({
-			type: "workspace_register",
-			name: "ws2",
-			path: scratchWorkspaceDir,
-		});
-		expect(scratchRegistered.type).toBe("ok");
-
-		// A relay bound to "ws" cannot unregister the unrelated workspace "ws2".
-		const crossWorkspaceUnregister = await control.request({
-			type: "relay_rpc",
-			clientNodeId: pairedClientNodeId,
-			workspaceName: "ws",
-			sessionId: "s-relay",
-			command: { type: "unregister_workspace", id: "uw-x", workspaceName: "ws2" },
-		});
-		expect(crossWorkspaceUnregister.type).toBe("relay_rpc_result");
-		if (crossWorkspaceUnregister.type === "relay_rpc_result") {
-			expect(crossWorkspaceUnregister.response).toMatchObject({ success: false, error: "session_mismatch" });
-		}
-
-		// The legacy/undocumented `name` field is not honored.
-		const legacyFieldUnregister = await control.request({
-			type: "relay_rpc",
-			clientNodeId: pairedClientNodeId,
-			workspaceName: "ws2",
-			sessionId: "s-relay",
-			command: { type: "unregister_workspace", id: "uw-y", name: "ws2" },
-		});
-		expect(legacyFieldUnregister.type).toBe("relay_rpc_result");
-		if (legacyFieldUnregister.type === "relay_rpc_result") {
-			expect(legacyFieldUnregister.response).toMatchObject({ success: false, error: "session_mismatch" });
-		}
-
-		// A relay bound to "ws2" may unregister "ws2" and reports refreshed metadata.
-		const workspaceUnregister = await control.request({
-			type: "relay_rpc",
-			clientNodeId: pairedClientNodeId,
-			workspaceName: "ws2",
-			sessionId: "s-relay",
-			command: { type: "unregister_workspace", id: "uw-1", workspaceName: "ws2" },
-		});
-		expect(workspaceUnregister.type).toBe("relay_rpc_result");
-		if (workspaceUnregister.type === "relay_rpc_result") {
-			expect(workspaceUnregister.response).toMatchObject({
-				id: "uw-1",
-				command: "unregister_workspace",
-				success: true,
-				data: { removedWorkspace: "ws2" },
-			});
-			expect(workspaceUnregister.workspaceMetadata?.workspaceNames).toContain("ws");
-			expect(workspaceUnregister.workspaceMetadata?.workspaceNames).not.toContain("ws2");
-		}
+		expect(missingRelay).toMatchObject({ type: "error", code: "not_found", message: "active relay not found" });
 
 		const reconnection = await phone.connect(endpointTicket.endpointAddr(), ALPN);
 		const reconnectStream = await reconnection.openBi();

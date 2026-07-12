@@ -8,6 +8,7 @@ import type {
 } from "../../core/remote/iroh/push.ts";
 import { createDaemonClient, type DaemonClient } from "../../daemon/control-client.ts";
 import {
+	CONTROL_RPC_GRANTS_CAPABILITY,
 	CONTROL_WORKTREES_CAPABILITY,
 	type ControlEvent,
 	type ControlWorktreeStatus,
@@ -222,7 +223,7 @@ export async function openDaemonWorktreeControl(
 		version: VERSION,
 		authToken: ensured.authToken,
 		reconnect: false,
-		capabilities: [CONTROL_WORKTREES_CAPABILITY],
+		capabilities: [CONTROL_WORKTREES_CAPABILITY, CONTROL_RPC_GRANTS_CAPABILITY],
 	});
 	try {
 		await client.connect();
@@ -330,6 +331,7 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 	let state: DaemonAttachConnectionState = "reconnecting";
 	let resolvedWorkspaceName: string | undefined;
 	let activeRelays = 0;
+	const activeRelayIds = new Map<string, string>();
 	let currentSessionId: string | undefined;
 	let disposed = false;
 	let resolvingWorkspace: Promise<void> | undefined;
@@ -376,6 +378,8 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 		return NOOP_OUTCOME;
 	};
 
+	const relayKey = (clientNodeId: string, sessionId: string) => `${clientNodeId}\0${sessionId}`;
+
 	const handleRelayOffer = (offer: DaemonRelayOffer) => {
 		const handler = relayOfferHandler;
 		const activeClient = client;
@@ -384,11 +388,16 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 		}
 		handler(offer, async () => {
 			const opened = await activeClient.openRelay({ relayId: offer.relayId, relayToken: offer.relayToken });
+			const key = relayKey(offer.clientNodeId, offer.sessionId);
+			activeRelayIds.set(key, offer.relayId);
 			setRelayCount(activeRelays + 1);
 			let finished = false;
 			const finish = () => {
 				if (!finished) {
 					finished = true;
+					if (activeRelayIds.get(key) === offer.relayId) {
+						activeRelayIds.delete(key);
+					}
 					setRelayCount(Math.max(0, activeRelays - 1));
 				}
 			};
@@ -459,7 +468,7 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 					version: VERSION,
 					authToken: ensured.authToken,
 					refreshEndpoint: () => readPublishedDaemonEndpoint(options.agentDir),
-					capabilities: [CONTROL_WORKTREES_CAPABILITY],
+					capabilities: [CONTROL_WORKTREES_CAPABILITY, CONTROL_RPC_GRANTS_CAPABILITY],
 					reconnect: true,
 					onEvent: (event) => {
 						if (event.type === "relay_offer") {
@@ -550,12 +559,14 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 		) {
 			const workspaceName = resolvedWorkspaceName;
 			const activeClient = client;
-			if (!activeClient || !workspaceName) {
+			const relayId = activeRelayIds.get(relayKey(clientNodeId, sessionId));
+			if (!activeClient || !workspaceName || !relayId) {
 				return undefined;
 			}
 			try {
 				const response = await activeClient.request({
 					type: "relay_rpc",
+					relayId,
 					clientNodeId,
 					workspaceName,
 					sessionId,
@@ -680,6 +691,7 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 		},
 		async dispose() {
 			disposed = true;
+			activeRelayIds.clear();
 			await client?.close();
 			client = undefined;
 			state = "gone";

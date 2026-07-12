@@ -1,4 +1,12 @@
 import { Buffer } from "node:buffer";
+import {
+	type IrohRemoteAccessPresetName,
+	type IrohRemoteRpcCapability,
+	type IrohRemoteRpcGrant,
+	isIrohRemoteAccessPresetName,
+	parseIrohRemoteRpcCapabilities,
+	parseIrohRemoteRpcGrant,
+} from "../core/remote/iroh/access-grant.ts";
 import type {
 	IrohRemoteLiveActivityUpdateIntent,
 	IrohRemotePushNotificationDeliveryStatus,
@@ -28,6 +36,8 @@ export type ControlClientKind = "tui" | "cli";
 export const CONTROL_WORKTREES_CAPABILITY = "worktrees";
 /** Status capability for cancellable, immediately-invalidated pairing tickets. */
 export const CONTROL_PAIR_CANCEL_CAPABILITY = "pair_cancel";
+/** TUI/CLI understands per-device tool + RPC grant control messages and relay preambles. */
+export const CONTROL_RPC_GRANTS_CAPABILITY = "rpc_grants";
 
 export type HelloMessage =
 	| {
@@ -65,6 +75,10 @@ export interface HelloAck {
 // Requests and responses (control role)
 // ============================================================================
 
+export type ControlAccessSelection =
+	| { access?: IrohRemoteAccessPresetName; allowedTools?: never; rpcCapabilities?: never }
+	| { access?: never; allowedTools: string[]; rpcCapabilities: IrohRemoteRpcCapability[] };
+
 export type ControlRequest =
 	| { type: "status"; id: string }
 	| { type: "shutdown"; id: string }
@@ -78,9 +92,15 @@ export type ControlRequest =
 	  }
 	| { type: "lease_release"; id: string; workspaceName: string; sessionId: string }
 	| { type: "lease_rekey"; id: string; workspaceName: string; oldSessionId: string; newSessionId: string }
-	| { type: "pair_request"; id: string; workspaceName?: string } // progress arrives as pairing_progress events
+	| ({ type: "pair_request"; id: string; workspaceName?: string } & ControlAccessSelection) // progress arrives as pairing_progress events
 	| { type: "pair_cancel"; id: string; requestId: string }
 	| { type: "clients_list"; id: string }
+	| ({
+			type: "client_access_update";
+			id: string;
+			clientNodeId: string;
+			expectedRevision: number;
+	  } & ControlAccessSelection)
 	| { type: "client_revoke"; id: string; clientNodeId: string }
 	| { type: "client_approve_repair"; id: string; clientNodeId: string }
 	| { type: "workspace_register"; id: string; name: string; path: string }
@@ -116,6 +136,8 @@ export type ControlRequest =
 	| {
 			type: "relay_rpc";
 			id: string;
+			/** Active relay whose phone command is being forwarded. */
+			relayId: string;
 			/** paired phone client the relayed conversation belongs to */
 			clientNodeId: string;
 			workspaceName: string;
@@ -217,6 +239,7 @@ export interface ControlClientStatus {
 	lastSeenAtMs?: number;
 	/** Persisted headless tool grant for this paired device. */
 	allowedTools?: string[];
+	rpcGrant?: IrohRemoteRpcGrant;
 }
 
 export interface ControlRevokedClientStatus {
@@ -227,6 +250,7 @@ export interface ControlRevokedClientStatus {
 	revokedAtMs: number;
 	/** Present after the desktop explicitly allows this identity to use a fresh pairing ticket. */
 	rePairApprovedAtMs?: number;
+	rpcGrant?: IrohRemoteRpcGrant;
 }
 
 export interface DaemonRemotePolicyStatus {
@@ -265,6 +289,7 @@ export type ControlResponse =
 	  }
 	| { type: "keep_awake_result"; id: string; keepAwake: ControlKeepAwakeStatus }
 	| { type: "clients_result"; id: string; clients: ControlClientStatus[] }
+	| { type: "client_access_updated"; id: string; client: ControlClientStatus }
 	| { type: "worktree_result"; id: string; worktree: ControlWorktreeStatus }
 	| { type: "worktrees_result"; id: string; worktrees: ControlWorktreeStatus[] }
 	| {
@@ -358,6 +383,9 @@ export interface RelayPreamble {
 		clientNodeId: string;
 		workspaceName: string;
 		workspacePath: string;
+		/** Headless agent tool grant, carried for visibility; TUI-owned sessions retain their full local tools. */
+		allowedTools: string;
+		rpcGrant: IrohRemoteRpcGrant;
 		/** Present when the conversation is bound to a daemon-managed worktree. */
 		worktreeId?: string;
 		/** Worktree checkout path — the TUI sanitizes with this as the root. */
@@ -484,6 +512,28 @@ function isOptionalNumber(value: unknown): boolean {
 	return value === undefined || typeof value === "number";
 }
 
+function isControlAccessSelection(value: Record<string, unknown>, allowDefault: boolean): boolean {
+	if (value.access !== undefined) {
+		return (
+			isIrohRemoteAccessPresetName(value.access) &&
+			value.allowedTools === undefined &&
+			value.rpcCapabilities === undefined
+		);
+	}
+	if (value.allowedTools === undefined && value.rpcCapabilities === undefined) {
+		return allowDefault;
+	}
+	if (!Array.isArray(value.allowedTools) || !value.allowedTools.every((entry) => typeof entry === "string")) {
+		return false;
+	}
+	try {
+		parseIrohRemoteRpcCapabilities(value.rpcCapabilities);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 function isPushDeliveryStatus(value: unknown): value is IrohRemotePushNotificationDeliveryStatus {
 	return (
 		value === "sent" ||
@@ -604,7 +654,10 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 		case "clients_list":
 			return true;
 		case "pair_request":
-			return value.workspaceName === undefined || typeof value.workspaceName === "string";
+			return (
+				(value.workspaceName === undefined || typeof value.workspaceName === "string") &&
+				isControlAccessSelection(value, true)
+			);
 		case "lease_acquire":
 		case "lease_release":
 			return typeof value.workspaceName === "string" && typeof value.sessionId === "string";
@@ -616,6 +669,14 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 			);
 		case "pair_cancel":
 			return typeof value.requestId === "string";
+		case "client_access_update":
+			return (
+				typeof value.clientNodeId === "string" &&
+				typeof value.expectedRevision === "number" &&
+				Number.isSafeInteger(value.expectedRevision) &&
+				value.expectedRevision >= 1 &&
+				isControlAccessSelection(value, false)
+			);
 		case "client_revoke":
 		case "client_approve_repair":
 			return typeof value.clientNodeId === "string";
@@ -664,6 +725,7 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 			return typeof value.viewerFeedId === "string";
 		case "relay_rpc":
 			return (
+				typeof value.relayId === "string" &&
 				typeof value.clientNodeId === "string" &&
 				typeof value.workspaceName === "string" &&
 				typeof value.sessionId === "string" &&
@@ -701,6 +763,7 @@ export function isControlResponse(value: unknown): value is ControlResponse {
 		case "lease_denied":
 		case "status_result":
 		case "clients_result":
+		case "client_access_updated":
 		case "pair_started":
 			return true;
 		case "worktree_result":
@@ -752,11 +815,22 @@ export function isHelloAck(value: unknown): value is HelloAck {
 }
 
 export function isRelayPreamble(value: unknown): value is RelayPreamble {
-	return (
-		isRecord(value) &&
-		value.type === "relay_preamble" &&
-		typeof value.relayId === "string" &&
-		isRecord(value.authorization) &&
-		isRecord(value.resolvedTarget)
-	);
+	if (
+		!isRecord(value) ||
+		value.type !== "relay_preamble" ||
+		typeof value.relayId !== "string" ||
+		!isRecord(value.authorization) ||
+		!isRecord(value.resolvedTarget)
+	) {
+		return false;
+	}
+	try {
+		if (typeof value.authorization.allowedTools !== "string") {
+			return false;
+		}
+		parseIrohRemoteRpcGrant(value.authorization.rpcGrant, "relay rpcGrant");
+		return true;
+	} catch {
+		return false;
+	}
 }

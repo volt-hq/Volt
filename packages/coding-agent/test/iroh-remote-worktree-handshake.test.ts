@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import {
 	createIrohRemoteHandshakeSuccess,
@@ -243,6 +244,7 @@ describe("integrated conversation handshake response echo", () => {
 			label: "phone",
 			allowedWorkspaces: ["volt"],
 			allowedTools: "read",
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			pairedAt: 1,
 			lastSeenAt: 2,
 		},

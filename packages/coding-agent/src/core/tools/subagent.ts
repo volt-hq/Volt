@@ -27,6 +27,11 @@ export const DEFAULT_SUBAGENT_AGGREGATE_OUTPUT_MAX_BYTES = 100 * 1024;
 export const DEFAULT_SUBAGENT_PARALLEL_MAX_TASKS = 8;
 export const DEFAULT_SUBAGENT_PARALLEL_MAX_CONCURRENCY = 4;
 export const DEFAULT_SUBAGENT_CHAIN_MAX_STEPS = 8;
+export const SUBAGENT_TREE_MAX_DEPTH = 5;
+export const SUBAGENT_TREE_MAX_CHILDREN = 16;
+const SUBAGENT_TREE_TASK_PREVIEW_CHARS = 200;
+const SUBAGENT_TREE_ACTIVITY_CHARS = 120;
+const SUBAGENT_PROGRESS_THROTTLE_MS = 200;
 
 const BUILT_IN_SUBAGENT_SUMMARY =
 	"Built-in agents: general (ad hoc tasks), researcher (source-backed evidence gathering with web_search), design-doc (RFC/design synthesis), and security-reviewer (non-mutating security review with web_search).";
@@ -111,6 +116,27 @@ export interface SubagentToolAgentDetails {
 	source?: SubagentDefinitionSource;
 }
 
+/**
+ * One node of the recursive delegation tree observed live by a parent task.
+ * Children are grafted from the child runtime's own `subagent` tool updates, so
+ * arbitrarily nested delegation surfaces level by level with bounded depth.
+ */
+export interface SubagentTreeNode {
+	subagentId?: string;
+	sessionId?: string;
+	agent: SubagentToolAgentDetails;
+	status: SubagentToolStatus;
+	/** Bounded task preview so clients can label nodes without the child's args. */
+	task?: string;
+	startedAt?: number;
+	durationMs?: number;
+	toolCalls?: number;
+	tokens?: number;
+	/** Bounded one-line description of what the node is doing right now. */
+	currentActivity?: string;
+	children?: SubagentTreeNode[];
+}
+
 export interface SubagentToolTaskDetails {
 	index: number;
 	subagentId?: string;
@@ -124,6 +150,14 @@ export interface SubagentToolTaskDetails {
 	usage?: SubagentToolUsageDetails;
 	output?: SubagentToolOutputDetails;
 	error?: SubagentToolErrorDetails;
+	/** Live tool-call count while running; final count once terminal. */
+	toolCalls?: number;
+	/** Live token consumption while running; final total once terminal. */
+	tokens?: number;
+	/** Present while running when the child reported tool activity. */
+	currentActivity?: string;
+	/** Nested delegation observed under this task, newest snapshot wins. */
+	children?: SubagentTreeNode[];
 }
 
 export interface SubagentToolChildSessionDetails {
@@ -149,6 +183,14 @@ export interface SubagentToolDetails {
 	output?: SubagentToolOutputDetails;
 	/** Present for single mode for backward-compatible consumers. */
 	error?: SubagentToolErrorDetails;
+	/** Present for single mode: live/final tool-call count of the one task. */
+	toolCalls?: number;
+	/** Present for single mode: live/final token consumption of the one task. */
+	tokens?: number;
+	/** Present for single mode while the one task reports tool activity. */
+	currentActivity?: string;
+	/** Present for single mode: nested delegation under the one task. */
+	children?: SubagentTreeNode[];
 	/** Total model-visible result after combining parallel child outputs. */
 	aggregateOutput?: SubagentToolOutputDetails;
 	/** Root-scoped recursive delegation accounting and final consumption. */
@@ -291,6 +333,339 @@ function getErrorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function clampInline(text: string, maxChars: number): string {
+	const collapsed = text.replace(/\s+/g, " ").trim();
+	if (collapsed.length <= maxChars) {
+		return collapsed;
+	}
+	return `${collapsed.slice(0, Math.max(1, maxChars - 1))}…`;
+}
+
+const TOOL_ACTIVITY_ARG_KEYS = [
+	"command",
+	"path",
+	"file_path",
+	"filePath",
+	"pattern",
+	"query",
+	"url",
+	"agent",
+	"task",
+	"prompt",
+	"name",
+];
+
+function describeToolActivity(toolName: string, args: unknown): string {
+	let detail: string | undefined;
+	if (isRecord(args)) {
+		for (const key of TOOL_ACTIVITY_ARG_KEYS) {
+			const value = args[key];
+			if (typeof value === "string" && value.trim().length > 0) {
+				detail = value;
+				break;
+			}
+		}
+		if (!detail) {
+			for (const value of Object.values(args)) {
+				if (typeof value === "string" && value.trim().length > 0) {
+					detail = value;
+					break;
+				}
+			}
+		}
+	}
+	return clampInline(detail ? `${toolName} ${detail}` : toolName, SUBAGENT_TREE_ACTIVITY_CHARS);
+}
+
+function isSubagentToolDetails(value: unknown): value is SubagentToolDetails {
+	return isRecord(value) && typeof value.mode === "string" && typeof value.status === "string";
+}
+
+function extractSubagentResultDetails(result: unknown): SubagentToolDetails | undefined {
+	if (!isRecord(result)) {
+		return undefined;
+	}
+	return isSubagentToolDetails(result.details) ? result.details : undefined;
+}
+
+function nodeStatusFromOverall(status: SubagentToolOverallStatus): SubagentToolStatus {
+	return status === "partial" || status === "running" ? "running" : status;
+}
+
+function readTreeTaskInput(value: unknown): { agent?: string; task?: string } {
+	if (!isRecord(value)) {
+		return {};
+	}
+	return {
+		...(typeof value.agent === "string" && value.agent.trim() ? { agent: value.agent } : {}),
+		...(typeof value.task === "string" && value.task.trim() ? { task: value.task } : {}),
+	};
+}
+
+function treeTaskInputs(args: unknown, mode: SubagentToolMode): Array<{ agent?: string; task?: string }> {
+	if (!isRecord(args)) {
+		return [];
+	}
+	if (mode === "single") {
+		return [readTreeTaskInput(args)];
+	}
+	const list = mode === "chain" ? args.chain : args.tasks;
+	return Array.isArray(list) ? list.map(readTreeTaskInput) : [];
+}
+
+function boundedTreeChildren(children: SubagentTreeNode[] | undefined, depth: number): SubagentTreeNode[] | undefined {
+	if (!children || children.length === 0 || depth + 1 >= SUBAGENT_TREE_MAX_DEPTH) {
+		return undefined;
+	}
+	const bounded = children
+		.slice(0, SUBAGENT_TREE_MAX_CHILDREN)
+		.map((child) => boundedTreeNode(child, depth + 1))
+		.filter((child): child is SubagentTreeNode => child !== undefined);
+	return bounded.length > 0 ? bounded : undefined;
+}
+
+function boundedTreeNode(node: SubagentTreeNode, depth: number): SubagentTreeNode | undefined {
+	if (depth >= SUBAGENT_TREE_MAX_DEPTH) {
+		return undefined;
+	}
+	const children = boundedTreeChildren(node.children, depth);
+	return {
+		...(node.subagentId ? { subagentId: node.subagentId } : {}),
+		...(node.sessionId ? { sessionId: node.sessionId } : {}),
+		agent: { ...node.agent },
+		status: node.status,
+		...(node.task ? { task: clampInline(node.task, SUBAGENT_TREE_TASK_PREVIEW_CHARS) } : {}),
+		...(node.startedAt !== undefined ? { startedAt: node.startedAt } : {}),
+		...(node.durationMs !== undefined ? { durationMs: node.durationMs } : {}),
+		...(node.toolCalls !== undefined ? { toolCalls: node.toolCalls } : {}),
+		...(node.tokens !== undefined ? { tokens: node.tokens } : {}),
+		...(node.currentActivity
+			? { currentActivity: clampInline(node.currentActivity, SUBAGENT_TREE_ACTIVITY_CHARS) }
+			: {}),
+		...(children ? { children } : {}),
+	};
+}
+
+function treeNodeFromTaskDetails(
+	task: SubagentToolTaskDetails,
+	input: { agent?: string; task?: string } | undefined,
+): SubagentTreeNode {
+	return {
+		...(task.subagentId ? { subagentId: task.subagentId } : {}),
+		...(task.sessionId ? { sessionId: task.sessionId } : {}),
+		agent: { ...task.agent },
+		status: task.status,
+		...(input?.task ? { task: input.task } : {}),
+		...(task.startedAt !== undefined ? { startedAt: task.startedAt } : {}),
+		...(task.durationMs !== undefined ? { durationMs: task.durationMs } : {}),
+		...(task.toolCalls !== undefined
+			? { toolCalls: task.toolCalls }
+			: task.usage
+				? { toolCalls: task.usage.messages.toolCalls }
+				: {}),
+		...(task.tokens !== undefined ? { tokens: task.tokens } : task.usage ? { tokens: task.usage.tokens.total } : {}),
+		...(task.currentActivity ? { currentActivity: task.currentActivity } : {}),
+		...(task.children ? { children: task.children } : {}),
+	};
+}
+
+/** Convert a child's `subagent` tool details into tree nodes for the parent's details. */
+function subagentTreeNodes(details: SubagentToolDetails | undefined, args: unknown): SubagentTreeNode[] {
+	if (!details) {
+		return [];
+	}
+	const inputs = treeTaskInputs(args, details.mode);
+	if (details.mode === "single") {
+		const node: SubagentTreeNode = {
+			...(details.subagentId ? { subagentId: details.subagentId } : {}),
+			...(details.sessionId ? { sessionId: details.sessionId } : {}),
+			agent: details.agent ? { ...details.agent } : { name: inputs[0]?.agent ?? "subagent" },
+			status: nodeStatusFromOverall(details.status),
+			...(inputs[0]?.task ? { task: inputs[0].task } : {}),
+			...(details.startedAt !== undefined ? { startedAt: details.startedAt } : {}),
+			...(details.durationMs !== undefined ? { durationMs: details.durationMs } : {}),
+			...(details.toolCalls !== undefined
+				? { toolCalls: details.toolCalls }
+				: details.usage
+					? { toolCalls: details.usage.messages.toolCalls }
+					: {}),
+			...(details.tokens !== undefined
+				? { tokens: details.tokens }
+				: details.usage
+					? { tokens: details.usage.tokens.total }
+					: {}),
+			...(details.currentActivity ? { currentActivity: details.currentActivity } : {}),
+			...(details.children ? { children: details.children } : {}),
+		};
+		const bounded = boundedTreeNode(node, 0);
+		return bounded ? [bounded] : [];
+	}
+	const items = details.mode === "chain" ? (details.steps ?? []) : (details.tasks ?? []);
+	if (items.length === 0) {
+		return inputs.slice(0, SUBAGENT_TREE_MAX_CHILDREN).flatMap((input) => {
+			const node = boundedTreeNode(
+				{
+					agent: { name: input.agent ?? "subagent" },
+					status: "running",
+					...(input.task ? { task: input.task } : {}),
+				},
+				0,
+			);
+			return node ? [node] : [];
+		});
+	}
+	return items.slice(0, SUBAGENT_TREE_MAX_CHILDREN).flatMap((item) => {
+		const node = boundedTreeNode(treeNodeFromTaskDetails(item, inputs[item.index]), 0);
+		return node ? [node] : [];
+	});
+}
+
+function coerceRunningTreeNodes(nodes: SubagentTreeNode[], status: SubagentToolStatus): SubagentTreeNode[] {
+	return nodes.map((node) => ({
+		...node,
+		status: node.status === "running" ? status : node.status,
+		...(node.children ? { children: coerceRunningTreeNodes(node.children, status) } : {}),
+	}));
+}
+
+/**
+ * Live view of one child run, fed by the child's RPC event stream. Tracks tool
+ * activity, token consumption, and the nested delegation tree observed through
+ * the child's own `subagent` tool calls.
+ */
+class SubagentTaskLiveActivity {
+	private toolCalls = 0;
+	private tokens = 0;
+	private currentActivity: string | undefined;
+	private readonly childArgs = new Map<string, unknown>();
+	private readonly childTrees = new Map<string, SubagentTreeNode[]>();
+
+	/** Apply one child event. Returns true when displayable progress state changed. */
+	apply(event: SubagentEvent): boolean {
+		if ("workflowId" in event) {
+			// Workflow-scoped tool frames (review timelines) are not the child's
+			// own tool calls and carry no result payload.
+			return false;
+		}
+		switch (event.type) {
+			case "tool_execution_start": {
+				this.toolCalls += 1;
+				this.currentActivity = describeToolActivity(event.toolName, event.args);
+				if (event.toolName === "subagent") {
+					this.childArgs.set(event.toolCallId, event.args);
+					const placeholders = subagentTreeNodes(
+						{ mode: subagentTreeModeFromArgs(event.args), status: "running" },
+						event.args,
+					);
+					if (placeholders.length > 0) {
+						this.childTrees.set(event.toolCallId, placeholders);
+					}
+				}
+				return true;
+			}
+			case "tool_execution_update": {
+				if (event.toolName !== "subagent") {
+					return false;
+				}
+				const nodes = subagentTreeNodes(
+					extractSubagentResultDetails(event.partialResult),
+					this.childArgs.get(event.toolCallId) ?? event.args,
+				);
+				if (nodes.length === 0) {
+					return false;
+				}
+				this.childTrees.set(event.toolCallId, nodes);
+				return true;
+			}
+			case "tool_execution_end": {
+				this.currentActivity = undefined;
+				if (event.toolName === "subagent") {
+					const nodes = subagentTreeNodes(
+						extractSubagentResultDetails(event.result),
+						this.childArgs.get(event.toolCallId),
+					);
+					if (nodes.length > 0) {
+						this.childTrees.set(event.toolCallId, nodes);
+					} else {
+						const existing = this.childTrees.get(event.toolCallId);
+						if (existing) {
+							this.childTrees.set(
+								event.toolCallId,
+								coerceRunningTreeNodes(existing, event.isError ? "failed" : "completed"),
+							);
+						}
+					}
+				}
+				return true;
+			}
+			case "message_end": {
+				if (event.message.role !== "assistant") {
+					return false;
+				}
+				const usage = event.message.usage;
+				this.tokens += usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+				return true;
+			}
+			default:
+				return false;
+		}
+	}
+
+	children(status?: SubagentToolStatus): SubagentTreeNode[] | undefined {
+		const all: SubagentTreeNode[] = [];
+		for (const nodes of this.childTrees.values()) {
+			all.push(...nodes);
+		}
+		if (all.length === 0) {
+			return undefined;
+		}
+		const bounded = all.slice(0, SUBAGENT_TREE_MAX_CHILDREN);
+		return status && status !== "running" && status !== "completed"
+			? coerceRunningTreeNodes(bounded, status)
+			: bounded;
+	}
+
+	runningDetailFields(): Pick<SubagentToolTaskDetails, "toolCalls" | "tokens" | "currentActivity" | "children"> {
+		const children = this.children();
+		return {
+			...(this.toolCalls > 0 ? { toolCalls: this.toolCalls } : {}),
+			...(this.tokens > 0 ? { tokens: this.tokens } : {}),
+			...(this.currentActivity ? { currentActivity: this.currentActivity } : {}),
+			...(children ? { children } : {}),
+		};
+	}
+
+	finalDetailFields(
+		status: SubagentToolStatus,
+		stats: SessionStats | undefined,
+	): Pick<SubagentToolTaskDetails, "toolCalls" | "tokens" | "children"> {
+		const toolCalls = stats ? stats.toolCalls : this.toolCalls;
+		const tokens = stats ? stats.tokens.total : this.tokens;
+		const children = this.children(status);
+		return {
+			...(toolCalls > 0 ? { toolCalls } : {}),
+			...(tokens > 0 ? { tokens } : {}),
+			...(children ? { children } : {}),
+		};
+	}
+}
+
+function subagentTreeModeFromArgs(args: unknown): SubagentToolMode {
+	if (isRecord(args)) {
+		if (Array.isArray(args.chain) && args.chain.length > 0) {
+			return "chain";
+		}
+		if (Array.isArray(args.tasks) && args.tasks.length > 0) {
+			return "parallel";
+		}
+	}
+	return "single";
+}
+
 function requirePositiveInteger(value: number, field: string): number {
 	if (!Number.isInteger(value) || value <= 0) {
 		throw new Error(`${field} must be a positive integer`);
@@ -357,6 +732,7 @@ function createTaskDetails(options: {
 	output: TruncatedText;
 	maxOutputBytes: number;
 	errorMessage?: string;
+	live?: SubagentTaskLiveActivity;
 }): SubagentToolTaskDetails {
 	return {
 		index: options.index,
@@ -371,6 +747,7 @@ function createTaskDetails(options: {
 		...(options.stats ? { usage: summarizeStats(options.stats) } : {}),
 		output: createOutputDetails(options.output, options.maxOutputBytes),
 		...(options.errorMessage ? { error: { message: options.errorMessage } } : {}),
+		...(options.live ? options.live.finalDetailFields(options.status, options.stats) : {}),
 	};
 }
 
@@ -380,6 +757,7 @@ function createRunningTaskDetails(options: {
 	agentName: string;
 	handle: SubagentHandle | undefined;
 	startedAt?: number;
+	live?: SubagentTaskLiveActivity;
 }): SubagentToolTaskDetails {
 	return {
 		index: options.index,
@@ -390,6 +768,7 @@ function createRunningTaskDetails(options: {
 		},
 		status: "running",
 		...(options.startedAt !== undefined ? { startedAt: options.startedAt } : {}),
+		...(options.live ? options.live.runningDetailFields() : {}),
 	};
 }
 
@@ -424,6 +803,10 @@ function createSingleDetails(task: SubagentToolTaskDetails): SubagentToolDetails
 		error: task.error,
 		...(task.startedAt !== undefined ? { startedAt: task.startedAt } : {}),
 		...(task.durationMs !== undefined ? { durationMs: task.durationMs } : {}),
+		...(task.toolCalls !== undefined ? { toolCalls: task.toolCalls } : {}),
+		...(task.tokens !== undefined ? { tokens: task.tokens } : {}),
+		...(task.currentActivity ? { currentActivity: task.currentActivity } : {}),
+		...(task.children ? { children: task.children } : {}),
 		...(childSessions ? { childSessions } : {}),
 	};
 }
@@ -835,6 +1218,10 @@ interface SubagentConversationItem {
 	usage?: SubagentToolUsageDetails;
 	output?: SubagentToolOutputDetails;
 	error?: SubagentToolErrorDetails;
+	toolCallsLive?: number;
+	tokensLive?: number;
+	currentActivity?: string;
+	children?: SubagentTreeNode[];
 }
 
 function formatCompactCount(value: number): string {
@@ -930,6 +1317,10 @@ class SubagentConversationSummaryComponent implements Component {
 					usage: this.details.usage,
 					output: this.details.output,
 					error: this.details.error,
+					...(this.details.toolCalls !== undefined ? { toolCallsLive: this.details.toolCalls } : {}),
+					...(this.details.tokens !== undefined ? { tokensLive: this.details.tokens } : {}),
+					...(this.details.currentActivity ? { currentActivity: this.details.currentActivity } : {}),
+					...(this.details.children ? { children: this.details.children } : {}),
 				},
 			];
 		}
@@ -946,6 +1337,10 @@ class SubagentConversationSummaryComponent implements Component {
 					usage: item.usage,
 					output: item.output,
 					error: item.error,
+					...(item.toolCalls !== undefined ? { toolCallsLive: item.toolCalls } : {}),
+					...(item.tokens !== undefined ? { tokensLive: item.tokens } : {}),
+					...(item.currentActivity ? { currentActivity: item.currentActivity } : {}),
+					...(item.children ? { children: item.children } : {}),
 				}));
 			}
 		}
@@ -969,6 +1364,67 @@ class SubagentConversationSummaryComponent implements Component {
 			input,
 			...(this.resultIsError && index === 0 && this.resultText ? { error: { message: this.resultText } } : {}),
 		}));
+	}
+
+	/** Render nested delegation nodes with box-drawing branches under an item. */
+	private renderTreeNodes(
+		lines: string[],
+		nodes: readonly SubagentTreeNode[],
+		prefix: string,
+		width: number,
+		depth: number,
+	): void {
+		if (depth >= SUBAGENT_TREE_MAX_DEPTH) {
+			return;
+		}
+		for (const [position, node] of nodes.entries()) {
+			const last = position === nodes.length - 1;
+			const branch = last ? "└─" : "├─";
+			const continuation = last ? "  " : "│ ";
+			const agentLabel = this.currentTheme.bold(this.currentTheme.fg("text", node.agent.name));
+			const task = node.task?.replace(/\s+/g, " ").trim();
+			const taskSuffix = task ? this.currentTheme.fg("muted", ` · ${task}`) : "";
+			lines.push(
+				truncateToWidth(
+					`${this.currentTheme.fg("muted", `${prefix}${branch} `)}${statusIcon(node.status, this.currentTheme)} ${agentLabel}${taskSuffix}`,
+					width,
+					this.currentTheme.fg("dim", "…"),
+				),
+			);
+
+			const metadata: string[] = [statusText(node.status, this.currentTheme)];
+			if (node.toolCalls !== undefined) {
+				metadata.push(this.currentTheme.fg("muted", pluralize(node.toolCalls, "tool call")));
+			}
+			const timing = formatTiming(
+				{
+					...(node.startedAt !== undefined ? { startedAt: node.startedAt } : {}),
+					...(node.durationMs !== undefined ? { durationMs: node.durationMs } : {}),
+				},
+				node.status === "running",
+				this.currentTheme,
+			);
+			if (timing) metadata.push(timing);
+			if (node.tokens !== undefined) {
+				metadata.push(this.currentTheme.fg("dim", `${formatCompactCount(node.tokens)} tokens`));
+			}
+			if (node.status === "running" && node.currentActivity) {
+				metadata.push(this.currentTheme.fg("accent", node.currentActivity.replace(/\s+/g, " ")));
+			}
+			if (metadata.length > 1 || node.status !== "running") {
+				lines.push(
+					truncateToWidth(
+						`${this.currentTheme.fg("muted", `${prefix}${continuation}  `)}${metadata.join(this.currentTheme.fg("dim", " · "))}`,
+						width,
+						this.currentTheme.fg("dim", "…"),
+					),
+				);
+			}
+
+			if (node.children && node.children.length > 0) {
+				this.renderTreeNodes(lines, node.children, `${prefix}${continuation}`, width, depth + 1);
+			}
+		}
 	}
 
 	render(width: number): string[] {
@@ -998,12 +1454,15 @@ class SubagentConversationSummaryComponent implements Component {
 			lines.push(truncateToWidth(`${taskPrefix}${taskSuffix}`, safeWidth, this.currentTheme.fg("dim", "…")));
 
 			const metadata: string[] = [statusText(item.status, this.currentTheme)];
-			const toolCalls = item.usage?.messages.toolCalls;
+			const toolCalls = item.usage?.messages.toolCalls ?? item.toolCallsLive;
 			if (toolCalls !== undefined) metadata.push(this.currentTheme.fg("muted", pluralize(toolCalls, "tool call")));
 			const timing = formatTiming(item.timing, this.isPartial, this.currentTheme);
 			if (timing) metadata.push(timing);
-			const tokens = item.usage?.tokens.total;
+			const tokens = item.usage?.tokens.total ?? item.tokensLive;
 			if (tokens !== undefined) metadata.push(this.currentTheme.fg("dim", `${formatCompactCount(tokens)} tokens`));
+			if (item.status === "running" && item.currentActivity) {
+				metadata.push(this.currentTheme.fg("accent", item.currentActivity.replace(/\s+/g, " ")));
+			}
 			if (item.error?.message) metadata.push(this.currentTheme.fg("error", item.error.message.replace(/\s+/g, " ")));
 			lines.push(
 				truncateToWidth(
@@ -1016,6 +1475,9 @@ class SubagentConversationSummaryComponent implements Component {
 			const warning = outputWarning(item.output, this.currentTheme);
 			if (warning) {
 				lines.push(truncateToWidth(`${continuation}  ${warning}`, safeWidth, this.currentTheme.fg("dim", "…")));
+			}
+			if (item.children && item.children.length > 0) {
+				this.renderTreeNodes(lines, item.children, `${continuation} `, safeWidth, 1);
 			}
 			if (!this.expanded) continue;
 			const outputText = item.output?.text ?? (items.length === 1 && !this.isPartial ? this.resultText : undefined);
@@ -1125,10 +1587,50 @@ export function createSubagentToolDefinition(
 				}
 				onUpdate({ content: [{ type: "text", text }], details: withDelegation(details) });
 			};
+			// Child event streams (nested delegation included) can be chatty, so
+			// progress updates are throttled with a trailing emit that preserves
+			// the newest snapshot. Final updates flush any queued progress first,
+			// so a stale snapshot can never land after the terminal details.
+			let progressThrottleTimer: ReturnType<typeof setTimeout> | undefined;
+			let queuedProgress: { details: SubagentToolDetails; message: string | undefined } | undefined;
+			let lastProgressEmitAt = 0;
+			const cancelQueuedProgress = (): void => {
+				queuedProgress = undefined;
+				if (progressThrottleTimer) {
+					clearTimeout(progressThrottleTimer);
+					progressThrottleTimer = undefined;
+				}
+			};
+			const flushQueuedProgress = (): void => {
+				if (progressThrottleTimer) {
+					clearTimeout(progressThrottleTimer);
+					progressThrottleTimer = undefined;
+				}
+				const queued = queuedProgress;
+				queuedProgress = undefined;
+				if (queued) {
+					lastProgressEmitAt = Date.now();
+					emitToolUpdate(queued.details, formatProgressContent(queued.details, queued.message));
+				}
+			};
 			const emitProgressUpdate = (details: SubagentToolDetails, message: string | undefined): void => {
-				emitToolUpdate(details, formatProgressContent(details, message));
+				const now = Date.now();
+				if (!progressThrottleTimer && now - lastProgressEmitAt >= SUBAGENT_PROGRESS_THROTTLE_MS) {
+					lastProgressEmitAt = now;
+					emitToolUpdate(details, formatProgressContent(details, message));
+					return;
+				}
+				queuedProgress = { details, message };
+				if (!progressThrottleTimer) {
+					progressThrottleTimer = setTimeout(
+						flushQueuedProgress,
+						Math.max(1, SUBAGENT_PROGRESS_THROTTLE_MS - (now - lastProgressEmitAt)),
+					);
+					progressThrottleTimer.unref?.();
+				}
 			};
 			const emitFinalUpdate = (result: AgentToolResult<SubagentToolDetails>): void => {
+				flushQueuedProgress();
 				emitToolUpdate(result.details, getTextContent(result) || "(no output)");
 			};
 
@@ -1177,6 +1679,7 @@ export function createSubagentToolDefinition(
 					let definition: SubagentDefinition | undefined;
 					let unsubscribeEvents: (() => void) | undefined;
 					const taskStartedAt = Date.now();
+					const live = new SubagentTaskLiveActivity();
 					try {
 						if (signal?.aborted) {
 							throw new Error("Operation aborted");
@@ -1199,20 +1702,23 @@ export function createSubagentToolDefinition(
 							await abortHandle(handle);
 							throw new Error("Operation aborted");
 						}
-						const runningDetails = createRunningTaskDetails({
-							index: task.index,
-							definition,
-							agentName: task.agent,
-							handle,
-							startedAt: taskStartedAt,
-						});
+						const runningDetails = (): SubagentToolTaskDetails =>
+							createRunningTaskDetails({
+								index: task.index,
+								definition,
+								agentName: task.agent,
+								handle,
+								startedAt: taskStartedAt,
+								live,
+							});
 						unsubscribeEvents = handle.onEvent((event) => {
+							const liveChanged = live.apply(event);
 							const message = describeSubagentProgressEvent(event);
-							if (message) {
-								onProgress?.(runningDetails, message);
+							if (message || liveChanged) {
+								onProgress?.(runningDetails(), message);
 							}
 						});
-						onProgress?.(runningDetails, "started");
+						onProgress?.(runningDetails(), "started");
 						const completion = handle.waitForEnd();
 						await Promise.race([handle.prompt(task.task), abortPromise]);
 						const result = await Promise.race([completion, abortPromise]);
@@ -1241,6 +1747,7 @@ export function createSubagentToolDefinition(
 								output,
 								maxOutputBytes,
 								errorMessage,
+								live,
 							}),
 						};
 					} catch (error) {
@@ -1265,6 +1772,7 @@ export function createSubagentToolDefinition(
 								output,
 								maxOutputBytes,
 								errorMessage,
+								live,
 							}),
 						};
 					} finally {
@@ -1388,6 +1896,7 @@ export function createSubagentToolDefinition(
 				throw error;
 			} finally {
 				acceptingUpdates = false;
+				cancelQueuedProgress();
 				if (timeout) clearTimeout(timeout);
 				signal?.removeEventListener("abort", onAbort);
 				delegationLease?.scope.signal.removeEventListener("abort", onScopeAbort);

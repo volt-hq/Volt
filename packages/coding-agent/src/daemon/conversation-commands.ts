@@ -684,6 +684,8 @@ function projectRemoteSubagentDetails(
 	copyRemoteString(value, projected, "status", authorization, 200);
 	copyRemoteString(value, projected, "subagentId", authorization, 200);
 	copyRemoteString(value, projected, "sessionId", authorization, 200);
+	copyRemoteSubagentNumericDetails(value, projected);
+	copyRemoteString(value, projected, "currentActivity", authorization, 300);
 	const summary = projectRemoteSubagentSummary(value.summary);
 	if (summary) {
 		projected.summary = summary;
@@ -704,6 +706,10 @@ function projectRemoteSubagentDetails(
 	if (error) {
 		projected.error = error;
 	}
+	const children = projectRemoteSubagentDetailArray(value.children, authorization);
+	if (children) {
+		projected.children = children;
+	}
 	const tasks = projectRemoteSubagentDetailArray(value.tasks, authorization);
 	if (tasks) {
 		projected.tasks = tasks;
@@ -713,6 +719,18 @@ function projectRemoteSubagentDetails(
 		projected.steps = steps;
 	}
 	return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+const REMOTE_SUBAGENT_NUMERIC_KEYS = ["startedAt", "durationMs", "toolCalls", "tokens"] as const;
+const REMOTE_SUBAGENT_TREE_DEPTH_LIMIT = 5;
+
+function copyRemoteSubagentNumericDetails(from: Record<string, unknown>, to: Record<string, unknown>): void {
+	for (const key of REMOTE_SUBAGENT_NUMERIC_KEYS) {
+		const numberValue = remoteFiniteNumber(from[key]);
+		if (numberValue !== undefined) {
+			to[key] = numberValue;
+		}
+	}
 }
 
 function projectRemoteSubagentSummary(value: unknown): Record<string, number> | undefined {
@@ -741,12 +759,13 @@ function projectRemoteSubagentSummary(value: unknown): Record<string, number> | 
 function projectRemoteSubagentDetailArray(
 	value: unknown,
 	authorization: IrohRemoteClientAuthorizationSuccess,
+	depth = 0,
 ): Array<Record<string, unknown>> | undefined {
-	if (!Array.isArray(value)) {
+	if (!Array.isArray(value) || depth >= REMOTE_SUBAGENT_TREE_DEPTH_LIMIT) {
 		return undefined;
 	}
 	const projected = value
-		.map((item) => projectRemoteSubagentTask(item, authorization))
+		.map((item) => projectRemoteSubagentTask(item, authorization, depth))
 		.filter((item): item is Record<string, unknown> => item !== undefined);
 	return projected.length > 0 ? projected : undefined;
 }
@@ -754,6 +773,7 @@ function projectRemoteSubagentDetailArray(
 function projectRemoteSubagentTask(
 	value: unknown,
 	authorization: IrohRemoteClientAuthorizationSuccess,
+	depth = 0,
 ): Record<string, unknown> | undefined {
 	if (!isRemoteRecord(value)) {
 		return undefined;
@@ -770,9 +790,16 @@ function projectRemoteSubagentTask(
 		projected.agent = agent;
 	}
 	copyRemoteString(value, projected, "status", authorization, 200);
+	copyRemoteString(value, projected, "task", authorization, 1_000);
+	copyRemoteSubagentNumericDetails(value, projected);
+	copyRemoteString(value, projected, "currentActivity", authorization, 300);
 	const error = projectRemoteSubagentError(value.error, authorization);
 	if (error) {
 		projected.error = error;
+	}
+	const children = projectRemoteSubagentDetailArray(value.children, authorization, depth + 1);
+	if (children) {
+		projected.children = children;
 	}
 	return Object.keys(projected).length > 0 ? projected : undefined;
 }

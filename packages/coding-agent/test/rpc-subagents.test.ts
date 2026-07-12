@@ -2,7 +2,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
-import { getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/index.ts";
+import { getStaticIrohRemoteRpcFilterResult as getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/index.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import type { RpcSessionState, RpcTranscriptResponse } from "../src/core/rpc/types.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";

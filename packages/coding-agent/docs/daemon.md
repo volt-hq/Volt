@@ -76,8 +76,12 @@ Everything lives under `~/.volt/agent/daemon/` (mode `0700`):
 | `audit.jsonl` | Append-only audit log (pairing, leases, relays, lifecycle) |
 
 On first start the daemon migrates the legacy `remote/iroh-host.json` state
-file automatically, carrying the Iroh secret key over verbatim so existing
-phone pairings survive; the legacy file is renamed to `.migrated`.
+file automatically and renames it to `.migrated`. A pre-grant file keeps the
+Iroh secret key (so the saved host identity does not rotate) plus validated
+workspace/worktree metadata, but intentionally drops active clients, revoked
+clients, and pending pairing tickets. The daemon logs and audits this expected
+migration as `legacy_remote_access_dropped`; it is not corruption. Every old
+client must pair again to receive an explicit current grant.
 
 ## Conversation leases
 
@@ -174,9 +178,7 @@ supported.
   it when dead, and rebinds.
 - A second daemon on the same agent dir exits immediately (single-instance is
   guaranteed by the socket bind).
-- Phone shows "in use"-style errors: never emitted by lease-capable daemons at
-  handshake; a `duplicate_conversation_connection` error means the same phone
-  raced two connections and retries on its own.
+- Phone shows an "in use" error: the existing daemon-owned runtime permits tools outside this phone's persisted grant, so it cannot safely co-attach. Re-pair with a compatible grant or close the broader runtime. A `duplicate_conversation_connection` error instead means the same phone raced two connections and retries on its own.
 - Full audit trail: `~/.volt/agent/daemon/audit.jsonl` records pairing,
   revocation, lease transitions, and daemon lifecycle for post-hoc review.
 

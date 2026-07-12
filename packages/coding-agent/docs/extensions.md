@@ -1427,7 +1427,21 @@ Labels persist in the session and survive restarts. Use them to mark important p
 
 ### volt.registerCommand(name, options)
 
-Register a command.
+Register a command. `name` is the slash-command token without the leading `/`. It must be non-empty and cannot contain whitespace or `/`; invalid names are rejected while the extension loads. For example, use `deploy`, not `/deploy` or `deploy now`.
+
+Commands are local-only by default. Set `remoteSafe: true` only after auditing the handler and its argument-completion callback for invocation by a paired remote client:
+
+```typescript
+volt.registerCommand("status", {
+  description: "Show sanitized project status",
+  remoteSafe: true,
+  handler: async (_args, ctx) => {
+    ctx.ui.notify("Ready", "info");
+  },
+});
+```
+
+`remoteSafe: true` exposes the command through remote native UI actions and permits remote slash invocation; it is a security classification, not a sandbox. The handler still runs on the host with the extension's full process permissions. Do not mark commands remote-safe if remote-controlled arguments can read secrets, mutate host configuration, execute arbitrary commands, or trigger UI flows that the remote client cannot safely answer. The default is `false`/omitted.
 
 If multiple extensions register the same command name, volt keeps them all and assigns numeric invocation suffixes in load order, for example `/review:1` and `/review:2`.
 

@@ -4,8 +4,22 @@ This deploys the managed Volt push relay contract to Firebase Cloud Functions. I
 
 - `POST /v1/push-targets`: called by the mobile app with `{ provider:"fcm", platform:"ios", token, enabled }`; returns `{ pushTargetId, pushTargetAuthToken, relayUrl, tokenHash }`.
 - `POST /v1/notifications`: called by the desktop host with `{ pushTargetId, pushTargetAuthToken, eventId, kind, title, body, data }`.
+- `POST /v1/live-activities`: called by the desktop host with `{ pushTargetId, pushTargetAuthToken, activityId, activityPushToken, tokenEnvironment?, eventId, kind, contentState, ... }`.
 
 Volt host state stores only the opaque relay target id, the target-scoped relay auth token, and an optional FCM token hash.
+
+## Error responses
+
+FCM send failures return `502 { error: "fcm_send_failed", code }` with the FCM
+error code, and the full error is logged to Cloud Logging (`console.error`).
+
+Live Activity updates with `tokenEnvironment: "development"` are rejected with
+`422 { error: "live_activity_environment_unsupported" }` before reaching FCM:
+FCM delivers `live_activity_token` pushes through the production APNs
+environment only, so a sandbox ActivityKit token (any Xcode-installed build —
+Debug or Release) can never be reached this way. Hosts treat the 422 as a
+permanently invalid channel and stop retrying. Set
+`LIVE_ACTIVITY_ALLOW_DEVELOPMENT=1` on the function to attempt delivery anyway.
 
 ## Setup
 

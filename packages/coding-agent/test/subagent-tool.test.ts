@@ -668,6 +668,16 @@ describe("subagent tool", () => {
 			(update) => updates.push(update),
 		);
 		await waitUntil(() => prompts.length === 2);
+		// Progress updates are throttled with a trailing flush, so the snapshot
+		// containing both running children may land shortly after both prompts.
+		await waitUntil(() =>
+			updates.some(
+				(update) =>
+					update.details.mode === "parallel" &&
+					update.details.summary?.running === 2 &&
+					update.details.childSessions?.length === 2,
+			),
+		);
 
 		const runningUpdate = updates.find(
 			(update) =>
@@ -757,6 +767,16 @@ describe("subagent tool", () => {
 			.get("first")
 			?.complete(createSubagentResult({ id: "sa_first", sessionId: "session_first", text: "first output" }));
 		await waitUntil(() => prompts.length === 2);
+		// Progress updates are throttled with a trailing flush, so the
+		// completed+running snapshot may land shortly after the second prompt.
+		await waitUntil(() =>
+			updates.some(
+				(update) =>
+					update.details.mode === "chain" &&
+					update.details.steps?.map((step) => step.status).join(",") === "completed,running" &&
+					update.details.childSessions?.length === 2,
+			),
+		);
 
 		const secondRunning = updates.find(
 			(update) =>
@@ -795,6 +815,178 @@ describe("subagent tool", () => {
 				{ subagentId: "sa_first", sessionId: "session_first", status: "completed" },
 				{ subagentId: "sa_second", sessionId: "session_second", status: "completed" },
 			],
+		});
+	});
+
+	it("grafts nested delegation trees and live activity into progress and final details", async () => {
+		const prompts: Array<{ agent: string; task: string }> = [];
+		const controlled = createControlledHandle({
+			id: "sa_scout",
+			sessionId: "session_scout",
+			agent: "scout",
+			prompts,
+		});
+		const manager = {
+			getDefinition: () => createDefinition("scout", { source: "project" }),
+			startByName: vi.fn(async () => controlled.handle),
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager });
+		const updates: AgentToolResult<SubagentToolDetails>[] = [];
+
+		const execution = tool.execute("call-1", { agent: "scout", task: "audit the daemon" }, undefined, (update) =>
+			updates.push(update),
+		);
+		await waitUntil(() => prompts.length === 1);
+
+		controlled.emit({
+			type: "tool_execution_start",
+			toolCallId: "grandchild-call",
+			toolName: "subagent",
+			args: {
+				tasks: [
+					{ agent: "researcher", task: "find prior art" },
+					{ agent: "general", task: "scan the code" },
+				],
+			},
+		});
+		await waitUntil(() => updates.some((update) => (update.details.children?.length ?? 0) === 2));
+		const placeholderUpdate = updates.find((update) => (update.details.children?.length ?? 0) === 2);
+		expect(placeholderUpdate?.details.currentActivity).toContain("subagent");
+		expect(placeholderUpdate?.details.toolCalls).toBe(1);
+		expect(placeholderUpdate?.details.children?.map((child) => child.agent.name)).toEqual(["researcher", "general"]);
+		expect(placeholderUpdate?.details.children?.[0]).toMatchObject({ status: "running", task: "find prior art" });
+
+		controlled.emit({
+			type: "tool_execution_update",
+			toolCallId: "grandchild-call",
+			toolName: "subagent",
+			args: {},
+			partialResult: {
+				content: [{ type: "text", text: "progress" }],
+				details: {
+					mode: "parallel",
+					status: "partial",
+					tasks: [
+						{
+							index: 0,
+							subagentId: "sa_g1",
+							sessionId: "session_g1",
+							agent: { name: "researcher", source: "built-in" },
+							status: "running",
+							toolCalls: 3,
+							currentActivity: "read docs/spec.md",
+							children: [
+								{
+									subagentId: "sa_gg1",
+									sessionId: "session_gg1",
+									agent: { name: "general" },
+									status: "running",
+									task: "deep dive",
+								},
+							],
+						},
+						{
+							index: 1,
+							subagentId: "sa_g2",
+							sessionId: "session_g2",
+							agent: { name: "general", source: "built-in" },
+							status: "completed",
+							durationMs: 1_234,
+							tokens: 500,
+						},
+					],
+				},
+			},
+		});
+		await waitUntil(() => updates.some((update) => update.details.children?.[0]?.children?.length === 1));
+		const graftedUpdate = updates.find((update) => update.details.children?.[0]?.children?.length === 1);
+		const grafted = graftedUpdate?.details.children;
+		expect(grafted?.[0]).toMatchObject({
+			subagentId: "sa_g1",
+			sessionId: "session_g1",
+			agent: { name: "researcher", source: "built-in" },
+			status: "running",
+			task: "find prior art",
+			toolCalls: 3,
+			currentActivity: "read docs/spec.md",
+		});
+		expect(grafted?.[0]?.children?.[0]).toMatchObject({
+			subagentId: "sa_gg1",
+			agent: { name: "general" },
+			status: "running",
+			task: "deep dive",
+		});
+		expect(grafted?.[1]).toMatchObject({ subagentId: "sa_g2", status: "completed", durationMs: 1_234, tokens: 500 });
+
+		const assistantBase = fauxAssistantMessage("thinking done");
+		controlled.emit({
+			type: "message_end",
+			message: {
+				...assistantBase,
+				usage: {
+					input: 40,
+					output: 25,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 65,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			} as AgentMessage,
+		});
+		await waitUntil(() => updates.some((update) => update.details.tokens === 65));
+
+		controlled.complete(createSubagentResult({ id: "sa_scout", sessionId: "session_scout", text: "done" }));
+		const result = await execution;
+		expect(result.details.children?.map((child) => child.subagentId)).toEqual(["sa_g1", "sa_g2"]);
+		expect(result.details.children?.[0]?.children?.[0]?.subagentId).toBe("sa_gg1");
+		// Final token totals come from the child's session stats, not the live counter.
+		expect(result.details.tokens).toBe(30);
+		expect(result.details.currentActivity).toBeUndefined();
+	});
+
+	it("coerces grafted placeholders to terminal status when a child subagent call ends without details", async () => {
+		const prompts: Array<{ agent: string; task: string }> = [];
+		const controlled = createControlledHandle({
+			id: "sa_scout",
+			sessionId: "session_scout",
+			agent: "scout",
+			prompts,
+		});
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			startByName: vi.fn(async () => controlled.handle),
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager });
+		const updates: AgentToolResult<SubagentToolDetails>[] = [];
+
+		const execution = tool.execute("call-1", { agent: "scout", task: "audit" }, undefined, (update) =>
+			updates.push(update),
+		);
+		await waitUntil(() => prompts.length === 1);
+
+		controlled.emit({
+			type: "tool_execution_start",
+			toolCallId: "grandchild-call",
+			toolName: "subagent",
+			args: { agent: "general", task: "probe" },
+		});
+		await waitUntil(() => updates.some((update) => update.details.children?.[0]?.status === "running"));
+
+		controlled.emit({
+			type: "tool_execution_end",
+			toolCallId: "grandchild-call",
+			toolName: "subagent",
+			result: { content: [{ type: "text", text: "boom" }] },
+			isError: true,
+		});
+		await waitUntil(() => updates.some((update) => update.details.children?.[0]?.status === "failed"));
+
+		controlled.complete(createSubagentResult({ id: "sa_scout", sessionId: "session_scout", text: "done" }));
+		const result = await execution;
+		expect(result.details.children?.[0]).toMatchObject({
+			agent: { name: "general" },
+			status: "failed",
+			task: "probe",
 		});
 	});
 

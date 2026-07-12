@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
+import { writeDurableAtomicFile } from "../../../utils/durable-atomic-write.ts";
+import { cloneIrohRemoteRpcGrant, type IrohRemoteRpcGrant, parseIrohRemoteRpcGrant } from "./access-grant.ts";
 import {
 	DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
 	isIrohRemoteWorkingDirectory,
@@ -72,6 +72,7 @@ export interface IrohRemoteClient {
 	label: string;
 	allowedWorkspaces: string[];
 	allowedTools: string;
+	rpcGrant?: IrohRemoteRpcGrant;
 	pairedAt: number;
 	lastSeenAt: number;
 	lastSessionIdByWorkspace?: Record<string, string>;
@@ -79,11 +80,14 @@ export interface IrohRemoteClient {
 	liveActivities?: IrohRemoteLiveActivityRegistration[];
 }
 
+export type IrohRemoteGrantedClient = IrohRemoteClient & { rpcGrant: IrohRemoteRpcGrant };
+
 export interface IrohRemoteRevokedClient {
 	nodeId: string;
 	label: string;
 	allowedWorkspaces: string[];
 	allowedTools: string;
+	rpcGrant?: IrohRemoteRpcGrant;
 	pairedAt: number;
 	lastSeenAt: number;
 	revokedAt: number;
@@ -91,14 +95,21 @@ export interface IrohRemoteRevokedClient {
 	rePairApprovedAt?: number;
 }
 
+export type IrohRemoteGrantedRevokedClient = IrohRemoteRevokedClient & { rpcGrant: IrohRemoteRpcGrant };
+
 export interface IrohRemotePendingPairingTicket {
 	secretHash: string;
 	workspace: string;
 	allowedTools: string;
+	rpcGrant?: IrohRemoteRpcGrant;
 	expiresAt: number;
 	createdAt: number;
 	labelHint?: string;
 }
+
+export type IrohRemoteGrantedPendingPairingTicket = IrohRemotePendingPairingTicket & {
+	rpcGrant: IrohRemoteRpcGrant;
+};
 
 export type IrohRemotePairingSecretTombstoneOutcome = "pairing_secret_consumed" | "pairing_secret_expired";
 
@@ -151,10 +162,7 @@ export async function readIrohRemoteHostState(path: string): Promise<IrohRemoteH
 }
 
 export async function writeIrohRemoteHostState(path: string, state: IrohRemoteHostState): Promise<void> {
-	await mkdir(dirname(path), { recursive: true });
-	const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-	await writeFile(tempPath, `${JSON.stringify(serializeIrohRemoteHostState(state), null, 2)}\n`, { mode: 0o600 });
-	await rename(tempPath, path);
+	await writeDurableAtomicFile(path, `${JSON.stringify(serializeIrohRemoteHostState(state), null, 2)}\n`);
 }
 
 export function parseIrohRemoteHostState(value: unknown): IrohRemoteHostState {
@@ -187,6 +195,7 @@ function serializeIrohRemoteHostState(state: IrohRemoteHostState): IrohRemoteHos
 		clients: state.clients.map((client) => ({
 			...client,
 			allowedWorkspaces: [...client.allowedWorkspaces],
+			...(client.rpcGrant === undefined ? {} : { rpcGrant: cloneIrohRemoteRpcGrant(client.rpcGrant) }),
 			...(client.lastSessionIdByWorkspace
 				? { lastSessionIdByWorkspace: { ...client.lastSessionIdByWorkspace } }
 				: {}),
@@ -205,17 +214,21 @@ function serializeIrohRemoteHostState(state: IrohRemoteHostState): IrohRemoteHos
 		revokedClients: (state.revokedClients ?? []).map((client) => ({
 			...client,
 			allowedWorkspaces: [...client.allowedWorkspaces],
+			...(client.rpcGrant === undefined ? {} : { rpcGrant: cloneIrohRemoteRpcGrant(client.rpcGrant) }),
 			...(client.lastSessionIdByWorkspace
 				? { lastSessionIdByWorkspace: { ...client.lastSessionIdByWorkspace } }
 				: {}),
 		})),
-		pendingPairingTickets: (state.pendingPairingTickets ?? []).map((ticket) => ({ ...ticket })),
+		pendingPairingTickets: (state.pendingPairingTickets ?? []).map((ticket) => ({
+			...ticket,
+			...(ticket.rpcGrant === undefined ? {} : { rpcGrant: cloneIrohRemoteRpcGrant(ticket.rpcGrant) }),
+		})),
 	};
 }
 
 export function parseIrohRemoteWorkspace(value: unknown): IrohRemoteWorkspace {
 	const workspace = expectRecord(value, "Iroh remote workspace");
-	const allowedTools = expectOptionalString(workspace.allowedTools, "workspace allowedTools");
+	const allowedTools = expectOptionalAllowTools(workspace.allowedTools, "workspace allowedTools");
 	return {
 		name: expectString(workspace.name, "workspace name"),
 		path: expectString(workspace.path, "workspace path"),
@@ -270,8 +283,9 @@ export function parseIrohRemoteClient(value: unknown): IrohRemoteClient {
 			expectString(entry, "client allowed workspace"),
 		),
 		allowedTools: normalizeIrohRemoteAllowTools(
-			expectOptionalString(client.allowedTools, "client allowedTools") ?? DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+			expectOptionalAllowTools(client.allowedTools, "client allowedTools") ?? DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
 		),
+		rpcGrant: parseIrohRemoteRpcGrant(client.rpcGrant, "client rpcGrant"),
 		pairedAt: expectNumber(client.pairedAt, "client pairedAt"),
 		lastSeenAt: expectNumber(client.lastSeenAt, "client lastSeenAt"),
 		...parseOptionalStringRecordProperty(
@@ -343,8 +357,10 @@ export function parseIrohRemoteRevokedClient(value: unknown): IrohRemoteRevokedC
 			expectString(entry, "revoked client allowed workspace"),
 		),
 		allowedTools: normalizeIrohRemoteAllowTools(
-			expectOptionalString(client.allowedTools, "revoked client allowedTools") ?? DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+			expectOptionalAllowTools(client.allowedTools, "revoked client allowedTools") ??
+				DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
 		),
+		rpcGrant: parseIrohRemoteRpcGrant(client.rpcGrant, "revoked client rpcGrant"),
 		pairedAt: expectNumber(client.pairedAt, "revoked client pairedAt"),
 		lastSeenAt: expectNumber(client.lastSeenAt, "revoked client lastSeenAt"),
 		revokedAt: expectNumber(client.revokedAt, "revoked client revokedAt"),
@@ -393,8 +409,9 @@ export function parseIrohRemotePendingPairingTicket(value: unknown): IrohRemoteP
 		secretHash: expectString(ticket.secretHash, "pending pairing ticket secretHash"),
 		workspace: expectString(ticket.workspace, "pending pairing ticket workspace"),
 		allowedTools: normalizeIrohRemoteAllowTools(
-			expectString(ticket.allowedTools, "pending pairing ticket allowedTools"),
+			expectAllowTools(ticket.allowedTools, "pending pairing ticket allowedTools"),
 		),
+		rpcGrant: parseIrohRemoteRpcGrant(ticket.rpcGrant, "pending pairing ticket rpcGrant"),
 		expiresAt: expectNumber(ticket.expiresAt, "pending pairing ticket expiresAt"),
 		createdAt: expectNumber(ticket.createdAt, "pending pairing ticket createdAt"),
 		...(labelHint === undefined ? {} : { labelHint }),
@@ -518,6 +535,17 @@ function expectOptionalString(value: unknown, label: string): string | undefined
 		return undefined;
 	}
 	return expectString(value, label);
+}
+
+function expectAllowTools(value: unknown, label: string): string {
+	if (typeof value !== "string") {
+		throw new Error(`${label} must be a string`);
+	}
+	return value;
+}
+
+function expectOptionalAllowTools(value: unknown, label: string): string | undefined {
+	return value === undefined ? undefined : expectAllowTools(value, label);
 }
 
 function expectOptionalNumber(value: unknown, label: string): number | undefined {

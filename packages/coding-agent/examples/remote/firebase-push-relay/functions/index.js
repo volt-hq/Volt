@@ -116,7 +116,7 @@ async function sendNotification(request, response) {
 			response.status(410).json({ error: "push_target_invalid" });
 			return;
 		}
-		throw error;
+		respondFcmSendFailed(response, "notification", notification, error);
 	}
 }
 
@@ -126,6 +126,16 @@ async function sendLiveActivityUpdate(request, response) {
 	const authorizedTarget = await getAuthorizedPushTarget(liveActivity, response);
 	if (!authorizedTarget) return;
 	const { pushTarget, pushTargetRef } = authorizedTarget;
+
+	// FCM delivers live_activity_token pushes through the production APNs
+	// environment only; a development (sandbox) ActivityKit token can never be
+	// reached this way and every send would fail. Fail fast with a distinct
+	// status so hosts can prune the channel instead of retrying forever. Set
+	// LIVE_ACTIVITY_ALLOW_DEVELOPMENT=1 to attempt delivery anyway.
+	if (liveActivity.tokenEnvironment === "development" && process.env.LIVE_ACTIVITY_ALLOW_DEVELOPMENT !== "1") {
+		response.status(422).json({ error: "live_activity_environment_unsupported" });
+		return;
+	}
 
 	try {
 		const messageId = await getMessaging().send({
@@ -154,8 +164,22 @@ async function sendLiveActivityUpdate(request, response) {
 			response.status(410).json({ error: "push_target_invalid" });
 			return;
 		}
-		throw error;
+		respondFcmSendFailed(response, "live-activity", liveActivity, error);
 	}
+}
+
+/**
+ * Surface an FCM send failure instead of collapsing it into an opaque 500:
+ * log the full error for Cloud Logging and return the FCM error code to the
+ * caller so host-side audit logs can name the actual failure.
+ */
+function respondFcmSendFailed(response, route, request, error) {
+	const code = getErrorCode(error) || "unknown";
+	console.error(
+		`FCM ${route} send failed (eventId=${request.eventId}, kind=${request.kind}, code=${code})`,
+		error,
+	);
+	response.status(502).json({ error: "fcm_send_failed", code });
 }
 
 async function getAuthorizedPushTarget(request, response) {
@@ -291,6 +315,7 @@ function parseLiveActivityUpdate(body) {
 		activityEvent: expectOptionalLiteral(body.activityEvent, ["update", "end"], "activityEvent") || "update",
 		activityPushToken: expectString(body.activityPushToken, "activityPushToken"),
 		activityId: expectString(body.activityId, "activityId"),
+		tokenEnvironment: expectOptionalLiteral(body.tokenEnvironment, ["development", "production"], "tokenEnvironment"),
 		contentState,
 		dismissalDateEpochSeconds: expectOptionalNumber(body.dismissalDateEpochSeconds, "dismissalDateEpochSeconds"),
 		eventId: expectString(body.eventId, "eventId"),

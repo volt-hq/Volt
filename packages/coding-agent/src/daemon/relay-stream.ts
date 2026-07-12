@@ -16,6 +16,7 @@ export interface PendingRelay {
 	sessionId: string;
 	clientNodeId: string;
 	connectionId: string;
+	ownerControlConnectionId: string;
 	streamId: string;
 	/** The phone's Iroh stream, paused until the TUI redeems the token. */
 	stream: IrohBiStreamLike;
@@ -40,15 +41,21 @@ export interface ActiveRelay {
 	sessionId: string;
 	clientNodeId: string;
 	connectionId: string;
+	ownerControlConnectionId: string;
 	streamId: string;
 	close(reason: RelayCloseReason): void;
 }
+
+export type RelayRpcAuthorizationResult =
+	| { ok: true; relay: ActiveRelay }
+	| { ok: false; code: "not_found" | "not_held" | "session_mismatch"; message: string };
 
 export interface MintRelayOptions {
 	workspaceName: string;
 	sessionId: string;
 	clientNodeId: string;
 	connectionId: string;
+	ownerControlConnectionId: string;
 	streamId: string;
 	stream: IrohBiStreamLike;
 	preamble: Omit<RelayPreamble, "type" | "relayId">;
@@ -74,6 +81,7 @@ export class RelayRegistry {
 			sessionId: options.sessionId,
 			clientNodeId: options.clientNodeId,
 			connectionId: options.connectionId,
+			ownerControlConnectionId: options.ownerControlConnectionId,
 			streamId: options.streamId,
 			stream: options.stream,
 			preamble: { ...options.preamble, type: "relay_preamble", relayId },
@@ -123,6 +131,28 @@ export class RelayRegistry {
 
 	activeCount(): number {
 		return this.active.size;
+	}
+
+	authorizeRpc(
+		relayId: string,
+		ownerControlConnectionId: string,
+		scope: { clientNodeId: string; workspaceName: string; sessionId: string },
+	): RelayRpcAuthorizationResult {
+		const relay = this.active.get(relayId);
+		if (!relay) {
+			return { ok: false, code: "not_found", message: "active relay not found" };
+		}
+		if (relay.ownerControlConnectionId !== ownerControlConnectionId) {
+			return { ok: false, code: "not_held", message: "relay is not owned by this control connection" };
+		}
+		if (
+			relay.clientNodeId !== scope.clientNodeId ||
+			relay.workspaceName !== scope.workspaceName ||
+			relay.sessionId !== scope.sessionId
+		) {
+			return { ok: false, code: "session_mismatch", message: "relay RPC scope does not match active relay" };
+		}
+		return { ok: true, relay };
 	}
 
 	closeActive(relayId: string, reason: RelayCloseReason): void {
@@ -177,6 +207,7 @@ export class RelayRegistry {
 			sessionId: relay.sessionId,
 			clientNodeId: relay.clientNodeId,
 			connectionId: relay.connectionId,
+			ownerControlConnectionId: relay.ownerControlConnectionId,
 			streamId: relay.streamId,
 			close: (reason: RelayCloseReason) => {
 				closeReason = reason;

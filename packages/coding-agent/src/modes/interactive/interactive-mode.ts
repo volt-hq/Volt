@@ -90,6 +90,7 @@ import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
 import { type ConfiguredPackage, DefaultPackageManager } from "../../core/package-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
+import { parseIrohRemoteRpcGrant } from "../../core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../../core/remote/iroh/authorization.ts";
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../../core/remote/iroh/handshake.ts";
 import { writeIrohRemoteHandshakeResponse } from "../../core/remote/iroh/handshake-reader.ts";
@@ -1888,6 +1889,7 @@ export class InteractiveMode {
 			initialInput?: number[];
 		};
 		const authorizationSubset = preamble.authorization;
+		const rpcGrant = parseIrohRemoteRpcGrant(authorizationSubset.rpcGrant, "relay rpcGrant");
 		// Worktree-bound conversations sanitize with the worktree checkout as the
 		// root; the parent checkout and the worktrees root must also redact.
 		const sanitizerOptions = getRelayServingSanitizerOptions(authorizationSubset, getAgentDir());
@@ -1899,6 +1901,7 @@ export class InteractiveMode {
 				label: authorizationSubset.clientNodeId,
 				allowedWorkspaces: [authorizationSubset.workspaceName],
 				allowedTools: "",
+				rpcGrant,
 				pairedAt: 0,
 				lastSeenAt: 0,
 			},
@@ -1947,6 +1950,7 @@ export class InteractiveMode {
 				// the lease keyed on an old session id.
 				let relayedSessionId = offer.sessionId;
 				await runIrohRemoteRpcMode(this.runtimeHost, {
+					rpcGrant,
 					stream: relayedStream,
 					disposeRuntimeOnClose: false,
 					workspaceName: authorization.workspace.name,

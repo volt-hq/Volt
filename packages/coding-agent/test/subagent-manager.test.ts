@@ -1266,6 +1266,52 @@ describe("SubagentManager", () => {
 		await expect(handle.abort()).resolves.toBeUndefined();
 	});
 
+	it("aborts a still-running retained runtime when the handle is disposed without an abort", async () => {
+		// Regression: disposing an unsettled handle used to only close the
+		// loopback transport; with retainRuntimeOnDispose (daemon hosts) the
+		// child kept running headless on a result nobody could receive.
+		let abortCalls = 0;
+		const { manager } = await createTestManager({
+			retainRuntimeOnDispose: true,
+			onRuntimeCreated: (event) => {
+				const abortRuntime = event.runtime.session.abort.bind(event.runtime.session);
+				event.runtime.session.abort = async () => {
+					abortCalls += 1;
+					await abortRuntime();
+				};
+			},
+		});
+		const handle = await manager.start();
+
+		await handle.dispose();
+
+		expect(abortCalls).toBe(1);
+		const activity = manager.listActivities().find((candidate) => candidate.id === handle.id);
+		expect(activity?.status).toBe("aborted");
+	});
+
+	it("does not abort a completed child on disposal", async () => {
+		let abortCalls = 0;
+		const { manager } = await createTestManager({
+			retainRuntimeOnDispose: true,
+			onRuntimeCreated: (event) => {
+				const abortRuntime = event.runtime.session.abort.bind(event.runtime.session);
+				event.runtime.session.abort = async () => {
+					abortCalls += 1;
+					await abortRuntime();
+				};
+			},
+		});
+		const handle = await manager.start();
+		const completion = handle.waitForEnd();
+		await handle.prompt("hello");
+		await completion;
+
+		await handle.dispose();
+
+		expect(abortCalls).toBe(0);
+	});
+
 	it("signals a retained runtime before concurrent handle disposal closes its transport", async () => {
 		let abortCalls = 0;
 		const { manager } = await createTestManager({

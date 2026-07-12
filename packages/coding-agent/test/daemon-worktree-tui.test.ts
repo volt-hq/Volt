@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AgentSessionRuntime, type CreateAgentSessionRuntimeResult } from "../src/core/agent-session-runtime.ts";
 import type { AgentSessionServices } from "../src/core/agent-session-services.ts";
+import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteWorkspaceWorktree } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
@@ -504,6 +505,8 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 		clientNodeId: "n-1",
 		workspaceName: "repo",
 		workspacePath: "/home/user/parent-repo",
+		allowedTools: "read",
+		rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 	} satisfies RelayPreamble["authorization"];
 
 	it("keeps the parent root for non-worktree conversations", () => {
@@ -574,6 +577,7 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 		const modePromise = runIrohRemoteRpcMode(runtimeHost, {
 			stream: { recv, send },
 			disposeRuntimeOnClose: false,
+			rpcGrant: authorizationBase.rpcGrant,
 			workspaceName: "repo",
 			workspacePath: sanitizerOptions.workspacePath,
 			...(sanitizerOptions.additionalRedactedPaths === undefined

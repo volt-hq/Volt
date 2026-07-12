@@ -74,6 +74,8 @@ export interface IrohRemotePushRelayLiveActivityRequest {
 	pushTargetAuthToken: string;
 	activityId: string;
 	activityPushToken: string;
+	/** APNs environment of the activity push token, when the client reported one. */
+	tokenEnvironment?: IrohRemotePushTokenEnvironment;
 	eventId: string;
 	kind: string;
 	contentState: IrohRemoteLiveActivityContentState;
@@ -169,11 +171,33 @@ export class IrohRemotePushRelayHttpError extends Error {
 	readonly status: number;
 	readonly transient: boolean;
 
-	constructor(status: number, transient: boolean) {
-		super(`Push relay request failed with HTTP ${status}`);
+	constructor(status: number, transient: boolean, detail?: string) {
+		super(`Push relay request failed with HTTP ${status}${detail ? ` (${detail})` : ""}`);
 		this.name = "IrohRemotePushRelayHttpError";
 		this.status = status;
 		this.transient = transient;
+	}
+}
+
+const MAX_RELAY_ERROR_DETAIL_LENGTH = 200;
+
+/** Best-effort extraction of the relay's `{ error, code }` body for audit logs. */
+async function readRelayErrorDetail(response: Response): Promise<string | undefined> {
+	try {
+		const body: unknown = await response.json();
+		if (typeof body !== "object" || body === null) {
+			return undefined;
+		}
+		const record = body as Record<string, unknown>;
+		const parts = [record.error, record.code].filter(
+			(part): part is string => typeof part === "string" && part.length > 0,
+		);
+		if (parts.length === 0) {
+			return undefined;
+		}
+		return parts.join(": ").slice(0, MAX_RELAY_ERROR_DETAIL_LENGTH);
+	} catch {
+		return undefined;
 	}
 }
 
@@ -216,10 +240,18 @@ export class IrohRemotePushRelayHttpClient implements IrohRemotePushRelayClient 
 		if (response.ok) {
 			return { status: "sent" };
 		}
-		if (response.status === 404 || response.status === 410) {
+		// 404/410: target unknown or disabled. 422: the relay cannot deliver to
+		// this target at all (e.g. a development-environment Live Activity token,
+		// which FCM cannot reach) — treat as invalid so the caller prunes the
+		// registration instead of retrying a permanently undeliverable channel.
+		if (response.status === 404 || response.status === 410 || response.status === 422) {
 			return { status: "invalid_target" };
 		}
-		throw new IrohRemotePushRelayHttpError(response.status, isTransientHttpStatus(response.status));
+		throw new IrohRemotePushRelayHttpError(
+			response.status,
+			isTransientHttpStatus(response.status),
+			await readRelayErrorDetail(response),
+		);
 	}
 
 	private createHeaders(): Record<string, string> {
@@ -253,6 +285,7 @@ function createRelayLiveActivityBody(
 		pushTargetAuthToken: request.pushTargetAuthToken,
 		activityId: request.activityId,
 		activityPushToken: request.activityPushToken,
+		...(request.tokenEnvironment === undefined ? {} : { tokenEnvironment: request.tokenEnvironment }),
 		eventId: request.eventId,
 		kind: request.kind,
 		contentState: request.contentState,
@@ -633,6 +666,9 @@ function createRelayLiveActivityRequest(
 		pushTargetAuthToken: pushTarget.pushTargetAuthToken,
 		activityId,
 		activityPushToken: pushTarget.liveActivity.pushToken,
+		...(pushTarget.liveActivity.tokenEnvironment === undefined
+			? {}
+			: { tokenEnvironment: pushTarget.liveActivity.tokenEnvironment }),
 		eventId: update.eventId,
 		kind: update.kind,
 		contentState: update.contentState,

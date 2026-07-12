@@ -5,10 +5,13 @@ import {
 	type RpcLineHandler,
 	type RpcTransport,
 } from "../../rpc/index.ts";
+import type { IrohRemoteRpcGrant } from "./access-grant.ts";
 import { getIrohRemoteRpcFilterResult } from "./rpc-command-filter.ts";
 
 export interface IrohRemoteFilteredRpcTransportOptions {
 	transport: RpcTransport;
+	/** Persisted grant snapshot for this authorized remote stream. */
+	rpcGrant: IrohRemoteRpcGrant;
 }
 
 interface StartupAwareRpcTransport extends RpcTransport {
@@ -70,7 +73,7 @@ export function createIrohRemoteFilteredRpcTransport(
 		},
 		onLine(handler: RpcLineHandler): () => void {
 			return options.transport.onLine((line) => {
-				const filterResult = getIrohRemoteRpcFilterResult(line);
+				const filterResult = getIrohRemoteRpcFilterResult(line, options.rpcGrant);
 				if (filterResult.allowed) {
 					handler(line);
 					return;
@@ -117,8 +120,11 @@ export function createIrohRemoteFilteredRpcTransport(
 	};
 }
 
-export function createIrohRemoteRpcTransport(options: IrohRpcTransportOptions): RpcTransport {
+export function createIrohRemoteRpcTransport(
+	options: IrohRpcTransportOptions & { rpcGrant: IrohRemoteRpcGrant },
+): RpcTransport {
 	return createIrohRemoteFilteredRpcTransport({
 		transport: createIrohRpcTransport(options),
+		rpcGrant: options.rpcGrant,
 	});
 }

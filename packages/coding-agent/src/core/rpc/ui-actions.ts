@@ -248,7 +248,7 @@ function createExtensionCommandAction(command: ResolvedCommand, index: number, t
 			destructive: false,
 			requiresConfirmation: false,
 			streamingBehavior: "immediate",
-			remoteSafe: true,
+			remoteSafe: command.remoteSafe === true,
 			slash: {
 				name: command.invocationName,
 				example: `/${command.invocationName}`,
@@ -335,6 +335,7 @@ function getCatalogFingerprint(session: UiActionDiscoverySession): string {
 			description: command.description,
 			invocationName: command.invocationName,
 			name: command.name,
+			remoteSafe: command.remoteSafe === true,
 			sourceInfo: sourceFingerprint(command.sourceInfo),
 		})),
 		prompts: session.promptTemplates.map((template) => ({

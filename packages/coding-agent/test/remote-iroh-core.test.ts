@@ -23,6 +23,7 @@ import {
 	createIrohRemoteHandshakeSuccess,
 	createIrohRemoteHostMetadata,
 	createIrohRemoteOutboundFilteredRpcTransport,
+	createIrohRemotePresetAccess,
 	createIrohRemoteSanitizedReconnectTicket,
 	createIrohRemoteSanitizedReconnectTicketPayload,
 	createIrohRemoteTicketQrCode,
@@ -34,7 +35,7 @@ import {
 	formatIrohRemoteTicketQrCode,
 	formatIrohRemoteTicketQrCodeTerminal,
 	getIrohRemoteControlPath,
-	getIrohRemoteRpcFilterResult,
+	getStaticIrohRemoteRpcFilterResult as getIrohRemoteRpcFilterResult,
 	getIrohRemoteUnsafeAllowedTools,
 	getIrohRemoteWorkspaceAvailabilityStatus,
 	handleIrohRemoteWorkspaceUnregisterRpcCommand,
@@ -60,6 +61,7 @@ import {
 	type IrohRemoteWorkspace,
 	listenIrohRemoteControlServer,
 	normalizeIrohRemoteAllowTools,
+	parseIrohRemoteAllowTools,
 	parseIrohRemoteHandshakeResponseLine,
 	parseIrohRemoteHelloLine,
 	parseIrohRemoteHostState,
@@ -68,6 +70,7 @@ import {
 	pipeIrohRemoteOutboundJsonlReadable,
 	readIrohRemoteHandshakeLine,
 	readIrohRemoteHostState,
+	resolveIrohRemoteRuntimeToolPolicy,
 	resolveIrohRemoteWorkspaceProjectTrusted,
 	sanitizeIrohRemoteOutbound,
 	sanitizeIrohRemoteOutboundJsonLine,
@@ -90,6 +93,8 @@ import {
 	createIrohRemoteCloseDeferringRpcTransport,
 	createIrohRemoteHostCommandRpcTransport,
 } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
+
+const CODING_RPC_GRANT = createIrohRemotePresetAccess("coding").rpcGrant;
 
 class ManualRpcTransport implements RpcTransport {
 	readonly writes: object[] = [];
@@ -1224,6 +1229,7 @@ describe("Iroh remote core helpers", () => {
 						label: "phone",
 						allowedWorkspaces: ["volt"],
 						allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+						rpcGrant: CODING_RPC_GRANT,
 						pairedAt: 10,
 						lastSeenAt: 20,
 						lastSessionIdByWorkspace: { volt: "session-one" },
@@ -1235,6 +1241,7 @@ describe("Iroh remote core helpers", () => {
 						label: "revoked phone",
 						allowedWorkspaces: ["volt"],
 						allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+						rpcGrant: CODING_RPC_GRANT,
 						pairedAt: 11,
 						lastSeenAt: 21,
 						revokedAt: 31,
@@ -1247,6 +1254,7 @@ describe("Iroh remote core helpers", () => {
 						secretHash: "sha256:pending",
 						workspace: "volt",
 						allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+						rpcGrant: CODING_RPC_GRANT,
 						createdAt: 30,
 						expiresAt: 40,
 						labelHint: "tablet",
@@ -1256,26 +1264,23 @@ describe("Iroh remote core helpers", () => {
 			await writeIrohRemoteHostState(statePath, state);
 
 			expect(await readIrohRemoteHostState(statePath)).toEqual(state);
-			const parsedLegacyState = parseIrohRemoteHostState({
-				...state,
-				clients: [
-					{
-						nodeId: "legacy-client",
-						label: "old phone",
-						allowedWorkspaces: ["volt"],
-						pairedAt: 10,
-						lastSeenAt: 20,
-					},
-				],
-				pairingSecretTombstones: undefined,
-				revokedClients: undefined,
-				pendingPairingTickets: undefined,
-			});
-			expect(parsedLegacyState.clients[0].allowedTools).toBe(DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
-			expect(parsedLegacyState.clients[0].lastSessionIdByWorkspace).toBeUndefined();
-			expect(parsedLegacyState.pairingSecretTombstones).toEqual([]);
-			expect(parsedLegacyState.revokedClients).toEqual([]);
-			expect(parsedLegacyState.pendingPairingTickets).toEqual([]);
+			expect(() =>
+				parseIrohRemoteHostState({
+					...state,
+					clients: [
+						{
+							nodeId: "legacy-client",
+							label: "old phone",
+							allowedWorkspaces: ["volt"],
+							pairedAt: 10,
+							lastSeenAt: 20,
+						},
+					],
+					pairingSecretTombstones: undefined,
+					revokedClients: undefined,
+					pendingPairingTickets: undefined,
+				}),
+			).toThrow("client rpcGrant must be an object");
 			expect((await readFile(statePath, "utf8")).endsWith("\n")).toBe(true);
 			expect((await stat(statePath)).isFile()).toBe(true);
 			await writeFile(statePath, JSON.stringify({ ...state, clients: [{ nodeId: "missing fields" }] }));
@@ -1321,13 +1326,13 @@ describe("Iroh remote core helpers", () => {
 		]);
 	});
 
-	test("normalizes legacy default remote tool grants to include current default tools", () => {
+	test("preserves explicit remote tool grants, including legacy-shaped and empty grants", () => {
 		const legacyDefaultGrant = "read,bash,edit,write,grep,find,ls";
-		const previousDefaultGrant = "read,bash,edit,write,web_search,grep,find,ls,subagent";
 
-		expect(normalizeIrohRemoteAllowTools(legacyDefaultGrant)).toBe(DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
-		expect(normalizeIrohRemoteAllowTools(previousDefaultGrant)).toBe(DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
+		expect(normalizeIrohRemoteAllowTools(legacyDefaultGrant)).toBe(legacyDefaultGrant);
 		expect(normalizeIrohRemoteAllowTools("read")).toBe("read");
+		expect(normalizeIrohRemoteAllowTools("")).toBe("");
+		expect(parseIrohRemoteAllowTools("")).toEqual([]);
 		expect(
 			parseIrohRemoteHostState({
 				workspaces: [{ name: "volt", path: "/workspace", allowedTools: legacyDefaultGrant }],
@@ -1336,7 +1341,8 @@ describe("Iroh remote core helpers", () => {
 						nodeId: "client-node",
 						label: "phone",
 						allowedWorkspaces: [],
-						allowedTools: legacyDefaultGrant,
+						allowedTools: "",
+						rpcGrant: CODING_RPC_GRANT,
 						pairedAt: 10,
 						lastSeenAt: 20,
 					},
@@ -1346,15 +1352,71 @@ describe("Iroh remote core helpers", () => {
 						secretHash: "sha256:pending",
 						workspace: "volt",
 						allowedTools: legacyDefaultGrant,
+						rpcGrant: CODING_RPC_GRANT,
 						createdAt: 30,
 						expiresAt: 40,
 					},
 				],
 			}),
 		).toMatchObject({
-			workspaces: [{ allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS }],
-			clients: [{ allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS }],
-			pendingPairingTickets: [{ allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS }],
+			workspaces: [{ allowedTools: legacyDefaultGrant }],
+			clients: [{ allowedTools: "" }],
+			pendingPairingTickets: [{ allowedTools: legacyDefaultGrant }],
+		});
+	});
+
+	test("intersects daemon runtime tool policies with the persisted client grant", () => {
+		expect(
+			resolveIrohRemoteRuntimeToolPolicy({
+				clientAllowTools: "read",
+				workspaceAllowTools: "read,bash",
+				daemonAllowTools: null,
+			}),
+		).toEqual({ tools: ["read"], allowUnlistedExtensionTools: false });
+		expect(
+			resolveIrohRemoteRuntimeToolPolicy({
+				clientAllowTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+				workspaceAllowTools: "read,workspace_extension",
+				daemonAllowTools: null,
+			}),
+		).toEqual({ tools: ["read", "workspace_extension"], allowUnlistedExtensionTools: false });
+		expect(
+			resolveIrohRemoteRuntimeToolPolicy({
+				clientAllowTools: "read,client_extension",
+				workspaceAllowTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+				daemonAllowTools: ["read", "client_extension", "daemon_extension"],
+			}),
+		).toEqual({ tools: ["read", "client_extension"], allowUnlistedExtensionTools: false });
+		expect(
+			resolveIrohRemoteRuntimeToolPolicy({
+				clientAllowTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+				workspaceAllowTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+				daemonAllowTools: null,
+			}),
+		).toEqual({
+			tools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(","),
+			allowUnlistedExtensionTools: true,
+		});
+		expect(
+			resolveIrohRemoteRuntimeToolPolicy({
+				clientAllowTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+				daemonAllowTools: [],
+			}),
+		).toEqual({ tools: [], allowUnlistedExtensionTools: false });
+		expect(
+			resolveIrohRemoteRuntimeToolPolicy({
+				clientAllowTools: "",
+				daemonAllowTools: null,
+			}),
+		).toEqual({ tools: [], allowUnlistedExtensionTools: false });
+		expect(
+			resolveIrohRemoteRuntimeToolPolicy({
+				clientAllowTools: "read,read,bash,edit,write,web_search,grep,find,ls,subagent",
+				daemonAllowTools: null,
+			}),
+		).toEqual({
+			tools: ["read", "bash", "edit", "write", "web_search", "grep", "find", "ls", "subagent"],
+			allowUnlistedExtensionTools: false,
 		});
 	});
 
@@ -1491,6 +1553,7 @@ describe("Iroh remote core helpers", () => {
 			label: "phone",
 			allowedWorkspaces: [],
 			allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+			rpcGrant: CODING_RPC_GRANT,
 			pairedAt: 100,
 			lastSeenAt: 100,
 		});
@@ -1547,33 +1610,20 @@ describe("Iroh remote core helpers", () => {
 		expect(persisted.client.allowedTools).toBe(DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
 		expect(persisted.client.lastSeenAt).toBe(150);
 
-		const legacyState = parseIrohRemoteHostState({
-			workspaces: [workspace],
-			clients: [
-				{
-					nodeId: "legacy-client",
-					label: "old phone",
-					allowedWorkspaces: ["volt"],
-					pairedAt: 10,
-					lastSeenAt: 20,
-				},
-			],
-		});
-		const legacyPersisted = authorizeIrohRemoteClient(
-			legacyState,
-			makeHello("volt", undefined, "old phone"),
-			"legacy-client",
-			{
-				allowTools: "bash",
-				workspace,
-				now: 175,
-			},
-		);
-		if (!legacyPersisted.ok) {
-			throw new Error(legacyPersisted.error);
-		}
-		expect(legacyPersisted.allowTools).toBe(DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
-		expect(legacyPersisted.client.allowedTools).toBe(DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
+		expect(() =>
+			parseIrohRemoteHostState({
+				workspaces: [workspace],
+				clients: [
+					{
+						nodeId: "legacy-client",
+						label: "old phone",
+						allowedWorkspaces: ["volt"],
+						pairedAt: 10,
+						lastSeenAt: 20,
+					},
+				],
+			}),
+		).toThrow("client rpcGrant must be an object");
 
 		const unpairedState = createEmptyIrohRemoteHostState();
 		expect(
@@ -1770,6 +1820,7 @@ describe("Iroh remote core helpers", () => {
 				label: "phone",
 				allowedWorkspaces: [],
 				allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+				rpcGrant: CODING_RPC_GRANT,
 				pairedAt: 100,
 				lastSeenAt: 100,
 				revokedAt: 100,
@@ -1891,6 +1942,7 @@ describe("Iroh remote core helpers", () => {
 						label: "phone",
 						allowedWorkspaces: ["alpha"],
 						allowedTools: "read",
+						rpcGrant: CODING_RPC_GRANT,
 						pairedAt: 10,
 						lastSeenAt: 20,
 					},
@@ -1931,6 +1983,7 @@ describe("Iroh remote core helpers", () => {
 						label: "phone",
 						allowedWorkspaces: ["alpha"],
 						allowedTools: "read",
+						rpcGrant: CODING_RPC_GRANT,
 						pairedAt: 10,
 						lastSeenAt: 20,
 					},
@@ -1975,6 +2028,7 @@ describe("Iroh remote core helpers", () => {
 						label: "phone",
 						allowedWorkspaces: ["alpha"],
 						allowedTools: "read",
+						rpcGrant: CODING_RPC_GRANT,
 						pairedAt: 10,
 						lastSeenAt: 20,
 						revokedAt: 30,
@@ -2129,6 +2183,12 @@ describe("Iroh remote core helpers", () => {
 			throw new Error(paired.error);
 		}
 		await stateManager.setClientLastSessionId("client-node", "volt", "session-one");
+		const updated = await stateManager.updateClientAccess(
+			"client-node",
+			paired.client.rpcGrant.revision,
+			createIrohRemotePresetAccess("coding"),
+		);
+		expect(updated).toMatchObject({ ok: true, client: { rpcGrant: { revision: 2 } } });
 
 		now = 150;
 		await expect(hostEngine.revokeClient("client-node")).resolves.toEqual({
@@ -2139,6 +2199,7 @@ describe("Iroh remote core helpers", () => {
 				label: "phone",
 				allowedWorkspaces: [],
 				allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+				rpcGrant: createIrohRemotePresetAccess("coding", 2).rpcGrant,
 				pairedAt: 100,
 				lastSeenAt: 100,
 				lastSessionIdByWorkspace: { volt: "session-one" },
@@ -2197,6 +2258,7 @@ describe("Iroh remote core helpers", () => {
 			nodeId: "client-node",
 			label: "phone repaired",
 			allowedWorkspaces: [],
+			rpcGrant: { revision: 3 },
 			pairedAt: 180,
 			lastSeenAt: 180,
 		});
@@ -2244,6 +2306,7 @@ describe("Iroh remote core helpers", () => {
 					secretHash: hashIrohRemotePairingSecret("secret"),
 					workspace: "volt",
 					allowedTools: "read,bash",
+					rpcGrant: CODING_RPC_GRANT,
 					createdAt: 100,
 					expiresAt: 125,
 					labelHint: "tablet",
@@ -2291,6 +2354,7 @@ describe("Iroh remote core helpers", () => {
 			secretHash: hashIrohRemotePairingSecret("secret"),
 			workspace: "private",
 			allowedTools: "read",
+			rpcGrant: CODING_RPC_GRANT,
 			createdAt: 100,
 			expiresAt: 200,
 		});
@@ -2313,6 +2377,7 @@ describe("Iroh remote core helpers", () => {
 					secretHash: hashIrohRemotePairingSecret("secret"),
 					workspace: "private",
 					allowedTools: "read",
+					rpcGrant: CODING_RPC_GRANT,
 					createdAt: 100,
 					expiresAt: 200,
 				},
@@ -2356,6 +2421,7 @@ describe("Iroh remote core helpers", () => {
 				secretHash: hashIrohRemotePairingSecret(secret),
 				workspace: "volt",
 				allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+				rpcGrant: CODING_RPC_GRANT,
 				createdAt: 100,
 				expiresAt: 150,
 			},
@@ -2376,6 +2442,7 @@ describe("Iroh remote core helpers", () => {
 					secretHash: hashIrohRemotePairingSecret(secret),
 					workspace: "volt",
 					allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
+					rpcGrant: CODING_RPC_GRANT,
 					createdAt: 100,
 					expiresAt: 150,
 				},
@@ -2466,6 +2533,7 @@ describe("Iroh remote core helpers", () => {
 					label: "phone",
 					allowedWorkspaces: ["volt"],
 					allowedTools: "read",
+					rpcGrant: CODING_RPC_GRANT,
 					pairedAt: 1,
 					lastSeenAt: 1,
 					lastSessionIdByWorkspace: { volt: "session-one" },
@@ -2477,6 +2545,7 @@ describe("Iroh remote core helpers", () => {
 					label: "revoked phone",
 					allowedWorkspaces: ["volt"],
 					allowedTools: "read",
+					rpcGrant: CODING_RPC_GRANT,
 					pairedAt: 2,
 					lastSeenAt: 3,
 					revokedAt: 4,
@@ -2488,6 +2557,7 @@ describe("Iroh remote core helpers", () => {
 					secretHash: "sha256:pending",
 					workspace: "volt",
 					allowedTools: "read",
+					rpcGrant: CODING_RPC_GRANT,
 					createdAt: 1,
 					expiresAt: 200,
 				},
@@ -2512,6 +2582,7 @@ describe("Iroh remote core helpers", () => {
 			secretHash: "sha256:leaked",
 			workspace: "leaked",
 			allowedTools: "bash",
+			rpcGrant: CODING_RPC_GRANT,
 			createdAt: 1,
 			expiresAt: 200,
 		});
@@ -2532,6 +2603,7 @@ describe("Iroh remote core helpers", () => {
 			secretHash: "sha256:loaded-leak",
 			workspace: "loaded-leak",
 			allowedTools: "bash",
+			rpcGrant: CODING_RPC_GRANT,
 			createdAt: 1,
 			expiresAt: 200,
 		});
@@ -2541,6 +2613,7 @@ describe("Iroh remote core helpers", () => {
 			label: "loaded revoked leak",
 			allowedWorkspaces: ["loaded-leak"],
 			allowedTools: "bash",
+			rpcGrant: CODING_RPC_GRANT,
 			pairedAt: 1,
 			lastSeenAt: 2,
 			revokedAt: 3,
@@ -2551,6 +2624,7 @@ describe("Iroh remote core helpers", () => {
 			label: "leaked",
 			allowedWorkspaces: [],
 			allowedTools: "read",
+			rpcGrant: CODING_RPC_GRANT,
 			pairedAt: 1,
 			lastSeenAt: 1,
 		});
@@ -2576,6 +2650,7 @@ describe("Iroh remote core helpers", () => {
 					label: "phone",
 					allowedWorkspaces: ["volt"],
 					allowedTools: "read",
+					rpcGrant: CODING_RPC_GRANT,
 					pairedAt: 1,
 					lastSeenAt: 1,
 					lastSessionIdByWorkspace: { volt: "session-one" },
@@ -2587,6 +2662,7 @@ describe("Iroh remote core helpers", () => {
 					label: "revoked phone",
 					allowedWorkspaces: ["volt"],
 					allowedTools: "read",
+					rpcGrant: CODING_RPC_GRANT,
 					pairedAt: 2,
 					lastSeenAt: 3,
 					revokedAt: 4,
@@ -2598,6 +2674,7 @@ describe("Iroh remote core helpers", () => {
 					secretHash: "sha256:pending",
 					workspace: "volt",
 					allowedTools: "read",
+					rpcGrant: CODING_RPC_GRANT,
 					createdAt: 1,
 					expiresAt: 200,
 				},
@@ -2725,6 +2802,7 @@ describe("Iroh remote core helpers", () => {
 						label: "phone",
 						allowedWorkspaces: ["alpha"],
 						allowedTools: "read",
+						rpcGrant: CODING_RPC_GRANT,
 						pairedAt: 1,
 						lastSeenAt: 2,
 					},
@@ -2735,6 +2813,7 @@ describe("Iroh remote core helpers", () => {
 						secretHash: "sha256:pending",
 						workspace: "alpha",
 						allowedTools: "read",
+						rpcGrant: CODING_RPC_GRANT,
 						createdAt: 1,
 						expiresAt: 2,
 					},
@@ -2742,6 +2821,7 @@ describe("Iroh remote core helpers", () => {
 						secretHash: "sha256:retained",
 						workspace: "alphabet",
 						allowedTools: "read,grep",
+						rpcGrant: CODING_RPC_GRANT,
 						createdAt: 3,
 						expiresAt: 4,
 					},
@@ -2775,6 +2855,7 @@ describe("Iroh remote core helpers", () => {
 						label: "phone",
 						allowedWorkspaces: [],
 						allowedTools: "read",
+						rpcGrant: CODING_RPC_GRANT,
 						pairedAt: 1,
 						lastSeenAt: 2,
 					},
@@ -2866,6 +2947,7 @@ describe("Iroh remote core helpers", () => {
 						label: "phone",
 						allowedWorkspaces: [],
 						allowedTools: "read",
+						rpcGrant: CODING_RPC_GRANT,
 						pairedAt: 1,
 						lastSeenAt: 2,
 					},
@@ -2930,6 +3012,7 @@ describe("Iroh remote core helpers", () => {
 							label: "phone",
 							allowedWorkspaces: [],
 							allowedTools: "read",
+							rpcGrant: CODING_RPC_GRANT,
 							pairedAt: 1,
 							lastSeenAt: 2,
 							lastSessionIdByWorkspace: { beta: "session-beta" },
@@ -2941,6 +3024,7 @@ describe("Iroh remote core helpers", () => {
 							label: "revoked phone",
 							allowedWorkspaces: [],
 							allowedTools: "read",
+							rpcGrant: CODING_RPC_GRANT,
 							pairedAt: 1,
 							lastSeenAt: 2,
 							revokedAt: 3,
@@ -2951,6 +3035,7 @@ describe("Iroh remote core helpers", () => {
 							secretHash: "sha256:pending",
 							workspace: "beta",
 							allowedTools: "read",
+							rpcGrant: CODING_RPC_GRANT,
 							createdAt: 1,
 							expiresAt: 2,
 						},
@@ -2958,6 +3043,7 @@ describe("Iroh remote core helpers", () => {
 							secretHash: "sha256:retained",
 							workspace: "alpha",
 							allowedTools: "read,grep",
+							rpcGrant: CODING_RPC_GRANT,
 							createdAt: 3,
 							expiresAt: Number.MAX_SAFE_INTEGER,
 						},
@@ -3211,6 +3297,7 @@ describe("Iroh remote core helpers", () => {
 					secretHash: hashIrohRemotePairingSecret("private-secret"),
 					workspace: "private",
 					allowedTools: "read",
+					rpcGrant: CODING_RPC_GRANT,
 					createdAt: 100,
 					expiresAt: 1100,
 				},
@@ -3399,6 +3486,7 @@ describe("Iroh remote core helpers", () => {
 						label: "phone",
 						allowedWorkspaces: ["volt"],
 						allowedTools: "read",
+						rpcGrant: CODING_RPC_GRANT,
 						pairedAt: 10,
 						lastSeenAt: 20,
 					},
@@ -3444,6 +3532,7 @@ describe("Iroh remote core helpers", () => {
 						label: "phone",
 						allowedWorkspaces: ["volt"],
 						allowedTools: "read",
+						rpcGrant: CODING_RPC_GRANT,
 						pairedAt: 10,
 						lastSeenAt: 20,
 					},
@@ -3494,6 +3583,7 @@ describe("Iroh remote core helpers", () => {
 						label: "phone",
 						allowedWorkspaces: ["volt"],
 						allowedTools: "read",
+						rpcGrant: CODING_RPC_GRANT,
 						pairedAt: 10,
 						lastSeenAt: 20,
 					},
@@ -3529,6 +3619,7 @@ describe("Iroh remote core helpers", () => {
 						label: "phone",
 						allowedWorkspaces: ["volt"],
 						allowedTools: "read",
+						rpcGrant: CODING_RPC_GRANT,
 						pairedAt: 10,
 						lastSeenAt: 20,
 					},
@@ -3675,7 +3766,10 @@ describe("Iroh remote core helpers", () => {
 
 	test("wraps RPC transports with the remote command filter", async () => {
 		const inner = new ManualRpcTransport();
-		const transport = createIrohRemoteFilteredRpcTransport({ transport: inner });
+		const transport = createIrohRemoteFilteredRpcTransport({
+			transport: inner,
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
+		});
 		const forwardedLines: string[] = [];
 		transport.onLine((line) => {
 			forwardedLines.push(line);
@@ -3710,6 +3804,7 @@ describe("Iroh remote core helpers", () => {
 		const forwardedLines: string[] = [];
 		let activeWorkspaceNames = ["alpha", "beta"];
 		const filteredTransport = createIrohRemoteFilteredRpcTransport({
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			transport: createIrohRemoteCloseDeferringRpcTransport({
 				transport: inner,
 				waitForPromptCompletion: () => Promise.resolve(),
@@ -3773,6 +3868,7 @@ describe("Iroh remote core helpers", () => {
 	test("routes remote command filter rejections through outbound and close-deferring layers", async () => {
 		const inner = new ManualRpcTransport();
 		const transport = createIrohRemoteFilteredRpcTransport({
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			transport: createIrohRemoteCloseDeferringRpcTransport({
 				transport: createIrohRemoteOutboundFilteredRpcTransport({
 					transport: inner,
@@ -4410,7 +4506,10 @@ describe("Iroh remote core helpers", () => {
 
 	test("surfaces asynchronous filter rejection write failures from close", async () => {
 		const inner = new ManualRpcTransport();
-		const transport = createIrohRemoteFilteredRpcTransport({ transport: inner });
+		const transport = createIrohRemoteFilteredRpcTransport({
+			transport: inner,
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
+		});
 		const write = createDeferredVoid();
 		const writeError = new Error("rejection write failed");
 		inner.writeResults.push(write.promise);

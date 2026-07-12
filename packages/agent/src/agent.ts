@@ -560,6 +560,18 @@ export class Agent {
 				break;
 			}
 
+			case "tool_execution_update": {
+				const existing = this._state.pendingToolExecutions.get(event.toolCallId);
+				const details = (event.partialResult as { details?: unknown } | undefined)?.details;
+				if (!existing || details === undefined) {
+					break;
+				}
+				const pendingToolExecutions = new Map(this._state.pendingToolExecutions);
+				pendingToolExecutions.set(event.toolCallId, { ...existing, latestDetails: details });
+				this._state.pendingToolExecutions = pendingToolExecutions;
+				break;
+			}
+
 			case "tool_execution_end": {
 				const pendingToolCalls = new Set(this._state.pendingToolCalls);
 				pendingToolCalls.delete(event.toolCallId);

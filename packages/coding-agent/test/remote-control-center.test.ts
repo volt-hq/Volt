@@ -1,11 +1,18 @@
 import { visibleWidth } from "@earendil-works/volt-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import type { IrohRemoteAccessPresetName } from "../src/core/remote/iroh/access-grant.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
-import type { ControlEvent, ControlResponse } from "../src/daemon/control-protocol.ts";
+import {
+	CONTROL_PAIR_CANCEL_CAPABILITY,
+	CONTROL_RPC_GRANTS_CAPABILITY,
+	type ControlEvent,
+	type ControlResponse,
+} from "../src/daemon/control-protocol.ts";
 import {
 	type RemoteControlBackend,
 	RemoteControlCenterComponent,
+	RemoteControlRequestError,
 	type RemoteControlSnapshot,
 	type RemotePairingHandle,
 } from "../src/modes/interactive/components/remote-control-center.ts";
@@ -22,7 +29,7 @@ function status(overrides: Partial<RemoteStatus> = {}): RemoteStatus {
 		protocolVersion: 1,
 		pid: 42,
 		startedAtMs: Date.now() - 5 * 60 * 1000,
-		capabilities: ["pair_cancel"],
+		capabilities: [CONTROL_PAIR_CANCEL_CAPABILITY, CONTROL_RPC_GRANTS_CAPABILITY],
 		leases: [
 			{
 				workspaceName: "volt",
@@ -54,10 +61,13 @@ class FakeBackend implements RemoteControlBackend {
 	snapshot: RemoteControlSnapshot;
 	nextSnapshot: RemoteControlSnapshot | undefined;
 	startCalls = 0;
+	regenerateCalls = 0;
+	recoverCalls: string[] = [];
 	registerCalls: string[] = [];
 	revokeCalls: string[] = [];
 	repairApprovalCalls: string[] = [];
 	pairWorkspace: string | undefined;
+	pairAccess: IrohRemoteAccessPresetName | undefined;
 	pairingProgress: ((event: PairingProgress) => void) | undefined;
 	closeCalls = 0;
 	pairDisposeCalls = 0;
@@ -78,6 +88,20 @@ class FakeBackend implements RemoteControlBackend {
 		this.startCalls++;
 	}
 
+	async regenerateState(): Promise<{ backupPath: string; preservedIdentity: boolean }> {
+		this.regenerateCalls++;
+		return { backupPath: "/tmp/state.json.invalid-1", preservedIdentity: true };
+	}
+
+	async findRecoveryBackup(): Promise<{ path: string; preservedIdentity: boolean } | undefined> {
+		return undefined;
+	}
+
+	async recoverStateBackup(path: string): Promise<{ preservedIdentity: boolean }> {
+		this.recoverCalls.push(path);
+		return { preservedIdentity: true };
+	}
+
 	async registerCurrentWorkspace(path: string): Promise<{ name: string; path: string }> {
 		this.registerCalls.push(path);
 		const workspace = { name: "volt", path };
@@ -92,9 +116,11 @@ class FakeBackend implements RemoteControlBackend {
 
 	async beginPairing(
 		workspaceName: string,
+		access: IrohRemoteAccessPresetName,
 		onProgress: (event: PairingProgress) => void,
 	): Promise<RemotePairingHandle> {
 		this.pairWorkspace = workspaceName;
+		this.pairAccess = access;
 		this.pairingProgress = onProgress;
 		return {
 			requestId: "pair-1",
@@ -134,15 +160,33 @@ class FakeBackend implements RemoteControlBackend {
 	}
 }
 
+class EndpointUnavailableBackend extends FakeBackend {
+	override async beginPairing(): Promise<RemotePairingHandle> {
+		throw new RemoteControlRequestError("iroh_unavailable", "Iroh endpoint did not become ready within 15s");
+	}
+
+	override async findRecoveryBackup(): Promise<{ path: string; preservedIdentity: boolean }> {
+		return { path: "/tmp/state.json.corrupt-1", preservedIdentity: true };
+	}
+
+	override async recoverStateBackup(path: string): Promise<{ preservedIdentity: boolean }> {
+		this.recoverCalls.push(path);
+		this.nextSnapshot = { kind: "online", status: status() };
+		return { preservedIdentity: true };
+	}
+}
+
 class DeferredPairBackend extends FakeBackend {
 	pairCallbacks: Array<(event: PairingProgress) => void> = [];
 	pairResolvers: Array<(handle: RemotePairingHandle) => void> = [];
 
 	override beginPairing(
 		workspaceName: string,
+		access: IrohRemoteAccessPresetName,
 		onProgress: (event: PairingProgress) => void,
 	): Promise<RemotePairingHandle> {
 		this.pairWorkspace = workspaceName;
+		this.pairAccess = access;
 		this.pairCallbacks.push(onProgress);
 		return new Promise((resolve) => this.pairResolvers.push(resolve));
 	}
@@ -214,7 +258,7 @@ describe("RemoteControlCenterComponent", () => {
 		const text = component.render(100).map(stripAnsi).join("\n");
 		expect(text).toContain("Detached runtime retention: not reported");
 		expect(text).toContain("Tools: not reported");
-		expect(text).toContain("Restart voltd to pair safely");
+		expect(text).toContain("Restart voltd to pair with explicit access grants");
 	});
 
 	it("is height- and width-safe across the visual validation matrix", async () => {
@@ -264,6 +308,40 @@ describe("RemoteControlCenterComponent", () => {
 		expect(component.render(80).map(stripAnsi).join("\n")).toContain("Daemon started");
 	});
 
+	it("requires confirmation before backing up and regenerating invalid daemon state", async () => {
+		const invalidSnapshot: RemoteControlSnapshot = {
+			kind: "offline",
+			state: "not-running",
+			error: "Daemon state file /tmp/state.json is invalid or incompatible",
+			invalidState: {
+				path: "/tmp/state.json",
+				error: "Daemon state file /tmp/state.json is invalid or incompatible",
+			},
+		};
+		const backend = new FakeBackend(invalidSnapshot);
+		const { component } = createComponent(backend);
+		await component.start();
+		let text = component.render(100).map(stripAnsi).join("\n");
+		expect(text).toContain("Regenerate daemon state…");
+		expect(text).toContain("preserves validated settings/identity when possible");
+
+		component.handleInput("\n");
+		expect(backend.regenerateCalls).toBe(0);
+		text = component.render(100).map(stripAnsi).join("\n");
+		expect(text).toContain("Confirm regenerate state");
+		expect(text).toContain("timestamped backup");
+
+		backend.nextSnapshot = { kind: "online", status: status() };
+		component.handleInput("\n");
+		await settle();
+		expect(backend.regenerateCalls).toBe(1);
+		expect(backend.startCalls).toBe(1);
+		text = component.render(100).map(stripAnsi).join("\n");
+		expect(text).toContain(
+			"Daemon state regenerated; backup saved to /tmp/state.json.invalid-1 · Iroh identity preserved",
+		);
+	});
+
 	it("registers Volt's current directory when it is not available to the daemon", async () => {
 		const backend = new FakeBackend({ kind: "online", status: status({ workspaces: [] }) });
 		const { component } = createComponent(backend, 36);
@@ -290,8 +368,16 @@ describe("RemoteControlCenterComponent", () => {
 		component.handleInput("\x1b[B");
 		component.handleInput("\x1b[B");
 		component.handleInput("\n");
+		let text = component.render(80).map(stripAnsi).join("\n");
+		expect(text).toContain("Choose what this phone may do");
+		expect(text).toContain("Everything: API keys, log upload, host control, worktrees, and workspaces");
+		component.handleInput("\x1b[B");
+		component.handleInput("\x1b[B");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
 		await settle();
 		expect(backend.pairWorkspace).toBe("volt");
+		expect(backend.pairAccess).toBe("full");
 
 		backend.pairingProgress?.({
 			type: "pairing_progress",
@@ -300,7 +386,8 @@ describe("RemoteControlCenterComponent", () => {
 			ticket: "volt+iroh://v1/test-pairing-ticket",
 		});
 		backend.pairingProgress?.({ type: "pairing_progress", requestId: "pair-1", phase: "waiting" });
-		let text = component.render(40).map(stripAnsi).join("\n");
+		text = component.render(40).map(stripAnsi).join("\n");
+		expect(text).toContain("PAIR PHONE · volt · Full access");
 		expect(text).toContain("Scan with Volt on your phone");
 		expect(text).toContain("Enlarge the terminal");
 
@@ -316,6 +403,69 @@ describe("RemoteControlCenterComponent", () => {
 		expect(component.render(40).map(stripAnsi).join("\n")).toContain("HEADLESS POLICY");
 	});
 
+	it("keeps the selected access preset when a workspace choice is required", async () => {
+		const backend = new FakeBackend({
+			kind: "online",
+			status: status({
+				workspaces: [
+					{ name: "alpha", path: "/tmp/alpha" },
+					{ name: "beta", path: "/tmp/beta" },
+				],
+			}),
+		});
+		const { component } = createComponent(backend, 24);
+		await component.start();
+		component.render(80);
+		component.handleInput("\x1b[B");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		component.render(80);
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+
+		let text = component.render(80).map(stripAnsi).join("\n");
+		expect(text).toContain("PAIR A PHONE · Review");
+		expect(text).toContain("Choose the phone's initial workspace");
+
+		component.handleInput("\x1b");
+		text = component.render(80).map(stripAnsi).join("\n");
+		expect(text).toContain("PAIR A PHONE · ACCESS");
+
+		component.handleInput("\n");
+		component.handleInput("\n");
+		await settle();
+		expect(backend.pairWorkspace).toBe("alpha");
+		expect(backend.pairAccess).toBe("review");
+	});
+
+	it("offers confirmed state recovery after endpoint readiness times out", async () => {
+		const backend = new EndpointUnavailableBackend({ kind: "online", status: status() });
+		const { component } = createComponent(backend, 36);
+		await component.start();
+		component.render(100);
+		component.handleInput("\x1b[B");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		component.handleInput("\n");
+		await settle();
+
+		let text = component.render(100).map(stripAnsi).join("\n");
+		expect(text).toContain("Iroh endpoint did not become ready within 15s");
+		expect(text).toContain("Recover previous daemon state…");
+
+		component.handleInput("\n");
+		expect(backend.recoverCalls).toEqual([]);
+		text = component.render(100).map(stripAnsi).join("\n");
+		expect(text).toContain("Confirm recover and restart");
+		expect(text).toContain("Legacy access records are dropped");
+
+		component.handleInput("\n");
+		await settle();
+		expect(backend.recoverCalls).toEqual(["/tmp/state.json.corrupt-1"]);
+		text = component.render(100).map(stripAnsi).join("\n");
+		expect(text).toContain("Recovered daemon state and preserved the Iroh identity");
+	});
+
 	it("ignores progress from a cancelled stale pairing attempt", async () => {
 		const backend = new DeferredPairBackend({ kind: "online", status: status() });
 		const { component } = createComponent(backend, 36);
@@ -324,8 +474,10 @@ describe("RemoteControlCenterComponent", () => {
 		component.handleInput("\x1b[B");
 		component.handleInput("\x1b[B");
 		component.handleInput("\n");
+		component.handleInput("\n");
 		component.handleInput("\x1b");
 		component.render(100);
+		component.handleInput("\n");
 		component.handleInput("\n");
 		expect(backend.pairResolvers).toHaveLength(2);
 
@@ -356,6 +508,7 @@ describe("RemoteControlCenterComponent", () => {
 		component.render(160);
 		component.handleInput("\x1b[B");
 		component.handleInput("\x1b[B");
+		component.handleInput("\n");
 		component.handleInput("\n");
 		await settle();
 		backend.pairingProgress?.({

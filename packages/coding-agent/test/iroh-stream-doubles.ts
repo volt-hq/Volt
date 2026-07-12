@@ -14,6 +14,7 @@ import type { Api, Model } from "@earendil-works/volt-ai";
 import { expect, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/rpc/index.ts";
 import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 
@@ -136,6 +137,7 @@ export async function startIrohRpcMode(
 	const send = new ManualIrohSendStream();
 	const modePromise = runIrohRemoteRpcMode(runtimeHost, {
 		...options,
+		rpcGrant: options.rpcGrant ?? createIrohRemotePresetAccess("full").rpcGrant,
 		disposeRuntimeOnClose: false,
 		stream: { recv, send },
 		workspacePath: "/workspace",

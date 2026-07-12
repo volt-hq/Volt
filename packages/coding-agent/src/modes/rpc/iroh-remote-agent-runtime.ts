@@ -9,7 +9,11 @@ import { createAgentSessionFromServices, createAgentSessionServices } from "../.
 import { formatNoModelsAvailableMessage } from "../../core/auth-guidance.ts";
 import { AuthStorage } from "../../core/auth-storage.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "../../core/http-dispatcher.ts";
-import { parseIrohRemoteAllowTools, usesDefaultIrohRemoteAllowTools } from "../../core/remote/iroh/index.ts";
+import {
+	type IrohRemoteRuntimeToolPolicy,
+	parseIrohRemoteAllowTools,
+	usesDefaultIrohRemoteAllowTools,
+} from "../../core/remote/iroh/index.ts";
 import { getDefaultSessionDir, type SessionManager } from "../../core/session-manager.ts";
 import { SettingsManager } from "../../core/settings-manager.ts";
 import { SubagentManager, type SubagentRuntimeCreatedEvent } from "../../core/subagents/index.ts";
@@ -23,7 +27,10 @@ import { runMigrations } from "../../migrations.ts";
 import { resolvePath } from "../../utils/paths.ts";
 
 export interface IrohRemoteAgentRuntimeOptions {
+	/** Legacy unresolved grant used by direct callers. Daemon runtimes pass toolPolicy instead. */
 	allowTools?: string;
+	/** Pre-composed client/workspace/daemon policy. Preserves an explicit deny-all. */
+	toolPolicy?: IrohRemoteRuntimeToolPolicy;
 	agentDir?: string;
 	conversationTarget?: IrohRemoteAgentRuntimeConversationTarget;
 	/** Runtime working directory for tools/session state. */
@@ -96,8 +103,9 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 	const projectCwd = resolvePath(options.projectCwd ?? options.cwd);
 	runIrohRemoteStartupMigrations(projectCwd, agentDir);
 	const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
-	const tools = parseIrohRemoteAllowTools(options.allowTools);
-	const allowUnlistedExtensionTools = usesDefaultIrohRemoteAllowTools(options.allowTools);
+	const tools = options.toolPolicy ? [...options.toolPolicy.tools] : parseIrohRemoteAllowTools(options.allowTools);
+	const allowUnlistedExtensionTools =
+		options.toolPolicy?.allowUnlistedExtensionTools ?? usesDefaultIrohRemoteAllowTools(options.allowTools);
 	const projectTrusted = options.projectTrusted ?? false;
 
 	const createRuntime: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {

@@ -3,6 +3,16 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { Socket } from "node:net";
 import { relative, resolve, sep } from "node:path";
+import {
+	createIrohRemoteExplicitAccess,
+	createIrohRemotePresetAccess,
+	getIrohRemoteRpcCommandCapabilities,
+	getIrohRemoteStreamCapability,
+	getMissingIrohRemoteRpcCapability,
+	hasIrohRemoteRpcCapability,
+	parseIrohRemoteRpcCapabilities,
+	parseIrohRemoteRpcGrant,
+} from "../core/remote/iroh/access-grant.ts";
 import type { IrohRemoteActiveStreamEntry } from "../core/remote/iroh/active-stream-registry.ts";
 import { IrohRemoteActiveStreamRegistry } from "../core/remote/iroh/active-stream-registry.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
@@ -19,7 +29,7 @@ import {
 	writeIrohRemoteHandshakeResponse,
 } from "../core/remote/iroh/handshake-reader.ts";
 import { resolveIrohRemoteWorkspaceProjectTrusted } from "../core/remote/iroh/host-policy.ts";
-import { IROH_REMOTE_ALPN } from "../core/remote/iroh/protocol.ts";
+import { IROH_REMOTE_ALPN, resolveIrohRemoteRuntimeToolPolicy } from "../core/remote/iroh/protocol.ts";
 import {
 	IrohRemoteInMemoryPushNotificationDeduper,
 	type IrohRemoteLiveActivityUpdateIntent,
@@ -28,7 +38,10 @@ import {
 	type IrohRemotePushNotificationIntent,
 	IrohRemotePushRelayHttpClient,
 } from "../core/remote/iroh/push.ts";
-import { createIrohRemoteRpcErrorResponse } from "../core/remote/iroh/rpc-command-filter.ts";
+import {
+	createIrohRemoteRpcCapabilityDeniedResponse,
+	createIrohRemoteRpcErrorResponse,
+} from "../core/remote/iroh/rpc-command-filter.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import { getIrohRemoteWorkspaceAvailabilityStatus } from "../core/remote/iroh/workspace.ts";
@@ -39,6 +52,7 @@ import { getCurrentThemeName, getResolvedThemeColors } from "../core/theme/runti
 import { ProjectTrustStore } from "../core/trust-manager.ts";
 import { runIrohRemoteRpcMode } from "../modes/rpc/iroh-remote-rpc-mode.ts";
 import {
+	CONTROL_RPC_GRANTS_CAPABILITY,
 	CONTROL_WORKTREES_CAPABILITY,
 	type ControlLeaseStatus,
 	type ControlRequest,
@@ -117,7 +131,42 @@ const DUPLICATE_CONVERSATION_RETRY_AFTER_MS = 500;
 const RELAY_OFFER_RETRY_AFTER_MS = 1000;
 const WORKSPACE_DISCOVERY_STREAM_SESSION_ID = "$workspace-discovery";
 const WORKSPACE_MANAGEMENT_STREAM_SESSION_ID = "$workspace-management";
+const IROH_ENDPOINT_READY_TIMEOUT_MS = 15_000;
 const SHUTDOWN_RUNTIME_IDLE_CAP_MS = 60_000;
+
+export type AuthorityInvalidationRuntime = Pick<IntegratedRuntimeEntry, "clientNodeId" | "workspaceName" | "sessionId">;
+
+export function collectClientAuthorityInvalidationRuntimes<T extends AuthorityInvalidationRuntime>(
+	activeStreams: IrohRemoteActiveStreamRegistry,
+	runtimes: Iterable<T>,
+	clientNodeId: string,
+): Set<T> {
+	const clientEntries = activeStreams.entriesForClientNodeId(clientNodeId);
+	return new Set(
+		Array.from(runtimes).filter(
+			(runtime) =>
+				runtime.clientNodeId === clientNodeId ||
+				clientEntries.some(
+					(entry) => entry.workspaceName === runtime.workspaceName && entry.sessionId === runtime.sessionId,
+				),
+		),
+	);
+}
+
+export function collectClientAuthorityInvalidationStreams(
+	activeStreams: IrohRemoteActiveStreamRegistry,
+	runtimes: Iterable<AuthorityInvalidationRuntime>,
+	clientNodeId: string,
+): Set<IrohRemoteActiveStreamEntry> {
+	const runtimeList = Array.from(runtimes);
+	const entries = new Set(activeStreams.entriesForClientNodeId(clientNodeId));
+	for (const runtime of collectClientAuthorityInvalidationRuntimes(activeStreams, runtimeList, clientNodeId)) {
+		for (const entry of activeStreams.entriesForConversationKey(runtime.workspaceName, runtime.sessionId)) {
+			entries.add(entry);
+		}
+	}
+	return entries;
+}
 
 function getRelativeWorkingDirectoryForRoot(rootPath: string, cwd: string): string | null | undefined {
 	const root = resolve(rootPath);
@@ -393,7 +442,12 @@ class IrohDaemonService {
 			stateManager: this.stateManager,
 			activeStreams: this.activeStreams,
 			detachedRuntimeTtlMs: () => services.state.state.settings.detachedRuntimeTtlMs,
-			getAllowTools: (workspace) => this.getWorkspaceAllowTools(workspace),
+			getToolPolicy: (workspace, clientAllowTools) =>
+				resolveIrohRemoteRuntimeToolPolicy({
+					clientAllowTools,
+					workspaceAllowTools: workspace.allowedTools,
+					daemonAllowTools: services.state.state.settings.allowTools,
+				}),
 			getProjectTrustedForWorkspace: (workspace) =>
 				resolveIrohRemoteWorkspaceProjectTrusted(workspace, { trustStore: this.trustStore }),
 			setClientLastSessionId: (nodeId, workspace, sessionId) =>
@@ -518,20 +572,17 @@ class IrohDaemonService {
 		}
 	}
 
-	private getWorkspaceAllowTools(workspace: IrohRemoteWorkspace): string | undefined {
-		const allowTools = this.services.state.state.settings.allowTools;
-		if (allowTools && allowTools.length > 0) {
-			return allowTools.join(",");
-		}
-		return workspace.allowedTools;
-	}
-
 	private getResponseContext(): RemoteHostResponseContext {
 		return {
 			hostNodeId: this.hostNodeId,
 			relayMode: this.relayMode,
 			...(this.relayMode === "production" ? { relayUrls: this.relayUrls } : {}),
 		};
+	}
+
+	private async isAuthorizationGrantCurrent(authorization: IrohRemoteClientAuthorizationSuccess): Promise<boolean> {
+		const client = await this.stateManager.getClient(authorization.client.nodeId);
+		return client?.rpcGrant.revision === authorization.client.rpcGrant.revision;
 	}
 
 	private getCommandContext(conversation?: {
@@ -817,6 +868,30 @@ class IrohDaemonService {
 			return;
 		}
 
+		const streamCapability = getIrohRemoteStreamCapability({
+			mode: handshake.hello.mode,
+			...(handshake.hello.mode === "workspaceManagement"
+				? { purpose: handshake.hello.workspaceManagement.purpose }
+				: {}),
+		});
+		if (
+			streamCapability !== undefined &&
+			!hasIrohRemoteRpcCapability(
+				parseIrohRemoteRpcGrant(handshake.authorization.client.rpcGrant, "client rpcGrant"),
+				streamCapability,
+			)
+		) {
+			await writeIrohRemoteHandshakeResponse(
+				stream.send,
+				createIrohRemoteHandshakeFailure(`rpc_capability_denied: ${streamCapability}`, {
+					hostNodeId: this.hostNodeId,
+					workspace: handshake.authorization.workspace.name,
+				}),
+			);
+			closeIrohRemoteStream(stream, "rpc_capability_denied");
+			return;
+		}
+
 		this.notifyPairingConsumed(handshake, remoteId);
 
 		if (handshake.authorization.paired) {
@@ -957,6 +1032,7 @@ class IrohDaemonService {
 					stream,
 					initialInput: handshake.initialInput,
 					authorization: handshake.authorization,
+					isRpcGrantCurrent: () => this.isAuthorizationGrantCurrent(handshake.authorization),
 					closeStream: (reason) => closeIrohRemoteStream(stream, reason),
 				},
 				{ commandContext: this.getCommandContext() },
@@ -989,6 +1065,7 @@ class IrohDaemonService {
 					stream,
 					initialInput: handshake.initialInput,
 					authorization: handshake.authorization,
+					isRpcGrantCurrent: () => this.isAuthorizationGrantCurrent(handshake.authorization),
 					closeStream: (reason) => {
 						activeStream.remove();
 						closeIrohRemoteStream(stream, reason);
@@ -1043,6 +1120,7 @@ class IrohDaemonService {
 					stream,
 					initialInput: handshake.initialInput,
 					authorization: handshake.authorization,
+					isRpcGrantCurrent: () => this.isAuthorizationGrantCurrent(handshake.authorization),
 					closeStream: (reason) => closeIrohRemoteStream(stream, reason),
 				},
 				{
@@ -1353,16 +1431,20 @@ class IrohDaemonService {
 		// parent-keyed session dir plus a non-matching cwd makes SessionManager.list
 		// filter by header cwd, restricting resolution to that worktree's sessions).
 		const boundWorktree = await this.stateManager.findWorktreeForSession(workspaceName, targetSessionId);
+		const relayOwnerCapabilities = this.services.controlServer
+			.connections()
+			.find((controlConnection) => controlConnection.connectionId === tuiConnectionId)?.capabilities;
+		if (!relayOwnerCapabilities?.has(CONTROL_RPC_GRANTS_CAPABILITY)) {
+			await this.sendHandshakeError(stream, {
+				message: "conversation owner is not grant-aware; retry",
+				retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
+			});
+			return;
+		}
 		// Worktree-bound conversations are only relayed to TUIs that advertised the
 		// worktrees control capability (an old TUI would sanitize with the parent
 		// root and leak host paths), and never when the checkout has vanished.
-		const relayGate = evaluateWorktreeRelayGate(
-			boundWorktree,
-			this.services.controlServer
-				.connections()
-				.find((controlConnection) => controlConnection.connectionId === tuiConnectionId)?.capabilities,
-			CONTROL_WORKTREES_CAPABILITY,
-		);
+		const relayGate = evaluateWorktreeRelayGate(boundWorktree, relayOwnerCapabilities, CONTROL_WORKTREES_CAPABILITY);
 		if (!relayGate.ok) {
 			if (relayGate.reason === "checkout_missing") {
 				await this.sendHandshakeError(stream, {
@@ -1426,6 +1508,13 @@ class IrohDaemonService {
 			});
 			return;
 		}
+		// The target-resolution awaits above can race an access update or revoke.
+		// Recheck immediately before the synchronous mint so stale authorization
+		// cannot create a new pending offer after control-plane invalidation acks.
+		if (!(await this.isAuthorizationGrantCurrent(authorization))) {
+			await this.sendHandshakeError(stream, { message: "client access changed; reconnect" });
+			return;
+		}
 
 		// A sibling stream can resolve/redeem while this stream awaits target
 		// resolution. Re-check immediately before minting the offer.
@@ -1459,6 +1548,7 @@ class IrohDaemonService {
 				sessionId: targetSessionId,
 				clientNodeId: authorization.client.nodeId,
 				connectionId,
+				ownerControlConnectionId: tuiConnectionId,
 				streamId,
 				stream,
 				preamble: {
@@ -1469,6 +1559,8 @@ class IrohDaemonService {
 					},
 					authorization: {
 						clientNodeId: authorization.client.nodeId,
+						allowedTools: authorization.client.allowedTools,
+						rpcGrant: authorization.client.rpcGrant,
 						workspaceName,
 						workspacePath: authorization.workspace.path,
 						...(boundWorktree === undefined
@@ -1738,6 +1830,10 @@ class IrohDaemonService {
 							workspacePath: entry.worktreePath,
 							additionalRedactedPaths: [authorization.workspace.path, getWorktreesRoot(this.services.agentDir)],
 						};
+			if (!(await this.isAuthorizationGrantCurrent(authorization))) {
+				await this.runtimes.stopEntry(entry, "access_updated_during_attach");
+				throw new Error("client access changed during conversation attach; reconnect");
+			}
 			const replacedEntries = this.activeStreams.takeEntriesForConversationOnOtherConnections(
 				authorization.client.nodeId,
 				authorization.workspace.name,
@@ -1775,6 +1871,8 @@ class IrohDaemonService {
 			await this.runtimes.replayWorkflowEvents(activeStream.entry, entry);
 			const pushDispatcher = this.createPushNotificationDispatcher(authorization);
 			await runIrohRemoteRpcMode(entry.runtime, {
+				rpcGrant: authorization.client.rpcGrant,
+				isRpcGrantCurrent: () => this.isAuthorizationGrantCurrent(authorization),
 				decorateOutbound: (value) => decorateRemoteHostState(value, authorization, this.getResponseContext()),
 				disposeRuntimeOnClose: false,
 				notificationDelivery: pushDispatcher,
@@ -1893,7 +1991,7 @@ class IrohDaemonService {
 		};
 	}
 
-	private async closeClientConnectionsForClient(nodeId: string, reason: string): Promise<number> {
+	private closeClientConnectionsForClient(nodeId: string, reason: string): number {
 		const records = Array.from(this.clientConnections.get(nodeId) ?? []);
 		if (records.length === 0) {
 			return 0;
@@ -2057,6 +2155,42 @@ class IrohDaemonService {
 		return entries.length;
 	}
 
+	private async closeClientForAccessUpdate(nodeId: string): Promise<void> {
+		const runtimeEntries = collectClientAuthorityInvalidationRuntimes(
+			this.activeStreams,
+			this.runtimes.values(),
+			nodeId,
+		);
+		const entries = collectClientAuthorityInvalidationStreams(this.activeStreams, runtimeEntries, nodeId);
+		for (const entry of entries) {
+			this.activeStreams.unregister(entry);
+		}
+		// Invalidate transport and relay authority synchronously. Terminal writes
+		// below are best-effort and must never keep old commands or buffered prompts
+		// alive behind backpressure.
+		this.closeClientConnectionsForClient(nodeId, "access_updated");
+		for (const entry of entries) {
+			try {
+				entry.closeConnection?.("access_updated");
+			} catch {}
+		}
+		for (const relay of this.relays.activeRelays()) {
+			if (relay.clientNodeId === nodeId) relay.close("error");
+		}
+		for (const pending of this.relays.pendingRelays()) {
+			if (pending.clientNodeId === nodeId) {
+				this.abortPendingRelay(pending.relayId, "error", "client access updated; reconnect");
+			}
+		}
+		const streamClosures = Promise.allSettled(
+			Array.from(entries, (entry) => Promise.resolve(entry.close("access_updated"))),
+		);
+		await Promise.allSettled(
+			Array.from(runtimeEntries, (runtimeEntry) => this.runtimes.stopEntry(runtimeEntry, "access_updated")),
+		);
+		await streamClosures;
+	}
+
 	private async closeWorkspaceAuthorizationRemovedStreams(nodeId: string, workspaceName: string): Promise<void> {
 		const reason = "workspace_authorization_removed";
 		const closedStreamCount = await this.closeActiveStreamsForClientWorkspace(nodeId, workspaceName, reason);
@@ -2080,33 +2214,61 @@ class IrohDaemonService {
 	}
 
 	async closeActiveStreamsForClient(nodeId: string): Promise<{ closed: boolean; closedCount: number }> {
-		const entries = this.activeStreams.entriesForClientNodeId(nodeId);
-		if (entries.length === 0) {
-			const closedConnectionCount = await this.closeClientConnectionsForClient(nodeId, ACTIVE_REVOKE_CLOSE_REASON);
-			const stoppedRuntimeCount = await this.runtimes.stopForClient(nodeId, "client_revoked");
-			const closed = closedConnectionCount > 0;
+		const runtimeEntries = collectClientAuthorityInvalidationRuntimes(
+			this.activeStreams,
+			this.runtimes.values(),
+			nodeId,
+		);
+		const entries = collectClientAuthorityInvalidationStreams(this.activeStreams, runtimeEntries, nodeId);
+		for (const entry of entries) {
+			this.activeStreams.unregister(entry);
+		}
+
+		// Match access-update ordering: synchronously make active and unredeemed TUI
+		// relays unusable before any terminal write, runtime disposal, or control ack.
+		const activeRelays = this.relays.activeRelays().filter((relay) => relay.clientNodeId === nodeId);
+		const pendingRelays = this.relays.pendingRelays().filter((relay) => relay.clientNodeId === nodeId);
+		for (const relay of activeRelays) {
+			relay.close("error");
+		}
+		for (const pending of pendingRelays) {
+			this.abortPendingRelay(pending.relayId, "error", "client revoked; re-pair required");
+		}
+
+		const closedConnectionCount = this.closeClientConnectionsForClient(nodeId, ACTIVE_REVOKE_CLOSE_REASON);
+		for (const entry of entries) {
+			try {
+				entry.closeConnection?.(ACTIVE_REVOKE_CLOSE_REASON);
+			} catch {}
+		}
+		const streamClosures = Promise.allSettled(
+			Array.from(entries, (entry) => Promise.resolve(entry.close(ACTIVE_REVOKE_CLOSE_REASON))),
+		);
+		await Promise.allSettled(
+			Array.from(runtimeEntries, (runtimeEntry) => this.runtimes.stopEntry(runtimeEntry, "client_revoked")),
+		);
+		await streamClosures;
+		const stoppedRuntimeCount = runtimeEntries.size;
+		const closed =
+			entries.size > 0 || closedConnectionCount > 0 || activeRelays.length > 0 || pendingRelays.length > 0;
+		if (entries.size === 0) {
 			await this.logAudit({
 				type: "active_connection_revoked",
 				clientNodeId: nodeId,
 				success: closed || stoppedRuntimeCount > 0,
 				error: closed || stoppedRuntimeCount > 0 ? undefined : "no active connection found",
 				details: {
+					activeRelayCount: activeRelays.length,
 					closeReason: ACTIVE_REVOKE_CLOSE_REASON,
 					closedConnectionCount,
+					pendingRelayCount: pendingRelays.length,
 					source: "control_channel",
 					stoppedRuntimeCount,
 				},
 			});
-			return { closed, closedCount: closedConnectionCount };
+			return { closed, closedCount: closedConnectionCount + activeRelays.length + pendingRelays.length };
 		}
 
-		for (const entry of entries) {
-			this.activeStreams.unregister(entry);
-			await Promise.resolve(entry.close(ACTIVE_REVOKE_CLOSE_REASON)).catch(() => {});
-		}
-		await this.closeIdleConnectionsForEntries(entries, ACTIVE_REVOKE_CLOSE_REASON);
-		const closedConnectionCount = await this.closeClientConnectionsForClient(nodeId, ACTIVE_REVOKE_CLOSE_REASON);
-		const stoppedRuntimeCount = await this.runtimes.stopForClient(nodeId, "client_revoked");
 		for (const entry of entries) {
 			await this.logAudit({
 				type: "active_connection_revoked",
@@ -2114,15 +2276,17 @@ class IrohDaemonService {
 				workspace: entry.workspaceName,
 				success: true,
 				details: {
+					activeRelayCount: activeRelays.length,
 					closeReason: ACTIVE_REVOKE_CLOSE_REASON,
 					closedConnectionCount,
+					pendingRelayCount: pendingRelays.length,
 					source: "control_channel",
 					streamId: entry.streamId,
 					stoppedRuntimeCount,
 				},
 			});
 		}
-		return { closed: true, closedCount: entries.length };
+		return { closed: true, closedCount: entries.size + activeRelays.length + pendingRelays.length };
 	}
 
 	// ==========================================================================
@@ -2157,7 +2321,11 @@ class IrohDaemonService {
 		request: ControlRequest & { type: "pair_request" },
 	): Promise<void> {
 		try {
-			await this.ready.promise;
+			await withTimeout(
+				this.ready.promise,
+				IROH_ENDPOINT_READY_TIMEOUT_MS,
+				"Iroh endpoint did not become ready within 15s",
+			);
 		} catch (error) {
 			connection.send({
 				type: "error",
@@ -2179,7 +2347,18 @@ class IrohDaemonService {
 				: undefined;
 		const requestId = randomUUID();
 		try {
+			const access =
+				request.access !== undefined
+					? createIrohRemotePresetAccess(request.access)
+					: request.allowedTools !== undefined && request.rpcCapabilities !== undefined
+						? createIrohRemoteExplicitAccess(
+								request.allowedTools,
+								parseIrohRemoteRpcCapabilities(request.rpcCapabilities),
+							)
+						: createIrohRemotePresetAccess("coding");
 			const pairing = await engine.pair({
+				allowTools: access.allowedTools,
+				rpcGrant: access.rpcGrant,
 				irohTicket: this.endpointTicket,
 				nodeId: this.hostNodeId,
 				relayMode: this.relayMode,
@@ -2349,7 +2528,7 @@ class IrohDaemonService {
 				return true;
 			}
 			case "relay_rpc": {
-				const result = await this.handleRelayRpc(request);
+				const result = await this.handleRelayRpc(connection, request);
 				if (!result.ok) {
 					connection.send({ type: "error", id: request.id, code: result.code, message: result.message });
 					return true;
@@ -2378,6 +2557,62 @@ class IrohDaemonService {
 					return true;
 				}
 				connection.send({ type: "relay_push_delivery_result", id: request.id, status: result.status });
+				return true;
+			}
+			case "client_access_update": {
+				const access =
+					request.access !== undefined
+						? createIrohRemotePresetAccess(request.access)
+						: createIrohRemoteExplicitAccess(
+								request.allowedTools ?? [],
+								parseIrohRemoteRpcCapabilities(request.rpcCapabilities),
+							);
+				const engine = this.engine;
+				const updated = engine
+					? await engine.updateClientAccess(request.clientNodeId, request.expectedRevision, access)
+					: await this.stateManager.updateClientAccess(request.clientNodeId, request.expectedRevision, access);
+				if (!engine) {
+					await this.logAudit({
+						type: "client_access_updated",
+						clientNodeId: request.clientNodeId,
+						success: updated.ok,
+						error: updated.ok ? undefined : updated.reason,
+						details: {
+							expectedRevision: request.expectedRevision,
+							...(updated.ok
+								? { revision: updated.client.rpcGrant.revision }
+								: { currentRevision: updated.currentRevision }),
+						},
+					});
+				}
+				if (!updated.ok) {
+					connection.send({
+						type: "error",
+						id: request.id,
+						code: updated.reason,
+						message:
+							updated.reason === "revision_conflict"
+								? `RPC grant revision conflict (current ${updated.currentRevision ?? "unknown"})`
+								: updated.reason === "revision_exhausted"
+									? "RPC grant revision is exhausted; revoke and re-pair the client"
+									: "client not found",
+					});
+					return true;
+				}
+				await this.services.state.flush();
+				await this.closeClientForAccessUpdate(request.clientNodeId);
+				connection.send({
+					type: "client_access_updated",
+					id: request.id,
+					client: {
+						clientNodeId: updated.client.nodeId,
+						label: updated.client.label,
+						pairedAtMs: updated.client.pairedAt,
+						lastSeenAtMs: updated.client.lastSeenAt,
+						allowedTools: updated.client.allowedTools.length === 0 ? [] : updated.client.allowedTools.split(","),
+						rpcGrant: updated.client.rpcGrant,
+					},
+				});
 				return true;
 			}
 			case "client_revoke": {
@@ -2459,7 +2694,7 @@ class IrohDaemonService {
 			ok: true,
 			authorization: {
 				ok: true,
-				allowTools: this.getWorkspaceAllowTools(workspace) ?? "",
+				allowTools: client.allowedTools,
 				client,
 				paired: true,
 				pairingSecretConsumed: false,
@@ -2547,7 +2782,10 @@ class IrohDaemonService {
 	 * and workspace unregistration must land here, not in the TUI's in-memory
 	 * state copy.
 	 */
-	private async handleRelayRpc(request: Extract<ControlRequest, { type: "relay_rpc" }>): Promise<
+	private async handleRelayRpc(
+		connection: ControlConnection,
+		request: Extract<ControlRequest, { type: "relay_rpc" }>,
+	): Promise<
 		| {
 				ok: true;
 				response: Record<string, unknown>;
@@ -2555,6 +2793,10 @@ class IrohDaemonService {
 		  }
 		| { ok: false; code: string; message: string }
 	> {
+		const relayAuthorization = this.relays.authorizeRpc(request.relayId, connection.connectionId, request);
+		if (!relayAuthorization.ok) {
+			return relayAuthorization;
+		}
 		const command = request.command;
 		if (!RELAY_RPC_COMMAND_TYPES.has(command.type)) {
 			return { ok: false, code: "unsupported", message: `unsupported relay rpc command: ${command.type}` };
@@ -2562,6 +2804,23 @@ class IrohDaemonService {
 		const client = await this.stateManager.getClient(request.clientNodeId);
 		if (!client) {
 			return { ok: false, code: "not_found", message: "paired client not found" };
+		}
+		const requiredCapabilities = getIrohRemoteRpcCommandCapabilities(command);
+		if (requiredCapabilities === undefined) {
+			return { ok: false, code: "unsupported", message: `unsupported relay rpc command: ${command.type}` };
+		}
+		const missingCapability = getMissingIrohRemoteRpcCapability(client.rpcGrant, requiredCapabilities);
+		if (missingCapability !== undefined) {
+			return {
+				ok: true,
+				response: {
+					...createIrohRemoteRpcCapabilityDeniedResponse(
+						getRpcResponseId(command),
+						command.type,
+						missingCapability,
+					),
+				},
+			};
 		}
 		const workspace = (await this.stateManager.getState()).workspaces.find(
 			(candidate) => candidate.name === request.workspaceName,
@@ -2571,7 +2830,7 @@ class IrohDaemonService {
 		}
 		const authorization: IrohRemoteClientAuthorizationSuccess = {
 			ok: true,
-			allowTools: this.getWorkspaceAllowTools(workspace) ?? "",
+			allowTools: client.allowedTools,
 			client,
 			paired: true,
 			pairingSecretConsumed: false,
@@ -2658,7 +2917,11 @@ class IrohDaemonService {
 		{ ok: true; engine: IrohRemoteHostEngine } | { ok: false; error: string }
 	> {
 		try {
-			await this.ready.promise;
+			await withTimeout(
+				this.ready.promise,
+				IROH_ENDPOINT_READY_TIMEOUT_MS,
+				"Iroh endpoint did not become ready within 15s",
+			);
 		} catch (error) {
 			return { ok: false, error: error instanceof Error ? error.message : String(error) };
 		}

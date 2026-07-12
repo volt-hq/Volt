@@ -24,6 +24,9 @@ const SUBAGENT_ID_LIMIT = 200;
 const SUBAGENT_TASK_LIMIT = 1_000;
 const SUBAGENT_ERROR_LIMIT = 1_000;
 const SUBAGENT_OUTPUT_LIMIT = 1_000;
+const SUBAGENT_ACTIVITY_LIMIT = 300;
+const SUBAGENT_TREE_DEPTH_LIMIT = 5;
+const SUBAGENT_NUMERIC_DETAIL_KEYS = ["startedAt", "durationMs", "toolCalls", "tokens"] as const;
 
 interface StoredToolCall {
 	id: string;
@@ -419,7 +422,9 @@ function projectSubagentInputArray(value: unknown): Record<string, string>[] | u
 	return projected.length > 0 ? projected : undefined;
 }
 
-function projectSubagentDetails(details: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+export function projectSubagentDetails(
+	details: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
 	if (!details) {
 		return undefined;
 	}
@@ -428,6 +433,13 @@ function projectSubagentDetails(details: Record<string, unknown> | undefined): R
 	copyBoundedString(details, projected, "status", SUBAGENT_AGENT_LIMIT);
 	copyBoundedString(details, projected, "subagentId", SUBAGENT_ID_LIMIT);
 	copyBoundedString(details, projected, "sessionId", SUBAGENT_ID_LIMIT);
+	for (const key of SUBAGENT_NUMERIC_DETAIL_KEYS) {
+		const numberValue = getFiniteNumber(details, key);
+		if (numberValue !== undefined) {
+			projected[key] = numberValue;
+		}
+	}
+	copyBoundedString(details, projected, "currentActivity", SUBAGENT_ACTIVITY_LIMIT);
 	const summary = projectSubagentSummary(details.summary);
 	if (summary) {
 		projected.summary = summary;
@@ -447,6 +459,10 @@ function projectSubagentDetails(details: Record<string, unknown> | undefined): R
 	const error = projectSubagentError(details.error);
 	if (error) {
 		projected.error = error;
+	}
+	const children = projectSubagentDetailArray(details.children);
+	if (children) {
+		projected.children = children;
 	}
 	const tasks = projectSubagentDetailArray(details.tasks);
 	if (tasks) {
@@ -482,17 +498,17 @@ function projectSubagentSummary(value: unknown): Record<string, number> | undefi
 	return Object.keys(projected).length > 0 ? projected : undefined;
 }
 
-function projectSubagentDetailArray(value: unknown): Record<string, unknown>[] | undefined {
-	if (!Array.isArray(value)) {
+function projectSubagentDetailArray(value: unknown, depth = 0): Record<string, unknown>[] | undefined {
+	if (!Array.isArray(value) || depth >= SUBAGENT_TREE_DEPTH_LIMIT) {
 		return undefined;
 	}
 	const projected = value
-		.map((item) => (isRecord(item) ? projectSubagentTaskDetails(item) : undefined))
+		.map((item) => (isRecord(item) ? projectSubagentTaskDetails(item, depth) : undefined))
 		.filter((item): item is Record<string, unknown> => item !== undefined);
 	return projected.length > 0 ? projected : undefined;
 }
 
-function projectSubagentTaskDetails(item: Record<string, unknown>): Record<string, unknown> | undefined {
+function projectSubagentTaskDetails(item: Record<string, unknown>, depth = 0): Record<string, unknown> | undefined {
 	const projected: Record<string, unknown> = {};
 	const index = getFiniteNumber(item, "index");
 	if (index !== undefined) {
@@ -505,9 +521,21 @@ function projectSubagentTaskDetails(item: Record<string, unknown>): Record<strin
 		projected.agent = agent;
 	}
 	copyBoundedString(item, projected, "status", SUBAGENT_AGENT_LIMIT);
+	copyBoundedString(item, projected, "task", SUBAGENT_TASK_LIMIT);
+	for (const key of SUBAGENT_NUMERIC_DETAIL_KEYS) {
+		const numberValue = getFiniteNumber(item, key);
+		if (numberValue !== undefined) {
+			projected[key] = numberValue;
+		}
+	}
+	copyBoundedString(item, projected, "currentActivity", SUBAGENT_ACTIVITY_LIMIT);
 	const error = projectSubagentError(item.error);
 	if (error) {
 		projected.error = error;
+	}
+	const children = projectSubagentDetailArray(item.children, depth + 1);
+	if (children) {
+		projected.children = children;
 	}
 	return Object.keys(projected).length > 0 ? projected : undefined;
 }

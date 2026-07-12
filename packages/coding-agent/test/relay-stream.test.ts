@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
 import { RELAY_TOKEN_TTL_MS, type RelayOutcome, RelayRegistry } from "../src/daemon/relay-stream.ts";
 import { connectRawRelayClient, FakePhoneIrohStream } from "./relay-doubles.ts";
@@ -48,6 +49,14 @@ afterEach(async () => {
 	}
 });
 
+const RELAY_AUTHORIZATION = {
+	clientNodeId: "n-phone-a",
+	workspaceName: "ws",
+	workspacePath: "/tmp/ws",
+	allowedTools: "read",
+	rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
+};
+
 const HANDSHAKE_VERBATIM = {
 	hello: {
 		type: "volt_iroh_hello",
@@ -71,12 +80,13 @@ function mintTestRelay(
 		workspaceName: "ws",
 		sessionId: "s-1",
 		clientNodeId: "n-phone-a",
+		ownerControlConnectionId: "control-1",
 		connectionId: "conn-1",
 		streamId: "st-1",
 		stream: phone,
 		preamble: {
 			handshake: HANDSHAKE_VERBATIM,
-			authorization: { clientNodeId: "n-phone-a", workspaceName: "ws", workspacePath: "/tmp/ws" },
+			authorization: RELAY_AUTHORIZATION,
 			hostNodeId: "n-host-1",
 			relayMode: "development",
 			connectionId: "conn-1",
@@ -110,7 +120,7 @@ describe("relay framing (§12.2.3)", () => {
 			type: "relay_preamble",
 			relayId: relay.relayId,
 			handshake: HANDSHAKE_VERBATIM,
-			authorization: { clientNodeId: "n-phone-a", workspaceName: "ws", workspacePath: "/tmp/ws" },
+			authorization: RELAY_AUTHORIZATION,
 			hostNodeId: "n-host-1",
 			relayMode: "development",
 			connectionId: "conn-1",
@@ -130,6 +140,41 @@ describe("relay framing (§12.2.3)", () => {
 			streamId: "st-1",
 		});
 		expect(settle).not.toHaveBeenCalled();
+	});
+
+	it("authorizes relay RPC only for the active relay owner and exact conversation scope", async () => {
+		const { socketPath, registry } = await startRelayHarness();
+		const relay = mintTestRelay(registry, new FakePhoneIrohStream(), vi.fn());
+		const client = connectRawRelayClient(socketPath, relay);
+		await vi.waitFor(() => expect(client.messages).toHaveLength(2));
+
+		const scope = { clientNodeId: "n-phone-a", workspaceName: "ws", sessionId: "s-1" };
+		expect(registry.authorizeRpc(relay.relayId, "control-1", scope)).toMatchObject({
+			ok: true,
+			relay: { relayId: relay.relayId },
+		});
+		expect(registry.authorizeRpc(relay.relayId, "wrong-owner", scope)).toEqual({
+			ok: false,
+			code: "not_held",
+			message: "relay is not owned by this control connection",
+		});
+		expect(registry.authorizeRpc(relay.relayId, "control-1", { ...scope, sessionId: "other" })).toEqual({
+			ok: false,
+			code: "session_mismatch",
+			message: "relay RPC scope does not match active relay",
+		});
+		expect(registry.authorizeRpc("missing-relay", "control-1", scope)).toEqual({
+			ok: false,
+			code: "not_found",
+			message: "active relay not found",
+		});
+
+		registry.closeActive(relay.relayId, "tui_disconnected");
+		expect(registry.authorizeRpc(relay.relayId, "control-1", scope)).toEqual({
+			ok: false,
+			code: "not_found",
+			message: "active relay not found",
+		});
 	});
 
 	it("pumps raw binary bytes transparently in both directions, including bytes buffered with the hello", async () => {
@@ -263,6 +308,24 @@ describe("relay framing (§12.2.3)", () => {
 		expect(registry.invalidatePending(relay.relayId)?.relayId).toBe(relay.relayId);
 		expect(registry.pendingForConversation("n-phone-a", "ws", "s-1")).toHaveLength(0);
 		expect(registry.invalidatePending(relay.relayId)).toBeUndefined();
+	});
+
+	it("does not admit a revoked pending offer containing a buffered prompt", async () => {
+		const { socketPath, registry } = await startRelayHarness();
+		const phone = new FakePhoneIrohStream();
+		const relay = mintTestRelay(registry, phone, vi.fn());
+		const bufferedPrompt = Buffer.from(`${JSON.stringify({ id: "p1", type: "prompt", message: "do not run" })}\n`);
+		(relay.preamble.handshake as { initialInput: number[] }).initialInput = Array.from(bufferedPrompt);
+
+		// Revocation uses this same synchronous invalidation before acknowledging
+		// the control request. The stale token must never expose initialInput.
+		expect(registry.invalidatePending(relay.relayId)).toBe(relay);
+		const client = connectRawRelayClient(socketPath, relay);
+		await client.closed;
+
+		expect(client.messages).toEqual([{ type: "hello_ack", ok: false, error: "bad_relay_token" }]);
+		expect(client.rawReceived()).toEqual(Buffer.alloc(0));
+		expect(registry.activeCount()).toBe(0);
 	});
 
 	it("settles with tui_disconnected when the TUI destroys the relay socket", async () => {

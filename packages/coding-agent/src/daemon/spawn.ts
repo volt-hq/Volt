@@ -6,6 +6,7 @@ import { type ControlSocketProbe, probeControlSocket } from "./control-server.ts
 import { type PidfileContents, readPidfile } from "./main.ts";
 import { type DaemonPaths, ensureDaemonDirs, getDaemonPaths } from "./paths.ts";
 import { verifyPidfileProcess } from "./process-identity.ts";
+import { type InvalidVoltdStateFile, inspectVoltdStateFiles } from "./state.ts";
 
 const SPAWN_HEALTH_TIMEOUT_MS = 5000;
 const SPAWN_HEALTH_POLL_MS = 100;
@@ -209,6 +210,8 @@ export async function spawnDetachedDaemon(agentDir: string = getAgentDir()): Pro
 
 export interface EnsureDaemonResult extends DaemonProbeResult {
 	spawned: boolean;
+	error?: string;
+	invalidState?: InvalidVoltdStateFile;
 }
 
 /** Probe the socket; if no healthy daemon answers, spawn one detached. */
@@ -234,9 +237,26 @@ export async function ensureDaemonRunning(agentDir: string = getAgentDir()): Pro
 			return { ...probe, spawned: false };
 		}
 	}
+	const invalidState = inspectVoltdStateFiles(agentDir);
+	if (invalidState) {
+		return {
+			healthy: false,
+			state: "not-running",
+			socketPath: probe.socketPath,
+			spawned: false,
+			error: invalidState.error,
+			invalidState,
+		};
+	}
 	const spawned = await spawnDetachedDaemon(agentDir);
 	if (!spawned.ok) {
-		return { healthy: false, state: "not-running", socketPath: spawned.socketPath, spawned: true };
+		return {
+			healthy: false,
+			state: "not-running",
+			socketPath: spawned.socketPath,
+			spawned: true,
+			...(spawned.error === undefined ? {} : { error: spawned.error }),
+		};
 	}
 	const healthyProbe = await probeDaemon(agentDir);
 	return { ...healthyProbe, spawned: true };

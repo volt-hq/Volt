@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createIrohRemotePresetAccess, type IrohRemoteRpcGrant } from "../src/core/remote/iroh/access-grant.ts";
 import { type IrohRemoteAuditEvent, IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import type { IrohRemoteWorkspaceWorktree } from "../src/core/remote/iroh/state.ts";
@@ -47,7 +48,9 @@ function createBackend(): IrohRemoteWorktreeRpcBackend {
 	};
 }
 
-function createAuthorization(): IrohRemoteClientAuthorizationSuccess {
+function createAuthorization(
+	rpcGrant: IrohRemoteRpcGrant = createIrohRemotePresetAccess("full").rpcGrant,
+): IrohRemoteClientAuthorizationSuccess {
 	return {
 		ok: true,
 		allowTools: "read",
@@ -56,6 +59,7 @@ function createAuthorization(): IrohRemoteClientAuthorizationSuccess {
 			label: "phone",
 			allowedWorkspaces: ["ws"],
 			allowedTools: "read",
+			rpcGrant,
 			pairedAt: 1,
 			lastSeenAt: 2,
 		},
@@ -254,7 +258,11 @@ describe("worktree RPC command helpers", () => {
 });
 
 describe("manage_worktrees management stream", () => {
-	async function runStream(lines: object[]) {
+	async function runStream(
+		lines: object[],
+		rpcGrant = createIrohRemotePresetAccess("full").rpcGrant,
+		isRpcGrantCurrent: () => boolean | Promise<boolean> = async () => true,
+	) {
 		const recv = new ManualIrohRecvStream();
 		const send = new ManualIrohSendStream();
 		for (const line of lines) {
@@ -268,7 +276,8 @@ describe("manage_worktrees management stream", () => {
 			{
 				stream: { recv, send },
 				initialInput: [],
-				authorization: createAuthorization(),
+				authorization: createAuthorization(rpcGrant),
+				isRpcGrantCurrent,
 				closeStream,
 			},
 			{
@@ -299,6 +308,36 @@ describe("manage_worktrees management stream", () => {
 			success: true,
 			details: { source: "remote_worktree_management_stream", worktreeId: "fix-login" },
 		});
+	});
+
+	it("closes before executing the next command when the persisted grant revision becomes stale", async () => {
+		let checks = 0;
+		const { frames, backend, closeStream } = await runStream(
+			[
+				{ id: "1", type: "list_worktrees", workspaceName: "ws" },
+				{ id: "2", type: "create_worktree", workspaceName: "ws" },
+			],
+			createIrohRemotePresetAccess("full").rpcGrant,
+			() => ++checks === 1,
+		);
+		expect(frames).toHaveLength(1);
+		expect(backend.listWorktrees).toHaveBeenCalledOnce();
+		expect(backend.createWorktree).not.toHaveBeenCalled();
+		expect(closeStream).toHaveBeenCalledWith("access_updated");
+	});
+
+	it("denies utility commands without the required capability", async () => {
+		const { frames, backend } = await runStream(
+			[{ id: "1", type: "create_worktree", workspaceName: "ws" }],
+			createIrohRemotePresetAccess("coding").rpcGrant,
+		);
+		expect(frames[0]).toMatchObject({
+			id: "1",
+			command: "create_worktree",
+			success: false,
+			error: { code: "rpc_capability_denied", requiredCapability: "worktrees.manage.v1" },
+		});
+		expect(backend.createWorktree).not.toHaveBeenCalled();
 	});
 
 	it("never puts filesystem paths on the wire", async () => {

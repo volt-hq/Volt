@@ -12,7 +12,7 @@ import {
 } from "../../core/host-actions.ts";
 import { getMcpRpcCapabilities, listMcpRpcServers } from "../../core/mcp/rpc.ts";
 import type { McpGatewayExecutionContext } from "../../core/mcp/types.ts";
-import { projectMessageImages, projectSessionTranscript } from "../../core/rpc/transcript.ts";
+import { projectMessageImages, projectSessionTranscript, projectSubagentDetails } from "../../core/rpc/transcript.ts";
 import {
 	createUiActionInvocationPlan,
 	getUiActionCompletions,
@@ -94,6 +94,15 @@ function toCatalogModel(model: RpcModel): RpcCatalogModel {
 	return { ...model, availableThinkingLevels: getSupportedThinkingLevels(model) as ThinkingLevel[] };
 }
 
+function getPromptExtensionCommandName(message: string): string | undefined {
+	if (!message.startsWith("/")) {
+		return undefined;
+	}
+	const spaceIndex = message.indexOf(" ");
+	const name = spaceIndex === -1 ? message.slice(1) : message.slice(1, spaceIndex);
+	return name.length > 0 ? name : undefined;
+}
+
 export function createRpcSuccessResponse<T extends RpcCommand["type"]>(
 	id: string | undefined,
 	command: T,
@@ -133,6 +142,17 @@ export async function handleRpcCommand(
 		// =================================================================
 
 		case "prompt": {
+			if (options.requireRemoteSafeUiActions) {
+				const commandName = getPromptExtensionCommandName(command.message);
+				const extensionCommand = commandName ? session.extensionRunner.getCommand(commandName) : undefined;
+				if (extensionCommand && extensionCommand.remoteSafe !== true) {
+					return createRpcErrorResponse(
+						id,
+						"prompt",
+						`Extension command is not available over remote host: /${commandName}`,
+					);
+				}
+			}
 			// Start prompt handling immediately, but emit the authoritative response only after
 			// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
 			let preflightSucceeded = false;
@@ -475,12 +495,22 @@ export async function handleRpcCommand(
 		case "get_state": {
 			const activeCompaction = session.activeCompaction;
 			const activeTools = [...session.agent.state.pendingToolExecutions.values()].map(
-				(execution): RpcActiveToolExecution => ({
-					toolCallId: execution.toolCallId,
-					toolName: execution.toolName,
-					status: "started",
-					args: { ...execution.args },
-				}),
+				(execution): RpcActiveToolExecution => {
+					// Ship the newest subagent tree snapshot so a client attaching
+					// mid-turn paints live delegation state without waiting for the
+					// next tool_execution_update.
+					const details =
+						execution.toolName === "subagent" && isRecord(execution.latestDetails)
+							? projectSubagentDetails(execution.latestDetails)
+							: undefined;
+					return {
+						toolCallId: execution.toolCallId,
+						toolName: execution.toolName,
+						status: "started",
+						args: { ...execution.args },
+						...(details ? { details } : {}),
+					};
+				},
 			);
 			const state: RpcSessionState = {
 				model: session.model,
@@ -803,4 +833,8 @@ export async function handleRpcCommand(
 			return createRpcErrorResponse(target.id, target.command, `Unknown command: ${target.command}`);
 		}
 	}
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }

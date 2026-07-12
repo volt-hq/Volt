@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
+import { discoverAndLoadExtensions, validateExtensionCommandName } from "../src/core/extensions/loader.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -26,6 +26,29 @@ describe("extensions discovery", () => {
 			volt.registerCommand("test", { handler: async () => {} });
 		}
 	`;
+
+	it("rejects a remote-safe command name that would resolve to a different slash command", async () => {
+		fs.writeFileSync(
+			path.join(extensionsDir, "collision.ts"),
+			`export default function(volt) {
+				volt.registerCommand("deploy", { handler: async () => {} });
+				volt.registerCommand("deploy now", { remoteSafe: true, handler: async () => {} });
+			}`,
+		);
+
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+		expect(result.extensions).toEqual([]);
+		expect(result.errors).toEqual([
+			expect.objectContaining({ error: expect.stringContaining("must not contain whitespace or '/'") }),
+		]);
+	});
+
+	it.each(["/deploy", "deploy/now", "deploy now", "deploy\tnow", ""])(
+		"rejects invalid slash-command registration name %j",
+		(name) => {
+			expect(() => validateExtensionCommandName(name)).toThrow("must not contain whitespace or '/'");
+		},
+	);
 
 	const extensionCodeWithTool = (toolName: string) => `
 		import { Type } from "typebox";

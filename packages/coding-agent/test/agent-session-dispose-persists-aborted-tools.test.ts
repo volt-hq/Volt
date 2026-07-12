@@ -1,0 +1,147 @@
+/**
+ * Tests that AgentSession.dispose() persists terminal markers for in-flight
+ * tool calls before disconnecting from the agent.
+ *
+ * Regression for a production incident where a daemon runtime was disposed
+ * mid-tool-call by a lease handoff (daemon -> TUI): the agent loop's
+ * synthesized "Operation aborted" tool result was emitted after dispose had
+ * disconnected the session's listeners, so the transcript kept a dangling
+ * toolCall with no result. Resuming the session rendered an empty subagent
+ * tree and the model was shown a synthetic "No result provided" stub.
+ */
+
+import type { AgentTool } from "@earendil-works/volt-agent-core";
+import { type Static, Type } from "typebox";
+import { describe, expect, it, vi } from "vitest";
+import { createHarness } from "./test-harness.ts";
+
+const hangToolSchema = Type.Object({});
+
+function createHangingTool(onStarted: () => void): AgentTool<typeof hangToolSchema> {
+	return {
+		name: "hang",
+		label: "hang",
+		description: "Hangs until aborted",
+		parameters: hangToolSchema,
+		execute: (_toolCallId, _params: Static<typeof hangToolSchema>, signal) => {
+			onStarted();
+			return new Promise((_resolve, reject) => {
+				const onAbort = () => reject(new Error("Operation aborted"));
+				if (signal?.aborted) {
+					onAbort();
+					return;
+				}
+				signal?.addEventListener("abort", onAbort, { once: true });
+			});
+		},
+	};
+}
+
+describe("AgentSession dispose with in-flight tool calls", () => {
+	it("persists an aborted toolResult for a dangling toolCall on dispose", async () => {
+		let toolStarted = false;
+		// The trailing "ok" is a terminal response for any post-abort provider
+		// call: the faux stream fn ignores abort signals and wraps around its
+		// response list, so an all-toolCall list would loop forever.
+		const harness = createHarness({
+			responses: [{ toolCalls: [{ id: "tc-hang-1", name: "hang", args: {} }] }, "ok"],
+			baseToolsOverride: {
+				hang: createHangingTool(() => {
+					toolStarted = true;
+				}),
+			},
+		});
+		try {
+			const promptPromise = harness.session.prompt("run the hanging tool").catch(() => {});
+
+			// Wait until the assistant message carrying the toolCall is persisted
+			// and the tool is actually executing.
+			await vi.waitFor(() => {
+				expect(toolStarted).toBe(true);
+				const context = harness.sessionManager.buildSessionContext();
+				const hasPersistedToolCall = context.messages.some(
+					(message) =>
+						message.role === "assistant" &&
+						message.content.some((block) => block.type === "toolCall" && block.id === "tc-hang-1"),
+				);
+				expect(hasPersistedToolCall).toBe(true);
+			});
+
+			harness.session.dispose();
+			await promptPromise;
+
+			const context = harness.sessionManager.buildSessionContext();
+			const toolResults = context.messages.filter((message) => message.role === "toolResult");
+			expect(toolResults).toHaveLength(1);
+			expect(toolResults[0]).toMatchObject({
+				toolCallId: "tc-hang-1",
+				toolName: "hang",
+				isError: true,
+			});
+			expect(toolResults[0]?.content).toEqual([
+				{ type: "text", text: "Operation aborted: the session closed before this tool call completed." },
+			]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("does not append tool results when disposing an idle session", async () => {
+		const harness = createHarness({ responses: ["ok"] });
+		try {
+			await harness.session.prompt("hello");
+			const before = harness.sessionManager.buildSessionContext().messages.length;
+			harness.session.dispose();
+			const after = harness.sessionManager.buildSessionContext().messages.length;
+			expect(after).toBe(before);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("does not duplicate results for completed tool calls on busy dispose", async () => {
+		// First tool call completes normally; second hangs. Dispose must only
+		// synthesize a result for the hanging call.
+		let hangStarted = false;
+		const quickTool: AgentTool<typeof hangToolSchema> = {
+			name: "quick",
+			label: "quick",
+			description: "Completes immediately",
+			parameters: hangToolSchema,
+			execute: async () => ({ content: [{ type: "text", text: "done" }], details: undefined }),
+		};
+		const harness = createHarness({
+			responses: [
+				{ toolCalls: [{ id: "tc-quick-1", name: "quick", args: {} }] },
+				{ toolCalls: [{ id: "tc-hang-2", name: "hang", args: {} }] },
+				"ok",
+			],
+			baseToolsOverride: {
+				quick: quickTool,
+				hang: createHangingTool(() => {
+					hangStarted = true;
+				}),
+			},
+		});
+		try {
+			const promptPromise = harness.session.prompt("run tools").catch(() => {});
+			await vi.waitFor(() => {
+				expect(hangStarted).toBe(true);
+			});
+
+			harness.session.dispose();
+			await promptPromise;
+
+			const context = harness.sessionManager.buildSessionContext();
+			const toolResults = context.messages.filter((message) => message.role === "toolResult");
+			const quickResults = toolResults.filter((result) => result.toolCallId === "tc-quick-1");
+			const hangResults = toolResults.filter((result) => result.toolCallId === "tc-hang-2");
+			expect(quickResults).toHaveLength(1);
+			expect(quickResults[0]?.isError).toBe(false);
+			expect(hangResults).toHaveLength(1);
+			expect(hangResults[0]?.isError).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+});

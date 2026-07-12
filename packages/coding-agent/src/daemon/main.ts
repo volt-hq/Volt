@@ -5,8 +5,15 @@ import type { Socket } from "node:net";
 import { join } from "node:path";
 import { getAgentDir, VERSION } from "../config.ts";
 import { AuthStorage } from "../core/auth-storage.ts";
+import {
+	createIrohRemoteExplicitAccess,
+	createIrohRemotePresetAccess,
+	parseIrohRemoteRpcCapabilities,
+	parseIrohRemoteRpcGrant,
+} from "../core/remote/iroh/access-grant.ts";
 import { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
+import { SettingsManager } from "../core/settings-manager.ts";
 import {
 	getCurrentThemeName,
 	getResolvedThemeColors,
@@ -23,7 +30,7 @@ import type {
 	ControlRevokedClientStatus,
 	ControlWorkspaceStatus,
 } from "./control-protocol.ts";
-import { CONTROL_PAIR_CANCEL_CAPABILITY, PROTOCOL_VERSION } from "./control-protocol.ts";
+import { CONTROL_PAIR_CANCEL_CAPABILITY, CONTROL_RPC_GRANTS_CAPABILITY, PROTOCOL_VERSION } from "./control-protocol.ts";
 import {
 	type ControlConnection,
 	type ControlServer,
@@ -216,28 +223,71 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 
 	const state = new VoltdStateStore({ agentDir, statePath: paths.statePath });
 	let migratedFromLegacyState = false;
+	let legacyDroppedAccess: { clients: number; revokedClients: number; pendingPairingTickets: number } | undefined;
 	try {
 		const loadResult = await state.load();
 		migratedFromLegacyState = loadResult.migratedFromLegacyState;
-		if (loadResult.recoveredFromCorruptStatePath) {
+		legacyDroppedAccess = loadResult.legacyDroppedAccess;
+		if (
+			legacyDroppedAccess !== undefined &&
+			legacyDroppedAccess.clients + legacyDroppedAccess.revokedClients + legacyDroppedAccess.pendingPairingTickets >
+				0
+		) {
 			log(
-				"error",
-				`state file was unparseable and was quarantined to ${loadResult.recoveredFromCorruptStatePath}; ` +
-					`started from empty state (Iroh identity and paired clients were reset, phones must pair again)`,
+				"warn",
+				"migrated pre-grant Iroh host state: preserved host identity and workspace metadata, " +
+					"dropped legacy clients, revocations, and pending tickets; all clients must pair again",
+				legacyDroppedAccess,
 			);
 		}
 	} catch (error) {
 		log("error", `failed to load state: ${error instanceof Error ? error.message : String(error)}`);
 		return finishBeforeServing(1);
 	}
+
+	// Global settings are the source of truth for daemon runtime policy. Project
+	// settings are deliberately excluded: registering a workspace must never
+	// widen or silently replace a paired client's workstation-level ceiling.
+	const settingsManager = SettingsManager.create(agentDir, agentDir, { projectTrusted: false });
+	const globalSettingsErrors = settingsManager.drainErrors().filter((error) => error.scope === "global");
+	if (globalSettingsErrors.length > 0) {
+		log("error", `failed to load global settings: ${globalSettingsErrors[0]?.error.message ?? "unknown error"}`);
+		return finishBeforeServing(1);
+	}
+	const remoteSettings = settingsManager.getRemoteSettings() as Record<string, unknown>;
+	const configuredAllowTools = remoteSettings.allowTools;
+	if (
+		configuredAllowTools !== undefined &&
+		(!Array.isArray(configuredAllowTools) || configuredAllowTools.some((tool) => typeof tool !== "string"))
+	) {
+		log("error", "invalid remote.allowTools setting: expected an array of tool names");
+		return finishBeforeServing(1);
+	}
+	const allowTools =
+		configuredAllowTools === undefined
+			? null
+			: Array.from(
+					new Set((configuredAllowTools as string[]).map((tool) => tool.trim()).filter((tool) => tool.length > 0)),
+				);
+	state.updateSettings({ allowTools });
+	try {
+		await state.flush();
+	} catch (error) {
+		log("error", `failed to persist remote policy: ${error instanceof Error ? error.message : String(error)}`);
+		return finishBeforeServing(1);
+	}
+
 	// The daemon's theme instance: persisted name from voltd state, no hot-reload
 	// watcher (that is the rendering TUI's job).
 	initTheme(state.state.settings.themeName, false);
 	const stateManager = new IrohRemoteHostStateManager({
 		store: {
 			read: () => state.getHostState(),
-			write: (hostState) => {
+			write: async (hostState) => {
 				state.setHostState(hostState);
+				// State-manager mutations are security-sensitive: callers must not
+				// expose tickets or acknowledge pairing/revocation before durability.
+				await state.flush();
 			},
 		},
 	});
@@ -340,6 +390,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				.split(",")
 				.map((tool) => tool.trim())
 				.filter((tool) => tool.length > 0),
+			rpcGrant: parseIrohRemoteRpcGrant(client.rpcGrant, "client rpcGrant"),
 		}));
 	const toRevokedClientStatuses = (): ControlRevokedClientStatus[] =>
 		state.state.revokedClients.map((client) => ({
@@ -348,6 +399,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			pairedAtMs: client.pairedAt ?? 0,
 			lastSeenAtMs: client.lastSeenAt ?? 0,
 			revokedAtMs: client.revokedAt,
+			rpcGrant: parseIrohRemoteRpcGrant(client.rpcGrant, "revoked client rpcGrant"),
 			...(client.rePairApprovedAt === undefined ? {} : { rePairApprovedAtMs: client.rePairApprovedAt }),
 		}));
 
@@ -407,7 +459,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					protocolVersion: PROTOCOL_VERSION,
 					pid: process.pid,
 					startedAtMs,
-					capabilities: [CONTROL_PAIR_CANCEL_CAPABILITY],
+					capabilities: [CONTROL_PAIR_CANCEL_CAPABILITY, CONTROL_RPC_GRANTS_CAPABILITY],
 					leases,
 					phoneConnections,
 					workspaces,
@@ -473,6 +525,61 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				}
 				await stateManager.removeLiveActivitiesForWorkspace(request.name);
 				connection.send({ type: "ok", id: request.id });
+				return;
+			}
+			case "client_access_update": {
+				const access =
+					request.access !== undefined
+						? createIrohRemotePresetAccess(request.access)
+						: createIrohRemoteExplicitAccess(
+								request.allowedTools ?? [],
+								parseIrohRemoteRpcCapabilities(request.rpcCapabilities),
+							);
+				const updated = await stateManager.updateClientAccess(
+					request.clientNodeId,
+					request.expectedRevision,
+					access,
+				);
+				if (!updated.ok) {
+					connection.send({
+						type: "error",
+						id: request.id,
+						code: updated.reason,
+						message:
+							updated.reason === "revision_conflict"
+								? `RPC grant revision conflict (current ${updated.currentRevision ?? "unknown"})`
+								: updated.reason === "revision_exhausted"
+									? "RPC grant revision is exhausted; revoke and re-pair the client"
+									: "client not found",
+					});
+					return;
+				}
+				await state.flush();
+				await auditLogger
+					.log({
+						type: "client_access_updated",
+						clientNodeId: request.clientNodeId,
+						success: true,
+						details: {
+							expectedRevision: request.expectedRevision,
+							revision: updated.client.rpcGrant.revision,
+							allowedTools: updated.client.allowedTools,
+							rpcCapabilities: updated.client.rpcGrant.capabilities,
+						},
+					})
+					.catch(() => {});
+				connection.send({
+					type: "client_access_updated",
+					id: request.id,
+					client: {
+						clientNodeId: updated.client.nodeId,
+						label: updated.client.label,
+						pairedAtMs: updated.client.pairedAt,
+						lastSeenAtMs: updated.client.lastSeenAt,
+						allowedTools: updated.client.allowedTools.length === 0 ? [] : updated.client.allowedTools.split(","),
+						rpcGrant: updated.client.rpcGrant,
+					},
+				});
 				return;
 			}
 			case "client_revoke": {
@@ -739,8 +846,24 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	process.on("SIGTERM", onSignal);
 	process.on("SIGINT", onSignal);
 
+	if (
+		legacyDroppedAccess !== undefined &&
+		legacyDroppedAccess.clients + legacyDroppedAccess.revokedClients + legacyDroppedAccess.pendingPairingTickets > 0
+	) {
+		await auditLogger
+			.log({
+				type: "legacy_remote_access_dropped",
+				success: true,
+				details: { ...legacyDroppedAccess, requiresRePair: true },
+			})
+			.catch(() => {});
+	}
 	await auditLogger
-		.log({ type: "daemon_started", success: true, details: { version: VERSION, migratedFromLegacyState } })
+		.log({
+			type: "daemon_started",
+			success: true,
+			details: { version: VERSION, migratedFromLegacyState, legacyDroppedAccess },
+		})
 		.catch(() => {});
 	log("info", `voltd ${VERSION} listening`, { socketPath: paths.socketPath, pid: process.pid });
 

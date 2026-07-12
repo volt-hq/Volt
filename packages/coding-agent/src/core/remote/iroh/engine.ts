@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import type { IrohBiStreamLike, IrohBytes, IrohRecvStreamLike } from "../../rpc/index.ts";
+import { cloneIrohRemoteRpcGrant, createIrohRemotePresetAccess, type IrohRemoteRpcGrant } from "./access-grant.ts";
 import { type IrohRemoteAuditEventInput, IrohRemoteAuditLogger } from "./audit.ts";
 import {
 	hashIrohRemotePairingSecret,
@@ -42,6 +43,7 @@ import {
 	parseIrohRemoteWorkspace,
 } from "./state.ts";
 import type {
+	IrohRemoteClientAccessUpdateResult,
 	IrohRemoteClientRePairApprovalResult,
 	IrohRemoteClientRevocationResult,
 	IrohRemoteHostStateManager,
@@ -58,6 +60,7 @@ export const DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS = 10 * 60 * 1000;
 
 export interface IrohRemoteHostEngineOptions {
 	allowTools?: string;
+	rpcGrant?: IrohRemoteRpcGrant;
 	auditLogger?: IrohRemoteAuditLogger;
 	hostNodeId?: string;
 	now?: () => number;
@@ -73,6 +76,7 @@ export interface IrohRemoteHostEngineOptions {
 
 export interface IrohRemoteHostPairOptions {
 	allowTools?: string;
+	rpcGrant?: IrohRemoteRpcGrant;
 	expiresAt?: number;
 	irohTicket: string;
 	labelHint?: string;
@@ -181,13 +185,17 @@ export class IrohRemoteHostEngine {
 	private readonly workspace: IrohRemoteWorkspace;
 	private authorizationQueue: Promise<void> = Promise.resolve();
 	private allowTools: string;
+	private rpcGrant: IrohRemoteRpcGrant;
 	private pairingAllowTools: string | undefined;
+	private pairingRpcGrant: IrohRemoteRpcGrant | undefined;
 	private pairingExpiresAt: number | undefined;
 	private pairingSecret: string | undefined;
 	private pairingWorkspaceName: string | undefined;
 
 	constructor(options: IrohRemoteHostEngineOptions) {
+		const defaultAccess = createIrohRemotePresetAccess("coding");
 		this.allowTools = normalizeIrohRemoteAllowTools(options.allowTools ?? DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
+		this.rpcGrant = cloneIrohRemoteRpcGrant(options.rpcGrant ?? defaultAccess.rpcGrant);
 		this.auditLogger = options.auditLogger ?? new IrohRemoteAuditLogger();
 		this.classifyWorkspaceAvailability = options.classifyWorkspaceAvailability;
 		this.hostNodeId = options.hostNodeId;
@@ -214,7 +222,9 @@ export class IrohRemoteHostEngine {
 			const allowTools = normalizeIrohRemoteAllowTools(
 				options.allowTools ?? workspace.allowedTools ?? this.allowTools,
 			);
+			const rpcGrant = cloneIrohRemoteRpcGrant(options.rpcGrant ?? this.rpcGrant);
 			this.pairingAllowTools = allowTools;
+			this.pairingRpcGrant = rpcGrant;
 			this.pairingSecret = secret;
 			this.pairingExpiresAt = expiresAt;
 			this.pairingWorkspaceName = workspace.name;
@@ -222,6 +232,7 @@ export class IrohRemoteHostEngine {
 				secretHash: hashIrohRemotePairingSecret(secret),
 				workspace: workspace.name,
 				allowedTools: allowTools,
+				rpcGrant,
 				expiresAt,
 				createdAt,
 				...(options.labelHint === undefined ? {} : { labelHint: options.labelHint }),
@@ -244,6 +255,7 @@ export class IrohRemoteHostEngine {
 				workspace: payload.workspace,
 				details: {
 					allowedTools: pendingPairingTicket.allowedTools,
+					rpcGrant: pendingPairingTicket.rpcGrant,
 					createdAt: pendingPairingTicket.createdAt,
 					expiresAt: pendingPairingTicket.expiresAt,
 					labelHint: pendingPairingTicket.labelHint,
@@ -268,6 +280,29 @@ export class IrohRemoteHostEngine {
 			clientNodeId: nodeId,
 			success: result.revoked,
 			error: result.revoked ? undefined : "client not found",
+		});
+		return result;
+	}
+
+	async updateClientAccess(
+		nodeId: string,
+		expectedRevision: number,
+		access: { allowedTools: string; rpcGrant: IrohRemoteRpcGrant },
+	): Promise<IrohRemoteClientAccessUpdateResult> {
+		const result = await this.stateManager.updateClientAccess(nodeId, expectedRevision, access);
+		await this.log({
+			type: "client_access_updated",
+			clientNodeId: nodeId,
+			success: result.ok,
+			error: result.ok ? undefined : result.reason,
+			details: result.ok
+				? {
+						expectedRevision,
+						revision: result.client.rpcGrant.revision,
+						allowedTools: result.client.allowedTools,
+						rpcCapabilities: result.client.rpcGrant.capabilities,
+					}
+				: { expectedRevision, currentRevision: result.currentRevision },
 		});
 		return result;
 	}
@@ -333,6 +368,10 @@ export class IrohRemoteHostEngine {
 		);
 		const result = await this.stateManager.authorizeClient(hello, remoteNodeId, {
 			allowTools,
+			rpcGrant:
+				this.pairingSecret !== undefined && hello.secret === this.pairingSecret
+					? (this.pairingRpcGrant ?? this.rpcGrant)
+					: this.rpcGrant,
 			classifyWorkspaceAvailability: this.classifyWorkspaceAvailability,
 			now: this.now(),
 			pairingExpiresAt: this.pairingExpiresAt,
@@ -455,6 +494,7 @@ export class IrohRemoteHostEngine {
 
 	private clearPairingSecret(): void {
 		this.pairingAllowTools = undefined;
+		this.pairingRpcGrant = undefined;
 		this.pairingSecret = undefined;
 		this.pairingExpiresAt = undefined;
 		this.pairingWorkspaceName = undefined;
@@ -561,6 +601,7 @@ export class IrohRemoteHostEngine {
 				success: false,
 				details: {
 					allowedTools: ticket.allowedTools,
+					rpcGrant: ticket.rpcGrant,
 					createdAt: ticket.createdAt,
 					expiresAt: ticket.expiresAt,
 				},
@@ -577,6 +618,7 @@ export class IrohRemoteHostEngine {
 			details: result.consumedPairingTicket
 				? {
 						allowedTools: result.consumedPairingTicket.allowedTools,
+						rpcGrant: result.consumedPairingTicket.rpcGrant,
 						createdAt: result.consumedPairingTicket.createdAt,
 						expiresAt: result.consumedPairingTicket.expiresAt,
 						labelHint: result.consumedPairingTicket.labelHint,

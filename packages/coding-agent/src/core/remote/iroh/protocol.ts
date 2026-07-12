@@ -51,12 +51,6 @@ export function getIrohRemoteWorkingDirectoryValidationError(value: string): str
 	return undefined;
 }
 export const DEFAULT_IROH_REMOTE_ALLOW_TOOLS = "read,bash,edit,write,web_search,grep,find,ls,subagent,mcp";
-const LEGACY_DEFAULT_IROH_REMOTE_ALLOW_TOOL_SETS: readonly string[][] = [
-	["read", "bash", "edit", "write", "grep", "find", "ls"],
-	["read", "bash", "edit", "write", "web_search", "grep", "find", "ls"],
-	["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"],
-	["read", "bash", "edit", "write", "web_search", "grep", "find", "ls", "subagent"],
-];
 export const IROH_REMOTE_UNSAFE_TOOL_NAMES = ["bash", "edit", "write", "web_search"] as const;
 export const IROH_REMOTE_OUTCOMES = [
 	"host_unreachable",
@@ -133,23 +127,89 @@ export class IrohRemoteOutcomeError extends Error {
 
 export function normalizeIrohRemoteAllowTools(allowTools: string | undefined): string {
 	const tools = parseIrohRemoteAllowToolNames(allowTools ?? DEFAULT_IROH_REMOTE_ALLOW_TOOLS);
-	if (
-		tools.length === 0 ||
-		LEGACY_DEFAULT_IROH_REMOTE_ALLOW_TOOL_SETS.some((legacy) => sameIrohRemoteAllowToolSet(tools, legacy))
-	) {
-		return DEFAULT_IROH_REMOTE_ALLOW_TOOLS;
-	}
 	return tools.join(",");
 }
 
 export function parseIrohRemoteAllowTools(allowTools: string | undefined): string[] {
-	return normalizeIrohRemoteAllowTools(allowTools).split(",");
+	const normalized = normalizeIrohRemoteAllowTools(allowTools);
+	return normalized.length === 0 ? [] : normalized.split(",");
 }
 
 export function usesDefaultIrohRemoteAllowTools(allowTools: string | undefined): boolean {
-	const tools = parseIrohRemoteAllowTools(allowTools);
+	const tools = new Set(parseIrohRemoteAllowTools(allowTools));
 	const defaultTools = new Set(DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(","));
-	return tools.length === defaultTools.size && tools.every((tool) => defaultTools.has(tool));
+	return tools.size === defaultTools.size && Array.from(tools).every((tool) => defaultTools.has(tool));
+}
+
+export interface IrohRemoteRuntimeToolPolicy {
+	tools: string[];
+	allowUnlistedExtensionTools: boolean;
+}
+
+export interface ResolveIrohRemoteRuntimeToolPolicyOptions {
+	/** Persisted pair-time grant. This is always the maximum authority. */
+	clientAllowTools: string;
+	/** Optional legacy workspace ceiling. Missing means no additional restriction. */
+	workspaceAllowTools?: string;
+	/** Exact daemon ceiling. Null means unrestricted; an empty array denies every tool. */
+	daemonAllowTools: readonly string[] | null;
+}
+
+/**
+ * Compose daemon-owned runtime policy without letting a host or workspace
+ * policy widen the grant persisted for a paired client.
+ *
+ * Default grants permit extension tools that are not known until resource
+ * loading. That wildcard applies only to non-default tool names, and survives
+ * only when every present policy layer has default-grant semantics.
+ */
+export function resolveIrohRemoteRuntimeToolPolicy(
+	options: ResolveIrohRemoteRuntimeToolPolicyOptions,
+): IrohRemoteRuntimeToolPolicy {
+	const defaultTools = new Set(DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(","));
+	const layers: Array<{ tools: string[]; toolSet: Set<string>; allowUnlistedExtensionTools: boolean }> = [];
+	const addStringLayer = (allowTools: string): void => {
+		const tools = uniqueIrohRemoteAllowToolNames(parseIrohRemoteAllowTools(allowTools));
+		layers.push({
+			tools,
+			toolSet: new Set(tools),
+			allowUnlistedExtensionTools: usesDefaultIrohRemoteAllowTools(allowTools),
+		});
+	};
+
+	addStringLayer(options.clientAllowTools);
+	if (options.workspaceAllowTools !== undefined) {
+		addStringLayer(options.workspaceAllowTools);
+	}
+	if (options.daemonAllowTools !== null) {
+		const tools = uniqueIrohRemoteAllowToolNames(options.daemonAllowTools);
+		layers.push({ tools, toolSet: new Set(tools), allowUnlistedExtensionTools: false });
+	}
+
+	const candidates = uniqueIrohRemoteAllowToolNames(layers.flatMap((layer) => layer.tools));
+	return {
+		tools: candidates.filter((tool) =>
+			layers.every(
+				(layer) => layer.toolSet.has(tool) || (layer.allowUnlistedExtensionTools && !defaultTools.has(tool)),
+			),
+		),
+		allowUnlistedExtensionTools: layers.every((layer) => layer.allowUnlistedExtensionTools),
+	};
+}
+
+/** Return whether every tool permitted by policy is also permitted by ceiling. */
+export function isIrohRemoteRuntimeToolPolicyWithin(
+	policy: IrohRemoteRuntimeToolPolicy,
+	ceiling: IrohRemoteRuntimeToolPolicy,
+): boolean {
+	if (policy.allowUnlistedExtensionTools && !ceiling.allowUnlistedExtensionTools) {
+		return false;
+	}
+	const defaultTools = new Set(DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(","));
+	const ceilingTools = new Set(ceiling.tools);
+	return policy.tools.every(
+		(tool) => ceilingTools.has(tool) || (ceiling.allowUnlistedExtensionTools && !defaultTools.has(tool)),
+	);
 }
 
 function hasAsciiControlCharacter(value: string): boolean {
@@ -169,9 +229,18 @@ function parseIrohRemoteAllowToolNames(allowTools: string): string[] {
 		.filter((tool) => tool.length > 0);
 }
 
-function sameIrohRemoteAllowToolSet(left: readonly string[], right: readonly string[]): boolean {
-	const rightTools = new Set(right);
-	return left.length === rightTools.size && left.every((tool) => rightTools.has(tool));
+function uniqueIrohRemoteAllowToolNames(toolNames: readonly string[]): string[] {
+	const tools: string[] = [];
+	const seen = new Set<string>();
+	for (const toolName of toolNames) {
+		const tool = toolName.trim();
+		if (tool.length === 0 || seen.has(tool)) {
+			continue;
+		}
+		seen.add(tool);
+		tools.push(tool);
+	}
+	return tools;
 }
 
 export function getIrohRemoteUnsafeAllowedTools(allowTools: string): string[] {

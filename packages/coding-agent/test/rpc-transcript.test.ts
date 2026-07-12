@@ -280,6 +280,84 @@ describe("RPC transcript projection", () => {
 		expect(JSON.stringify(transcript)).not.toContain("model-visible child output");
 	});
 
+	test("projects nested subagent delegation trees with live fields and a bounded depth", () => {
+		const session = SessionManager.inMemory("/workspace");
+		session.appendMessage(
+			assistant(
+				[
+					{
+						type: "toolCall",
+						id: "subagent-call",
+						name: "subagent",
+						arguments: { tasks: [{ agent: "researcher", task: "dig" }] },
+					},
+				],
+				20,
+			),
+		);
+		const makeNode = (depth: number): Record<string, unknown> => ({
+			subagentId: `sa_depth_${depth}`,
+			agent: { name: `agent-${depth}` },
+			status: "running",
+			task: `level ${depth} task`,
+			...(depth < 7 ? { children: [makeNode(depth + 1)] } : {}),
+		});
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "subagent-call",
+			toolName: "subagent",
+			content: [{ type: "text", text: "partial" }],
+			details: {
+				mode: "parallel",
+				status: "running",
+				tasks: [
+					{
+						index: 0,
+						subagentId: "sa_task",
+						sessionId: "session_task",
+						agent: { name: "researcher", source: "built-in" },
+						status: "running",
+						task: "dig",
+						startedAt: 1_000,
+						durationMs: 2_500,
+						toolCalls: 4,
+						tokens: 1_234,
+						currentActivity: "read docs/spec.md",
+						children: [makeNode(2)],
+					},
+				],
+			},
+			isError: false,
+			timestamp: 30,
+		} as Parameters<typeof session.appendMessage>[0]);
+
+		const transcript = projectSessionTranscript(session);
+		const toolItem = transcript.items.find((item) => item.role === "tool");
+		if (!toolItem || toolItem.role !== "tool") {
+			throw new Error("expected subagent tool item");
+		}
+		const tasks = (toolItem.details as { tasks?: Array<Record<string, unknown>> }).tasks;
+		expect(tasks?.[0]).toMatchObject({
+			subagentId: "sa_task",
+			status: "running",
+			task: "dig",
+			startedAt: 1_000,
+			durationMs: 2_500,
+			toolCalls: 4,
+			tokens: 1_234,
+			currentActivity: "read docs/spec.md",
+		});
+		// tasks nest at depth 0; children recurse up to the depth limit of 5.
+		let node = tasks?.[0] as { children?: Array<Record<string, unknown>> } | undefined;
+		const seen: string[] = [];
+		while (node?.children?.[0]) {
+			node = node.children[0] as { children?: Array<Record<string, unknown>> };
+			seen.push(String((node as { subagentId?: unknown }).subagentId));
+		}
+		expect(seen).toEqual(["sa_depth_2", "sa_depth_3", "sa_depth_4", "sa_depth_5"]);
+		expect(JSON.stringify(transcript)).not.toContain("sa_depth_6");
+	});
+
 	test("projects displayed review seed messages so remote clients can continue from findings", () => {
 		const session = SessionManager.inMemory("/workspace");
 		session.appendCustomMessageEntry("review", "Automated review result\n\nFindings:\n1. Fix the bug", true, {

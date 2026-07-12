@@ -13,6 +13,7 @@ import {
 	type IrohRemoteLiveActivityUpdateIntent,
 	type IrohRemoteOutboundValueDecorator,
 	type IrohRemotePushNotificationDelivery,
+	type IrohRemoteRpcGrant,
 	sanitizeIrohRemoteTranscriptText,
 } from "../../core/remote/iroh/index.ts";
 import {
@@ -29,6 +30,9 @@ import { type RpcModeOptions, type RpcSessionChange, runRpcMode } from "./rpc-mo
 import type { RpcRegisterPushTargetResponse } from "./rpc-types.ts";
 
 export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
+	rpcGrant: IrohRemoteRpcGrant;
+	/** Recheck persisted authority at each command boundary when the host owns grant state. */
+	isRpcGrantCurrent?: () => boolean | Promise<boolean>;
 	decorateOutbound?: IrohRemoteOutboundValueDecorator;
 	disposeRuntimeOnClose?: boolean;
 	notificationDelivery?: IrohRemotePushNotificationDelivery;
@@ -101,7 +105,8 @@ interface IrohRemoteCloseDeferringRpcTransport extends RpcTransport {
 }
 
 interface IrohRemoteHostCommandRpcTransportOptions {
-	handleCommand: (command: Record<string, unknown>) => object | Promise<object | undefined> | undefined;
+	handleCommand?: (command: Record<string, unknown>) => object | Promise<object | undefined> | undefined;
+	isRpcGrantCurrent?: () => boolean | Promise<boolean>;
 	transport: RpcTransport;
 }
 
@@ -216,13 +221,16 @@ export function runIrohRemoteRpcMode(
 
 	const filteredTransport = createIrohRemoteFilteredRpcTransport({
 		transport: closeDeferringTransport,
+		rpcGrant: options.rpcGrant,
 	});
-	const remoteHostCommandTransport = options.remoteCommandHandler
-		? createIrohRemoteHostCommandRpcTransport({
-				handleCommand: options.remoteCommandHandler,
-				transport: filteredTransport,
-			})
-		: filteredTransport;
+	const remoteHostCommandTransport =
+		options.remoteCommandHandler || options.isRpcGrantCurrent
+			? createIrohRemoteHostCommandRpcTransport({
+					handleCommand: options.remoteCommandHandler,
+					isRpcGrantCurrent: options.isRpcGrantCurrent,
+					transport: filteredTransport,
+				})
+			: filteredTransport;
 
 	return runRpcMode(runtimeHost, {
 		allowUiActionInvocation: true,
@@ -630,6 +638,8 @@ function projectIrohRemoteSubagentTranscriptDetails(
 	copyIrohRemoteBoundedString(details, projected, "status", options, 200);
 	copyIrohRemoteBoundedString(details, projected, "subagentId", options, 200);
 	copyIrohRemoteBoundedString(details, projected, "sessionId", options, 200);
+	copyIrohRemoteSubagentNumericDetails(details, projected);
+	copyIrohRemoteBoundedString(details, projected, "currentActivity", options, 300);
 	const summary = projectIrohRemoteSubagentSummary(details.summary);
 	if (summary) {
 		projected.summary = summary;
@@ -650,6 +660,10 @@ function projectIrohRemoteSubagentTranscriptDetails(
 	if (error) {
 		projected.error = error;
 	}
+	const children = projectIrohRemoteSubagentDetailArray(details.children, options);
+	if (children) {
+		projected.children = children;
+	}
 	const tasks = projectIrohRemoteSubagentDetailArray(details.tasks, options);
 	if (tasks) {
 		projected.tasks = tasks;
@@ -659,6 +673,18 @@ function projectIrohRemoteSubagentTranscriptDetails(
 		projected.steps = steps;
 	}
 	return Object.keys(projected).length > 0 ? { details: projected } : {};
+}
+
+const IROH_REMOTE_SUBAGENT_NUMERIC_KEYS = ["startedAt", "durationMs", "toolCalls", "tokens"] as const;
+const IROH_REMOTE_SUBAGENT_TREE_DEPTH_LIMIT = 5;
+
+function copyIrohRemoteSubagentNumericDetails(from: Record<string, unknown>, to: Record<string, unknown>): void {
+	for (const key of IROH_REMOTE_SUBAGENT_NUMERIC_KEYS) {
+		const numberValue = getIrohRemoteFiniteNumber(from[key]);
+		if (numberValue !== undefined) {
+			to[key] = numberValue;
+		}
+	}
 }
 
 function projectIrohRemoteSubagentSummary(value: unknown): Record<string, number> | undefined {
@@ -687,12 +713,13 @@ function projectIrohRemoteSubagentSummary(value: unknown): Record<string, number
 function projectIrohRemoteSubagentDetailArray(
 	value: unknown,
 	options: IrohRemoteTranscriptEventOptions,
+	depth = 0,
 ): Array<Record<string, unknown>> | undefined {
-	if (!Array.isArray(value)) {
+	if (!Array.isArray(value) || depth >= IROH_REMOTE_SUBAGENT_TREE_DEPTH_LIMIT) {
 		return undefined;
 	}
 	const projected = value
-		.map((item) => projectIrohRemoteSubagentTask(item, options))
+		.map((item) => projectIrohRemoteSubagentTask(item, options, depth))
 		.filter((item): item is Record<string, unknown> => item !== undefined);
 	return projected.length > 0 ? projected : undefined;
 }
@@ -700,6 +727,7 @@ function projectIrohRemoteSubagentDetailArray(
 function projectIrohRemoteSubagentTask(
 	value: unknown,
 	options: IrohRemoteTranscriptEventOptions,
+	depth = 0,
 ): Record<string, unknown> | undefined {
 	if (!isRecord(value)) {
 		return undefined;
@@ -716,9 +744,16 @@ function projectIrohRemoteSubagentTask(
 		projected.agent = agent;
 	}
 	copyIrohRemoteBoundedString(value, projected, "status", options, 200);
+	copyIrohRemoteBoundedString(value, projected, "task", options, 1_000);
+	copyIrohRemoteSubagentNumericDetails(value, projected);
+	copyIrohRemoteBoundedString(value, projected, "currentActivity", options, 300);
 	const error = projectIrohRemoteSubagentError(value.error, options);
 	if (error) {
 		projected.error = error;
+	}
+	const children = projectIrohRemoteSubagentDetailArray(value.children, options, depth + 1);
+	if (children) {
+		projected.children = children;
 	}
 	return Object.keys(projected).length > 0 ? projected : undefined;
 }
@@ -1019,7 +1054,12 @@ export function createIrohRemoteHostCommandRpcTransport(
 		}
 		let response: object | undefined;
 		try {
-			response = await options.handleCommand(command);
+			if (options.isRpcGrantCurrent && !(await options.isRpcGrantCurrent())) {
+				const target = getIrohRemoteRpcErrorTarget(line);
+				response = createIrohRemoteRpcErrorResponse(target.id, target.command, "RPC grant is stale; reconnect");
+			} else {
+				response = await options.handleCommand?.(command);
+			}
 		} catch (error: unknown) {
 			await writeHandlerError(line, error);
 			return;

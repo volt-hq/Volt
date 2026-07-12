@@ -18,7 +18,8 @@ import {
 import type { PromptTemplate } from "../src/core/prompt-templates.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
-	getIrohRemoteRpcFilterResult,
+	createIrohRemotePresetAccess,
+	getStaticIrohRemoteRpcFilterResult as getIrohRemoteRpcFilterResult,
 	sanitizeIrohRemoteOutbound,
 } from "../src/core/remote/iroh/index.ts";
 import {
@@ -711,6 +712,7 @@ describe("runRpcMode", () => {
 			await startupBlock;
 		});
 		const transport = createIrohRemoteFilteredRpcTransport({
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			transport: createIrohRemoteCloseDeferringRpcTransport({
 				transport: pair.server,
 				waitForPromptCompletion: () => Promise.resolve(),
@@ -763,6 +765,7 @@ describe("runRpcMode", () => {
 			await startupBlock;
 		});
 		const transport = createIrohRemoteFilteredRpcTransport({
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			transport: createIrohRemoteCloseDeferringRpcTransport({
 				transport: pair.server,
 				waitForPromptCompletion: () => Promise.resolve(),
@@ -959,7 +962,10 @@ describe("runRpcMode", () => {
 			options?.preflightResult?.(true);
 		});
 		const runtimeHost = createRuntimeHost(dispose, async () => {}, {
-			commands: [createCommand("deploy", "deploy", "Deploy", sourceInfo)],
+			commands: [
+				createCommand("deploy", "deploy", "Deploy", sourceInfo),
+				createCommand("unsafe", "unsafe", "Unsafe side effect", sourceInfo, false),
+			],
 			isStreaming: true,
 			newSession: vi.fn(async () => ({ cancelled: false })),
 			prompts: [
@@ -985,6 +991,7 @@ describe("runRpcMode", () => {
 			prompt,
 		});
 		const transport = createIrohRemoteFilteredRpcTransport({
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			transport: createIrohRemoteCloseDeferringRpcTransport({
 				transport: pair.server,
 				waitForPromptCompletion: () => Promise.resolve(),
@@ -1000,6 +1007,10 @@ describe("runRpcMode", () => {
 		await client.start();
 
 		try {
+			await expect(client.prompt("/unsafe now")).rejects.toThrow(
+				"Extension command is not available over remote host: /unsafe",
+			);
+			expect(prompt).not.toHaveBeenCalled();
 			await expect(client.getUiCapabilities()).resolves.toEqual({
 				protocolVersion: 1,
 				features: ["ui_actions.v1", "ui_action_invocation.v1", "ui_action_completions.v1"],
@@ -1008,6 +1019,7 @@ describe("runRpcMode", () => {
 			});
 			const actions = await client.getUiActions("all");
 			const extensionAction = actions.find((action) => action.source === "extension");
+			expect(actions.filter((action) => action.source === "extension")).toHaveLength(1);
 			const promptAction = actions.find((action) => action.source === "prompt");
 			const skillAction = actions.find((action) => action.source === "skill");
 			const newSessionAction = actions.find((action) => action.id === SESSION_NEW_ACTION_ID);
@@ -1148,11 +1160,15 @@ describe("createInProcessRpcClient", () => {
 		const dispose = vi.fn(async () => {});
 		const modelOne = createTestModel("model-one");
 		const modelTwo = createTestModel("model-two");
+		const setModel = vi.fn(async () => {});
+		const setThinkingLevel = vi.fn();
 		const runtimeHost = createRuntimeHost(dispose, async () => {}, {
 			model: modelOne,
 			availableModels: [modelOne, modelTwo],
 			availableThinkingLevels: ["off", "minimal", "low", "medium", "high"],
 			thinkingLevel: "medium",
+			setModel,
+			setThinkingLevel,
 		});
 		const client = await createInProcessRpcClient(runtimeHost);
 
@@ -1166,15 +1182,17 @@ describe("createInProcessRpcClient", () => {
 				expect.objectContaining({ id: "model-one" }),
 				expect.objectContaining({ id: "model-two" }),
 			]);
-			await expect(client.setModel("anthropic", "model-two")).resolves.toMatchObject({
+			await expect(client.setModel("anthropic", "model-two", { persistDefault: false })).resolves.toMatchObject({
 				provider: "anthropic",
 				id: "model-two",
 			});
+			expect(setModel).toHaveBeenCalledWith(modelTwo, { persistDefault: false });
 			await expect(client.getState()).resolves.toMatchObject({
 				model: expect.objectContaining({ id: "model-two" }),
 			});
 			await expect(client.setModel("anthropic", "missing")).rejects.toThrow("Model not found: anthropic/missing");
-			await expect(client.setThinkingLevel("low")).resolves.toEqual({ level: "low" });
+			await expect(client.setThinkingLevel("low", { persistDefault: false })).resolves.toEqual({ level: "low" });
+			expect(setThinkingLevel).toHaveBeenCalledWith("low", { persistDefault: false });
 		} finally {
 			await client.stop();
 		}
@@ -1910,7 +1928,7 @@ function createRuntimeHost(
 		model?: Model<Api>;
 		availableModels?: Model<Api>[];
 		availableThinkingLevels?: ThinkingLevel[];
-		setModel?: (model: Model<Api>) => Promise<void>;
+		setModel?: (model: Model<Api>, options?: { persistDefault?: boolean }) => Promise<void>;
 		newSession?: (options?: { parentSession?: string }) => Promise<{ cancelled: boolean }>;
 		prompt?: (message: string, options?: PromptOptions) => Promise<void>;
 		prompts?: PromptTemplate[];
@@ -1979,9 +1997,9 @@ function createRuntimeHost(
 				return thinkingLevel;
 			},
 			getAvailableThinkingLevels: vi.fn(() => resources.availableThinkingLevels ?? ["off"]),
-			setModel: vi.fn(async (model: Model<Api>) => {
+			setModel: vi.fn(async (model: Model<Api>, options?: { persistDefault?: boolean }) => {
 				currentModel = model;
-				await resources.setModel?.(model);
+				await resources.setModel?.(model, options);
 			}),
 			get fastModeRestoreThinkingLevel() {
 				return fastModeRestoreThinkingLevel;
@@ -2004,6 +2022,9 @@ function createRuntimeHost(
 				}),
 			extensionRunner: {
 				getRegisteredCommands: vi.fn(() => resources.commands ?? []),
+				getCommand: vi.fn((name: string) =>
+					(resources.commands ?? []).find((command) => command.invocationName === name || command.name === name),
+				),
 			},
 			promptTemplates: resources.prompts ?? [],
 			modelRegistry,
@@ -2054,11 +2075,13 @@ function createCommand(
 	invocationName: string,
 	description: string,
 	sourceInfo: SourceInfo,
+	remoteSafe = true,
 ): ResolvedCommand {
 	return {
 		name,
 		invocationName,
 		description,
+		remoteSafe,
 		sourceInfo,
 		getArgumentCompletions: vi.fn(() => []),
 		handler: vi.fn(async () => {}),

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { open } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { getAgentDir, VERSION } from "../config.ts";
 import { createDaemonClient } from "./control-client.ts";
 import type { ControlKeepAwakeStatus, ControlResponse } from "./control-protocol.ts";
@@ -9,6 +10,7 @@ import { getDaemonPaths } from "./paths.ts";
 import { verifyPidfileProcess } from "./process-identity.ts";
 import { installDaemonService, uninstallDaemonService } from "./service-install.ts";
 import { DAEMON_SHUTDOWN_TIMEOUT_MS, ensureDaemonRunning, probeDaemon, waitForDaemonExit } from "./spawn.ts";
+import { inspectVoltdStateFiles, regenerateInvalidVoltdState } from "./state.ts";
 
 const STOP_TIMEOUT_MS = DAEMON_SHUTDOWN_TIMEOUT_MS; // 60s drain cap + margin
 const DEFAULT_LOG_TAIL_LINES = 200;
@@ -23,6 +25,7 @@ Commands:
   stop                  Ask the daemon to shut down gracefully.
   status [--json]       Show daemon status; exit 0 when running, 1 when not.
   restart               Stop then start; persistent state survives.
+  regenerate-state      Back up invalid state and regenerate it after confirmation.
   keep-awake [on|off]   Prevent the host from sleeping while voltd runs; no arg prints state.
   logs [-f] [-n N]      Tail the daemon log (default ${DEFAULT_LOG_TAIL_LINES} lines).
   install-service       Register a login service (launchd/systemd) that starts the daemon.
@@ -65,7 +68,10 @@ async function daemonStart(agentDir: string): Promise<void> {
 		} else if (result.state === "shutting-down") {
 			console.error("Error: existing voltd did not finish shutting down within the timeout.");
 		} else {
-			console.error("Error: failed to start voltd (daemon did not become healthy within 5s).");
+			console.error(`Error: ${result.error ?? "failed to start voltd (daemon did not become healthy within 5s)."}`);
+			if (result.invalidState) {
+				console.error("Run `volt daemon regenerate-state` to review and confirm regeneration.");
+			}
 		}
 		console.error(`Check the log: ${getDaemonPaths(agentDir).logPath}`);
 		process.exitCode = 1;
@@ -307,6 +313,45 @@ function tailLines(content: string, count: number): string[] {
 	return lines.slice(-count);
 }
 
+async function promptConfirm(message: string): Promise<boolean> {
+	if (!process.stdin.isTTY || !process.stdout.isTTY) {
+		return false;
+	}
+	return new Promise((resolve) => {
+		const readline = createInterface({ input: process.stdin, output: process.stdout });
+		readline.question(`${message} [y/N] `, (answer) => {
+			readline.close();
+			resolve(answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes");
+		});
+	});
+}
+
+async function daemonRegenerateState(agentDir: string): Promise<void> {
+	const probe = await probeDaemon(agentDir);
+	if (probe.healthy || probe.state !== "not-running") {
+		console.error(`Error: voltd must be fully stopped before regenerating state (currently ${probe.state}).`);
+		process.exitCode = 1;
+		return;
+	}
+	const invalidState = inspectVoltdStateFiles(agentDir);
+	if (!invalidState) {
+		console.error("Daemon state is valid; regeneration is not needed.");
+		return;
+	}
+	console.error(invalidState.error);
+	console.error("Regeneration preserves validated identity/settings when safe and drops invalid access records.");
+	console.error("If the identity cannot be preserved, all phones will need to pair again.");
+	if (!(await promptConfirm("Back up the invalid file and regenerate daemon state?"))) {
+		console.error("Daemon state was not changed.");
+		process.exitCode = 1;
+		return;
+	}
+	const { backupPath, preservedIdentity } = await regenerateInvalidVoltdState(agentDir);
+	console.error(`Backed up invalid daemon state to ${backupPath}`);
+	console.error(preservedIdentity ? "Preserved the Iroh identity." : "A new Iroh identity will be created.");
+	console.error("Run `volt daemon start` to create fresh state.");
+}
+
 async function daemonLogs(agentDir: string, args: string[]): Promise<void> {
 	const paths = getDaemonPaths(agentDir);
 	const follow = args.includes("-f") || args.includes("--follow");
@@ -398,6 +443,9 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 			if ((process.exitCode ?? 0) === 0) {
 				await daemonStart(agentDir);
 			}
+			return true;
+		case "regenerate-state":
+			await daemonRegenerateState(agentDir);
 			return true;
 		case "keep-awake":
 			await daemonKeepAwake(agentDir, rest);

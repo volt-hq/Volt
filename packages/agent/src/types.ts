@@ -315,6 +315,8 @@ export interface PendingToolExecution {
 	toolCallId: string;
 	toolName: string;
 	args: Readonly<Record<string, unknown>>;
+	/** Structured details from the newest tool_execution_update, when the tool reported any. */
+	latestDetails?: unknown;
 }
 
 /**

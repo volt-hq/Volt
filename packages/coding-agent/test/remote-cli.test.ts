@@ -129,6 +129,18 @@ describe("remote CLI (daemon control client)", () => {
 		expect(process.exitCode).toBe(1);
 	});
 
+	it("validates RPC access preset arguments before contacting the daemon", async () => {
+		await main(["remote", "pair", "--access", "admin"]);
+		expect(process.exitCode).toBe(1);
+		expect(loggedLines(errorSpy)).toContain("--access requires coding, review, chat, or full");
+
+		process.exitCode = undefined;
+		errorSpy.mockClear();
+		await main(["remote", "access", "node", "set", "admin"]);
+		expect(process.exitCode).toBe(1);
+		expect(loggedLines(errorSpy)).toContain("remote access <node-id> set coding|review|chat|full");
+	});
+
 	it("requires a node id for revoke", async () => {
 		await main(["remote", "revoke"]);
 		expect(process.exitCode).toBe(1);

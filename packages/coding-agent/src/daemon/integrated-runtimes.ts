@@ -12,7 +12,12 @@ import {
 	isIrohRemoteSessionId,
 } from "../core/remote/iroh/handshake.ts";
 import { shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization } from "../core/remote/iroh/host-policy.ts";
-import type { IrohRemoteHostHandshakeFailureOutcome } from "../core/remote/iroh/protocol.ts";
+import {
+	type IrohRemoteHostHandshakeFailureOutcome,
+	type IrohRemoteRuntimeToolPolicy,
+	isIrohRemoteRuntimeToolPolicyWithin,
+	resolveIrohRemoteRuntimeToolPolicy,
+} from "../core/remote/iroh/protocol.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDir } from "../core/session-manager.ts";
@@ -61,6 +66,8 @@ export interface IntegratedRuntimeEntry {
 	worktreeSourceRootRelativePath?: string;
 	/** POSIX-style path relative to the registered workspace root. Omitted for root. */
 	workingDirectory?: string;
+	/** Immutable tool policy used to create this shared runtime. */
+	toolPolicy: IrohRemoteRuntimeToolPolicy;
 }
 
 export interface IntegratedRuntimeStreamWriter {
@@ -77,7 +84,10 @@ export interface IntegratedRuntimeRegistryOptions {
 	stateManager: IrohRemoteHostStateManager;
 	activeStreams: IrohRemoteActiveStreamRegistry;
 	detachedRuntimeTtlMs: () => number;
-	getAllowTools: (workspace: IrohRemoteWorkspace) => string | undefined;
+	/** Resolve the effective daemon-owned runtime policy. The client grant must remain the ceiling. */
+	getToolPolicy?: (workspace: IrohRemoteWorkspace, clientAllowTools: string) => IrohRemoteRuntimeToolPolicy;
+	/** Legacy workspace-policy seam. It is intersected with the client grant, never used as a replacement. */
+	getAllowTools?: (workspace: IrohRemoteWorkspace) => string | undefined;
 	getProjectTrustedForWorkspace: (workspace: IrohRemoteWorkspace) => boolean;
 	setClientLastSessionId: IrohRemoteHostEngine["setClientLastSessionId"];
 	/**
@@ -229,6 +239,17 @@ export class IntegratedRuntimeRegistry {
 		return undefined;
 	}
 
+	private resolveToolPolicy(authorization: IrohRemoteClientAuthorizationSuccess): IrohRemoteRuntimeToolPolicy {
+		return (
+			this.options.getToolPolicy?.(authorization.workspace, authorization.allowTools) ??
+			resolveIrohRemoteRuntimeToolPolicy({
+				clientAllowTools: authorization.allowTools,
+				workspaceAllowTools: this.options.getAllowTools?.(authorization.workspace),
+				daemonAllowTools: null,
+			})
+		);
+	}
+
 	async getOrCreateEntry(
 		handshake: { hello: IrohRemoteHello; response: IrohRemoteHandshakeSuccess },
 		authorization: IrohRemoteClientAuthorizationSuccess,
@@ -244,6 +265,14 @@ export class IntegratedRuntimeRegistry {
 			const existing = this.findOwner(authorization.workspace.name, targetSessionId);
 			if (existing) {
 				if (!shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization(authorization)) {
+					const attachingPolicy = this.resolveToolPolicy(authorization);
+					if (!isIrohRemoteRuntimeToolPolicyWithin(existing.toolPolicy, attachingPolicy)) {
+						throw createConversationOpenError(
+							"conversation_in_use",
+							"conversation is using tools outside this client's persisted grant",
+							{ workspace: authorization.workspace.name, sessionId: targetSessionId },
+						);
+					}
 					// Reattach recognized: cancel the pending detached-runtime TTL sweep
 					// synchronously, before the caller's multi-await commit window. The
 					// broker flips to daemon-active immediately (commitDaemonRuntime) but
@@ -315,9 +344,10 @@ export class IntegratedRuntimeRegistry {
 				workingDirectory: requestedWorkingDirectory,
 				...(worktree === undefined ? {} : { worktree }),
 			});
+			const toolPolicy = this.resolveToolPolicy(authorization);
 			const runtimeResult = await (this.options.createRuntime ?? createIrohRemoteAgentRuntimeWithSessionSelection)({
 				agentDir: this.options.agentDir,
-				allowTools: this.options.getAllowTools(authorization.workspace) ?? authorization.allowTools,
+				toolPolicy,
 				conversationTarget: createIrohRuntimeConversationTarget(handshake.hello, authorization),
 				cwd: initialDirectory.absolutePath,
 				projectCwd: rootPath,
@@ -346,6 +376,13 @@ export class IntegratedRuntimeRegistry {
 			const owner = this.findOwner(authorization.workspace.name, sessionId);
 			if (owner) {
 				await cleanupUncommittedRuntime(runtime, sessionSelection);
+				if (!isIrohRemoteRuntimeToolPolicyWithin(owner.toolPolicy, toolPolicy)) {
+					throw createConversationOpenError(
+						"conversation_in_use",
+						"conversation is using tools outside this client's persisted grant",
+						{ workspace: authorization.workspace.name, sessionId },
+					);
+				}
 				return {
 					entry: owner,
 					created: false,
@@ -367,6 +404,7 @@ export class IntegratedRuntimeRegistry {
 								: { worktreeSourceRootRelativePath: worktree.sourceRootRelativePath }),
 						}),
 				...(echoedWorkingDirectory === undefined ? {} : { workingDirectory: echoedWorkingDirectory }),
+				toolPolicy,
 			});
 			if (
 				worktree !== undefined &&
@@ -396,6 +434,7 @@ export class IntegratedRuntimeRegistry {
 		worktreePath?: string;
 		worktreeSourceRootRelativePath?: string;
 		workingDirectory?: string;
+		toolPolicy: IrohRemoteRuntimeToolPolicy;
 	}): IntegratedRuntimeEntry {
 		return {
 			key: this.getRegistryKey(options.workspaceName, options.sessionId),
@@ -417,6 +456,10 @@ export class IntegratedRuntimeRegistry {
 				? {}
 				: { worktreeSourceRootRelativePath: options.worktreeSourceRootRelativePath }),
 			...(options.workingDirectory === undefined ? {} : { workingDirectory: options.workingDirectory }),
+			toolPolicy: {
+				tools: [...options.toolPolicy.tools],
+				allowUnlistedExtensionTools: options.toolPolicy.allowUnlistedExtensionTools,
+			},
 		};
 	}
 
@@ -439,6 +482,7 @@ export class IntegratedRuntimeRegistry {
 			runtime: event.runtime,
 			parentSessionId: event.parentSessionId,
 			subagentId: event.id,
+			toolPolicy: parentEntry.toolPolicy,
 		});
 		entry.detachedAt = Date.now();
 		this.entries.set(entry.key, entry);

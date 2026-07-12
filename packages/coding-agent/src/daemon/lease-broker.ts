@@ -293,17 +293,18 @@ export class LeaseBroker {
 			}
 			case "daemon-detached":
 			case "daemon-active": {
-				if (record.state === "daemon-active" && this.effects.isRuntimeStreaming(workspaceName, sessionId)) {
+				if (this.effects.isRuntimeStreaming(workspaceName, sessionId)) {
+					// A mid-turn runtime ALWAYS drains before the handoff, even when
+					// every phone has detached. Disposing a busy runtime abandons the
+					// turn: its results (including completed subagent work buffered in
+					// an in-flight tool call) are never persisted, and the transcript
+					// is left with a dangling tool call. The acquiring TUI watches the
+					// rest of the turn through the drain viewer feed and is granted
+					// ownership once the runtime goes idle; it can cancel the drain by
+					// releasing (Esc/quit), which leaves the turn running on the daemon.
 					return this.beginDrain(record, connectionId);
 				}
-				// Not draining: dispose and grant immediately. A daemon-active runtime
-				// that is mid-turn drained above; everything else is disposed now,
-				// INCLUDING a daemon-detached runtime that is still streaming a turn
-				// after every phone has left. That is intentional: the drain (let the
-				// TUI watch the turn finish) is a courtesy to a device that is actively
-				// attached; once nothing is receiving the turn, acquiring the TUI
-				// abandons it rather than blocking the handoff on work no one is
-				// watching. See docs/live-shared-session-daemon-design.md §4.2.
+				// Idle: dispose and grant immediately.
 				// The flip to tui-owned happens BEFORE disposal so the disposal's
 				// onDaemonRuntimeDisposed callback no-ops (it is part of this grant).
 				record.state = "tui-owned";

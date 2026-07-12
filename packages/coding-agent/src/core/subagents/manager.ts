@@ -263,6 +263,7 @@ class LocalSubagentHandle implements SubagentHandle {
 	private promptMessageObserved = false;
 	private endSettled = false;
 	private ownershipSettled = false;
+	private abortRequested = false;
 	private disposed = false;
 	private disposePromise: Promise<void> | undefined;
 
@@ -312,6 +313,7 @@ class LocalSubagentHandle implements SubagentHandle {
 
 	async abort(): Promise<void> {
 		this.assertOpen();
+		this.abortRequested = true;
 		this.onAbortRequested();
 		// Abort the in-process runtime directly so cancellation is signalled before
 		// concurrent disposal can close the loopback transport.
@@ -350,6 +352,22 @@ class LocalSubagentHandle implements SubagentHandle {
 		}
 		this.disposed = true;
 		this.waitForIdle = undefined;
+		const abortInFlightRun = !this.endSettled && !this.abortRequested;
+		if (abortInFlightRun) {
+			// Disposing a still-running child must not orphan its turn: when the
+			// runtime is retained (daemon hosts keep child runtimes attachable),
+			// client.stop() only closes the loopback transport and the child would
+			// keep running on a result nobody can receive. Abort the runtime
+			// directly — the public abort() asserts the handle is still open — and
+			// do it fire-and-forget so a slow-to-cancel child cannot wedge
+			// disposal (and with it a lease handoff). Skipped when an abort was
+			// already requested through the handle so the runtime is signalled
+			// exactly once. Mark the abort request before rejecting the end
+			// promise so the manager's terminal handler records "aborted" rather
+			// than "failed".
+			this.onAbortRequested();
+			void this.abortRuntime().catch(() => undefined);
+		}
 		this.settleOwnership();
 		if (!this.endSettled) {
 			this.endSettled = true;

@@ -2,9 +2,15 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Paired Iroh remote devices and pending pairing tickets now require a versioned per-device RPC grant in addition to `allowedTools`; state without a valid grant fails closed, so existing development pairings must re-pair. `volt remote pair --access coding|review|chat|full` defaults to `coding`, and `volt remote access <node-id> set <preset>` atomically updates both access planes.
+
 ### Added
 
-- Added a built-in `/remote` TUI control center for daemon health and startup, current-directory workspace registration, current conversation ownership, attached phones, cancellable pairing QR/tickets, paired-device revocation and explicit re-pair approval, registered workspaces, active leases, and effective daemon-owned runtime tool/retention policy.
+- Added live nested subagent delegation trees to `subagent` tool details: each task now carries a bounded `task` preview, `startedAt`/`durationMs`, live `toolCalls`/`tokens` counters, a `currentActivity` line, and a recursive `children` array grafted from the child's own `subagent` tool updates (depth-capped at 5). The TUI transcript roster renders the tree inline with box-drawing branches as it grows, remote transcript/live-event projections preserve the new fields, `get_state.activeTools` includes the newest projected `subagent` details so mid-turn attachers can paint the current tree, and progress updates are throttled (trailing 200 ms) so chatty descendants cannot flood the wire.
+
+- Added a built-in `/remote` TUI control center for daemon health and startup, current-directory workspace registration, current conversation ownership, attached phones, cancellable pairing QR/tickets with explicit `coding`, `review`, `chat`, or `full` access selection, paired-device revocation and explicit re-pair approval, registered workspaces, active leases, and effective daemon-owned runtime tool/retention policy.
 
 - Added a dim duration suffix (e.g. `(3.2s)`) to the tool header once a tool call finishes, for executions of 1s or longer. Tool definitions whose renderers already display a duration (like the built-in bash tool) can opt out with the new `rendersDuration` flag.
 
@@ -78,6 +84,8 @@
 
 ### Fixed
 
+- Fixed invalid or incompatible daemon state being silently quarantined and replaced, which could reset the Iroh identity and leave pairing stuck while relay authentication was lost. Startup now fails without modifying the file, and `/remote` offers an explicit confirmation that backs it up before regeneration; validated identity, workspace, and settings data are preserved when only legacy access records are incompatible. `volt daemon regenerate-state` provides the same guarded recovery from the CLI. Pairing now reports `iroh_unavailable` instead of waiting indefinitely when endpoint startup stalls, and `/remote` offers confirmed recovery and daemon restart when a validated pre-failure state backup is available.
+- Fixed daemon-owned remote runtimes allowing daemon or workspace tool policies—or a broader co-attached phone's shared runtime—to widen a paired client's persisted grant. Runtime tools are now the intersection of every active policy layer, incompatible narrower clients are rejected from broader shared runtimes, `remote.allowTools` is synchronized into daemon state on startup, and explicit empty or legacy-shaped grants are preserved instead of being widened to current defaults.
 - Fixed child subagents seeing and attempting disallowed agent names: the `subagent` tool description, prompt guidance, and schema now expose only definitions permitted by the current delegation policy, reject unavailable names before starting work, and omit the tool when no child definition is available.
 - Fixed parent runtime teardown leaving directly-started SDK subagent managers alive after session replacement or disposal.
 - Fixed delayed queued-prompt preflight from accepting and stranding a message after the active run had already settled.

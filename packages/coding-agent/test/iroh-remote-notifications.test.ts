@@ -5,6 +5,7 @@ import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { REVIEW_UNCOMMITTED_ACTION_ID } from "../src/core/host-actions.ts";
 import {
 	createEmptyIrohRemoteHostState,
+	createIrohRemotePresetAccess,
 	hashIrohRemotePushToken,
 	IrohRemoteAuditLogger,
 	IrohRemoteHostStateManager,
@@ -114,6 +115,7 @@ function createStateManagerWithClient(
 					label: "phone",
 					allowedWorkspaces: [],
 					allowedTools: "read",
+					rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 					pairedAt: 1,
 					lastSeenAt: 2,
 					...(pushTargets.length > 0 ? { pushTargets } : {}),
@@ -232,6 +234,84 @@ describe("Iroh remote notification requests", () => {
 			eventId: "event-1",
 			pushTargetId: "relay-target-1",
 		});
+	});
+
+	test("relay HTTP client forwards the live activity token environment", async () => {
+		const fetcher = vi.fn(async (_input: string, _init: RequestInit): Promise<Response> => {
+			return new Response("{}", { status: 200 });
+		});
+		const client = new IrohRemotePushRelayHttpClient({ baseUrl: "https://push.example.test", fetcher });
+
+		await client.sendLiveActivityUpdate({
+			pushTargetId: "relay-target-1",
+			pushTargetAuthToken: "relay-target-auth-token",
+			activityId: "activity-1",
+			activityPushToken: "activity-token",
+			tokenEnvironment: "development",
+			eventId: "event-1",
+			kind: "live_activity_update",
+			contentState: {
+				status: "running",
+				statusText: "Using read",
+				recentTools: [],
+				updatedAtEpochSeconds: 123,
+			},
+		});
+
+		const init = fetcher.mock.calls[0]?.[1];
+		if (!init) {
+			throw new Error("Expected live activity fetch init");
+		}
+		const body = JSON.parse(String(init.body)) as unknown;
+		if (!isRecord(body)) {
+			throw new Error("Expected live activity body object");
+		}
+		expect(body).toMatchObject({ tokenEnvironment: "development" });
+	});
+
+	test("relay HTTP client treats 422 as an invalid target so the channel is pruned", async () => {
+		const fetcher = vi.fn(async (_input: string, _init: RequestInit): Promise<Response> => {
+			return new Response(JSON.stringify({ error: "live_activity_environment_unsupported" }), { status: 422 });
+		});
+		const client = new IrohRemotePushRelayHttpClient({ baseUrl: "https://push.example.test", fetcher });
+
+		await expect(
+			client.sendLiveActivityUpdate({
+				pushTargetId: "relay-target-1",
+				pushTargetAuthToken: "relay-target-auth-token",
+				activityId: "activity-1",
+				activityPushToken: "activity-token",
+				eventId: "event-1",
+				kind: "live_activity_update",
+				contentState: {
+					status: "running",
+					statusText: "Using read",
+					recentTools: [],
+					updatedAtEpochSeconds: 123,
+				},
+			}),
+		).resolves.toEqual({ status: "invalid_target" });
+	});
+
+	test("relay HTTP client surfaces the relay error body in thrown errors", async () => {
+		const fetcher = vi.fn(async (_input: string, _init: RequestInit): Promise<Response> => {
+			return new Response(JSON.stringify({ error: "fcm_send_failed", code: "messaging/invalid-argument" }), {
+				status: 502,
+			});
+		});
+		const client = new IrohRemotePushRelayHttpClient({ baseUrl: "https://push.example.test", fetcher });
+
+		await expect(
+			client.sendNotification({
+				pushTargetId: "relay-target-1",
+				pushTargetAuthToken: "relay-target-auth-token",
+				eventId: "event-1",
+				kind: "conversation_completed",
+				title: "Volt finished",
+				body: "Your conversation is ready.",
+				data: { eventId: "event-1", kind: "conversation_completed" },
+			}),
+		).rejects.toThrow("Push relay request failed with HTTP 502 (fcm_send_failed: messaging/invalid-argument)");
 	});
 
 	test("relay HTTP client sends bearer auth when configured", async () => {
@@ -431,6 +511,7 @@ describe("Iroh remote notification requests", () => {
 			} as unknown as AgentSessionRuntime,
 			{
 				disposeRuntimeOnClose: false,
+				rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 				notificationDelivery: {
 					deliverNotification: vi.fn(async () => "no_push_target" as const),
 					deliverLiveActivityUpdate: vi.fn(async (update) => {
@@ -510,6 +591,7 @@ describe("Iroh remote notification requests", () => {
 			pushTargetAuthToken: "relay-target-auth-token",
 			activityId: "activity-1",
 			activityPushToken: "activity-token",
+			tokenEnvironment: "production",
 			eventId: "live-activity:session-one:run-1:1",
 			kind: "live_activity_update",
 			contentState,
@@ -1316,6 +1398,7 @@ describe("Iroh remote notification requests", () => {
 		const recv = new ManualIrohRecvStream();
 		const modePromise = runIrohRemoteRpcMode(runtimeHost, {
 			disposeRuntimeOnClose: false,
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			notificationDelivery: dispatcher,
 			stream: { recv, send: new ThrowingIrohSendStream() },
 			workspacePath: "/workspace",

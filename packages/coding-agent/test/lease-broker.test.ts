@@ -188,6 +188,46 @@ describe("LeaseBroker", () => {
 		expect(effects.disposed).toHaveLength(1);
 	});
 
+	it("drains a detached mid-turn daemon runtime instead of abandoning the turn", async () => {
+		// Regression: a TUI acquire while every phone was detached used to
+		// dispose the runtime mid-turn, discarding in-flight (e.g. subagent)
+		// results and leaving a dangling tool call in the transcript.
+		const harness = createHarness();
+		const { broker, effects } = harness;
+		broker.onDaemonRuntimeAttached("ws", "s1");
+		broker.onDaemonRuntimeStreamCountChanged("ws", "s1", 0);
+		effects.streaming.add("ws/s1");
+
+		const outcome = await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "s1" });
+		expect(outcome.kind).toBe("pending");
+		if (outcome.kind !== "pending") {
+			return;
+		}
+		expect(broker.lookup("ws", "s1")?.state).toBe("daemon-draining");
+		expect(effects.disposed).toHaveLength(0);
+
+		await harness.finishTurn("ws", "s1");
+		await expect(outcome.granted).resolves.toEqual({ handoff: "warm" });
+		expect(broker.lookup("ws", "s1")?.state).toBe("tui-owned");
+		expect(effects.disposed).toHaveLength(1);
+	});
+
+	it("returns a cancelled detached drain to daemon-detached with the turn still running", async () => {
+		const harness = createHarness();
+		const { broker, effects } = harness;
+		broker.onDaemonRuntimeAttached("ws", "s1");
+		broker.onDaemonRuntimeStreamCountChanged("ws", "s1", 0);
+		effects.streaming.add("ws/s1");
+
+		const outcome = await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "s1" });
+		expect(outcome.kind).toBe("pending");
+		const released = broker.releaseFromTui("c-1", "ws", "s1");
+		expect(released).toEqual({ ok: true });
+		expect(broker.lookup("ws", "s1")?.state).toBe("daemon-detached");
+		// The runtime was never disposed: the turn keeps running on the daemon.
+		expect(effects.disposed).toHaveLength(0);
+	});
+
 	it("drains a mid-turn daemon runtime before granting", async () => {
 		const harness = createHarness();
 		const { broker, effects } = harness;

@@ -1,16 +1,28 @@
 import { isAbsolute, relative, resolve } from "node:path";
 import { type Component, getKeybindings, truncateToWidth, visibleWidth } from "@earendil-works/volt-tui";
 import { getAgentDir, VERSION } from "../../../config.ts";
+import {
+	IROH_REMOTE_ACCESS_PRESET_NAMES,
+	type IrohRemoteAccessPresetName,
+	isIrohRemoteAccessPresetName,
+} from "../../../core/remote/iroh/access-grant.ts";
 import { formatIrohRemoteTicketQrCode } from "../../../core/remote/iroh/qr.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 import { createDaemonClient, type DaemonClient } from "../../../daemon/control-client.ts";
 import {
 	CONTROL_PAIR_CANCEL_CAPABILITY,
+	CONTROL_RPC_GRANTS_CAPABILITY,
 	type ControlEvent,
 	type ControlResponse,
 	type DaemonRemotePolicyStatus,
 } from "../../../daemon/control-protocol.ts";
-import { type DaemonProbeState, ensureDaemonRunning, probeDaemon } from "../../../daemon/spawn.ts";
+import { type DaemonProbeState, ensureDaemonRunning, probeDaemon, waitForDaemonExit } from "../../../daemon/spawn.ts";
+import {
+	findRecoverableVoltdStateBackup,
+	inspectVoltdStateFiles,
+	recoverVoltdStateFromBackup,
+	regenerateInvalidVoltdState,
+} from "../../../daemon/state.ts";
 import { DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS } from "../../../remote/integrated-runtime-retention.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { resolveDaemonWorkspaceForCwd } from "../daemon-attach.ts";
@@ -20,10 +32,25 @@ import { keyHint } from "./keybinding-hints.ts";
 type RemoteStatus = Extract<ControlResponse, { type: "status_result" }>;
 type PairingProgress = Extract<ControlEvent, { type: "pairing_progress" }>;
 
+export class RemoteControlRequestError extends Error {
+	readonly code: string;
+
+	constructor(code: string, message: string) {
+		super(message);
+		this.name = "RemoteControlRequestError";
+		this.code = code;
+	}
+}
+
 const UNSAFE_TERMINAL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
 
 export type RemoteControlSnapshot =
-	| { kind: "offline"; state: DaemonProbeState; error?: string }
+	| {
+			kind: "offline";
+			state: DaemonProbeState;
+			error?: string;
+			invalidState?: { path: string; error: string };
+	  }
 	| { kind: "online"; status: RemoteStatus };
 
 export interface RemotePairingHandle {
@@ -34,8 +61,15 @@ export interface RemotePairingHandle {
 export interface RemoteControlBackend {
 	load(): Promise<RemoteControlSnapshot>;
 	startDaemon(): Promise<void>;
+	regenerateState(): Promise<{ backupPath: string; preservedIdentity: boolean }>;
+	findRecoveryBackup(): Promise<{ path: string; preservedIdentity: boolean } | undefined>;
+	recoverStateBackup(path: string): Promise<{ preservedIdentity: boolean }>;
 	registerCurrentWorkspace(path: string): Promise<{ name: string; path: string }>;
-	beginPairing(workspaceName: string, onProgress: (event: PairingProgress) => void): Promise<RemotePairingHandle>;
+	beginPairing(
+		workspaceName: string,
+		access: IrohRemoteAccessPresetName,
+		onProgress: (event: PairingProgress) => void,
+	): Promise<RemotePairingHandle>;
 	revokeClient(clientNodeId: string): Promise<void>;
 	approveClientRepair(clientNodeId: string): Promise<void>;
 	close(): Promise<void>;
@@ -113,7 +147,14 @@ export function createRemoteControlBackend(agentDir: string = getAgentDir()): Re
 	return {
 		async load() {
 			const probe = await probeDaemon(agentDir);
-			if (!probe.healthy) return { kind: "offline", state: probe.state };
+			if (!probe.healthy) {
+				const invalidState = inspectVoltdStateFiles(agentDir);
+				return {
+					kind: "offline",
+					state: probe.state,
+					...(invalidState === undefined ? {} : { error: invalidState.error, invalidState }),
+				};
+			}
 			try {
 				const response = await (await connect()).request({ type: "status" });
 				if (response.type === "error") throw new Error(response.message);
@@ -130,15 +171,47 @@ export function createRemoteControlBackend(agentDir: string = getAgentDir()): Re
 		},
 		async startDaemon() {
 			const result = await ensureDaemonRunning(agentDir);
-			if (!result.healthy) throw new Error(`voltd did not start (${result.state})`);
+			if (!result.healthy) throw new Error(result.error ?? `voltd did not start (${result.state})`);
 			await closeClient();
+		},
+		async regenerateState() {
+			const probe = await probeDaemon(agentDir);
+			if (probe.healthy || probe.state !== "not-running") {
+				throw new Error(`voltd must be fully stopped before regenerating state (currently ${probe.state})`);
+			}
+			return regenerateInvalidVoltdState(agentDir);
+		},
+		async findRecoveryBackup() {
+			return findRecoverableVoltdStateBackup(agentDir);
+		},
+		async recoverStateBackup(path) {
+			const probe = await probeDaemon(agentDir);
+			if (probe.healthy) {
+				const response = await (await connect()).request({ type: "shutdown" });
+				if (response.type === "error") throw new Error(response.message);
+				await closeClient();
+				const exit = await waitForDaemonExit({
+					agentDir,
+					pid: probe.pid,
+					socketPath: probe.socketPath,
+				});
+				if (exit !== "exited") throw new Error("voltd did not stop before state recovery");
+			} else if (probe.state !== "not-running") {
+				throw new Error(`voltd must be stopped before state recovery (currently ${probe.state})`);
+			}
+			const recovered = await recoverVoltdStateFromBackup(agentDir, path);
+			const restarted = await ensureDaemonRunning(agentDir);
+			if (!restarted.healthy) {
+				throw new Error(restarted.error ?? `voltd did not restart (${restarted.state})`);
+			}
+			return { preservedIdentity: recovered.preservedIdentity };
 		},
 		async registerCurrentWorkspace(path) {
 			const workspace = await resolveDaemonWorkspaceForCwd(await connect(), path);
 			if (!workspace) throw new Error("could not register the current directory with voltd");
 			return workspace;
 		},
-		async beginPairing(workspaceName, onProgress) {
+		async beginPairing(workspaceName, access, onProgress) {
 			const queued: PairingProgress[] = [];
 			let requestId: string | undefined;
 			let terminal = false;
@@ -156,8 +229,8 @@ export function createRemoteControlBackend(agentDir: string = getAgentDir()): Re
 			};
 			eventHandlers.add(handler);
 			try {
-				const response = await (await connect()).request({ type: "pair_request", workspaceName });
-				if (response.type === "error") throw new Error(response.message);
+				const response = await (await connect()).request({ type: "pair_request", workspaceName, access });
+				if (response.type === "error") throw new RemoteControlRequestError(response.code, response.message);
 				if (response.type !== "pair_started") throw new Error(`unexpected ${response.type} response`);
 				const startedRequestId = response.requestId;
 				requestId = startedRequestId;
@@ -210,16 +283,27 @@ type View =
 	| { kind: "loading"; label: string }
 	| { kind: "offline"; snapshot: Extract<RemoteControlSnapshot, { kind: "offline" }> }
 	| { kind: "overview"; status: RemoteStatus; notice?: string }
-	| { kind: "workspace-picker"; status: RemoteStatus }
+	| { kind: "access-picker"; status: RemoteStatus }
+	| { kind: "workspace-picker"; status: RemoteStatus; access: IrohRemoteAccessPresetName }
+	| { kind: "confirm-regenerate"; snapshot: Extract<RemoteControlSnapshot, { kind: "offline" }> }
+	| {
+			kind: "confirm-recover";
+			status: RemoteStatus;
+			workspaceName: string;
+			access: IrohRemoteAccessPresetName;
+			backupPath: string;
+	  }
 	| { kind: "confirm-revoke"; status: RemoteStatus; clientNodeId: string }
 	| { kind: "confirm-repair"; status: RemoteStatus; clientNodeId: string }
 	| {
 			kind: "pairing";
 			status: RemoteStatus;
 			workspaceName: string;
+			access: IrohRemoteAccessPresetName;
 			phase: "starting" | "ticket" | "waiting" | "completed" | "failed";
 			ticket?: string;
 			message?: string;
+			recoveryBackupPath?: string;
 	  };
 
 type DisplayRow = {
@@ -243,9 +327,32 @@ function abbreviatedId(value: string, width = 12): string {
 	return value.length <= width ? value : `${value.slice(0, Math.max(4, width - 1))}…`;
 }
 
-function supportsPairCancellation(status: RemoteStatus): boolean {
-	return status.capabilities?.includes(CONTROL_PAIR_CANCEL_CAPABILITY) === true;
+function supportsSafePairing(status: RemoteStatus): boolean {
+	return (
+		status.capabilities?.includes(CONTROL_PAIR_CANCEL_CAPABILITY) === true &&
+		status.capabilities.includes(CONTROL_RPC_GRANTS_CAPABILITY)
+	);
 }
+
+const ACCESS_PRESET_DETAILS: Readonly<Record<IrohRemoteAccessPresetName, { label: string; description: string }>> =
+	Object.freeze({
+		coding: {
+			label: "Coding",
+			description: "Coding tools plus conversation and model controls.",
+		},
+		review: {
+			label: "Review",
+			description: "Read-only tools plus conversation and model controls.",
+		},
+		chat: {
+			label: "Chat",
+			description: "Conversation and model controls without tool access.",
+		},
+		full: {
+			label: "Full access",
+			description: "Everything: API keys, log upload, host control, worktrees, and workspaces.",
+		},
+	});
 
 function workspaceForPath(status: RemoteStatus, path: string): RemoteStatus["workspaces"][number] | undefined {
 	const currentPath = resolve(path);
@@ -328,7 +435,10 @@ export class RemoteControlCenterComponent implements Component {
 		const keybindings = getKeybindings();
 		if (keybindings.matches(data, "tui.select.cancel")) {
 			if (
+				this.view.kind === "access-picker" ||
 				this.view.kind === "workspace-picker" ||
+				this.view.kind === "confirm-regenerate" ||
+				this.view.kind === "confirm-recover" ||
 				this.view.kind === "confirm-revoke" ||
 				this.view.kind === "confirm-repair" ||
 				this.view.kind === "pairing"
@@ -336,14 +446,34 @@ export class RemoteControlCenterComponent implements Component {
 				if (this.view.kind === "pairing") this.pairingAttempt++;
 				this.pairingHandle?.dispose();
 				this.pairingHandle = undefined;
-				const returnKey =
-					this.view.kind === "confirm-revoke"
-						? `client:${this.view.clientNodeId}`
-						: this.view.kind === "confirm-repair"
-							? `revoked:${this.view.clientNodeId}`
-							: "pair";
-				this.view = { kind: "overview", status: this.view.status };
-				this.selectedKey = returnKey;
+				if (this.view.kind === "confirm-regenerate") {
+					this.view = { kind: "offline", snapshot: this.view.snapshot };
+					this.selectedKey = "regenerate-state";
+				} else if (this.view.kind === "confirm-recover") {
+					this.view = {
+						kind: "pairing",
+						status: this.view.status,
+						workspaceName: this.view.workspaceName,
+						access: this.view.access,
+						phase: "failed",
+						message: "Iroh endpoint unavailable",
+						recoveryBackupPath: this.view.backupPath,
+					};
+					this.selectedKey = "pairing-recover";
+				} else if (this.view.kind === "workspace-picker") {
+					const { status, access } = this.view;
+					this.view = { kind: "access-picker", status };
+					this.selectedKey = `access:${access}`;
+				} else {
+					const returnKey =
+						this.view.kind === "confirm-revoke"
+							? `client:${this.view.clientNodeId}`
+							: this.view.kind === "confirm-repair"
+								? `revoked:${this.view.clientNodeId}`
+								: "pair";
+					this.view = { kind: "overview", status: this.view.status };
+					this.selectedKey = returnKey;
+				}
 				this.scrollOffset = 0;
 				this.manualScroll = false;
 				this.options.requestRender();
@@ -410,6 +540,66 @@ export class RemoteControlCenterComponent implements Component {
 		}
 	}
 
+	private async regenerateState(): Promise<void> {
+		const generation = ++this.generation;
+		this.view = { kind: "loading", label: "Backing up and regenerating daemon state…" };
+		this.options.requestRender();
+		try {
+			const result = await this.backend.regenerateState();
+			await this.backend.startDaemon();
+			if (this.disposed || generation !== this.generation) return;
+			await this.refresh(
+				`Daemon state regenerated; backup saved to ${result.backupPath}${result.preservedIdentity ? " · Iroh identity preserved" : " · new Iroh identity created"}`,
+			);
+		} catch (error) {
+			if (this.disposed || generation !== this.generation) return;
+			const snapshot = await this.backend.load();
+			if (this.disposed || generation !== this.generation) return;
+			this.view =
+				snapshot.kind === "online"
+					? { kind: "overview", status: snapshot.status, notice: "Daemon state was regenerated" }
+					: {
+							kind: "offline",
+							snapshot: {
+								...snapshot,
+								error: error instanceof Error ? error.message : String(error),
+							},
+						};
+			this.selectedKey =
+				snapshot.kind === "online" ? "refresh" : snapshot.invalidState ? "regenerate-state" : "start";
+			this.options.requestRender();
+		}
+	}
+
+	private async recoverStateBackup(backupPath: string): Promise<void> {
+		const generation = ++this.generation;
+		this.view = { kind: "loading", label: "Stopping voltd and recovering daemon state…" };
+		this.options.requestRender();
+		try {
+			const result = await this.backend.recoverStateBackup(backupPath);
+			if (this.disposed || generation !== this.generation) return;
+			await this.refresh(
+				result.preservedIdentity
+					? "Recovered daemon state and preserved the Iroh identity"
+					: "Recovered daemon state with a new Iroh identity; pair phones again",
+			);
+		} catch (error) {
+			if (this.disposed || generation !== this.generation) return;
+			const snapshot = await this.backend.load();
+			if (this.disposed || generation !== this.generation) return;
+			this.view =
+				snapshot.kind === "online"
+					? {
+							kind: "overview",
+							status: snapshot.status,
+							notice: `State recovery failed: ${error instanceof Error ? error.message : String(error)}`,
+						}
+					: { kind: "offline", snapshot };
+			this.selectedKey = "refresh";
+			this.options.requestRender();
+		}
+	}
+
 	private async registerCurrentWorkspace(): Promise<void> {
 		const generation = ++this.generation;
 		const currentPath = this.options.getCurrentWorkspacePath();
@@ -436,24 +626,29 @@ export class RemoteControlCenterComponent implements Component {
 		}
 	}
 
-	private async beginPairing(workspaceName: string, status: RemoteStatus): Promise<void> {
+	private async beginPairing(
+		workspaceName: string,
+		access: IrohRemoteAccessPresetName,
+		status: RemoteStatus,
+	): Promise<void> {
 		const pairingAttempt = ++this.pairingAttempt;
 		this.pairingHandle?.dispose();
 		this.pairingHandle = undefined;
-		this.view = { kind: "pairing", status, workspaceName, phase: "starting" };
+		this.view = { kind: "pairing", status, workspaceName, access, phase: "starting" };
 		this.selectedKey = "pairing-back";
 		this.scrollOffset = 0;
 		this.manualScroll = false;
 		this.options.requestRender();
 		try {
-			const handle = await this.backend.beginPairing(workspaceName, (event) =>
+			const handle = await this.backend.beginPairing(workspaceName, access, (event) =>
 				this.onPairingProgress(event, pairingAttempt),
 			);
 			if (
 				this.disposed ||
 				pairingAttempt !== this.pairingAttempt ||
 				this.view.kind !== "pairing" ||
-				this.view.workspaceName !== workspaceName
+				this.view.workspaceName !== workspaceName ||
+				this.view.access !== access
 			) {
 				handle.dispose();
 				return;
@@ -464,12 +659,18 @@ export class RemoteControlCenterComponent implements Component {
 				this.pairingHandle = handle;
 			}
 		} catch (error) {
+			const recoveryBackup =
+				error instanceof RemoteControlRequestError && error.code === "iroh_unavailable"
+					? await this.backend.findRecoveryBackup()
+					: undefined;
 			if (this.disposed || pairingAttempt !== this.pairingAttempt || this.view.kind !== "pairing") return;
 			this.view = {
 				...this.view,
 				phase: "failed",
 				message: error instanceof Error ? error.message : String(error),
+				...(recoveryBackup === undefined ? {} : { recoveryBackupPath: recoveryBackup.path }),
 			};
+			this.selectedKey = recoveryBackup === undefined ? "pairing-back" : "pairing-recover";
 			this.options.requestRender();
 		}
 	}
@@ -583,20 +784,57 @@ export class RemoteControlCenterComponent implements Component {
 			void this.startDaemon();
 			return;
 		}
+		if (key === "regenerate-state" && this.view.kind === "offline" && this.view.snapshot.invalidState) {
+			this.view = { kind: "confirm-regenerate", snapshot: this.view.snapshot };
+			this.selectedKey = "confirm-regenerate-state";
+			this.scrollOffset = 0;
+			this.manualScroll = false;
+			return;
+		}
+		if (key === "confirm-regenerate-state" && this.view.kind === "confirm-regenerate") {
+			void this.regenerateState();
+			return;
+		}
+		if (key === "pairing-recover" && this.view.kind === "pairing" && this.view.recoveryBackupPath) {
+			this.view = {
+				kind: "confirm-recover",
+				status: this.view.status,
+				workspaceName: this.view.workspaceName,
+				access: this.view.access,
+				backupPath: this.view.recoveryBackupPath,
+			};
+			this.selectedKey = "confirm-recover-state";
+			this.scrollOffset = 0;
+			this.manualScroll = false;
+			return;
+		}
+		if (key === "confirm-recover-state" && this.view.kind === "confirm-recover") {
+			void this.recoverStateBackup(this.view.backupPath);
+			return;
+		}
 		if (key === "register-current") {
 			if (this.view.kind === "overview") void this.registerCurrentWorkspace();
 			return;
 		}
 		if (key === "pair") {
-			if (this.view.kind !== "overview" || !supportsPairCancellation(this.view.status)) return;
+			if (this.view.kind !== "overview" || !supportsSafePairing(this.view.status)) return;
+			this.view = { kind: "access-picker", status: this.view.status };
+			this.selectedKey = "access:coding";
+			this.scrollOffset = 0;
+			this.manualScroll = false;
+			return;
+		}
+		if (key.startsWith("access:") && this.view.kind === "access-picker") {
+			const selectedAccess = key.slice("access:".length);
+			if (!isIrohRemoteAccessPresetName(selectedAccess)) return;
 			const currentWorkspace = this.options.getCurrentWorkspaceName();
 			const match = this.view.status.workspaces.find((workspace) => workspace.name === currentWorkspace);
 			if (match) {
-				void this.beginPairing(match.name, this.view.status);
+				void this.beginPairing(match.name, selectedAccess, this.view.status);
 			} else if (this.view.status.workspaces.length === 1) {
-				void this.beginPairing(this.view.status.workspaces[0]!.name, this.view.status);
+				void this.beginPairing(this.view.status.workspaces[0]!.name, selectedAccess, this.view.status);
 			} else if (this.view.status.workspaces.length > 1) {
-				this.view = { kind: "workspace-picker", status: this.view.status };
+				this.view = { kind: "workspace-picker", status: this.view.status, access: selectedAccess };
 				this.selectedKey = `workspace:${this.view.status.workspaces[0]!.name}`;
 				this.scrollOffset = 0;
 				this.manualScroll = false;
@@ -604,7 +842,7 @@ export class RemoteControlCenterComponent implements Component {
 			return;
 		}
 		if (key.startsWith("workspace:") && this.view.kind === "workspace-picker") {
-			void this.beginPairing(key.slice("workspace:".length), this.view.status);
+			void this.beginPairing(key.slice("workspace:".length), this.view.access, this.view.status);
 			return;
 		}
 		if (key.startsWith("client:") && this.view.kind === "overview") {
@@ -673,6 +911,7 @@ export class RemoteControlCenterComponent implements Component {
 	private renderHeader(width: number): string[] {
 		let state = "loading";
 		if (this.view.kind === "offline") state = this.view.snapshot.state;
+		else if (this.view.kind === "confirm-regenerate" || this.view.kind === "confirm-recover") state = "confirmation";
 		else if ("status" in this.view)
 			state = `online · ${this.view.status.phoneConnections} phone${this.view.status.phoneConnections === 1 ? "" : "s"}`;
 		const title = theme.bold(theme.fg("accent", "Remote Access"));
@@ -697,13 +936,58 @@ export class RemoteControlCenterComponent implements Component {
 				{ text: "DAEMON", tone: "accent" },
 				{ text: `voltd is ${this.view.snapshot.state}`, tone: "warning" },
 				...(this.view.snapshot.error ? [{ text: this.view.snapshot.error, tone: "error" as const }] : []),
-				{ key: "start", text: "Start daemon", tone: "text" },
+				...(this.view.snapshot.invalidState
+					? [
+							{
+								text: "Regeneration creates a backup, preserves validated settings/identity when possible, and may require phones to pair again.",
+								tone: "warning" as const,
+							},
+							{ key: "regenerate-state", text: "Regenerate daemon state…", tone: "warning" as const },
+						]
+					: [{ key: "start", text: "Start daemon", tone: "text" as const }]),
 				{ key: "refresh", text: "Refresh status", tone: "text" },
+			];
+		}
+		if (this.view.kind === "confirm-regenerate") {
+			return [
+				{ text: "REGENERATE DAEMON STATE", tone: "warning" },
+				{ text: this.view.snapshot.invalidState?.path ?? "Unknown state file", tone: "dim" },
+				{ text: "The invalid file will be kept as a timestamped backup.", tone: "text" },
+				{ text: "Validated identity, workspace, and settings data will be preserved when safe.", tone: "text" },
+				{ text: "Invalid access records are dropped; phones may need to pair again.", tone: "warning" },
+				{ key: "confirm-regenerate-state", text: "Confirm regenerate state", tone: "warning" },
+			];
+		}
+		if (this.view.kind === "confirm-recover") {
+			return [
+				{ text: "RECOVER PREVIOUS DAEMON STATE", tone: "warning" },
+				{ text: this.view.backupPath, tone: "dim" },
+				{ text: "The current daemon will stop and its state will be backed up.", tone: "text" },
+				{ text: "Validated identity, workspace, and settings data will be restored.", tone: "text" },
+				{ text: "Legacy access records are dropped; phones may need to pair again.", tone: "warning" },
+				{ key: "confirm-recover-state", text: "Confirm recover and restart", tone: "warning" },
+			];
+		}
+		if (this.view.kind === "access-picker") {
+			return [
+				{ text: "PAIR A PHONE · ACCESS", tone: "accent" },
+				{ text: "Choose what this phone may do. Access can be changed later.", tone: "muted" },
+				...IROH_REMOTE_ACCESS_PRESET_NAMES.flatMap((name) => {
+					const details = ACCESS_PRESET_DETAILS[name];
+					return [
+						{
+							key: `access:${name}`,
+							text: details.label,
+							tone: name === "full" ? ("warning" as const) : ("text" as const),
+						},
+						{ text: `  ${details.description}`, tone: "dim" as const },
+					];
+				}),
 			];
 		}
 		if (this.view.kind === "workspace-picker") {
 			return [
-				{ text: "PAIR A PHONE", tone: "accent" },
+				{ text: `PAIR A PHONE · ${ACCESS_PRESET_DETAILS[this.view.access].label}`, tone: "accent" },
 				{ text: "Choose the phone's initial workspace.", tone: "muted" },
 				...this.view.status.workspaces.map((workspace) => ({
 					key: `workspace:${workspace.name}`,
@@ -779,9 +1063,9 @@ export class RemoteControlCenterComponent implements Component {
 			{ key: "register-current", text: "Register current directory", tone: "text" },
 			...(status.workspaces.length === 0
 				? [{ text: "Pairing needs a registered workspace.", tone: "warning" as const }]
-				: supportsPairCancellation(status)
+				: supportsSafePairing(status)
 					? [{ key: "pair", text: "Pair a phone", tone: "text" as const }]
-					: [{ text: "Restart voltd to pair safely from this TUI.", tone: "warning" as const }]),
+					: [{ text: "Restart voltd to pair with explicit access grants.", tone: "warning" as const }]),
 			{ text: "HEADLESS POLICY", tone: "accent" },
 			...(status.remotePolicy
 				? [
@@ -864,7 +1148,10 @@ export class RemoteControlCenterComponent implements Component {
 			failed: "Pairing failed",
 		}[this.view.phase];
 		const rows: DisplayRow[] = [
-			{ text: `PAIR PHONE · ${this.view.workspaceName}`, tone: "accent" },
+			{
+				text: `PAIR PHONE · ${this.view.workspaceName} · ${ACCESS_PRESET_DETAILS[this.view.access].label}`,
+				tone: "accent",
+			},
 			{
 				text: phaseLabel,
 				tone: this.view.phase === "failed" ? "error" : this.view.phase === "completed" ? "success" : "text",
@@ -892,6 +1179,13 @@ export class RemoteControlCenterComponent implements Component {
 			}
 		}
 		if (this.view.ticket) rows.push({ key: "pairing-copy", text: "Copy pairing ticket", tone: "text" });
+		if (this.view.recoveryBackupPath) {
+			rows.push({
+				text: "A recoverable daemon-state backup is available from before the endpoint failure.",
+				tone: "warning",
+			});
+			rows.push({ key: "pairing-recover", text: "Recover previous daemon state…", tone: "warning" });
+		}
 		rows.push({
 			key: "pairing-back",
 			text:

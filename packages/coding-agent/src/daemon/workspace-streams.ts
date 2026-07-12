@@ -1,10 +1,18 @@
 import { Buffer } from "node:buffer";
+import {
+	getIrohRemoteRpcCommandCapabilities,
+	getMissingIrohRemoteRpcCapability,
+	parseIrohRemoteRpcGrant,
+} from "../core/remote/iroh/access-grant.ts";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
 import { isIrohRemoteWorkspaceName } from "../core/remote/iroh/handshake.ts";
 import { sanitizeIrohRemoteOutbound } from "../core/remote/iroh/outbound-filter.ts";
 import { isIrohRemoteWorkingDirectory } from "../core/remote/iroh/protocol.ts";
-import { createIrohRemoteRpcErrorResponse } from "../core/remote/iroh/rpc-command-filter.ts";
+import {
+	createIrohRemoteRpcCapabilityDeniedResponse,
+	createIrohRemoteRpcErrorResponse,
+} from "../core/remote/iroh/rpc-command-filter.ts";
 import {
 	handleIrohRemoteWorktreeRpcCommand,
 	IROH_REMOTE_WORKTREE_RPC_TYPES,
@@ -132,6 +140,21 @@ export function parseRemoteRpcCommandLine(
 	return { ok: true, command: record as RemoteRpcCommand };
 }
 
+function getUtilityCapabilityDenial(
+	command: RemoteRpcCommand,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): object | undefined {
+	const required = getIrohRemoteRpcCommandCapabilities(command);
+	if (required === undefined) return undefined;
+	const missing = getMissingIrohRemoteRpcCapability(
+		parseIrohRemoteRpcGrant(authorization.client.rpcGrant, "client rpcGrant"),
+		required,
+	);
+	return missing === undefined
+		? undefined
+		: createIrohRemoteRpcCapabilityDeniedResponse(getRpcResponseId(command), command.type, missing);
+}
+
 async function runWorkspaceUtilityRpcLoop(
 	stream: IrohBiStreamLike,
 	initialInput: IrohBytes,
@@ -174,6 +197,8 @@ export interface WorkspaceStreamContext {
 	stream: IrohBiStreamLike;
 	initialInput: IrohBytes;
 	authorization: IrohRemoteClientAuthorizationSuccess;
+	/** Recheck the persisted grant revision before every utility command. */
+	isRpcGrantCurrent(): boolean | Promise<boolean>;
 	closeStream(reason?: string): void;
 }
 
@@ -184,6 +209,10 @@ export async function runWorkspaceDiscoveryStream(
 ): Promise<void> {
 	const { stream, authorization } = context;
 	await runWorkspaceUtilityRpcLoop(stream, context.initialInput, async (line) => {
+		if (!(await context.isRpcGrantCurrent())) {
+			context.closeStream("access_updated");
+			return true;
+		}
 		const parsed = parseRemoteRpcCommandLine(line);
 		if (!parsed.ok) {
 			await writeIrohRemoteJsonLine(stream.send, parsed.response, authorization);
@@ -199,6 +228,11 @@ export async function runWorkspaceDiscoveryStream(
 				),
 				authorization,
 			);
+			return false;
+		}
+		const denied = getUtilityCapabilityDenial(parsed.command, authorization);
+		if (denied) {
+			await writeIrohRemoteJsonLine(stream.send, denied, authorization);
 			return false;
 		}
 		await writeIrohRemoteJsonLine(
@@ -247,6 +281,10 @@ export async function runWorkspaceManagementStream(
 ): Promise<void> {
 	const { stream, authorization } = context;
 	await runWorkspaceUtilityRpcLoop(stream, context.initialInput, async (line) => {
+		if (!(await context.isRpcGrantCurrent())) {
+			context.closeStream("access_updated");
+			return true;
+		}
 		const parsed = parseRemoteRpcCommandLine(line);
 		if (!parsed.ok) {
 			await writeIrohRemoteJsonLine(stream.send, parsed.response, authorization);
@@ -265,6 +303,11 @@ export async function runWorkspaceManagementStream(
 				),
 				authorization,
 			);
+			return false;
+		}
+		const denied = getUtilityCapabilityDenial(parsed.command, authorization);
+		if (denied) {
+			await writeIrohRemoteJsonLine(stream.send, denied, authorization);
 			return false;
 		}
 		const id = getRpcResponseId(parsed.command);
@@ -381,6 +424,10 @@ export async function runWorktreeManagementStream(
 	const { stream, authorization } = context;
 	const sanitizerOverrides = { additionalRedactedPaths: hooks.additionalRedactedPaths };
 	await runWorkspaceUtilityRpcLoop(stream, context.initialInput, async (line) => {
+		if (!(await context.isRpcGrantCurrent())) {
+			context.closeStream("access_updated");
+			return true;
+		}
 		const parsed = parseRemoteRpcCommandLine(line);
 		if (!parsed.ok) {
 			await writeIrohRemoteJsonLine(stream.send, parsed.response, authorization, sanitizerOverrides);
@@ -397,6 +444,11 @@ export async function runWorktreeManagementStream(
 				authorization,
 				sanitizerOverrides,
 			);
+			return false;
+		}
+		const denied = getUtilityCapabilityDenial(parsed.command, authorization);
+		if (denied) {
+			await writeIrohRemoteJsonLine(stream.send, denied, authorization, sanitizerOverrides);
 			return false;
 		}
 		const result = await handleIrohRemoteWorktreeRpcCommand(parsed.command, {

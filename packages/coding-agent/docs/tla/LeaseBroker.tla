@@ -134,10 +134,12 @@ AcquireUnowned(k, t) ==
     /\ UNCHANGED << streamCount, relayCount, runtimeStreaming, runtimeEntry,
                     disposePending, drainPhase, drainCancelled, grantSettled, pendingAttaches >>
 
-\* acquireForTui on a MID-TURN daemon-active runtime -> begin drain.
-\* (lease-broker.ts L296-297 -> beginDrain L337-359; RFC 4.3)
+\* acquireForTui on ANY mid-turn daemon runtime (active or detached) -> begin
+\* drain. Detached runtimes drain too: disposing a busy runtime would abandon
+\* the turn and discard its un-persisted results.
+\* (lease-broker.ts acquireForTui daemon-active/daemon-detached case -> beginDrain)
 AcquireDrainStart(k, t) ==
-    /\ Lease[k] = "daemon-active"
+    /\ Lease[k] \in {"daemon-active", "daemon-detached"}
     /\ runtimeStreaming[k] = TRUE
     /\ Lease'          = [Lease          EXCEPT ![k] = "daemon-draining"]
     /\ owner'          = [owner          EXCEPT ![k] = t]
@@ -149,10 +151,11 @@ AcquireDrainStart(k, t) ==
 
 \* acquireForTui on an IDLE daemon runtime: FLIP to tui-owned first, runtime NOT
 \* yet disposed.  This opens the split-brain window (disposePending = TRUE while
-\* runtimeEntry stays TRUE).  (lease-broker.ts L302-304)
+\* runtimeEntry stays TRUE).  Only idle runtimes take this path; a streaming
+\* runtime (active OR detached) drains via AcquireDrainStart instead.
 AcquireIdleFlip(k, t) ==
-    /\ \/ (Lease[k] = "daemon-active" /\ runtimeStreaming[k] = FALSE)
-       \/  Lease[k] = "daemon-detached"
+    /\ Lease[k] \in {"daemon-active", "daemon-detached"}
+    /\ runtimeStreaming[k] = FALSE
     /\ Lease'          = [Lease          EXCEPT ![k] = "tui-owned"]
     /\ owner'          = [owner          EXCEPT ![k] = t]
     /\ disposePending' = [disposePending EXCEPT ![k] = TRUE]

@@ -518,6 +518,9 @@ export interface RpcActiveToolExecution {
 	toolName: string;
 	status: "started";
 	args?: Record<string, unknown>;
+	/** Projected details from the newest tool_execution_update, so clients that
+	 *  attach mid-turn can restore live tool state (currently `subagent` only). */
+	details?: Record<string, unknown>;
 }
 
 export interface RpcActiveCompaction {

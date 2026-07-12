@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
 import { writeIrohRemoteHandshakeResponse } from "../src/core/remote/iroh/handshake-reader.ts";
@@ -35,6 +36,7 @@ import { FakePhoneIrohStream } from "./relay-doubles.ts";
 
 const SESSION_ID = "s-relay";
 const WORKSPACE = { name: "ws", path: "/tmp/ws" };
+const RPC_GRANT = createIrohRemotePresetAccess("full").rpcGrant;
 
 function createFanoutSession(sessionId: string) {
 	const session = createTestSession(sessionId, null);
@@ -66,6 +68,7 @@ function createAuthorization(clientNodeId: string): IrohRemoteClientAuthorizatio
 			label: clientNodeId,
 			allowedWorkspaces: [WORKSPACE.name],
 			allowedTools: "",
+			rpcGrant: RPC_GRANT,
 			pairedAt: 1,
 			lastSeenAt: 2,
 		},
@@ -139,12 +142,19 @@ function mintPhoneRelay(registry: RelayRegistry, clientNodeId: string, streamId:
 		workspaceName: WORKSPACE.name,
 		sessionId: SESSION_ID,
 		clientNodeId,
+		ownerControlConnectionId: "control-tui",
 		connectionId: `conn-${clientNodeId}`,
 		streamId,
 		stream: phone,
 		preamble: {
 			handshake: { hello: createPhoneHello(SESSION_ID), response: HANDSHAKE_RESPONSE },
-			authorization: { clientNodeId, workspaceName: WORKSPACE.name, workspacePath: WORKSPACE.path },
+			authorization: {
+				clientNodeId,
+				workspaceName: WORKSPACE.name,
+				workspacePath: WORKSPACE.path,
+				allowedTools: "",
+				rpcGrant: RPC_GRANT,
+			},
 			hostNodeId: "n-daemon-host",
 			relayMode: "development",
 			connectionId: `conn-${clientNodeId}`,
@@ -205,6 +215,7 @@ async function serveRelayFromTui(
 		disposeRuntimeOnClose: false,
 		workspaceName: WORKSPACE.name,
 		workspacePath: WORKSPACE.path,
+		rpcGrant: authorizationSubset.rpcGrant,
 		suppressExtensionUiRequests: true,
 		decorateOutbound: (value) => decorateRemoteHostState(value, authorization, responseContext),
 		remoteCommandHandler: (command) =>

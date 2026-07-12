@@ -1,4 +1,10 @@
 import { createHash } from "node:crypto";
+import {
+	cloneIrohRemoteRpcGrant,
+	createIrohRemotePresetAccess,
+	type IrohRemoteRpcGrant,
+	parseIrohRemoteRpcGrant,
+} from "./access-grant.ts";
 import type { IrohRemoteHello } from "./handshake.ts";
 import {
 	DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
@@ -7,6 +13,7 @@ import {
 } from "./protocol.ts";
 import type {
 	IrohRemoteClient,
+	IrohRemoteGrantedClient,
 	IrohRemoteHostState,
 	IrohRemotePairingSecretTombstone,
 	IrohRemotePendingPairingTicket,
@@ -27,6 +34,7 @@ export const DEFAULT_IROH_REMOTE_RE_PAIR_APPROVAL_TTL_MS = 30 * 60 * 1000;
 
 export interface AuthorizeIrohRemoteClientOptions {
 	allowTools: string;
+	rpcGrant?: IrohRemoteRpcGrant;
 	classifyWorkspaceAvailability?: IrohRemoteWorkspaceAvailabilityClassifier;
 	pairingExpiresAt?: number;
 	pairingSecret?: string;
@@ -39,7 +47,7 @@ export interface AuthorizeIrohRemoteClientOptions {
 export interface IrohRemoteClientAuthorizationSuccess {
 	ok: true;
 	allowTools: string;
-	client: IrohRemoteClient;
+	client: IrohRemoteGrantedClient;
 	consumedPairingTicket?: IrohRemotePendingPairingTicket;
 	expiredPairingTickets?: IrohRemotePendingPairingTicket[];
 	paired: boolean;
@@ -119,6 +127,17 @@ export function authorizeIrohRemoteClient(
 		// indefinitely.
 		now >= revokedClient.rePairApprovedAt &&
 		now - revokedClient.rePairApprovedAt <= DEFAULT_IROH_REMOTE_RE_PAIR_APPROVAL_TTL_MS;
+	try {
+		if (revokedClient) parseIrohRemoteRpcGrant(revokedClient.rpcGrant, "revoked client rpcGrant");
+		if (existingClient) assertGrantedClient(existingClient);
+	} catch {
+		return {
+			ok: false,
+			error: "client RPC grant is missing or malformed",
+			outcome: revokedClient ? "client_revoked" : "client_unknown",
+			pairingSecretExpired: false,
+		};
+	}
 	const hasActivePairingSecretForRevokedClient =
 		rePairApprovalActive &&
 		hasPairingSecret &&
@@ -230,13 +249,40 @@ export function authorizeIrohRemoteClient(
 		const allowedTools = normalizeIrohRemoteAllowTools(
 			matchingPendingPairingTicket?.allowedTools ?? options.allowTools,
 		);
+		let rpcGrant: IrohRemoteRpcGrant;
+		try {
+			const selectedGrant = parseIrohRemoteRpcGrant(
+				matchingPendingPairingTicket?.rpcGrant ??
+					options.rpcGrant ??
+					createIrohRemotePresetAccess("coding").rpcGrant,
+			);
+			const revokedRevision =
+				revokedClient === undefined
+					? 0
+					: parseIrohRemoteRpcGrant(revokedClient.rpcGrant, "revoked client rpcGrant").revision;
+			if (revokedRevision === Number.MAX_SAFE_INTEGER) {
+				throw new Error("revoked client RPC grant revision is exhausted");
+			}
+			rpcGrant = {
+				...cloneIrohRemoteRpcGrant(selectedGrant),
+				revision: Math.max(selectedGrant.revision, revokedRevision + 1),
+			};
+		} catch {
+			return {
+				ok: false,
+				error: "pairing ticket RPC grant is missing or malformed",
+				outcome: "client_unknown",
+				pairingSecretExpired: false,
+			};
+		}
 		const allowedWorkspace = matchingPendingPairingTicket?.workspace ?? workspace.name;
 		const ticketExpiresAt = matchingPendingPairingTicket?.expiresAt ?? options.pairingExpiresAt;
-		const client: IrohRemoteClient = {
+		const client: IrohRemoteGrantedClient = {
 			nodeId: remoteNodeId,
 			label: hello.clientLabel || matchingPendingPairingTicket?.labelHint || remoteNodeId.slice(0, 12),
 			allowedWorkspaces: [],
 			allowedTools,
+			rpcGrant,
 			pairedAt: now,
 			lastSeenAt: now,
 		};
@@ -327,6 +373,10 @@ export function isIrohRemoteClientAllowedForWorkspace(client: IrohRemoteClient, 
 
 export function hashIrohRemotePairingSecret(secret: string): string {
 	return `sha256:${createHash("sha256").update(secret, "utf8").digest("base64url")}`;
+}
+
+function assertGrantedClient(client: IrohRemoteClient): asserts client is IrohRemoteGrantedClient {
+	client.rpcGrant = parseIrohRemoteRpcGrant(client.rpcGrant, "client rpcGrant");
 }
 
 function getPendingPairingTickets(state: IrohRemoteHostState): IrohRemotePendingPairingTicket[] {

@@ -1,12 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteActiveStreamRegistry } from "../src/core/remote/iroh/active-stream-registry.ts";
 import { IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import { IntegratedRuntimeRegistry } from "../src/daemon/integrated-runtimes.ts";
+import {
+	collectClientAuthorityInvalidationRuntimes,
+	collectClientAuthorityInvalidationStreams,
+} from "../src/daemon/iroh-service.ts";
 import { createTestSession, parseWrittenObjects, startIrohRpcMode } from "./iroh-stream-doubles.ts";
 
 function createFanoutSession(sessionId: string) {
@@ -30,15 +35,16 @@ function createFanoutSession(sessionId: string) {
 	};
 }
 
-function createAuthorization(clientNodeId: string): IrohRemoteClientAuthorizationSuccess {
+function createAuthorization(clientNodeId: string, allowTools = "read"): IrohRemoteClientAuthorizationSuccess {
 	return {
 		ok: true,
-		allowTools: "read",
+		allowTools,
 		client: {
 			nodeId: clientNodeId,
 			label: clientNodeId,
 			allowedWorkspaces: ["ws"],
-			allowedTools: "read",
+			allowedTools: allowTools,
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			pairedAt: 1,
 			lastSeenAt: 2,
 		},
@@ -164,6 +170,53 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		expect(dispose).not.toHaveBeenCalled();
 	});
 
+	it("rejects co-attach when an existing runtime exceeds the attaching client's grant", async () => {
+		const runtime = {
+			cwd: "/tmp/ws",
+			session: createTestSession("s-policy", null),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+			listSessions: vi.fn(async () => []),
+		} as unknown as AgentSessionRuntime;
+		const registry = new IntegratedRuntimeRegistry({
+			auditLogger: new IrohRemoteAuditLogger(),
+			stateManager: new IrohRemoteHostStateManager(),
+			activeStreams: new IrohRemoteActiveStreamRegistry(),
+			detachedRuntimeTtlMs: () => 60_000,
+			getAllowTools: () => undefined,
+			getProjectTrustedForWorkspace: () => false,
+			setClientLastSessionId: vi.fn(async () => undefined),
+			createRuntime: async () => ({
+				runtime,
+				sessionSelection: { kind: "created", sessionId: "s-policy" },
+			}),
+		});
+		const broadPhone = createAuthorization("n-phone-broad", "read,bash");
+		const narrowPhone = createAuthorization("n-phone-narrow", "read");
+		const equallyBroadPhone = createAuthorization("n-phone-equal", "read,bash,edit");
+
+		const created = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
+			broadPhone,
+		);
+		await registry.commitEntry(created.entry, created.sessionSelection, broadPhone);
+
+		await expect(
+			registry.getOrCreateEntry(
+				{ hello: createHello({ target: "session", sessionId: "s-policy" }), response: HANDSHAKE_RESPONSE },
+				narrowPhone,
+			),
+		).rejects.toMatchObject({ outcome: "conversation_in_use" });
+
+		const attached = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "session", sessionId: "s-policy" }), response: HANDSHAKE_RESPONSE },
+			equallyBroadPhone,
+		);
+		expect(attached.created).toBe(false);
+		expect(attached.entry).toBe(created.entry);
+		await registry.stopAll("test_cleanup");
+	});
+
 	it("does not let attachable subagent sessions overwrite the client's last top-level session", async () => {
 		const parentRuntime = {
 			cwd: "/tmp/ws",
@@ -230,6 +283,103 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		expect(setClientLastSessionId).not.toHaveBeenCalled();
 
 		await registry.stopAll("test_cleanup");
+	});
+
+	it("invalidates the whole shared runtime when any attached client is updated or revoked", () => {
+		const activeStreams = new IrohRemoteActiveStreamRegistry();
+		const makeStream = (clientNodeId: string, sessionId: string) => ({
+			clientNodeId,
+			workspaceName: "ws",
+			sessionId,
+			connectionId: `conn-${clientNodeId}-${sessionId}`,
+			streamId: `stream-${clientNodeId}-${sessionId}`,
+			close: vi.fn(),
+		});
+		const creatorStream = makeStream("n-creator", "s-shared");
+		const attachedStream = makeStream("n-attached", "s-shared");
+		const attachedOtherStream = makeStream("n-attached", "s-other");
+		activeStreams.register(creatorStream);
+		activeStreams.register(attachedStream);
+		activeStreams.register(attachedOtherStream);
+		const runtimes = [
+			{ clientNodeId: "n-creator", workspaceName: "ws", sessionId: "s-shared" },
+			{ clientNodeId: "n-other", workspaceName: "ws", sessionId: "s-other" },
+		];
+
+		expect([...collectClientAuthorityInvalidationStreams(activeStreams, runtimes, "n-creator")]).toEqual([
+			creatorStream,
+			attachedStream,
+		]);
+		expect([...collectClientAuthorityInvalidationStreams(activeStreams, runtimes, "n-attached")]).toEqual([
+			attachedStream,
+			attachedOtherStream,
+			creatorStream,
+		]);
+		expect([...collectClientAuthorityInvalidationRuntimes(activeStreams, runtimes, "n-attached")]).toEqual(runtimes);
+	});
+
+	it("selects and stops a two-client runtime even while its turn is blocking", async () => {
+		const activeStreams = new IrohRemoteActiveStreamRegistry();
+		const abort = vi.fn(async () => {});
+		const session = Object.assign(createTestSession("s-blocking", null), {
+			abort,
+			isBusy: true,
+			isStreaming: true,
+			waitForIdle: vi.fn(() => new Promise<void>(() => {})),
+		});
+		const dispose = vi.fn(async () => {
+			await abort();
+		});
+		const runtime = {
+			cwd: "/tmp/ws",
+			session,
+			dispose,
+			setRebindSession: vi.fn(),
+			listSessions: vi.fn(async () => []),
+		} as unknown as AgentSessionRuntime;
+		const registry = new IntegratedRuntimeRegistry({
+			auditLogger: new IrohRemoteAuditLogger(),
+			stateManager: new IrohRemoteHostStateManager(),
+			activeStreams,
+			detachedRuntimeTtlMs: () => 60_000,
+			getAllowTools: () => undefined,
+			getProjectTrustedForWorkspace: () => false,
+			setClientLastSessionId: vi.fn(async () => undefined),
+			createRuntime: async () => ({
+				runtime,
+				sessionSelection: { kind: "created", sessionId: "s-blocking" },
+			}),
+		});
+		const creator = createAuthorization("n-creator");
+		const created = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
+			creator,
+		);
+		await registry.commitEntry(created.entry, created.sessionSelection, creator);
+		await registry.attachSubscriber(created.entry);
+		await registry.attachSubscriber(created.entry);
+		for (const clientNodeId of ["n-creator", "n-attached"]) {
+			activeStreams.register({
+				clientNodeId,
+				workspaceName: "ws",
+				sessionId: "s-blocking",
+				connectionId: `conn-${clientNodeId}`,
+				streamId: `stream-${clientNodeId}`,
+				close: vi.fn(),
+			});
+		}
+
+		const affected = collectClientAuthorityInvalidationRuntimes(activeStreams, registry.values(), "n-attached");
+		expect([...affected]).toEqual([created.entry]);
+		for (const entry of affected) {
+			await registry.stopEntry(entry, "access_updated");
+		}
+
+		expect(session.waitForIdle).not.toHaveBeenCalled();
+		expect(abort).toHaveBeenCalledOnce();
+		expect(dispose).toHaveBeenCalledOnce();
+		expect(created.entry.subscribers.size).toBe(0);
+		expect(registry.findOwner("ws", "s-blocking")).toBeUndefined();
 	});
 
 	it("retains a detached runtime while prompt preflight is busy", async () => {

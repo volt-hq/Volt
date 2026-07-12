@@ -1,5 +1,12 @@
 import { isRemoteSafeBuiltinHostActionId } from "../../host-actions.ts";
 import { serializeJsonLine } from "../../rpc/jsonl.ts";
+import {
+	getIrohRemoteRpcCommandCapabilities,
+	getMissingIrohRemoteRpcCapability,
+	type IrohRemoteRpcCapability,
+	type IrohRemoteRpcGrant,
+	parseIrohRemoteRpcGrant,
+} from "./access-grant.ts";
 
 export const IROH_REMOTE_RPC_CANCELLATION_TYPES = new Set(["abort"]);
 
@@ -62,6 +69,12 @@ export interface IrohRemoteRpcCommand extends Record<string, unknown> {
 	type: string;
 }
 
+export interface IrohRemoteRpcCapabilityDeniedError {
+	code: "rpc_capability_denied";
+	message: string;
+	requiredCapability: IrohRemoteRpcCapability;
+}
+
 export interface IrohRemoteRpcErrorResponse {
 	id?: string;
 	type: "response";
@@ -70,11 +83,67 @@ export interface IrohRemoteRpcErrorResponse {
 	error: string;
 }
 
-export type IrohRemoteRpcFilterResult =
+export interface IrohRemoteRpcCapabilityDeniedResponse {
+	id?: string;
+	type: "response";
+	command: string;
+	success: false;
+	error: IrohRemoteRpcCapabilityDeniedError;
+}
+
+export type IrohRemoteStaticRpcFilterResult =
 	| { allowed: true; command: IrohRemoteRpcCommand }
 	| { allowed: false; response: IrohRemoteRpcErrorResponse };
 
-export function getIrohRemoteRpcFilterResult(line: string): IrohRemoteRpcFilterResult {
+export type IrohRemoteRpcFilterResult =
+	| { allowed: true; command: IrohRemoteRpcCommand }
+	| { allowed: false; response: IrohRemoteRpcErrorResponse | IrohRemoteRpcCapabilityDeniedResponse };
+
+export function getIrohRemoteRpcFilterResult(line: string, rpcGrant: IrohRemoteRpcGrant): IrohRemoteRpcFilterResult {
+	const staticResult = getStaticIrohRemoteRpcFilterResult(line);
+	if (!staticResult.allowed) {
+		return staticResult;
+	}
+	let granted: IrohRemoteRpcGrant;
+	try {
+		granted = parseIrohRemoteRpcGrant(rpcGrant, "remote RPC grant");
+	} catch {
+		return {
+			allowed: false,
+			response: createIrohRemoteRpcErrorResponse(
+				typeof staticResult.command.id === "string" ? staticResult.command.id : undefined,
+				staticResult.command.type,
+				"Remote RPC grant is missing or malformed",
+			),
+		};
+	}
+	const required = getIrohRemoteRpcCommandCapabilities(staticResult.command);
+	if (required === undefined) {
+		return {
+			allowed: false,
+			response: createIrohRemoteRpcErrorResponse(
+				typeof staticResult.command.id === "string" ? staticResult.command.id : undefined,
+				staticResult.command.type,
+				`RPC command has no capability classification: ${staticResult.command.type}`,
+			),
+		};
+	}
+	const missing = getMissingIrohRemoteRpcCapability(granted, required);
+	if (missing === undefined) {
+		return staticResult;
+	}
+	return {
+		allowed: false,
+		response: createIrohRemoteRpcCapabilityDeniedResponse(
+			typeof staticResult.command.id === "string" ? staticResult.command.id : undefined,
+			staticResult.command.type,
+			missing,
+		),
+	};
+}
+
+/** Low-level syntax and hard-allowlist classifier. Remote serving must also apply an RPC grant. */
+export function getStaticIrohRemoteRpcFilterResult(line: string): IrohRemoteStaticRpcFilterResult {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(line);
@@ -144,7 +213,7 @@ export function getIrohRemoteRpcFilterResult(line: string): IrohRemoteRpcFilterR
 function getIrohRemoteMcpAuthCommandResult(
 	command: Record<string, unknown>,
 	responseId: string | undefined,
-): IrohRemoteRpcFilterResult {
+): IrohRemoteStaticRpcFilterResult {
 	if (command.flow !== "device") {
 		return {
 			allowed: false,
@@ -172,7 +241,7 @@ function getIrohRemoteUiActionCommandResult(
 	command: Record<string, unknown>,
 	responseId: string | undefined,
 	commandType: "invoke_ui_action" | "get_ui_action_completions",
-): IrohRemoteRpcFilterResult {
+): IrohRemoteStaticRpcFilterResult {
 	const action = command.action;
 	if (typeof action !== "string" || action.length === 0) {
 		return {
@@ -200,7 +269,9 @@ function isIrohRemoteUiActionId(action: string): boolean {
 	);
 }
 
-export function serializeIrohRemoteRpcFilterRejection(response: IrohRemoteRpcErrorResponse): string {
+export function serializeIrohRemoteRpcFilterRejection(
+	response: IrohRemoteRpcErrorResponse | IrohRemoteRpcCapabilityDeniedResponse,
+): string {
 	return serializeJsonLine(response);
 }
 
@@ -210,4 +281,22 @@ export function createIrohRemoteRpcErrorResponse(
 	error: string,
 ): IrohRemoteRpcErrorResponse {
 	return { id, type: "response", command, success: false, error };
+}
+
+export function createIrohRemoteRpcCapabilityDeniedResponse(
+	id: string | undefined,
+	command: string,
+	requiredCapability: IrohRemoteRpcCapability,
+): IrohRemoteRpcCapabilityDeniedResponse {
+	return {
+		id,
+		type: "response",
+		command,
+		success: false,
+		error: {
+			code: "rpc_capability_denied",
+			message: `RPC capability required: ${requiredCapability}`,
+			requiredCapability,
+		},
+	};
 }

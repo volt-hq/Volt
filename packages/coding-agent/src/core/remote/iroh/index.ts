@@ -1,4 +1,26 @@
 export {
+	cloneIrohRemoteRpcGrant,
+	createIrohRemoteExplicitAccess,
+	createIrohRemotePresetAccess,
+	createIrohRemoteRpcGrant,
+	getIrohRemoteAccessPreset,
+	getIrohRemoteRpcCommandCapabilities,
+	getIrohRemoteStreamCapability,
+	getMissingIrohRemoteRpcCapability,
+	hasIrohRemoteRpcCapability,
+	IROH_REMOTE_ACCESS_PRESET_NAMES,
+	IROH_REMOTE_ACCESS_PRESETS,
+	IROH_REMOTE_RPC_CAPABILITIES,
+	IROH_REMOTE_RPC_GRANT_SCHEMA_VERSION,
+	type IrohRemoteAccessPreset,
+	type IrohRemoteAccessPresetName,
+	type IrohRemoteRpcCapability,
+	type IrohRemoteRpcGrant,
+	isIrohRemoteAccessPresetName,
+	parseIrohRemoteRpcCapabilities,
+	parseIrohRemoteRpcGrant,
+} from "./access-grant.ts";
+export {
 	type IrohRemoteActiveStreamEntry,
 	IrohRemoteActiveStreamRegistry,
 } from "./active-stream-registry.ts";
@@ -149,12 +171,16 @@ export {
 	type IrohRemoteOutcome,
 	IrohRemoteOutcomeError,
 	type IrohRemoteRelayMode,
+	type IrohRemoteRuntimeToolPolicy,
 	isIrohRemoteHostHandshakeFailureOutcome,
 	isIrohRemoteOutcome,
 	isIrohRemoteRelayMode,
+	isIrohRemoteRuntimeToolPolicyWithin,
 	isIrohRemoteWorktreeId,
 	normalizeIrohRemoteAllowTools,
 	parseIrohRemoteAllowTools,
+	type ResolveIrohRemoteRuntimeToolPolicyOptions,
+	resolveIrohRemoteRuntimeToolPolicy,
 	usesDefaultIrohRemoteAllowTools,
 } from "./protocol.ts";
 export {
@@ -192,10 +218,14 @@ export {
 	type IrohRemoteTicketQrCodeFormatOptions,
 } from "./qr.ts";
 export {
+	createIrohRemoteRpcCapabilityDeniedResponse,
 	createIrohRemoteRpcErrorResponse,
 	getIrohRemoteRpcFilterResult,
+	getStaticIrohRemoteRpcFilterResult,
 	IROH_REMOTE_RPC_CANCELLATION_TYPES,
 	IROH_REMOTE_RPC_PASSTHROUGH_TYPES,
+	type IrohRemoteRpcCapabilityDeniedError,
+	type IrohRemoteRpcCapabilityDeniedResponse,
 	type IrohRemoteRpcCommand,
 	type IrohRemoteRpcErrorResponse,
 	type IrohRemoteRpcFilterResult,
@@ -209,6 +239,9 @@ export {
 export {
 	createEmptyIrohRemoteHostState,
 	type IrohRemoteClient,
+	type IrohRemoteGrantedClient,
+	type IrohRemoteGrantedPendingPairingTicket,
+	type IrohRemoteGrantedRevokedClient,
 	type IrohRemoteHostState,
 	type IrohRemoteLiveActivityRegistration,
 	type IrohRemoteLiveActivityTarget,
@@ -235,6 +268,7 @@ export {
 	writeIrohRemoteHostState,
 } from "./state.ts";
 export {
+	type IrohRemoteClientAccessUpdateResult,
 	type IrohRemoteClientRePairApprovalResult,
 	type IrohRemoteClientRevocationResult,
 	IrohRemoteHostStateManager,

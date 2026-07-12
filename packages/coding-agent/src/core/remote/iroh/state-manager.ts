@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import lockfile from "proper-lockfile";
+import { cloneIrohRemoteRpcGrant, type IrohRemoteRpcGrant, parseIrohRemoteRpcGrant } from "./access-grant.ts";
 import {
 	type AuthorizeIrohRemoteClientOptions,
 	authorizeIrohRemoteClient,
@@ -10,6 +11,8 @@ import type { IrohRemoteHello } from "./handshake.ts";
 import {
 	createEmptyIrohRemoteHostState,
 	type IrohRemoteClient,
+	type IrohRemoteGrantedClient,
+	type IrohRemoteGrantedRevokedClient,
 	type IrohRemoteHostState,
 	type IrohRemoteLiveActivityRegistration,
 	type IrohRemotePairingSecretTombstone,
@@ -33,6 +36,7 @@ import {
 
 export interface IrohRemoteHostStateStore {
 	read(): IrohRemoteHostState | Promise<IrohRemoteHostState>;
+	/** Resolve only after the supplied snapshot is durably persisted. */
 	write(state: IrohRemoteHostState): void | Promise<void>;
 }
 
@@ -53,6 +57,14 @@ export interface IrohRemoteClientRePairApprovalResult {
 	approved: boolean;
 	revokedClient?: IrohRemoteRevokedClient;
 }
+
+export type IrohRemoteClientAccessUpdateResult =
+	| { ok: true; client: IrohRemoteGrantedClient }
+	| {
+			ok: false;
+			reason: "not_found" | "revision_conflict" | "revision_exhausted";
+			currentRevision?: number;
+	  };
 
 export interface IrohRemoteLiveActivityDeliveryChannelLookup {
 	tokenHash: string;
@@ -260,18 +272,49 @@ export class IrohRemoteHostStateManager {
 		});
 	}
 
-	async listClients(): Promise<IrohRemoteClient[]> {
+	async listClients(): Promise<IrohRemoteGrantedClient[]> {
 		return this.runExclusive(async () => {
 			const state = await this.loadUnlocked();
 			return state.clients.map((client) => cloneClient(client));
 		});
 	}
 
-	async getClient(nodeId: string): Promise<IrohRemoteClient | undefined> {
+	async getClient(nodeId: string): Promise<IrohRemoteGrantedClient | undefined> {
 		return this.runExclusive(async () => {
 			const state = await this.loadUnlocked();
 			const client = state.clients.find((entry) => entry.nodeId === nodeId);
 			return client ? cloneClient(client) : undefined;
+		});
+	}
+
+	async updateClientAccess(
+		nodeId: string,
+		expectedRevision: number,
+		access: { allowedTools: string; rpcGrant: IrohRemoteRpcGrant },
+	): Promise<IrohRemoteClientAccessUpdateResult> {
+		if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+			throw new Error("expected RPC grant revision must be a safe integer greater than or equal to 1");
+		}
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			const client = state.clients.find((entry) => entry.nodeId === nodeId);
+			if (!client) {
+				return { ok: false, reason: "not_found" };
+			}
+			const currentGrant = parseIrohRemoteRpcGrant(client.rpcGrant, "client rpcGrant");
+			if (currentGrant.revision !== expectedRevision) {
+				return { ok: false, reason: "revision_conflict", currentRevision: currentGrant.revision };
+			}
+			if (currentGrant.revision === Number.MAX_SAFE_INTEGER) {
+				return { ok: false, reason: "revision_exhausted", currentRevision: currentGrant.revision };
+			}
+			client.allowedTools = access.allowedTools;
+			client.rpcGrant = {
+				...cloneIrohRemoteRpcGrant(access.rpcGrant),
+				revision: expectedRevision + 1,
+			};
+			await this.saveUnlocked(state);
+			return { ok: true, client: cloneClient(client) };
 		});
 	}
 
@@ -531,6 +574,7 @@ export class IrohRemoteHostStateManager {
 				label: client.label,
 				allowedWorkspaces: [...client.allowedWorkspaces],
 				allowedTools: client.allowedTools,
+				rpcGrant: parseIrohRemoteRpcGrant(client.rpcGrant, "client rpcGrant"),
 				pairedAt: client.pairedAt,
 				lastSeenAt: client.lastSeenAt,
 				revokedAt: now,
@@ -699,10 +743,11 @@ function cloneAuthorizationResult(result: IrohRemoteClientAuthorizationResult): 
 	};
 }
 
-function cloneClient(client: IrohRemoteClient): IrohRemoteClient {
+function cloneClient(client: IrohRemoteClient): IrohRemoteGrantedClient {
 	return {
 		...client,
 		allowedWorkspaces: [...client.allowedWorkspaces],
+		rpcGrant: parseIrohRemoteRpcGrant(client.rpcGrant, "client rpcGrant"),
 		...(client.lastSessionIdByWorkspace ? { lastSessionIdByWorkspace: { ...client.lastSessionIdByWorkspace } } : {}),
 		...(client.pushTargets ? { pushTargets: client.pushTargets.map((target) => clonePushTarget(target)) } : {}),
 		...(client.liveActivities
@@ -730,7 +775,10 @@ function clonePairingSecretTombstone(tombstone: IrohRemotePairingSecretTombstone
 }
 
 function clonePendingPairingTicket(ticket: IrohRemotePendingPairingTicket): IrohRemotePendingPairingTicket {
-	return { ...ticket };
+	return {
+		...ticket,
+		...(ticket.rpcGrant === undefined ? {} : { rpcGrant: cloneIrohRemoteRpcGrant(ticket.rpcGrant) }),
+	};
 }
 
 function clonePushTarget(pushTarget: IrohRemotePushTarget): IrohRemotePushTarget {
@@ -746,10 +794,11 @@ function cloneLiveActivityRegistration(
 	return { ...registration };
 }
 
-function cloneRevokedClient(client: IrohRemoteRevokedClient): IrohRemoteRevokedClient {
+function cloneRevokedClient(client: IrohRemoteRevokedClient): IrohRemoteGrantedRevokedClient {
 	return {
 		...client,
 		allowedWorkspaces: [...client.allowedWorkspaces],
+		rpcGrant: parseIrohRemoteRpcGrant(client.rpcGrant, "revoked client rpcGrant"),
 		...(client.lastSessionIdByWorkspace ? { lastSessionIdByWorkspace: { ...client.lastSessionIdByWorkspace } } : {}),
 	};
 }

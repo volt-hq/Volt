@@ -31,6 +31,8 @@ import type {
 	Model,
 	SimpleStreamOptions,
 	TextContent,
+	ToolCall,
+	ToolResultMessage,
 } from "@earendil-works/volt-ai";
 import {
 	clampThinkingLevel,
@@ -848,6 +850,13 @@ export class AgentSession {
 		this._disposed = true;
 
 		try {
+			// Persist terminal markers for in-flight tool calls FIRST: dispose
+			// disconnects listeners synchronously below, so the aborted tool
+			// results the agent loop synthesizes after agent.abort() are never
+			// observed or persisted. Without this, a session disposed mid-tool-call
+			// (e.g. a daemon runtime torn down for a lease handoff) leaves a
+			// dangling toolCall in the transcript.
+			this._persistAbortedResultsForDanglingToolCalls();
 			this.abortRetry();
 			this.abortCompaction();
 			this.abortBranchSummary();
@@ -881,6 +890,54 @@ export class AgentSession {
 		this._disconnectFromAgent();
 		this._eventListeners = [];
 		cleanupSessionResources(this.sessionId);
+	}
+
+	/**
+	 * Append an aborted toolResult for every persisted toolCall on the current
+	 * session path that has no persisted result, so a transcript closed mid-call
+	 * resumes coherently instead of with a dangling call. Persistence-only: no
+	 * events are emitted (dispose is tearing the listeners down), and the agent
+	 * loop's own late aborted results are dropped by the _disposed guard.
+	 */
+	private _persistAbortedResultsForDanglingToolCalls(): void {
+		if (!this.isBusy) {
+			return;
+		}
+		try {
+			const context = this.sessionManager.buildSessionContext();
+			const resolvedToolCallIds = new Set<string>();
+			for (const message of context.messages) {
+				if (message.role === "toolResult") {
+					resolvedToolCallIds.add(message.toolCallId);
+				}
+			}
+			for (const message of context.messages) {
+				if (message.role !== "assistant") {
+					continue;
+				}
+				const toolCalls = (message as AssistantMessage).content.filter(
+					(block): block is ToolCall => block.type === "toolCall",
+				);
+				for (const toolCall of toolCalls) {
+					if (resolvedToolCallIds.has(toolCall.id)) {
+						continue;
+					}
+					const abortedResult: ToolResultMessage = {
+						role: "toolResult",
+						toolCallId: toolCall.id,
+						toolName: toolCall.name,
+						content: [
+							{ type: "text", text: "Operation aborted: the session closed before this tool call completed." },
+						],
+						isError: true,
+						timestamp: Date.now(),
+					};
+					this.sessionManager.appendMessage(abortedResult);
+				}
+			}
+		} catch {
+			// Best-effort: a persistence failure must not block dispose.
+		}
 	}
 
 	// =========================================================================

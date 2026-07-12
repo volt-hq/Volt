@@ -284,6 +284,30 @@ export default function (volt) {
 		}
 	});
 
+	it("preserves an explicit deny-all composed policy", async () => {
+		writeRuntimeConfig({});
+		writeToolExtension();
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
+		try {
+			runtime = await createIrohRemoteAgentRuntime({
+				agentDir,
+				cwd,
+				toolPolicy: { tools: [], allowUnlistedExtensionTools: false },
+			});
+			await runtime.session.bindExtensions({});
+
+			expect(runtime.session.getAllTools()).toEqual([]);
+			expect(runtime.session.getActiveToolNames()).toEqual([]);
+			expect(runtime.session.systemPrompt).not.toContain("remote_extension_tool");
+			expect(runtime.session.systemPrompt).not.toContain("remote_dynamic_tool");
+		} finally {
+			errorSpy.mockRestore();
+			await runtime?.dispose();
+		}
+	});
+
 	it("resumes a requested remote session when its file still exists", async () => {
 		writeRuntimeConfig({});
 		const sessionDir = join(agentDir, "sessions", "remote-workspace");
