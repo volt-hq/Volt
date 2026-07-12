@@ -965,11 +965,10 @@ export class SubagentManager {
 			return SessionManager.inMemory(cwd);
 		}
 		const parentSession = this.parentSessionManager.getSessionFile();
-		return SessionManager.create(
-			cwd,
-			this.parentSessionManager.getSessionDir(),
-			parentSession ? { parentSession } : undefined,
-		);
+		return SessionManager.create(cwd, this.parentSessionManager.getSessionDir(), {
+			origin: "subagent",
+			...(parentSession ? { parentSession } : {}),
+		});
 	}
 
 	private async notifyRuntimeCreated(options: {

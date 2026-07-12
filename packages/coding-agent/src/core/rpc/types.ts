@@ -511,6 +511,8 @@ export interface RpcSessionListItem {
 	messageCount: number;
 	firstMessage: string;
 	current: boolean;
+	/** "subagent" when this session was created for a delegated subagent run. */
+	origin?: "subagent";
 }
 
 export interface RpcActiveToolExecution {

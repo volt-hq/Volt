@@ -646,6 +646,41 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		expect(bySessionId.get("s-saved")).not.toHaveProperty("runtimeState");
 	});
 
+	it("carries the subagent origin marker on list_sessions entries", async () => {
+		const runtime = createRuntime();
+		runtime.listSessions = async () => [
+			{
+				sessionId: "s-user",
+				sessionName: "user session",
+				firstMessage: "hi",
+				createdAt: new Date(1).toISOString(),
+				modifiedAt: new Date(1).toISOString(),
+				messageCount: 1,
+			},
+			{
+				sessionId: "s-subagent",
+				sessionName: "delegated run",
+				firstMessage: "task",
+				createdAt: new Date(2).toISOString(),
+				modifiedAt: new Date(2).toISOString(),
+				messageCount: 1,
+				origin: "subagent" as const,
+			},
+		];
+
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "origin", type: "list_sessions" },
+			createAuthorization(),
+			createContext(),
+			runtime,
+		)) as { success: boolean; data: { sessions: Array<Record<string, unknown>> } };
+
+		expect(response.success).toBe(true);
+		const bySessionId = new Map(response.data.sessions.map((session) => [session.sessionId, session]));
+		expect(bySessionId.get("s-subagent")?.origin).toBe("subagent");
+		expect(bySessionId.get("s-user")).not.toHaveProperty("origin");
+	});
+
 	it("serves list_sessions with the current session summary", async () => {
 		const response = (await handleIntegratedConversationRpcCommand(
 			{ id: "7", type: "list_sessions" },

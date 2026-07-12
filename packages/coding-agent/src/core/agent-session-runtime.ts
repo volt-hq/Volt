@@ -12,7 +12,13 @@ import type {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
-import { assertValidSessionId, type SessionInfo, SessionManager, summarizeSessionEntries } from "./session-manager.ts";
+import {
+	assertValidSessionId,
+	type SessionInfo,
+	SessionManager,
+	type SessionOrigin,
+	summarizeSessionEntries,
+} from "./session-manager.ts";
 import type { SubagentDelegationScope } from "./subagents/delegation-scope.ts";
 
 /**
@@ -45,6 +51,8 @@ export interface WorkspaceSessionSummary {
 	firstMessage: string;
 	current: boolean;
 	cwd: string;
+	/** "subagent" when this session was created for a delegated subagent run. */
+	origin?: SessionOrigin;
 }
 
 export interface AgentSessionSwitchOptions {
@@ -112,6 +120,7 @@ function sessionInfoToSummary(info: SessionInfo, currentSessionId: string): Work
 		firstMessage: info.firstMessage,
 		current: info.id === currentSessionId,
 		cwd: info.cwd,
+		origin: info.origin,
 	};
 }
 
@@ -278,6 +287,7 @@ export class AgentSessionRuntime {
 			firstMessage: summary.firstMessage,
 			current: true,
 			cwd: header?.cwd ?? this.cwd,
+			origin: header?.origin,
 		};
 	}
 

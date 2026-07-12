@@ -267,8 +267,13 @@ describe("SubagentManager", () => {
 		if (!headerLine) {
 			throw new Error("expected child session header");
 		}
-		const header = JSON.parse(headerLine) as { id?: string; parentSession?: string; type?: string };
-		expect(header).toMatchObject({ type: "session", id: handle.sessionId, parentSession: parentSessionFile });
+		const header = JSON.parse(headerLine) as { id?: string; origin?: string; parentSession?: string; type?: string };
+		expect(header).toMatchObject({
+			type: "session",
+			id: handle.sessionId,
+			parentSession: parentSessionFile,
+			origin: "subagent",
+		});
 		const reopened = SessionManager.open(stats.sessionFile);
 		expect(reopened.getBranch().some((entry) => entry.type === "message" && entry.message.role === "assistant")).toBe(
 			true,

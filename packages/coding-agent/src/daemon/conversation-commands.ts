@@ -84,6 +84,8 @@ export interface RemoteSessionListEntry {
 	createdAt: string;
 	updatedAt: string;
 	messageCount: number;
+	/** "subagent" when this session was created for a delegated subagent run. */
+	origin?: "subagent";
 	/** Live host ownership for this session. Omitted when no runtime is currently owned. */
 	runtimeState?: RemoteSessionRuntimeState;
 	/** Present when the session is bound to a daemon-managed worktree (worktrees.v1). */
@@ -115,6 +117,7 @@ export interface ConversationCommandRuntime {
 			messageCount: number;
 			firstMessage: string;
 			cwd?: string;
+			origin?: "subagent";
 		}>
 	>;
 }
@@ -1029,6 +1032,7 @@ interface RemoteSessionSummaryInput {
 	updatedAt: string | Date;
 	messageCount: number;
 	cwd?: string;
+	origin?: "subagent";
 }
 
 function getRelativeWorkingDirectory(rootPath: string, cwd: string | undefined): string | null | undefined {
@@ -1068,6 +1072,7 @@ function createRemoteSessionSummary(
 			createdAt,
 			updatedAt,
 			messageCount: input.messageCount,
+			...(input.origin === undefined ? {} : { origin: input.origin }),
 			...(workingDirectory === undefined || workingDirectory === null ? {} : { workingDirectory }),
 		},
 		...(input.cwd === undefined ? {} : { cwd: input.cwd }),
@@ -1097,6 +1102,7 @@ export async function listRemoteWorkspaceSessionSummaries(
 					updatedAt: info.modified,
 					messageCount: info.messageCount,
 					cwd: info.cwd,
+					...(info.origin === undefined ? {} : { origin: info.origin }),
 				},
 				authorization,
 			);
@@ -1113,6 +1119,7 @@ export async function listRemoteWorkspaceSessionSummaries(
 					updatedAt: liveSummary.modifiedAt,
 					messageCount: liveSummary.messageCount,
 					cwd: liveSummary.cwd,
+					...(liveSummary.origin === undefined ? {} : { origin: liveSummary.origin }),
 				},
 				authorization,
 			);

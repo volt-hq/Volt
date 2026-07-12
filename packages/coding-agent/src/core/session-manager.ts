@@ -36,11 +36,17 @@ export interface SessionHeader {
 	timestamp: string;
 	cwd: string;
 	parentSession?: string;
+	/** "subagent" when this session was created for a delegated subagent run. */
+	origin?: SessionOrigin;
 }
+
+/** How a session came to exist. Absent means a user-initiated session. */
+export type SessionOrigin = "subagent";
 
 export interface NewSessionOptions {
 	id?: string;
 	parentSession?: string;
+	origin?: SessionOrigin;
 }
 
 export interface SessionEntryBase {
@@ -176,6 +182,8 @@ export interface SessionInfo {
 	name?: string;
 	/** Path to the parent session (if this session was forked). */
 	parentSessionPath?: string;
+	/** "subagent" when this session was created for a delegated subagent run. */
+	origin?: SessionOrigin;
 	created: Date;
 	modified: Date;
 	messageCount: number;
@@ -722,6 +730,7 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 		const summary = summarizeSessionEntries(entries);
 		const cwd = typeof header.cwd === "string" ? header.cwd : "";
 		const parentSessionPath = header.parentSession;
+		const origin = header.origin === "subagent" ? header.origin : undefined;
 		const headerTime = typeof header.timestamp === "string" ? new Date(header.timestamp).getTime() : NaN;
 		const modified =
 			typeof summary.lastActivityTime === "number" && summary.lastActivityTime > 0
@@ -736,6 +745,7 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 			cwd,
 			name,
 			parentSessionPath,
+			origin,
 			created: new Date(header.timestamp),
 			modified,
 			messageCount: summary.messageCount,
@@ -915,6 +925,7 @@ export class SessionManager {
 			timestamp,
 			cwd: this.cwd,
 			parentSession: options?.parentSession,
+			origin: options?.origin,
 		};
 		this.fileEntries = [header];
 		this.byId.clear();
@@ -1394,6 +1405,7 @@ export class SessionManager {
 			timestamp,
 			cwd: this.cwd,
 			parentSession: this.persist ? previousSessionFile : undefined,
+			origin: this.getHeader()?.origin,
 		};
 
 		// Collect labels for entries in the path
