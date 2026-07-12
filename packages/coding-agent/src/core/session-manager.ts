@@ -1,24 +1,22 @@
 import { type AgentMessage, uuidv7 } from "@earendil-works/volt-agent-core";
 import type { ImageContent, Message, TextContent } from "@earendil-works/volt-ai";
 import { randomUUID } from "crypto";
-import {
-	appendFileSync,
-	closeSync,
-	createReadStream,
-	existsSync,
-	mkdirSync,
-	openSync,
-	readdirSync,
-	readSync,
-	statSync,
-	writeFileSync,
-} from "fs";
+import { closeSync, createReadStream, existsSync, openSync, readdirSync, readSync, statSync } from "fs";
 import { readdir, stat } from "fs/promises";
 import { basename, join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
+import { writeDurableAtomicFileSync } from "../utils/durable-atomic-write.ts";
 import { canonicalizePath, normalizePath, resolvePath } from "../utils/paths.ts";
+import {
+	appendPrivateFileSync,
+	ensurePrivateDirectorySync,
+	hardenPrivateRegularFileSync,
+	PRIVATE_DIRECTORY_MODE,
+	PRIVATE_FILE_MODE,
+	writePrivateNewFileSync,
+} from "../utils/private-files.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -465,9 +463,7 @@ function getDefaultSessionDirPath(cwd: string, agentDir: string = getDefaultAgen
 
 export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultAgentDir()): string {
 	const sessionDir = getDefaultSessionDirPath(cwd, agentDir);
-	if (!existsSync(sessionDir)) {
-		mkdirSync(sessionDir, { recursive: true });
-	}
+	ensurePrivateDirectorySync(sessionDir);
 	return sessionDir;
 }
 
@@ -530,6 +526,7 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 
 function readSessionHeader(filePath: string): SessionHeader | null {
 	try {
+		hardenPrivateRegularFileSync(filePath);
 		const fd = openSync(filePath, "r");
 		const buffer = Buffer.alloc(512);
 		const bytesRead = readSync(fd, buffer, 0, 512, 0);
@@ -560,6 +557,7 @@ export function findMostRecentSession(sessionDir: string, cwd?: string): string 
 	const resolvedSessionDir = normalizePath(sessionDir);
 	const resolvedCwd = cwd ? resolvePath(cwd) : undefined;
 	try {
+		ensurePrivateDirectorySync(resolvedSessionDir, { hardenExisting: false });
 		const files = readdirSync(resolvedSessionDir)
 			.filter((f) => f.endsWith(".jsonl"))
 			.map((f) => join(resolvedSessionDir, f))
@@ -695,6 +693,7 @@ export function summarizeSessionEntries(entries: Iterable<SessionEntry>): Sessio
 
 async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	try {
+		hardenPrivateRegularFileSync(filePath);
 		const stats = await stat(filePath);
 		let header: SessionHeader | null = null;
 		const entries: SessionEntry[] = [];
@@ -813,6 +812,7 @@ async function listSessionsFromDir(
 	}
 
 	try {
+		ensurePrivateDirectorySync(dir, { hardenExisting: false });
 		const dirEntries = await readdir(dir);
 		const files = dirEntries.filter((f) => f.endsWith(".jsonl")).map((f) => join(dir, f));
 		const total = progressTotal ?? files.length;
@@ -864,12 +864,13 @@ export class SessionManager {
 		sessionFile: string | undefined,
 		persist: boolean,
 		newSessionOptions?: NewSessionOptions,
+		hardenExistingSessionDir = true,
 	) {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
 		this.persist = persist;
-		if (persist && this.sessionDir && !existsSync(this.sessionDir)) {
-			mkdirSync(this.sessionDir, { recursive: true });
+		if (persist && this.sessionDir) {
+			ensurePrivateDirectorySync(this.sessionDir, { hardenExisting: hardenExistingSessionDir });
 		}
 
 		if (sessionFile) {
@@ -883,6 +884,7 @@ export class SessionManager {
 	setSessionFile(sessionFile: string): void {
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
+			hardenPrivateRegularFileSync(this.sessionFile);
 			this.fileEntries = loadEntriesFromFile(this.sessionFile);
 
 			// If file was empty or corrupted (no valid header), truncate and start fresh
@@ -963,14 +965,11 @@ export class SessionManager {
 
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
-		const fd = openSync(this.sessionFile, "w");
-		try {
-			for (const entry of this.fileEntries) {
-				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
-			}
-		} finally {
-			closeSync(fd);
-		}
+		writeDurableAtomicFileSync(
+			this.sessionFile,
+			`${this.fileEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+			{ directoryMode: PRIVATE_DIRECTORY_MODE, fileMode: PRIVATE_FILE_MODE },
+		);
 	}
 
 	isPersisted(): boolean {
@@ -1003,7 +1002,7 @@ export class SessionManager {
 		const hasFlushContent = this.fileEntries.some(isSessionFileFlushContent);
 		if (!hasFlushContent) {
 			if (this.flushed) {
-				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+				appendPrivateFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
 			} else {
 				// Mark as not flushed so when conversation content arrives, all entries get written.
 				this.flushed = false;
@@ -1012,17 +1011,13 @@ export class SessionManager {
 		}
 
 		if (!this.flushed) {
-			const fd = openSync(this.sessionFile, "wx");
-			try {
-				for (const e of this.fileEntries) {
-					writeFileSync(fd, `${JSON.stringify(e)}\n`);
-				}
-			} finally {
-				closeSync(fd);
-			}
+			writePrivateNewFileSync(
+				this.sessionFile,
+				`${this.fileEntries.map((fileEntry) => JSON.stringify(fileEntry)).join("\n")}\n`,
+			);
 			this.flushed = true;
 		} else {
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			appendPrivateFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
 		}
 	}
 
@@ -1496,13 +1491,16 @@ export class SessionManager {
 	 */
 	static open(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
 		const resolvedPath = resolvePath(path);
+		if (existsSync(resolvedPath)) {
+			hardenPrivateRegularFileSync(resolvedPath);
+		}
 		// Extract cwd from session header if possible, otherwise use process.cwd()
 		const entries = loadEntriesFromFile(resolvedPath);
 		const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
 		const cwd = cwdOverride ?? header?.cwd ?? process.cwd();
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
-		return new SessionManager(cwd, dir, resolvedPath, true);
+		return new SessionManager(cwd, dir, resolvedPath, true, undefined, sessionDir !== undefined);
 	}
 
 	/**
@@ -1540,6 +1538,9 @@ export class SessionManager {
 	): SessionManager {
 		const resolvedSourcePath = resolvePath(sourcePath);
 		const resolvedTargetCwd = resolvePath(targetCwd);
+		if (existsSync(resolvedSourcePath)) {
+			hardenPrivateRegularFileSync(resolvedSourcePath);
+		}
 		const sourceEntries = loadEntriesFromFile(resolvedSourcePath);
 		if (sourceEntries.length === 0) {
 			throw new Error(`Cannot fork: source session file is empty or invalid: ${resolvedSourcePath}`);
@@ -1551,9 +1552,7 @@ export class SessionManager {
 		}
 
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(resolvedTargetCwd);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
+		ensurePrivateDirectorySync(dir);
 
 		// Create new session file with new ID but forked content
 		if (options?.id !== undefined) {
@@ -1573,14 +1572,11 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
-
-		// Copy all non-header entries from source
-		for (const entry of sourceEntries) {
-			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
-			}
-		}
+		const forkEntries = [newHeader, ...sourceEntries.filter((entry) => entry.type !== "session")];
+		writeDurableAtomicFileSync(newSessionFile, `${forkEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, {
+			directoryMode: PRIVATE_DIRECTORY_MODE,
+			fileMode: PRIVATE_FILE_MODE,
+		});
 
 		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
 	}
@@ -1635,6 +1631,7 @@ export class SessionManager {
 			const dirFiles: string[][] = [];
 			for (const dir of dirs) {
 				try {
+					ensurePrivateDirectorySync(dir);
 					const files = (await readdir(dir)).filter((f) => f.endsWith(".jsonl"));
 					dirFiles.push(files.map((f) => join(dir, f)));
 					totalFiles += files.length;

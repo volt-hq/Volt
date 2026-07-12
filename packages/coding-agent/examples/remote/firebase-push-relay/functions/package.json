@@ -8,7 +8,8 @@
 		"node": "22"
 	},
 	"scripts": {
-		"check": "node --check index.js"
+		"check": "node --check index.js",
+		"test": "node --test core.test.js"
 	},
 	"dependencies": {
 		"firebase-admin": "13.10.0",

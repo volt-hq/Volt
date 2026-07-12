@@ -268,6 +268,7 @@ export {
 	writeIrohRemoteHostState,
 } from "./state.ts";
 export {
+	IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR,
 	type IrohRemoteClientAccessUpdateResult,
 	type IrohRemoteClientRePairApprovalResult,
 	type IrohRemoteClientRevocationResult,
@@ -275,6 +276,8 @@ export {
 	type IrohRemoteHostStateManagerOptions,
 	type IrohRemoteLiveActivityDeliveryChannelLookup,
 	type IrohRemoteLiveActivityRegistrationResult,
+	IrohRemoteWorkspaceHasWorktreesError,
+	isIrohRemoteWorkspaceHasWorktreesError,
 } from "./state-manager.ts";
 export {
 	assertIrohRemoteTicketNotExpired,
@@ -283,6 +286,9 @@ export {
 	createIrohRemoteSanitizedReconnectTicketPayload,
 	decodeIrohRemoteTicketPayload,
 	encodeIrohRemoteTicketPayload,
+	formatIrohRemoteHostFingerprint,
+	getIrohRemotePairingVerificationDetails,
+	type IrohRemotePairingVerificationDetails,
 	type IrohRemoteSanitizedReconnectTicketPayload,
 	type IrohRemoteTicketPayload,
 	parseIrohRemoteTicketPayload,

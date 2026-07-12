@@ -14,11 +14,19 @@ import {
 	type OAuthProviderId,
 } from "@earendil-works/volt-ai";
 import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@earendil-works/volt-ai/oauth";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, lstatSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.ts";
+import { writeDurableAtomicFileSync } from "../utils/durable-atomic-write.ts";
 import { normalizePath } from "../utils/paths.ts";
+import {
+	ensurePrivateDirectorySync,
+	hardenPrivateRegularFileSync,
+	PRIVATE_DIRECTORY_MODE,
+	PRIVATE_FILE_MODE,
+	writePrivateNewFileSync,
+} from "../utils/private-files.ts";
 import { resolveConfigValue } from "./resolve-config-value.ts";
 
 export type ApiKeyCredential = {
@@ -41,15 +49,22 @@ export type AuthStatus = {
 	label?: string;
 };
 
+export interface AuthStorageReloadOptions {
+	/**
+	 * Preserve cached data only when the caller has verified that a missing
+	 * auth.json is represented by the recognized sibling auth.json.bak file.
+	 */
+	preserveMissingFileFromBackup?: boolean;
+}
+
 type LockResult<T> = {
 	result: T;
 	next?: string;
 };
 
-const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
-
 export interface AuthStorageBackend {
 	readCurrent(): string | undefined;
+	hasRecognizedTemporaryBackup?(): boolean;
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T;
 	withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T>;
 }
@@ -62,17 +77,27 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 	}
 
 	private ensureParentDir(): void {
-		const dir = dirname(this.authPath);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true, mode: 0o700 });
-		}
+		ensurePrivateDirectorySync(dirname(this.authPath));
 	}
 
 	private ensureFileExists(): void {
 		if (!existsSync(this.authPath)) {
-			writeFileSync(this.authPath, "{}", AUTH_FILE_WRITE_OPTIONS);
-			chmodSync(this.authPath, 0o600);
+			try {
+				writePrivateNewFileSync(this.authPath, "{}");
+			} catch (error) {
+				if (!isErrnoException(error, "EEXIST")) {
+					throw error;
+				}
+			}
 		}
+		hardenPrivateRegularFileSync(this.authPath);
+	}
+
+	private writeCurrent(content: string): void {
+		writeDurableAtomicFileSync(this.authPath, content, {
+			directoryMode: PRIVATE_DIRECTORY_MODE,
+			fileMode: PRIVATE_FILE_MODE,
+		});
 	}
 
 	private acquireLockSyncWithRetry(path: string): () => void {
@@ -107,11 +132,14 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		if (!existsSync(this.authPath)) {
 			return undefined;
 		}
+		hardenPrivateRegularFileSync(this.authPath);
 
 		let release: (() => void) | undefined;
 		try {
 			release = this.acquireLockSyncWithRetry(this.authPath);
-			return existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
+			if (!existsSync(this.authPath)) return undefined;
+			hardenPrivateRegularFileSync(this.authPath);
+			return readFileSync(this.authPath, "utf-8");
 		} catch (error) {
 			const code =
 				typeof error === "object" && error !== null && "code" in error
@@ -128,6 +156,17 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		}
 	}
 
+	hasRecognizedTemporaryBackup(): boolean {
+		if (existsSync(this.authPath)) {
+			return false;
+		}
+		try {
+			return lstatSync(`${this.authPath}.bak`).isFile();
+		} catch {
+			return false;
+		}
+	}
+
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
 		this.ensureParentDir();
 		this.ensureFileExists();
@@ -135,11 +174,11 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		let release: (() => void) | undefined;
 		try {
 			release = this.acquireLockSyncWithRetry(this.authPath);
+			hardenPrivateRegularFileSync(this.authPath);
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = fn(current);
 			if (next !== undefined) {
-				writeFileSync(this.authPath, next, AUTH_FILE_WRITE_OPTIONS);
-				chmodSync(this.authPath, 0o600);
+				this.writeCurrent(next);
 			}
 			return result;
 		} finally {
@@ -179,12 +218,12 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			});
 
 			throwIfCompromised();
+			hardenPrivateRegularFileSync(this.authPath);
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = await fn(current);
 			throwIfCompromised();
 			if (next !== undefined) {
-				writeFileSync(this.authPath, next, AUTH_FILE_WRITE_OPTIONS);
-				chmodSync(this.authPath, 0o600);
+				this.writeCurrent(next);
 			}
 			throwIfCompromised();
 			return result;
@@ -198,6 +237,10 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			}
 		}
 	}
+}
+
+function isErrnoException(error: unknown, code: string): error is NodeJS.ErrnoException {
+	return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
 
 export class InMemoryAuthStorageBackend implements AuthStorageBackend {
@@ -292,13 +335,14 @@ export class AuthStorage {
 	/**
 	 * Reload credentials from storage.
 	 */
-	reload(): void {
+	reload(options: AuthStorageReloadOptions = {}): void {
 		try {
 			const content = this.storage.readCurrent();
-			if (content === undefined && Object.keys(this.data).length > 0) {
-				// auth.json may be temporarily moved aside by another process (for example
-				// test.sh). Keep the last known credentials until the file reappears or a
-				// parseable replacement is written.
+			if (
+				content === undefined &&
+				options.preserveMissingFileFromBackup &&
+				this.storage.hasRecognizedTemporaryBackup?.()
+			) {
 				this.loadError = null;
 				return;
 			}

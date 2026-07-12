@@ -1,10 +1,10 @@
-import { existsSync, mkdtempSync, renameSync, rmSync } from "node:fs";
+import { existsSync, type FSWatcher, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { startModelCatalogWatcher } from "../src/core/model-catalog-watcher.ts";
+import { isModelCatalogSourceWatchEvent, startModelCatalogWatcher } from "../src/core/model-catalog-watcher.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
@@ -33,6 +33,57 @@ describe("model catalog watcher", () => {
 		// A separate AuthStorage instance simulates another CLI process writing auth.json.
 		AuthStorage.create(join(agentDir, "auth.json")).set("anthropic", { type: "api_key", key });
 	}
+
+	function createManualDirectoryWatcher(): {
+		emit(eventType: "rename" | "change", fileName: string | null): void;
+		watchDirectory: NonNullable<Parameters<typeof startModelCatalogWatcher>[0]["watchDirectory"]>;
+	} {
+		let listener: ((eventType: "rename" | "change", fileName: string | null) => void) | undefined;
+		const fakeWatcher = {
+			close: vi.fn(),
+			on: vi.fn(function (this: FSWatcher) {
+				return this;
+			}),
+			unref: vi.fn(function (this: FSWatcher) {
+				return this;
+			}),
+		} as unknown as FSWatcher;
+		return {
+			emit(eventType, fileName) {
+				if (!listener) {
+					throw new Error("model catalog watcher listener was not installed");
+				}
+				listener(eventType, fileName);
+			},
+			watchDirectory: (_path, installedListener) => {
+				listener = installedListener;
+				return fakeWatcher;
+			},
+		};
+	}
+
+	test("reconciles destination-only and unnamed directory rename events", () => {
+		expect(isModelCatalogSourceWatchEvent("rename", "auth.json.bak")).toBe(true);
+		expect(isModelCatalogSourceWatchEvent("rename", "unrelated.tmp")).toBe(true);
+		expect(isModelCatalogSourceWatchEvent("change", null)).toBe(true);
+		expect(isModelCatalogSourceWatchEvent("change", "settings.json")).toBe(false);
+	});
+
+	test("explicit registry refresh preserves only the recognized auth.json.bak move", async () => {
+		const registry = createRegistry();
+		saveApiKeyFromAnotherProcess("sk-original");
+		registry.refreshFromDisk();
+		const authPath = join(agentDir, "auth.json");
+		const backupPath = join(agentDir, "auth.json.bak");
+		renameSync(authPath, backupPath);
+
+		registry.refreshFromDisk();
+		expect(await registry.authStorage.getApiKey("anthropic")).toBe("sk-original");
+
+		rmSync(backupPath);
+		registry.refreshFromDisk();
+		expect(await registry.authStorage.getApiKey("anthropic")).toBeUndefined();
+	});
 
 	test("notifies when a login saved by another process changes the catalog", async () => {
 		const registry = createRegistry();
@@ -98,15 +149,20 @@ describe("model catalog watcher", () => {
 
 		const refreshFromDisk = vi.spyOn(registry, "refreshFromDisk");
 		const onCatalogChanged = vi.fn();
+		const manualWatcher = createManualDirectoryWatcher();
 		const stop = startModelCatalogWatcher({
 			agentDir,
 			getModelRegistry: () => registry,
 			onCatalogChanged,
 			debounceMs: 25,
+			watchDirectory: manualWatcher.watchDirectory,
 		});
 
 		try {
-			renameSync(join(agentDir, "auth.json"), join(agentDir, "auth.json.bak"));
+			const authPath = join(agentDir, "auth.json");
+			const backupPath = join(agentDir, "auth.json.bak");
+			renameSync(authPath, backupPath);
+			manualWatcher.emit("rename", "auth.json.bak");
 
 			await vi.waitFor(
 				() => {
@@ -117,6 +173,43 @@ describe("model catalog watcher", () => {
 			expect(existsSync(join(agentDir, "auth.json"))).toBe(false);
 			expect(registry.getAvailable().some((model) => model.provider === "anthropic")).toBe(true);
 			expect(onCatalogChanged).not.toHaveBeenCalled();
+
+			AuthStorage.create(backupPath).set("anthropic", { type: "api_key", key: "restored-key" });
+			renameSync(backupPath, authPath);
+			manualWatcher.emit("rename", "auth.json");
+			await vi.waitFor(() => expect(refreshFromDisk).toHaveBeenCalledTimes(2), { timeout: 5000 });
+			expect(await registry.authStorage.getApiKey("anthropic")).toBe("restored-key");
+			expect(onCatalogChanged).not.toHaveBeenCalled();
+		} finally {
+			stop();
+		}
+	});
+
+	test("revokes the catalog when auth.json is deleted without the recognized backup", async () => {
+		const registry = createRegistry();
+		saveApiKeyFromAnotherProcess("sk-original");
+		registry.refreshFromDisk();
+		expect(registry.getAvailable().some((model) => model.provider === "anthropic")).toBe(true);
+
+		const refreshFromDisk = vi.spyOn(registry, "refreshFromDisk");
+		const onCatalogChanged = vi.fn();
+		const manualWatcher = createManualDirectoryWatcher();
+		const stop = startModelCatalogWatcher({
+			agentDir,
+			getModelRegistry: () => registry,
+			onCatalogChanged,
+			debounceMs: 25,
+			watchDirectory: manualWatcher.watchDirectory,
+		});
+
+		try {
+			rmSync(join(agentDir, "auth.json"));
+			manualWatcher.emit("rename", "auth.json");
+
+			await vi.waitFor(() => expect(refreshFromDisk).toHaveBeenCalledOnce(), { timeout: 5000 });
+			expect(registry.getAvailable().some((model) => model.provider === "anthropic")).toBe(false);
+			expect(await registry.authStorage.getApiKey("anthropic")).toBeUndefined();
+			expect(onCatalogChanged).toHaveBeenCalledOnce();
 		} finally {
 			stop();
 		}

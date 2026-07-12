@@ -151,7 +151,7 @@ If the duplicate is the first conversation stream on a new Iroh connection from 
 
 `working_directories.v1` is an additional optional host feature for starting a new conversation in a workspace-relative subfolder while keeping project configuration rooted at the registered workspace (or at the matching worktree checkout root for worktree sessions). Conversation successes echo `conversation.workingDirectory` when the effective cwd is not the root. The wire value is always relative; host-local absolute paths never cross the protocol.
 
-Missing stream features, `conversation_streams_unsupported`, `workspace_unavailable`, `workspace_unregistered`, `workspace_authorization_removed`, `session_unavailable`, `duplicate_conversation_connection`, and `conversation_in_use` are not QR re-pair requirements by themselves. `host_identity_mismatch`, malformed saved-host data, `client_unknown`, and `client_revoked` still require explicit Pair Again or Forget Host style UX.
+Missing stream features, `conversation_streams_unsupported`, `workspace_unavailable`, `workspace_unregistered`, `workspace_has_worktrees`, `workspace_authorization_removed`, `session_unavailable`, `duplicate_conversation_connection`, and `conversation_in_use` are not QR re-pair requirements by themselves. `workspace_has_worktrees` means the user must explicitly remove each child worktree first; it is not an authorization or connectivity failure. `host_identity_mismatch`, malformed saved-host data, `client_unknown`, and `client_revoked` still require explicit Pair Again or Forget Host style UX.
 
 ## Reconnect and session selection
 
@@ -249,7 +249,7 @@ On hosts advertising `session_runtime_state.v1`, an entry may also include `runt
 
 Workspace discovery streams accept only `list_sessions`. Any other valid RPC command receives `unsupported_on_workspace_discovery_stream`. Discovery streams create no conversation runtime and do not update last-session state.
 
-Workspace management streams with purpose `unregister_workspace` accept `unregister_workspace` and `list_workspace_directories`. The directory-listing RPC takes `workspaceName` plus optional relative `path`, and returns `directories:[{name,path}]` with relative paths only. Management streams with purpose `manage_worktrees` (worktrees.v1) accept only `create_worktree`, `list_worktrees`, and `remove_worktree`. Any other valid RPC command receives `unsupported_on_workspace_management_stream`. Every management command must include a `workspaceName` matching the stream workspace (`session_mismatch` otherwise) and may not include extra fields (`invalid_request`); inbound host-local filesystem paths are always rejected.
+Workspace management streams with purpose `unregister_workspace` accept `unregister_workspace` and `list_workspace_directories`. The directory-listing RPC takes `workspaceName` plus optional relative `path`, and returns `directories:[{name,path}]` with relative paths only. Unregister refuses with `workspace_has_worktrees` while any persisted child worktree remains; clients must remove each worktree through `remove_worktree`, using `force:true` only as the user's explicit destructive choice. Management streams with purpose `manage_worktrees` (worktrees.v1) accept only `create_worktree`, `list_worktrees`, and `remove_worktree`. Any other valid RPC command receives `unsupported_on_workspace_management_stream`. Every management command must include a `workspaceName` matching the stream workspace (`session_mismatch` otherwise) and may not include extra fields (`invalid_request`); inbound host-local filesystem paths are always rejected.
 
 All other command types receive a JSONL `response` with `success:false` and are not forwarded to the local Volt RPC process. This includes local-only subagent lifecycle commands such as `list_subagents`, `subagent_start`, `subagent_abort`, `subagent_get_state`, `subagent_get_transcript`, and `subagent_dispose`. Within the remote surface, only `abort` is a direct cancellation command.
 
@@ -318,13 +318,13 @@ The `workspace` field is a registered workspace name only. It must never contain
 {"id":"unregister-1","type":"unregister_workspace","workspaceName":"old-workspace"}
 ```
 
-The host rejects missing or malformed names, names that do not match the management stream workspace, and unknown workspaces. A successful response includes refreshed safe workspace metadata when available:
+The host rejects missing or malformed names, names that do not match the management stream workspace, and unknown workspaces. If the workspace has any persisted daemon-managed worktree records, the response is `success:false` with `error:"workspace_has_worktrees"`; the workspace, records, dirty/unmerged work, active worktree sessions, and all checkout directories remain untouched. A successful response is possible only after the user explicitly removes every managed worktree, and includes refreshed safe workspace metadata when available:
 
 ```json
 {"id":"unregister-1","type":"response","command":"unregister_workspace","success":true,"data":{"removedWorkspace":"old-workspace","workspaceNames":["volt"]}}
 ```
 
-This command is host-state metadata management only. It does not create, rename, path-map, or delete host workspace directories, and response data must contain registered names and availability statuses only, never host-local paths. Folder browsing is a separate read-only `list_workspace_directories` RPC on the same management stream and returns relative paths only.
+This command is host-state metadata management only. It does not create, rename, path-map, or delete host workspace or worktree directories, including unrecognized/orphan directories under the daemon worktree root. Response data must contain registered names and availability statuses only, never host-local paths. Folder browsing is a separate read-only `list_workspace_directories` RPC on the same management stream and returns relative paths only.
 
 ### Worktree management (`manage_worktrees`, worktrees.v1)
 

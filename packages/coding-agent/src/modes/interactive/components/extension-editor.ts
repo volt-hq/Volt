@@ -117,10 +117,12 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		}
 
 		const currentText = this.editor.getText();
-		const tmpFile = path.join(os.tmpdir(), `volt-extension-editor-${Date.now()}.md`);
+		const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "volt-extension-editor-"));
+		fs.chmodSync(tempDirectory, 0o700);
+		const tmpFile = path.join(tempDirectory, "draft.md");
 
 		try {
-			fs.writeFileSync(tmpFile, currentText, "utf-8");
+			fs.writeFileSync(tmpFile, currentText, { encoding: "utf-8", flag: "wx", mode: 0o600 });
 			this.tui.stop();
 
 			const [editor, ...editorArgs] = editorCmd.split(" ");
@@ -143,11 +145,7 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 				this.editor.setText(newContent);
 			}
 		} finally {
-			try {
-				fs.unlinkSync(tmpFile);
-			} catch {
-				// Ignore cleanup errors
-			}
+			fs.rmSync(tempDirectory, { recursive: true, force: true });
 			this.tui.start();
 			// Force full re-render since external editor uses alternate screen
 			this.tui.requestRender(true);

@@ -443,12 +443,23 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	}
 
 	/** Enable or disable protocol tracing for current and future servers. */
-	setTraceFile(filePath: string | undefined): void {
-		this.tracer?.dispose();
+	async setTraceFile(filePath: string | undefined): Promise<void> {
+		const previousTracer = this.tracer;
 		this.tracer = filePath ? new LspTracer(filePath) : undefined;
 		for (const client of this.clients.values()) {
 			client.setTracer(this.tracer);
 		}
+		await previousTracer?.dispose();
+	}
+
+	/** Synchronously stop tracing during non-awaitable process teardown. */
+	closeTraceSync(): void {
+		const previousTracer = this.tracer;
+		this.tracer = undefined;
+		for (const client of this.clients.values()) {
+			client.setTracer(undefined);
+		}
+		previousTracer?.disposeSync();
 	}
 
 	/** Dispose all running servers. They respawn lazily on next use. Returns the number stopped. */
@@ -592,7 +603,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		this.clients.clear();
 		this.lastUsedAt.clear();
 		this.installAttempts.clear();
-		this.tracer?.dispose();
+		void this.tracer?.dispose();
 		this.tracer = undefined;
 	}
 

@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import type { AgentMessage } from "@earendil-works/volt-agent-core";
 import type { ImageContent } from "@earendil-works/volt-ai";
 import { type BashExecutionMessage, extractVisibleTextContent } from "../messages.ts";
@@ -68,10 +69,15 @@ export function projectSessionTranscript(
  * a page is always included so pagination cannot stall on a single large image.
  */
 export const MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES = 6 * 1024 * 1024;
+export const MESSAGE_IMAGES_PAGE_MAX_ITEMS = 32;
 
 export type ProjectMessageImagesResult =
 	| { ok: true; entryId: string; totalImages: number; images: RpcMessageImage[]; nextImageIndex: number | null }
-	| { ok: false; error: "unknown_entry" };
+	| { ok: false; error: "unknown_entry" | "image_too_large" };
+
+function getSerializedMessageImageBytes(image: ImageContent, index: number): number {
+	return Buffer.byteLength(JSON.stringify({ ...image, index }), "utf8");
+}
 
 /**
  * Recovers the inline image blocks persisted on a session entry, paged from
@@ -96,12 +102,16 @@ export function projectMessageImages(
 	let nextImageIndex: number | null = null;
 	for (let index = start; index < allImages.length; index++) {
 		const image = allImages[index];
-		if (images.length > 0 && usedBytes + image.data.length > budgetBytes) {
+		const serializedBytes = getSerializedMessageImageBytes(image, index);
+		if (serializedBytes > budgetBytes && images.length === 0) {
+			return { ok: false, error: "image_too_large" };
+		}
+		if (images.length >= MESSAGE_IMAGES_PAGE_MAX_ITEMS || usedBytes + serializedBytes > budgetBytes) {
 			nextImageIndex = index;
 			break;
 		}
 		images.push({ ...image, index });
-		usedBytes += image.data.length;
+		usedBytes += serializedBytes;
 	}
 	return { ok: true, entryId, totalImages: allImages.length, images, nextImageIndex };
 }

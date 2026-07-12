@@ -8,14 +8,15 @@
  *
  * Steps:
  * 1. Check for uncommitted changes
- * 2. Bump version via npm run version:xxx or set an explicit version
- * 3. Update CHANGELOG.md files: [Unreleased] -> [version] - date
- * 4. Regenerate release artifacts
- * 5. Run checks
- * 6. Commit and tag the release
- * 7. Add new [Unreleased] section to changelogs
- * 8. Commit next-cycle changelog updates
- * 9. Push main and the tag to trigger CI publishing
+ * 2. Require an up-to-date main branch
+ * 3. Bump version via npm run version:xxx or set an explicit version
+ * 4. Update CHANGELOG.md files: [Unreleased] -> [version] - date
+ * 5. Regenerate release artifacts
+ * 6. Run checks
+ * 7. Commit and create an annotated release tag
+ * 8. Add new [Unreleased] section to changelogs
+ * 9. Commit next-cycle changelog updates
+ * 10. Push main and the tag to trigger CI publishing
  */
 
 import { execSync } from "child_process";
@@ -155,46 +156,62 @@ if (status && status.trim()) {
 }
 console.log("  Working directory clean\n");
 
-// 2. Bump or set version
+// 2. Require the protected release branch at its published tip
+console.log("Checking release branch provenance...");
+const branch = run("git branch --show-current", { silent: true })?.trim();
+if (branch !== "main") {
+	console.error(`Error: releases must start from main, not ${branch || "a detached HEAD"}.`);
+	process.exit(1);
+}
+run("git fetch --prune origin +refs/heads/main:refs/remotes/origin/main");
+const head = run("git rev-parse HEAD", { silent: true })?.trim();
+const originMain = run("git rev-parse refs/remotes/origin/main", { silent: true })?.trim();
+if (head !== originMain) {
+	console.error(`Error: local main ${head} must exactly match origin/main ${originMain} before release.`);
+	process.exit(1);
+}
+console.log("  main matches origin/main\n");
+
+// 3. Bump or set version
 const version = bumpOrSetVersion(RELEASE_TARGET);
 console.log(`  New version: ${version}\n`);
 
-// 3. Update changelogs
+// 4. Update changelogs
 console.log("Updating CHANGELOG.md files...");
 updateChangelogsForRelease(version);
 console.log();
 
-// 4. Regenerate release artifacts
+// 5. Regenerate release artifacts
 console.log("Regenerating release artifacts...");
 run("npm --prefix packages/ai run generate-models");
 run("npm --prefix packages/ai run generate-image-models");
 run("npm run shrinkwrap:coding-agent");
 console.log();
 
-// 5. Run checks
+// 6. Run checks
 console.log("Running checks...");
 run("npm run check");
 console.log();
 
-// 6. Commit and tag
+// 7. Commit and tag
 console.log("Committing and tagging...");
 stageChangedFiles();
 run(`git commit -m "Release v${version}"`);
-run(`git tag v${version}`);
+run(`git tag -a -m "Release v${version}" v${version}`);
 console.log();
 
-// 7. Add new [Unreleased] sections
+// 8. Add new [Unreleased] sections
 console.log("Adding [Unreleased] sections for next cycle...");
 addUnreleasedSection();
 console.log();
 
-// 8. Commit
+// 9. Commit
 console.log("Committing changelog updates...");
 stageChangedFiles();
 run(`git commit -m "Add [Unreleased] section for next cycle"`);
 console.log();
 
-// 9. Push
+// 10. Push
 console.log("Pushing to remote...");
 run("git push origin main");
 run(`git push origin v${version}`);

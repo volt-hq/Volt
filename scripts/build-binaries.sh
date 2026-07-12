@@ -25,6 +25,23 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+REPO_ROOT=$(pwd -P)
+DEFAULT_OUTPUT_DIR="$REPO_ROOT/packages/coding-agent/binaries"
+OUTPUT_SENTINEL=".volt-release-output-v1"
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required to create deterministic release archives" >&2
+    exit 1
+fi
+
+if [[ -z "${SOURCE_DATE_EPOCH:-}" ]]; then
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+    else
+        SOURCE_DATE_EPOCH=315532800
+    fi
+fi
+export SOURCE_DATE_EPOCH
 
 SKIP_INSTALL=false
 SKIP_DEPS=false
@@ -47,10 +64,18 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --platform)
+            if [[ $# -lt 2 || "$2" == -* ]]; then
+                echo "--platform requires a value" >&2
+                exit 1
+            fi
             PLATFORM="$2"
             shift 2
             ;;
         --out)
+            if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
+                echo "--out requires a directory" >&2
+                exit 1
+            fi
             OUTPUT_DIR="$2"
             shift 2
             ;;
@@ -75,10 +100,35 @@ if [[ -n "$PLATFORM" ]]; then
 fi
 
 if [[ -z "$OUTPUT_DIR" ]]; then
-    OUTPUT_DIR="packages/coding-agent/binaries"
+    OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
 fi
 if [[ "$OUTPUT_DIR" != /* ]]; then
     OUTPUT_DIR="$(pwd)/$OUTPUT_DIR"
+fi
+if [[ -L "$OUTPUT_DIR" ]]; then
+    echo "Refusing symlink release output directory: $OUTPUT_DIR" >&2
+    exit 1
+fi
+OUTPUT_DIR=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$OUTPUT_DIR")
+DEFAULT_OUTPUT_DIR=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$DEFAULT_OUTPUT_DIR")
+
+if [[ "$OUTPUT_DIR" == "/" || "$REPO_ROOT" == "$OUTPUT_DIR" || "$REPO_ROOT" == "$OUTPUT_DIR"/* ]]; then
+    echo "Refusing release output directory that contains the repository: $OUTPUT_DIR" >&2
+    exit 1
+fi
+if [[ "$OUTPUT_DIR" == "$REPO_ROOT"/* && "$OUTPUT_DIR" != "$DEFAULT_OUTPUT_DIR" ]]; then
+    echo "Custom release output directories must be outside the repository: $OUTPUT_DIR" >&2
+    exit 1
+fi
+if [[ -e "$OUTPUT_DIR" && ! -d "$OUTPUT_DIR" ]]; then
+    echo "Release output path is not a directory: $OUTPUT_DIR" >&2
+    exit 1
+fi
+if [[ -d "$OUTPUT_DIR" && "$OUTPUT_DIR" != "$DEFAULT_OUTPUT_DIR" && ! -e "$OUTPUT_DIR/$OUTPUT_SENTINEL" ]]; then
+    if [[ -n "$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+        echo "Refusing non-empty custom output without $OUTPUT_SENTINEL: $OUTPUT_DIR" >&2
+        exit 1
+    fi
 fi
 
 if [[ "$SKIP_INSTALL" == "false" ]]; then
@@ -117,8 +167,26 @@ fi
 echo "==> Building binaries..."
 cd packages/coding-agent
 
-# Clean previous builds
-rm -rf "$OUTPUT_DIR"
+# Clean only paths owned by this build. Unknown files in the default output are
+# preserved, while custom non-empty directories require our sentinel above.
+mkdir -p "$OUTPUT_DIR"
+touch "$OUTPUT_DIR/$OUTPUT_SENTINEL"
+GENERATED_PATHS=(
+    "$OUTPUT_DIR/darwin-arm64"
+    "$OUTPUT_DIR/darwin-x64"
+    "$OUTPUT_DIR/linux-x64"
+    "$OUTPUT_DIR/linux-arm64"
+    "$OUTPUT_DIR/windows-x64"
+    "$OUTPUT_DIR/windows-arm64"
+    "$OUTPUT_DIR/volt-darwin-arm64.tar.gz"
+    "$OUTPUT_DIR/volt-darwin-x64.tar.gz"
+    "$OUTPUT_DIR/volt-linux-x64.tar.gz"
+    "$OUTPUT_DIR/volt-linux-arm64.tar.gz"
+    "$OUTPUT_DIR/volt-windows-x64.zip"
+    "$OUTPUT_DIR/volt-windows-arm64.zip"
+    "$OUTPUT_DIR/SHA256SUMS"
+)
+rm -rf -- "${GENERATED_PATHS[@]}"
 mkdir -p "$OUTPUT_DIR"/{darwin-arm64,darwin-x64,linux-x64,linux-arm64,windows-x64,windows-arm64}
 
 # Determine which platforms to build
@@ -147,6 +215,11 @@ for platform in "${PLATFORMS[@]}"; do
     cp package.json "$OUTPUT_DIR/$platform/"
     cp README.md "$OUTPUT_DIR/$platform/"
     cp CHANGELOG.md "$OUTPUT_DIR/$platform/"
+    cp LICENSE "$OUTPUT_DIR/$platform/"
+    cp THIRD-PARTY-NOTICES.md "$OUTPUT_DIR/$platform/"
+    cp -r dist/LICENSES "$OUTPUT_DIR/$platform/"
+    cp BINARY-CAPABILITIES.md "$OUTPUT_DIR/$platform/"
+    cp npm-shrinkwrap.json "$OUTPUT_DIR/$platform/"
     cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm "$OUTPUT_DIR/$platform/"
     mkdir -p "$OUTPUT_DIR/$platform/theme"
     cp dist/core/theme/*.json "$OUTPUT_DIR/$platform/theme/"
@@ -158,6 +231,7 @@ for platform in "${PLATFORMS[@]}"; do
     cp examples/README.binary.md "$OUTPUT_DIR/$platform/examples/README.md"
     rm -f "$OUTPUT_DIR/$platform/examples/README.binary.md"
     rm -rf "$OUTPUT_DIR/$platform/examples/remote/iroh-sidecar"
+    rm -rf "$OUTPUT_DIR/$platform/examples/remote/firebase-push-relay/functions/node_modules"
 
     case "$platform" in
         darwin-arm64)
@@ -204,13 +278,20 @@ cd "$OUTPUT_DIR"
 
 for platform in "${PLATFORMS[@]}"; do
     if [[ "$platform" == windows-* ]]; then
-        # Windows (zip)
         echo "Creating volt-$platform.zip..."
-        (cd "$platform" && zip -r ../volt-$platform.zip .)
+        python3 "$REPO_ROOT/scripts/create-release-archive.py" \
+            --input "$platform" \
+            --output "volt-$platform.zip" \
+            --format zip \
+            --epoch "$SOURCE_DATE_EPOCH"
     else
-        # Unix platforms (tar.gz) - use wrapper directory for mise compatibility
         echo "Creating volt-$platform.tar.gz..."
-        mv "$platform" volt && tar -czf volt-$platform.tar.gz volt && mv volt "$platform"
+        python3 "$REPO_ROOT/scripts/create-release-archive.py" \
+            --input "$platform" \
+            --output "volt-$platform.tar.gz" \
+            --format tar.gz \
+            --root volt \
+            --epoch "$SOURCE_DATE_EPOCH"
     fi
 done
 

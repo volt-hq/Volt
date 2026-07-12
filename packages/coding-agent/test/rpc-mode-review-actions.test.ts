@@ -1,64 +1,65 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { restoreStdout } from "../src/core/output-guard.ts";
-import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
+import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "../src/core/rpc/transport.ts";
+
+interface ReviewWorkflowMockOptions {
+	newSession: (options?: unknown) => Promise<{ cancelled: boolean }>;
+	onEvent?: (event: Record<string, unknown>) => void;
+	confirm?: (request: { title: string; message: string }) => Promise<boolean>;
+}
 
 const reviewMocks = vi.hoisted(() => ({
-	runReviewWorkflow: vi.fn(
-		async (options: {
-			newSession: (options?: unknown) => Promise<{ cancelled: boolean }>;
-			onEvent?: (event: Record<string, unknown>) => void;
-		}) => {
-			options.onEvent?.({
-				type: "workflow_start",
-				workflowId: "review:test",
-				kind: "review",
-				action: "review.uncommitted",
-				title: "Review",
-				message: "Reviewing uncommitted changes.",
-				status: "running",
-			});
-			options.onEvent?.({
-				type: "tool_execution_start",
-				workflowId: "review:test",
-				workflowKind: "review",
-				workflowAction: "review.uncommitted",
-				toolCallId: "review:test:tool-1",
-				toolName: "read",
-				args: { path: "src/file.ts" },
-			});
-			options.onEvent?.({
-				type: "tool_execution_end",
-				workflowId: "review:test",
-				workflowKind: "review",
-				workflowAction: "review.uncommitted",
-				toolCallId: "review:test:tool-1",
-				toolName: "read",
-				isError: false,
-			});
-			const newSessionResult = await options.newSession({});
-			options.onEvent?.({
-				type: "workflow_end",
-				workflowId: "review:test",
-				kind: "review",
-				action: "review.uncommitted",
-				title: "Review",
-				message: "Review complete: 1 finding. Opening review session.",
-				status: "completed",
-			});
-			return {
-				status: "completed" as const,
-				resolution: {
-					description: "uncommitted changes",
-					diffCommand: "git diff HEAD",
-					diff: "diff",
-					truncated: false,
-				},
-				findingsCount: 1,
-				sessionSwitchCancelled: newSessionResult.cancelled,
-			};
-		},
-	),
+	runReviewWorkflow: vi.fn(async (options: ReviewWorkflowMockOptions) => {
+		options.onEvent?.({
+			type: "workflow_start",
+			workflowId: "review:test",
+			kind: "review",
+			action: "review.uncommitted",
+			title: "Review",
+			message: "Reviewing uncommitted changes.",
+			status: "running",
+		});
+		options.onEvent?.({
+			type: "tool_execution_start",
+			workflowId: "review:test",
+			workflowKind: "review",
+			workflowAction: "review.uncommitted",
+			toolCallId: "review:test:tool-1",
+			toolName: "read",
+			args: { path: "src/file.ts" },
+		});
+		options.onEvent?.({
+			type: "tool_execution_end",
+			workflowId: "review:test",
+			workflowKind: "review",
+			workflowAction: "review.uncommitted",
+			toolCallId: "review:test:tool-1",
+			toolName: "read",
+			isError: false,
+		});
+		const newSessionResult = await options.newSession({});
+		options.onEvent?.({
+			type: "workflow_end",
+			workflowId: "review:test",
+			kind: "review",
+			action: "review.uncommitted",
+			title: "Review",
+			message: "Review complete: 1 finding. Opening review session.",
+			status: "completed",
+		});
+		return {
+			status: "completed" as const,
+			resolution: {
+				description: "uncommitted changes",
+				diffCommand: "git diff HEAD",
+				diff: "diff",
+				truncated: false,
+			},
+			findingsCount: 1,
+			sessionSwitchCancelled: newSessionResult.cancelled,
+		};
+	}),
 }));
 
 vi.mock("../src/core/review.ts", async (importOriginal) => {
@@ -78,7 +79,7 @@ afterEach(() => {
 
 describe("RPC mode review actions", () => {
 	test("rebinds after a review action creates its post-review session", async () => {
-		let lineHandler: ((line: string) => void) | undefined;
+		let lineHandler: RpcLineHandler | undefined;
 		let closeHandler: RpcCloseHandler | undefined;
 		const detachInput = vi.fn();
 		const detachClose = vi.fn();
@@ -217,8 +218,243 @@ describe("RPC mode review actions", () => {
 		await expect(modePromise).resolves.toBeUndefined();
 	});
 
+	test("admits a review command without blocking its same-stream UI response", async () => {
+		let lineHandler: RpcLineHandler | undefined;
+		let closeHandler: RpcCloseHandler | undefined;
+		const writes: object[] = [];
+		const transport: RpcTransport = {
+			write: vi.fn((value) => {
+				writes.push(value);
+			}),
+			onLine: vi.fn((handler) => {
+				lineHandler = handler;
+				return vi.fn();
+			}),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return vi.fn();
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: vi.fn(async () => {}),
+		};
+		reviewMocks.runReviewWorkflow.mockImplementationOnce(async (options: ReviewWorkflowMockOptions) => {
+			options.onEvent?.({
+				type: "workflow_start",
+				workflowId: "review:confirm",
+				kind: "review",
+				action: "review.uncommitted",
+				title: "Review",
+				message: "Waiting for confirmation.",
+				status: "running",
+			});
+			const confirmed = await options.confirm?.({ title: "Continue review?", message: "Confirm review" });
+			if (!confirmed) {
+				throw new Error("review confirmation was not delivered");
+			}
+			return {
+				status: "completed" as const,
+				resolution: {
+					description: "uncommitted changes",
+					diffCommand: "git diff HEAD",
+					diff: "diff",
+					truncated: false,
+				},
+				findingsCount: 0,
+				sessionSwitchCancelled: false,
+			};
+		});
+		const session = {
+			bindExtensions: vi.fn(async () => {}),
+			subscribe: vi.fn(() => vi.fn()),
+			agent: { subscribe: vi.fn(() => vi.fn()), state: { pendingToolExecutions: new Map() } },
+			isStreaming: false,
+			isCompacting: false,
+			thinkingLevel: "off",
+			getAvailableThinkingLevels: vi.fn(() => ["off"]),
+			steeringMode: "all",
+			followUpMode: "all",
+			autoCompactionEnabled: false,
+			messages: [],
+			pendingMessageCount: 0,
+			modelRegistry: { authStorage: {} },
+			settingsManager: {},
+			sessionFile: "/sessions/initial.jsonl",
+			sessionId: "initial",
+		};
+		const runtimeHost = {
+			cwd: "/workspace",
+			services: { agentDir: "/tmp/agent" },
+			session,
+			setRebindSession: vi.fn(),
+			dispose: vi.fn(async () => {}),
+		} as unknown as AgentSessionRuntime;
+		let resolveReady: () => void = () => {};
+		const ready = new Promise<void>((resolve) => {
+			resolveReady = resolve;
+		});
+		const modePromise = runRpcMode(runtimeHost, {
+			transport,
+			exitProcess: false,
+			onReady: resolveReady,
+		});
+		await ready;
+		if (!lineHandler) {
+			throw new Error("RPC line handler was not installed");
+		}
+
+		let commandAdmitted = false;
+		const commandEmission = Promise.resolve(
+			lineHandler(
+				JSON.stringify({
+					id: "action-confirm",
+					type: "invoke_ui_action",
+					action: "review.uncommitted",
+					params: { target: { kind: "uncommitted" } },
+				}),
+			),
+		).then(() => {
+			commandAdmitted = true;
+		});
+		await vi.waitFor(() =>
+			expect(
+				writes.some(
+					(value) =>
+						(value as { type?: string; method?: string }).type === "extension_ui_request" &&
+						(value as { method?: string }).method === "confirm",
+				),
+			).toBe(true),
+		);
+		await vi.waitFor(() => expect(commandAdmitted).toBe(true));
+		const confirmationRequest = writes.find(
+			(value) => (value as { type?: string; method?: string }).method === "confirm",
+		) as { id: string };
+		await Promise.resolve(
+			lineHandler(JSON.stringify({ type: "extension_ui_response", id: confirmationRequest.id, confirmed: true })),
+		);
+		await commandEmission;
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({ id: "action-confirm", command: "invoke_ui_action", success: true }),
+			),
+		);
+
+		closeHandler?.();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("caps pending ordinary commands while control responses bypass the cap", async () => {
+		let lineHandler: RpcLineHandler | undefined;
+		const transport: RpcTransport = {
+			write: vi.fn(),
+			onLine: vi.fn((handler) => {
+				lineHandler = handler;
+				return vi.fn();
+			}),
+			onClose: vi.fn(() => vi.fn()),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: vi.fn(async () => {}),
+		};
+		let releaseReview: () => void = () => {};
+		const reviewCanFinish = new Promise<void>((resolve) => {
+			releaseReview = resolve;
+		});
+		let reviewFinished = false;
+		reviewMocks.runReviewWorkflow.mockImplementationOnce(async (options: ReviewWorkflowMockOptions) => {
+			options.onEvent?.({
+				type: "workflow_start",
+				workflowId: "review:queue-bound",
+				kind: "review",
+				action: "review.uncommitted",
+				title: "Review",
+				message: "Holding the input queue open.",
+				status: "running",
+			});
+			await reviewCanFinish;
+			reviewFinished = true;
+			return {
+				status: "completed" as const,
+				resolution: {
+					description: "uncommitted changes",
+					diffCommand: "git diff HEAD",
+					diff: "diff",
+					truncated: false,
+				},
+				findingsCount: 0,
+				sessionSwitchCancelled: false,
+			};
+		});
+		const session = {
+			bindExtensions: vi.fn(async () => {}),
+			subscribe: vi.fn(() => vi.fn()),
+			agent: { subscribe: vi.fn(() => vi.fn()), state: { pendingToolExecutions: new Map() } },
+			isStreaming: false,
+			isCompacting: false,
+			thinkingLevel: "off",
+			getAvailableThinkingLevels: vi.fn(() => ["off"]),
+			steeringMode: "all",
+			followUpMode: "all",
+			autoCompactionEnabled: false,
+			messages: [],
+			pendingMessageCount: 0,
+			modelRegistry: { authStorage: {} },
+			settingsManager: {},
+			sessionFile: "/sessions/queue-bound.jsonl",
+			sessionId: "queue-bound",
+		};
+		const runtimeHost = {
+			cwd: "/workspace",
+			services: { agentDir: "/tmp/agent" },
+			session,
+			setRebindSession: vi.fn(),
+			dispose: vi.fn(async () => {}),
+		} as unknown as AgentSessionRuntime;
+		let resolveReady: () => void = () => {};
+		const ready = new Promise<void>((resolve) => {
+			resolveReady = resolve;
+		});
+		const modePromise = runRpcMode(runtimeHost, {
+			transport,
+			exitProcess: false,
+			onReady: resolveReady,
+		});
+		await ready;
+		if (!lineHandler) {
+			throw new Error("RPC line handler was not installed");
+		}
+
+		await lineHandler(
+			JSON.stringify({
+				id: "queue-blocker",
+				type: "invoke_ui_action",
+				action: "review.uncommitted",
+				params: { target: { kind: "uncommitted" } },
+			}),
+		);
+		await vi.waitFor(() =>
+			expect(
+				(reviewMocks.runReviewWorkflow.mock.calls.at(-1)?.[0] as ReviewWorkflowMockOptions | undefined) !==
+					undefined,
+			).toBe(true),
+		);
+		for (let index = 0; index < 63; index++) {
+			await lineHandler(JSON.stringify({ id: `queued-${index}`, type: "get_state" }));
+		}
+
+		await lineHandler(JSON.stringify({ type: "extension_ui_response", id: "unknown-control", confirmed: true }));
+		expect(transport.close).not.toHaveBeenCalled();
+
+		await lineHandler(JSON.stringify({ id: "overflow", type: "get_state" }));
+		await expect(modePromise).rejects.toThrow("RPC input queue exceeds 64 tasks");
+		expect(transport.close).toHaveBeenCalledOnce();
+
+		releaseReview();
+		await vi.waitFor(() => expect(reviewFinished).toBe(true));
+	});
+
 	test("keeps review workflow and session-change hooks alive after the transport closes", async () => {
-		let lineHandler: ((line: string) => void) | undefined;
+		let lineHandler: RpcLineHandler | undefined;
 		let closeHandler: RpcCloseHandler | undefined;
 		const writes: object[] = [];
 		const transport: RpcTransport = {
@@ -259,53 +495,48 @@ describe("RPC mode review actions", () => {
 		const reviewCanFinish = new Promise<void>((resolve) => {
 			continueReview = resolve;
 		});
-		reviewMocks.runReviewWorkflow.mockImplementationOnce(
-			async (options: {
-				newSession: (options?: unknown) => Promise<{ cancelled: boolean }>;
-				onEvent?: (event: Record<string, unknown>) => void;
-			}) => {
-				options.onEvent?.({
-					type: "workflow_start",
-					workflowId: "review:slow",
-					kind: "review",
-					action: "review.uncommitted",
-					title: "Review",
-					message: "Reviewing uncommitted changes.",
-					status: "running",
-				});
-				await reviewCanFinish;
-				options.onEvent?.({
-					type: "tool_execution_start",
-					workflowId: "review:slow",
-					workflowKind: "review",
-					workflowAction: "review.uncommitted",
-					toolCallId: "review:slow:tool-1",
-					toolName: "read",
-					args: { path: "src/file.ts" },
-				});
-				const newSessionResult = await options.newSession({});
-				options.onEvent?.({
-					type: "workflow_end",
-					workflowId: "review:slow",
-					kind: "review",
-					action: "review.uncommitted",
-					title: "Review",
-					message: "Review complete.",
-					status: "completed",
-				});
-				return {
-					status: "completed" as const,
-					resolution: {
-						description: "uncommitted changes",
-						diffCommand: "git diff HEAD",
-						diff: "diff",
-						truncated: false,
-					},
-					findingsCount: 1,
-					sessionSwitchCancelled: newSessionResult.cancelled,
-				};
-			},
-		);
+		reviewMocks.runReviewWorkflow.mockImplementationOnce(async (options: ReviewWorkflowMockOptions) => {
+			options.onEvent?.({
+				type: "workflow_start",
+				workflowId: "review:slow",
+				kind: "review",
+				action: "review.uncommitted",
+				title: "Review",
+				message: "Reviewing uncommitted changes.",
+				status: "running",
+			});
+			await reviewCanFinish;
+			options.onEvent?.({
+				type: "tool_execution_start",
+				workflowId: "review:slow",
+				workflowKind: "review",
+				workflowAction: "review.uncommitted",
+				toolCallId: "review:slow:tool-1",
+				toolName: "read",
+				args: { path: "src/file.ts" },
+			});
+			const newSessionResult = await options.newSession({});
+			options.onEvent?.({
+				type: "workflow_end",
+				workflowId: "review:slow",
+				kind: "review",
+				action: "review.uncommitted",
+				title: "Review",
+				message: "Review complete.",
+				status: "completed",
+			});
+			return {
+				status: "completed" as const,
+				resolution: {
+					description: "uncommitted changes",
+					diffCommand: "git diff HEAD",
+					diff: "diff",
+					truncated: false,
+				},
+				findingsCount: 1,
+				sessionSwitchCancelled: newSessionResult.cancelled,
+			};
+		});
 		let currentSession = makeSession("original-session");
 		const runtimeHost = {
 			cwd: "/workspace",

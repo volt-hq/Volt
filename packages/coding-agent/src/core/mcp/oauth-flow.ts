@@ -94,6 +94,63 @@ function isLoopbackHostname(hostname: string): boolean {
 	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
 }
 
+function assertLoopbackRedirectUrl(value: string | URL): void {
+	const url = new URL(String(value));
+	if (url.protocol !== "http:" || !isLoopbackHostname(url.hostname) || url.hostname === "localhost") {
+		throw new Error("MCP OAuth redirect URL must use HTTP on a numeric loopback address");
+	}
+	if (url.username || url.password || url.hash) {
+		throw new Error("MCP OAuth redirect URL must not include userinfo or fragments");
+	}
+}
+
+function assertBrowserTargetUrl(value: string, label: string): void {
+	assertHttpsEndpoint(value, label);
+}
+
+function getOAuthFetchUrl(input: Parameters<typeof fetch>[0]): URL {
+	if (typeof input === "string") {
+		return new URL(input);
+	}
+	if (input instanceof URL) {
+		return input;
+	}
+	return new URL(input.url);
+}
+
+/**
+ * OAuth requests never follow redirects. Endpoint metadata is validated before
+ * credential-bearing requests, and rejecting redirects prevents an HTTPS token
+ * endpoint from forwarding codes, verifiers, or client secrets to plaintext or
+ * a different origin. Loopback HTTP remains available for MCP resource
+ * discovery; OAuth authorization-server endpoints themselves must be HTTPS.
+ */
+export function createSafeMcpOAuthFetch(fetchFn: typeof fetch = fetch): typeof fetch {
+	return async (input, init) => {
+		const requestUrl = getOAuthFetchUrl(input);
+		if (
+			requestUrl.protocol !== "https:" &&
+			!(requestUrl.protocol === "http:" && isLoopbackHostname(requestUrl.hostname))
+		) {
+			throw new Error("MCP OAuth network requests must use HTTPS unless the MCP resource is loopback HTTP");
+		}
+		const response = await fetchFn(input, { ...init, redirect: "error" });
+		if (response.redirected || (response.status >= 300 && response.status < 400)) {
+			throw new Error("MCP OAuth network redirects are not allowed");
+		}
+		if (response.url) {
+			const responseUrl = new URL(response.url);
+			if (
+				responseUrl.protocol !== "https:" &&
+				!(responseUrl.protocol === "http:" && isLoopbackHostname(responseUrl.hostname))
+			) {
+				throw new Error("MCP OAuth response URL must use HTTPS unless the MCP resource is loopback HTTP");
+			}
+		}
+		return response;
+	};
+}
+
 function assertHttpsEndpoint(value: string | undefined, label: string): void {
 	if (!value) {
 		throw new Error(`MCP OAuth ${label} is missing`);
@@ -314,9 +371,11 @@ export async function startMcpOAuthBrowserAuth(options: {
 	redirectUrl: string | URL;
 	fetchFn?: typeof fetch;
 }): Promise<McpOAuthBrowserStartResult> {
+	assertLoopbackRedirectUrl(options.redirectUrl);
+	const fetchFn = createSafeMcpOAuthFetch(options.fetchFn);
 	const provider = providerFor(options.server, options.store, options.redirectUrl);
 	try {
-		const serverInfo = await discoverOAuthForServer(options.server, options.fetchFn);
+		const serverInfo = await discoverOAuthForServer(options.server, fetchFn);
 		validateBrowserServerInfo(serverInfo);
 		saveDiscoveryState(options.server, provider, serverInfo);
 		const result = await auth(provider, {
@@ -325,7 +384,7 @@ export async function startMcpOAuthBrowserAuth(options: {
 			resourceMetadataUrl: options.server.auth?.resourceMetadataUrl
 				? new URL(options.server.auth.resourceMetadataUrl)
 				: undefined,
-			fetchFn: options.fetchFn,
+			fetchFn,
 		});
 		if (result === "AUTHORIZED") {
 			return {
@@ -363,10 +422,12 @@ export async function completeMcpOAuthBrowserAuth(options: {
 	state?: string;
 	fetchFn?: typeof fetch;
 }): Promise<McpOAuthBrowserCompleteResult> {
+	assertLoopbackRedirectUrl(options.redirectUrl);
 	const record = options.store.getRecord(options.server);
-	if (record?.state && options.state !== record.state) {
+	if (typeof record?.state !== "string" || record.state.length === 0 || options.state !== record.state) {
 		throw new Error("MCP OAuth state mismatch");
 	}
+	const fetchFn = createSafeMcpOAuthFetch(options.fetchFn);
 	const provider = providerFor(options.server, options.store, options.redirectUrl);
 	try {
 		await auth(provider, {
@@ -376,7 +437,7 @@ export async function completeMcpOAuthBrowserAuth(options: {
 			resourceMetadataUrl: options.server.auth?.resourceMetadataUrl
 				? new URL(options.server.auth.resourceMetadataUrl)
 				: undefined,
-			fetchFn: options.fetchFn,
+			fetchFn,
 		});
 		options.store.clear(options.server, "verifier");
 		return {
@@ -396,9 +457,10 @@ export async function startMcpOAuthDeviceAuth(options: {
 	store: McpOAuthStore;
 	fetchFn?: typeof fetch;
 }): Promise<{ result: McpOAuthDeviceStartResult; pending: McpOAuthPendingDeviceFlow }> {
+	const fetchFn = createSafeMcpOAuthFetch(options.fetchFn);
 	const provider = providerFor(options.server, options.store);
 	try {
-		const serverInfo = await discoverOAuthForServer(options.server, options.fetchFn);
+		const serverInfo = await discoverOAuthForServer(options.server, fetchFn);
 		const metadata = validateDeviceServerInfo(serverInfo);
 		saveDiscoveryState(options.server, provider, serverInfo);
 		const resource = options.server.url
@@ -411,7 +473,7 @@ export async function startMcpOAuthDeviceAuth(options: {
 			serverInfo.authorizationServerUrl,
 			metadata,
 			scope,
-			options.fetchFn,
+			fetchFn,
 		);
 		const endpoint = getDeviceAuthorizationEndpoint(metadata);
 		if (!endpoint) {
@@ -427,11 +489,15 @@ export async function startMcpOAuthDeviceAuth(options: {
 		if (resource) {
 			params.set("resource", resource.toString());
 		}
-		const response = await (options.fetchFn ?? fetch)(endpoint, { method: "POST", headers, body: params });
+		const response = await fetchFn(endpoint, { method: "POST", headers, body: params });
 		if (!response.ok) {
 			throw new Error(`MCP OAuth device authorization failed: ${await parseOAuthErrorCode(response)}`);
 		}
 		const device = parseDeviceAuthorizationResponse((await response.json()) as unknown);
+		assertBrowserTargetUrl(device.verification_uri ?? device.verification_url ?? "", "verification URL");
+		if (device.verification_uri_complete) {
+			assertBrowserTargetUrl(device.verification_uri_complete, "complete verification URL");
+		}
 		const intervalMs = Math.max(1, device.interval ?? DEFAULT_DEVICE_INTERVAL_MS / 1000) * 1000;
 		const expiresAtMs = Date.now() + Math.max(1, device.expires_in) * 1000;
 		const pending: McpOAuthPendingDeviceFlow = {
@@ -505,7 +571,9 @@ export async function pollMcpOAuthDeviceAuth(options: {
 	if (options.pending.resource) {
 		params.set("resource", options.pending.resource.toString());
 	}
-	const response = await (options.fetchFn ?? fetch)(options.pending.metadata.token_endpoint, {
+	assertHttpsEndpoint(options.pending.metadata.token_endpoint, "token endpoint");
+	const fetchFn = createSafeMcpOAuthFetch(options.fetchFn);
+	const response = await fetchFn(options.pending.metadata.token_endpoint, {
 		method: "POST",
 		headers,
 		body: params,

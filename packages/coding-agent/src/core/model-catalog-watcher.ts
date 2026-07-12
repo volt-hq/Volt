@@ -13,6 +13,11 @@ import type { ModelRegistry } from "./model-registry.ts";
 const WATCHED_FILE_NAMES = new Set(["auth.json", "models.json"]);
 const CHANGE_DEBOUNCE_MS = 300;
 
+export type ModelCatalogDirectoryWatch = (
+	path: string,
+	listener: (eventType: "rename" | "change", fileName: string | null) => void,
+) => FSWatcher;
+
 export interface ModelCatalogWatcherOptions {
 	/** Directory containing auth.json and models.json. Watching is skipped when undefined. */
 	agentDir: string | undefined;
@@ -20,6 +25,8 @@ export interface ModelCatalogWatcherOptions {
 	/** Called after a disk refresh that changed the available model catalog. */
 	onCatalogChanged: () => void;
 	debounceMs?: number;
+	/** Test seam for deterministic native watcher event coverage. */
+	watchDirectory?: ModelCatalogDirectoryWatch;
 }
 
 export function getModelCatalogSignature(modelRegistry: ModelRegistry): string {
@@ -31,6 +38,16 @@ export function getModelCatalogSignature(modelRegistry: ModelRegistry): string {
 }
 
 /**
+ * Directory watchers may report only the destination name for a rename (for
+ * example `auth.json.bak` when auth.json is moved away), or omit the filename
+ * entirely. Reconcile on every rename/unknown-name event so atomic replacement
+ * and temporary moves cannot hide an auth/models transition.
+ */
+export function isModelCatalogSourceWatchEvent(eventType: string, fileName: string | null): boolean {
+	return eventType === "rename" || fileName === null || WATCHED_FILE_NAMES.has(fileName);
+}
+
+/**
  * Start watching the agent dir for credential/model config changes.
  * Returns a stop function. Watch failures degrade to a no-op watcher: clients
  * still get fresh catalogs from get_available_models' explicit disk refresh.
@@ -39,11 +56,13 @@ export function startModelCatalogWatcher(options: ModelCatalogWatcherOptions): (
 	if (!options.agentDir) {
 		return () => {};
 	}
+	const agentDir = options.agentDir;
 
 	let watcher: FSWatcher | undefined;
 	let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 	let stopped = false;
 	const debounceMs = options.debounceMs ?? CHANGE_DEBOUNCE_MS;
+	const watchDirectory = options.watchDirectory ?? watch;
 
 	const stop = (): void => {
 		if (stopped) {
@@ -85,8 +104,8 @@ export function startModelCatalogWatcher(options: ModelCatalogWatcherOptions): (
 	};
 
 	try {
-		watcher = watch(options.agentDir, (_eventType, fileName) => {
-			if (stopped || typeof fileName !== "string" || !WATCHED_FILE_NAMES.has(fileName)) {
+		watcher = watchDirectory(agentDir, (eventType, fileName) => {
+			if (stopped || !isModelCatalogSourceWatchEvent(eventType, fileName)) {
 				return;
 			}
 			if (debounceTimer) {

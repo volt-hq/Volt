@@ -2,7 +2,7 @@ import { once } from "node:events";
 import type { Readable, Writable } from "node:stream";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 
-export type RpcLineHandler = (line: string) => void;
+export type RpcLineHandler = (line: string) => void | Promise<void>;
 export type RpcCloseHandler = (error?: Error) => void;
 
 /** Transport used by Volt RPC protocol handlers. */

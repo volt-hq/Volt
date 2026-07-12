@@ -12,6 +12,7 @@ import {
 	writeIrohRemoteHostState,
 } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
+import { handleIrohRemoteWorkspaceUnregisterRpcCommand } from "../src/core/remote/iroh/workspace-rpc.ts";
 import {
 	createEmptyVoltdState,
 	hostStateToVoltdState,
@@ -211,12 +212,59 @@ describe("worktree state manager operations", () => {
 		expect(await manager.removeWorktree("ws", "fix-login")).toBeUndefined();
 	});
 
-	it("unregisterWorkspace drops that workspace's worktree records only", async () => {
+	it("refuses to persist a worktree whose parent workspace is not registered", async () => {
+		await expect(
+			manager.upsertWorktree(createWorktree({ workspaceName: "missing", sessionIds: [] })),
+		).rejects.toMatchObject({
+			code: "worktree_parent_workspace_not_found",
+			workspaceName: "missing",
+		});
+		expect(await manager.listWorktrees()).toEqual([]);
+	});
+
+	it("unregisterWorkspace refuses to drop a workspace or its worktree records", async () => {
 		await manager.upsertWorktree(createWorktree({ sessionIds: [] }));
 		await manager.upsertWorktree(createWorktree({ id: "other-tree", workspaceName: "other", sessionIds: [] }));
 
-		await manager.unregisterWorkspace("ws");
-		expect(await manager.listWorktrees("ws")).toEqual([]);
+		await expect(manager.unregisterWorkspace("ws")).rejects.toMatchObject({
+			code: "workspace_has_worktrees",
+			workspaceName: "ws",
+			worktreeIds: ["fix-login"],
+		});
+		expect((await manager.getState()).workspaces.map((workspace) => workspace.name)).toContain("ws");
+		expect((await manager.listWorktrees("ws")).map((worktree) => worktree.id)).toEqual(["fix-login"]);
 		expect((await manager.listWorktrees("other")).map((worktree) => worktree.id)).toEqual(["other-tree"]);
+	});
+
+	it("unregisterWorkspace removes a normal empty workspace", async () => {
+		await manager.upsertWorktree(createWorktree({ id: "other-tree", workspaceName: "other", sessionIds: [] }));
+
+		await expect(manager.unregisterWorkspace("ws")).resolves.toEqual({ name: "ws", path: "/tmp/ws" });
+		expect((await manager.getState()).workspaces.map((workspace) => workspace.name)).toEqual(["other"]);
+		expect((await manager.listWorktrees("other")).map((worktree) => worktree.id)).toEqual(["other-tree"]);
+	});
+});
+
+describe("workspace unregister RPC safety", () => {
+	it("returns a stable workspace_has_worktrees conflict without changing state", async () => {
+		const manager = new IrohRemoteHostStateManager({ initialState: createHostStateWithWorktrees() });
+
+		const result = await handleIrohRemoteWorkspaceUnregisterRpcCommand(
+			{ id: "remove-ws", type: "unregister_workspace", workspaceName: "ws" },
+			{ stateManager: manager },
+		);
+
+		expect(result).toEqual({
+			handled: true,
+			response: {
+				id: "remove-ws",
+				type: "response",
+				command: "unregister_workspace",
+				success: false,
+				error: "workspace_has_worktrees",
+			},
+		});
+		expect((await manager.getState()).workspaces).toEqual([{ name: "ws", path: "/tmp/ws" }]);
+		expect(await manager.listWorktrees("ws")).toEqual([createWorktree()]);
 	});
 });

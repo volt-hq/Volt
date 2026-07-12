@@ -1,8 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { Buffer } from "node:buffer";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME } from "../../config.ts";
+import { writeDurableAtomicFileSync } from "../../utils/durable-atomic-write.ts";
 import { resolvePath } from "../../utils/paths.ts";
+import { ensurePrivateDirectorySync, hardenPrivateRegularFileSync } from "../../utils/private-files.ts";
 import type { McpResolvedServerConfig, McpSourceScope } from "./types.ts";
+
+const MAX_MCP_CONFIG_BYTES = 4 * 1024 * 1024;
 
 export interface McpConfigWriterOptions {
 	cwd: string;
@@ -25,6 +31,10 @@ function readJsonObject(path: string): MutableJsonRecord {
 	if (!existsSync(path)) {
 		return {};
 	}
+	hardenPrivateRegularFileSync(path);
+	if (lstatSync(path).size > MAX_MCP_CONFIG_BYTES) {
+		throw new Error(`MCP config exceeds ${MAX_MCP_CONFIG_BYTES} bytes: ${path}`);
+	}
 	const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
 	if (!isRecord(parsed)) {
 		throw new Error(`MCP config is not a JSON object: ${path}`);
@@ -43,11 +53,42 @@ function ensureObjectField(parent: MutableJsonRecord, field: string): MutableJso
 }
 
 function writeJsonObject(path: string, value: MutableJsonRecord): void {
-	const dir = dirname(path);
-	if (!existsSync(dir)) {
-		mkdirSync(dir, { recursive: true, mode: 0o700 });
+	const serialized = `${JSON.stringify(value, null, 2)}\n`;
+	if (Buffer.byteLength(serialized, "utf8") > MAX_MCP_CONFIG_BYTES) {
+		throw new Error(`Refusing to write MCP config larger than ${MAX_MCP_CONFIG_BYTES} bytes`);
 	}
-	writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
+	ensurePrivateDirectorySync(dirname(path));
+	writeDurableAtomicFileSync(path, serialized);
+}
+
+function withConfigLock<T>(path: string, operation: () => T): T {
+	const directoryPath = dirname(path);
+	ensurePrivateDirectorySync(directoryPath);
+	let release: (() => void) | undefined;
+	let lastError: unknown;
+	for (let attempt = 1; attempt <= 10; attempt++) {
+		try {
+			release = lockfile.lockSync(directoryPath, { realpath: false, lockfilePath: `${path}.lock` });
+			break;
+		} catch (error) {
+			const code =
+				typeof error === "object" && error !== null && "code" in error
+					? String((error as { code?: unknown }).code)
+					: undefined;
+			if (code !== "ELOCKED" || attempt === 10) throw error;
+			lastError = error;
+			const startedAt = Date.now();
+			while (Date.now() - startedAt < 20) {
+				// Preserve the synchronous writer contract while waiting briefly.
+			}
+		}
+	}
+	if (!release) throw lastError instanceof Error ? lastError : new Error("Failed to lock MCP config");
+	try {
+		return operation();
+	} finally {
+		release();
+	}
 }
 
 export class McpConfigWriter {
@@ -91,16 +132,18 @@ export class McpConfigWriter {
 		update: (overlay: MutableJsonRecord) => void,
 	): McpConfigWriteResult {
 		const path = this.getVoltOwnedPath(server.source.scope);
-		const config = readJsonObject(path);
-		if (typeof config.version !== "number") {
-			config.version = 1;
-		}
-		const servers = ensureObjectField(config, "servers");
-		const current = servers[server.id];
-		const overlay = isRecord(current) ? current : {};
-		servers[server.id] = overlay;
-		update(overlay);
-		writeJsonObject(path, config);
+		withConfigLock(path, () => {
+			const config = readJsonObject(path);
+			if (typeof config.version !== "number") {
+				config.version = 1;
+			}
+			const servers = ensureObjectField(config, "servers");
+			const current = servers[server.id];
+			const overlay = isRecord(current) ? current : {};
+			servers[server.id] = overlay;
+			update(overlay);
+			writeJsonObject(path, config);
+		});
 		return { path, scope: server.source.scope };
 	}
 }

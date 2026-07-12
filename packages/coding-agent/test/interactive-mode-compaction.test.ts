@@ -151,7 +151,9 @@ describe("InteractiveMode compaction events", () => {
 			streamingMessage: undefined,
 			chatContainer: { removeChild: vi.fn() },
 			pendingTools: { clear: vi.fn() },
+			stopWorkingElapsedTicker: vi.fn(),
 			scheduleTurnDoneAlert: vi.fn(),
+			updateEditorBorderColor: vi.fn(),
 			checkShutdownRequested: vi.fn(async () => undefined),
 		};
 		const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (

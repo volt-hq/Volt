@@ -1,10 +1,13 @@
+import { Buffer } from "node:buffer";
 import type { Transport } from "@earendil-works/volt-ai";
 import { randomUUID } from "crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
+import { writeDurableAtomicFileSync } from "../utils/durable-atomic-write.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
+import { ensurePrivateDirectorySync, hardenPrivateRegularFileSync } from "../utils/private-files.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 import type { LspSettings } from "./lsp/config.ts";
 
@@ -297,6 +300,7 @@ interface ModifiedSetting {
 type ModifiedProfileNestedFields = Map<string, Map<keyof Settings, Set<string>>>;
 
 export class FileSettingsStorage implements SettingsStorage {
+	private static readonly MAX_SETTINGS_BYTES = 4 * 1024 * 1024;
 	private globalSettingsPath: string;
 	private projectSettingsPath: string;
 
@@ -334,29 +338,65 @@ export class FileSettingsStorage implements SettingsStorage {
 		throw (lastError as Error) ?? new Error("Failed to acquire settings lock");
 	}
 
+	private prepareDirectory(scope: SettingsScope, directoryPath: string): void {
+		if (scope === "global") {
+			ensurePrivateDirectorySync(directoryPath);
+			return;
+		}
+		mkdirSync(directoryPath, { recursive: true, mode: 0o755 });
+		const stat = lstatSync(directoryPath);
+		if (stat.isSymbolicLink() || !stat.isDirectory()) {
+			throw new Error(`Refusing to use non-directory project settings path: ${directoryPath}`);
+		}
+	}
+
+	private readCurrent(scope: SettingsScope, path: string): string | undefined {
+		if (!existsSync(path)) return undefined;
+		if (scope === "global") {
+			hardenPrivateRegularFileSync(path);
+		} else {
+			const stat = lstatSync(path);
+			if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+				throw new Error(`Refusing to use non-regular project settings file: ${path}`);
+			}
+		}
+		if (lstatSync(path).size > FileSettingsStorage.MAX_SETTINGS_BYTES) {
+			throw new Error(`Settings file exceeds ${FileSettingsStorage.MAX_SETTINGS_BYTES} bytes: ${path}`);
+		}
+		return readFileSync(path, "utf-8");
+	}
+
+	private writeNext(scope: SettingsScope, path: string, next: string): void {
+		if (Buffer.byteLength(next, "utf8") > FileSettingsStorage.MAX_SETTINGS_BYTES) {
+			throw new Error(`Refusing to write settings larger than ${FileSettingsStorage.MAX_SETTINGS_BYTES} bytes`);
+		}
+		writeDurableAtomicFileSync(path, next, {
+			directoryMode: scope === "global" ? 0o700 : 0o755,
+			fileMode: scope === "global" ? 0o600 : 0o644,
+		});
+	}
+
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
 		const path = scope === "global" ? this.globalSettingsPath : this.projectSettingsPath;
 		const dir = dirname(path);
 
 		let release: (() => void) | undefined;
 		try {
-			// Only create directory and lock if file exists or we need to write
-			const fileExists = existsSync(path);
-			if (fileExists) {
+			if (existsSync(path)) {
+				this.prepareDirectory(scope, dir);
 				release = this.acquireLockSyncWithRetry(path);
+				const next = fn(this.readCurrent(scope, path));
+				if (next !== undefined) this.writeNext(scope, path, next);
+				return;
 			}
-			const current = fileExists ? readFileSync(path, "utf-8") : undefined;
-			const next = fn(current);
-			if (next !== undefined) {
-				// Only create directory when we actually need to write
-				if (!existsSync(dir)) {
-					mkdirSync(dir, { recursive: true });
-				}
-				if (!release) {
-					release = this.acquireLockSyncWithRetry(path);
-				}
-				writeFileSync(path, next, "utf-8");
-			}
+
+			const initialNext = fn(undefined);
+			if (initialNext === undefined) return;
+			this.prepareDirectory(scope, dir);
+			release = this.acquireLockSyncWithRetry(path);
+			const current = this.readCurrent(scope, path);
+			const next = current === undefined ? initialNext : fn(current);
+			if (next !== undefined) this.writeNext(scope, path, next);
 		} finally {
 			if (release) {
 				release();

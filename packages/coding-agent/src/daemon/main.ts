@@ -12,7 +12,12 @@ import {
 	parseIrohRemoteRpcGrant,
 } from "../core/remote/iroh/access-grant.ts";
 import { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
-import { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
+import { IrohRemotePushRelayHttpClient, revokeIrohRemoteClientPushTargets } from "../core/remote/iroh/push.ts";
+import {
+	IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR,
+	IrohRemoteHostStateManager,
+	isIrohRemoteWorkspaceHasWorktreesError,
+} from "../core/remote/iroh/state-manager.ts";
 import { SettingsManager } from "../core/settings-manager.ts";
 import {
 	getCurrentThemeName,
@@ -292,6 +297,10 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		},
 	});
 	const auditLogger = new IrohRemoteAuditLogger({ path: paths.auditPath });
+	const fallbackPushRelayClient = new IrohRemotePushRelayHttpClient({
+		authToken: process.env.VOLT_PUSH_RELAY_AUTH_TOKEN,
+		baseUrl: process.env.VOLT_PUSH_RELAY_URL,
+	});
 
 	let shuttingDown = false;
 	let resolveExit: ((code: number) => void) | undefined;
@@ -513,7 +522,34 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			}
 			case "workspace_unregister": {
 				// State-only fallback (no Iroh extension running).
-				const removedWorkspace = await stateManager.unregisterWorkspace(request.name);
+				let removedWorkspace: Awaited<ReturnType<IrohRemoteHostStateManager["unregisterWorkspace"]>>;
+				try {
+					removedWorkspace = await stateManager.unregisterWorkspace(request.name);
+				} catch (error) {
+					if (!isIrohRemoteWorkspaceHasWorktreesError(error)) {
+						throw error;
+					}
+					await auditLogger
+						.log({
+							type: "workspace_unregistered",
+							workspace: request.name,
+							success: false,
+							error: IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR,
+							details: {
+								source: "state_only_fallback",
+								worktreeCount: error.worktreeIds.length,
+								worktreeIds: error.worktreeIds,
+							},
+						})
+						.catch(() => {});
+					connection.send({
+						type: "error",
+						id: request.id,
+						code: IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR,
+						message: error.message,
+					});
+					return;
+				}
 				if (!removedWorkspace) {
 					connection.send({
 						type: "error",
@@ -524,6 +560,14 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					return;
 				}
 				await stateManager.removeLiveActivitiesForWorkspace(request.name);
+				await auditLogger
+					.log({
+						type: "workspace_unregistered",
+						workspace: request.name,
+						success: true,
+						details: { source: "state_only_fallback" },
+					})
+					.catch(() => {});
 				connection.send({ type: "ok", id: request.id });
 				return;
 			}
@@ -596,6 +640,24 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				if (!result.revoked) {
 					connection.send({ type: "error", id: request.id, code: "not_found", message: "client not found" });
 					return;
+				}
+				if ((result.client?.pushTargets?.length ?? 0) > 0) {
+					const summary = await revokeIrohRemoteClientPushTargets(result.client, fallbackPushRelayClient);
+					const complete = summary.failed === 0 && summary.skipped === 0;
+					if (!complete) {
+						log("warn", "remote push-target cleanup incomplete after fallback client revoke", { ...summary });
+					}
+					await auditLogger
+						.log({
+							type: "push_targets_revoked",
+							clientNodeId: request.clientNodeId,
+							success: complete,
+							error: complete
+								? undefined
+								: "remote push-target cleanup incomplete; relay TTL remains the lifetime bound",
+							details: { ...summary, remainingLifetimeBound: "relay_target_ttl", source: "state_only_fallback" },
+						})
+						.catch(() => {});
 				}
 				connection.send({ type: "ok", id: request.id });
 				return;

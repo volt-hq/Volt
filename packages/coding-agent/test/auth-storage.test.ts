@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerOAuthProvider } from "@earendil-works/volt-ai/oauth";
@@ -592,26 +592,34 @@ describe("AuthStorage", () => {
 			expect(secondDrain).toHaveLength(0);
 		});
 
-		test("reload preserves in-memory credentials while auth file is temporarily missing", async () => {
+		test("reload revokes cached credentials when auth.json is permanently deleted", async () => {
 			writeAuthJson({
 				anthropic: { type: "api_key", key: "anthropic-key" },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);
-			const backupPath = join(tempDir, "auth.json.bak");
-			renameSync(authJsonPath, backupPath);
+			rmSync(authJsonPath);
 
 			authStorage.reload();
 
 			expect(existsSync(authJsonPath)).toBe(false);
-			expect(authStorage.get("anthropic")).toEqual({ type: "api_key", key: "anthropic-key" });
-			expect(await authStorage.getApiKey("anthropic")).toBe("anthropic-key");
+			expect(authStorage.get("anthropic")).toBeUndefined();
+			expect(await authStorage.getApiKey("anthropic")).toBeUndefined();
+		});
 
-			writeFileSync(backupPath, JSON.stringify({ anthropic: { type: "api_key", key: "restored-key" } }));
-			renameSync(backupPath, authJsonPath);
+		test("explicit reload does not infer retention from an auth.json.bak sibling", async () => {
+			writeAuthJson({
+				anthropic: { type: "api_key", key: "anthropic-key" },
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+			writeFileSync(`${authJsonPath}.bak`, readFileSync(authJsonPath, "utf8"));
+			rmSync(authJsonPath);
+
 			authStorage.reload();
 
-			expect(await authStorage.getApiKey("anthropic")).toBe("restored-key");
+			expect(authStorage.get("anthropic")).toBeUndefined();
+			expect(await authStorage.getApiKey("anthropic")).toBeUndefined();
 		});
 	});
 

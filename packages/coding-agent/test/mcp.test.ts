@@ -1,4 +1,13 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Tool as SdkTool } from "@modelcontextprotocol/sdk/types.js";
@@ -16,7 +25,12 @@ import { McpConfigWriter } from "../src/core/mcp/config-writer.ts";
 import { createMcpDirectToolDefinitions } from "../src/core/mcp/direct-tools.ts";
 import { McpManager } from "../src/core/mcp/manager.ts";
 import { McpMetadataCache } from "../src/core/mcp/metadata-cache.ts";
-import { pollMcpOAuthDeviceAuth, startMcpOAuthDeviceAuth } from "../src/core/mcp/oauth-flow.ts";
+import {
+	completeMcpOAuthBrowserAuth,
+	pollMcpOAuthDeviceAuth,
+	startMcpOAuthBrowserAuth,
+	startMcpOAuthDeviceAuth,
+} from "../src/core/mcp/oauth-flow.ts";
 import { McpOAuthStore } from "../src/core/mcp/oauth-store.ts";
 import { McpOutputStore } from "../src/core/mcp/output-store.ts";
 import { classifyMcpToolRisk, sanitizeMcpArguments } from "../src/core/mcp/safety.ts";
@@ -201,6 +215,96 @@ describe("MCP support", () => {
 		await manager.disconnectServer("fake");
 	});
 
+	it("bounds persistent MCP output caches and scopes entries strictly", () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		let now = 1_000;
+		const store = new McpOutputStore({
+			agentDir: tempDir,
+			maxOutputBytes: 8,
+			maxOutputLines: 10,
+			maxCacheEntryBytes: 1_024,
+			maxCacheEntries: 2,
+			maxCacheTotalBytes: 2_048,
+			now: () => now,
+		});
+		const first = store.write("first");
+		now += 1_000;
+		const second = store.write("second");
+		now += 1_000;
+		const third = store.write("third");
+		expect(first).toBeDefined();
+		expect(second).toBeDefined();
+		expect(third).toBeDefined();
+		expect(readdirSync(join(tempDir, "mcp", "output"))).toHaveLength(2);
+		expect(() => store.read(first ?? "")).toThrow("not found");
+		expect(() => store.read(third ?? "", { cursor: "1garbage" })).toThrow("Invalid MCP cache cursor");
+
+		const scoped = new McpOutputStore({ agentDir: tempDir, sessionId: "other-session", now: () => now });
+		expect(() => scoped.read(third ?? "")).toThrow("not available in this session");
+		const sessionScoped = new McpOutputStore({
+			agentDir: tempDir,
+			sessionId: "session-a",
+			workspaceId: "workspace-a",
+			now: () => now,
+		});
+		const sessionScopedId = sessionScoped.write("session secret");
+		const workspaceOnly = new McpOutputStore({ agentDir: tempDir, workspaceId: "workspace-a", now: () => now });
+		expect(() => workspaceOnly.read(sessionScopedId ?? "")).toThrow("not available in this session");
+		const unscoped = new McpOutputStore({ agentDir: tempDir, now: () => now });
+		expect(() => unscoped.read(sessionScopedId ?? "")).toThrow("not available in this session");
+
+		const tooLarge = new McpOutputStore({
+			agentDir: tempDir,
+			maxOutputBytes: 8,
+			maxOutputLines: 10,
+			maxCacheEntryBytes: 128,
+		});
+		const shaped = tooLarge.shapeOutput("x".repeat(1_000));
+		expect(shaped.truncation?.truncated).toBe(true);
+		expect(shaped.cache).toBeUndefined();
+	});
+
+	it("prunes stale and excess MCP metadata cache entries", () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		let now = Date.parse("2026-01-01T00:00:00.000Z");
+		const cache = new McpMetadataCache({
+			agentDir: tempDir,
+			maxServers: 2,
+			maxAgeMs: 1_000,
+			now: () => now,
+		});
+		const metadata = { tools: [], resources: [], prompts: [] };
+		cache.set("one", { server: "one", ...metadata });
+		now += 100;
+		cache.set("two", { server: "two", ...metadata });
+		now += 100;
+		cache.set("three", { server: "three", ...metadata });
+		expect(cache.get("one")).toBeUndefined();
+		expect(cache.getAll().map((entry) => entry.server)).toEqual(["two", "three"]);
+
+		now += 2_000;
+		const reloaded = new McpMetadataCache({
+			agentDir: tempDir,
+			maxServers: 2,
+			maxAgeMs: 1_000,
+			now: () => now,
+		});
+		expect(reloaded.getAll()).toEqual([]);
+	});
+
+	it("measures the exact pretty-printed metadata cache payload against the byte cap", () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const cache = new McpMetadataCache({ agentDir: tempDir, maxBytes: 240 });
+		cache.set("one", { server: "one", tools: [], resources: [], prompts: [] });
+
+		const cachePath = join(tempDir, "mcp", "metadata-cache.json");
+		expect(statSync(cachePath).size).toBeLessThanOrEqual(240);
+		expect(cache.get("one")).toBeUndefined();
+	});
+
 	it("streams lifecycle events for status changes, tool calls, enablement, and auth", async () => {
 		const tempDir = makeTempDir();
 		tempDirs.push(tempDir);
@@ -339,6 +443,29 @@ describe("MCP support", () => {
 		expect(persistedConfig.servers?.fake?.enabled).toBe(false);
 	});
 
+	it("atomically persists private MCP config and refuses symlink targets", () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const config = createTestConfig(tempDir);
+		const writer = new McpConfigWriter({ cwd: tempDir, agentDir: tempDir, projectTrusted: true });
+		const configPath = writer.setServerEnabled(config.servers.fake, false).path;
+		const firstInode = statSync(configPath).ino;
+		writer.setServerDirectTools(config.servers.fake, ["read_note"]);
+		const persisted = JSON.parse(readFileSync(configPath, "utf8")) as {
+			servers?: Record<string, { enabled?: boolean; directTools?: string[] }>;
+		};
+		expect(persisted.servers?.fake).toEqual({ enabled: false, directTools: ["read_note"] });
+		expect(statSync(configPath).mode & 0o777).toBe(0o600);
+		expect(statSync(configPath).ino).not.toBe(firstInode);
+
+		rmSync(configPath);
+		const referent = join(tempDir, "referent.json");
+		writeFileSync(referent, '{"doNotOverwrite":true}');
+		symlinkSync(referent, configPath);
+		expect(() => writer.setServerEnabled(config.servers.fake, true)).toThrow("non-regular private file");
+		expect(readFileSync(referent, "utf8")).toBe('{"doNotOverwrite":true}');
+	});
+
 	it("completes OAuth device-code auth without exposing device secrets", async () => {
 		const tempDir = makeTempDir();
 		tempDirs.push(tempDir);
@@ -351,6 +478,7 @@ describe("MCP support", () => {
 		const oauthStore = McpOAuthStore.fromStorage(new InMemoryAuthStorageBackend());
 		let tokenPolls = 0;
 		const fetchFn = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			expect(init?.redirect).toBe("error");
 			const url = String(input);
 			if (url.includes("oauth-protected-resource")) {
 				return new Response(
@@ -435,6 +563,146 @@ describe("MCP support", () => {
 		expect(completed.result.status).toBe("authenticated");
 		expect(oauthStore.getRecord(server)?.tokens?.access_token).toBe("access-token");
 		expect(getMcpServerAuthState(server, process.env, oauthStore)).toBe("authenticated");
+	});
+
+	it("rejects non-loopback OAuth browser redirects before discovery", async () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const server = createTestConfig(tempDir, {
+			transport: "streamable-http",
+			url: "https://api.example/mcp",
+			auth: { type: "oauth", clientId: "volt-test" },
+		}).servers.fake;
+		let fetched = false;
+
+		await expect(
+			startMcpOAuthBrowserAuth({
+				server,
+				store: McpOAuthStore.fromStorage(new InMemoryAuthStorageBackend()),
+				redirectUrl: "https://attacker.example/callback",
+				fetchFn: async () => {
+					fetched = true;
+					throw new Error("unexpected fetch");
+				},
+			}),
+		).rejects.toThrow("numeric loopback");
+		expect(fetched).toBe(false);
+	});
+
+	it("rejects OAuth network redirects during discovery", async () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const server = createTestConfig(tempDir, {
+			transport: "streamable-http",
+			url: "https://api.example/mcp",
+			auth: { type: "oauth", flow: "device", clientId: "volt-test" },
+		}).servers.fake;
+		let redirectMode: RequestInit["redirect"];
+
+		await expect(
+			startMcpOAuthDeviceAuth({
+				server,
+				store: McpOAuthStore.fromStorage(new InMemoryAuthStorageBackend()),
+				fetchFn: async (_input, init) => {
+					redirectMode = init?.redirect;
+					return new Response(undefined, {
+						status: 307,
+						headers: { location: "http://attacker.example/downgrade" },
+					});
+				},
+			}),
+		).rejects.toThrow("network redirects are not allowed");
+		expect(redirectMode).toBe("error");
+	});
+
+	it("requires a stored nonempty exact OAuth browser state before exchanging a code", async () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const server = createTestConfig(tempDir, {
+			transport: "streamable-http",
+			url: "https://api.example/mcp",
+			auth: { type: "oauth", clientId: "volt-test" },
+		}).servers.fake;
+		const store = McpOAuthStore.fromStorage(new InMemoryAuthStorageBackend());
+		let fetched = false;
+
+		await expect(
+			completeMcpOAuthBrowserAuth({
+				server,
+				store,
+				redirectUrl: "http://127.0.0.1:4321/mcp/oauth/callback",
+				code: "attacker-code",
+				state: "attacker-state",
+				fetchFn: async () => {
+					fetched = true;
+					throw new Error("unexpected fetch");
+				},
+			}),
+		).rejects.toThrow("state mismatch");
+		expect(fetched).toBe(false);
+
+		store.patchRecord(server, { state: "expected-state" });
+		await expect(
+			completeMcpOAuthBrowserAuth({
+				server,
+				store,
+				redirectUrl: "http://127.0.0.1:4321/mcp/oauth/callback",
+				code: "attacker-code",
+				state: "wrong-state",
+				fetchFn: async () => {
+					fetched = true;
+					throw new Error("unexpected fetch");
+				},
+			}),
+		).rejects.toThrow("state mismatch");
+		expect(fetched).toBe(false);
+	});
+
+	it("rejects unsafe device verification URLs", async () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const server = createTestConfig(tempDir, {
+			transport: "streamable-http",
+			url: "https://api.example/mcp",
+			auth: { type: "oauth", flow: "device", clientId: "volt-test" },
+		}).servers.fake;
+		const fetchFn = async (input: string | URL | Request): Promise<Response> => {
+			const url = String(input);
+			if (url.includes("oauth-protected-resource")) {
+				return Response.json({
+					resource: "https://api.example/mcp",
+					authorization_servers: ["https://auth.example"],
+				});
+			}
+			if (url.includes("oauth-authorization-server")) {
+				return Response.json({
+					issuer: "https://auth.example",
+					authorization_endpoint: "https://auth.example/authorize",
+					token_endpoint: "https://auth.example/token",
+					device_authorization_endpoint: "https://auth.example/device",
+					response_types_supported: ["code"],
+					grant_types_supported: ["urn:ietf:params:oauth:grant-type:device_code"],
+					token_endpoint_auth_methods_supported: ["none"],
+				});
+			}
+			if (url === "https://auth.example/device") {
+				return Response.json({
+					device_code: "secret-device-code",
+					user_code: "ABCD-EFGH",
+					verification_uri: "file:///tmp/fake-login.html",
+					expires_in: 600,
+				});
+			}
+			throw new Error(`Unexpected fetch URL: ${url}`);
+		};
+
+		await expect(
+			startMcpOAuthDeviceAuth({
+				server,
+				store: McpOAuthStore.fromStorage(new InMemoryAuthStorageBackend()),
+				fetchFn,
+			}),
+		).rejects.toThrow("verification URL must use HTTPS");
 	});
 
 	it("classifies risks and redacts secret-looking arguments", () => {

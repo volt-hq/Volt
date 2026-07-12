@@ -24,11 +24,6 @@ const generatedOut = join(siteRoot, "src", "generated");
 
 const GITHUB_BLOB = "https://github.com/hansjm10/Volt/blob/main";
 
-// The CLI publishes to npm as @hansjm10/volt-cli, but the repo still uses the
-// upstream-derived name. Rewrite it in synced docs so the site shows the real
-// install name; remove once the repo package is renamed.
-const NPM_NAME_REWRITES = [["@earendil-works/volt-coding-agent", "@hansjm10/volt-cli"]];
-
 const manifest = JSON.parse(readFileSync(join(docsSource, "docs.json"), "utf8"));
 
 const titleByPath = new Map();
@@ -83,7 +78,6 @@ for (const file of mdFiles) {
 
   body = body.replace(/\]\(([^)\s]+)\)/g, (m, target) => `](${rewriteLink(target, file)})`);
   body = body.replace(/(\]\(|src=")(?:\.\/)?images\//g, "$1/docs-images/");
-  for (const [from, to] of NPM_NAME_REWRITES) body = body.replaceAll(from, to);
 
   const frontmatter = `---\ntitle: ${escapeYaml(title)}\n---\n\n`;
   writeFileSync(join(contentOut, file), frontmatter + body);

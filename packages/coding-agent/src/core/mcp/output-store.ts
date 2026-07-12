@@ -1,13 +1,29 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, unlinkSync, utimesSync } from "node:fs";
 import { join } from "node:path";
+import {
+	ensurePrivateDirectorySync,
+	hardenPrivateRegularFileSync,
+	writePrivateNewFileSync,
+} from "../../utils/private-files.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead } from "../tools/truncate.ts";
 import type { McpCacheReference, McpOutputTruncation } from "./types.ts";
+
+const DEFAULT_MAX_CACHE_ENTRY_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_CACHE_ENTRIES = 64;
+const DEFAULT_MAX_CACHE_TOTAL_BYTES = 128 * 1024 * 1024;
+const DEFAULT_MAX_CACHE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const CACHE_FILE_PATTERN = /^mcpout_[a-f0-9]{32}\.json$/;
 
 export interface McpOutputStoreOptions {
 	agentDir: string;
 	maxOutputBytes?: number;
 	maxOutputLines?: number;
+	maxCacheEntryBytes?: number;
+	maxCacheEntries?: number;
+	maxCacheTotalBytes?: number;
+	maxCacheAgeMs?: number;
+	now?: () => number;
 	sessionId?: string;
 	workspaceId?: string;
 }
@@ -77,6 +93,11 @@ export class McpOutputStore {
 	private dir: string;
 	private maxOutputBytes: number;
 	private maxOutputLines: number;
+	private maxCacheEntryBytes: number;
+	private maxCacheEntries: number;
+	private maxCacheTotalBytes: number;
+	private maxCacheAgeMs: number;
+	private now: () => number;
 	private sessionId: string | undefined;
 	private workspaceId: string | undefined;
 
@@ -84,6 +105,11 @@ export class McpOutputStore {
 		this.dir = join(options.agentDir, "mcp", "output");
 		this.maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_BYTES;
 		this.maxOutputLines = options.maxOutputLines ?? DEFAULT_MAX_LINES;
+		this.maxCacheEntryBytes = Math.max(1, options.maxCacheEntryBytes ?? DEFAULT_MAX_CACHE_ENTRY_BYTES);
+		this.maxCacheEntries = Math.max(1, options.maxCacheEntries ?? DEFAULT_MAX_CACHE_ENTRIES);
+		this.maxCacheTotalBytes = Math.max(1, options.maxCacheTotalBytes ?? DEFAULT_MAX_CACHE_TOTAL_BYTES);
+		this.maxCacheAgeMs = Math.max(1, options.maxCacheAgeMs ?? DEFAULT_MAX_CACHE_AGE_MS);
+		this.now = options.now ?? Date.now;
 		this.sessionId = options.sessionId;
 		this.workspaceId = options.workspaceId;
 	}
@@ -103,29 +129,41 @@ export class McpOutputStore {
 				returnedLines: truncation.outputLines,
 				totalLines: truncation.totalLines,
 			},
-			cache: {
-				id: cacheId,
-				read: `mcp({"action":"read_cache","cacheId":"${cacheId}"})`,
-			},
+			...(cacheId
+				? {
+						cache: {
+							id: cacheId,
+							read: `mcp({"action":"read_cache","cacheId":"${cacheId}"})`,
+						},
+					}
+				: {}),
 		};
 	}
 
-	write(text: string): string {
-		if (!existsSync(this.dir)) {
-			mkdirSync(this.dir, { recursive: true, mode: 0o700 });
-		}
+	write(text: string): string | undefined {
 		const id = createCacheId();
 		const record: McpStoredOutput = {
 			id,
-			createdAt: new Date().toISOString(),
+			createdAt: new Date(this.now()).toISOString(),
 			...(this.sessionId ? { sessionId: this.sessionId } : {}),
 			...(this.workspaceId ? { workspaceId: this.workspaceId } : {}),
 			text,
 			bytes: byteLength(text),
 			lines: lineCount(text),
 		};
+		const serialized = `${JSON.stringify(record)}\n`;
+		const serializedBytes = byteLength(serialized);
+		if (serializedBytes > this.maxCacheEntryBytes || serializedBytes > this.maxCacheTotalBytes) {
+			return undefined;
+		}
+		ensurePrivateDirectorySync(this.dir);
+		if (!this.prune(serializedBytes, 1)) {
+			return undefined;
+		}
 		const filePath = join(this.dir, `${id}.json`);
-		writeFileSync(filePath, `${JSON.stringify(record)}\n`, { encoding: "utf-8", mode: 0o600 });
+		writePrivateNewFileSync(filePath, serialized);
+		const timestamp = new Date(this.now());
+		utimesSync(filePath, timestamp, timestamp);
 		return id;
 	}
 
@@ -135,29 +173,90 @@ export class McpOutputStore {
 		if (!existsSync(filePath)) {
 			throw new Error(`MCP cache entry not found: ${cacheId}`);
 		}
+		hardenPrivateRegularFileSync(filePath);
+		const stat = lstatSync(filePath);
+		if (stat.size > this.maxCacheEntryBytes || stat.mtimeMs < this.now() - this.maxCacheAgeMs) {
+			throw new Error(`MCP cache entry is expired or exceeds the configured size limit: ${cacheId}`);
+		}
 		const parsed = JSON.parse(readFileSync(filePath, "utf-8")) as unknown;
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
 			throw new Error(`Invalid MCP cache entry: ${cacheId}`);
 		}
 		const record = parsed as Partial<McpStoredOutput>;
-		if (record.id !== id || typeof record.text !== "string" || typeof record.bytes !== "number") {
+		if (
+			record.id !== id ||
+			typeof record.text !== "string" ||
+			typeof record.bytes !== "number" ||
+			record.bytes !== byteLength(record.text)
+		) {
 			throw new Error(`Invalid MCP cache entry: ${cacheId}`);
 		}
-		if (this.sessionId && record.sessionId && record.sessionId !== this.sessionId) {
+		if (record.sessionId !== this.sessionId) {
 			throw new Error(`MCP cache entry is not available in this session: ${cacheId}`);
 		}
-		if (this.workspaceId && record.workspaceId && record.workspaceId !== this.workspaceId) {
+		if (record.workspaceId !== this.workspaceId) {
 			throw new Error(`MCP cache entry is not available in this workspace: ${cacheId}`);
 		}
+		if (options?.cursor !== undefined && !/^\d+$/.test(options.cursor)) {
+			throw new Error("Invalid MCP cache cursor");
+		}
 		const startByte = options?.cursor ? Number.parseInt(options.cursor, 10) : 0;
+		if (!Number.isSafeInteger(startByte) || startByte < 0 || startByte > record.bytes) {
+			throw new Error("Invalid MCP cache cursor");
+		}
 		const maxBytes = Math.max(1, Math.min(options?.limit ?? this.maxOutputBytes, this.maxOutputBytes));
-		const chunk = sliceByUtf8Bytes(record.text, Number.isFinite(startByte) ? startByte : 0, maxBytes);
+		const chunk = sliceByUtf8Bytes(record.text, startByte, maxBytes);
 		return {
 			cacheId,
 			content: chunk.content,
-			startByte: Number.isFinite(startByte) ? startByte : 0,
+			startByte,
 			...(chunk.nextCursor ? { nextCursor: chunk.nextCursor } : {}),
 			totalBytes: record.bytes,
 		};
+	}
+
+	private prune(reservedBytes = 0, reservedEntries = 0): boolean {
+		if (!existsSync(this.dir)) return true;
+		const cutoff = this.now() - this.maxCacheAgeMs;
+		const entries = readdirSync(this.dir)
+			.filter((name) => CACHE_FILE_PATTERN.test(name))
+			.flatMap((name) => {
+				const path = join(this.dir, name);
+				try {
+					const stat = lstatSync(path);
+					if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+						unlinkSync(path);
+						return [];
+					}
+					if (stat.mtimeMs < cutoff || stat.size > this.maxCacheEntryBytes) {
+						unlinkSync(path);
+						return [];
+					}
+					return [{ path, size: stat.size, mtimeMs: stat.mtimeMs }];
+				} catch {
+					return [];
+				}
+			})
+			.sort((left, right) => left.mtimeMs - right.mtimeMs);
+		let totalBytes = entries.reduce((total, entry) => total + entry.size, 0);
+		let totalEntries = entries.length;
+		for (const entry of entries) {
+			if (
+				totalBytes + reservedBytes <= this.maxCacheTotalBytes &&
+				totalEntries + reservedEntries <= this.maxCacheEntries
+			) {
+				break;
+			}
+			try {
+				unlinkSync(entry.path);
+				totalBytes -= entry.size;
+				totalEntries--;
+			} catch {
+				// Capacity is checked below; a failed eviction prevents the new write.
+			}
+		}
+		return (
+			totalBytes + reservedBytes <= this.maxCacheTotalBytes && totalEntries + reservedEntries <= this.maxCacheEntries
+		);
 	}
 }

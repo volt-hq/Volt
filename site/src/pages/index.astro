@@ -32,19 +32,19 @@ const description =
 
     <main>
       <section class="hero">
-        <p class="badge">Beta — now with remote access from iOS</p>
+        <p class="badge">Preview — public beta gates in progress</p>
         <h1>A coding agent that lives in your terminal,<br />not in someone else's cloud.</h1>
         <p class="sub">
           Volt is an open-source coding agent CLI. Bring your own model — Anthropic, OpenAI,
           or any provider — extend it with skills, extensions, and packages, and keep your
-          credentials and code on your own machine.
+          credential storage and tool execution on your own machine.
         </p>
         <div class="install" id="install-box">
           <code>{install}</code>
           <button id="copy-btn" aria-label="Copy install command">Copy</button>
         </div>
         <p class="install-alt">
-          or <code>npm install -g --ignore-scripts @hansjm10/volt-cli</code>
+          or <code>npm install -g --ignore-scripts @earendil-works/volt-coding-agent</code>
           &nbsp;·&nbsp; Windows: <code>irm volt-cli.dev/install.ps1 | iex</code>
         </p>
         <div class="cta">
@@ -72,8 +72,8 @@ const description =
           <h3>Take it with you</h3>
           <p>
             Pair your phone once and open live sessions on your workstation from anywhere —
-            over end-to-end encrypted Iroh connections. Credentials and repositories never
-            leave the host.
+            over end-to-end encrypted Iroh connections. Provider credentials stay on the
+            host, and repository access remains host-controlled.
           </p>
         </div>
         <div class="card">
@@ -104,10 +104,11 @@ const description =
       <section class="remote">
         <h2>Start on your desk. Finish from anywhere.</h2>
         <p>
-          <code>volt remote host</code> exposes a local Volt runtime to your paired iPhone —
-          no accounts, no relay of your source code through third-party servers. Register
-          workspaces by name, scan a QR code once, and your sessions show up as tabs on
-          your phone with live transcripts, notifications, and Live Activities.
+          <code>volt remote host</code> exposes a local Volt runtime to your paired iPhone
+          without a Volt account. Connection traffic may traverse configured Iroh relays,
+          but session payloads remain end-to-end encrypted. Register workspaces by name,
+          scan a QR code once, and your sessions show up as tabs on your phone with live
+          transcripts, notifications, and Live Activities.
         </p>
         <a class="btn" href="/docs/usage/#remote-access-over-iroh-preview">How remote access works</a>
       </section>

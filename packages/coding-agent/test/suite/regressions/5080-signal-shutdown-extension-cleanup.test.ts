@@ -25,6 +25,8 @@ type ShutdownThis = {
 	settingsManager: { rememberActiveProfile: () => void; flush: () => Promise<void> };
 	sessionManager: SessionManager;
 	releaseDaemonLeaseOnQuit: () => Promise<void>;
+	closeLspTrace: () => Promise<void>;
+	cleanupAllScratchDirectories: () => void;
 };
 
 type InteractiveModePrototypeWithShutdown = {
@@ -92,6 +94,8 @@ function createContext(order: string[], sessionManager = createSessionManager())
 		},
 		sessionManager,
 		releaseDaemonLeaseOnQuit: vi.fn(async () => {}),
+		closeLspTrace: vi.fn(async () => {}),
+		cleanupAllScratchDirectories: vi.fn(),
 	};
 }
 

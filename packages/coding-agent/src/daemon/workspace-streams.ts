@@ -19,10 +19,10 @@ import {
 	type IrohRemoteWorktreeRpcBackend,
 } from "../core/remote/iroh/worktree-rpc.ts";
 import {
-	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
 	type IrohBiStreamLike,
 	type IrohBytes,
 	type IrohRecvStreamLike,
+	readIrohJsonlLine,
 } from "../core/rpc/iroh-transport.ts";
 import { serializeJsonLine } from "../core/rpc/jsonl.ts";
 import {
@@ -35,6 +35,7 @@ import {
 import { listWorkspaceDirectories } from "./workspace-directory.ts";
 
 const DEFAULT_READ_LIMIT = 64 * 1024;
+export const DEFAULT_IROH_UTILITY_RPC_MAX_LINE_BYTES = 64 * 1024;
 
 export const WORKSPACE_UNREGISTERED_CLOSE_REASON = "workspace_unregistered";
 const LIST_WORKSPACE_DIRECTORIES_RPC_TYPE = "list_workspace_directories";
@@ -44,36 +45,10 @@ export async function readLineFromIroh(
 	initial: Buffer = Buffer.alloc(0),
 	options: { maxLineBytes?: number } = {},
 ): Promise<{ line: string | undefined; rest: Buffer }> {
-	const maxLineBytes = options.maxLineBytes;
-	const readLimit = Math.min(DEFAULT_READ_LIMIT, maxLineBytes === undefined ? DEFAULT_READ_LIMIT : maxLineBytes + 1);
-	let buffer = Buffer.from(initial);
-
-	while (true) {
-		const newlineIndex = buffer.indexOf(10);
-		if (newlineIndex !== -1) {
-			let lineBuffer = buffer.subarray(0, newlineIndex);
-			if (lineBuffer.length > 0 && lineBuffer[lineBuffer.length - 1] === 13) {
-				lineBuffer = lineBuffer.subarray(0, lineBuffer.length - 1);
-			}
-			if (maxLineBytes !== undefined && lineBuffer.length > maxLineBytes) {
-				throw new Error(`Line exceeds maximum size of ${maxLineBytes} bytes`);
-			}
-			return {
-				line: lineBuffer.toString("utf8"),
-				rest: buffer.subarray(newlineIndex + 1),
-			};
-		}
-
-		if (maxLineBytes !== undefined && buffer.length > maxLineBytes) {
-			throw new Error(`Line exceeds maximum size of ${maxLineBytes} bytes`);
-		}
-
-		const chunk = await recv.read(readLimit);
-		if (!chunk || chunk.length === 0) {
-			return { line: undefined, rest: buffer };
-		}
-		buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
-	}
+	return await readIrohJsonlLine(recv, initial, {
+		readLimit: DEFAULT_READ_LIMIT,
+		maxLineBytes: options.maxLineBytes ?? DEFAULT_IROH_UTILITY_RPC_MAX_LINE_BYTES,
+	});
 }
 
 export interface RemoteSanitizerOverrides {
@@ -160,11 +135,9 @@ async function runWorkspaceUtilityRpcLoop(
 	initialInput: IrohBytes,
 	handleCommand: (line: string) => Promise<boolean>,
 ): Promise<void> {
-	let buffer: Buffer = Buffer.from(Array.from(initialInput));
+	let buffer: Buffer = Buffer.from(initialInput);
 	while (true) {
-		const result = await readLineFromIroh(stream.recv, buffer, {
-			maxLineBytes: DEFAULT_IROH_RPC_MAX_LINE_BYTES,
-		});
+		const result = await readLineFromIroh(stream.recv, buffer);
 		if (result.line === undefined) {
 			if (result.rest.length > 0) {
 				const shouldClose = await handleCommand(result.rest.toString("utf8"));
@@ -190,7 +163,10 @@ export interface WorkspaceStreamHooks {
 	unregisterWorkspace(
 		workspaceName: string,
 		excludedStreamClose: () => void,
-	): Promise<{ ok: true; closedStreamCount: number; stoppedRuntimeCount: number } | { ok: false; error: string }>;
+	): Promise<
+		| { ok: true; closedStreamCount: number; stoppedRuntimeCount: number }
+		| { ok: false; error: string; details?: Record<string, unknown> }
+	>;
 }
 
 export interface WorkspaceStreamContext {
@@ -374,6 +350,16 @@ export async function runWorkspaceManagementStream(
 			excludedClosed = true;
 		});
 		if (!result.ok) {
+			await hooks.auditLogger
+				.log({
+					type: "workspace_unregistered",
+					clientNodeId: authorization.client.nodeId,
+					workspace: request.workspaceName,
+					success: false,
+					error: result.error,
+					details: { source: "remote_workspace_management_stream", ...(result.details ?? {}) },
+				})
+				.catch(() => {});
 			await writeIrohRemoteJsonLine(
 				stream.send,
 				createIrohRemoteRpcErrorResponse(id, "unregister_workspace", result.error),

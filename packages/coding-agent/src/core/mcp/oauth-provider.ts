@@ -157,6 +157,7 @@ export class VoltMcpOAuthProvider implements OAuthClientProvider {
 	}
 
 	async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
+		assertHttpsEndpoint(authorizationUrl.toString(), "authorization URL");
 		this.authorizationUrlValue = authorizationUrl;
 		await this.onAuthorizationUrl?.(authorizationUrl);
 	}

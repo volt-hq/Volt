@@ -122,6 +122,12 @@ Attribution:
 
 ## Releasing
 
+**Repository prerequisite**: protect `refs/tags/v*` with a GitHub repository
+ruleset that restricts creation, update, and deletion to release owners. The
+release script and CI validate an annotated tag on `main`, but checks loaded
+from a tag cannot defend against an actor who can replace that tag or its
+workflow without a repository-level rule.
+
 **Lockstep versioning**: all packages share one version; every release updates all together. `patch` = fixes + additions, `minor` = breaking changes. No major releases.
 
 1. **Update CHANGELOGs**: ask the user whether they ran the `/cl` prompt on the latest commit on `main`. If not, they must run `/cl` first to audit and update each package's `[Unreleased]` section before releasing.
@@ -154,7 +160,13 @@ Attribution:
    ```
    Use `npm_config_min_release_age=0` only for the release command. The repo's normal npm age gate can otherwise block the release lockfile refresh when the current workspace package version was published recently. Review any lockfile or shrinkwrap diffs the release creates before push.
 
-   The release script bumps all package versions, updates changelogs, regenerates release artifacts, runs `npm run check`, commits `Release vX.Y.Z`, tags `vX.Y.Z`, adds fresh `## [Unreleased]` changelog sections, commits `Add [Unreleased] section for next cycle`, then pushes `main` and the tag. Do not rerun the release script after a tag was pushed.
+   The release script first requires clean local `main` to exactly match
+   `origin/main`, then bumps all package versions, updates changelogs,
+   regenerates release artifacts, runs `npm run check`, commits `Release
+   vX.Y.Z`, creates an annotated `vX.Y.Z` tag, adds fresh `## [Unreleased]`
+   changelog sections, commits `Add [Unreleased] section for next cycle`, then
+   pushes `main` and the tag. Do not rerun the release script after a tag was
+   pushed.
 
 4. **CI publishes npm packages**: pushing the `vX.Y.Z` tag triggers `.github/workflows/build-binaries.yml`. The `publish-npm` job uses npm trusted publishing through GitHub Actions OIDC with environment `npm-publish`; no local `npm publish`, `npm whoami`, OTP, or WebAuthn flow is required.
 

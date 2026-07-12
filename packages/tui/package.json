@@ -14,7 +14,8 @@
 		"dist/**/*",
 		"native/win32/prebuilds/**/*.node",
 		"native/darwin/prebuilds/**/*.node",
-		"README.md"
+		"README.md",
+		"LICENSE"
 	],
 	"keywords": [
 		"tui",
@@ -25,7 +26,19 @@
 		"typescript",
 		"cli"
 	],
-	"author": "Mario Zechner",
+	"contributors": [
+		"Mario Zechner",
+		"Jordan Hans"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/hansjm10/Volt.git",
+		"directory": "packages/tui"
+	},
+	"homepage": "https://github.com/hansjm10/Volt#readme",
+	"bugs": {
+		"url": "https://github.com/hansjm10/Volt/issues"
+	},
 	"license": "MIT",
 	"engines": {
 		"node": ">=22.19.0"

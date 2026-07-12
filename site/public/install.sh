@@ -4,49 +4,55 @@
 # Usage:
 #   curl -fsSL https://volt-cli.dev/install.sh | sh
 #
-# Installs the Volt coding agent globally via npm with lifecycle scripts
-# disabled. Volt does not require install scripts for normal npm installs.
-#
-# Options (env vars):
-#   VOLT_INSTALL_METHOD=binary   Download a standalone prebuilt binary from
-#                                GitHub Releases into ~/.volt/bin instead of
-#                                using npm. Note: binary builds do not support
-#                                `volt daemon` (remote/iOS access needs the
-#                                npm install).
-#   VOLT_VERSION=v0.79.6         Pin a specific release (binary method only;
-#                                npm method installs the latest published
-#                                version).
+# Options (environment variables):
+#   VOLT_INSTALL_METHOD=npm      Node.js install (default). Supports the local
+#                                CLI/TUI and, where the pinned native Iroh
+#                                adapter is available, daemon/remote/iOS access.
+#   VOLT_INSTALL_METHOD=binary   Standalone local CLI/TUI only. The binary does
+#                                not bundle Iroh and rejects `volt daemon`.
+#   VOLT_VERSION=v0.79.6         Pin a canonical release for either method.
 set -eu
 
-PACKAGE="@hansjm10/volt-cli"
+PACKAGE="@earendil-works/volt-coding-agent"
 REPO="hansjm10/Volt"
 MIN_NODE_MAJOR=22
+MIN_NODE_MINOR=19
 METHOD="${VOLT_INSTALL_METHOD:-npm}"
+VERSION="${VOLT_VERSION:-latest}"
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'volt install: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+validate_version() {
+    [ "$VERSION" = "latest" ] && return
+    printf '%s\n' "$VERSION" | grep -Eq '^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || \
+        fail "VOLT_VERSION must be 'latest' or a canonical version such as v0.79.6"
+}
+
 install_npm() {
-    have node || fail "Node.js not found. Volt requires Node.js >= 22.19.
-Install it from https://nodejs.org or via your package manager, then re-run:
-  curl -fsSL https://volt-cli.dev/install.sh | sh
-Or install a standalone binary (no Node needed, but 'volt daemon' is unavailable):
+    have node || fail "Node.js not found. The full Volt install requires Node.js >= 22.19.
+Install it from https://nodejs.org, then re-run this installer.
+For a local CLI/TUI without daemon or remote/iOS support:
   curl -fsSL https://volt-cli.dev/install.sh | VOLT_INSTALL_METHOD=binary sh"
 
-    node_major=$(node -p 'process.versions.node.split(".")[0]')
-    [ "$node_major" -ge "$MIN_NODE_MAJOR" ] || fail "Node.js $(node --version) is too old. Volt requires Node.js >= 22.19."
-
+    node_supported=$(node -p "const [major, minor] = process.versions.node.split('.').map(Number); Number(major > $MIN_NODE_MAJOR || (major === $MIN_NODE_MAJOR && minor >= $MIN_NODE_MINOR))")
+    [ "$node_supported" = "1" ] || fail "Node.js $(node --version) is too old. Volt requires Node.js >= 22.19."
     have npm || fail "npm not found. It normally ships with Node.js; install Node.js from https://nodejs.org."
 
-    say "Installing $PACKAGE globally (lifecycle scripts disabled)..."
-    npm install -g --ignore-scripts "$PACKAGE"
+    npm_spec="$PACKAGE"
+    if [ "$VERSION" != "latest" ]; then
+        npm_spec="$PACKAGE@${VERSION#v}"
+    fi
+
+    say "Installing $npm_spec globally (lifecycle scripts disabled)..."
+    npm install -g --ignore-scripts "$npm_spec"
+    node_runtime=$(node -p '`${process.platform}-${process.arch}`')
 
     if have volt; then
         say ""
         say "Installed: $(volt --version 2>/dev/null || say volt)"
         say "Run 'volt' in a project directory to get started."
-        say "Docs: https://volt-cli.dev/docs/quickstart/"
     else
         npm_bin=$(npm prefix -g)/bin
         say ""
@@ -54,9 +60,31 @@ Or install a standalone binary (no Node needed, but 'volt daemon' is unavailable
         say "Add it to your shell profile, e.g.:"
         say "  export PATH=\"$npm_bin:\$PATH\""
     fi
+    if [ "$node_runtime" = "darwin-x64" ]; then
+        say "This install supports the local CLI/TUI."
+        say "Daemon and remote/iOS access are unavailable on Intel macOS because the pinned Iroh adapter has no Darwin x64 binding."
+    else
+        say "This npm install supports 'volt daemon' and remote/iOS access."
+    fi
+    say "Docs: https://volt-cli.dev/docs/quickstart/"
+}
+
+sha256_file() {
+    if have sha256sum; then
+        sha256sum "$1" | awk '{print $1}'
+    elif have shasum; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif have openssl; then
+        openssl dgst -sha256 "$1" | awk '{print $NF}'
+    else
+        fail "no SHA-256 tool found (need sha256sum, shasum, or openssl)"
+    fi
 }
 
 install_binary() {
+    have curl || fail "curl is required for the standalone binary install"
+    have tar || fail "tar is required for the standalone binary install"
+
     os=$(uname -s)
     arch=$(uname -m)
     case "$os" in
@@ -70,30 +98,49 @@ install_binary() {
         *) fail "unsupported architecture '$arch'" ;;
     esac
 
-    version="${VOLT_VERSION:-latest}"
-    if [ "$version" = "latest" ]; then
-        url="https://github.com/$REPO/releases/latest/download/volt-$platform.tar.gz"
+    asset="volt-$platform.tar.gz"
+    if [ "$VERSION" = "latest" ]; then
+        base_url="https://github.com/$REPO/releases/latest/download"
     else
-        url="https://github.com/$REPO/releases/download/$version/volt-$platform.tar.gz"
+        release_tag="v${VERSION#v}"
+        base_url="https://github.com/$REPO/releases/download/$release_tag"
     fi
 
+    umask 077
     bin_dir="$HOME/.volt/bin"
     mkdir -p "$bin_dir"
-    tmp=$(mktemp -d)
+    chmod 700 "$HOME/.volt" "$bin_dir" 2>/dev/null || true
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/volt-install.XXXXXX")
     trap 'rm -rf "$tmp"' EXIT
+    trap 'exit 1' HUP INT TERM
 
-    say "Downloading $url ..."
-    curl -fSL --proto '=https' --tlsv1.2 -o "$tmp/volt.tar.gz" "$url"
-    tar -xzf "$tmp/volt.tar.gz" -C "$tmp"
+    say "Downloading $base_url/$asset ..."
+    curl -fSL --proto '=https' --tlsv1.2 -o "$tmp/$asset" "$base_url/$asset"
+    curl -fSL --proto '=https' --tlsv1.2 -o "$tmp/SHA256SUMS" "$base_url/SHA256SUMS"
 
-    volt_bin=$(find "$tmp" -type f -name volt | head -n 1)
-    [ -n "$volt_bin" ] || fail "no 'volt' binary found in the release archive"
-    install -m 755 "$volt_bin" "$bin_dir/volt"
+    checksum_count=$(awk -v asset="$asset" '$2 == asset { count += 1 } END { print count + 0 }' "$tmp/SHA256SUMS")
+    [ "$checksum_count" = "1" ] || fail "SHA256SUMS must contain exactly one checksum for $asset"
+    expected=$(awk -v asset="$asset" '$2 == asset { print $1 }' "$tmp/SHA256SUMS")
+    printf '%s\n' "$expected" | grep -Eq '^[0-9A-Fa-f]{64}$' || fail "invalid checksum for $asset"
+    actual=$(sha256_file "$tmp/$asset")
+    expected=$(printf '%s' "$expected" | tr 'A-F' 'a-f')
+    actual=$(printf '%s' "$actual" | tr 'A-F' 'a-f')
+    [ "$actual" = "$expected" ] || fail "SHA-256 verification failed for $asset"
+
+    mkdir "$tmp/extract"
+    tar -xzf "$tmp/$asset" -C "$tmp/extract" volt/volt
+    volt_bin="$tmp/extract/volt/volt"
+    [ -f "$volt_bin" ] && [ ! -L "$volt_bin" ] || fail "release archive does not contain a regular volt/volt executable"
+
+    staged="$bin_dir/.volt.install.$$"
+    install -m 755 "$volt_bin" "$staged"
+    mv -f "$staged" "$bin_dir/volt"
 
     say ""
-    say "Installed volt to $bin_dir/volt"
-    say "Note: standalone binaries do not support 'volt daemon' (remote/iOS access)."
-    say "      For that, install via npm: curl -fsSL https://volt-cli.dev/install.sh | sh"
+    say "Installed verified standalone binary to $bin_dir/volt"
+    say "Capability: local CLI/TUI only. 'volt daemon' and remote/iOS access are unavailable."
+    say "For those features, use the default npm install:"
+    say "  curl -fsSL https://volt-cli.dev/install.sh | sh"
     case ":$PATH:" in
         *":$bin_dir:"*) ;;
         *)
@@ -105,6 +152,7 @@ install_binary() {
     say "Docs: https://volt-cli.dev/docs/quickstart/"
 }
 
+validate_version
 case "$METHOD" in
     npm) install_npm ;;
     binary) install_binary ;;

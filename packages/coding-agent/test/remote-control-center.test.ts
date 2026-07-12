@@ -1,6 +1,8 @@
 import { visibleWidth } from "@earendil-works/volt-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { IrohRemoteAccessPresetName } from "../src/core/remote/iroh/access-grant.ts";
+import { IROH_REMOTE_ALPN } from "../src/core/remote/iroh/protocol.ts";
+import { encodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import {
@@ -20,6 +22,22 @@ import { stripAnsi } from "../src/utils/ansi.ts";
 
 type RemoteStatus = Extract<ControlResponse, { type: "status_result" }>;
 type PairingProgress = Extract<ControlEvent, { type: "pairing_progress" }>;
+
+const PAIRING_HOST_NODE_ID = Array.from({ length: 32 }, (_, index) => index.toString(16).padStart(2, "0")).join("");
+
+function verificationTicket(): string {
+	return encodeIrohRemoteTicketPayload({
+		alpn: IROH_REMOTE_ALPN,
+		expiresAt: 1_800_000_000_000,
+		irohTicket: "endpoint-ticket",
+		nodeId: PAIRING_HOST_NODE_ID,
+		relayMode: "production",
+		relayUrls: ["https://relay-b.example/", "https://relay-a.example:8443"],
+		relayAuthToken: "relay-auth-must-not-render",
+		secret: "pairing-secret-must-not-render",
+		workspace: "volt",
+	});
+}
 
 function status(overrides: Partial<RemoteStatus> = {}): RemoteStatus {
 	return {
@@ -388,7 +406,7 @@ describe("RemoteControlCenterComponent", () => {
 		backend.pairingProgress?.({ type: "pairing_progress", requestId: "pair-1", phase: "waiting" });
 		text = component.render(40).map(stripAnsi).join("\n");
 		expect(text).toContain("PAIR PHONE · volt · Full access");
-		expect(text).toContain("Scan with Volt on your phone");
+		expect(text).toContain("Scan with Volt, then compare");
 		expect(text).toContain("Enlarge the terminal");
 
 		component.handleInput("\x1b[A");
@@ -401,6 +419,41 @@ describe("RemoteControlCenterComponent", () => {
 		component.handleInput("\x1b");
 		expect(backend.pairDisposeCalls).toBe(1);
 		expect(component.render(40).map(stripAnsi).join("\n")).toContain("HEADLESS POLICY");
+	});
+
+	it("shows full safe pairing verification details at the narrow review size", async () => {
+		const backend = new FakeBackend({ kind: "online", status: status() });
+		const { component } = createComponent(backend, 24);
+		await component.start();
+		component.render(80);
+		component.handleInput("\x1b[B");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		component.handleInput("\n");
+		await settle();
+		backend.pairingProgress?.({
+			type: "pairing_progress",
+			requestId: "pair-1",
+			phase: "ticket",
+			ticket: verificationTicket(),
+		});
+		backend.pairingProgress?.({ type: "pairing_progress", requestId: "pair-1", phase: "waiting" });
+
+		const lines = component.render(80);
+		const text = lines.map(stripAnsi).join("\n");
+		expect(lines).toHaveLength(24);
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(80);
+		expect(text).toContain("630DCD29-66C43366-91125448-BBB25B4F");
+		expect(text).toContain(PAIRING_HOST_NODE_ID);
+		expect(text).toContain("Workspace\n  volt");
+		expect(text).toContain("Relay mode\n  production");
+		expect(text).toContain("https://relay-a.example:8443");
+		expect(text).toContain("https://relay-b.example");
+		expect(text).toContain("https://relay-a.example:8443\n  https://relay-b.example");
+		expect(text).toContain("2027-01-15T08:00:00.000Z");
+		expect(text).toContain("Copy pairing ticket");
+		expect(text).not.toContain("pairing-secret-must-not-render");
+		expect(text).not.toContain("relay-auth-must-not-render");
 	});
 
 	it("keeps the selected access preset when a workspace choice is required", async () => {
@@ -498,12 +551,12 @@ describe("RemoteControlCenterComponent", () => {
 			requestId: "pair-1",
 			phase: "waiting",
 		});
-		expect(component.render(100).map(stripAnsi).join("\n")).toContain("Scan with Volt on your phone");
+		expect(component.render(100).map(stripAnsi).join("\n")).toContain("Scan with Volt, then compare");
 	});
 
 	it("renders a complete QR only when the viewport can contain it", async () => {
 		const backend = new FakeBackend({ kind: "online", status: status() });
-		const { component } = createComponent(backend, 80);
+		const { component } = createComponent(backend, 50);
 		await component.start();
 		component.render(160);
 		component.handleInput("\x1b[B");
@@ -515,13 +568,29 @@ describe("RemoteControlCenterComponent", () => {
 			type: "pairing_progress",
 			requestId: "pair-1",
 			phase: "ticket",
-			ticket: "volt+iroh://v1/test-pairing-ticket",
+			ticket: verificationTicket(),
 		});
-		const lines = component.render(160);
+		let lines = component.render(160);
+		expect(lines.map(stripAnsi).join("\n")).toContain("Show pairing QR");
+		component.handleInput("\x1b[A");
+		component.handleInput("\x1b[A");
+		component.handleInput("\n");
+		lines = component.render(160);
 		const text = lines.map(stripAnsi).join("\n");
 		expect(text).not.toContain("Enlarge the terminal");
 		expect(text).toMatch(/[▀▄█]/);
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(160);
+
+		backend.pairingProgress?.({
+			type: "pairing_progress",
+			requestId: "pair-1",
+			phase: "completed",
+			clientNodeId: "paired-phone",
+		});
+		const completed = component.render(160).map(stripAnsi).join("\n");
+		expect(completed).toContain("Pairing complete");
+		expect(completed).toContain("Paired paired-phone");
+		expect(completed).not.toMatch(/[▀▄█]/);
 	});
 
 	it("requires confirmation before revoking a paired device", async () => {

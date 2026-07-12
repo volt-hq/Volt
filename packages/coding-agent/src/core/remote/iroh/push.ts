@@ -84,13 +84,28 @@ export interface IrohRemotePushRelayLiveActivityRequest {
 	dismissalDateEpochSeconds?: number;
 }
 
+export interface IrohRemotePushRelayRevocationRequest {
+	pushTargetId: string;
+	pushTargetAuthToken: string;
+}
+
 export type IrohRemotePushRelayNotificationResult = { status: "sent" } | { status: "invalid_target" };
+export type IrohRemotePushRelayRevocationResult = { status: "revoked" } | { status: "already_absent" };
 
 export interface IrohRemotePushRelayClient {
 	sendNotification(request: IrohRemotePushRelayNotificationRequest): Promise<IrohRemotePushRelayNotificationResult>;
 	sendLiveActivityUpdate?(
 		request: IrohRemotePushRelayLiveActivityRequest,
 	): Promise<IrohRemotePushRelayNotificationResult>;
+	revokePushTarget?(request: IrohRemotePushRelayRevocationRequest): Promise<IrohRemotePushRelayRevocationResult>;
+}
+
+export interface IrohRemotePushTargetRevocationSummary {
+	attempted: number;
+	revoked: number;
+	alreadyAbsent: number;
+	failed: number;
+	skipped: number;
 }
 
 export type IrohRemotePushNotificationDeliveryStatus =
@@ -137,6 +152,9 @@ export interface IrohRemotePushRelayHttpClientOptions {
 // The deduper lives for the daemon's whole lifetime, so the per-client id set is
 // bounded. Re-marking an evicted id at most re-sends one very old notification.
 const MAX_SENT_EVENT_IDS_PER_CLIENT = 1000;
+export const MAX_IROH_REMOTE_PUSH_TARGET_REVOCATIONS_PER_CLIENT = 8;
+export const MAX_IROH_REMOTE_PUSH_TARGET_REVOCATION_CONCURRENCY = 4;
+const MAX_IROH_REMOTE_PUSH_RELAY_RESPONSE_BYTES = 1024;
 
 export class IrohRemoteInMemoryPushNotificationDeduper implements IrohRemotePushNotificationDeduper {
 	private readonly sentEventIdsByClient = new Map<string, Set<string>>();
@@ -184,7 +202,7 @@ const MAX_RELAY_ERROR_DETAIL_LENGTH = 200;
 /** Best-effort extraction of the relay's `{ error, code }` body for audit logs. */
 async function readRelayErrorDetail(response: Response): Promise<string | undefined> {
 	try {
-		const body: unknown = await response.json();
+		const body: unknown = await readBoundedRelayJson(response);
 		if (typeof body !== "object" || body === null) {
 			return undefined;
 		}
@@ -227,9 +245,35 @@ export class IrohRemotePushRelayHttpClient implements IrohRemotePushRelayClient 
 		return this.sendRelayRequest("v1/live-activities", createRelayLiveActivityBody(request));
 	}
 
+	async revokePushTarget(request: IrohRemotePushRelayRevocationRequest): Promise<IrohRemotePushRelayRevocationResult> {
+		const response = await this.fetcher(new URL("v1/push-targets/revoke", this.baseUrl).toString(), {
+			body: JSON.stringify(createRelayRevocationBody(request)),
+			headers: this.createHeaders(),
+			method: "POST",
+			signal: AbortSignal.timeout(this.timeoutMs),
+		});
+		if (response.status === 404 || response.status === 410) {
+			return { status: "already_absent" };
+		}
+		if (!response.ok) {
+			throw new IrohRemotePushRelayHttpError(
+				response.status,
+				isTransientHttpStatus(response.status),
+				await readRelayErrorDetail(response),
+			);
+		}
+		const body = await readBoundedRelayJson(response);
+		if (body.status === "revoked") return { status: "revoked" };
+		if (body.status === "already_revoked") return { status: "already_absent" };
+		throw new IrohRemotePushRelayHttpError(502, true, "invalid revoke response");
+	}
+
 	private async sendRelayRequest(
 		path: string,
-		body: IrohRemotePushRelayNotificationRequest | IrohRemotePushRelayLiveActivityRequest,
+		body:
+			| IrohRemotePushRelayNotificationRequest
+			| IrohRemotePushRelayLiveActivityRequest
+			| IrohRemotePushRelayRevocationRequest,
 	): Promise<IrohRemotePushRelayNotificationResult> {
 		const response = await this.fetcher(new URL(path, this.baseUrl).toString(), {
 			body: JSON.stringify(body),
@@ -295,6 +339,99 @@ function createRelayLiveActivityBody(
 			? {}
 			: { dismissalDateEpochSeconds: request.dismissalDateEpochSeconds }),
 	};
+}
+
+function createRelayRevocationBody(
+	request: IrohRemotePushRelayRevocationRequest,
+): IrohRemotePushRelayRevocationRequest {
+	return {
+		pushTargetId: request.pushTargetId,
+		pushTargetAuthToken: request.pushTargetAuthToken,
+	};
+}
+
+async function readBoundedRelayJson(response: Response): Promise<Record<string, unknown>> {
+	const reader = response.body?.getReader();
+	if (!reader) return {};
+	const chunks: Uint8Array[] = [];
+	let totalBytes = 0;
+	try {
+		while (true) {
+			const chunk = await reader.read();
+			if (chunk.done) break;
+			totalBytes += chunk.value.byteLength;
+			if (totalBytes > MAX_IROH_REMOTE_PUSH_RELAY_RESPONSE_BYTES) {
+				await reader.cancel();
+				throw new IrohRemotePushRelayHttpError(502, true, "relay response too large");
+			}
+			chunks.push(chunk.value);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	const bytes = new Uint8Array(totalBytes);
+	let offset = 0;
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	try {
+		const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+		return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+			? (parsed as Record<string, unknown>)
+			: {};
+	} catch {
+		return {};
+	}
+}
+
+/**
+ * Best-effort cleanup after local client revocation. Local authority is already
+ * gone before this runs, so relay failures are summarized rather than thrown.
+ * The call count is capped to keep a corrupted or malicious state file from
+ * turning one control request into unbounded outbound work; relay TTL bounds any
+ * skipped or failed credential's remaining lifetime.
+ */
+export async function revokeIrohRemoteClientPushTargets(
+	client: Pick<IrohRemoteClient, "pushTargets"> | undefined,
+	relayClient: IrohRemotePushRelayClient,
+): Promise<IrohRemotePushTargetRevocationSummary> {
+	const uniqueTargets = new Map<string, IrohRemotePushRelayRevocationRequest>();
+	for (const target of client?.pushTargets ?? []) {
+		if (target.id.length === 0 || target.pushTargetAuthToken.length === 0) continue;
+		uniqueTargets.set(`${target.id}\0${target.pushTargetAuthToken}`, {
+			pushTargetId: target.id,
+			pushTargetAuthToken: target.pushTargetAuthToken,
+		});
+	}
+	const targets = Array.from(uniqueTargets.values());
+	const selectedTargets = targets.slice(0, MAX_IROH_REMOTE_PUSH_TARGET_REVOCATIONS_PER_CLIENT);
+	const summary: IrohRemotePushTargetRevocationSummary = {
+		attempted: selectedTargets.length,
+		revoked: 0,
+		alreadyAbsent: 0,
+		failed: 0,
+		skipped: targets.length - selectedTargets.length,
+	};
+	const revokePushTarget = relayClient.revokePushTarget?.bind(relayClient);
+	if (!revokePushTarget) {
+		summary.failed = selectedTargets.length;
+		return summary;
+	}
+	for (let offset = 0; offset < selectedTargets.length; offset += MAX_IROH_REMOTE_PUSH_TARGET_REVOCATION_CONCURRENCY) {
+		const batch = selectedTargets.slice(offset, offset + MAX_IROH_REMOTE_PUSH_TARGET_REVOCATION_CONCURRENCY);
+		const results = await Promise.allSettled(batch.map((target) => revokePushTarget(target)));
+		for (const result of results) {
+			if (result.status === "rejected") {
+				summary.failed += 1;
+			} else if (result.value.status === "revoked") {
+				summary.revoked += 1;
+			} else {
+				summary.alreadyAbsent += 1;
+			}
+		}
+	}
+	return summary;
 }
 
 export class IrohRemotePushNotificationDispatcher implements IrohRemotePushNotificationDelivery {

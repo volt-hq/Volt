@@ -1,9 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { Buffer } from "node:buffer";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME } from "../config.ts";
+import { writeDurableAtomicFileSync } from "../utils/durable-atomic-write.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
+import { ensurePrivateDirectorySync, hardenPrivateRegularFileSync } from "../utils/private-files.ts";
 
 export type ProjectTrustDecision = boolean | null;
 
@@ -25,6 +28,7 @@ export interface ProjectTrustOption {
 }
 
 type TrustFile = Record<string, boolean | null | undefined>;
+const MAX_TRUST_FILE_BYTES = 4 * 1024 * 1024;
 
 const TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES = [
 	"settings.json",
@@ -99,6 +103,10 @@ function readTrustFile(path: string): TrustFile {
 	if (!existsSync(path)) {
 		return {};
 	}
+	hardenPrivateRegularFileSync(path);
+	if (lstatSync(path).size > MAX_TRUST_FILE_BYTES) {
+		throw new Error(`Trust store exceeds ${MAX_TRUST_FILE_BYTES} bytes: ${path}`);
+	}
 
 	let parsed: unknown;
 	try {
@@ -130,13 +138,17 @@ function writeTrustFile(path: string, data: TrustFile): void {
 			sorted[key] = value;
 		}
 	}
-	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, `${JSON.stringify(sorted, null, 2)}\n`, "utf-8");
+	const serialized = `${JSON.stringify(sorted, null, 2)}\n`;
+	if (Buffer.byteLength(serialized, "utf8") > MAX_TRUST_FILE_BYTES) {
+		throw new Error(`Refusing to write trust store larger than ${MAX_TRUST_FILE_BYTES} bytes`);
+	}
+	ensurePrivateDirectorySync(dirname(path));
+	writeDurableAtomicFileSync(path, serialized);
 }
 
 function acquireTrustLockSync(path: string): () => void {
 	const trustDir = dirname(path);
-	mkdirSync(trustDir, { recursive: true });
+	ensurePrivateDirectorySync(trustDir);
 	const maxAttempts = 10;
 	const delayMs = 20;
 	let lastError: unknown;

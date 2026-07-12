@@ -3,12 +3,13 @@ import { createIrohRemotePresetAccess, type IrohRemoteRpcGrant } from "../src/co
 import { type IrohRemoteAuditEvent, IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import type { IrohRemoteWorkspaceWorktree } from "../src/core/remote/iroh/state.ts";
+import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import {
 	handleIrohRemoteWorktreeRpcCommand,
 	type IrohRemoteWorktreeRpcBackend,
 	type IrohRemoteWorktreeSummary,
 } from "../src/core/remote/iroh/worktree-rpc.ts";
-import { runWorktreeManagementStream } from "../src/daemon/workspace-streams.ts";
+import { runWorkspaceManagementStream, runWorktreeManagementStream } from "../src/daemon/workspace-streams.ts";
 import { ManualIrohRecvStream, ManualIrohSendStream, parseWrittenObjects } from "./iroh-stream-doubles.ts";
 
 const HOST_WORKSPACE_PATH = "/home/user/projects/repo";
@@ -385,5 +386,68 @@ describe("manage_worktrees management stream", () => {
 		expect(frames[3]).toMatchObject({ success: false, error: "invalid_request" });
 		// Failed create/remove attempts are still audited.
 		expect(auditEvents.map((event) => event.success)).toEqual([false, false, false]);
+	});
+});
+
+describe("workspace unregister management stream", () => {
+	it("returns and audits workspace_has_worktrees without closing the stream", async () => {
+		const recv = new ManualIrohRecvStream();
+		const send = new ManualIrohSendStream();
+		recv.pushLine(JSON.stringify({ id: "remove", type: "unregister_workspace", workspaceName: "ws" }));
+		recv.end();
+		const auditEvents: IrohRemoteAuditEvent[] = [];
+		const closeStream = vi.fn();
+		const unregisterWorkspace = vi.fn(async () => ({
+			ok: false as const,
+			error: "workspace_has_worktrees",
+			details: { worktreeCount: 1, worktreeIds: ["fix-login"] },
+		}));
+		await runWorkspaceManagementStream(
+			{
+				stream: { recv, send },
+				initialInput: [],
+				authorization: createAuthorization(),
+				isRpcGrantCurrent: () => true,
+				closeStream,
+			},
+			{
+				auditLogger: new IrohRemoteAuditLogger({ sink: { write: (event) => void auditEvents.push(event) } }),
+				commandContext: {
+					stateManager: new IrohRemoteHostStateManager({
+						initialState: { workspaces: [], worktrees: [], clients: [] },
+					}),
+					sessionListCursors: new Map(),
+					sessionListCursorTtlMs: 60_000,
+				},
+				unregisterWorkspace,
+			},
+		);
+
+		expect(parseWrittenObjects(send)).toEqual([
+			{
+				id: "remove",
+				type: "response",
+				command: "unregister_workspace",
+				success: false,
+				error: "workspace_has_worktrees",
+			},
+		]);
+		expect(unregisterWorkspace).toHaveBeenCalledOnce();
+		expect(closeStream).not.toHaveBeenCalled();
+		expect(auditEvents).toEqual([
+			{
+				timestamp: expect.any(Number),
+				type: "workspace_unregistered",
+				clientNodeId: "n-phone",
+				workspace: "ws",
+				success: false,
+				error: "workspace_has_worktrees",
+				details: {
+					source: "remote_workspace_management_stream",
+					worktreeCount: 1,
+					worktreeIds: ["fix-login"],
+				},
+			},
+		]);
 	});
 });

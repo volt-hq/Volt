@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { type DurableAtomicWriteOperations, writeDurableAtomicFile } from "../src/utils/durable-atomic-write.ts";
+import {
+	type DurableAtomicWriteOperations,
+	type DurableAtomicWriteSyncOperations,
+	writeDurableAtomicFile,
+	writeDurableAtomicFileSync,
+} from "../src/utils/durable-atomic-write.ts";
 
 function createOperations(events: string[]): DurableAtomicWriteOperations {
 	return {
@@ -25,6 +30,38 @@ function createOperations(events: string[]): DurableAtomicWriteOperations {
 			events.push("rename");
 		}),
 		rm: vi.fn(async () => {
+			events.push("rm");
+		}),
+	};
+}
+
+function createSyncOperations(events: string[]): DurableAtomicWriteSyncOperations {
+	let nextFd = 1;
+	const kinds = new Map<number, "parent" | "temp">();
+	return {
+		mkdir: vi.fn(() => {
+			events.push("mkdir");
+		}),
+		open: vi.fn((_path, flags) => {
+			const kind = flags === "r" ? "parent" : "temp";
+			const fd = nextFd++;
+			kinds.set(fd, kind);
+			events.push(`open:${kind}`);
+			return fd;
+		}),
+		writeFile: vi.fn((fd, content) => {
+			events.push(`write:${kinds.get(fd)}:${content}`);
+		}),
+		fsync: vi.fn((fd) => {
+			events.push(`sync:${kinds.get(fd)}`);
+		}),
+		close: vi.fn((fd) => {
+			events.push(`close:${kinds.get(fd)}`);
+		}),
+		rename: vi.fn(() => {
+			events.push("rename");
+		}),
+		rm: vi.fn(() => {
 			events.push("rm");
 		}),
 	};
@@ -72,6 +109,38 @@ describe("durable atomic writes", () => {
 			"injected fsync failure",
 		);
 		expect(events).toEqual(["mkdir", "open:temp", "write:temp", "sync:temp", "close:temp", "rm"]);
+		expect(operations.rename).not.toHaveBeenCalled();
+	});
+
+	it("provides the same durability ordering for synchronous writers", () => {
+		const events: string[] = [];
+		writeDurableAtomicFileSync("/state/host.json", "payload", { operations: createSyncOperations(events) });
+
+		expect(events).toEqual([
+			"mkdir",
+			"open:temp",
+			"write:temp:payload",
+			"sync:temp",
+			"close:temp",
+			"rename",
+			"open:parent",
+			"sync:parent",
+			"close:parent",
+		]);
+	});
+
+	it("closes and removes a synchronous temp file when fsync fails", () => {
+		const events: string[] = [];
+		const operations = createSyncOperations(events);
+		operations.fsync = vi.fn(() => {
+			events.push("sync:temp");
+			throw new Error("injected synchronous fsync failure");
+		});
+
+		expect(() => writeDurableAtomicFileSync("/state/host.json", "payload", { operations })).toThrow(
+			"injected synchronous fsync failure",
+		);
+		expect(events).toEqual(["mkdir", "open:temp", "write:temp:payload", "sync:temp", "close:temp", "rm"]);
 		expect(operations.rename).not.toHaveBeenCalled();
 	});
 });

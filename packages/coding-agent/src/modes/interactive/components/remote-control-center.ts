@@ -1,5 +1,11 @@
 import { isAbsolute, relative, resolve } from "node:path";
-import { type Component, getKeybindings, truncateToWidth, visibleWidth } from "@earendil-works/volt-tui";
+import {
+	type Component,
+	getKeybindings,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@earendil-works/volt-tui";
 import { getAgentDir, VERSION } from "../../../config.ts";
 import {
 	IROH_REMOTE_ACCESS_PRESET_NAMES,
@@ -7,6 +13,7 @@ import {
 	isIrohRemoteAccessPresetName,
 } from "../../../core/remote/iroh/access-grant.ts";
 import { formatIrohRemoteTicketQrCode } from "../../../core/remote/iroh/qr.ts";
+import { getIrohRemotePairingVerificationDetails } from "../../../core/remote/iroh/ticket.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 import { createDaemonClient, type DaemonClient } from "../../../daemon/control-client.ts";
 import {
@@ -304,6 +311,7 @@ type View =
 			ticket?: string;
 			message?: string;
 			recoveryBackupPath?: string;
+			showQr?: boolean;
 	  };
 
 type DisplayRow = {
@@ -686,11 +694,12 @@ export class RemoteControlCenterComponent implements Component {
 				...this.view,
 				phase: "completed",
 				message: `Paired ${event.clientNodeId ? abbreviatedId(event.clientNodeId, 20) : "device"}`,
+				showQr: false,
 			};
 			this.pairingHandle?.dispose();
 			this.pairingHandle = undefined;
 		} else if (event.phase === "failed") {
-			this.view = { ...this.view, phase: "failed", message: event.error ?? "Pairing failed" };
+			this.view = { ...this.view, phase: "failed", message: event.error ?? "Pairing failed", showQr: false };
 			this.pairingHandle?.dispose();
 			this.pairingHandle = undefined;
 		}
@@ -871,6 +880,20 @@ export class RemoteControlCenterComponent implements Component {
 		}
 		if (key === "pairing-copy" && this.view.kind === "pairing" && this.view.ticket) {
 			void this.copyPairingTicket();
+			return;
+		}
+		if (key === "pairing-show-qr" && this.view.kind === "pairing" && this.view.ticket) {
+			this.view = { ...this.view, showQr: true };
+			this.selectedKey = "pairing-verification";
+			this.scrollOffset = 0;
+			this.manualScroll = false;
+			return;
+		}
+		if (key === "pairing-verification" && this.view.kind === "pairing") {
+			this.view = { ...this.view, showQr: false };
+			this.selectedKey = "pairing-show-qr";
+			this.scrollOffset = 0;
+			this.manualScroll = false;
 			return;
 		}
 		if (key === "pairing-back" && this.view.kind === "pairing") {
@@ -1153,29 +1176,80 @@ export class RemoteControlCenterComponent implements Component {
 				tone: "accent",
 			},
 			{
-				text: phaseLabel,
+				text:
+					this.view.phase === "waiting"
+						? "Scan with Volt, then compare these values before confirming"
+						: phaseLabel,
 				tone: this.view.phase === "failed" ? "error" : this.view.phase === "completed" ? "success" : "text",
 			},
 		];
 		if (this.view.message)
 			rows.push({ text: this.view.message, tone: this.view.phase === "failed" ? "error" : "muted" });
+
+		let qrLines: string[] | undefined;
+		let qrError: string | undefined;
 		if (this.view.ticket) {
 			try {
-				const qrLines = formatIrohRemoteTicketQrCode(this.view.ticket)
+				qrLines = formatIrohRemoteTicketQrCode(this.view.ticket)
 					.split("\n")
 					.filter((line, index, lines) => line.length > 0 || (index > 0 && index < lines.length - 1));
-				const available = pageSize - rows.length - 2;
-				if (qrLines.length <= available && qrLines.every((line) => visibleWidth(line) <= width)) {
-					rows.push(...qrLines.map((line) => ({ text: line, raw: true })));
-				} else {
-					rows.push({ text: "Enlarge the terminal to show the complete QR code.", tone: "warning" });
-					rows.push({ text: "Use Copy pairing ticket instead of exposing it in scrollback.", tone: "dim" });
-				}
+			} catch (error) {
+				qrError = error instanceof Error ? error.message : String(error);
+			}
+		}
+		const qrFits =
+			qrLines !== undefined &&
+			qrLines.length + 4 <= pageSize &&
+			qrLines.every((line) => visibleWidth(line) <= width);
+		if (this.view.showQr) {
+			if (qrFits && qrLines !== undefined) {
+				return [
+					{ text: `PAIR QR · ${this.view.workspaceName}`, tone: "accent" },
+					...qrLines.map((line) => ({ text: line, raw: true })),
+					{ key: "pairing-verification", text: "Show verification details", tone: "text" },
+					{ key: "pairing-copy", text: "Copy pairing ticket", tone: "text" },
+					{ key: "pairing-back", text: "Cancel pairing", tone: "text" },
+				];
+			}
+			rows.push({ text: "The terminal is no longer large enough to show the complete QR code.", tone: "warning" });
+			rows.push({ key: "pairing-verification", text: "Show verification details", tone: "text" });
+		} else if (this.view.ticket) {
+			try {
+				const details = getIrohRemotePairingVerificationDetails(this.view.ticket);
+				const addDetail = (label: string, value: string | string[]): void => {
+					rows.push({ text: label, tone: "dim" });
+					for (const item of typeof value === "string" ? [value] : value) {
+						const safeValue = stripAnsi(item).replace(UNSAFE_TERMINAL_CHARACTERS, "");
+						rows.push(
+							...wrapTextWithAnsi(safeValue, Math.max(1, width - 2)).map((line) => ({
+								text: line,
+								tone: "text" as const,
+							})),
+						);
+					}
+				};
+				addDetail("Fingerprint", details.hostFingerprint);
+				addDetail("Host ID", details.hostNodeId);
+				addDetail("Workspace", details.workspace);
+				addDetail("Relay mode", details.relayMode);
+				addDetail("HTTPS relay origins", details.relayOrigins.length === 0 ? "none" : details.relayOrigins);
+				addDetail(
+					"Expires (UTC)",
+					details.expiresAt === undefined ? "not specified" : new Date(details.expiresAt).toISOString(),
+				);
 			} catch (error) {
 				rows.push({
-					text: `QR unavailable: ${error instanceof Error ? error.message : String(error)}`,
-					tone: "warning",
+					text: `Verification unavailable: ${error instanceof Error ? error.message : String(error)}`,
+					tone: "error",
 				});
+			}
+			if (qrFits) {
+				rows.push({ key: "pairing-show-qr", text: "Show pairing QR", tone: "text" });
+			} else if (qrError) {
+				rows.push({ text: `QR unavailable: ${qrError}`, tone: "warning" });
+			} else {
+				rows.push({ text: "Enlarge the terminal to show the complete QR code.", tone: "warning" });
+				rows.push({ text: "Use Copy pairing ticket instead of exposing it in scrollback.", tone: "dim" });
 			}
 		}
 		if (this.view.ticket) rows.push({ key: "pairing-copy", text: "Copy pairing ticket", tone: "text" });

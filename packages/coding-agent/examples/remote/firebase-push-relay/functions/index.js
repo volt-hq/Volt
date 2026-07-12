@@ -1,13 +1,36 @@
-const { createHash, randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
+const { randomBytes } = require("node:crypto");
+const { getAppCheck } = require("firebase-admin/app-check");
 const { initializeApp, getApps } = require("firebase-admin/app");
-const { FieldValue, getFirestore } = require("firebase-admin/firestore");
+const { FieldValue, Timestamp, getFirestore } = require("firebase-admin/firestore");
 const { getMessaging } = require("firebase-admin/messaging");
 const { onRequest } = require("firebase-functions/v2/https");
+const {
+	RequestError,
+	assertRequestEnvelope,
+	assertVerifiedAppCheck,
+	getAllowedFirebaseAppIds,
+	getBoundedPositiveInteger,
+	getConfiguredRelayUrl,
+	getHeader,
+	getPushTargetId,
+	getPushTargetTtlMs,
+	hashToken,
+	isPushTargetExpired,
+	parseLiveActivityUpdate,
+	parseNotification,
+	parsePushTargetRegistration,
+	parsePushTargetRevocation,
+	readJsonBody,
+	revokePushTargetTransaction,
+	timingSafeTokenHashMatches,
+} = require("./core.js");
 
 const DEFAULT_COLLECTION = "voltPushTargets";
-const DEFAULT_PUBLIC_RELAY_URL = "https://us-central1-volt-3fae7.cloudfunctions.net/pushRelay";
 const DEFAULT_LIVE_ACTIVITY_APNS_TOPIC = "com.hansjm10.volt.push-type.liveactivity";
 const DEFAULT_REGION = "us-central1";
+const DELIVERY_QUOTA_WINDOW_MS = 60_000;
+const DEFAULT_DELIVERIES_PER_TARGET_PER_MINUTE = 30;
+const DEFAULT_REGISTRATIONS_PER_INSTANCE_PER_MINUTE = 30;
 const INVALID_TARGET_ERROR_CODES = new Set([
 	"messaging/invalid-registration-token",
 	"messaging/mismatched-credential",
@@ -18,65 +41,94 @@ if (getApps().length === 0) {
 	initializeApp();
 }
 
+const allowedFirebaseAppIds = getAllowedFirebaseAppIds();
+const publicRelayUrl = getConfiguredRelayUrl();
+const pushTargetTtlMs = getPushTargetTtlMs();
+const maxDeliveriesPerTargetPerMinute = getBoundedPositiveInteger(
+	process.env.DELIVERIES_PER_TARGET_PER_MINUTE,
+	1,
+	600,
+	DEFAULT_DELIVERIES_PER_TARGET_PER_MINUTE,
+);
+const maxRegistrationsPerInstancePerMinute = getBoundedPositiveInteger(
+	process.env.REGISTRATIONS_PER_INSTANCE_PER_MINUTE,
+	1,
+	120,
+	DEFAULT_REGISTRATIONS_PER_INSTANCE_PER_MINUTE,
+);
+const registrationWindows = new Map();
+
 exports.pushRelay = onRequest(
 	{
+		concurrency: 20,
 		cors: false,
 		invoker: "public",
 		maxInstances: 10,
+		memory: "256MiB",
 		region: process.env.FUNCTION_REGION || DEFAULT_REGION,
-		timeoutSeconds: 30,
+		timeoutSeconds: 15,
 	},
 	async (request, response) => {
 		response.set("cache-control", "no-store");
-		if (request.method !== "POST") {
-			response.status(405).json({ error: "method_not_allowed" });
-			return;
-		}
-
-		const routePath = normalizeRoutePath(request.path || request.originalUrl || request.url || "/");
+		response.set("x-content-type-options", "nosniff");
 		try {
-			if (routePath === "/v1/push-targets") {
-				await registerPushTarget(request, response);
-				return;
-			}
-			if (routePath === "/v1/notifications") {
-				await sendNotification(request, response);
-				return;
-			}
-			if (routePath === "/v1/live-activities") {
-				await sendLiveActivityUpdate(request, response);
-				return;
-			}
-			response.status(404).json({ error: "not_found" });
+			await routeRequest(request, response);
 		} catch (error) {
+			if (response.headersSent) return;
 			if (error instanceof RequestError) {
 				response.status(error.status).json({ error: error.publicMessage });
 				return;
 			}
+			console.error("push relay request failed", getSafeErrorLog(error));
 			response.status(500).json({ error: "internal_error" });
 		}
 	},
 );
 
-class RequestError extends Error {
-	constructor(status, publicMessage) {
-		super(publicMessage);
-		this.name = "RequestError";
-		this.publicMessage = publicMessage;
-		this.status = status;
+async function routeRequest(request, response) {
+	if (request.method !== "POST") {
+		response.set("allow", "POST");
+		throw new RequestError(405, "method_not_allowed");
 	}
+	assertRequestEnvelope(request);
+	const routePath = normalizeRoutePath(request.path || request.originalUrl || request.url || "/");
+	if (routePath === "/v1/push-targets") {
+		await registerPushTarget(request, response);
+		return;
+	}
+	if (routePath === "/v1/push-targets/revoke") {
+		await revokePushTarget(request, response);
+		return;
+	}
+	if (routePath === "/v1/push-targets/status") {
+		await getPushTargetStatus(request, response);
+		return;
+	}
+	if (routePath === "/v1/notifications") {
+		await sendNotification(request, response);
+		return;
+	}
+	if (routePath === "/v1/live-activities") {
+		await sendLiveActivityUpdate(request, response);
+		return;
+	}
+	throw new RequestError(404, "not_found");
 }
 
 async function registerPushTarget(request, response) {
-	const body = readJsonBody(request);
-	const registration = parsePushTargetRegistration(body);
-	const pushTargetId = randomUUID();
+	const appId = await verifyRegistrationAppCheck(request);
+	enforceRegistrationRateLimit(appId);
+	const registration = parsePushTargetRegistration(readJsonBody(request));
+	const pushTargetId = getPushTargetId(registration.token);
 	const pushTargetAuthToken = randomBytes(32).toString("base64url");
 	const tokenHash = hashToken(registration.token);
-	const now = FieldValue.serverTimestamp();
+	const nowMs = Date.now();
+	const now = Timestamp.fromMillis(nowMs);
 	await getPushTargetsCollection().doc(pushTargetId).set({
+		appId,
 		createdAt: now,
 		enabled: registration.enabled,
+		expiresAt: Timestamp.fromMillis(nowMs + pushTargetTtlMs),
 		platform: registration.platform,
 		provider: registration.provider,
 		token: registration.token,
@@ -87,16 +139,76 @@ async function registerPushTarget(request, response) {
 	response.status(201).json({
 		pushTargetId,
 		pushTargetAuthToken,
-		relayUrl: getPublicRelayUrl(request),
+		relayUrl: publicRelayUrl,
 		tokenHash,
+		expiresAtEpochSeconds: Math.floor((nowMs + pushTargetTtlMs) / 1000),
+	});
+}
+
+async function verifyRegistrationAppCheck(request) {
+	const appCheckToken = getHeader(request, "x-firebase-appcheck");
+	if (appCheckToken === undefined || appCheckToken.length > 8192) {
+		throw new RequestError(401, "app_check_limited_use_token_required");
+	}
+	let verification;
+	try {
+		verification = await getAppCheck().verifyToken(appCheckToken, { consume: true });
+	} catch {
+		throw new RequestError(401, "app_check_invalid");
+	}
+	return assertVerifiedAppCheck(verification, allowedFirebaseAppIds);
+}
+
+function enforceRegistrationRateLimit(appId) {
+	const now = Date.now();
+	const existing = registrationWindows.get(appId);
+	if (existing === undefined || existing.startedAtMs + DELIVERY_QUOTA_WINDOW_MS <= now) {
+		registrationWindows.set(appId, { count: 1, startedAtMs: now });
+		return;
+	}
+	if (existing.count >= maxRegistrationsPerInstancePerMinute) {
+		throw new RequestError(429, "registration_rate_limited");
+	}
+	existing.count += 1;
+}
+
+async function revokePushTarget(request, response) {
+	const revocation = parsePushTargetRevocation(readJsonBody(request));
+	const pushTargetRef = getPushTargetsCollection().doc(revocation.pushTargetId);
+	const status = await revokePushTargetTransaction(
+		getFirestore(),
+		pushTargetRef,
+		revocation.pushTargetAuthToken,
+	);
+	response.status(200).json({ status });
+}
+
+async function getPushTargetStatus(request, response) {
+	const credential = parsePushTargetRevocation(readJsonBody(request));
+	const snapshot = await getPushTargetsCollection().doc(credential.pushTargetId).get();
+	if (!snapshot.exists) {
+		throw new RequestError(404, "push_target_not_found");
+	}
+	const pushTarget = snapshot.data();
+	if (!isAuthorizedTargetCredential(pushTarget, credential.pushTargetAuthToken)) {
+		throw new RequestError(401, "unauthorized");
+	}
+	if (!isValidEnabledPushTarget(pushTarget) || isPushTargetExpired(pushTarget)) {
+		throw new RequestError(410, "push_target_invalid");
+	}
+	const expiresAtMs = getFirestoreTimestampMillis(pushTarget.expiresAt);
+	if (expiresAtMs === undefined) {
+		throw new RequestError(410, "push_target_invalid");
+	}
+	response.status(200).json({
+		status: "active",
+		expiresAtEpochSeconds: Math.floor(expiresAtMs / 1000),
 	});
 }
 
 async function sendNotification(request, response) {
-	const body = readJsonBody(request);
-	const notification = parseNotification(body);
-	const authorizedTarget = await getAuthorizedPushTarget(notification, response);
-	if (!authorizedTarget) return;
+	const notification = parseNotification(readJsonBody(request));
+	const authorizedTarget = await reserveAuthorizedPushTarget(notification);
 	const { pushTarget, pushTargetRef } = authorizedTarget;
 
 	try {
@@ -113,28 +225,19 @@ async function sendNotification(request, response) {
 	} catch (error) {
 		if (isInvalidTargetError(error)) {
 			await disablePushTarget(pushTargetRef, getErrorCode(error) || "messaging/invalid-target");
-			response.status(410).json({ error: "push_target_invalid" });
-			return;
+			throw new RequestError(410, "push_target_invalid");
 		}
 		respondFcmSendFailed(response, "notification", notification, error);
 	}
 }
 
 async function sendLiveActivityUpdate(request, response) {
-	const body = readJsonBody(request);
-	const liveActivity = parseLiveActivityUpdate(body);
-	const authorizedTarget = await getAuthorizedPushTarget(liveActivity, response);
-	if (!authorizedTarget) return;
+	const liveActivity = parseLiveActivityUpdate(readJsonBody(request));
+	const authorizedTarget = await reserveAuthorizedPushTarget(liveActivity);
 	const { pushTarget, pushTargetRef } = authorizedTarget;
 
-	// FCM delivers live_activity_token pushes through the production APNs
-	// environment only; a development (sandbox) ActivityKit token can never be
-	// reached this way and every send would fail. Fail fast with a distinct
-	// status so hosts can prune the channel instead of retrying forever. Set
-	// LIVE_ACTIVITY_ALLOW_DEVELOPMENT=1 to attempt delivery anyway.
 	if (liveActivity.tokenEnvironment === "development" && process.env.LIVE_ACTIVITY_ALLOW_DEVELOPMENT !== "1") {
-		response.status(422).json({ error: "live_activity_environment_unsupported" });
-		return;
+		throw new RequestError(422, "live_activity_environment_unsupported");
 	}
 
 	try {
@@ -161,48 +264,77 @@ async function sendLiveActivityUpdate(request, response) {
 				lastLiveActivityInvalidReason: getErrorCode(error) || "messaging/invalid-live-activity-target",
 				updatedAt: FieldValue.serverTimestamp(),
 			});
-			response.status(410).json({ error: "push_target_invalid" });
-			return;
+			throw new RequestError(410, "push_target_invalid");
 		}
 		respondFcmSendFailed(response, "live-activity", liveActivity, error);
 	}
 }
 
-/**
- * Surface an FCM send failure instead of collapsing it into an opaque 500:
- * log the full error for Cloud Logging and return the FCM error code to the
- * caller so host-side audit logs can name the actual failure.
- */
-function respondFcmSendFailed(response, route, request, error) {
-	const code = getErrorCode(error) || "unknown";
-	console.error(
-		`FCM ${route} send failed (eventId=${request.eventId}, kind=${request.kind}, code=${code})`,
-		error,
-	);
-	response.status(502).json({ error: "fcm_send_failed", code });
+async function reserveAuthorizedPushTarget(request) {
+	const pushTargetRef = getPushTargetsCollection().doc(request.pushTargetId);
+	return getFirestore().runTransaction(async (transaction) => {
+		const snapshot = await transaction.get(pushTargetRef);
+		if (!snapshot.exists) {
+			throw new RequestError(404, "push_target_not_found");
+		}
+		const pushTarget = snapshot.data();
+		if (!isValidEnabledPushTarget(pushTarget)) {
+			throw new RequestError(410, "push_target_invalid");
+		}
+		if (isPushTargetExpired(pushTarget)) {
+			throw new RequestError(410, "push_target_expired");
+		}
+		if (!isAuthorizedTargetCredential(pushTarget, request.pushTargetAuthToken)) {
+			throw new RequestError(401, "unauthorized");
+		}
+
+		const nowMs = Date.now();
+		const windowStartedAtMs = getFirestoreTimestampMillis(pushTarget.deliveryWindowStartedAt);
+		const inCurrentWindow =
+			windowStartedAtMs !== undefined && windowStartedAtMs + DELIVERY_QUOTA_WINDOW_MS > nowMs;
+		const deliveryWindowCount = inCurrentWindow && Number.isSafeInteger(pushTarget.deliveryWindowCount)
+			? pushTarget.deliveryWindowCount
+			: 0;
+		if (deliveryWindowCount >= maxDeliveriesPerTargetPerMinute) {
+			throw new RequestError(429, "push_target_rate_limited");
+		}
+		transaction.update(pushTargetRef, {
+			deliveryWindowCount: deliveryWindowCount + 1,
+			deliveryWindowStartedAt: inCurrentWindow
+				? pushTarget.deliveryWindowStartedAt
+				: Timestamp.fromMillis(nowMs),
+			updatedAt: Timestamp.fromMillis(nowMs),
+		});
+		return { pushTarget, pushTargetRef };
+	});
 }
 
-async function getAuthorizedPushTarget(request, response) {
-	const pushTargetRef = getPushTargetsCollection().doc(request.pushTargetId);
-	const pushTargetSnapshot = await pushTargetRef.get();
-	if (!pushTargetSnapshot.exists) {
-		response.status(404).json({ error: "push_target_not_found" });
-		return undefined;
-	}
+function isValidEnabledPushTarget(value) {
+	return (
+		isRecord(value) &&
+		value.enabled === true &&
+		value.provider === "fcm" &&
+		value.platform === "ios" &&
+		typeof value.token === "string" &&
+		value.token.length >= 16 &&
+		value.token.length <= 4096
+	);
+}
 
-	const pushTarget = pushTargetSnapshot.data();
-	if (!isRecord(pushTarget) || pushTarget.enabled !== true || typeof pushTarget.token !== "string") {
-		response.status(410).json({ error: "push_target_invalid" });
-		return undefined;
+function isAuthorizedTargetCredential(pushTarget, authToken) {
+	return (
+		isRecord(pushTarget) &&
+		typeof authToken === "string" &&
+		timingSafeTokenHashMatches(authToken, pushTarget.pushTargetAuthTokenHash)
+	);
+}
+
+function getFirestoreTimestampMillis(value) {
+	if (isRecord(value) && typeof value.toMillis === "function") {
+		const millis = value.toMillis();
+		return Number.isFinite(millis) ? millis : undefined;
 	}
-	if (
-		typeof pushTarget.pushTargetAuthTokenHash !== "string" ||
-		!timingSafeStringEqual(hashToken(request.pushTargetAuthToken), pushTarget.pushTargetAuthTokenHash)
-	) {
-		response.status(401).json({ error: "unauthorized" });
-		return undefined;
-	}
-	return { pushTarget, pushTargetRef };
+	return undefined;
 }
 
 async function markPushSent(pushTargetRef, request, messageId) {
@@ -243,186 +375,22 @@ function getLiveActivityApnsTopic() {
 	return process.env.LIVE_ACTIVITY_APNS_TOPIC || DEFAULT_LIVE_ACTIVITY_APNS_TOPIC;
 }
 
-function timingSafeStringEqual(left, right) {
-	const leftBuffer = Buffer.from(left, "utf8");
-	const rightBuffer = Buffer.from(right, "utf8");
-	return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
-}
-
-function getPushTargetsCollection() {
-	return getFirestore().collection(process.env.PUSH_TARGETS_COLLECTION || DEFAULT_COLLECTION);
-}
-
-function readJsonBody(request) {
-	const body = request.body;
-	if (Buffer.isBuffer(body)) {
-		return parseJson(body.toString("utf8"));
-	}
-	if (typeof body === "string") {
-		return parseJson(body);
-	}
-	if (isRecord(body)) {
-		return body;
-	}
-	throw new RequestError(400, "request_body_must_be_json");
-}
-
-function parseJson(value) {
-	try {
-		const parsed = JSON.parse(value);
-		if (!isRecord(parsed)) {
-			throw new RequestError(400, "request_body_must_be_json_object");
-		}
-		return parsed;
-	} catch (error) {
-		if (error instanceof RequestError) {
-			throw error;
-		}
-		throw new RequestError(400, "request_body_must_be_json");
-	}
-}
-
-function parsePushTargetRegistration(body) {
-	const provider = expectLiteral(body.provider, "fcm", "provider");
-	const platform = expectLiteral(body.platform, "ios", "platform");
-	const token = expectString(body.token, "token");
-	const enabled = expectBoolean(body.enabled, "enabled");
-	return { enabled, platform, provider, token };
-}
-
-function parseNotification(body) {
-	const data = expectStringRecord(body.data, "data");
-	const eventId = expectString(body.eventId, "eventId");
-	const kind = expectString(body.kind, "kind");
-	return {
-		body: expectString(body.body, "body"),
-		data: {
-			...data,
-			eventId,
-			kind,
-		},
-		eventId,
-		kind,
-		pushTargetAuthToken: expectString(body.pushTargetAuthToken, "pushTargetAuthToken"),
-		pushTargetId: expectString(body.pushTargetId, "pushTargetId"),
-		title: expectString(body.title, "title"),
-	};
-}
-
-function parseLiveActivityUpdate(body) {
-	const contentState = expectLiveActivityContentState(body.contentState);
-	return {
-		activityEvent: expectOptionalLiteral(body.activityEvent, ["update", "end"], "activityEvent") || "update",
-		activityPushToken: expectString(body.activityPushToken, "activityPushToken"),
-		activityId: expectString(body.activityId, "activityId"),
-		tokenEnvironment: expectOptionalLiteral(body.tokenEnvironment, ["development", "production"], "tokenEnvironment"),
-		contentState,
-		dismissalDateEpochSeconds: expectOptionalNumber(body.dismissalDateEpochSeconds, "dismissalDateEpochSeconds"),
-		eventId: expectString(body.eventId, "eventId"),
-		kind: expectString(body.kind, "kind"),
-		pushTargetAuthToken: expectString(body.pushTargetAuthToken, "pushTargetAuthToken"),
-		pushTargetId: expectString(body.pushTargetId, "pushTargetId"),
-		staleDateEpochSeconds: expectOptionalNumber(body.staleDateEpochSeconds, "staleDateEpochSeconds"),
-	};
-}
-
-function expectLiveActivityContentState(value) {
-	if (!isRecord(value)) {
-		throw new RequestError(400, "contentState_must_be_object");
-	}
-	const encoded = JSON.stringify(value);
-	if (encoded.length > 3500) {
-		throw new RequestError(400, "contentState_too_large");
-	}
-	return value;
-}
-
-function getPublicRelayUrl(request) {
-	if (typeof process.env.PUSH_RELAY_URL === "string" && process.env.PUSH_RELAY_URL.length > 0) {
-		return process.env.PUSH_RELAY_URL;
-	}
-	const host = request.headers.host;
-	if (typeof host !== "string" || host.length === 0) {
-		return DEFAULT_PUBLIC_RELAY_URL;
-	}
-	const protocol = request.headers["x-forwarded-proto"];
-	const scheme = typeof protocol === "string" && protocol.length > 0 ? protocol.split(",")[0].trim() : "https";
-	const baseUrl = new URL(request.originalUrl || request.url || "/", `${scheme}://${host}`);
-	const versionPathIndex = baseUrl.pathname.indexOf("/v1/");
-	if (versionPathIndex === 0 && host.endsWith(".cloudfunctions.net")) {
-		return `${scheme}://${host}/pushRelay`;
-	}
-	if (versionPathIndex === -1) {
-		return `${scheme}://${host}${baseUrl.pathname.replace(/\/+$/, "")}`;
-	}
-	return `${scheme}://${host}${baseUrl.pathname.slice(0, versionPathIndex).replace(/\/+$/, "")}`;
-}
-
-function expectLiteral(value, expected, label) {
-	if (value !== expected) {
-		throw new RequestError(400, `${label}_must_be_${expected}`);
-	}
-	return expected;
-}
-
-function expectString(value, label) {
-	if (typeof value !== "string" || value.length === 0) {
-		throw new RequestError(400, `${label}_must_be_non_empty_string`);
-	}
-	return value;
-}
-
-function expectBoolean(value, label) {
-	if (typeof value !== "boolean") {
-		throw new RequestError(400, `${label}_must_be_boolean`);
-	}
-	return value;
-}
-
-function expectOptionalNumber(value, label) {
-	if (value === undefined) {
-		return undefined;
-	}
-	if (!Number.isSafeInteger(value) || value < 0) {
-		throw new RequestError(400, `${label}_must_be_non_negative_integer`);
-	}
-	return value;
-}
-
-function expectOptionalLiteral(value, expected, label) {
-	if (value === undefined) {
-		return undefined;
-	}
-	if (!expected.includes(value)) {
-		throw new RequestError(400, `${label}_must_be_${expected.join("_or_")}`);
-	}
-	return value;
-}
-
-function expectStringRecord(value, label) {
-	if (!isRecord(value)) {
-		throw new RequestError(400, `${label}_must_be_object`);
-	}
-	const parsed = {};
-	for (const [key, entry] of Object.entries(value)) {
-		if (typeof entry !== "string") {
-			throw new RequestError(400, `${label}_values_must_be_strings`);
-		}
-		parsed[key] = entry;
-	}
-	return parsed;
+function respondFcmSendFailed(response, route, request, error) {
+	const code = getErrorCode(error) || "unknown";
+	console.error(`FCM ${route} send failed`, {
+		eventId: request.eventId.slice(0, 128),
+		kind: request.kind.slice(0, 64),
+		...getSafeErrorLog(error),
+	});
+	response.status(502).json({ error: "fcm_send_failed", code });
 }
 
 function normalizeRoutePath(rawPath) {
-	let routePath = rawPath.split("?")[0] || "/";
+	let routePath = rawPath.split("?", 1)[0] || "/";
 	if (routePath.startsWith("/pushRelay/")) {
 		routePath = routePath.slice("/pushRelay".length);
 	}
 	return routePath.replace(/\/+$/, "") || "/";
-}
-
-function hashToken(token) {
-	return `sha256:${createHash("sha256").update(token, "utf8").digest("base64url")}`;
 }
 
 function isInvalidTargetError(error) {
@@ -432,6 +400,12 @@ function isInvalidTargetError(error) {
 
 function getErrorCode(error) {
 	return isRecord(error) && typeof error.code === "string" ? error.code : undefined;
+}
+
+function getSafeErrorLog(error) {
+	const code = getErrorCode(error);
+	const name = error instanceof Error ? error.name.slice(0, 64) : "UnknownError";
+	return { ...(code === undefined ? {} : { code: code.slice(0, 96) }), name };
 }
 
 function isRecord(value) {

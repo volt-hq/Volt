@@ -23,6 +23,8 @@ import {
 	type IrohRemoteRevokedClient,
 	type IrohRemoteWorkspace,
 	type IrohRemoteWorkspaceWorktree,
+	normalizeIrohRemoteLiveActivityRegistrations,
+	parseIrohRemoteLiveActivityRegistration,
 	readIrohRemoteHostState,
 	writeIrohRemoteHostState,
 } from "./state.ts";
@@ -84,6 +86,82 @@ export interface IrohRemoteLiveActivityPruneResult {
 	pushTarget?: IrohRemotePushTarget;
 }
 
+export interface IrohRemoteWorkspaceWorktreeLifecycleContext {
+	workspace: IrohRemoteWorkspace;
+	worktrees: IrohRemoteWorkspaceWorktree[];
+}
+
+export interface IrohRemoteWorkspaceWorktreeLifecycleOutcome<T> {
+	result: T;
+	worktree?: IrohRemoteWorkspaceWorktree;
+}
+
+export const IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR = "workspace_has_worktrees";
+export const IROH_REMOTE_WORKTREE_PARENT_WORKSPACE_NOT_FOUND_ERROR = "worktree_parent_workspace_not_found";
+export const IROH_REMOTE_WORKTREE_PERSISTENCE_ERROR = "worktree_persistence_failed";
+
+/**
+ * A workspace with persisted worktree children cannot be unregistered. This
+ * typed conflict is thrown from the state mutation itself so every caller,
+ * including lower-level ones, gets the same non-destructive invariant.
+ */
+export class IrohRemoteWorkspaceHasWorktreesError extends Error {
+	readonly code = IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR;
+	readonly workspaceName: string;
+	readonly worktreeIds: string[];
+
+	constructor(workspaceName: string, worktrees: readonly IrohRemoteWorkspaceWorktree[]) {
+		const worktreeIds = worktrees.map((worktree) => worktree.id).sort();
+		const noun = worktreeIds.length === 1 ? "worktree" : "worktrees";
+		super(
+			`Workspace ${workspaceName} has ${worktreeIds.length} daemon-managed ${noun} (${worktreeIds.join(", ")}). ` +
+				`Remove each with "volt remote worktree remove <id> --workspace ${workspaceName}" before unregistering; ` +
+				"use --force only to explicitly discard dirty or busy worktrees.",
+		);
+		this.name = "IrohRemoteWorkspaceHasWorktreesError";
+		this.workspaceName = workspaceName;
+		this.worktreeIds = worktreeIds;
+	}
+}
+
+export function isIrohRemoteWorkspaceHasWorktreesError(error: unknown): error is IrohRemoteWorkspaceHasWorktreesError {
+	return error instanceof IrohRemoteWorkspaceHasWorktreesError;
+}
+
+export class IrohRemoteWorktreeParentWorkspaceNotFoundError extends Error {
+	readonly code = IROH_REMOTE_WORKTREE_PARENT_WORKSPACE_NOT_FOUND_ERROR;
+	readonly workspaceName: string;
+
+	constructor(workspaceName: string) {
+		super(`Cannot persist a worktree for unregistered workspace ${workspaceName}`);
+		this.name = "IrohRemoteWorktreeParentWorkspaceNotFoundError";
+		this.workspaceName = workspaceName;
+	}
+}
+
+export function isIrohRemoteWorktreeParentWorkspaceNotFoundError(
+	error: unknown,
+): error is IrohRemoteWorktreeParentWorkspaceNotFoundError {
+	return error instanceof IrohRemoteWorktreeParentWorkspaceNotFoundError;
+}
+
+export class IrohRemoteWorktreePersistenceError extends Error {
+	readonly code = IROH_REMOTE_WORKTREE_PERSISTENCE_ERROR;
+	readonly workspaceName: string;
+	readonly worktreeId: string;
+
+	constructor(workspaceName: string, worktreeId: string, cause: unknown) {
+		super(`Failed to persist worktree ${worktreeId} for workspace ${workspaceName}`, { cause });
+		this.name = "IrohRemoteWorktreePersistenceError";
+		this.workspaceName = workspaceName;
+		this.worktreeId = worktreeId;
+	}
+}
+
+export function isIrohRemoteWorktreePersistenceError(error: unknown): error is IrohRemoteWorktreePersistenceError {
+	return error instanceof IrohRemoteWorktreePersistenceError;
+}
+
 export class IrohRemoteHostStateManager {
 	private readonly statePath: string | undefined;
 	private readonly store: IrohRemoteHostStateStore | undefined;
@@ -140,27 +218,86 @@ export class IrohRemoteHostStateManager {
 			if (index === -1) {
 				return undefined;
 			}
+			const worktrees = (state.worktrees ?? []).filter((worktree) => worktree.workspaceName === name);
+			if (worktrees.length > 0) {
+				throw new IrohRemoteWorkspaceHasWorktreesError(name, worktrees);
+			}
 			const [removedWorkspace] = state.workspaces.splice(index, 1);
 			state.pendingPairingTickets = (state.pendingPairingTickets ?? []).filter(
 				(ticket) => ticket.workspace !== name,
 			);
-			// Records only; checkout deletion is the daemon's best-effort cleanup.
-			state.worktrees = (state.worktrees ?? []).filter((worktree) => worktree.workspaceName !== name);
 			await this.saveUnlocked(state);
 			return removedWorkspace ? cloneWorkspace(removedWorkspace) : undefined;
+		});
+	}
+
+	/**
+	 * Serialize a worktree create/adopt side effect with workspace unregister and
+	 * commit its child record in the same state transaction. The operation runs
+	 * while the state lock is held so an unregister cannot observe the gap between
+	 * `git worktree add` and durable child persistence.
+	 */
+	async runWorkspaceWorktreeLifecycle<T>(
+		workspaceName: string,
+		operation: (
+			context: IrohRemoteWorkspaceWorktreeLifecycleContext,
+		) => Promise<IrohRemoteWorkspaceWorktreeLifecycleOutcome<T>>,
+	): Promise<T> {
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			const workspace = state.workspaces.find((entry) => entry.name === workspaceName);
+			if (!workspace) {
+				throw new IrohRemoteWorktreeParentWorkspaceNotFoundError(workspaceName);
+			}
+			const outcome = await operation({
+				workspace: cloneWorkspace(workspace),
+				worktrees: (state.worktrees ?? [])
+					.filter((worktree) => worktree.workspaceName === workspaceName)
+					.map((worktree) => cloneWorktree(worktree)),
+			});
+			if (!outcome.worktree) {
+				return outcome.result;
+			}
+			if (outcome.worktree.workspaceName !== workspaceName) {
+				throw new Error("Worktree lifecycle result does not match its parent workspace");
+			}
+
+			const previousState = cloneHostState(state);
+			state.worktrees = [
+				...(state.worktrees ?? []).filter(
+					(entry) => entry.workspaceName !== workspaceName || entry.id !== outcome.worktree?.id,
+				),
+				cloneWorktree(outcome.worktree),
+			];
+			try {
+				await this.saveUnlocked(state);
+			} catch (error) {
+				await this.restoreAfterFailedWorktreePersistence(previousState);
+				throw new IrohRemoteWorktreePersistenceError(workspaceName, outcome.worktree.id, error);
+			}
+			return outcome.result;
 		});
 	}
 
 	async upsertWorktree(worktree: IrohRemoteWorkspaceWorktree): Promise<IrohRemoteWorkspaceWorktree> {
 		return this.runExclusive(async () => {
 			const state = await this.loadUnlocked();
+			if (!state.workspaces.some((workspace) => workspace.name === worktree.workspaceName)) {
+				throw new IrohRemoteWorktreeParentWorkspaceNotFoundError(worktree.workspaceName);
+			}
+			const previousState = cloneHostState(state);
 			state.worktrees = [
 				...(state.worktrees ?? []).filter(
 					(entry) => entry.workspaceName !== worktree.workspaceName || entry.id !== worktree.id,
 				),
 				cloneWorktree(worktree),
 			];
-			await this.saveUnlocked(state);
+			try {
+				await this.saveUnlocked(state);
+			} catch (error) {
+				await this.restoreAfterFailedWorktreePersistence(previousState);
+				throw new IrohRemoteWorktreePersistenceError(worktree.workspaceName, worktree.id, error);
+			}
 			return cloneWorktree(worktree);
 		});
 	}
@@ -411,25 +548,33 @@ export class IrohRemoteHostStateManager {
 		nodeId: string,
 		registration: IrohRemoteLiveActivityRegistration,
 	): Promise<IrohRemoteLiveActivityRegistrationResult> {
+		const validatedRegistration = parseIrohRemoteLiveActivityRegistration(registration);
 		return this.runExclusive(async () => {
 			const state = await this.loadUnlocked();
 			const client = state.clients.find((entry) => entry.nodeId === nodeId);
 			if (!client) {
 				return {};
 			}
-			let createdAt = registration.createdAt;
+			let createdAt = validatedRegistration.createdAt;
 			let replacedRegistration: IrohRemoteLiveActivityRegistration | undefined;
 			const retainedRegistrations: IrohRemoteLiveActivityRegistration[] = [];
 			for (const existingRegistration of client.liveActivities ?? []) {
-				if (existingRegistration.activityId === registration.activityId) {
+				if (
+					(existingRegistration.workspaceName === validatedRegistration.workspaceName &&
+						existingRegistration.sessionId === validatedRegistration.sessionId) ||
+					existingRegistration.activityId === validatedRegistration.activityId
+				) {
 					createdAt = existingRegistration.createdAt;
 					replacedRegistration = existingRegistration;
 					continue;
 				}
 				retainedRegistrations.push(existingRegistration);
 			}
-			const savedRegistration = { ...registration, createdAt };
-			client.liveActivities = [...retainedRegistrations, savedRegistration];
+			const savedRegistration = { ...validatedRegistration, createdAt };
+			client.liveActivities = normalizeIrohRemoteLiveActivityRegistrations([
+				...retainedRegistrations,
+				savedRegistration,
+			]);
 			await this.saveUnlocked(state);
 			return {
 				client: cloneClient(client),
@@ -690,6 +835,21 @@ export class IrohRemoteHostStateManager {
 		}
 		if (this.statePath) {
 			await writeIrohRemoteHostState(this.statePath, stateToSave);
+		}
+	}
+
+	private async restoreAfterFailedWorktreePersistence(previousState: IrohRemoteHostState): Promise<void> {
+		const restoredState = cloneHostState(previousState);
+		this.state = restoredState;
+		if (!this.store) {
+			return;
+		}
+		try {
+			await this.store.write(cloneHostState(restoredState));
+			this.state = restoredState;
+		} catch {
+			// A failed rollback may leave the child record in the custom store, which
+			// is safer than deleting a checkout whose persistence outcome is unknown.
 		}
 	}
 

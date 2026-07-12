@@ -4,7 +4,7 @@ Marketing landing page, documentation, and install scripts for Volt, built with 
 
 - `src/pages/index.astro` — marketing landing page.
 - `packages/coding-agent/docs/` — the documentation source of truth. `scripts/sync-docs.mjs` copies it into the Starlight content collection at build time, deriving the sidebar and redirects from `docs.json`. Do not edit `src/content/docs/docs/` or `src/generated/`; both are generated and gitignored.
-- The sync step also rewrites the npm package name `@earendil-works/volt-coding-agent` (upstream-derived, still used in the repo) to the publish name `@hansjm10/volt-cli`. Drop that rewrite from `sync-docs.mjs` once the repo package is renamed.
+- The sync step preserves the canonical package identities used by the source documentation, including `@earendil-works/volt-coding-agent`.
 - `public/install.sh`, `public/install.ps1` — served at `https://volt-cli.dev/install.sh` and `/install.ps1`. The shell installer defaults to `npm install -g --ignore-scripts`; `VOLT_INSTALL_METHOD=binary` fetches a standalone binary from GitHub Releases instead (binary builds do not support `volt daemon`).
 - `public/_headers`, `public/_redirects` — Cloudflare Pages config (`/install` → `/install.sh`, `/github` → repo).
 
@@ -36,6 +36,6 @@ Every push to `main` that touches the site or docs then deploys automatically; P
 
 The install paths reference artifacts that must exist before the site goes live:
 
-- [ ] Publish the CLI to npm as `@hansjm10/volt-cli` (`install.sh` default path and the documented npm install). The repo package is still named `@earendil-works/volt-coding-agent`; rename it (package.json, publish scripts, shrinkwrap regen) or publish under the new name deliberately.
+- [ ] Bootstrap and publish the CLI to npm as `@earendil-works/volt-coding-agent` (`install.sh` default path and the documented npm install).
 - [ ] Push a `v*` tag so `build-binaries.yml` creates a GitHub Release with platform tarballs (`VOLT_INSTALL_METHOD=binary` path).
 - [ ] After both exist, smoke-test: `curl -fsSL https://volt-cli.dev/install.sh | sh` on macOS/Linux and `irm https://volt-cli.dev/install.ps1 | iex` on Windows.

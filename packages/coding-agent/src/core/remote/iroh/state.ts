@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import { writeDurableAtomicFile } from "../../../utils/durable-atomic-write.ts";
 import { cloneIrohRemoteRpcGrant, type IrohRemoteRpcGrant, parseIrohRemoteRpcGrant } from "./access-grant.ts";
@@ -66,6 +67,11 @@ export interface IrohRemoteLiveActivityRegistration {
 	createdAt: number;
 	updatedAt: number;
 }
+
+export const MAX_IROH_REMOTE_LIVE_ACTIVITIES_PER_CLIENT = 32;
+export const MAX_IROH_REMOTE_LIVE_ACTIVITY_SCOPE_BYTES = 512;
+export const MAX_IROH_REMOTE_LIVE_ACTIVITY_ID_BYTES = 512;
+export const MAX_IROH_REMOTE_LIVE_ACTIVITY_ID_CODE_POINTS = 128;
 
 export interface IrohRemoteClient {
 	nodeId: string;
@@ -335,16 +341,87 @@ function parseOptionalIrohRemoteLiveActivityTarget(
 export function parseIrohRemoteLiveActivityRegistration(value: unknown): IrohRemoteLiveActivityRegistration {
 	const registration = expectRecord(value, "live activity registration");
 	return {
-		workspaceName: expectString(registration.workspaceName, "live activity workspaceName"),
-		sessionId: expectString(registration.sessionId, "live activity sessionId"),
-		activityId: expectString(registration.activityId, "live activity activityId"),
-		tokenHash: expectString(registration.tokenHash, "live activity tokenHash"),
+		workspaceName: expectBoundedUtf8String(
+			registration.workspaceName,
+			"live activity workspaceName",
+			MAX_IROH_REMOTE_LIVE_ACTIVITY_SCOPE_BYTES,
+		),
+		sessionId: expectBoundedUtf8String(
+			registration.sessionId,
+			"live activity sessionId",
+			MAX_IROH_REMOTE_LIVE_ACTIVITY_SCOPE_BYTES,
+		),
+		activityId: expectBoundedUtf8String(
+			registration.activityId,
+			"live activity activityId",
+			MAX_IROH_REMOTE_LIVE_ACTIVITY_ID_BYTES,
+			MAX_IROH_REMOTE_LIVE_ACTIVITY_ID_CODE_POINTS,
+		),
+		tokenHash: expectSha256Hex(registration.tokenHash, "live activity tokenHash"),
 		tokenEnvironment: expectPushTokenEnvironment(registration.tokenEnvironment, "live activity tokenEnvironment"),
 		platform: expectPushTargetPlatform(registration.platform, "live activity platform"),
-		pushTargetId: expectString(registration.pushTargetId, "live activity pushTargetId"),
-		createdAt: expectNumber(registration.createdAt, "live activity createdAt"),
-		updatedAt: expectNumber(registration.updatedAt, "live activity updatedAt"),
+		pushTargetId: expectBoundedUtf8String(
+			registration.pushTargetId,
+			"live activity pushTargetId",
+			MAX_IROH_REMOTE_LIVE_ACTIVITY_SCOPE_BYTES,
+		),
+		createdAt: expectNonNegativeSafeInteger(registration.createdAt, "live activity createdAt"),
+		updatedAt: expectNonNegativeSafeInteger(registration.updatedAt, "live activity updatedAt"),
 	};
+}
+
+/**
+ * Normalize legacy registration arrays into the same bounded shape enforced at
+ * mutation time: one newest entry per workspace/session and the newest 32
+ * sessions overall, ordered oldest-first for deterministic future eviction.
+ */
+export function normalizeIrohRemoteLiveActivityRegistrations(
+	registrations: readonly IrohRemoteLiveActivityRegistration[],
+): IrohRemoteLiveActivityRegistration[] {
+	interface IndexedRegistration {
+		registration: IrohRemoteLiveActivityRegistration;
+		index: number;
+	}
+
+	const newestBySession = new Map<string, IndexedRegistration>();
+	for (const [index, registration] of registrations.entries()) {
+		const candidate = { registration, index };
+		const key = JSON.stringify([registration.workspaceName, registration.sessionId]);
+		const existing = newestBySession.get(key);
+		if (!existing || compareLiveActivityRecency(existing, candidate) <= 0) {
+			newestBySession.set(key, candidate);
+		}
+	}
+
+	const normalized = [...newestBySession.values()].sort(compareLiveActivityAge);
+	return normalized
+		.slice(Math.max(0, normalized.length - MAX_IROH_REMOTE_LIVE_ACTIVITIES_PER_CLIENT))
+		.map(({ registration }) => registration);
+}
+
+function compareLiveActivityRecency(
+	left: { registration: IrohRemoteLiveActivityRegistration; index: number },
+	right: { registration: IrohRemoteLiveActivityRegistration; index: number },
+): number {
+	return (
+		compareNumbers(left.registration.updatedAt, right.registration.updatedAt) ||
+		compareNumbers(left.registration.createdAt, right.registration.createdAt) ||
+		compareNumbers(left.index, right.index)
+	);
+}
+
+function compareLiveActivityAge(
+	left: { registration: IrohRemoteLiveActivityRegistration; index: number },
+	right: { registration: IrohRemoteLiveActivityRegistration; index: number },
+): number {
+	return (
+		compareNumbers(left.registration.createdAt, right.registration.createdAt) ||
+		compareNumbers(left.registration.updatedAt, right.registration.updatedAt) ||
+		compareStrings(left.registration.workspaceName, right.registration.workspaceName) ||
+		compareStrings(left.registration.sessionId, right.registration.sessionId) ||
+		compareStrings(left.registration.activityId, right.registration.activityId) ||
+		compareNumbers(left.index, right.index)
+	);
 }
 
 export function parseIrohRemoteRevokedClient(value: unknown): IrohRemoteRevokedClient {
@@ -478,7 +555,9 @@ function parseOptionalLiveActivityRegistrationsProperty(
 	if (value === undefined) {
 		return {};
 	}
-	return { liveActivities: parseArray(value, label, parseIrohRemoteLiveActivityRegistration) };
+	const registrations = parseArray(value, label, parseIrohRemoteLiveActivityRegistration);
+	const normalized = normalizeIrohRemoteLiveActivityRegistrations(registrations);
+	return normalized.length === 0 ? {} : { liveActivities: normalized };
 }
 
 function expectPairingSecretTombstoneOutcome(value: unknown): IrohRemotePairingSecretTombstoneOutcome {
@@ -530,6 +609,25 @@ function expectString(value: unknown, label: string): string {
 	return value;
 }
 
+function expectBoundedUtf8String(value: unknown, label: string, maxBytes: number, maxCodePoints?: number): string {
+	const parsed = expectString(value, label);
+	if (Buffer.byteLength(parsed, "utf8") > maxBytes) {
+		throw new Error(`${label} must be at most ${maxBytes} UTF-8 bytes`);
+	}
+	if (maxCodePoints !== undefined && Array.from(parsed).length > maxCodePoints) {
+		throw new Error(`${label} must contain at most ${maxCodePoints} characters`);
+	}
+	return parsed;
+}
+
+function expectSha256Hex(value: unknown, label: string): string {
+	const parsed = expectString(value, label);
+	if (!/^[0-9a-f]{64}$/.test(parsed)) {
+		throw new Error(`${label} must be a lowercase SHA-256 hex digest`);
+	}
+	return parsed;
+}
+
 function expectOptionalString(value: unknown, label: string): string | undefined {
 	if (value === undefined) {
 		return undefined;
@@ -567,6 +665,22 @@ function expectNumber(value: unknown, label: string): number {
 		throw new Error(`${label} must be a finite number`);
 	}
 	return value;
+}
+
+function expectNonNegativeSafeInteger(value: unknown, label: string): number {
+	const parsed = expectNumber(value, label);
+	if (!Number.isSafeInteger(parsed) || parsed < 0) {
+		throw new Error(`${label} must be a non-negative safe integer`);
+	}
+	return parsed;
+}
+
+function compareNumbers(left: number, right: number): number {
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function compareStrings(left: string, right: string): number {
+	return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {

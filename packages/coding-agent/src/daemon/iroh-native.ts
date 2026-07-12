@@ -26,6 +26,7 @@ export interface IrohEndpointLike {
 
 export interface IrohIncomingLike {
 	accept(): Promise<IrohAcceptingLike>;
+	refuse(): Promise<void>;
 }
 
 export interface IrohAcceptingLike {
@@ -35,6 +36,7 @@ export interface IrohAcceptingLike {
 export interface IrohConnectionLike {
 	remoteId(): IrohNodeIdLike;
 	acceptBi(): Promise<IrohBiStreamLike>;
+	setMaxConcurrentBiStreams(count: bigint): void;
 	close(errorCode: bigint, reason: number[]): void;
 	closed(): Promise<unknown>;
 }

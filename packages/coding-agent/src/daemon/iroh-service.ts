@@ -37,13 +37,18 @@ import {
 	IrohRemotePushNotificationDispatcher,
 	type IrohRemotePushNotificationIntent,
 	IrohRemotePushRelayHttpClient,
+	revokeIrohRemoteClientPushTargets,
 } from "../core/remote/iroh/push.ts";
 import {
 	createIrohRemoteRpcCapabilityDeniedResponse,
 	createIrohRemoteRpcErrorResponse,
 } from "../core/remote/iroh/rpc-command-filter.ts";
-import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
-import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
+import type { IrohRemoteClient, IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
+import {
+	IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR,
+	type IrohRemoteHostStateManager,
+	isIrohRemoteWorkspaceHasWorktreesError,
+} from "../core/remote/iroh/state-manager.ts";
 import { getIrohRemoteWorkspaceAvailabilityStatus } from "../core/remote/iroh/workspace.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../core/remote/iroh/worktree-rpc.ts";
 import type { IrohBiStreamLike } from "../core/rpc/iroh-transport.ts";
@@ -93,6 +98,7 @@ import {
 	type IrohModuleLike,
 	loadIrohModule,
 } from "./iroh-native.ts";
+import { IrohRemoteResourceGuard } from "./iroh-resource-guard.ts";
 import { type DaemonAttachClaim, LeaseBroker, type LeaseState } from "./lease-broker.ts";
 import type { VoltdRuntimeServices, VoltdServiceExtension } from "./main.ts";
 import { RELAY_TOKEN_TTL_MS, RelayRegistry } from "./relay-stream.ts";
@@ -132,6 +138,7 @@ const RELAY_OFFER_RETRY_AFTER_MS = 1000;
 const WORKSPACE_DISCOVERY_STREAM_SESSION_ID = "$workspace-discovery";
 const WORKSPACE_MANAGEMENT_STREAM_SESSION_ID = "$workspace-management";
 const IROH_ENDPOINT_READY_TIMEOUT_MS = 15_000;
+const IROH_UNAUTHENTICATED_CONNECTION_TIMEOUT_MS = 15_000;
 const SHUTDOWN_RUNTIME_IDLE_CAP_MS = 60_000;
 
 export type AuthorityInvalidationRuntime = Pick<IntegratedRuntimeEntry, "clientNodeId" | "workspaceName" | "sessionId">;
@@ -293,7 +300,11 @@ function isExpectedApplicationClose(error: unknown): boolean {
 }
 
 function closeConnection(connection: IrohConnectionLike, reason: string): void {
-	connection.close(0n, Array.from(Buffer.from(reason, "utf8")));
+	try {
+		connection.close(0n, Array.from(Buffer.from(reason, "utf8")));
+	} catch {
+		// Transport closure is best-effort; registry/task cleanup must still run.
+	}
 }
 
 async function waitForConnectionClose(connection: IrohConnectionLike): Promise<void> {
@@ -393,6 +404,7 @@ class IrohDaemonService {
 	private readonly activeStreams = new IrohRemoteActiveStreamRegistry();
 	private readonly clientConnections = new Map<string, Set<ClientConnectionRecord>>();
 	private readonly connectionTasks = new Set<Promise<void>>();
+	private readonly resourceGuard = new IrohRemoteResourceGuard();
 	private readonly pendingPairRequests = new Map<string, PendingPairRequest>();
 	private readonly sessionListCursors = new Map<string, RemoteSessionListCursorEntry>();
 	private readonly pushRelayClient: IrohRemotePushRelayHttpClient;
@@ -743,6 +755,26 @@ class IrohDaemonService {
 			if (!incoming) {
 				break;
 			}
+			const connectionAdmission = this.resourceGuard.tryAcquireConnectionTask();
+			if (!connectionAdmission.ok) {
+				let refused = true;
+				try {
+					await incoming.refuse();
+				} catch {
+					refused = false;
+				}
+				await this.logAudit({
+					type: "iroh_security_connection_limit",
+					success: false,
+					error: "incoming connection refused at daemon connection-task limit",
+					details: {
+						limit: connectionAdmission.limit,
+						refused,
+						scope: connectionAdmission.scope,
+					},
+				});
+				continue;
+			}
 			const task = this.handleConnection(incoming)
 				.catch((error) => {
 					if (!isExpectedApplicationClose(error)) {
@@ -754,6 +786,7 @@ class IrohDaemonService {
 				})
 				.finally(() => {
 					this.connectionTasks.delete(task);
+					connectionAdmission.lease.release();
 				});
 			this.connectionTasks.add(task);
 		}
@@ -762,21 +795,108 @@ class IrohDaemonService {
 	private async handleConnection(
 		incoming: NonNullable<Awaited<ReturnType<IrohEndpointLike["acceptNext"]>>>,
 	): Promise<void> {
-		const accepting = await incoming.accept();
-		const connection = await accepting.connect();
-		const remoteId = connection.remoteId().toString();
+		let connection: IrohConnectionLike;
+		try {
+			const accepting = await incoming.accept();
+			connection = await accepting.connect();
+		} catch {
+			await this.logAudit({
+				type: "iroh_security_transport_rejected",
+				success: false,
+				error: "incoming transport handshake failed",
+				details: { phase: "transport_connect" },
+			});
+			return;
+		}
+		try {
+			connection.setMaxConcurrentBiStreams(BigInt(MAX_CONCURRENT_STREAMS_PER_CONNECTION));
+		} catch {
+			closeConnection(connection, "stream_limit_configuration_failed");
+			await waitForConnectionClose(connection);
+			await this.logAudit({
+				type: "iroh_security_transport_rejected",
+				success: false,
+				error: "connected transport could not enforce the inbound stream limit",
+				details: { phase: "stream_limit_configuration" },
+			});
+			return;
+		}
+		let remoteId: string;
+		try {
+			remoteId = connection.remoteId().toString();
+		} catch {
+			closeConnection(connection, "invalid_remote_identity");
+			await waitForConnectionClose(connection);
+			await this.logAudit({
+				type: "iroh_security_transport_rejected",
+				success: false,
+				error: "connected transport did not expose a valid remote identity",
+				details: { phase: "remote_identity" },
+			});
+			return;
+		}
+		const nodeConnectionAdmission = this.resourceGuard.tryAcquireNodeConnection(remoteId);
+		if (!nodeConnectionAdmission.ok) {
+			closeConnection(connection, "node_connection_limit");
+			await waitForConnectionClose(connection);
+			await this.logAudit({
+				type: "iroh_security_connection_limit",
+				clientNodeId: remoteId,
+				success: false,
+				error: "connection refused at per-node connection limit",
+				details: { limit: nodeConnectionAdmission.limit, scope: nodeConnectionAdmission.scope },
+			});
+			return;
+		}
+		const unauthenticatedAdmission = this.resourceGuard.tryAcquireUnauthenticatedConnection(remoteId);
+		if (!unauthenticatedAdmission.ok) {
+			nodeConnectionAdmission.lease.release();
+			closeConnection(connection, "unauthenticated_connection_limit");
+			await waitForConnectionClose(connection);
+			await this.logAudit({
+				type: "iroh_security_unauthenticated_connection_limit",
+				clientNodeId: remoteId,
+				success: false,
+				error: "unauthenticated connection refused at admission limit",
+				details: { limit: unauthenticatedAdmission.limit, scope: unauthenticatedAdmission.scope },
+			});
+			return;
+		}
 		const connectionId = `conn-${++activeConnectionSequence}`;
 		const removeClientConnection = this.registerClientConnection(remoteId, connection, connectionId);
 		const streamTasks = new Set<Promise<void>>();
 		let acceptedStreamCount = 0;
 		let closeRequested = false;
-		this.log("info", `client connection opened: ${remoteId} (${connectionId})`);
-		await this.logAudit({
-			type: "client_connected",
-			clientNodeId: remoteId,
-			success: true,
-			details: { connectionId },
-		});
+		let authenticated = false;
+		const unauthenticatedTimer = setTimeout(() => {
+			if (authenticated || closeRequested) return;
+			closeRequested = true;
+			closeConnection(connection, "handshake_timeout");
+			void this.logAudit({
+				type: "iroh_security_handshake_timeout",
+				clientNodeId: remoteId,
+				success: false,
+				error: "connection did not authenticate before the handshake deadline",
+				details: { connectionId, timeoutMs: IROH_UNAUTHENTICATED_CONNECTION_TIMEOUT_MS },
+			});
+		}, IROH_UNAUTHENTICATED_CONNECTION_TIMEOUT_MS);
+		unauthenticatedTimer.unref?.();
+
+		const markAuthenticated = async (): Promise<boolean> => {
+			if (authenticated) return true;
+			if (closeRequested) return false;
+			authenticated = true;
+			clearTimeout(unauthenticatedTimer);
+			unauthenticatedAdmission.lease.release();
+			this.log("info", `client connection opened: ${remoteId} (${connectionId})`);
+			await this.logAudit({
+				type: "client_connected",
+				clientNodeId: remoteId,
+				success: true,
+				details: { connectionId },
+			});
+			return true;
+		};
 
 		const requestCloseWhenIdle = () => {
 			if (closeRequested || acceptedStreamCount === 0 || streamTasks.size > 0) {
@@ -788,45 +908,90 @@ class IrohDaemonService {
 
 		try {
 			while (!closeRequested) {
-				const stream = await (acceptedStreamCount === 0
+				const stream = await (!authenticated
 					? withTimeout(connection.acceptBi(), DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS, "handshake timed out")
 					: connection.acceptBi());
 				acceptedStreamCount++;
 				if (streamTasks.size >= MAX_CONCURRENT_STREAMS_PER_CONNECTION) {
-					// One authenticated client is holding too many concurrent streams
-					// open. Refuse further work and close the connection rather than let
+					// One connection is holding too many concurrent streams open. Refuse
+					// further work and close the connection rather than let
 					// it exhaust daemon resources; the just-accepted stream is torn down
 					// with the connection. A legitimate client never reaches this.
-					this.log(
-						"error",
-						`client ${remoteId} (${connectionId}) exceeded concurrent stream cap ` +
-							`(${MAX_CONCURRENT_STREAMS_PER_CONNECTION}); closing connection`,
-					);
 					closeRequested = true;
 					closeConnection(connection, "stream_limit_exceeded");
+					await this.logAudit({
+						type: "iroh_security_stream_limit",
+						clientNodeId: remoteId,
+						success: false,
+						error: "connection exceeded concurrent stream limit",
+						details: { connectionId, limit: MAX_CONCURRENT_STREAMS_PER_CONNECTION, scope: "connection" },
+					});
 					break;
 				}
+				const streamAdmission = this.resourceGuard.tryAcquireActiveStream(remoteId);
+				if (!streamAdmission.ok) {
+					closeIrohRemoteStream(stream, "stream_limit_exceeded");
+					await this.logAudit({
+						type: "iroh_security_stream_limit",
+						clientNodeId: remoteId,
+						success: false,
+						error: "stream refused at daemon active-stream limit",
+						details: { connectionId, limit: streamAdmission.limit, scope: streamAdmission.scope },
+					});
+					requestCloseWhenIdle();
+					continue;
+				}
 				const streamId = `stream-${++activeStreamSequence}`;
-				const task = this.handleConnectionStream(stream, connection, remoteId, connectionId, streamId)
-					.catch((error) => {
+				const task = this.handleConnectionStream(
+					stream,
+					connection,
+					remoteId,
+					connectionId,
+					streamId,
+					markAuthenticated,
+				)
+					.catch(async (error) => {
 						if (!isExpectedApplicationClose(error)) {
-							this.log(
-								"error",
-								`stream error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
-							);
+							if (authenticated) {
+								this.log(
+									"error",
+									`stream error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+								);
+							} else {
+								await this.logAudit({
+									type: "iroh_security_transport_rejected",
+									clientNodeId: remoteId,
+									success: false,
+									error: "unauthenticated stream failed",
+									details: { connectionId, phase: "stream_handshake" },
+								});
+							}
 						}
 					})
 					.finally(() => {
+						streamAdmission.lease.release();
 						streamTasks.delete(task);
 						requestCloseWhenIdle();
 					});
 				streamTasks.add(task);
 			}
 		} catch (error) {
-			if (acceptedStreamCount === 0) {
+			if (acceptedStreamCount === 0 && authenticated) {
 				throw error;
 			}
+			if (acceptedStreamCount === 0 && !closeRequested) {
+				await this.logAudit({
+					type: "iroh_security_handshake_timeout",
+					clientNodeId: remoteId,
+					success: false,
+					error: "connection closed or timed out before opening a handshake stream",
+					details: { connectionId, timeoutMs: DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS },
+				});
+			}
 		} finally {
+			clearTimeout(unauthenticatedTimer);
+			unauthenticatedAdmission.lease.release();
+			nodeConnectionAdmission.lease.release();
 			await this.closeActiveStreamsForConnection(connectionId, "connection_closed");
 			await Promise.allSettled(streamTasks);
 			removeClientConnection();
@@ -834,13 +999,15 @@ class IrohDaemonService {
 				closeConnection(connection, "done");
 			}
 			await waitForConnectionClose(connection);
-			this.log("info", `client connection closed: ${remoteId} (${connectionId})`);
-			await this.logAudit({
-				type: "client_disconnected",
-				clientNodeId: remoteId,
-				success: true,
-				details: { connectionId },
-			});
+			if (authenticated) {
+				this.log("info", `client connection closed: ${remoteId} (${connectionId})`);
+				await this.logAudit({
+					type: "client_disconnected",
+					clientNodeId: remoteId,
+					success: true,
+					details: { connectionId },
+				});
+			}
 		}
 	}
 
@@ -850,14 +1017,32 @@ class IrohDaemonService {
 		remoteId: string,
 		connectionId: string,
 		streamId: string,
+		markAuthenticated: () => Promise<boolean>,
 	): Promise<void> {
 		const engine = this.requireEngine();
-		const handshake = await engine.readHandshake(stream, remoteId, {
-			child: "volt",
-			maxLineBytes: DEFAULT_IROH_REMOTE_HANDSHAKE_MAX_LINE_BYTES,
-			timeoutMs: DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS,
-			writeSuccessResponse: false,
-		});
+		const handshakeAdmission = this.resourceGuard.tryAcquireHandshake(remoteId);
+		if (!handshakeAdmission.ok) {
+			closeIrohRemoteStream(stream, "handshake_limit_exceeded");
+			await this.logAudit({
+				type: "iroh_security_handshake_limit",
+				clientNodeId: remoteId,
+				success: false,
+				error: "stream refused at concurrent handshake limit",
+				details: { connectionId, limit: handshakeAdmission.limit, scope: handshakeAdmission.scope },
+			});
+			return;
+		}
+		let handshake: IrohRemoteHostHandshakeResult;
+		try {
+			handshake = await engine.readHandshake(stream, remoteId, {
+				child: "volt",
+				maxLineBytes: DEFAULT_IROH_REMOTE_HANDSHAKE_MAX_LINE_BYTES,
+				timeoutMs: DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS,
+				writeSuccessResponse: false,
+			});
+		} finally {
+			handshakeAdmission.lease.release();
+		}
 		if (!handshake.ok) {
 			if (
 				handshake.response.outcome === "workspace_authorization_removed" &&
@@ -867,6 +1052,10 @@ class IrohDaemonService {
 			}
 			await Promise.resolve(stream.send.finish?.()).catch(() => {});
 			await Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
+			return;
+		}
+		if (!(await markAuthenticated())) {
+			closeIrohRemoteStream(stream, "handshake_timeout");
 			return;
 		}
 
@@ -1077,7 +1266,22 @@ class IrohDaemonService {
 					auditLogger: this.services.auditLogger,
 					commandContext: this.getCommandContext(),
 					unregisterWorkspace: async (workspaceName) => {
-						const removedWorkspace = await this.stateManager.unregisterWorkspace(workspaceName);
+						let removedWorkspace: Awaited<ReturnType<IrohRemoteHostStateManager["unregisterWorkspace"]>>;
+						try {
+							removedWorkspace = await this.stateManager.unregisterWorkspace(workspaceName);
+						} catch (error) {
+							if (!isIrohRemoteWorkspaceHasWorktreesError(error)) {
+								throw error;
+							}
+							return {
+								ok: false,
+								error: IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR,
+								details: {
+									worktreeCount: error.worktreeIds.length,
+									worktreeIds: error.worktreeIds,
+								},
+							};
+						}
 						if (!removedWorkspace) {
 							return { ok: false, error: "workspace_unregistered" };
 						}
@@ -1290,6 +1494,34 @@ class IrohDaemonService {
 			stateManager: this.stateManager,
 			workspace: authorization.workspace.name,
 		});
+	}
+
+	private async revokeClientPushTargets(client: IrohRemoteClient | undefined): Promise<void> {
+		if ((client?.pushTargets?.length ?? 0) === 0) return;
+		try {
+			const summary = await revokeIrohRemoteClientPushTargets(client, this.pushRelayClient);
+			const complete = summary.failed === 0 && summary.skipped === 0;
+			if (!complete) {
+				this.log("warn", "remote push-target cleanup incomplete after client revoke", { ...summary });
+			}
+			await this.logAudit({
+				type: "push_targets_revoked",
+				clientNodeId: client?.nodeId,
+				success: complete,
+				error: complete ? undefined : "remote push-target cleanup incomplete; relay TTL remains the lifetime bound",
+				details: { ...summary, remainingLifetimeBound: "relay_target_ttl" },
+			});
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.log("warn", "remote push-target cleanup failed after client revoke", { error: message });
+			await this.logAudit({
+				type: "push_targets_revoked",
+				clientNodeId: client?.nodeId,
+				success: false,
+				error: "remote push-target cleanup failed; relay TTL remains the lifetime bound",
+				details: { remainingLifetimeBound: "relay_target_ttl" },
+			});
+		}
 	}
 
 	private async sendHandshakeError(stream: IrohBiStreamLike, error: unknown): Promise<void> {
@@ -2114,7 +2346,7 @@ class IrohDaemonService {
 			streamEntry?: IrohRemoteActiveStreamEntry;
 			runtimeEntry?: IntegratedRuntimeEntry;
 			relayIds?: ReadonlySet<string>;
-			/** Enables best-effort worktree checkout removal (records are already gone). */
+			/** Enables a non-destructive audit of preserved checkout directories. */
 			workspacePath?: string;
 		} = {},
 	): Promise<{ closedStreamCount: number; stoppedRuntimeCount: number }> {
@@ -2629,11 +2861,37 @@ class IrohDaemonService {
 					return true;
 				}
 				await this.closeActiveStreamsForClient(request.clientNodeId);
+				await this.revokeClientPushTargets(revocation.client);
 				connection.send({ type: "ok", id: request.id });
 				return true;
 			}
 			case "workspace_unregister": {
-				const removedWorkspace = await this.stateManager.unregisterWorkspace(request.name);
+				let removedWorkspace: Awaited<ReturnType<IrohRemoteHostStateManager["unregisterWorkspace"]>>;
+				try {
+					removedWorkspace = await this.stateManager.unregisterWorkspace(request.name);
+				} catch (error) {
+					if (!isIrohRemoteWorkspaceHasWorktreesError(error)) {
+						throw error;
+					}
+					await this.logAudit({
+						type: "workspace_unregistered",
+						workspace: request.name,
+						success: false,
+						error: IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR,
+						details: {
+							source: "control",
+							worktreeCount: error.worktreeIds.length,
+							worktreeIds: error.worktreeIds,
+						},
+					});
+					connection.send({
+						type: "error",
+						id: request.id,
+						code: IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR,
+						message: error.message,
+					});
+					return true;
+				}
 				if (!removedWorkspace) {
 					connection.send({
 						type: "error",
@@ -3016,6 +3274,7 @@ class IrohDaemonService {
 			// Endpoint shutdown is best-effort.
 		}
 		await Promise.allSettled(this.connectionTasks);
+		await this.services.auditLogger.flush().catch(() => {});
 		this.log("info", "iroh service stopped", { cappedRuntimes });
 	}
 

@@ -1,8 +1,15 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { Buffer } from "node:buffer";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Prompt, Resource, Tool as SdkTool } from "@modelcontextprotocol/sdk/types.js";
+import { writeDurableAtomicFileSync } from "../../utils/durable-atomic-write.ts";
+import { ensurePrivateDirectorySync, hardenPrivateRegularFileSync } from "../../utils/private-files.ts";
 import { hashMcpMetadata } from "./config.ts";
 import type { McpServerMetadata } from "./types.ts";
+
+const DEFAULT_METADATA_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+const DEFAULT_METADATA_CACHE_MAX_SERVERS = 64;
+const DEFAULT_METADATA_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
 interface MetadataCacheFile {
 	version: 1;
@@ -11,6 +18,10 @@ interface MetadataCacheFile {
 
 export interface McpMetadataCacheOptions {
 	agentDir: string;
+	maxBytes?: number;
+	maxServers?: number;
+	maxAgeMs?: number;
+	now?: () => number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -60,10 +71,18 @@ function parseCacheFile(value: unknown): MetadataCacheFile {
 export class McpMetadataCache {
 	private path: string;
 	private servers: Map<string, McpServerMetadata>;
+	private maxBytes: number;
+	private maxServers: number;
+	private maxAgeMs: number;
+	private now: () => number;
 
 	constructor(options: McpMetadataCacheOptions) {
 		this.path = join(options.agentDir, "mcp", "metadata-cache.json");
 		this.servers = new Map();
+		this.maxBytes = Math.max(1, options.maxBytes ?? DEFAULT_METADATA_CACHE_MAX_BYTES);
+		this.maxServers = Math.max(1, options.maxServers ?? DEFAULT_METADATA_CACHE_MAX_SERVERS);
+		this.maxAgeMs = Math.max(1, options.maxAgeMs ?? DEFAULT_METADATA_CACHE_MAX_AGE_MS);
+		this.now = options.now ?? Date.now;
 		this.load();
 	}
 
@@ -87,7 +106,7 @@ export class McpMetadataCache {
 				serverVersion: metadata.serverVersion,
 				configHash: metadata.configHash,
 			}),
-			lastSeenAt: new Date().toISOString(),
+			lastSeenAt: new Date(this.now()).toISOString(),
 		};
 		this.servers.set(server, next);
 		this.save();
@@ -104,25 +123,60 @@ export class McpMetadataCache {
 			return;
 		}
 		try {
+			hardenPrivateRegularFileSync(this.path);
+			if (lstatSync(this.path).size > this.maxBytes) {
+				return;
+			}
 			const parsed = parseCacheFile(JSON.parse(readFileSync(this.path, "utf-8")) as unknown);
-			this.servers = new Map(Object.entries(parsed.servers));
+			this.servers = new Map(
+				Object.entries(parsed.servers).filter(([server, metadata]) => server === metadata.server),
+			);
+			this.prune();
 		} catch {
 			this.servers = new Map();
 		}
 	}
 
 	private save(): void {
+		this.prune();
+		const serialized = this.serialize();
+		if (Buffer.byteLength(serialized, "utf8") > this.maxBytes) return;
 		const dir = dirname(this.path);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true, mode: 0o700 });
+		ensurePrivateDirectorySync(dir);
+		writeDurableAtomicFileSync(this.path, serialized);
+	}
+
+	private prune(): void {
+		const cutoff = this.now() - this.maxAgeMs;
+		const sorted = () =>
+			Array.from(this.servers.entries()).sort((left, right) => {
+				const leftTime = Date.parse(left[1].lastSeenAt);
+				const rightTime = Date.parse(right[1].lastSeenAt);
+				return (Number.isFinite(leftTime) ? leftTime : 0) - (Number.isFinite(rightTime) ? rightTime : 0);
+			});
+		for (const [server, metadata] of sorted()) {
+			const lastSeenAt = Date.parse(metadata.lastSeenAt);
+			if (!Number.isFinite(lastSeenAt) || lastSeenAt < cutoff) {
+				this.servers.delete(server);
+			}
 		}
-		const servers: Record<string, McpServerMetadata> = {};
-		for (const [server, metadata] of this.servers.entries()) {
-			servers[server] = metadata;
+		while (this.servers.size > this.maxServers) {
+			const oldest = sorted()[0];
+			if (!oldest) break;
+			this.servers.delete(oldest[0]);
 		}
-		writeFileSync(this.path, `${JSON.stringify({ version: 1, servers }, null, 2)}\n`, {
-			encoding: "utf-8",
-			mode: 0o600,
-		});
+		while (this.serializedBytes() > this.maxBytes) {
+			const oldest = sorted()[0];
+			if (!oldest) break;
+			this.servers.delete(oldest[0]);
+		}
+	}
+
+	private serializedBytes(): number {
+		return Buffer.byteLength(this.serialize(), "utf8");
+	}
+
+	private serialize(): string {
+		return `${JSON.stringify({ version: 1, servers: Object.fromEntries(this.servers.entries()) }, null, 2)}\n`;
 	}
 }

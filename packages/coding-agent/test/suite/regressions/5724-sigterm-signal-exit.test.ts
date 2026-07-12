@@ -16,6 +16,8 @@ type ShutdownThis = {
 	stop: () => void;
 	settingsManager: { rememberActiveProfile: () => void; flush: () => Promise<void> };
 	releaseDaemonLeaseOnQuit: () => Promise<void>;
+	closeLspTrace: () => Promise<void>;
+	cleanupAllScratchDirectories: () => void;
 };
 
 type InteractiveModePrototypeWithShutdown = {
@@ -83,12 +85,15 @@ describe("InteractiveMode SIGTERM shutdown with signal-exit (#5724)", () => {
 				flush: vi.fn(async () => {}),
 			},
 			releaseDaemonLeaseOnQuit: vi.fn(async () => {}),
+			closeLspTrace: vi.fn(async () => {}),
+			cleanupAllScratchDirectories: vi.fn(),
 		};
 
 		const shutdownPromise = callShutdown(context, { fromSignal: true });
-		await Promise.resolve();
+		await vi.waitFor(() => {
+			expect(order).toEqual(["dispose"]);
+		});
 
-		expect(order).toEqual(["dispose"]);
 		expect(context.unregisterSignalHandlers).not.toHaveBeenCalled();
 
 		dispose.resolve();

@@ -1,6 +1,6 @@
 import { spawnSync } from "child_process";
 import { randomUUID } from "crypto";
-import { readFileSync, unlinkSync } from "fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -159,7 +159,9 @@ function isWSL(env: NodeJS.ProcessEnv = process.env): boolean {
  * directly, so we use it as a fallback.
  */
 function readClipboardImageViaPowerShell(): ClipboardImage | null {
-	const tmpFile = join(tmpdir(), `volt-wsl-clip-${randomUUID()}.png`);
+	const tempDirectory = mkdtempSync(join(tmpdir(), "volt-wsl-clip-"));
+	chmodSync(tempDirectory, 0o700);
+	const tmpFile = join(tempDirectory, `${randomUUID()}.png`);
 
 	try {
 		const winPathResult = runCommand("wslpath", ["-w", tmpFile], { timeoutMs: DEFAULT_LIST_TIMEOUT_MS });
@@ -202,11 +204,7 @@ function readClipboardImageViaPowerShell(): ClipboardImage | null {
 	} catch {
 		return null;
 	} finally {
-		try {
-			unlinkSync(tmpFile);
-		} catch {
-			// Ignore cleanup errors.
-		}
+		rmSync(tempDirectory, { recursive: true, force: true });
 	}
 }
 

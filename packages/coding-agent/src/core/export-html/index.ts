@@ -1,8 +1,10 @@
 import type { AgentState } from "@earendil-works/volt-agent-core";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { basename, join } from "path";
 import { APP_NAME, getExportTemplateDir } from "../../config.ts";
+import { writeDurableAtomicFileSync } from "../../utils/durable-atomic-write.ts";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
+import { PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE } from "../../utils/private-files.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { SessionEntry } from "../session-manager.ts";
 import { SessionManager } from "../session-manager.ts";
@@ -277,7 +279,10 @@ export async function exportSessionToHtml(
 		outputPath = `${APP_NAME}-session-${sessionBasename}.html`;
 	}
 
-	writeFileSync(outputPath, html, "utf8");
+	writeDurableAtomicFileSync(outputPath, html, {
+		directoryMode: PRIVATE_DIRECTORY_MODE,
+		fileMode: PRIVATE_FILE_MODE,
+	});
 	return outputPath;
 }
 
@@ -311,6 +316,9 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		outputPath = `${APP_NAME}-session-${inputBasename}.html`;
 	}
 
-	writeFileSync(outputPath, html, "utf8");
+	writeDurableAtomicFileSync(outputPath, html, {
+		directoryMode: PRIVATE_DIRECTORY_MODE,
+		fileMode: PRIVATE_FILE_MODE,
+	});
 	return outputPath;
 }

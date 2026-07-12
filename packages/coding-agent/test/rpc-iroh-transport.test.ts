@@ -1,10 +1,14 @@
 import { Buffer } from "node:buffer";
 import { describe, expect, test } from "vitest";
+import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
+import { createIrohRemoteFilteredRpcTransport } from "../src/core/remote/iroh/rpc-transport.ts";
 import {
 	createIrohRpcTransport,
+	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
 	type IrohBytes,
 	type IrohRecvStreamLike,
 	type IrohSendStreamLike,
+	readIrohJsonlLine,
 } from "../src/core/rpc/iroh-transport.ts";
 import { serializeJsonLine } from "../src/core/rpc/jsonl.ts";
 import type { RpcTransport } from "../src/core/rpc/transport.ts";
@@ -115,6 +119,29 @@ class BlockingStopIrohRecvStream implements IrohRecvStreamLike {
 	}
 }
 
+class FragmentedIrohRecvStream implements IrohRecvStreamLike {
+	readonly requestedReadLimits: number[] = [];
+	private readonly bytes: Buffer;
+	private readonly fragmentBytes: number;
+	private offset = 0;
+
+	constructor(bytes: Buffer, fragmentBytes: number) {
+		this.bytes = bytes;
+		this.fragmentBytes = fragmentBytes;
+	}
+
+	read(sizeLimit: number): Promise<IrohBytes | undefined> {
+		this.requestedReadLimits.push(sizeLimit);
+		if (this.offset >= this.bytes.length) {
+			return Promise.resolve(undefined);
+		}
+		const end = Math.min(this.bytes.length, this.offset + this.fragmentBytes, this.offset + sizeLimit);
+		const chunk = this.bytes.subarray(this.offset, end);
+		this.offset = end;
+		return Promise.resolve(chunk);
+	}
+}
+
 interface DeferredWrite {
 	resolve(): void;
 	reject(error: Error): void;
@@ -187,6 +214,103 @@ function nextTick(): Promise<void> {
 }
 
 describe("Iroh RPC transport", () => {
+	test("uses an 8 MiB authenticated RPC line ceiling", () => {
+		expect(DEFAULT_IROH_RPC_MAX_LINE_BYTES).toBe(8 * 1024 * 1024);
+	});
+
+	test("reads a maximally fragmented line with bounded remaining-byte reads", async () => {
+		const recv = new FragmentedIrohRecvStream(Buffer.from(`${"a".repeat(4096)}\nrest`), 1);
+
+		await expect(readIrohJsonlLine(recv, undefined, { maxLineBytes: 4096 })).resolves.toEqual({
+			line: "a".repeat(4096),
+			rest: Buffer.alloc(0),
+		});
+		expect(recv.requestedReadLimits.at(-1)).toBe(1);
+	});
+
+	test("rejects a fragmented partial line as soon as it crosses the ceiling", async () => {
+		const recv = new FragmentedIrohRecvStream(Buffer.from("a".repeat(4097)), 1);
+
+		await expect(readIrohJsonlLine(recv, undefined, { maxLineBytes: 4096 })).rejects.toThrow(
+			"Iroh RPC line exceeds maximum size of 4096 bytes",
+		);
+		expect(recv.requestedReadLimits.at(-1)).toBe(1);
+	});
+
+	test("consumes many short lines without copying each shrinking remainder", async () => {
+		const lineCount = 8192;
+		const input = Buffer.from("x\n".repeat(lineCount));
+		let readCalls = 0;
+		const recv: IrohRecvStreamLike = {
+			read: async () => {
+				readCalls++;
+				return undefined;
+			},
+		};
+		let rest: Buffer = input;
+
+		for (let index = 0; index < lineCount; index++) {
+			const result = await readIrohJsonlLine(recv, rest);
+			expect(result.line).toBe("x");
+			expect(result.rest.buffer).toBe(input.buffer);
+			rest = result.rest;
+		}
+
+		expect(rest).toHaveLength(0);
+		expect(readCalls).toBe(0);
+	});
+
+	test("does not dispatch another short line until its async handler completes", async () => {
+		const recv = new ManualIrohRecvStream();
+		const send = new ManualIrohSendStream();
+		const transport = createIrohRpcTransport({ stream: { recv, send } });
+		let releaseFirstLine: (() => void) | undefined;
+		const firstLineGate = new Promise<void>((resolve) => {
+			releaseFirstLine = resolve;
+		});
+		const receivedLines: string[] = [];
+		transport.onLine(async (line) => {
+			receivedLines.push(line);
+			if (receivedLines.length === 1) {
+				await firstLineGate;
+			}
+		});
+		const closed = waitForTransportClose(transport);
+		recv.push(Buffer.from("{}\n".repeat(4096)));
+		recv.end();
+
+		await nextTick();
+		expect(receivedLines).toEqual(["{}"]);
+
+		releaseFirstLine?.();
+		await expect(closed).resolves.toBeUndefined();
+		expect(receivedLines).toHaveLength(4096);
+	});
+
+	test("waits for each filtered parse-error write before dispatching the next line", async () => {
+		const recv = new ManualIrohRecvStream();
+		const send = new ManualIrohSendStream();
+		const rawTransport = createIrohRpcTransport({ stream: { recv, send } });
+		const transport = createIrohRemoteFilteredRpcTransport({
+			transport: rawTransport,
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
+		});
+		transport.onLine(() => {
+			throw new Error("empty lines must be rejected before RPC dispatch");
+		});
+		const closed = waitForTransportClose(transport);
+		send.deferNextWrite();
+		recv.push(Buffer.from("\n".repeat(4096)));
+		recv.end();
+
+		await nextTick();
+		expect(send.writes).toHaveLength(1);
+
+		send.completeWrite();
+		await expect(closed).resolves.toBeUndefined();
+		expect(send.writes).toHaveLength(4096);
+	});
+
 	test("serializes outbound values and reads strict JSONL from an Iroh stream", async () => {
 		const recv = new ManualIrohRecvStream();
 		const send = new ManualIrohSendStream();
@@ -230,6 +354,15 @@ describe("Iroh RPC transport", () => {
 		await expect(closed).resolves.toMatchObject({
 			message: "Iroh RPC line exceeds maximum size of 4 bytes",
 		});
+	});
+
+	test("rejects outbound JSONL lines that exceed the configured maximum", () => {
+		const recv = new ManualIrohRecvStream();
+		const send = new ManualIrohSendStream();
+		const transport = createIrohRpcTransport({ stream: { recv, send }, maxLineBytes: 4 });
+
+		expect(() => transport.write({ ok: true })).toThrow("Iroh RPC line exceeds maximum size of 4 bytes");
+		expect(send.writes).toEqual([]);
 	});
 
 	test("flush waits for pending Iroh writes", async () => {

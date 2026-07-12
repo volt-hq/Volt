@@ -72,15 +72,17 @@ export function createIrohRemoteFilteredRpcTransport(
 			return options.transport.write(value);
 		},
 		onLine(handler: RpcLineHandler): () => void {
-			return options.transport.onLine((line) => {
+			return options.transport.onLine(async (line) => {
 				const filterResult = getIrohRemoteRpcFilterResult(line, options.rpcGrant);
 				if (filterResult.allowed) {
-					handler(line);
+					await handler(line);
 					return;
 				}
 
 				try {
-					trackRejectionWrite(options.transport.write(filterResult.response));
+					const writeResult = options.transport.write(filterResult.response);
+					trackRejectionWrite(writeResult);
+					await writeResult;
 				} catch (error: unknown) {
 					recordRejectionError(error);
 				}

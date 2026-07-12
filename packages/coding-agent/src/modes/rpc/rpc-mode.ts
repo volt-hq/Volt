@@ -164,6 +164,8 @@ type RpcModeStartupAwareTransport = RpcTransport & {
 	setRpcModeStartupComplete?(startupComplete: boolean): void;
 };
 
+const MAX_PENDING_RPC_INPUT_TASKS = 64;
+
 function createStdioRpcTransport(): RpcTransport {
 	return {
 		write(value) {
@@ -1166,6 +1168,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	}
 
 	let commandQueue: Promise<void> = Promise.resolve();
+	let pendingInputTaskCount = 0;
 
 	const handleControlMessage = (parsed: unknown): boolean => {
 		// Handle extension UI and host action responses during startup as well as normal operation.
@@ -1230,24 +1233,40 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		await checkShutdownRequested();
 	};
 
-	const enqueueInputTask = (task: () => Promise<void>): void => {
+	const enqueueInputTask = (task: () => Promise<void>): boolean => {
+		if (pendingInputTaskCount >= MAX_PENDING_RPC_INPUT_TASKS) {
+			return false;
+		}
+		pendingInputTaskCount++;
 		const runTask = async (): Promise<void> => {
 			try {
 				await task();
 			} catch (inputError: unknown) {
 				await shutdown(1, undefined, { error: toError(inputError) }).catch(() => {});
+			} finally {
+				pendingInputTaskCount--;
 			}
 		};
 		commandQueue = commandQueue.then(runTask, runTask);
 		void commandQueue.catch(() => {});
+		return true;
 	};
 
-	const processInputLine = (line: string): void => {
+	const rejectInputTaskOverflow = (): Promise<void> => {
+		return shutdown(1, undefined, {
+			error: new Error(`RPC input queue exceeds ${MAX_PENDING_RPC_INPUT_TASKS} tasks`),
+		}).catch(() => {});
+	};
+
+	const processInputLine = (line: string): Promise<void> => {
+		if (shuttingDown) {
+			return Promise.resolve();
+		}
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(line);
 		} catch (parseError: unknown) {
-			enqueueInputTask(async () => {
+			const enqueued = enqueueInputTask(async () => {
 				if (shuttingDown) {
 					return;
 				}
@@ -1260,19 +1279,22 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				);
 				await waitForTransportBackpressure();
 			});
-			return;
+			return enqueued ? Promise.resolve() : rejectInputTaskOverflow();
 		}
 
 		if (handleControlMessage(parsed)) {
-			return;
+			return Promise.resolve();
 		}
 
 		if (!startupComplete) {
+			if (queuedStartupCommandLines.length >= MAX_PENDING_RPC_INPUT_TASKS) {
+				return rejectInputTaskOverflow();
+			}
 			queuedStartupCommandLines.push(line);
-			return;
+			return Promise.resolve();
 		}
 
-		enqueueInputTask(() => handleQueuedParsedInput(parsed));
+		return enqueueInputTask(() => handleQueuedParsedInput(parsed)) ? Promise.resolve() : rejectInputTaskOverflow();
 	};
 
 	detachInput = transport.onLine(processInputLine);
@@ -1319,7 +1341,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		onCatalogChanged: () => output({ type: "models_changed" }),
 	});
 	for (const line of queuedStartupCommandLines.splice(0)) {
-		processInputLine(line);
+		// These lines were admitted into the bounded pre-startup queue before an
+		// async-aware transport could apply steady-state per-line backpressure.
+		// Preserve detached review workflows by scheduling them onto commandQueue
+		// without holding RPC-mode startup open until a long-running action ends.
+		void processInputLine(line);
 	}
 	if (shouldExitProcess) {
 		registerSignalHandlers();

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type IrohRemoteAuditEvent, IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
-import type { IrohRemoteWorkspace } from "../src/core/remote/iroh/state.ts";
+import type { IrohRemoteHostState, IrohRemoteWorkspace } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import {
 	getWorkspaceWorktreesDir,
@@ -20,6 +20,14 @@ import {
 interface RecordedGitCall {
 	args: string[];
 	cwd: string;
+}
+
+function createDeferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve = () => {};
+	const promise = new Promise<void>((innerResolve) => {
+		resolve = innerResolve;
+	});
+	return { promise, resolve };
 }
 
 function createFakeGit(
@@ -123,6 +131,89 @@ describe("worktree manager (fake git)", () => {
 		expect(records[0]?.id).toBe("fix-login");
 	});
 
+	it("serializes workspace unregister with create through child persistence", async () => {
+		const addStarted = createDeferred();
+		const finishAdd = createDeferred();
+		const realWorkspaceDir = realpathSync(workspaceDir);
+		const runGit: WorktreeGitRunner = async (args) => {
+			if (args[0] === "-C" && args[2] === "rev-parse" && args[3] === "--show-toplevel") {
+				return { ok: true, code: 0, stdout: `${realWorkspaceDir}\n`, stderr: "" };
+			}
+			if (args[0] === "worktree" && args[1] === "add") {
+				addStarted.resolve();
+				await finishAdd.promise;
+			}
+			return { ok: true, code: 0, stdout: "", stderr: "" };
+		};
+		const manager = createManager(runGit);
+
+		const creating = manager.create(workspace, { id: "racing-create", baseRef: "main" });
+		await addStarted.promise;
+		let unregisterSettled = false;
+		const unregistering = stateManager.unregisterWorkspace("repo").then(
+			(value) => ({ ok: true as const, value }),
+			(error: unknown) => ({ ok: false as const, error }),
+		);
+		void unregistering.finally(() => {
+			unregisterSettled = true;
+		});
+		await Promise.resolve();
+		expect(unregisterSettled).toBe(false);
+
+		finishAdd.resolve();
+		expect(await creating).toMatchObject({ ok: true, worktree: { id: "racing-create" } });
+		const unregisterResult = await unregistering;
+		expect(unregisterResult.ok).toBe(false);
+		if (!unregisterResult.ok) {
+			expect(unregisterResult.error).toMatchObject({
+				code: "workspace_has_worktrees",
+				worktreeIds: ["racing-create"],
+			});
+		}
+		expect((await stateManager.getState()).workspaces).toContainEqual(workspace);
+	});
+
+	it("preserves a created checkout and rolls state back when child persistence fails", async () => {
+		let persistedState: IrohRemoteHostState = {
+			workspaces: [workspace],
+			worktrees: [],
+			clients: [],
+		};
+		const failingStateManager = new IrohRemoteHostStateManager({
+			store: {
+				read: () => structuredClone(persistedState),
+				write: (nextState) => {
+					if ((nextState.worktrees ?? []).length > 0) {
+						throw new Error("simulated durable write failure");
+					}
+					persistedState = structuredClone(nextState);
+				},
+			},
+		});
+		const expectedCheckout = getWorktreeCheckoutPath(agentDir, workspaceDir, "persist-failure");
+		const git = createFakeGit((args) => {
+			if (args[0] === "worktree" && args[1] === "add") {
+				mkdirSync(expectedCheckout, { recursive: true });
+				writeFileSync(join(expectedCheckout, "keep.txt"), "created worktree data\n");
+			}
+			return { ok: true };
+		});
+
+		const result = await createManager(git.runGit, { stateManager: failingStateManager }).create(workspace, {
+			id: "persist-failure",
+			baseRef: "main",
+		});
+
+		expect(result).toEqual({
+			ok: false,
+			error: "git_failed",
+			detail: "worktree state could not be persisted; the created checkout was preserved for recovery",
+		});
+		expect(existsSync(join(expectedCheckout, "keep.txt"))).toBe(true);
+		expect((await failingStateManager.getState()).worktrees).toEqual([]);
+		expect((await failingStateManager.getState()).workspaces).toEqual([workspace]);
+	});
+
 	it("adopts an existing git worktree without creating a checkout", async () => {
 		const externalCheckout = join(agentDir, "manual-worktree");
 		mkdirSync(externalCheckout, { recursive: true });
@@ -165,6 +256,63 @@ describe("worktree manager (fake git)", () => {
 		expect(git.calls.map((call) => call.args[0])).toEqual(["rev-parse", "worktree", "symbolic-ref"]);
 		expect(flushState).toHaveBeenCalledTimes(1);
 		expect(await stateManager.listWorktrees("repo")).toHaveLength(1);
+	});
+
+	it("serializes workspace unregister with adopt through child persistence", async () => {
+		const externalCheckout = join(agentDir, "racing-adopt");
+		mkdirSync(externalCheckout, { recursive: true });
+		const realWorkspaceDir = realpathSync(workspaceDir);
+		const realExternalCheckout = realpathSync(externalCheckout);
+		const inspectionStarted = createDeferred();
+		const finishInspection = createDeferred();
+		const runGit: WorktreeGitRunner = async (args) => {
+			if (args[0] === "rev-parse" && args[1] === "--show-toplevel") {
+				inspectionStarted.resolve();
+				await finishInspection.promise;
+				return { ok: true, code: 0, stdout: `${realExternalCheckout}\n`, stderr: "" };
+			}
+			if (args[0] === "worktree" && args[1] === "list") {
+				return {
+					ok: true,
+					code: 0,
+					stdout:
+						`worktree ${realWorkspaceDir}\nHEAD abc123\nbranch refs/heads/main\n\n` +
+						`worktree ${realExternalCheckout}\nHEAD def456\nbranch refs/heads/feature/race\n`,
+					stderr: "",
+				};
+			}
+			return { ok: true, code: 0, stdout: "", stderr: "" };
+		};
+		const manager = createManager(runGit);
+
+		const adopting = manager.adopt(workspace, {
+			path: externalCheckout,
+			id: "racing-adopt",
+			baseRef: "main",
+		});
+		await inspectionStarted.promise;
+		let unregisterSettled = false;
+		const unregistering = stateManager.unregisterWorkspace("repo").then(
+			(value) => ({ ok: true as const, value }),
+			(error: unknown) => ({ ok: false as const, error }),
+		);
+		void unregistering.finally(() => {
+			unregisterSettled = true;
+		});
+		await Promise.resolve();
+		expect(unregisterSettled).toBe(false);
+
+		finishInspection.resolve();
+		expect(await adopting).toMatchObject({ ok: true, worktree: { id: "racing-adopt" } });
+		const unregisterResult = await unregistering;
+		expect(unregisterResult.ok).toBe(false);
+		if (!unregisterResult.ok) {
+			expect(unregisterResult.error).toMatchObject({
+				code: "workspace_has_worktrees",
+				worktreeIds: ["racing-adopt"],
+			});
+		}
+		expect(existsSync(externalCheckout)).toBe(true);
 	});
 
 	it("rejects adopt when the worktree source checkout is not registered", async () => {
@@ -428,31 +576,53 @@ describe("worktree manager (fake git)", () => {
 		expect(git.calls.at(-1)).toEqual({ args: ["worktree", "prune"], cwd: realpathSync(workspaceDir) });
 	});
 
-	it("cleanupUnregisteredWorkspace force-removes checkouts via git and deletes the workspace worktrees dir", async () => {
+	it("workspace unregister preserves dirty, unmerged, busy, and stray checkout data", async () => {
 		const git = okGit();
 		const manager = createManager(git.runGit);
-		expect((await manager.create(workspace, { id: "leftover" })).ok).toBe(true);
-		const checkout = getWorktreeCheckoutPath(agentDir, workspaceDir, "leftover");
-		mkdirSync(checkout, { recursive: true });
+		for (const id of ["dirty", "unmerged", "busy"]) {
+			expect((await manager.create(workspace, { id, baseRef: "main" })).ok).toBe(true);
+			const checkout = getWorktreeCheckoutPath(agentDir, workspaceDir, id);
+			mkdirSync(checkout, { recursive: true });
+			writeFileSync(join(checkout, `${id}.txt`), `${id} work must survive\n`);
+		}
+		await manager.bindSession("repo", "busy", "s-live");
+		const strayCheckout = join(getWorkspaceWorktreesDir(agentDir, workspaceDir), "unknown-checkout");
+		mkdirSync(strayCheckout, { recursive: true });
+		writeFileSync(join(strayCheckout, "keep.txt"), "unknown work must survive\n");
+
+		await expect(stateManager.unregisterWorkspace("repo")).rejects.toMatchObject({
+			code: "workspace_has_worktrees",
+			workspaceName: "repo",
+			worktreeIds: ["busy", "dirty", "unmerged"],
+		});
 		git.calls.length = 0;
 
 		await manager.cleanupUnregisteredWorkspace(workspace);
-		// Main checkout exists: git worktree remove --force runs before the rm fallback.
-		expect(git.calls).toEqual([{ args: ["worktree", "remove", "--force", checkout], cwd: workspaceDir }]);
-		expect(existsSync(getWorkspaceWorktreesDir(agentDir, workspaceDir))).toBe(false);
+		expect(git.calls).toEqual([]);
+		expect((await stateManager.getState()).workspaces).toContainEqual(workspace);
+		expect((await stateManager.listWorktrees("repo")).map((worktree) => worktree.id).sort()).toEqual([
+			"busy",
+			"dirty",
+			"unmerged",
+		]);
+		for (const id of ["dirty", "unmerged", "busy"]) {
+			expect(existsSync(join(getWorktreeCheckoutPath(agentDir, workspaceDir, id), `${id}.txt`))).toBe(true);
+		}
+		expect(existsSync(join(strayCheckout, "keep.txt"))).toBe(true);
 	});
 
-	it("cleanupUnregisteredWorkspace skips git when the main checkout is gone", async () => {
+	it("cleanupUnregisteredWorkspace preserves unknown checkout directories when the main checkout is gone", async () => {
 		const git = okGit();
 		const manager = createManager(git.runGit);
 		const missingWorkspace: IrohRemoteWorkspace = { name: "gone", path: join(agentDir, "missing-repo") };
 		const checkout = getWorktreeCheckoutPath(agentDir, missingWorkspace.path, "orphan");
 		mkdirSync(checkout, { recursive: true });
+		writeFileSync(join(checkout, "keep.txt"), "orphaned work must survive\n");
 		git.calls.length = 0;
 
 		await manager.cleanupUnregisteredWorkspace(missingWorkspace);
 		expect(git.calls).toEqual([]);
-		expect(existsSync(getWorkspaceWorktreesDir(agentDir, missingWorkspace.path))).toBe(false);
+		expect(existsSync(join(checkout, "keep.txt"))).toBe(true);
 	});
 
 	it("resolves and persists a concrete base ref for defaulted creates (§5.3 merge-back)", async () => {

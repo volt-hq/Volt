@@ -13,7 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type {
 	Agent,
@@ -43,8 +43,10 @@ import {
 	modelsAreEqual,
 	streamSimple,
 } from "@earendil-works/volt-ai";
+import { writeDurableAtomicFileSync } from "../utils/durable-atomic-write.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
+import { PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE } from "../utils/private-files.ts";
 import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
@@ -461,8 +463,13 @@ export class AgentSession {
 	}
 
 	/** Enable or disable LSP protocol tracing at runtime. */
-	setLspTraceFile(filePath: string | undefined): void {
-		this._lspManager?.setTraceFile(filePath);
+	setLspTraceFile(filePath: string | undefined): Promise<void> {
+		return this._lspManager?.setTraceFile(filePath) ?? Promise.resolve();
+	}
+
+	/** Stop LSP tracing from a synchronous process teardown path. */
+	closeLspTraceSync(): void {
+		this._lspManager?.closeTraceSync();
 	}
 
 	/** Stop all running language servers; they respawn lazily on next use. Returns the number stopped. */
@@ -3797,11 +3804,6 @@ export class AgentSession {
 			outputPath ?? `session-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`,
 			process.cwd(),
 		);
-		const dir = dirname(filePath);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
-
 		const header: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
@@ -3821,7 +3823,10 @@ export class AgentSession {
 			prevId = entry.id;
 		}
 
-		writeFileSync(filePath, `${lines.join("\n")}\n`);
+		writeDurableAtomicFileSync(filePath, `${lines.join("\n")}\n`, {
+			directoryMode: PRIVATE_DIRECTORY_MODE,
+			fileMode: PRIVATE_FILE_MODE,
+		});
 		return filePath;
 	}
 

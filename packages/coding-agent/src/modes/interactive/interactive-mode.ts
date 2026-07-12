@@ -3,7 +3,6 @@
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
  */
 
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -158,8 +157,16 @@ import {
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
+import { writeDurableAtomicFileSync } from "../../utils/durable-atomic-write.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { resolvePath } from "../../utils/paths.ts";
+import {
+	createPrivateTempDirectorySync,
+	ensurePrivateDirectorySync,
+	PRIVATE_DIRECTORY_MODE,
+	PRIVATE_FILE_MODE,
+	writePrivateNewFileSync,
+} from "../../utils/private-files.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewVoltVersion, type LatestVoltRelease } from "../../utils/version-check.ts";
@@ -445,6 +452,9 @@ export class InteractiveMode {
 	// Agent subscription unsubscribe function
 	private unsubscribe?: () => void;
 	private signalCleanupHandlers: Array<() => void> = [];
+	private scratchDirectories = new Set<string>();
+	private clipboardScratchFiles = new Map<string, string>();
+	private lspTraceScratchDirectory: string | undefined;
 
 	// Track editor modes that affect the border treatment and label.
 	private isBashMode = false;
@@ -3041,6 +3051,57 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	private createScratchDirectory(prefix: string): string {
+		const directoryPath = createPrivateTempDirectorySync(path.join(os.tmpdir(), prefix));
+		this.scratchDirectories.add(directoryPath);
+		return directoryPath;
+	}
+
+	private removeScratchDirectory(directoryPath: string): void {
+		try {
+			fs.rmSync(directoryPath, { recursive: true, force: true });
+			this.scratchDirectories.delete(directoryPath);
+			if (this.lspTraceScratchDirectory === directoryPath) {
+				this.lspTraceScratchDirectory = undefined;
+			}
+			for (const [filePath, scratchDirectory] of this.clipboardScratchFiles) {
+				if (scratchDirectory === directoryPath) {
+					this.clipboardScratchFiles.delete(filePath);
+				}
+			}
+		} catch {
+			// Cleanup is retried during shutdown.
+		}
+	}
+
+	private cleanupClipboardScratchFilesInText(text: string): void {
+		this.cleanupClipboardScratchFiles(
+			[...this.clipboardScratchFiles.keys()].filter((filePath) => text.includes(filePath)),
+		);
+	}
+
+	private cleanupClipboardScratchFiles(filePaths: readonly string[]): void {
+		for (const filePath of filePaths) {
+			const directoryPath = this.clipboardScratchFiles.get(filePath);
+			if (directoryPath) {
+				this.removeScratchDirectory(directoryPath);
+			}
+		}
+	}
+
+	private cleanupAllScratchDirectories(): void {
+		for (const directoryPath of [...this.scratchDirectories]) {
+			this.removeScratchDirectory(directoryPath);
+		}
+	}
+
+	private async closeLspTrace(): Promise<void> {
+		await this.session.setLspTraceFile(undefined);
+		if (this.lspTraceScratchDirectory) {
+			this.removeScratchDirectory(this.lspTraceScratchDirectory);
+		}
+	}
+
 	// =========================================================================
 	// Key Handlers
 	// =========================================================================
@@ -3149,23 +3210,26 @@ export class InteractiveMode {
 	}
 
 	private async handleClipboardImagePaste(): Promise<void> {
+		let scratchDirectory: string | undefined;
 		try {
 			const image = await readClipboardImage();
 			if (!image) {
 				return;
 			}
 
-			// Write to temp file
-			const tmpDir = os.tmpdir();
+			scratchDirectory = this.createScratchDirectory("volt-clipboard-");
 			const ext = extensionForImageMimeType(image.mimeType) ?? "png";
-			const fileName = `volt-clipboard-${crypto.randomUUID()}.${ext}`;
-			const filePath = path.join(tmpDir, fileName);
-			fs.writeFileSync(filePath, Buffer.from(image.bytes));
+			const filePath = path.join(scratchDirectory, `image.${ext}`);
+			writePrivateNewFileSync(filePath, Buffer.from(image.bytes));
+			this.clipboardScratchFiles.set(filePath, scratchDirectory);
 
 			// Insert file path directly
 			this.editor.insertTextAtCursor?.(filePath);
 			this.ui.requestRender();
 		} catch {
+			if (scratchDirectory) {
+				this.removeScratchDirectory(scratchDirectory);
+			}
 			// Silently ignore clipboard errors (may not have permission, etc.)
 		}
 	}
@@ -3188,21 +3252,27 @@ export class InteractiveMode {
 		if (!result) {
 			return undefined;
 		}
-		if (result.attachedPaths.length > 0) {
-			const names = result.attachedPaths.map((filePath) => path.basename(filePath));
-			this.showStatus(`[attached ${names.join(", ")} as image${names.length > 1 ? "s" : ""}]`);
+		try {
+			if (result.attachedPaths.length > 0) {
+				const names = result.attachedPaths.map((filePath) => path.basename(filePath));
+				this.showStatus(`[attached ${names.join(", ")} as image${names.length > 1 ? "s" : ""}]`);
+			}
+			if (result.cappedPaths.length > 0) {
+				this.showWarning(
+					`Only the first ${MAX_PROMPT_IMAGE_ATTACHMENTS} images were attached; ${result.cappedPaths.length} more left as plain text.`,
+				);
+			}
+			if (result.failedPaths.length > 0) {
+				this.showWarning(
+					`Could not attach ${result.failedPaths.map((filePath) => path.basename(filePath)).join(", ")} (unreadable or too large); left as plain text.`,
+				);
+			}
+			return result.images.length > 0 ? result.images : undefined;
+		} finally {
+			// Attached images have already been copied into the model payload. Capped
+			// or failed paths remain available as plain-text file references.
+			this.cleanupClipboardScratchFiles(result.attachedPaths);
 		}
-		if (result.cappedPaths.length > 0) {
-			this.showWarning(
-				`Only the first ${MAX_PROMPT_IMAGE_ATTACHMENTS} images were attached; ${result.cappedPaths.length} more left as plain text.`,
-			);
-		}
-		if (result.failedPaths.length > 0) {
-			this.showWarning(
-				`Could not attach ${result.failedPaths.map((filePath) => path.basename(filePath)).join(", ")} (unreadable or too large); left as plain text.`,
-			);
-		}
-		return result.images.length > 0 ? result.images : undefined;
 	}
 
 	private setupEditorSubmitHandler(): void {
@@ -3271,7 +3341,7 @@ export class InteractiveMode {
 				return;
 			}
 			if (text === "/lsp" || text.startsWith("/lsp ")) {
-				this.handleLspCommand(text.startsWith("/lsp ") ? text.slice(5).trim() : undefined);
+				await this.handleLspCommand(text.startsWith("/lsp ") ? text.slice(5).trim() : undefined);
 				this.editor.setText("");
 				return;
 			}
@@ -4144,6 +4214,8 @@ export class InteractiveMode {
 			this.settingsManager.rememberActiveProfile();
 			await this.settingsManager.flush();
 		};
+		await this.closeLspTrace().catch(() => {});
+		this.cleanupAllScratchDirectories();
 
 		if (options?.fromSignal) {
 			// Signal-triggered shutdown (SIGTERM/SIGHUP). Emit extension cleanup
@@ -4189,6 +4261,8 @@ export class InteractiveMode {
 		this.isShuttingDown = true;
 		this.unregisterSignalHandlers();
 		killTrackedDetachedChildren();
+		this.session.closeLspTraceSync();
+		this.cleanupAllScratchDirectories();
 		// The terminal is gone. Do not run normal shutdown because TUI and
 		// extension cleanup can write restore sequences and re-trigger EIO.
 		process.exit(129);
@@ -4219,6 +4293,8 @@ export class InteractiveMode {
 		try {
 			this.ui.stop();
 		} catch {}
+		this.session.closeLspTraceSync();
+		this.cleanupAllScratchDirectories();
 		console.error("volt exiting due to uncaughtException:");
 		console.error(error);
 		process.exit(1);
@@ -4448,14 +4524,25 @@ export class InteractiveMode {
 		}
 
 		const currentText = this.editor.getExpandedText?.() ?? this.editor.getText();
-		const tmpFile = path.join(os.tmpdir(), `volt-editor-${Date.now()}.volt.md`);
+		let scratchDirectory: string;
+		try {
+			scratchDirectory = this.createScratchDirectory("volt-editor-");
+		} catch (error) {
+			this.showError(
+				`Failed to create private editor file: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+		const tmpFile = path.join(scratchDirectory, "draft.volt.md");
+		let tuiStopped = false;
 
 		try {
 			// Write current content to temp file
-			fs.writeFileSync(tmpFile, currentText, "utf-8");
+			writePrivateNewFileSync(tmpFile, currentText);
 
 			// Stop TUI to release terminal
 			this.ui.stop();
+			tuiStopped = true;
 
 			// Split by space to support editor arguments (e.g., "code --wait")
 			const [editor, ...editorArgs] = editorCmd.split(" ");
@@ -4481,17 +4568,13 @@ export class InteractiveMode {
 			}
 			// On non-zero exit, keep original text (no action needed)
 		} finally {
-			// Clean up temp file
-			try {
-				fs.unlinkSync(tmpFile);
-			} catch {
-				// Ignore cleanup errors
-			}
+			this.removeScratchDirectory(scratchDirectory);
 
-			// Restart TUI
-			this.ui.start();
-			// Force full re-render since external editor uses alternate screen
-			this.ui.requestRender(true);
+			if (tuiStopped) {
+				// Restart TUI and force a full render because external editors use the alternate screen.
+				this.ui.start();
+				this.ui.requestRender(true);
+			}
 		}
 	}
 
@@ -4500,6 +4583,7 @@ export class InteractiveMode {
 	// =========================================================================
 
 	clearEditor(): void {
+		this.cleanupClipboardScratchFilesInText(this.editor.getText());
 		this.editor.setText("");
 		this.ui.requestRender();
 	}
@@ -7038,11 +7122,20 @@ export class InteractiveMode {
 			return;
 		}
 
-		// Export to a temp file
-		const tmpFile = path.join(os.tmpdir(), "session.html");
+		let scratchDirectory: string;
+		try {
+			scratchDirectory = this.createScratchDirectory("volt-share-");
+		} catch (error: unknown) {
+			this.showError(
+				`Failed to create private share file: ${error instanceof Error ? error.message : "Unknown error"}`,
+			);
+			return;
+		}
+		const tmpFile = path.join(scratchDirectory, "session.html");
 		try {
 			await this.session.exportToHtml(tmpFile);
 		} catch (error: unknown) {
+			this.removeScratchDirectory(scratchDirectory);
 			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
 			return;
 		}
@@ -7054,16 +7147,15 @@ export class InteractiveMode {
 		this.ui.setFocus(loader);
 		this.ui.requestRender();
 
+		let restored = false;
 		const restoreEditor = () => {
+			if (restored) return;
+			restored = true;
 			loader.dispose();
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.editor);
 			this.ui.setFocus(this.editor);
-			try {
-				fs.unlinkSync(tmpFile);
-			} catch {
-				// Ignore cleanup errors
-			}
+			this.removeScratchDirectory(scratchDirectory);
 		};
 
 		// Create a secret gist asynchronously
@@ -7086,6 +7178,7 @@ export class InteractiveMode {
 				proc.stderr?.on("data", (data) => {
 					stderr += data.toString();
 				});
+				proc.once("error", (error) => resolve({ stdout, stderr: error.message, code: null }));
 				proc.on("close", (code) => resolve({ stdout, stderr, code }));
 			});
 
@@ -7116,6 +7209,8 @@ export class InteractiveMode {
 				restoreEditor();
 				this.showError(`Failed to create gist: ${error instanceof Error ? error.message : "Unknown error"}`);
 			}
+		} finally {
+			restoreEditor();
 		}
 	}
 
@@ -7197,7 +7292,7 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private handleLspCommand(args?: string): void {
+	private async handleLspCommand(args?: string): Promise<void> {
 		const formatIdle = (idleMs: number): string => {
 			const seconds = Math.floor(idleMs / 1000);
 			if (seconds < 60) return `${seconds}s`;
@@ -7217,17 +7312,27 @@ export class InteractiveMode {
 			} else {
 				const traceArg = args === "trace" ? undefined : args.slice(6).trim();
 				if (traceArg === "off") {
-					this.session.setLspTraceFile(undefined);
+					await this.closeLspTrace();
 					info = "LSP tracing disabled.";
 				} else {
-					const tracePath = resolvePath(
-						traceArg && traceArg.length > 0
-							? traceArg
-							: path.join(os.tmpdir(), `volt-lsp-trace-${process.pid}.log`),
-						this.session.sessionManager.getCwd(),
-					);
-					this.session.setLspTraceFile(tracePath);
-					info = `LSP tracing enabled: ${tracePath}\nUse /lsp trace off to disable.`;
+					await this.closeLspTrace();
+					let tracePath: string;
+					if (traceArg && traceArg.length > 0) {
+						tracePath = resolvePath(traceArg, this.session.sessionManager.getCwd());
+					} else {
+						const scratchDirectory = this.createScratchDirectory("volt-lsp-trace-");
+						this.lspTraceScratchDirectory = scratchDirectory;
+						tracePath = path.join(scratchDirectory, "trace.log");
+					}
+					try {
+						await this.session.setLspTraceFile(tracePath);
+						info = `LSP tracing enabled: ${tracePath}\nUse /lsp trace off to disable.`;
+					} catch (error) {
+						if (this.lspTraceScratchDirectory) {
+							this.removeScratchDirectory(this.lspTraceScratchDirectory);
+						}
+						info = `Failed to enable LSP tracing: ${error instanceof Error ? error.message : String(error)}`;
+					}
 				}
 			}
 		} else if (!status.enabled) {
@@ -7534,8 +7639,16 @@ export class InteractiveMode {
 			"",
 		].join("\n");
 
-		fs.mkdirSync(path.dirname(debugLogPath), { recursive: true });
-		fs.writeFileSync(debugLogPath, debugData);
+		try {
+			ensurePrivateDirectorySync(path.dirname(debugLogPath), { hardenExisting: false });
+			writeDurableAtomicFileSync(debugLogPath, debugData, {
+				directoryMode: PRIVATE_DIRECTORY_MODE,
+				fileMode: PRIVATE_FILE_MODE,
+			});
+		} catch (error) {
+			this.showError(`Failed to write debug log: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(
@@ -8154,6 +8267,8 @@ export class InteractiveMode {
 			this.ui.stop();
 			this.isInitialized = false;
 		}
+		this.session.closeLspTraceSync();
+		this.cleanupAllScratchDirectories();
 		this.unregisterSignalHandlers();
 	}
 }

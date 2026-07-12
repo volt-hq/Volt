@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil-works/volt-ai";
 import { describe, expect, test } from "vitest";
 import type { BashExecutionMessage } from "../src/core/messages.ts";
@@ -513,7 +514,7 @@ describe("message image recovery", () => {
 		});
 	});
 
-	test("pages under the byte budget and always includes the first requested image", () => {
+	test("pages under the serialized byte budget", () => {
 		const session = SessionManager.inMemory("/workspace");
 		const bigImage = "A".repeat(100);
 		const entryId = session.appendMessage({
@@ -526,7 +527,7 @@ describe("message image recovery", () => {
 			timestamp: 10,
 		});
 
-		const firstPage = projectMessageImages(session.getBranch(), entryId, 0, 100);
+		const firstPage = projectMessageImages(session.getBranch(), entryId, 0, 180);
 		expect(firstPage.ok).toBe(true);
 		if (!firstPage.ok) {
 			throw new Error("expected ok result");
@@ -535,7 +536,7 @@ describe("message image recovery", () => {
 		expect(firstPage.images.map((image) => image.index)).toEqual([0]);
 		expect(firstPage.nextImageIndex).toBe(1);
 
-		const secondPage = projectMessageImages(session.getBranch(), entryId, firstPage.nextImageIndex ?? 0, 100);
+		const secondPage = projectMessageImages(session.getBranch(), entryId, firstPage.nextImageIndex ?? 0, 180);
 		expect(secondPage.ok).toBe(true);
 		if (!secondPage.ok) {
 			throw new Error("expected ok result");
@@ -543,13 +544,48 @@ describe("message image recovery", () => {
 		expect(secondPage.images.map((image) => image.index)).toEqual([1]);
 		expect(secondPage.nextImageIndex).toBe(2);
 
-		const finalPage = projectMessageImages(session.getBranch(), entryId, secondPage.nextImageIndex ?? 0, 100);
+		const finalPage = projectMessageImages(session.getBranch(), entryId, secondPage.nextImageIndex ?? 0, 180);
 		expect(finalPage.ok).toBe(true);
 		if (!finalPage.ok) {
 			throw new Error("expected ok result");
 		}
 		expect(finalPage.images.map((image) => image.index)).toEqual([2]);
 		expect(finalPage.nextImageIndex).toBeNull();
+	});
+
+	test("rejects a single image that cannot fit in a response page", () => {
+		const session = SessionManager.inMemory("/workspace");
+		const entryId = session.appendMessage({
+			role: "user",
+			content: [{ type: "image", data: "A".repeat(1_000), mimeType: "image/jpeg" }],
+			timestamp: 10,
+		});
+
+		expect(projectMessageImages(session.getBranch(), entryId, 0, 100)).toEqual({
+			ok: false,
+			error: "image_too_large",
+		});
+	});
+
+	test("caps the number of images returned in one page", () => {
+		const session = SessionManager.inMemory("/workspace");
+		const entryId = session.appendMessage({
+			role: "user",
+			content: Array.from({ length: 40 }, (_, index) => ({
+				type: "image" as const,
+				data: Buffer.from(String(index)).toString("base64"),
+				mimeType: "image/png",
+			})),
+			timestamp: 10,
+		});
+
+		const result = projectMessageImages(session.getBranch(), entryId);
+		expect(result.ok).toBe(true);
+		if (!result.ok) {
+			throw new Error("expected ok result");
+		}
+		expect(result.images).toHaveLength(32);
+		expect(result.nextImageIndex).toBe(32);
 	});
 
 	test("returns an empty page for entries without images", () => {

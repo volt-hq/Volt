@@ -18,7 +18,8 @@
 	},
 	"files": [
 		"dist",
-		"README.md"
+		"README.md",
+		"LICENSE"
 	],
 	"scripts": {
 		"clean": "shx rm -rf dist",
@@ -41,7 +42,19 @@
 		"transport",
 		"state-management"
 	],
-	"author": "Mario Zechner",
+	"contributors": [
+		"Mario Zechner",
+		"Jordan Hans"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/hansjm10/Volt.git",
+		"directory": "packages/agent"
+	},
+	"homepage": "https://github.com/hansjm10/Volt#readme",
+	"bugs": {
+		"url": "https://github.com/hansjm10/Volt/issues"
+	},
 	"license": "MIT",
 	"engines": {
 		"node": ">=22.19.0"

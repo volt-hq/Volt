@@ -2,6 +2,7 @@ import { basename, resolve } from "node:path";
 import { getAgentDir, VERSION } from "../config.ts";
 import { type IrohRemoteAccessPresetName, isIrohRemoteAccessPresetName } from "../core/remote/iroh/access-grant.ts";
 import { formatIrohRemoteTicketQrCode } from "../core/remote/iroh/qr.ts";
+import { getIrohRemotePairingVerificationDetails } from "../core/remote/iroh/ticket.ts";
 import { spawnProcess, waitForChildProcess } from "../utils/child-process.ts";
 import { createDaemonClient, type DaemonClient } from "./control-client.ts";
 import type { ControlEvent, ControlResponse } from "./control-protocol.ts";
@@ -20,7 +21,7 @@ Commands:
   approve-repair <node-id>      Allow a revoked client node ID to re-pair.
   workspace add [path] [--name <name>]
                                 Register a workspace with the daemon.
-  workspace remove <name>       Unregister a workspace.
+  workspace remove <name>       Unregister an empty workspace (refuses while worktrees exist).
   workspace list                List registered workspaces.
   worktree add [--workspace <name>] [--name <id>] [--branch <ref>] [--base <ref>]
                                 Create a daemon-managed git worktree.
@@ -104,11 +105,32 @@ async function connectToDaemon(options: { autoStart: boolean }): Promise<RemoteC
 
 function reportControlError(response: ControlResponse, context: string): boolean {
 	if (response.type === "error") {
-		console.error(`Error: ${context}: ${response.message}`);
+		const code = response.code === "workspace_has_worktrees" ? ` [${response.code}]` : "";
+		console.error(`Error: ${context}${code}: ${response.message}`);
 		process.exitCode = 1;
 		return true;
 	}
 	return false;
+}
+
+/** Render only the non-secret ticket fields a user should compare in Volt. */
+export function formatRemotePairingVerificationLines(ticket: string): string[] {
+	const details = getIrohRemotePairingVerificationDetails(ticket);
+	return [
+		"verify these details in Volt before confirming:",
+		"  Fingerprint",
+		`    ${details.hostFingerprint}`,
+		"  Host ID",
+		`    ${details.hostNodeId}`,
+		"  Workspace",
+		`    ${details.workspace}`,
+		"  Relay mode",
+		`    ${details.relayMode}`,
+		"  HTTPS relay origins",
+		...(details.relayOrigins.length === 0 ? ["    none"] : details.relayOrigins.map((origin) => `    ${origin}`)),
+		"  Expires (UTC)",
+		`    ${details.expiresAt === undefined ? "not specified" : new Date(details.expiresAt).toISOString()}`,
+	];
 }
 
 async function handlePairCommand(args: string[]): Promise<void> {
@@ -173,6 +195,16 @@ async function handlePairCommand(args: string[]): Promise<void> {
 					return;
 				}
 				if (event.phase === "ticket" && event.ticket) {
+					try {
+						for (const line of formatRemotePairingVerificationLines(event.ticket)) console.error(line);
+					} catch (error) {
+						console.error(
+							`pairing failed: ticket verification details are invalid: ${error instanceof Error ? error.message : String(error)}`,
+						);
+						process.exitCode = 1;
+						resolveDone();
+						return;
+					}
 					if (process.stderr.isTTY) {
 						try {
 							console.error("pairing ticket QR:");

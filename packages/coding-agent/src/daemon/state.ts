@@ -273,6 +273,8 @@ export interface VoltdStateStoreOptions {
 	statePath: string;
 	/** Debounce for coalescing writes; flushes synchronously on close(). */
 	debounceMs?: number;
+	/** Durable writer seam for deterministic persistence-concurrency tests. */
+	writeStateFile?: (path: string, content: string) => Promise<void>;
 }
 
 export interface LoadVoltdStateResult {
@@ -433,9 +435,12 @@ export class VoltdStateStore {
 	private readonly statePath: string;
 	private readonly agentDir: string;
 	private readonly debounceMs: number;
+	private readonly writeStateFile: (path: string, content: string) => Promise<void>;
 	private current: VoltdStateFileV1 | undefined;
 	private flushTimer: NodeJS.Timeout | undefined;
 	private pendingFlush: Promise<void> = Promise.resolve();
+	private stateRevision = 0;
+	private persistedRevision = 0;
 	private migrated = false;
 	private legacyDroppedAccess: LegacyRemoteStateMigration["droppedAccess"] | undefined;
 
@@ -443,6 +448,7 @@ export class VoltdStateStore {
 		this.statePath = options.statePath;
 		this.agentDir = options.agentDir;
 		this.debounceMs = options.debounceMs ?? DEFAULT_STATE_DEBOUNCE_MS;
+		this.writeStateFile = options.writeStateFile ?? writeDurableAtomicFile;
 	}
 
 	async load(): Promise<LoadVoltdStateResult> {
@@ -461,9 +467,10 @@ export class VoltdStateStore {
 		}
 		if (migration) {
 			this.current = migration.state;
+			this.markStateChanged();
 			this.migrated = true;
 			this.legacyDroppedAccess = migration.droppedAccess;
-			await this.writeNow();
+			await this.enqueueWrite();
 			const legacyPath = getLegacyRemoteStatePath(this.agentDir);
 			try {
 				await rename(legacyPath, `${legacyPath}.migrated`);
@@ -491,7 +498,8 @@ export class VoltdStateStore {
 			}
 		} else {
 			this.current = createEmptyVoltdState();
-			await this.writeNow();
+			this.markStateChanged();
+			await this.enqueueWrite();
 		}
 		return { state: this.current, migratedFromLegacyState: false };
 	}
@@ -519,12 +527,13 @@ export class VoltdStateStore {
 	}
 
 	scheduleFlush(): void {
+		this.markStateChanged();
 		if (this.flushTimer) {
 			return;
 		}
 		this.flushTimer = setTimeout(() => {
 			this.flushTimer = undefined;
-			this.pendingFlush = this.pendingFlush.then(() => this.writeNow()).catch(() => {});
+			void this.enqueueWrite().catch(() => {});
 		}, this.debounceMs);
 		this.flushTimer.unref?.();
 	}
@@ -539,9 +548,14 @@ export class VoltdStateStore {
 			clearTimeout(this.flushTimer);
 			this.flushTimer = undefined;
 		}
-		await this.pendingFlush;
 		if (this.current) {
-			await this.writeNow();
+			// Force an explicit current-snapshot revision. Besides preserving flush's
+			// historical semantics, this catches callers that deliberately mutate the
+			// loaded state object before requesting durability.
+			this.markStateChanged();
+			await this.enqueueWrite();
+		} else {
+			await this.pendingFlush;
 		}
 	}
 
@@ -550,10 +564,24 @@ export class VoltdStateStore {
 		await this.flush();
 	}
 
+	private markStateChanged(): void {
+		this.stateRevision++;
+	}
+
+	private enqueueWrite(): Promise<void> {
+		const write = this.pendingFlush.then(() => this.writeNow());
+		this.pendingFlush = write.catch(() => {});
+		return write;
+	}
+
+	/** Must only be invoked through enqueueWrite so atomic renames cannot overtake one another. */
 	private async writeNow(): Promise<void> {
-		if (!this.current) {
+		if (!this.current || this.persistedRevision >= this.stateRevision) {
 			return;
 		}
-		await writeDurableAtomicFile(this.statePath, `${JSON.stringify(this.current, null, 2)}\n`);
+		const revision = this.stateRevision;
+		const content = `${JSON.stringify(this.current, null, 2)}\n`;
+		await this.writeStateFile(this.statePath, content);
+		this.persistedRevision = Math.max(this.persistedRevision, revision);
 	}
 }

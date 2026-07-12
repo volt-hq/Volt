@@ -15,6 +15,7 @@ import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { VERSION } from "../../config.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { buildMcpAuthorizationHeaders, resolveMcpStringRecordTemplates } from "./auth.ts";
+import { createSafeMcpOAuthFetch } from "./oauth-flow.ts";
 import { VoltMcpOAuthProvider } from "./oauth-provider.ts";
 import type { McpOAuthStore } from "./oauth-store.ts";
 import type { McpClientConnection, McpClientFactory, McpRequestOptions, McpResolvedServerConfig } from "./types.ts";
@@ -172,17 +173,15 @@ function mergeHeaders(base: HeaderInput | undefined, extra: HeaderInput | undefi
 	return headers;
 }
 
-function createExactResourceFetch(serverUrl: URL, requestInit: RequestInit | undefined): typeof fetch | undefined {
-	if (!requestInit?.headers) {
-		return undefined;
-	}
+function createExactResourceFetch(serverUrl: URL, requestInit: RequestInit | undefined): typeof fetch {
 	const expected = serverUrl.toString();
+	const oauthFetch = createSafeMcpOAuthFetch();
 	return async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 		const requestUrl = input instanceof Request ? input.url : String(input);
-		if (requestUrl !== expected) {
-			return fetch(input, init);
+		if (requestUrl !== expected || !requestInit?.headers) {
+			return oauthFetch(input, init);
 		}
-		return fetch(input, { ...init, headers: mergeHeaders(init?.headers, requestInit.headers) });
+		return oauthFetch(input, { ...init, headers: mergeHeaders(init?.headers, requestInit.headers) });
 	};
 }
 

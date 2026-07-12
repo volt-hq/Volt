@@ -3,7 +3,7 @@ import { serializeJsonLine } from "./jsonl.ts";
 import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "./transport.ts";
 
 export const DEFAULT_IROH_READ_LIMIT = 64 * 1024;
-export const DEFAULT_IROH_RPC_MAX_LINE_BYTES = 16 * 1024 * 1024;
+export const DEFAULT_IROH_RPC_MAX_LINE_BYTES = 8 * 1024 * 1024;
 
 export type IrohBytes = Array<number> | Uint8Array;
 
@@ -29,7 +29,7 @@ export interface IrohRpcTransportOptions {
 	initialInput?: IrohBytes;
 	/** Maximum bytes requested per Iroh read. Defaults to 64 KiB. */
 	readLimit?: number;
-	/** Maximum bytes allowed in one inbound JSONL line. Defaults to 16 MiB. */
+	/** Maximum bytes allowed in one inbound or outbound JSONL line. Defaults to 8 MiB. */
 	maxLineBytes?: number;
 	/** Finish the send half during close. Defaults to true. */
 	finishSendOnClose?: boolean;
@@ -97,10 +97,10 @@ export function createIrohRpcTransport(options: IrohRpcTransportOptions): RpcTra
 		}
 	};
 
-	const emitLine = (line: string): void => {
+	const emitLine = async (line: string): Promise<void> => {
 		const normalizedLine = line.endsWith("\r") ? line.slice(0, -1) : line;
 		for (const handler of lineHandlers) {
-			handler(normalizedLine);
+			await handler(normalizedLine);
 		}
 	};
 
@@ -129,7 +129,10 @@ export function createIrohRpcTransport(options: IrohRpcTransportOptions): RpcTra
 				throw new Error("Iroh RPC send stream is closed");
 			}
 
-			const bytes = textToBytes(serializeJsonLine(value));
+			const serialized = serializeJsonLine(value);
+			const serializedBytes = Buffer.from(serialized, "utf8");
+			assertIrohRpcLineWithinLimit(serializedBytes.length - 1, maxLineBytes);
+			const bytes = Array.from(serializedBytes);
 			const runWrite = (): Promise<void> => {
 				try {
 					return options.stream.send.writeAll(bytes);
@@ -214,35 +217,117 @@ async function readIrohJsonl(
 	readLimit: number,
 	maxLineBytes: number,
 	initialInput: IrohBytes | undefined,
-	onLine: (line: string) => void,
+	onLine: (line: string) => void | Promise<void>,
 ): Promise<void> {
-	let buffer = initialInput ? bytesToBuffer(initialInput) : Buffer.alloc(0);
-
+	let buffer = initialInput ? copyBytesToBuffer(initialInput) : Buffer.alloc(0);
 	while (true) {
-		while (true) {
-			const newlineIndex = buffer.indexOf(10);
-			if (newlineIndex === -1) {
-				break;
+		const result = await readIrohJsonlLine(recv, buffer, { readLimit, maxLineBytes });
+		if (result.line === undefined) {
+			if (result.rest.length > 0) {
+				await onLine(normalizeJsonlLine(result.rest).toString("utf8"));
 			}
-
-			const lineBuffer = buffer.subarray(0, newlineIndex);
-			assertIrohRpcLineWithinLimit(lineBuffer.length, maxLineBytes);
-			buffer = buffer.subarray(newlineIndex + 1);
-			onLine(lineBuffer.toString("utf8"));
-		}
-
-		assertIrohRpcLineWithinLimit(buffer.length, maxLineBytes);
-		const chunk = await recv.read(readLimit);
-		if (!chunk || chunk.length === 0) {
 			break;
 		}
-		buffer = Buffer.concat([buffer, bytesToBuffer(chunk)]);
+		await onLine(result.line);
+		buffer = result.rest;
+	}
+}
+
+export interface ReadIrohJsonlLineOptions {
+	/** Maximum bytes requested per Iroh read. Defaults to 64 KiB. */
+	readLimit?: number;
+	/** Maximum bytes allowed before the LF delimiter. Defaults to 8 MiB. */
+	maxLineBytes?: number;
+}
+
+/**
+ * Read one bounded JSONL line without repeatedly concatenating an attacker-
+ * controlled partial line. The geometric accumulator performs linear total
+ * copying while retaining at most maxLineBytes of partial-line storage.
+ */
+export async function readIrohJsonlLine(
+	recv: IrohRecvStreamLike,
+	initialInput: IrohBytes = Buffer.alloc(0),
+	options: ReadIrohJsonlLineOptions = {},
+): Promise<{ line: string | undefined; rest: Buffer }> {
+	const maxLineBytes = normalizePositiveInteger(
+		options.maxLineBytes ?? DEFAULT_IROH_RPC_MAX_LINE_BYTES,
+		"maxLineBytes",
+	);
+	const requestedReadLimit = normalizePositiveInteger(options.readLimit ?? DEFAULT_IROH_READ_LIMIT, "readLimit");
+	const readLimit = Math.min(requestedReadLimit, maxLineBytes + 1);
+	const accumulator = new BoundedLineAccumulator(maxLineBytes);
+	let input = bytesToBuffer(initialInput);
+
+	while (true) {
+		const newlineIndex = input.indexOf(10);
+		if (newlineIndex !== -1) {
+			accumulator.append(input.subarray(0, newlineIndex));
+			return {
+				line: normalizeJsonlLine(accumulator.take()).toString("utf8"),
+				// Iroh reads are already capped. Keep an immutable view over the
+				// unread suffix so a chunk containing many short lines is consumed
+				// linearly instead of copying its shrinking remainder for every line.
+				rest: input.subarray(newlineIndex + 1),
+			};
+		}
+
+		accumulator.append(input);
+		const remainingBytes = maxLineBytes - accumulator.length;
+		const nextReadLimit = Math.min(readLimit, remainingBytes + 1);
+		const chunk = await recv.read(nextReadLimit);
+		if (!chunk || chunk.length === 0) {
+			return { line: undefined, rest: accumulator.take() };
+		}
+		if (chunk.length > nextReadLimit) {
+			throw new Error(`Iroh recv returned ${chunk.length} bytes for a ${nextReadLimit}-byte read`);
+		}
+		input = bytesToBuffer(chunk);
+	}
+}
+
+class BoundedLineAccumulator {
+	private readonly maxLineBytes: number;
+	private storage = Buffer.alloc(0);
+	private used = 0;
+
+	constructor(maxLineBytes: number) {
+		this.maxLineBytes = maxLineBytes;
 	}
 
-	if (buffer.length > 0) {
-		assertIrohRpcLineWithinLimit(buffer.length, maxLineBytes);
-		onLine(buffer.toString("utf8"));
+	get length(): number {
+		return this.used;
 	}
+
+	append(bytes: Buffer): void {
+		const nextLength = this.used + bytes.length;
+		assertIrohRpcLineWithinLimit(nextLength, this.maxLineBytes);
+		if (bytes.length === 0) {
+			return;
+		}
+		if (nextLength > this.storage.length) {
+			let nextCapacity = Math.max(1, this.storage.length);
+			while (nextCapacity < nextLength) {
+				nextCapacity = Math.min(this.maxLineBytes, Math.max(nextLength, nextCapacity * 2));
+			}
+			const grown = Buffer.allocUnsafe(nextCapacity);
+			this.storage.copy(grown, 0, 0, this.used);
+			this.storage = grown;
+		}
+		bytes.copy(this.storage, this.used);
+		this.used = nextLength;
+	}
+
+	take(): Buffer {
+		const result = Buffer.from(this.storage.subarray(0, this.used));
+		this.storage = Buffer.alloc(0);
+		this.used = 0;
+		return result;
+	}
+}
+
+function normalizeJsonlLine(line: Buffer): Buffer {
+	return line.length > 0 && line[line.length - 1] === 13 ? line.subarray(0, line.length - 1) : line;
 }
 
 function assertIrohRpcLineWithinLimit(length: number, maxLineBytes: number): void {
@@ -262,11 +347,11 @@ function bytesToBuffer(bytes: IrohBytes): Buffer {
 	if (Buffer.isBuffer(bytes)) {
 		return bytes;
 	}
-	return Buffer.from(Array.from(bytes));
+	return Buffer.from(bytes);
 }
 
-function textToBytes(text: string): Array<number> {
-	return Array.from(Buffer.from(text, "utf8"));
+function copyBytesToBuffer(bytes: IrohBytes): Buffer {
+	return Buffer.from(bytesToBuffer(bytes));
 }
 
 function toError(value: unknown): Error {

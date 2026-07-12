@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/volt-agent-core";
 import type { AgentSessionEvent } from "../../core/agent-session.ts";
@@ -1027,11 +1028,17 @@ export function createIrohRemoteHostCommandRpcTransport(
 	options: IrohRemoteHostCommandRpcTransportOptions,
 ): RpcTransport & { setRpcModeStartupComplete?(startupComplete: boolean): void } {
 	let pendingInboundCommand = Promise.resolve();
+	const inboundCommandContext = new AsyncLocalStorage<boolean>();
 	const startupAwareTransport = options.transport as {
 		setRpcModeStartupComplete?: (startupComplete: boolean) => void;
 	};
-
 	const waitForPendingInboundCommand = async (): Promise<void> => {
+		// Command handlers themselves call transport backpressure/flush/close.
+		// Awaiting their own pending promise would form a cycle; external callers
+		// still wait for the full serialized inbound command chain.
+		if (inboundCommandContext.getStore() === true) {
+			return;
+		}
 		await pendingInboundCommand;
 	};
 
@@ -1049,7 +1056,7 @@ export function createIrohRemoteHostCommandRpcTransport(
 	const handleLine = async (line: string, handler: RpcLineHandler): Promise<void> => {
 		const command = parseIrohRemoteHostCommandLine(line);
 		if (!command) {
-			handler(line);
+			await handler(line);
 			return;
 		}
 		let response: object | undefined;
@@ -1065,7 +1072,7 @@ export function createIrohRemoteHostCommandRpcTransport(
 			return;
 		}
 		if (response === undefined) {
-			handler(line);
+			await handler(line);
 			return;
 		}
 		await options.transport.write(response);
@@ -1081,10 +1088,11 @@ export function createIrohRemoteHostCommandRpcTransport(
 		onLine(handler: RpcLineHandler): () => void {
 			return options.transport.onLine((line) => {
 				pendingInboundCommand = pendingInboundCommand.then(
-					() => handleLine(line, handler),
-					() => handleLine(line, handler),
+					() => inboundCommandContext.run(true, () => handleLine(line, handler)),
+					() => inboundCommandContext.run(true, () => handleLine(line, handler)),
 				);
 				void pendingInboundCommand.catch(() => {});
+				return pendingInboundCommand;
 			});
 		},
 		onClose(handler: RpcCloseHandler): () => void {
@@ -1351,10 +1359,10 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 			return result;
 		},
 		onLine(handler: RpcLineHandler): () => void {
-			return options.transport.onLine((line) => {
+			return options.transport.onLine(async (line) => {
 				const pending = trackInboundLine(line);
 				try {
-					handler(line);
+					await handler(line);
 				} catch (error: unknown) {
 					pending?.finish();
 					throw error;

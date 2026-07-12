@@ -1,5 +1,9 @@
 import { createIrohRemoteRpcErrorResponse, type IrohRemoteRpcErrorResponse } from "./rpc-command-filter.ts";
-import type { IrohRemoteHostStateManager } from "./state-manager.ts";
+import {
+	IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR,
+	type IrohRemoteHostStateManager,
+	isIrohRemoteWorkspaceHasWorktreesError,
+} from "./state-manager.ts";
 import {
 	getAvailableIrohRemoteWorkspaceNames,
 	type IrohRemoteWorkspaceAvailabilityClassifier,
@@ -57,7 +61,22 @@ export async function handleIrohRemoteWorkspaceUnregisterRpcCommand(
 		};
 	}
 
-	const removedWorkspace = await options.stateManager.unregisterWorkspace(name.value);
+	let removedWorkspace: Awaited<ReturnType<IrohRemoteHostStateManager["unregisterWorkspace"]>>;
+	try {
+		removedWorkspace = await options.stateManager.unregisterWorkspace(name.value);
+	} catch (error) {
+		if (!isIrohRemoteWorkspaceHasWorktreesError(error)) {
+			throw error;
+		}
+		return {
+			handled: true,
+			response: createIrohRemoteRpcErrorResponse(
+				id,
+				IROH_REMOTE_UNREGISTER_WORKSPACE_RPC_TYPE,
+				IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR,
+			),
+		};
+	}
 	if (!removedWorkspace) {
 		return {
 			handled: true,

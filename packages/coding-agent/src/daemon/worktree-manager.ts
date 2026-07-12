@@ -1,11 +1,15 @@
 import { createHash, randomInt } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, readdir, realpath, rename, rm } from "node:fs/promises";
+import { mkdir, readdir, realpath, rename } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import { IROH_REMOTE_WORKTREE_ID_PATTERN } from "../core/remote/iroh/protocol.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
-import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
+import {
+	type IrohRemoteHostStateManager,
+	isIrohRemoteWorktreeParentWorkspaceNotFoundError,
+	isIrohRemoteWorktreePersistenceError,
+} from "../core/remote/iroh/state-manager.ts";
 import { spawnProcess, waitForChildProcess } from "../utils/child-process.ts";
 import type { ControlRequest, ControlWorktreeStatus } from "./control-protocol.ts";
 import type { ControlConnection } from "./control-server.ts";
@@ -320,53 +324,91 @@ export class WorktreeManager {
 			return { ok: false, error: "git_failed", detail: "invalid baseRef ref syntax" };
 		}
 
-		const existing = await this.stateManager.listWorktrees(workspace.name);
-		if (existing.length >= this.maxWorktreesPerWorkspace) {
-			return { ok: false, error: "worktree_limit_reached" };
-		}
-		const checkoutPath = getWorktreeCheckoutPath(this.agentDir, workspace.path, id);
-		if (existing.some((entry) => entry.id === id) || existsSync(checkoutPath)) {
-			return { ok: false, error: "worktree_exists" };
-		}
+		try {
+			const result = await this.stateManager.runWorkspaceWorktreeLifecycle<
+				WorktreeResult<{ worktree: IrohRemoteWorkspaceWorktree }>
+			>(workspace.name, async ({ workspace: registeredWorkspace, worktrees: existing }) => {
+				if (existing.length >= this.maxWorktreesPerWorkspace) {
+					return { result: { ok: false, error: "worktree_limit_reached" } };
+				}
+				const checkoutPath = getWorktreeCheckoutPath(this.agentDir, registeredWorkspace.path, id);
+				if (existing.some((entry) => entry.id === id) || existsSync(checkoutPath)) {
+					return { result: { ok: false, error: "worktree_exists" } };
+				}
 
-		const source = await this.resolveCreateSource(workspace, options.workingDirectory);
-		if (!source.ok) {
-			return source;
-		}
-		const repoCheck = await this.runGit(["rev-parse", "--git-common-dir"], source.source.sourceRootPath);
-		if (!repoCheck.ok) {
-			return this.mapGitFailure(repoCheck.stderr, workspace, checkoutPath, [source.source.sourceRootPath]);
-		}
+				const source = await this.resolveCreateSource(registeredWorkspace, options.workingDirectory);
+				if (!source.ok) {
+					return { result: source };
+				}
+				const repoCheck = await this.runGit(["rev-parse", "--git-common-dir"], source.source.sourceRootPath);
+				if (!repoCheck.ok) {
+					return {
+						result: this.mapGitFailure(repoCheck.stderr, registeredWorkspace, checkoutPath, [
+							source.source.sourceRootPath,
+						]),
+					};
+				}
 
-		// Resolve a defaulted base to a concrete ref (the source checkout's branch,
-		// falling back to its commit sha) so merge-back guidance — aheadBehind,
-		// retention merge checks, `worktree diff` — has a stable base later.
-		const recordedBaseRef = options.baseRef ?? (await this.resolveDefaultBaseRef(source.source.sourceRootPath));
+				// Resolve a defaulted base to a concrete ref (the source checkout's branch,
+				// falling back to its commit sha) so merge-back guidance — aheadBehind,
+				// retention merge checks, `worktree diff` — has a stable base later.
+				const recordedBaseRef = options.baseRef ?? (await this.resolveDefaultBaseRef(source.source.sourceRootPath));
 
-		await mkdir(getWorkspaceWorktreesDir(this.agentDir, workspace.path), { recursive: true, mode: 0o700 });
-		const added = await this.runGit(
-			["worktree", "add", checkoutPath, "-b", branch, baseRef],
-			source.source.sourceRootPath,
-		);
-		if (!added.ok) {
-			return this.mapGitFailure(added.stderr, workspace, checkoutPath, [source.source.sourceRootPath]);
+				await mkdir(getWorkspaceWorktreesDir(this.agentDir, registeredWorkspace.path), {
+					recursive: true,
+					mode: 0o700,
+				});
+				const added = await this.runGit(
+					["worktree", "add", checkoutPath, "-b", branch, baseRef],
+					source.source.sourceRootPath,
+				);
+				if (!added.ok) {
+					return {
+						result: this.mapGitFailure(added.stderr, registeredWorkspace, checkoutPath, [
+							source.source.sourceRootPath,
+						]),
+					};
+				}
+
+				const worktree: IrohRemoteWorkspaceWorktree = {
+					id,
+					workspaceName: registeredWorkspace.name,
+					path: checkoutPath,
+					...(source.source.sourceRootRelativePath === undefined
+						? {}
+						: { sourceRootRelativePath: source.source.sourceRootRelativePath }),
+					branch,
+					...(recordedBaseRef === undefined ? {} : { baseRef: recordedBaseRef }),
+					createdAt: this.now(),
+					sessionIds: [],
+				};
+				return { result: { ok: true, worktree }, worktree };
+			});
+			if (result.ok) {
+				try {
+					await this.flushState?.();
+				} catch {
+					return {
+						ok: false,
+						error: "git_failed",
+						detail: "worktree state could not be flushed; the checkout and daemon record were preserved",
+					};
+				}
+			}
+			return result;
+		} catch (error) {
+			if (isIrohRemoteWorktreeParentWorkspaceNotFoundError(error)) {
+				return { ok: false, error: "worktree_source_unregistered" };
+			}
+			if (isIrohRemoteWorktreePersistenceError(error)) {
+				return {
+					ok: false,
+					error: "git_failed",
+					detail: "worktree state could not be persisted; the created checkout was preserved for recovery",
+				};
+			}
+			throw error;
 		}
-
-		const worktree: IrohRemoteWorkspaceWorktree = {
-			id,
-			workspaceName: workspace.name,
-			path: checkoutPath,
-			...(source.source.sourceRootRelativePath === undefined
-				? {}
-				: { sourceRootRelativePath: source.source.sourceRootRelativePath }),
-			branch,
-			...(recordedBaseRef === undefined ? {} : { baseRef: recordedBaseRef }),
-			createdAt: this.now(),
-			sessionIds: [],
-		};
-		await this.stateManager.upsertWorktree(worktree);
-		await this.flushState?.();
-		return { ok: true, worktree };
 	}
 
 	/** Adopt an existing git worktree checkout into daemon state; local control socket only. */
@@ -385,73 +427,120 @@ export class WorktreeManager {
 			return { ok: false, error: "worktree_not_found", detail: "checkout path does not exist" };
 		}
 
-		const existing = await this.stateManager.listWorktrees(workspace.name);
-		if (existing.length >= this.maxWorktreesPerWorkspace) {
-			return { ok: false, error: "worktree_limit_reached" };
-		}
+		try {
+			const result = await this.stateManager.runWorkspaceWorktreeLifecycle<
+				WorktreeResult<{ worktree: IrohRemoteWorkspaceWorktree }>
+			>(workspace.name, async ({ workspace: registeredWorkspace, worktrees: existing }) => {
+				if (existing.length >= this.maxWorktreesPerWorkspace) {
+					return { result: { ok: false, error: "worktree_limit_reached" } };
+				}
 
-		const topLevel = await this.runGit(["rev-parse", "--show-toplevel"], requestedPath);
-		if (!topLevel.ok) {
-			return this.mapGitFailure(topLevel.stderr, workspace, requestedPath, [requestedPath]);
-		}
-		const targetRootPath = await realpathOrResolve(topLevel.stdout.trim());
-		if (existing.some((entry) => entry.id === options.id || isSamePath(entry.path, targetRootPath))) {
-			return { ok: false, error: "worktree_exists" };
-		}
-		const id = options.id ?? deriveAdoptedWorktreeId(targetRootPath, new Set(existing.map((entry) => entry.id)));
-		if (!WORKTREE_ID_PATTERN.test(id)) {
-			return { ok: false, error: "invalid_worktree_id" };
-		}
+				const topLevel = await this.runGit(["rev-parse", "--show-toplevel"], requestedPath);
+				if (!topLevel.ok) {
+					return {
+						result: this.mapGitFailure(topLevel.stderr, registeredWorkspace, requestedPath, [requestedPath]),
+					};
+				}
+				const targetRootPath = await realpathOrResolve(topLevel.stdout.trim());
+				if (existing.some((entry) => entry.id === options.id || isSamePath(entry.path, targetRootPath))) {
+					return { result: { ok: false, error: "worktree_exists" } };
+				}
+				const id =
+					options.id ?? deriveAdoptedWorktreeId(targetRootPath, new Set(existing.map((entry) => entry.id)));
+				if (!WORKTREE_ID_PATTERN.test(id)) {
+					return { result: { ok: false, error: "invalid_worktree_id" } };
+				}
 
-		const gitList = await this.runGit(["worktree", "list", "--porcelain"], targetRootPath);
-		if (!gitList.ok) {
-			return this.mapGitFailure(gitList.stderr, workspace, targetRootPath, [requestedPath, targetRootPath]);
-		}
-		const entries = parseWorktreeListEntries(gitList.stdout);
-		const targetEntry = await findWorktreeListEntryByPath(entries, targetRootPath);
-		if (targetEntry === undefined) {
-			return { ok: false, error: "worktree_not_found", detail: "checkout is not listed by git worktree" };
-		}
-		const workspaceRootPath = await realpathOrResolve(workspace.path);
-		const sourceRootPath = await findAdoptSourceRootPath(entries, workspaceRootPath, targetRootPath);
-		if (sourceRootPath === undefined) {
-			return {
-				ok: false,
-				error: "worktree_source_unregistered",
-				detail: "worktree source checkout is not inside the registered workspace",
-			};
-		}
-		const sourceRootRelativePath = await findWorkspaceRelativePathForRealpath(
-			workspaceRootPath,
-			undefined,
-			sourceRootPath,
-		);
-		if (sourceRootRelativePath === null) {
-			return {
-				ok: false,
-				error: "worktree_source_unregistered",
-				detail: "worktree source checkout is not inside the registered workspace",
-			};
-		}
-		const branch = targetEntry.branch ?? targetEntry.detached ?? "HEAD";
-		if (!isValidGitRefSyntax(branch)) {
-			return { ok: false, error: "git_failed", detail: "invalid worktree branch ref syntax" };
-		}
-		const baseRef = options.baseRef ?? (await this.resolveDefaultBaseRef(sourceRootPath));
+				const gitList = await this.runGit(["worktree", "list", "--porcelain"], targetRootPath);
+				if (!gitList.ok) {
+					return {
+						result: this.mapGitFailure(gitList.stderr, registeredWorkspace, targetRootPath, [
+							requestedPath,
+							targetRootPath,
+						]),
+					};
+				}
+				const entries = parseWorktreeListEntries(gitList.stdout);
+				const targetEntry = await findWorktreeListEntryByPath(entries, targetRootPath);
+				if (targetEntry === undefined) {
+					return {
+						result: {
+							ok: false,
+							error: "worktree_not_found",
+							detail: "checkout is not listed by git worktree",
+						},
+					};
+				}
+				const workspaceRootPath = await realpathOrResolve(registeredWorkspace.path);
+				const sourceRootPath = await findAdoptSourceRootPath(entries, workspaceRootPath, targetRootPath);
+				if (sourceRootPath === undefined) {
+					return {
+						result: {
+							ok: false,
+							error: "worktree_source_unregistered",
+							detail: "worktree source checkout is not inside the registered workspace",
+						},
+					};
+				}
+				const sourceRootRelativePath = await findWorkspaceRelativePathForRealpath(
+					workspaceRootPath,
+					undefined,
+					sourceRootPath,
+				);
+				if (sourceRootRelativePath === null) {
+					return {
+						result: {
+							ok: false,
+							error: "worktree_source_unregistered",
+							detail: "worktree source checkout is not inside the registered workspace",
+						},
+					};
+				}
+				const branch = targetEntry.branch ?? targetEntry.detached ?? "HEAD";
+				if (!isValidGitRefSyntax(branch)) {
+					return {
+						result: { ok: false, error: "git_failed", detail: "invalid worktree branch ref syntax" },
+					};
+				}
+				const baseRef = options.baseRef ?? (await this.resolveDefaultBaseRef(sourceRootPath));
 
-		const worktree: IrohRemoteWorkspaceWorktree = {
-			id,
-			workspaceName: workspace.name,
-			path: targetRootPath,
-			...(sourceRootRelativePath === undefined ? {} : { sourceRootRelativePath }),
-			branch,
-			...(baseRef === undefined ? {} : { baseRef }),
-			createdAt: this.now(),
-			sessionIds: [],
-		};
-		await this.stateManager.upsertWorktree(worktree);
-		await this.flushState?.();
-		return { ok: true, worktree };
+				const worktree: IrohRemoteWorkspaceWorktree = {
+					id,
+					workspaceName: registeredWorkspace.name,
+					path: targetRootPath,
+					...(sourceRootRelativePath === undefined ? {} : { sourceRootRelativePath }),
+					branch,
+					...(baseRef === undefined ? {} : { baseRef }),
+					createdAt: this.now(),
+					sessionIds: [],
+				};
+				return { result: { ok: true, worktree }, worktree };
+			});
+			if (result.ok) {
+				try {
+					await this.flushState?.();
+				} catch {
+					return {
+						ok: false,
+						error: "git_failed",
+						detail: "worktree state could not be flushed; the existing checkout and daemon record were preserved",
+					};
+				}
+			}
+			return result;
+		} catch (error) {
+			if (isIrohRemoteWorktreeParentWorkspaceNotFoundError(error)) {
+				return { ok: false, error: "worktree_source_unregistered" };
+			}
+			if (isIrohRemoteWorktreePersistenceError(error)) {
+				return {
+					ok: false,
+					error: "git_failed",
+					detail: "worktree state could not be persisted; the existing checkout was left unchanged",
+				};
+			}
+			throw error;
+		}
 	}
 
 	async validateWorkingDirectory(
@@ -847,38 +936,34 @@ export class WorktreeManager {
 	}
 
 	/**
-	 * Best-effort checkout removal after a workspace unregister (records were
-	 * already dropped by the state manager). Uses git when the main checkout
-	 * still exists, plain directory removal otherwise.
+	 * Compatibility guard for post-unregister callers. Workspace unregister is
+	 * deliberately non-destructive: persisted worktrees block the state mutation,
+	 * and unknown checkout directories are preserved for manual reconciliation.
 	 */
 	async cleanupUnregisteredWorkspace(workspace: IrohRemoteWorkspace): Promise<void> {
 		const workspaceDir = getWorkspaceWorktreesDir(this.agentDir, workspace.path);
 		if (!existsSync(workspaceDir)) {
 			return;
 		}
-		const mainCheckoutExists = existsSync(workspace.path);
-		let removedCheckoutCount = 0;
+		let preservedEntryCount = 0;
 		try {
-			for (const entry of await readdir(workspaceDir, { withFileTypes: true })) {
-				if (!entry.isDirectory()) {
-					continue;
-				}
-				const entryPath = join(workspaceDir, entry.name);
-				if (mainCheckoutExists) {
-					await this.runGit(["worktree", "remove", "--force", entryPath], workspace.path).catch(() => undefined);
-				}
-				await rm(entryPath, { recursive: true, force: true }).catch(() => undefined);
-				removedCheckoutCount++;
-			}
-			await rm(workspaceDir, { recursive: true, force: true });
+			preservedEntryCount = (await readdir(workspaceDir)).length;
 		} catch {
-			// Best-effort: leftover directories are reconciled by a later prune.
+			// Inspection is best-effort. Failure still leaves every path untouched.
 		}
+		const persistedWorktreeIds = (await this.stateManager.listWorktrees(workspace.name))
+			.map((worktree) => worktree.id)
+			.sort();
 		await this.logAudit({
-			type: "worktree_removed",
+			type: "worktree_unregister_cleanup_skipped",
 			workspace: workspace.name,
-			success: true,
-			details: { reason: "workspace_unregistered", removedCheckoutCount },
+			success: false,
+			error: "workspace unregister never removes worktree checkouts",
+			details: {
+				persistedWorktreeIds,
+				preservedEntryCount,
+				reason: "non_destructive_workspace_unregister",
+			},
 		});
 	}
 

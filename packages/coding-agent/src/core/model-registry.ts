@@ -379,7 +379,9 @@ export class ModelRegistry {
 	 * Picks up logins, logouts, and API keys saved by other volt processes.
 	 */
 	refreshFromDisk(): void {
-		this.authStorage.reload();
+		this.authStorage.reload({
+			preserveMissingFileFromBackup: true,
+		});
 		this.refresh();
 	}
 
