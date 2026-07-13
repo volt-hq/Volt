@@ -579,6 +579,20 @@ test("tag workflow publishes the inspected exact-commit candidate and never clob
 	assert.equal(publishJob.match(/npm test/g)?.length, 2);
 	assert.match(publishJob, /elif \[\[ "\$\{GITHUB_EVENT_NAME\}" == "workflow_dispatch" \]\]/);
 	assert.match(publishJob, /automatic tag releases are not retried/);
+	assert.match(
+		publishJob,
+		/if \[\[ "\$\{GITHUB_EVENT_NAME\}" == "workflow_dispatch" && "\$\{RELEASE_TAG\}" == "v0\.1\.0" \]\]/,
+	);
+	assert.match(publishJob, /recovery_commit='7c6cd97f8069e371a35ea8369b5b3aa525a0b107'/);
+	assert.match(publishJob, /recovery_fixture='packages\/coding-agent\/test\/rpc-client-process-exit\.test\.ts'/);
+	assert.match(publishJob, /git show "\$\{recovery_commit\}:\$\{recovery_fixture\}" > "\$\{recovery_fixture\}"/);
+	assert.match(publishJob, /trap restore_recovery_fixture EXIT/);
+	assert.match(publishJob, /git restore --source=HEAD --worktree -- "\$\{recovery_fixture\}"/);
+	assert.match(publishJob, /trap - EXIT/);
+	assert.match(publishJob, /git diff --exit-code HEAD/);
+	assert.ok(publishJob.indexOf("trap restore_recovery_fixture EXIT") < publishJob.indexOf('git show "${recovery_commit}'));
+	assert.ok(publishJob.indexOf("restore_recovery_fixture\n") < publishJob.indexOf("git diff --exit-code HEAD"));
+	assert.doesNotMatch(publishJob, /git (?:checkout|switch) .*7c6cd97f/);
 	assert.ok(publishJob.indexOf("node scripts/publish.mjs") < publishJob.lastIndexOf("verify-npm-package-bootstrap.mjs tag --version"));
 	assert.match(releaseJob, /needs: \[assemble, publish-npm\]/);
 	assert.match(releaseJob, /environment: binary-release/);
