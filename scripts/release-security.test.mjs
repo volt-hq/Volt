@@ -708,6 +708,8 @@ test("published packages and binary build include the repository license and not
 	assert.match(standaloneBuild, /binary-metafile\.json/);
 	assert.match(standaloneBuild, /binary-license-manifest\.json/);
 	assert.match(standaloneBuild, /standalone-file-manifest\.json/);
+	assert.match(standaloneBuild, /normalizedArchiveFileMode/);
+	assert.match(standaloneBuild, /stagedPath === "volt\.exe".*"0755".*"0644"/s);
 	assert.match(standaloneBuild, /sourceTreeClean/);
 	assert.match(standaloneBuild, /VOLT_REQUIRE_CLEAN_SOURCE/);
 	assert.match(standaloneBuild, /process\.platform === "win32".*powershell\.exe.*Expand-Archive/s);

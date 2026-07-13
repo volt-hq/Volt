@@ -359,6 +359,14 @@ function assertStagedBinarySidecars(stageDirectory, target) {
 	}
 }
 
+function normalizedArchiveFileMode(stagedPath, statMode) {
+	// Windows reports ordinary files as 0666 through Node, while the archive
+	// writer makes the shipped executable 0755 and all other files 0644.
+	// Record the normalized archive mode so the manifest describes the bytes
+	// and metadata testers actually extract on every platform.
+	return stagedPath === "volt.exe" || (statMode & 0o111) !== 0 ? "0755" : "0644";
+}
+
 function writeStagedFileManifest(stageDirectory) {
 	const manifestName = "standalone-file-manifest.json";
 	const files = [];
@@ -375,7 +383,7 @@ function writeStagedFileManifest(stageDirectory) {
 					path: stagedPath,
 					sha256: createHash("sha256").update(bytes).digest("hex"),
 					size: stat.size,
-					mode: (stat.mode & 0o777).toString(8).padStart(4, "0"),
+					mode: normalizedArchiveFileMode(stagedPath, stat.mode),
 				});
 			}
 		}

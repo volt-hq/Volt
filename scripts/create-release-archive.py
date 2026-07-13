@@ -33,6 +33,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def normalized_mode(path: Path) -> int:
+    # Keep the shipped CLI executable executable even on Windows, where stat
+    # permission bits are otherwise a platform-dependent approximation.
+    if path.name in ("volt", "volt.exe"):
+        return 0o755
     mode = path.stat().st_mode
     return 0o755 if mode & 0o111 else 0o644
 
