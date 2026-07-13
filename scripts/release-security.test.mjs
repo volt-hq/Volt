@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { collectBinaryLicenses } from "./collect-binary-licenses.mjs";
 import {
@@ -39,6 +39,106 @@ import {
 	verifyReleasePackageMetadata,
 	versionFromReleaseTag,
 } from "./verify-release-provenance.mjs";
+
+const isWindows = process.platform === "win32";
+
+function prependPath(...directories) {
+	return [...directories, process.env.PATH].filter(Boolean).join(delimiter);
+}
+
+function writeNodeCommand(directory, name, source) {
+	if (isWindows) {
+		const script = join(directory, `${name}.cjs`);
+		const command = join(directory, `${name}.cmd`);
+		writeFileSync(script, source);
+		writeFileSync(command, `@echo off\r\n"${process.execPath}" "%~dp0${name}.cjs" %*\r\n`);
+		return command;
+	}
+
+	const command = join(directory, name);
+	writeFileSync(command, `#!/usr/bin/env node\n${source}`);
+	chmodSync(command, 0o755);
+	return command;
+}
+
+function execNpm(args, options) {
+	const commandOptions = {
+		...options,
+		env: {
+			...process.env,
+			...options?.env,
+			npm_config_loglevel: "error",
+			npm_config_update_notifier: "false",
+		},
+	};
+	if (isWindows) {
+		const npmCli = join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+		return execFileSync(process.execPath, [npmCli, ...args], commandOptions);
+	}
+	return execFileSync("npm", args, commandOptions);
+}
+
+function resolvePythonCommand() {
+	const override = process.env.VOLT_PYTHON;
+	const candidates = override
+		? [{ command: override, args: [] }]
+		: isWindows
+			? [
+					{ command: "py", args: ["-3"] },
+					{ command: "python", args: [] },
+				]
+			: [
+					{ command: "python3", args: [] },
+					{ command: "python", args: [] },
+				];
+
+	for (const candidate of candidates) {
+		const result = spawnSync(candidate.command, [
+			...candidate.args,
+			"-c",
+			"import sys; raise SystemExit(sys.version_info.major != 3)",
+		]);
+		if (result.status === 0) return candidate;
+	}
+
+	throw new Error(
+		override
+			? `VOLT_PYTHON does not name a working Python 3 interpreter: ${override}`
+			: "Python 3 is required; set VOLT_PYTHON to an interpreter path if it is not discoverable",
+	);
+}
+
+const pythonCommand = resolvePythonCommand();
+
+function execPython(args, options) {
+	return execFileSync(pythonCommand.command, [...pythonCommand.args, ...args], options);
+}
+
+function spawnPython(args, options) {
+	return spawnSync(pythonCommand.command, [...pythonCommand.args, ...args], options);
+}
+
+function resolveGitForWindowsShell(name) {
+	const gitExecPath = execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim();
+	const shell = resolve(gitExecPath, "..", "..", "..", "bin", name);
+	if (!existsSync(shell)) {
+		throw new Error(`Git for Windows shell was not found at ${shell}`);
+	}
+	return shell;
+}
+
+function resolvePosixShell() {
+	if (process.env.VOLT_POSIX_SHELL) return process.env.VOLT_POSIX_SHELL;
+	return isWindows ? resolveGitForWindowsShell("sh.exe") : "sh";
+}
+
+function resolveBashShell() {
+	if (process.env.VOLT_BASH) return process.env.VOLT_BASH;
+	return isWindows ? resolveGitForWindowsShell("bash.exe") : "bash";
+}
+
+const posixShell = resolvePosixShell();
+const bashShell = resolveBashShell();
 
 test("release tags are canonical semver tags", () => {
 	assert.equal(versionFromReleaseTag("v0.1.0"), "0.1.0");
@@ -313,7 +413,7 @@ test("release finalization requires explicit sign-off for the exact prepared can
 	);
 	assert.match(nextCycleFlow, /requireCleanPublishedMain\(\)/);
 	assert.match(nextCycleFlow, /git cat-file -t refs\/tags\/\$\{tag\}/);
-	assert.match(nextCycleFlow, /git rev-parse refs\/tags\/\$\{tag\}\^\{commit\}/);
+	assert.match(nextCycleFlow, /git rev-parse .*refs\/tags\/\$\{tag\}\^\{commit\}/);
 	assert.match(nextCycleFlow, /assertReleaseTagMatchesCandidate/);
 	assert.match(nextCycleFlow, /docs: start post-\$\{tag\} changelog cycle/);
 	assert.match(nextCycleFlow, /writeGitHubOutputs\(outputPath, \{ tag, commit: nextCycleCommit \}\)/);
@@ -372,10 +472,10 @@ test("GitHub-native release phases preserve their mutation boundaries end to end
 			writeFileSync(join(path, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n- Fixture change.\n");
 		}
 
-		const fakeNpm = join(fakeBin, "npm");
-		writeFileSync(
-			fakeNpm,
-			`#!/usr/bin/env node
+		writeNodeCommand(
+			fakeBin,
+			"npm",
+			`
 const { readFileSync, writeFileSync } = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] === "run" && args[1] === "version:patch") {
@@ -388,12 +488,11 @@ if (args[0] === "run" && args[1] === "version:patch") {
 }
 `,
 		);
-		chmodSync(fakeNpm, 0o755);
 
-		const fakeGh = join(fakeBin, "gh");
-		writeFileSync(
-			fakeGh,
-			`#!/usr/bin/env node
+		writeNodeCommand(
+			fakeBin,
+			"gh",
+			`
 const runId = process.env.VOLT_APPROVED_CANDIDATE_RUN_ID;
 const commit = process.env.VOLT_TEST_CANDIDATE_COMMIT;
 const digest = process.env.VOLT_APPROVED_CANDIDATE_ARTIFACT_DIGEST;
@@ -423,7 +522,6 @@ if (process.argv.join(" ").includes("/artifacts?")) {
 }
 `,
 		);
-		chmodSync(fakeGh, 0o755);
 
 		git(["add", "."]);
 		git(["commit", "-m", "Initial release fixture"]);
@@ -434,7 +532,7 @@ if (process.argv.join(" ").includes("/artifacts?")) {
 
 		const releaseEnvironment = {
 			...process.env,
-			PATH: `${fakeBin}:${process.env.PATH || ""}`,
+			PATH: prependPath(fakeBin),
 		};
 		const preparedOutput = execFileSync(process.execPath, [releaseScript, "prepare-pr", "patch"], {
 			cwd: repository,
@@ -527,7 +625,7 @@ if (process.argv.join(" ").includes("/artifacts?")) {
 		assert.equal(git(["status", "--porcelain"]), "");
 		for (const [packageDirectory] of packageIdentities) {
 			const changelog = readFileSync(join(repository, "packages", packageDirectory, "CHANGELOG.md"), "utf8");
-			assert.match(changelog, /^# Changelog\n\n## \[Unreleased\]\n\n## \[0\.1\.1\]/);
+			assert.match(changelog, /^# Changelog\r?\n\r?\n## \[Unreleased\]\r?\n\r?\n## \[0\.1\.1\]/);
 			assert.equal(changelog.match(/^## \[Unreleased\]$/gm)?.length, 1);
 		}
 	} finally {
@@ -1422,7 +1520,7 @@ test("installers use the published package and verify binary checksums before ex
 	assert.match(windowsInstaller, /standalone-file-manifest\.json/);
 	assert.match(windowsInstaller, /\$releaseTag = "v\$\(\$version\.TrimStart\('v'\)\)"/);
 	assert.doesNotMatch(windowsInstaller, /Expand-Archive/);
-	assert.equal(spawnSync("sh", ["-n", "site/public/install.sh"]).status, 0);
+	assert.equal(spawnSync(posixShell, ["-n", "site/public/install.sh"]).status, 0);
 });
 
 test("site sources never rewrite documentation to the obsolete npm identity", () => {
@@ -1464,15 +1562,11 @@ test("published packages and binary build include the repository license and not
 	const packCache = mkdtempSync(join(tmpdir(), "volt-npm-pack-cache-"));
 	try {
 		const packResult = JSON.parse(
-			execFileSync(
-				process.platform === "win32" ? "npm.cmd" : "npm",
-				["pack", "--dry-run", "--json", "--ignore-scripts"],
-				{
-					cwd: "packages/coding-agent",
-					encoding: "utf8",
-					env: { ...process.env, npm_config_cache: packCache },
-				},
-			),
+			execNpm(["pack", "--dry-run", "--json", "--ignore-scripts"], {
+				cwd: "packages/coding-agent",
+				encoding: "utf8",
+				env: { ...process.env, npm_config_cache: packCache },
+			}),
 		);
 		assert.equal(packResult.length, 1);
 		assert.equal(
@@ -1520,7 +1614,7 @@ test("published packages and binary build include the repository license and not
 			"packages/coding-agent/dist/LICENSES/marked-18.0.5-LICENSE.txt",
 		],
 	];
-	execFileSync(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "copy-third-party-licenses"], {
+	execNpm(["run", "copy-third-party-licenses"], {
 		cwd: "packages/coding-agent",
 		stdio: "pipe",
 	});
@@ -1585,13 +1679,13 @@ test("release archive creation is deterministic and rejects symlinks", () => {
 				"--epoch",
 				"1700000000",
 			];
-			execFileSync("python3", [...args, "--output", first, ...(format === "tar.gz" ? ["--root", "volt"] : [])]);
-			execFileSync("python3", [...args, "--output", second, ...(format === "tar.gz" ? ["--root", "volt"] : [])]);
+			execPython([...args, "--output", first, ...(format === "tar.gz" ? ["--root", "volt"] : [])]);
+			execPython([...args, "--output", second, ...(format === "tar.gz" ? ["--root", "volt"] : [])]);
 			assert.deepEqual(readFileSync(first), readFileSync(second));
 		}
 
 		for (const unsafeRoot of [".", "..", "../escape", "..\\escape", "C:\\escape"]) {
-			const result = spawnSync("python3", [
+			const result = spawnPython([
 				"scripts/create-release-archive.py",
 				"--input",
 				input,
@@ -1606,8 +1700,14 @@ test("release archive creation is deterministic and rejects symlinks", () => {
 			assert.match(result.stderr.toString(), /one safe relative path component/);
 		}
 
-		symlinkSync("volt", join(input, "linked-volt"));
-		const result = spawnSync("python3", [
+		if (isWindows) {
+			const junctionTarget = join(directory, "junction-target");
+			mkdirSync(junctionTarget);
+			symlinkSync(junctionTarget, join(input, "linked-directory"), "junction");
+		} else {
+			symlinkSync("volt", join(input, "linked-volt"));
+		}
+		const result = spawnPython([
 			"scripts/create-release-archive.py",
 			"--input",
 			input,
@@ -1617,7 +1717,7 @@ test("release archive creation is deterministic and rejects symlinks", () => {
 			"zip",
 		]);
 		assert.notEqual(result.status, 0);
-		assert.match(result.stderr.toString(), /must not contain symlinks/);
+		assert.match(result.stderr.toString(), /must not contain symlinks or reparse points/);
 	} finally {
 		rmSync(directory, { force: true, recursive: true });
 	}
@@ -1626,7 +1726,7 @@ test("release archive creation is deterministic and rejects symlinks", () => {
 test("binary build refuses destructive output paths before invoking the compiler", () => {
 	const platform = `${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`;
 	const result = spawnSync(
-		"bash",
+		bashShell,
 		[
 			"scripts/build-binaries.sh",
 			"--skip-install",
@@ -1669,12 +1769,12 @@ esac
 		writeFileSync(fakeVolt, "#!/bin/sh\nprintf 'volt 1.2.3\\n'\n");
 		chmodSync(fakeVolt, 0o755);
 
-		const result = spawnSync("sh", ["site/public/install.sh"], {
+		const result = spawnSync(posixShell, ["site/public/install.sh"], {
 			encoding: "utf8",
 				env: {
 					...process.env,
 					HOME: home,
-					PATH: `${fakeBin}:/usr/bin:/bin`,
+					PATH: prependPath(fakeBin),
 					VOLT_INSTALL_METHOD: "npm",
 					VOLT_INSTALL_NPM_LOG: join(directory, "npm-args.log"),
 				},
@@ -1746,7 +1846,7 @@ test("Unix binary installer verifies a pinned archive before installing its exac
 		writeFileSync(join(payload, "export-html", "template.html"), "<html></html>\n");
 		const asset = "volt-linux-x64.tar.gz";
 		const archive = join(fixtures, asset);
-		execFileSync("python3", [
+		execPython([
 			"scripts/create-release-archive.py",
 			"--input",
 			payload,
@@ -1760,40 +1860,43 @@ test("Unix binary installer verifies a pinned archive before installing its exac
 		const checksum = createHash("sha256").update(readFileSync(archive)).digest("hex");
 		writeFileSync(join(fixtures, "SHA256SUMS"), `${checksum}  ${asset}\n`);
 
-		const fakeCurl = join(fakeBin, "curl");
-		writeFileSync(
-			fakeCurl,
-			`#!/bin/sh
-output=""
-url=""
-while [ "$#" -gt 0 ]; do
-    if [ "$1" = "-o" ]; then
-        output="$2"
-        shift 2
-    else
-        url="$1"
-        shift
-    fi
-done
-cp "$VOLT_INSTALL_FIXTURES/\${url##*/}" "$output"
-printf '%s\n' "$url" >> "$VOLT_INSTALL_URL_LOG"
-`,
-		);
-		chmodSync(fakeCurl, 0o755);
-		const fakeUname = join(fakeBin, "uname");
-		writeFileSync(fakeUname, "#!/bin/sh\n[ \"$1\" = \"-s\" ] && printf 'Linux\\n' || printf 'x86_64\\n'\n");
-		chmodSync(fakeUname, 0o755);
-
 		const env = {
 			...process.env,
 			HOME: home,
-			PATH: `${fakeBin}:/usr/bin:/bin`,
+			PATH: prependPath(fakeBin),
 			VOLT_INSTALL_FIXTURES: fixtures,
 			VOLT_INSTALL_METHOD: "binary",
 			VOLT_INSTALL_URL_LOG: join(directory, "download-urls.log"),
 			VOLT_VERSION: "1.2.3",
 		};
-		const installed = spawnSync("sh", ["site/public/install.sh"], { encoding: "utf8", env });
+		const runInstaller = (environment) =>
+			spawnSync(
+				posixShell,
+				[
+					"-c",
+					`curl() {
+    output=""
+    url=""
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = "-o" ]; then
+            output="$2"
+            shift 2
+        else
+            url="$1"
+            shift
+        fi
+    done
+    cp "$VOLT_INSTALL_FIXTURES/\${url##*/}" "$output"
+    printf '%s\\n' "$url" >> "$VOLT_INSTALL_URL_LOG"
+}
+uname() {
+    [ "$1" = "-s" ] && printf 'Linux\\n' || printf 'x86_64\\n'
+}
+. site/public/install.sh`,
+				],
+				{ encoding: "utf8", env: environment },
+			);
+		const installed = runInstaller(env);
 		assert.equal(installed.status, 0, installed.stderr);
 		assert.equal(readFileSync(join(home, ".volt", "bin", "volt"), "utf8"), readFileSync(join(payload, "volt"), "utf8"));
 		assert.deepEqual(
@@ -1810,26 +1913,29 @@ printf '%s\n' "$url" >> "$VOLT_INSTALL_URL_LOG"
 		writeFileSync(join(fixtures, "SHA256SUMS"), `${"0".repeat(64)}  ${asset}\n`);
 		const secondHome = join(directory, "unverified-home");
 		mkdirSync(secondHome);
-		const rejected = spawnSync("sh", ["site/public/install.sh"], {
-			encoding: "utf8",
-			env: { ...env, HOME: secondHome },
-		});
+		const rejected = runInstaller({ ...env, HOME: secondHome });
 		assert.notEqual(rejected.status, 0);
 		assert.match(rejected.stderr, /SHA-256 verification failed/);
 		assert.throws(() => readFileSync(join(secondHome, ".volt", "bin", "volt")));
 
-		const unsafeArchiveRoot = join(directory, "unsafe-archive");
-		mkdirSync(join(unsafeArchiveRoot, "volt"), { recursive: true });
-		symlinkSync("/tmp", join(unsafeArchiveRoot, "volt", "unsafe-link"));
-		execFileSync("tar", ["-czf", archive, "-C", unsafeArchiveRoot, "volt"]);
+		execPython([
+			"-c",
+			`import sys
+import tarfile
+
+with tarfile.open(sys.argv[1], "w:gz") as archive:
+    link = tarfile.TarInfo("volt/unsafe-link")
+    link.type = tarfile.SYMTYPE
+    link.linkname = "/tmp"
+    archive.addfile(link)
+`,
+			archive,
+		]);
 		const unsafeChecksum = createHash("sha256").update(readFileSync(archive)).digest("hex");
 		writeFileSync(join(fixtures, "SHA256SUMS"), `${unsafeChecksum}  ${asset}\n`);
 		const unsafeHome = join(directory, "unsafe-home");
 		mkdirSync(unsafeHome);
-		const unsafe = spawnSync("sh", ["site/public/install.sh"], {
-			encoding: "utf8",
-			env: { ...env, HOME: unsafeHome },
-		});
+		const unsafe = runInstaller({ ...env, HOME: unsafeHome });
 		assert.notEqual(unsafe.status, 0);
 		assert.match(unsafe.stderr, /only regular files and directories/);
 		assert.equal(existsSync(join(unsafeHome, ".volt", "bin")), false);

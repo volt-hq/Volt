@@ -44,10 +44,17 @@ def normalized_mode(path: Path) -> int:
 def archive_entries(source: Path) -> list[tuple[Path, PurePosixPath, bool]]:
     entries: list[tuple[Path, PurePosixPath, bool]] = []
     for path in sorted(source.rglob("*"), key=lambda item: item.relative_to(source).as_posix()):
-        if path.is_symlink():
-            raise ValueError(f"release archives must not contain symlinks: {path}")
+        metadata = path.lstat()
+        is_reparse_point = bool(
+            getattr(metadata, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        )
+        if path.is_symlink() or is_reparse_point:
+            raise ValueError(
+                f"release archives must not contain symlinks or reparse points: {path}"
+            )
         relative = PurePosixPath(path.relative_to(source).as_posix())
-        mode = path.stat().st_mode
+        mode = metadata.st_mode
         if stat.S_ISDIR(mode):
             entries.append((path, relative, True))
         elif stat.S_ISREG(mode):

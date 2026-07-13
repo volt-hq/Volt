@@ -71,6 +71,12 @@ function getVersion() {
 }
 
 function shellQuote(value) {
+	if (process.platform === "win32") {
+		if (/["\r\n]|%[^%]*%/.test(value)) {
+			throw new Error(`Cannot safely quote value for cmd.exe: ${JSON.stringify(value)}`);
+		}
+		return `"${value}"`;
+	}
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
@@ -129,13 +135,13 @@ function updateChangelogsForRelease(version) {
 }
 
 function addUnreleasedSection() {
-	const unreleasedSection = "## [Unreleased]\n\n";
 	for (const changelog of getChangelogs()) {
 		const content = readFileSync(changelog, "utf-8");
 		if (content.includes("## [Unreleased]")) {
 			fail(`${changelog} already contains an [Unreleased] section`);
 		}
-		const updated = content.replace(/^(# Changelog\n\n)/, `$1${unreleasedSection}`);
+		const newline = content.includes("\r\n") ? "\r\n" : "\n";
+		const updated = content.replace(/^(# Changelog\r?\n\r?\n)/, `$1## [Unreleased]${newline}${newline}`);
 		if (updated === content) {
 			fail(`${changelog} does not start with the expected changelog heading`);
 		}
@@ -398,8 +404,8 @@ function nextCycle(candidateCommit) {
 	}
 	run(`git fetch --prune origin +refs/tags/${tag}:refs/tags/${tag}`);
 	const tagType = run(`git cat-file -t refs/tags/${tag}`, { silent: true })?.trim();
-	const taggedCommit = run(`git rev-parse refs/tags/${tag}^{commit}`, { silent: true })?.trim();
-	const tagMessage = run(`git for-each-ref --format='%(contents)' refs/tags/${tag}`, { silent: true }) ?? "";
+	const taggedCommit = run(`git rev-parse ${shellQuote(`refs/tags/${tag}^{commit}`)}`, { silent: true })?.trim();
+	const tagMessage = run(`git for-each-ref --format=${shellQuote("%(contents)")} refs/tags/${tag}`, { silent: true }) ?? "";
 	try {
 		assertReleaseTagMatchesCandidate({ tag, candidateCommit, tagType, taggedCommit, tagMessage });
 	} catch (error) {
