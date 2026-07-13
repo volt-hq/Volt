@@ -118,19 +118,27 @@ function spawnPython(args, options) {
 	return spawnSync(pythonCommand.command, [...pythonCommand.args, ...args], options);
 }
 
-function resolvePosixShell() {
-	if (process.env.VOLT_POSIX_SHELL) return process.env.VOLT_POSIX_SHELL;
-	if (!isWindows) return "sh";
-
+function resolveGitForWindowsShell(name) {
 	const gitExecPath = execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim();
-	const shell = resolve(gitExecPath, "..", "..", "..", "bin", "sh.exe");
+	const shell = resolve(gitExecPath, "..", "..", "..", "bin", name);
 	if (!existsSync(shell)) {
-		throw new Error(`Git for Windows POSIX shell was not found at ${shell}; set VOLT_POSIX_SHELL explicitly`);
+		throw new Error(`Git for Windows shell was not found at ${shell}`);
 	}
 	return shell;
 }
 
+function resolvePosixShell() {
+	if (process.env.VOLT_POSIX_SHELL) return process.env.VOLT_POSIX_SHELL;
+	return isWindows ? resolveGitForWindowsShell("sh.exe") : "sh";
+}
+
+function resolveBashShell() {
+	if (process.env.VOLT_BASH) return process.env.VOLT_BASH;
+	return isWindows ? resolveGitForWindowsShell("bash.exe") : "bash";
+}
+
 const posixShell = resolvePosixShell();
+const bashShell = resolveBashShell();
 
 test("release tags are canonical semver tags", () => {
 	assert.equal(versionFromReleaseTag("v0.1.0"), "0.1.0");
@@ -1718,7 +1726,7 @@ test("release archive creation is deterministic and rejects symlinks", () => {
 test("binary build refuses destructive output paths before invoking the compiler", () => {
 	const platform = `${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`;
 	const result = spawnSync(
-		posixShell,
+		bashShell,
 		[
 			"scripts/build-binaries.sh",
 			"--skip-install",
