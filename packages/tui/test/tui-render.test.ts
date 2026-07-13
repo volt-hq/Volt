@@ -71,6 +71,24 @@ function getCellItalic(terminal: VirtualTerminal, row: number, col: number): num
 	return cell.isItalic();
 }
 
+function getBufferPosition(terminal: VirtualTerminal): { baseY: number; viewportY: number } {
+	const xterm = (terminal as unknown as { xterm: XtermTerminalType }).xterm;
+	return {
+		baseY: xterm.buffer.active.baseY,
+		viewportY: xterm.buffer.active.viewportY,
+	};
+}
+
+function scrollToLine(terminal: VirtualTerminal, line: number): void {
+	const xterm = (terminal as unknown as { xterm: XtermTerminalType }).xterm;
+	xterm.scrollToLine(line);
+}
+
+function scrollToBottom(terminal: VirtualTerminal): void {
+	const xterm = (terminal as unknown as { xterm: XtermTerminalType }).xterm;
+	xterm.scrollToBottom();
+}
+
 describe("TUI Kitty image cleanup", () => {
 	it("clears reserved Kitty image rows before drawing appended image placements", async () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
@@ -561,6 +579,42 @@ describe("TUI differential rendering", () => {
 			assert.ok(viewport[1]?.includes(`Working ${frame}`), `Spinner updated: ${viewport[1]}`);
 			assert.ok(viewport[2]?.includes("Footer"), `Footer preserved: ${viewport[2]}`);
 		}
+
+		tui.stop();
+	});
+
+	it("preserves manual scroll position while stable offscreen content updates", async () => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = Array.from({ length: 12 }, (_, index) => `Line ${index}`);
+		tui.start();
+		await terminal.waitForRender();
+
+		const initialPosition = getBufferPosition(terminal);
+		assert.deepStrictEqual(initialPosition, { baseY: 7, viewportY: 7 });
+		scrollToLine(terminal, 3);
+
+		const redrawsBeforeUpdate = tui.fullRedraws;
+		component.lines = component.lines.map((line, index) => {
+			if (index === 0) return "Updated offscreen line";
+			if (index === 9) return "Updated active line";
+			return line;
+		});
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.strictEqual(tui.fullRedraws, redrawsBeforeUpdate, "Stable updates should not clear scrollback");
+		assert.deepStrictEqual(
+			getBufferPosition(terminal),
+			{ baseY: 7, viewportY: 3 },
+			"Background rendering should not move a manually scrolled viewport",
+		);
+
+		scrollToBottom(terminal);
+		assert.deepStrictEqual(terminal.getViewport(), ["Line 7", "Line 8", "Updated active line", "Line 10", "Line 11"]);
 
 		tui.stop();
 	});

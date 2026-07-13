@@ -1450,12 +1450,34 @@ export class TUI extends Container {
 			return;
 		}
 
-		// Differential rendering can only touch what was actually visible.
-		// If the first changed line is above the previous viewport, we need a full redraw.
+		// Rows above the active viewport are terminal scrollback and cannot be edited in place.
+		// For stable text-only updates, leave those historical rows alone and repaint only the
+		// active portion. This keeps live status updates from repeatedly clearing scrollback
+		// while the user is reading it; a later full redraw reconciles the stale history.
 		if (firstChanged < prevViewportTop) {
-			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
-			fullRender(true);
-			return;
+			let changedRangeContainsKittyImage = false;
+			for (let i = firstChanged; i <= lastChanged; i++) {
+				if (isImageLine(this.previousLines[i] ?? "") || isImageLine(newLines[i] ?? "")) {
+					changedRangeContainsKittyImage = true;
+					break;
+				}
+			}
+			if (newLines.length !== this.previousLines.length || changedRangeContainsKittyImage) {
+				logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
+				fullRender(true);
+				return;
+			}
+
+			firstChanged = prevViewportTop;
+			if (firstChanged > lastChanged) {
+				this.positionHardwareCursor(cursorPos, newLines.length);
+				this.previousLines = newLines;
+				this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+				this.previousWidth = width;
+				this.previousHeight = height;
+				this.previousViewportTop = prevViewportTop;
+				return;
+			}
 		}
 
 		// Render from first changed line to end
