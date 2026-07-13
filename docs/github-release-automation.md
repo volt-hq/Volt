@@ -1,8 +1,8 @@
 # GitHub-Native Release Automation
 
-> Status: rollout runbook. This document describes the release process and its
-> required GitHub configuration. Do not use the production path until every
-> one-time setting is installed and the test-prefix exercise passes.
+> Status: active since 2026-07-13. The one-time GitHub configuration is
+> installed, the test-prefix exercise passed, and production release tags are
+> authorized only through the repository-scoped Release Tagger App.
 
 The GitHub-native release flow moves release preparation, native candidate
 building, approval, tagging, npm publication, and GitHub Release publication
@@ -13,6 +13,34 @@ exists.
 The normal flow uses no personal access token and never publishes npm packages
 with a stored npm token. npm publication continues to use trusted publishing
 with GitHub Actions OIDC.
+
+## Activation record
+
+- Protected `main` ruleset: `18875265`; pull requests and the
+  `build-check-test` GitHub Actions check are required, with zero required
+  approving reviews and no bypass actors.
+- Actions policy: GitHub-owned actions only, full-SHA pinning required,
+  read-only default `GITHUB_TOKEN`, and the combined create/approve-pull-request
+  repository toggle enabled. Volt workflows never approve or merge a pull
+  request.
+- Release App: `Volt Release Tagger hansjm10`, App ID `4287315`; installed only
+  on `hansjm10/Volt` with `Contents: write` and mandatory `Metadata: read`.
+- Release authorization environment: `release-authorization`; `main` only,
+  administrator bypass disabled, no reviewers, and no wait timer.
+- Release-tag creation ruleset: `18846707`; `v*` creation is restricted and
+  only App ID `4287315` may bypass it.
+- Release-tag mutation ruleset: `18876498`; `v*` updates and deletions are
+  restricted with no bypass actors.
+- Immutable releases are enabled for future releases.
+- Activation CI passed in [run 29250095530](https://github.com/hansjm10/Volt/actions/runs/29250095530).
+  The protected-main exercise workflow was introduced through
+  [PR 22](https://github.com/hansjm10/Volt/pull/22), and the complete
+  authorization exercise passed in
+  [run 29254385483](https://github.com/hansjm10/Volt/actions/runs/29254385483)
+  at commit `0dbfe2ee8c34c5686c09c767d415a2d1ebcc34c3`.
+- The exercise verified ordinary `GITHUB_TOKEN` creation denial, annotated App
+  creation, App update denial, App deletion denial, owner cleanup, and removal
+  of the temporary tag and rulesets `18875873` and `18875868`.
 
 ## Security invariants
 
@@ -35,9 +63,9 @@ Only configured bypass actors can perform a restricted operation. GitHub Apps
 are eligible bypass actors. See [Available rules for rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)
 and [Creating rulesets for a repository](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository).
 
-## Planned workflows
+## Workflows
 
-The planned workflow files are:
+The workflow files are:
 
 - `.github/workflows/prepare-release.yml` — **Prepare Release**
 - `.github/workflows/build-standalone-candidate.yml` — **Build Standalone Candidate**
@@ -105,12 +133,16 @@ The workflow builds and smoke-tests the native matrix:
 - Linux arm64 and x64
 - Windows arm64 and x64
 
-It then assembles one combined review artifact containing exactly:
+It then assembles one combined review artifact containing exactly nine
+top-level files:
 
 - the six native archives
 - `SHA256SUMS`
 - `source-commit.txt`
-- the release record and required binary/file/license manifests
+- `release-record.json`
+
+The required binary, file, and license manifests are inside each native
+archive. They are not additional top-level files in the combined artifact.
 
 The workflow reports these approval inputs in its summary:
 
@@ -216,6 +248,9 @@ GitHub's Git database APIs. Both operations require `Contents: write`; see the
 force update and fails if the reference already exists. It reads the tag back
 and verifies the tag object, target commit, and message before continuing.
 
+The same authorized job creates or verifies the draft prerelease for the exact
+new tag. It fails if a release already exists in any other state.
+
 Finally, a separate job grants the ordinary `GITHUB_TOKEN` only
 `actions: write` and dispatches **Publish Release** with `ref` set to the new
 tag. A `GITHUB_TOKEN`-created push does not normally trigger another workflow,
@@ -256,14 +291,16 @@ Publication is divided into least-privilege jobs:
    versions are skipped only after exact integrity, provenance, repository,
    and dist-tag verification.
 3. **Publish GitHub Release** runs only after npm succeeds. It uses the
-   `binary-release` environment and receives `contents: write`. It creates or
-   resumes a draft release for the existing tag, uploads only the approved
-   archives, checksums, source commit, release notes, and release record, and
-   verifies every uploaded asset digest. It publishes the draft only after the
+   `binary-release` environment and receives `contents: write`. It requires the
+   exact draft prerelease created by **Approve Release**; it never creates a
+   release. It uploads exactly eight public assets: the six approved archives,
+   `SHA256SUMS`, and `release-record.json`. `source-commit.txt` and the release
+   notes are verified internal publication inputs, not public assets. It
+   verifies every uploaded asset digest and publishes the draft only after the
    full asset set passes verification.
 
-Repository release immutability must be enabled before this flow is activated.
-Once an immutable release is published, GitHub locks its tag and assets and
+Repository release immutability is enabled and must remain enabled. Once an
+immutable release is published, GitHub locks its tag and assets and
 automatically generates a release attestation. GitHub recommends creating a
 draft, attaching every asset, and then publishing it. See
 [Immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
@@ -275,16 +312,16 @@ adds fresh `[Unreleased]` changelog sections. It must not push directly to
 
 ## One-time GitHub setup
 
-Perform these steps in order. Do not activate production tag creation until
-the test-prefix exercise later in this document passes.
+This configuration is installed. Reproduce these steps in order after a
+repository migration or authorization redesign, and do not reactivate
+production tag creation until the test-prefix exercise passes again.
 
 ### 1. Register the Volt Release Tagger GitHub App
 
 From the owner account, open **Settings → Developer settings → GitHub Apps →
 New GitHub App** and configure:
 
-- **GitHub App name:** `Volt Release Tagger` (or a globally unique name with
-  that purpose)
+- **GitHub App name:** `Volt Release Tagger hansjm10`
 - **Homepage URL:** `https://github.com/hansjm10/Volt`
 - **User authorization callback URL:** unset
 - **Request user authorization during installation:** disabled
@@ -352,7 +389,7 @@ Environment secrets and selected branch/tag policies are documented in
 
 Open **Volt → Settings → Rules → Rulesets** and create two active tag rulesets.
 
-#### Volt release tag creation
+#### Protect release tag creation (`18846707`)
 
 - **Target:** tags matching `v*`
 - **Rule:** Restrict creations
@@ -363,7 +400,7 @@ The repository owner may remain an owner-level break-glass bypass actor for
 creation if GitHub's personal-repository role model requires it, but normal tag
 creation must use the authorized App job.
 
-#### Volt immutable release tags
+#### Protect release tag mutations (`18876498`)
 
 - **Target:** tags matching `v*`
 - **Rules:** Restrict updates and Restrict deletions
@@ -577,8 +614,11 @@ is disabled.
 
 ## Test-prefix exercise
 
-Test the App and workflow authorization before targeting production tags. Do
-not create a disposable `v*` tag.
+The initial exercise passed in
+[run 29254385483](https://github.com/hansjm10/Volt/actions/runs/29254385483).
+Repeat this exercise after changing the App identity, private key handling,
+environment policy, tag rulesets, or tag-creation workflow. Do not create a
+disposable `v*` tag.
 
 1. Create temporary tag rulesets for `release-automation-test/*`:
    - creation restriction with `Volt Release Tagger` as the only automation
