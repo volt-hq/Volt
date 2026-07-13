@@ -51,10 +51,11 @@ outside the automated release:
 4. Configure a GitHub repository ruleset for `refs/tags/v*` that restricts tag
    creation, update, and deletion to release owners. Do not rely on checks that
    run from the tagged commit as a substitute for this repository-level rule.
-5. Configure the GitHub `binary-release` environment with a required
-   release-owner reviewer. This approval is the enforcement point for the
-   standalone-binary license gate; do not approve the final release job until
-   the exact binary compliance record is complete.
+5. Configure the GitHub `binary-release` environment with administrator bypass
+   disabled and restrict deployments to protected `v*` tags. In the current
+   solo-maintainer workflow, complete and record the exact standalone-binary
+   license review before creating the release tag; tag creation is the release
+   owner's authorization for the final release job.
 6. Verify each package with
    `npm view <name>@0.0.0-bootstrap.0 name versions license dist-tags repository --json`.
    The explicit selector avoids resolving through `latest`. Before the real
@@ -63,7 +64,8 @@ outside the automated release:
    absent.
 7. Run the normal build, checks, tests, and package dry-run inspection, then
    commit the reviewed `0.1.0` migration on `main`.
-8. From a clean local `main` that exactly matches `origin/main`, prepare the
+8. After the standalone-binary compliance record is complete, from a clean
+   local `main` that exactly matches `origin/main`, prepare the
    already-versioned initial release with
    `npm_config_min_release_age=0 node scripts/release.mjs 0.1.0`. Unlike normal
    `patch` and `minor` releases, this one-time explicit-current target does not
@@ -78,7 +80,8 @@ outside the automated release:
    dependency order using trusted publishing, provenance, public access, and the
    `beta` dist-tag. The workflow accepts safe partial-publication reruns, but
    fails if an already-published target version does not have `beta` pointing to
-   it. Its final GitHub release job waits for `binary-release` approval.
+   it. Its final GitHub release job uses the tag-restricted `binary-release`
+   environment and does not pause for a reviewer in the solo-maintainer setup.
 10. Verify each real package with
    `npm view <name>@0.1.0 name version license dist-tags repository --json`.
    Confirm that `beta` resolves to `0.1.0`, `latest` remains pinned to the inert

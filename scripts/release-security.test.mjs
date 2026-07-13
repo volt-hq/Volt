@@ -407,7 +407,7 @@ test("published packages and binary build include the repository license and not
 
 	const betaReadiness = readFileSync("BETA-READINESS.md", "utf8");
 	assert.match(betaReadiness, /not ready for public beta\s+distribution/i);
-	assert.match(betaReadiness, /Do not publish the standalone binary until/i);
+	assert.match(betaReadiness, /Do not create the release tag until/i);
 	assert.match(betaReadiness, /Prove the npm daemon distribution/);
 });
 

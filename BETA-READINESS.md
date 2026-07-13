@@ -30,14 +30,14 @@ completed.
   available in this checkout. Obtain and review those exact materials before
   closing this gate; do not synthesize attribution from package metadata.
 
-  **Do not publish the standalone binary until the release owner approves this
-  compliance gate.** Configure the GitHub `binary-release` environment with a
-  at least one required release-owner reviewer who owns this sign-off, prevent
-  self-review, and restrict deployments to protected `v*` tags. Do not add
-  environment secrets. The workflow may build and checksum the binaries, but
-  its final GitHub release job is the only job with `contents: write` and must
-  remain unapproved until the exact release's compliance record is complete.
-  Do not silently omit or disable binary builds to make a release pass.
+  **Do not create the release tag until the release owner approves and records
+  this compliance gate.** Configure the GitHub `binary-release` environment
+  with administrator bypass disabled and restrict deployments to protected
+  `v*` tags. Do not add environment secrets. In the current solo-maintainer
+  workflow there is no independent deployment reviewer, so pushing the release
+  tag authorizes the final GitHub release job with `contents: write` to proceed
+  after npm publication. Do not silently omit or disable binary builds to make
+  a release pass.
 - [ ] **Prove the npm daemon distribution.** From an unpublished package
   installed outside the repository, run the full Node smoke test in
   [AGENTS.md](AGENTS.md#releasing). Then use an isolated

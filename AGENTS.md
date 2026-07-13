@@ -128,10 +128,11 @@ release script and CI validate an annotated tag on `main`, but checks loaded
 from a tag cannot defend against an actor who can replace that tag or its
 workflow without a repository-level rule.
 
-Configure the GitHub `binary-release` environment with a required compliance
-reviewer, prevent self-review, and restrict deployments to protected `v*` tags.
-The reviewer must not approve the final release-assets job until the standalone
-binary license gate in `BETA-READINESS.md` is complete.
+Configure the GitHub `binary-release` environment with administrator bypass
+disabled and restrict deployments to protected `v*` tags. While Volt has one
+maintainer, the release owner must complete and record the standalone-binary
+license gate in `BETA-READINESS.md` before creating the release tag; the tag is
+the authorization for the final release-assets job.
 
 **Lockstep versioning**: all packages share one version; every release updates all together. `patch` = fixes + additions, `minor` = breaking changes. No major releases.
 
@@ -159,6 +160,11 @@ binary license gate in `BETA-READINESS.md` is complete.
    Verify both Node and Bun startup, model/account listing, interactive startup, and at least one real prompt with the intended default provider. The bare commands `/tmp/volt-local-release/node/volt` and `/tmp/volt-local-release/bun/volt` start interactive mode; run each in tmux, submit a prompt, and wait for the model reply before considering the interactive smoke test passed. Failures are release blockers unless the user explicitly accepts the risk.
 
 3. **Run the release script**:
+
+   Do not run the release script until the standalone-binary compliance record
+   for this exact release is complete. With no independent environment reviewer,
+   pushing the tag allows the final release-assets job to proceed automatically.
+
    ```bash
    VOLT_ALLOW_LOCKFILE_CHANGE=1 npm_config_min_release_age=0 npm run release:patch    # fixes + additions
    VOLT_ALLOW_LOCKFILE_CHANGE=1 npm_config_min_release_age=0 npm run release:minor    # breaking changes
@@ -178,8 +184,9 @@ binary license gate in `BETA-READINESS.md` is complete.
    `vX.Y.Z` tag triggers `.github/workflows/build-binaries.yml`. The
    `publish-npm` job uses npm trusted publishing through GitHub Actions OIDC
    with environment `npm-publish`. The final GitHub release job runs only after
-   npm succeeds and requires approval through the `binary-release` environment;
-   approve it only after the standalone-binary compliance gate is complete.
+   npm succeeds through the tag-restricted `binary-release` environment. In the
+   solo-maintainer workflow it does not pause for a reviewer, so the compliance
+   gate must be complete before the release tag is created.
    Except for the documented one-time name-reservation placeholders, real
    releases never use local `npm publish`, a long-lived token, OTP, or WebAuthn.
 
