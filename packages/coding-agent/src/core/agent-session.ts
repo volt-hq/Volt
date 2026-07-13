@@ -269,7 +269,7 @@ export interface ModelCycleResult {
 	isScoped: boolean;
 }
 
-/** Session statistics for /session command */
+/** Lifetime session statistics for /session and RPC consumers. */
 export interface SessionStats {
 	sessionFile: string | undefined;
 	sessionId: string;
@@ -286,6 +286,7 @@ export interface SessionStats {
 		total: number;
 	};
 	cost: number;
+	/** Current retained model context, separate from lifetime token totals. */
 	contextUsage?: ContextUsage;
 }
 
@@ -3692,10 +3693,13 @@ export class AgentSession {
 	 * Get session statistics.
 	 */
 	getSessionStats(): SessionStats {
-		const state = this.state;
-		const userMessages = state.messages.filter((m) => m.role === "user").length;
-		const assistantMessages = state.messages.filter((m) => m.role === "assistant").length;
-		const toolResults = state.messages.filter((m) => m.role === "toolResult").length;
+		// Agent state is the retained model context after compaction. The append-only
+		// session entries preserve every message and therefore the lifetime totals.
+		const entries = this.sessionManager.getEntries();
+		const messages = entries.flatMap((entry) => (entry.type === "message" ? [entry.message] : []));
+		const userMessages = messages.filter((message) => message.role === "user").length;
+		const assistantMessages = messages.filter((message) => message.role === "assistant").length;
+		const toolResults = messages.filter((message) => message.role === "toolResult").length;
 
 		let toolCalls = 0;
 		let totalInput = 0;
@@ -3704,10 +3708,10 @@ export class AgentSession {
 		let totalCacheWrite = 0;
 		let totalCost = 0;
 
-		for (const message of state.messages) {
+		for (const message of messages) {
 			if (message.role === "assistant") {
 				const assistantMsg = message as AssistantMessage;
-				toolCalls += assistantMsg.content.filter((c) => c.type === "toolCall").length;
+				toolCalls += assistantMsg.content.filter((content) => content.type === "toolCall").length;
 				totalInput += assistantMsg.usage.input;
 				totalOutput += assistantMsg.usage.output;
 				totalCacheRead += assistantMsg.usage.cacheRead;
@@ -3723,7 +3727,7 @@ export class AgentSession {
 			assistantMessages,
 			toolCalls,
 			toolResults,
-			totalMessages: state.messages.length,
+			totalMessages: messages.length + entries.filter((entry) => entry.type === "custom_message").length,
 			tokens: {
 				input: totalInput,
 				output: totalOutput,

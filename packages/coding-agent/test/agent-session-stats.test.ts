@@ -11,6 +11,7 @@ import { createTestResourceLoader } from "./utilities.ts";
 const model = getModel("anthropic", "claude-sonnet-4-5")!;
 
 function createUsage(totalTokens: number): Usage {
+	const cost = totalTokens / 1_000_000;
 	return {
 		input: totalTokens,
 		output: 0,
@@ -18,19 +19,33 @@ function createUsage(totalTokens: number): Usage {
 		cacheWrite: 0,
 		totalTokens,
 		cost: {
-			input: 0,
+			input: cost,
 			output: 0,
 			cacheRead: 0,
 			cacheWrite: 0,
-			total: 0,
+			total: cost,
 		},
 	};
 }
 
-function createAssistantMessage(text: string, totalTokens: number, timestamp: number): AssistantMessage {
+function createAssistantMessage(
+	text: string,
+	totalTokens: number,
+	timestamp: number,
+	toolCallCount = 0,
+): AssistantMessage {
+	const content: AssistantMessage["content"] = [{ type: "text", text }];
+	for (let index = 0; index < toolCallCount; index++) {
+		content.push({
+			type: "toolCall",
+			id: `tool-${timestamp}-${index}`,
+			name: "read",
+			arguments: {},
+		});
+	}
 	return {
 		role: "assistant",
-		content: [{ type: "text", text }],
+		content,
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
@@ -101,15 +116,23 @@ describe("AgentSession.getSessionStats", () => {
 
 		try {
 			sessionManager.appendMessage(createUserMessage("first", 1));
-			sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2));
+			sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2, 2));
 			const keptUserId = sessionManager.appendMessage(createUserMessage("second", 3));
-			sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4));
+			sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4, 1));
 			sessionManager.appendCompaction("summary", keptUserId, 195_000);
 			sessionManager.appendMessage(createUserMessage("third", 5));
 			syncAgentMessages(session, sessionManager);
 
 			const stats = session.getSessionStats();
-			expect(stats.tokens.input).toBe(195_000);
+			expect(stats).toMatchObject({
+				userMessages: 3,
+				assistantMessages: 2,
+				toolCalls: 3,
+				toolResults: 0,
+				totalMessages: 5,
+				tokens: { input: 375_000, total: 375_000 },
+			});
+			expect(stats.cost).toBeCloseTo(0.375);
 			expect(stats.contextUsage).toBeDefined();
 			expect(stats.contextUsage?.tokens).toBeNull();
 			expect(stats.contextUsage?.percent).toBeNull();
@@ -123,16 +146,24 @@ describe("AgentSession.getSessionStats", () => {
 
 		try {
 			sessionManager.appendMessage(createUserMessage("first", 1));
-			sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2));
+			sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2, 2));
 			const keptUserId = sessionManager.appendMessage(createUserMessage("second", 3));
-			sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4));
+			sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4, 1));
 			sessionManager.appendCompaction("summary", keptUserId, 195_000);
 			sessionManager.appendMessage(createUserMessage("third", 5));
-			sessionManager.appendMessage(createAssistantMessage("response3", 25_000, 6));
+			sessionManager.appendMessage(createAssistantMessage("response3", 25_000, 6, 1));
 			syncAgentMessages(session, sessionManager);
 
 			const stats = session.getSessionStats();
-			expect(stats.tokens.input).toBe(220_000);
+			expect(stats).toMatchObject({
+				userMessages: 3,
+				assistantMessages: 3,
+				toolCalls: 4,
+				toolResults: 0,
+				totalMessages: 6,
+				tokens: { input: 400_000, total: 400_000 },
+			});
+			expect(stats.cost).toBeCloseTo(0.4);
 			expect(stats.contextUsage).toBeDefined();
 			expect(stats.contextUsage?.tokens).toBe(25_000);
 			expect(stats.contextUsage?.percent).toBe((25_000 / model.contextWindow) * 100);
