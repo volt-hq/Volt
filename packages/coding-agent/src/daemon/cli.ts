@@ -405,8 +405,8 @@ async function daemonLogs(agentDir: string, args: string[]): Promise<void> {
 
 export interface DaemonCommandOptions {
 	agentDir?: string;
-	/** Bun cannot host the daemon (native Iroh adapter); reject like remote host does. */
-	isBunBinary: boolean;
+	/** Standalone releases omit the native Iroh adapter. */
+	isStandaloneBinary: boolean;
 }
 
 /** Router for `volt daemon <command>`; returns true when the args were handled. */
@@ -419,8 +419,8 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 		printDaemonUsage();
 		return true;
 	}
-	if (options.isBunBinary) {
-		console.error("Error: volt daemon is not available from the Bun binary release yet.");
+	if (options.isStandaloneBinary) {
+		console.error("Error: volt daemon is not available from the standalone binary release.");
 		console.error("Use a Node.js npm install or a source checkout with optional @number0/iroh dependencies.");
 		process.exitCode = 1;
 		return true;

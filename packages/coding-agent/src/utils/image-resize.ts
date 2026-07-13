@@ -1,4 +1,6 @@
+import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
+import { isStandaloneBinary } from "../config.ts";
 import { type ImageResizeOptions, type ResizedImage, resizeImageInProcess } from "./image-resize-core.ts";
 
 export type { ImageResizeOptions, ResizedImage } from "./image-resize-core.ts";
@@ -77,30 +79,20 @@ async function resizeImageInWorker(
 
 /**
  * Resize an image to fit within the specified max dimensions and encoded file size.
- * Runs Photon in a worker thread so WASM decoding, resizing, and encoding do not
- * block the TUI event loop. If the worker cannot be loaded (for example in some
- * Bun compiled executable layouts), fall back to in-process resizing so image
- * reads still work.
+ * Runs image decoding, resizing, and encoding in a worker thread so it does not
+ * block the TUI event loop. If the worker cannot be loaded, fall back to
+ * in-process resizing so image reads still work.
  */
 export async function resizeImage(
 	inputBytes: Uint8Array,
 	mimeType: string,
 	options?: ImageResizeOptions,
 ): Promise<ResizedImage | null> {
-	const isTypeScriptRuntime = import.meta.url.endsWith(".ts");
-	const workerUrl = new URL(
-		isTypeScriptRuntime ? "./image-resize-worker.ts" : "./image-resize-worker.js",
-		import.meta.url,
-	);
-
-	// Bun compiled executables resolve worker entrypoints by string path, not via
-	// new URL(..., import.meta.url). Try the string path first under Bun so the
-	// release binary uses the embedded worker instead of falling back in-process.
-	if (typeof process.versions.bun === "string") {
-		try {
-			return await resizeImageInWorker("./src/utils/image-resize-worker.ts", inputBytes, mimeType, options);
-		} catch {}
-	}
+	const moduleUrl: string | undefined = import.meta.url;
+	const isTypeScriptRuntime = moduleUrl?.endsWith(".ts") === true;
+	const workerUrl = isStandaloneBinary
+		? new URL("./image-resize-worker.cjs", pathToFileURL(process.execPath))
+		: new URL(isTypeScriptRuntime ? "./image-resize-worker.ts" : "./image-resize-worker.js", moduleUrl);
 
 	try {
 		return await resizeImageInWorker(workerUrl, inputBytes, mimeType, options);

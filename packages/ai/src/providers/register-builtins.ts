@@ -87,7 +87,7 @@ interface BedrockProviderModule {
 }
 
 const importNodeOnlyProvider = (specifier: string): Promise<unknown> => {
-	const runtimeSpecifier = import.meta.url.endsWith(".js") ? specifier.replace(/\.ts$/, ".js") : specifier;
+	const runtimeSpecifier = import.meta.url?.endsWith(".js") ? specifier.replace(/\.ts$/, ".js") : specifier;
 	return import(runtimeSpecifier);
 };
 

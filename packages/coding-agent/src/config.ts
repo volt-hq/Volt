@@ -9,24 +9,26 @@ import { normalizePath } from "./utils/paths.ts";
 // Package Detection
 // =============================================================================
 
-const __filename = fileURLToPath(import.meta.url);
+const moduleUrl: string | undefined = import.meta.url;
+const __filename = moduleUrl ? fileURLToPath(moduleUrl) : process.execPath;
 const __dirname = dirname(__filename);
 
-/**
- * Detect if we're running as a Bun compiled binary.
- * Bun binaries have import.meta.url containing "$bunfs", "~BUN", or "%7EBUN" (Bun's virtual filesystem path)
- */
-export const isBunBinary =
-	import.meta.url.includes("$bunfs") || import.meta.url.includes("~BUN") || import.meta.url.includes("%7EBUN");
+declare const __VOLT_STANDALONE__: boolean | undefined;
 
-/** Detect if Bun is the runtime (compiled binary or bun run) */
+/**
+ * Detect a release standalone executable. The SEA bundler replaces this
+ * compile-time constant; normal Node.js/npm execution leaves it undefined.
+ */
+export const isStandaloneBinary = typeof __VOLT_STANDALONE__ !== "undefined" && __VOLT_STANDALONE__ === true;
+
+/** Detect Bun package/source execution for install-method compatibility. */
 export const isBunRuntime = !!process.versions.bun;
 
 // =============================================================================
 // Install Method Detection
 // =============================================================================
 
-export type InstallMethod = "bun-binary" | "npm" | "pnpm" | "yarn" | "bun" | "unknown";
+export type InstallMethod = "standalone" | "npm" | "pnpm" | "yarn" | "bun" | "unknown";
 
 interface SelfUpdateCommandStep {
 	command: string;
@@ -75,8 +77,8 @@ function packageNameFromInstallSpec(spec: string): string {
 }
 
 export function detectInstallMethod(): InstallMethod {
-	if (isBunBinary) {
-		return "bun-binary";
+	if (isStandaloneBinary) {
+		return "standalone";
 	}
 
 	const resolvedPath = `${__dirname}\0${process.execPath || ""}`.toLowerCase().replace(/\\/g, "/");
@@ -124,7 +126,7 @@ function getSelfUpdateCommandForMethod(
 ): SelfUpdateCommand | undefined {
 	const updatesInstalledPackage = packageNameFromInstallSpec(updatePackageSpec) === installedPackageName;
 	switch (method) {
-		case "bun-binary":
+		case "standalone":
 			return undefined;
 		case "pnpm": {
 			const match = readCommandOutput("pnpm", ["root", "-g"])
@@ -282,7 +284,7 @@ function getGlobalPackageRoots(method: InstallMethod, _packageName: string, npmC
 			}
 			return roots;
 		}
-		case "bun-binary":
+		case "standalone":
 		case "unknown":
 			return [];
 	}
@@ -371,7 +373,7 @@ export function getSelfUpdateUnavailableInstruction(
 	updatePackageSpec = packageName,
 ): string {
 	const method = detectInstallMethod();
-	if (method === "bun-binary") {
+	if (method === "standalone") {
 		return "Download the latest Volt binary from your release channel.";
 	}
 	const command = getSelfUpdateCommandForMethod(method, packageName, updatePackageSpec, npmCommand);
@@ -399,7 +401,7 @@ export function getUpdateInstruction(packageName: string): string {
 
 /**
  * Get the package root for resolving package metadata and asset roots.
- * - For Bun binary: returns the directory containing the executable
+ * - For a standalone binary: returns the directory containing the executable
  * - For Node.js/tsx: returns the nearest parent directory containing package.json
  */
 export function getPackageDir(): string {
@@ -409,8 +411,8 @@ export function getPackageDir(): string {
 		return normalizePath(envDir);
 	}
 
-	if (isBunBinary) {
-		// Bun binary: process.execPath points to the compiled executable
+	if (isStandaloneBinary) {
+		// SEA binary: process.execPath points to the compiled executable
 		return dirname(process.execPath);
 	}
 	// Node.js: walk up from __dirname until we find package.json
@@ -442,12 +444,12 @@ export function getPackageSourceOrDistDir(packageDir: string = getPackageDir(), 
 
 /**
  * Get path to built-in themes directory (shipped with package)
- * - For Bun binary: theme/ next to executable
+ * - For a standalone binary: theme/ next to executable
  * - For Node.js (dist/): dist/core/theme/
  * - For tsx (src/): src/core/theme/
  */
 export function getThemesDir(): string {
-	if (isBunBinary) {
+	if (isStandaloneBinary) {
 		return join(getPackageDir(), "theme");
 	}
 	// Theme assets ship in core/theme/ relative to the runtime src/ or dist/ tree.
@@ -456,12 +458,12 @@ export function getThemesDir(): string {
 
 /**
  * Get path to HTML export template directory (shipped with package)
- * - For Bun binary: export-html/ next to executable
+ * - For a standalone binary: export-html/ next to executable
  * - For Node.js (dist/): dist/core/export-html/
  * - For tsx (src/): src/core/export-html/
  */
 export function getExportTemplateDir(): string {
-	if (isBunBinary) {
+	if (isStandaloneBinary) {
 		return join(getPackageDir(), "export-html");
 	}
 	return join(getPackageSourceOrDistDir(), "core", "export-html");

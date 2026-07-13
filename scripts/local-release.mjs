@@ -23,13 +23,12 @@ Options:
   --force              Remove --out first if it already exists
   --skip-check         Do not run npm run check before building
   --skip-install       Only create tarballs; do not create isolated installs
-  --skip-bun-install   Do not create the isolated Bun install
   --help               Show this help
 `);
 }
 
 function parseArgs() {
-	const options = { force: false, outDir: undefined, skipBunInstall: false, skipCheck: false, skipInstall: false };
+	const options = { force: false, outDir: undefined, skipCheck: false, skipInstall: false };
 	const args = process.argv.slice(2);
 
 	for (let i = 0; i < args.length; i++) {
@@ -48,10 +47,6 @@ function parseArgs() {
 		}
 		if (arg === "--skip-install") {
 			options.skipInstall = true;
-			continue;
-		}
-		if (arg === "--skip-bun-install") {
-			options.skipBunInstall = true;
 			continue;
 		}
 		if (arg === "--out") {
@@ -86,10 +81,6 @@ function run(command, args, options = {}) {
 
 function readPackageJson(directory) {
 	return JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
-}
-
-function commandExists(command) {
-	return spawnSync(command, ["--version"], { stdio: "ignore" }).status === 0;
 }
 
 function isInsidePath(child, parent) {
@@ -131,10 +122,7 @@ function currentBinaryPlatform() {
 	throw new Error(`Unsupported binary platform: ${process.platform} ${process.arch}`);
 }
 
-function buildBunBinaryRelease(targetDirectory, archiveDirectory) {
-	if (!commandExists("bun")) {
-		throw new Error("Bun is required for the local binary release build.");
-	}
+function buildStandaloneBinaryRelease(targetDirectory, archiveDirectory) {
 	const platform = currentBinaryPlatform();
 	const binaryBuildDirectory = join(archiveDirectory, "binary-build");
 	run("./scripts/build-binaries.sh", [
@@ -192,8 +180,7 @@ if (rootPackageJson.name !== "volt-monorepo") {
 const outDir = prepareOutputDirectory(options, repoRoot);
 const tarballDirectory = join(outDir, "tarballs");
 const nodeInstallDirectory = join(outDir, "node");
-const bunInstallDirectory = join(outDir, "bun-install");
-const binaryDirectory = join(outDir, "bun");
+const binaryDirectory = join(outDir, "standalone");
 mkdirSync(tarballDirectory, { recursive: true });
 
 if (!options.skipCheck) {
@@ -213,7 +200,7 @@ for (const pkg of packages) {
 
 let binaryPlatform;
 if (!options.skipInstall) {
-	binaryPlatform = buildBunBinaryRelease(binaryDirectory, outDir);
+	binaryPlatform = buildStandaloneBinaryRelease(binaryDirectory, outDir);
 
 	mkdirSync(nodeInstallDirectory, { recursive: true });
 	const dependencies = Object.fromEntries(
@@ -225,18 +212,6 @@ if (!options.skipInstall) {
 	run("npm", ["install", "--omit=dev", "--ignore-scripts"], { cwd: nodeInstallDirectory });
 	createVoltShim(nodeInstallDirectory);
 
-	if (!options.skipBunInstall) {
-		if (!commandExists("bun")) {
-			throw new Error("Bun is required for the isolated Bun install. Use --skip-bun-install to skip it.");
-		}
-		mkdirSync(bunInstallDirectory, { recursive: true });
-		const bunDependencies = Object.fromEntries(
-			packages.map((pkg) => [pkg.name, fileSpecifier(bunInstallDirectory, tarballs.get(pkg.name))]),
-		);
-		writeFileSync(join(bunInstallDirectory, "package.json"), `${JSON.stringify({ private: true, dependencies: bunDependencies, overrides: bunDependencies }, undefined, "\t")}\n`);
-		run("bun", ["install", "--production", "--ignore-scripts"], { cwd: bunInstallDirectory });
-		createVoltShim(bunInstallDirectory);
-	}
 }
 
 console.log("\nLocal release artifacts created:");
@@ -247,10 +222,10 @@ for (const tarball of tarballs.values()) {
 }
 
 if (!options.skipInstall) {
-	console.log("\nLocal Bun binary release:");
+	console.log("\nLocal standalone binary release:");
 	console.log(`  ${binaryDirectory}`);
 	console.log(`  ${join(outDir, `volt-${binaryPlatform}.${String(binaryPlatform).startsWith("windows-") ? "zip" : "tar.gz"}`)}`);
-	console.log("\nRun the local Bun binary release from outside the repository:");
+	console.log("\nRun the local standalone binary release from outside the repository:");
 	console.log(`  ${join(binaryDirectory, String(binaryPlatform).startsWith("windows-") ? "volt.exe" : "volt")} --help`);
 
 	console.log("\nIsolated npm install:");
@@ -258,10 +233,4 @@ if (!options.skipInstall) {
 	console.log("\nRun the locally packed npm CLI from outside the repository:");
 	console.log(`  ${join(nodeInstallDirectory, process.platform === "win32" ? "volt.cmd" : "volt")} --help`);
 
-	if (!options.skipBunInstall) {
-		console.log("\nIsolated Bun package install:");
-		console.log(`  ${bunInstallDirectory}`);
-		console.log("\nRun the locally packed Bun package CLI from outside the repository:");
-		console.log(`  ${join(bunInstallDirectory, process.platform === "win32" ? "volt.cmd" : "volt")} --help`);
-	}
 }

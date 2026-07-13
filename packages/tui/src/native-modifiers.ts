@@ -1,8 +1,9 @@
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const cjsRequire = createRequire(import.meta.url);
+const moduleUrl: string | undefined = import.meta.url;
+const cjsRequire = createRequire(moduleUrl || pathToFileURL(process.execPath).href);
 
 export type ModifierKey = "shift" | "command" | "control" | "option";
 
@@ -25,7 +26,7 @@ function loadNativeModifiersHelper(): NativeModifiersHelper | undefined {
 	const arch = process.arch;
 	if (arch !== "x64" && arch !== "arm64") return undefined;
 
-	const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+	const moduleDir = moduleUrl ? path.dirname(fileURLToPath(moduleUrl)) : path.dirname(process.execPath);
 	const nativePath = path.join("native", "darwin", "prebuilds", `darwin-${arch}`, "darwin-modifiers.node");
 	const candidates = [
 		path.join(moduleDir, "..", nativePath),

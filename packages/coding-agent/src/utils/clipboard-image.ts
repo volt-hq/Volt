@@ -5,7 +5,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 
-import { loadPhoton } from "./photon.ts";
+import { decodeImageToPng } from "./image-codec.ts";
 
 export type ClipboardImage = {
 	bytes: Uint8Array;
@@ -65,25 +65,11 @@ function isSupportedImageMimeType(mimeType: string): boolean {
 }
 
 /**
- * Convert unsupported image formats to PNG using Photon.
+ * Convert unsupported image formats to PNG using the pure-JavaScript image codecs.
  * Returns null if conversion is unavailable or fails.
  */
 async function convertToPng(bytes: Uint8Array): Promise<Uint8Array | null> {
-	const photon = await loadPhoton();
-	if (!photon) {
-		return null;
-	}
-
-	try {
-		const image = photon.PhotonImage.new_from_byteslice(bytes);
-		try {
-			return image.get_bytes();
-		} finally {
-			image.free();
-		}
-	} catch {
-		return null;
-	}
+	return decodeImageToPng(bytes);
 }
 
 function runCommand(

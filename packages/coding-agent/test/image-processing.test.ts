@@ -1,5 +1,5 @@
 /**
- * Tests for image processing utilities using Photon.
+ * Tests for pure-JavaScript image processing utilities.
  */
 
 import { describe, expect, it } from "vitest";
@@ -13,6 +13,15 @@ const TINY_PNG =
 // Small 2x2 blue JPEG image (base64) - generated with ImageMagick
 const TINY_JPEG =
 	"/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAACAAIDAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAVAQEBAAAAAAAAAAAAAAAAAAAGCf/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AD3VTB3/2Q==";
+
+const MALFORMED_JPEG =
+	"/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRQBAwQEBQQFCQUFCRQNCw0UFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFP/AABEIAAIAAgMBEQACEQEDEQH/xAGiAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgsQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+gEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoLEQACAQIEBAMEBwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2dri4+Tl5ufo6ery8/T19vf4+fr/2gAMAwEAAhEDEQA/APz3r/VM+HP/2Q==";
+
+// Small valid 1x1 WebP image.
+const TINY_WEBP = "UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA";
+
+// Small valid 1x1 GIF image.
+const TINY_GIF = "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 
 // 100x100 gray PNG
 const MEDIUM_PNG_100x100 =
@@ -46,6 +55,16 @@ describe("convertToPng", () => {
 		expect(buffer[1]).toBe(0x50); // 'P'
 		expect(buffer[2]).toBe(0x4e); // 'N'
 		expect(buffer[3]).toBe(0x47); // 'G'
+	});
+
+	it("returns null when WebP conversion is unavailable", async () => {
+		await expect(convertToPng(TINY_WEBP, "image/webp")).resolves.toBeNull();
+	});
+
+	it("converts GIF to PNG", async () => {
+		const result = await convertToPng(TINY_GIF, "image/gif");
+		expect(result?.mimeType).toBe("image/png");
+		expect(Buffer.from(result?.data ?? "", "base64").subarray(0, 4)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
 	});
 });
 
@@ -136,6 +155,43 @@ describe("resizeImage", () => {
 		expect(result!.wasResized).toBe(false);
 		expect(result!.originalWidth).toBe(2);
 		expect(result!.originalHeight).toBe(2);
+	});
+
+	it("rejects malformed JPEG input", async () => {
+		await expect(resizeImage(imageBytes(MALFORMED_JPEG), "image/jpeg")).resolves.toBeNull();
+	});
+
+	it("passes through an in-limit WebP without a decoder", async () => {
+		const result = await resizeImage(imageBytes(TINY_WEBP), "image/webp", {
+			maxWidth: 100,
+			maxHeight: 100,
+			maxBytes: 1024 * 1024,
+		});
+
+		expect(result).toEqual({
+			data: TINY_WEBP,
+			mimeType: "image/webp",
+			originalWidth: 1,
+			originalHeight: 1,
+			width: 1,
+			height: 1,
+			wasResized: false,
+		});
+	});
+
+	it("fails cleanly when WebP exceeds the byte limit", async () => {
+		const result = await resizeImage(imageBytes(TINY_WEBP), "image/webp", {
+			maxWidth: 100,
+			maxHeight: 100,
+			maxBytes: 1,
+		});
+
+		expect(result).toBeNull();
+	});
+
+	it("rejects malformed WebP input", async () => {
+		const result = await resizeImage(Buffer.from("not a webp"), "image/webp");
+		expect(result).toBeNull();
 	});
 });
 

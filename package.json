@@ -39,9 +39,11 @@
 		"publish:dry": "npm run prepublishOnly && node scripts/publish.mjs --dry-run",
 		"release:local": "node scripts/local-release.mjs",
 		"shrinkwrap:coding-agent": "node scripts/generate-coding-agent-shrinkwrap.mjs",
-		"release:patch": "node scripts/release.mjs patch",
-		"release:minor": "node scripts/release.mjs minor",
-		"release:major": "node scripts/release.mjs major",
+		"release:initial": "node scripts/release.mjs prepare 0.1.0",
+		"release:patch": "node scripts/release.mjs prepare patch",
+		"release:minor": "node scripts/release.mjs prepare minor",
+		"release:major": "node scripts/release.mjs prepare major",
+		"release:finalize": "node scripts/release.mjs finalize",
 		"release:fix-links": "node scripts/release-notes.mjs fix-github-releases",
 		"prepare": "husky"
 	},
@@ -53,6 +55,7 @@
 		"esbuild": "0.28.1",
 		"husky": "9.1.7",
 		"jiti": "2.7.0",
+		"postject": "1.0.0-alpha.6",
 		"shx": "0.4.0",
 		"typescript": "5.9.3"
 	},

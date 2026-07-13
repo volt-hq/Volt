@@ -57,7 +57,11 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 			if (autoResizeImages) {
 				const resized = await resizeImage(content, mimeType);
 				if (!resized) {
-					text += `<file name="${absolutePath}">[Image omitted: could not be resized below the inline image size limit.]</file>\n`;
+					const reason =
+						mimeType === "image/webp"
+							? "WebP exceeds the inline limits and this beta does not include a local WebP resize codec."
+							: "Image could not be resized below the inline image size limit.";
+					text += `<file name="${absolutePath}">[Image omitted: ${reason}]</file>\n`;
 					continue;
 				}
 				dimensionNote = formatDimensionNote(resized);

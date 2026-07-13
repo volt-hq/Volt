@@ -1,270 +1,131 @@
 #!/usr/bin/env bash
-#
-# Build volt binaries for all platforms locally.
-# Mirrors .github/workflows/build-binaries.yml
+# Build the Volt standalone archive for the current native platform.
 #
 # Usage:
-#   ./scripts/build-binaries.sh [--skip-install] [--skip-build] [--platform <platform>] [--out <dir>]
-#
-# Options:
-#   --skip-install      Skip npm ci
-#   --skip-build        Skip npm run build
-#   --platform <name>   Build only for specified platform (darwin-arm64, darwin-x64, linux-x64, linux-arm64, windows-x64, windows-arm64)
-#   --out <dir>         Output directory (default: packages/coding-agent/binaries)
-#
-# Output:
-#   packages/coding-agent/binaries/
-#     volt-darwin-arm64.tar.gz
-#     volt-darwin-x64.tar.gz
-#     volt-linux-x64.tar.gz
-#     volt-linux-arm64.tar.gz
-#     volt-windows-x64.zip
-#     volt-windows-arm64.zip
+#   ./scripts/build-binaries.sh [--skip-install] [--skip-build] [--platform <target>] [--out <dir>] [--node-archive <file>]
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 REPO_ROOT=$(pwd -P)
 DEFAULT_OUTPUT_DIR="$REPO_ROOT/packages/coding-agent/binaries"
-OUTPUT_SENTINEL=".volt-release-output-v1"
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "python3 is required to create deterministic release archives" >&2
-    exit 1
+if [[ -z "${VOLT_PYTHON:-}" ]]; then
+	if command -v python3 >/dev/null 2>&1; then
+		VOLT_PYTHON=python3
+	elif command -v python >/dev/null 2>&1; then
+		VOLT_PYTHON=python
+	else
+		echo "Python 3 is required to create deterministic release archives" >&2
+		exit 1
+	fi
 fi
-
-if [[ -z "${SOURCE_DATE_EPOCH:-}" ]]; then
-    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
-    else
-        SOURCE_DATE_EPOCH=315532800
-    fi
-fi
-export SOURCE_DATE_EPOCH
+export VOLT_PYTHON
 
 SKIP_INSTALL=false
 SKIP_BUILD=false
 PLATFORM=""
 OUTPUT_DIR=""
+NODE_ARCHIVE=""
 
 while [[ $# -gt 0 ]]; do
-    case $1 in
-        --skip-install)
-            SKIP_INSTALL=true
-            shift
-            ;;
-        --skip-build)
-            SKIP_BUILD=true
-            shift
-            ;;
-        --platform)
-            if [[ $# -lt 2 || "$2" == -* ]]; then
-                echo "--platform requires a value" >&2
-                exit 1
-            fi
-            PLATFORM="$2"
-            shift 2
-            ;;
-        --out)
-            if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
-                echo "--out requires a directory" >&2
-                exit 1
-            fi
-            OUTPUT_DIR="$2"
-            shift 2
-            ;;
-        *)
-            echo "Unknown option: $1"
-            exit 1
-            ;;
-    esac
+	case "$1" in
+		--skip-install)
+			SKIP_INSTALL=true
+			shift
+			;;
+		--skip-build)
+			SKIP_BUILD=true
+			shift
+			;;
+		--platform)
+			if [[ $# -lt 2 || "$2" == -* ]]; then
+				echo "--platform requires a value" >&2
+				exit 1
+			fi
+			PLATFORM="$2"
+			shift 2
+			;;
+		--out)
+			if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
+				echo "--out requires a directory" >&2
+				exit 1
+			fi
+			OUTPUT_DIR="$2"
+			shift 2
+			;;
+		--node-archive)
+			if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
+				echo "--node-archive requires a file" >&2
+				exit 1
+			fi
+			NODE_ARCHIVE="$2"
+			shift 2
+			;;
+		*)
+			echo "Unknown option: $1" >&2
+			exit 1
+			;;
+	esac
 done
 
-# Validate platform if specified
-if [[ -n "$PLATFORM" ]]; then
-    case "$PLATFORM" in
-        darwin-arm64|darwin-x64|linux-x64|linux-arm64|windows-x64|windows-arm64)
-            ;;
-        *)
-            echo "Invalid platform: $PLATFORM"
-            echo "Valid platforms: darwin-arm64, darwin-x64, linux-x64, linux-arm64, windows-x64, windows-arm64"
-            exit 1
-            ;;
-    esac
+NATIVE_PLATFORM=$(node -p '`${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`')
+case "$NATIVE_PLATFORM" in
+	darwin-arm64|darwin-x64|linux-arm64|linux-x64|windows-arm64|windows-x64) ;;
+	*)
+		echo "Unsupported native platform: $NATIVE_PLATFORM" >&2
+		exit 1
+		;;
+esac
+if [[ -z "$PLATFORM" ]]; then
+	PLATFORM="$NATIVE_PLATFORM"
+fi
+case "$PLATFORM" in
+	darwin-arm64|darwin-x64|linux-arm64|linux-x64|windows-arm64|windows-x64) ;;
+	*)
+		echo "Invalid platform: $PLATFORM" >&2
+		exit 1
+		;;
+esac
+if [[ "$PLATFORM" != "$NATIVE_PLATFORM" ]]; then
+	echo "Standalone builds are native-only: requested $PLATFORM, current platform is $NATIVE_PLATFORM" >&2
+	exit 1
 fi
 
 if [[ -z "$OUTPUT_DIR" ]]; then
-    OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
-fi
-if [[ "$OUTPUT_DIR" != /* ]]; then
-    OUTPUT_DIR="$(pwd)/$OUTPUT_DIR"
-fi
-if [[ -L "$OUTPUT_DIR" ]]; then
-    echo "Refusing symlink release output directory: $OUTPUT_DIR" >&2
-    exit 1
-fi
-OUTPUT_DIR=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$OUTPUT_DIR")
-DEFAULT_OUTPUT_DIR=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$DEFAULT_OUTPUT_DIR")
-
-if [[ "$OUTPUT_DIR" == "/" || "$REPO_ROOT" == "$OUTPUT_DIR" || "$REPO_ROOT" == "$OUTPUT_DIR"/* ]]; then
-    echo "Refusing release output directory that contains the repository: $OUTPUT_DIR" >&2
-    exit 1
-fi
-if [[ "$OUTPUT_DIR" == "$REPO_ROOT"/* && "$OUTPUT_DIR" != "$DEFAULT_OUTPUT_DIR" ]]; then
-    echo "Custom release output directories must be outside the repository: $OUTPUT_DIR" >&2
-    exit 1
-fi
-if [[ -e "$OUTPUT_DIR" && ! -d "$OUTPUT_DIR" ]]; then
-    echo "Release output path is not a directory: $OUTPUT_DIR" >&2
-    exit 1
-fi
-if [[ -d "$OUTPUT_DIR" && "$OUTPUT_DIR" != "$DEFAULT_OUTPUT_DIR" && ! -e "$OUTPUT_DIR/$OUTPUT_SENTINEL" ]]; then
-    if [[ -n "$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-        echo "Refusing non-empty custom output without $OUTPUT_SENTINEL: $OUTPUT_DIR" >&2
-        exit 1
-    fi
+	OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
 fi
 
 if [[ "$SKIP_INSTALL" == "false" ]]; then
-    echo "==> Installing dependencies..."
-    npm ci --ignore-scripts
+	echo "==> Installing dependencies..."
+	npm ci --ignore-scripts
 else
-    echo "==> Skipping npm ci (--skip-install)"
+	echo "==> Skipping npm ci (--skip-install)"
 fi
 
 if [[ "$SKIP_BUILD" == "false" ]]; then
-    echo "==> Building all packages..."
-    npm run build
+	echo "==> Building all packages..."
+	npm run build
 else
-    echo "==> Skipping package build (--skip-build)"
+	echo "==> Skipping package build (--skip-build)"
 fi
 
-echo "==> Building binaries..."
-cd packages/coding-agent
+if [[ -z "${SOURCE_DATE_EPOCH:-}" ]]; then
+	SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+fi
 
-# Clean only paths owned by this build. Unknown files in the default output are
-# preserved, while custom non-empty directories require our sentinel above.
-mkdir -p "$OUTPUT_DIR"
-touch "$OUTPUT_DIR/$OUTPUT_SENTINEL"
-GENERATED_PATHS=(
-    "$OUTPUT_DIR/darwin-arm64"
-    "$OUTPUT_DIR/darwin-x64"
-    "$OUTPUT_DIR/linux-x64"
-    "$OUTPUT_DIR/linux-arm64"
-    "$OUTPUT_DIR/windows-x64"
-    "$OUTPUT_DIR/windows-arm64"
-    "$OUTPUT_DIR/volt-darwin-arm64.tar.gz"
-    "$OUTPUT_DIR/volt-darwin-x64.tar.gz"
-    "$OUTPUT_DIR/volt-linux-x64.tar.gz"
-    "$OUTPUT_DIR/volt-linux-arm64.tar.gz"
-    "$OUTPUT_DIR/volt-windows-x64.zip"
-    "$OUTPUT_DIR/volt-windows-arm64.zip"
-    "$OUTPUT_DIR/SHA256SUMS"
+args=(
+	--target "$PLATFORM"
+	--out "$OUTPUT_DIR"
+	--source-date-epoch "$SOURCE_DATE_EPOCH"
 )
-rm -rf -- "${GENERATED_PATHS[@]}"
-mkdir -p "$OUTPUT_DIR"/{darwin-arm64,darwin-x64,linux-x64,linux-arm64,windows-x64,windows-arm64}
-
-# Determine which platforms to build
-if [[ -n "$PLATFORM" ]]; then
-    PLATFORMS=("$PLATFORM")
-else
-    PLATFORMS=(darwin-arm64 darwin-x64 linux-x64 linux-arm64 windows-x64 windows-arm64)
+if [[ -n "$NODE_ARCHIVE" ]]; then
+	args+=(--node-archive "$NODE_ARCHIVE")
 fi
 
-for platform in "${PLATFORMS[@]}"; do
-    echo "Building for $platform..."
-    # Bun compiled executables only embed worker scripts when they are passed as
-    # explicit build entrypoints. The runtime can still use new URL(...), but the
-    # worker must be present in the compiled executable.
-    if [[ "$platform" == windows-* ]]; then
-        bun build --compile --target=bun-$platform ./dist/bun/cli.js ./src/utils/image-resize-worker.ts --outfile "$OUTPUT_DIR/$platform/volt.exe"
-    else
-        bun build --compile --target=bun-$platform ./dist/bun/cli.js ./src/utils/image-resize-worker.ts --outfile "$OUTPUT_DIR/$platform/volt"
-    fi
-done
+echo "==> Building Node.js SEA for $PLATFORM..."
+node scripts/build-standalone.mjs "${args[@]}"
 
-echo "==> Creating release archives..."
-
-# Copy shared files to each platform directory
-for platform in "${PLATFORMS[@]}"; do
-    cp package.json "$OUTPUT_DIR/$platform/"
-    cp README.md "$OUTPUT_DIR/$platform/"
-    cp CHANGELOG.md "$OUTPUT_DIR/$platform/"
-    cp LICENSE "$OUTPUT_DIR/$platform/"
-    cp THIRD-PARTY-NOTICES.md "$OUTPUT_DIR/$platform/"
-    cp -r dist/LICENSES "$OUTPUT_DIR/$platform/"
-    cp BINARY-CAPABILITIES.md "$OUTPUT_DIR/$platform/"
-    cp npm-shrinkwrap.json "$OUTPUT_DIR/$platform/"
-    cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm "$OUTPUT_DIR/$platform/"
-    mkdir -p "$OUTPUT_DIR/$platform/theme"
-    cp dist/core/theme/*.json "$OUTPUT_DIR/$platform/theme/"
-    cp -r dist/core/export-html "$OUTPUT_DIR/$platform/"
-    cp -r docs "$OUTPUT_DIR/$platform/"
-    cp -r examples "$OUTPUT_DIR/$platform/"
-    cp examples/README.binary.md "$OUTPUT_DIR/$platform/examples/README.md"
-    rm -f "$OUTPUT_DIR/$platform/examples/README.binary.md"
-    rm -rf "$OUTPUT_DIR/$platform/examples/remote/iroh-sidecar"
-    rm -rf "$OUTPUT_DIR/$platform/examples/remote/firebase-push-relay/functions/node_modules"
-
-    # Copy terminal input native helpers next to compiled binaries.
-    if [[ "$platform" == darwin-* ]]; then
-        mkdir -p "$OUTPUT_DIR/$platform/native/darwin/prebuilds/$platform"
-        cp ../tui/native/darwin/prebuilds/$platform/darwin-modifiers.node "$OUTPUT_DIR/$platform/native/darwin/prebuilds/$platform/"
-    fi
-    if [[ "$platform" == windows-* ]]; then
-        if [[ "$platform" == "windows-arm64" ]]; then
-            win32_arch_dir="win32-arm64"
-        else
-            win32_arch_dir="win32-x64"
-        fi
-        mkdir -p "$OUTPUT_DIR/$platform/native/win32/prebuilds/$win32_arch_dir"
-        cp ../tui/native/win32/prebuilds/$win32_arch_dir/win32-console-mode.node "$OUTPUT_DIR/$platform/native/win32/prebuilds/$win32_arch_dir/"
-    fi
-done
-
-# Create archives
-cd "$OUTPUT_DIR"
-
-for platform in "${PLATFORMS[@]}"; do
-    if [[ "$platform" == windows-* ]]; then
-        echo "Creating volt-$platform.zip..."
-        python3 "$REPO_ROOT/scripts/create-release-archive.py" \
-            --input "$platform" \
-            --output "volt-$platform.zip" \
-            --format zip \
-            --epoch "$SOURCE_DATE_EPOCH"
-    else
-        echo "Creating volt-$platform.tar.gz..."
-        python3 "$REPO_ROOT/scripts/create-release-archive.py" \
-            --input "$platform" \
-            --output "volt-$platform.tar.gz" \
-            --format tar.gz \
-            --root volt \
-            --epoch "$SOURCE_DATE_EPOCH"
-    fi
-done
-
-# Extract archives for easy local testing
-echo "==> Extracting archives for testing..."
-for platform in "${PLATFORMS[@]}"; do
-    rm -rf "$platform"
-    if [[ "$platform" == windows-* ]]; then
-        mkdir -p "$platform" && (cd "$platform" && unzip -q ../volt-$platform.zip)
-    else
-        tar -xzf volt-$platform.tar.gz && mv volt "$platform"
-    fi
-done
-
-echo ""
-echo "==> Build complete!"
-echo "Archives available in $OUTPUT_DIR/"
-ls -lh *.tar.gz *.zip 2>/dev/null || true
-echo ""
-echo "Extracted directories for testing:"
-for platform in "${PLATFORMS[@]}"; do
-    if [[ "$platform" == windows-* ]]; then
-        echo "  $OUTPUT_DIR/$platform/volt.exe"
-    else
-        echo "  $OUTPUT_DIR/$platform/volt"
-    fi
-done
+echo "==> Build complete"
+echo "Archive: $OUTPUT_DIR/volt-$PLATFORM.$([[ $PLATFORM == windows-* ]] && echo zip || echo tar.gz)"
+echo "Executable: $OUTPUT_DIR/$PLATFORM/$([[ $PLATFORM == windows-* ]] && echo volt.exe || echo volt)"

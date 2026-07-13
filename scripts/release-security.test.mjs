@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { collectBinaryLicenses } from "./collect-binary-licenses.mjs";
 import {
 	assertPublishedPackageMatchesRelease,
 	NPM_PROVENANCE_PREDICATE_TYPE,
@@ -17,6 +18,13 @@ import {
 	verifyPreflightPackageMetadata,
 	verifyTagWorkflowPackageMetadata,
 } from "./verify-npm-package-bootstrap.mjs";
+import {
+	assertCandidateMatchesHead,
+	assertCandidateRunId,
+	assertCandidateWorkflowArtifact,
+	assertCandidateWorkflowRun,
+	parseReleaseInvocation,
+} from "./release-phase.mjs";
 import { assertReleaseTagAvailable, getPlannedReleaseVersion, planReleaseTarget } from "./release-target.mjs";
 import {
 	RELEASE_PACKAGE_IDENTITIES,
@@ -60,11 +68,104 @@ test("initial release can prepare the current version without changing normal re
 	);
 
 	const releaseScript = readFileSync("scripts/release.mjs", "utf8");
-	const mainFlow = releaseScript.slice(releaseScript.indexOf("// Main flow"));
-	assert.ok(mainFlow.indexOf("requireReleaseTagAvailable(plannedVersion)") < mainFlow.indexOf("bumpOrSetVersion(RELEASE_TARGET)"));
-	assert.ok(
-		mainFlow.indexOf("verify-npm-package-bootstrap.mjs preflight") < mainFlow.indexOf("bumpOrSetVersion(RELEASE_TARGET)"),
+	const prepareFlow = releaseScript.slice(releaseScript.indexOf("function prepareRelease"), releaseScript.indexOf("function finalizeRelease"));
+	assert.ok(prepareFlow.indexOf("verifyNpmVersionAvailable(plannedVersion") < prepareFlow.indexOf("bumpOrSetVersion(target)"));
+	assert.doesNotMatch(prepareFlow, /git tag/);
+});
+
+test("release finalization requires explicit sign-off for the exact prepared candidate", () => {
+	const commit = "a".repeat(40);
+	assert.deepEqual(parseReleaseInvocation(["prepare", "patch"]), { phase: "prepare", target: "patch" });
+	assert.deepEqual(parseReleaseInvocation(["prepare", "0.1.0"]), { phase: "prepare", target: "0.1.0" });
+	assert.deepEqual(parseReleaseInvocation(["finalize", commit]), { phase: "finalize", candidateCommit: commit });
+	for (const invalid of [
+		["patch"],
+		["prepare"],
+		["prepare", "patch", "extra"],
+		["finalize"],
+		["finalize", "A".repeat(40)],
+		["finalize", "a".repeat(39)],
+		["finalize", commit, "extra"],
+	]) {
+		assert.throws(() => parseReleaseInvocation(invalid), /Usage:/);
+	}
+	assert.equal(assertCandidateMatchesHead(commit, commit), commit);
+	assert.throws(() => assertCandidateMatchesHead(commit, "b".repeat(40)), /does not match current HEAD/);
+	assert.equal(assertCandidateRunId("123456789"), "123456789");
+	for (const invalidRunId of [undefined, "", "0", "01", "-1", "1.5", "abc", "1\n2"]) {
+		assert.throws(() => assertCandidateRunId(invalidRunId), /VOLT_APPROVED_CANDIDATE_RUN_ID/);
+	}
+	const workflowRun = {
+		id: 123456789,
+		repository: { full_name: "hansjm10/Volt" },
+		path: ".github/workflows/build-standalone-candidate.yml",
+		event: "workflow_dispatch",
+		head_branch: "main",
+		head_sha: commit,
+		status: "completed",
+		conclusion: "success",
+	};
+	assert.equal(assertCandidateWorkflowRun(workflowRun, { candidateCommit: commit, runId: "123456789" }), workflowRun);
+	for (const override of [
+		{ id: 987654321 },
+		{ repository: { full_name: "someone/fork" } },
+		{ path: ".github/workflows/other.yml" },
+		{ event: "push" },
+		{ head_branch: "feature" },
+		{ head_sha: "b".repeat(40) },
+		{ status: "in_progress", conclusion: null },
+		{ conclusion: "failure" },
+	]) {
+		assert.throws(
+			() => assertCandidateWorkflowRun({ ...workflowRun, ...override }, { candidateCommit: commit, runId: "123456789" }),
+			/approved|workflow run/,
+		);
+	}
+	const artifact = {
+		id: 42,
+		name: `standalone-candidate-${commit}`,
+		expired: false,
+		size_in_bytes: 1024,
+		workflow_run: { id: 123456789 },
+	};
+	assert.equal(
+		assertCandidateWorkflowArtifact({ total_count: 1, artifacts: [artifact] }, { candidateCommit: commit, runId: "123456789" }),
+		artifact,
 	);
+	for (const response of [
+		{ total_count: 0, artifacts: [] },
+		{ total_count: 1, artifacts: [{ ...artifact, expired: true }] },
+		{ total_count: 1, artifacts: [{ ...artifact, size_in_bytes: 0 }] },
+		{ total_count: 1, artifacts: [{ ...artifact, workflow_run: undefined }] },
+		{ total_count: 1, artifacts: [{ ...artifact, workflow_run: { id: 987654321 } }] },
+		{ total_count: 2, artifacts: [artifact, { ...artifact, id: 43 }] },
+	]) {
+		assert.throws(
+			() => assertCandidateWorkflowArtifact(response, { candidateCommit: commit, runId: "123456789" }),
+			/artifact|workflow run/,
+		);
+	}
+
+	const packageManifest = JSON.parse(readFileSync("package.json", "utf8"));
+	assert.equal(packageManifest.scripts["release:initial"], "node scripts/release.mjs prepare 0.1.0");
+	assert.equal(packageManifest.scripts["release:patch"], "node scripts/release.mjs prepare patch");
+	assert.equal(packageManifest.scripts["release:minor"], "node scripts/release.mjs prepare minor");
+	assert.equal(packageManifest.scripts["release:major"], "node scripts/release.mjs prepare major");
+	assert.equal(packageManifest.scripts["release:finalize"], "node scripts/release.mjs finalize");
+
+	const releaseScript = readFileSync("scripts/release.mjs", "utf8");
+	const prepareFlow = releaseScript.slice(releaseScript.indexOf("function prepareRelease"), releaseScript.indexOf("function finalizeRelease"));
+	const finalizeFlow = releaseScript.slice(releaseScript.indexOf("function finalizeRelease"), releaseScript.indexOf("console.log(`\\n=== Release"));
+	assert.doesNotMatch(prepareFlow, /git tag|git push origin \$\{tag\}/);
+	assert.match(prepareFlow, /git push origin main/);
+	assert.ok(finalizeFlow.indexOf("assertCandidateMatchesHead(candidateCommit, head)") < finalizeFlow.indexOf("git tag -a -m"));
+	assert.ok(finalizeFlow.indexOf("assertCandidateRunId(process.env.VOLT_APPROVED_CANDIDATE_RUN_ID)") < finalizeFlow.indexOf("requireCleanPublishedMain()"));
+	assert.match(finalizeFlow, /verifyReleasePackageMetadata\(tag\)/);
+	assert.ok(finalizeFlow.indexOf("verifyApprovedCandidateRun(candidateCommit, candidateRunId)") < finalizeFlow.indexOf("git tag -a -m"));
+	assert.match(finalizeFlow, /Standalone-Candidate-Commit: \$\{candidateCommit\}/);
+	assert.match(finalizeFlow, /Standalone-Candidate-Run: \$\{candidateRunId\}/);
+	assert.match(finalizeFlow, /git tag -a -m .* -m .* \$\{tag\} \$\{candidateCommit\}/s);
+	assert.ok(finalizeFlow.indexOf("git push origin ${tag}") < finalizeFlow.indexOf("addUnreleasedSection()"));
 });
 
 test("npm bootstrap verification reserves names without publishing the real initial version", () => {
@@ -303,36 +404,212 @@ test("release git provenance requires an annotated tag reachable from origin/mai
 	assert.match(releaseScript, /git tag -a -m/);
 });
 
-test("workflow binds builds to tags and never clobbers release assets", () => {
+test("standalone runtime archives and the consolidated Node license are checksum pinned", () => {
+	const runtime = JSON.parse(readFileSync("compliance/standalone-runtime.json", "utf8"));
+	assert.equal(runtime.schemaVersion, 1);
+	assert.equal(runtime.runtime, "node");
+	assert.equal(runtime.version, "22.23.1");
+	assert.equal(runtime.releaseBaseUrl, "https://nodejs.org/download/release/v22.23.1");
+	assert.equal(
+		runtime.seaDocumentation,
+		"https://nodejs.org/download/release/v22.23.1/docs/api/single-executable-applications.html",
+	);
+	assert.deepEqual(runtime.license, {
+		source: "https://raw.githubusercontent.com/nodejs/node/v22.23.1/LICENSE",
+		sha256: "c738ae413cf561f174e34f6961f8ca458aae2369a73640dda6234c629b98bcc4",
+		path: "compliance/node-v22.23.1/LICENSE",
+	});
+	assert.equal(
+		createHash("sha256").update(readFileSync(runtime.license.path)).digest("hex"),
+		runtime.license.sha256,
+	);
+
+	const expectedTargets = {
+		"darwin-arm64": {
+			runner: "macos-15",
+			archive: "node-v22.23.1-darwin-arm64.tar.gz",
+			sha256: "ef28d8fab2c0e4314522d4bb1b7173270aa3937e93b92cb7de79c112ac1fa953",
+		},
+		"darwin-x64": {
+			runner: "macos-15-intel",
+			archive: "node-v22.23.1-darwin-x64.tar.gz",
+			sha256: "b8da981b8a0b1241b70249204916da76c63573ddf5814dbd2d1e41069105cb81",
+		},
+		"linux-arm64": {
+			runner: "ubuntu-24.04-arm",
+			archive: "node-v22.23.1-linux-arm64.tar.xz",
+			sha256: "0294e8b915ab75f92c7513d2fcb830ae06e10684e6c603e99a87dbf8835389c1",
+		},
+		"linux-x64": {
+			runner: "ubuntu-24.04",
+			archive: "node-v22.23.1-linux-x64.tar.xz",
+			sha256: "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578",
+		},
+		"windows-arm64": {
+			runner: "windows-11-arm",
+			archive: "node-v22.23.1-win-arm64.zip",
+			sha256: "b470fdfe3502c05151656e06d495e3f47544f2ee8b1d9c8705090f2dd5996bd0",
+		},
+		"windows-x64": {
+			runner: "windows-2025",
+			archive: "node-v22.23.1-win-x64.zip",
+			sha256: "7df0bc9375723f4a86b3aa1b7cc73342423d9677a8df4538aca31a049e309c29",
+		},
+	};
+	assert.deepEqual(runtime.targets, expectedTargets);
+});
+
+test("binary license collection fails closed and records exact copied license bytes", () => {
+	const directory = mkdtempSync(join(tmpdir(), "volt-binary-license-test-"));
+	try {
+		const packageRoot = join(directory, "fixture", "node_modules", "fixture-license-package");
+		const input = join(packageRoot, "index.js");
+		const metafile = join(directory, "binary-metafile.json");
+		const licenses = join(directory, "LICENSES", "npm");
+		const manifestPath = join(directory, "binary-license-manifest.json");
+		mkdirSync(packageRoot, { recursive: true });
+		writeFileSync(
+			join(packageRoot, "package.json"),
+			`${JSON.stringify({ name: "fixture-license-package", version: "1.2.3", license: "MIT" })}\n`,
+		);
+		writeFileSync(input, "export const fixture = true;\n");
+		writeFileSync(metafile, `${JSON.stringify({ inputs: { [input]: { bytes: 29 } }, outputs: {} })}\n`);
+
+		assert.throws(
+			() => collectBinaryLicenses({ metafilePath: metafile, outputDirectory: licenses, manifestPath }),
+			/fixture-license-package@1\.2\.3/,
+		);
+
+		const licenseBytes = Buffer.from("fixture license bytes\n");
+		writeFileSync(join(packageRoot, "LICENSE"), licenseBytes);
+		const manifest = collectBinaryLicenses({
+			metafilePath: metafile,
+			outputDirectory: licenses,
+			manifestPath,
+		});
+		assert.equal(manifest.npmPackageCount, 1);
+		assert.equal(manifest.packages[0].name, "fixture-license-package");
+		assert.equal(manifest.packages[0].version, "1.2.3");
+		assert.equal(manifest.packages[0].declaredLicense, "MIT");
+		assert.equal(manifest.packages[0].licenseFiles.length, 1);
+		assert.equal(
+			manifest.packages[0].licenseFiles[0].sha256,
+			createHash("sha256").update(licenseBytes).digest("hex"),
+		);
+		assert.deepEqual(
+			readFileSync(join(licenses, "fixture-license-package-1.2.3", "LICENSE")),
+			licenseBytes,
+		);
+		assert.deepEqual(JSON.parse(readFileSync(manifestPath, "utf8")), manifest);
+
+		const protectedDirectory = join(directory, "protected");
+		const protectedFile = join(protectedDirectory, "keep.txt");
+		mkdirSync(protectedDirectory);
+		writeFileSync(protectedFile, "keep\n");
+		assert.throws(
+			() =>
+				collectBinaryLicenses({
+					metafilePath: metafile,
+					outputDirectory: protectedDirectory,
+					manifestPath: join(protectedDirectory, "manifest.json"),
+				}),
+			/owned LICENSES\/npm directory/,
+		);
+		assert.equal(readFileSync(protectedFile, "utf8"), "keep\n");
+
+		const protectedPackagesDirectory = join(directory, "packages");
+		const protectedPackageFile = join(protectedPackagesDirectory, "keep.txt");
+		mkdirSync(protectedPackagesDirectory);
+		writeFileSync(protectedPackageFile, "keep packages\n");
+		assert.throws(
+			() =>
+				collectBinaryLicenses({
+					metafilePath: metafile,
+					outputDirectory: protectedPackagesDirectory,
+					manifestPath,
+				}),
+			/owned LICENSES\/npm directory/,
+		);
+		assert.equal(readFileSync(protectedPackageFile, "utf8"), "keep packages\n");
+	} finally {
+		rmSync(directory, { force: true, recursive: true });
+	}
+});
+
+test("tag workflow publishes the inspected exact-commit candidate and never clobbers release assets", () => {
 	const workflow = readFileSync(".github/workflows/build-binaries.yml", "utf8");
-	const buildJob = workflow.slice(workflow.indexOf("  build:"), workflow.indexOf("  publish-npm:"));
+	const validateJob = workflow.slice(workflow.indexOf("  validate:"), workflow.indexOf("  assemble:"));
+	const assembleJob = workflow.slice(workflow.indexOf("  assemble:"), workflow.indexOf("  publish-npm:"));
 	const publishJob = workflow.slice(workflow.indexOf("  publish-npm:"), workflow.indexOf("  release:"));
 	const releaseJob = workflow.slice(workflow.indexOf("  release:"));
 	assert.doesNotMatch(workflow, /source_ref|SOURCE_REF|--clobber/);
 	assert.doesNotMatch(workflow, /^\s*cache:\s*npm\s*$/m);
-	assert.equal(workflow.match(/actions\/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd/g)?.length, 3);
-	assert.equal(workflow.match(/actions\/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e/g)?.length, 2);
-	assert.equal(workflow.match(/package-manager-cache: false/g)?.length, 2);
+	assert.doesNotMatch(workflow, /oven-sh|setup-bun|bun build/i);
+	assert.doesNotMatch(workflow, /build-standalone:|matrix\.runner|build-binaries\.sh/);
+	assert.equal(workflow.match(/actions\/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd/g)?.length, 4);
+	assert.equal(workflow.match(/actions\/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e/g)?.length, 3);
+	assert.equal(workflow.match(/node-version: '22\.23\.1'/g)?.length, 3);
+	assert.equal(workflow.match(/package-manager-cache: false/g)?.length, 3);
 	assert.match(workflow, /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/);
 	assert.match(workflow, /actions\/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3/);
 	assert.match(workflow, /ref: refs\/tags\/\$\{\{ env\.RELEASE_TAG \}\}/);
 	assert.match(workflow, /verify-release-provenance\.mjs --tag/);
 	assert.match(workflow, /verify-npm-package-bootstrap\.mjs tag --version/);
-	assert.match(buildJob, /permissions:\s+contents: read/);
-	assert.doesNotMatch(buildJob, /gh release (?:create|edit|upload)/);
-	assert.match(buildJob, /npm run check:release-security/);
-	assert.match(buildJob, /\.\/scripts\/build-binaries\.sh --skip-install/);
-	assert.ok(buildJob.indexOf("npm ci --ignore-scripts") < buildJob.indexOf("npm run check:release-security"));
-	assert.ok(buildJob.indexOf("npm run check:release-security") < buildJob.indexOf("./scripts/build-binaries.sh --skip-install"));
-	assert.match(publishJob, /needs: build/);
+	assert.match(validateJob, /permissions:\s+contents: read/);
+	assert.match(validateJob, /npm run check:release-security/);
+	assert.ok(validateJob.indexOf("npm ci --ignore-scripts") < validateJob.indexOf("npm run check:release-security"));
+	assert.match(assembleJob, /needs: validate/);
+	assert.match(assembleJob, /permissions:\s+actions: read\s+contents: read/);
+	assert.match(assembleJob, /git cat-file -t .*RELEASE_TAG/);
+	assert.match(assembleJob, /Standalone-Candidate-Commit:/);
+	assert.match(assembleJob, /Standalone-Candidate-Run:/);
+	assert.match(assembleJob, /actions\/runs\/\$\{candidate_run_id\}/);
+	assert.match(assembleJob, /\.github\/workflows\/build-standalone-candidate\.yml/);
+	for (const binding of ["head_sha", "head_branch", "event", "status", "conclusion", "workflow_path"]) {
+		assert.match(assembleJob, new RegExp(binding));
+	}
+	assert.match(assembleJob, /name: standalone-candidate-\$\{\{ steps\.candidate\.outputs\.source-commit \}\}/);
+	assert.match(assembleJob, /run-id: \$\{\{ steps\.candidate\.outputs\.run-id \}\}/);
+	assert.match(assembleJob, /github-token: \$\{\{ secrets\.GITHUB_TOKEN \}\}/);
+	assert.match(assembleJob, /Candidate artifact commit .* does not match tag commit/);
+	assert.match(assembleJob, /Unexpected standalone archive set/);
+	assert.match(assembleJob, /sha256sum --strict -c SHA256SUMS/);
+	assert.match(publishJob, /needs: assemble/);
 	assert.ok(publishJob.indexOf("node scripts/publish.mjs") < publishJob.lastIndexOf("verify-npm-package-bootstrap.mjs tag --version"));
-	assert.match(releaseJob, /needs: \[build, publish-npm\]/);
+	assert.match(releaseJob, /needs: \[assemble, publish-npm\]/);
 	assert.match(releaseJob, /environment: binary-release/);
 	assert.match(releaseJob, /permissions:\s+contents: write/);
 	assert.match(releaseJob, /source-commit\.txt/);
 	assert.match(releaseJob, /Release artifact commit .* does not match checked-out tag commit/);
 	assert.match(workflow, /Refusing to replace existing release asset with different bytes/);
 	assert.match(workflow, /cmp -s/);
+});
+
+test("pre-tag standalone candidates build the exact main commit without publishing", () => {
+	const workflow = readFileSync(".github/workflows/build-standalone-candidate.yml", "utf8");
+	assert.match(workflow, /workflow_dispatch:/);
+	assert.match(workflow, /\^\[0-9a-f\]\{40\}\$/);
+	assert.match(workflow, /git rev-parse HEAD/);
+	assert.match(workflow, /git rev-parse refs\/remotes\/origin\/main/);
+	assert.match(workflow, /test "\$\{GITHUB_SHA\}" = "\$\{CANDIDATE_COMMIT\}"/);
+	assert.match(workflow, /test "\$\{GITHUB_REF\}" = "refs\/heads\/main"/);
+	assert.match(workflow, /npm run check:release-security/);
+	assert.match(workflow, /VOLT_REQUIRE_CLEAN_SOURCE: '1'/);
+	assert.match(workflow, /runs-on: \$\{\{ matrix\.runner \}\}/);
+	assert.match(workflow, /\.\/scripts\/build-binaries\.sh --skip-install --skip-build --platform/);
+	for (const [target, runner] of [
+		["darwin-arm64", "macos-15"],
+		["darwin-x64", "macos-15-intel"],
+		["linux-arm64", "ubuntu-24.04-arm"],
+		["linux-x64", "ubuntu-24.04"],
+		["windows-arm64", "windows-11-arm"],
+		["windows-x64", "windows-2025"],
+	]) {
+		assert.match(workflow, new RegExp(`- target: ${target}\\s+runner: ${runner}`));
+	}
+	assert.match(workflow, /standalone-candidate-\$\{\{ inputs\.commit \}\}/);
+	assert.match(workflow, /LC_ALL=C sha256sum/);
+	assert.doesNotMatch(workflow, /contents: write|id-token: write|npm publish|publish\.mjs|gh release|secrets\./);
 });
 
 test("installers use the published package and verify binary checksums before exact extraction", () => {
@@ -347,10 +624,13 @@ test("installers use the published package and verify binary checksums before ex
 	}
 	assert.match(shellInstaller, /npm_spec="\$PACKAGE@beta"/);
 	assert.match(windowsInstaller, /\$npmSpec = "\$package@beta"/);
-	assert.match(shellInstaller, /tar -xzf .* volt\/volt/);
+	assert.match(shellInstaller, /tar -xzf "\$tmp\/\$asset" -C "\$tmp\/extract"/);
+	assert.match(shellInstaller, /standalone-file-manifest\.json/);
 	assert.match(shellInstaller, /release_tag="v\$\{VERSION#v\}"/);
 	assert.doesNotMatch(shellInstaller, /find .* -name volt/);
 	assert.match(windowsInstaller, /FullName -eq "volt\.exe"/);
+	assert.match(windowsInstaller, /ExtractToDirectory/);
+	assert.match(windowsInstaller, /standalone-file-manifest\.json/);
 	assert.match(windowsInstaller, /\$releaseTag = "v\$\(\$version\.TrimStart\('v'\)\)"/);
 	assert.doesNotMatch(windowsInstaller, /Expand-Archive/);
 	assert.equal(spawnSync("sh", ["-n", "site/public/install.sh"]).status, 0);
@@ -383,20 +663,69 @@ test("published packages and binary build include the repository license and not
 		assert.deepEqual(manifest.publishConfig, { access: "public", tag: "beta" });
 	}
 	const buildScript = readFileSync("scripts/build-binaries.sh", "utf8");
+	const standaloneBuild = readFileSync("scripts/build-standalone.mjs", "utf8");
 	for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.md", "BINARY-CAPABILITIES.md", "npm-shrinkwrap.json"]) {
-		assert.match(buildScript, new RegExp(`cp ${file.replaceAll(".", "\\.")}`));
+		assert.match(standaloneBuild, new RegExp(`"${file.replaceAll(".", "\\.")}"`));
 	}
 	const codingAgentManifest = JSON.parse(readFileSync("packages/coding-agent/package.json", "utf8"));
+	assert.ok(codingAgentManifest.files.includes("!docs/images/doom-extension.png"));
 	assert.ok(codingAgentManifest.files.includes("!examples/**/node_modules/**"));
-	assert.match(buildScript, /firebase-push-relay\/functions\/node_modules/);
-	assert.match(buildScript, /cp -r dist\/LICENSES/);
+	assert.ok(codingAgentManifest.files.includes("!examples/extensions/doom-overlay"));
+	assert.ok(codingAgentManifest.files.includes("!examples/extensions/doom-overlay/**"));
+	const packCache = mkdtempSync(join(tmpdir(), "volt-npm-pack-cache-"));
+	try {
+		const packResult = JSON.parse(
+			execFileSync(
+				process.platform === "win32" ? "npm.cmd" : "npm",
+				["pack", "--dry-run", "--json", "--ignore-scripts"],
+				{
+					cwd: "packages/coding-agent",
+					encoding: "utf8",
+					env: { ...process.env, npm_config_cache: packCache },
+				},
+			),
+		);
+		assert.equal(packResult.length, 1);
+		assert.equal(
+			packResult[0].files.some(
+				({ path }) =>
+					path === "docs/images/doom-extension.png" ||
+					path === "examples/extensions/doom-overlay" ||
+					path.startsWith("examples/extensions/doom-overlay/"),
+			),
+			false,
+		);
+	} finally {
+		rmSync(packCache, { force: true, recursive: true });
+	}
+	assert.match(standaloneBuild, /remote\/firebase-push-relay\/functions\/node_modules/);
+	assert.match(standaloneBuild, /extensions\/doom-overlay/);
+	assert.match(standaloneBuild, /Doom overlay must not be present in standalone release staging/);
+	assert.match(standaloneBuild, /Standalone staging contains unexpected WASM files/);
+	assert.match(standaloneBuild, /Standalone staging contains unexpected binary files/);
+	assert.match(standaloneBuild, /git.*ls-files/);
+	assert.match(standaloneBuild, /images\/doom-extension\.png/);
+	assert.match(standaloneBuild, /binary-metafile\.json/);
+	assert.match(standaloneBuild, /binary-license-manifest\.json/);
+	assert.match(standaloneBuild, /standalone-file-manifest\.json/);
+	assert.match(standaloneBuild, /sourceTreeClean/);
+	assert.match(standaloneBuild, /VOLT_REQUIRE_CLEAN_SOURCE/);
+	assert.match(standaloneBuild, /collect-binary-licenses\.mjs/);
+	assert.match(standaloneBuild, /node-v\$\{runtime\.version\}-LICENSE\.txt/);
+	assert.match(standaloneBuild, /Node runtime license checksum mismatch/);
 
 	const licenseCopies = [
-		["node_modules/@silvia-odwyer/photon-node/LICENSE.md", "packages/coding-agent/dist/LICENSES/photon-node-Apache-2.0.txt"],
 		["node_modules/clipboard-image/license", "packages/coding-agent/dist/LICENSES/clipboard-image-MIT.txt"],
 		["node_modules/run-jxa/license", "packages/coding-agent/dist/LICENSES/run-jxa-MIT.txt"],
-		["node_modules/highlight.js/LICENSE", "packages/coding-agent/dist/LICENSES/highlight.js-BSD-3-Clause.txt"],
-		["node_modules/marked/LICENSE", "packages/coding-agent/dist/LICENSES/marked-LICENSE.txt"],
+		["node_modules/highlight.js/LICENSE", "packages/coding-agent/dist/LICENSES/highlight.js-10.7.3-BSD-3-Clause.txt"],
+		[
+			"packages/coding-agent/src/core/export-html/vendor/highlight.LICENSE",
+			"packages/coding-agent/dist/LICENSES/highlight.js-11.9.0-BSD-3-Clause.txt",
+		],
+		[
+			"packages/coding-agent/src/core/export-html/vendor/marked.LICENSE",
+			"packages/coding-agent/dist/LICENSES/marked-18.0.5-LICENSE.txt",
+		],
 	];
 	execFileSync(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "copy-third-party-licenses"], {
 		cwd: "packages/coding-agent",
@@ -405,13 +734,42 @@ test("published packages and binary build include the repository license and not
 	for (const [source, copied] of licenseCopies) {
 		assert.deepEqual(readFileSync(copied), readFileSync(source));
 	}
-	assert.match(readFileSync("packages/coding-agent/THIRD-PARTY-NOTICES.md", "utf8"), /`clipboard-image` \/ `run-jxa`/);
+	assert.equal(codingAgentManifest.dependencies["@silvia-odwyer/photon-node"], undefined);
+	assert.equal(existsSync("packages/coding-agent/src/utils/photon.ts"), false);
+	assert.doesNotMatch(JSON.stringify(codingAgentManifest.scripts), /photon|photon_rs|\.wasm/i);
+	assert.doesNotMatch(JSON.stringify(codingAgentManifest.scripts), /bun build|dist\/bun/i);
+	assert.doesNotMatch(`${buildScript}\n${standaloneBuild}`, /bun build|dist\/bun/i);
+	assert.doesNotMatch(
+		`${buildScript}\n${standaloneBuild}`,
+		/@silvia-odwyer\/photon-node|photon_rs_bg\.wasm/,
+	);
+	assert.doesNotMatch(
+		readFileSync("packages/coding-agent/THIRD-PARTY-NOTICES.md", "utf8"),
+		/@silvia-odwyer|photon_rs|Photon/,
+	);
+	for (const generatedDoomArtifact of [
+		"packages/coding-agent/docs/images/doom-extension.png",
+		"packages/coding-agent/examples/extensions/doom-overlay/doom/build/doom.js",
+		"packages/coding-agent/examples/extensions/doom-overlay/doom/build/doom.wasm",
+	]) {
+		assert.equal(existsSync(generatedDoomArtifact), false, generatedDoomArtifact);
+	}
+	const doomBuild = readFileSync("packages/coding-agent/examples/extensions/doom-overlay/doom/build.sh", "utf8");
+	assert.match(doomBuild, /DOOMGENERIC_COMMIT="[0-9a-f]{40}"/);
+	assert.match(doomBuild, /git -C doomgeneric checkout --detach "\$DOOMGENERIC_COMMIT"/);
+	const doomIgnore = readFileSync("packages/coding-agent/examples/extensions/doom-overlay/.gitignore", "utf8");
+	assert.match(doomIgnore, /doom\/build\//);
+	assert.match(doomIgnore, /doom\/doomgeneric\//);
 	assert.doesNotMatch(buildScript, /@mariozechner\/clipboard|clipboard_native_package/);
 
 	const betaReadiness = readFileSync("BETA-READINESS.md", "utf8");
 	assert.match(betaReadiness, /not ready for public beta\s+distribution/i);
 	assert.match(betaReadiness, /Do not create the release tag until/i);
 	assert.match(betaReadiness, /Prove the npm daemon distribution/);
+	assert.match(betaReadiness, /Node\.js 22\.23\.1/);
+	assert.match(betaReadiness, /glibc 2\.28/);
+	assert.match(betaReadiness, /Windows beta executables are not\s+Authenticode-signed/);
+	assert.match(betaReadiness, /Resolve Doom source-archive provenance/);
 });
 
 test("release archive creation is deterministic and rejects symlinks", () => {
@@ -473,6 +831,7 @@ test("release archive creation is deterministic and rejects symlinks", () => {
 });
 
 test("binary build refuses destructive output paths before invoking the compiler", () => {
+	const platform = `${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`;
 	const result = spawnSync(
 		"bash",
 		[
@@ -480,7 +839,7 @@ test("binary build refuses destructive output paths before invoking the compiler
 			"--skip-install",
 			"--skip-build",
 			"--platform",
-			"darwin-arm64",
+			platform,
 			"--out",
 			".",
 		],
@@ -576,6 +935,22 @@ test("Unix binary installer verifies a pinned archive before installing its exac
 		mkdirSync(fakeBin);
 		mkdirSync(home);
 		writeFileSync(join(payload, "volt"), "#!/bin/sh\nprintf 'fixture volt\\n'\n", { mode: 0o755 });
+		for (const directory of ["LICENSES", "theme", "export-html"]) {
+			mkdirSync(join(payload, directory));
+		}
+		for (const file of [
+			"package.json",
+			"image-resize-worker.cjs",
+			"binary-metafile.json",
+			"binary-license-manifest.json",
+			"standalone-build-manifest.json",
+			"standalone-file-manifest.json",
+		]) {
+			writeFileSync(join(payload, file), `${file}\n`);
+		}
+		writeFileSync(join(payload, "LICENSES", "node-v22.23.1-LICENSE.txt"), "node license\n");
+		writeFileSync(join(payload, "theme", "dark.json"), "{}\n");
+		writeFileSync(join(payload, "export-html", "template.html"), "<html></html>\n");
 		const asset = "volt-linux-x64.tar.gz";
 		const archive = join(fixtures, asset);
 		execFileSync("python3", [
@@ -628,7 +1003,15 @@ printf '%s\n' "$url" >> "$VOLT_INSTALL_URL_LOG"
 		const installed = spawnSync("sh", ["site/public/install.sh"], { encoding: "utf8", env });
 		assert.equal(installed.status, 0, installed.stderr);
 		assert.equal(readFileSync(join(home, ".volt", "bin", "volt"), "utf8"), readFileSync(join(payload, "volt"), "utf8"));
-		assert.match(installed.stdout, /Installed verified standalone binary/);
+		assert.deepEqual(
+			readFileSync(join(home, ".volt", "bin", "image-resize-worker.cjs")),
+			readFileSync(join(payload, "image-resize-worker.cjs")),
+		);
+		assert.deepEqual(
+			readFileSync(join(home, ".volt", "bin", "LICENSES", "node-v22.23.1-LICENSE.txt")),
+			readFileSync(join(payload, "LICENSES", "node-v22.23.1-LICENSE.txt")),
+		);
+		assert.match(installed.stdout, /Installed verified standalone release/);
 		assert.match(readFileSync(env.VOLT_INSTALL_URL_LOG, "utf8"), /\/releases\/download\/v1\.2\.3\/volt-linux-x64\.tar\.gz/);
 
 		writeFileSync(join(fixtures, "SHA256SUMS"), `${"0".repeat(64)}  ${asset}\n`);
@@ -641,6 +1024,22 @@ printf '%s\n' "$url" >> "$VOLT_INSTALL_URL_LOG"
 		assert.notEqual(rejected.status, 0);
 		assert.match(rejected.stderr, /SHA-256 verification failed/);
 		assert.throws(() => readFileSync(join(secondHome, ".volt", "bin", "volt")));
+
+		const unsafeArchiveRoot = join(directory, "unsafe-archive");
+		mkdirSync(join(unsafeArchiveRoot, "volt"), { recursive: true });
+		symlinkSync("/tmp", join(unsafeArchiveRoot, "volt", "unsafe-link"));
+		execFileSync("tar", ["-czf", archive, "-C", unsafeArchiveRoot, "volt"]);
+		const unsafeChecksum = createHash("sha256").update(readFileSync(archive)).digest("hex");
+		writeFileSync(join(fixtures, "SHA256SUMS"), `${unsafeChecksum}  ${asset}\n`);
+		const unsafeHome = join(directory, "unsafe-home");
+		mkdirSync(unsafeHome);
+		const unsafe = spawnSync("sh", ["site/public/install.sh"], {
+			encoding: "utf8",
+			env: { ...env, HOME: unsafeHome },
+		});
+		assert.notEqual(unsafe.status, 0);
+		assert.match(unsafe.stderr, /only regular files and directories/);
+		assert.equal(existsSync(join(unsafeHome, ".volt", "bin")), false);
 	} finally {
 		rmSync(directory, { force: true, recursive: true });
 	}

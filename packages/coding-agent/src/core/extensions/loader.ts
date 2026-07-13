@@ -6,7 +6,7 @@
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import * as _bundledVoltAgentCore from "@hansjm10/volt-agent-core";
 import * as _bundledVoltAi from "@hansjm10/volt-ai";
 import * as _bundledVoltAiOauth from "@hansjm10/volt-ai/oauth";
@@ -14,12 +14,12 @@ import type { KeyId } from "@hansjm10/volt-tui";
 import * as _bundledVoltTui from "@hansjm10/volt-tui";
 import { createJiti } from "jiti/static";
 // Static imports of packages that extensions may use.
-// These MUST be static so Bun bundles them into the compiled binary.
+// These MUST be static so the standalone bundler includes them.
 // The virtualModules option then makes them available to extensions.
 import * as _bundledTypebox from "typebox";
 import * as _bundledTypeboxCompile from "typebox/compile";
 import * as _bundledTypeboxValue from "typebox/value";
-import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.ts";
+import { CONFIG_DIR_NAME, getAgentDir, isStandaloneBinary } from "../../config.ts";
 // NOTE: This import works because loader.ts exports are NOT re-exported from index.ts,
 // avoiding a circular dependency. Extensions can import from @hansjm10/volt-coding-agent.
 import * as _bundledVoltCodingAgent from "../../index.ts";
@@ -40,7 +40,7 @@ import type {
 	ToolDefinition,
 } from "./types.ts";
 
-/** Modules available to extensions via virtualModules (for compiled Bun binary) */
+/** Modules available to extensions through the standalone binary's virtual module map. */
 const VIRTUAL_MODULES: Record<string, unknown> = {
 	typebox: _bundledTypebox,
 	"typebox/compile": _bundledTypeboxCompile,
@@ -65,7 +65,8 @@ const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@mariozechner/pi-coding-agent": _bundledVoltCodingAgent,
 };
 
-const require = createRequire(import.meta.url);
+const moduleUrl: string | undefined = import.meta.url;
+const require = createRequire(moduleUrl || pathToFileURL(process.execPath).href);
 
 type ImportMetaWithResolve = ImportMeta & { resolve?: (specifier: string) => string };
 
@@ -80,14 +81,14 @@ function resolveImportSpecifier(specifier: string): string {
 
 /**
  * Get aliases for jiti (used in Node.js/development mode).
- * In Bun binary mode, virtualModules is used instead.
+ * In standalone binary mode, virtualModules is used instead.
  */
 let _aliases: Record<string, string> | null = null;
 
 function getAliases(): Record<string, string> {
 	if (_aliases) return _aliases;
 
-	const __dirname = path.dirname(fileURLToPath(import.meta.url));
+	const __dirname = moduleUrl ? path.dirname(fileURLToPath(moduleUrl)) : path.dirname(process.execPath);
 	const sourcePackageIndex = path.resolve(__dirname, "../..", "index.ts");
 	const packageIndex = fs.existsSync(sourcePackageIndex)
 		? sourcePackageIndex
@@ -372,12 +373,12 @@ function createExtensionAPI(
 }
 
 async function loadExtensionModule(extensionPath: string) {
-	const jiti = createJiti(import.meta.url, {
+	const jiti = createJiti(moduleUrl || pathToFileURL(process.execPath).href, {
 		moduleCache: false,
-		// In Bun binary: use virtualModules for bundled packages (no filesystem resolution)
+		// In a standalone binary: use virtualModules for bundled packages (no filesystem resolution)
 		// Also disable tryNative so jiti handles ALL imports (not just the entry point)
 		// In Node.js/dev: use aliases to resolve to node_modules paths
-		...(isBunBinary ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }),
+		...(isStandaloneBinary ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }),
 	});
 
 	const module = await jiti.import(extensionPath, { default: true });

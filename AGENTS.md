@@ -150,39 +150,83 @@ the authorization for the final release-assets job.
    /tmp/volt-local-release/node/volt -p "Say exactly: ok"
    /tmp/volt-local-release/node/volt
 
-   # Bun binary smoke tests
-   /tmp/volt-local-release/bun/volt --help
-   /tmp/volt-local-release/bun/volt --version
-   /tmp/volt-local-release/bun/volt --list-models
-   /tmp/volt-local-release/bun/volt -p "Say exactly: ok"
-   /tmp/volt-local-release/bun/volt
+   # Standalone Node SEA smoke tests
+   /tmp/volt-local-release/standalone/volt --help
+   /tmp/volt-local-release/standalone/volt --version
+   /tmp/volt-local-release/standalone/volt --list-models
+   /tmp/volt-local-release/standalone/volt -p "Say exactly: ok"
+   /tmp/volt-local-release/standalone/volt
    ```
-   Verify both Node and Bun startup, model/account listing, interactive startup, and at least one real prompt with the intended default provider. The bare commands `/tmp/volt-local-release/node/volt` and `/tmp/volt-local-release/bun/volt` start interactive mode; run each in tmux, submit a prompt, and wait for the model reply before considering the interactive smoke test passed. Failures are release blockers unless the user explicitly accepts the risk.
+   Verify both the npm install and standalone startup, model/account listing, interactive startup, and at least one real prompt with the intended default provider. The bare commands `/tmp/volt-local-release/node/volt` and `/tmp/volt-local-release/standalone/volt` start interactive mode; run each in tmux, submit a prompt, and wait for the model reply before considering the interactive smoke test passed. Failures are release blockers unless the user explicitly accepts the risk.
 
-3. **Run the release script**:
+3. **Prepare the exact release candidate**:
 
-   Do not run the release script until the standalone-binary compliance record
-   for this exact release is complete. With no independent environment reviewer,
-   pushing the tag allows the final release-assets job to proceed automatically.
+   Preparation creates and pushes the final release commit to `main`, but does
+   not create or push a release tag:
 
    ```bash
+   VOLT_ALLOW_LOCKFILE_CHANGE=1 npm_config_min_release_age=0 npm run release:initial  # first 0.1.0 beta only
    VOLT_ALLOW_LOCKFILE_CHANGE=1 npm_config_min_release_age=0 npm run release:patch    # fixes + additions
    VOLT_ALLOW_LOCKFILE_CHANGE=1 npm_config_min_release_age=0 npm run release:minor    # breaking changes
    ```
+   The package manifests are already at `0.1.0`, so use `release:initial` for
+   the first beta. `release:patch` would intentionally prepare `0.1.1`.
    Use `npm_config_min_release_age=0` only for the release command. The repo's normal npm age gate can otherwise block the release lockfile refresh when the current workspace package version was published recently. Review any lockfile or shrinkwrap diffs the release creates before push.
 
-   The release script first requires clean local `main` to exactly match
+   The prepare phase first requires clean local `main` to exactly match
    `origin/main`, verifies that the planned tag and npm package versions are
    still available before changing any files, then bumps all package versions,
    updates changelogs, regenerates release artifacts, runs `npm run check`,
-   commits `Release vX.Y.Z`, creates an annotated `vX.Y.Z` tag, adds fresh
-   `## [Unreleased]` changelog sections, commits `Add [Unreleased] section for
-   next cycle`, then pushes `main` and the tag. Do not rerun the release script
-   after a tag was pushed.
+   commits `Release vX.Y.Z`, and pushes that exact commit to `main`. Record the
+   full 40-character candidate commit printed by the script. Do not amend it or
+   add the next `## [Unreleased]` sections yet.
 
-4. **CI publishes npm packages before exposing binaries**: pushing the
+4. **Build, inspect, and approve the pre-tag native candidate**:
+
+   Dispatch `.github/workflows/build-standalone-candidate.yml` with the exact
+   40-character commit from step 3. For example, with GitHub CLI:
+
+   ```bash
+   candidate=$(git rev-parse HEAD)
+   gh workflow run build-standalone-candidate.yml --ref main -f commit="$candidate"
+   ```
+
+   Record the successful workflow run's positive decimal run ID. Download the
+   combined `standalone-candidate-$candidate` artifact from that exact run.
+   Verify its `source-commit.txt` is exactly `$candidate`, inspect and smoke-test all six
+   native archives, review their binary and file manifests, verify
+   `SHA256SUMS`, and record the license-compliance approval described in
+   `BETA-READINESS.md`. Confirm every other hard gate, including the recorded
+   Doom generated-artifact removal, before continuing. The candidate workflow has read-only
+   permissions and cannot publish npm packages, push a tag, or create a GitHub
+   release.
+
+   Only after approving that exact candidate, finalize it with the SHA as an
+   explicit sign-off:
+
+   ```bash
+   candidate_run=<approved-successful-workflow-run-id>
+   VOLT_APPROVED_CANDIDATE_RUN_ID="$candidate_run" npm run release:finalize -- "$candidate"
+   ```
+
+   Finalization again requires clean `main` to exactly match `origin/main`,
+   requires the supplied SHA to equal `HEAD`, requires the positive decimal run
+   ID, queries GitHub to require that exact run to be a successful
+   `workflow_dispatch` on `main` for the candidate commit with the expected
+   unexpired combined artifact, verifies the prepared release commit and
+   package metadata, and rechecks tag/npm availability. It then creates the annotated tag at the approved
+   commit with machine-readable `Standalone-Candidate-Commit` and
+   `Standalone-Candidate-Run` lines, pushes the tag, adds fresh
+   `## [Unreleased]` sections in a separate next-cycle commit, and pushes
+   `main`. With no independent environment reviewer, the explicit commit/run
+   sign-off is the release owner's authorization for the tag-triggered jobs.
+
+5. **CI publishes npm packages before exposing binaries**: pushing the
    `vX.Y.Z` tag triggers `.github/workflows/build-binaries.yml`. The
-   `publish-npm` job uses npm trusted publishing through GitHub Actions OIDC
+   workflow locates the successful candidate run for the tag's exact commit,
+   downloads and reverifies the same six reviewed archives and checksums, and
+   promotes those bytes; it does not rebuild replacement standalone archives.
+   The `publish-npm` job uses npm trusted publishing through GitHub Actions OIDC
    with environment `npm-publish`. The final GitHub release job runs only after
    npm succeeds through the tag-restricted `binary-release` environment. In the
    solo-maintainer workflow it does not pause for a reviewer, so the compliance
@@ -190,7 +234,7 @@ the authorization for the final release-assets job.
    Except for the documented one-time name-reservation placeholders, real
    releases never use local `npm publish`, a long-lived token, OTP, or WebAuthn.
 
-5. **If CI publish fails**: inspect the failed `publish-npm` job. The publish helper is idempotent and skips package versions already present on npm, so rerun the tag workflow after fixing CI or transient npm issues. Do not rerun `npm run release:patch` or `npm run release:minor` for the same version.
+6. **If CI publish fails**: inspect the failed `publish-npm` job. The publish helper is idempotent and skips package versions already present on npm, so rerun the existing tag workflow after fixing CI or transient npm issues. Do not rerun either release phase or recreate the tag for the same version.
 
 ## User Override
 

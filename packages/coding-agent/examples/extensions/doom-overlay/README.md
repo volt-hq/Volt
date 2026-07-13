@@ -4,6 +4,19 @@ Play DOOM as an overlay in volt. Demonstrates that the overlay system can handle
 
 ## Usage
 
+This source-only demo does not ship precompiled Doom code. Install Emscripten,
+then build the GPL-2.0 DoomGeneric dependency locally from the exact source
+revision pinned in `doom/build.sh`:
+
+```bash
+./examples/extensions/doom-overlay/doom/build.sh
+```
+
+The generated `doom.js`, `doom.wasm`, cloned upstream source, and downloaded
+WAD are ignored and must not be committed or included in Volt release
+artifacts. Review DoomGeneric's GPL-2.0 license before redistributing a local
+build.
+
 ```bash
 volt --extension ./examples/extensions/doom-overlay
 ```
@@ -13,7 +26,8 @@ Then run:
 /doom-overlay
 ```
 
-The shareware WAD file (~4MB) is auto-downloaded on first run.
+The shareware WAD file (~4MB) is auto-downloaded on first run and remains
+local-only.
 
 ## Controls
 

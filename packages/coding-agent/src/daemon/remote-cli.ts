@@ -747,7 +747,10 @@ async function handleWorktreeCommand(args: string[]): Promise<void> {
 }
 
 /** Router for `volt remote <command>` (daemon control clients); returns true when handled. */
-export async function handleRemoteControlCommand(args: string[], options: { isBunBinary: boolean }): Promise<boolean> {
+export async function handleRemoteControlCommand(
+	args: string[],
+	options: { isStandaloneBinary: boolean },
+): Promise<boolean> {
 	if (args[0] !== "remote") {
 		return false;
 	}
@@ -763,8 +766,8 @@ export async function handleRemoteControlCommand(args: string[], options: { isBu
 		process.exitCode = 1;
 		return true;
 	}
-	if (options.isBunBinary) {
-		console.error("Error: volt remote is not available from the Bun binary release yet.");
+	if (options.isStandaloneBinary) {
+		console.error("Error: volt remote is not available from the standalone binary release.");
 		console.error("Use a Node.js npm install or a source checkout with optional @number0/iroh dependencies.");
 		process.exitCode = 1;
 		return true;

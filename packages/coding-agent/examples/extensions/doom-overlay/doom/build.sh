@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DOOM_DIR="$PROJECT_ROOT/doom"
 BUILD_DIR="$PROJECT_ROOT/doom/build"
+DOOMGENERIC_COMMIT="dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284"
 
 echo "=== volt-doom Build Script ==="
 
@@ -24,18 +25,26 @@ if ! command -v emcc &> /dev/null; then
     exit 1
 fi
 
-# Clone doomgeneric if not present
+# Clone the exact reviewed DoomGeneric source revision if not present. Generated
+# GPL binaries stay ignored and must never be committed to a Volt release.
 if [ ! -d "$DOOM_DIR/doomgeneric" ]; then
-    echo "Cloning doomgeneric..."
+    echo "Cloning doomgeneric at $DOOMGENERIC_COMMIT..."
     cd "$DOOM_DIR"
     git clone https://github.com/ozkl/doomgeneric.git
+    git -C doomgeneric checkout --detach "$DOOMGENERIC_COMMIT"
+fi
+
+if [ "$(git -C "$DOOM_DIR/doomgeneric" rev-parse HEAD)" != "$DOOMGENERIC_COMMIT" ]; then
+    echo "Error: doomgeneric must be checked out at $DOOMGENERIC_COMMIT"
+    exit 1
+fi
+if [ -n "$(git -C "$DOOM_DIR/doomgeneric" status --porcelain)" ]; then
+    echo "Error: doomgeneric checkout has local changes; refusing a non-reproducible build"
+    exit 1
 fi
 
 # Create build directory
 mkdir -p "$BUILD_DIR"
-
-# Copy our platform file
-cp "$DOOM_DIR/doomgeneric_volt.c" "$DOOM_DIR/doomgeneric/doomgeneric/"
 
 echo "Compiling DOOM to WebAssembly..."
 cd "$DOOM_DIR/doomgeneric/doomgeneric"
@@ -73,7 +82,7 @@ emcc -O2 \
     d_net.c \
     doomdef.c \
     doomgeneric.c \
-    doomgeneric_volt.c \
+    "$DOOM_DIR/doomgeneric_volt.c" \
     doomstat.c \
     dstrings.c \
     f_finale.c \
@@ -150,3 +159,4 @@ emcc -O2 \
 echo ""
 echo "Build complete!"
 echo "Output: $BUILD_DIR/doom.js and $BUILD_DIR/doom.wasm"
+echo "These generated GPL artifacts are local-only and are ignored by the Volt repository."

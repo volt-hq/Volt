@@ -55,7 +55,7 @@ import {
 	getDebugLogPath,
 	getDocsPath,
 	getShareViewerUrl,
-	isBunBinary,
+	isStandaloneBinary,
 	VERSION,
 } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
@@ -1714,7 +1714,7 @@ export class InteractiveMode {
 	 */
 	private async initDaemonAttach(): Promise<void> {
 		const remoteBackground = this.settingsManager.getRemoteSettings().background === true;
-		if (process.platform === "win32" || isBunBinary) {
+		if (process.platform === "win32" || isStandaloneBinary) {
 			return;
 		}
 		this.daemonAttach = createDaemonAttach({

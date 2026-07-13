@@ -20,7 +20,11 @@ Example extensions demonstrating:
 
 ## Not Included
 
-The Iroh remote demo clients are available in Node.js package installs and source checkouts, but are not included in Bun binary archives because they require the optional native `@number0/iroh` adapter.
+The Iroh remote demo clients are available in Node.js package installs and source checkouts, but are not included in standalone Node SEA archives because they require the optional native `@number0/iroh` adapter.
+
+The Doom overlay example is also repository-only and is excluded from
+standalone archives because its prebuilt artifacts are outside the verified
+standalone-release license inventory.
 
 ## Documentation
 

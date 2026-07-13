@@ -38,6 +38,25 @@ This is intentional. Volt is designed to operate on local source trees, invoke p
 
 Project trust is only an input-loading guard. It prevents a repository from silently changing volt's settings, MCP servers, or extensions before you approve it. It does not make untrusted code, untrusted prompts, or untrusted model output safe. Prompt injection from repository files, comments, documentation, context files, or build output is expected local-agent risk and cannot be reliably prevented by volt.
 
+## Standalone Release Integrity
+
+Prebuilt Volt executables are Node.js 22.23.1 Single Executable Applications.
+Release builds verify a pinned official Node runtime archive, bundle Volt's
+JavaScript, and generate an exact esbuild metafile plus a checksum-linked npm
+license manifest. Each archive includes Volt's license, the consolidated Node
+license and third-party notices, and the copied license files recorded by that
+manifest. Verify the downloaded archive against the release `SHA256SUMS` before
+running it.
+
+Standalone builds intentionally exclude the native Iroh adapter and the
+source-repository Doom overlay example. The official Linux runtime requires
+glibc 2.28 or newer and does not support Alpine/musl. Windows beta executables
+are not Authenticode-signed, so Windows may show an unknown-publisher warning;
+the published SHA-256 checksum is the release authenticity check. macOS
+executables are ad-hoc signed after SEA injection, not Developer ID notarized.
+See [Standalone Binary Capabilities](../BINARY-CAPABILITIES.md) and
+[Third-Party Notices](../THIRD-PARTY-NOTICES.md).
+
 ## MCP Servers
 
 Native MCP support can spawn local stdio server commands or connect to configured HTTP/SSE endpoints. User MCP config lives in `~/.volt/agent/mcp.json` and shared `~/.config/mcp/mcp.json`; project `.mcp.json` and `.volt/mcp.json` are loaded only after project trust. Project definitions with the same server id replace, rather than inherit, user-scope definitions so project endpoints cannot reuse user auth/env config by id collision.
@@ -99,7 +118,7 @@ Unsafe remote tools are powerful. Granting `bash`, `edit`, or `write` lets the r
 
 Remote sessions do not bypass project trust. Project-local settings, extensions, skills, prompt templates, themes, system prompts, and package-managed resources follow the same project trust rules as local Volt. A saved trust decision for the workspace is honored; otherwise the daemon runs those resources untrusted. Save trust from a desktop Volt session in that workspace.
 
-The daemon requires a Node.js npm package install or source checkout with optional `@number0/iroh` available for the platform. Bun binary builds reject `volt daemon` because the native Iroh adapter is not bundled. If startup reports that the optional native adapter is unavailable, reinstall with optional dependencies enabled for the current platform.
+The daemon requires a Node.js npm package install or source checkout with optional `@number0/iroh` available for the platform. Standalone Node SEA builds reject `volt daemon` because the native Iroh adapter is intentionally not bundled. If startup reports that the optional native adapter is unavailable, reinstall with optional dependencies enabled for the current platform.
 
 Daemon exit, crash, or explicit shutdown stops in-memory work; remote access does not provide durable job recovery beyond persisted session state.
 

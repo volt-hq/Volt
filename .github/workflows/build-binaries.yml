@@ -1,4 +1,4 @@
-name: Build Binaries
+name: Publish Release
 
 on:
   push:
@@ -14,8 +14,8 @@ on:
 permissions: {}
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  validate:
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     env:
@@ -33,22 +33,17 @@ jobs:
             exit 1
           fi
 
-      - name: Checkout
+      - name: Checkout immutable release tag
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.3.10
-
       - name: Setup Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: '22'
+          node-version: '22.23.1'
           registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false
 
@@ -56,6 +51,7 @@ jobs:
         run: node scripts/verify-release-provenance.mjs --tag "${RELEASE_TAG}"
 
       - name: Verify npm package bootstrap
+        shell: bash
         run: |
           VERSION="${RELEASE_TAG#v}"
           node scripts/verify-npm-package-bootstrap.mjs tag --version "${VERSION}"
@@ -66,54 +62,150 @@ jobs:
       - name: Check release security and build guardrails
         run: npm run check:release-security
 
-      - name: Build binaries
-        run: ./scripts/build-binaries.sh --skip-install
+  assemble:
+    runs-on: ubuntu-24.04
+    needs: validate
+    permissions:
+      actions: read
+      contents: read
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout immutable release tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Extract changelog for this version
-        id: changelog
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.23.1'
+          package-manager-cache: false
+
+      - name: Resolve and verify the explicitly approved candidate run
+        id: candidate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          VERSION="${RELEASE_TAG}"
-          VERSION="${VERSION#v}"  # Remove 'v' prefix
-          node scripts/release-notes.mjs extract --version "${VERSION}" --tag "${RELEASE_TAG}" --out /tmp/release-notes.md
+          source_commit=$(git rev-parse HEAD)
+          if [[ "$(git cat-file -t "${RELEASE_TAG}")" != "tag" ]]; then
+            echo "Release tag must be annotated with the approved standalone candidate" >&2
+            exit 1
+          fi
+          tag_message=$(git for-each-ref --format='%(contents)' "refs/tags/${RELEASE_TAG}")
+          mapfile -t candidate_commits < <(printf '%s\n' "${tag_message}" | sed -n 's/^Standalone-Candidate-Commit: //p')
+          mapfile -t candidate_run_ids < <(printf '%s\n' "${tag_message}" | sed -n 's/^Standalone-Candidate-Run: //p')
+          if [[ "${#candidate_commits[@]}" != "1" ]] || [[ ! "${candidate_commits[0]}" =~ ^[0-9a-f]{40}$ ]] || \
+             [[ "${candidate_commits[0]}" != "${source_commit}" ]]; then
+            echo "Release tag candidate commit is missing, malformed, or does not match ${source_commit}" >&2
+            exit 1
+          fi
+          if [[ "${#candidate_run_ids[@]}" != "1" ]]; then
+            echo "Release tag must identify exactly one approved candidate workflow run" >&2
+            exit 1
+          fi
+          candidate_run_id=${candidate_run_ids[0]}
+          if [[ ! "${candidate_run_id}" =~ ^[0-9]+$ ]]; then
+            echo "Approved candidate workflow run ID is malformed" >&2
+            exit 1
+          fi
+          IFS=$'\t' read -r run_id head_sha head_branch event status conclusion workflow_path < <(
+            gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${candidate_run_id}" \
+              --jq '[.id, .head_sha, .head_branch, .event, .status, .conclusion, .path] | @tsv'
+          )
+          if [[ "${run_id}" != "${candidate_run_id}" ]] || [[ "${head_sha}" != "${source_commit}" ]] || \
+             [[ "${head_branch}" != "main" ]] || [[ "${event}" != "workflow_dispatch" ]] || \
+             [[ "${status}" != "completed" ]] || [[ "${conclusion}" != "success" ]] || \
+             [[ "${workflow_path}" != ".github/workflows/build-standalone-candidate.yml" ]]; then
+            echo "Approved run is not a successful exact-commit Build Standalone Candidate run on main" >&2
+            exit 1
+          fi
+          printf 'run-id=%s\n' "${candidate_run_id}" >> "${GITHUB_OUTPUT}"
+          printf 'source-commit=%s\n' "${source_commit}" >> "${GITHUB_OUTPUT}"
 
-      - name: Prepare exact release artifact set
+      - name: Download the inspected standalone candidate bytes
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: standalone-candidate-${{ steps.candidate.outputs.source-commit }}
+          path: release-artifacts
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ steps.candidate.outputs.run-id }}
+
+      - name: Reverify the inspected candidate bytes and exact release set
+        shell: bash
         run: |
-          cd packages/coding-agent/binaries
-
           release_assets=(
             volt-darwin-arm64.tar.gz
             volt-darwin-x64.tar.gz
-            volt-linux-x64.tar.gz
             volt-linux-arm64.tar.gz
-            volt-windows-x64.zip
+            volt-linux-x64.tar.gz
             volt-windows-arm64.zip
+            volt-windows-x64.zip
           )
-          LC_ALL=C sha256sum "${release_assets[@]}" > SHA256SUMS
-          cp /tmp/release-notes.md release-notes.md
-          git rev-parse HEAD > source-commit.txt
-          sha256sum -c SHA256SUMS
+          cd release-artifacts
+          source_commit=$(tr -d '\r\n' < source-commit.txt)
+          if [[ "${source_commit}" != "${{ steps.candidate.outputs.source-commit }}" ]]; then
+            echo "Candidate artifact commit ${source_commit} does not match tag commit ${{ steps.candidate.outputs.source-commit }}" >&2
+            exit 1
+          fi
+          for asset in "${release_assets[@]}"; do
+            if [[ ! -f "${asset}" ]]; then
+              echo "Missing standalone archive: ${asset}" >&2
+              exit 1
+            fi
+          done
+          if [[ "$(find . -maxdepth 1 -type f -name 'volt-*' | wc -l | tr -d ' ')" != "6" ]]; then
+            echo "Unexpected standalone archive set" >&2
+            exit 1
+          fi
+          if [[ "$(find . -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" != "8" ]] || \
+             [[ -n "$(find . -mindepth 1 -maxdepth 1 ! -type f -print -quit)" ]]; then
+            echo "Candidate artifact contains an unexpected top-level entry" >&2
+            exit 1
+          fi
+          if [[ "$(wc -l < SHA256SUMS | tr -d ' ')" != "6" ]]; then
+            echo "Candidate SHA256SUMS must contain exactly six entries" >&2
+            exit 1
+          fi
+          for asset in "${release_assets[@]}"; do
+            if [[ "$(awk -v asset="${asset}" '$2 == asset { count += 1 } END { print count + 0 }' SHA256SUMS)" != "1" ]]; then
+              echo "Candidate SHA256SUMS must contain exactly one entry for ${asset}" >&2
+              exit 1
+            fi
+          done
+          awk 'length($1) != 64 || $1 !~ /^[0-9A-Fa-f]+$/ { exit 1 }' SHA256SUMS
+          sha256sum --strict -c SHA256SUMS
 
-      - name: Upload verified release artifacts for final publication
+      - name: Extract release notes
+        shell: bash
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          node scripts/release-notes.mjs extract --version "${VERSION}" --tag "${RELEASE_TAG}" --out release-artifacts/release-notes.md
+
+      - name: Upload verified release artifacts for publication
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-${{ env.RELEASE_TAG }}
           path: |
-            packages/coding-agent/binaries/volt-darwin-arm64.tar.gz
-            packages/coding-agent/binaries/volt-darwin-x64.tar.gz
-            packages/coding-agent/binaries/volt-linux-x64.tar.gz
-            packages/coding-agent/binaries/volt-linux-arm64.tar.gz
-            packages/coding-agent/binaries/volt-windows-x64.zip
-            packages/coding-agent/binaries/volt-windows-arm64.zip
-            packages/coding-agent/binaries/SHA256SUMS
-            packages/coding-agent/binaries/release-notes.md
-            packages/coding-agent/binaries/source-commit.txt
+            release-artifacts/volt-darwin-arm64.tar.gz
+            release-artifacts/volt-darwin-x64.tar.gz
+            release-artifacts/volt-linux-arm64.tar.gz
+            release-artifacts/volt-linux-x64.tar.gz
+            release-artifacts/volt-windows-arm64.zip
+            release-artifacts/volt-windows-x64.zip
+            release-artifacts/SHA256SUMS
+            release-artifacts/release-notes.md
+            release-artifacts/source-commit.txt
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
 
   publish-npm:
-    runs-on: ubuntu-latest
-    needs: build
+    runs-on: ubuntu-24.04
+    needs: assemble
     environment: npm-publish
     permissions:
       contents: read
@@ -133,7 +225,7 @@ jobs:
             exit 1
           fi
 
-      - name: Checkout
+      - name: Checkout immutable release tag
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: refs/tags/${{ env.RELEASE_TAG }}
@@ -143,7 +235,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: '22'
+          node-version: '22.23.1'
           registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false
 
@@ -151,10 +243,11 @@ jobs:
         run: node scripts/verify-release-provenance.mjs --tag "${RELEASE_TAG}"
 
       - name: Install system dependencies
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
-          sudo ln -s $(which fdfind) /usr/local/bin/fd
+          sudo ln -s "$(which fdfind)" /usr/local/bin/fd
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
@@ -180,13 +273,14 @@ jobs:
         run: node scripts/publish.mjs
 
       - name: Verify published beta channel
+        shell: bash
         run: |
           VERSION="${RELEASE_TAG#v}"
           node scripts/verify-npm-package-bootstrap.mjs tag --version "${VERSION}"
 
   release:
-    runs-on: ubuntu-latest
-    needs: [build, publish-npm]
+    runs-on: ubuntu-24.04
+    needs: [assemble, publish-npm]
     environment: binary-release
     permissions:
       contents: write
@@ -212,7 +306,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Reverify release provenance after approval
+      - name: Reverify release provenance after npm publication
         run: node scripts/verify-release-provenance.mjs --tag "${RELEASE_TAG}"
 
       - name: Download verified release artifacts
@@ -224,16 +318,17 @@ jobs:
       - name: Create GitHub Release and upload exact binaries
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
           cd release-artifacts
 
           release_assets=(
             volt-darwin-arm64.tar.gz
             volt-darwin-x64.tar.gz
-            volt-linux-x64.tar.gz
             volt-linux-arm64.tar.gz
-            volt-windows-x64.zip
+            volt-linux-x64.tar.gz
             volt-windows-arm64.zip
+            volt-windows-x64.zip
             SHA256SUMS
           )
           sha256sum -c SHA256SUMS

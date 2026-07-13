@@ -21,3 +21,6 @@
 *.gz binary
 *.woff binary
 *.woff2 binary
+
+# Preserve the exact upstream Node.js license bytes, including its original indentation.
+compliance/node-v22.23.1/LICENSE -whitespace

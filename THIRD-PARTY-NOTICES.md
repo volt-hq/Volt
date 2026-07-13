@@ -5,43 +5,51 @@ versioned dependency inventory for the npm CLI is
 `packages/coding-agent/npm-shrinkwrap.json`; npm-installed dependencies retain
 the license files shipped in their own packages.
 
-The standalone binary archive additionally redistributes or embeds the
-following components. This list is intentionally explicit because those files
-are shipped inside one Volt archive rather than installed as separate npm
-packages.
+## Standalone binary inventory
 
-| Component | Version | License | Source |
-| --- | --- | --- | --- |
-| Bun runtime | 1.3.10 | MIT; embedded JavaScriptCore/WebKit portions are LGPL-2.0 | https://bun.sh/docs/project/license |
-| `@silvia-odwyer/photon-node` / `photon_rs_bg.wasm` | 0.3.4 | Apache-2.0 | https://github.com/silvia-odwyer/photon |
-| `clipboard-image` / `run-jxa` | 0.1.0 / 3.0.0 | MIT | https://github.com/sindresorhus/clipboard-image |
-| `highlight.js` npm module / vendored browser bundle | 10.7.3 / 11.9.0 | BSD-3-Clause | https://github.com/highlightjs/highlight.js |
-| `marked` npm module / vendored browser bundle | 18.0.5 | MIT | https://github.com/markedjs/marked |
+Standalone releases are built as Node.js Single Executable Applications
+(SEA), using the official Node.js 22.23.1 runtime archive pinned for each
+target in `compliance/standalone-runtime.json`. Every standalone archive
+includes the exact consolidated Node.js license and third-party notices as
+`LICENSES/node-v22.23.1-LICENSE.txt`. The committed source copy and SHA-256
+checksum are recorded in the runtime configuration.
 
-Exact locally available license texts for Photon, clipboard-image, run-jxa,
-Highlight.js, and Marked are included under `dist/LICENSES/` in the npm package
-and `LICENSES/` in each standalone archive. Those files are copied byte-for-byte
-from the pinned npm dependencies during the release build.
+The JavaScript bundle has a separate, build-derived inventory:
 
-The binary also embeds the JavaScript dependency closure represented by the
-shrinkwrap inventory. Its per-package SPDX identifiers and immutable registry
-integrity hashes are recorded there.
+- `binary-metafile.json` records the exact source inputs embedded by esbuild.
+- `binary-license-manifest.json` records the metafile checksum, every embedded
+  npm package identity, its declared license, the copied license files, and
+  their SHA-256 checksums.
+- `LICENSES/npm/` contains the license files referenced by that manifest.
+- `standalone-file-manifest.json` records the path, mode, size, and SHA-256
+  checksum of every other staged archive file.
 
-The native `@number0/iroh` adapter is an optional dependency of the npm
-distribution under `MIT OR Apache-2.0`. It is intentionally **not** included in
-the standalone Bun binary, which consequently cannot host `volt daemon` or
-provide remote/iOS access.
+The HTML export assets also redistribute vendored Highlight.js 11.9.0 and
+Marked 18.0.5 browser bundles under `export-html/vendor/`. Their exact licenses
+are included as `LICENSES/highlight.js-11.9.0-BSD-3-Clause.txt` and
+`LICENSES/marked-18.0.5-LICENSE.txt`. These copies track the staged browser
+assets independently of the server bundle inventory.
 
-## Bun / JavaScriptCore redistribution
+License collection fails when an embedded npm package has no authoritative
+license file. The small number of packages whose npm tarballs omit their
+repository-level license use checksum-pinned, version- or commit-specific
+authoritative copies declared in `compliance/npm-license-overrides.json`.
 
-Bun's published licensing documentation states that Bun itself is MIT and
-that it statically links JavaScriptCore/WebKit portions under LGPL-2.0. It also
-publishes the patched WebKit source and relinking instructions at:
+The standalone archive also carries Volt's MIT license and this notice. The
+optional native `@number0/iroh` adapter is intentionally not bundled, so a
+standalone executable cannot host `volt daemon` or provide remote/iOS access.
+Use the npm package or a source checkout for those features.
 
-- https://bun.sh/docs/project/license
-- https://github.com/oven-sh/webkit
-- https://github.com/oven-sh/bun
+The source-only `examples/extensions/doom-overlay` demo remains in the
+repository, but is excluded from both the published npm package and standalone
+archives. Volt does not redistribute its Doom screenshot, WAD, cloned
+DoomGeneric source, or generated GPL JavaScript/WebAssembly. The optional local
+build script pins DoomGeneric source commit
+`dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284`; its ignored outputs remain subject
+to DoomGeneric's GPL-2.0 license if a user chooses to redistribute them.
 
-This notice is not a substitute for the applicable license texts or a release
-owner's compliance review. Before public binary distribution, preserve the
-corresponding source/relinking materials required for the exact Bun release.
+This notice is not a substitute for the applicable license texts or the
+release owner's review. Before creating a public release tag, verify the
+runtime archive checksum, generated metafile and license manifest, copied
+license bytes, staged-file manifest, archive exclusions, and final release
+checksums for that exact release.

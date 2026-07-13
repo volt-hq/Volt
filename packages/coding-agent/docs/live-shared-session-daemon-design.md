@@ -126,10 +126,10 @@ phone opens conversation stream
 
 ### 3.1 Process model
 
-- **Runtime**: Node only. Reuse the existing Bun rejection: `isBunBinary` from `src/config.ts` (see main.ts L1055-1060). `volt daemon *` under Bun prints the same guidance error and exits 1. Native dependency `@number0/iroh` loads via the existing `src/remote/iroh-native-adapter.cjs` mechanism (keep this file; it is the native loader, not host logic).
+- **Runtime**: npm package or source checkout only. Use `isStandaloneBinary` from `src/config.ts` to reject the Node SEA distribution, which intentionally omits Iroh; `volt daemon *` in that distribution prints actionable npm/source guidance and exits 1. Native dependency `@number0/iroh` loads via the existing `src/remote/iroh-native-adapter.cjs` mechanism (keep this file; it is the native loader, not host logic).
 - **Entry point**: `src/daemon/main.ts` exporting `runVoltDaemon(config: VoltdConfig): Promise<number>`; a thin bin shim is invoked as `volt daemon run --foreground` (internal) so packaging needs no new binary. The daemon process title is set to `voltd`.
 - **Detached spawn** (`src/daemon/spawn.ts`): `spawn(process.execPath, [cliEntry, "daemon", "run", "--foreground"], { detached: true, stdio: ["ignore", logFd, logFd] })`, `child.unref()`. `logFd` is an append fd to `voltd.log`. The spawner waits up to 5s for the socket to accept a `status` probe before reporting success.
-- **Auto-spawn**: in TUI startup (see §6.2), if setting `remote.background === true` and platform is not Windows and not Bun, `ensureDaemonRunning()` (spawn.ts) probes the socket; if no healthy daemon, spawns one. Failures are logged at debug level and never block TUI startup.
+- **Auto-spawn**: in TUI startup (see §6.2), if setting `remote.background === true` and platform is not Windows and the process is not a standalone SEA, `ensureDaemonRunning()` (spawn.ts) probes the socket; if no healthy daemon, spawns one. Failures are logged at debug level and never block TUI startup.
 - **Single instance**: guaranteed by socket bind. On `EADDRINUSE`: connect and send `status`; if a valid `status_result` arrives within 2s, another daemon is healthy → exit 3 (`already_running`). If connect fails or times out, unlink the socket and retry the bind exactly once; if that fails, exit 4.
 - **Pidfile** `voltd.pid` is advisory (JSON: `{ pid, version, startedAtMs, socketPath }`), written after successful bind, removed on graceful shutdown. Liveness truth is always the socket probe, never the pidfile.
 
@@ -229,7 +229,7 @@ Reused as-is from `src/core/remote/iroh/`: `engine.ts`, `handshake.ts`, `handsha
 | `volt remote clients` / `volt remote revoke <id>` | via `clients_list` / `client_revoke`. |
 | `volt remote workspace add/remove/list` | via `workspace_register` / `workspace_unregister` / `status`. |
 
-All `volt remote *` and `volt daemon *` reject Bun with the existing message (main.ts L1055-1060 pattern).
+All `volt remote *` and `volt daemon *` reject the standalone SEA with actionable npm/source guidance.
 
 ### 3.7 Session target resolution (shared helper)
 
@@ -972,7 +972,7 @@ Each milestone leaves `./test.sh` green. Branch implements M1-M8 (+M10 docs) in 
 
 ### M2 — Control protocol + daemon skeleton
 **Files**: `src/daemon/control-protocol.ts`, `control-server.ts`, `control-client.ts`, `state.ts` (+migration), `spawn.ts`, `cli.ts`, `main.ts` (daemon), main.ts (CLI router: add `volt daemon *`); daemon file layout, pidfile, log rotation, single-instance, version skew, graceful shutdown skeleton (no runtimes yet).
-**Accept**: `volt daemon start/stop/status/restart/logs` work end-to-end on macOS+Linux; migration test §12.2.4 passes; Bun rejected; unit tests §12.2.2 pass; lifecycle integration §12.3.1 passes (minus runtime drain).
+**Accept**: `volt daemon start/stop/status/restart/logs` work end-to-end on macOS+Linux; migration test §12.2.4 passes; standalone SEA rejected; unit tests §12.2.2 pass; lifecycle integration §12.3.1 passes (minus runtime drain).
 
 ### M3 — Host rewrite: daemon-owned runtimes (parity port)
 **Files**: `src/daemon/integrated-runtimes.ts`, `workspace-streams.ts`; wire `IrohRemoteHostEngine` into daemon main; port pairing (`pair_request` control flow replacing `startPairControlServer`), revocation, push/live-activity (ordering invariant), audit (all existing events + `daemon_started`/`daemon_shutdown`), workflow replay, retention, `onSessionChanged` rekey plumbing (broker stub: everything `daemon-active`/`daemon-detached`), duplicate handling, UNSUPPORTED_RPC rejection. **Delete** `src/remote/iroh-host.mjs`; **delete** main.ts spawn path (L1075-1097) and `volt remote host` (replace with removal error); rewrite `volt remote pair/status/clients/revoke/workspace` as control clients.

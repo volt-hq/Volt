@@ -78,7 +78,8 @@ function Install-BinaryVolt {
     $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) "volt-install-$([Guid]::NewGuid().ToString('N'))"
     $archivePath = Join-Path $temporaryDirectory $asset
     $checksumsPath = Join-Path $temporaryDirectory "SHA256SUMS"
-    $extractedBinary = Join-Path $temporaryDirectory "volt.exe"
+    $extractedDirectory = Join-Path $temporaryDirectory "release"
+    $stagedDirectory = $null
     New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
     try {
         Write-Host "Downloading $baseUrl/$asset ..."
@@ -103,28 +104,100 @@ function Install-BinaryVolt {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $archive = [IO.Compression.ZipFile]::OpenRead($archivePath)
         try {
+            foreach ($entry in $archive.Entries) {
+                $entryName = $entry.FullName
+                $unixFileType = (($entry.ExternalAttributes -shr 16) -band 0xF000)
+                $windowsAttributes = ($entry.ExternalAttributes -band 0xFFFF)
+                if (
+                    [string]::IsNullOrWhiteSpace($entryName) -or
+                    $entryName.Contains('\') -or
+                    $entryName.StartsWith('/') -or
+                    $entryName.Contains(':') -or
+                    $entryName -match '(^|/)\.\.(/|$)' -or
+                    $entryName -match '(^|/)\.(/|$)' -or
+                    $unixFileType -eq 0xA000 -or
+                    ($windowsAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+                ) {
+                    Fail "release archive contains an unsafe path or link"
+                }
+            }
             $entries = @($archive.Entries | Where-Object { $_.FullName -eq "volt.exe" -and $_.Name -eq "volt.exe" })
             if ($entries.Count -ne 1) {
                 Fail "release archive must contain exactly one root volt.exe"
             }
-            [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $extractedBinary, $false)
         } finally {
             $archive.Dispose()
         }
+        [IO.Compression.ZipFile]::ExtractToDirectory($archivePath, $extractedDirectory)
 
-        $binDirectory = Join-Path $HOME ".volt\bin"
-        New-Item -ItemType Directory -Force -Path $binDirectory | Out-Null
-        $destination = Join-Path $binDirectory "volt.exe"
-        Move-Item -Force -LiteralPath $extractedBinary -Destination $destination
+        $requiredFiles = @(
+            "volt.exe",
+            "package.json",
+            "image-resize-worker.cjs",
+            "binary-metafile.json",
+            "binary-license-manifest.json",
+            "standalone-build-manifest.json",
+            "standalone-file-manifest.json",
+            "LICENSES\node-v22.23.1-LICENSE.txt"
+        )
+        foreach ($required in $requiredFiles) {
+            if (-not (Test-Path -LiteralPath (Join-Path $extractedDirectory $required) -PathType Leaf)) {
+                Fail "release archive is missing $required"
+            }
+        }
+        foreach ($requiredDirectory in @("theme", "export-html")) {
+            if (-not (Test-Path -LiteralPath (Join-Path $extractedDirectory $requiredDirectory) -PathType Container)) {
+                Fail "release archive is missing $requiredDirectory"
+            }
+        }
+        $reparsePoint = Get-ChildItem -Force -Recurse -LiteralPath $extractedDirectory | Where-Object {
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+        } | Select-Object -First 1
+        if ($null -ne $reparsePoint) {
+            Fail "release archive must not contain links or reparse points"
+        }
 
+        $voltHome = Join-Path $HOME ".volt"
+        $binDirectory = Join-Path $voltHome "bin"
+        $stagedDirectory = Join-Path $voltHome ".bin.install-$([Guid]::NewGuid().ToString('N'))"
+        $backupDirectory = Join-Path $voltHome ".bin.backup-$([Guid]::NewGuid().ToString('N'))"
+        New-Item -ItemType Directory -Force -Path $voltHome | Out-Null
+        if (
+            (Test-Path -LiteralPath $binDirectory) -and
+            (((Get-Item -Force -LiteralPath $binDirectory).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+        ) {
+            Fail "refusing link or reparse-point install directory: $binDirectory"
+        }
+        New-Item -ItemType Directory -Path $stagedDirectory | Out-Null
+        Get-ChildItem -Force -LiteralPath $extractedDirectory | Copy-Item -Recurse -Force -Destination $stagedDirectory
+
+        $movedExistingInstall = $false
+        try {
+            if (Test-Path -LiteralPath $binDirectory) {
+                Move-Item -LiteralPath $binDirectory -Destination $backupDirectory
+                $movedExistingInstall = $true
+            }
+            Move-Item -LiteralPath $stagedDirectory -Destination $binDirectory
+            if ($movedExistingInstall) {
+                Remove-Item -Recurse -Force -LiteralPath $backupDirectory
+            }
+        } catch {
+            if ($movedExistingInstall -and -not (Test-Path -LiteralPath $binDirectory)) {
+                Move-Item -LiteralPath $backupDirectory -Destination $binDirectory
+            }
+            throw
+        }
         Write-Host ""
-        Write-Host "Installed verified standalone binary to $destination"
+        Write-Host "Installed verified standalone release to $binDirectory"
         Write-Host "Capability: local CLI/TUI only. 'volt daemon' and remote/iOS access are unavailable."
         Write-Host "For those features, use the default npm install."
         if (($env:PATH -split ';') -notcontains $binDirectory) {
             Write-Host "Add '$binDirectory' to your PATH and restart your terminal."
         }
     } finally {
+        if ($null -ne $stagedDirectory -and (Test-Path -LiteralPath $stagedDirectory)) {
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath $stagedDirectory
+        }
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath $temporaryDirectory
     }
 }

@@ -108,9 +108,10 @@ install_binary() {
     fi
 
     umask 077
-    bin_dir="$HOME/.volt/bin"
-    mkdir -p "$bin_dir"
-    chmod 700 "$HOME/.volt" "$bin_dir" 2>/dev/null || true
+    volt_home="$HOME/.volt"
+    bin_dir="$volt_home/bin"
+    mkdir -p "$volt_home"
+    chmod 700 "$volt_home" 2>/dev/null || true
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/volt-install.XXXXXX")
     trap 'rm -rf "$tmp"' EXIT
     trap 'exit 1' HUP INT TERM
@@ -128,17 +129,55 @@ install_binary() {
     actual=$(printf '%s' "$actual" | tr 'A-F' 'a-f')
     [ "$actual" = "$expected" ] || fail "SHA-256 verification failed for $asset"
 
-    mkdir "$tmp/extract"
-    tar -xzf "$tmp/$asset" -C "$tmp/extract" volt/volt
-    volt_bin="$tmp/extract/volt/volt"
-    [ -f "$volt_bin" ] && [ ! -L "$volt_bin" ] || fail "release archive does not contain a regular volt/volt executable"
+    tar -tzf "$tmp/$asset" > "$tmp/archive-entries"
+    [ -s "$tmp/archive-entries" ] || fail "release archive is empty"
+    while IFS= read -r entry; do
+        case "$entry" in
+            volt | volt/ | volt/*) ;;
+            *) fail "release archive contains a path outside volt/" ;;
+        esac
+        case "/$entry/" in
+            */../* | */./*) fail "release archive contains a non-canonical path" ;;
+        esac
+    done < "$tmp/archive-entries"
+    tar -tvzf "$tmp/$asset" > "$tmp/archive-details"
+    if awk 'substr($1, 1, 1) != "-" && substr($1, 1, 1) != "d" { found = 1 } END { exit !found }' "$tmp/archive-details"; then
+        fail "release archive must contain only regular files and directories"
+    fi
 
-    staged="$bin_dir/.volt.install.$$"
-    install -m 755 "$volt_bin" "$staged"
-    mv -f "$staged" "$bin_dir/volt"
+    mkdir "$tmp/extract"
+    tar -xzf "$tmp/$asset" -C "$tmp/extract"
+    release_dir="$tmp/extract/volt"
+    for required in \
+        volt package.json image-resize-worker.cjs binary-metafile.json \
+        binary-license-manifest.json standalone-build-manifest.json \
+        standalone-file-manifest.json LICENSES/node-v22.23.1-LICENSE.txt; do
+        [ -f "$release_dir/$required" ] || fail "release archive is missing volt/$required"
+    done
+    [ -d "$release_dir/theme" ] || fail "release archive is missing volt/theme"
+    [ -d "$release_dir/export-html" ] || fail "release archive is missing volt/export-html"
+    [ -z "$(find "$release_dir" -type l -print -quit)" ] || fail "release archive must not contain symlinks"
+
+    staged="$volt_home/.bin.install.$$"
+    backup="$volt_home/.bin.backup.$$"
+    rm -rf "$staged" "$backup"
+    mkdir "$staged"
+    cp -R "$release_dir/." "$staged/"
+    chmod 700 "$staged" "$staged/volt" 2>/dev/null || true
+
+    if [ -e "$bin_dir" ] || [ -L "$bin_dir" ]; then
+        [ ! -L "$bin_dir" ] || fail "refusing symlink install directory: $bin_dir"
+        mv "$bin_dir" "$backup"
+    fi
+    if mv "$staged" "$bin_dir"; then
+        rm -rf "$backup"
+    else
+        [ ! -e "$backup" ] || mv "$backup" "$bin_dir"
+        fail "could not replace $bin_dir"
+    fi
 
     say ""
-    say "Installed verified standalone binary to $bin_dir/volt"
+    say "Installed verified standalone release to $bin_dir"
     say "Capability: local CLI/TUI only. 'volt daemon' and remote/iOS access are unavailable."
     say "For those features, use the default npm install:"
     say "  curl -fsSL https://volt-cli.dev/install.sh | sh"

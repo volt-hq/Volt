@@ -54,8 +54,9 @@ volt remote worktree diff <id> [--workspace <name>]
 ```
 
 `volt remote host` is gone; running it prints a pointer to `volt daemon
-start`. The daemon requires Node.js with the optional `@number0/iroh` native
-adapter (Bun binary builds cannot host it, matching the old restriction).
+start`. The daemon requires a Node.js npm install or source checkout with the
+optional `@number0/iroh` native adapter. Standalone Node SEA builds do not
+bundle that adapter and cannot host the daemon.
 
 `volt daemon install-service` writes a launchd LaunchAgent (macOS) or a
 systemd user unit (Linux) that starts the daemon at login. The service does
