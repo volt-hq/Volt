@@ -6,6 +6,7 @@ import {
 	type Model,
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { estimateMessagesTokens } from "../../src/core/compaction/index.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 type SessionWithCompactionInternals = {
@@ -163,6 +164,39 @@ describe("AgentSession compaction characterization", () => {
 		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
 		expect(compactionEntries).toHaveLength(1);
 		expect(getStreamCallCount()).toBe(1);
+	});
+
+	it("excludes a stripped trailing error message from estimatedTokensAfter when retrying", async () => {
+		const harness = await createHarness({ withConfiguredAuth: false });
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		harness.sessionManager.appendMessage({
+			...createAssistant(harness, {
+				stopReason: "error",
+				errorMessage: "prompt is too long",
+				timestamp: Date.now(),
+			}),
+			content: [{ type: "text", text: "partial output ".repeat(50) }],
+		});
+		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+		useSummaryStreamFn(harness, "overflow summary");
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+		const estimates: (number | undefined)[] = [];
+		harness.session.subscribe((event) => {
+			if (event.type === "compaction_end") {
+				estimates.push(event.result?.estimatedTokensAfter);
+			}
+		});
+
+		await expect(sessionInternals._runAutoCompaction("overflow", true)).resolves.toBe(true);
+
+		const retained = harness.session.agent.state.messages;
+		expect(
+			retained.some(
+				(message) => message.role === "assistant" && (message as AssistantMessage).stopReason === "error",
+			),
+		).toBe(false);
+		expect(estimates.at(-1)).toBe(estimateMessagesTokens(retained));
 	});
 
 	it("cancels in-progress manual compaction when abortCompaction is called", async () => {

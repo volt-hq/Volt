@@ -39,6 +39,7 @@ export {
 	collectEntriesForBranchSummary,
 	compact,
 	DEFAULT_COMPACTION_SETTINGS,
+	estimateMessagesTokens,
 	estimateTokens,
 	type FileOperations,
 	findCutPoint,

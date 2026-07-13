@@ -184,6 +184,19 @@ function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; in
 }
 
 /**
+ * Sum per-message token estimates, ignoring any usage data on the messages.
+ * Use for rebuilt contexts (e.g. after compaction), where retained assistant
+ * messages carry usage from the pre-compaction context that would be stale.
+ */
+export function estimateMessagesTokens(messages: AgentMessage[]): number {
+	let tokens = 0;
+	for (const message of messages) {
+		tokens += estimateTokens(message);
+	}
+	return tokens;
+}
+
+/**
  * Estimate context tokens from messages, using the last assistant usage when available.
  * If there are messages after the last usage, estimate their tokens with estimateTokens.
  */
@@ -191,10 +204,7 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 	const usageInfo = getLastAssistantUsageInfo(messages);
 
 	if (!usageInfo) {
-		let estimated = 0;
-		for (const message of messages) {
-			estimated += estimateTokens(message);
-		}
+		const estimated = estimateMessagesTokens(messages);
 		return {
 			tokens: estimated,
 			usageTokens: 0,

@@ -56,7 +56,7 @@ import {
 	collectEntriesForBranchSummary,
 	compact,
 	estimateContextTokens,
-	estimateTokens,
+	estimateMessagesTokens,
 	generateBranchSummary,
 	prepareCompaction,
 	shouldCompact,
@@ -297,14 +297,6 @@ interface ToolDefinitionEntry {
 interface DefaultPersistenceOptions {
 	persistDefault?: boolean;
 	preserveFastMode?: boolean;
-}
-
-function estimateMessagesTokens(messages: AgentMessage[]): number {
-	let tokens = 0;
-	for (const message of messages) {
-		tokens += estimateTokens(message);
-	}
-	return tokens;
 }
 
 // ============================================================================
@@ -2101,6 +2093,57 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
+	 * Shared epilogue for manual and auto compaction: rebuild the session
+	 * context from the new boundary, update agent state, notify extensions,
+	 * and assemble the CompactionResult.
+	 *
+	 * When `dropTrailingErrorMessage` is set (auto-compaction retry), a
+	 * trailing assistant error message is removed before the retry so it is
+	 * excluded from both the retained context and estimatedTokensAfter.
+	 */
+	private async _finalizeCompaction(
+		summary: string,
+		firstKeptEntryId: string,
+		tokensBefore: number,
+		details: unknown,
+		fromExtension: boolean,
+		dropTrailingErrorMessage = false,
+	): Promise<CompactionResult> {
+		const newEntries = this.sessionManager.getEntries();
+		const sessionContext = this.sessionManager.buildSessionContext();
+		let messages = sessionContext.messages;
+		if (dropTrailingErrorMessage) {
+			const lastMsg = messages[messages.length - 1];
+			if (lastMsg?.role === "assistant" && (lastMsg as AssistantMessage).stopReason === "error") {
+				messages = messages.slice(0, -1);
+			}
+		}
+		this.agent.state.messages = messages;
+		const estimatedTokensAfter = estimateMessagesTokens(messages);
+
+		// Get the saved compaction entry for the extension event
+		const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
+			| CompactionEntry
+			| undefined;
+
+		if (this._extensionRunner && savedCompactionEntry) {
+			await this._extensionRunner.emit({
+				type: "session_compact",
+				compactionEntry: savedCompactionEntry,
+				fromExtension,
+			});
+		}
+
+		return {
+			summary,
+			firstKeptEntryId,
+			tokensBefore,
+			estimatedTokensAfter,
+			details,
+		};
+	}
+
+	/**
 	 * Manually compact the session context.
 	 * Aborts current agent operation first.
 	 * @param customInstructions Optional instructions for the compaction summary
@@ -2194,31 +2237,13 @@ export class AgentSession {
 
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension);
 			this._proactiveCompactionAttempted = false;
-			const newEntries = this.sessionManager.getEntries();
-			const sessionContext = this.sessionManager.buildSessionContext();
-			this.agent.state.messages = sessionContext.messages;
-			const estimatedTokensAfter = estimateMessagesTokens(sessionContext.messages);
-
-			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
-
-			if (this._extensionRunner && savedCompactionEntry) {
-				await this._extensionRunner.emit({
-					type: "session_compact",
-					compactionEntry: savedCompactionEntry,
-					fromExtension,
-				});
-			}
-
-			const compactionResult: CompactionResult = {
+			const compactionResult = await this._finalizeCompaction(
 				summary,
 				firstKeptEntryId,
 				tokensBefore,
-				estimatedTokensAfter,
 				details,
-			};
+				fromExtension,
+			);
 			this._emit({
 				type: "compaction_end",
 				reason: "manual",
@@ -2541,31 +2566,14 @@ export class AgentSession {
 
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension);
 			this._proactiveCompactionAttempted = false;
-			const newEntries = this.sessionManager.getEntries();
-			const sessionContext = this.sessionManager.buildSessionContext();
-			this.agent.state.messages = sessionContext.messages;
-			const estimatedTokensAfter = estimateMessagesTokens(sessionContext.messages);
-
-			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
-
-			if (this._extensionRunner && savedCompactionEntry) {
-				await this._extensionRunner.emit({
-					type: "session_compact",
-					compactionEntry: savedCompactionEntry,
-					fromExtension,
-				});
-			}
-
-			const result: CompactionResult = {
+			const result = await this._finalizeCompaction(
 				summary,
 				firstKeptEntryId,
 				tokensBefore,
-				estimatedTokensAfter,
 				details,
-			};
+				fromExtension,
+				willRetry,
+			);
 			this._emit({
 				type: "compaction_end",
 				reason,
@@ -2574,16 +2582,7 @@ export class AgentSession {
 				willRetry: canContinue() && (willRetry || continueAfterCompaction),
 			});
 
-			if (willRetry) {
-				const messages = this.agent.state.messages;
-				const lastMsg = messages[messages.length - 1];
-				if (lastMsg?.role === "assistant" && (lastMsg as AssistantMessage).stopReason === "error") {
-					this.agent.state.messages = messages.slice(0, -1);
-				}
-				return true;
-			}
-
-			if (continueAfterCompaction) {
+			if (willRetry || continueAfterCompaction) {
 				return true;
 			}
 
