@@ -92,6 +92,7 @@ process.stdin.resume();
 	test("cleans up the child process when readiness probe times out", async () => {
 		const dir = createTempDir();
 		const childPath = join(dir, "child.mjs");
+		const readinessMarker = join(dir, "readiness-probe-seen");
 		const terminationMarker = join(dir, "terminated");
 		writeFileSync(
 			childPath,
@@ -103,14 +104,18 @@ process.on("SIGTERM", () => {
 	process.exit(0);
 });
 
+process.stdin.once("data", () => {
+	writeFileSync(${JSON.stringify(readinessMarker)}, "readiness probe seen");
+});
 process.stdin.resume();
 `,
 		);
-		const client = new RpcClient({ cliPath: childPath, requestTimeoutMs: 50 });
+		const client = new RpcClient({ cliPath: childPath, requestTimeoutMs: 1000 });
 
 		await expect(client.start()).rejects.toThrow(
 			/RPC readiness probe failed: Timeout waiting for response to get_state/,
 		);
+		expect(existsSync(readinessMarker)).toBe(true);
 		expect(existsSync(terminationMarker)).toBe(true);
 	});
 

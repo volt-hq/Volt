@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
@@ -13,6 +16,20 @@ import {
 	collectClientAuthorityInvalidationStreams,
 } from "../src/daemon/iroh-service.ts";
 import { createTestSession, parseWrittenObjects, startIrohRpcMode } from "./iroh-stream-doubles.ts";
+
+let fixtureRoot: string;
+let workspacePath: string;
+let agentDir: string;
+
+beforeAll(async () => {
+	fixtureRoot = await mkdtemp(join(tmpdir(), "volt-daemon-co-attach-"));
+	workspacePath = fixtureRoot;
+	agentDir = join(fixtureRoot, "agent");
+});
+
+afterAll(async () => {
+	await rm(fixtureRoot, { recursive: true, force: true });
+});
 
 function createFanoutSession(sessionId: string) {
 	const session = createTestSession(sessionId, null);
@@ -50,7 +67,7 @@ function createAuthorization(clientNodeId: string, allowTools = "read"): IrohRem
 		},
 		paired: false,
 		pairingSecretConsumed: false,
-		workspace: { name: "ws", path: "/tmp/ws" },
+		workspace: { name: "ws", path: workspacePath },
 		workspaceNames: ["ws"],
 		workspaces: [{ name: "ws", status: "available" }],
 	};
@@ -78,7 +95,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		const fanout = createFanoutSession("s-co");
 		const dispose = vi.fn(async () => {});
 		const runtimeHost = {
-			cwd: "/tmp/ws",
+			cwd: workspacePath,
 			session: fanout.session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -89,6 +106,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		} as unknown as AgentSessionRuntime;
 
 		const registry = new IntegratedRuntimeRegistry({
+			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
 			stateManager: new IrohRemoteHostStateManager(),
 			activeStreams: new IrohRemoteActiveStreamRegistry(),
@@ -172,13 +190,14 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 
 	it("rejects co-attach when an existing runtime exceeds the attaching client's grant", async () => {
 		const runtime = {
-			cwd: "/tmp/ws",
+			cwd: workspacePath,
 			session: createTestSession("s-policy", null),
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),
 			listSessions: vi.fn(async () => []),
 		} as unknown as AgentSessionRuntime;
 		const registry = new IntegratedRuntimeRegistry({
+			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
 			stateManager: new IrohRemoteHostStateManager(),
 			activeStreams: new IrohRemoteActiveStreamRegistry(),
@@ -219,14 +238,14 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 
 	it("does not let attachable subagent sessions overwrite the client's last top-level session", async () => {
 		const parentRuntime = {
-			cwd: "/tmp/ws",
+			cwd: workspacePath,
 			session: createTestSession("parent-session", null),
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),
 			listSessions: vi.fn(async () => []),
 		} as unknown as AgentSessionRuntime;
 		const childRuntime = {
-			cwd: "/tmp/ws",
+			cwd: workspacePath,
 			session: createTestSession("child-session", null),
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),
@@ -234,6 +253,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		} as unknown as AgentSessionRuntime;
 		const setClientLastSessionId = vi.fn(async () => undefined);
 		const registry = new IntegratedRuntimeRegistry({
+			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
 			stateManager: new IrohRemoteHostStateManager(),
 			activeStreams: new IrohRemoteActiveStreamRegistry(),
@@ -331,13 +351,14 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			await abort();
 		});
 		const runtime = {
-			cwd: "/tmp/ws",
+			cwd: workspacePath,
 			session,
 			dispose,
 			setRebindSession: vi.fn(),
 			listSessions: vi.fn(async () => []),
 		} as unknown as AgentSessionRuntime;
 		const registry = new IntegratedRuntimeRegistry({
+			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
 			stateManager: new IrohRemoteHostStateManager(),
 			activeStreams,
@@ -396,13 +417,14 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			});
 			const dispose = vi.fn(async () => {});
 			const runtimeHost = {
-				cwd: "/tmp/ws",
+				cwd: workspacePath,
 				session,
 				dispose,
 				setRebindSession: vi.fn(),
 				listSessions: vi.fn(async () => []),
 			} as unknown as AgentSessionRuntime;
 			const registry = new IntegratedRuntimeRegistry({
+				agentDir,
 				auditLogger: new IrohRemoteAuditLogger(),
 				stateManager: new IrohRemoteHostStateManager(),
 				activeStreams: new IrohRemoteActiveStreamRegistry(),
@@ -445,7 +467,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		// while leaving it running unmanaged.
 		const makeRuntimeHost = (sessionId: string, dispose: ReturnType<typeof vi.fn>) =>
 			({
-				cwd: "/tmp/ws",
+				cwd: workspacePath,
 				session: createTestSession(sessionId, null),
 				dispose,
 				setRebindSession: vi.fn(),
@@ -456,6 +478,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		let nextRuntime = makeRuntimeHost("s-stale", disposeA);
 
 		const registry = new IntegratedRuntimeRegistry({
+			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
 			stateManager: new IrohRemoteHostStateManager(),
 			activeStreams: new IrohRemoteActiveStreamRegistry(),

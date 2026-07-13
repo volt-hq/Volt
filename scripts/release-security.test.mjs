@@ -575,6 +575,10 @@ test("tag workflow publishes the inspected exact-commit candidate and never clob
 	assert.match(assembleJob, /Unexpected standalone archive set/);
 	assert.match(assembleJob, /sha256sum --strict -c SHA256SUMS/);
 	assert.match(publishJob, /needs: assemble/);
+	assert.match(publishJob, /mkdir -p \/tmp\/ws/);
+	assert.equal(publishJob.match(/npm test/g)?.length, 2);
+	assert.match(publishJob, /elif \[\[ "\$\{GITHUB_EVENT_NAME\}" == "workflow_dispatch" \]\]/);
+	assert.match(publishJob, /automatic tag releases are not retried/);
 	assert.ok(publishJob.indexOf("node scripts/publish.mjs") < publishJob.lastIndexOf("verify-npm-package-bootstrap.mjs tag --version"));
 	assert.match(releaseJob, /needs: \[assemble, publish-npm\]/);
 	assert.match(releaseJob, /environment: binary-release/);

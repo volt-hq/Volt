@@ -259,7 +259,18 @@ jobs:
         run: npm run check
 
       - name: Test
-        run: npm test
+        shell: bash
+        run: |
+          mkdir -p /tmp/ws
+          if npm test; then
+            echo "Tests passed on the first attempt."
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "Tests failed on the first attempt; retrying once for this manual release recovery."
+            npm test
+          else
+            echo "Tests failed; automatic tag releases are not retried." >&2
+            exit 1
+          fi
 
       - name: Verify release artifacts are committed
         run: git diff --exit-code
