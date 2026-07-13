@@ -71,7 +71,7 @@ completed.
   DoomGeneric source commit and warns that redistributed output is GPL-2.0.
   The npm package and custom standalone archives continue to exclude the whole
   demo as defense in depth.
-- [ ] **Prove the npm daemon distribution.** From an unpublished package
+- [x] **Prove the npm daemon distribution.** From an unpublished package
   installed outside the repository, run the full Node smoke test in
   [AGENTS.md](AGENTS.md#releasing). Then use an isolated
   `VOLT_CODING_AGENT_DIR` to start `volt daemon`, verify `volt daemon status
@@ -82,6 +82,9 @@ completed.
   local CLI/TUI only. Standalone Node SEA binaries intentionally exclude Iroh
   on every platform and must reject daemon/remote commands; see
   [Binary Capabilities](packages/coding-agent/BINARY-CAPABILITIES.md).
+
+  The release owner confirmed this gate complete on 2026-07-12 after extensive
+  daemon and physical-iPhone deployment, pairing, reconnect, and session testing.
 - [ ] **Create one auditable release source.** Run `npm run check`, complete the
   changelog review and outside-repository smoke tests, prepare the untagged
   release commit on protected `main`, and build and approve the six-platform
