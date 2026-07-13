@@ -106,6 +106,8 @@ export interface CompactionResult<T = unknown> {
 	summary: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
+	/** Estimated context tokens after rebuilding from the new compaction boundary. */
+	estimatedTokensAfter?: number;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 }
@@ -182,6 +184,19 @@ function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; in
 }
 
 /**
+ * Sum per-message token estimates, ignoring any usage data on the messages.
+ * Use for rebuilt contexts (e.g. after compaction), where retained assistant
+ * messages carry usage from the pre-compaction context that would be stale.
+ */
+export function estimateMessagesTokens(messages: AgentMessage[]): number {
+	let tokens = 0;
+	for (const message of messages) {
+		tokens += estimateTokens(message);
+	}
+	return tokens;
+}
+
+/**
  * Estimate context tokens from messages, using the last assistant usage when available.
  * If there are messages after the last usage, estimate their tokens with estimateTokens.
  */
@@ -189,10 +204,7 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 	const usageInfo = getLastAssistantUsageInfo(messages);
 
 	if (!usageInfo) {
-		let estimated = 0;
-		for (const message of messages) {
-			estimated += estimateTokens(message);
-		}
+		const estimated = estimateMessagesTokens(messages);
 		return {
 			tokens: estimated,
 			usageTokens: 0,
@@ -411,13 +423,10 @@ export function findCutPoint(
 
 		// Check if we've exceeded the budget
 		if (accumulatedTokens >= keepRecentTokens) {
-			// Find the closest valid cut point at or after this entry
-			for (let c = 0; c < cutPoints.length; c++) {
-				if (cutPoints[c] >= i) {
-					cutIndex = cutPoints[c];
-					break;
-				}
-			}
+			// Tool results are not valid cut points. If the budget lands in a trailing
+			// result batch, retain the assistant that issued it so compaction still
+			// advances while keeping the call and all of its results together.
+			cutIndex = cutPoints.find((candidate) => candidate >= i) ?? cutPoints[cutPoints.length - 1];
 			break;
 		}
 	}

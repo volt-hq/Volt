@@ -186,6 +186,33 @@ describe("harness compaction", () => {
 		expect(entries[result.firstKeptEntryIndex]?.type).toBe("message");
 	});
 
+	it("keeps a trailing tool call and its results together when they exceed the retention budget", () => {
+		const user = createMessageEntry(createUserMessage("inspect a large file"));
+		const assistant = createMessageEntry(
+			{
+				...createAssistantMessage(""),
+				content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "large.txt" } }],
+				stopReason: "toolUse",
+			},
+			user.id,
+		);
+		const toolResult = createMessageEntry(
+			{
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: "x".repeat(100) }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+			assistant.id,
+		);
+
+		const result = findCutPoint([user, assistant, toolResult], 0, 3, 10);
+
+		expect(result.firstKeptEntryIndex).toBe(1);
+	});
+
 	it("covers cut-point and turn-start edge cases", () => {
 		const thinking = createThinkingLevelEntry("high");
 		const modelChange = createModelChangeEntry("openai", "gpt-4", thinking.id);

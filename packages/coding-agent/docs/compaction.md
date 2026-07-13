@@ -42,7 +42,7 @@ You can also trigger manually with `/compact [instructions]`, where optional ins
 2. **Extract messages**: Collect messages from the previous kept boundary (or session start) up to the cut point
 3. **Generate summary**: Call LLM to summarize with structured format, passing the previous summary as iterative context when present
 4. **Append entry**: Save `CompactionEntry` with summary and `firstKeptEntryId`
-5. **Reload**: Session reloads, using summary + messages from `firstKeptEntryId` onwards
+5. **Reload**: Session reloads, using summary + messages from `firstKeptEntryId` onwards; the completion result reports a fresh token estimate for the rebuilt context
 
 ```
 Before compaction:
@@ -114,7 +114,7 @@ Valid cut points are:
 - BashExecution messages
 - Custom messages (custom_message, branch_summary)
 
-Never cut at tool results (they must stay with their tool call).
+Never cut at tool results (they must stay with their tool call). If the retention budget is reached inside a trailing tool-result batch, the cut point backs up to the assistant message that issued the batch so compaction advances without separating calls from results.
 
 ### CompactionEntry Structure
 
