@@ -71,6 +71,24 @@ function getCellItalic(terminal: VirtualTerminal, row: number, col: number): num
 	return cell.isItalic();
 }
 
+function getBufferPosition(terminal: VirtualTerminal): { baseY: number; viewportY: number } {
+	const xterm = (terminal as unknown as { xterm: XtermTerminalType }).xterm;
+	return {
+		baseY: xterm.buffer.active.baseY,
+		viewportY: xterm.buffer.active.viewportY,
+	};
+}
+
+function scrollToLine(terminal: VirtualTerminal, line: number): void {
+	const xterm = (terminal as unknown as { xterm: XtermTerminalType }).xterm;
+	xterm.scrollToLine(line);
+}
+
+function scrollToBottom(terminal: VirtualTerminal): void {
+	const xterm = (terminal as unknown as { xterm: XtermTerminalType }).xterm;
+	xterm.scrollToBottom();
+}
+
 describe("TUI Kitty image cleanup", () => {
 	it("clears reserved Kitty image rows before drawing appended image placements", async () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
@@ -378,6 +396,87 @@ describe("TUI resize handling", () => {
 		});
 	});
 
+	it("repaints skipped rows exposed by a Termux height increase", async () => {
+		await withEnv({ TERMUX_VERSION: "1" }, async () => {
+			const terminal = new LoggingVirtualTerminal(40, 5);
+			const tui = new TUI(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+
+			component.lines = Array.from({ length: 12 }, (_, i) => `Line ${i}`);
+			tui.start();
+			await terminal.waitForRender();
+			const initialRedraws = tui.fullRedraws;
+
+			component.lines[6] = "Updated line 6";
+			tui.requestRender();
+			await terminal.waitForRender();
+			assert.deepStrictEqual(terminal.getViewport(), ["Line 7", "Line 8", "Line 9", "Line 10", "Line 11"]);
+
+			component.lines[5] = "Updated line 5";
+			component.lines[11] = "Updated line 11";
+			tui.requestRender();
+			await terminal.waitForRender();
+			assert.deepStrictEqual(terminal.getViewport(), ["Line 7", "Line 8", "Line 9", "Line 10", "Updated line 11"]);
+			assert.strictEqual(tui.fullRedraws, initialRedraws, "Skipped updates should stay differential");
+
+			const redrawsBeforeResize = tui.fullRedraws;
+			terminal.clearWrites();
+			terminal.resize(40, 7);
+			await terminal.waitForRender();
+
+			assert.strictEqual(tui.fullRedraws, redrawsBeforeResize, "Height increase should stay differential");
+			assert.ok(!terminal.getWrites().includes("\x1b[2J"), "Height increase should not clear the screen");
+			assert.deepStrictEqual(terminal.getViewport(), [
+				"Updated line 5",
+				"Updated line 6",
+				"Line 7",
+				"Line 8",
+				"Line 9",
+				"Line 10",
+				"Updated line 11",
+			]);
+
+			tui.stop();
+		});
+	});
+
+	it("keeps markerless Termux content bottom-anchored before a height decrease", async () => {
+		await withEnv({ TERMUX_VERSION: "1" }, async () => {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui = new TUI(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+
+			component.lines = Array.from({ length: 20 }, (_, i) => `Line ${i}`);
+			tui.start();
+			await terminal.waitForRender();
+			const initialRedraws = tui.fullRedraws;
+
+			component.lines[0] = "Updated line 0";
+			component.lines[17] = "Updated line 17";
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			terminal.resize(40, 8);
+			await terminal.waitForRender();
+
+			assert.strictEqual(tui.fullRedraws, initialRedraws, "Height decrease should stay differential");
+			assert.deepStrictEqual(terminal.getViewport(), [
+				"Line 12",
+				"Line 13",
+				"Line 14",
+				"Line 15",
+				"Line 16",
+				"Updated line 17",
+				"Line 18",
+				"Line 19",
+			]);
+
+			tui.stop();
+		});
+	});
+
 	it("triggers full re-render when terminal width changes", async () => {
 		const terminal = new VirtualTerminal(40, 10);
 		const tui = new TUI(terminal);
@@ -561,6 +660,42 @@ describe("TUI differential rendering", () => {
 			assert.ok(viewport[1]?.includes(`Working ${frame}`), `Spinner updated: ${viewport[1]}`);
 			assert.ok(viewport[2]?.includes("Footer"), `Footer preserved: ${viewport[2]}`);
 		}
+
+		tui.stop();
+	});
+
+	it("preserves manual scroll position while stable offscreen content updates", async () => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = Array.from({ length: 12 }, (_, index) => `Line ${index}`);
+		tui.start();
+		await terminal.waitForRender();
+
+		const initialPosition = getBufferPosition(terminal);
+		assert.deepStrictEqual(initialPosition, { baseY: 7, viewportY: 7 });
+		scrollToLine(terminal, 3);
+
+		const redrawsBeforeUpdate = tui.fullRedraws;
+		component.lines = component.lines.map((line, index) => {
+			if (index === 0) return "Updated offscreen line";
+			if (index === 9) return "Updated active line";
+			return line;
+		});
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.strictEqual(tui.fullRedraws, redrawsBeforeUpdate, "Stable updates should not clear scrollback");
+		assert.deepStrictEqual(
+			getBufferPosition(terminal),
+			{ baseY: 7, viewportY: 3 },
+			"Background rendering should not move a manually scrolled viewport",
+		);
+
+		scrollToBottom(terminal);
+		assert.deepStrictEqual(terminal.getViewport(), ["Line 7", "Line 8", "Updated active line", "Line 10", "Line 11"]);
 
 		tui.stop();
 	});

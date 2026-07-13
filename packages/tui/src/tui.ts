@@ -296,7 +296,7 @@ export class Container implements Component {
  */
 export class TUI extends Container {
 	public terminal: Terminal;
-	private previousLines: string[] = [];
+	private previousLines: string[] = []; // Last content known to be painted; skipped rows remain dirty.
 	private previousKittyImageIds = new Set<number>();
 	private previousWidth = 0;
 	private previousHeight = 0;
@@ -1450,12 +1450,36 @@ export class TUI extends Container {
 			return;
 		}
 
-		// Differential rendering can only touch what was actually visible.
-		// If the first changed line is above the previous viewport, we need a full redraw.
+		// Rows above the active viewport are terminal scrollback and cannot be edited in place.
+		// For stable text-only updates, leave those historical rows alone and repaint only the
+		// active portion. Keep skipped rows at their last painted values so they remain dirty
+		// if a later resize brings them back into the active viewport.
+		let nextPreviousLines = newLines;
 		if (firstChanged < prevViewportTop) {
-			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
-			fullRender(true);
-			return;
+			let changedRangeContainsKittyImage = false;
+			for (let i = firstChanged; i <= lastChanged; i++) {
+				if (isImageLine(this.previousLines[i] ?? "") || isImageLine(newLines[i] ?? "")) {
+					changedRangeContainsKittyImage = true;
+					break;
+				}
+			}
+			if (newLines.length !== this.previousLines.length || changedRangeContainsKittyImage) {
+				logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
+				fullRender(true);
+				return;
+			}
+
+			nextPreviousLines = [...this.previousLines.slice(0, prevViewportTop), ...newLines.slice(prevViewportTop)];
+			firstChanged = prevViewportTop;
+			if (firstChanged > lastChanged) {
+				this.positionHardwareCursor(cursorPos, newLines.length);
+				this.previousLines = nextPreviousLines;
+				this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+				this.previousWidth = width;
+				this.previousHeight = height;
+				this.previousViewportTop = prevViewportTop;
+				return;
+			}
 		}
 
 		// Render from first changed line to end
@@ -1613,7 +1637,7 @@ export class TUI extends Container {
 		// Position hardware cursor for IME
 		this.positionHardwareCursor(cursorPos, newLines.length);
 
-		this.previousLines = newLines;
+		this.previousLines = nextPreviousLines;
 		this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 		this.previousWidth = width;
 		this.previousHeight = height;
@@ -1625,14 +1649,14 @@ export class TUI extends Container {
 	 * @param totalLines Total number of rendered lines
 	 */
 	private positionHardwareCursor(cursorPos: { row: number; col: number } | null, totalLines: number): void {
-		if (!cursorPos || totalLines <= 0) {
+		if (totalLines <= 0) {
 			this.terminal.hideCursor();
 			return;
 		}
 
-		// Clamp cursor position to valid range
-		const targetRow = Math.max(0, Math.min(cursorPos.row, totalLines - 1));
-		const targetCol = Math.max(0, cursorPos.col);
+		// Terminals anchor height changes at the physical cursor. Without a marker, keep
+		// the hidden cursor at content bottom to match the viewport bookkeeping invariant.
+		const targetRow = cursorPos ? Math.max(0, Math.min(cursorPos.row, totalLines - 1)) : totalLines - 1;
 
 		// Move cursor from current position to target
 		const rowDelta = targetRow - this.hardwareCursorRow;
@@ -1642,15 +1666,17 @@ export class TUI extends Container {
 		} else if (rowDelta < 0) {
 			buffer += `\x1b[${-rowDelta}A`; // Move up
 		}
-		// Move to absolute column (1-indexed)
-		buffer += `\x1b[${targetCol + 1}G`;
+		if (cursorPos) {
+			// Move to absolute column (1-indexed)
+			buffer += `\x1b[${Math.max(0, cursorPos.col) + 1}G`;
+		}
 
 		if (buffer) {
 			this.writeRenderBuffer(buffer);
 		}
 
 		this.hardwareCursorRow = targetRow;
-		if (this.showHardwareCursor) {
+		if (cursorPos && this.showHardwareCursor) {
 			this.terminal.showCursor();
 		} else {
 			this.terminal.hideCursor();
