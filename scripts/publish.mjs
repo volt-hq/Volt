@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
 	assertPublishedPackageMatchesRelease,
 	NPM_PUBLISHED_METADATA_FIELDS,
+	verifyPublishedPackageAfterPublish,
 } from "./npm-publish-verification.mjs";
 
 const packages = [
@@ -157,17 +158,12 @@ for (const pkg of packages) {
 	run("npm", ["publish", "--access", "public", "--provenance", "--ignore-scripts", "--tag", NPM_DIST_TAG], {
 		cwd: pkg.directory,
 	});
-	const published = getPublishedMetadata(pkg.name, version);
-	if (!published) {
-		throw new Error(`${pkg.name}@${version} is not visible on npm after publish`);
-	}
-	assertPublishedPackageMatchesRelease({
+	verifyPublishedPackageAfterPublish({
 		name: pkg.name,
 		version,
 		directory: pkg.directory,
 		sourceCommit,
 		packed,
-		metadata: published,
-	});
+	}, getPublishedMetadata);
 	console.log();
 }

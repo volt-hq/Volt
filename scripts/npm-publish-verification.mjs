@@ -2,6 +2,8 @@ import { BOOTSTRAP_VERSION } from "./verify-npm-package-bootstrap.mjs";
 
 export const NPM_PROVENANCE_PREDICATE_TYPE = "https://slsa.dev/provenance/v1";
 export const NPM_PUBLISHED_METADATA_FIELDS = ["name", "version", "gitHead", "repository", "dist-tags", "dist"];
+const DEFAULT_POST_PUBLISH_VERIFICATION_ATTEMPTS = 61;
+const DEFAULT_POST_PUBLISH_VERIFICATION_DELAY_MS = 5_000;
 
 export function assertPublishedPackageMatchesRelease({
 	name,
@@ -45,4 +47,30 @@ export function assertPublishedPackageMatchesRelease({
 	) {
 		throw new Error(`${name}@${version} has no valid npm provenance attestation`);
 	}
+}
+
+function sleepSync(milliseconds) {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+export function verifyPublishedPackageAfterPublish(release, getMetadata, options = {}) {
+	const attempts = options.attempts ?? DEFAULT_POST_PUBLISH_VERIFICATION_ATTEMPTS;
+	const delayMs = options.delayMs ?? DEFAULT_POST_PUBLISH_VERIFICATION_DELAY_MS;
+	const sleep = options.sleep ?? sleepSync;
+	const log = options.log ?? ((message) => process.stdout.write(`${message}\n`));
+
+	for (let attempt = 1; attempt <= attempts; attempt += 1) {
+		const metadata = getMetadata(release.name, release.version);
+		if (metadata) {
+			assertPublishedPackageMatchesRelease({ ...release, metadata });
+			return metadata;
+		}
+		if (attempt === attempts) break;
+		if (attempt === 1) {
+			log(`${release.name}@${release.version} publish accepted; waiting for npm registry metadata to become visible...`);
+		}
+		sleep(delayMs);
+	}
+
+	throw new Error(`${release.name}@${release.version} is not visible on npm after ${attempts} verification attempts`);
 }

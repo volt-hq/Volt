@@ -10,6 +10,7 @@ import {
 	assertPublishedPackageMatchesRelease,
 	NPM_PROVENANCE_PREDICATE_TYPE,
 	NPM_PUBLISHED_METADATA_FIELDS,
+	verifyPublishedPackageAfterPublish,
 } from "./npm-publish-verification.mjs";
 import {
 	BOOTSTRAP_VERSION,
@@ -306,8 +307,12 @@ test("release tooling publishes only the canonical Volt package identities under
 		{ directory: "packages/coding-agent", name: "@hansjm10/volt-coding-agent" },
 	]);
 	const publishScript = readFileSync("scripts/publish.mjs", "utf8");
+	const publishVerification = readFileSync("scripts/npm-publish-verification.mjs", "utf8");
 	assert.match(publishScript, /const NPM_DIST_TAG = "beta";/);
 	assert.match(publishScript, /"--tag", NPM_DIST_TAG/);
+	assert.ok(publishScript.indexOf('run("npm", ["publish"') < publishScript.lastIndexOf("verifyPublishedPackageAfterPublish({"));
+	assert.match(publishVerification, /DEFAULT_POST_PUBLISH_VERIFICATION_ATTEMPTS = 61/);
+	assert.match(publishVerification, /DEFAULT_POST_PUBLISH_VERIFICATION_DELAY_MS = 5_000/);
 	assert.doesNotMatch(publishScript, /@earendil-works\/volt-/);
 	assert.doesNotMatch(publishScript, /@hansjm10\/volt-cli/);
 });
@@ -369,6 +374,58 @@ test("idempotent npm publication requires exact release bytes and provenance", (
 			metadata: { ...release.metadata, gitHead: undefined },
 		}),
 	);
+
+	const visibilityQueries = [];
+	const sleeps = [];
+	const logs = [];
+	const published = verifyPublishedPackageAfterPublish(
+		release,
+		(name, version) => {
+			visibilityQueries.push(`${name}@${version}`);
+			return visibilityQueries.length === 1 ? undefined : release.metadata;
+		},
+		{
+			attempts: 2,
+			delayMs: 25,
+			sleep: (milliseconds) => sleeps.push(milliseconds),
+			log: (message) => logs.push(message),
+		},
+	);
+	assert.equal(published, release.metadata);
+	assert.deepEqual(visibilityQueries, ["@hansjm10/volt-ai@0.1.0", "@hansjm10/volt-ai@0.1.0"]);
+	assert.deepEqual(sleeps, [25]);
+	assert.equal(logs.length, 1);
+	assert.match(logs[0], /waiting for npm registry metadata/);
+
+	let missingQueries = 0;
+	assert.throws(
+		() =>
+			verifyPublishedPackageAfterPublish(
+				release,
+				() => {
+					missingQueries += 1;
+					return undefined;
+				},
+				{ attempts: 2, delayMs: 1, sleep: () => {}, log: () => {} },
+			),
+		/after 2 verification attempts/,
+	);
+	assert.equal(missingQueries, 2);
+
+	let mismatchedQueries = 0;
+	assert.throws(
+		() =>
+			verifyPublishedPackageAfterPublish(
+				release,
+				() => {
+					mismatchedQueries += 1;
+					return { ...release.metadata, dist: { ...release.metadata.dist, integrity: "sha512-other" } };
+				},
+				{ attempts: 2, delayMs: 1, sleep: () => {}, log: () => {} },
+			),
+		/does not match/,
+	);
+	assert.equal(mismatchedQueries, 1);
 });
 
 test("release git provenance requires an annotated tag reachable from origin/main", () => {
