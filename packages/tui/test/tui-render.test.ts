@@ -441,6 +441,42 @@ describe("TUI resize handling", () => {
 		});
 	});
 
+	it("keeps markerless Termux content bottom-anchored before a height decrease", async () => {
+		await withEnv({ TERMUX_VERSION: "1" }, async () => {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui = new TUI(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+
+			component.lines = Array.from({ length: 20 }, (_, i) => `Line ${i}`);
+			tui.start();
+			await terminal.waitForRender();
+			const initialRedraws = tui.fullRedraws;
+
+			component.lines[0] = "Updated line 0";
+			component.lines[17] = "Updated line 17";
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			terminal.resize(40, 8);
+			await terminal.waitForRender();
+
+			assert.strictEqual(tui.fullRedraws, initialRedraws, "Height decrease should stay differential");
+			assert.deepStrictEqual(terminal.getViewport(), [
+				"Line 12",
+				"Line 13",
+				"Line 14",
+				"Line 15",
+				"Line 16",
+				"Updated line 17",
+				"Line 18",
+				"Line 19",
+			]);
+
+			tui.stop();
+		});
+	});
+
 	it("triggers full re-render when terminal width changes", async () => {
 		const terminal = new VirtualTerminal(40, 10);
 		const tui = new TUI(terminal);

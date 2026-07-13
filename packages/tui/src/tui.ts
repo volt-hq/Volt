@@ -1649,14 +1649,14 @@ export class TUI extends Container {
 	 * @param totalLines Total number of rendered lines
 	 */
 	private positionHardwareCursor(cursorPos: { row: number; col: number } | null, totalLines: number): void {
-		if (!cursorPos || totalLines <= 0) {
+		if (totalLines <= 0) {
 			this.terminal.hideCursor();
 			return;
 		}
 
-		// Clamp cursor position to valid range
-		const targetRow = Math.max(0, Math.min(cursorPos.row, totalLines - 1));
-		const targetCol = Math.max(0, cursorPos.col);
+		// Terminals anchor height changes at the physical cursor. Without a marker, keep
+		// the hidden cursor at content bottom to match the viewport bookkeeping invariant.
+		const targetRow = cursorPos ? Math.max(0, Math.min(cursorPos.row, totalLines - 1)) : totalLines - 1;
 
 		// Move cursor from current position to target
 		const rowDelta = targetRow - this.hardwareCursorRow;
@@ -1666,15 +1666,17 @@ export class TUI extends Container {
 		} else if (rowDelta < 0) {
 			buffer += `\x1b[${-rowDelta}A`; // Move up
 		}
-		// Move to absolute column (1-indexed)
-		buffer += `\x1b[${targetCol + 1}G`;
+		if (cursorPos) {
+			// Move to absolute column (1-indexed)
+			buffer += `\x1b[${Math.max(0, cursorPos.col) + 1}G`;
+		}
 
 		if (buffer) {
 			this.writeRenderBuffer(buffer);
 		}
 
 		this.hardwareCursorRow = targetRow;
-		if (this.showHardwareCursor) {
+		if (cursorPos && this.showHardwareCursor) {
 			this.terminal.showCursor();
 		} else {
 			this.terminal.hideCursor();
