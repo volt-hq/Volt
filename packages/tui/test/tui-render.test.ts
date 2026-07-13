@@ -396,6 +396,51 @@ describe("TUI resize handling", () => {
 		});
 	});
 
+	it("repaints skipped rows exposed by a Termux height increase", async () => {
+		await withEnv({ TERMUX_VERSION: "1" }, async () => {
+			const terminal = new LoggingVirtualTerminal(40, 5);
+			const tui = new TUI(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+
+			component.lines = Array.from({ length: 12 }, (_, i) => `Line ${i}`);
+			tui.start();
+			await terminal.waitForRender();
+			const initialRedraws = tui.fullRedraws;
+
+			component.lines[6] = "Updated line 6";
+			tui.requestRender();
+			await terminal.waitForRender();
+			assert.deepStrictEqual(terminal.getViewport(), ["Line 7", "Line 8", "Line 9", "Line 10", "Line 11"]);
+
+			component.lines[5] = "Updated line 5";
+			component.lines[11] = "Updated line 11";
+			tui.requestRender();
+			await terminal.waitForRender();
+			assert.deepStrictEqual(terminal.getViewport(), ["Line 7", "Line 8", "Line 9", "Line 10", "Updated line 11"]);
+			assert.strictEqual(tui.fullRedraws, initialRedraws, "Skipped updates should stay differential");
+
+			const redrawsBeforeResize = tui.fullRedraws;
+			terminal.clearWrites();
+			terminal.resize(40, 7);
+			await terminal.waitForRender();
+
+			assert.strictEqual(tui.fullRedraws, redrawsBeforeResize, "Height increase should stay differential");
+			assert.ok(!terminal.getWrites().includes("\x1b[2J"), "Height increase should not clear the screen");
+			assert.deepStrictEqual(terminal.getViewport(), [
+				"Updated line 5",
+				"Updated line 6",
+				"Line 7",
+				"Line 8",
+				"Line 9",
+				"Line 10",
+				"Updated line 11",
+			]);
+
+			tui.stop();
+		});
+	});
+
 	it("triggers full re-render when terminal width changes", async () => {
 		const terminal = new VirtualTerminal(40, 10);
 		const tui = new TUI(terminal);

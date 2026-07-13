@@ -296,7 +296,7 @@ export class Container implements Component {
  */
 export class TUI extends Container {
 	public terminal: Terminal;
-	private previousLines: string[] = [];
+	private previousLines: string[] = []; // Last content known to be painted; skipped rows remain dirty.
 	private previousKittyImageIds = new Set<number>();
 	private previousWidth = 0;
 	private previousHeight = 0;
@@ -1452,8 +1452,9 @@ export class TUI extends Container {
 
 		// Rows above the active viewport are terminal scrollback and cannot be edited in place.
 		// For stable text-only updates, leave those historical rows alone and repaint only the
-		// active portion. This keeps live status updates from repeatedly clearing scrollback
-		// while the user is reading it; a later full redraw reconciles the stale history.
+		// active portion. Keep skipped rows at their last painted values so they remain dirty
+		// if a later resize brings them back into the active viewport.
+		let nextPreviousLines = newLines;
 		if (firstChanged < prevViewportTop) {
 			let changedRangeContainsKittyImage = false;
 			for (let i = firstChanged; i <= lastChanged; i++) {
@@ -1468,10 +1469,11 @@ export class TUI extends Container {
 				return;
 			}
 
+			nextPreviousLines = [...this.previousLines.slice(0, prevViewportTop), ...newLines.slice(prevViewportTop)];
 			firstChanged = prevViewportTop;
 			if (firstChanged > lastChanged) {
 				this.positionHardwareCursor(cursorPos, newLines.length);
-				this.previousLines = newLines;
+				this.previousLines = nextPreviousLines;
 				this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 				this.previousWidth = width;
 				this.previousHeight = height;
@@ -1635,7 +1637,7 @@ export class TUI extends Container {
 		// Position hardware cursor for IME
 		this.positionHardwareCursor(cursorPos, newLines.length);
 
-		this.previousLines = newLines;
+		this.previousLines = nextPreviousLines;
 		this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 		this.previousWidth = width;
 		this.previousHeight = height;
