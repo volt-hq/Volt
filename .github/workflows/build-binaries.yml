@@ -296,7 +296,31 @@ jobs:
           npm --version
 
       - name: Publish npm packages
-        run: node scripts/publish.mjs
+        shell: bash
+        run: |
+          registry_recovery_commit=''
+          registry_recovery_files=()
+          restore_registry_recovery() {
+            if [[ "${#registry_recovery_files[@]}" -gt 0 ]]; then
+              git restore --source=HEAD --worktree -- "${registry_recovery_files[@]}"
+            fi
+          }
+          trap restore_registry_recovery EXIT
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${RELEASE_TAG}" == "v0.1.0" ]]; then
+            registry_recovery_commit='751a07f8d06d5d95b037eaeb494eca98ddbbeecc'
+            registry_recovery_files=(
+              scripts/npm-publish-verification.mjs
+              scripts/publish.mjs
+            )
+            git cat-file -e "${registry_recovery_commit}^{commit}"
+            for registry_recovery_file in "${registry_recovery_files[@]}"; do
+              git show "${registry_recovery_commit}:${registry_recovery_file}" > "${registry_recovery_file}"
+            done
+          fi
+          node scripts/publish.mjs
+          restore_registry_recovery
+          trap - EXIT
+          git diff --exit-code HEAD
 
       - name: Verify published beta channel
         shell: bash

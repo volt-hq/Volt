@@ -650,6 +650,27 @@ test("tag workflow publishes the inspected exact-commit candidate and never clob
 	assert.ok(publishJob.indexOf("trap restore_recovery_fixture EXIT") < publishJob.indexOf('git show "${recovery_commit}'));
 	assert.ok(publishJob.indexOf("restore_recovery_fixture\n") < publishJob.indexOf("git diff --exit-code HEAD"));
 	assert.doesNotMatch(publishJob, /git (?:checkout|switch) .*7c6cd97f/);
+	assert.match(publishJob, /registry_recovery_commit='751a07f8d06d5d95b037eaeb494eca98ddbbeecc'/);
+	assert.match(
+		publishJob,
+		/registry_recovery_files=\(\s+scripts\/npm-publish-verification\.mjs\s+scripts\/publish\.mjs\s+\)/,
+	);
+	assert.match(
+		publishJob,
+		/if \[\[ "\$\{GITHUB_EVENT_NAME\}" == "workflow_dispatch" && "\$\{RELEASE_TAG\}" == "v0\.1\.0" \]\]/,
+	);
+	assert.match(
+		publishJob,
+		/git show "\$\{registry_recovery_commit\}:\$\{registry_recovery_file\}" > "\$\{registry_recovery_file\}"/,
+	);
+	assert.match(publishJob, /trap restore_registry_recovery EXIT/);
+	assert.match(publishJob, /git restore --source=HEAD --worktree -- "\$\{registry_recovery_files\[@\]\}"/);
+	assert.ok(
+		publishJob.indexOf("trap restore_registry_recovery EXIT") < publishJob.indexOf('git show "${registry_recovery_commit}'),
+	);
+	assert.ok(publishJob.indexOf("node scripts/publish.mjs") < publishJob.lastIndexOf("restore_registry_recovery\n"));
+	assert.ok(publishJob.lastIndexOf("restore_registry_recovery\n") < publishJob.lastIndexOf("git diff --exit-code HEAD"));
+	assert.doesNotMatch(publishJob, /git (?:checkout|switch) .*751a07f8/);
 	assert.ok(publishJob.indexOf("node scripts/publish.mjs") < publishJob.lastIndexOf("verify-npm-package-bootstrap.mjs tag --version"));
 	assert.match(releaseJob, /needs: \[assemble, publish-npm\]/);
 	assert.match(releaseJob, /environment: binary-release/);
