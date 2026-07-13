@@ -79,6 +79,7 @@ function run(command, args, options = {}) {
 	const result = spawnSync(command, args, {
 		cwd: options.cwd ?? repoRoot,
 		encoding: "utf8",
+		env: options.env ? { ...process.env, ...options.env } : process.env,
 		stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
 	});
 	if (result.error) throw result.error;
@@ -451,11 +452,26 @@ async function extractNodeRuntime(runtime, targetConfig, nodeArchiveOption, temp
 
 	const extractionDirectory = join(temporaryDirectory, "node-runtime");
 	mkdirSync(extractionDirectory, { recursive: true, mode: 0o755 });
-	const tarArguments = ["-xf", archivePath, "-C", extractionDirectory];
-	// Git for Windows puts GNU tar on PATH. Without --force-local it treats the
-	// drive-letter colon in C:\\... as the separator for a remote tape host.
-	if (process.platform === "win32") tarArguments.unshift("--force-local");
-	run("tar", tarArguments);
+	if (process.platform === "win32") {
+		run(
+			"powershell.exe",
+			[
+				"-NoLogo",
+				"-NoProfile",
+				"-NonInteractive",
+				"-Command",
+				"Expand-Archive -LiteralPath $env:VOLT_NODE_ARCHIVE -DestinationPath $env:VOLT_NODE_RUNTIME -Force",
+			],
+			{
+				env: {
+					VOLT_NODE_ARCHIVE: archivePath,
+					VOLT_NODE_RUNTIME: extractionDirectory,
+				},
+			},
+		);
+	} else {
+		run("tar", ["-xf", archivePath, "-C", extractionDirectory]);
+	}
 	const archiveRoot = targetConfig.archive.replace(/\.(?:tar\.gz|tar\.xz|zip)$/, "");
 	const executable = targetConfig.archive.includes("-win-")
 		? join(extractionDirectory, archiveRoot, "node.exe")

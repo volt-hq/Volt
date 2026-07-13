@@ -710,7 +710,8 @@ test("published packages and binary build include the repository license and not
 	assert.match(standaloneBuild, /standalone-file-manifest\.json/);
 	assert.match(standaloneBuild, /sourceTreeClean/);
 	assert.match(standaloneBuild, /VOLT_REQUIRE_CLEAN_SOURCE/);
-	assert.match(standaloneBuild, /process\.platform === "win32".*tarArguments\.unshift\("--force-local"\)/s);
+	assert.match(standaloneBuild, /process\.platform === "win32".*powershell\.exe.*Expand-Archive/s);
+	assert.match(standaloneBuild, /VOLT_NODE_ARCHIVE.*VOLT_NODE_RUNTIME/s);
 	assert.match(standaloneBuild, /collect-binary-licenses\.mjs/);
 	assert.match(standaloneBuild, /node-v\$\{runtime\.version\}-LICENSE\.txt/);
 	assert.match(standaloneBuild, /Node runtime license checksum mismatch/);
