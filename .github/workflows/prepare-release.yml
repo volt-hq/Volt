@@ -1,0 +1,184 @@
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Release increment: patch for fixes/additions, minor for breaking changes'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+
+permissions: {}
+
+concurrency:
+  group: release-preparation
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      RELEASE_TARGET: ${{ inputs.target }}
+    steps:
+      - name: Require an owner-triggered run on main
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          RUN_ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        shell: bash
+        run: |
+          if [[ "${RUN_ACTOR}" != "${REPOSITORY_OWNER}" ]] || [[ "${TRIGGERING_ACTOR}" != "${REPOSITORY_OWNER}" ]]; then
+            echo "Only the repository owner may prepare a release" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "Prepare Release must be dispatched from main, not ${GITHUB_REF}" >&2
+            exit 1
+          fi
+          if [[ "${RELEASE_TARGET}" != "patch" && "${RELEASE_TARGET}" != "minor" ]]; then
+            echo "Release target must be patch or minor" >&2
+            exit 1
+          fi
+
+      - name: Checkout the exact main commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.23.1'
+          package-manager-cache: false
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
+          sudo ln -sf "$(which fdfind)" /usr/local/bin/fd
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Prepare the release commit without pushing
+        env:
+          VOLT_ALLOW_LOCKFILE_CHANGE: '1'
+          npm_config_min_release_age: '0'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          node scripts/release.mjs prepare-pr "${RELEASE_TARGET}"
+
+      - name: Record prepared release metadata
+        id: release
+        shell: bash
+        run: |
+          version=$(node -p 'require("./packages/ai/package.json").version')
+          if [[ ! "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Prepared version is not canonical semver: ${version}" >&2
+            exit 1
+          fi
+          candidate_commit=$(git rev-parse HEAD)
+          if [[ ! "${candidate_commit}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Prepared commit is not an exact lowercase SHA" >&2
+            exit 1
+          fi
+          if [[ "$(git log -1 --format=%s)" != "Release v${version}" ]]; then
+            echo "Prepared commit subject does not match v${version}" >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
+          printf 'tag=v%s\n' "${version}" >> "${GITHUB_OUTPUT}"
+          printf 'commit=%s\n' "${candidate_commit}" >> "${GITHUB_OUTPUT}"
+
+      - name: Push a release branch and open a pull request
+        id: pull-request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          gh auth setup-git
+
+          existing_release_prs=$(
+            gh pr list --state open --base main --json headRefName,title,url |
+              jq --arg title "Release ${RELEASE_TAG}" --arg prefix "release/${RELEASE_TAG}-" \
+                '[.[] | select(.title == $title and (.headRefName | startswith($prefix)))]'
+          )
+          if [[ "$(jq 'length' <<<"${existing_release_prs}")" == "1" ]]; then
+            branch=$(jq -r '.[0].headRefName' <<<"${existing_release_prs}")
+          elif [[ "$(jq 'length' <<<"${existing_release_prs}")" == "0" ]]; then
+            branch="release/${RELEASE_TAG}-${GITHUB_RUN_ID}"
+          else
+            echo "More than one open release pull request exists for ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+
+          remote_ref="refs/remotes/origin/${branch}"
+          if gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" > /dev/null 2>&1; then
+            git fetch origin "refs/heads/${branch}:${remote_ref}"
+            if [[ "$(git rev-parse HEAD^{tree})" != "$(git rev-parse "${remote_ref}^{tree}")" ]] || \
+               [[ "$(git rev-parse "${remote_ref}^")" != "$(git rev-parse refs/remotes/origin/main)" ]]; then
+              echo "Existing release branch does not contain this run's exact prepared tree and parent" >&2
+              exit 1
+            fi
+            branch_commit=$(git rev-parse "${remote_ref}")
+          else
+            git push origin "HEAD:refs/heads/${branch}"
+            branch_commit=$(git rev-parse HEAD)
+          fi
+
+          body_file=$(mktemp)
+          printf '%s\n\n' "Prepares ${RELEASE_TAG} for an exact-main standalone candidate build." > "${body_file}"
+          printf '%s\n' "Review all changelogs, package metadata, lockfiles, shrinkwrap, and generated release artifacts before merging." >> "${body_file}"
+          printf '%s\n' "After merge, use the resulting main SHA—not the release-branch SHA—as the candidate commit." >> "${body_file}"
+          printf '%s\n' "Prepared by GitHub Actions run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}." >> "${body_file}"
+
+          pull_requests=$(gh pr list --state all --head "${branch}" --json url,mergedAt,state)
+          if [[ "$(jq 'length' <<<"${pull_requests}")" == "0" ]]; then
+            pr_url=$(gh pr create \
+              --base main \
+              --head "${branch}" \
+              --title "Release ${RELEASE_TAG}" \
+              --body-file "${body_file}")
+            pr_state=OPEN
+          elif [[ "$(jq 'length' <<<"${pull_requests}")" == "1" ]]; then
+            pr_url=$(jq -r '.[0].url' <<<"${pull_requests}")
+            pr_state=$(jq -r 'if .[0].mergedAt != null then "MERGED" else .[0].state end' <<<"${pull_requests}")
+            if [[ "${pr_state}" == "CLOSED" ]]; then
+              gh pr reopen "${pr_url}"
+              pr_state=OPEN
+            fi
+          else
+            echo "More than one pull request exists for ${branch}" >&2
+            exit 1
+          fi
+          printf 'commit=%s\n' "${branch_commit}" >> "${GITHUB_OUTPUT}"
+          printf 'url=%s\n' "${pr_url}" >> "${GITHUB_OUTPUT}"
+
+
+      - name: Summarize the release pull request
+        env:
+          PREPARED_COMMIT: ${{ steps.pull-request.outputs.commit }}
+          PULL_REQUEST_URL: ${{ steps.pull-request.outputs.url }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          {
+            echo "## ${RELEASE_TAG} preparation"
+            echo
+            echo "- Prepared branch commit: \`${PREPARED_COMMIT}\`"
+            echo "- Pull request: ${PULL_REQUEST_URL}"
+            echo "- Approve the pending pull-request workflows so CI tests the GitHub merge ref."
+            echo "- After merge, copy the new exact \`main\` SHA for the standalone candidate."
+          } >> "${GITHUB_STEP_SUMMARY}"

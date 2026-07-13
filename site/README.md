@@ -41,7 +41,9 @@ Every push to `main` that touches the site or docs then deploys automatically; P
 
 The install paths reference artifacts that must exist before the site goes live:
 
-- [ ] Bootstrap and publish `@hansjm10/volt-coding-agent@0.1.0` with the npm
+- [x] Bootstrap and publish `@hansjm10/volt-coding-agent@0.1.0` with the npm
   `beta` dist-tag (`install.sh` default path and the documented npm install).
-- [ ] Push a `v*` tag so `build-binaries.yml` creates a GitHub Release with platform tarballs (`VOLT_INSTALL_METHOD=binary` path).
+- [x] Publish `v0.1.0` so `build-binaries.yml` creates the GitHub Release with
+  platform archives (`VOLT_INSTALL_METHOD=binary` path). Future releases use
+  the owner-dispatched GitHub-native release workflows.
 - [ ] After both exist, smoke-test: `curl -fsSL https://volt-cli.dev/install.sh | sh` on macOS/Linux and `irm https://volt-cli.dev/install.ps1 | iex` on Windows.

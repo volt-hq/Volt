@@ -1,0 +1,17 @@
+# Release authorization, provenance, and publication
+/.github/workflows/prepare-release.yml @hansjm10
+/.github/workflows/build-standalone-candidate.yml @hansjm10
+/.github/workflows/approve-release.yml @hansjm10
+/.github/workflows/build-binaries.yml @hansjm10
+/scripts/release*.mjs @hansjm10
+/scripts/publish.mjs @hansjm10
+/scripts/npm-publish-verification.mjs @hansjm10
+/scripts/verify-release-provenance.mjs @hansjm10
+/scripts/verify-npm-package-bootstrap.mjs @hansjm10
+/scripts/build-binaries.sh @hansjm10
+/scripts/build-standalone.mjs @hansjm10
+/scripts/collect-binary-licenses.mjs @hansjm10
+/compliance/ @hansjm10
+/package.json @hansjm10
+/package-lock.json @hansjm10
+/packages/coding-agent/npm-shrinkwrap.json @hansjm10

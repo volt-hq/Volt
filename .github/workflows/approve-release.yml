@@ -1,0 +1,585 @@
+name: Approve Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Canonical release version without the v prefix'
+        required: true
+        type: string
+      candidate_commit:
+        description: 'Exact lowercase 40-character main commit from the candidate run'
+        required: true
+        type: string
+      candidate_run_id:
+        description: 'Successful Build Standalone Candidate workflow run ID'
+        required: true
+        type: string
+      candidate_artifact_digest:
+        description: 'Exact combined artifact digest: sha256:<64 lowercase hexadecimal characters>'
+        required: true
+        type: string
+      license_compliance_approved:
+        description: 'I reviewed and approve all binary and file license manifests'
+        required: true
+        type: boolean
+      native_smoke_tests_approved:
+        description: 'I completed and approve the required native smoke tests'
+        required: true
+        type: boolean
+      unsigned_windows_acknowledged:
+        description: 'I acknowledge that Windows beta executables are currently unsigned'
+        required: true
+        type: boolean
+      authorization_phrase:
+        description: 'release vVERSION from COMMIT using run RUN_ID and sha256:DIGEST'
+        required: true
+        type: string
+      confirm_release:
+        description: 'Create the release tag and start publication'
+        required: true
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: release-approval-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    outputs:
+      tag: ${{ steps.authorize.outputs.tag }}
+      version: ${{ steps.authorize.outputs.version }}
+      candidate-commit: ${{ steps.authorize.outputs.candidate-commit }}
+      candidate-run-id: ${{ steps.authorize.outputs.candidate-run-id }}
+      candidate-artifact-digest: ${{ steps.authorize.outputs.candidate-artifact-digest }}
+      tag-message-base64: ${{ steps.authorize.outputs.tag-message-base64 }}
+    env:
+      APPROVED_VERSION: ${{ inputs.version }}
+      CANDIDATE_ARTIFACT_DIGEST: ${{ inputs.candidate_artifact_digest }}
+      CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+    steps:
+      - name: Validate owner authorization and exact inputs
+        env:
+          AUTHORIZATION_PHRASE: ${{ inputs.authorization_phrase }}
+          CONFIRM_RELEASE: ${{ inputs.confirm_release }}
+          LICENSE_COMPLIANCE_APPROVED: ${{ inputs.license_compliance_approved }}
+          NATIVE_SMOKE_TESTS_APPROVED: ${{ inputs.native_smoke_tests_approved }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          RUN_ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          UNSIGNED_WINDOWS_ACKNOWLEDGED: ${{ inputs.unsigned_windows_acknowledged }}
+        shell: bash
+        run: |
+          if [[ "${RUN_ACTOR}" != "${REPOSITORY_OWNER}" ]] || [[ "${TRIGGERING_ACTOR}" != "${REPOSITORY_OWNER}" ]]; then
+            echo "Only the repository owner may approve a release" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "Approve Release must be dispatched from main, not ${GITHUB_REF}" >&2
+            exit 1
+          fi
+          if [[ ! "${APPROVED_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Version must be canonical MAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          if [[ ! "${CANDIDATE_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || [[ "${GITHUB_SHA}" != "${CANDIDATE_COMMIT}" ]]; then
+            echo "Candidate must be the exact current main SHA ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          if [[ ! "${CANDIDATE_RUN_ID}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Candidate run ID must be a positive decimal integer" >&2
+            exit 1
+          fi
+          if [[ ! "${CANDIDATE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Candidate artifact digest must be sha256:<64 lowercase hexadecimal characters>" >&2
+            exit 1
+          fi
+          for acknowledgement in \
+            "${LICENSE_COMPLIANCE_APPROVED}" \
+            "${NATIVE_SMOKE_TESTS_APPROVED}" \
+            "${UNSIGNED_WINDOWS_ACKNOWLEDGED}" \
+            "${CONFIRM_RELEASE}"; do
+            if [[ "${acknowledgement}" != "true" ]]; then
+              echo "Every release acknowledgement must be selected" >&2
+              exit 1
+            fi
+          done
+          expected_phrase="release v${APPROVED_VERSION} from ${CANDIDATE_COMMIT} using run ${CANDIDATE_RUN_ID} and ${CANDIDATE_ARTIFACT_DIGEST}"
+          if [[ "${AUTHORIZATION_PHRASE}" != "${expected_phrase}" ]]; then
+            echo "Authorization phrase does not exactly bind the approved version, commit, run, and digest" >&2
+            exit 1
+          fi
+
+      - name: Checkout the exact candidate on main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify checkout remains the approved main commit
+        shell: bash
+        run: |
+          if [[ "$(git branch --show-current)" != "main" ]] || \
+             [[ "$(git rev-parse HEAD)" != "${CANDIDATE_COMMIT}" ]] || \
+             [[ "$(git rev-parse refs/remotes/origin/main)" != "${CANDIDATE_COMMIT}" ]]; then
+            echo "Approved candidate is no longer the exact main commit" >&2
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.23.1'
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Check release security guardrails
+        run: npm run check:release-security
+
+      - name: Authorize the exact candidate without mutating GitHub
+        id: authorize
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VOLT_APPROVED_CANDIDATE_ARTIFACT_DIGEST: ${{ inputs.candidate_artifact_digest }}
+          VOLT_APPROVED_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        shell: bash
+        run: node scripts/release.mjs authorize "${CANDIDATE_COMMIT}"
+
+      - name: Verify the derived release identity
+        env:
+          DERIVED_VERSION: ${{ steps.authorize.outputs.version }}
+          DERIVED_TAG: ${{ steps.authorize.outputs.tag }}
+        shell: bash
+        run: |
+          if [[ "${DERIVED_VERSION}" != "${APPROVED_VERSION}" ]] || [[ "${DERIVED_TAG}" != "v${APPROVED_VERSION}" ]]; then
+            echo "Prepared release identity does not match approved version ${APPROVED_VERSION}" >&2
+            exit 1
+          fi
+          {
+            echo "## Release authorization preflight"
+            echo
+            echo "- Tag: \`${DERIVED_TAG}\`"
+            echo "- Candidate commit: \`${CANDIDATE_COMMIT}\`"
+            echo "- Candidate run: \`${CANDIDATE_RUN_ID}\`"
+            echo "- Candidate artifact: \`${CANDIDATE_ARTIFACT_DIGEST}\`"
+            echo "- Owner authorization and all beta acknowledgements: verified"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Resolve the immutable approved artifact ID
+        id: artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          artifact_name="standalone-candidate-${CANDIDATE_COMMIT}"
+          artifact_json=$(
+            gh api --method GET "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/artifacts" \
+              -f per_page=100 \
+              -f name="${artifact_name}" |
+              jq --arg name "${artifact_name}" \
+                '[.artifacts[] | select(.name == $name and .expired == false)]'
+          )
+          if [[ "$(jq 'length' <<<"${artifact_json}")" != "1" ]]; then
+            echo "Approved run must contain exactly one unexpired ${artifact_name} artifact" >&2
+            exit 1
+          fi
+          artifact_id=$(jq -r '.[0].id' <<<"${artifact_json}")
+          artifact_digest=$(jq -r '.[0].digest' <<<"${artifact_json}")
+          if [[ ! "${artifact_id}" =~ ^[1-9][0-9]*$ ]] || [[ "${artifact_digest}" != "${CANDIDATE_ARTIFACT_DIGEST}" ]]; then
+            echo "Resolved artifact ID or API digest does not match the exact authorization" >&2
+            exit 1
+          fi
+          printf 'id=%s\n' "${artifact_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download the exact approved candidate artifact
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          artifact-ids: ${{ steps.artifact.outputs.id }}
+          path: approved-candidate
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.candidate_run_id }}
+
+      - name: Reverify candidate contents and attestations
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          release_assets=(
+            volt-darwin-arm64.tar.gz
+            volt-darwin-x64.tar.gz
+            volt-linux-arm64.tar.gz
+            volt-linux-x64.tar.gz
+            volt-windows-arm64.zip
+            volt-windows-x64.zip
+          )
+          cd approved-candidate
+          if [[ "$(find . -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" != "9" ]] || \
+             [[ -n "$(find . -mindepth 1 -maxdepth 1 ! -type f -print -quit)" ]]; then
+            echo "Approved candidate contains an unexpected top-level entry" >&2
+            exit 1
+          fi
+          if [[ "$(tr -d '\r\n' < source-commit.txt)" != "${CANDIDATE_COMMIT}" ]]; then
+            echo "Approved candidate source commit does not match" >&2
+            exit 1
+          fi
+          if [[ "$(wc -l < SHA256SUMS | tr -d ' ')" != "6" ]]; then
+            echo "Approved candidate checksums must contain exactly six entries" >&2
+            exit 1
+          fi
+          sha256sum --strict -c SHA256SUMS
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg run_id "${CANDIDATE_RUN_ID}" \
+            --arg commit "${CANDIDATE_COMMIT}" \
+            --arg artifact "standalone-candidate-${CANDIDATE_COMMIT}" \
+            --arg run_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}" \
+            '.schemaVersion == 1 and
+             .repository == $repository and
+             .workflow.name == "Build Standalone Candidate" and
+             .workflow.path == ".github/workflows/build-standalone-candidate.yml" and
+             .workflow.runId == $run_id and
+             .workflow.url == $run_url and
+             (.workflow.runAttempt | type == "string" and test("^[1-9][0-9]*$")) and
+             .candidate.commit == $commit and
+             .candidate.ref == "refs/heads/main" and
+             .artifact.name == $artifact and
+             .artifact.retentionDays == 30 and
+             .runtime.name == "node" and
+             .runtime.version == "22.23.1" and
+             (.archives | type == "array" and length == 6)' \
+            release-record.json > /dev/null
+
+          for asset in "${release_assets[@]}"; do
+            checksum=$(awk -v asset="${asset}" '$2 == asset { print $1 }' SHA256SUMS)
+            if [[ ! "${checksum}" =~ ^[0-9a-f]{64}$ ]] || \
+               [[ "$(awk -v asset="${asset}" '$2 == asset { count += 1 } END { print count + 0 }' SHA256SUMS)" != "1" ]]; then
+              echo "Missing or duplicate approved checksum for ${asset}" >&2
+              exit 1
+            fi
+            jq -e --arg asset "${asset}" --arg checksum "${checksum}" \
+              '[.archives[] | select(.name == $asset and .sha256 == $checksum)] | length == 1' \
+              release-record.json > /dev/null
+            gh attestation verify "${asset}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/build-standalone-candidate.yml" \
+              --source-digest "${CANDIDATE_COMMIT}" \
+              --source-ref refs/heads/main \
+              --deny-self-hosted-runners
+          done
+          gh attestation verify release-record.json \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/build-standalone-candidate.yml" \
+            --source-digest "${CANDIDATE_COMMIT}" \
+            --source-ref refs/heads/main \
+            --deny-self-hosted-runners
+
+  tag-release:
+    runs-on: ubuntu-24.04
+    needs: preflight
+    environment: release-authorization
+    permissions:
+      actions: read
+      contents: read
+    env:
+      CANDIDATE_ARTIFACT_DIGEST: ${{ needs.preflight.outputs.candidate-artifact-digest }}
+      CANDIDATE_COMMIT: ${{ needs.preflight.outputs.candidate-commit }}
+      CANDIDATE_RUN_ID: ${{ needs.preflight.outputs.candidate-run-id }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+      TAG_MESSAGE_BASE64: ${{ needs.preflight.outputs.tag-message-base64 }}
+    steps:
+      - name: Repeat mutable GitHub state checks without a write credential
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          RUN_ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const candidateCommit = process.env.CANDIDATE_COMMIT;
+            const candidateRunId = Number(process.env.CANDIDATE_RUN_ID);
+            const artifactDigest = process.env.CANDIDATE_ARTIFACT_DIGEST;
+            const releaseTag = process.env.RELEASE_TAG;
+            const baseMessage = Buffer.from(process.env.TAG_MESSAGE_BASE64, "base64").toString("utf8");
+            const expectedMessage = `${baseMessage}\nRelease-Approval-Run: ${context.runId}`;
+
+            if (process.env.RUN_ACTOR !== process.env.REPOSITORY_OWNER || process.env.TRIGGERING_ACTOR !== process.env.REPOSITORY_OWNER) {
+              core.setFailed("Only the repository owner may authorize or rerun a release");
+              return;
+            }
+            const main = await github.rest.repos.getBranch({ owner, repo, branch: "main" });
+            if (main.data.commit.sha !== candidateCommit) {
+              core.setFailed(`main moved to ${main.data.commit.sha}; approved candidate was ${candidateCommit}`);
+              return;
+            }
+            const run = await github.rest.actions.getWorkflowRun({ owner, repo, run_id: candidateRunId });
+            if (
+              run.data.path !== ".github/workflows/build-standalone-candidate.yml" ||
+              run.data.event !== "workflow_dispatch" ||
+              run.data.head_branch !== "main" ||
+              run.data.head_sha !== candidateCommit ||
+              run.data.status !== "completed" ||
+              run.data.conclusion !== "success"
+            ) {
+              core.setFailed("Approved candidate workflow metadata changed or no longer matches");
+              return;
+            }
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              owner,
+              repo,
+              run_id: candidateRunId,
+              per_page: 100,
+            });
+            const expectedName = `standalone-candidate-${candidateCommit}`;
+            const matches = artifacts.filter((artifact) => artifact.name === expectedName);
+            if (matches.length !== 1 || matches[0].expired || matches[0].digest !== artifactDigest) {
+              core.setFailed("Approved candidate artifact is missing, expired, duplicated, or has a different digest");
+              return;
+            }
+            try {
+              const ref = await github.rest.git.getRef({ owner, repo, ref: `tags/${releaseTag}` });
+              if (ref.data.object.type !== "tag") {
+                core.setFailed(`${releaseTag} exists but is not annotated`);
+                return;
+              }
+              const tag = await github.rest.git.getTag({ owner, repo, tag_sha: ref.data.object.sha });
+              if (tag.data.object.type !== "commit" || tag.data.object.sha !== candidateCommit || tag.data.message !== expectedMessage) {
+                core.setFailed(`${releaseTag} already exists with different provenance`);
+              }
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
+      - name: Mint a repository-scoped Release Tagger token
+        id: release-app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.VOLT_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.VOLT_RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Create and read back the annotated tag and draft release
+        id: tag
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          github-token: ${{ steps.release-app.outputs.token }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const candidateCommit = process.env.CANDIDATE_COMMIT;
+            const releaseTag = process.env.RELEASE_TAG;
+            const baseMessage = Buffer.from(process.env.TAG_MESSAGE_BASE64, "base64").toString("utf8");
+            if (Buffer.from(baseMessage, "utf8").toString("base64") !== process.env.TAG_MESSAGE_BASE64) {
+              core.setFailed("Tag message is not canonical base64");
+              return;
+            }
+            const expectedMessage = `${baseMessage}\nRelease-Approval-Run: ${context.runId}`;
+
+            const main = await github.rest.repos.getBranch({ owner, repo, branch: "main" });
+            if (main.data.commit.sha !== candidateCommit) {
+              core.setFailed(`main moved to ${main.data.commit.sha} before tag creation; approved candidate was ${candidateCommit}`);
+              return;
+            }
+
+            const verifyTag = async () => {
+              const ref = await github.rest.git.getRef({ owner, repo, ref: `tags/${releaseTag}` });
+              if (ref.data.object.type !== "tag") throw new Error(`${releaseTag} is not annotated`);
+              const tag = await github.rest.git.getTag({ owner, repo, tag_sha: ref.data.object.sha });
+              if (
+                tag.data.tag !== releaseTag ||
+                tag.data.object.type !== "commit" ||
+                tag.data.object.sha !== candidateCommit ||
+                tag.data.message !== expectedMessage
+              ) {
+                throw new Error(`${releaseTag} read-back did not match the authorized candidate and message`);
+              }
+              return tag.data;
+            };
+
+            let existing = false;
+            try {
+              await verifyTag();
+              existing = true;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            if (!existing) {
+              const tagObject = await github.rest.git.createTag({
+                owner,
+                repo,
+                tag: releaseTag,
+                message: expectedMessage,
+                object: candidateCommit,
+                type: "commit",
+              });
+              try {
+                await github.rest.git.createRef({
+                  owner,
+                  repo,
+                  ref: `refs/tags/${releaseTag}`,
+                  sha: tagObject.data.sha,
+                });
+              } catch (error) {
+                if (error.status !== 422) throw error;
+              }
+              await verifyTag();
+            }
+
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            const matches = releases.filter((release) => release.tag_name === releaseTag);
+            if (matches.length > 1) throw new Error(`Multiple releases exist for ${releaseTag}`);
+            if (matches.length === 0) {
+              await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: releaseTag,
+                target_commitish: candidateCommit,
+                name: releaseTag,
+                body: "Release publication is in progress. This draft is published only after npm and exact asset verification succeed.",
+                draft: true,
+                prerelease: true,
+                make_latest: "false",
+              });
+            } else if (!matches[0].draft || !matches[0].prerelease) {
+              throw new Error(`Existing ${releaseTag} release is not the expected draft prerelease`);
+            }
+
+            core.setOutput("tag", releaseTag);
+            await core.summary
+              .addHeading(`Authorized ${releaseTag}`)
+              .addRaw(`Annotated tag verified at \`${candidateCommit}\`.\n`)
+              .addRaw("A draft prerelease exists and publication can now be dispatched.\n")
+              .write();
+
+  dispatch-publication:
+    runs-on: ubuntu-24.04
+    needs: [preflight, tag-release]
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch Publish Release at the authorized tag
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: "build-binaries.yml",
+              ref: process.env.RELEASE_TAG,
+              inputs: { tag: process.env.RELEASE_TAG },
+            });
+            const runsUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/workflows/build-binaries.yml`;
+            await core.summary
+              .addHeading(`Publication dispatched for ${process.env.RELEASE_TAG}`)
+              .addLink("Open Publish Release runs", runsUrl)
+              .write();
+
+  open-next-cycle:
+    runs-on: ubuntu-24.04
+    needs: [preflight, tag-release]
+    continue-on-error: true
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      CANDIDATE_COMMIT: ${{ needs.preflight.outputs.candidate-commit }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+    steps:
+      - name: Checkout the exact tagged main commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.23.1'
+          package-manager-cache: false
+
+      - name: Create the post-release changelog commit without pushing
+        id: next-cycle
+        shell: bash
+        run: |
+          if [[ "$(git rev-parse HEAD)" != "${CANDIDATE_COMMIT}" ]]; then
+            echo "main moved after release authorization; refusing a stale next-cycle commit" >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          node scripts/release.mjs next-cycle "${CANDIDATE_COMMIT}"
+
+      - name: Push the next-cycle branch and open a pull request
+        id: pull-request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          branch="post-release/${RELEASE_TAG}-${GITHUB_RUN_ID}"
+          gh auth setup-git
+
+          remote_ref="refs/remotes/origin/${branch}"
+          if gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" > /dev/null 2>&1; then
+            git fetch origin "refs/heads/${branch}:${remote_ref}"
+            if [[ "$(git rev-parse HEAD^{tree})" != "$(git rev-parse "${remote_ref}^{tree}")" ]] || \
+               [[ "$(git rev-parse "${remote_ref}^")" != "${CANDIDATE_COMMIT}" ]]; then
+              echo "Existing next-cycle branch does not contain this run's exact changelog tree and parent" >&2
+              exit 1
+            fi
+          else
+            git push origin "HEAD:refs/heads/${branch}"
+          fi
+
+          body_file=$(mktemp)
+          printf '%s\n\n' "Starts the changelog cycle after ${RELEASE_TAG}." > "${body_file}"
+          printf '%s\n' "The release tag remains unchanged; this pull request only restores the four [Unreleased] sections." >> "${body_file}"
+          printf '%s\n' "Created by GitHub Actions run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}." >> "${body_file}"
+          pull_requests=$(gh pr list --state all --head "${branch}" --json url,mergedAt,state)
+          if [[ "$(jq 'length' <<<"${pull_requests}")" == "0" ]]; then
+            pr_url=$(gh pr create \
+              --base main \
+              --head "${branch}" \
+              --title "Start post-${RELEASE_TAG} changelog cycle" \
+              --body-file "${body_file}")
+            pr_state=OPEN
+          elif [[ "$(jq 'length' <<<"${pull_requests}")" == "1" ]]; then
+            pr_url=$(jq -r '.[0].url' <<<"${pull_requests}")
+            pr_state=$(jq -r 'if .[0].mergedAt != null then "MERGED" else .[0].state end' <<<"${pull_requests}")
+            if [[ "${pr_state}" == "CLOSED" ]]; then
+              gh pr reopen "${pr_url}"
+              pr_state=OPEN
+            fi
+          else
+            echo "More than one pull request exists for ${branch}" >&2
+            exit 1
+          fi
+          printf 'url=%s\n' "${pr_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: Summarize the next-cycle pull request
+        env:
+          PULL_REQUEST_URL: ${{ steps.pull-request.outputs.url }}
+        shell: bash
+        run: |
+          {
+            echo "## Post-release changelog cycle"
+            echo
+            echo "- Pull request: ${PULL_REQUEST_URL}"
+            echo "- Approve the pending pull-request workflows so CI tests the GitHub merge ref."
+          } >> "${GITHUB_STEP_SUMMARY}"

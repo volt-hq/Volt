@@ -7,16 +7,16 @@ completed.
 
 ## Hard gates
 
-- [ ] **Bootstrap npm publishing.** Reserve the four public
+- [x] **Bootstrap npm publishing.** Reserve the four public
   `@hansjm10/volt-*` names with the non-installable `0.0.0-bootstrap.0`
   placeholder under `bootstrap`, with npm-required `latest` also pinned to that
   inert placeholder, configure the `build-binaries.yml` trusted publisher for
-  the `npm-publish` environment, and let tagged CI publish lockstep `0.1.0`
+  the `npm-publish` environment, and publish lockstep `0.1.0`
   under `beta` with provenance. Follow
   [Initial npm Release Bootstrap](docs/npm-release-bootstrap.md); do not publish
   the beta as `latest` and do not substitute a long-lived npm token for trusted
   publishing.
-- [ ] **Approve standalone-binary license compliance.** Standalone artifacts
+- [x] **Approve standalone-binary license compliance.** Standalone artifacts
   use the official Node.js 22.23.1 runtime as a Single Executable Application,
   replacing the previous standalone runtime design. The runtime version,
   per-platform archive checksums, exact consolidated Node license, and license
@@ -40,30 +40,23 @@ completed.
   Authenticode-signed; verify and record this disclosure and the final archive
   checksums before inviting testers.
 
-  Prepare and push the untagged `Release vX.Y.Z` commit first (`npm run
-  release:initial` for the already-versioned first `0.1.0` beta), then dispatch
-  `build-standalone-candidate.yml` with its exact lowercase 40-character commit
-  SHA. The workflow builds all six native archives with read-only permissions
-  and publishes only a 30-day workflow artifact containing `source-commit.txt`
-  and `SHA256SUMS`; it cannot publish npm packages or create a release. Download
-  that combined artifact from the successful workflow run you will approve,
-  require `source-commit.txt` to match the prepared commit, record the positive
-  decimal workflow run ID, and perform this compliance review against those
-  exact archives.
+  For subsequent releases, run **Prepare Release** and merge its pull request,
+  then dispatch `build-standalone-candidate.yml` with the resulting exact
+  lowercase 40-character `main` SHA. The workflow builds all six native
+  archives and publishes a 30-day artifact containing `source-commit.txt`,
+  `SHA256SUMS`, and `release-record.json`, with GitHub attestations for every
+  archive and the record. It cannot publish npm packages, create a tag, or
+  create a release. Download that artifact, record its run ID and exact
+  `sha256:` artifact digest, and perform this compliance review against those
+  exact bytes.
 
-  **Do not create the release tag until the release owner approves and records
-  this compliance gate for the exact prepared commit and workflow run.**
-  Finalization requires that full commit SHA as an explicit argument and the
-  approved positive decimal run ID in `VOLT_APPROVED_CANDIDATE_RUN_ID`, refuses
-  a different `HEAD`, queries GitHub to verify that exact successful run and its
-  unexpired combined artifact before tagging, and records both values in the
-  annotated tag.
-  Configure the GitHub `binary-release` environment
-  with administrator bypass disabled and restrict deployments to protected
-  `v*` tags. Do not add environment secrets. In the current solo-maintainer
-  workflow there is no independent deployment reviewer, so pushing the release
-  tag authorizes the final GitHub release job with `contents: write` to proceed
-  after npm publication.
+  **Do not run Approve Release until the release owner approves and records
+  this compliance gate for the exact commit, run, artifact digest, and native
+  bytes.** The owner-only workflow requires the exact authorization phrase and
+  acknowledgements, creates the annotated tag through the repository-scoped
+  Release Tagger App, and dispatches publication at that tag. The
+  `binary-release` environment has administrator bypass disabled and accepts
+  protected `v*` tags only. It has no secrets or reviewer requirement.
 - [x] **Resolve Doom source-archive provenance.** The unverified generated Doom
   JavaScript/WebAssembly and Doom artwork have been removed from the repository.
   The remaining source-only demo ignores generated output, cloned upstream
@@ -85,31 +78,21 @@ completed.
 
   The release owner confirmed this gate complete on 2026-07-12 after extensive
   daemon and physical-iPhone deployment, pairing, reconnect, and session testing.
-- [ ] **Create one auditable release source.** Run `npm run check`, complete the
-  changelog review and outside-repository smoke tests, prepare the untagged
-  release commit on protected `main`, and build and approve the six-platform
-  standalone candidate for that exact commit. Then run
-
-  ```bash
-  VOLT_APPROVED_CANDIDATE_RUN_ID=<approved-run-id> npm run release:finalize -- <exact-candidate-commit>
-  ```
-
-  to create the canonical annotated `v0.1.0` tag at that same commit. The tag commit must be reachable
-  from protected `main` and exactly match all four package versions and
-  changelog headings. Configure
-  a GitHub repository ruleset that restricts creation, update, and deletion of
-  `v*` tags to release owners. The release workflow verifies the local
-  invariants, requires a successful candidate run for the tag's exact commit,
-  promotes those reviewed archive bytes without rebuilding them, and refuses
-  to replace an existing artifact with different bytes; the repository ruleset
-  is required because workflow code from an untrusted tag cannot protect
-  itself.
+- [x] **Create one auditable release source.** The canonical annotated
+  `v0.1.0` tag, four lockstep npm packages, and GitHub prerelease are published
+  from the same main commit and reviewed native candidate. The tag is protected
+  against creation, update, and deletion by a repository ruleset. Subsequent
+  releases use the GitHub-native prepare, candidate, approval, tag, npm, and
+  draft-release flow documented in
+  [GitHub-Native Release Automation](docs/github-release-automation.md). The
+  publisher promotes the reviewed archives without rebuilding and refuses to
+  replace an existing asset with different bytes.
 
 ## Release-owner sign-off
 
-Record the npm bootstrap verification, candidate workflow run, exact candidate
-commit, workflow run ID, and `source-commit.txt`, runtime and binary-license
-manifest approval, Doom source-archive resolution, native-platform smoke
-results, unsigned-Windows disclosure, final commit, explicit finalization
-sign-off, protected annotated tag, and generated checksums in the release record
+For every subsequent release, record the npm bootstrap/channel verification,
+candidate workflow run, exact candidate commit, workflow run ID, artifact
+digest, attestation verification, `source-commit.txt`, runtime and binary-license
+manifest approval, native-platform smoke results, unsigned-Windows disclosure,
+owner authorization run, protected annotated tag, and generated checksums
 before inviting beta users.

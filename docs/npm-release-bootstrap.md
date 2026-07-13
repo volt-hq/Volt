@@ -1,5 +1,9 @@
 # Initial npm Release Bootstrap
 
+> Completed for all four packages and the `0.1.0` beta. This document retains
+> the one-time reservation rationale. Do not rerun bootstrap for normal
+> releases; use [GitHub-Native Release Automation](github-release-automation.md).
+
 The four Volt package names are declared in their package manifests:
 
 - `@hansjm10/volt-ai`
@@ -56,61 +60,20 @@ outside the automated release:
    solo-maintainer workflow, complete and record the exact standalone-binary
    license review before creating the release tag; tag creation is the release
    owner's authorization for the final release job.
-6. Verify each package with
+6. Before the first real release, verify each package with
    `npm view <name>@0.0.0-bootstrap.0 name versions license dist-tags repository --json`.
    The explicit selector avoids resolving through `latest`. Before the real
    release, the only version must be `0.0.0-bootstrap.0`; `bootstrap` and
    npm-required `latest` must both point to it; `beta` and `0.1.0` must be
    absent.
-7. Run the normal build, checks, tests, and package dry-run inspection, then
-   commit the reviewed `0.1.0` migration on `main`.
-8. From a clean local `main` that exactly matches `origin/main`, prepare the
-   already-versioned initial release commit with
-   `npm_config_min_release_age=0 node scripts/release.mjs prepare 0.1.0`.
-   Unlike normal `patch` and `minor` releases, this one-time explicit-current target does not
-   increment the manifests: it verifies the placeholder-only registry state and
-   target-version absence before changing any files, converts each
-   `[Unreleased]` changelog section into the `0.1.0` release section,
-   regenerates release artifacts, runs the release checks, commits
-   `Release v0.1.0`, and pushes that exact commit to `main` without creating a
-   tag.
-9. Dispatch `build-standalone-candidate.yml` with the full 40-character commit
-   printed by preparation. Record the successful run's positive decimal ID,
-   download the combined artifact from that exact run, require
-   `source-commit.txt` to match that commit, inspect and smoke-test all six
-   native archives, verify `SHA256SUMS`, and complete the standalone-binary
-   compliance record. The workflow is read-only and cannot publish or tag.
-10. After every beta hard gate is closed, create the tag with an explicit
-   approval of that exact candidate and workflow run:
-
-    ```bash
-    VOLT_APPROVED_CANDIDATE_RUN_ID=<approved-run-id> npm run release:finalize -- <exact-40-character-candidate-commit>
-    ```
-
-   Finalization refuses a different `HEAD` or invalid run ID, queries GitHub to
-   require that exact successful run and its unexpired combined artifact,
-   rechecks the package metadata and tag/npm availability, records the approved
-   commit and run ID in annotated `v0.1.0`, pushes the tag, then pushes a separate
-   next-cycle changelog commit. It refuses to
-   run if `v0.1.0` already exists locally or on `origin`; never recreate or
-   replace a release tag.
-11. Let `build-binaries.yml` publish the real packages from `v0.1.0` in
-   dependency order using trusted publishing, provenance, public access, and the
-   `beta` dist-tag. It locates the successful candidate workflow for the tag's
-   exact commit and promotes those reviewed standalone archives rather than
-   rebuilding them. The workflow accepts safe partial-publication reruns, but
-   fails if an already-published target version does not have `beta` pointing
-   to it. Its final GitHub release job uses the tag-restricted
-   `binary-release` environment and does not pause for a reviewer in the
-   solo-maintainer setup.
-12. Verify each real package with
+7. After trusted publication, verify each real package with
    `npm view <name>@0.1.0 name version license dist-tags repository --json`.
    Confirm that `beta` resolves to `0.1.0`, `latest` remains pinned to the inert
    `0.0.0-bootstrap.0` placeholder, and the npm provenance links to
    `hansjm10/Volt` and the release workflow. Beta users must install with
    `@beta`; an unqualified install intentionally resolves to the placeholder.
-13. Verify the final GitHub release assets and checksums match the approved
-    candidate and release record.
+8. Verify the final GitHub release assets and checksums match the approved
+   candidate and release record.
 
 npm requires a package to exist before a trusted-publisher relationship can be
 configured. Only the non-installable name-reservation placeholder uses the npm

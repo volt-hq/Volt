@@ -122,119 +122,66 @@ Attribution:
 
 ## Releasing
 
-**Repository prerequisite**: protect `refs/tags/v*` with a GitHub repository
-ruleset that restricts creation, update, and deletion to release owners. The
-release script and CI validate an annotated tag on `main`, but checks loaded
-from a tag cannot defend against an actor who can replace that tag or its
-workflow without a repository-level rule.
+Releases run through GitHub. The full configuration, operator runbook, and
+recovery rules are in `docs/github-release-automation.md`.
 
-Configure the GitHub `binary-release` environment with administrator bypass
-disabled and restrict deployments to protected `v*` tags. While Volt has one
-maintainer, the release owner must complete and record the standalone-binary
-license gate in `BETA-READINESS.md` before creating the release tag; the tag is
-the authorization for the final release-assets job.
+**Lockstep versioning**: all packages share one version and release together.
+`patch` is for fixes and additions, `minor` is for breaking changes, and major
+releases are not used.
 
-**Lockstep versioning**: all packages share one version; every release updates all together. `patch` = fixes + additions, `minor` = breaking changes. No major releases.
+Before GitHub preparation, build an unpublished release and smoke-test it from
+outside the repository so it cannot resolve workspace files:
 
-1. **Update CHANGELOGs**: ask the user whether they ran the `/cl` prompt on the latest commit on `main`. If not, they must run `/cl` first to audit and update each package's `[Unreleased]` section before releasing.
+```bash
+npm run release:local -- --out /tmp/volt-local-release --force
+cd /tmp
+/tmp/volt-local-release/node/volt --help
+/tmp/volt-local-release/node/volt --version
+/tmp/volt-local-release/node/volt --list-models
+/tmp/volt-local-release/node/volt -p "Say exactly: ok"
+/tmp/volt-local-release/node/volt
+/tmp/volt-local-release/standalone/volt --help
+/tmp/volt-local-release/standalone/volt --version
+/tmp/volt-local-release/standalone/volt --list-models
+/tmp/volt-local-release/standalone/volt -p "Say exactly: ok"
+/tmp/volt-local-release/standalone/volt
+```
 
-2. **Local smoke test**: build an unpublished release and smoke test from outside the repo (so it can't resolve workspace files):
-   ```bash
-   npm run release:local -- --out /tmp/volt-local-release --force
-   cd /tmp
+Run both bare interactive commands in tmux, submit a prompt, and wait for the
+model reply. Verify startup, account/model listing, and one real prompt with the
+intended default provider for both install forms.
 
-   # Node package install smoke tests
-   /tmp/volt-local-release/node/volt --help
-   /tmp/volt-local-release/node/volt --version
-   /tmp/volt-local-release/node/volt --list-models
-   /tmp/volt-local-release/node/volt -p "Say exactly: ok"
-   /tmp/volt-local-release/node/volt
+1. Ask whether `/cl` was run against the latest `main`, then complete the local
+   unpublished smoke test from `BETA-READINESS.md`. Do not continue past a
+   failed hard gate without an explicit user risk acceptance.
+2. Run **Actions → Prepare Release** on `main`, select `patch` or `minor`, review
+   the generated release pull request, wait for CI, and merge it. Never treat
+   the pre-merge branch SHA as the candidate; copy the resulting exact `main`
+   SHA.
+3. Run **Build Standalone Candidate** on `main` with that exact SHA. Download
+   the combined artifact, verify its GitHub attestation, `source-commit.txt`,
+   `release-record.json`, `SHA256SUMS`, all six archives and their manifests,
+   binary-license compliance, native smoke tests, and the unsigned-Windows beta
+   disclosure. Record the run ID and the exact `sha256:` artifact digest from
+   the workflow summary.
+4. Run **Approve Release** on `main`. Enter the version, candidate SHA, run ID,
+   artifact digest, exact authorization phrase, and every acknowledgement. The
+   owner-only workflow creates the annotated tag through the repository-scoped
+   Release Tagger App, creates a draft prerelease, and explicitly dispatches
+   **Publish Release** at that tag.
+5. Confirm npm trusted publishing succeeds before the draft GitHub Release is
+   published. Confirm the published release contains only the approved assets,
+   and verify all four npm versions, provenance, and the `beta` dist-tag.
+6. Review and merge the generated post-release changelog pull request.
 
-   # Standalone Node SEA smoke tests
-   /tmp/volt-local-release/standalone/volt --help
-   /tmp/volt-local-release/standalone/volt --version
-   /tmp/volt-local-release/standalone/volt --list-models
-   /tmp/volt-local-release/standalone/volt -p "Say exactly: ok"
-   /tmp/volt-local-release/standalone/volt
-   ```
-   Verify both the npm install and standalone startup, model/account listing, interactive startup, and at least one real prompt with the intended default provider. The bare commands `/tmp/volt-local-release/node/volt` and `/tmp/volt-local-release/standalone/volt` start interactive mode; run each in tmux, submit a prompt, and wait for the model reply before considering the interactive smoke test passed. Failures are release blockers unless the user explicitly accepts the risk.
+Normal release automation never pushes directly to `main`, creates a tag from
+an ordinary `GITHUB_TOKEN`, publishes npm locally, stores an npm token, rebuilds
+approved standalone bytes, moves a release tag, or replaces a release asset.
 
-3. **Prepare the exact release candidate**:
-
-   Preparation creates and pushes the final release commit to `main`, but does
-   not create or push a release tag:
-
-   ```bash
-   VOLT_ALLOW_LOCKFILE_CHANGE=1 npm_config_min_release_age=0 npm run release:initial  # first 0.1.0 beta only
-   VOLT_ALLOW_LOCKFILE_CHANGE=1 npm_config_min_release_age=0 npm run release:patch    # fixes + additions
-   VOLT_ALLOW_LOCKFILE_CHANGE=1 npm_config_min_release_age=0 npm run release:minor    # breaking changes
-   ```
-   The package manifests are already at `0.1.0`, so use `release:initial` for
-   the first beta. `release:patch` would intentionally prepare `0.1.1`.
-   Use `npm_config_min_release_age=0` only for the release command. The repo's normal npm age gate can otherwise block the release lockfile refresh when the current workspace package version was published recently. Review any lockfile or shrinkwrap diffs the release creates before push.
-
-   The prepare phase first requires clean local `main` to exactly match
-   `origin/main`, verifies that the planned tag and npm package versions are
-   still available before changing any files, then bumps all package versions,
-   updates changelogs, regenerates release artifacts, runs `npm run check`,
-   commits `Release vX.Y.Z`, and pushes that exact commit to `main`. Record the
-   full 40-character candidate commit printed by the script. Do not amend it or
-   add the next `## [Unreleased]` sections yet.
-
-4. **Build, inspect, and approve the pre-tag native candidate**:
-
-   Dispatch `.github/workflows/build-standalone-candidate.yml` with the exact
-   40-character commit from step 3. For example, with GitHub CLI:
-
-   ```bash
-   candidate=$(git rev-parse HEAD)
-   gh workflow run build-standalone-candidate.yml --ref main -f commit="$candidate"
-   ```
-
-   Record the successful workflow run's positive decimal run ID. Download the
-   combined `standalone-candidate-$candidate` artifact from that exact run.
-   Verify its `source-commit.txt` is exactly `$candidate`, inspect and smoke-test all six
-   native archives, review their binary and file manifests, verify
-   `SHA256SUMS`, and record the license-compliance approval described in
-   `BETA-READINESS.md`. Confirm every other hard gate, including the recorded
-   Doom generated-artifact removal, before continuing. The candidate workflow has read-only
-   permissions and cannot publish npm packages, push a tag, or create a GitHub
-   release.
-
-   Only after approving that exact candidate, finalize it with the SHA as an
-   explicit sign-off:
-
-   ```bash
-   candidate_run=<approved-successful-workflow-run-id>
-   VOLT_APPROVED_CANDIDATE_RUN_ID="$candidate_run" npm run release:finalize -- "$candidate"
-   ```
-
-   Finalization again requires clean `main` to exactly match `origin/main`,
-   requires the supplied SHA to equal `HEAD`, requires the positive decimal run
-   ID, queries GitHub to require that exact run to be a successful
-   `workflow_dispatch` on `main` for the candidate commit with the expected
-   unexpired combined artifact, verifies the prepared release commit and
-   package metadata, and rechecks tag/npm availability. It then creates the annotated tag at the approved
-   commit with machine-readable `Standalone-Candidate-Commit` and
-   `Standalone-Candidate-Run` lines, pushes the tag, adds fresh
-   `## [Unreleased]` sections in a separate next-cycle commit, and pushes
-   `main`. With no independent environment reviewer, the explicit commit/run
-   sign-off is the release owner's authorization for the tag-triggered jobs.
-
-5. **CI publishes npm packages before exposing binaries**: pushing the
-   `vX.Y.Z` tag triggers `.github/workflows/build-binaries.yml`. The
-   workflow locates the successful candidate run for the tag's exact commit,
-   downloads and reverifies the same six reviewed archives and checksums, and
-   promotes those bytes; it does not rebuild replacement standalone archives.
-   The `publish-npm` job uses npm trusted publishing through GitHub Actions OIDC
-   with environment `npm-publish`. The final GitHub release job runs only after
-   npm succeeds through the tag-restricted `binary-release` environment. In the
-   solo-maintainer workflow it does not pause for a reviewer, so the compliance
-   gate must be complete before the release tag is created.
-   Except for the documented one-time name-reservation placeholders, real
-   releases never use local `npm publish`, a long-lived token, OTP, or WebAuthn.
-
-6. **If CI publish fails**: inspect the failed `publish-npm` job. The publish helper is idempotent and skips package versions already present on npm, so rerun the existing tag workflow after fixing CI or transient npm issues. Do not rerun either release phase or recreate the tag for the same version.
+If publication fails after the tag exists, rerun **Publish Release** at the
+same immutable tag. The publisher is idempotent and may resume only after
+verifying any existing npm packages, draft assets, and candidate bytes. Do not
+rerun preparation or approval, recreate the tag, or reuse the version.
 
 ## User Override
 

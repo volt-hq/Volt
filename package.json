@@ -44,6 +44,9 @@
 		"release:minor": "node scripts/release.mjs prepare minor",
 		"release:major": "node scripts/release.mjs prepare major",
 		"release:finalize": "node scripts/release.mjs finalize",
+		"release:prepare-pr": "node scripts/release.mjs prepare-pr",
+		"release:authorize": "node scripts/release.mjs authorize",
+		"release:next-cycle": "node scripts/release.mjs next-cycle",
 		"release:fix-links": "node scripts/release-notes.mjs fix-github-releases",
 		"prepare": "husky"
 	},

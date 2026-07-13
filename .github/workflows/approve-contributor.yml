@@ -4,22 +4,31 @@ on:
   issue_comment:
     types: [created]
 
+permissions: {}
+
+concurrency:
+  group: approve-contributor-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
 jobs:
   approve:
     if: ${{ !github.event.issue.pull_request }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       issues: write
+      pull-requests: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Update contributor approval
         id: update
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const fs = require('fs');
@@ -135,36 +144,88 @@ jobs:
             core.setOutput('capability', targetCapability);
             console.log(`Set ${issueAuthor} capability to ${targetCapability}`);
 
-      - name: Commit and push
+      - name: Commit, push a branch, and open a pull request
+        id: pull-request
         if: steps.update.outputs.status == 'added' || steps.update.outputs.status == 'updated'
+        env:
+          APPROVED_CONTRIBUTOR: ${{ github.event.issue.user.login }}
+          APPROVED_CAPABILITY: ${{ steps.update.outputs.capability }}
+          APPROVER: ${{ github.event.comment.user.login }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .github/APPROVED_CONTRIBUTORS
-          git diff --staged --quiet || git commit -m "chore: approve contributor ${{ github.event.issue.user.login }}"
-          git push
+          git diff --staged --quiet || git commit -m "docs: approve contributor ${APPROVED_CONTRIBUTOR}"
+
+          branch="automation/approve-contributor-${ISSUE_NUMBER}-${APPROVED_CAPABILITY}"
+          gh auth setup-git
+
+          remote_ref="refs/remotes/origin/${branch}"
+          if gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" > /dev/null 2>&1; then
+            git fetch origin "refs/heads/${branch}:${remote_ref}"
+            if ! git show "${remote_ref}:.github/APPROVED_CONTRIBUTORS" | \
+              awk -v user="${APPROVED_CONTRIBUTOR}" -v capability="${APPROVED_CAPABILITY}" \
+                'tolower($1) == tolower(user) && ($2 == capability || ($2 == "pr" && capability == "issue")) { found = 1 } END { exit !found }'; then
+              echo "Existing contributor approval branch does not contain the requested capability" >&2
+              exit 1
+            fi
+          else
+            git push origin "HEAD:refs/heads/${branch}"
+          fi
+
+          body_file=$(mktemp)
+          printf '%s\n\n' "Approves @${APPROVED_CONTRIBUTOR} for the ${APPROVED_CAPABILITY} contributor capability." > "${body_file}"
+          printf '%s\n' "Requested from issue #${ISSUE_NUMBER} by @${APPROVER}." >> "${body_file}"
+          pull_requests=$(gh pr list --state all --head "${branch}" --json url,mergedAt,state)
+          if [[ "$(jq 'length' <<<"${pull_requests}")" == "0" ]]; then
+            pr_url=$(gh pr create \
+              --base "${BASE_BRANCH}" \
+              --head "${branch}" \
+              --title "Approve contributor @${APPROVED_CONTRIBUTOR}" \
+              --body-file "${body_file}")
+          elif [[ "$(jq 'length' <<<"${pull_requests}")" == "1" ]]; then
+            pr_url=$(jq -r '.[0].url' <<<"${pull_requests}")
+            pr_state=$(jq -r 'if .[0].mergedAt != null then "MERGED" else .[0].state end' <<<"${pull_requests}")
+            if [[ "${pr_state}" == "CLOSED" ]]; then
+              gh pr reopen "${pr_url}"
+            fi
+          else
+            echo "More than one pull request exists for ${branch}" >&2
+            exit 1
+          fi
+          printf 'url=%s\n' "${pr_url}" >> "${GITHUB_OUTPUT}"
 
       - name: Comment on issue
         if: steps.update.outputs.status == 'added' || steps.update.outputs.status == 'updated' || steps.update.outputs.status == 'already'
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          APPROVAL_CAPABILITY: ${{ steps.update.outputs.capability }}
+          APPROVAL_PR_URL: ${{ steps.pull-request.outputs.url }}
+          APPROVAL_STATUS: ${{ steps.update.outputs.status }}
         with:
           script: |
             const issueAuthor = context.payload.issue.user.login;
-            const capability = '${{ steps.update.outputs.capability }}';
+            const capability = process.env.APPROVAL_CAPABILITY;
+            const approvalPullRequest = process.env.APPROVAL_PR_URL;
             const defaultBranch = context.payload.repository.default_branch;
             let body;
 
-            if ('${{ steps.update.outputs.status }}' === 'already') {
+            if (process.env.APPROVAL_STATUS === 'already') {
               body = `@${issueAuthor} is already approved.`;
             } else if (capability === 'issue') {
               body = [
-                `@${issueAuthor} approved for issues. Your future issues will not be auto-closed. PRs still require \`lgtm\`.`,
+                `Approval for @${issueAuthor} was proposed for issues. It takes effect after this pull request is merged: ${approvalPullRequest}`,
+                `PRs still require \`lgtm\`.`,
                 '',
                 `See [CONTRIBUTING.md](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/${defaultBranch}/CONTRIBUTING.md).`,
               ].join('\n');
             } else {
               body = [
-                `@${issueAuthor} approved for issues and PRs. Your future issues and PRs will not be auto-closed.`,
+                `Approval for @${issueAuthor} was proposed for issues and PRs. It takes effect after this pull request is merged: ${approvalPullRequest}`,
                 '',
                 `See [CONTRIBUTING.md](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/${defaultBranch}/CONTRIBUTING.md).`,
               ].join('\n');
@@ -176,4 +237,3 @@ jobs:
               issue_number: context.issue.number,
               body,
             });
-
