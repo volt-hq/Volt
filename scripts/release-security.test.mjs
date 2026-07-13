@@ -393,6 +393,8 @@ test("published packages and binary build include the repository license and not
 
 	const licenseCopies = [
 		["node_modules/@silvia-odwyer/photon-node/LICENSE.md", "packages/coding-agent/dist/LICENSES/photon-node-Apache-2.0.txt"],
+		["node_modules/clipboard-image/license", "packages/coding-agent/dist/LICENSES/clipboard-image-MIT.txt"],
+		["node_modules/run-jxa/license", "packages/coding-agent/dist/LICENSES/run-jxa-MIT.txt"],
 		["node_modules/highlight.js/LICENSE", "packages/coding-agent/dist/LICENSES/highlight.js-BSD-3-Clause.txt"],
 		["node_modules/marked/LICENSE", "packages/coding-agent/dist/LICENSES/marked-LICENSE.txt"],
 	];
@@ -403,7 +405,8 @@ test("published packages and binary build include the repository license and not
 	for (const [source, copied] of licenseCopies) {
 		assert.deepEqual(readFileSync(copied), readFileSync(source));
 	}
-	assert.match(readFileSync("packages/coding-agent/THIRD-PARTY-NOTICES.md", "utf8"), /clipboard packages do not contain an authoritative license text/);
+	assert.match(readFileSync("packages/coding-agent/THIRD-PARTY-NOTICES.md", "utf8"), /`clipboard-image` \/ `run-jxa`/);
+	assert.doesNotMatch(buildScript, /@mariozechner\/clipboard|clipboard_native_package/);
 
 	const betaReadiness = readFileSync("BETA-READINESS.md", "utf8");
 	assert.match(betaReadiness, /not ready for public beta\s+distribution/i);
@@ -475,7 +478,6 @@ test("binary build refuses destructive output paths before invoking the compiler
 		[
 			"scripts/build-binaries.sh",
 			"--skip-install",
-			"--skip-deps",
 			"--skip-build",
 			"--platform",
 			"darwin-arm64",

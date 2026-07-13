@@ -14,14 +14,14 @@ packages.
 | --- | --- | --- | --- |
 | Bun runtime | 1.3.10 | MIT; embedded JavaScriptCore/WebKit portions are LGPL-2.0 | https://bun.sh/docs/project/license |
 | `@silvia-odwyer/photon-node` / `photon_rs_bg.wasm` | 0.3.4 | Apache-2.0 | https://github.com/silvia-odwyer/photon |
-| `@mariozechner/clipboard` and platform bindings | 0.3.9 | MIT | https://github.com/badlogic/clipboard |
+| `clipboard-image` / `run-jxa` | 0.1.0 / 3.0.0 | MIT | https://github.com/sindresorhus/clipboard-image |
 | `highlight.js` npm module / vendored browser bundle | 10.7.3 / 11.9.0 | BSD-3-Clause | https://github.com/highlightjs/highlight.js |
 | `marked` npm module / vendored browser bundle | 18.0.5 | MIT | https://github.com/markedjs/marked |
 
-Exact locally available license texts for Photon, Highlight.js, and Marked are
-included under `dist/LICENSES/` in the npm package and `LICENSES/` in each
-standalone archive. Those files are copied byte-for-byte from the pinned npm
-dependencies during the release build.
+Exact locally available license texts for Photon, clipboard-image, run-jxa,
+Highlight.js, and Marked are included under `dist/LICENSES/` in the npm package
+and `LICENSES/` in each standalone archive. Those files are copied byte-for-byte
+from the pinned npm dependencies during the release build.
 
 The binary also embeds the JavaScript dependency closure represented by the
 shrinkwrap inventory. Its per-package SPDX identifiers and immutable registry
@@ -45,6 +45,3 @@ publishes the patched WebKit source and relinking instructions at:
 This notice is not a substitute for the applicable license texts or a release
 owner's compliance review. Before public binary distribution, preserve the
 corresponding source/relinking materials required for the exact Bun release.
-The pinned clipboard packages do not contain an authoritative license text in
-this checkout; obtain and review that text from the dependency owner before
-approving standalone distribution rather than inventing an attribution.

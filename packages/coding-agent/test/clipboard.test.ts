@@ -5,19 +5,10 @@ import { copyToClipboard } from "../src/utils/clipboard.ts";
 
 const mocks = vi.hoisted(() => {
 	return {
-		clipboard: {
-			setText: vi.fn<(text: string) => Promise<void>>(),
-		},
 		execSync: vi.fn(),
 		spawn: vi.fn(),
 		platform: vi.fn<() => NodeJS.Platform>(),
 		isWaylandSession: vi.fn<() => boolean>(),
-	};
-});
-
-vi.mock("../src/utils/clipboard-native.js", () => {
-	return {
-		clipboard: mocks.clipboard,
 	};
 });
 
@@ -46,7 +37,6 @@ const mockedPlatform = vi.mocked(platform);
 
 let originalWrite: typeof process.stdout.write;
 let stdoutWrites: string[];
-let nativeResolved = false;
 
 function osc52Writes(): string[] {
 	return stdoutWrites.filter((write) => write.startsWith("\x1b]52;c;"));
@@ -58,18 +48,12 @@ beforeEach(() => {
 	vi.stubEnv("SSH_CLIENT", "");
 	vi.stubEnv("MOSH_CONNECTION", "");
 	stdoutWrites = [];
-	nativeResolved = false;
-	mocks.clipboard.setText.mockReset();
 	mocks.execSync.mockReset();
 	mocks.spawn.mockReset();
 	mocks.platform.mockReset();
 	mocks.isWaylandSession.mockReset();
 	mockedPlatform.mockReturnValue("darwin");
 	mocks.isWaylandSession.mockReturnValue(false);
-	mocks.clipboard.setText.mockImplementation(async () => {
-		await new Promise((resolve) => setTimeout(resolve, 1));
-		nativeResolved = true;
-	});
 	originalWrite = process.stdout.write.bind(process.stdout);
 	process.stdout.write = ((...args: Parameters<typeof process.stdout.write>) => {
 		const [chunk] = args;
@@ -87,32 +71,30 @@ afterEach(() => {
 });
 
 describe("copyToClipboard", () => {
-	test("local native success skips OSC 52 and shell fallbacks", async () => {
+	test("local macOS success uses pbcopy and skips OSC 52", async () => {
+		mockedExecSync.mockReturnValue(Buffer.alloc(0));
 		await copyToClipboard("hello");
 
-		expect(mocks.clipboard.setText).toHaveBeenCalledWith("hello");
+		expect(mockedExecSync).toHaveBeenCalledWith("pbcopy", {
+			input: "hello",
+			stdio: ["pipe", "ignore", "ignore"],
+			timeout: 5000,
+		});
 		expect(osc52Writes()).toHaveLength(0);
-		expect(mockedExecSync).not.toHaveBeenCalled();
 		expect(mockedSpawn).not.toHaveBeenCalled();
 	});
 
-	test("remote native success emits OSC 52 after native write", async () => {
+	test("remote macOS success writes pbcopy and OSC 52", async () => {
 		vi.stubEnv("SSH_CONNECTION", "client server");
-		mocks.clipboard.setText.mockImplementation(async () => {
-			await new Promise((resolve) => setTimeout(resolve, 1));
-			expect(osc52Writes()).toHaveLength(0);
-			nativeResolved = true;
-		});
+		mockedExecSync.mockReturnValue(Buffer.alloc(0));
 
 		await copyToClipboard("hello");
 
-		expect(nativeResolved).toBe(true);
+		expect(mockedExecSync).toHaveBeenCalledWith("pbcopy", expect.any(Object));
 		expect(osc52Writes()).toHaveLength(1);
-		expect(mockedExecSync).not.toHaveBeenCalled();
 	});
 
-	test("local shell fallback success skips OSC 52", async () => {
-		mocks.clipboard.setText.mockRejectedValue(new Error("native failed"));
+	test("local shell success skips OSC 52", async () => {
 		mockedExecSync.mockReturnValue(Buffer.alloc(0));
 
 		await copyToClipboard("hello");
@@ -126,7 +108,6 @@ describe("copyToClipboard", () => {
 	});
 
 	test("uses OSC 52 fallback when native and shell tools fail", async () => {
-		mocks.clipboard.setText.mockRejectedValue(new Error("native failed"));
 		mockedExecSync.mockImplementation(() => {
 			throw new Error("pbcopy failed");
 		});
@@ -137,7 +118,6 @@ describe("copyToClipboard", () => {
 	});
 
 	test("does not emit oversized OSC 52 payloads", async () => {
-		mocks.clipboard.setText.mockRejectedValue(new Error("native failed"));
 		mockedExecSync.mockImplementation(() => {
 			throw new Error("pbcopy failed");
 		});

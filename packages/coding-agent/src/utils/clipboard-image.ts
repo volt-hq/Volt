@@ -1,10 +1,10 @@
 import { spawnSync } from "child_process";
+import { readClipboardImages } from "clipboard-image";
 import { randomUUID } from "crypto";
 import { chmodSync, mkdtempSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 
-import { clipboard } from "./clipboard-native.ts";
 import { loadPhoton } from "./photon.ts";
 
 export type ClipboardImage = {
@@ -154,22 +154,23 @@ function isWSL(env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 /**
- * On WSL, the Linux clipboard (Wayland/X11) does not receive image data from
- * Windows screenshots (Win+Shift+S). PowerShell can access the Windows clipboard
- * directly, so we use it as a fallback.
+ * Read the Windows clipboard through PowerShell. On WSL, translate the temporary
+ * path first because PowerShell cannot write to the Linux path directly.
  */
-function readClipboardImageViaPowerShell(): ClipboardImage | null {
-	const tempDirectory = mkdtempSync(join(tmpdir(), "volt-wsl-clip-"));
+function readClipboardImageViaPowerShell(wsl: boolean): ClipboardImage | null {
+	const tempDirectory = mkdtempSync(join(tmpdir(), "volt-clip-"));
 	chmodSync(tempDirectory, 0o700);
 	const tmpFile = join(tempDirectory, `${randomUUID()}.png`);
 
 	try {
-		const winPathResult = runCommand("wslpath", ["-w", tmpFile], { timeoutMs: DEFAULT_LIST_TIMEOUT_MS });
-		if (!winPathResult.ok) {
-			return null;
+		let winPath = tmpFile;
+		if (wsl) {
+			const winPathResult = runCommand("wslpath", ["-w", tmpFile], { timeoutMs: DEFAULT_LIST_TIMEOUT_MS });
+			if (!winPathResult.ok) {
+				return null;
+			}
+			winPath = winPathResult.stdout.toString("utf-8").trim();
 		}
-
-		const winPath = winPathResult.stdout.toString("utf-8").trim();
 		if (!winPath) {
 			return null;
 		}
@@ -208,6 +209,31 @@ function readClipboardImageViaPowerShell(): ClipboardImage | null {
 	}
 }
 
+async function readClipboardImageViaMacOS(): Promise<ClipboardImage | null> {
+	let imagePaths: string[] = [];
+	try {
+		imagePaths = await readClipboardImages();
+		const firstImagePath = imagePaths[0];
+		if (!firstImagePath) {
+			return null;
+		}
+
+		const bytes = readFileSync(firstImagePath);
+		if (bytes.length === 0) {
+			return null;
+		}
+
+		return { bytes: new Uint8Array(bytes), mimeType: "image/png" };
+	} catch {
+		return null;
+	} finally {
+		const firstImagePath = imagePaths[0];
+		if (firstImagePath) {
+			rmSync(dirname(firstImagePath), { recursive: true, force: true });
+		}
+	}
+}
+
 function readClipboardImageViaXclip(): ClipboardImage | null {
 	const targets = runCommand("xclip", ["-selection", "clipboard", "-t", "TARGETS", "-o"], {
 		timeoutMs: DEFAULT_LIST_TIMEOUT_MS,
@@ -235,20 +261,6 @@ function readClipboardImageViaXclip(): ClipboardImage | null {
 	return null;
 }
 
-async function readClipboardImageViaNativeClipboard(): Promise<ClipboardImage | null> {
-	if (!clipboard || !clipboard.hasImage()) {
-		return null;
-	}
-
-	const imageData = await clipboard.getImageBinary();
-	if (!imageData || imageData.length === 0) {
-		return null;
-	}
-
-	const bytes = imageData instanceof Uint8Array ? imageData : Uint8Array.from(imageData);
-	return { bytes, mimeType: "image/png" };
-}
-
 export async function readClipboardImage(options?: {
 	env?: NodeJS.ProcessEnv;
 	platform?: NodeJS.Platform;
@@ -267,18 +279,20 @@ export async function readClipboardImage(options?: {
 		const wayland = isWaylandSession(env);
 
 		if (wayland || wsl) {
-			image = readClipboardImageViaWlPaste() ?? readClipboardImageViaXclip();
+			image = readClipboardImageViaWlPaste();
+		}
+
+		if (!image) {
+			image = readClipboardImageViaXclip();
 		}
 
 		if (!image && wsl) {
-			image = readClipboardImageViaPowerShell();
+			image = readClipboardImageViaPowerShell(true);
 		}
-
-		if (!image && !wayland) {
-			image = await readClipboardImageViaNativeClipboard();
-		}
-	} else {
-		image = await readClipboardImageViaNativeClipboard();
+	} else if (platform === "darwin") {
+		image = await readClipboardImageViaMacOS();
+	} else if (platform === "win32") {
+		image = readClipboardImageViaPowerShell(false);
 	}
 
 	if (!image) {

@@ -25,10 +25,10 @@ completed.
   [Bun licensing](https://bun.sh/docs/project/license).
 
   The release build now includes the exact locally available Photon,
-  Highlight.js, and Marked license files. The pinned clipboard packages do not
-  ship an authoritative license text, and the Bun/WebKit materials are not
-  available in this checkout. Obtain and review those exact materials before
-  closing this gate; do not synthesize attribution from package metadata.
+  clipboard-image, run-jxa, Highlight.js, and Marked license files. The former
+  native clipboard addon and its platform sidecars have been removed. The
+  Bun/WebKit materials are not available in this checkout; obtain and review
+  those exact materials before closing this gate.
 
   **Do not create the release tag until the release owner approves and records
   this compliance gate.** Configure the GitHub `binary-release` environment

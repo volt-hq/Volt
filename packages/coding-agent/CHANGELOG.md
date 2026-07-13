@@ -161,6 +161,7 @@
 
 ### Changed
 
+- Replaced the native clipboard addon and its platform sidecars with OS clipboard tools for text and Linux/Windows images, plus the MIT-licensed `clipboard-image` JXA helper for macOS image paste. Standalone archives no longer ship the native clipboard binaries.
 - Redesigned subagent tool calls as a compact live roster with aggregate status, per-child task, duration, tool-call and token metadata, expandable outputs, and a matching status summary in the dedicated subagent inspector.
 - Changed recursive subagent delegation to fail closed for definitions without `allowedSubagents`, share hard depth/start/concurrency/turn/token/cost/deadline limits across the entire descendant tree, cap combined parallel output, and report tree-budget consumption in tool details.
 - Redesigned the interactive shell with a responsive startup lockup, compact resource summary, mode-aware editor frame, prioritized workspace/model/context status rail, and explicit transcript and tool-state hierarchy.
