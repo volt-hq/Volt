@@ -26,6 +26,7 @@ vi.mock("../src/core/compaction/index.js", () => ({
 		tokensBefore: 100,
 		details: {},
 	}),
+	estimateTokens: (message: { content?: unknown }) => Math.ceil(JSON.stringify(message.content ?? "").length / 4),
 	estimateContextTokens: (
 		messages: Array<{
 			role: string;
