@@ -1,0 +1,223 @@
+name: Test Release Authorization
+
+on:
+  workflow_dispatch:
+    inputs:
+      authorization_phrase:
+        description: 'test release authorization at <current 40-character main SHA>'
+        required: true
+        type: string
+      app_creation_approved:
+        description: 'Exercise annotated tag creation through the Release Tagger App'
+        required: true
+        type: boolean
+      github_token_denial_approved:
+        description: 'Verify the ordinary GITHUB_TOKEN cannot create the test tag'
+        required: true
+        type: boolean
+      app_mutation_denial_approved:
+        description: 'Verify the Release Tagger App cannot update or delete the test tag'
+        required: true
+        type: boolean
+      confirm_test:
+        description: 'Create one disposable release-automation-test/* tag'
+        required: true
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: release-authorization-test
+  cancel-in-progress: false
+
+jobs:
+  exercise:
+    runs-on: ubuntu-24.04
+    environment: release-authorization
+    permissions:
+      contents: write
+    steps:
+      - name: Validate owner authorization and exact main commit
+        env:
+          APP_CREATION_APPROVED: ${{ inputs.app_creation_approved }}
+          APP_MUTATION_DENIAL_APPROVED: ${{ inputs.app_mutation_denial_approved }}
+          AUTHORIZATION_PHRASE: ${{ inputs.authorization_phrase }}
+          CONFIRM_TEST: ${{ inputs.confirm_test }}
+          GITHUB_TOKEN_DENIAL_APPROVED: ${{ inputs.github_token_denial_approved }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          RUN_ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        shell: bash
+        run: |
+          if [[ "${RUN_ACTOR}" != "${REPOSITORY_OWNER}" ]] || [[ "${TRIGGERING_ACTOR}" != "${REPOSITORY_OWNER}" ]]; then
+            echo "Only the repository owner may exercise release authorization" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "Release authorization testing must be dispatched from main" >&2
+            exit 1
+          fi
+          expected_phrase="test release authorization at ${GITHUB_SHA}"
+          if [[ "${AUTHORIZATION_PHRASE}" != "${expected_phrase}" ]]; then
+            echo "Authorization phrase must be exactly: ${expected_phrase}" >&2
+            exit 1
+          fi
+          for acknowledgement in \
+            "${APP_CREATION_APPROVED}" \
+            "${GITHUB_TOKEN_DENIAL_APPROVED}" \
+            "${APP_MUTATION_DENIAL_APPROVED}" \
+            "${CONFIRM_TEST}"; do
+            if [[ "${acknowledgement}" != "true" ]]; then
+              echo "Every test acknowledgement must be selected" >&2
+              exit 1
+            fi
+          done
+
+      - name: Resolve the disposable tag and verify current main
+        id: test-context
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const main = await github.rest.repos.getBranch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch: "main",
+            });
+            if (main.data.commit.sha !== context.sha) {
+              core.setFailed(`main moved to ${main.data.commit.sha}; workflow commit is ${context.sha}`);
+              return;
+            }
+            const tag = `release-automation-test/${context.runId}-${context.runAttempt}`;
+            core.setOutput("tag", tag);
+            core.setOutput("message", `Release authorization test ${context.runId}-${context.runAttempt}`);
+
+      - name: Verify the ordinary GITHUB_TOKEN cannot create the test tag
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          TEST_TAG: ${{ steps.test-context.outputs.tag }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const tag = process.env.TEST_TAG;
+            const tagObject = await github.rest.git.createTag({
+              owner,
+              repo,
+              tag,
+              message: `Ordinary GITHUB_TOKEN denial probe for ${context.runId}`,
+              object: context.sha,
+              type: "commit",
+            });
+            let denied = false;
+            try {
+              await github.rest.git.createRef({
+                owner,
+                repo,
+                ref: `refs/tags/${tag}`,
+                sha: tagObject.data.sha,
+              });
+            } catch (error) {
+              if (error.status !== 403 && error.status !== 422) throw error;
+              denied = true;
+            }
+            if (!denied) {
+              core.setFailed("Ordinary GITHUB_TOKEN unexpectedly created the protected test tag");
+              return;
+            }
+            try {
+              await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` });
+              core.setFailed("Protected test tag exists after the denied GITHUB_TOKEN attempt");
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
+      - name: Mint a repository-scoped Release Tagger token
+        id: release-app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.VOLT_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.VOLT_RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Verify App creation and mutation denial
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          TEST_TAG: ${{ steps.test-context.outputs.tag }}
+          TEST_TAG_MESSAGE: ${{ steps.test-context.outputs.message }}
+        with:
+          github-token: ${{ steps.release-app.outputs.token }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const tag = process.env.TEST_TAG;
+            const message = process.env.TEST_TAG_MESSAGE;
+            const tagObject = await github.rest.git.createTag({
+              owner,
+              repo,
+              tag,
+              message,
+              object: context.sha,
+              type: "commit",
+            });
+            await github.rest.git.createRef({
+              owner,
+              repo,
+              ref: `refs/tags/${tag}`,
+              sha: tagObject.data.sha,
+            });
+
+            const verifyTag = async () => {
+              const ref = await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` });
+              if (ref.data.object.type !== "tag") throw new Error(`${tag} is not annotated`);
+              const annotated = await github.rest.git.getTag({ owner, repo, tag_sha: ref.data.object.sha });
+              if (
+                annotated.data.tag !== tag ||
+                annotated.data.object.type !== "commit" ||
+                annotated.data.object.sha !== context.sha ||
+                annotated.data.message !== message
+              ) {
+                throw new Error(`${tag} did not read back as the exact test tag`);
+              }
+            };
+            await verifyTag();
+
+            let updateDenied = false;
+            try {
+              await github.rest.git.updateRef({
+                owner,
+                repo,
+                ref: `tags/${tag}`,
+                sha: context.sha,
+                force: true,
+              });
+            } catch (error) {
+              if (error.status !== 403 && error.status !== 422) throw error;
+              updateDenied = true;
+            }
+            if (!updateDenied) {
+              core.setFailed("Release Tagger App unexpectedly updated the protected test tag");
+              return;
+            }
+
+            let deletionDenied = false;
+            try {
+              await github.rest.git.deleteRef({ owner, repo, ref: `tags/${tag}` });
+            } catch (error) {
+              if (error.status !== 403 && error.status !== 422) throw error;
+              deletionDenied = true;
+            }
+            if (!deletionDenied) {
+              core.setFailed("Release Tagger App unexpectedly deleted the protected test tag");
+              return;
+            }
+            await verifyTag();
+
+            await core.summary
+              .addHeading("Release authorization exercise passed")
+              .addRaw(`- Test tag: \`${tag}\`\n`)
+              .addRaw(`- Target commit: \`${context.sha}\`\n`)
+              .addRaw("- Ordinary GITHUB_TOKEN creation: denied\n")
+              .addRaw("- Release Tagger App annotated creation: verified\n")
+              .addRaw("- Release Tagger App update: denied\n")
+              .addRaw("- Release Tagger App deletion: denied\n")
+              .write();
