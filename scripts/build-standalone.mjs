@@ -451,7 +451,11 @@ async function extractNodeRuntime(runtime, targetConfig, nodeArchiveOption, temp
 
 	const extractionDirectory = join(temporaryDirectory, "node-runtime");
 	mkdirSync(extractionDirectory, { recursive: true, mode: 0o755 });
-	run("tar", ["-xf", archivePath, "-C", extractionDirectory]);
+	const tarArguments = ["-xf", archivePath, "-C", extractionDirectory];
+	// Git for Windows puts GNU tar on PATH. Without --force-local it treats the
+	// drive-letter colon in C:\\... as the separator for a remote tape host.
+	if (process.platform === "win32") tarArguments.unshift("--force-local");
+	run("tar", tarArguments);
 	const archiveRoot = targetConfig.archive.replace(/\.(?:tar\.gz|tar\.xz|zip)$/, "");
 	const executable = targetConfig.archive.includes("-win-")
 		? join(extractionDirectory, archiveRoot, "node.exe")
