@@ -744,6 +744,60 @@ test("release package versions and the product changelog must match the tag", ()
 	assert.throws(() => verifyReleasePackageMetadata("v1.2.3", (path) => files.get(path)), /expected @hansjm10\/volt-ai/);
 });
 
+test("shipped packages and standalone archives contain no development workflow tooling", () => {
+	const rootManifest = JSON.parse(readFileSync("package.json", "utf8"));
+	assert.equal(rootManifest.private, true, "the monorepo root must never be publishable");
+
+	const expectedFiles = {
+		"packages/agent": ["dist", "README.md", "LICENSE"],
+		"packages/ai": ["dist", "README.md", "LICENSE"],
+		"packages/coding-agent": [
+			"dist",
+			"docs",
+			"!docs/images/doom-extension.png",
+			"examples",
+			"!examples/README.binary.md",
+			"!examples/extensions/doom-overlay",
+			"!examples/extensions/doom-overlay/**",
+			"!examples/**/node_modules",
+			"!examples/**/node_modules/**",
+			"containerization.md",
+			"CHANGELOG.md",
+			"LICENSE",
+			"THIRD-PARTY-NOTICES.md",
+			"BINARY-CAPABILITIES.md",
+			"npm-shrinkwrap.json",
+		],
+		"packages/tui": [
+			"dist/**/*",
+			"native/win32/prebuilds/**/*.node",
+			"native/darwin/prebuilds/**/*.node",
+			"README.md",
+			"LICENSE",
+		],
+	};
+	const devToolingMarker = /\.changeset|\.volt|\.husky|\.github|scripts\//;
+	for (const { directory } of RELEASE_PACKAGE_IDENTITIES) {
+		const manifest = JSON.parse(readFileSync(`${directory}/package.json`, "utf8"));
+		assert.deepEqual(
+			manifest.files,
+			expectedFiles[directory],
+			`${directory} ships an unexpected file set; the changelog/changeset/release workflow is Volt-development tooling and stays repo-only — update this pin only for deliberate product packaging changes`,
+		);
+		for (const entry of manifest.files) {
+			assert.doesNotMatch(entry, devToolingMarker, `${directory} files entry references development tooling: ${entry}`);
+		}
+	}
+
+	const buildStandalone = readFileSync("scripts/build-standalone.mjs", "utf8");
+	assert.match(
+		buildStandalone,
+		/"package\.json",\s*"README\.md",\s*"CHANGELOG\.md",\s*"LICENSE",\s*"THIRD-PARTY-NOTICES\.md",\s*"BINARY-CAPABILITIES\.md",\s*"npm-shrinkwrap\.json",\s*\]/,
+		"the standalone archive's staged top-level file list changed; keep development tooling out and update this pin deliberately",
+	);
+	assert.doesNotMatch(buildStandalone, /\.changeset\/|\.volt\/|\.husky\//);
+});
+
 test("release tooling publishes only the canonical Volt package identities under the beta dist-tag", () => {
 	assert.deepEqual(RELEASE_PACKAGE_IDENTITIES, [
 		{ directory: "packages/ai", name: "@hansjm10/volt-ai" },
