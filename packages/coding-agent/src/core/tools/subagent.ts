@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@hansjm10/volt-agent-core";
 import type { AssistantMessage, TextContent } from "@hansjm10/volt-ai";
 import { type Component, Markdown, Text, truncateToWidth, visibleWidth } from "@hansjm10/volt-tui";
@@ -18,6 +19,8 @@ import type {
 	SubagentHandle,
 	SubagentRegistryRecord,
 	SubagentResult,
+	SubagentSpawnConfirmationLease,
+	SubagentSpawnConfirmationPreflight,
 	SubagentStartByNameOptions,
 } from "../subagents/index.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
@@ -57,7 +60,11 @@ const subagentRegistrySchema = Type.Object({
 	),
 });
 
-function createSubagentSchema(availableNames?: readonly string[], includeRegistryModes = true) {
+function createSubagentSchema(
+	availableNames?: readonly string[],
+	includeRegistryModes = true,
+	includeSpawnConfirmation = true,
+) {
 	const enumConstraint = availableNames ? { enum: [...availableNames] } : {};
 	const subagentTaskSchema = Type.Object({
 		agent: Type.String({ description: "Name of the subagent to invoke", ...enumConstraint }),
@@ -80,6 +87,12 @@ function createSubagentSchema(availableNames?: readonly string[], includeRegistr
 				minItems: 1,
 			}),
 		),
+		confirm: Type.Optional(
+			Type.String({
+				description:
+					"Opaque confirmation token returned by the registry preflight. Repeat the exact spawn request with this token to start it.",
+			}),
+		),
 		list: subagentRegistrySchema.properties.list,
 		offset: subagentRegistrySchema.properties.offset,
 		follow: subagentRegistrySchema.properties.follow,
@@ -89,6 +102,10 @@ function createSubagentSchema(availableNames?: readonly string[], includeRegistr
 		delete properties.list;
 		delete properties.offset;
 		delete properties.follow;
+	}
+	if (!includeSpawnConfirmation) {
+		const properties: Record<string, unknown> = schema.properties;
+		delete properties.confirm;
 	}
 	return schema;
 }
@@ -265,6 +282,10 @@ export interface SubagentToolManager {
 	createDelegationScope?(options?: SubagentDelegationScopeOptions): SubagentDelegationScopeLease;
 	/** All delegated runs in this session's tree-wide registry, for list mode. */
 	listDelegations?(): SubagentRegistryRecord[];
+	/** Atomically list and reserve an exact spawn request across the session tree. */
+	prepareSpawnConfirmation?(requestKey: string): SubagentSpawnConfirmationPreflight;
+	/** Atomically claim a reserved exact spawn request. */
+	claimSpawnConfirmation?(requestKey: string, token: string): SubagentSpawnConfirmationLease | undefined;
 	/** Result of an existing run, waiting for completion when still running, for follow mode. */
 	followDelegation?(subagentId: string, options?: { signal?: AbortSignal }): Promise<SubagentFollowResult>;
 	dispose?(): Promise<void>;
@@ -298,7 +319,7 @@ interface NormalizedSubagentTaskInput {
 }
 
 type NormalizedSubagentToolInput =
-	| { mode: "single" | "parallel" | "chain"; tasks: NormalizedSubagentTaskInput[] }
+	| { mode: "single" | "parallel" | "chain"; tasks: NormalizedSubagentTaskInput[]; confirm?: string }
 	| { mode: "list"; offset: number }
 	| { mode: "follow"; subagentId: string };
 
@@ -1149,7 +1170,44 @@ function formatProgressContent(details: SubagentToolDetails, message: string | u
 	return `Subagent ${details.mode}: ${formatSummary(details)}${suffix}`;
 }
 
+function createSubagentSpawnRequestKey(
+	normalized: Extract<NormalizedSubagentToolInput, { mode: "single" | "parallel" | "chain" }>,
+): string {
+	const serialized = JSON.stringify({
+		mode: normalized.mode,
+		tasks: normalized.tasks.map((task) => ({ agent: task.agent, task: task.task })),
+	});
+	return createHash("sha256").update(serialized).digest("hex");
+}
+
+function createSubagentSpawnPreflightResult(
+	registryResult: AgentToolResult<SubagentToolDetails>,
+	preflight: SubagentSpawnConfirmationPreflight,
+	confirmationRejected: boolean,
+	maxBytes: number,
+): AgentToolResult<SubagentToolDetails> {
+	const status = confirmationRejected
+		? "The supplied confirmation token was not valid for this exact spawn request."
+		: "A registry preflight was completed.";
+	const confirmationInstruction = preflight.token
+		? `To start this exact request, repeat it unchanged with { "confirm": "${preflight.token}" } within 5 minutes. The token is one-time use.`
+		: preflight.status === "claimed"
+			? "An identical request is already being started or run elsewhere in this session, so no new confirmation token was issued. Reuse or follow that run."
+			: "An identical request already has a pending confirmation elsewhere in this session, so no new confirmation token was issued. Reuse that pending request or retry after it expires.";
+	const instructions = [
+		`${status} No subagents were started.`,
+		"Review the session-wide registry below and reuse or follow equivalent work instead of spawning a duplicate.",
+		confirmationInstruction,
+	].join("\n");
+	const output = truncateModelVisibleOutput(`${instructions}\n\n${getTextContent(registryResult)}`, maxBytes);
+	return { ...registryResult, content: [{ type: "text", text: output.text }] };
+}
+
 function normalizeSubagentToolInput(params: SubagentToolInput): NormalizedSubagentToolInput {
+	const confirm = params.confirm?.trim();
+	if (params.confirm !== undefined && !confirm) {
+		throw new Error("Invalid subagent input: confirm must be a non-empty registry preflight token.");
+	}
 	const hasSingleField = params.agent !== undefined || params.task !== undefined;
 	const hasTasksField = params.tasks !== undefined;
 	const hasChainField = params.chain !== undefined;
@@ -1172,6 +1230,9 @@ function normalizeSubagentToolInput(params: SubagentToolInput): NormalizedSubage
 	}
 
 	if (hasListField) {
+		if (confirm) {
+			throw new Error("Invalid subagent input: confirm is only valid with single, parallel, or chain mode.");
+		}
 		if (params.list !== true) {
 			throw new Error("Invalid subagent input: list mode requires { list: true }.");
 		}
@@ -1183,6 +1244,9 @@ function normalizeSubagentToolInput(params: SubagentToolInput): NormalizedSubage
 	}
 
 	if (hasFollowField) {
+		if (confirm) {
+			throw new Error("Invalid subagent input: confirm is only valid with single, parallel, or chain mode.");
+		}
 		const subagentId = params.follow?.trim();
 		if (!subagentId) {
 			throw new Error("Invalid subagent input: follow mode requires a non-empty subagent run id.");
@@ -1196,23 +1260,33 @@ function normalizeSubagentToolInput(params: SubagentToolInput): NormalizedSubage
 		if (!agent || !task || task.trim().length === 0) {
 			throw new Error("Invalid subagent input: single mode requires non-empty agent and task.");
 		}
-		return { mode: "single", tasks: [{ index: 0, agent, task }] };
+		return { mode: "single", tasks: [{ index: 0, agent, task }], ...(confirm ? { confirm } : {}) };
 	}
 
 	if (hasTasksField) {
 		if (!params.tasks || params.tasks.length === 0) {
 			throw new Error("Invalid subagent input: parallel mode requires at least one task.");
 		}
-
+		const firstIndexByTask = new Map<string, number>();
+		const tasks = params.tasks.map((task, index) => {
+			const agent = task.agent.trim();
+			if (!agent || task.task.trim().length === 0) {
+				throw new Error(`Invalid subagent input: parallel task ${index + 1} requires non-empty agent and task.`);
+			}
+			const taskKey = JSON.stringify([agent, task.task]);
+			const firstIndex = firstIndexByTask.get(taskKey);
+			if (firstIndex !== undefined) {
+				throw new Error(
+					`Invalid subagent input: parallel task ${index + 1} duplicates task ${firstIndex + 1}; submit each exact agent/task pair only once.`,
+				);
+			}
+			firstIndexByTask.set(taskKey, index);
+			return { index, agent, task: task.task };
+		});
 		return {
 			mode: "parallel",
-			tasks: params.tasks.map((task, index) => {
-				const agent = task.agent.trim();
-				if (!agent || task.task.trim().length === 0) {
-					throw new Error(`Invalid subagent input: parallel task ${index + 1} requires non-empty agent and task.`);
-				}
-				return { index, agent, task: task.task };
-			}),
+			tasks,
+			...(confirm ? { confirm } : {}),
 		};
 	}
 
@@ -1229,6 +1303,36 @@ function normalizeSubagentToolInput(params: SubagentToolInput): NormalizedSubage
 			}
 			return { index, agent, task: step.task };
 		}),
+		...(confirm ? { confirm } : {}),
+	};
+}
+
+function createSubagentRegistryListResult(
+	records: readonly SubagentRegistryRecord[],
+	offset: number,
+	maxAggregateOutputBytes: number,
+): AgentToolResult<SubagentToolDetails> {
+	const counts = { completed: 0, failed: 0, aborted: 0, running: 0 };
+	for (const record of records) {
+		counts[record.status] += 1;
+	}
+	const page = formatDelegationList(records, offset, maxAggregateOutputBytes);
+	return {
+		content: [{ type: "text", text: page.text }],
+		details: {
+			mode: "list",
+			status: "completed",
+			summary: {
+				total: records.length,
+				completed: counts.completed,
+				failed: counts.failed,
+				aborted: counts.aborted,
+				...(counts.running > 0 ? { running: counts.running } : {}),
+				offset,
+				returned: page.returned,
+				...(page.nextOffset !== undefined ? { nextOffset: page.nextOffset } : {}),
+			},
+		},
 	};
 }
 
@@ -1247,28 +1351,7 @@ async function executeSubagentRegistryOperation(
 		if (!records) {
 			throw new Error("The subagent delegation registry is not available in this session.");
 		}
-		const counts = { completed: 0, failed: 0, aborted: 0, running: 0 };
-		for (const record of records) {
-			counts[record.status] += 1;
-		}
-		const page = formatDelegationList(records, normalized.offset, options.maxAggregateOutputBytes);
-		return {
-			content: [{ type: "text", text: page.text }],
-			details: {
-				mode: "list",
-				status: "completed",
-				summary: {
-					total: records.length,
-					completed: counts.completed,
-					failed: counts.failed,
-					aborted: counts.aborted,
-					...(counts.running > 0 ? { running: counts.running } : {}),
-					offset: normalized.offset,
-					returned: page.returned,
-					...(page.nextOffset !== undefined ? { nextOffset: page.nextOffset } : {}),
-				},
-			},
-		};
+		return createSubagentRegistryListResult(records, normalized.offset, options.maxAggregateOutputBytes);
 	}
 
 	if (!options.manager.followDelegation) {
@@ -1828,6 +1911,9 @@ export function createSubagentToolDefinition(
 ): ToolDefinition<typeof subagentSchema, SubagentToolDetails, SubagentRenderState> {
 	const options = _options;
 	const includeRegistryModes = options.includeRegistryModes ?? true;
+	const requiresSpawnConfirmation =
+		typeof options.manager.prepareSpawnConfirmation === "function" &&
+		typeof options.manager.claimSpawnConfirmation === "function";
 	const availableDefinitions = options.manager.listAvailableDefinitions?.();
 	const availableNames = availableDefinitions?.map((definition) => definition.name);
 	const availableSummary = availableDefinitions
@@ -1872,6 +1958,11 @@ export function createSubagentToolDefinition(
 						"Follow mode returns an existing run's result by id instead of starting a new subagent, waiting for completion when it is still running.",
 					]
 				: []),
+			...(requiresSpawnConfirmation
+				? [
+						"Starting a single, parallel, or chain request is two-phase: the first request returns a live registry preflight and one-time confirmation token without starting any subagents.",
+					]
+				: []),
 			"Child subagent tools are clamped to the current parent/session tool policy.",
 		].join(" "),
 		promptSnippet: "Delegate tasks to named isolated subagents",
@@ -1879,15 +1970,19 @@ export function createSubagentToolDefinition(
 			"Use subagent when a named specialized agent should handle focused work in an isolated context.",
 			availableGuideline,
 			"Scale delegation to task complexity, avoid duplicate assignments, and stop spawning once existing evidence is sufficient.",
-			...(includeRegistryModes
+			...(requiresSpawnConfirmation
 				? [
-						'Before delegating, use { list: true } to check whether an equivalent task already ran or is still running anywhere in this session, and prefer { follow: "<id>" } over starting a duplicate run.',
+						"The first spawn request only lists the session-wide registry. Review it, reuse or follow equivalent work, and repeat the exact request with the returned confirmation token only when a new run is still needed.",
 					]
-				: []),
+				: includeRegistryModes
+					? [
+							'Before delegating, use { list: true } to check whether an equivalent task already ran or is still running anywhere in this session, and prefer { follow: "<id>" } over starting a duplicate run.',
+						]
+					: []),
 			"Use parallel mode only for independent tasks whose outputs can be combined after all children finish.",
 			"Use chain mode only when each step depends on the prior successful output via {previous}.",
 		],
-		parameters: createSubagentSchema(availableNames, includeRegistryModes),
+		parameters: createSubagentSchema(availableNames, includeRegistryModes, requiresSpawnConfirmation),
 		executionMode: "sequential",
 		async execute(
 			_toolCallId,
@@ -1930,8 +2025,34 @@ export function createSubagentToolDefinition(
 					);
 				}
 			}
+			let spawnConfirmationLease: SubagentSpawnConfirmationLease | undefined;
+			if (requiresSpawnConfirmation) {
+				const requestKey = createSubagentSpawnRequestKey(normalized);
+				spawnConfirmationLease = normalized.confirm
+					? options.manager.claimSpawnConfirmation?.(requestKey, normalized.confirm)
+					: undefined;
+				if (!spawnConfirmationLease) {
+					const preflight = options.manager.prepareSpawnConfirmation?.(requestKey);
+					if (!preflight) {
+						throw new Error("The subagent spawn confirmation registry is not available in this session.");
+					}
+					const registryResult = createSubagentRegistryListResult(preflight.records, 0, maxAggregateOutputBytes);
+					return createSubagentSpawnPreflightResult(
+						registryResult,
+						preflight,
+						normalized.confirm !== undefined,
+						maxAggregateOutputBytes,
+					);
+				}
+			}
 			const executionStartedAt = Date.now();
-			const delegationLease = options.manager.createDelegationScope?.({ signal });
+			let delegationLease: SubagentDelegationScopeLease | undefined;
+			try {
+				delegationLease = options.manager.createDelegationScope?.({ signal });
+			} catch (error) {
+				spawnConfirmationLease?.release();
+				throw error;
+			}
 			const activeHandles = new Set<SubagentHandle>();
 			const disposedHandles = new Set<SubagentHandle>();
 			let acceptingUpdates = true;
@@ -2286,7 +2407,11 @@ export function createSubagentToolDefinition(
 						await Promise.race([cleanup, abortPromise]);
 					}
 				} finally {
-					if (delegationLease?.owned) delegationLease.scope.dispose();
+					try {
+						if (delegationLease?.owned) delegationLease.scope.dispose();
+					} finally {
+						spawnConfirmationLease?.release();
+					}
 				}
 			}
 		},

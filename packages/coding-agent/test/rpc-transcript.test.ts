@@ -187,6 +187,7 @@ describe("RPC transcript projection", () => {
 						arguments: {
 							agent: "general",
 							task: "Review the implementation",
+							confirm: "confirmation-token",
 						},
 					},
 				],
@@ -248,7 +249,7 @@ describe("RPC transcript projection", () => {
 			role: "tool",
 			toolName: "subagent",
 			status: "completed",
-			args: { agent: "general", task: "Review the implementation" },
+			args: { agent: "general", task: "Review the implementation", confirm: "confirmation-token" },
 			details: {
 				mode: "single",
 				status: "completed",

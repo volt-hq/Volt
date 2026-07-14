@@ -23,6 +23,7 @@ import {
 	type SubagentEvent,
 	type SubagentHandle,
 	SubagentManager,
+	SubagentRegistry,
 	type SubagentResult,
 	type SubagentRuntimeCreatedEvent,
 } from "../src/core/subagents/index.ts";
@@ -68,6 +69,14 @@ function textFromResult(result: { content: Array<{ type: string; text?: string }
 		.filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string")
 		.map((part) => part.text)
 		.join("\n");
+}
+
+function confirmationTokenFromResult(result: { content: Array<{ type: string; text?: string }> }): string {
+	const token = /"confirm": "([^"]+)"/.exec(textFromResult(result))?.[1];
+	if (!token) {
+		throw new Error("expected subagent spawn confirmation token");
+	}
+	return token;
 }
 
 interface Deferred<T> {
@@ -425,17 +434,22 @@ describe("subagent tool", () => {
 			| undefined;
 		expect(rootSubagentParameters?.properties).toHaveProperty("list");
 		expect(rootSubagentParameters?.properties).toHaveProperty("follow");
+		expect(rootSubagentParameters?.properties).not.toHaveProperty("confirm");
 
 		const withoutManagerSession = await createSession({ manager: false });
 		expect(withoutManagerSession.getAllTools().map((tool) => tool.name)).not.toContain("subagent");
 		expect(withoutManagerSession.getActiveToolNames()).not.toContain("subagent");
 
 		const researcher = createDefinition("researcher");
+		const childRegistry = new SubagentRegistry();
 		const maxDepthManager = {
 			getDefinition: () => researcher,
 			isSubagentRuntime: () => true,
 			listAvailableDefinitions: () => [],
-			listDelegations: () => [],
+			listDelegations: () => childRegistry.list(),
+			prepareSpawnConfirmation: (requestKey: string) => childRegistry.prepareSpawnConfirmation(requestKey),
+			claimSpawnConfirmation: (requestKey: string, token: string) =>
+				childRegistry.claimSpawnConfirmation(requestKey, token),
 			followDelegation: async () => {
 				throw new Error("not implemented");
 			},
@@ -459,10 +473,78 @@ describe("subagent tool", () => {
 			| undefined;
 		expect(childSubagentParameters?.properties).not.toHaveProperty("list");
 		expect(childSubagentParameters?.properties).not.toHaveProperty("follow");
+		expect(childSubagentParameters?.properties).toHaveProperty("confirm");
 
 		const strictChildSession = await createSession({ manager: childManager, tools: ["subagent"] });
 		expect(strictChildSession.getAllTools().map((tool) => tool.name)).toEqual(["subagent"]);
 		expect(strictChildSession.getActiveToolNames()).toEqual(["subagent"]);
+	});
+
+	it("requires a live registry preflight and one-time exact confirmation before spawning", async () => {
+		const scout = createDefinition("scout", { source: "project" });
+		const registry = new SubagentRegistry();
+		const listRegistry = vi.spyOn(registry, "list");
+		const prompts: Array<{ agent: string; task: string }> = [];
+		const controlled = createControlledHandle({
+			id: "sa_scout",
+			sessionId: "session_scout",
+			agent: "scout",
+			prompts,
+		});
+		const startByName = vi.fn(async () => controlled.handle);
+		const createManager = (): SubagentToolManager => ({
+			getDefinition: () => scout,
+			listAvailableDefinitions: () => [scout],
+			listDelegations: () => registry.list(),
+			prepareSpawnConfirmation: (requestKey) => registry.prepareSpawnConfirmation(requestKey),
+			claimSpawnConfirmation: (requestKey, token) => registry.claimSpawnConfirmation(requestKey, token),
+			startByName,
+		});
+		const firstManager = createManager();
+		const secondManager = createManager();
+		const definition = createSubagentToolDefinition({ manager: firstManager });
+		const firstTool = createSubagentTool(process.cwd(), { manager: firstManager });
+		const secondTool = createSubagentTool(process.cwd(), { manager: secondManager });
+		const request = { agent: "scout", task: "inspect auth" };
+
+		expect(definition.description).toContain("two-phase");
+		expect(definition.parameters.properties).toHaveProperty("confirm");
+
+		const initialPreflight = await firstTool.execute("call-preflight", request);
+		const initialToken = confirmationTokenFromResult(initialPreflight);
+		expect(textFromResult(initialPreflight)).toContain("No subagents were started");
+		expect(initialPreflight.details).toMatchObject({ mode: "list", status: "completed" });
+		expect(startByName).not.toHaveBeenCalled();
+
+		const concurrentPreflight = await secondTool.execute("call-concurrent", request);
+		expect(textFromResult(concurrentPreflight)).toContain("pending confirmation elsewhere");
+		expect(textFromResult(concurrentPreflight)).not.toContain('"confirm": "');
+
+		const changedPreflight = await secondTool.execute("call-changed", {
+			agent: "scout",
+			task: "inspect billing",
+			confirm: initialToken,
+		});
+		expect(textFromResult(changedPreflight)).toContain("not valid for this exact spawn request");
+		expect(startByName).not.toHaveBeenCalled();
+
+		const execution = firstTool.execute("call-confirmed", { ...request, confirm: initialToken });
+		await waitUntil(() => prompts.length === 1);
+		const claimedPreflight = await secondTool.execute("call-claimed", request);
+		expect(textFromResult(claimedPreflight)).toContain("already being started or run elsewhere");
+		expect(textFromResult(claimedPreflight)).not.toContain('"confirm": "');
+
+		controlled.complete(
+			createSubagentResult({ id: "sa_scout", sessionId: "session_scout", text: "child final answer" }),
+		);
+		const result = await execution;
+		expect(textFromResult(result)).toBe("child final answer");
+		expect(startByName).toHaveBeenCalledOnce();
+
+		const replayedPreflight = await firstTool.execute("call-replayed", { ...request, confirm: initialToken });
+		expect(textFromResult(replayedPreflight)).toContain("not valid for this exact spawn request");
+		expect(startByName).toHaveBeenCalledOnce();
+		expect(listRegistry).toHaveBeenCalledTimes(5);
 	});
 
 	it("respects explicit subagent tool policy opt-outs and allowlists", async () => {
@@ -507,7 +589,12 @@ describe("subagent tool", () => {
 		});
 		const tool = createSubagentTool(process.cwd(), { manager, getAllowedTools: () => [] });
 
-		const result = await tool.execute("call-1", { agent: "scout", task: "inspect auth" });
+		const preflight = await tool.execute("call-1-preflight", { agent: "scout", task: "inspect auth" });
+		const result = await tool.execute("call-1", {
+			agent: "scout",
+			task: "inspect auth",
+			confirm: confirmationTokenFromResult(preflight),
+		});
 
 		expect(textFromResult(result)).toBe("child final answer");
 		expect(result.details).toMatchObject({
@@ -572,8 +659,16 @@ describe("subagent tool", () => {
 		});
 		cleanups.push({ cleanup: () => finishContinuation.resolve(undefined) });
 		const tool = createSubagentTool(process.cwd(), { manager, getAllowedTools: () => [] });
+		const preflight = await tool.execute("call-overflow-preflight", {
+			agent: "scout",
+			task: "recover from overflow",
+		});
 		let executionSettled = false;
-		const execution = tool.execute("call-overflow", { agent: "scout", task: "recover from overflow" });
+		const execution = tool.execute("call-overflow", {
+			agent: "scout",
+			task: "recover from overflow",
+			confirm: confirmationTokenFromResult(preflight),
+		});
 		void execution.then(
 			() => {
 				executionSettled = true;
@@ -1609,6 +1704,14 @@ describe("subagent tool", () => {
 			}),
 		).rejects.toThrow(/exactly one mode/);
 		await expect(tool.execute("call-1", { tasks: [] })).rejects.toThrow(/at least one task/);
+		await expect(
+			tool.execute("call-1", {
+				tasks: [
+					{ agent: "scout", task: "same work" },
+					{ agent: "scout", task: "same work" },
+				],
+			}),
+		).rejects.toThrow(/parallel task 2 duplicates task 1/);
 		await expect(tool.execute("call-1", { chain: [] })).rejects.toThrow(/at least one step/);
 		await expect(tool.execute("call-1", { list: true, agent: "scout", task: "single" })).rejects.toThrow(
 			/exactly one mode/,
@@ -1619,6 +1722,10 @@ describe("subagent tool", () => {
 			/offset is only valid/,
 		);
 		await expect(tool.execute("call-1", { follow: "  " })).rejects.toThrow(/non-empty subagent run id/);
+		await expect(tool.execute("call-1", { list: true, confirm: "token" })).rejects.toThrow(/confirm is only valid/);
+		await expect(tool.execute("call-1", { agent: "scout", task: "single", confirm: "  " })).rejects.toThrow(
+			/non-empty registry preflight token/,
+		);
 	});
 
 	it("lists the session-wide delegation registry through the standard registry tool", async () => {

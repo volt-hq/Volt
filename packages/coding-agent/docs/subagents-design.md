@@ -235,14 +235,16 @@ Core exposes a `subagent` tool when a `SubagentManager` exists and its current d
 - Parallel: `{ "tasks": [{ "agent": "scout", "task": "..." }] }`
 - Chain: `{ "chain": [{ "agent": "scout", "task": "... {previous}" }] }`
 
+Spawn modes are two-phase when the manager exposes the shared atomic confirmation API. The first request lists the live registry and reserves a SHA-256 key derived from the normalized mode and ordered agent/task inputs; it starts nothing and returns an opaque one-time token. Repeating the exact request with `confirm` claims that reservation and starts the run. Exact duplicate agent/task pairs inside one parallel request are rejected before preflight.
+
 A standard `subagent_registry` tool is registered only for runtimes whose manager has a `SubagentRuntimeContext`, independently of whether spawning is currently available. It supports:
 
 - List: `{ "list": true }` or `{ "list": true, "offset": 50 }` — a bounded page of delegated runs in the session-wide registry
 - Follow: `{ "follow": "sa_..." }` — an existing run's result, waiting while it is still running
 
-`subagent` and `subagent_registry` are separate policy names. Explicit allowlists and exclusions can enable or disable either capability without implicitly widening the other.
+`subagent` and `subagent_registry` are separate policy names. Explicit allowlists and exclusions can enable or disable either capability without implicitly widening the other. The spawn tool's internal preflight uses its manager's registry directly, so disabling the child-facing `subagent_registry` tool does not bypass confirmation.
 
-The session-wide registry (`SubagentRegistry`) is owned by the root session's manager and shared with every descendant runtime through the subagent context, alongside the delegation scope. Each start records id, parent id, agent, path, bounded task prompt, and status; terminal transitions attach the bounded final assistant output. This gives sideways visibility that the parent/child activity ledgers cannot: any branch can discover cousin runs and follow their results instead of duplicating work. Follow waits are deadlock-checked against a dependency graph of parent-awaits-child edges plus active follow edges; waits that close a cycle (following an ancestor, mutual sibling follows) are rejected. Terminal records are evicted oldest-first past a cap; running records are never evicted. List results return up to 50 complete rows within the aggregate byte limit and include the next offset when more records remain. Definition-backed children receive a bounded start-time snapshot of recorded runs only when `subagent_registry` is active (and the snapshot is non-empty), so prompt guidance never advertises an unavailable tool.
+The session-wide registry (`SubagentRegistry`) is owned by the root session's manager and shared with every descendant runtime through the subagent context, alongside the delegation scope. Each start records id, parent id, agent, path, bounded task prompt, and status; terminal transitions attach the bounded final assistant output. The same registry owns pending and claimed exact-request confirmation reservations. Reservation preparation lists and reserves synchronously, so concurrent identical requests across separate branches cannot receive independent tokens; a claimed reservation remains held until its tool call settles. Pending reservations expire after five minutes. This gives sideways visibility that the parent/child activity ledgers cannot: any branch can discover cousin runs and follow their results instead of duplicating work. Follow waits are deadlock-checked against a dependency graph of parent-awaits-child edges plus active follow edges; waits that close a cycle (following an ancestor, mutual sibling follows) are rejected. Terminal records are evicted oldest-first past a cap; running records are never evicted. List results return up to 50 complete rows within the aggregate byte limit and include the next offset when more records remain. Definition-backed children receive a bounded start-time snapshot of recorded runs only when `subagent_registry` is active (and the snapshot is non-empty), so prompt guidance never advertises an unavailable tool.
 
 The tool result returns:
 
@@ -371,7 +373,7 @@ Deferred options:
 - Definition-backed starts with system prompt, tools, model, and thinking configuration applied to child sessions.
 - Parent/session tool policy clamping for child tools.
 - Built-in `subagent` spawning tool and child-only `subagent_registry` tool backed by shared `SubagentManager` registry behavior.
-- Single, parallel, and chain spawning modes plus bounded/paginated registry list and deadlock-checked follow modes, with output truncation and usage/status details.
+- Single, parallel, and chain spawning modes with shared registry preflight/confirmation, exact concurrent-request reservation, duplicate parallel-item rejection, bounded/paginated registry list, and deadlock-checked follow modes, with output truncation and usage/status details.
 - Compact TUI rendering and live progress updates for built-in `subagent` tool calls.
 - Live `/subagents` inspector with bounded active/completed activity retention, conversation drill-down, and tool-flow rendering.
 - Local RPC commands: `list_subagents`, `subagent_start`, `subagent_abort`, `subagent_get_state`, `subagent_get_transcript`, and `subagent_dispose`.
@@ -405,6 +407,7 @@ Integration tests:
 - parent `subagent` tool receives child final output
 - max-depth children omit `subagent` spawning while retaining callable `subagent_registry` list/follow access
 - registry tool calls project through stdio, loopback, and Iroh as ordinary tool events
+- concurrent identical spawn requests across separate tool instances share one atomic registry reservation
 - parallel children respect concurrency limits
 - child provider/tool errors do not crash parent runtime
 - app-visible sessions keep the selected workspace/session identity through the existing remote flow

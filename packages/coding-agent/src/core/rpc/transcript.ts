@@ -410,6 +410,7 @@ function projectSubagentArgs(args: Record<string, unknown> | undefined): Record<
 	copyBooleanArg(args, projected, "list");
 	copyNumberArg(args, projected, "offset");
 	copyStringArg(args, projected, "follow", SUBAGENT_ID_LIMIT);
+	copyStringArg(args, projected, "confirm", SUBAGENT_ID_LIMIT);
 	return Object.keys(projected).length > 0 ? projected : undefined;
 }
 

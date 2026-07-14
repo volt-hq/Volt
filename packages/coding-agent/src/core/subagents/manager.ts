@@ -20,7 +20,13 @@ import {
 	type SubagentDelegationScopeOptions,
 } from "./delegation-scope.ts";
 import type { SubagentDefinition } from "./index.ts";
-import { type SubagentFollowResult, SubagentRegistry, type SubagentRegistryRecord } from "./registry.ts";
+import {
+	type SubagentFollowResult,
+	SubagentRegistry,
+	type SubagentRegistryRecord,
+	type SubagentSpawnConfirmationLease,
+	type SubagentSpawnConfirmationPreflight,
+} from "./registry.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "./tool-names.ts";
 
 export type SubagentEvent = RpcClientEvent;
@@ -573,6 +579,14 @@ export class SubagentManager {
 	/** All delegated runs recorded in this runtime tree's session-wide registry. */
 	listDelegations(): SubagentRegistryRecord[] {
 		return this.getRegistry().list();
+	}
+
+	prepareSpawnConfirmation(requestKey: string): SubagentSpawnConfirmationPreflight {
+		return this.getRegistry().prepareSpawnConfirmation(requestKey);
+	}
+
+	claimSpawnConfirmation(requestKey: string, token: string): SubagentSpawnConfirmationLease | undefined {
+		return this.getRegistry().claimSpawnConfirmation(requestKey, token);
 	}
 
 	/** Result of an existing run in the tree, waiting for completion when still running. */

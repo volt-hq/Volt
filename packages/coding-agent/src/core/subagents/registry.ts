@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { SubagentDefinitionSource } from "./index.ts";
 
 export type SubagentRegistryStatus = "running" | "completed" | "failed" | "aborted";
@@ -33,6 +34,22 @@ export interface SubagentFollowResult {
 	finishedAt: number;
 }
 
+export type SubagentSpawnConfirmationStatus = "reserved" | "pending" | "claimed";
+
+/** Atomic registry snapshot and reservation result for a proposed spawn request. */
+export interface SubagentSpawnConfirmationPreflight {
+	records: SubagentRegistryRecord[];
+	status: SubagentSpawnConfirmationStatus;
+	expiresAt: number;
+	/** Present only when this call created the reservation. */
+	token?: string;
+}
+
+/** One claimed spawn reservation. Release it when the confirmed tool call settles. */
+export interface SubagentSpawnConfirmationLease {
+	release(): void;
+}
+
 interface SubagentRegistryEntry {
 	id: string;
 	/** Monotonic registration order, so listing stays stable within one millisecond. */
@@ -49,12 +66,20 @@ interface SubagentRegistryEntry {
 	waiters: Array<{ resolve: (result: SubagentFollowResult) => void }>;
 }
 
+interface SubagentSpawnConfirmationEntry {
+	token: string;
+	status: "pending" | "claimed";
+	expiresAt: number;
+}
+
 const REGISTRY_TASK_LIMIT_CHARS = 2_000;
 const REGISTRY_OUTPUT_LIMIT_CHARS = 50_000;
 const REGISTRY_ERROR_LIMIT_CHARS = 4_000;
 const REGISTRY_ID_PREVIEW_LIMIT_CHARS = 120;
 const REGISTRY_KNOWN_ID_PREVIEW_LIMIT = 20;
 const MAX_REGISTRY_RECORDS = 500;
+const SUBAGENT_SPAWN_CONFIRMATION_TTL_MS = 5 * 60 * 1000;
+const MAX_PENDING_SPAWN_CONFIRMATIONS = 500;
 /** Node key representing the root session in the wait-dependency graph. */
 const ROOT_NODE = "root";
 
@@ -77,6 +102,7 @@ function boundText(text: string, limit: number): string {
  */
 export class SubagentRegistry {
 	private readonly entries = new Map<string, SubagentRegistryEntry>();
+	private readonly spawnConfirmations = new Map<string, SubagentSpawnConfirmationEntry>();
 	/** Active follow waits, follower node key -> target id and waiter count, for deadlock detection. */
 	private readonly activeFollows = new Map<string, Map<string, number>>();
 	private nextSequence = 0;
@@ -142,6 +168,59 @@ export class SubagentRegistry {
 	get(id: string): SubagentRegistryRecord | undefined {
 		const entry = this.entries.get(id);
 		return entry ? this.toRecord(entry) : undefined;
+	}
+
+	/**
+	 * List current runs and atomically reserve one exact normalized spawn request.
+	 * Concurrent callers for the same key observe the existing reservation instead
+	 * of receiving independent confirmation tokens.
+	 */
+	prepareSpawnConfirmation(requestKey: string): SubagentSpawnConfirmationPreflight {
+		const records = this.list();
+		const now = Date.now();
+		this.pruneExpiredSpawnConfirmations(now);
+		const existing = this.spawnConfirmations.get(requestKey);
+		if (existing) {
+			return {
+				records,
+				status: existing.status,
+				expiresAt: existing.expiresAt,
+			};
+		}
+
+		this.evictOldestPendingSpawnConfirmation();
+		const confirmation: SubagentSpawnConfirmationEntry = {
+			token: randomUUID(),
+			status: "pending",
+			expiresAt: now + SUBAGENT_SPAWN_CONFIRMATION_TTL_MS,
+		};
+		this.spawnConfirmations.set(requestKey, confirmation);
+		return {
+			records,
+			status: "reserved",
+			expiresAt: confirmation.expiresAt,
+			token: confirmation.token,
+		};
+	}
+
+	/** Atomically claim a pending token for its exact normalized spawn request. */
+	claimSpawnConfirmation(requestKey: string, token: string): SubagentSpawnConfirmationLease | undefined {
+		this.pruneExpiredSpawnConfirmations(Date.now());
+		const confirmation = this.spawnConfirmations.get(requestKey);
+		if (!confirmation || confirmation.status !== "pending" || confirmation.token !== token) {
+			return undefined;
+		}
+		confirmation.status = "claimed";
+		let released = false;
+		return {
+			release: () => {
+				if (released) return;
+				released = true;
+				if (this.spawnConfirmations.get(requestKey) === confirmation) {
+					this.spawnConfirmations.delete(requestKey);
+				}
+			},
+		};
 	}
 
 	/**
@@ -285,6 +364,26 @@ export class SubagentRegistry {
 			}
 			if (!oldestTerminal) return;
 			this.entries.delete(oldestTerminal.id);
+		}
+	}
+
+	private pruneExpiredSpawnConfirmations(now: number): void {
+		for (const [requestKey, confirmation] of this.spawnConfirmations) {
+			if (confirmation.status === "pending" && confirmation.expiresAt <= now) {
+				this.spawnConfirmations.delete(requestKey);
+			}
+		}
+	}
+
+	private evictOldestPendingSpawnConfirmation(): void {
+		if (this.spawnConfirmations.size < MAX_PENDING_SPAWN_CONFIRMATIONS) {
+			return;
+		}
+		for (const [requestKey, confirmation] of this.spawnConfirmations) {
+			if (confirmation.status === "pending") {
+				this.spawnConfirmations.delete(requestKey);
+				return;
+			}
 		}
 	}
 }

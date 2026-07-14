@@ -507,4 +507,7 @@ export {
 	SubagentRegistry,
 	type SubagentRegistryRecord,
 	type SubagentRegistryStatus,
+	type SubagentSpawnConfirmationLease,
+	type SubagentSpawnConfirmationPreflight,
+	type SubagentSpawnConfirmationStatus,
 } from "./registry.ts";

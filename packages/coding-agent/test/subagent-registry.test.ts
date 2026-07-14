@@ -40,6 +40,32 @@ describe("SubagentRegistry", () => {
 		expect(task?.endsWith("…")).toBe(true);
 	});
 
+	it("atomically reserves one confirmation for concurrent identical spawn requests", () => {
+		const registry = new SubagentRegistry();
+		registerRunning(registry, "sa_existing", { task: "existing work" });
+
+		const first = registry.prepareSpawnConfirmation("same-request");
+		const concurrent = registry.prepareSpawnConfirmation("same-request");
+
+		expect(first).toMatchObject({ status: "reserved", records: [{ id: "sa_existing" }] });
+		expect(first.token).toBeTruthy();
+		expect(concurrent).toMatchObject({ status: "pending", records: [{ id: "sa_existing" }] });
+		expect(concurrent.token).toBeUndefined();
+		if (!first.token) {
+			throw new Error("expected confirmation token");
+		}
+
+		const lease = registry.claimSpawnConfirmation("same-request", first.token);
+		expect(lease).toBeDefined();
+		expect(registry.claimSpawnConfirmation("same-request", first.token)).toBeUndefined();
+		expect(registry.prepareSpawnConfirmation("same-request").status).toBe("claimed");
+
+		lease?.release();
+		const afterRelease = registry.prepareSpawnConfirmation("same-request");
+		expect(afterRelease.status).toBe("reserved");
+		expect(afterRelease.token).not.toBe(first.token);
+	});
+
 	it("returns completed results immediately and bounds stored output", async () => {
 		const registry = new SubagentRegistry();
 		registerRunning(registry, "sa_1", { task: "research file x" });
