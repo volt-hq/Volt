@@ -42,6 +42,7 @@ Attribution stays inline in the sentence:
 
 ## Commands
 
+- `npm run changeset:draft` — have Volt draft the fragment from your staged or branch diff (one-shot `volt -p`; review the sentence before committing). Inside a Volt session, `/changeset` does the same with the session's full context.
 - `npm run changeset:add -- <kind> [area] "One user-facing sentence."` — write a validated fragment (add `--details "<text>"` for body/migration paragraphs, `--package <name>` per touched package)
 - `npx changeset` — interactive authoring (writing the file directly is fine too)
 - `npx changeset status` — list pending fragments
