@@ -1112,6 +1112,82 @@ describe("SubagentManager", () => {
 		await handle.dispose();
 	});
 
+	it("injects a start-time registry snapshot into delegating children", async () => {
+		const prompts: Array<string | undefined> = [];
+		const resourceLoader = createSubagentResourceLoader([
+			createDefinition({ name: "researcher", allowedSubagents: ["researcher"] }),
+		]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			noTools: false,
+			responses: [
+				(context) => {
+					prompts.push(context.systemPrompt);
+					return fauxAssistantMessage("first result");
+				},
+				(context) => {
+					prompts.push(context.systemPrompt);
+					return fauxAssistantMessage("second result");
+				},
+			],
+		});
+
+		const first = await manager.startByName("researcher");
+		const firstDone = first.waitForEnd();
+		await first.prompt("research file x");
+		await firstDone;
+		const firstId = manager.listDelegations()[0]?.id;
+
+		const second = await manager.startByName("researcher");
+		const secondDone = second.waitForEnd();
+		await second.prompt("research file y");
+		await secondDone;
+
+		// The first child started with an empty registry, so no snapshot is injected.
+		expect(prompts[0]).not.toContain("already recorded in this session");
+		expect(prompts[1]).toContain("already recorded in this session");
+		expect(prompts[1]).toContain(`- ${firstId} researcher completed — research file x`);
+		expect(prompts[1]).toContain('{ "follow": "<id>" }');
+
+		await first.dispose();
+		await second.dispose();
+	});
+
+	it("does not inject a registry snapshot into non-delegating children", async () => {
+		const prompts: Array<string | undefined> = [];
+		const resourceLoader = createSubagentResourceLoader([
+			createDefinition({ name: "researcher", allowedSubagents: ["researcher"] }),
+			createDefinition({ name: "worker" }),
+		]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			noTools: false,
+			responses: [
+				fauxAssistantMessage("first result"),
+				(context) => {
+					prompts.push(context.systemPrompt);
+					return fauxAssistantMessage("worker result");
+				},
+			],
+		});
+
+		const first = await manager.startByName("researcher");
+		const firstDone = first.waitForEnd();
+		await first.prompt("research file x");
+		await firstDone;
+
+		const worker = await manager.startByName("worker");
+		const workerDone = worker.waitForEnd();
+		await worker.prompt("do work");
+		await workerDone;
+
+		expect(prompts[0]).toBeDefined();
+		expect(prompts[0]).not.toContain("already recorded in this session");
+
+		await first.dispose();
+		await worker.dispose();
+	});
+
 	it("records disposed-before-completion runs as aborted in the registry", async () => {
 		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
 		const { manager } = await createTestManager({ resourceLoader });
