@@ -45,5 +45,13 @@ jobs:
       - name: Check
         run: npm run check
 
+      - name: Require changesets for product changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --depth=1 origin "refs/heads/${BASE_REF}"
+          node scripts/check-changesets.mjs --require --base FETCH_HEAD
+
       - name: Test
         run: npm test

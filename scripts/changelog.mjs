@@ -8,9 +8,11 @@
  * changelog, so the changelog itself is never edited by hand.
  *
  * Usage:
+ *   node scripts/changelog.mjs add <kind> [area] "<sentence>" [--details <text>] [--package <name>]...
  *   node scripts/changelog.mjs render [--version <x.y.z>] [--date <YYYY-MM-DD>]
  *   node scripts/changelog.mjs release --version <x.y.z> [--date <YYYY-MM-DD>]
  *
+ * `add` writes a validated fragment without needing to remember the format.
  * `render` prints the section the pending fragments would produce. `release`
  * inserts that section into the changelog and deletes the consumed fragments.
  */
@@ -216,6 +218,68 @@ export function applyReleaseSection({ version, date, changelogPath = RELEASE_CHA
 	return { changesets, section };
 }
 
+export function addChangeset({
+	kind,
+	area = "",
+	sentence,
+	details = "",
+	packages = ["@hansjm10/volt-coding-agent"],
+	changesetDir = CHANGESET_DIR,
+}) {
+	const bump = kind === "breaking" ? "minor" : "patch";
+	const frontMatter = packages.map((name) => `"${name}": ${bump}`).join("\n");
+	const summary = `${kind}${area ? `(${area})` : ""}: ${sentence}`;
+	const content = `---\n${frontMatter}\n---\n\n${summary}\n${details ? `\n${details}\n` : ""}`;
+
+	const slugWords = sentence
+		.toLowerCase()
+		.replaceAll(/[^a-z0-9\s-]/g, " ")
+		.split(/\s+/)
+		.filter(Boolean)
+		.slice(0, 5);
+	const baseSlug = [kind, ...slugWords].join("-");
+	let file = path.join(changesetDir, `${baseSlug}.md`);
+	for (let suffix = 2; existsSync(file); suffix++) {
+		file = path.join(changesetDir, `${baseSlug}-${suffix}.md`);
+	}
+
+	parseChangeset(file, content);
+	writeFileSync(file, content);
+	return { content, file };
+}
+
+function parseAddArguments(args) {
+	const positional = [];
+	const options = { details: "", packages: [] };
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === "--details" || arg === "--package") {
+			const value = args[++i];
+			if (!value) {
+				throw new Error(`${arg} requires a value`);
+			}
+			if (arg === "--details") options.details = value;
+			if (arg === "--package") options.packages.push(value);
+			continue;
+		}
+		if (arg.startsWith("--")) {
+			throw new Error(`Unknown option: ${arg}`);
+		}
+		positional.push(arg);
+	}
+	if (positional.length < 2 || positional.length > 3) {
+		throw new Error('Usage: node scripts/changelog.mjs add <kind> [area] "<sentence>" [--details <text>] [--package <name>]...');
+	}
+	const [kind, second, third] = positional;
+	return {
+		area: positional.length === 3 ? second : "",
+		details: options.details,
+		kind,
+		packages: options.packages.length > 0 ? options.packages : undefined,
+		sentence: positional.length === 3 ? third : second,
+	};
+}
+
 function parseCliOptions(args) {
 	const options = { date: undefined, version: undefined };
 	for (let i = 0; i < args.length; i++) {
@@ -239,6 +303,11 @@ function todayIsoDate() {
 
 function main(argv) {
 	const [command, ...args] = argv;
+	if (command === "add") {
+		const { content, file } = addChangeset(parseAddArguments(args));
+		console.log(`Wrote ${file}:\n\n${content}`);
+		return;
+	}
 	const options = parseCliOptions(args);
 	if (command === "render") {
 		const changesets = readChangesets();
@@ -258,7 +327,7 @@ function main(argv) {
 		console.log(`Consumed ${changesets.length} changeset(s) into ${RELEASE_CHANGELOG} for ${options.version}.`);
 		return;
 	}
-	throw new Error("Usage: node scripts/changelog.mjs <render|release> [--version <x.y.z>] [--date <YYYY-MM-DD>]");
+	throw new Error("Usage: node scripts/changelog.mjs <add|render|release> [options]; see the header comment for details");
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
