@@ -141,6 +141,7 @@ function requireFragmentForDiff(base) {
 		"FRAGMENT",
 		"",
 		'Or run: npm run changeset:add -- <kind> [area] "One user-facing sentence."',
+		"Or have Volt draft it from your diff: npm run changeset:draft",
 	);
 	console.error(lines.join("\n"));
 	process.exit(1);
@@ -166,7 +167,8 @@ function warnForStagedChanges() {
 	}
 	console.warn(
 		"⚠️  Staged changes touch product source (packages/*/src) but no changeset fragment exists.\n" +
-			'   User-visible change? Run: npm run changeset:add -- <kind> [area] "One user-facing sentence."\n' +
+			"   Let Volt draft it: npm run changeset:draft\n" +
+			'   Or write it yourself: npm run changeset:add -- <kind> [area] "One user-facing sentence."\n' +
 			"   Pure refactor? Use kind `internal`. CI will require a fragment on the pull request.",
 	);
 }

@@ -123,7 +123,7 @@ Rules:
 - The first summary line is `kind(area): One user-facing sentence.` Kind is one of `feature` (rendered under Highlights), `improvement`, `fix`, `breaking`, or `internal` (never rendered); `area` is an optional lowercase slug (`daemon`, `remote`, `tui`, `lsp`, `subagents`, `mcp`, ...).
 - Describe observable behavior, not implementation. Paragraphs below the first line become indented detail; `breaking` fragments must include migration guidance there.
 - Front matter lists the touched package(s) with bump `patch`; `breaking` uses `minor` and `major` is never used. When in doubt, list `@hansjm10/volt-coding-agent`.
-- Easiest path: `npm run changeset:add -- <kind> [area] "One user-facing sentence."` writes a validated fragment. Preview the pending release section with `npm run changelog:preview`.
+- Easiest path: `npm run changeset:add -- <kind> [area] "One user-facing sentence."` writes a validated fragment; `npm run changeset:draft` has Volt draft one from the current diff (review before committing), and `/changeset` does the same inside a Volt session. Preview the pending release section with `npm run changelog:preview`.
 - CI fails pull requests that change `packages/*/src` without adding a fragment (pure refactors use kind `internal`), so add the fragment in the same change.
 
 Attribution stays inline in the sentence:
