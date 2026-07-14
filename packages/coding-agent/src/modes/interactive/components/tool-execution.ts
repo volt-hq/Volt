@@ -21,6 +21,29 @@ export interface ToolExecutionOptions {
 	imageWidthCells?: number;
 }
 
+function hasCreatedSubagent(details: unknown): boolean {
+	if (typeof details !== "object" || details === null || Array.isArray(details)) {
+		return false;
+	}
+	const record = details as Record<string, unknown>;
+	if (record.mode !== "single" && record.mode !== "parallel" && record.mode !== "chain") {
+		return false;
+	}
+	const hasSubagentId = (value: unknown): boolean =>
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		typeof (value as Record<string, unknown>).subagentId === "string";
+	if (hasSubagentId(record)) {
+		return true;
+	}
+	if (Array.isArray(record.childSessions) && record.childSessions.some(hasSubagentId)) {
+		return true;
+	}
+	const tasks = record.mode === "chain" ? record.steps : record.tasks;
+	return Array.isArray(tasks) && tasks.some(hasSubagentId);
+}
+
 /**
  * Wraps a tool call renderer and appends explicit lifecycle metadata to its
  * first non-empty line. If the metadata does not fit, it gets its own line so
@@ -89,6 +112,7 @@ export class ToolExecutionComponent extends Container {
 	};
 	private convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
 	private hideComponent = false;
+	private subagentCreationObserved = false;
 
 	constructor(
 		toolName: string,
@@ -243,6 +267,9 @@ export class ToolExecutionComponent extends Container {
 		},
 		isPartial = false,
 	): void {
+		if (this.toolName === "subagent" && hasCreatedSubagent(result.details)) {
+			this.subagentCreationObserved = true;
+		}
 		if (!isPartial && this.executionStartedAt !== undefined && this.executionDurationMs === undefined) {
 			this.executionDurationMs = Date.now() - this.executionStartedAt;
 		}
@@ -426,6 +453,9 @@ export class ToolExecutionComponent extends Container {
 		}
 
 		if (this.hasRendererDefinition() && !hasContent && this.imageComponents.length === 0) {
+			this.hideComponent = true;
+		}
+		if (this.toolName === "subagent" && !this.subagentCreationObserved) {
 			this.hideComponent = true;
 		}
 	}

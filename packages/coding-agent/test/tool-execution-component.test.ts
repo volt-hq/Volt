@@ -470,6 +470,35 @@ describe("ToolExecutionComponent parity", () => {
 		expect(expanded).toContain("collapse outputs");
 	});
 
+	test("does not present a subagent until a child is actually created", () => {
+		const component = new ToolExecutionComponent(
+			"subagent",
+			"tool-subagent-preflight",
+			{ agent: "scout", task: "Inspect the auth flow" },
+			{},
+			createSubagentRenderDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+		expect(component.render(120)).toEqual([]);
+
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "A registry preflight was completed. No subagents were started." }],
+				details: {
+					mode: "list",
+					status: "completed",
+					summary: { total: 3, completed: 0, failed: 0, aborted: 0, running: 3 },
+				} satisfies SubagentToolDetails,
+				isError: false,
+			},
+			false,
+		);
+
+		expect(component.render(120)).toEqual([]);
+	});
+
 	test("renders unstructured built-in subagent failures as terminal errors", () => {
 		const component = new ToolExecutionComponent(
 			"subagent",
@@ -481,6 +510,20 @@ describe("ToolExecutionComponent parity", () => {
 			process.cwd(),
 		);
 		component.markExecutionStarted();
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "started" }],
+				details: {
+					mode: "single",
+					status: "running",
+					subagentId: "sa_missing",
+					sessionId: "session_missing",
+					agent: { name: "missing" },
+				} satisfies SubagentToolDetails,
+				isError: false,
+			},
+			true,
+		);
 		component.updateResult(
 			{
 				content: [{ type: "text", text: "Unknown subagent: missing" }],
