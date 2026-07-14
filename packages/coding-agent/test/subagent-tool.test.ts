@@ -1104,12 +1104,15 @@ describe("subagent tool", () => {
 				],
 			},
 		});
-		await waitUntil(() => updates.some((update) => (update.details.children?.length ?? 0) === 2));
-		const placeholderUpdate = updates.find((update) => (update.details.children?.length ?? 0) === 2);
-		expect(placeholderUpdate?.details.currentActivity).toContain("subagent");
-		expect(placeholderUpdate?.details.toolCalls).toBe(1);
-		expect(placeholderUpdate?.details.children?.map((child) => child.agent.name)).toEqual(["researcher", "general"]);
-		expect(placeholderUpdate?.details.children?.[0]).toMatchObject({ status: "running", task: "find prior art" });
+		await waitUntil(() =>
+			updates.some(
+				(update) => update.details.currentActivity?.includes("subagent") && update.details.toolCalls === 1,
+			),
+		);
+		const requestUpdate = updates.find(
+			(update) => update.details.currentActivity?.includes("subagent") && update.details.toolCalls === 1,
+		);
+		expect(requestUpdate?.details.children).toBeUndefined();
 
 		controlled.emit({
 			type: "tool_execution_update",
@@ -1199,7 +1202,62 @@ describe("subagent tool", () => {
 		expect(result.details.currentActivity).toBeUndefined();
 	});
 
-	it("coerces grafted placeholders to terminal status when a child subagent call ends without details", async () => {
+	it("does not graft nested registry preflights as completed children", async () => {
+		const prompts: Array<{ agent: string; task: string }> = [];
+		const controlled = createControlledHandle({
+			id: "sa_scout",
+			sessionId: "session_scout",
+			agent: "scout",
+			prompts,
+		});
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			startByName: vi.fn(async () => controlled.handle),
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager });
+		const updates: AgentToolResult<SubagentToolDetails>[] = [];
+
+		const execution = tool.execute("call-1", { agent: "scout", task: "audit" }, undefined, (update) =>
+			updates.push(update),
+		);
+		await waitUntil(() => prompts.length === 1);
+
+		controlled.emit({
+			type: "tool_execution_start",
+			toolCallId: "grandchild-call",
+			toolName: "subagent",
+			args: {
+				tasks: [
+					{ agent: "researcher", task: "find prior art" },
+					{ agent: "general", task: "scan the code" },
+				],
+			},
+		});
+		controlled.emit({
+			type: "tool_execution_end",
+			toolCallId: "grandchild-call",
+			toolName: "subagent",
+			result: {
+				content: [{ type: "text", text: "A registry preflight was completed. No subagents were started." }],
+				details: {
+					mode: "list",
+					status: "completed",
+					summary: { total: 4, completed: 0, failed: 0, aborted: 0, running: 4 },
+				},
+			},
+			isError: false,
+		});
+		await waitUntil(() =>
+			updates.some((update) => update.details.toolCalls === 1 && update.details.currentActivity === undefined),
+		);
+		expect(updates.every((update) => update.details.children === undefined)).toBe(true);
+
+		controlled.complete(createSubagentResult({ id: "sa_scout", sessionId: "session_scout", text: "done" }));
+		const result = await execution;
+		expect(result.details.children).toBeUndefined();
+	});
+
+	it("coerces confirmed grafted children to terminal status when a child subagent call ends without details", async () => {
 		const prompts: Array<{ agent: string; task: string }> = [];
 		const controlled = createControlledHandle({
 			id: "sa_scout",
@@ -1225,6 +1283,22 @@ describe("subagent tool", () => {
 			toolName: "subagent",
 			args: { agent: "general", task: "probe" },
 		});
+		controlled.emit({
+			type: "tool_execution_update",
+			toolCallId: "grandchild-call",
+			toolName: "subagent",
+			args: {},
+			partialResult: {
+				content: [{ type: "text", text: "started" }],
+				details: {
+					mode: "single",
+					status: "running",
+					subagentId: "sa_general",
+					sessionId: "session_general",
+					agent: { name: "general" },
+				},
+			},
+		});
 		await waitUntil(() => updates.some((update) => update.details.children?.[0]?.status === "running"));
 
 		controlled.emit({
@@ -1239,6 +1313,7 @@ describe("subagent tool", () => {
 		controlled.complete(createSubagentResult({ id: "sa_scout", sessionId: "session_scout", text: "done" }));
 		const result = await execution;
 		expect(result.details.children?.[0]).toMatchObject({
+			subagentId: "sa_general",
 			agent: { name: "general" },
 			status: "failed",
 			task: "probe",

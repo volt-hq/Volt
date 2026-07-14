@@ -522,7 +522,7 @@ function boundedTreeChildren(children: SubagentTreeNode[] | undefined, depth: nu
 }
 
 function boundedTreeNode(node: SubagentTreeNode, depth: number): SubagentTreeNode | undefined {
-	if (depth >= SUBAGENT_TREE_MAX_DEPTH) {
+	if (depth >= SUBAGENT_TREE_MAX_DEPTH || !node.subagentId) {
 		return undefined;
 	}
 	const children = boundedTreeChildren(node.children, depth);
@@ -650,13 +650,6 @@ class SubagentTaskLiveActivity {
 				this.currentActivity = describeToolActivity(event.toolName, event.args);
 				if (event.toolName === "subagent") {
 					this.childArgs.set(event.toolCallId, event.args);
-					const placeholders = subagentTreeNodes(
-						{ mode: subagentTreeModeFromArgs(event.args), status: "running" },
-						event.args,
-					);
-					if (placeholders.length > 0) {
-						this.childTrees.set(event.toolCallId, placeholders);
-					}
 				}
 				return true;
 			}
@@ -745,24 +738,6 @@ class SubagentTaskLiveActivity {
 			...(children ? { children } : {}),
 		};
 	}
-}
-
-function subagentTreeModeFromArgs(args: unknown): SubagentToolMode {
-	if (isRecord(args)) {
-		if (Array.isArray(args.chain) && args.chain.length > 0) {
-			return "chain";
-		}
-		if (Array.isArray(args.tasks) && args.tasks.length > 0) {
-			return "parallel";
-		}
-		if (args.list !== undefined) {
-			return "list";
-		}
-		if (args.follow !== undefined) {
-			return "follow";
-		}
-	}
-	return "single";
 }
 
 function requirePositiveInteger(value: number, field: string): number {
