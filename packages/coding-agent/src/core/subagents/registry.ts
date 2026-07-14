@@ -51,6 +51,7 @@ interface SubagentRegistryEntry {
 
 const REGISTRY_TASK_LIMIT_CHARS = 2_000;
 const REGISTRY_OUTPUT_LIMIT_CHARS = 50_000;
+const REGISTRY_ERROR_LIMIT_CHARS = 4_000;
 const MAX_REGISTRY_RECORDS = 500;
 /** Node key representing the root session in the wait-dependency graph. */
 const ROOT_NODE = "root";
@@ -74,8 +75,8 @@ function boundText(text: string, limit: number): string {
  */
 export class SubagentRegistry {
 	private readonly entries = new Map<string, SubagentRegistryEntry>();
-	/** Active follow waits, follower node key -> target ids, for deadlock detection. */
-	private readonly activeFollows = new Map<string, Set<string>>();
+	/** Active follow waits, follower node key -> target id and waiter count, for deadlock detection. */
+	private readonly activeFollows = new Map<string, Map<string, number>>();
 	private nextSequence = 0;
 
 	register(options: { id: string; parentId?: string; agent: SubagentRegistryRecord["agent"]; path: string[] }): void {
@@ -115,13 +116,14 @@ export class SubagentRegistry {
 		}
 		entry.status = status;
 		entry.finishedAt = Date.now();
-		entry.error = result.error;
+		entry.error = result.error === undefined ? undefined : boundText(result.error, REGISTRY_ERROR_LIMIT_CHARS);
 		entry.output = result.output === undefined ? undefined : boundText(result.output, REGISTRY_OUTPUT_LIMIT_CHARS);
 		const waiters = entry.waiters;
 		entry.waiters = [];
 		for (const waiter of waiters) {
 			waiter.resolve(this.toFollowResult(entry));
 		}
+		this.evictOldestTerminal();
 	}
 
 	/** All known runs, running first, then newest first — mirrors activity ordering. */
@@ -173,10 +175,10 @@ export class SubagentRegistry {
 
 		let followTargets = this.activeFollows.get(followerKey);
 		if (!followTargets) {
-			followTargets = new Set();
+			followTargets = new Map();
 			this.activeFollows.set(followerKey, followTargets);
 		}
-		followTargets.add(targetId);
+		followTargets.set(targetId, (followTargets.get(targetId) ?? 0) + 1);
 
 		try {
 			return await new Promise<SubagentFollowResult>((resolve, reject) => {
@@ -193,7 +195,12 @@ export class SubagentRegistry {
 				entry.waiters.push(waiter);
 			});
 		} finally {
-			followTargets.delete(targetId);
+			const remaining = (followTargets.get(targetId) ?? 0) - 1;
+			if (remaining > 0) {
+				followTargets.set(targetId, remaining);
+			} else {
+				followTargets.delete(targetId);
+			}
 			if (followTargets.size === 0) {
 				this.activeFollows.delete(followerKey);
 			}
@@ -224,7 +231,7 @@ export class SubagentRegistry {
 			}
 			const follows = this.activeFollows.get(current);
 			if (follows) {
-				stack.push(...follows);
+				stack.push(...follows.keys());
 			}
 		}
 		return false;

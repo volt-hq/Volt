@@ -52,6 +52,16 @@ describe("SubagentRegistry", () => {
 		expect(result.finishedAt).toBeGreaterThanOrEqual(result.startedAt);
 	});
 
+	it("bounds stored terminal errors", async () => {
+		const registry = new SubagentRegistry();
+		registerRunning(registry, "sa_1");
+		registry.complete("sa_1", "failed", { error: "x".repeat(5_000) });
+
+		const result = await registry.follow(undefined, "sa_1");
+		expect(result.error).toHaveLength(4_000);
+		expect(result.error?.endsWith("…")).toBe(true);
+	});
+
 	it("ignores completions after the first terminal transition", async () => {
 		const registry = new SubagentRegistry();
 		registerRunning(registry, "sa_1");
@@ -115,6 +125,22 @@ describe("SubagentRegistry", () => {
 		await expect(firstFollow).resolves.toMatchObject({ id: "sa_b", output: "b output" });
 	});
 
+	it("keeps a shared follow dependency active until every waiter settles", async () => {
+		const registry = new SubagentRegistry();
+		registerRunning(registry, "sa_a");
+		registerRunning(registry, "sa_b");
+		const firstController = new AbortController();
+
+		const firstFollow = registry.follow("sa_a", "sa_b", firstController.signal);
+		const secondFollow = registry.follow("sa_a", "sa_b");
+		firstController.abort();
+		await expect(firstFollow).rejects.toThrow(/aborted/i);
+
+		await expect(registry.follow("sa_b", "sa_a")).rejects.toThrow("would deadlock");
+		registry.complete("sa_b", "completed", { output: "b output" });
+		await expect(secondFollow).resolves.toMatchObject({ id: "sa_b", output: "b output" });
+	});
+
 	it("refuses follows that deadlock through a running descendant of the target", async () => {
 		const registry = new SubagentRegistry();
 		registerRunning(registry, "sa_root-call");
@@ -149,5 +175,21 @@ describe("SubagentRegistry", () => {
 		expect(records.length).toBeLessThanOrEqual(500);
 		expect(records.some((record) => record.id === "sa_running-oldest")).toBe(true);
 		expect(records.some((record) => record.id === "sa_0")).toBe(false);
+	});
+
+	it("evicts terminal records when a concurrent registration burst settles", () => {
+		const registry = new SubagentRegistry();
+		for (let index = 0; index < 510; index += 1) {
+			registerRunning(registry, `sa_${index}`);
+		}
+		for (let index = 0; index < 510; index += 1) {
+			registry.complete(`sa_${index}`, "completed");
+		}
+
+		const ids = new Set(registry.list().map((record) => record.id));
+		expect(ids.size).toBe(500);
+		expect(ids.has("sa_9")).toBe(false);
+		expect(ids.has("sa_10")).toBe(true);
+		expect(ids.has("sa_509")).toBe(true);
 	});
 });
