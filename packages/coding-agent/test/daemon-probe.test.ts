@@ -1,10 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { encodeControlLine, PROTOCOL_VERSION } from "../src/daemon/control-protocol.ts";
 import { probeControlSocket } from "../src/daemon/control-server.ts";
+import { createTestSocketEndpoint, listenTestServer } from "./socket-test-helpers.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -15,16 +13,15 @@ afterEach(async () => {
 });
 
 function tempSocketPath(): string {
-	const dir = mkdtempSync(join(tmpdir(), "volt-probe-"));
-	cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
-	return join(dir, "control.sock");
+	const endpoint = createTestSocketEndpoint("volt-probe");
+	cleanups.push(endpoint.cleanup);
+	return endpoint.socketPath;
 }
 
 async function startProbeServer(socketPath: string, handle: (socket: Socket) => void): Promise<Server> {
-	return new Promise((resolve) => {
-		const server = createServer(handle);
-		server.listen(socketPath, () => resolve(server));
-	});
+	const server = createServer(handle);
+	await listenTestServer(server, socketPath);
+	return server;
 }
 
 describe("control socket probe classification", () => {

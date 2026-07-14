@@ -68,7 +68,7 @@ function createSyncOperations(events: string[]): DurableAtomicWriteSyncOperation
 }
 
 describe("durable atomic writes", () => {
-	it("fsyncs the temp file before rename and the parent directory after rename", async () => {
+	it("uses the supported durability ordering for asynchronous writes", async () => {
 		const events: string[] = [];
 		await writeDurableAtomicFile("/state/host.json", "payload", { operations: createOperations(events) });
 
@@ -79,9 +79,7 @@ describe("durable atomic writes", () => {
 			"sync:temp",
 			"close:temp",
 			"rename",
-			"open:parent",
-			"sync:parent",
-			"close:parent",
+			...(process.platform === "win32" ? [] : ["open:parent", "sync:parent", "close:parent"]),
 		]);
 	});
 
@@ -112,7 +110,7 @@ describe("durable atomic writes", () => {
 		expect(operations.rename).not.toHaveBeenCalled();
 	});
 
-	it("provides the same durability ordering for synchronous writers", () => {
+	it("uses the supported durability ordering for synchronous writes", () => {
 		const events: string[] = [];
 		writeDurableAtomicFileSync("/state/host.json", "payload", { operations: createSyncOperations(events) });
 
@@ -123,9 +121,7 @@ describe("durable atomic writes", () => {
 			"sync:temp",
 			"close:temp",
 			"rename",
-			"open:parent",
-			"sync:parent",
-			"close:parent",
+			...(process.platform === "win32" ? [] : ["open:parent", "sync:parent", "close:parent"]),
 		]);
 	});
 

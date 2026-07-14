@@ -7,13 +7,11 @@
  */
 
 import { Buffer } from "node:buffer";
-import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDaemonClient } from "../src/daemon/control-client.ts";
 import { ControlLineDecoder, encodeControlLine, PROTOCOL_VERSION } from "../src/daemon/control-protocol.ts";
+import { createTestSocketEndpoint, listenTestServer } from "./socket-test-helpers.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -30,48 +28,47 @@ afterEach(async () => {
  * provisional and terminal frames coalesced into ONE socket write, so both
  * arrive in the same client read.
  */
-function startCoalescingServer(socketPath: string, terminal: "lease_granted" | "error"): Promise<Server> {
-	return new Promise((resolve) => {
-		const server = createServer((socket: Socket) => {
-			const decoder = new ControlLineDecoder();
-			socket.on("data", (chunk) => {
-				for (const message of decoder.push(chunk)) {
-					const request = message as Record<string, unknown>;
-					if (request.type === "hello") {
-						socket.write(
-							encodeControlLine({
-								type: "hello_ack",
-								ok: true,
-								connectionId: "c-1",
-								version: "0.0.0-test",
-								protocolVersion: PROTOCOL_VERSION,
-							}),
-						);
-						continue;
-					}
-					if (request.type === "lease_acquire") {
-						const terminalFrame =
-							terminal === "lease_granted"
-								? {
-										type: "lease_granted",
-										id: request.id,
-										workspaceName: request.workspaceName,
-										sessionId: request.sessionId,
-										handoff: "warm",
-									}
-								: { type: "error", id: request.id, code: "drain_failed", message: "drain cancelled" };
-						socket.write(
-							Buffer.concat([
-								encodeControlLine({ type: "lease_pending", id: request.id, viewerFeedId: "vf-1" }),
-								encodeControlLine(terminalFrame),
-							]),
-						);
-					}
+async function startCoalescingServer(socketPath: string, terminal: "lease_granted" | "error"): Promise<Server> {
+	const server = createServer((socket: Socket) => {
+		const decoder = new ControlLineDecoder();
+		socket.on("data", (chunk) => {
+			for (const message of decoder.push(chunk)) {
+				const request = message as Record<string, unknown>;
+				if (request.type === "hello") {
+					socket.write(
+						encodeControlLine({
+							type: "hello_ack",
+							ok: true,
+							connectionId: "c-1",
+							version: "0.0.0-test",
+							protocolVersion: PROTOCOL_VERSION,
+						}),
+					);
+					continue;
 				}
-			});
+				if (request.type === "lease_acquire") {
+					const terminalFrame =
+						terminal === "lease_granted"
+							? {
+									type: "lease_granted",
+									id: request.id,
+									workspaceName: request.workspaceName,
+									sessionId: request.sessionId,
+									handoff: "warm",
+								}
+							: { type: "error", id: request.id, code: "drain_failed", message: "drain cancelled" };
+					socket.write(
+						Buffer.concat([
+							encodeControlLine({ type: "lease_pending", id: request.id, viewerFeedId: "vf-1" }),
+							encodeControlLine(terminalFrame),
+						]),
+					);
+				}
+			}
 		});
-		server.listen(socketPath, () => resolve(server));
 	});
+	await listenTestServer(server, socketPath);
+	return server;
 }
 
 async function connectClient(socketPath: string) {
@@ -82,9 +79,9 @@ async function connectClient(socketPath: string) {
 }
 
 function tempSocketPath(): string {
-	const dir = mkdtempSync(join(tmpdir(), "volt-control-client-"));
-	cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
-	return join(dir, "control.sock");
+	const endpoint = createTestSocketEndpoint("volt-control-client");
+	cleanups.push(endpoint.cleanup);
+	return endpoint.socketPath;
 }
 
 describe("daemon control client provisional responses", () => {
@@ -131,28 +128,26 @@ describe("daemon control client reconnect", () => {
 		expect(client.connectionState).toBe("reconnecting");
 
 		let helloCount = 0;
-		const server = await new Promise<Server>((resolve) => {
-			const created = createServer((socket: Socket) => {
-				const decoder = new ControlLineDecoder();
-				socket.on("data", (chunk) => {
-					for (const message of decoder.push(chunk)) {
-						if ((message as Record<string, unknown>).type === "hello") {
-							helloCount++;
-							socket.write(
-								encodeControlLine({
-									type: "hello_ack",
-									ok: true,
-									connectionId: `c-${helloCount}`,
-									version: "0.0.0-test",
-									protocolVersion: PROTOCOL_VERSION,
-								}),
-							);
-						}
+		const server = createServer((socket: Socket) => {
+			const decoder = new ControlLineDecoder();
+			socket.on("data", (chunk) => {
+				for (const message of decoder.push(chunk)) {
+					if ((message as Record<string, unknown>).type === "hello") {
+						helloCount++;
+						socket.write(
+							encodeControlLine({
+								type: "hello_ack",
+								ok: true,
+								connectionId: `c-${helloCount}`,
+								version: "0.0.0-test",
+								protocolVersion: PROTOCOL_VERSION,
+							}),
+						);
 					}
-				});
+				}
 			});
-			created.listen(socketPath, () => resolve(created));
 		});
+		await listenTestServer(server, socketPath);
 		cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
 		cleanups.push(() => client.close());
 
@@ -168,28 +163,26 @@ describe("daemon control client reconnect", () => {
 	it("stops reconnecting after a protocol mismatch", async () => {
 		const socketPath = tempSocketPath();
 		let helloCount = 0;
-		const server = await new Promise<Server>((resolve) => {
-			const created = createServer((socket: Socket) => {
-				const decoder = new ControlLineDecoder();
-				socket.on("data", (chunk) => {
-					for (const message of decoder.push(chunk)) {
-						if ((message as Record<string, unknown>).type === "hello") {
-							helloCount++;
-							socket.end(
-								encodeControlLine({
-									type: "hello_ack",
-									ok: false,
-									error: "protocol_mismatch",
-									version: "older",
-									protocolVersion: PROTOCOL_VERSION + 1,
-								}),
-							);
-						}
+		const server = createServer((socket: Socket) => {
+			const decoder = new ControlLineDecoder();
+			socket.on("data", (chunk) => {
+				for (const message of decoder.push(chunk)) {
+					if ((message as Record<string, unknown>).type === "hello") {
+						helloCount++;
+						socket.end(
+							encodeControlLine({
+								type: "hello_ack",
+								ok: false,
+								error: "protocol_mismatch",
+								version: "older",
+								protocolVersion: PROTOCOL_VERSION + 1,
+							}),
+						);
 					}
-				});
+				}
 			});
-			created.listen(socketPath, () => resolve(created));
 		});
+		await listenTestServer(server, socketPath);
 		cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
 		const client = createDaemonClient({
 			socketPath,
@@ -216,29 +209,27 @@ describe("daemon control client reconnect", () => {
 		// command hung forever.
 		const socketPath = tempSocketPath();
 		const serverSockets: Socket[] = [];
-		const server = await new Promise<Server>((resolve) => {
-			const created = createServer((socket: Socket) => {
-				serverSockets.push(socket);
-				const decoder = new ControlLineDecoder();
-				socket.on("error", () => {});
-				socket.on("data", (chunk) => {
-					for (const message of decoder.push(chunk)) {
-						if ((message as Record<string, unknown>).type === "hello") {
-							socket.write(
-								encodeControlLine({
-									type: "hello_ack",
-									ok: true,
-									connectionId: "c-1",
-									version: "0.0.0-test",
-									protocolVersion: PROTOCOL_VERSION,
-								}),
-							);
-						}
+		const server = createServer((socket: Socket) => {
+			serverSockets.push(socket);
+			const decoder = new ControlLineDecoder();
+			socket.on("error", () => {});
+			socket.on("data", (chunk) => {
+				for (const message of decoder.push(chunk)) {
+					if ((message as Record<string, unknown>).type === "hello") {
+						socket.write(
+							encodeControlLine({
+								type: "hello_ack",
+								ok: true,
+								connectionId: "c-1",
+								version: "0.0.0-test",
+								protocolVersion: PROTOCOL_VERSION,
+							}),
+						);
 					}
-				});
+				}
 			});
-			created.listen(socketPath, () => resolve(created));
 		});
+		await listenTestServer(server, socketPath);
 		cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
 
 		const stateChanges: string[] = [];
@@ -271,30 +262,28 @@ describe("daemon control client reconnect", () => {
 		const socketPath = tempSocketPath();
 		const serverSockets: Socket[] = [];
 		let helloCount = 0;
-		const server = await new Promise<Server>((resolve) => {
-			const created = createServer((socket: Socket) => {
-				serverSockets.push(socket);
-				const decoder = new ControlLineDecoder();
-				socket.on("data", (chunk) => {
-					for (const message of decoder.push(chunk)) {
-						if ((message as Record<string, unknown>).type === "hello") {
-							helloCount++;
-							socket.write(
-								encodeControlLine({
-									type: "hello_ack",
-									ok: true,
-									connectionId: `c-${helloCount}`,
-									version: "0.0.0-test",
-									protocolVersion: PROTOCOL_VERSION,
-								}),
-							);
-						}
+		const server = createServer((socket: Socket) => {
+			serverSockets.push(socket);
+			const decoder = new ControlLineDecoder();
+			socket.on("data", (chunk) => {
+				for (const message of decoder.push(chunk)) {
+					if ((message as Record<string, unknown>).type === "hello") {
+						helloCount++;
+						socket.write(
+							encodeControlLine({
+								type: "hello_ack",
+								ok: true,
+								connectionId: `c-${helloCount}`,
+								version: "0.0.0-test",
+								protocolVersion: PROTOCOL_VERSION,
+							}),
+						);
 					}
-				});
-				socket.on("error", () => {});
+				}
 			});
-			created.listen(socketPath, () => resolve(created));
+			socket.on("error", () => {});
 		});
+		await listenTestServer(server, socketPath);
 		cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
 
 		const client = createDaemonClient({

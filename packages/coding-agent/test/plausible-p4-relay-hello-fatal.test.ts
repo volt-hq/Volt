@@ -12,10 +12,7 @@
  */
 
 import type { Buffer } from "node:buffer";
-import { mkdtempSync, rmSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	ControlLineDecoder,
@@ -24,6 +21,7 @@ import {
 	PROTOCOL_VERSION,
 } from "../src/daemon/control-protocol.ts";
 import { type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
+import { createTestSocketEndpoint } from "./socket-test-helpers.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -34,9 +32,9 @@ afterEach(async () => {
 });
 
 function tempSocketPath(): string {
-	const dir = mkdtempSync(join(tmpdir(), "volt-p4-"));
-	cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
-	return join(dir, "control.sock");
+	const endpoint = createTestSocketEndpoint("volt-p4");
+	cleanups.push(endpoint.cleanup);
+	return endpoint.socketPath;
 }
 
 describe("P4 relay hello: admitRelay throwing must not emit a misleading fatal(frame_too_large)", () => {
