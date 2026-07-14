@@ -6,8 +6,6 @@ Volt is maintained and distributed by [Jordan Hans](https://github.com/hansjm10)
 It is derived from [Mario Zechner's Pi project](https://github.com/badlogic/pi-mono)
 and remains available under the MIT License.
 
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
-
 ## Packages
 
 | Package | Description |
