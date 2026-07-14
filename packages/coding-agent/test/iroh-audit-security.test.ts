@@ -1,9 +1,10 @@
-import { mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type IrohRemoteAuditEvent, IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
+import { tryCreateFileSymlinkSync } from "./symlink-utils.ts";
 
 const tempDirectories: string[] = [];
 
@@ -81,7 +82,7 @@ describe("IrohRemoteAuditLogger security bounds", () => {
 		await logger.flush();
 	});
 
-	it("rotates to a fixed backup count, caps entries, and enforces owner-only modes", async () => {
+	it("rotates to a fixed backup count and caps entries", async () => {
 		const directory = createTempDirectory();
 		const auditPath = join(directory, "daemon", "audit.jsonl");
 		const logger = new IrohRemoteAuditLogger({
@@ -107,21 +108,35 @@ describe("IrohRemoteAuditLogger security bounds", () => {
 		for (const file of files) {
 			const filePath = join(directory, "daemon", file);
 			expect(statSync(filePath).size).toBeLessThanOrEqual(1024);
-			expect(statSync(filePath).mode & 0o777).toBe(0o600);
 			for (const line of readFileSync(filePath, "utf8").trim().split("\n")) {
 				expect(() => JSON.parse(line)).not.toThrow();
 			}
 		}
-		expect(statSync(join(directory, "daemon")).mode & 0o777).toBe(0o700);
 		expect(readFileSync(auditPath, "utf8")).toContain('"type":"audit_event_truncated"');
 	});
 
-	it("refuses to append through an audit-file symlink", async () => {
+	it("uses owner-only POSIX modes", async (context) => {
+		if (process.platform === "win32") {
+			context.skip("POSIX permission bits are not supported on Windows");
+		}
+		const directory = createTempDirectory();
+		const auditPath = join(directory, "daemon", "audit.jsonl");
+		const logger = new IrohRemoteAuditLogger({ path: auditPath, securityEventRateLimit: false });
+		await logger.log({ type: "daemon_started", success: true });
+		await logger.flush();
+
+		expect(statSync(auditPath).mode & 0o777).toBe(0o600);
+		expect(statSync(join(directory, "daemon")).mode & 0o777).toBe(0o700);
+	});
+
+	it("refuses to append to a non-regular audit file without modifying symlink referents", async () => {
 		const directory = createTempDirectory();
 		const targetPath = join(directory, "target.txt");
 		const auditPath = join(directory, "audit.jsonl");
 		writeFileSync(targetPath, "unchanged", { mode: 0o600 });
-		symlinkSync(targetPath, auditPath);
+		if (!tryCreateFileSymlinkSync(targetPath, auditPath)) {
+			mkdirSync(auditPath);
+		}
 		const logger = new IrohRemoteAuditLogger({ path: auditPath, securityEventRateLimit: false });
 
 		await expect(logger.log({ type: "daemon_started", success: true })).rejects.toThrow(

@@ -1,13 +1,12 @@
 import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
 import { RELAY_TOKEN_TTL_MS, type RelayOutcome, RelayRegistry } from "../src/daemon/relay-stream.ts";
 import { connectRawRelayClient, FakePhoneIrohStream } from "./relay-doubles.ts";
+import { createTestSocketEndpoint } from "./socket-test-helpers.ts";
 
 interface RelayHarness {
 	socketPath: string;
@@ -18,29 +17,34 @@ interface RelayHarness {
 const cleanups: Array<() => Promise<void> | void> = [];
 
 async function startRelayHarness(): Promise<RelayHarness> {
-	const dir = mkdtempSync(join(tmpdir(), "volt-relay-"));
-	const socketPath = join(dir, "s.sock");
+	const endpoint = createTestSocketEndpoint("volt-relay");
 	const registry = new RelayRegistry();
-	const server = await startControlServer({
-		socketPath,
-		version: "0.0.0-test",
-		handlers: {
-			onRequest: () => {},
-			relayAdmission: {
-				admitRelay: (hello, socket, bufferedRemainder) =>
-					registry.admit(hello.relayId, hello.relayToken, socket, bufferedRemainder),
+	let server: ControlServer;
+	try {
+		server = await startControlServer({
+			socketPath: endpoint.socketPath,
+			version: "0.0.0-test",
+			handlers: {
+				onRequest: () => {},
+				relayAdmission: {
+					admitRelay: (hello, socket, bufferedRemainder) =>
+						registry.admit(hello.relayId, hello.relayToken, socket, bufferedRemainder),
+				},
 			},
-		},
-	});
+		});
+	} catch (error) {
+		endpoint.cleanup();
+		throw error;
+	}
 	cleanups.push(async () => {
 		// server.close() waits for open sockets; admitted relays hold theirs.
 		for (const relay of registry.activeRelays()) {
 			relay.close("host_shutdown");
 		}
 		await server.close();
-		rmSync(dir, { recursive: true, force: true });
+		endpoint.cleanup();
 	});
-	return { socketPath, registry, server };
+	return { socketPath: endpoint.socketPath, registry, server };
 }
 
 afterEach(async () => {

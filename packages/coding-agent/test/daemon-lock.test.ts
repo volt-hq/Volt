@@ -126,7 +126,7 @@ describe("daemon startup lock", () => {
 	});
 
 	it("recovers a stale malformed non-directory lock node", async () => {
-		const { parentDir, lockDirPath } = createLockPath();
+		const { lockDirPath } = createLockPath();
 		writeFileSync(lockDirPath, "corrupt");
 		const staleTime = new Date(Date.now() - 60_000);
 		utimesSync(lockDirPath, staleTime, staleTime);
@@ -134,8 +134,8 @@ describe("daemon startup lock", () => {
 		const result = await acquireDaemonLock(lockDirPath);
 
 		expect(result.ok).toBe(true);
-		expect(readdirSync(parentDir).some((entry) => entry.startsWith("voltd.lock.retired-"))).toBe(true);
 		if (result.ok) {
+			expect(readDaemonLockOwner(lockDirPath)).toEqual(result.lock.owner);
 			result.lock.release();
 		}
 	});
