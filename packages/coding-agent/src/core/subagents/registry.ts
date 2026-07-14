@@ -3,6 +3,8 @@ import type { SubagentDefinitionSource } from "./index.ts";
 
 export type SubagentRegistryStatus = "running" | "completed" | "failed" | "aborted";
 
+export type SubagentRegistryFollowability = "followable" | "current" | "ancestor" | "dependency-cycle";
+
 /** Public snapshot of one delegated run, safe to hand to any runtime in the tree. */
 export interface SubagentRegistryRecord {
 	id: string;
@@ -17,6 +19,8 @@ export interface SubagentRegistryRecord {
 	/** Bounded task prompt this run was started with. */
 	task?: string;
 	status: SubagentRegistryStatus;
+	/** Caller-relative follow safety. Present on records returned for a specific runtime. */
+	followability?: SubagentRegistryFollowability;
 	startedAt: number;
 	finishedAt?: number;
 	error?: string;
@@ -189,6 +193,24 @@ export class SubagentRegistry {
 		return { records: this.collectRecords(limit), total: this.entries.size };
 	}
 
+	/** Bounded registry snapshot annotated with follow safety relative to one runtime. */
+	snapshotForFollower(
+		limit: number,
+		followerId: string | undefined,
+		followerParentId?: string,
+	): SubagentRegistrySnapshot {
+		const snapshot = this.snapshot(limit);
+		return {
+			...snapshot,
+			records: this.annotateFollowability(snapshot.records, followerId, followerParentId),
+		};
+	}
+
+	/** All known runs annotated with whether the specified runtime may safely follow each one. */
+	listForFollower(followerId: string | undefined, followerParentId?: string): SubagentRegistryRecord[] {
+		return this.annotateFollowability(this.list(), followerId, followerParentId);
+	}
+
 	get(id: string): SubagentRegistryRecord | undefined {
 		const entry = this.entries.get(id);
 		return entry ? this.toRecord(entry) : undefined;
@@ -199,8 +221,12 @@ export class SubagentRegistry {
 	 * Concurrent callers for the same key observe the existing reservation instead
 	 * of receiving independent confirmation tokens.
 	 */
-	prepareSpawnConfirmation(requestKey: string): SubagentSpawnConfirmationPreflight {
-		const snapshot = this.snapshot(SPAWN_CONFIRMATION_RECORD_LIMIT);
+	prepareSpawnConfirmation(
+		requestKey: string,
+		followerId?: string,
+		followerParentId?: string,
+	): SubagentSpawnConfirmationPreflight {
+		const snapshot = this.snapshotForFollower(SPAWN_CONFIRMATION_RECORD_LIMIT, followerId, followerParentId);
 		const registrySummary = {
 			records: snapshot.records,
 			total: snapshot.total,
@@ -282,6 +308,16 @@ export class SubagentRegistry {
 		}
 
 		const followerKey = followerId ?? ROOT_NODE;
+		if (followerId === targetId) {
+			throw new Error(
+				`Following subagent run "${targetId}" would deadlock because it is the current runtime. Continue the current task independently instead.`,
+			);
+		}
+		if (this.getAncestorIds(followerId).has(targetId)) {
+			throw new Error(
+				`Following subagent run "${targetId}" would deadlock because it is an ancestor waiting for the current runtime to finish. Continue independently instead.`,
+			);
+		}
 		if (this.wouldDeadlock(followerKey, targetId)) {
 			throw new Error(
 				`Following subagent run "${targetId}" would deadlock: its completion depends on the current runtime finishing first. Continue independently instead.`,
@@ -328,28 +364,78 @@ export class SubagentRegistry {
 	 * runs (a parent's tool call awaits its children) and active follow targets.
 	 */
 	private wouldDeadlock(followerKey: string, targetId: string): boolean {
-		const visited = new Set<string>();
-		const stack = [targetId];
-		while (stack.length > 0) {
-			const current = stack.pop();
-			if (current === undefined || visited.has(current)) {
-				continue;
+		return this.getDeadlockingTargetIds(followerKey).has(targetId);
+	}
+
+	/** Targets whose completion transitively depends on the specified follower. */
+	private getDeadlockingTargetIds(followerKey: string): Set<string> {
+		const dependentsByDependency = new Map<string, Set<string>>();
+		const addDependency = (dependent: string, dependency: string): void => {
+			let dependents = dependentsByDependency.get(dependency);
+			if (!dependents) {
+				dependents = new Set();
+				dependentsByDependency.set(dependency, dependents);
 			}
-			if (current === followerKey) {
-				return true;
-			}
-			visited.add(current);
-			for (const entry of this.entries.values()) {
-				if (entry.status === "running" && (entry.parentId ?? ROOT_NODE) === current) {
-					stack.push(entry.id);
-				}
-			}
-			const follows = this.activeFollows.get(current);
-			if (follows) {
-				stack.push(...follows.keys());
+			dependents.add(dependent);
+		};
+		for (const entry of this.entries.values()) {
+			if (entry.status === "running") {
+				addDependency(entry.parentId ?? ROOT_NODE, entry.id);
 			}
 		}
-		return false;
+		for (const [follower, targets] of this.activeFollows) {
+			for (const target of targets.keys()) {
+				addDependency(follower, target);
+			}
+		}
+
+		const deadlockingTargetIds = new Set<string>();
+		const stack = [followerKey];
+		while (stack.length > 0) {
+			const current = stack.pop();
+			if (current === undefined || deadlockingTargetIds.has(current)) {
+				continue;
+			}
+			deadlockingTargetIds.add(current);
+			const dependents = dependentsByDependency.get(current);
+			if (dependents) {
+				stack.push(...dependents);
+			}
+		}
+		return deadlockingTargetIds;
+	}
+
+	private getAncestorIds(followerId: string | undefined, followerParentId?: string): Set<string> {
+		const ancestorIds = new Set<string>();
+		const followerEntry = followerId === undefined ? undefined : this.entries.get(followerId);
+		let ancestorId = followerEntry ? followerEntry.parentId : followerParentId;
+		while (ancestorId !== undefined && !ancestorIds.has(ancestorId)) {
+			ancestorIds.add(ancestorId);
+			ancestorId = this.entries.get(ancestorId)?.parentId;
+		}
+		return ancestorIds;
+	}
+
+	private annotateFollowability(
+		records: readonly SubagentRegistryRecord[],
+		followerId: string | undefined,
+		followerParentId?: string,
+	): SubagentRegistryRecord[] {
+		const ancestorIds = this.getAncestorIds(followerId, followerParentId);
+		const deadlockingTargetIds = this.getDeadlockingTargetIds(followerId ?? ROOT_NODE);
+		return records.map((record) => {
+			let followability: SubagentRegistryFollowability = "followable";
+			if (record.status === "running") {
+				if (record.id === followerId) {
+					followability = "current";
+				} else if (ancestorIds.has(record.id)) {
+					followability = "ancestor";
+				} else if (deadlockingTargetIds.has(record.id)) {
+					followability = "dependency-cycle";
+				}
+			}
+			return { ...record, followability };
+		});
 	}
 
 	private toRecord(entry: SubagentRegistryEntry): SubagentRegistryRecord {

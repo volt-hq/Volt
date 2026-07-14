@@ -191,13 +191,23 @@ function formatDelegationSnapshot(snapshot: SubagentRegistrySnapshot): string | 
 	if (snapshot.records.length === 0) {
 		return undefined;
 	}
-	const lines = snapshot.records.map((record) => `- ${record.id} ${record.status}`);
+	const lines = snapshot.records.map((record) => {
+		const followability =
+			record.followability === "current"
+				? "current run; not followable"
+				: record.followability === "ancestor"
+					? "ancestor; not followable"
+					: record.followability === "dependency-cycle"
+						? "dependency cycle; not followable"
+						: "followable";
+		return `- ${record.id} ${record.status} [${followability}]`;
+	});
 	const omitted = snapshot.total - snapshot.records.length;
 	return [
 		"Delegated subagent runs already recorded in this session (snapshot at your start):",
 		...lines,
 		...(omitted > 0 ? [`…and ${omitted} more.`] : []),
-		`Call the ${SUBAGENT_REGISTRY_TOOL_NAME} tool with { "list": true } for the current state and untrusted task prompts, and reuse an existing result with { "follow": "<id>" } instead of duplicating it.`,
+		`Call the ${SUBAGENT_REGISTRY_TOOL_NAME} tool with { "list": true } for the current state and untrusted task prompts. Only use { "follow": "<id>" } for runs marked [followable]; continue independently for current, ancestor, or dependency-cycle runs.`,
 	].join("\n");
 }
 
@@ -569,8 +579,13 @@ export class SubagentManager {
 		return this.getRegistry().list();
 	}
 
+	/** Delegated runs annotated with follow safety relative to this runtime. */
+	listDelegationsForCaller(): SubagentRegistryRecord[] {
+		return this.getRegistry().listForFollower(this.subagentContext?.subagentId);
+	}
+
 	prepareSpawnConfirmation(requestKey: string): SubagentSpawnConfirmationPreflight {
-		return this.getRegistry().prepareSpawnConfirmation(requestKey);
+		return this.getRegistry().prepareSpawnConfirmation(requestKey, this.subagentContext?.subagentId);
 	}
 
 	claimSpawnConfirmation(requestKey: string, token: string): SubagentSpawnConfirmationLease | undefined {
@@ -860,7 +875,12 @@ export class SubagentManager {
 		let client: InProcessRpcClient | undefined;
 		try {
 			if (definitionOptions) {
-				await this.applyDefinitionToRuntime(runtime, definitionOptions.definition, definitionOptions.allowedTools);
+				await this.applyDefinitionToRuntime(
+					runtime,
+					definitionOptions.definition,
+					definitionOptions.allowedTools,
+					subagentContext,
+				);
 			}
 
 			let handle: LocalSubagentHandle | undefined;
@@ -1131,6 +1151,7 @@ export class SubagentManager {
 		runtime: AgentSessionRuntime,
 		definition: SubagentDefinition,
 		allowedTools: string[] | undefined,
+		subagentContext: SubagentRuntimeContext | undefined,
 	): Promise<void> {
 		const allowedSubagents = normalizeUniqueNames(definition.allowedSubagents) ?? [];
 		const activeTools = resolveEffectiveTools({
@@ -1147,7 +1168,13 @@ export class SubagentManager {
 		}
 		runtime.session.appendSystemPromptContext(definition.systemPrompt);
 		if (runtime.session.getActiveToolNames().includes(SUBAGENT_REGISTRY_TOOL_NAME)) {
-			const snapshot = formatDelegationSnapshot(this.getRegistry().snapshot(DELEGATION_SNAPSHOT_MAX_RECORDS));
+			const snapshot = formatDelegationSnapshot(
+				this.getRegistry().snapshotForFollower(
+					DELEGATION_SNAPSHOT_MAX_RECORDS,
+					subagentContext?.subagentId,
+					this.subagentContext?.subagentId,
+				),
+			);
 			if (snapshot) {
 				runtime.session.appendSystemPromptContext(snapshot);
 			}

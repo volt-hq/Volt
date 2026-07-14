@@ -505,6 +505,7 @@ export {
 export {
 	type SubagentFollowResult,
 	SubagentRegistry,
+	type SubagentRegistryFollowability,
 	type SubagentRegistryRecord,
 	type SubagentRegistrySnapshot,
 	type SubagentRegistryStatus,

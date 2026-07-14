@@ -56,7 +56,7 @@ function createSubagentRegistrySchema(includeListMode = true, includeFollowMode 
 		follow: Type.Optional(
 			Type.String({
 				description:
-					"Follow mode: id of an existing subagent run (sa_...) whose result to return, waiting if still running.",
+					"Follow mode: id of an existing subagent run (sa_...) marked followable by the caller-relative registry list.",
 			}),
 		),
 	});
@@ -298,6 +298,8 @@ export interface SubagentToolManager {
 	createDelegationScope?(options?: SubagentDelegationScopeOptions): SubagentDelegationScopeLease;
 	/** All delegated runs in this session's tree-wide registry, for list mode. */
 	listDelegations?(): SubagentRegistryRecord[];
+	/** Registry records annotated with follow safety relative to the current runtime. */
+	listDelegationsForCaller?(): SubagentRegistryRecord[];
 	/** Atomically list and reserve an exact spawn request across the session tree. */
 	prepareSpawnConfirmation?(requestKey: string): SubagentSpawnConfirmationPreflight;
 	/** Atomically claim a reserved exact spawn request. */
@@ -1100,7 +1102,15 @@ function formatDelegationListRecord(record: SubagentRegistryRecord, now: number)
 	const parentId = clampInline(record.parentId ?? "root", DELEGATION_LIST_ID_PREVIEW_CHARS);
 	const task = record.task ? ` — ${clampInline(record.task, DELEGATION_LIST_TASK_PREVIEW_CHARS)}` : "";
 	const error = record.error ? ` [error: ${clampInline(record.error, DELEGATION_LIST_ERROR_PREVIEW_CHARS)}]` : "";
-	return `${id} ${agentName} ${record.status} (${age}, parent: ${parentId})${task}${error}`;
+	const followability =
+		record.followability === "current"
+			? "current run; not followable"
+			: record.followability === "ancestor"
+				? "ancestor; not followable"
+				: record.followability === "dependency-cycle"
+					? "dependency cycle; not followable"
+					: "followable";
+	return `${id} ${agentName} ${record.status} [${followability}] (${age}, parent: ${parentId})${task}${error}`;
 }
 
 function formatDelegationListPageText(
@@ -1119,7 +1129,7 @@ function formatDelegationListPageText(
 			? [`Continue listing with { "list": true, "offset": ${nextOffset} }.`]
 			: []),
 		includeFollowMode
-			? 'Reuse an existing result with { "follow": "<id>" } instead of starting a duplicate run.'
+			? 'Only records marked [followable] may be used with { "follow": "<id>" }; continue independently for current, ancestor, or dependency-cycle records.'
 			: "Avoid starting a duplicate run when an equivalent record already exists.",
 	].join("\n");
 }
@@ -1226,13 +1236,13 @@ function createSubagentSpawnPreflightResult(
 		? `To start this exact request, repeat it unchanged with { "confirm": "${preflight.token}" } within 5 minutes. The token is one-time use.`
 		: preflight.status === "claimed"
 			? includeFollowMode
-				? "An identical request is already being started or run elsewhere in this session, so no new confirmation token was issued. Reuse or follow that run."
+				? "An identical request is already being started or run elsewhere in this session, so no new confirmation token was issued. Reuse its result, following it only when the registry marks it [followable]."
 				: "An identical request is already being started or run elsewhere in this session, so no new confirmation token was issued. Avoid starting another copy."
 			: "An identical request already has a pending confirmation elsewhere in this session, so no new confirmation token was issued. Reuse that pending request or retry after it expires.";
 	const instructions = [
 		`${status} No subagents were started.`,
 		includeFollowMode
-			? "Review the session-wide registry below and reuse or follow equivalent work instead of spawning a duplicate."
+			? "Review the session-wide registry below and reuse equivalent work instead of spawning a duplicate. Follow only records marked [followable]."
 			: "Review the session-wide registry below and avoid spawning duplicate work.",
 		confirmationInstruction,
 	].join("\n");
@@ -1397,7 +1407,7 @@ async function executeSubagentRegistryOperation(
 	onUpdate: AgentToolUpdateCallback<SubagentToolDetails> | undefined,
 ): Promise<AgentToolResult<SubagentToolDetails>> {
 	if (normalized.mode === "list") {
-		const records = options.manager.listDelegations?.();
+		const records = options.manager.listDelegationsForCaller?.() ?? options.manager.listDelegations?.();
 		if (!records) {
 			throw new Error("The subagent delegation registry is not available in this session.");
 		}
@@ -1967,7 +1977,10 @@ export function createSubagentToolDefinition(
 ): ToolDefinition<typeof subagentSchema, SubagentToolDetails, SubagentRenderState> {
 	const options = _options;
 	const registryModesRequested = options.includeRegistryModes ?? true;
-	const includeListMode = registryModesRequested && typeof options.manager.listDelegations === "function";
+	const includeListMode =
+		registryModesRequested &&
+		(typeof options.manager.listDelegationsForCaller === "function" ||
+			typeof options.manager.listDelegations === "function");
 	const includeFollowMode = registryModesRequested && typeof options.manager.followDelegation === "function";
 	const requiresSpawnConfirmation =
 		typeof options.manager.prepareSpawnConfirmation === "function" &&
@@ -2017,11 +2030,12 @@ export function createSubagentToolDefinition(
 			...(includeListMode
 				? [
 						`List mode returns delegated runs across the whole session tree in bounded pages of up to ${DELEGATION_LIST_PAGE_SIZE}; pass the returned offset to continue.`,
+						"List results mark caller-relative followability.",
 					]
 				: []),
 			...(includeFollowMode
 				? [
-						"Follow mode returns an existing run's result by id instead of starting a new subagent, waiting for completion when it is still running.",
+						"Follow mode accepts only runs marked followable and returns that run's result instead of starting a new subagent.",
 					]
 				: []),
 			...(requiresSpawnConfirmation
@@ -2039,12 +2053,12 @@ export function createSubagentToolDefinition(
 			...(requiresSpawnConfirmation
 				? [
 						includeFollowMode
-							? "The first spawn request only lists the session-wide registry. Review it, reuse or follow equivalent work, and repeat the exact request with the returned confirmation token only when a new run is still needed."
+							? "The first spawn request only lists the session-wide registry. Review it, reuse equivalent work, follow only records marked [followable], and repeat the exact request with the returned confirmation token only when a new run is still needed."
 							: "The first spawn request only lists the session-wide registry. Review it, avoid duplicating equivalent work, and repeat the exact request with the returned confirmation token only when a new run is still needed.",
 					]
 				: includeListMode && includeFollowMode
 					? [
-							'Before delegating, use { list: true } to check whether an equivalent task already ran or is still running anywhere in this session, and prefer { follow: "<id>" } over starting a duplicate run.',
+							"Before delegating, use { list: true } to check whether an equivalent task already ran or is still running anywhere in this session, and follow it only when marked [followable].",
 						]
 					: includeListMode
 						? [
@@ -2536,7 +2550,9 @@ export function createSubagentToolDefinition(
 export function createSubagentRegistryToolDefinition(
 	options: SubagentRegistryToolOptions,
 ): ToolDefinition<typeof subagentRegistrySchema, SubagentToolDetails> {
-	const includeListMode = typeof options.manager.listDelegations === "function";
+	const includeListMode =
+		typeof options.manager.listDelegationsForCaller === "function" ||
+		typeof options.manager.listDelegations === "function";
 	const includeFollowMode = typeof options.manager.followDelegation === "function";
 	const maxOutputBytes = Math.min(
 		requirePositiveInteger(options.maxOutputBytes ?? DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES, "maxOutputBytes"),
@@ -2558,11 +2574,11 @@ export function createSubagentRegistryToolDefinition(
 				: "No delegation registry operations are available from this manager.",
 			...(includeListMode
 				? [
-						`List mode { list: true, offset?: number } returns bounded pages of up to ${DELEGATION_LIST_PAGE_SIZE} complete records; pass the returned offset to continue.`,
+						`List mode { list: true, offset?: number } returns caller-relative followability in bounded pages of up to ${DELEGATION_LIST_PAGE_SIZE} complete records; pass the returned offset to continue.`,
 					]
 				: []),
 			...(includeFollowMode
-				? ['Follow mode { follow: "sa_..." } returns an existing run by id, waiting when it is still running.']
+				? ['Follow mode { follow: "sa_..." } accepts only records marked followable and returns that run by id.']
 				: []),
 		].join(" "),
 		promptSnippet:
@@ -2577,8 +2593,12 @@ export function createSubagentRegistryToolDefinition(
 			...(includeListMode || includeFollowMode
 				? ["Use subagent_registry to discover or reuse delegated work and avoid duplicate effort."]
 				: []),
-			...(includeListMode ? ["Use { list: true } to inspect recorded runs."] : []),
-			...(includeFollowMode ? ['Use { follow: "<id>" } to wait for or retrieve one result.'] : []),
+			...(includeListMode ? ["Use { list: true } to inspect caller-relative followability."] : []),
+			...(includeFollowMode
+				? [
+						'Use { follow: "<id>" } only for a record marked [followable]; never follow the current run, an ancestor, or a dependency-cycle record.',
+					]
+				: []),
 		],
 		parameters: createSubagentRegistrySchema(includeListMode, includeFollowMode),
 		executionMode: "sequential",
