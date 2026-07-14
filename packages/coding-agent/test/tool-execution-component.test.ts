@@ -628,6 +628,131 @@ describe("ToolExecutionComponent parity", () => {
 		);
 	});
 
+	test("caps the rendered subagent roster and prioritizes non-completed runs", () => {
+		const taskCount = 40;
+		const component = new ToolExecutionComponent(
+			"subagent",
+			"tool-subagent-roster-cap",
+			{ tasks: Array.from({ length: taskCount }, (_v, i) => ({ agent: `agent-${i}`, task: `task ${i}` })) },
+			{},
+			createSubagentRenderDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "progress" }],
+				details: {
+					mode: "parallel",
+					status: "running",
+					summary: { total: taskCount, completed: 30, failed: 0, aborted: 0, running: 10 },
+					tasks: Array.from({ length: taskCount }, (_v, index) => ({
+						index,
+						subagentId: `sa_${index}`,
+						sessionId: `session_${index}`,
+						agent: { name: `agent-${index}`, source: "user" as const },
+						// The last 10 are still running; they must all stay visible.
+						status: index < 30 ? ("completed" as const) : ("running" as const),
+					})),
+				} satisfies SubagentToolDetails,
+				isError: false,
+			},
+			true,
+		);
+
+		const rendered = stripAnsi(component.render(140).join("\n"));
+		expect(rendered).toContain("…and 24 more agents");
+		for (let index = 30; index < 40; index++) {
+			expect(rendered).toContain(`agent-${index}`);
+		}
+		expect(rendered).toContain("agent-0");
+		expect(rendered).not.toContain("agent-10 ");
+		// Roster summary still reports the full counts.
+		expect(rendered).toContain("10 running");
+		expect(rendered).toContain("30 done");
+	});
+
+	test("bounds rendered nested-tree lines per roster item", () => {
+		const children = Array.from({ length: 16 }, (_v, i) => ({
+			subagentId: `sa_child-${i}`,
+			agent: { name: `child-${i}` },
+			status: "running" as const,
+			task: `child task ${i}`,
+			children: Array.from({ length: 16 }, (_w, j) => ({
+				subagentId: `sa_grandchild-${i}-${j}`,
+				agent: { name: `grandchild-${i}-${j}` },
+				status: "running" as const,
+			})),
+		}));
+		const component = new ToolExecutionComponent(
+			"subagent",
+			"tool-subagent-tree-budget",
+			{ agent: "coordinator", task: "big tree" },
+			{},
+			createSubagentRenderDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "progress" }],
+				details: {
+					mode: "single",
+					status: "running",
+					subagentId: "sa_root",
+					agent: { name: "coordinator", source: "user" },
+					children,
+				} satisfies SubagentToolDetails,
+				isError: false,
+			},
+			true,
+		);
+
+		const lines = component.render(140);
+		const rendered = stripAnsi(lines.join("\n"));
+		// 16 children x 16 grandchildren would be hundreds of lines without a budget.
+		expect(lines.length).toBeLessThan(45);
+		expect(rendered).toContain("└─ …");
+		expect(rendered).toContain("child-0");
+	});
+
+	test("returns cached subagent lines until the result changes", () => {
+		const component = new ToolExecutionComponent(
+			"subagent",
+			"tool-subagent-render-cache",
+			{ agent: "worker", task: "cached task" },
+			{},
+			createSubagentRenderDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		const runningDetails = {
+			mode: "single",
+			status: "running",
+			subagentId: "sa_worker",
+			agent: { name: "worker", source: "user" },
+		} satisfies SubagentToolDetails;
+		component.updateResult(
+			{ content: [{ type: "text", text: "progress" }], isError: false, details: runningDetails },
+			true,
+		);
+
+		const first = component.render(140);
+		expect(component.render(140)).toEqual(first);
+
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "done" }],
+				details: { ...runningDetails, status: "completed" } satisfies SubagentToolDetails,
+				isError: false,
+			},
+			false,
+		);
+		const completed = stripAnsi(component.render(140).join("\n"));
+		expect(completed).toContain("done");
+		expect(completed).not.toContain("running");
+	});
+
 	test("renders built-in subagent chain steps with expanded outputs", () => {
 		const component = new ToolExecutionComponent(
 			"subagent",

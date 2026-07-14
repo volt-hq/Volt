@@ -1278,6 +1278,28 @@ interface SubagentConversationItem {
 	children?: SubagentTreeNode[];
 }
 
+/** Rendered roster rows per subagent call; overflow collapses to one summary line. */
+const SUBAGENT_ROSTER_MAX_VISIBLE = 16;
+/** Rendered nested-tree node budget per roster item; overflow collapses to "…". */
+const SUBAGENT_TREE_RENDER_MAX_NODES = 32;
+
+interface SubagentTreeRenderBudget {
+	remaining: number;
+	marked: boolean;
+}
+
+/** First MAX_VISIBLE items with non-completed runs prioritized, in original order. */
+function selectVisibleRosterItems(items: SubagentConversationItem[]): SubagentConversationItem[] {
+	if (items.length <= SUBAGENT_ROSTER_MAX_VISIBLE) {
+		return items;
+	}
+	const prioritized = [...items].sort(
+		(left, right) => Number(left.status === "completed") - Number(right.status === "completed"),
+	);
+	const selected = new Set(prioritized.slice(0, SUBAGENT_ROSTER_MAX_VISIBLE));
+	return items.filter((item) => selected.has(item));
+}
+
 function formatCompactCount(value: number): string {
 	if (value < 1_000) return String(value);
 	if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 100_000 ? 1 : 0).replace(/\.0$/, "")}k`;
@@ -1331,6 +1353,13 @@ class SubagentConversationSummaryComponent implements Component {
 	private expanded = false;
 	private executionStarted = false;
 	private currentTheme: Theme;
+	// The whole UI tree re-renders every TUI frame, so recomputing the roster and
+	// nested trees per frame dominates frame time once many subagents exist.
+	// Rendered lines are cached and recomputed only when inputs change or the
+	// host repaint tick invalidates (which advances elapsed-time displays).
+	private cachedWidth = -1;
+	private cachedLines: string[] | undefined;
+	private lastResultContent: unknown;
 
 	constructor(args: SubagentToolInput | undefined, currentTheme: Theme) {
 		this.args = args;
@@ -1338,26 +1367,55 @@ class SubagentConversationSummaryComponent implements Component {
 	}
 
 	setArgs(args: SubagentToolInput | undefined): void {
+		if (this.args === args) {
+			return;
+		}
 		this.args = args;
+		this.clearCache();
 	}
 
 	setTheme(currentTheme: Theme): void {
+		if (this.currentTheme === currentTheme) {
+			return;
+		}
 		this.currentTheme = currentTheme;
+		this.clearCache();
 	}
 
 	setRenderState(expanded: boolean, executionStarted: boolean): void {
+		if (this.expanded === expanded && this.executionStarted === executionStarted) {
+			return;
+		}
 		this.expanded = expanded;
 		this.executionStarted = executionStarted;
+		this.clearCache();
 	}
 
 	setResult(result: AgentToolResult<SubagentToolDetails>, isPartial: boolean, isError: boolean): void {
+		if (
+			this.lastResultContent === result.content &&
+			this.details === result.details &&
+			this.isPartial === isPartial &&
+			this.resultIsError === isError
+		) {
+			return;
+		}
+		this.lastResultContent = result.content;
 		this.details = result.details;
 		this.resultText = getTextContent(result);
 		this.isPartial = isPartial;
 		this.resultIsError = isError;
+		this.clearCache();
 	}
 
-	invalidate(): void {}
+	invalidate(): void {
+		this.clearCache();
+	}
+
+	private clearCache(): void {
+		this.cachedWidth = -1;
+		this.cachedLines = undefined;
+	}
 
 	private getItems(): SubagentConversationItem[] {
 		if (this.details?.mode === "single" || this.details?.mode === "follow") {
@@ -1427,11 +1485,19 @@ class SubagentConversationSummaryComponent implements Component {
 		prefix: string,
 		width: number,
 		depth: number,
+		budget: SubagentTreeRenderBudget,
 	): void {
 		if (depth >= SUBAGENT_TREE_MAX_DEPTH) {
 			return;
 		}
 		for (const [position, node] of nodes.entries()) {
+			if (budget.remaining <= 0) {
+				if (!budget.marked) {
+					budget.marked = true;
+					lines.push(truncateToWidth(this.currentTheme.fg("muted", `${prefix}└─ …`), width, ""));
+				}
+				return;
+			}
 			const last = position === nodes.length - 1;
 			const branch = last ? "└─" : "├─";
 			const continuation = last ? "  " : "│ ";
@@ -1475,13 +1541,24 @@ class SubagentConversationSummaryComponent implements Component {
 				);
 			}
 
+			budget.remaining -= 1;
 			if (node.children && node.children.length > 0) {
-				this.renderTreeNodes(lines, node.children, `${prefix}${continuation}`, width, depth + 1);
+				this.renderTreeNodes(lines, node.children, `${prefix}${continuation}`, width, depth + 1, budget);
 			}
 		}
 	}
 
 	render(width: number): string[] {
+		if (this.cachedLines && this.cachedWidth === width) {
+			return this.cachedLines;
+		}
+		const lines = this.renderLines(width);
+		this.cachedWidth = width;
+		this.cachedLines = lines;
+		return lines;
+	}
+
+	private renderLines(width: number): string[] {
 		const safeWidth = Math.max(1, width);
 		if (this.details?.mode === "list") {
 			const title = this.currentTheme.bold(this.currentTheme.fg("accent", "Subagent registry"));
@@ -1508,8 +1585,10 @@ class SubagentConversationSummaryComponent implements Component {
 		const summary = renderRosterSummary(items, this.currentTheme);
 		lines.push(truncateToWidth(`${title}${modeLabel}${summary ? `  ${summary}` : ""}`, safeWidth, ""));
 
-		for (const [position, item] of items.entries()) {
-			const last = position === items.length - 1;
+		const visibleItems = selectVisibleRosterItems(items);
+		const hiddenCount = items.length - visibleItems.length;
+		for (const [position, item] of visibleItems.entries()) {
+			const last = position === visibleItems.length - 1 && hiddenCount === 0;
 			const branch = last ? "└─" : "├─";
 			const continuation = last ? "  " : "│ ";
 			const agentLabel = this.currentTheme.bold(this.currentTheme.fg("text", item.agent.name));
@@ -1542,13 +1621,25 @@ class SubagentConversationSummaryComponent implements Component {
 				lines.push(truncateToWidth(`${continuation}  ${warning}`, safeWidth, this.currentTheme.fg("dim", "…")));
 			}
 			if (item.children && item.children.length > 0) {
-				this.renderTreeNodes(lines, item.children, `${continuation} `, safeWidth, 1);
+				this.renderTreeNodes(lines, item.children, `${continuation} `, safeWidth, 1, {
+					remaining: SUBAGENT_TREE_RENDER_MAX_NODES,
+					marked: false,
+				});
 			}
 			if (!this.expanded) continue;
 			const outputText = item.output?.text ?? (items.length === 1 && !this.isPartial ? this.resultText : undefined);
 			if (outputText && outputText.trim() !== item.error?.message?.trim()) {
 				appendIndentedMarkdown(lines, outputText, safeWidth, this.currentTheme, continuation);
 			}
+		}
+		if (hiddenCount > 0) {
+			lines.push(
+				truncateToWidth(
+					this.currentTheme.fg("muted", `└─ …and ${hiddenCount} more agent${hiddenCount === 1 ? "" : "s"}`),
+					safeWidth,
+					"",
+				),
+			);
 		}
 		return lines.map((line) =>
 			visibleWidth(line) > safeWidth ? truncateToWidth(line, safeWidth, this.currentTheme.fg("dim", "…")) : line,
@@ -1716,10 +1807,13 @@ export function createSubagentToolDefinition(
 			};
 			// Child event streams (nested delegation included) can be chatty, so
 			// progress updates are throttled with a trailing emit that preserves
-			// the newest snapshot. Final updates flush any queued progress first,
-			// so a stale snapshot can never land after the terminal details.
+			// the newest snapshot. Snapshot construction is deferred behind the
+			// throttle: producers are queued and only the one that actually emits
+			// is built, so per-event cost stays O(1) regardless of task count.
+			// Final updates flush any queued progress first, so a stale snapshot
+			// can never land after the terminal details.
 			let progressThrottleTimer: ReturnType<typeof setTimeout> | undefined;
-			let queuedProgress: { details: SubagentToolDetails; message: string | undefined } | undefined;
+			let queuedProgress: { buildDetails: () => SubagentToolDetails; message: string | undefined } | undefined;
 			let lastProgressEmitAt = 0;
 			const cancelQueuedProgress = (): void => {
 				queuedProgress = undefined;
@@ -1737,17 +1831,19 @@ export function createSubagentToolDefinition(
 				queuedProgress = undefined;
 				if (queued) {
 					lastProgressEmitAt = Date.now();
-					emitToolUpdate(queued.details, formatProgressContent(queued.details, queued.message));
+					const details = queued.buildDetails();
+					emitToolUpdate(details, formatProgressContent(details, queued.message));
 				}
 			};
-			const emitProgressUpdate = (details: SubagentToolDetails, message: string | undefined): void => {
+			const emitProgressUpdate = (buildDetails: () => SubagentToolDetails, message: string | undefined): void => {
 				const now = Date.now();
 				if (!progressThrottleTimer && now - lastProgressEmitAt >= SUBAGENT_PROGRESS_THROTTLE_MS) {
 					lastProgressEmitAt = now;
+					const details = buildDetails();
 					emitToolUpdate(details, formatProgressContent(details, message));
 					return;
 				}
-				queuedProgress = { details, message };
+				queuedProgress = { buildDetails, message };
 				if (!progressThrottleTimer) {
 					progressThrottleTimer = setTimeout(
 						flushQueuedProgress,
@@ -1800,7 +1896,7 @@ export function createSubagentToolDefinition(
 				const runTask = async (
 					task: NormalizedSubagentTaskInput,
 					captureTaskErrors: boolean,
-					onProgress?: (details: SubagentToolTaskDetails, message: string | undefined) => void,
+					onProgress?: (buildDetails: () => SubagentToolTaskDetails, message: string | undefined) => void,
 				): Promise<SubagentTaskExecutionResult> => {
 					let handle: SubagentHandle | undefined;
 					let definition: SubagentDefinition | undefined;
@@ -1842,10 +1938,10 @@ export function createSubagentToolDefinition(
 							const liveChanged = live.apply(event);
 							const message = describeSubagentProgressEvent(event);
 							if (message || liveChanged) {
-								onProgress?.(runningDetails(), message);
+								onProgress?.(runningDetails, message);
 							}
 						});
-						onProgress?.(runningDetails(), "started");
+						onProgress?.(runningDetails, "started");
 						const completion = handle.waitForEnd();
 						await Promise.race([handle.prompt(task.task), abortPromise]);
 						const result = await Promise.race([completion, abortPromise]);
@@ -1916,8 +2012,8 @@ export function createSubagentToolDefinition(
 				};
 
 				if (normalized.mode === "single") {
-					const result = await runTask(normalized.tasks[0], false, (details, message) => {
-						emitProgressUpdate(createSingleDetails(details), message);
+					const result = await runTask(normalized.tasks[0], false, (buildDetails, message) => {
+						emitProgressUpdate(() => createSingleDetails(buildDetails()), message);
 					});
 					const finalResult: AgentToolResult<SubagentToolDetails> = {
 						content: [{ type: "text", text: result.outputText }],
@@ -1934,19 +2030,20 @@ export function createSubagentToolDefinition(
 						const result = await runTask(
 							{ ...step, task: step.task.replace(/\{previous\}/g, () => previousOutput) },
 							true,
-							(details, message) => {
+							(buildDetails, message) => {
 								emitProgressUpdate(
-									createChainProgressDetails(
-										[...results.map((completed) => completed.details), details],
-										normalized.tasks.length,
-										{ startedAt: executionStartedAt },
-									),
+									() =>
+										createChainProgressDetails(
+											[...results.map((completed) => completed.details), buildDetails()],
+											normalized.tasks.length,
+											{ startedAt: executionStartedAt },
+										),
 									message,
 								);
 							},
 						);
 						results.push(result);
-						emitProgressUpdate(createChainDetails(results, { startedAt: executionStartedAt }), undefined);
+						emitProgressUpdate(() => createChainDetails(results, { startedAt: executionStartedAt }), undefined);
 						if (result.details.status !== "completed") {
 							const finalResult: AgentToolResult<SubagentToolDetails> = {
 								content: [{ type: "text", text: formatChainFailureSummary(results) }],
@@ -1975,27 +2072,38 @@ export function createSubagentToolDefinition(
 					return finalResult;
 				}
 
-				const parallelProgressTasks = normalized.tasks.map((task) =>
-					createRunningTaskDetails({
+				const parallelProgressTasks: Array<() => SubagentToolTaskDetails> = normalized.tasks.map((task) => {
+					const pending = createRunningTaskDetails({
 						index: task.index,
 						definition: undefined,
 						agentName: task.agent,
 						handle: undefined,
-					}),
-				);
-				const emitParallelTaskUpdate = (details: SubagentToolTaskDetails, message: string | undefined): void => {
-					parallelProgressTasks[details.index] = details;
-					emitProgressUpdate(
-						createParallelProgressDetails(parallelProgressTasks, { startedAt: executionStartedAt }),
-						message,
+					});
+					return () => pending;
+				});
+				// Built only when the throttle actually emits; producers capture live
+				// state so the emitted snapshot is always the newest.
+				const buildParallelProgress = (): SubagentToolDetails =>
+					createParallelProgressDetails(
+						parallelProgressTasks.map((buildTask) => buildTask()),
+						{ startedAt: executionStartedAt },
 					);
+				const emitParallelTaskUpdate = (
+					index: number,
+					buildDetails: () => SubagentToolTaskDetails,
+					message: string | undefined,
+				): void => {
+					parallelProgressTasks[index] = buildDetails;
+					emitProgressUpdate(buildParallelProgress, message);
 				};
 				const results = await mapWithConcurrencyLimit(
 					normalized.tasks,
 					DEFAULT_SUBAGENT_PARALLEL_MAX_CONCURRENCY,
 					async (task) => {
-						const result = await runTask(task, true, emitParallelTaskUpdate);
-						emitParallelTaskUpdate(result.details, undefined);
+						const result = await runTask(task, true, (buildDetails, message) =>
+							emitParallelTaskUpdate(task.index, buildDetails, message),
+						);
+						emitParallelTaskUpdate(task.index, () => result.details, undefined);
 						return result;
 					},
 					signal,
@@ -2056,7 +2164,12 @@ export function createSubagentToolDefinition(
 			state.summary?.setResult(result, options.isPartial, context.isError);
 			if (options.isPartial && !context.isError) {
 				// Tick once a second while running so elapsed times update live.
-				state.interval ??= setInterval(() => context.invalidate(), 1000);
+				// The tick also invalidates the summary's render cache, which is
+				// what advances elapsed-time displays between progress updates.
+				if (!state.interval) {
+					state.interval = setInterval(() => context.invalidate(), 1000);
+					state.interval.unref?.();
+				}
 			} else if (state.interval) {
 				clearInterval(state.interval);
 				state.interval = undefined;
