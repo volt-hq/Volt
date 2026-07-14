@@ -1076,7 +1076,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 
 	let startupComplete = false;
 	let startupAbortError: Error | undefined;
-	const queuedStartupCommandLines: string[] = [];
+	const queuedStartupCommands: unknown[] = [];
 
 	/**
 	 * Check if shutdown was requested and perform shutdown if so.
@@ -1258,6 +1258,25 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		}).catch(() => {});
 	};
 
+	const processParsedInput = (parsed: unknown): Promise<void> => {
+		if (shuttingDown) {
+			return Promise.resolve();
+		}
+		if (handleControlMessage(parsed)) {
+			return Promise.resolve();
+		}
+
+		if (!startupComplete) {
+			if (queuedStartupCommands.length >= MAX_PENDING_RPC_INPUT_TASKS) {
+				return rejectInputTaskOverflow();
+			}
+			queuedStartupCommands.push(parsed);
+			return Promise.resolve();
+		}
+
+		return enqueueInputTask(() => handleQueuedParsedInput(parsed)) ? Promise.resolve() : rejectInputTaskOverflow();
+	};
+
 	const processInputLine = (line: string): Promise<void> => {
 		if (shuttingDown) {
 			return Promise.resolve();
@@ -1282,22 +1301,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			return enqueued ? Promise.resolve() : rejectInputTaskOverflow();
 		}
 
-		if (handleControlMessage(parsed)) {
-			return Promise.resolve();
-		}
-
-		if (!startupComplete) {
-			if (queuedStartupCommandLines.length >= MAX_PENDING_RPC_INPUT_TASKS) {
-				return rejectInputTaskOverflow();
-			}
-			queuedStartupCommandLines.push(line);
-			return Promise.resolve();
-		}
-
-		return enqueueInputTask(() => handleQueuedParsedInput(parsed)) ? Promise.resolve() : rejectInputTaskOverflow();
+		return processParsedInput(parsed);
 	};
 
-	detachInput = transport.onLine(processInputLine);
+	detachInput = transport.onValue ? transport.onValue(processParsedInput) : transport.onLine(processInputLine);
 	detachClose =
 		transport.onClose?.((transportError) => {
 			if (transportError) {
@@ -1340,12 +1347,13 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		getModelRegistry: () => session.modelRegistry,
 		onCatalogChanged: () => output({ type: "models_changed" }),
 	});
-	for (const line of queuedStartupCommandLines.splice(0)) {
-		// These lines were admitted into the bounded pre-startup queue before an
-		// async-aware transport could apply steady-state per-line backpressure.
-		// Preserve detached review workflows by scheduling them onto commandQueue
-		// without holding RPC-mode startup open until a long-running action ends.
-		void processInputLine(line);
+	for (const parsed of queuedStartupCommands.splice(0)) {
+		// These commands were admitted into the bounded pre-startup queue before
+		// an async-aware transport could apply steady-state per-frame
+		// backpressure. Preserve detached review workflows by scheduling them
+		// onto commandQueue without holding RPC-mode startup open until a
+		// long-running action ends.
+		void processParsedInput(parsed);
 	}
 	if (shouldExitProcess) {
 		registerSignalHandlers();

@@ -1,5 +1,5 @@
 import { serializeJsonLine } from "./jsonl.ts";
-import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "./transport.ts";
+import type { RpcCloseHandler, RpcLineHandler, RpcTransport, RpcValueHandler } from "./transport.ts";
 
 export interface LoopbackRpcTransportPair {
 	client: RpcTransport;
@@ -9,9 +9,12 @@ export interface LoopbackRpcTransportPair {
 /**
  * Create an in-memory, full-duplex RPC transport pair.
  *
- * Each endpoint owns JSONL framing like the stream transports. Writes on one
- * endpoint are delivered as inbound lines on the other endpoint, and closing one
- * endpoint's output closes the peer endpoint's input.
+ * Frames pass between endpoints as structured values, not JSONL text: each
+ * write is structured-cloned once so endpoints never observe each other's
+ * later mutations, and consumers subscribed through onValue skip JSON
+ * serialize/parse entirely. onLine remains supported for line-based consumers
+ * by serializing lazily per delivery. Closing one endpoint's output closes the
+ * peer endpoint's input.
  */
 export function createLoopbackRpcTransportPair(): LoopbackRpcTransportPair {
 	const client = new LoopbackRpcTransportEndpoint();
@@ -21,12 +24,22 @@ export function createLoopbackRpcTransportPair(): LoopbackRpcTransportPair {
 	return { client, server };
 }
 
+function cloneLoopbackFrame(value: object): unknown {
+	try {
+		return structuredClone(value);
+	} catch {
+		// Rare non-cloneable frames (e.g. embedded functions) keep the legacy
+		// JSON round-trip semantics: unsupported values are dropped, not thrown.
+		return JSON.parse(JSON.stringify(value));
+	}
+}
+
 class LoopbackRpcTransportEndpoint implements RpcTransport {
+	private readonly valueHandlers = new Set<RpcValueHandler>();
 	private readonly lineHandlers = new Set<RpcLineHandler>();
 	private readonly closeHandlers = new Set<RpcCloseHandler>();
-	private readonly queuedLines: string[] = [];
+	private readonly queuedValues: unknown[] = [];
 	private peer: LoopbackRpcTransportEndpoint | undefined;
-	private inputBuffer = "";
 	private inputClosed = false;
 	private inputCloseError: Error | undefined;
 	private outputClosed = false;
@@ -43,12 +56,20 @@ class LoopbackRpcTransportEndpoint implements RpcTransport {
 			throw new Error("Loopback RPC transport peer is missing");
 		}
 
-		this.peer.receiveText(serializeJsonLine(value));
+		this.peer.receiveValue(cloneLoopbackFrame(value));
+	}
+
+	onValue(handler: RpcValueHandler): () => void {
+		this.valueHandlers.add(handler);
+		this.drainQueuedValues();
+		return () => {
+			this.valueHandlers.delete(handler);
+		};
 	}
 
 	onLine(handler: RpcLineHandler): () => void {
 		this.lineHandlers.add(handler);
-		this.drainQueuedLines();
+		this.drainQueuedValues();
 		return () => {
 			this.lineHandlers.delete(handler);
 		};
@@ -85,32 +106,22 @@ class LoopbackRpcTransportEndpoint implements RpcTransport {
 		this.peer?.endInput();
 	}
 
-	private receiveText(text: string): void {
+	private receiveValue(value: unknown): void {
 		if (this.inputClosed) {
 			return;
 		}
-
-		this.inputBuffer += text;
-		while (true) {
-			const newlineIndex = this.inputBuffer.indexOf("\n");
-			if (newlineIndex === -1) {
-				return;
-			}
-
-			this.enqueueLine(this.inputBuffer.slice(0, newlineIndex));
-			this.inputBuffer = this.inputBuffer.slice(newlineIndex + 1);
+		if (this.valueHandlers.size === 0 && this.lineHandlers.size === 0) {
+			this.queuedValues.push(value);
+			return;
 		}
+
+		this.emitValue(value);
 	}
 
 	private endInput(error?: Error): void {
 		if (this.inputClosed) {
 			return;
 		}
-		if (this.inputBuffer.length > 0) {
-			this.enqueueLine(this.inputBuffer);
-			this.inputBuffer = "";
-		}
-
 		this.inputClosed = true;
 		this.inputCloseError = error;
 		for (const handler of this.closeHandlers) {
@@ -118,28 +129,21 @@ class LoopbackRpcTransportEndpoint implements RpcTransport {
 		}
 	}
 
-	private enqueueLine(line: string): void {
-		const normalizedLine = line.endsWith("\r") ? line.slice(0, -1) : line;
-		if (this.lineHandlers.size === 0) {
-			this.queuedLines.push(normalizedLine);
-			return;
+	private drainQueuedValues(): void {
+		while (this.queuedValues.length > 0 && (this.valueHandlers.size > 0 || this.lineHandlers.size > 0)) {
+			this.emitValue(this.queuedValues.shift());
 		}
-
-		this.emitLine(normalizedLine);
 	}
 
-	private drainQueuedLines(): void {
-		while (this.queuedLines.length > 0 && this.lineHandlers.size > 0) {
-			const line = this.queuedLines.shift();
-			if (line !== undefined) {
-				this.emitLine(line);
+	private emitValue(value: unknown): void {
+		for (const handler of this.valueHandlers) {
+			handler(value);
+		}
+		if (this.lineHandlers.size > 0) {
+			const line = serializeJsonLine(value).slice(0, -1);
+			for (const handler of this.lineHandlers) {
+				handler(line);
 			}
-		}
-	}
-
-	private emitLine(line: string): void {
-		for (const handler of this.lineHandlers) {
-			handler(line);
 		}
 	}
 }
