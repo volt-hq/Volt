@@ -1,209 +1,33 @@
 # Changelog
 
-## [Unreleased]
-
 ## [0.1.0] - 2026-07-13
+
+Volt's first release: a terminal coding agent with a companion daemon that can hand a running session to your phone and back. Volt is a fork of [Pi](https://github.com/badlogic/pi-mono); this release restarts the version line under the `@hansjm10/volt-coding-agent` package identity.
+
+### Highlights
+
+- **Remote sessions on your phone** — Pair the Volt iOS app with your machine over an end-to-end encrypted Iroh connection (QR-code pairing, no port forwarding or accounts), attach to live conversations, steer runs from anywhere, and get push notifications and Live Activities as turns complete. Every device pairs with an explicit access preset: `coding`, `review`, `chat`, or `full`.
+- **`voltd` daemon and `/remote` control center** — A background daemon owns workspaces, runtimes, and conversation leases, so sessions survive TUI restarts and move cleanly between desktop and phone. The `/remote` command manages daemon health, workspace registration, pairing, paired devices, active leases, and runtime tool policy from inside the TUI. See [Daemon](docs/daemon.md).
+- **Subagent delegation** — A built-in `subagent` tool discovers user- and project-defined child agents, ships reserved `general`, `researcher`, `design-doc`, and `security-reviewer` roles, enforces bounded recursive delegation budgets, and renders live nested delegation trees in the TUI and on remote clients.
+- **Native MCP support** — Trusted config loading, a built-in `mcp` gateway tool, stdio/Streamable HTTP/SSE transports, and OAuth (browser PKCE and device-code) with host-side token storage. See [MCP](docs/mcp.md).
+- **LSP-backed editing** — Language servers spawn lazily per project and append diagnostics to `edit`/`write` results by default, and the `lsp` tool adds navigation, references, call hierarchy, project-wide rename, and quick fixes. See [LSP Diagnostics](docs/lsp.md).
+- **`/review`** — Review uncommitted changes, branch diffs, GitHub PRs, or single commits in an isolated session, then continue from the numbered findings with clean context.
+- **Built-in web search** — A `web_search` tool enabled by default across SDK, CLI/RPC, and remote sessions, with OpenAI/Codex, custom-endpoint, and Brave Search backends.
+- **Settings profiles** — Workflow-specific settings and resource overlays selectable with `--profile`, `VOLT_PROFILE`, or `defaultProfile`, plus `/profile` for switching interactively.
 
 ### Breaking Changes
 
-- Changed the Volt beta package identity to `@hansjm10/volt-coding-agent`, restarted the Volt release line at `0.1.0`, and moved npm beta installs to the `beta` dist-tag.
-- Replaced the old fork's hidden Earendil announcement with the Volt-owned `/voltannouncement` easter egg and removed the old branding asset.
-- Paired Iroh remote devices and pending pairing tickets now require a versioned per-device RPC grant in addition to `allowedTools`; state without a valid grant fails closed, so existing development pairings must re-pair. `volt remote pair --access coding|review|chat|full` defaults to `coding`, and `volt remote access <node-id> set <preset>` atomically updates both access planes.
+- Volt now ships as `@hansjm10/volt-coding-agent` with the release line restarted at 0.1.0; npm beta installs use the `beta` dist-tag.
+- Paired remote devices and pending pairing tickets require a versioned per-device access grant; pairings created before this release fail closed and must re-pair with `volt remote pair --access coding|review|chat|full`.
 
-### Added
+### Also in this release
 
-- Added live nested subagent delegation trees to `subagent` tool details: each task now carries a bounded `task` preview, `startedAt`/`durationMs`, live `toolCalls`/`tokens` counters, a `currentActivity` line, and a recursive `children` array grafted from the child's own `subagent` tool updates (depth-capped at 5). The TUI transcript roster renders the tree inline with box-drawing branches as it grows, remote transcript/live-event projections preserve the new fields, `get_state.activeTools` includes the newest projected `subagent` details so mid-turn attachers can paint the current tree, and progress updates are throttled (trailing 200 ms) so chatty descendants cannot flood the wire.
-
-- Added a built-in `/remote` TUI control center for daemon health and startup, current-directory workspace registration, current conversation ownership, attached phones, cancellable pairing QR/tickets with explicit `coding`, `review`, `chat`, or `full` access selection, paired-device revocation and explicit re-pair approval, registered workspaces, active leases, and effective daemon-owned runtime tool/retention policy.
-
-- Added a dim duration suffix (e.g. `(3.2s)`) to the tool header once a tool call finishes, for executions of 1s or longer. Tool definitions whose renderers already display a duration (like the built-in bash tool) can opt out with the new `rendersDuration` flag.
-
-- Added `session_runtime_state.v1` discovery metadata: `list_sessions` can now identify desktop-owned, daemon-active, retained-detached, and draining session runtimes so clients can reconnect currently running agents without reviving every dormant session.
-- Added an `agent_settled` session/RPC event emitted when all tracked prompt work reaches a global idle boundary, after any final `agent_end`, automatic retries, overflow/threshold compaction continuations, and queued-message continuations have finished. A boundary may settle multiple overlapping prompt transactions, and handled/rejected preflight may settle without an `agent_end`. RPC client `waitForIdle()`, `collectEvents()`, and `promptAndWait()` now terminate on `agent_settled` instead of a raw `agent_end`.
-- Added proactive mid-run compaction: when a turn with tool calls pushes live context usage over the compaction threshold, the session stops the agent loop after that turn (via a new `Agent.shouldStopAfterTurn` hook wired through to the agent-loop), runs threshold compaction, and resumes the interrupted run, instead of waiting for the full agent/tool loop to finish. A failed attempt does not retrigger until a compaction succeeds or the next user prompt.
-- Added an aggregate character budget for compaction/branch-summary summarization input: serialized conversations are capped (keeping the opening goal plus the newest contiguous parts with an omission marker), in addition to the existing per-tool-result truncation.
-
-- Added `volt remote worktree adopt <path>` to register existing git worktree checkouts with the daemon when their source checkout is a registered workspace.
-- Added native MCP support with trusted config loading, a built-in `mcp` gateway tool, stdio/Streamable HTTP/SSE client transports, metadata/output/audit storage, and local RPC server management commands.
-- Added MCP OAuth authentication for HTTP/SSE servers, including browser authorization-code + PKCE, device-code auth, host-side token storage, CLI commands, and RPC management hooks.
-- Added an `upload_device_logs` RPC command to Iroh remote conversation streams so paired mobile clients can store diagnostic logs in the workspace under `.volt/device-logs/` (validated single-component file name, 4 MiB content cap, atomic write, audit-logged).
-- Added live model catalog updates for RPC and Iroh remote clients: `get_available_models` now reloads `auth.json`/`models.json` from disk before answering, and RPC mode watches both files and emits a `models_changed` event when logins, logouts, or API key saves from other volt processes change the available catalog, so paired clients can offer new models without restarting the host.
-
-- Added a built-in `web_search` tool, enabled by default across SDK, CLI/RPC, and Iroh remote sessions. It uses the OpenAI/Codex search backend for authenticated OpenAI models, supports a custom Volt JSON endpoint via `VOLT_WEB_SEARCH_URL`, and falls back to Brave Search via `BRAVE_SEARCH_API_KEY`.
-- Added core subagent definition parsing, trusted user/project discovery plumbing, ResourceLoader exposure, and a local in-process SubagentManager skeleton.
-- Added definition-backed `SubagentManager.startByName()` support that applies discovered subagent prompts, tool policy intersections, excluded tool subtraction, delegation controls, model selection, and thinking levels to child runtimes.
-- Added a built-in `subagent` tool for MVP single-task, parallel, and chain delegation to discovered child agents, with bounded per-task/step model-visible output and child metadata details.
-- Added built-in `general`, `researcher`, `design-doc`, and `security-reviewer` subagents for common delegation, research, design-document, and security review workflows under reserved names that file-backed definitions cannot override, including bounded delegation policies and enforced non-mutating local grants for research/security roles.
-- Added custom interactive rendering for built-in `subagent` tool calls and single/parallel/chain results.
-- Added live inline rendering of running subagent conversations in the interactive TUI: each running child streams into a transient bordered transcript group (like `/review`), which is removed when the child finishes and its tool result summary lands; `/subagents` remains available for inspecting past runs.
-- Added live progress partial updates for built-in `subagent` tool single, parallel, and chain delegation.
-- Added local RPC subagent lifecycle commands for listing, starting, observing, aborting, inspecting, and disposing definition-backed child agents.
-- Added MVP subagent usage and SDK documentation covering definition discovery, project trust, explicit tool enablement, child isolation, and output limits.
-- Added active tool executions to RPC `get_state` responses so remote clients can restore in-flight tool cards after reconnecting.
-- Added host-initiated RPC action requests so clients can approve blocking host workflows; missing trusted LSP server binaries can now prompt for installation, run the host-owned install command, and retry diagnostics.
-- Added Pi extension package compatibility: `volt install` now reads `pi` manifests when no `volt` manifest is present and aliases Pi core imports to Volt modules at extension load time.
-- Added an experimental first-time setup flow behind `PI_EXPERIMENTAL=1` that asks for a dark/light theme choice (preselecting the detected appearance) and opt-in analytics data sharing on first launch with the default agent directory; opting in stores a `trackingId` in `settings.json`.
-- Added native LSP diagnostics: a config-driven multi-server manager spawns language servers lazily and appends diagnostics to `edit`/`write` tool results. It is enabled by default; configure servers via `lsp.servers` or set `lsp.enabled` to `false` to disable. See [LSP Diagnostics](docs/lsp.md).
-- Added an `lsp` navigation tool (active by default unless LSP is disabled) with definition, references, hover, symbols, and on-demand diagnostics actions.
-- Added `rename` and `fix` actions to the `lsp` tool: project-wide symbol rename and quick-fix application (e.g. auto-import) via LSP WorkspaceEdits, including command-based code actions applied through `workspace/applyEdit`.
-- Added a `/lsp` command showing language server status (root, open documents, idle time) with `/lsp restart` to stop servers, and automatic shutdown of servers idle for `lsp.idleShutdownMs` (default 10 minutes; servers respawn lazily).
-- Added per-server `lsp.servers.<name>.settings`: sent via `workspace/didChangeConfiguration` after startup and used to answer `workspace/configuration` section requests (e.g. pyright analysis options).
-- Added project-wide symbol search: `lsp symbols` with a `symbol` query searches the workspace via `workspace/symbol`, routed by the given file's server.
-- Edit/write diagnostics now report other open files that went from clean to failing as a result of the change (capped at 5 files).
-- Added `callers` and `callees` actions to the `lsp` tool (call hierarchy via `textDocument/prepareCallHierarchy`).
-- Added `implementations` and `type-definition` actions to the `lsp` tool.
-- Added a `kind` parameter to `lsp fix` for kind-filtered code actions such as `source.organizeImports` and `source.fixAll`.
-- Added built-in LSP server defaults for clangd (C/C++), zls (Zig), lua-language-server, and bash-language-server.
-- Added LSP protocol tracing: `lsp.traceFile` setting and `/lsp trace [path|off]` runtime toggle append JSON-RPC traffic, server stderr, and lifecycle events to a log file.
-- Added a built-in `/review` command that reviews uncommitted changes, branch diffs vs a base, GitHub PRs, or single commits in an isolated in-process review session with full tool access, then starts a fresh session seeded only with the numbered findings so follow-ups like "fix 1 and 3" run with clean context. Configure the reviewer model with the `reviewModel` setting or the "Review model" entry in `/settings`.
-- Added settings profiles, selectable with `--profile`, `VOLT_PROFILE`, or `defaultProfile`, for workflow-specific settings and resource overlays.
-- Added `/profile` for interactive profile inspection, switching, and creating empty global profiles.
-- Added `terminal.turnDoneAlert` and a `/settings` toggle to ring the terminal bell when Volt finishes a response.
-- Added an automated fake-RPC scenario runner for the Iroh remote host demo covering local prompt streaming, state retrieval, pairing, revocation, expired tickets, and workspace preflight failures.
-- Added a core RPC transport abstraction so RPC mode can run over adapters other than process stdin/stdout.
-- Added an in-process Iroh RPC transport adapter for running Volt RPC directly over Iroh bidirectional streams.
-- Added typed core Iroh remote helpers for tickets, handshakes, host state, client authorization, workspaces, remote RPC command filtering, and an in-process Iroh remote RPC mode wrapper.
-- Added typed Iroh remote host/client engines with bounded handshake reads, host state management, audit logging, and pair/list/revoke operations.
-- Added default JSONL audit logging to the Iroh remote host for pairing, authorization, rejection, revocation, connection lifecycle, and integrated runtime startup failures.
-- Added `volt remote clients`, `volt remote revoke <node-id>`, and `volt remote revoke --all` for managing paired Iroh remote clients from the main CLI.
-- Added `volt remote pair` to request first-class pairing tickets from a running Iroh remote host control channel.
-- Added `volt remote status` for deterministic persisted Iroh remote host state inspection without printing secrets or secret hashes.
-- Added Iroh remote protocol v1 documentation and compatibility vectors for tickets, handshakes, LF JSONL framing, command filtering, and outbound redaction.
-- Added Iroh remote per-client session tracking so integrated remote reconnects resume the client's previous workspace session when its session file still exists and create/audit a replacement when it is missing.
-- Added Iroh remote `new_session` RPC support so remote clients can start a fresh conversation and have that session recorded for reconnect.
-- Added workspace-scoped `list_sessions` and `switch_session_by_id` RPC support for remote-safe session switching.
-- Added a remote-safe `get_transcript` RPC response that projects the active session into bounded user, assistant, tool-summary, and compaction-summary transcript items with pagination.
-- Added terminal QR code rendering for `volt remote host` pairing tickets.
-- Added a self-contained `volt remote host` product entrypoint backed by optional `@number0/iroh`, keeping native Iroh loading isolated from the main CLI.
-- Added transport-backed RPC clients, including an in-memory loopback transport and in-process client helper for running Volt RPC without spawning a subprocess.
-- Added a remote-safe native UI `thinking.fast_mode` toggle that lowers/restores session thinking without exposing model metadata or changing defaults.
-- Added Iroh remote push target registration and generic completion delivery through the managed Volt push relay, with mobile-issued relay credentials persisted on the host instead of raw FCM registration tokens.
-- Added a Firebase Cloud Functions managed push relay implementation for app-side FCM token registration and target-scoped host delivery auth.
-- Added native UI action argument schema validation and `get_ui_action_completions` RPC support for descriptor-backed command arguments.
-- Allowed `get_available_models`, `set_model`, and `set_thinking_level` over Iroh remote conversation streams so paired mobile clients can list models and change the model or thinking level for the bound session. Remote `set_model` matches CLI `/model` behavior, including persisting the choice as the host default model/provider for future sessions; `cycle_model` and `cycle_thinking_level` stay blocked remotely.
-- Added an optional `persistDefault` field to `set_model` and `set_thinking_level` so clients can change the current session's model or thinking level without rewriting the host defaults (used for per-agent overrides).
-- Added `availableThinkingLevels` to RPC `get_state` responses and returned the effective (post-clamp) `level` from `set_thinking_level` so clients can render valid thinking-level choices and detect silent clamping.
-- Added `availableThinkingLevels` to each model in `get_available_models` and to the `set_model` response so clients can render per-model thinking-level choices without mirroring host capability rules.
-- Added `max` as a selectable CLI, settings, SDK, extension, subagent, and RPC thinking level when model metadata explicitly supports it.
-
-### Fixed
-
-- Fixed beta distribution so Unix and Windows installers target the published `@hansjm10/volt-coding-agent` package, apply the full Node.js 22.19 floor, and verify release checksums before exact-path binary extraction. Releases now prepare an untagged exact commit, build the six-platform standalone candidate with read-only permissions, and require explicit approval of that commit SHA before creating the tag; tagged CI verifies and promotes the reviewed archives, refuses to clobber different assets, and ships deterministic archives with license, capability, shrinkwrap, and third-party notice files.
-- Fixed beta security gaps across pairing, push delivery, MCP, and local persistence: pairing now requires comparable cryptographic host details and scoped HTTPS relay credentials; push targets use bounded App Check-protected registration, expiry, quotas, status, and transactional revocation; OAuth state and redirect handling fail closed; persistent caches are size/age/scope bounded; and sensitive state, logs, exports, sessions, and temporary artifacts use owner-only atomic storage with link-attack checks.
-- Fixed remote transcript framing so image pages respect the serialized control-line limit and reject an individually oversized image instead of emitting an over-limit frame, and improved the light theme's semantic text contrast to meet the 4.5:1 beta accessibility gate.
-- Fixed invalid or incompatible daemon state being silently quarantined and replaced, which could reset the Iroh identity and leave pairing stuck while relay authentication was lost. Startup now fails without modifying the file, and `/remote` offers an explicit confirmation that backs it up before regeneration; validated identity, workspace, and settings data are preserved when only legacy access records are incompatible. `volt daemon regenerate-state` provides the same guarded recovery from the CLI. Pairing now reports `iroh_unavailable` instead of waiting indefinitely when endpoint startup stalls, and `/remote` offers confirmed recovery and daemon restart when a validated pre-failure state backup is available.
-- Fixed daemon-owned remote runtimes allowing daemon or workspace tool policies—or a broader co-attached phone's shared runtime—to widen a paired client's persisted grant. Runtime tools are now the intersection of every active policy layer, incompatible narrower clients are rejected from broader shared runtimes, `remote.allowTools` is synchronized into daemon state on startup, and explicit empty or legacy-shaped grants are preserved instead of being widened to current defaults.
-- Fixed child subagents seeing and attempting disallowed agent names: the `subagent` tool description, prompt guidance, and schema now expose only definitions permitted by the current delegation policy, reject unavailable names before starting work, and omit the tool when no child definition is available.
-- Fixed exhausted delegation budgets being reported as the misleading "No subagents are currently available for delegation.": the `subagent` tool now validates requested names against the policy-permitted set (new `listPermittedDefinitions`), so depth and child-start limits surface their precise errors (e.g. `cannot start more than N child subagents`) while the generic message is reserved for genuinely empty delegation policies.
-- Fixed parent runtime teardown leaving directly-started SDK subagent managers alive after session replacement or disposal.
-- Fixed delayed queued-prompt preflight from accepting and stranding a message after the active run had already settled.
-- Fixed aborted compaction summaries from being committed as successful context checkpoints.
-- Fixed retry cancellation from reporting success or retaining stale retry-attempt state.
-- Fixed extension-command subagents losing valid custom-turn results, and ensured child disposal is attempted even when child abort hangs.
-- Fixed RPC state conflating asynchronous prompt preflight with provider streaming by exposing `isBusy` separately, and included standalone compaction and tree operations in idle settlement.
-- Fixed delayed Live Activity terminal delivery from deactivating a newer run.
-- Fixed `volt daemon` failing to start on Windows with `listen EACCES` because the control socket used a filesystem `.sock` path, which Node's `net` module treats as a named pipe on Windows. The daemon now publishes a fresh per-instance `\\.\pipe\voltd-<hash>-<random>` named pipe through the pidfile, authenticates local control clients with the pidfile token, and uses a daemon lock so pre-created legacy pipes do not block normal start or auto-start.
-- Fixed `volt daemon stop`/`restart` hanging on Windows (and reporting a false timeout) because the foreground daemon process stayed alive after a clean shutdown when the native Iroh handle kept the event loop from draining; the daemon now exits deterministically once shutdown completes.
-- Fixed daemon restart recovery and single-instance safety across platforms: long-lived TUI clients now rediscover rotated control endpoints and tokens, stale startup locks are claimed atomically and validate process creation identity, and detached Windows starts no longer open a persistent console window.
-- Fixed a detached-runtime retention race where a phone reattaching to its daemon runtime just as the 30-minute TTL elapsed could dispose the live runtime mid-reattach, serving the phone from a disposed runtime and flipping the conversation lease to unowned so a desktop TUI could seize a session a phone was still using. The retention timer is now cancelled synchronously when a reattach is recognized.
-- Fixed workspace unregister deleting daemon-managed worktree records and force-removing dirty, unmerged, busy, or orphan checkout data. Every unregister path now fails atomically with `workspace_has_worktrees` until each child worktree is explicitly removed; create/adopt and unregister are serialized through child persistence so no orphan record can race into a removed parent; per-worktree `--force` remains the only destructive opt-in, unknown checkout directories are preserved, and rejected attempts are surfaced and audited consistently.
-- Fixed unauthenticated Iroh peers being able to create unbounded connection/handshake tasks and per-attempt audit writes. The daemon now enforces global and per-node connection, stream, and handshake admission caps with strict pre-authentication deadlines, while security rejections are burst-sampled into aggregate records and the owner-only audit log rotates at a fixed size and backup count.
-- Fixed `unregister_workspace` on conversation and TUI-relay streams: it now reads the documented `workspaceName` field and is scoped to the stream-bound workspace (returning `session_mismatch` otherwise), so a paired client can no longer unregister an unrelated registered workspace by name.
-- Fixed a daemon control-client socket leak where calling `close()` while a dial was mid-handshake left the connecting socket alive; a late `hello_ack` then adopted it and reported `connected` after close. The in-flight dial is now destroyed on close and late acks on a closed client are dropped.
-- Fixed live review/workflow progress events not reaching a second co-attached device: the daemon fanned events out by the runtime creator's client node id, skipping other paired devices sharing the same conversation runtime.
-- Fixed an unparseable daemon `state.json` (or legacy state file) permanently preventing voltd from starting; the corrupt file is now quarantined and the daemon starts from empty state with a loud log (this resets the Iroh identity and paired clients, so phones must pair again).
-- Fixed the pre-prompt compaction path in `AgentSession.prompt()` calling `agent.continue()` on a disposed session, which minted a fresh AbortController and could issue a provider request after teardown.
-- Fixed a TUI-relayed conversation rekey using the immutable relay-offer session id as the previous id, so a second in-place session change over one relay silently no-op'd on the daemon and left the lease keyed on a stale session id; the relay now tracks the rolling session id.
-- Fixed a daemon control-client race where a `lease_pending` and its terminal `lease_granted`/`error` response arriving in one socket read dropped the terminal response, leaving the TUI drain viewer waiting forever.
-- Fixed TUI-relayed phone conversations reporting push target registration success without persisting anything: state-touching RPC commands (`register_push_target`, `register_live_activity`, `unregister_live_activity`, `unregister_workspace`) are now forwarded to the daemon over a `relay_rpc` control request (carrying the paired client's node id) and executed against real daemon state, returning the daemon's actual response to the phone.
-- Fixed TUI-relayed conversation commands losing `list_sessions` pagination cursors between requests by reusing one command context per TUI instead of rebuilding it per command.
-- Fixed workspace unregister cleanup inconsistencies: the control, workspace-management, and conversation RPC unregister paths now share one cleanup that closes phone streams, stops runtimes, removes live activities, and closes active and pending TUI relays for the workspace.
-- Fixed unredeemed relay offers lingering until the 10s token expiry after the owning TUI released or rekeyed its lease; the phone's deferred handshake now fails immediately with a retry hint, and superseded or expired offers settle their relay bookkeeping instead of leaking the stream task.
-- Fixed chain-mode subagent previous-output substitution to XML-escape child output before wrapping it as untrusted data.
-- Fixed completed subagent cards losing pre-compaction message, tool-call, token, and cost totals by calculating final RPC stats from lifetime session history instead of retained model context ([#24](https://github.com/hansjm10/Volt/issues/24)).
-- Fixed subagents treating the first non-retrying `agent_end` as terminal before overflow compaction and continuation settled, which could dispose the child and return its recoverable context-limit error.
-- Fixed legacy Iroh remote default tool grants so saved workspaces, clients, and pairing tickets are upgraded to include the built-in `subagent` tool.
-- Fixed `get_ui_actions` palette scope responses so they return only palette descriptors instead of all actions.
-- Fixed `volt remote host` source entrypoint startup by exporting the Iroh remote workspace unregister RPC helpers from the package root, and added a source export check to keep the host entrypoint imports in sync.
-- Fixed `volt remote host` source entrypoint startup by exporting the Iroh remote RPC tool-argument helper from the package root.
-- Fixed Iroh remote host default tool grants to keep loaded extension tools available to the remote runtime.
-- Fixed fuzzy `edit` matches so they only replace the targeted range and no longer normalize unrelated file content.
-- Fixed Iroh remote Live Activity updates to report new turns as running and keep completed activities updateable for continued conversations.
-- Fixed Iroh remote host control socket setup to harden the shared control root directory before binding per-state sockets.
-- Fixed Iroh remote host startup to avoid leaking `listening` event listeners while retrying an already-active control socket.
-- Fixed Iroh remote host startup to preserve saved workspace tool allowlists unless `--allow-tools` is explicitly passed.
-- Fixed Iroh remote RPC transports to reject oversized inbound JSONL lines instead of buffering them without bound.
-- Fixed Iroh remote host control sockets to live under state-specific owner-only directories.
-- Fixed Iroh remote host workspace trust and revocation handling so multi-workspace remote sessions do not inherit startup workspace trust and fresh re-pairing cannot reuse stale integrated runtimes.
-- Fixed Iroh remote push delivery to ignore client-provided relay URLs, preventing a paired client from redirecting host push relay requests or configured relay bearer tokens.
-- Fixed Iroh remote host control socket cleanup and startup ordering so failed restarts do not leave nondialable pairing tickets and stale Unix sockets are retried before reporting an active host.
-- Fixed Iroh remote host QR display by using `qrcode-terminal` for compact terminal-native pairing codes.
-- Fixed Iroh remote reconnect authorization to keep each paired client's persisted tool allowlist instead of inheriting broader host restart defaults.
-- Fixed interactive mode to remember the last active settings profile on quit.
-- Fixed store package installs leaking verbose git and npm subprocess output into the interactive screen.
-- Fixed the default store catalog URL to point at the deployed GitHub Pages catalog.
-- Fixed store removal for project-local packages whose saved paths are relative to the project settings directory.
-- Fixed store updates to keep lifecycle scripts disabled, preserve git clone URLs when pinning sources, and honor configured `npmCommand` during store package inspection.
-- Fixed store commands to avoid resolving configured packages before their confirmation gates and to fall back to cached catalog data when remote catalog fetches time out.
-- Fixed store npm updates to honor configured tracking specs such as ranges and tags instead of forcing every non-pinned source to latest.
-- Fixed LSP diagnostics waits accepting publishes computed against an older document version, which could surface stale results after rapid consecutive edits.
-- Fixed LSP edit diagnostics reporting stale cross-file errors against pre-edit content: unversioned publishes that race a content change now trigger a re-wait for a fresher publish (capped at a short grace window for servers that never send versions, so single-publish servers do not stall every edit until the settle deadline), unversioned publishes pointing past the end of the synced content are dropped (also keeping them out of the "newly failing in other open files" sweep), and failed diagnostic pulls are retried once before falling back to published diagnostics ([#1](https://github.com/hansjm10/Volt/issues/1)).
-- Fixed missing-server install hints on Windows: shell spawning masked missing binaries as exit code 1, so a PATH/PATHEXT pre-check now produces the proper ENOENT failure.
-- LSP server start failures caused by a missing binary now include an install hint for the built-in servers (e.g. `npm install -g typescript-language-server typescript`), matched on the command's binary name so custom commands are unaffected.
-- Fixed the `lsp diagnostics` action bypassing the server start-failure breaker: a server that failed to start was respawned on every call instead of being disabled after three attempts.
-- LSP navigation and refactoring requests now honor tool-call abort signals instead of waiting out the 30s request timeout on a stuck server.
-- Fixed a failed LSP initialize handshake leaving a zombie client (and its server process) registered; failed clients are now disposed and removed so retries spawn fresh, and request errors on a healthy server no longer count toward the start-failure breaker.
-- Fixed LSP WorkspaceEdit application reversing the order of same-position insert edits.
-- Fixed LSP WorkspaceEdit application to reject code actions that try to create, edit, rename, or delete files outside the language server root before making any changes.
-- Reworked the startup ASCII wordmark to an outline letterform so it no longer appears split across a horizontal seam on macOS terminals that add inter-line spacing (the previous solid half-block art was bisected by the line gap).
-- Fixed the tree navigator to horizontally pan deep entries so the selected item remains readable ([#5830](https://github.com/earendil-works/pi/issues/5830)).
-- Fixed the Iroh remote host scenario harness and host preflight to canonicalize workspace paths before comparing or spawning RPC children.
-- Fixed the Iroh remote client to use core remote ticket and handshake helpers, and made direct Iroh remote runtime creation default to the read-only tool allowlist.
-- Fixed Iroh remote RPC outbound messages to normalize workspace paths and redact host-only session, export, and bash temp paths before sending data to remote clients.
-- Hardened Iroh remote outbound redaction for structured session, export, and bash-output path fields and added representative response, extension UI, assistant content, and tool-call compatibility coverage.
-
-### Changed
-
-- Replaced Bun-compiled standalone releases with Node.js 22.23.1 Single Executable Applications built natively for the six supported OS/architecture targets. Each archive now carries the pinned Node license, an exact esbuild input metafile, and a checksum-linked license manifest for the embedded npm package closure; Linux binaries require glibc 2.28 or newer, and Windows beta executables are currently unsigned.
-- Replaced Photon WASM image processing with a pure-JavaScript Jimp codec/resize stack, removing the Photon and WebAssembly payload from npm and standalone distributions. PNG, JPEG, GIF, and BMP remain locally decodable/resizable; WebP is passed through only when already within the inline limits and cannot be converted for Kitty-protocol previews in this beta.
-- Excluded the source-repository Doom overlay example from npm packages and standalone archives because its prebuilt artifacts are outside the verified release license inventory.
-- Replaced the native clipboard addon and its platform sidecars with OS clipboard tools for text and Linux/Windows images, plus the MIT-licensed `clipboard-image` JXA helper for macOS image paste. Standalone archives no longer ship the native clipboard binaries.
-- Redesigned subagent tool calls as a compact live roster with aggregate status, per-child task, duration, tool-call and token metadata, expandable outputs, and a matching status summary in the dedicated subagent inspector.
-- Changed recursive subagent delegation to fail closed for definitions without `allowedSubagents`, share hard depth/start/concurrency/turn/token/cost/deadline limits across the entire descendant tree, cap combined parallel output, and report tree-budget consumption in tool details.
-- Redesigned the interactive shell with a responsive startup lockup, compact resource summary, mode-aware editor frame, prioritized workspace/model/context status rail, and explicit transcript and tool-state hierarchy.
-- Added theme-aware Bash syntax highlighting to direct shell executions and built-in Bash tool headers, with a conservative overlay for external executable names.
-- Changed `terminal.turnDoneAlert` bell/notification alerts to be suppressed while the terminal window reports focus (via focus reporting, DECSET 1004). Terminals without focus reporting keep alerting as before.
-- Changed supported interactive Volt sessions to maintain a reconnecting daemon control client even when `remote.background` auto-start is disabled, so agents that were already running attach when another process starts the daemon.
-- Changed the default coding-agent prompt to use XML-delimited workflow, trust-boundary, and subagent-delegation guidance while preserving dynamic tool, project-context, skill, date, and working-directory injection.
-- Changed the built-in `general` subagent to inherit the parent tool posture while excluding `subagent`, preventing recursive delegation by default without dropping other active tools.
-- Changed nested subagent delegation to inherit the strictest ancestor `maxSubagentDepth` cap.
-- Changed chain-mode subagent delegation to cap chain length and substitute bounded, XML-escaped, untrusted-delimited prior step output instead of raw child output.
-- Changed subagent discovery to treat built-in subagent names as reserved and to preserve explicit empty `allowedSubagents:` as a no-child delegation policy.
-- Changed the built-in `subagent` tool to be active by default when a subagent manager is available, including the default remote tool grant, while preserving explicit tool allowlists and opt-outs.
-- Changed the default coding-agent prompt to discourage source-text assertions for ordinary behavior tests.
-- Changed `volt remote host` to default to Iroh relay/discovery mode `default`, keeping saved-host reconnect tickets usable across host restarts unless `--relay disabled` is explicitly passed.
-- Changed Iroh remote host startup and workspace registration prompts to offer a `trust` choice for project-local workspace resources, with saved workspace trust honored by remote sessions.
-- Changed Iroh remote host startup to require TTY confirmation or `--yes` before granting unsafe remote tools (`bash`, `edit`, or `write`) and to audit accepted unsafe grants.
-- Changed Iroh remote pairing ticket state to persist only secret hashes and non-secret metadata, prune expired pending tickets, audit ticket consumption and expiry, and apply pair-time tools/label hints through the host lifecycle.
-- Changed Iroh remote revocation to coordinate with a running host control channel, close matching active connections, and audit `active_connection_revoked` while keeping persisted-state revocation as a no-host fallback.
-- Changed Iroh remote host active connection handling to reject duplicate same-client/workspace connections with a `client already connected` handshake failure and `duplicate_connection_rejected` audit event.
-- Clarified that Iroh remote protocol v1 keeps the direct RPC command allowlist narrow, exposes only the projected `get_transcript` transcript surface, and continues rejecting raw messages, command-list, last-assistant-text, model-list, and path-based session-switch commands in preview.
-- Documented the Iroh remote supported-preview user workflow, security model, relay guidance, state/audit paths, and Node-only host support boundary across README, usage, security, protocol, design, and sidecar docs.
-- Documented the Iroh remote v1 preview duplicate-connection policy: reject a second active connection for the same client/workspace instead of replacing the existing runtime.
-- Documented the native UI action protocol across RPC, Iroh remote, extension command, prompt-template, skill, and iOS client docs.
-- Changed store install/update confirmations and summaries to show package names and concise source labels instead of full git source strings.
-- Changed the interactive `/store` browser to list available packages immediately, with search available from the package list.
-- Updated the `/review` selector to offer base-branch review first and show local branches with `main`/`master` prioritized.
-- Updated `/review` to use XML-structured review prompts, require whole-diff coverage reporting, and parse XML-wrapped JSON review payloads.
-- `SettingsManager.applyOverrides()` overrides now persist across `reload()` and internal settings re-merges instead of being silently dropped.
-- LSP project-root markers are now priority-ordered (a `tsconfig.json` anywhere up the tree beats a closer `package.json`), and diagnostics for files outside the working directory display absolute paths.
-- LSP cold starts now wait up to `lsp.firstSettleMs` (default 10s) for the first diagnostics from a fresh server, so the first edit no longer misses errors while the project loads.
-- LSP clients now re-sync open documents that changed on disk outside the `edit`/`write` tools (e.g. `git checkout` via bash) before every diagnostics collection or navigation query, closing deleted files and notifying servers via `workspace/didChangeWatchedFiles`. When a dependency was refreshed, diagnostics collection waits for a fresh publish instead of reusing the last one, so cross-file breakage introduced via bash is reported.
-- Changed LSP diagnostics and the `lsp` tool to be enabled by default. Set `lsp.enabled` to `false` to opt out; `--lsp` force-enables it for a run.
-- Renamed the `/new` slash command to `/clear`. The `app.session.new` keybinding action id is unchanged.
-- Restyled the built-in `dark` and `light` themes around an electric purple accent palette.
-- Replaced the plain-text startup logo with an ASCII wordmark; renamed forks (via `voltConfig.name`) still get the plain-text logo.
-- Changed the startup ASCII wordmark to a larger hero-style logo.
+- Standalone releases are Node.js Single Executable Applications for six OS/architecture targets, with checksum-verified installers, pinned license manifests, and a reviewed exact-commit release pipeline.
+- Live model catalog updates, mid-turn reconnect state (`get_state` active tools), remote model/thinking-level switching, and remote-safe transcript projection for paired clients.
+- Proactive mid-run compaction, an `agent_settled` idle-boundary event, and bounded summarization input for long conversations.
+- Pi extension compatibility: `volt install` reads `pi` manifests when no `volt` manifest is present and aliases Pi core imports to Volt modules at load time.
+- A redesigned interactive shell: responsive startup lockup, electric purple themes, Bash syntax highlighting, tool duration suffixes, focus-aware turn-done alerts, and `/clear` replacing `/new`.
+- Extensive hardening across daemon lifecycle and Windows support, Iroh pairing and connection admission, push delivery, MCP and OAuth handling, local persistence, and release integrity. The full engineering log for this release (~180 entries) is preserved in this file's git history.
 
 ## [0.79.6] - 2026-06-16
 

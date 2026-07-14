@@ -5,8 +5,7 @@ export const RELEASE_USAGE =
 	"  node scripts/release.mjs prepare <major|minor|patch|x.y.z>\n" +
 	"  node scripts/release.mjs prepare-pr <patch|minor>\n" +
 	"  VOLT_APPROVED_CANDIDATE_RUN_ID=<run-id> node scripts/release.mjs finalize <exact-40-character-candidate-commit>\n" +
-	"  VOLT_APPROVED_CANDIDATE_RUN_ID=<run-id> VOLT_APPROVED_CANDIDATE_ARTIFACT_DIGEST=<sha256:digest> node scripts/release.mjs authorize <exact-40-character-candidate-commit>\n" +
-	"  node scripts/release.mjs next-cycle <exact-40-character-candidate-commit>";
+	"  VOLT_APPROVED_CANDIDATE_RUN_ID=<run-id> VOLT_APPROVED_CANDIDATE_ARTIFACT_DIGEST=<sha256:digest> node scripts/release.mjs authorize <exact-40-character-candidate-commit>";
 
 const EXACT_COMMIT_RE = /^[0-9a-f]{40}$/;
 
@@ -18,7 +17,7 @@ export function parseReleaseInvocation(args) {
 	if (phase === "prepare-pr" && (value === "patch" || value === "minor") && extra.length === 0) {
 		return { phase, target: value };
 	}
-	if (["authorize", "finalize", "next-cycle"].includes(phase) && EXACT_COMMIT_RE.test(value || "") && extra.length === 0) {
+	if (["authorize", "finalize"].includes(phase) && EXACT_COMMIT_RE.test(value || "") && extra.length === 0) {
 		return { phase, candidateCommit: value };
 	}
 	throw new Error(RELEASE_USAGE);

@@ -140,7 +140,7 @@ jobs:
 
           body_file=$(mktemp)
           printf '%s\n\n' "Prepares ${RELEASE_TAG} for an exact-main standalone candidate build." > "${body_file}"
-          printf '%s\n' "Review all changelogs, package metadata, lockfiles, shrinkwrap, and generated release artifacts before merging." >> "${body_file}"
+          printf '%s\n' "Review the generated changelog section, package metadata, lockfiles, shrinkwrap, and generated release artifacts before merging." >> "${body_file}"
           printf '%s\n' "After merge, use the resulting main SHA—not the release-branch SHA—as the candidate commit." >> "${body_file}"
           printf '%s\n' "Prepared by GitHub Actions run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}." >> "${body_file}"
 

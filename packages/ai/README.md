@@ -1402,11 +1402,14 @@ Update `packages/ai/README.md`:
 
 #### 8. Changelog
 
-Add an entry to `packages/ai/CHANGELOG.md` under `## [Unreleased]`:
+Add a changeset fragment in `.changeset/` at the repository root (see `.changeset/README.md`):
 
 ```markdown
-### Added
-- Added support for [Provider Name] provider ([#PR](link) by [@author](link))
+---
+"@hansjm10/volt-ai": patch
+---
+
+feature(providers): Added support for [Provider Name] provider. ([#PR](link) by [@author](link))
 ```
 
 ## License
