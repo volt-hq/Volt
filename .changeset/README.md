@@ -42,9 +42,23 @@ Attribution stays inline in the sentence:
 
 ## Commands
 
+- `npm run changeset:add -- <kind> [area] "One user-facing sentence."` — write a validated fragment (add `--details "<text>"` for body/migration paragraphs, `--package <name>` per touched package)
 - `npx changeset` — interactive authoring (writing the file directly is fine too)
 - `npx changeset status` — list pending fragments
 - `npm run changelog:preview` — render the release section the pending fragments would produce
+
+## Enforcement
+
+You should not need to remember any of this:
+
+- `npm run check` (CI, pre-commit) validates the format of every pending fragment.
+- CI fails a pull request that changes product source (`packages/*/src`, excluding
+  generated files) without adding a fragment, and prints a ready-to-edit
+  suggestion derived from the PR title. Pure refactors satisfy the gate with an
+  `internal` fragment.
+- The pre-commit hook prints a reminder when staged product changes carry no fragment.
+- Release preparation refuses to run with no fragments, with malformed fragments,
+  or with breaking changes targeted at a patch release.
 
 Never run `npx changeset version` or `npx changeset publish`: they would consume
 fragments and bump versions outside the guarded release flow. Release tooling
