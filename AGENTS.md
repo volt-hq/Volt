@@ -108,6 +108,8 @@ tmux kill-session -t volt-test
 
 One changelog for the whole product: `packages/coding-agent/CHANGELOG.md`. Never edit it directly — release tooling generates each version section from changeset fragments, and released sections (e.g. `## [0.1.0]`) are immutable.
 
+The changelog/changeset/release workflow is Volt-development tooling and stays repo-only: `scripts/`, `.changeset/`, `.volt/`, `.husky/`, and `.github/` must never enter a package `files` list, the standalone archive, or the built-in command set. A release-security test pins the shipped file sets; `CHANGELOG.md` is the only workflow artifact users receive.
+
 Every user-visible change adds one fragment file in `.changeset/` (unique kebab-case name, `.md`):
 
 ```md
