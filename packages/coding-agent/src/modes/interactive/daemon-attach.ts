@@ -22,6 +22,7 @@ import {
 	probeDaemon,
 	readPublishedDaemonEndpoint,
 } from "../../daemon/spawn.ts";
+import { isPathInside } from "../../daemon/workspace-directory.ts";
 import { getWorktreesRoot } from "../../daemon/worktree-manager.ts";
 
 export type DaemonAttachConnectionState = "connected" | "reconnecting" | "gone" | "disabled";
@@ -129,7 +130,7 @@ export async function resolveDaemonWorkspaceForCwd(
 	}
 	const resolvedCwd = resolve(cwd);
 	const match = status.workspaces
-		.filter((workspace) => resolvedCwd === workspace.path || resolvedCwd.startsWith(`${workspace.path}/`))
+		.filter((workspace) => isPathInside(workspace.path, resolvedCwd))
 		.sort((left, right) => right.path.length - left.path.length)[0];
 	if (match) {
 		return { name: match.name, path: match.path };

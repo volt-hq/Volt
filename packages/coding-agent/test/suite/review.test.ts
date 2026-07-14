@@ -374,6 +374,8 @@ describe("resolveReviewTarget", () => {
 		mkdirSync(dir, { recursive: true });
 		tempDirs.push(dir);
 		git(dir, "init", "--initial-branch=main");
+		git(dir, "config", "core.autocrlf", "false");
+		git(dir, "config", "core.eol", "lf");
 		git(dir, "config", "user.email", "test@example.com");
 		git(dir, "config", "user.name", "Test");
 		git(dir, "config", "commit.gpgsign", "false");
@@ -416,6 +418,8 @@ describe("resolveReviewTarget", () => {
 		mkdirSync(dir, { recursive: true });
 		tempDirs.push(dir);
 		git(dir, "init", "--initial-branch=main");
+		git(dir, "config", "core.autocrlf", "false");
+		git(dir, "config", "core.eol", "lf");
 		git(dir, "config", "user.email", "test@example.com");
 		git(dir, "config", "user.name", "Test");
 		writeFileSync(join(dir, "staged.txt"), "staged content\n");
@@ -921,6 +925,8 @@ describe("createWorkingTreeGuard", () => {
 		mkdirSync(dir, { recursive: true });
 		tempDirs.push(dir);
 		git(dir, "init", "--initial-branch=main");
+		git(dir, "config", "core.autocrlf", "false");
+		git(dir, "config", "core.eol", "lf");
 		git(dir, "config", "user.email", "test@example.com");
 		git(dir, "config", "user.name", "Test");
 		git(dir, "config", "commit.gpgsign", "false");

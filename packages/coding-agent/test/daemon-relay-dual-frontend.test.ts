@@ -6,9 +6,6 @@
  * are doubles.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
@@ -33,6 +30,7 @@ import { adaptRelaySocketToIrohStream } from "../src/modes/interactive/relay-str
 import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 import { createTestSession } from "./iroh-stream-doubles.ts";
 import { FakePhoneIrohStream } from "./relay-doubles.ts";
+import { createTestSocketEndpoint } from "./socket-test-helpers.ts";
 
 const SESSION_ID = "s-relay";
 const WORKSPACE = { name: "ws", path: "/tmp/ws" };
@@ -110,28 +108,33 @@ interface DaemonHarness {
 }
 
 async function startDaemonHarness(): Promise<DaemonHarness> {
-	const dir = mkdtempSync(join(tmpdir(), "volt-dualfe-"));
-	const socketPath = join(dir, "s.sock");
+	const endpoint = createTestSocketEndpoint("volt-dualfe");
 	const registry = new RelayRegistry();
-	const server = await startControlServer({
-		socketPath,
-		version: "0.0.0-test",
-		handlers: {
-			onRequest: () => {},
-			relayAdmission: {
-				admitRelay: (hello, socket, bufferedRemainder) =>
-					registry.admit(hello.relayId, hello.relayToken, socket, bufferedRemainder),
+	let server: ControlServer;
+	try {
+		server = await startControlServer({
+			socketPath: endpoint.socketPath,
+			version: "0.0.0-test",
+			handlers: {
+				onRequest: () => {},
+				relayAdmission: {
+					admitRelay: (hello, socket, bufferedRemainder) =>
+						registry.admit(hello.relayId, hello.relayToken, socket, bufferedRemainder),
+				},
 			},
-		},
-	});
+		});
+	} catch (error) {
+		endpoint.cleanup();
+		throw error;
+	}
 	cleanups.push(async () => {
 		for (const relay of registry.activeRelays()) {
 			relay.close("host_shutdown");
 		}
 		await server.close();
-		rmSync(dir, { recursive: true, force: true });
+		endpoint.cleanup();
 	});
-	return { socketPath, registry, server };
+	return { socketPath: endpoint.socketPath, registry, server };
 }
 
 /** Daemon side of one phone attach: the phone stream paused behind a minted relay offer. */
