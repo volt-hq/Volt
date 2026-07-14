@@ -21,6 +21,10 @@
 	"files": [
 		"dist",
 		"docs",
+		"!docs/development.md",
+		"!docs/*-design.md",
+		"!docs/tla",
+		"!docs/tla/**",
 		"!docs/images/doom-extension.png",
 		"examples",
 		"!examples/README.binary.md",

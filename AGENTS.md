@@ -110,6 +110,8 @@ One changelog for the whole product: `packages/coding-agent/CHANGELOG.md`. Never
 
 The changelog/changeset/release workflow is Volt-development tooling and stays repo-only: `scripts/`, `.changeset/`, `.volt/`, `.husky/`, and `.github/` must never enter a package `files` list, the standalone archive, or the built-in command set. A release-security test pins the shipped file sets; `CHANGELOG.md` is the only workflow artifact users receive.
 
+Docs under `packages/coding-agent/docs/` must pick an audience: user-facing docs go in `docs.json` navigation (published to volt-cli.dev and shipped in the npm package); development-facing docs are named `*-design.md` (or are `development.md`/`tla/`) and stay repo-only — link to them with absolute GitHub URLs from user docs. A release-security test enforces the split.
+
 Every user-visible change adds one fragment file in `.changeset/` (unique kebab-case name, `.md`):
 
 ```md

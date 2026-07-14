@@ -1,9 +1,12 @@
 // Syncs packages/coding-agent/docs into the Starlight content collection.
 //
-// - Copies every top-level .md file to src/content/docs/docs/<name>.md,
-//   adding Starlight frontmatter (title from docs.json, else the first H1).
+// - Copies exactly the .md files listed in docs.json navigation to
+//   src/content/docs/docs/<name>.md, adding Starlight frontmatter (title from
+//   docs.json, else the first H1). Docs not in the navigation are
+//   development-facing and never become site routes; links to them resolve to
+//   the GitHub repo.
 // - Rewrites relative .md links to /docs/<slug>/ routes; links that escape
-//   the docs directory point at the GitHub repo instead.
+//   the published set point at the GitHub repo instead.
 // - Copies the images/ directory to public/docs-images and rewrites image
 //   references (markdown and raw <img> HTML) to that absolute path, since
 //   relative paths break against trailing-slash routes.
@@ -33,7 +36,13 @@ for (const section of manifest.navigation) {
   }
 }
 
-const mdFiles = readdirSync(docsSource).filter((f) => f.endsWith(".md"));
+const availableDocs = new Set(readdirSync(docsSource));
+const mdFiles = [...new Set(manifest.navigation.flatMap((section) => section.items.map((item) => item.path)))];
+for (const file of mdFiles) {
+  if (!availableDocs.has(file)) {
+    throw new Error(`docs.json navigation lists a missing doc: ${file}`);
+  }
+}
 // index.md collapses to the folder route (/docs/), everything else is /docs/<name>.
 const slugFor = (file) => (basename(file, ".md") === "index" ? "docs" : `docs/${basename(file, ".md")}`);
 const knownSlugs = new Set(mdFiles.map((f) => basename(f, ".md")));
