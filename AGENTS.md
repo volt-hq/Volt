@@ -106,16 +106,26 @@ tmux kill-session -t volt-test
 
 ## Changelog
 
-Location: `packages/*/CHANGELOG.md` (one per package).
+One changelog for the whole product: `packages/coding-agent/CHANGELOG.md`. Never edit it directly — release tooling generates each version section from changeset fragments, and released sections (e.g. `## [0.1.0]`) are immutable.
 
-Sections under `## [Unreleased]`: `### Breaking Changes` (API changes requiring migration), `### Added`, `### Changed`, `### Fixed`, `### Removed`.
+Every user-visible change adds one fragment file in `.changeset/` (unique kebab-case name, `.md`):
+
+```md
+---
+"@hansjm10/volt-coding-agent": patch
+---
+
+fix(daemon): Fixed workspace unregister leaving orphaned worktree records. ([#123](https://github.com/hansjm10/Volt/issues/123))
+```
 
 Rules:
 
-- All new entries go under `## [Unreleased]`. Read the full section first and append to existing subsections; never duplicate them.
-- Released version sections (e.g. `## [0.12.2]`) are immutable; never modify them.
+- The first summary line is `kind(area): One user-facing sentence.` Kind is one of `feature` (rendered under Highlights), `improvement`, `fix`, `breaking`, or `internal` (never rendered); `area` is an optional lowercase slug (`daemon`, `remote`, `tui`, `lsp`, `subagents`, `mcp`, ...).
+- Describe observable behavior, not implementation. Paragraphs below the first line become indented detail; `breaking` fragments must include migration guidance there.
+- Front matter lists the touched package(s) with bump `patch`; `breaking` uses `minor` and `major` is never used. When in doubt, list `@hansjm10/volt-coding-agent`.
+- Preview the pending release section with `npm run changelog:preview`.
 
-Attribution:
+Attribution stays inline in the sentence:
 
 - Internal (from issues): `Fixed foo bar ([#123](https://github.com/hansjm10/Volt/issues/123))`
 - External contributions: `Added feature X ([#456](https://github.com/hansjm10/Volt/pull/456) by [@username](https://github.com/username))`
@@ -172,7 +182,6 @@ intended default provider for both install forms.
 5. Confirm npm trusted publishing succeeds before the draft GitHub Release is
    published. Confirm the published release contains only the approved assets,
    and verify all four npm versions, provenance, and the `beta` dist-tag.
-6. Review and merge the generated post-release changelog pull request.
 
 Normal release automation never pushes directly to `main`, creates a tag from
 an ordinary `GITHUB_TOKEN`, publishes npm locally, stores an npm token, rebuilds

@@ -47,7 +47,7 @@ npm run check
 
 Both must pass.
 
-Do not edit the per-package `CHANGELOG.md` files. Changelog entries are handled at release time.
+Do not edit `packages/coding-agent/CHANGELOG.md` directly. User-visible changes add a changeset fragment in `.changeset/` instead (see `.changeset/README.md`); release tooling generates the changelog from those fragments.
 
 If you are adding a new provider to `packages/ai`, see `AGENTS.md` for required tests.
 

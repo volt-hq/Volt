@@ -7,25 +7,29 @@
  *   node scripts/release.mjs prepare-pr <patch|minor>
  *   VOLT_APPROVED_CANDIDATE_RUN_ID=<run-id> node scripts/release.mjs finalize <exact-40-character-candidate-commit>
  *   VOLT_APPROVED_CANDIDATE_RUN_ID=<run-id> VOLT_APPROVED_CANDIDATE_ARTIFACT_DIGEST=<sha256:digest> node scripts/release.mjs authorize <exact-40-character-candidate-commit>
- *   node scripts/release.mjs next-cycle <exact-40-character-candidate-commit>
  *
  * `prepare`/`finalize` preserve the original local fallback. The GitHub-native
- * phases split mutation boundaries: `prepare-pr` creates only a release commit,
- * `authorize` performs the exact candidate preflight and emits machine outputs,
- * and `next-cycle` creates only the post-release changelog commit. GitHub owns
- * branch, tag, release, and pull-request publication for those phases.
+ * phases split mutation boundaries: `prepare-pr` creates only a release commit
+ * (consuming the pending `.changeset/` fragments into the product changelog)
+ * and `authorize` performs the exact candidate preflight and emits machine
+ * outputs. GitHub owns branch, tag, release, and pull-request publication for
+ * those phases.
  */
 
 import { execSync } from "child_process";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "fs";
-import { join } from "path";
+import { readFileSync, writeFileSync } from "fs";
+import {
+	applyReleaseSection,
+	assertNoPendingChangesets,
+	assertReleaseTargetSatisfiesChangesets,
+	readChangesets,
+} from "./changelog.mjs";
 import {
 	assertCandidateArtifactDigest,
 	assertCandidateMatchesHead,
 	assertCandidateRunId,
 	assertCandidateWorkflowArtifact,
 	assertCandidateWorkflowRun,
-	assertReleaseTagMatchesCandidate,
 	candidateTagAttestation,
 	createReleaseAuthorization,
 	formatGitHubOutputs,
@@ -116,38 +120,17 @@ function bumpOrSetVersion(target) {
 	return getVersion();
 }
 
-function getChangelogs() {
-	return readdirSync("packages")
-		.map((pkg) => join("packages", pkg, "CHANGELOG.md"))
-		.filter((path) => existsSync(path));
-}
-
-function updateChangelogsForRelease(version) {
-	const date = new Date().toISOString().split("T")[0];
-	for (const changelog of getChangelogs()) {
-		const content = readFileSync(changelog, "utf-8");
-		if (!content.includes("## [Unreleased]")) {
-			fail(`${changelog} has no [Unreleased] section`);
-		}
-		writeFileSync(changelog, content.replace("## [Unreleased]", `## [${version}] - ${date}`));
-		console.log(`  Updated ${changelog}`);
+function readReleaseChangesets() {
+	let changesets;
+	try {
+		changesets = readChangesets();
+	} catch (error) {
+		fail(error instanceof Error ? error.message : String(error));
 	}
-}
-
-function addUnreleasedSection() {
-	for (const changelog of getChangelogs()) {
-		const content = readFileSync(changelog, "utf-8");
-		if (content.includes("## [Unreleased]")) {
-			fail(`${changelog} already contains an [Unreleased] section`);
-		}
-		const newline = content.includes("\r\n") ? "\r\n" : "\n";
-		const updated = content.replace(/^(# Changelog\r?\n\r?\n)/, `$1## [Unreleased]${newline}${newline}`);
-		if (updated === content) {
-			fail(`${changelog} does not start with the expected changelog heading`);
-		}
-		writeFileSync(changelog, updated);
-		console.log(`  Added [Unreleased] to ${changelog}`);
+	if (changesets.length === 0) {
+		fail("no changesets found in .changeset; add release fragments before preparing a release.");
 	}
+	return changesets;
 }
 
 function requireCleanPublishedMain(options = {}) {
@@ -218,6 +201,16 @@ function prepareReleaseCommit(target, options = {}) {
 	const currentVersion = getVersion();
 	const releasePlan = planReleaseTarget(target, currentVersion);
 	const plannedVersion = getPlannedReleaseVersion(target, currentVersion);
+
+	console.log("Reading changesets...");
+	const changesets = readReleaseChangesets();
+	try {
+		assertReleaseTargetSatisfiesChangesets(currentVersion, plannedVersion, changesets);
+	} catch (error) {
+		fail(error instanceof Error ? error.message : String(error));
+	}
+	console.log(`  ${changesets.length} changeset(s) ready for v${plannedVersion}\n`);
+
 	console.log(`Checking release target v${plannedVersion}...`);
 	verifyNpmVersionAvailable(plannedVersion, releasePlan.type === "current");
 	console.log(`  v${plannedVersion} is available for release\n`);
@@ -228,8 +221,12 @@ function prepareReleaseCommit(target, options = {}) {
 	}
 	console.log(`  New version: ${version}\n`);
 
-	console.log("Updating CHANGELOG.md files...");
-	updateChangelogsForRelease(version);
+	console.log("Generating the changelog section from changesets...");
+	try {
+		applyReleaseSection({ version, date: new Date().toISOString().split("T")[0] });
+	} catch (error) {
+		fail(error instanceof Error ? error.message : String(error));
+	}
 	console.log();
 
 	console.log("Regenerating release artifacts...");
@@ -303,10 +300,10 @@ function verifyReleaseAuthorization(candidateCommit, candidateRunId, candidateAr
 	} catch (error) {
 		fail(error instanceof Error ? error.message : String(error));
 	}
-	for (const changelog of getChangelogs()) {
-		if (readFileSync(changelog, "utf-8").includes("## [Unreleased]")) {
-			fail(`${changelog} still contains [Unreleased]; finalize only the exact commit produced by prepare.`);
-		}
+	try {
+		assertNoPendingChangesets();
+	} catch (error) {
+		fail(`${error instanceof Error ? error.message : String(error)}; finalize only the exact commit produced by prepare.`);
 	}
 
 	console.log(`Verifying approved candidate workflow run ${candidateRunId} before tag creation...`);
@@ -374,56 +371,9 @@ function finalizeRelease(candidateCommit) {
 	run(`git push origin ${tag}`);
 	console.log();
 
-	console.log("Starting the next changelog cycle...");
-	addUnreleasedSection();
-	stageChangedFiles();
-	run('git commit -m "Add [Unreleased] section for next cycle"');
-	run("git push origin main");
-	console.log();
-
 	console.log(
 		`=== Finalized ${tag} at approved candidate ${candidateCommit} from workflow run ${candidateRunId}; CI publishing has started ===`,
 	);
-}
-
-function nextCycle(candidateCommit) {
-	const outputPath = githubOutputPath();
-	const head = requireCleanPublishedMain();
-	try {
-		assertCandidateMatchesHead(candidateCommit, head);
-	} catch (error) {
-		fail(error instanceof Error ? error.message : String(error));
-	}
-
-	const version = getVersion();
-	const tag = `v${version}`;
-	try {
-		verifyReleasePackageMetadata(tag);
-	} catch (error) {
-		fail(error instanceof Error ? error.message : String(error));
-	}
-	run(`git fetch --prune origin +refs/tags/${tag}:refs/tags/${tag}`);
-	const tagType = run(`git cat-file -t refs/tags/${tag}`, { silent: true })?.trim();
-	const taggedCommit = run(`git rev-parse ${shellQuote(`refs/tags/${tag}^{commit}`)}`, { silent: true })?.trim();
-	const tagMessage = run(`git for-each-ref --format=${shellQuote("%(contents)")} refs/tags/${tag}`, { silent: true }) ?? "";
-	try {
-		assertReleaseTagMatchesCandidate({ tag, candidateCommit, tagType, taggedCommit, tagMessage });
-	} catch (error) {
-		fail(error instanceof Error ? error.message : String(error));
-	}
-
-	console.log(`Starting the post-${tag} changelog cycle...`);
-	addUnreleasedSection();
-	stageChangedFiles();
-	run(`git commit -m ${shellQuote(`docs: start post-${tag} changelog cycle`)}`);
-	const nextCycleCommit = run("git rev-parse HEAD", { silent: true })?.trim();
-	try {
-		assertCandidateMatchesHead(nextCycleCommit, nextCycleCommit);
-	} catch (error) {
-		fail(error instanceof Error ? error.message : String(error));
-	}
-	writeGitHubOutputs(outputPath, { tag, commit: nextCycleCommit });
-	console.log(`=== Created post-${tag} changelog commit ${nextCycleCommit}; nothing was pushed ===`);
 }
 
 console.log(`\n=== Release ${invocation.phase} ===\n`);
@@ -439,8 +389,5 @@ switch (invocation.phase) {
 		break;
 	case "finalize":
 		finalizeRelease(invocation.candidateCommit);
-		break;
-	case "next-cycle":
-		nextCycle(invocation.candidateCommit);
 		break;
 }

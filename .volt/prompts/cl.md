@@ -1,7 +1,7 @@
 ---
-description: Audit changelog entries before release
+description: Audit changeset coverage before release
 ---
-Audit changelog entries for all commits since the last release.
+Audit changeset fragments for all commits since the last release.
 
 ## Process
 
@@ -15,40 +15,28 @@ Audit changelog entries for all commits since the last release.
    git log <tag>..HEAD --oneline
    ```
 
-3. **Read each package's [Unreleased] section:**
-   - packages/ai/CHANGELOG.md
-   - packages/tui/CHANGELOG.md
-   - packages/coding-agent/CHANGELOG.md
+3. **Read the pending fragments:**
+   - List `.changeset/*.md` (ignore `README.md`).
+   - Preview the generated section with `npm run changelog:preview`.
 
 4. **For each commit, check:**
-   - Skip: changelog updates, doc-only changes, release housekeeping
+   - Skip: changeset/doc-only changes, release housekeeping
    - Skip: changes to generated model catalogs (for example `packages/ai/src/models.generated.ts`) unless accompanied by an intentional product-facing change in non-generated source/docs.
-   - Determine which package(s) the commit affects (use `git show <hash> --stat`)
-   - Verify a changelog entry exists in the affected package(s)
-   - For external contributions (PRs), verify format: `Description ([#N](url) by [@user](url))`
+   - Purely internal changes (refactors, CI, test-only) need either no fragment or an `internal:` fragment; do not force user-facing wording onto them.
+   - Otherwise verify a fragment covers the commit's user-visible behavior (use `git show <hash> --stat` to scope it).
+   - For external contributions (PRs), verify attribution format: `([#N](url) by [@user](url))`
 
-5. **Cross-package duplication rule:**
-   Changes in `ai`, `agent` or `tui` that affect end users should be duplicated to `coding-agent` changelog, since coding-agent is the user-facing package that depends on them.
+5. **Check fragment quality** (format reference: `.changeset/README.md`):
+   - First line is `kind(area): One user-facing sentence.` with kind in `feature`, `improvement`, `fix`, `breaking`, `internal`.
+   - The sentence describes observable behavior, not implementation.
+   - `breaking` fragments use a `minor` bump and include migration guidance in the body.
+   - Related commits share one fragment instead of near-duplicate fragments.
 
-6. **Add New Features section after changelog fixes:**
-   - Insert a `### New Features` section at the start of `## [Unreleased]` in `packages/coding-agent/CHANGELOG.md`.
-   - Propose the top new features to the user for confirmation before writing them.
-   - Link to relevant docs and sections whenever possible.
+6. **Curate the highlights:**
+   - Run `npm run changelog:preview` and review the `### Highlights` section (all `feature` fragments).
+   - Propose to the user which features deserve highlight billing, with doc links in their sentences whenever possible; demote the rest to `improvement`.
 
 7. **Report:**
-   - List commits with missing entries
-   - List entries that need cross-package duplication
-   - Add any missing entries directly
-
-## Changelog Format Reference
-
-Sections (in order):
-- `### Breaking Changes` - API changes requiring migration
-- `### Added` - New features
-- `### Changed` - Changes to existing functionality
-- `### Fixed` - Bug fixes
-- `### Removed` - Removed features
-
-Attribution:
-- Internal: `Fixed foo ([#123](https://github.com/hansjm10/Volt/issues/123))`
-- External: `Added bar ([#456](https://github.com/hansjm10/Volt/pull/456) by [@user](https://github.com/user))`
+   - List commits with missing fragments
+   - List fragments that need rewording, re-kinding, or merging
+   - Add or fix fragments directly after confirming with the user
