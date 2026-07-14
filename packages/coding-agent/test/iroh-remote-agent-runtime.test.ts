@@ -149,7 +149,9 @@ export default function (volt) {
 			expect(existsSync(join(agentDir, "prompts", "remote.md"))).toBe(true);
 			expect(existsSync(join(agentDir, "commands"))).toBe(false);
 			expect(readdirSync(join(agentDir, "sessions"))).toHaveLength(1);
-			expect(runtime.session.getActiveToolNames()).toEqual(DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(","));
+			expect(runtime.session.getActiveToolNames()).toEqual(
+				DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(",").filter((name) => name !== "subagent_registry"),
+			);
 		} finally {
 			errorSpy.mockRestore();
 			await runtime?.dispose();
@@ -168,7 +170,10 @@ export default function (volt) {
 
 			expect(runtime.session.getAllTools().map((tool) => tool.name)).toContain("remote_extension_tool");
 			expect(runtime.session.getActiveToolNames()).toEqual(
-				expect.arrayContaining([...DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(","), "remote_extension_tool"]),
+				expect.arrayContaining([
+					...DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(",").filter((name) => name !== "subagent_registry"),
+					"remote_extension_tool",
+				]),
 			);
 
 			await runtime.session.bindExtensions({});
@@ -227,6 +232,8 @@ export default function (volt) {
 			expect(child.parentSessionFile).toBe(runtime.session.sessionFile);
 			expect(child.sessionId).toBe(child.runtime.session.sessionId);
 			expect(child.runtime.session.sessionFile).toBeTruthy();
+			expect(child.runtime.session.getActiveToolNames()).toContain("subagent_registry");
+			expect(child.runtime.session.getActiveToolNames()).not.toContain("subagent");
 			if (!child.runtime.session.sessionFile) {
 				throw new Error("expected child session file");
 			}

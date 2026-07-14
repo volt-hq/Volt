@@ -5,6 +5,7 @@ import {
 	type FauxModelDefinition,
 	type FauxResponseStep,
 	fauxAssistantMessage,
+	fauxToolCall,
 	registerFauxProvider,
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
@@ -177,27 +178,24 @@ describe("SubagentManager", () => {
 			if (options.settings) {
 				services.settingsManager.applyOverrides(options.settings);
 			}
+			const childManager =
+				options.noTools === false
+					? new SubagentManager({
+							createRuntime,
+							cwd,
+							agentDir,
+							resourceLoader: options.resourceLoader ?? services.resourceLoader,
+							parentSessionManager: sessionManager,
+							allowedTools: options.allowedTools,
+							...(subagentContext ? { subagentContext } : {}),
+						})
+					: undefined;
 			const result = await createAgentSessionFromServices({
 				services,
 				sessionManager,
 				sessionStartEvent,
 				model: initialModel,
-				...(options.noTools === false
-					? {
-							subagentToolManager: {
-								getDefinition: (name: string) => {
-									const definition = options.resourceLoader
-										?.getSubagents()
-										.definitions.find((candidate) => candidate.name === name);
-									if (!definition) throw new Error(`Missing test subagent ${name}`);
-									return definition;
-								},
-								startByName: async () => {
-									throw new Error("Nested test subagent start is not implemented");
-								},
-							},
-						}
-					: {}),
+				...(childManager ? { subagentToolManager: childManager } : {}),
 				...(options.noTools === false ? {} : { noTools: options.noTools ?? "all" }),
 			});
 			const originalDispose = result.session.dispose.bind(result.session);
@@ -848,7 +846,7 @@ describe("SubagentManager", () => {
 		await handle.dispose();
 	});
 
-	it("defaults custom definitions to a non-delegating child policy", async () => {
+	it("defaults custom definitions to registry-only child access", async () => {
 		const observedContexts: Array<SubagentRuntimeContext | undefined> = [];
 		let observedTools: string[] = [];
 		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "custom" })]);
@@ -865,6 +863,7 @@ describe("SubagentManager", () => {
 
 		expect(observedContexts[0]?.allowedSubagents).toEqual([]);
 		expect(observedTools).not.toContain("subagent");
+		expect(observedTools).toContain("subagent_registry");
 		await handle.dispose();
 	});
 
@@ -885,7 +884,57 @@ describe("SubagentManager", () => {
 		const handle = await manager.startByName("coordinator");
 
 		expect(observedTools).toContain("subagent");
+		expect(observedTools).toContain("subagent_registry");
 		await handle.dispose();
+	});
+
+	it("keeps registry list and follow available when maximum delegation depth disables spawning", async () => {
+		let maxDepthToolNames: string[] = [];
+		let maxDepthSystemPrompt: string | undefined;
+		const resourceLoader = createSubagentResourceLoader([
+			createDefinition({
+				name: "researcher",
+				allowedSubagents: ["researcher"],
+				maxSubagentDepth: 1,
+			}),
+		]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			noTools: false,
+			responses: [
+				fauxAssistantMessage("first result"),
+				(context) => {
+					maxDepthToolNames = context.tools?.map((tool) => tool.name).sort() ?? [];
+					maxDepthSystemPrompt = context.systemPrompt;
+					return fauxAssistantMessage(fauxToolCall("subagent_registry", { list: true }), {
+						stopReason: "toolUse",
+					});
+				},
+				fauxAssistantMessage("registry checked"),
+			],
+		});
+
+		const first = await manager.startByName("researcher");
+		const firstDone = first.waitForEnd();
+		await first.prompt("research prior work");
+		await firstDone;
+		const firstId = manager.listDelegations()[0]?.id;
+		await first.dispose();
+
+		const second = await manager.startByName("researcher");
+		const secondDone = second.waitForEnd();
+		await second.prompt("inspect prior work");
+		await secondDone;
+
+		expect(maxDepthToolNames).toContain("subagent_registry");
+		expect(maxDepthToolNames).not.toContain("subagent");
+		expect(maxDepthSystemPrompt).toContain(`- ${firstId} researcher completed — research prior work`);
+		expect(maxDepthSystemPrompt).toContain("subagent_registry tool");
+		const transcript = await second.getTranscript();
+		expect(transcript.items).toContainEqual(
+			expect.objectContaining({ role: "tool", toolName: "subagent_registry", status: "completed" }),
+		);
+		await second.dispose();
 	});
 
 	it("shares accounting across every child using one root delegation scope", async () => {
@@ -1147,17 +1196,18 @@ describe("SubagentManager", () => {
 		expect(prompts[0]).not.toContain("already recorded in this session");
 		expect(prompts[1]).toContain("already recorded in this session");
 		expect(prompts[1]).toContain(`- ${firstId} researcher completed — research file x`);
+		expect(prompts[1]).toContain("subagent_registry tool");
 		expect(prompts[1]).toContain('{ "follow": "<id>" }');
 
 		await first.dispose();
 		await second.dispose();
 	});
 
-	it("does not inject a registry snapshot into non-delegating children", async () => {
+	it("does not inject a registry snapshot when the registry tool is explicitly excluded", async () => {
 		const prompts: Array<string | undefined> = [];
 		const resourceLoader = createSubagentResourceLoader([
 			createDefinition({ name: "researcher", allowedSubagents: ["researcher"] }),
-			createDefinition({ name: "worker" }),
+			createDefinition({ name: "worker", excludedTools: ["subagent_registry"] }),
 		]);
 		const { manager } = await createTestManager({
 			resourceLoader,

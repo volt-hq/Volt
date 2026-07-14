@@ -26,6 +26,7 @@ import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
+import { SUBAGENT_REGISTRY_TOOL_NAME } from "./subagents/tool-names.ts";
 import { time } from "./timings.ts";
 import {
 	createBashTool,
@@ -37,6 +38,7 @@ import {
 	createLsTool,
 	createReadOnlyTools,
 	createReadTool,
+	createSubagentRegistryTool,
 	createSubagentTool,
 	createWebSearchTool,
 	createWriteTool,
@@ -162,6 +164,7 @@ export {
 	createFindTool,
 	createLsTool,
 	createLspTool,
+	createSubagentRegistryTool,
 	createSubagentTool,
 	createWebSearchTool,
 };
@@ -322,8 +325,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const mcpManager = options.disableMcp ? undefined : (options.mcpManager ?? (await createDefaultMcpManager()));
 
 	const defaultActiveToolNames: string[] = [...DEFAULT_ACTIVE_TOOL_NAMES];
+	const isSubagentRuntime = options.subagentToolManager?.isSubagentRuntime?.() === true;
 	if (options.subagentToolManager) {
 		defaultActiveToolNames.push("subagent");
+		if (isSubagentRuntime) {
+			defaultActiveToolNames.push(SUBAGENT_REGISTRY_TOOL_NAME);
+		}
 	}
 	if (mcpManager?.isEnabled()) {
 		defaultActiveToolNames.push("mcp");

@@ -18,6 +18,7 @@ import {
 	getUiActionCompletions,
 	getUiActionDescriptors,
 } from "../../core/rpc/ui-actions.ts";
+import { SUBAGENT_REGISTRY_TOOL_NAME } from "../../core/subagents/tool-names.ts";
 import type {
 	RpcActiveToolExecution,
 	RpcCatalogModel,
@@ -500,7 +501,8 @@ export async function handleRpcCommand(
 					// mid-turn paints live delegation state without waiting for the
 					// next tool_execution_update.
 					const details =
-						execution.toolName === "subagent" && isRecord(execution.latestDetails)
+						(execution.toolName === "subagent" || execution.toolName === SUBAGENT_REGISTRY_TOOL_NAME) &&
+						isRecord(execution.latestDetails)
 							? projectSubagentDetails(execution.latestDetails)
 							: undefined;
 					return {

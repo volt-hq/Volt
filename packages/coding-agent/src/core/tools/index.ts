@@ -5,6 +5,7 @@ export {
 	type McpGatewayToolInput,
 	type McpGatewayToolOptions,
 } from "../mcp/gateway-tool.ts";
+export { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
 export {
 	type BashOperations,
 	type BashSpawnContext,
@@ -68,11 +69,15 @@ export {
 	type ReadToolOptions,
 } from "./read.ts";
 export {
+	createSubagentRegistryTool,
+	createSubagentRegistryToolDefinition,
 	createSubagentTool,
 	createSubagentToolDefinition,
 	DEFAULT_SUBAGENT_AGGREGATE_OUTPUT_MAX_BYTES,
 	DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES,
 	DEFAULT_SUBAGENT_PARALLEL_MAX_CONCURRENCY,
+	type SubagentRegistryToolInput,
+	type SubagentRegistryToolOptions,
 	type SubagentToolAgentDetails,
 	type SubagentToolDetails,
 	type SubagentToolErrorDetails,
@@ -126,6 +131,7 @@ export {
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { createMcpTool, createMcpToolDefinition, type McpGatewayToolOptions } from "../mcp/gateway-tool.ts";
+import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
 import { type BashToolOptions, createBashTool, createBashToolDefinition } from "./bash.ts";
 import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.ts";
 import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.ts";
@@ -133,14 +139,21 @@ import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createLspTool, createLspToolDefinition, type LspToolOptions } from "./lsp.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
-import { createSubagentTool, createSubagentToolDefinition, type SubagentToolOptions } from "./subagent.ts";
+import {
+	createSubagentRegistryTool,
+	createSubagentRegistryToolDefinition,
+	createSubagentTool,
+	createSubagentToolDefinition,
+	type SubagentRegistryToolOptions,
+	type SubagentToolOptions,
+} from "./subagent.ts";
 import { createWebSearchTool, createWebSearchToolDefinition, type WebSearchToolOptions } from "./web-search.ts";
 import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
 export type CoreToolName = "read" | "bash" | "edit" | "write" | "web_search" | "grep" | "find" | "ls" | "lsp";
-export type ToolName = CoreToolName | "subagent" | "mcp";
+export type ToolName = CoreToolName | "subagent" | typeof SUBAGENT_REGISTRY_TOOL_NAME | "mcp";
 export const DEFAULT_ACTIVE_TOOL_NAMES: readonly CoreToolName[] = ["read", "bash", "edit", "write", "web_search"];
 export const READ_ONLY_TOOL_NAMES: readonly CoreToolName[] = ["read", "web_search", "grep", "find", "ls"];
 export const allToolNames: Set<ToolName> = new Set([
@@ -154,6 +167,7 @@ export const allToolNames: Set<ToolName> = new Set([
 	"ls",
 	"lsp",
 	"subagent",
+	SUBAGENT_REGISTRY_TOOL_NAME,
 	"mcp",
 ]);
 
@@ -168,6 +182,7 @@ export interface ToolsOptions {
 	ls?: LsToolOptions;
 	lsp?: LspToolOptions;
 	subagent?: SubagentToolOptions;
+	subagentRegistry?: SubagentRegistryToolOptions;
 	mcp?: McpGatewayToolOptions;
 }
 
@@ -196,6 +211,11 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 				throw new Error("Subagent tool requires SubagentToolOptions");
 			}
 			return createSubagentToolDefinition(options.subagent);
+		case SUBAGENT_REGISTRY_TOOL_NAME:
+			if (!options?.subagentRegistry) {
+				throw new Error("Subagent registry tool requires SubagentRegistryToolOptions");
+			}
+			return createSubagentRegistryToolDefinition(options.subagentRegistry);
 		case "mcp":
 			if (!options?.mcp) {
 				throw new Error("MCP tool requires McpGatewayToolOptions");
@@ -231,6 +251,11 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 				throw new Error("Subagent tool requires SubagentToolOptions");
 			}
 			return createSubagentTool(cwd, options.subagent);
+		case SUBAGENT_REGISTRY_TOOL_NAME:
+			if (!options?.subagentRegistry) {
+				throw new Error("Subagent registry tool requires SubagentRegistryToolOptions");
+			}
+			return createSubagentRegistryTool(cwd, options.subagentRegistry);
 		case "mcp":
 			if (!options?.mcp) {
 				throw new Error("MCP tool requires McpGatewayToolOptions");
@@ -264,7 +289,7 @@ export function createReadOnlyToolDefinitions(cwd: string, options?: ToolsOption
 export function createAllToolDefinitions(
 	cwd: string,
 	options?: ToolsOptions,
-): Record<CoreToolName, ToolDef> & Partial<Record<"subagent" | "mcp", ToolDef>> {
+): Record<CoreToolName, ToolDef> & Partial<Record<"subagent" | typeof SUBAGENT_REGISTRY_TOOL_NAME | "mcp", ToolDef>> {
 	return {
 		read: createReadToolDefinition(cwd, options?.read),
 		bash: createBashToolDefinition(cwd, options?.bash),
@@ -276,6 +301,9 @@ export function createAllToolDefinitions(
 		ls: createLsToolDefinition(cwd, options?.ls),
 		lsp: createLspToolDefinition(cwd, options?.lsp),
 		...(options?.subagent ? { subagent: createSubagentToolDefinition(options.subagent) } : {}),
+		...(options?.subagentRegistry
+			? { [SUBAGENT_REGISTRY_TOOL_NAME]: createSubagentRegistryToolDefinition(options.subagentRegistry) }
+			: {}),
 		...(options?.mcp ? { mcp: createMcpToolDefinition(options.mcp) } : {}),
 	};
 }
@@ -303,7 +331,7 @@ export function createReadOnlyTools(cwd: string, options?: ToolsOptions): Tool[]
 export function createAllTools(
 	cwd: string,
 	options?: ToolsOptions,
-): Record<CoreToolName, Tool> & Partial<Record<"subagent" | "mcp", Tool>> {
+): Record<CoreToolName, Tool> & Partial<Record<"subagent" | typeof SUBAGENT_REGISTRY_TOOL_NAME | "mcp", Tool>> {
 	return {
 		read: createReadTool(cwd, options?.read),
 		bash: createBashTool(cwd, options?.bash),
@@ -315,6 +343,9 @@ export function createAllTools(
 		ls: createLsTool(cwd, options?.ls),
 		lsp: createLspTool(cwd, options?.lsp),
 		...(options?.subagent ? { subagent: createSubagentTool(cwd, options.subagent) } : {}),
+		...(options?.subagentRegistry
+			? { [SUBAGENT_REGISTRY_TOOL_NAME]: createSubagentRegistryTool(cwd, options.subagentRegistry) }
+			: {}),
 		...(options?.mcp ? { mcp: createMcpTool(options.mcp) } : {}),
 	};
 }

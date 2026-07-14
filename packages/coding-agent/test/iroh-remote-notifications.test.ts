@@ -1649,6 +1649,12 @@ describe("Iroh remote notification requests", () => {
 					name: "read",
 					arguments: { path: "/workspace/src/index.ts", offset: 3 },
 				},
+				{
+					type: "toolCall",
+					id: "registry-call",
+					name: "subagent_registry",
+					arguments: { list: true, offset: 50 },
+				},
 			],
 			timestamp: 1,
 		};
@@ -1667,6 +1673,19 @@ describe("Iroh remote notification requests", () => {
 			content: [{ type: "text", text: "private file contents" }],
 			isError: false,
 			timestamp: 3,
+		};
+		const registryResult = {
+			role: "toolResult",
+			toolCallId: "registry-call",
+			toolName: "subagent_registry",
+			content: [{ type: "text", text: "bounded registry page" }],
+			details: {
+				mode: "list",
+				status: "completed",
+				summary: { total: 120, offset: 50, returned: 50, nextOffset: 100 },
+			},
+			isError: false,
+			timestamp: 4,
 		};
 		session.sessionManager.getBranch.mockReturnValue([
 			{
@@ -1690,6 +1709,13 @@ describe("Iroh remote notification requests", () => {
 				timestamp: "2026-06-27T00:00:02.000Z",
 				message: readResult,
 			},
+			{
+				type: "message",
+				id: "registry-entry",
+				parentId: "read-entry",
+				timestamp: "2026-06-27T00:00:03.000Z",
+				message: registryResult,
+			},
 		]);
 		const sessionHandlers: Array<(event: AgentSessionEvent) => void> = [];
 		session.subscribe.mockImplementation((handler: (event: AgentSessionEvent) => void) => {
@@ -1709,6 +1735,7 @@ describe("Iroh remote notification requests", () => {
 		for (const handler of sessionHandlers) {
 			handler({ type: "message_end", message: bashResult } as AgentSessionEvent);
 			handler({ type: "message_end", message: readResult } as AgentSessionEvent);
+			handler({ type: "message_end", message: registryResult } as AgentSessionEvent);
 		}
 
 		await vi.waitFor(() => {
@@ -1740,6 +1767,25 @@ describe("Iroh remote notification requests", () => {
 						path: "/workspace/src/index.ts",
 						args: { path: "/workspace/src/index.ts", offset: 3 },
 						output: "private file contents",
+						outputTruncated: false,
+					}),
+				}),
+			);
+			expect(transcriptEntries).toContainEqual(
+				expect.objectContaining({
+					type: "transcript_entry",
+					entry: expect.objectContaining({
+						entryId: "registry-entry",
+						role: "tool",
+						toolName: "subagent_registry",
+						status: "completed",
+						args: { list: true, offset: 50 },
+						details: {
+							mode: "list",
+							status: "completed",
+							summary: { total: 120, offset: 50, returned: 50, nextOffset: 100 },
+						},
+						output: "bounded registry page",
 						outputTruncated: false,
 					}),
 				}),

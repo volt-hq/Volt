@@ -28,6 +28,7 @@ import {
 import { extractMessageImages, projectMessageImages } from "../core/rpc/transcript.ts";
 import type { RpcKeepAwakeStatus } from "../core/rpc/types.ts";
 import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../core/session-manager.ts";
+import { SUBAGENT_REGISTRY_TOOL_NAME } from "../core/subagents/tool-names.ts";
 import type { KeepAwakeStatus } from "./keep-awake.ts";
 import type { LeaseState } from "./lease-broker.ts";
 import { getRegisteredWorkingDirectoryForWorktree } from "./worktree-manager.ts";
@@ -450,7 +451,7 @@ function projectRemoteTranscriptEntry(
 		if (projectedArgs) {
 			item.args = projectedArgs;
 		}
-		if (toolName === "subagent") {
+		if (toolName === "subagent" || toolName === SUBAGENT_REGISTRY_TOOL_NAME) {
 			const details = projectRemoteSubagentDetails(message.details, authorization);
 			if (details) {
 				item.details = details;
@@ -539,7 +540,7 @@ function projectRemoteToolArgs(
 	args: Record<string, unknown> | undefined,
 	authorization: IrohRemoteClientAuthorizationSuccess,
 ): Record<string, unknown> | undefined {
-	if (toolName === "subagent") {
+	if (toolName === "subagent" || toolName === SUBAGENT_REGISTRY_TOOL_NAME) {
 		return projectRemoteSubagentArgs(args, authorization);
 	}
 	if (!isRemoteRecord(args)) {
@@ -672,6 +673,11 @@ function projectRemoteSubagentArgs(
 	if (chain) {
 		projected.chain = chain;
 	}
+	if (typeof args.list === "boolean") {
+		projected.list = args.list;
+	}
+	copyRemoteNumber(args, projected, "offset");
+	copyRemoteString(args, projected, "follow", authorization, 200);
 	return Object.keys(projected).length > 0 ? projected : undefined;
 }
 
@@ -761,7 +767,18 @@ function projectRemoteSubagentSummary(value: unknown): Record<string, number> | 
 		return undefined;
 	}
 	const projected: Record<string, number> = {};
-	for (const key of ["total", "completed", "failed", "aborted", "running", "maxConcurrency", "stoppedAt"]) {
+	for (const key of [
+		"total",
+		"completed",
+		"failed",
+		"aborted",
+		"running",
+		"maxConcurrency",
+		"stoppedAt",
+		"offset",
+		"returned",
+		"nextOffset",
+	]) {
 		const numberValue = remoteFiniteNumber(value[key]);
 		if (numberValue !== undefined) {
 			projected[key] = numberValue;

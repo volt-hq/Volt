@@ -3,6 +3,7 @@ import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { ImageContent } from "@hansjm10/volt-ai";
 import { type BashExecutionMessage, extractVisibleTextContent } from "../messages.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
+import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
 import type {
 	RpcMessageImage,
 	RpcTranscriptItem,
@@ -266,7 +267,7 @@ function projectToolResult(
 	if (projectedArgs) {
 		item.args = projectedArgs;
 	}
-	if (message.toolName === "subagent") {
+	if (message.toolName === "subagent" || message.toolName === SUBAGENT_REGISTRY_TOOL_NAME) {
 		const subagentDetails = projectSubagentDetails(details);
 		if (subagentDetails) {
 			item.details = subagentDetails;
@@ -279,7 +280,7 @@ function projectToolArgs(
 	toolName: string,
 	args: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
-	if (toolName === "subagent") {
+	if (toolName === "subagent" || toolName === SUBAGENT_REGISTRY_TOOL_NAME) {
 		return projectSubagentArgs(args);
 	}
 	if (!args) {

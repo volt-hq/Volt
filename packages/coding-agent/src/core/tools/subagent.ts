@@ -20,6 +20,7 @@ import type {
 	SubagentResult,
 	SubagentStartByNameOptions,
 } from "../subagents/index.ts";
+import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
 import { getMarkdownTheme, type Theme } from "../theme/runtime.ts";
 import { formatDuration } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -36,13 +37,33 @@ const SUBAGENT_PROGRESS_THROTTLE_MS = 200;
 const BUILT_IN_SUBAGENT_SUMMARY =
 	"Built-in agents: general (ad hoc tasks), researcher (source-backed evidence gathering with web_search), design-doc (RFC/design synthesis), and security-reviewer (non-mutating security review with web_search).";
 
-function createSubagentSchema(availableNames?: readonly string[]) {
+const subagentRegistrySchema = Type.Object({
+	list: Type.Optional(
+		Type.Boolean({
+			description: "List mode: pass true to list delegated subagent runs in this session across the tree.",
+		}),
+	),
+	offset: Type.Optional(
+		Type.Integer({
+			description: "Zero-based list-mode offset for retrieving the next bounded page of delegated runs.",
+			minimum: 0,
+		}),
+	),
+	follow: Type.Optional(
+		Type.String({
+			description:
+				"Follow mode: id of an existing subagent run (sa_...) whose result to return, waiting if still running.",
+		}),
+	),
+});
+
+function createSubagentSchema(availableNames?: readonly string[], includeRegistryModes = true) {
 	const enumConstraint = availableNames ? { enum: [...availableNames] } : {};
 	const subagentTaskSchema = Type.Object({
 		agent: Type.String({ description: "Name of the subagent to invoke", ...enumConstraint }),
 		task: Type.String({ description: "Task prompt to send to the subagent" }),
 	});
-	return Type.Object({
+	const schema = Type.Object({
 		agent: Type.Optional(
 			Type.String({ description: "Name of the subagent to invoke for single mode", ...enumConstraint }),
 		),
@@ -59,24 +80,17 @@ function createSubagentSchema(availableNames?: readonly string[]) {
 				minItems: 1,
 			}),
 		),
-		list: Type.Optional(
-			Type.Boolean({
-				description: "List mode: pass true to list delegated subagent runs in this session across the tree.",
-			}),
-		),
-		offset: Type.Optional(
-			Type.Integer({
-				description: "Zero-based list-mode offset for retrieving the next bounded page of delegated runs.",
-				minimum: 0,
-			}),
-		),
-		follow: Type.Optional(
-			Type.String({
-				description:
-					"Follow mode: id of an existing subagent run (sa_...) whose result to return, waiting if still running.",
-			}),
-		),
+		list: subagentRegistrySchema.properties.list,
+		offset: subagentRegistrySchema.properties.offset,
+		follow: subagentRegistrySchema.properties.follow,
 	});
+	if (!includeRegistryModes) {
+		const properties: Record<string, unknown> = schema.properties;
+		delete properties.list;
+		delete properties.offset;
+		delete properties.follow;
+	}
+	return schema;
 }
 
 const subagentSchema = createSubagentSchema();
@@ -86,6 +100,7 @@ export interface SubagentToolTaskInput {
 	task: string;
 }
 export type SubagentToolInput = Static<typeof subagentSchema>;
+export type SubagentRegistryToolInput = Static<typeof subagentRegistrySchema>;
 export type SubagentToolMode = "single" | "parallel" | "chain" | "list" | "follow";
 export type SubagentToolStatus = "running" | "completed" | "failed" | "aborted";
 export type SubagentToolOverallStatus = SubagentToolStatus | "partial";
@@ -237,6 +252,8 @@ export interface SubagentToolDetails {
 
 export interface SubagentToolManager {
 	getDefinition(agentName: string): SubagentDefinition;
+	/** Whether this manager belongs to a child subagent runtime. */
+	isSubagentRuntime?(): boolean;
 	/** Definitions this runtime is currently allowed to invoke. Omit for unrestricted legacy managers. */
 	listAvailableDefinitions?(): readonly SubagentDefinition[];
 	/**
@@ -264,6 +281,14 @@ export interface SubagentToolOptions {
 	maxAggregateOutputBytes?: number;
 	/** Optional caller-specified timeout. Delegation has no automatic deadline by default. */
 	runTimeoutMs?: number;
+	/** Keep registry modes on the root compatibility tool. Child runtimes set this to false. */
+	includeRegistryModes?: boolean;
+}
+
+export interface SubagentRegistryToolOptions {
+	manager: SubagentToolManager;
+	maxOutputBytes?: number;
+	maxAggregateOutputBytes?: number;
 }
 
 interface NormalizedSubagentTaskInput {
@@ -1207,6 +1232,76 @@ function normalizeSubagentToolInput(params: SubagentToolInput): NormalizedSubage
 	};
 }
 
+async function executeSubagentRegistryOperation(
+	normalized: Extract<NormalizedSubagentToolInput, { mode: "list" | "follow" }>,
+	options: {
+		manager: SubagentToolManager;
+		maxOutputBytes: number;
+		maxAggregateOutputBytes: number;
+	},
+	signal: AbortSignal | undefined,
+	onUpdate: AgentToolUpdateCallback<SubagentToolDetails> | undefined,
+): Promise<AgentToolResult<SubagentToolDetails>> {
+	if (normalized.mode === "list") {
+		const records = options.manager.listDelegations?.();
+		if (!records) {
+			throw new Error("The subagent delegation registry is not available in this session.");
+		}
+		const counts = { completed: 0, failed: 0, aborted: 0, running: 0 };
+		for (const record of records) {
+			counts[record.status] += 1;
+		}
+		const page = formatDelegationList(records, normalized.offset, options.maxAggregateOutputBytes);
+		return {
+			content: [{ type: "text", text: page.text }],
+			details: {
+				mode: "list",
+				status: "completed",
+				summary: {
+					total: records.length,
+					completed: counts.completed,
+					failed: counts.failed,
+					aborted: counts.aborted,
+					...(counts.running > 0 ? { running: counts.running } : {}),
+					offset: normalized.offset,
+					returned: page.returned,
+					...(page.nextOffset !== undefined ? { nextOffset: page.nextOffset } : {}),
+				},
+			},
+		};
+	}
+
+	if (!options.manager.followDelegation) {
+		throw new Error("The subagent delegation registry is not available in this session.");
+	}
+	onUpdate?.({
+		content: [{ type: "text", text: `Following subagent run ${normalized.subagentId}` }],
+		details: { mode: "follow", status: "running", subagentId: normalized.subagentId },
+	});
+	const followed = await options.manager.followDelegation(normalized.subagentId, {
+		...(signal ? { signal } : {}),
+	});
+	const output = truncateModelVisibleOutput(
+		followed.output || followed.error || "(no output)",
+		options.maxOutputBytes,
+	);
+	const finalResult: AgentToolResult<SubagentToolDetails> = {
+		content: [{ type: "text", text: output.text }],
+		details: {
+			mode: "follow",
+			status: followed.status,
+			subagentId: followed.id,
+			agent: { ...followed.agent },
+			output: createOutputDetails(output, options.maxOutputBytes),
+			...(followed.error ? { error: { message: followed.error } } : {}),
+			startedAt: followed.startedAt,
+			durationMs: Math.max(0, followed.finishedAt - followed.startedAt),
+		},
+	};
+	onUpdate?.(finalResult);
+	return finalResult;
+}
+
 async function mapWithConcurrencyLimit<TIn, TOut>(
 	items: TIn[],
 	concurrency: number,
@@ -1732,6 +1827,7 @@ export function createSubagentToolDefinition(
 	_options: SubagentToolOptions,
 ): ToolDefinition<typeof subagentSchema, SubagentToolDetails, SubagentRenderState> {
 	const options = _options;
+	const includeRegistryModes = options.includeRegistryModes ?? true;
 	const availableDefinitions = options.manager.listAvailableDefinitions?.();
 	const availableNames = availableDefinitions?.map((definition) => definition.name);
 	const availableSummary = availableDefinitions
@@ -1765,11 +1861,17 @@ export function createSubagentToolDefinition(
 			"Delegate tasks to named Volt subagents with isolated context windows.",
 			availableSummary,
 			"User and project definitions may add custom names; built-in names are reserved.",
-			'Modes: single { agent, task }, parallel { tasks: [{ agent, task }, ...] }, chain { chain: [{ agent, task }, ...] }, list { list: true, offset?: number }, or follow { follow: "sa_..." }.',
+			includeRegistryModes
+				? 'Modes: single { agent, task }, parallel { tasks: [{ agent, task }, ...] }, chain { chain: [{ agent, task }, ...] }, list { list: true, offset?: number }, or follow { follow: "sa_..." }.'
+				: "Modes: single { agent, task }, parallel { tasks: [{ agent, task }, ...] }, or chain { chain: [{ agent, task }, ...] }.",
 			`Parallel mode runs any number of tasks with max concurrency ${DEFAULT_SUBAGENT_PARALLEL_MAX_CONCURRENCY}.`,
 			"Chain mode runs steps sequentially, replacing {previous} with bounded XML-escaped untrusted prior output and stopping at the first failed step.",
-			`List mode returns delegated runs across the whole session tree in bounded pages of up to ${DELEGATION_LIST_PAGE_SIZE}; pass the returned offset to continue.`,
-			"Follow mode returns an existing run's result by id instead of starting a new subagent, waiting for completion when it is still running.",
+			...(includeRegistryModes
+				? [
+						`List mode returns delegated runs across the whole session tree in bounded pages of up to ${DELEGATION_LIST_PAGE_SIZE}; pass the returned offset to continue.`,
+						"Follow mode returns an existing run's result by id instead of starting a new subagent, waiting for completion when it is still running.",
+					]
+				: []),
 			"Child subagent tools are clamped to the current parent/session tool policy.",
 		].join(" "),
 		promptSnippet: "Delegate tasks to named isolated subagents",
@@ -1777,11 +1879,15 @@ export function createSubagentToolDefinition(
 			"Use subagent when a named specialized agent should handle focused work in an isolated context.",
 			availableGuideline,
 			"Scale delegation to task complexity, avoid duplicate assignments, and stop spawning once existing evidence is sufficient.",
-			'Before delegating, use { list: true } to check whether an equivalent task already ran or is still running anywhere in this session, and prefer { follow: "<id>" } over starting a duplicate run.',
+			...(includeRegistryModes
+				? [
+						'Before delegating, use { list: true } to check whether an equivalent task already ran or is still running anywhere in this session, and prefer { follow: "<id>" } over starting a duplicate run.',
+					]
+				: []),
 			"Use parallel mode only for independent tasks whose outputs can be combined after all children finish.",
 			"Use chain mode only when each step depends on the prior successful output via {previous}.",
 		],
-		parameters: createSubagentSchema(availableNames),
+		parameters: createSubagentSchema(availableNames, includeRegistryModes),
 		executionMode: "sequential",
 		async execute(
 			_toolCallId,
@@ -1794,64 +1900,16 @@ export function createSubagentToolDefinition(
 			}
 
 			const normalized = normalizeSubagentToolInput(params);
-			if (normalized.mode === "list") {
-				const records = options.manager.listDelegations?.();
-				if (!records) {
-					throw new Error("The subagent delegation registry is not available in this session.");
-				}
-				const counts = { completed: 0, failed: 0, aborted: 0, running: 0 };
-				for (const record of records) {
-					counts[record.status] += 1;
-				}
-				const page = formatDelegationList(records, normalized.offset, maxAggregateOutputBytes);
-				return {
-					content: [{ type: "text", text: page.text }],
-					details: {
-						mode: "list",
-						status: "completed",
-						summary: {
-							total: records.length,
-							completed: counts.completed,
-							failed: counts.failed,
-							aborted: counts.aborted,
-							...(counts.running > 0 ? { running: counts.running } : {}),
-							offset: normalized.offset,
-							returned: page.returned,
-							...(page.nextOffset !== undefined ? { nextOffset: page.nextOffset } : {}),
-						},
-					},
-				};
+			if (!includeRegistryModes && (normalized.mode === "list" || normalized.mode === "follow")) {
+				throw new Error(`Use the ${SUBAGENT_REGISTRY_TOOL_NAME} tool for registry list and follow operations.`);
 			}
-			if (normalized.mode === "follow") {
-				if (!options.manager.followDelegation) {
-					throw new Error("The subagent delegation registry is not available in this session.");
-				}
-				onUpdate?.({
-					content: [{ type: "text", text: `Following subagent run ${normalized.subagentId}` }],
-					details: { mode: "follow", status: "running", subagentId: normalized.subagentId },
-				});
-				const followed = await options.manager.followDelegation(normalized.subagentId, {
-					...(signal ? { signal } : {}),
-				});
-				const output = truncateModelVisibleOutput(
-					followed.output || followed.error || "(no output)",
-					maxOutputBytes,
+			if (normalized.mode === "list" || normalized.mode === "follow") {
+				return executeSubagentRegistryOperation(
+					normalized,
+					{ manager: options.manager, maxOutputBytes, maxAggregateOutputBytes },
+					signal,
+					onUpdate,
 				);
-				const finalResult: AgentToolResult<SubagentToolDetails> = {
-					content: [{ type: "text", text: output.text }],
-					details: {
-						mode: "follow",
-						status: followed.status,
-						subagentId: followed.id,
-						agent: { ...followed.agent },
-						output: createOutputDetails(output, maxOutputBytes),
-						...(followed.error ? { error: { message: followed.error } } : {}),
-						startedAt: followed.startedAt,
-						durationMs: Math.max(0, followed.finishedAt - followed.startedAt),
-					},
-				};
-				onUpdate?.(finalResult);
-				return finalResult;
 			}
 			// Validate names against the policy-permitted set, not the budget-filtered
 			// available set: when depth or child-start budgets are exhausted, startByName
@@ -2265,9 +2323,65 @@ export function createSubagentToolDefinition(
 	};
 }
 
+export function createSubagentRegistryToolDefinition(
+	options: SubagentRegistryToolOptions,
+): ToolDefinition<typeof subagentRegistrySchema, SubagentToolDetails> {
+	const maxOutputBytes = Math.min(
+		requirePositiveInteger(options.maxOutputBytes ?? DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES, "maxOutputBytes"),
+		DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES,
+	);
+	const maxAggregateOutputBytes = Math.min(
+		requirePositiveInteger(
+			options.maxAggregateOutputBytes ?? DEFAULT_SUBAGENT_AGGREGATE_OUTPUT_MAX_BYTES,
+			"maxAggregateOutputBytes",
+		),
+		DEFAULT_SUBAGENT_AGGREGATE_OUTPUT_MAX_BYTES,
+	);
+	return {
+		name: SUBAGENT_REGISTRY_TOOL_NAME,
+		label: "subagent registry",
+		description: [
+			"List and follow delegated subagent runs recorded across this session tree.",
+			`List mode { list: true, offset?: number } returns bounded pages of up to ${DELEGATION_LIST_PAGE_SIZE} complete records; pass the returned offset to continue.`,
+			'Follow mode { follow: "sa_..." } returns an existing run by id, waiting when it is still running.',
+		].join(" "),
+		promptSnippet: "List or follow delegated subagent runs",
+		promptGuidelines: [
+			"Use subagent_registry to discover existing delegated work and avoid duplicate effort.",
+			'Use { list: true } to inspect recorded runs and { follow: "<id>" } to wait for or retrieve one result.',
+		],
+		parameters: subagentRegistrySchema,
+		executionMode: "sequential",
+		async execute(_toolCallId, params, signal, onUpdate) {
+			if (signal?.aborted) {
+				throw new Error("Operation aborted");
+			}
+			const normalized = normalizeSubagentToolInput(params);
+			if (normalized.mode !== "list" && normalized.mode !== "follow") {
+				throw new Error(
+					"Invalid subagent registry input: provide exactly one mode, either { list: true, offset? } or { follow }.",
+				);
+			}
+			return executeSubagentRegistryOperation(
+				normalized,
+				{ manager: options.manager, maxOutputBytes, maxAggregateOutputBytes },
+				signal,
+				onUpdate,
+			);
+		},
+	};
+}
+
 export function createSubagentTool(
 	_cwd: string,
 	options: SubagentToolOptions,
 ): AgentTool<typeof subagentSchema, SubagentToolDetails> {
 	return wrapToolDefinition(createSubagentToolDefinition(options));
+}
+
+export function createSubagentRegistryTool(
+	_cwd: string,
+	options: SubagentRegistryToolOptions,
+): AgentTool<typeof subagentRegistrySchema, SubagentToolDetails> {
+	return wrapToolDefinition(createSubagentRegistryToolDefinition(options));
 }

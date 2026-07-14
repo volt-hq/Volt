@@ -281,7 +281,7 @@ describe("RPC transcript projection", () => {
 		expect(JSON.stringify(transcript)).not.toContain("model-visible child output");
 	});
 
-	test("projects subagent list pagination arguments and summary", () => {
+	test("projects standard subagent registry pagination arguments and summary", () => {
 		const session = SessionManager.inMemory("/workspace");
 		session.appendMessage(
 			assistant(
@@ -289,7 +289,7 @@ describe("RPC transcript projection", () => {
 					{
 						type: "toolCall",
 						id: "subagent-list-call",
-						name: "subagent",
+						name: "subagent_registry",
 						arguments: { list: true, offset: 50 },
 					},
 				],
@@ -299,7 +299,7 @@ describe("RPC transcript projection", () => {
 		session.appendMessage({
 			role: "toolResult",
 			toolCallId: "subagent-list-call",
-			toolName: "subagent",
+			toolName: "subagent_registry",
 			content: [{ type: "text", text: "page output" }],
 			details: {
 				mode: "list",
@@ -322,7 +322,7 @@ describe("RPC transcript projection", () => {
 		const transcript = projectSessionTranscript(session);
 		const toolItem = transcript.items.find((item) => item.role === "tool");
 		expect(toolItem).toMatchObject({
-			toolName: "subagent",
+			toolName: "subagent_registry",
 			args: { list: true, offset: 50 },
 			details: {
 				mode: "list",

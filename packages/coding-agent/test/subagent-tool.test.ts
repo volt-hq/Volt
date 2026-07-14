@@ -27,6 +27,7 @@ import {
 	type SubagentRuntimeCreatedEvent,
 } from "../src/core/subagents/index.ts";
 import {
+	createSubagentRegistryTool,
 	createSubagentTool,
 	createSubagentToolDefinition,
 	DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES,
@@ -414,25 +415,54 @@ describe("subagent tool", () => {
 		};
 	}
 
-	it("activates the built-in subagent tool only when a manager has available definitions", async () => {
+	it("exposes child registry access independently from subagent spawning", async () => {
 		const defaultSession = await createSession({});
 		expect(defaultSession.getAllTools().map((tool) => tool.name)).toContain("subagent");
 		expect(defaultSession.getActiveToolNames()).toContain("subagent");
+		expect(defaultSession.getAllTools().map((tool) => tool.name)).not.toContain("subagent_registry");
+		const rootSubagentParameters = defaultSession.getToolDefinition("subagent")?.parameters as
+			| { properties?: Record<string, unknown> }
+			| undefined;
+		expect(rootSubagentParameters?.properties).toHaveProperty("list");
+		expect(rootSubagentParameters?.properties).toHaveProperty("follow");
 
 		const withoutManagerSession = await createSession({ manager: false });
 		expect(withoutManagerSession.getAllTools().map((tool) => tool.name)).not.toContain("subagent");
 		expect(withoutManagerSession.getActiveToolNames()).not.toContain("subagent");
 
-		const unavailableManager = {
-			getDefinition: () => createDefinition("researcher"),
+		const researcher = createDefinition("researcher");
+		const maxDepthManager = {
+			getDefinition: () => researcher,
+			isSubagentRuntime: () => true,
 			listAvailableDefinitions: () => [],
+			listDelegations: () => [],
+			followDelegation: async () => {
+				throw new Error("not implemented");
+			},
 			startByName: async () => {
 				throw new Error("not implemented");
 			},
 		} satisfies SubagentToolManager;
-		const unavailableSession = await createSession({ manager: unavailableManager });
-		expect(unavailableSession.getAllTools().map((tool) => tool.name)).not.toContain("subagent");
-		expect(unavailableSession.getActiveToolNames()).not.toContain("subagent");
+		const maxDepthSession = await createSession({ manager: maxDepthManager });
+		expect(maxDepthSession.getAllTools().map((tool) => tool.name)).toContain("subagent_registry");
+		expect(maxDepthSession.getActiveToolNames()).toContain("subagent_registry");
+		expect(maxDepthSession.getAllTools().map((tool) => tool.name)).not.toContain("subagent");
+
+		const childManager = {
+			...maxDepthManager,
+			listAvailableDefinitions: () => [researcher],
+		} satisfies SubagentToolManager;
+		const childSession = await createSession({ manager: childManager });
+		expect(childSession.getActiveToolNames()).toEqual(expect.arrayContaining(["subagent", "subagent_registry"]));
+		const childSubagentParameters = childSession.getToolDefinition("subagent")?.parameters as
+			| { properties?: Record<string, unknown> }
+			| undefined;
+		expect(childSubagentParameters?.properties).not.toHaveProperty("list");
+		expect(childSubagentParameters?.properties).not.toHaveProperty("follow");
+
+		const strictChildSession = await createSession({ manager: childManager, tools: ["subagent"] });
+		expect(strictChildSession.getAllTools().map((tool) => tool.name)).toEqual(["subagent"]);
+		expect(strictChildSession.getActiveToolNames()).toEqual(["subagent"]);
 	});
 
 	it("respects explicit subagent tool policy opt-outs and allowlists", async () => {
@@ -1591,7 +1621,7 @@ describe("subagent tool", () => {
 		await expect(tool.execute("call-1", { follow: "  " })).rejects.toThrow(/non-empty subagent run id/);
 	});
 
-	it("lists the session-wide delegation registry", async () => {
+	it("lists the session-wide delegation registry through the standard registry tool", async () => {
 		const now = Date.now();
 		const manager = {
 			getDefinition: () => createDefinition("scout"),
@@ -1617,7 +1647,7 @@ describe("subagent tool", () => {
 				},
 			],
 		} satisfies SubagentToolManager;
-		const tool = createSubagentTool(process.cwd(), { manager });
+		const tool = createSubagentRegistryTool(process.cwd(), { manager });
 
 		const result = await tool.execute("call-1", { list: true });
 		const text = result.content
@@ -1652,11 +1682,11 @@ describe("subagent tool", () => {
 			listDelegations: () => records,
 		} satisfies SubagentToolManager;
 
-		const defaultTool = createSubagentTool(process.cwd(), { manager });
+		const defaultTool = createSubagentRegistryTool(process.cwd(), { manager });
 		const defaultPage = await defaultTool.execute("call-default", { list: true });
 		expect(defaultPage.details.summary).toMatchObject({ offset: 0, returned: 50, nextOffset: 50 });
 
-		const boundedTool = createSubagentTool(process.cwd(), { manager, maxAggregateOutputBytes: 2_000 });
+		const boundedTool = createSubagentRegistryTool(process.cwd(), { manager, maxAggregateOutputBytes: 2_000 });
 		const firstPage = await boundedTool.execute("call-first", { list: true });
 		const firstText = textFromResult(firstPage);
 		expect(Buffer.byteLength(firstText, "utf8")).toBeLessThanOrEqual(2_000);
@@ -1696,7 +1726,7 @@ describe("subagent tool", () => {
 				};
 			},
 		} satisfies SubagentToolManager;
-		const tool = createSubagentTool(process.cwd(), { manager });
+		const tool = createSubagentRegistryTool(process.cwd(), { manager });
 
 		const result = await tool.execute("call-1", { follow: "sa_done" });
 		expect(followRequests).toEqual(["sa_done"]);
@@ -1717,7 +1747,7 @@ describe("subagent tool", () => {
 			getDefinition: () => createDefinition("scout"),
 			startByName: async () => createCompletedHandle("unused"),
 		} satisfies SubagentToolManager;
-		const tool = createSubagentTool(process.cwd(), { manager });
+		const tool = createSubagentRegistryTool(process.cwd(), { manager });
 
 		await expect(tool.execute("call-1", { list: true })).rejects.toThrow("registry is not available");
 		await expect(tool.execute("call-1", { follow: "sa_x" })).rejects.toThrow("registry is not available");

@@ -255,7 +255,9 @@ const { session } = await createAgentSession({
 });
 ```
 
-The built-in tool supports single `{ agent: string, task: string }`, parallel `{ tasks: Array<{ agent: string, task: string }> }`, chain `{ chain: Array<{ agent: string, task: string }> }`, list `{ list: true, offset?: number }`, and follow `{ follow: string }` calls. List mode returns up to 50 session-wide registry records per page within the aggregate output byte limit and reports the next offset when more records remain. Follow mode reuses an existing run by id and waits when it is still running.
+Root sessions retain compatibility support for single `{ agent: string, task: string }`, parallel `{ tasks: Array<{ agent: string, task: string }> }`, chain `{ chain: Array<{ agent: string, task: string }> }`, list `{ list: true, offset?: number }`, and follow `{ follow: string }` calls on `subagent`. In a runtime whose `SubagentManager` has a `SubagentRuntimeContext`, `subagent` is spawn-only and the child-only `subagent_registry` tool owns list and follow. It remains registered when depth, child-count, or child-name policy leaves no spawnable definitions. List mode returns up to 50 session-wide registry records per page within the aggregate output byte limit and reports the next offset when more records remain. Follow mode reuses an existing run by id and waits when it is still running.
+
+Custom runtime factories that support nested delegation must construct each child session's manager with the `subagentContext` passed to `CreateAgentSessionRuntimeFactory`. Explicit `tools` and `excludeTools` policies treat `subagent` and `subagent_registry` as separate names; omitting the registry name from an explicit child allowlist disables registry access and its snapshot guidance.
 
 Parallel mode accepts any number of tasks with max concurrency 4, keeps result ordering stable, and returns mixed-status details for partial failures. Chain mode runs sequentially, replaces `{previous}` with the prior successful step output, returns the final successful step output on full success, and stops at the first failed step. Recursive delegation is fail-closed unless `allowedSubagents` is explicit, and every descendant shares the root scope's hard depth, start, concurrency, turn, token, cost, deadline, and cancellation limits. Model-visible output is capped at 50 KB per task/step and 100 KB in aggregate for parallel and list modes; tool details also store the final tree-budget snapshot.
 
@@ -552,8 +554,8 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 
 Specify which built-in tools to enable:
 
-- Built-in tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`
-- Default built-ins: `read`, `bash`, `edit`, `write`, and `subagent` when `subagentToolManager` is supplied
+- Built-in tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`, and child-only `subagent_registry`
+- Default built-ins: `read`, `bash`, `edit`, `write`, `subagent` when spawning is available, and `subagent_registry` when the manager belongs to a child runtime
 - `noTools: "all"` disables all tools
 - `noTools: "builtin"` disables default built-ins, including `subagent`, while keeping extension and custom tools enabled
 - `excludeTools` disables specific built-in, extension, or custom tool names after any `tools` allowlist is applied
@@ -1253,7 +1255,7 @@ SettingsManager
 createCodingTools
 createReadOnlyTools
 createReadTool, createBashTool, createEditTool, createWriteTool
-createGrepTool, createFindTool, createLsTool, createSubagentTool
+createGrepTool, createFindTool, createLsTool, createSubagentTool, createSubagentRegistryTool
 
 // Types
 type CreateAgentSessionOptions

@@ -106,6 +106,7 @@ import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader }
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import { SUBAGENT_REGISTRY_TOOL_NAME } from "./subagents/tool-names.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { getThemeByName, theme } from "./theme/runtime.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
@@ -2984,10 +2985,17 @@ export class AgentSession {
 		}
 
 		const directMcpToolDefinitions = this._mcpManager ? createMcpDirectToolDefinitions(this._mcpManager) : [];
+		const isSubagentRuntime = this._subagentToolManager?.isSubagentRuntime?.() === true;
 		const subagentToolManager =
 			this._subagentToolManager &&
 			(this._subagentToolManager.listAvailableDefinitions === undefined ||
 				this._subagentToolManager.listAvailableDefinitions().length > 0)
+				? this._subagentToolManager
+				: undefined;
+		const subagentRegistryManager =
+			isSubagentRuntime &&
+			this._subagentToolManager?.listDelegations !== undefined &&
+			this._subagentToolManager.followDelegation !== undefined
 				? this._subagentToolManager
 				: undefined;
 		const baseToolDefinitions = this._baseToolsOverride
@@ -3034,10 +3042,23 @@ export class AgentSession {
 						? {
 								subagent: {
 									manager: subagentToolManager,
-									getAllowedTools: () => this.getActiveToolNames(),
+									getAllowedTools: () => {
+										const activeToolNames = this.getActiveToolNames();
+										if (
+											!isSubagentRuntime &&
+											(this._allowedToolNames === undefined ||
+												this._allowedToolNames.has(SUBAGENT_REGISTRY_TOOL_NAME)) &&
+											!this._excludedToolNames?.has(SUBAGENT_REGISTRY_TOOL_NAME)
+										) {
+											return [...activeToolNames, SUBAGENT_REGISTRY_TOOL_NAME];
+										}
+										return activeToolNames;
+									},
+									includeRegistryModes: !isSubagentRuntime,
 								},
 							}
 						: {}),
+					...(subagentRegistryManager ? { subagentRegistry: { manager: subagentRegistryManager } } : {}),
 					...(this._mcpManager ? { mcp: { manager: this._mcpManager } } : {}),
 				});
 
