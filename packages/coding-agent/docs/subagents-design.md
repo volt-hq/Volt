@@ -235,7 +235,7 @@ Supported MVP modes:
 
 - Single: `{ "agent": "scout", "task": "Find auth code" }`
 - Parallel: `{ "tasks": [{ "agent": "scout", "task": "..." }] }`
-- Chain: `{ "chain": [{ "agent": "scout", "task": "... {previous}" }] }`, capped at 8 steps
+- Chain: `{ "chain": [{ "agent": "scout", "task": "... {previous}" }] }`
 
 The tool result returns:
 

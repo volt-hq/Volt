@@ -198,28 +198,28 @@ describe("subagent definitions", () => {
 		expect(general?.tools).toBeUndefined();
 		expect(general?.excludedTools).toEqual(["subagent"]);
 		expect(general?.allowedSubagents).toEqual([]);
-		expect(general?.maxChildAgents).toBe(0);
+		expect(general?.maxChildAgents).toBeUndefined();
 		expect(general?.systemPrompt).toContain("general-purpose Volt subagent");
 		expect(researcher).toMatchObject({
 			allowedSubagents: ["researcher"],
-			maxSubagentDepth: 3,
-			maxChildAgents: 2,
 		});
+		expect(researcher?.maxSubagentDepth).toBeUndefined();
+		expect(researcher?.maxChildAgents).toBeUndefined();
 		expect(researcher?.tools).toContain("subagent");
 		expect(researcher?.tools).not.toContain("bash");
 		expect(researcher?.tools).not.toContain("lsp");
 		expect(designDoc).toMatchObject({
 			description: "Design document planner and synthesizer that delegates independent research when warranted",
 			allowedSubagents: ["researcher", "security-reviewer", "general"],
-			maxSubagentDepth: 3,
-			maxChildAgents: 8,
 		});
+		expect(designDoc?.maxSubagentDepth).toBeUndefined();
+		expect(designDoc?.maxChildAgents).toBeUndefined();
 		expect(designDoc?.tools).toBeUndefined();
 		expect(securityReviewer).toMatchObject({
 			allowedSubagents: ["researcher"],
-			maxSubagentDepth: 3,
-			maxChildAgents: 4,
 		});
+		expect(securityReviewer?.maxSubagentDepth).toBeUndefined();
+		expect(securityReviewer?.maxChildAgents).toBeUndefined();
 		expect(securityReviewer?.tools).toContain("subagent");
 		expect(securityReviewer?.tools).not.toContain("bash");
 		expect(securityReviewer?.tools).not.toContain("lsp");

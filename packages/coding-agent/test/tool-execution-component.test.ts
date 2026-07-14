@@ -517,7 +517,7 @@ describe("ToolExecutionComponent parity", () => {
 				details: {
 					mode: "parallel",
 					status: "partial",
-					summary: { total: 2, completed: 1, failed: 1, aborted: 0, maxTasks: 8, maxConcurrency: 4 },
+					summary: { total: 2, completed: 1, failed: 1, aborted: 0, maxConcurrency: 4 },
 					tasks: [
 						{
 							index: 0,
@@ -582,7 +582,7 @@ describe("ToolExecutionComponent parity", () => {
 				details: {
 					mode: "parallel",
 					status: "running",
-					summary: { total: 2, completed: 0, failed: 0, aborted: 0, running: 2, maxTasks: 8, maxConcurrency: 4 },
+					summary: { total: 2, completed: 0, failed: 0, aborted: 0, running: 2, maxConcurrency: 4 },
 					startedAt: Date.now() - 65_000,
 					tasks: [
 						{

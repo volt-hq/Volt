@@ -693,16 +693,7 @@ function projectIrohRemoteSubagentSummary(value: unknown): Record<string, number
 		return undefined;
 	}
 	const projected: Record<string, number> = {};
-	for (const key of [
-		"total",
-		"completed",
-		"failed",
-		"aborted",
-		"running",
-		"maxTasks",
-		"maxConcurrency",
-		"stoppedAt",
-	]) {
+	for (const key of ["total", "completed", "failed", "aborted", "running", "maxConcurrency", "stoppedAt"]) {
 		const numberValue = getIrohRemoteFiniteNumber(value[key]);
 		if (numberValue !== undefined) {
 			projected[key] = numberValue;

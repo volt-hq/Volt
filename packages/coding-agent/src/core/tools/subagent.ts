@@ -24,9 +24,7 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 export const DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES = 50 * 1024;
 export const DEFAULT_SUBAGENT_AGGREGATE_OUTPUT_MAX_BYTES = 100 * 1024;
-export const DEFAULT_SUBAGENT_PARALLEL_MAX_TASKS = 8;
 export const DEFAULT_SUBAGENT_PARALLEL_MAX_CONCURRENCY = 4;
-export const DEFAULT_SUBAGENT_CHAIN_MAX_STEPS = 8;
 export const SUBAGENT_TREE_MAX_DEPTH = 5;
 export const SUBAGENT_TREE_MAX_CHILDREN = 16;
 const SUBAGENT_TREE_TASK_PREVIEW_CHARS = 200;
@@ -51,14 +49,12 @@ function createSubagentSchema(availableNames?: readonly string[]) {
 			Type.Array(subagentTaskSchema, {
 				description: "Parallel mode tasks. Each item is { agent, task }.",
 				minItems: 1,
-				maxItems: DEFAULT_SUBAGENT_PARALLEL_MAX_TASKS,
 			}),
 		),
 		chain: Type.Optional(
 			Type.Array(subagentTaskSchema, {
 				description: "Chain mode steps. Each item is { agent, task }; task may include {previous}.",
 				minItems: 1,
-				maxItems: DEFAULT_SUBAGENT_CHAIN_MAX_STEPS,
 			}),
 		),
 	});
@@ -205,7 +201,6 @@ export interface SubagentToolDetails {
 		failed: number;
 		aborted: number;
 		running?: number;
-		maxTasks?: number;
 		maxConcurrency?: number;
 		stoppedAt?: number;
 	};
@@ -833,12 +828,7 @@ function summarizeTaskDetails(
 		failed,
 		aborted,
 		...(running > 0 ? { running } : {}),
-		...(options.includeParallelLimits
-			? {
-					maxTasks: DEFAULT_SUBAGENT_PARALLEL_MAX_TASKS,
-					maxConcurrency: DEFAULT_SUBAGENT_PARALLEL_MAX_CONCURRENCY,
-				}
-			: {}),
+		...(options.includeParallelLimits ? { maxConcurrency: DEFAULT_SUBAGENT_PARALLEL_MAX_CONCURRENCY } : {}),
 		...(options.stoppedAt !== undefined ? { stoppedAt: options.stoppedAt } : {}),
 	};
 }
@@ -1038,11 +1028,6 @@ function normalizeSubagentToolInput(params: SubagentToolInput): NormalizedSubage
 		if (!params.tasks || params.tasks.length === 0) {
 			throw new Error("Invalid subagent input: parallel mode requires at least one task.");
 		}
-		if (params.tasks.length > DEFAULT_SUBAGENT_PARALLEL_MAX_TASKS) {
-			throw new Error(
-				`Too many parallel subagent tasks (${params.tasks.length}). Max is ${DEFAULT_SUBAGENT_PARALLEL_MAX_TASKS}.`,
-			);
-		}
 
 		return {
 			mode: "parallel",
@@ -1058,11 +1043,6 @@ function normalizeSubagentToolInput(params: SubagentToolInput): NormalizedSubage
 
 	if (!params.chain || params.chain.length === 0) {
 		throw new Error("Invalid subagent input: chain mode requires at least one step.");
-	}
-	if (params.chain.length > DEFAULT_SUBAGENT_CHAIN_MAX_STEPS) {
-		throw new Error(
-			`Too many chain subagent steps (${params.chain.length}). Max is ${DEFAULT_SUBAGENT_CHAIN_MAX_STEPS}.`,
-		);
 	}
 
 	return {
@@ -1534,8 +1514,8 @@ export function createSubagentToolDefinition(
 			availableSummary,
 			"User and project definitions may add custom names; built-in names are reserved.",
 			"Modes: single { agent, task }, parallel { tasks: [{ agent, task }, ...] }, or chain { chain: [{ agent, task }, ...] }.",
-			`Parallel mode runs up to ${DEFAULT_SUBAGENT_PARALLEL_MAX_TASKS} tasks with max concurrency ${DEFAULT_SUBAGENT_PARALLEL_MAX_CONCURRENCY}.`,
-			`Chain mode runs up to ${DEFAULT_SUBAGENT_CHAIN_MAX_STEPS} steps sequentially, replacing {previous} with bounded XML-escaped untrusted prior output and stopping at the first failed step.`,
+			`Parallel mode runs any number of tasks with max concurrency ${DEFAULT_SUBAGENT_PARALLEL_MAX_CONCURRENCY}.`,
+			"Chain mode runs steps sequentially, replacing {previous} with bounded XML-escaped untrusted prior output and stopping at the first failed step.",
 			"Child subagent tools are clamped to the current parent/session tool policy.",
 		].join(" "),
 		promptSnippet: "Delegate tasks to named isolated subagents",

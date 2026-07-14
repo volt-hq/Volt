@@ -29,10 +29,8 @@ import {
 import {
 	createSubagentTool,
 	createSubagentToolDefinition,
-	DEFAULT_SUBAGENT_CHAIN_MAX_STEPS,
 	DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES,
 	DEFAULT_SUBAGENT_PARALLEL_MAX_CONCURRENCY,
-	DEFAULT_SUBAGENT_PARALLEL_MAX_TASKS,
 	type SubagentToolDetails,
 	type SubagentToolManager,
 } from "../src/core/tools/index.ts";
@@ -1582,34 +1580,6 @@ describe("subagent tool", () => {
 		).rejects.toThrow(/exactly one mode/);
 		await expect(tool.execute("call-1", { tasks: [] })).rejects.toThrow(/at least one task/);
 		await expect(tool.execute("call-1", { chain: [] })).rejects.toThrow(/at least one step/);
-	});
-
-	it("rejects parallel task lists above the maximum", async () => {
-		const manager = {
-			getDefinition: () => createDefinition("scout"),
-			startByName: async () => createCompletedHandle("unused"),
-		} satisfies SubagentToolManager;
-		const tool = createSubagentTool(process.cwd(), { manager });
-		const tasks = Array.from({ length: DEFAULT_SUBAGENT_PARALLEL_MAX_TASKS + 1 }, (_value, index) => ({
-			agent: "scout",
-			task: `task-${index}`,
-		}));
-
-		await expect(tool.execute("call-1", { tasks })).rejects.toThrow(`Max is ${DEFAULT_SUBAGENT_PARALLEL_MAX_TASKS}`);
-	});
-
-	it("rejects chain step lists above the maximum", async () => {
-		const manager = {
-			getDefinition: () => createDefinition("scout"),
-			startByName: async () => createCompletedHandle("unused"),
-		} satisfies SubagentToolManager;
-		const tool = createSubagentTool(process.cwd(), { manager });
-		const chain = Array.from({ length: DEFAULT_SUBAGENT_CHAIN_MAX_STEPS + 1 }, (_value, index) => ({
-			agent: "scout",
-			task: `step-${index}`,
-		}));
-
-		await expect(tool.execute("call-1", { chain })).rejects.toThrow(`Max is ${DEFAULT_SUBAGENT_CHAIN_MAX_STEPS}`);
 	});
 
 	it("throws for unknown agents and is reported as a tool error", async () => {
