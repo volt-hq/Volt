@@ -1584,6 +1584,10 @@ describe("subagent tool", () => {
 			/exactly one mode/,
 		);
 		await expect(tool.execute("call-1", { list: false })).rejects.toThrow(/list mode requires/);
+		await expect(tool.execute("call-1", { list: true, offset: -1 })).rejects.toThrow(/non-negative safe integer/);
+		await expect(tool.execute("call-1", { agent: "scout", task: "single", offset: 1 })).rejects.toThrow(
+			/offset is only valid/,
+		);
 		await expect(tool.execute("call-1", { follow: "  " })).rejects.toThrow(/non-empty subagent run id/);
 	});
 
@@ -1630,6 +1634,48 @@ describe("subagent tool", () => {
 			status: "completed",
 			summary: { total: 2, completed: 1, failed: 0, aborted: 0, running: 1 },
 		});
+	});
+
+	it("paginates registry listings within the aggregate byte limit", async () => {
+		const records = Array.from({ length: 120 }, (_, index) => ({
+			id: `sa_${String(index).padStart(3, "0")}`,
+			agent: { name: "researcher", source: "built-in" as const },
+			path: ["researcher"],
+			task: `task ${index} ${"界".repeat(300)}`,
+			status: "completed" as const,
+			startedAt: 1_000 + index,
+			finishedAt: 2_000 + index,
+		}));
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			startByName: async () => createCompletedHandle("unused"),
+			listDelegations: () => records,
+		} satisfies SubagentToolManager;
+
+		const defaultTool = createSubagentTool(process.cwd(), { manager });
+		const defaultPage = await defaultTool.execute("call-default", { list: true });
+		expect(defaultPage.details.summary).toMatchObject({ offset: 0, returned: 50, nextOffset: 50 });
+
+		const boundedTool = createSubagentTool(process.cwd(), { manager, maxAggregateOutputBytes: 2_000 });
+		const firstPage = await boundedTool.execute("call-first", { list: true });
+		const firstText = textFromResult(firstPage);
+		expect(Buffer.byteLength(firstText, "utf8")).toBeLessThanOrEqual(2_000);
+		expect(firstText).toContain("\nsa_000 researcher completed");
+		const returned = firstPage.details.summary?.returned;
+		const nextOffset = firstPage.details.summary?.nextOffset;
+		expect(returned).toBeGreaterThan(0);
+		expect(returned).toBeLessThan(50);
+		expect(nextOffset).toBe(returned);
+		if (nextOffset === undefined) {
+			throw new Error("expected another registry page");
+		}
+		expect(firstText).toContain(`{ "list": true, "offset": ${nextOffset} }`);
+
+		const secondPage = await boundedTool.execute("call-second", { list: true, offset: nextOffset });
+		const secondText = textFromResult(secondPage);
+		expect(Buffer.byteLength(secondText, "utf8")).toBeLessThanOrEqual(2_000);
+		expect(secondText).toContain(`\nsa_${String(nextOffset).padStart(3, "0")} researcher completed`);
+		expect(secondPage.details.summary).toMatchObject({ offset: nextOffset });
 	});
 
 	it("follows an existing run and returns its result", async () => {

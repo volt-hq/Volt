@@ -281,6 +281,57 @@ describe("RPC transcript projection", () => {
 		expect(JSON.stringify(transcript)).not.toContain("model-visible child output");
 	});
 
+	test("projects subagent list pagination arguments and summary", () => {
+		const session = SessionManager.inMemory("/workspace");
+		session.appendMessage(
+			assistant(
+				[
+					{
+						type: "toolCall",
+						id: "subagent-list-call",
+						name: "subagent",
+						arguments: { list: true, offset: 50 },
+					},
+				],
+				20,
+			),
+		);
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "subagent-list-call",
+			toolName: "subagent",
+			content: [{ type: "text", text: "page output" }],
+			details: {
+				mode: "list",
+				status: "completed",
+				summary: {
+					total: 120,
+					completed: 100,
+					failed: 10,
+					aborted: 5,
+					running: 5,
+					offset: 50,
+					returned: 50,
+					nextOffset: 100,
+				},
+			},
+			isError: false,
+			timestamp: 30,
+		} as Parameters<typeof session.appendMessage>[0]);
+
+		const transcript = projectSessionTranscript(session);
+		const toolItem = transcript.items.find((item) => item.role === "tool");
+		expect(toolItem).toMatchObject({
+			toolName: "subagent",
+			args: { list: true, offset: 50 },
+			details: {
+				mode: "list",
+				status: "completed",
+				summary: { total: 120, offset: 50, returned: 50, nextOffset: 100 },
+			},
+		});
+	});
+
 	test("projects nested subagent delegation trees with live fields and a bounded depth", () => {
 		const session = SessionManager.inMemory("/workspace");
 		session.appendMessage(

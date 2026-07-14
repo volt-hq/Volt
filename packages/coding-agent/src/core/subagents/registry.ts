@@ -52,6 +52,8 @@ interface SubagentRegistryEntry {
 const REGISTRY_TASK_LIMIT_CHARS = 2_000;
 const REGISTRY_OUTPUT_LIMIT_CHARS = 50_000;
 const REGISTRY_ERROR_LIMIT_CHARS = 4_000;
+const REGISTRY_ID_PREVIEW_LIMIT_CHARS = 120;
+const REGISTRY_KNOWN_ID_PREVIEW_LIMIT = 20;
 const MAX_REGISTRY_RECORDS = 500;
 /** Node key representing the root session in the wait-dependency graph. */
 const ROOT_NODE = "root";
@@ -153,10 +155,15 @@ export class SubagentRegistry {
 		const entry = this.entries.get(targetId);
 		if (!entry) {
 			const known = Array.from(this.entries.keys());
+			const shown = known
+				.slice(0, REGISTRY_KNOWN_ID_PREVIEW_LIMIT)
+				.map((id) => boundText(id, REGISTRY_ID_PREVIEW_LIMIT_CHARS));
+			const omitted = known.length - shown.length;
+			const targetPreview = boundText(targetId, REGISTRY_ID_PREVIEW_LIMIT_CHARS);
 			throw new Error(
 				known.length > 0
-					? `Subagent run "${targetId}" is not in the delegation registry. Known runs: ${known.join(", ")}.`
-					: `Subagent run "${targetId}" is not in the delegation registry. No runs have been recorded yet.`,
+					? `Subagent run "${targetPreview}" is not in the delegation registry. Known runs: ${shown.join(", ")}${omitted > 0 ? ` (${omitted} more omitted)` : ""}.`
+					: `Subagent run "${targetPreview}" is not in the delegation registry. No runs have been recorded yet.`,
 			);
 		}
 		if (entry.status !== "running") {

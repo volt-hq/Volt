@@ -236,10 +236,10 @@ Supported MVP modes:
 - Single: `{ "agent": "scout", "task": "Find auth code" }`
 - Parallel: `{ "tasks": [{ "agent": "scout", "task": "..." }] }`
 - Chain: `{ "chain": [{ "agent": "scout", "task": "... {previous}" }] }`
-- List: `{ "list": true }` — every delegated run in the session-wide registry
+- List: `{ "list": true }` or `{ "list": true, "offset": 50 }` — a bounded page of delegated runs in the session-wide registry
 - Follow: `{ "follow": "sa_..." }` — an existing run's result, waiting while it is still running
 
-The session-wide registry (`SubagentRegistry`) is owned by the root session's manager and shared with every descendant runtime through the subagent context, alongside the delegation scope. Each start records id, parent id, agent, path, bounded task prompt, and status; terminal transitions attach the bounded final assistant output. This gives sideways visibility that the parent/child activity ledgers cannot: any branch can discover cousin runs and follow their results instead of duplicating work. Follow waits are deadlock-checked against a dependency graph of parent-awaits-child edges plus active follow edges; waits that close a cycle (following an ancestor, mutual sibling follows) are rejected. Terminal records are evicted oldest-first past a cap; running records are never evicted. Definition-backed children whose policy allows delegation additionally receive a bounded start-time snapshot of recorded runs as system prompt context (skipped when the registry is empty or the child cannot delegate), so registry awareness does not depend on the child thinking to call list.
+The session-wide registry (`SubagentRegistry`) is owned by the root session's manager and shared with every descendant runtime through the subagent context, alongside the delegation scope. Each start records id, parent id, agent, path, bounded task prompt, and status; terminal transitions attach the bounded final assistant output. This gives sideways visibility that the parent/child activity ledgers cannot: any branch can discover cousin runs and follow their results instead of duplicating work. Follow waits are deadlock-checked against a dependency graph of parent-awaits-child edges plus active follow edges; waits that close a cycle (following an ancestor, mutual sibling follows) are rejected. Terminal records are evicted oldest-first past a cap; running records are never evicted. List results return up to 50 complete rows within the aggregate byte limit and include the next offset when more records remain. Definition-backed children whose policy allows delegation additionally receive a bounded start-time snapshot of recorded runs as system prompt context (skipped when the registry is empty or the child cannot delegate), so registry awareness does not depend on the child thinking to call list.
 
 The tool result returns:
 
@@ -250,7 +250,7 @@ The tool result returns:
 - bounded transcript/tool summary
 - usage and cost when available
 
-Model-visible output is capped at 50 KB per task/step and parallel results have an additional 100 KB aggregate cap. Chain `{previous}` substitution uses that bounded output, XML-escapes it, and wraps it as untrusted prior data instead of forwarding raw child text. Delegation tool calls have no automatic deadline; SDK callers may opt into a call-specific `runTimeoutMs`, and users or parents can cancel explicitly. Full child output remains in child session state when available; tool details include status, usage, truncation, error metadata, and a final snapshot of tree-wide accounting.
+Model-visible output is capped at 50 KB per task/step, while parallel results and registry list pages have a 100 KB aggregate cap. Chain `{previous}` substitution uses that bounded output, XML-escapes it, and wraps it as untrusted prior data instead of forwarding raw child text. Delegation tool calls have no automatic deadline; SDK callers may opt into a call-specific `runTimeoutMs`, and users or parents can cancel explicitly. Full child output remains in child session state when available; tool details include status, usage, truncation, error metadata, and a final snapshot of tree-wide accounting.
 
 ## Public RPC surface
 

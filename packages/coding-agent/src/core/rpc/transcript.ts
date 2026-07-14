@@ -406,6 +406,9 @@ function projectSubagentArgs(args: Record<string, unknown> | undefined): Record<
 	if (chain) {
 		projected.chain = chain;
 	}
+	copyBooleanArg(args, projected, "list");
+	copyNumberArg(args, projected, "offset");
+	copyStringArg(args, projected, "follow", SUBAGENT_ID_LIMIT);
 	return Object.keys(projected).length > 0 ? projected : undefined;
 }
 
@@ -490,7 +493,18 @@ function projectSubagentSummary(value: unknown): Record<string, number> | undefi
 		return undefined;
 	}
 	const projected: Record<string, number> = {};
-	for (const key of ["total", "completed", "failed", "aborted", "running", "maxConcurrency", "stoppedAt"]) {
+	for (const key of [
+		"total",
+		"completed",
+		"failed",
+		"aborted",
+		"running",
+		"maxConcurrency",
+		"stoppedAt",
+		"offset",
+		"returned",
+		"nextOffset",
+	]) {
 		const numberValue = getFiniteNumber(value, key);
 		if (numberValue !== undefined) {
 			projected[key] = numberValue;

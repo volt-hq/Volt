@@ -105,6 +105,17 @@ describe("SubagentRegistry", () => {
 		);
 	});
 
+	it("bounds known run ids in unknown-run errors", async () => {
+		const registry = new SubagentRegistry();
+		for (let index = 0; index < 30; index += 1) {
+			registerRunning(registry, `sa_${index}`);
+		}
+
+		const following = registry.follow(undefined, "sa_missing");
+		await expect(following).rejects.toThrow("sa_19 (10 more omitted)");
+		await expect(following).rejects.not.toThrow("sa_20");
+	});
+
 	it("refuses to follow a running ancestor", async () => {
 		const registry = new SubagentRegistry();
 		registerRunning(registry, "sa_parent");
