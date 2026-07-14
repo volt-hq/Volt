@@ -690,7 +690,7 @@ describe("SubagentManager", () => {
 		});
 	});
 
-	it("normalizes an aborted retry candidate as terminal after settlement", async () => {
+	it("records an explicitly aborted retry candidate as aborted after settlement", async () => {
 		const retryStarted = createDeferred();
 		const agentEnds: SubagentEndEvent[] = [];
 		const { manager } = await createTestManager({
@@ -727,6 +727,15 @@ describe("SubagentManager", () => {
 			stopReason: "error",
 			errorMessage: "overloaded_error",
 		});
+
+		const activity = manager.listActivities().find((candidate) => candidate.id === handle.id);
+		expect(activity).toMatchObject({ id: handle.id, status: "aborted", abortRequested: true });
+		expect(activity?.error).toBeUndefined();
+
+		const registryRecord = manager.listDelegations().find((candidate) => candidate.id === handle.id);
+		expect(registryRecord).toMatchObject({ id: handle.id, status: "aborted" });
+		expect(registryRecord?.error).toBeUndefined();
+		await expect(manager.followDelegation(handle.id)).resolves.toMatchObject({ id: handle.id, status: "aborted" });
 	});
 
 	it("starts by definition name and applies the definition body as child prompt context", async () => {

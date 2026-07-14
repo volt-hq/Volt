@@ -233,10 +233,16 @@ function getFinalAssistantText(event: SubagentEndEvent): string | undefined {
 	return undefined;
 }
 
-function getTerminalActivityResult(event: SubagentEndEvent): {
+function getTerminalActivityResult(
+	event: SubagentEndEvent,
+	abortRequested: boolean,
+): {
 	status: Extract<SubagentActivityStatus, "completed" | "failed" | "aborted">;
 	error?: string;
 } {
+	if (abortRequested) {
+		return { status: "aborted" };
+	}
 	for (let index = event.messages.length - 1; index >= 0; index -= 1) {
 		const message = event.messages[index];
 		if (!message || message.role !== "assistant") {
@@ -902,7 +908,10 @@ export class SubagentManager {
 			this.handles.set(id, handle);
 			void handle.waitForEnd().then(
 				(result) => {
-					const terminal = getTerminalActivityResult(result.event);
+					const terminal = getTerminalActivityResult(
+						result.event,
+						this.activities.get(id)?.abortRequested === true,
+					);
 					this.finishActivity(id, terminal.status, terminal.error);
 					const output = getFinalAssistantText(result.event);
 					this.getRegistry().complete(id, terminal.status, {
