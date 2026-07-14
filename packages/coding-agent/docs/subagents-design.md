@@ -236,6 +236,10 @@ Supported MVP modes:
 - Single: `{ "agent": "scout", "task": "Find auth code" }`
 - Parallel: `{ "tasks": [{ "agent": "scout", "task": "..." }] }`
 - Chain: `{ "chain": [{ "agent": "scout", "task": "... {previous}" }] }`
+- List: `{ "list": true }` — every delegated run in the session-wide registry
+- Follow: `{ "follow": "sa_..." }` — an existing run's result, waiting while it is still running
+
+The session-wide registry (`SubagentRegistry`) is owned by the root session's manager and shared with every descendant runtime through the subagent context, alongside the delegation scope. Each start records id, parent id, agent, path, bounded task prompt, and status; terminal transitions attach the bounded final assistant output. This gives sideways visibility that the parent/child activity ledgers cannot: any branch can discover cousin runs and follow their results instead of duplicating work. Follow waits are deadlock-checked against a dependency graph of parent-awaits-child edges plus active follow edges; waits that close a cycle (following an ancestor, mutual sibling follows) are rejected. Terminal records are evicted oldest-first past a cap; running records are never evicted.
 
 The tool result returns:
 

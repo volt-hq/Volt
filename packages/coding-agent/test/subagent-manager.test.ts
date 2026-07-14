@@ -26,6 +26,7 @@ import {
 	SubagentDelegationScope,
 	type SubagentEndEvent,
 	SubagentManager,
+	SubagentRegistry,
 	type SubagentRuntimeCreatedEvent,
 } from "../src/core/subagents/index.ts";
 import { createTestResourceLoader } from "./utilities.ts";
@@ -97,6 +98,18 @@ describe("SubagentManager", () => {
 		const scope = new SubagentDelegationScope();
 		cleanups.push(() => scope.dispose());
 		return scope;
+	};
+
+	let testSubagentContextCounter = 0;
+	const createTestSubagentContext = (
+		context: Omit<SubagentRuntimeContext, "subagentId" | "registry">,
+	): SubagentRuntimeContext => {
+		testSubagentContextCounter += 1;
+		return {
+			subagentId: `sa_test-${testSubagentContextCounter}`,
+			registry: new SubagentRegistry(),
+			...context,
+		};
 	};
 
 	afterEach(async () => {
@@ -823,8 +836,10 @@ describe("SubagentManager", () => {
 			{
 				depth: 1,
 				agentName: "researcher",
+				subagentId: expect.stringMatching(/^sa_/),
 				path: ["researcher"],
 				delegationScope,
+				registry: expect.any(SubagentRegistry),
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 3,
 				maxChildAgents: 2,
@@ -935,7 +950,7 @@ describe("SubagentManager", () => {
 		]);
 		const { manager } = await createTestManager({
 			resourceLoader,
-			subagentContext: {
+			subagentContext: createTestSubagentContext({
 				depth: 1,
 				agentName: "design-doc",
 				path: ["design-doc"],
@@ -943,7 +958,7 @@ describe("SubagentManager", () => {
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 3,
 				maxChildAgents: 8,
-			},
+			}),
 			onCreateRuntime: (context) => {
 				observedContexts.push(context);
 			},
@@ -956,8 +971,10 @@ describe("SubagentManager", () => {
 			{
 				depth: 2,
 				agentName: "researcher",
+				subagentId: expect.stringMatching(/^sa_/),
 				path: ["design-doc", "researcher"],
 				delegationScope,
+				registry: expect.any(SubagentRegistry),
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 3,
 				maxChildAgents: 2,
@@ -983,7 +1000,7 @@ describe("SubagentManager", () => {
 		]);
 		const { manager } = await createTestManager({
 			resourceLoader,
-			subagentContext: {
+			subagentContext: createTestSubagentContext({
 				depth: 1,
 				agentName: "design-doc",
 				path: ["design-doc"],
@@ -991,7 +1008,7 @@ describe("SubagentManager", () => {
 				allowedSubagents: ["researcher", "analyst"],
 				maxSubagentDepth: 2,
 				maxChildAgents: 8,
-			},
+			}),
 			onCreateRuntime: (context) => {
 				observedContexts.push(context);
 			},
@@ -1006,8 +1023,10 @@ describe("SubagentManager", () => {
 			{
 				depth: 2,
 				agentName: "researcher",
+				subagentId: expect.stringMatching(/^sa_/),
 				path: ["design-doc", "researcher"],
 				delegationScope,
+				registry: expect.any(SubagentRegistry),
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 2,
 				maxChildAgents: 2,
@@ -1015,8 +1034,10 @@ describe("SubagentManager", () => {
 			{
 				depth: 2,
 				agentName: "analyst",
+				subagentId: expect.stringMatching(/^sa_/),
 				path: ["design-doc", "analyst"],
 				delegationScope,
+				registry: expect.any(SubagentRegistry),
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 2,
 				maxChildAgents: 2,
@@ -1026,6 +1047,83 @@ describe("SubagentManager", () => {
 		await analyst.dispose();
 	});
 
+	it("records delegated runs in the session-wide registry and shares results with descendants", async () => {
+		const observedContexts: Array<SubagentRuntimeContext | undefined> = [];
+		const resourceLoader = createSubagentResourceLoader([
+			createDefinition({ name: "researcher", allowedSubagents: ["researcher"] }),
+		]);
+		const { manager } = await createTestManager({
+			resourceLoader,
+			responseText: "registry result",
+			onCreateRuntime: (context) => observedContexts.push(context),
+		});
+
+		const handle = await manager.startByName("researcher");
+		const completion = handle.waitForEnd();
+		await handle.prompt("research file x");
+		await completion;
+
+		const records = manager.listDelegations();
+		expect(records).toHaveLength(1);
+		expect(records[0]).toMatchObject({
+			agent: { name: "researcher", source: "user" },
+			path: ["researcher"],
+			task: "research file x",
+			status: "completed",
+		});
+		expect(records[0]?.parentId).toBeUndefined();
+
+		const followed = await manager.followDelegation(records[0]?.id ?? "");
+		expect(followed.status).toBe("completed");
+		expect(followed.output).toBe("registry result");
+
+		// The child runtime shares the root manager's registry through its context.
+		expect(observedContexts[0]?.registry.list().map((record) => record.id)).toEqual([records[0]?.id]);
+		await handle.dispose();
+	});
+
+	it("records nested starts into the inherited registry with the parent id", async () => {
+		const resourceLoader = createSubagentResourceLoader([
+			createDefinition({ name: "researcher", allowedSubagents: ["researcher"] }),
+		]);
+		const context = createTestSubagentContext({
+			depth: 1,
+			agentName: "researcher",
+			path: ["researcher"],
+			delegationScope: createTestDelegationScope(),
+			allowedSubagents: ["researcher"],
+		});
+		const { manager } = await createTestManager({ resourceLoader, subagentContext: context });
+
+		const handle = await manager.startByName("researcher");
+		const completion = handle.waitForEnd();
+		await handle.prompt("nested research");
+		await completion;
+
+		const records = context.registry.list();
+		expect(records).toHaveLength(1);
+		expect(records[0]).toMatchObject({
+			parentId: context.subagentId,
+			path: ["researcher", "researcher"],
+			task: "nested research",
+			status: "completed",
+		});
+		expect(manager.listDelegations()).toEqual(records);
+		await handle.dispose();
+	});
+
+	it("records disposed-before-completion runs as aborted in the registry", async () => {
+		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
+		const { manager } = await createTestManager({ resourceLoader });
+
+		const handle = await manager.startByName("researcher");
+		await handle.dispose();
+
+		expect(manager.listDelegations()).toEqual([
+			expect.objectContaining({ agent: { name: "researcher", source: "user" }, status: "aborted" }),
+		]);
+	});
+
 	it("lists only definitions allowed by the current delegation policy", async () => {
 		const resourceLoader = createSubagentResourceLoader([
 			createDefinition({ name: "researcher" }),
@@ -1033,7 +1131,7 @@ describe("SubagentManager", () => {
 		]);
 		const { manager } = await createTestManager({
 			resourceLoader,
-			subagentContext: {
+			subagentContext: createTestSubagentContext({
 				depth: 1,
 				agentName: "researcher",
 				path: ["researcher"],
@@ -1041,7 +1139,7 @@ describe("SubagentManager", () => {
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 3,
 				maxChildAgents: 2,
-			},
+			}),
 		});
 
 		expect(manager.listAvailableDefinitions().map((definition) => definition.name)).toEqual(["researcher"]);
@@ -1052,7 +1150,7 @@ describe("SubagentManager", () => {
 		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
 		const { manager } = await createTestManager({
 			resourceLoader,
-			subagentContext: {
+			subagentContext: createTestSubagentContext({
 				depth: 2,
 				agentName: "researcher",
 				path: ["researcher", "researcher"],
@@ -1060,7 +1158,7 @@ describe("SubagentManager", () => {
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 2,
 				maxChildAgents: 2,
-			},
+			}),
 		});
 
 		expect(manager.listAvailableDefinitions()).toEqual([]);
@@ -1074,7 +1172,7 @@ describe("SubagentManager", () => {
 		]);
 		const { manager } = await createTestManager({
 			resourceLoader,
-			subagentContext: {
+			subagentContext: createTestSubagentContext({
 				depth: 1,
 				agentName: "security-reviewer",
 				path: ["security-reviewer"],
@@ -1082,7 +1180,7 @@ describe("SubagentManager", () => {
 				allowedSubagents: ["approved-child"],
 				maxSubagentDepth: 3,
 				maxChildAgents: 2,
-			},
+			}),
 		});
 
 		await expect(manager.startByName("researcher")).rejects.toThrow("Allowed subagents: approved-child");
@@ -1092,7 +1190,7 @@ describe("SubagentManager", () => {
 
 	it("blocks unnamed delegated child runtimes from subagent contexts", async () => {
 		const { manager } = await createTestManager({
-			subagentContext: {
+			subagentContext: createTestSubagentContext({
 				depth: 1,
 				agentName: "researcher",
 				path: ["researcher"],
@@ -1100,7 +1198,7 @@ describe("SubagentManager", () => {
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 3,
 				maxChildAgents: 2,
-			},
+			}),
 		});
 
 		await expect(manager.start()).rejects.toThrow("cannot start unnamed child subagents");
@@ -1110,14 +1208,14 @@ describe("SubagentManager", () => {
 		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
 		const { manager } = await createTestManager({
 			resourceLoader,
-			subagentContext: {
+			subagentContext: createTestSubagentContext({
 				depth: 1,
 				agentName: "general",
 				path: ["general"],
 				delegationScope: createTestDelegationScope(),
 				allowedSubagents: [],
 				maxChildAgents: 0,
-			},
+			}),
 		});
 
 		await expect(manager.startByName("researcher")).rejects.toThrow("no child subagents are allowed");
@@ -1127,7 +1225,7 @@ describe("SubagentManager", () => {
 		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
 		const { manager } = await createTestManager({
 			resourceLoader,
-			subagentContext: {
+			subagentContext: createTestSubagentContext({
 				depth: 2,
 				agentName: "researcher",
 				path: ["design-doc", "researcher"],
@@ -1135,7 +1233,7 @@ describe("SubagentManager", () => {
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 2,
 				maxChildAgents: 2,
-			},
+			}),
 		});
 
 		await expect(manager.startByName("researcher")).rejects.toThrow("maxSubagentDepth 2 reached");
@@ -1145,7 +1243,7 @@ describe("SubagentManager", () => {
 		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
 		const { manager } = await createTestManager({
 			resourceLoader,
-			subagentContext: {
+			subagentContext: createTestSubagentContext({
 				depth: 1,
 				agentName: "researcher",
 				path: ["researcher"],
@@ -1153,7 +1251,7 @@ describe("SubagentManager", () => {
 				allowedSubagents: ["researcher"],
 				maxSubagentDepth: 3,
 				maxChildAgents: 1,
-			},
+			}),
 		});
 
 		const handle = await manager.startByName("researcher");

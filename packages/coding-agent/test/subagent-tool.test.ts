@@ -1580,6 +1580,101 @@ describe("subagent tool", () => {
 		).rejects.toThrow(/exactly one mode/);
 		await expect(tool.execute("call-1", { tasks: [] })).rejects.toThrow(/at least one task/);
 		await expect(tool.execute("call-1", { chain: [] })).rejects.toThrow(/at least one step/);
+		await expect(tool.execute("call-1", { list: true, agent: "scout", task: "single" })).rejects.toThrow(
+			/exactly one mode/,
+		);
+		await expect(tool.execute("call-1", { list: false })).rejects.toThrow(/list mode requires/);
+		await expect(tool.execute("call-1", { follow: "  " })).rejects.toThrow(/non-empty subagent run id/);
+	});
+
+	it("lists the session-wide delegation registry", async () => {
+		const now = Date.now();
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			startByName: async () => createCompletedHandle("unused"),
+			listDelegations: () => [
+				{
+					id: "sa_live",
+					parentId: "sa_done",
+					agent: { name: "researcher", source: "built-in" as const },
+					path: ["researcher", "researcher"],
+					task: "research file y",
+					status: "running" as const,
+					startedAt: now - 2_000,
+				},
+				{
+					id: "sa_done",
+					agent: { name: "researcher", source: "built-in" as const },
+					path: ["researcher"],
+					task: "research file x",
+					status: "completed" as const,
+					startedAt: now - 10_000,
+					finishedAt: now - 4_000,
+				},
+			],
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager });
+
+		const result = await tool.execute("call-1", { list: true });
+		const text = result.content
+			.filter((part): part is Extract<(typeof result.content)[number], { type: "text" }> => part.type === "text")
+			.map((part) => part.text)
+			.join("\n");
+		expect(text).toContain("2 subagent runs recorded in this session");
+		expect(text).toContain("sa_live researcher running");
+		expect(text).toContain("parent: sa_done) — research file y");
+		expect(text).toContain("parent: root) — research file x");
+		expect(text).toContain('{ "follow": "<id>" }');
+		expect(result.details).toMatchObject({
+			mode: "list",
+			status: "completed",
+			summary: { total: 2, completed: 1, failed: 0, aborted: 0, running: 1 },
+		});
+	});
+
+	it("follows an existing run and returns its result", async () => {
+		const followRequests: string[] = [];
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			startByName: async () => createCompletedHandle("unused"),
+			followDelegation: async (subagentId: string) => {
+				followRequests.push(subagentId);
+				return {
+					id: subagentId,
+					agent: { name: "researcher", source: "built-in" as const },
+					task: "research file x",
+					status: "completed" as const,
+					output: "shared research result",
+					startedAt: 1_000,
+					finishedAt: 5_000,
+				};
+			},
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager });
+
+		const result = await tool.execute("call-1", { follow: "sa_done" });
+		expect(followRequests).toEqual(["sa_done"]);
+		expect(result.content).toEqual([{ type: "text", text: "shared research result" }]);
+		expect(result.details).toMatchObject({
+			mode: "follow",
+			status: "completed",
+			subagentId: "sa_done",
+			agent: { name: "researcher", source: "built-in" },
+			startedAt: 1_000,
+			durationMs: 4_000,
+		});
+		expect(result.details.output).toMatchObject({ text: "shared research result", truncated: false });
+	});
+
+	it("errors when the delegation registry is unavailable", async () => {
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			startByName: async () => createCompletedHandle("unused"),
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager });
+
+		await expect(tool.execute("call-1", { list: true })).rejects.toThrow("registry is not available");
+		await expect(tool.execute("call-1", { follow: "sa_x" })).rejects.toThrow("registry is not available");
 	});
 
 	it("throws for unknown agents and is reported as a tool error", async () => {

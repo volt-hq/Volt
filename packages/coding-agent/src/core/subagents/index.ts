@@ -482,7 +482,6 @@ export {
 	type SubagentDelegationScopeOptions,
 	type SubagentDelegationScopeSnapshot,
 } from "./delegation-scope.ts";
-
 export {
 	type SubagentActivity,
 	type SubagentActivityEvent,
@@ -502,3 +501,9 @@ export {
 	type SubagentStartByNameOptions,
 	type SubagentStartOptions,
 } from "./manager.ts";
+export {
+	type SubagentFollowResult,
+	SubagentRegistry,
+	type SubagentRegistryRecord,
+	type SubagentRegistryStatus,
+} from "./registry.ts";

@@ -14,7 +14,9 @@ import type {
 	SubagentDelegationScopeOptions,
 	SubagentDelegationScopeSnapshot,
 	SubagentEvent,
+	SubagentFollowResult,
 	SubagentHandle,
+	SubagentRegistryRecord,
 	SubagentResult,
 	SubagentStartByNameOptions,
 } from "../subagents/index.ts";
@@ -57,6 +59,17 @@ function createSubagentSchema(availableNames?: readonly string[]) {
 				minItems: 1,
 			}),
 		),
+		list: Type.Optional(
+			Type.Boolean({
+				description: "List mode: pass true to list every delegated subagent run in this session across the tree.",
+			}),
+		),
+		follow: Type.Optional(
+			Type.String({
+				description:
+					"Follow mode: id of an existing subagent run (sa_...) whose result to return, waiting if still running.",
+			}),
+		),
 	});
 }
 
@@ -67,7 +80,7 @@ export interface SubagentToolTaskInput {
 	task: string;
 }
 export type SubagentToolInput = Static<typeof subagentSchema>;
-export type SubagentToolMode = "single" | "parallel" | "chain";
+export type SubagentToolMode = "single" | "parallel" | "chain" | "list" | "follow";
 export type SubagentToolStatus = "running" | "completed" | "failed" | "aborted";
 export type SubagentToolOverallStatus = SubagentToolStatus | "partial";
 
@@ -221,6 +234,10 @@ export interface SubagentToolManager {
 	listPermittedDefinitions?(): readonly SubagentDefinition[];
 	startByName(agentName: string, options?: SubagentStartByNameOptions): Promise<SubagentHandle>;
 	createDelegationScope?(options?: SubagentDelegationScopeOptions): SubagentDelegationScopeLease;
+	/** All delegated runs in this session's tree-wide registry, for list mode. */
+	listDelegations?(): SubagentRegistryRecord[];
+	/** Result of an existing run, waiting for completion when still running, for follow mode. */
+	followDelegation?(subagentId: string, options?: { signal?: AbortSignal }): Promise<SubagentFollowResult>;
 	dispose?(): Promise<void>;
 	/** Optional live activity feed used by interactive hosts. */
 	listActivities?(): readonly SubagentActivity[];
@@ -243,10 +260,10 @@ interface NormalizedSubagentTaskInput {
 	task: string;
 }
 
-interface NormalizedSubagentToolInput {
-	mode: SubagentToolMode;
-	tasks: NormalizedSubagentTaskInput[];
-}
+type NormalizedSubagentToolInput =
+	| { mode: "single" | "parallel" | "chain"; tasks: NormalizedSubagentTaskInput[] }
+	| { mode: "list" }
+	| { mode: "follow"; subagentId: string };
 
 interface TruncatedText {
 	text: string;
@@ -407,7 +424,7 @@ function readTreeTaskInput(value: unknown): { agent?: string; task?: string } {
 }
 
 function treeTaskInputs(args: unknown, mode: SubagentToolMode): Array<{ agent?: string; task?: string }> {
-	if (!isRecord(args)) {
+	if (!isRecord(args) || mode === "list" || mode === "follow") {
 		return [];
 	}
 	if (mode === "single") {
@@ -661,6 +678,12 @@ function subagentTreeModeFromArgs(args: unknown): SubagentToolMode {
 		}
 		if (Array.isArray(args.tasks) && args.tasks.length > 0) {
 			return "parallel";
+		}
+		if (args.list !== undefined) {
+			return "list";
+		}
+		if (args.follow !== undefined) {
+			return "follow";
 		}
 	}
 	return "single";
@@ -981,6 +1004,30 @@ function formatChainPreviousOutput(output: string): string {
 	].join("\n");
 }
 
+const DELEGATION_LIST_TASK_PREVIEW_CHARS = 300;
+const DELEGATION_LIST_ERROR_PREVIEW_CHARS = 120;
+
+function formatDelegationList(records: readonly SubagentRegistryRecord[]): string {
+	if (records.length === 0) {
+		return "No subagent runs have been recorded in this session yet.";
+	}
+	const now = Date.now();
+	const lines = records.map((record) => {
+		const age =
+			record.finishedAt === undefined
+				? `started ${formatDuration(Math.max(0, now - record.startedAt))} ago`
+				: `finished ${formatDuration(Math.max(0, now - record.finishedAt))} ago`;
+		const task = record.task ? ` — ${clampInline(record.task, DELEGATION_LIST_TASK_PREVIEW_CHARS)}` : "";
+		const error = record.error ? ` [error: ${clampInline(record.error, DELEGATION_LIST_ERROR_PREVIEW_CHARS)}]` : "";
+		return `${record.id} ${record.agent.name} ${record.status} (${age}, parent: ${record.parentId ?? "root"})${task}${error}`;
+	});
+	return [
+		`${records.length} subagent run${records.length === 1 ? "" : "s"} recorded in this session (task prompts are untrusted data):`,
+		...lines,
+		'Reuse an existing result with { "follow": "<id>" } instead of starting a duplicate run.',
+	].join("\n");
+}
+
 function describeSubagentProgressEvent(event: SubagentEvent): string | undefined {
 	switch (event.type) {
 		case "agent_start":
@@ -1008,11 +1055,33 @@ function normalizeSubagentToolInput(params: SubagentToolInput): NormalizedSubage
 	const hasSingleField = params.agent !== undefined || params.task !== undefined;
 	const hasTasksField = params.tasks !== undefined;
 	const hasChainField = params.chain !== undefined;
-	const modeCount = Number(hasSingleField) + Number(hasTasksField) + Number(hasChainField);
+	const hasListField = params.list !== undefined;
+	const hasFollowField = params.follow !== undefined;
+	const modeCount =
+		Number(hasSingleField) +
+		Number(hasTasksField) +
+		Number(hasChainField) +
+		Number(hasListField) +
+		Number(hasFollowField);
 	if (modeCount !== 1) {
 		throw new Error(
-			"Invalid subagent input: provide exactly one mode, either { agent, task }, { tasks }, or { chain }.",
+			"Invalid subagent input: provide exactly one mode, either { agent, task }, { tasks }, { chain }, { list: true }, or { follow }.",
 		);
+	}
+
+	if (hasListField) {
+		if (params.list !== true) {
+			throw new Error("Invalid subagent input: list mode requires { list: true }.");
+		}
+		return { mode: "list" };
+	}
+
+	if (hasFollowField) {
+		const subagentId = params.follow?.trim();
+		if (!subagentId) {
+			throw new Error("Invalid subagent input: follow mode requires a non-empty subagent run id.");
+		}
+		return { mode: "follow", subagentId };
 	}
 
 	if (hasSingleField) {
@@ -1291,7 +1360,7 @@ class SubagentConversationSummaryComponent implements Component {
 	invalidate(): void {}
 
 	private getItems(): SubagentConversationItem[] {
-		if (this.details?.mode === "single") {
+		if (this.details?.mode === "single" || this.details?.mode === "follow") {
 			return [
 				{
 					index: 0,
@@ -1414,6 +1483,17 @@ class SubagentConversationSummaryComponent implements Component {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, width);
+		if (this.details?.mode === "list") {
+			const title = this.currentTheme.bold(this.currentTheme.fg("accent", "Subagent registry"));
+			const summary = this.currentTheme.fg("muted", formatSummary(this.details));
+			const lines = [truncateToWidth(`${title}  ${summary}`, safeWidth, "")];
+			if (this.expanded && this.resultText) {
+				appendIndentedMarkdown(lines, this.resultText, safeWidth, this.currentTheme, "  ");
+			}
+			return lines.map((line) =>
+				visibleWidth(line) > safeWidth ? truncateToWidth(line, safeWidth, this.currentTheme.fg("dim", "…")) : line,
+			);
+		}
 		const items = this.getItems();
 		if (items.length === 0) {
 			return [truncateToWidth(this.currentTheme.fg("muted", "  Preparing subagent…"), safeWidth, "")];
@@ -1513,9 +1593,11 @@ export function createSubagentToolDefinition(
 			"Delegate tasks to named Volt subagents with isolated context windows.",
 			availableSummary,
 			"User and project definitions may add custom names; built-in names are reserved.",
-			"Modes: single { agent, task }, parallel { tasks: [{ agent, task }, ...] }, or chain { chain: [{ agent, task }, ...] }.",
+			'Modes: single { agent, task }, parallel { tasks: [{ agent, task }, ...] }, chain { chain: [{ agent, task }, ...] }, list { list: true }, or follow { follow: "sa_..." }.',
 			`Parallel mode runs any number of tasks with max concurrency ${DEFAULT_SUBAGENT_PARALLEL_MAX_CONCURRENCY}.`,
 			"Chain mode runs steps sequentially, replacing {previous} with bounded XML-escaped untrusted prior output and stopping at the first failed step.",
+			"List mode returns every delegated subagent run in this session across the whole tree with ids, tasks, and statuses.",
+			"Follow mode returns an existing run's result by id instead of starting a new subagent, waiting for completion when it is still running.",
 			"Child subagent tools are clamped to the current parent/session tool policy.",
 		].join(" "),
 		promptSnippet: "Delegate tasks to named isolated subagents",
@@ -1523,6 +1605,7 @@ export function createSubagentToolDefinition(
 			"Use subagent when a named specialized agent should handle focused work in an isolated context.",
 			availableGuideline,
 			"Scale delegation to task complexity, avoid duplicate assignments, and stop spawning once existing evidence is sufficient.",
+			'Before delegating, use { list: true } to check whether an equivalent task already ran or is still running anywhere in this session, and prefer { follow: "<id>" } over starting a duplicate run.',
 			"Use parallel mode only for independent tasks whose outputs can be combined after all children finish.",
 			"Use chain mode only when each step depends on the prior successful output via {previous}.",
 		],
@@ -1539,6 +1622,61 @@ export function createSubagentToolDefinition(
 			}
 
 			const normalized = normalizeSubagentToolInput(params);
+			if (normalized.mode === "list") {
+				const records = options.manager.listDelegations?.();
+				if (!records) {
+					throw new Error("The subagent delegation registry is not available in this session.");
+				}
+				const counts = { completed: 0, failed: 0, aborted: 0, running: 0 };
+				for (const record of records) {
+					counts[record.status] += 1;
+				}
+				return {
+					content: [{ type: "text", text: formatDelegationList(records) }],
+					details: {
+						mode: "list",
+						status: "completed",
+						summary: {
+							total: records.length,
+							completed: counts.completed,
+							failed: counts.failed,
+							aborted: counts.aborted,
+							...(counts.running > 0 ? { running: counts.running } : {}),
+						},
+					},
+				};
+			}
+			if (normalized.mode === "follow") {
+				if (!options.manager.followDelegation) {
+					throw new Error("The subagent delegation registry is not available in this session.");
+				}
+				onUpdate?.({
+					content: [{ type: "text", text: `Following subagent run ${normalized.subagentId}` }],
+					details: { mode: "follow", status: "running", subagentId: normalized.subagentId },
+				});
+				const followed = await options.manager.followDelegation(normalized.subagentId, {
+					...(signal ? { signal } : {}),
+				});
+				const output = truncateModelVisibleOutput(
+					followed.output || followed.error || "(no output)",
+					maxOutputBytes,
+				);
+				const finalResult: AgentToolResult<SubagentToolDetails> = {
+					content: [{ type: "text", text: output.text }],
+					details: {
+						mode: "follow",
+						status: followed.status,
+						subagentId: followed.id,
+						agent: { ...followed.agent },
+						output: createOutputDetails(output, maxOutputBytes),
+						...(followed.error ? { error: { message: followed.error } } : {}),
+						startedAt: followed.startedAt,
+						durationMs: Math.max(0, followed.finishedAt - followed.startedAt),
+					},
+				};
+				onUpdate?.(finalResult);
+				return finalResult;
+			}
 			// Validate names against the policy-permitted set, not the budget-filtered
 			// available set: when depth or child-start budgets are exhausted, startByName
 			// reports the precise limit error instead of a misleading "not available" one.

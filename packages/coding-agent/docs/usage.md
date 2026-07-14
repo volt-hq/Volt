@@ -149,7 +149,7 @@ Required fields are `name`, `description`, and the markdown body. Optional `tool
 
 The built-in `subagent` tool is active by default when a `SubagentManager` is available, including normal CLI sessions. If you pass an explicit `--tools` allowlist, include `subagent` to keep delegation available; disable it with `--exclude-tools subagent`, `--no-builtin-tools`, or `--no-tools`.
 
-The current built-in tool supports three modes. Provide exactly one mode per call:
+The current built-in tool supports five modes. Provide exactly one mode per call:
 
 ```json
 { "agent": "scout", "task": "Find the auth entry points" }
@@ -172,6 +172,16 @@ The current built-in tool supports three modes. Provide exactly one mode per cal
   ]
 }
 ```
+
+```json
+{ "list": true }
+```
+
+```json
+{ "follow": "sa_1f2e3d4c" }
+```
+
+List and follow expose the session-wide delegation registry. Every runtime in one session tree — the root session and every nested subagent — shares one registry that records each delegated run's id, agent, task prompt, status, and bounded final output. `list` returns all recorded runs so an agent can spot that an equivalent task already ran (or is still running) in another branch before spawning a duplicate; `follow` returns an existing run's result by id, waiting for completion when the run is still in flight. Follows that could never resolve — waiting on an ancestor, or two runs waiting on each other — are rejected with a deadlock error instead of hanging. Task prompts and outputs surfaced this way cross subagent context boundaries and are untrusted data.
 
 Parallel mode accepts any number of tasks and runs them with max concurrency 4. Results are returned in input order, and mixed success/failure runs return a combined status summary instead of hiding partial results. Chain mode accepts any number of steps, runs them sequentially, replaces `{previous}` with bounded prior successful step output that is XML-escaped and delimited as untrusted data, returns the final successful step output when all steps complete, and stops at the first failed step with details for executed steps. Recursive delegation is opt-in through `allowedSubagents`; omission allows no child names. Delegation trees have no automatic depth, start, active-child, turn, token, cost, or time ceilings; explicit definition policy and user/parent cancellation remain authoritative. In-memory parents create in-memory child sessions, while persisted parents create linked persisted children. Model-visible output is capped at 50 KB per task or chain step and 100 KB for a combined parallel result; metadata includes IDs, source, status, usage, truncation/errors, and tree-wide accounting.
 

@@ -20,6 +20,7 @@ import {
 	type SubagentDelegationScopeOptions,
 } from "./delegation-scope.ts";
 import type { SubagentDefinition } from "./index.ts";
+import { type SubagentFollowResult, SubagentRegistry, type SubagentRegistryRecord } from "./registry.ts";
 
 export type SubagentEvent = RpcClientEvent;
 export type SubagentEndEvent = Extract<SubagentEvent, { type: "agent_end" }>;
@@ -174,6 +175,32 @@ interface MutableSubagentActivity {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function getFinalAssistantText(event: SubagentEndEvent): string | undefined {
+	for (let index = event.messages.length - 1; index >= 0; index -= 1) {
+		const message = event.messages[index];
+		if (!message || message.role !== "assistant") {
+			continue;
+		}
+		const content = (message as { content?: unknown }).content;
+		if (!Array.isArray(content)) {
+			return undefined;
+		}
+		const text = content
+			.filter(
+				(part): part is { type: "text"; text: string } =>
+					typeof part === "object" &&
+					part !== null &&
+					(part as { type?: unknown }).type === "text" &&
+					typeof (part as { text?: unknown }).text === "string",
+			)
+			.map((part) => part.text)
+			.join("\n")
+			.trim();
+		return text.length > 0 ? text : undefined;
+	}
+	return undefined;
 }
 
 function getTerminalActivityResult(event: SubagentEndEvent): {
@@ -478,6 +505,8 @@ export class SubagentManager {
 	private disposePromise: Promise<void> | undefined;
 	private pendingStartCount = 0;
 	private readonly pendingStartWaiters = new Set<() => void>();
+	/** Lazily created when this manager belongs to the root session; children share it via context. */
+	private ownedRegistry: SubagentRegistry | undefined;
 
 	constructor(options: SubagentManagerOptions) {
 		this.createRuntime = options.createRuntime;
@@ -499,6 +528,24 @@ export class SubagentManager {
 			return { scope: inherited, owned: false };
 		}
 		return { scope: new SubagentDelegationScope(options), owned: true };
+	}
+
+	/** All delegated runs recorded in this runtime tree's session-wide registry. */
+	listDelegations(): SubagentRegistryRecord[] {
+		return this.getRegistry().list();
+	}
+
+	/** Result of an existing run in the tree, waiting for completion when still running. */
+	followDelegation(subagentId: string, options: { signal?: AbortSignal } = {}): Promise<SubagentFollowResult> {
+		return this.getRegistry().follow(this.subagentContext?.subagentId, subagentId, options.signal);
+	}
+
+	private getRegistry(): SubagentRegistry {
+		if (this.subagentContext) {
+			return this.subagentContext.registry;
+		}
+		this.ownedRegistry ??= new SubagentRegistry();
+		return this.ownedRegistry;
 	}
 
 	async start(options: SubagentStartOptions = {}): Promise<SubagentHandle> {
@@ -703,6 +750,7 @@ export class SubagentManager {
 	}
 
 	private createChildSubagentContext(
+		id: string,
 		definition: SubagentDefinition | undefined,
 		delegationScope: SubagentDelegationScope,
 	): SubagentRuntimeContext | undefined {
@@ -721,8 +769,10 @@ export class SubagentManager {
 		return {
 			depth: (this.subagentContext?.depth ?? 0) + 1,
 			agentName: definition.name,
+			subagentId: id,
 			path: [...parentPath, definition.name],
 			delegationScope,
+			registry: this.getRegistry(),
 			allowedSubagents: definition.allowedSubagents ?? [],
 			...(maxSubagentDepth !== undefined ? { maxSubagentDepth } : {}),
 			...(definition.maxChildAgents !== undefined ? { maxChildAgents: definition.maxChildAgents } : {}),
@@ -748,6 +798,7 @@ export class SubagentManager {
 			throw new Error("Subagent delegation scope is required");
 		}
 		const subagentContext = this.createChildSubagentContext(
+			id,
 			definitionOptions?.definition,
 			delegation.scopeLease.scope,
 		);
@@ -781,6 +832,15 @@ export class SubagentManager {
 			});
 			await this.notifyRuntimeCreated({ id, runtime, definition: definitionOptions?.definition });
 			this.registerActivity(id, runtime, definitionOptions?.definition);
+			this.getRegistry().register({
+				id,
+				...(this.subagentContext ? { parentId: this.subagentContext.subagentId } : {}),
+				agent: {
+					name: definitionOptions?.definition.name ?? "subagent",
+					...(definitionOptions?.definition.source ? { source: definitionOptions.definition.source } : {}),
+				},
+				path: subagentContext?.path ?? [...(this.subagentContext?.path ?? []), "subagent"],
+			});
 			handle = new LocalSubagentHandle({
 				id,
 				sessionId: runtime.session.sessionId,
@@ -789,7 +849,10 @@ export class SubagentManager {
 				removeFromManager: (handleId) => {
 					this.handles.delete(handleId);
 				},
-				onPromptStarted: (message) => this.updateActivityTask(id, message),
+				onPromptStarted: (message) => {
+					this.updateActivityTask(id, message);
+					this.getRegistry().setTask(id, message);
+				},
 				onPromptFailed: (error) => this.finishActivity(id, "failed", errorMessage(error)),
 				onAbortRequested: () => this.markActivityAbortRequested(id),
 				onTerminal: () => {
@@ -807,11 +870,18 @@ export class SubagentManager {
 				(result) => {
 					const terminal = getTerminalActivityResult(result.event);
 					this.finishActivity(id, terminal.status, terminal.error);
+					const output = getFinalAssistantText(result.event);
+					this.getRegistry().complete(id, terminal.status, {
+						...(output !== undefined ? { output } : {}),
+						...(terminal.error !== undefined ? { error: terminal.error } : {}),
+					});
 				},
 				(error: unknown) => {
 					const activity = this.activities.get(id);
 					const status = activity?.abortRequested ? "aborted" : "failed";
-					this.finishActivity(id, status, status === "failed" ? errorMessage(error) : undefined);
+					const message = status === "failed" ? errorMessage(error) : undefined;
+					this.finishActivity(id, status, message);
+					this.getRegistry().complete(id, status, message !== undefined ? { error: message } : {});
 				},
 			);
 			return handle;
