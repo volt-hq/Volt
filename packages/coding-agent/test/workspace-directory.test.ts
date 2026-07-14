@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { listWorkspaceDirectories, resolveWorkspaceDirectory } from "../src/daemon/workspace-directory.ts";
+import { createDirectorySymlinkSync } from "./symlink-utils.ts";
 
 describe("workspace directory validation", () => {
 	let root: string;
@@ -35,7 +36,7 @@ describe("workspace directory validation", () => {
 	});
 
 	it("rejects absolute, parent, dot, control-character, .git, and symlink-escape selections", async () => {
-		symlinkSync(outside, join(root, "escape"));
+		createDirectorySymlinkSync(outside, join(root, "escape"));
 
 		await expect(resolveWorkspaceDirectory(root, "/tmp")).resolves.toMatchObject({
 			ok: false,

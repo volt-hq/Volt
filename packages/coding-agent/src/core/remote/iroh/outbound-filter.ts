@@ -43,7 +43,7 @@ export interface IrohRemoteOutboundJsonlReadablePipeOptions extends IrohRemoteOu
 interface IrohRemoteOutboundSanitizerContext {
 	remoteWorkspacePath: string;
 	workspacePath: string;
-	workspacePathVariants: string[];
+	workspacePathPatterns: string[];
 }
 
 export type IrohRemoteOutboundValueDecorator = (value: object) => object;
@@ -133,24 +133,22 @@ function createSanitizerContext(options: IrohRemoteOutboundSanitizerOptions): Ir
 	// NFC, and match embedded occurrences against both NFC and NFD forms.
 	const workspacePath = resolvedWorkspacePath.normalize("NFC");
 	// Additional roots (worktree parent checkout, worktrees root) fold into the
-	// same variant list: every occurrence maps to remoteWorkspacePath.
+	// same pattern list: every occurrence maps to remoteWorkspacePath. On Windows,
+	// match either separator so mixed paths cannot bypass redaction.
 	const redactedRoots = [
 		resolvedWorkspacePath,
 		...(options.additionalRedactedPaths ?? []).map((value) => resolve(value)),
 	];
-	const workspacePathVariants = [
-		...new Set(
-			redactedRoots
-				.flatMap((root) => [root, toPosixPath(root), toWindowsPath(root)])
-				.flatMap((value) => [value.normalize("NFC"), value.normalize("NFD")]),
-		),
+	const workspacePathPatterns = [
+		...new Set(redactedRoots.flatMap((root) => [root.normalize("NFC"), root.normalize("NFD")])),
 	]
 		.filter((value) => value.length > 0)
-		.sort((left, right) => right.length - left.length);
+		.sort((left, right) => right.length - left.length)
+		.map(createWorkspacePathPattern);
 	return {
 		remoteWorkspacePath: options.remoteWorkspacePath ?? "/workspace",
 		workspacePath,
-		workspacePathVariants,
+		workspacePathPatterns,
 	};
 }
 
@@ -269,6 +267,10 @@ function sanitizePathField(value: string, context: IrohRemoteOutboundSanitizerCo
 	if (isTildePath(value)) {
 		return sanitizePathToken(value, context);
 	}
+	const redactedValue = normalizeWorkspacePathOccurrences(value, context);
+	if (redactedValue !== value) {
+		return redactedValue;
+	}
 	if (isAbsolute(value) || isWindowsAbsolutePath(value) || isWindowsUncPath(value) || isFileUrl(value)) {
 		return value;
 	}
@@ -319,13 +321,16 @@ function normalizeWorkspacePath(value: string, context: IrohRemoteOutboundSaniti
 
 function normalizeWorkspacePathOccurrences(value: string, context: IrohRemoteOutboundSanitizerContext): string {
 	let normalized = value;
-	for (const workspacePath of context.workspacePathVariants) {
-		normalized = normalized.replace(
-			new RegExp(`${escapeRegExp(workspacePath)}(?=$|[\\\\/\\s"'<>),.;:!?}\\]])`, "g"),
+	let redacted = false;
+	for (const workspacePathPattern of context.workspacePathPatterns) {
+		const next = normalized.replace(
+			new RegExp(`${workspacePathPattern}(?=$|[\\\\/\\s"'<>),.;:!?}\\]])`, sep === "\\" ? "gi" : "g"),
 			context.remoteWorkspacePath,
 		);
+		redacted ||= next !== normalized;
+		normalized = next;
 	}
-	return normalized;
+	return redacted && sep === "\\" ? normalized.replaceAll("\\", "/") : normalized;
 }
 
 function redactPathOccurrences(
@@ -816,6 +821,9 @@ function isPathListSeparator(value: string, index: number): boolean {
 	if (!":;,".includes(value[index])) {
 		return false;
 	}
+	if (value[index] === ":" && index > 0 && startsWindowsPathAt(value, index - 1)) {
+		return false;
+	}
 	const pathStart = index + 1;
 	return (
 		startsFileUrlAt(value, pathStart) ||
@@ -847,8 +855,9 @@ function toPosixPath(value: string): string {
 	return value.split(sep).join("/");
 }
 
-function toWindowsPath(value: string): string {
-	return value.split(sep).join("\\");
+function createWorkspacePathPattern(value: string): string {
+	const separatorPattern = sep === "\\" ? "[\\\\/]" : "/";
+	return value.split(sep).map(escapeRegExp).join(separatorPattern);
 }
 
 function isWindowsAbsolutePath(value: string): boolean {

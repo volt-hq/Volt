@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -17,6 +17,18 @@ function writeChildScript(contents: string): string {
 	const path = join(dir, "child.mjs");
 	writeFileSync(path, contents);
 	return path;
+}
+
+function isProcessRunning(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ESRCH") {
+			return false;
+		}
+		throw error;
+	}
 }
 
 afterEach(() => {
@@ -46,16 +58,13 @@ process.stdin.resume();
 	test("cleans up the child process when readiness probe fails", async () => {
 		const dir = createTempDir();
 		const childPath = join(dir, "child.mjs");
-		const terminationMarker = join(dir, "terminated");
+		const pidMarker = join(dir, "pid");
 		writeFileSync(
 			childPath,
 			`
 import { writeFileSync } from "node:fs";
 
-process.on("SIGTERM", () => {
-	writeFileSync(${JSON.stringify(terminationMarker)}, "terminated");
-	process.exit(0);
-});
+writeFileSync(${JSON.stringify(pidMarker)}, String(process.pid));
 
 let buffer = "";
 process.stdin.setEncoding("utf8");
@@ -86,23 +95,21 @@ process.stdin.resume();
 		const client = new RpcClient({ cliPath: childPath, requestTimeoutMs: 1000 });
 
 		await expect(client.start()).rejects.toThrow(/RPC readiness probe failed: boot failed/);
-		expect(existsSync(terminationMarker)).toBe(true);
+		const pid = Number(readFileSync(pidMarker, "utf8"));
+		await expect.poll(() => isProcessRunning(pid)).toBe(false);
 	});
 
 	test("cleans up the child process when readiness probe times out", async () => {
 		const dir = createTempDir();
 		const childPath = join(dir, "child.mjs");
 		const readinessMarker = join(dir, "readiness-probe-seen");
-		const terminationMarker = join(dir, "terminated");
+		const pidMarker = join(dir, "pid");
 		writeFileSync(
 			childPath,
 			`
 import { writeFileSync } from "node:fs";
 
-process.on("SIGTERM", () => {
-	writeFileSync(${JSON.stringify(terminationMarker)}, "terminated");
-	process.exit(0);
-});
+writeFileSync(${JSON.stringify(pidMarker)}, String(process.pid));
 
 process.stdin.once("data", () => {
 	writeFileSync(${JSON.stringify(readinessMarker)}, "readiness probe seen");
@@ -116,7 +123,8 @@ process.stdin.resume();
 			/RPC readiness probe failed: Timeout waiting for response to get_state/,
 		);
 		expect(existsSync(readinessMarker)).toBe(true);
-		expect(existsSync(terminationMarker)).toBe(true);
+		const pid = Number(readFileSync(pidMarker, "utf8"));
+		await expect.poll(() => isProcessRunning(pid)).toBe(false);
 	});
 
 	test("allows startup extension UI events to be handled before start resolves", async () => {

@@ -58,6 +58,13 @@ function createFakeGit(
 
 const okGit = () => createFakeGit(() => ({ ok: true }));
 
+function getGitWorktreePaths(output: string): string[] {
+	return output
+		.split(/\r?\n/)
+		.filter((line) => line.startsWith("worktree "))
+		.map((line) => realpathSync(line.slice("worktree ".length).trim()));
+}
+
 describe("worktree manager (fake git)", () => {
 	let agentDir: string;
 	let workspaceDir: string;
@@ -826,6 +833,8 @@ describe("worktree manager (real git integration)", () => {
 					env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" },
 				});
 			git(["init", "--initial-branch=main"]);
+			git(["config", "core.autocrlf", "false"]);
+			git(["config", "core.eol", "lf"]);
 			git(["config", "user.email", "test@example.com"]);
 			git(["config", "user.name", "Test"]);
 			writeFileSync(join(repoDir, "readme.md"), "hello\n");
@@ -848,7 +857,9 @@ describe("worktree manager (real git integration)", () => {
 				return;
 			}
 			expect(existsSync(created.worktree.path)).toBe(true);
-			expect(git(["worktree", "list", "--porcelain"])).toContain(realpathSync(created.worktree.path));
+			expect(getGitWorktreePaths(git(["worktree", "list", "--porcelain"]))).toContain(
+				realpathSync(created.worktree.path),
+			);
 			expect(git(["rev-parse", "--abbrev-ref", "HEAD"], created.worktree.path).trim()).toBe("volt/feature-x");
 
 			let listed = await manager.list(workspace);
@@ -885,6 +896,8 @@ describe("worktree manager (real git integration)", () => {
 					env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" },
 				});
 			git(["init", "--initial-branch=main"]);
+			git(["config", "core.autocrlf", "false"]);
+			git(["config", "core.eol", "lf"]);
 			git(["config", "user.email", "test@example.com"]);
 			git(["config", "user.name", "Test"]);
 			writeFileSync(join(repoDir, "packages", "app", "readme.md"), "hello\n");
@@ -907,7 +920,7 @@ describe("worktree manager (real git integration)", () => {
 				return;
 			}
 			expect(existsSync(join(created.worktree.path, "packages", "app"))).toBe(true);
-			expect(git(["rev-parse", "--show-toplevel"], created.worktree.path).trim()).toBe(
+			expect(realpathSync(git(["rev-parse", "--show-toplevel"], created.worktree.path).trim())).toBe(
 				realpathSync(created.worktree.path),
 			);
 		} finally {
@@ -928,6 +941,8 @@ describe("worktree manager (real git integration)", () => {
 					env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" },
 				});
 			git(["init", "--initial-branch=main"]);
+			git(["config", "core.autocrlf", "false"]);
+			git(["config", "core.eol", "lf"]);
 			git(["config", "user.email", "test@example.com"]);
 			git(["config", "user.name", "Test"]);
 			writeFileSync(join(nestedRepoDir, "packages", "coding-agent", "readme.md"), "hello\n");
@@ -954,10 +969,12 @@ describe("worktree manager (real git integration)", () => {
 			}
 			expect(created.worktree.sourceRootRelativePath).toBe("Volt");
 			expect(existsSync(join(created.worktree.path, "packages", "coding-agent"))).toBe(true);
-			expect(git(["rev-parse", "--show-toplevel"], created.worktree.path).trim()).toBe(
+			expect(realpathSync(git(["rev-parse", "--show-toplevel"], created.worktree.path).trim())).toBe(
 				realpathSync(created.worktree.path),
 			);
-			expect(git(["worktree", "list", "--porcelain"], nestedRepoDir)).toContain(realpathSync(created.worktree.path));
+			expect(getGitWorktreePaths(git(["worktree", "list", "--porcelain"], nestedRepoDir))).toContain(
+				realpathSync(created.worktree.path),
+			);
 		} finally {
 			rmSync(agentDir, { recursive: true, force: true });
 		}
@@ -975,6 +992,8 @@ describe("worktree manager (real git integration)", () => {
 					env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" },
 				});
 			git(["init", "--initial-branch=main"]);
+			git(["config", "core.autocrlf", "false"]);
+			git(["config", "core.eol", "lf"]);
 			git(["config", "user.email", "test@example.com"]);
 			git(["config", "user.name", "Test"]);
 			writeFileSync(join(repoDir, "readme.md"), "hello\n");

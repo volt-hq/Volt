@@ -53,6 +53,10 @@ import {
 } from "./iroh-stream-doubles.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
+const HOST_FIXTURE_ROOT = join(tmpdir(), "volt-worktree-tui");
+const HOST_PARENT_PATH = join(HOST_FIXTURE_ROOT, "parent-repo");
+const HOST_AGENT_DIR = join(HOST_FIXTURE_ROOT, ".volt", "agent");
+const HOST_WORKTREE_PATH = join(getWorktreesRoot(HOST_AGENT_DIR), "--repo--", "fix-login");
 
 afterEach(async () => {
 	for (const cleanup of cleanups.splice(0)) {
@@ -217,33 +221,34 @@ describe("resolveDaemonWorkspaceForCwd (§5.2.2 auto-registration fix)", () => {
 
 	it("uses the parent workspace on a worktree_resolve hit and never auto-registers", async () => {
 		const client = createFakeClient({
-			workspaces: [{ name: "repo", path: "/tmp/repo" }],
+			workspaces: [{ name: "repo", path: HOST_PARENT_PATH }],
 			resolve: () => ({
 				type: "worktree_resolve_result",
 				id: "x",
 				workspaceName: "repo",
-				workspacePath: "/tmp/repo",
+				workspacePath: HOST_PARENT_PATH,
 				worktreeId: "fix-login",
-				worktreePath: "/tmp/agent/worktrees/--repo--/fix-login",
+				worktreePath: HOST_WORKTREE_PATH,
 			}),
 		});
-		const resolved = await resolveDaemonWorkspaceForCwd(client, "/tmp/agent/worktrees/--repo--/fix-login");
-		expect(resolved).toEqual({ name: "repo", path: "/tmp/repo" });
+		const resolved = await resolveDaemonWorkspaceForCwd(client, HOST_WORKTREE_PATH);
+		expect(resolved).toEqual({ name: "repo", path: HOST_PARENT_PATH });
 		expect(client.requests.some((req) => req.type === "workspace_register")).toBe(false);
 	});
 
 	it("keeps the auto-register fallback on a miss", async () => {
-		const client = createFakeClient({ workspaces: [{ name: "repo", path: "/tmp/repo" }] });
-		const resolved = await resolveDaemonWorkspaceForCwd(client, "/tmp/elsewhere/project");
-		expect(resolved).toEqual({ name: "project", path: "/tmp/elsewhere/project" });
+		const client = createFakeClient({ workspaces: [{ name: "repo", path: HOST_PARENT_PATH }] });
+		const projectPath = join(HOST_FIXTURE_ROOT, "elsewhere", "project");
+		const resolved = await resolveDaemonWorkspaceForCwd(client, projectPath);
+		expect(resolved).toEqual({ name: "project", path: projectPath });
 		const register = client.requests.find((req) => req.type === "workspace_register");
-		expect(register).toMatchObject({ name: "project", path: "/tmp/elsewhere/project" });
+		expect(register).toMatchObject({ name: "project", path: projectPath });
 	});
 
 	it("prefers the longest path-prefix match without touching worktree_resolve", async () => {
-		const client = createFakeClient({ workspaces: [{ name: "repo", path: "/tmp/repo" }] });
-		const resolved = await resolveDaemonWorkspaceForCwd(client, "/tmp/repo/sub/dir");
-		expect(resolved).toEqual({ name: "repo", path: "/tmp/repo" });
+		const client = createFakeClient({ workspaces: [{ name: "repo", path: HOST_PARENT_PATH }] });
+		const resolved = await resolveDaemonWorkspaceForCwd(client, join(HOST_PARENT_PATH, "sub", "dir"));
+		expect(resolved).toEqual({ name: "repo", path: HOST_PARENT_PATH });
 		expect(client.requests.map((req) => req.type)).toEqual(["status"]);
 	});
 });
@@ -306,7 +311,7 @@ describe("createDaemonAttach + control server integration", () => {
 	it("advertises the worktrees capability and lease-acquires under the parent workspace on a worktree_resolve hit", async () => {
 		const harness = await startControlHarness((connection, request) => {
 			if (request.type === "status") {
-				connection.send(statusResult(request.id, [{ name: "repo", path: "/tmp/parent-repo" }]));
+				connection.send(statusResult(request.id, [{ name: "repo", path: HOST_PARENT_PATH }]));
 				return;
 			}
 			if (request.type === "worktree_resolve") {
@@ -314,7 +319,7 @@ describe("createDaemonAttach + control server integration", () => {
 					type: "worktree_resolve_result",
 					id: request.id,
 					workspaceName: "repo",
-					workspacePath: "/tmp/parent-repo",
+					workspacePath: HOST_PARENT_PATH,
 					worktreeId: "fix-login",
 					worktreePath: request.path,
 				});
@@ -356,7 +361,7 @@ describe("createDaemonAttach + control server integration", () => {
 	it("forwards relayed push and Live Activity delivery through the resolved workspace", async () => {
 		const harness = await startControlHarness((connection, request) => {
 			if (request.type === "status") {
-				connection.send(statusResult(request.id, [{ name: "repo", path: "/tmp/parent-repo" }]));
+				connection.send(statusResult(request.id, [{ name: "repo", path: HOST_PARENT_PATH }]));
 				return;
 			}
 			if (request.type === "relay_notification_delivery") {
@@ -369,7 +374,7 @@ describe("createDaemonAttach + control server integration", () => {
 			}
 			connection.send({ type: "ok", id: request.id });
 		});
-		const attach = createDaemonAttach({ cwd: "/tmp/parent-repo/sub", agentDir: harness.agentDir });
+		const attach = createDaemonAttach({ cwd: join(HOST_PARENT_PATH, "sub"), agentDir: harness.agentDir });
 		cleanups.push(() => attach.dispose());
 		await attach.start();
 
@@ -434,7 +439,7 @@ describe("openDaemonWorktreeControl (§5.2.1)", () => {
 	it("creates a worktree in the resolved workspace and binds the session", async () => {
 		const harness = await startControlHarness((connection, request) => {
 			if (request.type === "status") {
-				connection.send(statusResult(request.id, [{ name: "repo", path: "/tmp/parent-repo" }]));
+				connection.send(statusResult(request.id, [{ name: "repo", path: HOST_PARENT_PATH }]));
 				return;
 			}
 			if (request.type === "worktree_create") {
@@ -444,7 +449,11 @@ describe("openDaemonWorktreeControl (§5.2.1)", () => {
 					worktree: {
 						id: request.worktreeName ?? "generated-slug-01",
 						workspaceName: request.workspaceName,
-						path: `/tmp/agent/worktrees/--parent-repo--/${request.worktreeName ?? "generated-slug-01"}`,
+						path: join(
+							getWorktreesRoot(HOST_AGENT_DIR),
+							"--parent-repo--",
+							request.worktreeName ?? "generated-slug-01",
+						),
 						branch: `volt/${request.worktreeName ?? "generated-slug-01"}`,
 						createdAt: 1,
 						sessionIds: [],
@@ -462,7 +471,7 @@ describe("openDaemonWorktreeControl (§5.2.1)", () => {
 			spawned: false,
 		});
 		const opened = await openDaemonWorktreeControl({
-			cwd: "/tmp/parent-repo/sub",
+			cwd: join(HOST_PARENT_PATH, "sub"),
 			agentDir: harness.agentDir,
 			ensureDaemon,
 		});
@@ -472,7 +481,7 @@ describe("openDaemonWorktreeControl (§5.2.1)", () => {
 		}
 		cleanups.push(() => opened.control.close());
 		expect(opened.control.workspaceName).toBe("repo");
-		expect(opened.control.workspacePath).toBe("/tmp/parent-repo");
+		expect(opened.control.workspacePath).toBe(HOST_PARENT_PATH);
 
 		const created = await opened.control.createWorktree("fix-login");
 		expect(created).toMatchObject({ ok: true, worktree: { id: "fix-login", branch: "volt/fix-login" } });
@@ -484,7 +493,7 @@ describe("openDaemonWorktreeControl (§5.2.1)", () => {
 	it("fails fast when the daemon is unavailable", async () => {
 		const agentDir = makeTempDir("volt-wt-nodaemon-");
 		const opened = await openDaemonWorktreeControl({
-			cwd: "/tmp/anywhere",
+			cwd: join(HOST_FIXTURE_ROOT, "anywhere"),
 			agentDir,
 			ensureDaemon: async () => ({
 				healthy: false,
@@ -504,14 +513,14 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 	const authorizationBase = {
 		clientNodeId: "n-1",
 		workspaceName: "repo",
-		workspacePath: "/home/user/parent-repo",
+		workspacePath: HOST_PARENT_PATH,
 		allowedTools: "read",
 		rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 	} satisfies RelayPreamble["authorization"];
 
 	it("keeps the parent root for non-worktree conversations", () => {
-		expect(getRelayServingSanitizerOptions(authorizationBase, "/home/user/.volt/agent")).toEqual({
-			workspacePath: "/home/user/parent-repo",
+		expect(getRelayServingSanitizerOptions(authorizationBase, HOST_AGENT_DIR)).toEqual({
+			workspacePath: HOST_PARENT_PATH,
 		});
 	});
 
@@ -520,13 +529,13 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 			{
 				...authorizationBase,
 				worktreeId: "fix-login",
-				worktreePath: "/home/user/.volt/agent/worktrees/--repo--/fix-login",
+				worktreePath: HOST_WORKTREE_PATH,
 			},
-			"/home/user/.volt/agent",
+			HOST_AGENT_DIR,
 		);
 		expect(options).toEqual({
-			workspacePath: "/home/user/.volt/agent/worktrees/--repo--/fix-login",
-			additionalRedactedPaths: ["/home/user/parent-repo", "/home/user/.volt/agent/worktrees"],
+			workspacePath: HOST_WORKTREE_PATH,
+			additionalRedactedPaths: [HOST_PARENT_PATH, getWorktreesRoot(HOST_AGENT_DIR)],
 		});
 	});
 
@@ -535,22 +544,22 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 			{
 				...authorizationBase,
 				worktreeId: "fix-login",
-				worktreePath: "/home/user/.volt/agent/worktrees/--repo--/fix-login",
+				worktreePath: HOST_WORKTREE_PATH,
 				worktreeSourceRootRelativePath: "Volt",
 			},
-			"/home/user/.volt/agent",
+			HOST_AGENT_DIR,
 		);
 		expect(options).toEqual({
 			remoteWorkspacePath: "/workspace/Volt",
-			workspacePath: "/home/user/.volt/agent/worktrees/--repo--/fix-login",
-			additionalRedactedPaths: ["/home/user/parent-repo", "/home/user/.volt/agent/worktrees"],
+			workspacePath: HOST_WORKTREE_PATH,
+			additionalRedactedPaths: [HOST_PARENT_PATH, getWorktreesRoot(HOST_AGENT_DIR)],
 		});
 	});
 
 	it("redacts worktree, parent, and worktrees-root paths on served relay frames", async () => {
-		const parentPath = "/home/user/parent-repo";
-		const agentDir = "/home/user/.volt/agent";
-		const worktreePath = `${agentDir}/worktrees/--repo--/fix-login`;
+		const parentPath = HOST_PARENT_PATH;
+		const agentDir = HOST_AGENT_DIR;
+		const worktreePath = HOST_WORKTREE_PATH;
 		const session = createTestSession("s-relay-wt", null);
 		const subscribers = new Set<(event: AgentSessionEvent) => void>();
 		session.subscribe = vi.fn((handler: (event: AgentSessionEvent) => void) => {
@@ -647,7 +656,7 @@ describe("worktree relay gating and takeover refusal (§5.2.3)", () => {
 		expect(isPathUnderWorktreesRoot(agentDir, join(root, "--repo--", "fix-login", "src"))).toBe(true);
 		expect(isPathUnderWorktreesRoot(agentDir, root)).toBe(false);
 		expect(isPathUnderWorktreesRoot(agentDir, join(agentDir, "repo"))).toBe(false);
-		expect(isPathUnderWorktreesRoot(agentDir, "/tmp/unrelated")).toBe(false);
+		expect(isPathUnderWorktreesRoot(agentDir, join(tmpdir(), "unrelated"))).toBe(false);
 	});
 });
 

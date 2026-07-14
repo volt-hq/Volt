@@ -1,13 +1,4 @@
-import {
-	mkdirSync,
-	mkdtempSync,
-	readdirSync,
-	readFileSync,
-	rmSync,
-	statSync,
-	symlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Tool as SdkTool } from "@modelcontextprotocol/sdk/types.js";
@@ -41,6 +32,7 @@ import type {
 	McpManagerEvent,
 	McpResolvedConfig,
 } from "../src/core/mcp/types.ts";
+import { tryCreateFileSymlinkSync } from "./symlink-utils.ts";
 
 function makeTempDir(): string {
 	return mkdtempSync(join(tmpdir(), "volt-mcp-test-"));
@@ -443,7 +435,7 @@ describe("MCP support", () => {
 		expect(persistedConfig.servers?.fake?.enabled).toBe(false);
 	});
 
-	it("atomically persists private MCP config and refuses symlink targets", () => {
+	it("atomically persists MCP config", () => {
 		const tempDir = makeTempDir();
 		tempDirs.push(tempDir);
 		const config = createTestConfig(tempDir);
@@ -455,13 +447,34 @@ describe("MCP support", () => {
 			servers?: Record<string, { enabled?: boolean; directTools?: string[] }>;
 		};
 		expect(persisted.servers?.fake).toEqual({ enabled: false, directTools: ["read_note"] });
-		expect(statSync(configPath).mode & 0o777).toBe(0o600);
 		expect(statSync(configPath).ino).not.toBe(firstInode);
+	});
 
+	it("uses an owner-only POSIX mode for MCP config", (context) => {
+		if (process.platform === "win32") {
+			context.skip("POSIX permission bits are not supported on Windows");
+		}
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const config = createTestConfig(tempDir);
+		const writer = new McpConfigWriter({ cwd: tempDir, agentDir: tempDir, projectTrusted: true });
+		const configPath = writer.setServerEnabled(config.servers.fake, false).path;
+
+		expect(statSync(configPath).mode & 0o777).toBe(0o600);
+	});
+
+	it("refuses non-regular MCP config targets without modifying symlink referents", () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const config = createTestConfig(tempDir);
+		const writer = new McpConfigWriter({ cwd: tempDir, agentDir: tempDir, projectTrusted: true });
+		const configPath = writer.setServerEnabled(config.servers.fake, false).path;
 		rmSync(configPath);
 		const referent = join(tempDir, "referent.json");
 		writeFileSync(referent, '{"doNotOverwrite":true}');
-		symlinkSync(referent, configPath);
+		if (!tryCreateFileSymlinkSync(referent, configPath)) {
+			mkdirSync(configPath);
+		}
 		expect(() => writer.setServerEnabled(config.servers.fake, true)).toThrow("non-regular private file");
 		expect(readFileSync(referent, "utf8")).toBe('{"doNotOverwrite":true}');
 	});
