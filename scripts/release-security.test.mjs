@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -754,6 +754,10 @@ test("shipped packages and standalone archives contain no development workflow t
 		"packages/coding-agent": [
 			"dist",
 			"docs",
+			"!docs/development.md",
+			"!docs/*-design.md",
+			"!docs/tla",
+			"!docs/tla/**",
 			"!docs/images/doom-extension.png",
 			"examples",
 			"!examples/README.binary.md",
@@ -796,6 +800,38 @@ test("shipped packages and standalone archives contain no development workflow t
 		"the standalone archive's staged top-level file list changed; keep development tooling out and update this pin deliberately",
 	);
 	assert.doesNotMatch(buildStandalone, /\.changeset\/|\.volt\/|\.husky\//);
+});
+
+test("published docs are user-facing: docs.json navigation is the allowlist for the site and the npm package", () => {
+	const docsDirectory = "packages/coding-agent/docs";
+	const manifest = JSON.parse(readFileSync(`${docsDirectory}/docs.json`, "utf8"));
+	const navPaths = manifest.navigation.flatMap((section) => section.items.map((item) => item.path));
+	const navSet = new Set(navPaths);
+	assert.equal(navPaths.length, navSet.size, "docs.json navigation lists a doc twice");
+
+	const isDevelopmentDoc = (file) => file === "development.md" || file.endsWith("-design.md");
+	for (const path of navPaths) {
+		assert.ok(existsSync(`${docsDirectory}/${path}`), `docs.json navigation lists a missing doc: ${path}`);
+		assert.ok(!isDevelopmentDoc(path), `${path} is development-facing and must not be published to the site or the npm package`);
+	}
+	for (const file of readdirSync(docsDirectory).filter((name) => name.endsWith(".md"))) {
+		assert.ok(
+			navSet.has(file) || isDevelopmentDoc(file),
+			`docs/${file} has no audience: add it to docs.json navigation (user-facing, published) or name it *-design.md (development-facing, repo-only)`,
+		);
+	}
+
+	const codingAgentManifest = JSON.parse(readFileSync("packages/coding-agent/package.json", "utf8"));
+	for (const exclusion of ["!docs/development.md", "!docs/*-design.md", "!docs/tla", "!docs/tla/**"]) {
+		assert.ok(codingAgentManifest.files.includes(exclusion), `packages/coding-agent must exclude ${exclusion} from npm`);
+	}
+
+	const syncScript = readFileSync("site/scripts/sync-docs.mjs", "utf8");
+	assert.match(
+		syncScript,
+		/manifest\.navigation\.flatMap/,
+		"site/scripts/sync-docs.mjs must derive the published doc set from docs.json navigation, not the docs directory listing",
+	);
 });
 
 test("release tooling publishes only the canonical Volt package identities under the beta dist-tag", () => {

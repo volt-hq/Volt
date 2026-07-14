@@ -96,6 +96,10 @@
         {
           "title": "Session Format",
           "path": "session-format.md"
+        },
+        {
+          "title": "Iroh Remote Protocol",
+          "path": "iroh-remote-protocol.md"
         }
       ]
     },
@@ -142,23 +146,6 @@
         {
           "title": "Shell Aliases",
           "path": "shell-aliases.md"
-        }
-      ]
-    },
-    {
-      "title": "Development",
-      "items": [
-        {
-          "title": "Development",
-          "path": "development.md"
-        },
-        {
-          "title": "Core Subagents",
-          "path": "subagents-design.md"
-        },
-        {
-          "title": "Live Shared Sessions (voltd)",
-          "path": "live-shared-session-daemon-design.md"
         }
       ]
     }
