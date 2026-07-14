@@ -96,16 +96,17 @@ The preparation job must:
 
 1. Require `github.ref == refs/heads/main` and start from the current protected
    `main` commit.
-2. Verify lockstep package versions, changelog state, npm availability, and tag
-   absence.
+2. Verify lockstep package versions, pending changesets, npm availability, and
+   tag absence.
 3. Regenerate release-controlled files and run the required checks and tests.
 4. Create a release branch and pull request containing only the reviewed
    release changes.
 5. Report the planned version and expected post-merge validation steps.
 
-The repository owner reviews the pull request's changelogs, package metadata,
-lockfiles, shrinkwrap, and generated artifacts, waits for required checks, and
-merges it. The candidate SHA is the resulting commit on `main`, not the
+The repository owner reviews the pull request's generated changelog section,
+package metadata, lockfiles, shrinkwrap, and generated artifacts, waits for
+required checks, and merges it. Consumed `.changeset/` fragments are deleted in
+the same commit. The candidate SHA is the resulting commit on `main`, not the
 pre-merge release-branch SHA.
 
 The prepare job uses a write-scoped ordinary `GITHUB_TOKEN` only after all
@@ -185,7 +186,7 @@ before starting **Approve Release**. At minimum, the owner verifies:
 
 | Input | Type | Requirement |
 | --- | --- | --- |
-| `version` | string | Canonical `MAJOR.MINOR.PATCH` matching all packages and changelogs |
+| `version` | string | Canonical `MAJOR.MINOR.PATCH` matching all packages and the changelog |
 | `candidate_commit` | string | Exact lowercase 40-character SHA at current `main` |
 | `candidate_run_id` | string | Positive decimal Build Standalone Candidate run ID |
 | `candidate_artifact_digest` | string | Exact `sha256:<64 lowercase hex>` combined-artifact digest |
@@ -212,8 +213,8 @@ Preflight must fail unless all of the following are true:
 - both `github.actor` and `github.triggering_actor` are the repository owner;
 - the workflow runs from `refs/heads/main`;
 - `candidate_commit` is the exact current `main` commit;
-- the prepared commit, package versions, and changelog headings match
-  `version`;
+- the prepared commit, package versions, and the product changelog heading
+  match `version`, with no unconsumed `.changeset/` fragments;
 - `v<version>` is absent locally and remotely and the npm versions are
   available;
 - the candidate run is a successful `workflow_dispatch` run of
@@ -273,7 +274,7 @@ Before any publication, the workflow verifies:
 - the tag message contains exactly one matching candidate commit, run ID,
   artifact digest, and approval run ID;
 - the tag commit is reachable from protected `main`;
-- package versions and changelogs match the tag;
+- package versions and the product changelog match the tag;
 - the candidate run, artifact, attestation, source commit, archive set, and
   checksums still match; and
 - no existing npm version, dist-tag, draft release, published release, or
@@ -305,10 +306,6 @@ automatically generates a release attestation. GitHub recommends creating a
 draft, attaching every asset, and then publishing it. See
 [Immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
 and [Preventing changes to releases](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes).
-
-After publication, automation may open a separate next-cycle pull request that
-adds fresh `[Unreleased]` changelog sections. It must not push directly to
-`main`.
 
 ## One-time GitHub setup
 
@@ -459,10 +456,9 @@ production approval workflow.
 
 - Set the repository's default `GITHUB_TOKEN` permission to read-only.
 - Enable **Allow GitHub Actions to create and approve pull requests** so the
-  prepare and next-cycle workflows can open pull requests. The workflows do
-  not request review-approval permission and never approve or merge a pull
-  request; GitHub currently exposes creation and approval under one repository
-  setting.
+  prepare workflow can open pull requests. The workflows do not request
+  review-approval permission and never approve or merge a pull request; GitHub
+  currently exposes creation and approval under one repository setting.
 - Require every workflow to declare top-level `permissions: {}` and add
   job-level permissions explicitly.
 - Require actions to be pinned to full-length commit SHAs where the repository
@@ -477,9 +473,8 @@ check before merge. Configure zero required approving reviews while the
 repository has one maintainer, do not require Code Owner approval, and do not
 allow direct pushes as the normal path. Require the branch to be up to date so
 the required CI result covers GitHub's current merge ref. The
-contributor-approval automation,
-release preparation, and post-release changelog automation all open pull
-requests so this rule does not require an exception for routine work.
+contributor-approval automation and release preparation open pull requests so
+this rule does not require an exception for routine work.
 
 GitHub describes job-level `GITHUB_TOKEN` permission controls in
 [Workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#permissions).
@@ -494,8 +489,8 @@ GitHub describes job-level `GITHUB_TOKEN` permission controls in
 4. Open the generated release pull request.
 5. Click **Approve workflows to run** so the PR checks execute against the
    merge ref.
-6. Review every changelog, package version, dependency metadata file, generated
-   artifact, and workflow result.
+6. Review the generated changelog section, every package version, dependency
+   metadata file, generated artifact, and workflow result.
 7. Merge only after all required checks pass.
 8. Copy the resulting full `main` commit SHA.
 

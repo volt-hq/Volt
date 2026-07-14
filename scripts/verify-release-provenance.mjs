@@ -11,6 +11,7 @@ export const RELEASE_PACKAGE_IDENTITIES = [
 	{ directory: "packages/coding-agent", name: "@hansjm10/volt-coding-agent" },
 ];
 export const RELEASE_PACKAGES = RELEASE_PACKAGE_IDENTITIES.map(({ directory }) => directory);
+export const RELEASE_CHANGELOG = "packages/coding-agent/CHANGELOG.md";
 const RELEASE_REPOSITORY_URL = "git+https://github.com/hansjm10/Volt.git";
 
 export function versionFromReleaseTag(tag) {
@@ -34,11 +35,11 @@ export function verifyReleasePackageMetadata(tag, readText = (path) => readFileS
 		if (manifest.repository?.url !== RELEASE_REPOSITORY_URL || manifest.repository?.directory !== directory) {
 			throw new Error(`${directory}/package.json must identify ${RELEASE_REPOSITORY_URL} and its package directory`);
 		}
-		const changelog = readText(`${directory}/CHANGELOG.md`);
-		const escapedVersion = version.replaceAll(".", "\\.");
-		if (!new RegExp(`^## \\[${escapedVersion}\\](?:\\s|$)`, "m").test(changelog)) {
-			throw new Error(`${directory}/CHANGELOG.md has no release section for ${version}`);
-		}
+	}
+	const changelog = readText(RELEASE_CHANGELOG);
+	const escapedVersion = version.replaceAll(".", "\\.");
+	if (!new RegExp(`^## \\[${escapedVersion}\\](?:\\s|$)`, "m").test(changelog)) {
+		throw new Error(`${RELEASE_CHANGELOG} has no release section for ${version}`);
 	}
 	return version;
 }

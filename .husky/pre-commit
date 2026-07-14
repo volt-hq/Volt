@@ -42,4 +42,7 @@ for file in $STAGED_FILES; do
   fi
 done
 
+# Nudge (never blocks): product source changes should carry a changeset fragment
+node scripts/check-changesets.mjs --warn --staged
+
 echo "✅ All pre-commit checks passed!"

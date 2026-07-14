@@ -60,7 +60,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [RPC mode](rpc.md) - integrate over stdin/stdout JSONL.
 - [Iroh remote access](usage.md#remote-access-over-iroh-preview) - supported preview host, pair, status, clients, revoke, relay, and safety workflow.
 - [Iroh remote protocol](iroh-remote-protocol.md) - v1 ticket, handshake, JSONL, command, and redaction contract for client authors.
-- [Iroh remote access design](iroh-remote-access-design.md) - architecture, support boundary, and limitations for Volt access over Iroh.
+- [Iroh remote access design](https://github.com/hansjm10/Volt/blob/main/packages/coding-agent/docs/iroh-remote-access-design.md) - architecture, support boundary, and limitations for Volt access over Iroh.
 - [JSON event stream mode](json.md) - print mode with structured events.
 - [TUI components](tui.md) - build custom terminal UI for extensions.
 
@@ -78,5 +78,5 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 
 ## Development
 
-- [Development](development.md) - local setup, project structure, and debugging.
-- [Core subagents design](subagents-design.md) - implemented local MVP boundary and deferred remote/package work for first-class subagents.
+- [Development](https://github.com/hansjm10/Volt/blob/main/packages/coding-agent/docs/development.md) - local setup, project structure, and debugging.
+- [Core subagents design](https://github.com/hansjm10/Volt/blob/main/packages/coding-agent/docs/subagents-design.md) - implemented local MVP boundary and deferred remote/package work for first-class subagents.

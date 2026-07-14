@@ -1,54 +1,35 @@
 ---
-description: Audit changelog entries before release
+description: Editorial pass over pending changesets before release
 ---
-Audit changelog entries for all commits since the last release.
+Review the pending changeset fragments and curate the release highlights. CI
+already guarantees coverage (PRs that change product source must include a
+fragment), so this pass is about editorial quality, not completeness.
 
 ## Process
 
-1. **Find the last release tag:**
+1. **Render the pending section:**
    ```bash
-   git tag --sort=-version:refname | head -1
+   npm run changelog:preview
    ```
+   List the fragments behind it: `.changeset/*.md` (ignore `README.md`).
 
-2. **List all commits since that tag:**
-   ```bash
-   git log <tag>..HEAD --oneline
-   ```
+2. **Review fragment quality** (format reference: `.changeset/README.md`):
+   - Each first line is `kind(area): One user-facing sentence.` describing
+     observable behavior, not implementation.
+   - Kinds are honest: `feature` only for genuinely new capability, `internal`
+     only for changes with no user-visible behavior.
+   - `breaking` fragments use a `minor` bump and include real migration
+     guidance in the body.
+   - Near-duplicate fragments for related changes are merged into one.
+   - External contributions carry attribution: `([#N](url) by [@user](url))`.
 
-3. **Read each package's [Unreleased] section:**
-   - packages/ai/CHANGELOG.md
-   - packages/tui/CHANGELOG.md
-   - packages/coding-agent/CHANGELOG.md
+3. **Curate the highlights:**
+   - Review the `### Highlights` section of the preview (all `feature`
+     fragments).
+   - Propose to the user which features deserve highlight billing, adding doc
+     links to their sentences whenever possible; demote the rest to
+     `improvement`.
 
-4. **For each commit, check:**
-   - Skip: changelog updates, doc-only changes, release housekeeping
-   - Skip: changes to generated model catalogs (for example `packages/ai/src/models.generated.ts`) unless accompanied by an intentional product-facing change in non-generated source/docs.
-   - Determine which package(s) the commit affects (use `git show <hash> --stat`)
-   - Verify a changelog entry exists in the affected package(s)
-   - For external contributions (PRs), verify format: `Description ([#N](url) by [@user](url))`
-
-5. **Cross-package duplication rule:**
-   Changes in `ai`, `agent` or `tui` that affect end users should be duplicated to `coding-agent` changelog, since coding-agent is the user-facing package that depends on them.
-
-6. **Add New Features section after changelog fixes:**
-   - Insert a `### New Features` section at the start of `## [Unreleased]` in `packages/coding-agent/CHANGELOG.md`.
-   - Propose the top new features to the user for confirmation before writing them.
-   - Link to relevant docs and sections whenever possible.
-
-7. **Report:**
-   - List commits with missing entries
-   - List entries that need cross-package duplication
-   - Add any missing entries directly
-
-## Changelog Format Reference
-
-Sections (in order):
-- `### Breaking Changes` - API changes requiring migration
-- `### Added` - New features
-- `### Changed` - Changes to existing functionality
-- `### Fixed` - Bug fixes
-- `### Removed` - Removed features
-
-Attribution:
-- Internal: `Fixed foo ([#123](https://github.com/hansjm10/Volt/issues/123))`
-- External: `Added bar ([#456](https://github.com/hansjm10/Volt/pull/456) by [@user](https://github.com/user))`
+4. **Report and fix:**
+   - List fragments that need rewording, re-kinding, or merging, then apply
+     the fixes after confirming with the user.

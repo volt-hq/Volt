@@ -1,9 +1,5 @@
 # Volt Coding Agent
 
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](../../CONTRIBUTING.md).
-
----
-
 Volt is a minimal terminal coding harness. Adapt volt to your workflows, not the other way around, without having to fork and modify volt internals. Extend it with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), and [Themes](#themes). Put your extensions, skills, prompt templates, and themes in [Volt Packages](#volt-packages) and share them with others via npm or git.
 
 Volt is maintained and distributed by [Jordan Hans](https://github.com/hansjm10).
@@ -703,7 +699,7 @@ volt --thinking high "Solve this complex problem"
 
 ## Contributing & Development
 
-See [CONTRIBUTING.md](../../CONTRIBUTING.md) for guidelines and [docs/development.md](docs/development.md) for setup, forking, and debugging.
+See [CONTRIBUTING.md](../../CONTRIBUTING.md) for guidelines and [docs/development.md](https://github.com/hansjm10/Volt/blob/main/packages/coding-agent/docs/development.md) for setup, forking, and debugging.
 
 ---
 

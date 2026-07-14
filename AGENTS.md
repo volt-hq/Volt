@@ -69,7 +69,7 @@ If rebase conflicts occur:
 
 ## Issues and PRs
 
-See `CONTRIBUTING.md` for the contributor gate (auto-close workflows, `lgtm`/`lgtmi`, quality bar).
+See `CONTRIBUTING.md` for the issue quality bar and PR requirements.
 
 When reviewing PRs:
 
@@ -106,16 +106,31 @@ tmux kill-session -t volt-test
 
 ## Changelog
 
-Location: `packages/*/CHANGELOG.md` (one per package).
+One changelog for the whole product: `packages/coding-agent/CHANGELOG.md`. Never edit it directly — release tooling generates each version section from changeset fragments, and released sections (e.g. `## [0.1.0]`) are immutable.
 
-Sections under `## [Unreleased]`: `### Breaking Changes` (API changes requiring migration), `### Added`, `### Changed`, `### Fixed`, `### Removed`.
+The changelog/changeset/release workflow is Volt-development tooling and stays repo-only: `scripts/`, `.changeset/`, `.volt/`, `.husky/`, and `.github/` must never enter a package `files` list, the standalone archive, or the built-in command set. A release-security test pins the shipped file sets; `CHANGELOG.md` is the only workflow artifact users receive.
+
+Docs under `packages/coding-agent/docs/` must pick an audience: user-facing docs go in `docs.json` navigation (published to volt-cli.dev and shipped in the npm package); development-facing docs are named `*-design.md` (or are `development.md`/`tla/`) and stay repo-only — link to them with absolute GitHub URLs from user docs. A release-security test enforces the split.
+
+Every user-visible change adds one fragment file in `.changeset/` (unique kebab-case name, `.md`):
+
+```md
+---
+"@hansjm10/volt-coding-agent": patch
+---
+
+fix(daemon): Fixed workspace unregister leaving orphaned worktree records. ([#123](https://github.com/hansjm10/Volt/issues/123))
+```
 
 Rules:
 
-- All new entries go under `## [Unreleased]`. Read the full section first and append to existing subsections; never duplicate them.
-- Released version sections (e.g. `## [0.12.2]`) are immutable; never modify them.
+- The first summary line is `kind(area): One user-facing sentence.` Kind is one of `feature` (rendered under Highlights), `improvement`, `fix`, `breaking`, or `internal` (never rendered); `area` is an optional lowercase slug (`daemon`, `remote`, `tui`, `lsp`, `subagents`, `mcp`, ...).
+- Describe observable behavior, not implementation. Paragraphs below the first line become indented detail; `breaking` fragments must include migration guidance there.
+- Front matter lists the touched package(s) with bump `patch`; `breaking` uses `minor` and `major` is never used. When in doubt, list `@hansjm10/volt-coding-agent`.
+- Easiest path: `npm run changeset:add -- <kind> [area] "One user-facing sentence."` writes a validated fragment; `npm run changeset:draft` has Volt draft one from the current diff (review before committing), and `/changeset` does the same inside a Volt session. Preview the pending release section with `npm run changelog:preview`.
+- CI fails pull requests that change `packages/*/src` without adding a fragment (pure refactors use kind `internal`), so add the fragment in the same change.
 
-Attribution:
+Attribution stays inline in the sentence:
 
 - Internal (from issues): `Fixed foo bar ([#123](https://github.com/hansjm10/Volt/issues/123))`
 - External contributions: `Added feature X ([#456](https://github.com/hansjm10/Volt/pull/456) by [@username](https://github.com/username))`
@@ -172,7 +187,6 @@ intended default provider for both install forms.
 5. Confirm npm trusted publishing succeeds before the draft GitHub Release is
    published. Confirm the published release contains only the approved assets,
    and verify all four npm versions, provenance, and the `beta` dist-tag.
-6. Review and merge the generated post-release changelog pull request.
 
 Normal release automation never pushes directly to `main`, creates a tag from
 an ordinary `GITHUB_TOKEN`, publishes npm locally, stores an npm token, rebuilds

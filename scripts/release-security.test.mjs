@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -33,6 +33,7 @@ import {
 } from "./release-phase.mjs";
 import { assertReleaseTagAvailable, getPlannedReleaseVersion, planReleaseTarget } from "./release-target.mjs";
 import {
+	RELEASE_CHANGELOG,
 	RELEASE_PACKAGE_IDENTITIES,
 	RELEASE_PACKAGES,
 	verifyReleaseGitProvenance,
@@ -190,7 +191,6 @@ test("release finalization requires explicit sign-off for the exact prepared can
 	assert.deepEqual(parseReleaseInvocation(["prepare-pr", "minor"]), { phase: "prepare-pr", target: "minor" });
 	assert.deepEqual(parseReleaseInvocation(["finalize", commit]), { phase: "finalize", candidateCommit: commit });
 	assert.deepEqual(parseReleaseInvocation(["authorize", commit]), { phase: "authorize", candidateCommit: commit });
-	assert.deepEqual(parseReleaseInvocation(["next-cycle", commit]), { phase: "next-cycle", candidateCommit: commit });
 	for (const invalid of [
 		["patch"],
 		["prepare"],
@@ -204,8 +204,7 @@ test("release finalization requires explicit sign-off for the exact prepared can
 		["finalize", "A".repeat(40)],
 		["finalize", "a".repeat(39)],
 		["finalize", commit, "extra"],
-		["next-cycle", "a".repeat(39)],
-		["next-cycle", commit, "extra"],
+		["next-cycle", commit],
 	]) {
 		assert.throws(() => parseReleaseInvocation(invalid), /Usage:/);
 	}
@@ -370,7 +369,7 @@ test("release finalization requires explicit sign-off for the exact prepared can
 	assert.equal(packageManifest.scripts["release:finalize"], "node scripts/release.mjs finalize");
 	assert.equal(packageManifest.scripts["release:prepare-pr"], "node scripts/release.mjs prepare-pr");
 	assert.equal(packageManifest.scripts["release:authorize"], "node scripts/release.mjs authorize");
-	assert.equal(packageManifest.scripts["release:next-cycle"], "node scripts/release.mjs next-cycle");
+	assert.equal(packageManifest.scripts["release:next-cycle"], undefined);
 
 	const releaseScript = readFileSync("scripts/release.mjs", "utf8");
 	const prepareFlow = releaseScript.slice(
@@ -392,9 +391,12 @@ test("release finalization requires explicit sign-off for the exact prepared can
 	const finalizeFlow = releaseScript.slice(releaseScript.indexOf("function finalizeRelease"), releaseScript.indexOf("console.log(`\\n=== Release"));
 	assert.doesNotMatch(prepareFlow, /git tag|git push origin \$\{tag\}/);
 	assert.doesNotMatch(prepareFlow, /git push/);
-	assert.doesNotMatch(preparePrFlow, /git push|git tag|addUnreleasedSection/);
+	assert.ok(prepareFlow.indexOf("readReleaseChangesets()") < prepareFlow.indexOf("bumpOrSetVersion(target)"));
+	assert.match(prepareFlow, /assertReleaseTargetSatisfiesChangesets\(currentVersion, plannedVersion, changesets\)/);
+	assert.match(prepareFlow, /applyReleaseSection\(/);
+	assert.doesNotMatch(preparePrFlow, /git push|git tag/);
 	assert.match(preparePrFlow, /prepareReleaseCommit\(target, \{ requireMainBranch: false \}\)/);
-	assert.doesNotMatch(authorizeFlow, /git tag|git push|git commit|addUnreleasedSection/);
+	assert.doesNotMatch(authorizeFlow, /git tag|git push|git commit|applyReleaseSection/);
 	assert.match(authorizeFlow, /requireDigest: true/);
 	assert.match(authorizeFlow, /verifyReleaseAuthorization/);
 	assert.match(authorizeFlow, /createReleaseAuthorization/);
@@ -406,18 +408,14 @@ test("release finalization requires explicit sign-off for the exact prepared can
 	assert.match(releaseScript, /verifyApprovedCandidateRun\(candidateCommit, candidateRunId, candidateArtifactDigest\)/);
 	assert.match(finalizeFlow, /candidateTagAttestation\(candidateCommit, candidateRunId, candidateArtifactDigest\)/);
 	assert.match(finalizeFlow, /git tag -a -m .* -m .* \$\{tag\} \$\{candidateCommit\}/s);
-	assert.ok(finalizeFlow.indexOf("git push origin ${tag}") < finalizeFlow.indexOf("addUnreleasedSection()"));
-	const nextCycleFlow = releaseScript.slice(
-		releaseScript.indexOf("function nextCycle"),
-		releaseScript.indexOf("console.log(`\\n=== Release"),
+	assert.match(finalizeFlow, /git push origin \$\{tag\}/);
+	assert.doesNotMatch(finalizeFlow, /git push origin main|applyReleaseSection/);
+	assert.doesNotMatch(releaseScript, /nextCycle|next-cycle|addUnreleasedSection|\[Unreleased\]/);
+	const authorizationChecks = releaseScript.slice(
+		releaseScript.indexOf("function verifyReleaseAuthorization"),
+		releaseScript.indexOf("function approvedCandidateEnvironment"),
 	);
-	assert.match(nextCycleFlow, /requireCleanPublishedMain\(\)/);
-	assert.match(nextCycleFlow, /git cat-file -t refs\/tags\/\$\{tag\}/);
-	assert.match(nextCycleFlow, /git rev-parse .*refs\/tags\/\$\{tag\}\^\{commit\}/);
-	assert.match(nextCycleFlow, /assertReleaseTagMatchesCandidate/);
-	assert.match(nextCycleFlow, /docs: start post-\$\{tag\} changelog cycle/);
-	assert.match(nextCycleFlow, /writeGitHubOutputs\(outputPath, \{ tag, commit: nextCycleCommit \}\)/);
-	assert.doesNotMatch(nextCycleFlow, /git push/);
+	assert.match(authorizationChecks, /assertNoPendingChangesets\(\)/);
 });
 
 test("GitHub-native release phases preserve their mutation boundaries end to end", () => {
@@ -469,8 +467,14 @@ test("GitHub-native release phases preserve their mutation boundaries end to end
 					2,
 				)}\n`,
 			);
-			writeFileSync(join(path, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n- Fixture change.\n");
 		}
+		writeFileSync(join(repository, "packages", "coding-agent", "CHANGELOG.md"), "# Changelog\n\n## [0.1.0] - 2026-07-13\n\nInitial release.\n");
+		mkdirSync(join(repository, ".changeset"), { recursive: true });
+		writeFileSync(join(repository, ".changeset", "README.md"), "# Changesets fixture\n");
+		writeFileSync(
+			join(repository, ".changeset", "fixture-fix.md"),
+			'---\n"@hansjm10/volt-coding-agent": patch\n---\n\nfix(daemon): Fixed a fixture defect.\n',
+		);
 
 		writeNodeCommand(
 			fakeBin,
@@ -546,6 +550,10 @@ if (process.argv.join(" ").includes("/artifacts?")) {
 		assert.equal(git(["rev-parse", "refs/remotes/origin/main"]), initialCommit);
 		assert.equal(git(["tag", "--list"]), "");
 		assert.equal(git(["status", "--porcelain"]), "");
+		const preparedChangelog = readFileSync(join(repository, "packages", "coding-agent", "CHANGELOG.md"), "utf8");
+		assert.match(preparedChangelog, /^# Changelog\n\n## \[0\.1\.1\] - \d{4}-\d{2}-\d{2}\n\n### Fixes\n\n- \*\*daemon:\*\* Fixed a fixture defect\.\n\n## \[0\.1\.0\]/);
+		assert.equal(existsSync(join(repository, ".changeset", "fixture-fix.md")), false);
+		assert.equal(readFileSync(join(repository, ".changeset", "README.md"), "utf8"), "# Changesets fixture\n");
 		assert.match(preparedOutput, /resulting exact main SHA/);
 		assert.match(preparedOutput, /post-merge main SHA/);
 		assert.doesNotMatch(preparedOutput, new RegExp(`Build Standalone Candidate workflow with commit ${candidateCommit}`));
@@ -578,9 +586,7 @@ if (process.argv.join(" ").includes("/artifacts?")) {
 		assert.equal(readFileSync(authorizationOutput, "utf8"), "");
 
 		const refsBeforeAuthorization = git(["show-ref"]);
-		const changelogsBeforeAuthorization = packageIdentities.map(([packageDirectory]) =>
-			readFileSync(join(repository, "packages", packageDirectory, "CHANGELOG.md"), "utf8"),
-		);
+		const changelogBeforeAuthorization = readFileSync(join(repository, "packages", "coding-agent", "CHANGELOG.md"), "utf8");
 		execFileSync(process.execPath, [releaseScript, "authorize", candidateCommit], {
 			cwd: repository,
 			encoding: "utf8",
@@ -598,36 +604,10 @@ if (process.argv.join(" ").includes("/artifacts?")) {
 		assert.equal(git(["rev-parse", "HEAD"]), candidateCommit);
 		assert.equal(git(["show-ref"]), refsBeforeAuthorization);
 		assert.equal(git(["status", "--porcelain"]), "");
-		assert.deepEqual(
-			packageIdentities.map(([packageDirectory]) =>
-				readFileSync(join(repository, "packages", packageDirectory, "CHANGELOG.md"), "utf8"),
-			),
-			changelogsBeforeAuthorization,
+		assert.equal(
+			readFileSync(join(repository, "packages", "coding-agent", "CHANGELOG.md"), "utf8"),
+			changelogBeforeAuthorization,
 		);
-
-		const tagMessage = Buffer.from(authorization["tag-message-base64"], "base64").toString("utf8");
-		git(["tag", "-a", "v0.1.1", "-m", tagMessage, candidateCommit]);
-		git(["push", "origin", "v0.1.1"]);
-		const nextCycleOutput = join(directory, "next-cycle-output");
-		writeFileSync(nextCycleOutput, "");
-		execFileSync(process.execPath, [releaseScript, "next-cycle", candidateCommit], {
-			cwd: repository,
-			encoding: "utf8",
-			env: { ...releaseEnvironment, GITHUB_OUTPUT: nextCycleOutput },
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-		const nextCycleCommit = git(["rev-parse", "HEAD"]);
-		assert.notEqual(nextCycleCommit, candidateCommit);
-		assert.equal(git(["log", "-1", "--format=%s"]), "docs: start post-v0.1.1 changelog cycle");
-		assert.equal(git(["rev-parse", "refs/remotes/origin/main"]), candidateCommit);
-		assert.equal(git(["rev-parse", "refs/tags/v0.1.1^{commit}"]), candidateCommit);
-		assert.equal(readFileSync(nextCycleOutput, "utf8"), formatGitHubOutputs({ tag: "v0.1.1", commit: nextCycleCommit }));
-		assert.equal(git(["status", "--porcelain"]), "");
-		for (const [packageDirectory] of packageIdentities) {
-			const changelog = readFileSync(join(repository, "packages", packageDirectory, "CHANGELOG.md"), "utf8");
-			assert.match(changelog, /^# Changelog\r?\n\r?\n## \[Unreleased\]\r?\n\r?\n## \[0\.1\.1\]/);
-			assert.equal(changelog.match(/^## \[Unreleased\]$/gm)?.length, 1);
-		}
 	} finally {
 		rmSync(directory, { force: true, recursive: true });
 	}
@@ -740,7 +720,7 @@ test("tag workflow bootstrap verification supports absent, partial, and idempote
 	);
 });
 
-test("release package versions and changelogs must match the tag", () => {
+test("release package versions and the product changelog must match the tag", () => {
 	const files = new Map();
 	for (const { directory, name } of RELEASE_PACKAGE_IDENTITIES) {
 		files.set(
@@ -751,16 +731,107 @@ test("release package versions and changelogs must match the tag", () => {
 				repository: { url: "git+https://github.com/hansjm10/Volt.git", directory },
 			}),
 		);
-		files.set(`${directory}/CHANGELOG.md`, "# Changelog\n\n## [1.2.3] - 2026-07-12\n");
 	}
+	files.set(RELEASE_CHANGELOG, "# Changelog\n\n## [1.2.3] - 2026-07-12\n");
 	assert.equal(verifyReleasePackageMetadata("v1.2.3", (path) => files.get(path)), "1.2.3");
-	files.set("packages/ai/CHANGELOG.md", "A link to ## [1.2.3] is not a release heading.\n");
+	assert.equal(RELEASE_CHANGELOG, "packages/coding-agent/CHANGELOG.md");
+	files.set(RELEASE_CHANGELOG, "A link to ## [1.2.3] is not a release heading.\n");
 	assert.throws(() => verifyReleasePackageMetadata("v1.2.3", (path) => files.get(path)), /no release section/);
-	files.set("packages/ai/CHANGELOG.md", "# Changelog\n\n## [1.2.3] - 2026-07-12\n");
+	files.set(RELEASE_CHANGELOG, "# Changelog\n\n## [1.2.3] - 2026-07-12\n");
 	files.set("packages/ai/package.json", JSON.stringify({ name: "@hansjm10/volt-ai", version: "1.2.4" }));
 	assert.throws(() => verifyReleasePackageMetadata("v1.2.3", (path) => files.get(path)), /expected 1\.2\.3/);
 	files.set("packages/ai/package.json", JSON.stringify({ name: "@earendil-works/volt-ai", version: "1.2.3" }));
 	assert.throws(() => verifyReleasePackageMetadata("v1.2.3", (path) => files.get(path)), /expected @hansjm10\/volt-ai/);
+});
+
+test("shipped packages and standalone archives contain no development workflow tooling", () => {
+	const rootManifest = JSON.parse(readFileSync("package.json", "utf8"));
+	assert.equal(rootManifest.private, true, "the monorepo root must never be publishable");
+
+	const expectedFiles = {
+		"packages/agent": ["dist", "README.md", "LICENSE"],
+		"packages/ai": ["dist", "README.md", "LICENSE"],
+		"packages/coding-agent": [
+			"dist",
+			"docs",
+			"!docs/development.md",
+			"!docs/*-design.md",
+			"!docs/tla",
+			"!docs/tla/**",
+			"!docs/images/doom-extension.png",
+			"examples",
+			"!examples/README.binary.md",
+			"!examples/extensions/doom-overlay",
+			"!examples/extensions/doom-overlay/**",
+			"!examples/**/node_modules",
+			"!examples/**/node_modules/**",
+			"containerization.md",
+			"CHANGELOG.md",
+			"LICENSE",
+			"THIRD-PARTY-NOTICES.md",
+			"BINARY-CAPABILITIES.md",
+			"npm-shrinkwrap.json",
+		],
+		"packages/tui": [
+			"dist/**/*",
+			"native/win32/prebuilds/**/*.node",
+			"native/darwin/prebuilds/**/*.node",
+			"README.md",
+			"LICENSE",
+		],
+	};
+	const devToolingMarker = /\.changeset|\.volt|\.husky|\.github|scripts\//;
+	for (const { directory } of RELEASE_PACKAGE_IDENTITIES) {
+		const manifest = JSON.parse(readFileSync(`${directory}/package.json`, "utf8"));
+		assert.deepEqual(
+			manifest.files,
+			expectedFiles[directory],
+			`${directory} ships an unexpected file set; the changelog/changeset/release workflow is Volt-development tooling and stays repo-only — update this pin only for deliberate product packaging changes`,
+		);
+		for (const entry of manifest.files) {
+			assert.doesNotMatch(entry, devToolingMarker, `${directory} files entry references development tooling: ${entry}`);
+		}
+	}
+
+	const buildStandalone = readFileSync("scripts/build-standalone.mjs", "utf8");
+	assert.match(
+		buildStandalone,
+		/"package\.json",\s*"README\.md",\s*"CHANGELOG\.md",\s*"LICENSE",\s*"THIRD-PARTY-NOTICES\.md",\s*"BINARY-CAPABILITIES\.md",\s*"npm-shrinkwrap\.json",\s*\]/,
+		"the standalone archive's staged top-level file list changed; keep development tooling out and update this pin deliberately",
+	);
+	assert.doesNotMatch(buildStandalone, /\.changeset\/|\.volt\/|\.husky\//);
+});
+
+test("published docs are user-facing: docs.json navigation is the allowlist for the site and the npm package", () => {
+	const docsDirectory = "packages/coding-agent/docs";
+	const manifest = JSON.parse(readFileSync(`${docsDirectory}/docs.json`, "utf8"));
+	const navPaths = manifest.navigation.flatMap((section) => section.items.map((item) => item.path));
+	const navSet = new Set(navPaths);
+	assert.equal(navPaths.length, navSet.size, "docs.json navigation lists a doc twice");
+
+	const isDevelopmentDoc = (file) => file === "development.md" || file.endsWith("-design.md");
+	for (const path of navPaths) {
+		assert.ok(existsSync(`${docsDirectory}/${path}`), `docs.json navigation lists a missing doc: ${path}`);
+		assert.ok(!isDevelopmentDoc(path), `${path} is development-facing and must not be published to the site or the npm package`);
+	}
+	for (const file of readdirSync(docsDirectory).filter((name) => name.endsWith(".md"))) {
+		assert.ok(
+			navSet.has(file) || isDevelopmentDoc(file),
+			`docs/${file} has no audience: add it to docs.json navigation (user-facing, published) or name it *-design.md (development-facing, repo-only)`,
+		);
+	}
+
+	const codingAgentManifest = JSON.parse(readFileSync("packages/coding-agent/package.json", "utf8"));
+	for (const exclusion of ["!docs/development.md", "!docs/*-design.md", "!docs/tla", "!docs/tla/**"]) {
+		assert.ok(codingAgentManifest.files.includes(exclusion), `packages/coding-agent must exclude ${exclusion} from npm`);
+	}
+
+	const syncScript = readFileSync("site/scripts/sync-docs.mjs", "utf8");
+	assert.match(
+		syncScript,
+		/manifest\.navigation\.flatMap/,
+		"site/scripts/sync-docs.mjs must derive the published doc set from docs.json navigation, not the docs directory listing",
+	);
 });
 
 test("release tooling publishes only the canonical Volt package identities under the beta dist-tag", () => {
@@ -1114,13 +1185,12 @@ test("release preparation is owner-triggered and can only open a reviewed releas
 	assert.doesNotMatch(ciCheckout, /^\s+ref:/m);
 });
 
-test("release approval separates read-only authorization, App tagging, publication, and next-cycle PRs", () => {
+test("release approval separates read-only authorization, App tagging, and publication", () => {
 	const workflow = readFileSync(".github/workflows/approve-release.yml", "utf8");
 	const triggers = workflow.slice(workflow.indexOf("on:"), workflow.indexOf("permissions:"));
 	const preflight = workflow.slice(workflow.indexOf("  preflight:"), workflow.indexOf("  tag-release:"));
 	const tagRelease = workflow.slice(workflow.indexOf("  tag-release:"), workflow.indexOf("  dispatch-publication:"));
-	const dispatch = workflow.slice(workflow.indexOf("  dispatch-publication:"), workflow.indexOf("  open-next-cycle:"));
-	const nextCycle = workflow.slice(workflow.indexOf("  open-next-cycle:"));
+	const dispatch = workflow.slice(workflow.indexOf("  dispatch-publication:"));
 
 	assert.match(triggers, /^  workflow_dispatch:/m);
 	assert.doesNotMatch(triggers, /^  (?:push|pull_request|pull_request_target|release|schedule|workflow_call):/m);
@@ -1284,27 +1354,7 @@ test("release approval separates read-only authorization, App tagging, publicati
 	assert.match(dispatch, /ref: process\.env\.RELEASE_TAG/);
 	assert.match(dispatch, /inputs: \{ tag: process\.env\.RELEASE_TAG \}/);
 
-	assert.match(nextCycle, /needs: \[preflight, tag-release\]/);
-	assert.match(nextCycle, /continue-on-error: true/);
-	assert.match(nextCycle, /permissions:\s+contents: write\s+pull-requests: write/);
-	assert.doesNotMatch(nextCycle, /actions: write/);
-	assert.match(nextCycle, /ref: main/);
-	assert.match(nextCycle, /persist-credentials: false/);
-	assert.match(nextCycle, /git rev-parse HEAD.*CANDIDATE_COMMIT/);
-	assert.match(nextCycle, /node scripts\/release\.mjs next-cycle "\$\{CANDIDATE_COMMIT\}"/);
-	assert.match(nextCycle, /branch="post-release\/\$\{RELEASE_TAG\}-\$\{GITHUB_RUN_ID\}"/);
-	assert.doesNotMatch(nextCycle, /GITHUB_RUN_ATTEMPT/);
-	assert.match(nextCycle, /git\/ref\/heads\/\$\{branch\}/);
-	assert.match(nextCycle, /git fetch origin "refs\/heads\/\$\{branch\}:\$\{remote_ref\}"/);
-	assert.match(nextCycle, /git rev-parse HEAD\^\{tree\}.*git rev-parse "\$\{remote_ref\}\^\{tree\}"/);
-	assert.match(nextCycle, /git rev-parse "\$\{remote_ref\}\^".*CANDIDATE_COMMIT/);
-	assert.match(nextCycle, /git push origin "HEAD:refs\/heads\/\$\{branch\}"/);
-	assert.match(nextCycle, /gh pr list --state all --head "\$\{branch\}" --json url,mergedAt,state/);
-	assert.match(nextCycle, /gh pr create[\s\S]*?--base main[\s\S]*?--head "\$\{branch\}"/);
-	assert.match(nextCycle, /gh pr reopen "\$\{pr_url\}"/);
-	assert.match(nextCycle, /Approve the pending pull-request workflows so CI tests the GitHub merge ref/);
-	assert.doesNotMatch(nextCycle, /gh workflow run|createWorkflowDispatch/);
-	assert.doesNotMatch(nextCycle, /git push origin (?:main|"?(?:HEAD:)?refs\/heads\/main)/);
+	assert.doesNotMatch(workflow, /next-cycle|open-next-cycle|\[Unreleased\]/);
 });
 
 test("publisher is dispatch-only, tag-bound, approval-bound, and cannot replace release bytes", () => {
