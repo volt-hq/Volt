@@ -2994,8 +2994,8 @@ export class AgentSession {
 				: undefined;
 		const subagentRegistryManager =
 			isSubagentRuntime &&
-			this._subagentToolManager?.listDelegations !== undefined &&
-			this._subagentToolManager.followDelegation !== undefined
+			(this._subagentToolManager?.listDelegations !== undefined ||
+				this._subagentToolManager?.followDelegation !== undefined)
 				? this._subagentToolManager
 				: undefined;
 		const baseToolDefinitions = this._baseToolsOverride

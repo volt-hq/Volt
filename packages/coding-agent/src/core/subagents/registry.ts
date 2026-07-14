@@ -22,6 +22,12 @@ export interface SubagentRegistryRecord {
 	error?: string;
 }
 
+/** Bounded newest-first view of the registry plus its unbounded logical size. */
+export interface SubagentRegistrySnapshot {
+	records: SubagentRegistryRecord[];
+	total: number;
+}
+
 /** Terminal outcome of a followed run, including its bounded final output. */
 export interface SubagentFollowResult {
 	id: string;
@@ -39,6 +45,10 @@ export type SubagentSpawnConfirmationStatus = "reserved" | "pending" | "claimed"
 /** Atomic registry snapshot and reservation result for a proposed spawn request. */
 export interface SubagentSpawnConfirmationPreflight {
 	records: SubagentRegistryRecord[];
+	/** Full registry size when records is a bounded first page. */
+	total?: number;
+	/** Full-registry status counts when records is bounded. */
+	statusCounts?: Record<SubagentRegistryStatus, number>;
 	status: SubagentSpawnConfirmationStatus;
 	expiresAt: number;
 	/** Present only when this call created the reservation. */
@@ -54,6 +64,8 @@ interface SubagentRegistryEntry {
 	id: string;
 	/** Monotonic registration order, so listing stays stable within one millisecond. */
 	sequence: number;
+	previousRunning: SubagentRegistryEntry | undefined;
+	nextRunning: SubagentRegistryEntry | undefined;
 	parentId: string | undefined;
 	agent: SubagentRegistryRecord["agent"];
 	path: string[];
@@ -80,6 +92,7 @@ const REGISTRY_KNOWN_ID_PREVIEW_LIMIT = 20;
 const MAX_REGISTRY_RECORDS = 500;
 const SUBAGENT_SPAWN_CONFIRMATION_TTL_MS = 5 * 60 * 1000;
 const MAX_PENDING_SPAWN_CONFIRMATIONS = 500;
+const SPAWN_CONFIRMATION_RECORD_LIMIT = 50;
 /** Node key representing the root session in the wait-dependency graph. */
 const ROOT_NODE = "root";
 
@@ -102,15 +115,20 @@ function boundText(text: string, limit: number): string {
  */
 export class SubagentRegistry {
 	private readonly entries = new Map<string, SubagentRegistryEntry>();
+	/** Terminal entries stay sorted by registration sequence and are capped at 500. */
+	private readonly terminalEntries: SubagentRegistryEntry[] = [];
+	private runningTail: SubagentRegistryEntry | undefined;
 	private readonly spawnConfirmations = new Map<string, SubagentSpawnConfirmationEntry>();
 	/** Active follow waits, follower node key -> target id and waiter count, for deadlock detection. */
 	private readonly activeFollows = new Map<string, Map<string, number>>();
 	private nextSequence = 0;
 
 	register(options: { id: string; parentId?: string; agent: SubagentRegistryRecord["agent"]; path: string[] }): void {
-		this.entries.set(options.id, {
+		const entry: SubagentRegistryEntry = {
 			id: options.id,
 			sequence: this.nextSequence++,
+			previousRunning: undefined,
+			nextRunning: undefined,
 			parentId: options.parentId,
 			agent: { ...options.agent },
 			path: [...options.path],
@@ -121,7 +139,9 @@ export class SubagentRegistry {
 			error: undefined,
 			output: undefined,
 			waiters: [],
-		});
+		};
+		this.entries.set(options.id, entry);
+		this.appendRunning(entry);
 		this.evictOldestTerminal();
 	}
 
@@ -142,10 +162,12 @@ export class SubagentRegistry {
 		if (!entry || entry.status !== "running") {
 			return;
 		}
+		this.removeRunning(entry);
 		entry.status = status;
 		entry.finishedAt = Date.now();
 		entry.error = result.error === undefined ? undefined : boundText(result.error, REGISTRY_ERROR_LIMIT_CHARS);
 		entry.output = result.output === undefined ? undefined : boundText(result.output, REGISTRY_OUTPUT_LIMIT_CHARS);
+		this.insertTerminal(entry);
 		const waiters = entry.waiters;
 		entry.waiters = [];
 		for (const waiter of waiters) {
@@ -156,13 +178,15 @@ export class SubagentRegistry {
 
 	/** All known runs, running first, then newest first — mirrors activity ordering. */
 	list(): SubagentRegistryRecord[] {
-		return Array.from(this.entries.values())
-			.sort((left, right) => {
-				if (left.status === "running" && right.status !== "running") return -1;
-				if (left.status !== "running" && right.status === "running") return 1;
-				return right.sequence - left.sequence;
-			})
-			.map((entry) => this.toRecord(entry));
+		return this.collectRecords(this.entries.size);
+	}
+
+	/** Newest records without sorting or cloning entries beyond the requested bound. */
+	snapshot(limit: number): SubagentRegistrySnapshot {
+		if (!Number.isSafeInteger(limit) || limit < 0) {
+			throw new Error("Subagent registry snapshot limit must be a non-negative safe integer");
+		}
+		return { records: this.collectRecords(limit), total: this.entries.size };
 	}
 
 	get(id: string): SubagentRegistryRecord | undefined {
@@ -176,13 +200,18 @@ export class SubagentRegistry {
 	 * of receiving independent confirmation tokens.
 	 */
 	prepareSpawnConfirmation(requestKey: string): SubagentSpawnConfirmationPreflight {
-		const records = this.list();
+		const snapshot = this.snapshot(SPAWN_CONFIRMATION_RECORD_LIMIT);
+		const registrySummary = {
+			records: snapshot.records,
+			total: snapshot.total,
+			statusCounts: this.getStatusCounts(),
+		};
 		const now = Date.now();
 		this.pruneExpiredSpawnConfirmations(now);
 		const existing = this.spawnConfirmations.get(requestKey);
 		if (existing) {
 			return {
-				records,
+				...registrySummary,
 				status: existing.status,
 				expiresAt: existing.expiresAt,
 			};
@@ -196,7 +225,7 @@ export class SubagentRegistry {
 		};
 		this.spawnConfirmations.set(requestKey, confirmation);
 		return {
-			records,
+			...registrySummary,
 			status: "reserved",
 			expiresAt: confirmation.expiresAt,
 			token: confirmation.token,
@@ -353,15 +382,75 @@ export class SubagentRegistry {
 		};
 	}
 
+	private getStatusCounts(): Record<SubagentRegistryStatus, number> {
+		const counts: Record<SubagentRegistryStatus, number> = {
+			running: this.entries.size - this.terminalEntries.length,
+			completed: 0,
+			failed: 0,
+			aborted: 0,
+		};
+		for (const entry of this.terminalEntries) {
+			counts[entry.status] += 1;
+		}
+		return counts;
+	}
+
+	private collectRecords(limit: number): SubagentRegistryRecord[] {
+		const records: SubagentRegistryRecord[] = [];
+		let running = this.runningTail;
+		while (running && records.length < limit) {
+			records.push(this.toRecord(running));
+			running = running.previousRunning;
+		}
+		for (let index = this.terminalEntries.length - 1; index >= 0 && records.length < limit; index -= 1) {
+			const terminal = this.terminalEntries[index];
+			if (terminal) {
+				records.push(this.toRecord(terminal));
+			}
+		}
+		return records;
+	}
+
+	private appendRunning(entry: SubagentRegistryEntry): void {
+		entry.previousRunning = this.runningTail;
+		entry.nextRunning = undefined;
+		if (this.runningTail) {
+			this.runningTail.nextRunning = entry;
+		}
+		this.runningTail = entry;
+	}
+
+	private removeRunning(entry: SubagentRegistryEntry): void {
+		if (entry.previousRunning) {
+			entry.previousRunning.nextRunning = entry.nextRunning;
+		}
+		if (entry.nextRunning) {
+			entry.nextRunning.previousRunning = entry.previousRunning;
+		} else {
+			this.runningTail = entry.previousRunning;
+		}
+		entry.previousRunning = undefined;
+		entry.nextRunning = undefined;
+	}
+
+	private insertTerminal(entry: SubagentRegistryEntry): void {
+		let low = 0;
+		let high = this.terminalEntries.length;
+		while (low < high) {
+			const middle = Math.floor((low + high) / 2);
+			const candidate = this.terminalEntries[middle];
+			if (candidate && candidate.sequence < entry.sequence) {
+				low = middle + 1;
+			} else {
+				high = middle;
+			}
+		}
+		this.terminalEntries.splice(low, 0, entry);
+	}
+
 	private evictOldestTerminal(): void {
 		while (this.entries.size > MAX_REGISTRY_RECORDS) {
-			let oldestTerminal: SubagentRegistryEntry | undefined;
-			for (const entry of this.entries.values()) {
-				if (entry.status !== "running") {
-					oldestTerminal = entry;
-					break;
-				}
-			}
+			const oldestTerminal = this.terminalEntries.shift();
 			if (!oldestTerminal) return;
 			this.entries.delete(oldestTerminal.id);
 		}

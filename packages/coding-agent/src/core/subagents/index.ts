@@ -506,6 +506,7 @@ export {
 	type SubagentFollowResult,
 	SubagentRegistry,
 	type SubagentRegistryRecord,
+	type SubagentRegistrySnapshot,
 	type SubagentRegistryStatus,
 	type SubagentSpawnConfirmationLease,
 	type SubagentSpawnConfirmationPreflight,

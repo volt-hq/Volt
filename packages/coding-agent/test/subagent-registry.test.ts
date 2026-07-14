@@ -29,6 +29,26 @@ describe("SubagentRegistry", () => {
 		expect(registry.list().map((record) => record.status)).toEqual(["running", "running", "completed"]);
 	});
 
+	it("returns bounded snapshots with an accurate total for unbounded running records", () => {
+		const registry = new SubagentRegistry();
+		for (let index = 0; index < 600; index += 1) {
+			registerRunning(registry, `sa_${index}`);
+		}
+
+		const snapshot = registry.snapshot(25);
+
+		expect(snapshot.total).toBe(600);
+		expect(snapshot.records).toHaveLength(25);
+		expect(snapshot.records.map((record) => record.id)).toEqual(
+			Array.from({ length: 25 }, (_value, index) => `sa_${599 - index}`),
+		);
+
+		const preflight = registry.prepareSpawnConfirmation("large-request");
+		expect(preflight.records).toHaveLength(50);
+		expect(preflight.total).toBe(600);
+		expect(preflight.statusCounts).toEqual({ running: 600, completed: 0, failed: 0, aborted: 0 });
+	});
+
 	it("keeps the first task and bounds long prompts", () => {
 		const registry = new SubagentRegistry();
 		registerRunning(registry, "sa_1", { task: "x".repeat(5_000) });

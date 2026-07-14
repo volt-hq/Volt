@@ -29,6 +29,7 @@ import {
 } from "../src/core/subagents/index.ts";
 import {
 	createSubagentRegistryTool,
+	createSubagentRegistryToolDefinition,
 	createSubagentTool,
 	createSubagentToolDefinition,
 	DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES,
@@ -160,6 +161,79 @@ describe("subagent tool", () => {
 		expect(tool.description).toContain("design-doc");
 		expect(tool.description).toContain("security-reviewer");
 		expect(tool.description).not.toContain("red-test-runner");
+	});
+
+	it("advertises only registry modes implemented by custom managers", async () => {
+		const baseManager = {
+			getDefinition: () => createDefinition("general"),
+			startByName: async () => createCompletedHandle("unused"),
+		} satisfies SubagentToolManager;
+		const withoutRegistry = createSubagentToolDefinition({ manager: baseManager });
+		expect(withoutRegistry.parameters.properties).not.toHaveProperty("list");
+		expect(withoutRegistry.parameters.properties).not.toHaveProperty("offset");
+		expect(withoutRegistry.parameters.properties).not.toHaveProperty("follow");
+		expect(withoutRegistry.description).not.toContain("List mode");
+		expect(withoutRegistry.description).not.toContain("Follow mode");
+		expect((withoutRegistry.promptGuidelines ?? []).some((guideline) => guideline.includes("{ list: true }"))).toBe(
+			false,
+		);
+
+		const listManager = {
+			...baseManager,
+			listDelegations: () => [],
+		} satisfies SubagentToolManager;
+		const listDefinition = createSubagentToolDefinition({ manager: listManager });
+		expect(listDefinition.parameters.properties).toHaveProperty("list");
+		expect(listDefinition.parameters.properties).toHaveProperty("offset");
+		expect(listDefinition.parameters.properties).not.toHaveProperty("follow");
+		expect(listDefinition.description).toContain("List mode");
+		expect(listDefinition.description).not.toContain("Follow mode");
+		const listTool = createSubagentTool(process.cwd(), { manager: listManager });
+		await expect(listTool.execute("call-list", { list: true })).resolves.toMatchObject({
+			details: { mode: "list", status: "completed" },
+		});
+		await expect(listTool.execute("call-follow", { follow: "sa_existing" })).rejects.toThrow(
+			"registry is not available",
+		);
+
+		const fullManager = {
+			...listManager,
+			followDelegation: async (subagentId: string) => ({
+				id: subagentId,
+				agent: { name: "general" },
+				status: "completed" as const,
+				output: "existing result",
+				startedAt: 1,
+				finishedAt: 2,
+			}),
+		} satisfies SubagentToolManager;
+		const fullDefinition = createSubagentToolDefinition({ manager: fullManager });
+		expect(fullDefinition.parameters.properties).toHaveProperty("list");
+		expect(fullDefinition.parameters.properties).toHaveProperty("follow");
+		expect(fullDefinition.description).toContain("List mode");
+		expect(fullDefinition.description).toContain("Follow mode");
+
+		const confirmationRegistry = new SubagentRegistry();
+		for (let index = 0; index < 60; index += 1) {
+			const id = `sa_existing_${index}`;
+			confirmationRegistry.register({ id, agent: { name: "general" }, path: ["general"] });
+			confirmationRegistry.complete(id, "completed");
+		}
+		const confirmationOnlyManager = {
+			...baseManager,
+			prepareSpawnConfirmation: (requestKey: string) => confirmationRegistry.prepareSpawnConfirmation(requestKey),
+			claimSpawnConfirmation: (requestKey: string, token: string) =>
+				confirmationRegistry.claimSpawnConfirmation(requestKey, token),
+		} satisfies SubagentToolManager;
+		const confirmationDefinition = createSubagentToolDefinition({ manager: confirmationOnlyManager });
+		expect(confirmationDefinition.parameters.properties).not.toHaveProperty("list");
+		expect(confirmationDefinition.parameters.properties).not.toHaveProperty("follow");
+		expect(confirmationDefinition.parameters.properties).toHaveProperty("confirm");
+		const confirmationTool = createSubagentTool(process.cwd(), { manager: confirmationOnlyManager });
+		const preflight = await confirmationTool.execute("call-preflight", { agent: "general", task: "new work" });
+		expect(textFromResult(preflight)).not.toContain("Continue listing");
+		expect(preflight.details.summary).toMatchObject({ total: 60, returned: 50 });
+		expect(preflight.details.summary).not.toHaveProperty("nextOffset");
 	});
 
 	it("exposes only subagents allowed by the current manager", async () => {
@@ -432,8 +506,8 @@ describe("subagent tool", () => {
 		const rootSubagentParameters = defaultSession.getToolDefinition("subagent")?.parameters as
 			| { properties?: Record<string, unknown> }
 			| undefined;
-		expect(rootSubagentParameters?.properties).toHaveProperty("list");
-		expect(rootSubagentParameters?.properties).toHaveProperty("follow");
+		expect(rootSubagentParameters?.properties).not.toHaveProperty("list");
+		expect(rootSubagentParameters?.properties).not.toHaveProperty("follow");
 		expect(rootSubagentParameters?.properties).not.toHaveProperty("confirm");
 
 		const withoutManagerSession = await createSession({ manager: false });
@@ -462,6 +536,45 @@ describe("subagent tool", () => {
 		expect(maxDepthSession.getActiveToolNames()).toContain("subagent_registry");
 		expect(maxDepthSession.getAllTools().map((tool) => tool.name)).not.toContain("subagent");
 
+		const listOnlyManager = {
+			getDefinition: () => researcher,
+			isSubagentRuntime: () => true,
+			listAvailableDefinitions: () => [],
+			listDelegations: () => childRegistry.list(),
+			startByName: async () => {
+				throw new Error("not implemented");
+			},
+		} satisfies SubagentToolManager;
+		const listOnlySession = await createSession({ manager: listOnlyManager });
+		const listOnlyParameters = listOnlySession.getToolDefinition("subagent_registry")?.parameters as
+			| { properties?: Record<string, unknown> }
+			| undefined;
+		expect(listOnlyParameters?.properties).toHaveProperty("list");
+		expect(listOnlyParameters?.properties).not.toHaveProperty("follow");
+
+		const followOnlyManager = {
+			getDefinition: () => researcher,
+			isSubagentRuntime: () => true,
+			listAvailableDefinitions: () => [],
+			followDelegation: async (subagentId: string) => ({
+				id: subagentId,
+				agent: { name: "researcher" },
+				status: "completed" as const,
+				output: "existing result",
+				startedAt: 1,
+				finishedAt: 2,
+			}),
+			startByName: async () => {
+				throw new Error("not implemented");
+			},
+		} satisfies SubagentToolManager;
+		const followOnlySession = await createSession({ manager: followOnlyManager });
+		const followOnlyParameters = followOnlySession.getToolDefinition("subagent_registry")?.parameters as
+			| { properties?: Record<string, unknown> }
+			| undefined;
+		expect(followOnlyParameters?.properties).not.toHaveProperty("list");
+		expect(followOnlyParameters?.properties).toHaveProperty("follow");
+
 		const childManager = {
 			...maxDepthManager,
 			listAvailableDefinitions: () => [researcher],
@@ -483,7 +596,7 @@ describe("subagent tool", () => {
 	it("requires a live registry preflight and one-time exact confirmation before spawning", async () => {
 		const scout = createDefinition("scout", { source: "project" });
 		const registry = new SubagentRegistry();
-		const listRegistry = vi.spyOn(registry, "list");
+		const snapshotRegistry = vi.spyOn(registry, "snapshot");
 		const prompts: Array<{ agent: string; task: string }> = [];
 		const controlled = createControlledHandle({
 			id: "sa_scout",
@@ -544,7 +657,8 @@ describe("subagent tool", () => {
 		const replayedPreflight = await firstTool.execute("call-replayed", { ...request, confirm: initialToken });
 		expect(textFromResult(replayedPreflight)).toContain("not valid for this exact spawn request");
 		expect(startByName).toHaveBeenCalledOnce();
-		expect(listRegistry).toHaveBeenCalledTimes(5);
+		expect(snapshotRegistry).toHaveBeenCalledTimes(5);
+		expect(snapshotRegistry).toHaveBeenCalledWith(50);
 	});
 
 	it("respects explicit subagent tool policy opt-outs and allowlists", async () => {
@@ -1754,6 +1868,10 @@ describe("subagent tool", () => {
 				},
 			],
 		} satisfies SubagentToolManager;
+		const definition = createSubagentRegistryToolDefinition({ manager });
+		expect(definition.parameters.properties).toHaveProperty("list");
+		expect(definition.parameters.properties).not.toHaveProperty("follow");
+		expect(definition.description).not.toContain("Follow mode");
 		const tool = createSubagentRegistryTool(process.cwd(), { manager });
 
 		const result = await tool.execute("call-1", { list: true });
@@ -1765,7 +1883,8 @@ describe("subagent tool", () => {
 		expect(text).toContain("sa_live researcher running");
 		expect(text).toContain("parent: sa_done) — research file y");
 		expect(text).toContain("parent: root) — research file x");
-		expect(text).toContain('{ "follow": "<id>" }');
+		expect(text).not.toContain('{ "follow": "<id>" }');
+		expect(text).toContain("Avoid starting a duplicate run");
 		expect(result.details).toMatchObject({
 			mode: "list",
 			status: "completed",
@@ -1833,6 +1952,10 @@ describe("subagent tool", () => {
 				};
 			},
 		} satisfies SubagentToolManager;
+		const definition = createSubagentRegistryToolDefinition({ manager });
+		expect(definition.parameters.properties).not.toHaveProperty("list");
+		expect(definition.parameters.properties).toHaveProperty("follow");
+		expect(definition.description).not.toContain("List mode");
 		const tool = createSubagentRegistryTool(process.cwd(), { manager });
 
 		const result = await tool.execute("call-1", { follow: "sa_done" });
@@ -1854,6 +1977,11 @@ describe("subagent tool", () => {
 			getDefinition: () => createDefinition("scout"),
 			startByName: async () => createCompletedHandle("unused"),
 		} satisfies SubagentToolManager;
+		const definition = createSubagentRegistryToolDefinition({ manager });
+		expect(definition.parameters.properties).not.toHaveProperty("list");
+		expect(definition.parameters.properties).not.toHaveProperty("follow");
+		expect(definition.description).not.toContain("List mode");
+		expect(definition.description).not.toContain("Follow mode");
 		const tool = createSubagentRegistryTool(process.cwd(), { manager });
 
 		await expect(tool.execute("call-1", { list: true })).rejects.toThrow("registry is not available");

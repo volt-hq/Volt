@@ -1655,6 +1655,12 @@ describe("Iroh remote notification requests", () => {
 					name: "subagent_registry",
 					arguments: { list: true, offset: 50 },
 				},
+				{
+					type: "toolCall",
+					id: "follow-call",
+					name: "subagent_registry",
+					arguments: { follow: "sa_existing" },
+				},
 			],
 			timestamp: 1,
 		};
@@ -1687,6 +1693,20 @@ describe("Iroh remote notification requests", () => {
 			isError: false,
 			timestamp: 4,
 		};
+		const followResult = {
+			role: "toolResult",
+			toolCallId: "follow-call",
+			toolName: "subagent_registry",
+			content: [{ type: "text", text: "existing result" }],
+			details: {
+				mode: "follow",
+				status: "completed",
+				subagentId: "sa_existing",
+				agent: { name: "researcher", source: "built-in" },
+			},
+			isError: false,
+			timestamp: 5,
+		};
 		session.sessionManager.getBranch.mockReturnValue([
 			{
 				type: "message",
@@ -1716,6 +1736,13 @@ describe("Iroh remote notification requests", () => {
 				timestamp: "2026-06-27T00:00:03.000Z",
 				message: registryResult,
 			},
+			{
+				type: "message",
+				id: "follow-entry",
+				parentId: "registry-entry",
+				timestamp: "2026-06-27T00:00:04.000Z",
+				message: followResult,
+			},
 		]);
 		const sessionHandlers: Array<(event: AgentSessionEvent) => void> = [];
 		session.subscribe.mockImplementation((handler: (event: AgentSessionEvent) => void) => {
@@ -1736,6 +1763,7 @@ describe("Iroh remote notification requests", () => {
 			handler({ type: "message_end", message: bashResult } as AgentSessionEvent);
 			handler({ type: "message_end", message: readResult } as AgentSessionEvent);
 			handler({ type: "message_end", message: registryResult } as AgentSessionEvent);
+			handler({ type: "message_end", message: followResult } as AgentSessionEvent);
 		}
 
 		await vi.waitFor(() => {
@@ -1786,6 +1814,26 @@ describe("Iroh remote notification requests", () => {
 							summary: { total: 120, offset: 50, returned: 50, nextOffset: 100 },
 						},
 						output: "bounded registry page",
+						outputTruncated: false,
+					}),
+				}),
+			);
+			expect(transcriptEntries).toContainEqual(
+				expect.objectContaining({
+					type: "transcript_entry",
+					entry: expect.objectContaining({
+						entryId: "follow-entry",
+						role: "tool",
+						toolName: "subagent_registry",
+						status: "completed",
+						args: { follow: "sa_existing" },
+						details: {
+							mode: "follow",
+							status: "completed",
+							subagentId: "sa_existing",
+							agent: { name: "researcher", source: "built-in" },
+						},
+						output: "existing result",
 						outputTruncated: false,
 					}),
 				}),

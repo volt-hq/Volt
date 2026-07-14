@@ -333,6 +333,50 @@ describe("RPC transcript projection", () => {
 		});
 	});
 
+	test("projects standard subagent registry follow arguments", () => {
+		const session = SessionManager.inMemory("/workspace");
+		session.appendMessage(
+			assistant(
+				[
+					{
+						type: "toolCall",
+						id: "subagent-follow-call",
+						name: "subagent_registry",
+						arguments: { follow: "sa_existing" },
+					},
+				],
+				20,
+			),
+		);
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "subagent-follow-call",
+			toolName: "subagent_registry",
+			content: [{ type: "text", text: "existing result" }],
+			details: {
+				mode: "follow",
+				status: "completed",
+				subagentId: "sa_existing",
+				agent: { name: "researcher", source: "built-in" },
+			},
+			isError: false,
+			timestamp: 30,
+		} as Parameters<typeof session.appendMessage>[0]);
+
+		const transcript = projectSessionTranscript(session);
+		const toolItem = transcript.items.find((item) => item.role === "tool");
+		expect(toolItem).toMatchObject({
+			toolName: "subagent_registry",
+			args: { follow: "sa_existing" },
+			details: {
+				mode: "follow",
+				status: "completed",
+				subagentId: "sa_existing",
+				agent: { name: "researcher", source: "built-in" },
+			},
+		});
+	});
+
 	test("projects nested subagent delegation trees with live fields and a bounded depth", () => {
 		const session = SessionManager.inMemory("/workspace");
 		session.appendMessage(
