@@ -54,4 +54,4 @@ Create a provider file exporting:
 ## 7. Documentation
 
 - `packages/ai/README.md`: add to providers table, document options/auth, add env vars.
-- `packages/ai/CHANGELOG.md`: add entry under `## [Unreleased]`.
+- `.changeset/`: add a fragment with `"@hansjm10/volt-ai": patch` front matter and a `feature(providers): Added support for [Provider Name] provider.` summary (see `.changeset/README.md`).

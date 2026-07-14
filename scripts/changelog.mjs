@@ -160,7 +160,7 @@ function renderEntry(changeset, { includeArea }) {
 }
 
 export function renderReleaseSection(changesets, version, date) {
-	const lines = [`## [${version}] - ${date}`, ""];
+	const lines = [date ? `## [${version}] - ${date}` : `## [${version}]`, ""];
 	const visible = changesets.filter(({ kind }) => kind !== "internal");
 	if (visible.length === 0) {
 		lines.push("Maintenance release with no user-facing changes.", "");
@@ -230,8 +230,11 @@ function parseCliOptions(args) {
 		if (arg === "--version") options.version = value;
 		if (arg === "--date") options.date = value;
 	}
-	options.date ??= new Date().toISOString().split("T")[0];
 	return options;
+}
+
+function todayIsoDate() {
+	return new Date().toISOString().split("T")[0];
 }
 
 function main(argv) {
@@ -243,14 +246,15 @@ function main(argv) {
 			console.log("No pending changesets.");
 			return;
 		}
-		process.stdout.write(renderReleaseSection(changesets, options.version ?? "Unreleased", options.date));
+		const date = options.date ?? (options.version ? todayIsoDate() : undefined);
+		process.stdout.write(renderReleaseSection(changesets, options.version ?? "Unreleased", date));
 		return;
 	}
 	if (command === "release") {
 		if (!options.version) {
 			throw new Error("release requires --version");
 		}
-		const { changesets } = applyReleaseSection(options);
+		const { changesets } = applyReleaseSection({ ...options, date: options.date ?? todayIsoDate() });
 		console.log(`Consumed ${changesets.length} changeset(s) into ${RELEASE_CHANGELOG} for ${options.version}.`);
 		return;
 	}

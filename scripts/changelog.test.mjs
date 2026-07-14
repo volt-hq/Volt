@@ -102,6 +102,11 @@ test("renderReleaseSection notes maintenance releases with only internal changes
 	assert.match(renderReleaseSection(changesets, "1.2.3", "2026-07-13"), /Maintenance release with no user-facing changes\./);
 });
 
+test("renderReleaseSection omits the date suffix for dateless previews", () => {
+	const changesets = [parseChangeset(".changeset/fix.md", changeset("fix: X."))];
+	assert.match(renderReleaseSection(changesets, "Unreleased", undefined), /^## \[Unreleased\]\n/);
+});
+
 test("requiredReleaseBump and release-target validation enforce minor for breaking changes", () => {
 	const fix = parseChangeset(".changeset/fix.md", changeset("fix: X."));
 	const breaking = parseChangeset(
@@ -145,6 +150,25 @@ test("applyReleaseSection inserts the section, consumes fragments, and is idempo
 		assert.throws(() => applyReleaseSection({ version: "0.1.2", date: "2026-07-15", changelogPath, changesetDir }), /no changesets/);
 		writeFileSync(join(changesetDir, "fix-b.md"), changeset("fix: X."));
 		assert.throws(() => applyReleaseSection({ version: "0.1.1", date: "2026-07-15", changelogPath, changesetDir }), /already contains/);
+	} finally {
+		rmSync(directory, { force: true, recursive: true });
+	}
+});
+
+test("applyReleaseSection preserves CRLF line endings", () => {
+	const directory = mkdtempSync(join(tmpdir(), "volt-changelog-test-"));
+	try {
+		const changesetDir = join(directory, ".changeset");
+		const changelogPath = join(directory, "CHANGELOG.md");
+		mkdirSync(changesetDir);
+		writeFileSync(join(changesetDir, "fix-a.md"), changeset("fix(daemon): Fixed lease cleanup."));
+		writeFileSync(changelogPath, "# Changelog\r\n\r\n## [0.1.0] - 2026-07-13\r\n\r\nInitial release.\r\n");
+
+		applyReleaseSection({ version: "0.1.1", date: "2026-07-14", changelogPath, changesetDir });
+		assert.equal(
+			readFileSync(changelogPath, "utf8"),
+			"# Changelog\r\n\r\n## [0.1.1] - 2026-07-14\r\n\r\n### Fixes\r\n\r\n- **daemon:** Fixed lease cleanup.\r\n\r\n## [0.1.0] - 2026-07-13\r\n\r\nInitial release.\r\n",
+		);
 	} finally {
 		rmSync(directory, { force: true, recursive: true });
 	}

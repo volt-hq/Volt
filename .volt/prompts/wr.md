@@ -1,5 +1,5 @@
 ---
-description: Finish the current task end-to-end with changelog, commit, and push
+description: Finish the current task end-to-end with changeset, commit, and push
 argument-hint: "[instructions]"
 ---
 Wrap it.
@@ -15,7 +15,7 @@ Rules for context detection:
 
 Unless I explicitly override something in this request, do the following in order:
 
-1. Add or update the relevant package changelog entry under `## [Unreleased]` using the repo changelog rules.
+1. If the work is user-visible, add a changeset fragment in `.changeset/` using the repo changelog rules (see `.changeset/README.md`). Purely internal work (refactors, CI, test-only) needs no fragment.
 2. If this task is tied to a GitHub issue or PR and a final issue or PR comment has not already been posted in this session, draft it in my tone, preview it, and post exactly one final comment. The comment must end with this exact standalone disclaimer line, with no variations:
 
    ```text

@@ -45,3 +45,8 @@ Attribution stays inline in the sentence:
 - `npx changeset` — interactive authoring (writing the file directly is fine too)
 - `npx changeset status` — list pending fragments
 - `npm run changelog:preview` — render the release section the pending fragments would produce
+
+Never run `npx changeset version` or `npx changeset publish`: they would consume
+fragments and bump versions outside the guarded release flow. Release tooling
+(`scripts/changelog.mjs` via `release.mjs`) owns consumption; the changesets CLI
+is for authoring and status only.
