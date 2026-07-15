@@ -699,7 +699,7 @@ volt --thinking high "Solve this complex problem"
 
 ## Contributing & Development
 
-See [CONTRIBUTING.md](../../CONTRIBUTING.md) for guidelines and [docs/development.md](https://github.com/hansjm10/Volt/blob/main/packages/coding-agent/docs/development.md) for setup, forking, and debugging.
+See [CONTRIBUTING.md](../../CONTRIBUTING.md) for guidelines and [docs/development.md](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/development.md) for setup, forking, and debugging.
 
 ---
 

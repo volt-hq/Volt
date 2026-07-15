@@ -353,7 +353,7 @@ Security and support boundary:
 - The daemon requires a Node.js npm install or source checkout with optional `@number0/iroh` available for the platform. The pinned adapter supports macOS arm64, Linux x64/arm64 (glibc and musl), and Windows x64/arm64; it does not ship a Darwin x64 binding, so Intel macOS npm installs are local CLI/TUI only. Standalone Node SEA builds reject `volt daemon` because the native Iroh adapter is intentionally not bundled.
 - Known preview limitations: daemon exit is not durable active-work recovery, idle detached runtime retention is time-limited, very large hidden-agent sets may need future host/app resource controls, per-workspace client grants are deferred, remote workspace creation/rename/path browsing stays local to the desktop host, and default relay/discovery should be validated in the target cross-network environment.
 
-See [Iroh remote protocol v1](iroh-remote-protocol.md), [Iroh remote access design](https://github.com/hansjm10/Volt/blob/main/packages/coding-agent/docs/iroh-remote-access-design.md), and [Security](security.md#remote-access-over-iroh-preview).
+See [Iroh remote protocol v1](iroh-remote-protocol.md), [Iroh remote access design](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/iroh-remote-access-design.md), and [Security](security.md#remote-access-over-iroh-preview).
 
 ### Modes
 

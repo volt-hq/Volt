@@ -65,7 +65,7 @@ export function suggestFragment({ changedPaths = [], title = "", pullNumber = un
 		sentence += ".";
 	}
 	if (pullNumber) {
-		sentence += ` ([#${pullNumber}](https://github.com/hansjm10/Volt/pull/${pullNumber}))`;
+		sentence += ` ([#${pullNumber}](https://github.com/volt-hq/Volt/pull/${pullNumber}))`;
 	}
 
 	const changedDirectories = new Set(

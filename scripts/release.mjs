@@ -174,7 +174,7 @@ function parseGitHubJson(output, description) {
 }
 
 function verifyApprovedCandidateRun(candidateCommit, runId, artifactDigest) {
-	const runPath = `/repos/hansjm10/Volt/actions/runs/${runId}`;
+	const runPath = `/repos/volt-hq/Volt/actions/runs/${runId}`;
 	const runMetadata = parseGitHubJson(run(`gh api ${shellQuote(runPath)}`, { silent: true }), "candidate workflow run");
 	try {
 		assertCandidateWorkflowRun(runMetadata, { candidateCommit, runId });

@@ -67,7 +67,7 @@ function getDefaultAttributionHeaders(
 
 	if (isVercelGatewayModel(model)) {
 		return {
-			"http-referer": "https://github.com/hansjm10/Volt",
+			"http-referer": "https://github.com/volt-hq/Volt",
 			"x-title": "volt",
 		};
 	}

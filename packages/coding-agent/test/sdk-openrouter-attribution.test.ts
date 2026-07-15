@@ -199,7 +199,7 @@ describe("createAgentSession provider attribution headers", () => {
 	it("adds default attribution headers for Vercel AI Gateway models", async () => {
 		const headers = await captureHeaders(createModel("vercel-ai-gateway", "https://ai-gateway.vercel.sh/v1"));
 
-		expect(headers?.["http-referer"]).toBe("https://github.com/hansjm10/Volt");
+		expect(headers?.["http-referer"]).toBe("https://github.com/volt-hq/Volt");
 		expect(headers?.["x-title"]).toBe("volt");
 	});
 
