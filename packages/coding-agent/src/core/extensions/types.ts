@@ -484,6 +484,13 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		theme: Theme,
 		context: ToolRenderContext<TState, Static<TParams>>,
 	) => Component;
+
+	/**
+	 * Release renderer resources held in the shared render state (e.g. repaint
+	 * timers) when the host discards the tool row before a terminal render.
+	 * Must be idempotent.
+	 */
+	disposeRenderState?: (state: TState) => void;
 }
 
 type AnyToolDefinition = ToolDefinition<any, any, any>;

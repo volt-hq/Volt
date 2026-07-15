@@ -470,6 +470,156 @@ describe("ToolExecutionComponent parity", () => {
 		expect(expanded).toContain("collapse outputs");
 	});
 
+	test("does not present a subagent until a child is actually created", () => {
+		const component = new ToolExecutionComponent(
+			"subagent",
+			"tool-subagent-preflight",
+			{ agent: "scout", task: "Inspect the auth flow" },
+			{},
+			createSubagentRenderDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+		expect(component.render(120)).toEqual([]);
+
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "A registry preflight was completed. No subagents were started." }],
+				details: {
+					mode: "list",
+					status: "completed",
+					summary: { total: 3, completed: 0, failed: 0, aborted: 0, running: 3 },
+				} satisfies SubagentToolDetails,
+				isError: false,
+			},
+			false,
+		);
+
+		expect(component.render(120)).toEqual([]);
+	});
+
+	test("presents explicit registry list and follow calls without a created child", () => {
+		const listComponent = new ToolExecutionComponent(
+			"subagent",
+			"tool-subagent-list",
+			{ list: true },
+			{},
+			createSubagentRenderDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		listComponent.markExecutionStarted();
+		expect(stripAnsi(listComponent.render(120).join("\n"))).toContain("Subagent registry");
+		listComponent.updateResult(
+			{
+				content: [{ type: "text", text: "2 subagent runs recorded in this session" }],
+				details: {
+					mode: "list",
+					status: "completed",
+					summary: { total: 2, completed: 1, failed: 0, aborted: 0, running: 1, returned: 2 },
+				} satisfies SubagentToolDetails,
+				isError: false,
+			},
+			false,
+		);
+		expect(stripAnsi(listComponent.render(120).join("\n"))).toContain("Subagent registry");
+
+		const followComponent = new ToolExecutionComponent(
+			"subagent",
+			"tool-subagent-follow",
+			{ follow: "sa_existing" },
+			{},
+			createSubagentRenderDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		followComponent.markExecutionStarted();
+		expect(followComponent.render(120)).not.toEqual([]);
+		followComponent.updateResult(
+			{
+				content: [{ type: "text", text: "shared result" }],
+				details: {
+					mode: "follow",
+					status: "completed",
+					subagentId: "sa_existing",
+					agent: { name: "researcher", source: "built-in" },
+				} satisfies SubagentToolDetails,
+				isError: false,
+			},
+			false,
+		);
+		expect(stripAnsi(followComponent.render(120).join("\n"))).toContain("researcher");
+	});
+
+	test("presents terminal errors that occur before any child is created", () => {
+		const component = new ToolExecutionComponent(
+			"subagent",
+			"tool-subagent-precreation-error",
+			{ agent: "scout", task: "Inspect the auth flow" },
+			{},
+			createSubagentRenderDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+		expect(component.render(120)).toEqual([]);
+
+		component.updateResult(
+			{
+				content: [
+					{ type: "text", text: 'Cannot delegate to "scout": the delegation tree already started 100 subagents' },
+				],
+				isError: true,
+			},
+			false,
+		);
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("scout");
+		expect(rendered).toContain("failed");
+	});
+
+	test("dispose releases the subagent repaint interval", () => {
+		vi.useFakeTimers();
+		try {
+			let renderRequests = 0;
+			const tui = { requestRender: () => renderRequests++ } as unknown as TUI;
+			const component = new ToolExecutionComponent(
+				"subagent",
+				"tool-subagent-dispose",
+				{ agent: "scout", task: "Inspect the auth flow" },
+				{},
+				createSubagentRenderDefinition(),
+				tui,
+				process.cwd(),
+			);
+			component.updateResult(
+				{
+					content: [{ type: "text", text: "started" }],
+					details: {
+						mode: "single",
+						status: "running",
+						subagentId: "sa_1",
+						sessionId: "session_1",
+						agent: { name: "scout" },
+					} satisfies SubagentToolDetails,
+					isError: false,
+				},
+				true,
+			);
+			const baseline = renderRequests;
+			vi.advanceTimersByTime(3_000);
+			expect(renderRequests).toBeGreaterThan(baseline);
+
+			component.dispose();
+			const afterDispose = renderRequests;
+			vi.advanceTimersByTime(5_000);
+			expect(renderRequests).toBe(afterDispose);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	test("renders unstructured built-in subagent failures as terminal errors", () => {
 		const component = new ToolExecutionComponent(
 			"subagent",
@@ -481,6 +631,20 @@ describe("ToolExecutionComponent parity", () => {
 			process.cwd(),
 		);
 		component.markExecutionStarted();
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "started" }],
+				details: {
+					mode: "single",
+					status: "running",
+					subagentId: "sa_missing",
+					sessionId: "session_missing",
+					agent: { name: "missing" },
+				} satisfies SubagentToolDetails,
+				isError: false,
+			},
+			true,
+		);
 		component.updateResult(
 			{
 				content: [{ type: "text", text: "Unknown subagent: missing" }],
@@ -626,6 +790,131 @@ describe("ToolExecutionComponent parity", () => {
 			},
 			false,
 		);
+	});
+
+	test("caps the rendered subagent roster and prioritizes non-completed runs", () => {
+		const taskCount = 40;
+		const component = new ToolExecutionComponent(
+			"subagent",
+			"tool-subagent-roster-cap",
+			{ tasks: Array.from({ length: taskCount }, (_v, i) => ({ agent: `agent-${i}`, task: `task ${i}` })) },
+			{},
+			createSubagentRenderDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "progress" }],
+				details: {
+					mode: "parallel",
+					status: "running",
+					summary: { total: taskCount, completed: 30, failed: 0, aborted: 0, running: 10 },
+					tasks: Array.from({ length: taskCount }, (_v, index) => ({
+						index,
+						subagentId: `sa_${index}`,
+						sessionId: `session_${index}`,
+						agent: { name: `agent-${index}`, source: "user" as const },
+						// The last 10 are still running; they must all stay visible.
+						status: index < 30 ? ("completed" as const) : ("running" as const),
+					})),
+				} satisfies SubagentToolDetails,
+				isError: false,
+			},
+			true,
+		);
+
+		const rendered = stripAnsi(component.render(140).join("\n"));
+		expect(rendered).toContain("…and 24 more agents");
+		for (let index = 30; index < 40; index++) {
+			expect(rendered).toContain(`agent-${index}`);
+		}
+		expect(rendered).toContain("agent-0");
+		expect(rendered).not.toContain("agent-10 ");
+		// Roster summary still reports the full counts.
+		expect(rendered).toContain("10 running");
+		expect(rendered).toContain("30 done");
+	});
+
+	test("bounds rendered nested-tree lines per roster item", () => {
+		const children = Array.from({ length: 16 }, (_v, i) => ({
+			subagentId: `sa_child-${i}`,
+			agent: { name: `child-${i}` },
+			status: "running" as const,
+			task: `child task ${i}`,
+			children: Array.from({ length: 16 }, (_w, j) => ({
+				subagentId: `sa_grandchild-${i}-${j}`,
+				agent: { name: `grandchild-${i}-${j}` },
+				status: "running" as const,
+			})),
+		}));
+		const component = new ToolExecutionComponent(
+			"subagent",
+			"tool-subagent-tree-budget",
+			{ agent: "coordinator", task: "big tree" },
+			{},
+			createSubagentRenderDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "progress" }],
+				details: {
+					mode: "single",
+					status: "running",
+					subagentId: "sa_root",
+					agent: { name: "coordinator", source: "user" },
+					children,
+				} satisfies SubagentToolDetails,
+				isError: false,
+			},
+			true,
+		);
+
+		const lines = component.render(140);
+		const rendered = stripAnsi(lines.join("\n"));
+		// 16 children x 16 grandchildren would be hundreds of lines without a budget.
+		expect(lines.length).toBeLessThan(45);
+		expect(rendered).toContain("└─ …");
+		expect(rendered).toContain("child-0");
+	});
+
+	test("returns cached subagent lines until the result changes", () => {
+		const component = new ToolExecutionComponent(
+			"subagent",
+			"tool-subagent-render-cache",
+			{ agent: "worker", task: "cached task" },
+			{},
+			createSubagentRenderDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		const runningDetails = {
+			mode: "single",
+			status: "running",
+			subagentId: "sa_worker",
+			agent: { name: "worker", source: "user" },
+		} satisfies SubagentToolDetails;
+		component.updateResult(
+			{ content: [{ type: "text", text: "progress" }], isError: false, details: runningDetails },
+			true,
+		);
+
+		const first = component.render(140);
+		expect(component.render(140)).toEqual(first);
+
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "done" }],
+				details: { ...runningDetails, status: "completed" } satisfies SubagentToolDetails,
+				isError: false,
+			},
+			false,
+		);
+		const completed = stripAnsi(component.render(140).join("\n"));
+		expect(completed).toContain("done");
+		expect(completed).not.toContain("running");
 	});
 
 	test("renders built-in subagent chain steps with expanded outputs", () => {

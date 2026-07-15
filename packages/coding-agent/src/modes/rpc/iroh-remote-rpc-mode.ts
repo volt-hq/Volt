@@ -27,6 +27,7 @@ import {
 } from "../../core/rpc/index.ts";
 import { extractMessageImages, projectSessionTranscript } from "../../core/rpc/transcript.ts";
 import type { CustomMessageEntry, SessionEntry, SessionMessageEntry } from "../../core/session-manager.ts";
+import { SUBAGENT_REGISTRY_TOOL_NAME } from "../../core/subagents/tool-names.ts";
 import { type RpcModeOptions, type RpcSessionChange, runRpcMode } from "./rpc-mode.ts";
 import type { RpcRegisterPushTargetResponse } from "./rpc-types.ts";
 
@@ -382,7 +383,7 @@ function createIrohRemoteTranscriptEntryEvent(
 			toolName,
 			status,
 			summary: `${toolName} ${status}`,
-			...(toolName === "subagent"
+			...(toolName === "subagent" || toolName === SUBAGENT_REGISTRY_TOOL_NAME
 				? {
 						...projectIrohRemoteSubagentTranscriptArgs(toolCall?.arguments, options),
 						...projectIrohRemoteSubagentTranscriptDetails(message.details, options),
@@ -604,6 +605,14 @@ function projectIrohRemoteSubagentTranscriptArgs(
 	if (chain) {
 		projected.chain = chain;
 	}
+	if (typeof args.list === "boolean") {
+		projected.list = args.list;
+	}
+	const cursor = getIrohRemoteFiniteNumber(args.cursor);
+	if (cursor !== undefined) {
+		projected.cursor = cursor;
+	}
+	copyIrohRemoteBoundedString(args, projected, "follow", options, 200);
 	return Object.keys(projected).length > 0 ? { args: projected } : {};
 }
 
@@ -702,6 +711,9 @@ function projectIrohRemoteSubagentSummary(value: unknown): Record<string, number
 		"maxTasks",
 		"maxConcurrency",
 		"stoppedAt",
+		"returned",
+		"nextCursor",
+		"omittedTasks",
 	]) {
 		const numberValue = getIrohRemoteFiniteNumber(value[key]);
 		if (numberValue !== undefined) {

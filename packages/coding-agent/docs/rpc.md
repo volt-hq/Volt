@@ -241,7 +241,7 @@ Response:
 }
 ```
 
-Tool items may include bounded `diffPreview` and `patchPreview` fields for mutation tools.
+Tool items may include bounded `diffPreview` and `patchPreview` fields for mutation tools. `subagent` spawning calls and child-only `subagent_registry` list/follow calls include the same bounded subagent argument/detail projection used by live tool events, including registry pagination summaries.
 
 Recommended resume flow for remote or headless UI clients:
 
@@ -1503,7 +1503,7 @@ When complete:
 }
 ```
 
-Use `toolCallId` to correlate events. The `partialResult` in `tool_execution_update` contains the accumulated output so far (not just the delta), allowing clients to simply replace their display on each update.
+Use `toolCallId` to correlate events. The `partialResult` in `tool_execution_update` contains the accumulated output so far (not just the delta), allowing clients to simply replace their display on each update. `subagent_registry` is an ordinary built-in tool, not an RPC command: when active in a child runtime, its list/follow calls use these unchanged lifecycle events over stdio, in-process loopback, and Iroh transports.
 
 Host-owned workflows can also emit sanitized tool lifecycle events with workflow metadata. For example, review actions emit tool names and bounded arguments, but omit raw file contents and raw tool output:
 

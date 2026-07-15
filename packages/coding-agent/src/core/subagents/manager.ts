@@ -17,9 +17,19 @@ import { SessionManager } from "../session-manager.ts";
 import {
 	type SubagentDelegationReservation,
 	SubagentDelegationScope,
+	type SubagentDelegationScopeLimits,
 	type SubagentDelegationScopeOptions,
 } from "./delegation-scope.ts";
 import type { SubagentDefinition } from "./index.ts";
+import {
+	type SubagentFollowResult,
+	SubagentRegistry,
+	type SubagentRegistryRecord,
+	type SubagentRegistrySnapshot,
+	type SubagentSpawnConfirmationLease,
+	type SubagentSpawnConfirmationPreflight,
+} from "./registry.ts";
+import { SUBAGENT_REGISTRY_TOOL_NAME } from "./tool-names.ts";
 
 export type SubagentEvent = RpcClientEvent;
 export type SubagentEndEvent = Extract<SubagentEvent, { type: "agent_end" }>;
@@ -94,6 +104,8 @@ export interface SubagentManagerOptions {
 	allowedTools?: string[];
 	/** Current subagent identity and delegation policy when this manager belongs to a child runtime. */
 	subagentContext?: SubagentRuntimeContext;
+	/** Tree-wide ceiling overrides applied to delegation scopes this manager creates. */
+	delegationLimits?: SubagentDelegationScopeLimits;
 	requestTimeoutMs?: number;
 	/** Keep child runtimes alive after the hidden loopback client detaches. Another owner must retain/dispose them. */
 	retainRuntimeOnDispose?: boolean;
@@ -152,6 +164,7 @@ export class SubagentDefinitionConfigurationError extends Error {
 const VALID_THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const MAX_RETAINED_ACTIVITIES = 50;
 const MAX_RETAINED_ACTIVITY_EVENTS = 2_000;
+const DELEGATION_SNAPSHOT_MAX_RECORDS = 25;
 
 interface MutableSubagentActivity {
 	id: string;
@@ -176,10 +189,67 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function getTerminalActivityResult(event: SubagentEndEvent): {
+/** Start-time system prompt context containing only registry-controlled run metadata. */
+function formatDelegationSnapshot(snapshot: SubagentRegistrySnapshot): string | undefined {
+	if (snapshot.records.length === 0) {
+		return undefined;
+	}
+	const lines = snapshot.records.map((record) => {
+		const followability =
+			record.followability === "current"
+				? "current run; not followable"
+				: record.followability === "ancestor"
+					? "ancestor; not followable"
+					: record.followability === "dependency-cycle"
+						? "dependency cycle; not followable"
+						: "followable";
+		return `- ${record.id} ${record.status} [${followability}]`;
+	});
+	const omitted = snapshot.total - snapshot.records.length;
+	return [
+		"Delegated subagent runs already recorded in this session (snapshot at your start):",
+		...lines,
+		...(omitted > 0 ? [`…and ${omitted} more.`] : []),
+		`Call the ${SUBAGENT_REGISTRY_TOOL_NAME} tool with { "list": true } for the current state and untrusted task prompts. Only use { "follow": "<id>" } for runs marked [followable]; continue independently for current, ancestor, or dependency-cycle runs.`,
+	].join("\n");
+}
+
+function getFinalAssistantText(event: SubagentEndEvent): string | undefined {
+	for (let index = event.messages.length - 1; index >= 0; index -= 1) {
+		const message = event.messages[index];
+		if (!message || message.role !== "assistant") {
+			continue;
+		}
+		const content = (message as { content?: unknown }).content;
+		if (!Array.isArray(content)) {
+			return undefined;
+		}
+		const text = content
+			.filter(
+				(part): part is { type: "text"; text: string } =>
+					typeof part === "object" &&
+					part !== null &&
+					(part as { type?: unknown }).type === "text" &&
+					typeof (part as { text?: unknown }).text === "string",
+			)
+			.map((part) => part.text)
+			.join("\n")
+			.trim();
+		return text.length > 0 ? text : undefined;
+	}
+	return undefined;
+}
+
+function getTerminalActivityResult(
+	event: SubagentEndEvent,
+	abortRequested: boolean,
+): {
 	status: Extract<SubagentActivityStatus, "completed" | "failed" | "aborted">;
 	error?: string;
 } {
+	if (abortRequested) {
+		return { status: "aborted" };
+	}
 	for (let index = event.messages.length - 1; index >= 0; index -= 1) {
 		const message = event.messages[index];
 		if (!message || message.role !== "assistant") {
@@ -468,6 +538,7 @@ export class SubagentManager {
 	private readonly parentSessionManager?: SessionManager;
 	private readonly allowedTools?: string[];
 	private readonly subagentContext?: SubagentRuntimeContext;
+	private readonly delegationLimits?: SubagentDelegationScopeLimits;
 	private readonly requestTimeoutMs?: number;
 	private readonly retainRuntimeOnDispose: boolean;
 	private readonly onRuntimeCreated?: (event: SubagentRuntimeCreatedEvent) => void | Promise<void>;
@@ -478,6 +549,8 @@ export class SubagentManager {
 	private disposePromise: Promise<void> | undefined;
 	private pendingStartCount = 0;
 	private readonly pendingStartWaiters = new Set<() => void>();
+	/** Lazily created when this manager belongs to the root session; children share it via context. */
+	private ownedRegistry: SubagentRegistry | undefined;
 
 	constructor(options: SubagentManagerOptions) {
 		this.createRuntime = options.createRuntime;
@@ -487,9 +560,14 @@ export class SubagentManager {
 		this.parentSessionManager = options.parentSessionManager;
 		this.allowedTools = normalizeUniqueNames(options.allowedTools);
 		this.subagentContext = options.subagentContext;
+		this.delegationLimits = options.delegationLimits;
 		this.requestTimeoutMs = options.requestTimeoutMs;
 		this.retainRuntimeOnDispose = options.retainRuntimeOnDispose ?? false;
 		this.onRuntimeCreated = options.onRuntimeCreated;
+	}
+
+	isSubagentRuntime(): boolean {
+		return this.subagentContext !== undefined;
 	}
 
 	createDelegationScope(options: SubagentDelegationScopeOptions = {}): SubagentDelegationScopeLease {
@@ -498,7 +576,49 @@ export class SubagentManager {
 		if (inherited) {
 			return { scope: inherited, owned: false };
 		}
-		return { scope: new SubagentDelegationScope(options), owned: true };
+		return {
+			scope: new SubagentDelegationScope({ limits: this.delegationLimits, ...options }),
+			owned: true,
+		};
+	}
+
+	/** All delegated runs recorded in this runtime tree's session-wide registry. */
+	listDelegations(): SubagentRegistryRecord[] {
+		return this.getRegistry().list();
+	}
+
+	/** Delegated runs annotated with follow safety relative to this runtime. */
+	listDelegationsForCaller(): SubagentRegistryRecord[] {
+		return this.getRegistry().listForFollower(this.subagentContext?.subagentId);
+	}
+
+	prepareSpawnConfirmation(
+		requestKey: string,
+		options?: { reissuePending?: boolean },
+	): SubagentSpawnConfirmationPreflight {
+		return this.getRegistry().prepareSpawnConfirmation(
+			requestKey,
+			this.subagentContext?.subagentId,
+			undefined,
+			options,
+		);
+	}
+
+	claimSpawnConfirmation(requestKey: string, token: string): SubagentSpawnConfirmationLease | undefined {
+		return this.getRegistry().claimSpawnConfirmation(requestKey, token);
+	}
+
+	/** Result of an existing run in the tree, waiting for completion when still running. */
+	followDelegation(subagentId: string, options: { signal?: AbortSignal } = {}): Promise<SubagentFollowResult> {
+		return this.getRegistry().follow(this.subagentContext?.subagentId, subagentId, options.signal);
+	}
+
+	private getRegistry(): SubagentRegistry {
+		if (this.subagentContext) {
+			return this.subagentContext.registry;
+		}
+		this.ownedRegistry ??= new SubagentRegistry();
+		return this.ownedRegistry;
 	}
 
 	async start(options: SubagentStartOptions = {}): Promise<SubagentHandle> {
@@ -699,19 +819,24 @@ export class SubagentManager {
 		const inherited = this.subagentContext?.delegationScope;
 		if (inherited) return { scope: inherited, owned: false };
 		if (requested) return { scope: requested, owned: false };
-		return { scope: new SubagentDelegationScope(), owned: true };
+		return { scope: new SubagentDelegationScope({ limits: this.delegationLimits }), owned: true };
 	}
 
+	/**
+	 * Every child joins the session tree, definition-backed or not: unnamed SDK
+	 * starts share the same registry, delegation scope, and depth accounting, and
+	 * are fail-closed for nested delegation because only a definition can declare
+	 * an `allowedSubagents` policy.
+	 */
 	private createChildSubagentContext(
+		id: string,
 		definition: SubagentDefinition | undefined,
 		delegationScope: SubagentDelegationScope,
-	): SubagentRuntimeContext | undefined {
-		if (!definition) {
-			return undefined;
-		}
+	): SubagentRuntimeContext {
 		const parentPath = this.subagentContext?.path ?? [];
+		const agentName = definition?.name ?? "subagent";
 		const inheritedMaxDepth = this.subagentContext?.maxSubagentDepth;
-		const definitionMaxDepth = definition.maxSubagentDepth;
+		const definitionMaxDepth = definition?.maxSubagentDepth;
 		const maxSubagentDepth =
 			inheritedMaxDepth === undefined
 				? definitionMaxDepth
@@ -720,12 +845,14 @@ export class SubagentManager {
 					: Math.min(inheritedMaxDepth, definitionMaxDepth);
 		return {
 			depth: (this.subagentContext?.depth ?? 0) + 1,
-			agentName: definition.name,
-			path: [...parentPath, definition.name],
+			agentName,
+			subagentId: id,
+			path: [...parentPath, agentName],
 			delegationScope,
-			allowedSubagents: definition.allowedSubagents ?? [],
+			registry: this.getRegistry(),
+			allowedSubagents: definition?.allowedSubagents ?? [],
 			...(maxSubagentDepth !== undefined ? { maxSubagentDepth } : {}),
-			...(definition.maxChildAgents !== undefined ? { maxChildAgents: definition.maxChildAgents } : {}),
+			...(definition?.maxChildAgents !== undefined ? { maxChildAgents: definition.maxChildAgents } : {}),
 		};
 	}
 
@@ -748,6 +875,7 @@ export class SubagentManager {
 			throw new Error("Subagent delegation scope is required");
 		}
 		const subagentContext = this.createChildSubagentContext(
+			id,
 			definitionOptions?.definition,
 			delegation.scopeLease.scope,
 		);
@@ -767,7 +895,12 @@ export class SubagentManager {
 		let client: InProcessRpcClient | undefined;
 		try {
 			if (definitionOptions) {
-				await this.applyDefinitionToRuntime(runtime, definitionOptions.definition, definitionOptions.allowedTools);
+				await this.applyDefinitionToRuntime(
+					runtime,
+					definitionOptions.definition,
+					definitionOptions.allowedTools,
+					subagentContext,
+				);
 			}
 
 			let handle: LocalSubagentHandle | undefined;
@@ -781,6 +914,15 @@ export class SubagentManager {
 			});
 			await this.notifyRuntimeCreated({ id, runtime, definition: definitionOptions?.definition });
 			this.registerActivity(id, runtime, definitionOptions?.definition);
+			this.getRegistry().register({
+				id,
+				...(this.subagentContext ? { parentId: this.subagentContext.subagentId } : {}),
+				agent: {
+					name: definitionOptions?.definition.name ?? "subagent",
+					...(definitionOptions?.definition.source ? { source: definitionOptions.definition.source } : {}),
+				},
+				path: subagentContext.path,
+			});
 			handle = new LocalSubagentHandle({
 				id,
 				sessionId: runtime.session.sessionId,
@@ -789,7 +931,10 @@ export class SubagentManager {
 				removeFromManager: (handleId) => {
 					this.handles.delete(handleId);
 				},
-				onPromptStarted: (message) => this.updateActivityTask(id, message),
+				onPromptStarted: (message) => {
+					this.updateActivityTask(id, message);
+					this.getRegistry().setTask(id, message);
+				},
 				onPromptFailed: (error) => this.finishActivity(id, "failed", errorMessage(error)),
 				onAbortRequested: () => this.markActivityAbortRequested(id),
 				onTerminal: () => {
@@ -805,13 +950,23 @@ export class SubagentManager {
 			this.handles.set(id, handle);
 			void handle.waitForEnd().then(
 				(result) => {
-					const terminal = getTerminalActivityResult(result.event);
+					const terminal = getTerminalActivityResult(
+						result.event,
+						this.activities.get(id)?.abortRequested === true,
+					);
 					this.finishActivity(id, terminal.status, terminal.error);
+					const output = getFinalAssistantText(result.event);
+					this.getRegistry().complete(id, terminal.status, {
+						...(output !== undefined ? { output } : {}),
+						...(terminal.error !== undefined ? { error: terminal.error } : {}),
+					});
 				},
 				(error: unknown) => {
 					const activity = this.activities.get(id);
 					const status = activity?.abortRequested ? "aborted" : "failed";
-					this.finishActivity(id, status, status === "failed" ? errorMessage(error) : undefined);
+					const message = status === "failed" ? errorMessage(error) : undefined;
+					this.finishActivity(id, status, message);
+					this.getRegistry().complete(id, status, message !== undefined ? { error: message } : {});
 				},
 			);
 			return handle;
@@ -1016,6 +1171,7 @@ export class SubagentManager {
 		runtime: AgentSessionRuntime,
 		definition: SubagentDefinition,
 		allowedTools: string[] | undefined,
+		subagentContext: SubagentRuntimeContext | undefined,
 	): Promise<void> {
 		const allowedSubagents = normalizeUniqueNames(definition.allowedSubagents) ?? [];
 		const activeTools = resolveEffectiveTools({
@@ -1031,6 +1187,18 @@ export class SubagentManager {
 			runtime.session.setActiveToolsByName(activeTools);
 		}
 		runtime.session.appendSystemPromptContext(definition.systemPrompt);
+		if (runtime.session.getActiveToolNames().includes(SUBAGENT_REGISTRY_TOOL_NAME)) {
+			const snapshot = formatDelegationSnapshot(
+				this.getRegistry().snapshotForFollower(
+					DELEGATION_SNAPSHOT_MAX_RECORDS,
+					subagentContext?.subagentId,
+					this.subagentContext?.subagentId,
+				),
+			);
+			if (snapshot) {
+				runtime.session.appendSystemPromptContext(snapshot);
+			}
+		}
 
 		let thinkingLevel = this.validateThinkingLevel(definition);
 		if (definition.model) {

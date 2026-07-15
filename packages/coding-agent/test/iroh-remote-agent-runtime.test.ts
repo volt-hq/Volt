@@ -149,7 +149,9 @@ export default function (volt) {
 			expect(existsSync(join(agentDir, "prompts", "remote.md"))).toBe(true);
 			expect(existsSync(join(agentDir, "commands"))).toBe(false);
 			expect(readdirSync(join(agentDir, "sessions"))).toHaveLength(1);
-			expect(runtime.session.getActiveToolNames()).toEqual(DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(","));
+			expect(runtime.session.getActiveToolNames()).toEqual(
+				DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(",").filter((name) => name !== "subagent_registry"),
+			);
 		} finally {
 			errorSpy.mockRestore();
 			await runtime?.dispose();
@@ -168,7 +170,10 @@ export default function (volt) {
 
 			expect(runtime.session.getAllTools().map((tool) => tool.name)).toContain("remote_extension_tool");
 			expect(runtime.session.getActiveToolNames()).toEqual(
-				expect.arrayContaining([...DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(","), "remote_extension_tool"]),
+				expect.arrayContaining([
+					...DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(",").filter((name) => name !== "subagent_registry"),
+					"remote_extension_tool",
+				]),
 			);
 
 			await runtime.session.bindExtensions({});
@@ -186,9 +191,29 @@ export default function (volt) {
 		const faux = registerFauxProvider();
 		const model = faux.getModel();
 		faux.setResponses([
+			// Spawning is two-phase: the first exact request only returns a registry
+			// preflight with a one-time confirmation token and starts nothing.
 			fauxAssistantMessage(fauxToolCall("subagent", { agent: "scout", task: "Inspect the remote child" }), {
 				stopReason: "toolUse",
 			}),
+			(context) => {
+				let token: string | undefined;
+				for (let index = context.messages.length - 1; index >= 0; index -= 1) {
+					const message = context.messages[index];
+					if (message?.role === "toolResult" && message.toolName === "subagent") {
+						const text = message.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+						token = /"confirm": "([^"]+)"/.exec(text)?.[1];
+						break;
+					}
+				}
+				if (!token) {
+					throw new Error("expected a subagent spawn confirmation token in the preflight result");
+				}
+				return fauxAssistantMessage(
+					fauxToolCall("subagent", { agent: "scout", task: "Inspect the remote child", confirm: token }),
+					{ stopReason: "toolUse" },
+				);
+			},
 			fauxAssistantMessage("child finished"),
 			fauxAssistantMessage("parent finished"),
 		]);
@@ -227,6 +252,8 @@ export default function (volt) {
 			expect(child.parentSessionFile).toBe(runtime.session.sessionFile);
 			expect(child.sessionId).toBe(child.runtime.session.sessionId);
 			expect(child.runtime.session.sessionFile).toBeTruthy();
+			expect(child.runtime.session.getActiveToolNames()).toContain("subagent_registry");
+			expect(child.runtime.session.getActiveToolNames()).not.toContain("subagent");
 			if (!child.runtime.session.sessionFile) {
 				throw new Error("expected child session file");
 			}
@@ -236,11 +263,18 @@ export default function (volt) {
 			}
 			const childHeader = JSON.parse(childHeaderLine) as { parentSession?: string };
 			expect(childHeader.parentSession).toBe(runtime.session.sessionFile);
-			const parentToolResult = runtime.session.sessionManager.getBranch().find((entry) => {
-				return (
-					entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "subagent"
-				);
-			});
+			// The first subagent tool result is the registry preflight; the confirmed
+			// spawn's result is the last one.
+			const parentToolResult = runtime.session.sessionManager
+				.getBranch()
+				.filter((entry) => {
+					return (
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						entry.message.toolName === "subagent"
+					);
+				})
+				.at(-1);
 			if (parentToolResult?.type !== "message" || parentToolResult.message.role !== "toolResult") {
 				throw new Error("expected parent subagent tool result");
 			}

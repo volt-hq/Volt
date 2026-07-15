@@ -206,6 +206,7 @@ describe("subagent definitions", () => {
 			maxChildAgents: 2,
 		});
 		expect(researcher?.tools).toContain("subagent");
+		expect(researcher?.tools).toContain("subagent_registry");
 		expect(researcher?.tools).not.toContain("bash");
 		expect(researcher?.tools).not.toContain("lsp");
 		expect(designDoc).toMatchObject({
@@ -221,6 +222,7 @@ describe("subagent definitions", () => {
 			maxChildAgents: 4,
 		});
 		expect(securityReviewer?.tools).toContain("subagent");
+		expect(securityReviewer?.tools).toContain("subagent_registry");
 		expect(securityReviewer?.tools).not.toContain("bash");
 		expect(securityReviewer?.tools).not.toContain("lsp");
 		expect(securityReviewer?.tools).not.toContain("write");

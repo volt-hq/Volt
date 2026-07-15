@@ -33,9 +33,13 @@ export class RpcTransportClient extends RpcClientBase {
 		this.clearFailureError();
 		this.started = true;
 		try {
-			this.detachInput = this.transport.onLine((line) => {
-				this.handleLine(line);
-			});
+			this.detachInput = this.transport.onValue
+				? this.transport.onValue((value) => {
+						this.handleValue(value);
+					})
+				: this.transport.onLine((line) => {
+						this.handleLine(line);
+					});
 			this.detachClose =
 				this.transport.onClose?.((error) => {
 					this.handleTransportClose(error);

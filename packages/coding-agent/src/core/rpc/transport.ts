@@ -3,6 +3,7 @@ import type { Readable, Writable } from "node:stream";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 
 export type RpcLineHandler = (line: string) => void | Promise<void>;
+export type RpcValueHandler = (value: unknown) => void | Promise<void>;
 export type RpcCloseHandler = (error?: Error) => void;
 
 /** Transport used by Volt RPC protocol handlers. */
@@ -11,6 +12,12 @@ export interface RpcTransport {
 	write(value: object): void | Promise<void>;
 	/** Subscribe to inbound JSONL payload lines. */
 	onLine(handler: RpcLineHandler): () => void;
+	/**
+	 * Subscribe to inbound frames as structured values on transports that pass
+	 * objects in-process (the loopback pair). Consumers that attach here skip
+	 * JSONL serialize/parse entirely; wire transports do not implement this.
+	 */
+	onValue?(handler: RpcValueHandler): () => void;
 	/** Subscribe to inbound transport close/end notification. */
 	onClose?(handler: RpcCloseHandler): () => void;
 	/** Wait until queued outbound writes have drained. */

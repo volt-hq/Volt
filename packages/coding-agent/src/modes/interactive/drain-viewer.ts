@@ -82,13 +82,15 @@ export class DrainViewerComponent extends Container {
 		const event = raw as ViewerEvent;
 		if (event.kind === "truncated") {
 			// Too much history to replay; show only the spinner and rely on the
-			// post-grant session file load.
+			// post-grant session file load. Pending tool rows never see a terminal
+			// render after this, so their renderer resources must be released here
+			// or partial subagent rows leak their repaint intervals.
 			this.truncated = true;
 			this.streamingRenderCoalescer?.dispose();
 			this.streamingRenderCoalescer = undefined;
 			this.content.clear();
 			this.streamingComponent = undefined;
-			this.pendingTools.clear();
+			this.disposePendingTools();
 			this.tui.requestRender();
 			return;
 		}
@@ -223,9 +225,17 @@ export class DrainViewerComponent extends Container {
 		this.finished = true;
 		this.streamingRenderCoalescer?.dispose();
 		this.streamingRenderCoalescer = undefined;
+		this.disposePendingTools();
 		if (message) {
 			this.loader.setMessage(message);
 		}
 		this.loader.stop();
+	}
+
+	private disposePendingTools(): void {
+		for (const component of this.pendingTools.values()) {
+			component.dispose();
+		}
+		this.pendingTools.clear();
 	}
 }

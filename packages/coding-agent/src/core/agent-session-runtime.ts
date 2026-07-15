@@ -20,6 +20,7 @@ import {
 	summarizeSessionEntries,
 } from "./session-manager.ts";
 import type { SubagentDelegationScope } from "./subagents/delegation-scope.ts";
+import type { SubagentRegistry } from "./subagents/registry.ts";
 
 /**
  * Result returned by runtime creation.
@@ -35,8 +36,12 @@ export interface CreateAgentSessionRuntimeResult extends CreateAgentSessionResul
 export interface SubagentRuntimeContext {
 	depth: number;
 	agentName: string;
+	/** This runtime's own id in the session-wide delegation registry. */
+	subagentId: string;
 	path: string[];
 	delegationScope: SubagentDelegationScope;
+	/** Session-wide registry of delegated runs, shared by every runtime in the tree. */
+	registry: SubagentRegistry;
 	allowedSubagents?: string[];
 	maxSubagentDepth?: number;
 	maxChildAgents?: number;

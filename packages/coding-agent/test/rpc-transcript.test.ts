@@ -187,6 +187,7 @@ describe("RPC transcript projection", () => {
 						arguments: {
 							agent: "general",
 							task: "Review the implementation",
+							confirm: "confirmation-token",
 						},
 					},
 				],
@@ -279,6 +280,103 @@ describe("RPC transcript projection", () => {
 		expect(output).toEqual(expect.stringContaining("Child answer"));
 		expect(output).toEqual(expect.stringContaining("[truncated]"));
 		expect(JSON.stringify(transcript)).not.toContain("model-visible child output");
+		// The consumed one-time confirm token is omitted, matching the daemon
+		// and iroh projections.
+		expect(JSON.stringify(transcript)).not.toContain("confirmation-token");
+	});
+
+	test("projects standard subagent registry pagination arguments and summary", () => {
+		const session = SessionManager.inMemory("/workspace");
+		session.appendMessage(
+			assistant(
+				[
+					{
+						type: "toolCall",
+						id: "subagent-list-call",
+						name: "subagent_registry",
+						arguments: { list: true, cursor: 50 },
+					},
+				],
+				20,
+			),
+		);
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "subagent-list-call",
+			toolName: "subagent_registry",
+			content: [{ type: "text", text: "page output" }],
+			details: {
+				mode: "list",
+				status: "completed",
+				summary: {
+					total: 120,
+					completed: 100,
+					failed: 10,
+					aborted: 5,
+					running: 5,
+					returned: 50,
+					nextCursor: 20,
+				},
+			},
+			isError: false,
+			timestamp: 30,
+		} as Parameters<typeof session.appendMessage>[0]);
+
+		const transcript = projectSessionTranscript(session);
+		const toolItem = transcript.items.find((item) => item.role === "tool");
+		expect(toolItem).toMatchObject({
+			toolName: "subagent_registry",
+			args: { list: true, cursor: 50 },
+			details: {
+				mode: "list",
+				status: "completed",
+				summary: { total: 120, returned: 50, nextCursor: 20 },
+			},
+		});
+	});
+
+	test("projects standard subagent registry follow arguments", () => {
+		const session = SessionManager.inMemory("/workspace");
+		session.appendMessage(
+			assistant(
+				[
+					{
+						type: "toolCall",
+						id: "subagent-follow-call",
+						name: "subagent_registry",
+						arguments: { follow: "sa_existing" },
+					},
+				],
+				20,
+			),
+		);
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "subagent-follow-call",
+			toolName: "subagent_registry",
+			content: [{ type: "text", text: "existing result" }],
+			details: {
+				mode: "follow",
+				status: "completed",
+				subagentId: "sa_existing",
+				agent: { name: "researcher", source: "built-in" },
+			},
+			isError: false,
+			timestamp: 30,
+		} as Parameters<typeof session.appendMessage>[0]);
+
+		const transcript = projectSessionTranscript(session);
+		const toolItem = transcript.items.find((item) => item.role === "tool");
+		expect(toolItem).toMatchObject({
+			toolName: "subagent_registry",
+			args: { follow: "sa_existing" },
+			details: {
+				mode: "follow",
+				status: "completed",
+				subagentId: "sa_existing",
+				agent: { name: "researcher", source: "built-in" },
+			},
+		});
 	});
 
 	test("projects nested subagent delegation trees with live fields and a bounded depth", () => {

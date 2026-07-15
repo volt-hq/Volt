@@ -537,13 +537,25 @@ export abstract class RpcClientBase {
 			return;
 		}
 
+		this.handleInbound(data, () => formatLinePreview(line));
+	}
+
+	/** Inbound path for object-passing transports; error previews serialize lazily. */
+	protected handleValue(value: unknown): void {
+		if (this.failureError) {
+			return;
+		}
+		this.handleInbound(value, () => formatValuePreview(value));
+	}
+
+	private handleInbound(data: unknown, preview: () => string): void {
 		if (!isInboundRpcMessage(data)) {
-			this.failInboundProtocol("Invalid inbound RPC message: expected object with string type", line);
+			this.failInboundProtocol("Invalid inbound RPC message: expected object with string type", preview);
 			return;
 		}
 
 		if (data.type === "response") {
-			this.handleResponse(data, line);
+			this.handleResponse(data, preview);
 			return;
 		}
 
@@ -638,37 +650,37 @@ export abstract class RpcClientBase {
 		});
 	}
 
-	private handleResponse(response: InboundRpcMessage, line: string): void {
+	private handleResponse(response: InboundRpcMessage, preview: () => string): void {
 		// Responses are reserved protocol messages. Missing, malformed, or
 		// unrecognized correlation ids fail the client instead of reaching event
 		// listeners as ordinary events.
 		if (typeof response.id !== "string") {
-			this.failInboundProtocol("Invalid inbound RPC response: expected string id", line);
+			this.failInboundProtocol("Invalid inbound RPC response: expected string id", preview);
 			return;
 		}
 		if (typeof response.command !== "string") {
-			this.failInboundProtocol("Invalid inbound RPC response: expected string command", line);
+			this.failInboundProtocol("Invalid inbound RPC response: expected string command", preview);
 			return;
 		}
 		if (typeof response.success !== "boolean") {
-			this.failInboundProtocol("Invalid inbound RPC response: expected boolean success", line);
+			this.failInboundProtocol("Invalid inbound RPC response: expected boolean success", preview);
 			return;
 		}
 		if (response.success === false && typeof response.error !== "string") {
-			this.failInboundProtocol("Invalid inbound RPC response: expected string error", line);
+			this.failInboundProtocol("Invalid inbound RPC response: expected string error", preview);
 			return;
 		}
 
 		const pending = this.pendingRequests.get(response.id);
 		if (!pending) {
-			this.failInboundProtocol(`Invalid inbound RPC response: unknown id ${JSON.stringify(response.id)}`, line);
+			this.failInboundProtocol(`Invalid inbound RPC response: unknown id ${JSON.stringify(response.id)}`, preview);
 			return;
 		}
 
 		if (response.command !== pending.command) {
 			this.failInboundProtocol(
 				`Invalid inbound RPC response: command ${JSON.stringify(response.command)} does not match request ${JSON.stringify(pending.command)}`,
-				line,
+				preview,
 			);
 			return;
 		}
@@ -677,8 +689,8 @@ export abstract class RpcClientBase {
 		pending.resolve(response as RpcResponse);
 	}
 
-	private failInboundProtocol(message: string, line: string): void {
-		const failureError = new Error(this.formatError(`${message}. Bad line preview: ${formatLinePreview(line)}`));
+	private failInboundProtocol(message: string, preview: () => string): void {
+		const failureError = new Error(this.formatError(`${message}. Bad line preview: ${preview()}`));
 		this.setFailureError(failureError);
 		this.rejectPendingRequests(failureError);
 	}
@@ -719,4 +731,14 @@ function toError(value: unknown): Error {
 function formatLinePreview(line: string): string {
 	const preview = JSON.stringify(line.slice(0, MALFORMED_RPC_LINE_PREVIEW_CHARS));
 	return line.length > MALFORMED_RPC_LINE_PREVIEW_CHARS ? `${preview}… (${line.length} chars)` : preview;
+}
+
+function formatValuePreview(value: unknown): string {
+	let serialized: string;
+	try {
+		serialized = JSON.stringify(value) ?? String(value);
+	} catch {
+		serialized = String(value);
+	}
+	return formatLinePreview(serialized);
 }

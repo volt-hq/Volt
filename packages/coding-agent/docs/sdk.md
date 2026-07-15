@@ -238,6 +238,8 @@ try {
 
 `waitForEnd()` resolves after the child session settles, including automatic retries, overflow compaction, and queued continuations. Its result contains the latest low-level `agent_end` event.
 
+Definition-less `start()` children join the session tree exactly like definition-backed ones — they share the session-wide registry, the delegation scope's ceilings, and depth accounting — but they are fail-closed for nested delegation: only a definition can declare an `allowedSubagents` policy, so an unnamed child cannot spawn further subagents.
+
 To expose the built-in `subagent` tool in an SDK-created parent session, pass the manager as `subagentToolManager`. It is active by default when no explicit tool allowlist is provided:
 
 ```typescript
@@ -255,7 +257,13 @@ const { session } = await createAgentSession({
 });
 ```
 
-The built-in tool supports single `{ agent: string, task: string }`, parallel `{ tasks: Array<{ agent: string, task: string }> }`, and chain `{ chain: Array<{ agent: string, task: string }> }` calls. Parallel mode is capped at 8 tasks with max concurrency 4, keeps result ordering stable, and returns mixed-status details for partial failures. Chain mode runs sequentially, replaces `{previous}` with the prior successful step output, returns the final successful step output on full success, and stops at the first failed step. Recursive delegation is fail-closed unless `allowedSubagents` is explicit, and every descendant shares the root scope's hard depth, start, concurrency, turn, token, cost, deadline, and cancellation limits. Model-visible output is capped at 50 KB per task/step and 100 KB in aggregate for parallel mode; tool details also store the final tree-budget snapshot.
+Root sessions retain compatibility support for single `{ agent: string, task: string }`, parallel `{ tasks: Array<{ agent: string, task: string }> }`, chain `{ chain: Array<{ agent: string, task: string }> }`, list `{ list: true, cursor?: number }`, and follow `{ follow: string }` calls on `subagent`. In a runtime whose `SubagentManager` has a `SubagentRuntimeContext`, `subagent` is spawn-only and the child-only `subagent_registry` tool owns list and follow. It remains registered when depth, child-count, or child-name policy leaves no spawnable definitions. List mode returns up to 50 session-wide registry records per page, newest first by immutable registration sequence, within the aggregate output byte limit; when more records remain it reports a `nextCursor` registration-sequence cursor, so pages stay exact while records change state. Follow mode reuses an existing run by id, waits when it is still running, and prefixes the returned output with an untrusted-data notice because followed runs were prompted elsewhere in the tree.
+
+When the built-in `subagent` tool's manager implements the atomic spawn-confirmation methods — including `SubagentManager` — spawn modes are two-phase. The initial request internally lists the live registry and returns a one-time token without starting a child. Repeating the exact normalized request with `confirm: string` set to that token starts it. Reservations live in the shared session registry, so concurrent identical requests across different branches produce only one token; other callers observe the pending or claimed reservation. Tokens expire after five minutes, are request-bound and one-time. Custom `SubagentToolManager` implementations without the atomic methods retain immediate spawn behavior; direct `SubagentManager.startByName()` calls are unchanged.
+
+Custom runtime factories that support nested delegation must construct each child session's manager with the `subagentContext` passed to `CreateAgentSessionRuntimeFactory`. Explicit `tools` and `excludeTools` policies treat `subagent` and `subagent_registry` as separate names; omitting the registry name from an explicit child allowlist disables direct registry calls and its snapshot guidance, but not the spawn tool's internal registry preflight.
+
+Parallel mode accepts up to 8 tasks per call with max concurrency 4, rejects exact duplicate agent/task pairs before starting, keeps result ordering stable, and returns mixed-status details for partial failures. Chain mode runs up to 8 steps sequentially, replaces `{previous}` with the prior successful step output, returns the final successful step output on full success, and stops at the first failed step. Recursive delegation is fail-closed unless `allowedSubagents` is explicit, and every descendant shares the root delegation scope's cancellation signal and hard tree-wide ceilings: by default depth 5, 100 starts, 16 active descendants, 1,000 turns, 50 million tokens, and $100 cost, with no wall-clock deadline. `SubagentManagerOptions.delegationLimits` overrides each ceiling and `Number.POSITIVE_INFINITY` is the explicit unlimited opt-in; exhausted reservation ceilings fail new starts, while crossing a consumption ceiling aborts the whole tree. Model-visible output is capped at 50 KB per task/step and 100 KB in aggregate for parallel and list modes. Details payloads retain at most 100 task entries per snapshot with one shared aggregate output-text byte budget — omitted entries are counted in `summary.omittedTasks` and full output stays reachable through child sessions and the registry — so details stay well under remote frame limits regardless of future cap changes; tool details also store the final tree-budget snapshot.
 
 ### Prompting and Message Queueing
 
@@ -550,8 +558,8 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 
 Specify which built-in tools to enable:
 
-- Built-in tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`
-- Default built-ins: `read`, `bash`, `edit`, `write`, and `subagent` when `subagentToolManager` is supplied
+- Built-in tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`, and child-only `subagent_registry`
+- Default built-ins: `read`, `bash`, `edit`, `write`, `subagent` when spawning is available, and `subagent_registry` when the manager belongs to a child runtime
 - `noTools: "all"` disables all tools
 - `noTools: "builtin"` disables default built-ins, including `subagent`, while keeping extension and custom tools enabled
 - `excludeTools` disables specific built-in, extension, or custom tool names after any `tools` allowlist is applied
@@ -1251,7 +1259,7 @@ SettingsManager
 createCodingTools
 createReadOnlyTools
 createReadTool, createBashTool, createEditTool, createWriteTool
-createGrepTool, createFindTool, createLsTool, createSubagentTool
+createGrepTool, createFindTool, createLsTool, createSubagentTool, createSubagentRegistryTool
 
 // Types
 type CreateAgentSessionOptions

@@ -5,6 +5,7 @@ import { parseFrontmatter } from "../../utils/frontmatter.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "../source-info.ts";
+import { SUBAGENT_REGISTRY_TOOL_NAME } from "./tool-names.ts";
 
 export type SubagentDefinitionSource = "built-in" | "user" | "project";
 export type FileSubagentDefinitionSource = Exclude<SubagentDefinitionSource, "built-in">;
@@ -55,7 +56,7 @@ const BUILT_IN_RESEARCHER_SUBAGENT_FILE_PATH = "builtin:researcher";
 const BUILT_IN_DESIGN_DOC_SUBAGENT_FILE_PATH = "builtin:design-doc";
 const BUILT_IN_SECURITY_REVIEWER_SUBAGENT_FILE_PATH = "builtin:security-reviewer";
 const BUILT_IN_READ_ONLY_TOOLS = ["read", "web_search", "grep", "find", "ls"];
-const BUILT_IN_DELEGATING_READ_ONLY_TOOLS = [...BUILT_IN_READ_ONLY_TOOLS, "subagent"];
+const BUILT_IN_DELEGATING_READ_ONLY_TOOLS = [...BUILT_IN_READ_ONLY_TOOLS, "subagent", SUBAGENT_REGISTRY_TOOL_NAME];
 
 export function createBuiltInSubagentDefinitions(): SubagentDefinition[] {
 	return [
@@ -484,12 +485,13 @@ export function discoverSubagentDefinitions(options: DiscoverSubagentDefinitions
 }
 
 export {
+	DEFAULT_SUBAGENT_DELEGATION_LIMITS,
 	type SubagentDelegationReservation,
 	SubagentDelegationScope,
+	type SubagentDelegationScopeLimits,
 	type SubagentDelegationScopeOptions,
 	type SubagentDelegationScopeSnapshot,
 } from "./delegation-scope.ts";
-
 export {
 	type SubagentActivity,
 	type SubagentActivityEvent,
@@ -509,3 +511,14 @@ export {
 	type SubagentStartByNameOptions,
 	type SubagentStartOptions,
 } from "./manager.ts";
+export {
+	type SubagentFollowResult,
+	SubagentRegistry,
+	type SubagentRegistryFollowability,
+	type SubagentRegistryRecord,
+	type SubagentRegistrySnapshot,
+	type SubagentRegistryStatus,
+	type SubagentSpawnConfirmationLease,
+	type SubagentSpawnConfirmationPreflight,
+	type SubagentSpawnConfirmationStatus,
+} from "./registry.ts";

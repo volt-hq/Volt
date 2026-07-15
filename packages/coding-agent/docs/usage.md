@@ -116,7 +116,7 @@ Subagents are named child Volt sessions with isolated context. Volt includes bui
 
 | Name | Purpose | Tool posture |
 | --- | --- | --- |
-| `general` | Ad hoc delegated tasks | Broad normal tools, no `subagent` tool |
+| `general` | Ad hoc delegated tasks | Broad normal tools plus registry access, but no `subagent` spawning tool |
 | `researcher` | Web/codebase evidence gathering | Enforced non-mutating local tools plus `web_search` network egress and bounded `researcher` delegation; no shell or LSP mutation |
 | `design-doc` | RFC/design-document planning and synthesis | Broad inherited tools plus bounded delegation to `researcher`, `security-reviewer`, and `general` |
 | `security-reviewer` | Threat modeling and security/code review | Enforced non-mutating local tools plus `web_search` network egress and bounded read-only delegation to `researcher` |
@@ -134,7 +134,7 @@ Definition format:
 ---
 name: scout
 description: Fast codebase reconnaissance
-tools: read, grep, find, ls, web_search, subagent
+tools: read, grep, find, ls, web_search, subagent, subagent_registry
 allowedSubagents: researcher
 maxSubagentDepth: 2
 maxChildAgents: 2
@@ -145,11 +145,11 @@ thinking: off
 You are a scout. Find relevant files and return concise findings.
 ```
 
-Required fields are `name`, `description`, and the markdown body. Optional `tools` is a comma-separated allowlist, `excludedTools` is a comma-separated subtraction list, `allowedSubagents` is a comma-separated child-name allowlist, `maxSubagentDepth` is the deepest nested subagent depth this agent may create (top-level user session is depth 0, and descendants inherit the strictest ancestor cap), `maxChildAgents` is this agent runtime's child-start quota, `model` is a model pattern/id, and `thinking` is a thinking level. Omit `subagent` from `tools`, set `excludedTools: subagent` when inheriting the parent tool set, or set an explicit empty `allowedSubagents:`/`maxChildAgents: 0` if that agent should not spawn child agents. Malformed tool/delegation policy fields reject the affected definition instead of silently dropping restrictions.
+Required fields are `name`, `description`, and the markdown body. Optional `tools` is a comma-separated allowlist, `excludedTools` is a comma-separated subtraction list, `allowedSubagents` is a comma-separated child-name allowlist, `maxSubagentDepth` is the deepest nested subagent depth this agent may create (top-level user session is depth 0, and descendants inherit the strictest ancestor cap), `maxChildAgents` is this agent runtime's child-start quota, `model` is a model pattern/id, and `thinking` is a thinking level. Omit `subagent` from `tools`, set `excludedTools: subagent` when inheriting the parent tool set, or set an explicit empty `allowedSubagents:`/`maxChildAgents: 0` if that agent should not spawn child agents. Include `subagent_registry` in an explicit child `tools` allowlist when the child should directly list or follow existing runs; the enforced spawn preflight still reads the registry internally. Malformed tool/delegation policy fields reject the affected definition instead of silently dropping restrictions.
 
-The built-in `subagent` tool is active by default when a `SubagentManager` is available, including normal CLI sessions. If you pass an explicit `--tools` allowlist, include `subagent` to keep delegation available; disable it with `--exclude-tools subagent`, `--no-builtin-tools`, or `--no-tools`.
+The built-in `subagent` tool is active by default when a `SubagentManager` has an available definition, including normal CLI sessions. Root sessions retain its list and follow modes for compatibility. In definition-backed child runtimes, `subagent` exposes only single, parallel, and chain spawning modes, while the standard child-only `subagent_registry` tool exposes list and follow independently. Registry access remains available when `maxSubagentDepth`, `maxChildAgents`, or an empty `allowedSubagents` policy disables further spawning. Explicit tool allowlists and exclusions remain strict: include or exclude `subagent` and `subagent_registry` separately.
 
-The current built-in tool supports three modes. Provide exactly one mode per call:
+Provide exactly one spawning mode per `subagent` call:
 
 ```json
 { "agent": "scout", "task": "Find the auth entry points" }
@@ -173,7 +173,31 @@ The current built-in tool supports three modes. Provide exactly one mode per cal
 }
 ```
 
-Parallel mode is limited to 8 tasks with max concurrency 4. Results are returned in input order, and mixed success/failure runs return a combined status summary instead of hiding partial results. Chain mode is limited to 8 steps, runs steps sequentially, replaces `{previous}` with bounded prior successful step output that is XML-escaped and delimited as untrusted data, returns the final successful step output when all steps complete, and stops at the first failed step with details for executed steps. Recursive delegation is opt-in through `allowedSubagents`; omission allows no child names. Delegation trees have no automatic depth, start, active-child, turn, token, cost, or time ceilings; explicit definition policy and user/parent cancellation remain authoritative. In-memory parents create in-memory child sessions, while persisted parents create linked persisted children. Model-visible output is capped at 50 KB per task or chain step and 100 KB for a combined parallel result; metadata includes IDs, source, status, usage, truncation/errors, and tree-wide accounting.
+In normal Volt sessions, every spawn request is two-phase. The first single, parallel, or chain call programmatically lists the live session-wide registry and returns a one-time confirmation token without starting any subagents. After reviewing that list, reuse or follow equivalent work when possible. If a new run is still needed, repeat the exact spawn request with only the returned `confirm` token added:
+
+```json
+{ "agent": "scout", "task": "Find the auth entry points", "confirm": "<preflight-token>" }
+```
+
+Confirmation reservations are shared across the whole session tree. If two branches request the same normalized spawn at once, only the first receives a token; the other sees that an identical request is pending or claimed and starts nothing. Tokens expire after five minutes, are valid only for the exact normalized request that produced them, and are consumed by one successful confirmation attempt. A missing, expired, reused, or mismatched token starts nothing and returns a registry preflight; when the reservation is still pending, that preflight carries a freshly rotated token (invalidating the previous one) so a garbled token never locks the request out until expiry. Differently worded prompts are not treated as exact duplicates, so the returned registry still requires judgment about semantic overlap.
+
+Root sessions may continue using compatibility list/follow calls on `subagent`. Child runtimes use the same inputs with `subagent_registry`:
+
+```json
+{ "list": true }
+```
+
+```json
+{ "list": true, "cursor": 42 }
+```
+
+```json
+{ "follow": "sa_1f2e3d4c" }
+```
+
+List and follow expose the session-wide delegation registry. Every runtime in one session tree — the root session and every nested subagent — shares one registry that records each delegated run's id, agent, task prompt, status, and bounded final output. `list` returns bounded newest-first pages of up to 50 recorded runs so an agent can spot that an equivalent task already ran (or is still running) in another branch before spawning a duplicate; when more runs remain, the result provides the `cursor` for the next page, and cursors stay exact while runs change state. `follow` returns an existing run's result by id, waiting for completion when the run is still in flight. Follows that could never resolve — waiting on an ancestor, or two runs waiting on each other — are rejected with a deadlock error instead of hanging. Subagents with an active `subagent_registry` tool also start with a bounded snapshot of already-recorded runs in their system prompt context, so they can reuse prior results without being told to check first. Task prompts and outputs surfaced this way cross subagent context boundaries and are untrusted data; follow results are prefixed with an explicit untrusted-data notice.
+
+Parallel mode is limited to 8 tasks per call with max concurrency 4. Exact duplicate agent/task pairs in one parallel request are rejected before anything starts. Results are returned in input order, and mixed success/failure runs return a combined status summary instead of hiding partial results. Chain mode is limited to 8 steps, runs them sequentially, replaces `{previous}` with bounded prior successful step output that is XML-escaped and delimited as untrusted data, returns the final successful step output when all steps complete, and stops at the first failed step with details for executed steps. Recursive delegation is opt-in through `allowedSubagents`; omission allows no child names. Every delegation tree also shares hard root-scope ceilings — by default depth 5, 100 total starts, 16 concurrently active descendants, 1,000 turns, 50 million tokens, and $100 of cost, with no wall-clock deadline — and crossing a consumption ceiling cancels the whole tree; explicit definition policy and user/parent cancellation remain authoritative within those bounds. In-memory parents create in-memory child sessions, while persisted parents create linked persisted children. Model-visible output is capped at 50 KB per task or chain step and 100 KB for a combined parallel result or registry list page; metadata includes IDs, source, status, usage, truncation/errors, pagination, and tree-wide accounting.
 
 ## Context Files
 
@@ -303,7 +327,7 @@ Options to know:
 
 Security and support boundary:
 
-- The default remote tool grant enables the built-in tools `read,bash,edit,write,grep,find,ls,subagent` plus active tools registered by loaded extensions. A custom `remote.allowTools` list restricts daemon-owned headless runtimes only; name extension tools explicitly when using one. When a desktop TUI owns the conversation lease, phone prompts run with the TUI session's full local tool set (see [Security](security.md)). The `subagent` tool can only run built-in or discovered named definitions, and child tools are clamped by the remote session's active tool grant.
+- The default remote tool grant enables the built-in tools `read,bash,edit,write,web_search,grep,find,ls,subagent,subagent_registry,mcp` plus active tools registered by loaded extensions. A custom `remote.allowTools` list restricts daemon-owned headless runtimes only; name extension tools explicitly when using one. When a desktop TUI owns the conversation lease, phone prompts run with the TUI session's full local tool set (see [Security](security.md)). The `subagent` tool can only run built-in or discovered named definitions, and child tools are clamped by the remote session's active tool grant.
 - Granting `bash`, `edit`, or `write` can modify host files or run shell commands. Extension tools run code installed on the host and may do the same. Pairing a phone grants it desktop-equivalent power over the workspaces it can reach; pair only devices you control.
 - `volt remote workspace add` is a local desktop action. It stores a workspace name and realpath in the daemon's state file, without starting a remote API for clients to create, rename, browse, or path-map workspaces. Removing a workspace unregisters the saved name from daemon state only; it does not delete files. If any daemon-managed worktree record remains, unregister fails with `workspace_has_worktrees`; run `volt remote worktree list --workspace <name>` and explicitly remove each worktree first. Only per-worktree `remove --force` is allowed to discard dirty or busy work.
 - When interactive Volt connects to the daemon, it auto-registers its working directory when it is not inside a registered workspace (named by basename, with a numeric suffix on collision).
@@ -379,7 +403,7 @@ cat README.md | volt -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
 
-Built-in tools include `read`, `bash`, `edit`, `write`, `web_search`, `grep`, `find`, `ls`, `lsp` (when enabled), `subagent` (when available), and `mcp` (when MCP servers are configured). The `subagent` tool only runs built-in or discovered named definitions from the ResourceLoader; the `mcp` tool is a single gateway for configured MCP servers.
+Built-in tools include `read`, `bash`, `edit`, `write`, `web_search`, `grep`, `find`, `ls`, `lsp` (when enabled), `subagent` (when spawning is available), child-only `subagent_registry`, and `mcp` (when MCP servers are configured). The `subagent` tool only runs built-in or discovered named definitions from the ResourceLoader; `subagent_registry` lists or follows runs in a child runtime's shared session registry; the `mcp` tool is a single gateway for configured MCP servers.
 
 ### Resource Options
 
@@ -477,6 +501,6 @@ volt --exclude-tools ask_question
 
 Volt keeps the core small and pushes workflow-specific behavior into extensions, skills, prompt templates, and packages.
 
-Native MCP support is intentionally explicit: configured servers are exposed through a single `mcp` gateway tool and project MCP config follows project trust. HTTP/SSE MCP servers that require OAuth can be authenticated with `volt mcp auth <server>` or `volt mcp auth-device <server>`; tokens stay on the host. Volt still avoids permission popups, plan mode, built-in to-dos, background bash, or advanced subagent orchestration. The core subagent MVP is limited to built-in/discovered named agents and the single/parallel/chain `subagent` tool; richer workflows can be built as extensions or external tools.
+Native MCP support is intentionally explicit: configured servers are exposed through a single `mcp` gateway tool and project MCP config follows project trust. HTTP/SSE MCP servers that require OAuth can be authenticated with `volt mcp auth <server>` or `volt mcp auth-device <server>`; tokens stay on the host. Volt still avoids permission popups, plan mode, built-in to-dos, background bash, or advanced subagent orchestration. The core subagent MVP is limited to built-in/discovered named agents, the single/parallel/chain `subagent` spawning tool, and child registry list/follow access; richer workflows can be built as extensions or external tools.
 
 For the full rationale, see the project documentation and extension examples.

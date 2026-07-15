@@ -8,11 +8,11 @@ Implemented surfaces:
 
 - Built-in `general`, `researcher`, `design-doc`, and `security-reviewer` definitions and markdown definition discovery through `ResourceLoader.getSubagents()`.
 - `SubagentManager` for isolated in-process child runtimes.
-- Built-in `subagent` tool with single, parallel, and chain modes, active by default when a `SubagentManager` exists.
+- Built-in `subagent` spawning tool with single, parallel, and chain modes, plus child-only `subagent_registry` list/follow access to the shared delegation registry.
 - Local RPC lifecycle commands for definition-backed subagents.
 - App-visible "new agent with initial prompt" flow through existing Iroh conversation streams followed by `prompt`.
 
-Not implemented in this MVP: package-manager `agents` resources, subprocess fallback, remote/Iroh subagent lifecycle commands, protocol handshake changes, app-native subagent action surfaces, or tool modes beyond single/parallel/chain.
+Not implemented in this MVP: package-manager `agents` resources, subprocess fallback, remote/Iroh subagent lifecycle commands, protocol handshake changes, app-native subagent action surfaces, or spawning modes beyond single/parallel/chain.
 
 ## Summary
 
@@ -67,7 +67,7 @@ Core subagents use the markdown frontmatter shape from the extension prototype:
 ---
 name: scout
 description: Fast codebase reconnaissance
-tools: read, grep, find, ls, web_search, subagent
+tools: read, grep, find, ls, web_search, subagent, subagent_registry
 allowedSubagents: researcher
 maxSubagentDepth: 2
 maxChildAgents: 2
@@ -199,7 +199,7 @@ Effective tool policy is:
 effective child tools = (requested child tools OR inherited parent tools) ∩ parent allowed tools ∩ host allowed tools - excluded tools
 ```
 
-If no child tools are requested, inherit the parent's active tool set. `excludedTools` can remove dangerous or recursive capabilities such as `subagent` while preserving the rest of the inherited parent tool posture. Delegation is fail-closed: omitting `allowedSubagents` allows no child names and removes the `subagent` tool from that child. When delegation is available, the child-facing tool description, prompt guidelines, and JSON schema enumerate only definitions permitted by the inherited `allowedSubagents` policy; disallowed names are rejected before any child starts. The tool is omitted entirely when no definition is available, including at an inherited depth or zero-child limit. Every descendant shares one root accounting and cancellation scope, but the scope does not impose automatic depth, start, active-descendant, turn, token, cost, or time ceilings. Definition `maxSubagentDepth` values still propagate as the strictest inherited cap, while `maxChildAgents` caps total starts for one runtime. Malformed tool/delegation policy fields reject the affected definition instead of silently dropping restrictions. Built-in research and security-review roles are non-mutating locally but include `web_search`, so they can send query text to the configured external search provider. Any future tool escalation must be an explicit host/SDK option, not the default.
+If no child tools are requested, inherit the parent's active tool set. `excludedTools` can remove capabilities such as `subagent` or `subagent_registry` while preserving the rest of the inherited parent tool posture. Delegation is fail-closed: omitting `allowedSubagents` allows no child names and removes the `subagent` spawning tool from that child. When delegation is available, the child-facing `subagent` description, prompt guidelines, and JSON schema enumerate only definitions permitted by the inherited `allowedSubagents` policy; disallowed names are rejected before any child starts. The spawning tool is omitted when no definition is currently available, including at an inherited depth or zero-child limit. Separately, a child runtime with a `SubagentRuntimeContext` registers `subagent_registry` whenever its explicit tool policy allows it, so list/follow access survives exhausted spawning limits. Every descendant shares one root accounting and cancellation scope that enforces tree-wide ceilings — by default depth 5, 100 starts, 16 active descendants, 1,000 turns, 50 million tokens, and $100 cost, with the wall-clock deadline opt-in; each ceiling is host-overridable with `Infinity` as the explicit unlimited opt-in. Definition `maxSubagentDepth` values additionally propagate as the strictest inherited cap, while `maxChildAgents` caps total starts for one runtime. Malformed tool/delegation policy fields reject the affected definition instead of silently dropping restrictions. Built-in research and security-review roles are non-mutating locally but include `web_search`, so they can send query text to the configured external search provider. Any future tool escalation must be an explicit host/SDK option, not the default.
 
 ## RPC lifecycle
 
@@ -227,15 +227,24 @@ Failure semantics:
 - Subprocess fallback is outside the MVP.
 - Child failures must not crash the parent agent loop.
 
-## Parent-facing tool
+## Parent- and child-facing tools
 
-Core exposes a `subagent` tool when a `SubagentManager` exists and its current delegation policy has at least one available definition. The tool is active by default for normal local/SDK sessions with an eligible manager, can be disabled through normal tool policy (`--exclude-tools subagent`, `--no-builtin-tools`, or `--no-tools`), and remains subject to strict explicit allowlists when callers pass `tools`.
-
-Supported MVP modes:
+Core exposes a `subagent` tool when a `SubagentManager` exists and its current delegation policy has at least one available definition. The tool is active by default for normal local/SDK sessions with an eligible manager, can be disabled through normal tool policy (`--exclude-tools subagent`, `--no-builtin-tools`, or `--no-tools`), and remains subject to strict explicit allowlists when callers pass `tools`. Root sessions retain list/follow on this tool for compatibility. In child runtimes, its schema and guidance are spawn-only:
 
 - Single: `{ "agent": "scout", "task": "Find auth code" }`
-- Parallel: `{ "tasks": [{ "agent": "scout", "task": "..." }] }`
+- Parallel: `{ "tasks": [{ "agent": "scout", "task": "..." }] }`, capped at 8 tasks
 - Chain: `{ "chain": [{ "agent": "scout", "task": "... {previous}" }] }`, capped at 8 steps
+
+Spawn modes are two-phase when the manager exposes the shared atomic confirmation API. The first request lists the live registry and reserves a SHA-256 key derived from the normalized mode and ordered agent/task inputs; it starts nothing and returns an opaque one-time token. Repeating the exact request with `confirm` claims that reservation and starts the run. Exact duplicate agent/task pairs inside one parallel request are rejected before preflight.
+
+A standard `subagent_registry` tool is registered only for runtimes whose manager has a `SubagentRuntimeContext`, independently of whether spawning is currently available. It supports:
+
+- List: `{ "list": true }` or `{ "list": true, "cursor": 42 }` — a bounded newest-first page of delegated runs in the session-wide registry, paginated by immutable registration-sequence cursor
+- Follow: `{ "follow": "sa_..." }` — an existing run's result, waiting while it is still running
+
+`subagent` and `subagent_registry` are separate policy names. Explicit allowlists and exclusions can enable or disable either capability without implicitly widening the other. The spawn tool's internal preflight uses its manager's registry directly, so disabling the child-facing `subagent_registry` tool does not bypass confirmation.
+
+The session-wide registry (`SubagentRegistry`) is owned by the root session's manager and shared with every descendant runtime through the subagent context, alongside the delegation scope. Each start records id, parent id, agent, path, bounded task prompt, and status; terminal transitions attach the bounded final assistant output. The same registry owns pending and claimed exact-request confirmation reservations. Reservation preparation lists and reserves synchronously, so concurrent identical requests across separate branches cannot receive independent tokens; a claimed reservation remains held until its tool call settles. Pending reservations expire after five minutes. This gives sideways visibility that the parent/child activity ledgers cannot: any branch can discover cousin runs and follow their results instead of duplicating work. Follow waits are deadlock-checked against a dependency graph of parent-awaits-child edges plus active follow edges; waits that close a cycle (following an ancestor, mutual sibling follows) are rejected. Terminal records are evicted oldest-first past a cap; running records are never evicted. List results return up to 50 complete rows newest first within the aggregate byte limit and include the next registration-sequence cursor when more records remain; because sequences are immutable, later pages never duplicate or skip records as runs change state. Definition-backed children receive a bounded start-time snapshot of recorded runs only when `subagent_registry` is active (and the snapshot is non-empty), so prompt guidance never advertises an unavailable tool.
 
 The tool result returns:
 
@@ -246,7 +255,7 @@ The tool result returns:
 - bounded transcript/tool summary
 - usage and cost when available
 
-Model-visible output is capped at 50 KB per task/step and parallel results have an additional 100 KB aggregate cap. Chain `{previous}` substitution uses that bounded output, XML-escapes it, and wraps it as untrusted prior data instead of forwarding raw child text. Delegation tool calls have no automatic deadline; SDK callers may opt into a call-specific `runTimeoutMs`, and users or parents can cancel explicitly. Full child output remains in child session state when available; tool details include status, usage, truncation, error metadata, and a final snapshot of tree-wide accounting.
+Model-visible output is capped at 50 KB per task/step, while parallel results and registry list pages have a 100 KB aggregate cap; details payloads additionally bound task entries and retained output text so unbounded task counts stay under remote frame limits. Chain `{previous}` substitution uses that bounded output, XML-escapes it, and wraps it as untrusted prior data instead of forwarding raw child text. Delegation tool calls have no automatic deadline by default, but the shared delegation scope enforces tree-wide depth/start/active/turn/token/cost ceilings (deadline opt-in via `maxDurationMs`); SDK callers may opt into a call-specific `runTimeoutMs`, and users or parents can cancel explicitly. Full child output remains in child session state when available; tool details include status, usage, truncation, error metadata, and a final snapshot of tree-wide accounting.
 
 ## Public RPC surface
 
@@ -363,8 +372,8 @@ Deferred options:
 - `SubagentManager` using `createInProcessRpcClient()` and isolated child runtimes.
 - Definition-backed starts with system prompt, tools, model, and thinking configuration applied to child sessions.
 - Parent/session tool policy clamping for child tools.
-- Built-in `subagent` tool backed by `SubagentManager`.
-- Single, parallel, and chain modes with output truncation and usage/status details.
+- Built-in `subagent` spawning tool and child-only `subagent_registry` tool backed by shared `SubagentManager` registry behavior.
+- Single, parallel, and chain spawning modes with shared registry preflight/confirmation, exact concurrent-request reservation, duplicate parallel-item rejection, bounded/paginated registry list, and deadlock-checked follow modes, with output truncation and usage/status details.
 - Compact TUI rendering and live progress updates for built-in `subagent` tool calls.
 - Live `/subagents` inspector with bounded active/completed activity retention, conversation drill-down, and tool-flow rendering.
 - Local RPC commands: `list_subagents`, `subagent_start`, `subagent_abort`, `subagent_get_state`, `subagent_get_transcript`, and `subagent_dispose`.
@@ -396,6 +405,9 @@ Integration tests:
 
 - run a child through in-process RPC with the faux provider
 - parent `subagent` tool receives child final output
+- max-depth children omit `subagent` spawning while retaining callable `subagent_registry` list/follow access
+- registry tool calls project through stdio, loopback, and Iroh as ordinary tool events
+- concurrent identical spawn requests across separate tool instances share one atomic registry reservation
 - parallel children respect concurrency limits
 - child provider/tool errors do not crash parent runtime
 - app-visible sessions keep the selected workspace/session identity through the existing remote flow

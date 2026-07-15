@@ -18,6 +18,7 @@ export {
 	type RpcCloseHandler,
 	type RpcLineHandler,
 	type RpcTransport,
+	type RpcValueHandler,
 } from "./transport.ts";
 export type {
 	RpcClientCapabilityFeature,

@@ -291,6 +291,69 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		expect(tool?.outputTruncated).toBe(true);
 	});
 
+	it("projects standard subagent registry tool metadata for integrated Iroh transcripts", async () => {
+		const branch = [
+			{
+				type: "message",
+				id: "e-registry-call",
+				timestamp: "2026-07-06T00:00:00.000Z",
+				message: {
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "tc-registry",
+							name: "subagent_registry",
+							arguments: { list: true, cursor: 50 },
+						},
+					],
+				},
+			},
+			{
+				type: "message",
+				id: "e-registry-result",
+				timestamp: "2026-07-06T00:00:01.000Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "tc-registry",
+					toolName: "subagent_registry",
+					isError: false,
+					content: [{ type: "text", text: "bounded registry page" }],
+					details: {
+						mode: "list",
+						status: "completed",
+						summary: { total: 120, returned: 50, nextCursor: 20 },
+					},
+				},
+			},
+		] as unknown as SessionEntry[];
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-1", sessionManager: { getBranch: () => branch } },
+			listSessions: async () => [],
+		};
+
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "12", type: "get_transcript" },
+			createAuthorization(),
+			createContext(),
+			runtime,
+		)) as { success: boolean; data: { items: Array<Record<string, unknown>> } };
+		expect(response.success).toBe(true);
+		expect(response.data.items).toContainEqual(
+			expect.objectContaining({
+				entryId: "e-registry-result",
+				role: "tool",
+				toolName: "subagent_registry",
+				args: { list: true, cursor: 50 },
+				details: {
+					mode: "list",
+					status: "completed",
+					summary: { total: 120, returned: 50, nextCursor: 20 },
+				},
+			}),
+		);
+	});
+
 	it("advertises imageCount on tool transcript items with image results", async () => {
 		const branch = [
 			{

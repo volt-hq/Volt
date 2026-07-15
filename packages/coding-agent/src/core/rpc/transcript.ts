@@ -3,6 +3,7 @@ import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { ImageContent } from "@hansjm10/volt-ai";
 import { type BashExecutionMessage, extractVisibleTextContent } from "../messages.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
+import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
 import type {
 	RpcMessageImage,
 	RpcTranscriptItem,
@@ -266,7 +267,7 @@ function projectToolResult(
 	if (projectedArgs) {
 		item.args = projectedArgs;
 	}
-	if (message.toolName === "subagent") {
+	if (message.toolName === "subagent" || message.toolName === SUBAGENT_REGISTRY_TOOL_NAME) {
 		const subagentDetails = projectSubagentDetails(details);
 		if (subagentDetails) {
 			item.details = subagentDetails;
@@ -279,7 +280,7 @@ function projectToolArgs(
 	toolName: string,
 	args: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
-	if (toolName === "subagent") {
+	if (toolName === "subagent" || toolName === SUBAGENT_REGISTRY_TOOL_NAME) {
 		return projectSubagentArgs(args);
 	}
 	if (!args) {
@@ -406,6 +407,11 @@ function projectSubagentArgs(args: Record<string, unknown> | undefined): Record<
 	if (chain) {
 		projected.chain = chain;
 	}
+	copyBooleanArg(args, projected, "list");
+	copyNumberArg(args, projected, "cursor");
+	copyStringArg(args, projected, "follow", SUBAGENT_ID_LIMIT);
+	// The one-time confirm token is consumed by the call and omitted here, as
+	// in the daemon and iroh projections.
 	return Object.keys(projected).length > 0 ? projected : undefined;
 }
 
@@ -499,6 +505,9 @@ function projectSubagentSummary(value: unknown): Record<string, number> | undefi
 		"maxTasks",
 		"maxConcurrency",
 		"stoppedAt",
+		"returned",
+		"nextCursor",
+		"omittedTasks",
 	]) {
 		const numberValue = getFiniteNumber(value, key);
 		if (numberValue !== undefined) {
