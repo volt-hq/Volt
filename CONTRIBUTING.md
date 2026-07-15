@@ -53,4 +53,6 @@ If you are adding a new provider to `packages/ai`, see `AGENTS.md` for required 
 
 ## Roadmap
 
+Planned and in-flight work across the Volt CLI and its companion app is tracked on the [Volt Roadmap](https://github.com/orgs/volt-hq/projects/1) project board. Items from private repositories are only visible to people with access, so the board may look sparse from the outside.
+
 Volt is a fork of [Pi](https://github.com/badlogic/pi-mono). Historical Pi design material remains upstream and does not represent the Volt roadmap.
