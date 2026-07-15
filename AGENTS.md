@@ -81,6 +81,11 @@ When creating issues:
 
 - Add `pkg:*` labels for affected packages (`pkg:agent`, `pkg:ai`, `pkg:coding-agent`, `pkg:tui`); use all that apply.
 
+When starting work on an issue:
+
+- Add the `inprogress` label; remove it when the PR merges or work stops.
+- If the issue is on the [Volt Roadmap](https://github.com/orgs/volt-hq/projects/1) project board, set its board Status to In Progress. Closed issues move to Done automatically.
+
 When posting issue/PR comments:
 
 - Write the comment to a temp file and post with `gh issue/pr comment --body-file` (never multi-line markdown via `--body`).
