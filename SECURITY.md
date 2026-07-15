@@ -25,7 +25,7 @@ agent; this risk cannot be reliably eliminated.
 
 If you believe you found a security vulnerability in Volt or another package in
 this repository, [open a private GitHub Security Advisory for
-`hansjm10/Volt`](https://github.com/hansjm10/Volt/security/advisories/new).
+`volt-hq/Volt`](https://github.com/volt-hq/Volt/security/advisories/new).
 
 Please include:
 

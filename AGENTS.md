@@ -119,7 +119,7 @@ Every user-visible change adds one fragment file in `.changeset/` (unique kebab-
 "@hansjm10/volt-coding-agent": patch
 ---
 
-fix(daemon): Fixed workspace unregister leaving orphaned worktree records. ([#123](https://github.com/hansjm10/Volt/issues/123))
+fix(daemon): Fixed workspace unregister leaving orphaned worktree records. ([#123](https://github.com/volt-hq/Volt/issues/123))
 ```
 
 Rules:
@@ -132,8 +132,8 @@ Rules:
 
 Attribution stays inline in the sentence:
 
-- Internal (from issues): `Fixed foo bar ([#123](https://github.com/hansjm10/Volt/issues/123))`
-- External contributions: `Added feature X ([#456](https://github.com/hansjm10/Volt/pull/456) by [@username](https://github.com/username))`
+- Internal (from issues): `Fixed foo bar ([#123](https://github.com/volt-hq/Volt/issues/123))`
+- External contributions: `Added feature X ([#456](https://github.com/volt-hq/Volt/pull/456) by [@username](https://github.com/username))`
 
 ## Releasing
 

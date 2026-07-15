@@ -13,10 +13,10 @@ export default defineConfig({
     starlight({
       title: "Volt",
       description: "A fast, hackable coding agent for your terminal — with remote access from your phone.",
-      social: [{ icon: "github", label: "GitHub", href: "https://github.com/hansjm10/Volt" }],
+      social: [{ icon: "github", label: "GitHub", href: "https://github.com/volt-hq/Volt" }],
       sidebar,
       editLink: {
-        baseUrl: "https://github.com/hansjm10/Volt/edit/main/packages/coding-agent/docs/",
+        baseUrl: "https://github.com/volt-hq/Volt/edit/main/packages/coding-agent/docs/",
       },
       customCss: ["./src/styles/starlight.css"],
       components: {},

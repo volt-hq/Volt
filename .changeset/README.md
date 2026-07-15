@@ -12,7 +12,7 @@ directly.
 "@hansjm10/volt-coding-agent": patch
 ---
 
-fix(daemon): Fixed workspace unregister leaving orphaned worktree records. ([#123](https://github.com/hansjm10/Volt/issues/123))
+fix(daemon): Fixed workspace unregister leaving orphaned worktree records. ([#123](https://github.com/volt-hq/Volt/issues/123))
 ```
 
 The front matter lists the workspace package(s) the change touches
@@ -37,8 +37,8 @@ the bullet — use them for context or migration steps, not to restate the diff.
 
 Attribution stays inline in the sentence:
 
-- Internal (from issues): `([#123](https://github.com/hansjm10/Volt/issues/123))`
-- External contributions: `([#456](https://github.com/hansjm10/Volt/pull/456) by [@username](https://github.com/username))`
+- Internal (from issues): `([#123](https://github.com/volt-hq/Volt/issues/123))`
+- External contributions: `([#456](https://github.com/volt-hq/Volt/pull/456) by [@username](https://github.com/username))`
 
 ## Commands
 

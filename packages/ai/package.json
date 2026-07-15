@@ -100,12 +100,12 @@
 	],
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/hansjm10/Volt.git",
+		"url": "git+https://github.com/volt-hq/Volt.git",
 		"directory": "packages/ai"
 	},
-	"homepage": "https://github.com/hansjm10/Volt#readme",
+	"homepage": "https://github.com/volt-hq/Volt#readme",
 	"bugs": {
-		"url": "https://github.com/hansjm10/Volt/issues"
+		"url": "https://github.com/volt-hq/Volt/issues"
 	},
 	"license": "MIT",
 	"engines": {

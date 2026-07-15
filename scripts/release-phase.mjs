@@ -144,8 +144,8 @@ export function assertCandidateWorkflowRun(run, { candidateCommit, runId }) {
 	if (String(run.id) !== runId) {
 		throw new Error(`GitHub returned workflow run ${String(run.id)}; expected approved run ${runId}`);
 	}
-	if (run.repository?.full_name !== "hansjm10/Volt") {
-		throw new Error(`approved workflow run belongs to ${String(run.repository?.full_name)}, not hansjm10/Volt`);
+	if (run.repository?.full_name !== "volt-hq/Volt") {
+		throw new Error(`approved workflow run belongs to ${String(run.repository?.full_name)}, not volt-hq/Volt`);
 	}
 	if (run.path !== ".github/workflows/build-standalone-candidate.yml") {
 		throw new Error(`approved run used unexpected workflow ${String(run.path)}`);

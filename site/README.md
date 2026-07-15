@@ -3,7 +3,7 @@
 Marketing landing page, documentation, and install scripts for Volt, built with Astro + Starlight.
 
 The public project and release repository is
-[`hansjm10/Volt`](https://github.com/hansjm10/Volt). Volt is maintained and
+[`volt-hq/Volt`](https://github.com/volt-hq/Volt). Volt is maintained and
 distributed by Jordan Hans and derived from Mario Zechner's Pi project under
 the MIT License.
 
@@ -25,7 +25,7 @@ Docs edits go in `packages/coding-agent/docs/`; re-run `npm run sync-docs` (or r
 
 ## Deploying to Cloudflare (Workers Builds)
 
-The site deploys as an assets-only Worker (`wrangler.jsonc`, no server code). One-time setup in the Cloudflare dashboard (Workers & Pages → Create → import the `hansjm10/Volt` repository):
+The site deploys as an assets-only Worker (`wrangler.jsonc`, no server code). One-time setup in the Cloudflare dashboard (Workers & Pages → Create → import the `volt-hq/Volt` repository):
 
 1. Project name: `volt-site`.
 2. Build configuration:

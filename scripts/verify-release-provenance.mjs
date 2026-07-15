@@ -12,7 +12,7 @@ export const RELEASE_PACKAGE_IDENTITIES = [
 ];
 export const RELEASE_PACKAGES = RELEASE_PACKAGE_IDENTITIES.map(({ directory }) => directory);
 export const RELEASE_CHANGELOG = "packages/coding-agent/CHANGELOG.md";
-const RELEASE_REPOSITORY_URL = "git+https://github.com/hansjm10/Volt.git";
+const RELEASE_REPOSITORY_URL = "git+https://github.com/volt-hq/Volt.git";
 
 export function versionFromReleaseTag(tag) {
 	const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(tag);

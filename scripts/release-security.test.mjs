@@ -221,7 +221,7 @@ test("release finalization requires explicit sign-off for the exact prepared can
 	}
 	const workflowRun = {
 		id: 123456789,
-		repository: { full_name: "hansjm10/Volt" },
+		repository: { full_name: "volt-hq/Volt" },
 		path: ".github/workflows/build-standalone-candidate.yml",
 		event: "workflow_dispatch",
 		head_branch: "main",
@@ -459,7 +459,7 @@ test("GitHub-native release phases preserve their mutation boundaries end to end
 						version: "0.1.0",
 						repository: {
 							type: "git",
-							url: "git+https://github.com/hansjm10/Volt.git",
+							url: "git+https://github.com/volt-hq/Volt.git",
 							directory: `packages/${packageDirectory}`,
 						},
 					},
@@ -515,7 +515,7 @@ if (process.argv.join(" ").includes("/artifacts?")) {
 } else {
 	console.log(JSON.stringify({
 		id: Number(runId),
-		repository: { full_name: "hansjm10/Volt" },
+		repository: { full_name: "volt-hq/Volt" },
 		path: ".github/workflows/build-standalone-candidate.yml",
 		event: "workflow_dispatch",
 		head_branch: "main",
@@ -728,7 +728,7 @@ test("release package versions and the product changelog must match the tag", ()
 			JSON.stringify({
 				name,
 				version: "1.2.3",
-				repository: { url: "git+https://github.com/hansjm10/Volt.git", directory },
+				repository: { url: "git+https://github.com/volt-hq/Volt.git", directory },
 			}),
 		);
 	}
@@ -865,7 +865,7 @@ test("idempotent npm publication requires exact release bytes and provenance", (
 			version: "0.1.0",
 			gitHead: "a".repeat(40),
 			repository: {
-				url: "git+https://github.com/hansjm10/Volt.git",
+				url: "git+https://github.com/volt-hq/Volt.git",
 				directory: "packages/ai",
 			},
 			"dist-tags": { beta: "0.1.0", bootstrap: "0.0.0-bootstrap.0", latest: "0.0.0-bootstrap.0" },
@@ -1595,7 +1595,7 @@ test("published packages and binary build include the repository license and not
 		const manifest = JSON.parse(readFileSync(`${directory}/package.json`, "utf8"));
 		assert.equal(manifest.license, "MIT");
 		assert.deepEqual(manifest.contributors, ["Mario Zechner", "Jordan Hans"]);
-		assert.equal(manifest.repository.url, "git+https://github.com/hansjm10/Volt.git");
+		assert.equal(manifest.repository.url, "git+https://github.com/volt-hq/Volt.git");
 		assert.equal(manifest.repository.directory, directory);
 		assert.deepEqual(manifest.publishConfig, { access: "public", tag: "beta" });
 	}
@@ -1859,7 +1859,7 @@ test("release notes link to the canonical GitHub repository", () => {
 		]);
 		assert.match(
 			readFileSync(output, "utf8"),
-			/https:\/\/github\.com\/hansjm10\/Volt\/blob\/v1\.2\.3\/packages\/coding-agent\/README\.md/,
+			/https:\/\/github\.com\/volt-hq\/Volt\/blob\/v1\.2\.3\/packages\/coding-agent\/README\.md/,
 		);
 	} finally {
 		rmSync(directory, { force: true, recursive: true });

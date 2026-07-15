@@ -25,7 +25,7 @@ const docsSource = join(siteRoot, "..", "packages", "coding-agent", "docs");
 const contentOut = join(siteRoot, "src", "content", "docs", "docs");
 const generatedOut = join(siteRoot, "src", "generated");
 
-const GITHUB_BLOB = "https://github.com/hansjm10/Volt/blob/main";
+const GITHUB_BLOB = "https://github.com/volt-hq/Volt/blob/main";
 
 const manifest = JSON.parse(readFileSync(join(docsSource, "docs.json"), "utf8"));
 

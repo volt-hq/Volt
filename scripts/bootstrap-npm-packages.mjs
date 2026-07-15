@@ -102,7 +102,7 @@ export function expectedPlaceholderManifest(pkg) {
 		license: "MIT",
 		repository: {
 			type: "git",
-			url: "git+https://github.com/hansjm10/Volt.git",
+			url: "git+https://github.com/volt-hq/Volt.git",
 			directory: pkg.directory,
 		},
 		voltBootstrapPlaceholder: true,
@@ -205,7 +205,7 @@ function writePlaceholderPackage(root, pkg) {
 	writeFileSync(join(directory, "package.json"), `${JSON.stringify(expectedPlaceholderManifest(pkg), null, 2)}\n`);
 	writeFileSync(
 		join(directory, "README.md"),
-		`# ${pkg.name}\n\nThis package only reserves the npm name for [Volt](https://github.com/hansjm10/Volt).\n\nInstallable releases begin at \`0.1.0\` and use the \`beta\` dist-tag.\n`,
+		`# ${pkg.name}\n\nThis package only reserves the npm name for [Volt](https://github.com/volt-hq/Volt).\n\nInstallable releases begin at \`0.1.0\` and use the \`beta\` dist-tag.\n`,
 	);
 	writeFileSync(join(directory, "LICENSE"), readFileSync(LICENSE_PATH, "utf8"));
 	return directory;

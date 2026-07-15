@@ -19,10 +19,10 @@ describe("normalizeChangelogLinks", () => {
 
 		expect(normalizeChangelogLinks(markdown, entry)).toBe(
 			[
-				"[Project Trust](https://github.com/hansjm10/Volt/blob/v0.79.0/packages/coding-agent/README.md#project-trust)",
-				"[Extensions](https://github.com/hansjm10/Volt/blob/v0.79.0/packages/coding-agent/docs/extensions.md#project_trust)",
-				"[Examples](https://github.com/hansjm10/Volt/tree/v0.79.0/packages/coding-agent/examples/extensions/)",
-				"[Root README](https://github.com/hansjm10/Volt/blob/v0.79.0/README.md#supply-chain-hardening)",
+				"[Project Trust](https://github.com/volt-hq/Volt/blob/v0.79.0/packages/coding-agent/README.md#project-trust)",
+				"[Extensions](https://github.com/volt-hq/Volt/blob/v0.79.0/packages/coding-agent/docs/extensions.md#project_trust)",
+				"[Examples](https://github.com/volt-hq/Volt/tree/v0.79.0/packages/coding-agent/examples/extensions/)",
+				"[Root README](https://github.com/volt-hq/Volt/blob/v0.79.0/README.md#supply-chain-hardening)",
 			].join("\n"),
 		);
 	});
@@ -38,9 +38,9 @@ describe("normalizeChangelogLinks", () => {
 
 		expect(normalizeChangelogLinks(markdown, "0.79.0")).toBe(
 			[
-				"[#5167](https://github.com/hansjm10/Volt/pull/5167)",
-				"[#4163](https://github.com/hansjm10/Volt/issues/4163)",
-				"[Agent README](https://github.com/hansjm10/Volt/blob/v0.79.0/packages/agent/README.md)",
+				"[#5167](https://github.com/volt-hq/Volt/pull/5167)",
+				"[#4163](https://github.com/volt-hq/Volt/issues/4163)",
+				"[Agent README](https://github.com/volt-hq/Volt/blob/v0.79.0/packages/agent/README.md)",
 				"[External](https://example.com/docs)",
 				"[Local anchor](#settings)",
 			].join("\n"),
