@@ -283,7 +283,9 @@ function attachIrohRemoteTranscriptEntryEvents(
 				return;
 			}
 			emittedFinalEntryIds.add(entry.id);
-			void Promise.resolve(transport.write(transcriptEvent)).catch(() => {});
+			void Promise.resolve()
+				.then(() => transport.write(transcriptEvent))
+				.catch(() => {});
 		});
 	});
 }
