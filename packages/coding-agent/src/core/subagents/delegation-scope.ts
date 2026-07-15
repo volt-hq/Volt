@@ -57,11 +57,19 @@ export interface SubagentDelegationScopeOptions {
 }
 
 function resolveLimits(overrides: SubagentDelegationScopeLimits | undefined): Required<SubagentDelegationScopeLimits> {
-	const limits = { ...DEFAULT_SUBAGENT_DELEGATION_LIMITS, ...overrides };
-	for (const [key, value] of Object.entries(limits)) {
-		if (Number.isNaN(value) || value <= 0) {
+	// Explicitly-undefined overrides must fall back to the default, never
+	// silently disable a ceiling: every comparison against undefined is false,
+	// which would grant the Infinity opt-in without anyone opting in.
+	const limits: Required<SubagentDelegationScopeLimits> = { ...DEFAULT_SUBAGENT_DELEGATION_LIMITS };
+	for (const key of Object.keys(limits) as Array<keyof SubagentDelegationScopeLimits>) {
+		const value = overrides?.[key];
+		if (value === undefined) {
+			continue;
+		}
+		if (typeof value !== "number" || Number.isNaN(value) || value <= 0) {
 			throw new Error(`Subagent delegation limit ${key} must be a positive number or Infinity`);
 		}
+		limits[key] = value;
 	}
 	return limits;
 }

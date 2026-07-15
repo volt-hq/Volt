@@ -21,6 +21,7 @@ import { SessionManager } from "../src/core/session-manager.ts";
 import type { Settings } from "../src/core/settings-manager.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import {
+	DEFAULT_SUBAGENT_DELEGATION_LIMITS,
 	type SubagentDefinition,
 	SubagentDefinitionConfigurationError,
 	SubagentDefinitionNotFoundError,
@@ -1011,6 +1012,17 @@ describe("SubagentManager", () => {
 		expect(() => new SubagentDelegationScope({ limits: { maxStarts: 0 } })).toThrow(
 			/maxStarts must be a positive number or Infinity/,
 		);
+		expect(() => new SubagentDelegationScope({ limits: { maxStarts: "10" as unknown as number } })).toThrow(
+			/maxStarts must be a positive number or Infinity/,
+		);
+
+		// Explicitly-undefined overrides (e.g. unset optional config passed
+		// through) must keep the default ceiling, not silently lift it.
+		const undefinedOverrides = new SubagentDelegationScope({
+			limits: { maxTotalCostUsd: undefined, maxStarts: undefined },
+		});
+		cleanups.push(() => undefinedOverrides.dispose());
+		expect(undefinedOverrides.limits).toEqual(DEFAULT_SUBAGENT_DELEGATION_LIMITS);
 	});
 
 	it("records arbitrarily large tree activity with an explicit unlimited opt-in", () => {

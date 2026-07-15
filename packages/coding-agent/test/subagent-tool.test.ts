@@ -19,6 +19,7 @@ import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import {
 	type SubagentDefinition,
 	SubagentDefinitionNotFoundError,
+	SubagentDelegationScope,
 	type SubagentEndEvent,
 	type SubagentEvent,
 	type SubagentHandle,
@@ -1702,6 +1703,54 @@ describe("subagent tool", () => {
 		expect(outputs?.[2]?.omittedBytes).toBe(outputs?.[2]?.bytes);
 		// The child session reference stays available for the dropped output.
 		expect(result.details.childSessions?.[2]).toMatchObject({ subagentId: "sa_three" });
+	});
+
+	it("clamps oversized task error messages in details", async () => {
+		const hugeError = "e".repeat(64 * 1024);
+		const manager = {
+			getDefinition: (agentName: string) => createDefinition(agentName),
+			startByName: async () => {
+				throw new Error(hugeError);
+			},
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager });
+
+		const result = await tool.execute("call-error-clamp", {
+			tasks: [{ agent: "one", task: "explode" }],
+		});
+
+		const message = result.details.tasks?.[0]?.error?.message;
+		expect(message?.length).toBeLessThanOrEqual(4_000);
+		expect(message?.endsWith("…")).toBe(true);
+	});
+
+	it("aborts children that finish starting after a run timeout on an inherited scope", async () => {
+		const scope = new SubagentDelegationScope();
+		cleanups.push({ cleanup: () => scope.dispose() });
+		const aborts: string[] = [];
+		const disposes: string[] = [];
+		const startDeferred = createDeferred<SubagentHandle>();
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			// An inherited (non-owned) scope is not disposed by the tool call, so
+			// the late-start guard is the only thing that can cancel this child.
+			createDelegationScope: () => ({ scope, owned: false }),
+			startByName: () => startDeferred.promise,
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager, runTimeoutMs: 20 });
+
+		await expect(tool.execute("call-late-start", { agent: "scout", task: "slow start" })).rejects.toThrow(
+			/timed out after 20ms/,
+		);
+
+		startDeferred.resolve(
+			createCompletedHandle("late", {
+				id: "sa_late",
+				onAbort: () => aborts.push("sa_late"),
+				onDispose: () => disposes.push("sa_late"),
+			}),
+		);
+		await waitUntil(() => aborts.length === 1 && disposes.length === 1);
 	});
 
 	it("runs chain steps sequentially and substitutes previous output", async () => {

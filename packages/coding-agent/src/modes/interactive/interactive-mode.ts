@@ -2148,8 +2148,19 @@ export class InteractiveMode {
 		this.streamingRenderCoalescer = undefined;
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
-		this.pendingTools.clear();
+		this.disposePendingTools();
 		this.renderInitialMessages();
+	}
+
+	/**
+	 * Discarded tool rows never see a terminal render, so their renderer
+	 * resources (e.g. the subagent repaint interval) must be released here.
+	 */
+	private disposePendingTools(): void {
+		for (const component of this.pendingTools.values()) {
+			component.dispose();
+		}
+		this.pendingTools.clear();
 	}
 
 	/**
@@ -3538,7 +3549,7 @@ export class InteractiveMode {
 
 		switch (event.type) {
 			case "agent_start":
-				this.pendingTools.clear();
+				this.disposePendingTools();
 				this.turnStartedAt = Date.now();
 				this.startWorkingElapsedTicker();
 				if (this.settingsManager.getShowTerminalProgress()) {
@@ -3676,7 +3687,7 @@ export class InteractiveMode {
 								isError: true,
 							});
 						}
-						this.pendingTools.clear();
+						this.disposePendingTools();
 					} else {
 						// Args are now complete - trigger diff computation for edit tools
 						for (const [, component] of this.pendingTools.entries()) {
@@ -3752,7 +3763,7 @@ export class InteractiveMode {
 					this.streamingComponent = undefined;
 					this.streamingMessage = undefined;
 				}
-				this.pendingTools.clear();
+				this.disposePendingTools();
 
 				this.scheduleTurnDoneAlert(event);
 				this.updateEditorBorderColor(false);
@@ -4030,7 +4041,7 @@ export class InteractiveMode {
 		sessionContext: SessionContext,
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
-		this.pendingTools.clear();
+		this.disposePendingTools();
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 
 		if (options.updateFooter) {
@@ -8165,6 +8176,9 @@ export class InteractiveMode {
 			dispose: () => {
 				streamingRenderCoalescer?.dispose();
 				streamingRenderCoalescer = undefined;
+				for (const component of pending.values()) {
+					component.dispose();
+				}
 				pending.clear();
 				this.chatContainer.removeChild(group);
 				this.ui.requestRender();

@@ -249,7 +249,7 @@ describe("RPC transcript projection", () => {
 			role: "tool",
 			toolName: "subagent",
 			status: "completed",
-			args: { agent: "general", task: "Review the implementation", confirm: "confirmation-token" },
+			args: { agent: "general", task: "Review the implementation" },
 			details: {
 				mode: "single",
 				status: "completed",
@@ -280,6 +280,9 @@ describe("RPC transcript projection", () => {
 		expect(output).toEqual(expect.stringContaining("Child answer"));
 		expect(output).toEqual(expect.stringContaining("[truncated]"));
 		expect(JSON.stringify(transcript)).not.toContain("model-visible child output");
+		// The consumed one-time confirm token is omitted, matching the daemon
+		// and iroh projections.
+		expect(JSON.stringify(transcript)).not.toContain("confirmation-token");
 	});
 
 	test("projects standard subagent registry pagination arguments and summary", () => {

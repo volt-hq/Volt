@@ -599,19 +599,6 @@ function subagentTreeNodes(details: SubagentToolDetails | undefined, args: unkno
 		return bounded ? [bounded] : [];
 	}
 	const items = details.mode === "chain" ? (details.steps ?? []) : (details.tasks ?? []);
-	if (items.length === 0) {
-		return inputs.slice(0, SUBAGENT_TREE_MAX_CHILDREN).flatMap((input) => {
-			const node = boundedTreeNode(
-				{
-					agent: { name: input.agent ?? "subagent" },
-					status: "running",
-					...(input.task ? { task: input.task } : {}),
-				},
-				0,
-			);
-			return node ? [node] : [];
-		});
-	}
 	return items.slice(0, SUBAGENT_TREE_MAX_CHILDREN).flatMap((item) => {
 		const node = boundedTreeNode(treeNodeFromTaskDetails(item, inputs[item.index]), 0);
 		return node ? [node] : [];
@@ -796,6 +783,16 @@ function createOutputDetails(truncated: TruncatedText, maxOutputBytes: number): 
 	};
 }
 
+/** Matches the registry's error bound; unlike output text, error messages are not budgeted per payload. */
+const SUBAGENT_DETAILS_ERROR_MESSAGE_LIMIT_CHARS = 4_000;
+
+function boundDetailsErrorMessage(message: string): string {
+	if (message.length <= SUBAGENT_DETAILS_ERROR_MESSAGE_LIMIT_CHARS) {
+		return message;
+	}
+	return `${message.slice(0, SUBAGENT_DETAILS_ERROR_MESSAGE_LIMIT_CHARS - 1)}…`;
+}
+
 function createTaskDetails(options: {
 	index: number;
 	definition: SubagentDefinition | undefined;
@@ -821,7 +818,7 @@ function createTaskDetails(options: {
 		durationMs: Date.now() - options.startedAt,
 		...(options.stats ? { usage: summarizeStats(options.stats) } : {}),
 		output: createOutputDetails(options.output, options.maxOutputBytes),
-		...(options.errorMessage ? { error: { message: options.errorMessage } } : {}),
+		...(options.errorMessage ? { error: { message: boundDetailsErrorMessage(options.errorMessage) } } : {}),
 		...(options.live ? options.live.finalDetailFields(options.status, options.stats) : {}),
 	};
 }
@@ -2263,6 +2260,10 @@ export function createSubagentToolDefinition(
 			const activeHandles = new Set<SubagentHandle>();
 			const disposedHandles = new Set<SubagentHandle>();
 			let acceptingUpdates = true;
+			// Set on any internal abort (timeout, scope abort), not just the tool
+			// signal: a startByName still in flight when the race is lost must be
+			// aborted once it resolves, even when signal itself never fires.
+			let abortRequested = false;
 			let abortReject: (error: Error) => void = () => undefined;
 			const abortPromise = new Promise<never>((_resolve, reject) => {
 				abortReject = reject;
@@ -2344,6 +2345,7 @@ export function createSubagentToolDefinition(
 			const requestAbort = (error: Error): void => {
 				// Parent cancellation wins immediately; child transport cleanup is
 				// best-effort and must not delay or hang the parent tool call.
+				abortRequested = true;
 				abortReject(error);
 				void abortActiveHandles();
 			};
@@ -2385,7 +2387,7 @@ export function createSubagentToolDefinition(
 						});
 						void startPromise
 							.then((startedHandle) => {
-								if (signal?.aborted && handle !== startedHandle) {
+								if ((signal?.aborted || abortRequested) && handle !== startedHandle) {
 									void abortHandle(startedHandle);
 								}
 							})

@@ -2,4 +2,4 @@
 "@hansjm10/volt-coding-agent": patch
 ---
 
-fix(tui): Truncated remote-drain overlays no longer leak subagent repaint timers; pending tool renderers are disposed when the overlay drops or finishes its feed.
+fix(tui): Discarded tool rows no longer leak subagent repaint timers; pending tool renderers are disposed at every discard site (drain-overlay truncation and finish, session re-renders, turn boundaries, and inline child-session views).
