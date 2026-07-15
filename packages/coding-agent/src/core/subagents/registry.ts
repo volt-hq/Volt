@@ -221,12 +221,16 @@ export class SubagentRegistry {
 	/**
 	 * List current runs and atomically reserve one exact normalized spawn request.
 	 * Concurrent callers for the same key observe the existing reservation instead
-	 * of receiving independent confirmation tokens.
+	 * of receiving independent confirmation tokens. A caller that just failed a
+	 * claim may pass `reissuePending` to rotate a still-pending token: a garbled
+	 * token must not lock the request out until the reservation expires, and
+	 * rotation keeps exactly one token valid at a time.
 	 */
 	prepareSpawnConfirmation(
 		requestKey: string,
 		followerId?: string,
 		followerParentId?: string,
+		options?: { reissuePending?: boolean },
 	): SubagentSpawnConfirmationPreflight {
 		const snapshot = this.snapshotForFollower(SPAWN_CONFIRMATION_RECORD_LIMIT, followerId, followerParentId);
 		const registrySummary = {
@@ -238,6 +242,16 @@ export class SubagentRegistry {
 		this.pruneExpiredSpawnConfirmations(now);
 		const existing = this.spawnConfirmations.get(requestKey);
 		if (existing) {
+			if (existing.status === "pending" && options?.reissuePending) {
+				existing.token = randomUUID();
+				existing.expiresAt = now + SUBAGENT_SPAWN_CONFIRMATION_TTL_MS;
+				return {
+					...registrySummary,
+					status: "reserved",
+					expiresAt: existing.expiresAt,
+					token: existing.token,
+				};
+			}
 			return {
 				...registrySummary,
 				status: existing.status,

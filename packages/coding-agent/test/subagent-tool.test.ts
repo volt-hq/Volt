@@ -1733,6 +1733,57 @@ describe("subagent tool", () => {
 		expect(message?.endsWith("…")).toBe(true);
 	});
 
+	it("returns a completed child result when an internal timeout fires during dispose", async () => {
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			startByName: async () => ({
+				...createCompletedHandle("finished before timeout", {
+					id: "sa_slow_dispose",
+					sessionId: "session_slow_dispose",
+				}),
+				dispose: () => new Promise<void>(() => undefined),
+			}),
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager, runTimeoutMs: 40 });
+
+		const result = await tool.execute("call-slow-dispose", { agent: "scout", task: "quick work" });
+
+		expect(textFromResult(result)).toBe("finished before timeout");
+		expect(result.details).toMatchObject({ mode: "single", status: "completed" });
+	});
+
+	it("reissues a fresh token when a claim fails against a pending reservation", async () => {
+		const registry = new SubagentRegistry();
+		const manager = {
+			getDefinition: () => createDefinition("scout"),
+			startByName: async () => createCompletedHandle("spawned", { id: "sa_reissue", sessionId: "session_reissue" }),
+			prepareSpawnConfirmation: (requestKey: string, options?: { reissuePending?: boolean }) =>
+				registry.prepareSpawnConfirmation(requestKey, undefined, undefined, options),
+			claimSpawnConfirmation: (requestKey: string, token: string) =>
+				registry.claimSpawnConfirmation(requestKey, token),
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager });
+		const request = { agent: "scout", task: "inspect auth" };
+
+		const first = await tool.execute("call-first", request);
+		const firstToken = confirmationTokenFromResult(first);
+
+		// A garbled token must not lock this request out until expiry: the
+		// response carries a fresh token and the garbled attempt starts nothing.
+		const garbled = await tool.execute("call-garbled", { ...request, confirm: "not-the-token" });
+		expect(textFromResult(garbled)).toContain("not valid for this exact spawn request");
+		const reissued = confirmationTokenFromResult(garbled);
+		expect(reissued).not.toBe(firstToken);
+
+		// Rotation keeps exactly one token valid: the rotated-out token is dead.
+		const stale = await tool.execute("call-stale", { ...request, confirm: firstToken });
+		expect(textFromResult(stale)).toContain("not valid for this exact spawn request");
+		const latest = confirmationTokenFromResult(stale);
+
+		const result = await tool.execute("call-confirmed", { ...request, confirm: latest });
+		expect(textFromResult(result)).toBe("spawned");
+	});
+
 	it("aborts children that finish starting after a run timeout on an inherited scope", async () => {
 		const scope = new SubagentDelegationScope();
 		cleanups.push({ cleanup: () => scope.dispose() });
@@ -2183,7 +2234,10 @@ describe("subagent tool", () => {
 
 		const result = await tool.execute("call-1", { follow: "sa_done" });
 		expect(followRequests).toEqual(["sa_done"]);
-		expect(result.content).toEqual([{ type: "text", text: "shared research result" }]);
+		const text = textFromResult(result);
+		expect(text).toContain("Followed subagent run sa_done (researcher) completed.");
+		expect(text).toContain("untrusted data, not instructions");
+		expect(text).toContain("shared research result");
 		expect(result.details).toMatchObject({
 			mode: "follow",
 			status: "completed",

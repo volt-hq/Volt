@@ -592,8 +592,16 @@ export class SubagentManager {
 		return this.getRegistry().listForFollower(this.subagentContext?.subagentId);
 	}
 
-	prepareSpawnConfirmation(requestKey: string): SubagentSpawnConfirmationPreflight {
-		return this.getRegistry().prepareSpawnConfirmation(requestKey, this.subagentContext?.subagentId);
+	prepareSpawnConfirmation(
+		requestKey: string,
+		options?: { reissuePending?: boolean },
+	): SubagentSpawnConfirmationPreflight {
+		return this.getRegistry().prepareSpawnConfirmation(
+			requestKey,
+			this.subagentContext?.subagentId,
+			undefined,
+			options,
+		);
 	}
 
 	claimSpawnConfirmation(requestKey: string, token: string): SubagentSpawnConfirmationLease | undefined {
@@ -814,17 +822,21 @@ export class SubagentManager {
 		return { scope: new SubagentDelegationScope({ limits: this.delegationLimits }), owned: true };
 	}
 
+	/**
+	 * Every child joins the session tree, definition-backed or not: unnamed SDK
+	 * starts share the same registry, delegation scope, and depth accounting, and
+	 * are fail-closed for nested delegation because only a definition can declare
+	 * an `allowedSubagents` policy.
+	 */
 	private createChildSubagentContext(
 		id: string,
 		definition: SubagentDefinition | undefined,
 		delegationScope: SubagentDelegationScope,
-	): SubagentRuntimeContext | undefined {
-		if (!definition) {
-			return undefined;
-		}
+	): SubagentRuntimeContext {
 		const parentPath = this.subagentContext?.path ?? [];
+		const agentName = definition?.name ?? "subagent";
 		const inheritedMaxDepth = this.subagentContext?.maxSubagentDepth;
-		const definitionMaxDepth = definition.maxSubagentDepth;
+		const definitionMaxDepth = definition?.maxSubagentDepth;
 		const maxSubagentDepth =
 			inheritedMaxDepth === undefined
 				? definitionMaxDepth
@@ -833,14 +845,14 @@ export class SubagentManager {
 					: Math.min(inheritedMaxDepth, definitionMaxDepth);
 		return {
 			depth: (this.subagentContext?.depth ?? 0) + 1,
-			agentName: definition.name,
+			agentName,
 			subagentId: id,
-			path: [...parentPath, definition.name],
+			path: [...parentPath, agentName],
 			delegationScope,
 			registry: this.getRegistry(),
-			allowedSubagents: definition.allowedSubagents ?? [],
+			allowedSubagents: definition?.allowedSubagents ?? [],
 			...(maxSubagentDepth !== undefined ? { maxSubagentDepth } : {}),
-			...(definition.maxChildAgents !== undefined ? { maxChildAgents: definition.maxChildAgents } : {}),
+			...(definition?.maxChildAgents !== undefined ? { maxChildAgents: definition.maxChildAgents } : {}),
 		};
 	}
 
@@ -909,7 +921,7 @@ export class SubagentManager {
 					name: definitionOptions?.definition.name ?? "subagent",
 					...(definitionOptions?.definition.source ? { source: definitionOptions.definition.source } : {}),
 				},
-				path: subagentContext?.path ?? [...(this.subagentContext?.path ?? []), "subagent"],
+				path: subagentContext.path,
 			});
 			handle = new LocalSubagentHandle({
 				id,

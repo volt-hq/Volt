@@ -877,6 +877,28 @@ describe("SubagentManager", () => {
 		await handle.dispose();
 	});
 
+	it("gives unnamed SDK starts a fail-closed tree context instead of a fresh root", async () => {
+		const observedContexts: Array<SubagentRuntimeContext | undefined> = [];
+		const { manager } = await createTestManager({
+			onCreateRuntime: (context) => observedContexts.push(context),
+		});
+
+		const handle = await manager.start();
+		const context = observedContexts[0];
+		expect(context).toMatchObject({
+			depth: 1,
+			agentName: "subagent",
+			subagentId: expect.stringMatching(/^sa_/),
+			path: ["subagent"],
+			allowedSubagents: [],
+		});
+		expect(context?.delegationScope).toBeInstanceOf(SubagentDelegationScope);
+		expect(context?.registry).toBeInstanceOf(SubagentRegistry);
+		// The child shares the session-wide registry that recorded its own run.
+		expect(context?.registry.list().map((record) => record.id)).toEqual([handle.id]);
+		await handle.dispose();
+	});
+
 	it("keeps the subagent tool for definitions with an explicit child allowlist", async () => {
 		let observedTools: string[] = [];
 		const resourceLoader = createSubagentResourceLoader([
