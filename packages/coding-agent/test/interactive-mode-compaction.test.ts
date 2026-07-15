@@ -150,7 +150,7 @@ describe("InteractiveMode compaction events", () => {
 			streamingComponent: undefined,
 			streamingMessage: undefined,
 			chatContainer: { removeChild: vi.fn() },
-			pendingTools: { clear: vi.fn() },
+			disposePendingTools: vi.fn(),
 			stopWorkingElapsedTicker: vi.fn(),
 			scheduleTurnDoneAlert: vi.fn(),
 			updateEditorBorderColor: vi.fn(),

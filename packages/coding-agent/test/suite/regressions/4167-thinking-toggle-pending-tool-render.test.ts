@@ -29,6 +29,7 @@ const EMPTY_USAGE: Usage = {
 
 type RenderSessionContextThis = {
 	pendingTools: Map<string, ToolExecutionComponent>;
+	disposePendingTools(): void;
 	chatContainer: Container;
 	footer: { invalidate(): void };
 	ui: TUI;
@@ -57,6 +58,12 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 	const chatContainer = new Container();
 	return {
 		pendingTools: new Map<string, ToolExecutionComponent>(),
+		disposePendingTools() {
+			for (const component of this.pendingTools.values()) {
+				component.dispose();
+			}
+			this.pendingTools.clear();
+		},
 		chatContainer,
 		footer: { invalidate: vi.fn() },
 		ui: { requestRender: vi.fn() } as unknown as TUI,
