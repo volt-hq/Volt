@@ -773,6 +773,7 @@ function projectRemoteSubagentSummary(value: unknown): Record<string, number> | 
 		"failed",
 		"aborted",
 		"running",
+		"maxTasks",
 		"maxConcurrency",
 		"stoppedAt",
 		"returned",

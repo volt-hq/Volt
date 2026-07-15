@@ -502,6 +502,7 @@ function projectSubagentSummary(value: unknown): Record<string, number> | undefi
 		"failed",
 		"aborted",
 		"running",
+		"maxTasks",
 		"maxConcurrency",
 		"stoppedAt",
 		"returned",

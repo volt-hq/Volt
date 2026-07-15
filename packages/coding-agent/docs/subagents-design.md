@@ -232,8 +232,8 @@ Failure semantics:
 Core exposes a `subagent` tool when a `SubagentManager` exists and its current delegation policy has at least one available definition. The tool is active by default for normal local/SDK sessions with an eligible manager, can be disabled through normal tool policy (`--exclude-tools subagent`, `--no-builtin-tools`, or `--no-tools`), and remains subject to strict explicit allowlists when callers pass `tools`. Root sessions retain list/follow on this tool for compatibility. In child runtimes, its schema and guidance are spawn-only:
 
 - Single: `{ "agent": "scout", "task": "Find auth code" }`
-- Parallel: `{ "tasks": [{ "agent": "scout", "task": "..." }] }`
-- Chain: `{ "chain": [{ "agent": "scout", "task": "... {previous}" }] }`
+- Parallel: `{ "tasks": [{ "agent": "scout", "task": "..." }] }`, capped at 8 tasks
+- Chain: `{ "chain": [{ "agent": "scout", "task": "... {previous}" }] }`, capped at 8 steps
 
 Spawn modes are two-phase when the manager exposes the shared atomic confirmation API. The first request lists the live registry and reserves a SHA-256 key derived from the normalized mode and ordered agent/task inputs; it starts nothing and returns an opaque one-time token. Repeating the exact request with `confirm` claims that reservation and starts the run. Exact duplicate agent/task pairs inside one parallel request are rejected before preflight.
 

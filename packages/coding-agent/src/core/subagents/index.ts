@@ -65,6 +65,7 @@ export function createBuiltInSubagentDefinitions(): SubagentDefinition[] {
 			description: "General-purpose isolated child agent for ad hoc delegated tasks",
 			excludedTools: ["subagent"],
 			allowedSubagents: [],
+			maxChildAgents: 0,
 			systemPrompt: [
 				"You are the built-in general-purpose Volt subagent.",
 				"Complete the delegated task independently using only the task prompt and available tools.",
@@ -83,6 +84,8 @@ export function createBuiltInSubagentDefinitions(): SubagentDefinition[] {
 			description: "Non-mutating research scout for web and codebase evidence gathering",
 			tools: [...BUILT_IN_DELEGATING_READ_ONLY_TOOLS],
 			allowedSubagents: ["researcher"],
+			maxSubagentDepth: 3,
+			maxChildAgents: 2,
 			systemPrompt: [
 				"You are the built-in Volt researcher subagent.",
 				"Gather source-backed evidence from the web and/or codebase for the delegated question.",
@@ -100,6 +103,8 @@ export function createBuiltInSubagentDefinitions(): SubagentDefinition[] {
 			name: "design-doc",
 			description: "Design document planner and synthesizer that delegates independent research when warranted",
 			allowedSubagents: ["researcher", "security-reviewer", "general"],
+			maxSubagentDepth: 3,
+			maxChildAgents: 8,
 			systemPrompt: [
 				"You are the built-in Volt design-document coordinator.",
 				"Your job is to turn an ambiguous technical goal into a sourced design/RFC, decision memo, or implementation plan.",
@@ -122,6 +127,8 @@ export function createBuiltInSubagentDefinitions(): SubagentDefinition[] {
 				"Non-mutating security review coordinator for threat modeling, code review, and verification planning",
 			tools: [...BUILT_IN_DELEGATING_READ_ONLY_TOOLS],
 			allowedSubagents: ["researcher"],
+			maxSubagentDepth: 3,
+			maxChildAgents: 4,
 			systemPrompt: [
 				"You are the built-in Volt security-reviewer subagent.",
 				"Analyze code, design, dependencies, configuration, and agent/tool workflows for security risk.",
