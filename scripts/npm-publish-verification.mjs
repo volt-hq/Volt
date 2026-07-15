@@ -22,7 +22,7 @@ export function assertPublishedPackageMatchesRelease({
 		throw new Error(`${name}@${version} was published from git commit ${metadata.gitHead ?? "unknown"}, expected ${sourceCommit}`);
 	}
 	if (
-		metadata.repository?.url !== "git+https://github.com/hansjm10/Volt.git" ||
+		metadata.repository?.url !== "git+https://github.com/volt-hq/Volt.git" ||
 		metadata.repository?.directory !== directory
 	) {
 		throw new Error(`${name}@${version} has unexpected repository metadata`);

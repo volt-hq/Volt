@@ -1,4 +1,4 @@
-// Regression for https://github.com/hansjm10/Volt/issues/1
+// Regression for https://github.com/volt-hq/Volt/issues/1
 //
 // When two coordinated edits land in quick succession on files with a
 // cross-file dependency, the server can publish diagnostics computed against

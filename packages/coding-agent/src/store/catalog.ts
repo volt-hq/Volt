@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const DEFAULT_STORE_CATALOG_URL = "https://hansjm10.github.io/Volt/store/catalog.json";
+export const DEFAULT_STORE_CATALOG_URL = "https://volt-hq.github.io/Volt/store/catalog.json";
 
 const DEFAULT_STORE_CATALOG_FETCH_TIMEOUT_MS = 10000;
 

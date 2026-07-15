@@ -32,7 +32,7 @@ test("suggested fragments derive kind, area, packages, and attribution from the 
 	});
 	assert.equal(
 		suggestion,
-		'---\n"@hansjm10/volt-tui": patch\n"@hansjm10/volt-coding-agent": patch\n---\n\nfix(tui): Preserve scrollback during live updates. ([#42](https://github.com/hansjm10/Volt/pull/42))\n',
+		'---\n"@hansjm10/volt-tui": patch\n"@hansjm10/volt-coding-agent": patch\n---\n\nfix(tui): Preserve scrollback during live updates. ([#42](https://github.com/volt-hq/Volt/pull/42))\n',
 	);
 
 	const featureSuggestion = suggestFragment({ changedPaths: [], title: "feat: add web search" });

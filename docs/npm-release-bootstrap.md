@@ -23,7 +23,7 @@ The owner of the `hansjm10` npm scope must perform the one-time bootstrap
 outside the automated release:
 
 1. Confirm that the npm account owns the `@hansjm10` scope and that public
-   repository metadata points to `hansjm10/Volt`.
+   repository metadata points to `volt-hq/Volt`.
 2. Review the reservation helper, then check all four names without changing
    npm:
 
@@ -47,7 +47,7 @@ outside the automated release:
    A partial network failure is safe to retry: exact
    placeholders are verified and skipped.
 3. For each reserved package, configure npm trusted publishing for GitHub
-   repository `hansjm10/Volt`, workflow filename `build-binaries.yml`,
+   repository `volt-hq/Volt`, workflow filename `build-binaries.yml`,
    environment `npm-publish`, with `npm publish` allowed. Then set package
    publishing access to require two-factor authentication and disallow tokens,
    and revoke any obsolete automation publish tokens. Trusted OIDC publication
@@ -70,7 +70,7 @@ outside the automated release:
    `npm view <name>@0.1.0 name version license dist-tags repository --json`.
    Confirm that `beta` resolves to `0.1.0`, `latest` remains pinned to the inert
    `0.0.0-bootstrap.0` placeholder, and the npm provenance links to
-   `hansjm10/Volt` and the release workflow. Beta users must install with
+   `volt-hq/Volt` and the release workflow. Beta users must install with
    `@beta`; an unqualified install intentionally resolves to the placeholder.
 8. Verify the final GitHub release assets and checksums match the approved
    candidate and release record.
