@@ -668,6 +668,7 @@ export {
 	type SubagentManagerOptions,
 	type SubagentResult,
 	type SubagentRuntimeCreatedEvent,
+	type SubagentRuntimeRegistration,
 	type SubagentStartByNameOptions,
 	type SubagentStartOptions,
 } from "./core/subagents/index.ts";
