@@ -676,7 +676,7 @@ function projectRemoteSubagentArgs(
 	if (typeof args.list === "boolean") {
 		projected.list = args.list;
 	}
-	copyRemoteNumber(args, projected, "offset");
+	copyRemoteNumber(args, projected, "cursor");
 	copyRemoteString(args, projected, "follow", authorization, 200);
 	return Object.keys(projected).length > 0 ? projected : undefined;
 }
@@ -775,9 +775,9 @@ function projectRemoteSubagentSummary(value: unknown): Record<string, number> | 
 		"running",
 		"maxConcurrency",
 		"stoppedAt",
-		"offset",
 		"returned",
-		"nextOffset",
+		"nextCursor",
+		"omittedTasks",
 	]) {
 		const numberValue = remoteFiniteNumber(value[key]);
 		if (numberValue !== undefined) {

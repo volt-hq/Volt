@@ -191,9 +191,29 @@ export default function (volt) {
 		const faux = registerFauxProvider();
 		const model = faux.getModel();
 		faux.setResponses([
+			// Spawning is two-phase: the first exact request only returns a registry
+			// preflight with a one-time confirmation token and starts nothing.
 			fauxAssistantMessage(fauxToolCall("subagent", { agent: "scout", task: "Inspect the remote child" }), {
 				stopReason: "toolUse",
 			}),
+			(context) => {
+				let token: string | undefined;
+				for (let index = context.messages.length - 1; index >= 0; index -= 1) {
+					const message = context.messages[index];
+					if (message?.role === "toolResult" && message.toolName === "subagent") {
+						const text = message.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+						token = /"confirm": "([^"]+)"/.exec(text)?.[1];
+						break;
+					}
+				}
+				if (!token) {
+					throw new Error("expected a subagent spawn confirmation token in the preflight result");
+				}
+				return fauxAssistantMessage(
+					fauxToolCall("subagent", { agent: "scout", task: "Inspect the remote child", confirm: token }),
+					{ stopReason: "toolUse" },
+				);
+			},
 			fauxAssistantMessage("child finished"),
 			fauxAssistantMessage("parent finished"),
 		]);
@@ -243,11 +263,18 @@ export default function (volt) {
 			}
 			const childHeader = JSON.parse(childHeaderLine) as { parentSession?: string };
 			expect(childHeader.parentSession).toBe(runtime.session.sessionFile);
-			const parentToolResult = runtime.session.sessionManager.getBranch().find((entry) => {
-				return (
-					entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "subagent"
-				);
-			});
+			// The first subagent tool result is the registry preflight; the confirmed
+			// spawn's result is the last one.
+			const parentToolResult = runtime.session.sessionManager
+				.getBranch()
+				.filter((entry) => {
+					return (
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						entry.message.toolName === "subagent"
+					);
+				})
+				.at(-1);
 			if (parentToolResult?.type !== "message" || parentToolResult.message.role !== "toolResult") {
 				throw new Error("expected parent subagent tool result");
 			}

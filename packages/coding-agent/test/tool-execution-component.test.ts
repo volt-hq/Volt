@@ -499,6 +499,127 @@ describe("ToolExecutionComponent parity", () => {
 		expect(component.render(120)).toEqual([]);
 	});
 
+	test("presents explicit registry list and follow calls without a created child", () => {
+		const listComponent = new ToolExecutionComponent(
+			"subagent",
+			"tool-subagent-list",
+			{ list: true },
+			{},
+			createSubagentRenderDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		listComponent.markExecutionStarted();
+		expect(stripAnsi(listComponent.render(120).join("\n"))).toContain("Subagent registry");
+		listComponent.updateResult(
+			{
+				content: [{ type: "text", text: "2 subagent runs recorded in this session" }],
+				details: {
+					mode: "list",
+					status: "completed",
+					summary: { total: 2, completed: 1, failed: 0, aborted: 0, running: 1, returned: 2 },
+				} satisfies SubagentToolDetails,
+				isError: false,
+			},
+			false,
+		);
+		expect(stripAnsi(listComponent.render(120).join("\n"))).toContain("Subagent registry");
+
+		const followComponent = new ToolExecutionComponent(
+			"subagent",
+			"tool-subagent-follow",
+			{ follow: "sa_existing" },
+			{},
+			createSubagentRenderDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		followComponent.markExecutionStarted();
+		expect(followComponent.render(120)).not.toEqual([]);
+		followComponent.updateResult(
+			{
+				content: [{ type: "text", text: "shared result" }],
+				details: {
+					mode: "follow",
+					status: "completed",
+					subagentId: "sa_existing",
+					agent: { name: "researcher", source: "built-in" },
+				} satisfies SubagentToolDetails,
+				isError: false,
+			},
+			false,
+		);
+		expect(stripAnsi(followComponent.render(120).join("\n"))).toContain("researcher");
+	});
+
+	test("presents terminal errors that occur before any child is created", () => {
+		const component = new ToolExecutionComponent(
+			"subagent",
+			"tool-subagent-precreation-error",
+			{ agent: "scout", task: "Inspect the auth flow" },
+			{},
+			createSubagentRenderDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+		expect(component.render(120)).toEqual([]);
+
+		component.updateResult(
+			{
+				content: [
+					{ type: "text", text: 'Cannot delegate to "scout": the delegation tree already started 100 subagents' },
+				],
+				isError: true,
+			},
+			false,
+		);
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("scout");
+		expect(rendered).toContain("failed");
+	});
+
+	test("dispose releases the subagent repaint interval", () => {
+		vi.useFakeTimers();
+		try {
+			let renderRequests = 0;
+			const tui = { requestRender: () => renderRequests++ } as unknown as TUI;
+			const component = new ToolExecutionComponent(
+				"subagent",
+				"tool-subagent-dispose",
+				{ agent: "scout", task: "Inspect the auth flow" },
+				{},
+				createSubagentRenderDefinition(),
+				tui,
+				process.cwd(),
+			);
+			component.updateResult(
+				{
+					content: [{ type: "text", text: "started" }],
+					details: {
+						mode: "single",
+						status: "running",
+						subagentId: "sa_1",
+						sessionId: "session_1",
+						agent: { name: "scout" },
+					} satisfies SubagentToolDetails,
+					isError: false,
+				},
+				true,
+			);
+			const baseline = renderRequests;
+			vi.advanceTimersByTime(3_000);
+			expect(renderRequests).toBeGreaterThan(baseline);
+
+			component.dispose();
+			const afterDispose = renderRequests;
+			vi.advanceTimersByTime(5_000);
+			expect(renderRequests).toBe(afterDispose);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	test("renders unstructured built-in subagent failures as terminal errors", () => {
 		const component = new ToolExecutionComponent(
 			"subagent",

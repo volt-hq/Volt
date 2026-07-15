@@ -8,6 +8,8 @@ export type SubagentRegistryFollowability = "followable" | "current" | "ancestor
 /** Public snapshot of one delegated run, safe to hand to any runtime in the tree. */
 export interface SubagentRegistryRecord {
 	id: string;
+	/** Immutable registration order. List-mode pagination cursors compare against it. */
+	sequence: number;
 	/** Registry id of the runtime that started this run; absent for root-session starts. */
 	parentId?: string;
 	agent: {
@@ -441,6 +443,7 @@ export class SubagentRegistry {
 	private toRecord(entry: SubagentRegistryEntry): SubagentRegistryRecord {
 		return {
 			id: entry.id,
+			sequence: entry.sequence,
 			...(entry.parentId !== undefined ? { parentId: entry.parentId } : {}),
 			agent: { ...entry.agent },
 			path: [...entry.path],

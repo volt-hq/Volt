@@ -1653,7 +1653,7 @@ describe("Iroh remote notification requests", () => {
 					type: "toolCall",
 					id: "registry-call",
 					name: "subagent_registry",
-					arguments: { list: true, offset: 50 },
+					arguments: { list: true, cursor: 50 },
 				},
 				{
 					type: "toolCall",
@@ -1688,7 +1688,7 @@ describe("Iroh remote notification requests", () => {
 			details: {
 				mode: "list",
 				status: "completed",
-				summary: { total: 120, offset: 50, returned: 50, nextOffset: 100 },
+				summary: { total: 120, returned: 50, nextCursor: 20 },
 			},
 			isError: false,
 			timestamp: 4,
@@ -1807,11 +1807,11 @@ describe("Iroh remote notification requests", () => {
 						role: "tool",
 						toolName: "subagent_registry",
 						status: "completed",
-						args: { list: true, offset: 50 },
+						args: { list: true, cursor: 50 },
 						details: {
 							mode: "list",
 							status: "completed",
-							summary: { total: 120, offset: 50, returned: 50, nextOffset: 100 },
+							summary: { total: 120, returned: 50, nextCursor: 20 },
 						},
 						output: "bounded registry page",
 						outputTruncated: false,

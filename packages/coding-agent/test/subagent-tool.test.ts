@@ -170,7 +170,7 @@ describe("subagent tool", () => {
 		} satisfies SubagentToolManager;
 		const withoutRegistry = createSubagentToolDefinition({ manager: baseManager });
 		expect(withoutRegistry.parameters.properties).not.toHaveProperty("list");
-		expect(withoutRegistry.parameters.properties).not.toHaveProperty("offset");
+		expect(withoutRegistry.parameters.properties).not.toHaveProperty("cursor");
 		expect(withoutRegistry.parameters.properties).not.toHaveProperty("follow");
 		expect(withoutRegistry.description).not.toContain("List mode");
 		expect(withoutRegistry.description).not.toContain("Follow mode");
@@ -184,7 +184,7 @@ describe("subagent tool", () => {
 		} satisfies SubagentToolManager;
 		const listDefinition = createSubagentToolDefinition({ manager: listManager });
 		expect(listDefinition.parameters.properties).toHaveProperty("list");
-		expect(listDefinition.parameters.properties).toHaveProperty("offset");
+		expect(listDefinition.parameters.properties).toHaveProperty("cursor");
 		expect(listDefinition.parameters.properties).not.toHaveProperty("follow");
 		expect(listDefinition.description).toContain("List mode");
 		expect(listDefinition.description).not.toContain("Follow mode");
@@ -233,7 +233,7 @@ describe("subagent tool", () => {
 		const preflight = await confirmationTool.execute("call-preflight", { agent: "general", task: "new work" });
 		expect(textFromResult(preflight)).not.toContain("Continue listing");
 		expect(preflight.details.summary).toMatchObject({ total: 60, returned: 50 });
-		expect(preflight.details.summary).not.toHaveProperty("nextOffset");
+		expect(preflight.details.summary).not.toHaveProperty("nextCursor");
 	});
 
 	it("exposes only subagents allowed by the current manager", async () => {
@@ -1630,6 +1630,80 @@ describe("subagent tool", () => {
 		expect(result.details.tasks?.every((task) => task.output?.truncated === false)).toBe(true);
 	});
 
+	it("keeps the confirmation token when a small aggregate limit truncates the preflight", async () => {
+		const registry = new SubagentRegistry();
+		for (let index = 0; index < 60; index += 1) {
+			const id = `sa_prior_${index}`;
+			registry.register({ id, agent: { name: "general" }, path: ["general"] });
+			registry.complete(id, "completed");
+		}
+		const manager = {
+			getDefinition: () => createDefinition("general"),
+			startByName: async () => createCompletedHandle("unused"),
+			prepareSpawnConfirmation: (requestKey: string) => registry.prepareSpawnConfirmation(requestKey),
+			claimSpawnConfirmation: (requestKey: string, token: string) =>
+				registry.claimSpawnConfirmation(requestKey, token),
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager, maxAggregateOutputBytes: 80 });
+
+		const preflight = await tool.execute("call-preflight", { agent: "general", task: "new work" });
+		const token = confirmationTokenFromResult(preflight);
+		expect(token.length).toBeGreaterThan(0);
+		expect(textFromResult(preflight)).toContain("No subagents were started");
+	});
+
+	it("caps task detail entries and reports the omitted count", async () => {
+		const manager = {
+			getDefinition: (agentName: string) => createDefinition(agentName),
+			startByName: vi.fn(async (agentName: string) =>
+				createCompletedHandle(`${agentName} done`, {
+					id: `sa_${agentName}`,
+					sessionId: `session_${agentName}`,
+				}),
+			),
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager });
+
+		const result = await tool.execute("call-large", {
+			tasks: Array.from({ length: 102 }, (_, index) => ({ agent: `agent${index}`, task: `task ${index}` })),
+		});
+
+		expect(result.details.tasks).toHaveLength(100);
+		expect(result.details.childSessions).toHaveLength(100);
+		expect(result.details.summary).toMatchObject({ total: 102, completed: 102, omittedTasks: 2 });
+	});
+
+	it("shares one fixed output-text budget across retained task details", async () => {
+		const longText = "x".repeat(60 * 1024);
+		const manager = {
+			getDefinition: (agentName: string) => createDefinition(agentName),
+			startByName: vi.fn(async (agentName: string) =>
+				createCompletedHandle(`${agentName}:${longText}`, {
+					id: `sa_${agentName}`,
+					sessionId: `session_${agentName}`,
+				}),
+			),
+		} satisfies SubagentToolManager;
+		const tool = createSubagentTool(process.cwd(), { manager });
+
+		const result = await tool.execute("call-budget", {
+			tasks: [
+				{ agent: "one", task: "summarize one" },
+				{ agent: "two", task: "summarize two" },
+				{ agent: "three", task: "summarize three" },
+			],
+		});
+
+		const outputs = result.details.tasks?.map((task) => task.output);
+		expect(outputs?.[0]?.text).toBeDefined();
+		expect(outputs?.[1]?.text).toBeDefined();
+		expect(outputs?.[2]?.text).toBeUndefined();
+		expect(outputs?.[2]).toMatchObject({ truncated: true });
+		expect(outputs?.[2]?.omittedBytes).toBe(outputs?.[2]?.bytes);
+		// The child session reference stays available for the dropped output.
+		expect(result.details.childSessions?.[2]).toMatchObject({ subagentId: "sa_three" });
+	});
+
 	it("runs chain steps sequentially and substitutes previous output", async () => {
 		const completions = new Map<string, Deferred<SubagentResult>>();
 		const prompts: Array<{ agent: string; task: string }> = [];
@@ -1906,9 +1980,9 @@ describe("subagent tool", () => {
 			/exactly one mode/,
 		);
 		await expect(tool.execute("call-1", { list: false })).rejects.toThrow(/list mode requires/);
-		await expect(tool.execute("call-1", { list: true, offset: -1 })).rejects.toThrow(/non-negative safe integer/);
-		await expect(tool.execute("call-1", { agent: "scout", task: "single", offset: 1 })).rejects.toThrow(
-			/offset is only valid/,
+		await expect(tool.execute("call-1", { list: true, cursor: -1 })).rejects.toThrow(/non-negative safe integer/);
+		await expect(tool.execute("call-1", { agent: "scout", task: "single", cursor: 1 })).rejects.toThrow(
+			/cursor is only valid/,
 		);
 		await expect(tool.execute("call-1", { follow: "  " })).rejects.toThrow(/non-empty subagent run id/);
 		await expect(tool.execute("call-1", { list: true, confirm: "token" })).rejects.toThrow(/confirm is only valid/);
@@ -1925,6 +1999,7 @@ describe("subagent tool", () => {
 			listDelegations: () => [
 				{
 					id: "sa_live",
+					sequence: 1,
 					parentId: "sa_done",
 					agent: { name: "researcher", source: "built-in" as const },
 					path: ["researcher", "researcher"],
@@ -1934,6 +2009,7 @@ describe("subagent tool", () => {
 				},
 				{
 					id: "sa_done",
+					sequence: 0,
 					agent: { name: "researcher", source: "built-in" as const },
 					path: ["researcher"],
 					task: "research file x",
@@ -1967,9 +2043,10 @@ describe("subagent tool", () => {
 		});
 	});
 
-	it("paginates registry listings within the aggregate byte limit", async () => {
+	it("paginates registry listings by registration-sequence cursor within the aggregate byte limit", async () => {
 		const records = Array.from({ length: 120 }, (_, index) => ({
 			id: `sa_${String(index).padStart(3, "0")}`,
+			sequence: index,
 			agent: { name: "researcher", source: "built-in" as const },
 			path: ["researcher"],
 			task: `task ${index} ${"界".repeat(300)}`,
@@ -1985,28 +2062,41 @@ describe("subagent tool", () => {
 
 		const defaultTool = createSubagentRegistryTool(process.cwd(), { manager });
 		const defaultPage = await defaultTool.execute("call-default", { list: true });
-		expect(defaultPage.details.summary).toMatchObject({ offset: 0, returned: 50, nextOffset: 50 });
+		expect(defaultPage.details.summary).toMatchObject({ returned: 50, nextCursor: 70 });
+		expect(textFromResult(defaultPage)).toContain("\nsa_119 researcher completed");
 
 		const boundedTool = createSubagentRegistryTool(process.cwd(), { manager, maxAggregateOutputBytes: 2_000 });
 		const firstPage = await boundedTool.execute("call-first", { list: true });
 		const firstText = textFromResult(firstPage);
 		expect(Buffer.byteLength(firstText, "utf8")).toBeLessThanOrEqual(2_000);
-		expect(firstText).toContain("\nsa_000 researcher completed");
+		expect(firstText).toContain("\nsa_119 researcher completed");
 		const returned = firstPage.details.summary?.returned;
-		const nextOffset = firstPage.details.summary?.nextOffset;
+		const nextCursor = firstPage.details.summary?.nextCursor;
 		expect(returned).toBeGreaterThan(0);
 		expect(returned).toBeLessThan(50);
-		expect(nextOffset).toBe(returned);
-		if (nextOffset === undefined) {
+		expect(nextCursor).toBe(120 - (returned ?? 0));
+		if (nextCursor === undefined) {
 			throw new Error("expected another registry page");
 		}
-		expect(firstText).toContain(`{ "list": true, "offset": ${nextOffset} }`);
+		expect(firstText).toContain(`{ "list": true, "cursor": ${nextCursor} }`);
 
-		const secondPage = await boundedTool.execute("call-second", { list: true, offset: nextOffset });
+		// Registrations after the first page must not shift later pages.
+		records.push({
+			id: "sa_120",
+			sequence: 120,
+			agent: { name: "researcher", source: "built-in" as const },
+			path: ["researcher"],
+			task: `task 120 ${"界".repeat(300)}`,
+			status: "completed" as const,
+			startedAt: 1_120,
+			finishedAt: 2_120,
+		});
+		const secondPage = await boundedTool.execute("call-second", { list: true, cursor: nextCursor });
 		const secondText = textFromResult(secondPage);
 		expect(Buffer.byteLength(secondText, "utf8")).toBeLessThanOrEqual(2_000);
-		expect(secondText).toContain(`\nsa_${String(nextOffset).padStart(3, "0")} researcher completed`);
-		expect(secondPage.details.summary).toMatchObject({ offset: nextOffset });
+		expect(secondText).toContain(`\nsa_${String(nextCursor - 1).padStart(3, "0")} researcher completed`);
+		expect(secondText).not.toContain("sa_120");
+		expect(secondPage.details.summary?.nextCursor).toBe(nextCursor - (secondPage.details.summary?.returned ?? 0));
 	});
 
 	it("follows an existing run and returns its result", async () => {

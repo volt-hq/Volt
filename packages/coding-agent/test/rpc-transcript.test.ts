@@ -291,7 +291,7 @@ describe("RPC transcript projection", () => {
 						type: "toolCall",
 						id: "subagent-list-call",
 						name: "subagent_registry",
-						arguments: { list: true, offset: 50 },
+						arguments: { list: true, cursor: 50 },
 					},
 				],
 				20,
@@ -311,9 +311,8 @@ describe("RPC transcript projection", () => {
 					failed: 10,
 					aborted: 5,
 					running: 5,
-					offset: 50,
 					returned: 50,
-					nextOffset: 100,
+					nextCursor: 20,
 				},
 			},
 			isError: false,
@@ -324,11 +323,11 @@ describe("RPC transcript projection", () => {
 		const toolItem = transcript.items.find((item) => item.role === "tool");
 		expect(toolItem).toMatchObject({
 			toolName: "subagent_registry",
-			args: { list: true, offset: 50 },
+			args: { list: true, cursor: 50 },
 			details: {
 				mode: "list",
 				status: "completed",
-				summary: { total: 120, offset: 50, returned: 50, nextOffset: 100 },
+				summary: { total: 120, returned: 50, nextCursor: 20 },
 			},
 		});
 	});

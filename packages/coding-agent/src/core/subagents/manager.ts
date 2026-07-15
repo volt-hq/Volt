@@ -17,6 +17,7 @@ import { SessionManager } from "../session-manager.ts";
 import {
 	type SubagentDelegationReservation,
 	SubagentDelegationScope,
+	type SubagentDelegationScopeLimits,
 	type SubagentDelegationScopeOptions,
 } from "./delegation-scope.ts";
 import type { SubagentDefinition } from "./index.ts";
@@ -103,6 +104,8 @@ export interface SubagentManagerOptions {
 	allowedTools?: string[];
 	/** Current subagent identity and delegation policy when this manager belongs to a child runtime. */
 	subagentContext?: SubagentRuntimeContext;
+	/** Tree-wide ceiling overrides applied to delegation scopes this manager creates. */
+	delegationLimits?: SubagentDelegationScopeLimits;
 	requestTimeoutMs?: number;
 	/** Keep child runtimes alive after the hidden loopback client detaches. Another owner must retain/dispose them. */
 	retainRuntimeOnDispose?: boolean;
@@ -535,6 +538,7 @@ export class SubagentManager {
 	private readonly parentSessionManager?: SessionManager;
 	private readonly allowedTools?: string[];
 	private readonly subagentContext?: SubagentRuntimeContext;
+	private readonly delegationLimits?: SubagentDelegationScopeLimits;
 	private readonly requestTimeoutMs?: number;
 	private readonly retainRuntimeOnDispose: boolean;
 	private readonly onRuntimeCreated?: (event: SubagentRuntimeCreatedEvent) => void | Promise<void>;
@@ -556,6 +560,7 @@ export class SubagentManager {
 		this.parentSessionManager = options.parentSessionManager;
 		this.allowedTools = normalizeUniqueNames(options.allowedTools);
 		this.subagentContext = options.subagentContext;
+		this.delegationLimits = options.delegationLimits;
 		this.requestTimeoutMs = options.requestTimeoutMs;
 		this.retainRuntimeOnDispose = options.retainRuntimeOnDispose ?? false;
 		this.onRuntimeCreated = options.onRuntimeCreated;
@@ -571,7 +576,10 @@ export class SubagentManager {
 		if (inherited) {
 			return { scope: inherited, owned: false };
 		}
-		return { scope: new SubagentDelegationScope(options), owned: true };
+		return {
+			scope: new SubagentDelegationScope({ limits: this.delegationLimits, ...options }),
+			owned: true,
+		};
 	}
 
 	/** All delegated runs recorded in this runtime tree's session-wide registry. */
@@ -803,7 +811,7 @@ export class SubagentManager {
 		const inherited = this.subagentContext?.delegationScope;
 		if (inherited) return { scope: inherited, owned: false };
 		if (requested) return { scope: requested, owned: false };
-		return { scope: new SubagentDelegationScope(), owned: true };
+		return { scope: new SubagentDelegationScope({ limits: this.delegationLimits }), owned: true };
 	}
 
 	private createChildSubagentContext(

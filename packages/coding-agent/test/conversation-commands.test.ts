@@ -304,7 +304,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 							type: "toolCall",
 							id: "tc-registry",
 							name: "subagent_registry",
-							arguments: { list: true, offset: 50 },
+							arguments: { list: true, cursor: 50 },
 						},
 					],
 				},
@@ -322,7 +322,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 					details: {
 						mode: "list",
 						status: "completed",
-						summary: { total: 120, offset: 50, returned: 50, nextOffset: 100 },
+						summary: { total: 120, returned: 50, nextCursor: 20 },
 					},
 				},
 			},
@@ -344,11 +344,11 @@ describe("handleIntegratedConversationRpcCommand", () => {
 				entryId: "e-registry-result",
 				role: "tool",
 				toolName: "subagent_registry",
-				args: { list: true, offset: 50 },
+				args: { list: true, cursor: 50 },
 				details: {
 					mode: "list",
 					status: "completed",
-					summary: { total: 120, offset: 50, returned: 50, nextOffset: 100 },
+					summary: { total: 120, returned: 50, nextCursor: 20 },
 				},
 			}),
 		);

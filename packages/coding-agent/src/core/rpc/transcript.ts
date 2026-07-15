@@ -408,7 +408,7 @@ function projectSubagentArgs(args: Record<string, unknown> | undefined): Record<
 		projected.chain = chain;
 	}
 	copyBooleanArg(args, projected, "list");
-	copyNumberArg(args, projected, "offset");
+	copyNumberArg(args, projected, "cursor");
 	copyStringArg(args, projected, "follow", SUBAGENT_ID_LIMIT);
 	copyStringArg(args, projected, "confirm", SUBAGENT_ID_LIMIT);
 	return Object.keys(projected).length > 0 ? projected : undefined;
@@ -503,9 +503,9 @@ function projectSubagentSummary(value: unknown): Record<string, number> | undefi
 		"running",
 		"maxConcurrency",
 		"stoppedAt",
-		"offset",
 		"returned",
-		"nextOffset",
+		"nextCursor",
+		"omittedTasks",
 	]) {
 		const numberValue = getFiniteNumber(value, key);
 		if (numberValue !== undefined) {

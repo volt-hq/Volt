@@ -970,16 +970,68 @@ describe("SubagentManager", () => {
 		expect(scope.snapshot()).toMatchObject({ startsUsed: 4, activeDescendants: 0 });
 	});
 
-	it("records arbitrarily large tree activity without aborting or rejecting reservations", () => {
+	it("enforces tree-wide delegation ceilings by default", () => {
 		const scope = new SubagentDelegationScope();
+		cleanups.push(() => scope.dispose());
+		expect(() => scope.reserve("worker", 6)).toThrow(/depth 6 exceeds the delegation tree limit of 5/);
+
+		const startLimited = new SubagentDelegationScope({ limits: { maxStarts: 2 } });
+		cleanups.push(() => startLimited.dispose());
+		startLimited.reserve("worker", 1).release();
+		startLimited.reserve("worker", 1).release();
+		expect(() => startLimited.reserve("worker", 1)).toThrow(/limit of 2 \(maxStarts\)/);
+
+		const activeLimited = new SubagentDelegationScope({ limits: { maxActiveDescendants: 1 } });
+		cleanups.push(() => activeLimited.dispose());
+		const activeReservation = activeLimited.reserve("worker", 1);
+		expect(() => activeLimited.reserve("worker", 1)).toThrow(/limit of 1 \(maxActiveDescendants\)/);
+		activeReservation.release();
+		activeLimited.reserve("worker", 1).release();
+
+		const turnLimited = new SubagentDelegationScope({ limits: { maxTurns: 1 } });
+		cleanups.push(() => turnLimited.dispose());
+		turnLimited.recordTurn();
+		expect(turnLimited.signal.aborted).toBe(false);
+		turnLimited.recordTurn();
+		expect(turnLimited.signal.aborted).toBe(true);
+		expect(String(turnLimited.signal.reason)).toContain("maxTurns");
+
+		const tokenLimited = new SubagentDelegationScope({ limits: { maxTotalTokens: 10 } });
+		cleanups.push(() => tokenLimited.dispose());
+		tokenLimited.recordUsage(11, 0);
+		expect(tokenLimited.signal.aborted).toBe(true);
+		expect(String(tokenLimited.signal.reason)).toContain("maxTotalTokens");
+
+		const costLimited = new SubagentDelegationScope({ limits: { maxTotalCostUsd: 1 } });
+		cleanups.push(() => costLimited.dispose());
+		costLimited.recordUsage(0, 1.5);
+		expect(costLimited.signal.aborted).toBe(true);
+		expect(String(costLimited.signal.reason)).toContain("maxTotalCostUsd");
+
+		expect(() => new SubagentDelegationScope({ limits: { maxStarts: 0 } })).toThrow(
+			/maxStarts must be a positive number or Infinity/,
+		);
+	});
+
+	it("records arbitrarily large tree activity with an explicit unlimited opt-in", () => {
+		const scope = new SubagentDelegationScope({
+			limits: {
+				maxDepth: Number.POSITIVE_INFINITY,
+				maxStarts: Number.POSITIVE_INFINITY,
+				maxActiveDescendants: Number.POSITIVE_INFINITY,
+				maxTurns: Number.POSITIVE_INFINITY,
+				maxTotalTokens: Number.POSITIVE_INFINITY,
+				maxTotalCostUsd: Number.POSITIVE_INFINITY,
+			},
+		});
 		cleanups.push(() => scope.dispose());
 		const reservations = Array.from({ length: 100 }, (_, index) => {
 			const reservation = scope.reserve(`worker-${index}`, 100 + index);
 			reservation.commit(`sa_${index}`, () => undefined);
 			return reservation;
 		});
-		for (let index = 0; index < 500; index += 1) scope.recordTurn();
-		scope.recordUsage(2_000_000, 100);
+		for (let index = 0; index < 5_000; index += 1) scope.recordTurn();
+		scope.recordUsage(200_000_000, 1_000);
 
 		expect(scope.signal.aborted).toBe(false);
 		expect(scope.snapshot()).toMatchObject({
@@ -987,9 +1039,9 @@ describe("SubagentManager", () => {
 			activeDescendants: 100,
 			peakActiveDescendants: 100,
 			maxDepthReached: 199,
-			turnsUsed: 500,
-			tokensUsed: 2_000_000,
-			costUsd: 100,
+			turnsUsed: 5_000,
+			tokensUsed: 200_000_000,
+			costUsd: 1_000,
 			aborted: false,
 		});
 

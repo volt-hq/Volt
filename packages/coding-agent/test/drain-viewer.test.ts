@@ -7,6 +7,7 @@
 
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { getMarkdownTheme, initTheme } from "../src/core/theme/runtime.ts";
+import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import type { AcquireOutcome } from "../src/modes/interactive/daemon-attach.ts";
 import { DrainViewerComponent } from "../src/modes/interactive/drain-viewer.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -119,6 +120,69 @@ describe("drain viewer (§6.3)", () => {
 		expect(rendered).not.toContain("ignored after truncation");
 		expect(rendered).toContain("finishing remote turn");
 		grant.reject(new Error("test over"));
+	});
+
+	it("disposes pending tool renderers on truncation and finish", () => {
+		const disposeSpy = vi.spyOn(ToolExecutionComponent.prototype, "dispose");
+		try {
+			const startPartialSubagent = (viewer: DrainViewerComponent): void => {
+				viewer.handleViewerEvent({
+					type: "tool_execution_start",
+					toolCallId: "tc-subagent",
+					toolName: "subagent",
+					args: { agent: "scout", task: "inspect" },
+				});
+				viewer.handleViewerEvent({
+					type: "tool_execution_update",
+					toolCallId: "tc-subagent",
+					toolName: "subagent",
+					partialResult: {
+						content: [{ type: "text", text: "running" }],
+						details: {
+							mode: "single",
+							status: "running",
+							subagentId: "sa_1",
+							sessionId: "session_1",
+							agent: { name: "scout" },
+						},
+					},
+				});
+			};
+
+			// Truncation forgets the row without a terminal render; its renderer
+			// resources (the subagent repaint interval) must be disposed with it.
+			const truncatedContext = createContext();
+			const truncatedGrant = deferredGrant();
+			proto.enterDrainViewer.call(truncatedContext, {
+				kind: "pending",
+				viewerFeedId: "vf-4",
+				granted: truncatedGrant.promise,
+			});
+			const truncatedViewer = truncatedContext.drainViewer as DrainViewerComponent;
+			startPartialSubagent(truncatedViewer);
+			expect(disposeSpy).not.toHaveBeenCalled();
+			truncatedViewer.handleViewerEvent({ kind: "truncated" });
+			expect(disposeSpy).toHaveBeenCalledTimes(1);
+			truncatedGrant.reject(new Error("test over"));
+
+			// finish() stops processing events, so still-partial rows are disposed
+			// there too.
+			disposeSpy.mockClear();
+			const finishedContext = createContext();
+			const finishedGrant = deferredGrant();
+			proto.enterDrainViewer.call(finishedContext, {
+				kind: "pending",
+				viewerFeedId: "vf-5",
+				granted: finishedGrant.promise,
+			});
+			const finishedViewer = finishedContext.drainViewer as DrainViewerComponent;
+			startPartialSubagent(finishedViewer);
+			finishedViewer.finish();
+			expect(disposeSpy).toHaveBeenCalledTimes(1);
+			finishedGrant.reject(new Error("test over"));
+		} finally {
+			disposeSpy.mockRestore();
+		}
 	});
 
 	it("drain failure exits the overlay with a warning instead of taking over", async () => {

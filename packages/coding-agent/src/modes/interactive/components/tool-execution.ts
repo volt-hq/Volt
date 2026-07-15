@@ -302,6 +302,17 @@ export class ToolExecutionComponent extends Container {
 		}
 	}
 
+	/**
+	 * Release renderer resources (e.g. the subagent repaint interval) when the
+	 * host discards this row before a terminal render. Safe to call repeatedly.
+	 */
+	dispose(): void {
+		this.toolDefinition?.disposeRenderState?.(this.rendererState);
+		if (this.builtInToolDefinition !== this.toolDefinition) {
+			this.builtInToolDefinition?.disposeRenderState?.(this.rendererState);
+		}
+	}
+
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
 		this.updateDisplay();
@@ -455,9 +466,29 @@ export class ToolExecutionComponent extends Container {
 		if (this.hasRendererDefinition() && !hasContent && this.imageComponents.length === 0) {
 			this.hideComponent = true;
 		}
-		if (this.toolName === "subagent" && !this.subagentCreationObserved) {
+		if (this.toolName === "subagent" && !this.subagentCreationObserved && !this.shouldPresentWithoutCreation()) {
 			this.hideComponent = true;
 		}
+	}
+
+	/**
+	 * Subagent rows without a created child stay hidden only for spawn
+	 * preflights: explicit registry queries, terminal errors, and settled spawn
+	 * executions (e.g. every child failed to start) must render normally.
+	 */
+	private shouldPresentWithoutCreation(): boolean {
+		const args = this.args as Record<string, unknown> | null | undefined;
+		if (args && typeof args === "object" && (args.list !== undefined || args.follow !== undefined)) {
+			return true;
+		}
+		if (!this.result || this.isPartial) {
+			return false;
+		}
+		if (this.result.isError) {
+			return true;
+		}
+		const mode = (this.result.details as { mode?: unknown } | undefined)?.mode;
+		return mode === "single" || mode === "parallel" || mode === "chain";
 	}
 
 	private getTextOutput(): string {

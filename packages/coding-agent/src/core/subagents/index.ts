@@ -478,8 +478,10 @@ export function discoverSubagentDefinitions(options: DiscoverSubagentDefinitions
 }
 
 export {
+	DEFAULT_SUBAGENT_DELEGATION_LIMITS,
 	type SubagentDelegationReservation,
 	SubagentDelegationScope,
+	type SubagentDelegationScopeLimits,
 	type SubagentDelegationScopeOptions,
 	type SubagentDelegationScopeSnapshot,
 } from "./delegation-scope.ts";

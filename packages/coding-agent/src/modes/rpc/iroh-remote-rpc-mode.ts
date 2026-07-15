@@ -608,9 +608,9 @@ function projectIrohRemoteSubagentTranscriptArgs(
 	if (typeof args.list === "boolean") {
 		projected.list = args.list;
 	}
-	const offset = getIrohRemoteFiniteNumber(args.offset);
-	if (offset !== undefined) {
-		projected.offset = offset;
+	const cursor = getIrohRemoteFiniteNumber(args.cursor);
+	if (cursor !== undefined) {
+		projected.cursor = cursor;
 	}
 	copyIrohRemoteBoundedString(args, projected, "follow", options, 200);
 	return Object.keys(projected).length > 0 ? { args: projected } : {};
@@ -710,9 +710,9 @@ function projectIrohRemoteSubagentSummary(value: unknown): Record<string, number
 		"running",
 		"maxConcurrency",
 		"stoppedAt",
-		"offset",
 		"returned",
-		"nextOffset",
+		"nextCursor",
+		"omittedTasks",
 	]) {
 		const numberValue = getIrohRemoteFiniteNumber(value[key]);
 		if (numberValue !== undefined) {

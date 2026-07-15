@@ -639,6 +639,7 @@ export {
 export { createSyntheticSourceInfo } from "./core/source-info.ts";
 export {
 	createBuiltInSubagentDefinitions,
+	DEFAULT_SUBAGENT_DELEGATION_LIMITS,
 	type DiscoverSubagentDefinitionsOptions,
 	discoverSubagentDefinitions,
 	type FileSubagentDefinitionSource,
@@ -655,6 +656,7 @@ export {
 	type SubagentDefinitionSource,
 	SubagentDelegationScope,
 	type SubagentDelegationScopeLease,
+	type SubagentDelegationScopeLimits,
 	type SubagentDelegationScopeOptions,
 	type SubagentDelegationScopeSnapshot,
 	type SubagentDiscoveryResult,
