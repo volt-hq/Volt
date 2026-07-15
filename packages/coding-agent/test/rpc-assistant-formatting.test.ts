@@ -143,8 +143,10 @@ describe("RPC assistant formatting", () => {
 		const textEndEvent = getNestedRecord(textEnd, "assistantMessageEvent");
 		expect(textEndEvent.content).toBe(formattedText);
 		expect(textEndEvent.message).toBe(formattedText);
-		expect(getMessageText(textEndEvent.partial)).toBe(formattedText);
-		expect(getMessageText(textEnd.message)).toBe(formattedText);
+		// message_update frames are delta-only (issue #44): no duplicated
+		// partial and no accumulated message once message_start shipped the base.
+		expect("partial" in textEndEvent).toBe(false);
+		expect("message" in textEnd).toBe(false);
 
 		rpc.send({ id: "transcript-1", type: "get_transcript", limit: 10 });
 		await vi.waitFor(() =>

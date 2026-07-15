@@ -11,6 +11,11 @@ export {
 export { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 export { createLoopbackRpcTransportPair, type LoopbackRpcTransportPair } from "./loopback-transport.ts";
 export {
+	RpcMessageDeltaDecoder,
+	RpcSessionEventEncoder,
+	stripAssistantMessageEventPartial,
+} from "./message-deltas.ts";
+export {
 	createJsonlRpcTransport,
 	createJsonlStreamRpcTransport,
 	type JsonlRpcTransportOptions,

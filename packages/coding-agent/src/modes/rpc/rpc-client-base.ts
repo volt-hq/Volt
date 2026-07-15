@@ -4,6 +4,7 @@ import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.t
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { ExtensionError } from "../../core/extensions/index.ts";
+import { RpcMessageDeltaDecoder } from "../../core/rpc/message-deltas.ts";
 import type { SubagentEvent, SubagentResult } from "../../core/subagents/index.ts";
 import type {
 	RpcClientCapabilityFeature,
@@ -80,6 +81,8 @@ export abstract class RpcClientBase {
 	private readonly requestTimeoutMs: number;
 	private readonly eventListeners: RpcEventListener[] = [];
 	private readonly pendingRequests = new Map<string, PendingRpcRequest>();
+	/** Rebuilds full message_update events from capability-gated delta frames. */
+	private readonly messageDeltaDecoder = new RpcMessageDeltaDecoder();
 	private requestId = 0;
 	private failureError: Error | null = null;
 
@@ -559,7 +562,7 @@ export abstract class RpcClientBase {
 			return;
 		}
 
-		this.emitEvent(data as RpcClientEvent);
+		this.emitEvent(this.messageDeltaDecoder.decode(data) as RpcClientEvent);
 	}
 
 	protected assertCanSend(): void {

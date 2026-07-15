@@ -1,3 +1,4 @@
+import { stripAssistantMessageEventPartial } from "../core/rpc/message-deltas.ts";
 import type { ControlEvent } from "./control-protocol.ts";
 
 /**
@@ -63,7 +64,10 @@ export class ViewerFeedRegistry {
 			ended: false,
 		};
 		feed.unsubscribeSession = session.subscribe((event) => {
-			this.onSessionEvent(feed, event);
+			// message_update events duplicate the accumulated partial as
+			// assistantMessageEvent.partial; dropping it halves buffer pressure
+			// against VIEWER_BUFFER_MAX_BYTES (the drain viewer reads `message`).
+			this.onSessionEvent(feed, stripAssistantMessageEventPartial(event));
 		});
 		this.feeds.set(viewerFeedId, feed);
 	}

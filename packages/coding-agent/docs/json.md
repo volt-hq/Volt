@@ -71,12 +71,14 @@ Followed by events as they occur:
 {"type":"agent_start"}
 {"type":"turn_start"}
 {"type":"message_start","message":{"role":"assistant","content":[],...}}
-{"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_delta","delta":"Hello",...}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello"}}
 {"type":"message_end","message":{...}}
 {"type":"turn_end","message":{...},"toolResults":[]}
 {"type":"agent_end","messages":[...],"willRetry":false}
 {"type":"agent_settled"}
 ```
+
+`message_update` output is delta-only: it omits the in-process `assistantMessageEvent.partial` field and the accumulated `message`. `message_start` carries the accumulator base and `message_end` carries the final message; consumers needing live partials apply the deltas (see the reconstruction rules in [rpc.md](rpc.md#message_update-streaming)).
 
 When `agent_end.willRetry` is true, another agent run will follow. Even when it is false, use `agent_settled` rather than `agent_end` as the prompt-completion signal.
 
