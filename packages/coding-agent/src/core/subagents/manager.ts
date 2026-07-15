@@ -911,12 +911,16 @@ export class SubagentManager {
 		});
 		let client: InProcessRpcClient | undefined;
 		let runtimeRegistration: SubagentRuntimeRegistration | undefined;
+		let rollbackRuntimeRegistrationPromise: Promise<void> | undefined;
 		let published = false;
-		const rollbackRuntimeRegistration = async (): Promise<void> => {
-			if (published) return;
-			const registration = runtimeRegistration;
-			runtimeRegistration = undefined;
-			await registration?.rollback().catch(() => undefined);
+		const rollbackRuntimeRegistration = (): Promise<void> => {
+			if (published) return Promise.resolve();
+			if (!rollbackRuntimeRegistrationPromise) {
+				const registration = runtimeRegistration;
+				runtimeRegistration = undefined;
+				rollbackRuntimeRegistrationPromise = registration?.rollback().catch(() => undefined) ?? Promise.resolve();
+			}
+			return rollbackRuntimeRegistrationPromise;
 		};
 		try {
 			if (definitionOptions) {

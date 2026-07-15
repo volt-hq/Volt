@@ -23,6 +23,14 @@ interface TestContext {
 	cleanup(): Promise<void>;
 }
 
+function createDeferred(): { promise: Promise<void>; resolve(): void } {
+	let resolve: () => void = () => undefined;
+	const promise = new Promise<void>((promiseResolve) => {
+		resolve = promiseResolve;
+	});
+	return { promise, resolve };
+}
+
 function createDefinition(): SubagentDefinition {
 	const filePath = join(tmpdir(), "issue-56-researcher.md");
 	return {
@@ -38,6 +46,7 @@ function createDefinition(): SubagentDefinition {
 async function createTestContext(options: {
 	withConfiguredAuth: boolean;
 	providerFailure?: boolean;
+	rollback?: () => Promise<void>;
 }): Promise<TestContext> {
 	const children: Harness[] = [];
 	const definition = createDefinition();
@@ -79,7 +88,7 @@ async function createTestContext(options: {
 	};
 	const registration: SubagentRuntimeRegistration = {
 		commit: vi.fn(),
-		rollback: vi.fn(async () => {}),
+		rollback: vi.fn(options.rollback ?? (async () => {})),
 	};
 	const manager = new SubagentManager({
 		createRuntime,
@@ -127,6 +136,41 @@ describe("issue #56", () => {
 			expect(context.registration.commit).not.toHaveBeenCalled();
 			expect(context.registration.rollback).toHaveBeenCalledOnce();
 		} finally {
+			await context.cleanup();
+		}
+	});
+
+	it("waits for an in-flight registration rollback before disposal completes", async () => {
+		const rollbackStarted = createDeferred();
+		const finishRollback = createDeferred();
+		const context = await createTestContext({
+			withConfiguredAuth: false,
+			rollback: async () => {
+				rollbackStarted.resolve();
+				await finishRollback.promise;
+			},
+		});
+		let prompt: Promise<void> | undefined;
+		try {
+			const handle = await context.manager.startByName("researcher");
+			prompt = handle.prompt("inspect authentication");
+			void prompt.catch(() => undefined);
+			await rollbackStarted.promise;
+
+			const disposal = handle.dispose();
+			const disposalState = await Promise.race([
+				disposal.then(() => "resolved" as const),
+				new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 100)),
+			]);
+
+			expect(disposalState).toBe("pending");
+			finishRollback.resolve();
+			await expect(prompt).rejects.toThrow(/API key/i);
+			await disposal;
+			expect(context.registration.rollback).toHaveBeenCalledOnce();
+		} finally {
+			finishRollback.resolve();
+			if (prompt) await prompt.catch(() => undefined);
 			await context.cleanup();
 		}
 	});
