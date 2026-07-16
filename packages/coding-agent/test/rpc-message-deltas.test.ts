@@ -3,7 +3,7 @@ import { parseStreamingJson } from "@hansjm10/volt-ai";
 import { describe, expect, test } from "vitest";
 import {
 	createIrohRemoteOutboundDeltaSanitizer,
-	sanitizeIrohRemoteOutbound,
+	createIrohRemoteOutboundFilteredRpcTransport,
 } from "../src/core/remote/iroh/outbound-filter.ts";
 import {
 	RpcMessageDeltaDecoder,
@@ -373,10 +373,23 @@ describe("RpcSessionEventEncoder with the iroh outbound delta sanitizer", () => 
 		});
 		const decoder = new RpcMessageDeltaDecoder();
 		const wireFrames: Array<Record<string, unknown>> = [];
+		// Mirror runIrohRemoteRpcMode: encoder-derived frames cross the outbound
+		// frame filter (with preSanitizedMessageDeltas) before reaching clients.
+		const written: object[] = [];
+		const transport = createIrohRemoteOutboundFilteredRpcTransport({
+			...sanitizerOptions,
+			preSanitizedMessageDeltas: true,
+			transport: {
+				write: (value) => {
+					written.push(value);
+				},
+				onLine: () => () => {},
+				close: () => {},
+			},
+		});
 		const roundTrip = (event: object): Record<string, unknown> => {
-			const frame = getRecord(
-				JSON.parse(JSON.stringify(sanitizeIrohRemoteOutbound(encoder.encode(event), sanitizerOptions))),
-			);
+			void transport.write(encoder.encode(event));
+			const frame = getRecord(JSON.parse(JSON.stringify(written.at(-1))));
 			wireFrames.push(frame);
 			return getRecord(decoder.decode(frame));
 		};
@@ -472,6 +485,39 @@ describe("RpcSessionEventEncoder with the iroh outbound delta sanitizer", () => 
 
 		for (const frame of wireFrames) {
 			expect(JSON.stringify(frame)).not.toContain("secret-project");
+		}
+	});
+
+	test("encoder-derived delta fragments are not re-redacted by the frame filter", () => {
+		const { roundTrip, wireFrames } = createPipeline();
+		const fullText = `log: ${workspacePath}${sep}sessions${sep}foo.jsonl done`;
+		// Split right after the workspace root: the remaining wire fragment
+		// "/sessions/foo.jsonl done" matches the session-file heuristic in
+		// isolation but is clean within the accumulated sanitized text.
+		const splitAt = `log: ${workspacePath}`.length;
+
+		roundTrip({ type: "message_start", message: assistantPartial([]) });
+		roundTrip(messageUpdate(assistantPartial([{ type: "text", text: "" }]), { type: "text_start", contentIndex: 0 }));
+		roundTrip(
+			messageUpdate(assistantPartial([{ type: "text", text: fullText.slice(0, splitAt) }]), {
+				type: "text_delta",
+				contentIndex: 0,
+				delta: fullText.slice(0, splitAt),
+			}),
+		);
+		const afterFull = roundTrip(
+			messageUpdate(assistantPartial([{ type: "text", text: fullText }]), {
+				type: "text_delta",
+				contentIndex: 0,
+				delta: fullText.slice(splitAt),
+			}),
+		);
+		expect(getRecord(wireFrames[3].assistantMessageEvent).delta).toBe("/sessions/foo.jsonl done");
+		expect(getContent(afterFull.message)).toEqual([
+			{ type: "text", text: "log: /workspace/sessions/foo.jsonl done" },
+		]);
+		for (const frame of wireFrames) {
+			expect(JSON.stringify(frame)).not.toContain("[redacted");
 		}
 	});
 

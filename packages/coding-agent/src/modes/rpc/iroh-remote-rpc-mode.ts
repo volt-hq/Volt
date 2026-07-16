@@ -151,10 +151,15 @@ export function runIrohRemoteRpcMode(
 		transport: createIrohRpcTransport(options),
 		workspacePath: options.workspacePath,
 		additionalRedactedPaths: options.additionalRedactedPaths,
+		// The session event encoders below derive message_update deltas from
+		// sanitized accumulated text; re-sanitizing those fragments in isolation
+		// would over-redact and desynchronize client accumulation.
+		preSanitizedMessageDeltas: true,
 	});
 	// The outbound filter sanitizes frames independently, which cannot redact a
 	// host path split across delta-only message_update frames; encode streamed
-	// deltas from sanitized accumulated text so clients never rebuild raw paths.
+	// deltas from sanitized accumulated text so clients never rebuild a
+	// complete raw path.
 	const messageDeltaSanitizer = createIrohRemoteOutboundDeltaSanitizer({
 		remoteWorkspacePath: options.remoteWorkspacePath,
 		workspacePath: options.workspacePath,
