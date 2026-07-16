@@ -161,6 +161,14 @@ export class RpcMessageDeltaDecoder {
 				return event;
 			case "message_update":
 				return this.decodeMessageUpdate(event, key);
+			case "agent_end":
+			case "agent_settled":
+				// Terminal run events. Subagents disposed mid-stream never forward a
+				// message_end/subagent_end frame, so drop any partial-message
+				// accumulator here to keep the streams map bounded. Safe: any later
+				// assistant message re-seeds via message_start or a snapshot frame.
+				this.streams.delete(key);
+				return event;
 			default:
 				return event;
 		}
@@ -197,6 +205,15 @@ export class RpcMessageDeltaDecoder {
 		};
 	}
 
+	/**
+	 * Drop accumulated state for a subagent stream whose terminal frames may
+	 * never arrive: a client-initiated abort/dispose unsubscribes the server-side
+	 * forwarder before the child's message_end/subagent_end can cross the wire.
+	 */
+	endSubagentStream(subagentId: string): void {
+		this.streams.delete(`subagent:${subagentId}`);
+	}
+
 	private adopt(key: string, message: Record<string, unknown>): void {
 		this.streams.set(key, {
 			base: message,
@@ -213,8 +230,12 @@ export class RpcMessageDeltaDecoder {
 			return;
 		}
 		const content = state.content;
-		while (content.length < contentIndex) {
-			content.push({ type: "text", text: "" });
+		if (contentIndex > content.length) {
+			// Well-formed streams append content blocks contiguously, so an index
+			// past the end means malformed or malicious input. Padding to an
+			// arbitrary index would let a tiny frame allocate unbounded memory;
+			// drop the out-of-range delta instead.
+			return;
 		}
 		const existing = content[contentIndex];
 		const delta = typeof event.delta === "string" ? event.delta : "";

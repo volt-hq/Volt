@@ -284,6 +284,61 @@ describe("RpcMessageDeltaDecoder", () => {
 		expect(decoder.decode(afterEnd)).toBe(afterEnd);
 	});
 
+	test("drops deltas whose contentIndex skips past the accumulated content", () => {
+		const decoder = new RpcMessageDeltaDecoder();
+		decoder.decode({ type: "message_start", message: assistantPartial([]) });
+		// A tiny frame must not be able to allocate an arbitrarily large content
+		// array (memory-amplification DoS from a malicious or buggy server).
+		const decoded = getRecord(
+			decoder.decode({
+				type: "message_update",
+				assistantMessageEvent: { type: "text_delta", contentIndex: 50_000_000, delta: "x" },
+			}),
+		);
+		expect(getContent(decoded.message)).toEqual([]);
+		// Contiguous appends still work after the out-of-range delta was dropped.
+		const appended = getRecord(
+			decoder.decode({
+				type: "message_update",
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hi" },
+			}),
+		);
+		expect(getContent(appended.message)).toEqual([{ type: "text", text: "hi" }]);
+	});
+
+	test("clears subagent stream state on agent_end when no subagent_end arrives", () => {
+		const decoder = new RpcMessageDeltaDecoder();
+		decoder.decode({
+			type: "subagent_event",
+			subagentId: "sa_1",
+			event: { type: "message_start", message: assistantPartial([]) },
+		});
+		decoder.decode({ type: "subagent_event", subagentId: "sa_1", event: { type: "agent_end", messages: [] } });
+		// No accumulator base left: slim frames pass through untouched.
+		const slim = {
+			type: "subagent_event",
+			subagentId: "sa_1",
+			event: { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x" } },
+		};
+		expect(decoder.decode(slim)).toBe(slim);
+	});
+
+	test("endSubagentStream drops the accumulator for a disposed subagent", () => {
+		const decoder = new RpcMessageDeltaDecoder();
+		decoder.decode({
+			type: "subagent_event",
+			subagentId: "sa_1",
+			event: { type: "message_start", message: assistantPartial([]) },
+		});
+		decoder.endSubagentStream("sa_1");
+		const slim = {
+			type: "subagent_event",
+			subagentId: "sa_1",
+			event: { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x" } },
+		};
+		expect(decoder.decode(slim)).toBe(slim);
+	});
+
 	test("restores the partial reference on snapshot frames", () => {
 		const decoder = new RpcMessageDeltaDecoder();
 		const message = assistantPartial([{ type: "text", text: "hi" }]);

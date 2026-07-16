@@ -81,7 +81,7 @@ export abstract class RpcClientBase {
 	private readonly requestTimeoutMs: number;
 	private readonly eventListeners: RpcEventListener[] = [];
 	private readonly pendingRequests = new Map<string, PendingRpcRequest>();
-	/** Rebuilds full message_update events from capability-gated delta frames. */
+	/** Rebuilds full message_update events from delta frames. */
 	private readonly messageDeltaDecoder = new RpcMessageDeltaDecoder();
 	private requestId = 0;
 	private failureError: Error | null = null;
@@ -215,6 +215,9 @@ export abstract class RpcClientBase {
 	/** Abort and dispose a local RPC-managed subagent. */
 	async abortSubagent(subagentId: string): Promise<void> {
 		await this.send({ type: "subagent_abort", subagentId });
+		// The host unsubscribes the event forwarder before responding, so no
+		// terminal frame will clear this stream's accumulator; drop it here.
+		this.messageDeltaDecoder.endSubagentStream(subagentId);
 	}
 
 	/** Get state for a local RPC-managed subagent. */
@@ -240,6 +243,9 @@ export abstract class RpcClientBase {
 	/** Dispose a local RPC-managed subagent without sending an abort request first. */
 	async disposeSubagent(subagentId: string): Promise<void> {
 		await this.send({ type: "subagent_dispose", subagentId });
+		// The host unsubscribes the event forwarder before responding, so no
+		// terminal frame will clear this stream's accumulator; drop it here.
+		this.messageDeltaDecoder.endSubagentStream(subagentId);
 	}
 
 	/** Set model by provider and ID. Pass persistDefault: false to change the session's model without rewriting the host's default. */
