@@ -1,4 +1,5 @@
-import { stripAssistantMessageEventPartial } from "../core/rpc/message-deltas.ts";
+import { Buffer } from "node:buffer";
+import { RpcSessionEventEncoder } from "../core/rpc/message-deltas.ts";
 import type { ControlEvent } from "./control-protocol.ts";
 
 /**
@@ -18,19 +19,37 @@ export interface ViewerFeedSession {
 	abort(): Promise<void> | void;
 }
 
+interface BufferedViewerEvent {
+	event: unknown;
+	byteLength: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isToolCallDeltaSnapshot(value: unknown): boolean {
+	if (!isRecord(value) || value.type !== "message_update" || !isRecord(value.message)) {
+		return false;
+	}
+	return isRecord(value.assistantMessageEvent) && value.assistantMessageEvent.type === "toolcall_delta";
+}
+
 interface ViewerFeed {
 	viewerFeedId: string;
 	connectionId: string;
 	session: ViewerFeedSession;
 	unsubscribeSession: () => void;
 	/** Buffered events awaiting viewer_subscribe; null once flushed (live). */
-	buffer: unknown[] | null;
+	buffer: BufferedViewerEvent[] | null;
 	bufferedBytes: number;
 	/** Buffer overflowed: buffer dropped, TUI gets {kind:"truncated"} first. */
 	truncated: boolean;
 	seq: number;
 	subscribed: boolean;
 	ended: boolean;
+	/** Delta framing state for this feed's single ordered delivery stream. */
+	eventEncoder: RpcSessionEventEncoder;
 }
 
 export interface ViewerFeedEffects {
@@ -62,12 +81,10 @@ export class ViewerFeedRegistry {
 			seq: 0,
 			subscribed: false,
 			ended: false,
+			eventEncoder: new RpcSessionEventEncoder(),
 		};
 		feed.unsubscribeSession = session.subscribe((event) => {
-			// message_update events duplicate the accumulated partial as
-			// assistantMessageEvent.partial; dropping it halves buffer pressure
-			// against VIEWER_BUFFER_MAX_BYTES (the drain viewer reads `message`).
-			this.onSessionEvent(feed, stripAssistantMessageEventPartial(event));
+			this.onSessionEvent(feed, event);
 		});
 		this.feeds.set(viewerFeedId, feed);
 	}
@@ -77,32 +94,60 @@ export class ViewerFeedRegistry {
 			return;
 		}
 		if (feed.subscribed) {
-			this.emit(feed, event);
+			this.emit(feed, this.encodeSessionEvent(feed, event));
 			return;
 		}
 		if (feed.truncated || feed.buffer === null) {
 			return;
 		}
-		let eventBytes = 0;
+		const encodedEvent = this.encodeSessionEvent(feed, event);
+		let serializedEvent: string;
 		try {
-			eventBytes = JSON.stringify(event)?.length ?? 0;
+			const serialized = JSON.stringify(encodedEvent);
+			if (serialized === undefined) {
+				feed.eventEncoder = new RpcSessionEventEncoder();
+				return;
+			}
+			serializedEvent = serialized;
 		} catch {
-			// Unserializable events cannot cross the control plane anyway.
+			// Unserializable events cannot cross the control plane anyway. Reset the
+			// encoder so the next deliverable update carries a fresh snapshot.
+			feed.eventEncoder = new RpcSessionEventEncoder();
 			return;
 		}
-		if (
-			feed.buffer.length + 1 > VIEWER_BUFFER_MAX_EVENTS ||
-			feed.bufferedBytes + eventBytes > VIEWER_BUFFER_MAX_BYTES
-		) {
+		const eventBytes = Buffer.byteLength(serializedEvent, "utf8");
+		const previousEvent = feed.buffer[feed.buffer.length - 1];
+		const replacePrevious =
+			previousEvent !== undefined &&
+			isToolCallDeltaSnapshot(previousEvent.event) &&
+			isToolCallDeltaSnapshot(encodedEvent);
+		const nextEventCount = feed.buffer.length + (replacePrevious ? 0 : 1);
+		const nextBufferedBytes = feed.bufferedBytes - (replacePrevious ? previousEvent.byteLength : 0) + eventBytes;
+		if (nextEventCount > VIEWER_BUFFER_MAX_EVENTS || nextBufferedBytes > VIEWER_BUFFER_MAX_BYTES) {
 			// Cap exceeded: drop everything; the TUI shows a spinner and relies on
 			// the post-grant session file load for truth.
 			feed.buffer = null;
 			feed.bufferedBytes = 0;
 			feed.truncated = true;
+			// Buffered history is gone. Any later live frame must not depend on it.
+			feed.eventEncoder = new RpcSessionEventEncoder();
 			return;
 		}
-		feed.buffer.push(event);
-		feed.bufferedBytes += eventBytes;
+		// Buffer the exact detached JSON value that will cross the control plane.
+		// Provider streams mutate nested message blocks in place after emission.
+		// Consecutive tool-call snapshots supersede one another when a provider
+		// cannot expose the raw argument prefix needed to resume delta framing.
+		const bufferedEvent: BufferedViewerEvent = { event: JSON.parse(serializedEvent), byteLength: eventBytes };
+		if (replacePrevious) {
+			feed.buffer[feed.buffer.length - 1] = bufferedEvent;
+		} else {
+			feed.buffer.push(bufferedEvent);
+		}
+		feed.bufferedBytes = nextBufferedBytes;
+	}
+
+	private encodeSessionEvent(feed: ViewerFeed, event: unknown): unknown {
+		return typeof event === "object" && event !== null ? feed.eventEncoder.encode(event) : event;
 	}
 
 	private emit(feed: ViewerFeed, event: unknown): void {
@@ -131,8 +176,8 @@ export class ViewerFeedRegistry {
 		if (feed.truncated) {
 			this.emit(feed, { kind: "truncated" });
 		} else if (feed.buffer) {
-			for (const event of feed.buffer) {
-				this.emit(feed, event);
+			for (const entry of feed.buffer) {
+				this.emit(feed, entry.event);
 			}
 		}
 		feed.buffer = null;
@@ -149,6 +194,8 @@ export class ViewerFeedRegistry {
 		feed.subscribed = false;
 		feed.buffer = null;
 		feed.bufferedBytes = 0;
+		// Events are dropped while unsubscribed, so resumption needs a snapshot.
+		feed.eventEncoder = new RpcSessionEventEncoder();
 		return true;
 	}
 

@@ -6,6 +6,7 @@
  */
 
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { RpcSessionEventEncoder } from "../src/core/rpc/message-deltas.ts";
 import { getMarkdownTheme, initTheme } from "../src/core/theme/runtime.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import type { AcquireOutcome } from "../src/modes/interactive/daemon-attach.ts";
@@ -78,15 +79,28 @@ describe("drain viewer (§6.3)", () => {
 		const viewer = context.drainViewer as DrainViewerComponent;
 		expect(viewer).toBeInstanceOf(DrainViewerComponent);
 
-		// Assistant streaming renders through the real message component.
-		viewer.handleViewerEvent({
-			type: "message_start",
-			message: { role: "assistant", content: [{ type: "text", text: "remote says hi" }] },
-		});
-		viewer.handleViewerEvent({
+		// Assistant streaming renders through the real message component after
+		// reconstructing the delta-only viewer wire frame.
+		const eventEncoder = new RpcSessionEventEncoder();
+		const startMessage = { role: "assistant", content: [{ type: "text", text: "remote says hi" }] };
+		viewer.handleViewerEvent(eventEncoder.encode({ type: "message_start", message: startMessage }));
+		const updatedMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "remote says hi from the phone" }],
+		};
+		const wireUpdate = eventEncoder.encode({
 			type: "message_update",
-			message: { role: "assistant", content: [{ type: "text", text: "remote says hi from the phone" }] },
+			message: updatedMessage,
+			assistantMessageEvent: {
+				type: "text_delta",
+				contentIndex: 0,
+				delta: " from the phone",
+				partial: updatedMessage,
+			},
 		});
+		expect(wireUpdate).not.toHaveProperty("message");
+		viewer.handleViewerEvent(wireUpdate);
+		viewer.handleViewerEvent(eventEncoder.encode({ type: "message_end", message: updatedMessage }));
 		const rendered = stripAnsi(viewer.render(80).join("\n"));
 		expect(rendered).toContain("remote says hi from the phone");
 		expect(rendered).toContain("finishing remote turn");
@@ -99,6 +113,171 @@ describe("drain viewer (§6.3)", () => {
 		});
 		expect(proto.isDrainViewerActive.call(context)).toBe(false);
 		expect(context.drainViewerFeedId).toBeUndefined();
+	});
+
+	it("reconstructs a mid-message snapshot with subsequent thinking and tool-call deltas", () => {
+		const context = createContext();
+		const grant = deferredGrant();
+		proto.enterDrainViewer.call(context, { kind: "pending", viewerFeedId: "vf-mid", granted: grant.promise });
+		const viewer = context.drainViewer as DrainViewerComponent;
+		const eventEncoder = new RpcSessionEventEncoder();
+		const send = (event: object): void => viewer.handleViewerEvent(eventEncoder.encode(event));
+
+		let message = { role: "assistant", content: [{ type: "text", text: "mid" }] };
+		send({
+			type: "message_update",
+			message,
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "mid", partial: message },
+		});
+		message = { role: "assistant", content: [{ type: "text", text: "mid-stream" }] };
+		send({
+			type: "message_update",
+			message,
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "-stream", partial: message },
+		});
+
+		let richMessage = {
+			role: "assistant",
+			content: [
+				{ type: "text", text: "mid-stream" },
+				{ type: "thinking", thinking: "" },
+			],
+		};
+		send({
+			type: "message_update",
+			message: richMessage,
+			assistantMessageEvent: { type: "thinking_start", contentIndex: 1, partial: richMessage },
+		});
+		richMessage = {
+			role: "assistant",
+			content: [
+				{ type: "text", text: "mid-stream" },
+				{ type: "thinking", thinking: "plan" },
+			],
+		};
+		send({
+			type: "message_update",
+			message: richMessage,
+			assistantMessageEvent: { type: "thinking_delta", contentIndex: 1, delta: "plan", partial: richMessage },
+		});
+
+		const toolStartMessage = {
+			...richMessage,
+			content: [...richMessage.content, { type: "toolCall", id: "tc-1", name: "write", arguments: {} }],
+		};
+		send({
+			type: "message_update",
+			message: toolStartMessage,
+			assistantMessageEvent: { type: "toolcall_start", contentIndex: 2, partial: toolStartMessage },
+		});
+		const finalMessage = {
+			...richMessage,
+			content: [
+				...richMessage.content,
+				{ type: "toolCall", id: "tc-1", name: "write", arguments: { path: "notes.md", content: "done" } },
+			],
+		};
+		send({
+			type: "message_update",
+			message: finalMessage,
+			assistantMessageEvent: {
+				type: "toolcall_delta",
+				contentIndex: 2,
+				delta: '{"path":"notes.md","content":"done"}',
+				partial: finalMessage,
+			},
+		});
+		send({ type: "message_end", message: finalMessage });
+
+		const rendered = stripAnsi(viewer.render(100).join("\n"));
+		expect(rendered).toContain("mid-stream");
+		expect(rendered).toContain("plan");
+		expect(rendered).toContain("notes.md");
+		grant.reject(new Error("test over"));
+	});
+
+	it("keeps tool arguments live when the first observed update is mid-toolcall", () => {
+		const context = createContext();
+		const grant = deferredGrant();
+		proto.enterDrainViewer.call(context, {
+			kind: "pending",
+			viewerFeedId: "vf-mid-tool",
+			granted: grant.promise,
+		});
+		const viewer = context.drainViewer as DrainViewerComponent;
+		const eventEncoder = new RpcSessionEventEncoder();
+
+		const firstMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "tc-mid",
+					name: "write",
+					arguments: { path: "no" },
+					partialJson: '{"path":"no',
+				},
+			],
+		};
+		viewer.handleViewerEvent(
+			eventEncoder.encode({
+				type: "message_update",
+				message: firstMessage,
+				assistantMessageEvent: {
+					type: "toolcall_delta",
+					contentIndex: 0,
+					delta: "no",
+					partial: firstMessage,
+				},
+			}),
+		);
+		const updatedMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "tc-mid",
+					name: "write",
+					arguments: { path: "notes.md", content: "done" },
+					partialJson: '{"path":"notes.md","content":"done"}',
+				},
+			],
+		};
+		const delta = eventEncoder.encode({
+			type: "message_update",
+			message: updatedMessage,
+			assistantMessageEvent: {
+				type: "toolcall_delta",
+				contentIndex: 0,
+				delta: 'tes.md","content":"done"}',
+				partial: updatedMessage,
+			},
+		});
+		expect(delta).not.toHaveProperty("message");
+		viewer.handleViewerEvent(delta);
+
+		const rendered = stripAnsi(viewer.render(100).join("\n"));
+		expect(rendered).toContain("notes.md");
+		grant.reject(new Error("test over"));
+	});
+
+	it("renders an authoritative message_end when it is the first observed assistant event", () => {
+		const context = createContext();
+		const grant = deferredGrant();
+		proto.enterDrainViewer.call(context, {
+			kind: "pending",
+			viewerFeedId: "vf-end-only",
+			granted: grant.promise,
+		});
+		const viewer = context.drainViewer as DrainViewerComponent;
+		viewer.handleViewerEvent({
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "authoritative final reply" }] },
+		});
+
+		const rendered = stripAnsi(viewer.render(80).join("\n"));
+		expect(rendered).toContain("authoritative final reply");
+		grant.reject(new Error("test over"));
 	});
 
 	it("shows only the spinner after a truncated feed", () => {
