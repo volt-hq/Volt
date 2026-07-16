@@ -296,6 +296,30 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		const revokedHandshake = await readJsonLine(revokedStream);
 		expect(revokedHandshake.value.success).toBe(false);
 		expect(revokedHandshake.value.outcome).toBe("client_revoked");
+		const revokedStreamEnd = await readLineFromIroh(revokedStream.recv, revokedHandshake.rest, {
+			maxLineBytes: 1024 * 1024,
+		});
+		expect(revokedStreamEnd.line).toBeUndefined();
+		expect(revokedStreamEnd.rest).toHaveLength(0);
+
+		// A terminal handshake failure closes only its stream. Once the host FIN is
+		// observed, another stream on the same connection must still receive the
+		// structured failure instead of losing it to a parent-connection close.
+		const retriedRevokedStream = await revokedConnection.openBi();
+		await writeJsonLine(retriedRevokedStream, {
+			type: "volt_iroh_hello",
+			protocol: IROH_REMOTE_ALPN,
+			workspace: "ws",
+			workspaceDiscovery: { purpose: "list_sessions" },
+		});
+		const retriedRevokedHandshake = await readJsonLine(retriedRevokedStream);
+		expect(retriedRevokedHandshake.value.success).toBe(false);
+		expect(retriedRevokedHandshake.value.outcome).toBe("client_revoked");
+		const retriedRevokedStreamEnd = await readLineFromIroh(retriedRevokedStream.recv, retriedRevokedHandshake.rest, {
+			maxLineBytes: 1024 * 1024,
+		});
+		expect(retriedRevokedStreamEnd.line).toBeUndefined();
+		expect(retriedRevokedStreamEnd.rest).toHaveLength(0);
 		revokedConnection.close(0n, Array.from(Buffer.from("done", "utf8")));
 		await revokedConnection.closed();
 		await phone.close();
