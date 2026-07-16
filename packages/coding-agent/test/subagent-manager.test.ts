@@ -894,7 +894,12 @@ describe("SubagentManager", () => {
 		});
 		expect(context?.delegationScope).toBeInstanceOf(SubagentDelegationScope);
 		expect(context?.registry).toBeInstanceOf(SubagentRegistry);
-		// The child shares the session-wide registry that recorded its own run.
+		// The child shares the session-wide registry, but its own run is published
+		// only after the first prompt passes preflight.
+		expect(context?.registry.list()).toEqual([]);
+		const completion = handle.waitForEnd();
+		await handle.prompt("run unnamed child");
+		await completion;
 		expect(context?.registry.list().map((record) => record.id)).toEqual([handle.id]);
 		await handle.dispose();
 	});
@@ -1389,12 +1394,28 @@ describe("SubagentManager", () => {
 		await worker.dispose();
 	});
 
-	it("records disposed-before-completion runs as aborted in the registry", async () => {
+	it("records accepted runs disposed before completion as aborted in the registry", async () => {
+		const responseStarted = createDeferred();
+		const finishResponse = createDeferred();
 		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
-		const { manager } = await createTestManager({ resourceLoader });
+		const { manager } = await createTestManager({
+			resourceLoader,
+			responses: [
+				async () => {
+					responseStarted.resolve();
+					await finishResponse.promise;
+					return fauxAssistantMessage("late response");
+				},
+			],
+		});
+		cleanups.push(() => finishResponse.resolve());
 
 		const handle = await manager.startByName("researcher");
-		await handle.dispose();
+		await handle.prompt("run accepted child");
+		await responseStarted.promise;
+		const disposal = handle.dispose();
+		finishResponse.resolve();
+		await disposal;
 
 		expect(manager.listDelegations()).toEqual([
 			expect.objectContaining({ agent: { name: "researcher", source: "user" }, status: "aborted" }),
@@ -1649,7 +1670,7 @@ describe("SubagentManager", () => {
 		await expect(handle.abort()).resolves.toBeUndefined();
 	});
 
-	it("aborts a still-running retained runtime when the handle is disposed without an abort", async () => {
+	it("aborts an unaccepted retained runtime without publishing activity when its handle is disposed", async () => {
 		// Regression: disposing an unsettled handle used to only close the
 		// loopback transport; with retainRuntimeOnDispose (daemon hosts) the
 		// child kept running headless on a result nobody could receive.
@@ -1669,8 +1690,7 @@ describe("SubagentManager", () => {
 		await handle.dispose();
 
 		expect(abortCalls).toBe(1);
-		const activity = manager.listActivities().find((candidate) => candidate.id === handle.id);
-		expect(activity?.status).toBe("aborted");
+		expect(manager.listActivities().find((candidate) => candidate.id === handle.id)).toBeUndefined();
 	});
 
 	it("does not abort a completed child on disposal", async () => {

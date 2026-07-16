@@ -10,6 +10,7 @@ import { IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
+import type { SubagentRuntimeRegistration } from "../src/core/subagents/index.ts";
 import { IntegratedRuntimeRegistry } from "../src/daemon/integrated-runtimes.ts";
 import {
 	collectClientAuthorityInvalidationRuntimes,
@@ -276,17 +277,19 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		expect(setClientLastSessionId).toHaveBeenLastCalledWith("n-phone-a", "ws", "parent-session");
 
 		setClientLastSessionId.mockClear();
-		await (
+		const registration = (
 			registry as unknown as {
 				registerSubagentRuntime(
 					event: { id: string; parentSessionId: string; runtime: AgentSessionRuntime; sessionId: string },
 					authorization: IrohRemoteClientAuthorizationSuccess,
-				): Promise<void>;
+				): SubagentRuntimeRegistration;
 			}
 		).registerSubagentRuntime(
 			{ id: "sa-child", parentSessionId: "parent-session", runtime: childRuntime, sessionId: "child-session" },
 			phone,
 		);
+		expect(registry.findOwner("ws", "child-session")).toBeUndefined();
+		registration.commit();
 		expect(setClientLastSessionId).not.toHaveBeenCalled();
 
 		setClientLastSessionId.mockClear();
@@ -302,6 +305,66 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		await registry.handleSessionChanged(child.entry, undefined, { sessionId: "child-session-rekeyed" }, phone);
 		expect(setClientLastSessionId).not.toHaveBeenCalled();
 
+		await registry.stopAll("test_cleanup");
+	});
+
+	it("disposes a prepared subagent runtime that is rolled back before prompt acceptance", async () => {
+		const parentRuntime = {
+			cwd: workspacePath,
+			session: createTestSession("parent-session", null),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+			listSessions: vi.fn(async () => []),
+		} as unknown as AgentSessionRuntime;
+		const childDispose = vi.fn(async () => {});
+		const childRuntime = {
+			cwd: workspacePath,
+			session: createTestSession("child-session", null),
+			dispose: childDispose,
+			setRebindSession: vi.fn(),
+			listSessions: vi.fn(async () => []),
+		} as unknown as AgentSessionRuntime;
+		const registry = new IntegratedRuntimeRegistry({
+			agentDir,
+			auditLogger: new IrohRemoteAuditLogger(),
+			stateManager: new IrohRemoteHostStateManager(),
+			activeStreams: new IrohRemoteActiveStreamRegistry(),
+			detachedRuntimeTtlMs: () => 60_000,
+			getAllowTools: () => undefined,
+			getProjectTrustedForWorkspace: () => false,
+			setClientLastSessionId: vi.fn(async () => undefined),
+			createRuntime: async () => ({
+				runtime: parentRuntime,
+				sessionSelection: { kind: "created", sessionId: "parent-session" },
+			}),
+		});
+		const phone = createAuthorization("n-phone-a");
+		const parent = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
+			phone,
+		);
+		await registry.commitEntry(parent.entry, parent.sessionSelection, phone);
+
+		const registration = (
+			registry as unknown as {
+				registerSubagentRuntime(
+					event: { id: string; parentSessionId: string; runtime: AgentSessionRuntime; sessionId: string },
+					authorization: IrohRemoteClientAuthorizationSuccess,
+				): SubagentRuntimeRegistration;
+			}
+		).registerSubagentRuntime(
+			{ id: "sa-child", parentSessionId: "parent-session", runtime: childRuntime, sessionId: "child-session" },
+			phone,
+		);
+
+		expect(registry.findOwner("ws", "child-session")).toBeUndefined();
+		await registration.rollback();
+		await registration.rollback();
+
+		expect(childDispose).toHaveBeenCalledOnce();
+		expect(registry.findOwner("ws", "child-session")).toBeUndefined();
+		registration.commit();
+		expect(registry.findOwner("ws", "child-session")).toBeUndefined();
 		await registry.stopAll("test_cleanup");
 	});
 

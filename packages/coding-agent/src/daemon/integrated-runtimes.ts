@@ -21,6 +21,7 @@ import {
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDir } from "../core/session-manager.ts";
+import type { SubagentRuntimeRegistration } from "../core/subagents/index.ts";
 import {
 	createIrohRemoteAgentRuntimeWithSessionSelection,
 	type IrohRemoteAgentRuntimeConversationTarget,
@@ -463,35 +464,58 @@ export class IntegratedRuntimeRegistry {
 		};
 	}
 
-	private async registerSubagentRuntime(
+	private registerSubagentRuntime(
 		event: IrohRemoteSubagentRuntimeCreatedEvent,
 		authorization: IrohRemoteClientAuthorizationSuccess,
-	): Promise<void> {
-		const parentEntry = this.findOwner(authorization.workspace.name, event.parentSessionId);
+	): SubagentRuntimeRegistration {
+		const workspaceName = authorization.workspace.name;
+		const parentEntry = this.findOwner(workspaceName, event.parentSessionId);
 		if (!parentEntry) {
 			throw new Error(`Parent runtime is not active for subagent session ${event.sessionId}`);
 		}
-		const owner = this.findOwner(authorization.workspace.name, event.sessionId);
-		if (owner) {
-			return;
+		if (this.findOwner(workspaceName, event.sessionId)) {
+			throw new Error(`Subagent session ${event.sessionId} is already active`);
 		}
 		const entry = this.createEntryRecord({
 			clientNodeId: authorization.client.nodeId,
-			workspaceName: authorization.workspace.name,
+			workspaceName,
 			sessionId: event.sessionId,
 			runtime: event.runtime,
 			parentSessionId: event.parentSessionId,
 			subagentId: event.id,
 			toolPolicy: parentEntry.toolPolicy,
 		});
-		entry.detachedAt = Date.now();
-		this.entries.set(entry.key, entry);
-		await this.logEntryAudit(entry, "remote_runtime_started", {
-			parentSessionId: event.parentSessionId,
-			reason: "subagent_created",
-			subagentId: event.id,
-		});
-		this.scheduleRetention(entry, "subagent_created");
+		let state: "prepared" | "committed" | "rolled-back" = "prepared";
+		return {
+			commit: () => {
+				if (state !== "prepared") return;
+				if (!this.findOwner(workspaceName, event.parentSessionId)) {
+					throw new Error(`Parent runtime is not active for subagent session ${event.sessionId}`);
+				}
+				if (this.findOwner(workspaceName, event.sessionId)) {
+					throw new Error(`Subagent session ${event.sessionId} is already active`);
+				}
+				state = "committed";
+				entry.detachedAt = Date.now();
+				this.entries.set(entry.key, entry);
+				this.scheduleRetention(entry, "subagent_created");
+				void this.logEntryAudit(entry, "remote_runtime_started", {
+					parentSessionId: event.parentSessionId,
+					reason: "subagent_created",
+					subagentId: event.id,
+				});
+			},
+			rollback: async () => {
+				if (state === "rolled-back") return;
+				if (state === "committed") {
+					state = "rolled-back";
+					await this.stopEntry(entry, "subagent_start_rolled_back");
+					return;
+				}
+				state = "rolled-back";
+				await event.runtime.dispose().catch(() => undefined);
+			},
+		};
 	}
 
 	async commitEntry(

@@ -74,6 +74,12 @@ export interface SubagentResult {
 export interface SubagentHandle {
 	id: string;
 	sessionId: string;
+	/**
+	 * Send a message to the child. A rejection before the start is published
+	 * (prompt preflight or the host's runtime registration commit) rolls back
+	 * the unpublished start (daemon hosts dispose the prepared child runtime)
+	 * and disposes this handle, so it cannot be retried.
+	 */
 	prompt(message: string): Promise<void>;
 	abort(): Promise<void>;
 	getState(): Promise<RpcSessionState>;
@@ -93,6 +99,12 @@ export interface SubagentRuntimeCreatedEvent {
 	parentSessionFile?: string;
 }
 
+/** Host-owned registration prepared before prompting and committed only after prompt preflight succeeds. */
+export interface SubagentRuntimeRegistration {
+	commit(): void;
+	rollback(): Promise<void>;
+}
+
 export interface SubagentManagerOptions {
 	createRuntime: CreateAgentSessionRuntimeFactory;
 	cwd: string;
@@ -109,8 +121,10 @@ export interface SubagentManagerOptions {
 	requestTimeoutMs?: number;
 	/** Keep child runtimes alive after the hidden loopback client detaches. Another owner must retain/dispose them. */
 	retainRuntimeOnDispose?: boolean;
-	/** Called after a child runtime is ready so hosts can register it for live attachment. */
-	onRuntimeCreated?: (event: SubagentRuntimeCreatedEvent) => void | Promise<void>;
+	/** Called after a child runtime is ready so hosts can prepare it for live attachment. */
+	onRuntimeCreated?: (
+		event: SubagentRuntimeCreatedEvent,
+	) => SubagentRuntimeRegistration | Promise<SubagentRuntimeRegistration> | Promise<void> | void;
 }
 
 export interface SubagentDelegationScopeLease {
@@ -317,10 +331,11 @@ class LocalSubagentHandle implements SubagentHandle {
 	private readonly client: InProcessRpcClient;
 	private readonly abortRuntime: () => Promise<void>;
 	private readonly removeFromManager: (id: string) => void;
-	private readonly onPromptStarted: (message: string) => void;
-	private readonly onPromptFailed: (error: unknown) => void;
+	private readonly onPromptAccepted: (message: string) => void;
+	private readonly onPromptFailed: (error: unknown) => Promise<void>;
 	private readonly onAbortRequested: () => void;
 	private readonly onTerminal: () => void;
+	private readonly onDispose: () => Promise<void>;
 	private waitForIdle: (() => Promise<void>) | undefined;
 	private readonly eventListeners = new Set<SubagentEventListener>();
 	private readonly endPromise: Promise<SubagentResult>;
@@ -343,10 +358,11 @@ class LocalSubagentHandle implements SubagentHandle {
 		client: InProcessRpcClient;
 		abortRuntime: () => Promise<void>;
 		removeFromManager: (id: string) => void;
-		onPromptStarted: (message: string) => void;
-		onPromptFailed: (error: unknown) => void;
+		onPromptAccepted: (message: string) => void;
+		onPromptFailed: (error: unknown) => Promise<void>;
 		onAbortRequested: () => void;
 		onTerminal: () => void;
+		onDispose: () => Promise<void>;
 		waitForIdle: () => Promise<void>;
 	}) {
 		this.id = options.id;
@@ -354,10 +370,11 @@ class LocalSubagentHandle implements SubagentHandle {
 		this.client = options.client;
 		this.abortRuntime = options.abortRuntime;
 		this.removeFromManager = options.removeFromManager;
-		this.onPromptStarted = options.onPromptStarted;
+		this.onPromptAccepted = options.onPromptAccepted;
 		this.onPromptFailed = options.onPromptFailed;
 		this.onAbortRequested = options.onAbortRequested;
 		this.onTerminal = options.onTerminal;
+		this.onDispose = options.onDispose;
 		this.waitForIdle = options.waitForIdle;
 		this.endPromise = new Promise<SubagentResult>((resolve, reject) => {
 			this.resolveEnd = resolve;
@@ -369,14 +386,25 @@ class LocalSubagentHandle implements SubagentHandle {
 	async prompt(message: string): Promise<void> {
 		this.assertOpen();
 		this.promptStarted = true;
-		this.onPromptStarted(message);
 		try {
 			await this.client.prompt(message, undefined, () => {
+				// Publish before marking acceptance: publishing can itself fail
+				// (daemon hosts re-check preconditions when committing the runtime
+				// registration), and a publish failure must take the unpublished
+				// rollback path below, which disposes this handle.
+				this.onPromptAccepted(message);
 				this.promptAccepted = true;
 			});
 		} catch (error) {
-			this.onPromptFailed(error);
+			await this.onPromptFailed(error).catch(() => undefined);
 			this.settleOwnership();
+			if (!this.promptAccepted) {
+				// An unpublished prompt failure rolled the start back; daemon hosts
+				// dispose the prepared child runtime, so the handle cannot be
+				// retried. Dispose it so later calls fail with a clear
+				// disposed-handle error instead of generic disposed-session errors.
+				await this.dispose().catch(() => undefined);
+			}
 			throw error;
 		}
 	}
@@ -447,8 +475,12 @@ class LocalSubagentHandle implements SubagentHandle {
 			try {
 				await this.client.stop();
 			} finally {
-				this.eventListeners.clear();
-				this.removeFromManager(this.id);
+				try {
+					await this.onDispose();
+				} finally {
+					this.eventListeners.clear();
+					this.removeFromManager(this.id);
+				}
 			}
 		});
 		return this.disposePromise;
@@ -541,7 +573,9 @@ export class SubagentManager {
 	private readonly delegationLimits?: SubagentDelegationScopeLimits;
 	private readonly requestTimeoutMs?: number;
 	private readonly retainRuntimeOnDispose: boolean;
-	private readonly onRuntimeCreated?: (event: SubagentRuntimeCreatedEvent) => void | Promise<void>;
+	private readonly onRuntimeCreated?: (
+		event: SubagentRuntimeCreatedEvent,
+	) => SubagentRuntimeRegistration | Promise<SubagentRuntimeRegistration> | Promise<void> | void;
 	private readonly handles = new Map<string, LocalSubagentHandle>();
 	private readonly activities = new Map<string, MutableSubagentActivity>();
 	private readonly activityListeners = new Set<SubagentActivityListener>();
@@ -893,6 +927,18 @@ export class SubagentManager {
 			);
 		});
 		let client: InProcessRpcClient | undefined;
+		let runtimeRegistration: SubagentRuntimeRegistration | undefined;
+		let rollbackRuntimeRegistrationPromise: Promise<void> | undefined;
+		let published = false;
+		const rollbackRuntimeRegistration = (): Promise<void> => {
+			if (published) return Promise.resolve();
+			if (!rollbackRuntimeRegistrationPromise) {
+				const registration = runtimeRegistration;
+				runtimeRegistration = undefined;
+				rollbackRuntimeRegistrationPromise = registration?.rollback().catch(() => undefined) ?? Promise.resolve();
+			}
+			return rollbackRuntimeRegistrationPromise;
+		};
 		try {
 			if (definitionOptions) {
 				await this.applyDefinitionToRuntime(
@@ -912,17 +958,28 @@ export class SubagentManager {
 					handle?.handleEvent(event);
 				},
 			});
-			await this.notifyRuntimeCreated({ id, runtime, definition: definitionOptions?.definition });
-			this.registerActivity(id, runtime, definitionOptions?.definition);
-			this.getRegistry().register({
+			runtimeRegistration = await this.notifyRuntimeCreated({
 				id,
-				...(this.subagentContext ? { parentId: this.subagentContext.subagentId } : {}),
-				agent: {
-					name: definitionOptions?.definition.name ?? "subagent",
-					...(definitionOptions?.definition.source ? { source: definitionOptions.definition.source } : {}),
-				},
-				path: subagentContext.path,
+				runtime,
+				definition: definitionOptions?.definition,
 			});
+			const publish = (message: string): void => {
+				if (published) return;
+				runtimeRegistration?.commit();
+				runtimeRegistration = undefined;
+				published = true;
+				this.getRegistry().register({
+					id,
+					...(this.subagentContext ? { parentId: this.subagentContext.subagentId } : {}),
+					agent: {
+						name: definitionOptions?.definition.name ?? "subagent",
+						...(definitionOptions?.definition.source ? { source: definitionOptions.definition.source } : {}),
+					},
+					path: subagentContext.path,
+				});
+				this.getRegistry().setTask(id, message);
+				this.registerActivity(id, runtime, definitionOptions?.definition, message);
+			};
 			handle = new LocalSubagentHandle({
 				id,
 				sessionId: runtime.session.sessionId,
@@ -931,17 +988,21 @@ export class SubagentManager {
 				removeFromManager: (handleId) => {
 					this.handles.delete(handleId);
 				},
-				onPromptStarted: (message) => {
-					this.updateActivityTask(id, message);
-					this.getRegistry().setTask(id, message);
+				onPromptAccepted: publish,
+				onPromptFailed: async (error) => {
+					if (published) {
+						this.finishActivity(id, "failed", errorMessage(error));
+						return;
+					}
+					await rollbackRuntimeRegistration();
 				},
-				onPromptFailed: (error) => this.finishActivity(id, "failed", errorMessage(error)),
 				onAbortRequested: () => this.markActivityAbortRequested(id),
 				onTerminal: () => {
 					unsubscribeScopeAccounting();
 					delegation.reservation.release();
 					if (delegation.scopeLease.owned) delegation.scopeLease.scope.dispose();
 				},
+				onDispose: rollbackRuntimeRegistration,
 				waitForIdle: () => runtime.session.waitForIdle(),
 			});
 			delegation.reservation.commit(id, () => {
@@ -973,6 +1034,7 @@ export class SubagentManager {
 		} catch (error) {
 			unsubscribeScopeAccounting();
 			await client?.stop().catch(() => undefined);
+			await rollbackRuntimeRegistration();
 			await runtime.dispose().catch(() => undefined);
 			throw error;
 		}
@@ -982,6 +1044,7 @@ export class SubagentManager {
 		id: string,
 		runtime: AgentSessionRuntime,
 		definition: SubagentDefinition | undefined,
+		task: string,
 	): void {
 		const now = Date.now();
 		const activity: MutableSubagentActivity = {
@@ -991,7 +1054,7 @@ export class SubagentManager {
 				name: definition?.name ?? "subagent",
 				source: definition?.source,
 			},
-			task: undefined,
+			task,
 			status: "running",
 			startedAt: now,
 			updatedAt: now,
@@ -1007,14 +1070,6 @@ export class SubagentManager {
 		};
 		this.activities.set(id, activity);
 		this.trimActivities();
-		this.notifyActivity(activity);
-	}
-
-	private updateActivityTask(id: string, task: string): void {
-		const activity = this.activities.get(id);
-		if (!activity || activity.status !== "running") return;
-		activity.task = task;
-		activity.updatedAt = Date.now();
 		this.notifyActivity(activity);
 	}
 
@@ -1130,20 +1185,22 @@ export class SubagentManager {
 		id: string;
 		runtime: AgentSessionRuntime;
 		definition?: SubagentDefinition;
-	}): Promise<void> {
+	}): Promise<SubagentRuntimeRegistration | undefined> {
 		if (!this.onRuntimeCreated) {
-			return;
+			return undefined;
 		}
-		await this.onRuntimeCreated({
-			id: options.id,
-			sessionId: options.runtime.session.sessionId,
-			runtime: options.runtime,
-			...(options.definition ? { definition: options.definition } : {}),
-			...(this.parentSessionManager ? { parentSessionId: this.parentSessionManager.getSessionId() } : {}),
-			...(this.parentSessionManager?.getSessionFile()
-				? { parentSessionFile: this.parentSessionManager.getSessionFile() }
-				: {}),
-		});
+		return (
+			(await this.onRuntimeCreated({
+				id: options.id,
+				sessionId: options.runtime.session.sessionId,
+				runtime: options.runtime,
+				...(options.definition ? { definition: options.definition } : {}),
+				...(this.parentSessionManager ? { parentSessionId: this.parentSessionManager.getSessionId() } : {}),
+				...(this.parentSessionManager?.getSessionFile()
+					? { parentSessionFile: this.parentSessionManager.getSessionFile() }
+					: {}),
+			})) ?? undefined
+		);
 	}
 
 	private resolveDefinition(
