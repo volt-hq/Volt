@@ -11,7 +11,9 @@
  * `message` is omitted while the client holds the accumulator base. The first
  * update for a message whose `message_start` was not observed on the same
  * stream (mid-turn attach) carries a full snapshot so clients always have a
- * base; `message_start` and `message_end` keep full messages.
+ * base. If attachment lands mid-toolcall, replacement snapshots continue until
+ * `toolcall_end` because the client lacks the raw argument prefix. `message_start`
+ * and `message_end` keep full messages.
  *
  * `RpcMessageDeltaDecoder` reconstructs the full documented event shape on the
  * client, so consumers of `RpcClientEvent` keep the in-process contract
@@ -79,6 +81,8 @@ export class RpcSessionEventEncoder {
 	private readonly emittedSanitizedText = new Map<number, string>();
 	/** Raw tool-call argument text already shipped, per resumable content index. */
 	private readonly resumableToolArgsText = new Map<number, string>();
+	/** Mid-toolcall attaches that require replacement snapshots until toolcall_end. */
+	private readonly snapshotOnlyToolCallIndexes = new Set<number>();
 
 	constructor(options: RpcSessionEventEncoderOptions = {}) {
 		this.deltaSanitizer = options.deltaSanitizer;
@@ -93,6 +97,7 @@ export class RpcSessionEventEncoder {
 				if (isRecord(event.message) && event.message.role === "assistant") {
 					// The full (near-empty) partial in this frame is the base.
 					this.deltaBaseSent = true;
+					this.snapshotOnlyToolCallIndexes.clear();
 					this.seedSanitizedState(event.message);
 				}
 				return event;
@@ -100,6 +105,7 @@ export class RpcSessionEventEncoder {
 				this.deltaBaseSent = false;
 				this.emittedSanitizedText.clear();
 				this.resumableToolArgsText.clear();
+				this.snapshotOnlyToolCallIndexes.clear();
 				return event;
 			case "message_update":
 				return this.encodeMessageUpdate(event);
@@ -124,11 +130,27 @@ export class RpcSessionEventEncoder {
 		if (message.role !== "assistant") {
 			return { ...event, assistantMessageEvent: slimEvent };
 		}
+		const contentIndex = typeof slimEvent.contentIndex === "number" ? slimEvent.contentIndex : undefined;
 		if (!this.deltaBaseSent) {
 			// No message_start observed on this stream for this message:
 			// this frame doubles as the accumulator snapshot.
 			this.deltaBaseSent = true;
+			if (slimEvent.type === "toolcall_delta" && contentIndex !== undefined) {
+				// The client has parsed arguments but not the raw JSON prefix needed to
+				// append later deltas. Keep replacing its snapshot until toolcall_end.
+				this.snapshotOnlyToolCallIndexes.add(contentIndex);
+			}
 			return this.encodeSnapshotFrame(event, slimEvent, message);
+		}
+		if (
+			slimEvent.type === "toolcall_delta" &&
+			contentIndex !== undefined &&
+			this.snapshotOnlyToolCallIndexes.has(contentIndex)
+		) {
+			return this.encodeSnapshotFrame(event, slimEvent, message);
+		}
+		if ((slimEvent.type === "toolcall_start" || slimEvent.type === "toolcall_end") && contentIndex !== undefined) {
+			this.snapshotOnlyToolCallIndexes.delete(contentIndex);
 		}
 		if (this.deltaSanitizer) {
 			return this.encodeSanitizedUpdate(this.deltaSanitizer, event, slimEvent, message);

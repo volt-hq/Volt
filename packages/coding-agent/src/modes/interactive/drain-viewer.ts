@@ -1,5 +1,6 @@
 import type { MarkdownTheme, TUI } from "@hansjm10/volt-tui";
 import { Container, Loader, Spacer, Text } from "@hansjm10/volt-tui";
+import { RpcMessageDeltaDecoder } from "../../core/rpc/message-deltas.ts";
 import { theme } from "../../core/theme/runtime.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { isCoalescableAssistantUpdate, StreamingRenderCoalescer } from "./components/streaming-render-coalescer.ts";
@@ -49,6 +50,7 @@ export class DrainViewerComponent extends Container {
 	private readonly options: DrainViewerOptions;
 	private readonly loader: Loader;
 	private readonly content = new Container();
+	private readonly messageDeltaDecoder = new RpcMessageDeltaDecoder();
 	private streamingComponent: AssistantMessageComponent | undefined;
 	private streamingRenderCoalescer: StreamingRenderCoalescer<ViewerMessage> | undefined;
 	private readonly pendingTools = new Map<string, ToolExecutionComponent>();
@@ -79,8 +81,8 @@ export class DrainViewerComponent extends Container {
 		if (this.finished || typeof raw !== "object" || raw === null) {
 			return;
 		}
-		const event = raw as ViewerEvent;
-		if (event.kind === "truncated") {
+		const wireEvent = raw as ViewerEvent;
+		if (wireEvent.kind === "truncated") {
 			// Too much history to replay; show only the spinner and rely on the
 			// post-grant session file load. Pending tool rows never see a terminal
 			// render after this, so their renderer resources must be released here
@@ -94,30 +96,19 @@ export class DrainViewerComponent extends Container {
 			this.tui.requestRender();
 			return;
 		}
-		if (this.truncated && event.type !== "agent_end") {
+		if (this.truncated && wireEvent.type !== "agent_end") {
 			// After truncation we only show the spinner and skip content replay, but
 			// agent_end merely advances the loader label — let it through so the
 			// overlay reflects the remote turn finishing instead of staying stuck on
 			// "finishing remote turn…".
 			return;
 		}
+		const event = this.messageDeltaDecoder.decode(raw) as ViewerEvent;
 		switch (event.type) {
 			case "message_start": {
 				const message = event.message;
 				if (message?.role === "assistant") {
-					this.streamingRenderCoalescer?.dispose();
-					this.streamingComponent = new AssistantMessageComponent(
-						undefined,
-						this.options.hideThinkingBlock,
-						this.options.markdownTheme,
-						this.options.hiddenThinkingLabel,
-					);
-					this.content.addChild(this.streamingComponent);
-					this.streamingRenderCoalescer = new StreamingRenderCoalescer((latest) => {
-						this.streamingComponent?.updateContent(latest as never);
-						this.tui.requestRender();
-					});
-					this.streamingRenderCoalescer.commitNow(message);
+					this.startAssistantStream(message);
 					this.upsertToolCalls(message);
 				} else if (message?.role === "user") {
 					const text = (message.content ?? [])
@@ -132,19 +123,31 @@ export class DrainViewerComponent extends Container {
 			}
 			case "message_update": {
 				if (event.message?.role === "assistant") {
-					if (isCoalescableAssistantUpdate(event.assistantMessageEvent?.type)) {
-						this.streamingRenderCoalescer?.update(event.message);
-					} else {
-						this.streamingRenderCoalescer?.commitNow(event.message);
-					}
-					if (event.assistantMessageEvent?.type?.startsWith("toolcall_")) {
+					if (!this.streamingComponent || !this.streamingRenderCoalescer) {
+						// Mid-message drains have no preceding message_start. The encoder's
+						// first update is a full snapshot, so it can initialize the overlay.
+						this.startAssistantStream(event.message);
 						this.upsertToolCalls(event.message);
+					} else {
+						if (isCoalescableAssistantUpdate(event.assistantMessageEvent?.type)) {
+							this.streamingRenderCoalescer.update(event.message);
+						} else {
+							this.streamingRenderCoalescer.commitNow(event.message);
+						}
+						if (event.assistantMessageEvent?.type?.startsWith("toolcall_")) {
+							this.upsertToolCalls(event.message);
+						}
 					}
 				}
 				return;
 			}
 			case "message_end": {
 				if (event.message?.role === "assistant") {
+					if (!this.streamingComponent || !this.streamingRenderCoalescer) {
+						// A drain can attach after the last update. message_end is a full,
+						// authoritative snapshot and must initialize the overlay on its own.
+						this.startAssistantStream(event.message);
+					}
 					this.streamingRenderCoalescer?.finish(event.message);
 					this.streamingRenderCoalescer = undefined;
 					this.upsertToolCalls(event.message);
@@ -183,6 +186,22 @@ export class DrainViewerComponent extends Container {
 				break;
 		}
 		this.tui.requestRender();
+	}
+
+	private startAssistantStream(message: ViewerMessage): void {
+		this.streamingRenderCoalescer?.dispose();
+		this.streamingComponent = new AssistantMessageComponent(
+			undefined,
+			this.options.hideThinkingBlock,
+			this.options.markdownTheme,
+			this.options.hiddenThinkingLabel,
+		);
+		this.content.addChild(this.streamingComponent);
+		this.streamingRenderCoalescer = new StreamingRenderCoalescer((latest) => {
+			this.streamingComponent?.updateContent(latest as never);
+			this.tui.requestRender();
+		});
+		this.streamingRenderCoalescer.commitNow(message);
 	}
 
 	private upsertToolCalls(message: ViewerMessage): void {

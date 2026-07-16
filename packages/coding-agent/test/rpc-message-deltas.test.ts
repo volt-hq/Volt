@@ -120,6 +120,48 @@ describe("RpcSessionEventEncoder", () => {
 		expect(getRecord(frame.assistantMessageEvent).toolCall).toEqual({ id: "tc1", name: "write" });
 	});
 
+	test("uses replacement snapshots after attaching mid-toolcall until toolcall_end", () => {
+		const encoder = new RpcSessionEventEncoder();
+		const decoder = new RpcMessageDeltaDecoder();
+		const firstToolCall = { type: "toolCall", id: "tc1", name: "read", arguments: { path: "no" } };
+		const first = getRecord(
+			encoder.encode(
+				messageUpdate(assistantPartial([firstToolCall]), {
+					type: "toolcall_delta",
+					contentIndex: 0,
+					delta: "no",
+				}),
+			),
+		);
+		expect(first).toHaveProperty("message");
+		decoder.decode(first);
+
+		const finalToolCall = { type: "toolCall", id: "tc1", name: "read", arguments: { path: "notes.md" } };
+		const replacement = getRecord(
+			encoder.encode(
+				messageUpdate(assistantPartial([finalToolCall]), {
+					type: "toolcall_delta",
+					contentIndex: 0,
+					delta: 'tes.md"}',
+				}),
+			),
+		);
+		expect(replacement).toHaveProperty("message");
+		const decoded = getRecord(decoder.decode(replacement));
+		expect(getRecord(getContent(decoded.message)[0]).arguments).toEqual({ path: "notes.md" });
+
+		const end = getRecord(
+			encoder.encode(
+				messageUpdate(assistantPartial([finalToolCall]), {
+					type: "toolcall_end",
+					contentIndex: 0,
+					toolCall: finalToolCall,
+				}),
+			),
+		);
+		expect(end).not.toHaveProperty("message");
+	});
+
 	test("message_end resets the base so the next message starts from its message_start", () => {
 		const encoder = new RpcSessionEventEncoder();
 		encoder.encode({ type: "message_start", message: assistantPartial([]) });
