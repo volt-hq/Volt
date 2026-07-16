@@ -25,7 +25,6 @@ import {
 import {
 	type IrohRemoteHandshakeLineReadOptions,
 	readIrohRemoteHandshakeLine,
-	writeIrohRemoteHandshakeResponse,
 	writeIrohRemoteHello,
 } from "./handshake-reader.ts";
 import { createIrohRemoteHostMetadata } from "./metadata.ts";
@@ -103,16 +102,12 @@ export type IrohRemoteHostHandshakeResult =
 			hello: IrohRemoteHello;
 			initialInput: IrohBytes;
 			response: IrohRemoteHandshakeSuccess;
-			responseWritten: boolean;
-			responseWriteError?: string;
 	  }
 	| {
 			ok: false;
 			error: string;
 			initialInput: IrohBytes;
 			response: IrohRemoteHandshakeFailure;
-			responseWritten: boolean;
-			responseWriteError?: string;
 	  };
 
 export interface IrohRemoteHostReadHandshakeOptions extends IrohRemoteHandshakeLineReadOptions {
@@ -122,7 +117,6 @@ export interface IrohRemoteHostReadHandshakeOptions extends IrohRemoteHandshakeL
 		sessionId: string;
 		requestedSessionId?: string;
 	};
-	writeSuccessResponse?: boolean;
 }
 
 export interface IrohRemoteClientEngineOptions {
@@ -400,25 +394,22 @@ export class IrohRemoteHostEngine {
 	}
 
 	async readHandshake(
-		stream: IrohBiStreamLike,
+		recv: IrohRecvStreamLike,
 		remoteNodeId: string,
 		options: IrohRemoteHostReadHandshakeOptions = {},
 	): Promise<IrohRemoteHostHandshakeResult> {
 		let initialInput: IrohBytes = Buffer.alloc(0);
 		try {
-			const handshake = await readIrohRemoteHandshakeLine(stream.recv, options);
+			const handshake = await readIrohRemoteHandshakeLine(recv, options);
 			initialInput = handshake.rest;
 			if (handshake.line === undefined) {
-				return await this.writeHandshakeResult(
-					stream,
-					await this.createHandshakeFailure("missing handshake", initialInput),
-				);
+				return await this.createHandshakeFailure("missing handshake", initialInput);
 			}
 
 			const hello = parseIrohRemoteHelloLine(handshake.line);
 			const authorization = await this.authorizeHello(hello, remoteNodeId);
 			if (!authorization.ok) {
-				return await this.writeHandshakeResult(stream, {
+				return {
 					ok: false,
 					error: authorization.error,
 					initialInput,
@@ -427,30 +418,21 @@ export class IrohRemoteHostEngine {
 						outcome: authorization.outcome,
 						workspace: authorization.workspace?.name,
 					}),
-					responseWritten: false,
-				});
+				};
 			}
 
-			const successResult: IrohRemoteHostHandshakeResult = {
+			return {
 				ok: true,
 				authorization,
 				hello,
 				initialInput,
 				response: this.createHandshakeSuccessResponse(hello, authorization, remoteNodeId, options),
-				responseWritten: false,
 			};
-			if (options.writeSuccessResponse === false) {
-				return successResult;
-			}
-			return await this.writeHandshakeResult(stream, successResult);
 		} catch (error: unknown) {
-			return await this.writeHandshakeResult(
-				stream,
-				await this.createHandshakeFailure(
-					error instanceof Error ? error.message : String(error),
-					initialInput,
-					error,
-				),
+			return await this.createHandshakeFailure(
+				error instanceof Error ? error.message : String(error),
+				initialInput,
+				error,
 			);
 		}
 	}
@@ -521,7 +503,6 @@ export class IrohRemoteHostEngine {
 				hostNodeId: this.hostNodeId,
 				...(outcome === undefined ? {} : { outcome }),
 			}),
-			responseWritten: false,
 		};
 	}
 
@@ -558,36 +539,13 @@ export class IrohRemoteHostEngine {
 			});
 		}
 		if (options.conversationSession === undefined) {
-			if (options.writeSuccessResponse === false) {
-				return createIrohRemoteHandshakeSuccess(common);
-			}
-			throw new IrohRemoteHandshakeError(
-				"conversation_streams_unsupported",
-				"conversation stream requires resolved session metadata",
-			);
+			return createIrohRemoteHandshakeSuccess(common);
 		}
 		return createIrohRemoteHandshakeSuccess({
 			...common,
 			sessionId: options.conversationSession.sessionId,
 			conversation: createConversationHandshakeMetadata(hello, options.conversationSession),
 		});
-	}
-
-	private async writeHandshakeResult(
-		stream: IrohBiStreamLike,
-		result: IrohRemoteHostHandshakeResult,
-	): Promise<IrohRemoteHostHandshakeResult> {
-		try {
-			await writeIrohRemoteHandshakeResponse(stream.send, result.response);
-			return { ...result, responseWritten: true };
-		} catch (error) {
-			// Authorization may already be committed; response write failures should not reclassify the result.
-			return {
-				...result,
-				responseWritten: false,
-				responseWriteError: error instanceof Error ? error.message : String(error),
-			};
-		}
 	}
 
 	private async logPairingTicketLifecycle(

@@ -13,7 +13,7 @@ import {
 	parseIrohRemoteHandshakeResponseLine,
 	parseIrohRemoteHelloLine,
 } from "../src/core/remote/iroh/index.ts";
-import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/rpc/index.ts";
+import type { IrohBytes, IrohRecvStreamLike } from "../src/core/rpc/index.ts";
 
 type QueuedIrohRead = { type: "data"; bytes: IrohBytes } | { type: "end" };
 
@@ -34,18 +34,6 @@ class ManualIrohRecvStream implements IrohRecvStreamLike {
 
 	stop(_errorCode: bigint): void {
 		this.queue.length = 0;
-	}
-}
-
-class ManualIrohSendStream implements IrohSendStreamLike {
-	readonly writes: Array<Array<number>> = [];
-
-	async writeAll(bytes: Array<number>): Promise<void> {
-		this.writes.push(bytes);
-	}
-
-	writtenText(): string {
-		return this.writes.map((bytes) => Buffer.from(bytes).toString("utf8")).join("");
 	}
 }
 
@@ -95,11 +83,8 @@ async function readHandshakeForHello(
 	options: Parameters<IrohRemoteHostEngine["readHandshake"]>[2] = {},
 ) {
 	const recv = new ManualIrohRecvStream();
-	const send = new ManualIrohSendStream();
 	recv.push(Buffer.from(`${JSON.stringify(hello)}\n`));
-	const handshake = await hostEngine.readHandshake({ recv, send }, "client-node", options);
-	const written = send.writtenText().trim();
-	return { handshake, written: written.length === 0 ? undefined : JSON.parse(written) };
+	return hostEngine.readHandshake(recv, "client-node", options);
 }
 
 describe("Iroh remote handshake stream modes", () => {
@@ -284,7 +269,7 @@ describe("Iroh remote handshake stream modes", () => {
 		}
 	});
 
-	test("host engine emits stable mode success and malformed-mode failure responses", async () => {
+	test("host engine returns stable mode success and malformed-mode failure responses", async () => {
 		const hostEngine = await createPairedHostEngine();
 		const baseHello = {
 			type: "volt_iroh_hello",
@@ -295,40 +280,36 @@ describe("Iroh remote handshake stream modes", () => {
 		};
 
 		const invalid = await readHandshakeForHello(hostEngine, baseHello);
-		expect(invalid.handshake).toMatchObject({
+		expect(invalid).toMatchObject({
 			ok: false,
 			response: {
 				success: false,
 				outcome: "invalid_conversation_target",
 			},
 		});
-		expect(invalid.written).toMatchObject({
-			success: false,
-			outcome: "invalid_conversation_target",
-		});
 
-		const unsupportedConversation = await readHandshakeForHello(hostEngine, {
+		const deferredConversation = await readHandshakeForHello(hostEngine, {
 			...baseHello,
 			conversation: { target: "last" },
 		});
-		expect(unsupportedConversation.handshake).toMatchObject({
-			ok: false,
+		expect(deferredConversation).toMatchObject({
+			ok: true,
 			response: {
-				success: false,
-				outcome: "conversation_streams_unsupported",
+				success: true,
 			},
 		});
-		expect(unsupportedConversation.written).toMatchObject({
-			success: false,
-			outcome: "conversation_streams_unsupported",
-		});
+		if (!deferredConversation.ok) {
+			throw new Error(deferredConversation.error);
+		}
+		expect(deferredConversation.response).not.toHaveProperty("sessionId");
+		expect(deferredConversation.response).not.toHaveProperty("conversation");
 
 		const conversation = await readHandshakeForHello(
 			hostEngine,
 			{ ...baseHello, conversation: { target: "session", sessionId: "abc123" } },
 			{ conversationSession: { sessionId: "abc123", selection: "resumed" } },
 		);
-		expect(conversation.handshake).toMatchObject({
+		expect(conversation).toMatchObject({
 			ok: true,
 			response: {
 				success: true,
@@ -348,7 +329,7 @@ describe("Iroh remote handshake stream modes", () => {
 				},
 			},
 		);
-		expect(rekeyedConversation.handshake).toMatchObject({
+		expect(rekeyedConversation).toMatchObject({
 			ok: true,
 			response: {
 				success: true,
@@ -367,7 +348,7 @@ describe("Iroh remote handshake stream modes", () => {
 			secret: undefined,
 			workspaceDiscovery: { purpose: "list_sessions" },
 		});
-		expect(discovery.handshake).toMatchObject({
+		expect(discovery).toMatchObject({
 			ok: true,
 			response: {
 				success: true,
@@ -375,23 +356,23 @@ describe("Iroh remote handshake stream modes", () => {
 				workspaceDiscovery: { purpose: "list_sessions" },
 			},
 		});
-		expect(discovery.handshake.response).not.toHaveProperty("sessionId");
-		expect(discovery.handshake.response).not.toHaveProperty("conversation");
+		expect(discovery.response).not.toHaveProperty("sessionId");
+		expect(discovery.response).not.toHaveProperty("conversation");
 
 		const management = await readHandshakeForHello(hostEngine, {
 			...baseHello,
 			secret: undefined,
 			workspaceManagement: { purpose: "unregister_workspace" },
 		});
-		expect(management.handshake).toMatchObject({
+		expect(management).toMatchObject({
 			ok: true,
 			response: {
 				success: true,
 				workspaceManagement: { purpose: "unregister_workspace" },
 			},
 		});
-		expect(management.handshake.response).not.toHaveProperty("sessionId");
-		expect(management.handshake.response).not.toHaveProperty("conversation");
+		expect(management.response).not.toHaveProperty("sessionId");
+		expect(management.response).not.toHaveProperty("conversation");
 
 		expect(
 			createIrohRemoteHandshakeSuccess({
