@@ -9,6 +9,7 @@
 import type { AssistantMessage, ImageContent } from "@hansjm10/volt-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
+import { RpcSessionEventEncoder } from "../core/rpc/message-deltas.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
 
 /**
@@ -101,9 +102,13 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		});
 
 		unsubscribe?.();
+		// message_update output is delta-only (see core/rpc/message-deltas.ts):
+		// message_start carries the accumulator base, updates carry only the
+		// streaming delta, and message_end carries the final message.
+		const eventEncoder = new RpcSessionEventEncoder();
 		unsubscribe = session.subscribe((event) => {
 			if (mode === "json") {
-				writeRawStdout(`${JSON.stringify(event)}\n`);
+				writeRawStdout(`${JSON.stringify(eventEncoder.encode(event))}\n`);
 			}
 		});
 	};

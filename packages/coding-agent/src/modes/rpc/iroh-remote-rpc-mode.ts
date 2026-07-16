@@ -7,6 +7,7 @@ import { REVIEW_BRANCH_ACTION_ID, REVIEW_UNCOMMITTED_ACTION_ID } from "../../cor
 import { type CustomMessage, extractVisibleTextContent } from "../../core/messages.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
+	createIrohRemoteOutboundDeltaSanitizer,
 	createIrohRemoteOutboundFilteredRpcTransport,
 	createIrohRemoteRpcErrorResponse,
 	type IrohRemoteLiveActivityContentState,
@@ -22,6 +23,7 @@ import {
 	type IrohRpcTransportOptions,
 	type RpcCloseHandler,
 	type RpcLineHandler,
+	RpcSessionEventEncoder,
 	type RpcTranscriptItem,
 	type RpcTransport,
 } from "../../core/rpc/index.ts";
@@ -149,6 +151,19 @@ export function runIrohRemoteRpcMode(
 		transport: createIrohRpcTransport(options),
 		workspacePath: options.workspacePath,
 		additionalRedactedPaths: options.additionalRedactedPaths,
+		// The session event encoders below derive message_update deltas from
+		// sanitized accumulated text; re-sanitizing those fragments in isolation
+		// would over-redact and desynchronize client accumulation.
+		preSanitizedMessageDeltas: true,
+	});
+	// The outbound filter sanitizes frames independently, which cannot redact a
+	// host path split across delta-only message_update frames; encode streamed
+	// deltas from sanitized accumulated text so clients never rebuild a
+	// complete raw path.
+	const messageDeltaSanitizer = createIrohRemoteOutboundDeltaSanitizer({
+		remoteWorkspacePath: options.remoteWorkspacePath,
+		workspacePath: options.workspacePath,
+		additionalRedactedPaths: options.additionalRedactedPaths,
 	});
 	const suppressingTransport: RpcTransport = options.suppressExtensionUiRequests
 		? {
@@ -250,6 +265,7 @@ export function runIrohRemoteRpcMode(
 		transport: remoteHostCommandTransport,
 		exitProcess: false,
 		registerPushTarget: options.registerPushTarget,
+		createSessionEventEncoder: () => new RpcSessionEventEncoder({ deltaSanitizer: messageDeltaSanitizer }),
 	}).finally(() => {
 		transportClosed = true;
 		detachTranscriptEntryEvents?.();

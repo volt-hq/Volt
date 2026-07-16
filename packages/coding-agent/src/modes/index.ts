@@ -33,6 +33,7 @@ export {
 	type RpcClientOptions,
 	type RpcEventListener,
 	type RpcExtensionErrorEvent,
+	type RpcSubagentDisposedEvent,
 	type RpcSubagentEndEvent,
 	type RpcSubagentEvent,
 } from "./rpc/rpc-client.ts";

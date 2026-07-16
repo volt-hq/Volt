@@ -433,6 +433,64 @@ describe("RpcTransportClient", () => {
 			}
 		}
 	});
+
+	test("disposing a subagent drops its message-delta accumulator", async () => {
+		const pair = createLoopbackRpcTransportPair();
+		const client = new RpcTransportClient({ transport: pair.client });
+		const events: Array<Record<string, unknown>> = [];
+		client.onEvent((event) => {
+			events.push(event as unknown as Record<string, unknown>);
+		});
+		pair.server.onLine((line) => {
+			const command = parseCommandLine(line);
+			// Mirror the host: every disposal path emits a terminal
+			// subagent_disposed frame before the command response.
+			if (command.type === "subagent_dispose") {
+				pair.server.write({ type: "subagent_disposed", subagentId: "sa_1" });
+			}
+			pair.server.write({ id: command.id, type: "response", command: command.type, success: true });
+		});
+		await client.start();
+
+		try {
+			const message = {
+				role: "assistant",
+				content: [],
+				api: "faux",
+				provider: "faux",
+				model: "faux-1",
+				stopReason: "stop",
+				timestamp: 0,
+			};
+			// Seed the subagent stream's accumulator, then dispose mid-message so
+			// no message_end/subagent_end ever crosses the wire.
+			pair.server.write({
+				type: "subagent_event",
+				subagentId: "sa_1",
+				event: { type: "message_start", message },
+			});
+			await client.disposeSubagent("sa_1");
+
+			// A late slim frame finds no accumulator: it passes through untouched
+			// instead of being rebuilt from retained (leaked) state.
+			pair.server.write({
+				type: "subagent_event",
+				subagentId: "sa_1",
+				event: {
+					type: "message_update",
+					assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x" },
+				},
+			});
+			const last = events.at(-1) as { event?: Record<string, unknown> } | undefined;
+			if (!last?.event) {
+				throw new Error("expected a trailing subagent_event");
+			}
+			expect(last.event.type).toBe("message_update");
+			expect("message" in last.event).toBe(false);
+		} finally {
+			await client.stop();
+		}
+	});
 });
 
 describe("Iroh remote RPC filter", () => {

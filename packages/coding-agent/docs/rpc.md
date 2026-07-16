@@ -331,6 +331,12 @@ Child events are wrapped on the parent RPC stream:
 
 `subagent_event.event` is the child RPC event. `subagent_end.result` is emitted after the child session settles, including automatic retries, overflow compaction, and queued continuations. The result contains the latest low-level `agent_end` event; `willRetry` is normalized to `false` if a planned retry was cancelled before another run started.
 
+When the host releases a subagent — after `subagent_abort`/`subagent_dispose`, when `subagent_start` fails after accepting the child, or when a session switch disposes all active subagents — it emits a terminal frame (possibly after `subagent_end`); no further frames follow for that `subagentId`:
+
+```json
+{"type": "subagent_disposed", "subagentId": "sa_123"}
+```
+
 #### subagent_abort
 
 Abort and dispose a local RPC-managed subagent.
@@ -1354,6 +1360,7 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | `auto_retry_end` | Auto-retry completes (success or final failure) |
 | `subagent_event` | Wrapped child event from a local RPC-managed subagent |
 | `subagent_end` | Terminal completion result for a local RPC-managed subagent |
+| `subagent_disposed` | Host released a local RPC-managed subagent; terminal for its event stream |
 | `extension_error` | Extension threw an error |
 | `models_changed` | Available model catalog changed on disk (login, logout, or API key save) |
 | `mcp_servers_changed` | MCP server list or enablement changed (`servers`: full summary list) |
@@ -1420,20 +1427,20 @@ Emitted when a message begins and completes. The `message` field contains an `Ag
 
 ### message_update (Streaming)
 
-Emitted during streaming of assistant messages. Contains both the partial message and a streaming delta event.
+Emitted during streaming of assistant messages. Frames are delta-only: they carry the streaming delta event, not the accumulated partial message (shipping the accumulated message on every update would make streaming cost quadratic in message length).
 
 ```json
 {
   "type": "message_update",
-  "message": {...},
   "assistantMessageEvent": {
     "type": "text_delta",
     "contentIndex": 0,
-    "delta": "Hello ",
-    "partial": {...}
+    "delta": "Hello "
   }
 }
 ```
+
+The in-process `AssistantMessageEvent` type also carries a `partial` field duplicating the accumulated message; it is never serialized.
 
 The `assistantMessageEvent` field contains one of these delta types:
 
@@ -1454,11 +1461,21 @@ The `assistantMessageEvent` field contains one of these delta types:
 
 Example streaming a text response:
 ```json
-{"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_start","contentIndex":0,"partial":{...}}}
-{"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello","partial":{...}}}
-{"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" world","partial":{...}}}
-{"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Hello world","partial":{...}}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" world"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Hello world"}}
 ```
+
+Reconstruction rules:
+
+- `message_start` and `message_end` always carry the full message; seed the accumulator from `message_start` and reset/validate it on `message_end`.
+- If no `message_start` was observed on the stream for the current message (mid-turn attach), the first `message_update` carries a full `message` snapshot; treat any update that includes `message` as an accumulator replacement. A snapshot can also arrive mid-message (remote transports send one whenever redaction rewrites text that already streamed), so replacement must work at any point.
+- `text_delta`/`thinking_delta` append `delta` to the block at `contentIndex`; `text_end`/`thinking_end` carry the authoritative block `content`.
+- Delta-only `toolcall_start` frames include a `toolCall` stub (`{"id", "name"}`); `toolcall_delta` streams raw argument JSON text; `toolcall_end` carries the authoritative full `toolCall` object.
+- The same rules apply to `message_update` events wrapped in `subagent_event`, keyed per `subagentId`. Drop a subagent's accumulator on `subagent_end` or `subagent_disposed`.
+
+The bundled RPC client (`RpcClientBase` and the SDK clients built on it) performs this reconstruction transparently and exposes fully accumulated `message`/`partial` fields to event listeners.
 
 ### tool_execution_start / tool_execution_update / tool_execution_end
 

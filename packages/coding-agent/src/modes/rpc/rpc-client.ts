@@ -8,6 +8,7 @@ export type {
 	RpcClientEvent,
 	RpcEventListener,
 	RpcExtensionErrorEvent,
+	RpcSubagentDisposedEvent,
 	RpcSubagentEndEvent,
 	RpcSubagentEvent,
 } from "./rpc-client-base.ts";

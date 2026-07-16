@@ -27,7 +27,6 @@ import type {
 	HostActionUpdate,
 	HostInteraction,
 } from "../../core/host-interaction.ts";
-import { extractVisibleTextContent } from "../../core/messages.ts";
 import { startModelCatalogWatcher } from "../../core/model-catalog-watcher.ts";
 import {
 	flushRawStdout,
@@ -42,6 +41,7 @@ import {
 	type ReviewWorkflowToolEvent,
 	runReviewWorkflow,
 } from "../../core/review.ts";
+import { RpcSessionEventEncoder } from "../../core/rpc/message-deltas.ts";
 import type { RpcTransport } from "../../core/rpc/transport.ts";
 import type { SubagentDefinition, SubagentHandle } from "../../core/subagents/index.ts";
 import {
@@ -158,6 +158,8 @@ export interface RpcModeOptions {
 	registerPushTarget?: (args: unknown) => Promise<RpcRegisterPushTargetResponse>;
 	/** Observes set_client_capabilities feature lists (remote hosts gate optional pushes on these). */
 	onClientCapabilitiesChanged?: (features: string[]) => void;
+	/** Outbound event encoder factory; iroh remote mode passes redaction-aware encoders. */
+	createSessionEventEncoder?: () => RpcSessionEventEncoder;
 }
 
 type RpcModeStartupAwareTransport = RpcTransport & {
@@ -332,31 +334,6 @@ interface RpcSubagentEntry {
 	disposed: boolean;
 }
 
-function createRpcSessionEventPayload(event: object): object {
-	if (!isRecord(event) || event.type !== "message_update") {
-		return event;
-	}
-	const assistantMessageEvent = event.assistantMessageEvent;
-	const message = event.message;
-	if (!isRecord(assistantMessageEvent) || assistantMessageEvent.type !== "text_end" || !isRecord(message)) {
-		return event;
-	}
-	if (message.role !== "assistant") {
-		return event;
-	}
-	return {
-		...event,
-		assistantMessageEvent: {
-			...assistantMessageEvent,
-			message: extractVisibleTextContent(message.content),
-		},
-	};
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function toRpcSubagentDefinition(definition: SubagentDefinition): RpcSubagentDefinition {
 	return {
 		name: definition.name,
@@ -380,11 +357,17 @@ function toRpcSubagentDefinition(definition: SubagentDefinition): RpcSubagentDef
 class RpcSubagentLifecycle implements RpcSubagentLifecycleController {
 	private readonly getSession: () => AgentSession;
 	private readonly output: (event: object) => void;
+	private readonly createEventEncoder: () => RpcSessionEventEncoder;
 	private readonly active = new Map<string, RpcSubagentEntry>();
 
-	constructor(options: { getSession: () => AgentSession; output: (event: object) => void }) {
+	constructor(options: {
+		getSession: () => AgentSession;
+		output: (event: object) => void;
+		createEventEncoder: () => RpcSessionEventEncoder;
+	}) {
 		this.getSession = options.getSession;
 		this.output = options.output;
+		this.createEventEncoder = options.createEventEncoder;
 	}
 
 	list(): RpcListSubagentsResponse {
@@ -402,11 +385,12 @@ class RpcSubagentLifecycle implements RpcSubagentLifecycleController {
 
 		const handle = await manager.startByName(agent, { allowedTools: session.getActiveToolNames() });
 		let entry: RpcSubagentEntry | undefined;
+		const eventEncoder = this.createEventEncoder();
 		const unsubscribe = handle.onEvent((event) => {
 			if (entry?.disposed) {
 				return;
 			}
-			this.output({ type: "subagent_event", subagentId: handle.id, event: createRpcSessionEventPayload(event) });
+			this.output({ type: "subagent_event", subagentId: handle.id, event: eventEncoder.encode(event) });
 		});
 		entry = { handle, unsubscribe, disposed: false };
 		this.active.set(handle.id, entry);
@@ -479,6 +463,11 @@ class RpcSubagentLifecycle implements RpcSubagentLifecycleController {
 		entry.disposed = true;
 		this.active.delete(subagentId);
 		entry.unsubscribe();
+		// Terminal frame for every disposal path (abort/dispose commands, failed
+		// starts, session rebinds). Nothing else fires for host-side disposals, and
+		// without a terminal frame clients would retain this subagent stream's
+		// message-delta accumulator forever. output() no-ops during shutdown.
+		this.output({ type: "subagent_disposed", subagentId });
 		await entry.handle.dispose();
 	}
 }
@@ -572,7 +561,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			requestTransportFailureShutdown(writeError);
 		}
 	};
-	const rpcSubagents = new RpcSubagentLifecycle({ getSession: () => session, output });
+	const createSessionEventEncoder = options.createSessionEventEncoder ?? (() => new RpcSessionEventEncoder());
+	const rpcSubagents = new RpcSubagentLifecycle({
+		getSession: () => session,
+		output,
+		createEventEncoder: createSessionEventEncoder,
+	});
 
 	// Pending extension UI requests waiting for response
 	const pendingExtensionRequests = new Map<
@@ -932,8 +926,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
+		const sessionEventEncoder = createSessionEventEncoder();
 		unsubscribe = session.subscribe((event) => {
-			output(createRpcSessionEventPayload(event));
+			output(sessionEventEncoder.encode(event));
 		});
 		unsubscribeBackpressure = session.agent.subscribe(async () => {
 			try {

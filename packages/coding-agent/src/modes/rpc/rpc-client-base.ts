@@ -4,6 +4,7 @@ import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.t
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { ExtensionError } from "../../core/extensions/index.ts";
+import { RpcMessageDeltaDecoder } from "../../core/rpc/message-deltas.ts";
 import type { SubagentEvent, SubagentResult } from "../../core/subagents/index.ts";
 import type {
 	RpcClientCapabilityFeature,
@@ -59,6 +60,12 @@ export interface ModelInfo {
 export type RpcExtensionErrorEvent = { type: "extension_error" } & ExtensionError;
 export type RpcSubagentEvent = { type: "subagent_event"; subagentId: string; event: SubagentEvent };
 export type RpcSubagentEndEvent = { type: "subagent_end"; subagentId: string; result: SubagentResult };
+/**
+ * Emitted when the host releases a local RPC-managed subagent (abort/dispose
+ * command, failed start, or a session switch disposing active subagents).
+ * Terminal for that subagent's event stream; may follow subagent_end.
+ */
+export type RpcSubagentDisposedEvent = { type: "subagent_disposed"; subagentId: string };
 /** Emitted when the host's available model catalog changed on disk (login, logout, or API key save). */
 export type RpcModelsChangedEvent = { type: "models_changed" };
 export type RpcClientEvent =
@@ -71,6 +78,7 @@ export type RpcClientEvent =
 	| RpcHostActionUpdate
 	| RpcSubagentEvent
 	| RpcSubagentEndEvent
+	| RpcSubagentDisposedEvent
 	| RpcExtensionErrorEvent;
 export type RpcEventListener = (event: RpcClientEvent) => void;
 
@@ -80,6 +88,8 @@ export abstract class RpcClientBase {
 	private readonly requestTimeoutMs: number;
 	private readonly eventListeners: RpcEventListener[] = [];
 	private readonly pendingRequests = new Map<string, PendingRpcRequest>();
+	/** Rebuilds full message_update events from delta frames. */
+	private readonly messageDeltaDecoder = new RpcMessageDeltaDecoder();
 	private requestId = 0;
 	private failureError: Error | null = null;
 
@@ -559,7 +569,7 @@ export abstract class RpcClientBase {
 			return;
 		}
 
-		this.emitEvent(data as RpcClientEvent);
+		this.emitEvent(this.messageDeltaDecoder.decode(data) as RpcClientEvent);
 	}
 
 	protected assertCanSend(): void {

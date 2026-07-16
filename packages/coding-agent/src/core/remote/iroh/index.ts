@@ -138,6 +138,7 @@ export {
 	type IrohRemoteHostMetadata,
 } from "./metadata.ts";
 export {
+	createIrohRemoteOutboundDeltaSanitizer,
 	createIrohRemoteOutboundFilteredRpcTransport,
 	IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH,
 	IROH_REMOTE_REDACTED_EXPORT_PATH,

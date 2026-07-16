@@ -1,6 +1,6 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { TextDecoder } from "node:util";
-import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "../../rpc/index.ts";
+import type { RpcCloseHandler, RpcLineHandler, RpcSessionEventDeltaSanitizer, RpcTransport } from "../../rpc/index.ts";
 
 export const IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH = "[redacted bash output path]";
 export const IROH_REMOTE_REDACTED_EXPORT_PATH = "[redacted export path]";
@@ -25,6 +25,17 @@ export interface IrohRemoteOutboundFilterOptions {
 	workspacePath: string;
 	/** Extra roots (e.g. a worktree's parent checkout) redacted to remoteWorkspacePath. */
 	additionalRedactedPaths?: string[];
+	/**
+	 * Streamed `message_update` frames were encoded by an
+	 * `RpcSessionEventEncoder` whose delta sanitizer shares these options, so
+	 * their `delta` fragments are already derived from sanitized accumulated
+	 * text. Re-sanitizing a fragment in isolation can spuriously redact (a path
+	 * heuristic matching the fragment but not the accumulated text), which
+	 * would desynchronize client accumulation from the sanitized snapshots and
+	 * `*_end` frames; the filter restores those deltas after whole-frame
+	 * sanitization.
+	 */
+	preSanitizedMessageDeltas?: boolean;
 }
 
 export interface IrohRemoteOutboundSanitizerOptions {
@@ -59,7 +70,10 @@ export function createIrohRemoteOutboundFilteredRpcTransport(options: IrohRemote
 	};
 	return {
 		write(value) {
-			return options.transport.write(sanitizeIrohRemoteOutbound(value, sanitizerOptions));
+			const sanitized = sanitizeIrohRemoteOutbound(value, sanitizerOptions);
+			return options.transport.write(
+				options.preSanitizedMessageDeltas ? restorePreSanitizedMessageUpdateDelta(value, sanitized) : sanitized,
+			);
 		},
 		onLine(handler: RpcLineHandler): () => void {
 			return options.transport.onLine(handler);
@@ -77,6 +91,69 @@ export function createIrohRemoteOutboundFilteredRpcTransport(options: IrohRemote
 			return options.transport.close();
 		},
 	};
+}
+
+/**
+ * Streamed `message_update` frames are delta-only on the wire, so the
+ * per-frame sanitizer cannot see host paths split across deltas. The RPC
+ * session event encoder uses this sanitizer to re-derive wire deltas from
+ * sanitized accumulated text; it sanitizes whole strings exactly like the
+ * frame filter does, so client-side accumulation matches the sanitized
+ * snapshots and `*_end` frames the filter produces. Pair it with a transport
+ * created with `preSanitizedMessageDeltas: true`: re-sanitizing an
+ * encoder-derived delta fragment in isolation can redact tokens that are
+ * clean in the accumulated text and desynchronize the client.
+ */
+export function createIrohRemoteOutboundDeltaSanitizer(
+	options: IrohRemoteOutboundSanitizerOptions,
+): RpcSessionEventDeltaSanitizer {
+	const context = createSanitizerContext(options);
+	return {
+		sanitizeText: (value) => sanitizeRemoteText(value, context),
+		sanitizeToolCallArguments: (value) => sanitizeValue(value, context, "arguments"),
+	};
+}
+
+/**
+ * Restore an encoder-sanitized `message_update` delta fragment that
+ * whole-frame sanitization re-sanitized in isolation. Only delta-only frames
+ * (no accumulated `message`) are restored: those are exactly the frames a
+ * sanitizer-mode encoder emits with deltas derived from sanitized accumulated
+ * text (or sanitization-invariant raw tool-call argument JSON). Snapshot and
+ * full frames keep the filter's output.
+ */
+function restorePreSanitizedMessageUpdateDelta(original: object, sanitized: object): object {
+	const originalEvent = getDeltaOnlyMessageUpdateEvent(original);
+	const sanitizedEvent = getDeltaOnlyMessageUpdateEvent(sanitized);
+	if (
+		originalEvent !== undefined &&
+		sanitizedEvent !== undefined &&
+		typeof originalEvent.delta === "string" &&
+		typeof sanitizedEvent.delta === "string"
+	) {
+		sanitizedEvent.delta = originalEvent.delta;
+	}
+	return sanitized;
+}
+
+function getDeltaOnlyMessageUpdateEvent(frame: object): Record<string, unknown> | undefined {
+	if (!isRecord(frame)) {
+		return undefined;
+	}
+	const update =
+		frame.type === "message_update"
+			? frame
+			: frame.type === "subagent_event" && isRecord(frame.event) && frame.event.type === "message_update"
+				? frame.event
+				: undefined;
+	if (update === undefined || "message" in update || !isRecord(update.assistantMessageEvent)) {
+		return undefined;
+	}
+	const eventType = update.assistantMessageEvent.type;
+	if (eventType !== "text_delta" && eventType !== "thinking_delta" && eventType !== "toolcall_delta") {
+		return undefined;
+	}
+	return update.assistantMessageEvent;
 }
 
 export function sanitizeIrohRemoteOutbound(value: object, options: IrohRemoteOutboundSanitizerOptions): object {
