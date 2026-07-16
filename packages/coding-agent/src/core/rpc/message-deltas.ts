@@ -77,8 +77,8 @@ export class RpcSessionEventEncoder {
 	private readonly deltaSanitizer: RpcSessionEventDeltaSanitizer | undefined;
 	/** Sanitized text/thinking already shipped to the client, per content index. */
 	private readonly emittedSanitizedText = new Map<number, string>();
-	/** Content indexes whose raw tool-call argument JSON the client can still resume. */
-	private readonly resumableToolArgs = new Set<number>();
+	/** Raw tool-call argument text already shipped, per resumable content index. */
+	private readonly resumableToolArgsText = new Map<number, string>();
 
 	constructor(options: RpcSessionEventEncoderOptions = {}) {
 		this.deltaSanitizer = options.deltaSanitizer;
@@ -99,7 +99,7 @@ export class RpcSessionEventEncoder {
 			case "message_end":
 				this.deltaBaseSent = false;
 				this.emittedSanitizedText.clear();
-				this.resumableToolArgs.clear();
+				this.resumableToolArgsText.clear();
 				return event;
 			case "message_update":
 				return this.encodeMessageUpdate(event);
@@ -194,28 +194,42 @@ export class RpcSessionEventEncoder {
 				return encodeDeltaFrame(event, slimEvent);
 			case "toolcall_start":
 				if (contentIndex !== undefined) {
-					this.resumableToolArgs.add(contentIndex);
+					this.resumableToolArgsText.set(contentIndex, "");
 				}
 				attachToolCallStub(slimEvent, message);
 				return encodeDeltaFrame(event, slimEvent);
 			case "toolcall_delta": {
-				if (contentIndex === undefined || !this.resumableToolArgs.has(contentIndex)) {
+				const emittedArgsText =
+					contentIndex === undefined ? undefined : this.resumableToolArgsText.get(contentIndex);
+				if (contentIndex === undefined || emittedArgsText === undefined) {
 					return this.encodeSnapshotFrame(event, slimEvent, message);
 				}
+				const rawArgsText = emittedArgsText + (typeof slimEvent.delta === "string" ? slimEvent.delta : "");
 				const block = Array.isArray(message.content) ? message.content[contentIndex] : undefined;
 				const args = isRecord(block) && block.type === "toolCall" ? block.arguments : undefined;
-				if (args === undefined || !jsonValueEquals(args, sanitizer.sanitizeToolCallArguments(args))) {
-					// Sanitization changes the accumulated arguments, so the raw
-					// argument JSON cannot ship. Snapshots keep the client's rendered
-					// args current until toolcall_end delivers the sanitized block.
-					this.resumableToolArgs.delete(contentIndex);
+				// The parsed-arguments check alone is bypassable: parseStreamingJson
+				// drops incomplete object keys and yields {} for unparseable text, so a
+				// host path can hide in the raw argument text while the parsed args
+				// stay sanitization-invariant. Gate raw streaming on the accumulated
+				// raw text being sanitization-clean as well.
+				if (
+					args === undefined ||
+					sanitizer.sanitizeText(rawArgsText) !== rawArgsText ||
+					!jsonValueEquals(args, sanitizer.sanitizeToolCallArguments(args))
+				) {
+					// Sanitization changes the accumulated argument text or parsed
+					// arguments, so the raw argument JSON cannot ship. Snapshots keep
+					// the client's rendered args current until toolcall_end delivers
+					// the sanitized block.
+					this.resumableToolArgsText.delete(contentIndex);
 					return this.encodeSnapshotFrame(event, slimEvent, message);
 				}
+				this.resumableToolArgsText.set(contentIndex, rawArgsText);
 				return encodeDeltaFrame(event, slimEvent);
 			}
 			case "toolcall_end":
 				if (contentIndex !== undefined) {
-					this.resumableToolArgs.delete(contentIndex);
+					this.resumableToolArgsText.delete(contentIndex);
 				}
 				return encodeDeltaFrame(event, slimEvent);
 			default:
@@ -243,7 +257,7 @@ export class RpcSessionEventEncoder {
 
 	private seedSanitizedState(message: Record<string, unknown>): void {
 		this.emittedSanitizedText.clear();
-		this.resumableToolArgs.clear();
+		this.resumableToolArgsText.clear();
 		const sanitizer = this.deltaSanitizer;
 		if (!sanitizer || !Array.isArray(message.content)) {
 			return;

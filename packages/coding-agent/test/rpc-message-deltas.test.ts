@@ -488,6 +488,72 @@ describe("RpcSessionEventEncoder with the iroh outbound delta sanitizer", () => 
 		}
 	});
 
+	test("host paths streamed as JSON object keys never cross the wire raw", () => {
+		const { roundTrip, wireFrames } = createPipeline();
+		const hostPath = `${workspacePath}${sep}notes.md`;
+		const argsJson = JSON.stringify({ files: { [hostPath]: "content" } });
+		// partial-json drops incomplete object keys, so while the path streams as
+		// a key the parsed accumulated arguments stay {"files":{}} and are
+		// sanitization-invariant; only the raw argument text sees the path.
+		const keyStart = argsJson.indexOf(':{"') + 3;
+		const keyEnd = argsJson.indexOf('":', keyStart);
+		const toolBlock = (args: unknown) => ({ type: "toolCall", id: "tc1", name: "write", arguments: args });
+
+		roundTrip({ type: "message_start", message: assistantPartial([]) });
+		roundTrip(messageUpdate(assistantPartial([toolBlock({})]), { type: "toolcall_start", contentIndex: 0 }));
+		for (const [start, end] of [
+			[0, keyStart],
+			[keyStart, keyEnd],
+			[keyEnd, argsJson.length],
+		]) {
+			roundTrip(
+				messageUpdate(assistantPartial([toolBlock(parseStreamingJson(argsJson.slice(0, end)))]), {
+					type: "toolcall_delta",
+					contentIndex: 0,
+					delta: argsJson.slice(start, end),
+				}),
+			);
+		}
+		const fullArgs = { files: { [hostPath]: "content" } };
+		const ended = roundTrip(
+			messageUpdate(assistantPartial([toolBlock(fullArgs)]), {
+				type: "toolcall_end",
+				contentIndex: 0,
+				toolCall: toolBlock(fullArgs),
+			}),
+		);
+		expect(getRecord(getContent(ended.message)[0]).arguments).toEqual({
+			files: { "/workspace/notes.md": "content" },
+		});
+
+		for (const frame of wireFrames) {
+			expect(JSON.stringify(frame)).not.toContain("secret-project");
+		}
+	});
+
+	test("host paths inside unparseable tool-call argument text never cross the wire raw", () => {
+		const { roundTrip, wireFrames } = createPipeline();
+		const rawArgs = `ls ${workspacePath}${sep}notes.md`;
+		// Not JSON at all: parseStreamingJson yields {} for every prefix, so the
+		// parsed-arguments check alone would keep the raw text streaming.
+		expect(parseStreamingJson(rawArgs)).toEqual({});
+		const toolBlock = (args: unknown) => ({ type: "toolCall", id: "tc1", name: "bash", arguments: args });
+
+		roundTrip({ type: "message_start", message: assistantPartial([]) });
+		roundTrip(messageUpdate(assistantPartial([toolBlock({})]), { type: "toolcall_start", contentIndex: 0 }));
+		roundTrip(
+			messageUpdate(assistantPartial([toolBlock({})]), {
+				type: "toolcall_delta",
+				contentIndex: 0,
+				delta: rawArgs,
+			}),
+		);
+
+		for (const frame of wireFrames) {
+			expect(JSON.stringify(frame)).not.toContain("secret-project");
+		}
+	});
+
 	test("encoder-derived delta fragments are not re-redacted by the frame filter", () => {
 		const { roundTrip, wireFrames } = createPipeline();
 		const fullText = `log: ${workspacePath}${sep}sessions${sep}foo.jsonl done`;
