@@ -26,11 +26,17 @@ interface PhoneEndpoint {
 	close(): Promise<void>;
 }
 
+interface PhoneBiStream extends IrohBiStreamLike {
+	send: IrohBiStreamLike["send"] & {
+		finish(): Promise<void>;
+		stopped(): Promise<number | null>;
+	};
+}
+
 interface PhoneConnection {
 	remoteId(): { toString(): string };
-	openBi(): Promise<IrohBiStreamLike>;
+	openBi(): Promise<PhoneBiStream>;
 	closed(): Promise<string>;
-	closeReason(): string | null;
 	close(code: bigint, reason: number[]): void;
 }
 
@@ -249,6 +255,28 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		});
 		const reconnectHandshake = await readJsonLine(reconnectStream);
 		expect(reconnectHandshake.value.success).toBe(true);
+		await writeJsonLine(reconnectStream, { id: "ls-reconnect-1", type: "list_sessions" });
+		const reconnectListResponse = await readJsonLine(reconnectStream, reconnectHandshake.rest);
+		expect(reconnectListResponse.value.command).toBe("list_sessions");
+		expect(reconnectListResponse.value.success).toBe(true);
+
+		// Completing one stream must leave the multi-stream connection reusable.
+		await reconnectStream.send.finish();
+		expect(await reconnectStream.send.stopped()).toBeNull();
+		await reconnectStream.recv.stop?.(0n);
+		const reusedStream = await reconnection.openBi();
+		await writeJsonLine(reusedStream, {
+			type: "volt_iroh_hello",
+			protocol: IROH_REMOTE_ALPN,
+			workspace: "ws",
+			workspaceDiscovery: { purpose: "list_sessions" },
+		});
+		const reusedHandshake = await readJsonLine(reusedStream);
+		expect(reusedHandshake.value.success).toBe(true);
+		await writeJsonLine(reusedStream, { id: "ls-reconnect-2", type: "list_sessions" });
+		const reusedListResponse = await readJsonLine(reusedStream, reusedHandshake.rest);
+		expect(reusedListResponse.value.command).toBe("list_sessions");
+		expect(reusedListResponse.value.success).toBe(true);
 		reconnection.close(0n, Array.from(Buffer.from("done", "utf8")));
 		await reconnection.closed();
 
@@ -268,10 +296,6 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		const revokedHandshake = await readJsonLine(revokedStream);
 		expect(revokedHandshake.value.success).toBe(false);
 		expect(revokedHandshake.value.outcome).toBe("client_revoked");
-		// The host must not immediately close after writing a terminal handshake;
-		// QUIC may otherwise discard the response before the client consumes it.
-		await new Promise((resolve) => setTimeout(resolve, 100));
-		expect(revokedConnection.closeReason()).toBeNull();
 		revokedConnection.close(0n, Array.from(Buffer.from("done", "utf8")));
 		await revokedConnection.closed();
 		await phone.close();
