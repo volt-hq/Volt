@@ -443,6 +443,11 @@ describe("RpcTransportClient", () => {
 		});
 		pair.server.onLine((line) => {
 			const command = parseCommandLine(line);
+			// Mirror the host: every disposal path emits a terminal
+			// subagent_disposed frame before the command response.
+			if (command.type === "subagent_dispose") {
+				pair.server.write({ type: "subagent_disposed", subagentId: "sa_1" });
+			}
 			pair.server.write({ id: command.id, type: "response", command: command.type, success: true });
 		});
 		await client.start();
@@ -458,7 +463,7 @@ describe("RpcTransportClient", () => {
 				timestamp: 0,
 			};
 			// Seed the subagent stream's accumulator, then dispose mid-message so
-			// the host never forwards a terminal message_end/subagent_end frame.
+			// no message_end/subagent_end ever crosses the wire.
 			pair.server.write({
 				type: "subagent_event",
 				subagentId: "sa_1",

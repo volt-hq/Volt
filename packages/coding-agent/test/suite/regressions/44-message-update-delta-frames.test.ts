@@ -54,7 +54,52 @@ function createFakeRuntimeHost(harness: Harness): AgentSessionRuntime {
 	} as unknown as AgentSessionRuntime;
 }
 
-async function startRpcModeForHarness(harness: Harness): Promise<RpcHarness> {
+function createFakeSubagentScaffold(): {
+	emit: (event: SubagentEvent) => void;
+	handle: SubagentHandle;
+	manager: SubagentToolManager;
+} {
+	const listeners = new Set<(event: SubagentEvent) => void>();
+	const handle: SubagentHandle = {
+		id: "sa_child",
+		sessionId: "child-session",
+		prompt: vi.fn(async () => undefined),
+		abort: vi.fn(async () => undefined),
+		getState: async () => ({}) as RpcSessionState,
+		getTranscript: async () => ({}) as RpcTranscriptResponse,
+		getSessionStats: async () => {
+			throw new Error("not used");
+		},
+		waitForEnd: () => new Promise<SubagentResult>(() => {}),
+		dispose: vi.fn(async () => undefined),
+		onEvent: (listener) => {
+			listeners.add(listener);
+			return () => {
+				listeners.delete(listener);
+			};
+		},
+	};
+	const manager = {
+		getDefinition: () => {
+			throw new Error("not used");
+		},
+		startByName: vi.fn(async () => handle),
+	} as unknown as SubagentToolManager;
+	return {
+		emit(event) {
+			for (const listener of listeners) {
+				listener(event);
+			}
+		},
+		handle,
+		manager,
+	};
+}
+
+async function startRpcModeForHarness(
+	harness: Harness,
+	runtimeHost: AgentSessionRuntime = createFakeRuntimeHost(harness),
+): Promise<RpcHarness> {
 	let lineHandler: ((line: string) => void) | undefined;
 	let closeHandler: RpcCloseHandler | undefined;
 	const writes: Record<string, unknown>[] = [];
@@ -81,7 +126,7 @@ async function startRpcModeForHarness(harness: Harness): Promise<RpcHarness> {
 	const ready = new Promise<void>((resolve) => {
 		resolveReady = resolve;
 	});
-	const modePromise = runRpcMode(createFakeRuntimeHost(harness), {
+	const modePromise = runRpcMode(runtimeHost, {
 		disposeRuntimeOnClose: false,
 		onReady: resolveReady,
 		transport,
@@ -178,32 +223,7 @@ describe("issue #44: delta-based message_update RPC frames", () => {
 		// emits message_update without any message_start on this stream, so the
 		// first frame must include the accumulator base and later frames must be
 		// delta-only.
-		const listeners = new Set<(event: SubagentEvent) => void>();
-		const handle: SubagentHandle = {
-			id: "sa_child",
-			sessionId: "child-session",
-			prompt: vi.fn(async () => undefined),
-			abort: vi.fn(async () => undefined),
-			getState: async () => ({}) as RpcSessionState,
-			getTranscript: async () => ({}) as RpcTranscriptResponse,
-			getSessionStats: async () => {
-				throw new Error("not used");
-			},
-			waitForEnd: () => new Promise<SubagentResult>(() => {}),
-			dispose: vi.fn(async () => undefined),
-			onEvent: (listener) => {
-				listeners.add(listener);
-				return () => {
-					listeners.delete(listener);
-				};
-			},
-		};
-		const manager = {
-			getDefinition: () => {
-				throw new Error("not used");
-			},
-			startByName: vi.fn(async () => handle),
-		} as unknown as SubagentToolManager;
+		const { emit, manager } = createFakeSubagentScaffold();
 		const harness = await createHarness();
 		activeHarnesses.push(harness);
 		const session = harness.session as unknown as { getSubagentToolManager?: () => SubagentToolManager };
@@ -219,11 +239,6 @@ describe("issue #44: delta-based message_update RPC frames", () => {
 
 		const firstPartial = fauxAssistantMessage("He");
 		const secondPartial = fauxAssistantMessage("Hello");
-		const emit = (event: SubagentEvent): void => {
-			for (const listener of listeners) {
-				listener(event);
-			}
-		};
 		emit({
 			type: "message_update",
 			message: firstPartial,
@@ -249,6 +264,58 @@ describe("issue #44: delta-based message_update RPC frames", () => {
 		// Delta-only afterwards.
 		expect("message" in secondEvent).toBe(false);
 		expect("partial" in getAssistantMessageEvent(secondEvent)).toBe(false);
+
+		rpc.close();
+		await rpc.modePromise.catch(() => undefined);
+	});
+
+	test("host-side subagent disposal emits a terminal subagent_disposed frame", async () => {
+		const { emit, handle, manager } = createFakeSubagentScaffold();
+		const harness = await createHarness();
+		activeHarnesses.push(harness);
+		const session = harness.session as unknown as { getSubagentToolManager?: () => SubagentToolManager };
+		session.getSubagentToolManager = () => manager;
+		const runtimeHost = createFakeRuntimeHost(harness);
+		(runtimeHost as { newSession: () => Promise<{ cancelled: boolean }> }).newSession = vi.fn(async () => ({
+			cancelled: false,
+		}));
+		const rpc = await startRpcModeForHarness(harness, runtimeHost);
+
+		rpc.send({ id: "start-1", type: "subagent_start", agent: "scout", prompt: "inspect" });
+		await vi.waitFor(() =>
+			expect(rpc.writes.some((record) => record.type === "response" && record.command === "subagent_start")).toBe(
+				true,
+			),
+		);
+
+		// Leave the child mid-message so a connected client holds a delta
+		// accumulator for this subagent stream.
+		const partial = fauxAssistantMessage("He");
+		emit({
+			type: "message_update",
+			message: partial,
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "He", partial },
+		});
+
+		// new_session rebinds the RPC session and disposes all active subagents
+		// host-side. No subagent_end fires on this path; the dedicated terminal
+		// frame is the only signal that lets clients drop the accumulator.
+		rpc.send({ id: "new-1", type: "new_session" });
+		await vi.waitFor(() =>
+			expect(rpc.writes.some((record) => record.type === "response" && record.command === "new_session")).toBe(true),
+		);
+
+		const disposedIndex = rpc.writes.findIndex((record) => record.type === "subagent_disposed");
+		const responseIndex = rpc.writes.findIndex(
+			(record) => record.type === "response" && record.command === "new_session",
+		);
+		expect(disposedIndex).toBeGreaterThan(-1);
+		expect(rpc.writes[disposedIndex].subagentId).toBe("sa_child");
+		// The terminal frame precedes the command response on the same ordered
+		// transport, so clients clear state before the command resolves.
+		expect(disposedIndex).toBeLessThan(responseIndex);
+		expect(rpc.writes.some((record) => record.type === "subagent_end")).toBe(false);
+		expect(handle.dispose).toHaveBeenCalled();
 
 		rpc.close();
 		await rpc.modePromise.catch(() => undefined);

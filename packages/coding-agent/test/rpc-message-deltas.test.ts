@@ -323,14 +323,16 @@ describe("RpcMessageDeltaDecoder", () => {
 		expect(decoder.decode(slim)).toBe(slim);
 	});
 
-	test("endSubagentStream drops the accumulator for a disposed subagent", () => {
+	test("subagent_disposed drops the accumulator for a host-disposed subagent", () => {
 		const decoder = new RpcMessageDeltaDecoder();
 		decoder.decode({
 			type: "subagent_event",
 			subagentId: "sa_1",
 			event: { type: "message_start", message: assistantPartial([]) },
 		});
-		decoder.endSubagentStream("sa_1");
+		// The host emits this terminal frame for every disposal path (abort,
+		// dispose, failed start, session rebind).
+		decoder.decode({ type: "subagent_disposed", subagentId: "sa_1" });
 		const slim = {
 			type: "subagent_event",
 			subagentId: "sa_1",

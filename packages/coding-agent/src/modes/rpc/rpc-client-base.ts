@@ -60,6 +60,12 @@ export interface ModelInfo {
 export type RpcExtensionErrorEvent = { type: "extension_error" } & ExtensionError;
 export type RpcSubagentEvent = { type: "subagent_event"; subagentId: string; event: SubagentEvent };
 export type RpcSubagentEndEvent = { type: "subagent_end"; subagentId: string; result: SubagentResult };
+/**
+ * Emitted when the host releases a local RPC-managed subagent (abort/dispose
+ * command, failed start, or a session switch disposing active subagents).
+ * Terminal for that subagent's event stream; may follow subagent_end.
+ */
+export type RpcSubagentDisposedEvent = { type: "subagent_disposed"; subagentId: string };
 /** Emitted when the host's available model catalog changed on disk (login, logout, or API key save). */
 export type RpcModelsChangedEvent = { type: "models_changed" };
 export type RpcClientEvent =
@@ -72,6 +78,7 @@ export type RpcClientEvent =
 	| RpcHostActionUpdate
 	| RpcSubagentEvent
 	| RpcSubagentEndEvent
+	| RpcSubagentDisposedEvent
 	| RpcExtensionErrorEvent;
 export type RpcEventListener = (event: RpcClientEvent) => void;
 
@@ -215,9 +222,6 @@ export abstract class RpcClientBase {
 	/** Abort and dispose a local RPC-managed subagent. */
 	async abortSubagent(subagentId: string): Promise<void> {
 		await this.send({ type: "subagent_abort", subagentId });
-		// The host unsubscribes the event forwarder before responding, so no
-		// terminal frame will clear this stream's accumulator; drop it here.
-		this.messageDeltaDecoder.endSubagentStream(subagentId);
 	}
 
 	/** Get state for a local RPC-managed subagent. */
@@ -243,9 +247,6 @@ export abstract class RpcClientBase {
 	/** Dispose a local RPC-managed subagent without sending an abort request first. */
 	async disposeSubagent(subagentId: string): Promise<void> {
 		await this.send({ type: "subagent_dispose", subagentId });
-		// The host unsubscribes the event forwarder before responding, so no
-		// terminal frame will clear this stream's accumulator; drop it here.
-		this.messageDeltaDecoder.endSubagentStream(subagentId);
 	}
 
 	/** Set model by provider and ID. Pass persistDefault: false to change the session's model without rewriting the host's default. */

@@ -837,6 +837,7 @@ export {
 	type RpcSessionState,
 	type RpcSubagentDefinition,
 	type RpcSubagentDefinitionSource,
+	type RpcSubagentDisposedEvent,
 	type RpcSubagentEndEvent,
 	type RpcSubagentEvent,
 	type RpcSubagentSourceInfo,

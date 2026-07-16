@@ -142,7 +142,13 @@ export class RpcMessageDeltaDecoder {
 			const decoded = this.decodeSessionEvent(value.event, key);
 			return decoded === value.event ? value : { ...value, event: decoded };
 		}
-		if (value.type === "subagent_end" && typeof value.subagentId === "string") {
+		if (
+			(value.type === "subagent_end" || value.type === "subagent_disposed") &&
+			typeof value.subagentId === "string"
+		) {
+			// Terminal frames for a subagent's stream: subagent_end after the child
+			// settles, subagent_disposed whenever the host releases the subagent
+			// (abort/dispose commands, failed starts, session rebinds).
 			this.streams.delete(`subagent:${value.subagentId}`);
 			return value;
 		}
@@ -163,10 +169,10 @@ export class RpcMessageDeltaDecoder {
 				return this.decodeMessageUpdate(event, key);
 			case "agent_end":
 			case "agent_settled":
-				// Terminal run events. Subagents disposed mid-stream never forward a
-				// message_end/subagent_end frame, so drop any partial-message
-				// accumulator here to keep the streams map bounded. Safe: any later
-				// assistant message re-seeds via message_start or a snapshot frame.
+				// Terminal run events. Aborted or failed runs can end without a
+				// message_end frame, so drop any partial-message accumulator here to
+				// keep the streams map bounded. Safe: any later assistant message
+				// re-seeds via message_start or a snapshot frame.
 				this.streams.delete(key);
 				return event;
 			default:
@@ -203,15 +209,6 @@ export class RpcMessageDeltaDecoder {
 			message: snapshot,
 			assistantMessageEvent: { ...assistantMessageEvent, partial: snapshot },
 		};
-	}
-
-	/**
-	 * Drop accumulated state for a subagent stream whose terminal frames may
-	 * never arrive: a client-initiated abort/dispose unsubscribes the server-side
-	 * forwarder before the child's message_end/subagent_end can cross the wire.
-	 */
-	endSubagentStream(subagentId: string): void {
-		this.streams.delete(`subagent:${subagentId}`);
 	}
 
 	private adopt(key: string, message: Record<string, unknown>): void {

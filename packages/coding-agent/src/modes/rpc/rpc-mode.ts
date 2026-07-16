@@ -461,6 +461,11 @@ class RpcSubagentLifecycle implements RpcSubagentLifecycleController {
 		entry.disposed = true;
 		this.active.delete(subagentId);
 		entry.unsubscribe();
+		// Terminal frame for every disposal path (abort/dispose commands, failed
+		// starts, session rebinds). Nothing else fires for host-side disposals, and
+		// without a terminal frame clients would retain this subagent stream's
+		// message-delta accumulator forever. output() no-ops during shutdown.
+		this.output({ type: "subagent_disposed", subagentId });
 		await entry.handle.dispose();
 	}
 }
