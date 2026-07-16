@@ -209,7 +209,15 @@ describe("drain viewer (§6.3)", () => {
 
 		const firstMessage = {
 			role: "assistant",
-			content: [{ type: "toolCall", id: "tc-mid", name: "write", arguments: { path: "no" } }],
+			content: [
+				{
+					type: "toolCall",
+					id: "tc-mid",
+					name: "write",
+					arguments: { path: "no" },
+					partialJson: '{"path":"no',
+				},
+			],
 		};
 		viewer.handleViewerEvent(
 			eventEncoder.encode({
@@ -225,9 +233,17 @@ describe("drain viewer (§6.3)", () => {
 		);
 		const updatedMessage = {
 			role: "assistant",
-			content: [{ type: "toolCall", id: "tc-mid", name: "write", arguments: { path: "notes.md", content: "done" } }],
+			content: [
+				{
+					type: "toolCall",
+					id: "tc-mid",
+					name: "write",
+					arguments: { path: "notes.md", content: "done" },
+					partialJson: '{"path":"notes.md","content":"done"}',
+				},
+			],
 		};
-		const replacement = eventEncoder.encode({
+		const delta = eventEncoder.encode({
 			type: "message_update",
 			message: updatedMessage,
 			assistantMessageEvent: {
@@ -237,8 +253,8 @@ describe("drain viewer (§6.3)", () => {
 				partial: updatedMessage,
 			},
 		});
-		expect(replacement).toHaveProperty("message");
-		viewer.handleViewerEvent(replacement);
+		expect(delta).not.toHaveProperty("message");
+		viewer.handleViewerEvent(delta);
 
 		const rendered = stripAnsi(viewer.render(100).join("\n"));
 		expect(rendered).toContain("notes.md");

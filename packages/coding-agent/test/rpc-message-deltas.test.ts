@@ -120,10 +120,16 @@ describe("RpcSessionEventEncoder", () => {
 		expect(getRecord(frame.assistantMessageEvent).toolCall).toEqual({ id: "tc1", name: "write" });
 	});
 
-	test("uses replacement snapshots after attaching mid-toolcall until toolcall_end", () => {
+	test("resumes delta-only arguments when a mid-toolcall snapshot carries the provider raw prefix", () => {
 		const encoder = new RpcSessionEventEncoder();
 		const decoder = new RpcMessageDeltaDecoder();
-		const firstToolCall = { type: "toolCall", id: "tc1", name: "read", arguments: { path: "no" } };
+		const firstToolCall = {
+			type: "toolCall",
+			id: "tc1",
+			name: "read",
+			arguments: { path: "no" },
+			partialJson: '{"path":"no',
+		};
 		const first = getRecord(
 			encoder.encode(
 				messageUpdate(assistantPartial([firstToolCall]), {
@@ -136,6 +142,51 @@ describe("RpcSessionEventEncoder", () => {
 		expect(first).toHaveProperty("message");
 		decoder.decode(first);
 
+		const streamedToolCall = {
+			...firstToolCall,
+			arguments: { path: "notes.md" },
+			partialJson: '{"path":"notes.md"}',
+		};
+		const delta = getRecord(
+			encoder.encode(
+				messageUpdate(assistantPartial([streamedToolCall]), {
+					type: "toolcall_delta",
+					contentIndex: 0,
+					delta: 'tes.md"}',
+				}),
+			),
+		);
+		expect(delta).not.toHaveProperty("message");
+		const decoded = getRecord(decoder.decode(delta));
+		expect(getRecord(getContent(decoded.message)[0]).arguments).toEqual({ path: "notes.md" });
+
+		const finalToolCall = { type: "toolCall", id: "tc1", name: "read", arguments: { path: "notes.md" } };
+		const end = getRecord(
+			encoder.encode(
+				messageUpdate(assistantPartial([finalToolCall]), {
+					type: "toolcall_end",
+					contentIndex: 0,
+					toolCall: finalToolCall,
+				}),
+			),
+		);
+		expect(end).not.toHaveProperty("message");
+	});
+
+	test("keeps replacement snapshots when a mid-toolcall raw prefix is unavailable", () => {
+		const encoder = new RpcSessionEventEncoder();
+		const firstToolCall = { type: "toolCall", id: "tc1", name: "read", arguments: { path: "no" } };
+		const first = getRecord(
+			encoder.encode(
+				messageUpdate(assistantPartial([firstToolCall]), {
+					type: "toolcall_delta",
+					contentIndex: 0,
+					delta: "no",
+				}),
+			),
+		);
+		expect(first).toHaveProperty("message");
+
 		const finalToolCall = { type: "toolCall", id: "tc1", name: "read", arguments: { path: "notes.md" } };
 		const replacement = getRecord(
 			encoder.encode(
@@ -147,19 +198,63 @@ describe("RpcSessionEventEncoder", () => {
 			),
 		);
 		expect(replacement).toHaveProperty("message");
-		const decoded = getRecord(decoder.decode(replacement));
-		expect(getRecord(getContent(decoded.message)[0]).arguments).toEqual({ path: "notes.md" });
+	});
 
-		const end = getRecord(
-			encoder.encode(
-				messageUpdate(assistantPartial([finalToolCall]), {
-					type: "toolcall_end",
-					contentIndex: 0,
-					toolCall: finalToolCall,
-				}),
+	test("keeps every concurrent tool call snapshot-only when raw prefixes are unavailable", () => {
+		const encoder = new RpcSessionEventEncoder();
+		encoder.encode(
+			messageUpdate(
+				assistantPartial([
+					{ type: "toolCall", id: "tc-a", name: "a", arguments: { x: 1 } },
+					{ type: "toolCall", id: "tc-b", name: "b", arguments: {} },
+				]),
+				{ type: "toolcall_delta", contentIndex: 0, delta: "1" },
 			),
 		);
-		expect(end).not.toHaveProperty("message");
+		const second = getRecord(
+			encoder.encode(
+				messageUpdate(
+					assistantPartial([
+						{ type: "toolCall", id: "tc-a", name: "a", arguments: { x: 1 } },
+						{ type: "toolCall", id: "tc-b", name: "b", arguments: { y: 2 } },
+					]),
+					{ type: "toolcall_delta", contentIndex: 1, delta: "2}" },
+				),
+			),
+		);
+		expect(second).toHaveProperty("message");
+	});
+
+	test("restores every concurrent tool-call prefix when adopting a snapshot", () => {
+		const encoder = new RpcSessionEventEncoder();
+		const decoder = new RpcMessageDeltaDecoder();
+		const first = getRecord(
+			encoder.encode(
+				messageUpdate(
+					assistantPartial([
+						{ type: "toolCall", id: "tc-a", name: "a", arguments: { x: 1 }, partialJson: '{"x":1' },
+						{ type: "toolCall", id: "tc-b", name: "b", arguments: {}, partialArgs: '{"y":' },
+					]),
+					{ type: "toolcall_delta", contentIndex: 0, delta: "1" },
+				),
+			),
+		);
+		decoder.decode(first);
+
+		const second = getRecord(
+			encoder.encode(
+				messageUpdate(
+					assistantPartial([
+						{ type: "toolCall", id: "tc-a", name: "a", arguments: { x: 1 }, partialJson: '{"x":1' },
+						{ type: "toolCall", id: "tc-b", name: "b", arguments: { y: 2 }, partialArgs: '{"y":2}' },
+					]),
+					{ type: "toolcall_delta", contentIndex: 1, delta: "2}" },
+				),
+			),
+		);
+		expect(second).not.toHaveProperty("message");
+		const decoded = getRecord(decoder.decode(second));
+		expect(getRecord(getContent(decoded.message)[1]).arguments).toEqual({ y: 2 });
 	});
 
 	test("message_end resets the base so the next message starts from its message_start", () => {

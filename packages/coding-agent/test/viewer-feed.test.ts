@@ -198,6 +198,76 @@ describe("ViewerFeedRegistry (§4.3)", () => {
 		).toBeLessThan(VIEWER_BUFFER_MAX_BYTES);
 	});
 
+	it("keeps a long mid-toolcall attach delta-only when provider raw arguments are available", () => {
+		const { registry, sent } = createRegistry();
+		const { session } = createFeedSession();
+		registry.start("vf-1", "c-1", session);
+
+		const delta = "x".repeat(1024);
+		let accumulated = "";
+		let repeatedMessageBytes = 0;
+		for (let index = 0; index < 128; index++) {
+			accumulated += delta;
+			repeatedMessageBytes += accumulated.length;
+			const message = {
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-long",
+						name: "write",
+						arguments: { content: accumulated },
+						partialJson: `{"content":"${accumulated}`,
+					},
+				],
+			};
+			session.emit({
+				type: "message_update",
+				message,
+				assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta, partial: message },
+			});
+		}
+		expect(repeatedMessageBytes).toBeGreaterThan(VIEWER_BUFFER_MAX_BYTES);
+
+		expect(registry.subscribe("vf-1", "c-1")).toBe(true);
+		const events = viewerEvents(sent);
+		expect(events).toHaveLength(128);
+		expect(events[0]?.event.event).toHaveProperty("message");
+		expect(events.slice(1).every((entry) => !("message" in (entry.event.event as Record<string, unknown>)))).toBe(
+			true,
+		);
+		expect(events.some((entry) => (entry.event.event as { kind?: string }).kind === "truncated")).toBe(false);
+	});
+
+	it("coalesces fallback tool-call snapshots when no raw argument prefix is available", () => {
+		const { registry, sent } = createRegistry();
+		const { session } = createFeedSession();
+		registry.start("vf-1", "c-1", session);
+
+		const delta = "x".repeat(1024);
+		let accumulated = "";
+		for (let index = 0; index < 128; index++) {
+			accumulated += delta;
+			const message = {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "tc-fallback", name: "write", arguments: { content: accumulated } }],
+			};
+			session.emit({
+				type: "message_update",
+				message,
+				assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta, partial: message },
+			});
+		}
+
+		expect(registry.subscribe("vf-1", "c-1")).toBe(true);
+		const events = viewerEvents(sent);
+		expect(events).toHaveLength(1);
+		expect(events[0]?.event.event).toMatchObject({
+			type: "message_update",
+			message: { content: [{ arguments: { content: accumulated } }] },
+		});
+	});
+
 	it("applies the byte cap to UTF-8 wire bytes", () => {
 		const { registry, sent } = createRegistry();
 		const { session } = createFeedSession();

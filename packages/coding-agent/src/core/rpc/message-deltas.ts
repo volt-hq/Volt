@@ -11,9 +11,9 @@
  * `message` is omitted while the client holds the accumulator base. The first
  * update for a message whose `message_start` was not observed on the same
  * stream (mid-turn attach) carries a full snapshot so clients always have a
- * base. If attachment lands mid-toolcall, replacement snapshots continue until
- * `toolcall_end` because the client lacks the raw argument prefix. `message_start`
- * and `message_end` keep full messages.
+ * base. Mid-toolcall snapshots resume deltas from provider argument scratch
+ * text when available; otherwise replacement snapshots continue until
+ * `toolcall_end`. `message_start` and `message_end` keep full messages.
  *
  * `RpcMessageDeltaDecoder` reconstructs the full documented event shape on the
  * client, so consumers of `RpcClientEvent` keep the in-process contract
@@ -135,11 +135,6 @@ export class RpcSessionEventEncoder {
 			// No message_start observed on this stream for this message:
 			// this frame doubles as the accumulator snapshot.
 			this.deltaBaseSent = true;
-			if (slimEvent.type === "toolcall_delta" && contentIndex !== undefined) {
-				// The client has parsed arguments but not the raw JSON prefix needed to
-				// append later deltas. Keep replacing its snapshot until toolcall_end.
-				this.snapshotOnlyToolCallIndexes.add(contentIndex);
-			}
 			return this.encodeSnapshotFrame(event, slimEvent, message);
 		}
 		if (
@@ -264,6 +259,7 @@ export class RpcSessionEventEncoder {
 		slimEvent: Record<string, unknown>,
 		message: Record<string, unknown>,
 	): object {
+		this.updateSnapshotToolCallState(message);
 		if (!this.deltaSanitizer) {
 			return { ...event, assistantMessageEvent: slimEvent };
 		}
@@ -275,6 +271,24 @@ export class RpcSessionEventEncoder {
 			...event,
 			assistantMessageEvent: typeof slimEvent.delta === "string" ? { ...slimEvent, delta: "" } : slimEvent,
 		};
+	}
+
+	private updateSnapshotToolCallState(message: Record<string, unknown>): void {
+		if (!Array.isArray(message.content)) {
+			return;
+		}
+		for (const [index, block] of message.content.entries()) {
+			if (!isRecord(block) || block.type !== "toolCall") {
+				continue;
+			}
+			if (getToolCallArgsText(block) === undefined) {
+				// Snapshot adoption discards the decoder's raw prefix. Without a
+				// provider scratch prefix, later updates must remain replacements.
+				this.snapshotOnlyToolCallIndexes.add(index);
+			} else {
+				this.snapshotOnlyToolCallIndexes.delete(index);
+			}
+		}
 	}
 
 	private seedSanitizedState(message: Record<string, unknown>): void {
@@ -292,6 +306,11 @@ export class RpcSessionEventEncoder {
 				this.emittedSanitizedText.set(index, sanitizer.sanitizeText(block.text));
 			} else if (block.type === "thinking" && typeof block.thinking === "string") {
 				this.emittedSanitizedText.set(index, sanitizer.sanitizeText(block.thinking));
+			} else if (block.type === "toolCall") {
+				const argsText = getToolCallArgsText(block);
+				if (argsText !== undefined) {
+					this.resumableToolArgsText.set(index, argsText);
+				}
 			}
 		}
 	}
@@ -313,6 +332,13 @@ function attachToolCallStub(slimEvent: Record<string, unknown>, message: Record<
 	if (isRecord(block) && block.type === "toolCall") {
 		slimEvent.toolCall = { id: block.id, name: block.name };
 	}
+}
+
+function getToolCallArgsText(block: Record<string, unknown>): string | undefined {
+	if (typeof block.partialJson === "string") {
+		return block.partialJson;
+	}
+	return typeof block.partialArgs === "string" ? block.partialArgs : undefined;
 }
 
 function getStreamedBlockText(
@@ -464,13 +490,17 @@ export class RpcMessageDeltaDecoder {
 	}
 
 	private adopt(key: string, message: Record<string, unknown>): void {
-		this.streams.set(key, {
-			base: message,
-			content: Array.isArray(message.content) ? [...message.content] : [],
-			// Unknown mid-stream tool-call argument text cannot be resumed from a
-			// parsed snapshot; toolcall_end frames carry the authoritative block.
-			argsText: new Map(),
-		});
+		const content = Array.isArray(message.content) ? [...message.content] : [];
+		const argsText = new Map<number, string>();
+		for (const [index, block] of content.entries()) {
+			if (isRecord(block) && block.type === "toolCall") {
+				const rawArgs = getToolCallArgsText(block);
+				if (rawArgs !== undefined) {
+					argsText.set(index, rawArgs);
+				}
+			}
+		}
+		this.streams.set(key, { base: message, content, argsText });
 	}
 
 	private apply(state: MessageDeltaStreamState, event: Record<string, unknown>): void {
