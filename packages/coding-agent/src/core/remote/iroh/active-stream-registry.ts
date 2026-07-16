@@ -8,7 +8,6 @@ export interface IrohRemoteActiveStreamEntry {
 	capabilities?: Set<string>;
 	close(reason: string): Promise<void> | void;
 	write?(value: object): Promise<void> | void;
-	closeConnection?(reason: string): Promise<void> | void;
 }
 
 export class IrohRemoteActiveStreamRegistry {

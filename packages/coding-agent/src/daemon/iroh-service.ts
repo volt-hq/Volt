@@ -22,7 +22,11 @@ import {
 	IrohRemoteHostEngine,
 	type IrohRemoteHostHandshakeResult,
 } from "../core/remote/iroh/engine.ts";
-import { createIrohRemoteHandshakeFailure, type IrohRemoteHello } from "../core/remote/iroh/handshake.ts";
+import {
+	createIrohRemoteHandshakeFailure,
+	type IrohRemoteHandshakeResponse,
+	type IrohRemoteHello,
+} from "../core/remote/iroh/handshake.ts";
 import {
 	DEFAULT_IROH_REMOTE_HANDSHAKE_MAX_LINE_BYTES,
 	DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS,
@@ -91,6 +95,7 @@ import {
 	IntegratedRuntimeRegistry,
 	type IntegratedRuntimeSubscriber,
 } from "./integrated-runtimes.ts";
+import { IrohConnectionSupervisor } from "./iroh-connection-supervisor.ts";
 import {
 	formatIrohLoadError,
 	type IrohConnectionLike,
@@ -280,7 +285,7 @@ interface PendingPairRequest {
 
 interface ClientConnectionRecord {
 	connectionId: string;
-	close(reason: string): void;
+	supervisor: IrohConnectionSupervisor;
 }
 
 type RelayPushDeliveryResult =
@@ -297,23 +302,6 @@ function isExpectedApplicationClose(error: unknown): boolean {
 			message.includes(`reason: b"${ACTIVE_REPLACE_CLOSE_REASON}"`) ||
 			message.includes(`reason: b"${WORKSPACE_UNREGISTERED_CLOSE_REASON}"`))
 	);
-}
-
-function closeConnection(connection: IrohConnectionLike, reason: string): void {
-	try {
-		connection.close(0n, Array.from(Buffer.from(reason, "utf8")));
-	} catch {
-		// Transport closure is best-effort; registry/task cleanup must still run.
-	}
-}
-
-async function waitForConnectionClose(connection: IrohConnectionLike): Promise<void> {
-	await Promise.race([
-		connection.closed().catch(() => {}),
-		new Promise((resolveDelay) => {
-			setTimeout(resolveDelay, 500);
-		}),
-	]);
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -403,6 +391,7 @@ class IrohDaemonService {
 	private readonly stateManager: IrohRemoteHostStateManager;
 	private readonly activeStreams = new IrohRemoteActiveStreamRegistry();
 	private readonly clientConnections = new Map<string, Set<ClientConnectionRecord>>();
+	private readonly connectionSupervisors = new Map<string, IrohConnectionSupervisor>();
 	private readonly connectionTasks = new Set<Promise<void>>();
 	private readonly resourceGuard = new IrohRemoteResourceGuard();
 	private readonly pendingPairRequests = new Map<string, PendingPairRequest>();
@@ -808,11 +797,12 @@ class IrohDaemonService {
 			});
 			return;
 		}
+		const supervisor = new IrohConnectionSupervisor(connection);
 		try {
 			connection.setMaxConcurrentBiStreams(BigInt(MAX_CONCURRENT_STREAMS_PER_CONNECTION));
 		} catch {
-			closeConnection(connection, "stream_limit_configuration_failed");
-			await waitForConnectionClose(connection);
+			supervisor.requestClose("stream_limit_configuration_failed", "immediate");
+			await supervisor.finalize("stream_limit_configuration_failed");
 			await this.logAudit({
 				type: "iroh_security_transport_rejected",
 				success: false,
@@ -825,8 +815,8 @@ class IrohDaemonService {
 		try {
 			remoteId = connection.remoteId().toString();
 		} catch {
-			closeConnection(connection, "invalid_remote_identity");
-			await waitForConnectionClose(connection);
+			supervisor.requestClose("invalid_remote_identity", "immediate");
+			await supervisor.finalize("invalid_remote_identity");
 			await this.logAudit({
 				type: "iroh_security_transport_rejected",
 				success: false,
@@ -837,8 +827,8 @@ class IrohDaemonService {
 		}
 		const nodeConnectionAdmission = this.resourceGuard.tryAcquireNodeConnection(remoteId);
 		if (!nodeConnectionAdmission.ok) {
-			closeConnection(connection, "node_connection_limit");
-			await waitForConnectionClose(connection);
+			supervisor.requestClose("node_connection_limit", "immediate");
+			await supervisor.finalize("node_connection_limit");
 			await this.logAudit({
 				type: "iroh_security_connection_limit",
 				clientNodeId: remoteId,
@@ -848,11 +838,11 @@ class IrohDaemonService {
 			});
 			return;
 		}
+		supervisor.addTerminalFinalizer(() => nodeConnectionAdmission.lease.release());
 		const unauthenticatedAdmission = this.resourceGuard.tryAcquireUnauthenticatedConnection(remoteId);
 		if (!unauthenticatedAdmission.ok) {
-			nodeConnectionAdmission.lease.release();
-			closeConnection(connection, "unauthenticated_connection_limit");
-			await waitForConnectionClose(connection);
+			supervisor.requestClose("unauthenticated_connection_limit", "immediate");
+			await supervisor.finalize("unauthenticated_connection_limit");
 			await this.logAudit({
 				type: "iroh_security_unauthenticated_connection_limit",
 				clientNodeId: remoteId,
@@ -862,16 +852,14 @@ class IrohDaemonService {
 			});
 			return;
 		}
+		supervisor.addTerminalFinalizer(() => unauthenticatedAdmission.lease.release());
 		const connectionId = `conn-${++activeConnectionSequence}`;
-		const removeClientConnection = this.registerClientConnection(remoteId, connection, connectionId);
-		const streamTasks = new Set<Promise<void>>();
+		this.registerClientConnection(remoteId, connectionId, supervisor);
 		let acceptedStreamCount = 0;
-		let closeRequested = false;
 		let authenticated = false;
 		const unauthenticatedTimer = setTimeout(() => {
-			if (authenticated || closeRequested) return;
-			closeRequested = true;
-			closeConnection(connection, "handshake_timeout");
+			if (authenticated || supervisor.isClosing) return;
+			supervisor.requestClose("handshake_timeout", "immediate");
 			void this.logAudit({
 				type: "iroh_security_handshake_timeout",
 				clientNodeId: remoteId,
@@ -884,7 +872,7 @@ class IrohDaemonService {
 
 		const markAuthenticated = async (): Promise<boolean> => {
 			if (authenticated) return true;
-			if (closeRequested) return false;
+			if (supervisor.isClosing) return false;
 			authenticated = true;
 			clearTimeout(unauthenticatedTimer);
 			unauthenticatedAdmission.lease.release();
@@ -898,30 +886,18 @@ class IrohDaemonService {
 			return true;
 		};
 
-		// Ordinary stream completion leaves the multi-stream connection reusable.
-		// Only an admission-limit refusal requests closure after sibling streams drain.
-		let closeWhenIdleRequested = false;
-		const closeWhenIdleIfRequested = () => {
-			if (closeRequested || !closeWhenIdleRequested || streamTasks.size > 0) {
-				return;
-			}
-			closeRequested = true;
-			closeConnection(connection, "done");
-		};
-
 		try {
-			while (!closeRequested) {
+			while (!supervisor.isClosing) {
 				const stream = await (!authenticated
 					? withTimeout(connection.acceptBi(), DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS, "handshake timed out")
 					: connection.acceptBi());
 				acceptedStreamCount++;
-				if (streamTasks.size >= MAX_CONCURRENT_STREAMS_PER_CONNECTION) {
+				if (supervisor.childTaskCount >= MAX_CONCURRENT_STREAMS_PER_CONNECTION) {
 					// One connection is holding too many concurrent streams open. Refuse
 					// further work and close the connection rather than let
 					// it exhaust daemon resources; the just-accepted stream is torn down
 					// with the connection. A legitimate client never reaches this.
-					closeRequested = true;
-					closeConnection(connection, "stream_limit_exceeded");
+					supervisor.requestClose("stream_limit_exceeded", "immediate");
 					await this.logAudit({
 						type: "iroh_security_stream_limit",
 						clientNodeId: remoteId,
@@ -941,19 +917,11 @@ class IrohDaemonService {
 						error: "stream refused at daemon active-stream limit",
 						details: { connectionId, limit: streamAdmission.limit, scope: streamAdmission.scope },
 					});
-					closeWhenIdleRequested = true;
-					closeWhenIdleIfRequested();
+					supervisor.requestClose("done", "when_idle");
 					continue;
 				}
 				const streamId = `stream-${++activeStreamSequence}`;
-				const task = this.handleConnectionStream(
-					stream,
-					connection,
-					remoteId,
-					connectionId,
-					streamId,
-					markAuthenticated,
-				)
+				const task = this.handleConnectionStream(stream, remoteId, connectionId, streamId, markAuthenticated)
 					.catch(async (error) => {
 						if (!isExpectedApplicationClose(error)) {
 							if (authenticated) {
@@ -974,16 +942,14 @@ class IrohDaemonService {
 					})
 					.finally(() => {
 						streamAdmission.lease.release();
-						streamTasks.delete(task);
-						closeWhenIdleIfRequested();
 					});
-				streamTasks.add(task);
+				supervisor.trackChild(task);
 			}
 		} catch (error) {
 			if (acceptedStreamCount === 0 && authenticated) {
 				throw error;
 			}
-			if (acceptedStreamCount === 0 && !closeRequested) {
+			if (acceptedStreamCount === 0 && !supervisor.isClosing) {
 				await this.logAudit({
 					type: "iroh_security_handshake_timeout",
 					clientNodeId: remoteId,
@@ -994,15 +960,8 @@ class IrohDaemonService {
 			}
 		} finally {
 			clearTimeout(unauthenticatedTimer);
-			unauthenticatedAdmission.lease.release();
-			nodeConnectionAdmission.lease.release();
 			await this.closeActiveStreamsForConnection(connectionId, "connection_closed");
-			await Promise.allSettled(streamTasks);
-			removeClientConnection();
-			if (!closeRequested) {
-				closeConnection(connection, "done");
-			}
-			await waitForConnectionClose(connection);
+			await supervisor.finalize("done");
 			if (authenticated) {
 				this.log("info", `client connection closed: ${remoteId} (${connectionId})`);
 				await this.logAudit({
@@ -1017,7 +976,6 @@ class IrohDaemonService {
 
 	private async handleConnectionStream(
 		stream: IrohBiStreamLike,
-		connection: IrohConnectionLike,
 		remoteId: string,
 		connectionId: string,
 		streamId: string,
@@ -1038,11 +996,10 @@ class IrohDaemonService {
 		}
 		let handshake: IrohRemoteHostHandshakeResult;
 		try {
-			handshake = await engine.readHandshake(stream, remoteId, {
+			handshake = await engine.readHandshake(stream.recv, remoteId, {
 				child: "volt",
 				maxLineBytes: DEFAULT_IROH_REMOTE_HANDSHAKE_MAX_LINE_BYTES,
 				timeoutMs: DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS,
-				writeSuccessResponse: false,
 			});
 		} finally {
 			handshakeAdmission.lease.release();
@@ -1054,8 +1011,7 @@ class IrohDaemonService {
 			) {
 				await this.closeWorkspaceAuthorizationRemovedStreams(remoteId, handshake.response.workspace);
 			}
-			await Promise.resolve(stream.send.finish?.()).catch(() => {});
-			await Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
+			await this.writeTerminalHandshakeResponse(stream, handshake.response);
 			return;
 		}
 		if (!(await markAuthenticated())) {
@@ -1076,14 +1032,13 @@ class IrohDaemonService {
 				streamCapability,
 			)
 		) {
-			await writeIrohRemoteHandshakeResponse(
-				stream.send,
+			await this.writeTerminalHandshakeResponse(
+				stream,
 				createIrohRemoteHandshakeFailure(`rpc_capability_denied: ${streamCapability}`, {
 					hostNodeId: this.hostNodeId,
 					workspace: handshake.authorization.workspace.name,
 				}),
 			);
-			closeIrohRemoteStream(stream, "rpc_capability_denied");
 			return;
 		}
 
@@ -1094,18 +1049,18 @@ class IrohDaemonService {
 		}
 
 		if (handshake.hello.mode === "workspaceDiscovery") {
-			await this.runWorkspaceDiscovery(stream, handshake, connection, connectionId, streamId);
+			await this.runWorkspaceDiscovery(stream, handshake, connectionId, streamId);
 			return;
 		}
 		if (handshake.hello.mode === "workspaceManagement") {
 			if (handshake.hello.workspaceManagement.purpose === "manage_worktrees") {
-				await this.runWorktreeManagement(stream, handshake, connection, connectionId, streamId);
+				await this.runWorktreeManagement(stream, handshake, connectionId, streamId);
 				return;
 			}
-			await this.runWorkspaceManagement(stream, handshake, connection, connectionId, streamId);
+			await this.runWorkspaceManagement(stream, handshake, connectionId, streamId);
 			return;
 		}
-		await this.runIntegratedConversation(stream, handshake, connection, connectionId, streamId);
+		await this.runIntegratedConversation(stream, handshake, connectionId, streamId);
 	}
 
 	// ==========================================================================
@@ -1116,7 +1071,6 @@ class IrohDaemonService {
 		authorization: IrohRemoteClientAuthorizationSuccess,
 		sessionId: string,
 		stream: IrohBiStreamLike,
-		connection: IrohConnectionLike,
 		connectionId: string,
 		streamId: string,
 		details: { terminalSessionId?: string | undefined; sanitizerOverrides?: RemoteSanitizerOverrides } = {},
@@ -1132,7 +1086,6 @@ class IrohDaemonService {
 					authorization,
 					sessionId: Object.hasOwn(details, "terminalSessionId") ? details.terminalSessionId : entry.sessionId,
 				}),
-			closeConnection: (reason: string) => closeConnection(connection, reason),
 			write: (value: object) =>
 				writeIrohRemoteJsonLine(stream.send, value, authorization, details.sanitizerOverrides ?? {}),
 		};
@@ -1207,7 +1160,6 @@ class IrohDaemonService {
 	private async runWorkspaceDiscovery(
 		stream: IrohBiStreamLike,
 		handshake: Extract<IrohRemoteHostHandshakeResult, { ok: true }>,
-		connection: IrohConnectionLike,
 		connectionId: string,
 		streamId: string,
 	): Promise<void> {
@@ -1216,7 +1168,6 @@ class IrohDaemonService {
 			handshake.authorization,
 			WORKSPACE_DISCOVERY_STREAM_SESSION_ID,
 			stream,
-			connection,
 			connectionId,
 			streamId,
 			{ terminalSessionId: undefined },
@@ -1240,7 +1191,6 @@ class IrohDaemonService {
 	private async runWorkspaceManagement(
 		stream: IrohBiStreamLike,
 		handshake: Extract<IrohRemoteHostHandshakeResult, { ok: true }>,
-		connection: IrohConnectionLike,
 		connectionId: string,
 		streamId: string,
 	): Promise<void> {
@@ -1249,7 +1199,6 @@ class IrohDaemonService {
 			handshake.authorization,
 			WORKSPACE_MANAGEMENT_STREAM_SESSION_ID,
 			stream,
-			connection,
 			connectionId,
 			streamId,
 			{ terminalSessionId: undefined },
@@ -1307,7 +1256,6 @@ class IrohDaemonService {
 	private async runWorktreeManagement(
 		stream: IrohBiStreamLike,
 		handshake: Extract<IrohRemoteHostHandshakeResult, { ok: true }>,
-		connection: IrohConnectionLike,
 		connectionId: string,
 		streamId: string,
 	): Promise<void> {
@@ -1319,7 +1267,6 @@ class IrohDaemonService {
 			handshake.authorization,
 			WORKSPACE_MANAGEMENT_STREAM_SESSION_ID,
 			stream,
-			connection,
 			connectionId,
 			streamId,
 			{ terminalSessionId: undefined, sanitizerOverrides },
@@ -1528,6 +1475,18 @@ class IrohDaemonService {
 		}
 	}
 
+	private async writeTerminalHandshakeResponse(
+		stream: IrohBiStreamLike,
+		response: IrohRemoteHandshakeResponse,
+	): Promise<void> {
+		try {
+			await writeIrohRemoteHandshakeResponse(stream.send, response);
+		} finally {
+			await Promise.resolve(stream.send.finish?.()).catch(() => {});
+			await Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
+		}
+	}
+
 	private async sendHandshakeError(stream: IrohBiStreamLike, error: unknown): Promise<void> {
 		const record = (error ?? {}) as Record<string, unknown>;
 		// Plain {message, ...} records (abortPendingRelay, lease re-check) must not
@@ -1538,8 +1497,8 @@ class IrohDaemonService {
 		const workspace = typeof record.workspace === "string" ? record.workspace : undefined;
 		const sessionId = typeof record.sessionId === "string" ? record.sessionId : undefined;
 		const retryAfterMs = typeof record.retryAfterMs === "number" ? record.retryAfterMs : undefined;
-		await writeIrohRemoteHandshakeResponse(
-			stream.send,
+		await this.writeTerminalHandshakeResponse(
+			stream,
 			createIrohRemoteHandshakeFailure(message, {
 				hostNodeId: this.hostNodeId,
 				...(outcome === undefined ? {} : { outcome: outcome as never }),
@@ -1548,8 +1507,6 @@ class IrohDaemonService {
 				...(retryAfterMs === undefined ? {} : { retryAfterMs }),
 			}),
 		);
-		await Promise.resolve(stream.send.finish?.()).catch(() => {});
-		await Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
 	}
 
 	private async rejectDuplicateActiveConnection(
@@ -1571,8 +1528,8 @@ class IrohDaemonService {
 				source,
 			},
 		});
-		await writeIrohRemoteHandshakeResponse(
-			stream.send,
+		await this.writeTerminalHandshakeResponse(
+			stream,
 			createIrohRemoteHandshakeFailure(error, {
 				hostNodeId: this.hostNodeId,
 				outcome: "duplicate_conversation_connection",
@@ -1581,8 +1538,6 @@ class IrohDaemonService {
 				retryAfterMs: DUPLICATE_CONVERSATION_RETRY_AFTER_MS,
 			}),
 		);
-		await Promise.resolve(stream.send.finish?.()).catch(() => {});
-		await Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
 	}
 
 	private async closeReplacedActiveStreams(
@@ -1597,7 +1552,7 @@ class IrohDaemonService {
 		for (const entry of replacedEntries) {
 			await Promise.resolve(entry.close(ACTIVE_REPLACE_CLOSE_REASON)).catch(() => {});
 		}
-		await this.closeIdleConnectionsForEntries(replacedEntries, ACTIVE_REPLACE_CLOSE_REASON);
+		this.requestCloseWhenIdleForEntries(replacedEntries, ACTIVE_REPLACE_CLOSE_REASON);
 		this.log(
 			"info",
 			`client stream replaced: ${authorization.client.nodeId}/${authorization.workspace.name} (${replacedStreamIds.join(", ")} -> ${replacementStreamId})`,
@@ -1907,7 +1862,6 @@ class IrohDaemonService {
 	private async runIntegratedConversation(
 		stream: IrohBiStreamLike,
 		handshake: Extract<IrohRemoteHostHandshakeResult, { ok: true }>,
-		connection: IrohConnectionLike,
 		connectionId: string,
 		streamId: string,
 	): Promise<void> {
@@ -2082,7 +2036,6 @@ class IrohDaemonService {
 				authorization,
 				entry.sessionId,
 				stream,
-				connection,
 				connectionId,
 				streamId,
 				worktreeSanitizerOverrides === undefined ? {} : { sanitizerOverrides: worktreeSanitizerOverrides },
@@ -2205,10 +2158,10 @@ class IrohDaemonService {
 	// Stream/connection registries
 	// ==========================================================================
 
-	private registerClientConnection(nodeId: string, connection: IrohConnectionLike, connectionId: string): () => void {
+	private registerClientConnection(nodeId: string, connectionId: string, supervisor: IrohConnectionSupervisor): void {
 		const record: ClientConnectionRecord = {
 			connectionId,
-			close: (reason: string) => closeConnection(connection, reason),
+			supervisor,
 		};
 		let records = this.clientConnections.get(nodeId);
 		if (!records) {
@@ -2216,17 +2169,16 @@ class IrohDaemonService {
 			this.clientConnections.set(nodeId, records);
 		}
 		records.add(record);
-		let removed = false;
-		return () => {
-			if (removed) {
-				return;
-			}
-			removed = true;
+		this.connectionSupervisors.set(connectionId, supervisor);
+		supervisor.addTerminalFinalizer(() => {
 			records.delete(record);
 			if (records.size === 0 && this.clientConnections.get(nodeId) === records) {
 				this.clientConnections.delete(nodeId);
 			}
-		};
+			if (this.connectionSupervisors.get(connectionId) === supervisor) {
+				this.connectionSupervisors.delete(connectionId);
+			}
+		});
 	}
 
 	private closeClientConnectionsForClient(nodeId: string, reason: string): number {
@@ -2234,36 +2186,20 @@ class IrohDaemonService {
 		if (records.length === 0) {
 			return 0;
 		}
-		this.clientConnections.delete(nodeId);
 		for (const record of records) {
-			try {
-				record.close(reason);
-			} catch {
-				// Connection closure is best-effort; the transport may already be closing.
-			}
+			record.supervisor.requestClose(reason, "immediate");
 		}
 		return records.length;
 	}
 
-	private async closeEntryConnection(entry: IrohRemoteActiveStreamEntry, reason: string): Promise<void> {
-		try {
-			await Promise.resolve(entry.closeConnection?.(reason));
-		} catch {
-			// Connection closure is best-effort. Stream teardown still drives task cleanup.
-		}
-	}
-
-	private async closeIdleConnectionsForEntries(entries: IrohRemoteActiveStreamEntry[], reason: string): Promise<void> {
-		const closedConnectionIds = new Set<string>();
+	private requestCloseWhenIdleForEntries(entries: IrohRemoteActiveStreamEntry[], reason: string): void {
+		const requestedConnectionIds = new Set<string>();
 		for (const entry of entries) {
-			if (closedConnectionIds.has(entry.connectionId)) {
+			if (requestedConnectionIds.has(entry.connectionId)) {
 				continue;
 			}
-			if (this.activeStreams.entriesForConnection(entry.connectionId).length > 0) {
-				continue;
-			}
-			closedConnectionIds.add(entry.connectionId);
-			await this.closeEntryConnection(entry, reason);
+			requestedConnectionIds.add(entry.connectionId);
+			this.connectionSupervisors.get(entry.connectionId)?.requestClose(reason, "when_idle");
 		}
 	}
 
@@ -2285,7 +2221,7 @@ class IrohDaemonService {
 			this.activeStreams.unregister(entry);
 			await Promise.resolve(entry.close(reason)).catch(() => {});
 		}
-		await this.closeIdleConnectionsForEntries(entries, reason);
+		this.requestCloseWhenIdleForEntries(entries, reason);
 		return entries.length;
 	}
 
@@ -2304,7 +2240,7 @@ class IrohDaemonService {
 			this.activeStreams.unregister(entry);
 			await Promise.resolve(entry.close(reason)).catch(() => {});
 		}
-		await this.closeIdleConnectionsForEntries(entries, reason);
+		this.requestCloseWhenIdleForEntries(entries, reason);
 		return entries.length;
 	}
 
@@ -2389,7 +2325,7 @@ class IrohDaemonService {
 			this.activeStreams.unregister(entry);
 			await Promise.resolve(entry.close(reason)).catch(() => {});
 		}
-		await this.closeIdleConnectionsForEntries(entries, reason);
+		this.requestCloseWhenIdleForEntries(entries, reason);
 		return entries.length;
 	}
 
@@ -2407,11 +2343,6 @@ class IrohDaemonService {
 		// below are best-effort and must never keep old commands or buffered prompts
 		// alive behind backpressure.
 		this.closeClientConnectionsForClient(nodeId, "access_updated");
-		for (const entry of entries) {
-			try {
-				entry.closeConnection?.("access_updated");
-			} catch {}
-		}
 		for (const relay of this.relays.activeRelays()) {
 			if (relay.clientNodeId === nodeId) relay.close("error");
 		}
@@ -2474,11 +2405,6 @@ class IrohDaemonService {
 		}
 
 		const closedConnectionCount = this.closeClientConnectionsForClient(nodeId, ACTIVE_REVOKE_CLOSE_REASON);
-		for (const entry of entries) {
-			try {
-				entry.closeConnection?.(ACTIVE_REVOKE_CLOSE_REASON);
-			} catch {}
-		}
 		const streamClosures = Promise.allSettled(
 			Array.from(entries, (entry) => Promise.resolve(entry.close(ACTIVE_REVOKE_CLOSE_REASON))),
 		);

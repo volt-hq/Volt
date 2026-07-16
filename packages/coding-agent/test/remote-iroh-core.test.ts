@@ -201,12 +201,8 @@ class ManualIrohRecvStream implements IrohRecvStreamLike {
 
 class ManualIrohSendStream implements IrohSendStreamLike {
 	readonly writes: Array<Array<number>> = [];
-	failWrites = false;
 
 	async writeAll(bytes: Array<number>): Promise<void> {
-		if (this.failWrites) {
-			throw new Error("send failed");
-		}
 		this.writes.push(bytes);
 	}
 
@@ -1700,7 +1696,6 @@ describe("Iroh remote core helpers", () => {
 		expect(decodeIrohRemoteTicketPayload(pairing.ticket)).toEqual(pairing.payload);
 
 		const recv = new ManualIrohRecvStream();
-		const send = new ManualIrohSendStream();
 		recv.push(
 			Buffer.from(
 				`${JSON.stringify({
@@ -1714,7 +1709,7 @@ describe("Iroh remote core helpers", () => {
 			),
 		);
 
-		const handshake = await hostEngine.readHandshake({ recv, send }, "client-node", {
+		const handshake = await hostEngine.readHandshake(recv, "client-node", {
 			child: "volt",
 			conversationSession: { sessionId: "session-one", selection: "created" },
 		});
@@ -1744,10 +1739,7 @@ describe("Iroh remote core helpers", () => {
 			},
 			child: "volt",
 		});
-		expect(handshake.responseWritten).toBe(true);
-		expect(handshake.responseWriteError).toBeUndefined();
 		expect(handshake.initialInput).toEqual(Buffer.from('{"id":"state-1","type":"get_state"}\n'));
-		expect(send.writtenText()).toBe(`${JSON.stringify(handshake.response)}\n`);
 
 		const clients = await hostEngine.listClients();
 		expect(clients).toEqual([
@@ -1761,7 +1753,6 @@ describe("Iroh remote core helpers", () => {
 		expect(await hostEngine.listClients()).toEqual([expect.objectContaining({ allowedWorkspaces: [] })]);
 
 		const rejectedRecv = new ManualIrohRecvStream();
-		const rejectedSend = new ManualIrohSendStream();
 		rejectedRecv.push(
 			Buffer.from(
 				`${JSON.stringify({
@@ -1774,10 +1765,7 @@ describe("Iroh remote core helpers", () => {
 				})}\n`,
 			),
 		);
-		const rejectedHandshake = await hostEngine.readHandshake(
-			{ recv: rejectedRecv, send: rejectedSend },
-			"second-client",
-		);
+		const rejectedHandshake = await hostEngine.readHandshake(rejectedRecv, "second-client");
 		expect(rejectedHandshake).toMatchObject({
 			ok: false,
 			error: "pairing ticket has already been used",
@@ -1788,9 +1776,7 @@ describe("Iroh remote core helpers", () => {
 				hostNodeId: "host-node",
 				error: "pairing ticket has already been used",
 			},
-			responseWritten: true,
 		});
-		expect(rejectedSend.writtenText()).toBe(`${JSON.stringify(rejectedHandshake.response)}\n`);
 
 		await expect(hostEngine.setClientLastSessionId("client-node", "volt", "session-one")).resolves.toEqual(
 			expect.objectContaining({
@@ -2078,7 +2064,6 @@ describe("Iroh remote core helpers", () => {
 			});
 
 			const pairRecv = new ManualIrohRecvStream();
-			const pairSend = new ManualIrohSendStream();
 			pairRecv.push(
 				Buffer.from(
 					`${JSON.stringify({
@@ -2091,11 +2076,9 @@ describe("Iroh remote core helpers", () => {
 					})}\n`,
 				),
 			);
-			const pairedHandshake = await firstHostEngine.readHandshake(
-				{ recv: pairRecv, send: pairSend },
-				"client-node",
-				{ conversationSession: { sessionId: "session-one", selection: "created" } },
-			);
+			const pairedHandshake = await firstHostEngine.readHandshake(pairRecv, "client-node", {
+				conversationSession: { sessionId: "session-one", selection: "created" },
+			});
 			if (!pairedHandshake.ok) {
 				throw new Error(pairedHandshake.error);
 			}
@@ -2109,7 +2092,6 @@ describe("Iroh remote core helpers", () => {
 				workspace,
 			});
 			const reconnectRecv = new ManualIrohRecvStream();
-			const reconnectSend = new ManualIrohSendStream();
 			reconnectRecv.push(
 				Buffer.from(
 					`${JSON.stringify({
@@ -2121,11 +2103,9 @@ describe("Iroh remote core helpers", () => {
 					})}\n`,
 				),
 			);
-			const reconnectHandshake = await restartedHostEngine.readHandshake(
-				{ recv: reconnectRecv, send: reconnectSend },
-				"client-node",
-				{ conversationSession: { sessionId: "session-one", selection: "resumed" } },
-			);
+			const reconnectHandshake = await restartedHostEngine.readHandshake(reconnectRecv, "client-node", {
+				conversationSession: { sessionId: "session-one", selection: "resumed" },
+			});
 			if (!reconnectHandshake.ok) {
 				throw new Error(reconnectHandshake.error);
 			}
@@ -3165,7 +3145,6 @@ describe("Iroh remote core helpers", () => {
 		).resolves.toMatchObject({ secret: "secret" });
 
 		const recv = new ManualIrohRecvStream();
-		const send = new ManualIrohSendStream();
 		recv.push(
 			Buffer.from(
 				`${JSON.stringify({
@@ -3178,7 +3157,7 @@ describe("Iroh remote core helpers", () => {
 			),
 		);
 
-		const handshake = await hostEngine.readHandshake({ recv, send }, "client-node", {
+		const handshake = await hostEngine.readHandshake(recv, "client-node", {
 			conversationSession: { sessionId: "session-one", selection: "created" },
 		});
 
@@ -3186,12 +3165,10 @@ describe("Iroh remote core helpers", () => {
 			throw new Error(handshake.error);
 		}
 		expect(handshake.response.success).toBe(true);
-		expect(handshake.responseWritten).toBe(true);
-		expect(handshake.responseWriteError).toBeUndefined();
 		expect(await hostEngine.listClients()).toEqual([expect.objectContaining({ nodeId: "client-node" })]);
 	});
 
-	test("host engine can defer writing successful handshakes", async () => {
+	test("host engine returns authorized handshakes without writing transport responses", async () => {
 		const stateManager = new IrohRemoteHostStateManager({ initialState: createEmptyIrohRemoteHostState() });
 		const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
 		const hostEngine = new IrohRemoteHostEngine({
@@ -3204,7 +3181,6 @@ describe("Iroh remote core helpers", () => {
 			secret: "secret",
 		});
 		const recv = new ManualIrohRecvStream();
-		const send = new ManualIrohSendStream();
 		recv.push(
 			Buffer.from(
 				`${JSON.stringify({
@@ -3217,58 +3193,15 @@ describe("Iroh remote core helpers", () => {
 			),
 		);
 
-		const handshake = await hostEngine.readHandshake({ recv, send }, "client-node", {
+		const handshake = await hostEngine.readHandshake(recv, "client-node", {
 			child: "volt",
-			writeSuccessResponse: false,
 		});
 
 		if (!handshake.ok) {
 			throw new Error(handshake.error);
 		}
 		expect(handshake.response.success).toBe(true);
-		expect(handshake.responseWritten).toBe(false);
 		expect(handshake.initialInput).toEqual(Buffer.from('{"id":"state-1","type":"get_state"}\n'));
-		expect(send.writtenText()).toBe("");
-		expect(await hostEngine.listClients()).toEqual([expect.objectContaining({ nodeId: "client-node" })]);
-	});
-
-	test("host engine send failures do not turn committed authorization into handshake failure", async () => {
-		const stateManager = new IrohRemoteHostStateManager({ initialState: createEmptyIrohRemoteHostState() });
-		const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
-		const hostEngine = new IrohRemoteHostEngine({
-			now: () => 100,
-			stateManager,
-			workspace,
-		});
-		await hostEngine.pair({
-			irohTicket: "iroh-endpoint-ticket",
-			secret: "secret",
-		});
-		const recv = new ManualIrohRecvStream();
-		const send = new ManualIrohSendStream();
-		send.failWrites = true;
-		recv.push(
-			Buffer.from(
-				`${JSON.stringify({
-					type: "volt_iroh_hello",
-					protocol: IROH_REMOTE_ALPN,
-					workspace: "volt",
-					secret: "secret",
-					conversation: { target: "last" },
-				})}\n`,
-			),
-		);
-
-		const handshake = await hostEngine.readHandshake({ recv, send }, "client-node", {
-			conversationSession: { sessionId: "session-one", selection: "created" },
-		});
-
-		if (!handshake.ok) {
-			throw new Error(handshake.error);
-		}
-		expect(handshake.response.success).toBe(true);
-		expect(handshake.responseWritten).toBe(false);
-		expect(handshake.responseWriteError).toBe("send failed");
 		expect(await hostEngine.listClients()).toEqual([expect.objectContaining({ nodeId: "client-node" })]);
 	});
 
