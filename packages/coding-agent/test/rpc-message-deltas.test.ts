@@ -257,6 +257,45 @@ describe("RpcSessionEventEncoder", () => {
 		expect(getRecord(getContent(decoded.message)[1]).arguments).toEqual({ y: 2 });
 	});
 
+	test("does not replay queued text deltas already present in a mid-message snapshot", () => {
+		const encoder = new RpcSessionEventEncoder();
+		const decoder = new RpcMessageDeltaDecoder();
+		const advancedMessage = assistantPartial([{ type: "text", text: "AB" }]);
+		decoder.decode(
+			encoder.encode(messageUpdate(advancedMessage, { type: "text_delta", contentIndex: 0, delta: "A" })),
+		);
+		const queued = getRecord(
+			encoder.encode(messageUpdate(advancedMessage, { type: "text_delta", contentIndex: 0, delta: "B" })),
+		);
+		expect(queued).not.toHaveProperty("message");
+		expect(getRecord(queued.assistantMessageEvent).delta).toBe("");
+		const decoded = getRecord(decoder.decode(queued));
+		expect(getContent(decoded.message)).toEqual([{ type: "text", text: "AB" }]);
+	});
+
+	test("does not replay queued tool deltas already present in provider scratch", () => {
+		const encoder = new RpcSessionEventEncoder();
+		const decoder = new RpcMessageDeltaDecoder();
+		const advancedToolCall = {
+			type: "toolCall",
+			id: "tc1",
+			name: "write",
+			arguments: { content: "hello" },
+			partialJson: '{"content":"hello"}',
+		};
+		const advancedMessage = assistantPartial([advancedToolCall]);
+		decoder.decode(
+			encoder.encode(messageUpdate(advancedMessage, { type: "toolcall_delta", contentIndex: 0, delta: "hel" })),
+		);
+		const queued = getRecord(
+			encoder.encode(messageUpdate(advancedMessage, { type: "toolcall_delta", contentIndex: 0, delta: 'lo"}' })),
+		);
+		expect(queued).not.toHaveProperty("message");
+		expect(getRecord(queued.assistantMessageEvent).delta).toBe("");
+		const decoded = getRecord(decoder.decode(queued));
+		expect(getRecord(getContent(decoded.message)[0]).arguments).toEqual({ content: "hello" });
+	});
+
 	test("message_end resets the base so the next message starts from its message_start", () => {
 		const encoder = new RpcSessionEventEncoder();
 		encoder.encode({ type: "message_start", message: assistantPartial([]) });
@@ -569,6 +608,49 @@ describe("RpcSessionEventEncoder with the iroh outbound delta sanitizer", () => 
 		};
 		return { roundTrip, wireFrames };
 	}
+
+	test("keeps sanitizer-mode mid-toolcall attachments snapshot-only", () => {
+		const { roundTrip, wireFrames } = createPipeline();
+		const firstArgsText = '{"command":"cat /tmp/volt-bash-deadbeef.log';
+		const firstMessage = assistantPartial([
+			{
+				type: "toolCall",
+				id: "tc1",
+				name: "bash",
+				arguments: parseStreamingJson(firstArgsText),
+				partialJson: firstArgsText,
+			},
+		]);
+		roundTrip(
+			messageUpdate(firstMessage, {
+				type: "toolcall_delta",
+				contentIndex: 0,
+				delta: "/tmp/volt-bash-deadbeef.log",
+			}),
+		);
+
+		const secondArgsText = `${firstArgsText}x`;
+		const secondMessage = assistantPartial([
+			{
+				type: "toolCall",
+				id: "tc1",
+				name: "bash",
+				arguments: parseStreamingJson(secondArgsText),
+				partialJson: secondArgsText,
+			},
+		]);
+		roundTrip(
+			messageUpdate(secondMessage, {
+				type: "toolcall_delta",
+				contentIndex: 0,
+				delta: "x",
+			}),
+		);
+
+		expect(wireFrames[0]).toHaveProperty("message");
+		expect(wireFrames[1]).toHaveProperty("message");
+		expect(getRecord(wireFrames[1].assistantMessageEvent).delta).toBe("");
+	});
 
 	test("host paths split across text deltas cannot be reconstructed by the client", () => {
 		const { roundTrip, wireFrames } = createPipeline();

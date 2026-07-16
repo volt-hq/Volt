@@ -77,8 +77,8 @@ export interface RpcSessionEventEncoderOptions {
 export class RpcSessionEventEncoder {
 	private deltaBaseSent = false;
 	private readonly deltaSanitizer: RpcSessionEventDeltaSanitizer | undefined;
-	/** Sanitized text/thinking already shipped to the client, per content index. */
-	private readonly emittedSanitizedText = new Map<number, string>();
+	/** Text/thinking already shipped to the client, per content index. */
+	private readonly emittedText = new Map<number, string>();
 	/** Raw tool-call argument text already shipped, per resumable content index. */
 	private readonly resumableToolArgsText = new Map<number, string>();
 	/** Mid-toolcall attaches that require replacement snapshots until toolcall_end. */
@@ -98,12 +98,12 @@ export class RpcSessionEventEncoder {
 					// The full (near-empty) partial in this frame is the base.
 					this.deltaBaseSent = true;
 					this.snapshotOnlyToolCallIndexes.clear();
-					this.seedSanitizedState(event.message);
+					this.seedEncoderState(event.message);
 				}
 				return event;
 			case "message_end":
 				this.deltaBaseSent = false;
-				this.emittedSanitizedText.clear();
+				this.emittedText.clear();
 				this.resumableToolArgsText.clear();
 				this.snapshotOnlyToolCallIndexes.clear();
 				return event;
@@ -150,10 +150,101 @@ export class RpcSessionEventEncoder {
 		if (this.deltaSanitizer) {
 			return this.encodeSanitizedUpdate(this.deltaSanitizer, event, slimEvent, message);
 		}
-		if (slimEvent.type === "toolcall_start") {
-			attachToolCallStub(slimEvent, message);
+		return this.encodeUnsanitizedUpdate(event, slimEvent, message);
+	}
+
+	/**
+	 * Normal encoding derives deltas from successive accumulated values rather
+	 * than trusting the provider event fragment. Provider streams queue mutable
+	 * partial-message blocks, so an event can carry delta A after its message has
+	 * already advanced through delta B while an async hook was awaiting.
+	 */
+	private encodeUnsanitizedUpdate(
+		event: Record<string, unknown>,
+		slimEvent: Record<string, unknown>,
+		message: Record<string, unknown>,
+	): object {
+		const contentIndex = typeof slimEvent.contentIndex === "number" ? slimEvent.contentIndex : undefined;
+		switch (slimEvent.type) {
+			case "text_start":
+			case "thinking_start":
+				if (contentIndex === undefined) {
+					return this.encodeSnapshotFrame(event, slimEvent, message);
+				}
+				this.emittedText.set(contentIndex, "");
+				return encodeDeltaFrame(event, slimEvent);
+			case "text_delta":
+			case "thinking_delta": {
+				if (contentIndex === undefined) {
+					return this.encodeSnapshotFrame(event, slimEvent, message);
+				}
+				const accumulated = getStreamedBlockText(
+					message,
+					contentIndex,
+					slimEvent.type === "text_delta" ? "text" : "thinking",
+				);
+				if (accumulated === undefined) {
+					return this.encodeSnapshotFrame(event, slimEvent, message);
+				}
+				const emitted = this.emittedText.get(contentIndex) ?? "";
+				const delta = deriveAppendedDelta(
+					emitted,
+					accumulated,
+					typeof slimEvent.delta === "string" ? slimEvent.delta : "",
+				);
+				if (delta === undefined) {
+					return this.encodeSnapshotFrame(event, slimEvent, message);
+				}
+				this.emittedText.set(contentIndex, accumulated);
+				return encodeDeltaFrame(event, { ...slimEvent, delta });
+			}
+			case "text_end":
+			case "thinking_end":
+				if (contentIndex !== undefined && typeof slimEvent.content === "string") {
+					this.emittedText.set(contentIndex, slimEvent.content);
+				}
+				return encodeDeltaFrame(event, slimEvent);
+			case "toolcall_start":
+				if (contentIndex !== undefined) {
+					this.resumableToolArgsText.set(contentIndex, "");
+				}
+				attachToolCallStub(slimEvent, message);
+				return encodeDeltaFrame(event, slimEvent);
+			case "toolcall_delta": {
+				const emittedArgsText =
+					contentIndex === undefined ? undefined : this.resumableToolArgsText.get(contentIndex);
+				if (contentIndex === undefined || emittedArgsText === undefined) {
+					return this.encodeSnapshotFrame(event, slimEvent, message);
+				}
+				const block = Array.isArray(message.content) ? message.content[contentIndex] : undefined;
+				const accumulatedArgsText =
+					isRecord(block) && block.type === "toolCall" ? getToolCallArgsText(block) : undefined;
+				if (accumulatedArgsText === undefined) {
+					this.resumableToolArgsText.set(
+						contentIndex,
+						emittedArgsText + (typeof slimEvent.delta === "string" ? slimEvent.delta : ""),
+					);
+					return encodeDeltaFrame(event, slimEvent);
+				}
+				const delta = deriveAppendedDelta(
+					emittedArgsText,
+					accumulatedArgsText,
+					typeof slimEvent.delta === "string" ? slimEvent.delta : "",
+				);
+				if (delta === undefined) {
+					return this.encodeSnapshotFrame(event, slimEvent, message);
+				}
+				this.resumableToolArgsText.set(contentIndex, accumulatedArgsText);
+				return encodeDeltaFrame(event, { ...slimEvent, delta });
+			}
+			case "toolcall_end":
+				if (contentIndex !== undefined) {
+					this.resumableToolArgsText.delete(contentIndex);
+				}
+				return encodeDeltaFrame(event, slimEvent);
+			default:
+				return encodeDeltaFrame(event, slimEvent);
 		}
-		return encodeDeltaFrame(event, slimEvent);
 	}
 
 	/**
@@ -176,7 +267,7 @@ export class RpcSessionEventEncoder {
 				if (contentIndex === undefined) {
 					return this.encodeSnapshotFrame(event, slimEvent, message);
 				}
-				this.emittedSanitizedText.set(contentIndex, "");
+				this.emittedText.set(contentIndex, "");
 				return encodeDeltaFrame(event, slimEvent);
 			case "text_delta":
 			case "thinking_delta": {
@@ -188,7 +279,7 @@ export class RpcSessionEventEncoder {
 					contentIndex,
 					slimEvent.type === "text_delta" ? "text" : "thinking",
 				);
-				const emitted = this.emittedSanitizedText.get(contentIndex);
+				const emitted = this.emittedText.get(contentIndex);
 				if (rawText === undefined || emitted === undefined) {
 					return this.encodeSnapshotFrame(event, slimEvent, message);
 				}
@@ -198,7 +289,7 @@ export class RpcSessionEventEncoder {
 					// accumulator wholesale instead of appending.
 					return this.encodeSnapshotFrame(event, slimEvent, message);
 				}
-				this.emittedSanitizedText.set(contentIndex, sanitized);
+				this.emittedText.set(contentIndex, sanitized);
 				return encodeDeltaFrame(event, { ...slimEvent, delta: sanitized.slice(emitted.length) });
 			}
 			case "text_end":
@@ -206,7 +297,7 @@ export class RpcSessionEventEncoder {
 				// The whole-string `content` is sanitized by the outbound transport
 				// and is authoritative on the client; resync local state to it.
 				if (contentIndex !== undefined && typeof slimEvent.content === "string") {
-					this.emittedSanitizedText.set(contentIndex, sanitizer.sanitizeText(slimEvent.content));
+					this.emittedText.set(contentIndex, sanitizer.sanitizeText(slimEvent.content));
 				}
 				return encodeDeltaFrame(event, slimEvent);
 			case "toolcall_start":
@@ -260,13 +351,13 @@ export class RpcSessionEventEncoder {
 		message: Record<string, unknown>,
 	): object {
 		this.updateSnapshotToolCallState(message);
+		this.seedEncoderState(message);
 		if (!this.deltaSanitizer) {
 			return { ...event, assistantMessageEvent: slimEvent };
 		}
 		// The client re-seeds its accumulator (and drops any raw tool-call
-		// argument text) from the sanitized snapshot; resync emitted state and
-		// blank the raw delta so no unsanitized fragment rides along.
-		this.seedSanitizedState(message);
+		// argument text) from the sanitized snapshot; blank the raw delta so no
+		// unsanitized fragment rides along.
 		return {
 			...event,
 			assistantMessageEvent: typeof slimEvent.delta === "string" ? { ...slimEvent, delta: "" } : slimEvent,
@@ -291,22 +382,22 @@ export class RpcSessionEventEncoder {
 		}
 	}
 
-	private seedSanitizedState(message: Record<string, unknown>): void {
-		this.emittedSanitizedText.clear();
+	private seedEncoderState(message: Record<string, unknown>): void {
+		this.emittedText.clear();
 		this.resumableToolArgsText.clear();
-		const sanitizer = this.deltaSanitizer;
-		if (!sanitizer || !Array.isArray(message.content)) {
+		if (!Array.isArray(message.content)) {
 			return;
 		}
+		const sanitizer = this.deltaSanitizer;
 		for (const [index, block] of message.content.entries()) {
 			if (!isRecord(block)) {
 				continue;
 			}
 			if (block.type === "text" && typeof block.text === "string") {
-				this.emittedSanitizedText.set(index, sanitizer.sanitizeText(block.text));
+				this.emittedText.set(index, sanitizer ? sanitizer.sanitizeText(block.text) : block.text);
 			} else if (block.type === "thinking" && typeof block.thinking === "string") {
-				this.emittedSanitizedText.set(index, sanitizer.sanitizeText(block.thinking));
-			} else if (block.type === "toolCall") {
+				this.emittedText.set(index, sanitizer ? sanitizer.sanitizeText(block.thinking) : block.thinking);
+			} else if (!sanitizer && block.type === "toolCall") {
 				const argsText = getToolCallArgsText(block);
 				if (argsText !== undefined) {
 					this.resumableToolArgsText.set(index, argsText);
@@ -314,6 +405,16 @@ export class RpcSessionEventEncoder {
 			}
 		}
 	}
+}
+
+function deriveAppendedDelta(emitted: string, accumulated: string, eventDelta: string): string | undefined {
+	if (accumulated.length === emitted.length + eventDelta.length && accumulated.endsWith(eventDelta)) {
+		return eventDelta;
+	}
+	if (accumulated.length === emitted.length) {
+		return accumulated === emitted ? "" : undefined;
+	}
+	return accumulated.startsWith(emitted) ? accumulated.slice(emitted.length) : undefined;
 }
 
 function encodeDeltaFrame(event: Record<string, unknown>, slimEvent: Record<string, unknown>): object {
