@@ -16,7 +16,11 @@ import {
 } from "../../core/remote/iroh/index.ts";
 import { getDefaultSessionDir, type SessionManager } from "../../core/session-manager.ts";
 import { SettingsManager } from "../../core/settings-manager.ts";
-import { SubagentManager, type SubagentRuntimeCreatedEvent } from "../../core/subagents/index.ts";
+import {
+	SubagentManager,
+	type SubagentRuntimeCreatedEvent,
+	type SubagentRuntimeRegistration,
+} from "../../core/subagents/index.ts";
 import {
 	createSessionManagerTargetStore,
 	type IrohRemoteSessionTarget,
@@ -37,7 +41,9 @@ export interface IrohRemoteAgentRuntimeOptions {
 	cwd: string;
 	/** Project/config root for .volt resources. Defaults to cwd. */
 	projectCwd?: string;
-	onSubagentRuntimeCreated?: (event: IrohRemoteSubagentRuntimeCreatedEvent) => void | Promise<void>;
+	onSubagentRuntimeCreated?: (
+		event: IrohRemoteSubagentRuntimeCreatedEvent,
+	) => SubagentRuntimeRegistration | Promise<SubagentRuntimeRegistration> | Promise<void> | void;
 	profile?: string;
 	projectTrusted?: boolean;
 	/** Pre-resolved session target (daemon path); skips internal target resolution. */
