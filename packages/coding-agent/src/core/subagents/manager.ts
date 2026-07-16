@@ -74,6 +74,11 @@ export interface SubagentResult {
 export interface SubagentHandle {
 	id: string;
 	sessionId: string;
+	/**
+	 * Send a message to the child. A rejection before the prompt is accepted
+	 * rolls back the unpublished start (daemon hosts dispose the prepared child
+	 * runtime) and disposes this handle, so it cannot be retried.
+	 */
 	prompt(message: string): Promise<void>;
 	abort(): Promise<void>;
 	getState(): Promise<RpcSessionState>;
@@ -388,6 +393,13 @@ class LocalSubagentHandle implements SubagentHandle {
 		} catch (error) {
 			await this.onPromptFailed(error).catch(() => undefined);
 			this.settleOwnership();
+			if (!this.promptAccepted) {
+				// An unpublished prompt failure rolled the start back; daemon hosts
+				// dispose the prepared child runtime, so the handle cannot be
+				// retried. Dispose it so later calls fail with a clear
+				// disposed-handle error instead of generic disposed-session errors.
+				await this.dispose().catch(() => undefined);
+			}
 			throw error;
 		}
 	}

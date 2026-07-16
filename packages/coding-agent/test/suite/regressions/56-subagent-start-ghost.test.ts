@@ -175,6 +175,25 @@ describe("issue #56", () => {
 		}
 	});
 
+	it("disposes the handle after an unpublished prompt failure", async () => {
+		const context = await createTestContext({ withConfiguredAuth: false });
+		try {
+			const handle = await context.manager.startByName("researcher");
+
+			await expect(handle.prompt("inspect authentication")).rejects.toThrow(/API key/i);
+
+			// The rollback disposed the prepared child runtime, so the handle is
+			// dead: later calls must fail with a clear disposed-handle error.
+			await expect(handle.getState()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
+			await expect(handle.prompt("retry")).rejects.toThrow(`Subagent ${handle.id} is disposed`);
+			await expect(handle.waitForEnd()).rejects.toThrow(/disposed before completion/);
+			await handle.dispose();
+			expect(context.registration.rollback).toHaveBeenCalledOnce();
+		} finally {
+			await context.cleanup();
+		}
+	});
+
 	it("retains an accepted run that fails during provider execution", async () => {
 		const context = await createTestContext({ withConfiguredAuth: true, providerFailure: true });
 		try {
