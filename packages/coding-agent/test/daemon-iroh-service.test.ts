@@ -26,9 +26,17 @@ interface PhoneEndpoint {
 	close(): Promise<void>;
 }
 
+interface PhoneBiStream extends IrohBiStreamLike {
+	send: IrohBiStreamLike["send"] & {
+		finish(): Promise<void>;
+		stopped(): Promise<number | null>;
+	};
+}
+
 interface PhoneConnection {
 	remoteId(): { toString(): string };
-	openBi(): Promise<IrohBiStreamLike>;
+	openBi(): Promise<PhoneBiStream>;
+	closed(): Promise<string>;
 	close(code: bigint, reason: number[]): void;
 }
 
@@ -215,6 +223,7 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		expect(listResponse.value.success).toBe(true);
 		expect((listResponse.value.data as Record<string, unknown>).sessions).toEqual([]);
 		connection.close(0n, Array.from(Buffer.from("done", "utf8")));
+		await connection.closed();
 
 		// The client is paired and reconnects WITHOUT the secret.
 		const clients = await control.request({ type: "clients_list" });
@@ -246,7 +255,30 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		});
 		const reconnectHandshake = await readJsonLine(reconnectStream);
 		expect(reconnectHandshake.value.success).toBe(true);
+		await writeJsonLine(reconnectStream, { id: "ls-reconnect-1", type: "list_sessions" });
+		const reconnectListResponse = await readJsonLine(reconnectStream, reconnectHandshake.rest);
+		expect(reconnectListResponse.value.command).toBe("list_sessions");
+		expect(reconnectListResponse.value.success).toBe(true);
+
+		// Completing one stream must leave the multi-stream connection reusable.
+		await reconnectStream.send.finish();
+		expect(await reconnectStream.send.stopped()).toBeNull();
+		await reconnectStream.recv.stop?.(0n);
+		const reusedStream = await reconnection.openBi();
+		await writeJsonLine(reusedStream, {
+			type: "volt_iroh_hello",
+			protocol: IROH_REMOTE_ALPN,
+			workspace: "ws",
+			workspaceDiscovery: { purpose: "list_sessions" },
+		});
+		const reusedHandshake = await readJsonLine(reusedStream);
+		expect(reusedHandshake.value.success).toBe(true);
+		await writeJsonLine(reusedStream, { id: "ls-reconnect-2", type: "list_sessions" });
+		const reusedListResponse = await readJsonLine(reusedStream, reusedHandshake.rest);
+		expect(reusedListResponse.value.command).toBe("list_sessions");
+		expect(reusedListResponse.value.success).toBe(true);
 		reconnection.close(0n, Array.from(Buffer.from("done", "utf8")));
+		await reconnection.closed();
 
 		// Revocation closes the door: the next handshake is rejected.
 		const clientNodeId = clients.type === "clients_result" ? clients.clients[0]?.clientNodeId : undefined;
@@ -264,7 +296,32 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		const revokedHandshake = await readJsonLine(revokedStream);
 		expect(revokedHandshake.value.success).toBe(false);
 		expect(revokedHandshake.value.outcome).toBe("client_revoked");
+		const revokedStreamEnd = await readLineFromIroh(revokedStream.recv, revokedHandshake.rest, {
+			maxLineBytes: 1024 * 1024,
+		});
+		expect(revokedStreamEnd.line).toBeUndefined();
+		expect(revokedStreamEnd.rest).toHaveLength(0);
+
+		// A terminal handshake failure closes only its stream. Once the host FIN is
+		// observed, another stream on the same connection must still receive the
+		// structured failure instead of losing it to a parent-connection close.
+		const retriedRevokedStream = await revokedConnection.openBi();
+		await writeJsonLine(retriedRevokedStream, {
+			type: "volt_iroh_hello",
+			protocol: IROH_REMOTE_ALPN,
+			workspace: "ws",
+			workspaceDiscovery: { purpose: "list_sessions" },
+		});
+		const retriedRevokedHandshake = await readJsonLine(retriedRevokedStream);
+		expect(retriedRevokedHandshake.value.success).toBe(false);
+		expect(retriedRevokedHandshake.value.outcome).toBe("client_revoked");
+		const retriedRevokedStreamEnd = await readLineFromIroh(retriedRevokedStream.recv, retriedRevokedHandshake.rest, {
+			maxLineBytes: 1024 * 1024,
+		});
+		expect(retriedRevokedStreamEnd.line).toBeUndefined();
+		expect(retriedRevokedStreamEnd.rest).toHaveLength(0);
 		revokedConnection.close(0n, Array.from(Buffer.from("done", "utf8")));
+		await revokedConnection.closed();
 		await phone.close();
 	}, 60_000);
 });
