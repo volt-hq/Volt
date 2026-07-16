@@ -898,8 +898,11 @@ class IrohDaemonService {
 			return true;
 		};
 
-		const requestCloseWhenIdle = () => {
-			if (closeRequested || acceptedStreamCount === 0 || streamTasks.size > 0) {
+		// Ordinary stream completion leaves the multi-stream connection reusable.
+		// Only an admission-limit refusal requests closure after sibling streams drain.
+		let closeWhenIdleRequested = false;
+		const closeWhenIdleIfRequested = () => {
+			if (closeRequested || !closeWhenIdleRequested || streamTasks.size > 0) {
 				return;
 			}
 			closeRequested = true;
@@ -938,7 +941,8 @@ class IrohDaemonService {
 						error: "stream refused at daemon active-stream limit",
 						details: { connectionId, limit: streamAdmission.limit, scope: streamAdmission.scope },
 					});
-					requestCloseWhenIdle();
+					closeWhenIdleRequested = true;
+					closeWhenIdleIfRequested();
 					continue;
 				}
 				const streamId = `stream-${++activeStreamSequence}`;
@@ -971,7 +975,7 @@ class IrohDaemonService {
 					.finally(() => {
 						streamAdmission.lease.release();
 						streamTasks.delete(task);
-						requestCloseWhenIdle();
+						closeWhenIdleIfRequested();
 					});
 				streamTasks.add(task);
 			}

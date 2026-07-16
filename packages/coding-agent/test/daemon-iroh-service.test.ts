@@ -29,6 +29,8 @@ interface PhoneEndpoint {
 interface PhoneConnection {
 	remoteId(): { toString(): string };
 	openBi(): Promise<IrohBiStreamLike>;
+	closed(): Promise<string>;
+	closeReason(): string | null;
 	close(code: bigint, reason: number[]): void;
 }
 
@@ -215,6 +217,7 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		expect(listResponse.value.success).toBe(true);
 		expect((listResponse.value.data as Record<string, unknown>).sessions).toEqual([]);
 		connection.close(0n, Array.from(Buffer.from("done", "utf8")));
+		await connection.closed();
 
 		// The client is paired and reconnects WITHOUT the secret.
 		const clients = await control.request({ type: "clients_list" });
@@ -247,6 +250,7 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		const reconnectHandshake = await readJsonLine(reconnectStream);
 		expect(reconnectHandshake.value.success).toBe(true);
 		reconnection.close(0n, Array.from(Buffer.from("done", "utf8")));
+		await reconnection.closed();
 
 		// Revocation closes the door: the next handshake is rejected.
 		const clientNodeId = clients.type === "clients_result" ? clients.clients[0]?.clientNodeId : undefined;
@@ -264,7 +268,12 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		const revokedHandshake = await readJsonLine(revokedStream);
 		expect(revokedHandshake.value.success).toBe(false);
 		expect(revokedHandshake.value.outcome).toBe("client_revoked");
+		// The host must not immediately close after writing a terminal handshake;
+		// QUIC may otherwise discard the response before the client consumes it.
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(revokedConnection.closeReason()).toBeNull();
 		revokedConnection.close(0n, Array.from(Buffer.from("done", "utf8")));
+		await revokedConnection.closed();
 		await phone.close();
 	}, 60_000);
 });
