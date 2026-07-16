@@ -347,6 +347,43 @@ describe("RpcMessageDeltaDecoder", () => {
 		expect(decoder.decode(slim)).toBe(slim);
 	});
 
+	test("streams toolcall arguments when adoption snapshot lands on toolcall_start", () => {
+		const decoder = new RpcMessageDeltaDecoder();
+		// Mid-turn attach: the first frame the client observes is the snapshot
+		// (message present) carrying the toolcall_start itself, so raw argument
+		// text is known to be empty and later deltas must stream.
+		decoder.decode({
+			type: "message_update",
+			message: assistantPartial([{ type: "toolCall", id: "tc1", name: "read", arguments: {} }]),
+			assistantMessageEvent: { type: "toolcall_start", contentIndex: 0 },
+		});
+		const afterDelta = getRecord(
+			decoder.decode({
+				type: "message_update",
+				assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: '{"path":"notes.md"' },
+			}),
+		);
+		expect(getRecord(getContent(afterDelta.message)[0]).arguments).toEqual({ path: "notes.md" });
+	});
+
+	test("keeps snapshot arguments when adopted mid-toolcall", () => {
+		const decoder = new RpcMessageDeltaDecoder();
+		// Adoption mid-stream of the argument text: raw prefix is unknown, so
+		// later deltas must not clobber the snapshot arguments.
+		decoder.decode({
+			type: "message_update",
+			message: assistantPartial([{ type: "toolCall", id: "tc1", name: "read", arguments: { path: "no" } }]),
+			assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: 'o"' },
+		});
+		const afterDelta = getRecord(
+			decoder.decode({
+				type: "message_update",
+				assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: 'tes.md"}' },
+			}),
+		);
+		expect(getRecord(getContent(afterDelta.message)[0]).arguments).toEqual({ path: "no" });
+	});
+
 	test("restores the partial reference on snapshot frames", () => {
 		const decoder = new RpcMessageDeltaDecoder();
 		const message = assistantPartial([{ type: "text", text: "hi" }]);

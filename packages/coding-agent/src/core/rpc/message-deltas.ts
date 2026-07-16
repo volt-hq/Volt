@@ -410,6 +410,16 @@ export class RpcMessageDeltaDecoder {
 			// Full frame (legacy client path or delta snapshot): re-seed the base.
 			if (message.role === "assistant") {
 				this.adopt(key, message);
+				if (
+					assistantMessageEvent.type === "toolcall_start" &&
+					typeof assistantMessageEvent.contentIndex === "number"
+				) {
+					// The snapshot landed exactly on a toolcall_start, so the raw
+					// argument text for that block is known to be empty. Seed it so
+					// subsequent delta-only toolcall_delta frames stream instead of
+					// freezing the rendered arguments until toolcall_end.
+					this.streams.get(key)?.argsText.set(assistantMessageEvent.contentIndex, "");
+				}
 			}
 			if ("partial" in assistantMessageEvent) {
 				return event;
