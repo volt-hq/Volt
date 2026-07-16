@@ -1,6 +1,6 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { TextDecoder } from "node:util";
-import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "../../rpc/index.ts";
+import type { RpcCloseHandler, RpcLineHandler, RpcSessionEventDeltaSanitizer, RpcTransport } from "../../rpc/index.ts";
 
 export const IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH = "[redacted bash output path]";
 export const IROH_REMOTE_REDACTED_EXPORT_PATH = "[redacted export path]";
@@ -76,6 +76,24 @@ export function createIrohRemoteOutboundFilteredRpcTransport(options: IrohRemote
 		close() {
 			return options.transport.close();
 		},
+	};
+}
+
+/**
+ * Streamed `message_update` frames are delta-only on the wire, so the
+ * per-frame sanitizer cannot see host paths split across deltas. The RPC
+ * session event encoder uses this sanitizer to re-derive wire deltas from
+ * sanitized accumulated text; it sanitizes strings exactly like the frame
+ * filter does, so client-side accumulation matches the sanitized snapshots
+ * and `*_end` frames the filter produces.
+ */
+export function createIrohRemoteOutboundDeltaSanitizer(
+	options: IrohRemoteOutboundSanitizerOptions,
+): RpcSessionEventDeltaSanitizer {
+	const context = createSanitizerContext(options);
+	return {
+		sanitizeText: (value) => sanitizeRemoteText(value, context),
+		sanitizeToolCallArguments: (value) => sanitizeValue(value, context, "arguments"),
 	};
 }
 

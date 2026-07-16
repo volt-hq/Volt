@@ -259,6 +259,7 @@ export {
 	createIrohRemoteHandshakeFailure,
 	createIrohRemoteHandshakeSuccess,
 	createIrohRemoteHostMetadata,
+	createIrohRemoteOutboundDeltaSanitizer,
 	createIrohRemoteOutboundFilteredRpcTransport,
 	createIrohRemotePresetAccess,
 	createIrohRemoteRpcCapabilityDeniedResponse,

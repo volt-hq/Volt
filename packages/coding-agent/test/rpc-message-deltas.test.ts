@@ -1,4 +1,10 @@
+import { resolve, sep } from "node:path";
+import { parseStreamingJson } from "@hansjm10/volt-ai";
 import { describe, expect, test } from "vitest";
+import {
+	createIrohRemoteOutboundDeltaSanitizer,
+	sanitizeIrohRemoteOutbound,
+} from "../src/core/remote/iroh/outbound-filter.ts";
 import {
 	RpcMessageDeltaDecoder,
 	RpcSessionEventEncoder,
@@ -352,5 +358,145 @@ describe("RpcMessageDeltaDecoder", () => {
 			}),
 		);
 		expect(getRecord(decoded.assistantMessageEvent).partial).toBe(message);
+	});
+});
+
+describe("RpcSessionEventEncoder with the iroh outbound delta sanitizer", () => {
+	// Same redaction options for the delta sanitizer and the per-frame outbound
+	// filter, mirroring runIrohRemoteRpcMode.
+	const workspacePath = resolve("/Users/jordan/secret-project");
+	const sanitizerOptions = { workspacePath };
+
+	function createPipeline() {
+		const encoder = new RpcSessionEventEncoder({
+			deltaSanitizer: createIrohRemoteOutboundDeltaSanitizer(sanitizerOptions),
+		});
+		const decoder = new RpcMessageDeltaDecoder();
+		const wireFrames: Array<Record<string, unknown>> = [];
+		const roundTrip = (event: object): Record<string, unknown> => {
+			const frame = getRecord(
+				JSON.parse(JSON.stringify(sanitizeIrohRemoteOutbound(encoder.encode(event), sanitizerOptions))),
+			);
+			wireFrames.push(frame);
+			return getRecord(decoder.decode(frame));
+		};
+		return { roundTrip, wireFrames };
+	}
+
+	test("host paths split across text deltas cannot be reconstructed by the client", () => {
+		const { roundTrip, wireFrames } = createPipeline();
+		const fullText = `See ${workspacePath}${sep}notes.md ok`;
+		// Split inside the secret directory name, like model tokenizers do.
+		const splitAt = fullText.indexOf("secret-project") + 3;
+
+		roundTrip({ type: "message_start", message: assistantPartial([]) });
+		roundTrip(messageUpdate(assistantPartial([{ type: "text", text: "" }]), { type: "text_start", contentIndex: 0 }));
+		roundTrip(
+			messageUpdate(assistantPartial([{ type: "text", text: fullText.slice(0, splitAt) }]), {
+				type: "text_delta",
+				contentIndex: 0,
+				delta: fullText.slice(0, splitAt),
+			}),
+		);
+		// Streaming stays delta-only while sanitization is append-only.
+		expect("message" in wireFrames[2]).toBe(false);
+
+		const afterFull = roundTrip(
+			messageUpdate(assistantPartial([{ type: "text", text: fullText }]), {
+				type: "text_delta",
+				contentIndex: 0,
+				delta: fullText.slice(splitAt),
+			}),
+		);
+		// Redaction rewrote already-streamed text: the wire carries a sanitized
+		// snapshot (accumulator replacement) instead of the raw delta.
+		expect(isRecord(wireFrames[3].message)).toBe(true);
+		expect(getRecord(wireFrames[3].assistantMessageEvent).delta).toBe("");
+		expect(getContent(afterFull.message)).toEqual([{ type: "text", text: "See /workspace/notes.md ok" }]);
+
+		const ended = roundTrip(
+			messageUpdate(assistantPartial([{ type: "text", text: fullText }]), {
+				type: "text_end",
+				contentIndex: 0,
+				content: fullText,
+			}),
+		);
+		expect(getContent(ended.message)).toEqual([{ type: "text", text: "See /workspace/notes.md ok" }]);
+
+		for (const frame of wireFrames) {
+			expect(JSON.stringify(frame)).not.toContain("secret-project");
+		}
+	});
+
+	test("host paths split across toolcall deltas are redacted via snapshot frames", () => {
+		const { roundTrip, wireFrames } = createPipeline();
+		const argsJson = JSON.stringify({ path: `${workspacePath}${sep}notes.md` });
+		const splitAt = argsJson.indexOf("secret-project") + 3;
+		const partialArgs = parseStreamingJson(argsJson.slice(0, splitAt));
+		const fullArgs = { path: `${workspacePath}${sep}notes.md` };
+		const toolBlock = (args: unknown) => ({ type: "toolCall", id: "tc1", name: "read", arguments: args });
+
+		roundTrip({ type: "message_start", message: assistantPartial([]) });
+		roundTrip(messageUpdate(assistantPartial([toolBlock({})]), { type: "toolcall_start", contentIndex: 0 }));
+		roundTrip(
+			messageUpdate(assistantPartial([toolBlock(partialArgs)]), {
+				type: "toolcall_delta",
+				contentIndex: 0,
+				delta: argsJson.slice(0, splitAt),
+			}),
+		);
+		// Sanitization does not change the partial arguments yet: raw JSON streams.
+		expect("message" in wireFrames[2]).toBe(false);
+
+		const afterFull = roundTrip(
+			messageUpdate(assistantPartial([toolBlock(fullArgs)]), {
+				type: "toolcall_delta",
+				contentIndex: 0,
+				delta: argsJson.slice(splitAt),
+			}),
+		);
+		// The completed path is redactable: raw argument JSON stops and a
+		// sanitized snapshot replaces the client accumulator.
+		expect(isRecord(wireFrames[3].message)).toBe(true);
+		expect(getRecord(wireFrames[3].assistantMessageEvent).delta).toBe("");
+		expect(getRecord(getContent(afterFull.message)[0]).arguments).toEqual({ path: "/workspace/notes.md" });
+
+		const ended = roundTrip(
+			messageUpdate(assistantPartial([toolBlock(fullArgs)]), {
+				type: "toolcall_end",
+				contentIndex: 0,
+				toolCall: toolBlock(fullArgs),
+			}),
+		);
+		expect(getContent(ended.message)[0]).toEqual(toolBlock({ path: "/workspace/notes.md" }));
+
+		for (const frame of wireFrames) {
+			expect(JSON.stringify(frame)).not.toContain("secret-project");
+		}
+	});
+
+	test("clean streamed text stays delta-only", () => {
+		const { roundTrip, wireFrames } = createPipeline();
+		roundTrip({ type: "message_start", message: assistantPartial([]) });
+		roundTrip(messageUpdate(assistantPartial([{ type: "text", text: "" }]), { type: "text_start", contentIndex: 0 }));
+		const first = roundTrip(
+			messageUpdate(assistantPartial([{ type: "text", text: "Hello " }]), {
+				type: "text_delta",
+				contentIndex: 0,
+				delta: "Hello ",
+			}),
+		);
+		const second = roundTrip(
+			messageUpdate(assistantPartial([{ type: "text", text: "Hello world" }]), {
+				type: "text_delta",
+				contentIndex: 0,
+				delta: "world",
+			}),
+		);
+		expect("message" in wireFrames[2]).toBe(false);
+		expect("message" in wireFrames[3]).toBe(false);
+		expect(getRecord(wireFrames[3].assistantMessageEvent).delta).toBe("world");
+		expect(getContent(first.message)).toEqual([{ type: "text", text: "Hello " }]);
+		expect(getContent(second.message)).toEqual([{ type: "text", text: "Hello world" }]);
 	});
 });

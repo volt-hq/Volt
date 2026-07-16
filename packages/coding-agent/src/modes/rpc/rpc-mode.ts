@@ -158,6 +158,8 @@ export interface RpcModeOptions {
 	registerPushTarget?: (args: unknown) => Promise<RpcRegisterPushTargetResponse>;
 	/** Observes set_client_capabilities feature lists (remote hosts gate optional pushes on these). */
 	onClientCapabilitiesChanged?: (features: string[]) => void;
+	/** Outbound event encoder factory; iroh remote mode passes redaction-aware encoders. */
+	createSessionEventEncoder?: () => RpcSessionEventEncoder;
 }
 
 type RpcModeStartupAwareTransport = RpcTransport & {
@@ -559,10 +561,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			requestTransportFailureShutdown(writeError);
 		}
 	};
+	const createSessionEventEncoder = options.createSessionEventEncoder ?? (() => new RpcSessionEventEncoder());
 	const rpcSubagents = new RpcSubagentLifecycle({
 		getSession: () => session,
 		output,
-		createEventEncoder: () => new RpcSessionEventEncoder(),
+		createEventEncoder: createSessionEventEncoder,
 	});
 
 	// Pending extension UI requests waiting for response
@@ -923,7 +926,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
-		const sessionEventEncoder = new RpcSessionEventEncoder();
+		const sessionEventEncoder = createSessionEventEncoder();
 		unsubscribe = session.subscribe((event) => {
 			output(sessionEventEncoder.encode(event));
 		});

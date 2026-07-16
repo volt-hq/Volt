@@ -16,6 +16,14 @@
  * `RpcMessageDeltaDecoder` reconstructs the full documented event shape on the
  * client, so consumers of `RpcClientEvent` keep the in-process contract
  * regardless of what crossed the wire.
+ *
+ * Transports that redact outbound frames (iroh remote) sanitize each frame
+ * independently, which cannot catch a host path split across deltas: the
+ * client accumulator would rebuild the raw path. An encoder constructed with a
+ * `deltaSanitizer` therefore re-derives wire deltas from sanitized accumulated
+ * text and falls back to a full `message` snapshot (an accumulator replacement
+ * per the documented protocol) whenever sanitization rewrites text the client
+ * already received.
  */
 
 import { parseStreamingJson } from "@hansjm10/volt-ai";
@@ -43,6 +51,22 @@ export function stripAssistantMessageEventPartial(event: unknown): unknown {
 }
 
 /**
+ * Redacts streamed assistant content before it crosses a privacy boundary
+ * (the iroh remote transport). `sanitizeText` must be deterministic and match
+ * the transport's whole-string sanitization of the same text: the client's
+ * delta accumulation has to agree with the sanitized snapshots and
+ * `text_end`/`toolcall_end` frames the transport produces.
+ */
+export interface RpcSessionEventDeltaSanitizer {
+	sanitizeText(value: string): string;
+	sanitizeToolCallArguments(value: unknown): unknown;
+}
+
+export interface RpcSessionEventEncoderOptions {
+	deltaSanitizer?: RpcSessionEventDeltaSanitizer;
+}
+
+/**
  * Per-stream outbound projection of AgentSession events. One encoder serves
  * exactly one ordered event stream (a session subscription or one subagent
  * handle); it tracks whether the connected client already holds the
@@ -50,6 +74,15 @@ export function stripAssistantMessageEventPartial(event: unknown): unknown {
  */
 export class RpcSessionEventEncoder {
 	private deltaBaseSent = false;
+	private readonly deltaSanitizer: RpcSessionEventDeltaSanitizer | undefined;
+	/** Sanitized text/thinking already shipped to the client, per content index. */
+	private readonly emittedSanitizedText = new Map<number, string>();
+	/** Content indexes whose raw tool-call argument JSON the client can still resume. */
+	private readonly resumableToolArgs = new Set<number>();
+
+	constructor(options: RpcSessionEventEncoderOptions = {}) {
+		this.deltaSanitizer = options.deltaSanitizer;
+	}
 
 	encode(event: object): object {
 		if (!isRecord(event)) {
@@ -60,10 +93,13 @@ export class RpcSessionEventEncoder {
 				if (isRecord(event.message) && event.message.role === "assistant") {
 					// The full (near-empty) partial in this frame is the base.
 					this.deltaBaseSent = true;
+					this.seedSanitizedState(event.message);
 				}
 				return event;
 			case "message_end":
 				this.deltaBaseSent = false;
+				this.emittedSanitizedText.clear();
+				this.resumableToolArgs.clear();
 				return event;
 			case "message_update":
 				return this.encodeMessageUpdate(event);
@@ -92,23 +128,193 @@ export class RpcSessionEventEncoder {
 			// No message_start observed on this stream for this message:
 			// this frame doubles as the accumulator snapshot.
 			this.deltaBaseSent = true;
-			return { ...event, assistantMessageEvent: slimEvent };
+			return this.encodeSnapshotFrame(event, slimEvent, message);
+		}
+		if (this.deltaSanitizer) {
+			return this.encodeSanitizedUpdate(this.deltaSanitizer, event, slimEvent, message);
 		}
 		if (slimEvent.type === "toolcall_start") {
-			// Tool call identity otherwise only exists in the omitted partial;
-			// ship the tiny id/name stub so clients can render the pending call.
-			const contentIndex = slimEvent.contentIndex;
-			const block =
-				Array.isArray(message.content) && typeof contentIndex === "number"
-					? message.content[contentIndex]
-					: undefined;
-			if (isRecord(block) && block.type === "toolCall") {
-				slimEvent.toolCall = { id: block.id, name: block.name };
+			attachToolCallStub(slimEvent, message);
+		}
+		return encodeDeltaFrame(event, slimEvent);
+	}
+
+	/**
+	 * Sanitizer-mode encoding: every emitted delta is the diff between
+	 * successive sanitized accumulations, so the client's rebuilt text always
+	 * equals the sanitized accumulated text. When sanitization rewrites text the
+	 * client already received (a redactable host path completed across deltas),
+	 * fall back to a full snapshot frame that the transport sanitizes wholesale.
+	 */
+	private encodeSanitizedUpdate(
+		sanitizer: RpcSessionEventDeltaSanitizer,
+		event: Record<string, unknown>,
+		slimEvent: Record<string, unknown>,
+		message: Record<string, unknown>,
+	): object {
+		const contentIndex = typeof slimEvent.contentIndex === "number" ? slimEvent.contentIndex : undefined;
+		switch (slimEvent.type) {
+			case "text_start":
+			case "thinking_start":
+				if (contentIndex === undefined) {
+					return this.encodeSnapshotFrame(event, slimEvent, message);
+				}
+				this.emittedSanitizedText.set(contentIndex, "");
+				return encodeDeltaFrame(event, slimEvent);
+			case "text_delta":
+			case "thinking_delta": {
+				if (contentIndex === undefined) {
+					return this.encodeSnapshotFrame(event, slimEvent, message);
+				}
+				const rawText = getStreamedBlockText(
+					message,
+					contentIndex,
+					slimEvent.type === "text_delta" ? "text" : "thinking",
+				);
+				const emitted = this.emittedSanitizedText.get(contentIndex);
+				if (rawText === undefined || emitted === undefined) {
+					return this.encodeSnapshotFrame(event, slimEvent, message);
+				}
+				const sanitized = sanitizer.sanitizeText(rawText);
+				if (!sanitized.startsWith(emitted)) {
+					// Redaction rewrote text the client already rendered; replace the
+					// accumulator wholesale instead of appending.
+					return this.encodeSnapshotFrame(event, slimEvent, message);
+				}
+				this.emittedSanitizedText.set(contentIndex, sanitized);
+				return encodeDeltaFrame(event, { ...slimEvent, delta: sanitized.slice(emitted.length) });
+			}
+			case "text_end":
+			case "thinking_end":
+				// The whole-string `content` is sanitized by the outbound transport
+				// and is authoritative on the client; resync local state to it.
+				if (contentIndex !== undefined && typeof slimEvent.content === "string") {
+					this.emittedSanitizedText.set(contentIndex, sanitizer.sanitizeText(slimEvent.content));
+				}
+				return encodeDeltaFrame(event, slimEvent);
+			case "toolcall_start":
+				if (contentIndex !== undefined) {
+					this.resumableToolArgs.add(contentIndex);
+				}
+				attachToolCallStub(slimEvent, message);
+				return encodeDeltaFrame(event, slimEvent);
+			case "toolcall_delta": {
+				if (contentIndex === undefined || !this.resumableToolArgs.has(contentIndex)) {
+					return this.encodeSnapshotFrame(event, slimEvent, message);
+				}
+				const block = Array.isArray(message.content) ? message.content[contentIndex] : undefined;
+				const args = isRecord(block) && block.type === "toolCall" ? block.arguments : undefined;
+				if (args === undefined || !jsonValueEquals(args, sanitizer.sanitizeToolCallArguments(args))) {
+					// Sanitization changes the accumulated arguments, so the raw
+					// argument JSON cannot ship. Snapshots keep the client's rendered
+					// args current until toolcall_end delivers the sanitized block.
+					this.resumableToolArgs.delete(contentIndex);
+					return this.encodeSnapshotFrame(event, slimEvent, message);
+				}
+				return encodeDeltaFrame(event, slimEvent);
+			}
+			case "toolcall_end":
+				if (contentIndex !== undefined) {
+					this.resumableToolArgs.delete(contentIndex);
+				}
+				return encodeDeltaFrame(event, slimEvent);
+			default:
+				return encodeDeltaFrame(event, slimEvent);
+		}
+	}
+
+	private encodeSnapshotFrame(
+		event: Record<string, unknown>,
+		slimEvent: Record<string, unknown>,
+		message: Record<string, unknown>,
+	): object {
+		if (!this.deltaSanitizer) {
+			return { ...event, assistantMessageEvent: slimEvent };
+		}
+		// The client re-seeds its accumulator (and drops any raw tool-call
+		// argument text) from the sanitized snapshot; resync emitted state and
+		// blank the raw delta so no unsanitized fragment rides along.
+		this.seedSanitizedState(message);
+		return {
+			...event,
+			assistantMessageEvent: typeof slimEvent.delta === "string" ? { ...slimEvent, delta: "" } : slimEvent,
+		};
+	}
+
+	private seedSanitizedState(message: Record<string, unknown>): void {
+		this.emittedSanitizedText.clear();
+		this.resumableToolArgs.clear();
+		const sanitizer = this.deltaSanitizer;
+		if (!sanitizer || !Array.isArray(message.content)) {
+			return;
+		}
+		for (const [index, block] of message.content.entries()) {
+			if (!isRecord(block)) {
+				continue;
+			}
+			if (block.type === "text" && typeof block.text === "string") {
+				this.emittedSanitizedText.set(index, sanitizer.sanitizeText(block.text));
+			} else if (block.type === "thinking" && typeof block.thinking === "string") {
+				this.emittedSanitizedText.set(index, sanitizer.sanitizeText(block.thinking));
 			}
 		}
-		const { message: _message, ...deltaFrame } = event;
-		return { ...deltaFrame, assistantMessageEvent: slimEvent };
 	}
+}
+
+function encodeDeltaFrame(event: Record<string, unknown>, slimEvent: Record<string, unknown>): object {
+	const { message: _message, ...deltaFrame } = event;
+	return { ...deltaFrame, assistantMessageEvent: slimEvent };
+}
+
+/**
+ * Tool call identity otherwise only exists in the omitted partial; ship the
+ * tiny id/name stub so clients can render the pending call.
+ */
+function attachToolCallStub(slimEvent: Record<string, unknown>, message: Record<string, unknown>): void {
+	const contentIndex = slimEvent.contentIndex;
+	const block =
+		Array.isArray(message.content) && typeof contentIndex === "number" ? message.content[contentIndex] : undefined;
+	if (isRecord(block) && block.type === "toolCall") {
+		slimEvent.toolCall = { id: block.id, name: block.name };
+	}
+}
+
+function getStreamedBlockText(
+	message: Record<string, unknown>,
+	contentIndex: number,
+	kind: "text" | "thinking",
+): string | undefined {
+	if (!Array.isArray(message.content)) {
+		return undefined;
+	}
+	const block = message.content[contentIndex];
+	if (!isRecord(block) || block.type !== kind) {
+		return undefined;
+	}
+	const value = kind === "text" ? block.text : block.thinking;
+	return typeof value === "string" ? value : undefined;
+}
+
+function jsonValueEquals(left: unknown, right: unknown): boolean {
+	if (left === right) {
+		return true;
+	}
+	if (Array.isArray(left) || Array.isArray(right)) {
+		return (
+			Array.isArray(left) &&
+			Array.isArray(right) &&
+			left.length === right.length &&
+			left.every((entry, index) => jsonValueEquals(entry, right[index]))
+		);
+	}
+	if (isRecord(left) && isRecord(right)) {
+		const leftKeys = Object.keys(left);
+		if (leftKeys.length !== Object.keys(right).length) {
+			return false;
+		}
+		return leftKeys.every((key) => Object.hasOwn(right, key) && jsonValueEquals(left[key], right[key]));
+	}
+	return false;
 }
 
 interface MessageDeltaStreamState {

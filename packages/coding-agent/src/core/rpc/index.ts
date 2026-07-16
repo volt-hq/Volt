@@ -12,7 +12,9 @@ export { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 export { createLoopbackRpcTransportPair, type LoopbackRpcTransportPair } from "./loopback-transport.ts";
 export {
 	RpcMessageDeltaDecoder,
+	type RpcSessionEventDeltaSanitizer,
 	RpcSessionEventEncoder,
+	type RpcSessionEventEncoderOptions,
 	stripAssistantMessageEventPartial,
 } from "./message-deltas.ts";
 export {

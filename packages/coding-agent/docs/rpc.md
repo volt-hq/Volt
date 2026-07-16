@@ -1470,7 +1470,7 @@ Example streaming a text response:
 Reconstruction rules:
 
 - `message_start` and `message_end` always carry the full message; seed the accumulator from `message_start` and reset/validate it on `message_end`.
-- If no `message_start` was observed on the stream for the current message (mid-turn attach), the first `message_update` carries a full `message` snapshot; treat any update that includes `message` as an accumulator replacement.
+- If no `message_start` was observed on the stream for the current message (mid-turn attach), the first `message_update` carries a full `message` snapshot; treat any update that includes `message` as an accumulator replacement. A snapshot can also arrive mid-message (remote transports send one whenever redaction rewrites text that already streamed), so replacement must work at any point.
 - `text_delta`/`thinking_delta` append `delta` to the block at `contentIndex`; `text_end`/`thinking_end` carry the authoritative block `content`.
 - Delta-only `toolcall_start` frames include a `toolCall` stub (`{"id", "name"}`); `toolcall_delta` streams raw argument JSON text; `toolcall_end` carries the authoritative full `toolCall` object.
 - The same rules apply to `message_update` events wrapped in `subagent_event`, keyed per `subagentId`. Drop a subagent's accumulator on `subagent_end` or `subagent_disposed`.
