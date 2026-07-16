@@ -75,9 +75,10 @@ export interface SubagentHandle {
 	id: string;
 	sessionId: string;
 	/**
-	 * Send a message to the child. A rejection before the prompt is accepted
-	 * rolls back the unpublished start (daemon hosts dispose the prepared child
-	 * runtime) and disposes this handle, so it cannot be retried.
+	 * Send a message to the child. A rejection before the start is published
+	 * (prompt preflight or the host's runtime registration commit) rolls back
+	 * the unpublished start (daemon hosts dispose the prepared child runtime)
+	 * and disposes this handle, so it cannot be retried.
 	 */
 	prompt(message: string): Promise<void>;
 	abort(): Promise<void>;
@@ -387,8 +388,12 @@ class LocalSubagentHandle implements SubagentHandle {
 		this.promptStarted = true;
 		try {
 			await this.client.prompt(message, undefined, () => {
-				this.promptAccepted = true;
+				// Publish before marking acceptance: publishing can itself fail
+				// (daemon hosts re-check preconditions when committing the runtime
+				// registration), and a publish failure must take the unpublished
+				// rollback path below, which disposes this handle.
 				this.onPromptAccepted(message);
+				this.promptAccepted = true;
 			});
 		} catch (error) {
 			await this.onPromptFailed(error).catch(() => undefined);

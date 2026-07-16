@@ -222,7 +222,7 @@ Cancellation semantics:
 
 Failure semantics:
 
-- First-prompt preflight failures reject the prompt, roll back the unpublished start (daemon hosts dispose the prepared child runtime), and dispose the handle; nothing is recorded in activities or the registry.
+- First-prompt failures before the start is published (preflight rejections and host runtime-registration commit failures) reject the prompt, roll back the unpublished start (daemon hosts dispose the prepared child runtime), and dispose the handle; nothing is recorded in activities or the registry.
 - Model/provider/tool errors are reported through child events and final result metadata.
 - Subprocess fallback is outside the MVP.
 - Child failures must not crash the parent agent loop.

@@ -46,6 +46,7 @@ function createDefinition(): SubagentDefinition {
 async function createTestContext(options: {
 	withConfiguredAuth: boolean;
 	providerFailure?: boolean;
+	commit?: () => void;
 	rollback?: () => Promise<void>;
 }): Promise<TestContext> {
 	const children: Harness[] = [];
@@ -87,7 +88,7 @@ async function createTestContext(options: {
 		return { ...created, services, diagnostics: services.diagnostics };
 	};
 	const registration: SubagentRuntimeRegistration = {
-		commit: vi.fn(),
+		commit: vi.fn(options.commit ?? (() => {})),
 		rollback: vi.fn(options.rollback ?? (async () => {})),
 	};
 	const manager = new SubagentManager({
@@ -188,6 +189,31 @@ describe("issue #56", () => {
 			await expect(handle.prompt("retry")).rejects.toThrow(`Subagent ${handle.id} is disposed`);
 			await expect(handle.waitForEnd()).rejects.toThrow(/disposed before completion/);
 			await handle.dispose();
+			expect(context.registration.rollback).toHaveBeenCalledOnce();
+		} finally {
+			await context.cleanup();
+		}
+	});
+
+	it("disposes the handle when the registration commit rejects an accepted prompt", async () => {
+		const context = await createTestContext({
+			withConfiguredAuth: true,
+			commit: () => {
+				throw new Error("Parent runtime is not active");
+			},
+		});
+		try {
+			const handle = await context.manager.startByName("researcher");
+
+			// The commit runs after the child accepted the prompt; its failure must
+			// still take the unpublished rollback path and dispose the handle.
+			await expect(handle.prompt("inspect authentication")).rejects.toThrow("Parent runtime is not active");
+
+			await expect(handle.getState()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
+			await expect(handle.prompt("retry")).rejects.toThrow(`Subagent ${handle.id} is disposed`);
+			await expect(handle.waitForEnd()).rejects.toThrow(/disposed before completion/);
+			expect(context.manager.listActivities()).toEqual([]);
+			expect(context.manager.listDelegations()).toEqual([]);
 			expect(context.registration.rollback).toHaveBeenCalledOnce();
 		} finally {
 			await context.cleanup();
