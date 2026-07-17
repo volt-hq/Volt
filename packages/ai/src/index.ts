@@ -24,6 +24,8 @@ export type { OpenAICompletionsOptions } from "./providers/openai-completions.ts
 export type { OpenAIResponsesOptions } from "./providers/openai-responses.ts";
 export * from "./providers/register-builtins.ts";
 export * from "./session-resources.ts";
+export * from "./stream/fragments.ts";
+export * from "./stream/normalizer.ts";
 export * from "./stream.ts";
 export * from "./types.ts";
 export * from "./utils/diagnostics.ts";

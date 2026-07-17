@@ -11,8 +11,8 @@ import type {
 	ChatCompletionToolMessageParam,
 } from "openai/resources/chat/completions.js";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
+import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
 import type {
-	AssistantMessage,
 	CacheRetention,
 	Context,
 	ImageContent,
@@ -29,10 +29,9 @@ import type {
 	Tool,
 	ToolCall,
 	ToolResultMessage,
+	Usage,
 } from "../types.ts";
-import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
-import { parseStreamingJson } from "../utils/json-parse.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
@@ -92,6 +91,10 @@ type ResolvedOpenAICompletionsCompat = Omit<Required<OpenAICompletionsCompat>, "
 
 type ChatCompletionInstructionMessageParam = ChatCompletionDeveloperMessageParam | ChatCompletionSystemMessageParam;
 
+type ChatCompletionChoiceWithUsage = ChatCompletionChunk["choices"][number] & {
+	usage?: ChatCompletionChunk["usage"];
+};
+
 type ChatCompletionTextPartWithCacheControl = ChatCompletionContentPartText & {
 	cache_control?: OpenAICompatCacheControl;
 };
@@ -114,28 +117,25 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 	model: Model<"openai-completions">,
 	context: Context,
 	options?: OpenAICompletionsOptions,
-): AssistantMessageEventStream => {
-	const stream = new AssistantMessageEventStream();
+) => {
+	const normalizer = new AssistantStreamNormalizer();
+	const timestamp = Date.now();
+	let started = false;
+	const start = () => {
+		if (started) return;
+		started = true;
+		normalizer.push({
+			type: "start",
+			init: {
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				timestamp,
+			},
+		});
+	};
 
 	(async () => {
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
-
 		try {
 			const apiKey = options?.apiKey;
 			if (!apiKey) {
@@ -159,111 +159,87 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				.create(params, requestOptions)
 				.withResponse();
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			stream.push({ type: "start", partial: output });
+			start();
 
-			interface StreamingToolCallBlock extends ToolCall {
-				partialArgs?: string;
+			interface StreamingToolCallState {
+				contentIndex: number;
 				streamIndex?: number;
+				id: string;
+				name: string;
+				thoughtSignature?: string;
 			}
-			type StreamingBlock = TextContent | ThinkingContent | StreamingToolCallBlock;
 			type StreamingToolCallDelta = NonNullable<ChatCompletionChunk.Choice.Delta["tool_calls"]>[number];
 
-			let textBlock: TextContent | null = null;
-			let thinkingBlock: ThinkingContent | null = null;
+			let nextContentIndex = 0;
+			let textContentIndex: number | undefined;
+			let thinkingContentIndex: number | undefined;
 			let hasFinishReason = false;
-			const toolCallBlocksByIndex = new Map<number, StreamingToolCallBlock>();
-			const toolCallBlocksById = new Map<string, StreamingToolCallBlock>();
-			const blocks = output.content as StreamingBlock[];
-			const getContentIndex = (block: StreamingBlock) => blocks.indexOf(block);
-			const finishBlock = (block: StreamingBlock) => {
-				const contentIndex = getContentIndex(block);
-				if (contentIndex === -1) {
-					return;
+			let stopReason: StopReason = "stop";
+			let stopErrorMessage: string | undefined;
+			let responseId: string | undefined;
+			let responseModel: string | undefined;
+			const toolCallStates: StreamingToolCallState[] = [];
+			const toolCallStatesByIndex = new Map<number, StreamingToolCallState>();
+			const toolCallStatesById = new Map<string, StreamingToolCallState>();
+			const ensureTextBlock = (): number => {
+				if (textContentIndex === undefined) {
+					textContentIndex = nextContentIndex++;
+					normalizer.push({ type: "text_start", contentIndex: textContentIndex });
 				}
-				if (block.type === "text") {
-					stream.push({
-						type: "text_end",
-						contentIndex,
-						content: block.text,
-						partial: output,
-					});
-				} else if (block.type === "thinking") {
-					stream.push({
-						type: "thinking_end",
-						contentIndex,
-						content: block.thinking,
-						partial: output,
-					});
-				} else if (block.type === "toolCall") {
-					block.arguments = parseStreamingJson(block.partialArgs);
-					// Finalize in-place and strip the scratch buffers so replay only
-					// carries parsed arguments.
-					delete block.partialArgs;
-					delete block.streamIndex;
-					stream.push({
-						type: "toolcall_end",
-						contentIndex,
-						toolCall: block,
-						partial: output,
-					});
-				}
+				return textContentIndex;
 			};
-			const ensureTextBlock = () => {
-				if (!textBlock) {
-					textBlock = { type: "text", text: "" };
-					blocks.push(textBlock);
-					stream.push({ type: "text_start", contentIndex: getContentIndex(textBlock), partial: output });
-				}
-				return textBlock;
-			};
-			const ensureThinkingBlock = (thinkingSignature: string) => {
-				if (!thinkingBlock) {
-					thinkingBlock = {
-						type: "thinking",
-						thinking: "",
+			const ensureThinkingBlock = (thinkingSignature: string): number => {
+				if (thinkingContentIndex === undefined) {
+					thinkingContentIndex = nextContentIndex++;
+					normalizer.push({
+						type: "thinking_start",
+						contentIndex: thinkingContentIndex,
 						thinkingSignature,
-					};
-					blocks.push(thinkingBlock);
-					stream.push({ type: "thinking_start", contentIndex: getContentIndex(thinkingBlock), partial: output });
+					});
 				}
-				return thinkingBlock;
+				return thinkingContentIndex;
 			};
-			const ensureToolCallBlock = (toolCall: StreamingToolCallDelta) => {
+			const ensureToolCallState = (toolCall: StreamingToolCallDelta): StreamingToolCallState => {
 				const streamIndex = typeof toolCall.index === "number" ? toolCall.index : undefined;
-				let block = streamIndex !== undefined ? toolCallBlocksByIndex.get(streamIndex) : undefined;
-				if (!block && toolCall.id) {
-					block = toolCallBlocksById.get(toolCall.id);
+				let state = streamIndex !== undefined ? toolCallStatesByIndex.get(streamIndex) : undefined;
+				if (!state && toolCall.id) {
+					state = toolCallStatesById.get(toolCall.id);
 				}
-				if (!block) {
-					block = {
-						type: "toolCall",
+				if (!state) {
+					state = {
+						contentIndex: nextContentIndex++,
 						id: toolCall.id || "",
 						name: toolCall.function?.name || "",
-						arguments: {},
-						partialArgs: "",
 						streamIndex,
 					};
+					toolCallStates.push(state);
 					if (streamIndex !== undefined) {
-						toolCallBlocksByIndex.set(streamIndex, block);
+						toolCallStatesByIndex.set(streamIndex, state);
 					}
 					if (toolCall.id) {
-						toolCallBlocksById.set(toolCall.id, block);
+						toolCallStatesById.set(toolCall.id, state);
 					}
-					blocks.push(block);
-					stream.push({
+					normalizer.push({
 						type: "toolcall_start",
-						contentIndex: getContentIndex(block),
-						partial: output,
+						contentIndex: state.contentIndex,
+						id: state.id,
+						name: state.name,
 					});
 				}
-				if (streamIndex !== undefined && block.streamIndex === undefined) {
-					block.streamIndex = streamIndex;
-					toolCallBlocksByIndex.set(streamIndex, block);
+				if (streamIndex !== undefined && state.streamIndex === undefined) {
+					state.streamIndex = streamIndex;
+					toolCallStatesByIndex.set(streamIndex, state);
 				}
 				if (toolCall.id) {
-					toolCallBlocksById.set(toolCall.id, block);
+					toolCallStatesById.set(toolCall.id, state);
+					if (!state.id) {
+						state.id = toolCall.id;
+					}
 				}
-				return block;
+				if (!state.name && toolCall.function?.name) {
+					state.name = toolCall.function.name;
+				}
+				return state;
 			};
 
 			for await (const chunk of openaiStream) {
@@ -271,12 +247,21 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
-				output.responseId ||= chunk.id;
-				if (typeof chunk.model === "string" && chunk.model.length > 0 && chunk.model !== model.id) {
-					output.responseModel ||= chunk.model;
+				if (!responseId && chunk.id) {
+					responseId = chunk.id;
+					normalizer.push({ type: "meta", patch: { responseId } });
+				}
+				if (
+					!responseModel &&
+					typeof chunk.model === "string" &&
+					chunk.model.length > 0 &&
+					chunk.model !== model.id
+				) {
+					responseModel = chunk.model;
+					normalizer.push({ type: "meta", patch: { responseModel } });
 				}
 				if (chunk.usage) {
-					output.usage = parseChunkUsage(chunk.usage, model);
+					normalizer.push({ type: "meta", patch: { usage: parseChunkUsage(chunk.usage, model) } });
 				}
 
 				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
@@ -284,16 +269,15 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 
 				// Fallback: some providers (e.g., Moonshot) return usage
 				// in choice.usage instead of the standard chunk.usage
-				if (!chunk.usage && (choice as any).usage) {
-					output.usage = parseChunkUsage((choice as any).usage, model);
+				const choiceUsage = (choice as ChatCompletionChoiceWithUsage).usage;
+				if (!chunk.usage && choiceUsage) {
+					normalizer.push({ type: "meta", patch: { usage: parseChunkUsage(choiceUsage, model) } });
 				}
 
 				if (choice.finish_reason) {
 					const finishReasonResult = mapStopReason(choice.finish_reason);
-					output.stopReason = finishReasonResult.stopReason;
-					if (finishReasonResult.errorMessage) {
-						output.errorMessage = finishReasonResult.errorMessage;
-					}
+					stopReason = finishReasonResult.stopReason;
+					stopErrorMessage = finishReasonResult.errorMessage;
 					hasFinishReason = true;
 				}
 
@@ -303,13 +287,11 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						choice.delta.content !== undefined &&
 						choice.delta.content.length > 0
 					) {
-						const block = ensureTextBlock();
-						block.text += choice.delta.content;
-						stream.push({
+						const contentIndex = ensureTextBlock();
+						normalizer.push({
 							type: "text_delta",
-							contentIndex: getContentIndex(block),
+							contentIndex,
 							delta: choice.delta.content,
-							partial: output,
 						});
 					}
 
@@ -335,39 +317,24 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 								model.provider === "opencode-go" && foundReasoningField === "reasoning"
 									? "reasoning_content"
 									: foundReasoningField;
-							const block = ensureThinkingBlock(thinkingSignature);
-							block.thinking += delta;
-							stream.push({
+							const contentIndex = ensureThinkingBlock(thinkingSignature);
+							normalizer.push({
 								type: "thinking_delta",
-								contentIndex: getContentIndex(block),
+								contentIndex,
 								delta,
-								partial: output,
 							});
 						}
 					}
 
 					if (choice?.delta?.tool_calls) {
 						for (const toolCall of choice.delta.tool_calls) {
-							const block = ensureToolCallBlock(toolCall);
-							if (!block.id && toolCall.id) {
-								block.id = toolCall.id;
-								toolCallBlocksById.set(toolCall.id, block);
-							}
-							if (!block.name && toolCall.function?.name) {
-								block.name = toolCall.function.name;
-							}
-
-							let delta = "";
-							if (toolCall.function?.arguments) {
-								delta = toolCall.function.arguments;
-								block.partialArgs = (block.partialArgs ?? "") + toolCall.function.arguments;
-								block.arguments = parseStreamingJson(block.partialArgs);
-							}
-							stream.push({
+							const state = ensureToolCallState(toolCall);
+							normalizer.push({
 								type: "toolcall_delta",
-								contentIndex: getContentIndex(block),
-								delta,
-								partial: output,
+								contentIndex: state.contentIndex,
+								argsTextDelta: toolCall.function?.arguments || "",
+								id: state.id,
+								name: state.name,
 							});
 						}
 					}
@@ -376,9 +343,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					if (reasoningDetails && Array.isArray(reasoningDetails)) {
 						for (const detail of reasoningDetails) {
 							if (detail.type === "reasoning.encrypted" && detail.id && detail.data) {
-								const matchingToolCall = output.content.find(
-									(b) => b.type === "toolCall" && b.id === detail.id,
-								) as ToolCall | undefined;
+								const matchingToolCall = toolCallStatesById.get(detail.id);
 								if (matchingToolCall) {
 									matchingToolCall.thoughtSignature = JSON.stringify(detail);
 								}
@@ -388,50 +353,74 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				}
 			}
 
-			for (const block of blocks) {
-				finishBlock(block);
+			const endings: Array<
+				| { kind: "text"; contentIndex: number }
+				| { kind: "thinking"; contentIndex: number }
+				| { kind: "toolCall"; state: StreamingToolCallState }
+			> = [
+				...(textContentIndex === undefined ? [] : [{ kind: "text" as const, contentIndex: textContentIndex }]),
+				...(thinkingContentIndex === undefined
+					? []
+					: [{ kind: "thinking" as const, contentIndex: thinkingContentIndex }]),
+				...toolCallStates.map((state) => ({ kind: "toolCall" as const, state })),
+			];
+			endings.sort((left, right) => {
+				const leftIndex = left.kind === "toolCall" ? left.state.contentIndex : left.contentIndex;
+				const rightIndex = right.kind === "toolCall" ? right.state.contentIndex : right.contentIndex;
+				return leftIndex - rightIndex;
+			});
+			for (const ending of endings) {
+				if (ending.kind === "text") {
+					normalizer.push({ type: "text_end", contentIndex: ending.contentIndex });
+				} else if (ending.kind === "thinking") {
+					normalizer.push({ type: "thinking_end", contentIndex: ending.contentIndex });
+				} else {
+					normalizer.push({
+						type: "toolcall_end",
+						contentIndex: ending.state.contentIndex,
+						thoughtSignature: ending.state.thoughtSignature,
+					});
+				}
 			}
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
 			}
 
-			if (output.stopReason === "aborted") {
+			if (stopReason === "aborted") {
 				throw new Error("Request was aborted");
 			}
-			if (output.stopReason === "error") {
-				throw new Error(output.errorMessage || "Provider returned an error stop reason");
+			if (stopReason === "error") {
+				throw new Error(stopErrorMessage || "Provider returned an error stop reason");
 			}
 			if (!hasFinishReason) {
 				throw new Error("Stream ended without finish_reason");
 			}
 
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			normalizer.push({ type: "done", reason: stopReason });
 		} catch (error) {
-			for (const block of output.content) {
-				delete (block as { index?: number }).index;
-				// Streaming scratch buffers are only used during parsing; never persist them.
-				delete (block as { partialArgs?: string }).partialArgs;
-				delete (block as { streamIndex?: number }).streamIndex;
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+			start();
+			let errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
 			// Some providers via OpenRouter give additional information in this field.
 			const rawMetadata = (error as any)?.error?.metadata?.raw;
-			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			if (rawMetadata) errorMessage += `\n${rawMetadata}`;
+			normalizer.push({
+				type: "error",
+				reason: options?.signal?.aborted ? "aborted" : "error",
+				errorMessage,
+			});
+		} finally {
+			normalizer.end();
 		}
 	})();
 
-	return stream;
+	return normalizer.stream;
 };
 
 export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions", SimpleStreamOptions> = (
 	model: Model<"openai-completions">,
 	context: Context,
 	options?: SimpleStreamOptions,
-): AssistantMessageEventStream => {
+) => {
 	const apiKey = options?.apiKey;
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);
@@ -1031,7 +1020,7 @@ function parseChunkUsage(
 		prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
 	},
 	model: Model<"openai-completions">,
-): AssistantMessage["usage"] {
+): Usage {
 	const promptTokens = rawUsage.prompt_tokens || 0;
 	const cacheReadTokens = rawUsage.prompt_tokens_details?.cached_tokens ?? rawUsage.prompt_cache_hit_tokens ?? 0;
 	const cacheWriteTokens = rawUsage.prompt_tokens_details?.cache_write_tokens || 0;
@@ -1047,7 +1036,7 @@ function parseChunkUsage(
 	const input = Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens);
 	// OpenAI completion_tokens already includes reasoning_tokens.
 	const outputTokens = rawUsage.completion_tokens || 0;
-	const usage: AssistantMessage["usage"] = {
+	const usage: Usage = {
 		input,
 		output: outputTokens,
 		cacheRead: cacheReadTokens,

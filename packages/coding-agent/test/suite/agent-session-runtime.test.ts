@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
@@ -159,6 +159,72 @@ describe("AgentSessionRuntime characterization", () => {
 			throw new Error("missing persisted assistant message");
 		}
 		expect(persistedAssistant.usage.cost.total).toBe(0.123);
+	});
+
+	it("executes tool calls from a functional message_end replacement", async () => {
+		let replaced = false;
+		const { runtime, faux } = await createRuntimeForTest((volt: ExtensionAPI) => {
+			volt.on("message_end", (event) => {
+				if (replaced || event.message.role !== "assistant") return;
+				replaced = true;
+				return {
+					message: {
+						...event.message,
+						content: [fauxToolCall("replacement_tool", { value: "rewritten" }, { id: "replacement-call" })],
+						stopReason: "toolUse",
+					},
+				};
+			});
+		});
+		const startedTools: string[] = [];
+		runtime.session.subscribe((event) => {
+			if (event.type === "tool_execution_start") {
+				startedTools.push(event.toolName);
+			}
+		});
+
+		await runtime.session.prompt("hello");
+
+		expect(startedTools).toContain("replacement_tool");
+		expect(faux.state.callCount).toBe(2);
+		const replacedMessage = runtime.session.messages.find(
+			(message) =>
+				message.role === "assistant" &&
+				message.content.some((content) => content.type === "toolCall" && content.id === "replacement-call"),
+		);
+		expect(replacedMessage).toBeDefined();
+	});
+
+	it("uses a functional message_end replacement for retry classification", async () => {
+		let replaced = false;
+		const { runtime, faux } = await createRuntimeForTest((volt: ExtensionAPI) => {
+			volt.on("message_end", (event) => {
+				if (replaced || event.message.role !== "assistant") return;
+				replaced = true;
+				return {
+					message: {
+						...event.message,
+						stopReason: "error",
+						errorMessage: "overloaded_error",
+					},
+				};
+			});
+		});
+		runtime.session.settingsManager.applyOverrides({
+			retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 },
+		});
+		const retryDecisions: Array<boolean | undefined> = [];
+		runtime.session.subscribe((event) => {
+			if (event.type === "agent_end") {
+				retryDecisions.push(event.willRetry);
+			}
+		});
+
+		await runtime.session.prompt("hello");
+
+		expect(faux.state.callCount).toBe(2);
+		expect(retryDecisions).toEqual([true, false]);
+		expect(runtime.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
 
 	it("emits session_before_switch and session_start for new and resume flows", async () => {

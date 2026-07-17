@@ -122,7 +122,7 @@ const s = stream(model, context);
 for await (const event of s) {
   switch (event.type) {
     case 'start':
-      console.log(`Starting with ${event.partial.model}`);
+      console.log(`Starting with ${event.snapshot.model}`);
       break;
     case 'text_start':
       console.log('\n[Text started]');
@@ -147,7 +147,7 @@ for await (const event of s) {
       break;
     case 'toolcall_delta':
       // Partial tool arguments are being streamed
-      const partialCall = event.partial.content[event.contentIndex];
+      const partialCall = event.snapshot.content[event.contentIndex];
       if (partialCall.type === 'toolCall') {
         console.log(`[Streaming args for ${partialCall.name}]`);
       }
@@ -305,7 +305,7 @@ const s = stream(model, context);
 
 for await (const event of s) {
   if (event.type === 'toolcall_delta') {
-    const toolCall = event.partial.content[event.contentIndex];
+    const toolCall = event.snapshot.content[event.contentIndex];
 
     // toolCall.arguments contains partially parsed JSON during streaming
     // This allows for progressive UI updates
@@ -382,18 +382,18 @@ All streaming events emitted during assistant message generation:
 
 | Event Type | Description | Key Properties |
 |------------|-------------|----------------|
-| `start` | Stream begins | `partial`: Initial assistant message structure |
-| `text_start` | Text block starts | `contentIndex`: Position in content array |
-| `text_delta` | Text chunk received | `delta`: New text, `contentIndex`: Position |
-| `text_end` | Text block complete | `content`: Full text, `contentIndex`: Position |
-| `thinking_start` | Thinking block starts | `contentIndex`: Position in content array |
-| `thinking_delta` | Thinking chunk received | `delta`: New text, `contentIndex`: Position |
-| `thinking_end` | Thinking block complete | `content`: Full thinking, `contentIndex`: Position |
-| `toolcall_start` | Tool call begins | `contentIndex`: Position in content array |
-| `toolcall_delta` | Tool arguments streaming | `delta`: JSON chunk, `partial.content[contentIndex].arguments`: Partial parsed args |
-| `toolcall_end` | Tool call complete | `toolCall`: Complete validated tool call with `id`, `name`, `arguments` |
-| `done` | Stream complete | `reason`: Stop reason ("stop", "length", "toolUse"), `message`: Final assistant message |
-| `error` | Error occurred | `reason`: Error type ("error" or "aborted"), `error`: AssistantMessage with partial content |
+| `start` | Stream begins | `seq`, `snapshot`, `toolState` |
+| `text_start` | Text block starts | `contentIndex`, `snapshot`, `toolState` |
+| `text_delta` | Text chunk received | `delta`, `contentIndex`, `snapshot`, `toolState` |
+| `text_end` | Text block complete | `content`, `contentIndex`, `snapshot`, `toolState` |
+| `thinking_start` | Thinking block starts | `contentIndex`, `snapshot`, `toolState` |
+| `thinking_delta` | Thinking chunk received | `delta`, `contentIndex`, `snapshot`, `toolState` |
+| `thinking_end` | Thinking block complete | `content`, `contentIndex`, `snapshot`, `toolState` |
+| `toolcall_start` | Tool call begins | `contentIndex`, `id`, `name`, `snapshot`, `toolState` |
+| `toolcall_delta` | Tool arguments streaming | `argsTextDelta`, `contentIndex`, `snapshot`, `toolState` |
+| `toolcall_end` | Tool call complete | `toolCall`, `contentIndex`, `snapshot`, `toolState` |
+| `done` | Stream complete | `seq`, `reason` ("stop", "length", or "toolUse"), `message` |
+| `error` | Stream failed or aborted | `seq`, `reason` ("error" or "aborted"), `error` |
 
 Streaming events for different content blocks are not guaranteed to be contiguous. Providers may emit deltas for text, thinking, and tool calls in the same upstream chunk, and volt may surface corresponding events interleaved, for example `text_start`, `text_delta`, `toolcall_start`, `text_delta`, `toolcall_delta`. Consumers must use `contentIndex` to associate each delta/end event with its block and must not assume that a block's `*_start`/`*_delta`/`*_end` sequence is uninterrupted by events for other blocks.
 

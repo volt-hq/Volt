@@ -11,12 +11,26 @@ export {
 export { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 export { createLoopbackRpcTransportPair, type LoopbackRpcTransportPair } from "./loopback-transport.ts";
 export {
-	RpcMessageDeltaDecoder,
-	type RpcSessionEventDeltaSanitizer,
-	RpcSessionEventEncoder,
-	type RpcSessionEventEncoderOptions,
-	stripAssistantMessageEventPartial,
-} from "./message-deltas.ts";
+	createProjectionState,
+	type ProjectedMessageEndFrame,
+	type ProjectedMessageStartFrame,
+	type ProjectedMessageUpdateFrame,
+	type ProjectionBatch,
+	type ProjectionConfig,
+	type ProjectionDiagnostic,
+	type ProjectionInput,
+	type ProjectionPhase,
+	type ProjectionResult,
+	type ProjectionSanitizer,
+	type ProjectionState,
+	project,
+	type SlimAssistantEvent,
+	type StreamPos,
+	StreamProjectionDecoder,
+	type StreamProjectionDecoderOptions,
+	StreamProjector,
+	type WireFrame,
+} from "./stream-projection.ts";
 export {
 	createJsonlRpcTransport,
 	createJsonlStreamRpcTransport,

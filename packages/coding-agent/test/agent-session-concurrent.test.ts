@@ -94,10 +94,15 @@ describe("AgentSession concurrent prompt guard", () => {
 				abortSignal = options?.signal;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
-					stream.push({ type: "start", partial: createAssistantMessage("") });
+					stream.push({ type: "start", seq: 0, snapshot: createAssistantMessage(""), toolState: [] });
 					const checkAbort = () => {
 						if (abortSignal?.aborted) {
-							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
+							stream.push({
+								type: "error",
+								seq: 1,
+								reason: "aborted",
+								error: createAssistantMessage("Aborted"),
+							});
 						} else {
 							setTimeout(checkAbort, 5);
 						}
@@ -214,15 +219,20 @@ describe("AgentSession concurrent prompt guard", () => {
 
 					if (userTexts.includes("Steer from extension")) {
 						sawSteeringMessage = true;
-						stream.push({ type: "start", partial: createAssistantMessage("") });
-						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Steered") });
+						stream.push({ type: "start", seq: 0, snapshot: createAssistantMessage(""), toolState: [] });
+						stream.push({ type: "done", seq: 1, reason: "stop", message: createAssistantMessage("Steered") });
 						return;
 					}
 
-					stream.push({ type: "start", partial: createAssistantMessage("") });
+					stream.push({ type: "start", seq: 0, snapshot: createAssistantMessage(""), toolState: [] });
 					const checkAbort = () => {
 						if (abortSignal?.aborted) {
-							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
+							stream.push({
+								type: "error",
+								seq: 1,
+								reason: "aborted",
+								error: createAssistantMessage("Aborted"),
+							});
 						} else {
 							setTimeout(checkAbort, 5);
 						}
@@ -304,8 +314,8 @@ describe("AgentSession concurrent prompt guard", () => {
 			streamFn: () => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
-					stream.push({ type: "start", partial: createAssistantMessage("") });
-					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Done") });
+					stream.push({ type: "start", seq: 0, snapshot: createAssistantMessage(""), toolState: [] });
+					stream.push({ type: "done", seq: 1, reason: "stop", message: createAssistantMessage("Done") });
 				});
 				return stream;
 			},
@@ -384,8 +394,8 @@ describe("AgentSession concurrent prompt guard", () => {
 							stopReason: "stop",
 							timestamp: Date.now(),
 						};
-						stream.push({ type: "start", partial: { ...message, content: [] } });
-						stream.push({ type: "done", reason: "stop", message });
+						stream.push({ type: "start", seq: 0, snapshot: { ...message, content: [] }, toolState: [] });
+						stream.push({ type: "done", seq: 1, reason: "stop", message });
 						return;
 					}
 
@@ -410,8 +420,8 @@ describe("AgentSession concurrent prompt guard", () => {
 						timestamp: Date.now(),
 					};
 
-					stream.push({ type: "start", partial: { ...message, content: [] } });
-					stream.push({ type: "done", reason: "toolUse", message });
+					stream.push({ type: "start", seq: 0, snapshot: { ...message, content: [] }, toolState: [] });
+					stream.push({ type: "done", seq: 1, reason: "toolUse", message });
 				});
 				return stream;
 			},
@@ -531,8 +541,8 @@ describe("AgentSession concurrent prompt guard", () => {
 							stopReason: "stop",
 							timestamp: Date.now(),
 						};
-						stream.push({ type: "start", partial: { ...message, content: [] } });
-						stream.push({ type: "done", reason: "stop", message });
+						stream.push({ type: "start", seq: 0, snapshot: { ...message, content: [] }, toolState: [] });
+						stream.push({ type: "done", seq: 1, reason: "stop", message });
 						return;
 					}
 
@@ -557,8 +567,8 @@ describe("AgentSession concurrent prompt guard", () => {
 						timestamp: Date.now(),
 					};
 
-					stream.push({ type: "start", partial: { ...message, content: [] } });
-					stream.push({ type: "done", reason: "toolUse", message });
+					stream.push({ type: "start", seq: 0, snapshot: { ...message, content: [] }, toolState: [] });
+					stream.push({ type: "done", seq: 1, reason: "toolUse", message });
 				});
 				return stream;
 			},

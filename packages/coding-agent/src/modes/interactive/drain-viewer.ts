@@ -1,6 +1,6 @@
 import type { MarkdownTheme, TUI } from "@hansjm10/volt-tui";
 import { Container, Loader, Spacer, Text } from "@hansjm10/volt-tui";
-import { RpcMessageDeltaDecoder } from "../../core/rpc/message-deltas.ts";
+import { type ProjectionDiagnostic, StreamProjectionDecoder } from "../../core/rpc/stream-projection.ts";
 import { theme } from "../../core/theme/runtime.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { isCoalescableAssistantUpdate, StreamingRenderCoalescer } from "./components/streaming-render-coalescer.ts";
@@ -50,7 +50,9 @@ export class DrainViewerComponent extends Container {
 	private readonly options: DrainViewerOptions;
 	private readonly loader: Loader;
 	private readonly content = new Container();
-	private readonly messageDeltaDecoder = new RpcMessageDeltaDecoder();
+	private readonly streamProjectionDecoder = new StreamProjectionDecoder({
+		onDiagnostic: (diagnostic) => reportStreamProjectionDiagnostic("drain-viewer", diagnostic),
+	});
 	private streamingComponent: AssistantMessageComponent | undefined;
 	private streamingRenderCoalescer: StreamingRenderCoalescer<ViewerMessage> | undefined;
 	private readonly pendingTools = new Map<string, ToolExecutionComponent>();
@@ -88,6 +90,7 @@ export class DrainViewerComponent extends Container {
 			// render after this, so their renderer resources must be released here
 			// or partial subagent rows leak their repaint intervals.
 			this.truncated = true;
+			this.streamProjectionDecoder.dispose();
 			this.streamingRenderCoalescer?.dispose();
 			this.streamingRenderCoalescer = undefined;
 			this.content.clear();
@@ -103,7 +106,11 @@ export class DrainViewerComponent extends Container {
 			// "finishing remote turn…".
 			return;
 		}
-		const event = this.messageDeltaDecoder.decode(raw) as ViewerEvent;
+		const decoded = this.streamProjectionDecoder.decode(raw);
+		if (decoded === undefined) {
+			return;
+		}
+		const event = decoded as ViewerEvent;
 		switch (event.type) {
 			case "message_start": {
 				const message = event.message;
@@ -242,6 +249,7 @@ export class DrainViewerComponent extends Container {
 	/** Stop the spinner; the component is removed by the post-grant re-render. */
 	finish(message?: string): void {
 		this.finished = true;
+		this.streamProjectionDecoder.dispose();
 		this.streamingRenderCoalescer?.dispose();
 		this.streamingRenderCoalescer = undefined;
 		this.disposePendingTools();
@@ -257,4 +265,8 @@ export class DrainViewerComponent extends Container {
 		}
 		this.pendingTools.clear();
 	}
+}
+
+function reportStreamProjectionDiagnostic(boundary: string, diagnostic: ProjectionDiagnostic): void {
+	console.error(`[stream-projection:${boundary}] ${diagnostic.code}: ${diagnostic.message}`, diagnostic);
 }

@@ -8,10 +8,9 @@ import type {
 	RefusalStopDetails,
 } from "@anthropic-ai/sdk/resources/messages.js";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
+import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
 import type {
 	AnthropicMessagesCompat,
-	Api,
-	AssistantMessage,
 	CacheRetention,
 	Context,
 	ImageContent,
@@ -23,14 +22,13 @@ import type {
 	StreamFunction,
 	StreamOptions,
 	TextContent,
-	ThinkingContent,
 	Tool,
-	ToolCall,
 	ToolResultMessage,
+	Usage,
 } from "../types.ts";
-import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
-import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
+import { parseJsonWithRepair } from "../utils/json-parse.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 
@@ -454,25 +452,40 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 	context: Context,
 	options?: AnthropicOptions,
 ): AssistantMessageEventStream => {
-	const stream = new AssistantMessageEventStream();
-
-	(async () => {
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: model.api as Api,
+	const normalizer = new AssistantStreamNormalizer();
+	normalizer.push({
+		type: "start",
+		init: {
+			api: model.api,
 			provider: model.provider,
 			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
 			timestamp: Date.now(),
+		},
+	});
+
+	(async () => {
+		let usage: Usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		let stopReason: StopReason = "stop";
+		let stopErrorMessage: string | undefined;
+		let nextContentIndex = 0;
+		type AnthropicBlockKind = "text" | "thinking" | "toolCall";
+		const blocksByRawIndex = new Map<number, { contentIndex: number; kind: AnthropicBlockKind }>();
+		const registerBlock = (rawIndex: number, kind: AnthropicBlockKind) => {
+			const block = { contentIndex: nextContentIndex, kind };
+			nextContentIndex += 1;
+			blocksByRawIndex.set(rawIndex, block);
+			return block.contentIndex;
+		};
+		const resolveBlock = (rawIndex: number, kind: AnthropicBlockKind) => {
+			const block = blocksByRawIndex.get(rawIndex);
+			return block?.contentIndex ?? registerBlock(rawIndex, kind);
 		};
 
 		try {
@@ -525,171 +538,110 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			};
 			const response = await client.messages.create({ ...params, stream: true }, requestOptions).asResponse();
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			stream.push({ type: "start", partial: output });
-
-			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
-			const blocks = output.content as Block[];
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
 				if (event.type === "message_start") {
-					output.responseId = event.message.id;
 					// Capture initial token usage from message_start event
 					// This ensures we have input token counts even if the stream is aborted early
-					output.usage.input = event.message.usage.input_tokens || 0;
-					output.usage.output = event.message.usage.output_tokens || 0;
-					output.usage.cacheRead = event.message.usage.cache_read_input_tokens || 0;
-					output.usage.cacheWrite = event.message.usage.cache_creation_input_tokens || 0;
-					output.usage.cacheWrite1h = event.message.usage.cache_creation?.ephemeral_1h_input_tokens || 0;
+					usage = {
+						...usage,
+						input: event.message.usage.input_tokens || 0,
+						output: event.message.usage.output_tokens || 0,
+						cacheRead: event.message.usage.cache_read_input_tokens || 0,
+						cacheWrite: event.message.usage.cache_creation_input_tokens || 0,
+						cacheWrite1h: event.message.usage.cache_creation?.ephemeral_1h_input_tokens || 0,
+					};
 					// Anthropic doesn't provide total_tokens, compute from components
-					output.usage.totalTokens =
-						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-					calculateCost(model, output.usage);
+					usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+					calculateCost(model, usage);
+					normalizer.push({ type: "meta", patch: { responseId: event.message.id, usage } });
 				} else if (event.type === "content_block_start") {
 					if (event.content_block.type === "text") {
-						const block: Block = {
-							type: "text",
-							text: "",
-							index: event.index,
-						};
-						output.content.push(block);
-						stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
+						const contentIndex = registerBlock(event.index, "text");
+						normalizer.push({ type: "text_start", contentIndex });
 					} else if (event.content_block.type === "thinking") {
-						const block: Block = {
-							type: "thinking",
-							thinking: "",
-							thinkingSignature: "",
-							index: event.index,
-						};
-						output.content.push(block);
-						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
+						const contentIndex = registerBlock(event.index, "thinking");
+						normalizer.push({ type: "thinking_start", contentIndex });
 					} else if (event.content_block.type === "redacted_thinking") {
-						const block: Block = {
-							type: "thinking",
-							thinking: "[Reasoning redacted]",
+						const contentIndex = registerBlock(event.index, "thinking");
+						normalizer.push({
+							type: "thinking_start",
+							contentIndex,
+							content: "[Reasoning redacted]",
 							thinkingSignature: event.content_block.data,
 							redacted: true,
-							index: event.index,
-						};
-						output.content.push(block);
-						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
+						});
 					} else if (event.content_block.type === "tool_use") {
-						const block: Block = {
-							type: "toolCall",
+						const contentIndex = registerBlock(event.index, "toolCall");
+						normalizer.push({
+							type: "toolcall_start",
+							contentIndex,
 							id: event.content_block.id,
 							name: isOAuth
 								? fromClaudeCodeName(event.content_block.name, context.tools)
 								: event.content_block.name,
-							arguments: (event.content_block.input as Record<string, any>) ?? {},
-							partialJson: "",
-							index: event.index,
-						};
-						output.content.push(block);
-						stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
+						});
+						const seededArgs = JSON.stringify(event.content_block.input ?? {});
+						if (seededArgs !== "{}") {
+							normalizer.push({ type: "toolcall_delta", contentIndex, argsTextDelta: seededArgs });
+						}
 					}
 				} else if (event.type === "content_block_delta") {
 					if (event.delta.type === "text_delta") {
-						const index = blocks.findIndex((b) => b.index === event.index);
-						const block = blocks[index];
-						if (block && block.type === "text") {
-							block.text += event.delta.text;
-							stream.push({
-								type: "text_delta",
-								contentIndex: index,
-								delta: event.delta.text,
-								partial: output,
-							});
-						}
+						const contentIndex = resolveBlock(event.index, "text");
+						normalizer.push({ type: "text_delta", contentIndex, delta: event.delta.text });
 					} else if (event.delta.type === "thinking_delta") {
-						const index = blocks.findIndex((b) => b.index === event.index);
-						const block = blocks[index];
-						if (block && block.type === "thinking") {
-							block.thinking += event.delta.thinking;
-							stream.push({
-								type: "thinking_delta",
-								contentIndex: index,
-								delta: event.delta.thinking,
-								partial: output,
-							});
-						}
+						const contentIndex = resolveBlock(event.index, "thinking");
+						normalizer.push({ type: "thinking_delta", contentIndex, delta: event.delta.thinking });
 					} else if (event.delta.type === "input_json_delta") {
-						const index = blocks.findIndex((b) => b.index === event.index);
-						const block = blocks[index];
-						if (block && block.type === "toolCall") {
-							block.partialJson += event.delta.partial_json;
-							block.arguments = parseStreamingJson(block.partialJson);
-							stream.push({
-								type: "toolcall_delta",
-								contentIndex: index,
-								delta: event.delta.partial_json,
-								partial: output,
-							});
-						}
+						const contentIndex = resolveBlock(event.index, "toolCall");
+						normalizer.push({
+							type: "toolcall_delta",
+							contentIndex,
+							argsTextDelta: event.delta.partial_json,
+						});
 					} else if (event.delta.type === "signature_delta") {
-						const index = blocks.findIndex((b) => b.index === event.index);
-						const block = blocks[index];
-						if (block && block.type === "thinking") {
-							block.thinkingSignature = block.thinkingSignature || "";
-							block.thinkingSignature += event.delta.signature;
-						}
+						const contentIndex = resolveBlock(event.index, "thinking");
+						normalizer.push({
+							type: "thinking_delta",
+							contentIndex,
+							delta: "",
+							signatureDelta: event.delta.signature,
+						});
 					}
 				} else if (event.type === "content_block_stop") {
-					const index = blocks.findIndex((b) => b.index === event.index);
-					const block = blocks[index];
-					if (block) {
-						delete (block as any).index;
-						if (block.type === "text") {
-							stream.push({
-								type: "text_end",
-								contentIndex: index,
-								content: block.text,
-								partial: output,
-							});
-						} else if (block.type === "thinking") {
-							stream.push({
-								type: "thinking_end",
-								contentIndex: index,
-								content: block.thinking,
-								partial: output,
-							});
-						} else if (block.type === "toolCall") {
-							block.arguments = parseStreamingJson(block.partialJson);
-							// Finalize in-place and strip the scratch buffer so replay only
-							// carries parsed arguments.
-							delete (block as { partialJson?: string }).partialJson;
-							stream.push({
-								type: "toolcall_end",
-								contentIndex: index,
-								toolCall: block,
-								partial: output,
-							});
-						}
+					const block = blocksByRawIndex.get(event.index);
+					if (block?.kind === "text") {
+						normalizer.push({ type: "text_end", contentIndex: block.contentIndex });
+					} else if (block?.kind === "thinking") {
+						normalizer.push({ type: "thinking_end", contentIndex: block.contentIndex });
+					} else if (block?.kind === "toolCall") {
+						normalizer.push({ type: "toolcall_end", contentIndex: block.contentIndex });
 					}
 				} else if (event.type === "message_delta") {
 					if (event.delta.stop_reason) {
 						const stopReasonResult = mapStopReason(event.delta.stop_reason, event.delta.stop_details);
-						output.stopReason = stopReasonResult.stopReason;
-						if (stopReasonResult.errorMessage) {
-							output.errorMessage = stopReasonResult.errorMessage;
-						}
+						stopReason = stopReasonResult.stopReason;
+						stopErrorMessage = stopReasonResult.errorMessage;
 					}
 					// Only update usage fields if present (not null).
 					// Preserves input_tokens from message_start when proxies omit it in message_delta.
 					if (event.usage.input_tokens != null) {
-						output.usage.input = event.usage.input_tokens;
+						usage.input = event.usage.input_tokens;
 					}
 					if (event.usage.output_tokens != null) {
-						output.usage.output = event.usage.output_tokens;
+						usage.output = event.usage.output_tokens;
 					}
 					if (event.usage.cache_read_input_tokens != null) {
-						output.usage.cacheRead = event.usage.cache_read_input_tokens;
+						usage.cacheRead = event.usage.cache_read_input_tokens;
 					}
 					if (event.usage.cache_creation_input_tokens != null) {
-						output.usage.cacheWrite = event.usage.cache_creation_input_tokens;
+						usage.cacheWrite = event.usage.cache_creation_input_tokens;
 					}
 					// Anthropic doesn't provide total_tokens, compute from components
-					output.usage.totalTokens =
-						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-					calculateCost(model, output.usage);
+					usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+					calculateCost(model, usage);
+					normalizer.push({ type: "meta", patch: { usage } });
 				}
 			}
 
@@ -697,26 +649,24 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				throw new Error("Request was aborted");
 			}
 
-			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error(output.errorMessage || "An unknown error occurred");
+			if (stopReason === "aborted" || stopReason === "error") {
+				throw new Error(stopErrorMessage || "An unknown error occurred");
 			}
 
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			normalizer.push({ type: "done", reason: stopReason, usage });
 		} catch (error) {
-			for (const block of output.content) {
-				delete (block as { index?: number }).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			normalizer.push({
+				type: "error",
+				reason: options?.signal?.aborted ? "aborted" : "error",
+				errorMessage: error instanceof Error ? error.message : JSON.stringify(error),
+				usage,
+			});
+		} finally {
+			normalizer.end();
 		}
 	})();
 
-	return stream;
+	return normalizer.stream;
 };
 
 /**

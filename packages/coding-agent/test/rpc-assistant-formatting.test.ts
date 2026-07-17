@@ -142,9 +142,9 @@ describe("RPC assistant formatting", () => {
 		}
 		const textEndEvent = getNestedRecord(textEnd, "assistantMessageEvent");
 		expect(textEndEvent.content).toBe(formattedText);
-		expect(textEndEvent.message).toBe(formattedText);
-		// message_update frames are delta-only (issue #44): no duplicated
-		// partial and no accumulated message once message_start shipped the base.
+		// message_update frames are delta-only: no legacy visible-text shim,
+		// duplicated partial, or accumulated message after the base ships.
+		expect("message" in textEndEvent).toBe(false);
 		expect("partial" in textEndEvent).toBe(false);
 		expect("message" in textEnd).toBe(false);
 

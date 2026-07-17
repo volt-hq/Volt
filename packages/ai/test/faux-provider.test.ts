@@ -214,11 +214,11 @@ describe("faux provider", () => {
 			stream(registration.getModel(), { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] }),
 		);
 
-		expect(events).toHaveLength(1);
-		expect(events[0].type).toBe("error");
-		if (events[0].type === "error") {
-			expect(events[0].error.stopReason).toBe("error");
-			expect(events[0].error.errorMessage).toBe("boom");
+		expect(events.map((event) => event.type)).toEqual(["start", "error"]);
+		const terminal = events[events.length - 1];
+		if (terminal.type === "error") {
+			expect(terminal.error.stopReason).toBe("error");
+			expect(terminal.error.errorMessage).toBe("boom");
 		}
 	});
 
@@ -375,7 +375,7 @@ describe("faux provider", () => {
 		for await (const event of s) {
 			events.push(event.type);
 			if (event.type === "toolcall_delta") {
-				toolCallDeltas.push(event.delta);
+				toolCallDeltas.push(event.argsTextDelta);
 			}
 		}
 
@@ -504,11 +504,11 @@ describe("faux provider", () => {
 			),
 		);
 
-		expect(events).toHaveLength(1);
-		expect(events[0].type).toBe("error");
-		if (events[0].type === "error") {
-			expect(events[0].reason).toBe("aborted");
-			expect(events[0].error.stopReason).toBe("aborted");
+		expect(events.map((event) => event.type)).toEqual(["start", "error"]);
+		const terminal = events[events.length - 1];
+		if (terminal.type === "error") {
+			expect(terminal.reason).toBe("aborted");
+			expect(terminal.error.stopReason).toBe("aborted");
 		}
 	});
 
@@ -537,7 +537,7 @@ describe("faux provider", () => {
 		expect(events).toContain("text_start");
 		expect(events).toContain("text_delta");
 		expect(events).toContain("error");
-		expect(events).not.toContain("text_end");
+		expect(events).toContain("text_end");
 	});
 
 	it("supports aborting mid-thinking stream when paced", async () => {
@@ -570,7 +570,7 @@ describe("faux provider", () => {
 		expect(events).toContain("thinking_start");
 		expect(events).toContain("thinking_delta");
 		expect(events).toContain("error");
-		expect(events).not.toContain("thinking_end");
+		expect(events).toContain("thinking_end");
 	});
 
 	it("supports aborting mid-toolcall stream when paced", async () => {
@@ -611,7 +611,7 @@ describe("faux provider", () => {
 		expect(events).toContain("toolcall_start");
 		expect(events).toContain("toolcall_delta");
 		expect(events).toContain("error");
-		expect(events).not.toContain("toolcall_end");
+		expect(events).toContain("toolcall_end");
 	});
 
 	it("unregisters the provider", async () => {

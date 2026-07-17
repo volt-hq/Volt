@@ -62,7 +62,7 @@ function useSummaryStreamFn(harness: Harness, summary: string): () => number {
 				model: model.id,
 				usage: createUsage(10),
 			};
-			stream.push({ type: "done", reason: "stop", message });
+			stream.push({ type: "done", seq: 1, reason: "stop", message });
 		});
 		return stream;
 	};

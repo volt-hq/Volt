@@ -1,7 +1,7 @@
 import { registerApiProvider, unregisterApiProviders } from "../api-registry.ts";
+import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
 import type {
 	AssistantMessage,
-	AssistantMessageEventStream,
 	Context,
 	ImageContent,
 	Message,
@@ -15,7 +15,6 @@ import type {
 	ToolResultMessage,
 	Usage,
 } from "../types.ts";
-import { createAssistantMessageEventStream } from "../utils/event-stream.ts";
 
 const DEFAULT_API = "faux";
 const DEFAULT_PROVIDER = "faux";
@@ -293,15 +292,6 @@ function createErrorMessage(error: unknown, api: string, provider: string, model
 	};
 }
 
-function createAbortedMessage(partial: AssistantMessage): AssistantMessage {
-	return {
-		...partial,
-		stopReason: "aborted",
-		errorMessage: "Request was aborted",
-		timestamp: Date.now(),
-	};
-}
-
 function scheduleChunk(chunk: string, tokensPerSecond: number | undefined): Promise<void> {
 	if (!tokensPerSecond || tokensPerSecond <= 0) {
 		return new Promise((resolve) => queueMicrotask(resolve));
@@ -311,98 +301,142 @@ function scheduleChunk(chunk: string, tokensPerSecond: number | undefined): Prom
 }
 
 async function streamWithDeltas(
-	stream: AssistantMessageEventStream,
+	normalizer: AssistantStreamNormalizer,
 	message: AssistantMessage,
 	minTokenSize: number,
 	maxTokenSize: number,
 	tokensPerSecond: number | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<void> {
-	const partial: AssistantMessage = { ...message, content: [] };
+	normalizer.push({
+		type: "start",
+		init: {
+			api: message.api,
+			provider: message.provider,
+			model: message.model,
+			timestamp: message.timestamp,
+			...(message.responseId === undefined ? {} : { responseId: message.responseId }),
+			...(message.responseModel === undefined ? {} : { responseModel: message.responseModel }),
+			...(message.diagnostics === undefined ? {} : { diagnostics: message.diagnostics }),
+			usage: message.usage,
+		},
+	});
+
 	if (signal?.aborted) {
-		const aborted = createAbortedMessage(partial);
-		stream.push({ type: "error", reason: "aborted", error: aborted });
-		stream.end(aborted);
+		normalizer.push({ type: "error", reason: "aborted", errorMessage: "Request was aborted", usage: message.usage });
 		return;
 	}
 
-	stream.push({ type: "start", partial: { ...partial } });
-
 	for (let index = 0; index < message.content.length; index++) {
 		if (signal?.aborted) {
-			const aborted = createAbortedMessage(partial);
-			stream.push({ type: "error", reason: "aborted", error: aborted });
-			stream.end(aborted);
+			normalizer.push({
+				type: "error",
+				reason: "aborted",
+				errorMessage: "Request was aborted",
+				usage: message.usage,
+			});
 			return;
 		}
 
 		const block = message.content[index];
 
 		if (block.type === "thinking") {
-			partial.content = [...partial.content, { type: "thinking", thinking: "" }];
-			stream.push({ type: "thinking_start", contentIndex: index, partial: { ...partial } });
+			normalizer.push({
+				type: "thinking_start",
+				contentIndex: index,
+				...(block.redacted
+					? {
+							content: block.thinking,
+							thinkingSignature: block.thinkingSignature,
+							redacted: true,
+						}
+					: {}),
+			});
+			if (block.redacted) {
+				normalizer.push({
+					type: "thinking_end",
+					contentIndex: index,
+					content: block.thinking,
+					thinkingSignature: block.thinkingSignature,
+					redacted: true,
+				});
+				continue;
+			}
 			for (const chunk of splitStringByTokenSize(block.thinking, minTokenSize, maxTokenSize)) {
 				await scheduleChunk(chunk, tokensPerSecond);
 				if (signal?.aborted) {
-					const aborted = createAbortedMessage(partial);
-					stream.push({ type: "error", reason: "aborted", error: aborted });
-					stream.end(aborted);
+					normalizer.push({
+						type: "error",
+						reason: "aborted",
+						errorMessage: "Request was aborted",
+						usage: message.usage,
+					});
 					return;
 				}
-				(partial.content[index] as ThinkingContent).thinking += chunk;
-				stream.push({ type: "thinking_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
+				normalizer.push({ type: "thinking_delta", contentIndex: index, delta: chunk });
 			}
-			stream.push({
+			normalizer.push({
 				type: "thinking_end",
 				contentIndex: index,
 				content: block.thinking,
-				partial: { ...partial },
+				...(block.thinkingSignature === undefined ? {} : { thinkingSignature: block.thinkingSignature }),
+				...(block.redacted === undefined ? {} : { redacted: block.redacted }),
 			});
 			continue;
 		}
 
 		if (block.type === "text") {
-			partial.content = [...partial.content, { type: "text", text: "" }];
-			stream.push({ type: "text_start", contentIndex: index, partial: { ...partial } });
+			normalizer.push({ type: "text_start", contentIndex: index });
 			for (const chunk of splitStringByTokenSize(block.text, minTokenSize, maxTokenSize)) {
 				await scheduleChunk(chunk, tokensPerSecond);
 				if (signal?.aborted) {
-					const aborted = createAbortedMessage(partial);
-					stream.push({ type: "error", reason: "aborted", error: aborted });
-					stream.end(aborted);
+					normalizer.push({
+						type: "error",
+						reason: "aborted",
+						errorMessage: "Request was aborted",
+						usage: message.usage,
+					});
 					return;
 				}
-				(partial.content[index] as TextContent).text += chunk;
-				stream.push({ type: "text_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
+				normalizer.push({ type: "text_delta", contentIndex: index, delta: chunk });
 			}
-			stream.push({ type: "text_end", contentIndex: index, content: block.text, partial: { ...partial } });
+			normalizer.push({
+				type: "text_end",
+				contentIndex: index,
+				content: block.text,
+				...(block.textSignature === undefined ? {} : { textSignature: block.textSignature }),
+			});
 			continue;
 		}
 
-		partial.content = [...partial.content, { type: "toolCall", id: block.id, name: block.name, arguments: {} }];
-		stream.push({ type: "toolcall_start", contentIndex: index, partial: { ...partial } });
+		normalizer.push({ type: "toolcall_start", contentIndex: index, id: block.id, name: block.name });
 		for (const chunk of splitStringByTokenSize(JSON.stringify(block.arguments), minTokenSize, maxTokenSize)) {
 			await scheduleChunk(chunk, tokensPerSecond);
 			if (signal?.aborted) {
-				const aborted = createAbortedMessage(partial);
-				stream.push({ type: "error", reason: "aborted", error: aborted });
-				stream.end(aborted);
+				normalizer.push({
+					type: "error",
+					reason: "aborted",
+					errorMessage: "Request was aborted",
+					usage: message.usage,
+				});
 				return;
 			}
-			stream.push({ type: "toolcall_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
+			normalizer.push({ type: "toolcall_delta", contentIndex: index, argsTextDelta: chunk });
 		}
-		(partial.content[index] as ToolCall).arguments = block.arguments;
-		stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: { ...partial } });
+		normalizer.push({ type: "toolcall_end", contentIndex: index, toolCall: block });
 	}
 
 	if (message.stopReason === "error" || message.stopReason === "aborted") {
-		stream.push({ type: "error", reason: message.stopReason, error: message });
-		stream.end(message);
+		normalizer.push({
+			type: "error",
+			reason: message.stopReason,
+			errorMessage: message.errorMessage ?? "An unknown error occurred",
+			usage: message.usage,
+		});
 		return;
 	}
 
-	stream.push({ type: "done", reason: message.stopReason, message });
-	stream.end(message);
+	normalizer.push({ type: "done", reason: message.stopReason, usage: message.usage });
 }
 
 export function registerFauxProvider(options: RegisterFauxProviderOptions = {}): FauxProviderRegistration {
@@ -449,7 +483,7 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 	const createQueueStream =
 		(takeStep: () => FauxResponseStep | undefined, recordCall: () => void): StreamFunction<string, StreamOptions> =>
 		(requestModel, context, streamOptions) => {
-			const outer = createAssistantMessageEventStream();
+			const normalizer = new AssistantStreamNormalizer();
 			const step = takeStep();
 			recordCall();
 
@@ -464,8 +498,14 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 							requestModel.id,
 						);
 						message = withUsageEstimate(message, context, streamOptions, promptCache);
-						outer.push({ type: "error", reason: "error", error: message });
-						outer.end(message);
+						await streamWithDeltas(
+							normalizer,
+							message,
+							minTokenSize,
+							maxTokenSize,
+							tokensPerSecond,
+							streamOptions?.signal,
+						);
 						return;
 					}
 
@@ -474,7 +514,7 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 					let message = cloneMessage(resolved, api, provider, requestModel.id);
 					message = withUsageEstimate(message, context, streamOptions, promptCache);
 					await streamWithDeltas(
-						outer,
+						normalizer,
 						message,
 						minTokenSize,
 						maxTokenSize,
@@ -483,12 +523,28 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 					);
 				} catch (error) {
 					const message = createErrorMessage(error, api, provider, requestModel.id);
-					outer.push({ type: "error", reason: "error", error: message });
-					outer.end(message);
+					normalizer.push({
+						type: "start",
+						init: {
+							api: message.api,
+							provider: message.provider,
+							model: message.model,
+							timestamp: message.timestamp,
+							usage: message.usage,
+						},
+					});
+					normalizer.push({
+						type: "error",
+						reason: "error",
+						errorMessage: message.errorMessage ?? "An unknown error occurred",
+						usage: message.usage,
+					});
+				} finally {
+					normalizer.end();
 				}
 			});
 
-			return outer;
+			return normalizer.stream;
 		};
 
 	const stream = createQueueStream(

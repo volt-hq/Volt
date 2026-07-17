@@ -22,9 +22,8 @@ if (typeof process !== "undefined" && (process.versions?.node || process.version
 
 import { clampThinkingLevel } from "../models.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
+import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
 import type {
-	Api,
-	AssistantMessage,
 	Context,
 	Model,
 	ProviderEnv,
@@ -34,16 +33,17 @@ import type {
 	Usage,
 } from "../types.ts";
 import { combineAbortSignals } from "../utils/abort-signals.ts";
-import {
-	appendAssistantMessageDiagnostic,
-	createAssistantMessageDiagnostic,
-	formatThrownValue,
-} from "../utils/diagnostics.ts";
-import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import type { AssistantMessageDiagnostic } from "../utils/diagnostics.ts";
+import { createAssistantMessageDiagnostic, formatThrownValue } from "../utils/diagnostics.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
+import {
+	convertResponsesMessages,
+	convertResponsesTools,
+	type ProcessResponsesStreamResult,
+	processResponsesStream,
+} from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 // ============================================================================
@@ -199,28 +199,36 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 	model: Model<"openai-codex-responses">,
 	context: Context,
 	options?: OpenAICodexResponsesOptions,
-): AssistantMessageEventStream => {
-	const stream = new AssistantMessageEventStream();
+) => {
+	const normalizer = new AssistantStreamNormalizer();
+	const timestamp = Date.now();
+	const pendingDiagnostics: AssistantMessageDiagnostic[] = [];
+	let started = false;
+	const start = () => {
+		if (started) return;
+		started = true;
+		normalizer.push({
+			type: "start",
+			init: {
+				api: "openai-codex-responses",
+				provider: model.provider,
+				model: model.id,
+				timestamp,
+			},
+		});
+		if (pendingDiagnostics.length > 0) {
+			normalizer.push({ type: "meta", patch: { diagnostics: pendingDiagnostics.splice(0) } });
+		}
+	};
+	const addDiagnostic = (diagnostic: AssistantMessageDiagnostic) => {
+		if (started) {
+			normalizer.push({ type: "meta", patch: { diagnostics: [diagnostic] } });
+		} else {
+			pendingDiagnostics.push(diagnostic);
+		}
+	};
 
 	(async () => {
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: "openai-codex-responses" as Api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
-
 		try {
 			const apiKey = options?.apiKey;
 			if (!apiKey) {
@@ -254,15 +262,15 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			if (transport !== "sse" && !websocketDisabledForSession) {
 				let websocketStarted = false;
 				try {
-					await processWebSocketStream(
+					const result = await processWebSocketStream(
 						resolveCodexWebSocketUrl(model.baseUrl),
 						body,
 						websocketHeaders,
-						output,
-						stream,
+						normalizer,
 						model,
 						() => {
 							websocketStarted = true;
+							start();
 						},
 						idleTimeoutMs,
 						websocketConnectTimeoutMs,
@@ -272,20 +280,17 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					if (options?.signal?.aborted) {
 						throw new Error("Request was aborted");
 					}
-					stream.push({
-						type: "done",
-						reason: output.stopReason as "stop" | "length" | "toolUse",
-						message: output,
-					});
-					stream.end();
+					if (result.stopReason === "aborted" || result.stopReason === "error") {
+						throw new CodexApiError("An unknown error occurred");
+					}
+					normalizer.push({ type: "done", reason: result.stopReason });
 					return;
 				} catch (error) {
 					const aborted = options?.signal?.aborted;
 					if (aborted || isCodexNonTransportError(error)) {
 						throw error;
 					}
-					appendAssistantMessageDiagnostic(
-						output,
+					addDiagnostic(
 						createAssistantMessageDiagnostic("provider_transport_failure", error, {
 							configuredTransport: transport,
 							fallbackTransport: websocketStarted ? undefined : "sse",
@@ -384,35 +389,37 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				throw new Error("No response body");
 			}
 
-			stream.push({ type: "start", partial: output });
-			await processStream(response, output, stream, model, options);
+			start();
+			const result = await processStream(response, normalizer, model, options);
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
 			}
-
-			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
-			stream.end();
-		} catch (error) {
-			for (const block of output.content) {
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
+			if (result.stopReason === "aborted" || result.stopReason === "error") {
+				throw new CodexApiError("An unknown error occurred");
 			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : String(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+
+			normalizer.push({ type: "done", reason: result.stopReason });
+		} catch (error) {
+			start();
+			normalizer.push({
+				type: "error",
+				reason: options?.signal?.aborted ? "aborted" : "error",
+				errorMessage: error instanceof Error ? error.message : String(error),
+			});
+		} finally {
+			normalizer.end();
 		}
 	})();
 
-	return stream;
+	return normalizer.stream;
 };
 
 export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-responses", SimpleStreamOptions> = (
 	model: Model<"openai-codex-responses">,
 	context: Context,
 	options?: SimpleStreamOptions,
-): AssistantMessageEventStream => {
+) => {
 	const apiKey = options?.apiKey;
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);
@@ -542,12 +549,11 @@ function resolveCodexWebSocketUrl(baseUrl?: string): string {
 
 async function processStream(
 	response: Response,
-	output: AssistantMessage,
-	stream: AssistantMessageEventStream,
+	normalizer: AssistantStreamNormalizer,
 	model: Model<"openai-codex-responses">,
 	options?: OpenAICodexResponsesOptions,
-): Promise<void> {
-	await processResponsesStream(mapCodexEvents(parseSSE(response, options?.signal)), output, stream, model, {
+): Promise<ProcessResponsesStreamResult> {
+	return processResponsesStream(mapCodexEvents(parseSSE(response, options?.signal)), normalizer, model, {
 		serviceTier: options?.serviceTier,
 		resolveServiceTier: resolveCodexServiceTier,
 		applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
@@ -614,6 +620,8 @@ async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): 
 
 		yield event as unknown as ResponseStreamEvent;
 	}
+
+	throw new CodexProtocolError("Codex stream ended before response.completed");
 }
 
 function normalizeCodexStatus(status: unknown): CodexResponseStatus | undefined {
@@ -1283,8 +1291,6 @@ function buildCachedWebSocketRequestBody(entry: CachedWebSocketConnection, body:
 
 async function* startWebSocketOutputOnFirstEvent(
 	events: AsyncIterable<ResponseStreamEvent>,
-	output: AssistantMessage,
-	stream: AssistantMessageEventStream,
 	onStart: () => void,
 ): AsyncGenerator<ResponseStreamEvent> {
 	let started = false;
@@ -1292,7 +1298,6 @@ async function* startWebSocketOutputOnFirstEvent(
 		if (!started) {
 			started = true;
 			onStart();
-			stream.push({ type: "start", partial: output });
 		}
 		yield event;
 	}
@@ -1302,14 +1307,13 @@ async function processWebSocketStream(
 	url: string,
 	body: RequestBody,
 	headers: Headers,
-	output: AssistantMessage,
-	stream: AssistantMessageEventStream,
+	normalizer: AssistantStreamNormalizer,
 	model: Model<"openai-codex-responses">,
 	onStart: () => void,
 	idleTimeoutMs: number | undefined,
 	websocketConnectTimeoutMs: number | undefined,
 	options?: OpenAICodexResponsesOptions,
-): Promise<void> {
+): Promise<ProcessResponsesStreamResult> {
 	const { socket, entry, reused, release } = await acquireWebSocket(
 		url,
 		headers,
@@ -1344,15 +1348,12 @@ async function processWebSocketStream(
 	}
 	try {
 		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
-		await processResponsesStream(
+		const result = await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
 				mapCodexEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs)),
-				output,
-				stream,
 				onStart,
 			),
-			output,
-			stream,
+			normalizer,
 			model,
 			{
 				serviceTier: options?.serviceTier,
@@ -1362,16 +1363,14 @@ async function processWebSocketStream(
 		);
 		if (options?.signal?.aborted) {
 			keepConnection = false;
-		} else if (useCachedContext && entry && output.responseId) {
-			const responseItems = convertResponsesMessages(model, { messages: [output] }, CODEX_TOOL_CALL_PROVIDERS, {
-				includeSystemPrompt: false,
-			}).filter((item) => item.type !== "function_call_output");
+		} else if (useCachedContext && entry && result.responseId) {
 			entry.continuation = {
 				lastRequestBody: fullBody,
-				lastResponseId: output.responseId,
-				lastResponseItems: responseItems,
+				lastResponseId: result.responseId,
+				lastResponseItems: result.responseItems,
 			};
 		}
+		return result;
 	} catch (error) {
 		if (entry) {
 			entry.continuation = undefined;

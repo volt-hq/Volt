@@ -41,7 +41,7 @@ import {
 	type ReviewWorkflowToolEvent,
 	runReviewWorkflow,
 } from "../../core/review.ts";
-import { RpcSessionEventEncoder } from "../../core/rpc/message-deltas.ts";
+import { type ProjectionDiagnostic, StreamProjector } from "../../core/rpc/stream-projection.ts";
 import type { RpcTransport } from "../../core/rpc/transport.ts";
 import type { SubagentDefinition, SubagentHandle } from "../../core/subagents/index.ts";
 import {
@@ -158,8 +158,8 @@ export interface RpcModeOptions {
 	registerPushTarget?: (args: unknown) => Promise<RpcRegisterPushTargetResponse>;
 	/** Observes set_client_capabilities feature lists (remote hosts gate optional pushes on these). */
 	onClientCapabilitiesChanged?: (features: string[]) => void;
-	/** Outbound event encoder factory; iroh remote mode passes redaction-aware encoders. */
-	createSessionEventEncoder?: () => RpcSessionEventEncoder;
+	/** Outbound projector factory; Iroh remote mode supplies its field-aware sanitizer. */
+	createStreamProjector?: () => StreamProjector;
 }
 
 type RpcModeStartupAwareTransport = RpcTransport & {
@@ -330,6 +330,8 @@ function getRpcHostActionBridge(runtimeHost: AgentSessionRuntime): RpcHostAction
 
 interface RpcSubagentEntry {
 	handle: SubagentHandle;
+	projector: StreamProjector;
+	projectorEnded: boolean;
 	unsubscribe: () => void;
 	disposed: boolean;
 }
@@ -357,17 +359,20 @@ function toRpcSubagentDefinition(definition: SubagentDefinition): RpcSubagentDef
 class RpcSubagentLifecycle implements RpcSubagentLifecycleController {
 	private readonly getSession: () => AgentSession;
 	private readonly output: (event: object) => void;
-	private readonly createEventEncoder: () => RpcSessionEventEncoder;
+	private readonly createProjector: () => StreamProjector;
+	private readonly reportProjectionDiagnostics: (source: string, diagnostics: readonly ProjectionDiagnostic[]) => void;
 	private readonly active = new Map<string, RpcSubagentEntry>();
 
 	constructor(options: {
 		getSession: () => AgentSession;
 		output: (event: object) => void;
-		createEventEncoder: () => RpcSessionEventEncoder;
+		createProjector: () => StreamProjector;
+		reportProjectionDiagnostics: (source: string, diagnostics: readonly ProjectionDiagnostic[]) => void;
 	}) {
 		this.getSession = options.getSession;
 		this.output = options.output;
-		this.createEventEncoder = options.createEventEncoder;
+		this.createProjector = options.createProjector;
+		this.reportProjectionDiagnostics = options.reportProjectionDiagnostics;
 	}
 
 	list(): RpcListSubagentsResponse {
@@ -385,22 +390,34 @@ class RpcSubagentLifecycle implements RpcSubagentLifecycleController {
 
 		const handle = await manager.startByName(agent, { allowedTools: session.getActiveToolNames() });
 		let entry: RpcSubagentEntry | undefined;
-		const eventEncoder = this.createEventEncoder();
+		const projector = this.createProjector();
 		const unsubscribe = handle.onEvent((event) => {
 			if (entry?.disposed) {
 				return;
 			}
-			this.output({ type: "subagent_event", subagentId: handle.id, event: eventEncoder.encode(event) });
+			const batch = projector.push(event);
+			this.reportProjectionDiagnostics(`subagent:${handle.id}`, batch.diagnostics);
+			for (const frame of batch.frames) {
+				this.output({ type: "subagent_event", subagentId: handle.id, event: frame });
+			}
 		});
-		entry = { handle, unsubscribe, disposed: false };
+		entry = { handle, projector, projectorEnded: false, unsubscribe, disposed: false };
 		this.active.set(handle.id, entry);
 		void handle.waitForEnd().then(
 			(result) => {
 				if (!entry?.disposed) {
+					this.endProjector(handle.id, entry);
 					this.output({ type: "subagent_end", subagentId: handle.id, result });
 				}
 			},
-			() => undefined,
+			(error: unknown) => {
+				if (!entry?.disposed) {
+					console.error(`[rpc-subagent:${handle.id}] stream failed`, error);
+					void this.disposeEntry(handle.id, entry).catch((disposeError: unknown) => {
+						console.error(`[rpc-subagent:${handle.id}] failed to dispose rejected stream`, disposeError);
+					});
+				}
+			},
 		);
 
 		try {
@@ -463,12 +480,21 @@ class RpcSubagentLifecycle implements RpcSubagentLifecycleController {
 		entry.disposed = true;
 		this.active.delete(subagentId);
 		entry.unsubscribe();
+		this.endProjector(subagentId, entry);
 		// Terminal frame for every disposal path (abort/dispose commands, failed
 		// starts, session rebinds). Nothing else fires for host-side disposals, and
 		// without a terminal frame clients would retain this subagent stream's
 		// message-delta accumulator forever. output() no-ops during shutdown.
 		this.output({ type: "subagent_disposed", subagentId });
 		await entry.handle.dispose();
+	}
+
+	private endProjector(subagentId: string, entry: RpcSubagentEntry): void {
+		if (entry.projectorEnded) {
+			return;
+		}
+		entry.projectorEnded = true;
+		this.reportProjectionDiagnostics(`subagent:${subagentId}`, entry.projector.endStream().diagnostics);
 	}
 }
 
@@ -549,6 +575,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	let lastNotifiedSession: AgentSession | undefined;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
+	let sessionProjector: StreamProjector | undefined;
 	let stopModelCatalogWatcher: () => void = () => {};
 
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
@@ -561,12 +588,25 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			requestTransportFailureShutdown(writeError);
 		}
 	};
-	const createSessionEventEncoder = options.createSessionEventEncoder ?? (() => new RpcSessionEventEncoder());
+	const createStreamProjector = options.createStreamProjector ?? (() => new StreamProjector());
+	const reportProjectionDiagnostics = (source: string, diagnostics: readonly ProjectionDiagnostic[]): void => {
+		for (const diagnostic of diagnostics) {
+			console.error(`[stream-projection:${source}] ${diagnostic.code}: ${diagnostic.message}`, diagnostic);
+		}
+	};
 	const rpcSubagents = new RpcSubagentLifecycle({
 		getSession: () => session,
 		output,
-		createEventEncoder: createSessionEventEncoder,
+		createProjector: createStreamProjector,
+		reportProjectionDiagnostics,
 	});
+	const endSessionProjector = (): void => {
+		if (!sessionProjector) {
+			return;
+		}
+		reportProjectionDiagnostics("rpc-session", sessionProjector.endStream().diagnostics);
+		sessionProjector = undefined;
+	};
 
 	// Pending extension UI requests waiting for response
 	const pendingExtensionRequests = new Map<
@@ -926,9 +966,17 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
-		const sessionEventEncoder = createSessionEventEncoder();
+		endSessionProjector();
+		sessionProjector = createStreamProjector();
 		unsubscribe = session.subscribe((event) => {
-			output(sessionEventEncoder.encode(event));
+			const batch = sessionProjector?.push(event);
+			if (!batch) {
+				return;
+			}
+			reportProjectionDiagnostics("rpc-session", batch.diagnostics);
+			for (const frame of batch.frames) {
+				output(frame);
+			}
 		});
 		unsubscribeBackpressure = session.agent.subscribe(async () => {
 			try {
@@ -1052,6 +1100,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				cleanup();
 			}
 			unsubscribe?.();
+			endSessionProjector();
 			unsubscribeBackpressure?.();
 			if (shouldDisposeRuntimeOnClose) {
 				await runtimeHost.dispose();
@@ -1113,6 +1162,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 						cleanup();
 					}
 					unsubscribe?.();
+					endSessionProjector();
 					unsubscribeBackpressure?.();
 					await rpcSubagents.disposeAll();
 					if (shouldDisposeRuntimeOnClose) {

@@ -7,8 +7,8 @@ import { REVIEW_BRANCH_ACTION_ID, REVIEW_UNCOMMITTED_ACTION_ID } from "../../cor
 import { type CustomMessage, extractVisibleTextContent } from "../../core/messages.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
-	createIrohRemoteOutboundDeltaSanitizer,
 	createIrohRemoteOutboundFilteredRpcTransport,
+	createIrohRemoteProjectionSanitizer,
 	createIrohRemoteRpcErrorResponse,
 	type IrohRemoteLiveActivityContentState,
 	type IrohRemoteLiveActivityToolGlyph,
@@ -23,9 +23,9 @@ import {
 	type IrohRpcTransportOptions,
 	type RpcCloseHandler,
 	type RpcLineHandler,
-	RpcSessionEventEncoder,
 	type RpcTranscriptItem,
 	type RpcTransport,
+	StreamProjector,
 } from "../../core/rpc/index.ts";
 import { extractMessageImages, projectSessionTranscript } from "../../core/rpc/transcript.ts";
 import type { CustomMessageEntry, SessionEntry, SessionMessageEntry } from "../../core/session-manager.ts";
@@ -151,16 +151,8 @@ export function runIrohRemoteRpcMode(
 		transport: createIrohRpcTransport(options),
 		workspacePath: options.workspacePath,
 		additionalRedactedPaths: options.additionalRedactedPaths,
-		// The session event encoders below derive message_update deltas from
-		// sanitized accumulated text; re-sanitizing those fragments in isolation
-		// would over-redact and desynchronize client accumulation.
-		preSanitizedMessageDeltas: true,
 	});
-	// The outbound filter sanitizes frames independently, which cannot redact a
-	// host path split across delta-only message_update frames; encode streamed
-	// deltas from sanitized accumulated text so clients never rebuild a
-	// complete raw path.
-	const messageDeltaSanitizer = createIrohRemoteOutboundDeltaSanitizer({
+	const streamProjectionSanitizer = createIrohRemoteProjectionSanitizer({
 		remoteWorkspacePath: options.remoteWorkspacePath,
 		workspacePath: options.workspacePath,
 		additionalRedactedPaths: options.additionalRedactedPaths,
@@ -265,7 +257,7 @@ export function runIrohRemoteRpcMode(
 		transport: remoteHostCommandTransport,
 		exitProcess: false,
 		registerPushTarget: options.registerPushTarget,
-		createSessionEventEncoder: () => new RpcSessionEventEncoder({ deltaSanitizer: messageDeltaSanitizer }),
+		createStreamProjector: () => new StreamProjector({ sanitizer: streamProjectionSanitizer }),
 	}).finally(() => {
 		transportClosed = true;
 		detachTranscriptEntryEvents?.();

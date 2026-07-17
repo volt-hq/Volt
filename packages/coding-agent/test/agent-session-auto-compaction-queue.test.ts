@@ -185,8 +185,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 						stopReason: "length",
 						timestamp: Date.now(),
 					};
-					stream.push({ type: "start", partial: message });
-					stream.push({ type: "done", reason: "length", message });
+					stream.push({ type: "start", seq: 0, snapshot: message, toolState: [] });
+					stream.push({ type: "done", seq: 1, reason: "length", message });
 					return;
 				}
 
@@ -207,8 +207,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 					stopReason: "stop",
 					timestamp: Date.now(),
 				};
-				stream.push({ type: "start", partial: message });
-				stream.push({ type: "done", reason: "stop", message });
+				stream.push({ type: "start", seq: 0, snapshot: message, toolState: [] });
+				stream.push({ type: "done", seq: 1, reason: "stop", message });
 			});
 			return stream;
 		};
@@ -259,8 +259,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 						stopReason: "toolUse",
 						timestamp: Date.now(),
 					};
-					stream.push({ type: "start", partial: message });
-					stream.push({ type: "done", reason: "toolUse", message });
+					stream.push({ type: "start", seq: 0, snapshot: message, toolState: [] });
+					stream.push({ type: "done", seq: 1, reason: "toolUse", message });
 					return;
 				}
 
@@ -281,8 +281,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 					stopReason: "stop",
 					timestamp: Date.now(),
 				};
-				stream.push({ type: "start", partial: message });
-				stream.push({ type: "done", reason: "stop", message });
+				stream.push({ type: "start", seq: 0, snapshot: message, toolState: [] });
+				stream.push({ type: "done", seq: 1, reason: "stop", message });
 			});
 			return stream;
 		};
@@ -333,8 +333,13 @@ describe("AgentSession auto-compaction queue resume", () => {
 					stopReason: callNumber === 1 ? "toolUse" : "stop",
 					timestamp: Date.now(),
 				};
-				stream.push({ type: "start", partial: message });
-				stream.push({ type: "done", reason: message.stopReason === "toolUse" ? "toolUse" : "stop", message });
+				stream.push({ type: "start", seq: 0, snapshot: message, toolState: [] });
+				stream.push({
+					type: "done",
+					seq: 1,
+					reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
+					message,
+				});
 			});
 			return stream;
 		};
@@ -378,8 +383,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 					stopReason: "toolUse",
 					timestamp: Date.now(),
 				};
-				stream.push({ type: "start", partial: message });
-				stream.push({ type: "done", reason: "toolUse", message });
+				stream.push({ type: "start", seq: 0, snapshot: message, toolState: [] });
+				stream.push({ type: "done", seq: 1, reason: "toolUse", message });
 			});
 			return stream;
 		};
@@ -412,8 +417,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 					stopReason: "stop",
 					timestamp: Date.now(),
 				};
-				stream.push({ type: "start", partial: message });
-				stream.push({ type: "done", reason: "stop", message });
+				stream.push({ type: "start", seq: 0, snapshot: message, toolState: [] });
+				stream.push({ type: "done", seq: 1, reason: "stop", message });
 			});
 			return stream;
 		};
@@ -536,8 +541,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 					stopReason: "toolUse",
 					timestamp: Date.now(),
 				};
-				stream.push({ type: "start", partial: message });
-				stream.push({ type: "done", reason: "toolUse", message });
+				stream.push({ type: "start", seq: 0, snapshot: message, toolState: [] });
+				stream.push({ type: "done", seq: 1, reason: "toolUse", message });
 			});
 			return stream;
 		};

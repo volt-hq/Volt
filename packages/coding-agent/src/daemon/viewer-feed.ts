@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { RpcSessionEventEncoder } from "../core/rpc/message-deltas.ts";
+import { type ProjectionDiagnostic, StreamProjector } from "../core/rpc/stream-projection.ts";
 import type { ControlEvent } from "./control-protocol.ts";
 
 /**
@@ -24,17 +24,6 @@ interface BufferedViewerEvent {
 	byteLength: number;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isToolCallDeltaSnapshot(value: unknown): boolean {
-	if (!isRecord(value) || value.type !== "message_update" || !isRecord(value.message)) {
-		return false;
-	}
-	return isRecord(value.assistantMessageEvent) && value.assistantMessageEvent.type === "toolcall_delta";
-}
-
 interface ViewerFeed {
 	viewerFeedId: string;
 	connectionId: string;
@@ -48,8 +37,8 @@ interface ViewerFeed {
 	seq: number;
 	subscribed: boolean;
 	ended: boolean;
-	/** Delta framing state for this feed's single ordered delivery stream. */
-	eventEncoder: RpcSessionEventEncoder;
+	/** Projection state for this feed's single ordered delivery stream. */
+	projector: StreamProjector;
 }
 
 export interface ViewerFeedEffects {
@@ -81,7 +70,7 @@ export class ViewerFeedRegistry {
 			seq: 0,
 			subscribed: false,
 			ended: false,
-			eventEncoder: new RpcSessionEventEncoder(),
+			projector: new StreamProjector(),
 		};
 		feed.unsubscribeSession = session.subscribe((event) => {
 			this.onSessionEvent(feed, event);
@@ -94,35 +83,21 @@ export class ViewerFeedRegistry {
 			return;
 		}
 		if (feed.subscribed) {
-			this.emit(feed, this.encodeSessionEvent(feed, event));
+			const entries = this.projectDeliverableEvents(feed, event);
+			for (const entry of entries) {
+				if (!this.emit(feed, entry.event)) {
+					this.markDiscontinuity(feed);
+					break;
+				}
+			}
 			return;
 		}
 		if (feed.truncated || feed.buffer === null) {
 			return;
 		}
-		const encodedEvent = this.encodeSessionEvent(feed, event);
-		let serializedEvent: string;
-		try {
-			const serialized = JSON.stringify(encodedEvent);
-			if (serialized === undefined) {
-				feed.eventEncoder = new RpcSessionEventEncoder();
-				return;
-			}
-			serializedEvent = serialized;
-		} catch {
-			// Unserializable events cannot cross the control plane anyway. Reset the
-			// encoder so the next deliverable update carries a fresh snapshot.
-			feed.eventEncoder = new RpcSessionEventEncoder();
-			return;
-		}
-		const eventBytes = Buffer.byteLength(serializedEvent, "utf8");
-		const previousEvent = feed.buffer[feed.buffer.length - 1];
-		const replacePrevious =
-			previousEvent !== undefined &&
-			isToolCallDeltaSnapshot(previousEvent.event) &&
-			isToolCallDeltaSnapshot(encodedEvent);
-		const nextEventCount = feed.buffer.length + (replacePrevious ? 0 : 1);
-		const nextBufferedBytes = feed.bufferedBytes - (replacePrevious ? previousEvent.byteLength : 0) + eventBytes;
+		const entries = this.projectDeliverableEvents(feed, event);
+		const nextEventCount = feed.buffer.length + entries.length;
+		const nextBufferedBytes = feed.bufferedBytes + entries.reduce((total, entry) => total + entry.byteLength, 0);
 		if (nextEventCount > VIEWER_BUFFER_MAX_EVENTS || nextBufferedBytes > VIEWER_BUFFER_MAX_BYTES) {
 			// Cap exceeded: drop everything; the TUI shows a spinner and relies on
 			// the post-grant session file load for truth.
@@ -130,33 +105,61 @@ export class ViewerFeedRegistry {
 			feed.bufferedBytes = 0;
 			feed.truncated = true;
 			// Buffered history is gone. Any later live frame must not depend on it.
-			feed.eventEncoder = new RpcSessionEventEncoder();
+			this.markDiscontinuity(feed);
 			return;
 		}
-		// Buffer the exact detached JSON value that will cross the control plane.
-		// Provider streams mutate nested message blocks in place after emission.
-		// Consecutive tool-call snapshots supersede one another when a provider
-		// cannot expose the raw argument prefix needed to resume delta framing.
-		const bufferedEvent: BufferedViewerEvent = { event: JSON.parse(serializedEvent), byteLength: eventBytes };
-		if (replacePrevious) {
-			feed.buffer[feed.buffer.length - 1] = bufferedEvent;
-		} else {
-			feed.buffer.push(bufferedEvent);
-		}
+		feed.buffer.push(...entries);
 		feed.bufferedBytes = nextBufferedBytes;
 	}
 
-	private encodeSessionEvent(feed: ViewerFeed, event: unknown): unknown {
-		return typeof event === "object" && event !== null ? feed.eventEncoder.encode(event) : event;
+	private projectDeliverableEvents(feed: ViewerFeed, event: unknown): BufferedViewerEvent[] {
+		let frames: readonly unknown[];
+		if (typeof event === "object" && event !== null) {
+			const batch = feed.projector.push(event);
+			this.reportProjectionDiagnostics(feed, batch.diagnostics);
+			frames = batch.frames;
+		} else {
+			frames = [event];
+		}
+		try {
+			return frames.map((frame) => {
+				const serialized = JSON.stringify(frame);
+				if (serialized === undefined) {
+					throw new Error("Viewer event is not JSON serializable");
+				}
+				return {
+					event: JSON.parse(serialized),
+					byteLength: Buffer.byteLength(serialized, "utf8"),
+				};
+			});
+		} catch {
+			// The dropped input may already have advanced projection state. Fence it
+			// so the next deliverable assistant update is a replacement snapshot.
+			this.markDiscontinuity(feed);
+			return [];
+		}
 	}
 
-	private emit(feed: ViewerFeed, event: unknown): void {
-		this.effects.sendTo(feed.connectionId, {
+	private emit(feed: ViewerFeed, event: unknown): boolean {
+		return this.effects.sendTo(feed.connectionId, {
 			type: "viewer_event",
 			viewerFeedId: feed.viewerFeedId,
 			seq: feed.seq++,
 			event,
 		});
+	}
+
+	private markDiscontinuity(feed: ViewerFeed): void {
+		this.reportProjectionDiagnostics(feed, feed.projector.discontinuity().diagnostics);
+	}
+
+	private reportProjectionDiagnostics(feed: ViewerFeed, diagnostics: readonly ProjectionDiagnostic[]): void {
+		for (const diagnostic of diagnostics) {
+			console.error(
+				`[stream-projection:viewer:${feed.viewerFeedId}] ${diagnostic.code}: ${diagnostic.message}`,
+				diagnostic,
+			);
+		}
 	}
 
 	/**
@@ -174,10 +177,15 @@ export class ViewerFeedRegistry {
 		}
 		feed.subscribed = true;
 		if (feed.truncated) {
-			this.emit(feed, { kind: "truncated" });
+			if (!this.emit(feed, { kind: "truncated" })) {
+				this.markDiscontinuity(feed);
+			}
 		} else if (feed.buffer) {
 			for (const entry of feed.buffer) {
-				this.emit(feed, entry.event);
+				if (!this.emit(feed, entry.event)) {
+					this.markDiscontinuity(feed);
+					break;
+				}
 			}
 		}
 		feed.buffer = null;
@@ -195,7 +203,7 @@ export class ViewerFeedRegistry {
 		feed.buffer = null;
 		feed.bufferedBytes = 0;
 		// Events are dropped while unsubscribed, so resumption needs a snapshot.
-		feed.eventEncoder = new RpcSessionEventEncoder();
+		this.markDiscontinuity(feed);
 		return true;
 	}
 
@@ -217,6 +225,7 @@ export class ViewerFeedRegistry {
 		}
 		feed.ended = true;
 		feed.unsubscribeSession();
+		this.reportProjectionDiagnostics(feed, feed.projector.endStream().diagnostics);
 		this.feeds.delete(viewerFeedId);
 		this.effects.sendTo(feed.connectionId, { type: "viewer_end", viewerFeedId, reason });
 	}

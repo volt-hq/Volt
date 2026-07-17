@@ -154,13 +154,157 @@ describe("Agent", () => {
 		expect(agent.state.errorMessage).toBe("provider exploded");
 	});
 
+	it("feeds finalized user-message replacements into the current model context", async () => {
+		let providerUserText: string | undefined;
+		const agent = new Agent({
+			streamFn: (_model, context) => {
+				const userMessage = context.messages.find((message) => message.role === "user");
+				if (userMessage?.role === "user") {
+					providerUserText =
+						typeof userMessage.content === "string"
+							? userMessage.content
+							: userMessage.content.find((part) => part.type === "text")?.text;
+				}
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", seq: 1, reason: "stop", message: createAssistantMessage("ok") });
+				});
+				return stream;
+			},
+		});
+		agent.subscribe((event) => {
+			if (event.type === "message_end" && event.message.role === "user") {
+				return {
+					...event.message,
+					content: [{ type: "text", text: "rewritten user message" }],
+				};
+			}
+			return undefined;
+		});
+
+		await agent.prompt("original user message");
+
+		expect(providerUserText).toBe("rewritten user message");
+		const firstMessage = agent.state.messages[0];
+		expect(firstMessage?.role).toBe("user");
+		if (firstMessage?.role !== "user" || typeof firstMessage.content === "string") {
+			throw new Error("Expected structured user message");
+		}
+		expect(firstMessage.content[0]).toEqual({ type: "text", text: "rewritten user message" });
+	});
+
+	it("feeds finalized tool-result replacements into the next model context", async () => {
+		const toolSchema = Type.Object({});
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "replaceable_tool",
+			label: "Replaceable Tool",
+			description: "Returns content that a listener replaces",
+			parameters: toolSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "original tool result" }], details: {} };
+			},
+		};
+		let providerToolText: string | undefined;
+		let callIndex = 0;
+		const agent = new Agent({
+			initialState: { tools: [tool] },
+			streamFn: (_model, context) => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (callIndex === 0) {
+						stream.push({
+							type: "done",
+							seq: 1,
+							reason: "toolUse",
+							message: createAssistantToolUseMessage([
+								{ type: "toolCall", id: "replace-call", name: tool.name, arguments: {} },
+							]),
+						});
+					} else {
+						const toolResult = context.messages
+							.slice()
+							.reverse()
+							.find((message) => message.role === "toolResult");
+						if (toolResult?.role === "toolResult") {
+							providerToolText = toolResult.content.find((part) => part.type === "text")?.text;
+						}
+						stream.push({ type: "done", seq: 1, reason: "stop", message: createAssistantMessage("done") });
+					}
+					callIndex++;
+				});
+				return stream;
+			},
+		});
+		agent.subscribe((event) => {
+			if (event.type === "message_end" && event.message.role === "toolResult") {
+				return {
+					...event.message,
+					content: [{ type: "text", text: "rewritten tool result" }],
+				};
+			}
+			return undefined;
+		});
+
+		await agent.prompt("run the tool");
+
+		expect(providerToolText).toBe("rewritten tool result");
+		const storedToolResult = agent.state.messages.find((message) => message.role === "toolResult");
+		expect(storedToolResult?.role).toBe("toolResult");
+		if (storedToolResult?.role !== "toolResult") throw new Error("Expected tool result");
+		expect(storedToolResult.content[0]).toEqual({ type: "text", text: "rewritten tool result" });
+	});
+
+	it("uses a finalized replacement throughout thrown-run failure lifecycle events", async () => {
+		let turnEndText: string | undefined;
+		let agentEndText: string | undefined;
+		const agent = new Agent({
+			streamFn: () => {
+				throw new Error("provider exploded");
+			},
+		});
+		agent.subscribe((event) => {
+			if (event.type === "message_end" && event.message.role === "assistant") {
+				return {
+					...event.message,
+					content: [{ type: "text", text: "rewritten failure" }],
+					errorMessage: "rewritten provider error",
+				};
+			}
+			if (event.type === "turn_end" && event.message.role === "assistant") {
+				turnEndText = event.message.content.find((part) => part.type === "text")?.text;
+			}
+			if (event.type === "agent_end") {
+				const message = event.messages
+					.slice()
+					.reverse()
+					.find((candidate) => candidate.role === "assistant");
+				if (message?.role === "assistant") {
+					agentEndText = message.content.find((part) => part.type === "text")?.text;
+				}
+			}
+			return undefined;
+		});
+
+		await agent.prompt("hello");
+
+		expect(turnEndText).toBe("rewritten failure");
+		expect(agentEndText).toBe("rewritten failure");
+		const finalMessage = agent.state.messages
+			.slice()
+			.reverse()
+			.find((message) => message.role === "assistant");
+		expect(finalMessage?.role).toBe("assistant");
+		if (finalMessage?.role !== "assistant") throw new Error("Expected assistant message");
+		expect(finalMessage.errorMessage).toBe("rewritten provider error");
+	});
+
 	it("should await async subscribers before prompt resolves", async () => {
 		const barrier = createDeferred();
 		const agent = new Agent({
 			streamFn: () => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
-					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+					stream.push({ type: "done", seq: 1, reason: "stop", message: createAssistantMessage("ok") });
 				});
 				return stream;
 			},
@@ -198,7 +342,7 @@ describe("Agent", () => {
 			streamFn: () => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
-					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+					stream.push({ type: "done", seq: 1, reason: "stop", message: createAssistantMessage("ok") });
 				});
 				return stream;
 			},
@@ -233,10 +377,15 @@ describe("Agent", () => {
 			streamFn: (_model, _context, options) => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
-					stream.push({ type: "start", partial: createAssistantMessage("") });
+					stream.push({ type: "start", seq: 0, snapshot: createAssistantMessage(""), toolState: [] });
 					const checkAbort = () => {
 						if (options?.signal?.aborted) {
-							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
+							stream.push({
+								type: "error",
+								seq: 1,
+								reason: "aborted",
+								error: createAssistantMessage("Aborted"),
+							});
 						} else {
 							setTimeout(checkAbort, 5);
 						}
@@ -298,6 +447,7 @@ describe("Agent", () => {
 				queueMicrotask(() => {
 					stream.push({
 						type: "done",
+						seq: 1,
 						reason: "toolUse",
 						message: createAssistantToolUseMessage([
 							{ type: "toolCall", id: "call-1", name: "delayed_tool", arguments: {} },
@@ -373,6 +523,7 @@ describe("Agent", () => {
 				queueMicrotask(() => {
 					stream.push({
 						type: "done",
+						seq: 1,
 						reason: "toolUse",
 						message: createAssistantToolUseMessage([
 							{ type: "toolCall", id: "call-1", name: "settled_tool", arguments: {} },
@@ -480,11 +631,16 @@ describe("Agent", () => {
 				abortSignal = options?.signal;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
-					stream.push({ type: "start", partial: createAssistantMessage("") });
+					stream.push({ type: "start", seq: 0, snapshot: createAssistantMessage(""), toolState: [] });
 					// Check abort signal periodically
 					const checkAbort = () => {
 						if (abortSignal?.aborted) {
-							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
+							stream.push({
+								type: "error",
+								seq: 1,
+								reason: "aborted",
+								error: createAssistantMessage("Aborted"),
+							});
 						} else {
 							setTimeout(checkAbort, 5);
 						}
@@ -519,10 +675,15 @@ describe("Agent", () => {
 				abortSignal = options?.signal;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
-					stream.push({ type: "start", partial: createAssistantMessage("") });
+					stream.push({ type: "start", seq: 0, snapshot: createAssistantMessage(""), toolState: [] });
 					const checkAbort = () => {
 						if (abortSignal?.aborted) {
-							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
+							stream.push({
+								type: "error",
+								seq: 1,
+								reason: "aborted",
+								error: createAssistantMessage("Aborted"),
+							});
 						} else {
 							setTimeout(checkAbort, 5);
 						}
@@ -553,7 +714,7 @@ describe("Agent", () => {
 			streamFn: () => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
-					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Processed") });
+					stream.push({ type: "done", seq: 1, reason: "stop", message: createAssistantMessage("Processed") });
 				});
 				return stream;
 			},
@@ -598,7 +759,7 @@ describe("Agent", () => {
 				);
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
-					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Processed") });
+					stream.push({ type: "done", seq: 1, reason: "stop", message: createAssistantMessage("Processed") });
 				});
 				return stream;
 			},
@@ -634,6 +795,7 @@ describe("Agent", () => {
 				queueMicrotask(() => {
 					stream.push({
 						type: "done",
+						seq: 1,
 						reason: "stop",
 						message: createAssistantMessage(`Processed ${responseCount}`),
 					});
@@ -689,6 +851,7 @@ describe("Agent", () => {
 				queueMicrotask(() => {
 					stream.push({
 						type: "done",
+						seq: 1,
 						reason: "toolUse",
 						message: createAssistantToolUseMessage([
 							{ type: "toolCall", id: `call-${llmCalls}`, name: "noop_tool", arguments: {} },
@@ -736,7 +899,7 @@ describe("Agent", () => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
 					const message = createAssistantMessage("ok");
-					stream.push({ type: "done", reason: "stop", message });
+					stream.push({ type: "done", seq: 1, reason: "stop", message });
 				});
 				return stream;
 			},
@@ -788,11 +951,12 @@ describe("Agent", () => {
 				const finalTurn = streamCalls > 1;
 				queueMicrotask(() => {
 					if (finalTurn) {
-						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+						stream.push({ type: "done", seq: 1, reason: "stop", message: createAssistantMessage("done") });
 						return;
 					}
 					stream.push({
 						type: "done",
+						seq: 1,
 						reason: "toolUse",
 						message: createAssistantToolUseMessage([
 							{ type: "toolCall", id: "call-1", name: "tracked_tool", arguments: {} },

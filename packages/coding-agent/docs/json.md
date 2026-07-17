@@ -70,15 +70,16 @@ Followed by events as they occur:
 ```json
 {"type":"agent_start"}
 {"type":"turn_start"}
-{"type":"message_start","message":{"role":"assistant","content":[],...}}
-{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello"}}
-{"type":"message_end","message":{...}}
+{"type":"message_start","stream":{"epoch":1,"seq":0},"message":{"role":"assistant","content":[],...}}
+{"type":"message_update","stream":{"epoch":1,"seq":1},"assistantMessageEvent":{"type":"text_start","contentIndex":0}}
+{"type":"message_update","stream":{"epoch":1,"seq":2},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello"}}
+{"type":"message_end","stream":{"epoch":1,"seq":2},"message":{...}}
 {"type":"turn_end","message":{...},"toolResults":[]}
 {"type":"agent_end","messages":[...],"willRetry":false}
 {"type":"agent_settled"}
 ```
 
-`message_update` output is delta-only: it omits the in-process `assistantMessageEvent.partial` field and the accumulated `message`. `message_start` carries the accumulator base and `message_end` carries the final message; consumers needing live partials apply the deltas (see the reconstruction rules in [rpc.md](rpc.md#message_update-streaming)).
+Assistant streaming frames carry a `stream` position. Most `message_update` frames are compact deltas; recovery frames also include a full `message` snapshot and, for resumable open tool calls, `toolState`. In-process events use immutable `snapshot`, `seq`, and `toolState` fields, which are reconstructed by the bundled RPC client but omitted from compact wire deltas. See the position and reconstruction rules in [rpc.md](rpc.md#message_update-streaming).
 
 When `agent_end.willRetry` is true, another agent run will follow. Even when it is false, use `agent_settled` rather than `agent_end` as the prompt-completion signal.
 

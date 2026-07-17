@@ -175,7 +175,7 @@ const STREAMED_TEXT = ["Delta frames flatten the quadratic streaming cost.", "Ea
 	.repeat(3);
 
 describe("issue #44: delta-based message_update RPC frames", () => {
-	test("message_update frames are delta-only: no accumulated message, no partial", async () => {
+	test("message_update frames are delta-only: no accumulated message, snapshot, or tool state", async () => {
 		const harness = await createHarness();
 		activeHarnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage(STREAMED_TEXT)]);
@@ -188,7 +188,11 @@ describe("issue #44: delta-based message_update RPC frames", () => {
 		for (const update of updates) {
 			// message_start already delivered the accumulator base on this stream.
 			expect("message" in update).toBe(false);
-			expect("partial" in getAssistantMessageEvent(update)).toBe(false);
+			expect(isRecord(update.stream)).toBe(true);
+			const event = getAssistantMessageEvent(update);
+			expect("seq" in event).toBe(false);
+			expect("snapshot" in event).toBe(false);
+			expect("toolState" in event).toBe(false);
 		}
 
 		// The deltas alone reconstruct the full text.
@@ -199,20 +203,24 @@ describe("issue #44: delta-based message_update RPC frames", () => {
 			.join("");
 		expect(concatenated).toBe(STREAMED_TEXT);
 
-		// text_end still carries the authoritative block text and the visible-text shim.
+		// text_end carries the authoritative block text without a duplicate visible-text shim.
 		const textEnd = updates
 			.map((update) => getAssistantMessageEvent(update))
 			.find((event) => event.type === "text_end");
 		expect(textEnd?.content).toBe(STREAMED_TEXT);
-		expect(textEnd?.message).toBe(STREAMED_TEXT);
+		expect("message" in (textEnd ?? {})).toBe(false);
 
 		// Boundary frames keep full messages.
 		const assistantStarts = rpc.writes.filter(
 			(record) => record.type === "message_start" && isRecord(record.message) && record.message.role === "assistant",
 		);
 		expect(assistantStarts.length).toBe(1);
-		const ends = rpc.writes.filter((record) => record.type === "message_end" && isRecord(record.message));
-		expect(ends.some((record) => getMessageText(record.message) === STREAMED_TEXT)).toBe(true);
+		expect(isRecord(assistantStarts[0]?.stream)).toBe(true);
+		const assistantEnds = rpc.writes.filter(
+			(record) => record.type === "message_end" && isRecord(record.message) && record.message.role === "assistant",
+		);
+		expect(assistantEnds.some((record) => getMessageText(record.message) === STREAMED_TEXT)).toBe(true);
+		expect(assistantEnds.every((record) => isRecord(record.stream))).toBe(true);
 
 		rpc.close();
 		await expect(rpc.modePromise).resolves.toBeUndefined();
@@ -242,12 +250,26 @@ describe("issue #44: delta-based message_update RPC frames", () => {
 		emit({
 			type: "message_update",
 			message: firstPartial,
-			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "He", partial: firstPartial },
+			assistantMessageEvent: {
+				type: "text_delta",
+				seq: 1,
+				contentIndex: 0,
+				delta: "He",
+				snapshot: firstPartial,
+				toolState: [],
+			},
 		});
 		emit({
 			type: "message_update",
 			message: secondPartial,
-			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "llo", partial: secondPartial },
+			assistantMessageEvent: {
+				type: "text_delta",
+				seq: 2,
+				contentIndex: 0,
+				delta: "llo",
+				snapshot: secondPartial,
+				toolState: [],
+			},
 		});
 
 		await vi.waitFor(() => expect(rpc.writes.filter((record) => record.type === "subagent_event").length).toBe(2));
@@ -260,10 +282,12 @@ describe("issue #44: delta-based message_update RPC frames", () => {
 		// Snapshot frame: no message_start was seen on this stream.
 		expect(isRecord(firstEvent.message)).toBe(true);
 		expect(getMessageText(firstEvent.message)).toBe("He");
-		expect("partial" in getAssistantMessageEvent(firstEvent)).toBe(false);
+		expect("snapshot" in getAssistantMessageEvent(firstEvent)).toBe(false);
+		expect("toolState" in getAssistantMessageEvent(firstEvent)).toBe(false);
 		// Delta-only afterwards.
 		expect("message" in secondEvent).toBe(false);
-		expect("partial" in getAssistantMessageEvent(secondEvent)).toBe(false);
+		expect("snapshot" in getAssistantMessageEvent(secondEvent)).toBe(false);
+		expect("toolState" in getAssistantMessageEvent(secondEvent)).toBe(false);
 
 		rpc.close();
 		await rpc.modePromise.catch(() => undefined);
@@ -290,11 +314,18 @@ describe("issue #44: delta-based message_update RPC frames", () => {
 
 		// Leave the child mid-message so a connected client holds a delta
 		// accumulator for this subagent stream.
-		const partial = fauxAssistantMessage("He");
+		const snapshot = fauxAssistantMessage("He");
 		emit({
 			type: "message_update",
-			message: partial,
-			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "He", partial },
+			message: snapshot,
+			assistantMessageEvent: {
+				type: "text_delta",
+				seq: 1,
+				contentIndex: 0,
+				delta: "He",
+				snapshot,
+				toolState: [],
+			},
 		});
 
 		// new_session rebinds the RPC session and disposes all active subagents
@@ -341,13 +372,15 @@ describe("issue #44: delta-based message_update RPC frames", () => {
 			);
 			expect(updates.length).toBeGreaterThan(1);
 			for (const update of updates) {
-				// The client contract is unchanged: every update exposes the full
-				// accumulated message and the documented partial reference.
+				// Every decoded update exposes the full accumulated message plus the
+				// immutable normalizer snapshot and resumable tool state.
 				expect(isRecord(update.message)).toBe(true);
 				expect(update.message.role).toBe("assistant");
 				expect(STREAMED_TEXT.startsWith(getMessageText(update.message))).toBe(true);
 				const assistantMessageEvent = update.assistantMessageEvent as unknown as Record<string, unknown>;
-				expect(isRecord(assistantMessageEvent.partial)).toBe(true);
+				expect(assistantMessageEvent.snapshot).toBe(update.message);
+				expect(Array.isArray(assistantMessageEvent.toolState)).toBe(true);
+				expect("partial" in assistantMessageEvent).toBe(false);
 			}
 			const textEndUpdate = updates.find((update) => update.assistantMessageEvent.type === "text_end");
 			expect(getMessageText(textEndUpdate?.message)).toBe(STREAMED_TEXT);

@@ -1418,20 +1418,21 @@ A turn consists of one assistant response plus any resulting tool calls and resu
 
 ### message_start / message_end
 
-Emitted when a message begins and completes. The `message` field contains an `AgentMessage`.
+Emitted when a message begins and completes. The `message` field contains an `AgentMessage`. Assistant frames also carry a projector-local `stream` position; non-assistant message frames pass through without one.
 
 ```json
-{"type": "message_start", "message": {...}}
-{"type": "message_end", "message": {...}}
+{"type": "message_start", "stream": {"epoch": 1, "seq": 0}, "message": {...}}
+{"type": "message_end", "stream": {"epoch": 1, "seq": 4}, "message": {...}}
 ```
 
 ### message_update (Streaming)
 
-Emitted during streaming of assistant messages. Frames are delta-only: they carry the streaming delta event, not the accumulated partial message (shipping the accumulated message on every update would make streaming cost quadratic in message length).
+Emitted during streaming of assistant messages. Normal frames carry a compact delta plus an explicit `stream` position, avoiding the quadratic cost of sending the accumulated message on every token. Recovery frames additionally carry a full `message` snapshot.
 
 ```json
 {
   "type": "message_update",
+  "stream": {"epoch": 1, "seq": 2},
   "assistantMessageEvent": {
     "type": "text_delta",
     "contentIndex": 0,
@@ -1440,13 +1441,12 @@ Emitted during streaming of assistant messages. Frames are delta-only: they carr
 }
 ```
 
-The in-process `AssistantMessageEvent` type also carries a `partial` field duplicating the accumulated message; it is never serialized.
+The in-process `AssistantMessageEvent` type carries contiguous `seq`, immutable `snapshot`, and resumable `toolState` fields. Compact wire deltas omit those fields because `stream.seq` carries the position and the decoder rebuilds the snapshot. A recovery frame includes `message` and may include `toolState`.
 
 The `assistantMessageEvent` field contains one of these delta types:
 
 | Type | Description |
 |------|-------------|
-| `start` | Message generation started |
 | `text_start` | Text content block started |
 | `text_delta` | Text content chunk |
 | `text_end` | Text content block ended |
@@ -1456,26 +1456,28 @@ The `assistantMessageEvent` field contains one of these delta types:
 | `toolcall_start` | Tool call started |
 | `toolcall_delta` | Tool call arguments chunk |
 | `toolcall_end` | Tool call ended (includes full `toolCall` object) |
-| `done` | Message complete (reason: `"stop"`, `"length"`, `"toolUse"`) |
-| `error` | Error occurred (reason: `"aborted"`, `"error"`) |
 
 Example streaming a text response:
 ```json
-{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}
-{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello"}}
-{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" world"}}
-{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Hello world"}}
+{"type":"message_start","stream":{"epoch":1,"seq":0},"message":{"role":"assistant","content":[],"...":"..."}}
+{"type":"message_update","stream":{"epoch":1,"seq":1},"assistantMessageEvent":{"type":"text_start","contentIndex":0}}
+{"type":"message_update","stream":{"epoch":1,"seq":2},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello"}}
+{"type":"message_update","stream":{"epoch":1,"seq":3},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" world"}}
+{"type":"message_update","stream":{"epoch":1,"seq":4},"assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Hello world"}}
+{"type":"message_end","stream":{"epoch":1,"seq":4},"message":{"role":"assistant","content":[{"type":"text","text":"Hello world"}],"...":"..."}}
 ```
 
 Reconstruction rules:
 
-- `message_start` and `message_end` always carry the full message; seed the accumulator from `message_start` and reset/validate it on `message_end`.
-- If no `message_start` was observed on the stream for the current message (mid-turn attach), the first `message_update` carries a full `message` snapshot; treat any update that includes `message` as an accumulator replacement. A snapshot can also arrive mid-message (remote transports send one whenever redaction rewrites text that already streamed), so replacement must work at any point.
+- Assistant `message_start`, `message_update`, and `message_end` frames carry `{epoch, seq}` in `stream`. `message_start` is the base at sequence 0. Within one epoch, accept a delta only when its sequence is exactly the previous sequence plus one.
+- Adopt every `message_start`, snapshot-bearing `message_update`, and `message_end` unconditionally, even if its epoch is lower than a previously observed epoch. A server-side projector can be recreated during session rebinding. Epoch and sequence checks gate compact deltas only.
+- If no `message_start` was observed for the current message (for example, a mid-turn attach), the first `message_update` carries a full `message` snapshot. A snapshot can also arrive after a delivery discontinuity, a sequence gap, an authoritative non-append update, or remote redaction. Treat any update that includes `message` as an accumulator replacement and seed open tool argument text from its optional `toolState`.
 - `text_delta`/`thinking_delta` append `delta` to the block at `contentIndex`; `text_end`/`thinking_end` carry the authoritative block `content`.
-- Delta-only `toolcall_start` frames include a `toolCall` stub (`{"id", "name"}`); `toolcall_delta` streams raw argument JSON text; `toolcall_end` carries the authoritative full `toolCall` object.
+- `toolcall_start` includes best-effort `id` and `name`; `toolcall_delta.argsTextDelta` streams raw argument JSON text and may refine identity; `toolcall_end` carries the authoritative full `toolCall` object.
 - The same rules apply to `message_update` events wrapped in `subagent_event`, keyed per `subagentId`. Drop a subagent's accumulator on `subagent_end` or `subagent_disposed`.
+- If a compact delta has an invalid position or cannot be applied at its bounded `contentIndex`, drop it and wait for the next base, snapshot, or final frame. Do not partially apply it.
 
-The bundled RPC client (`RpcClientBase` and the SDK clients built on it) performs this reconstruction transparently and exposes fully accumulated `message`/`partial` fields to event listeners.
+The bundled RPC client (`RpcClientBase` and the SDK clients built on it) performs this reconstruction transparently and exposes a fully accumulated `message` plus `assistantMessageEvent.snapshot`, `seq`, and `toolState` to event listeners.
 
 ### tool_execution_start / tool_execution_update / tool_execution_end
 

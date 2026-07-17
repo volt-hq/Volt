@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
+import { type ActiveToolCallState, type AssistantMessage, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
-import { RpcMessageDeltaDecoder } from "../src/core/rpc/message-deltas.ts";
+import { StreamProjectionDecoder } from "../src/core/rpc/stream-projection.ts";
 import type { ControlEvent } from "../src/daemon/control-protocol.ts";
 import {
 	VIEWER_BUFFER_MAX_BYTES,
@@ -29,17 +30,25 @@ function createFeedSession() {
 	return { session, handlers };
 }
 
-function assistantMessage(text: string) {
-	return { role: "assistant", content: [{ type: "text", text }] };
+function assistantMessage(text: string): AssistantMessage {
+	return fauxAssistantMessage(text, { timestamp: 0 });
 }
 
-function assistantTextUpdate(text: string, assistantMessageEvent: Record<string, unknown>) {
-	const message = assistantMessage(text);
+function assistantUpdate(
+	message: AssistantMessage,
+	seq: number,
+	assistantMessageEvent: Record<string, unknown>,
+	toolState: readonly ActiveToolCallState[] = [],
+): object {
 	return {
 		type: "message_update",
 		message,
-		assistantMessageEvent: { ...assistantMessageEvent, partial: message },
+		assistantMessageEvent: { ...assistantMessageEvent, seq, snapshot: message, toolState },
 	};
+}
+
+function assistantTextUpdate(text: string, seq: number, assistantMessageEvent: Record<string, unknown>): object {
+	return assistantUpdate(assistantMessage(text), seq, assistantMessageEvent);
 }
 
 function createRegistry() {
@@ -82,31 +91,40 @@ describe("ViewerFeedRegistry (§4.3)", () => {
 		expect(events[2]?.event.seq).toBe(2);
 	});
 
-	it("delta-encodes buffered and live updates after message_start while keeping terminal messages full", () => {
+	it("projects buffered and live updates after message_start while keeping terminal messages full", () => {
 		const { registry, sent } = createRegistry();
 		const { session } = createFeedSession();
 		registry.start("vf-1", "c-1", session);
 
-		session.emit({ type: "message_start", message: { role: "assistant", content: [] } });
-		session.emit(assistantTextUpdate("", { type: "text_start", contentIndex: 0 }));
-		session.emit(assistantTextUpdate("buffered", { type: "text_delta", contentIndex: 0, delta: "buffered" }));
+		session.emit({ type: "message_start", message: fauxAssistantMessage([], { timestamp: 0 }) });
+		session.emit(assistantTextUpdate("", 1, { type: "text_start", contentIndex: 0 }));
+		session.emit(assistantTextUpdate("buffered", 2, { type: "text_delta", contentIndex: 0, delta: "buffered" }));
 		expect(registry.subscribe("vf-1", "c-1")).toBe(true);
 
 		let events = viewerEvents(sent);
 		expect(events).toHaveLength(3);
-		expect(events[0]?.event.event).toMatchObject({ type: "message_start", message: { role: "assistant" } });
+		expect(events[0]?.event.event).toMatchObject({
+			type: "message_start",
+			stream: { epoch: 1, seq: 0 },
+			message: { role: "assistant" },
+		});
 		for (const entry of events.slice(1)) {
 			const event = entry.event.event as Record<string, unknown>;
 			expect(event).not.toHaveProperty("message");
-			expect(event.assistantMessageEvent).not.toHaveProperty("partial");
+			expect(event.assistantMessageEvent).not.toHaveProperty("snapshot");
+			expect(event.assistantMessageEvent).not.toHaveProperty("toolState");
 		}
 
-		session.emit(assistantTextUpdate("buffered live", { type: "text_delta", contentIndex: 0, delta: " live" }));
+		session.emit(assistantTextUpdate("buffered live", 3, { type: "text_delta", contentIndex: 0, delta: " live" }));
 		const finalMessage = assistantMessage("buffered live");
 		session.emit({ type: "message_end", message: finalMessage });
 		events = viewerEvents(sent);
 		expect(events[3]?.event.event).not.toHaveProperty("message");
-		expect(events[4]?.event.event).toEqual({ type: "message_end", message: finalMessage });
+		expect(events[4]?.event.event).toMatchObject({
+			type: "message_end",
+			stream: { epoch: 1, seq: 3 },
+			message: { role: "assistant", content: [{ type: "text", text: "buffered live" }] },
+		});
 	});
 
 	it("starts a mid-message feed with a snapshot and reconstructs buffered and live deltas", () => {
@@ -114,22 +132,24 @@ describe("ViewerFeedRegistry (§4.3)", () => {
 		const { session } = createFeedSession();
 		registry.start("vf-1", "c-1", session);
 
-		session.emit(assistantTextUpdate("mid", { type: "text_delta", contentIndex: 0, delta: "mid" }));
-		session.emit(assistantTextUpdate("mid-buffered", { type: "text_delta", contentIndex: 0, delta: "-buffered" }));
+		session.emit(assistantTextUpdate("mid", 1, { type: "text_delta", contentIndex: 0, delta: "mid" }));
+		session.emit(assistantTextUpdate("mid-buffered", 2, { type: "text_delta", contentIndex: 0, delta: "-buffered" }));
 		expect(registry.subscribe("vf-1", "c-1")).toBe(true);
 
 		let events = viewerEvents(sent);
 		expect(events[0]?.event.event).toHaveProperty("message");
 		expect(events[1]?.event.event).not.toHaveProperty("message");
 
-		const decoder = new RpcMessageDeltaDecoder();
+		const decoder = new StreamProjectionDecoder();
 		decoder.decode(events[0]?.event.event);
 		const buffered = decoder.decode(events[1]?.event.event) as {
 			message?: { content?: Array<{ text?: string }> };
 		};
 		expect(buffered.message?.content?.[0]?.text).toBe("mid-buffered");
 
-		session.emit(assistantTextUpdate("mid-buffered-live", { type: "text_delta", contentIndex: 0, delta: "-live" }));
+		session.emit(
+			assistantTextUpdate("mid-buffered-live", 3, { type: "text_delta", contentIndex: 0, delta: "-live" }),
+		);
 		events = viewerEvents(sent);
 		expect(events[2]?.event.event).not.toHaveProperty("message");
 		const live = decoder.decode(events[2]?.event.event) as {
@@ -143,26 +163,19 @@ describe("ViewerFeedRegistry (§4.3)", () => {
 		const { session } = createFeedSession();
 		registry.start("vf-1", "c-1", session);
 
-		const content = [{ type: "text", text: "A" }];
-		const partial = { role: "assistant", content };
-		session.emit({
-			type: "message_update",
-			message: { ...partial },
-			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "A", partial },
-		});
+		const content = [{ type: "text" as const, text: "A" }];
+		const firstMessage = { ...assistantMessage("A"), content };
+		session.emit(assistantUpdate(firstMessage, 1, { type: "text_delta", contentIndex: 0, delta: "A" }));
 		content[0]!.text += "B";
-		session.emit({
-			type: "message_update",
-			message: { ...partial },
-			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "B", partial },
-		});
+		const secondMessage = { ...assistantMessage("AB"), content };
+		session.emit(assistantUpdate(secondMessage, 2, { type: "text_delta", contentIndex: 0, delta: "B" }));
 
 		expect(registry.subscribe("vf-1", "c-1")).toBe(true);
 		const events = viewerEvents(sent);
 		expect(events[0]?.event.event).toMatchObject({
 			message: { content: [{ type: "text", text: "A" }] },
 		});
-		const decoder = new RpcMessageDeltaDecoder();
+		const decoder = new StreamProjectionDecoder();
 		decoder.decode(events[0]?.event.event);
 		const decoded = decoder.decode(events[1]?.event.event) as {
 			message?: { content?: Array<{ text?: string }> };
@@ -174,7 +187,8 @@ describe("ViewerFeedRegistry (§4.3)", () => {
 		const { registry, sent } = createRegistry();
 		const { session } = createFeedSession();
 		registry.start("vf-1", "c-1", session);
-		session.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+		session.emit({ type: "message_start", message: fauxAssistantMessage([], { timestamp: 0 }) });
+		session.emit(assistantTextUpdate("", 1, { type: "text_start", contentIndex: 0 }));
 
 		const delta = "x".repeat(1024);
 		let accumulated = "";
@@ -182,13 +196,13 @@ describe("ViewerFeedRegistry (§4.3)", () => {
 		for (let index = 0; index < 128; index++) {
 			accumulated += delta;
 			repeatedMessageBytes += accumulated.length;
-			session.emit(assistantTextUpdate(accumulated, { type: "text_delta", contentIndex: 0, delta }));
+			session.emit(assistantTextUpdate(accumulated, index + 2, { type: "text_delta", contentIndex: 0, delta }));
 		}
 		expect(repeatedMessageBytes).toBeGreaterThan(VIEWER_BUFFER_MAX_BYTES);
 
 		expect(registry.subscribe("vf-1", "c-1")).toBe(true);
 		const events = viewerEvents(sent);
-		expect(events).toHaveLength(129);
+		expect(events).toHaveLength(130);
 		expect(events.some((entry) => (entry.event.event as { kind?: string }).kind === "truncated")).toBe(false);
 		expect(events.slice(1).every((entry) => !("message" in (entry.event.event as Record<string, unknown>)))).toBe(
 			true,
@@ -209,23 +223,16 @@ describe("ViewerFeedRegistry (§4.3)", () => {
 		for (let index = 0; index < 128; index++) {
 			accumulated += delta;
 			repeatedMessageBytes += accumulated.length;
-			const message = {
-				role: "assistant",
-				content: [
-					{
-						type: "toolCall",
-						id: "tc-long",
-						name: "write",
-						arguments: { content: accumulated },
-						partialJson: `{"content":"${accumulated}`,
-					},
-				],
-			};
-			session.emit({
-				type: "message_update",
-				message,
-				assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta, partial: message },
-			});
+			const message = fauxAssistantMessage(
+				{ type: "toolCall", id: "tc-long", name: "write", arguments: { content: accumulated } },
+				{ timestamp: 0 },
+			);
+			const argsText = `{"content":"${accumulated}`;
+			session.emit(
+				assistantUpdate(message, index + 1, { type: "toolcall_delta", contentIndex: 0, argsTextDelta: delta }, [
+					{ contentIndex: 0, argsText },
+				]),
+			);
 		}
 		expect(repeatedMessageBytes).toBeGreaterThan(VIEWER_BUFFER_MAX_BYTES);
 
@@ -239,33 +246,41 @@ describe("ViewerFeedRegistry (§4.3)", () => {
 		expect(events.some((entry) => (entry.event.event as { kind?: string }).kind === "truncated")).toBe(false);
 	});
 
-	it("coalesces fallback tool-call snapshots when no raw argument prefix is available", () => {
-		const { registry, sent } = createRegistry();
-		const { session } = createFeedSession();
-		registry.start("vf-1", "c-1", session);
+	it("falls back to replacement snapshots when resumable tool state is unavailable", () => {
+		const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const { registry, sent } = createRegistry();
+			const { session } = createFeedSession();
+			registry.start("vf-1", "c-1", session);
 
-		const delta = "x".repeat(1024);
-		let accumulated = "";
-		for (let index = 0; index < 128; index++) {
-			accumulated += delta;
-			const message = {
-				role: "assistant",
-				content: [{ type: "toolCall", id: "tc-fallback", name: "write", arguments: { content: accumulated } }],
-			};
-			session.emit({
-				type: "message_update",
-				message,
-				assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta, partial: message },
+			for (const [index, content] of ["first", "second"].entries()) {
+				const message = fauxAssistantMessage(
+					{ type: "toolCall", id: "tc-fallback", name: "write", arguments: { content } },
+					{ timestamp: 0 },
+				);
+				session.emit(
+					assistantUpdate(message, index + 1, {
+						type: "toolcall_delta",
+						contentIndex: 0,
+						argsTextDelta: content,
+					}),
+				);
+			}
+
+			expect(registry.subscribe("vf-1", "c-1")).toBe(true);
+			const events = viewerEvents(sent);
+			expect(events).toHaveLength(2);
+			expect(events.every((entry) => "message" in (entry.event.event as Record<string, unknown>))).toBe(true);
+			expect(events[1]?.event.event).toMatchObject({
+				message: { content: [{ arguments: { content: "second" } }] },
 			});
+			expect(stderr).toHaveBeenCalledWith(
+				expect.stringContaining("missing_tool_accumulator"),
+				expect.objectContaining({ code: "missing_tool_accumulator" }),
+			);
+		} finally {
+			stderr.mockRestore();
 		}
-
-		expect(registry.subscribe("vf-1", "c-1")).toBe(true);
-		const events = viewerEvents(sent);
-		expect(events).toHaveLength(1);
-		expect(events[0]?.event.event).toMatchObject({
-			type: "message_update",
-			message: { content: [{ arguments: { content: accumulated } }] },
-		});
 	});
 
 	it("applies the byte cap to UTF-8 wire bytes", () => {
@@ -289,7 +304,7 @@ describe("ViewerFeedRegistry (§4.3)", () => {
 		const { registry, sent } = createRegistry();
 		const { session } = createFeedSession();
 		registry.start("vf-1", "c-1", session);
-		session.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+		session.emit({ type: "message_start", message: fauxAssistantMessage([], { timestamp: 0 }) });
 
 		for (let index = 0; index < VIEWER_BUFFER_MAX_EVENTS + 5; index++) {
 			session.emit({ type: "message_delta", index });
@@ -301,7 +316,7 @@ describe("ViewerFeedRegistry (§4.3)", () => {
 
 		// Live events still stream after the truncation marker, and the broken
 		// replay history forces the next update to carry a fresh snapshot.
-		session.emit(assistantTextUpdate("after truncation", { type: "text_delta", contentIndex: 0, delta: "x" }));
+		session.emit(assistantTextUpdate("after truncation", 1, { type: "text_delta", contentIndex: 0, delta: "x" }));
 		events = viewerEvents(sent);
 		expect(events[1]?.event.event).toHaveProperty("message");
 		session.emit({ type: "agent_end" });
@@ -349,18 +364,79 @@ describe("ViewerFeedRegistry (§4.3)", () => {
 		const { session } = createFeedSession();
 		registry.start("vf-1", "c-1", session);
 		registry.subscribe("vf-1", "c-1");
-		session.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+		session.emit({ type: "message_start", message: fauxAssistantMessage([], { timestamp: 0 }) });
 		expect(viewerEvents(sent)).toHaveLength(1);
 
 		expect(registry.unsubscribe("vf-1", "c-1")).toBe(true);
-		session.emit(assistantTextUpdate("missed", { type: "text_delta", contentIndex: 0, delta: "missed" }));
+		session.emit(assistantTextUpdate("missed", 1, { type: "text_delta", contentIndex: 0, delta: "missed" }));
 		expect(viewerEvents(sent)).toHaveLength(1);
 		expect(registry.has("vf-1")).toBe(true);
 
 		expect(registry.subscribe("vf-1", "c-1")).toBe(true);
-		session.emit(assistantTextUpdate("missed resumed", { type: "text_delta", contentIndex: 0, delta: " resumed" }));
+		session.emit(
+			assistantTextUpdate("missed resumed", 2, { type: "text_delta", contentIndex: 0, delta: " resumed" }),
+		);
 		const events = viewerEvents(sent);
 		expect(events).toHaveLength(2);
 		expect(events[1]?.event.event).toHaveProperty("message");
+	});
+
+	it("surfaces projector diagnostics without writing them into the viewer protocol", () => {
+		const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const { registry, sent } = createRegistry();
+			const { session } = createFeedSession();
+			registry.start("vf-1", "c-1", session);
+			registry.subscribe("vf-1", "c-1");
+			session.emit({ type: "message_start", message: fauxAssistantMessage([], { timestamp: 0 }) });
+			session.emit(assistantTextUpdate("", 1, { type: "text_start", contentIndex: 0 }));
+			session.emit(assistantTextUpdate("gap", 3, { type: "text_delta", contentIndex: 0, delta: "gap" }));
+
+			expect(stderr).toHaveBeenCalledWith(
+				expect.stringContaining("[stream-projection:viewer:vf-1] sequence_gap"),
+				expect.objectContaining({ code: "sequence_gap" }),
+			);
+			expect(JSON.stringify(sent)).not.toContain("sequence_gap");
+		} finally {
+			stderr.mockRestore();
+		}
+	});
+
+	it("fences a failed live delivery so the next update is a snapshot", () => {
+		const attempts: ControlEvent[] = [];
+		let writes = 0;
+		const registry = new ViewerFeedRegistry({
+			sendTo: (_connectionId, event) => {
+				attempts.push(event);
+				writes += 1;
+				return writes !== 2;
+			},
+		});
+		const { session } = createFeedSession();
+		registry.start("vf-1", "c-1", session);
+		registry.subscribe("vf-1", "c-1");
+
+		session.emit({ type: "message_start", message: fauxAssistantMessage([], { timestamp: 0 }) });
+		session.emit(assistantTextUpdate("", 1, { type: "text_start", contentIndex: 0 }));
+		session.emit(assistantTextUpdate("recovered", 2, { type: "text_delta", contentIndex: 0, delta: "recovered" }));
+
+		const recovered = attempts[2] as Extract<ControlEvent, { type: "viewer_event" }>;
+		expect(recovered.event).toHaveProperty("message");
+	});
+
+	it("does not advance projection state past an unserializable dropped event", () => {
+		const { registry, sent } = createRegistry();
+		const { session } = createFeedSession();
+		registry.start("vf-1", "c-1", session);
+		registry.subscribe("vf-1", "c-1");
+
+		const unserializable = { ...assistantMessage("dropped"), debugCounter: 1n };
+		session.emit(assistantUpdate(unserializable, 1, { type: "text_delta", contentIndex: 0, delta: "dropped" }));
+		expect(viewerEvents(sent)).toHaveLength(0);
+
+		session.emit(assistantTextUpdate("recovered", 2, { type: "text_delta", contentIndex: 0, delta: "recovered" }));
+		const events = viewerEvents(sent);
+		expect(events).toHaveLength(1);
+		expect(events[0]?.event.event).toHaveProperty("message");
 	});
 });

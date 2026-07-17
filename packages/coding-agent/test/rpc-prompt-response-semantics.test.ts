@@ -131,9 +131,9 @@ function createRuntimeHost(options: {
 		streamFn: (_model, _context, _options) => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
-				stream.push({ type: "start", partial: createAssistantMessage("") });
+				stream.push({ type: "start", seq: 0, snapshot: createAssistantMessage(""), toolState: [] });
 				setTimeout(() => {
-					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+					stream.push({ type: "done", seq: 1, reason: "stop", message: createAssistantMessage("done") });
 				}, options.responseDelayMs);
 			});
 			return stream;

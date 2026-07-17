@@ -114,6 +114,7 @@
 	"devDependencies": {
 		"canvas": "3.2.3",
 		"@types/node": "24.12.4",
+		"fast-check": "4.9.0",
 		"vitest": "3.2.6"
 	}
 }

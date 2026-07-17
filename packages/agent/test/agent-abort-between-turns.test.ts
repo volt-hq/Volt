@@ -84,6 +84,7 @@ describe("abort between turns", () => {
 				queueMicrotask(() => {
 					stream.push({
 						type: "done",
+						seq: 1,
 						reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
 						message,
 					});
@@ -119,6 +120,7 @@ describe("abort between turns", () => {
 				queueMicrotask(() => {
 					stream.push({
 						type: "done",
+						seq: 1,
 						reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
 						message,
 					});

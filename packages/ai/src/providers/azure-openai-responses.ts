@@ -1,16 +1,8 @@
 import { AzureOpenAI } from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
-import type {
-	Api,
-	AssistantMessage,
-	Context,
-	Model,
-	SimpleStreamOptions,
-	StreamFunction,
-	StreamOptions,
-} from "../types.ts";
-import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
+import type { Context, Model, SimpleStreamOptions, StreamFunction, StreamOptions } from "../types.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
@@ -76,32 +68,28 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 	model: Model<"azure-openai-responses">,
 	context: Context,
 	options?: AzureOpenAIResponsesOptions,
-): AssistantMessageEventStream => {
-	const stream = new AssistantMessageEventStream();
+) => {
+	const normalizer = new AssistantStreamNormalizer();
+	const timestamp = Date.now();
+	let started = false;
+	const start = () => {
+		if (started) return;
+		started = true;
+		normalizer.push({
+			type: "start",
+			init: {
+				api: "azure-openai-responses",
+				provider: model.provider,
+				model: model.id,
+				timestamp,
+			},
+		});
+	};
 
 	// Start async processing
 	(async () => {
-		const deploymentName = resolveDeploymentName(model, options);
-
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: "azure-openai-responses" as Api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
-
 		try {
+			const deploymentName = resolveDeploymentName(model, options);
 			// Create Azure OpenAI client
 			const apiKey = options?.apiKey;
 			if (!apiKey) {
@@ -120,41 +108,39 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 			};
 			const { data: openaiStream, response } = await client.responses.create(params, requestOptions).withResponse();
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			stream.push({ type: "start", partial: output });
+			start();
 
-			await processResponsesStream(openaiStream, output, stream, model);
+			const result = await processResponsesStream(openaiStream, normalizer, model);
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
 			}
 
-			if (output.stopReason === "aborted" || output.stopReason === "error") {
+			if (result.stopReason === "aborted" || result.stopReason === "error") {
 				throw new Error("An unknown error occurred");
 			}
 
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			normalizer.push({ type: "done", reason: result.stopReason });
 		} catch (error) {
-			for (const block of output.content) {
-				delete (block as { index?: number }).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatAzureOpenAIError(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			start();
+			normalizer.push({
+				type: "error",
+				reason: options?.signal?.aborted ? "aborted" : "error",
+				errorMessage: formatAzureOpenAIError(error),
+			});
+		} finally {
+			normalizer.end();
 		}
 	})();
 
-	return stream;
+	return normalizer.stream;
 };
 
 export const streamSimpleAzureOpenAIResponses: StreamFunction<"azure-openai-responses", SimpleStreamOptions> = (
 	model: Model<"azure-openai-responses">,
 	context: Context,
 	options?: SimpleStreamOptions,
-): AssistantMessageEventStream => {
+) => {
 	const apiKey = options?.apiKey;
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);

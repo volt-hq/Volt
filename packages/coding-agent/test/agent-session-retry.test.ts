@@ -87,12 +87,12 @@ describe("AgentSession retry", () => {
 							stopReason: "error",
 							errorMessage: "overloaded_error",
 						});
-						stream.push({ type: "start", partial: msg });
-						stream.push({ type: "error", reason: "error", error: msg });
+						stream.push({ type: "start", seq: 0, snapshot: msg, toolState: [] });
+						stream.push({ type: "error", seq: 1, reason: "error", error: msg });
 					} else {
 						const msg = createAssistantMessage("Success");
-						stream.push({ type: "start", partial: msg });
-						stream.push({ type: "done", reason: "stop", message: msg });
+						stream.push({ type: "start", seq: 0, snapshot: msg, toolState: [] });
+						stream.push({ type: "done", seq: 1, reason: "stop", message: msg });
 					}
 				});
 				return stream;
@@ -182,14 +182,14 @@ describe("AgentSession retry", () => {
 						stopReason: "error",
 						errorMessage: "Provider finish_reason: network_error",
 					});
-					stream.push({ type: "start", partial: msg });
-					stream.push({ type: "error", reason: "error", error: msg });
+					stream.push({ type: "start", seq: 0, snapshot: msg, toolState: [] });
+					stream.push({ type: "error", seq: 1, reason: "error", error: msg });
 					return;
 				}
 
 				const msg = createAssistantMessage("Recovered after retry");
-				stream.push({ type: "start", partial: msg });
-				stream.push({ type: "done", reason: "stop", message: msg });
+				stream.push({ type: "start", seq: 0, snapshot: msg, toolState: [] });
+				stream.push({ type: "done", seq: 1, reason: "stop", message: msg });
 			});
 			return stream;
 		};
@@ -261,8 +261,8 @@ describe("AgentSession retry", () => {
 							stopReason: "error",
 							errorMessage: "overloaded_error",
 						});
-						stream.push({ type: "start", partial: msg });
-						stream.push({ type: "error", reason: "error", error: msg });
+						stream.push({ type: "start", seq: 0, snapshot: msg, toolState: [] });
+						stream.push({ type: "error", seq: 1, reason: "error", error: msg });
 					} else if (callCount === 2) {
 						// Second call (retry): text + tool_use
 						const msg: AssistantMessage = {
@@ -273,13 +273,13 @@ describe("AgentSession retry", () => {
 								{ type: "toolCall", id: "call_1", name: "echo", arguments: { text: "hello" } },
 							],
 						};
-						stream.push({ type: "start", partial: msg });
-						stream.push({ type: "done", reason: "toolUse", message: msg });
+						stream.push({ type: "start", seq: 0, snapshot: msg, toolState: [] });
+						stream.push({ type: "done", seq: 1, reason: "toolUse", message: msg });
 					} else {
 						// Third call (after tool result): final response
 						const msg = createAssistantMessage("Final answer.");
-						stream.push({ type: "start", partial: msg });
-						stream.push({ type: "done", reason: "stop", message: msg });
+						stream.push({ type: "start", seq: 0, snapshot: msg, toolState: [] });
+						stream.push({ type: "done", seq: 1, reason: "stop", message: msg });
 					}
 				});
 				return stream;
