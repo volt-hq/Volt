@@ -48,6 +48,10 @@ export type RpcCommand =
 	| { id?: string; type: "set_client_capabilities"; features: RpcClientCapabilityFeature[] }
 	| { id?: string; type: "get_pending_host_actions" }
 
+	// Streaming recovery: client-side assistant-stream state was lost (dropped
+	// frames, replay gap); the next assistant event re-seeds it with a snapshot.
+	| { id?: string; type: "report_stream_discontinuity" }
+
 	// Native UI actions
 	| { id?: string; type: "get_ui_capabilities" }
 	| { id?: string; type: "get_ui_actions"; scope?: UiActionListScope }
@@ -649,6 +653,7 @@ export type RpcResponse =
 
 	// Client capabilities and host-initiated actions
 	| { id?: string; type: "response"; command: "set_client_capabilities"; success: true }
+	| { id?: string; type: "response"; command: "report_stream_discontinuity"; success: true }
 	| {
 			id?: string;
 			type: "response";

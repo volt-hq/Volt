@@ -1476,6 +1476,19 @@ Reconstruction rules:
 - `toolcall_start` includes best-effort `id` and `name`; `toolcall_delta.argsTextDelta` streams raw argument JSON text and may refine identity; `toolcall_end` carries the authoritative full `toolCall` object.
 - The same rules apply to `message_update` events wrapped in `subagent_event`, keyed per `subagentId`. Drop a subagent's accumulator on `subagent_end` or `subagent_disposed`.
 - If a compact delta has an invalid position or cannot be applied at its bounded `contentIndex`, drop it and wait for the next base, snapshot, or final frame. Do not partially apply it.
+- A client that dropped deltas for a gap the server never saw (for example, frames discarded during an attach or replay window) receives no automatic recovery — the server believes the stream is synchronized. Send `report_stream_discontinuity` to request one:
+
+```json
+{"type": "report_stream_discontinuity"}
+```
+
+Response:
+
+```json
+{"type": "response", "command": "report_stream_discontinuity", "success": true}
+```
+
+The server marks the session's assistant stream as discontinuous, so the next assistant streaming event is emitted as a full recovery snapshot instead of a compact delta. Idempotent and safe to send while idle (the next message then simply begins with its normal base frame). Send it at most once per detected gap rather than per dropped frame.
 
 The bundled RPC client (`RpcClientBase` and the SDK clients built on it) performs this reconstruction transparently and exposes a fully accumulated `message` plus `assistantMessageEvent.snapshot`, `seq`, and `toolState` to event listeners.
 

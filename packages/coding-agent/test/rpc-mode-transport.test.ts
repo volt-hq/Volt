@@ -1598,6 +1598,100 @@ describe("RPC mode caller-provided transports", () => {
 	});
 });
 
+describe("RPC mode stream discontinuity", () => {
+	test("report_stream_discontinuity makes the next assistant event ship a recovery snapshot", async () => {
+		let sessionListener: ((event: object) => void) | undefined;
+		const runtimeHost = {
+			session: {
+				bindExtensions: vi.fn(async () => {}),
+				subscribe: vi.fn((listener: (event: object) => void) => {
+					sessionListener = listener;
+					return () => {};
+				}),
+				agent: {
+					subscribe: vi.fn(() => () => {}),
+				},
+			},
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+
+		const harness = await startRpcModeHarness(runtimeHost);
+		await vi.waitFor(() => expect(sessionListener).toBeDefined());
+
+		const snapshot = (text: string) => ({
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: "faux",
+			provider: "faux",
+			model: "faux-1",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+			stopReason: "stop",
+			timestamp: 1,
+		});
+
+		sessionListener?.({ type: "message_start", message: snapshot("") });
+		sessionListener?.({
+			type: "message_update",
+			message: snapshot(""),
+			assistantMessageEvent: { type: "text_start", seq: 1, contentIndex: 0, snapshot: snapshot(""), toolState: [] },
+		});
+		sessionListener?.({
+			type: "message_update",
+			message: snapshot("Hel"),
+			assistantMessageEvent: {
+				type: "text_delta",
+				seq: 2,
+				contentIndex: 0,
+				delta: "Hel",
+				snapshot: snapshot("Hel"),
+				toolState: [],
+			},
+		});
+
+		const updatesBefore = harness.writes.filter((frame) => (frame as { type?: string }).type === "message_update");
+		expect(updatesBefore).toHaveLength(2);
+		for (const frame of updatesBefore) {
+			expect(frame).not.toHaveProperty("message");
+		}
+
+		harness.send({ id: "disc-1", type: "report_stream_discontinuity" });
+		await vi.waitFor(() =>
+			expect(harness.writes).toContainEqual({
+				id: "disc-1",
+				type: "response",
+				command: "report_stream_discontinuity",
+				success: true,
+			}),
+		);
+
+		sessionListener?.({
+			type: "message_update",
+			message: snapshot("Hello"),
+			assistantMessageEvent: {
+				type: "text_delta",
+				seq: 3,
+				contentIndex: 0,
+				delta: "lo",
+				snapshot: snapshot("Hello"),
+				toolState: [],
+			},
+		});
+
+		const updatesAfter = harness.writes.filter((frame) => (frame as { type?: string }).type === "message_update");
+		expect(updatesAfter).toHaveLength(3);
+		const recovery = updatesAfter[2] as { message?: { content?: unknown[] }; stream?: { epoch: number } };
+		expect(recovery.message).toMatchObject({ content: [{ type: "text", text: "Hello" }] });
+		expect(recovery.stream?.epoch).toBeGreaterThan(1);
+
+		harness.close();
+		await harness.modePromise;
+	});
+});
+
 describe("RPC mode stdio transport", () => {
 	test("restores stdout when non-exiting stdio mode closes", async () => {
 		const initialEndListenerCount = process.stdin.listenerCount("end");

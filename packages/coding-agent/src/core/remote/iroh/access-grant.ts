@@ -34,6 +34,9 @@ const STANDARD_CAPABILITIES = Object.freeze<IrohRemoteRpcCapability[]>([
 	"conversation.observe.v1",
 	"conversation.control.v1",
 	"model.select.v1",
+	// A paired device is the user's own; host-action responses, keep-awake, and
+	// capability advertisement (host_action_requests.v1) work out of the box.
+	"host.manage.v1",
 ]);
 
 export const IROH_REMOTE_ACCESS_PRESETS: Readonly<Record<IrohRemoteAccessPresetName, IrohRemoteAccessPreset>> =
@@ -145,6 +148,7 @@ const BASELINE_COMMANDS = new Set(["register_push_target", "register_live_activi
 const OBSERVE_COMMANDS = new Set([
 	"get_state",
 	"get_transcript",
+	"report_stream_discontinuity",
 	"get_message_images",
 	"get_ui_capabilities",
 	"get_ui_actions",

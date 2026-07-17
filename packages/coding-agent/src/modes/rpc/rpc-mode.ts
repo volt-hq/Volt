@@ -1054,6 +1054,16 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			);
 			options.onClientCapabilitiesChanged?.(Array.from(clientCapabilities));
 		},
+		reportStreamDiscontinuity(): void {
+			if (!sessionProjector) {
+				return;
+			}
+			const batch = sessionProjector.discontinuity();
+			reportProjectionDiagnostics("rpc-session", batch.diagnostics);
+			for (const frame of batch.frames) {
+				output(frame);
+			}
+		},
 		getPendingHostActionRequests: () => hostActionBridge.getPendingRequests(),
 		cancelPendingHostActionRequests,
 		subagents: rpcSubagents,

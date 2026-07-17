@@ -68,6 +68,7 @@ export interface RpcCommandDispatcherContext {
 	rebindSession(): Promise<void>;
 	createHostActionContext(): HostActionInvocationContext;
 	setClientCapabilities(features: RpcClientCapabilityFeature[]): void;
+	reportStreamDiscontinuity(): void;
 	getPendingHostActionRequests(): RpcHostActionRequest[];
 	cancelPendingHostActionRequests(message?: string): void;
 	subagents: RpcSubagentLifecycleController;
@@ -215,6 +216,11 @@ export async function handleRpcCommand(
 				actions: context.getPendingHostActionRequests(),
 			};
 			return createRpcSuccessResponse(id, "get_pending_host_actions", data);
+		}
+
+		case "report_stream_discontinuity": {
+			context.reportStreamDiscontinuity();
+			return createRpcSuccessResponse(id, "report_stream_discontinuity");
 		}
 
 		// =================================================================
