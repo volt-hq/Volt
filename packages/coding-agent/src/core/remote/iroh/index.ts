@@ -138,8 +138,8 @@ export {
 	type IrohRemoteHostMetadata,
 } from "./metadata.ts";
 export {
-	createIrohRemoteOutboundDeltaSanitizer,
 	createIrohRemoteOutboundFilteredRpcTransport,
+	createIrohRemoteProjectionSanitizer,
 	IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH,
 	IROH_REMOTE_REDACTED_EXPORT_PATH,
 	IROH_REMOTE_REDACTED_SESSION_FILE,
@@ -147,6 +147,8 @@ export {
 	type IrohRemoteOutboundJsonlReadablePipeOptions,
 	type IrohRemoteOutboundSanitizerOptions,
 	type IrohRemoteOutboundValueDecorator,
+	type IrohRemoteProjectionSanitizer,
+	type IrohRemoteSanitizerOptions,
 	pipeIrohRemoteOutboundJsonlReadable,
 	sanitizeIrohRemoteOutbound,
 	sanitizeIrohRemoteOutboundJsonLine,

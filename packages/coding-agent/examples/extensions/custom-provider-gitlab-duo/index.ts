@@ -11,9 +11,11 @@
 
 import {
 	type Api,
+	type AssistantMessage,
+	type AssistantMessageEvent,
 	type AssistantMessageEventStream,
+	AssistantStreamNormalizer,
 	type Context,
-	createAssistantMessageEventStream,
 	type Model,
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
@@ -308,7 +310,139 @@ export function streamGitLabDuo(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const stream = createAssistantMessageEventStream();
+	const normalizer = new AssistantStreamNormalizer();
+	normalizer.push({
+		type: "start",
+		init: {
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+		},
+	});
+
+	let diagnosticCount = 0;
+	const thinkingSignatures = new Map<number, string>();
+	const pushMeta = (message: AssistantMessage) => {
+		const diagnostics = message.diagnostics ?? [];
+		const newDiagnostics = diagnostics.length >= diagnosticCount ? diagnostics.slice(diagnosticCount) : diagnostics;
+		diagnosticCount = diagnostics.length;
+		normalizer.push({
+			type: "meta",
+			patch: {
+				...(message.responseId === undefined ? {} : { responseId: message.responseId }),
+				...(message.responseModel === undefined ? {} : { responseModel: message.responseModel }),
+				usage: message.usage,
+				...(newDiagnostics.length === 0 ? {} : { diagnostics: newDiagnostics }),
+			},
+		});
+	};
+	const replayEvent = (event: AssistantMessageEvent) => {
+		if (event.type === "done") {
+			pushMeta(event.message);
+			normalizer.push({ type: "done", reason: event.reason, usage: event.message.usage });
+			return;
+		}
+		if (event.type === "error") {
+			pushMeta(event.error);
+			normalizer.push({
+				type: "error",
+				reason: event.reason,
+				errorMessage: event.error.errorMessage ?? "Delegated provider stream failed",
+				usage: event.error.usage,
+			});
+			return;
+		}
+
+		pushMeta(event.snapshot);
+		if (event.type === "start") return;
+
+		const block = event.snapshot.content[event.contentIndex];
+		switch (event.type) {
+			case "text_start":
+				normalizer.push({ type: "text_start", contentIndex: event.contentIndex });
+				break;
+			case "text_delta":
+				normalizer.push({ type: "text_delta", contentIndex: event.contentIndex, delta: event.delta });
+				break;
+			case "text_end":
+				normalizer.push({
+					type: "text_end",
+					contentIndex: event.contentIndex,
+					content: event.content,
+					...(block?.type === "text" && block.textSignature !== undefined
+						? { textSignature: block.textSignature }
+						: {}),
+				});
+				break;
+			case "thinking_start": {
+				const signature = block?.type === "thinking" ? block.thinkingSignature : undefined;
+				if (signature !== undefined) thinkingSignatures.set(event.contentIndex, signature);
+				normalizer.push({
+					type: "thinking_start",
+					contentIndex: event.contentIndex,
+					...(block?.type === "thinking"
+						? {
+								content: block.thinking,
+								...(signature === undefined ? {} : { thinkingSignature: signature }),
+								...(block.redacted === undefined ? {} : { redacted: block.redacted }),
+							}
+						: {}),
+				});
+				break;
+			}
+			case "thinking_delta": {
+				const previousSignature = thinkingSignatures.get(event.contentIndex) ?? "";
+				const nextSignature = block?.type === "thinking" ? (block.thinkingSignature ?? "") : previousSignature;
+				const signatureDelta = nextSignature.startsWith(previousSignature)
+					? nextSignature.slice(previousSignature.length)
+					: undefined;
+				thinkingSignatures.set(event.contentIndex, nextSignature);
+				normalizer.push({
+					type: "thinking_delta",
+					contentIndex: event.contentIndex,
+					delta: event.delta,
+					...(signatureDelta ? { signatureDelta } : {}),
+				});
+				break;
+			}
+			case "thinking_end":
+				normalizer.push({
+					type: "thinking_end",
+					contentIndex: event.contentIndex,
+					content: event.content,
+					...(block?.type === "thinking" && block.thinkingSignature !== undefined
+						? { thinkingSignature: block.thinkingSignature }
+						: {}),
+					...(block?.type === "thinking" && block.redacted !== undefined ? { redacted: block.redacted } : {}),
+				});
+				break;
+			case "toolcall_start":
+				normalizer.push({
+					type: "toolcall_start",
+					contentIndex: event.contentIndex,
+					id: event.id,
+					name: event.name,
+				});
+				break;
+			case "toolcall_delta":
+				normalizer.push({
+					type: "toolcall_delta",
+					contentIndex: event.contentIndex,
+					argsTextDelta: event.argsTextDelta,
+					...(event.id === undefined ? {} : { id: event.id }),
+					...(event.name === undefined ? {} : { name: event.name }),
+				});
+				break;
+			case "toolcall_end":
+				normalizer.push({
+					type: "toolcall_end",
+					contentIndex: event.contentIndex,
+					toolCall: event.toolCall,
+				});
+				break;
+		}
+	};
 
 	(async () => {
 		try {
@@ -338,36 +472,19 @@ export function streamGitLabDuo(
 						)
 					: streamSimpleOpenAIResponses(modelWithBaseUrl as Model<"openai-responses">, context, streamOptions);
 
-			for await (const event of innerStream) stream.push(event);
-			stream.end();
+			for await (const event of innerStream) replayEvent(event);
 		} catch (error) {
-			stream.push({
+			normalizer.push({
 				type: "error",
-				reason: "error",
-				error: {
-					role: "assistant",
-					content: [],
-					api: model.api,
-					provider: model.provider,
-					model: model.id,
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "error",
-					errorMessage: error instanceof Error ? error.message : String(error),
-					timestamp: Date.now(),
-				},
+				reason: options?.signal?.aborted ? "aborted" : "error",
+				errorMessage: error instanceof Error ? error.message : String(error),
 			});
-			stream.end();
+		} finally {
+			normalizer.end();
 		}
 	})();
 
-	return stream;
+	return normalizer.stream;
 }
 
 // =============================================================================

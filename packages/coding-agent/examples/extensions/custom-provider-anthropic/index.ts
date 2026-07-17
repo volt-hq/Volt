@@ -25,11 +25,10 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { ContentBlockParam, MessageCreateParamsStreaming } from "@anthropic-ai/sdk/resources/messages.js";
 import {
 	type Api,
-	type AssistantMessage,
 	type AssistantMessageEventStream,
+	AssistantStreamNormalizer,
 	type Context,
 	calculateCost,
-	createAssistantMessageEventStream,
 	type ImageContent,
 	type Message,
 	type Model,
@@ -40,8 +39,8 @@ import {
 	type TextContent,
 	type ThinkingContent,
 	type Tool,
-	type ToolCall,
 	type ToolResultMessage,
+	type Usage,
 } from "@hansjm10/volt-ai";
 import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
@@ -336,25 +335,39 @@ function streamCustomAnthropic(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const stream = createAssistantMessageEventStream();
-
-	(async () => {
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
+	const normalizer = new AssistantStreamNormalizer();
+	normalizer.push({
+		type: "start",
+		init: {
 			api: model.api,
 			provider: model.provider,
 			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
 			timestamp: Date.now(),
+		},
+	});
+
+	(async () => {
+		let usage: Usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		let stopReason: StopReason = "stop";
+		let nextContentIndex = 0;
+		type AnthropicBlockKind = "text" | "thinking" | "toolCall";
+		const blocksByRawIndex = new Map<number, { contentIndex: number; kind: AnthropicBlockKind }>();
+		const registerBlock = (rawIndex: number, kind: AnthropicBlockKind) => {
+			const block = { contentIndex: nextContentIndex, kind };
+			nextContentIndex += 1;
+			blocksByRawIndex.set(rawIndex, block);
+			return block.contentIndex;
+		};
+		const resolveBlock = (rawIndex: number, kind: AnthropicBlockKind) => {
+			const block = blocksByRawIndex.get(rawIndex);
+			return block?.contentIndex ?? registerBlock(rawIndex, kind);
 		};
 
 		try {
@@ -443,103 +456,101 @@ function streamCustomAnthropic(
 			}
 
 			const anthropicStream = client.messages.stream({ ...params }, { signal: options?.signal });
-			stream.push({ type: "start", partial: output });
-
-			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
-			const blocks = output.content as Block[];
 
 			for await (const event of anthropicStream) {
 				if (event.type === "message_start") {
-					output.usage.input = event.message.usage.input_tokens || 0;
-					output.usage.output = event.message.usage.output_tokens || 0;
-					output.usage.cacheRead = (event.message.usage as any).cache_read_input_tokens || 0;
-					output.usage.cacheWrite = (event.message.usage as any).cache_creation_input_tokens || 0;
-					output.usage.totalTokens =
-						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-					calculateCost(model, output.usage);
+					usage = {
+						...usage,
+						input: event.message.usage.input_tokens || 0,
+						output: event.message.usage.output_tokens || 0,
+						cacheRead: event.message.usage.cache_read_input_tokens || 0,
+						cacheWrite: event.message.usage.cache_creation_input_tokens || 0,
+					};
+					usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+					calculateCost(model, usage);
+					normalizer.push({ type: "meta", patch: { responseId: event.message.id, usage } });
 				} else if (event.type === "content_block_start") {
 					if (event.content_block.type === "text") {
-						output.content.push({ type: "text", text: "", index: event.index } as any);
-						stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
+						const contentIndex = registerBlock(event.index, "text");
+						normalizer.push({ type: "text_start", contentIndex });
 					} else if (event.content_block.type === "thinking") {
-						output.content.push({
-							type: "thinking",
-							thinking: "",
-							thinkingSignature: "",
-							index: event.index,
-						} as any);
-						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
+						const contentIndex = registerBlock(event.index, "thinking");
+						normalizer.push({ type: "thinking_start", contentIndex });
+					} else if (event.content_block.type === "redacted_thinking") {
+						const contentIndex = registerBlock(event.index, "thinking");
+						normalizer.push({
+							type: "thinking_start",
+							contentIndex,
+							content: "[Reasoning redacted]",
+							thinkingSignature: event.content_block.data,
+							redacted: true,
+						});
 					} else if (event.content_block.type === "tool_use") {
-						output.content.push({
-							type: "toolCall",
+						const contentIndex = registerBlock(event.index, "toolCall");
+						normalizer.push({
+							type: "toolcall_start",
+							contentIndex,
 							id: event.content_block.id,
 							name: isOAuth
 								? fromClaudeCodeName(event.content_block.name, context.tools)
 								: event.content_block.name,
-							arguments: {},
-							partialJson: "",
-							index: event.index,
-						} as any);
-						stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
+						});
+						const seededArgs = JSON.stringify(event.content_block.input ?? {});
+						if (seededArgs !== "{}") {
+							normalizer.push({ type: "toolcall_delta", contentIndex, argsTextDelta: seededArgs });
+						}
 					}
 				} else if (event.type === "content_block_delta") {
-					const index = blocks.findIndex((b) => b.index === event.index);
-					const block = blocks[index];
-					if (!block) continue;
-
-					if (event.delta.type === "text_delta" && block.type === "text") {
-						block.text += event.delta.text;
-						stream.push({ type: "text_delta", contentIndex: index, delta: event.delta.text, partial: output });
-					} else if (event.delta.type === "thinking_delta" && block.type === "thinking") {
-						block.thinking += event.delta.thinking;
-						stream.push({
-							type: "thinking_delta",
-							contentIndex: index,
-							delta: event.delta.thinking,
-							partial: output,
-						});
-					} else if (event.delta.type === "input_json_delta" && block.type === "toolCall") {
-						(block as any).partialJson += event.delta.partial_json;
-						try {
-							block.arguments = JSON.parse((block as any).partialJson);
-						} catch {}
-						stream.push({
+					if (event.delta.type === "text_delta") {
+						const contentIndex = resolveBlock(event.index, "text");
+						normalizer.push({ type: "text_delta", contentIndex, delta: event.delta.text });
+					} else if (event.delta.type === "thinking_delta") {
+						const contentIndex = resolveBlock(event.index, "thinking");
+						normalizer.push({ type: "thinking_delta", contentIndex, delta: event.delta.thinking });
+					} else if (event.delta.type === "input_json_delta") {
+						const contentIndex = resolveBlock(event.index, "toolCall");
+						normalizer.push({
 							type: "toolcall_delta",
-							contentIndex: index,
-							delta: event.delta.partial_json,
-							partial: output,
+							contentIndex,
+							argsTextDelta: event.delta.partial_json,
 						});
-					} else if (event.delta.type === "signature_delta" && block.type === "thinking") {
-						block.thinkingSignature = (block.thinkingSignature || "") + (event.delta as any).signature;
+					} else if (event.delta.type === "signature_delta") {
+						const contentIndex = resolveBlock(event.index, "thinking");
+						normalizer.push({
+							type: "thinking_delta",
+							contentIndex,
+							delta: "",
+							signatureDelta: event.delta.signature,
+						});
 					}
 				} else if (event.type === "content_block_stop") {
-					const index = blocks.findIndex((b) => b.index === event.index);
-					const block = blocks[index];
-					if (!block) continue;
-
-					delete (block as any).index;
-					if (block.type === "text") {
-						stream.push({ type: "text_end", contentIndex: index, content: block.text, partial: output });
-					} else if (block.type === "thinking") {
-						stream.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: output });
-					} else if (block.type === "toolCall") {
-						try {
-							block.arguments = JSON.parse((block as any).partialJson);
-						} catch {}
-						delete (block as any).partialJson;
-						stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: output });
+					const block = blocksByRawIndex.get(event.index);
+					if (block?.kind === "text") {
+						normalizer.push({ type: "text_end", contentIndex: block.contentIndex });
+					} else if (block?.kind === "thinking") {
+						normalizer.push({ type: "thinking_end", contentIndex: block.contentIndex });
+					} else if (block?.kind === "toolCall") {
+						normalizer.push({ type: "toolcall_end", contentIndex: block.contentIndex });
 					}
 				} else if (event.type === "message_delta") {
-					if ((event.delta as any).stop_reason) {
-						output.stopReason = mapStopReason((event.delta as any).stop_reason);
+					if (event.delta.stop_reason) {
+						stopReason = mapStopReason(event.delta.stop_reason);
 					}
-					output.usage.input = (event.usage as any).input_tokens || 0;
-					output.usage.output = (event.usage as any).output_tokens || 0;
-					output.usage.cacheRead = (event.usage as any).cache_read_input_tokens || 0;
-					output.usage.cacheWrite = (event.usage as any).cache_creation_input_tokens || 0;
-					output.usage.totalTokens =
-						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-					calculateCost(model, output.usage);
+					if (event.usage.input_tokens != null) {
+						usage.input = event.usage.input_tokens;
+					}
+					if (event.usage.output_tokens != null) {
+						usage.output = event.usage.output_tokens;
+					}
+					if (event.usage.cache_read_input_tokens != null) {
+						usage.cacheRead = event.usage.cache_read_input_tokens;
+					}
+					if (event.usage.cache_creation_input_tokens != null) {
+						usage.cacheWrite = event.usage.cache_creation_input_tokens;
+					}
+					usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+					calculateCost(model, usage);
+					normalizer.push({ type: "meta", patch: { usage } });
 				}
 			}
 
@@ -547,18 +558,24 @@ function streamCustomAnthropic(
 				throw new Error("Request was aborted");
 			}
 
-			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
-			stream.end();
+			if (stopReason === "aborted" || stopReason === "error") {
+				throw new Error("Provider returned an error stop reason");
+			}
+
+			normalizer.push({ type: "done", reason: stopReason, usage });
 		} catch (error) {
-			for (const block of output.content) delete (block as any).index;
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			normalizer.push({
+				type: "error",
+				reason: options?.signal?.aborted ? "aborted" : "error",
+				errorMessage: error instanceof Error ? error.message : JSON.stringify(error),
+				usage,
+			});
+		} finally {
+			normalizer.end();
 		}
 	})();
 
-	return stream;
+	return normalizer.stream;
 }
 
 // =============================================================================

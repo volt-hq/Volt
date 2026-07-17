@@ -27,9 +27,8 @@ import type { BuildMiddleware, DocumentType, MetadataBearer } from "@smithy/type
 import { HttpProxyAgent } from "http-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
+import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
 import type {
-	Api,
-	AssistantMessage,
 	CacheRetention,
 	Context,
 	ImageContent,
@@ -41,14 +40,12 @@ import type {
 	StreamOptions,
 	TextContent,
 	ThinkingBudgets,
-	ThinkingContent,
 	ThinkingLevel,
 	Tool,
-	ToolCall,
 	ToolResultMessage,
+	Usage,
 } from "../types.ts";
-import { AssistantMessageEventStream } from "../utils/event-stream.ts";
-import { parseStreamingJson } from "../utils/json-parse.ts";
+import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
@@ -91,7 +88,17 @@ export interface BedrockOptions extends StreamOptions {
 	bearerToken?: string;
 }
 
-type Block = (TextContent | ThinkingContent | ToolCall) & { index?: number; partialJson?: string };
+type BedrockBlockKind = "text" | "thinking" | "toolCall";
+
+interface BedrockStreamBlock {
+	contentIndex: number;
+	kind: BedrockBlockKind;
+}
+
+interface BedrockStreamState {
+	blocksByRawIndex: Map<number, BedrockStreamBlock>;
+	nextContentIndex: number;
+}
 
 const EMPTY_TEXT_PLACEHOLDER = "<empty>";
 
@@ -100,109 +107,109 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 	context: Context,
 	options: BedrockOptions = {},
 ): AssistantMessageEventStream => {
-	const stream = new AssistantMessageEventStream();
-
-	(async () => {
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: "bedrock-converse-stream" as Api,
+	const normalizer = new AssistantStreamNormalizer();
+	normalizer.push({
+		type: "start",
+		init: {
+			api: "bedrock-converse-stream",
 			provider: model.provider,
 			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
 			timestamp: Date.now(),
+		},
+	});
+
+	(async () => {
+		let usage: Usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
-
-		const blocks = output.content as Block[];
-
-		const config: BedrockRuntimeClientConfig = {
-			profile: options.profile || getProviderEnvValue("AWS_PROFILE", options.env),
-		};
-		const configuredRegion = getConfiguredBedrockRegion(options);
-		const hasAmbientConfiguredProfile = Boolean(getProviderEnvValue("AWS_PROFILE"));
-		const endpointRegion = getStandardBedrockEndpointRegion(model.baseUrl);
-		const useExplicitEndpoint = shouldUseExplicitBedrockEndpoint(
-			model.baseUrl,
-			configuredRegion,
-			hasAmbientConfiguredProfile,
-		);
-
-		// Only pin standard AWS Bedrock runtime endpoints when no region or ambient AWS_PROFILE is configured.
-		// This preserves custom endpoints (VPC/proxy) from #3402 without forcing built-in
-		// catalog defaults such as us-east-1 to override AWS_REGION/AWS_PROFILE.
-		if (useExplicitEndpoint) {
-			config.endpoint = model.baseUrl;
-		}
-
-		// Resolve bearer token for Bedrock API key auth.
-		const skipAuth = getProviderEnvValue("AWS_BEDROCK_SKIP_AUTH", options.env) === "1";
-		const bearerToken =
-			options.bearerToken || getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) || undefined;
-		const useBearerToken = bearerToken !== undefined && !skipAuth;
-
-		// in Node.js/Bun environment only
-		if (typeof process !== "undefined" && (process.versions?.node || process.versions?.bun)) {
-			// Region resolution: ARN-embedded > explicit option > env vars > SDK default chain.
-			// When the model ID is an inference profile ARN, extract the region from it.
-			// This avoids conflicts with AWS_REGION set for other services.
-			const arnRegionMatch = model.id.match(/^arn:aws(?:-[a-z0-9-]+)?:bedrock:([a-z0-9-]+):/);
-			if (arnRegionMatch) {
-				config.region = arnRegionMatch[1];
-			} else if (configuredRegion) {
-				config.region = configuredRegion;
-			} else if (endpointRegion && useExplicitEndpoint) {
-				config.region = endpointRegion;
-			} else if (!hasAmbientConfiguredProfile) {
-				config.region = "us-east-1";
-			}
-
-			// Support proxies that don't need authentication
-			if (skipAuth) {
-				config.credentials = {
-					accessKeyId: "dummy-access-key",
-					secretAccessKey: "dummy-secret-key",
-				};
-			}
-
-			const credentials = getConfiguredBedrockCredentials(options.env);
-			if (!skipAuth && credentials) {
-				config.credentials = credentials;
-			}
-
-			const proxyUrl = resolveHttpProxyUrlForTarget(model.baseUrl, options.env);
-			if (proxyUrl) {
-				// Bedrock runtime uses NodeHttp2Handler by default since v3.798.0, which is based
-				// on `http2` module and has no support for http agent.
-				// Use NodeHttpHandler to support HTTP(S) proxy agents.
-				config.requestHandler = new NodeHttpHandler({
-					httpAgent: new HttpProxyAgent(proxyUrl),
-					httpsAgent: new HttpsProxyAgent(proxyUrl) as unknown as HttpsAgent,
-				});
-			} else if (getProviderEnvValue("AWS_BEDROCK_FORCE_HTTP1", options.env) === "1") {
-				// Some custom endpoints require HTTP/1.1 instead of HTTP/2
-				config.requestHandler = new NodeHttpHandler();
-			}
-		} else {
-			// Non-Node environment (browser): fall back to us-east-1 since
-			// there's no config file resolution available.
-			config.region =
-				configuredRegion || (endpointRegion && useExplicitEndpoint ? endpointRegion : undefined) || "us-east-1";
-		}
-
-		if (useBearerToken) {
-			config.token = { token: bearerToken };
-			config.authSchemePreference = ["httpBearerAuth"];
-		}
+		let stopReason: StopReason = "stop";
+		const streamState: BedrockStreamState = { blocksByRawIndex: new Map(), nextContentIndex: 0 };
 
 		try {
+			const config: BedrockRuntimeClientConfig = {
+				profile: options.profile || getProviderEnvValue("AWS_PROFILE", options.env),
+			};
+			const configuredRegion = getConfiguredBedrockRegion(options);
+			const hasAmbientConfiguredProfile = Boolean(getProviderEnvValue("AWS_PROFILE"));
+			const endpointRegion = getStandardBedrockEndpointRegion(model.baseUrl);
+			const useExplicitEndpoint = shouldUseExplicitBedrockEndpoint(
+				model.baseUrl,
+				configuredRegion,
+				hasAmbientConfiguredProfile,
+			);
+
+			// Only pin standard AWS Bedrock runtime endpoints when no region or ambient AWS_PROFILE is configured.
+			// This preserves custom endpoints (VPC/proxy) from #3402 without forcing built-in
+			// catalog defaults such as us-east-1 to override AWS_REGION/AWS_PROFILE.
+			if (useExplicitEndpoint) {
+				config.endpoint = model.baseUrl;
+			}
+
+			// Resolve bearer token for Bedrock API key auth.
+			const skipAuth = getProviderEnvValue("AWS_BEDROCK_SKIP_AUTH", options.env) === "1";
+			const bearerToken =
+				options.bearerToken || getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) || undefined;
+			const useBearerToken = bearerToken !== undefined && !skipAuth;
+
+			// in Node.js/Bun environment only
+			if (typeof process !== "undefined" && (process.versions?.node || process.versions?.bun)) {
+				// Region resolution: ARN-embedded > explicit option > env vars > SDK default chain.
+				// When the model ID is an inference profile ARN, extract the region from it.
+				// This avoids conflicts with AWS_REGION set for other services.
+				const arnRegionMatch = model.id.match(/^arn:aws(?:-[a-z0-9-]+)?:bedrock:([a-z0-9-]+):/);
+				if (arnRegionMatch) {
+					config.region = arnRegionMatch[1];
+				} else if (configuredRegion) {
+					config.region = configuredRegion;
+				} else if (endpointRegion && useExplicitEndpoint) {
+					config.region = endpointRegion;
+				} else if (!hasAmbientConfiguredProfile) {
+					config.region = "us-east-1";
+				}
+
+				// Support proxies that don't need authentication
+				if (skipAuth) {
+					config.credentials = {
+						accessKeyId: "dummy-access-key",
+						secretAccessKey: "dummy-secret-key",
+					};
+				}
+
+				const credentials = getConfiguredBedrockCredentials(options.env);
+				if (!skipAuth && credentials) {
+					config.credentials = credentials;
+				}
+
+				const proxyUrl = resolveHttpProxyUrlForTarget(model.baseUrl, options.env);
+				if (proxyUrl) {
+					// Bedrock runtime uses NodeHttp2Handler by default since v3.798.0, which is based
+					// on `http2` module and has no support for http agent.
+					// Use NodeHttpHandler to support HTTP(S) proxy agents.
+					config.requestHandler = new NodeHttpHandler({
+						httpAgent: new HttpProxyAgent(proxyUrl),
+						httpsAgent: new HttpsProxyAgent(proxyUrl) as unknown as HttpsAgent,
+					});
+				} else if (getProviderEnvValue("AWS_BEDROCK_FORCE_HTTP1", options.env) === "1") {
+					// Some custom endpoints require HTTP/1.1 instead of HTTP/2
+					config.requestHandler = new NodeHttpHandler();
+				}
+			} else {
+				// Non-Node environment (browser): fall back to us-east-1 since
+				// there's no config file resolution available.
+				config.region =
+					configuredRegion || (endpointRegion && useExplicitEndpoint ? endpointRegion : undefined) || "us-east-1";
+			}
+
+			if (useBearerToken) {
+				config.token = { token: bearerToken };
+				config.authSchemePreference = ["httpBearerAuth"];
+			}
+
 			const client = new BedrockRuntimeClient(config);
 			if (options.headers && Object.keys(options.headers).length > 0) {
 				addCustomHeadersMiddleware(client, options.headers);
@@ -241,17 +248,20 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 					if (item.messageStart.role !== ConversationRole.ASSISTANT) {
 						throw new Error("Unexpected assistant message start but got user message start instead");
 					}
-					stream.push({ type: "start", partial: output });
 				} else if (item.contentBlockStart) {
-					handleContentBlockStart(item.contentBlockStart, blocks, output, stream);
+					handleContentBlockStart(item.contentBlockStart, streamState, normalizer);
 				} else if (item.contentBlockDelta) {
-					handleContentBlockDelta(item.contentBlockDelta, blocks, output, stream);
+					handleContentBlockDelta(item.contentBlockDelta, streamState, normalizer);
 				} else if (item.contentBlockStop) {
-					handleContentBlockStop(item.contentBlockStop, blocks, output, stream);
+					handleContentBlockStop(item.contentBlockStop, streamState, normalizer);
 				} else if (item.messageStop) {
-					output.stopReason = mapStopReason(item.messageStop.stopReason);
+					stopReason = mapStopReason(item.messageStop.stopReason);
 				} else if (item.metadata) {
-					handleMetadata(item.metadata, model, output);
+					const metadataUsage = parseMetadataUsage(item.metadata, model);
+					if (metadataUsage) {
+						usage = metadataUsage;
+						normalizer.push({ type: "meta", patch: { usage } });
+					}
 				} else if (item.internalServerException) {
 					throw item.internalServerException;
 				} else if (item.modelStreamErrorException) {
@@ -269,26 +279,24 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 				throw new Error("Request was aborted");
 			}
 
-			if (output.stopReason === "error" || output.stopReason === "aborted") {
+			if (stopReason === "error" || stopReason === "aborted") {
 				throw new Error("An unknown error occurred");
 			}
 
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			normalizer.push({ type: "done", reason: stopReason, usage });
 		} catch (error) {
-			for (const block of output.content) {
-				delete (block as Block).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as Block).partialJson;
-			}
-			output.stopReason = options.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatBedrockError(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			normalizer.push({
+				type: "error",
+				reason: options.signal?.aborted ? "aborted" : "error",
+				errorMessage: formatBedrockError(error),
+				usage,
+			});
+		} finally {
+			normalizer.end();
 		}
 	})();
 
-	return stream;
+	return normalizer.stream;
 };
 
 /**
@@ -415,126 +423,117 @@ export const streamSimpleBedrock: StreamFunction<"bedrock-converse-stream", Simp
 
 function handleContentBlockStart(
 	event: ContentBlockStartEvent,
-	blocks: Block[],
-	output: AssistantMessage,
-	stream: AssistantMessageEventStream,
+	state: BedrockStreamState,
+	normalizer: AssistantStreamNormalizer,
 ): void {
-	const index = event.contentBlockIndex!;
+	const rawIndex = event.contentBlockIndex!;
 	const start = event.start;
 
 	if (start?.toolUse) {
-		const block: Block = {
-			type: "toolCall",
+		const contentIndex = registerBedrockBlock(state, rawIndex, "toolCall");
+		normalizer.push({
+			type: "toolcall_start",
+			contentIndex,
 			id: start.toolUse.toolUseId || "",
 			name: start.toolUse.name || "",
-			arguments: {},
-			partialJson: "",
-			index,
-		};
-		output.content.push(block);
-		stream.push({ type: "toolcall_start", contentIndex: blocks.length - 1, partial: output });
+		});
 	}
 }
 
 function handleContentBlockDelta(
 	event: ContentBlockDeltaEvent,
-	blocks: Block[],
-	output: AssistantMessage,
-	stream: AssistantMessageEventStream,
+	state: BedrockStreamState,
+	normalizer: AssistantStreamNormalizer,
 ): void {
-	const contentBlockIndex = event.contentBlockIndex!;
+	const rawIndex = event.contentBlockIndex!;
 	const delta = event.delta;
-	let index = blocks.findIndex((b) => b.index === contentBlockIndex);
-	let block = blocks[index];
 
 	if (delta?.text !== undefined) {
-		// If no text block exists yet, create one, as `handleContentBlockStart` is not sent for text blocks
-		if (!block) {
-			const newBlock: Block = { type: "text", text: "", index: contentBlockIndex };
-			output.content.push(newBlock);
-			index = blocks.length - 1;
-			block = blocks[index];
-			stream.push({ type: "text_start", contentIndex: index, partial: output });
+		const { contentIndex, created } = resolveBedrockBlock(state, rawIndex, "text");
+		if (created) {
+			normalizer.push({ type: "text_start", contentIndex });
 		}
-		if (block.type === "text") {
-			block.text += delta.text;
-			stream.push({ type: "text_delta", contentIndex: index, delta: delta.text, partial: output });
-		}
-	} else if (delta?.toolUse && block?.type === "toolCall") {
-		block.partialJson = (block.partialJson || "") + (delta.toolUse.input || "");
-		block.arguments = parseStreamingJson(block.partialJson);
-		stream.push({ type: "toolcall_delta", contentIndex: index, delta: delta.toolUse.input || "", partial: output });
+		normalizer.push({ type: "text_delta", contentIndex, delta: delta.text });
+	} else if (delta?.toolUse) {
+		const { contentIndex } = resolveBedrockBlock(state, rawIndex, "toolCall");
+		normalizer.push({
+			type: "toolcall_delta",
+			contentIndex,
+			argsTextDelta: delta.toolUse.input || "",
+		});
 	} else if (delta?.reasoningContent) {
-		let thinkingBlock = block;
-		let thinkingIndex = index;
-
-		if (!thinkingBlock) {
-			const newBlock: Block = { type: "thinking", thinking: "", thinkingSignature: "", index: contentBlockIndex };
-			output.content.push(newBlock);
-			thinkingIndex = blocks.length - 1;
-			thinkingBlock = blocks[thinkingIndex];
-			stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
+		const { contentIndex, created } = resolveBedrockBlock(state, rawIndex, "thinking");
+		if (created) {
+			normalizer.push({ type: "thinking_start", contentIndex });
 		}
-
-		if (thinkingBlock?.type === "thinking") {
-			if (delta.reasoningContent.text) {
-				thinkingBlock.thinking += delta.reasoningContent.text;
-				stream.push({
-					type: "thinking_delta",
-					contentIndex: thinkingIndex,
-					delta: delta.reasoningContent.text,
-					partial: output,
-				});
-			}
-			if (delta.reasoningContent.signature) {
-				thinkingBlock.thinkingSignature =
-					(thinkingBlock.thinkingSignature || "") + delta.reasoningContent.signature;
-			}
+		const text = delta.reasoningContent.text ?? "";
+		const signature = delta.reasoningContent.signature;
+		if (text || signature) {
+			normalizer.push({
+				type: "thinking_delta",
+				contentIndex,
+				delta: text,
+				...(signature === undefined ? {} : { signatureDelta: signature }),
+			});
 		}
 	}
 }
 
-function handleMetadata(
+function parseMetadataUsage(
 	event: ConverseStreamMetadataEvent,
 	model: Model<"bedrock-converse-stream">,
-	output: AssistantMessage,
-): void {
-	if (event.usage) {
-		output.usage.input = event.usage.inputTokens || 0;
-		output.usage.output = event.usage.outputTokens || 0;
-		output.usage.cacheRead = event.usage.cacheReadInputTokens || 0;
-		output.usage.cacheWrite = event.usage.cacheWriteInputTokens || 0;
-		output.usage.totalTokens = event.usage.totalTokens || output.usage.input + output.usage.output;
-		calculateCost(model, output.usage);
-	}
+): Usage | undefined {
+	if (!event.usage) return undefined;
+	const usage: Usage = {
+		input: event.usage.inputTokens || 0,
+		output: event.usage.outputTokens || 0,
+		cacheRead: event.usage.cacheReadInputTokens || 0,
+		cacheWrite: event.usage.cacheWriteInputTokens || 0,
+		totalTokens: event.usage.totalTokens || (event.usage.inputTokens || 0) + (event.usage.outputTokens || 0),
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	calculateCost(model, usage);
+	return usage;
 }
 
 function handleContentBlockStop(
 	event: ContentBlockStopEvent,
-	blocks: Block[],
-	output: AssistantMessage,
-	stream: AssistantMessageEventStream,
+	state: BedrockStreamState,
+	normalizer: AssistantStreamNormalizer,
 ): void {
-	const index = blocks.findIndex((b) => b.index === event.contentBlockIndex);
-	const block = blocks[index];
+	const block = state.blocksByRawIndex.get(event.contentBlockIndex!);
 	if (!block) return;
-	delete (block as Block).index;
 
-	switch (block.type) {
+	switch (block.kind) {
 		case "text":
-			stream.push({ type: "text_end", contentIndex: index, content: block.text, partial: output });
+			normalizer.push({ type: "text_end", contentIndex: block.contentIndex });
 			break;
 		case "thinking":
-			stream.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: output });
+			normalizer.push({ type: "thinking_end", contentIndex: block.contentIndex });
 			break;
 		case "toolCall":
-			block.arguments = parseStreamingJson(block.partialJson);
-			// Finalize in-place and strip the scratch buffer so replay only
-			// carries parsed arguments.
-			delete (block as Block).partialJson;
-			stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: output });
+			normalizer.push({ type: "toolcall_end", contentIndex: block.contentIndex });
 			break;
 	}
+}
+
+function registerBedrockBlock(state: BedrockStreamState, rawIndex: number, kind: BedrockBlockKind): number {
+	const contentIndex = state.nextContentIndex;
+	state.nextContentIndex += 1;
+	state.blocksByRawIndex.set(rawIndex, { contentIndex, kind });
+	return contentIndex;
+}
+
+function resolveBedrockBlock(
+	state: BedrockStreamState,
+	rawIndex: number,
+	kind: BedrockBlockKind,
+): { contentIndex: number; created: boolean } {
+	const block = state.blocksByRawIndex.get(rawIndex);
+	if (block) {
+		return { contentIndex: block.contentIndex, created: false };
+	}
+	return { contentIndex: registerBedrockBlock(state, rawIndex, kind), created: true };
 }
 
 /**

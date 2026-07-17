@@ -95,7 +95,7 @@ async function handleToolCall<TApi extends Api>(model: Model<TApi>, options?: St
 	for await (const event of s) {
 		if (event.type === "toolcall_start") {
 			hasToolStart = true;
-			const toolCall = event.partial.content[event.contentIndex];
+			const toolCall = event.snapshot.content[event.contentIndex];
 			index = event.contentIndex;
 			expect(toolCall.type).toBe("toolCall");
 			if (toolCall.type === "toolCall") {
@@ -105,12 +105,12 @@ async function handleToolCall<TApi extends Api>(model: Model<TApi>, options?: St
 		}
 		if (event.type === "toolcall_delta") {
 			hasToolDelta = true;
-			const toolCall = event.partial.content[event.contentIndex];
+			const toolCall = event.snapshot.content[event.contentIndex];
 			expect(event.contentIndex).toBe(index);
 			expect(toolCall.type).toBe("toolCall");
 			if (toolCall.type === "toolCall") {
 				expect(toolCall.name).toBe("math_operation");
-				accumulatedToolArgs += event.delta;
+				accumulatedToolArgs += event.argsTextDelta;
 				// Check that we have a parsed arguments object during streaming
 				expect(toolCall.arguments).toBeDefined();
 				expect(typeof toolCall.arguments).toBe("object");
@@ -121,7 +121,7 @@ async function handleToolCall<TApi extends Api>(model: Model<TApi>, options?: St
 		}
 		if (event.type === "toolcall_end") {
 			hasToolEnd = true;
-			const toolCall = event.partial.content[event.contentIndex];
+			const toolCall = event.snapshot.content[event.contentIndex];
 			expect(event.contentIndex).toBe(index);
 			expect(toolCall.type).toBe("toolCall");
 			if (toolCall.type === "toolCall") {

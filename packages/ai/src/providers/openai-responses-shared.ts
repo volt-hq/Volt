@@ -13,6 +13,7 @@ import type {
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
 import { calculateCost } from "../models.ts";
+import type { AssistantStreamNormalizer } from "../stream/normalizer.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -22,12 +23,10 @@ import type {
 	StopReason,
 	TextContent,
 	TextSignatureV1,
-	ThinkingContent,
 	Tool,
 	ToolCall,
 	Usage,
 } from "../types.ts";
-import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
@@ -81,6 +80,12 @@ export interface ConvertResponsesMessagesOptions {
 
 export interface ConvertResponsesToolsOptions {
 	strict?: boolean | null;
+}
+
+export interface ProcessResponsesStreamResult {
+	stopReason: StopReason;
+	responseId?: string;
+	responseItems: ResponseInput;
 }
 
 // =============================================================================
@@ -287,218 +292,315 @@ export function convertResponsesTools(tools: Tool[], options?: ConvertResponsesT
 
 export async function processResponsesStream<TApi extends Api>(
 	openaiStream: AsyncIterable<ResponseStreamEvent>,
-	output: AssistantMessage,
-	stream: AssistantMessageEventStream,
+	normalizer: AssistantStreamNormalizer,
 	model: Model<TApi>,
 	options?: OpenAIResponsesStreamOptions,
-): Promise<void> {
-	let currentItem: ResponseReasoningItem | ResponseOutputMessage | ResponseFunctionToolCall | null = null;
-	let currentBlock: ThinkingContent | TextContent | (ToolCall & { partialJson: string }) | null = null;
-	const blocks = output.content;
-	const blockIndex = () => blocks.length - 1;
+): Promise<ProcessResponsesStreamResult> {
+	type SupportedOutputItem = ResponseReasoningItem | ResponseOutputMessage | ResponseFunctionToolCall;
+	type OutputState =
+		| {
+				kind: "reasoning";
+				contentIndex: number;
+				ended: boolean;
+				outputIndex?: number;
+				itemId?: string;
+				hasSummaryPart: boolean;
+				item: ResponseReasoningItem;
+		  }
+		| {
+				kind: "message";
+				contentIndex: number;
+				ended: boolean;
+				outputIndex?: number;
+				itemId?: string;
+				activeContentKind?: "output_text" | "refusal";
+				item: ResponseOutputMessage;
+		  }
+		| {
+				kind: "function_call";
+				contentIndex: number;
+				ended: boolean;
+				outputIndex?: number;
+				itemId?: string;
+				callId: string;
+				name: string;
+				authoritativeArguments?: string;
+				item: ResponseFunctionToolCall;
+		  };
+
+	const states: OutputState[] = [];
+	const statesByOutputIndex = new Map<number, OutputState>();
+	const statesByItemId = new Map<string, OutputState>();
+	let currentState: OutputState | undefined;
+	let nextContentIndex = 0;
+	let stopReason: StopReason = "stop";
+	let responseId: string | undefined;
+	let sawToolCall = false;
+
+	const eventOutputIndex = (event: ResponseStreamEvent): number | undefined => {
+		const value = (event as { output_index?: unknown }).output_index;
+		return typeof value === "number" ? value : undefined;
+	};
+	const eventItemId = (event: ResponseStreamEvent): string | undefined => {
+		const value = (event as { item_id?: unknown }).item_id;
+		return typeof value === "string" ? value : undefined;
+	};
+	const rememberState = (state: OutputState): void => {
+		states.push(state);
+		if (state.outputIndex !== undefined) statesByOutputIndex.set(state.outputIndex, state);
+		if (state.itemId) statesByItemId.set(state.itemId, state);
+		currentState = state;
+	};
+	const findState = <Kind extends OutputState["kind"]>(
+		event: ResponseStreamEvent,
+		kind: Kind,
+	): Extract<OutputState, { kind: Kind }> | undefined => {
+		const outputIndex = eventOutputIndex(event);
+		const itemId = eventItemId(event);
+		const state =
+			(outputIndex === undefined ? undefined : statesByOutputIndex.get(outputIndex)) ??
+			(itemId === undefined ? undefined : statesByItemId.get(itemId)) ??
+			currentState;
+		return state?.kind === kind ? (state as Extract<OutputState, { kind: Kind }>) : undefined;
+	};
+	const toolCallId = (state: Extract<OutputState, { kind: "function_call" }>): string | undefined => {
+		const itemId = state.item.id ?? state.itemId;
+		return itemId ? `${state.callId}|${itemId}` : undefined;
+	};
+	const updateToolCallIdentity = (
+		state: Extract<OutputState, { kind: "function_call" }>,
+		event: ResponseStreamEvent,
+	): void => {
+		const itemId = eventItemId(event);
+		if (!state.itemId && itemId) {
+			state.itemId = itemId;
+			state.item = { ...state.item, id: itemId };
+			statesByItemId.set(itemId, state);
+		}
+	};
+	const createState = (event: ResponseStreamEvent, item: SupportedOutputItem): OutputState => {
+		const outputIndex = eventOutputIndex(event);
+		const itemId = "id" in item && typeof item.id === "string" ? item.id : eventItemId(event);
+		const contentIndex = nextContentIndex++;
+		if (item.type === "reasoning") {
+			const state: OutputState = {
+				kind: "reasoning",
+				contentIndex,
+				ended: false,
+				outputIndex,
+				itemId,
+				hasSummaryPart: false,
+				item,
+			};
+			rememberState(state);
+			normalizer.push({ type: "thinking_start", contentIndex });
+			return state;
+		}
+		if (item.type === "message") {
+			const lastPart = item.content[item.content.length - 1];
+			const activeContentKind =
+				lastPart?.type === "output_text" || lastPart?.type === "refusal" ? lastPart.type : undefined;
+			const state: OutputState = {
+				kind: "message",
+				contentIndex,
+				ended: false,
+				outputIndex,
+				itemId,
+				activeContentKind,
+				item,
+			};
+			rememberState(state);
+			normalizer.push({ type: "text_start", contentIndex });
+			return state;
+		}
+
+		const state: OutputState = {
+			kind: "function_call",
+			contentIndex,
+			ended: false,
+			outputIndex,
+			itemId,
+			callId: item.call_id,
+			name: item.name,
+			item,
+		};
+		rememberState(state);
+		sawToolCall = true;
+		const id = toolCallId(state);
+		normalizer.push({ type: "toolcall_start", contentIndex, id, name: item.name });
+		if (item.arguments) {
+			normalizer.push({
+				type: "toolcall_delta",
+				contentIndex,
+				argsTextDelta: item.arguments,
+				id,
+				name: item.name,
+			});
+		}
+		return state;
+	};
 
 	for await (const event of openaiStream) {
 		if (event.type === "response.created") {
-			output.responseId = event.response.id;
+			responseId = event.response.id;
+			normalizer.push({ type: "meta", patch: { responseId } });
 		} else if (event.type === "response.output_item.added") {
 			const item = event.item;
-			if (item.type === "reasoning") {
-				currentItem = item;
-				currentBlock = { type: "thinking", thinking: "" };
-				output.content.push(currentBlock);
-				stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
-			} else if (item.type === "message") {
-				currentItem = item;
-				currentBlock = { type: "text", text: "" };
-				output.content.push(currentBlock);
-				stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
-			} else if (item.type === "function_call") {
-				currentItem = item;
-				currentBlock = {
-					type: "toolCall",
-					id: `${item.call_id}|${item.id}`,
-					name: item.name,
-					arguments: {},
-					partialJson: item.arguments || "",
-				};
-				output.content.push(currentBlock);
-				stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
+			if (item.type === "reasoning" || item.type === "message" || item.type === "function_call") {
+				createState(event, item);
 			}
 		} else if (event.type === "response.reasoning_summary_part.added") {
-			if (currentItem && currentItem.type === "reasoning") {
-				currentItem.summary = currentItem.summary || [];
-				currentItem.summary.push(event.part);
-			}
+			const state = findState(event, "reasoning");
+			if (state) state.hasSummaryPart = true;
 		} else if (event.type === "response.reasoning_summary_text.delta") {
-			if (currentItem?.type === "reasoning" && currentBlock?.type === "thinking") {
-				currentItem.summary = currentItem.summary || [];
-				const lastPart = currentItem.summary[currentItem.summary.length - 1];
-				if (lastPart) {
-					currentBlock.thinking += event.delta;
-					lastPart.text += event.delta;
-					stream.push({
-						type: "thinking_delta",
-						contentIndex: blockIndex(),
-						delta: event.delta,
-						partial: output,
-					});
-				}
+			const state = findState(event, "reasoning");
+			if (state?.hasSummaryPart) {
+				normalizer.push({ type: "thinking_delta", contentIndex: state.contentIndex, delta: event.delta });
 			}
 		} else if (event.type === "response.reasoning_summary_part.done") {
-			if (currentItem?.type === "reasoning" && currentBlock?.type === "thinking") {
-				currentItem.summary = currentItem.summary || [];
-				const lastPart = currentItem.summary[currentItem.summary.length - 1];
-				if (lastPart) {
-					currentBlock.thinking += "\n\n";
-					lastPart.text += "\n\n";
-					stream.push({
-						type: "thinking_delta",
-						contentIndex: blockIndex(),
-						delta: "\n\n",
-						partial: output,
-					});
-				}
+			const state = findState(event, "reasoning");
+			if (state?.hasSummaryPart) {
+				normalizer.push({ type: "thinking_delta", contentIndex: state.contentIndex, delta: "\n\n" });
 			}
 		} else if (event.type === "response.reasoning_text.delta") {
-			if (currentItem?.type === "reasoning" && currentBlock?.type === "thinking") {
-				currentBlock.thinking += event.delta;
-				stream.push({
-					type: "thinking_delta",
-					contentIndex: blockIndex(),
-					delta: event.delta,
-					partial: output,
-				});
+			const state = findState(event, "reasoning");
+			if (state) {
+				normalizer.push({ type: "thinking_delta", contentIndex: state.contentIndex, delta: event.delta });
 			}
 		} else if (event.type === "response.content_part.added") {
-			if (currentItem?.type === "message") {
-				currentItem.content = currentItem.content || [];
-				// Filter out ReasoningText, only accept output_text and refusal
-				if (event.part.type === "output_text" || event.part.type === "refusal") {
-					currentItem.content.push(event.part);
-				}
+			const state = findState(event, "message");
+			if (state && (event.part.type === "output_text" || event.part.type === "refusal")) {
+				state.activeContentKind = event.part.type;
 			}
 		} else if (event.type === "response.output_text.delta") {
-			if (currentItem?.type === "message" && currentBlock?.type === "text") {
-				if (!currentItem.content || currentItem.content.length === 0) {
-					continue;
-				}
-				const lastPart = currentItem.content[currentItem.content.length - 1];
-				if (lastPart?.type === "output_text") {
-					currentBlock.text += event.delta;
-					lastPart.text += event.delta;
-					stream.push({
-						type: "text_delta",
-						contentIndex: blockIndex(),
-						delta: event.delta,
-						partial: output,
-					});
-				}
+			const state = findState(event, "message");
+			if (state?.activeContentKind === "output_text") {
+				normalizer.push({ type: "text_delta", contentIndex: state.contentIndex, delta: event.delta });
 			}
 		} else if (event.type === "response.refusal.delta") {
-			if (currentItem?.type === "message" && currentBlock?.type === "text") {
-				if (!currentItem.content || currentItem.content.length === 0) {
-					continue;
-				}
-				const lastPart = currentItem.content[currentItem.content.length - 1];
-				if (lastPart?.type === "refusal") {
-					currentBlock.text += event.delta;
-					lastPart.refusal += event.delta;
-					stream.push({
-						type: "text_delta",
-						contentIndex: blockIndex(),
-						delta: event.delta,
-						partial: output,
-					});
-				}
+			const state = findState(event, "message");
+			if (state?.activeContentKind === "refusal") {
+				normalizer.push({ type: "text_delta", contentIndex: state.contentIndex, delta: event.delta });
 			}
 		} else if (event.type === "response.function_call_arguments.delta") {
-			if (currentItem?.type === "function_call" && currentBlock?.type === "toolCall") {
-				currentBlock.partialJson += event.delta;
-				currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
-				stream.push({
+			const state = findState(event, "function_call");
+			if (state) {
+				updateToolCallIdentity(state, event);
+				normalizer.push({
 					type: "toolcall_delta",
-					contentIndex: blockIndex(),
-					delta: event.delta,
-					partial: output,
+					contentIndex: state.contentIndex,
+					argsTextDelta: event.delta,
+					id: toolCallId(state),
+					name: state.name,
 				});
 			}
 		} else if (event.type === "response.function_call_arguments.done") {
-			if (currentItem?.type === "function_call" && currentBlock?.type === "toolCall") {
-				const previousPartialJson = currentBlock.partialJson;
-				currentBlock.partialJson = event.arguments;
-				currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
-
-				if (event.arguments.startsWith(previousPartialJson)) {
-					const delta = event.arguments.slice(previousPartialJson.length);
-					if (delta.length > 0) {
-						stream.push({
-							type: "toolcall_delta",
-							contentIndex: blockIndex(),
-							delta,
-							partial: output,
-						});
-					}
-				}
+			const state = findState(event, "function_call");
+			if (state) {
+				updateToolCallIdentity(state, event);
+				state.authoritativeArguments = event.arguments;
+				state.name = event.name || state.name;
 			}
 		} else if (event.type === "response.output_item.done") {
 			const item = event.item;
-
-			if (item.type === "reasoning" && currentBlock?.type === "thinking") {
+			if (item.type === "reasoning") {
+				let state = findState(event, "reasoning");
+				if (!state) {
+					state = createState(event, item) as Extract<OutputState, { kind: "reasoning" }>;
+				}
+				state.item = item;
+				currentState = state;
 				const summaryText = item.summary?.map((s) => s.text).join("\n\n") || "";
 				const contentText = item.content?.map((c) => c.text).join("\n\n") || "";
-				currentBlock.thinking = summaryText || contentText || currentBlock.thinking;
-				currentBlock.thinkingSignature = JSON.stringify(item);
-				stream.push({
-					type: "thinking_end",
-					contentIndex: blockIndex(),
-					content: currentBlock.thinking,
-					partial: output,
-				});
-				currentBlock = null;
-			} else if (item.type === "message" && currentBlock?.type === "text") {
-				currentBlock.text =
-					item.content?.map((c) => (c.type === "output_text" ? c.text : c.refusal)).join("") || "";
-				currentBlock.textSignature = encodeTextSignatureV1(item.id, item.phase ?? undefined);
-				stream.push({
-					type: "text_end",
-					contentIndex: blockIndex(),
-					content: currentBlock.text,
-					partial: output,
-				});
-				currentBlock = null;
-			} else if (item.type === "function_call") {
-				const args =
-					currentBlock?.type === "toolCall" && currentBlock.partialJson
-						? parseStreamingJson(currentBlock.partialJson)
-						: parseStreamingJson(item.arguments || "{}");
-
-				let toolCall: ToolCall;
-				if (currentBlock?.type === "toolCall") {
-					// Finalize in-place and strip the scratch buffer so replay only
-					// carries parsed arguments.
-					currentBlock.arguments = args;
-					delete (currentBlock as { partialJson?: string }).partialJson;
-					toolCall = currentBlock;
-				} else {
-					toolCall = {
-						type: "toolCall",
-						id: `${item.call_id}|${item.id}`,
-						name: item.name,
-						arguments: args,
-					};
+				if (!state.ended) {
+					normalizer.push({
+						type: "thinking_end",
+						contentIndex: state.contentIndex,
+						content: summaryText || contentText,
+						thinkingSignature: JSON.stringify(item),
+					});
+					state.ended = true;
 				}
-
-				currentBlock = null;
-				stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
+			} else if (item.type === "message") {
+				let state = findState(event, "message");
+				if (!state) {
+					state = createState(event, item) as Extract<OutputState, { kind: "message" }>;
+				}
+				state.item = item;
+				currentState = state;
+				const content = item.content?.map((c) => (c.type === "output_text" ? c.text : c.refusal)).join("") || "";
+				if (!state.ended) {
+					normalizer.push({
+						type: "text_end",
+						contentIndex: state.contentIndex,
+						content,
+						textSignature: encodeTextSignatureV1(item.id, item.phase ?? undefined),
+					});
+					state.ended = true;
+				}
+			} else if (item.type === "function_call") {
+				let state = findState(event, "function_call");
+				if (!state) {
+					state = createState(event, item) as Extract<OutputState, { kind: "function_call" }>;
+				}
+				state.callId = item.call_id;
+				state.name = item.name;
+				if (item.id) state.itemId = item.id;
+				const argumentsJson = item.arguments || state.authoritativeArguments || "{}";
+				state.item = {
+					...item,
+					...(item.id || state.itemId ? { id: item.id ?? state.itemId } : {}),
+					arguments: argumentsJson,
+				};
+				currentState = state;
+				const toolCall: ToolCall = {
+					type: "toolCall",
+					id: toolCallId(state) ?? item.call_id,
+					name: state.name,
+					arguments: parseStreamingJson(argumentsJson),
+				};
+				if (!state.ended) {
+					normalizer.push({ type: "toolcall_end", contentIndex: state.contentIndex, toolCall });
+					state.ended = true;
+				}
 			}
 		} else if (event.type === "response.completed") {
 			const response = event.response;
-			if (response?.id) {
-				output.responseId = response.id;
+			for (const state of states) {
+				if (state.kind !== "function_call" || state.ended || state.authoritativeArguments === undefined) {
+					continue;
+				}
+				state.item = {
+					...state.item,
+					name: state.name,
+					arguments: state.authoritativeArguments,
+				};
+				normalizer.push({
+					type: "toolcall_end",
+					contentIndex: state.contentIndex,
+					toolCall: {
+						type: "toolCall",
+						id: toolCallId(state) ?? state.callId,
+						name: state.name,
+						arguments: parseStreamingJson(state.authoritativeArguments),
+					},
+				});
+				state.ended = true;
 			}
+			if (response?.id) {
+				responseId = response.id;
+			}
+			let usage: Usage = {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
 			if (response?.usage) {
 				const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
-				output.usage = {
+				usage = {
 					// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input
 					input: (response.usage.input_tokens || 0) - cachedTokens,
 					output: response.usage.output_tokens || 0,
@@ -508,17 +610,17 @@ export async function processResponsesStream<TApi extends Api>(
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				};
 			}
-			calculateCost(model, output.usage);
+			calculateCost(model, usage);
 			if (options?.applyServiceTierPricing) {
 				const serviceTier = options.resolveServiceTier
 					? options.resolveServiceTier(response?.service_tier, options.serviceTier)
 					: (response?.service_tier ?? options.serviceTier);
-				options.applyServiceTierPricing(output.usage, serviceTier);
+				options.applyServiceTierPricing(usage, serviceTier);
 			}
-			// Map status to stop reason
-			output.stopReason = mapStopReason(response?.status);
-			if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
-				output.stopReason = "toolUse";
+			normalizer.push({ type: "meta", patch: { responseId, usage } });
+			stopReason = mapStopReason(response?.status);
+			if (sawToolCall && stopReason === "stop") {
+				stopReason = "toolUse";
 			}
 		} else if (event.type === "error") {
 			throw new Error(`Error Code ${event.code}: ${event.message}` || "Unknown error");
@@ -533,6 +635,36 @@ export async function processResponsesStream<TApi extends Api>(
 			throw new Error(msg);
 		}
 	}
+
+	return {
+		stopReason,
+		...(responseId === undefined ? {} : { responseId }),
+		responseItems: states.map((state) => {
+			if (state.kind === "reasoning") {
+				return state.item;
+			}
+			if (state.kind === "message") {
+				const text = state.item.content
+					.map((part) => (part.type === "output_text" ? part.text : part.refusal))
+					.join("");
+				return {
+					type: "message",
+					role: "assistant",
+					content: [{ type: "output_text", text: sanitizeSurrogates(text), annotations: [] }],
+					status: "completed",
+					id: state.item.id,
+					...(state.item.phase == null ? {} : { phase: state.item.phase }),
+				} satisfies ResponseOutputMessage;
+			}
+			return {
+				type: "function_call",
+				...(state.item.id === undefined ? {} : { id: state.item.id }),
+				call_id: state.item.call_id,
+				name: state.item.name,
+				arguments: state.item.arguments,
+			} satisfies ResponseFunctionToolCall;
+		}),
+	};
 }
 
 function mapStopReason(status: OpenAI.Responses.ResponseStatus | undefined): StopReason {

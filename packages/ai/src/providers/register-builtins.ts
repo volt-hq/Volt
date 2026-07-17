@@ -1,7 +1,7 @@
 import { clearApiProviders, registerApiProvider } from "../api-registry.ts";
+import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
 import type {
 	Api,
-	AssistantMessage,
 	AssistantMessageEvent,
 	Context,
 	Model,
@@ -138,25 +138,18 @@ function forwardStream(target: AssistantMessageEventStream, source: AsyncIterabl
 	})();
 }
 
-function createLazyLoadErrorMessage<TApi extends Api>(model: Model<TApi>, error: unknown): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "error",
+function createLazyLoadErrorStream<TApi extends Api>(model: Model<TApi>, error: unknown): AssistantMessageEventStream {
+	const normalizer = new AssistantStreamNormalizer();
+	normalizer.push({
+		type: "start",
+		init: { api: model.api, provider: model.provider, model: model.id, timestamp: Date.now() },
+	});
+	normalizer.push({
+		type: "error",
+		reason: "error",
 		errorMessage: error instanceof Error ? error.message : String(error),
-		timestamp: Date.now(),
-	};
+	});
+	return normalizer.stream;
 }
 
 function createLazyStream<TApi extends Api, TOptions extends StreamOptions, TSimpleOptions extends SimpleStreamOptions>(
@@ -171,9 +164,7 @@ function createLazyStream<TApi extends Api, TOptions extends StreamOptions, TSim
 				forwardStream(outer, inner);
 			})
 			.catch((error) => {
-				const message = createLazyLoadErrorMessage(model, error);
-				outer.push({ type: "error", reason: "error", error: message });
-				outer.end(message);
+				forwardStream(outer, createLazyLoadErrorStream(model, error));
 			});
 
 		return outer;
@@ -194,9 +185,7 @@ function createLazySimpleStream<
 				forwardStream(outer, inner);
 			})
 			.catch((error) => {
-				const message = createLazyLoadErrorMessage(model, error);
-				outer.push({ type: "error", reason: "error", error: message });
-				outer.end(message);
+				forwardStream(outer, createLazyLoadErrorStream(model, error));
 			});
 
 		return outer;

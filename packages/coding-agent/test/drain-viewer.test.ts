@@ -5,8 +5,9 @@
  * turn, and the warm grant reloads the session and dismisses the overlay.
  */
 
+import { type ActiveToolCallState, type AssistantMessage, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { RpcSessionEventEncoder } from "../src/core/rpc/message-deltas.ts";
+import { StreamProjector } from "../src/core/rpc/stream-projection.ts";
 import { getMarkdownTheme, initTheme } from "../src/core/theme/runtime.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import type { AcquireOutcome } from "../src/modes/interactive/daemon-attach.ts";
@@ -15,6 +16,27 @@ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 const proto = InteractiveMode.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;
+
+function assistantUpdate(
+	message: AssistantMessage,
+	seq: number,
+	assistantMessageEvent: Record<string, unknown>,
+	toolState: readonly ActiveToolCallState[] = [],
+): object {
+	return {
+		type: "message_update",
+		message,
+		assistantMessageEvent: { ...assistantMessageEvent, seq, snapshot: message, toolState },
+	};
+}
+
+function sendProjected(viewer: DrainViewerComponent, projector: StreamProjector, event: object): readonly object[] {
+	const frames = projector.push(event).frames;
+	for (const frame of frames) {
+		viewer.handleViewerEvent(frame);
+	}
+	return frames;
+}
 
 function createContext() {
 	const context = {
@@ -80,27 +102,22 @@ describe("drain viewer (§6.3)", () => {
 		expect(viewer).toBeInstanceOf(DrainViewerComponent);
 
 		// Assistant streaming renders through the real message component after
-		// reconstructing the delta-only viewer wire frame.
-		const eventEncoder = new RpcSessionEventEncoder();
-		const startMessage = { role: "assistant", content: [{ type: "text", text: "remote says hi" }] };
-		viewer.handleViewerEvent(eventEncoder.encode({ type: "message_start", message: startMessage }));
-		const updatedMessage = {
-			role: "assistant",
-			content: [{ type: "text", text: "remote says hi from the phone" }],
-		};
-		const wireUpdate = eventEncoder.encode({
-			type: "message_update",
-			message: updatedMessage,
-			assistantMessageEvent: {
+		// reconstructing the projected delta-only viewer wire frame.
+		const projector = new StreamProjector();
+		const startMessage = fauxAssistantMessage("remote says hi", { timestamp: 0 });
+		sendProjected(viewer, projector, { type: "message_start", message: startMessage });
+		const updatedMessage = fauxAssistantMessage("remote says hi from the phone", { timestamp: 0 });
+		const [wireUpdate] = sendProjected(
+			viewer,
+			projector,
+			assistantUpdate(updatedMessage, 1, {
 				type: "text_delta",
 				contentIndex: 0,
 				delta: " from the phone",
-				partial: updatedMessage,
-			},
-		});
+			}),
+		);
 		expect(wireUpdate).not.toHaveProperty("message");
-		viewer.handleViewerEvent(wireUpdate);
-		viewer.handleViewerEvent(eventEncoder.encode({ type: "message_end", message: updatedMessage }));
+		sendProjected(viewer, projector, { type: "message_end", message: updatedMessage });
 		const rendered = stripAnsi(viewer.render(80).join("\n"));
 		expect(rendered).toContain("remote says hi from the phone");
 		expect(rendered).toContain("finishing remote turn");
@@ -120,73 +137,55 @@ describe("drain viewer (§6.3)", () => {
 		const grant = deferredGrant();
 		proto.enterDrainViewer.call(context, { kind: "pending", viewerFeedId: "vf-mid", granted: grant.promise });
 		const viewer = context.drainViewer as DrainViewerComponent;
-		const eventEncoder = new RpcSessionEventEncoder();
-		const send = (event: object): void => viewer.handleViewerEvent(eventEncoder.encode(event));
+		const projector = new StreamProjector();
+		const send = (event: object): void => {
+			sendProjected(viewer, projector, event);
+		};
 
-		let message = { role: "assistant", content: [{ type: "text", text: "mid" }] };
-		send({
-			type: "message_update",
-			message,
-			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "mid", partial: message },
-		});
-		message = { role: "assistant", content: [{ type: "text", text: "mid-stream" }] };
-		send({
-			type: "message_update",
-			message,
-			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "-stream", partial: message },
-		});
+		let message = fauxAssistantMessage("mid", { timestamp: 0 });
+		send(assistantUpdate(message, 1, { type: "text_delta", contentIndex: 0, delta: "mid" }));
+		message = fauxAssistantMessage("mid-stream", { timestamp: 0 });
+		send(assistantUpdate(message, 2, { type: "text_delta", contentIndex: 0, delta: "-stream" }));
 
-		let richMessage = {
-			role: "assistant",
-			content: [
+		let richMessage = fauxAssistantMessage(
+			[
 				{ type: "text", text: "mid-stream" },
 				{ type: "thinking", thinking: "" },
 			],
-		};
-		send({
-			type: "message_update",
-			message: richMessage,
-			assistantMessageEvent: { type: "thinking_start", contentIndex: 1, partial: richMessage },
-		});
-		richMessage = {
-			role: "assistant",
-			content: [
+			{ timestamp: 0 },
+		);
+		send(assistantUpdate(richMessage, 3, { type: "thinking_start", contentIndex: 1 }));
+		richMessage = fauxAssistantMessage(
+			[
 				{ type: "text", text: "mid-stream" },
 				{ type: "thinking", thinking: "plan" },
 			],
-		};
-		send({
-			type: "message_update",
-			message: richMessage,
-			assistantMessageEvent: { type: "thinking_delta", contentIndex: 1, delta: "plan", partial: richMessage },
-		});
+			{ timestamp: 0 },
+		);
+		send(assistantUpdate(richMessage, 4, { type: "thinking_delta", contentIndex: 1, delta: "plan" }));
 
-		const toolStartMessage = {
-			...richMessage,
-			content: [...richMessage.content, { type: "toolCall", id: "tc-1", name: "write", arguments: {} }],
-		};
-		send({
-			type: "message_update",
-			message: toolStartMessage,
-			assistantMessageEvent: { type: "toolcall_start", contentIndex: 2, partial: toolStartMessage },
-		});
-		const finalMessage = {
-			...richMessage,
-			content: [
+		const toolStartMessage = fauxAssistantMessage(
+			[...richMessage.content, { type: "toolCall", id: "tc-1", name: "write", arguments: {} }],
+			{ timestamp: 0 },
+		);
+		send(
+			assistantUpdate(toolStartMessage, 5, { type: "toolcall_start", contentIndex: 2, id: "tc-1", name: "write" }, [
+				{ contentIndex: 2, argsText: "" },
+			]),
+		);
+		const argsText = '{"path":"notes.md","content":"done"}';
+		const finalMessage = fauxAssistantMessage(
+			[
 				...richMessage.content,
 				{ type: "toolCall", id: "tc-1", name: "write", arguments: { path: "notes.md", content: "done" } },
 			],
-		};
-		send({
-			type: "message_update",
-			message: finalMessage,
-			assistantMessageEvent: {
-				type: "toolcall_delta",
-				contentIndex: 2,
-				delta: '{"path":"notes.md","content":"done"}',
-				partial: finalMessage,
-			},
-		});
+			{ timestamp: 0 },
+		);
+		send(
+			assistantUpdate(finalMessage, 6, { type: "toolcall_delta", contentIndex: 2, argsTextDelta: argsText }, [
+				{ contentIndex: 2, argsText },
+			]),
+		);
 		send({ type: "message_end", message: finalMessage });
 
 		const rendered = stripAnsi(viewer.render(100).join("\n"));
@@ -205,56 +204,36 @@ describe("drain viewer (§6.3)", () => {
 			granted: grant.promise,
 		});
 		const viewer = context.drainViewer as DrainViewerComponent;
-		const eventEncoder = new RpcSessionEventEncoder();
+		const projector = new StreamProjector();
 
-		const firstMessage = {
-			role: "assistant",
-			content: [
-				{
-					type: "toolCall",
-					id: "tc-mid",
-					name: "write",
-					arguments: { path: "no" },
-					partialJson: '{"path":"no',
-				},
-			],
-		};
-		viewer.handleViewerEvent(
-			eventEncoder.encode({
-				type: "message_update",
-				message: firstMessage,
-				assistantMessageEvent: {
-					type: "toolcall_delta",
-					contentIndex: 0,
-					delta: "no",
-					partial: firstMessage,
-				},
-			}),
+		const firstArgsText = '{"path":"no';
+		const firstMessage = fauxAssistantMessage(
+			{ type: "toolCall", id: "tc-mid", name: "write", arguments: { path: "no" } },
+			{ timestamp: 0 },
 		);
-		const updatedMessage = {
-			role: "assistant",
-			content: [
-				{
-					type: "toolCall",
-					id: "tc-mid",
-					name: "write",
-					arguments: { path: "notes.md", content: "done" },
-					partialJson: '{"path":"notes.md","content":"done"}',
-				},
-			],
-		};
-		const delta = eventEncoder.encode({
-			type: "message_update",
-			message: updatedMessage,
-			assistantMessageEvent: {
-				type: "toolcall_delta",
-				contentIndex: 0,
-				delta: 'tes.md","content":"done"}',
-				partial: updatedMessage,
-			},
-		});
+		sendProjected(
+			viewer,
+			projector,
+			assistantUpdate(firstMessage, 1, { type: "toolcall_delta", contentIndex: 0, argsTextDelta: "no" }, [
+				{ contentIndex: 0, argsText: firstArgsText },
+			]),
+		);
+		const argsText = '{"path":"notes.md","content":"done"}';
+		const updatedMessage = fauxAssistantMessage(
+			{ type: "toolCall", id: "tc-mid", name: "write", arguments: { path: "notes.md", content: "done" } },
+			{ timestamp: 0 },
+		);
+		const [delta] = sendProjected(
+			viewer,
+			projector,
+			assistantUpdate(
+				updatedMessage,
+				2,
+				{ type: "toolcall_delta", contentIndex: 0, argsTextDelta: 'tes.md","content":"done"}' },
+				[{ contentIndex: 0, argsText }],
+			),
+		);
 		expect(delta).not.toHaveProperty("message");
-		viewer.handleViewerEvent(delta);
 
 		const rendered = stripAnsi(viewer.render(100).join("\n"));
 		expect(rendered).toContain("notes.md");
@@ -272,7 +251,8 @@ describe("drain viewer (§6.3)", () => {
 		const viewer = context.drainViewer as DrainViewerComponent;
 		viewer.handleViewerEvent({
 			type: "message_end",
-			message: { role: "assistant", content: [{ type: "text", text: "authoritative final reply" }] },
+			stream: { epoch: 1, seq: 0 },
+			message: fauxAssistantMessage("authoritative final reply", { timestamp: 0 }),
 		});
 
 		const rendered = stripAnsi(viewer.render(80).join("\n"));
@@ -287,12 +267,14 @@ describe("drain viewer (§6.3)", () => {
 		const viewer = context.drainViewer as DrainViewerComponent;
 		viewer.handleViewerEvent({
 			type: "message_start",
-			message: { role: "assistant", content: [{ type: "text", text: "will be dropped" }] },
+			stream: { epoch: 1, seq: 0 },
+			message: fauxAssistantMessage("will be dropped", { timestamp: 0 }),
 		});
 		viewer.handleViewerEvent({ kind: "truncated" });
 		viewer.handleViewerEvent({
 			type: "message_start",
-			message: { role: "assistant", content: [{ type: "text", text: "ignored after truncation" }] },
+			stream: { epoch: 2, seq: 0 },
+			message: fauxAssistantMessage("ignored after truncation", { timestamp: 0 }),
 		});
 		const rendered = stripAnsi(viewer.render(80).join("\n"));
 		expect(rendered).not.toContain("will be dropped");

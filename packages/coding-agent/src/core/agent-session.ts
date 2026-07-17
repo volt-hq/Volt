@@ -601,7 +601,7 @@ export class AgentSession {
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
-	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+	private _handleAgentEvent = async (event: AgentEvent): Promise<AgentMessage | undefined> => {
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
@@ -625,38 +625,45 @@ export class AgentSession {
 			}
 		}
 
-		// Emit to extensions first
-		await this._emitExtensionEvent(event);
+		// Extensions can functionally replace a finalized message. Feed the
+		// replacement back to agent-core so the current loop uses it for context,
+		// tool execution, retry classification, and later lifecycle events.
+		const replacement = await this._emitExtensionEvent(event);
+		const handledEvent = event.type === "message_end" && replacement ? { ...event, message: replacement } : event;
 
 		// Notify all listeners
-		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		this._emit(
+			handledEvent.type === "agent_end"
+				? { ...handledEvent, willRetry: this._willRetryAfterAgentEnd(handledEvent) }
+				: handledEvent,
+		);
 
 		// Handle session persistence
-		if (event.type === "message_end") {
+		if (handledEvent.type === "message_end") {
 			// Check if this is a custom message from extensions
-			if (event.message.role === "custom") {
+			if (handledEvent.message.role === "custom") {
 				// Persist as CustomMessageEntry
 				this.sessionManager.appendCustomMessageEntry(
-					event.message.customType,
-					event.message.content,
-					event.message.display,
-					event.message.details,
+					handledEvent.message.customType,
+					handledEvent.message.content,
+					handledEvent.message.display,
+					handledEvent.message.details,
 				);
 			} else if (
-				event.message.role === "user" ||
-				event.message.role === "assistant" ||
-				event.message.role === "toolResult"
+				handledEvent.message.role === "user" ||
+				handledEvent.message.role === "assistant" ||
+				handledEvent.message.role === "toolResult"
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
-				this.sessionManager.appendMessage(event.message);
+				this.sessionManager.appendMessage(handledEvent.message);
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
 			// Track assistant message for auto-compaction (checked on agent_end)
-			if (event.message.role === "assistant") {
-				this._lastAssistantMessage = event.message;
+			if (handledEvent.message.role === "assistant") {
+				this._lastAssistantMessage = handledEvent.message;
 
-				const assistantMsg = event.message as AssistantMessage;
+				const assistantMsg = handledEvent.message as AssistantMessage;
 				if (assistantMsg.stopReason !== "error") {
 					this._overflowRecoveryAttempted = false;
 				}
@@ -668,6 +675,7 @@ export class AgentSession {
 					this._settleRetry(false, "Retry cancelled");
 				}
 			}
+			return handledEvent.message;
 		}
 	};
 
@@ -721,24 +729,8 @@ export class AgentSession {
 		return undefined;
 	}
 
-	private _replaceMessageInPlace(target: AgentMessage, replacement: AgentMessage): void {
-		// Agent-core stores the finalized message object in its state before emitting message_end.
-		// SessionManager persistence happens later in _handleAgentEvent() with event.message.
-		// Mutating this object in place keeps agent state, later turn/agent events, listeners,
-		// and the eventual SessionManager.appendMessage(event.message) persistence in sync.
-		if (target === replacement) {
-			return;
-		}
-
-		const targetRecord = target as unknown as Record<string, unknown>;
-		for (const key of Object.keys(targetRecord)) {
-			delete targetRecord[key];
-		}
-		Object.assign(targetRecord, replacement);
-	}
-
 	/** Emit extension events based on agent events */
-	private async _emitExtensionEvent(event: AgentEvent): Promise<void> {
+	private async _emitExtensionEvent(event: AgentEvent): Promise<AgentMessage | undefined> {
 		if (event.type === "agent_start") {
 			this._turnIndex = 0;
 			await this._extensionRunner.emit({ type: "agent_start" });
@@ -779,9 +771,7 @@ export class AgentSession {
 				message: event.message,
 			};
 			const replacement = await this._extensionRunner.emitMessageEnd(extensionEvent);
-			if (replacement) {
-				this._replaceMessageInPlace(event.message, replacement);
-			}
+			return replacement;
 		} else if (event.type === "tool_execution_start") {
 			const extensionEvent: ToolExecutionStartEvent = {
 				type: "tool_execution_start",
@@ -809,6 +799,7 @@ export class AgentSession {
 			};
 			await this._extensionRunner.emit(extensionEvent);
 		}
+		return undefined;
 	}
 
 	/**

@@ -22,7 +22,18 @@ import type {
 	StreamFn,
 } from "./types.ts";
 
-export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
+type PassiveAgentEventSink = (event: AgentEvent) => void;
+type AsyncPassiveAgentEventSink = (event: AgentEvent) => Promise<void>;
+type ReplacingAgentEventSink = (event: AgentEvent) => AgentMessage | undefined;
+type AsyncReplacingAgentEventSink = (event: AgentEvent) => Promise<AgentMessage | undefined>;
+
+export type AgentEventSink =
+	| PassiveAgentEventSink
+	| AsyncPassiveAgentEventSink
+	| ReplacingAgentEventSink
+	| AsyncReplacingAgentEventSink;
+
+type AgentEventSinkResult = Awaited<ReturnType<AgentEventSink>>;
 
 /**
  * Start an agent loop with a new prompt message.
@@ -108,9 +119,10 @@ export async function runAgentLoop(
 
 	await emit({ type: "agent_start" });
 	await emit({ type: "turn_start" });
-	for (const prompt of prompts) {
-		await emit({ type: "message_start", message: prompt });
-		await emit({ type: "message_end", message: prompt });
+	for (const [index, prompt] of prompts.entries()) {
+		const finalizedPrompt = await emitCompletedMessage(prompt, emit);
+		newMessages[index] = finalizedPrompt;
+		currentContext.messages[context.messages.length + index] = finalizedPrompt;
 	}
 
 	await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
@@ -191,10 +203,9 @@ async function runLoop(
 			// Process pending messages (inject before next assistant response)
 			if (pendingMessages.length > 0) {
 				for (const message of pendingMessages) {
-					await emit({ type: "message_start", message });
-					await emit({ type: "message_end", message });
-					currentContext.messages.push(message);
-					newMessages.push(message);
+					const finalizedMessage = await emitCompletedMessage(message, emit);
+					currentContext.messages.push(finalizedMessage);
+					newMessages.push(finalizedMessage);
 				}
 				pendingMessages = [];
 			}
@@ -327,10 +338,10 @@ async function streamAssistantResponse(
 	for await (const event of response) {
 		switch (event.type) {
 			case "start":
-				partialMessage = event.partial;
+				partialMessage = event.snapshot;
 				context.messages.push(partialMessage);
 				addedPartial = true;
-				await emit({ type: "message_start", message: { ...partialMessage } });
+				await emit({ type: "message_start", message: partialMessage });
 				break;
 
 			case "text_start":
@@ -343,12 +354,12 @@ async function streamAssistantResponse(
 			case "toolcall_delta":
 			case "toolcall_end":
 				if (partialMessage) {
-					partialMessage = event.partial;
+					partialMessage = event.snapshot;
 					context.messages[context.messages.length - 1] = partialMessage;
 					await emit({
 						type: "message_update",
 						assistantMessageEvent: event,
-						message: { ...partialMessage },
+						message: partialMessage,
 					});
 				}
 				break;
@@ -362,10 +373,12 @@ async function streamAssistantResponse(
 					context.messages.push(finalMessage);
 				}
 				if (!addedPartial) {
-					await emit({ type: "message_start", message: { ...finalMessage } });
+					await emit({ type: "message_start", message: finalMessage });
 				}
-				await emit({ type: "message_end", message: finalMessage });
-				return finalMessage;
+				const replacement = await emit({ type: "message_end", message: finalMessage });
+				const emittedMessage = resolveMessageReplacement(finalMessage, replacement);
+				context.messages[context.messages.length - 1] = emittedMessage;
+				return emittedMessage;
 			}
 		}
 	}
@@ -375,10 +388,12 @@ async function streamAssistantResponse(
 		context.messages[context.messages.length - 1] = finalMessage;
 	} else {
 		context.messages.push(finalMessage);
-		await emit({ type: "message_start", message: { ...finalMessage } });
+		await emit({ type: "message_start", message: finalMessage });
 	}
-	await emit({ type: "message_end", message: finalMessage });
-	return finalMessage;
+	const replacement = await emit({ type: "message_end", message: finalMessage });
+	const emittedMessage = resolveMessageReplacement(finalMessage, replacement);
+	context.messages[context.messages.length - 1] = emittedMessage;
+	return emittedMessage;
 }
 
 /**
@@ -447,9 +462,9 @@ async function executeToolCallsSequential(
 
 		await emitToolExecutionEnd(finalized, emit);
 		const toolResultMessage = createToolResultMessage(finalized);
-		await emitToolResultMessage(toolResultMessage, emit);
+		const finalizedToolResultMessage = await emitCompletedMessage(toolResultMessage, emit);
 		finalizedCalls.push(finalized);
-		messages.push(toolResultMessage);
+		messages.push(finalizedToolResultMessage);
 
 		if (signal?.aborted) {
 			break;
@@ -519,8 +534,7 @@ async function executeToolCallsParallel(
 	const messages: ToolResultMessage[] = [];
 	for (const finalized of orderedFinalizedCalls) {
 		const toolResultMessage = createToolResultMessage(finalized);
-		await emitToolResultMessage(toolResultMessage, emit);
-		messages.push(toolResultMessage);
+		messages.push(await emitCompletedMessage(toolResultMessage, emit));
 	}
 
 	return {
@@ -663,7 +677,7 @@ async function executePreparedToolCall(
 							args: prepared.toolCall.arguments,
 							partialResult,
 						}),
-					),
+					).then(() => {}),
 				);
 			},
 		);
@@ -756,7 +770,24 @@ function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResul
 	};
 }
 
-async function emitToolResultMessage(toolResultMessage: ToolResultMessage, emit: AgentEventSink): Promise<void> {
-	await emit({ type: "message_start", message: toolResultMessage });
-	await emit({ type: "message_end", message: toolResultMessage });
+async function emitCompletedMessage<MessageType extends AgentMessage>(
+	message: MessageType,
+	emit: AgentEventSink,
+): Promise<MessageType> {
+	await emit({ type: "message_start", message });
+	const replacement = await emit({ type: "message_end", message });
+	return resolveMessageReplacement(message, replacement);
+}
+
+function resolveMessageReplacement<MessageType extends AgentMessage>(
+	message: MessageType,
+	replacement: AgentEventSinkResult,
+): MessageType {
+	if (replacement === undefined) {
+		return message;
+	}
+	if (replacement.role !== message.role) {
+		throw new Error("message_end listeners must return a message with the same role");
+	}
+	return replacement as MessageType;
 }

@@ -125,6 +125,17 @@ export interface AgentOptions {
 	toolExecution?: ToolExecutionMode;
 }
 
+type PassiveAgentEventListener = (event: AgentEvent, signal: AbortSignal) => void;
+type AsyncPassiveAgentEventListener = (event: AgentEvent, signal: AbortSignal) => Promise<void>;
+type ReplacingAgentEventListener = (event: AgentEvent, signal: AbortSignal) => AgentMessage | undefined;
+type AsyncReplacingAgentEventListener = (event: AgentEvent, signal: AbortSignal) => Promise<AgentMessage | undefined>;
+
+export type AgentEventListener =
+	| PassiveAgentEventListener
+	| AsyncPassiveAgentEventListener
+	| ReplacingAgentEventListener
+	| AsyncReplacingAgentEventListener;
+
 class PendingMessageQueue {
 	private messages: AgentMessage[] = [];
 	public mode: QueueMode;
@@ -175,7 +186,7 @@ type ActiveRun = {
  */
 export class Agent {
 	private _state: MutableAgentState;
-	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
+	private readonly listeners = new Set<AgentEventListener>();
 	private readonly steeringQueue: PendingMessageQueue;
 	private readonly followUpQueue: PendingMessageQueue;
 
@@ -247,7 +258,7 @@ export class Agent {
 	 * `agent_end` is the final emitted event for a run, but the agent does not
 	 * become idle until all awaited listeners for that event have settled.
 	 */
-	subscribe(listener: (event: AgentEvent, signal: AbortSignal) => Promise<void> | void): () => void {
+	subscribe(listener: AgentEventListener): () => void {
 		this.listeners.add(listener);
 		return () => this.listeners.delete(listener);
 	}
@@ -509,9 +520,10 @@ export class Agent {
 			timestamp: Date.now(),
 		} satisfies AgentMessage;
 		await this.processEvents({ type: "message_start", message: failureMessage });
-		await this.processEvents({ type: "message_end", message: failureMessage });
-		await this.processEvents({ type: "turn_end", message: failureMessage, toolResults: [] });
-		await this.processEvents({ type: "agent_end", messages: [failureMessage] });
+		const replacement = await this.processEvents({ type: "message_end", message: failureMessage });
+		const finalizedMessage = replacement?.role === "assistant" ? replacement : failureMessage;
+		await this.processEvents({ type: "turn_end", message: finalizedMessage, toolResults: [] });
+		await this.processEvents({ type: "agent_end", messages: [finalizedMessage] });
 	}
 
 	private finishRun(): void {
@@ -530,7 +542,7 @@ export class Agent {
 	 * considered idle later, after all awaited listeners for `agent_end` finish
 	 * and `finishRun()` clears runtime-owned state.
 	 */
-	private async processEvents(event: AgentEvent): Promise<void> {
+	private async processEvents(event: AgentEvent): Promise<AgentMessage | undefined> {
 		switch (event.type) {
 			case "message_start":
 				this._state.streamingMessage = event.message;
@@ -542,7 +554,6 @@ export class Agent {
 
 			case "message_end":
 				this._state.streamingMessage = undefined;
-				this._state.messages.push(event.message);
 				break;
 
 			case "tool_execution_start": {
@@ -598,8 +609,20 @@ export class Agent {
 		if (!signal) {
 			throw new Error("Agent listener invoked outside active run");
 		}
+		let emittedEvent = event;
 		for (const listener of this.listeners) {
-			await listener(event, signal);
+			const replacement = await listener(emittedEvent, signal);
+			if (emittedEvent.type === "message_end" && replacement) {
+				if (replacement.role !== emittedEvent.message.role) {
+					throw new Error("message_end listeners must return a message with the same role");
+				}
+				emittedEvent = { ...emittedEvent, message: replacement };
+			}
+		}
+
+		if (emittedEvent.type === "message_end") {
+			this._state.messages.push(emittedEvent.message);
+			return emittedEvent.message;
 		}
 	}
 }

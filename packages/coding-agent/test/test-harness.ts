@@ -14,7 +14,6 @@ import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { Agent } from "@hansjm10/volt-agent-core";
 import type {
 	AssistantMessage,
-	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,
 	Model,
@@ -25,7 +24,7 @@ import type {
 	ToolCall,
 	Usage,
 } from "@hansjm10/volt-ai";
-import { createAssistantMessageEventStream } from "@hansjm10/volt-ai";
+import { AssistantStreamNormalizer } from "@hansjm10/volt-ai";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
@@ -183,80 +182,76 @@ function chunkString(text: string): string[] {
  * Stream a complete AssistantMessage through an EventStream with realistic
  * intermediate delta events for each content block.
  */
-function streamWithDeltas(stream: AssistantMessageEventStream, message: AssistantMessage): void {
-	const isError = message.stopReason === "error" || message.stopReason === "aborted";
-
-	// Build partial progressively as we stream content blocks
-	const partial: AssistantMessage = { ...message, content: [] };
-	stream.push({ type: "start", partial: { ...partial } });
+function streamWithDeltas(normalizer: AssistantStreamNormalizer, message: AssistantMessage): void {
+	normalizer.push({
+		type: "start",
+		init: {
+			api: message.api,
+			provider: message.provider,
+			model: message.model,
+			timestamp: message.timestamp,
+			responseId: message.responseId,
+			responseModel: message.responseModel,
+			usage: message.usage,
+			diagnostics: message.diagnostics,
+		},
+	});
 
 	for (let i = 0; i < message.content.length; i++) {
 		const block = message.content[i];
 
 		if (block.type === "thinking") {
-			partial.content = [...partial.content, { type: "thinking", thinking: "" }];
-			stream.push({ type: "thinking_start", contentIndex: i, partial: { ...partial } });
+			normalizer.push({ type: "thinking_start", contentIndex: i, redacted: block.redacted });
 
 			for (const chunk of chunkString(block.thinking)) {
-				(partial.content[i] as ThinkingContent).thinking += chunk;
-				stream.push(makeEvent("thinking_delta", i, chunk, partial));
+				normalizer.push({ type: "thinking_delta", contentIndex: i, delta: chunk });
 			}
 
-			stream.push({
+			normalizer.push({
 				type: "thinking_end",
 				contentIndex: i,
 				content: block.thinking,
-				partial: { ...partial },
+				thinkingSignature: block.thinkingSignature,
+				redacted: block.redacted,
 			});
 		} else if (block.type === "text") {
-			partial.content = [...partial.content, { type: "text", text: "" }];
-			stream.push({ type: "text_start", contentIndex: i, partial: { ...partial } });
+			normalizer.push({ type: "text_start", contentIndex: i });
 
 			for (const chunk of chunkString(block.text)) {
-				(partial.content[i] as TextContent).text += chunk;
-				stream.push(makeEvent("text_delta", i, chunk, partial));
+				normalizer.push({ type: "text_delta", contentIndex: i, delta: chunk });
 			}
 
-			stream.push({
+			normalizer.push({
 				type: "text_end",
 				contentIndex: i,
 				content: block.text,
-				partial: { ...partial },
+				textSignature: block.textSignature,
 			});
 		} else if (block.type === "toolCall") {
 			const argsJson = JSON.stringify(block.arguments);
-			partial.content = [...partial.content, { type: "toolCall", id: block.id, name: block.name, arguments: {} }];
-			stream.push({ type: "toolcall_start", contentIndex: i, partial: { ...partial } });
+			normalizer.push({ type: "toolcall_start", contentIndex: i, id: block.id, name: block.name });
 
 			for (const chunk of chunkString(argsJson)) {
-				stream.push(makeEvent("toolcall_delta", i, chunk, partial));
+				normalizer.push({ type: "toolcall_delta", contentIndex: i, argsTextDelta: chunk });
 			}
 
-			// Final toolcall has the real parsed arguments
-			(partial.content[i] as ToolCall).arguments = block.arguments;
-			stream.push({
+			normalizer.push({
 				type: "toolcall_end",
 				contentIndex: i,
 				toolCall: block,
-				partial: { ...partial },
 			});
 		}
 	}
 
-	if (isError) {
-		stream.push({ type: "error", reason: message.stopReason as "error" | "aborted", error: message });
+	if (message.stopReason === "error" || message.stopReason === "aborted") {
+		normalizer.push({
+			type: "error",
+			reason: message.stopReason,
+			errorMessage: message.errorMessage ?? `Request ${message.stopReason}`,
+		});
 	} else {
-		stream.push({ type: "done", reason: message.stopReason as "stop" | "length" | "toolUse", message });
+		normalizer.push({ type: "done", reason: message.stopReason, usage: message.usage });
 	}
-}
-
-function makeEvent(
-	type: "text_delta" | "thinking_delta" | "toolcall_delta",
-	contentIndex: number,
-	delta: string,
-	partial: AssistantMessage,
-): AssistantMessageEvent {
-	return { type, contentIndex, delta, partial: { ...partial } };
 }
 
 // ============================================================================
@@ -295,10 +290,10 @@ export function createFauxStreamFn(responses: FauxResponseInput[]): {
 
 		const resp = normalizeResponse(responses[index]);
 		const message = buildAssistantMessage(resp);
-		const stream = createAssistantMessageEventStream();
+		const normalizer = new AssistantStreamNormalizer();
 
 		const emit = () => {
-			streamWithDeltas(stream, message);
+			streamWithDeltas(normalizer, message);
 		};
 
 		if (resp.delayMs && resp.delayMs > 0) {
@@ -307,7 +302,7 @@ export function createFauxStreamFn(responses: FauxResponseInput[]): {
 			queueMicrotask(emit);
 		}
 
-		return stream;
+		return normalizer.stream;
 	};
 
 	return { streamFn, state };

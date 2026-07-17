@@ -55,6 +55,7 @@ export class RpcTransportClient extends RpcClientBase {
 	}
 
 	async stop(): Promise<void> {
+		this.disposeStreamProjectionDecoder();
 		if (this.started) {
 			this.started = false;
 			this.detachInput?.();

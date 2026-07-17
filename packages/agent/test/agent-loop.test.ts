@@ -99,7 +99,7 @@ describe("agentLoop with AgentMessage", () => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				const message = createAssistantMessage([{ type: "text", text: "Hi there!" }]);
-				stream.push({ type: "done", reason: "stop", message });
+				stream.push({ type: "done", seq: 1, reason: "stop", message });
 			});
 			return stream;
 		};
@@ -166,7 +166,7 @@ describe("agentLoop with AgentMessage", () => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				const message = createAssistantMessage([{ type: "text", text: "Response" }]);
-				stream.push({ type: "done", reason: "stop", message });
+				stream.push({ type: "done", seq: 1, reason: "stop", message });
 			});
 			return stream;
 		};
@@ -219,7 +219,7 @@ describe("agentLoop with AgentMessage", () => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				const message = createAssistantMessage([{ type: "text", text: "Response" }]);
-				stream.push({ type: "done", reason: "stop", message });
+				stream.push({ type: "done", seq: 1, reason: "stop", message });
 			});
 			return stream;
 		};
@@ -276,11 +276,11 @@ describe("agentLoop with AgentMessage", () => {
 						[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
 						"toolUse",
 					);
-					stream.push({ type: "done", reason: "toolUse", message });
+					stream.push({ type: "done", seq: 1, reason: "toolUse", message });
 				} else {
 					// Second call: return final response
 					const message = createAssistantMessage([{ type: "text", text: "done" }]);
-					stream.push({ type: "done", reason: "stop", message });
+					stream.push({ type: "done", seq: 1, reason: "stop", message });
 				}
 				callIndex++;
 			});
@@ -351,10 +351,10 @@ describe("agentLoop with AgentMessage", () => {
 						[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
 						"toolUse",
 					);
-					stream.push({ type: "done", reason: "toolUse", message });
+					stream.push({ type: "done", seq: 1, reason: "toolUse", message });
 				} else {
 					const message = createAssistantMessage([{ type: "text", text: "done" }]);
-					stream.push({ type: "done", reason: "stop", message });
+					stream.push({ type: "done", seq: 1, reason: "stop", message });
 				}
 				callIndex++;
 			});
@@ -431,10 +431,10 @@ describe("agentLoop with AgentMessage", () => {
 						],
 						"toolUse",
 					);
-					stream.push({ type: "done", reason: "toolUse", message });
+					stream.push({ type: "done", seq: 1, reason: "toolUse", message });
 				} else {
 					const message = createAssistantMessage([{ type: "text", text: "done" }]);
-					stream.push({ type: "done", reason: "stop", message });
+					stream.push({ type: "done", seq: 1, reason: "stop", message });
 				}
 				callIndex++;
 			});
@@ -503,11 +503,11 @@ describe("agentLoop with AgentMessage", () => {
 						],
 						"toolUse",
 					);
-					mockStream.push({ type: "done", reason: "toolUse", message });
+					mockStream.push({ type: "done", seq: 1, reason: "toolUse", message });
 					setTimeout(() => releaseFirst?.(), 20);
 				} else {
 					const message = createAssistantMessage([{ type: "text", text: "done" }]);
-					mockStream.push({ type: "done", reason: "stop", message });
+					mockStream.push({ type: "done", seq: 1, reason: "stop", message });
 				}
 				callIndex++;
 			});
@@ -608,11 +608,11 @@ describe("agentLoop with AgentMessage", () => {
 						],
 						"toolUse",
 					);
-					mockStream.push({ type: "done", reason: "toolUse", message });
+					mockStream.push({ type: "done", seq: 1, reason: "toolUse", message });
 				} else {
 					// Second call: return final response
 					const message = createAssistantMessage([{ type: "text", text: "done" }]);
-					mockStream.push({ type: "done", reason: "stop", message });
+					mockStream.push({ type: "done", seq: 1, reason: "stop", message });
 				}
 				callIndex++;
 			});
@@ -705,11 +705,11 @@ describe("agentLoop with AgentMessage", () => {
 						],
 						"toolUse",
 					);
-					mockStream.push({ type: "done", reason: "toolUse", message });
+					mockStream.push({ type: "done", seq: 1, reason: "toolUse", message });
 					setTimeout(() => releaseFirst?.(), 20);
 				} else {
 					const message = createAssistantMessage([{ type: "text", text: "done" }]);
-					mockStream.push({ type: "done", reason: "stop", message });
+					mockStream.push({ type: "done", seq: 1, reason: "stop", message });
 				}
 				callIndex++;
 			});
@@ -799,11 +799,11 @@ describe("agentLoop with AgentMessage", () => {
 						],
 						"toolUse",
 					);
-					mockStream.push({ type: "done", reason: "toolUse", message });
+					mockStream.push({ type: "done", seq: 1, reason: "toolUse", message });
 					setTimeout(() => releaseSlow?.(), 20);
 				} else {
 					const message = createAssistantMessage([{ type: "text", text: "done" }]);
-					mockStream.push({ type: "done", reason: "stop", message });
+					mockStream.push({ type: "done", seq: 1, reason: "stop", message });
 				}
 				callIndex++;
 			});
@@ -874,11 +874,11 @@ describe("agentLoop with AgentMessage", () => {
 						],
 						"toolUse",
 					);
-					mockStream.push({ type: "done", reason: "toolUse", message });
+					mockStream.push({ type: "done", seq: 1, reason: "toolUse", message });
 					setTimeout(() => releaseFirst?.(), 20);
 				} else {
 					const message = createAssistantMessage([{ type: "text", text: "done" }]);
-					mockStream.push({ type: "done", reason: "stop", message });
+					mockStream.push({ type: "done", seq: 1, reason: "stop", message });
 				}
 				callIndex++;
 			});
@@ -942,6 +942,7 @@ describe("agentLoop with AgentMessage", () => {
 				if (llmCalls === 1) {
 					mockStream.push({
 						type: "done",
+						seq: 1,
 						reason: "toolUse",
 						message: createAssistantMessage(
 							[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
@@ -951,6 +952,7 @@ describe("agentLoop with AgentMessage", () => {
 				} else {
 					mockStream.push({
 						type: "done",
+						seq: 1,
 						reason: "stop",
 						message: createAssistantMessage([{ type: "text", text: "done" }]),
 					});
@@ -1025,10 +1027,11 @@ describe("agentLoop with AgentMessage", () => {
 						[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
 						"toolUse",
 					);
-					mockStream.push({ type: "done", reason: "toolUse", message });
+					mockStream.push({ type: "done", seq: 1, reason: "toolUse", message });
 				} else {
 					mockStream.push({
 						type: "done",
+						seq: 1,
 						reason: "stop",
 						message: createAssistantMessage([{ type: "text", text: "should not run" }]),
 					});
@@ -1108,7 +1111,7 @@ describe("agentLoop with AgentMessage", () => {
 					[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
 					"toolUse",
 				);
-				mockStream.push({ type: "done", reason: "toolUse", message });
+				mockStream.push({ type: "done", seq: 1, reason: "toolUse", message });
 			});
 			return mockStream;
 		});
@@ -1165,10 +1168,10 @@ describe("agentLoop with AgentMessage", () => {
 						],
 						"toolUse",
 					);
-					mockStream.push({ type: "done", reason: "toolUse", message });
+					mockStream.push({ type: "done", seq: 1, reason: "toolUse", message });
 				} else {
 					const message = createAssistantMessage([{ type: "text", text: "done" }]);
-					mockStream.push({ type: "done", reason: "stop", message });
+					mockStream.push({ type: "done", seq: 1, reason: "stop", message });
 				}
 				callIndex++;
 			});
@@ -1226,7 +1229,7 @@ describe("agentLoop with AgentMessage", () => {
 					[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
 					"toolUse",
 				);
-				mockStream.push({ type: "done", reason: "toolUse", message });
+				mockStream.push({ type: "done", seq: 1, reason: "toolUse", message });
 			});
 			return mockStream;
 		});
@@ -1273,7 +1276,7 @@ describe("agentLoopContinue with AgentMessage", () => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				const message = createAssistantMessage([{ type: "text", text: "Response" }]);
-				stream.push({ type: "done", reason: "stop", message });
+				stream.push({ type: "done", seq: 1, reason: "stop", message });
 			});
 			return stream;
 		};
@@ -1340,7 +1343,7 @@ describe("agentLoopContinue with AgentMessage", () => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				const message = createAssistantMessage([{ type: "text", text: "Response to custom message" }]);
-				stream.push({ type: "done", reason: "stop", message });
+				stream.push({ type: "done", seq: 1, reason: "stop", message });
 			});
 			return stream;
 		};

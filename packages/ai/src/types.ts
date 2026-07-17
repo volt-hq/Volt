@@ -358,6 +358,12 @@ export interface Context {
 	tools?: Tool[];
 }
 
+/** Resumable raw state for an in-flight tool call. */
+export interface ActiveToolCallState {
+	contentIndex: number;
+	argsText: string;
+}
+
 /**
  * Event protocol for AssistantMessageEventStream.
  *
@@ -367,18 +373,99 @@ export interface Context {
  *   and errorMessage.
  */
 export type AssistantMessageEvent =
-	| { type: "start"; partial: AssistantMessage }
-	| { type: "text_start"; contentIndex: number; partial: AssistantMessage }
-	| { type: "text_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
-	| { type: "text_end"; contentIndex: number; content: string; partial: AssistantMessage }
-	| { type: "thinking_start"; contentIndex: number; partial: AssistantMessage }
-	| { type: "thinking_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
-	| { type: "thinking_end"; contentIndex: number; content: string; partial: AssistantMessage }
-	| { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
-	| { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
-	| { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }
-	| { type: "done"; reason: Extract<StopReason, "stop" | "length" | "toolUse">; message: AssistantMessage }
-	| { type: "error"; reason: Extract<StopReason, "aborted" | "error">; error: AssistantMessage };
+	| {
+			type: "start";
+			seq: number;
+			snapshot: AssistantMessage;
+			toolState: readonly ActiveToolCallState[];
+	  }
+	| {
+			type: "text_start";
+			seq: number;
+			contentIndex: number;
+			snapshot: AssistantMessage;
+			toolState: readonly ActiveToolCallState[];
+	  }
+	| {
+			type: "text_delta";
+			seq: number;
+			contentIndex: number;
+			delta: string;
+			snapshot: AssistantMessage;
+			toolState: readonly ActiveToolCallState[];
+	  }
+	| {
+			type: "text_end";
+			seq: number;
+			contentIndex: number;
+			content: string;
+			snapshot: AssistantMessage;
+			toolState: readonly ActiveToolCallState[];
+	  }
+	| {
+			type: "thinking_start";
+			seq: number;
+			contentIndex: number;
+			redacted?: boolean;
+			snapshot: AssistantMessage;
+			toolState: readonly ActiveToolCallState[];
+	  }
+	| {
+			type: "thinking_delta";
+			seq: number;
+			contentIndex: number;
+			delta: string;
+			snapshot: AssistantMessage;
+			toolState: readonly ActiveToolCallState[];
+	  }
+	| {
+			type: "thinking_end";
+			seq: number;
+			contentIndex: number;
+			content: string;
+			redacted?: boolean;
+			snapshot: AssistantMessage;
+			toolState: readonly ActiveToolCallState[];
+	  }
+	| {
+			type: "toolcall_start";
+			seq: number;
+			contentIndex: number;
+			id: string;
+			name: string;
+			snapshot: AssistantMessage;
+			toolState: readonly ActiveToolCallState[];
+	  }
+	| {
+			type: "toolcall_delta";
+			seq: number;
+			contentIndex: number;
+			argsTextDelta: string;
+			id?: string;
+			name?: string;
+			snapshot: AssistantMessage;
+			toolState: readonly ActiveToolCallState[];
+	  }
+	| {
+			type: "toolcall_end";
+			seq: number;
+			contentIndex: number;
+			toolCall: ToolCall;
+			snapshot: AssistantMessage;
+			toolState: readonly ActiveToolCallState[];
+	  }
+	| {
+			type: "done";
+			seq: number;
+			reason: Extract<StopReason, "stop" | "length" | "toolUse">;
+			message: AssistantMessage;
+	  }
+	| {
+			type: "error";
+			seq: number;
+			reason: Extract<StopReason, "aborted" | "error">;
+			error: AssistantMessage;
+	  };
 
 /**
  * Compatibility settings for OpenAI-compatible completions APIs.

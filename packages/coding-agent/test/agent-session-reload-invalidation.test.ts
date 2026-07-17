@@ -63,8 +63,8 @@ describe("AgentSession reload invalidates the previous extension generation", ()
 			);
 			const message = fauxAssistantMessage(replies[Math.min(replyIndex++, replies.length - 1)]);
 			queueMicrotask(() => {
-				stream.push({ type: "start", partial: message });
-				stream.push({ type: "done", reason: "stop", message });
+				stream.push({ type: "start", seq: 0, snapshot: message, toolState: [] });
+				stream.push({ type: "done", seq: 1, reason: "stop", message });
 			});
 			return stream;
 		};

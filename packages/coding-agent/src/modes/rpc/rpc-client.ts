@@ -125,11 +125,13 @@ export class RpcClient extends RpcClientBase {
 	async stop(): Promise<void> {
 		const childProcess = this.process;
 		if (!childProcess) {
+			this.disposeStreamProjectionDecoder();
 			return;
 		}
 
 		this.stopReadingStdout?.();
 		this.stopReadingStdout = null;
+		this.disposeStreamProjectionDecoder();
 		this.rejectPendingRequests(new Error("RPC client stopped"));
 		await this.terminateChildProcess(childProcess);
 
@@ -191,6 +193,7 @@ export class RpcClient extends RpcClientBase {
 
 		this.stopReadingStdout?.();
 		this.stopReadingStdout = null;
+		this.disposeStreamProjectionDecoder();
 		this.rejectPendingRequests(new Error("RPC client startup failed"));
 		this.process = null;
 		await this.terminateChildProcess(childProcess);

@@ -92,11 +92,12 @@ describe("AgentSession dispose inertness", () => {
 				const signal = streamOptions?.signal;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
-					stream.push({ type: "start", partial: createAssistantMessage("") });
+					stream.push({ type: "start", seq: 0, snapshot: createAssistantMessage(""), toolState: [] });
 					const checkAbort = () => {
 						if (signal?.aborted) {
 							stream.push({
 								type: "error",
+								seq: 1,
 								reason: "aborted",
 								error: createAssistantMessage("Aborted", "aborted"),
 							});

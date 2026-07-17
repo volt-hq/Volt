@@ -382,17 +382,17 @@ For providers with non-standard APIs, implement `streamSimple`. Study the existi
 
 ### Stream Pattern
 
-All providers follow the same pattern:
+Custom providers emit lightweight fragments into `AssistantStreamNormalizer`. The normalizer is the only component that builds an `AssistantMessage`; it also produces immutable, sequenced public events and guarantees a terminal error if a fragment source ends unexpectedly.
 
 ```typescript
 import {
-  type AssistantMessage,
   type AssistantMessageEventStream,
+  AssistantStreamNormalizer,
   type Context,
   type Model,
   type SimpleStreamOptions,
+  type Usage,
   calculateCost,
-  createAssistantMessageEventStream,
 } from "@hansjm10/volt-ai";
 
 function streamMyProvider(
@@ -400,138 +400,159 @@ function streamMyProvider(
   context: Context,
   options?: SimpleStreamOptions
 ): AssistantMessageEventStream {
-  const stream = createAssistantMessageEventStream();
-
-  (async () => {
-    // Initialize output message
-    const output: AssistantMessage = {
-      role: "assistant",
-      content: [],
+  const normalizer = new AssistantStreamNormalizer();
+  normalizer.push({
+    type: "start",
+    init: {
       api: model.api,
       provider: model.provider,
       model: model.id,
-      usage: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 0,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-      },
-      stopReason: "stop",
       timestamp: Date.now(),
+    },
+  });
+
+  (async () => {
+    let usage: Usage = {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     };
+    let stopReason: "stop" | "length" | "toolUse" = "stop";
 
     try {
-      // Push start event
-      stream.push({ type: "start", partial: output });
-
       // Make API request and process response...
-      // Push content events as they arrive...
+      // Push text/thinking/tool-call fragments as they arrive.
 
-      // Push done event
-      stream.push({
-        type: "done",
-        reason: output.stopReason as "stop" | "length" | "toolUse",
-        message: output
-      });
-      stream.end();
+      normalizer.push({ type: "done", reason: stopReason, usage });
     } catch (error) {
-      output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-      output.errorMessage = error instanceof Error ? error.message : String(error);
-      stream.push({ type: "error", reason: output.stopReason, error: output });
-      stream.end();
+      normalizer.push({
+        type: "error",
+        reason: options?.signal?.aborted ? "aborted" : "error",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        usage,
+      });
+    } finally {
+      normalizer.end();
     }
   })();
 
-  return stream;
+  return normalizer.stream;
 }
 ```
 
-### Event Types
+`normalizer.end()` is deliberately called in `finally`. It is a no-op after `done` or `error`; if neither terminal fragment was emitted, it synthesizes an error so callers do not hang waiting for `stream.result()`.
 
-Push events via `stream.push()` in this order:
+### Fragment Types
 
-1. `{ type: "start", partial: output }` - Stream started
+Push fragments via `normalizer.push()` in this order:
 
-2. Content events (repeatable, track `contentIndex` for each block):
-   - `{ type: "text_start", contentIndex, partial }` - Text block started
-   - `{ type: "text_delta", contentIndex, delta, partial }` - Text chunk
-   - `{ type: "text_end", contentIndex, content, partial }` - Text block ended
-   - `{ type: "thinking_start", contentIndex, partial }` - Thinking started
-   - `{ type: "thinking_delta", contentIndex, delta, partial }` - Thinking chunk
-   - `{ type: "thinking_end", contentIndex, content, partial }` - Thinking ended
-   - `{ type: "toolcall_start", contentIndex, partial }` - Tool call started
-   - `{ type: "toolcall_delta", contentIndex, delta, partial }` - Tool call JSON chunk
-   - `{ type: "toolcall_end", contentIndex, toolCall, partial }` - Tool call ended
+1. `{ type: "start", init }` - Identifies the API, provider, model, and timestamp. Emit it exactly once.
 
-3. `{ type: "done", reason, message }` or `{ type: "error", reason, error }` - Stream ended
+2. Optional `{ type: "meta", patch }` fragments - Fold response ID/model, usage, or diagnostics into subsequent snapshots.
 
-The `partial` field in each event contains the current `AssistantMessage` state. Update `output.content` as you receive data, then include `output` as the `partial`.
+3. Content fragments (repeatable; `contentIndex` must be dense: `0`, `1`, `2`, ...):
+   - `{ type: "text_start", contentIndex }`
+   - `{ type: "text_delta", contentIndex, delta }`
+   - `{ type: "text_end", contentIndex, content?, textSignature? }`
+   - `{ type: "thinking_start", contentIndex, content?, thinkingSignature?, redacted? }`
+   - `{ type: "thinking_delta", contentIndex, delta, signatureDelta? }`
+   - `{ type: "thinking_end", contentIndex, content?, thinkingSignature?, redacted? }`
+   - `{ type: "toolcall_start", contentIndex, id?, name? }`
+   - `{ type: "toolcall_delta", contentIndex, argsTextDelta, id?, name? }`
+   - `{ type: "toolcall_end", contentIndex, toolCall?, thoughtSignature? }`
+
+4. `{ type: "done", reason, usage? }` or `{ type: "error", reason, errorMessage, diagnostics?, usage? }` - Terminates the stream.
+
+Provider code should retain only protocol bookkeeping such as raw-index-to-dense-index maps and late tool identity. Do not build an `AssistantMessage`, retain content strings, or add private `partialJson` / `partialArgs` fields; the normalizer owns that state.
 
 ### Content Blocks
 
-Add content blocks to `output.content` as they arrive:
+Allocate a dense index when the provider announces a block, then forward its deltas:
 
 ```typescript
-// Text block
-output.content.push({ type: "text", text: "" });
-stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
+let nextContentIndex = 0;
+const contentIndex = nextContentIndex++;
 
-// As text arrives
-const block = output.content[contentIndex];
-if (block.type === "text") {
-  block.text += delta;
-  stream.push({ type: "text_delta", contentIndex, delta, partial: output });
-}
-
-// When block completes
-stream.push({ type: "text_end", contentIndex, content: block.text, partial: output });
+normalizer.push({ type: "text_start", contentIndex });
+normalizer.push({ type: "text_delta", contentIndex, delta });
+normalizer.push({ type: "text_end", contentIndex });
 ```
+
+If the upstream API has sparse or out-of-order block indexes, map them to dense indexes locally:
+
+```typescript
+const blocksByRawIndex = new Map<number, number>();
+
+function registerBlock(rawIndex: number): number {
+  const contentIndex = nextContentIndex++;
+  blocksByRawIndex.set(rawIndex, contentIndex);
+  return contentIndex;
+}
+```
+
+An optional `content` on `text_end` / `thinking_end` is authoritative. Use it when the provider's final value can replace rather than append to streamed deltas.
 
 ### Tool Calls
 
-Tool calls require accumulating JSON and parsing:
+The normalizer accumulates and incrementally parses tool argument JSON. Providers only forward raw argument text:
 
 ```typescript
-// Start tool call
-output.content.push({
-  type: "toolCall",
+const contentIndex = nextContentIndex++;
+
+normalizer.push({
+  type: "toolcall_start",
+  contentIndex,
   id: toolCallId,
   name: toolName,
-  arguments: {}
 });
-stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
 
-// Accumulate JSON
-let partialJson = "";
-partialJson += jsonDelta;
-try {
-  block.arguments = JSON.parse(partialJson);
-} catch {}
-stream.push({ type: "toolcall_delta", contentIndex, delta: jsonDelta, partial: output });
+normalizer.push({
+  type: "toolcall_delta",
+  contentIndex,
+  argsTextDelta: jsonDelta,
+});
 
-// Complete
-stream.push({
+normalizer.push({
   type: "toolcall_end",
   contentIndex,
-  toolCall: { type: "toolCall", id, name, arguments: block.arguments },
-  partial: output
 });
 ```
 
-### Usage and Cost
-
-Update usage from API response and calculate cost:
+If a tool call starts with pre-seeded arguments, serialize them and emit that string as the immediate first `toolcall_delta`. If the provider supplies a final argument object that is not guaranteed to be an append of prior deltas, pass a complete authoritative `toolCall` on `toolcall_end`:
 
 ```typescript
-output.usage.input = response.usage.input_tokens;
-output.usage.output = response.usage.output_tokens;
-output.usage.cacheRead = response.usage.cache_read_tokens ?? 0;
-output.usage.cacheWrite = response.usage.cache_write_tokens ?? 0;
-output.usage.totalTokens = output.usage.input + output.usage.output +
-                           output.usage.cacheRead + output.usage.cacheWrite;
-calculateCost(model, output.usage);
+normalizer.push({
+  type: "toolcall_end",
+  contentIndex,
+  toolCall: {
+    type: "toolCall",
+    id: toolCallId,
+    name: toolName,
+    arguments: finalArguments,
+  },
+});
+```
+
+When identity arrives late, include the newly known `id` / `name` on the next `toolcall_delta`; the normalizer patches the block without provider-side mutation.
+
+### Usage and Cost
+
+Keep usage as a small provider-local value, calculate cost, and fold it through a `meta` fragment:
+
+```typescript
+usage = {
+  ...usage,
+  input: response.usage.input_tokens,
+  output: response.usage.output_tokens,
+  cacheRead: response.usage.cache_read_tokens ?? 0,
+  cacheWrite: response.usage.cache_write_tokens ?? 0,
+};
+usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+calculateCost(model, usage);
+normalizer.push({ type: "meta", patch: { usage } });
 ```
 
 ### Context Overflow Errors

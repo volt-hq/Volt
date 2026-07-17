@@ -4,7 +4,7 @@ import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.t
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { ExtensionError } from "../../core/extensions/index.ts";
-import { RpcMessageDeltaDecoder } from "../../core/rpc/message-deltas.ts";
+import { type ProjectionDiagnostic, StreamProjectionDecoder } from "../../core/rpc/stream-projection.ts";
 import type { SubagentEvent, SubagentResult } from "../../core/subagents/index.ts";
 import type {
 	RpcClientCapabilityFeature,
@@ -88,13 +88,16 @@ export abstract class RpcClientBase {
 	private readonly requestTimeoutMs: number;
 	private readonly eventListeners: RpcEventListener[] = [];
 	private readonly pendingRequests = new Map<string, PendingRpcRequest>();
-	/** Rebuilds full message_update events from delta frames. */
-	private readonly messageDeltaDecoder = new RpcMessageDeltaDecoder();
+	/** Rebuilds full message_update events from projected wire frames. */
+	private readonly streamProjectionDecoder: StreamProjectionDecoder;
 	private requestId = 0;
 	private failureError: Error | null = null;
 
 	constructor(options: RpcClientBaseOptions = {}) {
 		this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+		this.streamProjectionDecoder = new StreamProjectionDecoder({
+			onDiagnostic: (diagnostic) => reportStreamProjectionDiagnostic("rpc-client", diagnostic),
+		});
 	}
 
 	/** Subscribe to RPC events and extension UI requests. */
@@ -569,7 +572,10 @@ export abstract class RpcClientBase {
 			return;
 		}
 
-		this.emitEvent(this.messageDeltaDecoder.decode(data) as RpcClientEvent);
+		const decoded = this.streamProjectionDecoder.decode(data);
+		if (decoded !== undefined) {
+			this.emitEvent(decoded as RpcClientEvent);
+		}
 	}
 
 	protected assertCanSend(): void {
@@ -580,10 +586,16 @@ export abstract class RpcClientBase {
 
 	protected clearFailureError(): void {
 		this.failureError = null;
+		this.streamProjectionDecoder.dispose();
 	}
 
 	protected setFailureError(error: Error): void {
 		this.failureError = error;
+		this.streamProjectionDecoder.dispose();
+	}
+
+	protected disposeStreamProjectionDecoder(): void {
+		this.streamProjectionDecoder.dispose();
 	}
 
 	protected rejectPendingRequests(error: Error): void {
@@ -751,4 +763,8 @@ function formatValuePreview(value: unknown): string {
 		serialized = String(value);
 	}
 	return formatLinePreview(serialized);
+}
+
+function reportStreamProjectionDiagnostic(boundary: string, diagnostic: ProjectionDiagnostic): void {
+	console.error(`[stream-projection:${boundary}] ${diagnostic.code}: ${diagnostic.message}`, diagnostic);
 }

@@ -1,6 +1,6 @@
 import { tmpdir } from "node:os";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
-import type { Api, Model, ThinkingLevelMap } from "@hansjm10/volt-ai";
+import { type Api, fauxAssistantMessage, type Model, type ThinkingLevelMap } from "@hansjm10/volt-ai";
 import { describe, expect, test, vi } from "vitest";
 import type { ExtensionBindings, PromptOptions } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
@@ -86,6 +86,42 @@ describe("RpcTransportClient", () => {
 		expect(events).toEqual([{ type: "extension_ui_request", id: "ui-1", method: "notify", message: "hello" }]);
 
 		await client.stop();
+	});
+
+	test("drops stale deltas after transport stop and restart", async () => {
+		const pair = createLoopbackRpcTransportPair();
+		const client = new RpcTransportClient({ transport: pair.client, closeTransportOnStop: false });
+		const events: Array<{ type: string }> = [];
+		const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+		client.onEvent((event) => events.push(event));
+
+		try {
+			await client.start();
+			pair.server.write({
+				type: "message_start",
+				stream: { epoch: 1, seq: 0 },
+				message: fauxAssistantMessage([], { timestamp: 0 }),
+			});
+			expect(events).toHaveLength(1);
+
+			await client.stop();
+			await client.start();
+			pair.server.write({
+				type: "message_update",
+				stream: { epoch: 1, seq: 1 },
+				assistantMessageEvent: { type: "text_start", contentIndex: 0 },
+			});
+
+			expect(events).toHaveLength(1);
+			expect(stderr).toHaveBeenCalledWith(
+				expect.stringContaining("[stream-projection:rpc-client] delta_position_gap"),
+				expect.objectContaining({ code: "delta_position_gap" }),
+			);
+		} finally {
+			await client.stop();
+			pair.client.close();
+			stderr.mockRestore();
+		}
 	});
 
 	test("exposes typed wrappers for documented session RPC commands", async () => {
