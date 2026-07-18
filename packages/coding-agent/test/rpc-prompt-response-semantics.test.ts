@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@hansjm10/volt-agent-core";
@@ -22,6 +22,7 @@ import { createTestResourceLoader } from "./utilities.ts";
 const rpcIo = vi.hoisted(() => ({
 	outputLines: [] as string[],
 	lineHandler: undefined as ((line: string) => void) | undefined,
+	outputObserver: undefined as ((line: string) => void) | undefined,
 }));
 
 vi.mock("../src/core/output-guard.js", () => ({
@@ -31,6 +32,7 @@ vi.mock("../src/core/output-guard.js", () => ({
 	waitForRawStdoutBackpressure: vi.fn(async () => {}),
 	writeRawStdout: (line: string) => {
 		rpcIo.outputLines.push(line);
+		rpcIo.outputObserver?.(line);
 	},
 }));
 
@@ -109,8 +111,11 @@ function createRuntimeHost(options: {
 	responseDelayMs: number;
 	model?: Model<any>;
 	configureSession?: (session: AgentSession) => void;
+	sessionManager?: SessionManager;
 }): {
 	runtimeHost: AgentSessionRuntime;
+	sessionManager: SessionManager;
+	getStreamCallCount: () => number;
 	cleanup: () => Promise<void>;
 } {
 	const tempDir = join(tmpdir(), `volt-rpc-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -121,6 +126,7 @@ function createRuntimeHost(options: {
 		throw new Error("Test model not found");
 	}
 
+	let streamCallCount = 0;
 	const agent = new Agent({
 		getApiKey: () => "test-key",
 		initialState: {
@@ -129,6 +135,7 @@ function createRuntimeHost(options: {
 			tools: [],
 		},
 		streamFn: (_model, _context, _options) => {
+			streamCallCount++;
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				stream.push({ type: "start", seq: 0, snapshot: createAssistantMessage(""), toolState: [] });
@@ -140,7 +147,7 @@ function createRuntimeHost(options: {
 		},
 	});
 
-	const sessionManager = SessionManager.inMemory();
+	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
 	const settingsManager = SettingsManager.create(tempDir, tempDir);
 	const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 	const modelRegistry = ModelRegistry.create(authStorage, tempDir);
@@ -173,6 +180,8 @@ function createRuntimeHost(options: {
 
 	return {
 		runtimeHost,
+		sessionManager,
+		getStreamCallCount: () => streamCallCount,
 		cleanup: async () => {
 			try {
 				if (session.isStreaming) {
@@ -194,24 +203,29 @@ async function startRpcMode(options: {
 	responseDelayMs: number;
 	model?: Model<any>;
 	configureSession?: (session: AgentSession) => void;
+	sessionManager?: SessionManager;
 }): Promise<{
 	lineHandler: (line: string) => void;
+	sessionManager: SessionManager;
+	getStreamCallCount: () => number;
 	cleanup: () => Promise<void>;
 }> {
 	rpcIo.outputLines = [];
 	rpcIo.lineHandler = undefined;
+	rpcIo.outputObserver = undefined;
 
-	const { runtimeHost, cleanup } = createRuntimeHost(options);
+	const { runtimeHost, sessionManager, getStreamCallCount, cleanup } = createRuntimeHost(options);
 	void runRpcMode(runtimeHost);
 	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
 
-	return { lineHandler: rpcIo.lineHandler!, cleanup };
+	return { lineHandler: rpcIo.lineHandler!, sessionManager, getStreamCallCount, cleanup };
 }
 
 describe("RPC prompt response semantics", () => {
 	afterEach(() => {
 		rpcIo.outputLines = [];
 		rpcIo.lineHandler = undefined;
+		rpcIo.outputObserver = undefined;
 	});
 
 	it("emits one failure response when prompt preflight rejects", async () => {
@@ -254,7 +268,33 @@ describe("RPC prompt response semantics", () => {
 	});
 
 	it("emits one success response when prompt preflight succeeds", async () => {
-		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+		const sessionDir = join(tmpdir(), `volt-rpc-durable-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(sessionDir, { recursive: true });
+		const manager = SessionManager.create(sessionDir, sessionDir);
+		const { lineHandler, cleanup } = await startRpcMode({
+			withAuth: true,
+			responseDelayMs: 0,
+			sessionManager: manager,
+		});
+		let successObservedCanonicalCommit = false;
+		rpcIo.outputObserver = (line) => {
+			const response = parseOutputLines([line]).find(
+				(record) => record.id === "b2" && record.type === "response" && record.success === true,
+			);
+			if (!response) return;
+			const persistedEntries = readFileSync(manager.getSessionFile()!, "utf8")
+				.trim()
+				.split("\n")
+				.map((entry) => JSON.parse(entry) as Record<string, unknown>);
+			successObservedCanonicalCommit =
+				manager.getClientInput("client-b2")?.state === "completed" &&
+				persistedEntries.some(
+					(entry) =>
+						entry.type === "message" &&
+						(entry.message as Record<string, unknown> | undefined)?.role === "user" &&
+						(entry.message as Record<string, unknown> | undefined)?.clientMessageId === "client-b2",
+				);
+		};
 
 		try {
 			lineHandler(JSON.stringify({ id: "b2", type: "prompt", clientMessageId: "client-b2", message: "Hello" }));
@@ -267,8 +307,14 @@ describe("RPC prompt response semantics", () => {
 					type: "response",
 					command: "prompt",
 					success: true,
+					data: {
+						clientMessageId: "client-b2",
+						outcome: "admitted",
+						canonicalEntryId: expect.any(String),
+					},
 				});
 			});
+			expect(successObservedCanonicalCommit).toBe(true);
 			await vi.waitFor(() => {
 				const userEnd = parseOutputLines(rpcIo.outputLines).find(
 					(record) =>
@@ -281,6 +327,79 @@ describe("RPC prompt response semantics", () => {
 			});
 		} finally {
 			await cleanup();
+			if (existsSync(sessionDir)) {
+				rmSync(sessionDir, { recursive: true, force: true });
+			}
+		}
+	});
+
+	it("replays success after immediate teardown without dispatching the same durable input again", async () => {
+		const sessionDir = join(tmpdir(), `volt-rpc-crash-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(sessionDir, { recursive: true });
+		const manager = SessionManager.create(sessionDir, sessionDir);
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("expected a persisted session file");
+		const command = {
+			type: "prompt",
+			clientMessageId: "client-success-crash",
+			message: "Commit before acknowledging",
+		};
+		const first = await startRpcMode({
+			withAuth: true,
+			responseDelayMs: 250,
+			sessionManager: manager,
+		});
+		let second: Awaited<ReturnType<typeof startRpcMode>> | undefined;
+
+		try {
+			first.lineHandler(JSON.stringify({ ...command, id: "before-crash" }));
+			await vi.waitFor(() => {
+				expect(getPromptResponses(rpcIo.outputLines, "before-crash")).toMatchObject([
+					{
+						id: "before-crash",
+						success: true,
+						data: {
+							clientMessageId: command.clientMessageId,
+							outcome: "admitted",
+							canonicalEntryId: expect.any(String),
+						},
+					},
+				]);
+			});
+			expect(manager.getClientInput(command.clientMessageId)?.state).toBe("completed");
+			expect(first.getStreamCallCount()).toBe(1);
+			await first.cleanup();
+
+			const reopened = SessionManager.open(sessionFile, sessionDir);
+			second = await startRpcMode({ withAuth: true, responseDelayMs: 0, sessionManager: reopened });
+			second.lineHandler(JSON.stringify({ ...command, id: "after-crash" }));
+			await vi.waitFor(() => {
+				expect(getPromptResponses(rpcIo.outputLines, "after-crash")).toMatchObject([
+					{
+						id: "after-crash",
+						success: true,
+						data: {
+							clientMessageId: command.clientMessageId,
+							outcome: "completed",
+							canonicalEntryId: expect.any(String),
+						},
+					},
+				]);
+			});
+			expect(second.getStreamCallCount()).toBe(0);
+			expect(
+				reopened
+					.buildSessionContext()
+					.messages.filter(
+						(message) => message.role === "user" && message.clientMessageId === command.clientMessageId,
+					),
+			).toHaveLength(1);
+		} finally {
+			await first.cleanup();
+			await second?.cleanup();
+			if (existsSync(sessionDir)) {
+				rmSync(sessionDir, { recursive: true, force: true });
+			}
 		}
 	});
 
@@ -331,6 +450,55 @@ describe("RPC prompt response semantics", () => {
 			});
 		} finally {
 			releaseInput();
+			await cleanup();
+		}
+	});
+
+	it("reports handled identified prompts as completed without waiting for a canonical row", async () => {
+		const { lineHandler, sessionManager, getStreamCallCount, cleanup } = await startRpcMode({
+			withAuth: true,
+			responseDelayMs: 0,
+			configureSession: (session) => {
+				const runner = session.extensionRunner;
+				const hasHandlers = runner.hasHandlers.bind(runner);
+				runner.hasHandlers = (eventType) => eventType === "input" || hasHandlers(eventType);
+				runner.emitInput = async () => ({ action: "handled" });
+			},
+		});
+
+		try {
+			lineHandler(
+				JSON.stringify({
+					id: "handled-prompt",
+					type: "prompt",
+					clientMessageId: "client-handled",
+					message: "Handled without a model turn",
+				}),
+			);
+
+			await vi.waitFor(() => {
+				expect(getPromptResponses(rpcIo.outputLines, "handled-prompt")).toMatchObject([
+					{
+						id: "handled-prompt",
+						success: true,
+						data: {
+							clientMessageId: "client-handled",
+							outcome: "completed",
+						},
+					},
+				]);
+			});
+			expect(sessionManager.getClientInput("client-handled")).toMatchObject({ state: "completed" });
+			expect(sessionManager.getClientInput("client-handled")?.canonicalEntryId).toBeUndefined();
+			expect(getStreamCallCount()).toBe(0);
+			expect(
+				parseOutputLines(rpcIo.outputLines).filter(
+					(record) =>
+						record.type === "message_end" &&
+						(record.message as Record<string, unknown> | undefined)?.role === "user",
+				),
+			).toHaveLength(0);
+		} finally {
 			await cleanup();
 		}
 	});
@@ -447,7 +615,15 @@ describe("RPC prompt response semantics", () => {
 				}),
 			);
 			await vi.waitFor(() => {
-				expect(getPromptResponses(rpcIo.outputLines, "retry-original")).toHaveLength(1);
+				expect(getPromptResponses(rpcIo.outputLines, "retry-original")).toMatchObject([
+					{
+						data: {
+							clientMessageId: "client-retry-complete",
+							outcome: "admitted",
+							canonicalEntryId: expect.any(String),
+						},
+					},
+				]);
 				const assistantEnds = parseOutputLines(rpcIo.outputLines).filter(
 					(record) =>
 						record.type === "message_end" &&
@@ -471,6 +647,11 @@ describe("RPC prompt response semantics", () => {
 						type: "response",
 						command: "prompt",
 						success: true,
+						data: {
+							clientMessageId: "client-retry-complete",
+							outcome: "completed",
+							canonicalEntryId: expect.any(String),
+						},
 					},
 				]);
 			});

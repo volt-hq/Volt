@@ -154,6 +154,29 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
 
+/**
+ * An extension attempted to replace a finalized message with a different role.
+ * Role changes would let extension output cross a trust and persistence boundary,
+ * so callers must treat this as a terminal event failure rather than a patch to
+ * ignore.
+ */
+export class ExtensionMessageRoleMismatchError extends Error {
+	readonly code = "extension_message_role_mismatch";
+	readonly extensionPath: string;
+	readonly expectedRole: AgentMessage["role"];
+	readonly receivedRole: AgentMessage["role"];
+
+	constructor(extensionPath: string, expectedRole: AgentMessage["role"], receivedRole: AgentMessage["role"]) {
+		super(
+			`Extension ${JSON.stringify(extensionPath)} message_end handler cannot change the role from ${JSON.stringify(expectedRole)} to ${JSON.stringify(receivedRole)}`,
+		);
+		this.name = "ExtensionMessageRoleMismatchError";
+		this.extensionPath = extensionPath;
+		this.expectedRole = expectedRole;
+		this.receivedRole = receivedRole;
+	}
+}
+
 export type NewSessionHandler = (options?: {
 	parentSession?: string;
 	setup?: (sessionManager: SessionManager) => Promise<void>;
@@ -823,17 +846,30 @@ export class ExtensionRunner {
 					if (!handlerResult?.message) continue;
 
 					if (handlerResult.message.role !== currentMessage.role) {
-						this.emitError({
-							extensionPath: ext.path,
-							event: "message_end",
-							error: "message_end handlers must return a message with the same role",
-						});
-						continue;
+						const error = new ExtensionMessageRoleMismatchError(
+							ext.path,
+							currentMessage.role,
+							handlerResult.message.role,
+						);
+						try {
+							this.emitError({
+								extensionPath: ext.path,
+								event: "message_end",
+								error: error.message,
+							});
+						} catch {
+							// Diagnostics are observers. They cannot mask the typed contract
+							// violation and downgrade transport handling to an ambiguous error.
+						}
+						throw error;
 					}
 
 					currentMessage = handlerResult.message;
 					modified = true;
 				} catch (err) {
+					if (err instanceof ExtensionMessageRoleMismatchError) {
+						throw err;
+					}
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({

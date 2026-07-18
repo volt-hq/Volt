@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AgentSession } from "../src/core/agent-session.ts";
 import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS } from "../src/core/remote/iroh/index.ts";
 import { CURRENT_SESSION_VERSION } from "../src/core/session-manager.ts";
 import {
@@ -342,7 +343,7 @@ export default function (volt) {
 		}
 	});
 
-	it("resumes a requested remote session when its file still exists", async () => {
+	it("loads a requested remote session without dispatching recovery before attach ownership", async () => {
 		writeRuntimeConfig({});
 		const sessionDir = join(agentDir, "sessions", "remote-workspace");
 		mkdirSync(sessionDir, { recursive: true });
@@ -358,6 +359,7 @@ export default function (volt) {
 			})}\n`,
 		);
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const resumeRecoveredInputs = vi.spyOn(AgentSession.prototype, "resumeRecoveredClientInputs").mockResolvedValue();
 
 		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
 		try {
@@ -377,7 +379,9 @@ export default function (volt) {
 			});
 			expect(runtime.session.sessionId).toBe("remote-session");
 			expect(runtime.session.sessionFile).toBe(sessionFile);
+			expect(resumeRecoveredInputs).not.toHaveBeenCalled();
 		} finally {
+			resumeRecoveredInputs.mockRestore();
 			errorSpy.mockRestore();
 			await runtime?.dispose();
 		}

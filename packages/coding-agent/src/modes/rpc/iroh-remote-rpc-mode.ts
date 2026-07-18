@@ -66,6 +66,8 @@ export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	projectConversationExternal: (event: object) => object | null;
 	/** Installs the idempotent owner for the physical conversation stream. */
 	onConversationLifecycleReady?: (lifecycle: IrohRemoteConversationLifecycle) => void;
+	/** Runs only after RPC has rebound the session and completed extension/resource binding. */
+	onReady?: RpcModeOptions["onReady"];
 }
 
 export interface IrohRemoteConversationLifecycle {
@@ -409,6 +411,7 @@ export function runIrohRemoteRpcMode(
 	return runRpcMode(runtimeHost, {
 		allowUiActionInvocation: true,
 		disposeRuntimeOnClose: options.disposeRuntimeOnClose,
+		onReady: options.onReady,
 		onSessionChanged: async (session) => {
 			await options.onSessionChanged?.(session);
 			if (!transportClosed) {
@@ -418,6 +421,7 @@ export function runIrohRemoteRpcMode(
 		onClientCapabilitiesChanged: options.onClientCapabilitiesChanged,
 		onWorkflowEvent: options.onWorkflowEvent,
 		requireRemoteSafeUiActions: true,
+		requireConversationAuthority: true,
 		transport: remoteHostCommandTransport,
 		exitProcess: false,
 		registerPushTarget: options.registerPushTarget,
@@ -426,6 +430,10 @@ export function runIrohRemoteRpcMode(
 			get subscriptionId() {
 				return orderedSubscription.subscriptionId;
 			},
+			get branchEpoch() {
+				return orderedSubscription.branchEpoch;
+			},
+			subscribeAuthorityChanges: (listener) => orderedSubscription.subscribeAuthorityChanges(listener),
 			enqueueControl: enqueueOrderedControl,
 			requestCheckpoint: (requestId) => orderedSubscription.requestCheckpoint(requestId),
 			publishExternal: (event) => runtimeHost.publishConversationProjectionEvent(event),

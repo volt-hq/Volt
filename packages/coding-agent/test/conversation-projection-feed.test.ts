@@ -1282,9 +1282,18 @@ describe("ConversationProjectionFeed", () => {
 		});
 		await subscription.ready;
 		const originalSubscriptionId = subscription.subscriptionId;
+		const originalBranchEpoch = subscription.branchEpoch;
+		const authorityCuts: Array<{ subscriptionId: string; branchEpoch: string }> = [];
+		subscription.subscribeAuthorityChanges(() => {
+			authorityCuts.push({
+				subscriptionId: subscription.subscriptionId,
+				branchEpoch: subscription.branchEpoch,
+			});
+		});
 		const countBeforeRekey = writes.length;
 
 		feed.beginSourceRebind(secondSource);
+		expect(authorityCuts).toEqual([{ subscriptionId: originalSubscriptionId, branchEpoch: originalBranchEpoch }]);
 		secondSource.emit({ type: "agent_start" });
 		expect(writes).toHaveLength(countBeforeRekey);
 		expect(() =>
@@ -1296,6 +1305,7 @@ describe("ConversationProjectionFeed", () => {
 
 		feed.commitSourceRebind();
 		await subscription.flush();
+		expect(authorityCuts).toHaveLength(1);
 		expect(subscription.subscriptionId).not.toBe(originalSubscriptionId);
 		expect(writes.at(-1)).toMatchObject({
 			type: "conversation_bootstrap",
@@ -1407,17 +1417,28 @@ describe("ConversationProjectionFeed", () => {
 		await subscription.ready;
 		const oldSubscriptionId = subscription.subscriptionId;
 		const oldBranchEpoch = feed.branchEpoch;
+		const authorityCuts: Array<{ subscriptionId: string; branchEpoch: string }> = [];
+		subscription.subscribeAuthorityChanges(() => {
+			authorityCuts.push({
+				subscriptionId: subscription.subscriptionId,
+				branchEpoch: subscription.branchEpoch,
+			});
+		});
 
 		source.rebase();
 		await subscription.flush();
 		expect(feed.branchEpoch).not.toBe(oldBranchEpoch);
+		expect(authorityCuts).toEqual([{ subscriptionId: oldSubscriptionId, branchEpoch: feed.branchEpoch }]);
 		expect(subscription.subscriptionId).not.toBe(oldSubscriptionId);
 		expect(writes.at(-1)).toMatchObject({
-			reason: "session_rebind",
+			reason: "branch_rebase",
 			delivery: { subscriptionId: subscription.subscriptionId, cursor: 0 },
 			state: { branchEpoch: feed.branchEpoch },
 			transcript: { branchEpoch: feed.branchEpoch },
 		});
+		expect((writes.at(-1) as RpcConversationBootstrapEvent).conversation).toEqual(
+			(writes[0] as RpcConversationBootstrapEvent).conversation,
+		);
 		feed.dispose();
 	});
 
@@ -1474,7 +1495,7 @@ describe("ConversationProjectionFeed", () => {
 		await subscription.flush();
 
 		expect(writes).toHaveLength(2);
-		expect(writes[1]).toMatchObject({ type: "conversation_bootstrap", reason: "session_rebind" });
+		expect(writes[1]).toMatchObject({ type: "conversation_bootstrap", reason: "branch_rebase" });
 		expect(writes.some((value) => (value as { command?: string }).command === "get_transcript")).toBe(false);
 		feed.dispose();
 	});
@@ -1748,7 +1769,7 @@ describe("ConversationProjectionFeed", () => {
 		expect(writes).toHaveLength(2);
 		expect(writes[1]).toMatchObject({
 			type: "conversation_bootstrap",
-			reason: "session_rebind",
+			reason: "branch_rebase",
 			delivery: { subscriptionId: subscription.subscriptionId, cursor: 0 },
 		});
 
@@ -1925,11 +1946,16 @@ describe("ConversationProjectionFeed", () => {
 			prepare,
 		});
 		const initialSubscriptionId = subscription.subscriptionId;
+		const authorityCuts: string[] = [];
+		subscription.subscribeAuthorityChanges(() => {
+			authorityCuts.push(subscription.subscriptionId);
+		});
 
 		source.emit({ type: "agent_start" });
 		source.emit({ type: "turn_start" });
 		expect(subscription.subscriptionId).toBe(initialSubscriptionId);
 		source.emit({ type: "compaction_start" });
+		expect(authorityCuts).toEqual([initialSubscriptionId]);
 		expect(subscription.subscriptionId).not.toBe(initialSubscriptionId);
 		expect(writes).toHaveLength(1);
 

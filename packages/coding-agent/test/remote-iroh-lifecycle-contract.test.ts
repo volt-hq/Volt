@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import type { AgentSession } from "../src/core/agent-session.ts";
+import type { AgentSession, PromptPreflightResult } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
@@ -135,9 +135,9 @@ function createPromptRuntime(
 			prompt: vi.fn(
 				async (
 					_message: string,
-					promptOptions?: { preflightResult?: (didSucceed: boolean) => void },
+					promptOptions?: { preflightResult?: (result: PromptPreflightResult) => void },
 				): Promise<void> => {
-					promptOptions?.preflightResult?.(true);
+					promptOptions?.preflightResult?.({ success: true, outcome: "admitted" });
 					await promptRelease.promise;
 					sessionManager.appendMessage({
 						role: "assistant",
@@ -388,12 +388,15 @@ describe("Iroh remote lifecycle command contract", () => {
 			}),
 		);
 		await vi.waitFor(() =>
-			expect(inner.writes).toContainEqual({
-				id: "prompt-1",
-				type: "response",
-				command: "prompt",
-				success: true,
-			}),
+			expect(inner.writes).toContainEqual(
+				expect.objectContaining({
+					id: "prompt-1",
+					type: "response",
+					command: "prompt",
+					success: true,
+					data: { clientMessageId: "client-prompt-1", outcome: "admitted" },
+				}),
+			),
 		);
 
 		inner.emitClose();
@@ -439,12 +442,15 @@ describe("Iroh remote lifecycle command contract", () => {
 			}),
 		);
 		await vi.waitFor(() =>
-			expect(inner.writes).toContainEqual({
-				id: "prompt-1",
-				type: "response",
-				command: "prompt",
-				success: true,
-			}),
+			expect(inner.writes).toContainEqual(
+				expect.objectContaining({
+					id: "prompt-1",
+					type: "response",
+					command: "prompt",
+					success: true,
+					data: { clientMessageId: "client-prompt-1", outcome: "admitted" },
+				}),
+			),
 		);
 
 		const writeError = new Error("remote write side closed");
@@ -501,12 +507,15 @@ describe("Iroh remote lifecycle command contract", () => {
 			}),
 		);
 		await vi.waitFor(() =>
-			expect(inner.writes).toContainEqual({
-				id: "prompt-1",
-				type: "response",
-				command: "prompt",
-				success: true,
-			}),
+			expect(inner.writes).toContainEqual(
+				expect.objectContaining({
+					id: "prompt-1",
+					type: "response",
+					command: "prompt",
+					success: true,
+					data: { clientMessageId: "client-prompt-1", outcome: "admitted" },
+				}),
+			),
 		);
 
 		inner.emitLine(JSON.stringify({ id: "abort-1", type: "abort" }));

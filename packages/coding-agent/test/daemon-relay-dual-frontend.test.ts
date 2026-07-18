@@ -14,6 +14,7 @@ import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/ir
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
 import { writeIrohRemoteHandshakeResponse } from "../src/core/remote/iroh/handshake-reader.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
+import type { RpcConversationAuthority } from "../src/core/rpc/types.ts";
 import { createDaemonClient, type DaemonClient } from "../src/daemon/control-client.ts";
 import { type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
 import {
@@ -35,6 +36,29 @@ import { createTestSocketEndpoint } from "./socket-test-helpers.ts";
 const SESSION_ID = "s-relay";
 const WORKSPACE = { name: "ws", path: "/tmp/ws" };
 const RPC_GRANT = createIrohRemotePresetAccess("full").rpcGrant;
+
+function getPhoneConversationAuthority(phone: FakePhoneIrohStream): RpcConversationAuthority {
+	const bootstrap = phone
+		.receivedFrames()
+		.slice()
+		.reverse()
+		.find((frame) => frame.type === "conversation_bootstrap");
+	const conversation = bootstrap?.conversation as Record<string, unknown> | undefined;
+	const delivery = bootstrap?.delivery as Record<string, unknown> | undefined;
+	const transcript = bootstrap?.transcript as Record<string, unknown> | undefined;
+	if (
+		typeof conversation?.sessionId !== "string" ||
+		typeof delivery?.subscriptionId !== "string" ||
+		typeof transcript?.branchEpoch !== "string"
+	) {
+		throw new Error("Phone has not received a complete conversation authority bootstrap");
+	}
+	return {
+		sessionId: conversation.sessionId,
+		subscriptionId: delivery.subscriptionId,
+		branchEpoch: transcript.branchEpoch,
+	};
+}
 
 function createStableSessionRunner<TSession>(getSession: () => TSession) {
 	return {
@@ -314,6 +338,7 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 			type: "prompt",
 			clientMessageId: "client-message-p1",
 			message: "hello from phone a",
+			conversationAuthority: getPhoneConversationAuthority(attachA.phone),
 		});
 		await vi.waitFor(() => {
 			expect(fanout.session.prompt).toHaveBeenCalledWith("hello from phone a", expect.anything());
@@ -339,7 +364,11 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 		});
 
 		// Abort from phone B stops the turn; both relays and streams stay open.
-		attachB.phone.sendLine({ id: "a1", type: "abort" });
+		attachB.phone.sendLine({
+			id: "a1",
+			type: "abort",
+			conversationAuthority: getPhoneConversationAuthority(attachB.phone),
+		});
 		await vi.waitFor(() => {
 			const responses = attachB.phone.receivedFrames().filter((frame) => frame.command === "abort");
 			expect(responses).toHaveLength(1);

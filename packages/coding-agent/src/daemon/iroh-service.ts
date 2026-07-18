@@ -2389,7 +2389,7 @@ class IrohDaemonService {
 				if (createdRuntime) {
 					await this.runtimes.abortPreparedEntry(entry, sessionSelection, attachClaim);
 				} else {
-					await this.runtimes.detachWithoutSubscriber(entry, "host_shutdown_during_attach");
+					await this.runtimes.detachWithoutSubscriber(entry, attachClaim, "host_shutdown_during_attach");
 				}
 			} finally {
 				attachClaim.release();
@@ -2413,7 +2413,7 @@ class IrohDaemonService {
 					// Reattach: getOrCreateEntry cancelled the detached-runtime retention
 					// timer up front. Re-arm it (no-op unless the entry is still detached
 					// with no timer) so aborting here never leaves the runtime unswept.
-					await this.runtimes.detachWithoutSubscriber(entry, "reattach_superseded");
+					await this.runtimes.detachWithoutSubscriber(entry, attachClaim, "reattach_superseded");
 				}
 			} finally {
 				attachClaim.release();
@@ -2444,7 +2444,7 @@ class IrohDaemonService {
 				if (createdRuntime) {
 					await this.runtimes.abortPreparedEntry(entry, sessionSelection, attachClaim);
 				} else {
-					await this.runtimes.detachWithoutSubscriber(entry, "host_shutdown_during_attach");
+					await this.runtimes.detachWithoutSubscriber(entry, attachClaim, "host_shutdown_during_attach");
 				}
 				return;
 			}
@@ -2468,7 +2468,7 @@ class IrohDaemonService {
 					// capability cannot mutate the replacement lease record.
 					await this.runtimes.stopEntry(entry, "daemon_runtime_owner_fenced");
 				} else {
-					await this.runtimes.detachWithoutSubscriber(entry, "daemon_attach_not_committed");
+					await this.runtimes.detachWithoutSubscriber(entry, attachClaim, "daemon_attach_not_committed");
 				}
 				if (
 					brokerCommit.reason === "tui_owned" &&
@@ -2521,7 +2521,7 @@ class IrohDaemonService {
 				// commitEntry has published this runtime. Even when this attach created
 				// it, another stream may already have captured/co-attached it, so only
 				// detach this failed attach; never roll back shared runtime ownership.
-				await this.runtimes.detachWithoutSubscriber(entry, reason);
+				await this.runtimes.detachWithoutSubscriber(entry, attachClaim, reason);
 				const stillOwnsLease = this.syncRuntimeLeaseStreamCount(entry);
 				attachDetached = true;
 				if (!stillOwnsLease) {
@@ -2690,6 +2690,15 @@ class IrohDaemonService {
 						activeStream.entry.write = lifecycle.write;
 						activeStream.entry.terminate = lifecycle.terminate;
 					}
+				},
+				onReady: () => {
+					if (!subscriber) {
+						throw new Error("Recovered input cannot start before subscriber admission");
+					}
+					// Arm recovery only after RPC has rebound the active session and extension
+					// session_start/resource discovery has completed. Fresh sessions complete as
+					// a no-op; later replacements inherit the same post-rebind capability.
+					void this.runtimes.startRecoveredClientInputs(entry, attachClaim, subscriber);
 					attachClaim.release();
 				},
 				onSessionWillProject: async (session) => {
@@ -2754,6 +2763,7 @@ class IrohDaemonService {
 					// when the entry was replaced or still has other subscribers.
 					await this.runtimes.detachWithoutSubscriber(
 						entry,
+						attachClaim,
 						subscriberError ? "transport_error" : "transport_closed",
 					);
 					// Sync the lease's stream count to reality. Without this, a handshake

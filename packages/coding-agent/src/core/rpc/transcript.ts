@@ -4,6 +4,7 @@ import type { ImageContent } from "@hansjm10/volt-ai";
 import { type BashExecutionMessage, extractVisibleTextContent } from "../messages.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
+import { DEFAULT_IROH_RPC_MAX_LINE_BYTES } from "./iroh-transport.ts";
 import type {
 	RpcMessageImage,
 	RpcTranscriptItem,
@@ -71,16 +72,29 @@ export function projectSessionTranscript(
 
 /**
  * Serialized-size budget for one get_message_images response. Keeps the frame
- * under the daemon control protocol's 8 MB line cap (the tightest transport on
- * any relay path) with headroom for JSON envelope overhead. The first image of
- * a page is always included so pagination cannot stall on a single large image.
+ * under volt-app's 4 MiB encoded JSONL cap, with explicit headroom for the
+ * response envelope, identifiers, array commas, and the LF framing byte.
  */
-export const MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES = 6 * 1024 * 1024;
+export const MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES = 64 * 1024;
+export const MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES =
+	DEFAULT_IROH_RPC_MAX_LINE_BYTES - MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES;
 export const MESSAGE_IMAGES_PAGE_MAX_ITEMS = 32;
+/** A recovered transcript entry may span pages, but never an unbounded number of images. */
+export const MESSAGE_IMAGES_ENTRY_MAX_ITEMS = 64;
+/** Aggregate serialized image-component bytes recoverable for one transcript entry. */
+export const MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES = 16 * 1024 * 1024;
 
 export type ProjectMessageImagesResult =
 	| { ok: true; entryId: string; totalImages: number; images: RpcMessageImage[]; nextImageIndex: number | null }
-	| { ok: false; error: "unknown_entry" | "image_too_large" };
+	| {
+			ok: false;
+			error:
+				| "unknown_entry"
+				| "invalid_cursor"
+				| "image_too_large"
+				| "image_count_exceeded"
+				| "image_bytes_exceeded";
+	  };
 
 function getSerializedMessageImageBytes(image: ImageContent, index: number): number {
 	return Buffer.byteLength(JSON.stringify({ ...image, index }), "utf8");
@@ -103,23 +117,42 @@ export function projectMessageImages(
 		return { ok: false, error: "unknown_entry" };
 	}
 	const allImages = extractMessageImages((entry.message as { content?: unknown }).content);
-	const start = Math.max(0, Math.floor(startImageIndex));
-	const images: RpcMessageImage[] = [];
-	let usedBytes = 0;
-	let nextImageIndex: number | null = null;
-	for (let index = start; index < allImages.length; index++) {
-		const image = allImages[index];
+	if (
+		!Number.isSafeInteger(startImageIndex) ||
+		startImageIndex < 0 ||
+		(allImages.length === 0 ? startImageIndex !== 0 : startImageIndex >= allImages.length)
+	) {
+		return { ok: false, error: "invalid_cursor" };
+	}
+	if (allImages.length > MESSAGE_IMAGES_ENTRY_MAX_ITEMS) {
+		return { ok: false, error: "image_count_exceeded" };
+	}
+	const serializedImageBytes: number[] = [];
+	let totalSerializedBytes = 0;
+	for (const [index, image] of allImages.entries()) {
 		const serializedBytes = getSerializedMessageImageBytes(image, index);
-		if (serializedBytes > budgetBytes && images.length === 0) {
+		if (serializedBytes > budgetBytes) {
 			return { ok: false, error: "image_too_large" };
 		}
+		totalSerializedBytes += serializedBytes;
+		if (totalSerializedBytes > MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES) {
+			return { ok: false, error: "image_bytes_exceeded" };
+		}
+		serializedImageBytes.push(serializedBytes);
+	}
+
+	const images: RpcMessageImage[] = [];
+	let usedBytes = 0;
+	for (let index = startImageIndex; index < allImages.length; index++) {
+		const image = allImages[index];
+		const serializedBytes = serializedImageBytes[index];
 		if (images.length >= MESSAGE_IMAGES_PAGE_MAX_ITEMS || usedBytes + serializedBytes > budgetBytes) {
-			nextImageIndex = index;
 			break;
 		}
 		images.push({ ...image, index });
 		usedBytes += serializedBytes;
 	}
+	const nextImageIndex = startImageIndex + images.length < allImages.length ? startImageIndex + images.length : null;
 	return { ok: true, entryId, totalImages: allImages.length, images, nextImageIndex };
 }
 

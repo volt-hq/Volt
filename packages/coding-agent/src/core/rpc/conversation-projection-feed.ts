@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { AssistantMessage } from "@hansjm10/volt-ai";
+import {
+	ConversationProjectionLimitError,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
+} from "./conversation-projection-limits.ts";
 import { measureRpcJsonBytesWithin, projectRpcUtf8Prefix } from "./session-state.ts";
 import {
+	assertConversationProjectionSourceAssistantEventWithinLimits,
 	type ProjectedMessageStartFrame,
 	type ProjectedMessageUpdateFrame,
 	type ProjectionDiagnostic,
@@ -16,7 +21,13 @@ import {
 } from "./types.ts";
 
 export const DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_ENVELOPES = 512;
-export const DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES = 4 * 1024 * 1024;
+export {
+	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CONTENT_BLOCKS,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_TOOL_CALL_SERIALIZED_BYTES,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
+} from "./conversation-projection-limits.ts";
 export const DEFAULT_CONVERSATION_PROJECTION_MAX_CHECKPOINT_REQUESTS = 128;
 export const DEFAULT_CONVERSATION_PROJECTION_MAX_CHECKPOINTS_PER_WINDOW = 4;
 export const DEFAULT_CONVERSATION_PROJECTION_CHECKPOINT_WINDOW_MS = 10_000;
@@ -114,7 +125,10 @@ export interface ConversationProjectionRawWorkflowSnapshot {
 
 export interface ConversationProjectionSubscription {
 	readonly subscriptionId: string;
+	readonly branchEpoch: string;
 	readonly ready: Promise<void>;
+	/** Runs synchronously whenever this subscription's authority tuple rotates. */
+	subscribeAuthorityChanges(listener: () => void): () => void;
 	requestCheckpoint(requestId: string): ConversationProjectionCheckpointReceipt;
 	/** Enqueue a non-conversation control frame behind prior feed writes. */
 	enqueueControl(value: object, onAdmitted?: (preparedValue: object) => void): Promise<void>;
@@ -167,6 +181,7 @@ interface ConversationProjectionSubscriber {
 	readonly flushWaiters: Deferred<void>[];
 	readonly checkpoints: Map<string, ConversationProjectionCheckpointReceipt>;
 	readonly checkpointRequestTimes: number[];
+	readonly authorityChangeListeners: Set<() => void>;
 	pendingCheckpointRequestId?: string;
 	overflowRotationPending: boolean;
 }
@@ -568,6 +583,7 @@ const CONVERSATION_SOURCE_EVENT_TYPES = new Set([
 	"thinking_level_changed",
 	"auto_retry_start",
 	"auto_retry_end",
+	"client_input_outcome",
 ]);
 
 const CONVERSATION_EXTERNAL_EVENT_TYPES = new Set([
@@ -778,6 +794,7 @@ export class ConversationProjectionFeed {
 			flushWaiters: [],
 			checkpoints: new Map(),
 			checkpointRequestTimes: [],
+			authorityChangeListeners: new Set(),
 			overflowRotationPending: false,
 		};
 		this.subscribers.add(subscriber);
@@ -804,7 +821,17 @@ export class ConversationProjectionFeed {
 			get subscriptionId() {
 				return subscriber.subscriptionId;
 			},
+			get branchEpoch() {
+				return feed._branchEpoch;
+			},
 			ready: ready.promise,
+			subscribeAuthorityChanges(listener) {
+				if (!subscriber.active) return () => {};
+				subscriber.authorityChangeListeners.add(listener);
+				return () => {
+					subscriber.authorityChangeListeners.delete(listener);
+				};
+			},
 			requestCheckpoint(requestId) {
 				return feed.requestCheckpoint({ subscriptionId: subscriber.subscriptionId, requestId });
 			},
@@ -948,6 +975,10 @@ export class ConversationProjectionFeed {
 		if (this.sourceRebindPending) {
 			throw new Error("Conversation source rebind is already pending");
 		}
+		// Retire request/reply capabilities while the old authority tuple is still
+		// observable. Waiting until commit leaves a window where the source has
+		// already changed but an old correlated reply can still mutate host state.
+		this.notifyAllSubscriberAuthorityChanging();
 		this.detachSourceEvents();
 		this.detachGenerationChanges();
 		this.source = source;
@@ -969,7 +1000,7 @@ export class ConversationProjectionFeed {
 			throw new Error("Conversation source rebind is not pending");
 		}
 		this.sourceRebindPending = false;
-		this.rotateAllSubscriptions("session_rebind");
+		this.rotateAllSubscriptions("session_rebind", false);
 		this.flushPendingRebindControls();
 	}
 
@@ -1009,7 +1040,7 @@ export class ConversationProjectionFeed {
 		this.clearPendingRebindControls();
 		this.poisonedError = undefined;
 		this._branchEpoch = this.mintId("branchEpoch");
-		this.rotateAllSubscriptions("session_rebind");
+		this.rotateAllSubscriptions("branch_rebase");
 	}
 
 	async flush(): Promise<void> {
@@ -1061,6 +1092,15 @@ export class ConversationProjectionFeed {
 			this.poisonGeneration(new Error(`Unsupported conversation projection source event: ${event.type}`));
 			return;
 		}
+		try {
+			// Validate canonical source truth even with zero subscribers. Otherwise an
+			// oversized active assistant could be cached and only fail much later while
+			// assigning an attach/checkpoint cursor.
+			assertConversationProjectionSourceAssistantEventWithinLimits(event);
+		} catch (error: unknown) {
+			this.poisonGeneration(toError(error));
+			return;
+		}
 		if (isAssistantStartOrUpdate(event)) {
 			this.activeAssistantSourceEvent = event;
 		}
@@ -1083,7 +1123,12 @@ export class ConversationProjectionFeed {
 					this.enqueueOrdinaryFrame(subscriber, frame, terminal);
 				}
 			} catch (error: unknown) {
-				this.failSubscriber(subscriber, toError(error));
+				const projectionError = toError(error);
+				if (projectionError instanceof ConversationProjectionLimitError) {
+					this.poisonGeneration(projectionError);
+					return;
+				}
+				this.failSubscriber(subscriber, projectionError);
 			}
 		}
 	}
@@ -1526,6 +1571,7 @@ export class ConversationProjectionFeed {
 
 	private rotateSubscriberForOverflow(subscriber: ConversationProjectionSubscriber): void {
 		subscriber.overflowRotationPending = false;
+		this.notifySubscriberAuthorityChanging(subscriber);
 		this.dropPendingConversationItems(subscriber, new Error("Superseded by overflow subscription bootstrap"));
 		this.subscribersById.delete(subscriber.subscriptionId);
 		subscriber.subscriptionId = this.mintId("subscriptionId");
@@ -1548,10 +1594,16 @@ export class ConversationProjectionFeed {
 		this.flushAttachingTail(subscriber);
 	}
 
-	private rotateAllSubscriptions(reason: Extract<RpcConversationBootstrapReason, "session_rebind">): void {
+	private rotateAllSubscriptions(
+		reason: Extract<RpcConversationBootstrapReason, "branch_rebase" | "session_rebind">,
+		notifyAuthorityChanging = true,
+	): void {
 		for (const subscriber of [...this.subscribers]) {
 			if (!subscriber.active || subscriber.fenced) continue;
 			try {
+				if (notifyAuthorityChanging) {
+					this.notifySubscriberAuthorityChanging(subscriber);
+				}
 				this.dropPendingConversationItems(subscriber, new Error("Superseded by conversation generation change"));
 				this.subscribersById.delete(subscriber.subscriptionId);
 				subscriber.subscriptionId = this.mintId("subscriptionId");
@@ -1568,7 +1620,7 @@ export class ConversationProjectionFeed {
 				const bootstrap = this.createBootstrap(subscriber, reason, 0, undefined, true);
 				const item = this.createQueueItem(subscriber, bootstrap, "checkpoint");
 				this.assertSubscriberGeneration(subscriber, subscriptionId, branchEpoch);
-				this.assertAuthorityCapacity(subscriber, item, "Session rebind bootstrap exceeds its authority slot");
+				this.assertAuthorityCapacity(subscriber, item, "Generation bootstrap exceeds its authority slot");
 				this.enqueueItem(subscriber, item);
 				this.assertSubscriberGeneration(subscriber, subscriptionId, branchEpoch);
 				subscriber.attaching = false;
@@ -1690,6 +1742,7 @@ export class ConversationProjectionFeed {
 		subscriber.active = false;
 		this.subscribers.delete(subscriber);
 		this.subscribersById.delete(subscriber.subscriptionId);
+		subscriber.authorityChangeListeners.clear();
 		const closeError = error ?? new Error("Conversation projection subscription detached");
 		for (const item of subscriber.pending.splice(0)) item.deferred?.reject(closeError);
 		subscriber.pendingNormalCount = 0;
@@ -1718,6 +1771,24 @@ export class ConversationProjectionFeed {
 			try {
 				subscriber.options.onDiagnostic?.(diagnostic);
 			} catch {}
+		}
+	}
+
+	private notifySubscriberAuthorityChanging(subscriber: ConversationProjectionSubscriber): void {
+		for (const listener of [...subscriber.authorityChangeListeners]) {
+			try {
+				listener();
+			} catch {
+				// Authority rotation is irrevocably underway. A consumer's
+				// cleanup observer cannot roll it back or prevent the fresh bootstrap.
+			}
+		}
+	}
+
+	private notifyAllSubscriberAuthorityChanging(): void {
+		for (const subscriber of [...this.subscribers]) {
+			if (!subscriber.active || subscriber.fenced) continue;
+			this.notifySubscriberAuthorityChanging(subscriber);
 		}
 	}
 

@@ -1,11 +1,18 @@
 import { Buffer } from "node:buffer";
-import type { AgentSession } from "../agent-session.ts";
+import type { AgentSession, AgentSessionQueuedMessage } from "../agent-session.ts";
+import {
+	CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES,
+	isRuntimeQueueEntryId,
+	isValidClientMessageId,
+} from "../session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
 import { projectSubagentDetails } from "./transcript.ts";
 import type {
 	RpcActiveToolExecution,
 	RpcProjectionCollectionTruncation,
 	RpcProjectionTruncation,
+	RpcQueuedMessage,
+	RpcQueueUpdateProjection,
 	RpcSessionState,
 	RpcSessionStateProjection,
 } from "./types.ts";
@@ -13,8 +20,9 @@ import type {
 export const RPC_SESSION_STATE_MAX_SERIALIZED_BYTES = 768 * 1024;
 export const RPC_SESSION_MODEL_MAX_SERIALIZED_BYTES = 32 * 1024;
 export const RPC_SESSION_QUEUE_MAX_SERIALIZED_BYTES = 128 * 1024;
-export const RPC_SESSION_QUEUE_MAX_ITEMS = 128;
+export const RPC_SESSION_QUEUE_MAX_ITEMS = CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES;
 export const RPC_SESSION_QUEUE_ITEM_MAX_UTF8_BYTES = 16 * 1024;
+export const RPC_SESSION_QUEUE_ID_MAX_UTF8_BYTES = 256;
 export const RPC_SESSION_ACTIVE_TOOLS_MAX_SERIALIZED_BYTES = 256 * 1024;
 export const RPC_SESSION_ACTIVE_TOOLS_MAX_ITEMS = 128;
 export const RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES = 12 * 1024;
@@ -305,25 +313,74 @@ export function projectRpcBoundedRecord(
 	};
 }
 
-function projectRpcStringQueue(values: readonly string[]): {
-	value: string[];
+export function projectRpcQueuedMessages(values: readonly AgentSessionQueuedMessage[]): {
+	value: RpcQueuedMessage[];
 	projection?: RpcProjectionCollectionTruncation;
 } {
-	const projected: string[] = [];
-	const truncatedItems: NonNullable<RpcProjectionCollectionTruncation["truncatedItems"]> = [];
+	const sources: Array<{ clientMessageId: string; text: string }> = [];
 	for (let index = 0; index < values.length && index < RPC_SESSION_QUEUE_MAX_ITEMS; index++) {
-		const item = projectRpcBoundedString(values[index]!, RPC_SESSION_QUEUE_ITEM_MAX_UTF8_BYTES);
-		const candidate = [...projected, item.value];
-		const candidateBytes = measureRpcJsonBytes(candidate);
-		if (candidateBytes === null || candidateBytes > RPC_SESSION_QUEUE_MAX_SERIALIZED_BYTES) {
-			break;
+		const source = values[index]!;
+		const clientMessageId = source.clientMessageId ?? source.queueEntryId;
+		if (
+			(source.clientMessageId === undefined && !isRuntimeQueueEntryId(clientMessageId)) ||
+			(source.clientMessageId !== undefined && !isValidClientMessageId(clientMessageId))
+		) {
+			throw new Error("RPC queue projection received an invalid queue identity");
 		}
-		projected.push(item.value);
-		if (item.projection) {
+		sources.push({ clientMessageId, text: source.text });
+	}
+
+	// Reserve the complete identity skeleton before spending any budget on
+	// display text. Valid AgentSession queues are capped at the same item count,
+	// so a projected absence can never hide an admitted identity.
+	const projected: RpcQueuedMessage[] = sources.map(({ clientMessageId }) => ({ clientMessageId, text: "" }));
+	const skeletonBytes = measureRpcJsonBytes(projected);
+	if (skeletonBytes === null || skeletonBytes > RPC_SESSION_QUEUE_MAX_SERIALIZED_BYTES) {
+		throw new Error("RPC queue identities exceed the queue projection byte contract");
+	}
+
+	const truncatedItems: NonNullable<RpcProjectionCollectionTruncation["truncatedItems"]> = [];
+	let remainingBytes = RPC_SESSION_QUEUE_MAX_SERIALIZED_BYTES - skeletonBytes;
+	for (let index = 0; index < sources.length; index++) {
+		const source = sources[index]!;
+		const emptyItem: RpcQueuedMessage = { clientMessageId: source.clientMessageId, text: "" };
+		const emptyItemBytes = measureRpcJsonBytes(emptyItem);
+		if (emptyItemBytes === null) {
+			throw new Error("RPC queue projection could not measure an identity skeleton item");
+		}
+		const itemPrefix = projectRpcUtf8Prefix(source.text, RPC_SESSION_QUEUE_ITEM_MAX_UTF8_BYTES);
+		let retainedText = itemPrefix.value;
+		let retainedItem: RpcQueuedMessage = { clientMessageId: source.clientMessageId, text: retainedText };
+		let retainedItemBytes = measureRpcJsonBytes(retainedItem) ?? Number.POSITIVE_INFINITY;
+		if (retainedItemBytes - emptyItemBytes > remainingBytes) {
+			let lowerBound = 0;
+			let upperBound = itemPrefix.utf8Bytes;
+			while (lowerBound < upperBound) {
+				const midpoint = Math.ceil((lowerBound + upperBound) / 2);
+				const candidateText = projectRpcUtf8Prefix(source.text, midpoint).value;
+				const candidateItem: RpcQueuedMessage = {
+					clientMessageId: source.clientMessageId,
+					text: candidateText,
+				};
+				const candidateBytes = measureRpcJsonBytes(candidateItem) ?? Number.POSITIVE_INFINITY;
+				if (candidateBytes - emptyItemBytes <= remainingBytes) {
+					lowerBound = midpoint;
+					retainedText = candidateText;
+				} else {
+					upperBound = midpoint - 1;
+				}
+			}
+			retainedText = lowerBound === 0 ? "" : projectRpcUtf8Prefix(source.text, lowerBound).value;
+			retainedItem = { clientMessageId: source.clientMessageId, text: retainedText };
+			retainedItemBytes = measureRpcJsonBytes(retainedItem) ?? Number.POSITIVE_INFINITY;
+		}
+		projected[index] = retainedItem;
+		remainingBytes -= retainedItemBytes - emptyItemBytes;
+		if (retainedText !== source.text) {
 			truncatedItems.push({
 				index,
-				originalBytes: item.projection.originalBytes,
-				projectedBytes: item.projection.projectedBytes,
+				originalBytes: null,
+				projectedBytes: measureRpcJsonBytes(projected[index]) ?? 0,
 			});
 		}
 	}
@@ -344,6 +401,27 @@ function projectRpcStringQueue(values: readonly string[]): {
 			...(truncatedItems.length === 0 ? {} : { truncatedItems }),
 		},
 	};
+}
+
+/** Applies the same identity-preserving queue bounds to incremental updates as
+ * atomic bootstrap state. Omitted entries are reported by count; absence from
+ * a truncated prefix is never authoritative. */
+export function projectRpcQueueUpdate(event: {
+	type: "queue_update";
+	steering: readonly AgentSessionQueuedMessage[];
+	followUp: readonly AgentSessionQueuedMessage[];
+}): object {
+	const steering = projectRpcQueuedMessages(event.steering);
+	const followUp = projectRpcQueuedMessages(event.followUp);
+	const projection: RpcQueueUpdateProjection = {};
+	if (steering.projection) projection.steering = steering.projection;
+	if (followUp.projection) projection.followUp = followUp.projection;
+	return Object.freeze({
+		type: "queue_update",
+		steering: Object.freeze(steering.value),
+		followUp: Object.freeze(followUp.value),
+		...(Object.keys(projection).length === 0 ? {} : { projection: Object.freeze(projection) }),
+	});
 }
 
 function projectRpcActiveTool(execution: {
@@ -501,10 +579,10 @@ export function buildRpcSessionState(session: AgentSession): RpcSessionState {
 		session.agent.state.pendingToolExecutions.values(),
 		session.agent.state.pendingToolExecutions.size,
 	);
-	const steeringQueue = projectRpcStringQueue(
+	const steeringQueue = projectRpcQueuedMessages(
 		typeof session.getSteeringMessages === "function" ? session.getSteeringMessages() : [],
 	);
-	const followUpQueue = projectRpcStringQueue(
+	const followUpQueue = projectRpcQueuedMessages(
 		typeof session.getFollowUpMessages === "function" ? session.getFollowUpMessages() : [],
 	);
 	const sessionFile = projectOptionalStateString(session.sessionFile);

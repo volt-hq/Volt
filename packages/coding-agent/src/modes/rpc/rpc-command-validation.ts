@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { ImageContent } from "@hansjm10/volt-ai";
 import { RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES } from "../../core/rpc/types.ts";
+import { isValidClientMessageId } from "../../core/session-manager.ts";
 
 export const RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES = 512 * 1024;
 export const RPC_CONVERSATION_INPUT_MAX_IMAGES = 8;
@@ -152,18 +153,16 @@ function validateConversationInputResourceBounds(command: Record<string, unknown
 	if (messageBytes > RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES) {
 		return `Invalid RPC command payload: "message" exceeds the ${RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES}-byte UTF-8 limit`;
 	}
-	if (command.images === undefined) {
+	if (command.images !== undefined && !isRpcImageContentArray(command.images)) {
 		return undefined;
 	}
-	if (!isRpcImageContentArray(command.images)) {
-		return undefined;
-	}
-	if (command.images.length > RPC_CONVERSATION_INPUT_MAX_IMAGES) {
+	const images = command.images ?? [];
+	if (images.length > RPC_CONVERSATION_INPUT_MAX_IMAGES) {
 		return `Invalid RPC command payload: "images" exceeds the ${RPC_CONVERSATION_INPUT_MAX_IMAGES}-image limit`;
 	}
 	let imagePayloadBytes = 0;
-	for (let index = 0; index < command.images.length; index++) {
-		const image = command.images[index]!;
+	for (let index = 0; index < images.length; index++) {
+		const image = images[index]!;
 		const mimeTypeBytes = Buffer.byteLength(image.mimeType, "utf8");
 		if (mimeTypeBytes > RPC_CONVERSATION_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES) {
 			return `Invalid RPC command payload: "images[${index}].mimeType" exceeds the ${RPC_CONVERSATION_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES}-byte UTF-8 limit`;
@@ -177,10 +176,7 @@ function validateConversationInputResourceBounds(command: Record<string, unknown
 			return `Invalid RPC command payload: "images" exceeds the ${RPC_CONVERSATION_INPUT_IMAGES_MAX_UTF8_BYTES}-byte UTF-8 payload limit`;
 		}
 	}
-	const serializedBytes = Buffer.byteLength(
-		JSON.stringify({ message: command.message, images: command.images }),
-		"utf8",
-	);
+	const serializedBytes = Buffer.byteLength(JSON.stringify({ message: command.message, images }), "utf8");
 	if (serializedBytes > RPC_CONVERSATION_INPUT_MAX_SERIALIZED_BYTES) {
 		return `Invalid RPC command payload: conversation input exceeds the ${RPC_CONVERSATION_INPUT_MAX_SERIALIZED_BYTES}-byte serialized limit`;
 	}
@@ -200,16 +196,54 @@ function validateConversationIdentifierResourceBound(
 	return `Invalid RPC command payload: "${field}" exceeds the ${RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES}-byte UTF-8 limit`;
 }
 
+function validateClientMessageIdentifier(command: Record<string, unknown>): string | undefined {
+	const value = command.clientMessageId;
+	if (typeof value !== "string" || isValidClientMessageId(value)) return undefined;
+	return 'Invalid RPC command payload: "clientMessageId" must match [A-Za-z0-9][A-Za-z0-9._:-]{0,255}';
+}
+
+const RPC_CONVERSATION_AUTHORITY_FIELDS = ["sessionId", "subscriptionId", "branchEpoch"] as const;
+
+function validateConversationAuthority(command: Record<string, unknown>): string | undefined {
+	const authority = command.conversationAuthority;
+	if (authority === undefined) return undefined;
+	if (!isRecord(authority)) {
+		return 'Invalid RPC command payload: "conversationAuthority" must be an object';
+	}
+	const keys = Object.keys(authority);
+	if (
+		keys.length !== RPC_CONVERSATION_AUTHORITY_FIELDS.length ||
+		keys.some((key) => !RPC_CONVERSATION_AUTHORITY_FIELDS.some((field) => field === key))
+	) {
+		return 'Invalid RPC command payload: "conversationAuthority" must contain exactly "sessionId", "subscriptionId", and "branchEpoch"';
+	}
+	for (const field of RPC_CONVERSATION_AUTHORITY_FIELDS) {
+		const value = authority[field];
+		if (typeof value !== "string" || value.length === 0) {
+			return `Invalid RPC command payload: "conversationAuthority.${field}" must be a non-empty string`;
+		}
+		if (value !== value.trim()) {
+			return `Invalid RPC command payload: "conversationAuthority.${field}" must not contain surrounding whitespace`;
+		}
+		if (Buffer.byteLength(value, "utf8") > RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES) {
+			return `Invalid RPC command payload: "conversationAuthority.${field}" exceeds the ${RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES}-byte UTF-8 limit`;
+		}
+	}
+	return undefined;
+}
+
 export function validateRpcCommandPayload(value: unknown): string | undefined {
 	if (!isRecord(value)) {
 		return undefined;
 	}
+	const authorityError = validateConversationAuthority(value);
+	if (authorityError) return authorityError;
 
 	switch (value.type) {
 		case "prompt": {
 			const shapeError =
 				validateRequiredField(value, "clientMessageId", isNonEmptyString, "a non-empty string") ??
-				validateConversationIdentifierResourceBound(value, "clientMessageId") ??
+				validateClientMessageIdentifier(value) ??
 				validateRequiredField(value, "message", isString, "a string") ??
 				validateOptionalField(value, "images", isRpcImageContentArray, "an array of image objects") ??
 				validateOptionalField(value, "streamingBehavior", isRpcStreamingBehavior, '"steer" or "followUp"');
@@ -219,7 +253,7 @@ export function validateRpcCommandPayload(value: unknown): string | undefined {
 		case "follow_up": {
 			const shapeError =
 				validateRequiredField(value, "clientMessageId", isNonEmptyString, "a non-empty string") ??
-				validateConversationIdentifierResourceBound(value, "clientMessageId") ??
+				validateClientMessageIdentifier(value) ??
 				validateRequiredField(value, "message", isString, "a string") ??
 				validateOptionalField(value, "images", isRpcImageContentArray, "an array of image objects");
 			return shapeError ?? validateConversationInputResourceBounds(value);

@@ -141,6 +141,8 @@ export interface RpcSessionChange {
 
 export interface RpcOrderedConversationBinding {
 	readonly subscriptionId: string;
+	readonly branchEpoch: string;
+	subscribeAuthorityChanges(listener: () => void): () => void;
 	enqueueControl(value: object): Promise<void>;
 	requestCheckpoint(requestId: string): {
 		subscriptionId: string;
@@ -174,6 +176,8 @@ export interface RpcModeOptions {
 	createStreamProjector?: () => StreamProjector;
 	/** One runtime-owned conversation lane for events, checkpoints, and control frames. */
 	orderedConversation?: RpcOrderedConversationBinding;
+	/** Require generation-bound authority for remote conversation mutations. */
+	requireConversationAuthority?: boolean;
 	/** @deprecated Prefer orderedConversation. Retained for non-Iroh embedders during migration. */
 	reportStreamDiscontinuity?: (
 		command: Extract<RpcCommand, { type: "report_stream_discontinuity" }>,
@@ -186,6 +190,26 @@ type RpcModeStartupAwareTransport = RpcTransport & {
 
 const MAX_PENDING_RPC_INPUT_TASKS = 64;
 const RPC_SESSION_INTERRUPTION_TYPES: ReadonlySet<string> = new Set(["abort", "abort_retry", "abort_bash"]);
+const RPC_CONVERSATION_AUTHORITY_MUTATION_TYPES: ReadonlySet<RpcCommand["type"]> = new Set([
+	"prompt",
+	"steer",
+	"follow_up",
+	"abort",
+	"new_session",
+	"switch_session_by_id",
+	"set_model",
+	"set_thinking_level",
+	"invoke_ui_action",
+]);
+
+class StaleConversationAuthorityError extends Error {
+	readonly code = "stale_conversation_authority";
+
+	constructor() {
+		super("Conversation authority is stale; apply the latest conversation bootstrap and retry");
+		this.name = "StaleConversationAuthorityError";
+	}
+}
 
 /** Commands that must reach the active session even while another stream owns the lifecycle actor. */
 export function isRpcSessionInterruptionCommand(command: { type?: unknown }): boolean {
@@ -659,6 +683,15 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	const cancelPendingHostActionRequests = (message = "RPC mode is shutting down"): void => {
 		hostActionBridge.cancelAll(message);
 	};
+	const retireConversationControlCapabilities = (): void => {
+		cancelPendingExtensionRequests();
+		cancelPendingHostActionRequests("Conversation authority changed");
+	};
+	const detachOrderedAuthorityChanges = options.orderedConversation?.subscribeAuthorityChanges(() => {
+		retireConversationControlCapabilities();
+	});
+	let unsubscribeConversationGenerationChanges: (() => void) | undefined;
+	let hasBoundConversationSession = false;
 
 	const setSessionHostInteraction = (targetSession: AgentSession): void => {
 		const sessionWithHostInteraction = targetSession as {
@@ -919,6 +952,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	// own rebind handler so it can be restored on exit; otherwise the TUI's session
 	// changes would keep running this RPC-mode handler after the phone disconnects.
 	const previousRebindSession = runtimeHost.getRebindSession?.();
+	const detachSessionWillProject = runtimeHost.subscribeSessionWillProject?.(() => {
+		retireConversationControlCapabilities();
+	});
 	const detachSessionReplacement = runtimeHost.subscribeSessionReplaced?.(async () => {
 		await rebindSession();
 	});
@@ -929,6 +965,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	}
 	const restoreRebindSession = (): void => {
 		detachSessionReplacement?.();
+		detachSessionWillProject?.();
+		detachOrderedAuthorityChanges?.();
+		unsubscribeConversationGenerationChanges?.();
+		unsubscribeConversationGenerationChanges = undefined;
 		if (!detachSessionReplacement && !shouldDisposeRuntimeOnClose) {
 			runtimeHost.setRebindSession(previousRebindSession);
 		}
@@ -947,8 +987,24 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	};
 
 	const rebindSession = async (): Promise<void> => {
+		// Correlated control replies are capabilities over the conversation state
+		// that minted them. Retire them before a replacement binds extensions, and
+		// bind the same synchronous cut to every in-session branch generation.
+		if (hasBoundConversationSession) {
+			retireConversationControlCapabilities();
+		}
+		unsubscribeConversationGenerationChanges?.();
+		unsubscribeConversationGenerationChanges = undefined;
 		await rpcSubagents.disposeAll();
 		session = runtimeHost.session;
+		const sessionWithConversationGeneration = session as AgentSession & {
+			subscribeConversationGenerationChanges?: (listener: () => void) => () => void;
+		};
+		unsubscribeConversationGenerationChanges =
+			sessionWithConversationGeneration.subscribeConversationGenerationChanges?.(() => {
+				retireConversationControlCapabilities();
+			});
+		hasBoundConversationSession = true;
 		if (shuttingDown) {
 			await notifySessionChanged();
 			return;
@@ -1039,11 +1095,16 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		}
 	};
 
-	const createHostActionContext = (commandSession: AgentSession = session): HostActionInvocationContext => ({
+	const createHostActionContext = (
+		commandSession: AgentSession = session,
+		assertConversationGenerationCurrent?: () => void,
+	): HostActionInvocationContext => ({
 		session: commandSession,
 		abortRun: () => commandSession.abort(),
-		compactContext: (customInstructions) => commandSession.compact(customInstructions),
-		newSession: (newSessionOptions) => runtimeHost.newSession(newSessionOptions),
+		compactContext: (customInstructions) =>
+			commandSession.compact(customInstructions, assertConversationGenerationCurrent),
+		newSession: (newSessionOptions) =>
+			runtimeHost.newSession({ ...newSessionOptions, assertConversationGenerationCurrent }),
 		afterSessionSwitch: rebindSession,
 		renameSession: (name) => {
 			commandSession.setSessionName(name);
@@ -1061,7 +1122,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				agentDir: runtimeHost.services.agentDir,
 				session: commandSession,
 				newSession: async (newSessionOptions) => {
-					const result = await runtimeHost.newSession(newSessionOptions);
+					const result = await runtimeHost.newSession({
+						...newSessionOptions,
+						assertConversationGenerationCurrent,
+					});
 					if (!result.cancelled) {
 						await rebindSession();
 					}
@@ -1077,42 +1141,63 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			}),
 	});
 
-	const createRpcCommandContext = (commandSession: AgentSession = session) => ({
-		session: commandSession,
-		runtimeHost,
-		options: {
-			allowUiActionInvocation,
-			requireRemoteSafeUiActions,
-			registerPushTarget: options.registerPushTarget,
-		},
-		output,
-		rebindSession,
-		createHostActionContext: () => createHostActionContext(commandSession),
-		setClientCapabilities(features: RpcClientCapabilityFeature[]): void {
-			clientCapabilities = new Set(
-				features.filter((feature): feature is RpcClientCapabilityFeature => typeof feature === "string"),
-			);
-			options.onClientCapabilitiesChanged?.(Array.from(clientCapabilities));
-		},
-		async reportStreamDiscontinuity(command: Extract<RpcCommand, { type: "report_stream_discontinuity" }>) {
-			if (options.orderedConversation) {
-				if (command.sessionId !== commandSession.sessionId) {
-					throw new Error(`Stale conversation session: ${command.sessionId}`);
+	const createRpcCommandContext = (command: RpcCommand, commandSession: AgentSession = session) => {
+		const assertConversationGenerationCurrent = () => assertConversationAuthority(command, commandSession);
+		return {
+			session: commandSession,
+			runtimeHost,
+			options: {
+				allowUiActionInvocation,
+				requireRemoteSafeUiActions,
+				registerPushTarget: options.registerPushTarget,
+			},
+			output,
+			rebindSession,
+			createHostActionContext: () => createHostActionContext(commandSession, assertConversationGenerationCurrent),
+			setClientCapabilities(features: RpcClientCapabilityFeature[]): void {
+				clientCapabilities = new Set(
+					features.filter((feature): feature is RpcClientCapabilityFeature => typeof feature === "string"),
+				);
+				options.onClientCapabilitiesChanged?.(Array.from(clientCapabilities));
+			},
+			async reportStreamDiscontinuity(command: Extract<RpcCommand, { type: "report_stream_discontinuity" }>) {
+				if (options.orderedConversation) {
+					if (command.sessionId !== commandSession.sessionId) {
+						throw new Error(`Stale conversation session: ${command.sessionId}`);
+					}
+					if (command.subscriptionId !== options.orderedConversation.subscriptionId) {
+						throw new Error(`Stale conversation subscription: ${command.subscriptionId}`);
+					}
+					return options.orderedConversation.requestCheckpoint(command.id);
 				}
-				if (command.subscriptionId !== options.orderedConversation.subscriptionId) {
-					throw new Error(`Stale conversation subscription: ${command.subscriptionId}`);
+				if (!options.reportStreamDiscontinuity) {
+					throw new Error("Ordered conversation recovery is unavailable on this RPC transport");
 				}
-				return options.orderedConversation.requestCheckpoint(command.id);
-			}
-			if (!options.reportStreamDiscontinuity) {
-				throw new Error("Ordered conversation recovery is unavailable on this RPC transport");
-			}
-			return await options.reportStreamDiscontinuity(command);
-		},
-		getPendingHostActionRequests: () => hostActionBridge.getPendingRequests(),
-		cancelPendingHostActionRequests,
-		subagents: rpcSubagents,
-	});
+				return await options.reportStreamDiscontinuity(command);
+			},
+			getPendingHostActionRequests: () => hostActionBridge.getPendingRequests(),
+			cancelPendingHostActionRequests,
+			assertConversationGenerationCurrent,
+			subagents: rpcSubagents,
+		};
+	};
+
+	const assertConversationAuthority = (command: RpcCommand, commandSession: AgentSession): void => {
+		if (!options.requireConversationAuthority || !RPC_CONVERSATION_AUTHORITY_MUTATION_TYPES.has(command.type)) {
+			return;
+		}
+		const authority = command.conversationAuthority;
+		const orderedConversation = options.orderedConversation;
+		if (
+			!authority ||
+			!orderedConversation ||
+			authority.sessionId !== commandSession.sessionId ||
+			authority.subscriptionId !== orderedConversation.subscriptionId ||
+			authority.branchEpoch !== orderedConversation.branchEpoch
+		) {
+			throw new StaleConversationAuthorityError();
+		}
+	};
 
 	let detachInput = () => {};
 	let detachClose = () => {};
@@ -1327,12 +1412,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		let response: RpcResponse | undefined;
 		try {
 			response = isRpcSessionInterruptionCommand(command)
-				? await runtimeHost.runSessionInterruption((interruptionSession) =>
-						handleRpcCommand(command, createRpcCommandContext(interruptionSession)),
-					)
-				: await runtimeHost.runWithStableSession((stableSession) =>
-						handleRpcCommand(command, createRpcCommandContext(stableSession)),
-					);
+				? await runtimeHost.runSessionInterruption((interruptionSession) => {
+						assertConversationAuthority(command, interruptionSession);
+						return handleRpcCommand(command, createRpcCommandContext(command, interruptionSession));
+					})
+				: await runtimeHost.runWithStableSession((stableSession) => {
+						assertConversationAuthority(command, stableSession);
+						return handleRpcCommand(command, createRpcCommandContext(command, stableSession));
+					});
 		} catch (commandError: unknown) {
 			const target = getRpcErrorResponseTarget(command);
 			output(createRpcErrorResponse(target.id, target.command, toError(commandError).message, commandError));

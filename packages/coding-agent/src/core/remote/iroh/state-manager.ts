@@ -714,6 +714,38 @@ export class IrohRemoteHostStateManager {
 		return this.removeClientLiveActivities(nodeId, (entry) => entry.workspaceName === workspaceName);
 	}
 
+	/** Remove one runtime's complete conversation-identity history across every paired client. */
+	async removeLiveActivitiesForWorkspaceSessions(
+		workspaceName: string,
+		sessionIds: ReadonlySet<string>,
+	): Promise<number> {
+		const selectedSessionIds = new Set(sessionIds);
+		if (selectedSessionIds.size === 0) {
+			return 0;
+		}
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			let removedCount = 0;
+			for (const client of state.clients) {
+				if (!client.liveActivities) {
+					continue;
+				}
+				const beforeCount = client.liveActivities.length;
+				client.liveActivities = client.liveActivities.filter(
+					(entry) => entry.workspaceName !== workspaceName || !selectedSessionIds.has(entry.sessionId),
+				);
+				removedCount += beforeCount - client.liveActivities.length;
+				if (client.liveActivities.length === 0) {
+					delete client.liveActivities;
+				}
+			}
+			if (removedCount > 0) {
+				await this.saveUnlocked(state);
+			}
+			return removedCount;
+		});
+	}
+
 	async removeLiveActivitiesForWorkspace(workspaceName: string): Promise<number> {
 		return this.runExclusive(async () => {
 			const state = await this.loadUnlocked();

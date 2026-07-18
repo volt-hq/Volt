@@ -1,12 +1,17 @@
 import type { AssistantMessage } from "@hansjm10/volt-ai";
 import { type AgentSessionRuntime, isConversationTranscriptCommittedEvent } from "../core/agent-session-runtime.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
-import {
-	type ConversationProjectionRawWorkflowSnapshot,
-	type ConversationProjectionSnapshot,
-	type ConversationProjectionSnapshotBuilder,
-	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
+import type {
+	ConversationProjectionRawWorkflowSnapshot,
+	ConversationProjectionSnapshot,
+	ConversationProjectionSnapshotBuilder,
 } from "../core/rpc/conversation-projection-feed.ts";
+import {
+	assertConversationProjectionAssistantSnapshotWithinLimits,
+	assertConversationProjectionAssistantToolStateWithinLimits,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
+} from "../core/rpc/conversation-projection-limits.ts";
 import {
 	buildRpcSessionState,
 	measureRpcJsonBytes,
@@ -30,7 +35,8 @@ import {
 } from "./conversation-commands.ts";
 
 export const REMOTE_CONVERSATION_BOOTSTRAP_MAX_SERIALIZED_BYTES = DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES;
-export const REMOTE_CONVERSATION_ACTIVE_ASSISTANT_MAX_SERIALIZED_BYTES = 384 * 1024;
+export const REMOTE_CONVERSATION_ACTIVE_ASSISTANT_MAX_SERIALIZED_BYTES =
+	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES;
 export const REMOTE_CONVERSATION_WORKFLOWS_MAX_SERIALIZED_BYTES = 384 * 1024;
 export const REMOTE_CONVERSATION_WORKFLOW_EVENT_MAX_SERIALIZED_BYTES = 32 * 1024;
 export const REMOTE_CONVERSATION_WORKFLOW_ACTIVE_TOOLS_MAX_SERIALIZED_BYTES = 96 * 1024;
@@ -138,9 +144,17 @@ export function projectRemoteConversationActiveAssistant(
 		REMOTE_CONVERSATION_ACTIVE_ASSISTANT_MAX_SERIALIZED_BYTES,
 	);
 	if (originalBytes !== null) {
+		const metrics = assertConversationProjectionAssistantSnapshotWithinLimits(activeAssistant.message);
+		assertConversationProjectionAssistantToolStateWithinLimits(
+			activeAssistant.message,
+			activeAssistant.toolState ?? [],
+			metrics,
+		);
 		return activeAssistant;
 	}
 	const message = projectAssistantMessage(activeAssistant.message);
+	const metrics = assertConversationProjectionAssistantSnapshotWithinLimits(message.value);
+	assertConversationProjectionAssistantToolStateWithinLimits(message.value, activeAssistant.toolState ?? [], metrics);
 	const projected: Omit<RpcConversationActiveAssistant, "projection"> = {
 		stream: activeAssistant.stream,
 		message: message.value,

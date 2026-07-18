@@ -1,8 +1,20 @@
 import { Buffer } from "node:buffer";
-import type { AssistantMessage, ToolResultMessage, UserMessage } from "@hansjm10/volt-ai";
+import type { AssistantMessage, ImageContent, ToolResultMessage, UserMessage } from "@hansjm10/volt-ai";
 import { describe, expect, test } from "vitest";
 import type { BashExecutionMessage } from "../src/core/messages.ts";
-import { projectMessageImages, projectSessionTranscript } from "../src/core/rpc/transcript.ts";
+import {
+	DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES,
+	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
+} from "../src/core/rpc/iroh-transport.ts";
+import {
+	MESSAGE_IMAGES_ENTRY_MAX_ITEMS,
+	MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES,
+	MESSAGE_IMAGES_PAGE_MAX_ITEMS,
+	MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES,
+	MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES,
+	projectMessageImages,
+	projectSessionTranscript,
+} from "../src/core/rpc/transcript.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 
 const emptyUsage = {
@@ -34,6 +46,11 @@ function user(text: string, timestamp: number): UserMessage {
 describe("RPC transcript projection", () => {
 	test("returns UI-ready transcript items without raw internal payloads", () => {
 		const session = SessionManager.inMemory("/Users/jordan/project");
+		session.reserveClientInput("client-message-1", "prompt", {
+			message: "hello",
+			images: [{ type: "image", data: "image-bytes", mimeType: "image/png" }],
+		});
+		session.transitionClientInput("client-message-1", "started");
 		const firstUserEntryId = session.appendMessage({
 			role: "user",
 			clientMessageId: "client-message-1",
@@ -591,6 +608,134 @@ describe("RPC transcript projection", () => {
 });
 
 describe("message image recovery", () => {
+	function imageWithProjectedBytes(projectedBytes: number, index: number): ImageContent {
+		const emptyProjectedImage = { type: "image" as const, data: "", mimeType: "image/png", index };
+		const envelopeBytes = Buffer.byteLength(JSON.stringify(emptyProjectedImage), "utf8");
+		if (projectedBytes < envelopeBytes) {
+			throw new Error("projected image target is smaller than its JSON envelope");
+		}
+		return { type: "image", data: "A".repeat(projectedBytes - envelopeBytes), mimeType: "image/png" };
+	}
+
+	test("keeps an exact-budget image response below the app line cap and rejects one more component byte", () => {
+		const emptyProjectedImage = { type: "image", data: "", mimeType: "image/png", index: 0 };
+		const emptyProjectedBytes = Buffer.byteLength(JSON.stringify(emptyProjectedImage), "utf8");
+		const exactData = "A".repeat(MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES - emptyProjectedBytes);
+		const session = SessionManager.inMemory("/workspace");
+		const entryId = session.appendMessage({
+			role: "user",
+			content: [{ type: "image", data: exactData, mimeType: "image/png" }],
+			timestamp: 10,
+		});
+
+		const exact = projectMessageImages(session.getBranch(), entryId);
+		expect(exact.ok).toBe(true);
+		if (!exact.ok) throw new Error("expected exact-budget image page");
+		expect(Buffer.byteLength(JSON.stringify(exact.images[0]), "utf8")).toBe(MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES);
+		const response = {
+			id: "image-request",
+			type: "response",
+			command: "get_message_images",
+			success: true,
+			data: {
+				workspaceName: "scratch",
+				sessionId: session.getSessionId(),
+				entryId,
+				totalImages: exact.totalImages,
+				images: exact.images,
+				nextImageIndex: exact.nextImageIndex,
+			},
+		};
+		const responseContentBytes = Buffer.byteLength(JSON.stringify(response), "utf8");
+		expect(responseContentBytes).toBeLessThanOrEqual(DEFAULT_IROH_RPC_MAX_LINE_BYTES);
+		expect(responseContentBytes + 1).toBeLessThanOrEqual(DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES);
+		expect(DEFAULT_IROH_RPC_MAX_LINE_BYTES - MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES).toBe(
+			MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES,
+		);
+
+		const oversized = SessionManager.inMemory("/workspace");
+		const oversizedEntryId = oversized.appendMessage({
+			role: "user",
+			content: [{ type: "image", data: `${exactData}B`, mimeType: "image/png" }],
+			timestamp: 10,
+		});
+		expect(projectMessageImages(oversized.getBranch(), oversizedEntryId)).toEqual({
+			ok: false,
+			error: "image_too_large",
+		});
+	});
+
+	test("accepts the exact per-entry serialized image budget and rejects one more byte", () => {
+		const imageCount = 5;
+		const baseImageBytes = Math.floor(MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES / imageCount);
+		const imageByteTargets = Array.from({ length: imageCount }, (_, index) =>
+			index === imageCount - 1
+				? MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES - baseImageBytes * (imageCount - 1)
+				: baseImageBytes,
+		);
+		expect(Math.max(...imageByteTargets)).toBeLessThan(MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES);
+
+		const exact = SessionManager.inMemory("/workspace");
+		const exactEntryId = exact.appendMessage({
+			role: "user",
+			content: imageByteTargets.map((bytes, index) => imageWithProjectedBytes(bytes, index)),
+			timestamp: 10,
+		});
+		const exactResult = projectMessageImages(exact.getBranch(), exactEntryId);
+		expect(exactResult.ok).toBe(true);
+		if (!exactResult.ok) throw new Error("expected exact aggregate image budget to be accepted");
+		expect(exactResult.totalImages).toBe(imageCount);
+		expect(exactResult.images).toHaveLength(1);
+		expect(exactResult.nextImageIndex).toBe(1);
+
+		const oversized = SessionManager.inMemory("/workspace");
+		const oversizedTargets = [...imageByteTargets];
+		oversizedTargets[oversizedTargets.length - 1] += 1;
+		const oversizedEntryId = oversized.appendMessage({
+			role: "user",
+			content: oversizedTargets.map((bytes, index) => imageWithProjectedBytes(bytes, index)),
+			timestamp: 10,
+		});
+		expect(projectMessageImages(oversized.getBranch(), oversizedEntryId)).toEqual({
+			ok: false,
+			error: "image_bytes_exceeded",
+		});
+	});
+
+	test("accepts the exact per-entry image count and rejects one more image", () => {
+		const exact = SessionManager.inMemory("/workspace");
+		const exactEntryId = exact.appendMessage({
+			role: "user",
+			content: Array.from({ length: MESSAGE_IMAGES_ENTRY_MAX_ITEMS }, (_, index) => ({
+				type: "image" as const,
+				data: Buffer.from(String(index)).toString("base64"),
+				mimeType: "image/png",
+			})),
+			timestamp: 10,
+		});
+		const exactResult = projectMessageImages(exact.getBranch(), exactEntryId);
+		expect(exactResult.ok).toBe(true);
+		if (!exactResult.ok) throw new Error("expected exact image count to be accepted");
+		expect(exactResult.totalImages).toBe(MESSAGE_IMAGES_ENTRY_MAX_ITEMS);
+		expect(exactResult.images).toHaveLength(MESSAGE_IMAGES_PAGE_MAX_ITEMS);
+		expect(exactResult.nextImageIndex).toBe(MESSAGE_IMAGES_PAGE_MAX_ITEMS);
+
+		const oversized = SessionManager.inMemory("/workspace");
+		const oversizedEntryId = oversized.appendMessage({
+			role: "user",
+			content: Array.from({ length: MESSAGE_IMAGES_ENTRY_MAX_ITEMS + 1 }, () => ({
+				type: "image" as const,
+				data: "QQ==",
+				mimeType: "image/png",
+			})),
+			timestamp: 10,
+		});
+		expect(projectMessageImages(oversized.getBranch(), oversizedEntryId)).toEqual({
+			ok: false,
+			error: "image_count_exceeded",
+		});
+	});
+
 	test("returns the image blocks for an entry with paging metadata", () => {
 		const session = SessionManager.inMemory("/workspace");
 		const entryId = session.appendMessage({
@@ -644,6 +789,7 @@ describe("message image recovery", () => {
 		if (!secondPage.ok) {
 			throw new Error("expected ok result");
 		}
+		expect(secondPage.totalImages).toBe(firstPage.totalImages);
 		expect(secondPage.images.map((image) => image.index)).toEqual([1]);
 		expect(secondPage.nextImageIndex).toBe(2);
 
@@ -652,8 +798,28 @@ describe("message image recovery", () => {
 		if (!finalPage.ok) {
 			throw new Error("expected ok result");
 		}
+		expect(finalPage.totalImages).toBe(firstPage.totalImages);
 		expect(finalPage.images.map((image) => image.index)).toEqual([2]);
 		expect(finalPage.nextImageIndex).toBeNull();
+	});
+
+	test("rejects cursors that cannot produce the next contiguous nonempty page", () => {
+		const session = SessionManager.inMemory("/workspace");
+		const entryId = session.appendMessage({
+			role: "user",
+			content: [
+				{ type: "image", data: "Zmlyc3Q=", mimeType: "image/jpeg" },
+				{ type: "image", data: "c2Vjb25k", mimeType: "image/png" },
+			],
+			timestamp: 10,
+		});
+
+		for (const invalidCursor of [-1, 0.5, 2, 3, Number.MAX_SAFE_INTEGER + 1]) {
+			expect(projectMessageImages(session.getBranch(), entryId, invalidCursor)).toEqual({
+				ok: false,
+				error: "invalid_cursor",
+			});
+		}
 	});
 
 	test("rejects a single image that cannot fit in a response page", () => {

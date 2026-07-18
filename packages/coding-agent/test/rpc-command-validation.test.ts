@@ -241,11 +241,21 @@ describe("RPC command payload validation", () => {
 		).toBeUndefined();
 	});
 
+	test("bounds serialized conversation text even when images are omitted", () => {
+		const escapedText = "\u0000".repeat(400 * 1024);
+		expect(Buffer.byteLength(escapedText, "utf8")).toBeLessThan(RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES);
+		expect(Buffer.byteLength(JSON.stringify({ message: escapedText, images: [] }), "utf8")).toBeGreaterThan(
+			RPC_CONVERSATION_INPUT_MAX_SERIALIZED_BYTES,
+		);
+		for (const type of ["prompt", "steer", "follow_up"]) {
+			expect(validateRpcCommandPayload({ type, clientMessageId, message: escapedText })).toBe(
+				`Invalid RPC command payload: conversation input exceeds the ${RPC_CONVERSATION_INPUT_MAX_SERIALIZED_BYTES}-byte serialized limit`,
+			);
+		}
+	});
+
 	test("bounds ordered-conversation authority identifiers", () => {
 		const oversized = "🧪".repeat(Math.floor(RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES / 4) + 1);
-		expect(validateRpcCommandPayload({ type: "prompt", clientMessageId: " client-message-1 ", message: "hi" })).toBe(
-			'Invalid RPC command payload: "clientMessageId" must not contain surrounding whitespace',
-		);
 		for (const field of ["id", "sessionId", "subscriptionId"] as const) {
 			const command = {
 				id: "recovery-1",
@@ -263,9 +273,84 @@ describe("RPC command payload validation", () => {
 		expect(validateRpcCommandPayload({ type: "get_transcript", branchEpoch: oversized })).toBe(
 			`Invalid RPC command payload: "branchEpoch" exceeds the ${RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES}-byte UTF-8 limit`,
 		);
-		expect(validateRpcCommandPayload({ type: "prompt", clientMessageId: oversized, message: "hi" })).toBe(
-			`Invalid RPC command payload: "clientMessageId" exceeds the ${RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES}-byte UTF-8 limit`,
+	});
+
+	test("accepts only the exact bounded conversation-authority tuple", () => {
+		const authority = {
+			sessionId: "s".repeat(RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES),
+			subscriptionId: "p".repeat(RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES),
+			branchEpoch: "b".repeat(RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES),
+		};
+		expect(validateRpcCommandPayload({ type: "abort", conversationAuthority: authority })).toBeUndefined();
+		// Authority remains optional on the transport-neutral RPC contract.
+		expect(validateRpcCommandPayload({ type: "abort" })).toBeUndefined();
+
+		expect(validateRpcCommandPayload({ type: "abort", conversationAuthority: null })).toBe(
+			'Invalid RPC command payload: "conversationAuthority" must be an object',
 		);
+		expect(
+			validateRpcCommandPayload({
+				type: "abort",
+				conversationAuthority: { sessionId: "session", subscriptionId: "subscription" },
+			}),
+		).toBe(
+			'Invalid RPC command payload: "conversationAuthority" must contain exactly "sessionId", "subscriptionId", and "branchEpoch"',
+		);
+		expect(
+			validateRpcCommandPayload({
+				type: "abort",
+				conversationAuthority: { ...authority, extra: "not-authority" },
+			}),
+		).toBe(
+			'Invalid RPC command payload: "conversationAuthority" must contain exactly "sessionId", "subscriptionId", and "branchEpoch"',
+		);
+		expect(
+			validateRpcCommandPayload({
+				type: "abort",
+				conversationAuthority: { ...authority, branchEpoch: " branch" },
+			}),
+		).toBe(
+			'Invalid RPC command payload: "conversationAuthority.branchEpoch" must not contain surrounding whitespace',
+		);
+
+		for (const field of ["sessionId", "subscriptionId", "branchEpoch"] as const) {
+			expect(
+				validateRpcCommandPayload({
+					type: "abort",
+					conversationAuthority: { ...authority, [field]: "🧪".repeat(65) },
+				}),
+			).toBe(
+				`Invalid RPC command payload: "conversationAuthority.${field}" exceeds the ${RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES}-byte UTF-8 limit`,
+			);
+		}
+	});
+
+	test("requires canonical bounded ASCII client message identities", () => {
+		const invalidClientMessageIds = [
+			" client-message-1",
+			"client-message-1 ",
+			"client\nmessage",
+			"client\0message",
+			'client"message',
+			"client\\message",
+			"client-méssage",
+			`client-${"x".repeat(250)}`,
+		];
+		const expected = 'Invalid RPC command payload: "clientMessageId" must match [A-Za-z0-9][A-Za-z0-9._:-]{0,255}';
+		for (const type of ["prompt", "steer", "follow_up"]) {
+			for (const invalidClientMessageId of invalidClientMessageIds) {
+				expect(validateRpcCommandPayload({ type, clientMessageId: invalidClientMessageId, message: "hi" })).toBe(
+					expected,
+				);
+			}
+		}
+		expect(
+			validateRpcCommandPayload({
+				type: "prompt",
+				clientMessageId: `A${"x".repeat(255)}`,
+				message: "hi",
+			}),
+		).toBeUndefined();
 	});
 
 	test("bounds image count, per-image data, aggregate payload, and serialized input", () => {

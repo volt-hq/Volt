@@ -4,6 +4,7 @@ import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-gra
 import { createIrohRemoteFilteredRpcTransport } from "../src/core/remote/iroh/rpc-transport.ts";
 import {
 	createIrohRpcTransport,
+	DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES,
 	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
 	type IrohBytes,
 	type IrohRecvStreamLike,
@@ -214,8 +215,9 @@ function nextTick(): Promise<void> {
 }
 
 describe("Iroh RPC transport", () => {
-	test("uses an 8 MiB authenticated RPC line ceiling", () => {
-		expect(DEFAULT_IROH_RPC_MAX_LINE_BYTES).toBe(8 * 1024 * 1024);
+	test("matches volt-app's 4 MiB encoded JSONL ceiling including the LF", () => {
+		expect(DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES).toBe(4 * 1024 * 1024);
+		expect(DEFAULT_IROH_RPC_MAX_LINE_BYTES).toBe(DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES - 1);
 	});
 
 	test("reads a maximally fragmented line with bounded remaining-byte reads", async () => {

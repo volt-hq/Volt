@@ -63,17 +63,35 @@ describe.skipIf(process.platform === "win32")("sensitive artifact permissions", 
 		expect(mode(forked.getSessionFile()!)).toBe(0o600);
 	});
 
-	it("rewrites corrupted existing sessions with owner-only permissions", () => {
+	it("rejects ambiguous corruption after hardening explicit session artifacts", () => {
 		const sessionDir = join(root, "sessions");
 		mkdirSync(sessionDir, { mode: 0o777 });
 		const sessionFile = join(sessionDir, "corrupt.jsonl");
-		writeFileSync(sessionFile, "not json\n", { mode: 0o666 });
+		const original = "not json\n";
+		writeFileSync(sessionFile, original, { mode: 0o666 });
 
-		const manager = SessionManager.open(sessionFile, sessionDir);
+		expect(() => SessionManager.open(sessionFile, sessionDir)).toThrow(
+			"Current session JSONL is malformed at committed line 1",
+		);
 
-		expect(manager.getHeader()?.type).toBe("session");
 		expect(mode(sessionDir)).toBe(0o700);
 		expect(mode(sessionFile)).toBe(0o600);
+		expect(readFileSync(sessionFile, "utf8")).toBe(original);
+	});
+
+	it("does not chmod an implicitly derived shared parent when rejecting corruption", () => {
+		const sharedDir = join(root, "shared");
+		mkdirSync(sharedDir, { mode: 0o777 });
+		chmodSync(sharedDir, 0o777);
+		const sessionFile = join(sharedDir, "corrupt.jsonl");
+		const original = "not json\n";
+		writeFileSync(sessionFile, original, { mode: 0o666 });
+
+		expect(() => SessionManager.open(sessionFile)).toThrow("Current session JSONL is malformed at committed line 1");
+
+		expect(mode(sharedDir)).toBe(0o777);
+		expect(mode(sessionFile)).toBe(0o600);
+		expect(readFileSync(sessionFile, "utf8")).toBe(original);
 	});
 
 	it("rejects linked session sources", () => {

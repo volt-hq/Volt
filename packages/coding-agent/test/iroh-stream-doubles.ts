@@ -12,11 +12,12 @@ import { Buffer } from "node:buffer";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { Api, Model } from "@hansjm10/volt-ai";
 import { expect, vi } from "vitest";
-import type { AgentSessionEvent } from "../src/core/agent-session.ts";
+import type { AgentSession, AgentSessionEvent, PromptPreflightResult } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { ConversationProjectionFeed } from "../src/core/rpc/conversation-projection-feed.ts";
 import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/rpc/index.ts";
+import type { RpcConversationAuthority } from "../src/core/rpc/types.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 
@@ -93,6 +94,38 @@ export function parseWrittenObjects(send: ManualIrohSendStream): Array<Record<st
 		});
 }
 
+export function getCurrentConversationAuthority(send: ManualIrohSendStream): RpcConversationAuthority {
+	const bootstrap = parseWrittenObjects(send)
+		.slice()
+		.reverse()
+		.find((record) => record.type === "conversation_bootstrap");
+	const conversation = bootstrap?.conversation;
+	const delivery = bootstrap?.delivery;
+	const transcript = bootstrap?.transcript;
+	if (!isRecord(conversation) || !isRecord(delivery) || !isRecord(transcript)) {
+		throw new Error("Conversation bootstrap authority is unavailable");
+	}
+	if (
+		typeof conversation.sessionId !== "string" ||
+		typeof delivery.subscriptionId !== "string" ||
+		typeof transcript.branchEpoch !== "string"
+	) {
+		throw new Error("Conversation bootstrap authority is malformed");
+	}
+	return {
+		sessionId: conversation.sessionId,
+		subscriptionId: delivery.subscriptionId,
+		branchEpoch: transcript.branchEpoch,
+	};
+}
+
+export function withCurrentConversationAuthority<T extends object>(
+	send: ManualIrohSendStream,
+	command: T,
+): T & { conversationAuthority: RpcConversationAuthority } {
+	return { ...command, conversationAuthority: getCurrentConversationAuthority(send) };
+}
+
 export function createTestSession(sessionId: string, leafId: string | null) {
 	const session = {
 		leafId,
@@ -106,14 +139,18 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 		modelRegistry: { authStorage: {} },
 		pendingMessageCount: 0,
 		prompt: vi.fn(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 			},
 		),
 		sessionFile: `/sessions/${sessionId}.jsonl`,
 		sessionId,
 		sessionManager: {
 			getBranch: vi.fn((): object[] => []),
+			getClientInput: vi.fn(() => undefined),
 			getBranchWindow: ({
 				beforeEntryId,
 				maxEntries,
@@ -223,7 +260,7 @@ export function createTestIrohConversationOptions(runtimeHost: AgentSessionRunti
 
 export async function startIrohRpcMode(
 	runtimeHost: AgentSessionRuntime,
-	startupSession: Pick<ReturnType<typeof createTestSession>, "bindExtensions">,
+	startupSession: Pick<AgentSession, "bindExtensions"> | Pick<ReturnType<typeof createTestSession>, "bindExtensions">,
 	options: Partial<Parameters<typeof runIrohRemoteRpcMode>[1]> = {},
 ) {
 	const recv = new ManualIrohRecvStream();

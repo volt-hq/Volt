@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { AgentSession } from "../src/core/agent-session.ts";
+import type { AgentSession, PromptPreflightResult } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { ExtensionUIContext } from "../src/core/extensions/index.ts";
 import type { HostInteraction } from "../src/core/host-interaction.ts";
@@ -31,6 +31,7 @@ function createRuntimeHost(): { runtimeHost: AgentSessionRuntime; dispose: Retur
 	const runtimeHost = {
 		session: {
 			bindExtensions: vi.fn(async () => {}),
+			sessionManager: { getClientInput: vi.fn(() => undefined) },
 			subscribe: vi.fn(() => () => {}),
 			agent: {
 				subscribe: vi.fn(() => () => {}),
@@ -271,7 +272,9 @@ describe("RPC mode caller-provided transports", () => {
 				data: { cancelled: false },
 			}),
 		);
-		expect(runtimeHost.switchSessionById).toHaveBeenCalledWith("selected-session");
+		expect(runtimeHost.switchSessionById).toHaveBeenCalledWith("selected-session", {
+			assertConversationGenerationCurrent: expect.any(Function),
+		});
 
 		closeHandler?.();
 		await expect(modePromise).resolves.toBeUndefined();
@@ -520,6 +523,61 @@ describe("RPC mode caller-provided transports", () => {
 			expect(runtimeHost.dispose).toHaveBeenCalledOnce();
 		} finally {
 			finishNewSession();
+			rpc.close();
+			await rpc.modePromise.catch(() => {});
+		}
+	});
+
+	test("holds structural commands through prompt admission but not the provider turn", async () => {
+		const { runtimeHost } = createRuntimeHost();
+		const admissions = new Set<Promise<void>>();
+		Object.assign(runtimeHost, {
+			trackClientInputAdmission(_session: AgentSession, admission: Promise<void>) {
+				admissions.add(admission);
+				void admission.finally(() => admissions.delete(admission));
+			},
+			newSession: vi.fn(async () => {
+				await Promise.all([...admissions]);
+				return { cancelled: true };
+			}),
+		});
+		let acceptPrompt = (): void => {};
+		let finishPrompt = (): void => {};
+		const prompt = vi.fn(
+			(_message: string, options: { preflightResult?: (result: PromptPreflightResult) => void }) =>
+				new Promise<void>((resolve) => {
+					acceptPrompt = () => options.preflightResult?.({ success: true, outcome: "admitted" });
+					finishPrompt = resolve;
+				}),
+		);
+		Object.assign(runtimeHost.session, { prompt });
+		const rpc = await startRpcModeHarness(runtimeHost);
+
+		try {
+			rpc.send({
+				id: "prompt-admission",
+				type: "prompt",
+				clientMessageId: "prompt-admission-client",
+				message: "queue me",
+			});
+			await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+			rpc.send({ id: "new-after-prompt", type: "new_session" });
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(runtimeHost.newSession).toHaveBeenCalledOnce();
+			expect(rpc.writes).not.toContainEqual(expect.objectContaining({ id: "new-after-prompt" }));
+
+			acceptPrompt();
+			await vi.waitFor(() =>
+				expect(rpc.writes).toContainEqual(
+					expect.objectContaining({ id: "new-after-prompt", command: "new_session", success: true }),
+				),
+			);
+			// Admission releases the lifecycle actor while the model call remains live.
+			expect(rpc.writes).toContainEqual(
+				expect.objectContaining({ id: "prompt-admission", command: "prompt", success: true }),
+			);
+		} finally {
+			finishPrompt();
 			rpc.close();
 			await rpc.modePromise.catch(() => {});
 		}
@@ -1382,8 +1440,8 @@ describe("RPC mode caller-provided transports", () => {
 		};
 		const { runtimeHost, dispose } = createRuntimeHost();
 		Object.assign(runtimeHost.session, {
-			prompt: vi.fn((_message: string, options: { preflightResult?: (didSucceed: boolean) => void }) => {
-				options.preflightResult?.(true);
+			prompt: vi.fn((_message: string, options: { preflightResult?: (result: PromptPreflightResult) => void }) => {
+				options.preflightResult?.({ success: true, outcome: "admitted" });
 				return Promise.resolve();
 			}),
 		});

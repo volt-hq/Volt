@@ -68,6 +68,8 @@ export interface AgentSessionSwitchOptions {
 	cwdOverride?: string;
 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	projectTrustContextFactory?: (cwd: string) => ProjectTrustContext;
+	/** Internal remote mutation lease revalidated at every awaited replacement boundary. */
+	assertConversationGenerationCurrent?: () => void;
 }
 
 export interface AgentSessionReplacementTransaction {
@@ -86,6 +88,8 @@ export interface AgentSessionReplacementTarget {
 interface AgentSessionStructuralOperation {
 	expectedSession: AgentSession;
 	expectedRevision: number;
+	expectedConversationGenerationRevision: number;
+	assertConversationGenerationCurrent?: () => void;
 }
 
 interface AgentSessionLifecycleLease {
@@ -174,6 +178,14 @@ function sessionInfoToSummary(info: SessionInfo, currentSessionId: string): Work
 	};
 }
 
+interface RecoveredClientInputsTask {
+	readonly session: AgentSession;
+	readonly promise: Promise<void>;
+	settled: boolean;
+	succeeded: boolean;
+	cancellationRequested: boolean;
+}
+
 /**
  * Owns the current AgentSession plus its cwd-bound services.
  *
@@ -204,6 +216,9 @@ export class AgentSessionRuntime {
 	private sessionReplacementInProgress = false;
 	private acceptingStructuralOperations = true;
 	private disposePromise?: Promise<void>;
+	private recoveredClientInputsEnabled = false;
+	private recoveredClientInputsTask?: RecoveredClientInputsTask;
+	private readonly clientInputAdmissions = new Map<Promise<void>, AgentSession>();
 	readonly conversationProjectionFeed: ConversationProjectionFeed;
 
 	constructor(
@@ -244,6 +259,96 @@ export class AgentSessionRuntime {
 
 	get modelFallbackMessage(): string | undefined {
 		return this._modelFallbackMessage;
+	}
+
+	/**
+	 * Start the one-shot recovery of durable queued remote input. The projection
+	 * source is already bound when this is called, so recovered transcript and
+	 * queue events remain observable even though runtime attachment does not wait
+	 * for the provider turn to drain.
+	 */
+	startRecoveredClientInputs(): Promise<void> {
+		this.recoveredClientInputsEnabled = true;
+		const session = this.session;
+		const current = this.recoveredClientInputsTask;
+		if (current?.session === session) {
+			return current.promise;
+		}
+		if (this.disposePromise || this.sessionInvalidated) {
+			return Promise.reject(new Error("Cannot recover client input after the agent runtime was invalidated"));
+		}
+
+		let state!: RecoveredClientInputsTask;
+		// Capture the AgentSession abort generation synchronously. Deferring the
+		// resume call itself to a promise microtask lets same-tick dispose/replace
+		// abort first and then accidentally dispatch on the new generation.
+		const recoveryOperation =
+			current && !current.settled
+				? (async () => {
+						current.cancellationRequested = true;
+						await current.session.abort().catch(() => undefined);
+						await current.promise.catch(() => undefined);
+						if (state.cancellationRequested) {
+							throw new Error("Recovered client input processing was cancelled before dispatch");
+						}
+						await session.resumeRecoveredClientInputs();
+					})()
+				: session.resumeRecoveredClientInputs();
+		const task = recoveryOperation
+			.then(() => {
+				state.succeeded = true;
+			})
+			.catch((error: unknown) => {
+				if (!state.cancellationRequested && this.session === session && !this.sessionInvalidated) {
+					const recovery = session.sessionManager.getClientInputRecoveryPlan();
+					const message =
+						recovery.kind === "blocked"
+							? `Client input ${JSON.stringify(recovery.blocker.clientMessageId)} has an ambiguous post-restart outcome; later durable queued input remains visible but fenced from automatic replay.`
+							: recovery.records.length > 0
+								? "Recovered client input replay failed; its durable queued input remains available for an explicit retry or daemon restart."
+								: "Recovered client input processing failed after its durable dispatch boundary; it was not automatically replayed.";
+					if (
+						!this._diagnostics.some(
+							(diagnostic) => diagnostic.type === "warning" && diagnostic.message === message,
+						)
+					) {
+						this._diagnostics.push({ type: "warning", message });
+						console.warn(message);
+					}
+				}
+				throw error;
+			})
+			.finally(() => {
+				state.settled = true;
+				// A successful recovery is one-shot for this session generation. A
+				// failed attempt remains explicitly retryable without permitting two
+				// overlapping attempts.
+				if (!state.succeeded && this.recoveredClientInputsTask === state) {
+					this.recoveredClientInputsTask = undefined;
+				}
+			});
+		state = {
+			session,
+			promise: task,
+			settled: false,
+			succeeded: false,
+			cancellationRequested: false,
+		};
+		// The runtime retains and joins the original rejection. Observe it here so
+		// a background recovery failure can never become an unhandled rejection.
+		void task.catch(() => undefined);
+		this.recoveredClientInputsTask = state;
+		return task;
+	}
+
+	private async abortAndJoinRecoveredClientInputs(session: AgentSession): Promise<void> {
+		const recovery = this.recoveredClientInputsTask;
+		if (!recovery || recovery.session !== session || recovery.settled) {
+			return;
+		}
+		recovery.cancellationRequested = true;
+		await recovery.session.abort().catch(() => undefined);
+		await recovery.promise.catch(() => undefined);
 	}
 
 	setRebindSession(rebindSession?: (session: AgentSession) => Promise<void>): void {
@@ -323,6 +428,40 @@ export class AgentSessionRuntime {
 	}
 
 	/**
+	 * Fence structural replacement behind an RPC prompt's durable admission
+	 * without serializing unrelated reads or holding the actor for its provider
+	 * turn. Registration is synchronous while the caller owns a stable session.
+	 */
+	trackClientInputAdmission(session: AgentSession, admission: Promise<void>): void {
+		if (
+			!this.acceptingStructuralOperations ||
+			this.sessionInvalidated ||
+			this.sessionReplacementInProgress ||
+			this.session !== session
+		) {
+			throw new Error("Agent session generation changed before client input admission");
+		}
+		const observed = admission.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.clientInputAdmissions.set(observed, session);
+		void observed.finally(() => {
+			this.clientInputAdmissions.delete(observed);
+		});
+	}
+
+	private async waitForClientInputAdmissions(session: AgentSession): Promise<void> {
+		while (true) {
+			const pending = [...this.clientInputAdmissions]
+				.filter(([, owner]) => owner === session)
+				.map(([admission]) => admission);
+			if (pending.length === 0) return;
+			await Promise.all(pending);
+		}
+	}
+
+	/**
 	 * Acquire the current session generation for an interruption without joining
 	 * the lifecycle FIFO. Interrupts must be able to stop a busy turn, but they
 	 * may never act through a stream-local session pointer while replacement is
@@ -379,13 +518,18 @@ export class AgentSessionRuntime {
 		return result;
 	}
 
-	private runStructuralOperation<T>(operation: (context: AgentSessionStructuralOperation) => Promise<T>): Promise<T> {
+	private runStructuralOperation<T>(
+		operation: (context: AgentSessionStructuralOperation) => Promise<T>,
+		assertConversationGenerationCurrent?: () => void,
+	): Promise<T> {
 		if (!this.acceptingStructuralOperations) {
 			return Promise.reject(new Error("Agent session runtime is no longer accepting structural operations"));
 		}
 		const context: AgentSessionStructuralOperation = {
 			expectedSession: this.session,
 			expectedRevision: this.lifecycleRevision,
+			expectedConversationGenerationRevision: this.session.conversationGenerationRevision,
+			assertConversationGenerationCurrent,
 		};
 		this.pendingStructuralOperationCount++;
 		const execute = async () => {
@@ -399,12 +543,25 @@ export class AgentSessionRuntime {
 	}
 
 	private assertStructuralOperationCurrent(context: AgentSessionStructuralOperation): void {
+		// Preserve a transport's stable stale-authority error when it supplied a
+		// lease; the revision check remains the transport-neutral defense in depth.
+		context.assertConversationGenerationCurrent?.();
 		if (
 			this.sessionInvalidated ||
 			this.session !== context.expectedSession ||
-			this.lifecycleRevision !== context.expectedRevision
+			this.lifecycleRevision !== context.expectedRevision ||
+			this.session.conversationGenerationRevision !== context.expectedConversationGenerationRevision
 		) {
 			throw new Error("Stale agent session structural operation");
+		}
+		if (this.session.isStreaming) {
+			throw new Error("Cannot change sessions while an agent run is active; abort or wait for it to finish");
+		}
+		if (this.session.isBashRunning) {
+			throw new Error("Cannot change sessions while a bash run is active; abort or wait for it to finish");
+		}
+		if (this.session.hasActiveSessionMutation) {
+			throw new Error("Cannot change sessions while a session mutation is active; wait for it to finish");
 		}
 	}
 
@@ -489,19 +646,35 @@ export class AgentSessionRuntime {
 		if (this.sessionReplacementInProgress) {
 			throw new Error("Agent session replacement is already in progress");
 		}
+		// Prompt handlers return to the transport immediately so state reads remain
+		// responsive, but structural teardown must wait until every earlier prompt
+		// has either durably queued, canonically started, or failed preflight.
+		await this.waitForClientInputAdmissions(this.session);
+		this.assertStructuralOperationCurrent(options.operation);
+		const clientInputRecovery = this.session.sessionManager.getClientInputRecoveryPlan();
+		if (clientInputRecovery.kind === "blocked") {
+			throw new Error("Cannot replace the session while a durable client input outcome is ambiguous");
+		}
+		if (clientInputRecovery.kind === "replay") {
+			throw new Error("Cannot replace the session while durable client input is still queued");
+		}
+		const previousSessionId = options.previousSessionId ?? this.session.sessionId;
+		const sessionId = options.sessionManager.getSessionId();
+		if (previousSessionId === sessionId) {
+			throw new Error("Cannot replace the current session with a different file using the same session ID");
+		}
 		this.sessionReplacementInProgress = true;
 		try {
-			const previousSessionId = options.previousSessionId ?? this.session.sessionId;
-			const sessionId = options.sessionManager.getSessionId();
-			const transaction =
-				previousSessionId === sessionId
-					? undefined
-					: await this.prepareSessionReplacement?.({ previousSessionId, sessionId });
+			await this.abortAndJoinRecoveredClientInputs(this.session);
+			this.assertStructuralOperationCurrent(options.operation);
+			const transaction = await this.prepareSessionReplacement?.({ previousSessionId, sessionId });
 			let invalidated = false;
 			let created: CreateAgentSessionRuntimeResult | undefined;
 			let applied = false;
 			try {
+				this.assertStructuralOperationCurrent(options.operation);
 				await this.teardownCurrent(options.reason, options.sessionManager.getSessionFile(), () => {
+					this.assertStructuralOperationCurrent(options.operation);
 					invalidated = true;
 					this.sessionInvalidated = true;
 					this.lifecycleRevision++;
@@ -645,6 +818,19 @@ export class AgentSessionRuntime {
 		for (const listener of [...this.sessionReplacementListeners]) {
 			await listener(this.session);
 		}
+		if (this.recoveredClientInputsEnabled) {
+			// Admit and drain older durable input before post-replacement callbacks
+			// can submit fresh work. Recovery failures are already diagnosed and leave
+			// their exact queue visible; they do not invalidate the replacement.
+			try {
+				await this.startRecoveredClientInputs();
+			} catch {
+				// The replacement session and its durable queue remain authoritative,
+				// but post-replacement callbacks may submit fresh work. Skip them until
+				// a later attach explicitly retries and drains recovery.
+				return;
+			}
+		}
 		if (withSession) {
 			await withSession(this.session.createReplacedSessionContext());
 		}
@@ -689,8 +875,9 @@ export class AgentSessionRuntime {
 	}
 
 	async switchSessionById(sessionId: string, options?: AgentSessionSwitchOptions): Promise<{ cancelled: boolean }> {
-		return this.runStructuralOperation((operation) =>
-			this.switchSessionByIdWithinOperation(sessionId, options, operation),
+		return this.runStructuralOperation(
+			(operation) => this.switchSessionByIdWithinOperation(sessionId, options, operation),
+			options?.assertConversationGenerationCurrent,
 		);
 	}
 
@@ -704,6 +891,7 @@ export class AgentSessionRuntime {
 			return { cancelled: false };
 		}
 		const target = (await this.listWorkspaceSessionInfos()).find((session) => session.id === sessionId);
+		this.assertStructuralOperationCurrent(operation);
 		if (!target) {
 			throw new Error(`Session not found in current workspace: ${sessionId}`);
 		}
@@ -715,8 +903,9 @@ export class AgentSessionRuntime {
 	}
 
 	async switchSession(sessionPath: string, options?: AgentSessionSwitchOptions): Promise<{ cancelled: boolean }> {
-		return this.runStructuralOperation((operation) =>
-			this.switchSessionWithinOperation(sessionPath, options, operation),
+		return this.runStructuralOperation(
+			(operation) => this.switchSessionWithinOperation(sessionPath, options, operation),
+			options?.assertConversationGenerationCurrent,
 		);
 	}
 
@@ -725,13 +914,18 @@ export class AgentSessionRuntime {
 		options: AgentSessionSwitchOptions | undefined,
 		operation: AgentSessionStructuralOperation,
 	): Promise<{ cancelled: boolean }> {
+		const resolvedSessionPath = resolvePath(sessionPath);
+		if (this.session.sessionFile !== undefined && resolvedSessionPath === this.session.sessionFile) {
+			return { cancelled: false };
+		}
 		const beforeResult = await this.emitBeforeSwitch("resume", sessionPath);
+		this.assertStructuralOperationCurrent(operation);
 		if (beforeResult.cancelled) {
 			return beforeResult;
 		}
 
 		const previousSessionFile = this.session.sessionFile;
-		const sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
+		const sessionManager = SessionManager.open(resolvedSessionPath, undefined, options?.cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
 		await this.replaceCurrentSession({
 			operation,
@@ -760,8 +954,13 @@ export class AgentSessionRuntime {
 		sessionDir?: string;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+		/** Internal remote mutation lease revalidated at every awaited replacement boundary. */
+		assertConversationGenerationCurrent?: () => void;
 	}): Promise<{ cancelled: boolean }> {
-		return this.runStructuralOperation((operation) => this.newSessionWithinOperation(options, operation));
+		return this.runStructuralOperation(
+			(operation) => this.newSessionWithinOperation(options, operation),
+			options?.assertConversationGenerationCurrent,
+		);
 	}
 
 	private async newSessionWithinOperation(
@@ -772,11 +971,13 @@ export class AgentSessionRuntime {
 					sessionDir?: string;
 					setup?: (sessionManager: SessionManager) => Promise<void>;
 					withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+					assertConversationGenerationCurrent?: () => void;
 			  }
 			| undefined,
 		operation: AgentSessionStructuralOperation,
 	): Promise<{ cancelled: boolean }> {
 		const beforeResult = await this.emitBeforeSwitch("new");
+		this.assertStructuralOperationCurrent(operation);
 		if (beforeResult.cancelled) {
 			return beforeResult;
 		}
@@ -829,6 +1030,7 @@ export class AgentSessionRuntime {
 	): Promise<{ cancelled: boolean; selectedText?: string }> {
 		const position = options?.position ?? "before";
 		const beforeResult = await this.emitBeforeFork(entryId, { position });
+		this.assertStructuralOperationCurrent(operation);
 		if (beforeResult.cancelled) {
 			return { cancelled: true };
 		}
@@ -959,6 +1161,7 @@ export class AgentSessionRuntime {
 
 		const destinationPath = join(sessionDir, basename(resolvedPath));
 		const beforeResult = await this.emitBeforeSwitch("resume", destinationPath);
+		this.assertStructuralOperationCurrent(operation);
 		if (beforeResult.cancelled) {
 			return beforeResult;
 		}
@@ -996,6 +1199,12 @@ export class AgentSessionRuntime {
 		// has either finalized or failed closed.
 		this.acceptingStructuralOperations = false;
 		const execute = async () => {
+			const recoveredClientInputsTask = this.recoveredClientInputsTask;
+			if (recoveredClientInputsTask && !recoveredClientInputsTask.settled) {
+				recoveredClientInputsTask.cancellationRequested = true;
+				await recoveredClientInputsTask.session.abort().catch(() => undefined);
+				await recoveredClientInputsTask.promise.catch(() => undefined);
+			}
 			this.prepareSessionReplacement = undefined;
 			this.sessionWillProjectListeners.clear();
 			this.sessionReplacementListeners.clear();

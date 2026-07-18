@@ -10,9 +10,13 @@ import type {
 } from "../src/core/agent-session-runtime.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteActiveStreamRegistry } from "../src/core/remote/iroh/active-stream-registry.ts";
-import { IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
+import { type IrohRemoteAuditEvent, IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
+import {
+	createEmptyIrohRemoteHostState,
+	type IrohRemoteLiveActivityRegistration,
+} from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import type { SubagentRuntimeRegistration } from "../src/core/subagents/index.ts";
 import {
@@ -25,7 +29,12 @@ import {
 	collectClientAuthorityInvalidationStreams,
 } from "../src/daemon/iroh-service.ts";
 import { type DaemonRuntimeOwnerCapability, LeaseBroker } from "../src/daemon/lease-broker.ts";
-import { createTestSession, parseWrittenObjects, startIrohRpcMode } from "./iroh-stream-doubles.ts";
+import {
+	createTestSession,
+	parseWrittenObjects,
+	startIrohRpcMode,
+	withCurrentConversationAuthority,
+} from "./iroh-stream-doubles.ts";
 
 let fixtureRoot: string;
 let workspacePath: string;
@@ -155,6 +164,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 	it("two phones with distinct clientNodeIds share one runtime, both stream, and abort keeps streams open", async () => {
 		const fanout = createFanoutSession("s-co");
 		const dispose = vi.fn(async () => {});
+		const auditEvents: IrohRemoteAuditEvent[] = [];
 		const runtimeHost = {
 			cwd: workspacePath,
 			session: fanout.session,
@@ -170,7 +180,13 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
-			auditLogger: new IrohRemoteAuditLogger(),
+			auditLogger: new IrohRemoteAuditLogger({
+				sink: {
+					write: (event) => {
+						auditEvents.push(event);
+					},
+				},
+			}),
 			stateManager: new IrohRemoteHostStateManager(),
 			activeStreams: new IrohRemoteActiveStreamRegistry(),
 			detachedRuntimeTtlMs: () => 60_000,
@@ -192,6 +208,10 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			phoneA,
 		);
 		expect(first.created).toBe(true);
+		await expect(
+			registry.commitEntry(first.entry, first.sessionSelection, phoneB, first.attachClaim),
+		).rejects.toMatchObject({ outcome: "duplicate_conversation_connection" });
+		expect(first.entry.lifecycle).toBe("prepared");
 		await registry.commitEntry(first.entry, first.sessionSelection, phoneA, first.attachClaim);
 
 		// Phone B (different clientNodeId) attaches to the SAME runtime — no
@@ -207,12 +227,17 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			requestedSessionId: "s-co",
 			sessionId: "s-co",
 		});
+		await registry.commitEntry(second.entry, second.sessionSelection, phoneB, second.attachClaim);
 
-		await registry.attachSubscriber(first.entry, first.attachClaim);
-		await registry.attachSubscriber(first.entry, second.attachClaim);
+		const subscriberA = await registry.attachSubscriber(first.entry, first.attachClaim);
+		const subscriberB = await registry.attachSubscriber(first.entry, second.attachClaim);
 		first.attachClaim.release();
 		second.attachClaim.release();
 		expect(first.entry.subscribers.size).toBe(2);
+		expect([subscriberA.clientNodeId, subscriberB.clientNodeId]).toEqual(["n-phone-a", "n-phone-b"]);
+		expect(
+			auditEvents.filter((event) => event.type === "remote_subscriber_attached").map((event) => event.clientNodeId),
+		).toEqual(["n-phone-a", "n-phone-b"]);
 
 		// Serve both phones from the same runtime.
 		const modeA = await startIrohRpcMode(runtimeHost, fanout.session);
@@ -228,7 +253,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 
 		// Abort from phone B stops the turn; BOTH streams stay open and the
 		// runtime stays live (no dispose, no stream invalidation).
-		modeB.recv.pushLine(JSON.stringify({ id: "a1", type: "abort" }));
+		modeB.recv.pushLine(JSON.stringify(withCurrentConversationAuthority(modeB.send, { id: "a1", type: "abort" })));
 		await vi.waitFor(() => {
 			const responses = parseWrittenObjects(modeB.send).filter((frame) => frame.command === "abort");
 			expect(responses).toHaveLength(1);
@@ -251,6 +276,82 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		await modeA.modePromise;
 		await modeB.modePromise;
 		expect(dispose).not.toHaveBeenCalled();
+
+		await registry.detachSubscriber(first.entry, subscriberB, "phone_b_closed");
+		await registry.detachSubscriber(first.entry, subscriberA, "phone_a_closed");
+		expect(
+			auditEvents.filter((event) => event.type === "remote_subscriber_detached").map((event) => event.clientNodeId),
+		).toEqual(["n-phone-b", "n-phone-a"]);
+		expect(
+			auditEvents.filter((event) => event.type === "remote_runtime_detached").map((event) => event.clientNodeId),
+		).toEqual(["n-phone-a"]);
+		await registry.stopAll("test_cleanup");
+	});
+
+	it("attributes a co-attaching client's pre-subscriber detach to that client", async () => {
+		const auditEvents: IrohRemoteAuditEvent[] = [];
+		const runtime = {
+			cwd: workspacePath,
+			session: createTestSession("s-pre-subscriber", null),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+			listSessions: vi.fn(async () => []),
+		} as unknown as AgentSessionRuntime;
+		const registry = new IntegratedRuntimeRegistry({
+			agentDir,
+			auditLogger: new IrohRemoteAuditLogger({
+				sink: {
+					write: (event) => {
+						auditEvents.push(event);
+					},
+				},
+			}),
+			stateManager: new IrohRemoteHostStateManager(),
+			activeStreams: new IrohRemoteActiveStreamRegistry(),
+			detachedRuntimeTtlMs: () => 60_000,
+			getAllowTools: () => undefined,
+			getProjectTrustedForWorkspace: () => false,
+			setClientLastSessionId: vi.fn(async () => undefined),
+			createRuntime: async () => ({
+				runtime,
+				sessionSelection: { kind: "created", sessionId: "s-pre-subscriber" },
+			}),
+		});
+		const phoneA = createAuthorization("n-phone-a");
+		const phoneB = createAuthorization("n-phone-b");
+
+		const creatorAttach = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
+			phoneA,
+		);
+		await registry.commitEntry(
+			creatorAttach.entry,
+			creatorAttach.sessionSelection,
+			phoneA,
+			creatorAttach.attachClaim,
+		);
+		const coattach = await registry.getOrCreateEntry(
+			{
+				hello: createHello({ target: "session", sessionId: "s-pre-subscriber" }),
+				response: HANDSHAKE_RESPONSE,
+			},
+			phoneB,
+		);
+		await registry.commitEntry(coattach.entry, coattach.sessionSelection, phoneB, coattach.attachClaim);
+		expect(creatorAttach.entry.subscribers.size).toBe(0);
+		expect(creatorAttach.entry.detachedAt).toBeUndefined();
+
+		await registry.detachWithoutSubscriber(creatorAttach.entry, coattach.attachClaim, "phone_b_attach_failed");
+
+		expect(auditEvents.filter((event) => event.type === "remote_runtime_detached")).toEqual([
+			expect.objectContaining({
+				clientNodeId: "n-phone-b",
+				details: expect.objectContaining({ reason: "phone_b_attach_failed" }),
+			}),
+		]);
+		creatorAttach.attachClaim.release();
+		coattach.attachClaim.release();
+		await registry.stopAll("test_cleanup");
 	});
 
 	it("cancels provisional attach without waiting for runtime creation and disposes a late result", async () => {
@@ -305,6 +406,126 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
 		expect(registry.size).toBe(0);
 		expect(registry.findOwner("ws", "late-runtime")).toBeUndefined();
+	});
+
+	it("starts recovered input only on the committed winner after subscriber admission", async () => {
+		const sessionId = "recovery-race";
+		const starts = [vi.fn(async () => {}), vi.fn(async () => {})];
+		const disposes = [vi.fn(async () => {}), vi.fn(async () => {})];
+		const runtimes = starts.map(
+			(startRecoveredClientInputs, index) =>
+				({
+					cwd: workspacePath,
+					session: createTestSession(sessionId, null),
+					dispose: disposes[index],
+					startRecoveredClientInputs,
+					setRebindSession: vi.fn(),
+					listSessions: vi.fn(async () => []),
+				}) as unknown as AgentSessionRuntime,
+		);
+		let runtimeCalls = 0;
+		let releaseFactoryBarrier = (): void => {};
+		const factoryBarrier = new Promise<void>((resolve) => {
+			releaseFactoryBarrier = resolve;
+		});
+		const createRuntime = vi.fn(async () => {
+			const runtime = runtimes[runtimeCalls++]!;
+			if (runtimeCalls === runtimes.length) releaseFactoryBarrier();
+			await factoryBarrier;
+			return {
+				runtime,
+				sessionSelection: { kind: "resumed" as const, requestedSessionId: sessionId, sessionId },
+			};
+		});
+		const registry = new IntegratedRuntimeRegistry({
+			agentDir,
+			auditLogger: new IrohRemoteAuditLogger(),
+			stateManager: new IrohRemoteHostStateManager(),
+			activeStreams: new IrohRemoteActiveStreamRegistry(),
+			detachedRuntimeTtlMs: () => 60_000,
+			getAllowTools: () => undefined,
+			getProjectTrustedForWorkspace: () => false,
+			setClientLastSessionId: vi.fn(async () => undefined),
+			createRuntime,
+		});
+		const authorization = createAuthorization("n-recovery-race");
+		const open = () =>
+			registry.getOrCreateEntry(
+				{ hello: createHello({ target: "session", sessionId }), response: HANDSHAKE_RESPONSE },
+				authorization,
+			);
+		const results = await Promise.allSettled([open(), open()]);
+		const fulfilled = results.filter(
+			(result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof open>>> => result.status === "fulfilled",
+		);
+		expect(fulfilled).toHaveLength(1);
+		expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+		const winner = fulfilled[0]!.value;
+		const winnerIndex = runtimes.indexOf(winner.entry.runtime);
+		const loserIndex = winnerIndex === 0 ? 1 : 0;
+		expect(starts[0]).not.toHaveBeenCalled();
+		expect(starts[1]).not.toHaveBeenCalled();
+		await vi.waitFor(() => expect(disposes[loserIndex]).toHaveBeenCalledOnce());
+
+		await registry.commitEntry(winner.entry, winner.sessionSelection, authorization, winner.attachClaim);
+		expect(() =>
+			registry.startRecoveredClientInputs(winner.entry, winner.attachClaim, {
+				id: "not-admitted",
+				clientNodeId: authorization.client.nodeId,
+				attachedAt: Date.now(),
+			}),
+		).toThrow(/subscriber is not owned/);
+		const subscriber = await registry.attachSubscriber(winner.entry, winner.attachClaim);
+		await registry.startRecoveredClientInputs(winner.entry, winner.attachClaim, subscriber);
+		expect(starts[winnerIndex]).toHaveBeenCalledOnce();
+		expect(starts[loserIndex]).not.toHaveBeenCalled();
+		await registry.detachSubscriber(winner.entry, subscriber, "test_cleanup");
+		winner.attachClaim.release();
+		await registry.stopAll("test_cleanup");
+	});
+
+	it("never starts recovered input for an attach cancelled before ownership commit", async () => {
+		const startRecoveredClientInputs = vi.fn(async () => {});
+		const dispose = vi.fn(async () => {});
+		const sessionId = "recovery-cancelled";
+		const runtime = {
+			cwd: workspacePath,
+			session: createTestSession(sessionId, null),
+			dispose,
+			startRecoveredClientInputs,
+			setRebindSession: vi.fn(),
+			listSessions: vi.fn(async () => []),
+		} as unknown as AgentSessionRuntime;
+		const registry = new IntegratedRuntimeRegistry({
+			agentDir,
+			auditLogger: new IrohRemoteAuditLogger(),
+			stateManager: new IrohRemoteHostStateManager(),
+			activeStreams: new IrohRemoteActiveStreamRegistry(),
+			detachedRuntimeTtlMs: () => 60_000,
+			getAllowTools: () => undefined,
+			getProjectTrustedForWorkspace: () => false,
+			setClientLastSessionId: vi.fn(async () => undefined),
+			createRuntime: async () => ({
+				runtime,
+				sessionSelection: { kind: "resumed", requestedSessionId: sessionId, sessionId },
+			}),
+		});
+		const authorization = createAuthorization("n-recovery-cancelled");
+		const prepared = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "session", sessionId }), response: HANDSHAKE_RESPONSE },
+			authorization,
+		);
+
+		await registry.abortPreparedEntry(prepared.entry, prepared.sessionSelection, prepared.attachClaim);
+		expect(startRecoveredClientInputs).not.toHaveBeenCalled();
+		expect(dispose).toHaveBeenCalledOnce();
+		expect(() =>
+			registry.startRecoveredClientInputs(prepared.entry, prepared.attachClaim, {
+				id: "never-admitted",
+				clientNodeId: authorization.client.nodeId,
+				attachedAt: Date.now(),
+			}),
+		).toThrow(/stale|ownership changed/);
 	});
 
 	it("cannot publish a prepared runtime after attach admission closes during persistence", async () => {
@@ -498,6 +719,109 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		activeStreams.unregister(streamA);
 		activeStreams.unregister(streamB);
 		await registry.stopAll("test_cleanup");
+	});
+
+	it("retires live activities for every client and every owned rekey identity", async () => {
+		const oldSessionId = "activity-shared-old";
+		const newSessionId = "activity-shared-new";
+		const keepSessionId = "activity-unrelated";
+		const registration = (sessionId: string, activityId: string): IrohRemoteLiveActivityRegistration => ({
+			workspaceName: "ws",
+			sessionId,
+			activityId,
+			tokenHash: "a".repeat(64),
+			tokenEnvironment: "production",
+			platform: "ios",
+			pushTargetId: `target-${activityId}`,
+			createdAt: 1,
+			updatedAt: 2,
+		});
+		const phoneA = createAuthorization("n-activity-a");
+		const phoneB = createAuthorization("n-activity-b");
+		const untrackedPhone = createAuthorization("n-activity-untracked");
+		const stateManager = new IrohRemoteHostStateManager({
+			initialState: {
+				...createEmptyIrohRemoteHostState(),
+				workspaces: [{ name: "ws", path: workspacePath }],
+				clients: [
+					{
+						...phoneA.client,
+						liveActivities: [registration(oldSessionId, "a-old"), registration(newSessionId, "a-new")],
+					},
+					{
+						...phoneB.client,
+						liveActivities: [
+							registration(oldSessionId, "b-old"),
+							registration(newSessionId, "b-new"),
+							registration(keepSessionId, "b-keep"),
+						],
+					},
+					{
+						...untrackedPhone.client,
+						liveActivities: [
+							registration(oldSessionId, "untracked-old"),
+							registration(keepSessionId, "untracked-keep"),
+						],
+					},
+				],
+			},
+		});
+		const runtime = {
+			cwd: workspacePath,
+			session: createTestSession(oldSessionId, null),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+			listSessions: vi.fn(async () => []),
+		} as unknown as AgentSessionRuntime;
+		const registry = new IntegratedRuntimeRegistry({
+			agentDir,
+			auditLogger: new IrohRemoteAuditLogger(),
+			stateManager,
+			activeStreams: new IrohRemoteActiveStreamRegistry(),
+			detachedRuntimeTtlMs: () => 60_000,
+			getAllowTools: () => undefined,
+			getProjectTrustedForWorkspace: () => false,
+			setClientLastSessionId: stateManager.setClientLastSessionId.bind(stateManager),
+			createRuntime: async () => ({
+				runtime,
+				sessionSelection: { kind: "created", sessionId: oldSessionId },
+			}),
+		});
+		const created = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
+			phoneA,
+		);
+		await registry.commitEntry(created.entry, created.sessionSelection, phoneA, created.attachClaim);
+		const subscriberA = await registry.attachSubscriber(created.entry, created.attachClaim);
+		const coattach = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "session", sessionId: oldSessionId }), response: HANDSHAKE_RESPONSE },
+			phoneB,
+		);
+		await registry.commitEntry(coattach.entry, coattach.sessionSelection, phoneB, coattach.attachClaim);
+		const subscriberB = await registry.attachSubscriber(coattach.entry, coattach.attachClaim);
+		created.attachClaim.release();
+		coattach.attachClaim.release();
+		expect(created.entry.recordedSessionIdsByClient.has(phoneB.client.nodeId)).toBe(false);
+
+		await registry.handleSessionChanged(created.entry, undefined, { sessionId: newSessionId }, phoneA);
+		expect(created.entry.previousSessionIds.has(oldSessionId)).toBe(true);
+		expect(created.entry.recordedSessionIdsByClient.has(phoneB.client.nodeId)).toBe(false);
+		await registry.detachSubscriber(created.entry, subscriberB, "test_cleanup");
+		await registry.detachSubscriber(created.entry, subscriberA, "test_cleanup");
+		await registry.stopEntry(created.entry, "test_cleanup");
+
+		const state = await stateManager.getState();
+		const activitiesByClient = Object.fromEntries(
+			state.clients.map((client) => [
+				client.nodeId,
+				(client.liveActivities ?? []).map((activity) => activity.sessionId),
+			]),
+		);
+		expect(activitiesByClient).toEqual({
+			"n-activity-a": [],
+			"n-activity-b": [keepSessionId],
+			"n-activity-untracked": [keepSessionId],
+		});
 	});
 
 	it("preflights daemon-owned rekeys and bulk-commits every attached client", async () => {
@@ -950,7 +1274,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		const dispose = vi.fn(async () => {});
 		const onRuntimeDisposed = vi.fn();
 		const stateManager = new IrohRemoteHostStateManager();
-		stateManager.removeClientLiveActivitiesForSession = vi.fn(async () => {
+		stateManager.removeLiveActivitiesForWorkspaceSessions = vi.fn(async () => {
 			throw new Error("state write failed");
 		});
 		const runtime = {

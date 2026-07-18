@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { AgentSessionEvent } from "../src/core/agent-session.ts";
+import type { AgentSessionEvent, PromptPreflightResult } from "../src/core/agent-session.ts";
 import { type AgentSessionRuntime, isConversationTranscriptCommittedEvent } from "../src/core/agent-session-runtime.ts";
 import { REVIEW_UNCOMMITTED_ACTION_ID } from "../src/core/host-actions.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
@@ -67,6 +67,34 @@ function createStableSessionRunner<TSession>(getSession: () => TSession) {
 
 function getNotifications(send: ManualIrohSendStream): Array<Record<string, unknown>> {
 	return parseWrittenObjects(send).filter((record) => record.type === "notification_request");
+}
+
+function withCurrentConversationAuthority(send: ManualIrohSendStream, command: object): object {
+	const bootstrap = parseWrittenObjects(send)
+		.slice()
+		.reverse()
+		.find((record) => record.type === "conversation_bootstrap");
+	const conversation = bootstrap?.conversation;
+	const delivery = bootstrap?.delivery;
+	const transcript = bootstrap?.transcript;
+	if (!isRecord(conversation) || !isRecord(delivery) || !isRecord(transcript)) {
+		throw new Error("Conversation bootstrap authority is unavailable");
+	}
+	if (
+		typeof conversation.sessionId !== "string" ||
+		typeof delivery.subscriptionId !== "string" ||
+		typeof transcript.branchEpoch !== "string"
+	) {
+		throw new Error("Conversation bootstrap authority is malformed");
+	}
+	return {
+		...command,
+		conversationAuthority: {
+			sessionId: conversation.sessionId,
+			subscriptionId: delivery.subscriptionId,
+			branchEpoch: transcript.branchEpoch,
+		},
+	};
 }
 
 class ThrowingIrohSendStream extends ManualIrohSendStream {
@@ -1288,8 +1316,11 @@ describe("Iroh remote notification requests", () => {
 	test("sends conversation completion notifications through the push relay when a target exists", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 			},
 		);
@@ -1318,7 +1349,14 @@ describe("Iroh remote notification requests", () => {
 		});
 
 		recv.pushLine(
-			JSON.stringify({ id: "prompt-1", type: "prompt", clientMessageId: "client-prompt-1", message: "hello" }),
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
 		);
 
 		const expectedNotification: IrohRemotePushRelayNotificationRequest = {
@@ -1346,8 +1384,11 @@ describe("Iroh remote notification requests", () => {
 	test("sends failure notice instead of completion notification when a prompt ends with an assistant error", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 				session.messages = [
 					createAssistantMessage({ stopReason: "error", errorMessage: "No API key for provider: openai-codex" }),
@@ -1379,7 +1420,14 @@ describe("Iroh remote notification requests", () => {
 		});
 
 		recv.pushLine(
-			JSON.stringify({ id: "prompt-1", type: "prompt", clientMessageId: "client-prompt-1", message: "hello" }),
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
 		);
 
 		await vi.waitFor(() =>
@@ -1404,8 +1452,11 @@ describe("Iroh remote notification requests", () => {
 	test("does not send a completion notification when a prompt is aborted", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 				session.messages = [createAssistantMessage({ stopReason: "aborted" })];
 			},
@@ -1422,7 +1473,14 @@ describe("Iroh remote notification requests", () => {
 		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
 
 		recv.pushLine(
-			JSON.stringify({ id: "prompt-1", type: "prompt", clientMessageId: "client-prompt-1", message: "hello" }),
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
 		);
 
 		await vi.waitFor(() =>
@@ -1440,8 +1498,11 @@ describe("Iroh remote notification requests", () => {
 	test("sends push completion notification when accepted prompt response cannot be written", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 			},
 		);
@@ -1481,7 +1542,14 @@ describe("Iroh remote notification requests", () => {
 		});
 
 		recv.pushLine(
-			JSON.stringify({ id: "prompt-1", type: "prompt", clientMessageId: "client-prompt-1", message: "hello" }),
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
 		);
 
 		await vi.waitFor(() =>
@@ -2000,8 +2068,11 @@ describe("Iroh remote notification requests", () => {
 	test("falls back to Iroh notification_request when no push target exists", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 			},
 		);
@@ -2027,7 +2098,14 @@ describe("Iroh remote notification requests", () => {
 		});
 
 		recv.pushLine(
-			JSON.stringify({ id: "prompt-1", type: "prompt", clientMessageId: "client-prompt-1", message: "hello" }),
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
 		);
 
 		await vi.waitFor(() =>
@@ -2052,8 +2130,11 @@ describe("Iroh remote notification requests", () => {
 	test("does not send duplicate push notifications for the same eventId", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 			},
 		);
@@ -2074,22 +2155,31 @@ describe("Iroh remote notification requests", () => {
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),
 		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv } = await startIrohRpcMode(runtimeHost, session, {
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
 			notificationDelivery: dispatcher,
 		});
 
 		recv.pushLine(
-			JSON.stringify({ id: "prompt-1", type: "prompt", clientMessageId: "client-prompt-1", message: "hello" }),
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
 		);
 		await vi.waitFor(() => expect(relayClient.sendNotification).toHaveBeenCalledTimes(1));
 		session.leafId = "before-run";
 		recv.pushLine(
-			JSON.stringify({
-				id: "prompt-2",
-				type: "prompt",
-				clientMessageId: "client-prompt-2",
-				message: "hello again",
-			}),
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-2",
+					type: "prompt",
+					clientMessageId: "client-prompt-2",
+					message: "hello again",
+				}),
+			),
 		);
 		await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledTimes(2));
 		await new Promise((resolve) => setImmediate(resolve));
@@ -2102,8 +2192,11 @@ describe("Iroh remote notification requests", () => {
 	test("disables push targets reported invalid by the relay", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 			},
 		);
@@ -2142,7 +2235,14 @@ describe("Iroh remote notification requests", () => {
 		});
 
 		recv.pushLine(
-			JSON.stringify({ id: "prompt-1", type: "prompt", clientMessageId: "client-prompt-1", message: "hello" }),
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
 		);
 
 		await vi.waitFor(async () => {
@@ -2170,8 +2270,11 @@ describe("Iroh remote notification requests", () => {
 	test("emits one conversation completion notification after prompt completion", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 			},
 		);
@@ -2187,7 +2290,14 @@ describe("Iroh remote notification requests", () => {
 		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
 
 		recv.pushLine(
-			JSON.stringify({ id: "prompt-1", type: "prompt", clientMessageId: "client-prompt-1", message: "hello" }),
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
 		);
 
 		await vi.waitFor(() =>
@@ -2228,7 +2338,15 @@ describe("Iroh remote notification requests", () => {
 		const startupSession = currentSession;
 		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, startupSession);
 
-		recv.pushLine(JSON.stringify({ id: "review-1", type: "invoke_ui_action", action: REVIEW_UNCOMMITTED_ACTION_ID }));
+		recv.pushLine(
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "review-1",
+					type: "invoke_ui_action",
+					action: REVIEW_UNCOMMITTED_ACTION_ID,
+				}),
+			),
+		);
 
 		await vi.waitFor(() =>
 			expect(getNotifications(send)).toEqual([

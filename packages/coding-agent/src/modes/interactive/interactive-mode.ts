@@ -1749,7 +1749,7 @@ export class InteractiveMode {
 			}
 		});
 		await this.daemonAttach.start();
-		await this.acquireCurrentSessionLease();
+		const acquireOutcome = await this.acquireCurrentSessionLease();
 		this.runtimeHost.setPrepareSessionReplacement(async ({ previousSessionId, sessionId }) => {
 			const rekey = await this.daemonAttach.prepareRekey(previousSessionId, sessionId);
 			if (!rekey) {
@@ -1767,11 +1767,16 @@ export class InteractiveMode {
 				},
 			};
 		});
+		if (acquireOutcome.kind === "granted" || acquireOutcome.kind === "noop") {
+			// UI subscriptions and the daemon ownership decision are both complete.
+			// Drain any restored durable queue before startup input can overtake it.
+			await this.runtimeHost.startRecoveredClientInputs();
+		}
 	}
 
-	private async acquireCurrentSessionLease(): Promise<void> {
+	private async acquireCurrentSessionLease(): Promise<AcquireOutcome> {
 		if (this.daemonAttach.connectionState() === "disabled") {
-			return;
+			return { kind: "noop" };
 		}
 		this.daemonLeaseSessionId = this.session.sessionId;
 		const outcome = await this.daemonAttach.acquire(this.session.sessionId);
@@ -1784,6 +1789,7 @@ export class InteractiveMode {
 			this.enterDrainViewer(outcome);
 		}
 		this.updatePhoneFooterIndicator();
+		return outcome;
 	}
 
 	private async handleReacquireOutcome(outcome: AcquireOutcome): Promise<void> {
@@ -1798,6 +1804,9 @@ export class InteractiveMode {
 			// A remote turn is mid-flight; watch it finish behind the current
 			// transcript, then take over warm.
 			this.enterDrainViewer(outcome);
+		}
+		if (outcome.kind === "granted") {
+			await this.runtimeHost.startRecoveredClientInputs().catch(() => undefined);
 		}
 	}
 
@@ -1878,6 +1887,7 @@ export class InteractiveMode {
 		this.renderCurrentSessionState();
 		this.showStatus("Attached — the remote turn finished and this desktop now owns the session.");
 		this.ui.requestRender();
+		await this.runtimeHost.startRecoveredClientInputs().catch(() => undefined);
 	}
 
 	private exitDrainViewer(reason: "cancelled" | "error" | "reconnecting"): void {
@@ -2002,6 +2012,9 @@ export class InteractiveMode {
 						authorization,
 						runtime: this.runtimeHost,
 					}),
+					onReady: () => {
+						void this.runtimeHost.startRecoveredClientInputs().catch(() => undefined);
+					},
 					initialInput: handshake.initialInput,
 					notificationDelivery: {
 						deliverNotification: (notification) =>
@@ -4693,11 +4706,11 @@ export class InteractiveMode {
 	private getAllQueuedMessages(): { steering: string[]; followUp: string[] } {
 		return {
 			steering: [
-				...this.session.getSteeringMessages(),
+				...this.session.getSteeringMessages().map((message) => message.text),
 				...this.compactionQueuedMessages.filter((msg) => msg.mode === "steer").map((msg) => msg.text),
 			],
 			followUp: [
-				...this.session.getFollowUpMessages(),
+				...this.session.getFollowUpMessages().map((message) => message.text),
 				...this.compactionQueuedMessages.filter((msg) => msg.mode === "followUp").map((msg) => msg.text),
 			],
 		};

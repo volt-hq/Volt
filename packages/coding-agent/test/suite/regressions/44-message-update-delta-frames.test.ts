@@ -50,6 +50,7 @@ function createFakeRuntimeHost(harness: Harness): AgentSessionRuntime {
 		switchSession: vi.fn(async () => ({ cancelled: true })),
 		switchSessionById: vi.fn(async () => ({ cancelled: true })),
 		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+		startRecoveredClientInputs: vi.fn(async () => {}),
 		dispose: vi.fn(async () => {}),
 		setRebindSession: vi.fn(),
 		async runWithStableSession<T>(operation: (stableSession: AgentSession) => Promise<T> | T): Promise<T> {

@@ -426,6 +426,10 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		mkdirSync(sessionDir, { recursive: true });
 		try {
 			const manager = SessionManager.create(workspacePath, sessionDir);
+			manager.reserveClientInput("client-message-42", "prompt", {
+				message: `Read ${workspacePath}/fixture.txt`,
+			});
+			manager.transitionClientInput("client-message-42", "started");
 			manager.appendMessage({
 				role: "user",
 				clientMessageId: "client-message-42",

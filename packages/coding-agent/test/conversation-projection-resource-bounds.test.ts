@@ -11,7 +11,7 @@ import {
 	type ConversationProjectionSource,
 } from "../src/core/rpc/conversation-projection-feed.ts";
 import { serializeJsonLine } from "../src/core/rpc/jsonl.ts";
-import { projectRpcBoundedString, projectRpcUtf8Prefix } from "../src/core/rpc/session-state.ts";
+import { projectRpcBoundedString, projectRpcQueueUpdate, projectRpcUtf8Prefix } from "../src/core/rpc/session-state.ts";
 import { projectSubagentDetails } from "../src/core/rpc/transcript.ts";
 import type { RpcConversationActiveAssistant } from "../src/core/rpc/types.ts";
 import type { SessionEntry, SessionManager } from "../src/core/session-manager.ts";
@@ -94,8 +94,18 @@ function createRuntime(largePayload: string): AgentSessionRuntime {
 		session: {
 			activeCompaction: undefined,
 			agent: { state: { pendingToolExecutions } },
-			getSteeringMessages: () => [largePayload, largePayload, largePayload],
-			getFollowUpMessages: () => [largePayload, largePayload, largePayload],
+			getSteeringMessages: () =>
+				Array.from({ length: 3 }, (_, index) => ({
+					queueEntryId: `steering-${index}`,
+					clientMessageId: `steering-${index}`,
+					text: largePayload,
+				})),
+			getFollowUpMessages: () =>
+				Array.from({ length: 3 }, (_, index) => ({
+					queueEntryId: `follow-up-${index}`,
+					clientMessageId: `follow-up-${index}`,
+					text: largePayload,
+				})),
 			retryAttempt: 0,
 			settingsManager: undefined,
 			model: undefined,
@@ -202,6 +212,49 @@ describe("conversation projection resource bounds", () => {
 		expect(projected.projection).toMatchObject({ truncated: true, originalBytes: null });
 	});
 
+	it("projects exact queue identities through updates while independently bounding duplicate text", () => {
+		const oversizedText = "q".repeat(32 * 1024);
+		const projected = projectRpcQueueUpdate({
+			type: "queue_update",
+			steering: [
+				{ queueEntryId: "client-a", clientMessageId: "client-a", text: oversizedText },
+				{ queueEntryId: "client-b", clientMessageId: "client-b", text: oversizedText },
+			],
+			followUp: [],
+		}) as {
+			steering: Array<{ clientMessageId: string; text: string }>;
+			projection: { steering: { truncated: boolean; omittedCount: number } };
+		};
+
+		expect(projected.steering.map((entry) => entry.clientMessageId)).toEqual(["client-a", "client-b"]);
+		expect(projected.steering[0]?.text).toHaveLength(16 * 1024);
+		expect(projected.steering[1]?.text).toBe(projected.steering[0]?.text);
+		expect(projected.projection.steering).toMatchObject({ truncated: true, omittedCount: 0 });
+	});
+
+	it("retains all 128 queue identities under worst-case escaped text without exceeding the wire budget", () => {
+		const escapedText = '"\\\n'.repeat(64 * 1024);
+		const steering = Array.from({ length: 128 }, (_, index) => {
+			const prefix = `client-${index}-`;
+			const clientMessageId = `${prefix}${"x".repeat(256 - prefix.length)}`;
+			return { queueEntryId: clientMessageId, clientMessageId, text: escapedText };
+		});
+		const projected = projectRpcQueueUpdate({
+			type: "queue_update",
+			steering,
+			followUp: [],
+		}) as {
+			steering: Array<{ clientMessageId: string; text: string }>;
+			projection: { steering: { projectedCount: number; omittedCount: number } };
+		};
+
+		expect(projected.steering.map((entry) => entry.clientMessageId)).toEqual(
+			steering.map((entry) => entry.clientMessageId),
+		);
+		expect(projected.projection.steering).toMatchObject({ projectedCount: 128, omittedCount: 0 });
+		expect(Buffer.byteLength(JSON.stringify(projected.steering), "utf8")).toBeLessThanOrEqual(128 * 1024);
+	});
+
 	it("bounds wide subagent arrays and one global tree-node budget", () => {
 		const wide = (label: string): Array<Record<string, unknown>> => {
 			const value = Array.from({ length: 64 }, (_, index) => ({
@@ -270,6 +323,11 @@ describe("conversation projection resource bounds", () => {
 		expect(Buffer.byteLength(JSON.stringify(snapshot.transcript), "utf8")).toBeGreaterThan(1024 * 1024);
 		expect(snapshot.state.projection?.steeringQueue).toMatchObject({ totalCount: 3, truncated: true });
 		expect(snapshot.state.projection?.followUpQueue).toMatchObject({ totalCount: 3, truncated: true });
+		expect(snapshot.state.steeringQueue?.map((entry) => entry.clientMessageId)).toEqual([
+			"steering-0",
+			"steering-1",
+			"steering-2",
+		]);
 		expect(snapshot.state.projection?.activeTools).toMatchObject({
 			totalCount: 8,
 			projectedCount: 8,
@@ -314,7 +372,11 @@ describe("conversation projection resource bounds", () => {
 
 	it("bounds projection traversal before omitted queue, tool, and workflow tails", () => {
 		const runtime = createRuntime("small");
-		const queue = Array.from({ length: 128 }, (_, index) => `queued-${index}`);
+		const queue = Array.from({ length: 128 }, (_, index) => ({
+			queueEntryId: `queued-${index}`,
+			clientMessageId: `queued-${index}`,
+			text: `queued-${index}`,
+		}));
 		queue.length = 10_000;
 		Object.defineProperty(queue, 128, {
 			get: () => {
@@ -337,8 +399,8 @@ describe("conversation projection resource bounds", () => {
 		}
 		const session = runtime.session as unknown as {
 			agent: { state: { pendingToolExecutions: typeof tools } };
-			getSteeringMessages: () => string[];
-			getFollowUpMessages: () => string[];
+			getSteeringMessages: () => typeof queue;
+			getFollowUpMessages: () => typeof queue;
 		};
 		session.agent.state.pendingToolExecutions = tools;
 		session.getSteeringMessages = () => queue;
@@ -423,7 +485,7 @@ describe("conversation projection resource bounds", () => {
 				},
 				buildSnapshot,
 			}),
-		).toThrow("Active assistant delta-dependent state exceeded");
+		).toThrow("generation is poisoned: Assistant tool call 0 exceeded its 65536-byte serialized limit");
 		expect(writes).toEqual([]);
 
 		const completed = oversizedToolAssistant(`${largePayload}tail`);

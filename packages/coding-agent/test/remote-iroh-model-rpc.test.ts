@@ -2,7 +2,13 @@ import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { Api, Model } from "@hansjm10/volt-ai";
 import { describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
-import { createTestModel, createTestSession, parseWrittenObjects, startIrohRpcMode } from "./iroh-stream-doubles.ts";
+import {
+	createTestModel,
+	createTestSession,
+	parseWrittenObjects,
+	startIrohRpcMode,
+	withCurrentConversationAuthority,
+} from "./iroh-stream-doubles.ts";
 
 function createStableSessionRunner<TSession>(getSession: () => TSession) {
 	return {
@@ -16,6 +22,42 @@ function createStableSessionRunner<TSession>(getSession: () => TSession) {
 }
 
 describe("Iroh remote model RPC", () => {
+	test("starts recovered dispatch only after extension session_start and resource discovery binding", async () => {
+		const bindingOrder: string[] = [];
+		let sessionStartInitialized = false;
+		let resourcesInitialized = false;
+		const session = {
+			...createTestSession("session-recovery-order", null),
+			bindExtensions: vi.fn(async () => {
+				sessionStartInitialized = true;
+				bindingOrder.push("session_start");
+				await Promise.resolve();
+				resourcesInitialized = true;
+				bindingOrder.push("resources");
+			}),
+		};
+		const runtimeHost = {
+			...createStableSessionRunner(() => session),
+			session,
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const recoveredDispatch = vi.fn(() => {
+			expect(sessionStartInitialized).toBe(true);
+			expect(resourcesInitialized).toBe(true);
+			bindingOrder.push("recovered_dispatch");
+		});
+
+		const { modePromise, recv } = await startIrohRpcMode(runtimeHost, session, {
+			onReady: recoveredDispatch,
+		});
+		await vi.waitFor(() => expect(recoveredDispatch).toHaveBeenCalledOnce());
+		expect(bindingOrder).toEqual(["session_start", "resources", "recovered_dispatch"]);
+
+		recv.end();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
 	test("forwards model catalog, set_model, and set_thinking_level while rejecting cycle commands", async () => {
 		const modelOne = createTestModel("model-one");
 		const modelTwo = createTestModel("model-two", { input: ["text", "image"] });
@@ -58,22 +100,57 @@ describe("Iroh remote model RPC", () => {
 		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
 
 		recv.pushLine(JSON.stringify({ id: "models-1", type: "get_available_models" }));
-		recv.pushLine(JSON.stringify({ id: "set-1", type: "set_model", provider: "anthropic", modelId: "model-two" }));
-		recv.pushLine(JSON.stringify({ id: "set-2", type: "set_model", provider: "anthropic", modelId: "missing" }));
-		recv.pushLine(JSON.stringify({ id: "think-1", type: "set_thinking_level", level: "low" }));
+		recv.pushLine(
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "set-1",
+					type: "set_model",
+					provider: "anthropic",
+					modelId: "model-two",
+				}),
+			),
+		);
+		recv.pushLine(
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "set-2",
+					type: "set_model",
+					provider: "anthropic",
+					modelId: "missing",
+				}),
+			),
+		);
+		recv.pushLine(
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "think-1",
+					type: "set_thinking_level",
+					level: "low",
+				}),
+			),
+		);
 		recv.pushLine(JSON.stringify({ id: "state-1", type: "get_state" }));
 		// Sent after state-1 so the persistDefault-forwarding checks don't disturb the state assertions above.
 		recv.pushLine(
-			JSON.stringify({
-				id: "set-3",
-				type: "set_model",
-				provider: "anthropic",
-				modelId: "model-one",
-				persistDefault: false,
-			}),
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "set-3",
+					type: "set_model",
+					provider: "anthropic",
+					modelId: "model-one",
+					persistDefault: false,
+				}),
+			),
 		);
 		recv.pushLine(
-			JSON.stringify({ id: "think-2", type: "set_thinking_level", level: "high", persistDefault: false }),
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "think-2",
+					type: "set_thinking_level",
+					level: "high",
+					persistDefault: false,
+				}),
+			),
 		);
 		recv.pushLine(JSON.stringify({ id: "cycle-1", type: "cycle_model" }));
 		recv.pushLine(JSON.stringify({ id: "cycle-2", type: "cycle_thinking_level" }));

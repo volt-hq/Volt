@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+	CONVERSATION_CLIENT_NODE_ID_MAX_UTF8_BYTES,
 	ConversationCoordinatorRegistry,
 	type ConversationTransportOwner,
 } from "../src/daemon/conversation-coordinator.ts";
@@ -82,7 +83,7 @@ describe("ConversationCoordinator", () => {
 		const registry = new ConversationCoordinatorRegistry();
 		const coordinator = registry.reserveRuntime("workspace", "session");
 		coordinator.activateRuntime();
-		const claim = coordinator.createAttachClaim();
+		const claim = coordinator.createAttachClaim("client-node");
 		const generation = coordinator.generation;
 
 		const retirement = coordinator.beginRuntimeRetirement("test", () => {});
@@ -93,6 +94,24 @@ describe("ConversationCoordinator", () => {
 		expect(coordinator.isAttachClaimCurrent(claim)).toBe(false);
 		await retirement.settled;
 		expect(coordinator.runtimeLifecycle).toBe("retired");
+	});
+
+	it("bounds client identity before retaining an attach claim", () => {
+		const registry = new ConversationCoordinatorRegistry();
+		const coordinator = registry.reserveRuntime("workspace", "session");
+		coordinator.activateRuntime();
+
+		expect(() => coordinator.createAttachClaim("")).toThrow("must be a non-empty string");
+		expect(() => coordinator.createAttachClaim(" client-node ")).toThrow("without surrounding whitespace");
+		expect(() =>
+			coordinator.createAttachClaim("🧪".repeat(Math.floor(CONVERSATION_CLIENT_NODE_ID_MAX_UTF8_BYTES / 4) + 1)),
+		).toThrow(`${CONVERSATION_CLIENT_NODE_ID_MAX_UTF8_BYTES}-byte UTF-8 limit`);
+		expect(coordinator.attachClaims.size).toBe(0);
+
+		const clientNodeId = "client-node";
+		const claim = coordinator.createAttachClaim(clientNodeId);
+		expect(claim.clientNodeId).toBe(clientNodeId);
+		expect(coordinator.attachClaims).toEqual(new Set([claim]));
 	});
 
 	it("owns one terminal barrier across transport close and runtime finalization", async () => {

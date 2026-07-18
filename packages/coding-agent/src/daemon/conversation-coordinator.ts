@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import type { DetachedRuntimeRetentionHandle } from "../remote/integrated-runtime-retention.ts";
 import type {
 	DaemonAttachClaim,
@@ -8,8 +9,22 @@ import type {
 
 export type ConversationRuntimeLifecycle = "prepared" | "active" | "retiring" | "retired";
 
+export const CONVERSATION_CLIENT_NODE_ID_MAX_UTF8_BYTES = 256;
+
+export function assertConversationClientNodeId(clientNodeId: string): void {
+	if (clientNodeId.length === 0 || clientNodeId !== clientNodeId.trim()) {
+		throw new Error("conversation client node id must be a non-empty string without surrounding whitespace");
+	}
+	if (Buffer.byteLength(clientNodeId, "utf8") > CONVERSATION_CLIENT_NODE_ID_MAX_UTF8_BYTES) {
+		throw new Error(
+			`conversation client node id exceeds the ${CONVERSATION_CLIENT_NODE_ID_MAX_UTF8_BYTES}-byte UTF-8 limit`,
+		);
+	}
+}
+
 export interface ConversationAttachClaim {
 	readonly coordinator: ConversationCoordinator;
+	readonly clientNodeId: string;
 	readonly generation: number;
 	readonly released: boolean;
 	release(): void;
@@ -17,6 +32,7 @@ export interface ConversationAttachClaim {
 
 export interface ConversationSubscriber {
 	readonly id: string;
+	readonly clientNodeId: string;
 	readonly attachedAt: number;
 }
 
@@ -198,13 +214,15 @@ export class ConversationCoordinator {
 		this.runtimeLifecycleValue = "active";
 	}
 
-	createAttachClaim(): ConversationAttachClaim {
+	createAttachClaim(clientNodeId: string): ConversationAttachClaim {
 		if (this.runtimeLifecycleValue !== "prepared" && this.runtimeLifecycleValue !== "active") {
 			throw new Error("conversation runtime is not accepting attach claims");
 		}
+		assertConversationClientNodeId(clientNodeId);
 		let released = false;
 		const claim: ConversationAttachClaim = {
 			coordinator: this,
+			clientNodeId,
 			generation: this.generationValue,
 			get released() {
 				return released;

@@ -36,6 +36,7 @@ import {
 	scheduleDetachedRuntimeRetention,
 } from "../remote/integrated-runtime-retention.ts";
 import {
+	assertConversationClientNodeId,
 	type ConversationAttachClaim,
 	type ConversationCoordinator,
 	ConversationCoordinatorRegistry,
@@ -350,13 +351,20 @@ export class IntegratedRuntimeRegistry {
 		});
 	}
 
-	private createAttachClaim(entry: IntegratedRuntimeEntry): IntegratedRuntimeAttachClaim {
-		return entry.coordinator.createAttachClaim();
+	private createAttachClaim(entry: IntegratedRuntimeEntry, clientNodeId: string): IntegratedRuntimeAttachClaim {
+		return entry.coordinator.createAttachClaim(clientNodeId);
 	}
 
 	private assertAttachClaimCurrent(entry: IntegratedRuntimeEntry, claim: IntegratedRuntimeAttachClaim): void {
-		if (claim.coordinator !== entry.coordinator || !entry.coordinator.isAttachClaimCurrent(claim)) {
+		this.assertAttachClaimBelongsToEntry(entry, claim);
+		if (!entry.coordinator.isAttachClaimCurrent(claim)) {
 			throw this.createAttachRetryError(entry, "conversation attach claim is stale");
+		}
+	}
+
+	private assertAttachClaimBelongsToEntry(entry: IntegratedRuntimeEntry, claim: IntegratedRuntimeAttachClaim): void {
+		if (claim.coordinator !== entry.coordinator) {
+			throw this.createAttachRetryError(entry, "conversation attach claim belongs to another runtime");
 		}
 	}
 
@@ -394,6 +402,7 @@ export class IntegratedRuntimeRegistry {
 		sessionSelection: IntegratedConversationSessionSelection;
 	}> {
 		assertAttachAdmissionOpen(options.signal);
+		assertConversationClientNodeId(authorization.client.nodeId);
 		const targetSessionId = getResolvedTargetSessionId(handshake.hello, authorization);
 		if (targetSessionId !== undefined) {
 			const targetKey = this.getRegistryKey(authorization.workspace.name, targetSessionId);
@@ -433,7 +442,7 @@ export class IntegratedRuntimeRegistry {
 							: existing.sessionId;
 					return {
 						entry: existing,
-						attachClaim: this.createAttachClaim(existing),
+						attachClaim: this.createAttachClaim(existing, authorization.client.nodeId),
 						created: false,
 						sessionSelection: createConversationSessionSelectionFromEntry(existing, requestedSessionId),
 					};
@@ -564,7 +573,7 @@ export class IntegratedRuntimeRegistry {
 				}
 				return {
 					entry: owner,
-					attachClaim: this.createAttachClaim(owner),
+					attachClaim: this.createAttachClaim(owner, authorization.client.nodeId),
 					created: false,
 					sessionSelection: createConversationSessionSelectionFromEntry(owner),
 				};
@@ -603,7 +612,7 @@ export class IntegratedRuntimeRegistry {
 			});
 			return {
 				entry,
-				attachClaim: this.createAttachClaim(entry),
+				attachClaim: this.createAttachClaim(entry, authorization.client.nodeId),
 				created: true,
 				sessionSelection,
 			};
@@ -761,6 +770,9 @@ export class IntegratedRuntimeRegistry {
 	): Promise<void> {
 		assertAttachAdmissionOpen(signal);
 		this.assertAttachClaimCurrent(entry, attachClaim);
+		if (attachClaim.clientNodeId !== authorization.client.nodeId) {
+			throw this.createAttachRetryError(entry, "conversation attach client identity changed before commit");
+		}
 		if (entry.lifecycle !== "prepared" && entry.lifecycle !== "active") {
 			throw this.createAttachRetryError(entry, "conversation runtime ownership changed before commit");
 		}
@@ -884,18 +896,29 @@ export class IntegratedRuntimeRegistry {
 		this.cancelRetention(entry);
 		const subscriber: IntegratedRuntimeSubscriber = {
 			id: `subscriber-${++integratedRuntimeSubscriberSequence}`,
+			clientNodeId: attachClaim.clientNodeId,
 			attachedAt: Date.now(),
 		};
 		entry.coordinator.addSubscriber(subscriber);
 		try {
 			if (wasDetached) {
 				entry.coordinator.markAttached();
-				await this.logEntryAudit(entry, "remote_runtime_reattached", {
-					reason: "subscriber_attached",
-					subscriberId: subscriber.id,
-				});
+				await this.logEntryAudit(
+					entry,
+					"remote_runtime_reattached",
+					{
+						reason: "subscriber_attached",
+						subscriberId: subscriber.id,
+					},
+					{ clientNodeId: subscriber.clientNodeId },
+				);
 			}
-			await this.logEntryAudit(entry, "remote_subscriber_attached", { subscriberId: subscriber.id });
+			await this.logEntryAudit(
+				entry,
+				"remote_subscriber_attached",
+				{ subscriberId: subscriber.id },
+				{ clientNodeId: subscriber.clientNodeId },
+			);
 			// The caller cannot detach until this promise resolves, so an attach
 			// fenced during audit publication must roll its provisional subscriber
 			// back internally before surfacing the retry.
@@ -918,6 +941,23 @@ export class IntegratedRuntimeRegistry {
 		}
 	}
 
+	/**
+	 * Start durable input recovery only for the published runtime generation that
+	 * owns this fully admitted subscriber. The iroh service calls this after the
+	 * ordered projection feed is bound, closing the loser-runtime dispatch race.
+	 */
+	startRecoveredClientInputs(
+		entry: IntegratedRuntimeEntry,
+		attachClaim: IntegratedRuntimeAttachClaim,
+		subscriber: IntegratedRuntimeSubscriber,
+	): Promise<void> {
+		this.assertEntryAttachable(entry, attachClaim);
+		if (!entry.subscribers.has(subscriber) || subscriber.clientNodeId !== attachClaim.clientNodeId) {
+			throw this.createAttachRetryError(entry, "conversation subscriber is not owned by this attach");
+		}
+		return entry.runtime.startRecoveredClientInputs();
+	}
+
 	async detachSubscriber(
 		entry: IntegratedRuntimeEntry,
 		subscriber: IntegratedRuntimeSubscriber,
@@ -932,8 +972,11 @@ export class IntegratedRuntimeRegistry {
 			entry,
 			"remote_subscriber_detached",
 			{ reason, subscriberId: subscriber.id },
-			errorMessage === undefined,
-			errorMessage,
+			{
+				clientNodeId: subscriber.clientNodeId,
+				success: errorMessage === undefined,
+				error: errorMessage,
+			},
 		);
 		if (entry.subscribers.size > 0) {
 			return;
@@ -942,11 +985,23 @@ export class IntegratedRuntimeRegistry {
 			return;
 		}
 		entry.coordinator.markDetached();
-		await this.logEntryAudit(entry, "remote_runtime_detached", { detachedAt: entry.detachedAt, reason });
+		await this.logEntryAudit(
+			entry,
+			"remote_runtime_detached",
+			{ detachedAt: entry.detachedAt, reason },
+			{ clientNodeId: subscriber.clientNodeId },
+		);
 		this.scheduleRetention(entry, reason);
 	}
 
-	async detachWithoutSubscriber(entry: IntegratedRuntimeEntry, reason: string): Promise<void> {
+	async detachWithoutSubscriber(
+		entry: IntegratedRuntimeEntry,
+		attachClaim: IntegratedRuntimeAttachClaim,
+		reason: string,
+	): Promise<void> {
+		// Cleanup can run after retirement fenced/released the claim, but the
+		// claim's captured actor identity remains immutable and authoritative.
+		this.assertAttachClaimBelongsToEntry(entry, attachClaim);
 		if (entry.lifecycle !== "active" || this.entries.get(entry.key) !== entry || entry.subscribers.size > 0) {
 			return;
 		}
@@ -964,7 +1019,12 @@ export class IntegratedRuntimeRegistry {
 			return;
 		}
 		entry.coordinator.markDetached();
-		await this.logEntryAudit(entry, "remote_runtime_detached", { detachedAt: entry.detachedAt, reason });
+		await this.logEntryAudit(
+			entry,
+			"remote_runtime_detached",
+			{ detachedAt: entry.detachedAt, reason },
+			{ clientNodeId: attachClaim.clientNodeId },
+		);
 		this.scheduleRetention(entry, reason);
 	}
 
@@ -1034,10 +1094,9 @@ export class IntegratedRuntimeRegistry {
 		this.cancelRetention(entry);
 		this.entries.delete(entry.key);
 		try {
-			removedLiveActivityCount = await this.options.stateManager.removeClientLiveActivitiesForSession(
-				entry.clientNodeId,
+			removedLiveActivityCount = await this.options.stateManager.removeLiveActivitiesForWorkspaceSessions(
 				entry.workspaceName,
-				entry.sessionId,
+				ownedConversationIds,
 			);
 		} catch (error: unknown) {
 			stopSuccess = false;
@@ -1057,8 +1116,7 @@ export class IntegratedRuntimeRegistry {
 				entry,
 				"remote_runtime_stopped",
 				{ active: wasActive, reason, removedLiveActivityCount },
-				stopSuccess,
-				stopError,
+				{ success: stopSuccess, error: stopError },
 			);
 		} finally {
 			this.options.onRuntimeDisposed?.(entry, reason);
@@ -1515,8 +1573,7 @@ export class IntegratedRuntimeRegistry {
 						reason: "detached_runtime_ttl_error",
 						ttlMs,
 					},
-					false,
-					error instanceof Error ? error.message : String(error),
+					{ success: false, error: error instanceof Error ? error.message : String(error) },
 				);
 			},
 		});
@@ -1541,15 +1598,14 @@ export class IntegratedRuntimeRegistry {
 		entry: IntegratedRuntimeEntry,
 		type: string,
 		details: Record<string, unknown> = {},
-		success = true,
-		error?: string,
+		outcome: { clientNodeId?: string; success?: boolean; error?: string } = {},
 	): Promise<void> {
 		await this.logAudit({
 			type,
-			clientNodeId: entry.clientNodeId,
+			clientNodeId: outcome.clientNodeId ?? entry.clientNodeId,
 			workspace: entry.workspaceName,
-			success,
-			error,
+			success: outcome.success ?? true,
+			error: outcome.error,
 			details: this.getEntryDetails(entry, details),
 		});
 	}

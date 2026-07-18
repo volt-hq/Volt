@@ -1,6 +1,12 @@
 import { describe, expect, test, vi } from "vitest";
+import type { PromptPreflightResult } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
-import { createTestSession, parseWrittenObjects, startIrohRpcMode } from "./iroh-stream-doubles.ts";
+import {
+	createTestSession,
+	parseWrittenObjects,
+	startIrohRpcMode,
+	withCurrentConversationAuthority,
+} from "./iroh-stream-doubles.ts";
 
 /**
  * P3 (leak): `sentNotificationEventIds` in runIrohRemoteRpcMode is a per-stream
@@ -44,8 +50,11 @@ describe("P3: iroh remote notification dedupe set growth", () => {
 		// (conversation:session-one:<runId>:completed).
 		let runCounter = 0;
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = `run-${runCounter}`;
 			},
 		);
@@ -73,12 +82,14 @@ describe("P3: iroh remote notification dedupe set growth", () => {
 			runCounter = index;
 			session.leafId = "before-run";
 			recv.pushLine(
-				JSON.stringify({
-					id: `prompt-${index}`,
-					type: "prompt",
-					clientMessageId: `client-prompt-${index}`,
-					message: `hello ${index}`,
-				}),
+				JSON.stringify(
+					withCurrentConversationAuthority(send, {
+						id: `prompt-${index}`,
+						type: "prompt",
+						clientMessageId: `client-prompt-${index}`,
+						message: `hello ${index}`,
+					}),
+				),
 			);
 			// runCounter is captured by the async prompt mock; wait for this prompt to
 			// be consumed before mutating runCounter for the next one.
@@ -97,12 +108,14 @@ describe("P3: iroh remote notification dedupe set growth", () => {
 		runCounter = 0;
 		session.leafId = "before-run";
 		recv.pushLine(
-			JSON.stringify({
-				id: "prompt-replay",
-				type: "prompt",
-				clientMessageId: "client-prompt-replay",
-				message: "hello replay",
-			}),
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-replay",
+					type: "prompt",
+					clientMessageId: "client-prompt-replay",
+					message: "hello replay",
+				}),
+			),
 		);
 		await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledTimes(TOTAL + 1));
 		// Give any async notification delivery a chance to flush.

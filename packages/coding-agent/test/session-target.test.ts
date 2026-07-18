@@ -1,6 +1,11 @@
+import { appendFileSync, copyFileSync, mkdtempSync, readdirSync, rmSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { IrohRemoteOutcomeError } from "../src/core/remote/iroh/protocol.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 import {
+	createSessionManagerTargetStore,
 	type IrohRemoteSessionTarget,
 	resolveIrohRemoteSessionTarget,
 	type SessionTargetSessionStore,
@@ -134,5 +139,69 @@ describe("resolveIrohRemoteSessionTarget", () => {
 		const store = createFakeStore([{ id: "existing", path: "/s/existing.jsonl" }]);
 		const resolved = await resolve({ kind: "session", sessionId: "existing" }, store);
 		expect(resolved.sessionManager.getSessionId()).toBe("existing");
+	});
+
+	it("fails closed if a resume target changes identity between lookup and open", async () => {
+		const store = createFakeStore([{ id: "expected", path: "/s/expected.jsonl" }]);
+		store.find = async () => ({ id: "expected", path: "/s/expected.jsonl" });
+		store.open = () => ({
+			getSessionId: () => "replacement",
+			getSessionFile: () => "/s/expected.jsonl",
+		});
+
+		const error = await resolve({ kind: "session", sessionId: "expected" }, store).catch((thrown) => thrown);
+		expect(error).toBeInstanceOf(IrohRemoteOutcomeError);
+		expect((error as IrohRemoteOutcomeError).outcome).toBe("session_unavailable");
+	});
+
+	it("strictly resumes selector-hidden WAL-only sessions and never downgrades target corruption to missing", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "volt-session-target-wal-"));
+		try {
+			const manager = SessionManager.create(tempDir, tempDir, { id: "wal-only-resume" });
+			manager.reserveClientInput("handled-terminal", "prompt", { message: "/handled" });
+			manager.transitionClientInput("handled-terminal", "started");
+			manager.transitionClientInput("handled-terminal", "completed");
+			const sessionFile = manager.getSessionFile()!;
+			expect(await SessionManager.listAll(tempDir)).toEqual([]);
+
+			const store = createSessionManagerTargetStore(tempDir, tempDir, {
+				listAll: true,
+				preserveSessionCwd: true,
+			});
+			const resumed = await resolveIrohRemoteSessionTarget(
+				{ kind: "session", sessionId: "wal-only-resume" },
+				{ name: "volt", path: tempDir },
+				store,
+			);
+			expect(resumed.selection).toBe("resumed");
+			expect(resumed.sessionFilePath).toBe(sessionFile);
+			expect(resumed.sessionManager.getClientInput("handled-terminal")?.state).toBe("completed");
+
+			// A duplicate durable identity is equally ambiguous and must not pick a
+			// winner based on directory enumeration order.
+			const duplicateFile = join(tempDir, "duplicate.jsonl");
+			copyFileSync(sessionFile, duplicateFile);
+			const duplicateError = await resolveIrohRemoteSessionTarget(
+				{ kind: "session", sessionId: "wal-only-resume" },
+				{ name: "volt", path: tempDir },
+				store,
+			).catch((thrown) => thrown);
+			expect(duplicateError).toBeInstanceOf(IrohRemoteOutcomeError);
+			expect((duplicateError as IrohRemoteOutcomeError).outcome).toBe("session_unavailable");
+			unlinkSync(duplicateFile);
+
+			appendFileSync(sessionFile, '{"type":"client_input_state"\n');
+			const before = readdirSync(tempDir).filter((name) => name.endsWith(".jsonl"));
+			const error = await resolveIrohRemoteSessionTarget(
+				{ kind: "last", resumeSessionId: "wal-only-resume" },
+				{ name: "volt", path: tempDir },
+				store,
+			).catch((thrown) => thrown);
+			expect(error).toBeInstanceOf(IrohRemoteOutcomeError);
+			expect((error as IrohRemoteOutcomeError).outcome).toBe("session_unavailable");
+			expect(readdirSync(tempDir).filter((name) => name.endsWith(".jsonl"))).toEqual(before);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 });
