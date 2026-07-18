@@ -6,12 +6,28 @@ import {
 	type RpcTransport,
 } from "../../rpc/index.ts";
 import type { IrohRemoteRpcGrant } from "./access-grant.ts";
-import { getIrohRemoteRpcFilterResult } from "./rpc-command-filter.ts";
+import {
+	createIrohRemoteRpcErrorResponse,
+	getIrohRemoteRpcFilterResult,
+	getStaticIrohRemoteRpcFilterResult,
+} from "./rpc-command-filter.ts";
 
 export interface IrohRemoteFilteredRpcTransportOptions {
 	transport: RpcTransport;
 	/** Persisted grant snapshot for this authorized remote stream. */
 	rpcGrant: IrohRemoteRpcGrant;
+	/**
+	 * Optional ordered response sink. Conversation transports install their
+	 * runtime-owned projection lane here so policy rejections cannot overtake
+	 * bootstrap or already-enqueued conversation frames.
+	 */
+	writeRejectedResponse?: (value: object) => void | Promise<void>;
+	/** Atomically fence queued output and write the stale-authority rejection last. */
+	writeStaleGrantResponse?: (value: object) => void | Promise<void>;
+	/** Recheck persisted authority before even parsing/capability-filtering input. */
+	isRpcGrantCurrent?: () => boolean | Promise<boolean>;
+	/** Retire the stream immediately after the stale rejection owns its ordered slot. */
+	onRpcGrantStale?: () => void | Promise<void>;
 }
 
 interface StartupAwareRpcTransport extends RpcTransport {
@@ -73,6 +89,39 @@ export function createIrohRemoteFilteredRpcTransport(
 		},
 		onLine(handler: RpcLineHandler): () => void {
 			return options.transport.onLine(async (line) => {
+				if (options.isRpcGrantCurrent && !(await options.isRpcGrantCurrent())) {
+					const staticResult = getStaticIrohRemoteRpcFilterResult(line);
+					const target = staticResult.allowed
+						? {
+								id: typeof staticResult.command.id === "string" ? staticResult.command.id : undefined,
+								command: staticResult.command.type,
+							}
+						: { id: staticResult.response.id, command: staticResult.response.command };
+					const staleResponse = createIrohRemoteRpcErrorResponse(
+						target.id,
+						target.command,
+						"RPC grant is stale; reconnect",
+					);
+					try {
+						const writeResult = options.writeStaleGrantResponse
+							? options.writeStaleGrantResponse(staleResponse)
+							: options.writeRejectedResponse
+								? options.writeRejectedResponse(staleResponse)
+								: options.transport.write(staleResponse);
+						trackRejectionWrite(writeResult);
+						// Ordered sinks admit synchronously before returning their physical
+						// delivery promise. Authority retirement must start at that boundary;
+						// waiting for delivery can deadlock behind an older blocked write.
+					} catch (error: unknown) {
+						recordRejectionError(error);
+					}
+					try {
+						await options.onRpcGrantStale?.();
+					} catch (error: unknown) {
+						recordRejectionError(error);
+					}
+					return;
+				}
 				const filterResult = getIrohRemoteRpcFilterResult(line, options.rpcGrant);
 				if (filterResult.allowed) {
 					await handler(line);
@@ -80,9 +129,16 @@ export function createIrohRemoteFilteredRpcTransport(
 				}
 
 				try {
-					const writeResult = options.transport.write(filterResult.response);
-					trackRejectionWrite(writeResult);
-					await writeResult;
+					if (options.writeRejectedResponse) {
+						// Conversation sinks claim the response synchronously at FIFO
+						// admission. Track their later delivery settlement without blocking
+						// input behind a potentially retired physical stream.
+						trackRejectionWrite(options.writeRejectedResponse(filterResult.response));
+					} else {
+						// A raw transport has no separate admission receipt. Await each write
+						// so a peer cannot build an unbounded queue of policy rejections.
+						await options.transport.write(filterResult.response);
+					}
 				} catch (error: unknown) {
 					recordRejectionError(error);
 				}

@@ -12,15 +12,14 @@ import {
 } from "../../core/host-actions.ts";
 import { getMcpRpcCapabilities, listMcpRpcServers } from "../../core/mcp/rpc.ts";
 import type { McpGatewayExecutionContext } from "../../core/mcp/types.ts";
-import { projectMessageImages, projectSessionTranscript, projectSubagentDetails } from "../../core/rpc/transcript.ts";
+import { buildRpcSessionState } from "../../core/rpc/session-state.ts";
+import { projectMessageImages, projectSessionTranscript } from "../../core/rpc/transcript.ts";
 import {
 	createUiActionInvocationPlan,
 	getUiActionCompletions,
 	getUiActionDescriptors,
 } from "../../core/rpc/ui-actions.ts";
-import { SUBAGENT_REGISTRY_TOOL_NAME } from "../../core/subagents/tool-names.ts";
 import type {
-	RpcActiveToolExecution,
 	RpcCatalogModel,
 	RpcClientCapabilityFeature,
 	RpcCommand,
@@ -68,7 +67,9 @@ export interface RpcCommandDispatcherContext {
 	rebindSession(): Promise<void>;
 	createHostActionContext(): HostActionInvocationContext;
 	setClientCapabilities(features: RpcClientCapabilityFeature[]): void;
-	reportStreamDiscontinuity(): void;
+	reportStreamDiscontinuity(
+		command: Extract<RpcCommand, { type: "report_stream_discontinuity" }>,
+	): Promise<{ subscriptionId: string; requestId: string; checkpointCursor: number }>;
 	getPendingHostActionRequests(): RpcHostActionRequest[];
 	cancelPendingHostActionRequests(message?: string): void;
 	subagents: RpcSubagentLifecycleController;
@@ -116,8 +117,30 @@ export function createRpcSuccessResponse<T extends RpcCommand["type"]>(
 	return { id, type: "response", command, success: true, data } as RpcResponse;
 }
 
-export function createRpcErrorResponse(id: string | undefined, command: string, message: string): RpcResponse {
-	return { id, type: "response", command, success: false, error: message };
+const STABLE_RPC_ERROR_CODES = new Set(["client_input_conflict", "client_input_outcome_ambiguous"]);
+
+function getStableRpcErrorCode(error: unknown): string | undefined {
+	if (typeof error !== "object" || error === null || !("code" in error) || typeof error.code !== "string") {
+		return undefined;
+	}
+	return STABLE_RPC_ERROR_CODES.has(error.code) ? error.code : undefined;
+}
+
+export function createRpcErrorResponse(
+	id: string | undefined,
+	command: string,
+	message: string,
+	error?: unknown,
+): RpcResponse {
+	const errorCode = getStableRpcErrorCode(error);
+	return {
+		id,
+		type: "response",
+		command,
+		success: false,
+		error: message,
+		...(errorCode === undefined ? {} : { errorCode }),
+	};
 }
 
 export function getRpcErrorResponseTarget(value: unknown): { id: string | undefined; command: string } {
@@ -162,6 +185,7 @@ export async function handleRpcCommand(
 				.prompt(command.message, {
 					images: command.images,
 					streamingBehavior: command.streamingBehavior,
+					clientMessageId: command.clientMessageId,
 					source: "rpc",
 					preflightResult: (didSucceed) => {
 						if (didSucceed) {
@@ -172,19 +196,19 @@ export async function handleRpcCommand(
 				})
 				.catch((e) => {
 					if (!preflightSucceeded) {
-						context.output(createRpcErrorResponse(id, "prompt", e.message));
+						context.output(createRpcErrorResponse(id, "prompt", e.message, e));
 					}
 				});
 			return undefined;
 		}
 
 		case "steer": {
-			await session.steer(command.message, command.images);
+			await session.steer(command.message, command.images, command.clientMessageId);
 			return createRpcSuccessResponse(id, "steer");
 		}
 
 		case "follow_up": {
-			await session.followUp(command.message, command.images);
+			await session.followUp(command.message, command.images, command.clientMessageId);
 			return createRpcSuccessResponse(id, "follow_up");
 		}
 
@@ -219,8 +243,8 @@ export async function handleRpcCommand(
 		}
 
 		case "report_stream_discontinuity": {
-			context.reportStreamDiscontinuity();
-			return createRpcSuccessResponse(id, "report_stream_discontinuity");
+			const data = await context.reportStreamDiscontinuity(command);
+			return createRpcSuccessResponse(id, "report_stream_discontinuity", data);
 		}
 
 		// =================================================================
@@ -500,45 +524,7 @@ export async function handleRpcCommand(
 		// =================================================================
 
 		case "get_state": {
-			const activeCompaction = session.activeCompaction;
-			const activeTools = [...session.agent.state.pendingToolExecutions.values()].map(
-				(execution): RpcActiveToolExecution => {
-					// Ship the newest subagent tree snapshot so a client attaching
-					// mid-turn paints live delegation state without waiting for the
-					// next tool_execution_update.
-					const details =
-						(execution.toolName === "subagent" || execution.toolName === SUBAGENT_REGISTRY_TOOL_NAME) &&
-						isRecord(execution.latestDetails)
-							? projectSubagentDetails(execution.latestDetails)
-							: undefined;
-					return {
-						toolCallId: execution.toolCallId,
-						toolName: execution.toolName,
-						status: "started",
-						args: { ...execution.args },
-						...(details ? { details } : {}),
-					};
-				},
-			);
-			const state: RpcSessionState = {
-				model: session.model,
-				thinkingLevel: session.thinkingLevel,
-				availableThinkingLevels: session.getAvailableThinkingLevels(),
-				isStreaming: session.isStreaming,
-				isBusy: session.isBusy,
-				isCompacting: session.isCompacting,
-				steeringMode: session.steeringMode,
-				followUpMode: session.followUpMode,
-				sessionFile: session.sessionFile,
-				sessionId: session.sessionId,
-				sessionName: session.sessionName,
-				autoCompactionEnabled: session.autoCompactionEnabled,
-				messageCount: session.messages.length,
-				pendingMessageCount: session.pendingMessageCount,
-				...(activeTools.length === 0 ? {} : { activeTools }),
-				...(activeCompaction ? { activeCompaction } : {}),
-			};
-			return createRpcSuccessResponse(id, "get_state", state);
+			return createRpcSuccessResponse(id, "get_state", buildRpcSessionState(session));
 		}
 
 		case "get_transcript": {
@@ -841,8 +827,4 @@ export async function handleRpcCommand(
 			return createRpcErrorResponse(target.id, target.command, `Unknown command: ${target.command}`);
 		}
 	}
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }

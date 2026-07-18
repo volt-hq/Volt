@@ -11,6 +11,8 @@ import type { ControlEvent } from "../src/daemon/control-protocol.ts";
 import { loadIrohModule } from "../src/daemon/iroh-native.ts";
 import {
 	createIrohDaemonService,
+	IrohDaemonAdmissionGate,
+	IrohPhysicalStreamOwner,
 	resolveIrohRelayConfig,
 	VOLT_PRODUCTION_RELAY_URLS,
 } from "../src/daemon/iroh-service.ts";
@@ -117,6 +119,128 @@ describe("relay config resolution", () => {
 		expect(resolved.relayMode).toBe("production");
 		expect(resolved.relayUrls).toEqual(VOLT_PRODUCTION_RELAY_URLS);
 		expect(resolved.warning).toContain("VOLT_IROH_RELAY_MODE");
+	});
+});
+
+describe("iroh daemon lifecycle ownership", () => {
+	it("closes admission synchronously and drains exactly the pre-close operation set", async () => {
+		const gate = new IrohDaemonAdmissionGate();
+		const first = gate.tryAcquire();
+		const second = gate.tryAcquire();
+		expect(first).toBeDefined();
+		expect(second).toBeDefined();
+
+		gate.close();
+		expect(gate.isOpen).toBe(false);
+		expect(first?.signal.aborted).toBe(true);
+		expect(second?.signal.aborted).toBe(true);
+		expect(first?.isCurrent()).toBe(false);
+		expect(second?.isCurrent()).toBe(false);
+		expect(gate.tryAcquire()).toBeUndefined();
+
+		let drained = false;
+		const draining = gate.waitForDrain().then(() => {
+			drained = true;
+		});
+		await Promise.resolve();
+		expect(drained).toBe(false);
+		first?.release();
+		await Promise.resolve();
+		expect(drained).toBe(false);
+		second?.release();
+		await draining;
+		expect(drained).toBe(true);
+	});
+
+	it("uses one idempotent physical stream close action from lifecycle install through outer finalization", async () => {
+		const fallbackReasons: string[] = [];
+		const lifecycleReasons: string[] = [];
+		let reentrantClose: Promise<void> | undefined;
+		const owner = new IrohPhysicalStreamOwner((reason) => {
+			fallbackReasons.push(reason);
+		});
+		let settled = false;
+		void owner.settled.then(() => {
+			settled = true;
+		});
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		expect(
+			owner.installCloseAction((reason) => {
+				lifecycleReasons.push(reason);
+				reentrantClose = owner.close("reentrant_close");
+			}),
+		).toBe(true);
+
+		const shutdown = owner.close("host_shutdown");
+		const outerFinally = owner.close("stream_task_settled");
+		expect(owner.settled).toBe(shutdown);
+		expect(outerFinally).toBe(shutdown);
+		expect(reentrantClose).toBe(shutdown);
+		await outerFinally;
+
+		expect(owner.isClosing).toBe(true);
+		expect(settled).toBe(true);
+		expect(lifecycleReasons).toEqual(["host_shutdown"]);
+		expect(fallbackReasons).toEqual([]);
+		expect(owner.installCloseAction(() => {})).toBe(false);
+	});
+
+	it("falls back to immediate physical close when shutdown wins before lifecycle install", async () => {
+		const reasons: string[] = [];
+		const owner = new IrohPhysicalStreamOwner((reason) => {
+			reasons.push(reason);
+		});
+
+		await owner.close("host_shutdown");
+
+		expect(reasons).toEqual(["host_shutdown"]);
+		expect(owner.installCloseAction(() => {})).toBe(false);
+	});
+
+	it("holds replacement close behind subscriber detach, zero-count publication, and active-stream removal", async () => {
+		const events: string[] = [];
+		let releaseLifecycle = () => {};
+		const lifecycleSettled = new Promise<void>((resolve) => {
+			releaseLifecycle = resolve;
+		});
+		const owner = new IrohPhysicalStreamOwner(() => {
+			throw new Error("fallback close must not own an installed stream lifecycle");
+		});
+		expect(
+			owner.installCloseAction(async (reason) => {
+				events.push(`close_requested:${reason}`);
+				await lifecycleSettled;
+				events.push("physical_close_settled");
+			}),
+		).toBe(true);
+
+		let replacementMayAttach = false;
+		const replacementBarrier = owner.close("active_stream_replaced").then(() => {
+			replacementMayAttach = true;
+			events.push("replacement_attach_released");
+		});
+		await Promise.resolve();
+		expect(replacementMayAttach).toBe(false);
+
+		// This is the outer conversation-stream finally order. The old physical
+		// owner cannot release the replacement barrier until the runtime subscriber
+		// and capability-scoped lease count no longer include the old stream, and the
+		// registry entry is synchronously removed.
+		events.push("subscriber_detached");
+		events.push("lease_count_zero");
+		events.push("active_stream_removed");
+		releaseLifecycle();
+		await replacementBarrier;
+
+		expect(events).toEqual([
+			"close_requested:active_stream_replaced",
+			"subscriber_detached",
+			"lease_count_zero",
+			"active_stream_removed",
+			"physical_close_settled",
+			"replacement_attach_released",
+		]);
 	});
 });
 

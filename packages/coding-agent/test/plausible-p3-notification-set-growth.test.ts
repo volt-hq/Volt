@@ -23,6 +23,17 @@ function getNotifications(send: { writtenText(): string; writes: number[][] }): 
 	return parseWrittenObjects(send as never).filter((record) => record.type === "notification_request");
 }
 
+function createStableSessionRunner<TSession>(getSession: () => TSession) {
+	return {
+		async runWithStableSession<TResult>(
+			operation: (session: TSession) => Promise<TResult> | TResult,
+		): Promise<TResult> {
+			const session = getSession();
+			return operation(session);
+		},
+	};
+}
+
 describe("P3: iroh remote notification dedupe set growth", () => {
 	test("bounds the per-stream notification dedupe set so old eventIds are eventually evicted", async () => {
 		// The loop drives hundreds of prompts through the async transport queue.
@@ -40,6 +51,7 @@ describe("P3: iroh remote notification dedupe set growth", () => {
 		);
 
 		const runtimeHost = {
+			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -60,7 +72,14 @@ describe("P3: iroh remote notification dedupe set growth", () => {
 		for (let index = 0; index < TOTAL; index++) {
 			runCounter = index;
 			session.leafId = "before-run";
-			recv.pushLine(JSON.stringify({ id: `prompt-${index}`, type: "prompt", message: `hello ${index}` }));
+			recv.pushLine(
+				JSON.stringify({
+					id: `prompt-${index}`,
+					type: "prompt",
+					clientMessageId: `client-prompt-${index}`,
+					message: `hello ${index}`,
+				}),
+			);
 			// runCounter is captured by the async prompt mock; wait for this prompt to
 			// be consumed before mutating runCounter for the next one.
 			await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledTimes(index + 1));
@@ -77,7 +96,14 @@ describe("P3: iroh remote notification dedupe set growth", () => {
 		// Re-drive the OLDEST completion (run-0) again in the same stream.
 		runCounter = 0;
 		session.leafId = "before-run";
-		recv.pushLine(JSON.stringify({ id: "prompt-replay", type: "prompt", message: "hello replay" }));
+		recv.pushLine(
+			JSON.stringify({
+				id: "prompt-replay",
+				type: "prompt",
+				clientMessageId: "client-prompt-replay",
+				message: "hello replay",
+			}),
+		);
 		await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledTimes(TOTAL + 1));
 		// Give any async notification delivery a chance to flush.
 		await new Promise((resolve) => setImmediate(resolve));

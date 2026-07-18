@@ -41,7 +41,16 @@ describe("control protocol framing", () => {
 			{ type: "lease_acquire", id: "3", workspaceName: "volt", sessionId: "s-1" },
 			{ type: "lease_acquire", id: "3b", workspaceName: "volt", sessionId: "s-1", force: true },
 			{ type: "lease_release", id: "4", workspaceName: "volt", sessionId: "s-1" },
-			{ type: "lease_rekey", id: "5", workspaceName: "volt", oldSessionId: "s-1", newSessionId: "s-2" },
+			{
+				type: "lease_rekey_prepare",
+				id: "5",
+				workspaceName: "volt",
+				oldSessionId: "s-1",
+				newSessionId: "s-2",
+			},
+			{ type: "lease_rekey_commit", id: "5a", transactionId: "tx-1" },
+			{ type: "lease_rekey_rollback", id: "5b", transactionId: "tx-1" },
+			{ type: "lease_rekey_dispose", id: "5c", transactionId: "tx-1" },
 			{ type: "pair_request", id: "6", access: "coding" },
 			{
 				type: "client_access_update",
@@ -121,6 +130,7 @@ describe("control protocol framing", () => {
 			{ type: "lease_granted", id: "3", workspaceName: "volt", sessionId: "s-1", handoff: "warm" },
 			{ type: "lease_pending", id: "4", viewerFeedId: "vf-1" },
 			{ type: "lease_denied", id: "5", reason: "held_by_tui" },
+			{ type: "lease_rekey_prepared", id: "5a", transactionId: "tx-1" },
 			{
 				type: "status_result",
 				id: "6",
@@ -185,6 +195,10 @@ describe("control protocol framing", () => {
 			expect(decoded).toEqual(response);
 			expect(isControlResponse(decoded), `response ${response.type}`).toBe(true);
 		}
+	});
+
+	it("rejects a prepared-rekey response without its transaction id", () => {
+		expect(isControlResponse({ type: "lease_rekey_prepared", id: "5a" })).toBe(false);
 	});
 
 	it("rejects pair_request with a malformed workspace", () => {

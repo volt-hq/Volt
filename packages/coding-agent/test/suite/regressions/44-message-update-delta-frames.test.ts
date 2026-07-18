@@ -1,5 +1,6 @@
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import type { AgentSession } from "../../../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import type { RpcCloseHandler, RpcTransport } from "../../../src/core/rpc/transport.ts";
 import type { RpcSessionState, RpcTranscriptResponse } from "../../../src/core/rpc/types.ts";
@@ -51,6 +52,9 @@ function createFakeRuntimeHost(harness: Harness): AgentSessionRuntime {
 		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
 		dispose: vi.fn(async () => {}),
 		setRebindSession: vi.fn(),
+		async runWithStableSession<T>(operation: (stableSession: AgentSession) => Promise<T> | T): Promise<T> {
+			return operation(harness.session);
+		},
 	} as unknown as AgentSessionRuntime;
 }
 
@@ -150,7 +154,12 @@ async function startRpcModeForHarness(
 }
 
 async function promptAndWaitForMessageEnd(rpc: RpcHarness, text: string): Promise<void> {
-	rpc.send({ id: "prompt-1", type: "prompt", message: "stream please" });
+	rpc.send({
+		id: "prompt-1",
+		type: "prompt",
+		clientMessageId: "client-prompt-1",
+		message: "stream please",
+	});
 	await vi.waitFor(() =>
 		expect(
 			rpc.writes.some((record) => record.type === "message_end" && getMessageText(record.message) === text),

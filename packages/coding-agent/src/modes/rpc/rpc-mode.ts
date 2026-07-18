@@ -11,6 +11,7 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as crypto from "node:crypto";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
@@ -138,6 +139,17 @@ export interface RpcSessionChange {
 	sessionId: string;
 }
 
+export interface RpcOrderedConversationBinding {
+	readonly subscriptionId: string;
+	enqueueControl(value: object): Promise<void>;
+	requestCheckpoint(requestId: string): {
+		subscriptionId: string;
+		requestId: string;
+		checkpointCursor: number;
+	};
+	publishExternal(event: object): void;
+}
+
 export interface RpcModeOptions {
 	transport?: RpcTransport;
 	/** Defaults to true. Remote hosts can detach a transport without disposing the owned runtime. */
@@ -160,6 +172,12 @@ export interface RpcModeOptions {
 	onClientCapabilitiesChanged?: (features: string[]) => void;
 	/** Outbound projector factory; Iroh remote mode supplies its field-aware sanitizer. */
 	createStreamProjector?: () => StreamProjector;
+	/** One runtime-owned conversation lane for events, checkpoints, and control frames. */
+	orderedConversation?: RpcOrderedConversationBinding;
+	/** @deprecated Prefer orderedConversation. Retained for non-Iroh embedders during migration. */
+	reportStreamDiscontinuity?: (
+		command: Extract<RpcCommand, { type: "report_stream_discontinuity" }>,
+	) => Promise<{ subscriptionId: string; requestId: string; checkpointCursor: number }>;
 }
 
 type RpcModeStartupAwareTransport = RpcTransport & {
@@ -167,6 +185,12 @@ type RpcModeStartupAwareTransport = RpcTransport & {
 };
 
 const MAX_PENDING_RPC_INPUT_TASKS = 64;
+const RPC_SESSION_INTERRUPTION_TYPES: ReadonlySet<string> = new Set(["abort", "abort_retry", "abort_bash"]);
+
+/** Commands that must reach the active session even while another stream owns the lifecycle actor. */
+export function isRpcSessionInterruptionCommand(command: { type?: unknown }): boolean {
+	return typeof command.type === "string" && RPC_SESSION_INTERRUPTION_TYPES.has(command.type);
+}
 
 function createStdioRpcTransport(): RpcTransport {
 	return {
@@ -583,7 +607,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			return;
 		}
 		try {
-			trackTransportWrite(transport.write(obj));
+			trackTransportWrite(
+				options.orderedConversation ? options.orderedConversation.enqueueControl(obj) : transport.write(obj),
+			);
 		} catch (writeError: unknown) {
 			requestTransportFailureShutdown(writeError);
 		}
@@ -893,11 +919,17 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	// own rebind handler so it can be restored on exit; otherwise the TUI's session
 	// changes would keep running this RPC-mode handler after the phone disconnects.
 	const previousRebindSession = runtimeHost.getRebindSession?.();
-	runtimeHost.setRebindSession(async () => {
+	const detachSessionReplacement = runtimeHost.subscribeSessionReplaced?.(async () => {
 		await rebindSession();
 	});
+	if (!detachSessionReplacement) {
+		runtimeHost.setRebindSession(async () => {
+			await rebindSession();
+		});
+	}
 	const restoreRebindSession = (): void => {
-		if (!shouldDisposeRuntimeOnClose) {
+		detachSessionReplacement?.();
+		if (!detachSessionReplacement && !shouldDisposeRuntimeOnClose) {
 			runtimeHost.setRebindSession(previousRebindSession);
 		}
 	};
@@ -965,26 +997,30 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		await notifySessionChanged();
 
 		unsubscribe?.();
+		unsubscribe = undefined;
 		unsubscribeBackpressure?.();
+		unsubscribeBackpressure = undefined;
 		endSessionProjector();
-		sessionProjector = createStreamProjector();
-		unsubscribe = session.subscribe((event) => {
-			const batch = sessionProjector?.push(event);
-			if (!batch) {
-				return;
-			}
-			reportProjectionDiagnostics("rpc-session", batch.diagnostics);
-			for (const frame of batch.frames) {
-				output(frame);
-			}
-		});
-		unsubscribeBackpressure = session.agent.subscribe(async () => {
-			try {
-				await waitForTransportBackpressure();
-			} catch (transportError: unknown) {
-				requestTransportFailureShutdown(transportError);
-			}
-		});
+		if (!options.orderedConversation) {
+			sessionProjector = createStreamProjector();
+			unsubscribe = session.subscribe((event) => {
+				const batch = sessionProjector?.push(event);
+				if (!batch) {
+					return;
+				}
+				reportProjectionDiagnostics("rpc-session", batch.diagnostics);
+				for (const frame of batch.frames) {
+					output(frame);
+				}
+			});
+			unsubscribeBackpressure = session.agent.subscribe(async () => {
+				try {
+					await waitForTransportBackpressure();
+				} catch (transportError: unknown) {
+					requestTransportFailureShutdown(transportError);
+				}
+			});
+		}
 	};
 
 	const handleReviewWorkflowEvent = (event: ReviewWorkflowEvent | ReviewWorkflowToolEvent): void => {
@@ -996,30 +1032,34 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		} catch (error) {
 			void error;
 		}
-		output(event);
+		if (options.orderedConversation) {
+			options.orderedConversation.publishExternal(event);
+		} else {
+			output(event);
+		}
 	};
 
-	const createHostActionContext = (): HostActionInvocationContext => ({
-		session,
-		abortRun: () => session.abort(),
-		compactContext: (customInstructions) => session.compact(customInstructions),
+	const createHostActionContext = (commandSession: AgentSession = session): HostActionInvocationContext => ({
+		session: commandSession,
+		abortRun: () => commandSession.abort(),
+		compactContext: (customInstructions) => commandSession.compact(customInstructions),
 		newSession: (newSessionOptions) => runtimeHost.newSession(newSessionOptions),
 		afterSessionSwitch: rebindSession,
 		renameSession: (name) => {
-			session.setSessionName(name);
+			commandSession.setSessionName(name);
 		},
 		setThinkingLevel: (level, options) => {
-			session.setThinkingLevel(level, options);
+			commandSession.setThinkingLevel(level, options);
 		},
 		setFastModeRestoreThinkingLevel: (level) => {
-			session.setFastModeRestoreThinkingLevel(level);
+			commandSession.setFastModeRestoreThinkingLevel(level);
 		},
 		runReviewAction: (target, reviewOptions) =>
 			runReviewWorkflow({
 				target,
 				cwd: runtimeHost.cwd,
 				agentDir: runtimeHost.services.agentDir,
-				session,
+				session: commandSession,
 				newSession: async (newSessionOptions) => {
 					const result = await runtimeHost.newSession(newSessionOptions);
 					if (!result.cancelled) {
@@ -1027,8 +1067,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					}
 					return result;
 				},
-				authStorage: session.modelRegistry.authStorage,
-				settingsManager: session.settingsManager,
+				authStorage: commandSession.modelRegistry.authStorage,
+				settingsManager: commandSession.settingsManager,
 				tools: REMOTE_REVIEW_TOOL_NAMES,
 				requireProjectTrust: reviewOptions.remote,
 				requireConfirmation: reviewOptions.requireConfirmation,
@@ -1037,8 +1077,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			}),
 	});
 
-	const createRpcCommandContext = () => ({
-		session,
+	const createRpcCommandContext = (commandSession: AgentSession = session) => ({
+		session: commandSession,
 		runtimeHost,
 		options: {
 			allowUiActionInvocation,
@@ -1047,22 +1087,27 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		},
 		output,
 		rebindSession,
-		createHostActionContext,
+		createHostActionContext: () => createHostActionContext(commandSession),
 		setClientCapabilities(features: RpcClientCapabilityFeature[]): void {
 			clientCapabilities = new Set(
 				features.filter((feature): feature is RpcClientCapabilityFeature => typeof feature === "string"),
 			);
 			options.onClientCapabilitiesChanged?.(Array.from(clientCapabilities));
 		},
-		reportStreamDiscontinuity(): void {
-			if (!sessionProjector) {
-				return;
+		async reportStreamDiscontinuity(command: Extract<RpcCommand, { type: "report_stream_discontinuity" }>) {
+			if (options.orderedConversation) {
+				if (command.sessionId !== commandSession.sessionId) {
+					throw new Error(`Stale conversation session: ${command.sessionId}`);
+				}
+				if (command.subscriptionId !== options.orderedConversation.subscriptionId) {
+					throw new Error(`Stale conversation subscription: ${command.subscriptionId}`);
+				}
+				return options.orderedConversation.requestCheckpoint(command.id);
 			}
-			const batch = sessionProjector.discontinuity();
-			reportProjectionDiagnostics("rpc-session", batch.diagnostics);
-			for (const frame of batch.frames) {
-				output(frame);
+			if (!options.reportStreamDiscontinuity) {
+				throw new Error("Ordered conversation recovery is unavailable on this RPC transport");
 			}
+			return await options.reportStreamDiscontinuity(command);
 		},
 		getPendingHostActionRequests: () => hostActionBridge.getPendingRequests(),
 		cancelPendingHostActionRequests,
@@ -1078,6 +1123,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		rejectModeClosed = reject;
 	});
 	let shutdownPromise: Promise<void> | undefined;
+	let commandQueue: Promise<void> = Promise.resolve();
+	let pendingInputTaskCount = 0;
+	const commandTaskContext = new AsyncLocalStorage<boolean>();
 
 	const registerSignalHandlers = (): void => {
 		const signals: NodeJS.Signals[] = ["SIGTERM"];
@@ -1137,6 +1185,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	 * Called after handling each command when waiting for the next command.
 	 */
 	function shutdown(exitCode = 0, signal?: NodeJS.Signals, failure?: { error: unknown }): Promise<void> {
+		const invokedFromCommandTask = commandTaskContext.getStore() === true;
 		if (!startupComplete) {
 			void modeClosed.catch(() => {});
 			if (!startupAbortError) {
@@ -1156,10 +1205,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			cancelPendingHostActionRequests();
 		}
 		if (shuttingDown) {
-			if (shouldExitProcess) {
-				process.exit(exitCode);
-			}
-			return shutdownPromise ?? modeClosed;
+			return invokedFromCommandTask ? Promise.resolve() : (shutdownPromise ?? modeClosed);
 		}
 		shuttingDown = true;
 		shutdownPromise = (async () => {
@@ -1167,6 +1213,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				let hasShutdownError = failure !== undefined;
 				let shutdownError: unknown = failure?.error;
 				try {
+					// Stop admitting input first, then let every command that already
+					// owns a bounded queue slot either finish or observe shuttingDown and
+					// cancel. Runtime/session teardown is only safe after that barrier.
+					detachInput();
+					detachClose();
+					await commandQueue;
 					restoreRebindSession();
 					for (const cleanup of signalCleanupHandlers) {
 						cleanup();
@@ -1178,8 +1230,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					if (shouldDisposeRuntimeOnClose) {
 						await runtimeHost.dispose();
 					}
-					detachInput();
-					detachClose();
 					if (signal !== "SIGTERM" && !hasShutdownError) {
 						await waitForTransportBackpressure();
 						await transport.flush?.();
@@ -1214,16 +1264,19 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				throw shutdownError;
 			}
 		})();
-		return shutdownPromise;
+		// modeClosed is the public outcome. Keep the independently running
+		// finalizer observed as well when a command-task caller must return early.
+		void shutdownPromise.catch(() => {});
+		// A command cannot await a shutdown finalizer whose first barrier is the
+		// command's own queue promise. It has initiated shutdown; returning here
+		// lets that command settle so the independently owned finalizer can drain.
+		return invokedFromCommandTask ? Promise.resolve() : shutdownPromise;
 	}
 
 	async function checkShutdownRequested(): Promise<void> {
 		if (!shutdownRequested) return;
 		await shutdown();
 	}
-
-	let commandQueue: Promise<void> = Promise.resolve();
-	let pendingInputTaskCount = 0;
 
 	const handleControlMessage = (parsed: unknown): boolean => {
 		// Handle extension UI and host action responses during startup as well as normal operation.
@@ -1273,10 +1326,16 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		const command = parsed as RpcCommand;
 		let response: RpcResponse | undefined;
 		try {
-			response = await handleRpcCommand(command, createRpcCommandContext());
+			response = isRpcSessionInterruptionCommand(command)
+				? await runtimeHost.runSessionInterruption((interruptionSession) =>
+						handleRpcCommand(command, createRpcCommandContext(interruptionSession)),
+					)
+				: await runtimeHost.runWithStableSession((stableSession) =>
+						handleRpcCommand(command, createRpcCommandContext(stableSession)),
+					);
 		} catch (commandError: unknown) {
 			const target = getRpcErrorResponseTarget(command);
-			output(createRpcErrorResponse(target.id, target.command, toError(commandError).message));
+			output(createRpcErrorResponse(target.id, target.command, toError(commandError).message, commandError));
 			await waitForTransportBackpressure();
 			await checkShutdownRequested();
 			return;
@@ -1293,15 +1352,16 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			return false;
 		}
 		pendingInputTaskCount++;
-		const runTask = async (): Promise<void> => {
-			try {
-				await task();
-			} catch (inputError: unknown) {
-				await shutdown(1, undefined, { error: toError(inputError) }).catch(() => {});
-			} finally {
-				pendingInputTaskCount--;
-			}
-		};
+		const runTask = (): Promise<void> =>
+			commandTaskContext.run(true, async () => {
+				try {
+					await task();
+				} catch (inputError: unknown) {
+					await shutdown(1, undefined, { error: toError(inputError) }).catch(() => {});
+				} finally {
+					pendingInputTaskCount--;
+				}
+			});
 		commandQueue = commandQueue.then(runTask, runTask);
 		void commandQueue.catch(() => {});
 		return true;

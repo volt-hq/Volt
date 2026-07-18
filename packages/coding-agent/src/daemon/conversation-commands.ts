@@ -26,7 +26,7 @@ import {
 	type IrohRemoteWorktreeRpcBackend,
 } from "../core/remote/iroh/worktree-rpc.ts";
 import { extractMessageImages, projectMessageImages } from "../core/rpc/transcript.ts";
-import type { RpcKeepAwakeStatus } from "../core/rpc/types.ts";
+import type { RpcConversationAssistantPart, RpcKeepAwakeStatus } from "../core/rpc/types.ts";
 import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../core/session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../core/subagents/tool-names.ts";
 import type { KeepAwakeStatus } from "./keep-awake.ts";
@@ -70,6 +70,16 @@ const REMOTE_TRANSCRIPT_DEFAULT_LIMIT = 200;
 const REMOTE_TRANSCRIPT_MAX_LIMIT = 200;
 const REMOTE_TRANSCRIPT_CURSOR_MAX_BYTES = 2048;
 const REMOTE_TRANSCRIPT_CURSOR_MAX_SCALARS = 512;
+/**
+ * Leaves half of the ordered feed's 4 MiB queue available for the bootstrap
+ * envelope, session state, active workflows, and frames committed at the cut.
+ */
+export const REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES = 2 * 1024 * 1024;
+const REMOTE_TRANSCRIPT_SOURCE_WINDOW_MIN_ENTRIES = 256;
+const REMOTE_TRANSCRIPT_SOURCE_WINDOW_MAX_ENTRIES = 800;
+const REMOTE_TRANSCRIPT_SOURCE_WINDOW_MULTIPLIER = 4;
+export const REMOTE_TRANSCRIPT_TOOL_CALL_LOOKBACK_ENTRIES = 256;
+export const REMOTE_TRANSCRIPT_PROJECTION_VERSION = 3;
 const REMOTE_TOOL_COMMAND_MAX_SCALARS = 500;
 const REMOTE_TOOL_ARGUMENT_MAX_SCALARS = 500;
 const REMOTE_TOOL_ARGUMENT_KEYS_MAX = 12;
@@ -107,7 +117,7 @@ export interface RemoteSessionListCursorEntry {
 export interface ConversationCommandRuntime {
 	session: {
 		sessionId: string;
-		sessionManager: Pick<SessionManager, "getBranch">;
+		sessionManager: Pick<SessionManager, "getBranch" | "getBranchWindow" | "getLeafEntry">;
 	};
 	listSessions(): Promise<
 		Array<{
@@ -131,12 +141,20 @@ export interface ConversationCommandContext {
 	sessionListCursors: Map<string, RemoteSessionListCursorEntry>;
 	sessionListCursorTtlMs: number;
 	now?: () => number;
+	/** Current ordered-projection generation used to correlate transcript pagination. */
+	getConversationBranchEpoch?: () => string;
+	/** Accept only generation-scoped cursors previously issued by the ordered feed. */
+	isConversationTranscriptCursorValid?: (cursor: string) => boolean;
+	/** Retain the next bounded cursor emitted by a successful page. */
+	registerConversationTranscriptCursor?: (cursor: string | null) => void;
 	/** Batch live-runtime presence for list_sessions; absent on hosts without a daemon broker. */
 	listRuntimeStates?: (
 		workspaceName: string,
 	) => Promise<ReadonlyMap<string, RemoteSessionRuntimeState>> | ReadonlyMap<string, RemoteSessionRuntimeState>;
 	/** True while this conversation's lease is draining to a TUI (§4.5 rejection). */
 	isDraining?: () => boolean;
+	/** True once the daemon has closed its admission epoch for shutdown. */
+	isTurnAdmissionClosed?: () => boolean;
 	/**
 	 * True when this conversation runtime is a subagent child session. Subagent
 	 * sessions are observe-only for remote clients: the parent agent owns the
@@ -176,6 +194,20 @@ export function createLeaseDrainingRpcErrorResponse(command: RemoteRpcCommand): 
 			code: "lease_draining",
 			message: "Handing off to the desktop TUI; retry shortly.",
 			retryAfterMs: LEASE_DRAINING_RETRY_AFTER_MS,
+		},
+	};
+}
+
+export function createHostShutdownRpcErrorResponse(command: RemoteRpcCommand): Record<string, unknown> {
+	const id = getRpcResponseId(command);
+	return {
+		...(id === undefined ? {} : { id }),
+		type: "response",
+		command: command.type,
+		success: false,
+		error: {
+			code: "host_shutdown",
+			message: "The host is shutting down; reconnect after it restarts.",
 		},
 	};
 }
@@ -271,6 +303,14 @@ interface RemoteTranscriptRequest {
 	beforeEntryId?: string;
 }
 
+export interface RemoteConversationTranscriptPageOptions {
+	beforeEntryId?: string;
+	limit?: number;
+	branchEpoch?: string;
+	/** Internal override for deterministic boundary tests. */
+	maxSerializedBytes?: number;
+}
+
 function parseRemoteTranscriptLimit(
 	command: Record<string, unknown>,
 ): { ok: true; limit: number } | { ok: false; error: string } {
@@ -332,10 +372,13 @@ function extractTranscriptContentText(content: unknown): string {
 
 export interface RemoteTranscriptItem {
 	entryId: string;
+	ordinal: number;
 	createdAt: string;
 	role: "user" | "assistant" | "system" | "tool";
 	text: string;
 	truncated: boolean;
+	/** Stable submitting-client identity. Omitted for host-local user messages. */
+	clientMessageId?: string;
 	/** Inline image blocks persisted on the message (user attachments or tool
 	 *  results such as image reads); recoverable per entry via
 	 *  get_message_images. */
@@ -348,6 +391,8 @@ export interface RemoteTranscriptItem {
 	details?: Record<string, unknown>;
 	output?: string;
 	outputTruncated?: boolean;
+	parts?: RpcConversationAssistantPart[];
+	stopReason?: "stop" | "length" | "toolUse" | "error" | "aborted";
 }
 
 /**
@@ -385,11 +430,51 @@ function createRemoteTranscriptItem(
 	const sanitized = sanitizeRemoteTranscriptText(text, authorization, layout);
 	return {
 		entryId: entry.id,
+		ordinal: entry.ordinal ?? 0,
 		createdAt: toRemoteSessionTimestamp(entry.timestamp),
 		role,
 		text: sanitized.text,
 		truncated: sanitized.truncated,
 	};
+}
+
+function projectRemoteAssistantParts(
+	content: unknown,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): RpcConversationAssistantPart[] {
+	if (!Array.isArray(content)) {
+		return [];
+	}
+	const parts: RpcConversationAssistantPart[] = [];
+	for (const part of content) {
+		if (!isRemoteRecord(part)) {
+			continue;
+		}
+		if (part.type === "text" && typeof part.text === "string") {
+			const sanitized = sanitizeRemoteTranscriptText(part.text, authorization, "preserve");
+			if (sanitized.text.length > 0) {
+				parts.push({ type: "text", text: sanitized.text, truncated: sanitized.truncated });
+			}
+			continue;
+		}
+		if (part.type === "thinking" && part.redacted === true) {
+			parts.push({ type: "thinking", text: "", redacted: true });
+			continue;
+		}
+		if (part.type === "thinking" && typeof part.thinking === "string") {
+			const sanitized = sanitizeRemoteTranscriptText(part.thinking, authorization, "preserve");
+			if (sanitized.text.length > 0) {
+				parts.push({ type: "thinking", text: sanitized.text, truncated: sanitized.truncated });
+			}
+		}
+	}
+	return parts;
+}
+
+function getRemoteStopReason(value: unknown): RemoteTranscriptItem["stopReason"] {
+	return value === "stop" || value === "length" || value === "toolUse" || value === "error" || value === "aborted"
+		? value
+		: undefined;
 }
 
 interface RemoteToolCallRecord {
@@ -398,7 +483,7 @@ interface RemoteToolCallRecord {
 	arguments: Record<string, unknown>;
 }
 
-function projectRemoteTranscriptEntry(
+export function projectRemoteTranscriptEntry(
 	entry: SessionEntry,
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	toolCallsById: Map<string, RemoteToolCallRecord>,
@@ -421,12 +506,34 @@ function projectRemoteTranscriptEntry(
 	}
 	const message = entry.message as unknown as Record<string, unknown>;
 	if (message.role === "user" || message.role === "assistant") {
-		const text = extractTranscriptContentText(message.content);
+		const parts = message.role === "assistant" ? projectRemoteAssistantParts(message.content, authorization) : [];
+		const stopReason = message.role === "assistant" ? getRemoteStopReason(message.stopReason) : undefined;
+		const text =
+			message.role === "assistant"
+				? parts
+						.filter(
+							(part): part is Extract<RpcConversationAssistantPart, { type: "text" }> => part.type === "text",
+						)
+						.map((part) => part.text)
+						.join("")
+				: extractTranscriptContentText(message.content);
 		const imageCount = message.role === "user" ? extractMessageImages(message.content).length : 0;
-		if (!text && imageCount === 0) {
+		const isIdentityOnlyTerminal =
+			message.role === "assistant" && (stopReason === "aborted" || stopReason === "error");
+		if (!text && imageCount === 0 && parts.length === 0 && !isIdentityOnlyTerminal) {
 			return undefined;
 		}
 		const item = createRemoteTranscriptItem(entry, message.role, text, authorization);
+		if (message.role === "user" && typeof message.clientMessageId === "string") {
+			item.clientMessageId = message.clientMessageId;
+		}
+		if (parts.length > 0) {
+			item.parts = parts;
+			item.truncated ||= parts.some((part) => part.truncated === true);
+		}
+		if (message.role === "assistant") {
+			item.stopReason = stopReason;
+		}
 		if (imageCount > 0) {
 			item.imageCount = imageCount;
 		}
@@ -495,20 +602,143 @@ function projectRemoteTranscriptEntry(
 	return undefined;
 }
 
-function projectRemoteTranscriptItems(
-	sessionManager: Pick<SessionManager, "getBranch">,
+export function projectRemoteTranscriptItems(
+	sessionManager: Pick<SessionManager, "getBranchWindow">,
 	authorization: IrohRemoteClientAuthorizationSuccess,
 ): RemoteTranscriptItem[] {
-	const branch = sessionManager.getBranch();
-	const toolCallsById = collectRemoteToolCalls(branch);
-	return branch
+	const window = sessionManager.getBranchWindow({
+		maxEntries: REMOTE_TRANSCRIPT_SOURCE_WINDOW_MAX_ENTRIES,
+		lookbackEntries: REMOTE_TRANSCRIPT_TOOL_CALL_LOOKBACK_ENTRIES,
+	});
+	if (!window) return [];
+	const boundedBranch = [...window.lookback, ...window.entries];
+	const toolCallsById = collectRemoteToolCalls(boundedBranch);
+	return window.entries
 		.map((entry) => projectRemoteTranscriptEntry(entry, authorization, toolCallsById))
 		.filter((item): item is RemoteTranscriptItem => item !== undefined);
 }
 
-function collectRemoteToolCalls(entries: SessionEntry[]): Map<string, RemoteToolCallRecord> {
+export interface RemoteConversationTranscriptPage extends Record<string, unknown> {
+	workspaceName: string;
+	sessionId: string;
+	items: RemoteTranscriptItem[];
+	hasMore: boolean;
+	nextBeforeEntryId: string | null;
+	projectionVersion: number;
+	branchEpoch: string;
+	head: { entryId: string; ordinal: number } | null;
+}
+
+/**
+ * Build the authoritative, subscriber-projected recent transcript used by
+ * initial bootstrap and recovery checkpoints. This is synchronous so it can be
+ * captured inside the feed's atomic snapshot-and-subscribe cut.
+ */
+export function createRemoteConversationTranscriptPage(
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	runtime: ConversationCommandRuntime,
+	options: RemoteConversationTranscriptPageOptions = {},
+): RemoteConversationTranscriptPage | undefined {
+	const requestedLimit = options.limit ?? 100;
+	if (!Number.isSafeInteger(requestedLimit) || requestedLimit <= 0) {
+		throw new Error("Transcript page limit must be a positive safe integer");
+	}
+	const maxSerializedBytes = options.maxSerializedBytes ?? REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES;
+	if (!Number.isSafeInteger(maxSerializedBytes) || maxSerializedBytes <= 0) {
+		throw new Error("Transcript page byte budget must be a positive safe integer");
+	}
+	const limit = Math.min(requestedLimit, REMOTE_TRANSCRIPT_MAX_LIMIT);
+	const sourceWindowSize = Math.min(
+		REMOTE_TRANSCRIPT_SOURCE_WINDOW_MAX_ENTRIES,
+		Math.max(REMOTE_TRANSCRIPT_SOURCE_WINDOW_MIN_ENTRIES, limit * REMOTE_TRANSCRIPT_SOURCE_WINDOW_MULTIPLIER),
+	);
+	const window = runtime.session.sessionManager.getBranchWindow({
+		...(options.beforeEntryId === undefined ? {} : { beforeEntryId: options.beforeEntryId }),
+		maxEntries: sourceWindowSize,
+		lookbackEntries: REMOTE_TRANSCRIPT_TOOL_CALL_LOOKBACK_ENTRIES,
+	});
+	if (!window) return undefined;
+	const boundedBranch = [...window.lookback, ...window.entries];
+	const projectedItems = projectRemoteTranscriptWindow(
+		boundedBranch,
+		window.lookback.length,
+		boundedBranch.length,
+		authorization,
+	);
+	const leaf = runtime.session.sessionManager.getLeafEntry();
+	if (leaf !== undefined && (!Number.isSafeInteger(leaf.ordinal) || (leaf.ordinal ?? 0) <= 0)) {
+		throw new Error("Active conversation leaf is missing its positive commit ordinal");
+	}
+	const fixedFields = {
+		workspaceName: authorization.workspace.name,
+		sessionId: runtime.session.sessionId,
+		projectionVersion: REMOTE_TRANSCRIPT_PROJECTION_VERSION,
+		branchEpoch: options.branchEpoch ?? runtime.session.sessionId,
+		head: leaf === undefined ? null : { entryId: leaf.id, ordinal: leaf.ordinal! },
+	};
+	const page = createRemoteTranscriptPage(projectedItems, {
+		fixedFields,
+		hasEarlierSourceEntries: window.hasEarlier || window.lookback.length > 0,
+		fallbackBeforeEntryId: window.hasEarlier || window.lookback.length > 0 ? window.entries[0]?.id : undefined,
+		limit,
+		maxSerializedBytes,
+	});
+	return { ...fixedFields, ...page };
+}
+
+/** Project one committed entry with the same authorization rules as transcript pages. */
+export function createRemoteConversationTranscriptEntry(
+	entry: SessionEntry,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	runtime: ConversationCommandRuntime,
+): RemoteTranscriptItem | undefined {
+	const window = runtime.session.sessionManager.getBranchWindow({
+		maxEntries: 1,
+		lookbackEntries: REMOTE_TRANSCRIPT_TOOL_CALL_LOOKBACK_ENTRIES,
+	});
+	const isCurrentCommit = window?.entries.at(-1)?.id === entry.id;
+	const toolCallsById = isCurrentCommit
+		? collectRemoteToolCalls([...(window?.lookback ?? []), ...(window?.entries ?? [])])
+		: new Map<string, RemoteToolCallRecord>();
+	return projectRemoteTranscriptEntry(entry, authorization, toolCallsById);
+}
+
+function projectRemoteTranscriptWindow(
+	entries: SessionEntry[],
+	startIndex: number,
+	endIndex: number,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): RemoteTranscriptItem[] {
+	const toolCallsById = collectRemoteToolCalls(
+		entries,
+		Math.max(0, startIndex - REMOTE_TRANSCRIPT_TOOL_CALL_LOOKBACK_ENTRIES),
+		endIndex,
+	);
+	const items: RemoteTranscriptItem[] = [];
+	for (let index = startIndex; index < endIndex; index++) {
+		const entry = entries[index];
+		if (!entry) {
+			continue;
+		}
+		const item = projectRemoteTranscriptEntry(entry, authorization, toolCallsById);
+		if (item) {
+			items.push(item);
+		}
+	}
+	return items;
+}
+
+function collectRemoteToolCalls(
+	entries: SessionEntry[],
+	startIndex = 0,
+	endIndex = entries.length,
+): Map<string, RemoteToolCallRecord> {
 	const toolCallsById = new Map<string, RemoteToolCallRecord>();
-	for (const entry of entries) {
+	for (let index = startIndex; index < endIndex; index++) {
+		const entry = entries[index];
+		if (!entry) {
+			continue;
+		}
 		if (entry.type !== "message") {
 			continue;
 		}
@@ -663,13 +893,14 @@ function projectRemoteSubagentArgs(
 		return undefined;
 	}
 	const projected: Record<string, unknown> = {};
+	const budget: RemoteSubagentProjectionBudget = { remainingNodes: REMOTE_SUBAGENT_GLOBAL_NODE_LIMIT };
 	copyRemoteString(args, projected, "agent", authorization, 200);
 	copyRemoteString(args, projected, "task", authorization, 1000);
-	const tasks = projectRemoteSubagentInputArray(args.tasks, authorization);
+	const tasks = projectRemoteSubagentInputArray(args.tasks, authorization, budget);
 	if (tasks) {
 		projected.tasks = tasks;
 	}
-	const chain = projectRemoteSubagentInputArray(args.chain, authorization);
+	const chain = projectRemoteSubagentInputArray(args.chain, authorization, budget);
 	if (chain) {
 		projected.chain = chain;
 	}
@@ -684,20 +915,24 @@ function projectRemoteSubagentArgs(
 function projectRemoteSubagentInputArray(
 	value: unknown,
 	authorization: IrohRemoteClientAuthorizationSuccess,
+	budget: RemoteSubagentProjectionBudget,
 ): Array<{ agent: string; task: string }> | undefined {
 	if (!Array.isArray(value)) {
 		return undefined;
 	}
-	const projected = value
-		.map((item) => {
-			if (!isRemoteRecord(item)) {
-				return undefined;
-			}
-			const agent = remoteString(item.agent, authorization, 200);
-			const task = remoteString(item.task, authorization, 1000);
-			return agent && task ? { agent, task } : undefined;
-		})
-		.filter((item): item is { agent: string; task: string } => item !== undefined);
+	const projected: Array<{ agent: string; task: string }> = [];
+	for (
+		let index = 0;
+		index < value.length && index < REMOTE_SUBAGENT_ARRAY_ITEM_LIMIT && budget.remainingNodes > 0;
+		index++
+	) {
+		budget.remainingNodes--;
+		const item = value[index];
+		if (!isRemoteRecord(item)) continue;
+		const agent = remoteString(item.agent, authorization, 200);
+		const task = remoteString(item.task, authorization, 1000);
+		if (agent && task) projected.push({ agent, task });
+	}
 	return projected.length > 0 ? projected : undefined;
 }
 
@@ -709,6 +944,7 @@ function projectRemoteSubagentDetails(
 		return undefined;
 	}
 	const projected: Record<string, unknown> = {};
+	const budget: RemoteSubagentProjectionBudget = { remainingNodes: REMOTE_SUBAGENT_GLOBAL_NODE_LIMIT };
 	copyRemoteString(value, projected, "mode", authorization, 200);
 	copyRemoteString(value, projected, "status", authorization, 200);
 	copyRemoteString(value, projected, "subagentId", authorization, 200);
@@ -719,7 +955,7 @@ function projectRemoteSubagentDetails(
 	if (summary) {
 		projected.summary = summary;
 	}
-	const childSessions = projectRemoteSubagentDetailArray(value.childSessions, authorization);
+	const childSessions = projectRemoteSubagentDetailArray(value.childSessions, authorization, budget);
 	if (childSessions) {
 		projected.childSessions = childSessions;
 	}
@@ -735,15 +971,15 @@ function projectRemoteSubagentDetails(
 	if (error) {
 		projected.error = error;
 	}
-	const children = projectRemoteSubagentDetailArray(value.children, authorization);
+	const children = projectRemoteSubagentDetailArray(value.children, authorization, budget);
 	if (children) {
 		projected.children = children;
 	}
-	const tasks = projectRemoteSubagentDetailArray(value.tasks, authorization);
+	const tasks = projectRemoteSubagentDetailArray(value.tasks, authorization, budget);
 	if (tasks) {
 		projected.tasks = tasks;
 	}
-	const steps = projectRemoteSubagentDetailArray(value.steps, authorization);
+	const steps = projectRemoteSubagentDetailArray(value.steps, authorization, budget);
 	if (steps) {
 		projected.steps = steps;
 	}
@@ -752,6 +988,12 @@ function projectRemoteSubagentDetails(
 
 const REMOTE_SUBAGENT_NUMERIC_KEYS = ["startedAt", "durationMs", "toolCalls", "tokens"] as const;
 const REMOTE_SUBAGENT_TREE_DEPTH_LIMIT = 5;
+const REMOTE_SUBAGENT_ARRAY_ITEM_LIMIT = 64;
+const REMOTE_SUBAGENT_GLOBAL_NODE_LIMIT = 128;
+
+interface RemoteSubagentProjectionBudget {
+	remainingNodes: number;
+}
 
 function copyRemoteSubagentNumericDetails(from: Record<string, unknown>, to: Record<string, unknown>): void {
 	for (const key of REMOTE_SUBAGENT_NUMERIC_KEYS) {
@@ -791,20 +1033,29 @@ function projectRemoteSubagentSummary(value: unknown): Record<string, number> | 
 function projectRemoteSubagentDetailArray(
 	value: unknown,
 	authorization: IrohRemoteClientAuthorizationSuccess,
+	budget: RemoteSubagentProjectionBudget,
 	depth = 0,
 ): Array<Record<string, unknown>> | undefined {
 	if (!Array.isArray(value) || depth >= REMOTE_SUBAGENT_TREE_DEPTH_LIMIT) {
 		return undefined;
 	}
-	const projected = value
-		.map((item) => projectRemoteSubagentTask(item, authorization, depth))
-		.filter((item): item is Record<string, unknown> => item !== undefined);
+	const projected: Array<Record<string, unknown>> = [];
+	for (
+		let index = 0;
+		index < value.length && index < REMOTE_SUBAGENT_ARRAY_ITEM_LIMIT && budget.remainingNodes > 0;
+		index++
+	) {
+		budget.remainingNodes--;
+		const task = projectRemoteSubagentTask(value[index], authorization, budget, depth);
+		if (task) projected.push(task);
+	}
 	return projected.length > 0 ? projected : undefined;
 }
 
 function projectRemoteSubagentTask(
 	value: unknown,
 	authorization: IrohRemoteClientAuthorizationSuccess,
+	budget: RemoteSubagentProjectionBudget,
 	depth = 0,
 ): Record<string, unknown> | undefined {
 	if (!isRemoteRecord(value)) {
@@ -829,7 +1080,7 @@ function projectRemoteSubagentTask(
 	if (error) {
 		projected.error = error;
 	}
-	const children = projectRemoteSubagentDetailArray(value.children, authorization, depth + 1);
+	const children = projectRemoteSubagentDetailArray(value.children, authorization, budget, depth + 1);
 	if (children) {
 		projected.children = children;
 	}
@@ -945,45 +1196,108 @@ function isRemoteRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function createRemoteTranscriptPage(items: RemoteTranscriptItem[], request: RemoteTranscriptRequest) {
-	const beforeIndex =
-		request.beforeEntryId === undefined
-			? items.length
-			: items.findIndex((item) => item.entryId === request.beforeEntryId);
-	if (beforeIndex === -1) {
-		return undefined;
+function createRemoteTranscriptPage(
+	items: RemoteTranscriptItem[],
+	options: {
+		fixedFields: Omit<RemoteConversationTranscriptPage, "items" | "hasMore" | "nextBeforeEntryId">;
+		hasEarlierSourceEntries: boolean;
+		fallbackBeforeEntryId?: string;
+		limit: number;
+		maxSerializedBytes: number;
+	},
+): Pick<RemoteConversationTranscriptPage, "items" | "hasMore" | "nextBeforeEntryId"> {
+	let pageStart = items.length;
+	let serializedItemBytes = 0;
+	while (pageStart > 0 && items.length - pageStart < options.limit) {
+		const candidateIndex = pageStart - 1;
+		const candidate = items[candidateIndex];
+		if (!candidate) {
+			break;
+		}
+		const candidateItemBytes = Buffer.byteLength(JSON.stringify(candidate), "utf8");
+		const candidateCount = items.length - candidateIndex;
+		const candidateHasMore = options.hasEarlierSourceEntries || candidateIndex > 0;
+		const candidateBytes = measureRemoteTranscriptPageBytes(
+			options.fixedFields,
+			serializedItemBytes + candidateItemBytes,
+			candidateCount,
+			candidateHasMore,
+			candidateHasMore ? candidate.entryId : null,
+		);
+		if (candidateBytes > options.maxSerializedBytes) {
+			if (pageStart === items.length) {
+				throw new Error(`Projected transcript entry ${candidate.entryId} exceeds the transcript page byte budget`);
+			}
+			break;
+		}
+		pageStart = candidateIndex;
+		serializedItemBytes += candidateItemBytes;
 	}
-	const eligibleItems = items.slice(0, beforeIndex);
-	const pageStart = Math.max(0, eligibleItems.length - request.limit);
-	const pageItems = eligibleItems.slice(pageStart);
-	const hasMore = pageStart > 0;
-	return {
-		items: pageItems,
+
+	const pageItems = items.slice(pageStart);
+	const hasMore = options.hasEarlierSourceEntries || pageStart > 0;
+	const nextBeforeEntryId = hasMore ? (pageItems[0]?.entryId ?? options.fallbackBeforeEntryId ?? null) : null;
+	const serializedBytes = measureRemoteTranscriptPageBytes(
+		options.fixedFields,
+		serializedItemBytes,
+		pageItems.length,
 		hasMore,
-		nextBeforeEntryId: hasMore ? (pageItems[0]?.entryId ?? null) : null,
-	};
+		nextBeforeEntryId,
+	);
+	if (serializedBytes > options.maxSerializedBytes) {
+		throw new Error("Transcript page metadata exceeds the transcript page byte budget");
+	}
+	return { items: pageItems, hasMore, nextBeforeEntryId };
+}
+
+/** Exact UTF-8 JSON size without repeatedly serializing the growing item array. */
+function measureRemoteTranscriptPageBytes(
+	fixedFields: Omit<RemoteConversationTranscriptPage, "items" | "hasMore" | "nextBeforeEntryId">,
+	serializedItemBytes: number,
+	itemCount: number,
+	hasMore: boolean,
+	nextBeforeEntryId: string | null,
+): number {
+	const emptyPageBytes = Buffer.byteLength(
+		JSON.stringify({ ...fixedFields, items: [], hasMore, nextBeforeEntryId }),
+		"utf8",
+	);
+	return emptyPageBytes + serializedItemBytes + Math.max(0, itemCount - 1);
 }
 
 export function createRemoteGetTranscriptRpcResponse(
 	command: RemoteRpcCommand,
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	runtime: ConversationCommandRuntime,
+	branchEpoch?: string,
+	isCursorValid?: (cursor: string) => boolean,
+	registerCursor?: (cursor: string | null) => void,
 ): object {
 	const id = getRpcResponseId(command);
+	if (branchEpoch !== undefined) {
+		if (typeof command.branchEpoch !== "string" || command.branchEpoch.length === 0) {
+			return createIrohRemoteRpcErrorResponse(id, "get_transcript", "branch_epoch_required");
+		}
+		if (command.branchEpoch !== branchEpoch) {
+			return createIrohRemoteRpcErrorResponse(id, "get_transcript", "stale_branch_epoch");
+		}
+	}
 	const request = parseRemoteTranscriptRequest(command);
 	if (!request.ok) {
 		return createIrohRemoteRpcErrorResponse(id, "get_transcript", request.error);
 	}
-	const items = projectRemoteTranscriptItems(runtime.session.sessionManager, authorization);
-	const page = createRemoteTranscriptPage(items, request);
+	if (request.beforeEntryId !== undefined && isCursorValid && !isCursorValid(request.beforeEntryId)) {
+		return createIrohRemoteRpcErrorResponse(id, "get_transcript", "invalid_cursor");
+	}
+	const page = createRemoteConversationTranscriptPage(authorization, runtime, {
+		...request,
+		...(branchEpoch === undefined ? {} : { branchEpoch }),
+	});
 	if (!page) {
 		return createIrohRemoteRpcErrorResponse(id, "get_transcript", "invalid_cursor");
 	}
-	return createRpcSuccessResponse(id, "get_transcript", {
-		workspaceName: authorization.workspace.name,
-		sessionId: runtime.session.sessionId,
-		...page,
-	});
+	registerCursor?.(page.nextBeforeEntryId);
+	return createRpcSuccessResponse(id, "get_transcript", page);
 }
 
 export function createRemoteGetMessageImagesRpcResponse(
@@ -1744,6 +2058,9 @@ export async function handleIntegratedConversationRpcCommand(
 	context: ConversationCommandContext,
 	runtime: ConversationCommandRuntime,
 ): Promise<object | undefined> {
+	if (context.isTurnAdmissionClosed?.() && TURN_INITIATING_RPC_TYPES.has(command.type)) {
+		return createHostShutdownRpcErrorResponse(command);
+	}
 	if (context.isDraining?.() && TURN_INITIATING_RPC_TYPES.has(command.type)) {
 		return createLeaseDrainingRpcErrorResponse(command);
 	}
@@ -1788,7 +2105,14 @@ export async function handleIntegratedConversationRpcCommand(
 		return await createRemoteUploadDeviceLogsRpcResponse(command, authorization, context);
 	}
 	if (command.type === "get_transcript") {
-		return createRemoteGetTranscriptRpcResponse(command, authorization, runtime);
+		return createRemoteGetTranscriptRpcResponse(
+			command,
+			authorization,
+			runtime,
+			context.getConversationBranchEpoch?.(),
+			context.isConversationTranscriptCursorValid,
+			context.registerConversationTranscriptCursor,
+		);
 	}
 	if (command.type === "get_message_images") {
 		return createRemoteGetMessageImagesRpcResponse(command, authorization, runtime);

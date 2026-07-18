@@ -15,7 +15,9 @@ import { expect, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
+import { ConversationProjectionFeed } from "../src/core/rpc/conversation-projection-feed.ts";
 import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/rpc/index.ts";
+import type { SessionEntry } from "../src/core/session-manager.ts";
 import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 
 type QueuedIrohRead = { type: "data"; bytes: IrohBytes } | { type: "end" };
@@ -112,6 +114,29 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 		sessionId,
 		sessionManager: {
 			getBranch: vi.fn((): object[] => []),
+			getBranchWindow: ({
+				beforeEntryId,
+				maxEntries,
+				lookbackEntries = 0,
+			}: {
+				beforeEntryId?: string;
+				maxEntries: number;
+				lookbackEntries?: number;
+			}) => {
+				const branch = session.sessionManager.getBranch() as SessionEntry[];
+				const endIndex =
+					beforeEntryId === undefined ? branch.length : branch.findIndex((entry) => entry.id === beforeEntryId);
+				if (endIndex < 0) return undefined;
+				const entryStart = Math.max(0, endIndex - maxEntries);
+				const lookbackStart = Math.max(0, entryStart - lookbackEntries);
+				return {
+					entries: branch.slice(entryStart, endIndex),
+					lookback: branch.slice(lookbackStart, entryStart),
+					hasEarlier: lookbackStart > 0,
+					visitedEntries: endIndex - lookbackStart + (lookbackStart > 0 ? 1 : 0),
+				};
+			},
+			getLeafEntry: (): SessionEntry | undefined => (session.sessionManager.getBranch() as SessionEntry[]).at(-1),
 			getLeafId: (): string | null => session.leafId,
 			getSessionId: (): string => sessionId,
 		},
@@ -128,6 +153,74 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 	return session;
 }
 
+type TestIrohConversationOptions = Pick<
+	Parameters<typeof runIrohRemoteRpcMode>[1],
+	"buildConversationSnapshot" | "projectConversationExternal"
+>;
+
+interface TestConversationRuntimeHost {
+	conversationProjectionFeed?: ConversationProjectionFeed;
+	publishConversationProjectionEvent?: (event: object) => void;
+	session: AgentSessionRuntime["session"];
+}
+
+/** Install the runtime-owned ordered feed surface omitted by lightweight test doubles. */
+export function createTestIrohConversationOptions(runtimeHost: AgentSessionRuntime): TestIrohConversationOptions {
+	const testHost = runtimeHost as unknown as TestConversationRuntimeHost;
+	let feed = testHost.conversationProjectionFeed;
+	if (!feed) {
+		feed = new ConversationProjectionFeed({
+			subscribe: (listener) => testHost.session.subscribe((event) => listener(event)),
+		});
+		Object.defineProperty(testHost, "conversationProjectionFeed", {
+			configurable: true,
+			value: feed,
+			writable: true,
+		});
+	}
+	if (!testHost.publishConversationProjectionEvent) {
+		Object.defineProperty(testHost, "publishConversationProjectionEvent", {
+			configurable: true,
+			value: (event: object) => feed.publishExternal(event),
+			writable: true,
+		});
+	}
+
+	return {
+		buildConversationSnapshot: ({ activeAssistant, branchEpoch }) => {
+			const session = testHost.session;
+			return {
+				conversation: { workspaceName: "test", sessionId: session.sessionId },
+				state: {
+					thinkingLevel: session.thinkingLevel,
+					availableThinkingLevels: [session.thinkingLevel],
+					isStreaming: session.isStreaming,
+					isCompacting: session.isCompacting,
+					steeringMode: session.steeringMode,
+					followUpMode: session.followUpMode,
+					sessionFile: session.sessionFile,
+					sessionId: session.sessionId,
+					autoCompactionEnabled: session.autoCompactionEnabled,
+					messageCount: session.messages.length,
+					pendingMessageCount: session.pendingMessageCount,
+				},
+				transcript: {
+					sessionId: session.sessionId,
+					items: [],
+					hasMore: false,
+					nextBeforeEntryId: null,
+					projectionVersion: 1,
+					branchEpoch,
+					head: null,
+				},
+				activeAssistant,
+				activeWorkflows: [],
+			};
+		},
+		projectConversationExternal: (event) => event,
+	};
+}
+
 export async function startIrohRpcMode(
 	runtimeHost: AgentSessionRuntime,
 	startupSession: Pick<ReturnType<typeof createTestSession>, "bindExtensions">,
@@ -135,14 +228,25 @@ export async function startIrohRpcMode(
 ) {
 	const recv = new ManualIrohRecvStream();
 	const send = new ManualIrohSendStream();
+	const conversationOptions = createTestIrohConversationOptions(runtimeHost);
 	const modePromise = runIrohRemoteRpcMode(runtimeHost, {
 		...options,
+		buildConversationSnapshot: options.buildConversationSnapshot ?? conversationOptions.buildConversationSnapshot,
+		projectConversationExternal:
+			options.projectConversationExternal ?? conversationOptions.projectConversationExternal,
 		rpcGrant: options.rpcGrant ?? createIrohRemotePresetAccess("full").rpcGrant,
 		disposeRuntimeOnClose: false,
 		stream: { recv, send },
 		workspacePath: "/workspace",
 	});
 	await vi.waitFor(() => expect(startupSession.bindExtensions).toHaveBeenCalledOnce());
+	const bootstrap = parseWrittenObjects(send)[0];
+	expect(bootstrap).toMatchObject({
+		type: "conversation_bootstrap",
+		delivery: { cursor: 0 },
+		conversation: { sessionId: runtimeHost.session.sessionId },
+		reason: "bootstrap",
+	});
 	return { modePromise, recv, send };
 }
 

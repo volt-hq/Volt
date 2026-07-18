@@ -125,6 +125,10 @@ import {
 	type RemoteSessionListCursorEntry,
 } from "../../daemon/conversation-commands.ts";
 import {
+	createRemoteConversationExternalProjector,
+	createRemoteConversationSnapshotBuilder,
+} from "../../daemon/conversation-projection.ts";
+import {
 	createIntegratedConversationHandshakeResponse,
 	decorateRemoteHostState,
 	type IntegratedConversationSessionSelection,
@@ -1746,6 +1750,23 @@ export class InteractiveMode {
 		});
 		await this.daemonAttach.start();
 		await this.acquireCurrentSessionLease();
+		this.runtimeHost.setPrepareSessionReplacement(async ({ previousSessionId, sessionId }) => {
+			const rekey = await this.daemonAttach.prepareRekey(previousSessionId, sessionId);
+			if (!rekey) {
+				return undefined;
+			}
+			return {
+				commit: async () => {
+					await rekey.commit();
+					this.daemonLeaseSessionId = sessionId;
+				},
+				rollback: () => rekey.rollback(),
+				dispose: async () => {
+					await rekey.dispose();
+					this.daemonLeaseSessionId = undefined;
+				},
+			};
+		});
 	}
 
 	private async acquireCurrentSessionLease(): Promise<void> {
@@ -1973,6 +1994,14 @@ export class InteractiveMode {
 						: { additionalRedactedPaths: sanitizerOptions.additionalRedactedPaths }),
 					suppressExtensionUiRequests: true,
 					decorateOutbound: (value) => decorateRemoteHostState(value, authorization, responseContext),
+					buildConversationSnapshot: createRemoteConversationSnapshotBuilder({
+						authorization,
+						runtime: this.runtimeHost,
+					}),
+					projectConversationExternal: createRemoteConversationExternalProjector({
+						authorization,
+						runtime: this.runtimeHost,
+					}),
 					initialInput: handshake.initialInput,
 					notificationDelivery: {
 						deliverNotification: (notification) =>
@@ -2021,13 +2050,17 @@ export class InteractiveMode {
 								stateManager: this.relayStateManager,
 								sessionListCursors: this.relaySessionListCursors,
 								sessionListCursorTtlMs: REMOTE_SESSION_LIST_CURSOR_TTL_MS,
+								getConversationBranchEpoch: () => this.runtimeHost.conversationProjectionFeed.branchEpoch,
+								isConversationTranscriptCursorValid: (cursor) =>
+									this.runtimeHost.conversationProjectionFeed.isTranscriptCursorValid(cursor),
+								registerConversationTranscriptCursor: (cursor) =>
+									this.runtimeHost.conversationProjectionFeed.registerTranscriptCursor(cursor),
 								listRuntimeStates: (workspaceName) => this.daemonAttach.listRuntimeStates(workspaceName),
 							},
 							this.runtimeHost,
 						);
 					},
-					onSessionChanged: async (session) => {
-						await this.daemonAttach.rekey(relayedSessionId, session.sessionId);
+					onSessionChanged: (session) => {
 						relayedSessionId = session.sessionId;
 					},
 				});

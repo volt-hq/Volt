@@ -46,6 +46,7 @@ import {
 } from "../src/modes/interactive/daemon-attach.ts";
 import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 import {
+	createTestIrohConversationOptions,
 	createTestSession,
 	ManualIrohRecvStream,
 	ManualIrohSendStream,
@@ -584,6 +585,7 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 			agentDir,
 		);
 		const modePromise = runIrohRemoteRpcMode(runtimeHost, {
+			...createTestIrohConversationOptions(runtimeHost),
 			stream: { recv, send },
 			disposeRuntimeOnClose: false,
 			rpcGrant: authorizationBase.rpcGrant,
@@ -594,6 +596,11 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 				: { additionalRedactedPaths: sanitizerOptions.additionalRedactedPaths }),
 		});
 		await vi.waitFor(() => expect(session.bindExtensions).toHaveBeenCalledOnce());
+		expect(parseWrittenObjects(send)[0]).toMatchObject({
+			type: "conversation_bootstrap",
+			delivery: { cursor: 0 },
+			conversation: { sessionId: "s-relay-wt" },
+		});
 
 		const text = `wt=${worktreePath}/file.ts parent=${parentPath}/file.ts root=${agentDir}/worktrees`;
 		for (const handler of Array.from(subscribers)) {
@@ -702,6 +709,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 				extensionRunner: { hasHandlers: () => false },
 				getSubagentToolManager: () => undefined,
 				dispose: vi.fn(),
+				subscribe: vi.fn(() => () => {}),
 				get sessionFile() {
 					return sessionManager.getSessionFile();
 				},

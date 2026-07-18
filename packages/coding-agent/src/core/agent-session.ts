@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type {
@@ -101,7 +102,7 @@ import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
-import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.ts";
+import type { BranchSummaryEntry, ClientInputCommand, CompactionEntry, SessionManager } from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
@@ -193,6 +194,19 @@ export type AgentSessionEvent =
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
+/**
+ * A committed change to the conversation generation.
+ *
+ * Unlike SessionManager's low-level leaf notification, this fires only after
+ * the active leaf and Agent message context describe the same branch.
+ */
+export interface ConversationGenerationChange {
+	previousLeafId: string | null;
+	nextLeafId: string | null;
+}
+
+export type ConversationGenerationListener = (change: ConversationGenerationChange) => void;
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -258,6 +272,8 @@ export interface PromptOptions {
 	streamingBehavior?: "steer" | "followUp";
 	/** Source of input for extension input event handlers. Defaults to "interactive". */
 	source?: InputSource;
+	/** Stable remote-client identity persisted with the resulting user message. */
+	clientMessageId?: string;
 	/** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
 	preflightResult?: (success: boolean) => void;
 }
@@ -301,6 +317,53 @@ interface DefaultPersistenceOptions {
 	preserveFastMode?: boolean;
 }
 
+interface LiveClientInputOperation {
+	command: ClientInputCommand;
+	semanticDigest: string;
+	accepted: Promise<void>;
+	resolveAccepted(): void;
+	rejectAccepted(error: Error): void;
+	acceptanceSettled: boolean;
+	acceptedForDispatch: boolean;
+	completion: Promise<void>;
+	queued: boolean;
+}
+
+type ClientInputAdmission =
+	| { kind: "none" }
+	| { kind: "completed" }
+	| { kind: "live"; operation: LiveClientInputOperation }
+	| { kind: "start"; operation: LiveClientInputOperation };
+
+type PromptDispatchOutcome = "handled" | "queued" | "run";
+
+export class ClientInputConflictError extends Error {
+	readonly code = "client_input_conflict";
+}
+
+export class ClientInputOutcomeAmbiguousError extends Error {
+	readonly code = "client_input_outcome_ambiguous";
+}
+
+function createClientInputSemanticDigest(
+	command: ClientInputCommand,
+	message: string,
+	images: ImageContent[] | undefined,
+	streamingBehavior?: "steer" | "followUp",
+): string {
+	const semanticInput = {
+		command,
+		message,
+		images: (images ?? []).map((image) => ({
+			type: "image" as const,
+			data: image.data,
+			mimeType: image.mimeType,
+		})),
+		...(command === "prompt" ? { streamingBehavior: streamingBehavior ?? null } : {}),
+	};
+	return createHash("sha256").update(JSON.stringify(semanticInput)).digest("hex");
+}
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -322,6 +385,7 @@ export class AgentSession {
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
+	private readonly _conversationGenerationListeners = new Set<ConversationGenerationListener>();
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -335,6 +399,8 @@ export class AgentSession {
 	private _activePromptTransactions = new Map<symbol, Promise<void>>();
 	/** Tracks standalone session operations such as manual compaction and tree navigation. */
 	private _activeSessionOperations = new Set<Promise<unknown>>();
+	/** Runtime joins for durable client-input receipts; survives physical transport replacement. */
+	private readonly _liveClientInputs = new Map<string, LiveClientInputOperation>();
 	private _extensionCommandTransactions = new Set<symbol>();
 	private _activeExtensionCommandHandlers = 0;
 
@@ -607,6 +673,14 @@ export class AgentSession {
 		if (event.type === "message_start" && event.message.role === "user") {
 			this._overflowRecoveryAttempted = false;
 			this._proactiveCompactionAttempted = false;
+			if (event.message.clientMessageId !== undefined) {
+				const operation = this._liveClientInputs.get(event.message.clientMessageId);
+				if (operation) {
+					// agent-core emits message_start at its irreversible queue dequeue
+					// boundary. clearQueue must no longer own or fail this input.
+					operation.queued = false;
+				}
+			}
 			const messageText = this._getUserMessageText(event.message);
 			if (messageText) {
 				// Check steering queue first
@@ -629,7 +703,17 @@ export class AgentSession {
 		// replacement back to agent-core so the current loop uses it for context,
 		// tool execution, retry classification, and later lifecycle events.
 		const replacement = await this._emitExtensionEvent(event);
-		const handledEvent = event.type === "message_end" && replacement ? { ...event, message: replacement } : event;
+		const identityPreservingReplacement =
+			event.type === "message_end" &&
+			event.message.role === "user" &&
+			replacement?.role === "user" &&
+			event.message.clientMessageId !== undefined
+				? { ...replacement, clientMessageId: event.message.clientMessageId }
+				: replacement;
+		const handledEvent =
+			event.type === "message_end" && identityPreservingReplacement
+				? { ...event, message: identityPreservingReplacement }
+				: event;
 
 		// Notify all listeners
 		this._emit(
@@ -656,6 +740,9 @@ export class AgentSession {
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
 				this.sessionManager.appendMessage(handledEvent.message);
+			}
+			if (handledEvent.message.role === "user" && handledEvent.message.clientMessageId !== undefined) {
+				this._completeLiveClientInput(handledEvent.message.clientMessageId);
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
@@ -820,6 +907,34 @@ export class AgentSession {
 	}
 
 	/**
+	 * Observe conversation-generation commits such as tree navigation.
+	 *
+	 * The callback runs synchronously after both the SessionManager branch and
+	 * Agent message context have been rebuilt, giving snapshot consumers one
+	 * atomic read boundary for the new generation.
+	 */
+	subscribeConversationGenerationChanges(listener: ConversationGenerationListener): () => void {
+		this._conversationGenerationListeners.add(listener);
+		return () => {
+			this._conversationGenerationListeners.delete(listener);
+		};
+	}
+
+	private _emitConversationGenerationChange(change: ConversationGenerationChange): void {
+		if (change.previousLeafId === change.nextLeafId) {
+			return;
+		}
+		for (const listener of this._conversationGenerationListeners) {
+			try {
+				listener(change);
+			} catch {
+				// The branch and Agent context are already authoritative. A projection
+				// observer cannot make a committed navigation appear to have failed.
+			}
+		}
+	}
+
+	/**
 	 * Temporarily disconnect from agent events.
 	 * User listeners are preserved and will receive events again after resubscribe().
 	 * Used internally during operations that need to pause event processing.
@@ -890,6 +1005,7 @@ export class AgentSession {
 		}
 		this._disconnectFromAgent();
 		this._eventListeners = [];
+		this._conversationGenerationListeners.clear();
 		cleanupSessionResources(this.sessionId);
 	}
 
@@ -1179,6 +1295,117 @@ export class AgentSession {
 		return buildSystemPrompt(this._baseSystemPromptOptions);
 	}
 
+	private _beginClientInput(
+		command: ClientInputCommand,
+		message: string,
+		images: ImageContent[] | undefined,
+		clientMessageId: string | undefined,
+		streamingBehavior?: "steer" | "followUp",
+	): ClientInputAdmission {
+		if (clientMessageId === undefined) {
+			return { kind: "none" };
+		}
+		const semanticDigest = createClientInputSemanticDigest(command, message, images, streamingBehavior);
+		const live = this._liveClientInputs.get(clientMessageId);
+		if (live) {
+			if (live.command !== command || live.semanticDigest !== semanticDigest) {
+				throw new ClientInputConflictError(
+					`client_input_conflict: ${JSON.stringify(clientMessageId)} was already used for different input`,
+				);
+			}
+			return { kind: "live", operation: live };
+		}
+
+		const reservation = this.sessionManager.reserveClientInput(clientMessageId, command, semanticDigest);
+		const record = reservation.record;
+		if (record.command !== command || record.semanticDigest !== semanticDigest) {
+			throw new ClientInputConflictError(
+				`client_input_conflict: ${JSON.stringify(clientMessageId)} was already used for different input`,
+			);
+		}
+		if (record.state === "completed") {
+			return { kind: "completed" };
+		}
+		if (record.state === "failed") {
+			throw new Error(record.error ?? "client_input_failed: the original input failed before commit");
+		}
+		if (record.state === "started") {
+			throw new ClientInputOutcomeAmbiguousError(
+				`client_input_outcome_ambiguous: ${JSON.stringify(clientMessageId)} started before the host restarted but has no durable terminal record; it was not replayed`,
+			);
+		}
+
+		// This append is the last operation before dispatch. If it cannot be made
+		// durable, the caller throws and no prompt/queue side effect is performed.
+		this.sessionManager.transitionClientInput(clientMessageId, "started");
+		let resolveAccepted!: () => void;
+		let rejectAccepted!: (error: Error) => void;
+		const accepted = new Promise<void>((resolve, reject) => {
+			resolveAccepted = resolve;
+			rejectAccepted = reject;
+		});
+		void accepted.catch(() => {});
+		const operation: LiveClientInputOperation = {
+			command,
+			semanticDigest,
+			accepted,
+			acceptanceSettled: false,
+			acceptedForDispatch: false,
+			completion: Promise.resolve(),
+			queued: false,
+			resolveAccepted() {
+				if (operation.acceptanceSettled) return;
+				operation.acceptanceSettled = true;
+				operation.acceptedForDispatch = true;
+				resolveAccepted();
+			},
+			rejectAccepted(error) {
+				if (operation.acceptanceSettled) return;
+				operation.acceptanceSettled = true;
+				rejectAccepted(error);
+			},
+		};
+		this._liveClientInputs.set(clientMessageId, operation);
+		return { kind: "start", operation };
+	}
+
+	private _failLiveClientInput(clientMessageId: string, operation: LiveClientInputOperation, error: Error): void {
+		const current = this._liveClientInputs.get(clientMessageId);
+		if (current !== operation) return;
+		let reportedError = error;
+		try {
+			this.sessionManager.transitionClientInput(clientMessageId, "failed", error.message);
+		} catch (transitionError) {
+			reportedError =
+				transitionError instanceof Error
+					? transitionError
+					: new Error(`Failed to persist client input failure: ${transitionError}`);
+		}
+		operation.rejectAccepted(reportedError);
+		this._liveClientInputs.delete(clientMessageId);
+		if (reportedError !== error) {
+			throw reportedError;
+		}
+	}
+
+	private _completeLiveClientInput(clientMessageId: string): void {
+		const operation = this._liveClientInputs.get(clientMessageId);
+		if (!operation) return;
+		operation.resolveAccepted();
+		this._liveClientInputs.delete(clientMessageId);
+	}
+
+	private _observeLivePrompt(
+		operation: LiveClientInputOperation,
+		preflightResult: ((success: boolean) => void) | undefined,
+	): Promise<void> {
+		void operation.accepted.then(
+			() => preflightResult?.(true),
+			() => preflightResult?.(false),
+		);
+		return operation.completion;
+	}
+
 	// =========================================================================
 	// Prompting
 	// =========================================================================
@@ -1339,9 +1566,75 @@ export class AgentSession {
 		const shouldQueue = isRunning || this._activePromptTransactions.size > 0 || this._abortPromise !== undefined;
 		const allowQueue = isRunning && this._abortPromise === undefined;
 		const abortGeneration = this._abortGeneration;
-		return this._trackPromptTransaction((transactionId) =>
-			this._prompt(text, options, shouldQueue, allowQueue, abortGeneration, transactionId),
-		);
+		let admission: ClientInputAdmission;
+		try {
+			admission = this._beginClientInput(
+				"prompt",
+				text,
+				options?.images,
+				options?.clientMessageId,
+				options?.streamingBehavior,
+			);
+		} catch (error) {
+			return Promise.reject(error);
+		}
+		if (admission.kind === "completed") {
+			options?.preflightResult?.(true);
+			return Promise.resolve();
+		}
+		if (admission.kind === "live") {
+			return this._observeLivePrompt(admission.operation, options?.preflightResult);
+		}
+
+		const operation = admission.kind === "start" ? admission.operation : undefined;
+		const clientMessageId = options?.clientMessageId;
+		const originalPreflightResult = options?.preflightResult;
+		const promptOptions = operation
+			? {
+					...options,
+					preflightResult: (success: boolean) => {
+						if (success) {
+							operation.resolveAccepted();
+						} else {
+							operation.rejectAccepted(new Error("Client input prompt preflight failed"));
+						}
+						originalPreflightResult?.(success);
+					},
+				}
+			: options;
+		const completion = this._trackPromptTransaction(async (transactionId) => {
+			try {
+				const outcome = await this._prompt(
+					text,
+					promptOptions,
+					shouldQueue,
+					allowQueue,
+					abortGeneration,
+					transactionId,
+				);
+				if (operation && clientMessageId && outcome === "handled") {
+					this.sessionManager.transitionClientInput(clientMessageId, "completed");
+					this._completeLiveClientInput(clientMessageId);
+				}
+			} catch (error) {
+				const normalized = error instanceof Error ? error : new Error(String(error));
+				if (operation && clientMessageId && !operation.acceptedForDispatch) {
+					this._failLiveClientInput(clientMessageId, operation, normalized);
+				}
+				throw normalized;
+			}
+		});
+		if (operation) {
+			operation.completion = completion;
+			void completion
+				.finally(() => {
+					if (clientMessageId && this._liveClientInputs.get(clientMessageId) === operation && !operation.queued) {
+						this._liveClientInputs.delete(clientMessageId);
+					}
+				})
+				.catch(() => {});
+		}
+		return completion;
 	}
 
 	private async _prompt(
@@ -1351,7 +1644,7 @@ export class AgentSession {
 		allowQueue: boolean,
 		abortGeneration: number,
 		transactionId: symbol,
-	): Promise<void> {
+	): Promise<PromptDispatchOutcome> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
@@ -1368,7 +1661,7 @@ export class AgentSession {
 				if (handled) {
 					// Extension command executed, no prompt to send
 					preflightResult?.(true);
-					return;
+					return "handled";
 				}
 			}
 
@@ -1387,7 +1680,7 @@ export class AgentSession {
 				}
 				if (inputResult.action === "handled") {
 					preflightResult?.(true);
-					return;
+					return "handled";
 				}
 				if (inputResult.action === "transform") {
 					currentText = inputResult.text;
@@ -1416,12 +1709,12 @@ export class AgentSession {
 					);
 				}
 				if (options.streamingBehavior === "followUp") {
-					await this._queueFollowUp(expandedText, currentImages);
+					await this._queueFollowUp(expandedText, currentImages, options.clientMessageId);
 				} else {
-					await this._queueSteer(expandedText, currentImages);
+					await this._queueSteer(expandedText, currentImages, options.clientMessageId);
 				}
 				preflightResult?.(true);
-				return;
+				return "queued";
 			}
 
 			// Flush any pending bash messages before the new prompt
@@ -1477,6 +1770,7 @@ export class AgentSession {
 			messages.push({
 				role: "user",
 				content: userContent,
+				...(options?.clientMessageId === undefined ? {} : { clientMessageId: options.clientMessageId }),
 				timestamp: Date.now(),
 			});
 
@@ -1526,7 +1820,7 @@ export class AgentSession {
 		}
 
 		if (!messages) {
-			return;
+			return "handled";
 		}
 
 		if (this._disposed || abortGeneration !== this._abortGeneration) {
@@ -1535,6 +1829,7 @@ export class AgentSession {
 		}
 		preflightResult?.(true);
 		await this._runAgentPrompt(messages, abortGeneration);
+		return "run";
 	}
 
 	/**
@@ -1610,17 +1905,33 @@ export class AgentSession {
 	 * @param images Optional image attachments to include with the message
 	 * @throws Error if text is an extension command
 	 */
-	async steer(text: string, images?: ImageContent[]): Promise<void> {
-		// Check for extension commands (cannot be queued)
-		if (text.startsWith("/")) {
-			this._throwIfExtensionCommand(text);
+	async steer(text: string, images?: ImageContent[], clientMessageId?: string): Promise<void> {
+		const admission = this._beginClientInput("steer", text, images, clientMessageId);
+		if (admission.kind === "completed") return;
+		if (admission.kind === "live") {
+			await admission.operation.accepted;
+			return;
 		}
+		const operation = admission.kind === "start" ? admission.operation : undefined;
+		try {
+			// Check for extension commands (cannot be queued)
+			if (text.startsWith("/")) {
+				this._throwIfExtensionCommand(text);
+			}
 
-		// Expand skill commands and prompt templates
-		let expandedText = this._expandSkillCommand(text);
-		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+			// Expand skill commands and prompt templates
+			let expandedText = this._expandSkillCommand(text);
+			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
-		await this._queueSteer(expandedText, images);
+			await this._queueSteer(expandedText, images, clientMessageId);
+			operation?.resolveAccepted();
+		} catch (error) {
+			const normalized = error instanceof Error ? error : new Error(String(error));
+			if (operation && clientMessageId) {
+				this._failLiveClientInput(clientMessageId, operation, normalized);
+			}
+			throw normalized;
+		}
 	}
 
 	/**
@@ -1630,23 +1941,39 @@ export class AgentSession {
 	 * @param images Optional image attachments to include with the message
 	 * @throws Error if text is an extension command
 	 */
-	async followUp(text: string, images?: ImageContent[]): Promise<void> {
-		// Check for extension commands (cannot be queued)
-		if (text.startsWith("/")) {
-			this._throwIfExtensionCommand(text);
+	async followUp(text: string, images?: ImageContent[], clientMessageId?: string): Promise<void> {
+		const admission = this._beginClientInput("follow_up", text, images, clientMessageId);
+		if (admission.kind === "completed") return;
+		if (admission.kind === "live") {
+			await admission.operation.accepted;
+			return;
 		}
+		const operation = admission.kind === "start" ? admission.operation : undefined;
+		try {
+			// Check for extension commands (cannot be queued)
+			if (text.startsWith("/")) {
+				this._throwIfExtensionCommand(text);
+			}
 
-		// Expand skill commands and prompt templates
-		let expandedText = this._expandSkillCommand(text);
-		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+			// Expand skill commands and prompt templates
+			let expandedText = this._expandSkillCommand(text);
+			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
-		await this._queueFollowUp(expandedText, images);
+			await this._queueFollowUp(expandedText, images, clientMessageId);
+			operation?.resolveAccepted();
+		} catch (error) {
+			const normalized = error instanceof Error ? error : new Error(String(error));
+			if (operation && clientMessageId) {
+				this._failLiveClientInput(clientMessageId, operation, normalized);
+			}
+			throw normalized;
+		}
 	}
 
 	/**
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
-	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
+	private async _queueSteer(text: string, images?: ImageContent[], clientMessageId?: string): Promise<void> {
 		this._steeringMessages.push(text);
 		this._emitQueueUpdate();
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
@@ -1656,14 +1983,19 @@ export class AgentSession {
 		this.agent.steer({
 			role: "user",
 			content,
+			...(clientMessageId === undefined ? {} : { clientMessageId }),
 			timestamp: Date.now(),
 		});
+		if (clientMessageId !== undefined) {
+			const operation = this._liveClientInputs.get(clientMessageId);
+			if (operation) operation.queued = true;
+		}
 	}
 
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
-	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
+	private async _queueFollowUp(text: string, images?: ImageContent[], clientMessageId?: string): Promise<void> {
 		this._followUpMessages.push(text);
 		this._emitQueueUpdate();
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
@@ -1673,8 +2005,13 @@ export class AgentSession {
 		this.agent.followUp({
 			role: "user",
 			content,
+			...(clientMessageId === undefined ? {} : { clientMessageId }),
 			timestamp: Date.now(),
 		});
+		if (clientMessageId !== undefined) {
+			const operation = this._liveClientInputs.get(clientMessageId);
+			if (operation) operation.queued = true;
+		}
 	}
 
 	/**
@@ -1806,6 +2143,14 @@ export class AgentSession {
 		this._steeringMessages = [];
 		this._followUpMessages = [];
 		this.agent.clearAllQueues();
+		for (const [clientMessageId, operation] of this._liveClientInputs) {
+			if (!operation.queued) continue;
+			this._failLiveClientInput(
+				clientMessageId,
+				operation,
+				new Error("client_input_failed: queued input was cleared before canonical consumption"),
+			);
+		}
 		this._emitQueueUpdate();
 		return { steering, followUp };
 	}
@@ -3652,6 +3997,10 @@ export class AgentSession {
 			// Update agent state
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
+			this._emitConversationGenerationChange({
+				previousLeafId: oldLeafId,
+				nextLeafId: this.sessionManager.getLeafId(),
+			});
 
 			// Emit session_tree event
 			await this._extensionRunner.emit({

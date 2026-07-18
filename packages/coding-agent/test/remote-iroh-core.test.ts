@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/pr
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
 	CONTEXT_COMPACT_ACTION_ID,
 	REVIEW_BRANCH_ACTION_ID,
@@ -837,7 +837,8 @@ describe("Iroh remote core helpers", () => {
 			clientLabel: `line separator client with unicode separators ${unicodeLineSeparators}`,
 			conversation: { target: "last" },
 		});
-		const initialRpcInput = '{"id":"prompt-1","type":"prompt","message":"kept after hello"}\n';
+		const initialRpcInput =
+			'{"id":"prompt-1","type":"prompt","clientMessageId":"client-prompt-1","message":"kept after hello"}\n';
 		const recv = new ManualIrohRecvStream();
 		recv.push(Buffer.from(`${line}\n${initialRpcInput}`));
 
@@ -892,6 +893,7 @@ describe("Iroh remote core helpers", () => {
 			"abort",
 			"new_session",
 			"set_client_capabilities",
+			"report_stream_discontinuity",
 			"get_pending_host_actions",
 			"host_action_response",
 			"get_state",
@@ -3708,7 +3710,12 @@ describe("Iroh remote core helpers", () => {
 			forwardedLines.push(line);
 		});
 
-		const promptLine = JSON.stringify({ id: "prompt-1", type: "prompt", message: "hi" });
+		const promptLine = JSON.stringify({
+			id: "prompt-1",
+			type: "prompt",
+			clientMessageId: "client-prompt-1",
+			message: "hi",
+		});
 		inner.emitLine(promptLine);
 		inner.emitLine(JSON.stringify({ id: "bash-1", type: "bash", command: "pwd" }));
 		inner.emitLine("{");
@@ -3730,6 +3737,82 @@ describe("Iroh remote core helpers", () => {
 		expect(inner.waitForBackpressureCalls).toBe(1);
 		expect(inner.flushCalls).toBe(1);
 		expect(inner.closeCalls).toBe(1);
+	});
+
+	test("routes policy rejections through the installed ordered response sink", async () => {
+		const inner = new ManualRpcTransport();
+		const orderedWrites: object[] = [];
+		const transport = createIrohRemoteFilteredRpcTransport({
+			transport: inner,
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
+			writeRejectedResponse: async (value) => {
+				orderedWrites.push(value);
+			},
+		});
+		transport.onLine(() => {
+			throw new Error("denied commands must not reach RPC mode");
+		});
+
+		inner.emitLine(JSON.stringify({ id: "denied", type: "bash", command: "pwd" }));
+		await vi.waitFor(() => expect(orderedWrites).toHaveLength(1));
+
+		expect(inner.writes).toEqual([]);
+		expect(orderedWrites).toEqual([expect.objectContaining({ id: "denied", command: "bash", success: false })]);
+	});
+
+	test("checks current authority before capability filtering and closes after the ordered rejection", async () => {
+		const inner = new ManualRpcTransport();
+		const events: string[] = [];
+		const transport = createIrohRemoteFilteredRpcTransport({
+			transport: inner,
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
+			isRpcGrantCurrent: () => false,
+			writeRejectedResponse: async () => {
+				events.push("ordinary-rejection-sink");
+			},
+			writeStaleGrantResponse: async (value) => {
+				events.push(`write:${String((value as { error?: unknown }).error)}`);
+			},
+			onRpcGrantStale: async () => {
+				events.push("close");
+			},
+		});
+		transport.onLine(() => {
+			throw new Error("stale grants must not dispatch any command");
+		});
+
+		// This is also statically denied: persisted authority must still win and
+		// force reconnect before the snapshot grant is consulted.
+		inner.emitLine(JSON.stringify({ id: "stale", type: "bash", command: "pwd" }));
+		await vi.waitFor(() => expect(events).toHaveLength(2));
+
+		expect(inner.writes).toEqual([]);
+		expect(events).toEqual(["write:RPC grant is stale; reconnect", "close"]);
+	});
+
+	test("retires stale authority even when the courtesy rejection cannot be admitted", async () => {
+		const inner = new ManualRpcTransport();
+		const admissionError = new Error("ordered feed already fenced");
+		let retired = false;
+		const transport = createIrohRemoteFilteredRpcTransport({
+			transport: inner,
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
+			isRpcGrantCurrent: () => false,
+			writeStaleGrantResponse: () => {
+				throw admissionError;
+			},
+			onRpcGrantStale: () => {
+				retired = true;
+			},
+		});
+		transport.onLine(() => {
+			throw new Error("stale grants must not dispatch any command");
+		});
+
+		inner.emitLine(JSON.stringify({ id: "stale-fenced", type: "get_state" }));
+		await vi.waitFor(() => expect(retired).toBe(true));
+
+		await expect(transport.waitForBackpressure?.()).rejects.toBe(admissionError);
 	});
 
 	test("intercepts allowed remote host commands before subsequent active-connection state requests", async () => {
@@ -4531,7 +4614,7 @@ describe("Iroh remote core helpers", () => {
 		expect(closed).toBe(true);
 	});
 
-	test("defers clean remote close until prompt completion after preflight success", async () => {
+	test("does not retain clean close for detached prompt completion after response admission", async () => {
 		const inner = new ManualRpcTransport();
 		const promptCompletion = createDeferredVoid();
 		const transport = createIrohRemoteCloseDeferringRpcTransport({
@@ -4544,23 +4627,23 @@ describe("Iroh remote core helpers", () => {
 			closed = true;
 		});
 
-		inner.emitLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hi" }));
+		inner.emitLine(
+			JSON.stringify({ id: "prompt-1", type: "prompt", clientMessageId: "client-prompt-1", message: "hi" }),
+		);
 		inner.emitClose();
 		await nextTick();
 		expect(closed).toBe(false);
 
 		transport.write({ id: "prompt-1", type: "response", command: "prompt", success: true });
 		await nextTick();
-		expect(closed).toBe(false);
+		expect(closed).toBe(true);
 
 		promptCompletion.resolve();
 		await nextTick();
-
-		expect(closed).toBe(true);
 	});
 
 	test.each(["steer", "follow_up"] as const)(
-		"defers clean remote close until %s completion after success",
+		"does not retain clean remote close for detached %s completion after response admission",
 		async (command) => {
 			const inner = new ManualRpcTransport();
 			const promptCompletion = createDeferredVoid();
@@ -4581,16 +4664,14 @@ describe("Iroh remote core helpers", () => {
 
 			transport.write({ id: `${command}-1`, type: "response", command, success: true });
 			await nextTick();
-			expect(closed).toBe(false);
+			expect(closed).toBe(true);
 
 			promptCompletion.resolve();
 			await nextTick();
-
-			expect(closed).toBe(true);
 		},
 	);
 
-	test("matches duplicate id-less prompt-like responses one pending command at a time", async () => {
+	test("releases duplicate id-less prompt commands at admission while completions continue detached", async () => {
 		const inner = new ManualRpcTransport();
 		const firstCompletion = createDeferredVoid();
 		const secondCompletion = createDeferredVoid();
@@ -4611,8 +4692,8 @@ describe("Iroh remote core helpers", () => {
 			closed = true;
 		});
 
-		inner.emitLine(JSON.stringify({ type: "steer", message: "first" }));
-		inner.emitLine(JSON.stringify({ type: "steer", message: "second" }));
+		inner.emitLine(JSON.stringify({ type: "steer", clientMessageId: "client-steer-1", message: "first" }));
+		inner.emitLine(JSON.stringify({ type: "steer", clientMessageId: "client-steer-2", message: "second" }));
 		inner.emitClose();
 		await nextTick();
 		expect(closed).toBe(false);
@@ -4620,24 +4701,29 @@ describe("Iroh remote core helpers", () => {
 		transport.write({ type: "response", command: "steer", success: true });
 		transport.write({ type: "response", command: "steer", success: true });
 		await nextTick();
-		expect(closed).toBe(false);
+		expect(closed).toBe(true);
 
 		firstCompletion.resolve();
 		await nextTick();
-		expect(closed).toBe(false);
+		expect(closed).toBe(true);
 
 		secondCompletion.resolve();
 		await nextTick();
-
-		expect(closed).toBe(true);
 	});
 
 	test("filters remote RPC commands before forwarding to Volt RPC", () => {
-		const prompt = getIrohRemoteRpcFilterResult(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hi" }));
+		const prompt = getIrohRemoteRpcFilterResult(
+			JSON.stringify({ id: "prompt-1", type: "prompt", clientMessageId: "client-prompt-1", message: "hi" }),
+		);
 		if (!prompt.allowed) {
 			throw new Error(prompt.response.error);
 		}
-		expect(prompt.command).toMatchObject({ id: "prompt-1", type: "prompt", message: "hi" });
+		expect(prompt.command).toMatchObject({
+			id: "prompt-1",
+			type: "prompt",
+			clientMessageId: "client-prompt-1",
+			message: "hi",
+		});
 
 		const rejected = getIrohRemoteRpcFilterResult(JSON.stringify({ id: "bash-1", type: "bash", command: "pwd" }));
 		if (rejected.allowed) {

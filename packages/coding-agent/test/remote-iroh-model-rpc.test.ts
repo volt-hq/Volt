@@ -4,6 +4,17 @@ import { describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { createTestModel, createTestSession, parseWrittenObjects, startIrohRpcMode } from "./iroh-stream-doubles.ts";
 
+function createStableSessionRunner<TSession>(getSession: () => TSession) {
+	return {
+		async runWithStableSession<TResult>(
+			operation: (session: TSession) => Promise<TResult> | TResult,
+		): Promise<TResult> {
+			const session = getSession();
+			return operation(session);
+		},
+	};
+}
+
 describe("Iroh remote model RPC", () => {
 	test("forwards model catalog, set_model, and set_thinking_level while rejecting cycle commands", async () => {
 		const modelOne = createTestModel("model-one");
@@ -39,6 +50,7 @@ describe("Iroh remote model RPC", () => {
 			},
 		};
 		const runtimeHost = {
+			...createStableSessionRunner(() => session),
 			session,
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),

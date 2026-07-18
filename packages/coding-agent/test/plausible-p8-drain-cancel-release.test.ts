@@ -17,6 +17,16 @@ function key(workspaceName: string, sessionId: string): string {
 	return `${workspaceName}/${sessionId}`;
 }
 
+function publishDaemonRuntime(broker: LeaseBroker, workspaceName: string, sessionId: string) {
+	const begun = broker.beginDaemonAttach(workspaceName, sessionId);
+	if (begun.kind !== "proceed") throw new Error(`daemon attach did not proceed: ${begun.kind}`);
+	const committed = broker.commitDaemonRuntime(begun.claim, workspaceName, sessionId);
+	if (!committed.ok) throw new Error(`daemon runtime commit failed: ${committed.reason}`);
+	const finalized = broker.finalizeDaemonRuntimeCommit(committed.token);
+	if (finalized.kind === "fenced") throw new Error("daemon runtime publication was fenced");
+	return finalized.owner;
+}
+
 function createHarness() {
 	const streaming = new Set<string>();
 	const idleWaiters = new Map<string, Array<() => void>>();
@@ -40,6 +50,13 @@ function createHarness() {
 		},
 		closePhoneStreams: () => {},
 		closeRelays: (_record: LeaseRecord) => {},
+		beginTuiLeaseHandoff: () => {},
+		commitTuiLeaseHandoff: () => {},
+		cancelTuiLeaseHandoff: () => {},
+		releaseTuiLease: () => {},
+		prepareTuiLeaseRekey: () => {},
+		commitTuiLeaseRekey: () => {},
+		rollbackTuiLeaseRekey: () => {},
 		onDrainEnded: (record, _viewerFeedId, reason) => {
 			drainEnded.push({ key: key(record.workspaceName, record.sessionId), reason });
 		},
@@ -69,8 +86,8 @@ describe("P8: TUI cancels its own pending drain via lease_release", () => {
 	it("cancels the drain and does not force-grant the warm lease", async () => {
 		const h = createHarness();
 		const { broker } = h;
-		broker.onDaemonRuntimeAttached("ws", "s1");
-		broker.onDaemonRuntimeStreamCountChanged("ws", "s1", 1);
+		const runtimeOwner = publishDaemonRuntime(broker, "ws", "s1");
+		broker.onDaemonRuntimeStreamCountChanged(runtimeOwner, "ws", "s1", 1);
 		h.streaming.add(key("ws", "s1"));
 
 		// TUI c-1 acquires a streaming lease -> drain begins (pending).

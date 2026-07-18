@@ -36,6 +36,7 @@ describe("RPC transcript projection", () => {
 		const session = SessionManager.inMemory("/Users/jordan/project");
 		const firstUserEntryId = session.appendMessage({
 			role: "user",
+			clientMessageId: "client-message-1",
 			content: [
 				{ type: "text", text: "hello" },
 				{ type: "image", data: "image-bytes", mimeType: "image/png" },
@@ -116,7 +117,11 @@ describe("RPC transcript projection", () => {
 			"tool",
 			"tool",
 		]);
-		expect(transcript.items[0]).toMatchObject({ role: "user", text: "hello" });
+		expect(transcript.items[0]).toMatchObject({
+			role: "user",
+			text: "hello",
+			clientMessageId: "client-message-1",
+		});
 		expect(transcript.items[1]).toMatchObject({ role: "assistant", text: "I can help." });
 		expect(transcript.items[2]).toMatchObject({
 			role: "tool",

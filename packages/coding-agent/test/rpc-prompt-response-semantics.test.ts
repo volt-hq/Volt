@@ -166,6 +166,9 @@ function createRuntimeHost(options: {
 		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
 		dispose: vi.fn(async () => {}),
 		setRebindSession: vi.fn(),
+		async runWithStableSession<T>(operation: (stableSession: AgentSession) => Promise<T> | T): Promise<T> {
+			return operation(session);
+		},
 	} as unknown as AgentSessionRuntime;
 
 	return {
@@ -230,7 +233,7 @@ describe("RPC prompt response semantics", () => {
 		});
 
 		try {
-			lineHandler(JSON.stringify({ id: "b1", type: "prompt", message: "Hello" }));
+			lineHandler(JSON.stringify({ id: "b1", type: "prompt", clientMessageId: "client-b1", message: "Hello" }));
 
 			await vi.waitFor(() => {
 				const responses = getPromptResponses(rpcIo.outputLines, "b1");
@@ -254,7 +257,7 @@ describe("RPC prompt response semantics", () => {
 		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
 
 		try {
-			lineHandler(JSON.stringify({ id: "b2", type: "prompt", message: "Hello" }));
+			lineHandler(JSON.stringify({ id: "b2", type: "prompt", clientMessageId: "client-b2", message: "Hello" }));
 
 			await vi.waitFor(() => {
 				const responses = getPromptResponses(rpcIo.outputLines, "b2");
@@ -264,6 +267,16 @@ describe("RPC prompt response semantics", () => {
 					type: "response",
 					command: "prompt",
 					success: true,
+				});
+			});
+			await vi.waitFor(() => {
+				const userEnd = parseOutputLines(rpcIo.outputLines).find(
+					(record) =>
+						record.type === "message_end" &&
+						(record.message as Record<string, unknown> | undefined)?.role === "user",
+				);
+				expect(userEnd).toMatchObject({
+					message: { role: "user", clientMessageId: "client-b2" },
 				});
 			});
 		} finally {
@@ -296,7 +309,14 @@ describe("RPC prompt response semantics", () => {
 		});
 
 		try {
-			lineHandler(JSON.stringify({ id: "busy-prompt", type: "prompt", message: "Wait in preflight" }));
+			lineHandler(
+				JSON.stringify({
+					id: "busy-prompt",
+					type: "prompt",
+					clientMessageId: "client-busy",
+					message: "Wait in preflight",
+				}),
+			);
 			await inputStarted;
 			lineHandler(JSON.stringify({ id: "busy-state", type: "get_state" }));
 
@@ -315,11 +335,73 @@ describe("RPC prompt response semantics", () => {
 		}
 	});
 
+	it("joins concurrent retries while preserving each request RPC id", async () => {
+		let releaseInput!: () => void;
+		let markInputStarted!: () => void;
+		const inputRelease = new Promise<void>((resolve) => {
+			releaseInput = resolve;
+		});
+		const inputStarted = new Promise<void>((resolve) => {
+			markInputStarted = resolve;
+		});
+		const { lineHandler, cleanup } = await startRpcMode({
+			withAuth: true,
+			responseDelayMs: 0,
+			configureSession: (session) => {
+				const runner = session.extensionRunner;
+				const hasHandlers = runner.hasHandlers.bind(runner);
+				runner.hasHandlers = (eventType) => eventType === "input" || hasHandlers(eventType);
+				runner.emitInput = async (text, images) => {
+					markInputStarted();
+					await inputRelease;
+					return { action: "transform", text, images };
+				};
+			},
+		});
+
+		try {
+			const command = {
+				type: "prompt",
+				clientMessageId: "client-concurrent-retry",
+				message: "One dispatch",
+			};
+			lineHandler(JSON.stringify({ ...command, id: "concurrent-original" }));
+			await inputStarted;
+			lineHandler(JSON.stringify({ ...command, id: "concurrent-retry" }));
+			releaseInput();
+
+			await vi.waitFor(() => {
+				expect(getPromptResponses(rpcIo.outputLines, "concurrent-original")).toMatchObject([
+					{ id: "concurrent-original", success: true },
+				]);
+				expect(getPromptResponses(rpcIo.outputLines, "concurrent-retry")).toMatchObject([
+					{ id: "concurrent-retry", success: true },
+				]);
+			});
+			await vi.waitFor(() => {
+				const messageEnds = parseOutputLines(rpcIo.outputLines).filter((record) => record.type === "message_end");
+				expect(
+					messageEnds.filter((record) => (record.message as Record<string, unknown> | undefined)?.role === "user"),
+				).toHaveLength(1);
+				expect(
+					messageEnds.filter(
+						(record) => (record.message as Record<string, unknown> | undefined)?.role === "assistant",
+					),
+				).toHaveLength(1);
+			});
+		} finally {
+			releaseInput();
+			await cleanup();
+		}
+	});
+
 	it("emits one success response when prompt is queued during streaming", async () => {
 		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 100 });
 
 		try {
-			lineHandler(JSON.stringify({ id: "b3-start", type: "prompt", message: "Start" }));
+			lineHandler(
+				JSON.stringify({ id: "b3-start", type: "prompt", clientMessageId: "client-b3-start", message: "Start" }),
+			);
 			await vi.waitFor(() => {
 				expect(getPromptResponses(rpcIo.outputLines, "b3-start")).toHaveLength(1);
 			});
@@ -329,6 +411,7 @@ describe("RPC prompt response semantics", () => {
 				JSON.stringify({
 					id: "b3",
 					type: "prompt",
+					clientMessageId: "client-b3",
 					message: "Queue this",
 					streamingBehavior: "followUp",
 				}),
@@ -346,6 +429,131 @@ describe("RPC prompt response semantics", () => {
 			});
 
 			await sleep(150);
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("answers completed retries under each RPC id without replaying the turn", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+
+		try {
+			lineHandler(
+				JSON.stringify({
+					id: "retry-original",
+					type: "prompt",
+					clientMessageId: "client-retry-complete",
+					message: "Only once",
+				}),
+			);
+			await vi.waitFor(() => {
+				expect(getPromptResponses(rpcIo.outputLines, "retry-original")).toHaveLength(1);
+				const assistantEnds = parseOutputLines(rpcIo.outputLines).filter(
+					(record) =>
+						record.type === "message_end" &&
+						(record.message as Record<string, unknown> | undefined)?.role === "assistant",
+				);
+				expect(assistantEnds).toHaveLength(1);
+			});
+
+			lineHandler(
+				JSON.stringify({
+					id: "retry-replay",
+					type: "prompt",
+					clientMessageId: "client-retry-complete",
+					message: "Only once",
+				}),
+			);
+			await vi.waitFor(() => {
+				expect(getPromptResponses(rpcIo.outputLines, "retry-replay")).toMatchObject([
+					{
+						id: "retry-replay",
+						type: "response",
+						command: "prompt",
+						success: true,
+					},
+				]);
+			});
+
+			lineHandler(
+				JSON.stringify({
+					id: "retry-conflict",
+					type: "prompt",
+					clientMessageId: "client-retry-complete",
+					message: "Different input",
+				}),
+			);
+			await vi.waitFor(() => {
+				expect(getPromptResponses(rpcIo.outputLines, "retry-conflict")).toMatchObject([
+					{
+						id: "retry-conflict",
+						type: "response",
+						command: "prompt",
+						success: false,
+						error: expect.stringContaining("client_input_conflict"),
+						errorCode: "client_input_conflict",
+					},
+				]);
+			});
+
+			const transcriptEnds = parseOutputLines(rpcIo.outputLines).filter((record) => record.type === "message_end");
+			expect(
+				transcriptEnds.filter((record) => (record.message as Record<string, unknown> | undefined)?.role === "user"),
+			).toHaveLength(1);
+			expect(
+				transcriptEnds.filter(
+					(record) => (record.message as Record<string, unknown> | undefined)?.role === "assistant",
+				),
+			).toHaveLength(1);
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("replays a durable prompt failure under a new RPC id", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({
+			withAuth: false,
+			responseDelayMs: 0,
+			model: {
+				id: "failed-replay-model",
+				name: "Failed Replay Model",
+				api: "openai-completions",
+				provider: "failed-replay-provider",
+				baseUrl: "https://example.invalid",
+				reasoning: false,
+				input: [],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 0,
+				maxTokens: 0,
+			},
+		});
+
+		try {
+			const command = {
+				type: "prompt",
+				clientMessageId: "client-retry-failed",
+				message: "Cannot dispatch",
+			};
+			lineHandler(JSON.stringify({ ...command, id: "failed-original" }));
+			await vi.waitFor(() => {
+				expect(getPromptResponses(rpcIo.outputLines, "failed-original")).toMatchObject([
+					{ id: "failed-original", success: false, error: expect.stringContaining("No API key found") },
+				]);
+			});
+
+			lineHandler(JSON.stringify({ ...command, id: "failed-replay" }));
+			await vi.waitFor(() => {
+				expect(getPromptResponses(rpcIo.outputLines, "failed-replay")).toMatchObject([
+					{ id: "failed-replay", success: false, error: expect.stringContaining("No API key found") },
+				]);
+			});
+
+			const userEnds = parseOutputLines(rpcIo.outputLines).filter(
+				(record) =>
+					record.type === "message_end" &&
+					(record.message as Record<string, unknown> | undefined)?.role === "user",
+			);
+			expect(userEnds).toHaveLength(0);
 		} finally {
 			await cleanup();
 		}

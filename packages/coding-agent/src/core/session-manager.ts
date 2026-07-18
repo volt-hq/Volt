@@ -10,6 +10,7 @@ import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts"
 import { writeDurableAtomicFileSync } from "../utils/durable-atomic-write.ts";
 import { canonicalizePath, normalizePath, resolvePath } from "../utils/paths.ts";
 import {
+	appendDurablePrivateFileSync,
 	appendPrivateFileSync,
 	ensurePrivateDirectorySync,
 	hardenPrivateRegularFileSync,
@@ -25,7 +26,7 @@ import {
 	createCustomMessage,
 } from "./messages.ts";
 
-export const CURRENT_SESSION_VERSION = 3;
+export const CURRENT_SESSION_VERSION = 4;
 
 export interface SessionHeader {
 	type: "session";
@@ -52,11 +53,56 @@ export interface SessionEntryBase {
 	id: string;
 	parentId: string | null;
 	timestamp: string;
+	/** Monotonic file commit order. Added on append and backfilled by v4 migration. */
+	ordinal?: number;
 }
 
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+}
+
+export type ClientInputCommand = "prompt" | "steer" | "follow_up";
+export type ClientInputState = "accepted" | "started" | "completed" | "failed";
+
+/**
+ * Durable idempotency reservation for one client-originated conversation input.
+ * This is host metadata only: it never enters model context or transcript projection.
+ *
+ * The receipt and `started` transition form an at-most-once admission WAL. A
+ * receipt with no `started` transition may be dispatched after reload. A
+ * `started` receipt with no terminal record is deliberately ambiguous and must
+ * never be replayed automatically. Canonical identified user-message commits
+ * imply `completed`; handled non-message inputs append an explicit terminal.
+ */
+export interface ClientInputReceiptEntry extends SessionEntryBase {
+	type: "client_input_receipt";
+	clientMessageId: string;
+	command: ClientInputCommand;
+	semanticDigest: string;
+}
+
+/** Append-only state transition for a client input receipt. */
+export interface ClientInputStateEntry extends SessionEntryBase {
+	type: "client_input_state";
+	receiptId: string;
+	clientMessageId: string;
+	state: Exclude<ClientInputState, "accepted">;
+	error?: string;
+}
+
+export interface ClientInputRecord {
+	receiptId: string;
+	clientMessageId: string;
+	command: ClientInputCommand;
+	semanticDigest: string;
+	state: ClientInputState;
+	error?: string;
+}
+
+export interface ClientInputReservation {
+	record: ClientInputRecord;
+	created: boolean;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -143,6 +189,8 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
 export type SessionEntry =
 	| SessionMessageEntry
+	| ClientInputReceiptEntry
+	| ClientInputStateEntry
 	| ThinkingLevelChangeEntry
 	| ModelChangeEntry
 	| CompactionEntry
@@ -151,6 +199,37 @@ export type SessionEntry =
 	| CustomMessageEntry
 	| LabelEntry
 	| SessionInfoEntry;
+
+/** Host-only input admission WAL records. These never participate in the conversation branch or projection. */
+export function isClientInputWalEntry(entry: SessionEntry): entry is ClientInputReceiptEntry | ClientInputStateEntry {
+	return entry.type === "client_input_receipt" || entry.type === "client_input_state";
+}
+
+export type SessionEntryListener = (entry: SessionEntry) => void;
+
+export interface SessionBranchChange {
+	previousLeafId: string | null;
+	nextLeafId: string | null;
+}
+
+export interface SessionBranchWindowOptions {
+	/** Exclude this entry and begin at its parent; omit to begin at the active leaf. */
+	beforeEntryId?: string;
+	/** Newest branch entries returned in chronological order. */
+	maxEntries: number;
+	/** Older context returned separately for bounded correlation lookups. */
+	lookbackEntries?: number;
+}
+
+export interface SessionBranchWindow {
+	entries: SessionEntry[];
+	lookback: SessionEntry[];
+	hasEarlier: boolean;
+	/** Number of branch entries visited, excluding the one bounded earlier-existence probe. */
+	visitedEntries: number;
+}
+
+export type SessionBranchListener = (change: SessionBranchChange) => void;
 
 /** Raw file entry (includes header) */
 export type FileEntry = SessionHeader | SessionEntry;
@@ -200,6 +279,7 @@ export type ReadonlySessionManager = Pick<
 	| "getEntry"
 	| "getLabel"
 	| "getBranch"
+	| "getBranchWindow"
 	| "getHeader"
 	| "getEntries"
 	| "getTree"
@@ -275,6 +355,18 @@ function migrateV2ToV3(entries: FileEntry[]): void {
 	}
 }
 
+/** Migrate v3 → v4: assign stable file-order commit ordinals. Mutates in place. */
+function migrateV3ToV4(entries: FileEntry[]): void {
+	let ordinal = 1;
+	for (const entry of entries) {
+		if (entry.type === "session") {
+			entry.version = 4;
+			continue;
+		}
+		entry.ordinal = ordinal++;
+	}
+}
+
 /**
  * Run all necessary migrations to bring entries to current version.
  * Mutates entries in place. Returns true if any migration was applied.
@@ -287,6 +379,7 @@ function migrateToCurrentVersion(entries: FileEntry[]): boolean {
 
 	if (version < 2) migrateV1ToV2(entries);
 	if (version < 3) migrateV2ToV3(entries);
+	if (version < 4) migrateV3ToV4(entries);
 
 	return true;
 }
@@ -620,9 +713,26 @@ function isDisplayedCustomMessage(entry: SessionEntry): entry is CustomMessageEn
 
 function isSessionFileFlushContent(entry: FileEntry): boolean {
 	return (
+		entry.type === "client_input_receipt" ||
 		(entry.type === "message" && entry.message.role === "assistant") ||
 		(entry.type === "custom_message" && entry.display)
 	);
+}
+
+function isClientInputDurabilityBoundary(entry: SessionEntry): boolean {
+	return (
+		isClientInputWalEntry(entry) ||
+		(entry.type === "message" && entry.message.role === "user" && typeof entry.message.clientMessageId === "string")
+	);
+}
+
+const CLIENT_INPUT_ERROR_MAX_SCALARS = 2_000;
+
+function boundClientInputError(error: string): string {
+	const scalars = Array.from(error);
+	return scalars.length <= CLIENT_INPUT_ERROR_MAX_SCALARS
+		? error
+		: `${scalars.slice(0, CLIENT_INPUT_ERROR_MAX_SCALARS).join("")}…`;
 }
 
 export interface SessionEntrySummary {
@@ -727,6 +837,14 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 		if (!header) return null;
 
 		const summary = summarizeSessionEntries(entries);
+		// A client-input receipt must be durable before admission, but that private
+		// recovery boundary must not materialize an otherwise nonexistent
+		// conversation in session selectors. Keep the file available for explicit
+		// recovery by path; omit it from enumeration until canonical conversation
+		// content has been committed.
+		if (summary.messageCount === 0 && entries.some(isClientInputWalEntry)) {
+			return null;
+		}
 		const cwd = typeof header.cwd === "string" ? header.cwd : "";
 		const parentSessionPath = header.parentSession;
 		const origin = header.origin === "subagent" ? header.origin : undefined;
@@ -856,7 +974,13 @@ export class SessionManager {
 	private byId: Map<string, SessionEntry> = new Map();
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
+	private clientInputsById: Map<string, ClientInputRecord> = new Map();
 	private leafId: string | null = null;
+	private nextOrdinal = 1;
+	/** First uncertain persistence failure. This manager remains fail-stopped until reloaded. */
+	private persistenceError: Error | undefined;
+	private readonly entryListeners = new Set<SessionEntryListener>();
+	private readonly branchListeners = new Set<SessionBranchListener>();
 
 	private constructor(
 		cwd: string,
@@ -932,7 +1056,10 @@ export class SessionManager {
 		this.fileEntries = [header];
 		this.byId.clear();
 		this.labelsById.clear();
+		this.clientInputsById.clear();
 		this.leafId = null;
+		this.nextOrdinal = 1;
+		this.persistenceError = undefined;
 		this.flushed = false;
 
 		if (this.persist) {
@@ -946,11 +1073,20 @@ export class SessionManager {
 		this.byId.clear();
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
+		this.clientInputsById.clear();
 		this.leafId = null;
+		this.nextOrdinal = 1;
+		this.persistenceError = undefined;
 		for (const entry of this.fileEntries) {
 			if (entry.type === "session") continue;
+			if (Number.isSafeInteger(entry.ordinal) && (entry.ordinal ?? 0) > 0) {
+				this.nextOrdinal = Math.max(this.nextOrdinal, (entry.ordinal ?? 0) + 1);
+			}
 			this.byId.set(entry.id, entry);
-			this.leafId = entry.id;
+			if (!isClientInputWalEntry(entry)) {
+				this.leafId = entry.id;
+			}
+			this._indexClientInputEntry(entry);
 			if (entry.type === "label") {
 				if (entry.label) {
 					this.labelsById.set(entry.targetId, entry.label);
@@ -998,11 +1134,12 @@ export class SessionManager {
 
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
+		const appendEntry = isClientInputDurabilityBoundary(entry) ? appendDurablePrivateFileSync : appendPrivateFileSync;
 
 		const hasFlushContent = this.fileEntries.some(isSessionFileFlushContent);
 		if (!hasFlushContent) {
 			if (this.flushed) {
-				appendPrivateFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+				appendEntry(this.sessionFile, `${JSON.stringify(entry)}\n`);
 			} else {
 				// Mark as not flushed so when conversation content arrives, all entries get written.
 				this.flushed = false;
@@ -1017,15 +1154,194 @@ export class SessionManager {
 			);
 			this.flushed = true;
 		} else {
-			appendPrivateFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			appendEntry(this.sessionFile, `${JSON.stringify(entry)}\n`);
 		}
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
+		this._assertPersistenceHealthy();
+		const previousLeafId = this.leafId;
+		const assignedOrdinal = this.nextOrdinal++;
+		entry.ordinal = assignedOrdinal;
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
-		this.leafId = entry.id;
-		this._persist(entry);
+		if (!isClientInputWalEntry(entry)) {
+			this.leafId = entry.id;
+		}
+		try {
+			this._persist(entry);
+		} catch (error) {
+			this.fileEntries.pop();
+			this.byId.delete(entry.id);
+			this.leafId = previousLeafId;
+			this.nextOrdinal = assignedOrdinal;
+			this.persistenceError = error instanceof Error ? error : new Error(String(error));
+			throw this.persistenceError;
+		}
+		this._indexClientInputEntry(entry);
+		if (isClientInputWalEntry(entry)) {
+			return;
+		}
+		for (const listener of this.entryListeners) {
+			try {
+				listener(entry);
+			} catch {
+				// Persistence is authoritative. A projection observer cannot make a
+				// successfully appended entry appear to have failed.
+			}
+		}
+	}
+
+	private _assertPersistenceHealthy(): void {
+		if (!this.persistenceError) return;
+		throw new Error(
+			"Session persistence is fail-stopped after an uncertain write; reload the session before retrying",
+			{ cause: this.persistenceError },
+		);
+	}
+
+	private _indexClientInputEntry(entry: SessionEntry): void {
+		if (entry.type === "client_input_receipt") {
+			const existing = this.clientInputsById.get(entry.clientMessageId);
+			if (!existing) {
+				this.clientInputsById.set(entry.clientMessageId, {
+					receiptId: entry.id,
+					clientMessageId: entry.clientMessageId,
+					command: entry.command,
+					semanticDigest: entry.semanticDigest,
+					state: "accepted",
+				});
+			}
+			return;
+		}
+
+		if (entry.type === "client_input_state") {
+			const record = this.clientInputsById.get(entry.clientMessageId);
+			if (!record || record.receiptId !== entry.receiptId || record.state === "completed") {
+				return;
+			}
+			if (entry.state === "started" && record.state !== "accepted") {
+				return;
+			}
+			record.state = entry.state;
+			record.error = entry.state === "failed" ? entry.error : undefined;
+			return;
+		}
+
+		if (entry.type !== "message" || entry.message.role !== "user") {
+			return;
+		}
+		const clientMessageId = entry.message.clientMessageId;
+		if (typeof clientMessageId !== "string") {
+			return;
+		}
+		const record = this.clientInputsById.get(clientMessageId);
+		if (record) {
+			record.state = "completed";
+			record.error = undefined;
+		}
+	}
+
+	getClientInput(clientMessageId: string): ClientInputRecord | undefined {
+		const record = this.clientInputsById.get(clientMessageId);
+		return record ? { ...record } : undefined;
+	}
+
+	reserveClientInput(
+		clientMessageId: string,
+		command: ClientInputCommand,
+		semanticDigest: string,
+	): ClientInputReservation {
+		this._assertPersistenceHealthy();
+		const existing = this.clientInputsById.get(clientMessageId);
+		if (existing) {
+			return { record: { ...existing }, created: false };
+		}
+		const entry: ClientInputReceiptEntry = {
+			type: "client_input_receipt",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			clientMessageId,
+			command,
+			semanticDigest,
+		};
+		this._appendEntry(entry);
+		const record = this.clientInputsById.get(clientMessageId);
+		if (!record) {
+			throw new Error("Client input receipt was not indexed after persistence");
+		}
+		return { record: { ...record }, created: true };
+	}
+
+	transitionClientInput(
+		clientMessageId: string,
+		state: Exclude<ClientInputState, "accepted">,
+		error?: string,
+	): ClientInputRecord {
+		this._assertPersistenceHealthy();
+		const record = this.clientInputsById.get(clientMessageId);
+		if (!record) {
+			throw new Error(`Client input receipt not found: ${clientMessageId}`);
+		}
+		if (record.state === "completed" || record.state === "failed") {
+			return { ...record };
+		}
+		if (state === "started" && record.state !== "accepted") {
+			return { ...record };
+		}
+		const entry: ClientInputStateEntry = {
+			type: "client_input_state",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			receiptId: record.receiptId,
+			clientMessageId,
+			state,
+			...(state === "failed" && error !== undefined ? { error: boundClientInputError(error) } : {}),
+		};
+		this._appendEntry(entry);
+		return { ...this.clientInputsById.get(clientMessageId)! };
+	}
+
+	/**
+	 * Observe public conversation entries after they are indexed and durably
+	 * appended. Host-only admission WAL records are intentionally excluded. The
+	 * callback runs synchronously at the commit boundary so ordered projections
+	 * can place transcript mutations in the same causal lane as live events.
+	 */
+	subscribeEntries(listener: SessionEntryListener): () => void {
+		this.entryListeners.add(listener);
+		return () => {
+			this.entryListeners.delete(listener);
+		};
+	}
+
+	/**
+	 * Observe the low-level active-leaf mutation before any later child append.
+	 * This is not an Agent context commit boundary; consumers that require the
+	 * rebuilt message state must observe AgentSession's conversation generation.
+	 */
+	subscribeBranchChanges(listener: SessionBranchListener): () => void {
+		this.branchListeners.add(listener);
+		return () => {
+			this.branchListeners.delete(listener);
+		};
+	}
+
+	private _setBranchLeaf(nextLeafId: string | null): void {
+		const previousLeafId = this.leafId;
+		this.leafId = nextLeafId;
+		if (previousLeafId === nextLeafId) {
+			return;
+		}
+		for (const listener of this.branchListeners) {
+			try {
+				listener({ previousLeafId, nextLeafId });
+			} catch {
+				// Branch mutation remains authoritative if a projection observer fails.
+			}
+		}
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
@@ -1178,16 +1494,18 @@ export class SessionManager {
 	}
 
 	getEntry(id: string): SessionEntry | undefined {
-		return this.byId.get(id);
+		const entry = this.byId.get(id);
+		return entry && !isClientInputWalEntry(entry) ? entry : undefined;
 	}
 
 	/**
 	 * Get all direct children of an entry.
 	 */
 	getChildren(parentId: string): SessionEntry[] {
+		if (!this.getEntry(parentId)) return [];
 		const children: SessionEntry[] = [];
 		for (const entry of this.byId.values()) {
-			if (entry.parentId === parentId) {
+			if (entry.parentId === parentId && !isClientInputWalEntry(entry)) {
 				children.push(entry);
 			}
 		}
@@ -1198,7 +1516,7 @@ export class SessionManager {
 	 * Get the label for an entry, if any.
 	 */
 	getLabel(id: string): string | undefined {
-		return this.labelsById.get(id);
+		return this.getEntry(id) ? this.labelsById.get(id) : undefined;
 	}
 
 	/**
@@ -1207,7 +1525,7 @@ export class SessionManager {
 	 * Pass undefined or empty string to clear the label.
 	 */
 	appendLabelChange(targetId: string, label: string | undefined): string {
-		if (!this.byId.has(targetId)) {
+		if (!this.getEntry(targetId)) {
 			throw new Error(`Entry ${targetId} not found`);
 		}
 		const entry: LabelEntry = {
@@ -1231,18 +1549,79 @@ export class SessionManager {
 
 	/**
 	 * Walk from entry to root, returning all entries in path order.
-	 * Includes all entry types (messages, compaction, model changes, etc.).
+	 * Includes all conversation entry types (messages, compaction, model changes, etc.)
+	 * while traversing transparently across any legacy host-only WAL parents.
 	 * Use buildSessionContext() to get the resolved messages for the LLM.
 	 */
 	getBranch(fromId?: string): SessionEntry[] {
 		const path: SessionEntry[] = [];
 		const startId = fromId ?? this.leafId;
-		let current = startId ? this.byId.get(startId) : undefined;
+		let current = startId ? this.getEntry(startId) : undefined;
 		while (current) {
-			path.unshift(current);
+			if (!isClientInputWalEntry(current)) {
+				path.push(current);
+			}
 			current = current.parentId ? this.byId.get(current.parentId) : undefined;
 		}
-		return path;
+		return path.reverse();
+	}
+
+	/**
+	 * Return a bounded active-branch window without materializing the full path.
+	 * The walk is newest-to-oldest with one final parent lookup to determine
+	 * whether more history exists, then reverses only the bounded result.
+	 */
+	getBranchWindow(options: SessionBranchWindowOptions): SessionBranchWindow | undefined {
+		if (!Number.isSafeInteger(options.maxEntries) || options.maxEntries <= 0) {
+			throw new Error("maxEntries must be a positive safe integer");
+		}
+		const lookbackEntries = options.lookbackEntries ?? 0;
+		if (!Number.isSafeInteger(lookbackEntries) || lookbackEntries < 0) {
+			throw new Error("lookbackEntries must be a non-negative safe integer");
+		}
+		if (options.maxEntries > Number.MAX_SAFE_INTEGER - lookbackEntries) {
+			throw new Error("branch window size exceeds the safe integer range");
+		}
+
+		let current: SessionEntry | undefined;
+		if (options.beforeEntryId !== undefined) {
+			const before = this.getEntry(options.beforeEntryId);
+			if (!before) return undefined;
+			current = before.parentId ? this.byId.get(before.parentId) : undefined;
+		} else {
+			current = this.leafId ? this.byId.get(this.leafId) : undefined;
+		}
+
+		const reverseWindow: SessionEntry[] = [];
+		const seen = new Set<string>();
+		const capacity = options.maxEntries + lookbackEntries;
+		while (current && reverseWindow.length < capacity) {
+			if (seen.has(current.id)) {
+				throw new Error("Session branch contains a parent cycle");
+			}
+			seen.add(current.id);
+			if (!isClientInputWalEntry(current)) {
+				reverseWindow.push(current);
+			}
+			current = current.parentId ? this.byId.get(current.parentId) : undefined;
+		}
+		while (current && isClientInputWalEntry(current)) {
+			if (seen.has(current.id)) {
+				throw new Error("Session branch contains a parent cycle");
+			}
+			seen.add(current.id);
+			current = current.parentId ? this.byId.get(current.parentId) : undefined;
+		}
+		const hasEarlier = current !== undefined;
+		const visitedEntries = reverseWindow.length;
+		reverseWindow.reverse();
+		const entryStart = Math.max(0, reverseWindow.length - options.maxEntries);
+		return {
+			entries: reverseWindow.slice(entryStart),
+			lookback: reverseWindow.slice(0, entryStart),
+			hasEarlier,
+			visitedEntries,
+		};
 	}
 
 	/**
@@ -1262,20 +1641,25 @@ export class SessionManager {
 	}
 
 	/**
-	 * Get all session entries (excludes header). Returns a shallow copy.
+	 * Get all conversation entries (excludes the header and host-only admission WAL).
+	 * Returns a shallow copy.
 	 * The session is append-only: use appendXXX() to add entries, branch() to
 	 * change the leaf pointer. Entries cannot be modified or deleted.
 	 */
 	getEntries(): SessionEntry[] {
-		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+		return this.fileEntries.filter(
+			(entry): entry is SessionEntry => entry.type !== "session" && !isClientInputWalEntry(entry),
+		);
 	}
 
 	/**
-	 * Get the session as a tree structure. Returns a shallow defensive copy of all entries.
+	 * Get the conversation as a tree. Returns a shallow defensive copy of public entries.
 	 * A well-formed session has exactly one root (first entry with parentId === null).
 	 * Orphaned entries (broken parent chain) are also returned as roots.
 	 */
 	getTree(): SessionTreeNode[] {
+		// Admission WAL records share the JSONL for crash recovery but are not
+		// conversation nodes and must never become blank/selectable tree rows.
 		const entries = this.getEntries();
 		const nodeMap = new Map<string, SessionTreeNode>();
 		const roots: SessionTreeNode[] = [];
@@ -1326,10 +1710,10 @@ export class SessionManager {
 	 * are not modified or deleted.
 	 */
 	branch(branchFromId: string): void {
-		if (!this.byId.has(branchFromId)) {
+		if (!this.getEntry(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
-		this.leafId = branchFromId;
+		this._setBranchLeaf(branchFromId);
 	}
 
 	/**
@@ -1338,7 +1722,7 @@ export class SessionManager {
 	 * Use this when navigating to re-edit the first user message.
 	 */
 	resetLeaf(): void {
-		this.leafId = null;
+		this._setBranchLeaf(null);
 	}
 
 	/**
@@ -1347,10 +1731,10 @@ export class SessionManager {
 	 * context from the abandoned conversation path.
 	 */
 	branchWithSummary(branchFromId: string | null, summary: string, details?: unknown, fromHook?: boolean): string {
-		if (branchFromId !== null && !this.byId.has(branchFromId)) {
+		if (branchFromId !== null && !this.getEntry(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
-		this.leafId = branchFromId;
+		this._setBranchLeaf(branchFromId);
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
 			id: generateId(this.byId),

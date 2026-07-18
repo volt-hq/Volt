@@ -1,4 +1,23 @@
 export {
+	type ConversationProjectionCheckpointReceipt,
+	ConversationProjectionFeed,
+	type ConversationProjectionFeedOptions,
+	type ConversationProjectionPreparedValue,
+	type ConversationProjectionQueueBounds,
+	type ConversationProjectionRawWorkflowSnapshot,
+	type ConversationProjectionSnapshot,
+	type ConversationProjectionSnapshotBuilder,
+	type ConversationProjectionSnapshotContext,
+	type ConversationProjectionSource,
+	type ConversationProjectionSubscriberOptions,
+	type ConversationProjectionSubscription,
+	DEFAULT_CONVERSATION_PROJECTION_CHECKPOINT_WINDOW_MS,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_CHECKPOINT_REQUESTS,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_CHECKPOINTS_PER_WINDOW,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_ENVELOPES,
+} from "./conversation-projection-feed.ts";
+export {
 	createIrohRpcTransport,
 	DEFAULT_IROH_READ_LIMIT,
 	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
@@ -10,6 +29,7 @@ export {
 } from "./iroh-transport.ts";
 export { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 export { createLoopbackRpcTransportPair, type LoopbackRpcTransportPair } from "./loopback-transport.ts";
+export { buildRpcSessionState } from "./session-state.ts";
 export {
 	createProjectionState,
 	type ProjectedMessageEndFrame,
@@ -42,9 +62,19 @@ export {
 	type RpcValueHandler,
 } from "./transport.ts";
 export type {
+	RpcAssistantStreamPosition,
 	RpcClientCapabilityFeature,
 	RpcCommand,
 	RpcCommandType,
+	RpcConversationActiveAssistant,
+	RpcConversationAssistantPart,
+	RpcConversationBootstrapEvent,
+	RpcConversationBootstrapReason,
+	RpcConversationDeliveryPosition,
+	RpcConversationDiscontinuityReason,
+	RpcConversationTranscriptItem,
+	RpcConversationTranscriptPage,
+	RpcConversationWorkflowSnapshot,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcHostActionRequest,

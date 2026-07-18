@@ -28,7 +28,13 @@ const SUBAGENT_ERROR_LIMIT = 1_000;
 const SUBAGENT_OUTPUT_LIMIT = 1_000;
 const SUBAGENT_ACTIVITY_LIMIT = 300;
 const SUBAGENT_TREE_DEPTH_LIMIT = 5;
+const SUBAGENT_ARRAY_ITEM_LIMIT = 64;
+const SUBAGENT_GLOBAL_NODE_LIMIT = 128;
 const SUBAGENT_NUMERIC_DETAIL_KEYS = ["startedAt", "durationMs", "toolCalls", "tokens"] as const;
+
+interface SubagentProjectionBudget {
+	remainingNodes: number;
+}
 
 interface StoredToolCall {
 	id: string;
@@ -177,6 +183,7 @@ function projectTranscriptItems(entries: SessionEntry[]): RpcTranscriptItem[] {
 					role: "user",
 					text,
 					timestamp: normalizeTimestamp(entry.timestamp),
+					...(message.clientMessageId === undefined ? {} : { clientMessageId: message.clientMessageId }),
 					...(imageCount > 0 ? { imageCount } : {}),
 				});
 			}
@@ -391,6 +398,7 @@ function projectSubagentArgs(args: Record<string, unknown> | undefined): Record<
 		return undefined;
 	}
 	const projected: Record<string, unknown> = {};
+	const budget: SubagentProjectionBudget = { remainingNodes: SUBAGENT_GLOBAL_NODE_LIMIT };
 	const agent = getStringArg(args, "agent");
 	if (agent) {
 		projected.agent = boundSummary(agent, SUBAGENT_AGENT_LIMIT);
@@ -399,11 +407,11 @@ function projectSubagentArgs(args: Record<string, unknown> | undefined): Record<
 	if (task) {
 		projected.task = boundText(task, SUBAGENT_TASK_LIMIT);
 	}
-	const tasks = projectSubagentInputArray(args.tasks);
+	const tasks = projectSubagentInputArray(args.tasks, budget);
 	if (tasks) {
 		projected.tasks = tasks;
 	}
-	const chain = projectSubagentInputArray(args.chain);
+	const chain = projectSubagentInputArray(args.chain, budget);
 	if (chain) {
 		projected.chain = chain;
 	}
@@ -415,26 +423,30 @@ function projectSubagentArgs(args: Record<string, unknown> | undefined): Record<
 	return Object.keys(projected).length > 0 ? projected : undefined;
 }
 
-function projectSubagentInputArray(value: unknown): Record<string, string>[] | undefined {
+function projectSubagentInputArray(
+	value: unknown,
+	budget: SubagentProjectionBudget,
+): Record<string, string>[] | undefined {
 	if (!Array.isArray(value)) {
 		return undefined;
 	}
-	const projected = value
-		.map((item) => {
-			if (!isRecord(item)) {
-				return undefined;
-			}
-			const agent = getStringArg(item, "agent");
-			const task = getStringArg(item, "task");
-			if (!agent || !task) {
-				return undefined;
-			}
-			return {
-				agent: boundSummary(agent, SUBAGENT_AGENT_LIMIT),
-				task: boundText(task, SUBAGENT_TASK_LIMIT),
-			};
-		})
-		.filter((item): item is { agent: string; task: string } => item !== undefined);
+	const projected: Record<string, string>[] = [];
+	for (
+		let index = 0;
+		index < value.length && index < SUBAGENT_ARRAY_ITEM_LIMIT && budget.remainingNodes > 0;
+		index++
+	) {
+		budget.remainingNodes--;
+		const item = value[index];
+		if (!isRecord(item)) continue;
+		const agent = getStringArg(item, "agent");
+		const task = getStringArg(item, "task");
+		if (!agent || !task) continue;
+		projected.push({
+			agent: boundSummary(agent, SUBAGENT_AGENT_LIMIT),
+			task: boundText(task, SUBAGENT_TASK_LIMIT),
+		});
+	}
 	return projected.length > 0 ? projected : undefined;
 }
 
@@ -445,6 +457,7 @@ export function projectSubagentDetails(
 		return undefined;
 	}
 	const projected: Record<string, unknown> = {};
+	const budget: SubagentProjectionBudget = { remainingNodes: SUBAGENT_GLOBAL_NODE_LIMIT };
 	copyBoundedString(details, projected, "mode", SUBAGENT_AGENT_LIMIT);
 	copyBoundedString(details, projected, "status", SUBAGENT_AGENT_LIMIT);
 	copyBoundedString(details, projected, "subagentId", SUBAGENT_ID_LIMIT);
@@ -460,7 +473,7 @@ export function projectSubagentDetails(
 	if (summary) {
 		projected.summary = summary;
 	}
-	const childSessions = projectSubagentDetailArray(details.childSessions);
+	const childSessions = projectSubagentDetailArray(details.childSessions, budget);
 	if (childSessions) {
 		projected.childSessions = childSessions;
 	}
@@ -476,15 +489,15 @@ export function projectSubagentDetails(
 	if (error) {
 		projected.error = error;
 	}
-	const children = projectSubagentDetailArray(details.children);
+	const children = projectSubagentDetailArray(details.children, budget);
 	if (children) {
 		projected.children = children;
 	}
-	const tasks = projectSubagentDetailArray(details.tasks);
+	const tasks = projectSubagentDetailArray(details.tasks, budget);
 	if (tasks) {
 		projected.tasks = tasks;
 	}
-	const steps = projectSubagentDetailArray(details.steps);
+	const steps = projectSubagentDetailArray(details.steps, budget);
 	if (steps) {
 		projected.steps = steps;
 	}
@@ -517,17 +530,34 @@ function projectSubagentSummary(value: unknown): Record<string, number> | undefi
 	return Object.keys(projected).length > 0 ? projected : undefined;
 }
 
-function projectSubagentDetailArray(value: unknown, depth = 0): Record<string, unknown>[] | undefined {
+function projectSubagentDetailArray(
+	value: unknown,
+	budget: SubagentProjectionBudget,
+	depth = 0,
+): Record<string, unknown>[] | undefined {
 	if (!Array.isArray(value) || depth >= SUBAGENT_TREE_DEPTH_LIMIT) {
 		return undefined;
 	}
-	const projected = value
-		.map((item) => (isRecord(item) ? projectSubagentTaskDetails(item, depth) : undefined))
-		.filter((item): item is Record<string, unknown> => item !== undefined);
+	const projected: Record<string, unknown>[] = [];
+	for (
+		let index = 0;
+		index < value.length && index < SUBAGENT_ARRAY_ITEM_LIMIT && budget.remainingNodes > 0;
+		index++
+	) {
+		budget.remainingNodes--;
+		const item = value[index];
+		if (!isRecord(item)) continue;
+		const task = projectSubagentTaskDetails(item, budget, depth);
+		if (task) projected.push(task);
+	}
 	return projected.length > 0 ? projected : undefined;
 }
 
-function projectSubagentTaskDetails(item: Record<string, unknown>, depth = 0): Record<string, unknown> | undefined {
+function projectSubagentTaskDetails(
+	item: Record<string, unknown>,
+	budget: SubagentProjectionBudget,
+	depth = 0,
+): Record<string, unknown> | undefined {
 	const projected: Record<string, unknown> = {};
 	const index = getFiniteNumber(item, "index");
 	if (index !== undefined) {
@@ -552,7 +582,7 @@ function projectSubagentTaskDetails(item: Record<string, unknown>, depth = 0): R
 	if (error) {
 		projected.error = error;
 	}
-	const children = projectSubagentDetailArray(item.children, depth + 1);
+	const children = projectSubagentDetailArray(item.children, budget, depth + 1);
 	if (children) {
 		projected.children = children;
 	}

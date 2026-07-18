@@ -26,6 +26,16 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 	return { promise, resolve };
 }
 
+function publishDaemonRuntime(broker: LeaseBroker, workspaceName: string, sessionId: string) {
+	const begun = broker.beginDaemonAttach(workspaceName, sessionId);
+	if (begun.kind !== "proceed") throw new Error(`daemon attach did not proceed: ${begun.kind}`);
+	const committed = broker.commitDaemonRuntime(begun.claim, workspaceName, sessionId);
+	if (!committed.ok) throw new Error(`daemon runtime commit failed: ${committed.reason}`);
+	const finalized = broker.finalizeDaemonRuntimeCommit(committed.token);
+	if (finalized.kind === "fenced") throw new Error("daemon runtime publication was fenced");
+	return finalized.owner;
+}
+
 function createDrainableSession() {
 	const handlers = new Set<(event: unknown) => void>();
 	let idle = deferred();
@@ -102,6 +112,13 @@ async function startDaemonHalf(
 			closedStreams.push({ reason });
 		},
 		closeRelays: () => {},
+		beginTuiLeaseHandoff: () => {},
+		commitTuiLeaseHandoff: () => {},
+		cancelTuiLeaseHandoff: () => {},
+		releaseTuiLease: () => {},
+		prepareTuiLeaseRekey: () => {},
+		commitTuiLeaseRekey: () => {},
+		rollbackTuiLeaseRekey: () => {},
 		onDrainStarted: (record, viewerFeedId) => {
 			if (record.tuiConnectionId) {
 				feeds.start(viewerFeedId, record.tuiConnectionId, session);
@@ -192,6 +209,52 @@ async function startDaemonHalf(
 				);
 				return;
 			}
+			case "lease_rekey_prepare": {
+				const result = broker.prepareTuiRekey(
+					request.workspaceName,
+					request.oldSessionId,
+					request.newSessionId,
+					connection.connectionId,
+				);
+				connection.send(
+					result.ok
+						? { type: "lease_rekey_prepared", id: request.id, transactionId: result.reservation.id }
+						: {
+								type: "error",
+								id: request.id,
+								code: result.code,
+								message: `conversation lease rekey preflight failed: ${result.code}`,
+							},
+				);
+				return;
+			}
+			case "lease_rekey_commit": {
+				const result = broker.commitTuiRekey(request.transactionId, connection.connectionId);
+				connection.send(
+					result.ok
+						? { type: "ok", id: request.id }
+						: { type: "error", id: request.id, code: result.code, message: "rekey commit failed" },
+				);
+				return;
+			}
+			case "lease_rekey_rollback": {
+				const result = broker.rollbackTuiRekey(request.transactionId, connection.connectionId);
+				connection.send(
+					result.ok
+						? { type: "ok", id: request.id }
+						: { type: "error", id: request.id, code: result.code, message: "rekey rollback failed" },
+				);
+				return;
+			}
+			case "lease_rekey_dispose": {
+				const result = broker.disposeTuiRekey(request.transactionId, connection.connectionId);
+				connection.send(
+					result.ok
+						? { type: "ok", id: request.id }
+						: { type: "error", id: request.id, code: result.code, message: "rekey dispose failed" },
+				);
+				return;
+			}
 			case "viewer_subscribe":
 				connection.send(
 					feeds.subscribe(request.viewerFeedId, connection.connectionId)
@@ -268,6 +331,110 @@ async function startTuiHalf(
 }
 
 describe("turn-boundary handoff (§12.3.2)", () => {
+	it("rejects a colliding rekey before runtime replacement and commits a reserved target", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "volt-rekey-cleanup-"));
+		const cwd = mkdtempSync(join(tmpdir(), "volt-rekey-cleanup-ws-"));
+		cleanups.push(() => {
+			rmSync(agentDir, { recursive: true, force: true });
+			rmSync(cwd, { recursive: true, force: true });
+		});
+		const paths = getDaemonPaths(agentDir);
+		ensureDaemonDirs(paths);
+		const daemon = await startDaemonHalf(paths.socketPath, { workspaces: [{ name: "ws", path: cwd }] });
+		cleanups.push(() => daemon.close());
+
+		const first = await startTuiHalf(agentDir, cwd);
+		const second = await startTuiHalf(agentDir, cwd);
+		expect(await first.attach.acquire("old")).toMatchObject({ kind: "granted" });
+		expect(await second.attach.acquire("occupied")).toMatchObject({ kind: "granted" });
+
+		await expect(first.attach.prepareRekey("old", "occupied")).rejects.toThrow(/target_in_use/);
+		expect(daemon.broker.lookup("ws", "old")?.state).toBe("tui-owned");
+		expect(daemon.broker.lookup("ws", "occupied")?.state).toBe("tui-owned");
+
+		const transaction = await first.attach.prepareRekey("old", "fresh-new");
+		expect(transaction).toBeDefined();
+		expect(daemon.broker.lookup("ws", "old")?.state).toBe("tui-owned");
+		expect(await second.attach.acquire("fresh-new")).toMatchObject({ kind: "denied" });
+		await transaction?.commit();
+		expect(daemon.broker.lookup("ws", "old")).toBeUndefined();
+		expect(daemon.broker.lookup("ws", "fresh-new")?.state).toBe("tui-owned");
+	}, 20_000);
+
+	it("commits local session tracking while disconnected and reacquires only the replacement", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "volt-rekey-disconnected-"));
+		const cwd = mkdtempSync(join(tmpdir(), "volt-rekey-disconnected-ws-"));
+		cleanups.push(() => {
+			rmSync(agentDir, { recursive: true, force: true });
+			rmSync(cwd, { recursive: true, force: true });
+		});
+		const paths = getDaemonPaths(agentDir);
+		ensureDaemonDirs(paths);
+		const tui = await startTuiHalf(agentDir, cwd);
+		expect(await tui.attach.acquire("old")).toEqual({ kind: "noop" });
+
+		const transaction = await tui.attach.prepareRekey("old", "new");
+		expect(transaction).toBeDefined();
+		await transaction?.commit();
+
+		const daemon = await startDaemonHalf(paths.socketPath, { workspaces: [{ name: "ws", path: cwd }] });
+		cleanups.push(() => daemon.close());
+		await vi.waitFor(() => {
+			expect(daemon.broker.lookup("ws", "new")?.state).toBe("tui-owned");
+		});
+		expect(daemon.broker.lookup("ws", "old")).toBeUndefined();
+	}, 20_000);
+
+	it("advances a connected unheld attach without releasing another TUI's source lease", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "volt-rekey-unheld-"));
+		const cwd = mkdtempSync(join(tmpdir(), "volt-rekey-unheld-ws-"));
+		cleanups.push(() => {
+			rmSync(agentDir, { recursive: true, force: true });
+			rmSync(cwd, { recursive: true, force: true });
+		});
+		const paths = getDaemonPaths(agentDir);
+		ensureDaemonDirs(paths);
+		const daemon = await startDaemonHalf(paths.socketPath, { workspaces: [{ name: "ws", path: cwd }] });
+		cleanups.push(() => daemon.close());
+		const owner = await startTuiHalf(agentDir, cwd);
+		const unheld = await startTuiHalf(agentDir, cwd);
+		expect(await owner.attach.acquire("old")).toMatchObject({ kind: "granted" });
+		expect(await unheld.attach.acquire("old")).toMatchObject({ kind: "denied" });
+
+		const transaction = await unheld.attach.prepareRekey("old", "new");
+		expect(transaction).toBeDefined();
+		await transaction?.commit();
+		expect(daemon.broker.lookup("ws", "old")?.state).toBe("tui-owned");
+		expect(daemon.broker.lookup("ws", "new")?.state).toBe("tui-owned");
+	}, 20_000);
+
+	it("reacquires the old lease when a prepared rekey rolls back after reconnect", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "volt-rekey-rollback-reconnect-"));
+		const cwd = mkdtempSync(join(tmpdir(), "volt-rekey-rollback-reconnect-ws-"));
+		cleanups.push(() => {
+			rmSync(agentDir, { recursive: true, force: true });
+			rmSync(cwd, { recursive: true, force: true });
+		});
+		const paths = getDaemonPaths(agentDir);
+		ensureDaemonDirs(paths);
+		const first = await startDaemonHalf(paths.socketPath, { workspaces: [{ name: "ws", path: cwd }] });
+		const tui = await startTuiHalf(agentDir, cwd);
+		expect(await tui.attach.acquire("old")).toMatchObject({ kind: "granted" });
+		const transaction = await tui.attach.prepareRekey("old", "new");
+		expect(transaction).toBeDefined();
+
+		await first.close();
+		const second = await startDaemonHalf(paths.socketPath, { workspaces: [{ name: "ws", path: cwd }] });
+		cleanups.push(() => second.close());
+		await vi.waitFor(() => expect(tui.attach.connectionState()).toBe("connected"), { timeout: 10_000 });
+		expect(second.broker.lookup("ws", "old")).toBeUndefined();
+
+		await transaction?.rollback();
+		await vi.waitFor(() => expect(second.broker.lookup("ws", "old")?.state).toBe("tui-owned"), {
+			timeout: 10_000,
+		});
+	}, 20_000);
+
 	it("connects every already-running TUI when a daemon appears without auto-start", async () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "volt-late-daemon-"));
 		const cwd = mkdtempSync(join(tmpdir(), "volt-late-daemon-ws-"));
@@ -326,8 +493,8 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 
 		// A daemon runtime is mid-turn with one phone attached.
 		daemon.session.isStreaming = true;
-		daemon.broker.onDaemonRuntimeAttached(workspaceName as string, "s-1");
-		daemon.broker.onDaemonRuntimeStreamCountChanged(workspaceName as string, "s-1", 1);
+		const runtimeOwner = publishDaemonRuntime(daemon.broker, workspaceName as string, "s-1");
+		daemon.broker.onDaemonRuntimeStreamCountChanged(runtimeOwner, workspaceName as string, "s-1", 1);
 
 		const outcome = await attach.acquire("s-1");
 		expect(outcome.kind).toBe("pending");
@@ -364,7 +531,7 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		// lazily resumes (registry-level) and the broker records daemon-active.
 		await attach.release("s-1");
 		expect(daemon.broker.lookup(workspaceName as string, "s-1")?.state ?? "unowned").toBe("unowned");
-		daemon.broker.onDaemonRuntimeAttached(workspaceName as string, "s-1");
+		publishDaemonRuntime(daemon.broker, workspaceName as string, "s-1");
 		expect(daemon.broker.lookup(workspaceName as string, "s-1")?.state).toBe("daemon-active");
 	}, 20_000);
 
@@ -430,7 +597,7 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 			workspaces: [{ name: workspaceName, path: cwd }],
 		});
 		cleanups.push(() => second.close());
-		second.broker.onDaemonRuntimeAttached(workspaceName, "s-1");
+		publishDaemonRuntime(second.broker, workspaceName, "s-1");
 		publishDaemonEndpoint(paths, secondSocketPath, secondToken);
 
 		await vi.waitFor(

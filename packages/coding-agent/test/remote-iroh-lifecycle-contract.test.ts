@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
+import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
@@ -10,8 +11,29 @@ import {
 import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "../src/core/rpc/index.ts";
 import { projectSessionTranscript } from "../src/core/rpc/transcript.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
-import { createIrohRemoteCloseDeferringRpcTransport } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
-import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import {
+	createIrohRemoteCloseDeferringRpcTransport,
+	createIrohRemoteHostCommandRpcTransport,
+} from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
+import { runRpcMode as runRpcModeImpl } from "../src/modes/rpc/rpc-mode.ts";
+
+function runRpcMode(runtimeHost: AgentSessionRuntime, options?: Parameters<typeof runRpcModeImpl>[1]): Promise<void> {
+	if (typeof runtimeHost.runWithStableSession !== "function") {
+		Object.assign(runtimeHost, {
+			async runWithStableSession<T>(operation: (session: AgentSession) => Promise<T> | T): Promise<T> {
+				return operation(runtimeHost.session);
+			},
+		});
+	}
+	if (typeof runtimeHost.runSessionInterruption !== "function") {
+		Object.assign(runtimeHost, {
+			runSessionInterruption<T>(operation: (session: AgentSession) => T): T {
+				return operation(runtimeHost.session);
+			},
+		});
+	}
+	return runRpcModeImpl(runtimeHost, options);
+}
 
 class ManualRpcTransport implements RpcTransport {
 	readonly writes: object[] = [];
@@ -46,6 +68,10 @@ class ManualRpcTransport implements RpcTransport {
 		for (const handler of this.lineHandlers) {
 			handler(line);
 		}
+	}
+
+	async emitLineAndWait(line: string): Promise<void> {
+		await Promise.all([...this.lineHandlers].map((handler) => handler(line)));
 	}
 
 	emitClose(error?: Error): void {
@@ -222,6 +248,109 @@ describe("Iroh remote lifecycle command contract", () => {
 		expect(closeErrors).toEqual([undefined]);
 	});
 
+	test("ordered response admission settles command ownership before physical delivery", async () => {
+		const inner = new ManualRpcTransport();
+		const transport = createIrohRemoteCloseDeferringRpcTransport({
+			transport: inner,
+			waitForPromptCompletion: () => Promise.resolve(),
+		});
+		let closed = false;
+		transport.onLine(() => {});
+		transport.onClose?.(() => {
+			closed = true;
+		});
+
+		inner.emitLine(JSON.stringify({ id: "state-queued", type: "get_state" }));
+		inner.emitClose();
+		await Promise.resolve();
+		expect(closed).toBe(false);
+
+		transport.admitPrepared({
+			id: "state-queued",
+			type: "response",
+			command: "get_state",
+			success: true,
+		});
+		await vi.waitFor(() => expect(closed).toBe(true));
+
+		expect(inner.writes).toEqual([]);
+	});
+
+	test("denied input settles after ordered response admission without waiting for delivery", async () => {
+		const inner = new ManualRpcTransport();
+		const delivery = createDeferred();
+		const admitted: object[] = [];
+		const forwarded = vi.fn();
+		const transport = createIrohRemoteFilteredRpcTransport({
+			transport: inner,
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
+			writeRejectedResponse: (value) => {
+				admitted.push(value);
+				return delivery.promise;
+			},
+		});
+		transport.onLine(forwarded);
+
+		let inputSettled = false;
+		const input = inner
+			.emitLineAndWait(JSON.stringify({ id: "denied-gated", type: "bash", command: "pwd" }))
+			.then(() => {
+				inputSettled = true;
+			});
+		try {
+			expect(admitted).toEqual([expect.objectContaining({ id: "denied-gated", command: "bash", success: false })]);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(inputSettled).toBe(true);
+			expect(forwarded).not.toHaveBeenCalled();
+		} finally {
+			delivery.resolve();
+			await input;
+		}
+		await transport.flush?.();
+	});
+
+	test("host command input settles after final FIFO admission without waiting for delivery", async () => {
+		const inner = new ManualRpcTransport();
+		const delivery = createDeferred();
+		const admitted: object[] = [];
+		const forwarded = vi.fn();
+		const transport = createIrohRemoteHostCommandRpcTransport({
+			transport: inner,
+			handleCommand: async (command) => ({
+				id: command.id,
+				type: "response",
+				command: command.type,
+				success: true,
+			}),
+			writeResponse: (value) => {
+				admitted.push(value);
+				return delivery.promise;
+			},
+		});
+		transport.onLine(forwarded);
+
+		let inputSettled = false;
+		const input = inner
+			.emitLineAndWait(JSON.stringify({ id: "host-gated", type: "unregister_workspace" }))
+			.then(() => {
+				inputSettled = true;
+			});
+		try {
+			await vi.waitFor(() =>
+				expect(admitted).toEqual([
+					expect.objectContaining({ id: "host-gated", command: "unregister_workspace", success: true }),
+				]),
+			);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(inputSettled).toBe(true);
+			expect(forwarded).not.toHaveBeenCalled();
+		} finally {
+			delivery.resolve();
+			await input;
+		}
+		await transport.flush?.();
+	});
+
 	test("accepted prompts continue after clean transport close without disposing the runtime", async () => {
 		const inner = new ManualRpcTransport();
 		const sessionManager = SessionManager.inMemory("/workspace");
@@ -250,7 +379,14 @@ describe("Iroh remote lifecycle command contract", () => {
 		);
 		await ready;
 
-		inner.emitLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "keep running" }));
+		inner.emitLine(
+			JSON.stringify({
+				id: "prompt-1",
+				type: "prompt",
+				clientMessageId: "client-prompt-1",
+				message: "keep running",
+			}),
+		);
 		await vi.waitFor(() =>
 			expect(inner.writes).toContainEqual({
 				id: "prompt-1",
@@ -294,7 +430,14 @@ describe("Iroh remote lifecycle command contract", () => {
 		});
 		await ready;
 
-		inner.emitLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "keep running" }));
+		inner.emitLine(
+			JSON.stringify({
+				id: "prompt-1",
+				type: "prompt",
+				clientMessageId: "client-prompt-1",
+				message: "keep running",
+			}),
+		);
 		await vi.waitFor(() =>
 			expect(inner.writes).toContainEqual({
 				id: "prompt-1",
@@ -349,7 +492,14 @@ describe("Iroh remote lifecycle command contract", () => {
 		});
 		await ready;
 
-		inner.emitLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "keep running" }));
+		inner.emitLine(
+			JSON.stringify({
+				id: "prompt-1",
+				type: "prompt",
+				clientMessageId: "client-prompt-1",
+				message: "keep running",
+			}),
+		);
 		await vi.waitFor(() =>
 			expect(inner.writes).toContainEqual({
 				id: "prompt-1",

@@ -6,7 +6,7 @@
  */
 
 import type { AgentMessage, ThinkingLevel } from "@hansjm10/volt-agent-core";
-import type { Api, ImageContent, Model } from "@hansjm10/volt-ai";
+import type { ActiveToolCallState, Api, AssistantMessage, ImageContent, Model } from "@hansjm10/volt-ai";
 import type { SessionStats } from "../agent-session.ts";
 import type { BashResult } from "../bash-executor.ts";
 import type { CompactionResult } from "../compaction/index.ts";
@@ -28,6 +28,7 @@ import type {
 import type { SourceInfo } from "../source-info.ts";
 
 export type RpcModel = Model<Api>;
+export const RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES = 256;
 /** A model as reported to clients: the raw model plus the thinking levels it supports. */
 export type RpcCatalogModel = RpcModel & { availableThinkingLevels: ThinkingLevel[] };
 export type RpcSubagentDefinitionSource = "built-in" | "user" | "project";
@@ -38,9 +39,16 @@ export type RpcSubagentDefinitionSource = "built-in" | "user" | "project";
 
 export type RpcCommand =
 	// Prompting
-	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
-	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
-	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
+	| {
+			id?: string;
+			type: "prompt";
+			clientMessageId: string;
+			message: string;
+			images?: ImageContent[];
+			streamingBehavior?: "steer" | "followUp";
+	  }
+	| { id?: string; type: "steer"; clientMessageId: string; message: string; images?: ImageContent[] }
+	| { id?: string; type: "follow_up"; clientMessageId: string; message: string; images?: ImageContent[] }
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "new_session"; parentSession?: string }
 
@@ -48,9 +56,17 @@ export type RpcCommand =
 	| { id?: string; type: "set_client_capabilities"; features: RpcClientCapabilityFeature[] }
 	| { id?: string; type: "get_pending_host_actions" }
 
-	// Streaming recovery: client-side assistant-stream state was lost (dropped
-	// frames, replay gap); the next assistant event re-seeds it with a snapshot.
-	| { id?: string; type: "report_stream_discontinuity" }
+	// Ordered conversation recovery. The command id is the recovery request id;
+	// only the same-subscription checkpoint carrying that id can clear the fence.
+	| {
+			id: string;
+			type: "report_stream_discontinuity";
+			sessionId: string;
+			subscriptionId: string;
+			lastAppliedCursor: number;
+			assistantPosition?: RpcAssistantStreamPosition;
+			reason: RpcConversationDiscontinuityReason;
+	  }
 
 	// Native UI actions
 	| { id?: string; type: "get_ui_capabilities" }
@@ -131,7 +147,7 @@ export type RpcCommand =
 
 	// State
 	| { id?: string; type: "get_state" }
-	| { id?: string; type: "get_transcript"; limit?: number; beforeEntryId?: string }
+	| { id?: string; type: "get_transcript"; limit?: number; beforeEntryId?: string; branchEpoch?: string }
 	| { id?: string; type: "get_message_images"; entryId: string; startImageIndex?: number }
 
 	// Subagents (local RPC only)
@@ -307,6 +323,31 @@ export interface UiActionInvocationResponse {
 export type RpcWorkflowKind = "review" | (string & {});
 export type RpcWorkflowStatus = "running" | "finalizing" | "completed" | "cancelled" | "failed" | (string & {});
 
+/** Describes a value whose wire projection was reduced to satisfy a byte budget. */
+export interface RpcProjectionTruncation {
+	truncated: true;
+	/** UTF-8 JSON bytes before projection, or null when intentionally unmeasured or not JSON-serializable. */
+	originalBytes: number | null;
+	/** UTF-8 JSON bytes after projection, excluding this metadata record. */
+	projectedBytes: number;
+	omittedEntries?: number;
+	fields?: Record<string, RpcProjectionTruncation>;
+}
+
+/** Describes a bounded ordered collection. Included entries always retain source order. */
+export interface RpcProjectionCollectionTruncation extends RpcProjectionTruncation {
+	totalCount: number;
+	projectedCount: number;
+	omittedCount: number;
+	truncatedItems?: Array<{
+		index: number;
+		originalBytes: number | null;
+		projectedBytes: number;
+	}>;
+	/** Stable source identifiers for entries omitted after the projected prefix. */
+	omittedItemIds?: string[];
+}
+
 export interface RpcWorkflowEvent {
 	type: "workflow_start" | "workflow_update" | "workflow_end";
 	workflowId: string;
@@ -315,6 +356,7 @@ export interface RpcWorkflowEvent {
 	title?: string;
 	message?: string;
 	status?: RpcWorkflowStatus;
+	projection?: RpcProjectionTruncation;
 }
 
 export type RpcWorkflowToolEvent =
@@ -326,6 +368,7 @@ export type RpcWorkflowToolEvent =
 			toolCallId: string;
 			toolName: string;
 			args?: Record<string, unknown>;
+			projection?: RpcProjectionTruncation;
 	  }
 	| {
 			type: "tool_execution_end";
@@ -335,6 +378,7 @@ export type RpcWorkflowToolEvent =
 			toolCallId: string;
 			toolName: string;
 			isError: boolean;
+			projection?: RpcProjectionTruncation;
 	  };
 
 // ============================================================================
@@ -527,12 +571,29 @@ export interface RpcActiveToolExecution {
 	/** Projected details from the newest tool_execution_update, so clients that
 	 *  attach mid-turn can restore live tool state (currently `subagent` only). */
 	details?: Record<string, unknown>;
+	projection?: RpcProjectionTruncation;
 }
 
 export interface RpcActiveCompaction {
 	reason: "manual" | "threshold" | "overflow";
 	/** Unix epoch milliseconds when the active compaction started. */
 	startedAt: number;
+}
+
+export interface RpcActiveRetry {
+	attempt: number;
+	maxAttempts: number;
+}
+
+export interface RpcSessionStateProjection {
+	model?: RpcProjectionTruncation;
+	sessionFile?: RpcProjectionTruncation;
+	sessionName?: RpcProjectionTruncation;
+	steeringQueue?: RpcProjectionCollectionTruncation;
+	followUpQueue?: RpcProjectionCollectionTruncation;
+	activeTools?: RpcProjectionCollectionTruncation;
+	/** Top-level workflow collection metadata carried here so the atomic snapshot remains one envelope. */
+	activeWorkflows?: RpcProjectionCollectionTruncation;
 }
 
 export interface RpcSessionState {
@@ -552,8 +613,14 @@ export interface RpcSessionState {
 	autoCompactionEnabled: boolean;
 	messageCount: number;
 	pendingMessageCount: number;
+	/** Authoritative queue contents for atomic bootstrap/checkpoint recovery. */
+	steeringQueue?: readonly string[];
+	/** Authoritative queue contents for atomic bootstrap/checkpoint recovery. */
+	followUpQueue?: readonly string[];
 	activeTools?: RpcActiveToolExecution[];
 	activeCompaction?: RpcActiveCompaction;
+	activeRetry?: RpcActiveRetry;
+	projection?: RpcSessionStateProjection;
 }
 
 export type RpcTranscriptToolStatus = "started" | "completed" | "failed";
@@ -567,6 +634,8 @@ export interface RpcTranscriptBaseItem {
 export interface RpcTranscriptTextItem extends RpcTranscriptBaseItem {
 	role: "user" | "assistant";
 	text: string;
+	/** Stable submitting-client identity. Present only on remotely submitted user messages. */
+	clientMessageId?: string;
 	/** Number of inline image blocks on the persisted user message. Transcript
 	 *  projections are text-only; clients recover the blocks per entry via
 	 *  `get_message_images`. */
@@ -602,6 +671,95 @@ export interface RpcTranscriptResponse {
 	items: RpcTranscriptItem[];
 	hasMore: boolean;
 	nextBeforeEntryId: string | null;
+	/** Present for ordered remote pagination and correlated to the request's bootstrap generation. */
+	branchEpoch?: string;
+}
+
+// ============================================================================
+// Ordered conversation projection
+// ============================================================================
+
+export interface RpcConversationDeliveryPosition {
+	subscriptionId: string;
+	cursor: number;
+}
+
+export interface RpcAssistantStreamPosition {
+	epoch: number;
+	seq: number;
+}
+
+export type RpcConversationDiscontinuityReason = "cursor_gap" | "assistant_position_gap" | "reducer_divergence";
+
+export type RpcConversationBootstrapReason = "bootstrap" | "session_rebind" | "resync" | "overflow";
+
+/** Subscriber-sanitized active assistant state used to seed the decoder before tail delivery. */
+export interface RpcConversationActiveAssistant {
+	stream: RpcAssistantStreamPosition;
+	message: AssistantMessage;
+	toolState?: readonly ActiveToolCallState[];
+	projection?: RpcProjectionTruncation;
+}
+
+/** Canonical transcript shape used by authorized remote conversation streams. */
+export interface RpcConversationTranscriptItem {
+	entryId: string;
+	ordinal: number;
+	createdAt: string;
+	role: "user" | "assistant" | "system" | "tool";
+	text: string;
+	truncated: boolean;
+	/** Stable submitting-client identity. Present only on remotely submitted user messages. */
+	clientMessageId?: string;
+	imageCount?: number;
+	toolName?: string;
+	status?: "completed" | "failed";
+	summary?: string;
+	path?: string;
+	args?: Record<string, unknown>;
+	details?: Record<string, unknown>;
+	output?: string;
+	outputTruncated?: boolean;
+	parts?: RpcConversationAssistantPart[];
+	stopReason?: AssistantMessage["stopReason"];
+}
+
+export type RpcConversationAssistantPart =
+	| { type: "text"; text: string; truncated: boolean }
+	| { type: "thinking"; text: string; truncated?: boolean; redacted?: boolean };
+
+export interface RpcConversationTranscriptPage {
+	workspaceName?: string;
+	sessionId: string;
+	items: RpcConversationTranscriptItem[];
+	hasMore: boolean;
+	nextBeforeEntryId: string | null;
+	projectionVersion: number;
+	branchEpoch: string;
+	head: { entryId: string; ordinal: number } | null;
+}
+
+export interface RpcConversationWorkflowSnapshot {
+	/** Stable identity retained even when workflow details are projected away. */
+	workflowId: string;
+	workflowEvent?: RpcWorkflowEvent;
+	activeTools: RpcWorkflowToolEvent[];
+	activeToolsProjection?: RpcProjectionCollectionTruncation;
+}
+
+export interface RpcConversationBootstrapEvent {
+	type: "conversation_bootstrap";
+	delivery: RpcConversationDeliveryPosition;
+	conversation: {
+		workspaceName: string;
+		sessionId: string;
+	};
+	state: RpcSessionState;
+	transcript: RpcConversationTranscriptPage;
+	activeAssistant: RpcConversationActiveAssistant | null;
+	activeWorkflows: RpcConversationWorkflowSnapshot[];
+	reason: RpcConversationBootstrapReason;
+	requestId?: string;
 }
 
 /** One recovered image block. Shaped as an ImageContent record (plus its
@@ -653,7 +811,13 @@ export type RpcResponse =
 
 	// Client capabilities and host-initiated actions
 	| { id?: string; type: "response"; command: "set_client_capabilities"; success: true }
-	| { id?: string; type: "response"; command: "report_stream_discontinuity"; success: true }
+	| {
+			id: string;
+			type: "response";
+			command: "report_stream_discontinuity";
+			success: true;
+			data: { subscriptionId: string; requestId: string; checkpointCursor: number };
+	  }
 	| {
 			id?: string;
 			type: "response";
@@ -915,7 +1079,15 @@ export type RpcResponse =
 	  }
 
 	// Error response (any command can fail)
-	| { id?: string; type: "response"; command: string; success: false; error: string };
+	| {
+			id?: string;
+			type: "response";
+			command: string;
+			success: false;
+			error: string;
+			/** Stable machine-readable code for recovery decisions when one is available. */
+			errorCode?: string;
+	  };
 
 // ============================================================================
 // Extension UI Events

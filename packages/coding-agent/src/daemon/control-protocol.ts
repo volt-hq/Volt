@@ -91,7 +91,10 @@ export type ControlRequest =
 			force?: boolean;
 	  }
 	| { type: "lease_release"; id: string; workspaceName: string; sessionId: string }
-	| { type: "lease_rekey"; id: string; workspaceName: string; oldSessionId: string; newSessionId: string }
+	| { type: "lease_rekey_prepare"; id: string; workspaceName: string; oldSessionId: string; newSessionId: string }
+	| { type: "lease_rekey_commit"; id: string; transactionId: string }
+	| { type: "lease_rekey_rollback"; id: string; transactionId: string }
+	| { type: "lease_rekey_dispose"; id: string; transactionId: string }
 	| ({ type: "pair_request"; id: string; workspaceName?: string } & ControlAccessSelection) // progress arrives as pairing_progress events
 	| { type: "pair_cancel"; id: string; requestId: string }
 	| { type: "clients_list"; id: string }
@@ -263,6 +266,7 @@ export interface DaemonRemotePolicyStatus {
 export type ControlResponse =
 	| { type: "ok"; id: string }
 	| { type: "error"; id: string; code: string; message: string }
+	| { type: "lease_rekey_prepared"; id: string; transactionId: string }
 	| { type: "lease_granted"; id: string; workspaceName: string; sessionId: string; handoff: "cold" | "warm" | "none" }
 	| { type: "lease_pending"; id: string; viewerFeedId: string }
 	// lease_pending is provisional; the terminal response for the same id arrives
@@ -661,12 +665,16 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 		case "lease_acquire":
 		case "lease_release":
 			return typeof value.workspaceName === "string" && typeof value.sessionId === "string";
-		case "lease_rekey":
+		case "lease_rekey_prepare":
 			return (
 				typeof value.workspaceName === "string" &&
 				typeof value.oldSessionId === "string" &&
 				typeof value.newSessionId === "string"
 			);
+		case "lease_rekey_commit":
+		case "lease_rekey_rollback":
+		case "lease_rekey_dispose":
+			return typeof value.transactionId === "string";
 		case "pair_cancel":
 			return typeof value.requestId === "string";
 		case "client_access_update":
@@ -766,6 +774,8 @@ export function isControlResponse(value: unknown): value is ControlResponse {
 		case "client_access_updated":
 		case "pair_started":
 			return true;
+		case "lease_rekey_prepared":
+			return typeof value.transactionId === "string";
 		case "worktree_result":
 			return isRecord(value.worktree);
 		case "worktrees_result":

@@ -148,7 +148,8 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		});
 		expect(created.entry).toMatchObject({ worktreeId: "fix-login", worktreePath });
 		expect(bindWorktreeSession).toHaveBeenCalledExactlyOnceWith("ws", "fix-login", "s-wt");
-		await registry.commitEntry(created.entry, created.sessionSelection, authorization);
+		await registry.commitEntry(created.entry, created.sessionSelection, authorization, created.attachClaim);
+		created.attachClaim.release();
 
 		// A reattach to the same conversation must not re-bind.
 		const reattach = await registry.getOrCreateEntry(
@@ -158,6 +159,7 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		expect(reattach.created).toBe(false);
 		expect(reattach.entry).toBe(created.entry);
 		expect(bindWorktreeSession).toHaveBeenCalledTimes(1);
+		reattach.attachClaim.release();
 		await registry.stopAll("test_cleanup");
 	});
 

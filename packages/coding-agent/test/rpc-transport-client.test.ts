@@ -2,7 +2,7 @@ import { tmpdir } from "node:os";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { type Api, fauxAssistantMessage, type Model, type ThinkingLevelMap } from "@hansjm10/volt-ai";
 import { describe, expect, test, vi } from "vitest";
-import type { ExtensionBindings, PromptOptions } from "../src/core/agent-session.ts";
+import type { AgentSession, ExtensionBindings, PromptOptions } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { ResolvedCommand } from "../src/core/extensions/types.ts";
 import {
@@ -2136,6 +2136,9 @@ function createRuntimeHost(
 		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
 		dispose,
 		setRebindSession: vi.fn(),
+		async runWithStableSession<T>(operation: (stableSession: AgentSession) => Promise<T> | T): Promise<T> {
+			return operation((this as unknown as AgentSessionRuntime).session);
+		},
 	} as unknown as AgentSessionRuntime;
 }
 

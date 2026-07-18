@@ -7,6 +7,8 @@ export interface IrohRemoteActiveStreamEntry {
 	/** Feature strings from the client's last set_client_capabilities. */
 	capabilities?: Set<string>;
 	close(reason: string): Promise<void> | void;
+	/** Retire the stream-local projection/RPC mode and await its logical shutdown. */
+	terminate?(): Promise<void>;
 	write?(value: object): Promise<void> | void;
 }
 

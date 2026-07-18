@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { AgentMessage, ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { ImageContent } from "@hansjm10/volt-ai";
 import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.ts";
@@ -134,17 +135,17 @@ export abstract class RpcClientBase {
 
 	/** Send a prompt to the agent. */
 	async prompt(message: string, images?: ImageContent[], onAccepted?: () => void): Promise<void> {
-		await this.send({ type: "prompt", message, images }, onAccepted);
+		await this.send({ type: "prompt", clientMessageId: randomUUID(), message, images }, onAccepted);
 	}
 
 	/** Queue a steering message to interrupt the agent mid-run. */
 	async steer(message: string, images?: ImageContent[]): Promise<void> {
-		await this.send({ type: "steer", message, images });
+		await this.send({ type: "steer", clientMessageId: randomUUID(), message, images });
 	}
 
 	/** Queue a follow-up message to be processed after the agent finishes. */
 	async followUp(message: string, images?: ImageContent[]): Promise<void> {
-		await this.send({ type: "follow_up", message, images });
+		await this.send({ type: "follow_up", clientMessageId: randomUUID(), message, images });
 	}
 
 	/** Abort current operation. */
@@ -524,7 +525,7 @@ export abstract class RpcClientBase {
 				}
 			});
 
-			void this.send({ type: "prompt", message, images }, () => {
+			void this.send({ type: "prompt", clientMessageId: randomUUID(), message, images }, () => {
 				promptAccepted = true;
 				resolveIfComplete();
 			}).catch(rejectAndCleanup);
