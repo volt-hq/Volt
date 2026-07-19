@@ -4,6 +4,12 @@ import type { Socket } from "node:net";
 import { DuplexWriteGate, StreamClosedError } from "../core/rpc/duplex-write-gate.ts";
 import type { IrohBiStreamLike } from "../core/rpc/iroh-transport.ts";
 import { encodeControlLine, type RelayCloseReason, type RelayPreamble } from "./control-protocol.ts";
+import {
+	createLifecycleFencedIrohStream,
+	type IrohPhysicalTaskObserver,
+	isIrohStreamLifecycleClosedError,
+	runLifecycleFencedPhysicalOperation,
+} from "./iroh-stream-lifecycle.ts";
 
 export const RELAY_TOKEN_TTL_MS = 10_000;
 export const RELAY_OFFER_RETRY_AFTER_MS = 1_000;
@@ -53,6 +59,8 @@ export interface MintRelayOptions {
 	rejectPending(rejection: RelayPendingRejection): Promise<void> | void;
 	/** Exactly-once notification paired with the owner's `settled` promise. */
 	onSettled(outcome: RelayOutcome): Promise<void> | void;
+	/** Owns raw phone/socket settlement after logical relay closure. */
+	observePhysicalTask?: IrohPhysicalTaskObserver;
 }
 
 type RelayLifecycleOwnerHooks = {
@@ -76,7 +84,10 @@ export class RelayLifecycleOwner {
 	readonly expiresAt: number;
 	readonly settled: Promise<RelayOutcome>;
 
+	private readonly physicalStream: IrohBiStreamLike;
 	private readonly stream: IrohBiStreamLike;
+	private readonly closeController = new AbortController();
+	private readonly observePhysicalTask: IrohPhysicalTaskObserver;
 	private readonly rejectPending: MintRelayOptions["rejectPending"];
 	private readonly onSettled: MintRelayOptions["onSettled"];
 	private readonly hooks: RelayLifecycleOwnerHooks;
@@ -90,6 +101,7 @@ export class RelayLifecycleOwner {
 	private bytesUp = 0;
 	private bytesDown = 0;
 	private writeQueue: Promise<void> = Promise.resolve();
+	private physicalWriteTail: Promise<void> = Promise.resolve();
 	private phoneToTuiPump: Promise<void> | undefined;
 	private terminalClosePromise: Promise<void> | undefined;
 	private terminalError: string | undefined;
@@ -104,7 +116,16 @@ export class RelayLifecycleOwner {
 		this.connectionId = options.connectionId;
 		this.ownerControlConnectionId = options.ownerControlConnectionId;
 		this.streamId = options.streamId;
-		this.stream = options.stream;
+		this.physicalStream = options.stream;
+		this.observePhysicalTask = (task) => {
+			void task.catch(() => {});
+			options.observePhysicalTask?.(task);
+		};
+		this.stream = createLifecycleFencedIrohStream(
+			options.stream,
+			this.closeController.signal,
+			this.observePhysicalTask,
+		);
 		this.preamble = { ...options.preamble, type: "relay_preamble", relayId: this.relayId };
 		this.expiresAt = (options.now ?? Date.now()) + RELAY_TOKEN_TTL_MS;
 		this.rejectPending = options.rejectPending;
@@ -153,6 +174,7 @@ export class RelayLifecycleOwner {
 		this.activeStartedAt = now;
 		this.socket = socket;
 		this.writeGate = new DuplexWriteGate(socket);
+		this.observePhysicalTask(this.writeGate.closed);
 
 		socket.write(encodeControlLine({ type: "hello_ack", ok: true }));
 		socket.write(encodeControlLine(this.preamble));
@@ -194,6 +216,7 @@ export class RelayLifecycleOwner {
 			message: options.pendingMessage ?? RELAY_PENDING_CLOSE_MESSAGE,
 			...(options.retryAfterMs === undefined ? {} : { retryAfterMs: options.retryAfterMs }),
 		};
+		this.startOfferedPhysicalClose(rejection);
 		this.startTerminalClose(
 			{
 				reason,
@@ -201,8 +224,9 @@ export class RelayLifecycleOwner {
 				bytesDown: 0,
 				durationMs: 0,
 			},
-			() => this.settleOfferedClose(rejection),
+			() => Promise.resolve(),
 		);
+		this.fencePhysicalWaits();
 		return this.settled;
 	}
 
@@ -222,14 +246,28 @@ export class RelayLifecycleOwner {
 			this.socket?.pause();
 		}
 		const bytes = Array.from(chunk);
+		const physicalWrite = this.physicalWriteTail.then(() => this.physicalStream.send.writeAll(bytes));
+		this.observePhysicalTask(physicalWrite);
+		this.physicalWriteTail = physicalWrite.catch(() => {
+			this.writeFailed = true;
+		});
 		this.writeQueue = this.writeQueue
-			.then(() => this.stream.send.writeAll(bytes))
+			.then(() =>
+				runLifecycleFencedPhysicalOperation(
+					() => physicalWrite,
+					this.closeController.signal,
+					() => {},
+				),
+			)
 			.then(() => {
 				if (pauseSocket && this.lifecyclePhase === "active") {
 					this.socket?.resume();
 				}
 			})
 			.catch((error: unknown) => {
+				if (isIrohStreamLifecycleClosedError(error)) {
+					return;
+				}
 				this.writeFailed = true;
 				this.beginActiveClose("error", "abortive", this.toErrorMessage(error));
 			});
@@ -253,7 +291,7 @@ export class RelayLifecycleOwner {
 				if (!writeGate) {
 					break;
 				}
-				await writeGate.write(buffer);
+				await this.runPhysicalOperation(() => writeGate.write(buffer));
 				if (this.lifecyclePhase !== "active") {
 					break;
 				}
@@ -262,6 +300,9 @@ export class RelayLifecycleOwner {
 				this.beginActiveClose(this.closeReason ?? "phone_disconnected", "graceful");
 			}
 		} catch (error) {
+			if (isIrohStreamLifecycleClosedError(error)) {
+				return;
+			}
 			if (error instanceof StreamClosedError) {
 				this.beginActiveClose(this.closeReason ?? "tui_disconnected", "abortive");
 				return;
@@ -281,14 +322,15 @@ export class RelayLifecycleOwner {
 
 		const socket = this.socket;
 		const writeGate = this.writeGate;
-		const capturedWriteQueue = this.writeQueue;
-		const phoneToTuiPump = this.phoneToTuiPump ?? Promise.resolve();
+		const logicalWriteQueue = this.writeQueue;
+		const logicalPhonePump = this.phoneToTuiPump ?? Promise.resolve();
 		if (mode === "abortive") {
 			// Stop the local source synchronously. Stream reset/stop begins in the
 			// terminal task below before it waits for either retained pump.
 			socket?.pause();
 			socket?.destroy();
 		}
+		this.startActivePhysicalClose(mode, writeGate, socket);
 		this.startTerminalClose(
 			{
 				reason: this.closeReason ?? reason,
@@ -296,11 +338,9 @@ export class RelayLifecycleOwner {
 				bytesDown: this.bytesDown,
 				durationMs: Date.now() - (this.activeStartedAt ?? Date.now()),
 			},
-			() =>
-				mode === "graceful"
-					? this.settleActiveGracefully(capturedWriteQueue, phoneToTuiPump, writeGate, socket)
-					: this.settleActiveAbortively(capturedWriteQueue, phoneToTuiPump, writeGate),
+			() => Promise.allSettled([logicalWriteQueue, logicalPhonePump]).then(() => undefined),
 		);
+		this.fencePhysicalWaits();
 	}
 
 	private fenceClosing(): void {
@@ -310,6 +350,12 @@ export class RelayLifecycleOwner {
 		this.lifecyclePhase = "closed";
 		this.clearExpiryTimer();
 		this.hooks.onClosing(this);
+	}
+
+	private fencePhysicalWaits(): void {
+		if (!this.closeController.signal.aborted) {
+			this.closeController.abort();
+		}
 	}
 
 	private startTerminalClose(outcome: Omit<RelayOutcome, "error">, terminalWork: () => Promise<void>): void {
@@ -335,87 +381,77 @@ export class RelayLifecycleOwner {
 		})();
 	}
 
-	private async settleOfferedClose(rejection: RelayPendingRejection): Promise<void> {
-		await this.observeTerminalOperation(() => this.rejectPending(rejection));
-		await Promise.all([
-			this.finishSendGracefully(),
-			this.observeTerminalOperation(() => this.stream.recv.stop?.(0n)),
-		]);
+	private startOfferedPhysicalClose(rejection: RelayPendingRejection): void {
+		const rejected = this.startRawPhysicalOperation(() => this.rejectPending(rejection));
+		const afterRejection = rejected.catch(() => undefined);
+		this.observePhysicalTask(afterRejection.then(() => this.finishPhysicalSendAfterWrites()));
+		this.observePhysicalTask(afterRejection.then(() => this.physicalStream.recv.stop?.(0n)));
 	}
 
-	private async settleActiveGracefully(
-		capturedWriteQueue: Promise<void>,
-		phoneToTuiPump: Promise<void>,
+	private startActivePhysicalClose(
+		mode: "graceful" | "abortive",
 		writeGate: DuplexWriteGate | undefined,
 		socket: Socket | undefined,
-	): Promise<void> {
-		await this.observePromise(capturedWriteQueue);
-		const sendClose = this.writeFailed
-			? this.observeTerminalOperation(() => this.resetSend())
-			: this.finishSendGracefully();
-		await sendClose;
-
-		// Start stop before waiting for the retained recv pump, but await the pump
-		// before the stop promise: native read()/stop() may share a stream lock.
-		const recvStop = this.observeTerminalOperation(() => this.stream.recv.stop?.(0n));
-		await this.observePromise(phoneToTuiPump);
-		await recvStop;
-		if (writeGate) {
-			await this.observeTerminalOperation(() => writeGate.end());
-			if (!socket?.destroyed) {
+	): void {
+		if (mode === "graceful") {
+			this.observePhysicalTask(this.finishPhysicalSendAfterWrites());
+			if (writeGate) {
+				const ending = this.startRawPhysicalOperation(() => writeGate.end());
+				const destroyed = ending.finally(() => {
+					if (!socket?.destroyed) socket?.destroy();
+				});
+				this.observePhysicalTask(destroyed);
+				const disposed = writeGate.closed.finally(() => writeGate.dispose());
+				this.observePhysicalTask(disposed);
+			} else {
 				socket?.destroy();
 			}
-			await this.observePromise(writeGate.closed);
-			writeGate.dispose();
 		} else {
-			socket?.destroy();
-		}
-	}
-
-	private async settleActiveAbortively(
-		capturedWriteQueue: Promise<void>,
-		phoneToTuiPump: Promise<void>,
-		writeGate: DuplexWriteGate | undefined,
-	): Promise<void> {
-		const sendReset = this.observeTerminalOperation(() => this.resetSend());
-		const recvStop = this.observeTerminalOperation(() => this.stream.recv.stop?.(0n));
-		await Promise.all([this.observePromise(capturedWriteQueue), this.observePromise(phoneToTuiPump)]);
-		await Promise.all([sendReset, recvStop]);
-		if (writeGate) {
-			await this.observePromise(writeGate.closed);
-			writeGate.dispose();
-		}
-	}
-
-	private async observeTerminalOperation(operation: () => Promise<void> | void): Promise<void> {
-		try {
-			await operation();
-		} catch (error: unknown) {
-			this.recordTerminalError(error);
-		}
-	}
-
-	private async observePromise(promise: Promise<void>): Promise<void> {
-		try {
-			await promise;
-		} catch (error: unknown) {
-			this.recordTerminalError(error);
-		}
-	}
-
-	private resetSend(): Promise<void> | void {
-		return this.stream.send.reset ? this.stream.send.reset(0n) : this.stream.send.finish?.();
-	}
-
-	private async finishSendGracefully(): Promise<void> {
-		try {
-			await this.stream.send.finish?.();
-		} catch (error: unknown) {
-			this.recordTerminalError(error);
-			if (this.stream.send.reset) {
-				await this.observeTerminalOperation(() => this.stream.send.reset?.(0n));
+			this.startRawPhysicalOperation(() => this.resetPhysicalSend());
+			if (writeGate) {
+				const disposed = writeGate.closed.finally(() => writeGate.dispose());
+				this.observePhysicalTask(disposed);
 			}
 		}
+		this.startRawPhysicalOperation(() => this.physicalStream.recv.stop?.(0n));
+	}
+
+	private startRawPhysicalOperation(operation: () => Promise<void> | void): Promise<void> {
+		let task: Promise<void>;
+		try {
+			task = Promise.resolve(operation());
+		} catch (error: unknown) {
+			this.recordTerminalError(error);
+			task = Promise.reject(error);
+		}
+		this.observePhysicalTask(task);
+		void task.catch(() => {});
+		return task;
+	}
+
+	private finishPhysicalSendAfterWrites(): Promise<void> {
+		const closeTask = this.physicalWriteTail.then(async () => {
+			if (this.writeFailed) {
+				await this.resetPhysicalSend();
+				return;
+			}
+			try {
+				await this.physicalStream.send.finish?.();
+			} catch {
+				await this.physicalStream.send.reset?.(0n);
+			}
+		});
+		this.observePhysicalTask(closeTask);
+		void closeTask.catch(() => {});
+		return closeTask;
+	}
+
+	private runPhysicalOperation<T>(operation: () => Promise<T> | T): Promise<T> {
+		return runLifecycleFencedPhysicalOperation(operation, this.closeController.signal, this.observePhysicalTask);
+	}
+
+	private resetPhysicalSend(): Promise<void> | void {
+		return this.physicalStream.send.reset ? this.physicalStream.send.reset(0n) : this.physicalStream.send.finish?.();
 	}
 
 	private recordTerminalError(error: unknown): void {

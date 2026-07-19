@@ -144,7 +144,7 @@ export interface RpcOrderedConversationBinding {
 	readonly branchEpoch: string;
 	subscribeAuthorityChanges(listener: () => void): () => void;
 	enqueueControl(value: object): Promise<void>;
-	requestCheckpoint(requestId: string): {
+	requestCheckpoint(command: Extract<RpcCommand, { type: "report_stream_discontinuity" }>): {
 		subscriptionId: string;
 		requestId: string;
 		checkpointCursor: number;
@@ -1167,7 +1167,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				if (command.subscriptionId !== orderedConversation.subscriptionId) {
 					throw new Error(`Stale conversation subscription: ${command.subscriptionId}`);
 				}
-				return orderedConversation.requestCheckpoint(command.id);
+				return orderedConversation.requestCheckpoint(command);
 			},
 			getPendingHostActionRequests: () => hostActionBridge.getPendingRequests(),
 			cancelPendingHostActionRequests,

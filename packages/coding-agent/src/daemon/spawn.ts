@@ -139,6 +139,29 @@ export interface WaitForDaemonExitOptions {
 	timeoutMs?: number;
 }
 
+export type PublishedDaemonGenerationState = "current" | "retired" | "unverifiable";
+
+/** Compare a captured daemon generation with the generation currently published on disk. */
+export function classifyPublishedDaemonGeneration(
+	target: PidfileContents,
+	current: PidfileContents | undefined,
+): PublishedDaemonGenerationState {
+	if (!current) {
+		return "unverifiable";
+	}
+	if (!target.token || !current.token) {
+		return "unverifiable";
+	}
+	if (target.token !== current.token) {
+		return "retired";
+	}
+	return target.pid === current.pid &&
+		target.startedAtMs === current.startedAtMs &&
+		target.socketPath === current.socketPath
+		? "current"
+		: "unverifiable";
+}
+
 function processIsGone(pid: number | undefined): boolean {
 	if (!pid || pid === process.pid) {
 		return true;
@@ -158,6 +181,12 @@ export async function waitForDaemonExit(options: WaitForDaemonExitOptions = {}):
 	const targetPid = options.pid ?? options.pidfile?.pid;
 	const socketPath = options.socketPath ?? options.pidfile?.socketPath ?? paths.socketPath;
 	while (Date.now() < deadline) {
+		if (
+			options.pidfile &&
+			classifyPublishedDaemonGeneration(options.pidfile, readPidfile(paths.pidfilePath)) === "retired"
+		) {
+			return "exited";
+		}
 		const socketProbe = await probeControlSocket(socketPath, {
 			version: VERSION,
 			timeoutMs: 500,

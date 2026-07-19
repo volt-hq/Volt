@@ -348,6 +348,57 @@ describe("Iroh ordered conversation integration", () => {
 				success: true,
 				data: { subscriptionId, requestId: "resync-1", checkpointCursor: 1 },
 			});
+
+			// The checkpoint is a new authoritative base, not a terminal snapshot.
+			// Prove the same subscription continues with a contiguous live tail and
+			// converges on the exact canonical entry persisted by SessionManager.
+			emitTextUpdate(fixture.emit, 2, "1\n2\n3", "\n3");
+			const finalMessage = fauxAssistantMessage("1\n2\n3", { timestamp: 3 });
+			fixture.emit({ type: "message_end", message: finalMessage });
+			const committedEntryId = fixture.manager.appendMessage(finalMessage);
+
+			await vi.waitFor(() => {
+				expect(
+					parseWrittenObjects(fixture.send).some(
+						(value) =>
+							value.type === "transcript_entry" &&
+							(value.entry as { entryId?: string } | undefined)?.entryId === committedEntryId,
+					),
+				).toBe(true);
+			});
+			const recoveredTail = parseWrittenObjects(fixture.send).filter(
+				(value) =>
+					"delivery" in value &&
+					(value.delivery as { cursor?: number }).cursor !== undefined &&
+					(value.delivery as { cursor: number }).cursor >= 1,
+			);
+			expect(recoveredTail.map((value) => value.type)).toEqual([
+				"conversation_bootstrap",
+				"message_update",
+				"message_end",
+				"transcript_entry",
+			]);
+			expect(recoveredTail.map((value) => (value.delivery as { cursor: number }).cursor)).toEqual([1, 2, 3, 4]);
+			expect(recoveredTail[1]).toMatchObject({
+				type: "message_update",
+				stream: { epoch: 1, seq: 2 },
+				assistantMessageEvent: { type: "text_delta", delta: "\n3" },
+			});
+			expect(recoveredTail[3]).toMatchObject({
+				type: "transcript_entry",
+				entry: {
+					entryId: committedEntryId,
+					text: "1\n2\n3",
+					stopReason: "stop",
+				},
+				final: true,
+			});
+			const sessionFile = fixture.manager.getSessionFile();
+			expect(sessionFile).toBeDefined();
+			const persisted = readFileSync(sessionFile!, "utf8");
+			expect(persisted).toContain(`"id":"${committedEntryId}"`);
+			expect(persisted).toContain('"text":"1\\n2\\n3"');
+			expect(persisted).toContain('"stopReason":"stop"');
 		} finally {
 			await fixture.close();
 		}

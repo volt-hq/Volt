@@ -10,6 +10,7 @@ import * as fc from "fast-check";
 import { describe, expect, it, vi } from "vitest";
 import {
 	ConversationProjectionFeed,
+	type ConversationProjectionRecoveryRequest,
 	type ConversationProjectionSnapshotBuilder,
 	type ConversationProjectionSource,
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ACTIVE_TOOLS_PER_WORKFLOW,
@@ -94,6 +95,10 @@ function messageUpdate(event: AssistantMessageEvent): object {
 function makeIds(prefix: string): () => string {
 	let next = 0;
 	return () => `${prefix}-${++next}`;
+}
+
+function recoveryRequest(requestId: string, lastAppliedCursor = 0): ConversationProjectionRecoveryRequest {
+	return { requestId, lastAppliedCursor, reason: "cursor_gap" };
 }
 
 function snapshotBuilder(source: TestSource, label = "test"): ConversationProjectionSnapshotBuilder {
@@ -617,7 +622,7 @@ describe("ConversationProjectionFeed", () => {
 		});
 		await subscription.ready;
 
-		const activeReceipt = subscription.requestCheckpoint("request-active");
+		const activeReceipt = subscription.requestCheckpoint(recoveryRequest("request-active"));
 		await subscription.flush();
 		expect(activeReceipt).toEqual({
 			subscriptionId: subscription.subscriptionId,
@@ -634,7 +639,7 @@ describe("ConversationProjectionFeed", () => {
 
 		source.emit({ type: "message_end", message: assistant("active") });
 		await subscription.flush();
-		const idleReceipt = subscription.requestCheckpoint("request-idle");
+		const idleReceipt = subscription.requestCheckpoint(recoveryRequest("request-idle"));
 		await subscription.flush();
 		expect(idleReceipt.checkpointCursor).toBe(3);
 		expect(writes[3]).toMatchObject({
@@ -761,7 +766,7 @@ describe("ConversationProjectionFeed", () => {
 			activeAssistant: { message: { content: [{ text: "/second/a" }] } },
 		});
 
-		first.requestCheckpoint("only-first");
+		first.requestCheckpoint(recoveryRequest("only-first"));
 		await first.flush();
 		source.emit(messageUpdate(textDelta(2, "/secret/ab", "b")));
 		await Promise.all([first.flush(), second.flush()]);
@@ -815,7 +820,7 @@ describe("ConversationProjectionFeed", () => {
 		});
 		expect(filteredWrites).toHaveLength(1);
 
-		filtered.requestCheckpoint("no-gap");
+		filtered.requestCheckpoint(recoveryRequest("no-gap"));
 		await filtered.flush();
 		expect(delivery(filteredWrites[1]!)).toEqual({ subscriptionId: filtered.subscriptionId, cursor: 1 });
 		feed.dispose();
@@ -1131,7 +1136,7 @@ describe("ConversationProjectionFeed", () => {
 			kind: "review",
 			status: "completed",
 		});
-		subscription.requestCheckpoint("workflow-ended");
+		subscription.requestCheckpoint(recoveryRequest("workflow-ended"));
 		await subscription.flush();
 		expect(feed.activeWorkflows).toEqual([]);
 		expect(writes.at(-1)).toMatchObject({ reason: "resync", activeWorkflows: [] });
@@ -1240,10 +1245,23 @@ describe("ConversationProjectionFeed", () => {
 		});
 		await subscription.ready;
 		const oldSubscriptionId = subscription.subscriptionId;
-		const first = subscription.requestCheckpoint("same-request");
-		const duplicate = subscription.requestCheckpoint("same-request");
+		expect(() => subscription.requestCheckpoint(recoveryRequest("future-cut", 1))).toThrow(/exceeds issued cursor 0/);
+		const admittedRequest: ConversationProjectionRecoveryRequest = {
+			requestId: "same-request",
+			lastAppliedCursor: 0,
+			assistantPosition: { epoch: 7, seq: 12 },
+			reason: "assistant_position_gap",
+		};
+		const first = subscription.requestCheckpoint(admittedRequest);
+		const duplicate = subscription.requestCheckpoint(admittedRequest);
 		expect(duplicate).toBe(first);
-		expect(() => subscription.requestCheckpoint(" padded ")).toThrow(/canonical non-empty string/);
+		expect(() =>
+			subscription.requestCheckpoint({
+				...admittedRequest,
+				reason: "reducer_divergence",
+			}),
+		).toThrow(/changed after admission/);
+		expect(() => subscription.requestCheckpoint(recoveryRequest(" padded "))).toThrow(/canonical non-empty string/);
 		await subscription.flush();
 		expect(writes.filter((value) => (value as { requestId?: string }).requestId === "same-request")).toHaveLength(1);
 
@@ -1255,7 +1273,7 @@ describe("ConversationProjectionFeed", () => {
 			reason: "session_rebind",
 			delivery: { subscriptionId: subscription.subscriptionId, cursor: 0 },
 		});
-		expect(() => feed.requestCheckpoint({ subscriptionId: oldSubscriptionId, requestId: "stale" })).toThrow(
+		expect(() => feed.requestCheckpoint({ subscriptionId: oldSubscriptionId, ...recoveryRequest("stale") })).toThrow(
 			/Unknown or stale/,
 		);
 
@@ -1556,7 +1574,7 @@ describe("ConversationProjectionFeed", () => {
 			padding: "c".repeat(3_000),
 		});
 		feed.publishExternal({ type: "workflow_update", workflowId: "checkpoint-tail", kind: "review", message: "one" });
-		const receipt = subscription.requestCheckpoint("cut-now");
+		const receipt = subscription.requestCheckpoint(recoveryRequest("cut-now"));
 		expect(afterCutWrite).toBeDefined();
 		expect(receipt.checkpointCursor).toBe(2);
 		expect(writes).toHaveLength(1);
@@ -1593,7 +1611,7 @@ describe("ConversationProjectionFeed", () => {
 		feed.publishExternal({ type: "workflow_update", workflowId: "wf-1", kind: "review", message: "in-flight" });
 		feed.publishExternal({ type: "workflow_update", workflowId: "wf-1", kind: "review", message: "prune-2" });
 		feed.publishExternal({ type: "workflow_update", workflowId: "wf-1", kind: "review", message: "prune-3" });
-		const receipt = subscription.requestCheckpoint("after-in-flight");
+		const receipt = subscription.requestCheckpoint(recoveryRequest("after-in-flight"));
 		expect(receipt.checkpointCursor).toBe(4);
 		expect(writes).toHaveLength(2);
 
@@ -1627,18 +1645,18 @@ describe("ConversationProjectionFeed", () => {
 		});
 		await subscription.ready;
 
-		const first = subscription.requestCheckpoint("first");
-		expect(() => subscription.requestCheckpoint("while-first-pending")).toThrow(/still pending/);
+		const first = subscription.requestCheckpoint(recoveryRequest("first"));
+		expect(() => subscription.requestCheckpoint(recoveryRequest("while-first-pending"))).toThrow(/still pending/);
 		firstCheckpointWrite.resolve();
 		await subscription.flush();
-		expect(subscription.requestCheckpoint("first")).toBe(first);
+		expect(subscription.requestCheckpoint(recoveryRequest("first"))).toBe(first);
 
-		subscription.requestCheckpoint("second");
+		subscription.requestCheckpoint(recoveryRequest("second"));
 		await subscription.flush();
-		expect(() => subscription.requestCheckpoint("third")).toThrow(/rate limit exceeded/);
+		expect(() => subscription.requestCheckpoint(recoveryRequest("third"))).toThrow(/rate limit exceeded/);
 
 		now = 1_001;
-		subscription.requestCheckpoint("third");
+		subscription.requestCheckpoint(recoveryRequest("third"));
 		await subscription.flush();
 		expect(writes.filter((value) => (value as { reason?: string }).reason === "resync")).toHaveLength(3);
 		feed.dispose();
@@ -1664,7 +1682,9 @@ describe("ConversationProjectionFeed", () => {
 		});
 		await subscription.ready;
 
-		expect(() => subscription.requestCheckpoint("cannot-measure")).toThrow("checkpoint encoder failed");
+		expect(() => subscription.requestCheckpoint(recoveryRequest("cannot-measure"))).toThrow(
+			"checkpoint encoder failed",
+		);
 		expect(failed).toHaveBeenCalledWith(expect.objectContaining({ message: "checkpoint encoder failed" }));
 		await expect(subscription.flush()).rejects.toThrow(/closed/);
 		const writeCount = writes.length;
@@ -1698,7 +1718,7 @@ describe("ConversationProjectionFeed", () => {
 		};
 		await subscription.ready;
 
-		expect(() => subscription.requestCheckpoint("reentrant-failure")).toThrow(/generation changed/);
+		expect(() => subscription.requestCheckpoint(recoveryRequest("reentrant-failure"))).toThrow(/generation changed/);
 		expect(failed).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("byte bounds") }));
 		expect(writes).toHaveLength(1);
 		await expect(subscription.flush()).rejects.toThrow(/closed/);
@@ -1728,7 +1748,7 @@ describe("ConversationProjectionFeed", () => {
 		};
 		await subscription.ready;
 
-		expect(() => subscription.requestCheckpoint("reentrant-fence")).toThrow(/generation changed/);
+		expect(() => subscription.requestCheckpoint(recoveryRequest("reentrant-fence"))).toThrow(/generation changed/);
 		expect(terminalWrite).toBeDefined();
 		expect(writes).toEqual([
 			expect.objectContaining({ type: "conversation_bootstrap", reason: "bootstrap" }),
@@ -1763,7 +1783,9 @@ describe("ConversationProjectionFeed", () => {
 		await subscription.ready;
 		const originalSubscriptionId = subscription.subscriptionId;
 
-		expect(() => subscription.requestCheckpoint("rotate-during-prepare")).toThrow(/generation changed/);
+		expect(() => subscription.requestCheckpoint(recoveryRequest("rotate-during-prepare"))).toThrow(
+			/generation changed/,
+		);
 		expect(subscription.subscriptionId).not.toBe(originalSubscriptionId);
 		await subscription.flush();
 		expect(writes).toHaveLength(2);
@@ -2065,7 +2087,7 @@ describe("ConversationProjectionFeed", () => {
 			marker: "full-normal-lane",
 			padding: "c".repeat(3_000),
 		});
-		const receipt = subscription.requestCheckpoint("three-part-cut");
+		const receipt = subscription.requestCheckpoint(recoveryRequest("three-part-cut"));
 		expect(receipt.checkpointCursor).toBe(2);
 		expect(writes).toHaveLength(2);
 

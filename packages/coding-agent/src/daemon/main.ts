@@ -74,6 +74,16 @@ export interface VoltdConfig {
 	clock?: Clock;
 	/** Keep-awake controller overrides (tests inject a fake spawn here). */
 	keepAwake?: KeepAwakeControllerOptions;
+	/** Maximum time native extension disposal may delay process teardown. */
+	extensionDisposeTimeoutMs?: number;
+	/** Process lifecycle override for deterministic signal tests. */
+	processLifecycle?: VoltdProcessLifecycle;
+}
+
+export interface VoltdProcessLifecycle {
+	addShutdownSignalHandler(handler: () => void): void;
+	removeShutdownSignalHandler(handler: () => void): void;
+	forceExit(code: number): void;
 }
 
 export interface PidfileContents {
@@ -109,6 +119,21 @@ export const VOLTD_EXIT_INCOMPATIBLE_RUNNING = 5;
 
 const DAEMON_BIND_WAIT_TIMEOUT_MS = 75_000;
 const DAEMON_BIND_WAIT_POLL_MS = 200;
+export const VOLTD_EXTENSION_DISPOSE_TIMEOUT_MS = 5_000;
+
+const defaultProcessLifecycle: VoltdProcessLifecycle = {
+	addShutdownSignalHandler(handler) {
+		process.on("SIGTERM", handler);
+		process.on("SIGINT", handler);
+	},
+	removeShutdownSignalHandler(handler) {
+		process.off("SIGTERM", handler);
+		process.off("SIGINT", handler);
+	},
+	forceExit(code) {
+		process.exit(code);
+	},
+};
 
 async function sleep(ms: number): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, ms));
@@ -129,6 +154,16 @@ export interface VoltdRuntimeServices {
 	requestShutdown(reason: "cli" | "signal"): void;
 }
 
+export interface VoltdExtensionQuiesceContext {
+	reason: "cli" | "signal";
+}
+
+export interface VoltdExtensionDisposeContext extends VoltdExtensionQuiesceContext {
+	/** Aborted when the daemon-owned disposal deadline expires. */
+	signal: AbortSignal;
+	deadlineAtMs: number;
+}
+
 export interface VoltdServiceExtensionInstance {
 	/** Extra request handling; return true when the request was handled. */
 	handleRequest?(connection: ControlConnection, request: ControlRequest): Promise<boolean> | boolean;
@@ -140,7 +175,10 @@ export interface VoltdServiceExtensionInstance {
 	statusExtras?(): { leases?: ControlLeaseStatus[]; phoneConnections?: number; relayCount?: number };
 	/** Redeem a relay hello token; true when the socket was taken over. */
 	admitRelay?(relayId: string, relayToken: string, socket: Socket, bufferedRemainder: Buffer): boolean;
-	shutdown?(): Promise<void>;
+	/** Stop admitting work, settle durable ownership, and flush extension state. */
+	quiesce?(context: VoltdExtensionQuiesceContext): Promise<void>;
+	/** Release native/process resources after durable daemon state is closed. */
+	dispose?(context: VoltdExtensionDisposeContext): Promise<void>;
 }
 
 export type VoltdServiceExtension = (services: VoltdRuntimeServices) => VoltdServiceExtensionInstance;
@@ -302,7 +340,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		baseUrl: process.env.VOLT_PUSH_RELAY_URL,
 	});
 
-	let shuttingDown = false;
+	let shutdownPhase: "running" | "quiescing" | "disposing" | "complete" = "running";
 	let resolveExit: ((code: number) => void) | undefined;
 	const removeOwnedPidfile = () => {
 		const current = readPidfile(paths.pidfilePath);
@@ -359,28 +397,83 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	};
 
 	const shutdown = async (reason: "cli" | "signal") => {
-		if (shuttingDown) {
+		if (shutdownPhase !== "running") {
 			return;
 		}
-		shuttingDown = true;
+		shutdownPhase = "quiescing";
 		log("info", `shutting down (${reason})`);
-		// Tell control clients up front: extension shutdown can drain streaming
+		// Tell control clients up front: extension quiescing can drain streaming
 		// runtimes for up to 60s and clients must not wait blind. New hellos are
-		// already rejected via the isShuttingDown gate.
+		// already rejected via the shutdown admission gate.
 		controlServer?.broadcast({ type: "daemon_shutdown" });
-		for (const extension of extensionInstances) {
+		// Close control request admission synchronously, then let the initiating
+		// shutdown handler return its ok and drain with every request admitted before
+		// the cut. No extension or durable state can quiesce underneath those tasks.
+		await controlServer?.quiesce();
+		let shutdownFailed = false;
+		for (const [index, extension] of extensionInstances.entries()) {
 			try {
-				await extension.shutdown?.();
+				await extension.quiesce?.({ reason });
 			} catch (error) {
-				log("error", `extension shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+				shutdownFailed = true;
+				log(
+					"error",
+					`extension ${index + 1} quiesce failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
 			}
 		}
 		await keepAwake.shutdown().catch(() => {});
 		await state.close().catch(() => {});
-		await auditLogger.log({ type: "daemon_shutdown", success: true, details: { reason } }).catch(() => {});
+
+		shutdownPhase = "disposing";
+		const disposeTimeoutMs = config.extensionDisposeTimeoutMs ?? VOLTD_EXTENSION_DISPOSE_TIMEOUT_MS;
+		const disposeAbortController = new AbortController();
+		const disposeContext: VoltdExtensionDisposeContext = {
+			reason,
+			signal: disposeAbortController.signal,
+			deadlineAtMs: Date.now() + disposeTimeoutMs,
+		};
+		const extensionDisposal = Promise.all(
+			extensionInstances.map(async (extension, index) => {
+				try {
+					await extension.dispose?.(disposeContext);
+				} catch (error) {
+					shutdownFailed = true;
+					log(
+						"error",
+						`extension ${index + 1} dispose failed: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			}),
+		);
+		let disposeTimer: NodeJS.Timeout | undefined;
+		const disposeOutcome = await Promise.race([
+			extensionDisposal.then(() => "settled" as const),
+			new Promise<"timed_out">((resolve) => {
+				disposeTimer = setTimeout(() => resolve("timed_out"), disposeTimeoutMs);
+			}),
+		]);
+		clearTimeout(disposeTimer);
+		const extensionDisposalTimedOut = disposeOutcome === "timed_out";
+		if (extensionDisposalTimedOut) {
+			shutdownFailed = true;
+			disposeAbortController.abort(new Error("daemon extension disposal deadline exceeded"));
+			log("error", `extension dispose deadline exceeded after ${disposeTimeoutMs}ms; forcing process teardown`);
+			// The aggregate observes every late rejection. The foreground daemon exits
+			// immediately after runVoltDaemon resolves, terminating stuck native work.
+			void extensionDisposal;
+		}
+		await auditLogger
+			.log({
+				type: "daemon_shutdown",
+				success: !shutdownFailed,
+				details: { reason, extensionDisposalTimedOut },
+			})
+			.catch(() => {});
 		await controlServer?.close().catch(() => {});
 		removeOwnedPidfile();
 		releaseDaemonLock();
+		shutdownPhase = "complete";
 		log("info", "shutdown complete");
 		resolveExit?.(0);
 	};
@@ -735,7 +828,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			authToken: pidfileToken,
 			handlers: {
 				onRequest: handleRequest,
-				isShuttingDown: () => shuttingDown,
+				isShuttingDown: () => shutdownPhase !== "running",
 				relayAdmission: {
 					admitRelay(hello, socket, bufferedRemainder) {
 						for (const extension of extensionInstances) {
@@ -904,9 +997,16 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		keepAwake.setEnabled(true);
 	}
 
-	const onSignal = () => requestShutdown("signal");
-	process.on("SIGTERM", onSignal);
-	process.on("SIGINT", onSignal);
+	const processLifecycle = config.processLifecycle ?? defaultProcessLifecycle;
+	const onSignal = () => {
+		if (shutdownPhase !== "running") {
+			log("warn", `shutdown signal received during ${shutdownPhase}; forcing process exit`);
+			processLifecycle.forceExit(1);
+			return;
+		}
+		requestShutdown("signal");
+	};
+	processLifecycle.addShutdownSignalHandler(onSignal);
 
 	if (
 		legacyDroppedAccess !== undefined &&
@@ -930,8 +1030,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	log("info", `voltd ${VERSION} listening`, { socketPath: paths.socketPath, pid: process.pid });
 
 	const code = await exitPromise;
-	process.off("SIGTERM", onSignal);
-	process.off("SIGINT", onSignal);
+	processLifecycle.removeShutdownSignalHandler(onSignal);
 	return code;
 }
 

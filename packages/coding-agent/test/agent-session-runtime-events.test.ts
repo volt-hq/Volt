@@ -1053,7 +1053,11 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			delivery: { subscriptionId: subscription.subscriptionId },
 		});
 
-		subscription.requestCheckpoint("still-healthy");
+		subscription.requestCheckpoint({
+			requestId: "still-healthy",
+			lastAppliedCursor: 0,
+			reason: "cursor_gap",
+		});
 		await subscription.flush();
 		expect(writes.at(-1)).toMatchObject({ type: "conversation_bootstrap", reason: "resync" });
 		subscription.detach();

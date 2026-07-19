@@ -86,6 +86,7 @@ function mintTestRelay(
 	onSettled: (outcome: RelayOutcome) => Promise<void> | void,
 	now?: number,
 	rejectPending: (rejection: RelayPendingRejection) => Promise<void> | void = () => {},
+	observePhysicalTask?: (task: Promise<unknown>) => void,
 ) {
 	return registry.mint({
 		workspaceName: "ws",
@@ -114,6 +115,7 @@ function mintTestRelay(
 		...(now === undefined ? {} : { now }),
 		rejectPending,
 		onSettled,
+		...(observePhysicalTask === undefined ? {} : { observePhysicalTask }),
 	});
 }
 
@@ -254,7 +256,7 @@ describe("relay framing (§12.2.3)", () => {
 		expect(registry.activeCount()).toBe(0);
 	});
 
-	it("fences on TUI EOF but drains the admitted tail before FIN and physical settlement", async () => {
+	it("fences on TUI EOF while the ordered raw write tail owns FIN and stop settlement", async () => {
 		const { socketPath, registry } = await startRelayHarness();
 		const phone = new FakePhoneIrohStream();
 		const writeGate = createDeferred<void>();
@@ -288,36 +290,31 @@ describe("relay framing (§12.2.3)", () => {
 
 		client.socket.end();
 		await vi.waitFor(() => expect(relay.phase).toBe("closed"));
-		// Lookup is fenced synchronously at the first terminal signal, while the
-		// physical owner remains unsettled behind its admitted write.
+		// Lookup and application ownership are fenced synchronously. The observer
+		// is the application barrier; raw write/FIN/read/stop settlement is separate.
 		expect(registry.get(relay.relayId)).toBeUndefined();
 		expect(finish).not.toHaveBeenCalled();
 		expect(reset).not.toHaveBeenCalled();
-		expect(onSettled).not.toHaveBeenCalled();
+		expect(stop).toHaveBeenCalledTimes(1);
+		expect(onSettled).toHaveBeenCalledTimes(1);
 		expect(didSettle).toBe(false);
 
 		writeGate.resolve(undefined);
-		await vi.waitFor(() => {
-			expect(finish).toHaveBeenCalledTimes(1);
-			expect(stop).toHaveBeenCalledTimes(1);
-		});
+		await vi.waitFor(() => expect(finish).toHaveBeenCalledTimes(1));
 		expect(Buffer.concat(writtenChunks)).toEqual(tail);
 		expect(reset).not.toHaveBeenCalled();
-		// stop() was initiated before waiting for the retained recv pump. Neither
-		// that pump nor the native stop operation has completed yet.
-		expect(onSettled).not.toHaveBeenCalled();
-		readGate.resolve(Buffer.from("phone bytes returned after fence", "utf8"));
-		await Promise.resolve();
-		expect(onSettled).not.toHaveBeenCalled();
-
-		stopGate.resolve(undefined);
-		await vi.waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1));
-		// Registry/coordinator release is downstream of the async observer too.
-		expect(didSettle).toBe(false);
+		// FIN starts only after the admitted raw write completes, while the raw read
+		// and stop promises may remain pending under bounded daemon disposal.
+		expect(onSettled).toHaveBeenCalledTimes(1);
 		observerGate.resolve(undefined);
 		expect(await relay.settled).toMatchObject({ reason: "tui_disconnected", bytesUp: tail.length, bytesDown: 0 });
-		expect(client.rawReceived()).toEqual(Buffer.alloc(0));
 		expect(didSettle).toBe(true);
+
+		readGate.resolve(Buffer.from("phone bytes returned after fence", "utf8"));
+		await Promise.resolve();
+		stopGate.resolve(undefined);
+		await Promise.resolve();
+		expect(client.rawReceived()).toEqual(Buffer.alloc(0));
 		expect(finish).toHaveBeenCalledTimes(1);
 		expect(stop).toHaveBeenCalledTimes(1);
 	});
@@ -439,8 +436,6 @@ describe("relay framing (§12.2.3)", () => {
 		expect(registry.get(relay.relayId)).toBeUndefined();
 		expect(registry.forConversation("n-phone-a", "ws", "s-1")).toHaveLength(0);
 		await vi.waitFor(() => expect(rejectPending).toHaveBeenCalledTimes(1));
-		expect(onSettled).not.toHaveBeenCalled();
-		finishPendingRejection();
 		expect(await relay.settled).toEqual({
 			reason: "workspace_unregistered",
 			bytesUp: 0,
@@ -449,6 +444,8 @@ describe("relay framing (§12.2.3)", () => {
 		});
 		expect(rejectPending).toHaveBeenCalledWith({ message: "workspace unregistered" });
 		expect(onSettled).toHaveBeenCalledTimes(1);
+		finishPendingRejection();
+		await pendingRejection;
 	});
 
 	it("does not admit a revoked pending offer containing a buffered prompt", async () => {
@@ -507,7 +504,7 @@ describe("relay framing (§12.2.3)", () => {
 		expect(onSettled).toHaveBeenCalledTimes(1);
 	});
 
-	it("forces reset/stop on abortive close and awaits both pumps and terminal operations exactly once", async () => {
+	it("settles a redeemed abortive close while stalled raw reset/stop remain physically owned", async () => {
 		const { socketPath, registry } = await startRelayHarness();
 		const phone = new FakePhoneIrohStream();
 		const writeGate = createDeferred<void>();
@@ -515,6 +512,15 @@ describe("relay framing (§12.2.3)", () => {
 		const resetGate = createDeferred<void>();
 		const stopGate = createDeferred<void>();
 		const observerGate = createDeferred<void>();
+		const physicalTasks: Promise<unknown>[] = [];
+		let resetSettled = false;
+		let stopSettled = false;
+		void resetGate.promise.then(() => {
+			resetSettled = true;
+		});
+		void stopGate.promise.then(() => {
+			stopSettled = true;
+		});
 		const finish = vi.fn(async () => {});
 		const reset = vi.fn(() => {
 			writeGate.resolve(undefined);
@@ -530,7 +536,9 @@ describe("relay framing (§12.2.3)", () => {
 		phone.recv.read = vi.fn(() => readGate.promise);
 		phone.recv.stop = stop;
 		const onSettled = vi.fn(() => observerGate.promise);
-		const relay = mintTestRelay(registry, phone, onSettled);
+		const relay = mintTestRelay(registry, phone, onSettled, undefined, undefined, (task) => {
+			physicalTasks.push(task);
+		});
 		let didSettle = false;
 		void relay.settled.then(() => {
 			didSettle = true;
@@ -550,18 +558,19 @@ describe("relay framing (§12.2.3)", () => {
 		expect(reset).toHaveBeenCalledTimes(1);
 		expect(stop).toHaveBeenCalledTimes(1);
 		expect(finish).not.toHaveBeenCalled();
-		expect(onSettled).not.toHaveBeenCalled();
-		expect(didSettle).toBe(false);
-
-		resetGate.resolve(undefined);
-		await Promise.resolve();
-		expect(onSettled).not.toHaveBeenCalled();
-		stopGate.resolve(undefined);
 		await vi.waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1));
 		expect(didSettle).toBe(false);
 		observerGate.resolve(undefined);
 		expect(await relay.settled).toMatchObject({ reason: "host_shutdown", bytesUp: 9 });
 		expect(didSettle).toBe(true);
+		// Native terminal receipts are still pending and externally owned after the
+		// relay's application/onSettled barrier has completed.
+		expect(physicalTasks.length).toBeGreaterThan(0);
+		expect({ resetSettled, stopSettled }).toEqual({ resetSettled: false, stopSettled: false });
+		resetGate.resolve(undefined);
+		stopGate.resolve(undefined);
+		await Promise.resolve();
+		expect({ resetSettled, stopSettled }).toEqual({ resetSettled: true, stopSettled: true });
 		expect(reset).toHaveBeenCalledTimes(1);
 		expect(stop).toHaveBeenCalledTimes(1);
 		expect(onSettled).toHaveBeenCalledTimes(1);

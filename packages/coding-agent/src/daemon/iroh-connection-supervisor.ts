@@ -58,11 +58,8 @@ export class IrohConnectionSupervisor {
 	}
 
 	async finalize(defaultReason: string): Promise<void> {
-		this.acceptingChildren = false;
+		await this.sealAndWaitForChildren();
 		this.requestClose(defaultReason, "when_idle");
-		while (this.childTasks.size > 0) {
-			await Promise.allSettled(Array.from(this.childTasks));
-		}
 		this.closeIfIdle();
 		await this.terminalPromise;
 		for (const finalizer of this.terminalFinalizers.splice(0)) {
@@ -71,6 +68,17 @@ export class IrohConnectionSupervisor {
 			} catch {
 				// One bookkeeping cleanup must not prevent the remaining releases.
 			}
+		}
+	}
+
+	/**
+	 * Fence new application children and join every already admitted child.
+	 * Transport settlement remains the caller's separate native-lifecycle concern.
+	 */
+	async sealAndWaitForChildren(): Promise<void> {
+		this.acceptingChildren = false;
+		while (this.childTasks.size > 0) {
+			await Promise.allSettled(Array.from(this.childTasks));
 		}
 	}
 

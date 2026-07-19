@@ -112,6 +112,8 @@ export type IrohRemoteHostHandshakeResult =
 
 export interface IrohRemoteHostReadHandshakeOptions extends IrohRemoteHandshakeLineReadOptions {
 	child?: string;
+	/** Prevent authorization/audit publication after the owning physical stream is fenced. */
+	isCancelled?: () => boolean;
 	conversationSession?: {
 		selection: IrohRemoteConversationSelection;
 		sessionId: string;
@@ -401,6 +403,9 @@ export class IrohRemoteHostEngine {
 		let initialInput: IrohBytes = Buffer.alloc(0);
 		try {
 			const handshake = await readIrohRemoteHandshakeLine(recv, options);
+			if (options.isCancelled?.()) {
+				throw new Error("Iroh handshake stream closed");
+			}
 			initialInput = handshake.rest;
 			if (handshake.line === undefined) {
 				return await this.createHandshakeFailure("missing handshake", initialInput);
@@ -429,6 +434,9 @@ export class IrohRemoteHostEngine {
 				response: this.createHandshakeSuccessResponse(hello, authorization, remoteNodeId, options),
 			};
 		} catch (error: unknown) {
+			if (options.isCancelled?.()) {
+				throw error;
+			}
 			return await this.createHandshakeFailure(
 				error instanceof Error ? error.message : String(error),
 				initialInput,

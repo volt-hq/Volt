@@ -15,9 +15,11 @@ import {
 } from "./stream-projection.ts";
 import {
 	RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES,
+	type RpcAssistantStreamPosition,
 	type RpcConversationActiveAssistant,
 	type RpcConversationBootstrapEvent,
 	type RpcConversationBootstrapReason,
+	type RpcConversationDiscontinuityReason,
 } from "./types.ts";
 
 export const DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_ENVELOPES = 512;
@@ -117,6 +119,13 @@ export interface ConversationProjectionCheckpointReceipt {
 	checkpointCursor: number;
 }
 
+export interface ConversationProjectionRecoveryRequest {
+	requestId: string;
+	lastAppliedCursor: number;
+	assistantPosition?: RpcAssistantStreamPosition;
+	reason: RpcConversationDiscontinuityReason;
+}
+
 export interface ConversationProjectionRawWorkflowSnapshot {
 	workflowId: string;
 	workflowEvent?: object;
@@ -129,7 +138,7 @@ export interface ConversationProjectionSubscription {
 	readonly ready: Promise<void>;
 	/** Runs synchronously whenever this subscription's authority tuple rotates. */
 	subscribeAuthorityChanges(listener: () => void): () => void;
-	requestCheckpoint(requestId: string): ConversationProjectionCheckpointReceipt;
+	requestCheckpoint(request: ConversationProjectionRecoveryRequest): ConversationProjectionCheckpointReceipt;
 	/** Enqueue a non-conversation control frame behind prior feed writes. */
 	enqueueControl(value: object, onAdmitted?: (preparedValue: object) => void): Promise<void>;
 	/**
@@ -179,7 +188,13 @@ interface ConversationProjectionSubscriber {
 	inFlight?: SubscriberQueueItem;
 	draining: boolean;
 	readonly flushWaiters: Deferred<void>[];
-	readonly checkpoints: Map<string, ConversationProjectionCheckpointReceipt>;
+	readonly checkpoints: Map<
+		string,
+		{
+			request: ConversationProjectionRecoveryRequest;
+			receipt: ConversationProjectionCheckpointReceipt;
+		}
+	>;
 	readonly checkpointRequestTimes: number[];
 	readonly authorityChangeListeners: Set<() => void>;
 	pendingCheckpointRequestId?: string;
@@ -832,8 +847,8 @@ export class ConversationProjectionFeed {
 					subscriber.authorityChangeListeners.delete(listener);
 				};
 			},
-			requestCheckpoint(requestId) {
-				return feed.requestCheckpoint({ subscriptionId: subscriber.subscriptionId, requestId });
+			requestCheckpoint(request) {
+				return feed.requestCheckpoint({ subscriptionId: subscriber.subscriptionId, ...request });
 			},
 			enqueueControl(value, onAdmitted) {
 				return feed.enqueueControl(subscriber.subscriptionId, value, onAdmitted);
@@ -850,7 +865,9 @@ export class ConversationProjectionFeed {
 		};
 	}
 
-	requestCheckpoint(args: { subscriptionId: string; requestId: string }): ConversationProjectionCheckpointReceipt {
+	requestCheckpoint(
+		args: { subscriptionId: string } & ConversationProjectionRecoveryRequest,
+	): ConversationProjectionCheckpointReceipt {
 		this.assertActive();
 		if (!args.requestId || args.requestId !== args.requestId.trim()) {
 			throw new Error("requestId must be a canonical non-empty string");
@@ -868,9 +885,46 @@ export class ConversationProjectionFeed {
 		if (subscriber.attaching) {
 			throw new Error("Conversation projection authority cut is already in progress");
 		}
+		if (!Number.isSafeInteger(args.lastAppliedCursor) || args.lastAppliedCursor < 0) {
+			throw new Error("lastAppliedCursor must be a safe non-negative integer");
+		}
+		if (
+			args.reason !== "cursor_gap" &&
+			args.reason !== "assistant_position_gap" &&
+			args.reason !== "reducer_divergence"
+		) {
+			throw new Error("reason must identify a supported conversation discontinuity");
+		}
+		if (
+			args.assistantPosition !== undefined &&
+			(!Number.isSafeInteger(args.assistantPosition.epoch) ||
+				args.assistantPosition.epoch < 0 ||
+				!Number.isSafeInteger(args.assistantPosition.seq) ||
+				args.assistantPosition.seq < 0)
+		) {
+			throw new Error("assistantPosition must contain safe non-negative epoch and seq values");
+		}
+		const lastIssuedCursor = subscriber.nextCursor - 1;
+		if (args.lastAppliedCursor > lastIssuedCursor) {
+			throw new Error(`lastAppliedCursor ${args.lastAppliedCursor} exceeds issued cursor ${lastIssuedCursor}`);
+		}
+		const request = Object.freeze({
+			requestId: args.requestId,
+			lastAppliedCursor: args.lastAppliedCursor,
+			...(args.assistantPosition === undefined ? {} : { assistantPosition: { ...args.assistantPosition } }),
+			reason: args.reason,
+		});
 		const existing = subscriber.checkpoints.get(args.requestId);
 		if (existing) {
-			return existing;
+			if (
+				existing.request.lastAppliedCursor !== request.lastAppliedCursor ||
+				existing.request.reason !== request.reason ||
+				existing.request.assistantPosition?.epoch !== request.assistantPosition?.epoch ||
+				existing.request.assistantPosition?.seq !== request.assistantPosition?.seq
+			) {
+				throw new Error(`Conversation recovery request ${args.requestId} changed after admission`);
+			}
+			return existing.receipt;
 		}
 		if (subscriber.pendingCheckpointRequestId !== undefined) {
 			throw new Error(`Conversation recovery checkpoint ${subscriber.pendingCheckpointRequestId} is still pending`);
@@ -896,7 +950,7 @@ export class ConversationProjectionFeed {
 				requestId: args.requestId,
 				checkpointCursor,
 			});
-			this.rememberCheckpoint(subscriber, args.requestId, receipt);
+			this.rememberCheckpoint(subscriber, request, receipt);
 			subscriber.pendingCheckpointRequestId = args.requestId;
 			// The authority cut replaces only ordinary cursor tail. Controls already
 			// accepted by the physical FIFO remain before it; controls accepted after
@@ -1794,14 +1848,14 @@ export class ConversationProjectionFeed {
 
 	private rememberCheckpoint(
 		subscriber: ConversationProjectionSubscriber,
-		requestId: string,
+		request: ConversationProjectionRecoveryRequest,
 		receipt: ConversationProjectionCheckpointReceipt,
 	): void {
 		if (subscriber.checkpoints.size >= subscriber.maxCheckpointRequests) {
 			const oldest = subscriber.checkpoints.keys().next().value;
 			if (oldest !== undefined) subscriber.checkpoints.delete(oldest);
 		}
-		subscriber.checkpoints.set(requestId, receipt);
+		subscriber.checkpoints.set(request.requestId, { request, receipt });
 	}
 
 	private recordCheckpointRequestRate(subscriber: ConversationProjectionSubscriber): void {

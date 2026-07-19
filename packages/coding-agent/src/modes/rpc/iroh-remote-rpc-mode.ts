@@ -435,7 +435,13 @@ export function runIrohRemoteRpcMode(
 			},
 			subscribeAuthorityChanges: (listener) => orderedSubscription.subscribeAuthorityChanges(listener),
 			enqueueControl: enqueueOrderedControl,
-			requestCheckpoint: (requestId) => orderedSubscription.requestCheckpoint(requestId),
+			requestCheckpoint: (command) =>
+				orderedSubscription.requestCheckpoint({
+					requestId: command.id,
+					lastAppliedCursor: command.lastAppliedCursor,
+					...(command.assistantPosition === undefined ? {} : { assistantPosition: command.assistantPosition }),
+					reason: command.reason,
+				}),
 			publishExternal: (event) => runtimeHost.publishConversationProjectionEvent(event),
 		},
 	}).finally(() => {

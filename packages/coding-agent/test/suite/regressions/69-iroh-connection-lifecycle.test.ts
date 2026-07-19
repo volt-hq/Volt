@@ -109,3 +109,48 @@ test("timeout closes immediately but releases accounting only after children and
 		harness.cleanup();
 	}
 });
+
+test("quiesce joins admitted application children without waiting for native transport settlement", async () => {
+	const harness = await createHarness();
+	const connection = new ManualIrohConnection();
+	const supervisor = new IrohConnectionSupervisor(connection);
+	const mutation = createDeferred();
+	const lifecycleEvents: string[] = [];
+	supervisor.trackChild(
+		mutation.promise.then(() => {
+			lifecycleEvents.push("mutation_settled");
+		}),
+	);
+
+	try {
+		supervisor.requestClose("host_shutdown", "immediate");
+		const applicationDrain = supervisor.sealAndWaitForChildren().then(() => {
+			lifecycleEvents.push("application_drained");
+		});
+		await Promise.resolve();
+		expect(connection.closeReasons).toEqual(["host_shutdown"]);
+		expect(lifecycleEvents).toEqual([]);
+		expect(() => supervisor.trackChild(Promise.resolve())).toThrow("after connection finalization started");
+
+		mutation.resolve();
+		await applicationDrain;
+		expect(lifecycleEvents).toEqual(["mutation_settled", "application_drained"]);
+
+		// The native connection tail is deliberately still pending. Application
+		// quiescence must not inherit that unbounded transport wait.
+		let finalized = false;
+		const nativeFinalization = supervisor.finalize("done").then(() => {
+			finalized = true;
+		});
+		await Promise.resolve();
+		expect(finalized).toBe(false);
+		connection.resolveTerminal();
+		await nativeFinalization;
+		expect(finalized).toBe(true);
+	} finally {
+		connection.resolveTerminal();
+		mutation.resolve();
+		await supervisor.finalize("done");
+		harness.cleanup();
+	}
+});

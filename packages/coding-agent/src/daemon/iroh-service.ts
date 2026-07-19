@@ -114,6 +114,12 @@ import {
 	loadIrohModule,
 } from "./iroh-native.ts";
 import { IrohRemoteResourceGuard } from "./iroh-resource-guard.ts";
+import {
+	createLifecycleFencedIrohStream,
+	IrohStreamLifecycleClosedError,
+	isIrohStreamLifecycleClosedError,
+	runLifecycleFencedPhysicalOperation,
+} from "./iroh-stream-lifecycle.ts";
 import { type DaemonAttachClaim, LeaseBroker, type LeaseState } from "./lease-broker.ts";
 import type { VoltdRuntimeServices, VoltdServiceExtension } from "./main.ts";
 import { RelayRegistry } from "./relay-stream.ts";
@@ -262,6 +268,13 @@ export interface IrohDaemonServiceConfig {
 	profile?: string;
 }
 
+export interface IrohDaemonServiceDependencies {
+	/** Decorate a freshly bound endpoint (used to exercise native lifecycle failures). */
+	decorateEndpoint?(endpoint: IrohEndpointLike): IrohEndpointLike;
+	/** Decorate an accepted raw stream before lifecycle fencing (test-only failure injection). */
+	decorateAcceptedStream?(stream: IrohBiStreamLike): IrohBiStreamLike;
+}
+
 export interface ResolvedIrohRelayConfig {
 	relayMode: IrohRelayMode;
 	relayUrls: string[];
@@ -312,6 +325,7 @@ interface PendingPairRequest {
 	secretHash: string;
 	expiresAt: number;
 	timer: NodeJS.Timeout;
+	cancellation?: Promise<void>;
 }
 
 interface ClientConnectionRecord {
@@ -454,14 +468,17 @@ type IrohPhysicalStreamCloseAction = (reason: string) => Promise<void> | void;
 /** Single idempotent owner for a physical bi-stream from accept to task exit. */
 export class IrohPhysicalStreamOwner {
 	private readonly fallbackClose: IrohPhysicalStreamCloseAction;
+	readonly physicalStream: IrohBiStreamLike | undefined;
+	private readonly closeController = new AbortController();
 	private closeAction: IrohPhysicalStreamCloseAction | undefined;
 	private readonly settledPromise: Promise<void>;
 	private resolveSettled: () => void = () => {};
 	private rejectSettled: (error: unknown) => void = () => {};
 	private closeStarted = false;
 
-	constructor(fallbackClose: IrohPhysicalStreamCloseAction) {
+	constructor(fallbackClose: IrohPhysicalStreamCloseAction, physicalStream?: IrohBiStreamLike) {
 		this.fallbackClose = fallbackClose;
+		this.physicalStream = physicalStream;
 		this.settledPromise = new Promise<void>((resolve, reject) => {
 			this.resolveSettled = resolve;
 			this.rejectSettled = reject;
@@ -474,6 +491,10 @@ export class IrohPhysicalStreamOwner {
 
 	get settled(): Promise<void> {
 		return this.settledPromise;
+	}
+
+	get signal(): AbortSignal {
+		return this.closeController.signal;
 	}
 
 	installCloseAction(closeAction: IrohPhysicalStreamCloseAction): boolean {
@@ -491,8 +512,11 @@ export class IrohPhysicalStreamOwner {
 		this.closeStarted = true;
 		const closeAction = this.closeAction ?? this.fallbackClose;
 		try {
-			Promise.resolve(closeAction(reason)).then(this.resolveSettled, this.rejectSettled);
+			const closeResult = closeAction(reason);
+			this.closeController.abort(new IrohStreamLifecycleClosedError());
+			Promise.resolve(closeResult).then(this.resolveSettled, this.rejectSettled);
 		} catch (error) {
+			this.closeController.abort(new IrohStreamLifecycleClosedError());
 			this.rejectSettled(error);
 		}
 		return this.settledPromise;
@@ -542,7 +566,10 @@ function isAuthorityTighteningCloseReason(reason: string): boolean {
  * headless integrated runtimes, workspace/device streams, push dispatch, and
  * the accept loop. Ported from the dissolved src/remote/iroh-host.mjs.
  */
-export function createIrohDaemonService(config: IrohDaemonServiceConfig = {}): VoltdServiceExtension {
+export function createIrohDaemonService(
+	config: IrohDaemonServiceConfig = {},
+	dependencies: IrohDaemonServiceDependencies = {},
+): VoltdServiceExtension {
 	return (services: VoltdRuntimeServices) => {
 		const log = services.logger.child("iroh");
 		const loaded = loadIrohModule();
@@ -564,8 +591,8 @@ export function createIrohDaemonService(config: IrohDaemonServiceConfig = {}): V
 			};
 		}
 
-		const service = new IrohDaemonService(loaded.iroh, services, config);
-		void service.start();
+		const service = new IrohDaemonService(loaded.iroh, services, config, dependencies);
+		service.start();
 		return {
 			handleRequest: (connection, request) => service.handleRequest(connection, request),
 			onConnectionClosed: (connection) => service.onControlConnectionClosed(connection),
@@ -574,7 +601,8 @@ export function createIrohDaemonService(config: IrohDaemonServiceConfig = {}): V
 			statusExtras: () => service.statusExtras(),
 			admitRelay: (relayId, relayToken, socket, bufferedRemainder) =>
 				service.admitRelay(relayId, relayToken, socket, bufferedRemainder),
-			shutdown: () => service.shutdown(),
+			quiesce: () => service.quiesce(),
+			dispose: () => service.dispose(),
 		};
 	};
 }
@@ -582,6 +610,7 @@ export function createIrohDaemonService(config: IrohDaemonServiceConfig = {}): V
 class IrohDaemonService {
 	private readonly iroh: IrohModuleLike;
 	private readonly services: VoltdRuntimeServices;
+	private readonly dependencies: IrohDaemonServiceDependencies;
 	private readonly relayMode: IrohRelayMode;
 	private readonly relayUrls: string[];
 	private readonly relayAuthToken: string | undefined;
@@ -595,6 +624,11 @@ class IrohDaemonService {
 	private readonly clientConnections = new Map<string, Set<ClientConnectionRecord>>();
 	private readonly connectionSupervisors = new Map<string, IrohConnectionSupervisor>();
 	private readonly connectionTasks = new Set<Promise<void>>();
+	private readonly nativeLifecycleTasks = new Set<Promise<void>>();
+	private readonly endpointDisposalTasks = new Map<IrohEndpointLike, Promise<void>>();
+	private startupTask: Promise<void> | undefined;
+	private startupEndpoint: IrohEndpointLike | undefined;
+	private acceptLoopTask: Promise<void> | undefined;
 	private readonly resourceGuard = new IrohRemoteResourceGuard();
 	private readonly pendingPairRequests = new Map<string, PendingPairRequest>();
 	private readonly sessionListCursors = new Map<string, RemoteSessionListCursorEntry>();
@@ -614,9 +648,15 @@ class IrohDaemonService {
 	private endpointTicket: string | undefined;
 	private readonly ready: { promise: Promise<void>; resolve: () => void; reject: (error: unknown) => void };
 
-	constructor(iroh: IrohModuleLike, services: VoltdRuntimeServices, config: IrohDaemonServiceConfig) {
+	constructor(
+		iroh: IrohModuleLike,
+		services: VoltdRuntimeServices,
+		config: IrohDaemonServiceConfig,
+		dependencies: IrohDaemonServiceDependencies,
+	) {
 		this.iroh = iroh;
 		this.services = services;
+		this.dependencies = dependencies;
 		const relayConfig = resolveIrohRelayConfig(config);
 		this.relayMode = relayConfig.relayMode;
 		this.relayUrls = relayConfig.relayUrls;
@@ -786,14 +826,16 @@ class IrohDaemonService {
 		return this.engine;
 	}
 
-	private async pruneWorktreesOnStart(): Promise<void> {
-		if (!resolveWorktreeCleanupPolicy(this.services.state.state.settings).pruneOnStart) {
+	private async pruneWorktreesOnStart(signal: AbortSignal): Promise<void> {
+		if (signal.aborted || !resolveWorktreeCleanupPolicy(this.services.state.state.settings).pruneOnStart) {
 			return;
 		}
 		try {
 			const state = await this.stateManager.getState();
+			if (signal.aborted) return;
 			const workspacesWithRecords = new Set((state.worktrees ?? []).map((worktree) => worktree.workspaceName));
 			for (const workspace of state.workspaces) {
+				if (signal.aborted) return;
 				// Skip workspaces with neither records nor checkout directories: no git
 				// subprocesses or audit noise on the common no-worktrees start.
 				if (
@@ -803,8 +845,9 @@ class IrohDaemonService {
 					continue;
 				}
 				try {
-					await this.worktrees.prune(workspace);
+					await this.worktrees.prune(workspace, { signal });
 				} catch (error) {
+					if (signal.aborted) return;
 					this.log("warn", "worktree prune failed on start", {
 						workspace: workspace.name,
 						error: error instanceof Error ? error.message : String(error),
@@ -889,19 +932,71 @@ class IrohDaemonService {
 		};
 	}
 
-	async start(): Promise<void> {
-		let endpoint: IrohEndpointLike | undefined;
-		if (this.relayConfigWarning !== undefined) {
-			this.log("warn", this.relayConfigWarning);
+	start(): void {
+		if (this.startupTask !== undefined) return;
+		this.startupTask = this.runStart();
+	}
+
+	private trackNativeLifecycleTask(task: Promise<unknown>): void {
+		const settled = task.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.nativeLifecycleTasks.add(settled);
+		void settled.then(() => this.nativeLifecycleTasks.delete(settled));
+	}
+
+	private retireEndpoint(endpoint: IrohEndpointLike, context: string): Promise<void> {
+		if (this.startupEndpoint === endpoint) {
+			this.startupEndpoint = undefined;
 		}
-		// Reconcile worktree records/checkouts before the endpoint starts taking
-		// conversations (design §5.3 pruneOnStart; default on, quarantine-only).
-		await this.pruneWorktreesOnStart();
-		if (!this.admission.isOpen) {
+		const existing = this.endpointDisposalTasks.get(endpoint);
+		if (existing !== undefined) {
+			return existing;
+		}
+		const closeTask = Promise.resolve()
+			.then(() => endpoint.close())
+			.catch((error: unknown) => {
+				this.log("warn", `${context}: ${error instanceof Error ? error.message : String(error)}`);
+			});
+		this.endpointDisposalTasks.set(endpoint, closeTask);
+		this.trackNativeLifecycleTask(closeTask);
+		return closeTask;
+	}
+
+	private retireLateBoundEndpoint(bindTask: Promise<IrohEndpointLike>): void {
+		const cleanupTask = bindTask.then(
+			(endpoint) => this.retireEndpoint(endpoint, "late iroh endpoint disposal failed"),
+			() => undefined,
+		);
+		this.trackNativeLifecycleTask(cleanupTask);
+	}
+
+	private async runStart(): Promise<void> {
+		let endpoint: IrohEndpointLike | undefined;
+		const startupAdmission = this.admission.tryAcquire();
+		if (!startupAdmission) {
 			this.ready.reject(new Error("iroh service shut down before endpoint startup"));
 			return;
 		}
+		let startupAdmissionReleased = false;
+		const releaseStartupAdmission = () => {
+			if (startupAdmissionReleased) return;
+			startupAdmissionReleased = true;
+			startupAdmission.release();
+		};
+		if (this.relayConfigWarning !== undefined) {
+			this.log("warn", this.relayConfigWarning);
+		}
 		try {
+			// Reconcile worktree records/checkouts before the endpoint starts taking
+			// conversations. The startup admission lease keeps every state mutation
+			// inside the durable quiesce barrier, while its abort signal cancels git.
+			await this.pruneWorktreesOnStart(startupAdmission.signal);
+			if (!startupAdmission.isCurrent()) {
+				this.ready.reject(new Error("iroh service shut down before endpoint startup"));
+				return;
+			}
 			const builder = this.iroh.Endpoint.builder();
 			if (this.relayMode === "development") {
 				this.log(
@@ -932,9 +1027,18 @@ class IrohDaemonService {
 				builder.secretKey(secretKey);
 			}
 			builder.alpns([Array.from(Buffer.from(IROH_REMOTE_ALPN, "utf8"))]);
-			endpoint = await builder.bind();
-			if (!this.admission.isOpen) {
-				await endpoint.close().catch(() => {});
+			const bindTask = builder.bind();
+			endpoint = await waitUntilAdmissionCancelled(bindTask, startupAdmission.signal);
+			if (!endpoint) {
+				this.retireLateBoundEndpoint(bindTask);
+				this.ready.reject(new Error("iroh service shut down during endpoint bind"));
+				return;
+			}
+			endpoint = this.dependencies.decorateEndpoint?.(endpoint) ?? endpoint;
+			this.startupEndpoint = endpoint;
+			if (!startupAdmission.isCurrent()) {
+				this.retireEndpoint(endpoint, "iroh endpoint disposal after cancelled bind failed");
+				endpoint = undefined;
 				this.ready.reject(new Error("iroh service shut down during endpoint startup"));
 				return;
 			}
@@ -950,22 +1054,43 @@ class IrohDaemonService {
 				// this endpoint would be talking to a node id the daemon can never
 				// reproduce on restart.
 				await this.services.state.flush();
+				if (!startupAdmission.isCurrent()) {
+					this.retireEndpoint(endpoint, "iroh endpoint disposal after identity persistence failed");
+					endpoint = undefined;
+					this.ready.reject(new Error("iroh service shut down during identity persistence"));
+					return;
+				}
 			}
+			// Everything after this boundary is native/publication work. Quiesce may
+			// now close core state without waiting for bind/online transport tails;
+			// dispose owns and bounds those tasks instead.
+			releaseStartupAdmission();
 			if (this.relayMode !== "disabled") {
-				await endpoint.online();
+				const onlineTask = Promise.resolve(endpoint.online());
+				this.trackNativeLifecycleTask(onlineTask);
+				const online = await waitUntilAdmissionCancelled(
+					onlineTask.then(() => true),
+					startupAdmission.signal,
+				);
+				if (online !== true) {
+					this.retireEndpoint(endpoint, "iroh endpoint disposal after cancelled online failed");
+					endpoint = undefined;
+					this.ready.reject(new Error("iroh service shut down while endpoint was coming online"));
+					return;
+				}
 			}
 			if (!this.admission.isOpen) {
-				await endpoint.close().catch(() => {});
+				this.retireEndpoint(endpoint, "iroh endpoint disposal after startup cancellation failed");
+				endpoint = undefined;
 				this.ready.reject(new Error("iroh service shut down during endpoint startup"));
 				return;
 			}
-			this.endpoint = endpoint;
-			this.hostNodeId = endpoint.id().toString();
-			this.endpointTicket = this.iroh.EndpointTicket.fromAddr(endpoint.addr()).toString();
-			this.engine = new IrohRemoteHostEngine({
+			const hostNodeId = endpoint.id().toString();
+			const endpointTicket = this.iroh.EndpointTicket.fromAddr(endpoint.addr()).toString();
+			const engine = new IrohRemoteHostEngine({
 				auditLogger: this.services.auditLogger,
 				classifyWorkspaceAvailability: getIrohRemoteWorkspaceAvailabilityStatus,
-				hostNodeId: this.hostNodeId,
+				hostNodeId,
 				relayMode: this.relayMode,
 				...(this.relayMode === "production" ? { relayUrls: this.relayUrls } : {}),
 				stateManager: this.stateManager,
@@ -973,26 +1098,29 @@ class IrohDaemonService {
 					(await getIrohRemoteWorkspaceAvailabilityStatus(workspace)) === "available",
 				workspace: { name: "voltd", path: this.services.agentDir },
 			});
+			this.endpoint = endpoint;
+			this.startupEndpoint = undefined;
+			this.hostNodeId = hostNodeId;
+			this.endpointTicket = endpointTicket;
+			this.engine = engine;
 			this.ready.resolve();
 			this.log("info", `iroh endpoint online`, {
 				hostNodeId: this.hostNodeId,
 				relayMode: this.relayMode,
 				...(this.relayMode === "production" ? { relayUrls: this.relayUrls } : {}),
 			});
-			void this.acceptLoop(endpoint);
+			this.acceptLoopTask = this.acceptLoop(endpoint).catch((error) => {
+				this.log("error", `accept loop failed: ${error instanceof Error ? error.message : String(error)}`);
+			});
+			endpoint = undefined;
 		} catch (error) {
 			if (endpoint) {
-				// bind() succeeded but a later start step (e.g. online()) failed before
-				// the endpoint was adopted; close it so its QUIC socket is not leaked.
-				try {
-					await endpoint.close();
-				} catch {}
-				if (this.endpoint === endpoint) {
-					this.endpoint = undefined;
-				}
+				this.retireEndpoint(endpoint, "iroh endpoint disposal after startup failure failed");
 			}
 			this.ready.reject(error);
 			this.log("error", `failed to start iroh endpoint: ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			releaseStartupAdmission();
 		}
 	}
 
@@ -1011,27 +1139,54 @@ class IrohDaemonService {
 			if (!incoming) {
 				break;
 			}
+			// Acquire once for the accepted incoming before branching. This is the
+			// exact publication fence for both rejection work and handleConnection;
+			// quiesce either observes this lease or wins before it can be acquired.
+			const admission = this.admission.tryAcquire();
+			if (!admission) {
+				try {
+					const refusalTask = Promise.resolve(incoming.refuse());
+					this.trackNativeLifecycleTask(refusalTask);
+				} catch {}
+				break;
+			}
 			const connectionAdmission = this.resourceGuard.tryAcquireConnectionTask();
 			if (!connectionAdmission.ok) {
-				let refused = true;
 				try {
-					await incoming.refuse();
-				} catch {
-					refused = false;
+					let refused = true;
+					try {
+						await runLifecycleFencedPhysicalOperation(
+							() => incoming.refuse(),
+							admission.signal,
+							(task) => this.trackNativeLifecycleTask(task),
+						);
+					} catch (error) {
+						if (isIrohStreamLifecycleClosedError(error)) {
+							continue;
+						}
+						refused = false;
+					}
+					if (!admission.isCurrent()) {
+						continue;
+					}
+					await this.logAudit({
+						type: "iroh_security_connection_limit",
+						success: false,
+						error: "incoming connection refused at daemon connection-task limit",
+						details: {
+							limit: connectionAdmission.limit,
+							refused,
+							scope: connectionAdmission.scope,
+						},
+					});
+				} finally {
+					admission.release();
 				}
-				await this.logAudit({
-					type: "iroh_security_connection_limit",
-					success: false,
-					error: "incoming connection refused at daemon connection-task limit",
-					details: {
-						limit: connectionAdmission.limit,
-						refused,
-						scope: connectionAdmission.scope,
-					},
-				});
 				continue;
 			}
-			const task = this.handleConnection(incoming)
+			// Ownership of the per-incoming admission lease transfers to the
+			// connection task; its single release path lives in handleConnection.
+			const task = this.handleConnection(incoming, admission)
 				.catch((error) => {
 					if (!isExpectedApplicationClose(error)) {
 						this.log(
@@ -1050,78 +1205,123 @@ class IrohDaemonService {
 
 	private async handleConnection(
 		incoming: NonNullable<Awaited<ReturnType<IrohEndpointLike["acceptNext"]>>>,
+		admission: IrohDaemonAdmissionLease,
 	): Promise<void> {
+		let admissionReleased = false;
+		const releaseAdmission = () => {
+			if (admissionReleased) return;
+			admissionReleased = true;
+			admission.release();
+		};
 		let connection: IrohConnectionLike;
-		try {
-			const accepting = await incoming.accept();
-			connection = await accepting.connect();
-		} catch {
-			await this.logAudit({
-				type: "iroh_security_transport_rejected",
-				success: false,
-				error: "incoming transport handshake failed",
-				details: { phase: "transport_connect" },
-			});
-			return;
-		}
-		const supervisor = new IrohConnectionSupervisor(connection);
-		try {
-			connection.setMaxConcurrentBiStreams(BigInt(MAX_CONCURRENT_STREAMS_PER_CONNECTION));
-		} catch {
-			supervisor.requestClose("stream_limit_configuration_failed", "immediate");
-			await supervisor.finalize("stream_limit_configuration_failed");
-			await this.logAudit({
-				type: "iroh_security_transport_rejected",
-				success: false,
-				error: "connected transport could not enforce the inbound stream limit",
-				details: { phase: "stream_limit_configuration" },
-			});
-			return;
-		}
+		let supervisor: IrohConnectionSupervisor;
 		let remoteId: string;
+		let connectionId: string;
+		let unauthenticatedAdmission: Extract<
+			ReturnType<IrohRemoteResourceGuard["tryAcquireUnauthenticatedConnection"]>,
+			{ ok: true }
+		>;
 		try {
-			remoteId = connection.remoteId().toString();
-		} catch {
-			supervisor.requestClose("invalid_remote_identity", "immediate");
-			await supervisor.finalize("invalid_remote_identity");
-			await this.logAudit({
-				type: "iroh_security_transport_rejected",
-				success: false,
-				error: "connected transport did not expose a valid remote identity",
-				details: { phase: "remote_identity" },
-			});
-			return;
+			try {
+				const accepting = await runLifecycleFencedPhysicalOperation(
+					() => incoming.accept(),
+					admission.signal,
+					(task) => this.trackNativeLifecycleTask(task),
+				);
+				connection = await runLifecycleFencedPhysicalOperation(
+					() => accepting.connect(),
+					admission.signal,
+					(task) => this.trackNativeLifecycleTask(task),
+				);
+			} catch (error) {
+				if (!isIrohStreamLifecycleClosedError(error) && admission.isCurrent()) {
+					await this.logAudit({
+						type: "iroh_security_transport_rejected",
+						success: false,
+						error: "incoming transport handshake failed",
+						details: { phase: "transport_connect" },
+					});
+				}
+				return;
+			}
+			// A transport handshake can complete in the same event-loop turn as
+			// quiesce. Close it without publishing application ownership; endpoint
+			// disposal owns any remaining native transport tail.
+			if (!admission.isCurrent()) {
+				try {
+					connection.close(0n, Array.from(Buffer.from("host_shutdown", "utf8")));
+				} catch {}
+				return;
+			}
+			supervisor = new IrohConnectionSupervisor(connection);
+			try {
+				connection.setMaxConcurrentBiStreams(BigInt(MAX_CONCURRENT_STREAMS_PER_CONNECTION));
+			} catch {
+				supervisor.requestClose("stream_limit_configuration_failed", "immediate");
+				await this.logAudit({
+					type: "iroh_security_transport_rejected",
+					success: false,
+					error: "connected transport could not enforce the inbound stream limit",
+					details: { phase: "stream_limit_configuration" },
+				});
+				releaseAdmission();
+				await supervisor.finalize("stream_limit_configuration_failed");
+				return;
+			}
+			try {
+				remoteId = connection.remoteId().toString();
+			} catch {
+				supervisor.requestClose("invalid_remote_identity", "immediate");
+				await this.logAudit({
+					type: "iroh_security_transport_rejected",
+					success: false,
+					error: "connected transport did not expose a valid remote identity",
+					details: { phase: "remote_identity" },
+				});
+				releaseAdmission();
+				await supervisor.finalize("invalid_remote_identity");
+				return;
+			}
+			const nodeConnectionAdmission = this.resourceGuard.tryAcquireNodeConnection(remoteId);
+			if (!nodeConnectionAdmission.ok) {
+				supervisor.requestClose("node_connection_limit", "immediate");
+				await this.logAudit({
+					type: "iroh_security_connection_limit",
+					clientNodeId: remoteId,
+					success: false,
+					error: "connection refused at per-node connection limit",
+					details: { limit: nodeConnectionAdmission.limit, scope: nodeConnectionAdmission.scope },
+				});
+				releaseAdmission();
+				await supervisor.finalize("node_connection_limit");
+				return;
+			}
+			supervisor.addTerminalFinalizer(() => nodeConnectionAdmission.lease.release());
+			const provisionalUnauthenticatedAdmission = this.resourceGuard.tryAcquireUnauthenticatedConnection(remoteId);
+			if (!provisionalUnauthenticatedAdmission.ok) {
+				supervisor.requestClose("unauthenticated_connection_limit", "immediate");
+				await this.logAudit({
+					type: "iroh_security_unauthenticated_connection_limit",
+					clientNodeId: remoteId,
+					success: false,
+					error: "unauthenticated connection refused at admission limit",
+					details: {
+						limit: provisionalUnauthenticatedAdmission.limit,
+						scope: provisionalUnauthenticatedAdmission.scope,
+					},
+				});
+				releaseAdmission();
+				await supervisor.finalize("unauthenticated_connection_limit");
+				return;
+			}
+			unauthenticatedAdmission = provisionalUnauthenticatedAdmission;
+			supervisor.addTerminalFinalizer(() => provisionalUnauthenticatedAdmission.lease.release());
+			connectionId = `conn-${++activeConnectionSequence}`;
+			this.registerClientConnection(remoteId, connectionId, supervisor);
+			releaseAdmission();
+		} finally {
+			releaseAdmission();
 		}
-		const nodeConnectionAdmission = this.resourceGuard.tryAcquireNodeConnection(remoteId);
-		if (!nodeConnectionAdmission.ok) {
-			supervisor.requestClose("node_connection_limit", "immediate");
-			await supervisor.finalize("node_connection_limit");
-			await this.logAudit({
-				type: "iroh_security_connection_limit",
-				clientNodeId: remoteId,
-				success: false,
-				error: "connection refused at per-node connection limit",
-				details: { limit: nodeConnectionAdmission.limit, scope: nodeConnectionAdmission.scope },
-			});
-			return;
-		}
-		supervisor.addTerminalFinalizer(() => nodeConnectionAdmission.lease.release());
-		const unauthenticatedAdmission = this.resourceGuard.tryAcquireUnauthenticatedConnection(remoteId);
-		if (!unauthenticatedAdmission.ok) {
-			supervisor.requestClose("unauthenticated_connection_limit", "immediate");
-			await supervisor.finalize("unauthenticated_connection_limit");
-			await this.logAudit({
-				type: "iroh_security_unauthenticated_connection_limit",
-				clientNodeId: remoteId,
-				success: false,
-				error: "unauthenticated connection refused at admission limit",
-				details: { limit: unauthenticatedAdmission.limit, scope: unauthenticatedAdmission.scope },
-			});
-			return;
-		}
-		supervisor.addTerminalFinalizer(() => unauthenticatedAdmission.lease.release());
-		const connectionId = `conn-${++activeConnectionSequence}`;
-		this.registerClientConnection(remoteId, connectionId, supervisor);
 		let acceptedStreamCount = 0;
 		let authenticated = false;
 		const unauthenticatedTimer = setTimeout(() => {
@@ -1195,7 +1395,11 @@ class IrohDaemonService {
 				const streamId = `stream-${++activeStreamSequence}`;
 				const task = this.runOwnedConnectionStream(stream, remoteId, connectionId, streamId, markAuthenticated)
 					.catch(async (error) => {
-						if (!isExpectedApplicationClose(error)) {
+						if (
+							this.admission.isOpen &&
+							!isIrohStreamLifecycleClosedError(error) &&
+							!isExpectedApplicationClose(error)
+						) {
 							if (authenticated) {
 								this.log(
 									"error",
@@ -1234,7 +1438,7 @@ class IrohDaemonService {
 			clearTimeout(unauthenticatedTimer);
 			await this.closeActiveStreamsForConnection(connectionId, "connection_closed");
 			await supervisor.finalize("done");
-			if (authenticated) {
+			if (authenticated && this.admission.isOpen) {
 				this.log("info", `client connection closed: ${remoteId} (${connectionId})`);
 				await this.logAudit({
 					type: "client_disconnected",
@@ -1247,13 +1451,21 @@ class IrohDaemonService {
 	}
 
 	private async runOwnedConnectionStream(
-		stream: IrohBiStreamLike,
+		rawStream: IrohBiStreamLike,
 		remoteId: string,
 		connectionId: string,
 		streamId: string,
 		markAuthenticated: () => Promise<boolean>,
 	): Promise<void> {
-		const owner = new IrohPhysicalStreamOwner((reason) => closeIrohRemoteStream(stream, reason));
+		const decoratedStream = this.dependencies.decorateAcceptedStream?.(rawStream) ?? rawStream;
+		let stream: IrohBiStreamLike | undefined;
+		const owner = new IrohPhysicalStreamOwner(
+			(reason) => closeIrohRemoteStream(stream ?? decoratedStream, reason),
+			decoratedStream,
+		);
+		stream = createLifecycleFencedIrohStream(decoratedStream, owner.signal, (task) =>
+			this.trackNativeLifecycleTask(task),
+		);
 		this.physicalStreamOwners.set(streamId, owner);
 		try {
 			await this.handleConnectionStream(stream, remoteId, connectionId, streamId, markAuthenticated, owner);
@@ -1297,6 +1509,7 @@ class IrohDaemonService {
 		try {
 			handshake = await engine.readHandshake(stream.recv, remoteId, {
 				child: "volt",
+				isCancelled: () => owner.signal.aborted,
 				maxLineBytes: DEFAULT_IROH_REMOTE_HANDSHAKE_MAX_LINE_BYTES,
 				timeoutMs: DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS,
 			});
@@ -2133,6 +2346,7 @@ class IrohDaemonService {
 		}
 		const coordinator = this.conversationCoordinators.getOrCreate(workspaceName, targetSessionId);
 		let releaseRelayTransport = () => {};
+		const relayPhysicalStream = physicalOwner.physicalStream ?? stream;
 		const relay = this.relays.mint({
 			workspaceName,
 			sessionId: targetSessionId,
@@ -2140,7 +2354,8 @@ class IrohDaemonService {
 			connectionId,
 			ownerControlConnectionId: tuiConnectionId,
 			streamId,
-			stream,
+			stream: relayPhysicalStream,
+			observePhysicalTask: (task) => this.trackNativeLifecycleTask(task),
 			preamble: {
 				handshake: {
 					hello: handshake.hello,
@@ -2187,7 +2402,7 @@ class IrohDaemonService {
 				},
 			},
 			rejectPending: ({ message, retryAfterMs }) =>
-				this.sendHandshakeError(stream, {
+				this.sendHandshakeError(relayPhysicalStream, {
 					message,
 					...(retryAfterMs === undefined ? {} : { retryAfterMs }),
 				}),
@@ -2214,6 +2429,22 @@ class IrohDaemonService {
 				});
 			},
 		});
+		if (
+			!physicalOwner.installCloseAction((reason) =>
+				relay
+					.close(normalizeRelayCloseReason(reason), {
+						pendingMessage: relayPendingMessageForReason(reason),
+						...(reason === "workspace_unregistered" || reason === "host_shutdown"
+							? {}
+							: { retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS }),
+					})
+					.then(() => undefined),
+			)
+		) {
+			await relay.close("host_shutdown", { pendingMessage: relayPendingMessageForReason("host_shutdown") });
+			this.conversationCoordinators.releaseIfVacant(coordinator);
+			return;
+		}
 
 		try {
 			releaseRelayTransport = coordinator.registerTransport({
@@ -2221,15 +2452,7 @@ class IrohDaemonService {
 				kind: "relay",
 				clientNodeId: authorization.client.nodeId,
 				connectionId,
-				close: (reason) =>
-					relay
-						.close(normalizeRelayCloseReason(reason), {
-							pendingMessage: relayPendingMessageForReason(reason),
-							...(reason === "workspace_unregistered" || reason === "host_shutdown"
-								? {}
-								: { retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS }),
-						})
-						.then(() => undefined),
+				close: (reason) => physicalOwner.close(reason),
 			});
 		} catch {
 			await relay.close("error", {
@@ -3862,31 +4085,55 @@ class IrohDaemonService {
 		return { ok: true, engine: this.engine };
 	}
 
-	private async cancelPendingPairing(
-		requestId: string,
-		pending: { secretHash: string; timer: NodeJS.Timeout },
-	): Promise<void> {
-		clearTimeout(pending.timer);
-		if (this.engine) {
-			await this.engine.cancelPairingSecretByHash(pending.secretHash);
-		} else {
-			await this.stateManager.removePendingPairingTicket(pending.secretHash);
+	private cancelPendingPairing(requestId: string, pending: PendingPairRequest): Promise<void> {
+		if (this.pendingPairRequests.get(requestId) !== pending) {
+			return Promise.resolve();
 		}
-		await this.services.state.flush();
-		this.pendingPairRequests.delete(requestId);
+		if (pending.cancellation) {
+			return pending.cancellation;
+		}
+		clearTimeout(pending.timer);
+		const cancellation = (async () => {
+			if (this.engine) {
+				await this.engine.cancelPairingSecretByHash(pending.secretHash);
+			} else {
+				await this.stateManager.removePendingPairingTicket(pending.secretHash);
+			}
+			await this.services.state.flush();
+			if (this.pendingPairRequests.get(requestId) === pending) {
+				this.pendingPairRequests.delete(requestId);
+			}
+		})();
+		pending.cancellation = cancellation;
+		void cancellation.catch(() => {
+			if (pending.cancellation === cancellation) {
+				pending.cancellation = undefined;
+			}
+		});
+		return cancellation;
 	}
 
 	onControlConnectionClosed(connection: ControlConnection): void {
 		this.leaseBroker.releaseAllForConnection(connection.connectionId);
-		for (const [requestId, pending] of this.pendingPairRequests) {
-			if (pending.connectionId !== connection.connectionId) continue;
-			void this.cancelPendingPairing(requestId, pending).catch((error) => {
-				this.log("warn", "failed to cancel pairing after control disconnect", {
-					requestId,
-					error: error instanceof Error ? error.message : String(error),
-				});
-			});
+		const admission = this.admission.tryAcquire();
+		if (!admission) {
+			// Quiesce owns every remaining ticket after the admission cut. A final
+			// control-socket close must never launch a durable write after state.close().
+			return;
 		}
+		const cancellations = Array.from(this.pendingPairRequests)
+			.filter(([, pending]) => pending.connectionId === connection.connectionId)
+			.map(async ([requestId, pending]) => {
+				try {
+					await this.cancelPendingPairing(requestId, pending);
+				} catch (error) {
+					this.log("warn", "failed to cancel pairing after control disconnect", {
+						requestId,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			});
+		void Promise.all(cancellations).finally(() => admission.release());
 	}
 
 	admitRelay(relayId: string, relayToken: string, socket: Socket, bufferedRemainder: Buffer): boolean {
@@ -3904,12 +4151,18 @@ class IrohDaemonService {
 		return { leases, phoneConnections: this.clientConnections.size, relayCount: this.relays.activeCount() };
 	}
 
-	async shutdown(): Promise<void> {
+	async quiesce(): Promise<void> {
 		// Close the service-wide epoch before any snapshot or await. New streams,
 		// ownership commits, relay offers, and turn-starting commands now fail
 		// closed against the same state.
 		this.admission.close();
 		this.worktreeRetention.dispose();
+		// Freeze expiry callbacks at the same cut. Once admission is closed, no
+		// disconnect callback may mutate durable pairing state; quiesce becomes the
+		// sole owner of every ticket still published in this map.
+		for (const pending of this.pendingPairRequests.values()) {
+			clearTimeout(pending.timer);
+		}
 		// 1. Stop accepting, then close every published conversation transport
 		//    through its coordinator. Offered and redeemed relays share this same
 		//    terminal path and therefore preserve the host_shutdown reason.
@@ -3941,6 +4194,20 @@ class IrohDaemonService {
 		// close (and is in the snapshots above) or observes a stale lease, rolls
 		// back, and releases here. No runtime can appear after the next snapshot.
 		await this.admission.waitForDrain();
+		// Control request admission was drained before extension quiesce began, and
+		// the service gate now rejects disconnect-owned cancellation work. Therefore
+		// this is a fixed producer-free set: settle it completely before state.close.
+		const pendingPairingResults = await Promise.allSettled(
+			Array.from(this.pendingPairRequests, ([requestId, pending]) => this.cancelPendingPairing(requestId, pending)),
+		);
+		const pendingPairingFailures = pendingPairingResults.filter(
+			(result): result is PromiseRejectedResult => result.status === "rejected",
+		);
+		for (const failure of pendingPairingFailures) {
+			this.log("warn", "failed to cancel pending pairing during quiesce", {
+				error: failure.reason instanceof Error ? failure.reason.message : String(failure.reason),
+			});
+		}
 
 		// 2. Wait for busy runtimes to go idle (60s cap each, concurrently);
 		//    never abort prompt preflight or a turn from shutdown.
@@ -3961,20 +4228,50 @@ class IrohDaemonService {
 				this.physicalStreamOwners.delete(streamId);
 			}
 		}
-		// 4. Flush + dispose runtimes through the normal dispose path.
-		await this.runtimes.stopAll("host_shutdown");
-		// 5. Close all remaining client connections.
+		// 4. Close all remaining client connections and join their admitted
+		//    application children. Connection.closed(), accept-loop settlement,
+		//    and endpoint closure are native tails owned by bounded dispose().
+		const supervisors = Array.from(this.connectionSupervisors.values());
 		for (const nodeId of Array.from(this.clientConnections.keys())) {
-			await this.closeClientConnectionsForClient(nodeId, "host_shutdown");
+			this.closeClientConnectionsForClient(nodeId, "host_shutdown");
 		}
-		try {
-			await this.endpoint?.close();
-		} catch {
-			// Endpoint shutdown is best-effort.
-		}
-		await Promise.allSettled(this.connectionTasks);
+		await Promise.allSettled(supervisors.map((supervisor) => supervisor.sealAndWaitForChildren()));
+		// 5. Flush + dispose runtimes through the normal dispose path only after
+		//    every accepted management/conversation child has stopped mutating.
+		await this.runtimes.stopAll("host_shutdown");
 		await this.services.auditLogger.flush().catch(() => {});
-		this.log("info", "iroh service stopped", { cappedRuntimes });
+		this.log("info", "iroh service quiesced", { cappedRuntimes });
+		if (pendingPairingFailures.length > 0) {
+			throw new AggregateError(
+				pendingPairingFailures.map((failure) => failure.reason),
+				"pending pairing cleanup failed",
+			);
+		}
+	}
+
+	async dispose(): Promise<void> {
+		const endpoints = new Set(
+			[this.endpoint, this.startupEndpoint].filter(
+				(endpoint): endpoint is IrohEndpointLike => endpoint !== undefined,
+			),
+		);
+		this.endpoint = undefined;
+		this.startupEndpoint = undefined;
+		const endpointDisposals = Array.from(endpoints, (endpoint) =>
+			this.retireEndpoint(endpoint, "iroh endpoint disposal failed"),
+		);
+		await Promise.allSettled([this.startupTask, ...endpointDisposals]);
+		// The accept loop is the last producer of connection tasks and closed-gate
+		// refusal tasks. Join it before taking the final disposal snapshots, then
+		// drain to a fixed point because connection settlement can still enqueue a
+		// raw native tail. The daemon's outer extension deadline bounds this whole
+		// native phase.
+		await this.acceptLoopTask;
+		while (this.connectionTasks.size > 0 || this.nativeLifecycleTasks.size > 0) {
+			await Promise.allSettled([...this.connectionTasks, ...this.nativeLifecycleTasks]);
+		}
+		await this.services.auditLogger.flush().catch(() => {});
+		this.log("info", "iroh service stopped");
 	}
 
 	private async logAudit(event: Parameters<VoltdRuntimeServices["auditLogger"]["log"]>[0]): Promise<void> {

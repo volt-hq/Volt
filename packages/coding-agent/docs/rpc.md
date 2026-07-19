@@ -1476,19 +1476,73 @@ Reconstruction rules:
 - `toolcall_start` includes best-effort `id` and `name`; `toolcall_delta.argsTextDelta` streams raw argument JSON text and may refine identity; `toolcall_end` carries the authoritative full `toolCall` object.
 - The same rules apply to `message_update` events wrapped in `subagent_event`, keyed per `subagentId`. Drop a subagent's accumulator on `subagent_end` or `subagent_disposed`.
 - If a compact delta has an invalid position or cannot be applied at its bounded `contentIndex`, drop it and wait for the next base, snapshot, or final frame. Do not partially apply it.
-- A client that dropped deltas for a gap the server never saw (for example, frames discarded during an attach or replay window) receives no automatic recovery — the server believes the stream is synchronized. Send `report_stream_discontinuity` to request one:
+- A client that detects a delivery, assistant-position, or reducer gap must fence
+  ordinary conversation projection and send one correlated
+  `report_stream_discontinuity` command. The report is scoped to the exact
+  session and ordered-conversation subscription that produced the dropped
+  frame:
 
 ```json
-{"type": "report_stream_discontinuity"}
+{
+  "id": "recovery-42",
+  "type": "report_stream_discontinuity",
+  "sessionId": "session-abc",
+  "subscriptionId": "subscription-def",
+  "lastAppliedCursor": 17,
+  "assistantPosition": {"epoch": 3, "seq": 28},
+  "reason": "assistant_position_gap"
+}
 ```
 
-Response:
+`reason` is one of `cursor_gap`, `assistant_position_gap`, or
+`reducer_divergence`; `assistantPosition` is omitted when no assistant frame
+has been committed. `lastAppliedCursor` may not be ahead of the host's issued
+cursor. The host remembers the 128 most recent recovery IDs for each
+subscription. Within that replay window, a repeated `id` is idempotent only
+when every recovery field is identical; reusing it for a different report is
+rejected. Clients must mint a fresh ID for every detected gap and never
+intentionally reuse one. An ID that has fallen out of the bounded window is
+treated as a new, rate-limited recovery request.
+
+The host synchronously takes one authoritative cut, discards only ordinary
+tail frames that have not yet been handed to transport, and writes a correlated
+checkpoint on the same ordered writer:
 
 ```json
-{"type": "response", "command": "report_stream_discontinuity", "success": true}
+{
+  "type": "conversation_bootstrap",
+  "reason": "resync",
+  "requestId": "recovery-42",
+  "delivery": {"subscriptionId": "subscription-def", "cursor": 18},
+  "conversation": {"...": "..."},
+  "transcript": {"...": "..."},
+  "state": {"...": "..."},
+  "activeAssistant": {"...": "..."},
+  "activeWorkflows": []
+}
 ```
 
-The server marks the session's assistant stream as discontinuous, so the next assistant streaming event is emitted as a full recovery snapshot instead of a compact delta. Idempotent and safe to send while idle (the next message then simply begins with its normal base frame). Send it at most once per detected gap rather than per dropped frame.
+Only that checkpoint, carrying the same `requestId` and subscription, can clear
+the client's fence. After it has been admitted to the writer, the host writes
+the RPC receipt behind it:
+
+```json
+{
+  "id": "recovery-42",
+  "type": "response",
+  "command": "report_stream_discontinuity",
+  "success": true,
+  "data": {
+    "subscriptionId": "subscription-def",
+    "requestId": "recovery-42",
+    "checkpointCursor": 18
+  }
+}
+```
+
+The receipt is not recovery state and does not clear the fence. Stale session
+or subscription identities fail closed. Send one request per detected gap, not
+one per dropped frame.
 
 The bundled RPC client (`RpcClientBase` and the SDK clients built on it) performs this reconstruction transparently and exposes a fully accumulated `message` plus `assistantMessageEvent.snapshot`, `seq`, and `toolState` to event listeners.
 

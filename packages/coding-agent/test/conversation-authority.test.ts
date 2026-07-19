@@ -460,10 +460,10 @@ describe("correlated conversation controls", () => {
 				async enqueueControl(value) {
 					received.push(value as Record<string, unknown>);
 				},
-				requestCheckpoint(requestId) {
+				requestCheckpoint(command) {
 					return {
 						subscriptionId: "control-subscription",
-						requestId,
+						requestId: command.id,
 						checkpointCursor: 1,
 					};
 				},

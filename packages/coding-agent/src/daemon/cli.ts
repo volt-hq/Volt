@@ -5,14 +5,21 @@ import { getAgentDir, VERSION } from "../config.ts";
 import { createDaemonClient } from "./control-client.ts";
 import type { ControlKeepAwakeStatus, ControlResponse } from "./control-protocol.ts";
 import { createIrohDaemonService } from "./iroh-service.ts";
-import { readPidfile, runVoltDaemon } from "./main.ts";
+import { type PidfileContents, readPidfile, runVoltDaemon } from "./main.ts";
 import { getDaemonPaths } from "./paths.ts";
 import { verifyPidfileProcess } from "./process-identity.ts";
 import { installDaemonService, uninstallDaemonService } from "./service-install.ts";
-import { DAEMON_SHUTDOWN_TIMEOUT_MS, ensureDaemonRunning, probeDaemon, waitForDaemonExit } from "./spawn.ts";
+import {
+	classifyPublishedDaemonGeneration,
+	DAEMON_SHUTDOWN_TIMEOUT_MS,
+	ensureDaemonRunning,
+	probeDaemon,
+	waitForDaemonExit,
+} from "./spawn.ts";
 import { inspectVoltdStateFiles, regenerateInvalidVoltdState } from "./state.ts";
 
 const STOP_TIMEOUT_MS = DAEMON_SHUTDOWN_TIMEOUT_MS; // 60s drain cap + margin
+const STOP_SIGNAL_GRACE_TIMEOUT_MS = 5_000;
 const DEFAULT_LOG_TAIL_LINES = 200;
 
 type StatusResult = ControlResponse & { type: "status_result" };
@@ -83,21 +90,86 @@ async function daemonStart(agentDir: string): Promise<void> {
 	console.error(`socket: ${result.socketPath}`);
 }
 
+export type DaemonStopSignalResult = "sent" | "refused" | "gone";
+export type DaemonStopEscalationResult = "exited" | "refused" | "timeout";
+
+/** Only ESRCH proves the captured pid disappeared; every other signal error fails closed. */
+export function classifyDaemonSignalError(error: unknown): Exclude<DaemonStopSignalResult, "sent"> {
+	return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ESRCH"
+		? "gone"
+		: "refused";
+}
+
+export interface DaemonStopEscalationOptions {
+	/** Whether shutdown has already been requested over a healthy control path. */
+	gracefulShutdownRequested: boolean;
+	gracefulTimeoutMs: number;
+	signalGraceTimeoutMs: number;
+	waitForExit(timeoutMs: number): Promise<"exited" | "timeout">;
+	sendSignal(signal: "SIGTERM" | "SIGKILL"): Promise<DaemonStopSignalResult>;
+}
+
+/** Request one graceful drain, then TERM/short grace/KILL against the same daemon identity. */
+export async function escalateDaemonExit(options: DaemonStopEscalationOptions): Promise<DaemonStopEscalationResult> {
+	if (!options.gracefulShutdownRequested) {
+		const gracefulSignalResult = await options.sendSignal("SIGTERM");
+		if (gracefulSignalResult === "refused") {
+			return "refused";
+		}
+		if (gracefulSignalResult === "gone") {
+			return "exited";
+		}
+	}
+	if ((await options.waitForExit(options.gracefulTimeoutMs)) === "exited") {
+		return "exited";
+	}
+	for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+		const signalResult = await options.sendSignal(signal);
+		if (signalResult === "refused") {
+			return "refused";
+		}
+		if (signalResult === "gone") {
+			return "exited";
+		}
+		if ((await options.waitForExit(options.signalGraceTimeoutMs)) === "exited") {
+			return "exited";
+		}
+	}
+	return "timeout";
+}
+
 /**
- * SIGTERM a pidfile-recorded daemon, but only after verifying the pid still
- * refers to the voltd that wrote the pidfile (a recycled pid must never
- * receive the signal). Returns whether SIGTERM was sent, refused, or the
- * process was already gone.
+ * Signal the daemon identity captured before shutdown began. The published
+ * generation and OS process identity are rechecked before each signal, failing
+ * closed when either cannot be established. A process signal is not atomic
+ * with these checks, so they narrow rather than eliminate the PID-reuse race.
  */
-async function signalPidfileDaemon(pidfilePath: string, context: string): Promise<"sent" | "refused" | "gone"> {
-	const pidfile = readPidfile(pidfilePath);
-	if (!pidfile) {
-		return "gone";
+async function signalPidfileDaemon(
+	pidfile: PidfileContents,
+	pidfilePath: string,
+	signal: "SIGTERM" | "SIGKILL",
+	context: string,
+): Promise<DaemonStopSignalResult> {
+	const requireCurrentGeneration = (): DaemonStopSignalResult | undefined => {
+		const generationState = classifyPublishedDaemonGeneration(pidfile, readPidfile(pidfilePath));
+		if (generationState === "retired") {
+			return "gone";
+		}
+		if (generationState === "unverifiable") {
+			console.error(`Error: voltd pidfile generation is not verifiable; not sending ${signal}.`);
+			process.exitCode = 1;
+			return "refused";
+		}
+		return undefined;
+	};
+	const initialGenerationResult = requireCurrentGeneration();
+	if (initialGenerationResult) {
+		return initialGenerationResult;
 	}
 	const verification = await verifyPidfileProcess(pidfile);
 	if (verification === "mismatch") {
 		console.error(
-			`Error: pid ${pidfile.pid} from the pidfile is not verifiable as voltd (recycled pid?); not sending SIGTERM.`,
+			`Error: pid ${pidfile.pid} from the pidfile is not verifiable as voltd (recycled pid?); not sending ${signal}.`,
 		);
 		console.error(`Remove ${pidfilePath} if it is stale.`);
 		process.exitCode = 1;
@@ -106,13 +178,25 @@ async function signalPidfileDaemon(pidfilePath: string, context: string): Promis
 	if (verification === "gone") {
 		return "gone";
 	}
+	const finalGenerationResult = requireCurrentGeneration();
+	if (finalGenerationResult) {
+		return finalGenerationResult;
+	}
 	try {
-		process.kill(pidfile.pid, "SIGTERM");
-		console.error(`${context}; sent SIGTERM to pid ${pidfile.pid}`);
+		process.kill(pidfile.pid, signal);
+		console.error(`${context}; sent ${signal} to pid ${pidfile.pid}`);
 		return "sent";
-	} catch {
-		// Process exited between verification and signal.
-		return "gone";
+	} catch (error) {
+		const result = classifyDaemonSignalError(error);
+		if (result === "gone") {
+			// Process exited between verification and signal.
+			return result;
+		}
+		console.error(
+			`Error: failed to send ${signal} to verified voltd pid ${pidfile.pid}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		process.exitCode = 1;
+		return result;
 	}
 }
 
@@ -120,82 +204,74 @@ async function daemonStop(agentDir: string): Promise<void> {
 	const paths = getDaemonPaths(agentDir);
 	const probe = await probeDaemon(agentDir);
 	const pidfile = readPidfile(paths.pidfilePath);
-	if (!probe.healthy) {
-		if (probe.state === "shutting-down") {
-			console.error("voltd is already draining; waiting for exit");
-			if (
-				(await waitForDaemonExit({
-					agentDir,
-					pidfile,
-					socketPath: probe.socketPath,
-					timeoutMs: STOP_TIMEOUT_MS,
-				})) === "exited"
-			) {
-				console.error("voltd stopped");
-				return;
-			}
-		}
-		const signalResult = await signalPidfileDaemon(paths.pidfilePath, "voltd socket unreachable");
-		if (signalResult === "sent") {
-			if ((await waitForDaemonExit({ agentDir, pidfile, timeoutMs: STOP_TIMEOUT_MS })) === "exited") {
-				console.error("voltd stopped");
-				return;
-			}
-			console.error("Error: voltd did not stop after SIGTERM");
-			process.exitCode = 1;
-			return;
-		}
-		if (signalResult === "refused") {
-			return;
-		}
+	if (!probe.healthy && probe.state === "not-running" && !pidfile) {
 		console.error("voltd is not running");
 		return;
 	}
 
-	const client = createDaemonClient({
-		socketPath: probe.socketPath,
-		client: "cli",
-		version: VERSION,
-		authToken: probe.authToken,
-		reconnect: false,
-	});
-	try {
-		await client.request({ type: "shutdown" });
-	} catch {
-		// The daemon may close the socket before the ok lands; fall through to the poll.
-	} finally {
-		await client.close();
+	if (probe.healthy) {
+		const client = createDaemonClient({
+			socketPath: probe.socketPath,
+			client: "cli",
+			version: VERSION,
+			authToken: probe.authToken,
+			reconnect: false,
+		});
+		try {
+			await client.request({ type: "shutdown" });
+		} catch {
+			// The daemon may close the socket before the ok lands; fall through to the poll.
+		} finally {
+			await client.close();
+		}
+	} else if (probe.state === "shutting-down") {
+		console.error("voltd is already draining; waiting for exit");
 	}
 
-	if (
-		(await waitForDaemonExit({
-			agentDir,
-			pid: probe.pid,
-			pidfile,
-			socketPath: probe.socketPath,
-			timeoutMs: STOP_TIMEOUT_MS,
-		})) === "exited"
-	) {
+	const target: PidfileContents | undefined =
+		probe.healthy && probe.pid !== undefined && probe.startedAtMs !== undefined
+			? {
+					pid: probe.pid,
+					version: probe.version ?? VERSION,
+					startedAtMs: probe.startedAtMs,
+					socketPath: probe.socketPath,
+					...(probe.authToken === undefined ? {} : { token: probe.authToken }),
+				}
+			: pidfile;
+	const result = await escalateDaemonExit({
+		gracefulShutdownRequested: probe.healthy || probe.state === "shutting-down",
+		gracefulTimeoutMs: STOP_TIMEOUT_MS,
+		signalGraceTimeoutMs: STOP_SIGNAL_GRACE_TIMEOUT_MS,
+		waitForExit: (timeoutMs) =>
+			waitForDaemonExit({
+				agentDir,
+				pid: target?.pid,
+				pidfile: target,
+				socketPath: probe.socketPath,
+				timeoutMs,
+			}),
+		sendSignal: async (signal) => {
+			if (!target) {
+				console.error(`Error: voltd has no verifiable process identity; not sending ${signal}.`);
+				process.exitCode = 1;
+				return "refused";
+			}
+			return signalPidfileDaemon(
+				target,
+				paths.pidfilePath,
+				signal,
+				signal === "SIGTERM" ? "voltd did not stop gracefully" : "voltd did not stop after SIGTERM",
+			);
+		},
+	});
+	if (result === "exited") {
 		console.error("voltd stopped");
 		return;
 	}
-	const signalResult = await signalPidfileDaemon(paths.pidfilePath, "voltd did not stop over the control socket");
-	if (signalResult === "sent") {
-		if (
-			(await waitForDaemonExit({ agentDir, pidfile, socketPath: probe.socketPath, timeoutMs: STOP_TIMEOUT_MS })) ===
-			"exited"
-		) {
-			console.error("voltd stopped");
-			return;
-		}
-		console.error("Error: voltd did not stop after SIGTERM");
-		process.exitCode = 1;
+	if (result === "refused") {
 		return;
 	}
-	if (signalResult === "refused") {
-		return;
-	}
-	console.error("Error: voltd did not stop within the timeout");
+	console.error("Error: voltd did not stop after SIGKILL");
 	process.exitCode = 1;
 }
 
@@ -480,7 +556,7 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 				return true;
 			}
 			const code = await runVoltDaemon({ agentDir, foreground: true }, [createIrohDaemonService()]);
-			// The run loop resolves only after shutdown() has awaited all cleanup, but
+			// The run loop resolves after durable quiescing and bounded native disposal, but
 			// the native iroh handle can keep the event loop alive afterwards (notably
 			// on Windows), leaving a zombie that clients still probe as "draining".
 			// Exit deterministically now that teardown is complete.
