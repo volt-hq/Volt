@@ -450,11 +450,11 @@ function projectRemoteAssistantParts(
 		if (!isRemoteRecord(part)) {
 			continue;
 		}
+		// Empty canonical blocks still own an ordered content index. Preserve them
+		// so transcript commits can claim the exact live assistant block shape.
 		if (part.type === "text" && typeof part.text === "string") {
 			const sanitized = sanitizeRemoteTranscriptText(part.text, authorization, "preserve");
-			if (sanitized.text.length > 0) {
-				parts.push({ type: "text", text: sanitized.text, truncated: sanitized.truncated });
-			}
+			parts.push({ type: "text", text: sanitized.text, truncated: sanitized.truncated });
 			continue;
 		}
 		if (part.type === "thinking" && part.redacted === true) {
@@ -463,9 +463,7 @@ function projectRemoteAssistantParts(
 		}
 		if (part.type === "thinking" && typeof part.thinking === "string") {
 			const sanitized = sanitizeRemoteTranscriptText(part.thinking, authorization, "preserve");
-			if (sanitized.text.length > 0) {
-				parts.push({ type: "thinking", text: sanitized.text, truncated: sanitized.truncated });
-			}
+			parts.push({ type: "thinking", text: sanitized.text, truncated: sanitized.truncated });
 		}
 	}
 	return parts;

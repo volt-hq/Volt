@@ -418,6 +418,56 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		expect(JSON.stringify(response)).not.toContain("/tmp/ws");
 	});
 
+	it.each(["stop", "aborted"] as const)(
+		"preserves empty canonical assistant parts for %s terminal entries",
+		(stopReason) => {
+			const entry = {
+				type: "message",
+				id: `assistant-empty-parts-${stopReason}`,
+				ordinal: 8,
+				timestamp: "2026-07-19T00:00:00.000Z",
+				message: {
+					role: "assistant",
+					content: [
+						{
+							type: "thinking",
+							thinking: "",
+							redacted: false,
+							thinkingSignature: "opaque-signature",
+						},
+						{ type: "text", text: "visible" },
+						{ type: "text", text: "" },
+					],
+					stopReason,
+				},
+			} as unknown as SessionEntry;
+			const runtime: ConversationCommandRuntime = {
+				session: { sessionId: "s-empty-parts", sessionManager: createSessionManager([entry]) },
+				listSessions: async () => [],
+			};
+
+			const live = createRemoteConversationTranscriptEntry(entry, createAuthorization(), runtime);
+			const bootstrap = createRemoteConversationTranscriptPage(createAuthorization(), runtime);
+
+			expect(live).toEqual({
+				entryId: entry.id,
+				ordinal: 8,
+				createdAt: "2026-07-19T00:00:00.000Z",
+				role: "assistant",
+				text: "visible",
+				truncated: false,
+				parts: [
+					{ type: "thinking", text: "", truncated: false },
+					{ type: "text", text: "visible", truncated: false },
+					{ type: "text", text: "", truncated: false },
+				],
+				stopReason,
+			});
+			expect(bootstrap?.items).toEqual([live]);
+			expect(JSON.stringify(live)).not.toContain("opaque-signature");
+		},
+	);
+
 	it("persists and echoes client message identity across sanitized live and bootstrap projections", () => {
 		const root = mkdtempSync(join(tmpdir(), "volt-client-message-id-"));
 		const workspacePath = join(root, "workspace");
