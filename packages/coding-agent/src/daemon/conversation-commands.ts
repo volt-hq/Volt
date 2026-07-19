@@ -492,7 +492,8 @@ export function projectRemoteTranscriptEntry(
 		return undefined;
 	}
 	if (entry.type === "compaction") {
-		return createRemoteTranscriptItem(entry, "system", entry.summary, authorization);
+		const item = createRemoteTranscriptItem(entry, "system", entry.summary, authorization);
+		return item.text.length > 0 ? item : undefined;
 	}
 	if (entry.type === "custom_message") {
 		if (entry.customType !== "review" || entry.display !== true) {

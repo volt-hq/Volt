@@ -499,6 +499,30 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		expect(bootstrap?.items).toEqual([live]);
 	});
 
+	it("omits compaction entries whose sanitized system text is empty", () => {
+		const emptyCompaction = {
+			type: "compaction",
+			id: "empty-compaction",
+			ordinal: 1,
+			parentId: null,
+			timestamp: "2026-07-18T00:00:00.000Z",
+			summary: "\u0000\u0007",
+			firstKeptEntryId: "kept-entry",
+			tokensBefore: 1,
+		} as unknown as SessionEntry;
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-empty-compaction", sessionManager: createSessionManager([emptyCompaction]) },
+			listSessions: async () => [],
+		};
+		const authorization = createAuthorization();
+
+		expect(createRemoteConversationTranscriptEntry(emptyCompaction, authorization, runtime)).toBeUndefined();
+		expect(createRemoteConversationTranscriptPage(authorization, runtime)).toMatchObject({
+			head: { entryId: "empty-compaction", ordinal: 1 },
+			items: [],
+		});
+	});
+
 	it("bounds large Unicode bootstrap pages by serialized UTF-8 bytes without pagination gaps", () => {
 		const branch = Array.from({ length: 120 }, (_, index) => ({
 			type: "message",
