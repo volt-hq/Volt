@@ -113,15 +113,15 @@ export class ViewerFeedRegistry {
 	}
 
 	private projectDeliverableEvents(feed: ViewerFeed, event: unknown): BufferedViewerEvent[] {
-		let frames: readonly unknown[];
-		if (typeof event === "object" && event !== null) {
-			const batch = feed.projector.push(event);
-			this.reportProjectionDiagnostics(feed, batch.diagnostics);
-			frames = batch.frames;
-		} else {
-			frames = [event];
-		}
 		try {
+			let frames: readonly unknown[];
+			if (typeof event === "object" && event !== null) {
+				const batch = feed.projector.push(event);
+				this.reportProjectionDiagnostics(feed, batch.diagnostics);
+				frames = batch.frames;
+			} else {
+				frames = [event];
+			}
 			return frames.map((frame) => {
 				const serialized = JSON.stringify(frame);
 				if (serialized === undefined) {

@@ -189,6 +189,7 @@ export type WorktreeError =
 export type WorktreeGitRunner = (
 	args: string[],
 	cwd: string,
+	options?: { signal?: AbortSignal },
 ) => Promise<{ ok: boolean; code: number | null; stdout: string; stderr: string }>;
 
 export interface WorktreeManagerOptions {
@@ -241,9 +242,13 @@ function generateWorktreeIdSlug(): string {
 
 /** Default runner: no shell, argv only, captured stdio. */
 export function createDefaultWorktreeGitRunner(): WorktreeGitRunner {
-	return async (args, cwd) => {
+	return async (args, cwd, options = {}) => {
 		try {
-			const child = spawnProcess("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+			const child = spawnProcess("git", args, {
+				cwd,
+				stdio: ["ignore", "pipe", "pipe"],
+				...(options.signal === undefined ? {} : { signal: options.signal }),
+			});
 			let stdout = "";
 			let stderr = "";
 			child.stdout?.setEncoding("utf8");
@@ -809,18 +814,46 @@ export class WorktreeManager {
 	 * records without checkouts, quarantines unrecognized checkout directories
 	 * (rename, never delete), and runs `git worktree prune` in each known source checkout.
 	 */
-	async prune(workspace: IrohRemoteWorkspace): Promise<{ removedRecords: string[]; orphanCheckouts: string[] }> {
+	async prune(
+		workspace: IrohRemoteWorkspace,
+		options: { signal?: AbortSignal } = {},
+	): Promise<{ removedRecords: string[]; orphanCheckouts: string[] }> {
+		const { signal } = options;
 		const records = await this.stateManager.listWorktrees(workspace.name);
 		const removedRecords: string[] = [];
+		const orphanCheckouts: string[] = [];
+		const finish = async (audit: boolean): Promise<{ removedRecords: string[]; orphanCheckouts: string[] }> => {
+			if (removedRecords.length > 0) {
+				await this.flushState?.();
+			}
+			if (audit) {
+				await this.logAudit({
+					type: "worktree_pruned",
+					workspace: workspace.name,
+					success: true,
+					details: { removedRecords, orphanCheckouts },
+				});
+			}
+			return { removedRecords, orphanCheckouts };
+		};
+		if (signal?.aborted) {
+			return finish(false);
+		}
 		const sourceRootPaths = new Set<string>();
 		for (const record of records) {
 			const sourceRootPath = await this.resolveRecordSourceRootPath(workspace, record);
+			if (signal?.aborted) {
+				return finish(false);
+			}
 			if (sourceRootPath !== undefined) {
 				sourceRootPaths.add(sourceRootPath);
 			}
 			if (!existsSync(record.path)) {
 				await this.stateManager.removeWorktree(workspace.name, record.id);
 				removedRecords.push(record.id);
+				if (signal?.aborted) {
+					return finish(false);
+				}
 			}
 		}
 		const parentSourceRootPath = await this.resolveRecordSourceRootPath(workspace, {
@@ -831,14 +864,19 @@ export class WorktreeManager {
 			createdAt: 0,
 			sessionIds: [],
 		});
+		if (signal?.aborted) {
+			return finish(false);
+		}
 		if (parentSourceRootPath !== undefined) {
 			sourceRootPaths.add(parentSourceRootPath);
 		}
-		const orphanCheckouts: string[] = [];
 		const workspaceDir = getWorkspaceWorktreesDir(this.agentDir, workspace.path);
 		const recordedPaths = new Set(records.map((record) => resolve(record.path)));
 		if (existsSync(workspaceDir)) {
 			for (const entry of await readdir(workspaceDir, { withFileTypes: true })) {
+				if (signal?.aborted) {
+					return finish(false);
+				}
 				if (!entry.isDirectory() || entry.name.includes(".orphan-")) {
 					continue;
 				}
@@ -856,18 +894,12 @@ export class WorktreeManager {
 			}
 		}
 		for (const sourceRootPath of sourceRootPaths) {
-			await this.runGit(["worktree", "prune"], sourceRootPath).catch(() => undefined);
+			if (signal?.aborted) {
+				return finish(false);
+			}
+			await this.runGit(["worktree", "prune"], sourceRootPath, { signal }).catch(() => undefined);
 		}
-		if (removedRecords.length > 0) {
-			await this.flushState?.();
-		}
-		await this.logAudit({
-			type: "worktree_pruned",
-			workspace: workspace.name,
-			success: true,
-			details: { removedRecords, orphanCheckouts },
-		});
-		return { removedRecords, orphanCheckouts };
+		return finish(signal?.aborted !== true);
 	}
 
 	/**

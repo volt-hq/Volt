@@ -293,6 +293,8 @@ export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
+	/** Stable identity minted by a remote client for optimistic transcript reconciliation. */
+	clientMessageId?: string;
 	timestamp: number; // Unix timestamp in milliseconds
 }
 

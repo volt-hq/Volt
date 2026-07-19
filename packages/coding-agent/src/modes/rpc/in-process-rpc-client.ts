@@ -59,7 +59,10 @@ export class InProcessRpcClient extends RpcTransportClient {
 			transport: pair.server,
 			disposeRuntimeOnClose: options.disposeRuntimeOnClose,
 			exitProcess: false,
-			onReady: resolveReady,
+			onReady: () => {
+				void options.runtimeHost.startRecoveredClientInputs().catch(() => undefined);
+				resolveReady();
+			},
 		});
 		void this.modeClosed.catch((error: unknown) => {
 			if (!readySettled) {

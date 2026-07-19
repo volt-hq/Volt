@@ -329,12 +329,17 @@ describe("AgentSession queue characterization", () => {
 		]);
 
 		await waitForToolStart;
-		await harness.session.steer("steer 1");
-		await harness.session.steer("steer 2");
+		await harness.session.steer("steer 1", undefined, "client-steer-1");
+		await harness.session.steer("steer 2", undefined, "client-steer-2");
 		releaseToolExecution();
 		await promptPromise;
 
 		expect(getUserTexts(harness)).toEqual(["start", "steer 1", "steer 2"]);
+		expect(
+			harness.session.messages
+				.filter((message) => message.role === "user")
+				.map((message) => message.clientMessageId),
+		).toEqual([undefined, "client-steer-1", "client-steer-2"]);
 		expect(getAssistantTexts(harness)).toEqual(["", "handled steer 1", "handled steer 2"]);
 	});
 
@@ -351,12 +356,17 @@ describe("AgentSession queue characterization", () => {
 		]);
 
 		await waitForToolStart;
-		await harness.session.followUp("follow-up 1");
-		await harness.session.followUp("follow-up 2");
+		await harness.session.followUp("follow-up 1", undefined, "client-follow-up-1");
+		await harness.session.followUp("follow-up 2", undefined, "client-follow-up-2");
 		releaseToolExecution();
 		await promptPromise;
 
 		expect(getUserTexts(harness)).toEqual(["start", "follow-up 1", "follow-up 2"]);
+		expect(
+			harness.session.messages
+				.filter((message) => message.role === "user")
+				.map((message) => message.clientMessageId),
+		).toEqual([undefined, "client-follow-up-1", "client-follow-up-2"]);
 		expect(getAssistantTexts(harness)).toEqual([
 			"",
 			"original turn complete",

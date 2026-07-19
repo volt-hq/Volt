@@ -5,6 +5,21 @@ import {
 	parseStreamingJson,
 	type ToolCall,
 } from "@hansjm10/volt-ai";
+import type { AgentSessionQueuedMessage } from "../agent-session.ts";
+import {
+	assertConversationProjectionAssistantSnapshotWithinLimits,
+	assertConversationProjectionAssistantToolStateWithinLimits,
+	assertConversationProjectionCumulativeContentWithinLimits,
+	assertConversationProjectionToolArgumentWithinLimits,
+	assertConversationProjectionToolCallWithinLimits,
+	type ConversationProjectionAssistantSnapshotMetrics,
+	ConversationProjectionLimitError,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CONTENT_BLOCKS,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_TOOL_CALL_SERIALIZED_BYTES,
+	measureConversationProjectionUtf8BytesWithin,
+} from "./conversation-projection-limits.ts";
+import { projectRpcQueueUpdate } from "./session-state.ts";
 
 export type ProjectionPhase = "idle" | "needs_snapshot" | "synchronized" | "desynchronized" | "terminal";
 
@@ -159,6 +174,7 @@ function projectMessageStart(
 	message: AssistantMessage,
 	config: ProjectionConfig,
 ): ProjectionResult {
+	const snapshot = prepareProjectionSnapshot(message, config);
 	const seeded = seedProjection(message, [], config);
 	const epoch = state.epoch + 1;
 	const nextState = freezeProjectionState({
@@ -178,7 +194,7 @@ function projectMessageStart(
 			Object.freeze({
 				type: "message_start",
 				stream: Object.freeze({ epoch, seq: 0 }),
-				message: sanitizeSnapshot(message, config),
+				message: snapshot,
 			}) as ProjectedMessageStartFrame,
 		],
 		diagnostics,
@@ -190,6 +206,7 @@ function projectMessageEnd(
 	message: AssistantMessage,
 	config: ProjectionConfig,
 ): ProjectionResult {
+	const snapshot = prepareProjectionSnapshot(message, config);
 	const pos = Object.freeze({ epoch: state.epoch, seq: Math.max(state.lastSeq, 0) });
 	return {
 		state: freezeProjectionState({
@@ -203,7 +220,7 @@ function projectMessageEnd(
 			Object.freeze({
 				type: "message_end",
 				stream: pos,
-				message: sanitizeSnapshot(message, config),
+				message: snapshot,
 			}) as ProjectedMessageEndFrame,
 		],
 		diagnostics: [],
@@ -222,6 +239,7 @@ function projectEvent(
 			diagnostics: [diagnostic(state, "non_update_event", `Dropped ${event.type} on message_update input`)],
 		};
 	}
+	assertAssistantEventWithinLimits(event);
 
 	if (state.phase === "idle" || state.phase === "needs_snapshot") {
 		return emitSnapshot(state, event, config, []);
@@ -282,7 +300,10 @@ function projectIncrementalEvent(
 			if (!accumulated.startsWith(previous)) {
 				return emitSnapshot(state, event, config, []);
 			}
-			if (!config.sanitizer && accumulated !== previous + event.delta) {
+			if (
+				!config.sanitizer &&
+				(accumulated.length !== previous.length + event.delta.length || !accumulated.endsWith(event.delta))
+			) {
 				return emitSnapshot(state, event, config, []);
 			}
 			emitted.set(contentIndex, accumulated);
@@ -323,7 +344,11 @@ function projectIncrementalEvent(
 			if (!isToolStateShippable(event.snapshot, toolState, config)) {
 				return emitSnapshot(state, event, config, []);
 			}
-			if (toolState.argsText !== previous + event.argsTextDelta) {
+			if (
+				toolState.argsText.length !== previous.length + event.argsTextDelta.length ||
+				!toolState.argsText.startsWith(previous) ||
+				!toolState.argsText.endsWith(event.argsTextDelta)
+			) {
 				return emitSnapshot(state, event, config, []);
 			}
 			emitted.set(contentIndex, toolState.argsText);
@@ -372,13 +397,14 @@ function emitSnapshot(
 	config: ProjectionConfig,
 	diagnostics: readonly ProjectionDiagnostic[],
 ): ProjectionResult {
+	const snapshot = prepareProjectionSnapshot(event.snapshot, config);
 	const seeded = seedProjection(event.snapshot, event.toolState, config);
 	const epoch = state.epoch + 1;
 	const frame: ProjectedMessageUpdateFrame = {
 		type: "message_update",
 		stream: Object.freeze({ epoch, seq: event.seq }),
 		assistantMessageEvent: sanitizeSlimEvent(event, config),
-		message: sanitizeSnapshot(event.snapshot, config),
+		message: snapshot,
 		...(seeded.shippableToolState.length === 0 ? {} : { toolState: seeded.shippableToolState }),
 	};
 	return {
@@ -400,11 +426,96 @@ interface SeededProjection {
 	shippableToolState: readonly ActiveToolCallState[];
 }
 
+function prepareProjectionSnapshot(message: AssistantMessage, config: ProjectionConfig): AssistantMessage {
+	const snapshot = sanitizeSnapshot(message, config);
+	assertConversationProjectionAssistantSnapshotWithinLimits(snapshot);
+	return snapshot;
+}
+
+function assertAssistantEventPayloadWithinLimits(event: Record<string, unknown>): void {
+	const contentIndex =
+		typeof event.contentIndex === "number" && Number.isSafeInteger(event.contentIndex) ? event.contentIndex : 0;
+	switch (event.type) {
+		case "text_delta":
+		case "thinking_delta":
+			if (
+				typeof event.delta === "string" &&
+				measureConversationProjectionUtf8BytesWithin(
+					event.delta,
+					DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
+				) === null
+			) {
+				throw new ConversationProjectionLimitError(
+					"assistant_cumulative_content_bytes",
+					`Assistant projection delta exceeded its ${DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES}-byte content limit`,
+				);
+			}
+			return;
+		case "text_end":
+		case "thinking_end":
+			if (
+				typeof event.content === "string" &&
+				measureConversationProjectionUtf8BytesWithin(
+					event.content,
+					DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
+				) === null
+			) {
+				throw new ConversationProjectionLimitError(
+					"assistant_cumulative_content_bytes",
+					`Assistant projection block end exceeded its ${DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES}-byte content limit`,
+				);
+			}
+			return;
+		case "toolcall_delta":
+			if (typeof event.argsTextDelta === "string") {
+				assertConversationProjectionToolArgumentWithinLimits(event.argsTextDelta, contentIndex);
+			}
+			return;
+		case "toolcall_end":
+			if (event.toolCall !== undefined) {
+				assertConversationProjectionToolCallWithinLimits(event.toolCall, contentIndex);
+			}
+			return;
+	}
+}
+
+function assertAssistantEventWithinLimits(event: StreamUpdateEvent): void {
+	const metrics = assertConversationProjectionAssistantSnapshotWithinLimits(event.snapshot, {
+		enforceSerializedSnapshot: false,
+	});
+	assertConversationProjectionAssistantToolStateWithinLimits(event.snapshot, event.toolState, metrics);
+	assertAssistantEventPayloadWithinLimits(event as unknown as Record<string, unknown>);
+}
+
+/** Validate cached source truth even when no subscriber projector exists yet. */
+export function assertConversationProjectionSourceAssistantEventWithinLimits(event: object): void {
+	if (!isRecord(event)) return;
+	if ((event.type === "message_start" || event.type === "message_end") && isAssistantMessage(event.message)) {
+		assertConversationProjectionAssistantSnapshotWithinLimits(event.message, { enforceSerializedSnapshot: false });
+		return;
+	}
+	if (
+		event.type === "message_update" &&
+		isAssistantMessage(event.message) &&
+		isAssistantMessageEvent(event.assistantMessageEvent) &&
+		event.assistantMessageEvent.type !== "start" &&
+		event.assistantMessageEvent.type !== "done" &&
+		event.assistantMessageEvent.type !== "error"
+	) {
+		assertConversationProjectionAssistantSnapshotWithinLimits(event.message, { enforceSerializedSnapshot: false });
+		assertAssistantEventWithinLimits(event.assistantMessageEvent);
+	}
+}
+
 function seedProjection(
 	message: AssistantMessage,
 	toolState: readonly ActiveToolCallState[],
 	config: ProjectionConfig,
 ): SeededProjection {
+	const metrics = assertConversationProjectionAssistantSnapshotWithinLimits(message, {
+		enforceSerializedSnapshot: false,
+	});
+	assertConversationProjectionAssistantToolStateWithinLimits(message, toolState, metrics);
 	const emitted = new Map<number, string>();
 	const replaceOnly = new Set<number>();
 	for (const [index, block] of message.content.entries()) {
@@ -468,7 +579,9 @@ function sanitizeSlimEvent(
 	const { seq: _seq, snapshot: _snapshot, toolState: _toolState, ...rawSlimEvent } = record;
 	const sanitized = config.sanitizer ? config.sanitizer.sanitizeValue(rawSlimEvent) : rawSlimEvent;
 	const sanitizedRecord = isRecord(sanitized) ? sanitized : rawSlimEvent;
-	return Object.freeze({ ...sanitizedRecord, ...overrides }) as SlimAssistantEvent;
+	const slimEvent = { ...sanitizedRecord, ...overrides };
+	assertAssistantEventPayloadWithinLimits(slimEvent);
+	return Object.freeze(slimEvent) as SlimAssistantEvent;
 }
 
 function getBlockText(message: AssistantMessage, contentIndex: number, kind: "text" | "thinking"): string | undefined {
@@ -523,6 +636,19 @@ export class StreamProjector {
 			return { frames: [event], diagnostics: reset.diagnostics };
 		}
 
+		if (event.type === "queue_update" && Array.isArray(event.steering) && Array.isArray(event.followUp)) {
+			return {
+				frames: [
+					projectRpcQueueUpdate({
+						type: "queue_update",
+						steering: event.steering as AgentSessionQueuedMessage[],
+						followUp: event.followUp as AgentSessionQueuedMessage[],
+					}),
+				],
+				diagnostics: [],
+			};
+		}
+
 		if (event.type === "message_start" && isAssistantMessage(event.message)) {
 			return this.transition({ kind: "message_start", message: event.message });
 		}
@@ -567,6 +693,8 @@ interface DecoderStreamState {
 	lastSeq: number;
 	message?: AssistantMessage;
 	argsText: Map<number, string>;
+	contentBytes: number[];
+	cumulativeContentBytes: number;
 }
 
 export interface StreamProjectionDecoderOptions {
@@ -574,7 +702,7 @@ export interface StreamProjectionDecoderOptions {
 }
 
 const SESSION_STREAM_KEY = "session";
-const MAX_CONTENT_INDEX = 100_000;
+const MAX_CONTENT_INDEX = DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CONTENT_BLOCKS - 1;
 
 /** Mirrored client projection. Malformed delta frames diagnose and drop. */
 export class StreamProjectionDecoder {
@@ -613,6 +741,16 @@ export class StreamProjectionDecoder {
 			return event;
 		}
 		if (event.type === "message_start" && isAssistantMessage(event.message) && isStreamPos(event.stream)) {
+			const metrics = getAssistantSnapshotMetrics(event.message);
+			if (!metrics) {
+				this.desynchronize(
+					key,
+					this.streams.get(key) ?? createDecoderState(),
+					"assistant_projection_limit",
+					"Dropped an oversized assistant snapshot",
+				);
+				return undefined;
+			}
 			const message = cloneAndFreeze(event.message);
 			this.streams.set(key, {
 				phase: "synchronized",
@@ -620,10 +758,21 @@ export class StreamProjectionDecoder {
 				lastSeq: event.stream.seq,
 				message,
 				argsText: new Map(),
+				contentBytes: [...metrics.contentBytes],
+				cumulativeContentBytes: metrics.cumulativeContentBytes,
 			});
 			return { ...event, message };
 		}
 		if (event.type === "message_end" && isAssistantMessage(event.message) && isRecord(event.stream)) {
+			if (!getAssistantSnapshotMetrics(event.message)) {
+				this.desynchronize(
+					key,
+					this.streams.get(key) ?? createDecoderState(),
+					"assistant_projection_limit",
+					"Dropped an oversized final assistant snapshot",
+				);
+				return undefined;
+			}
 			const message = cloneAndFreeze(event.message);
 			this.streams.set(key, createDecoderState());
 			return { ...event, message };
@@ -638,20 +787,41 @@ export class StreamProjectionDecoder {
 		return this.applyDelta(event, key);
 	}
 
-	private adoptSnapshot(event: Record<string, unknown>, key: string): Record<string, unknown> {
-		const message = cloneAndFreeze(event.message as AssistantMessage);
+	private adoptSnapshot(event: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+		const sourceMessage = event.message as AssistantMessage;
+		const metrics = getAssistantSnapshotMetrics(sourceMessage);
+		if (!metrics) {
+			this.desynchronize(
+				key,
+				this.streams.get(key) ?? createDecoderState(),
+				"assistant_projection_limit",
+				"Dropped an oversized assistant recovery snapshot",
+			);
+			return undefined;
+		}
+		const seeded = seedDecoderToolState(sourceMessage, event.toolState, metrics);
+		if (!seeded) {
+			this.desynchronize(
+				key,
+				this.streams.get(key) ?? createDecoderState(),
+				"assistant_projection_limit",
+				"Dropped oversized assistant tool state",
+			);
+			return undefined;
+		}
+		const message = cloneAndFreeze(sourceMessage);
 		const pos = isStreamPos(event.stream) ? event.stream : { epoch: 0, seq: 0 };
 		if (!isStreamPos(event.stream)) {
 			this.report("invalid_snapshot_position", "Adopted a snapshot with an invalid position", "desynchronized");
 		}
-		const toolState = parseToolState(event.toolState);
-		const argsText = new Map(toolState.map((entry) => [entry.contentIndex, entry.argsText]));
 		this.streams.set(key, {
 			phase: isStreamPos(event.stream) ? "synchronized" : "desynchronized",
 			epoch: pos.epoch,
 			lastSeq: pos.seq,
 			message,
-			argsText,
+			argsText: seeded.argsText,
+			contentBytes: seeded.contentBytes,
+			cumulativeContentBytes: seeded.cumulativeContentBytes,
 		});
 		return {
 			...event,
@@ -660,7 +830,7 @@ export class StreamProjectionDecoder {
 				...(event.assistantMessageEvent as Record<string, unknown>),
 				seq: pos.seq,
 				snapshot: message,
-				toolState,
+				toolState: seeded.toolState,
 			}),
 		};
 	}
@@ -688,6 +858,8 @@ export class StreamProjectionDecoder {
 		const applied = applySlimEvent(
 			state.message,
 			state.argsText,
+			state.contentBytes,
+			state.cumulativeContentBytes,
 			event.assistantMessageEvent as Record<string, unknown>,
 		);
 		if (!applied) {
@@ -701,6 +873,8 @@ export class StreamProjectionDecoder {
 			lastSeq: pos.seq,
 			message: applied.message,
 			argsText: applied.argsText,
+			contentBytes: applied.contentBytes,
+			cumulativeContentBytes: applied.cumulativeContentBytes,
 		});
 		return {
 			...event,
@@ -738,11 +912,15 @@ export class StreamProjectionDecoder {
 interface AppliedDelta {
 	message: AssistantMessage;
 	argsText: Map<number, string>;
+	contentBytes: number[];
+	cumulativeContentBytes: number;
 }
 
 function applySlimEvent(
 	message: AssistantMessage,
 	previousArgsText: Map<number, string>,
+	previousContentBytes: readonly number[],
+	previousCumulativeContentBytes: number,
 	event: Record<string, unknown>,
 ): AppliedDelta | undefined {
 	const contentIndex = event.contentIndex;
@@ -758,20 +936,53 @@ function applySlimEvent(
 
 	const content = [...message.content];
 	const argsText = new Map(previousArgsText);
+	const contentBytes = [...previousContentBytes];
+	let cumulativeContentBytes = previousCumulativeContentBytes;
+	const replaceContentBytes = (nextBytes: number): boolean => {
+		const metrics: ConversationProjectionAssistantSnapshotMetrics = {
+			contentBytes,
+			cumulativeContentBytes,
+		};
+		try {
+			assertConversationProjectionCumulativeContentWithinLimits(metrics, contentIndex, nextBytes);
+		} catch (error: unknown) {
+			if (error instanceof ConversationProjectionLimitError) return false;
+			throw error;
+		}
+		const previousBytes = contentBytes[contentIndex] ?? 0;
+		cumulativeContentBytes = cumulativeContentBytes - previousBytes + nextBytes;
+		contentBytes[contentIndex] = nextBytes;
+		return true;
+	};
 	const existing = content[contentIndex];
 	switch (event.type) {
 		case "text_start":
 			if (contentIndex !== content.length) return undefined;
 			content[contentIndex] = Object.freeze({ type: "text", text: "" });
+			contentBytes[contentIndex] = 0;
 			break;
-		case "text_delta":
+		case "text_delta": {
 			if (existing?.type !== "text" || typeof event.delta !== "string") return undefined;
+			const deltaBytes = measureConversationProjectionUtf8BytesWithin(
+				event.delta,
+				DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
+			);
+			if (deltaBytes === null) return undefined;
+			const nextBytes = (contentBytes[contentIndex] ?? 0) + deltaBytes;
+			if (!Number.isSafeInteger(nextBytes) || !replaceContentBytes(nextBytes)) return undefined;
 			content[contentIndex] = Object.freeze({ ...existing, text: existing.text + event.delta });
 			break;
-		case "text_end":
+		}
+		case "text_end": {
 			if (existing?.type !== "text" || typeof event.content !== "string") return undefined;
+			const nextBytes = measureConversationProjectionUtf8BytesWithin(
+				event.content,
+				DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
+			);
+			if (nextBytes === null || !replaceContentBytes(nextBytes)) return undefined;
 			content[contentIndex] = Object.freeze({ ...existing, text: event.content });
 			break;
+		}
 		case "thinking_start":
 			if (contentIndex !== content.length) return undefined;
 			content[contentIndex] = Object.freeze({
@@ -779,19 +990,34 @@ function applySlimEvent(
 				thinking: "",
 				...(typeof event.redacted === "boolean" ? { redacted: event.redacted } : {}),
 			});
+			contentBytes[contentIndex] = 0;
 			break;
-		case "thinking_delta":
+		case "thinking_delta": {
 			if (existing?.type !== "thinking" || typeof event.delta !== "string") return undefined;
+			const deltaBytes = measureConversationProjectionUtf8BytesWithin(
+				event.delta,
+				DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
+			);
+			if (deltaBytes === null) return undefined;
+			const nextBytes = (contentBytes[contentIndex] ?? 0) + deltaBytes;
+			if (!Number.isSafeInteger(nextBytes) || !replaceContentBytes(nextBytes)) return undefined;
 			content[contentIndex] = Object.freeze({ ...existing, thinking: existing.thinking + event.delta });
 			break;
-		case "thinking_end":
+		}
+		case "thinking_end": {
 			if (existing?.type !== "thinking" || typeof event.content !== "string") return undefined;
+			const nextBytes = measureConversationProjectionUtf8BytesWithin(
+				event.content,
+				DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
+			);
+			if (nextBytes === null || !replaceContentBytes(nextBytes)) return undefined;
 			content[contentIndex] = Object.freeze({
 				...existing,
 				thinking: event.content,
 				...(typeof event.redacted === "boolean" ? { redacted: event.redacted } : {}),
 			});
 			break;
+		}
 		case "toolcall_start": {
 			if (contentIndex !== content.length) return undefined;
 			const argumentsValue = Object.freeze({});
@@ -802,12 +1028,27 @@ function applySlimEvent(
 				arguments: argumentsValue,
 			});
 			argsText.set(contentIndex, "");
+			contentBytes[contentIndex] = 0;
 			break;
 		}
 		case "toolcall_delta": {
 			if (existing?.type !== "toolCall" || typeof event.argsTextDelta !== "string") return undefined;
 			const previous = argsText.get(contentIndex);
 			if (previous === undefined) return undefined;
+			const previousBytes = contentBytes[contentIndex] ?? 0;
+			const deltaBytes = measureConversationProjectionUtf8BytesWithin(
+				event.argsTextDelta,
+				DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_TOOL_CALL_SERIALIZED_BYTES,
+			);
+			if (deltaBytes === null) return undefined;
+			const nextBytes = previousBytes + deltaBytes;
+			if (
+				!Number.isSafeInteger(nextBytes) ||
+				nextBytes > DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_TOOL_CALL_SERIALIZED_BYTES ||
+				!replaceContentBytes(nextBytes)
+			) {
+				return undefined;
+			}
 			const next = previous + event.argsTextDelta;
 			argsText.set(contentIndex, next);
 			content[contentIndex] = Object.freeze({
@@ -818,11 +1059,20 @@ function applySlimEvent(
 			});
 			break;
 		}
-		case "toolcall_end":
+		case "toolcall_end": {
 			if (existing?.type !== "toolCall" || !isToolCall(event.toolCall)) return undefined;
+			let nextBytes: number;
+			try {
+				nextBytes = assertConversationProjectionToolCallWithinLimits(event.toolCall, contentIndex);
+			} catch (error: unknown) {
+				if (error instanceof ConversationProjectionLimitError) return undefined;
+				throw error;
+			}
+			if (!replaceContentBytes(nextBytes)) return undefined;
 			content[contentIndex] = cloneAndFreeze(event.toolCall);
 			argsText.delete(contentIndex);
 			break;
+		}
 		default:
 			return undefined;
 	}
@@ -831,16 +1081,55 @@ function applySlimEvent(
 	return {
 		message: Object.freeze({ ...message, content }),
 		argsText,
+		contentBytes,
+		cumulativeContentBytes,
 	};
 }
 
 function createDecoderState(): DecoderStreamState {
-	return { phase: "idle", epoch: 0, lastSeq: -1, argsText: new Map() };
+	return {
+		phase: "idle",
+		epoch: 0,
+		lastSeq: -1,
+		argsText: new Map(),
+		contentBytes: [],
+		cumulativeContentBytes: 0,
+	};
 }
 
-function parseToolState(value: unknown): readonly ActiveToolCallState[] {
+function getAssistantSnapshotMetrics(
+	message: AssistantMessage,
+): ConversationProjectionAssistantSnapshotMetrics | undefined {
+	try {
+		return assertConversationProjectionAssistantSnapshotWithinLimits(message);
+	} catch (error: unknown) {
+		if (error instanceof ConversationProjectionLimitError) return undefined;
+		throw error;
+	}
+}
+
+function seedDecoderToolState(
+	message: AssistantMessage,
+	value: unknown,
+	metrics: ConversationProjectionAssistantSnapshotMetrics,
+):
+	| {
+			toolState: readonly ActiveToolCallState[];
+			argsText: Map<number, string>;
+			contentBytes: number[];
+			cumulativeContentBytes: number;
+	  }
+	| undefined {
+	const contentBytes = [...metrics.contentBytes];
+	let cumulativeContentBytes = metrics.cumulativeContentBytes;
+	const argsText = new Map<number, string>();
 	if (!Array.isArray(value)) {
-		return Object.freeze([]);
+		return {
+			toolState: Object.freeze([]),
+			argsText,
+			contentBytes,
+			cumulativeContentBytes,
+		};
 	}
 	const entries: ActiveToolCallState[] = [];
 	for (const entry of value) {
@@ -852,10 +1141,33 @@ function parseToolState(value: unknown): readonly ActiveToolCallState[] {
 			entry.contentIndex <= MAX_CONTENT_INDEX &&
 			typeof entry.argsText === "string"
 		) {
+			let nextBytes: number;
+			try {
+				nextBytes = assertConversationProjectionToolArgumentWithinLimits(entry.argsText, entry.contentIndex);
+				if (message.content[entry.contentIndex]?.type === "toolCall") {
+					assertConversationProjectionCumulativeContentWithinLimits(
+						{ contentBytes, cumulativeContentBytes },
+						entry.contentIndex,
+						nextBytes,
+					);
+					const previousBytes = contentBytes[entry.contentIndex] ?? 0;
+					cumulativeContentBytes = cumulativeContentBytes - previousBytes + nextBytes;
+					contentBytes[entry.contentIndex] = nextBytes;
+				}
+			} catch (error: unknown) {
+				if (error instanceof ConversationProjectionLimitError) return undefined;
+				throw error;
+			}
 			entries.push(Object.freeze({ contentIndex: entry.contentIndex, argsText: entry.argsText }));
+			argsText.set(entry.contentIndex, entry.argsText);
 		}
 	}
-	return Object.freeze(entries);
+	return {
+		toolState: Object.freeze(entries),
+		argsText,
+		contentBytes,
+		cumulativeContentBytes,
+	};
 }
 
 function freezeToolState(argsText: ReadonlyMap<number, string>): readonly ActiveToolCallState[] {

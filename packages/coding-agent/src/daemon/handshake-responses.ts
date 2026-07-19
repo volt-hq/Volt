@@ -8,6 +8,7 @@ import {
 } from "../core/remote/iroh/handshake.ts";
 import { createIrohRemoteHostMetadata, type IrohRemoteHostMetadata } from "../core/remote/iroh/metadata.ts";
 import type { IrohRemoteRelayMode } from "../core/remote/iroh/protocol.ts";
+import type { RpcSessionState } from "../core/rpc/types.ts";
 
 /**
  * Session selection outcomes as tracked by the conversation owner. Extends the
@@ -48,6 +49,18 @@ export function createRemoteHostMetadata(
 		userName: getCurrentUserName(),
 		cwd: "/workspace",
 	});
+}
+
+export function decorateRemoteConversationSessionState(
+	state: RpcSessionState,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	context: RemoteHostResponseContext,
+): RpcSessionState & { workspaceName: string; remoteHost: IrohRemoteHostMetadata } {
+	return {
+		...state,
+		workspaceName: authorization.workspace.name,
+		remoteHost: createRemoteHostMetadata(authorization, context),
+	};
 }
 
 export function getHandshakeConversationSelection(
@@ -159,10 +172,6 @@ export function decorateRemoteHostState(
 	}
 	return {
 		...decoratedValue,
-		data: {
-			...data,
-			workspaceName: authorization.workspace.name,
-			remoteHost: createRemoteHostMetadata(authorization, context),
-		},
+		data: decorateRemoteConversationSessionState(data as unknown as RpcSessionState, authorization, context),
 	};
 }

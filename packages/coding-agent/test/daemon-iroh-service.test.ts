@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -8,13 +8,26 @@ import { decodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts
 import type { IrohBiStreamLike } from "../src/core/rpc/iroh-transport.ts";
 import { createDaemonClient, type DaemonClient } from "../src/daemon/control-client.ts";
 import type { ControlEvent } from "../src/daemon/control-protocol.ts";
-import { loadIrohModule } from "../src/daemon/iroh-native.ts";
+import {
+	type IrohConnectionLike,
+	type IrohEndpointLike,
+	type IrohIncomingLike,
+	loadIrohModule,
+} from "../src/daemon/iroh-native.ts";
+import { DEFAULT_IROH_REMOTE_RESOURCE_LIMITS } from "../src/daemon/iroh-resource-guard.ts";
 import {
 	createIrohDaemonService,
+	IrohDaemonAdmissionGate,
+	IrohPhysicalStreamOwner,
 	resolveIrohRelayConfig,
 	VOLT_PRODUCTION_RELAY_URLS,
 } from "../src/daemon/iroh-service.ts";
+import {
+	createLifecycleFencedIrohStream,
+	IrohStreamLifecycleClosedError,
+} from "../src/daemon/iroh-stream-lifecycle.ts";
 import { runVoltDaemon } from "../src/daemon/main.ts";
+import { getDaemonPaths } from "../src/daemon/paths.ts";
 import { type DaemonProbeResult, probeDaemon } from "../src/daemon/spawn.ts";
 import { readLineFromIroh } from "../src/daemon/workspace-streams.ts";
 
@@ -42,6 +55,14 @@ interface PhoneConnection {
 
 const ALPN = Array.from(Buffer.from(IROH_REMOTE_ALPN, "utf8"));
 
+function createDeferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve = () => {};
+	const promise = new Promise<void>((innerResolve) => {
+		resolve = innerResolve;
+	});
+	return { promise, resolve };
+}
+
 async function createPhoneEndpoint(): Promise<PhoneEndpoint> {
 	const iroh = native.iroh;
 	if (!iroh) {
@@ -52,6 +73,98 @@ async function createPhoneEndpoint(): Promise<PhoneEndpoint> {
 	builder.relayMode(iroh.RelayMode.disabled());
 	const endpoint = (await builder.bind()) as unknown as PhoneEndpoint;
 	return endpoint;
+}
+
+function withStalledClose(endpoint: IrohEndpointLike): IrohEndpointLike {
+	return {
+		id: () => endpoint.id(),
+		addr: () => endpoint.addr(),
+		online: () => endpoint.online(),
+		acceptNext: () => endpoint.acceptNext(),
+		secretKey: () => endpoint.secretKey(),
+		async close() {
+			// Begin the real native close so live transports retire, then reproduce
+			// the observed native promise that never reports terminal settlement.
+			void endpoint.close().catch(() => {});
+			await new Promise<void>(() => {});
+		},
+	};
+}
+
+function withStalledOnline(
+	endpoint: IrohEndpointLike,
+	onlineStarted: () => void,
+	onlineGate: Promise<void>,
+): IrohEndpointLike {
+	return {
+		id: () => endpoint.id(),
+		addr: () => endpoint.addr(),
+		async online() {
+			onlineStarted();
+			await onlineGate;
+		},
+		acceptNext: () => endpoint.acceptNext(),
+		secretKey: () => endpoint.secretKey(),
+		close: () => endpoint.close(),
+	};
+}
+
+function withInjectedIncomings(endpoint: IrohEndpointLike, incomings: readonly IrohIncomingLike[]): IrohEndpointLike {
+	let nextIncoming = 0;
+	return {
+		id: () => endpoint.id(),
+		addr: () => endpoint.addr(),
+		online: () => endpoint.online(),
+		acceptNext: () => {
+			if (nextIncoming < incomings.length) {
+				return Promise.resolve(incomings[nextIncoming++]);
+			}
+			return endpoint.acceptNext();
+		},
+		secretKey: () => endpoint.secretKey(),
+		close: () => endpoint.close(),
+	};
+}
+
+function withDeferredIncoming(
+	endpoint: IrohEndpointLike,
+	incomingReady: Promise<void>,
+	incoming: IrohIncomingLike,
+): IrohEndpointLike {
+	let delivered = false;
+	return {
+		id: () => endpoint.id(),
+		addr: () => endpoint.addr(),
+		online: () => endpoint.online(),
+		async acceptNext() {
+			if (!delivered) {
+				delivered = true;
+				await incomingReady;
+				return incoming;
+			}
+			return endpoint.acceptNext();
+		},
+		secretKey: () => endpoint.secretKey(),
+		close: () => endpoint.close(),
+	};
+}
+
+function withStalledRead(
+	stream: IrohBiStreamLike,
+	onReadStarted: () => void,
+	readGate: Promise<void>,
+): IrohBiStreamLike {
+	return {
+		recv: {
+			async read() {
+				onReadStarted();
+				await readGate;
+				return undefined;
+			},
+			...(stream.recv.stop === undefined ? {} : { stop: (errorCode: bigint) => stream.recv.stop?.(errorCode) }),
+		},
+		send: stream.send,
+	};
 }
 
 async function writeJsonLine(stream: IrohBiStreamLike, value: object): Promise<void> {
@@ -120,10 +233,193 @@ describe("relay config resolution", () => {
 	});
 });
 
+describe("iroh daemon lifecycle ownership", () => {
+	it("closes admission synchronously and drains exactly the pre-close operation set", async () => {
+		const gate = new IrohDaemonAdmissionGate();
+		const first = gate.tryAcquire();
+		const second = gate.tryAcquire();
+		expect(first).toBeDefined();
+		expect(second).toBeDefined();
+
+		gate.close();
+		expect(gate.isOpen).toBe(false);
+		expect(first?.signal.aborted).toBe(true);
+		expect(second?.signal.aborted).toBe(true);
+		expect(first?.isCurrent()).toBe(false);
+		expect(second?.isCurrent()).toBe(false);
+		expect(gate.tryAcquire()).toBeUndefined();
+
+		let drained = false;
+		const draining = gate.waitForDrain().then(() => {
+			drained = true;
+		});
+		await Promise.resolve();
+		expect(drained).toBe(false);
+		first?.release();
+		await Promise.resolve();
+		expect(drained).toBe(false);
+		second?.release();
+		await draining;
+		expect(drained).toBe(true);
+	});
+
+	it("uses one idempotent physical stream close action from lifecycle install through outer finalization", async () => {
+		const fallbackReasons: string[] = [];
+		const lifecycleReasons: string[] = [];
+		let reentrantClose: Promise<void> | undefined;
+		const owner = new IrohPhysicalStreamOwner((reason) => {
+			fallbackReasons.push(reason);
+		});
+		let settled = false;
+		void owner.settled.then(() => {
+			settled = true;
+		});
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		expect(
+			owner.installCloseAction((reason) => {
+				lifecycleReasons.push(reason);
+				reentrantClose = owner.close("reentrant_close");
+			}),
+		).toBe(true);
+
+		const shutdown = owner.close("host_shutdown");
+		const outerFinally = owner.close("stream_task_settled");
+		expect(owner.settled).toBe(shutdown);
+		expect(outerFinally).toBe(shutdown);
+		expect(reentrantClose).toBe(shutdown);
+		await outerFinally;
+
+		expect(owner.isClosing).toBe(true);
+		expect(settled).toBe(true);
+		expect(lifecycleReasons).toEqual(["host_shutdown"]);
+		expect(fallbackReasons).toEqual([]);
+		expect(owner.installCloseAction(() => {})).toBe(false);
+	});
+
+	it("falls back to immediate physical close when shutdown wins before lifecycle install", async () => {
+		const reasons: string[] = [];
+		const owner = new IrohPhysicalStreamOwner((reason) => {
+			reasons.push(reason);
+		});
+
+		await owner.close("host_shutdown");
+
+		expect(reasons).toEqual(["host_shutdown"]);
+		expect(owner.installCloseAction(() => {})).toBe(false);
+	});
+
+	it("fences application I/O without suppressing the owner's raw terminal operations", async () => {
+		const readGate = createDeferred();
+		const writeGate = createDeferred();
+		let readCalls = 0;
+		let writeCalls = 0;
+		let resetCalls = 0;
+		let stopCalls = 0;
+		const rawStream: IrohBiStreamLike = {
+			recv: {
+				read: () => {
+					readCalls++;
+					return readGate.promise.then(() => undefined);
+				},
+				stop: () => {
+					stopCalls++;
+					return Promise.resolve();
+				},
+			},
+			send: {
+				writeAll: () => {
+					writeCalls++;
+					return writeGate.promise;
+				},
+				reset: () => {
+					resetCalls++;
+					return Promise.resolve();
+				},
+			},
+		};
+		const observed: Promise<unknown>[] = [];
+		let terminalStream: IrohBiStreamLike | undefined;
+		const owner = new IrohPhysicalStreamOwner(() => {
+			void Promise.resolve(terminalStream?.send.reset?.(0n)).catch(() => {});
+			void Promise.resolve(terminalStream?.recv.stop?.(0n)).catch(() => {});
+		});
+		const stream = createLifecycleFencedIrohStream(rawStream, owner.signal, (task) => observed.push(task));
+		terminalStream = stream;
+
+		const read = stream.recv.read(1);
+		const write = stream.send.writeAll([1]);
+		await owner.close("host_shutdown");
+
+		await expect(read).rejects.toBeInstanceOf(IrohStreamLifecycleClosedError);
+		await expect(write).rejects.toBeInstanceOf(IrohStreamLifecycleClosedError);
+		expect({ readCalls, writeCalls, resetCalls, stopCalls }).toEqual({
+			readCalls: 1,
+			writeCalls: 1,
+			resetCalls: 1,
+			stopCalls: 1,
+		});
+		await expect(stream.recv.read(1)).rejects.toBeInstanceOf(IrohStreamLifecycleClosedError);
+		await expect(stream.send.writeAll([2])).rejects.toBeInstanceOf(IrohStreamLifecycleClosedError);
+		expect({ readCalls, writeCalls }).toEqual({ readCalls: 1, writeCalls: 1 });
+		expect(observed).toHaveLength(4);
+
+		readGate.resolve();
+		writeGate.resolve();
+		await Promise.allSettled(observed);
+	});
+
+	it("holds replacement close behind subscriber detach, zero-count publication, and active-stream removal", async () => {
+		const events: string[] = [];
+		let releaseLifecycle = () => {};
+		const lifecycleSettled = new Promise<void>((resolve) => {
+			releaseLifecycle = resolve;
+		});
+		const owner = new IrohPhysicalStreamOwner(() => {
+			throw new Error("fallback close must not own an installed stream lifecycle");
+		});
+		expect(
+			owner.installCloseAction(async (reason) => {
+				events.push(`close_requested:${reason}`);
+				await lifecycleSettled;
+				events.push("physical_close_settled");
+			}),
+		).toBe(true);
+
+		let replacementMayAttach = false;
+		const replacementBarrier = owner.close("active_stream_replaced").then(() => {
+			replacementMayAttach = true;
+			events.push("replacement_attach_released");
+		});
+		await Promise.resolve();
+		expect(replacementMayAttach).toBe(false);
+
+		// This is the outer conversation-stream finally order. The old physical
+		// owner cannot release the replacement barrier until the runtime subscriber
+		// and capability-scoped lease count no longer include the old stream, and the
+		// registry entry is synchronously removed.
+		events.push("subscriber_detached");
+		events.push("lease_count_zero");
+		events.push("active_stream_removed");
+		releaseLifecycle();
+		await replacementBarrier;
+
+		expect(events).toEqual([
+			"close_requested:active_stream_replaced",
+			"subscriber_detached",
+			"lease_count_zero",
+			"active_stream_removed",
+			"physical_close_settled",
+			"replacement_attach_released",
+		]);
+	});
+});
+
 describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 	let agentDir: string;
 	let workspaceDir: string;
 	let daemon: Promise<number>;
+	let daemonStopped = false;
 	let control: DaemonClient;
 	const controlEvents: ControlEvent[] = [];
 
@@ -131,7 +427,9 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-"));
 		workspaceDir = join(agentDir, "ws");
 		mkdirSync(workspaceDir, { recursive: true });
-		daemon = runVoltDaemon({ agentDir, foreground: false }, [createIrohDaemonService({ relayMode: "disabled" })]);
+		daemon = runVoltDaemon({ agentDir, foreground: false, extensionDisposeTimeoutMs: 50 }, [
+			createIrohDaemonService({ relayMode: "disabled" }, { decorateEndpoint: withStalledClose }),
+		]);
 		let status: DaemonProbeResult = await probeDaemon(agentDir);
 		for (let attempt = 0; !status.healthy && attempt < 100; attempt++) {
 			await new Promise((resolve) => setTimeout(resolve, 100));
@@ -151,10 +449,12 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 	}, 30_000);
 
 	afterAll(async () => {
-		try {
-			await control.request({ type: "shutdown" });
-		} catch {
-			// daemon may already be gone
+		if (!daemonStopped) {
+			try {
+				await control.request({ type: "shutdown" });
+			} catch {
+				// daemon may already be gone
+			}
 		}
 		await control?.close();
 		await daemon;
@@ -320,8 +620,606 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		});
 		expect(retriedRevokedStreamEnd.line).toBeUndefined();
 		expect(retriedRevokedStreamEnd.rest).toHaveLength(0);
-		revokedConnection.close(0n, Array.from(Buffer.from("done", "utf8")));
+
+		// Leave a live connection with an admitted handshake child at daemon
+		// shutdown. Quiesce must settle that application child before core state
+		// closes; endpoint/connection native settlement remains disposal work.
+		await revokedConnection.openBi();
+		await expect
+			.poll(async () => {
+				const status = await control.request({ type: "status" });
+				return status.type === "status_result" ? status.phoneConnections : 0;
+			})
+			.toBeGreaterThan(0);
+		await control.request({ type: "shutdown" });
+		await daemon;
+		daemonStopped = true;
+		const paths = getDaemonPaths(agentDir);
+		expect(existsSync(paths.pidfilePath)).toBe(false);
+		expect(existsSync(paths.socketPath)).toBe(false);
+		expect(readFileSync(paths.logPath, "utf8")).toContain("extension dispose deadline exceeded after 50ms");
 		await revokedConnection.closed();
 		await phone.close();
 	}, 60_000);
+});
+
+describe.skipIf(!nativeAvailable)("voltd iroh startup ownership", () => {
+	it("bounds a native online tail without holding the durable quiesce barrier", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-startup-"));
+		const onlineGate = createDeferred();
+		let onlineStarted = false;
+		let daemonStopped = false;
+		let control: DaemonClient | undefined;
+		const daemon = runVoltDaemon({ agentDir, foreground: false, extensionDisposeTimeoutMs: 50 }, [
+			createIrohDaemonService(
+				{ relayMode: "development" },
+				{
+					decorateEndpoint: (endpoint) =>
+						withStalledOnline(
+							endpoint,
+							() => {
+								onlineStarted = true;
+							},
+							onlineGate.promise,
+						),
+				},
+			),
+		]);
+
+		try {
+			let status: DaemonProbeResult = await probeDaemon(agentDir);
+			for (let attempt = 0; !status.healthy && attempt < 100; attempt++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				status = await probeDaemon(agentDir);
+			}
+			expect(status.healthy).toBe(true);
+			control = createDaemonClient({
+				socketPath: status.socketPath,
+				client: "cli",
+				version: "test",
+				authToken: status.authToken,
+				reconnect: false,
+			});
+			await expect.poll(() => onlineStarted, { timeout: 15_000 }).toBe(true);
+
+			const shutdownResponse = await control.request({ type: "shutdown" });
+			expect(shutdownResponse.type).toBe("ok");
+			await expect(daemon).resolves.toBe(0);
+			daemonStopped = true;
+
+			const paths = getDaemonPaths(agentDir);
+			expect(existsSync(paths.pidfilePath)).toBe(false);
+			expect(existsSync(paths.socketPath)).toBe(false);
+			expect(readFileSync(paths.logPath, "utf8")).toContain("extension dispose deadline exceeded after 50ms");
+		} finally {
+			onlineGate.resolve();
+			if (!daemonStopped && control !== undefined) {
+				await control.request({ type: "shutdown" }).catch(() => {});
+				await daemon;
+			}
+			await control?.close();
+			const logPath = getDaemonPaths(agentDir).logPath;
+			if (existsSync(logPath)) {
+				await expect
+					.poll(() => readFileSync(logPath, "utf8").includes("iroh service stopped"), { timeout: 5_000 })
+					.toBe(true);
+			}
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	}, 30_000);
+});
+
+describe.skipIf(!nativeAvailable)("voltd iroh control pairing ownership", () => {
+	it("cancels pending pairing state before the final control connection closes", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-pairing-quiesce-"));
+		const postIrohQuiesceGate = createDeferred();
+		let postIrohQuiesceStarted = false;
+		let daemonStopped = false;
+		let pairingControl: DaemonClient | undefined;
+		let shutdownControl: DaemonClient | undefined;
+		const daemon = runVoltDaemon({ agentDir, foreground: false }, [
+			createIrohDaemonService({ relayMode: "disabled" }),
+			() => ({
+				async quiesce() {
+					postIrohQuiesceStarted = true;
+					await postIrohQuiesceGate.promise;
+				},
+			}),
+		]);
+
+		try {
+			let status: DaemonProbeResult = await probeDaemon(agentDir);
+			for (let attempt = 0; !status.healthy && attempt < 100; attempt++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				status = await probeDaemon(agentDir);
+			}
+			expect(status.healthy).toBe(true);
+			pairingControl = createDaemonClient({
+				socketPath: status.socketPath,
+				client: "cli",
+				version: "test",
+				authToken: status.authToken,
+				reconnect: false,
+			});
+			shutdownControl = createDaemonClient({
+				socketPath: status.socketPath,
+				client: "cli",
+				version: "test",
+				authToken: status.authToken,
+				reconnect: false,
+			});
+
+			expect(await pairingControl.request({ type: "pair_request" })).toMatchObject({ type: "pair_started" });
+			const paths = getDaemonPaths(agentDir);
+			const pendingBeforeShutdown = JSON.parse(readFileSync(paths.statePath, "utf8")) as {
+				pendingPairingTickets: unknown[];
+			};
+			expect(pendingBeforeShutdown.pendingPairingTickets).toHaveLength(1);
+
+			expect((await shutdownControl.request({ type: "shutdown" })).type).toBe("ok");
+			await expect.poll(() => postIrohQuiesceStarted, { timeout: 15_000 }).toBe(true);
+			// The pairing owner remains connected. Iroh quiesce, not a disconnect
+			// callback from final controlServer.close(), must make the cut durable.
+			expect(pairingControl.connectionState).toBe("connected");
+			const stateAtDurableCut = JSON.parse(readFileSync(paths.statePath, "utf8")) as {
+				pendingPairingTickets: unknown[];
+			};
+			expect(stateAtDurableCut.pendingPairingTickets).toEqual([]);
+			expect((await probeDaemon(agentDir)).state).toBe("shutting-down");
+
+			postIrohQuiesceGate.resolve();
+			await expect(daemon).resolves.toBe(0);
+			daemonStopped = true;
+			const finalState = readFileSync(paths.statePath, "utf8");
+			const finalAudit = readFileSync(paths.auditPath, "utf8");
+			await new Promise<void>((resolve) => setTimeout(resolve, 100));
+			expect(readFileSync(paths.statePath, "utf8")).toBe(finalState);
+			expect(readFileSync(paths.auditPath, "utf8")).toBe(finalAudit);
+		} finally {
+			postIrohQuiesceGate.resolve();
+			if (!daemonStopped) {
+				await shutdownControl?.request({ type: "shutdown" }).catch(() => {});
+				await pairingControl?.request({ type: "shutdown" }).catch(() => {});
+				await daemon;
+			}
+			await pairingControl?.close();
+			await shutdownControl?.close();
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	}, 30_000);
+});
+
+describe.skipIf(!nativeAvailable)("voltd iroh pre-registration ownership", () => {
+	it("joins a closed-gate refusal produced after the outer daemon disposal deadline", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-late-incoming-refusal-"));
+		const incomingGate = createDeferred();
+		const refuseGate = createDeferred();
+		let refuseStarted = false;
+		let refuseSettled = false;
+		let daemonStopped = false;
+		let control: DaemonClient | undefined;
+		const incoming: IrohIncomingLike = {
+			async accept() {
+				throw new Error("closed-gate incoming must not be accepted");
+			},
+			async refuse() {
+				refuseStarted = true;
+				await refuseGate.promise;
+				refuseSettled = true;
+			},
+		};
+		const daemon = runVoltDaemon({ agentDir, foreground: false, extensionDisposeTimeoutMs: 50 }, [
+			createIrohDaemonService(
+				{ relayMode: "disabled" },
+				{
+					decorateEndpoint: (endpoint) => withDeferredIncoming(endpoint, incomingGate.promise, incoming),
+				},
+			),
+		]);
+
+		try {
+			let status: DaemonProbeResult = await probeDaemon(agentDir);
+			for (let attempt = 0; !status.healthy && attempt < 100; attempt++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				status = await probeDaemon(agentDir);
+			}
+			expect(status.healthy).toBe(true);
+			control = createDaemonClient({
+				socketPath: status.socketPath,
+				client: "cli",
+				version: "test",
+				authToken: status.authToken,
+				reconnect: false,
+			});
+
+			const shutdownResponse = await control.request({ type: "shutdown" });
+			expect(shutdownResponse.type).toBe("ok");
+			await expect(daemon).resolves.toBe(0);
+			daemonStopped = true;
+			const paths = getDaemonPaths(agentDir);
+			expect(readFileSync(paths.logPath, "utf8")).toContain("extension dispose deadline exceeded after 50ms");
+			expect(refuseStarted).toBe(false);
+
+			incomingGate.resolve();
+			await expect.poll(() => refuseStarted).toBe(true);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(refuseSettled).toBe(false);
+			expect(readFileSync(paths.logPath, "utf8")).not.toContain("iroh service stopped");
+
+			refuseGate.resolve();
+			await expect.poll(() => refuseSettled).toBe(true);
+			await expect
+				.poll(() => readFileSync(paths.logPath, "utf8").includes("iroh service stopped"), { timeout: 5_000 })
+				.toBe(true);
+		} finally {
+			incomingGate.resolve();
+			refuseGate.resolve();
+			if (!daemonStopped && control !== undefined) {
+				await control.request({ type: "shutdown" }).catch(() => {});
+				await daemon;
+			}
+			await control?.close();
+			const logPath = getDaemonPaths(agentDir).logPath;
+			if (existsSync(logPath)) {
+				await expect
+					.poll(() => readFileSync(logPath, "utf8").includes("iroh service stopped"), { timeout: 5_000 })
+					.toBe(true);
+			}
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("fences a deferred connection-task-limit refusal across daemon shutdown", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-connection-task-limit-"));
+		const connectGate = createDeferred();
+		const refuseGate = createDeferred();
+		let connectStarted = 0;
+		let refuseStarted = false;
+		let refuseSettled = false;
+		let daemonStopped = false;
+		let control: DaemonClient | undefined;
+		const saturatedIncoming: IrohIncomingLike = {
+			async accept() {
+				return {
+					async connect() {
+						connectStarted++;
+						await connectGate.promise;
+						throw new Error("injected late saturated connect failure");
+					},
+				};
+			},
+			async refuse() {
+				throw new Error("admitted connection task must not be refused");
+			},
+		};
+		const deferredRefusal: IrohIncomingLike = {
+			async accept() {
+				throw new Error("connection-task-limit rejection must not accept the incoming");
+			},
+			async refuse() {
+				refuseStarted = true;
+				await refuseGate.promise;
+				refuseSettled = true;
+			},
+		};
+		const incomings = [
+			...Array.from({ length: DEFAULT_IROH_REMOTE_RESOURCE_LIMITS.maxConnectionTasks }, () => saturatedIncoming),
+			deferredRefusal,
+		];
+		const daemon = runVoltDaemon({ agentDir, foreground: false, extensionDisposeTimeoutMs: 50 }, [
+			createIrohDaemonService(
+				{ relayMode: "disabled" },
+				{ decorateEndpoint: (endpoint) => withInjectedIncomings(endpoint, incomings) },
+			),
+		]);
+
+		try {
+			let status: DaemonProbeResult = await probeDaemon(agentDir);
+			for (let attempt = 0; !status.healthy && attempt < 100; attempt++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				status = await probeDaemon(agentDir);
+			}
+			expect(status.healthy).toBe(true);
+			control = createDaemonClient({
+				socketPath: status.socketPath,
+				client: "cli",
+				version: "test",
+				authToken: status.authToken,
+				reconnect: false,
+			});
+			await expect
+				.poll(() => connectStarted, { timeout: 15_000 })
+				.toBe(DEFAULT_IROH_REMOTE_RESOURCE_LIMITS.maxConnectionTasks);
+			await expect.poll(() => refuseStarted, { timeout: 15_000 }).toBe(true);
+
+			const shutdownResponse = await control.request({ type: "shutdown" });
+			expect(shutdownResponse.type).toBe("ok");
+			await expect(daemon).resolves.toBe(0);
+			daemonStopped = true;
+			const paths = getDaemonPaths(agentDir);
+			expect(readFileSync(paths.logPath, "utf8")).toContain("extension dispose deadline exceeded after 50ms");
+			const auditAfterShutdown = readFileSync(paths.auditPath, "utf8");
+			expect(auditAfterShutdown).not.toContain("incoming connection refused at daemon connection-task limit");
+
+			refuseGate.resolve();
+			await expect.poll(() => refuseSettled).toBe(true);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(readFileSync(paths.auditPath, "utf8")).toBe(auditAfterShutdown);
+
+			connectGate.resolve();
+			await expect
+				.poll(() => readFileSync(paths.logPath, "utf8").includes("iroh service stopped"), { timeout: 5_000 })
+				.toBe(true);
+			expect(readFileSync(paths.auditPath, "utf8")).toBe(auditAfterShutdown);
+		} finally {
+			refuseGate.resolve();
+			connectGate.resolve();
+			if (!daemonStopped && control !== undefined) {
+				await control.request({ type: "shutdown" }).catch(() => {});
+				await daemon;
+			}
+			await control?.close();
+			const logPath = getDaemonPaths(agentDir).logPath;
+			if (existsSync(logPath)) {
+				await expect
+					.poll(() => readFileSync(logPath, "utf8").includes("iroh service stopped"), { timeout: 5_000 })
+					.toBe(true);
+			}
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("suppresses a late incoming-connect rejection after application quiesce", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-incoming-connect-"));
+		const connectGate = createDeferred();
+		let connectStarted = false;
+		let daemonStopped = false;
+		let control: DaemonClient | undefined;
+		const incoming: IrohIncomingLike = {
+			async accept() {
+				return {
+					async connect() {
+						connectStarted = true;
+						await connectGate.promise;
+						throw new Error("injected late incoming-connect failure");
+					},
+				};
+			},
+			async refuse() {},
+		};
+		const daemon = runVoltDaemon({ agentDir, foreground: false, extensionDisposeTimeoutMs: 50 }, [
+			createIrohDaemonService(
+				{ relayMode: "disabled" },
+				{ decorateEndpoint: (endpoint) => withInjectedIncomings(endpoint, [incoming]) },
+			),
+		]);
+
+		try {
+			let status: DaemonProbeResult = await probeDaemon(agentDir);
+			for (let attempt = 0; !status.healthy && attempt < 100; attempt++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				status = await probeDaemon(agentDir);
+			}
+			expect(status.healthy).toBe(true);
+			control = createDaemonClient({
+				socketPath: status.socketPath,
+				client: "cli",
+				version: "test",
+				authToken: status.authToken,
+				reconnect: false,
+			});
+			await expect.poll(() => connectStarted, { timeout: 15_000 }).toBe(true);
+
+			const shutdownResponse = await control.request({ type: "shutdown" });
+			expect(shutdownResponse.type).toBe("ok");
+			await expect(daemon).resolves.toBe(0);
+			daemonStopped = true;
+			const paths = getDaemonPaths(agentDir);
+			expect(readFileSync(paths.logPath, "utf8")).toContain("extension dispose deadline exceeded after 50ms");
+			const auditAfterShutdown = readFileSync(paths.auditPath, "utf8");
+			expect(auditAfterShutdown).not.toContain('"phase":"transport_connect"');
+
+			connectGate.resolve();
+			await expect
+				.poll(() => readFileSync(paths.logPath, "utf8").includes("iroh service stopped"), { timeout: 5_000 })
+				.toBe(true);
+			expect(readFileSync(paths.auditPath, "utf8")).toBe(auditAfterShutdown);
+		} finally {
+			connectGate.resolve();
+			if (!daemonStopped && control !== undefined) {
+				await control.request({ type: "shutdown" }).catch(() => {});
+				await daemon;
+			}
+			await control?.close();
+			const logPath = getDaemonPaths(agentDir).logPath;
+			if (existsSync(logPath)) {
+				await expect
+					.poll(() => readFileSync(logPath, "utf8").includes("iroh service stopped"), { timeout: 5_000 })
+					.toBe(true);
+			}
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("publishes a pre-registration rejection before a stalled connection.closed native tail", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-preregistration-reject-"));
+		const connectionClosedGate = createDeferred();
+		let closeRequested = false;
+		let daemonStopped = false;
+		let control: DaemonClient | undefined;
+		const rejectedConnection: IrohConnectionLike = {
+			remoteId: () => ({ toString: () => "rejected-pre-registration-node" }),
+			acceptBi: () => Promise.reject(new Error("rejected connection must not accept streams")),
+			setMaxConcurrentBiStreams() {
+				throw new Error("injected stream-limit configuration failure");
+			},
+			close() {
+				closeRequested = true;
+			},
+			closed: () => connectionClosedGate.promise,
+		};
+		const incoming: IrohIncomingLike = {
+			async accept() {
+				return { connect: () => Promise.resolve(rejectedConnection) };
+			},
+			async refuse() {},
+		};
+		const daemon = runVoltDaemon({ agentDir, foreground: false, extensionDisposeTimeoutMs: 50 }, [
+			createIrohDaemonService(
+				{ relayMode: "disabled" },
+				{ decorateEndpoint: (endpoint) => withInjectedIncomings(endpoint, [incoming]) },
+			),
+		]);
+
+		try {
+			let status: DaemonProbeResult = await probeDaemon(agentDir);
+			for (let attempt = 0; !status.healthy && attempt < 100; attempt++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				status = await probeDaemon(agentDir);
+			}
+			expect(status.healthy).toBe(true);
+			control = createDaemonClient({
+				socketPath: status.socketPath,
+				client: "cli",
+				version: "test",
+				authToken: status.authToken,
+				reconnect: false,
+			});
+			await expect.poll(() => closeRequested, { timeout: 15_000 }).toBe(true);
+
+			const shutdownResponse = await control.request({ type: "shutdown" });
+			expect(shutdownResponse.type).toBe("ok");
+			await expect(daemon).resolves.toBe(0);
+			daemonStopped = true;
+			const paths = getDaemonPaths(agentDir);
+			expect(readFileSync(paths.logPath, "utf8")).toContain("extension dispose deadline exceeded after 50ms");
+			const auditAfterShutdown = readFileSync(paths.auditPath, "utf8");
+			expect(auditAfterShutdown).toContain('"phase":"stream_limit_configuration"');
+
+			connectionClosedGate.resolve();
+			await expect
+				.poll(() => readFileSync(paths.logPath, "utf8").includes("iroh service stopped"), { timeout: 5_000 })
+				.toBe(true);
+			expect(readFileSync(paths.auditPath, "utf8")).toBe(auditAfterShutdown);
+		} finally {
+			connectionClosedGate.resolve();
+			if (!daemonStopped && control !== undefined) {
+				await control.request({ type: "shutdown" }).catch(() => {});
+				await daemon;
+			}
+			await control?.close();
+			const logPath = getDaemonPaths(agentDir).logPath;
+			if (existsSync(logPath)) {
+				await expect
+					.poll(() => readFileSync(logPath, "utf8").includes("iroh service stopped"), { timeout: 5_000 })
+					.toBe(true);
+			}
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	}, 30_000);
+});
+
+describe.skipIf(!nativeAvailable)("voltd iroh native stream-tail ownership", () => {
+	it("bounds a stalled accepted read after application quiesce and prevents late audit/state mutation", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-stream-tail-"));
+		const workspaceDir = join(agentDir, "ws");
+		mkdirSync(workspaceDir, { recursive: true });
+		const readGate = createDeferred();
+		let readStarted = false;
+		let daemonStopped = false;
+		let control: DaemonClient | undefined;
+		let phone: PhoneEndpoint | undefined;
+		let phoneConnection: PhoneConnection | undefined;
+		const controlEvents: ControlEvent[] = [];
+		const daemon = runVoltDaemon({ agentDir, foreground: false, extensionDisposeTimeoutMs: 50 }, [
+			createIrohDaemonService(
+				{ relayMode: "disabled" },
+				{
+					decorateAcceptedStream: (stream) =>
+						withStalledRead(
+							stream,
+							() => {
+								readStarted = true;
+							},
+							readGate.promise,
+						),
+				},
+			),
+		]);
+
+		try {
+			let status: DaemonProbeResult = await probeDaemon(agentDir);
+			for (let attempt = 0; !status.healthy && attempt < 100; attempt++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				status = await probeDaemon(agentDir);
+			}
+			expect(status.healthy).toBe(true);
+			control = createDaemonClient({
+				socketPath: status.socketPath,
+				client: "cli",
+				version: "test",
+				authToken: status.authToken,
+				reconnect: false,
+				onEvent: (event) => controlEvents.push(event),
+			});
+			expect(await control.request({ type: "workspace_register", name: "ws", path: workspaceDir })).toMatchObject({
+				type: "ok",
+			});
+			const pairStarted = await control.request({ type: "pair_request", workspaceName: "ws" });
+			expect(pairStarted).toMatchObject({ type: "pair_started" });
+			if (pairStarted.type !== "pair_started") throw new Error("pair request did not start");
+			let ticket: string | undefined;
+			await expect
+				.poll(() => {
+					const event = controlEvents.find(
+						(candidate) => candidate.type === "pairing_progress" && candidate.phase === "ticket",
+					);
+					ticket = event?.type === "pairing_progress" ? event.ticket : undefined;
+					return ticket;
+				})
+				.toBeTypeOf("string");
+			const payload = decodeIrohRemoteTicketPayload(ticket as string);
+			const iroh = native.iroh;
+			if (!iroh) throw new Error("native iroh unavailable");
+			const endpointTicket = (
+				iroh.EndpointTicket as unknown as { fromString(value: string): { endpointAddr(): unknown } }
+			).fromString(payload.irohTicket);
+			phone = await createPhoneEndpoint();
+			phoneConnection = await phone.connect(endpointTicket.endpointAddr(), ALPN);
+			const stalledStream = await phoneConnection.openBi();
+			await stalledStream.send.writeAll([123]);
+			await expect.poll(() => readStarted).toBe(true);
+			expect(await control.request({ type: "pair_cancel", requestId: pairStarted.requestId })).toMatchObject({
+				type: "ok",
+			});
+
+			const shutdownResponse = await control.request({ type: "shutdown" });
+			expect(shutdownResponse.type).toBe("ok");
+			await expect(daemon).resolves.toBe(0);
+			daemonStopped = true;
+			const paths = getDaemonPaths(agentDir);
+			expect(existsSync(paths.pidfilePath)).toBe(false);
+			expect(existsSync(paths.socketPath)).toBe(false);
+			expect(readFileSync(paths.logPath, "utf8")).toContain("extension dispose deadline exceeded after 50ms");
+
+			const auditAfterShutdown = readFileSync(paths.auditPath, "utf8");
+			const stateAfterShutdown = readFileSync(paths.statePath, "utf8");
+			readGate.resolve();
+			await expect
+				.poll(() => readFileSync(paths.logPath, "utf8").includes("iroh service stopped"), { timeout: 5_000 })
+				.toBe(true);
+			expect(readFileSync(paths.auditPath, "utf8")).toBe(auditAfterShutdown);
+			expect(readFileSync(paths.statePath, "utf8")).toBe(stateAfterShutdown);
+		} finally {
+			readGate.resolve();
+			if (!daemonStopped && control !== undefined) {
+				await control.request({ type: "shutdown" }).catch(() => {});
+				await daemon;
+			}
+			phoneConnection?.close(0n, Array.from(Buffer.from("done", "utf8")));
+			await phone?.close().catch(() => {});
+			await control?.close();
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	}, 30_000);
 });

@@ -63,17 +63,29 @@ export function hardenPrivateRegularFileSync(filePath: string): void {
 	chmodSync(filePath, PRIVATE_FILE_MODE);
 }
 
-/** Append through an owner-only, no-follow handle. The file must already exist. */
-export function appendPrivateFileSync(filePath: string, content: string): void {
+function appendPrivateFileWithDurabilitySync(filePath: string, content: string, durable: boolean): void {
 	const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
 	const fd = openSync(filePath, constants.O_WRONLY | constants.O_APPEND | noFollow);
 	try {
 		assertPrivateRegularFile(fstatSync(fd), filePath);
 		fchmodSync(fd, PRIVATE_FILE_MODE);
 		writeFileSync(fd, content, "utf8");
+		if (durable) {
+			fsyncSync(fd);
+		}
 	} finally {
 		closeSync(fd);
 	}
+}
+
+/** Append through an owner-only, no-follow handle. The file must already exist. */
+export function appendPrivateFileSync(filePath: string, content: string): void {
+	appendPrivateFileWithDurabilitySync(filePath, content, false);
+}
+
+/** Append and fsync through an owner-only, no-follow handle. The file must already exist. */
+export function appendDurablePrivateFileSync(filePath: string, content: string): void {
+	appendPrivateFileWithDurabilitySync(filePath, content, true);
 }
 
 /** Create a collision-resistant owner-only directory beneath a caller-provided prefix. */

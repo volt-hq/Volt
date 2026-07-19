@@ -19,6 +19,7 @@ export const IROH_REMOTE_RPC_PASSTHROUGH_TYPES = new Set([
 	...IROH_REMOTE_RPC_CANCELLATION_TYPES,
 	"new_session",
 	"set_client_capabilities",
+	"report_stream_discontinuity",
 	"get_pending_host_actions",
 	"host_action_response",
 	"get_state",

@@ -34,6 +34,8 @@ export interface SessionTargetSessionHandle {
 export interface SessionTargetSessionStore<H extends SessionTargetSessionHandle = SessionTargetSessionHandle> {
 	/** Existing sessions for the workspace (only entries whose files exist on disk). */
 	list(): Promise<Array<{ id: string; path: string }>>;
+	/** Strict internal lookup that may include selector-hidden WAL-only sessions. */
+	find?(sessionId: string): Promise<{ id: string; path: string } | undefined>;
 	open(path: string): H;
 	create(): H;
 }
@@ -88,7 +90,17 @@ export async function resolveIrohRemoteSessionTarget<H extends SessionTargetSess
 		return resolved(sessions.create(), "created_after_missing", requestedSessionId);
 	}
 
-	const existingSession = (await sessions.list()).find((session) => session.id === requestedSessionId);
+	let existingSession: { id: string; path: string } | undefined;
+	try {
+		existingSession = sessions.find
+			? await sessions.find(requestedSessionId)
+			: (await sessions.list()).find((session) => session.id === requestedSessionId);
+	} catch {
+		// Corrupt or duplicate durable identity is unavailable, never missing. In
+		// particular, `last` must not create a fresh idempotency domain and replay
+		// a handled side effect under the same clientMessageId.
+		throw new IrohRemoteOutcomeError("session_unavailable", "session state is corrupt or ambiguous");
+	}
 	if (!existingSession) {
 		if (target.kind === "session") {
 			throw new IrohRemoteOutcomeError("session_unavailable", "session not found in workspace");
@@ -96,7 +108,18 @@ export async function resolveIrohRemoteSessionTarget<H extends SessionTargetSess
 		return resolved(sessions.create(), "created_after_missing", requestedSessionId);
 	}
 
-	return resolved(sessions.open(existingSession.path), "resumed", requestedSessionId);
+	try {
+		const sessionManager = sessions.open(existingSession.path);
+		if (sessionManager.getSessionId() !== requestedSessionId) {
+			throw new Error("session identity changed while opening resume target");
+		}
+		return resolved(sessionManager, "resumed", requestedSessionId);
+	} catch {
+		// Lookup and open cannot be atomic across an arbitrary injected store. Fail
+		// closed if the target disappears, is replaced, or no longer claims the
+		// requested durable idempotency domain between those operations.
+		throw new IrohRemoteOutcomeError("session_unavailable", "session state is corrupt or ambiguous");
+	}
 }
 
 /** Real SessionManager-backed store for a workspace cwd + session dir. */
@@ -106,6 +129,9 @@ export function createSessionManagerTargetStore(
 	options: { listAll?: boolean; preserveSessionCwd?: boolean } = {},
 ): SessionTargetSessionStore<SessionManager> {
 	return {
+		async find(sessionId) {
+			return SessionManager.findForResume(sessionDir, sessionId);
+		},
 		async list() {
 			const sessions = options.listAll
 				? await SessionManager.listAll(sessionDir)

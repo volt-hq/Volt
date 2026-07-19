@@ -1,7 +1,21 @@
 import { type AgentMessage, uuidv7 } from "@hansjm10/volt-agent-core";
 import type { ImageContent, Message, TextContent } from "@hansjm10/volt-ai";
-import { randomUUID } from "crypto";
-import { closeSync, createReadStream, existsSync, openSync, readdirSync, readSync, statSync } from "fs";
+import { createHash, randomUUID } from "crypto";
+import {
+	closeSync,
+	constants,
+	createReadStream,
+	existsSync,
+	fchmodSync,
+	fstatSync,
+	fsyncSync,
+	ftruncateSync,
+	openSync,
+	readdirSync,
+	readSync,
+	statSync,
+	writeFileSync,
+} from "fs";
 import { readdir, stat } from "fs/promises";
 import { basename, join, resolve } from "path";
 import { createInterface } from "readline";
@@ -10,7 +24,6 @@ import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts"
 import { writeDurableAtomicFileSync } from "../utils/durable-atomic-write.ts";
 import { canonicalizePath, normalizePath, resolvePath } from "../utils/paths.ts";
 import {
-	appendPrivateFileSync,
 	ensurePrivateDirectorySync,
 	hardenPrivateRegularFileSync,
 	PRIVATE_DIRECTORY_MODE,
@@ -25,7 +38,7 @@ import {
 	createCustomMessage,
 } from "./messages.ts";
 
-export const CURRENT_SESSION_VERSION = 3;
+export const CURRENT_SESSION_VERSION = 5;
 
 export interface SessionHeader {
 	type: "session";
@@ -52,11 +65,107 @@ export interface SessionEntryBase {
 	id: string;
 	parentId: string | null;
 	timestamp: string;
+	/** Monotonic file commit order. Added on append and backfilled by v4 migration. */
+	ordinal?: number;
 }
 
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+}
+
+export type ClientInputCommand = "prompt" | "steer" | "follow_up";
+export type ClientInputState = "accepted" | "started" | "completed" | "failed";
+export type ClientInputStreamingBehavior = "steer" | "followUp";
+export type ClientInputQueuedDelivery = "steer" | "follow_up";
+
+export interface ClientInputPayload {
+	message: string;
+	images: ImageContent[];
+	streamingBehavior?: ClientInputStreamingBehavior;
+}
+
+export interface ClientInputPayloadInput {
+	message: string;
+	images?: readonly ImageContent[];
+	streamingBehavior?: ClientInputStreamingBehavior;
+}
+
+export interface ClientInputQueuedPayload {
+	delivery: ClientInputQueuedDelivery;
+	message: string;
+	images: ImageContent[];
+}
+
+export interface ClientInputQueuedPayloadInput {
+	delivery: ClientInputQueuedDelivery;
+	message: string;
+	images?: readonly ImageContent[];
+}
+
+/**
+ * Durable idempotency reservation for one client-originated conversation input.
+ * This is host metadata only: it never enters model context or transcript projection.
+ *
+ * An accepted receipt retains the exact retryable input. Queued delivery is
+ * persisted separately after abortable transforms and before the in-memory
+ * queue is mutated. A `started` receipt with no terminal record is deliberately
+ * ambiguous and must never be replayed automatically. Canonical identified
+ * user-message commits imply `completed`; handled non-message inputs append an
+ * explicit terminal.
+ */
+export interface ClientInputReceiptEntry extends SessionEntryBase {
+	type: "client_input_receipt";
+	clientMessageId: string;
+	command: ClientInputCommand;
+	semanticDigest: string;
+	input: ClientInputPayload;
+}
+
+/** Exact post-preflight queue intent, durable before queue admission is acknowledged. */
+export interface ClientInputQueuedEntry extends SessionEntryBase {
+	type: "client_input_queued";
+	receiptId: string;
+	clientMessageId: string;
+	queuedInput: ClientInputQueuedPayload;
+}
+
+/** Append-only state transition for a client input receipt. */
+export interface ClientInputStateEntry extends SessionEntryBase {
+	type: "client_input_state";
+	receiptId: string;
+	clientMessageId: string;
+	state: Exclude<ClientInputState, "accepted">;
+	error?: string;
+}
+
+export interface ClientInputRecord {
+	receiptId: string;
+	clientMessageId: string;
+	command: ClientInputCommand;
+	semanticDigest: string;
+	input: ClientInputPayload;
+	queuedEntryId?: string;
+	queuedInput?: ClientInputQueuedPayload;
+	state: ClientInputState;
+	error?: string;
+	/** Canonical identified user entry that completed this input, when applicable. */
+	canonicalEntryId?: string;
+}
+
+/**
+ * Durable automatic-recovery state. A started receipt without a canonical or
+ * terminal boundary is an at-most-once ambiguity fence: queued receipts remain
+ * visible, but none may be dispatched automatically past that uncertainty.
+ */
+export type ClientInputRecoveryPlan =
+	| { kind: "idle"; records: [] }
+	| { kind: "replay"; records: ClientInputRecord[] }
+	| { kind: "blocked"; records: ClientInputRecord[]; blocker: ClientInputRecord };
+
+export interface ClientInputReservation {
+	record: ClientInputRecord;
+	created: boolean;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -143,6 +252,9 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
 export type SessionEntry =
 	| SessionMessageEntry
+	| ClientInputReceiptEntry
+	| ClientInputQueuedEntry
+	| ClientInputStateEntry
 	| ThinkingLevelChangeEntry
 	| ModelChangeEntry
 	| CompactionEntry
@@ -151,6 +263,273 @@ export type SessionEntry =
 	| CustomMessageEntry
 	| LabelEntry
 	| SessionInfoEntry;
+
+/** Host-only input admission WAL records. These never participate in the conversation branch or projection. */
+export function isClientInputWalEntry(
+	entry: FileEntry,
+): entry is ClientInputReceiptEntry | ClientInputQueuedEntry | ClientInputStateEntry {
+	return (
+		entry.type === "client_input_receipt" ||
+		entry.type === "client_input_queued" ||
+		entry.type === "client_input_state"
+	);
+}
+
+const CLIENT_INPUT_ID_MAX_CHARACTERS = 256;
+const CLIENT_INPUT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+export const RUNTIME_QUEUE_ENTRY_ID_PREFIX = "local-queue:";
+const CLIENT_INPUT_MESSAGE_MAX_UTF8_BYTES = 512 * 1024;
+const CLIENT_INPUT_MAX_IMAGES = 8;
+const CLIENT_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES = 256;
+const CLIENT_INPUT_IMAGE_DATA_MAX_UTF8_BYTES = 1024 * 1024;
+const CLIENT_INPUT_IMAGES_MAX_UTF8_BYTES = 1536 * 1024;
+const CLIENT_INPUT_MAX_SERIALIZED_BYTES = 2 * 1024 * 1024;
+export const CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES = 128;
+export const CLIENT_INPUT_MAX_OUTSTANDING_ENTRIES = CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES;
+export const CLIENT_INPUT_MAX_OUTSTANDING_BYTES = 16 * 1024 * 1024;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Canonical wire/storage grammar for durable external conversation identities. */
+export function isValidClientMessageId(value: unknown): value is string {
+	if (typeof value !== "string" || value.length === 0 || value.length > CLIENT_INPUT_ID_MAX_CHARACTERS) {
+		return false;
+	}
+	// Runtime-only queue identities use this reserved namespace. Keeping it out
+	// of the external semantic-ID domain makes an observed local queue card
+	// impossible to forge through paired-client ingress.
+	if (value.startsWith(RUNTIME_QUEUE_ENTRY_ID_PREFIX)) {
+		return false;
+	}
+	// Comparing the full match avoids JavaScript `$` accepting a match immediately
+	// before a trailing line terminator.
+	return value.match(CLIENT_INPUT_ID_PATTERN)?.[0] === value;
+}
+
+/** Runtime-only dequeue identity. This namespace is never valid at paired-client ingress. */
+export function isRuntimeQueueEntryId(value: unknown): value is string {
+	return typeof value === "string" && value.startsWith(RUNTIME_QUEUE_ENTRY_ID_PREFIX) && value.length <= 64;
+}
+
+function assertClientMessageId(clientMessageId: string): void {
+	if (!isValidClientMessageId(clientMessageId)) {
+		throw new Error(
+			`Client input id must match [A-Za-z0-9][A-Za-z0-9._:-]{0,255} and be at most ${CLIENT_INPUT_ID_MAX_CHARACTERS} ASCII characters`,
+		);
+	}
+}
+
+function normalizeClientInputImages(value: unknown): ImageContent[] {
+	if (value === undefined) return [];
+	if (!Array.isArray(value)) {
+		throw new Error("Client input images must be an array");
+	}
+	if (value.length > CLIENT_INPUT_MAX_IMAGES) {
+		throw new Error(`Client input images exceed the ${CLIENT_INPUT_MAX_IMAGES}-image limit`);
+	}
+
+	let aggregateBytes = 0;
+	return value.map((candidate, index) => {
+		if (
+			!isRecord(candidate) ||
+			candidate.type !== "image" ||
+			typeof candidate.mimeType !== "string" ||
+			typeof candidate.data !== "string"
+		) {
+			throw new Error(`Client input image ${index} is invalid`);
+		}
+		const mimeTypeBytes = Buffer.byteLength(candidate.mimeType, "utf8");
+		if (mimeTypeBytes > CLIENT_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES) {
+			throw new Error(
+				`Client input image ${index} MIME type exceeds the ${CLIENT_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES}-byte UTF-8 limit`,
+			);
+		}
+		const dataBytes = Buffer.byteLength(candidate.data, "utf8");
+		if (dataBytes > CLIENT_INPUT_IMAGE_DATA_MAX_UTF8_BYTES) {
+			throw new Error(
+				`Client input image ${index} data exceeds the ${CLIENT_INPUT_IMAGE_DATA_MAX_UTF8_BYTES}-byte UTF-8 limit`,
+			);
+		}
+		aggregateBytes += mimeTypeBytes + dataBytes;
+		if (aggregateBytes > CLIENT_INPUT_IMAGES_MAX_UTF8_BYTES) {
+			throw new Error(`Client input images exceed the ${CLIENT_INPUT_IMAGES_MAX_UTF8_BYTES}-byte UTF-8 limit`);
+		}
+		return { type: "image", mimeType: candidate.mimeType, data: candidate.data };
+	});
+}
+
+function normalizeClientInputContent(message: unknown, images: unknown): { message: string; images: ImageContent[] } {
+	if (typeof message !== "string") {
+		throw new Error("Client input message must be a string");
+	}
+	if (Buffer.byteLength(message, "utf8") > CLIENT_INPUT_MESSAGE_MAX_UTF8_BYTES) {
+		throw new Error(`Client input message exceeds the ${CLIENT_INPUT_MESSAGE_MAX_UTF8_BYTES}-byte UTF-8 limit`);
+	}
+	const normalizedImages = normalizeClientInputImages(images);
+	if (
+		Buffer.byteLength(JSON.stringify({ message, images: normalizedImages }), "utf8") >
+		CLIENT_INPUT_MAX_SERIALIZED_BYTES
+	) {
+		throw new Error(`Client input exceeds the ${CLIENT_INPUT_MAX_SERIALIZED_BYTES}-byte serialized limit`);
+	}
+	return { message, images: normalizedImages };
+}
+
+function normalizeClientInputPayload(command: ClientInputCommand, value: unknown): ClientInputPayload {
+	if (!isRecord(value)) {
+		throw new Error("Client input receipt payload is invalid");
+	}
+	const content = normalizeClientInputContent(value.message, value.images);
+	const streamingBehavior = value.streamingBehavior;
+	if (streamingBehavior !== undefined && streamingBehavior !== "steer" && streamingBehavior !== "followUp") {
+		throw new Error("Client input streaming behavior is invalid");
+	}
+	if (command !== "prompt" && streamingBehavior !== undefined) {
+		throw new Error("Only prompt inputs may specify streaming behavior");
+	}
+	return {
+		...content,
+		...(streamingBehavior === undefined ? {} : { streamingBehavior }),
+	};
+}
+
+function normalizeClientInputQueuedPayload(value: unknown): ClientInputQueuedPayload {
+	if (!isRecord(value) || (value.delivery !== "steer" && value.delivery !== "follow_up")) {
+		throw new Error("Client input queued delivery is invalid");
+	}
+	return {
+		delivery: value.delivery,
+		...normalizeClientInputContent(value.message, value.images),
+	};
+}
+
+function measureClientInputPayloadBytes(value: ClientInputPayload | ClientInputQueuedPayload): number {
+	return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function getOutstandingClientInputBytes(records: Iterable<ClientInputRecord>): number {
+	let total = 0;
+	for (const record of records) {
+		if (record.state === "completed" || record.state === "failed") continue;
+		total += measureClientInputPayloadBytes(record.input);
+		if (record.queuedInput) {
+			total += measureClientInputPayloadBytes(record.queuedInput);
+		}
+	}
+	return total;
+}
+
+function getOutstandingClientInputCount(records: Iterable<ClientInputRecord>): number {
+	let total = 0;
+	for (const record of records) {
+		if (record.state !== "completed" && record.state !== "failed") {
+			total++;
+		}
+	}
+	return total;
+}
+
+function getRecoverableQueuedClientInputCount(records: Iterable<ClientInputRecord>): number {
+	let total = 0;
+	for (const record of records) {
+		if (record.state === "accepted" && record.queuedInput !== undefined) {
+			total++;
+		}
+	}
+	return total;
+}
+
+function assertClientInputOutstandingCount(records: Iterable<ClientInputRecord>, additionalEntries: number): void {
+	if (getOutstandingClientInputCount(records) + additionalEntries > CLIENT_INPUT_MAX_OUTSTANDING_ENTRIES) {
+		throw new Error(`Outstanding client input exceeds the ${CLIENT_INPUT_MAX_OUTSTANDING_ENTRIES}-entry limit`);
+	}
+}
+
+function assertClientInputOutstandingBudget(records: Iterable<ClientInputRecord>, additionalBytes: number): void {
+	if (getOutstandingClientInputBytes(records) + additionalBytes > CLIENT_INPUT_MAX_OUTSTANDING_BYTES) {
+		throw new Error(
+			`Outstanding client input exceeds the ${CLIENT_INPUT_MAX_OUTSTANDING_BYTES}-byte aggregate limit`,
+		);
+	}
+}
+
+function digestClientInputPayload(command: ClientInputCommand, input: ClientInputPayload): string {
+	return createHash("sha256")
+		.update(JSON.stringify({ command, ...input }))
+		.digest("hex");
+}
+
+export function createClientInputSemanticDigest(command: ClientInputCommand, input: ClientInputPayloadInput): string {
+	return digestClientInputPayload(command, normalizeClientInputPayload(command, input));
+}
+
+function cloneClientInputRecord(record: ClientInputRecord): ClientInputRecord {
+	return {
+		...record,
+		input: { ...record.input, images: record.input.images.map((image) => ({ ...image })) },
+		...(record.queuedInput === undefined
+			? {}
+			: {
+					queuedInput: {
+						...record.queuedInput,
+						images: record.queuedInput.images.map((image) => ({ ...image })),
+					},
+				}),
+	};
+}
+
+function requireStartedClientInputReceipt(
+	records: ReadonlyMap<string, ClientInputRecord>,
+	clientMessageId: string,
+): ClientInputRecord {
+	assertClientMessageId(clientMessageId);
+	const record = records.get(clientMessageId);
+	if (!record) {
+		throw new Error(`Canonical client input ${JSON.stringify(clientMessageId)} has no matching durable receipt`);
+	}
+	if (record.state !== "started") {
+		throw new Error(
+			`Canonical client input ${JSON.stringify(clientMessageId)} requires a started receipt; found ${record.state}`,
+		);
+	}
+	return record;
+}
+
+function getExpectedClientInputQueuedDelivery(record: ClientInputRecord): ClientInputQueuedDelivery | undefined {
+	if (record.command === "steer") return "steer";
+	if (record.command === "follow_up") return "follow_up";
+	if (record.input.streamingBehavior === "steer") return "steer";
+	if (record.input.streamingBehavior === "followUp") return "follow_up";
+	return undefined;
+}
+
+export type SessionEntryListener = (entry: SessionEntry) => void;
+
+export interface SessionBranchChange {
+	previousLeafId: string | null;
+	nextLeafId: string | null;
+}
+
+export interface SessionBranchWindowOptions {
+	/** Exclude this entry and begin at its parent; omit to begin at the active leaf. */
+	beforeEntryId?: string;
+	/** Newest branch entries returned in chronological order. */
+	maxEntries: number;
+	/** Older context returned separately for bounded correlation lookups. */
+	lookbackEntries?: number;
+}
+
+export interface SessionBranchWindow {
+	entries: SessionEntry[];
+	lookback: SessionEntry[];
+	hasEarlier: boolean;
+	/** Number of branch entries visited, excluding the one bounded earlier-existence probe. */
+	visitedEntries: number;
+}
+
+export type SessionBranchListener = (change: SessionBranchChange) => void;
 
 /** Raw file entry (includes header) */
 export type FileEntry = SessionHeader | SessionEntry;
@@ -200,6 +579,7 @@ export type ReadonlySessionManager = Pick<
 	| "getEntry"
 	| "getLabel"
 	| "getBranch"
+	| "getBranchWindow"
 	| "getHeader"
 	| "getEntries"
 	| "getTree"
@@ -275,6 +655,48 @@ function migrateV2ToV3(entries: FileEntry[]): void {
 	}
 }
 
+/** Migrate v3 → v4: assign stable file-order commit ordinals. Mutates in place. */
+function migrateV3ToV4(entries: FileEntry[]): void {
+	let ordinal = 1;
+	for (const entry of entries) {
+		if (entry.type === "session") {
+			entry.version = 4;
+			continue;
+		}
+		entry.ordinal = ordinal++;
+	}
+}
+
+/** Migrate v4 → v5: discard unreplayable legacy WAL while preserving canonical transcript entries. */
+function migrateV4ToV5(entries: FileEntry[]): void {
+	const retainedEntries = entries.filter(
+		(entry) =>
+			entry.type !== "client_input_receipt" &&
+			entry.type !== "client_input_queued" &&
+			entry.type !== "client_input_state",
+	);
+	entries.splice(0, entries.length, ...retainedEntries);
+	for (const entry of retainedEntries) {
+		if (entry.type === "session") {
+			entry.version = 5;
+		} else if (entry.type === "message" && entry.message.role === "user") {
+			// v4 receipts did not retain the replayable payload required by v5. Once
+			// their WAL is discarded, the transport identity must go with it so the
+			// migrated canonical transcript cannot impersonate a v5 completion boundary.
+			delete (entry.message as { clientMessageId?: string }).clientMessageId;
+		}
+	}
+}
+
+function withoutClientInputIdentity(entry: SessionEntry): SessionEntry {
+	if (entry.type !== "message" || entry.message.role !== "user" || entry.message.clientMessageId === undefined) {
+		return entry;
+	}
+	const message = { ...entry.message };
+	delete message.clientMessageId;
+	return { ...entry, message };
+}
+
 /**
  * Run all necessary migrations to bring entries to current version.
  * Mutates entries in place. Returns true if any migration was applied.
@@ -283,10 +705,18 @@ function migrateToCurrentVersion(entries: FileEntry[]): boolean {
 	const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
 	const version = header?.version ?? 1;
 
-	if (version >= CURRENT_SESSION_VERSION) return false;
+	if (!Number.isSafeInteger(version) || version < 1) {
+		throw new Error(`Session has an invalid schema version: ${String(version)}`);
+	}
+	if (version > CURRENT_SESSION_VERSION) {
+		throw new Error(`Session schema version ${version} is newer than supported version ${CURRENT_SESSION_VERSION}`);
+	}
+	if (version === CURRENT_SESSION_VERSION) return false;
 
 	if (version < 2) migrateV1ToV2(entries);
 	if (version < 3) migrateV2ToV3(entries);
+	if (version < 4) migrateV3ToV4(entries);
+	if (version < 5) migrateV4ToV5(entries);
 
 	return true;
 }
@@ -468,14 +898,92 @@ export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultA
 }
 
 const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
+const SESSION_HEADER_MAX_BYTES = 64 * 1024;
+const SESSION_HEADER_READ_CHUNK_BYTES = 4 * 1024;
 
 function parseSessionEntryLine(line: string): FileEntry | null {
 	if (!line.trim()) return null;
 	try {
-		return JSON.parse(line) as FileEntry;
+		const parsed: unknown = JSON.parse(line);
+		return isRecord(parsed) ? (parsed as unknown as FileEntry) : null;
 	} catch {
-		// Skip malformed lines
 		return null;
+	}
+}
+
+/**
+ * Append at a verified JSONL boundary. A power loss can leave
+ * either a complete JSON object without its line delimiter or an incomplete
+ * final object. Preserve the former by adding the missing newline and discard
+ * only the latter by truncating back to the last committed delimiter.
+ *
+ * Opening a session is deliberately read-only: target discovery and phone
+ * relay attach may inspect a file while another lease owner is writing it.
+ * Repair therefore happens only when this manager is actually appending, and
+ * repair plus append share one no-follow descriptor. Any repair is fsynced
+ * before the new boundary is written.
+ */
+function appendSessionFileEntry(filePath: string, content: string, durable: boolean): void {
+	const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+	const fd = openSync(filePath, constants.O_RDWR | constants.O_APPEND | noFollow);
+	try {
+		const fileStat = fstatSync(fd);
+		if (!fileStat.isFile() || fileStat.nlink !== 1) {
+			throw new Error(`Refusing to append non-private session file: ${filePath}`);
+		}
+		fchmodSync(fd, PRIVATE_FILE_MODE);
+		if (fileStat.size > 0) {
+			const lastByte = Buffer.allocUnsafe(1);
+			if (readSync(fd, lastByte, 0, 1, fileStat.size - 1) !== 1) {
+				throw new Error(`Failed to inspect session tail: ${filePath}`);
+			}
+			if (lastByte[0] !== 0x0a) {
+				const scanBuffer = Buffer.allocUnsafe(Math.min(64 * 1024, fileStat.size));
+				let cursor = fileStat.size;
+				let finalRecordOffset = 0;
+				let foundDelimiter = false;
+				while (cursor > 0 && !foundDelimiter) {
+					const length = Math.min(scanBuffer.length, cursor);
+					const offset = cursor - length;
+					const bytesRead = readSync(fd, scanBuffer, 0, length, offset);
+					if (bytesRead !== length) throw new Error(`Failed to inspect session tail: ${filePath}`);
+					for (let index = length - 1; index >= 0; index--) {
+						if (scanBuffer[index] === 0x0a) {
+							finalRecordOffset = offset + index + 1;
+							foundDelimiter = true;
+							break;
+						}
+					}
+					cursor = offset;
+				}
+
+				const finalRecordLength = fileStat.size - finalRecordOffset;
+				const finalRecord = Buffer.allocUnsafe(finalRecordLength);
+				let bytesLoaded = 0;
+				while (bytesLoaded < finalRecordLength) {
+					const bytesRead = readSync(
+						fd,
+						finalRecord,
+						bytesLoaded,
+						finalRecordLength - bytesLoaded,
+						finalRecordOffset + bytesLoaded,
+					);
+					if (bytesRead === 0) throw new Error(`Failed to read session tail: ${filePath}`);
+					bytesLoaded += bytesRead;
+				}
+
+				if (parseSessionEntryLine(finalRecord.toString("utf8"))) {
+					writeFileSync(fd, "\n", "utf8");
+				} else {
+					ftruncateSync(fd, finalRecordOffset);
+				}
+				fsyncSync(fd);
+			}
+		}
+		writeFileSync(fd, content, "utf8");
+		if (durable) fsyncSync(fd);
+	} finally {
+		closeSync(fd);
 	}
 }
 
@@ -485,6 +993,8 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	if (!existsSync(resolvedFilePath)) return [];
 
 	const entries: FileEntry[] = [];
+	let malformedCompleteLine: number | undefined;
+	let lineNumber = 0;
 	const fd = openSync(resolvedFilePath, "r");
 	try {
 		const decoder = new StringDecoder("utf8");
@@ -499,8 +1009,11 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 			let lineStart = 0;
 			let newlineIndex = pending.indexOf("\n", lineStart);
 			while (newlineIndex !== -1) {
-				const entry = parseSessionEntryLine(pending.slice(lineStart, newlineIndex));
+				lineNumber++;
+				const completeLine = pending.slice(lineStart, newlineIndex);
+				const entry = parseSessionEntryLine(completeLine);
 				if (entry) entries.push(entry);
+				else if (completeLine.trim() && malformedCompleteLine === undefined) malformedCompleteLine = lineNumber;
 				lineStart = newlineIndex + 1;
 				newlineIndex = pending.indexOf("\n", lineStart);
 			}
@@ -508,13 +1021,30 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 		}
 
 		pending += decoder.end();
+		// A malformed unterminated final fragment may be a torn append. Every
+		// newline-terminated malformed record is a committed interior corruption
+		// candidate and is handled fail-closed below for current WAL sessions.
 		const finalEntry = parseSessionEntryLine(pending);
 		if (finalEntry) entries.push(finalEntry);
 	} finally {
 		closeSync(fd);
 	}
 
-	// Validate session header
+	// Validate session header. Current WAL sessions cannot silently skip a
+	// malformed committed line: it might be the only started/canonical boundary
+	// preventing duplicate side effects. A parseable legacy header retains its
+	// historical best-effort behavior. A file with no parseable records fails
+	// because it cannot be proven to be legacy rather than a current WAL whose
+	// header or only durable boundary was destroyed.
+	const parsedHeader = entries[0];
+	if (
+		malformedCompleteLine !== undefined &&
+		(entries.length === 0 ||
+			(parsedHeader?.type === "session" && (parsedHeader.version ?? 1) >= CURRENT_SESSION_VERSION) ||
+			entries.some(isClientInputWalEntry))
+	) {
+		throw new Error(`Current session JSONL is malformed at committed line ${malformedCompleteLine}`);
+	}
 	if (entries.length === 0) return entries;
 	const header = entries[0];
 	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
@@ -525,13 +1055,36 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 }
 
 function readSessionHeader(filePath: string): SessionHeader | null {
+	let fd: number | undefined;
 	try {
 		hardenPrivateRegularFileSync(filePath);
-		const fd = openSync(filePath, "r");
-		const buffer = Buffer.alloc(512);
-		const bytesRead = readSync(fd, buffer, 0, 512, 0);
-		closeSync(fd);
-		const firstLine = buffer.toString("utf8", 0, bytesRead).split("\n")[0];
+		const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+		fd = openSync(filePath, constants.O_RDONLY | noFollow);
+		const fileStat = fstatSync(fd);
+		if (!fileStat.isFile() || fileStat.nlink !== 1) return null;
+
+		const chunks: Buffer[] = [];
+		let byteCount = 0;
+		let reachedBoundary = false;
+		while (byteCount <= SESSION_HEADER_MAX_BYTES) {
+			const remainingProbeBytes = SESSION_HEADER_MAX_BYTES + 1 - byteCount;
+			const buffer = Buffer.allocUnsafe(Math.min(SESSION_HEADER_READ_CHUNK_BYTES, remainingProbeBytes));
+			const bytesRead = readSync(fd, buffer, 0, buffer.length, byteCount);
+			if (bytesRead === 0) {
+				reachedBoundary = true;
+				break;
+			}
+			const newlineIndex = buffer.subarray(0, bytesRead).indexOf(0x0a);
+			const retainedBytes = newlineIndex === -1 ? bytesRead : newlineIndex;
+			if (retainedBytes > 0) chunks.push(buffer.subarray(0, retainedBytes));
+			byteCount += retainedBytes;
+			if (newlineIndex !== -1) {
+				reachedBoundary = true;
+				break;
+			}
+		}
+		if (!reachedBoundary || byteCount > SESSION_HEADER_MAX_BYTES) return null;
+		const firstLine = Buffer.concat(chunks, byteCount).toString("utf8");
 		if (!firstLine) return null;
 		const header = JSON.parse(firstLine) as Record<string, unknown>;
 		if (header.type !== "session" || typeof header.id !== "string") {
@@ -540,6 +1093,8 @@ function readSessionHeader(filePath: string): SessionHeader | null {
 		return header as unknown as SessionHeader;
 	} catch {
 		return null;
+	} finally {
+		if (fd !== undefined) closeSync(fd);
 	}
 }
 
@@ -620,9 +1175,26 @@ function isDisplayedCustomMessage(entry: SessionEntry): entry is CustomMessageEn
 
 function isSessionFileFlushContent(entry: FileEntry): boolean {
 	return (
+		entry.type === "client_input_receipt" ||
 		(entry.type === "message" && entry.message.role === "assistant") ||
 		(entry.type === "custom_message" && entry.display)
 	);
+}
+
+function isClientInputDurabilityBoundary(entry: SessionEntry): boolean {
+	return (
+		isClientInputWalEntry(entry) ||
+		(entry.type === "message" && entry.message.role === "user" && typeof entry.message.clientMessageId === "string")
+	);
+}
+
+const CLIENT_INPUT_ERROR_MAX_SCALARS = 2_000;
+
+function boundClientInputError(error: string): string {
+	const scalars = Array.from(error);
+	return scalars.length <= CLIENT_INPUT_ERROR_MAX_SCALARS
+		? error
+		: `${scalars.slice(0, CLIENT_INPUT_ERROR_MAX_SCALARS).join("")}…`;
 }
 
 export interface SessionEntrySummary {
@@ -727,6 +1299,14 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 		if (!header) return null;
 
 		const summary = summarizeSessionEntries(entries);
+		// A client-input receipt must be durable before admission, but that private
+		// recovery boundary must not materialize an otherwise nonexistent
+		// conversation in session selectors. Keep the file available for explicit
+		// recovery by path; omit it from enumeration until canonical conversation
+		// content has been committed.
+		if (summary.messageCount === 0 && entries.some(isClientInputWalEntry)) {
+			return null;
+		}
 		const cwd = typeof header.cwd === "string" ? header.cwd : "";
 		const parentSessionPath = header.parentSession;
 		const origin = header.origin === "subagent" ? header.origin : undefined;
@@ -856,7 +1436,15 @@ export class SessionManager {
 	private byId: Map<string, SessionEntry> = new Map();
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
+	private clientInputsById: Map<string, ClientInputRecord> = new Map();
 	private leafId: string | null = null;
+	private nextOrdinal = 1;
+	/** Legacy migration is projected in memory on open and written only by the next actual writer. */
+	private sessionFileNeedsMigration = false;
+	/** First uncertain persistence failure. This manager remains fail-stopped until reloaded. */
+	private persistenceError: Error | undefined;
+	private readonly entryListeners = new Set<SessionEntryListener>();
+	private readonly branchListeners = new Set<SessionBranchListener>();
 
 	private constructor(
 		cwd: string,
@@ -887,23 +1475,19 @@ export class SessionManager {
 			hardenPrivateRegularFileSync(this.sessionFile);
 			this.fileEntries = loadEntriesFromFile(this.sessionFile);
 
-			// If file was empty or corrupted (no valid header), truncate and start fresh
-			// to avoid appending messages without a session header (which breaks the session)
 			if (this.fileEntries.length === 0) {
-				const explicitPath = this.sessionFile;
-				this.newSession();
-				this.sessionFile = explicitPath;
-				this._rewriteFile();
-				this.flushed = true;
-				return;
+				throw new Error(`Session file has no valid session header: ${this.sessionFile}`);
 			}
 
 			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
-			this.sessionId = header?.id ?? createSessionId();
-
-			if (migrateToCurrentVersion(this.fileEntries)) {
-				this._rewriteFile();
+			if (!header || typeof header.id !== "string" || header.id.length === 0) {
+				throw new Error(`Session file has no valid session header: ${this.sessionFile}`);
 			}
+			this.sessionId = header.id;
+
+			// Migration is safe to compute for readers, but writing it here would let
+			// target discovery mutate a session owned by another runtime.
+			this.sessionFileNeedsMigration = migrateToCurrentVersion(this.fileEntries);
 
 			this._buildIndex();
 			this.flushed = true;
@@ -932,7 +1516,11 @@ export class SessionManager {
 		this.fileEntries = [header];
 		this.byId.clear();
 		this.labelsById.clear();
+		this.clientInputsById.clear();
 		this.leafId = null;
+		this.nextOrdinal = 1;
+		this.persistenceError = undefined;
+		this.sessionFileNeedsMigration = false;
 		this.flushed = false;
 
 		if (this.persist) {
@@ -946,11 +1534,44 @@ export class SessionManager {
 		this.byId.clear();
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
+		this.clientInputsById.clear();
 		this.leafId = null;
+		this.nextOrdinal = 1;
+		this.persistenceError = undefined;
+		const currentVersion =
+			(this.fileEntries.find((entry) => entry.type === "session") as SessionHeader | undefined)?.version ===
+			CURRENT_SESSION_VERSION;
+		const seenEntryIds = new Set<string>();
+		let lastWalOrdinal = 0;
 		for (const entry of this.fileEntries) {
 			if (entry.type === "session") continue;
+			if (currentVersion) {
+				if (typeof entry.id !== "string" || entry.id.length === 0 || seenEntryIds.has(entry.id)) {
+					throw new Error("Current session contains an invalid or duplicate entry identity");
+				}
+				seenEntryIds.add(entry.id);
+				if (isClientInputWalEntry(entry)) {
+					if (!Number.isSafeInteger(entry.ordinal) || (entry.ordinal ?? 0) <= lastWalOrdinal) {
+						throw new Error(`Client input WAL entry ${entry.id} has an invalid commit ordinal`);
+					}
+					lastWalOrdinal = entry.ordinal!;
+					assertClientMessageId(entry.clientMessageId);
+					if (
+						(entry.type === "client_input_queued" || entry.type === "client_input_state") &&
+						(typeof entry.receiptId !== "string" || entry.receiptId.length === 0)
+					) {
+						throw new Error(`Client input WAL entry ${entry.id} has an invalid receipt identity`);
+					}
+				}
+			}
+			if (Number.isSafeInteger(entry.ordinal) && (entry.ordinal ?? 0) > 0) {
+				this.nextOrdinal = Math.max(this.nextOrdinal, (entry.ordinal ?? 0) + 1);
+			}
 			this.byId.set(entry.id, entry);
-			this.leafId = entry.id;
+			if (!isClientInputWalEntry(entry)) {
+				this.leafId = entry.id;
+			}
+			this._indexClientInputEntry(entry);
 			if (entry.type === "label") {
 				if (entry.label) {
 					this.labelsById.set(entry.targetId, entry.label);
@@ -970,6 +1591,7 @@ export class SessionManager {
 			`${this.fileEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
 			{ directoryMode: PRIVATE_DIRECTORY_MODE, fileMode: PRIVATE_FILE_MODE },
 		);
+		this.sessionFileNeedsMigration = false;
 	}
 
 	isPersisted(): boolean {
@@ -998,11 +1620,13 @@ export class SessionManager {
 
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
+		const appendEntry = (content: string) =>
+			appendSessionFileEntry(this.sessionFile!, content, isClientInputDurabilityBoundary(entry));
 
 		const hasFlushContent = this.fileEntries.some(isSessionFileFlushContent);
 		if (!hasFlushContent) {
 			if (this.flushed) {
-				appendPrivateFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+				appendEntry(`${JSON.stringify(entry)}\n`);
 			} else {
 				// Mark as not flushed so when conversation content arrives, all entries get written.
 				this.flushed = false;
@@ -1017,15 +1641,348 @@ export class SessionManager {
 			);
 			this.flushed = true;
 		} else {
-			appendPrivateFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			appendEntry(`${JSON.stringify(entry)}\n`);
 		}
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
+		this._assertPersistenceHealthy();
+		if (this.sessionFileNeedsMigration) {
+			// Rewriting is a writer action. Deferring it until the first append keeps
+			// every discovery/open path content-read-only.
+			try {
+				this._rewriteFile();
+				this.flushed = true;
+			} catch (error) {
+				this.persistenceError = error instanceof Error ? error : new Error(String(error));
+				throw this.persistenceError;
+			}
+		}
+		const previousLeafId = this.leafId;
+		const assignedOrdinal = this.nextOrdinal++;
+		entry.ordinal = assignedOrdinal;
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
-		this.leafId = entry.id;
-		this._persist(entry);
+		if (!isClientInputWalEntry(entry)) {
+			this.leafId = entry.id;
+		}
+		try {
+			this._persist(entry);
+		} catch (error) {
+			this.fileEntries.pop();
+			this.byId.delete(entry.id);
+			this.leafId = previousLeafId;
+			this.nextOrdinal = assignedOrdinal;
+			this.persistenceError = error instanceof Error ? error : new Error(String(error));
+			throw this.persistenceError;
+		}
+		this._indexClientInputEntry(entry);
+		if (isClientInputWalEntry(entry)) {
+			return;
+		}
+		for (const listener of this.entryListeners) {
+			try {
+				listener(entry);
+			} catch {
+				// Persistence is authoritative. A projection observer cannot make a
+				// successfully appended entry appear to have failed.
+			}
+		}
+	}
+
+	private _assertPersistenceHealthy(): void {
+		if (!this.persistenceError) return;
+		throw new Error(
+			"Session persistence is fail-stopped after an uncertain write; reload the session before retrying",
+			{ cause: this.persistenceError },
+		);
+	}
+
+	private _indexClientInputEntry(entry: SessionEntry): void {
+		if (entry.type === "client_input_receipt") {
+			assertClientMessageId(entry.clientMessageId);
+			if (entry.command !== "prompt" && entry.command !== "steer" && entry.command !== "follow_up") {
+				throw new Error(`Client input receipt ${entry.id} has an invalid command`);
+			}
+			const input = normalizeClientInputPayload(entry.command, entry.input);
+			if (entry.semanticDigest !== digestClientInputPayload(entry.command, input)) {
+				throw new Error(`Client input receipt ${entry.id} has a mismatched semantic digest`);
+			}
+			const existing = this.clientInputsById.get(entry.clientMessageId);
+			if (!existing) {
+				assertClientInputOutstandingCount(this.clientInputsById.values(), 1);
+				assertClientInputOutstandingBudget(this.clientInputsById.values(), measureClientInputPayloadBytes(input));
+				this.clientInputsById.set(entry.clientMessageId, {
+					receiptId: entry.id,
+					clientMessageId: entry.clientMessageId,
+					command: entry.command,
+					semanticDigest: entry.semanticDigest,
+					input,
+					state: "accepted",
+				});
+			} else if (existing.command !== entry.command || existing.semanticDigest !== entry.semanticDigest) {
+				throw new Error(
+					`Client input id ${JSON.stringify(entry.clientMessageId)} has conflicting durable receipts`,
+				);
+			}
+			return;
+		}
+
+		if (entry.type === "client_input_queued") {
+			assertClientMessageId(entry.clientMessageId);
+			const record = this.clientInputsById.get(entry.clientMessageId);
+			if (!record || record.receiptId !== entry.receiptId) {
+				throw new Error(`Queued client input ${entry.id} has no matching receipt`);
+			}
+			if (record.state !== "accepted" && record.state !== "started") {
+				throw new Error(`Queued client input ${entry.id} was persisted after dispatch started`);
+			}
+			const queuedInput = normalizeClientInputQueuedPayload(entry.queuedInput);
+			if (queuedInput.delivery !== getExpectedClientInputQueuedDelivery(record)) {
+				throw new Error(`Queued client input ${entry.id} conflicts with its requested delivery`);
+			}
+			if (record.queuedInput && JSON.stringify(record.queuedInput) !== JSON.stringify(queuedInput)) {
+				throw new Error(`Client input id ${JSON.stringify(entry.clientMessageId)} has conflicting queued payloads`);
+			}
+			if (
+				!record.queuedInput &&
+				getRecoverableQueuedClientInputCount(this.clientInputsById.values()) >=
+					CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES
+			) {
+				throw new Error(
+					`Recoverable client input queue exceeds ${CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES} entries`,
+				);
+			}
+			if (!record.queuedInput) {
+				assertClientInputOutstandingBudget(
+					this.clientInputsById.values(),
+					measureClientInputPayloadBytes(queuedInput),
+				);
+			}
+			record.queuedEntryId ??= entry.id;
+			record.queuedInput = queuedInput;
+			// A queued payload is the durable output of preflight/input hooks. Once it
+			// commits, replay consumes this exact payload without re-running those
+			// side effects, so the receipt is recoverable again.
+			record.state = "accepted";
+			record.error = undefined;
+			return;
+		}
+
+		if (entry.type === "client_input_state") {
+			assertClientMessageId(entry.clientMessageId);
+			if (entry.state !== "started" && entry.state !== "completed" && entry.state !== "failed") {
+				throw new Error(`Client input state ${entry.id} has an invalid state`);
+			}
+			if (
+				(entry.error !== undefined && typeof entry.error !== "string") ||
+				(entry.state !== "failed" && entry.error !== undefined) ||
+				(typeof entry.error === "string" && Array.from(entry.error).length > CLIENT_INPUT_ERROR_MAX_SCALARS)
+			) {
+				throw new Error(`Client input state ${entry.id} has an invalid error`);
+			}
+			const record = this.clientInputsById.get(entry.clientMessageId);
+			if (!record || record.receiptId !== entry.receiptId) {
+				throw new Error(`Client input state ${entry.id} has no matching receipt`);
+			}
+			if (record.state === "completed" || record.state === "failed") {
+				throw new Error(`Client input state ${entry.id} follows a terminal state`);
+			}
+			if (entry.state === "started" && record.state !== "accepted") {
+				throw new Error(`Client input state ${entry.id} repeats the started boundary`);
+			}
+			record.state = entry.state;
+			record.error = entry.state === "failed" ? entry.error : undefined;
+			return;
+		}
+
+		if (entry.type !== "message" || entry.message.role !== "user") {
+			return;
+		}
+		const clientMessageId = (entry.message as { clientMessageId?: unknown }).clientMessageId;
+		if (clientMessageId === undefined) {
+			return;
+		}
+		if (typeof clientMessageId !== "string") {
+			throw new Error(`Canonical client input ${entry.id} has an invalid client identity`);
+		}
+		const record = requireStartedClientInputReceipt(this.clientInputsById, clientMessageId);
+		record.state = "completed";
+		record.error = undefined;
+		record.canonicalEntryId = entry.id;
+	}
+
+	getClientInput(clientMessageId: string): ClientInputRecord | undefined {
+		const record = this.clientInputsById.get(clientMessageId);
+		return record ? cloneClientInputRecord(record) : undefined;
+	}
+
+	getClientInputRecoveryPlan(): ClientInputRecoveryPlan {
+		const commitOrdinal = (record: ClientInputRecord): number => {
+			const admissionEntry = record.queuedEntryId
+				? this.byId.get(record.queuedEntryId)
+				: this.byId.get(record.receiptId);
+			return admissionEntry?.ordinal ?? Number.MAX_SAFE_INTEGER;
+		};
+		const records = Array.from(this.clientInputsById.values())
+			.filter((record) => record.state === "accepted" && record.queuedInput !== undefined)
+			.sort((a, b) => commitOrdinal(a) - commitOrdinal(b))
+			.map(cloneClientInputRecord);
+		const blocker = Array.from(this.clientInputsById.values())
+			.filter((record) => record.state === "started")
+			.sort((a, b) => commitOrdinal(a) - commitOrdinal(b))[0];
+		if (blocker) {
+			return { kind: "blocked", records, blocker: cloneClientInputRecord(blocker) };
+		}
+		return records.length > 0 ? { kind: "replay", records } : { kind: "idle", records: [] };
+	}
+
+	getRecoverableQueuedClientInputs(): ClientInputRecord[] {
+		return this.getClientInputRecoveryPlan().records;
+	}
+
+	reserveClientInput(
+		clientMessageId: string,
+		command: ClientInputCommand,
+		inputValue: ClientInputPayloadInput,
+	): ClientInputReservation {
+		this._assertPersistenceHealthy();
+		assertClientMessageId(clientMessageId);
+		const input = normalizeClientInputPayload(command, inputValue);
+		const semanticDigest = digestClientInputPayload(command, input);
+		const existing = this.clientInputsById.get(clientMessageId);
+		if (existing) {
+			return { record: cloneClientInputRecord(existing), created: false };
+		}
+		assertClientInputOutstandingCount(this.clientInputsById.values(), 1);
+		assertClientInputOutstandingBudget(this.clientInputsById.values(), measureClientInputPayloadBytes(input));
+		const entry: ClientInputReceiptEntry = {
+			type: "client_input_receipt",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			clientMessageId,
+			command,
+			semanticDigest,
+			input,
+		};
+		this._appendEntry(entry);
+		const record = this.clientInputsById.get(clientMessageId);
+		if (!record) {
+			throw new Error("Client input receipt was not indexed after persistence");
+		}
+		return { record: cloneClientInputRecord(record), created: true };
+	}
+
+	markClientInputQueued(clientMessageId: string, queuedInputValue: ClientInputQueuedPayloadInput): ClientInputRecord {
+		this._assertPersistenceHealthy();
+		const record = this.clientInputsById.get(clientMessageId);
+		if (!record) {
+			throw new Error(`Client input receipt not found: ${clientMessageId}`);
+		}
+		if (record.state !== "accepted" && record.state !== "started") {
+			throw new Error(`Client input ${JSON.stringify(clientMessageId)} cannot be queued from ${record.state}`);
+		}
+		const queuedInput = normalizeClientInputQueuedPayload(queuedInputValue);
+		if (queuedInput.delivery !== getExpectedClientInputQueuedDelivery(record)) {
+			throw new Error(`Client input ${JSON.stringify(clientMessageId)} conflicts with its requested delivery`);
+		}
+		if (record.queuedInput) {
+			if (JSON.stringify(record.queuedInput) !== JSON.stringify(queuedInput)) {
+				throw new Error(`Client input ${JSON.stringify(clientMessageId)} has a conflicting queued payload`);
+			}
+			return cloneClientInputRecord(record);
+		}
+		assertClientInputOutstandingBudget(this.clientInputsById.values(), measureClientInputPayloadBytes(queuedInput));
+		if (
+			getRecoverableQueuedClientInputCount(this.clientInputsById.values()) >=
+			CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES
+		) {
+			throw new Error(
+				`Recoverable client input queue exceeds ${CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES} entries`,
+			);
+		}
+		const entry: ClientInputQueuedEntry = {
+			type: "client_input_queued",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			receiptId: record.receiptId,
+			clientMessageId,
+			queuedInput,
+		};
+		this._appendEntry(entry);
+		return cloneClientInputRecord(this.clientInputsById.get(clientMessageId)!);
+	}
+
+	transitionClientInput(
+		clientMessageId: string,
+		state: Exclude<ClientInputState, "accepted">,
+		error?: string,
+	): ClientInputRecord {
+		this._assertPersistenceHealthy();
+		const record = this.clientInputsById.get(clientMessageId);
+		if (!record) {
+			throw new Error(`Client input receipt not found: ${clientMessageId}`);
+		}
+		if (record.state === "completed" || record.state === "failed") {
+			return cloneClientInputRecord(record);
+		}
+		if (state === "started" && record.state !== "accepted") {
+			return cloneClientInputRecord(record);
+		}
+		const entry: ClientInputStateEntry = {
+			type: "client_input_state",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			receiptId: record.receiptId,
+			clientMessageId,
+			state,
+			...(state === "failed" && error !== undefined ? { error: boundClientInputError(error) } : {}),
+		};
+		this._appendEntry(entry);
+		return cloneClientInputRecord(this.clientInputsById.get(clientMessageId)!);
+	}
+
+	/**
+	 * Observe public conversation entries after they are indexed and durably
+	 * appended. Host-only admission WAL records are intentionally excluded. The
+	 * callback runs synchronously at the commit boundary so ordered projections
+	 * can place transcript mutations in the same causal lane as live events.
+	 */
+	subscribeEntries(listener: SessionEntryListener): () => void {
+		this.entryListeners.add(listener);
+		return () => {
+			this.entryListeners.delete(listener);
+		};
+	}
+
+	/**
+	 * Observe the low-level active-leaf mutation before any later child append.
+	 * This is not an Agent context commit boundary; consumers that require the
+	 * rebuilt message state must observe AgentSession's conversation generation.
+	 */
+	subscribeBranchChanges(listener: SessionBranchListener): () => void {
+		this.branchListeners.add(listener);
+		return () => {
+			this.branchListeners.delete(listener);
+		};
+	}
+
+	private _setBranchLeaf(nextLeafId: string | null): void {
+		const previousLeafId = this.leafId;
+		this.leafId = nextLeafId;
+		if (previousLeafId === nextLeafId) {
+			return;
+		}
+		for (const listener of this.branchListeners) {
+			try {
+				listener({ previousLeafId, nextLeafId });
+			} catch {
+				// Branch mutation remains authoritative if a projection observer fails.
+			}
+		}
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
@@ -1035,6 +1992,9 @@ export class SessionManager {
 	 * These need to be appended via appendCompaction() and appendBranchSummary() methods.
 	 */
 	appendMessage(message: Message | CustomMessage | BashExecutionMessage): string {
+		if (message.role === "user" && message.clientMessageId !== undefined) {
+			requireStartedClientInputReceipt(this.clientInputsById, message.clientMessageId);
+		}
 		const entry: SessionMessageEntry = {
 			type: "message",
 			id: generateId(this.byId),
@@ -1178,16 +2138,18 @@ export class SessionManager {
 	}
 
 	getEntry(id: string): SessionEntry | undefined {
-		return this.byId.get(id);
+		const entry = this.byId.get(id);
+		return entry && !isClientInputWalEntry(entry) ? entry : undefined;
 	}
 
 	/**
 	 * Get all direct children of an entry.
 	 */
 	getChildren(parentId: string): SessionEntry[] {
+		if (!this.getEntry(parentId)) return [];
 		const children: SessionEntry[] = [];
 		for (const entry of this.byId.values()) {
-			if (entry.parentId === parentId) {
+			if (entry.parentId === parentId && !isClientInputWalEntry(entry)) {
 				children.push(entry);
 			}
 		}
@@ -1198,7 +2160,7 @@ export class SessionManager {
 	 * Get the label for an entry, if any.
 	 */
 	getLabel(id: string): string | undefined {
-		return this.labelsById.get(id);
+		return this.getEntry(id) ? this.labelsById.get(id) : undefined;
 	}
 
 	/**
@@ -1207,7 +2169,7 @@ export class SessionManager {
 	 * Pass undefined or empty string to clear the label.
 	 */
 	appendLabelChange(targetId: string, label: string | undefined): string {
-		if (!this.byId.has(targetId)) {
+		if (!this.getEntry(targetId)) {
 			throw new Error(`Entry ${targetId} not found`);
 		}
 		const entry: LabelEntry = {
@@ -1231,18 +2193,79 @@ export class SessionManager {
 
 	/**
 	 * Walk from entry to root, returning all entries in path order.
-	 * Includes all entry types (messages, compaction, model changes, etc.).
+	 * Includes all conversation entry types (messages, compaction, model changes, etc.)
+	 * while traversing transparently across any legacy host-only WAL parents.
 	 * Use buildSessionContext() to get the resolved messages for the LLM.
 	 */
 	getBranch(fromId?: string): SessionEntry[] {
 		const path: SessionEntry[] = [];
 		const startId = fromId ?? this.leafId;
-		let current = startId ? this.byId.get(startId) : undefined;
+		let current = startId ? this.getEntry(startId) : undefined;
 		while (current) {
-			path.unshift(current);
+			if (!isClientInputWalEntry(current)) {
+				path.push(current);
+			}
 			current = current.parentId ? this.byId.get(current.parentId) : undefined;
 		}
-		return path;
+		return path.reverse();
+	}
+
+	/**
+	 * Return a bounded active-branch window without materializing the full path.
+	 * The walk is newest-to-oldest with one final parent lookup to determine
+	 * whether more history exists, then reverses only the bounded result.
+	 */
+	getBranchWindow(options: SessionBranchWindowOptions): SessionBranchWindow | undefined {
+		if (!Number.isSafeInteger(options.maxEntries) || options.maxEntries <= 0) {
+			throw new Error("maxEntries must be a positive safe integer");
+		}
+		const lookbackEntries = options.lookbackEntries ?? 0;
+		if (!Number.isSafeInteger(lookbackEntries) || lookbackEntries < 0) {
+			throw new Error("lookbackEntries must be a non-negative safe integer");
+		}
+		if (options.maxEntries > Number.MAX_SAFE_INTEGER - lookbackEntries) {
+			throw new Error("branch window size exceeds the safe integer range");
+		}
+
+		let current: SessionEntry | undefined;
+		if (options.beforeEntryId !== undefined) {
+			const before = this.getEntry(options.beforeEntryId);
+			if (!before) return undefined;
+			current = before.parentId ? this.byId.get(before.parentId) : undefined;
+		} else {
+			current = this.leafId ? this.byId.get(this.leafId) : undefined;
+		}
+
+		const reverseWindow: SessionEntry[] = [];
+		const seen = new Set<string>();
+		const capacity = options.maxEntries + lookbackEntries;
+		while (current && reverseWindow.length < capacity) {
+			if (seen.has(current.id)) {
+				throw new Error("Session branch contains a parent cycle");
+			}
+			seen.add(current.id);
+			if (!isClientInputWalEntry(current)) {
+				reverseWindow.push(current);
+			}
+			current = current.parentId ? this.byId.get(current.parentId) : undefined;
+		}
+		while (current && isClientInputWalEntry(current)) {
+			if (seen.has(current.id)) {
+				throw new Error("Session branch contains a parent cycle");
+			}
+			seen.add(current.id);
+			current = current.parentId ? this.byId.get(current.parentId) : undefined;
+		}
+		const hasEarlier = current !== undefined;
+		const visitedEntries = reverseWindow.length;
+		reverseWindow.reverse();
+		const entryStart = Math.max(0, reverseWindow.length - options.maxEntries);
+		return {
+			entries: reverseWindow.slice(entryStart),
+			lookback: reverseWindow.slice(0, entryStart),
+			hasEarlier,
+			visitedEntries,
+		};
 	}
 
 	/**
@@ -1262,20 +2285,25 @@ export class SessionManager {
 	}
 
 	/**
-	 * Get all session entries (excludes header). Returns a shallow copy.
+	 * Get all conversation entries (excludes the header and host-only admission WAL).
+	 * Returns a shallow copy.
 	 * The session is append-only: use appendXXX() to add entries, branch() to
 	 * change the leaf pointer. Entries cannot be modified or deleted.
 	 */
 	getEntries(): SessionEntry[] {
-		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+		return this.fileEntries.filter(
+			(entry): entry is SessionEntry => entry.type !== "session" && !isClientInputWalEntry(entry),
+		);
 	}
 
 	/**
-	 * Get the session as a tree structure. Returns a shallow defensive copy of all entries.
+	 * Get the conversation as a tree. Returns a shallow defensive copy of public entries.
 	 * A well-formed session has exactly one root (first entry with parentId === null).
 	 * Orphaned entries (broken parent chain) are also returned as roots.
 	 */
 	getTree(): SessionTreeNode[] {
+		// Admission WAL records share the JSONL for crash recovery but are not
+		// conversation nodes and must never become blank/selectable tree rows.
 		const entries = this.getEntries();
 		const nodeMap = new Map<string, SessionTreeNode>();
 		const roots: SessionTreeNode[] = [];
@@ -1326,10 +2354,10 @@ export class SessionManager {
 	 * are not modified or deleted.
 	 */
 	branch(branchFromId: string): void {
-		if (!this.byId.has(branchFromId)) {
+		if (!this.getEntry(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
-		this.leafId = branchFromId;
+		this._setBranchLeaf(branchFromId);
 	}
 
 	/**
@@ -1338,7 +2366,7 @@ export class SessionManager {
 	 * Use this when navigating to re-edit the first user message.
 	 */
 	resetLeaf(): void {
-		this.leafId = null;
+		this._setBranchLeaf(null);
 	}
 
 	/**
@@ -1347,10 +2375,10 @@ export class SessionManager {
 	 * context from the abandoned conversation path.
 	 */
 	branchWithSummary(branchFromId: string | null, summary: string, details?: unknown, fromHook?: boolean): string {
-		if (branchFromId !== null && !this.byId.has(branchFromId)) {
+		if (branchFromId !== null && !this.getEntry(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
-		this.leafId = branchFromId;
+		this._setBranchLeaf(branchFromId);
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
 			id: generateId(this.byId),
@@ -1384,7 +2412,7 @@ export class SessionManager {
 		let pathParentId: string | null = null;
 		for (const entry of path) {
 			if (entry.type === "label") continue;
-			pathWithoutLabels.push({ ...entry, parentId: pathParentId });
+			pathWithoutLabels.push(withoutClientInputIdentity({ ...entry, parentId: pathParentId }));
 			pathParentId = entry.id;
 		}
 
@@ -1491,6 +2519,14 @@ export class SessionManager {
 	 */
 	static open(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
 		const resolvedPath = resolvePath(path);
+		// An explicitly supplied session directory is a known private artifact
+		// boundary. Harden it before parsing so a fail-closed corrupt session does
+		// not leave sibling session artifacts exposed by permissive directory mode.
+		// Do not chmod an implicitly derived parent, which may be a shared directory.
+		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
+		if (sessionDir !== undefined) {
+			ensurePrivateDirectorySync(dir);
+		}
 		if (existsSync(resolvedPath)) {
 			hardenPrivateRegularFileSync(resolvedPath);
 		}
@@ -1499,7 +2535,6 @@ export class SessionManager {
 		const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
 		const cwd = cwdOverride ?? header?.cwd ?? process.cwd();
 		// If no sessionDir provided, derive from file's parent directory
-		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
 		return new SessionManager(cwd, dir, resolvedPath, true, undefined, sessionDir !== undefined);
 	}
 
@@ -1516,6 +2551,43 @@ export class SessionManager {
 			return new SessionManager(cwd, dir, mostRecent, true);
 		}
 		return new SessionManager(cwd, dir, undefined, true);
+	}
+
+	/**
+	 * Strict daemon-only lookup for a reconnect target. Unlike user-facing
+	 * selectors, this includes WAL-only sessions and fails closed when the target
+	 * file is corrupt or when more than one file claims the same session id.
+	 */
+	static async findForResume(
+		sessionDir: string,
+		sessionId: string,
+	): Promise<{ id: string; path: string } | undefined> {
+		assertValidSessionId(sessionId);
+		const dir = normalizePath(sessionDir);
+		if (!existsSync(dir)) return undefined;
+		ensurePrivateDirectorySync(dir, { hardenExisting: false });
+		const files = (await readdir(dir)).filter((name) => name.endsWith(".jsonl")).map((name) => join(dir, name));
+		const matches: string[] = [];
+		for (const filePath of files) {
+			const header = readSessionHeader(filePath);
+			const filenameClaimsTarget = basename(filePath).endsWith(`_${sessionId}.jsonl`);
+			if (header?.id !== sessionId && !filenameClaimsTarget) continue;
+			if (header?.id !== sessionId) {
+				throw new Error(`Session file claiming ${sessionId} has an invalid header`);
+			}
+			// Full open validates every current-version WAL boundary and aggregate
+			// resource invariant. Do not let listing's best-effort parser downgrade a
+			// corrupt target to "missing".
+			const manager = SessionManager.open(filePath, dir);
+			if (manager.getSessionId() !== sessionId) {
+				throw new Error(`Session file identity changed while opening ${sessionId}`);
+			}
+			matches.push(filePath);
+		}
+		if (matches.length > 1) {
+			throw new Error(`Multiple session files claim ${sessionId}`);
+		}
+		return matches[0] ? { id: sessionId, path: matches[0] } : undefined;
 	}
 
 	/** Create an in-memory session (no file persistence) */
@@ -1572,7 +2644,12 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		const forkEntries = [newHeader, ...sourceEntries.filter((entry) => entry.type !== "session")];
+		const forkEntries = [
+			newHeader,
+			...sourceEntries
+				.filter((entry): entry is SessionEntry => entry.type !== "session" && !isClientInputWalEntry(entry))
+				.map(withoutClientInputIdentity),
+		];
 		writeDurableAtomicFileSync(newSessionFile, `${forkEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, {
 			directoryMode: PRIVATE_DIRECTORY_MODE,
 			fileMode: PRIVATE_FILE_MODE,

@@ -1,9 +1,21 @@
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
-import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { runRpcMode as runRpcModeImpl } from "../src/modes/rpc/rpc-mode.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
+
+function runRpcMode(runtimeHost: AgentSessionRuntime, options?: Parameters<typeof runRpcModeImpl>[1]): Promise<void> {
+	if (typeof runtimeHost.runWithStableSession !== "function") {
+		Object.assign(runtimeHost, {
+			async runWithStableSession<T>(operation: (session: AgentSession) => Promise<T> | T): Promise<T> {
+				return operation(runtimeHost.session);
+			},
+		});
+	}
+	return runRpcModeImpl(runtimeHost, options);
+}
 
 interface RpcHarness {
 	close(): void;
@@ -120,7 +132,12 @@ describe("RPC assistant formatting", () => {
 		harness.setResponses([fauxAssistantMessage(formattedText)]);
 		const rpc = await startRpcModeForHarness(harness);
 
-		rpc.send({ id: "prompt-1", type: "prompt", message: "formatting" });
+		rpc.send({
+			id: "prompt-1",
+			type: "prompt",
+			clientMessageId: "client-prompt-1",
+			message: "formatting",
+		});
 		await vi.waitFor(() =>
 			expect(
 				rpc.writes.some(

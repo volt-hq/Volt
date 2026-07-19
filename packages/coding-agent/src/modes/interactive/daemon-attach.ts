@@ -70,17 +70,23 @@ export interface RelayNotificationDeliveryForwarder {
 	): Promise<IrohRemotePushNotificationDeliveryStatus>;
 }
 
+export interface DaemonAttachRekeyTransaction {
+	commit(): Promise<void>;
+	rollback(): Promise<void>;
+	dispose(): Promise<void>;
+}
+
 /**
- * TUI-side daemon integration façade. Every method resolves successfully as a
- * no-op when the daemon is off or unreachable: InteractiveMode never throws or
- * blocks on daemon absence.
+ * TUI-side daemon integration façade. Ordinary best-effort methods resolve as
+ * no-ops when the daemon is unavailable. Rekeys reserve their target before a
+ * runtime replacement and publish it only after the replacement is ready.
  */
 export interface DaemonAttach {
 	/** Connect, resolve (or auto-register) the cwd workspace. Never throws. */
 	start(): Promise<void>;
 	acquire(sessionId: string): Promise<AcquireOutcome>;
 	release(sessionId: string): Promise<void>;
-	rekey(oldSessionId: string, newSessionId: string): Promise<void>;
+	prepareRekey(oldSessionId: string, newSessionId: string): Promise<DaemonAttachRekeyTransaction | undefined>;
 	/**
 	 * Forward a state-touching RPC command from a relayed phone conversation to
 	 * the daemon (push targets, live activities, workspace unregister). Returns
@@ -282,7 +288,9 @@ export function createDisabledDaemonAttach(): DaemonAttach {
 			return NOOP_OUTCOME;
 		},
 		async release() {},
-		async rekey() {},
+		async prepareRekey() {
+			return undefined;
+		},
 		async forwardRelayRpc() {
 			return undefined;
 		},
@@ -334,6 +342,8 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 	let activeRelays = 0;
 	const activeRelayIds = new Map<string, string>();
 	let currentSessionId: string | undefined;
+	let heldSessionId: string | undefined;
+	let pendingRekeyTransactionId: string | undefined;
 	let disposed = false;
 	let resolvingWorkspace: Promise<void> | undefined;
 	const eventHandlers = new Set<(event: ControlEvent) => void>();
@@ -377,6 +387,27 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 			};
 		}
 		return NOOP_OUTCOME;
+	};
+
+	const trackAcquireOutcome = (sessionId: string, outcome: AcquireOutcome): void => {
+		if (outcome.kind === "granted") {
+			heldSessionId = sessionId;
+			return;
+		}
+		if (outcome.kind === "pending") {
+			void outcome.granted.then(
+				() => {
+					if (currentSessionId === sessionId && !pendingRekeyTransactionId) {
+						heldSessionId = sessionId;
+					}
+				},
+				() => {},
+			);
+			return;
+		}
+		if (heldSessionId === sessionId) {
+			heldSessionId = undefined;
+		}
 	};
 
 	const relayKey = (clientNodeId: string, sessionId: string) => `${clientNodeId}\0${sessionId}`;
@@ -431,7 +462,7 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 		const sessionId = currentSessionId;
 		const workspaceName = resolvedWorkspaceName;
 		const activeClient = client;
-		if (!sessionId || !workspaceName || !activeClient || !reacquiredHandler) {
+		if (!sessionId || !workspaceName || !activeClient || !reacquiredHandler || pendingRekeyTransactionId) {
 			return;
 		}
 		try {
@@ -440,6 +471,7 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 				response as { type: string } & Record<string, unknown>,
 				(id) => activeClient.waitForResponse(id) as Promise<{ type: string } & Record<string, unknown>>,
 			);
+			trackAcquireOutcome(sessionId, outcome);
 			reacquiredHandler(sessionId, outcome);
 		} catch {
 			// The next reconnect retries.
@@ -488,6 +520,9 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 					},
 					onConnectionStateChange: (next) => {
 						state = next;
+						if (next !== "connected") {
+							heldSessionId = undefined;
+						}
 						if (next === "connected") {
 							void ensureLeaseAfterConnected().catch(() => {});
 						}
@@ -515,10 +550,12 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 			}
 			try {
 				const response = await activeClient.request({ type: "lease_acquire", workspaceName, sessionId });
-				return parseAcquireResponse(
+				const outcome = parseAcquireResponse(
 					response as { type: string } & Record<string, unknown>,
 					(id) => activeClient.waitForResponse(id) as Promise<{ type: string } & Record<string, unknown>>,
 				);
+				trackAcquireOutcome(sessionId, outcome);
+				return outcome;
 			} catch {
 				return NOOP_OUTCOME;
 			}
@@ -526,6 +563,9 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 		async release(sessionId: string) {
 			if (currentSessionId === sessionId) {
 				currentSessionId = undefined;
+			}
+			if (heldSessionId === sessionId) {
+				heldSessionId = undefined;
 			}
 			const workspaceName = resolvedWorkspaceName;
 			const activeClient = client;
@@ -538,20 +578,172 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 				// Daemon-side implicit release on disconnect covers this.
 			}
 		},
-		async rekey(oldSessionId: string, newSessionId: string) {
-			if (currentSessionId === oldSessionId) {
-				currentSessionId = newSessionId;
+		async prepareRekey(oldSessionId: string, newSessionId: string) {
+			if (oldSessionId === newSessionId) {
+				return undefined;
+			}
+			if (pendingRekeyTransactionId) {
+				throw new Error("conversation lease rekey already in progress");
 			}
 			const workspaceName = resolvedWorkspaceName;
 			const activeClient = client;
-			if (!activeClient || !workspaceName) {
-				return;
+			if (heldSessionId !== oldSessionId || !activeClient || !workspaceName || state !== "connected") {
+				pendingRekeyTransactionId = "local";
+				const previousHeldSessionId = heldSessionId;
+				let phase: "prepared" | "committed" | "rolled_back" | "disposed" = "prepared";
+				return {
+					async commit() {
+						if (phase !== "prepared") {
+							return;
+						}
+						currentSessionId = newSessionId;
+						heldSessionId = undefined;
+						const connectedClient = client;
+						const connectedWorkspaceName = resolvedWorkspaceName;
+						if (connectedClient && connectedWorkspaceName && state === "connected") {
+							try {
+								await connectedClient.request({
+									type: "lease_release",
+									workspaceName: connectedWorkspaceName,
+									sessionId: oldSessionId,
+								});
+							} catch {
+								// The old connection may already have released this lease.
+							}
+							try {
+								const response = await connectedClient.request({
+									type: "lease_acquire",
+									workspaceName: connectedWorkspaceName,
+									sessionId: newSessionId,
+								});
+								const outcome = parseAcquireResponse(
+									response as { type: string } & Record<string, unknown>,
+									(id) =>
+										connectedClient.waitForResponse(id) as Promise<
+											{ type: string } & Record<string, unknown>
+										>,
+								);
+								trackAcquireOutcome(newSessionId, outcome);
+								reacquiredHandler?.(newSessionId, outcome);
+							} catch {
+								// Reconnect below re-acquires the committed session id.
+							}
+						}
+						phase = "committed";
+						pendingRekeyTransactionId = undefined;
+						if (state === "connected" && heldSessionId !== newSessionId) {
+							await ensureLeaseAfterConnected().catch(() => {});
+						}
+					},
+					async rollback() {
+						if (phase !== "prepared") {
+							return;
+						}
+						phase = "rolled_back";
+						pendingRekeyTransactionId = undefined;
+						currentSessionId = oldSessionId;
+						heldSessionId = state === "connected" && client === activeClient ? previousHeldSessionId : undefined;
+						if (state === "connected" && heldSessionId !== oldSessionId) {
+							await ensureLeaseAfterConnected().catch(() => {});
+						}
+					},
+					async dispose() {
+						if (phase === "disposed" || phase === "rolled_back") {
+							return;
+						}
+						const disposedSessionId = phase === "committed" ? newSessionId : oldSessionId;
+						const disposeClient = client;
+						const disposeWorkspaceName = resolvedWorkspaceName;
+						if (disposeClient && disposeWorkspaceName) {
+							try {
+								await disposeClient.request({
+									type: "lease_release",
+									workspaceName: disposeWorkspaceName,
+									sessionId: disposedSessionId,
+								});
+							} catch {
+								// Disconnect cleanup releases any server-side owner.
+							}
+						}
+						phase = "disposed";
+						pendingRekeyTransactionId = undefined;
+						currentSessionId = undefined;
+						heldSessionId = undefined;
+					},
+				};
 			}
-			try {
-				await activeClient.request({ type: "lease_rekey", workspaceName, oldSessionId, newSessionId });
-			} catch {
-				// Reconnect re-acquires with the new id.
+			const prepared = await activeClient.request({
+				type: "lease_rekey_prepare",
+				workspaceName,
+				oldSessionId,
+				newSessionId,
+			});
+			if (prepared.type !== "lease_rekey_prepared") {
+				throw new Error(
+					prepared.type === "error"
+						? prepared.message
+						: `unexpected daemon response to conversation lease rekey preflight: ${prepared.type}`,
+				);
 			}
+			const transactionId = prepared.transactionId;
+			pendingRekeyTransactionId = transactionId;
+			let phase: "prepared" | "committed" | "rolled_back" | "disposed" = "prepared";
+			return {
+				async commit() {
+					if (phase !== "prepared") {
+						return;
+					}
+					const response = await activeClient.request({ type: "lease_rekey_commit", transactionId });
+					if (response.type !== "ok") {
+						throw new Error(
+							response.type === "error"
+								? response.message
+								: `unexpected daemon response to conversation lease rekey commit: ${response.type}`,
+						);
+					}
+					phase = "committed";
+					pendingRekeyTransactionId = undefined;
+					currentSessionId = newSessionId;
+					heldSessionId = newSessionId;
+				},
+				async rollback() {
+					if (phase !== "prepared") {
+						return;
+					}
+					let retained = false;
+					try {
+						const response = await activeClient.request({ type: "lease_rekey_rollback", transactionId });
+						retained = response.type === "ok";
+					} catch {
+						// Disconnect cleanup rolls the reservation and lease back implicitly.
+					}
+					phase = "rolled_back";
+					pendingRekeyTransactionId = undefined;
+					currentSessionId = oldSessionId;
+					heldSessionId = retained && state === "connected" ? oldSessionId : undefined;
+					if (state === "connected" && heldSessionId !== oldSessionId) {
+						await ensureLeaseAfterConnected().catch(() => {});
+					}
+				},
+				async dispose() {
+					if (phase === "disposed" || phase === "rolled_back") {
+						return;
+					}
+					try {
+						if (phase === "committed") {
+							await activeClient.request({ type: "lease_release", workspaceName, sessionId: newSessionId });
+						} else {
+							await activeClient.request({ type: "lease_rekey_dispose", transactionId });
+						}
+					} catch {
+						// Disconnect cleanup releases both reservation and lease implicitly.
+					}
+					phase = "disposed";
+					pendingRekeyTransactionId = undefined;
+					currentSessionId = undefined;
+					heldSessionId = undefined;
+				},
+			};
 		},
 		async forwardRelayRpc(
 			clientNodeId: string,
@@ -692,6 +884,9 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 		},
 		async dispose() {
 			disposed = true;
+			currentSessionId = undefined;
+			heldSessionId = undefined;
+			pendingRekeyTransactionId = undefined;
 			activeRelayIds.clear();
 			await client?.close();
 			client = undefined;

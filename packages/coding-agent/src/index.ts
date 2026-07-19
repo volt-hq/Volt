@@ -548,6 +548,7 @@ export {
 	createJsonlStreamRpcTransport,
 	createLoopbackRpcTransportPair,
 	DEFAULT_IROH_READ_LIMIT,
+	DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES,
 	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
 	type IrohBiStreamLike,
 	type IrohBytes,

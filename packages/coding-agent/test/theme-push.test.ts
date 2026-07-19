@@ -1,4 +1,5 @@
 import { describe, expect, it, test, vi } from "vitest";
+import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import {
@@ -64,6 +65,9 @@ describe("host theme token push (§9.5)", () => {
 			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
 			dispose: vi.fn(async () => undefined),
 			setRebindSession: vi.fn(),
+			async runWithStableSession<T>(operation: (stableSession: AgentSession) => Promise<T> | T): Promise<T> {
+				return operation(session as unknown as AgentSession);
+			},
 		} as unknown as AgentSessionRuntime;
 
 		let lineHandler: ((line: string) => void) | undefined;

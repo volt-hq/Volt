@@ -3,7 +3,10 @@ import { serializeJsonLine } from "./jsonl.ts";
 import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "./transport.ts";
 
 export const DEFAULT_IROH_READ_LIMIT = 64 * 1024;
-export const DEFAULT_IROH_RPC_MAX_LINE_BYTES = 8 * 1024 * 1024;
+/** Mirrored by volt-app's JSONLLineDecoder.maximumEncodedLineBytes. */
+export const DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES = 4 * 1024 * 1024;
+/** JSON content bytes before the required LF framing byte. */
+export const DEFAULT_IROH_RPC_MAX_LINE_BYTES = DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES - 1;
 
 export type IrohBytes = Array<number> | Uint8Array;
 
@@ -29,7 +32,7 @@ export interface IrohRpcTransportOptions {
 	initialInput?: IrohBytes;
 	/** Maximum bytes requested per Iroh read. Defaults to 64 KiB. */
 	readLimit?: number;
-	/** Maximum bytes allowed in one inbound or outbound JSONL line. Defaults to 8 MiB. */
+	/** Maximum JSON content bytes allowed in one inbound or outbound line. Defaults to 4 MiB minus LF. */
 	maxLineBytes?: number;
 	/** Finish the send half during close. Defaults to true. */
 	finishSendOnClose?: boolean;
@@ -236,7 +239,7 @@ async function readIrohJsonl(
 export interface ReadIrohJsonlLineOptions {
 	/** Maximum bytes requested per Iroh read. Defaults to 64 KiB. */
 	readLimit?: number;
-	/** Maximum bytes allowed before the LF delimiter. Defaults to 8 MiB. */
+	/** Maximum bytes allowed before the LF delimiter. Defaults to 4 MiB minus LF. */
 	maxLineBytes?: number;
 }
 

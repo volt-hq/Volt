@@ -58,6 +58,12 @@ export interface ControlServer {
 	connections(): ControlConnection[];
 	broadcast(event: ControlEvent): void;
 	sendTo(connectionId: string, event: ControlEvent): boolean;
+	/**
+	 * Atomically stop admitting control requests and drain every request admitted
+	 * before that cut. Established sockets stay open for shutdown events, and new
+	 * hellos are rejected as shutting down until close() retires the listener.
+	 */
+	quiesce(): Promise<void>;
 	close(): Promise<void>;
 }
 
@@ -80,6 +86,22 @@ let controlConnectionSequence = 0;
 export async function startControlServer(options: ControlServerOptions): Promise<ControlServer> {
 	const { socketPath, version, authToken, handlers } = options;
 	const connections = new Map<string, ControlConnectionImpl>();
+	const pendingSockets = new Set<Socket>();
+	const admittedRequests = new Set<Promise<void>>();
+	let acceptingRequests = true;
+	let requestDrainPromise: Promise<void> | undefined;
+	let closing = false;
+	let closePromise: Promise<void> | undefined;
+
+	const drainAdmittedRequests = (): Promise<void> => {
+		acceptingRequests = false;
+		requestDrainPromise ??= (async () => {
+			while (admittedRequests.size > 0) {
+				await Promise.all(Array.from(admittedRequests));
+			}
+		})();
+		return requestDrainPromise;
+	};
 
 	class ControlConnectionImpl implements ControlConnection {
 		readonly connectionId: string;
@@ -110,6 +132,13 @@ export async function startControlServer(options: ControlServerOptions): Promise
 	}
 
 	const server: Server = createServer((socket) => {
+		if (closing) {
+			// server.close() can race a connection event that was already queued.
+			// Such a socket never enters a handshake or escapes control-server ownership.
+			socket.destroy();
+			return;
+		}
+		pendingSockets.add(socket);
 		const decoder = new ControlLineDecoder();
 		let established: ControlConnectionImpl | undefined;
 		let handedOffToRelay = false;
@@ -128,7 +157,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				fatal("invalid_hello");
 				return false;
 			}
-			if (handlers.isShuttingDown?.()) {
+			if (!acceptingRequests || handlers.isShuttingDown?.()) {
 				const ack: HelloAck = {
 					type: "hello_ack",
 					ok: false,
@@ -182,6 +211,11 @@ export async function startControlServer(options: ControlServerOptions): Promise
 					socket.destroy();
 					return false;
 				}
+				if (admitted) {
+					// The relay lifecycle is now the socket's exact owner. It must not
+					// be destroyed by control-server shutdown independently.
+					pendingSockets.delete(socket);
+				}
 				if (!admitted) {
 					const ack: HelloAck = { type: "hello_ack", ok: false, error: "bad_relay_token" };
 					socket.end(encodeControlLine(ack));
@@ -189,6 +223,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				return false;
 			}
 			established = new ControlConnectionImpl(socket, hello);
+			pendingSockets.delete(socket);
 			connections.set(established.connectionId, established);
 			const ack: HelloAck = {
 				type: "hello_ack",
@@ -217,14 +252,42 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				connection.send({ type: "error", id, code: "invalid_request", message: "unrecognized control request" });
 				return;
 			}
-			Promise.resolve(handlers.onRequest(connection, message)).catch((error) => {
+			if (!acceptingRequests || handlers.isShuttingDown?.()) {
+				connection.send({
+					type: "error",
+					id: message.id,
+					code: "shutting_down",
+					message: "daemon is shutting down",
+				});
+				return;
+			}
+
+			// Register the request before invoking its handler. A shutdown request can
+			// synchronously close admission from inside onRequest, so registering after
+			// invocation would let the durable shutdown cut overtake its own handler.
+			let settleRequest: () => void = () => {};
+			const admittedRequest = new Promise<void>((resolve) => {
+				settleRequest = resolve;
+			});
+			admittedRequests.add(admittedRequest);
+			void admittedRequest.then(() => admittedRequests.delete(admittedRequest));
+			const rejectRequest = (error: unknown): void => {
 				connection.send({
 					type: "error",
 					id: message.id,
 					code: "internal_error",
 					message: error instanceof Error ? error.message : String(error),
 				});
-			});
+			};
+			try {
+				void Promise.resolve(handlers.onRequest(connection, message)).then(settleRequest, (error) => {
+					rejectRequest(error);
+					settleRequest();
+				});
+			} catch (error) {
+				rejectRequest(error);
+				settleRequest();
+			}
 		};
 
 		const onData = (chunk: Buffer) => {
@@ -245,6 +308,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 			socket.destroy();
 		});
 		socket.on("close", () => {
+			pendingSockets.delete(socket);
 			if (established) {
 				connections.delete(established.connectionId);
 				handlers.onConnectionClosed?.(established);
@@ -292,27 +356,44 @@ export async function startControlServer(options: ControlServerOptions): Promise
 			connection.send(event);
 			return true;
 		},
+		quiesce() {
+			return drainAdmittedRequests();
+		},
 		async close() {
-			for (const connection of connections.values()) {
-				connection.close();
-			}
-			await new Promise<void>((resolve) => {
-				server.close(() => resolve());
-			});
-			if (process.platform !== "win32" && boundSocketStats) {
-				try {
-					const currentStats = lstatSync(socketPath);
-					if (
-						currentStats.isSocket() &&
-						currentStats.dev === boundSocketStats.dev &&
-						currentStats.ino === boundSocketStats.ino
-					) {
-						rmSync(socketPath, { force: true });
-					}
-				} catch {
-					// Already gone or not ours.
+			closePromise ??= (() => {
+				const requestDrain = drainAdmittedRequests();
+				closing = true;
+				for (const socket of pendingSockets) {
+					socket.destroy();
 				}
-			}
+				const serverClosed = new Promise<void>((resolve) => {
+					server.close(() => resolve());
+				});
+				return (async () => {
+					// Leave established sockets alive until admitted handlers settle so their
+					// terminal responses (including shutdown's ok) can still be delivered.
+					await requestDrain;
+					for (const connection of connections.values()) {
+						connection.close();
+					}
+					await serverClosed;
+					if (process.platform !== "win32" && boundSocketStats) {
+						try {
+							const currentStats = lstatSync(socketPath);
+							if (
+								currentStats.isSocket() &&
+								currentStats.dev === boundSocketStats.dev &&
+								currentStats.ino === boundSocketStats.ino
+							) {
+								rmSync(socketPath, { force: true });
+							}
+						} catch {
+							// Already gone or not ours.
+						}
+					}
+				})();
+			})();
+			await closePromise;
 		},
 	};
 }

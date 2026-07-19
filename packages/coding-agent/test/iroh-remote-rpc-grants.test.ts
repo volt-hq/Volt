@@ -66,6 +66,7 @@ describe("Iroh remote RPC grants", () => {
 			"conversation.observe.v1",
 			"conversation.control.v1",
 			"model.select.v1",
+			"host.manage.v1",
 		]);
 		expect(review.rpcGrant.capabilities).toEqual(coding.rpcGrant.capabilities);
 		expect(chat.rpcGrant.capabilities).toEqual(coding.rpcGrant.capabilities);
@@ -138,6 +139,16 @@ describe("Iroh remote RPC grants", () => {
 					features: ["host_action_requests.v1"],
 				}),
 				createIrohRemotePresetAccess("coding").rpcGrant,
+			),
+		).toMatchObject({ allowed: true });
+		expect(
+			getIrohRemoteRpcFilterResult(
+				JSON.stringify({
+					id: "caps-observe",
+					type: "set_client_capabilities",
+					features: ["host_action_requests.v1"],
+				}),
+				createIrohRemoteExplicitAccess([], ["conversation.observe.v1"]).rpcGrant,
 			),
 		).toMatchObject({
 			allowed: false,

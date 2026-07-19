@@ -1,8 +1,9 @@
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { AgentSessionEvent } from "../src/core/agent-session.ts";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import type { AgentSessionEvent, PromptPreflightResult } from "../src/core/agent-session.ts";
+import { type AgentSessionRuntime, isConversationTranscriptCommittedEvent } from "../src/core/agent-session-runtime.ts";
 import { REVIEW_UNCOMMITTED_ACTION_ID } from "../src/core/host-actions.ts";
+import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import {
 	createEmptyIrohRemoteHostState,
 	createIrohRemotePresetAccess,
@@ -17,7 +18,10 @@ import {
 	type IrohRemotePushRelayNotificationRequest,
 	type IrohRemotePushTarget,
 } from "../src/core/remote/iroh/index.ts";
+import type { SessionEntry } from "../src/core/session-manager.ts";
+import { createRemoteConversationTranscriptEntry } from "../src/daemon/conversation-commands.ts";
 import {
+	createTestIrohConversationOptions,
 	createTestSession,
 	isRecord,
 	ManualIrohRecvStream,
@@ -50,17 +54,78 @@ vi.mock("../src/core/review.ts", () => ({
 
 import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 
+function createStableSessionRunner<TSession>(getSession: () => TSession) {
+	return {
+		async runWithStableSession<TResult>(
+			operation: (session: TSession) => Promise<TResult> | TResult,
+		): Promise<TResult> {
+			const session = getSession();
+			return operation(session);
+		},
+	};
+}
+
 function getNotifications(send: ManualIrohSendStream): Array<Record<string, unknown>> {
 	return parseWrittenObjects(send).filter((record) => record.type === "notification_request");
 }
 
+function withCurrentConversationAuthority(send: ManualIrohSendStream, command: object): object {
+	const bootstrap = parseWrittenObjects(send)
+		.slice()
+		.reverse()
+		.find((record) => record.type === "conversation_bootstrap");
+	const conversation = bootstrap?.conversation;
+	const delivery = bootstrap?.delivery;
+	const transcript = bootstrap?.transcript;
+	if (!isRecord(conversation) || !isRecord(delivery) || !isRecord(transcript)) {
+		throw new Error("Conversation bootstrap authority is unavailable");
+	}
+	if (
+		typeof conversation.sessionId !== "string" ||
+		typeof delivery.subscriptionId !== "string" ||
+		typeof transcript.branchEpoch !== "string"
+	) {
+		throw new Error("Conversation bootstrap authority is malformed");
+	}
+	return {
+		...command,
+		conversationAuthority: {
+			sessionId: conversation.sessionId,
+			subscriptionId: delivery.subscriptionId,
+			branchEpoch: transcript.branchEpoch,
+		},
+	};
+}
+
 class ThrowingIrohSendStream extends ManualIrohSendStream {
-	writeAll(_bytes: Array<number>): Promise<void> {
+	override async writeAll(bytes: Array<number>): Promise<void> {
+		if (this.writes.length === 0) {
+			await super.writeAll(bytes);
+			return;
+		}
 		throw new Error("send closed");
 	}
 }
 
 const LIVE_ACTIVITY_TOKEN_HASH = "a".repeat(64);
+const TEST_TRANSCRIPT_AUTHORIZATION = {
+	ok: true,
+	allowTools: "",
+	client: {
+		nodeId: "test-client",
+		label: "test-client",
+		allowedWorkspaces: ["workspace"],
+		allowedTools: "",
+		rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
+		pairedAt: 1,
+		lastSeenAt: 2,
+	},
+	paired: true,
+	pairingSecretConsumed: false,
+	workspace: { name: "workspace", path: "/workspace" },
+	workspaceNames: ["workspace"],
+	workspaces: [{ name: "workspace", status: "available" }],
+} satisfies IrohRemoteClientAuthorizationSuccess;
 
 type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
 
@@ -83,6 +148,20 @@ function createAssistantMessage(overrides: Partial<AssistantAgentMessage> = {}):
 		timestamp: 1,
 		...overrides,
 	};
+}
+
+function createTestTranscriptExternalProjection(runtimeHost: AgentSessionRuntime): (event: object) => object | null {
+	return (event) => {
+		if (!isConversationTranscriptCommittedEvent(event)) {
+			return event;
+		}
+		const entry = createRemoteConversationTranscriptEntry(event.entry, TEST_TRANSCRIPT_AUTHORIZATION, runtimeHost);
+		return entry === undefined ? null : { type: "transcript_entry", entry, final: true };
+	};
+}
+
+function publishTestTranscriptCommit(runtimeHost: AgentSessionRuntime, entry: SessionEntry): void {
+	runtimeHost.publishConversationProjectionEvent({ type: "conversation_transcript_committed", entry });
 }
 
 function createLiveActivityRegistration(
@@ -399,6 +478,7 @@ describe("Iroh remote notification requests", () => {
 			stateManager,
 		});
 		const runtimeHost = {
+			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -503,28 +583,33 @@ describe("Iroh remote notification requests", () => {
 		};
 		const deliveredUpdates: Array<{ activityEvent?: "update" | "end"; kind: string }> = [];
 		const recv = new ManualIrohRecvStream();
-		const modePromise = runIrohRemoteRpcMode(
-			{
-				session,
-				dispose: vi.fn(async () => {}),
-				setRebindSession: vi.fn(),
-			} as unknown as AgentSessionRuntime,
-			{
-				disposeRuntimeOnClose: false,
-				rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-				notificationDelivery: {
-					deliverNotification: vi.fn(async () => "no_push_target" as const),
-					deliverLiveActivityUpdate: vi.fn(async (update) => {
-						deliveredUpdates.push({ activityEvent: update.activityEvent, kind: update.kind });
-						return "sent" as const;
-					}),
-				},
-				stream: { recv, send: new ManualIrohSendStream() },
-				workspacePath: "/workspace",
+		const send = new ManualIrohSendStream();
+		const runtimeHost = {
+			session,
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const modePromise = runIrohRemoteRpcMode(runtimeHost, {
+			...createTestIrohConversationOptions(runtimeHost),
+			disposeRuntimeOnClose: false,
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
+			notificationDelivery: {
+				deliverNotification: vi.fn(async () => "no_push_target" as const),
+				deliverLiveActivityUpdate: vi.fn(async (update) => {
+					deliveredUpdates.push({ activityEvent: update.activityEvent, kind: update.kind });
+					return "sent" as const;
+				}),
 			},
-		);
+			stream: { recv, send },
+			workspacePath: "/workspace",
+		});
 
 		await vi.waitFor(() => expect(sessionHandlers.length).toBeGreaterThanOrEqual(2));
+		expect(parseWrittenObjects(send)[0]).toMatchObject({
+			type: "conversation_bootstrap",
+			delivery: { cursor: 0 },
+			conversation: { sessionId: "session-one" },
+		});
 		for (const handler of sessionHandlers) {
 			handler({ type: "agent_start" });
 			handler({ type: "tool_execution_end", toolCallId: "read-1", toolName: "read", result: {}, isError: false });
@@ -1231,8 +1316,11 @@ describe("Iroh remote notification requests", () => {
 	test("sends conversation completion notifications through the push relay when a target exists", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 			},
 		);
@@ -1247,6 +1335,7 @@ describe("Iroh remote notification requests", () => {
 			stateManager,
 		});
 		const runtimeHost = {
+			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -1259,7 +1348,16 @@ describe("Iroh remote notification requests", () => {
 			workspaceName: "volt-app",
 		});
 
-		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
+		recv.pushLine(
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
+		);
 
 		const expectedNotification: IrohRemotePushRelayNotificationRequest = {
 			pushTargetId: "relay-target-1",
@@ -1286,8 +1384,11 @@ describe("Iroh remote notification requests", () => {
 	test("sends failure notice instead of completion notification when a prompt ends with an assistant error", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 				session.messages = [
 					createAssistantMessage({ stopReason: "error", errorMessage: "No API key for provider: openai-codex" }),
@@ -1305,6 +1406,7 @@ describe("Iroh remote notification requests", () => {
 			stateManager,
 		});
 		const runtimeHost = {
+			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -1317,7 +1419,16 @@ describe("Iroh remote notification requests", () => {
 			workspaceName: "volt-app",
 		});
 
-		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
+		recv.pushLine(
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
+		);
 
 		await vi.waitFor(() =>
 			expect(relayClient.sendNotification).toHaveBeenCalledWith(
@@ -1341,13 +1452,17 @@ describe("Iroh remote notification requests", () => {
 	test("does not send a completion notification when a prompt is aborted", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 				session.messages = [createAssistantMessage({ stopReason: "aborted" })];
 			},
 		);
 		const runtimeHost = {
+			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -1357,7 +1472,16 @@ describe("Iroh remote notification requests", () => {
 		} as unknown as AgentSessionRuntime;
 		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
 
-		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
+		recv.pushLine(
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
+		);
 
 		await vi.waitFor(() =>
 			expect(parseWrittenObjects(send)).toContainEqual(
@@ -1374,8 +1498,11 @@ describe("Iroh remote notification requests", () => {
 	test("sends push completion notification when accepted prompt response cannot be written", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 			},
 		);
@@ -1388,6 +1515,7 @@ describe("Iroh remote notification requests", () => {
 			stateManager,
 		});
 		const runtimeHost = {
+			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -1396,17 +1524,33 @@ describe("Iroh remote notification requests", () => {
 			setRebindSession: vi.fn(),
 		} as unknown as AgentSessionRuntime;
 		const recv = new ManualIrohRecvStream();
+		const send = new ThrowingIrohSendStream();
 		const modePromise = runIrohRemoteRpcMode(runtimeHost, {
+			...createTestIrohConversationOptions(runtimeHost),
 			disposeRuntimeOnClose: false,
 			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			notificationDelivery: dispatcher,
-			stream: { recv, send: new ThrowingIrohSendStream() },
+			stream: { recv, send },
 			workspacePath: "/workspace",
 		});
 		void modePromise.catch(() => {});
 		await vi.waitFor(() => expect(session.bindExtensions).toHaveBeenCalledOnce());
+		expect(parseWrittenObjects(send)[0]).toMatchObject({
+			type: "conversation_bootstrap",
+			delivery: { cursor: 0 },
+			conversation: { sessionId: "session-one" },
+		});
 
-		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
+		recv.pushLine(
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
+		);
 
 		await vi.waitFor(() =>
 			expect(relayClient.sendNotification).toHaveBeenCalledWith(
@@ -1420,27 +1564,17 @@ describe("Iroh remote notification requests", () => {
 		const initialSession = createTestSession("initial-session", "initial-entry");
 		const reviewSession = createTestSession("review-session", "review-entry");
 		const reviewContent = [{ type: "text" as const, text: "Review findings" }];
-		reviewSession.sessionManager.getBranch.mockReturnValue([
-			{
-				type: "custom_message",
-				id: "review-entry",
-				parentId: null,
-				timestamp: "2026-06-27T00:00:00.000Z",
-				customType: "review",
-				content: reviewContent,
-				display: true,
-			},
-		]);
-		const reviewSessionHandlers: Array<(event: AgentSessionEvent) => void> = [];
-		reviewSession.subscribe.mockImplementation((handler: (event: AgentSessionEvent) => void) => {
-			reviewSessionHandlers.push(handler);
-			return () => {
-				const index = reviewSessionHandlers.indexOf(handler);
-				if (index !== -1) {
-					reviewSessionHandlers.splice(index, 1);
-				}
-			};
-		});
+		const reviewEntry = {
+			type: "custom_message",
+			id: "review-entry",
+			parentId: null,
+			ordinal: 1,
+			timestamp: "2026-06-27T00:00:00.000Z",
+			customType: "review",
+			content: reviewContent,
+			display: true,
+		} as unknown as SessionEntry;
+		reviewSession.sessionManager.getBranch.mockReturnValue([reviewEntry]);
 		let currentSession = initialSession;
 		const setRebindSession = vi.fn();
 		const runtimeHost = {
@@ -1453,7 +1587,9 @@ describe("Iroh remote notification requests", () => {
 			dispose: vi.fn(async () => {}),
 			setRebindSession,
 		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, initialSession);
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, initialSession, {
+			projectConversationExternal: createTestTranscriptExternalProjection(runtimeHost),
+		});
 		const rebindSession = setRebindSession.mock.calls[0]?.[0] as (() => Promise<void>) | undefined;
 		if (!rebindSession) {
 			throw new Error("Expected runIrohRemoteRpcMode to register a session rebind callback");
@@ -1461,31 +1597,24 @@ describe("Iroh remote notification requests", () => {
 
 		currentSession = reviewSession;
 		await rebindSession();
-		for (const handler of reviewSessionHandlers) {
-			handler({
-				type: "message_end",
-				message: {
-					role: "custom",
-					customType: "review",
-					content: reviewContent,
-					display: true,
-					timestamp: Date.now(),
-				},
-			} as AgentSessionEvent);
-		}
+		publishTestTranscriptCommit(runtimeHost, reviewEntry);
 
 		await vi.waitFor(() =>
-			expect(parseWrittenObjects(send)).toContainEqual({
-				type: "transcript_entry",
-				entry: {
-					entryId: "review-entry",
-					createdAt: "2026-06-27T00:00:00.000Z",
-					role: "assistant",
-					text: "Review findings",
-					truncated: false,
-				},
-				final: true,
-			}),
+			expect(parseWrittenObjects(send)).toContainEqual(
+				expect.objectContaining({
+					type: "transcript_entry",
+					delivery: expect.objectContaining({ cursor: 1 }),
+					entry: {
+						entryId: "review-entry",
+						ordinal: 1,
+						createdAt: "2026-06-27T00:00:00.000Z",
+						role: "assistant",
+						text: "Review findings",
+						truncated: false,
+					},
+					final: true,
+				}),
+			),
 		);
 
 		recv.end();
@@ -1496,25 +1625,18 @@ describe("Iroh remote notification requests", () => {
 		const session = createTestSession("session-one", "leaf-one");
 		const formattedText =
 			"Here is the plan:\n\n- Keep Markdown lists\n- Preserve code fences\n\n```swift\nlet value = 1\n```";
-		const assistantMessage = {
-			role: "assistant",
+		const assistantMessage = createAssistantMessage({
 			content: [{ type: "text" as const, text: formattedText }],
-			timestamp: 1,
-		};
-		session.sessionManager.getBranch.mockReturnValue([
-			{
-				type: "message",
-				id: "assistant-entry",
-				parentId: null,
-				timestamp: "2026-06-27T00:00:00.000Z",
-				message: assistantMessage,
-			},
-		]);
-		const sessionHandlers: Array<(event: AgentSessionEvent) => void> = [];
-		session.subscribe.mockImplementation((handler: (event: AgentSessionEvent) => void) => {
-			sessionHandlers.push(handler);
-			return () => {};
 		});
+		const assistantEntry = {
+			type: "message",
+			id: "assistant-entry",
+			parentId: null,
+			ordinal: 1,
+			timestamp: "2026-06-27T00:00:00.000Z",
+			message: assistantMessage,
+		} as unknown as SessionEntry;
+		session.sessionManager.getBranch.mockReturnValue([assistantEntry]);
 		const runtimeHost = {
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
@@ -1523,24 +1645,28 @@ describe("Iroh remote notification requests", () => {
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),
 		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
-
-		for (const handler of sessionHandlers) {
-			handler({ type: "message_end", message: assistantMessage } as AgentSessionEvent);
-		}
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+			projectConversationExternal: createTestTranscriptExternalProjection(runtimeHost),
+		});
+		publishTestTranscriptCommit(runtimeHost, assistantEntry);
 
 		await vi.waitFor(() =>
-			expect(parseWrittenObjects(send)).toContainEqual({
-				type: "transcript_entry",
-				entry: {
-					entryId: "assistant-entry",
-					createdAt: "2026-06-27T00:00:00.000Z",
-					role: "assistant",
-					text: formattedText,
-					truncated: false,
-				},
-				final: true,
-			}),
+			expect(parseWrittenObjects(send)).toContainEqual(
+				expect.objectContaining({
+					type: "transcript_entry",
+					delivery: expect.objectContaining({ cursor: 1 }),
+					entry: expect.objectContaining({
+						entryId: "assistant-entry",
+						ordinal: 1,
+						createdAt: "2026-06-27T00:00:00.000Z",
+						role: "assistant",
+						text: formattedText,
+						truncated: false,
+						parts: [{ type: "text", text: formattedText, truncated: false }],
+					}),
+					final: true,
+				}),
+			),
 		);
 
 		expect(JSON.stringify(parseWrittenObjects(send))).not.toContain(
@@ -1555,29 +1681,34 @@ describe("Iroh remote notification requests", () => {
 		const expectedText = ["Here is a plan:", "- Step one", "- Step two", "```swift", "\tlet value = 1", "```"].join(
 			"\n",
 		);
-		const assistantMessage = {
-			role: "assistant",
+		// The ordered conversation projection preserves the exact text-part boundaries,
+		// while the legacy get_transcript command still inserts a separator between parts.
+		const expectedLegacyTranscriptText = [
+			"Here is a plan:",
+			"- Step one",
+			"",
+			"- Step two",
+			"```swift",
+			"\tlet value = 1",
+			"```",
+		].join("\n");
+		const assistantMessage = createAssistantMessage({
 			content: [
 				{ type: "text" as const, text: "Here is a plan:\n- Step one" },
-				{ type: "text" as const, text: "- Step two\n```swift\n\tlet value = 1\n```" },
+				{ type: "text" as const, text: "\n- Step two\n```swift\n\tlet value = 1\n```" },
 			],
-			timestamp: 1,
-		};
-		session.sessionManager.getBranch.mockReturnValue([
-			{
-				type: "message",
-				id: "assistant-entry",
-				parentId: null,
-				timestamp: "2026-06-27T00:00:00.000Z",
-				message: assistantMessage,
-			},
-		]);
-		const sessionHandlers: Array<(event: AgentSessionEvent) => void> = [];
-		session.subscribe.mockImplementation((handler: (event: AgentSessionEvent) => void) => {
-			sessionHandlers.push(handler);
-			return () => {};
 		});
+		const assistantEntry = {
+			type: "message",
+			id: "assistant-entry",
+			parentId: null,
+			ordinal: 1,
+			timestamp: "2026-06-27T00:00:00.000Z",
+			message: assistantMessage,
+		} as unknown as SessionEntry;
+		session.sessionManager.getBranch.mockReturnValue([assistantEntry]);
 		const runtimeHost = {
+			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -1585,24 +1716,31 @@ describe("Iroh remote notification requests", () => {
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),
 		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
-
-		for (const handler of sessionHandlers) {
-			handler({ type: "message_end", message: assistantMessage } as AgentSessionEvent);
-		}
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+			projectConversationExternal: createTestTranscriptExternalProjection(runtimeHost),
+		});
+		publishTestTranscriptCommit(runtimeHost, assistantEntry);
 
 		await vi.waitFor(() =>
-			expect(parseWrittenObjects(send)).toContainEqual({
-				type: "transcript_entry",
-				entry: {
-					entryId: "assistant-entry",
-					createdAt: "2026-06-27T00:00:00.000Z",
-					role: "assistant",
-					text: expectedText,
-					truncated: false,
-				},
-				final: true,
-			}),
+			expect(parseWrittenObjects(send)).toContainEqual(
+				expect.objectContaining({
+					type: "transcript_entry",
+					delivery: expect.objectContaining({ cursor: 1 }),
+					entry: expect.objectContaining({
+						entryId: "assistant-entry",
+						ordinal: 1,
+						createdAt: "2026-06-27T00:00:00.000Z",
+						role: "assistant",
+						text: expectedText,
+						truncated: false,
+						parts: [
+							{ type: "text", text: "Here is a plan:\n- Step one", truncated: false },
+							{ type: "text", text: "\n- Step two\n```swift\n\tlet value = 1\n```", truncated: false },
+						],
+					}),
+					final: true,
+				}),
+			),
 		);
 
 		recv.pushLine(JSON.stringify({ id: "transcript-1", type: "get_transcript", limit: 10 }));
@@ -1618,7 +1756,7 @@ describe("Iroh remote notification requests", () => {
 						{
 							id: "assistant-entry",
 							role: "assistant",
-							text: expectedText,
+							text: expectedLegacyTranscriptText,
 							timestamp: "2026-06-27T00:00:00.000Z",
 						},
 					],
@@ -1707,11 +1845,12 @@ describe("Iroh remote notification requests", () => {
 			isError: false,
 			timestamp: 5,
 		};
-		session.sessionManager.getBranch.mockReturnValue([
+		const branch = [
 			{
 				type: "message",
 				id: "assistant-entry",
 				parentId: null,
+				ordinal: 1,
 				timestamp: "2026-06-27T00:00:00.000Z",
 				message: assistantMessage,
 			},
@@ -1719,6 +1858,7 @@ describe("Iroh remote notification requests", () => {
 				type: "message",
 				id: "bash-entry",
 				parentId: "assistant-entry",
+				ordinal: 2,
 				timestamp: "2026-06-27T00:00:01.000Z",
 				message: bashResult,
 			},
@@ -1726,6 +1866,7 @@ describe("Iroh remote notification requests", () => {
 				type: "message",
 				id: "read-entry",
 				parentId: "bash-entry",
+				ordinal: 3,
 				timestamp: "2026-06-27T00:00:02.000Z",
 				message: readResult,
 			},
@@ -1733,6 +1874,7 @@ describe("Iroh remote notification requests", () => {
 				type: "message",
 				id: "registry-entry",
 				parentId: "read-entry",
+				ordinal: 4,
 				timestamp: "2026-06-27T00:00:03.000Z",
 				message: registryResult,
 			},
@@ -1740,15 +1882,12 @@ describe("Iroh remote notification requests", () => {
 				type: "message",
 				id: "follow-entry",
 				parentId: "registry-entry",
+				ordinal: 5,
 				timestamp: "2026-06-27T00:00:04.000Z",
 				message: followResult,
 			},
-		]);
-		const sessionHandlers: Array<(event: AgentSessionEvent) => void> = [];
-		session.subscribe.mockImplementation((handler: (event: AgentSessionEvent) => void) => {
-			sessionHandlers.push(handler);
-			return () => {};
-		});
+		] as unknown as SessionEntry[];
+		session.sessionManager.getBranch.mockReturnValue(branch);
 		const runtimeHost = {
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
@@ -1757,13 +1896,14 @@ describe("Iroh remote notification requests", () => {
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),
 		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
-
-		for (const handler of sessionHandlers) {
-			handler({ type: "message_end", message: bashResult } as AgentSessionEvent);
-			handler({ type: "message_end", message: readResult } as AgentSessionEvent);
-			handler({ type: "message_end", message: registryResult } as AgentSessionEvent);
-			handler({ type: "message_end", message: followResult } as AgentSessionEvent);
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+			projectConversationExternal: createTestTranscriptExternalProjection(runtimeHost),
+		});
+		for (let index = 1; index < branch.length; index++) {
+			const entry = branch[index]!;
+			session.leafId = entry.id;
+			session.sessionManager.getBranch.mockReturnValue(branch.slice(0, index + 1));
+			publishTestTranscriptCommit(runtimeHost, entry);
 		}
 
 		await vi.waitFor(() => {
@@ -1869,11 +2009,12 @@ describe("Iroh remote notification requests", () => {
 			isError: false,
 			timestamp: 2,
 		};
-		session.sessionManager.getBranch.mockReturnValue([
+		const branch = [
 			{
 				type: "message",
 				id: "assistant-entry",
 				parentId: null,
+				ordinal: 1,
 				timestamp: "2026-06-27T00:00:00.000Z",
 				message: assistantMessage,
 			},
@@ -1881,15 +2022,12 @@ describe("Iroh remote notification requests", () => {
 				type: "message",
 				id: "read-image-entry",
 				parentId: "assistant-entry",
+				ordinal: 2,
 				timestamp: "2026-06-27T00:00:01.000Z",
 				message: imageReadResult,
 			},
-		]);
-		const sessionHandlers: Array<(event: AgentSessionEvent) => void> = [];
-		session.subscribe.mockImplementation((handler: (event: AgentSessionEvent) => void) => {
-			sessionHandlers.push(handler);
-			return () => {};
-		});
+		] as unknown as SessionEntry[];
+		session.sessionManager.getBranch.mockReturnValue(branch);
 		const runtimeHost = {
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
@@ -1898,11 +2036,10 @@ describe("Iroh remote notification requests", () => {
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),
 		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
-
-		for (const handler of sessionHandlers) {
-			handler({ type: "message_end", message: imageReadResult } as AgentSessionEvent);
-		}
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+			projectConversationExternal: createTestTranscriptExternalProjection(runtimeHost),
+		});
+		publishTestTranscriptCommit(runtimeHost, branch[1]!);
 
 		await vi.waitFor(() => {
 			const objects = parseWrittenObjects(send);
@@ -1931,8 +2068,11 @@ describe("Iroh remote notification requests", () => {
 	test("falls back to Iroh notification_request when no push target exists", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 			},
 		);
@@ -1944,6 +2084,7 @@ describe("Iroh remote notification requests", () => {
 			stateManager,
 		});
 		const runtimeHost = {
+			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -1956,7 +2097,16 @@ describe("Iroh remote notification requests", () => {
 			workspaceName: "volt-app",
 		});
 
-		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
+		recv.pushLine(
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
+		);
 
 		await vi.waitFor(() =>
 			expect(getNotifications(send)).toEqual([
@@ -1980,8 +2130,11 @@ describe("Iroh remote notification requests", () => {
 	test("does not send duplicate push notifications for the same eventId", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 			},
 		);
@@ -1994,6 +2147,7 @@ describe("Iroh remote notification requests", () => {
 			stateManager,
 		});
 		const runtimeHost = {
+			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -2001,14 +2155,32 @@ describe("Iroh remote notification requests", () => {
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),
 		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv } = await startIrohRpcMode(runtimeHost, session, {
+		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
 			notificationDelivery: dispatcher,
 		});
 
-		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
+		recv.pushLine(
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
+		);
 		await vi.waitFor(() => expect(relayClient.sendNotification).toHaveBeenCalledTimes(1));
 		session.leafId = "before-run";
-		recv.pushLine(JSON.stringify({ id: "prompt-2", type: "prompt", message: "hello again" }));
+		recv.pushLine(
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-2",
+					type: "prompt",
+					clientMessageId: "client-prompt-2",
+					message: "hello again",
+				}),
+			),
+		);
 		await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledTimes(2));
 		await new Promise((resolve) => setImmediate(resolve));
 		expect(relayClient.sendNotification).toHaveBeenCalledTimes(1);
@@ -2020,8 +2192,11 @@ describe("Iroh remote notification requests", () => {
 	test("disables push targets reported invalid by the relay", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 			},
 		);
@@ -2047,6 +2222,7 @@ describe("Iroh remote notification requests", () => {
 			stateManager,
 		});
 		const runtimeHost = {
+			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -2058,7 +2234,16 @@ describe("Iroh remote notification requests", () => {
 			notificationDelivery: dispatcher,
 		});
 
-		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
+		recv.pushLine(
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
+		);
 
 		await vi.waitFor(async () => {
 			const state = await stateManager.getState();
@@ -2085,12 +2270,16 @@ describe("Iroh remote notification requests", () => {
 	test("emits one conversation completion notification after prompt completion", async () => {
 		const session = createTestSession("session-one", "before-run");
 		session.prompt.mockImplementation(
-			async (_message: string, options?: { preflightResult?: (success: boolean) => void }): Promise<void> => {
-				options?.preflightResult?.(true);
+			async (
+				_message: string,
+				options?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 			},
 		);
 		const runtimeHost = {
+			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -2100,7 +2289,16 @@ describe("Iroh remote notification requests", () => {
 		} as unknown as AgentSessionRuntime;
 		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
 
-		recv.pushLine(JSON.stringify({ id: "prompt-1", type: "prompt", message: "hello" }));
+		recv.pushLine(
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "prompt-1",
+					type: "prompt",
+					clientMessageId: "client-prompt-1",
+					message: "hello",
+				}),
+			),
+		);
 
 		await vi.waitFor(() =>
 			expect(getNotifications(send)).toEqual([
@@ -2122,6 +2320,7 @@ describe("Iroh remote notification requests", () => {
 	test("emits one review completion notification after a remote review action completes", async () => {
 		let currentSession = createTestSession("initial-session", "initial-run");
 		const runtimeHost = {
+			...createStableSessionRunner(() => currentSession),
 			get session() {
 				return currentSession;
 			},
@@ -2139,7 +2338,15 @@ describe("Iroh remote notification requests", () => {
 		const startupSession = currentSession;
 		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, startupSession);
 
-		recv.pushLine(JSON.stringify({ id: "review-1", type: "invoke_ui_action", action: REVIEW_UNCOMMITTED_ACTION_ID }));
+		recv.pushLine(
+			JSON.stringify(
+				withCurrentConversationAuthority(send, {
+					id: "review-1",
+					type: "invoke_ui_action",
+					action: REVIEW_UNCOMMITTED_ACTION_ID,
+				}),
+			),
+		);
 
 		await vi.waitFor(() =>
 			expect(getNotifications(send)).toEqual([

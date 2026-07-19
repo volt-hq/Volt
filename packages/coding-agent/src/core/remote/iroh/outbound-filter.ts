@@ -31,15 +31,34 @@ export interface IrohRemoteOutboundJsonlReadablePipeOptions extends IrohRemoteOu
 	writeLine: (line: string) => Promise<void> | void;
 }
 
-const PROJECTED_MESSAGE_FRAME_FIELDS = new Set(["type", "stream", "message"]);
+const PROJECTED_MESSAGE_FRAME_FIELDS = new Set(["type", "stream", "message", "delivery"]);
 const PROJECTED_MESSAGE_UPDATE_FRAME_FIELDS = new Set([
 	"type",
 	"stream",
 	"assistantMessageEvent",
 	"message",
 	"toolState",
+	"delivery",
 ]);
 const PROJECTED_STREAM_POSITION_FIELDS = new Set(["epoch", "seq"]);
+const CONVERSATION_DELIVERY_POSITION_FIELDS = new Set(["subscriptionId", "cursor"]);
+const CONVERSATION_BOOTSTRAP_FIELDS = new Set([
+	"type",
+	"delivery",
+	"conversation",
+	"state",
+	"transcript",
+	"activeAssistant",
+	"activeWorkflows",
+	"reason",
+	"requestId",
+]);
+const SENSITIVE_CONVERSATION_SIGNATURE_FIELDS = new Set([
+	"textSignature",
+	"thinkingSignature",
+	"thoughtSignature",
+	"signatureDelta",
+]);
 
 export function createIrohRemoteOutboundFilteredRpcTransport(options: IrohRemoteOutboundFilterOptions): RpcTransport {
 	const sanitizer = createIrohRemoteProjectionSanitizer(options);
@@ -116,8 +135,71 @@ function sanitizeOutboundValue(
 	if (isProjectedAssistantMessageFrame(decorated)) {
 		return decorated;
 	}
+	if (isConversationBootstrapEnvelope(decorated)) {
+		return sanitizeConversationBootstrapEnvelope(decorated, sanitizer);
+	}
 	const sanitized = sanitizer.sanitizeValue(decorated, preserveProjectedAssistantSubagentMessage);
 	return isRecord(sanitized) || Array.isArray(sanitized) ? sanitized : {};
+}
+
+function sanitizeConversationBootstrapEnvelope(
+	value: Record<string, unknown>,
+	sanitizer: IrohRemoteProjectionSanitizer,
+): object {
+	const sanitized: Record<string, unknown> = Object.create(null);
+	for (const key of CONVERSATION_BOOTSTRAP_FIELDS) {
+		if (!Object.hasOwn(value, key)) {
+			continue;
+		}
+		const entry = value[key];
+		if (key === "type") {
+			sanitized.type = "conversation_bootstrap";
+			continue;
+		}
+		if (key === "delivery") {
+			sanitized.delivery = sanitizeConversationDeliveryPosition(entry);
+			continue;
+		}
+		if ((key === "requestId" || key === "reason") && typeof entry === "string") {
+			sanitized[key] = entry;
+			continue;
+		}
+		const sanitizedEntry = stripSensitiveConversationSignatures(sanitizer.sanitizeValue(entry));
+		if (sanitizedEntry !== undefined) {
+			sanitized[key] = sanitizedEntry;
+		}
+	}
+	return sanitized;
+}
+
+function sanitizeConversationDeliveryPosition(value: unknown): object {
+	if (!isRecord(value)) {
+		return {};
+	}
+	const sanitized: Record<string, unknown> = Object.create(null);
+	if (typeof value.subscriptionId === "string") {
+		sanitized.subscriptionId = value.subscriptionId;
+	}
+	if (typeof value.cursor === "number" && Number.isSafeInteger(value.cursor) && value.cursor >= 0) {
+		sanitized.cursor = value.cursor;
+	}
+	return sanitized;
+}
+
+function stripSensitiveConversationSignatures(value: unknown): unknown {
+	if (Array.isArray(value)) {
+		return value.map(stripSensitiveConversationSignatures);
+	}
+	if (!isRecord(value)) {
+		return value;
+	}
+	const stripped: Record<string, unknown> = Object.create(null);
+	for (const [key, entry] of Object.entries(value)) {
+		if (!SENSITIVE_CONVERSATION_SIGNATURE_FIELDS.has(key)) {
+			stripped[key] = stripSensitiveConversationSignatures(entry);
+		}
+	}
+	return stripped;
 }
 
 const preserveProjectedAssistantSubagentMessage: IrohRemoteSanitizerValuePreserver = (record, key, value) =>
@@ -125,6 +207,9 @@ const preserveProjectedAssistantSubagentMessage: IrohRemoteSanitizerValuePreserv
 
 function isProjectedAssistantMessageFrame(value: unknown): boolean {
 	if (!isRecord(value) || !isProjectedStreamPosition(value.stream)) {
+		return false;
+	}
+	if ("delivery" in value && !isConversationDeliveryPosition(value.delivery)) {
 		return false;
 	}
 	if (value.type === "message_start" || value.type === "message_end") {
@@ -143,6 +228,10 @@ function isProjectedAssistantMessageFrame(value: unknown): boolean {
 	return true;
 }
 
+function isConversationBootstrapEnvelope(value: unknown): value is Record<string, unknown> {
+	return isRecord(value) && value.type === "conversation_bootstrap";
+}
+
 function isAssistantMessage(value: unknown): boolean {
 	return isRecord(value) && value.role === "assistant" && Array.isArray(value.content);
 }
@@ -157,6 +246,18 @@ function isProjectedStreamPosition(value: unknown): boolean {
 		typeof value.seq === "number" &&
 		Number.isSafeInteger(value.seq) &&
 		value.seq >= 0
+	);
+}
+
+function isConversationDeliveryPosition(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		hasOnlyFields(value, CONVERSATION_DELIVERY_POSITION_FIELDS) &&
+		typeof value.subscriptionId === "string" &&
+		value.subscriptionId.length > 0 &&
+		typeof value.cursor === "number" &&
+		Number.isSafeInteger(value.cursor) &&
+		value.cursor >= 0
 	);
 }
 

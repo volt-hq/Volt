@@ -130,16 +130,19 @@ describe("Iroh outbound projector-frame classification", () => {
 			type: "message_start",
 			stream: { epoch: 1, seq: 0 },
 			message: projectedAssistantMessage(hostFile),
+			delivery: { subscriptionId: "subscription-1", cursor: 1 },
 		};
 		const update = {
 			type: "message_update",
 			stream: { epoch: 1, seq: 1 },
 			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: hostFile },
+			delivery: { subscriptionId: "subscription-1", cursor: 2 },
 		};
 		const end = {
 			type: "message_end",
 			stream: { epoch: 1, seq: 1 },
 			message: projectedAssistantMessage(hostFile),
+			delivery: { subscriptionId: "subscription-1", cursor: 3 },
 		};
 
 		expect(sanitizeIrohRemoteOutbound(start, { workspacePath })).toBe(start);
@@ -147,6 +150,173 @@ describe("Iroh outbound projector-frame classification", () => {
 		expect(sanitizeIrohRemoteOutbound(end, { workspacePath })).toBe(end);
 		expect(getRecord(getArray(getRecord(start.message).content)[0]).text).toBe(hostFile);
 		expect(JSON.stringify([start, update, end])).toContain("secret-project");
+	});
+
+	it("does not treat malformed delivery metadata as a wire-final projected frame", () => {
+		const frame = {
+			type: "message_update",
+			stream: { epoch: 1, seq: 1 },
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: hostFile },
+			delivery: { subscriptionId: "subscription-1", cursor: 2, hostPath: hostFile },
+		};
+
+		const sanitized = getRecord(sanitizeIrohRemoteOutbound(frame, { workspacePath }));
+		expect(sanitized).not.toBe(frame);
+		expect(sanitized).toMatchObject({
+			assistantMessageEvent: { delta: "/workspace/notes.md" },
+			delivery: { hostPath: "/workspace/notes.md" },
+		});
+	});
+
+	it("allowlists and recursively sanitizes ordered conversation bootstraps", () => {
+		const bootstrap = {
+			type: "conversation_bootstrap",
+			delivery: { subscriptionId: "subscription-1", cursor: 47, hostPath: hostFile },
+			conversation: {
+				workspaceName: "scratch",
+				sessionId: "session-1",
+				diagnosticPath: hostFile,
+			},
+			state: {
+				sessionId: "session-1",
+				cwd: workspacePath,
+				sessionFile: `${workspacePath}${sep}.volt${sep}sessions${sep}session-1.jsonl`,
+				activeTools: [
+					{
+						toolCallId: "tool-1",
+						toolName: "read",
+						status: "started",
+						args: { path: hostFile, fullOutputPath: hostFile },
+						details: { signatureDelta: "private-state-signature", path: hostFile },
+					},
+				],
+			},
+			transcript: {
+				workspaceName: "scratch",
+				sessionId: "session-1",
+				items: [
+					{
+						entryId: "entry-1",
+						ordinal: 1,
+						createdAt: "2026-07-17T00:00:00.000Z",
+						role: "assistant",
+						text: `answer ${hostFile}`,
+						truncated: false,
+						path: hostFile,
+						parts: [
+							{
+								type: "thinking",
+								text: `plan ${hostFile}`,
+								thinkingSignature: "private-transcript-signature",
+							},
+						],
+					},
+				],
+				hasMore: false,
+				nextBeforeEntryId: null,
+				projectionVersion: 3,
+				branchEpoch: "branch-1",
+				head: { entryId: "entry-1", ordinal: 1 },
+			},
+			activeAssistant: {
+				stream: { epoch: 3, seq: 128 },
+				message: {
+					...projectedAssistantMessage(hostFile),
+					content: [
+						{ type: "text", text: `answer ${hostFile}`, textSignature: "private-text-signature" },
+						{
+							type: "thinking",
+							thinking: `plan ${hostFile}`,
+							thinkingSignature: "private-thinking-signature",
+						},
+						{
+							type: "toolCall",
+							id: "tool-1",
+							name: "read",
+							arguments: { path: hostFile, fullOutputPath: hostFile },
+							thoughtSignature: "private-tool-signature",
+						},
+					],
+				},
+				toolState: [{ contentIndex: 2, argsText: JSON.stringify({ path: hostFile }) }],
+			},
+			activeWorkflows: [
+				{
+					workflowEvent: {
+						type: "workflow_start",
+						workflowId: "workflow-1",
+						path: hostFile,
+						thoughtSignature: "private-workflow-signature",
+					},
+					activeTools: [
+						{
+							type: "tool_execution_start",
+							toolCallId: "workflow-tool-1",
+							args: { path: hostFile, sessionFile: hostFile },
+						},
+					],
+				},
+			],
+			reason: "resync",
+			requestId: "resync-request-1",
+			unexpectedHostPath: hostFile,
+		};
+
+		const sanitized = getRecord(sanitizeIrohRemoteOutbound(bootstrap, { workspacePath }));
+		expect(Object.keys(sanitized)).toEqual([
+			"type",
+			"delivery",
+			"conversation",
+			"state",
+			"transcript",
+			"activeAssistant",
+			"activeWorkflows",
+			"reason",
+			"requestId",
+		]);
+		expect(sanitized.delivery).toEqual({ subscriptionId: "subscription-1", cursor: 47 });
+		expect(sanitized.reason).toBe("resync");
+		expect(sanitized.requestId).toBe("resync-request-1");
+		expect(sanitized).not.toHaveProperty("unexpectedHostPath");
+
+		const state = getRecord(sanitized.state);
+		expect(state.cwd).toBe("/workspace");
+		expect(state).not.toHaveProperty("sessionFile");
+		const activeTool = getRecord(getArray(state.activeTools)[0]);
+		expect(activeTool.args).toEqual({ path: "/workspace/notes.md" });
+		expect(getRecord(activeTool.details)).toEqual({ path: "/workspace/notes.md" });
+
+		const transcript = getRecord(sanitized.transcript);
+		const transcriptItem = getRecord(getArray(transcript.items)[0]);
+		expect(transcriptItem).toMatchObject({
+			text: "answer /workspace/notes.md",
+			path: "/workspace/notes.md",
+		});
+		expect(getRecord(getArray(transcriptItem.parts)[0])).toEqual({
+			type: "thinking",
+			text: "plan /workspace/notes.md",
+		});
+
+		const activeAssistant = getRecord(sanitized.activeAssistant);
+		const activeMessage = getRecord(activeAssistant.message);
+		const activeContent = getArray(activeMessage.content).map(getRecord);
+		expect(activeContent[0]).toEqual({ type: "text", text: "answer /workspace/notes.md" });
+		expect(activeContent[1]).toEqual({ type: "thinking", thinking: "plan /workspace/notes.md" });
+		expect(activeContent[2]).toEqual({
+			type: "toolCall",
+			id: "tool-1",
+			name: "read",
+			arguments: { path: "/workspace/notes.md" },
+		});
+		expect(getRecord(getArray(activeAssistant.toolState)[0]).argsText).toContain("/workspace/notes.md");
+
+		const workflow = getRecord(getArray(sanitized.activeWorkflows)[0]);
+		expect(getRecord(workflow.workflowEvent)).toMatchObject({ path: "/workspace/notes.md" });
+		expect(getRecord(getRecord(getArray(workflow.activeTools)[0]).args)).toEqual({ path: "/workspace/notes.md" });
+
+		const wire = JSON.stringify(sanitized);
+		expect(wire).not.toContain("secret-project");
+		expect(wire).not.toContain("private-");
 	});
 
 	it("still sanitizes non-assistant and non-projected message frames", () => {

@@ -272,7 +272,7 @@ export class IrohRemoteHostStateManager {
 			try {
 				await this.saveUnlocked(state);
 			} catch (error) {
-				await this.restoreAfterFailedWorktreePersistence(previousState);
+				await this.restoreAfterFailedPersistence(previousState);
 				throw new IrohRemoteWorktreePersistenceError(workspaceName, outcome.worktree.id, error);
 			}
 			return outcome.result;
@@ -295,7 +295,7 @@ export class IrohRemoteHostStateManager {
 			try {
 				await this.saveUnlocked(state);
 			} catch (error) {
-				await this.restoreAfterFailedWorktreePersistence(previousState);
+				await this.restoreAfterFailedPersistence(previousState);
 				throw new IrohRemoteWorktreePersistenceError(worktree.workspaceName, worktree.id, error);
 			}
 			return cloneWorktree(worktree);
@@ -479,6 +479,41 @@ export class IrohRemoteHostStateManager {
 			};
 			await this.saveUnlocked(state);
 			return cloneClient(client);
+		});
+	}
+
+	/** Persist one conversation selection for every attached client in one state write. */
+	async setClientsLastSessionId(
+		nodeIds: readonly string[],
+		workspace: string,
+		sessionId: string,
+	): Promise<IrohRemoteClient[]> {
+		const selectedNodeIds = new Set(nodeIds);
+		if (selectedNodeIds.size === 0) {
+			return [];
+		}
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			const previousState = cloneHostState(state);
+			const clients = state.clients.filter((client) => selectedNodeIds.has(client.nodeId));
+			if (clients.length !== selectedNodeIds.size) {
+				const foundNodeIds = new Set(clients.map((client) => client.nodeId));
+				const missingNodeIds = Array.from(selectedNodeIds).filter((nodeId) => !foundNodeIds.has(nodeId));
+				throw new Error(`Cannot persist session selection for unknown client(s): ${missingNodeIds.join(", ")}`);
+			}
+			for (const client of clients) {
+				client.lastSessionIdByWorkspace = {
+					...(client.lastSessionIdByWorkspace ?? {}),
+					[workspace]: sessionId,
+				};
+			}
+			try {
+				await this.saveUnlocked(state);
+			} catch (error) {
+				await this.restoreAfterFailedPersistence(previousState);
+				throw error;
+			}
+			return clients.map((client) => cloneClient(client));
 		});
 	}
 
@@ -679,6 +714,38 @@ export class IrohRemoteHostStateManager {
 		return this.removeClientLiveActivities(nodeId, (entry) => entry.workspaceName === workspaceName);
 	}
 
+	/** Remove one runtime's complete conversation-identity history across every paired client. */
+	async removeLiveActivitiesForWorkspaceSessions(
+		workspaceName: string,
+		sessionIds: ReadonlySet<string>,
+	): Promise<number> {
+		const selectedSessionIds = new Set(sessionIds);
+		if (selectedSessionIds.size === 0) {
+			return 0;
+		}
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			let removedCount = 0;
+			for (const client of state.clients) {
+				if (!client.liveActivities) {
+					continue;
+				}
+				const beforeCount = client.liveActivities.length;
+				client.liveActivities = client.liveActivities.filter(
+					(entry) => entry.workspaceName !== workspaceName || !selectedSessionIds.has(entry.sessionId),
+				);
+				removedCount += beforeCount - client.liveActivities.length;
+				if (client.liveActivities.length === 0) {
+					delete client.liveActivities;
+				}
+			}
+			if (removedCount > 0) {
+				await this.saveUnlocked(state);
+			}
+			return removedCount;
+		});
+	}
+
 	async removeLiveActivitiesForWorkspace(workspaceName: string): Promise<number> {
 		return this.runExclusive(async () => {
 			const state = await this.loadUnlocked();
@@ -838,7 +905,7 @@ export class IrohRemoteHostStateManager {
 		}
 	}
 
-	private async restoreAfterFailedWorktreePersistence(previousState: IrohRemoteHostState): Promise<void> {
+	private async restoreAfterFailedPersistence(previousState: IrohRemoteHostState): Promise<void> {
 		const restoredState = cloneHostState(previousState);
 		this.state = restoredState;
 		if (!this.store) {
@@ -848,8 +915,8 @@ export class IrohRemoteHostStateManager {
 			await this.store.write(cloneHostState(restoredState));
 			this.state = restoredState;
 		} catch {
-			// A failed rollback may leave the child record in the custom store, which
-			// is safer than deleting a checkout whose persistence outcome is unknown.
+			// The custom store's durability outcome is unknown. Keep the restored
+			// in-memory snapshot so later reads do not expose a failed mutation.
 		}
 	}
 

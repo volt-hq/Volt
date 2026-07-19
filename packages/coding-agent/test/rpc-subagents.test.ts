@@ -1,6 +1,7 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test, vi } from "vitest";
+import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { getStaticIrohRemoteRpcFilterResult as getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/index.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
@@ -190,6 +191,9 @@ function createRuntimeHost(options: {
 		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
 		dispose: vi.fn(async () => undefined),
 		setRebindSession: vi.fn(),
+		async runWithStableSession<T>(operation: (stableSession: AgentSession) => Promise<T> | T): Promise<T> {
+			return operation(session as unknown as AgentSession);
+		},
 	} as unknown as AgentSessionRuntime;
 }
 

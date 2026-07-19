@@ -4,7 +4,12 @@ import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
-import { RELAY_TOKEN_TTL_MS, type RelayOutcome, RelayRegistry } from "../src/daemon/relay-stream.ts";
+import {
+	RELAY_TOKEN_TTL_MS,
+	type RelayOutcome,
+	type RelayPendingRejection,
+	RelayRegistry,
+} from "../src/daemon/relay-stream.ts";
 import { connectRawRelayClient, FakePhoneIrohStream } from "./relay-doubles.ts";
 import { createTestSocketEndpoint } from "./socket-test-helpers.ts";
 
@@ -37,10 +42,10 @@ async function startRelayHarness(): Promise<RelayHarness> {
 		throw error;
 	}
 	cleanups.push(async () => {
-		// server.close() waits for open sockets; admitted relays hold theirs.
-		for (const relay of registry.activeRelays()) {
-			relay.close("host_shutdown");
-		}
+		// server.close() waits for open sockets; active relay owners hold theirs.
+		await Promise.all(
+			registry.all().map((relay) => relay.close("host_shutdown", { pendingMessage: "daemon shutting down" })),
+		);
 		await server.close();
 		endpoint.cleanup();
 	});
@@ -51,6 +56,7 @@ afterEach(async () => {
 	for (const cleanup of cleanups.splice(0)) {
 		await cleanup();
 	}
+	vi.useRealTimers();
 });
 
 const RELAY_AUTHORIZATION = {
@@ -77,8 +83,10 @@ const HANDSHAKE_VERBATIM = {
 function mintTestRelay(
 	registry: RelayRegistry,
 	phone: FakePhoneIrohStream,
-	settle: (outcome: RelayOutcome) => void,
+	onSettled: (outcome: RelayOutcome) => Promise<void> | void,
 	now?: number,
+	rejectPending: (rejection: RelayPendingRejection) => Promise<void> | void = () => {},
+	observePhysicalTask?: (task: Promise<unknown>) => void,
 ) {
 	return registry.mint({
 		workspaceName: "ws",
@@ -105,8 +113,18 @@ function mintTestRelay(
 			},
 		},
 		...(now === undefined ? {} : { now }),
-		settle,
+		rejectPending,
+		onSettled,
+		...(observePhysicalTask === undefined ? {} : { observePhysicalTask }),
 	});
+}
+
+function createDeferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+	let resolve = (_value: T): void => {};
+	const promise = new Promise<T>((resolvePromise) => {
+		resolve = resolvePromise;
+	});
+	return { promise, resolve };
 }
 
 describe("relay framing (§12.2.3)", () => {
@@ -138,8 +156,11 @@ describe("relay framing (§12.2.3)", () => {
 				workspacePath: "/tmp/ws",
 			},
 		});
+		expect(relay.phase).toBe("active");
+		expect(registry.get(relay.relayId)).toBe(relay);
 		expect(registry.activeCount()).toBe(1);
-		expect(registry.activeForConversation("n-phone-a", "ws", "s-1")[0]).toMatchObject({
+		expect(registry.forConversation("n-phone-a", "ws", "s-1", "active")[0]).toBe(relay);
+		expect(relay).toMatchObject({
 			connectionId: "conn-1",
 			streamId: "st-1",
 		});
@@ -173,7 +194,7 @@ describe("relay framing (§12.2.3)", () => {
 			message: "active relay not found",
 		});
 
-		registry.closeActive(relay.relayId, "tui_disconnected");
+		await relay.close("tui_disconnected");
 		expect(registry.authorizeRpc(relay.relayId, "control-1", scope)).toEqual({
 			ok: false,
 			code: "not_found",
@@ -233,6 +254,69 @@ describe("relay framing (§12.2.3)", () => {
 			expect(settle).toHaveBeenCalledTimes(1);
 		});
 		expect(registry.activeCount()).toBe(0);
+	});
+
+	it("fences on TUI EOF while the ordered raw write tail owns FIN and stop settlement", async () => {
+		const { socketPath, registry } = await startRelayHarness();
+		const phone = new FakePhoneIrohStream();
+		const writeGate = createDeferred<void>();
+		const readGate = createDeferred<Buffer | undefined>();
+		const stopGate = createDeferred<void>();
+		const observerGate = createDeferred<void>();
+		const writtenChunks: Buffer[] = [];
+		const finish = vi.fn(async () => {});
+		const reset = vi.fn(async () => {});
+		const stop = vi.fn(() => stopGate.promise);
+		phone.send.writeAll = vi.fn((bytes: Array<number>) => {
+			writtenChunks.push(Buffer.from(bytes));
+			return writeGate.promise;
+		});
+		phone.send.finish = finish;
+		phone.send.reset = reset;
+		phone.recv.read = vi.fn(() => readGate.promise);
+		phone.recv.stop = stop;
+		const onSettled = vi.fn(() => observerGate.promise);
+		const relay = mintTestRelay(registry, phone, onSettled);
+		let didSettle = false;
+		void relay.settled.then(() => {
+			didSettle = true;
+		});
+
+		const client = connectRawRelayClient(socketPath, relay);
+		await vi.waitFor(() => expect(client.messages).toHaveLength(2));
+		const tail = Buffer.from("tail admitted before EOF", "utf8");
+		client.socket.write(tail);
+		await vi.waitFor(() => expect(phone.send.writeAll).toHaveBeenCalledTimes(1));
+
+		client.socket.end();
+		await vi.waitFor(() => expect(relay.phase).toBe("closed"));
+		// Lookup and application ownership are fenced synchronously. The observer
+		// is the application barrier; raw write/FIN/read/stop settlement is separate.
+		expect(registry.get(relay.relayId)).toBeUndefined();
+		expect(finish).not.toHaveBeenCalled();
+		expect(reset).not.toHaveBeenCalled();
+		expect(stop).toHaveBeenCalledTimes(1);
+		expect(onSettled).toHaveBeenCalledTimes(1);
+		expect(didSettle).toBe(false);
+
+		writeGate.resolve(undefined);
+		await vi.waitFor(() => expect(finish).toHaveBeenCalledTimes(1));
+		expect(Buffer.concat(writtenChunks)).toEqual(tail);
+		expect(reset).not.toHaveBeenCalled();
+		// FIN starts only after the admitted raw write completes, while the raw read
+		// and stop promises may remain pending under bounded daemon disposal.
+		expect(onSettled).toHaveBeenCalledTimes(1);
+		observerGate.resolve(undefined);
+		expect(await relay.settled).toMatchObject({ reason: "tui_disconnected", bytesUp: tail.length, bytesDown: 0 });
+		expect(didSettle).toBe(true);
+
+		readGate.resolve(Buffer.from("phone bytes returned after fence", "utf8"));
+		await Promise.resolve();
+		stopGate.resolve(undefined);
+		await Promise.resolve();
+		expect(client.rawReceived()).toEqual(Buffer.alloc(0));
+		expect(finish).toHaveBeenCalledTimes(1);
+		expect(stop).toHaveBeenCalledTimes(1);
 	});
 
 	it("propagates phone EOF to the TUI and settles phone_disconnected with byte counts", async () => {
@@ -303,27 +387,80 @@ describe("relay framing (§12.2.3)", () => {
 		expect(unknown.messages).toEqual([{ type: "hello_ack", ok: false, error: "bad_relay_token" }]);
 	});
 
-	it("invalidates pending offers single-use", () => {
+	it("owns offer expiry and settles the expiry-vs-redemption race exactly once", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+		const registry = new RelayRegistry();
+		const rejectPending = vi.fn(async () => {});
+		const onSettled = vi.fn();
+		const relay = mintTestRelay(registry, new FakePhoneIrohStream(), onSettled, undefined, rejectPending);
+
+		expect(relay.phase).toBe("offered");
+		expect(registry.get(relay.relayId)).toBe(relay);
+		await vi.advanceTimersByTimeAsync(RELAY_TOKEN_TTL_MS);
+
+		expect(relay.phase).toBe("closed");
+		expect(registry.get(relay.relayId)).toBeUndefined();
+		// Expiry synchronously removed the owner from the token index, so a
+		// same-tick redemption cannot promote it while rejection I/O settles.
+		expect(registry.admit(relay.relayId, relay.relayToken, {} as never, Buffer.alloc(0))).toBe(false);
+		expect(await relay.settled).toEqual({ reason: "error", bytesUp: 0, bytesDown: 0, durationMs: 0 });
+		expect(rejectPending).toHaveBeenCalledTimes(1);
+		expect(rejectPending).toHaveBeenCalledWith({ message: "relay offer expired; retry", retryAfterMs: 1000 });
+		expect(onSettled).toHaveBeenCalledTimes(1);
+
+		await vi.advanceTimersByTimeAsync(RELAY_TOKEN_TTL_MS);
+		await relay.close("host_shutdown", { pendingMessage: "daemon shutting down" });
+		expect(rejectPending).toHaveBeenCalledTimes(1);
+		expect(onSettled).toHaveBeenCalledTimes(1);
+	});
+
+	it("fences and settles an offered owner exactly once", async () => {
 		const registry = new RelayRegistry();
 		const phone = new FakePhoneIrohStream();
-		const relay = mintTestRelay(registry, phone, vi.fn());
+		let finishPendingRejection: () => void = () => {};
+		const pendingRejection = new Promise<void>((resolve) => {
+			finishPendingRejection = resolve;
+		});
+		const rejectPending = vi.fn(() => pendingRejection);
+		const onSettled = vi.fn();
+		const relay = mintTestRelay(registry, phone, onSettled, undefined, rejectPending);
 
-		expect(registry.pendingForConversation("n-phone-a", "ws", "s-1")).toHaveLength(1);
-		expect(registry.invalidatePending(relay.relayId)?.relayId).toBe(relay.relayId);
-		expect(registry.pendingForConversation("n-phone-a", "ws", "s-1")).toHaveLength(0);
-		expect(registry.invalidatePending(relay.relayId)).toBeUndefined();
+		expect(registry.forConversation("n-phone-a", "ws", "s-1", "offered")).toEqual([relay]);
+		const firstClose = relay.close("workspace_unregistered", { pendingMessage: "workspace unregistered" });
+		const duplicateClose = relay.close("host_shutdown", { pendingMessage: "daemon shutting down" });
+
+		// Closing fences lookup and redemption synchronously, before rejection I/O.
+		expect(firstClose).toBe(duplicateClose);
+		expect(relay.phase).toBe("closed");
+		expect(registry.get(relay.relayId)).toBeUndefined();
+		expect(registry.forConversation("n-phone-a", "ws", "s-1")).toHaveLength(0);
+		await vi.waitFor(() => expect(rejectPending).toHaveBeenCalledTimes(1));
+		expect(await relay.settled).toEqual({
+			reason: "workspace_unregistered",
+			bytesUp: 0,
+			bytesDown: 0,
+			durationMs: 0,
+		});
+		expect(rejectPending).toHaveBeenCalledWith({ message: "workspace unregistered" });
+		expect(onSettled).toHaveBeenCalledTimes(1);
+		finishPendingRejection();
+		await pendingRejection;
 	});
 
 	it("does not admit a revoked pending offer containing a buffered prompt", async () => {
 		const { socketPath, registry } = await startRelayHarness();
 		const phone = new FakePhoneIrohStream();
 		const relay = mintTestRelay(registry, phone, vi.fn());
-		const bufferedPrompt = Buffer.from(`${JSON.stringify({ id: "p1", type: "prompt", message: "do not run" })}\n`);
+		const bufferedPrompt = Buffer.from(
+			`${JSON.stringify({ id: "p1", type: "prompt", clientMessageId: "client-p1", message: "do not run" })}\n`,
+		);
 		(relay.preamble.handshake as { initialInput: number[] }).initialInput = Array.from(bufferedPrompt);
 
-		// Revocation uses this same synchronous invalidation before acknowledging
+		// Revocation uses this same synchronous owner close before acknowledging
 		// the control request. The stale token must never expose initialInput.
-		expect(registry.invalidatePending(relay.relayId)).toBe(relay);
+		void relay.close("error", { pendingMessage: "client revoked; re-pair required" });
+		expect(registry.get(relay.relayId)).toBeUndefined();
 		const client = connectRawRelayClient(socketPath, relay);
 		await client.closed;
 
@@ -344,6 +481,99 @@ describe("relay framing (§12.2.3)", () => {
 		await vi.waitFor(() => expect(settle).toHaveBeenCalled());
 		const outcome = settle.mock.calls[0]?.[0] as RelayOutcome;
 		expect(outcome.reason).toBe("tui_disconnected");
+	});
+
+	it("keeps one owner through redemption and settles competing active closes once", async () => {
+		const { socketPath, registry } = await startRelayHarness();
+		const phone = new FakePhoneIrohStream();
+		const onSettled = vi.fn();
+		const relay = mintTestRelay(registry, phone, onSettled);
+		const client = connectRawRelayClient(socketPath, relay);
+		await vi.waitFor(() => expect(relay.phase).toBe("active"));
+
+		expect(registry.get(relay.relayId)).toBe(relay);
+		const firstClose = relay.close("host_shutdown");
+		client.socket.destroy();
+		phone.end();
+		const duplicateClose = relay.close("error", { error: "late close" });
+
+		expect(firstClose).toBe(duplicateClose);
+		expect(await relay.settled).toMatchObject({ reason: "host_shutdown" });
+		expect(relay.phase).toBe("closed");
+		expect(registry.get(relay.relayId)).toBeUndefined();
+		expect(onSettled).toHaveBeenCalledTimes(1);
+	});
+
+	it("settles a redeemed abortive close while stalled raw reset/stop remain physically owned", async () => {
+		const { socketPath, registry } = await startRelayHarness();
+		const phone = new FakePhoneIrohStream();
+		const writeGate = createDeferred<void>();
+		const readGate = createDeferred<undefined>();
+		const resetGate = createDeferred<void>();
+		const stopGate = createDeferred<void>();
+		const observerGate = createDeferred<void>();
+		const physicalTasks: Promise<unknown>[] = [];
+		let resetSettled = false;
+		let stopSettled = false;
+		void resetGate.promise.then(() => {
+			resetSettled = true;
+		});
+		void stopGate.promise.then(() => {
+			stopSettled = true;
+		});
+		const finish = vi.fn(async () => {});
+		const reset = vi.fn(() => {
+			writeGate.resolve(undefined);
+			return resetGate.promise;
+		});
+		const stop = vi.fn(() => {
+			readGate.resolve(undefined);
+			return stopGate.promise;
+		});
+		phone.send.writeAll = vi.fn(() => writeGate.promise);
+		phone.send.finish = finish;
+		phone.send.reset = reset;
+		phone.recv.read = vi.fn(() => readGate.promise);
+		phone.recv.stop = stop;
+		const onSettled = vi.fn(() => observerGate.promise);
+		const relay = mintTestRelay(registry, phone, onSettled, undefined, undefined, (task) => {
+			physicalTasks.push(task);
+		});
+		let didSettle = false;
+		void relay.settled.then(() => {
+			didSettle = true;
+		});
+
+		const client = connectRawRelayClient(socketPath, relay);
+		await vi.waitFor(() => expect(client.messages).toHaveLength(2));
+		client.socket.write("in-flight");
+		await vi.waitFor(() => expect(phone.send.writeAll).toHaveBeenCalledTimes(1));
+
+		const firstClose = relay.close("host_shutdown");
+		const duplicateClose = relay.close("error", { error: "late error" });
+		client.socket.destroy();
+		expect(firstClose).toBe(duplicateClose);
+		expect(relay.phase).toBe("closed");
+		expect(registry.get(relay.relayId)).toBeUndefined();
+		expect(reset).toHaveBeenCalledTimes(1);
+		expect(stop).toHaveBeenCalledTimes(1);
+		expect(finish).not.toHaveBeenCalled();
+		await vi.waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1));
+		expect(didSettle).toBe(false);
+		observerGate.resolve(undefined);
+		expect(await relay.settled).toMatchObject({ reason: "host_shutdown", bytesUp: 9 });
+		expect(didSettle).toBe(true);
+		// Native terminal receipts are still pending and externally owned after the
+		// relay's application/onSettled barrier has completed.
+		expect(physicalTasks.length).toBeGreaterThan(0);
+		expect({ resetSettled, stopSettled }).toEqual({ resetSettled: false, stopSettled: false });
+		resetGate.resolve(undefined);
+		stopGate.resolve(undefined);
+		await Promise.resolve();
+		expect({ resetSettled, stopSettled }).toEqual({ resetSettled: true, stopSettled: true });
+		expect(reset).toHaveBeenCalledTimes(1);
+		expect(stop).toHaveBeenCalledTimes(1);
+		expect(onSettled).toHaveBeenCalledTimes(1);
 	});
 
 	it("pauses the TUI socket while a phone write is in flight (backpressure)", async () => {

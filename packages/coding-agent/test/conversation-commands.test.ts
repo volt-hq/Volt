@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { Buffer } from "node:buffer";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -7,14 +8,19 @@ import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/ir
 import { getStaticIrohRemoteRpcFilterResult as getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/rpc-command-filter.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../src/core/remote/iroh/worktree-rpc.ts";
-import { getDefaultSessionDir, type SessionEntry } from "../src/core/session-manager.ts";
+import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import {
 	type ConversationCommandContext,
 	type ConversationCommandRuntime,
+	createRemoteConversationTranscriptEntry,
+	createRemoteConversationTranscriptPage,
 	handleIntegratedConversationRpcCommand,
 	INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES,
 	LEASE_DRAINING_RETRY_AFTER_MS,
 	REMOTE_TOOL_OUTPUT_MAX_SCALARS,
+	REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES,
+	REMOTE_TRANSCRIPT_PROJECTION_VERSION,
+	REMOTE_TRANSCRIPT_TOOL_CALL_LOOKBACK_ENTRIES,
 	type RemoteSessionRuntimeState,
 	TURN_INITIATING_RPC_TYPES,
 } from "../src/daemon/conversation-commands.ts";
@@ -44,15 +50,39 @@ function createRuntime(sessionId = "s-1"): ConversationCommandRuntime {
 	return {
 		session: {
 			sessionId,
-			sessionManager: { getBranch: () => [] },
+			sessionManager: createSessionManager([]),
 		},
 		listSessions: async () => [],
+	};
+}
+
+function createSessionManager(branch: SessionEntry[]): ConversationCommandRuntime["session"]["sessionManager"] {
+	return {
+		getBranch: () => branch,
+		getLeafEntry: () => {
+			const leaf = branch.at(-1);
+			return leaf === undefined || leaf.ordinal !== undefined ? leaf : { ...leaf, ordinal: branch.length };
+		},
+		getBranchWindow: ({ beforeEntryId, maxEntries, lookbackEntries = 0 }) => {
+			const endIndex =
+				beforeEntryId === undefined ? branch.length : branch.findIndex((entry) => entry.id === beforeEntryId);
+			if (endIndex < 0) return undefined;
+			const entryStart = Math.max(0, endIndex - maxEntries);
+			const lookbackStart = Math.max(0, entryStart - lookbackEntries);
+			return {
+				entries: branch.slice(entryStart, endIndex),
+				lookback: branch.slice(lookbackStart, entryStart),
+				hasEarlier: lookbackStart > 0,
+				visitedEntries: endIndex - lookbackStart,
+			};
+		},
 	};
 }
 
 function createContext(
 	options: {
 		isDraining?: () => boolean;
+		isTurnAdmissionClosed?: () => boolean;
 		isSubagentSession?: () => boolean;
 		stateManager?: IrohRemoteHostStateManager;
 		onWorkspaceUnregistered?: (workspaceName: string) => Promise<void>;
@@ -67,6 +97,7 @@ function createContext(
 		sessionListCursors: new Map(),
 		sessionListCursorTtlMs: 60_000,
 		...(options.isDraining === undefined ? {} : { isDraining: options.isDraining }),
+		...(options.isTurnAdmissionClosed === undefined ? {} : { isTurnAdmissionClosed: options.isTurnAdmissionClosed }),
 		...(options.isSubagentSession === undefined ? {} : { isSubagentSession: options.isSubagentSession }),
 		...(options.onWorkspaceUnregistered === undefined
 			? {}
@@ -149,6 +180,46 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		}
 	});
 
+	it("rejects new turns against the daemon's closed shutdown epoch", async () => {
+		for (const type of TURN_INITIATING_RPC_TYPES) {
+			const response = (await handleIntegratedConversationRpcCommand(
+				{ id: "shutdown-turn", type, message: "hi" },
+				createAuthorization(),
+				createContext({ isTurnAdmissionClosed: () => true }),
+				createRuntime(),
+			)) as Record<string, unknown>;
+			expect(response).toEqual({
+				id: "shutdown-turn",
+				type: "response",
+				command: type,
+				success: false,
+				error: {
+					code: "host_shutdown",
+					message: "The host is shutting down; reconnect after it restarts.",
+				},
+			});
+		}
+	});
+
+	it("keeps abort and observation available after turn admission closes", async () => {
+		const context = createContext({ isTurnAdmissionClosed: () => true });
+		const abort = await handleIntegratedConversationRpcCommand(
+			{ id: "shutdown-abort", type: "abort" },
+			createAuthorization(),
+			context,
+			createRuntime(),
+		);
+		expect(abort).toBeUndefined();
+
+		const transcript = (await handleIntegratedConversationRpcCommand(
+			{ id: "shutdown-read", type: "get_transcript" },
+			createAuthorization(),
+			context,
+			createRuntime(),
+		)) as Record<string, unknown>;
+		expect(transcript).toMatchObject({ command: "get_transcript", success: true });
+	});
+
 	it("lets read-only commands through while draining", async () => {
 		const transcript = (await handleIntegratedConversationRpcCommand(
 			{ id: "2", type: "get_transcript" },
@@ -210,7 +281,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 
 	it("does not reject prompts on non-subagent sessions", async () => {
 		const response = await handleIntegratedConversationRpcCommand(
-			{ id: "10", type: "prompt", message: "hi" },
+			{ id: "10", type: "prompt", clientMessageId: "client-10", message: "hi" },
 			createAuthorization(),
 			createContext({ isSubagentSession: () => false }),
 			createRuntime(),
@@ -220,7 +291,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 
 	it("does not reject prompts when the lease is not draining", async () => {
 		const response = await handleIntegratedConversationRpcCommand(
-			{ id: "4", type: "prompt", message: "hi" },
+			{ id: "4", type: "prompt", clientMessageId: "client-4", message: "hi" },
 			createAuthorization(),
 			createContext({ isDraining: () => false }),
 			createRuntime(),
@@ -271,7 +342,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 			},
 		] as unknown as SessionEntry[];
 		const runtime: ConversationCommandRuntime = {
-			session: { sessionId: "s-1", sessionManager: { getBranch: () => branch } },
+			session: { sessionId: "s-1", sessionManager: createSessionManager(branch) },
 			listSessions: async () => [],
 		};
 
@@ -289,6 +360,468 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		expect(output).not.toContain("/tmp/ws");
 		expect(Array.from(output)).toHaveLength(REMOTE_TOOL_OUTPUT_MAX_SCALARS);
 		expect(tool?.outputTruncated).toBe(true);
+	});
+
+	it("preserves ordered assistant parts, stop reason, ordinals, and transcript head", async () => {
+		const branch = [
+			{
+				type: "message",
+				id: "assistant-1",
+				ordinal: 7,
+				timestamp: "2026-07-06T00:00:00.000Z",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "inspect /tmp/ws/src", redacted: false },
+						{ type: "text", text: "first" },
+						{ type: "thinking", thinking: "secret", redacted: true, thinkingSignature: "opaque" },
+						{ type: "text", text: " second" },
+					],
+					stopReason: "aborted",
+				},
+			},
+		] as unknown as SessionEntry[];
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-1", sessionManager: createSessionManager(branch) },
+			listSessions: async () => [],
+		};
+
+		const response = (await handleIntegratedConversationRpcCommand(
+			{ id: "parts", type: "get_transcript" },
+			createAuthorization(),
+			createContext(),
+			runtime,
+		)) as { success: boolean; data: Record<string, unknown> };
+
+		expect(response.success).toBe(true);
+		expect(response.data).toMatchObject({
+			projectionVersion: REMOTE_TRANSCRIPT_PROJECTION_VERSION,
+			branchEpoch: "s-1",
+			head: { entryId: "assistant-1", ordinal: 7 },
+			items: [
+				{
+					entryId: "assistant-1",
+					ordinal: 7,
+					role: "assistant",
+					text: "first second",
+					stopReason: "aborted",
+					parts: [
+						{ type: "thinking", text: "inspect /workspace/src", truncated: false },
+						{ type: "text", text: "first", truncated: false },
+						{ type: "thinking", text: "", redacted: true },
+						{ type: "text", text: " second", truncated: false },
+					],
+				},
+			],
+		});
+		expect(JSON.stringify(response)).not.toContain("opaque");
+		expect(JSON.stringify(response)).not.toContain("/tmp/ws");
+	});
+
+	it.each(["stop", "aborted"] as const)(
+		"preserves empty canonical assistant parts for %s terminal entries",
+		(stopReason) => {
+			const entry = {
+				type: "message",
+				id: `assistant-empty-parts-${stopReason}`,
+				ordinal: 8,
+				timestamp: "2026-07-19T00:00:00.000Z",
+				message: {
+					role: "assistant",
+					content: [
+						{
+							type: "thinking",
+							thinking: "",
+							redacted: false,
+							thinkingSignature: "opaque-signature",
+						},
+						{ type: "text", text: "visible" },
+						{ type: "text", text: "" },
+					],
+					stopReason,
+				},
+			} as unknown as SessionEntry;
+			const runtime: ConversationCommandRuntime = {
+				session: { sessionId: "s-empty-parts", sessionManager: createSessionManager([entry]) },
+				listSessions: async () => [],
+			};
+
+			const live = createRemoteConversationTranscriptEntry(entry, createAuthorization(), runtime);
+			const bootstrap = createRemoteConversationTranscriptPage(createAuthorization(), runtime);
+
+			expect(live).toEqual({
+				entryId: entry.id,
+				ordinal: 8,
+				createdAt: "2026-07-19T00:00:00.000Z",
+				role: "assistant",
+				text: "visible",
+				truncated: false,
+				parts: [
+					{ type: "thinking", text: "", truncated: false },
+					{ type: "text", text: "visible", truncated: false },
+					{ type: "text", text: "", truncated: false },
+				],
+				stopReason,
+			});
+			expect(bootstrap?.items).toEqual([live]);
+			expect(JSON.stringify(live)).not.toContain("opaque-signature");
+		},
+	);
+
+	it("persists and echoes client message identity across sanitized live and bootstrap projections", () => {
+		const root = mkdtempSync(join(tmpdir(), "volt-client-message-id-"));
+		const workspacePath = join(root, "workspace");
+		const sessionDir = join(root, "sessions");
+		mkdirSync(workspacePath, { recursive: true });
+		mkdirSync(sessionDir, { recursive: true });
+		try {
+			const manager = SessionManager.create(workspacePath, sessionDir);
+			manager.reserveClientInput("client-message-42", "prompt", {
+				message: `Read ${workspacePath}/fixture.txt`,
+			});
+			manager.transitionClientInput("client-message-42", "started");
+			manager.appendMessage({
+				role: "user",
+				clientMessageId: "client-message-42",
+				content: [{ type: "text", text: `Read ${workspacePath}/fixture.txt` }],
+				timestamp: 1,
+			});
+			const entry = manager.getLeafEntry()!;
+			// Session files are intentionally deferred until conversation content
+			// beyond the first user prompt exists.
+			manager.appendCustomMessageEntry("test.flush", "flush", true);
+			const runtime: ConversationCommandRuntime = {
+				session: { sessionId: manager.getSessionId(), sessionManager: manager },
+				listSessions: async () => [],
+			};
+			const authorization = createAuthorization({ workspacePath });
+
+			const live = createRemoteConversationTranscriptEntry(entry, authorization, runtime);
+			const bootstrap = createRemoteConversationTranscriptPage(authorization, runtime);
+
+			expect(live).toMatchObject({
+				entryId: entry.id,
+				role: "user",
+				clientMessageId: "client-message-42",
+				text: "Read /workspace/fixture.txt",
+			});
+			expect(bootstrap?.items).toEqual([live]);
+			expect(readFileSync(manager.getSessionFile()!, "utf8")).toContain('"clientMessageId":"client-message-42"');
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves identity-only aborted assistant truth in live entries and bootstrap", () => {
+		const manager = SessionManager.inMemory("/tmp/ws");
+		manager.appendMessage({
+			role: "assistant",
+			content: [],
+			api: "faux",
+			provider: "faux",
+			model: "faux-1",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "aborted",
+			timestamp: 1,
+		});
+		const entry = manager.getLeafEntry()!;
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-zero-token-abort", sessionManager: manager },
+			listSessions: async () => [],
+		};
+
+		const live = createRemoteConversationTranscriptEntry(entry, createAuthorization(), runtime);
+		const bootstrap = createRemoteConversationTranscriptPage(createAuthorization(), runtime);
+		expect(live).toMatchObject({
+			entryId: entry.id,
+			ordinal: entry.ordinal,
+			role: "assistant",
+			text: "",
+			stopReason: "aborted",
+		});
+		expect(bootstrap?.items).toEqual([live]);
+	});
+
+	it("omits compaction entries whose sanitized system text is empty", () => {
+		const emptyCompaction = {
+			type: "compaction",
+			id: "empty-compaction",
+			ordinal: 1,
+			parentId: null,
+			timestamp: "2026-07-18T00:00:00.000Z",
+			summary: "\u0000\u0007",
+			firstKeptEntryId: "kept-entry",
+			tokensBefore: 1,
+		} as unknown as SessionEntry;
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-empty-compaction", sessionManager: createSessionManager([emptyCompaction]) },
+			listSessions: async () => [],
+		};
+		const authorization = createAuthorization();
+
+		expect(createRemoteConversationTranscriptEntry(emptyCompaction, authorization, runtime)).toBeUndefined();
+		expect(createRemoteConversationTranscriptPage(authorization, runtime)).toMatchObject({
+			head: { entryId: "empty-compaction", ordinal: 1 },
+			items: [],
+		});
+	});
+
+	it("bounds large Unicode bootstrap pages by serialized UTF-8 bytes without pagination gaps", () => {
+		const branch = Array.from({ length: 120 }, (_, index) => ({
+			type: "message",
+			id: `assistant-${index}`,
+			ordinal: index + 1,
+			timestamp: new Date(index + 1).toISOString(),
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "🧪".repeat(12_000) }],
+				stopReason: "stop",
+			},
+		})) as unknown as SessionEntry[];
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-unicode", sessionManager: createSessionManager(branch) },
+			listSessions: async () => [],
+		};
+
+		const newest = createRemoteConversationTranscriptPage(createAuthorization(), runtime);
+		expect(newest).toBeDefined();
+		expect(Buffer.byteLength(JSON.stringify(newest), "utf8")).toBeLessThanOrEqual(
+			REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES,
+		);
+		expect(newest?.items.length).toBeGreaterThan(0);
+		expect(newest?.items.length).toBeLessThan(100);
+		expect(newest?.items.at(-1)?.entryId).toBe("assistant-119");
+		expect(newest?.head).toEqual({ entryId: "assistant-119", ordinal: 120 });
+		expect(newest?.hasMore).toBe(true);
+		expect(newest?.nextBeforeEntryId).toBe(newest?.items[0]?.entryId);
+
+		const oldestNewestPageIndex = Number(newest?.items[0]?.entryId.split("-").at(-1));
+		const older = createRemoteConversationTranscriptPage(createAuthorization(), runtime, {
+			beforeEntryId: newest?.nextBeforeEntryId ?? undefined,
+		});
+		expect(older).toBeDefined();
+		expect(Buffer.byteLength(JSON.stringify(older), "utf8")).toBeLessThanOrEqual(
+			REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES,
+		);
+		expect(older?.items.at(-1)?.entryId).toBe(`assistant-${oldestNewestPageIndex - 1}`);
+		expect(older?.head).toEqual({ entryId: "assistant-119", ordinal: 120 });
+		expect(older?.items.some((item) => item.entryId === newest?.items[0]?.entryId)).toBe(false);
+	});
+
+	it("correlates remote pagination to the current epoch and server-issued cursors", async () => {
+		const branch = Array.from({ length: 300 }, (_, index) => ({
+			type: "message",
+			id: `user-${index}`,
+			ordinal: index + 1,
+			timestamp: new Date(index + 1).toISOString(),
+			message: { role: "user", content: [{ type: "text", text: `message ${index}` }] },
+		})) as unknown as SessionEntry[];
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-pagination", sessionManager: createSessionManager(branch) },
+			listSessions: async () => [],
+		};
+		let branchEpoch = "epoch-a";
+		const issued = new Set<string>();
+		const context: ConversationCommandContext = {
+			...createContext(),
+			getConversationBranchEpoch: () => branchEpoch,
+			isConversationTranscriptCursorValid: (cursor) => issued.has(cursor),
+			registerConversationTranscriptCursor: (cursor) => {
+				if (cursor !== null) issued.add(cursor);
+			},
+		};
+
+		const first = (await handleIntegratedConversationRpcCommand(
+			{ id: "page-1", type: "get_transcript", branchEpoch },
+			createAuthorization(),
+			context,
+			runtime,
+		)) as { success: boolean; data: { branchEpoch: string; nextBeforeEntryId: string } };
+		expect(first).toMatchObject({ success: true, data: { branchEpoch: "epoch-a" } });
+		expect(issued.has(first.data.nextBeforeEntryId)).toBe(true);
+
+		const arbitrary = (await handleIntegratedConversationRpcCommand(
+			{
+				id: "page-arbitrary",
+				type: "get_transcript",
+				branchEpoch,
+				beforeEntryId: "abandoned-branch-entry",
+			},
+			createAuthorization(),
+			context,
+			runtime,
+		)) as Record<string, unknown>;
+		expect(arbitrary).toMatchObject({ success: false, error: "invalid_cursor" });
+
+		const older = (await handleIntegratedConversationRpcCommand(
+			{
+				id: "page-2",
+				type: "get_transcript",
+				branchEpoch,
+				beforeEntryId: first.data.nextBeforeEntryId,
+			},
+			createAuthorization(),
+			context,
+			runtime,
+		)) as Record<string, unknown>;
+		expect(older).toMatchObject({ success: true, data: { branchEpoch: "epoch-a" } });
+
+		branchEpoch = "epoch-b";
+		const stale = (await handleIntegratedConversationRpcCommand(
+			{
+				id: "page-stale",
+				type: "get_transcript",
+				branchEpoch: "epoch-a",
+				beforeEntryId: first.data.nextBeforeEntryId,
+			},
+			createAuthorization(),
+			context,
+			runtime,
+		)) as Record<string, unknown>;
+		expect(stale).toMatchObject({ success: false, error: "stale_branch_epoch" });
+	});
+
+	it("projects only a bounded recent source window for cursor-zero bootstrap", () => {
+		const storedBranch = Array.from({ length: 10_000 }, (_, index) => ({
+			type: "message",
+			id: `user-${index}`,
+			ordinal: index + 1,
+			timestamp: new Date(index + 1).toISOString(),
+			message: { role: "user", content: [{ type: "text", text: `message ${index}` }] },
+		})) as unknown as SessionEntry[];
+		let entryReads = 0;
+		const branch = new Proxy(storedBranch, {
+			get(target, property, receiver) {
+				if (typeof property === "string" && /^\d+$/.test(property)) {
+					entryReads++;
+				}
+				return Reflect.get(target, property, receiver);
+			},
+		});
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-long", sessionManager: createSessionManager(branch) },
+			listSessions: async () => [],
+		};
+
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), runtime);
+		expect(page?.items).toHaveLength(100);
+		expect(page?.items[0]?.entryId).toBe("user-9900");
+		expect(page?.items.at(-1)?.entryId).toBe("user-9999");
+		expect(page?.head).toEqual({ entryId: "user-9999", ordinal: 10_000 });
+		expect(entryReads).toBeLessThan(1_200);
+	});
+
+	it("walks a very deep branch with bounded ancestor work", () => {
+		const manager = SessionManager.inMemory("/tmp/ws");
+		for (let index = 0; index < 50_000; index++) {
+			manager.appendCustomEntry("deep-history", { index });
+		}
+		manager.appendMessage({ role: "user", content: [{ type: "text", text: "tail" }], timestamp: 1 });
+		const getBranch = vi.spyOn(manager, "getBranch").mockImplementation(() => {
+			throw new Error("full branch materialization is forbidden");
+		});
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-deep", sessionManager: manager },
+			listSessions: async () => [],
+		};
+
+		const window = manager.getBranchWindow({
+			maxEntries: 800,
+			lookbackEntries: REMOTE_TRANSCRIPT_TOOL_CALL_LOOKBACK_ENTRIES,
+		});
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), runtime);
+
+		expect(window?.visitedEntries).toBe(800 + REMOTE_TRANSCRIPT_TOOL_CALL_LOOKBACK_ENTRIES);
+		expect(window?.hasEarlier).toBe(true);
+		expect(page?.items).toEqual([expect.objectContaining({ role: "user", text: "tail" })]);
+		expect(page?.head).toEqual({ entryId: manager.getLeafEntry()?.id, ordinal: 50_001 });
+		expect(getBranch).not.toHaveBeenCalled();
+	});
+
+	it("fails closed when the active transcript head lacks a positive commit ordinal", () => {
+		const entry = {
+			type: "message",
+			id: "missing-ordinal",
+			parentId: null,
+			timestamp: "2026-07-17T00:00:00.000Z",
+			message: { role: "user", content: [{ type: "text", text: "hello" }] },
+		} as unknown as SessionEntry;
+		const runtime: ConversationCommandRuntime = {
+			session: {
+				sessionId: "s-missing-ordinal",
+				sessionManager: {
+					getBranch: () => [entry],
+					getLeafEntry: () => entry,
+					getBranchWindow: () => ({
+						entries: [entry],
+						lookback: [],
+						hasEarlier: false,
+						visitedEntries: 1,
+					}),
+				},
+			},
+			listSessions: async () => [],
+		};
+
+		expect(() => createRemoteConversationTranscriptPage(createAuthorization(), runtime)).toThrow(
+			/missing its positive commit ordinal/,
+		);
+	});
+
+	it("uses bounded tool-call metadata lookup for each newly committed transcript entry", () => {
+		const storedBranch = Array.from({ length: 9_998 }, (_, index) => ({
+			type: "message",
+			id: `user-${index}`,
+			timestamp: new Date(index + 1).toISOString(),
+			message: { role: "user", content: [{ type: "text", text: "filler" }] },
+		})) as unknown as SessionEntry[];
+		storedBranch.push(
+			{
+				type: "message",
+				id: "tool-call",
+				timestamp: new Date(9_999).toISOString(),
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "tc-recent", name: "read", arguments: { path: "/tmp/ws/file" } }],
+				},
+			} as unknown as SessionEntry,
+			{
+				type: "message",
+				id: "tool-result",
+				timestamp: new Date(10_000).toISOString(),
+				message: {
+					role: "toolResult",
+					toolCallId: "tc-recent",
+					toolName: "read",
+					isError: false,
+					content: [{ type: "text", text: "second line" }],
+				},
+			} as unknown as SessionEntry,
+		);
+		let entryReads = 0;
+		const branch = new Proxy(storedBranch, {
+			get(target, property, receiver) {
+				if (typeof property === "string" && /^\d+$/.test(property)) {
+					entryReads++;
+				}
+				return Reflect.get(target, property, receiver);
+			},
+		});
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-tool", sessionManager: createSessionManager(branch) },
+			listSessions: async () => [],
+		};
+
+		const item = createRemoteConversationTranscriptEntry(storedBranch.at(-1)!, createAuthorization(), runtime);
+		expect(item).toMatchObject({ role: "tool", toolName: "read", path: "/workspace/file" });
+		expect(entryReads).toBeLessThanOrEqual(REMOTE_TRANSCRIPT_TOOL_CALL_LOOKBACK_ENTRIES + 4);
 	});
 
 	it("projects standard subagent registry tool metadata for integrated Iroh transcripts", async () => {
@@ -328,7 +861,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 			},
 		] as unknown as SessionEntry[];
 		const runtime: ConversationCommandRuntime = {
-			session: { sessionId: "s-1", sessionManager: { getBranch: () => branch } },
+			session: { sessionId: "s-1", sessionManager: createSessionManager(branch) },
 			listSessions: async () => [],
 		};
 
@@ -352,6 +885,72 @@ describe("handleIntegratedConversationRpcCommand", () => {
 				},
 			}),
 		);
+	});
+
+	it("bounds remote subagent detail traversal across wide sibling arrays", () => {
+		const wide = (label: string): Array<Record<string, unknown>> => {
+			const value = Array.from({ length: 64 }, (_, index) => ({
+				subagentId: `${label}-${index}`,
+				status: "running",
+			}));
+			value.length = 10_000;
+			Object.defineProperty(value, 64, {
+				get: () => {
+					throw new Error(`${label} omitted tail was traversed`);
+				},
+			});
+			return value;
+		};
+		const tasks: Array<Record<string, unknown>> = [];
+		tasks.length = 1;
+		Object.defineProperty(tasks, 0, {
+			get: () => {
+				throw new Error("remote global subagent node budget was exceeded");
+			},
+		});
+		const inputTasks = Array.from({ length: 64 }, (_, index) => ({ agent: `agent-${index}`, task: `task-${index}` }));
+		inputTasks.length = 10_000;
+		Object.defineProperty(inputTasks, 64, {
+			get: () => {
+				throw new Error("remote subagent input tail was traversed");
+			},
+		});
+		const callEntry = {
+			type: "message",
+			id: "subagent-call-entry",
+			ordinal: 1,
+			parentId: null,
+			timestamp: "2026-07-17T00:00:00.000Z",
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "subagent-call", name: "subagent", arguments: { tasks: inputTasks } }],
+			},
+		} as unknown as SessionEntry;
+		const entry = {
+			type: "message",
+			id: "subagent-result",
+			ordinal: 2,
+			parentId: "subagent-call-entry",
+			timestamp: "2026-07-17T00:00:00.000Z",
+			message: {
+				role: "toolResult",
+				toolCallId: "subagent-call",
+				toolName: "subagent",
+				isError: false,
+				content: [{ type: "text", text: "running" }],
+				details: { childSessions: wide("session"), children: wide("child"), tasks },
+			},
+		} as unknown as SessionEntry;
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-subagent-wide", sessionManager: createSessionManager([callEntry, entry]) },
+			listSessions: async () => [],
+		};
+
+		const projected = createRemoteConversationTranscriptEntry(entry, createAuthorization(), runtime);
+		expect(projected?.details?.childSessions as unknown[] | undefined).toHaveLength(64);
+		expect(projected?.details?.children as unknown[] | undefined).toHaveLength(64);
+		expect(projected?.details).not.toHaveProperty("tasks");
+		expect(projected?.args?.tasks as unknown[] | undefined).toHaveLength(64);
 	});
 
 	it("advertises imageCount on tool transcript items with image results", async () => {
@@ -394,7 +993,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 			},
 		] as unknown as SessionEntry[];
 		const runtime: ConversationCommandRuntime = {
-			session: { sessionId: "s-1", sessionManager: { getBranch: () => branch } },
+			session: { sessionId: "s-1", sessionManager: createSessionManager(branch) },
 			listSessions: async () => [],
 		};
 
@@ -433,7 +1032,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 			},
 		] as unknown as SessionEntry[];
 		const runtime: ConversationCommandRuntime = {
-			session: { sessionId: "s-1", sessionManager: { getBranch: () => branch } },
+			session: { sessionId: "s-1", sessionManager: createSessionManager(branch) },
 			listSessions: async () => [],
 		};
 
@@ -478,7 +1077,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 			},
 		] as unknown as SessionEntry[];
 		const runtime: ConversationCommandRuntime = {
-			session: { sessionId: "s-1", sessionManager: { getBranch: () => branch } },
+			session: { sessionId: "s-1", sessionManager: createSessionManager(branch) },
 			listSessions: async () => [],
 		};
 
@@ -514,7 +1113,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 			},
 		] as unknown as SessionEntry[];
 		const runtime: ConversationCommandRuntime = {
-			session: { sessionId: "s-1", sessionManager: { getBranch: () => branch } },
+			session: { sessionId: "s-1", sessionManager: createSessionManager(branch) },
 			listSessions: async () => [],
 		};
 

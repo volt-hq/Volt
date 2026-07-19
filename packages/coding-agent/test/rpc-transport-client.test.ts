@@ -2,7 +2,7 @@ import { tmpdir } from "node:os";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { type Api, fauxAssistantMessage, type Model, type ThinkingLevelMap } from "@hansjm10/volt-ai";
 import { describe, expect, test, vi } from "vitest";
-import type { ExtensionBindings, PromptOptions } from "../src/core/agent-session.ts";
+import type { AgentSession, ExtensionBindings, PromptOptions } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { ResolvedCommand } from "../src/core/extensions/types.ts";
 import {
@@ -1053,7 +1053,7 @@ describe("runRpcMode", () => {
 		const dispose = vi.fn(async () => {});
 		const sourceInfo = createSourceInfo("/Users/jordan/project/.volt/agent/extensions/deploy.ts");
 		const prompt = vi.fn(async (_message: string, options?: PromptOptions) => {
-			options?.preflightResult?.(true);
+			options?.preflightResult?.({ success: true, outcome: "admitted" });
 		});
 		const runtimeHost = createRuntimeHost(dispose, async () => {}, {
 			commands: [
@@ -1432,7 +1432,9 @@ describe("createInProcessRpcClient", () => {
 				stateChanged: true,
 				actionsChanged: true,
 			});
-			expect(newSession).toHaveBeenCalledWith(undefined);
+			expect(newSession).toHaveBeenCalledWith({
+				assertConversationGenerationCurrent: expect.any(Function),
+			});
 			await expect(client.invokeUiAction(RUN_CANCEL_ACTION_ID, { args: {} })).resolves.toEqual({
 				action: RUN_CANCEL_ACTION_ID,
 				status: "completed",
@@ -1450,7 +1452,7 @@ describe("createInProcessRpcClient", () => {
 				actionsChanged: true,
 				message: "Context compacted",
 			});
-			expect(compact).toHaveBeenCalledWith("preserve decisions");
+			expect(compact).toHaveBeenCalledWith("preserve decisions", expect.any(Function));
 			await expect(client.invokeUiAction(SESSION_RENAME_ACTION_ID, { args: { name: "  D.2  " } })).resolves.toEqual({
 				action: SESSION_RENAME_ACTION_ID,
 				status: "completed",
@@ -1681,7 +1683,7 @@ describe("createInProcessRpcClient", () => {
 			{ value: `${prefix}-prod`, label: "Production", description: "Production target" },
 		]);
 		const prompt = vi.fn(async (_message: string, options?: PromptOptions) => {
-			options?.preflightResult?.(true);
+			options?.preflightResult?.({ success: true, outcome: "admitted" });
 		});
 		const resources = {
 			commands: [deployCommand],
@@ -1770,7 +1772,7 @@ describe("createInProcessRpcClient", () => {
 	test("queues prompt-like action invocation while streaming", async () => {
 		const sourceInfo = createSourceInfo("/Users/jordan/project/.volt/agent/prompts/fix-tests.md");
 		const prompt = vi.fn(async (_message: string, options?: PromptOptions) => {
-			options?.preflightResult?.(true);
+			options?.preflightResult?.({ success: true, outcome: "admitted" });
 		});
 		const runtimeHost = createRuntimeHost(
 			vi.fn(async () => {}),
@@ -1825,7 +1827,7 @@ describe("createInProcessRpcClient", () => {
 	test("rejects stale UI action ids after the catalog changes", async () => {
 		const sourceInfo = createSourceInfo("/Users/jordan/project/.volt/agent/extensions/deploy.ts");
 		const prompt = vi.fn(async (_message: string, options?: PromptOptions) => {
-			options?.preflightResult?.(true);
+			options?.preflightResult?.({ success: true, outcome: "admitted" });
 		});
 		const resources = {
 			commands: [createCommand("deploy", "deploy", "Deploy", sourceInfo)],
@@ -2112,7 +2114,7 @@ function createRuntimeHost(
 			prompt:
 				resources.prompt ??
 				vi.fn(async (_message: string, options?: PromptOptions) => {
-					options?.preflightResult?.(true);
+					options?.preflightResult?.({ success: true, outcome: "admitted" });
 				}),
 			extensionRunner: {
 				getRegisteredCommands: vi.fn(() => resources.commands ?? []),
@@ -2134,8 +2136,12 @@ function createRuntimeHost(
 		newSession: resources.newSession ?? vi.fn(async () => ({ cancelled: true })),
 		switchSession: vi.fn(async () => ({ cancelled: true })),
 		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+		startRecoveredClientInputs: vi.fn(async () => {}),
 		dispose,
 		setRebindSession: vi.fn(),
+		async runWithStableSession<T>(operation: (stableSession: AgentSession) => Promise<T> | T): Promise<T> {
+			return operation((this as unknown as AgentSessionRuntime).session);
+		},
 	} as unknown as AgentSessionRuntime;
 }
 

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
+import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { restoreStdout } from "../src/core/output-guard.ts";
 import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "../src/core/rpc/transport.ts";
@@ -70,7 +71,18 @@ vi.mock("../src/core/review.ts", async (importOriginal) => {
 	};
 });
 
-import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { runRpcMode as runRpcModeImpl } from "../src/modes/rpc/rpc-mode.ts";
+
+function runRpcMode(runtimeHost: AgentSessionRuntime, options?: Parameters<typeof runRpcModeImpl>[1]): Promise<void> {
+	if (typeof runtimeHost.runWithStableSession !== "function") {
+		Object.assign(runtimeHost, {
+			async runWithStableSession<T>(operation: (session: AgentSession) => Promise<T> | T): Promise<T> {
+				return operation(runtimeHost.session);
+			},
+		});
+	}
+	return runRpcModeImpl(runtimeHost, options);
+}
 
 afterEach(() => {
 	reviewMocks.runReviewWorkflow.mockClear();
@@ -445,12 +457,20 @@ describe("RPC mode review actions", () => {
 		await lineHandler(JSON.stringify({ type: "extension_ui_response", id: "unknown-control", confirmed: true }));
 		expect(transport.close).not.toHaveBeenCalled();
 
-		await lineHandler(JSON.stringify({ id: "overflow", type: "get_state" }));
-		await expect(modePromise).rejects.toThrow("RPC input queue exceeds 64 tasks");
-		expect(transport.close).toHaveBeenCalledOnce();
+		let modeSettled = false;
+		void modePromise.catch(() => {
+			modeSettled = true;
+		});
+		const overflowHandling = Promise.resolve(lineHandler(JSON.stringify({ id: "overflow", type: "get_state" })));
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(modeSettled).toBe(false);
+		expect(transport.close).not.toHaveBeenCalled();
 
 		releaseReview();
+		await overflowHandling;
 		await vi.waitFor(() => expect(reviewFinished).toBe(true));
+		await expect(modePromise).rejects.toThrow("RPC input queue exceeds 64 tasks");
+		expect(transport.close).toHaveBeenCalledOnce();
 	});
 
 	test("keeps review workflow and session-change hooks alive after the transport closes", async () => {
@@ -579,8 +599,13 @@ describe("RPC mode review actions", () => {
 			expect(writes.some((value) => (value as { type?: string }).type === "workflow_start")).toBe(true),
 		);
 
+		let modeSettled = false;
+		void modePromise.then(() => {
+			modeSettled = true;
+		});
 		closeHandler?.();
-		await expect(modePromise).resolves.toBeUndefined();
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(modeSettled).toBe(false);
 		continueReview();
 
 		await vi.waitFor(() => expect(runtimeHost.newSession).toHaveBeenCalled());
@@ -588,5 +613,6 @@ describe("RPC mode review actions", () => {
 		expect(workflowEvents).toEqual(
 			expect.arrayContaining(["workflow_start", "tool_execution_start", "workflow_end"]),
 		);
+		await expect(modePromise).resolves.toBeUndefined();
 	});
 });

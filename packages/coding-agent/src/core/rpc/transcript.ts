@@ -4,6 +4,7 @@ import type { ImageContent } from "@hansjm10/volt-ai";
 import { type BashExecutionMessage, extractVisibleTextContent } from "../messages.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
+import { DEFAULT_IROH_RPC_MAX_LINE_BYTES } from "./iroh-transport.ts";
 import type {
 	RpcMessageImage,
 	RpcTranscriptItem,
@@ -28,7 +29,13 @@ const SUBAGENT_ERROR_LIMIT = 1_000;
 const SUBAGENT_OUTPUT_LIMIT = 1_000;
 const SUBAGENT_ACTIVITY_LIMIT = 300;
 const SUBAGENT_TREE_DEPTH_LIMIT = 5;
+const SUBAGENT_ARRAY_ITEM_LIMIT = 64;
+const SUBAGENT_GLOBAL_NODE_LIMIT = 128;
 const SUBAGENT_NUMERIC_DETAIL_KEYS = ["startedAt", "durationMs", "toolCalls", "tokens"] as const;
+
+interface SubagentProjectionBudget {
+	remainingNodes: number;
+}
 
 interface StoredToolCall {
 	id: string;
@@ -65,16 +72,29 @@ export function projectSessionTranscript(
 
 /**
  * Serialized-size budget for one get_message_images response. Keeps the frame
- * under the daemon control protocol's 8 MB line cap (the tightest transport on
- * any relay path) with headroom for JSON envelope overhead. The first image of
- * a page is always included so pagination cannot stall on a single large image.
+ * under volt-app's 4 MiB encoded JSONL cap, with explicit headroom for the
+ * response envelope, identifiers, array commas, and the LF framing byte.
  */
-export const MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES = 6 * 1024 * 1024;
+export const MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES = 64 * 1024;
+export const MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES =
+	DEFAULT_IROH_RPC_MAX_LINE_BYTES - MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES;
 export const MESSAGE_IMAGES_PAGE_MAX_ITEMS = 32;
+/** A recovered transcript entry may span pages, but never an unbounded number of images. */
+export const MESSAGE_IMAGES_ENTRY_MAX_ITEMS = 64;
+/** Aggregate serialized image-component bytes recoverable for one transcript entry. */
+export const MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES = 16 * 1024 * 1024;
 
 export type ProjectMessageImagesResult =
 	| { ok: true; entryId: string; totalImages: number; images: RpcMessageImage[]; nextImageIndex: number | null }
-	| { ok: false; error: "unknown_entry" | "image_too_large" };
+	| {
+			ok: false;
+			error:
+				| "unknown_entry"
+				| "invalid_cursor"
+				| "image_too_large"
+				| "image_count_exceeded"
+				| "image_bytes_exceeded";
+	  };
 
 function getSerializedMessageImageBytes(image: ImageContent, index: number): number {
 	return Buffer.byteLength(JSON.stringify({ ...image, index }), "utf8");
@@ -97,23 +117,42 @@ export function projectMessageImages(
 		return { ok: false, error: "unknown_entry" };
 	}
 	const allImages = extractMessageImages((entry.message as { content?: unknown }).content);
-	const start = Math.max(0, Math.floor(startImageIndex));
-	const images: RpcMessageImage[] = [];
-	let usedBytes = 0;
-	let nextImageIndex: number | null = null;
-	for (let index = start; index < allImages.length; index++) {
-		const image = allImages[index];
+	if (
+		!Number.isSafeInteger(startImageIndex) ||
+		startImageIndex < 0 ||
+		(allImages.length === 0 ? startImageIndex !== 0 : startImageIndex >= allImages.length)
+	) {
+		return { ok: false, error: "invalid_cursor" };
+	}
+	if (allImages.length > MESSAGE_IMAGES_ENTRY_MAX_ITEMS) {
+		return { ok: false, error: "image_count_exceeded" };
+	}
+	const serializedImageBytes: number[] = [];
+	let totalSerializedBytes = 0;
+	for (const [index, image] of allImages.entries()) {
 		const serializedBytes = getSerializedMessageImageBytes(image, index);
-		if (serializedBytes > budgetBytes && images.length === 0) {
+		if (serializedBytes > budgetBytes) {
 			return { ok: false, error: "image_too_large" };
 		}
+		totalSerializedBytes += serializedBytes;
+		if (totalSerializedBytes > MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES) {
+			return { ok: false, error: "image_bytes_exceeded" };
+		}
+		serializedImageBytes.push(serializedBytes);
+	}
+
+	const images: RpcMessageImage[] = [];
+	let usedBytes = 0;
+	for (let index = startImageIndex; index < allImages.length; index++) {
+		const image = allImages[index];
+		const serializedBytes = serializedImageBytes[index];
 		if (images.length >= MESSAGE_IMAGES_PAGE_MAX_ITEMS || usedBytes + serializedBytes > budgetBytes) {
-			nextImageIndex = index;
 			break;
 		}
 		images.push({ ...image, index });
 		usedBytes += serializedBytes;
 	}
+	const nextImageIndex = startImageIndex + images.length < allImages.length ? startImageIndex + images.length : null;
 	return { ok: true, entryId, totalImages: allImages.length, images, nextImageIndex };
 }
 
@@ -177,6 +216,7 @@ function projectTranscriptItems(entries: SessionEntry[]): RpcTranscriptItem[] {
 					role: "user",
 					text,
 					timestamp: normalizeTimestamp(entry.timestamp),
+					...(message.clientMessageId === undefined ? {} : { clientMessageId: message.clientMessageId }),
 					...(imageCount > 0 ? { imageCount } : {}),
 				});
 			}
@@ -391,6 +431,7 @@ function projectSubagentArgs(args: Record<string, unknown> | undefined): Record<
 		return undefined;
 	}
 	const projected: Record<string, unknown> = {};
+	const budget: SubagentProjectionBudget = { remainingNodes: SUBAGENT_GLOBAL_NODE_LIMIT };
 	const agent = getStringArg(args, "agent");
 	if (agent) {
 		projected.agent = boundSummary(agent, SUBAGENT_AGENT_LIMIT);
@@ -399,11 +440,11 @@ function projectSubagentArgs(args: Record<string, unknown> | undefined): Record<
 	if (task) {
 		projected.task = boundText(task, SUBAGENT_TASK_LIMIT);
 	}
-	const tasks = projectSubagentInputArray(args.tasks);
+	const tasks = projectSubagentInputArray(args.tasks, budget);
 	if (tasks) {
 		projected.tasks = tasks;
 	}
-	const chain = projectSubagentInputArray(args.chain);
+	const chain = projectSubagentInputArray(args.chain, budget);
 	if (chain) {
 		projected.chain = chain;
 	}
@@ -415,26 +456,30 @@ function projectSubagentArgs(args: Record<string, unknown> | undefined): Record<
 	return Object.keys(projected).length > 0 ? projected : undefined;
 }
 
-function projectSubagentInputArray(value: unknown): Record<string, string>[] | undefined {
+function projectSubagentInputArray(
+	value: unknown,
+	budget: SubagentProjectionBudget,
+): Record<string, string>[] | undefined {
 	if (!Array.isArray(value)) {
 		return undefined;
 	}
-	const projected = value
-		.map((item) => {
-			if (!isRecord(item)) {
-				return undefined;
-			}
-			const agent = getStringArg(item, "agent");
-			const task = getStringArg(item, "task");
-			if (!agent || !task) {
-				return undefined;
-			}
-			return {
-				agent: boundSummary(agent, SUBAGENT_AGENT_LIMIT),
-				task: boundText(task, SUBAGENT_TASK_LIMIT),
-			};
-		})
-		.filter((item): item is { agent: string; task: string } => item !== undefined);
+	const projected: Record<string, string>[] = [];
+	for (
+		let index = 0;
+		index < value.length && index < SUBAGENT_ARRAY_ITEM_LIMIT && budget.remainingNodes > 0;
+		index++
+	) {
+		budget.remainingNodes--;
+		const item = value[index];
+		if (!isRecord(item)) continue;
+		const agent = getStringArg(item, "agent");
+		const task = getStringArg(item, "task");
+		if (!agent || !task) continue;
+		projected.push({
+			agent: boundSummary(agent, SUBAGENT_AGENT_LIMIT),
+			task: boundText(task, SUBAGENT_TASK_LIMIT),
+		});
+	}
 	return projected.length > 0 ? projected : undefined;
 }
 
@@ -445,6 +490,7 @@ export function projectSubagentDetails(
 		return undefined;
 	}
 	const projected: Record<string, unknown> = {};
+	const budget: SubagentProjectionBudget = { remainingNodes: SUBAGENT_GLOBAL_NODE_LIMIT };
 	copyBoundedString(details, projected, "mode", SUBAGENT_AGENT_LIMIT);
 	copyBoundedString(details, projected, "status", SUBAGENT_AGENT_LIMIT);
 	copyBoundedString(details, projected, "subagentId", SUBAGENT_ID_LIMIT);
@@ -460,7 +506,7 @@ export function projectSubagentDetails(
 	if (summary) {
 		projected.summary = summary;
 	}
-	const childSessions = projectSubagentDetailArray(details.childSessions);
+	const childSessions = projectSubagentDetailArray(details.childSessions, budget);
 	if (childSessions) {
 		projected.childSessions = childSessions;
 	}
@@ -476,15 +522,15 @@ export function projectSubagentDetails(
 	if (error) {
 		projected.error = error;
 	}
-	const children = projectSubagentDetailArray(details.children);
+	const children = projectSubagentDetailArray(details.children, budget);
 	if (children) {
 		projected.children = children;
 	}
-	const tasks = projectSubagentDetailArray(details.tasks);
+	const tasks = projectSubagentDetailArray(details.tasks, budget);
 	if (tasks) {
 		projected.tasks = tasks;
 	}
-	const steps = projectSubagentDetailArray(details.steps);
+	const steps = projectSubagentDetailArray(details.steps, budget);
 	if (steps) {
 		projected.steps = steps;
 	}
@@ -517,17 +563,34 @@ function projectSubagentSummary(value: unknown): Record<string, number> | undefi
 	return Object.keys(projected).length > 0 ? projected : undefined;
 }
 
-function projectSubagentDetailArray(value: unknown, depth = 0): Record<string, unknown>[] | undefined {
+function projectSubagentDetailArray(
+	value: unknown,
+	budget: SubagentProjectionBudget,
+	depth = 0,
+): Record<string, unknown>[] | undefined {
 	if (!Array.isArray(value) || depth >= SUBAGENT_TREE_DEPTH_LIMIT) {
 		return undefined;
 	}
-	const projected = value
-		.map((item) => (isRecord(item) ? projectSubagentTaskDetails(item, depth) : undefined))
-		.filter((item): item is Record<string, unknown> => item !== undefined);
+	const projected: Record<string, unknown>[] = [];
+	for (
+		let index = 0;
+		index < value.length && index < SUBAGENT_ARRAY_ITEM_LIMIT && budget.remainingNodes > 0;
+		index++
+	) {
+		budget.remainingNodes--;
+		const item = value[index];
+		if (!isRecord(item)) continue;
+		const task = projectSubagentTaskDetails(item, budget, depth);
+		if (task) projected.push(task);
+	}
 	return projected.length > 0 ? projected : undefined;
 }
 
-function projectSubagentTaskDetails(item: Record<string, unknown>, depth = 0): Record<string, unknown> | undefined {
+function projectSubagentTaskDetails(
+	item: Record<string, unknown>,
+	budget: SubagentProjectionBudget,
+	depth = 0,
+): Record<string, unknown> | undefined {
 	const projected: Record<string, unknown> = {};
 	const index = getFiniteNumber(item, "index");
 	if (index !== undefined) {
@@ -552,7 +615,7 @@ function projectSubagentTaskDetails(item: Record<string, unknown>, depth = 0): R
 	if (error) {
 		projected.error = error;
 	}
-	const children = projectSubagentDetailArray(item.children, depth + 1);
+	const children = projectSubagentDetailArray(item.children, budget, depth + 1);
 	if (children) {
 		projected.children = children;
 	}

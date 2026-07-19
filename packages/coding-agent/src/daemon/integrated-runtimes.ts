@@ -1,6 +1,10 @@
 import { realpath, rm } from "node:fs/promises";
 import { relative, sep } from "node:path";
-import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
+import type {
+	AgentSessionReplacementTarget,
+	AgentSessionReplacementTransaction,
+	AgentSessionRuntime,
+} from "../core/agent-session-runtime.ts";
 import type { IrohRemoteActiveStreamRegistry } from "../core/remote/iroh/active-stream-registry.ts";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
@@ -31,32 +35,44 @@ import {
 	type DetachedRuntimeRetentionHandle,
 	scheduleDetachedRuntimeRetention,
 } from "../remote/integrated-runtime-retention.ts";
+import {
+	assertConversationClientNodeId,
+	type ConversationAttachClaim,
+	type ConversationCoordinator,
+	ConversationCoordinatorRegistry,
+	type ConversationSubscriber,
+} from "./conversation-coordinator.ts";
 import type { IntegratedConversationSessionSelection } from "./handshake-responses.ts";
+import type { DaemonRuntimeOwnerCapability } from "./lease-broker.ts";
 import { isPathInside, resolveWorkspaceDirectory, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import { getRegisteredWorkingDirectoryForWorktree } from "./worktree-manager.ts";
 
-export interface IntegratedRuntimeSubscriber {
-	id: string;
-	attachedAt: number;
-}
+export type IntegratedRuntimeSubscriber = ConversationSubscriber;
 
-interface IntegratedWorkflowState {
-	workflowEvent: Record<string, unknown> | undefined;
-	activeTools: Map<string, Record<string, unknown>>;
-}
+export type IntegratedRuntimeAttachClaim = ConversationAttachClaim;
 
 export interface IntegratedRuntimeEntry {
-	key: string;
+	readonly coordinator: ConversationCoordinator;
+	readonly key: string;
 	clientNodeId: string;
 	workspaceName: string;
-	sessionId: string;
+	readonly sessionId: string;
 	runtime: AgentSessionRuntime;
-	recordedSessionId: string;
-	previousSessionIds: Set<string>;
-	activeWorkflows: Map<string, IntegratedWorkflowState>;
-	subscribers: Set<IntegratedRuntimeSubscriber>;
-	detachedAt: number | undefined;
-	detachedRuntimeRetention: DetachedRuntimeRetentionHandle | undefined;
+	readonly lifecycle: "prepared" | "active" | "retiring" | "retired";
+	/** Monotonic ownership generation; rekey/retirement invalidates captured attaches. */
+	readonly generation: number;
+	/** Exactly-one terminal owner; concurrent cleanup paths join this promise. */
+	readonly retirementPromise?: Promise<void>;
+	/** Capability-scoped broker ownership for this exact runtime generation. */
+	readonly leaseOwner?: DaemonRuntimeOwnerCapability;
+	/** Attach claims fence rekey until stream/subscriber/feed ownership is published. */
+	readonly attachClaims: ReadonlySet<IntegratedRuntimeAttachClaim>;
+	/** Last reconnect target persisted for each co-attached paired client. */
+	recordedSessionIdsByClient: Map<string, string>;
+	readonly previousSessionIds: ReadonlySet<string>;
+	readonly subscribers: ReadonlySet<IntegratedRuntimeSubscriber>;
+	readonly detachedAt: number | undefined;
+	readonly detachedRuntimeRetention: DetachedRuntimeRetentionHandle | undefined;
 	parentSessionId?: string;
 	subagentId?: string;
 	/** Set when the runtime cwd is a daemon-managed worktree checkout. */
@@ -84,6 +100,8 @@ export interface IntegratedRuntimeRegistryOptions {
 	auditLogger: IrohRemoteAuditLogger;
 	stateManager: IrohRemoteHostStateManager;
 	activeStreams: IrohRemoteActiveStreamRegistry;
+	/** Stable per-conversation authorities shared with relay and stream ownership. */
+	coordinators?: ConversationCoordinatorRegistry;
 	detachedRuntimeTtlMs: () => number;
 	/** Resolve the effective daemon-owned runtime policy. The client grant must remain the ceiling. */
 	getToolPolicy?: (workspace: IrohRemoteWorkspace, clientAllowTools: string) => IrohRemoteRuntimeToolPolicy;
@@ -110,7 +128,21 @@ export interface IntegratedRuntimeRegistryOptions {
 	/** Persist the sessionId → worktree binding after a created worktree conversation. */
 	bindWorktreeSession?: (workspaceName: string, worktreeId: string, sessionId: string) => Promise<void>;
 	/** Lease-broker seam: invoked when a runtime's session id changes (rekey). */
-	onRuntimeRekeyed?: (workspaceName: string, previousSessionId: string, sessionId: string) => void;
+	onRuntimeRekeyed?: (
+		owner: DaemonRuntimeOwnerCapability,
+		workspaceName: string,
+		previousSessionId: string,
+		sessionId: string,
+	) => void;
+	/** Reserve the lease target before the old daemon runtime is invalidated. */
+	prepareRuntimeRekey?: (
+		owner: DaemonRuntimeOwnerCapability,
+		workspaceName: string,
+		previousSessionId: string,
+		sessionId: string,
+	) => { commit(): void; rollback(): void };
+	/** Retire and await every stream/subscriber owner before low-level runtime disposal. */
+	beforeRuntimeStop?: (entry: IntegratedRuntimeEntry, reason: string) => Promise<void>;
 	onRuntimeDisposed?: (entry: IntegratedRuntimeEntry, reason: string) => void;
 }
 
@@ -206,17 +238,84 @@ async function resolveRuntimeWorkingDirectory(rootPath: string, cwd: string): Pr
 	};
 }
 
+function createAttachAdmissionCancelledError(): Error {
+	return new Error("Conversation attach cancelled because daemon admission closed");
+}
+
+function assertAttachAdmissionOpen(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) {
+		throw createAttachAdmissionCancelledError();
+	}
+}
+
+/**
+ * Observe an uncancellable external operation without letting it retain daemon
+ * admission after shutdown. A late successful resource result is handed to an
+ * explicit disposer so cancellation cannot turn eventual settlement into a
+ * leaked runtime.
+ */
+function waitForAttachAdmission<T>(
+	operation: Promise<T>,
+	signal: AbortSignal | undefined,
+	onLateSuccess?: (value: T) => Promise<void> | void,
+): Promise<T> {
+	if (!signal) {
+		return operation;
+	}
+	let decided = false;
+	let detachAbort = () => {};
+	const disposeLate = (value: T): void => {
+		if (!onLateSuccess) return;
+		void Promise.resolve(onLateSuccess(value)).catch(() => {});
+	};
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => {
+			if (decided) return;
+			decided = true;
+			detachAbort();
+			reject(createAttachAdmissionCancelledError());
+		};
+		detachAbort = () => signal.removeEventListener("abort", onAbort);
+		if (signal.aborted) {
+			onAbort();
+		} else {
+			signal.addEventListener("abort", onAbort, { once: true });
+		}
+		operation.then(
+			(value) => {
+				if (decided) {
+					disposeLate(value);
+					return;
+				}
+				decided = true;
+				detachAbort();
+				resolve(value);
+			},
+			(error: unknown) => {
+				if (decided) return;
+				decided = true;
+				detachAbort();
+				reject(error);
+			},
+		);
+	});
+}
+
 export class IntegratedRuntimeRegistry {
 	private readonly options: IntegratedRuntimeRegistryOptions;
+	readonly coordinators: ConversationCoordinatorRegistry;
 	private readonly entries = new Map<string, IntegratedRuntimeEntry>();
+	private readonly sessionRekeyReservationsBySource = new Map<string, IntegratedRuntimeEntry>();
+	private readonly sessionRekeyReservationsByTarget = new Map<string, IntegratedRuntimeEntry>();
 
 	constructor(options: IntegratedRuntimeRegistryOptions) {
 		this.options = options;
+		this.coordinators = options.coordinators ?? new ConversationCoordinatorRegistry();
 	}
 
 	/** The conversation runtime key: one runtime per (workspaceName, sessionId). */
 	getRegistryKey(workspaceName: string, sessionId: string): string {
-		return `${workspaceName}\0${sessionId}`;
+		return this.coordinators.getRegistryKey(workspaceName, sessionId);
 	}
 
 	get size(): number {
@@ -240,6 +339,47 @@ export class IntegratedRuntimeRegistry {
 		return undefined;
 	}
 
+	private getSessionRekeyReservation(key: string): IntegratedRuntimeEntry | undefined {
+		return this.sessionRekeyReservationsBySource.get(key) ?? this.sessionRekeyReservationsByTarget.get(key);
+	}
+
+	private createAttachRetryError(entry: IntegratedRuntimeEntry, message: string): IrohRemoteHandshakeError {
+		return createConversationOpenError("duplicate_conversation_connection", message, {
+			workspace: entry.workspaceName,
+			sessionId: entry.sessionId,
+			retryAfterMs: 500,
+		});
+	}
+
+	private createAttachClaim(entry: IntegratedRuntimeEntry, clientNodeId: string): IntegratedRuntimeAttachClaim {
+		return entry.coordinator.createAttachClaim(clientNodeId);
+	}
+
+	private assertAttachClaimCurrent(entry: IntegratedRuntimeEntry, claim: IntegratedRuntimeAttachClaim): void {
+		this.assertAttachClaimBelongsToEntry(entry, claim);
+		if (!entry.coordinator.isAttachClaimCurrent(claim)) {
+			throw this.createAttachRetryError(entry, "conversation attach claim is stale");
+		}
+	}
+
+	private assertAttachClaimBelongsToEntry(entry: IntegratedRuntimeEntry, claim: IntegratedRuntimeAttachClaim): void {
+		if (claim.coordinator !== entry.coordinator) {
+			throw this.createAttachRetryError(entry, "conversation attach claim belongs to another runtime");
+		}
+	}
+
+	/** Validate a claim immediately before attach side effects. */
+	assertEntryAttachable(entry: IntegratedRuntimeEntry, claim: IntegratedRuntimeAttachClaim): void {
+		this.assertAttachClaimCurrent(entry, claim);
+		if (
+			entry.lifecycle !== "active" ||
+			this.entries.get(entry.key) !== entry ||
+			this.getSessionRekeyReservation(entry.key) !== undefined
+		) {
+			throw this.createAttachRetryError(entry, "conversation runtime ownership changed during attach");
+		}
+	}
+
 	private resolveToolPolicy(authorization: IrohRemoteClientAuthorizationSuccess): IrohRemoteRuntimeToolPolicy {
 		return (
 			this.options.getToolPolicy?.(authorization.workspace, authorization.allowTools) ??
@@ -254,18 +394,31 @@ export class IntegratedRuntimeRegistry {
 	async getOrCreateEntry(
 		handshake: { hello: IrohRemoteHello; response: IrohRemoteHandshakeSuccess },
 		authorization: IrohRemoteClientAuthorizationSuccess,
+		options: { signal?: AbortSignal } = {},
 	): Promise<{
 		entry: IntegratedRuntimeEntry;
+		attachClaim: IntegratedRuntimeAttachClaim;
 		created: boolean;
 		sessionSelection: IntegratedConversationSessionSelection;
 	}> {
+		assertAttachAdmissionOpen(options.signal);
+		assertConversationClientNodeId(authorization.client.nodeId);
 		const targetSessionId = getResolvedTargetSessionId(handshake.hello, authorization);
 		if (targetSessionId !== undefined) {
+			const targetKey = this.getRegistryKey(authorization.workspace.name, targetSessionId);
+			const reservedEntry = this.getSessionRekeyReservation(targetKey);
+			if (reservedEntry) {
+				throw this.createAttachRetryError(reservedEntry, "conversation runtime replacement is still publishing");
+			}
 			// One runtime per conversation: any paired client attaches to an existing
 			// runtime for the target (conversation_in_use is retired; single-user model).
 			const existing = this.findOwner(authorization.workspace.name, targetSessionId);
 			if (existing) {
+				if (existing.lifecycle !== "active") {
+					throw this.createAttachRetryError(existing, "conversation runtime is retiring");
+				}
 				if (!shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization(authorization)) {
+					assertAttachAdmissionOpen(options.signal);
 					const attachingPolicy = this.resolveToolPolicy(authorization);
 					if (!isIrohRemoteRuntimeToolPolicyWithin(existing.toolPolicy, attachingPolicy)) {
 						throw createConversationOpenError(
@@ -289,14 +442,15 @@ export class IntegratedRuntimeRegistry {
 							: existing.sessionId;
 					return {
 						entry: existing,
+						attachClaim: this.createAttachClaim(existing, authorization.client.nodeId),
 						created: false,
 						sessionSelection: createConversationSessionSelectionFromEntry(existing, requestedSessionId),
 					};
 				}
-				await this.stopEntry(existing, "fresh_pairing_replaced_runtime");
+				await waitForAttachAdmission(this.stopEntry(existing, "fresh_pairing_replaced_runtime"), options.signal);
 			}
 		}
-		return this.createEntry(handshake, authorization);
+		return this.createEntry(handshake, authorization, options);
 	}
 
 	private async resolveInitialWorkingDirectory(options: {
@@ -320,8 +474,10 @@ export class IntegratedRuntimeRegistry {
 	private async createEntry(
 		handshake: { hello: IrohRemoteHello },
 		authorization: IrohRemoteClientAuthorizationSuccess,
+		options: { signal?: AbortSignal },
 	): Promise<{
 		entry: IntegratedRuntimeEntry;
+		attachClaim: IntegratedRuntimeAttachClaim;
 		created: boolean;
 		sessionSelection: IntegratedConversationSessionSelection;
 	}> {
@@ -332,21 +488,32 @@ export class IntegratedRuntimeRegistry {
 			// persisted sessionId binding on resume. Trust and allowTools stay pinned
 			// to the PARENT workspace; only cwd changes. The session dir is ALWAYS
 			// parent-keyed so worktree sessions stay listed under the workspace.
-			const worktree = await this.options.resolveWorktree?.(
-				authorization.workspace.name,
-				handshake.hello,
-				getResolvedTargetSessionId(handshake.hello, authorization),
-			);
+			assertAttachAdmissionOpen(options.signal);
+			const worktree = this.options.resolveWorktree
+				? await waitForAttachAdmission(
+						this.options.resolveWorktree(
+							authorization.workspace.name,
+							handshake.hello,
+							getResolvedTargetSessionId(handshake.hello, authorization),
+						),
+						options.signal,
+					)
+				: undefined;
 			const rootPath = worktree?.path ?? authorization.workspace.path;
 			const requestedWorkingDirectory = getRequestedWorkingDirectory(handshake.hello);
-			const initialDirectory = await this.resolveInitialWorkingDirectory({
-				workspace: authorization.workspace,
-				rootPath,
-				workingDirectory: requestedWorkingDirectory,
-				...(worktree === undefined ? {} : { worktree }),
-			});
+			assertAttachAdmissionOpen(options.signal);
+			const initialDirectory = await waitForAttachAdmission(
+				this.resolveInitialWorkingDirectory({
+					workspace: authorization.workspace,
+					rootPath,
+					workingDirectory: requestedWorkingDirectory,
+					...(worktree === undefined ? {} : { worktree }),
+				}),
+				options.signal,
+			);
 			const toolPolicy = this.resolveToolPolicy(authorization);
-			const runtimeResult = await (this.options.createRuntime ?? createIrohRemoteAgentRuntimeWithSessionSelection)({
+			assertAttachAdmissionOpen(options.signal);
+			const runtimeOperation = (this.options.createRuntime ?? createIrohRemoteAgentRuntimeWithSessionSelection)({
 				agentDir: this.options.agentDir,
 				toolPolicy,
 				conversationTarget: createIrohRuntimeConversationTarget(handshake.hello, authorization),
@@ -360,9 +527,16 @@ export class IntegratedRuntimeRegistry {
 				profile: this.options.profile,
 				projectTrusted: this.options.getProjectTrustedForWorkspace(authorization.workspace),
 			});
+			const runtimeResult = await waitForAttachAdmission(runtimeOperation, options.signal, async (lateResult) => {
+				await cleanupUncommittedRuntime(lateResult.runtime, lateResult.sessionSelection);
+			});
 			runtime = runtimeResult.runtime;
 			sessionSelection = runtimeResult.sessionSelection;
-			const runtimeDirectory = await resolveRuntimeWorkingDirectory(rootPath, runtime.cwd);
+			assertAttachAdmissionOpen(options.signal);
+			const runtimeDirectory = await waitForAttachAdmission(
+				resolveRuntimeWorkingDirectory(rootPath, runtime.cwd),
+				options.signal,
+			);
 			const remoteWorkingDirectory =
 				worktree === undefined
 					? runtimeDirectory.relativePath
@@ -375,8 +549,21 @@ export class IntegratedRuntimeRegistry {
 					: remoteWorkingDirectory;
 			const sessionId = runtime.session.sessionId;
 			const owner = this.findOwner(authorization.workspace.name, sessionId);
+			const reservedOwner = this.getSessionRekeyReservation(
+				this.getRegistryKey(authorization.workspace.name, sessionId),
+			);
+			if (reservedOwner) {
+				await cleanupUncommittedRuntime(runtime, sessionSelection);
+				runtime = undefined;
+				throw this.createAttachRetryError(reservedOwner, "conversation runtime replacement is still publishing");
+			}
 			if (owner) {
 				await cleanupUncommittedRuntime(runtime, sessionSelection);
+				runtime = undefined;
+				assertAttachAdmissionOpen(options.signal);
+				if (owner.lifecycle !== "active") {
+					throw this.createAttachRetryError(owner, "conversation runtime is retiring");
+				}
 				if (!isIrohRemoteRuntimeToolPolicyWithin(owner.toolPolicy, toolPolicy)) {
 					throw createConversationOpenError(
 						"conversation_in_use",
@@ -386,10 +573,26 @@ export class IntegratedRuntimeRegistry {
 				}
 				return {
 					entry: owner,
+					attachClaim: this.createAttachClaim(owner, authorization.client.nodeId),
 					created: false,
 					sessionSelection: createConversationSessionSelectionFromEntry(owner),
 				};
 			}
+			if (
+				worktree !== undefined &&
+				sessionSelection.kind === "created" &&
+				handshake.hello.mode === "conversation" &&
+				handshake.hello.conversation.target === "new"
+			) {
+				if (this.options.bindWorktreeSession) {
+					assertAttachAdmissionOpen(options.signal);
+					await waitForAttachAdmission(
+						this.options.bindWorktreeSession(authorization.workspace.name, worktree.id, sessionId),
+						options.signal,
+					);
+				}
+			}
+			assertAttachAdmissionOpen(options.signal);
 			const entry = this.createEntryRecord({
 				clientNodeId: authorization.client.nodeId,
 				workspaceName: authorization.workspace.name,
@@ -407,15 +610,12 @@ export class IntegratedRuntimeRegistry {
 				...(echoedWorkingDirectory === undefined ? {} : { workingDirectory: echoedWorkingDirectory }),
 				toolPolicy,
 			});
-			if (
-				worktree !== undefined &&
-				sessionSelection.kind === "created" &&
-				handshake.hello.mode === "conversation" &&
-				handshake.hello.conversation.target === "new"
-			) {
-				await this.options.bindWorktreeSession?.(authorization.workspace.name, worktree.id, sessionId);
-			}
-			return { entry, created: true, sessionSelection };
+			return {
+				entry,
+				attachClaim: this.createAttachClaim(entry, authorization.client.nodeId),
+				created: true,
+				sessionSelection,
+			};
 		} catch (error) {
 			if (runtime) {
 				await cleanupUncommittedRuntime(runtime, sessionSelection);
@@ -437,18 +637,48 @@ export class IntegratedRuntimeRegistry {
 		workingDirectory?: string;
 		toolPolicy: IrohRemoteRuntimeToolPolicy;
 	}): IntegratedRuntimeEntry {
-		return {
-			key: this.getRegistryKey(options.workspaceName, options.sessionId),
+		const coordinator = this.coordinators.reserveRuntime(options.workspaceName, options.sessionId);
+		const entry: IntegratedRuntimeEntry = {
+			coordinator,
+			get key() {
+				return `${coordinator.workspaceName}\0${coordinator.sessionId}`;
+			},
 			clientNodeId: options.clientNodeId,
 			workspaceName: options.workspaceName,
-			sessionId: options.sessionId,
+			get sessionId() {
+				return coordinator.sessionId;
+			},
 			runtime: options.runtime,
-			recordedSessionId: options.sessionId,
-			previousSessionIds: new Set(),
-			activeWorkflows: new Map(),
-			subscribers: new Set(),
-			detachedAt: undefined,
-			detachedRuntimeRetention: undefined,
+			get lifecycle() {
+				const lifecycle = coordinator.runtimeLifecycle;
+				if (lifecycle === undefined) throw new Error("integrated runtime lost its coordinator lifecycle");
+				return lifecycle;
+			},
+			get generation() {
+				return coordinator.generation;
+			},
+			get retirementPromise() {
+				return coordinator.retirement?.settled;
+			},
+			get leaseOwner() {
+				return coordinator.leaseOwner;
+			},
+			get attachClaims() {
+				return coordinator.attachClaims;
+			},
+			recordedSessionIdsByClient: new Map([[options.clientNodeId, options.sessionId]]),
+			get previousSessionIds() {
+				return coordinator.previousSessionIds;
+			},
+			get subscribers() {
+				return coordinator.subscribers;
+			},
+			get detachedAt() {
+				return coordinator.detachedAt;
+			},
+			get detachedRuntimeRetention() {
+				return coordinator.detachedRuntimeRetention;
+			},
 			...(options.parentSessionId === undefined ? {} : { parentSessionId: options.parentSessionId }),
 			...(options.subagentId === undefined ? {} : { subagentId: options.subagentId }),
 			...(options.worktreeId === undefined ? {} : { worktreeId: options.worktreeId }),
@@ -462,6 +692,10 @@ export class IntegratedRuntimeRegistry {
 				allowUnlistedExtensionTools: options.toolPolicy.allowUnlistedExtensionTools,
 			},
 		};
+		if (entry.parentSessionId === undefined) {
+			entry.runtime.setPrepareSessionReplacement?.((target) => this.prepareEntrySessionReplacement(entry, target));
+		}
+		return entry;
 	}
 
 	private registerSubagentRuntime(
@@ -470,10 +704,13 @@ export class IntegratedRuntimeRegistry {
 	): SubagentRuntimeRegistration {
 		const workspaceName = authorization.workspace.name;
 		const parentEntry = this.findOwner(workspaceName, event.parentSessionId);
-		if (!parentEntry) {
+		if (!parentEntry || parentEntry.lifecycle !== "active") {
 			throw new Error(`Parent runtime is not active for subagent session ${event.sessionId}`);
 		}
-		if (this.findOwner(workspaceName, event.sessionId)) {
+		if (
+			this.findOwner(workspaceName, event.sessionId) ||
+			this.getSessionRekeyReservation(this.getRegistryKey(workspaceName, event.sessionId)) !== undefined
+		) {
 			throw new Error(`Subagent session ${event.sessionId} is already active`);
 		}
 		const entry = this.createEntryRecord({
@@ -489,14 +726,18 @@ export class IntegratedRuntimeRegistry {
 		return {
 			commit: () => {
 				if (state !== "prepared") return;
-				if (!this.findOwner(workspaceName, event.parentSessionId)) {
+				if (this.findOwner(workspaceName, event.parentSessionId)?.lifecycle !== "active") {
 					throw new Error(`Parent runtime is not active for subagent session ${event.sessionId}`);
 				}
-				if (this.findOwner(workspaceName, event.sessionId)) {
+				if (
+					this.findOwner(workspaceName, event.sessionId) ||
+					this.getSessionRekeyReservation(this.getRegistryKey(workspaceName, event.sessionId)) !== undefined
+				) {
 					throw new Error(`Subagent session ${event.sessionId} is already active`);
 				}
 				state = "committed";
-				entry.detachedAt = Date.now();
+				entry.coordinator.activateRuntime();
+				entry.coordinator.markDetached();
 				this.entries.set(entry.key, entry);
 				this.scheduleRetention(entry, "subagent_created");
 				void this.logEntryAudit(entry, "remote_runtime_started", {
@@ -513,7 +754,9 @@ export class IntegratedRuntimeRegistry {
 					return;
 				}
 				state = "rolled-back";
-				await event.runtime.dispose().catch(() => undefined);
+				await entry.coordinator
+					.beginRuntimeRetirement("subagent_start_rolled_back", () => event.runtime.dispose())
+					.settled.catch(() => undefined);
 			},
 		};
 	}
@@ -522,9 +765,24 @@ export class IntegratedRuntimeRegistry {
 		entry: IntegratedRuntimeEntry,
 		sessionSelection: IntegratedConversationSessionSelection,
 		authorization: IrohRemoteClientAuthorizationSuccess,
+		attachClaim: IntegratedRuntimeAttachClaim,
+		signal?: AbortSignal,
 	): Promise<void> {
+		assertAttachAdmissionOpen(signal);
+		this.assertAttachClaimCurrent(entry, attachClaim);
+		if (attachClaim.clientNodeId !== authorization.client.nodeId) {
+			throw this.createAttachRetryError(entry, "conversation attach client identity changed before commit");
+		}
+		if (entry.lifecycle !== "prepared" && entry.lifecycle !== "active") {
+			throw this.createAttachRetryError(entry, "conversation runtime ownership changed before commit");
+		}
+		const initialLifecycle = entry.lifecycle;
+		if (entry.lifecycle === "active") {
+			this.assertEntryAttachable(entry, attachClaim);
+		}
 		const owner = this.findOwner(authorization.workspace.name, entry.sessionId);
-		if (owner && owner !== entry) {
+		const reservedOwner = this.getSessionRekeyReservation(entry.key);
+		if ((owner && owner !== entry) || (reservedOwner && reservedOwner !== entry)) {
 			// Two attaches raced to create the same conversation runtime; the loser
 			// retries and attaches to the winner.
 			throw createConversationOpenError("duplicate_conversation_connection", "conversation runtime already active", {
@@ -535,66 +793,169 @@ export class IntegratedRuntimeRegistry {
 		}
 
 		const inserted = this.entries.get(entry.key) !== entry;
+		assertAttachAdmissionOpen(signal);
 		if (inserted) {
 			this.entries.set(entry.key, entry);
 		}
 
 		try {
 			if (entry.parentSessionId === undefined) {
-				await this.options.setClientLastSessionId(
-					authorization.client.nodeId,
-					authorization.workspace.name,
-					entry.sessionId,
+				await waitForAttachAdmission(
+					this.options.setClientLastSessionId(
+						authorization.client.nodeId,
+						authorization.workspace.name,
+						entry.sessionId,
+					),
+					signal,
 				);
 			}
-			await this.logSessionSelection(sessionSelection, authorization);
+			await waitForAttachAdmission(this.logSessionSelection(sessionSelection, authorization), signal);
 			if (inserted) {
-				await this.logAudit({
-					type: "runtime_started",
-					clientNodeId: authorization.client.nodeId,
-					workspace: authorization.workspace.name,
-					success: true,
-					details: this.getEntryDetails(entry),
-				});
-				await this.logEntryAudit(entry, "remote_runtime_started", { reason: "created" });
+				await waitForAttachAdmission(
+					this.logAudit({
+						type: "runtime_started",
+						clientNodeId: authorization.client.nodeId,
+						workspace: authorization.workspace.name,
+						success: true,
+						details: this.getEntryDetails(entry),
+					}),
+					signal,
+				);
+				await waitForAttachAdmission(
+					this.logEntryAudit(entry, "remote_runtime_started", { reason: "created" }),
+					signal,
+				);
 			}
+			// stopEntry fences claims and advances the generation before its first
+			// await. Revalidate after every persistence/audit await and immediately
+			// before publishing `active`, otherwise a paused commit could resurrect a
+			// runtime that has already entered retirement.
+			assertAttachAdmissionOpen(signal);
+			this.assertAttachClaimCurrent(entry, attachClaim);
+			if (entry.lifecycle !== initialLifecycle || this.entries.get(entry.key) !== entry) {
+				throw this.createAttachRetryError(entry, "conversation runtime ownership changed during commit");
+			}
+			if (entry.lifecycle === "active") {
+				this.assertEntryAttachable(entry, attachClaim);
+			} else if (this.getSessionRekeyReservation(entry.key) !== undefined) {
+				throw this.createAttachRetryError(entry, "conversation runtime ownership changed during commit");
+			}
+			entry.coordinator.activateRuntime();
 		} catch (error) {
-			if (inserted && this.entries.get(entry.key) === entry) {
+			// A concurrent stop owns a retiring entry until disposal completes. Do
+			// not remove it here or stopEntry would return early and leak its runtime.
+			if (inserted && entry.lifecycle === "prepared" && this.entries.get(entry.key) === entry) {
 				this.entries.delete(entry.key);
 			}
 			throw error;
 		}
 	}
 
-	async cleanupUncommittedEntry(
+	async abortPreparedEntry(
+		entry: IntegratedRuntimeEntry,
+		sessionSelection: IntegratedConversationSessionSelection | undefined,
+		attachClaim: IntegratedRuntimeAttachClaim,
+	): Promise<void> {
+		if (entry.coordinator.retirement) {
+			await entry.coordinator.retirement.settled;
+			return;
+		}
+		if (entry.lifecycle === "retiring" || entry.lifecycle === "retired") {
+			return;
+		}
+		this.assertAttachClaimCurrent(entry, attachClaim);
+		if (entry.lifecycle !== "prepared") {
+			throw new Error("Cannot abort a conversation runtime after ownership publication");
+		}
+		await entry.coordinator.beginRuntimeRetirement("prepared_attach_aborted", () =>
+			this.finishPreparedEntryAbort(entry, sessionSelection),
+		).settled;
+	}
+
+	private async finishPreparedEntryAbort(
 		entry: IntegratedRuntimeEntry,
 		sessionSelection: IntegratedConversationSessionSelection | undefined,
 	): Promise<void> {
+		if (entry.subscribers.size !== 0) {
+			throw new Error("Cannot abort a prepared conversation runtime with attached subscribers");
+		}
 		if (this.entries.get(entry.key) === entry) {
 			this.entries.delete(entry.key);
 		}
 		this.cancelRetention(entry);
-		entry.subscribers.clear();
 		await cleanupUncommittedRuntime(entry.runtime, sessionSelection);
 	}
 
-	async attachSubscriber(entry: IntegratedRuntimeEntry): Promise<IntegratedRuntimeSubscriber> {
+	async attachSubscriber(
+		entry: IntegratedRuntimeEntry,
+		attachClaim: IntegratedRuntimeAttachClaim,
+	): Promise<IntegratedRuntimeSubscriber> {
+		this.assertEntryAttachable(entry, attachClaim);
 		const wasDetached = entry.subscribers.size === 0 && entry.detachedAt !== undefined;
+		const previousDetachedAt = entry.detachedAt;
 		this.cancelRetention(entry);
 		const subscriber: IntegratedRuntimeSubscriber = {
 			id: `subscriber-${++integratedRuntimeSubscriberSequence}`,
+			clientNodeId: attachClaim.clientNodeId,
 			attachedAt: Date.now(),
 		};
-		entry.subscribers.add(subscriber);
-		if (wasDetached) {
-			entry.detachedAt = undefined;
-			await this.logEntryAudit(entry, "remote_runtime_reattached", {
-				reason: "subscriber_attached",
-				subscriberId: subscriber.id,
-			});
+		entry.coordinator.addSubscriber(subscriber);
+		try {
+			if (wasDetached) {
+				entry.coordinator.markAttached();
+				await this.logEntryAudit(
+					entry,
+					"remote_runtime_reattached",
+					{
+						reason: "subscriber_attached",
+						subscriberId: subscriber.id,
+					},
+					{ clientNodeId: subscriber.clientNodeId },
+				);
+			}
+			await this.logEntryAudit(
+				entry,
+				"remote_subscriber_attached",
+				{ subscriberId: subscriber.id },
+				{ clientNodeId: subscriber.clientNodeId },
+			);
+			// The caller cannot detach until this promise resolves, so an attach
+			// fenced during audit publication must roll its provisional subscriber
+			// back internally before surfacing the retry.
+			this.assertEntryAttachable(entry, attachClaim);
+			return subscriber;
+		} catch (error) {
+			entry.coordinator.removeSubscriber(subscriber);
+			if (
+				wasDetached &&
+				previousDetachedAt !== undefined &&
+				entry.lifecycle === "active" &&
+				this.entries.get(entry.key) === entry &&
+				entry.subscribers.size === 0
+			) {
+				entry.coordinator.markDetached(previousDetachedAt);
+				const remainingTtlMs = Math.max(0, this.options.detachedRuntimeTtlMs() - (Date.now() - previousDetachedAt));
+				this.scheduleRetention(entry, "subscriber_attach_failed", remainingTtlMs);
+			}
+			throw error;
 		}
-		await this.logEntryAudit(entry, "remote_subscriber_attached", { subscriberId: subscriber.id });
-		return subscriber;
+	}
+
+	/**
+	 * Start durable input recovery only for the published runtime generation that
+	 * owns this fully admitted subscriber. The iroh service calls this after the
+	 * ordered projection feed is bound, closing the loser-runtime dispatch race.
+	 */
+	startRecoveredClientInputs(
+		entry: IntegratedRuntimeEntry,
+		attachClaim: IntegratedRuntimeAttachClaim,
+		subscriber: IntegratedRuntimeSubscriber,
+	): Promise<void> {
+		this.assertEntryAttachable(entry, attachClaim);
+		if (!entry.subscribers.has(subscriber) || subscriber.clientNodeId !== attachClaim.clientNodeId) {
+			throw this.createAttachRetryError(entry, "conversation subscriber is not owned by this attach");
+		}
+		return entry.runtime.startRecoveredClientInputs();
 	}
 
 	async detachSubscriber(
@@ -603,7 +964,7 @@ export class IntegratedRuntimeRegistry {
 		reason: string,
 		error?: unknown,
 	): Promise<void> {
-		if (!entry.subscribers.delete(subscriber)) {
+		if (!entry.coordinator.removeSubscriber(subscriber)) {
 			return;
 		}
 		const errorMessage = error instanceof Error ? error.message : error ? String(error) : undefined;
@@ -611,19 +972,37 @@ export class IntegratedRuntimeRegistry {
 			entry,
 			"remote_subscriber_detached",
 			{ reason, subscriberId: subscriber.id },
-			errorMessage === undefined,
-			errorMessage,
+			{
+				clientNodeId: subscriber.clientNodeId,
+				success: errorMessage === undefined,
+				error: errorMessage,
+			},
 		);
 		if (entry.subscribers.size > 0) {
 			return;
 		}
-		entry.detachedAt = Date.now();
-		await this.logEntryAudit(entry, "remote_runtime_detached", { detachedAt: entry.detachedAt, reason });
+		if (entry.lifecycle === "retiring" || entry.lifecycle === "retired") {
+			return;
+		}
+		entry.coordinator.markDetached();
+		await this.logEntryAudit(
+			entry,
+			"remote_runtime_detached",
+			{ detachedAt: entry.detachedAt, reason },
+			{ clientNodeId: subscriber.clientNodeId },
+		);
 		this.scheduleRetention(entry, reason);
 	}
 
-	async detachWithoutSubscriber(entry: IntegratedRuntimeEntry, reason: string): Promise<void> {
-		if (this.entries.get(entry.key) !== entry || entry.subscribers.size > 0) {
+	async detachWithoutSubscriber(
+		entry: IntegratedRuntimeEntry,
+		attachClaim: IntegratedRuntimeAttachClaim,
+		reason: string,
+	): Promise<void> {
+		// Cleanup can run after retirement fenced/released the claim, but the
+		// claim's captured actor identity remains immutable and authoritative.
+		this.assertAttachClaimBelongsToEntry(entry, attachClaim);
+		if (entry.lifecycle !== "active" || this.entries.get(entry.key) !== entry || entry.subscribers.size > 0) {
 			return;
 		}
 		if (entry.detachedAt !== undefined) {
@@ -639,53 +1018,109 @@ export class IntegratedRuntimeRegistry {
 			}
 			return;
 		}
-		entry.detachedAt = Date.now();
-		await this.logEntryAudit(entry, "remote_runtime_detached", { detachedAt: entry.detachedAt, reason });
+		entry.coordinator.markDetached();
+		await this.logEntryAudit(
+			entry,
+			"remote_runtime_detached",
+			{ detachedAt: entry.detachedAt, reason },
+			{ clientNodeId: attachClaim.clientNodeId },
+		);
 		this.scheduleRetention(entry, reason);
 	}
 
 	async stopEntry(entry: IntegratedRuntimeEntry, reason: string): Promise<void> {
+		if (entry.coordinator.retirement) {
+			await entry.coordinator.retirement.settled;
+			return;
+		}
 		if (this.entries.get(entry.key) !== entry) {
 			// Stale reference: the key may now belong to a replacement runtime, and
 			// deleting by key alone would evict that runtime from the registry while
 			// leaving it running unmanaged.
 			return;
 		}
-		this.cancelRetention(entry);
-		this.entries.delete(entry.key);
-		entry.subscribers.clear();
-		entry.activeWorkflows.clear();
-		entry.detachedAt = undefined;
-		const wasActive = entry.runtime.session.isBusy;
-		const removedLiveActivityCount = await this.options.stateManager.removeClientLiveActivitiesForSession(
-			entry.clientNodeId,
-			entry.workspaceName,
-			entry.sessionId,
+		if (entry.lifecycle === "retired") {
+			return;
+		}
+		if (entry.lifecycle === "retiring") {
+			return;
+		}
+		await entry.coordinator.beginRuntimeRetirement(reason, () => this.finishEntryStop(entry, reason)).settled;
+	}
+
+	private async finishEntryStop(entry: IntegratedRuntimeEntry, reason: string): Promise<void> {
+		await this.options.beforeRuntimeStop?.(entry, reason);
+		if (this.entries.get(entry.key) !== entry) {
+			return;
+		}
+		if (entry.subscribers.size !== 0) {
+			throw new Error(
+				`Cannot stop conversation runtime ${entry.workspaceName}/${entry.sessionId} with attached subscribers`,
+			);
+		}
+		const ownedConversationIds = new Set([entry.sessionId, ...entry.previousSessionIds]);
+		const activeStreamCount = Array.from(ownedConversationIds).reduce(
+			(count, sessionId) =>
+				count + this.options.activeStreams.entriesForConversationKey(entry.workspaceName, sessionId).length,
+			0,
 		);
+		if (activeStreamCount !== 0) {
+			throw new Error(
+				`Cannot stop conversation runtime ${entry.workspaceName}/${entry.sessionId} with active streams`,
+			);
+		}
+		const wasActive = entry.runtime.session.isBusy;
+		let removedLiveActivityCount = 0;
 		let stopSuccess = true;
-		let stopError: string | undefined;
+		const stopErrors: string[] = [];
+		// dispose() closes structural admission synchronously, then joins the same
+		// per-runtime actor as replacement. Keep registry/lease reservations intact
+		// until that fixed admitted set has settled.
 		try {
 			await entry.runtime.dispose();
 		} catch (error) {
 			stopSuccess = false;
-			stopError = error instanceof Error ? error.message : String(error);
+			stopErrors.push(`runtime disposal: ${error instanceof Error ? error.message : String(error)}`);
 		}
-		await this.logAudit({
-			type: "runtime_stopped",
-			clientNodeId: entry.clientNodeId,
-			workspace: entry.workspaceName,
-			success: stopSuccess,
-			error: stopError,
-			details: this.getEntryDetails(entry, { active: wasActive, reason, removedLiveActivityCount }),
-		});
-		await this.logEntryAudit(
-			entry,
-			"remote_runtime_stopped",
-			{ active: wasActive, reason, removedLiveActivityCount },
-			stopSuccess,
-			stopError,
-		);
-		this.options.onRuntimeDisposed?.(entry, reason);
+		if (this.entries.get(entry.key) !== entry) {
+			return;
+		}
+		for (const [key, reservedEntry] of this.sessionRekeyReservationsBySource) {
+			if (reservedEntry === entry) this.sessionRekeyReservationsBySource.delete(key);
+		}
+		for (const [key, reservedEntry] of this.sessionRekeyReservationsByTarget) {
+			if (reservedEntry === entry) this.sessionRekeyReservationsByTarget.delete(key);
+		}
+		this.cancelRetention(entry);
+		this.entries.delete(entry.key);
+		try {
+			removedLiveActivityCount = await this.options.stateManager.removeLiveActivitiesForWorkspaceSessions(
+				entry.workspaceName,
+				ownedConversationIds,
+			);
+		} catch (error: unknown) {
+			stopSuccess = false;
+			stopErrors.push(`live activity cleanup: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		const stopError = stopErrors.length === 0 ? undefined : stopErrors.join("; ");
+		try {
+			await this.logAudit({
+				type: "runtime_stopped",
+				clientNodeId: entry.clientNodeId,
+				workspace: entry.workspaceName,
+				success: stopSuccess,
+				error: stopError,
+				details: this.getEntryDetails(entry, { active: wasActive, reason, removedLiveActivityCount }),
+			});
+			await this.logEntryAudit(
+				entry,
+				"remote_runtime_stopped",
+				{ active: wasActive, reason, removedLiveActivityCount },
+				{ success: stopSuccess, error: stopError },
+			);
+		} finally {
+			this.options.onRuntimeDisposed?.(entry, reason);
+		}
 	}
 
 	async stopAll(reason: string): Promise<void> {
@@ -734,20 +1169,241 @@ export class IntegratedRuntimeRegistry {
 		return stoppedCount;
 	}
 
+	private async prepareEntrySessionReplacement(
+		entry: IntegratedRuntimeEntry,
+		target: AgentSessionReplacementTarget,
+	): Promise<AgentSessionReplacementTransaction> {
+		if (entry.sessionId !== target.previousSessionId || this.entries.get(entry.key) !== entry) {
+			throw new Error("daemon runtime ownership changed before session replacement preflight");
+		}
+		if (entry.lifecycle !== "active" || entry.attachClaims.size !== 0) {
+			throw new Error("daemon runtime attach is still publishing");
+		}
+		const sourceKey = entry.key;
+		const targetKey = this.getRegistryKey(entry.workspaceName, target.sessionId);
+		const existing = this.findOwner(entry.workspaceName, target.sessionId);
+		if (existing && existing !== entry) {
+			throw new Error(`conversation runtime already active for ${entry.workspaceName}/${target.sessionId}`);
+		}
+		if (
+			this.sessionRekeyReservationsBySource.has(sourceKey) ||
+			this.sessionRekeyReservationsByTarget.has(sourceKey) ||
+			this.sessionRekeyReservationsBySource.has(targetKey) ||
+			this.sessionRekeyReservationsByTarget.has(targetKey)
+		) {
+			throw new Error("daemon runtime session replacement already in progress");
+		}
+
+		const lease = (() => {
+			if (entry.coordinator.hasLeaseBroker) {
+				return entry.coordinator.prepareDaemonRuntimeLeaseRekey(target.sessionId);
+			}
+			if (!this.options.prepareRuntimeRekey) {
+				return undefined;
+			}
+			if (!entry.leaseOwner) {
+				throw new Error("daemon runtime lease owner is unavailable for session replacement");
+			}
+			return this.options.prepareRuntimeRekey(
+				entry.leaseOwner,
+				entry.workspaceName,
+				target.previousSessionId,
+				target.sessionId,
+			);
+		})();
+		this.sessionRekeyReservationsBySource.set(sourceKey, entry);
+		if (sourceKey !== targetKey) {
+			this.sessionRekeyReservationsByTarget.set(targetKey, entry);
+		}
+		const attachedClientNodeIds = new Set(
+			this.options.activeStreams
+				.entriesForConversationKey(entry.workspaceName, target.previousSessionId)
+				.map((stream) => stream.clientNodeId),
+		);
+		attachedClientNodeIds.add(entry.clientNodeId);
+		const preparedGeneration = entry.generation;
+		let phase: "prepared" | "committed" | "finalized" | "rolled_back" | "disposed" = "prepared";
+		let targetSessionPersisted = false;
+		const clearReservation = () => {
+			if (this.sessionRekeyReservationsBySource.get(sourceKey) === entry) {
+				this.sessionRekeyReservationsBySource.delete(sourceKey);
+			}
+			if (this.sessionRekeyReservationsByTarget.get(targetKey) === entry) {
+				this.sessionRekeyReservationsByTarget.delete(targetKey);
+			}
+		};
+		const assertPreparedOwnershipCurrent = () => {
+			if (
+				entry.lifecycle !== "active" ||
+				entry.generation !== preparedGeneration ||
+				entry.attachClaims.size !== 0 ||
+				this.entries.get(sourceKey) !== entry ||
+				this.sessionRekeyReservationsBySource.get(sourceKey) !== entry ||
+				(sourceKey !== targetKey && this.sessionRekeyReservationsByTarget.get(targetKey) !== entry)
+			) {
+				throw new Error("daemon runtime ownership changed before session replacement commit");
+			}
+			const targetOwner = this.findOwner(entry.workspaceName, target.sessionId);
+			if (targetOwner && targetOwner !== entry) {
+				throw new Error(`conversation runtime already active for ${entry.workspaceName}/${target.sessionId}`);
+			}
+		};
+		const restorePreviousRecordedSession = async (): Promise<void> => {
+			if (!targetSessionPersisted || entry.parentSessionId !== undefined) return;
+			await this.options.stateManager.setClientsLastSessionId(
+				Array.from(attachedClientNodeIds),
+				entry.workspaceName,
+				target.previousSessionId,
+			);
+			targetSessionPersisted = false;
+		};
+
+		return {
+			commit: async () => {
+				if (phase !== "prepared") return;
+				try {
+					assertPreparedOwnershipCurrent();
+					if (entry.parentSessionId === undefined) {
+						await this.options.stateManager.setClientsLastSessionId(
+							Array.from(attachedClientNodeIds),
+							entry.workspaceName,
+							target.sessionId,
+						);
+						targetSessionPersisted = true;
+					}
+					// Persistence is an ownership await boundary. A stop can synchronously
+					// fence the entry while that write is pending; never publish its lease or
+					// registry rekey without revalidating the captured generation.
+					assertPreparedOwnershipCurrent();
+					lease?.commit();
+				} catch (error) {
+					try {
+						await restorePreviousRecordedSession();
+					} catch (compensationError) {
+						throw new AggregateError(
+							[error, compensationError],
+							"session replacement failed and its persisted client target could not be restored",
+						);
+					}
+					throw error;
+				}
+
+				if (this.entries.get(sourceKey) === entry) {
+					this.entries.delete(sourceKey);
+				}
+				this.coordinators.rekey(entry.coordinator, target.sessionId);
+				this.entries.set(targetKey, entry);
+				for (const stream of this.options.activeStreams.entriesForConversationKey(
+					entry.workspaceName,
+					target.previousSessionId,
+				)) {
+					stream.sessionId = target.sessionId;
+				}
+				for (const clientNodeId of attachedClientNodeIds) {
+					entry.recordedSessionIdsByClient.set(clientNodeId, target.sessionId);
+				}
+				phase = "committed";
+			},
+			finalize: async () => {
+				if (phase === "finalized") return;
+				if (phase !== "committed") {
+					throw new Error("daemon runtime session replacement was not committed before publication");
+				}
+				phase = "finalized";
+				clearReservation();
+				await this.logEntryAudit(entry, "remote_runtime_session_changed", {
+					previousSessionId: target.previousSessionId,
+					sessionId: target.sessionId,
+				});
+				for (const clientNodeId of attachedClientNodeIds) {
+					await this.logAudit({
+						type: "session_changed",
+						clientNodeId,
+						workspace: entry.workspaceName,
+						success: true,
+						details: {
+							reason: "remote_rpc_session_change",
+							sessionId: target.sessionId,
+							lastSessionUpdated: entry.parentSessionId === undefined,
+						},
+					});
+				}
+			},
+			rollback: async () => {
+				if (phase !== "prepared") return;
+				phase = "rolled_back";
+				clearReservation();
+				lease?.rollback();
+				await restorePreviousRecordedSession();
+			},
+			dispose: () => {
+				if (phase === "disposed" || phase === "rolled_back") return Promise.resolve();
+				const existingRetirement = entry.coordinator.retirement;
+				const disposeTransaction = async (ownsRetirement: boolean): Promise<void> => {
+					if (phase === "prepared") {
+						lease?.rollback();
+					}
+					await restorePreviousRecordedSession().catch(() => undefined);
+					phase = "disposed";
+					clearReservation();
+					if (!ownsRetirement) {
+						// stopEntry already owns terminal disposal. Do not await it from the
+						// replacement command whose settlement may be needed to unblock stop.
+						return;
+					}
+					this.cancelRetention(entry);
+					if (this.entries.get(entry.key) === entry) {
+						this.entries.delete(entry.key);
+					}
+					this.options.onRuntimeDisposed?.(entry, "session_replacement_failed");
+				};
+				if (existingRetirement || entry.lifecycle === "retired") {
+					return disposeTransaction(false);
+				}
+				const retirement = entry.coordinator.beginRuntimeRetirement(
+					"session_replacement_failed",
+					() => disposeTransaction(true),
+					{ finalizationOrder: "concurrent" },
+				);
+				return retirement.finalization;
+			},
+		};
+	}
+
 	async handleSessionChanged(
 		entry: IntegratedRuntimeEntry,
 		activeStreamEntry: IntegratedRuntimeStreamWriter | undefined,
 		session: { sessionId: string },
 		authorization: IrohRemoteClientAuthorizationSuccess,
 	): Promise<void> {
+		const previousSessionId = entry.sessionId;
+		const attachedClientNodeIds = new Set(
+			this.options.activeStreams
+				.entriesForConversationKey(entry.workspaceName, previousSessionId)
+				.map((stream) => stream.clientNodeId),
+		);
+		attachedClientNodeIds.add(authorization.client.nodeId);
 		if (session.sessionId !== entry.sessionId) {
-			await this.rekeyEntry(entry, activeStreamEntry, session.sessionId);
+			try {
+				await this.rekeyEntry(entry, activeStreamEntry, session.sessionId);
+			} catch (error: unknown) {
+				await this.stopEntry(entry, "session_rekey_failed").catch(() => {});
+				throw error;
+			}
 		}
-		if (session.sessionId === entry.recordedSessionId) {
-			return;
+		if (activeStreamEntry) {
+			activeStreamEntry.sessionId = session.sessionId;
 		}
-		entry.recordedSessionId = session.sessionId;
-		await this.recordSessionChange(entry, session.sessionId, authorization);
+		for (const clientNodeId of attachedClientNodeIds) {
+			if (entry.recordedSessionIdsByClient.get(clientNodeId) === session.sessionId) continue;
+			try {
+				await this.recordSessionChange(entry, session.sessionId, clientNodeId);
+				entry.recordedSessionIdsByClient.set(clientNodeId, session.sessionId);
+			} catch (error: unknown) {
+				await this.stopEntry(entry, "session_rekey_persistence_failed").catch(() => {});
+				throw error;
+			}
+		}
 	}
 
 	private async rekeyEntry(
@@ -758,16 +1414,36 @@ export class IntegratedRuntimeRegistry {
 		const previousSessionId = entry.sessionId;
 		const previousKey = entry.key;
 		const nextKey = this.getRegistryKey(entry.workspaceName, nextSessionId);
-		const existing = this.entries.get(nextKey);
+		if (entry.lifecycle !== "active" || entry.attachClaims.size !== 0) {
+			throw new Error("daemon runtime attach is still publishing");
+		}
+		const existing = this.findOwner(entry.workspaceName, nextSessionId);
 		if (existing && existing !== entry) {
-			await this.stopEntry(existing, "session_change_replaced_runtime");
+			throw new Error(`conversation runtime already active for ${entry.workspaceName}/${nextSessionId}`);
+		}
+		if (
+			this.sessionRekeyReservationsBySource.has(previousKey) ||
+			this.sessionRekeyReservationsByTarget.has(previousKey) ||
+			this.sessionRekeyReservationsBySource.has(nextKey) ||
+			this.sessionRekeyReservationsByTarget.has(nextKey)
+		) {
+			throw new Error("daemon runtime session replacement already in progress");
+		}
+		// Rekey the lease first. The callback is synchronous and may reject; in
+		// that case the registry and every active stream remain on the old identity
+		// and the runtime's projection barrier fails closed.
+		if (entry.coordinator.hasLeaseBroker) {
+			entry.coordinator.rekeyDaemonRuntimeLease(nextSessionId);
+		} else if (this.options.onRuntimeRekeyed) {
+			if (!entry.leaseOwner) {
+				throw new Error("daemon runtime lease owner is unavailable for session rekey");
+			}
+			this.options.onRuntimeRekeyed(entry.leaseOwner, entry.workspaceName, previousSessionId, nextSessionId);
 		}
 		if (this.entries.get(previousKey) === entry) {
 			this.entries.delete(previousKey);
 		}
-		entry.previousSessionIds.add(previousSessionId);
-		entry.sessionId = nextSessionId;
-		entry.key = nextKey;
+		this.coordinators.rekey(entry.coordinator, nextSessionId);
 		this.entries.set(nextKey, entry);
 		// Re-key EVERY stream bound to the old conversation id, not just the one
 		// that drove this session change. Workflow-event fan-out matches streams by
@@ -788,19 +1464,18 @@ export class IntegratedRuntimeRegistry {
 			previousSessionId,
 			sessionId: nextSessionId,
 		});
-		this.options.onRuntimeRekeyed?.(entry.workspaceName, previousSessionId, nextSessionId);
 	}
 
 	private async recordSessionChange(
 		entry: IntegratedRuntimeEntry,
 		sessionId: string,
-		authorization: IrohRemoteClientAuthorizationSuccess,
+		clientNodeId: string,
 	): Promise<void> {
 		if (entry.parentSessionId !== undefined) {
 			await this.logAudit({
 				type: "session_changed",
-				clientNodeId: authorization.client.nodeId,
-				workspace: authorization.workspace.name,
+				clientNodeId,
+				workspace: entry.workspaceName,
 				success: true,
 				details: {
 					reason: "remote_rpc_session_change",
@@ -814,15 +1489,11 @@ export class IntegratedRuntimeRegistry {
 		}
 
 		try {
-			const client = await this.options.setClientLastSessionId(
-				authorization.client.nodeId,
-				authorization.workspace.name,
-				sessionId,
-			);
+			const client = await this.options.setClientLastSessionId(clientNodeId, entry.workspaceName, sessionId);
 			await this.logAudit({
 				type: "session_changed",
-				clientNodeId: authorization.client.nodeId,
-				workspace: authorization.workspace.name,
+				clientNodeId,
+				workspace: entry.workspaceName,
 				success: client !== undefined,
 				error: client ? undefined : "client not found",
 				details: { reason: "remote_rpc_session_change", sessionId },
@@ -830,81 +1501,13 @@ export class IntegratedRuntimeRegistry {
 		} catch (error) {
 			await this.logAudit({
 				type: "session_changed",
-				clientNodeId: authorization.client.nodeId,
-				workspace: authorization.workspace.name,
+				clientNodeId,
+				workspace: entry.workspaceName,
 				success: false,
 				error: error instanceof Error ? error.message : String(error),
 				details: { reason: "remote_rpc_session_change", sessionId },
 			});
-		}
-	}
-
-	// ==========================================================================
-	// Workflow event replay
-	// ==========================================================================
-
-	recordWorkflowEvent(entry: IntegratedRuntimeEntry, event: Record<string, unknown>): void {
-		const workflowId = getWorkflowEventId(event);
-		if (!workflowId) {
-			return;
-		}
-		if (event.type === "workflow_start" || event.type === "workflow_update") {
-			const state = entry.activeWorkflows.get(workflowId) ?? { workflowEvent: undefined, activeTools: new Map() };
-			state.workflowEvent = event;
-			entry.activeWorkflows.set(workflowId, state);
-			return;
-		}
-		if (event.type === "workflow_end") {
-			entry.activeWorkflows.delete(workflowId);
-			return;
-		}
-		if (event.type === "tool_execution_start") {
-			const toolCallId = getWorkflowToolCallId(event);
-			if (!toolCallId) {
-				return;
-			}
-			const state = entry.activeWorkflows.get(workflowId) ?? { workflowEvent: undefined, activeTools: new Map() };
-			state.activeTools.set(toolCallId, event);
-			entry.activeWorkflows.set(workflowId, state);
-			return;
-		}
-		if (event.type === "tool_execution_end") {
-			const toolCallId = getWorkflowToolCallId(event);
-			if (!toolCallId) {
-				return;
-			}
-			entry.activeWorkflows.get(workflowId)?.activeTools.delete(toolCallId);
-		}
-	}
-
-	async handleWorkflowEvent(
-		entry: IntegratedRuntimeEntry,
-		event: Record<string, unknown>,
-		excludedActiveStreamEntry: IntegratedRuntimeStreamWriter | undefined,
-	): Promise<void> {
-		this.recordWorkflowEvent(entry, event);
-		// Fan out across every co-attached device on this conversation, not just the
-		// runtime creator's clientNodeId — the runtime is shared by (workspace, session),
-		// so a second paired device must also receive live workflow events.
-		const activeStreams = this.options.activeStreams.entriesForConversationKey(entry.workspaceName, entry.sessionId);
-		await Promise.allSettled(
-			activeStreams
-				.filter((activeStream) => activeStream !== excludedActiveStreamEntry && activeStream.write)
-				.map((activeStream) => Promise.resolve(activeStream.write?.(event))),
-		);
-	}
-
-	async replayWorkflowEvents(
-		activeStreamEntry: IntegratedRuntimeStreamWriter,
-		entry: IntegratedRuntimeEntry,
-	): Promise<void> {
-		for (const state of entry.activeWorkflows.values()) {
-			if (state.workflowEvent) {
-				await Promise.resolve(activeStreamEntry.write?.(state.workflowEvent)).catch(() => {});
-			}
-			for (const toolEvent of state.activeTools.values()) {
-				await Promise.resolve(activeStreamEntry.write?.(toolEvent)).catch(() => {});
-			}
+			throw error;
 		}
 	}
 
@@ -916,12 +1519,16 @@ export class IntegratedRuntimeRegistry {
 		if (!entry.detachedRuntimeRetention) {
 			return;
 		}
-		entry.detachedRuntimeRetention.cancel();
-		entry.detachedRuntimeRetention = undefined;
+		entry.coordinator.cancelDetachedRuntimeRetention();
 	}
 
 	isDetached(entry: IntegratedRuntimeEntry): boolean {
-		return this.entries.get(entry.key) === entry && entry.subscribers.size === 0 && entry.detachedAt !== undefined;
+		return (
+			entry.lifecycle === "active" &&
+			this.entries.get(entry.key) === entry &&
+			entry.subscribers.size === 0 &&
+			entry.detachedAt !== undefined
+		);
 	}
 
 	scheduleRetention(entry: IntegratedRuntimeEntry, detachReason: string, ttlOverrideMs?: number): void {
@@ -966,12 +1573,11 @@ export class IntegratedRuntimeRegistry {
 						reason: "detached_runtime_ttl_error",
 						ttlMs,
 					},
-					false,
-					error instanceof Error ? error.message : String(error),
+					{ success: false, error: error instanceof Error ? error.message : String(error) },
 				);
 			},
 		});
-		entry.detachedRuntimeRetention = handle;
+		entry.coordinator.setDetachedRuntimeRetention(handle);
 	}
 
 	// ==========================================================================
@@ -992,15 +1598,14 @@ export class IntegratedRuntimeRegistry {
 		entry: IntegratedRuntimeEntry,
 		type: string,
 		details: Record<string, unknown> = {},
-		success = true,
-		error?: string,
+		outcome: { clientNodeId?: string; success?: boolean; error?: string } = {},
 	): Promise<void> {
 		await this.logAudit({
 			type,
-			clientNodeId: entry.clientNodeId,
+			clientNodeId: outcome.clientNodeId ?? entry.clientNodeId,
 			workspace: entry.workspaceName,
-			success,
-			error,
+			success: outcome.success ?? true,
+			error: outcome.error,
 			details: this.getEntryDetails(entry, details),
 		});
 	}
@@ -1076,12 +1681,4 @@ async function cleanupUncommittedRuntime(
 	if (typeof sessionFile === "string" && sessionFile.length > 0) {
 		await rm(sessionFile, { force: true }).catch(() => {});
 	}
-}
-
-function getWorkflowEventId(event: Record<string, unknown>): string | undefined {
-	return typeof event.workflowId === "string" && event.workflowId.trim() ? event.workflowId.trim() : undefined;
-}
-
-function getWorkflowToolCallId(event: Record<string, unknown>): string | undefined {
-	return typeof event.toolCallId === "string" && event.toolCallId.trim() ? event.toolCallId.trim() : undefined;
 }

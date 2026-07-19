@@ -4,7 +4,12 @@ import type { AgentSessionEventListener } from "../../../src/core/agent-session.
 import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import { createIrohRemotePresetAccess } from "../../../src/core/remote/iroh/access-grant.ts";
 import { runIrohRemoteRpcMode } from "../../../src/modes/rpc/iroh-remote-rpc-mode.ts";
-import { ManualIrohRecvStream, ManualIrohSendStream, parseWrittenObjects } from "../../iroh-stream-doubles.ts";
+import {
+	createTestIrohConversationOptions,
+	ManualIrohRecvStream,
+	ManualIrohSendStream,
+	parseWrittenObjects,
+} from "../../iroh-stream-doubles.ts";
 import { createHarness } from "../harness.ts";
 
 class BlockingFinishIrohSendStream extends ManualIrohSendStream {
@@ -49,12 +54,16 @@ test("closed Iroh stream does not crash on a queued transcript write", async () 
 		dispose: vi.fn(async () => {}),
 		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
 		newSession: vi.fn(async () => ({ cancelled: true })),
+		runWithStableSession: vi.fn(async (operation: (session: typeof harness.session) => Promise<unknown> | unknown) =>
+			operation(harness.session),
+		),
 		services: { agentDir: harness.tempDir },
 		session: harness.session,
 		setRebindSession: vi.fn(),
 		switchSession: vi.fn(async () => ({ cancelled: true })),
 	} as unknown as AgentSessionRuntime;
 	const modePromise = runIrohRemoteRpcMode(runtimeHost, {
+		...createTestIrohConversationOptions(runtimeHost),
 		disposeRuntimeOnClose: false,
 		rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 		stream: { recv, send },
@@ -62,7 +71,23 @@ test("closed Iroh stream does not crash on a queued transcript write", async () 
 	});
 
 	try {
-		await vi.waitFor(() => expect(sessionListeners.length).toBeGreaterThanOrEqual(2));
+		await vi.waitFor(() => expect(sessionListeners).toHaveLength(1));
+		expect(parseWrittenObjects(send)[0]).toMatchObject({
+			type: "conversation_bootstrap",
+			delivery: { cursor: 0 },
+			conversation: { sessionId: harness.session.sessionId },
+		});
+		recv.pushLine(JSON.stringify({ id: "startup-ready", type: "get_state" }));
+		await vi.waitFor(() =>
+			expect(parseWrittenObjects(send)).toContainEqual(
+				expect.objectContaining({
+					id: "startup-ready",
+					type: "response",
+					command: "get_state",
+					success: true,
+				}),
+			),
+		);
 		const transcriptListener = sessionListeners[0];
 		if (!transcriptListener) {
 			throw new Error("Expected transcript listener");

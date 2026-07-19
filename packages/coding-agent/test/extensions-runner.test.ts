@@ -8,7 +8,11 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createExtensionRuntime, discoverAndLoadExtensions, loadExtensions } from "../src/core/extensions/loader.ts";
-import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
+import {
+	ExtensionMessageRoleMismatchError,
+	ExtensionRunner,
+	emitProjectTrustEvent,
+} from "../src/core/extensions/runner.ts";
 import type {
 	ExtensionActions,
 	ExtensionContextActions,
@@ -557,6 +561,43 @@ describe("ExtensionRunner", () => {
 			expect(errors.length).toBe(1);
 			expect(errors[0].error).toContain("Handler error!");
 			expect(errors[0].event).toBe("context");
+		});
+
+		it("rejects a message_end replacement that crosses message roles", async () => {
+			const extensionPath = path.join(extensionsDir, "role-change.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`export default function(volt) {
+	volt.on("message_end", () => ({
+		message: { role: "assistant", content: [], timestamp: Date.now() },
+	}));
+}`,
+			);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError((error) => errors.push(error));
+			const original = {
+				role: "user" as const,
+				content: [{ type: "text" as const, text: "original" }],
+				timestamp: Date.now(),
+			};
+
+			await expect(runner.emitMessageEnd({ type: "message_end", message: original })).rejects.toMatchObject({
+				code: "extension_message_role_mismatch",
+				extensionPath,
+				expectedRole: "user",
+				receivedRole: "assistant",
+			});
+			runner.onError(() => {
+				throw new Error("diagnostic observer failed");
+			});
+			await expect(runner.emitMessageEnd({ type: "message_end", message: original })).rejects.toBeInstanceOf(
+				ExtensionMessageRoleMismatchError,
+			);
+			expect(errors).toHaveLength(2);
+			expect(errors[0]).toMatchObject({ extensionPath, event: "message_end" });
 		});
 	});
 

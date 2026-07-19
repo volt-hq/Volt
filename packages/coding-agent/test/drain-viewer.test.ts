@@ -56,6 +56,7 @@ function createContext() {
 			relayCount: () => 0,
 		},
 		session: { reload: vi.fn(async () => {}), isStreaming: false },
+		runtimeHost: { startRecoveredClientInputs: vi.fn(async () => {}) },
 		renderCurrentSessionState: vi.fn(),
 		showStatus: vi.fn(),
 		showWarning: vi.fn(),

@@ -16,7 +16,7 @@ import {
 } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AgentSession } from "../src/core/agent-session.ts";
+import { AgentSession, type AgentSessionQueuedMessage } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -154,6 +154,102 @@ describe("AgentSession concurrent prompt guard", () => {
 		await firstPrompt.catch(() => {}); // Ignore abort error
 	});
 
+	it("rejects tree navigation at message_update so an active run keeps its persistence parent", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		let finishAssistant = (): void => {};
+		let notifyStreamStarted = (): void => {};
+		const streamStarted = new Promise<void>((resolve) => {
+			notifyStreamStarted = resolve;
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model,
+				systemPrompt: "Test",
+				tools: [],
+			},
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", seq: 0, snapshot: createAssistantMessage(""), toolState: [] });
+					const partial = createAssistantMessage("late");
+					stream.push({ type: "text_start", seq: 1, contentIndex: 0, snapshot: partial, toolState: [] });
+					stream.push({
+						type: "text_delta",
+						seq: 2,
+						contentIndex: 0,
+						delta: "late",
+						snapshot: partial,
+						toolState: [],
+					});
+					finishAssistant = () => {
+						stream.push({
+							type: "done",
+							seq: 3,
+							reason: "stop",
+							message: createAssistantMessage("late assistant"),
+						});
+					};
+					notifyStreamStarted();
+				});
+				return stream;
+			},
+		});
+		const sessionManager = SessionManager.inMemory(tempDir);
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRegistry,
+			resourceLoader: createTestResourceLoader(),
+		});
+
+		sessionManager.appendMessage({ role: "user", content: "first user", timestamp: 1 });
+		const firstAssistantId = sessionManager.appendMessage(createAssistantMessage("first assistant"));
+		sessionManager.appendMessage({ role: "user", content: "abandoned user", timestamp: 2 });
+		sessionManager.appendMessage(createAssistantMessage("abandoned assistant"));
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+
+		const prompt = session.prompt("active user");
+		await streamStarted;
+		await expect(session.navigateTree(firstAssistantId, { summarize: false })).rejects.toThrow(
+			"Cannot navigate the session tree while an agent or bash run is active",
+		);
+		finishAssistant();
+		await prompt;
+
+		const completedBranch = sessionManager.getBranch().filter((entry) => entry.type === "message");
+		expect(completedBranch.map((entry) => entry.message.role)).toEqual([
+			"user",
+			"assistant",
+			"user",
+			"assistant",
+			"user",
+			"assistant",
+		]);
+		expect(completedBranch.at(-1)?.parentId).toBe(completedBranch.at(-2)?.id);
+		await session.navigateTree(firstAssistantId, { summarize: false });
+
+		const activeBranchTexts = sessionManager.getBranch().flatMap((entry) =>
+			entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant")
+				? [
+						typeof entry.message.content === "string"
+							? entry.message.content
+							: entry.message.content
+									.filter((part): part is TextContent => part.type === "text")
+									.map((part) => part.text)
+									.join(""),
+					]
+				: [],
+		);
+		expect(activeBranchTexts).toEqual(["first user", "first assistant"]);
+	});
+
 	it("should allow steer() while streaming", async () => {
 		createSession();
 
@@ -191,7 +287,10 @@ describe("AgentSession concurrent prompt guard", () => {
 		let abortSignal: AbortSignal | undefined;
 		let sawSteeringMessage = false;
 		let lastInputSource: string | undefined;
-		const queueEvents: Array<{ steering: readonly string[]; followUp: readonly string[] }> = [];
+		const queueEvents: Array<{
+			steering: readonly AgentSessionQueuedMessage[];
+			followUp: readonly AgentSessionQueuedMessage[];
+		}> = [];
 
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -291,9 +390,11 @@ describe("AgentSession concurrent prompt guard", () => {
 		await new Promise((resolve) => setTimeout(resolve, 25));
 
 		expect(session.pendingMessageCount).toBe(1);
-		expect(session.getSteeringMessages()).toContain("Steer from extension");
+		expect(session.getSteeringMessages().map((message) => message.text)).toContain("Steer from extension");
 		expect(lastInputSource).toBe("extension");
-		expect(queueEvents.some((event) => event.steering.includes("Steer from extension"))).toBe(true);
+		expect(
+			queueEvents.some((event) => event.steering.some((message) => message.text === "Steer from extension")),
+		).toBe(true);
 
 		await session.abort();
 		await firstPrompt.catch(() => {});

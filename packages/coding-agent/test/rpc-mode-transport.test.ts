@@ -1,17 +1,37 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
+import type { AgentSession, PromptPreflightResult } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { ExtensionUIContext } from "../src/core/extensions/index.ts";
 import type { HostInteraction } from "../src/core/host-interaction.ts";
 import { isStdoutTakenOver, restoreStdout } from "../src/core/output-guard.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
-import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { runRpcMode as runRpcModeImpl } from "../src/modes/rpc/rpc-mode.ts";
+
+function runRpcMode(runtimeHost: AgentSessionRuntime, options?: Parameters<typeof runRpcModeImpl>[1]): Promise<void> {
+	if (typeof runtimeHost.runWithStableSession !== "function") {
+		Object.assign(runtimeHost, {
+			async runWithStableSession<T>(operation: (session: AgentSession) => Promise<T> | T): Promise<T> {
+				return operation(runtimeHost.session);
+			},
+		});
+	}
+	if (typeof runtimeHost.runSessionInterruption !== "function") {
+		Object.assign(runtimeHost, {
+			runSessionInterruption<T>(operation: (session: AgentSession) => T): T {
+				return operation(runtimeHost.session);
+			},
+		});
+	}
+	return runRpcModeImpl(runtimeHost, options);
+}
 
 function createRuntimeHost(): { runtimeHost: AgentSessionRuntime; dispose: ReturnType<typeof vi.fn> } {
 	const dispose = vi.fn(async () => {});
 	const runtimeHost = {
 		session: {
 			bindExtensions: vi.fn(async () => {}),
+			sessionManager: { getClientInput: vi.fn(() => undefined) },
 			subscribe: vi.fn(() => () => {}),
 			agent: {
 				subscribe: vi.fn(() => () => {}),
@@ -252,7 +272,9 @@ describe("RPC mode caller-provided transports", () => {
 				data: { cancelled: false },
 			}),
 		);
-		expect(runtimeHost.switchSessionById).toHaveBeenCalledWith("selected-session");
+		expect(runtimeHost.switchSessionById).toHaveBeenCalledWith("selected-session", {
+			assertConversationGenerationCurrent: expect.any(Function),
+		});
 
 		closeHandler?.();
 		await expect(modePromise).resolves.toBeUndefined();
@@ -311,7 +333,148 @@ describe("RPC mode caller-provided transports", () => {
 		}
 	});
 
-	test("does not write delayed command responses after transport close", async () => {
+	test("leases ordinary dispatch while interruption commands bypass the held session actor", async () => {
+		let currentSession = Object.assign(createStateSession("initial-session"), {
+			abort: vi.fn(async () => {}),
+			abortRetry: vi.fn(),
+			abortBash: vi.fn(),
+		});
+		const leasedSession = createStateSession("leased-session");
+		let releaseStableDispatch = () => {};
+		let markStableDispatchStarted = () => {};
+		const stableDispatchStarted = new Promise<void>((resolve) => {
+			markStableDispatchStarted = resolve;
+		});
+		const stableDispatchGate = new Promise<void>((resolve) => {
+			releaseStableDispatch = resolve;
+		});
+		const runWithStableSession = vi.fn(async (operation: (session: AgentSession) => Promise<unknown> | unknown) => {
+			markStableDispatchStarted();
+			await stableDispatchGate;
+			currentSession = leasedSession as typeof currentSession;
+			return operation(leasedSession as unknown as AgentSession);
+		});
+		const runSessionInterruption = vi.fn((operation: (session: AgentSession) => unknown) =>
+			operation(currentSession as unknown as AgentSession),
+		);
+		const runtimeHost = {
+			get session() {
+				return currentSession;
+			},
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+			runWithStableSession,
+			runSessionInterruption,
+		} as unknown as AgentSessionRuntime;
+		const ordinaryRpc = await startRpcModeHarness(runtimeHost);
+		const interruptRpc = await startRpcModeHarness(runtimeHost);
+
+		try {
+			ordinaryRpc.send({ id: "state-leased", type: "get_state" });
+			await stableDispatchStarted;
+			expect(ordinaryRpc.writes).not.toContainEqual(expect.objectContaining({ id: "state-leased" }));
+
+			interruptRpc.send({ id: "abort-held-actor", type: "abort" });
+			interruptRpc.send({ id: "abort-retry-held-actor", type: "abort_retry" });
+			interruptRpc.send({ id: "abort-bash-held-actor", type: "abort_bash" });
+			await vi.waitFor(() => {
+				expect(currentSession.abort).toHaveBeenCalledOnce();
+				expect(currentSession.abortRetry).toHaveBeenCalledOnce();
+				expect(currentSession.abortBash).toHaveBeenCalledOnce();
+			});
+			expect(runWithStableSession).toHaveBeenCalledOnce();
+			expect(runSessionInterruption).toHaveBeenCalledTimes(3);
+
+			releaseStableDispatch();
+			await vi.waitFor(() =>
+				expect(ordinaryRpc.writes).toContainEqual(
+					expect.objectContaining({
+						id: "state-leased",
+						data: expect.objectContaining({ sessionId: "leased-session" }),
+					}),
+				),
+			);
+		} finally {
+			releaseStableDispatch();
+			ordinaryRpc.close();
+			interruptRpc.close();
+			await Promise.all([ordinaryRpc.modePromise.catch(() => {}), interruptRpc.modePromise.catch(() => {})]);
+		}
+	});
+
+	test("two streams never interrupt a stale local session across a paused replacement boundary", async () => {
+		const originalSession = Object.assign(createStateSession("original-session"), {
+			abort: vi.fn(async () => {}),
+			abortRetry: vi.fn(),
+			abortBash: vi.fn(),
+		});
+		const replacementSession = Object.assign(createStateSession("replacement-session"), {
+			abort: vi.fn(async () => {}),
+			abortRetry: vi.fn(),
+			abortBash: vi.fn(),
+		});
+		let currentSession = originalSession;
+		let replacementInProgress = false;
+		const runSessionInterruption = vi.fn((operation: (session: AgentSession) => unknown) => {
+			if (replacementInProgress) {
+				throw new Error("Agent session generation is changing; retry the interruption");
+			}
+			return operation(currentSession as unknown as AgentSession);
+		});
+		const runtimeHost = {
+			get session() {
+				return currentSession;
+			},
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+			runSessionInterruption,
+		} as unknown as AgentSessionRuntime;
+		const firstRpc = await startRpcModeHarness(runtimeHost);
+		const secondRpc = await startRpcModeHarness(runtimeHost);
+
+		try {
+			// Both mode-local pointers still reference originalSession. Runtime
+			// ownership has staged the replacement, but publication/rebind is paused.
+			currentSession = replacementSession;
+			replacementInProgress = true;
+			firstRpc.send({ id: "abort-during-rebind", type: "abort" });
+			await vi.waitFor(() =>
+				expect(firstRpc.writes).toContainEqual(
+					expect.objectContaining({
+						id: "abort-during-rebind",
+						command: "abort",
+						success: false,
+						error: "Agent session generation is changing; retry the interruption",
+					}),
+				),
+			);
+			expect(originalSession.abort).not.toHaveBeenCalled();
+			expect(replacementSession.abort).not.toHaveBeenCalled();
+
+			replacementInProgress = false;
+			secondRpc.send({ id: "abort-after-rebind", type: "abort" });
+			await vi.waitFor(() => {
+				expect(replacementSession.abort).toHaveBeenCalledOnce();
+				expect(secondRpc.writes).toContainEqual(
+					expect.objectContaining({ id: "abort-after-rebind", command: "abort", success: true }),
+				);
+			});
+			expect(originalSession.abort).not.toHaveBeenCalled();
+			expect(runSessionInterruption).toHaveBeenCalledTimes(2);
+		} finally {
+			firstRpc.close();
+			secondRpc.close();
+			await Promise.all([firstRpc.modePromise.catch(() => {}), secondRpc.modePromise.catch(() => {})]);
+		}
+	});
+
+	test("drains an admitted structural command before transport close settles", async () => {
 		let resolveNewSession: ((result: { cancelled: boolean }) => void) | undefined;
 		let newSessionResolved = false;
 		let currentSession = createStateSession("initial-session");
@@ -344,15 +507,77 @@ describe("RPC mode caller-provided transports", () => {
 			rpc.send({ id: "new-1", type: "new_session" });
 			await vi.waitFor(() => expect(runtimeHost.newSession).toHaveBeenCalledOnce());
 
+			let modeSettled = false;
+			void rpc.modePromise.finally(() => {
+				modeSettled = true;
+			});
 			rpc.close();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(modeSettled).toBe(false);
+			expect(runtimeHost.dispose).not.toHaveBeenCalled();
+
+			finishNewSession();
 			await expect(rpc.modePromise).resolves.toBeUndefined();
 
-			finishNewSession();
-			await new Promise<void>((resolve) => setImmediate(resolve));
-
 			expect(rpc.writes).not.toContainEqual(expect.objectContaining({ id: "new-1" }));
+			expect(runtimeHost.dispose).toHaveBeenCalledOnce();
 		} finally {
 			finishNewSession();
+			rpc.close();
+			await rpc.modePromise.catch(() => {});
+		}
+	});
+
+	test("holds structural commands through prompt admission but not the provider turn", async () => {
+		const { runtimeHost } = createRuntimeHost();
+		const admissions = new Set<Promise<void>>();
+		Object.assign(runtimeHost, {
+			trackClientInputAdmission(_session: AgentSession, admission: Promise<void>) {
+				admissions.add(admission);
+				void admission.finally(() => admissions.delete(admission));
+			},
+			newSession: vi.fn(async () => {
+				await Promise.all([...admissions]);
+				return { cancelled: true };
+			}),
+		});
+		let acceptPrompt = (): void => {};
+		let finishPrompt = (): void => {};
+		const prompt = vi.fn(
+			(_message: string, options: { preflightResult?: (result: PromptPreflightResult) => void }) =>
+				new Promise<void>((resolve) => {
+					acceptPrompt = () => options.preflightResult?.({ success: true, outcome: "admitted" });
+					finishPrompt = resolve;
+				}),
+		);
+		Object.assign(runtimeHost.session, { prompt });
+		const rpc = await startRpcModeHarness(runtimeHost);
+
+		try {
+			rpc.send({
+				id: "prompt-admission",
+				type: "prompt",
+				clientMessageId: "prompt-admission-client",
+				message: "queue me",
+			});
+			await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+			rpc.send({ id: "new-after-prompt", type: "new_session" });
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(runtimeHost.newSession).toHaveBeenCalledOnce();
+			expect(rpc.writes).not.toContainEqual(expect.objectContaining({ id: "new-after-prompt" }));
+
+			acceptPrompt();
+			await vi.waitFor(() =>
+				expect(rpc.writes).toContainEqual(
+					expect.objectContaining({ id: "new-after-prompt", command: "new_session", success: true }),
+				),
+			);
+			// Admission releases the lifecycle actor while the model call remains live.
+			expect(rpc.writes).toContainEqual(
+				expect.objectContaining({ id: "prompt-admission", command: "prompt", success: true }),
+			);
+		} finally {
+			finishPrompt();
 			rpc.close();
 			await rpc.modePromise.catch(() => {});
 		}
@@ -924,9 +1149,14 @@ describe("RPC mode caller-provided transports", () => {
 		const session = createPayloadValidationSession();
 		const rpc = await startRpcModeHarness(createPayloadValidationRuntimeHost(session));
 		const invalidCommands = [
-			{ id: "prompt-invalid", type: "prompt", message: 123 },
-			{ id: "steer-invalid", type: "steer", message: 123 },
-			{ id: "follow-up-invalid", type: "follow_up", message: 123 },
+			{ id: "prompt-invalid", type: "prompt", clientMessageId: "client-prompt-invalid", message: 123 },
+			{ id: "steer-invalid", type: "steer", clientMessageId: "client-steer-invalid", message: 123 },
+			{
+				id: "follow-up-invalid",
+				type: "follow_up",
+				clientMessageId: "client-follow-up-invalid",
+				message: 123,
+			},
 			{ id: "bash-invalid", type: "bash", command: 123 },
 		];
 
@@ -1210,8 +1440,8 @@ describe("RPC mode caller-provided transports", () => {
 		};
 		const { runtimeHost, dispose } = createRuntimeHost();
 		Object.assign(runtimeHost.session, {
-			prompt: vi.fn((_message: string, options: { preflightResult?: (didSucceed: boolean) => void }) => {
-				options.preflightResult?.(true);
+			prompt: vi.fn((_message: string, options: { preflightResult?: (result: PromptPreflightResult) => void }) => {
+				options.preflightResult?.({ success: true, outcome: "admitted" });
 				return Promise.resolve();
 			}),
 		});
@@ -1219,7 +1449,14 @@ describe("RPC mode caller-provided transports", () => {
 		const modePromise = runRpcMode(runtimeHost, { transport });
 		await vi.waitFor(() => expect(lineHandler).toBeDefined());
 
-		lineHandler?.(JSON.stringify({ id: "prompt-write-failure", type: "prompt", message: "hello" }));
+		lineHandler?.(
+			JSON.stringify({
+				id: "prompt-write-failure",
+				type: "prompt",
+				clientMessageId: "client-prompt-write-failure",
+				message: "hello",
+			}),
+		);
 
 		await expect(modePromise).rejects.toBe(writeError);
 		expect(transport.write).toHaveBeenCalledOnce();
@@ -1595,6 +1832,33 @@ describe("RPC mode caller-provided transports", () => {
 		await expect(modePromise).rejects.toThrow(flushError);
 		expect(transportFlush).toHaveBeenCalledOnce();
 		expect(transportClose).toHaveBeenCalledOnce();
+	});
+});
+
+describe("RPC mode stream discontinuity", () => {
+	test("rejects recovery when the transport has no ordered conversation feed", async () => {
+		const { runtimeHost } = createRuntimeHost();
+		const harness = await startRpcModeHarness(runtimeHost);
+		harness.send({
+			id: "disc-1",
+			type: "report_stream_discontinuity",
+			sessionId: "session-1",
+			subscriptionId: "subscription-1",
+			lastAppliedCursor: 2,
+			reason: "cursor_gap",
+		});
+		await vi.waitFor(() =>
+			expect(harness.writes).toContainEqual({
+				id: "disc-1",
+				type: "response",
+				command: "report_stream_discontinuity",
+				success: false,
+				error: "Ordered conversation recovery is unavailable on this RPC transport",
+			}),
+		);
+
+		harness.close();
+		await harness.modePromise;
 	});
 });
 

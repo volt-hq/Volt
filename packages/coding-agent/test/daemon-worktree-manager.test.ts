@@ -583,6 +583,38 @@ describe("worktree manager (fake git)", () => {
 		expect(git.calls.at(-1)).toEqual({ args: ["worktree", "prune"], cwd: realpathSync(workspaceDir) });
 	});
 
+	it("cancels an in-flight git prune without publishing a successful startup audit", async () => {
+		const pruneStarted = createDeferred();
+		const controller = new AbortController();
+		const auditEvents: IrohRemoteAuditEvent[] = [];
+		let observedSignal: AbortSignal | undefined;
+		const runGit: WorktreeGitRunner = async (args, cwd, options) => {
+			expect(args).toEqual(["worktree", "prune"]);
+			expect(cwd).toBe(realpathSync(workspaceDir));
+			observedSignal = options?.signal;
+			pruneStarted.resolve();
+			await new Promise<void>((resolveAbort) => {
+				if (options?.signal?.aborted) {
+					resolveAbort();
+					return;
+				}
+				options?.signal?.addEventListener("abort", () => resolveAbort(), { once: true });
+			});
+			return { ok: false, code: null, stdout: "", stderr: "aborted" };
+		};
+		const manager = createManager(runGit, {
+			auditLogger: new IrohRemoteAuditLogger({ sink: { write: (event) => void auditEvents.push(event) } }),
+		});
+
+		const pruning = manager.prune(workspace, { signal: controller.signal });
+		await pruneStarted.promise;
+		controller.abort();
+
+		await expect(pruning).resolves.toEqual({ removedRecords: [], orphanCheckouts: [] });
+		expect(observedSignal).toBe(controller.signal);
+		expect(auditEvents.filter((event) => event.type === "worktree_pruned")).toEqual([]);
+	});
+
 	it("workspace unregister preserves dirty, unmerged, busy, and stray checkout data", async () => {
 		const git = okGit();
 		const manager = createManager(git.runGit);

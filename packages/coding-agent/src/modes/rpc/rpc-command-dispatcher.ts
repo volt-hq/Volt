@@ -12,15 +12,14 @@ import {
 } from "../../core/host-actions.ts";
 import { getMcpRpcCapabilities, listMcpRpcServers } from "../../core/mcp/rpc.ts";
 import type { McpGatewayExecutionContext } from "../../core/mcp/types.ts";
-import { projectMessageImages, projectSessionTranscript, projectSubagentDetails } from "../../core/rpc/transcript.ts";
+import { buildRpcSessionState } from "../../core/rpc/session-state.ts";
+import { projectMessageImages, projectSessionTranscript } from "../../core/rpc/transcript.ts";
 import {
 	createUiActionInvocationPlan,
 	getUiActionCompletions,
 	getUiActionDescriptors,
 } from "../../core/rpc/ui-actions.ts";
-import { SUBAGENT_REGISTRY_TOOL_NAME } from "../../core/subagents/tool-names.ts";
 import type {
-	RpcActiveToolExecution,
 	RpcCatalogModel,
 	RpcClientCapabilityFeature,
 	RpcCommand,
@@ -28,6 +27,7 @@ import type {
 	RpcListSubagentsResponse,
 	RpcModel,
 	RpcPendingHostActionsResponse,
+	RpcPromptResponse,
 	RpcRegisterPushTargetResponse,
 	RpcResponse,
 	RpcSessionListItem,
@@ -68,8 +68,13 @@ export interface RpcCommandDispatcherContext {
 	rebindSession(): Promise<void>;
 	createHostActionContext(): HostActionInvocationContext;
 	setClientCapabilities(features: RpcClientCapabilityFeature[]): void;
+	reportStreamDiscontinuity(
+		command: Extract<RpcCommand, { type: "report_stream_discontinuity" }>,
+	): Promise<{ subscriptionId: string; requestId: string; checkpointCursor: number }>;
 	getPendingHostActionRequests(): RpcHostActionRequest[];
 	cancelPendingHostActionRequests(message?: string): void;
+	/** Revalidate the mutation lease after an awaited dispatcher/session preflight boundary. */
+	assertConversationGenerationCurrent(): void;
 	subagents: RpcSubagentLifecycleController;
 }
 
@@ -115,8 +120,34 @@ export function createRpcSuccessResponse<T extends RpcCommand["type"]>(
 	return { id, type: "response", command, success: true, data } as RpcResponse;
 }
 
-export function createRpcErrorResponse(id: string | undefined, command: string, message: string): RpcResponse {
-	return { id, type: "response", command, success: false, error: message };
+const STABLE_RPC_ERROR_CODES = new Set([
+	"client_input_conflict",
+	"client_input_outcome_ambiguous",
+	"stale_conversation_authority",
+]);
+
+function getStableRpcErrorCode(error: unknown): string | undefined {
+	if (typeof error !== "object" || error === null || !("code" in error) || typeof error.code !== "string") {
+		return undefined;
+	}
+	return STABLE_RPC_ERROR_CODES.has(error.code) ? error.code : undefined;
+}
+
+export function createRpcErrorResponse(
+	id: string | undefined,
+	command: string,
+	message: string,
+	error?: unknown,
+): RpcResponse {
+	const errorCode = getStableRpcErrorCode(error);
+	return {
+		id,
+		type: "response",
+		command,
+		success: false,
+		error: message,
+		...(errorCode === undefined ? {} : { errorCode }),
+	};
 }
 
 export function getRpcErrorResponseTarget(value: unknown): { id: string | undefined; command: string } {
@@ -157,33 +188,52 @@ export async function handleRpcCommand(
 			// Start prompt handling immediately, but emit the authoritative response only after
 			// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
 			let preflightSucceeded = false;
+			let settleAdmission!: () => void;
+			const admission = new Promise<void>((resolve) => {
+				settleAdmission = resolve;
+			});
 			void session
 				.prompt(command.message, {
 					images: command.images,
 					streamingBehavior: command.streamingBehavior,
+					clientMessageId: command.clientMessageId,
 					source: "rpc",
-					preflightResult: (didSucceed) => {
-						if (didSucceed) {
+					assertConversationGenerationCurrent: context.assertConversationGenerationCurrent,
+					preflightResult: (result) => {
+						if (result.success) {
 							preflightSucceeded = true;
-							context.output(createRpcSuccessResponse(id, "prompt"));
+							const record = session.sessionManager.getClientInput(command.clientMessageId);
+							const data: RpcPromptResponse = {
+								clientMessageId: command.clientMessageId,
+								outcome: result.outcome,
+								...(record?.canonicalEntryId === undefined
+									? {}
+									: { canonicalEntryId: record.canonicalEntryId }),
+							};
+							context.output(createRpcSuccessResponse(id, "prompt", data));
+							settleAdmission();
 						}
 					},
 				})
 				.catch((e) => {
 					if (!preflightSucceeded) {
-						context.output(createRpcErrorResponse(id, "prompt", e.message));
+						context.output(createRpcErrorResponse(id, "prompt", e.message, e));
 					}
+					settleAdmission();
 				});
+			// Structural replacement joins this dedicated admission fence, while
+			// ordinary state reads remain responsive during async input hooks.
+			runtimeHost.trackClientInputAdmission?.(session, admission);
 			return undefined;
 		}
 
 		case "steer": {
-			await session.steer(command.message, command.images);
+			await session.steer(command.message, command.images, command.clientMessageId);
 			return createRpcSuccessResponse(id, "steer");
 		}
 
 		case "follow_up": {
-			await session.followUp(command.message, command.images);
+			await session.followUp(command.message, command.images, command.clientMessageId);
 			return createRpcSuccessResponse(id, "follow_up");
 		}
 
@@ -215,6 +265,11 @@ export async function handleRpcCommand(
 				actions: context.getPendingHostActionRequests(),
 			};
 			return createRpcSuccessResponse(id, "get_pending_host_actions", data);
+		}
+
+		case "report_stream_discontinuity": {
+			const data = await context.reportStreamDiscontinuity(command);
+			return createRpcSuccessResponse(id, "report_stream_discontinuity", data);
 		}
 
 		// =================================================================
@@ -272,22 +327,30 @@ export async function handleRpcCommand(
 				streamingBehavior: command.streamingBehavior,
 			});
 			let preflightSucceeded = false;
+			let settleAdmission!: () => void;
+			const admission = new Promise<void>((resolve) => {
+				settleAdmission = resolve;
+			});
 			void session
 				.prompt(invocation.promptText, {
 					streamingBehavior: invocation.promptStreamingBehavior,
 					source: "rpc",
-					preflightResult: (didSucceed) => {
-						if (didSucceed) {
+					assertConversationGenerationCurrent: context.assertConversationGenerationCurrent,
+					preflightResult: (result) => {
+						if (result.success) {
 							preflightSucceeded = true;
 							context.output(createRpcSuccessResponse(id, "invoke_ui_action", invocation.response));
+							settleAdmission();
 						}
 					},
 				})
 				.catch((e) => {
 					if (!preflightSucceeded) {
-						context.output(createRpcErrorResponse(id, "invoke_ui_action", e.message));
+						context.output(createRpcErrorResponse(id, "invoke_ui_action", e.message, e));
 					}
+					settleAdmission();
 				});
+			runtimeHost.trackClientInputAdmission?.(session, admission);
 			return undefined;
 		}
 
@@ -494,45 +557,7 @@ export async function handleRpcCommand(
 		// =================================================================
 
 		case "get_state": {
-			const activeCompaction = session.activeCompaction;
-			const activeTools = [...session.agent.state.pendingToolExecutions.values()].map(
-				(execution): RpcActiveToolExecution => {
-					// Ship the newest subagent tree snapshot so a client attaching
-					// mid-turn paints live delegation state without waiting for the
-					// next tool_execution_update.
-					const details =
-						(execution.toolName === "subagent" || execution.toolName === SUBAGENT_REGISTRY_TOOL_NAME) &&
-						isRecord(execution.latestDetails)
-							? projectSubagentDetails(execution.latestDetails)
-							: undefined;
-					return {
-						toolCallId: execution.toolCallId,
-						toolName: execution.toolName,
-						status: "started",
-						args: { ...execution.args },
-						...(details ? { details } : {}),
-					};
-				},
-			);
-			const state: RpcSessionState = {
-				model: session.model,
-				thinkingLevel: session.thinkingLevel,
-				availableThinkingLevels: session.getAvailableThinkingLevels(),
-				isStreaming: session.isStreaming,
-				isBusy: session.isBusy,
-				isCompacting: session.isCompacting,
-				steeringMode: session.steeringMode,
-				followUpMode: session.followUpMode,
-				sessionFile: session.sessionFile,
-				sessionId: session.sessionId,
-				sessionName: session.sessionName,
-				autoCompactionEnabled: session.autoCompactionEnabled,
-				messageCount: session.messages.length,
-				pendingMessageCount: session.pendingMessageCount,
-				...(activeTools.length === 0 ? {} : { activeTools }),
-				...(activeCompaction ? { activeCompaction } : {}),
-			};
-			return createRpcSuccessResponse(id, "get_state", state);
+			return createRpcSuccessResponse(id, "get_state", buildRpcSessionState(session));
 		}
 
 		case "get_transcript": {
@@ -613,6 +638,7 @@ export async function handleRpcCommand(
 
 		case "set_model": {
 			const models = await session.modelRegistry.getAvailable();
+			context.assertConversationGenerationCurrent();
 			const model = models.find((m) => m.provider === command.provider && m.id === command.modelId);
 			if (!model) {
 				return createRpcErrorResponse(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
@@ -743,7 +769,9 @@ export async function handleRpcCommand(
 		}
 
 		case "switch_session_by_id": {
-			const result = await runtimeHost.switchSessionById(command.sessionId);
+			const result = await runtimeHost.switchSessionById(command.sessionId, {
+				assertConversationGenerationCurrent: context.assertConversationGenerationCurrent,
+			});
 			if (!result.cancelled) {
 				await context.rebindSession();
 			}
@@ -835,8 +863,4 @@ export async function handleRpcCommand(
 			return createRpcErrorResponse(target.id, target.command, `Unknown command: ${target.command}`);
 		}
 	}
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }

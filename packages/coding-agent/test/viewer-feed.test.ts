@@ -217,10 +217,10 @@ describe("ViewerFeedRegistry (§4.3)", () => {
 		const { session } = createFeedSession();
 		registry.start("vf-1", "c-1", session);
 
-		const delta = "x".repeat(1024);
+		const delta = "x".repeat(256);
 		let accumulated = "";
 		let repeatedMessageBytes = 0;
-		for (let index = 0; index < 128; index++) {
+		for (let index = 0; index < 240; index++) {
 			accumulated += delta;
 			repeatedMessageBytes += accumulated.length;
 			const message = fauxAssistantMessage(
@@ -238,7 +238,7 @@ describe("ViewerFeedRegistry (§4.3)", () => {
 
 		expect(registry.subscribe("vf-1", "c-1")).toBe(true);
 		const events = viewerEvents(sent);
-		expect(events).toHaveLength(128);
+		expect(events).toHaveLength(240);
 		expect(events[0]?.event.event).toHaveProperty("message");
 		expect(events.slice(1).every((entry) => !("message" in (entry.event.event as Record<string, unknown>)))).toBe(
 			true,
