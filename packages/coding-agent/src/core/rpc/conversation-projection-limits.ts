@@ -172,12 +172,29 @@ export function assertConversationProjectionAssistantToolStateWithinLimits(
 	let cumulativeContentBytes = metrics.cumulativeContentBytes;
 	const seen = new Set<number>();
 	for (const entry of toolState) {
-		const bytes = assertConversationProjectionToolArgumentWithinLimits(entry.argsText, entry.contentIndex);
-		if (seen.has(entry.contentIndex)) continue;
-		seen.add(entry.contentIndex);
-		const block = message.content[entry.contentIndex];
-		if (block?.type !== "toolCall") continue;
-		const previousBytes = contentBytes[entry.contentIndex] ?? 0;
+		const contentIndex = entry.contentIndex;
+		if (!Number.isSafeInteger(contentIndex) || contentIndex < 0 || contentIndex >= message.content.length) {
+			throw new ConversationProjectionLimitError(
+				"assistant_tool_state_content_index",
+				`Assistant tool state content index ${contentIndex} is outside the message content`,
+			);
+		}
+		if (seen.has(contentIndex)) {
+			throw new ConversationProjectionLimitError(
+				"assistant_tool_state_content_index",
+				`Assistant tool state content index ${contentIndex} is duplicated`,
+			);
+		}
+		const block = message.content[contentIndex];
+		if (block?.type !== "toolCall") {
+			throw new ConversationProjectionLimitError(
+				"assistant_tool_state_content_index",
+				`Assistant tool state content index ${contentIndex} does not reference a canonical toolCall block`,
+			);
+		}
+		seen.add(contentIndex);
+		const bytes = assertConversationProjectionToolArgumentWithinLimits(entry.argsText, contentIndex);
+		const previousBytes = contentBytes[contentIndex] ?? 0;
 		const withoutPrevious = cumulativeContentBytes - previousBytes;
 		if (
 			withoutPrevious < 0 ||
@@ -188,7 +205,7 @@ export function assertConversationProjectionAssistantToolStateWithinLimits(
 				`Assistant projection exceeded its ${DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES}-byte cumulative content limit`,
 			);
 		}
-		contentBytes[entry.contentIndex] = bytes;
+		contentBytes[contentIndex] = bytes;
 		cumulativeContentBytes = withoutPrevious + bytes;
 	}
 }

@@ -178,10 +178,6 @@ export interface RpcModeOptions {
 	orderedConversation?: RpcOrderedConversationBinding;
 	/** Require generation-bound authority for remote conversation mutations. */
 	requireConversationAuthority?: boolean;
-	/** @deprecated Prefer orderedConversation. Retained for non-Iroh embedders during migration. */
-	reportStreamDiscontinuity?: (
-		command: Extract<RpcCommand, { type: "report_stream_discontinuity" }>,
-	) => Promise<{ subscriptionId: string; requestId: string; checkpointCursor: number }>;
 }
 
 type RpcModeStartupAwareTransport = RpcTransport & {
@@ -1161,19 +1157,17 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				options.onClientCapabilitiesChanged?.(Array.from(clientCapabilities));
 			},
 			async reportStreamDiscontinuity(command: Extract<RpcCommand, { type: "report_stream_discontinuity" }>) {
-				if (options.orderedConversation) {
-					if (command.sessionId !== commandSession.sessionId) {
-						throw new Error(`Stale conversation session: ${command.sessionId}`);
-					}
-					if (command.subscriptionId !== options.orderedConversation.subscriptionId) {
-						throw new Error(`Stale conversation subscription: ${command.subscriptionId}`);
-					}
-					return options.orderedConversation.requestCheckpoint(command.id);
-				}
-				if (!options.reportStreamDiscontinuity) {
+				const orderedConversation = options.orderedConversation;
+				if (!orderedConversation) {
 					throw new Error("Ordered conversation recovery is unavailable on this RPC transport");
 				}
-				return await options.reportStreamDiscontinuity(command);
+				if (command.sessionId !== commandSession.sessionId) {
+					throw new Error(`Stale conversation session: ${command.sessionId}`);
+				}
+				if (command.subscriptionId !== orderedConversation.subscriptionId) {
+					throw new Error(`Stale conversation subscription: ${command.subscriptionId}`);
+				}
+				return orderedConversation.requestCheckpoint(command.id);
 			},
 			getPendingHostActionRequests: () => hostActionBridge.getPendingRequests(),
 			cancelPendingHostActionRequests,

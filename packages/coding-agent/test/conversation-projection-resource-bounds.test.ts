@@ -503,6 +503,38 @@ describe("conversation projection resource bounds", () => {
 		feed.dispose();
 	});
 
+	it("rejects active tool state that does not uniquely own a canonical toolCall block", () => {
+		const toolMessage = oversizedToolAssistant("small");
+		const project = (
+			message: AssistantMessage,
+			toolState: NonNullable<RpcConversationActiveAssistant["toolState"]>,
+		) =>
+			projectRemoteConversationActiveAssistant({
+				stream: { epoch: 1, seq: 1 },
+				message,
+				toolState,
+			});
+
+		expect(() =>
+			project(toolMessage, [
+				{ contentIndex: 0, argsText: "{}" },
+				{ contentIndex: 0, argsText: "{}" },
+			]),
+		).toThrow("Assistant tool state content index 0 is duplicated");
+		expect(() => project(toolMessage, [{ contentIndex: 1, argsText: "{}" }])).toThrow(
+			"Assistant tool state content index 1 is outside the message content",
+		);
+		expect(() =>
+			project(
+				{
+					...toolMessage,
+					content: [{ type: "text", text: "not a tool call" }],
+				},
+				[{ contentIndex: 0, argsText: "{}" }],
+			),
+		).toThrow("Assistant tool state content index 0 does not reference a canonical toolCall block");
+	});
+
 	it("may truncate non-delta assistant metadata while preserving the exact content base", () => {
 		const message: AssistantMessage = {
 			...oversizedToolAssistant("small"),
