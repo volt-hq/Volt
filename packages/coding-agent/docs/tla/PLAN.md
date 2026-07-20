@@ -141,7 +141,7 @@ prose below is the original design intent.
 - `WorkspaceAuthzPerRequest` — even a paired client is authz-checked against
   *current* host state every handshake, never cached at pairing.
 - `CheckOrderPreserved` — outcomes match the load-bearing order (revoked → expired
-  → workspace_unregistered → workspace_unavailable → workspace_authorization_removed
+  → workspace_unregistered → workspace_missing/workspace_unavailable → workspace_authorization_removed
   → consumed → client_unknown).
 - `RetiredOutcomesUnreachable` — the authorization-state model cannot produce
   `conversation_in_use` or `workspace_forbidden`; runtime attach may separately

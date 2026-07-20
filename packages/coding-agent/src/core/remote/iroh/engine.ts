@@ -53,7 +53,11 @@ import {
 	encodeIrohRemoteTicketPayload,
 	type IrohRemoteTicketPayload,
 } from "./ticket.ts";
-import { findIrohRemoteWorkspace, type IrohRemoteWorkspaceAvailabilityClassifier } from "./workspace.ts";
+import {
+	findIrohRemoteWorkspace,
+	type IrohRemoteWorkspaceAvailabilityClassifier,
+	type IrohRemoteWorkspaceAvailabilityStatus,
+} from "./workspace.ts";
 
 export const DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS = 10 * 60 * 1000;
 
@@ -346,6 +350,20 @@ export class IrohRemoteHostEngine {
 		if (!workspace) {
 			throw new Error(`workspace_unavailable: workspace not registered: ${workspaceName}`);
 		}
+		if (this.classifyWorkspaceAvailability !== undefined) {
+			let status: IrohRemoteWorkspaceAvailabilityStatus;
+			try {
+				status = await this.classifyWorkspaceAvailability(workspace);
+			} catch {
+				status = "unavailable";
+			}
+			if (status === "missing") {
+				throw new Error(`workspace_missing: workspace path is missing: ${workspaceName}`);
+			}
+			if (status !== "available") {
+				throw new Error(`workspace_unavailable: workspace path is unavailable: ${workspaceName}`);
+			}
+		}
 		if (this.validateWorkspace !== undefined && !(await this.validateWorkspace(workspace))) {
 			throw new Error(`workspace_unavailable: workspace path is unavailable: ${workspaceName}`);
 		}
@@ -422,6 +440,7 @@ export class IrohRemoteHostEngine {
 						hostNodeId: this.hostNodeId,
 						outcome: authorization.outcome,
 						workspace: authorization.workspace?.name,
+						retryAfterMs: authorization.retryAfterMs,
 					}),
 				};
 			}

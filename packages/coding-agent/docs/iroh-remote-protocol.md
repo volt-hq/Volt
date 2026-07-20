@@ -58,7 +58,7 @@ Example decoded payload:
 
 Pairing tickets are explicit Pair Phone invitations. They are short-lived, one-time credentials for adding a new client, not durable reconnect credentials. Mobile-facing host startup does not create an active pairing ticket; `volt remote pair` creates the QR/ticket from a running host when a phone is being added. The ticket's `workspace` is the initial registered workspace for that pairing, not the client's permanent workspace boundary.
 
-Saved-host reconnect data uses the same ticket payload shape without `secret` or `expiresAt`. A saved reconnect record must retain a non-empty `nodeId`, supported `relayMode`, `workspace`, and `irohTicket`; records missing those required reconnect fields are invalid and should not be dialed. Ordinary reconnect after app restart, network loss, or host restart with the same host state uses this saved-host data and does not require another QR scan. A saved-host client may synthesize a reconnect ticket for any registered workspace name it learned from verified host metadata; the host remains authoritative and rejects unknown names with `workspace_unregistered`, removed authorizations with `workspace_authorization_removed`, and registered names whose local directory is unavailable with `workspace_unavailable`.
+Saved-host reconnect data uses the same ticket payload shape without `secret` or `expiresAt`. A saved reconnect record must retain a non-empty `nodeId`, supported `relayMode`, `workspace`, and `irohTicket`; records missing those required reconnect fields are invalid and should not be dialed. Ordinary reconnect after app restart, network loss, or host restart with the same host state uses this saved-host data and does not require another QR scan. A saved-host client may synthesize a reconnect ticket for any registered workspace name it learned from verified host metadata; the host remains authoritative and rejects unknown names with `workspace_unregistered`, removed authorizations with `workspace_authorization_removed`, registered names whose local directory no longer exists with `workspace_missing`, and registered names whose local directory is transiently unusable with `workspace_unavailable`.
 
 ## Stream handshake
 
@@ -106,7 +106,7 @@ On success, `hostNodeId` is the host's authoritative Iroh node ID and `clientNod
 {"type":"volt_iroh_handshake","success":true,"workspace":"volt","hostNodeId":"<authoritative-host-node-id>","clientNodeId":"<authoritative-client-node-id>","features":["multi_streams.v1","conversation_streams.v1","working_directories.v1"],"workspaceDiscovery":{"purpose":"list_sessions"}}
 ```
 
-`child` is an implementation label for the host-side runtime and may be omitted. Failure responses include `hostNodeId` when the host identity is known. Failures after target resolution may include `workspace`, `sessionId`, and `retryAfterMs`; `error` is diagnostic text and should not drive app state.
+`child` is an implementation label for the host-side runtime and may be omitted. Failure responses include `hostNodeId` when the host identity is known and may include `workspace`, `sessionId`, and `retryAfterMs`. A present `retryAfterMs` is a pacing hint: wait at least that long before the next automatic dial. Its absence on outcomes that cannot self-heal (for example `workspace_missing`) means automatic redialing will not help. `error` is diagnostic text and should not drive app state.
 
 Host handshake failure outcomes:
 
@@ -120,7 +120,8 @@ Host handshake failure outcomes:
 | `client_unknown` | The host does not know this client node ID and no active, expired, or consumed pairing secret applies. |
 | `client_revoked` | The client node ID has a retained revocation tombstone and has not completed an approved re-pair. |
 | `workspace_unregistered` | The requested workspace name is not registered in this host state. |
-| `workspace_unavailable` | The requested workspace is registered but its local directory is not usable. |
+| `workspace_unavailable` | The requested workspace is registered but its local directory is transiently not usable (permissions, IO, not a directory). Carries `retryAfterMs` so clients pace their retries. |
+| `workspace_missing` | The requested workspace is registered but its local directory no longer exists. Clients should stop automatic redialing until the registration changes. |
 | `workspace_authorization_removed` | The workspace exists but this client is no longer authorized for it. |
 | `workspace_forbidden` | The workspace exists but this client is not allowed to use it. This is reserved for legacy or future per-client workspace restrictions. |
 | `session_unavailable` | A strict `conversation.target:"session"` target does not resolve to an available session. |
@@ -151,7 +152,7 @@ If the duplicate is the first conversation stream on a new Iroh connection from 
 
 `working_directories.v1` is an additional optional host feature for starting a new conversation in a workspace-relative subfolder while keeping project configuration rooted at the registered workspace (or at the matching worktree checkout root for worktree sessions). Conversation successes echo `conversation.workingDirectory` when the effective cwd is not the root. The wire value is always relative; host-local absolute paths never cross the protocol.
 
-Missing stream features, `conversation_streams_unsupported`, `workspace_unavailable`, `workspace_unregistered`, `workspace_has_worktrees`, `workspace_authorization_removed`, `session_unavailable`, `duplicate_conversation_connection`, and `conversation_in_use` are not QR re-pair requirements by themselves. `workspace_has_worktrees` means the user must explicitly remove each child worktree first; it is not an authorization or connectivity failure. `host_identity_mismatch`, malformed saved-host data, `client_unknown`, and `client_revoked` still require explicit Pair Again or Forget Host style UX.
+Missing stream features, `conversation_streams_unsupported`, `workspace_unavailable`, `workspace_missing`, `workspace_unregistered`, `workspace_has_worktrees`, `workspace_authorization_removed`, `session_unavailable`, `duplicate_conversation_connection`, and `conversation_in_use` are not QR re-pair requirements by themselves. `workspace_has_worktrees` means the user must explicitly remove each child worktree first; it is not an authorization or connectivity failure. `host_identity_mismatch`, malformed saved-host data, `client_unknown`, and `client_revoked` still require explicit Pair Again or Forget Host style UX.
 
 ## Reconnect and session selection
 

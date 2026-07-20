@@ -49,6 +49,7 @@ import {
 	IROH_REMOTE_REDACTED_EXPORT_PATH,
 	IROH_REMOTE_REDACTED_SESSION_FILE,
 	IROH_REMOTE_RPC_PASSTHROUGH_TYPES,
+	IROH_REMOTE_WORKSPACE_UNAVAILABLE_RETRY_AFTER_MS,
 	type IrohRemoteAuditEvent,
 	IrohRemoteAuditLogger,
 	IrohRemoteClientEngine,
@@ -861,6 +862,7 @@ describe("Iroh remote core helpers", () => {
 			"client_unknown",
 			"client_revoked",
 			"workspace_unavailable",
+			"workspace_missing",
 			"workspace_forbidden",
 			"workspace_authorization_removed",
 			"workspace_unregistered",
@@ -879,6 +881,7 @@ describe("Iroh remote core helpers", () => {
 			"client_unknown",
 			"client_revoked",
 			"workspace_unavailable",
+			"workspace_missing",
 			"workspace_forbidden",
 			"workspace_authorization_removed",
 			"workspace_unregistered",
@@ -2000,6 +2003,7 @@ describe("Iroh remote core helpers", () => {
 			error: "workspace path is unavailable: alpha",
 			outcome: "workspace_unavailable",
 			pairingSecretExpired: false,
+			retryAfterMs: IROH_REMOTE_WORKSPACE_UNAVAILABLE_RETRY_AFTER_MS,
 		});
 		expect((await stateManager.getState()).clients).toEqual([
 			expect.objectContaining({ nodeId: "client-node", allowedWorkspaces: ["alpha"] }),
@@ -2754,15 +2758,33 @@ describe("Iroh remote core helpers", () => {
 			expect(JSON.stringify(metadata)).not.toContain(missingPath);
 			expect(JSON.stringify(metadata)).not.toContain(unavailablePath);
 
-			const rejected = await stateManager.authorizeClient(makeHello("missing", "secret"), "client-node", {
+			const rejectedMissing = await stateManager.authorizeClient(makeHello("missing", "secret"), "client-node", {
 				allowTools: "read",
 				classifyWorkspaceAvailability: getIrohRemoteWorkspaceAvailabilityStatus,
 				pairingSecret: "secret",
 				now: 125,
 			});
-			expect(rejected).toMatchObject({
+			expect(rejectedMissing).toMatchObject({
 				ok: false,
+				error: "workspace path is missing: missing",
+				outcome: "workspace_missing",
+			});
+			expect(rejectedMissing).not.toHaveProperty("retryAfterMs");
+			const rejectedUnavailable = await stateManager.authorizeClient(
+				makeHello("unavailable", "secret"),
+				"client-node",
+				{
+					allowTools: "read",
+					classifyWorkspaceAvailability: getIrohRemoteWorkspaceAvailabilityStatus,
+					pairingSecret: "secret",
+					now: 150,
+				},
+			);
+			expect(rejectedUnavailable).toMatchObject({
+				ok: false,
+				error: "workspace path is unavailable: unavailable",
 				outcome: "workspace_unavailable",
+				retryAfterMs: IROH_REMOTE_WORKSPACE_UNAVAILABLE_RETRY_AFTER_MS,
 			});
 			expect((await stateManager.getState()).workspaces.map((workspace) => workspace.name)).toEqual([
 				"available",
@@ -3257,6 +3279,99 @@ describe("Iroh remote core helpers", () => {
 			}),
 		).rejects.toThrow("workspace_unavailable: workspace path is unavailable: stale");
 		expect((await stateManager.getState()).pendingPairingTickets).toHaveLength(1);
+	});
+
+	test("host engine pair distinguishes missing and unavailable workspace paths with a classifier", async () => {
+		const stateManager = new IrohRemoteHostStateManager({ initialState: createEmptyIrohRemoteHostState() });
+		await stateManager.upsertWorkspace({ name: "gone", path: "/gone" });
+		await stateManager.upsertWorkspace({ name: "broken", path: "/broken" });
+		const hostEngine = new IrohRemoteHostEngine({
+			classifyWorkspaceAvailability: (workspace) => (workspace.name === "gone" ? "missing" : "unavailable"),
+			now: () => 100,
+			stateManager,
+			workspace: { name: "gone", path: "/gone" },
+		});
+
+		await expect(
+			hostEngine.pair({ irohTicket: "iroh-endpoint-ticket", secret: "gone-secret", workspace: "gone" }),
+		).rejects.toThrow("workspace_missing: workspace path is missing: gone");
+		await expect(
+			hostEngine.pair({ irohTicket: "iroh-endpoint-ticket", secret: "broken-secret", workspace: "broken" }),
+		).rejects.toThrow("workspace_unavailable: workspace path is unavailable: broken");
+		expect((await stateManager.getState()).pendingPairingTickets ?? []).toHaveLength(0);
+	});
+
+	test("host engine handshake rejections distinguish missing and unavailable workspace paths", async () => {
+		const stateManager = new IrohRemoteHostStateManager({
+			initialState: {
+				hostSecretKey: undefined,
+				workspaces: [
+					{ name: "gone", path: "/gone" },
+					{ name: "broken", path: "/broken" },
+				],
+				clients: [
+					{
+						nodeId: "client-node",
+						label: "phone",
+						allowedWorkspaces: [],
+						allowedTools: "read",
+						rpcGrant: CODING_RPC_GRANT,
+						pairedAt: 10,
+						lastSeenAt: 20,
+					},
+				],
+			},
+		});
+		const hostEngine = new IrohRemoteHostEngine({
+			classifyWorkspaceAvailability: (workspace) => (workspace.name === "gone" ? "missing" : "unavailable"),
+			hostNodeId: "host-node",
+			now: () => 200,
+			stateManager,
+			workspace: { name: "gone", path: "/gone" },
+		});
+
+		const makeRecv = (workspace: string) => {
+			const recv = new ManualIrohRecvStream();
+			recv.push(
+				Buffer.from(
+					`${JSON.stringify({
+						type: "volt_iroh_hello",
+						protocol: IROH_REMOTE_ALPN,
+						workspace,
+						conversation: { target: "last" },
+					})}\n`,
+				),
+			);
+			return recv;
+		};
+
+		const missingHandshake = await hostEngine.readHandshake(makeRecv("gone"), "client-node");
+		expect(missingHandshake).toMatchObject({
+			ok: false,
+			error: "workspace path is missing: gone",
+			response: {
+				type: "volt_iroh_handshake",
+				success: false,
+				outcome: "workspace_missing",
+				hostNodeId: "host-node",
+				error: "workspace path is missing: gone",
+			},
+		});
+		expect(missingHandshake.response).not.toHaveProperty("retryAfterMs");
+
+		const unavailableHandshake = await hostEngine.readHandshake(makeRecv("broken"), "client-node");
+		expect(unavailableHandshake).toMatchObject({
+			ok: false,
+			error: "workspace path is unavailable: broken",
+			response: {
+				type: "volt_iroh_handshake",
+				success: false,
+				outcome: "workspace_unavailable",
+				hostNodeId: "host-node",
+				retryAfterMs: IROH_REMOTE_WORKSPACE_UNAVAILABLE_RETRY_AFTER_MS,
+				error: "workspace path is unavailable: broken",
+			},
+		});
 	});
 
 	test("host engine snapshots workspace options at construction", async () => {
