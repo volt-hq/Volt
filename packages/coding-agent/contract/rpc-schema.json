@@ -1565,6 +1565,9 @@
 				"conversationAuthority": {
 					"$ref": "#/$defs/RpcConversationAuthority"
 				},
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
 				"entryId": {
 					"type": "string"
 				},
@@ -1669,6 +1672,9 @@
 				},
 				"conversationAuthority": {
 					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
 				}
 			},
 			"additionalProperties": false
@@ -1688,6 +1694,9 @@
 				},
 				"conversationAuthority": {
 					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
 				},
 				"limit": {
 					"type": "number"
@@ -1973,6 +1982,16 @@
 				},
 				"conversationAuthority": {
 					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"limit": {
+					"type": "integer",
+					"minimum": 1,
+					"x-volt-expected": "be a positive integer"
+				},
+				"cursor": {
+					"type": "string",
+					"minLength": 1,
+					"x-volt-expected": "be a non-empty string"
 				}
 			},
 			"additionalProperties": false

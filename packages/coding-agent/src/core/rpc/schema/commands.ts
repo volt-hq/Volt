@@ -226,13 +226,17 @@ export const RPC_COMMAND_SCHEMAS = {
 	}),
 
 	// State
-	get_state: commandSchema("get_state", {}),
+	get_state: commandSchema("get_state", {
+		sessionId: Type.Optional(RpcConversationIdentifierSchema),
+	}),
 	get_transcript: commandSchema("get_transcript", {
+		sessionId: Type.Optional(RpcConversationIdentifierSchema),
 		limit: Type.Optional(Type.Number()),
 		beforeEntryId: Type.Optional(Type.String()),
 		branchEpoch: Type.Optional(RpcConversationIdentifierSchema),
 	}),
 	get_message_images: commandSchema("get_message_images", {
+		sessionId: Type.Optional(RpcConversationIdentifierSchema),
 		entryId: Type.String(),
 		startImageIndex: Type.Optional(Type.Number()),
 	}),
@@ -286,7 +290,10 @@ export const RPC_COMMAND_SCHEMAS = {
 
 	// Session
 	get_session_stats: commandSchema("get_session_stats", {}),
-	list_sessions: commandSchema("list_sessions", {}),
+	list_sessions: commandSchema("list_sessions", {
+		limit: Type.Optional(Type.Integer({ minimum: 1, "x-volt-expected": "be a positive integer" })),
+		cursor: Type.Optional(Type.String({ minLength: 1, "x-volt-expected": "be a non-empty string" })),
+	}),
 	export_html: commandSchema("export_html", { outputPath: Type.Optional(Type.String()) }),
 	switch_session: commandSchema("switch_session", { sessionPath: Type.String() }),
 	switch_session_by_id: commandSchema("switch_session_by_id", { sessionId: Type.String() }),
