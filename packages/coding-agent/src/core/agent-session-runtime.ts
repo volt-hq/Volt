@@ -11,6 +11,7 @@ import type {
 	SessionStartEvent,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { ReviewWorkflowManager } from "./review-workflows.ts";
 import { ConversationProjectionFeed, type ConversationProjectionSource } from "./rpc/conversation-projection-feed.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
@@ -219,6 +220,7 @@ export class AgentSessionRuntime {
 	private recoveredClientInputsEnabled = false;
 	private recoveredClientInputsTask?: RecoveredClientInputsTask;
 	private readonly clientInputAdmissions = new Map<Promise<void>, AgentSession>();
+	private _reviewWorkflows?: ReviewWorkflowManager;
 	readonly conversationProjectionFeed: ConversationProjectionFeed;
 
 	constructor(
@@ -259,6 +261,22 @@ export class AgentSessionRuntime {
 
 	get modelFallbackMessage(): string | undefined {
 		return this._modelFallbackMessage;
+	}
+
+	/**
+	 * Detached review workflows scoped to this runtime. Events are published
+	 * through the runtime conversation projection feed so they survive client
+	 * detach/reattach; disposal aborts every active review.
+	 */
+	get reviewWorkflows(): ReviewWorkflowManager {
+		if (!this._reviewWorkflows) {
+			this._reviewWorkflows = new ReviewWorkflowManager({
+				publishEvent: (event) => {
+					this.conversationProjectionFeed.publishExternal(event);
+				},
+			});
+		}
+		return this._reviewWorkflows;
 	}
 
 	/**
@@ -1199,6 +1217,11 @@ export class AgentSessionRuntime {
 		// has either finalized or failed closed.
 		this.acceptingStructuralOperations = false;
 		const execute = async () => {
+			// Detached reviews publish into the conversation feed; abort and join
+			// them before the feed (and the rest of the runtime) is torn down.
+			if (this._reviewWorkflows) {
+				await this._reviewWorkflows.abortAll().catch(() => undefined);
+			}
 			const recoveredClientInputsTask = this.recoveredClientInputsTask;
 			if (recoveredClientInputsTask && !recoveredClientInputsTask.settled) {
 				recoveredClientInputsTask.cancellationRequested = true;

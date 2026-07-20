@@ -303,6 +303,19 @@ export function validateRpcCommandPayload(value: unknown): string | undefined {
 				validateOptionalField(value, "args", isRecord, "an object") ??
 				validateOptionalField(value, "streamingBehavior", isRpcStreamingBehavior, '"steer" or "followUp"')
 			);
+		case "cancel_workflow":
+		case "get_review_result":
+		case "open_review_session":
+			return (
+				validateRequiredField(
+					value,
+					"workflowId",
+					(entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
+					"a non-empty string",
+				) ?? validateConversationIdentifierResourceBound(value, "workflowId")
+			);
+		case "list_review_workflows":
+			return undefined;
 		case "register_push_target":
 			return validateRequiredField(value, "args", isRpcRegisterPushTargetArgs, "a push target registration object");
 		case "unregister_workspace":

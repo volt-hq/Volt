@@ -31,6 +31,12 @@ export interface HostActionSessionState {
 
 export interface HostActionDescriptorContext {
 	session: HostActionSessionState;
+	/**
+	 * True when the host runs review actions detached from the session (RPC
+	 * mode): reviews stay available while the session is busy and the invocation
+	 * returns an accepted response with a workflowId instead of blocking.
+	 */
+	detachedReviews?: boolean;
 }
 
 export interface HostActionInvocationContext extends HostActionDescriptorContext {
@@ -605,6 +611,11 @@ async function invokeReviewBranchAction(
 }
 
 function reviewAvailability(context: HostActionDescriptorContext): HostActionAvailability {
+	if (context.detachedReviews) {
+		// Detached reviews run in an isolated session and never touch the
+		// current conversation, so session busy states do not gate them.
+		return { enabled: true };
+	}
 	if (context.session.isStreaming) {
 		return { enabled: false, disabledReason: "Review is not available while the agent is streaming" };
 	}
@@ -645,6 +656,15 @@ function createReviewOptions(options: HostActionInvokeOptions): HostActionReview
 }
 
 function createReviewInvocationResponse(action: string, result: ReviewWorkflowResult): UiActionInvocationResponse {
+	if (result.status === "accepted") {
+		return {
+			action,
+			status: "accepted",
+			workflowId: result.workflowId,
+			actionsChanged: true,
+			message: result.message ?? "Review started",
+		};
+	}
 	if (result.status === "cancelled") {
 		return {
 			action,

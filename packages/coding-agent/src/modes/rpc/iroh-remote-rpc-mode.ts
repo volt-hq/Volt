@@ -4,7 +4,6 @@ import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { AgentSessionEvent } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
-import { REVIEW_BRANCH_ACTION_ID, REVIEW_UNCOMMITTED_ACTION_ID } from "../../core/host-actions.ts";
 import { extractVisibleTextContent } from "../../core/messages.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
@@ -239,28 +238,52 @@ export function runIrohRemoteRpcMode(
 		}
 		await writeOrderedControl(notification);
 	};
+	const deliverNotificationOnce = async (notification: IrohRemoteNotificationRequest): Promise<void> => {
+		if (sentNotificationEventIds.has(notification.eventId)) {
+			return;
+		}
+		if (sentNotificationEventIds.size >= MAX_SENT_NOTIFICATION_EVENT_IDS) {
+			// Set preserves insertion order, so the first value is the oldest.
+			const oldest = sentNotificationEventIds.values().next().value;
+			if (oldest !== undefined) {
+				sentNotificationEventIds.delete(oldest);
+			}
+		}
+		sentNotificationEventIds.add(notification.eventId);
+		try {
+			await deliverCompletionNotification(notification);
+		} catch (error: unknown) {
+			sentNotificationEventIds.delete(notification.eventId);
+			throw error;
+		}
+	};
+	// Detached reviews complete via workflow_end events rather than a blocking
+	// invoke_ui_action response, so the review-completed push is keyed on the
+	// runtime-scoped workflow event stream.
+	const detachReviewWorkflowNotifications =
+		runtimeHost.reviewWorkflows?.attachSink((event) => {
+			if (event.type !== "workflow_end" || event.kind !== "review" || event.status !== "completed") {
+				return;
+			}
+			const workspace = getSafeNotificationWorkspace(options.workspaceName);
+			void deliverNotificationOnce({
+				type: "notification_request",
+				eventId: `${event.workflowId}:completed`,
+				kind: "review_completed",
+				title: workspace === undefined ? "Review complete" : `Review complete in ${workspace}`,
+				body: "Open Volt to see the findings.",
+				sessionId: runtimeHost.session.sessionId,
+				...(workspace === undefined ? {} : { workspace }),
+			}).catch(() => {});
+		}) ?? (() => {});
 	const closeDeferringTransport = createIrohRemoteCloseDeferringRpcTransport({
 		transport: outboundTransport,
 		preparedTransport: preparedOutboundTransport,
 		getCompletionState: () => getIrohRemoteCompletionState(runtimeHost),
 		onCommandCompleted: async (completion) => {
 			const notification = createIrohRemoteCompletionNotification(completion, options.workspaceName);
-			if (!notification || sentNotificationEventIds.has(notification.eventId)) {
-				return;
-			}
-			if (sentNotificationEventIds.size >= MAX_SENT_NOTIFICATION_EVENT_IDS) {
-				// Set preserves insertion order, so the first value is the oldest.
-				const oldest = sentNotificationEventIds.values().next().value;
-				if (oldest !== undefined) {
-					sentNotificationEventIds.delete(oldest);
-				}
-			}
-			sentNotificationEventIds.add(notification.eventId);
-			try {
-				await deliverCompletionNotification(notification);
-			} catch (error: unknown) {
-				sentNotificationEventIds.delete(notification.eventId);
-				throw error;
+			if (notification) {
+				await deliverNotificationOnce(notification);
 			}
 		},
 		onResponseWritten: options.onResponseWritten,
@@ -446,6 +469,7 @@ export function runIrohRemoteRpcMode(
 		},
 	}).finally(() => {
 		transportClosed = true;
+		detachReviewWorkflowNotifications();
 		detachSessionWillProject?.();
 		detachRawCloseRetirement();
 		retireConversation();
@@ -983,17 +1007,6 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 		});
 	};
 
-	const finishAfterCommandCompletion = async (
-		pending: PendingIrohRemoteCommand,
-		response?: Record<string, unknown>,
-	): Promise<void> => {
-		try {
-			await notifyCompletedCommand(pending, response);
-		} finally {
-			pending.finish();
-		}
-	};
-
 	const finishAfterPromptCompletion = async (pending: PendingIrohRemoteCommand): Promise<void> => {
 		try {
 			// Prompt success is emitted just before AgentSession starts the run.
@@ -1022,10 +1035,6 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 		pending.finish();
 		if (response.success === true && shouldWaitForRemoteResponseCompletion(pending.command, response)) {
 			void finishAfterPromptCompletion(pending).catch(() => {});
-			return;
-		}
-		if (response.success === true && isCompletedReviewInvocationResponse(pending.command, response)) {
-			void finishAfterCommandCompletion(pending, response).catch(() => {});
 			return;
 		}
 	};
@@ -1211,17 +1220,6 @@ function createIrohRemoteCompletionNotification(
 				};
 		}
 	}
-	if (isCompletedReviewInvocationResponse(completion.command, completion.response)) {
-		return {
-			type: "notification_request",
-			eventId: `review:${finalState.sessionId}:${finalState.runId}:completed`,
-			kind: "review_completed",
-			title: workspace === undefined ? "Review complete" : `Review complete in ${workspace}`,
-			body: "Open Volt to see the findings.",
-			sessionId: finalState.sessionId,
-			...workspaceDetails,
-		};
-	}
 	return undefined;
 }
 
@@ -1286,25 +1284,12 @@ function shouldWaitForRemoteResponseCompletion(command: string, response: Record
 	if (!isRecord(data)) {
 		return false;
 	}
+	if (typeof data.workflowId === "string") {
+		// Detached workflow acceptance: the review runs independently of the
+		// session run loop, so there is no prompt completion to wait for.
+		return false;
+	}
 	return data.status === "accepted" || data.status === "queued";
-}
-
-function isCompletedReviewInvocationResponse(
-	command: string,
-	response: Record<string, unknown> | undefined,
-): response is Record<string, unknown> & { data: { action: string; status: "completed" } } {
-	if (command !== "invoke_ui_action" || !response) {
-		return false;
-	}
-	const data = response.data;
-	if (!isRecord(data)) {
-		return false;
-	}
-	return data.status === "completed" && isReviewActionId(data.action);
-}
-
-function isReviewActionId(action: unknown): boolean {
-	return action === REVIEW_UNCOMMITTED_ACTION_ID || action === REVIEW_BRANCH_ACTION_ID;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -37,10 +37,11 @@ import {
 	writeRawStdout,
 } from "../../core/output-guard.ts";
 import {
+	executeReviewWorkflow,
+	prepareReviewWorkflow,
 	REMOTE_REVIEW_TOOL_NAMES,
 	type ReviewWorkflowEvent,
 	type ReviewWorkflowToolEvent,
-	runReviewWorkflow,
 } from "../../core/review.ts";
 import { type ProjectionDiagnostic, StreamProjector } from "../../core/rpc/stream-projection.ts";
 import type { RpcTransport } from "../../core/rpc/transport.ts";
@@ -196,6 +197,7 @@ const RPC_CONVERSATION_AUTHORITY_MUTATION_TYPES: ReadonlySet<RpcCommand["type"]>
 	"set_model",
 	"set_thinking_level",
 	"invoke_ui_action",
+	"open_review_session",
 ]);
 
 class StaleConversationAuthorityError extends Error {
@@ -1075,27 +1077,47 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		}
 	};
 
-	const handleReviewWorkflowEvent = (event: ReviewWorkflowEvent | ReviewWorkflowToolEvent): void => {
-		try {
-			const result = options.onWorkflowEvent?.(event);
-			if (result) {
-				void Promise.resolve(result).catch(() => {});
+	// Detached review workflow events reach ordered-conversation clients through
+	// the runtime conversation projection feed (published by the manager itself,
+	// which outlives this mode instance). This per-mode sink only serves the
+	// direct stdio output path and the host's onWorkflowEvent observer.
+	const detachReviewWorkflowSink =
+		runtimeHost.reviewWorkflows?.attachSink((event: ReviewWorkflowEvent | ReviewWorkflowToolEvent): void => {
+			try {
+				const result = options.onWorkflowEvent?.(event);
+				if (result) {
+					void Promise.resolve(result).catch(() => {});
+				}
+			} catch (error) {
+				void error;
 			}
-		} catch (error) {
-			void error;
+			if (!options.orderedConversation) {
+				output(event);
+			}
+		}) ?? (() => {});
+	// Per-mode review sinks outlive shutdown while workflows this client may be
+	// waiting on are still running; the runtime-scoped manager keeps executing
+	// them after the transport detaches (disposal aborts them instead).
+	const retireReviewWorkflowSink = (): void => {
+		const reviewWorkflows = runtimeHost.reviewWorkflows;
+		if (!reviewWorkflows?.hasActiveWorkflows) {
+			detachReviewWorkflowSink();
+			return;
 		}
-		if (options.orderedConversation) {
-			options.orderedConversation.publishExternal(event);
-		} else {
-			output(event);
-		}
+		void reviewWorkflows.waitForIdle().then(detachReviewWorkflowSink, detachReviewWorkflowSink);
 	};
+
+	// Review workflows registered by invoke_ui_action but not yet executing; the
+	// dispatcher launches them after the accepted response is enqueued so the
+	// response deterministically precedes workflow_start on the shared lane.
+	const pendingReviewWorkflowLaunches = new Map<string, () => void>();
 
 	const createHostActionContext = (
 		commandSession: AgentSession = session,
 		assertConversationGenerationCurrent?: () => void,
 	): HostActionInvocationContext => ({
 		session: commandSession,
+		detachedReviews: true,
 		abortRun: () => commandSession.abort(),
 		compactContext: (customInstructions) =>
 			commandSession.compact(customInstructions, assertConversationGenerationCurrent),
@@ -1111,30 +1133,52 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		setFastModeRestoreThinkingLevel: (level) => {
 			commandSession.setFastModeRestoreThinkingLevel(level);
 		},
-		runReviewAction: (target, reviewOptions) =>
-			runReviewWorkflow({
+		runReviewAction: async (target, reviewOptions) => {
+			// Detached review: run the fast preflight inline so target errors fail
+			// the invocation synchronously, then register the execution with the
+			// runtime-scoped manager and return an accepted response immediately.
+			// Confirmation is client-side (the descriptors advertise
+			// requiresConfirmation); there is no server confirm round-trip.
+			const prepared = await prepareReviewWorkflow({
 				target,
 				cwd: runtimeHost.cwd,
-				agentDir: runtimeHost.services.agentDir,
-				session: commandSession,
-				newSession: async (newSessionOptions) => {
-					const result = await runtimeHost.newSession({
-						...newSessionOptions,
-						assertConversationGenerationCurrent,
-					});
-					if (!result.cancelled) {
-						await rebindSession();
-					}
-					return result;
-				},
-				authStorage: commandSession.modelRegistry.authStorage,
 				settingsManager: commandSession.settingsManager,
-				tools: REMOTE_REVIEW_TOOL_NAMES,
+				modelRegistry: commandSession.modelRegistry,
+				currentModel: commandSession.model,
 				requireProjectTrust: reviewOptions.remote,
-				requireConfirmation: reviewOptions.requireConfirmation,
-				confirm: ({ title, message }) => createExtensionUIContext().confirm(title, message),
-				onEvent: handleReviewWorkflowEvent,
-			}),
+			});
+			const thinkingLevel = commandSession.thinkingLevel;
+			const authStorage = commandSession.modelRegistry.authStorage;
+			const modelRegistry = commandSession.modelRegistry;
+			const settingsManager = commandSession.settingsManager;
+			const { descriptor, launch } = runtimeHost.reviewWorkflows.start({
+				prepared,
+				execute: (hooks) =>
+					executeReviewWorkflow({
+						prepared,
+						cwd: runtimeHost.cwd,
+						agentDir: runtimeHost.services.agentDir,
+						authStorage,
+						modelRegistry,
+						settingsManager,
+						thinkingLevel,
+						// Read-only builtin allowlist and no inherited extension tools:
+						// the reviewer cannot modify the tree, so the working-tree guard
+						// is skipped. Restoring it could revert concurrent agent or user
+						// edits made while the detached review ran.
+						tools: REMOTE_REVIEW_TOOL_NAMES,
+						skipWorkingTreeGuard: true,
+						signal: hooks.signal,
+						onEvent: hooks.onEvent,
+					}),
+			});
+			pendingReviewWorkflowLaunches.set(descriptor.workflowId, launch);
+			return {
+				status: "accepted",
+				workflowId: descriptor.workflowId,
+				...(prepared.modelWarning === undefined ? {} : { message: prepared.modelWarning }),
+			};
+		},
 	});
 
 	const createRpcCommandContext = (command: RpcCommand, commandSession: AgentSession = session) => {
@@ -1172,6 +1216,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			getPendingHostActionRequests: () => hostActionBridge.getPendingRequests(),
 			cancelPendingHostActionRequests,
 			assertConversationGenerationCurrent,
+			takePendingReviewWorkflowLaunch: (workflowId: string) => {
+				const launch = pendingReviewWorkflowLaunches.get(workflowId);
+				pendingReviewWorkflowLaunches.delete(workflowId);
+				return launch;
+			},
 			subagents: rpcSubagents,
 		};
 	};
@@ -1229,7 +1278,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			stopModelCatalogWatcher();
 			cancelPendingExtensionRequests();
 			detachHostActionBridge();
+			detachReviewWorkflowSink();
 			await rpcSubagents.disposeAll();
+			pendingReviewWorkflowLaunches.clear();
 			if (shouldDisposeRuntimeOnClose) {
 				cancelPendingHostActionRequests();
 			}
@@ -1280,6 +1331,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		stopModelCatalogWatcher();
 		cancelPendingExtensionRequests();
 		detachHostActionBridge();
+		retireReviewWorkflowSink();
 		if (shouldDisposeRuntimeOnClose) {
 			cancelPendingHostActionRequests();
 		}

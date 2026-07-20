@@ -955,6 +955,11 @@ export interface RunReviewOptions {
 	parentResourceLoader?: ResourceLoader;
 	/** Optional review tool allowlist. Omit to use normal review defaults. */
 	tools?: string[];
+	/**
+	 * Skip the working-tree snapshot/restore guard. Only safe when the review
+	 * session cannot modify the tree; see ExecuteReviewWorkflowOptions.
+	 */
+	skipWorkingTreeGuard?: boolean;
 	/** Aborts the review session when triggered. */
 	signal?: AbortSignal;
 	/** Called with short progress updates (tool activity) while the review runs. */
@@ -1081,6 +1086,7 @@ export interface ReviewWorkflowOptions {
 }
 
 export type ReviewWorkflowResult =
+	| { status: "accepted"; workflowId: string; message?: string }
 	| { status: "cancelled"; resolution?: ResolvedReview }
 	| {
 			status: "completed";
@@ -1119,7 +1125,7 @@ export function resolveReviewModel(options: {
 	return { model: options.currentModel };
 }
 
-function reviewActionIdForTarget(target: ReviewTarget): string {
+export function reviewActionIdForTarget(target: ReviewTarget): string {
 	switch (target.kind) {
 		case "uncommitted":
 			return "review.uncommitted";
@@ -1136,23 +1142,167 @@ function createReviewWorkflowId(): string {
 	return `review:${randomUUID()}`;
 }
 
-function emitReviewWorkflowEvent(
-	emit: ((event: ReviewWorkflowEvent | ReviewWorkflowToolEvent) => void) | undefined,
-	event: ReviewWorkflowEvent,
-): void {
-	emit?.(event);
+export interface PrepareReviewWorkflowOptions {
+	target: ReviewTarget;
+	cwd: string;
+	settingsManager: SettingsManager;
+	modelRegistry: ModelRegistry;
+	currentModel?: Model<any>;
+	requireProjectTrust?: boolean;
 }
 
-export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise<ReviewWorkflowResult> {
-	assertReviewCanStart(options.session);
+/** A review workflow that passed preflight and is ready to execute. */
+export interface PreparedReviewWorkflow {
+	workflowId: string;
+	/** Review host-action id, e.g. `review.branch`. */
+	action: string;
+	target: ReviewTarget;
+	resolution: ResolvedReview;
+	model: Model<any>;
+	modelWarning?: string;
+}
+
+/**
+ * Fast review preflight: verifies project trust, resolves the target into a
+ * concrete diff, and picks the review model. Throws user-facing errors and
+ * performs no model calls, so callers can run it inline before detaching the
+ * actual review execution.
+ */
+export async function prepareReviewWorkflow(options: PrepareReviewWorkflowOptions): Promise<PreparedReviewWorkflow> {
 	if (options.requireProjectTrust && !options.settingsManager.isProjectTrusted()) {
 		throw new Error("Project trust is required before running a remote review.");
 	}
-
 	const resolution = await resolveReviewTarget(options.target, options.cwd);
 	if ("error" in resolution) {
 		throw new Error(resolution.error);
 	}
+	const reviewModel = resolveReviewModel({
+		settingsManager: options.settingsManager,
+		modelRegistry: options.modelRegistry,
+		currentModel: options.currentModel,
+	});
+	if (!reviewModel.model) {
+		throw new Error("No model available for review. Use /model to select one.");
+	}
+	return {
+		workflowId: createReviewWorkflowId(),
+		action: reviewActionIdForTarget(options.target),
+		target: options.target,
+		resolution,
+		model: reviewModel.model,
+		modelWarning: reviewModel.warning,
+	};
+}
+
+export interface ExecuteReviewWorkflowOptions {
+	prepared: PreparedReviewWorkflow;
+	cwd: string;
+	agentDir: string;
+	authStorage: AuthStorage;
+	modelRegistry: ModelRegistry;
+	settingsManager: SettingsManager;
+	thinkingLevel?: ThinkingLevel;
+	/** Parent session resource loader used to inherit configured extension tools. */
+	parentResourceLoader?: ResourceLoader;
+	/** Optional review tool allowlist. Omit to use normal review defaults. */
+	tools?: readonly string[];
+	/**
+	 * Skip the working-tree snapshot/restore guard. Only safe when the review
+	 * session cannot modify the tree (read-only tool allowlist and no inherited
+	 * extension tools); a guard restore would otherwise revert edits made by
+	 * concurrent agent or user work while the detached review ran.
+	 */
+	skipWorkingTreeGuard?: boolean;
+	signal?: AbortSignal;
+	onProgress?: (message: string) => void;
+	/** Receives workflow_start, workflow_update, and sanitized tool events. */
+	onEvent?: (event: ReviewWorkflowEvent | ReviewWorkflowToolEvent) => void;
+	/** Full in-process review-session event stream, for rich local rendering. */
+	onSessionEvent?: (event: AgentSessionEvent) => void;
+}
+
+export type ExecuteReviewWorkflowResult =
+	| { status: "cancelled" }
+	| { status: "failed"; errorMessage: string }
+	| { status: "completed"; raw: string; parsed?: ParsedReview; findingsCount?: number };
+
+/**
+ * Run a prepared review to a terminal result. Emits workflow_start, sanitized
+ * tool events, and the finalizing workflow_update; the caller owns the
+ * terminal workflow_end event so it can describe how findings are delivered.
+ * Review failures surface as a "failed" result rather than a throw.
+ */
+export async function executeReviewWorkflow(
+	options: ExecuteReviewWorkflowOptions,
+): Promise<ExecuteReviewWorkflowResult> {
+	const { prepared } = options;
+	options.onEvent?.({
+		type: "workflow_start",
+		workflowId: prepared.workflowId,
+		kind: "review",
+		action: prepared.action,
+		title: "Review",
+		message: `Reviewing ${prepared.resolution.description}.`,
+		status: "running",
+	});
+	let result: ReviewRunResult;
+	try {
+		result = await runReview({
+			cwd: options.cwd,
+			agentDir: options.agentDir,
+			model: prepared.model,
+			thinkingLevel: options.thinkingLevel,
+			authStorage: options.authStorage,
+			modelRegistry: options.modelRegistry,
+			settingsManager: options.settingsManager,
+			resolved: prepared.resolution,
+			parentResourceLoader: options.parentResourceLoader,
+			tools: options.tools ? [...options.tools] : undefined,
+			skipWorkingTreeGuard: options.skipWorkingTreeGuard,
+			signal: options.signal,
+			onProgress: options.onProgress,
+			onSessionEvent: options.onSessionEvent,
+			onEvent: options.onEvent,
+			workflowId: prepared.workflowId,
+			workflowAction: prepared.action,
+		});
+	} catch (error) {
+		return { status: "failed", errorMessage: error instanceof Error ? error.message : String(error) };
+	}
+	if (result.aborted || options.signal?.aborted) {
+		return { status: "cancelled" };
+	}
+	if (result.errorMessage) {
+		return { status: "failed", errorMessage: result.errorMessage };
+	}
+	options.onEvent?.({
+		type: "workflow_update",
+		workflowId: prepared.workflowId,
+		kind: "review",
+		action: prepared.action,
+		title: "Review",
+		message: "Finalizing findings.",
+		status: "finalizing",
+	});
+	return {
+		status: "completed",
+		raw: result.raw,
+		parsed: result.parsed,
+		findingsCount: result.parsed?.findings.length,
+	};
+}
+
+export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise<ReviewWorkflowResult> {
+	assertReviewCanStart(options.session);
+	const prepared = await prepareReviewWorkflow({
+		target: options.target,
+		cwd: options.cwd,
+		settingsManager: options.settingsManager,
+		modelRegistry: options.session.modelRegistry,
+		currentModel: options.session.model,
+		requireProjectTrust: options.requireProjectTrust,
+	});
+	const { resolution, model, workflowId, action: workflowAction } = prepared;
 
 	if (options.requireConfirmation) {
 		const confirmed = await options.confirm?.({
@@ -1164,71 +1314,46 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 			return { status: "cancelled", resolution };
 		}
 	}
-
-	const reviewModel = resolveReviewModel({
-		settingsManager: options.settingsManager,
-		modelRegistry: options.session.modelRegistry,
-		currentModel: options.session.model,
-	});
-	if (reviewModel.warning) {
-		options.onReviewModelWarning?.(reviewModel.warning);
-	}
-	const model = reviewModel.model;
-	if (!model) {
-		throw new Error("No model available for review. Use /model to select one.");
+	if (prepared.modelWarning) {
+		options.onReviewModelWarning?.(prepared.modelWarning);
 	}
 
 	assertReviewCanStart(options.session);
-	const workflowId = createReviewWorkflowId();
-	const workflowAction = reviewActionIdForTarget(options.target);
 	const hooks = await options.onBeforeReview?.(resolution, model);
 	const emitEvent = (event: ReviewWorkflowEvent | ReviewWorkflowToolEvent): void => {
 		options.onEvent?.(event);
 		hooks?.onEvent?.(event);
 	};
 
-	emitReviewWorkflowEvent(emitEvent, {
-		type: "workflow_start",
-		workflowId,
-		kind: "review",
-		action: workflowAction,
-		title: "Review",
-		message: `Reviewing ${resolution.description}.`,
-		status: "running",
-	});
-
 	let terminalWorkflowEmitted = false;
 	const emitTerminalWorkflowEvent = (event: Extract<ReviewWorkflowEvent, { type: "workflow_end" }>): void => {
 		terminalWorkflowEmitted = true;
-		emitReviewWorkflowEvent(emitEvent, event);
+		emitEvent(event);
 	};
 
 	try {
-		let result: ReviewRunResult;
+		let result: ExecuteReviewWorkflowResult;
 		try {
-			result = await runReview({
+			result = await executeReviewWorkflow({
+				prepared,
 				cwd: options.cwd,
 				agentDir: options.agentDir,
-				model,
-				thinkingLevel: options.session.thinkingLevel,
 				authStorage: options.authStorage,
 				modelRegistry: options.session.modelRegistry,
 				settingsManager: options.settingsManager,
-				resolved: resolution,
+				thinkingLevel: options.session.thinkingLevel,
 				parentResourceLoader: options.session.resourceLoader,
-				tools: options.tools ? [...options.tools] : undefined,
+				tools: options.tools,
 				signal: hooks?.signal,
 				onProgress: hooks?.onProgress,
 				onSessionEvent: hooks?.onSessionEvent,
 				onEvent: emitEvent,
-				workflowId,
-				workflowAction,
 			});
 		} finally {
 			hooks?.cleanup?.();
 		}
 
-		if (result.aborted || hooks?.signal?.aborted) {
+		if (result.status === "cancelled") {
 			emitTerminalWorkflowEvent({
 				type: "workflow_end",
 				workflowId,
@@ -1240,7 +1365,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 			});
 			return { status: "cancelled", resolution };
 		}
-		if (result.errorMessage) {
+		if (result.status === "failed") {
 			emitTerminalWorkflowEvent({
 				type: "workflow_end",
 				workflowId,
@@ -1252,16 +1377,6 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 			});
 			throw new Error(`Review failed: ${result.errorMessage}`);
 		}
-
-		emitReviewWorkflowEvent(emitEvent, {
-			type: "workflow_update",
-			workflowId,
-			kind: "review",
-			action: workflowAction,
-			title: "Review",
-			message: "Finalizing findings.",
-			status: "finalizing",
-		});
 
 		const reviewMessage = createReviewSeedMessage(resolution, result);
 		const newSessionResult = await options.newSession({
@@ -1306,7 +1421,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 	}
 }
 
-export function formatReviewWorkflowSummary(result: Extract<ReviewWorkflowResult, { status: "completed" }>): string {
+export function formatReviewWorkflowSummary(result: { findingsCount?: number }): string {
 	const findingCount = result.findingsCount;
 	if (findingCount === undefined) {
 		return "Review complete.";
@@ -1323,7 +1438,10 @@ function assertReviewCanStart(session: Pick<ReviewWorkflowSession, "isBusy" | "i
 	}
 }
 
-function createReviewSeedMessage(resolution: ResolvedReview, result: Pick<ReviewRunResult, "raw" | "parsed">) {
+export function createReviewSeedMessage(
+	resolution: Pick<ResolvedReview, "description" | "diffCommand">,
+	result: Pick<ReviewRunResult, "raw" | "parsed">,
+) {
 	return {
 		customType: "review",
 		content: formatReviewForNewSession(resolution, result.parsed, result.raw),
@@ -1570,6 +1688,9 @@ async function withTempIndex<T>(fn: (indexFile: string) => Promise<T>): Promise<
  * or deletes once the review finishes — including on error or abort.
  */
 export async function runReview(options: RunReviewOptions): Promise<ReviewRunResult> {
+	if (options.skipWorkingTreeGuard) {
+		return runReviewSession(options);
+	}
 	const guard = await createWorkingTreeGuard(options.cwd);
 	try {
 		return await runReviewSession(options);

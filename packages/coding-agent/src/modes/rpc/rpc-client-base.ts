@@ -17,6 +17,8 @@ import type {
 	RpcHostActionUpdate,
 	RpcListSubagentsResponse,
 	RpcResponse,
+	RpcReviewWorkflowListResponse,
+	RpcReviewWorkflowResultResponse,
 	RpcSessionListItem,
 	RpcSessionState,
 	RpcSlashCommand,
@@ -208,6 +210,29 @@ export abstract class RpcClientBase {
 			args: options.args,
 			streamingBehavior: options.streamingBehavior,
 		});
+		return this.getData(response);
+	}
+
+	/** Cancel a running detached workflow (e.g. a review) by workflowId. */
+	async cancelWorkflow(workflowId: string): Promise<void> {
+		await this.send({ type: "cancel_workflow", workflowId });
+	}
+
+	/** List active and recently finished detached review workflows. */
+	async listReviewWorkflows(): Promise<RpcReviewWorkflowListResponse> {
+		const response = await this.send({ type: "list_review_workflows" });
+		return this.getData(response);
+	}
+
+	/** Get the status and findings of a detached review workflow. */
+	async getReviewResult(workflowId: string): Promise<RpcReviewWorkflowResultResponse> {
+		const response = await this.send({ type: "get_review_result", workflowId });
+		return this.getData(response);
+	}
+
+	/** Open a fresh session seeded with a completed review's findings. */
+	async openReviewSession(workflowId: string): Promise<{ cancelled: boolean }> {
+		const response = await this.send({ type: "open_review_session", workflowId });
 		return this.getData(response);
 	}
 

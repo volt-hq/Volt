@@ -602,8 +602,8 @@ Built-in v1 actions currently include:
 | `context.compact` | `/compact` | no | Runs host compaction through the same handler as the local `compact` RPC command. |
 | `session.rename` | `/name <name>` | no | Sets the current session display name through the same handler as `set_session_name`. |
 | `thinking.fast_mode` | none | yes | Session-local, non-persistent toggle that lowers current thinking to the fastest supported host-owned level and restores the captured level when disabled. |
-| `review.uncommitted` | `/review uncommitted` | yes | Reviews uncommitted changes against `HEAD`, requires confirmation remotely, uses host-owned git/model/session policy, and returns only bounded workflow status. |
-| `review.branch` | `/review branch [base]` | yes | Reviews `HEAD` against a base branch; optional `base` is validated by the host and omitted values use host auto-detection. |
+| `review.uncommitted` | `/review uncommitted` | yes | Starts a detached review of uncommitted changes against `HEAD` using host-owned git/model policy; the response reports `accepted` with a `workflowId` and progress streams as workflow events. |
+| `review.branch` | `/review branch [base]` | yes | Starts a detached review of `HEAD` against a base branch; optional `base` is validated by the host and omitted values use host auto-detection. |
 
 Slash aliases are display and compatibility metadata. Clients may show them in palettes or advanced detail views, but should not synthesize slash strings when an action id is available. The host may change slash syntax without changing a stable built-in action id.
 
@@ -668,16 +668,16 @@ Successful response data reports the command disposition:
   "success": true,
   "data": {
     "action": "review.uncommitted",
-    "status": "completed",
+    "status": "accepted",
+    "workflowId": "review:2f4c…",
     "actionsChanged": true,
-    "stateChanged": true,
-    "message": "Review complete: no issues found; fresh session created with findings"
+    "message": "Review started"
   }
 }
 ```
 
 Possible statuses:
-- `"accepted"`: a prompt-like action was accepted while idle. Normal agent events report completion; wait for `agent_settled` for final settlement.
+- `"accepted"`: a prompt-like action was accepted while idle (normal agent events report completion; wait for `agent_settled` for final settlement), or a detached workflow was started (`workflowId` is present and `workflow_*` events report progress and completion).
 - `"queued"`: a prompt-like action was queued while another turn is streaming. `queuedAs` is `"steer"` or `"followUp"`.
 - `"completed"`: the action finished synchronously. No `agent_end` is expected for this invocation.
 - `"handled"`: the host, extension command, or input hook handled the action without starting an agent turn.
@@ -691,8 +691,24 @@ For projected dynamic actions, invocation uses the host's existing prompt semant
 - Prompt template and skill actions send their slash alias through host prompt expansion. While idle they return `accepted`; while the agent is streaming they require `streamingBehavior: "steer"` or `"followUp"` and return `queued`.
 - Dynamic action ids are opaque and tied to the current action catalog. After a reload, session replacement, or catalog change, clients must refresh descriptors; stale ids are rejected instead of being remapped to another action.
 - `thinking.fast_mode` uses a required boolean `enabled` argument. Enabling captures the current thinking level, applies the fastest supported lower thinking level among `off`, `minimal`, and `low`, and returns updated boolean state. Disabling restores the captured thinking level after host clamping. It never switches models, exposes model catalogs, changes scoped-model/profile settings, or persists model/thinking defaults. Manual thinking/model/profile/scoped-model changes clear the session-local restore marker.
-- Review actions run a host workflow: the host resolves git targets, applies review-model settings, runs an isolated review session with the approved tool policy, and creates a fresh session seeded with findings. Responses do not include raw diffs, review prompts, configured model names, auth state, or raw tool output. While the workflow runs, hosts may emit sanitized `workflow_*` and `tool_execution_*` activity events so clients can show progress. Remote review actions require confirmation and use the host-owned read-only tool set (`read`, `grep`, `find`, `ls`).
+- Review actions start a detached host workflow: the host resolves git targets and review-model settings inline (target errors fail the invocation synchronously), then returns `accepted` with a `workflowId` while an isolated review session runs with the approved tool policy. The runtime keeps serving other RPC commands, and the client's session is never force-switched. Progress streams as sanitized `workflow_*` and `tool_execution_*` events; completion is reported by `workflow_end`. Findings are fetched with `get_review_result`, running or retained reviews are listed with `list_review_workflows`, a running review is aborted with `cancel_workflow`, and `open_review_session` seeds a fresh session with the findings when the client asks for one. Responses and events do not include raw diffs, review prompts, configured model names, auth state, or raw tool output. Reviews use the host-owned read-only tool set (`read`, `grep`, `find`, `ls`) without inheriting extension tools; descriptors advertise `requiresConfirmation`, and clients confirm before invoking (there is no host-side confirmation round trip). Hosts cap concurrent reviews and retain a bounded window of terminal results.
 - Over Iroh, v1 invocation is allowlist-based and forwards only exact reviewed built-in ids (`session.new`, `run.cancel`, `thinking.fast_mode`, `review.uncommitted`, `review.branch`) plus projected dynamic ids under `extension.command.*`, `prompt.template.*`, and `skill.*`. Local-only built-ins such as `context.compact`, `session.rename`, deferred review actions, and unreviewed prefixes are rejected with a normal RPC error. Model and thinking changes use the direct `set_model`/`set_thinking_level` RPC commands, which are forwarded over Iroh conversation streams.
+
+#### Detached review workflows
+
+Review invocations return `accepted` with a `workflowId` and run detached from the RPC command queue. Four commands manage them:
+
+```json
+{"type": "list_review_workflows"}
+{"type": "get_review_result", "workflowId": "review:2f4c…"}
+{"type": "cancel_workflow", "workflowId": "review:2f4c…"}
+{"type": "open_review_session", "workflowId": "review:2f4c…"}
+```
+
+- `list_review_workflows` returns `{ "workflows": […] }` with active workflows followed by a bounded window of retained terminal results. Each entry carries `workflowId`, `action`, `status` (`running`, `completed`, `cancelled`, or `failed`), a bounded `target` (`description`, `diffCommand`), optional `findingsCount`/`errorMessage`, and `startedAt`/`endedAt` timestamps. Clients reconnecting after missing `workflow_end` should list to discover finished reviews.
+- `get_review_result` returns the same descriptor plus structured findings for completed reviews: `findings` (title, body, priority, confidence, file, line), optional `coverage`, `overallCorrectness`, and `overallExplanation`. When the reviewer produced no parseable findings payload, a bounded `raw` text is returned instead. Unknown workflow ids fail with a normal RPC error.
+- `cancel_workflow` aborts a running review; the workflow ends with `workflow_end` status `cancelled`. Cancelling an unknown or finished workflow fails with a normal RPC error.
+- `open_review_session` starts a fresh session seeded with a completed review's findings (the client-driven replacement for the old forced session switch) and responds with `{ "cancelled": boolean }`. It fails for unknown or non-completed workflows.
 
 #### Native UI Action Security
 
@@ -1600,12 +1616,12 @@ Host-owned workflows can also emit sanitized tool lifecycle events with workflow
 
 ### workflow_start / workflow_update / workflow_end
 
-Emitted for host-owned workflows that are not ordinary assistant chat turns, such as a review action. Clients can render these as a temporary live timeline until the action response and any resulting session refresh arrive.
+Emitted for host-owned workflows that are not ordinary assistant chat turns, such as a review action. The invocation response arrives before `workflow_start`; clients can render these as a live timeline and, for reviews, fetch results with `get_review_result` after `workflow_end`.
 
 ```json
 {"type":"workflow_start","workflowId":"review:abc","kind":"review","action":"review.uncommitted","title":"Review","message":"Reviewing uncommitted changes.","status":"running"}
 {"type":"workflow_update","workflowId":"review:abc","kind":"review","action":"review.uncommitted","title":"Review","message":"Finalizing findings.","status":"finalizing"}
-{"type":"workflow_end","workflowId":"review:abc","kind":"review","action":"review.uncommitted","title":"Review","message":"Review complete: 2 findings. Opening review session.","status":"completed"}
+{"type":"workflow_end","workflowId":"review:abc","kind":"review","action":"review.uncommitted","title":"Review","message":"Review complete: 2 findings. Fetch the findings or open them in a review session.","status":"completed"}
 ```
 
 `status` is advisory. Known review statuses are `running`, `finalizing`, `completed`, `cancelled`, and `failed`. Unknown workflow kinds, statuses, and extra fields should be ignored or rendered generically.

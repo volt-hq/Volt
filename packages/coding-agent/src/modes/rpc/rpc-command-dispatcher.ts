@@ -12,6 +12,7 @@ import {
 } from "../../core/host-actions.ts";
 import { getMcpRpcCapabilities, listMcpRpcServers } from "../../core/mcp/rpc.ts";
 import type { McpGatewayExecutionContext } from "../../core/mcp/types.ts";
+import { createReviewSeedMessage } from "../../core/review.ts";
 import { buildRpcSessionState } from "../../core/rpc/session-state.ts";
 import { projectMessageImages, projectSessionTranscript } from "../../core/rpc/transcript.ts";
 import {
@@ -75,6 +76,12 @@ export interface RpcCommandDispatcherContext {
 	cancelPendingHostActionRequests(message?: string): void;
 	/** Revalidate the mutation lease after an awaited dispatcher/session preflight boundary. */
 	assertConversationGenerationCurrent(): void;
+	/**
+	 * Claim the deferred launch of a review workflow registered by this
+	 * invocation. The dispatcher launches it only after the accepted response is
+	 * enqueued, so the response precedes workflow_start on the shared lane.
+	 */
+	takePendingReviewWorkflowLaunch?(workflowId: string): (() => void) | undefined;
 	subagents: RpcSubagentLifecycleController;
 }
 
@@ -288,6 +295,7 @@ export async function handleRpcCommand(
 			return createRpcSuccessResponse(id, "get_ui_actions", {
 				actions: getUiActionDescriptors(session, command.scope, {
 					remoteSafeOnly: options.requireRemoteSafeUiActions,
+					detachedReviews: true,
 				}),
 			});
 		}
@@ -318,6 +326,20 @@ export async function handleRpcCommand(
 					command.args,
 					{ requireRemoteSafe: options.requireRemoteSafeUiActions },
 				);
+				const launchReviewWorkflow =
+					response.status === "accepted" && response.workflowId !== undefined
+						? context.takePendingReviewWorkflowLaunch?.(response.workflowId)
+						: undefined;
+				if (launchReviewWorkflow) {
+					try {
+						context.output(createRpcSuccessResponse(id, "invoke_ui_action", response));
+					} finally {
+						// The workflow must always launch once registered; an unlaunched
+						// entry would pin the active set (and daemon retention) forever.
+						launchReviewWorkflow();
+					}
+					return undefined;
+				}
 				return createRpcSuccessResponse(id, "invoke_ui_action", response);
 			}
 			const invocation = createUiActionInvocationPlan(session, {
@@ -352,6 +374,68 @@ export async function handleRpcCommand(
 				});
 			runtimeHost.trackClientInputAdmission?.(session, admission);
 			return undefined;
+		}
+
+		// =================================================================
+		// Detached review workflows
+		// =================================================================
+
+		case "cancel_workflow": {
+			runtimeHost.reviewWorkflows.cancel(command.workflowId);
+			return createRpcSuccessResponse(id, "cancel_workflow");
+		}
+
+		case "list_review_workflows": {
+			return createRpcSuccessResponse(id, "list_review_workflows", {
+				workflows: runtimeHost.reviewWorkflows.list(),
+			});
+		}
+
+		case "get_review_result": {
+			const record = runtimeHost.reviewWorkflows.get(command.workflowId);
+			if (!record) {
+				return createRpcErrorResponse(id, "get_review_result", `Unknown review workflow: ${command.workflowId}`);
+			}
+			const { parsed, ...descriptor } = record;
+			return createRpcSuccessResponse(id, "get_review_result", {
+				...descriptor,
+				...(parsed === undefined
+					? {}
+					: {
+							findings: parsed.findings,
+							...(parsed.coverage === undefined ? {} : { coverage: parsed.coverage }),
+							...(parsed.overallCorrectness === undefined
+								? {}
+								: { overallCorrectness: parsed.overallCorrectness }),
+							...(parsed.overallExplanation === undefined
+								? {}
+								: { overallExplanation: parsed.overallExplanation }),
+						}),
+			});
+		}
+
+		case "open_review_session": {
+			const record = runtimeHost.reviewWorkflows.get(command.workflowId);
+			if (!record) {
+				return createRpcErrorResponse(id, "open_review_session", `Unknown review workflow: ${command.workflowId}`);
+			}
+			if (record.status !== "completed") {
+				return createRpcErrorResponse(
+					id,
+					"open_review_session",
+					`Review workflow is not completed: ${command.workflowId} (${record.status})`,
+				);
+			}
+			const seedMessage = createReviewSeedMessage(record.target, {
+				raw: record.raw ?? "",
+				parsed: record.parsed,
+			});
+			const result = await runSessionNewHostAction(context.createHostActionContext(), {
+				withSession: async (sessionContext) => {
+					await sessionContext.sendMessage(seedMessage);
+				},
+			});
+			return createRpcSuccessResponse(id, "open_review_session", { cancelled: result.cancelled });
 		}
 
 		// =================================================================
