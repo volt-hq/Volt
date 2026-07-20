@@ -25,6 +25,10 @@ import {
 	IROH_REMOTE_LIST_WORKTREES_RPC_TYPE,
 	type IrohRemoteWorktreeRpcBackend,
 } from "../core/remote/iroh/worktree-rpc.ts";
+import {
+	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
+	measureConversationProjectionUtf8BytesWithin,
+} from "../core/rpc/conversation-projection-limits.ts";
 import { extractMessageImages, projectMessageImages } from "../core/rpc/transcript.ts";
 import type { RpcConversationAssistantPart, RpcKeepAwakeStatus } from "../core/rpc/types.ts";
 import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../core/session-manager.ts";
@@ -84,6 +88,18 @@ const REMOTE_TOOL_COMMAND_MAX_SCALARS = 500;
 const REMOTE_TOOL_ARGUMENT_MAX_SCALARS = 500;
 const REMOTE_TOOL_ARGUMENT_KEYS_MAX = 12;
 export const REMOTE_TOOL_OUTPUT_MAX_SCALARS = 8_000;
+/**
+ * Elevated per-entry text budget for the branch-latest assistant message.
+ * Mirrors the live assistant stream's cumulative content budget so a client
+ * attaching after message_end converges on the same full text the live lane
+ * would have delivered. Entries whose cumulative text/thinking content exceeds
+ * this budget keep the default scalar truncation; their tails stay fetchable
+ * only through a future per-entry continuation RPC.
+ */
+export const REMOTE_TRANSCRIPT_FINAL_ASSISTANT_MAX_CONTENT_UTF8_BYTES =
+	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES;
+/** Scalar fail-safe covering any text within the byte budget (1 scalar >= 1 UTF-8 byte). */
+const REMOTE_TRANSCRIPT_FINAL_ASSISTANT_TEXT_MAX_SCALARS = REMOTE_TRANSCRIPT_FINAL_ASSISTANT_MAX_CONTENT_UTF8_BYTES;
 
 export type RemoteRpcCommand = Record<string, unknown> & { type: string };
 
@@ -286,11 +302,13 @@ function sanitizeRemoteTranscriptText(
 	value: unknown,
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	layout: IrohRemoteTranscriptTextLayout = "preserve",
+	maxScalars?: number,
 ) {
 	return sanitizeIrohRemoteTranscriptText(
 		typeof value === "string" ? value : "",
 		getRemoteSanitizerOptions(authorization),
 		layout,
+		maxScalars,
 	);
 }
 
@@ -426,8 +444,9 @@ function createRemoteTranscriptItem(
 	text: unknown,
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	layout: IrohRemoteTranscriptTextLayout = role === "tool" ? "summary" : "preserve",
+	maxScalars?: number,
 ): RemoteTranscriptItem {
-	const sanitized = sanitizeRemoteTranscriptText(text, authorization, layout);
+	const sanitized = sanitizeRemoteTranscriptText(text, authorization, layout, maxScalars);
 	return {
 		entryId: entry.id,
 		ordinal: entry.ordinal ?? 0,
@@ -441,6 +460,7 @@ function createRemoteTranscriptItem(
 function projectRemoteAssistantParts(
 	content: unknown,
 	authorization: IrohRemoteClientAuthorizationSuccess,
+	maxScalars?: number,
 ): RpcConversationAssistantPart[] {
 	if (!Array.isArray(content)) {
 		return [];
@@ -453,7 +473,7 @@ function projectRemoteAssistantParts(
 		// Empty canonical blocks still own an ordered content index. Preserve them
 		// so transcript commits can claim the exact live assistant block shape.
 		if (part.type === "text" && typeof part.text === "string") {
-			const sanitized = sanitizeRemoteTranscriptText(part.text, authorization, "preserve");
+			const sanitized = sanitizeRemoteTranscriptText(part.text, authorization, "preserve", maxScalars);
 			parts.push({ type: "text", text: sanitized.text, truncated: sanitized.truncated });
 			continue;
 		}
@@ -462,11 +482,82 @@ function projectRemoteAssistantParts(
 			continue;
 		}
 		if (part.type === "thinking" && typeof part.thinking === "string") {
-			const sanitized = sanitizeRemoteTranscriptText(part.thinking, authorization, "preserve");
+			const sanitized = sanitizeRemoteTranscriptText(part.thinking, authorization, "preserve", maxScalars);
 			parts.push({ type: "thinking", text: sanitized.text, truncated: sanitized.truncated });
 		}
 	}
 	return parts;
+}
+
+/**
+ * True when an assistant message's cumulative text/thinking content fits the
+ * elevated final-entry budget. Decided on canonical content; the elevated
+ * scalar cap remains as a fail-safe on the sanitized output.
+ */
+function isFullContentProjectableAssistantMessage(content: unknown): boolean {
+	if (!Array.isArray(content)) {
+		return false;
+	}
+	let remaining = REMOTE_TRANSCRIPT_FINAL_ASSISTANT_MAX_CONTENT_UTF8_BYTES;
+	for (const part of content) {
+		if (!isRemoteRecord(part)) {
+			continue;
+		}
+		const text =
+			part.type === "text" && typeof part.text === "string"
+				? part.text
+				: part.type === "thinking" && part.redacted !== true && typeof part.thinking === "string"
+					? part.thinking
+					: undefined;
+		if (text === undefined || text.length === 0) {
+			continue;
+		}
+		if (remaining <= 0) {
+			return false;
+		}
+		const bytes = measureConversationProjectionUtf8BytesWithin(text, remaining);
+		if (bytes === null) {
+			return false;
+		}
+		remaining -= bytes;
+	}
+	return true;
+}
+
+/** True when an assistant message carries any non-empty text/thinking content the elevated budget could preserve. */
+function hasProjectableAssistantContent(content: unknown): boolean {
+	if (!Array.isArray(content)) {
+		return false;
+	}
+	return content.some(
+		(part) =>
+			isRemoteRecord(part) &&
+			((part.type === "text" && typeof part.text === "string" && part.text.length > 0) ||
+				(part.type === "thinking" &&
+					part.redacted !== true &&
+					typeof part.thinking === "string" &&
+					part.thinking.length > 0)),
+	);
+}
+
+/**
+ * Newest assistant message entry with non-empty text/thinking content in a
+ * head window; only it earns the elevated text budget. Entries that project
+ * empty (tool-call-only messages, identity-only aborted/error terminals) are
+ * skipped so the budget lands on the last real answer instead.
+ */
+function findLatestAssistantMessageEntryId(entries: SessionEntry[]): string | undefined {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry?.type !== "message") {
+			continue;
+		}
+		const message = entry.message as unknown as Record<string, unknown>;
+		if (message?.role === "assistant" && hasProjectableAssistantContent(message.content)) {
+			return entry.id;
+		}
+	}
+	return undefined;
 }
 
 function getRemoteStopReason(value: unknown): RemoteTranscriptItem["stopReason"] {
@@ -485,6 +576,7 @@ export function projectRemoteTranscriptEntry(
 	entry: SessionEntry,
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	toolCallsById: Map<string, RemoteToolCallRecord>,
+	finalAssistantEntry = false,
 ): RemoteTranscriptItem | undefined {
 	if (!entry || typeof entry !== "object") {
 		return undefined;
@@ -505,7 +597,19 @@ export function projectRemoteTranscriptEntry(
 	}
 	const message = entry.message as unknown as Record<string, unknown>;
 	if (message.role === "user" || message.role === "assistant") {
-		const parts = message.role === "assistant" ? projectRemoteAssistantParts(message.content, authorization) : [];
+		// The branch-latest assistant message ships complete (up to the elevated
+		// byte budget) so late-attaching clients can converge on text the live
+		// stream no longer serves after message_end.
+		const fullContentMaxScalars =
+			finalAssistantEntry &&
+			message.role === "assistant" &&
+			isFullContentProjectableAssistantMessage(message.content)
+				? REMOTE_TRANSCRIPT_FINAL_ASSISTANT_TEXT_MAX_SCALARS
+				: undefined;
+		const parts =
+			message.role === "assistant"
+				? projectRemoteAssistantParts(message.content, authorization, fullContentMaxScalars)
+				: [];
 		const stopReason = message.role === "assistant" ? getRemoteStopReason(message.stopReason) : undefined;
 		const text =
 			message.role === "assistant"
@@ -522,7 +626,14 @@ export function projectRemoteTranscriptEntry(
 		if (!text && imageCount === 0 && parts.length === 0 && !isIdentityOnlyTerminal) {
 			return undefined;
 		}
-		const item = createRemoteTranscriptItem(entry, message.role, text, authorization);
+		const item = createRemoteTranscriptItem(
+			entry,
+			message.role,
+			text,
+			authorization,
+			"preserve",
+			fullContentMaxScalars,
+		);
 		if (message.role === "user" && typeof message.clientMessageId === "string") {
 			item.clientMessageId = message.clientMessageId;
 		}
@@ -612,8 +723,11 @@ export function projectRemoteTranscriptItems(
 	if (!window) return [];
 	const boundedBranch = [...window.lookback, ...window.entries];
 	const toolCallsById = collectRemoteToolCalls(boundedBranch);
+	const fullContentEntryId = findLatestAssistantMessageEntryId(window.entries);
 	return window.entries
-		.map((entry) => projectRemoteTranscriptEntry(entry, authorization, toolCallsById))
+		.map((entry) =>
+			projectRemoteTranscriptEntry(entry, authorization, toolCallsById, entry.id === fullContentEntryId),
+		)
 		.filter((item): item is RemoteTranscriptItem => item !== undefined);
 }
 
@@ -658,11 +772,16 @@ export function createRemoteConversationTranscriptPage(
 	});
 	if (!window) return undefined;
 	const boundedBranch = [...window.lookback, ...window.entries];
+	// Only head pages (no cursor) can identify the branch-latest assistant
+	// message; older pages keep the default truncation.
+	const fullContentEntryId =
+		options.beforeEntryId === undefined ? findLatestAssistantMessageEntryId(window.entries) : undefined;
 	const projectedItems = projectRemoteTranscriptWindow(
 		boundedBranch,
 		window.lookback.length,
 		boundedBranch.length,
 		authorization,
+		fullContentEntryId,
 	);
 	const leaf = runtime.session.sessionManager.getLeafEntry();
 	if (leaf !== undefined && (!Number.isSafeInteger(leaf.ordinal) || (leaf.ordinal ?? 0) <= 0)) {
@@ -699,7 +818,11 @@ export function createRemoteConversationTranscriptEntry(
 	const toolCallsById = isCurrentCommit
 		? collectRemoteToolCalls([...(window?.lookback ?? []), ...(window?.entries ?? [])])
 		: new Map<string, RemoteToolCallRecord>();
-	return projectRemoteTranscriptEntry(entry, authorization, toolCallsById);
+	const finalAssistantEntry =
+		isCurrentCommit &&
+		entry.type === "message" &&
+		(entry.message as unknown as Record<string, unknown>)?.role === "assistant";
+	return projectRemoteTranscriptEntry(entry, authorization, toolCallsById, finalAssistantEntry);
 }
 
 function projectRemoteTranscriptWindow(
@@ -707,6 +830,7 @@ function projectRemoteTranscriptWindow(
 	startIndex: number,
 	endIndex: number,
 	authorization: IrohRemoteClientAuthorizationSuccess,
+	fullContentEntryId?: string,
 ): RemoteTranscriptItem[] {
 	const toolCallsById = collectRemoteToolCalls(
 		entries,
@@ -719,7 +843,12 @@ function projectRemoteTranscriptWindow(
 		if (!entry) {
 			continue;
 		}
-		const item = projectRemoteTranscriptEntry(entry, authorization, toolCallsById);
+		const item = projectRemoteTranscriptEntry(
+			entry,
+			authorization,
+			toolCallsById,
+			fullContentEntryId !== undefined && entry.id === fullContentEntryId,
+		);
 		if (item) {
 			items.push(item);
 		}

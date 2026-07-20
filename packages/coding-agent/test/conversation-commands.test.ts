@@ -19,6 +19,7 @@ import {
 	LEASE_DRAINING_RETRY_AFTER_MS,
 	REMOTE_TOOL_OUTPUT_MAX_SCALARS,
 	REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES,
+	REMOTE_TRANSCRIPT_FINAL_ASSISTANT_MAX_CONTENT_UTF8_BYTES,
 	REMOTE_TRANSCRIPT_PROJECTION_VERSION,
 	REMOTE_TRANSCRIPT_TOOL_CALL_LOOKBACK_ENTRIES,
 	type RemoteSessionRuntimeState,
@@ -1498,6 +1499,217 @@ describe("handleIntegratedConversationRpcCommand", () => {
 				error: "unsupported_remote_command",
 			});
 		}
+	});
+});
+
+describe("final assistant entry full-content projection (#85)", () => {
+	function assistantEntry(id: string, ordinal: number, content: unknown[], stopReason = "stop"): SessionEntry {
+		return {
+			type: "message",
+			id,
+			ordinal,
+			timestamp: new Date(ordinal).toISOString(),
+			message: { role: "assistant", content, stopReason },
+		} as unknown as SessionEntry;
+	}
+
+	function userEntry(id: string, ordinal: number, text: string): SessionEntry {
+		return {
+			type: "message",
+			id,
+			ordinal,
+			timestamp: new Date(ordinal).toISOString(),
+			message: { role: "user", content: [{ type: "text", text }] },
+		} as unknown as SessionEntry;
+	}
+
+	function transcriptRuntime(branch: SessionEntry[], sessionId = "s-final"): ConversationCommandRuntime {
+		return {
+			session: { sessionId, sessionManager: createSessionManager(branch) },
+			listSessions: async () => [],
+		};
+	}
+
+	const longText = `Full transcript of /tmp/ws/report.md\n${"m".repeat(40_000)}END_MARK`;
+
+	it("serves the branch-latest assistant message in full on head pages and truncates older ones", () => {
+		const branch = [
+			assistantEntry("assistant-old", 1, [{ type: "text", text: `old ${"o".repeat(30_000)}OLD_END` }]),
+			userEntry("user-1", 2, "continue"),
+			assistantEntry("assistant-final", 3, [{ type: "text", text: longText }]),
+			userEntry("user-2", 4, "queued prompt after completion"),
+		];
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), transcriptRuntime(branch));
+
+		const finalItem = page?.items.find((item) => item.entryId === "assistant-final");
+		expect(finalItem?.truncated).toBe(false);
+		expect(finalItem?.text.endsWith("END_MARK")).toBe(true);
+		expect(finalItem?.text).toContain("/workspace/report.md");
+		expect(finalItem?.text).not.toContain("/tmp/ws");
+		expect(finalItem?.parts).toEqual([expect.objectContaining({ type: "text", truncated: false })]);
+
+		const olderItem = page?.items.find((item) => item.entryId === "assistant-old");
+		expect(olderItem?.truncated).toBe(true);
+		expect(Array.from(olderItem?.text ?? "")).toHaveLength(12_000);
+		expect(olderItem?.text.endsWith("OLD_END")).toBe(false);
+	});
+
+	it("keeps multi-part text and thinking content complete within the cumulative budget", () => {
+		const branch = [
+			assistantEntry("assistant-final", 1, [
+				{ type: "thinking", thinking: `think ${"t".repeat(20_000)}THINK_END`, redacted: false },
+				{ type: "text", text: `part one ${"a".repeat(20_000)}` },
+				{ type: "text", text: `${"b".repeat(20_000)}PART_TWO_END` },
+			]),
+		];
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), transcriptRuntime(branch));
+
+		const item = page?.items[0];
+		expect(item?.truncated).toBe(false);
+		expect(item?.text.endsWith("PART_TWO_END")).toBe(true);
+		expect(item?.parts?.map((part) => part.truncated)).toEqual([false, false, false]);
+		expect(item?.parts?.[0]?.text.endsWith("THINK_END")).toBe(true);
+	});
+
+	it("falls back to default truncation when the final entry exceeds the elevated byte budget", () => {
+		const overBudget = "x".repeat(REMOTE_TRANSCRIPT_FINAL_ASSISTANT_MAX_CONTENT_UTF8_BYTES + 1);
+		const branch = [assistantEntry("assistant-final", 1, [{ type: "text", text: overBudget }])];
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), transcriptRuntime(branch));
+
+		const item = page?.items[0];
+		expect(item?.truncated).toBe(true);
+		expect(Array.from(item?.text ?? "")).toHaveLength(12_000);
+	});
+
+	it("serves an at-budget final entry in full while keeping the page within its byte budget", () => {
+		const half = REMOTE_TRANSCRIPT_FINAL_ASSISTANT_MAX_CONTENT_UTF8_BYTES / 2;
+		const branch = [
+			...Array.from({ length: 60 }, (_, index) =>
+				assistantEntry(`assistant-${index}`, index + 1, [{ type: "text", text: "y".repeat(30_000) }]),
+			),
+			assistantEntry("assistant-final", 61, [
+				{ type: "text", text: "z".repeat(half) },
+				{ type: "text", text: `${"z".repeat(half - 10)}AT_BUDGET` },
+			]),
+		];
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), transcriptRuntime(branch));
+
+		const finalItem = page?.items.at(-1);
+		expect(finalItem?.entryId).toBe("assistant-final");
+		expect(finalItem?.truncated).toBe(false);
+		expect(finalItem?.text.endsWith("AT_BUDGET")).toBe(true);
+		expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThanOrEqual(
+			REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES,
+		);
+	});
+
+	it("serves an exactly-at-budget final entry with a trailing empty text part in full", () => {
+		const atBudget = `${"z".repeat(REMOTE_TRANSCRIPT_FINAL_ASSISTANT_MAX_CONTENT_UTF8_BYTES - 9)}AT_BUDGET`;
+		const branch = [
+			assistantEntry("assistant-final", 1, [
+				{ type: "text", text: atBudget },
+				{ type: "text", text: "" },
+			]),
+		];
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), transcriptRuntime(branch));
+
+		const item = page?.items[0];
+		expect(item?.truncated).toBe(false);
+		expect(item?.text.endsWith("AT_BUDGET")).toBe(true);
+		expect(item?.parts?.map((part) => part.truncated)).toEqual([false, false]);
+	});
+
+	it("falls back to default truncation when a part after an exactly-at-budget prefix overflows the budget", () => {
+		const atBudget = "x".repeat(REMOTE_TRANSCRIPT_FINAL_ASSISTANT_MAX_CONTENT_UTF8_BYTES);
+		const branch = [
+			assistantEntry("assistant-final", 1, [
+				{ type: "text", text: atBudget },
+				{ type: "text", text: "!" },
+			]),
+		];
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), transcriptRuntime(branch));
+
+		const item = page?.items[0];
+		expect(item?.truncated).toBe(true);
+		expect(Array.from(item?.text ?? "")).toHaveLength(12_000);
+	});
+
+	it("skips an identity-only aborted head assistant entry so the last real answer ships in full", () => {
+		const branch = [
+			assistantEntry("assistant-answer", 1, [{ type: "text", text: longText }]),
+			userEntry("user-1", 2, "another prompt"),
+			assistantEntry("assistant-aborted", 3, [], "aborted"),
+		];
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), transcriptRuntime(branch));
+
+		const aborted = page?.items.find((item) => item.entryId === "assistant-aborted");
+		expect(aborted?.stopReason).toBe("aborted");
+		const answer = page?.items.find((item) => item.entryId === "assistant-answer");
+		expect(answer?.truncated).toBe(false);
+		expect(answer?.text.endsWith("END_MARK")).toBe(true);
+	});
+
+	it("skips a tool-call-only head assistant entry so the last real answer ships in full", () => {
+		const branch = [
+			assistantEntry("assistant-answer", 1, [{ type: "text", text: longText }]),
+			userEntry("user-1", 2, "another prompt"),
+			assistantEntry(
+				"assistant-toolcall",
+				3,
+				[{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "file.txt" } }],
+				"toolUse",
+			),
+		];
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), transcriptRuntime(branch));
+
+		expect(page?.items.some((item) => item.entryId === "assistant-toolcall")).toBe(false);
+		const answer = page?.items.find((item) => item.entryId === "assistant-answer");
+		expect(answer?.truncated).toBe(false);
+		expect(answer?.text.endsWith("END_MARK")).toBe(true);
+	});
+
+	it("does not elevate entries on cursor-paged history", () => {
+		const branch = [
+			assistantEntry("assistant-big", 1, [{ type: "text", text: `big ${"p".repeat(30_000)}BIG_END` }]),
+			...Array.from({ length: 150 }, (_, index) => userEntry(`user-${index}`, index + 2, `message ${index}`)),
+		];
+		const newest = createRemoteConversationTranscriptPage(createAuthorization(), transcriptRuntime(branch));
+		expect(newest?.items.some((item) => item.entryId === "assistant-big")).toBe(false);
+		expect(newest?.nextBeforeEntryId).toBeDefined();
+
+		const older = createRemoteConversationTranscriptPage(createAuthorization(), transcriptRuntime(branch), {
+			beforeEntryId: newest?.nextBeforeEntryId ?? undefined,
+		});
+		const bigItem = older?.items.find((item) => item.entryId === "assistant-big");
+		expect(bigItem?.truncated).toBe(true);
+		expect(Array.from(bigItem?.text ?? "")).toHaveLength(12_000);
+	});
+
+	it("serves the head assistant commit in full on the live lane and truncates non-head commits", () => {
+		const headBranch = [
+			userEntry("user-1", 1, "go"),
+			assistantEntry("assistant-final", 2, [{ type: "text", text: longText }]),
+		];
+		const live = createRemoteConversationTranscriptEntry(
+			headBranch[1]!,
+			createAuthorization(),
+			transcriptRuntime(headBranch),
+		);
+		expect(live?.truncated).toBe(false);
+		expect(live?.text.endsWith("END_MARK")).toBe(true);
+
+		const nonHeadBranch = [
+			assistantEntry("assistant-final", 1, [{ type: "text", text: longText }]),
+			userEntry("user-after", 2, "next prompt"),
+			assistantEntry("assistant-next", 3, [{ type: "text", text: "short" }]),
+		];
+		const replayed = createRemoteConversationTranscriptEntry(
+			nonHeadBranch[0]!,
+			createAuthorization(),
+			transcriptRuntime(nonHeadBranch),
+		);
+		expect(replayed?.truncated).toBe(true);
+		expect(Array.from(replayed?.text ?? "")).toHaveLength(12_000);
 	});
 });
 
