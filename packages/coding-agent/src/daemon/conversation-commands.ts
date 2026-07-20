@@ -509,8 +509,11 @@ function isFullContentProjectableAssistantMessage(content: unknown): boolean {
 				: part.type === "thinking" && part.redacted !== true && typeof part.thinking === "string"
 					? part.thinking
 					: undefined;
-		if (text === undefined) {
+		if (text === undefined || text.length === 0) {
 			continue;
+		}
+		if (remaining <= 0) {
+			return false;
 		}
 		const bytes = measureConversationProjectionUtf8BytesWithin(text, remaining);
 		if (bytes === null) {

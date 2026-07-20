@@ -1603,6 +1603,37 @@ describe("final assistant entry full-content projection (#85)", () => {
 		);
 	});
 
+	it("serves an exactly-at-budget final entry with a trailing empty text part in full", () => {
+		const atBudget = `${"z".repeat(REMOTE_TRANSCRIPT_FINAL_ASSISTANT_MAX_CONTENT_UTF8_BYTES - 9)}AT_BUDGET`;
+		const branch = [
+			assistantEntry("assistant-final", 1, [
+				{ type: "text", text: atBudget },
+				{ type: "text", text: "" },
+			]),
+		];
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), transcriptRuntime(branch));
+
+		const item = page?.items[0];
+		expect(item?.truncated).toBe(false);
+		expect(item?.text.endsWith("AT_BUDGET")).toBe(true);
+		expect(item?.parts?.map((part) => part.truncated)).toEqual([false, false]);
+	});
+
+	it("falls back to default truncation when a part after an exactly-at-budget prefix overflows the budget", () => {
+		const atBudget = "x".repeat(REMOTE_TRANSCRIPT_FINAL_ASSISTANT_MAX_CONTENT_UTF8_BYTES);
+		const branch = [
+			assistantEntry("assistant-final", 1, [
+				{ type: "text", text: atBudget },
+				{ type: "text", text: "!" },
+			]),
+		];
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), transcriptRuntime(branch));
+
+		const item = page?.items[0];
+		expect(item?.truncated).toBe(true);
+		expect(Array.from(item?.text ?? "")).toHaveLength(12_000);
+	});
+
 	it("does not elevate entries on cursor-paged history", () => {
 		const branch = [
 			assistantEntry("assistant-big", 1, [{ type: "text", text: `big ${"p".repeat(30_000)}BIG_END` }]),
