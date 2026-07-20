@@ -29,7 +29,7 @@ import type { ReviewCoverage, ReviewFinding } from "../review.ts";
 import type { SourceInfo } from "../source-info.ts";
 
 export type RpcModel = Model<Api>;
-export const RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES = 256;
+export { RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES } from "./wire-limits.ts";
 /** A model as reported to clients: the raw model plus the thinking levels it supports. */
 export type RpcCatalogModel = RpcModel & { availableThinkingLevels: ThinkingLevel[] };
 export type RpcSubagentDefinitionSource = "built-in" | "user" | "project";

@@ -4,7 +4,6 @@ import type { ImageContent } from "@hansjm10/volt-ai";
 import { type BashExecutionMessage, extractVisibleTextContent } from "../messages.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
-import { DEFAULT_IROH_RPC_MAX_LINE_BYTES } from "./iroh-transport.ts";
 import type {
 	RpcMessageImage,
 	RpcTranscriptItem,
@@ -12,9 +11,15 @@ import type {
 	RpcTranscriptToolItem,
 	RpcTranscriptToolStatus,
 } from "./types.ts";
+import {
+	RPC_TRANSCRIPT_PAGE_DEFAULT_ITEMS as DEFAULT_TRANSCRIPT_LIMIT,
+	RPC_TRANSCRIPT_PAGE_MAX_ITEMS as MAX_TRANSCRIPT_LIMIT,
+	MESSAGE_IMAGES_ENTRY_MAX_ITEMS,
+	MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES,
+	MESSAGE_IMAGES_PAGE_MAX_ITEMS,
+	MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES,
+} from "./wire-limits.ts";
 
-const DEFAULT_TRANSCRIPT_LIMIT = 100;
-const MAX_TRANSCRIPT_LIMIT = 200;
 const MESSAGE_TEXT_LIMIT = 16_000;
 const SUMMARY_TEXT_LIMIT = 1_000;
 const TOOL_SUMMARY_LIMIT = 1_000;
@@ -75,14 +80,13 @@ export function projectSessionTranscript(
  * under volt-app's 4 MiB encoded JSONL cap, with explicit headroom for the
  * response envelope, identifiers, array commas, and the LF framing byte.
  */
-export const MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES = 64 * 1024;
-export const MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES =
-	DEFAULT_IROH_RPC_MAX_LINE_BYTES - MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES;
-export const MESSAGE_IMAGES_PAGE_MAX_ITEMS = 32;
-/** A recovered transcript entry may span pages, but never an unbounded number of images. */
-export const MESSAGE_IMAGES_ENTRY_MAX_ITEMS = 64;
-/** Aggregate serialized image-component bytes recoverable for one transcript entry. */
-export const MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES = 16 * 1024 * 1024;
+export {
+	MESSAGE_IMAGES_ENTRY_MAX_ITEMS,
+	MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES,
+	MESSAGE_IMAGES_PAGE_MAX_ITEMS,
+	MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES,
+	MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES,
+} from "./wire-limits.ts";
 
 export type ProjectMessageImagesResult =
 	| { ok: true; entryId: string; totalImages: number; images: RpcMessageImage[]; nextImageIndex: number | null }
