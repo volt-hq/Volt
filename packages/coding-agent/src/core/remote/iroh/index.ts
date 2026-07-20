@@ -38,6 +38,7 @@ export {
 	findIrohRemoteClient,
 	findIrohRemoteRevokedClient,
 	hashIrohRemotePairingSecret,
+	IROH_REMOTE_WORKSPACE_UNAVAILABLE_RETRY_AFTER_MS,
 	type IrohRemoteClientAuthorizationFailure,
 	type IrohRemoteClientAuthorizationResult,
 	type IrohRemoteClientAuthorizationSuccess,

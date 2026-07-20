@@ -24,6 +24,11 @@ import type { IrohRemoteWorkspaceAvailabilityClassifier, IrohRemoteWorkspaceStat
 
 export const DEFAULT_IROH_REMOTE_PAIRING_SECRET_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
+// Pacing hint sent with transient workspace_unavailable rejections. Missing
+// paths are rejected as workspace_missing without a hint: redialing cannot fix
+// a deleted registration, so well-behaved clients stop automatic retries.
+export const IROH_REMOTE_WORKSPACE_UNAVAILABLE_RETRY_AFTER_MS = 5_000;
+
 // A re-pair approval for a revoked client is a standing grant to consume a
 // pairing secret again. Bound it so a stale, unused approval cannot silently
 // hijack an unrelated pairing ticket minted much later for a different device;
@@ -64,6 +69,7 @@ export interface IrohRemoteClientAuthorizationFailure {
 	expiredPairingTickets?: IrohRemotePendingPairingTicket[];
 	outcome: IrohRemoteHostHandshakeFailureOutcome;
 	pairingSecretExpired: boolean;
+	retryAfterMs?: number;
 	workspace?: IrohRemoteWorkspace;
 }
 
@@ -186,12 +192,23 @@ export function authorizeIrohRemoteClient(
 	}
 
 	if (!workspace) {
+		const workspaceStatus = workspaces.find((entry) => entry.name === hello.workspace)?.status;
+		if (workspaceStatus === "missing") {
+			return {
+				ok: false,
+				error: `workspace path is missing: ${hello.workspace}`,
+				...(expiredResultTickets ? { expiredPairingTickets: expiredResultTickets } : {}),
+				outcome: "workspace_missing",
+				pairingSecretExpired: false,
+			};
+		}
 		return {
 			ok: false,
 			error: `workspace path is unavailable: ${hello.workspace}`,
 			...(expiredResultTickets ? { expiredPairingTickets: expiredResultTickets } : {}),
 			outcome: "workspace_unavailable",
 			pairingSecretExpired: false,
+			retryAfterMs: IROH_REMOTE_WORKSPACE_UNAVAILABLE_RETRY_AFTER_MS,
 		};
 	}
 
