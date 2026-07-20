@@ -1503,13 +1503,13 @@ describe("handleIntegratedConversationRpcCommand", () => {
 });
 
 describe("final assistant entry full-content projection (#85)", () => {
-	function assistantEntry(id: string, ordinal: number, content: unknown[]): SessionEntry {
+	function assistantEntry(id: string, ordinal: number, content: unknown[], stopReason = "stop"): SessionEntry {
 		return {
 			type: "message",
 			id,
 			ordinal,
 			timestamp: new Date(ordinal).toISOString(),
-			message: { role: "assistant", content, stopReason: "stop" },
+			message: { role: "assistant", content, stopReason },
 		} as unknown as SessionEntry;
 	}
 
@@ -1632,6 +1632,40 @@ describe("final assistant entry full-content projection (#85)", () => {
 		const item = page?.items[0];
 		expect(item?.truncated).toBe(true);
 		expect(Array.from(item?.text ?? "")).toHaveLength(12_000);
+	});
+
+	it("skips an identity-only aborted head assistant entry so the last real answer ships in full", () => {
+		const branch = [
+			assistantEntry("assistant-answer", 1, [{ type: "text", text: longText }]),
+			userEntry("user-1", 2, "another prompt"),
+			assistantEntry("assistant-aborted", 3, [], "aborted"),
+		];
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), transcriptRuntime(branch));
+
+		const aborted = page?.items.find((item) => item.entryId === "assistant-aborted");
+		expect(aborted?.stopReason).toBe("aborted");
+		const answer = page?.items.find((item) => item.entryId === "assistant-answer");
+		expect(answer?.truncated).toBe(false);
+		expect(answer?.text.endsWith("END_MARK")).toBe(true);
+	});
+
+	it("skips a tool-call-only head assistant entry so the last real answer ships in full", () => {
+		const branch = [
+			assistantEntry("assistant-answer", 1, [{ type: "text", text: longText }]),
+			userEntry("user-1", 2, "another prompt"),
+			assistantEntry(
+				"assistant-toolcall",
+				3,
+				[{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "file.txt" } }],
+				"toolUse",
+			),
+		];
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), transcriptRuntime(branch));
+
+		expect(page?.items.some((item) => item.entryId === "assistant-toolcall")).toBe(false);
+		const answer = page?.items.find((item) => item.entryId === "assistant-answer");
+		expect(answer?.truncated).toBe(false);
+		expect(answer?.text.endsWith("END_MARK")).toBe(true);
 	});
 
 	it("does not elevate entries on cursor-paged history", () => {

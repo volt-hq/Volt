@@ -524,11 +524,36 @@ function isFullContentProjectableAssistantMessage(content: unknown): boolean {
 	return true;
 }
 
-/** Newest assistant message entry in a head window; only it earns the elevated text budget. */
+/** True when an assistant message carries any non-empty text/thinking content the elevated budget could preserve. */
+function hasProjectableAssistantContent(content: unknown): boolean {
+	if (!Array.isArray(content)) {
+		return false;
+	}
+	return content.some(
+		(part) =>
+			isRemoteRecord(part) &&
+			((part.type === "text" && typeof part.text === "string" && part.text.length > 0) ||
+				(part.type === "thinking" &&
+					part.redacted !== true &&
+					typeof part.thinking === "string" &&
+					part.thinking.length > 0)),
+	);
+}
+
+/**
+ * Newest assistant message entry with non-empty text/thinking content in a
+ * head window; only it earns the elevated text budget. Entries that project
+ * empty (tool-call-only messages, identity-only aborted/error terminals) are
+ * skipped so the budget lands on the last real answer instead.
+ */
 function findLatestAssistantMessageEntryId(entries: SessionEntry[]): string | undefined {
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index];
-		if (entry?.type === "message" && (entry.message as unknown as Record<string, unknown>)?.role === "assistant") {
+		if (entry?.type !== "message") {
+			continue;
+		}
+		const message = entry.message as unknown as Record<string, unknown>;
+		if (message?.role === "assistant" && hasProjectableAssistantContent(message.content)) {
 			return entry.id;
 		}
 	}
