@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type IrohRemoteAuditEvent, IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteHostState, IrohRemoteWorkspace } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
+import { getDefaultSessionDir } from "../src/core/session-manager.ts";
 import {
 	getWorkspaceWorktreesDir,
 	getWorktreeCheckoutPath,
@@ -849,6 +850,50 @@ describe("worktree manager (fake git)", () => {
 		expect(flushState).toHaveBeenCalledTimes(1);
 		expect((await manager.resolveSessionWorktree("repo", "s-abc"))?.id).toBe("bind");
 		expect(await manager.resolveSessionWorktree("repo", "s-unknown")).toBeUndefined();
+	});
+
+	function writeSessionFile(sessionDir: string, fileName: string, id: string, cwd: string): void {
+		writeFileSync(
+			join(sessionDir, fileName),
+			`${JSON.stringify({ type: "session", version: 3, id, timestamp: new Date().toISOString(), cwd })}\n`,
+		);
+	}
+
+	it("resolveSessionWorktree heals a stranded binding from the session's stored cwd (#83)", async () => {
+		const manager = createManager(okGit().runGit);
+		expect((await manager.create(workspace, { id: "heal" })).ok).toBe(true);
+		const checkoutPath = getWorktreeCheckoutPath(agentDir, workspaceDir, "heal");
+		mkdirSync(join(checkoutPath, "src"), { recursive: true });
+		// A rekeyed (fork/new) descendant of a worktree conversation: the session
+		// file lives in the PARENT-keyed session dir with the worktree cwd, but its
+		// id was never appended to worktrees[].sessionIds.
+		const sessionDir = getDefaultSessionDir(workspaceDir, agentDir);
+		writeSessionFile(sessionDir, "2026-07-20T13-00-00-000Z_s-rekeyed.jsonl", "s-rekeyed", join(checkoutPath, "src"));
+
+		const resolved = await manager.resolveSessionWorktree("repo", "s-rekeyed");
+
+		expect(resolved?.id).toBe("heal");
+		// Self-heal: the id is appended to the durable binding so the next lookup
+		// (and list_sessions badging / busy checks) hit the persisted state.
+		const record = (await stateManager.listWorktrees("repo")).find((entry) => entry.id === "heal");
+		expect(record?.sessionIds).toContain("s-rekeyed");
+	});
+
+	it("resolveSessionWorktree cwd fallback stays inert for parent-cwd, unknown, and ambiguous sessions", async () => {
+		const manager = createManager(okGit().runGit);
+		expect((await manager.create(workspace, { id: "heal" })).ok).toBe(true);
+		const checkoutPath = getWorktreeCheckoutPath(agentDir, workspaceDir, "heal");
+		mkdirSync(checkoutPath, { recursive: true });
+		const sessionDir = getDefaultSessionDir(workspaceDir, agentDir);
+		writeSessionFile(sessionDir, "a_s-parent.jsonl", "s-parent", workspaceDir);
+		writeSessionFile(sessionDir, "a_s-dup.jsonl", "s-dup", checkoutPath);
+		writeSessionFile(sessionDir, "b_s-dup.jsonl", "s-dup", checkoutPath);
+
+		expect(await manager.resolveSessionWorktree("repo", "s-parent")).toBeUndefined();
+		expect(await manager.resolveSessionWorktree("repo", "s-missing")).toBeUndefined();
+		expect(await manager.resolveSessionWorktree("repo", "s-dup")).toBeUndefined();
+		const record = (await stateManager.listWorktrees("repo")).find((entry) => entry.id === "heal");
+		expect(record?.sessionIds).toEqual([]);
 	});
 });
 

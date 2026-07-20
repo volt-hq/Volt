@@ -1054,7 +1054,12 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	return entries;
 }
 
-function readSessionHeader(filePath: string): SessionHeader | null {
+/**
+ * Hardened first-line header read (O_NOFOLLOW, single-link regular files
+ * only). Exported for daemon worktree resolution, which needs a session's
+ * stored cwd without paying a full WAL-validating open.
+ */
+export function readSessionHeader(filePath: string): SessionHeader | null {
 	let fd: number | undefined;
 	try {
 		hardenPrivateRegularFileSync(filePath);

@@ -578,12 +578,11 @@ export class IntegratedRuntimeRegistry {
 					sessionSelection: createConversationSessionSelectionFromEntry(owner),
 				};
 			}
-			if (
-				worktree !== undefined &&
-				sessionSelection.kind === "created" &&
-				handshake.hello.mode === "conversation" &&
-				handshake.hello.conversation.target === "new"
-			) {
+			// Bind EVERY session actually created under the worktree root, not just
+			// the initial "new"-target one: a created_after_missing replacement for a
+			// bound-but-vanished resume target must stay resumable after a daemon
+			// restart too (#83). Resumed sessions were bound when they were created.
+			if (worktree !== undefined && sessionSelection.kind !== "resumed") {
 				if (this.options.bindWorktreeSession) {
 					assertAttachAdmissionOpen(options.signal);
 					await waitForAttachAdmission(
@@ -1271,6 +1270,12 @@ export class IntegratedRuntimeRegistry {
 						);
 						targetSessionPersisted = true;
 					}
+					if (entry.worktreeId !== undefined && this.options.bindWorktreeSession) {
+						// Keep the durable worktree binding covering the replacement id so a
+						// post-restart resume resolves the checkout again (#83). The append is
+						// additive and idempotent; rollback leaves a stale-but-inert extra id.
+						await this.options.bindWorktreeSession(entry.workspaceName, entry.worktreeId, target.sessionId);
+					}
 					// Persistence is an ownership await boundary. A stop can synchronously
 					// fence the entry while that write is pending; never publish its lease or
 					// registry rekey without revalidating the captured generation.
@@ -1459,6 +1464,16 @@ export class IntegratedRuntimeRegistry {
 			// Defensive: the driving stream is normally already in the registry, but
 			// keep it consistent even if this runs before it was registered.
 			activeStreamEntry.sessionId = nextSessionId;
+		}
+		// A rekeyed worktree conversation must stay resumable after a daemon
+		// restart: append the new id to the durable binding (additive, idempotent).
+		// Failure fails the rekey closed — handleSessionChanged stops the runtime
+		// rather than leaving a persisted resume target that cannot be resolved
+		// back to its checkout (#83). The registry has already moved to the new
+		// identity, so the fail-closed outcome is a stopped runtime, not the old
+		// identity retained.
+		if (entry.worktreeId !== undefined && this.options.bindWorktreeSession) {
+			await this.options.bindWorktreeSession(entry.workspaceName, entry.worktreeId, nextSessionId);
 		}
 		await this.logEntryAudit(entry, "remote_runtime_session_changed", {
 			previousSessionId,

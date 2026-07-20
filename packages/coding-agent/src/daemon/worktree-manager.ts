@@ -10,6 +10,7 @@ import {
 	isIrohRemoteWorktreeParentWorkspaceNotFoundError,
 	isIrohRemoteWorktreePersistenceError,
 } from "../core/remote/iroh/state-manager.ts";
+import { getDefaultSessionDir, readSessionHeader } from "../core/session-manager.ts";
 import { spawnProcess, waitForChildProcess } from "../utils/child-process.ts";
 import type { ControlRequest, ControlWorktreeStatus } from "./control-protocol.ts";
 import type { ControlConnection } from "./control-server.ts";
@@ -954,7 +955,70 @@ export class WorktreeManager {
 		workspaceName: string,
 		sessionId: string,
 	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
-		return this.stateManager.findWorktreeForSession(workspaceName, sessionId);
+		const bound = await this.stateManager.findWorktreeForSession(workspaceName, sessionId);
+		if (bound) {
+			return bound;
+		}
+		return this.resolveSessionWorktreeByStoredCwd(workspaceName, sessionId);
+	}
+
+	/**
+	 * Binding-miss fallback (#83): worktrees[].sessionIds historically only
+	 * recorded ids bound at creation, so rekeyed descendants (fork/new),
+	 * subagent sessions, and pre-fix stranded sessions can live under a
+	 * checkout without a binding. Resolve those from the session file's stored
+	 * cwd — a header-only read of the filename-matching candidate in the
+	 * parent-keyed session dir — and self-heal the durable binding. Anything
+	 * ambiguous or unreadable fails closed to undefined (current behavior).
+	 */
+	private async resolveSessionWorktreeByStoredCwd(
+		workspaceName: string,
+		sessionId: string,
+	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
+		const worktrees = await this.stateManager.listWorktrees(workspaceName);
+		if (worktrees.length === 0) {
+			return undefined;
+		}
+		const state = await this.stateManager.getState();
+		const workspace = state.workspaces.find((entry) => entry.name === workspaceName);
+		if (!workspace) {
+			return undefined;
+		}
+		const sessionDir = getDefaultSessionDir(workspace.path, this.agentDir);
+		let candidates: string[];
+		try {
+			candidates = (await readdir(sessionDir)).filter((name) => name.endsWith(`_${sessionId}.jsonl`));
+		} catch {
+			return undefined;
+		}
+		const candidate = candidates.length === 1 ? candidates[0] : undefined;
+		if (candidate === undefined) {
+			return undefined;
+		}
+		const header = readSessionHeader(join(sessionDir, candidate));
+		if (header?.id !== sessionId || typeof header.cwd !== "string" || header.cwd.length === 0) {
+			return undefined;
+		}
+		const cwdReal = await realpathOrResolve(header.cwd);
+		let match: { worktree: IrohRemoteWorkspaceWorktree; checkoutPath: string } | undefined;
+		for (const worktree of worktrees) {
+			const checkoutPath = await realpathOrResolve(worktree.path);
+			if (!isPathContained(checkoutPath, cwdReal)) {
+				continue;
+			}
+			// Adopted worktrees may nest; prefer the most specific containing checkout.
+			if (match === undefined || checkoutPath.length > match.checkoutPath.length) {
+				match = { worktree, checkoutPath };
+			}
+		}
+		if (match === undefined) {
+			return undefined;
+		}
+		// Self-heal so future lookups, session badging, and worktree busy checks
+		// hit the persisted binding. Resolution must not fail because this durable
+		// write did; the next lookup simply falls back again.
+		await this.bindSession(workspaceName, match.worktree.id, sessionId).catch(() => undefined);
+		return match.worktree;
 	}
 
 	async bindSession(workspaceName: string, worktreeId: string, sessionId: string): Promise<void> {
