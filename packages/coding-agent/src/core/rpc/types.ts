@@ -25,6 +25,7 @@ import type {
 	McpServerSummary,
 	McpToolSummary,
 } from "../mcp/types.ts";
+import type { ReviewCoverage, ReviewFinding } from "../review.ts";
 import type { SourceInfo } from "../source-info.ts";
 
 export type RpcModel = Model<Api>;
@@ -102,6 +103,12 @@ export type RpcCommand = RpcConversationAuthorityCarrier &
 				args?: Record<string, unknown>;
 				streamingBehavior?: UiActionInvocationQueueBehavior;
 		  }
+
+		// Detached review workflows
+		| { id?: string; type: "cancel_workflow"; workflowId: string }
+		| { id?: string; type: "get_review_result"; workflowId: string }
+		| { id?: string; type: "list_review_workflows" }
+		| { id?: string; type: "open_review_session"; workflowId: string }
 
 		// Push notifications
 		| { id?: string; type: "register_push_target"; args: RpcRegisterPushTargetArgs }
@@ -334,6 +341,8 @@ export interface UiActionInvocationResponse {
 	action: string;
 	status: UiActionInvocationStatus;
 	queuedAs?: UiActionInvocationQueueBehavior;
+	/** Detached workflow started by this invocation (review actions). */
+	workflowId?: string;
 	state?: UiActionStateDescriptor;
 	stateChanged?: boolean;
 	actionsChanged?: boolean;
@@ -404,6 +413,37 @@ export type RpcWorkflowToolEvent =
 			isError: boolean;
 			projection?: RpcProjectionTruncation;
 	  };
+
+// ============================================================================
+// Detached review workflows
+// ============================================================================
+
+export type RpcReviewWorkflowLifecycleStatus = "running" | "completed" | "cancelled" | "failed";
+
+export interface RpcReviewWorkflowDescriptor {
+	workflowId: string;
+	/** Review host-action id, e.g. `review.branch`. */
+	action: string;
+	status: RpcReviewWorkflowLifecycleStatus;
+	target: { description: string; diffCommand: string };
+	findingsCount?: number;
+	errorMessage?: string;
+	startedAt: number;
+	endedAt?: number;
+}
+
+export interface RpcReviewWorkflowResultResponse extends RpcReviewWorkflowDescriptor {
+	findings?: ReviewFinding[];
+	coverage?: ReviewCoverage;
+	overallCorrectness?: string;
+	overallExplanation?: string;
+	/** Bounded raw reviewer text; present only when the report had no parseable findings payload. */
+	raw?: string;
+}
+
+export interface RpcReviewWorkflowListResponse {
+	workflows: RpcReviewWorkflowDescriptor[];
+}
 
 // ============================================================================
 // RPC Host Actions
@@ -887,6 +927,30 @@ export type RpcResponse =
 			command: "invoke_ui_action";
 			success: true;
 			data: UiActionInvocationResponse;
+	  }
+
+	// Detached review workflows
+	| { id?: string; type: "response"; command: "cancel_workflow"; success: true }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_review_result";
+			success: true;
+			data: RpcReviewWorkflowResultResponse;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "list_review_workflows";
+			success: true;
+			data: RpcReviewWorkflowListResponse;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "open_review_session";
+			success: true;
+			data: { cancelled: boolean };
 	  }
 
 	// Push notifications

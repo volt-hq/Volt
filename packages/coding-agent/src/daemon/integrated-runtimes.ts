@@ -1538,13 +1538,21 @@ export class IntegratedRuntimeRegistry {
 		// rather than restarting a full TTL, so a flaky reconnect-then-abort loop
 		// cannot keep resetting the clock and pin a detached runtime open forever.
 		const ttlMs = ttlOverrideMs ?? this.options.detachedRuntimeTtlMs();
+		// Detached review workflows count as activity: a backgrounded client's
+		// running review must pin the runtime until it reaches a terminal state.
+		const isEntryActive = () =>
+			entry.runtime.session.isBusy || entry.runtime.reviewWorkflows?.hasActiveWorkflows === true;
+		const waitForEntryIdle = async () => {
+			await entry.runtime.session.waitForIdle();
+			await entry.runtime.reviewWorkflows?.waitForIdle();
+		};
 		const handle = scheduleDetachedRuntimeRetention({
 			ttlMs,
 			isDetached: () => this.isDetached(entry),
-			isActive: () => entry.runtime.session.isBusy,
-			waitForIdle: () => entry.runtime.session.waitForIdle(),
+			isActive: isEntryActive,
+			waitForIdle: waitForEntryIdle,
 			onExpire: async () => {
-				if (!this.isDetached(entry) || entry.runtime.session.isBusy) {
+				if (!this.isDetached(entry) || isEntryActive()) {
 					return;
 				}
 				await this.logEntryAudit(entry, "remote_runtime_retention_expired", {
@@ -1558,7 +1566,7 @@ export class IntegratedRuntimeRegistry {
 				// retention. Re-check (and confirm this retention is still the active
 				// one) before disposing, so the sweep never tears down a runtime that
 				// was just reattached.
-				if (!this.isDetached(entry) || entry.runtime.session.isBusy || entry.detachedRuntimeRetention !== handle) {
+				if (!this.isDetached(entry) || isEntryActive() || entry.detachedRuntimeRetention !== handle) {
 					return;
 				}
 				await this.stopEntry(entry, "detached_runtime_ttl_expired");

@@ -47,6 +47,8 @@ export interface UiActionInvocationPlan {
 
 export interface UiActionDescriptorOptions {
 	remoteSafeOnly?: boolean;
+	/** Advertise review actions as detached workflows (see HostActionDescriptorContext). */
+	detachedReviews?: boolean;
 }
 
 interface UiActionCatalogState {
@@ -77,6 +79,7 @@ export function getUiActionDescriptors(
 			thinkingLevel: session.thinkingLevel,
 			fastModeRestoreThinkingLevel: session.fastModeRestoreThinkingLevel,
 		},
+		detachedReviews: options.detachedReviews,
 	});
 	const normalizedScope = normalizeUiActionListScope(scope);
 	const descriptors =

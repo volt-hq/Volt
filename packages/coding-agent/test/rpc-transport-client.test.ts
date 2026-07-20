@@ -1381,7 +1381,8 @@ describe("createInProcessRpcClient", () => {
 					source: "builtin",
 					category: "review",
 					presentation: expect.objectContaining({ kind: "card", group: "Review" }),
-					enabled: false,
+					// Detached reviews stay available while the session is streaming.
+					enabled: true,
 					remoteSafe: true,
 					requiresConfirmation: true,
 					slash: { name: "review", example: "/review uncommitted" },
@@ -1392,7 +1393,8 @@ describe("createInProcessRpcClient", () => {
 					source: "builtin",
 					category: "review",
 					presentation: expect.objectContaining({ kind: "card", group: "Review" }),
-					enabled: false,
+					// Detached reviews stay available while the session is streaming.
+					enabled: true,
 					remoteSafe: true,
 					requiresConfirmation: true,
 					slash: { name: "review", example: "/review branch [base]" },
@@ -1460,8 +1462,10 @@ describe("createInProcessRpcClient", () => {
 				message: "Session name set: D.2",
 			});
 			expect(setSessionName).toHaveBeenCalledWith("D.2");
+			// Detached reviews are admitted even while the agent is streaming; in
+			// this environment the preflight then fails at target resolution.
 			await expect(client.invokeUiAction(REVIEW_UNCOMMITTED_ACTION_ID, { args: {} })).rejects.toThrow(
-				"Review is not available while the agent is streaming",
+				"Not inside a git repository.",
 			);
 		} finally {
 			await client.stop();

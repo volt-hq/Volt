@@ -8253,7 +8253,7 @@ export class InteractiveMode {
 				onBeforeReview: (resolution, model) => this.createReviewWorkflowHooks(resolution, model),
 			});
 
-			if (result.status === "cancelled") {
+			if (result.status !== "completed") {
 				this.showStatus("Review cancelled");
 				return result;
 			}

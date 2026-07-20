@@ -18,6 +18,7 @@ import {
 	type IrohRemotePushRelayNotificationRequest,
 	type IrohRemotePushTarget,
 } from "../src/core/remote/iroh/index.ts";
+import { ReviewWorkflowManager } from "../src/core/review-workflows.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 import { createRemoteConversationTranscriptEntry } from "../src/daemon/conversation-commands.ts";
 import {
@@ -31,26 +32,34 @@ import {
 } from "./iroh-stream-doubles.ts";
 
 const reviewMocks = vi.hoisted(() => ({
-	runReviewWorkflow: vi.fn(async (options: { newSession: (options?: unknown) => Promise<{ cancelled: boolean }> }) => {
-		const newSessionResult = await options.newSession({});
-		return {
-			status: "completed" as const,
-			resolution: {
-				description: "uncommitted changes",
-				diffCommand: "git diff HEAD",
-				diff: "diff",
-				truncated: false,
-			},
-			findingsCount: 1,
-			sessionSwitchCancelled: newSessionResult.cancelled,
-		};
-	}),
+	prepareReviewWorkflow: vi.fn(async (options: { target: unknown }) => ({
+		workflowId: "review:test",
+		action: "review.uncommitted",
+		target: options.target,
+		resolution: {
+			description: "uncommitted changes",
+			diffCommand: "git diff HEAD",
+			diff: "diff",
+			truncated: false,
+		},
+		model: { id: "test-model", provider: "test" },
+	})),
+	executeReviewWorkflow: vi.fn(async () => ({
+		status: "completed" as const,
+		raw: "raw reviewer output",
+		parsed: { findings: [{ title: "Fix the bug", body: "The bug is real." }] },
+		findingsCount: 1,
+	})),
 }));
 
-vi.mock("../src/core/review.ts", () => ({
-	REMOTE_REVIEW_TOOL_NAMES: ["read", "grep", "find", "ls"],
-	runReviewWorkflow: reviewMocks.runReviewWorkflow,
-}));
+vi.mock("../src/core/review.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/core/review.ts")>();
+	return {
+		...actual,
+		prepareReviewWorkflow: reviewMocks.prepareReviewWorkflow,
+		executeReviewWorkflow: reviewMocks.executeReviewWorkflow,
+	};
+});
 
 import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 
@@ -227,7 +236,8 @@ function createRelayClient(overrides: Partial<IrohRemotePushRelayClient> = {}): 
 }
 
 afterEach(() => {
-	reviewMocks.runReviewWorkflow.mockClear();
+	reviewMocks.prepareReviewWorkflow.mockClear();
+	reviewMocks.executeReviewWorkflow.mockClear();
 });
 
 describe("Iroh remote notification requests", () => {
@@ -2317,8 +2327,8 @@ describe("Iroh remote notification requests", () => {
 		await expect(modePromise).resolves.toBeUndefined();
 	});
 
-	test("emits one review completion notification after a remote review action completes", async () => {
-		let currentSession = createTestSession("initial-session", "initial-run");
+	test("emits one review completion notification after a detached remote review completes", async () => {
+		const currentSession = createTestSession("initial-session", "initial-run");
 		const runtimeHost = {
 			...createStableSessionRunner(() => currentSession),
 			get session() {
@@ -2326,10 +2336,8 @@ describe("Iroh remote notification requests", () => {
 			},
 			cwd: "/workspace",
 			services: { agentDir: "/agent" },
-			newSession: vi.fn(async () => {
-				currentSession = createTestSession("review-session", "review-run");
-				return { cancelled: false };
-			}),
+			reviewWorkflows: new ReviewWorkflowManager(),
+			newSession: vi.fn(async () => ({ cancelled: false })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
 			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
 			dispose: vi.fn(async () => {}),
@@ -2352,15 +2360,17 @@ describe("Iroh remote notification requests", () => {
 			expect(getNotifications(send)).toEqual([
 				{
 					type: "notification_request",
-					eventId: "review:review-session:review-run:completed",
+					eventId: "review:test:completed",
 					kind: "review_completed",
 					title: "Review complete",
 					body: "Open Volt to see the findings.",
-					sessionId: "review-session",
+					sessionId: "initial-session",
 				},
 			]),
 		);
-		expect(reviewMocks.runReviewWorkflow).toHaveBeenCalledOnce();
+		expect(reviewMocks.executeReviewWorkflow).toHaveBeenCalledOnce();
+		// The detached review never force-switches the client's session.
+		expect(runtimeHost.newSession).not.toHaveBeenCalled();
 
 		recv.end();
 		await expect(modePromise).resolves.toBeUndefined();

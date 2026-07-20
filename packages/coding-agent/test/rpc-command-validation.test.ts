@@ -108,6 +108,21 @@ const invalidPayloadCases: Array<{ name: string; payload: unknown; error: string
 		error: 'Invalid RPC command payload: "args" must be an object',
 	},
 	{
+		name: "rejects review workflow commands without a workflowId",
+		payload: { type: "cancel_workflow" },
+		error: 'Invalid RPC command payload: "workflowId" is required',
+	},
+	{
+		name: "rejects review workflow commands with an empty workflowId",
+		payload: { type: "get_review_result", workflowId: "   " },
+		error: 'Invalid RPC command payload: "workflowId" must be a non-empty string',
+	},
+	{
+		name: "rejects review workflow ids beyond the identifier byte bound",
+		payload: { type: "open_review_session", workflowId: "w".repeat(300) },
+		error: 'Invalid RPC command payload: "workflowId" exceeds the 256-byte UTF-8 limit',
+	},
+	{
 		name: "rejects invalid push target registrations",
 		payload: { type: "register_push_target", args: { provider: "fcm", platform: "ios", enabled: true } },
 		error: 'Invalid RPC command payload: "args" must be a push target registration object',
@@ -193,6 +208,10 @@ describe("RPC command payload validation", () => {
 		expect(validateRpcCommandPayload("not an object")).toBeUndefined();
 		expect(validateRpcCommandPayload({ type: "future_command", message: 1 })).toBeUndefined();
 		expect(validateRpcCommandPayload({ type: "set_thinking_level", level: "max" })).toBeUndefined();
+		expect(validateRpcCommandPayload({ type: "cancel_workflow", workflowId: "review:one" })).toBeUndefined();
+		expect(validateRpcCommandPayload({ type: "get_review_result", workflowId: "review:one" })).toBeUndefined();
+		expect(validateRpcCommandPayload({ type: "open_review_session", workflowId: "review:one" })).toBeUndefined();
+		expect(validateRpcCommandPayload({ type: "list_review_workflows" })).toBeUndefined();
 		expect(
 			validateRpcCommandPayload({
 				id: "recovery-1",
