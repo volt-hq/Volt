@@ -106,10 +106,9 @@ export const RpcSessionStateSchema = Type.Object(
 		autoCompactionEnabled: Type.Boolean(),
 		messageCount: Type.Number(),
 		pendingMessageCount: Type.Number(),
-		/** Authoritative queue contents for atomic bootstrap/checkpoint recovery. */
-		steeringQueue: Type.Optional(readonlyArrayOf(RpcQueuedMessageSchema)),
-		/** Authoritative queue contents for atomic bootstrap/checkpoint recovery. */
-		followUpQueue: Type.Optional(readonlyArrayOf(RpcQueuedMessageSchema)),
+		/** Authoritative queue contents for atomic bootstrap/checkpoint recovery. Always emitted; the iOS bootstrap decoder fails closed without them. */
+		steeringQueue: readonlyArrayOf(RpcQueuedMessageSchema),
+		followUpQueue: readonlyArrayOf(RpcQueuedMessageSchema),
 		activeTools: Type.Optional(Type.Array(RpcActiveToolExecutionSchema)),
 		activeCompaction: Type.Optional(RpcActiveCompactionSchema),
 		activeRetry: Type.Optional(RpcActiveRetrySchema),

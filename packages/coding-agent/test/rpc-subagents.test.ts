@@ -78,6 +78,8 @@ function createState(sessionId: string): RpcSessionState {
 		autoCompactionEnabled: true,
 		messageCount: 0,
 		pendingMessageCount: 0,
+		steeringQueue: [],
+		followUpQueue: [],
 	};
 }
 

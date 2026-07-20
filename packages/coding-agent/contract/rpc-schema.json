@@ -8493,7 +8493,9 @@
 				"sessionId",
 				"autoCompactionEnabled",
 				"messageCount",
-				"pendingMessageCount"
+				"pendingMessageCount",
+				"steeringQueue",
+				"followUpQueue"
 			],
 			"properties": {
 				"model": {

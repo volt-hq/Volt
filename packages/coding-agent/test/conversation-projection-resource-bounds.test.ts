@@ -464,6 +464,8 @@ describe("conversation projection resource bounds", () => {
 				autoCompactionEnabled: true,
 				messageCount: 0,
 				pendingMessageCount: 0,
+				steeringQueue: [],
+				followUpQueue: [],
 			},
 			transcript: {
 				sessionId: "session-active-assistant",

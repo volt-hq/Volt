@@ -1013,6 +1013,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 					autoCompactionEnabled: true,
 					messageCount: 0,
 					pendingMessageCount: 0,
+					steeringQueue: [],
+					followUpQueue: [],
 				},
 				transcript: {
 					sessionId: runtimeHost.session.sessionId,
@@ -1092,6 +1094,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 					autoCompactionEnabled: true,
 					messageCount: runtimeHost.session.agent.state.messages.length,
 					pendingMessageCount: 0,
+					steeringQueue: [],
+					followUpQueue: [],
 				},
 				transcript: {
 					sessionId: runtimeHost.session.sessionId,
@@ -1178,6 +1182,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 					autoCompactionEnabled: true,
 					messageCount: 0,
 					pendingMessageCount: 0,
+					steeringQueue: [],
+					followUpQueue: [],
 				},
 				transcript: {
 					sessionId: runtimeHost.session.sessionId,
