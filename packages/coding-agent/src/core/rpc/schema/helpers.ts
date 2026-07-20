@@ -59,5 +59,18 @@ export function readonlyArrayOf<S extends TSchema>(
  */
 export type MutualExtends<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
+/**
+ * The JSON wire shape of a TS type: properties that admit `undefined` become
+ * optional, because JSON.stringify drops them from the serialized object.
+ * `unknown`-typed properties stay required (undefined extends unknown, but the
+ * property models an always-present opaque value). Shallow by design — apply
+ * per level where upstream types use `| undefined`.
+ */
+export type JsonWireShape<T> = {
+	[K in keyof T as unknown extends T[K] ? never : undefined extends T[K] ? K : never]?: Exclude<T[K], undefined>;
+} & {
+	[K in keyof T as unknown extends T[K] ? K : undefined extends T[K] ? never : K]: T[K];
+};
+
 /** Anchors a `MutualExtends` assertion in a type alias; `false`/`never` fail the constraint visibly. */
 export type Assert<T extends true> = T;
