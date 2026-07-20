@@ -1,0 +1,10131 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"title": "Volt RPC contract",
+	"x-volt-generated": "Generated from packages/coding-agent/src/core/rpc/schema — run `npm run contract:rpc`; do not edit by hand.",
+	"x-volt-open-events": "The RpcServerEvent union is the declared vocabulary; plain-mode hosts pass additional session events through verbatim. Clients must ignore unknown event types.",
+	"x-volt-limits": {
+		"conversationIdentifierMaxUtf8Bytes": 256,
+		"clientMessageId": {
+			"maxChars": 256,
+			"patternSource": "[A-Za-z0-9][A-Za-z0-9._:-]{0,255}",
+			"schemaPattern": "^(?!local-queue:)[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$",
+			"reservedPrefix": "local-queue:"
+		},
+		"conversationInput": {
+			"messageMaxUtf8Bytes": 524288,
+			"maxImages": 8,
+			"imageMimeTypeMaxUtf8Bytes": 256,
+			"imageDataMaxUtf8Bytes": 1048576,
+			"imagesMaxUtf8Bytes": 1572864,
+			"maxSerializedBytes": 2097152
+		},
+		"sessionState": {
+			"maxSerializedBytes": 786432,
+			"modelMaxSerializedBytes": 32768,
+			"queueMaxSerializedBytes": 131072,
+			"queueMaxItems": 128,
+			"queueItemMaxUtf8Bytes": 16384,
+			"queueIdMaxUtf8Bytes": 256,
+			"activeToolsMaxSerializedBytes": 262144,
+			"activeToolsMaxItems": 128,
+			"activeToolArgsMaxSerializedBytes": 12288,
+			"activeToolDetailsMaxSerializedBytes": 20480,
+			"projectionStringMaxUtf8Bytes": 4096
+		},
+		"conversationProjection": {
+			"maxQueuedBytes": 4194304,
+			"maxQueuedEnvelopes": 512,
+			"assistantMaxContentBlocks": 128,
+			"assistantMaxCumulativeContentUtf8Bytes": 262144,
+			"assistantMaxToolCallSerializedBytes": 65536,
+			"assistantMaxSnapshotSerializedBytes": 393216
+		},
+		"transcript": {
+			"pageDefaultItems": 100,
+			"pageMaxItems": 200,
+			"remotePageMaxSerializedBytes": 2097152
+		},
+		"messageImages": {
+			"responseEnvelopeHeadroomBytes": 65536,
+			"responseBudgetBytes": 4128767,
+			"pageMaxItems": 32,
+			"entryMaxItems": 64,
+			"entryMaxSerializedBytes": 16777216
+		},
+		"jsonl": {
+			"maxEncodedLineBytes": 4194304,
+			"maxLineBytes": 4194303
+		},
+		"wireMaxSafeInteger": 9007199254740991,
+		"retryAfterMsMax": 30000,
+		"stableErrorCodes": [
+			"client_input_conflict",
+			"client_input_outcome_ambiguous",
+			"stale_conversation_authority"
+		],
+		"remoteErrorStrings": [
+			"invalid_cursor",
+			"invalid_limit",
+			"invalid_live_activity_registration",
+			"invalid_live_activity_token",
+			"invalid_request",
+			"invalid_workspace_payload",
+			"session_mismatch",
+			"unexpected_session_id",
+			"unknown_live_activity_token",
+			"unsupported_on_workspace_discovery_stream",
+			"unsupported_on_workspace_management_stream",
+			"unsupported_remote_command"
+		]
+	},
+	"$defs": {
+		"RpcActiveCompaction": {
+			"type": "object",
+			"required": [
+				"reason",
+				"startedAt"
+			],
+			"properties": {
+				"reason": {
+					"type": "string",
+					"enum": [
+						"manual",
+						"threshold",
+						"overflow"
+					]
+				},
+				"startedAt": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcActiveRetry": {
+			"type": "object",
+			"required": [
+				"attempt",
+				"maxAttempts"
+			],
+			"properties": {
+				"attempt": {
+					"type": "number"
+				},
+				"maxAttempts": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcActiveToolCallState": {
+			"type": "object",
+			"required": [
+				"contentIndex",
+				"argsText"
+			],
+			"properties": {
+				"contentIndex": {
+					"type": "integer"
+				},
+				"argsText": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcActiveToolExecution": {
+			"type": "object",
+			"required": [
+				"toolCallId",
+				"toolName",
+				"status"
+			],
+			"properties": {
+				"toolCallId": {
+					"type": "string"
+				},
+				"toolName": {
+					"type": "string"
+				},
+				"status": {
+					"type": "string",
+					"const": "started"
+				},
+				"args": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
+				},
+				"details": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
+				},
+				"projection": {
+					"$ref": "#/$defs/RpcProjectionTruncation"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcApi": {
+			"type": "string",
+			"x-volt-known-values": [
+				"openai-completions",
+				"mistral-conversations",
+				"openai-responses",
+				"azure-openai-responses",
+				"openai-codex-responses",
+				"anthropic-messages",
+				"bedrock-converse-stream",
+				"google-generative-ai",
+				"google-vertex"
+			]
+		},
+		"RpcAssistantContent": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/RpcTextContent"
+				},
+				{
+					"$ref": "#/$defs/RpcThinkingContent"
+				},
+				{
+					"$ref": "#/$defs/RpcToolCall"
+				}
+			]
+		},
+		"RpcAssistantMessage": {
+			"type": "object",
+			"required": [
+				"role",
+				"content",
+				"api",
+				"provider",
+				"model",
+				"usage",
+				"stopReason",
+				"timestamp"
+			],
+			"properties": {
+				"role": {
+					"type": "string",
+					"const": "assistant"
+				},
+				"content": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcAssistantContent"
+					}
+				},
+				"api": {
+					"$ref": "#/$defs/RpcApi"
+				},
+				"provider": {
+					"type": "string"
+				},
+				"model": {
+					"type": "string"
+				},
+				"responseModel": {
+					"type": "string"
+				},
+				"responseId": {
+					"type": "string"
+				},
+				"diagnostics": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcAssistantMessageDiagnostic"
+					}
+				},
+				"usage": {
+					"$ref": "#/$defs/RpcUsage"
+				},
+				"stopReason": {
+					"$ref": "#/$defs/RpcStopReason"
+				},
+				"errorMessage": {
+					"type": "string"
+				},
+				"timestamp": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcAssistantMessageDiagnostic": {
+			"type": "object",
+			"required": [
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"type": {
+					"type": "string"
+				},
+				"timestamp": {
+					"type": "number"
+				},
+				"error": {
+					"$ref": "#/$defs/RpcDiagnosticErrorInfo"
+				},
+				"details": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcAssistantStreamPosition": {
+			"type": "object",
+			"required": [
+				"epoch",
+				"seq"
+			],
+			"properties": {
+				"epoch": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"seq": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				}
+			},
+			"additionalProperties": false,
+			"x-volt-expected": "be a safe non-negative epoch/seq position"
+		},
+		"RpcBashResult": {
+			"type": "object",
+			"required": [
+				"output",
+				"cancelled",
+				"truncated"
+			],
+			"properties": {
+				"output": {
+					"type": "string"
+				},
+				"exitCode": {
+					"type": "number"
+				},
+				"cancelled": {
+					"type": "boolean"
+				},
+				"truncated": {
+					"type": "boolean"
+				},
+				"fullOutputPath": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCatalogModel": {
+			"type": "object",
+			"required": [
+				"id",
+				"name",
+				"api",
+				"provider",
+				"baseUrl",
+				"reasoning",
+				"input",
+				"cost",
+				"contextWindow",
+				"maxTokens",
+				"availableThinkingLevels"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"name": {
+					"type": "string"
+				},
+				"api": {
+					"$ref": "#/$defs/RpcApi"
+				},
+				"provider": {
+					"type": "string"
+				},
+				"baseUrl": {
+					"type": "string"
+				},
+				"reasoning": {
+					"type": "boolean"
+				},
+				"thinkingLevelMap": {
+					"type": "object",
+					"properties": {
+						"off": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"minimal": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"low": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"medium": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"high": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"xhigh": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"max": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						}
+					},
+					"additionalProperties": false
+				},
+				"input": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"enum": [
+							"text",
+							"image"
+						]
+					}
+				},
+				"cost": {
+					"type": "object",
+					"required": [
+						"input",
+						"output",
+						"cacheRead",
+						"cacheWrite"
+					],
+					"properties": {
+						"input": {
+							"type": "number"
+						},
+						"output": {
+							"type": "number"
+						},
+						"cacheRead": {
+							"type": "number"
+						},
+						"cacheWrite": {
+							"type": "number"
+						}
+					},
+					"additionalProperties": false
+				},
+				"contextWindow": {
+					"type": "number"
+				},
+				"maxTokens": {
+					"type": "number"
+				},
+				"headers": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {
+							"type": "string"
+						}
+					}
+				},
+				"compat": {
+					"x-volt-opaque": "provider compatibility tuning; clients never interpret this"
+				},
+				"availableThinkingLevels": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcThinkingLevel"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcClientCapabilityFeature": {
+			"type": "string",
+			"x-volt-known-values": [
+				"host_action_requests.v1"
+			]
+		},
+		"RpcClientMessage": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/RpcCommand.prompt"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.steer"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.follow_up"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.abort"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.new_session"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_client_capabilities"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_pending_host_actions"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.report_stream_discontinuity"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_ui_capabilities"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_ui_actions"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_ui_action_completions"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.invoke_ui_action"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.cancel_workflow"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_review_result"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_review_workflows"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.open_review_session"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.register_push_target"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.register_live_activity"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.unregister_live_activity"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.unregister_workspace"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_keep_awake"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_keep_awake"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_web_search_key"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_web_search_status"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.upload_device_logs"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_mcp_capabilities"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_mcp_servers"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_mcp_server"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.connect_mcp_server"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.disconnect_mcp_server"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.refresh_mcp_server"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.start_mcp_server_auth"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.complete_mcp_server_auth"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.poll_mcp_server_auth"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.cancel_mcp_server_auth"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.logout_mcp_server"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_mcp_server_enabled"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_mcp_tools"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_mcp_tool"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_mcp_resources"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.read_mcp_resource"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_mcp_prompts"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_mcp_prompt"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_mcp_recent_calls"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_state"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_transcript"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_message_images"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_subagents"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.subagent_start"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.subagent_abort"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.subagent_get_state"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.subagent_get_transcript"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.subagent_dispose"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_model"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.cycle_model"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_available_models"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_thinking_level"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.cycle_thinking_level"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_steering_mode"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_follow_up_mode"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.compact"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_auto_compaction"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_auto_retry"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.abort_retry"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.bash"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.abort_bash"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_session_stats"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_sessions"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.export_html"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.switch_session"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.switch_session_by_id"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.fork"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.clone"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_fork_messages"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_last_assistant_text"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_session_name"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_messages"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_commands"
+				},
+				{
+					"$ref": "#/$defs/RpcExtensionUIResponse"
+				},
+				{
+					"$ref": "#/$defs/RpcHostActionResponse"
+				}
+			]
+		},
+		"RpcClientMessageId": {
+			"type": "string",
+			"pattern": "^(?!local-queue:)[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$",
+			"x-volt-expected": "match [A-Za-z0-9][A-Za-z0-9._:-]{0,255}"
+		},
+		"RpcCommand": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/RpcCommand.prompt"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.steer"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.follow_up"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.abort"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.new_session"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_client_capabilities"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_pending_host_actions"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.report_stream_discontinuity"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_ui_capabilities"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_ui_actions"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_ui_action_completions"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.invoke_ui_action"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.cancel_workflow"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_review_result"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_review_workflows"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.open_review_session"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.register_push_target"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.register_live_activity"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.unregister_live_activity"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.unregister_workspace"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_keep_awake"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_keep_awake"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_web_search_key"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_web_search_status"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.upload_device_logs"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_mcp_capabilities"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_mcp_servers"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_mcp_server"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.connect_mcp_server"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.disconnect_mcp_server"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.refresh_mcp_server"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.start_mcp_server_auth"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.complete_mcp_server_auth"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.poll_mcp_server_auth"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.cancel_mcp_server_auth"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.logout_mcp_server"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_mcp_server_enabled"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_mcp_tools"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_mcp_tool"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_mcp_resources"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.read_mcp_resource"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_mcp_prompts"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_mcp_prompt"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_mcp_recent_calls"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_state"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_transcript"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_message_images"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_subagents"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.subagent_start"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.subagent_abort"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.subagent_get_state"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.subagent_get_transcript"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.subagent_dispose"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_model"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.cycle_model"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_available_models"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_thinking_level"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.cycle_thinking_level"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_steering_mode"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_follow_up_mode"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.compact"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_auto_compaction"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_auto_retry"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.abort_retry"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.bash"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.abort_bash"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_session_stats"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_sessions"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.export_html"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.switch_session"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.switch_session_by_id"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.fork"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.clone"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_fork_messages"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_last_assistant_text"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.set_session_name"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_messages"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_commands"
+				}
+			]
+		},
+		"RpcCommand.abort": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "abort"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.abort_bash": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "abort_bash"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.abort_retry": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "abort_retry"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.bash": {
+			"type": "object",
+			"required": [
+				"type",
+				"command"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "bash"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"command": {
+					"type": "string"
+				},
+				"excludeFromContext": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.cancel_mcp_server_auth": {
+			"type": "object",
+			"required": [
+				"type",
+				"server"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "cancel_mcp_server_auth"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.cancel_workflow": {
+			"type": "object",
+			"required": [
+				"type",
+				"workflowId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "cancel_workflow"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"workflowId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.clone": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "clone"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.compact": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "compact"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"customInstructions": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.complete_mcp_server_auth": {
+			"type": "object",
+			"required": [
+				"type",
+				"server",
+				"redirectUrl",
+				"code"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "complete_mcp_server_auth"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				},
+				"redirectUrl": {
+					"type": "string"
+				},
+				"code": {
+					"type": "string"
+				},
+				"state": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.connect_mcp_server": {
+			"type": "object",
+			"required": [
+				"type",
+				"server"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "connect_mcp_server"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.cycle_model": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "cycle_model"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.cycle_thinking_level": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "cycle_thinking_level"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.disconnect_mcp_server": {
+			"type": "object",
+			"required": [
+				"type",
+				"server"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "disconnect_mcp_server"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.export_html": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "export_html"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"outputPath": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.follow_up": {
+			"type": "object",
+			"required": [
+				"type",
+				"clientMessageId",
+				"message"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "follow_up"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"clientMessageId": {
+					"$ref": "#/$defs/RpcClientMessageId"
+				},
+				"message": {
+					"type": "string"
+				},
+				"images": {
+					"$ref": "#/$defs/RpcConversationInputImages"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.fork": {
+			"type": "object",
+			"required": [
+				"type",
+				"entryId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "fork"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"entryId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_available_models": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_available_models"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_commands": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_commands"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_fork_messages": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_fork_messages"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_keep_awake": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_keep_awake"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_last_assistant_text": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_last_assistant_text"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_mcp_capabilities": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_mcp_capabilities"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_mcp_prompt": {
+			"type": "object",
+			"required": [
+				"type",
+				"server",
+				"prompt"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_mcp_prompt"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				},
+				"prompt": {
+					"type": "string"
+				},
+				"arguments": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
+				},
+				"argumentsJson": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_mcp_server": {
+			"type": "object",
+			"required": [
+				"type",
+				"server"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_mcp_server"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_mcp_tool": {
+			"type": "object",
+			"required": [
+				"type",
+				"server",
+				"tool"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_mcp_tool"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				},
+				"tool": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_message_images": {
+			"type": "object",
+			"required": [
+				"type",
+				"entryId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_message_images"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"entryId": {
+					"type": "string"
+				},
+				"startImageIndex": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_messages": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_messages"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_pending_host_actions": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_pending_host_actions"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_review_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"workflowId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_review_result"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"workflowId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_session_stats": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_session_stats"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_state": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_state"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_transcript": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_transcript"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"limit": {
+					"type": "number"
+				},
+				"beforeEntryId": {
+					"type": "string"
+				},
+				"branchEpoch": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_ui_action_completions": {
+			"type": "object",
+			"required": [
+				"type",
+				"action",
+				"argument"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_ui_action_completions"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"action": {
+					"type": "string"
+				},
+				"argument": {
+					"type": "string"
+				},
+				"prefix": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_ui_actions": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_ui_actions"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"scope": {
+					"$ref": "#/$defs/RpcUiActionListScope"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_ui_capabilities": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_ui_capabilities"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_web_search_status": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_web_search_status"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.invoke_ui_action": {
+			"type": "object",
+			"required": [
+				"type",
+				"action"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "invoke_ui_action"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"action": {
+					"type": "string"
+				},
+				"args": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
+				},
+				"streamingBehavior": {
+					"$ref": "#/$defs/RpcStreamingBehavior"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.list_mcp_prompts": {
+			"type": "object",
+			"required": [
+				"type",
+				"server"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "list_mcp_prompts"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				},
+				"cursor": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.list_mcp_recent_calls": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "list_mcp_recent_calls"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.list_mcp_resources": {
+			"type": "object",
+			"required": [
+				"type",
+				"server"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "list_mcp_resources"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				},
+				"cursor": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.list_mcp_servers": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "list_mcp_servers"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.list_mcp_tools": {
+			"type": "object",
+			"required": [
+				"type",
+				"server"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "list_mcp_tools"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.list_review_workflows": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "list_review_workflows"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.list_sessions": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "list_sessions"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"limit": {
+					"type": "integer",
+					"minimum": 1,
+					"x-volt-expected": "be a positive integer"
+				},
+				"cursor": {
+					"type": "string",
+					"minLength": 1,
+					"x-volt-expected": "be a non-empty string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.list_subagents": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "list_subagents"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.logout_mcp_server": {
+			"type": "object",
+			"required": [
+				"type",
+				"server"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "logout_mcp_server"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.new_session": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "new_session"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"parentSession": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.open_review_session": {
+			"type": "object",
+			"required": [
+				"type",
+				"workflowId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "open_review_session"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"workflowId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.poll_mcp_server_auth": {
+			"type": "object",
+			"required": [
+				"type",
+				"server"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "poll_mcp_server_auth"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.prompt": {
+			"type": "object",
+			"required": [
+				"type",
+				"clientMessageId",
+				"message"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "prompt"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"clientMessageId": {
+					"$ref": "#/$defs/RpcClientMessageId"
+				},
+				"message": {
+					"type": "string"
+				},
+				"images": {
+					"$ref": "#/$defs/RpcConversationInputImages"
+				},
+				"streamingBehavior": {
+					"$ref": "#/$defs/RpcStreamingBehavior"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.read_mcp_resource": {
+			"type": "object",
+			"required": [
+				"type",
+				"server",
+				"resourceUri"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "read_mcp_resource"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				},
+				"resourceUri": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.refresh_mcp_server": {
+			"type": "object",
+			"required": [
+				"type",
+				"server"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "refresh_mcp_server"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.register_live_activity": {
+			"type": "object",
+			"required": [
+				"type",
+				"workspaceName",
+				"sessionId",
+				"activityId",
+				"tokenHash",
+				"tokenEnvironment",
+				"platform"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "register_live_activity"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"activityId": {
+					"type": "string"
+				},
+				"tokenHash": {
+					"type": "string"
+				},
+				"tokenEnvironment": {
+					"$ref": "#/$defs/RpcPushTokenEnvironment"
+				},
+				"platform": {
+					"$ref": "#/$defs/RpcPushPlatform"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.register_push_target": {
+			"type": "object",
+			"required": [
+				"type",
+				"args"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "register_push_target"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"args": {
+					"$ref": "#/$defs/RpcRegisterPushTargetArgs"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.report_stream_discontinuity": {
+			"type": "object",
+			"required": [
+				"id",
+				"type",
+				"sessionId",
+				"subscriptionId",
+				"lastAppliedCursor",
+				"reason"
+			],
+			"properties": {
+				"id": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"type": {
+					"type": "string",
+					"const": "report_stream_discontinuity"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"subscriptionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"lastAppliedCursor": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"assistantPosition": {
+					"$ref": "#/$defs/RpcAssistantStreamPosition"
+				},
+				"reason": {
+					"$ref": "#/$defs/RpcConversationDiscontinuityReason"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.set_auto_compaction": {
+			"type": "object",
+			"required": [
+				"type",
+				"enabled"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "set_auto_compaction"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.set_auto_retry": {
+			"type": "object",
+			"required": [
+				"type",
+				"enabled"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "set_auto_retry"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.set_client_capabilities": {
+			"type": "object",
+			"required": [
+				"type",
+				"features"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "set_client_capabilities"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"features": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcClientCapabilityFeature"
+					},
+					"x-volt-expected": "be an array of strings"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.set_follow_up_mode": {
+			"type": "object",
+			"required": [
+				"type",
+				"mode"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "set_follow_up_mode"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"mode": {
+					"$ref": "#/$defs/RpcQueueMode"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.set_keep_awake": {
+			"type": "object",
+			"required": [
+				"type",
+				"enabled"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "set_keep_awake"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.set_mcp_server_enabled": {
+			"type": "object",
+			"required": [
+				"type",
+				"server",
+				"enabled"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "set_mcp_server_enabled"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				},
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.set_model": {
+			"type": "object",
+			"required": [
+				"type",
+				"provider",
+				"modelId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "set_model"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"provider": {
+					"type": "string"
+				},
+				"modelId": {
+					"type": "string"
+				},
+				"persistDefault": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.set_session_name": {
+			"type": "object",
+			"required": [
+				"type",
+				"name"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "set_session_name"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"name": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.set_steering_mode": {
+			"type": "object",
+			"required": [
+				"type",
+				"mode"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "set_steering_mode"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"mode": {
+					"$ref": "#/$defs/RpcQueueMode"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.set_thinking_level": {
+			"type": "object",
+			"required": [
+				"type",
+				"level"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "set_thinking_level"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"level": {
+					"$ref": "#/$defs/RpcThinkingLevel"
+				},
+				"persistDefault": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.set_web_search_key": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "set_web_search_key"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"apiKey": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.start_mcp_server_auth": {
+			"type": "object",
+			"required": [
+				"type",
+				"server"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "start_mcp_server_auth"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"server": {
+					"type": "string"
+				},
+				"flow": {
+					"$ref": "#/$defs/RpcMcpAuthFlow"
+				},
+				"redirectUrl": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.steer": {
+			"type": "object",
+			"required": [
+				"type",
+				"clientMessageId",
+				"message"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "steer"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"clientMessageId": {
+					"$ref": "#/$defs/RpcClientMessageId"
+				},
+				"message": {
+					"type": "string"
+				},
+				"images": {
+					"$ref": "#/$defs/RpcConversationInputImages"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.subagent_abort": {
+			"type": "object",
+			"required": [
+				"type",
+				"subagentId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "subagent_abort"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"subagentId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.subagent_dispose": {
+			"type": "object",
+			"required": [
+				"type",
+				"subagentId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "subagent_dispose"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"subagentId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.subagent_get_state": {
+			"type": "object",
+			"required": [
+				"type",
+				"subagentId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "subagent_get_state"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"subagentId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.subagent_get_transcript": {
+			"type": "object",
+			"required": [
+				"type",
+				"subagentId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "subagent_get_transcript"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"subagentId": {
+					"type": "string"
+				},
+				"limit": {
+					"type": "number"
+				},
+				"beforeEntryId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.subagent_start": {
+			"type": "object",
+			"required": [
+				"type",
+				"agent",
+				"prompt"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "subagent_start"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"agent": {
+					"type": "string"
+				},
+				"prompt": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.switch_session": {
+			"type": "object",
+			"required": [
+				"type",
+				"sessionPath"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "switch_session"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"sessionPath": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.switch_session_by_id": {
+			"type": "object",
+			"required": [
+				"type",
+				"sessionId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "switch_session_by_id"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"sessionId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.unregister_live_activity": {
+			"type": "object",
+			"required": [
+				"type",
+				"workspaceName",
+				"sessionId",
+				"activityId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "unregister_live_activity"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"activityId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.unregister_workspace": {
+			"type": "object",
+			"required": [
+				"type",
+				"name"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "unregister_workspace"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"name": {
+					"type": "string",
+					"pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+					"x-volt-expected": "be a non-empty workspace name"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.upload_device_logs": {
+			"type": "object",
+			"required": [
+				"type",
+				"content"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "upload_device_logs"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"fileName": {
+					"type": "string"
+				},
+				"content": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCompactionResult": {
+			"type": "object",
+			"required": [
+				"summary",
+				"firstKeptEntryId",
+				"tokensBefore"
+			],
+			"properties": {
+				"summary": {
+					"type": "string"
+				},
+				"firstKeptEntryId": {
+					"type": "string"
+				},
+				"tokensBefore": {
+					"type": "number"
+				},
+				"estimatedTokensAfter": {
+					"type": "number"
+				},
+				"details": {
+					"x-volt-opaque": "extension-specific compaction data"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcConversationActiveAssistant": {
+			"type": "object",
+			"required": [
+				"stream",
+				"message"
+			],
+			"properties": {
+				"stream": {
+					"$ref": "#/$defs/RpcAssistantStreamPosition"
+				},
+				"message": {
+					"$ref": "#/$defs/RpcAssistantMessage"
+				},
+				"toolState": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcActiveToolCallState"
+					}
+				},
+				"projection": {
+					"$ref": "#/$defs/RpcProjectionTruncation"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcConversationAssistantPart": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"text",
+						"truncated"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "text"
+						},
+						"text": {
+							"type": "string"
+						},
+						"truncated": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"text"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "thinking"
+						},
+						"text": {
+							"type": "string"
+						},
+						"truncated": {
+							"type": "boolean"
+						},
+						"redacted": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"RpcConversationAuthority": {
+			"type": "object",
+			"required": [
+				"sessionId",
+				"subscriptionId",
+				"branchEpoch"
+			],
+			"properties": {
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"subscriptionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"branchEpoch": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcConversationBootstrapEvent": {
+			"type": "object",
+			"required": [
+				"type",
+				"delivery",
+				"conversation",
+				"state",
+				"transcript",
+				"activeAssistant",
+				"activeWorkflows",
+				"reason"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "conversation_bootstrap"
+				},
+				"delivery": {
+					"$ref": "#/$defs/RpcConversationDeliveryPosition"
+				},
+				"conversation": {
+					"type": "object",
+					"required": [
+						"workspaceName",
+						"sessionId"
+					],
+					"properties": {
+						"workspaceName": {
+							"type": "string"
+						},
+						"sessionId": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				"state": {
+					"$ref": "#/$defs/RpcSessionState"
+				},
+				"transcript": {
+					"$ref": "#/$defs/RpcConversationTranscriptPage"
+				},
+				"activeAssistant": {
+					"anyOf": [
+						{
+							"$ref": "#/$defs/RpcConversationActiveAssistant"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"activeWorkflows": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcConversationWorkflowSnapshot"
+					}
+				},
+				"reason": {
+					"$ref": "#/$defs/RpcConversationBootstrapReason"
+				},
+				"requestId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcConversationBootstrapReason": {
+			"type": "string",
+			"enum": [
+				"bootstrap",
+				"branch_rebase",
+				"session_rebind",
+				"resync",
+				"overflow"
+			]
+		},
+		"RpcConversationDeliveryPosition": {
+			"type": "object",
+			"required": [
+				"subscriptionId",
+				"cursor"
+			],
+			"properties": {
+				"subscriptionId": {
+					"type": "string"
+				},
+				"cursor": {
+					"type": "integer"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcConversationDiscontinuityReason": {
+			"type": "string",
+			"enum": [
+				"cursor_gap",
+				"assistant_position_gap",
+				"reducer_divergence"
+			]
+		},
+		"RpcConversationIdentifier": {
+			"type": "string",
+			"pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+			"x-volt-max-utf8-bytes": 256,
+			"x-volt-expected": "be a non-empty string"
+		},
+		"RpcConversationInputImages": {
+			"type": "array",
+			"items": {
+				"$ref": "#/$defs/RpcImageContent"
+			},
+			"x-volt-max-items": 8,
+			"x-volt-expected": "be an array of image objects"
+		},
+		"RpcConversationTranscriptItem": {
+			"type": "object",
+			"required": [
+				"entryId",
+				"ordinal",
+				"createdAt",
+				"role",
+				"text",
+				"truncated"
+			],
+			"properties": {
+				"entryId": {
+					"type": "string"
+				},
+				"ordinal": {
+					"type": "integer"
+				},
+				"createdAt": {
+					"type": "string"
+				},
+				"role": {
+					"type": "string",
+					"enum": [
+						"user",
+						"assistant",
+						"system",
+						"tool"
+					]
+				},
+				"text": {
+					"type": "string"
+				},
+				"truncated": {
+					"type": "boolean"
+				},
+				"clientMessageId": {
+					"type": "string"
+				},
+				"imageCount": {
+					"type": "number"
+				},
+				"toolName": {
+					"type": "string"
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"completed",
+						"failed"
+					]
+				},
+				"summary": {
+					"type": "string"
+				},
+				"path": {
+					"type": "string"
+				},
+				"args": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
+				},
+				"details": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
+				},
+				"output": {
+					"type": "string"
+				},
+				"outputTruncated": {
+					"type": "boolean"
+				},
+				"parts": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcConversationAssistantPart"
+					}
+				},
+				"stopReason": {
+					"$ref": "#/$defs/RpcStopReason"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcConversationTranscriptPage": {
+			"type": "object",
+			"required": [
+				"sessionId",
+				"items",
+				"hasMore",
+				"nextBeforeEntryId",
+				"projectionVersion",
+				"branchEpoch",
+				"head"
+			],
+			"properties": {
+				"workspaceName": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"items": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcConversationTranscriptItem"
+					}
+				},
+				"hasMore": {
+					"type": "boolean"
+				},
+				"nextBeforeEntryId": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"projectionVersion": {
+					"type": "number"
+				},
+				"branchEpoch": {
+					"type": "string"
+				},
+				"head": {
+					"anyOf": [
+						{
+							"type": "object",
+							"required": [
+								"entryId",
+								"ordinal"
+							],
+							"properties": {
+								"entryId": {
+									"type": "string"
+								},
+								"ordinal": {
+									"type": "integer"
+								}
+							},
+							"additionalProperties": false
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcConversationWorkflowSnapshot": {
+			"type": "object",
+			"required": [
+				"workflowId",
+				"activeTools"
+			],
+			"properties": {
+				"workflowId": {
+					"type": "string"
+				},
+				"workflowEvent": {
+					"$ref": "#/$defs/RpcWorkflowEvent"
+				},
+				"activeTools": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcWorkflowToolEvent"
+					}
+				},
+				"activeToolsProjection": {
+					"$ref": "#/$defs/RpcProjectionCollectionTruncation"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcDiagnosticErrorInfo": {
+			"type": "object",
+			"required": [
+				"message"
+			],
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"message": {
+					"type": "string"
+				},
+				"stack": {
+					"type": "string"
+				},
+				"code": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "number"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcErrorResponse": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"error"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string"
+				},
+				"success": {
+					"type": "boolean",
+					"const": false
+				},
+				"error": {
+					"type": "string"
+				},
+				"errorCode": {
+					"type": "string",
+					"x-volt-known-values": [
+						"client_input_conflict",
+						"client_input_outcome_ambiguous",
+						"stale_conversation_authority"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcExtensionErrorEvent": {
+			"type": "object",
+			"required": [
+				"type",
+				"extensionPath",
+				"event",
+				"error"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "extension_error"
+				},
+				"extensionPath": {
+					"type": "string"
+				},
+				"event": {
+					"type": "string"
+				},
+				"error": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcExtensionUIRequest": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id",
+						"method",
+						"title",
+						"options"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "extension_ui_request"
+						},
+						"id": {
+							"type": "string"
+						},
+						"method": {
+							"type": "string",
+							"const": "select"
+						},
+						"title": {
+							"type": "string"
+						},
+						"options": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						},
+						"timeout": {
+							"type": "number"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id",
+						"method",
+						"title",
+						"message"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "extension_ui_request"
+						},
+						"id": {
+							"type": "string"
+						},
+						"method": {
+							"type": "string",
+							"const": "confirm"
+						},
+						"title": {
+							"type": "string"
+						},
+						"message": {
+							"type": "string"
+						},
+						"timeout": {
+							"type": "number"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id",
+						"method",
+						"title"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "extension_ui_request"
+						},
+						"id": {
+							"type": "string"
+						},
+						"method": {
+							"type": "string",
+							"const": "input"
+						},
+						"title": {
+							"type": "string"
+						},
+						"placeholder": {
+							"type": "string"
+						},
+						"timeout": {
+							"type": "number"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id",
+						"method",
+						"title"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "extension_ui_request"
+						},
+						"id": {
+							"type": "string"
+						},
+						"method": {
+							"type": "string",
+							"const": "editor"
+						},
+						"title": {
+							"type": "string"
+						},
+						"prefill": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id",
+						"method",
+						"message"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "extension_ui_request"
+						},
+						"id": {
+							"type": "string"
+						},
+						"method": {
+							"type": "string",
+							"const": "notify"
+						},
+						"message": {
+							"type": "string"
+						},
+						"notifyType": {
+							"type": "string",
+							"enum": [
+								"info",
+								"warning",
+								"error"
+							]
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id",
+						"method",
+						"statusKey"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "extension_ui_request"
+						},
+						"id": {
+							"type": "string"
+						},
+						"method": {
+							"type": "string",
+							"const": "setStatus"
+						},
+						"statusKey": {
+							"type": "string"
+						},
+						"statusText": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id",
+						"method",
+						"widgetKey"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "extension_ui_request"
+						},
+						"id": {
+							"type": "string"
+						},
+						"method": {
+							"type": "string",
+							"const": "setWidget"
+						},
+						"widgetKey": {
+							"type": "string"
+						},
+						"widgetLines": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						},
+						"widgetPlacement": {
+							"type": "string",
+							"enum": [
+								"aboveEditor",
+								"belowEditor"
+							]
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id",
+						"method",
+						"title"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "extension_ui_request"
+						},
+						"id": {
+							"type": "string"
+						},
+						"method": {
+							"type": "string",
+							"const": "setTitle"
+						},
+						"title": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id",
+						"method",
+						"text"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "extension_ui_request"
+						},
+						"id": {
+							"type": "string"
+						},
+						"method": {
+							"type": "string",
+							"const": "set_editor_text"
+						},
+						"text": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"RpcExtensionUIResponse": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id",
+						"value"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "extension_ui_response"
+						},
+						"id": {
+							"type": "string"
+						},
+						"value": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id",
+						"confirmed"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "extension_ui_response"
+						},
+						"id": {
+							"type": "string"
+						},
+						"confirmed": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id",
+						"cancelled"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "extension_ui_response"
+						},
+						"id": {
+							"type": "string"
+						},
+						"cancelled": {
+							"type": "boolean",
+							"const": true
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"RpcHostActionMetadataValue": {
+			"anyOf": [
+				{
+					"type": "string"
+				},
+				{
+					"type": "number"
+				},
+				{
+					"type": "boolean"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"RpcHostActionRequest": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"action",
+				"title"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "host_action_request"
+				},
+				"id": {
+					"type": "string"
+				},
+				"action": {
+					"type": "string"
+				},
+				"title": {
+					"type": "string"
+				},
+				"message": {
+					"type": "string"
+				},
+				"confirmLabel": {
+					"type": "string"
+				},
+				"cancelLabel": {
+					"type": "string"
+				},
+				"commandPreview": {
+					"type": "string"
+				},
+				"blocking": {
+					"type": "boolean"
+				},
+				"destructive": {
+					"type": "boolean"
+				},
+				"metadata": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {
+							"$ref": "#/$defs/UiActionScalar"
+						}
+					}
+				},
+				"timeoutMs": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcHostActionResponse": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"decision"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "host_action_response"
+				},
+				"id": {
+					"type": "string"
+				},
+				"decision": {
+					"type": "string",
+					"enum": [
+						"approved",
+						"denied",
+						"dismissed"
+					]
+				},
+				"message": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcHostActionUpdate": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"action",
+				"status"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "host_action_update"
+				},
+				"id": {
+					"type": "string"
+				},
+				"action": {
+					"type": "string"
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"running",
+						"completed",
+						"failed",
+						"cancelled"
+					]
+				},
+				"message": {
+					"type": "string"
+				},
+				"exitCode": {
+					"anyOf": [
+						{
+							"type": "number"
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcImageContent": {
+			"type": "object",
+			"required": [
+				"type",
+				"data",
+				"mimeType"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "image"
+				},
+				"data": {
+					"type": "string",
+					"x-volt-max-utf8-bytes": 1048576
+				},
+				"mimeType": {
+					"type": "string",
+					"x-volt-max-utf8-bytes": 256
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcKeepAwakeStatus": {
+			"type": "object",
+			"required": [
+				"enabled",
+				"state"
+			],
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				},
+				"state": {
+					"type": "string",
+					"enum": [
+						"disabled",
+						"active",
+						"degraded"
+					]
+				},
+				"reason": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcListSubagentsResponse": {
+			"type": "object",
+			"required": [
+				"subagents"
+			],
+			"properties": {
+				"subagents": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcSubagentDefinition"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcLiveActivityRegistration": {
+			"type": "object",
+			"required": [
+				"activityId",
+				"pushToken"
+			],
+			"properties": {
+				"activityId": {
+					"type": "string"
+				},
+				"pushToken": {
+					"type": "string"
+				},
+				"tokenHash": {
+					"type": "string"
+				},
+				"tokenEnvironment": {
+					"$ref": "#/$defs/RpcPushTokenEnvironment"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpAuthFlow": {
+			"type": "string",
+			"enum": [
+				"browser",
+				"device"
+			]
+		},
+		"RpcMcpAuthResponse": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/RpcMcpOAuthBrowserStartResult"
+				},
+				{
+					"$ref": "#/$defs/RpcMcpOAuthBrowserCompleteResult"
+				},
+				{
+					"$ref": "#/$defs/RpcMcpOAuthDeviceStartResult"
+				},
+				{
+					"$ref": "#/$defs/RpcMcpOAuthDevicePollResult"
+				},
+				{
+					"type": "object",
+					"required": [
+						"action",
+						"server",
+						"status"
+					],
+					"properties": {
+						"action": {
+							"type": "string",
+							"const": "auth"
+						},
+						"server": {
+							"type": "string"
+						},
+						"status": {
+							"type": "string",
+							"enum": [
+								"cancelled",
+								"logged_out"
+							]
+						},
+						"message": {
+							"type": "string"
+						},
+						"serverSummary": {
+							"$ref": "#/$defs/RpcMcpServerSummary"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"RpcMcpAuthState": {
+			"type": "string",
+			"enum": [
+				"none",
+				"required",
+				"pending",
+				"authenticated",
+				"failed"
+			]
+		},
+		"RpcMcpCapabilitiesResponse": {
+			"type": "object",
+			"required": [
+				"protocolVersion",
+				"features",
+				"remoteSafeByDefault"
+			],
+			"properties": {
+				"protocolVersion": {
+					"type": "number",
+					"const": 1
+				},
+				"features": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"remoteSafeByDefault": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpOAuthBrowserCompleteResult": {
+			"type": "object",
+			"required": [
+				"action",
+				"server",
+				"flow",
+				"status",
+				"message"
+			],
+			"properties": {
+				"action": {
+					"type": "string",
+					"const": "auth"
+				},
+				"server": {
+					"type": "string"
+				},
+				"flow": {
+					"type": "string",
+					"const": "browser"
+				},
+				"status": {
+					"type": "string",
+					"const": "authenticated"
+				},
+				"message": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpOAuthBrowserStartResult": {
+			"type": "object",
+			"required": [
+				"action",
+				"server",
+				"flow",
+				"status",
+				"redirectUrl",
+				"message"
+			],
+			"properties": {
+				"action": {
+					"type": "string",
+					"const": "auth"
+				},
+				"server": {
+					"type": "string"
+				},
+				"flow": {
+					"type": "string",
+					"const": "browser"
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"pending",
+						"authenticated"
+					]
+				},
+				"authorizationUrl": {
+					"type": "string"
+				},
+				"redirectUrl": {
+					"type": "string"
+				},
+				"state": {
+					"type": "string"
+				},
+				"message": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpOAuthDevicePollResult": {
+			"type": "object",
+			"required": [
+				"action",
+				"server",
+				"flow",
+				"status",
+				"message"
+			],
+			"properties": {
+				"action": {
+					"type": "string",
+					"const": "auth"
+				},
+				"server": {
+					"type": "string"
+				},
+				"flow": {
+					"type": "string",
+					"const": "device"
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"pending",
+						"authenticated",
+						"failed"
+					]
+				},
+				"nextPollMs": {
+					"type": "number"
+				},
+				"message": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpOAuthDeviceStartResult": {
+			"type": "object",
+			"required": [
+				"action",
+				"server",
+				"flow",
+				"status",
+				"verificationUri",
+				"userCode",
+				"expiresAt",
+				"intervalMs",
+				"message"
+			],
+			"properties": {
+				"action": {
+					"type": "string",
+					"const": "auth"
+				},
+				"server": {
+					"type": "string"
+				},
+				"flow": {
+					"type": "string",
+					"const": "device"
+				},
+				"status": {
+					"type": "string",
+					"const": "pending"
+				},
+				"verificationUri": {
+					"type": "string"
+				},
+				"verificationUriComplete": {
+					"type": "string"
+				},
+				"userCode": {
+					"type": "string"
+				},
+				"expiresAt": {
+					"type": "string"
+				},
+				"intervalMs": {
+					"type": "number"
+				},
+				"message": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpPromptContentResponse": {
+			"type": "object",
+			"required": [
+				"result"
+			],
+			"properties": {
+				"result": {
+					"x-volt-opaque": "MCP SDK prompt content; passed through verbatim"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpPromptSummary": {
+			"type": "object",
+			"required": [
+				"server",
+				"name"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				},
+				"name": {
+					"type": "string"
+				},
+				"title": {
+					"type": "string"
+				},
+				"description": {
+					"type": "string"
+				},
+				"arguments": {
+					"x-volt-opaque": "MCP SDK prompt arguments; passed through verbatim"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpPromptsResponse": {
+			"type": "object",
+			"required": [
+				"server",
+				"prompts"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				},
+				"prompts": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcMcpPromptSummary"
+					}
+				},
+				"nextCursor": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpRecentCallStatus": {
+			"type": "string",
+			"enum": [
+				"started",
+				"completed",
+				"failed",
+				"cancelled"
+			]
+		},
+		"RpcMcpRecentCallSummary": {
+			"type": "object",
+			"required": [
+				"id",
+				"timestamp",
+				"server",
+				"tool",
+				"risk",
+				"status"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"timestamp": {
+					"type": "string"
+				},
+				"server": {
+					"type": "string"
+				},
+				"tool": {
+					"type": "string"
+				},
+				"risk": {
+					"$ref": "#/$defs/RpcMcpRisk"
+				},
+				"status": {
+					"$ref": "#/$defs/RpcMcpRecentCallStatus"
+				},
+				"durationMs": {
+					"type": "number"
+				},
+				"outputBytes": {
+					"type": "number"
+				},
+				"truncated": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpRecentCallsResponse": {
+			"type": "object",
+			"required": [
+				"calls"
+			],
+			"properties": {
+				"calls": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcMcpRecentCallSummary"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpResourceContentResponse": {
+			"type": "object",
+			"required": [
+				"result"
+			],
+			"properties": {
+				"result": {
+					"x-volt-opaque": "MCP SDK resource content; passed through verbatim"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpResourceSummary": {
+			"type": "object",
+			"required": [
+				"server",
+				"uri"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				},
+				"uri": {
+					"type": "string"
+				},
+				"name": {
+					"type": "string"
+				},
+				"description": {
+					"type": "string"
+				},
+				"mimeType": {
+					"type": "string"
+				},
+				"size": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpResourcesResponse": {
+			"type": "object",
+			"required": [
+				"server",
+				"resources"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				},
+				"resources": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcMcpResourceSummary"
+					}
+				},
+				"nextCursor": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpRisk": {
+			"type": "string",
+			"enum": [
+				"read",
+				"write",
+				"destructive",
+				"unknown"
+			]
+		},
+		"RpcMcpServerResponse": {
+			"type": "object",
+			"required": [
+				"server"
+			],
+			"properties": {
+				"server": {
+					"$ref": "#/$defs/RpcMcpServerSummary"
+				},
+				"persisted": {
+					"type": "object",
+					"required": [
+						"path",
+						"scope"
+					],
+					"properties": {
+						"path": {
+							"type": "string"
+						},
+						"scope": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpServerStatus": {
+			"type": "string",
+			"enum": [
+				"disabled",
+				"untrusted",
+				"cold",
+				"discovering",
+				"connecting",
+				"connected",
+				"ready",
+				"needs_auth",
+				"authenticating",
+				"error",
+				"disconnecting",
+				"disconnected"
+			]
+		},
+		"RpcMcpServerSummary": {
+			"type": "object",
+			"required": [
+				"id",
+				"displayName",
+				"sourceScope",
+				"sourceLabel",
+				"enabled",
+				"activeInSession",
+				"transport",
+				"lifecycle",
+				"status",
+				"authState",
+				"toolCounts",
+				"recentCalls",
+				"capabilities"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"displayName": {
+					"type": "string"
+				},
+				"sourceScope": {
+					"$ref": "#/$defs/RpcMcpSourceScope"
+				},
+				"sourceLabel": {
+					"type": "string"
+				},
+				"enabled": {
+					"type": "boolean"
+				},
+				"activeInSession": {
+					"type": "boolean"
+				},
+				"transport": {
+					"type": "string",
+					"enum": [
+						"stdio",
+						"streamable_http",
+						"sse"
+					]
+				},
+				"lifecycle": {
+					"type": "string",
+					"enum": [
+						"lazy",
+						"eager",
+						"keep_alive"
+					]
+				},
+				"status": {
+					"$ref": "#/$defs/RpcMcpServerStatus"
+				},
+				"authState": {
+					"$ref": "#/$defs/RpcMcpAuthState"
+				},
+				"toolCounts": {
+					"type": "object",
+					"required": [
+						"cached"
+					],
+					"properties": {
+						"cached": {
+							"type": "number"
+						},
+						"live": {
+							"type": "number"
+						},
+						"enabled": {
+							"type": "number"
+						}
+					},
+					"additionalProperties": false
+				},
+				"resourceCount": {
+					"type": "number"
+				},
+				"promptCount": {
+					"type": "number"
+				},
+				"recentCalls": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcMcpRecentCallSummary"
+					}
+				},
+				"lastError": {
+					"type": "string"
+				},
+				"lastConnectedAt": {
+					"type": "string"
+				},
+				"capabilities": {
+					"type": "object",
+					"required": [
+						"canEnable",
+						"canConnect",
+						"canDisconnect",
+						"canRefresh",
+						"canAuthenticate",
+						"canPersistChanges"
+					],
+					"properties": {
+						"canEnable": {
+							"type": "boolean"
+						},
+						"canConnect": {
+							"type": "boolean"
+						},
+						"canDisconnect": {
+							"type": "boolean"
+						},
+						"canRefresh": {
+							"type": "boolean"
+						},
+						"canAuthenticate": {
+							"type": "boolean"
+						},
+						"canPersistChanges": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpServersResponse": {
+			"type": "object",
+			"required": [
+				"servers"
+			],
+			"properties": {
+				"servers": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcMcpServerSummary"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpSourceScope": {
+			"type": "string",
+			"enum": [
+				"user",
+				"project",
+				"temporary"
+			]
+		},
+		"RpcMcpToolResponse": {
+			"type": "object",
+			"required": [
+				"tool"
+			],
+			"properties": {
+				"tool": {
+					"$ref": "#/$defs/RpcMcpToolSummary"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpToolSummary": {
+			"type": "object",
+			"required": [
+				"server",
+				"name",
+				"risk",
+				"metadataHash",
+				"lastSeenAt",
+				"stale",
+				"direct"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				},
+				"name": {
+					"type": "string"
+				},
+				"title": {
+					"type": "string"
+				},
+				"description": {
+					"type": "string"
+				},
+				"risk": {
+					"$ref": "#/$defs/RpcMcpRisk"
+				},
+				"inputSchema": {
+					"x-volt-opaque": "MCP SDK JSON schema; passed through verbatim"
+				},
+				"outputSchema": {
+					"x-volt-opaque": "MCP SDK JSON schema; passed through verbatim"
+				},
+				"annotations": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
+				},
+				"metadataHash": {
+					"type": "string"
+				},
+				"lastSeenAt": {
+					"type": "string"
+				},
+				"stale": {
+					"type": "boolean"
+				},
+				"direct": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMcpToolsResponse": {
+			"type": "object",
+			"required": [
+				"server",
+				"tools",
+				"stale"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				},
+				"tools": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcMcpToolSummary"
+					}
+				},
+				"metadataHash": {
+					"type": "string"
+				},
+				"stale": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMessageEndFrame": {
+			"type": "object",
+			"required": [
+				"type",
+				"stream",
+				"message"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "message_end"
+				},
+				"stream": {
+					"$ref": "#/$defs/RpcAssistantStreamPosition"
+				},
+				"message": {
+					"$ref": "#/$defs/RpcAssistantMessage"
+				},
+				"delivery": {
+					"$ref": "#/$defs/RpcConversationDeliveryPosition"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMessageImage": {
+			"type": "object",
+			"required": [
+				"type",
+				"data",
+				"mimeType",
+				"index"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "image"
+				},
+				"data": {
+					"type": "string"
+				},
+				"mimeType": {
+					"type": "string"
+				},
+				"index": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMessageImagesResponse": {
+			"type": "object",
+			"required": [
+				"sessionId",
+				"entryId",
+				"totalImages",
+				"images",
+				"nextImageIndex"
+			],
+			"properties": {
+				"sessionId": {
+					"type": "string"
+				},
+				"entryId": {
+					"type": "string"
+				},
+				"totalImages": {
+					"type": "number"
+				},
+				"images": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcMessageImage"
+					}
+				},
+				"nextImageIndex": {
+					"anyOf": [
+						{
+							"type": "number"
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMessageStartFrame": {
+			"type": "object",
+			"required": [
+				"type",
+				"stream",
+				"message"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "message_start"
+				},
+				"stream": {
+					"$ref": "#/$defs/RpcAssistantStreamPosition"
+				},
+				"message": {
+					"$ref": "#/$defs/RpcAssistantMessage"
+				},
+				"delivery": {
+					"$ref": "#/$defs/RpcConversationDeliveryPosition"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcMessageUpdateFrame": {
+			"type": "object",
+			"required": [
+				"type",
+				"stream",
+				"assistantMessageEvent"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "message_update"
+				},
+				"stream": {
+					"$ref": "#/$defs/RpcAssistantStreamPosition"
+				},
+				"assistantMessageEvent": {
+					"$ref": "#/$defs/RpcSlimAssistantEvent"
+				},
+				"message": {
+					"$ref": "#/$defs/RpcAssistantMessage"
+				},
+				"toolState": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcActiveToolCallState"
+					}
+				},
+				"delivery": {
+					"$ref": "#/$defs/RpcConversationDeliveryPosition"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcModel": {
+			"type": "object",
+			"required": [
+				"id",
+				"name",
+				"api",
+				"provider",
+				"baseUrl",
+				"reasoning",
+				"input",
+				"cost",
+				"contextWindow",
+				"maxTokens"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"name": {
+					"type": "string"
+				},
+				"api": {
+					"$ref": "#/$defs/RpcApi"
+				},
+				"provider": {
+					"type": "string"
+				},
+				"baseUrl": {
+					"type": "string"
+				},
+				"reasoning": {
+					"type": "boolean"
+				},
+				"thinkingLevelMap": {
+					"type": "object",
+					"properties": {
+						"off": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"minimal": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"low": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"medium": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"high": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"xhigh": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"max": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						}
+					},
+					"additionalProperties": false
+				},
+				"input": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"enum": [
+							"text",
+							"image"
+						]
+					}
+				},
+				"cost": {
+					"type": "object",
+					"required": [
+						"input",
+						"output",
+						"cacheRead",
+						"cacheWrite"
+					],
+					"properties": {
+						"input": {
+							"type": "number"
+						},
+						"output": {
+							"type": "number"
+						},
+						"cacheRead": {
+							"type": "number"
+						},
+						"cacheWrite": {
+							"type": "number"
+						}
+					},
+					"additionalProperties": false
+				},
+				"contextWindow": {
+					"type": "number"
+				},
+				"maxTokens": {
+					"type": "number"
+				},
+				"headers": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {
+							"type": "string"
+						}
+					}
+				},
+				"compat": {
+					"x-volt-opaque": "provider compatibility tuning; clients never interpret this"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcModelsChangedEvent": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "models_changed"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcPendingHostActionsResponse": {
+			"type": "object",
+			"required": [
+				"actions"
+			],
+			"properties": {
+				"actions": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcHostActionRequest"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcProjectionCollectionTruncation": {
+			"type": "object",
+			"required": [
+				"truncated",
+				"originalBytes",
+				"projectedBytes",
+				"totalCount",
+				"projectedCount",
+				"omittedCount"
+			],
+			"properties": {
+				"truncated": {
+					"type": "boolean",
+					"const": true
+				},
+				"originalBytes": {
+					"anyOf": [
+						{
+							"type": "number"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"projectedBytes": {
+					"type": "number"
+				},
+				"omittedEntries": {
+					"type": "number"
+				},
+				"fields": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {
+							"$ref": "#/$defs/RpcProjectionTruncation"
+						}
+					}
+				},
+				"totalCount": {
+					"type": "number"
+				},
+				"projectedCount": {
+					"type": "number"
+				},
+				"omittedCount": {
+					"type": "number"
+				},
+				"truncatedItems": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"required": [
+							"index",
+							"originalBytes",
+							"projectedBytes"
+						],
+						"properties": {
+							"index": {
+								"type": "number"
+							},
+							"originalBytes": {
+								"anyOf": [
+									{
+										"type": "number"
+									},
+									{
+										"type": "null"
+									}
+								]
+							},
+							"projectedBytes": {
+								"type": "number"
+							}
+						},
+						"additionalProperties": false
+					}
+				},
+				"omittedItemIds": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcProjectionTruncation": {
+			"type": "object",
+			"required": [
+				"truncated",
+				"originalBytes",
+				"projectedBytes"
+			],
+			"properties": {
+				"truncated": {
+					"type": "boolean",
+					"const": true
+				},
+				"originalBytes": {
+					"anyOf": [
+						{
+							"type": "number"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"projectedBytes": {
+					"type": "number"
+				},
+				"omittedEntries": {
+					"type": "number"
+				},
+				"fields": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {
+							"$ref": "#/$defs/RpcProjectionTruncation"
+						}
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcPromptResponse": {
+			"type": "object",
+			"required": [
+				"clientMessageId",
+				"outcome"
+			],
+			"properties": {
+				"clientMessageId": {
+					"type": "string"
+				},
+				"outcome": {
+					"type": "string",
+					"enum": [
+						"admitted",
+						"completed"
+					]
+				},
+				"canonicalEntryId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcPushPlatform": {
+			"type": "string",
+			"enum": [
+				"ios"
+			]
+		},
+		"RpcPushProvider": {
+			"type": "string",
+			"enum": [
+				"fcm"
+			]
+		},
+		"RpcPushTokenEnvironment": {
+			"type": "string",
+			"enum": [
+				"development",
+				"production"
+			]
+		},
+		"RpcQueueMode": {
+			"type": "string",
+			"enum": [
+				"all",
+				"one-at-a-time"
+			]
+		},
+		"RpcQueueUpdateEvent": {
+			"type": "object",
+			"required": [
+				"type",
+				"steering",
+				"followUp"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "queue_update"
+				},
+				"steering": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcQueuedMessage"
+					}
+				},
+				"followUp": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcQueuedMessage"
+					}
+				},
+				"projection": {
+					"$ref": "#/$defs/RpcQueueUpdateProjection"
+				},
+				"delivery": {
+					"$ref": "#/$defs/RpcConversationDeliveryPosition"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcQueueUpdateProjection": {
+			"type": "object",
+			"properties": {
+				"steering": {
+					"$ref": "#/$defs/RpcProjectionCollectionTruncation"
+				},
+				"followUp": {
+					"$ref": "#/$defs/RpcProjectionCollectionTruncation"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcQueuedMessage": {
+			"type": "object",
+			"required": [
+				"clientMessageId",
+				"text"
+			],
+			"properties": {
+				"clientMessageId": {
+					"type": "string"
+				},
+				"text": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcRegisterLiveActivityResponse": {
+			"type": "object",
+			"required": [
+				"status",
+				"activityId"
+			],
+			"properties": {
+				"status": {
+					"type": "string",
+					"const": "registered"
+				},
+				"activityId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcRegisterPushTargetArgs": {
+			"type": "object",
+			"required": [
+				"provider",
+				"platform",
+				"pushTargetId",
+				"pushTargetAuthToken",
+				"enabled"
+			],
+			"properties": {
+				"provider": {
+					"$ref": "#/$defs/RpcPushProvider"
+				},
+				"platform": {
+					"$ref": "#/$defs/RpcPushPlatform"
+				},
+				"pushTargetId": {
+					"type": "string"
+				},
+				"pushTargetAuthToken": {
+					"type": "string"
+				},
+				"relayUrl": {
+					"type": "string"
+				},
+				"tokenHash": {
+					"type": "string"
+				},
+				"liveActivity": {
+					"$ref": "#/$defs/RpcLiveActivityRegistration"
+				},
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false,
+			"x-volt-expected": "be a push target registration object"
+		},
+		"RpcRegisterPushTargetResponse": {
+			"type": "object",
+			"required": [
+				"status",
+				"pushTargetId"
+			],
+			"properties": {
+				"status": {
+					"type": "string",
+					"const": "registered"
+				},
+				"pushTargetId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/RpcResponse.prompt"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.steer"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.follow_up"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.abort"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.new_session"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.set_client_capabilities"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.report_stream_discontinuity"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_pending_host_actions"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_ui_capabilities"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_ui_actions"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_ui_action_completions"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.invoke_ui_action"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.cancel_workflow"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_review_result"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.list_review_workflows"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.open_review_session"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.register_push_target"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.register_live_activity"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.unregister_live_activity"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.unregister_workspace"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.set_keep_awake"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_keep_awake"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.set_web_search_key"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_web_search_status"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.upload_device_logs"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_mcp_capabilities"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.list_mcp_servers"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_mcp_server"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.connect_mcp_server"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.disconnect_mcp_server"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.refresh_mcp_server"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.start_mcp_server_auth"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.complete_mcp_server_auth"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.poll_mcp_server_auth"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.cancel_mcp_server_auth"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.logout_mcp_server"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.set_mcp_server_enabled"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.list_mcp_tools"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_mcp_tool"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.list_mcp_resources"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.read_mcp_resource"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.list_mcp_prompts"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_mcp_prompt"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.list_mcp_recent_calls"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_state"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_transcript"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_message_images"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.list_subagents"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.subagent_start"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.subagent_abort"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.subagent_get_state"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.subagent_get_transcript"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.subagent_dispose"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.set_model"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.cycle_model"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_available_models"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.set_thinking_level"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.cycle_thinking_level"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.set_steering_mode"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.set_follow_up_mode"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.compact"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.set_auto_compaction"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.set_auto_retry"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.abort_retry"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.bash"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.abort_bash"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_session_stats"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.list_sessions"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.export_html"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.switch_session"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.switch_session_by_id"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.fork"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.clone"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_fork_messages"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_last_assistant_text"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.set_session_name"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_messages"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_commands"
+				},
+				{
+					"$ref": "#/$defs/RpcErrorResponse"
+				}
+			]
+		},
+		"RpcResponse.abort": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "abort"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.abort_bash": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "abort_bash"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.abort_retry": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "abort_retry"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.bash": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "bash"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcBashResult"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.cancel_mcp_server_auth": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "cancel_mcp_server_auth"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpAuthResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.cancel_workflow": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "cancel_workflow"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.clone": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "clone"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"cancelled"
+					],
+					"properties": {
+						"cancelled": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.compact": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "compact"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcCompactionResult"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.complete_mcp_server_auth": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "complete_mcp_server_auth"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpAuthResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.connect_mcp_server": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "connect_mcp_server"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpServerResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.cycle_model": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "cycle_model"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"anyOf": [
+						{
+							"type": "object",
+							"required": [
+								"model",
+								"thinkingLevel",
+								"isScoped"
+							],
+							"properties": {
+								"model": {
+									"$ref": "#/$defs/RpcModel"
+								},
+								"thinkingLevel": {
+									"$ref": "#/$defs/RpcThinkingLevel"
+								},
+								"isScoped": {
+									"type": "boolean"
+								}
+							},
+							"additionalProperties": false
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.cycle_thinking_level": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "cycle_thinking_level"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"anyOf": [
+						{
+							"type": "object",
+							"required": [
+								"level"
+							],
+							"properties": {
+								"level": {
+									"$ref": "#/$defs/RpcThinkingLevel"
+								}
+							},
+							"additionalProperties": false
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.disconnect_mcp_server": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "disconnect_mcp_server"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpServerResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.export_html": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "export_html"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"path"
+					],
+					"properties": {
+						"path": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.follow_up": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "follow_up"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.fork": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "fork"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"text",
+						"cancelled"
+					],
+					"properties": {
+						"text": {
+							"type": "string"
+						},
+						"cancelled": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_available_models": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_available_models"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"models"
+					],
+					"properties": {
+						"models": {
+							"type": "array",
+							"items": {
+								"$ref": "#/$defs/RpcCatalogModel"
+							}
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_commands": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_commands"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"commands"
+					],
+					"properties": {
+						"commands": {
+							"type": "array",
+							"items": {
+								"$ref": "#/$defs/RpcSlashCommand"
+							}
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_fork_messages": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_fork_messages"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"messages"
+					],
+					"properties": {
+						"messages": {
+							"type": "array",
+							"items": {
+								"type": "object",
+								"required": [
+									"entryId",
+									"text"
+								],
+								"properties": {
+									"entryId": {
+										"type": "string"
+									},
+									"text": {
+										"type": "string"
+									}
+								},
+								"additionalProperties": false
+							}
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_keep_awake": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_keep_awake"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"keepAwake"
+					],
+					"properties": {
+						"keepAwake": {
+							"$ref": "#/$defs/RpcKeepAwakeStatus"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_last_assistant_text": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_last_assistant_text"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"text"
+					],
+					"properties": {
+						"text": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_mcp_capabilities": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_mcp_capabilities"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpCapabilitiesResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_mcp_prompt": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_mcp_prompt"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpPromptContentResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_mcp_server": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_mcp_server"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpServerResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_mcp_tool": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_mcp_tool"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpToolResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_message_images": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_message_images"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMessageImagesResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_messages": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_messages"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"messages"
+					],
+					"properties": {
+						"messages": {
+							"type": "array",
+							"items": {
+								"x-volt-opaque": "open AgentMessage union (extensible via declaration merging); local-only command, remote-unsupported"
+							}
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_pending_host_actions": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_pending_host_actions"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcPendingHostActionsResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_review_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_review_result"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcReviewWorkflowResultResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_session_stats": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_session_stats"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcSessionStats"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_state": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_state"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcSessionState"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_transcript": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_transcript"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcTranscriptResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_ui_action_completions": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_ui_action_completions"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/UiActionCompletionListResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_ui_actions": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_ui_actions"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/UiActionListResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_ui_capabilities": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_ui_capabilities"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/UiActionCapabilities"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_web_search_status": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_web_search_status"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"webSearch"
+					],
+					"properties": {
+						"webSearch": {
+							"$ref": "#/$defs/RpcWebSearchStatus"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.invoke_ui_action": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "invoke_ui_action"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/UiActionInvocationResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.list_mcp_prompts": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "list_mcp_prompts"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpPromptsResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.list_mcp_recent_calls": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "list_mcp_recent_calls"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpRecentCallsResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.list_mcp_resources": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "list_mcp_resources"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpResourcesResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.list_mcp_servers": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "list_mcp_servers"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpServersResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.list_mcp_tools": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "list_mcp_tools"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpToolsResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.list_review_workflows": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "list_review_workflows"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcReviewWorkflowListResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.list_sessions": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "list_sessions"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"sessions"
+					],
+					"properties": {
+						"sessions": {
+							"type": "array",
+							"items": {
+								"$ref": "#/$defs/RpcSessionListItem"
+							}
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.list_subagents": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "list_subagents"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcListSubagentsResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.logout_mcp_server": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "logout_mcp_server"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpAuthResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.new_session": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "new_session"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"cancelled"
+					],
+					"properties": {
+						"cancelled": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.open_review_session": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "open_review_session"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"cancelled"
+					],
+					"properties": {
+						"cancelled": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.poll_mcp_server_auth": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "poll_mcp_server_auth"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpAuthResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.prompt": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "prompt"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcPromptResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.read_mcp_resource": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "read_mcp_resource"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpResourceContentResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.refresh_mcp_server": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "refresh_mcp_server"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpServerResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.register_live_activity": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "register_live_activity"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcRegisterLiveActivityResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.register_push_target": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "register_push_target"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcRegisterPushTargetResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.report_stream_discontinuity": {
+			"type": "object",
+			"required": [
+				"id",
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "report_stream_discontinuity"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"subscriptionId",
+						"requestId",
+						"checkpointCursor"
+					],
+					"properties": {
+						"subscriptionId": {
+							"type": "string"
+						},
+						"requestId": {
+							"type": "string"
+						},
+						"checkpointCursor": {
+							"type": "integer"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.set_auto_compaction": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "set_auto_compaction"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.set_auto_retry": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "set_auto_retry"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.set_client_capabilities": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "set_client_capabilities"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.set_follow_up_mode": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "set_follow_up_mode"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.set_keep_awake": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "set_keep_awake"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"keepAwake"
+					],
+					"properties": {
+						"keepAwake": {
+							"$ref": "#/$defs/RpcKeepAwakeStatus"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.set_mcp_server_enabled": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "set_mcp_server_enabled"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpServerResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.set_model": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "set_model"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcCatalogModel"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.set_session_name": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "set_session_name"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.set_steering_mode": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "set_steering_mode"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.set_thinking_level": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "set_thinking_level"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"level"
+					],
+					"properties": {
+						"level": {
+							"$ref": "#/$defs/RpcThinkingLevel"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.set_web_search_key": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "set_web_search_key"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"webSearch"
+					],
+					"properties": {
+						"webSearch": {
+							"$ref": "#/$defs/RpcWebSearchStatus"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.start_mcp_server_auth": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "start_mcp_server_auth"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcMcpAuthResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.steer": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "steer"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.subagent_abort": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "subagent_abort"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.subagent_dispose": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "subagent_dispose"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.subagent_get_state": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "subagent_get_state"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcSessionState"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.subagent_get_transcript": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "subagent_get_transcript"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcTranscriptResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.subagent_start": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "subagent_start"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcSubagentStartResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.switch_session": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "switch_session"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"cancelled"
+					],
+					"properties": {
+						"cancelled": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.switch_session_by_id": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "switch_session_by_id"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"cancelled"
+					],
+					"properties": {
+						"cancelled": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.unregister_live_activity": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "unregister_live_activity"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcUnregisterLiveActivityResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.unregister_workspace": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "unregister_workspace"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"removedWorkspace",
+						"workspaceNames",
+						"workspaces"
+					],
+					"properties": {
+						"removedWorkspace": {
+							"type": "string"
+						},
+						"workspaceNames": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						},
+						"workspaces": {
+							"type": "array",
+							"items": {
+								"type": "object",
+								"required": [
+									"name",
+									"status"
+								],
+								"properties": {
+									"name": {
+										"type": "string"
+									},
+									"status": {
+										"type": "string"
+									}
+								},
+								"additionalProperties": false
+							}
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.upload_device_logs": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "upload_device_logs"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"path",
+						"byteCount"
+					],
+					"properties": {
+						"path": {
+							"type": "string"
+						},
+						"byteCount": {
+							"type": "number"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcReviewCoverage": {
+			"type": "object",
+			"required": [
+				"filesReviewed",
+				"commandsRun",
+				"uncheckedAreas"
+			],
+			"properties": {
+				"filesReviewed": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"commandsRun": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"uncheckedAreas": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcReviewFinding": {
+			"type": "object",
+			"required": [
+				"title",
+				"body"
+			],
+			"properties": {
+				"title": {
+					"type": "string"
+				},
+				"body": {
+					"type": "string"
+				},
+				"priority": {
+					"type": "number"
+				},
+				"confidence": {
+					"type": "number"
+				},
+				"file": {
+					"type": "string"
+				},
+				"line": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcReviewWorkflowDescriptor": {
+			"type": "object",
+			"required": [
+				"workflowId",
+				"action",
+				"status",
+				"target",
+				"startedAt"
+			],
+			"properties": {
+				"workflowId": {
+					"type": "string"
+				},
+				"action": {
+					"type": "string"
+				},
+				"status": {
+					"$ref": "#/$defs/RpcReviewWorkflowLifecycleStatus"
+				},
+				"target": {
+					"type": "object",
+					"required": [
+						"description",
+						"diffCommand"
+					],
+					"properties": {
+						"description": {
+							"type": "string"
+						},
+						"diffCommand": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				"findingsCount": {
+					"type": "number"
+				},
+				"errorMessage": {
+					"type": "string"
+				},
+				"startedAt": {
+					"type": "number"
+				},
+				"endedAt": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcReviewWorkflowLifecycleStatus": {
+			"type": "string",
+			"enum": [
+				"running",
+				"completed",
+				"cancelled",
+				"failed"
+			]
+		},
+		"RpcReviewWorkflowListResponse": {
+			"type": "object",
+			"required": [
+				"workflows"
+			],
+			"properties": {
+				"workflows": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcReviewWorkflowDescriptor"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcReviewWorkflowResultResponse": {
+			"type": "object",
+			"required": [
+				"workflowId",
+				"action",
+				"status",
+				"target",
+				"startedAt"
+			],
+			"properties": {
+				"workflowId": {
+					"type": "string"
+				},
+				"action": {
+					"type": "string"
+				},
+				"status": {
+					"$ref": "#/$defs/RpcReviewWorkflowLifecycleStatus"
+				},
+				"target": {
+					"type": "object",
+					"required": [
+						"description",
+						"diffCommand"
+					],
+					"properties": {
+						"description": {
+							"type": "string"
+						},
+						"diffCommand": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				"findingsCount": {
+					"type": "number"
+				},
+				"errorMessage": {
+					"type": "string"
+				},
+				"startedAt": {
+					"type": "number"
+				},
+				"endedAt": {
+					"type": "number"
+				},
+				"findings": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcReviewFinding"
+					}
+				},
+				"coverage": {
+					"$ref": "#/$defs/RpcReviewCoverage"
+				},
+				"overallCorrectness": {
+					"type": "string"
+				},
+				"overallExplanation": {
+					"type": "string"
+				},
+				"raw": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcSafeNonNegativeInteger": {
+			"type": "integer",
+			"minimum": 0,
+			"maximum": 9007199254740991,
+			"x-volt-expected": "be a safe non-negative integer"
+		},
+		"RpcServerEvent": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/RpcConversationBootstrapEvent"
+				},
+				{
+					"$ref": "#/$defs/RpcMessageStartFrame"
+				},
+				{
+					"$ref": "#/$defs/RpcMessageUpdateFrame"
+				},
+				{
+					"$ref": "#/$defs/RpcMessageEndFrame"
+				},
+				{
+					"$ref": "#/$defs/RpcQueueUpdateEvent"
+				},
+				{
+					"$ref": "#/$defs/RpcTranscriptEntryEvent"
+				},
+				{
+					"$ref": "#/$defs/RpcWorkflowEvent"
+				},
+				{
+					"$ref": "#/$defs/RpcWorkflowToolEvent"
+				},
+				{
+					"$ref": "#/$defs/RpcExtensionUIRequest"
+				},
+				{
+					"$ref": "#/$defs/RpcExtensionErrorEvent"
+				},
+				{
+					"$ref": "#/$defs/RpcHostActionRequest"
+				},
+				{
+					"$ref": "#/$defs/RpcHostActionUpdate"
+				},
+				{
+					"$ref": "#/$defs/RpcSubagentEvent"
+				},
+				{
+					"$ref": "#/$defs/RpcSubagentEndEvent"
+				},
+				{
+					"$ref": "#/$defs/RpcSubagentDisposedEvent"
+				},
+				{
+					"$ref": "#/$defs/RpcModelsChangedEvent"
+				}
+			]
+		},
+		"RpcSessionListItem": {
+			"type": "object",
+			"required": [
+				"sessionId",
+				"createdAt",
+				"modifiedAt",
+				"messageCount",
+				"firstMessage",
+				"current"
+			],
+			"properties": {
+				"sessionId": {
+					"type": "string"
+				},
+				"sessionName": {
+					"type": "string"
+				},
+				"createdAt": {
+					"type": "string"
+				},
+				"modifiedAt": {
+					"type": "string"
+				},
+				"messageCount": {
+					"type": "number"
+				},
+				"firstMessage": {
+					"type": "string"
+				},
+				"current": {
+					"type": "boolean"
+				},
+				"origin": {
+					"type": "string",
+					"const": "subagent"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcSessionState": {
+			"type": "object",
+			"required": [
+				"thinkingLevel",
+				"availableThinkingLevels",
+				"isStreaming",
+				"isCompacting",
+				"steeringMode",
+				"followUpMode",
+				"sessionId",
+				"autoCompactionEnabled",
+				"messageCount",
+				"pendingMessageCount",
+				"steeringQueue",
+				"followUpQueue"
+			],
+			"properties": {
+				"model": {
+					"$ref": "#/$defs/RpcModel"
+				},
+				"thinkingLevel": {
+					"$ref": "#/$defs/RpcThinkingLevel"
+				},
+				"availableThinkingLevels": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcThinkingLevel"
+					}
+				},
+				"isStreaming": {
+					"type": "boolean"
+				},
+				"isBusy": {
+					"type": "boolean"
+				},
+				"isCompacting": {
+					"type": "boolean"
+				},
+				"steeringMode": {
+					"$ref": "#/$defs/RpcQueueMode"
+				},
+				"followUpMode": {
+					"$ref": "#/$defs/RpcQueueMode"
+				},
+				"sessionFile": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"sessionName": {
+					"type": "string"
+				},
+				"autoCompactionEnabled": {
+					"type": "boolean"
+				},
+				"messageCount": {
+					"type": "number"
+				},
+				"pendingMessageCount": {
+					"type": "number"
+				},
+				"steeringQueue": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcQueuedMessage"
+					}
+				},
+				"followUpQueue": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcQueuedMessage"
+					}
+				},
+				"activeTools": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcActiveToolExecution"
+					}
+				},
+				"activeCompaction": {
+					"$ref": "#/$defs/RpcActiveCompaction"
+				},
+				"activeRetry": {
+					"$ref": "#/$defs/RpcActiveRetry"
+				},
+				"projection": {
+					"$ref": "#/$defs/RpcSessionStateProjection"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcSessionStateProjection": {
+			"type": "object",
+			"properties": {
+				"model": {
+					"$ref": "#/$defs/RpcProjectionTruncation"
+				},
+				"sessionFile": {
+					"$ref": "#/$defs/RpcProjectionTruncation"
+				},
+				"sessionName": {
+					"$ref": "#/$defs/RpcProjectionTruncation"
+				},
+				"steeringQueue": {
+					"$ref": "#/$defs/RpcProjectionCollectionTruncation"
+				},
+				"followUpQueue": {
+					"$ref": "#/$defs/RpcProjectionCollectionTruncation"
+				},
+				"activeTools": {
+					"$ref": "#/$defs/RpcProjectionCollectionTruncation"
+				},
+				"activeWorkflows": {
+					"$ref": "#/$defs/RpcProjectionCollectionTruncation"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcSessionStats": {
+			"type": "object",
+			"required": [
+				"sessionId",
+				"userMessages",
+				"assistantMessages",
+				"toolCalls",
+				"toolResults",
+				"totalMessages",
+				"tokens",
+				"cost"
+			],
+			"properties": {
+				"sessionFile": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"userMessages": {
+					"type": "number"
+				},
+				"assistantMessages": {
+					"type": "number"
+				},
+				"toolCalls": {
+					"type": "number"
+				},
+				"toolResults": {
+					"type": "number"
+				},
+				"totalMessages": {
+					"type": "number"
+				},
+				"tokens": {
+					"type": "object",
+					"required": [
+						"input",
+						"output",
+						"cacheRead",
+						"cacheWrite",
+						"total"
+					],
+					"properties": {
+						"input": {
+							"type": "number"
+						},
+						"output": {
+							"type": "number"
+						},
+						"cacheRead": {
+							"type": "number"
+						},
+						"cacheWrite": {
+							"type": "number"
+						},
+						"total": {
+							"type": "number"
+						}
+					},
+					"additionalProperties": false
+				},
+				"cost": {
+					"type": "number"
+				},
+				"contextUsage": {
+					"type": "object",
+					"required": [
+						"tokens",
+						"contextWindow",
+						"percent"
+					],
+					"properties": {
+						"tokens": {
+							"anyOf": [
+								{
+									"type": "number"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"contextWindow": {
+							"type": "number"
+						},
+						"percent": {
+							"anyOf": [
+								{
+									"type": "number"
+								},
+								{
+									"type": "null"
+								}
+							]
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcSlashCommand": {
+			"type": "object",
+			"required": [
+				"name",
+				"source",
+				"sourceInfo"
+			],
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"description": {
+					"type": "string"
+				},
+				"source": {
+					"type": "string",
+					"enum": [
+						"extension",
+						"prompt",
+						"skill"
+					]
+				},
+				"sourceInfo": {
+					"$ref": "#/$defs/RpcSourceInfo"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcSlimAssistantEvent": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"contentIndex"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "text_start"
+						},
+						"contentIndex": {
+							"type": "integer"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"contentIndex",
+						"delta"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "text_delta"
+						},
+						"contentIndex": {
+							"type": "integer"
+						},
+						"delta": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"contentIndex",
+						"content"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "text_end"
+						},
+						"contentIndex": {
+							"type": "integer"
+						},
+						"content": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"contentIndex"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "thinking_start"
+						},
+						"contentIndex": {
+							"type": "integer"
+						},
+						"redacted": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"contentIndex",
+						"delta"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "thinking_delta"
+						},
+						"contentIndex": {
+							"type": "integer"
+						},
+						"delta": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"contentIndex",
+						"content"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "thinking_end"
+						},
+						"contentIndex": {
+							"type": "integer"
+						},
+						"content": {
+							"type": "string"
+						},
+						"redacted": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"contentIndex",
+						"id",
+						"name"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "toolcall_start"
+						},
+						"contentIndex": {
+							"type": "integer"
+						},
+						"id": {
+							"type": "string"
+						},
+						"name": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"contentIndex",
+						"argsTextDelta"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "toolcall_delta"
+						},
+						"contentIndex": {
+							"type": "integer"
+						},
+						"argsTextDelta": {
+							"type": "string"
+						},
+						"id": {
+							"type": "string"
+						},
+						"name": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"contentIndex",
+						"toolCall"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "toolcall_end"
+						},
+						"contentIndex": {
+							"type": "integer"
+						},
+						"toolCall": {
+							"$ref": "#/$defs/RpcToolCall"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"RpcSourceInfo": {
+			"type": "object",
+			"required": [
+				"path",
+				"source",
+				"scope",
+				"origin"
+			],
+			"properties": {
+				"path": {
+					"type": "string"
+				},
+				"source": {
+					"type": "string"
+				},
+				"scope": {
+					"$ref": "#/$defs/RpcMcpSourceScope"
+				},
+				"origin": {
+					"type": "string",
+					"enum": [
+						"package",
+						"top-level"
+					]
+				},
+				"baseDir": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcStopReason": {
+			"type": "string",
+			"enum": [
+				"stop",
+				"length",
+				"toolUse",
+				"error",
+				"aborted"
+			]
+		},
+		"RpcStreamingBehavior": {
+			"type": "string",
+			"enum": [
+				"steer",
+				"followUp"
+			]
+		},
+		"RpcSubagentDefinition": {
+			"type": "object",
+			"required": [
+				"name",
+				"description",
+				"source",
+				"sourceInfo"
+			],
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"description": {
+					"type": "string"
+				},
+				"source": {
+					"$ref": "#/$defs/RpcSubagentDefinitionSource"
+				},
+				"sourceInfo": {
+					"$ref": "#/$defs/RpcSubagentSourceInfo"
+				},
+				"tools": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"excludedTools": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"allowedSubagents": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"maxSubagentDepth": {
+					"type": "number"
+				},
+				"maxChildAgents": {
+					"type": "number"
+				},
+				"model": {
+					"type": "string"
+				},
+				"thinking": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcSubagentDefinitionSource": {
+			"type": "string",
+			"enum": [
+				"built-in",
+				"user",
+				"project"
+			]
+		},
+		"RpcSubagentDisposedEvent": {
+			"type": "object",
+			"required": [
+				"type",
+				"subagentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "subagent_disposed"
+				},
+				"subagentId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcSubagentEndEvent": {
+			"type": "object",
+			"required": [
+				"type",
+				"subagentId",
+				"result"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "subagent_end"
+				},
+				"subagentId": {
+					"type": "string"
+				},
+				"result": {
+					"x-volt-opaque": "subagent completion result; local-only surface"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcSubagentEvent": {
+			"type": "object",
+			"required": [
+				"type",
+				"subagentId",
+				"event"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "subagent_event"
+				},
+				"subagentId": {
+					"type": "string"
+				},
+				"event": {
+					"x-volt-opaque": "a projected subagent frame: message_* / queue_update / passthrough session events"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcSubagentSourceInfo": {
+			"type": "object",
+			"required": [
+				"source",
+				"scope",
+				"origin"
+			],
+			"properties": {
+				"source": {
+					"type": "string"
+				},
+				"scope": {
+					"$ref": "#/$defs/RpcMcpSourceScope"
+				},
+				"origin": {
+					"type": "string",
+					"enum": [
+						"package",
+						"top-level"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcSubagentStartResponse": {
+			"type": "object",
+			"required": [
+				"subagentId",
+				"sessionId"
+			],
+			"properties": {
+				"subagentId": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcTextContent": {
+			"type": "object",
+			"required": [
+				"type",
+				"text"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "text"
+				},
+				"text": {
+					"type": "string"
+				},
+				"textSignature": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcThinkingContent": {
+			"type": "object",
+			"required": [
+				"type",
+				"thinking"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "thinking"
+				},
+				"thinking": {
+					"type": "string"
+				},
+				"thinkingSignature": {
+					"type": "string"
+				},
+				"redacted": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcThinkingLevel": {
+			"x-volt-expected": "be a supported thinking level",
+			"type": "string",
+			"enum": [
+				"off",
+				"minimal",
+				"low",
+				"medium",
+				"high",
+				"xhigh",
+				"max"
+			]
+		},
+		"RpcToolCall": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"name",
+				"arguments"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "toolCall"
+				},
+				"id": {
+					"type": "string"
+				},
+				"name": {
+					"type": "string"
+				},
+				"arguments": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
+				},
+				"thoughtSignature": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcTranscriptEntryEvent": {
+			"type": "object",
+			"required": [
+				"type",
+				"entry",
+				"final"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "transcript_entry"
+				},
+				"entry": {
+					"$ref": "#/$defs/RpcConversationTranscriptItem"
+				},
+				"final": {
+					"type": "boolean"
+				},
+				"delivery": {
+					"$ref": "#/$defs/RpcConversationDeliveryPosition"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcTranscriptItem": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/RpcTranscriptTextItem"
+				},
+				{
+					"$ref": "#/$defs/RpcTranscriptToolItem"
+				},
+				{
+					"$ref": "#/$defs/RpcTranscriptSummaryItem"
+				}
+			]
+		},
+		"RpcTranscriptResponse": {
+			"type": "object",
+			"required": [
+				"sessionId",
+				"items",
+				"hasMore",
+				"nextBeforeEntryId"
+			],
+			"properties": {
+				"sessionId": {
+					"type": "string"
+				},
+				"items": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcTranscriptItem"
+					}
+				},
+				"hasMore": {
+					"type": "boolean"
+				},
+				"nextBeforeEntryId": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"branchEpoch": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcTranscriptSummaryItem": {
+			"type": "object",
+			"required": [
+				"id",
+				"timestamp",
+				"role",
+				"title",
+				"text"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"timestamp": {
+					"type": "string"
+				},
+				"role": {
+					"type": "string",
+					"const": "summary"
+				},
+				"title": {
+					"type": "string",
+					"const": "Conversation compacted"
+				},
+				"text": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcTranscriptTextItem": {
+			"type": "object",
+			"required": [
+				"id",
+				"timestamp",
+				"role",
+				"text"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"timestamp": {
+					"type": "string"
+				},
+				"role": {
+					"type": "string",
+					"enum": [
+						"user",
+						"assistant"
+					]
+				},
+				"text": {
+					"type": "string"
+				},
+				"clientMessageId": {
+					"type": "string"
+				},
+				"imageCount": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcTranscriptToolItem": {
+			"type": "object",
+			"required": [
+				"id",
+				"timestamp",
+				"role",
+				"toolName",
+				"status",
+				"summary"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"timestamp": {
+					"type": "string"
+				},
+				"role": {
+					"type": "string",
+					"const": "tool"
+				},
+				"toolName": {
+					"type": "string"
+				},
+				"status": {
+					"$ref": "#/$defs/RpcTranscriptToolStatus"
+				},
+				"path": {
+					"type": "string"
+				},
+				"summary": {
+					"type": "string"
+				},
+				"imageCount": {
+					"type": "number"
+				},
+				"args": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
+				},
+				"details": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
+				},
+				"diffPreview": {
+					"type": "string"
+				},
+				"patchPreview": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcTranscriptToolStatus": {
+			"type": "string",
+			"enum": [
+				"started",
+				"completed",
+				"failed"
+			]
+		},
+		"RpcUiActionListScope": {
+			"type": "string",
+			"enum": [
+				"primary",
+				"palette",
+				"all"
+			]
+		},
+		"RpcUnregisterLiveActivityResponse": {
+			"type": "object",
+			"required": [
+				"status",
+				"activityId"
+			],
+			"properties": {
+				"status": {
+					"type": "string",
+					"const": "unregistered"
+				},
+				"activityId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcUsage": {
+			"type": "object",
+			"required": [
+				"input",
+				"output",
+				"cacheRead",
+				"cacheWrite",
+				"totalTokens",
+				"cost"
+			],
+			"properties": {
+				"input": {
+					"type": "number"
+				},
+				"output": {
+					"type": "number"
+				},
+				"cacheRead": {
+					"type": "number"
+				},
+				"cacheWrite": {
+					"type": "number"
+				},
+				"cacheWrite1h": {
+					"type": "number"
+				},
+				"totalTokens": {
+					"type": "number"
+				},
+				"cost": {
+					"type": "object",
+					"required": [
+						"input",
+						"output",
+						"cacheRead",
+						"cacheWrite",
+						"total"
+					],
+					"properties": {
+						"input": {
+							"type": "number"
+						},
+						"output": {
+							"type": "number"
+						},
+						"cacheRead": {
+							"type": "number"
+						},
+						"cacheWrite": {
+							"type": "number"
+						},
+						"total": {
+							"type": "number"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcWebSearchStatus": {
+			"type": "object",
+			"required": [
+				"configured"
+			],
+			"properties": {
+				"configured": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcWorkflowEvent": {
+			"type": "object",
+			"required": [
+				"type",
+				"workflowId",
+				"kind"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"enum": [
+						"workflow_start",
+						"workflow_update",
+						"workflow_end"
+					]
+				},
+				"workflowId": {
+					"type": "string"
+				},
+				"kind": {
+					"$ref": "#/$defs/RpcWorkflowKind"
+				},
+				"action": {
+					"type": "string"
+				},
+				"title": {
+					"type": "string"
+				},
+				"message": {
+					"type": "string"
+				},
+				"status": {
+					"$ref": "#/$defs/RpcWorkflowStatus"
+				},
+				"projection": {
+					"$ref": "#/$defs/RpcProjectionTruncation"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcWorkflowKind": {
+			"type": "string",
+			"x-volt-known-values": [
+				"review"
+			]
+		},
+		"RpcWorkflowStatus": {
+			"type": "string",
+			"x-volt-known-values": [
+				"running",
+				"finalizing",
+				"completed",
+				"cancelled",
+				"failed"
+			]
+		},
+		"RpcWorkflowToolEvent": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"workflowId",
+						"workflowKind",
+						"workflowAction",
+						"toolCallId",
+						"toolName"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "tool_execution_start"
+						},
+						"workflowId": {
+							"type": "string"
+						},
+						"workflowKind": {
+							"$ref": "#/$defs/RpcWorkflowKind"
+						},
+						"workflowAction": {
+							"type": "string"
+						},
+						"toolCallId": {
+							"type": "string"
+						},
+						"toolName": {
+							"type": "string"
+						},
+						"args": {
+							"type": "object",
+							"patternProperties": {
+								"^.*$": {}
+							}
+						},
+						"projection": {
+							"$ref": "#/$defs/RpcProjectionTruncation"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"workflowId",
+						"workflowKind",
+						"workflowAction",
+						"toolCallId",
+						"toolName",
+						"isError"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "tool_execution_end"
+						},
+						"workflowId": {
+							"type": "string"
+						},
+						"workflowKind": {
+							"$ref": "#/$defs/RpcWorkflowKind"
+						},
+						"workflowAction": {
+							"type": "string"
+						},
+						"toolCallId": {
+							"type": "string"
+						},
+						"toolName": {
+							"type": "string"
+						},
+						"isError": {
+							"type": "boolean"
+						},
+						"projection": {
+							"$ref": "#/$defs/RpcProjectionTruncation"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"UiActionArgumentDescriptor": {
+			"type": "object",
+			"required": [
+				"name",
+				"type"
+			],
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"label": {
+					"type": "string"
+				},
+				"description": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"x-volt-known-values": [
+						"string",
+						"boolean",
+						"enum",
+						"integer"
+					]
+				},
+				"required": {
+					"type": "boolean"
+				},
+				"multiline": {
+					"type": "boolean"
+				},
+				"placeholder": {
+					"type": "string"
+				},
+				"hint": {
+					"type": "string"
+				},
+				"defaultValue": {
+					"$ref": "#/$defs/UiActionScalar"
+				},
+				"options": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/UiActionOptionDescriptor"
+					}
+				},
+				"completion": {
+					"type": "string",
+					"x-volt-known-values": [
+						"commandArguments"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"UiActionArgumentType": {
+			"type": "string",
+			"enum": [
+				"string",
+				"boolean",
+				"enum",
+				"integer"
+			]
+		},
+		"UiActionCapabilities": {
+			"type": "object",
+			"required": [
+				"protocolVersion",
+				"features",
+				"maxActions",
+				"maxDescriptorBytes"
+			],
+			"properties": {
+				"protocolVersion": {
+					"type": "number",
+					"const": 1
+				},
+				"features": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/UiActionCapabilityFeature"
+					}
+				},
+				"maxActions": {
+					"type": "number"
+				},
+				"maxDescriptorBytes": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"UiActionCapabilityFeature": {
+			"type": "string",
+			"x-volt-known-values": [
+				"ui_actions.v1",
+				"ui_action_invocation.v1",
+				"ui_action_completions.v1"
+			]
+		},
+		"UiActionCategory": {
+			"type": "string",
+			"enum": [
+				"review",
+				"session",
+				"model",
+				"context",
+				"extension",
+				"prompt",
+				"skill",
+				"advanced"
+			]
+		},
+		"UiActionCompletionListResponse": {
+			"type": "object",
+			"required": [
+				"completions"
+			],
+			"properties": {
+				"completions": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/UiActionOptionDescriptor"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"UiActionDescriptor": {
+			"type": "object",
+			"required": [
+				"schemaVersion",
+				"id",
+				"label",
+				"source",
+				"category",
+				"enabled",
+				"remoteSafe"
+			],
+			"properties": {
+				"schemaVersion": {
+					"type": "number",
+					"const": 1
+				},
+				"id": {
+					"type": "string"
+				},
+				"label": {
+					"type": "string"
+				},
+				"description": {
+					"type": "string"
+				},
+				"source": {
+					"type": "string",
+					"x-volt-known-values": [
+						"builtin",
+						"extension",
+						"prompt",
+						"skill",
+						"package"
+					]
+				},
+				"sourceScope": {
+					"$ref": "#/$defs/RpcMcpSourceScope"
+				},
+				"sourceOrigin": {
+					"type": "string",
+					"enum": [
+						"package",
+						"top-level"
+					]
+				},
+				"sourceLabel": {
+					"type": "string"
+				},
+				"category": {
+					"type": "string",
+					"x-volt-known-values": [
+						"review",
+						"session",
+						"model",
+						"context",
+						"extension",
+						"prompt",
+						"skill",
+						"advanced"
+					]
+				},
+				"presentation": {
+					"$ref": "#/$defs/UiActionPresentationHint"
+				},
+				"args": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/UiActionArgumentDescriptor"
+					}
+				},
+				"state": {
+					"$ref": "#/$defs/UiActionStateDescriptor"
+				},
+				"enabled": {
+					"type": "boolean"
+				},
+				"disabledReason": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"destructive": {
+					"type": "boolean"
+				},
+				"requiresConfirmation": {
+					"type": "boolean"
+				},
+				"streamingBehavior": {
+					"anyOf": [
+						{
+							"$ref": "#/$defs/UiActionStreamingBehavior"
+						},
+						{
+							"type": "array",
+							"items": {
+								"$ref": "#/$defs/UiActionStreamingBehavior"
+							}
+						}
+					]
+				},
+				"remoteSafe": {
+					"type": "boolean"
+				},
+				"slash": {
+					"$ref": "#/$defs/UiActionSlashAlias"
+				}
+			},
+			"additionalProperties": false
+		},
+		"UiActionInvocationQueueBehavior": {
+			"type": "string",
+			"enum": [
+				"steer",
+				"followUp"
+			]
+		},
+		"UiActionInvocationResponse": {
+			"type": "object",
+			"required": [
+				"action",
+				"status"
+			],
+			"properties": {
+				"action": {
+					"type": "string"
+				},
+				"status": {
+					"$ref": "#/$defs/UiActionInvocationStatus"
+				},
+				"queuedAs": {
+					"$ref": "#/$defs/RpcStreamingBehavior"
+				},
+				"workflowId": {
+					"type": "string"
+				},
+				"state": {
+					"$ref": "#/$defs/UiActionStateDescriptor"
+				},
+				"stateChanged": {
+					"type": "boolean"
+				},
+				"actionsChanged": {
+					"type": "boolean"
+				},
+				"message": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"UiActionInvocationStatus": {
+			"type": "string",
+			"enum": [
+				"accepted",
+				"completed",
+				"queued",
+				"handled",
+				"cancelled"
+			]
+		},
+		"UiActionListResponse": {
+			"type": "object",
+			"required": [
+				"actions"
+			],
+			"properties": {
+				"actions": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/UiActionDescriptor"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"UiActionOptionDescriptor": {
+			"type": "object",
+			"required": [
+				"value"
+			],
+			"properties": {
+				"value": {
+					"type": "string"
+				},
+				"label": {
+					"type": "string"
+				},
+				"description": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"UiActionPresentationHint": {
+			"type": "object",
+			"required": [
+				"kind"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"x-volt-known-values": [
+						"card",
+						"button",
+						"toggle",
+						"picker",
+						"palette",
+						"detail",
+						"hidden"
+					]
+				},
+				"group": {
+					"type": "string"
+				},
+				"priority": {
+					"type": "number"
+				},
+				"icon": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"UiActionPresentationKind": {
+			"type": "string",
+			"enum": [
+				"card",
+				"button",
+				"toggle",
+				"picker",
+				"palette",
+				"detail",
+				"hidden"
+			]
+		},
+		"UiActionScalar": {
+			"anyOf": [
+				{
+					"type": "string"
+				},
+				{
+					"type": "number"
+				},
+				{
+					"type": "boolean"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"UiActionSlashAlias": {
+			"type": "object",
+			"required": [
+				"name"
+			],
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"example": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"UiActionSource": {
+			"type": "string",
+			"enum": [
+				"builtin",
+				"extension",
+				"prompt",
+				"skill",
+				"package"
+			]
+		},
+		"UiActionStateDescriptor": {
+			"type": "object",
+			"required": [
+				"type",
+				"value"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"x-volt-known-values": [
+						"boolean",
+						"string",
+						"enum",
+						"integer"
+					]
+				},
+				"value": {
+					"$ref": "#/$defs/UiActionScalar"
+				},
+				"label": {
+					"type": "string"
+				},
+				"options": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/UiActionOptionDescriptor"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"UiActionStateType": {
+			"type": "string",
+			"enum": [
+				"boolean",
+				"string",
+				"enum",
+				"integer"
+			]
+		},
+		"UiActionStreamingBehavior": {
+			"type": "string",
+			"enum": [
+				"disabled",
+				"immediate",
+				"queueSteer",
+				"queueFollowUp"
+			]
+		}
+	}
+}

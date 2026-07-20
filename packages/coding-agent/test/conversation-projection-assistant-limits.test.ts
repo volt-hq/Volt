@@ -69,6 +69,8 @@ const snapshotBuilder: ConversationProjectionSnapshotBuilder = (context) => ({
 		autoCompactionEnabled: true,
 		messageCount: 0,
 		pendingMessageCount: 0,
+		steeringQueue: [],
+		followUpQueue: [],
 	},
 	transcript: {
 		sessionId: "assistant-limits",

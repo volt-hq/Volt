@@ -2,11 +2,10 @@ import { Buffer } from "node:buffer";
 import { serializeJsonLine } from "./jsonl.ts";
 import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "./transport.ts";
 
+import { DEFAULT_IROH_RPC_MAX_LINE_BYTES } from "./wire-limits.ts";
+
 export const DEFAULT_IROH_READ_LIMIT = 64 * 1024;
-/** Mirrored by volt-app's JSONLLineDecoder.maximumEncodedLineBytes. */
-export const DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES = 4 * 1024 * 1024;
-/** JSON content bytes before the required LF framing byte. */
-export const DEFAULT_IROH_RPC_MAX_LINE_BYTES = DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES - 1;
+export { DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES, DEFAULT_IROH_RPC_MAX_LINE_BYTES } from "./wire-limits.ts";
 
 export type IrohBytes = Array<number> | Uint8Array;
 

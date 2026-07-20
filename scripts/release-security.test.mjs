@@ -752,6 +752,7 @@ test("shipped packages and standalone archives contain no development workflow t
 		"packages/agent": ["dist", "README.md", "LICENSE"],
 		"packages/ai": ["dist", "README.md", "LICENSE"],
 		"packages/coding-agent": [
+			"contract",
 			"dist",
 			"docs",
 			"!docs/development.md",

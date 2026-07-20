@@ -31,6 +31,7 @@ import {
 } from "../core/rpc/conversation-projection-limits.ts";
 import { extractMessageImages, projectMessageImages } from "../core/rpc/transcript.ts";
 import type { RpcConversationAssistantPart, RpcKeepAwakeStatus } from "../core/rpc/types.ts";
+import { REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES } from "../core/rpc/wire-limits.ts";
 import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../core/session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../core/subagents/tool-names.ts";
 import type { KeepAwakeStatus } from "./keep-awake.ts";
@@ -74,11 +75,9 @@ const REMOTE_TRANSCRIPT_DEFAULT_LIMIT = 200;
 const REMOTE_TRANSCRIPT_MAX_LIMIT = 200;
 const REMOTE_TRANSCRIPT_CURSOR_MAX_BYTES = 2048;
 const REMOTE_TRANSCRIPT_CURSOR_MAX_SCALARS = 512;
-/**
- * Leaves half of the ordered feed's 4 MiB queue available for the bootstrap
- * envelope, session state, active workflows, and frames committed at the cut.
- */
-export const REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES = 2 * 1024 * 1024;
+
+export { REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES } from "../core/rpc/wire-limits.ts";
+
 const REMOTE_TRANSCRIPT_SOURCE_WINDOW_MIN_ENTRIES = 256;
 const REMOTE_TRANSCRIPT_SOURCE_WINDOW_MAX_ENTRIES = 800;
 const REMOTE_TRANSCRIPT_SOURCE_WINDOW_MULTIPLIER = 4;

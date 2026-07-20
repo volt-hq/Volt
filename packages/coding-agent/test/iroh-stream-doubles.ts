@@ -240,6 +240,8 @@ export function createTestIrohConversationOptions(runtimeHost: AgentSessionRunti
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
+					steeringQueue: [],
+					followUpQueue: [],
 				},
 				transcript: {
 					sessionId: session.sessionId,

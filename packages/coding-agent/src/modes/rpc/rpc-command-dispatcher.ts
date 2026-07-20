@@ -20,6 +20,7 @@ import {
 	getUiActionCompletions,
 	getUiActionDescriptors,
 } from "../../core/rpc/ui-actions.ts";
+import { RPC_STABLE_ERROR_CODES } from "../../core/rpc/wire-limits.ts";
 import type {
 	RpcCatalogModel,
 	RpcClientCapabilityFeature,
@@ -127,11 +128,7 @@ export function createRpcSuccessResponse<T extends RpcCommand["type"]>(
 	return { id, type: "response", command, success: true, data } as RpcResponse;
 }
 
-const STABLE_RPC_ERROR_CODES = new Set([
-	"client_input_conflict",
-	"client_input_outcome_ambiguous",
-	"stale_conversation_authority",
-]);
+const STABLE_RPC_ERROR_CODES: ReadonlySet<string> = new Set(RPC_STABLE_ERROR_CODES);
 
 function getStableRpcErrorCode(error: unknown): string | undefined {
 	if (typeof error !== "object" || error === null || !("code" in error) || typeof error.code !== "string") {

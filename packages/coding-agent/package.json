@@ -19,6 +19,7 @@
 		}
 	},
 	"files": [
+		"contract",
 		"dist",
 		"docs",
 		"!docs/development.md",

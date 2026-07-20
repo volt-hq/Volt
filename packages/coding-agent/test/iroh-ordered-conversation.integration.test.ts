@@ -104,6 +104,8 @@ function createSnapshotBuilder(manager: SessionManager, sessionId: string): Conv
 				autoCompactionEnabled: false,
 				messageCount: items.length,
 				pendingMessageCount: 0,
+				steeringQueue: [],
+				followUpQueue: [],
 			},
 			transcript: {
 				workspaceName: "scratch",
