@@ -8,7 +8,6 @@
  */
 
 import { type TLiteral, type TObject, type TOptional, type TProperties, type TString, Type } from "typebox";
-import type { RpcCommandType } from "../types.ts";
 import { openStringEnum, stringEnum } from "./helpers.ts";
 import {
 	RPC_TRIMMED_NON_EMPTY_PATTERN,
@@ -72,9 +71,10 @@ const workspaceNameSchema = Type.String({
 });
 
 /**
- * Every RPC command schema, keyed by its `type` discriminant. `satisfies`
- * keeps this map in exact lockstep with the `RpcCommand` union: a member
- * added, removed, or renamed on either side fails typecheck.
+ * Every RPC command schema, keyed by its `type` discriminant. This map is the
+ * source of truth for the command contract: `RpcCommand`/`RpcCommandType` in
+ * ../types.ts derive from it, validation compiles it, and the JSON Schema
+ * artifact exports it.
  */
 export const RPC_COMMAND_SCHEMAS = {
 	// Prompting
@@ -301,4 +301,4 @@ export const RPC_COMMAND_SCHEMAS = {
 
 	// Commands (available for invocation via prompt)
 	get_commands: commandSchema("get_commands", {}),
-} as const satisfies { [K in RpcCommandType]: TObject };
+} as const satisfies Record<string, TObject>;

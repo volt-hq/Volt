@@ -10,14 +10,12 @@ import type { Static } from "typebox";
 import type {
 	RpcAssistantStreamPosition,
 	RpcClientCapabilityFeature,
-	RpcCommand,
-	RpcCommandType,
 	RpcConversationAuthority,
 	RpcConversationDiscontinuityReason,
 	RpcLiveActivityRegistration,
 	RpcRegisterPushTargetArgs,
 } from "../types.ts";
-import type { RPC_COMMAND_SCHEMAS, RpcClientCapabilityFeatureSchema } from "./commands.ts";
+import type { RpcClientCapabilityFeatureSchema } from "./commands.ts";
 import type { Assert, MutualExtends } from "./helpers.ts";
 import type {
 	RpcAssistantStreamPositionSchema,
@@ -28,16 +26,6 @@ import type {
 	RpcRegisterPushTargetArgsSchema,
 	RpcThinkingLevelSchema,
 } from "./primitives.ts";
-
-// Every command schema's Static type must match its member of the RpcCommand
-// union, key by key. On failure, inspect `DriftedCommands` — it resolves to
-// the union of command names whose schema and type disagree.
-type CommandStatics = { [K in RpcCommandType]: Static<(typeof RPC_COMMAND_SCHEMAS)[K]> };
-type CommandMembers = { [K in RpcCommandType]: Extract<RpcCommand, { type: K }> };
-type DriftedCommands = {
-	[K in RpcCommandType]: MutualExtends<CommandStatics[K], CommandMembers[K]> extends true ? never : K;
-}[RpcCommandType];
-type _commands = Assert<[DriftedCommands] extends [never] ? true : DriftedCommands>;
 
 // Wire projections of upstream types: if volt-ai / volt-agent-core change
 // these shapes, the contract must change consciously, not silently.

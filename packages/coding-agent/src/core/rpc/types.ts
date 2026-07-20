@@ -7,6 +7,7 @@
 
 import type { AgentMessage, ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { ActiveToolCallState, Api, AssistantMessage, ImageContent, Model } from "@hansjm10/volt-ai";
+import type { Static } from "typebox";
 import type { SessionStats } from "../agent-session.ts";
 import type { BashResult } from "../bash-executor.ts";
 import type { CompactionResult } from "../compaction/index.ts";
@@ -27,6 +28,7 @@ import type {
 } from "../mcp/types.ts";
 import type { ReviewCoverage, ReviewFinding } from "../review.ts";
 import type { SourceInfo } from "../source-info.ts";
+import type { RPC_COMMAND_SCHEMAS } from "./schema/commands.ts";
 
 export type RpcModel = Model<Api>;
 export { RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES } from "./wire-limits.ts";
@@ -45,192 +47,18 @@ export interface RpcConversationAuthority {
 	branchEpoch: string;
 }
 
-interface RpcConversationAuthorityCarrier {
-	/** Optional on the generic RPC protocol; required by authorized Iroh mutation ingress. */
-	conversationAuthority?: RpcConversationAuthority;
-}
-
 // ============================================================================
 // RPC Commands
 // ============================================================================
 
-export type RpcCommand = RpcConversationAuthorityCarrier &
-	// Prompting
-	(
-		| {
-				id?: string;
-				type: "prompt";
-				clientMessageId: string;
-				message: string;
-				images?: ImageContent[];
-				streamingBehavior?: "steer" | "followUp";
-		  }
-		| { id?: string; type: "steer"; clientMessageId: string; message: string; images?: ImageContent[] }
-		| { id?: string; type: "follow_up"; clientMessageId: string; message: string; images?: ImageContent[] }
-		| { id?: string; type: "abort" }
-		| { id?: string; type: "new_session"; parentSession?: string }
-
-		// Client capabilities and host-initiated actions
-		| { id?: string; type: "set_client_capabilities"; features: RpcClientCapabilityFeature[] }
-		| { id?: string; type: "get_pending_host_actions" }
-
-		// Ordered conversation recovery. The command id is the recovery request id;
-		// only the same-subscription checkpoint carrying that id can clear the fence.
-		| {
-				id: string;
-				type: "report_stream_discontinuity";
-				sessionId: string;
-				subscriptionId: string;
-				lastAppliedCursor: number;
-				assistantPosition?: RpcAssistantStreamPosition;
-				reason: RpcConversationDiscontinuityReason;
-		  }
-
-		// Native UI actions
-		| { id?: string; type: "get_ui_capabilities" }
-		| { id?: string; type: "get_ui_actions"; scope?: UiActionListScope }
-		| {
-				id?: string;
-				type: "get_ui_action_completions";
-				action: string;
-				argument: string;
-				prefix?: string;
-		  }
-		| {
-				id?: string;
-				type: "invoke_ui_action";
-				action: string;
-				args?: Record<string, unknown>;
-				streamingBehavior?: UiActionInvocationQueueBehavior;
-		  }
-
-		// Detached review workflows
-		| { id?: string; type: "cancel_workflow"; workflowId: string }
-		| { id?: string; type: "get_review_result"; workflowId: string }
-		| { id?: string; type: "list_review_workflows" }
-		| { id?: string; type: "open_review_session"; workflowId: string }
-
-		// Push notifications
-		| { id?: string; type: "register_push_target"; args: RpcRegisterPushTargetArgs }
-		| {
-				id?: string;
-				type: "register_live_activity";
-				workspaceName: string;
-				sessionId: string;
-				activityId: string;
-				tokenHash: string;
-				tokenEnvironment: RpcPushTokenEnvironment;
-				platform: RpcPushPlatform;
-		  }
-		| { id?: string; type: "unregister_live_activity"; workspaceName: string; sessionId: string; activityId: string }
-
-		// Remote host management
-		| { id?: string; type: "unregister_workspace"; name: string }
-		| { id?: string; type: "set_keep_awake"; enabled: boolean }
-		| { id?: string; type: "get_keep_awake" }
-		| { id?: string; type: "set_web_search_key"; apiKey?: string | null }
-		| { id?: string; type: "get_web_search_status" }
-
-		// Device diagnostics
-		| { id?: string; type: "upload_device_logs"; fileName?: string; content: string }
-
-		// MCP management
-		| { id?: string; type: "get_mcp_capabilities" }
-		| { id?: string; type: "list_mcp_servers" }
-		| { id?: string; type: "get_mcp_server"; server: string }
-		| { id?: string; type: "connect_mcp_server"; server: string }
-		| { id?: string; type: "disconnect_mcp_server"; server: string }
-		| { id?: string; type: "refresh_mcp_server"; server: string }
-		| {
-				id?: string;
-				type: "start_mcp_server_auth";
-				server: string;
-				flow?: "browser" | "device";
-				redirectUrl?: string;
-		  }
-		| {
-				id?: string;
-				type: "complete_mcp_server_auth";
-				server: string;
-				redirectUrl: string;
-				code: string;
-				state?: string;
-		  }
-		| { id?: string; type: "poll_mcp_server_auth"; server: string }
-		| { id?: string; type: "cancel_mcp_server_auth"; server: string }
-		| { id?: string; type: "logout_mcp_server"; server: string }
-		| { id?: string; type: "set_mcp_server_enabled"; server: string; enabled: boolean }
-		| { id?: string; type: "list_mcp_tools"; server: string }
-		| { id?: string; type: "get_mcp_tool"; server: string; tool: string }
-		| { id?: string; type: "list_mcp_resources"; server: string; cursor?: string }
-		| { id?: string; type: "read_mcp_resource"; server: string; resourceUri: string }
-		| { id?: string; type: "list_mcp_prompts"; server: string; cursor?: string }
-		| {
-				id?: string;
-				type: "get_mcp_prompt";
-				server: string;
-				prompt: string;
-				arguments?: Record<string, unknown>;
-				argumentsJson?: string;
-		  }
-		| { id?: string; type: "list_mcp_recent_calls"; server?: string }
-
-		// State
-		| { id?: string; type: "get_state" }
-		| { id?: string; type: "get_transcript"; limit?: number; beforeEntryId?: string; branchEpoch?: string }
-		| { id?: string; type: "get_message_images"; entryId: string; startImageIndex?: number }
-
-		// Subagents (local RPC only)
-		| { id?: string; type: "list_subagents" }
-		| { id?: string; type: "subagent_start"; agent: string; prompt: string }
-		| { id?: string; type: "subagent_abort"; subagentId: string }
-		| { id?: string; type: "subagent_get_state"; subagentId: string }
-		| { id?: string; type: "subagent_get_transcript"; subagentId: string; limit?: number; beforeEntryId?: string }
-		| { id?: string; type: "subagent_dispose"; subagentId: string }
-
-		// Model
-		| { id?: string; type: "set_model"; provider: string; modelId: string; persistDefault?: boolean }
-		| { id?: string; type: "cycle_model" }
-		| { id?: string; type: "get_available_models" }
-
-		// Thinking
-		| { id?: string; type: "set_thinking_level"; level: ThinkingLevel; persistDefault?: boolean }
-		| { id?: string; type: "cycle_thinking_level" }
-
-		// Queue modes
-		| { id?: string; type: "set_steering_mode"; mode: "all" | "one-at-a-time" }
-		| { id?: string; type: "set_follow_up_mode"; mode: "all" | "one-at-a-time" }
-
-		// Compaction
-		| { id?: string; type: "compact"; customInstructions?: string }
-		| { id?: string; type: "set_auto_compaction"; enabled: boolean }
-
-		// Retry
-		| { id?: string; type: "set_auto_retry"; enabled: boolean }
-		| { id?: string; type: "abort_retry" }
-
-		// Bash
-		| { id?: string; type: "bash"; command: string; excludeFromContext?: boolean }
-		| { id?: string; type: "abort_bash" }
-
-		// Session
-		| { id?: string; type: "get_session_stats" }
-		| { id?: string; type: "list_sessions" }
-		| { id?: string; type: "export_html"; outputPath?: string }
-		| { id?: string; type: "switch_session"; sessionPath: string }
-		| { id?: string; type: "switch_session_by_id"; sessionId: string }
-		| { id?: string; type: "fork"; entryId: string }
-		| { id?: string; type: "clone" }
-		| { id?: string; type: "get_fork_messages" }
-		| { id?: string; type: "get_last_assistant_text" }
-		| { id?: string; type: "set_session_name"; name: string }
-
-		// Messages
-		| { id?: string; type: "get_messages" }
-
-		// Commands (available for invocation via prompt)
-		| { id?: string; type: "get_commands" }
-	);
+/**
+ * The client→host command union, derived member-by-member from the TypeBox
+ * contract schemas (schema/commands.ts). Every member carries an optional
+ * correlation `id` (required for report_stream_discontinuity) and an optional
+ * `conversationAuthority`.
+ */
+export type RpcCommandType = keyof typeof RPC_COMMAND_SCHEMAS;
+export type RpcCommand = { [K in RpcCommandType]: Static<(typeof RPC_COMMAND_SCHEMAS)[K]> }[RpcCommandType];
 
 // ============================================================================
 // RPC Native UI Actions
@@ -1249,9 +1077,3 @@ export type RpcExtensionUIResponse =
 	| { type: "extension_ui_response"; id: string; value: string }
 	| { type: "extension_ui_response"; id: string; confirmed: boolean }
 	| { type: "extension_ui_response"; id: string; cancelled: true };
-
-// ============================================================================
-// Helper type for extracting command types
-// ============================================================================
-
-export type RpcCommandType = RpcCommand["type"];
