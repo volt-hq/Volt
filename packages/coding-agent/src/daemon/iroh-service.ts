@@ -2222,7 +2222,10 @@ class IrohDaemonService {
 		// A worktree-bound session must resolve against the worktree cwd (the
 		// parent-keyed session dir plus a non-matching cwd makes SessionManager.list
 		// filter by header cwd, restricting resolution to that worktree's sessions).
-		const boundWorktree = await this.stateManager.findWorktreeForSession(workspaceName, targetSessionId);
+		// resolveSessionWorktree also heals stranded bindings (rekeyed/subagent
+		// session ids) from the session's stored cwd, so relays fail with the
+		// designed worktree gates instead of session_unavailable (#83).
+		const boundWorktree = await this.worktrees.resolveSessionWorktree(workspaceName, targetSessionId);
 		const relayOwnerCapabilities = this.services.controlServer
 			.connections()
 			.find((controlConnection) => controlConnection.connectionId === tuiConnectionId)?.capabilities;
@@ -2598,13 +2601,19 @@ class IrohDaemonService {
 			));
 		} catch (error) {
 			this.leaseBroker.abortDaemonAttach(daemonAttachClaim);
+			// Include the resolved target so a failing attach can be correlated with
+			// its conversation from the audit log alone (#83 was undiagnosable without it).
 			await this.logAudit({
 				type: "runtime_failure",
 				clientNodeId: authorization.client.nodeId,
 				workspace: authorization.workspace.name,
 				success: false,
 				error: error instanceof Error ? error.message : String(error),
-				details: { runtime: "integrated-volt" },
+				details: {
+					runtime: "integrated-volt",
+					...(targetSessionId === undefined ? {} : { targetSessionId }),
+					...(handshake.hello.mode === "conversation" ? { target: handshake.hello.conversation.target } : {}),
+				},
 			});
 			await this.sendHandshakeError(stream, error);
 			return;
@@ -3547,6 +3556,24 @@ class IrohDaemonService {
 						.map((relay) => relay.clientNodeId),
 				);
 				try {
+					// A TUI rekey of a worktree-bound conversation must keep the durable
+					// binding covering the new id, or a post-restart daemon resume of the
+					// persisted reconnect target cannot resolve its checkout (#83). The
+					// healing lookup also repairs a stranded old id at rekey time, and the
+					// bind runs before the reconnect-target persist so a failure here
+					// leaves the old target intact; the append is additive and idempotent,
+					// so a stale extra id after a failed broker commit below is inert.
+					const boundWorktree = await this.worktrees.resolveSessionWorktree(
+						reservation.workspaceName,
+						reservation.oldSessionId,
+					);
+					if (boundWorktree) {
+						await this.worktrees.bindSession(
+							reservation.workspaceName,
+							boundWorktree.id,
+							reservation.newSessionId,
+						);
+					}
 					await this.stateManager.setClientsLastSessionId(
 						Array.from(relayedClientNodeIds),
 						reservation.workspaceName,
