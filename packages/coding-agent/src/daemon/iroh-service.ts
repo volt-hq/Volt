@@ -3556,17 +3556,14 @@ class IrohDaemonService {
 						.map((relay) => relay.clientNodeId),
 				);
 				try {
-					await this.stateManager.setClientsLastSessionId(
-						Array.from(relayedClientNodeIds),
-						reservation.workspaceName,
-						reservation.newSessionId,
-					);
 					// A TUI rekey of a worktree-bound conversation must keep the durable
 					// binding covering the new id, or a post-restart daemon resume of the
 					// persisted reconnect target cannot resolve its checkout (#83). The
-					// append is additive and idempotent; a stale extra id after a failed
-					// broker commit below is inert.
-					const boundWorktree = await this.stateManager.findWorktreeForSession(
+					// healing lookup also repairs a stranded old id at rekey time, and the
+					// bind runs before the reconnect-target persist so a failure here
+					// leaves the old target intact; the append is additive and idempotent,
+					// so a stale extra id after a failed broker commit below is inert.
+					const boundWorktree = await this.worktrees.resolveSessionWorktree(
 						reservation.workspaceName,
 						reservation.oldSessionId,
 					);
@@ -3577,6 +3574,11 @@ class IrohDaemonService {
 							reservation.newSessionId,
 						);
 					}
+					await this.stateManager.setClientsLastSessionId(
+						Array.from(relayedClientNodeIds),
+						reservation.workspaceName,
+						reservation.newSessionId,
+					);
 				} catch (error: unknown) {
 					connection.send({
 						type: "error",

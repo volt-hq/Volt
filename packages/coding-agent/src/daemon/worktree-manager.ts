@@ -10,8 +10,9 @@ import {
 	isIrohRemoteWorktreeParentWorkspaceNotFoundError,
 	isIrohRemoteWorktreePersistenceError,
 } from "../core/remote/iroh/state-manager.ts";
-import { getDefaultSessionDir, readSessionHeader } from "../core/session-manager.ts";
+import { getDefaultSessionDirPath, readSessionHeader } from "../core/session-manager.ts";
 import { spawnProcess, waitForChildProcess } from "../utils/child-process.ts";
+import { ensurePrivateDirectorySync } from "../utils/private-files.ts";
 import type { ControlRequest, ControlWorktreeStatus } from "./control-protocol.ts";
 import type { ControlConnection } from "./control-server.ts";
 import { resolveWorkspaceDirectory, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
@@ -984,9 +985,14 @@ export class WorktreeManager {
 		if (!workspace) {
 			return undefined;
 		}
-		const sessionDir = getDefaultSessionDir(workspace.path, this.agentDir);
+		const sessionDir = getDefaultSessionDirPath(workspace.path, this.agentDir);
 		let candidates: string[];
 		try {
+			// Read-only lookup: reject a symlinked leaf without re-hardening a
+			// directory this daemon-side path does not own (mirrors the
+			// findForResume/findMostRecentSession read paths), and fail closed on
+			// any fs error instead of letting it escape resolveSessionWorktree.
+			ensurePrivateDirectorySync(sessionDir, { hardenExisting: false });
 			candidates = (await readdir(sessionDir)).filter((name) => name.endsWith(`_${sessionId}.jsonl`));
 		} catch {
 			return undefined;

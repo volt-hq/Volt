@@ -886,8 +886,10 @@ function isDefaultShapedSessionDir(dir: string, cwd: string): boolean {
 /**
  * Compute the default session directory for a cwd.
  * Encodes cwd into a safe directory name under ~/.volt/agent/sessions/.
+ * Pure path computation; `getDefaultSessionDir` also creates and hardens the
+ * directory. Exported for read-only daemon lookups that must not mutate it.
  */
-function getDefaultSessionDirPath(cwd: string, agentDir: string = getDefaultAgentDir()): string {
+export function getDefaultSessionDirPath(cwd: string, agentDir: string = getDefaultAgentDir()): string {
 	return join(resolvePath(agentDir), "sessions", encodeSessionDirName(cwd));
 }
 
