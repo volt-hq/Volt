@@ -188,7 +188,13 @@ export class ConversationCoordinator {
 	}
 
 	prepareRuntime(): void {
-		if (this.runtimeLifecycleValue !== undefined) {
+		// A settled "retired" generation without a retained lease capability no
+		// longer reserves the authority; transports and TUI lease checks below
+		// still fence a coordinator whose previous era has not fully unwound.
+		const reservedByRuntime =
+			this.runtimeLifecycleValue !== undefined &&
+			!(this.runtimeLifecycleValue === "retired" && this.leaseOwnerValue === undefined);
+		if (reservedByRuntime) {
 			throw new Error(`conversation runtime already reserved for ${this.workspaceName}/${this.sessionId}`);
 		}
 		if (this.transports.size !== 0) {
@@ -197,6 +203,7 @@ export class ConversationCoordinator {
 		if (this.tuiLeaseConnectionIdValue !== undefined || this.pendingTuiLeaseConnectionIdValue !== undefined) {
 			throw new Error(`conversation lease is still TUI-owned for ${this.workspaceName}/${this.sessionId}`);
 		}
+		this.runtimeRetirementValue = undefined;
 		this.runtimeLifecycleValue = "prepared";
 	}
 
@@ -469,7 +476,11 @@ export class ConversationCoordinator {
 	}
 
 	registerTransport(owner: ConversationTransportOwner): () => void {
-		if (this.runtimeLifecycleValue === "retiring" || this.runtimeLifecycleValue === "retired") {
+		// Only an in-flight retirement fences new transports. A settled "retired"
+		// lifecycle is terminal for that runtime generation, not for the
+		// conversation: after a warm daemon-to-TUI handoff the coordinator stays
+		// alive under the TUI lease and must keep accepting relay transports.
+		if (this.runtimeLifecycleValue === "retiring") {
 			throw new Error("conversation is retiring");
 		}
 		if (owner.kind === "direct" && this.runtimeLifecycleValue !== "active") {
@@ -539,6 +550,9 @@ export class ConversationCoordinator {
 			return this.runtimeRetirementValue;
 		}
 		if (this.runtimeLifecycleValue === undefined || this.runtimeLifecycleValue === "retired") {
+			// No runtime generation to retire. The resolved barrier covers only that
+			// absent generation: post-handoff relay transports registered on a
+			// retired coordinator are owned by the TUI lease era, not this barrier.
 			const settled = Promise.resolve();
 			return { finalization: settled, settled };
 		}

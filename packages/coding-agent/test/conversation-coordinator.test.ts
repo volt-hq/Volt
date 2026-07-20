@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
 	CONVERSATION_CLIENT_NODE_ID_MAX_UTF8_BYTES,
+	ConversationCoordinator,
 	ConversationCoordinatorRegistry,
 	type ConversationTransportOwner,
 } from "../src/daemon/conversation-coordinator.ts";
@@ -44,6 +45,47 @@ function createLeaseBroker(): LeaseBroker {
 		rollbackTuiLeaseRekey: () => {},
 		audit: () => {},
 	});
+}
+
+/** Broker wired to real coordinators exactly like IrohDaemonService wires its effects. */
+function createCoordinatorWiredLeaseBroker(registry: ConversationCoordinatorRegistry): LeaseBroker {
+	const broker = new LeaseBroker({
+		isRuntimeStreaming: () => false,
+		waitForRuntimeIdle: async () => {},
+		disposeRuntime: async (workspaceName, sessionId, reason) => {
+			await registry.get(workspaceName, sessionId)?.beginRuntimeRetirement(reason, () => {}).settled;
+		},
+		closePhoneStreams: async (workspaceName, sessionId, reason) => {
+			await registry.get(workspaceName, sessionId)?.closeTransports(reason, (owner) => owner.kind === "direct");
+		},
+		closeRelays: (record, reason) => {
+			for (const relayId of Array.from(record.relayIds)) {
+				void registry.get(record.workspaceName, record.sessionId)?.closeTransport(relayId, reason);
+			}
+		},
+		beginTuiLeaseHandoff: (workspaceName, sessionId, connectionId) => {
+			(
+				registry.get(workspaceName, sessionId) ?? registry.getOrCreate(workspaceName, sessionId)
+			).beginTuiLeaseHandoff(connectionId);
+		},
+		commitTuiLeaseHandoff: (workspaceName, sessionId, connectionId) => {
+			const coordinator = registry.get(workspaceName, sessionId);
+			if (!coordinator) throw new Error("TUI handoff lost its conversation coordinator");
+			coordinator.commitTuiLeaseHandoff(connectionId);
+		},
+		cancelTuiLeaseHandoff: (workspaceName, sessionId, connectionId) => {
+			registry.get(workspaceName, sessionId)?.cancelTuiLeaseHandoff(connectionId);
+		},
+		releaseTuiLease: (workspaceName, sessionId, connectionId) => {
+			registry.get(workspaceName, sessionId)?.releaseTuiLease(connectionId);
+		},
+		prepareTuiLeaseRekey: () => {},
+		commitTuiLeaseRekey: () => {},
+		rollbackTuiLeaseRekey: () => {},
+		audit: () => {},
+	});
+	registry.bindLeaseBroker(broker);
+	return broker;
 }
 
 describe("ConversationCoordinator", () => {
@@ -305,6 +347,105 @@ describe("ConversationCoordinator", () => {
 		expect(coordinator.runtimeLifecycle).toBe("retired");
 		expect(coordinator.isVacant).toBe(false);
 		expect(registry.get("workspace", "session")).toBe(coordinator);
+		// The retained capability keeps the authority reserved: no re-preparation.
+		expect(() => registry.reserveRuntime("workspace", "session")).toThrow("conversation runtime already reserved");
+	});
+
+	it("relays phone attaches through the stable authority after a warm daemon-to-TUI handoff", async () => {
+		const registry = new ConversationCoordinatorRegistry();
+		const broker = createCoordinatorWiredLeaseBroker(registry);
+		const coordinator = registry.reserveRuntime("workspace", "session");
+		const attach = broker.beginDaemonAttach("workspace", "session");
+		expect(attach.kind).toBe("proceed");
+		if (attach.kind !== "proceed") return;
+		const publication = coordinator.commitDaemonRuntime(attach.claim);
+		expect(publication.outcome.ok).toBe(true);
+		if (!publication.outcome.ok) return;
+		coordinator.activateRuntime();
+		expect(coordinator.finalizeDaemonRuntimeCommit(publication.outcome.token).kind).toBe("finalized");
+
+		// Idle warm handoff: the daemon runtime retires, then the TUI lease commits.
+		await expect(
+			broker.acquireForTui({ connectionId: "tui-connection", workspaceName: "workspace", sessionId: "session" }),
+		).resolves.toEqual({ kind: "granted", handoff: "warm" });
+		expect(coordinator.runtimeLifecycle).toBe("retired");
+		expect(coordinator.tuiLeaseConnectionId).toBe("tui-connection");
+
+		// A reconnecting phone routes to a TUI relay (issue #81: this must not be
+		// permanently rejected with "conversation owner changed; retry").
+		const relayAttach = broker.beginDaemonAttach("workspace", "session");
+		expect(relayAttach).toEqual({ kind: "relay", tuiConnectionId: "tui-connection" });
+		const releaseTransport = coordinator.registerTransport(createTransport("relay-1", () => {}, "relay"));
+		expect(coordinator.registerRelayLease("relay-1")).toBe(true);
+
+		// Direct transports still require an active daemon runtime.
+		expect(() => coordinator.registerTransport(createTransport("direct-1"))).toThrow(
+			"direct conversation transport requires an active daemon runtime",
+		);
+
+		coordinator.unregisterRelayLease("relay-1");
+		releaseTransport();
+		expect(broker.releaseFromTui("tui-connection", "workspace", "session")).toEqual({ ok: true });
+		expect(registry.size).toBe(0);
+	});
+
+	it("keeps fencing relay transports while runtime retirement is in flight", async () => {
+		const registry = new ConversationCoordinatorRegistry();
+		const coordinator = registry.reserveRuntime("workspace", "session");
+		coordinator.activateRuntime();
+		const closeGate = deferred();
+		coordinator.registerTransport(createTransport("stream", () => closeGate.promise));
+
+		const retirement = coordinator.beginRuntimeRetirement("lease_transferred_to_tui", () => {});
+
+		expect(coordinator.runtimeLifecycle).toBe("retiring");
+		expect(() => coordinator.registerTransport(createTransport("relay-1", () => {}, "relay"))).toThrow(
+			"conversation is retiring",
+		);
+		closeGate.resolve();
+		await retirement.settled;
+	});
+
+	it("reports retiring transports when a daemon reservation races relay closure after TUI release", async () => {
+		const registry = new ConversationCoordinatorRegistry();
+		const coordinator = registry.reserveRuntime("workspace", "session");
+		coordinator.activateRuntime();
+		coordinator.beginTuiLeaseHandoff("tui-connection");
+		await coordinator.beginRuntimeRetirement("lease_transferred_to_tui", () => {}).settled;
+		coordinator.commitTuiLeaseHandoff("tui-connection");
+		const closeGate = deferred();
+		coordinator.registerTransport(createTransport("relay-1", () => closeGate.promise, "relay"));
+
+		// The TUI releases while its relay transport is still closing: a racing
+		// daemon reservation must fail on the transports, not on a phantom runtime.
+		const closing = coordinator.closeTransport("relay-1", "lease_transferred");
+		coordinator.releaseTuiLease("tui-connection");
+		expect(registry.get("workspace", "session")).toBe(coordinator);
+		expect(() => registry.reserveRuntime("workspace", "session")).toThrow(
+			"conversation transports are still retiring",
+		);
+
+		closeGate.resolve();
+		await closing;
+		expect(registry.size).toBe(0);
+		expect(registry.reserveRuntime("workspace", "session")).not.toBe(coordinator);
+	});
+
+	it("re-prepares a retired authority once transports and lease authority are gone", async () => {
+		const coordinator = new ConversationCoordinator("workspace", "session");
+		coordinator.prepareRuntime();
+		coordinator.activateRuntime();
+		await coordinator.beginRuntimeRetirement("test", () => {}).settled;
+		expect(coordinator.runtimeLifecycle).toBe("retired");
+		expect(coordinator.retirement).toBeDefined();
+
+		coordinator.prepareRuntime();
+
+		expect(coordinator.runtimeLifecycle).toBe("prepared");
+		expect(coordinator.retirement).toBeUndefined();
+		coordinator.activateRuntime();
+		await coordinator.beginRuntimeRetirement("again", () => {}).settled;
+		expect(coordinator.runtimeLifecycle).toBe("retired");
 	});
 
 	it("keeps a TUI lease anchored across relay settlement and rekey", async () => {

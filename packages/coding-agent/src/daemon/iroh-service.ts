@@ -2454,10 +2454,13 @@ class IrohDaemonService {
 				connectionId,
 				close: (reason) => physicalOwner.close(reason),
 			});
-		} catch {
+		} catch (error) {
+			// Surface the underlying registration failure in the relay_closed audit
+			// record; the client only ever sees the retryable pendingMessage.
 			await relay.close("error", {
 				pendingMessage: "conversation owner changed; retry",
 				retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
+				error: error instanceof Error ? error.message : String(error),
 			});
 			this.conversationCoordinators.releaseIfVacant(coordinator);
 			return;
