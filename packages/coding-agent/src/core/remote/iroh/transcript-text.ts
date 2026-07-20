@@ -1,6 +1,6 @@
 import { type IrohRemoteOutboundSanitizerOptions, sanitizeIrohRemoteOutbound } from "./outbound-filter.ts";
 
-const IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS = 12_000;
+export const IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS = 12_000;
 
 export type IrohRemoteTranscriptTextLayout = "preserve" | "summary";
 
@@ -13,17 +13,18 @@ export function sanitizeIrohRemoteTranscriptText(
 	value: string,
 	options: IrohRemoteOutboundSanitizerOptions,
 	layout: IrohRemoteTranscriptTextLayout = "preserve",
+	maxScalars: number = IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
 ): IrohRemoteSanitizedTranscriptText {
 	const normalized = normalizeIrohRemoteTranscriptText(value, layout);
 	const sanitizedValue = sanitizeIrohRemoteOutbound({ value: normalized }, options) as { value?: unknown };
 	const sanitized = sanitizedValue.value;
 	const text = normalizeIrohRemoteTranscriptText(typeof sanitized === "string" ? sanitized : "", layout);
 	const scalars = Array.from(text);
-	if (scalars.length <= IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS) {
+	if (scalars.length <= maxScalars) {
 		return { text, truncated: false };
 	}
 	return {
-		text: scalars.slice(0, IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS).join(""),
+		text: scalars.slice(0, maxScalars).join(""),
 		truncated: true,
 	};
 }

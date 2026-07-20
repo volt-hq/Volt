@@ -334,6 +334,12 @@ Checkpoint transcript items preserve assistant content parts in order, including
 plus final `stopReason`. They also carry projection version, branch epoch, commit ordinal, and transcript head. A
 branch rebase or projection-version mismatch replaces invalid cached pages rather than merging stale history.
 
+The branch-latest assistant message is projected with complete text and thinking content whenever its cumulative
+canonical content fits the live assistant budget (256 KiB UTF-8), on head transcript pages and on its own
+head-commit `transcript_entry` frame. A client attaching after `message_end` therefore converges on the same full
+text the live stream would have delivered. Older entries and over-budget entries keep the default 12,000-scalar
+truncation with `truncated: true`; their tails are recoverable only through a future per-entry continuation RPC.
+
 ### I13. Atomic app selection and ownership rekey
 
 The app stages a replacement transport and its bound `ConversationIngress`, receives and validates the complete
@@ -1021,6 +1027,7 @@ Every bootstrap/checkpoint builder enforces these exact component limits before 
 | Active tools for one workflow | 96 KiB and 128 entries |
 | One workflow `args` or `details` record | 12 KiB serialized JSON |
 | Active assistant | 384 KiB serialized JSON, lossless for delta-dependent state |
+| Branch-latest assistant transcript item | complete text up to 256 KiB cumulative content, else 12,000-scalar truncation |
 | One canonical transcript commit before subscriber projection | 4 MiB serialized JSON |
 | Canonical active workflows | 64 workflows, 128 tools per workflow, 4 MiB aggregate |
 | One canonical workflow event before subscriber projection | 256 KiB serialized JSON |
