@@ -1,6 +1,9 @@
 import { Buffer } from "node:buffer";
+import * as fc from "fast-check";
 import { describe, expect, test } from "vitest";
 import { RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES } from "../src/core/rpc/types.ts";
+import { RPC_CLIENT_MESSAGE_ID_SCHEMA_PATTERN } from "../src/core/rpc/wire-limits.ts";
+import { isValidClientMessageId } from "../src/core/session-manager.ts";
 import {
 	RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,
 	RPC_CONVERSATION_INPUT_IMAGES_MAX_UTF8_BYTES,
@@ -41,7 +44,7 @@ const invalidPayloadCases: Array<{ name: string; payload: unknown; error: string
 	{
 		name: "rejects invalid prompt images",
 		payload: { type: "prompt", clientMessageId, message: "hello", images: [{ type: "image", data: "abc" }] },
-		error: 'Invalid RPC command payload: "images" must be an array of image objects',
+		error: 'Invalid RPC command payload: "images[0].mimeType" is required',
 	},
 	{
 		name: "rejects invalid prompt streaming behavior",
@@ -61,6 +64,11 @@ const invalidPayloadCases: Array<{ name: string; payload: unknown; error: string
 	{
 		name: "rejects invalid client capability lists",
 		payload: { type: "set_client_capabilities", features: ["host_action_requests.v1", 1] },
+		error: 'Invalid RPC command payload: "features[1]" must be a string',
+	},
+	{
+		name: "rejects non-array client capability lists",
+		payload: { type: "set_client_capabilities", features: "host_action_requests.v1" },
 		error: 'Invalid RPC command payload: "features" must be an array of strings',
 	},
 	{
@@ -123,9 +131,28 @@ const invalidPayloadCases: Array<{ name: string; payload: unknown; error: string
 		error: 'Invalid RPC command payload: "workflowId" exceeds the 256-byte UTF-8 limit',
 	},
 	{
-		name: "rejects invalid push target registrations",
+		name: "rejects incomplete push target registrations",
 		payload: { type: "register_push_target", args: { provider: "fcm", platform: "ios", enabled: true } },
+		error: 'Invalid RPC command payload: "args.pushTargetId" is required',
+	},
+	{
+		name: "rejects non-object push target registrations",
+		payload: { type: "register_push_target", args: "registration" },
 		error: 'Invalid RPC command payload: "args" must be a push target registration object',
+	},
+	{
+		name: "rejects unknown push providers",
+		payload: {
+			type: "register_push_target",
+			args: {
+				provider: "apns",
+				platform: "ios",
+				pushTargetId: "target",
+				pushTargetAuthToken: "token",
+				enabled: true,
+			},
+		},
+		error: 'Invalid RPC command payload: "args.provider" must be "fcm"',
 	},
 	{
 		name: "rejects invalid transcript pagination",
@@ -196,6 +223,62 @@ const invalidPayloadCases: Array<{ name: string; payload: unknown; error: string
 		name: "rejects invalid session names",
 		payload: { type: "set_session_name", name: 1 },
 		error: 'Invalid RPC command payload: "name" must be a string',
+	},
+	{
+		name: "rejects unknown fields on known commands",
+		payload: { type: "get_state", bogusField: true },
+		error: 'Invalid RPC command payload: "bogusField" is not a recognized field',
+	},
+	{
+		name: "rejects legacy unregister-workspace path fields",
+		payload: { type: "unregister_workspace", name: "workspace", path: "/tmp/workspace" },
+		error: 'Invalid RPC command payload: "path" is not a recognized field',
+	},
+	{
+		name: "rejects blank workspace names",
+		payload: { type: "unregister_workspace", name: "   " },
+		error: 'Invalid RPC command payload: "name" must be a non-empty workspace name',
+	},
+	{
+		name: "rejects invalid keep-awake toggles",
+		payload: { type: "set_keep_awake", enabled: "on" },
+		error: 'Invalid RPC command payload: "enabled" must be a boolean',
+	},
+	{
+		name: "rejects device log uploads without content",
+		payload: { type: "upload_device_logs", fileName: "device.log" },
+		error: 'Invalid RPC command payload: "content" is required',
+	},
+	{
+		name: "rejects live-activity registrations with unknown token environments",
+		payload: {
+			type: "register_live_activity",
+			workspaceName: "workspace",
+			sessionId: "session",
+			activityId: "activity",
+			tokenHash: "hash",
+			tokenEnvironment: "staging",
+			platform: "ios",
+		},
+		error: 'Invalid RPC command payload: "tokenEnvironment" must be "development" or "production"',
+	},
+	{
+		name: "rejects invalid web search keys",
+		payload: { type: "set_web_search_key", apiKey: 7 },
+		error: 'Invalid RPC command payload: "apiKey" must be a string or null',
+	},
+	{
+		name: "rejects invalid discontinuity assistant positions",
+		payload: {
+			id: "recovery-1",
+			type: "report_stream_discontinuity",
+			sessionId: "session-1",
+			subscriptionId: "subscription-1",
+			lastAppliedCursor: 4,
+			assistantPosition: { epoch: 2, seq: -1 },
+			reason: "cursor_gap",
+		},
+		error: 'Invalid RPC command payload: "assistantPosition.seq" must be a safe non-negative integer',
 	},
 ];
 
@@ -370,6 +453,27 @@ describe("RPC command payload validation", () => {
 				message: "hi",
 			}),
 		).toBeUndefined();
+	});
+
+	test("schema clientMessageId grammar agrees with isValidClientMessageId", () => {
+		const schemaPattern = new RegExp(RPC_CLIENT_MESSAGE_ID_SCHEMA_PATTERN);
+		const candidates = fc.oneof(
+			fc.string({ maxLength: 300 }),
+			fc.string({ unit: "binary", maxLength: 300 }),
+			fc.stringMatching(/^[A-Za-z0-9._:-]{0,300}$/),
+			fc.stringMatching(/^[A-Za-z0-9._:-]{0,40}$/).map((suffix) => `local-queue:${suffix}`),
+		);
+		fc.assert(
+			fc.property(candidates, (value) => {
+				expect(schemaPattern.test(value)).toBe(isValidClientMessageId(value));
+				const structuralError = validateRpcCommandPayload({
+					type: "prompt",
+					clientMessageId: value,
+					message: "hi",
+				});
+				expect(structuralError === undefined).toBe(isValidClientMessageId(value));
+			}),
+		);
 	});
 
 	test("bounds image count, per-image data, aggregate payload, and serialized input", () => {

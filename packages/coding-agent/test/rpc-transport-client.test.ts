@@ -980,7 +980,8 @@ describe("runRpcMode", () => {
 				expect.objectContaining({
 					type: "response",
 					command: "get_state",
-					success: true,
+					success: false,
+					error: 'Invalid RPC command payload: "id" must be a string',
 				}),
 			);
 		});

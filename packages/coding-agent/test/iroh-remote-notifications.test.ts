@@ -500,6 +500,32 @@ describe("Iroh remote notification requests", () => {
 			registerPushTarget: (args) => dispatcher.registerPushTarget(args),
 		});
 
+		// A client-supplied clientNodeId is contract drift: the schema rejects the
+		// command outright, so the untrusted identity can never reach the dispatcher.
+		recv.pushLine(
+			JSON.stringify({
+				id: "push-0",
+				type: "register_push_target",
+				args: {
+					provider: "fcm",
+					platform: "ios",
+					pushTargetId: "relay-target-1",
+					pushTargetAuthToken: "secret-target-auth-token",
+					enabled: true,
+					clientNodeId: "untrusted-client",
+				},
+			}),
+		);
+		await vi.waitFor(() =>
+			expect(parseWrittenObjects(send)).toContainEqual({
+				id: "push-0",
+				type: "response",
+				command: "register_push_target",
+				success: false,
+				error: 'Invalid RPC command payload: "args.clientNodeId" is not a recognized field',
+			}),
+		);
+
 		recv.pushLine(
 			JSON.stringify({
 				id: "push-1",
@@ -517,7 +543,6 @@ describe("Iroh remote notification requests", () => {
 						tokenHash: hashIrohRemotePushToken("secret-live-activity-token"),
 					},
 					enabled: true,
-					clientNodeId: "untrusted-client",
 				},
 			}),
 		);
