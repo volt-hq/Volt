@@ -1,4 +1,4 @@
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { Text, type TUI, visibleWidth } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
@@ -1293,6 +1293,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(expanded).toContain("hidden content");
 	});
 
+	const outsideAgentsPath = process.platform === "win32" ? "C:/outside/AGENTS.md" : "/outside/AGENTS.md";
 	for (const scenario of [
 		{
 			title: "SKILL.md",
@@ -1312,9 +1313,9 @@ describe("ToolExecutionComponent parity", () => {
 		},
 		{
 			title: "outside AGENTS.md",
-			path: resolve(process.cwd(), "..", "AGENTS.md"),
+			path: outsideAgentsPath,
 			content: "Hidden outside resource instructions",
-			compact: `read resource ${resolve(process.cwd(), "..", "AGENTS.md").replace(/\\/g, "/")}`,
+			compact: `read resource ${outsideAgentsPath}`,
 			hidden: "Hidden outside resource instructions",
 			absent: undefined,
 		},
