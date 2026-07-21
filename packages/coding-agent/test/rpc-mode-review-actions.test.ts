@@ -444,15 +444,160 @@ describe("RPC mode detached review actions", () => {
 		]);
 		await vi.waitFor(() => expect(sessionChanges).toContain("review-session"));
 
-		// Opening an unknown or unfinished workflow fails loudly.
-		lineHandler(JSON.stringify({ id: "open-2", type: "open_review_session", workflowId: "review:unknown" }));
+		// The acted-on review is consumed from the retained ring: listings stop
+		// advertising it, so reconciling clients cannot re-surface an "open
+		// findings" affordance that would seed a duplicate session.
+		lineHandler(JSON.stringify({ id: "list-1", type: "list_review_workflows" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({
+					id: "list-1",
+					command: "list_review_workflows",
+					success: true,
+					data: { workflows: [] },
+				}),
+			),
+		);
+
+		// The findings live in the seeded session now; the record is gone.
+		lineHandler(JSON.stringify({ id: "result-1", type: "get_review_result", workflowId: "review:test" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({
+					id: "result-1",
+					command: "get_review_result",
+					success: false,
+					error: "Unknown review workflow: review:test",
+				}),
+			),
+		);
+
+		// Re-opening the consumed review fails like any unknown workflow.
+		lineHandler(JSON.stringify({ id: "open-2", type: "open_review_session", workflowId: "review:test" }));
 		await vi.waitFor(() =>
 			expect(writes).toContainEqual(
 				expect.objectContaining({
 					id: "open-2",
 					command: "open_review_session",
 					success: false,
+					error: "Unknown review workflow: review:test",
+				}),
+			),
+		);
+		expect(runtimeHost.newSession).toHaveBeenCalledOnce();
+
+		// Opening an unknown or unfinished workflow fails loudly.
+		lineHandler(JSON.stringify({ id: "open-3", type: "open_review_session", workflowId: "review:unknown" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({
+					id: "open-3",
+					command: "open_review_session",
+					success: false,
 					error: "Unknown review workflow: review:unknown",
+				}),
+			),
+		);
+
+		getCloseHandler()?.();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("a declined open keeps the review available in the retained ring", async () => {
+		const runtimeHost = makeRuntimeHost();
+		vi.mocked(runtimeHost.newSession).mockResolvedValue({ cancelled: true });
+		const { transport, writes, getLineHandler, getCloseHandler } = createCollectingTransport();
+		const { modePromise } = await startMode(runtimeHost, transport);
+		const lineHandler = getLineHandler();
+
+		lineHandler(JSON.stringify({ id: "review-1", type: "invoke_ui_action", action: "review.uncommitted" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({ type: "workflow_end", workflowId: "review:test", status: "completed" }),
+			),
+		);
+
+		lineHandler(JSON.stringify({ id: "open-1", type: "open_review_session", workflowId: "review:test" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({
+					id: "open-1",
+					command: "open_review_session",
+					success: true,
+					data: { cancelled: true },
+				}),
+			),
+		);
+
+		// A declined open must not consume the record: the review stays listed
+		// and its findings stay fetchable and openable.
+		lineHandler(JSON.stringify({ id: "list-1", type: "list_review_workflows" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({
+					id: "list-1",
+					command: "list_review_workflows",
+					success: true,
+					data: expect.objectContaining({
+						workflows: [expect.objectContaining({ workflowId: "review:test", status: "completed" })],
+					}),
+				}),
+			),
+		);
+		lineHandler(JSON.stringify({ id: "result-1", type: "get_review_result", workflowId: "review:test" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({
+					id: "result-1",
+					command: "get_review_result",
+					success: true,
+					data: expect.objectContaining({ workflowId: "review:test", status: "completed" }),
+				}),
+			),
+		);
+
+		getCloseHandler()?.();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("a failed seed keeps the review available in the retained ring", async () => {
+		const runtimeHost = makeRuntimeHost();
+		vi.mocked(runtimeHost.newSession).mockRejectedValue(new Error("seed exploded"));
+		const { transport, writes, getLineHandler, getCloseHandler } = createCollectingTransport();
+		const { modePromise } = await startMode(runtimeHost, transport);
+		const lineHandler = getLineHandler();
+
+		lineHandler(JSON.stringify({ id: "review-1", type: "invoke_ui_action", action: "review.uncommitted" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({ type: "workflow_end", workflowId: "review:test", status: "completed" }),
+			),
+		);
+
+		lineHandler(JSON.stringify({ id: "open-1", type: "open_review_session", workflowId: "review:test" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({
+					id: "open-1",
+					command: "open_review_session",
+					success: false,
+					error: "seed exploded",
+				}),
+			),
+		);
+
+		// The failed open must not consume the record: the findings were never
+		// seeded anywhere, so the review stays listed and its result fetchable.
+		lineHandler(JSON.stringify({ id: "list-1", type: "list_review_workflows" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({
+					id: "list-1",
+					command: "list_review_workflows",
+					success: true,
+					data: expect.objectContaining({
+						workflows: [expect.objectContaining({ workflowId: "review:test", status: "completed" })],
+					}),
 				}),
 			),
 		);

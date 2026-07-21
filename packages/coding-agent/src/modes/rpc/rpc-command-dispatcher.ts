@@ -432,6 +432,15 @@ export async function handleRpcCommand(
 					await sessionContext.sendMessage(seedMessage);
 				},
 			});
+			// The findings now live in the seeded session, so consume the retained
+			// terminal record: list_review_workflows must stop advertising a review
+			// that was already acted on, or every reconciling client re-surfaces an
+			// "open findings" affordance that would seed a duplicate session. A
+			// declined open keeps the review available; a failed seed throws above
+			// and also keeps it.
+			if (!result.cancelled) {
+				runtimeHost.reviewWorkflows.consume(command.workflowId);
+			}
 			return createRpcSuccessResponse(id, "open_review_session", { cancelled: result.cancelled });
 		}
 
