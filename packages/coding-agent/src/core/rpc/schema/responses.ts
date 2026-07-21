@@ -137,6 +137,30 @@ export const RpcMessageImagesResponseSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/**
+ * One bounded chunk of a transcript entry's sanitized canonical text
+ * (get_transcript_entry_text). Remote-only: transcript projections truncate
+ * long entries; clients page the remainder per entry through this response.
+ */
+export const RpcTranscriptEntryTextResponseSchema = Type.Object(
+	{
+		workspaceName: Type.String(),
+		sessionId: Type.String(),
+		entryId: Type.String(),
+		/** Start of this chunk, in Unicode scalars of the sanitized canonical entry text. */
+		offset: Type.Number(),
+		/** At most 12,000 scalars of sanitized canonical entry text. */
+		text: Type.String(),
+		/** True when more text remains past this chunk. */
+		truncated: Type.Boolean(),
+		/** Cursor for the next chunk, or null when the entry text is complete. */
+		nextOffset: Type.Union([Type.Number(), Type.Null()]),
+		/** Scalar length of the entry's full sanitized canonical text. */
+		totalScalars: Type.Number(),
+	},
+	{ additionalProperties: false },
+);
+
 // ============================================================================
 // Response member builders
 // ============================================================================
@@ -349,6 +373,7 @@ export const RPC_RESPONSE_SCHEMAS = {
 	get_state: dataResponse("get_state", RpcSessionStateSchema),
 	get_transcript: dataResponse("get_transcript", RpcTranscriptResponseSchema),
 	get_message_images: dataResponse("get_message_images", RpcMessageImagesResponseSchema),
+	get_transcript_entry_text: dataResponse("get_transcript_entry_text", RpcTranscriptEntryTextResponseSchema),
 
 	// Subagents (local RPC only)
 	list_subagents: dataResponse("list_subagents", RpcListSubagentsResponseSchema),

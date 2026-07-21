@@ -17,6 +17,7 @@ import {
 	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_ENVELOPES,
 	DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES,
 	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
+	IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
 	MESSAGE_IMAGES_ENTRY_MAX_ITEMS,
 	MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES,
 	MESSAGE_IMAGES_PAGE_MAX_ITEMS,
@@ -167,6 +168,7 @@ import {
 	RpcMessageImageSchema,
 	RpcMessageImagesResponseSchema,
 	RpcSessionStatsSchema,
+	RpcTranscriptEntryTextResponseSchema,
 } from "./responses.ts";
 import {
 	RpcActiveCompactionSchema,
@@ -426,6 +428,7 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcCompactionResult: RpcCompactionResultSchema,
 	RpcMessageImage: RpcMessageImageSchema,
 	RpcMessageImagesResponse: RpcMessageImagesResponseSchema,
+	RpcTranscriptEntryTextResponse: RpcTranscriptEntryTextResponseSchema,
 	RpcMcpServersResponse: RpcMcpServersResponseSchema,
 	RpcMcpServerResponse: RpcMcpServerResponseSchema,
 	RpcMcpToolsResponse: RpcMcpToolsResponseSchema,
@@ -509,6 +512,8 @@ export const RPC_WIRE_LIMITS = {
 		pageDefaultItems: RPC_TRANSCRIPT_PAGE_DEFAULT_ITEMS,
 		pageMaxItems: RPC_TRANSCRIPT_PAGE_MAX_ITEMS,
 		remotePageMaxSerializedBytes: REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES,
+		/** Scalar cap per projected item text and per get_transcript_entry_text continuation chunk. */
+		remoteEntryTextMaxScalars: IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
 	},
 	messageImages: {
 		responseEnvelopeHeadroomBytes: MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES,

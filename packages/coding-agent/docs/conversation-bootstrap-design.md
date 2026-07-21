@@ -338,7 +338,10 @@ The branch-latest assistant message is projected with complete text and thinking
 canonical content fits the live assistant budget (256 KiB UTF-8), on head transcript pages and on its own
 head-commit `transcript_entry` frame. A client attaching after `message_end` therefore converges on the same full
 text the live stream would have delivered. Older entries and over-budget entries keep the default 12,000-scalar
-truncation with `truncated: true`; their tails are recoverable only through a future per-entry continuation RPC.
+truncation with `truncated: true`; their tails are recoverable per entry through the `get_transcript_entry_text`
+continuation RPC, which pages an entry's sanitized canonical text in 12,000-scalar chunks. The continuation
+serves the text lane only: a truncated thinking part still sets the item-level `truncated` flag but its tail is
+not recoverable through this RPC.
 
 ### I13. Atomic app selection and ownership rekey
 

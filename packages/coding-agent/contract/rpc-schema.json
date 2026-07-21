@@ -43,7 +43,8 @@
 		"transcript": {
 			"pageDefaultItems": 100,
 			"pageMaxItems": 200,
-			"remotePageMaxSerializedBytes": 2097152
+			"remotePageMaxSerializedBytes": 2097152,
+			"remoteEntryTextMaxScalars": 12000
 		},
 		"messageImages": {
 			"responseEnvelopeHeadroomBytes": 65536,
@@ -72,6 +73,7 @@
 			"invalid_workspace_payload",
 			"session_mismatch",
 			"unexpected_session_id",
+			"unknown_entry",
 			"unknown_live_activity_token",
 			"unsupported_on_workspace_discovery_stream",
 			"unsupported_on_workspace_management_stream",
@@ -642,6 +644,9 @@
 					"$ref": "#/$defs/RpcCommand.get_message_images"
 				},
 				{
+					"$ref": "#/$defs/RpcCommand.get_transcript_entry_text"
+				},
+				{
 					"$ref": "#/$defs/RpcCommand.list_subagents"
 				},
 				{
@@ -889,6 +894,9 @@
 				},
 				{
 					"$ref": "#/$defs/RpcCommand.get_message_images"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_transcript_entry_text"
 				},
 				{
 					"$ref": "#/$defs/RpcCommand.list_subagents"
@@ -1706,6 +1714,35 @@
 				},
 				"branchEpoch": {
 					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_transcript_entry_text": {
+			"type": "object",
+			"required": [
+				"type",
+				"entryId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_transcript_entry_text"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"entryId": {
+					"type": "string"
+				},
+				"offset": {
+					"type": "number"
 				}
 			},
 			"additionalProperties": false
@@ -5496,6 +5533,9 @@
 					"$ref": "#/$defs/RpcResponse.get_message_images"
 				},
 				{
+					"$ref": "#/$defs/RpcResponse.get_transcript_entry_text"
+				},
+				{
 					"$ref": "#/$defs/RpcResponse.list_subagents"
 				},
 				{
@@ -6686,6 +6726,36 @@
 				},
 				"data": {
 					"$ref": "#/$defs/RpcTranscriptResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_transcript_entry_text": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_transcript_entry_text"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcTranscriptEntryTextResponse"
 				}
 			},
 			"additionalProperties": false
@@ -9247,6 +9317,53 @@
 				},
 				"delivery": {
 					"$ref": "#/$defs/RpcConversationDeliveryPosition"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcTranscriptEntryTextResponse": {
+			"type": "object",
+			"required": [
+				"workspaceName",
+				"sessionId",
+				"entryId",
+				"offset",
+				"text",
+				"truncated",
+				"nextOffset",
+				"totalScalars"
+			],
+			"properties": {
+				"workspaceName": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"entryId": {
+					"type": "string"
+				},
+				"offset": {
+					"type": "number"
+				},
+				"text": {
+					"type": "string"
+				},
+				"truncated": {
+					"type": "boolean"
+				},
+				"nextOffset": {
+					"anyOf": [
+						{
+							"type": "number"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"totalScalars": {
+					"type": "number"
 				}
 			},
 			"additionalProperties": false
