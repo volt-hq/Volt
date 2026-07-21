@@ -2,9 +2,10 @@ import { randomBytes } from "node:crypto";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { Api, Model } from "@hansjm10/volt-ai";
 import type { ResolvedCommand } from "../extensions/types.ts";
-import { BUILTIN_HOST_ACTION_REGISTRY } from "../host-actions.ts";
+import { BUILTIN_HOST_ACTION_REGISTRY, type HostActionDescriptorContext } from "../host-actions.ts";
 import type { PromptTemplate } from "../prompt-templates.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
+import { listBaseBranches } from "../review.ts";
 import type { Skill } from "../skills.ts";
 import type { SourceInfo } from "../source-info.ts";
 import type {
@@ -19,6 +20,7 @@ import type {
 import { validateUiActionArgs } from "./ui-action-args.ts";
 
 const MAX_ACTIONS = 200;
+const MAX_COMPLETIONS = 50;
 const MAX_LABEL_LENGTH = 80;
 const MAX_DESCRIPTION_LENGTH = 240;
 const MAX_SOURCE_LABEL_LENGTH = 80;
@@ -37,6 +39,7 @@ export interface UiActionDiscoverySession {
 	fastModeRestoreThinkingLevel?: ThinkingLevel;
 	promptTemplates: ReadonlyArray<PromptTemplate>;
 	resourceLoader: Pick<ResourceLoader, "getSkills">;
+	sessionManager: { getCwd(): string };
 }
 
 export interface UiActionInvocationPlan {
@@ -70,17 +73,9 @@ export function getUiActionDescriptors(
 	scope?: UiActionListScope,
 	options: UiActionDescriptorOptions = {},
 ): UiActionDescriptor[] {
-	const builtinDescriptors = BUILTIN_HOST_ACTION_REGISTRY.getDescriptors({
-		session: {
-			isBusy: session.isBusy ?? session.isStreaming ?? false,
-			isCompacting: session.isCompacting ?? false,
-			isStreaming: session.isStreaming ?? false,
-			model: session.model,
-			thinkingLevel: session.thinkingLevel,
-			fastModeRestoreThinkingLevel: session.fastModeRestoreThinkingLevel,
-		},
-		detachedReviews: options.detachedReviews,
-	});
+	const builtinDescriptors = BUILTIN_HOST_ACTION_REGISTRY.getDescriptors(
+		createHostActionDescriptorContext(session, options),
+	);
 	const normalizedScope = normalizeUiActionListScope(scope);
 	const descriptors =
 		normalizedScope === "primary"
@@ -91,6 +86,23 @@ export function getUiActionDescriptors(
 		.filter((descriptor) => matchesUiActionScope(descriptor, normalizedScope))
 		.filter((descriptor) => !options.remoteSafeOnly || descriptor.remoteSafe)
 		.slice(0, MAX_ACTIONS);
+}
+
+function createHostActionDescriptorContext(
+	session: UiActionDiscoverySession,
+	options: UiActionDescriptorOptions,
+): HostActionDescriptorContext {
+	return {
+		session: {
+			isBusy: session.isBusy ?? session.isStreaming ?? false,
+			isCompacting: session.isCompacting ?? false,
+			isStreaming: session.isStreaming ?? false,
+			model: session.model,
+			thinkingLevel: session.thinkingLevel,
+			fastModeRestoreThinkingLevel: session.fastModeRestoreThinkingLevel,
+		},
+		detachedReviews: options.detachedReviews,
+	};
 }
 
 function normalizeUiActionListScope(scope: UiActionListScope | undefined): UiActionListScope {
@@ -188,6 +200,26 @@ export async function getUiActionCompletions(
 		throw new Error("UI action completion prefix must be a string");
 	}
 
+	// Completions ignore availability (`enabled`), matching the catalog path
+	// below, so the descriptor context's busy/detached state never gates them.
+	const builtinDescriptor = BUILTIN_HOST_ACTION_REGISTRY.getDescriptor(
+		options.action,
+		createHostActionDescriptorContext(session, {}),
+	);
+	if (builtinDescriptor) {
+		if (options.requireRemoteSafe && !builtinDescriptor.remoteSafe) {
+			throw new Error(`UI action not available over remote host: ${options.action}`);
+		}
+		const argument = (builtinDescriptor.args ?? []).find((candidate) => candidate.name === options.argument);
+		if (!argument) {
+			throw new Error(`UI action argument not available: ${options.argument}`);
+		}
+		if (argument.completion !== "gitBranches") {
+			return [];
+		}
+		return getGitBranchCompletions(session.sessionManager.getCwd(), options.prefix ?? "");
+	}
+
 	const entry = getUiActionCatalog(session).find((candidate) => candidate.descriptor.id === options.action);
 	if (!entry) {
 		throw new Error(`UI action not available: ${options.action}`);
@@ -212,7 +244,31 @@ export async function getUiActionCompletions(
 			description: boundedDisplayString(completion.description, MAX_DESCRIPTION_LENGTH),
 		}))
 		.filter((completion) => completion.value.length > 0)
-		.slice(0, 50);
+		.slice(0, MAX_COMPLETIONS);
+}
+
+/**
+ * Serves the `gitBranches` completion source: candidate base branches from the
+ * workspace (the same local + remote-tracking set as the TUI /review picker),
+ * case-insensitively prefix-filtered and bounded.
+ */
+async function getGitBranchCompletions(cwd: string, prefix: string): Promise<UiActionOptionDescriptor[]> {
+	const branches = await listBaseBranches(cwd);
+	if (!Array.isArray(branches)) {
+		// Not a git repository (or git failed): serve no candidates instead of erroring.
+		return [];
+	}
+	const normalizedPrefix = prefix.toLowerCase();
+	return (
+		branches
+			.filter((branch) => branch.toLowerCase().startsWith(normalizedPrefix))
+			// Keep only values that survive display bounding unchanged: a truncated or
+			// redacted name would be an invalid completion value. Legal git refnames
+			// under the label limit always pass; longer ones are deliberately omitted.
+			.filter((branch) => boundedDisplayString(branch, MAX_LABEL_LENGTH) === branch)
+			.slice(0, MAX_COMPLETIONS)
+			.map((branch) => ({ value: branch }))
+	);
 }
 
 function getUiActionCatalog(session: UiActionDiscoverySession): UiActionCatalogEntry[] {

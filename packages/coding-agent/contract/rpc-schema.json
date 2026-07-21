@@ -9835,7 +9835,8 @@
 				"completion": {
 					"type": "string",
 					"x-volt-known-values": [
-						"commandArguments"
+						"commandArguments",
+						"gitBranches"
 					]
 				}
 			},
