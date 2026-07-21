@@ -603,7 +603,7 @@ Built-in v1 actions currently include:
 | `session.rename` | `/name <name>` | no | Sets the current session display name through the same handler as `set_session_name`. |
 | `thinking.fast_mode` | none | yes | Session-local, non-persistent toggle that lowers current thinking to the fastest supported host-owned level and restores the captured level when disabled. |
 | `review.uncommitted` | `/review uncommitted` | yes | Starts a detached review of uncommitted changes against `HEAD` using host-owned git/model policy; the response reports `accepted` with a `workflowId` and progress streams as workflow events. |
-| `review.branch` | `/review branch [base]` | yes | Starts a detached review of `HEAD` against a base branch; optional `base` is validated by the host and omitted values use host auto-detection. |
+| `review.branch` | `/review branch [base]` | yes | Starts a detached review of `HEAD` against a base branch; optional `base` is validated by the host and omitted values use host auto-detection. The `base` argument advertises `"completion": "gitBranches"`. |
 
 Slash aliases are display and compatibility metadata. Clients may show them in palettes or advanced detail views, but should not synthesize slash strings when an action id is available. The host may change slash syntax without changing a stable built-in action id.
 
@@ -616,7 +616,7 @@ Unsupported or deferred native surfaces in v1:
 
 #### get_ui_action_completions
 
-Get completion options for one action argument. Clients should only call this when the descriptor argument includes a supported `completion` value. V1 currently supports extension command argument completions via `"completion": "commandArguments"`.
+Get completion options for one action argument. Clients should only call this when the descriptor argument includes a supported `completion` value. V1 currently supports extension command argument completions via `"completion": "commandArguments"` and git branch-name completions via `"completion": "gitBranches"` (advertised by `review.branch`'s `base` argument). `gitBranches` serves the workspace's local and remote-tracking branch names with `main`/`master`-style defaults first, case-insensitively filtered by `prefix` and bounded; values are branch names only.
 
 ```json
 {"type": "get_ui_action_completions", "action": "extension.command.ec_a1b2c3d4e5f6_1", "argument": "arguments", "prefix": "pr"}
@@ -637,7 +637,7 @@ Response:
 }
 ```
 
-Unknown or stale action ids fail with the normal RPC error shape. Unsupported arguments or completion kinds return an empty completion list unless the argument name itself is not present in the descriptor.
+Unknown or stale action ids fail with the normal RPC error shape. Unsupported arguments or completion kinds — for built-in and projected actions alike — return an empty completion list unless the argument name itself is not present in the descriptor. `gitBranches` also returns an empty list when the workspace is not a git repository.
 
 #### invoke_ui_action
 
