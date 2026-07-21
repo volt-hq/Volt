@@ -166,13 +166,17 @@ Saved-host clients must verify that the native endpoint ticket node ID and the h
 
 Remote UI clients should request `get_state` followed by `get_transcript` after a conversation stream is accepted. New Agent and Resume Agent are not post-handshake mutations; clients open a new conversation stream with `target:new` or `target:session`. For older history, clients use `get_transcript` pagination (`hasMore` and `nextBeforeEntryId`) and request pages with `beforeEntryId`.
 
-`get_state` responses for Iroh sessions include remote host metadata with the current workspace and the registered workspace names visible to the saved host:
+`get_state` responses for Iroh sessions include remote host metadata with the current workspace, the available workspace names, and the availability of every registered workspace visible to the saved host:
 
 ```json
 {
   "remoteHost": {
     "workspace": "volt",
     "workspaceNames": ["volt", "other-project"],
+    "workspaces": [
+      { "name": "volt", "status": "available" },
+      { "name": "other-project", "status": "available" }
+    ],
     "features": ["multi_streams.v1", "conversation_streams.v1", "working_directories.v1"],
     "hostNodeId": "<authoritative-host-node-id>",
     "relayMode": "production",
@@ -184,7 +188,7 @@ Remote UI clients should request `get_state` followed by `get_transcript` after 
 }
 ```
 
-`remoteHost.workspaceNames` contains names only, never host-local paths. `remoteHost.features` repeats the safe host feature strings advertised during handshake. `remoteHost.relayMode` and `remoteHost.relayUrls` report the host's current relay configuration so saved-host clients can refresh their relay list without re-pairing; `relayUrls` is present only in `production` relay mode. Conversation clients must validate that the response `sessionId` and `remoteHost.workspace` match the handshake-bound stream identity. Selecting another pinned agent opens another conversation stream; v1 does not switch the cwd or session of an active stream in place.
+`remoteHost.workspaces` is required whenever `remoteHost` is present and lists every registered workspace as `{name,status}`, where `status` is `available`, `missing`, or `unavailable`. `remoteHost.workspaceNames` repeats only the names whose status is `available`. Both fields contain names only, never host-local paths. `remoteHost.features` repeats the safe host feature strings advertised during handshake. `remoteHost.relayMode` and `remoteHost.relayUrls` report the host's current relay configuration so saved-host clients can refresh their relay list without re-pairing; `relayUrls` is present only in `production` relay mode. Conversation clients must validate that the response `sessionId` and `remoteHost.workspace` match the handshake-bound stream identity. Selecting another pinned agent opens another conversation stream; v1 does not switch the cwd or session of an active stream in place.
 
 ## Lifecycle: detach versus cancel
 
@@ -324,13 +328,13 @@ The `workspace` field is a registered workspace name only. It must never contain
 {"id":"unregister-1","type":"unregister_workspace","workspaceName":"old-workspace"}
 ```
 
-The host rejects missing or malformed names, names that do not match the management stream workspace, and unknown workspaces. If the workspace has any persisted daemon-managed worktree records, the response is `success:false` with `error:"workspace_has_worktrees"`; the workspace, records, dirty/unmerged work, active worktree sessions, and all checkout directories remain untouched. A successful response is possible only after the user explicitly removes every managed worktree, and includes refreshed safe workspace metadata when available:
+The host rejects missing or malformed names, names that do not match the management stream workspace, and unknown workspaces. If the workspace has any persisted daemon-managed worktree records, the response is `success:false` with `error:"workspace_has_worktrees"`; the workspace, records, dirty/unmerged work, active worktree sessions, and all checkout directories remain untouched. A successful response is possible only after the user explicitly removes every managed worktree, and confirms the removed workspace name:
 
 ```json
-{"id":"unregister-1","type":"response","command":"unregister_workspace","success":true,"data":{"removedWorkspace":"old-workspace","workspaceNames":["volt"]}}
+{"id":"unregister-1","type":"response","command":"unregister_workspace","success":true,"data":{"workspaceName":"old-workspace","unregistered":true}}
 ```
 
-This command is host-state metadata management only. It does not create, rename, path-map, or delete host workspace or worktree directories, including unrecognized/orphan directories under the daemon worktree root. Response data must contain registered names and availability statuses only, never host-local paths. Folder browsing is a separate read-only `list_workspace_directories` RPC on the same management stream and returns relative paths only.
+This command is host-state metadata management only. It does not create, rename, path-map, or delete host workspace or worktree directories, including unrecognized/orphan directories under the daemon worktree root. Response data contains the registered name only, never a host-local path. Folder browsing is a separate read-only `list_workspace_directories` RPC on the same management stream and returns relative paths only.
 
 ### Worktree management (`manage_worktrees`, worktrees.v1)
 
