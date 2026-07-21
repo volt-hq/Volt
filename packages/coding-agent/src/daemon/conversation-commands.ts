@@ -11,6 +11,7 @@ import {
 } from "../core/remote/iroh/rpc-command-filter.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import {
+	IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
 	type IrohRemoteTranscriptTextLayout,
 	sanitizeIrohRemoteTranscriptText,
 } from "../core/remote/iroh/transcript-text.ts";
@@ -93,7 +94,7 @@ export const REMOTE_TOOL_OUTPUT_MAX_SCALARS = 8_000;
  * attaching after message_end converges on the same full text the live lane
  * would have delivered. Entries whose cumulative text/thinking content exceeds
  * this budget keep the default scalar truncation; their tails stay fetchable
- * only through a future per-entry continuation RPC.
+ * through the get_transcript_entry_text continuation RPC.
  */
 export const REMOTE_TRANSCRIPT_FINAL_ASSISTANT_MAX_CONTENT_UTF8_BYTES =
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES;
@@ -1427,6 +1428,104 @@ export function createRemoteGetTranscriptRpcResponse(
 	return createRpcSuccessResponse(id, "get_transcript", page);
 }
 
+/**
+ * The unbounded sanitized long-form text lane of one transcript entry — the
+ * same composition the transcript projection truncates. Assistant entries
+ * reuse the projection's per-part-then-join sanitize order so continuation
+ * offsets stay aligned with the projected item text; tool entries serve the
+ * output lane (the projection's `text` is a derived summary). Undefined for
+ * entry kinds the remote projection never emits.
+ */
+function getRemoteTranscriptEntryCanonicalText(
+	entry: SessionEntry,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): string | undefined {
+	const sanitize = (value: unknown): string =>
+		sanitizeRemoteTranscriptText(value, authorization, "preserve", Number.MAX_SAFE_INTEGER).text;
+	if (!entry || typeof entry !== "object") {
+		return undefined;
+	}
+	if (entry.type === "compaction") {
+		return sanitize(entry.summary);
+	}
+	if (entry.type === "custom_message") {
+		if (entry.customType !== "review" || entry.display !== true) {
+			return undefined;
+		}
+		return sanitize(extractTranscriptContentText(entry.content));
+	}
+	if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") {
+		return undefined;
+	}
+	const message = entry.message as unknown as Record<string, unknown>;
+	if (message.role === "assistant") {
+		const joined = Array.isArray(message.content)
+			? message.content
+					.filter(
+						(part): part is { type: "text"; text: string } =>
+							isRemoteRecord(part) && part.type === "text" && typeof part.text === "string",
+					)
+					.map((part) => sanitize(part.text))
+					.join("")
+			: "";
+		return sanitize(joined);
+	}
+	if (message.role === "user" || message.role === "toolResult") {
+		return sanitize(extractTranscriptContentText(message.content));
+	}
+	if (message.role === "bashExecution") {
+		return sanitize(message.output);
+	}
+	return undefined;
+}
+
+/**
+ * `get_transcript_entry_text`: one bounded chunk of a transcript entry's
+ * sanitized canonical text. Transcript projections truncate long entries at
+ * IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS (tool output even lower); remote
+ * clients page in the remainder per entry through this response. Offsets are
+ * Unicode-scalar indices into the sanitized canonical text, so chunks
+ * concatenate exactly and remain stable across requests.
+ */
+export function createRemoteGetTranscriptEntryTextRpcResponse(
+	command: RemoteRpcCommand,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	runtime: ConversationCommandRuntime,
+): object {
+	const id = getRpcResponseId(command);
+	if (!isValidRemoteTranscriptCursor(command.entryId)) {
+		return createIrohRemoteRpcErrorResponse(id, "get_transcript_entry_text", "invalid_cursor");
+	}
+	let offset = 0;
+	if (command.offset !== undefined) {
+		if (typeof command.offset !== "number" || !Number.isSafeInteger(command.offset) || command.offset < 0) {
+			return createIrohRemoteRpcErrorResponse(id, "get_transcript_entry_text", "invalid_request");
+		}
+		offset = command.offset;
+	}
+	const entry = runtime.session.sessionManager.getBranch().find((candidate) => candidate.id === command.entryId);
+	const canonicalText = entry === undefined ? undefined : getRemoteTranscriptEntryCanonicalText(entry, authorization);
+	if (canonicalText === undefined) {
+		return createIrohRemoteRpcErrorResponse(id, "get_transcript_entry_text", "unknown_entry");
+	}
+	const scalars = Array.from(canonicalText);
+	if (scalars.length === 0 ? offset !== 0 : offset >= scalars.length) {
+		return createIrohRemoteRpcErrorResponse(id, "get_transcript_entry_text", "invalid_cursor");
+	}
+	const chunk = scalars.slice(offset, offset + IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS);
+	const nextOffset = offset + chunk.length < scalars.length ? offset + chunk.length : null;
+	return createRpcSuccessResponse(id, "get_transcript_entry_text", {
+		workspaceName: authorization.workspace.name,
+		sessionId: runtime.session.sessionId,
+		entryId: command.entryId,
+		offset,
+		text: chunk.join(""),
+		truncated: nextOffset !== null,
+		nextOffset,
+		totalScalars: scalars.length,
+	});
+}
+
 export function createRemoteGetMessageImagesRpcResponse(
 	command: RemoteRpcCommand,
 	authorization: IrohRemoteClientAuthorizationSuccess,
@@ -2243,6 +2342,9 @@ export async function handleIntegratedConversationRpcCommand(
 	}
 	if (command.type === "get_message_images") {
 		return createRemoteGetMessageImagesRpcResponse(command, authorization, runtime);
+	}
+	if (command.type === "get_transcript_entry_text") {
+		return createRemoteGetTranscriptEntryTextRpcResponse(command, authorization, runtime);
 	}
 	return await handleRemoteHostRpcCommand(command, authorization, context);
 }
