@@ -7,6 +7,7 @@ import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-gra
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import { getStaticIrohRemoteRpcFilterResult as getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/rpc-command-filter.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
+import { IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS } from "../src/core/remote/iroh/transcript-text.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../src/core/remote/iroh/worktree-rpc.ts";
 import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import {
@@ -1830,5 +1831,258 @@ describe("worktree RPCs on conversation streams (worktrees.v1)", () => {
 		);
 		expect(response).toBeUndefined();
 		expect(backend.removeWorktree).not.toHaveBeenCalled();
+	});
+});
+
+describe("get_transcript_entry_text (#86)", () => {
+	function entry(id: string, ordinal: number, message: Record<string, unknown>): SessionEntry {
+		return {
+			type: "message",
+			id,
+			ordinal,
+			timestamp: new Date(ordinal).toISOString(),
+			message,
+		} as unknown as SessionEntry;
+	}
+
+	function transcriptRuntime(branch: SessionEntry[], sessionId = "s-entry-text"): ConversationCommandRuntime {
+		return {
+			session: { sessionId, sessionManager: createSessionManager(branch) },
+			listSessions: async () => [],
+		};
+	}
+
+	async function fetchChunk(
+		runtime: ConversationCommandRuntime,
+		command: Record<string, unknown>,
+	): Promise<Record<string, unknown>> {
+		return (await handleIntegratedConversationRpcCommand(
+			{ type: "get_transcript_entry_text", ...command },
+			createAuthorization(),
+			createContext(),
+			runtime,
+		)) as Record<string, unknown>;
+	}
+
+	it("pages the remainder of a truncated non-head assistant entry in order", async () => {
+		const canonical = `Report at /tmp/ws/notes.md\n${"m".repeat(30_000)}END_MARK`;
+		const branch = [
+			entry("assistant-old", 1, {
+				role: "assistant",
+				content: [{ type: "text", text: canonical }],
+				stopReason: "stop",
+			}),
+			entry("user-1", 2, { role: "user", content: [{ type: "text", text: "continue" }] }),
+			entry("assistant-final", 3, {
+				role: "assistant",
+				content: [{ type: "text", text: "short" }],
+				stopReason: "stop",
+			}),
+		];
+		const runtime = transcriptRuntime(branch);
+
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), runtime);
+		const oldItem = page?.items.find((item) => item.entryId === "assistant-old");
+		expect(oldItem?.truncated).toBe(true);
+		expect(Array.from(oldItem?.text ?? "")).toHaveLength(IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS);
+
+		const chunks: string[] = [];
+		let offset: number | null | undefined;
+		let response = await fetchChunk(runtime, { id: "c-0", entryId: "assistant-old" });
+		for (let guard = 0; guard < 8; guard++) {
+			expect(response).toMatchObject({
+				id: expect.any(String),
+				type: "response",
+				command: "get_transcript_entry_text",
+				success: true,
+			});
+			const data = (response as { data: Record<string, unknown> }).data;
+			expect(data.workspaceName).toBe("ws");
+			expect(data.sessionId).toBe("s-entry-text");
+			expect(data.entryId).toBe("assistant-old");
+			chunks.push(data.text as string);
+			offset = data.nextOffset as number | null;
+			expect(data.truncated).toBe(offset !== null);
+			if (offset === null) break;
+			expect(offset).toBe((data.offset as number) + Array.from(data.text as string).length);
+			response = await fetchChunk(runtime, { id: `c-${offset}`, entryId: "assistant-old", offset });
+		}
+		expect(offset).toBeNull();
+
+		const reconstructed = chunks.join("");
+		expect(chunks.length).toBe(3);
+		expect(Array.from(chunks[0]!)).toHaveLength(IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS);
+		// The projected (truncated) item text is a prefix of the continuation stream.
+		expect(reconstructed.startsWith(oldItem?.text ?? "?")).toBe(true);
+		expect(reconstructed.startsWith("Report at /workspace/notes.md")).toBe(true);
+		expect(reconstructed).not.toContain("/tmp/ws");
+		expect(reconstructed.endsWith("END_MARK")).toBe(true);
+		const lastData = (response as { data: Record<string, unknown> }).data;
+		expect(lastData.totalScalars).toBe(Array.from(reconstructed).length);
+	});
+
+	it("never splits an astral scalar across a chunk boundary", async () => {
+		const canonical = `${"a".repeat(IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS - 1)}\u{1F600}b`;
+		const branch = [entry("e-astral", 1, { role: "user", content: [{ type: "text", text: canonical }] })];
+		const runtime = transcriptRuntime(branch);
+
+		const first = (await fetchChunk(runtime, { id: "1", entryId: "e-astral" })) as {
+			data: { text: string; nextOffset: number | null; totalScalars: number };
+		};
+		expect(Array.from(first.data.text)).toHaveLength(IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS);
+		expect(first.data.text.endsWith("\u{1F600}")).toBe(true);
+		expect(first.data.nextOffset).toBe(IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS);
+		expect(first.data.totalScalars).toBe(IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS + 1);
+
+		const rest = (await fetchChunk(runtime, {
+			id: "2",
+			entryId: "e-astral",
+			offset: IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
+		})) as { data: { text: string; truncated: boolean; nextOffset: number | null } };
+		expect(rest.data).toMatchObject({ text: "b", truncated: false, nextOffset: null });
+	});
+
+	it("serves the long-form lane for each projectable entry kind", async () => {
+		const longOutput = `tool output from /tmp/ws/build.log\n${"o".repeat(10_000)}OUT_END`;
+		const branch = [
+			entry("e-user", 1, { role: "user", content: [{ type: "text", text: "user says /tmp/ws/a.txt" }] }),
+			entry("e-tool", 2, {
+				role: "toolResult",
+				toolCallId: "tc-1",
+				toolName: "read",
+				isError: false,
+				content: [{ type: "text", text: longOutput }],
+			}),
+			entry("e-bash", 3, { role: "bashExecution", command: "make", output: "built ok", exitCode: 0 }),
+			{
+				type: "compaction",
+				id: "e-compaction",
+				ordinal: 4,
+				timestamp: new Date(4).toISOString(),
+				summary: "Compacted: work in /tmp/ws so far",
+				firstKeptEntryId: "e-user",
+			} as unknown as SessionEntry,
+			{
+				type: "custom_message",
+				id: "e-review",
+				ordinal: 5,
+				timestamp: new Date(5).toISOString(),
+				customType: "review",
+				display: true,
+				content: [{ type: "text", text: "review verdict" }],
+			} as unknown as SessionEntry,
+		];
+		const runtime = transcriptRuntime(branch);
+
+		// The tool output lane is truncated on transcript pages but complete here.
+		const page = createRemoteConversationTranscriptPage(createAuthorization(), runtime);
+		const toolItem = page?.items.find((item) => item.entryId === "e-tool");
+		expect(toolItem?.outputTruncated).toBe(true);
+
+		const expectations: Array<[string, string]> = [
+			["e-user", "user says /workspace/a.txt"],
+			["e-tool", `tool output from /workspace/build.log\n${"o".repeat(10_000)}OUT_END`],
+			["e-bash", "built ok"],
+			["e-compaction", "Compacted: work in /workspace so far"],
+			["e-review", "review verdict"],
+		];
+		for (const [entryId, expected] of expectations) {
+			const response = (await fetchChunk(runtime, { id: entryId, entryId })) as {
+				success: boolean;
+				data: { text: string; truncated: boolean; nextOffset: number | null; totalScalars: number };
+			};
+			expect(response.success, entryId).toBe(true);
+			expect(response.data.text, entryId).toBe(expected);
+			expect(response.data.truncated, entryId).toBe(false);
+			expect(response.data.nextOffset, entryId).toBeNull();
+			expect(response.data.totalScalars, entryId).toBe(Array.from(expected).length);
+		}
+	});
+
+	it("serves an empty terminal page for a projectable entry without text", async () => {
+		const branch = [entry("e-aborted", 1, { role: "assistant", content: [], stopReason: "aborted" })];
+		const runtime = transcriptRuntime(branch);
+
+		const empty = (await fetchChunk(runtime, { id: "1", entryId: "e-aborted" })) as Record<string, unknown>;
+		expect(empty).toMatchObject({
+			success: true,
+			data: { text: "", truncated: false, nextOffset: null, totalScalars: 0, offset: 0 },
+		});
+
+		const outOfBounds = await fetchChunk(runtime, { id: "2", entryId: "e-aborted", offset: 1 });
+		expect(outOfBounds).toMatchObject({ success: false, error: "invalid_cursor" });
+	});
+
+	it("rejects unknown entries, non-projectable entries, and invalid arguments", async () => {
+		const branch = [
+			entry("e-user", 1, { role: "user", content: [{ type: "text", text: "hello world" }] }),
+			{
+				type: "custom_message",
+				id: "e-hidden",
+				ordinal: 2,
+				timestamp: new Date(2).toISOString(),
+				customType: "note",
+				display: false,
+				content: [{ type: "text", text: "hidden" }],
+			} as unknown as SessionEntry,
+		];
+		const runtime = transcriptRuntime(branch);
+
+		expect(await fetchChunk(runtime, { id: "1", entryId: "missing" })).toMatchObject({
+			success: false,
+			error: "unknown_entry",
+		});
+		expect(await fetchChunk(runtime, { id: "2", entryId: "e-hidden" })).toMatchObject({
+			success: false,
+			error: "unknown_entry",
+		});
+		expect(await fetchChunk(runtime, { id: "3" })).toMatchObject({ success: false, error: "invalid_cursor" });
+		expect(await fetchChunk(runtime, { id: "4", entryId: "e-user", offset: -1 })).toMatchObject({
+			success: false,
+			error: "invalid_request",
+		});
+		expect(await fetchChunk(runtime, { id: "5", entryId: "e-user", offset: 1.5 })).toMatchObject({
+			success: false,
+			error: "invalid_request",
+		});
+		expect(await fetchChunk(runtime, { id: "6", entryId: "e-user", offset: "3" })).toMatchObject({
+			success: false,
+			error: "invalid_request",
+		});
+		// offset === totalScalars is past the final scalar of a non-empty entry.
+		expect(await fetchChunk(runtime, { id: "7", entryId: "e-user", offset: 11 })).toMatchObject({
+			success: false,
+			error: "invalid_cursor",
+		});
+	});
+
+	it("enforces workspace and session identity like get_transcript", async () => {
+		const runtime = transcriptRuntime([
+			entry("e-user", 1, { role: "user", content: [{ type: "text", text: "hello" }] }),
+		]);
+
+		const sessionMismatch = (await handleIntegratedConversationRpcCommand(
+			{ id: "1", type: "get_transcript_entry_text", entryId: "e-user", sessionId: "other-session" },
+			createAuthorization(),
+			createContext(),
+			runtime,
+		)) as Record<string, unknown>;
+		expect(sessionMismatch).toMatchObject({ success: false, error: "session_mismatch" });
+
+		const workspaceMismatch = (await handleIntegratedConversationRpcCommand(
+			{ id: "2", type: "get_transcript_entry_text", entryId: "e-user", workspaceName: "other-ws" },
+			createAuthorization(),
+			createContext(),
+			runtime,
+		)) as Record<string, unknown>;
+		expect(workspaceMismatch).toMatchObject({ success: false, error: "session_mismatch" });
+
+		const scoped = (await handleIntegratedConversationRpcCommand(
+			{ id: "3", type: "get_transcript_entry_text", entryId: "e-user", sessionId: "s-entry-text" },
+			createAuthorization(),
+			createContext(),
+			runtime,
+		)) as Record<string, unknown>;
+		expect(scoped).toMatchObject({ success: true, data: { text: "hello" } });
 	});
 });

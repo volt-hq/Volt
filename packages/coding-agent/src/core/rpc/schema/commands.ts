@@ -240,6 +240,12 @@ export const RPC_COMMAND_SCHEMAS = {
 		entryId: Type.String(),
 		startImageIndex: Type.Optional(Type.Number()),
 	}),
+	get_transcript_entry_text: commandSchema("get_transcript_entry_text", {
+		sessionId: Type.Optional(RpcConversationIdentifierSchema),
+		entryId: Type.String(),
+		/** Start of the requested chunk, in Unicode scalars of the entry's sanitized canonical text. Defaults to 0. */
+		offset: Type.Optional(Type.Number()),
+	}),
 
 	// Subagents (local RPC only)
 	list_subagents: commandSchema("list_subagents", {}),
