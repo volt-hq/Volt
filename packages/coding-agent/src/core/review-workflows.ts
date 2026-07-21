@@ -204,6 +204,16 @@ export class ReviewWorkflowManager {
 		}
 	}
 
+	/**
+	 * Drop a retained terminal result whose findings were acted on (seeded into
+	 * a session via `open_review_session`), so listings stop advertising the
+	 * review. Never touches running workflows; unknown ids (already consumed or
+	 * evicted) are a no-op.
+	 */
+	consume(workflowId: string): void {
+		this.results.delete(workflowId);
+	}
+
 	/** Terminal result record, or the live descriptor for a running workflow. */
 	get(workflowId: string): ReviewWorkflowResultRecord | undefined {
 		const activeEntry = this.active.get(workflowId);

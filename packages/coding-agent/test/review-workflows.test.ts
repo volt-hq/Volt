@@ -156,6 +156,39 @@ describe("ReviewWorkflowManager", () => {
 		expect(manager.get("review:race")).toMatchObject({ status: "cancelled" });
 	});
 
+	test("consume drops a retained terminal result but never a running workflow", async () => {
+		const manager = new ReviewWorkflowManager();
+		const { launch } = manager.start({ prepared: prepared("review:done"), execute: async () => completed() });
+		launch();
+		await manager.waitForIdle();
+		manager
+			.start({
+				prepared: prepared("review:running"),
+				execute: (hooks) =>
+					new Promise((resolve) => {
+						hooks.signal.addEventListener("abort", () => resolve({ status: "cancelled" }), { once: true });
+					}),
+			})
+			.launch();
+
+		manager.consume("review:done");
+		expect(manager.get("review:done")).toBeUndefined();
+		expect(manager.list().map((descriptor) => descriptor.workflowId)).toEqual(["review:running"]);
+
+		// Only the retained terminal ring is consumable: a running workflow
+		// stays active and cancellable.
+		manager.consume("review:running");
+		expect(manager.get("review:running")).toMatchObject({ status: "running" });
+		expect(manager.hasActiveWorkflows).toBe(true);
+
+		// Already-consumed and unknown ids are a no-op.
+		manager.consume("review:done");
+		manager.consume("review:none");
+
+		await manager.abortAll();
+		expect(manager.get("review:running")).toMatchObject({ status: "cancelled" });
+	});
+
 	test("caps concurrent workflows and rejects duplicates", async () => {
 		const manager = new ReviewWorkflowManager();
 		const launches: Array<() => void> = [];
