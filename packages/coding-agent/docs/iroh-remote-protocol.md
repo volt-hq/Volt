@@ -38,7 +38,9 @@ The decoded JSON payload is an object with these fields:
 | `secret` | no | One-time pairing secret. Present only in pairing tickets. Persisted host state stores only a hash. |
 | `expiresAt` | no | Unix epoch milliseconds after which the pairing secret is invalid. |
 | `nodeId` | no | Host node ID. Required for saved-host reconnect records and verified against the native Iroh ticket plus handshake host identity. |
-| `relayMode` | no | `default` or `disabled`; clients may use it only as a diagnostic hint. |
+| `relayMode` | no | Host relay configuration: `disabled`, `development`, or `production`. Clients use it together with `relayUrls` to bind against the same relays as the host. |
+| `relayUrls` | no | Relay server URLs the client should use, as a non-empty array. Required when `relayMode` is `production`; a `production` payload without `relayUrls` is invalid. |
+| `relayAuthToken` | no | Bearer token for relays that require authentication. Secret-like: hosts include it only in pairing tickets whose production relays require it. Clients must store it as a credential and must never persist it in saved-host reconnect data. |
 
 Unknown ticket fields are reserved for compatible extension and must be ignored by v1 clients.
 
@@ -50,7 +52,9 @@ Example decoded payload:
   "expiresAt": 1790000000000,
   "irohTicket": "<iroh-endpoint-ticket>",
   "nodeId": "<host-node-id>",
-  "relayMode": "default",
+  "relayAuthToken": "<relay-auth-token>",
+  "relayMode": "production",
+  "relayUrls": ["https://<relay-origin>"],
   "secret": "<one-time-pairing-secret>",
   "workspace": "volt"
 }
@@ -58,7 +62,7 @@ Example decoded payload:
 
 Pairing tickets are explicit Pair Phone invitations. They are short-lived, one-time credentials for adding a new client, not durable reconnect credentials. Mobile-facing host startup does not create an active pairing ticket; `volt remote pair` creates the QR/ticket from a running host when a phone is being added. The ticket's `workspace` is the initial registered workspace for that pairing, not the client's permanent workspace boundary.
 
-Saved-host reconnect data uses the same ticket payload shape without `secret` or `expiresAt`. A saved reconnect record must retain a non-empty `nodeId`, supported `relayMode`, `workspace`, and `irohTicket`; records missing those required reconnect fields are invalid and should not be dialed. Ordinary reconnect after app restart, network loss, or host restart with the same host state uses this saved-host data and does not require another QR scan. A saved-host client may synthesize a reconnect ticket for any registered workspace name it learned from verified host metadata; the host remains authoritative and rejects unknown names with `workspace_unregistered`, removed authorizations with `workspace_authorization_removed`, registered names whose local directory no longer exists with `workspace_missing`, and registered names whose local directory is transiently unusable with `workspace_unavailable`.
+Saved-host reconnect data uses the same ticket payload shape sanitized of secrets: reconnect tickets strip the one-time `secret` (with its `expiresAt`) and the `relayAuthToken`. A saved reconnect record must retain a non-empty `nodeId`, supported `relayMode`, `workspace`, and `irohTicket`, plus `relayUrls` when `relayMode` is `production`; records missing those required reconnect fields are invalid and should not be dialed. Ordinary reconnect after app restart, network loss, or host restart with the same host state uses this saved-host data and does not require another QR scan. A saved-host client may synthesize a reconnect ticket for any registered workspace name it learned from verified host metadata; the host remains authoritative and rejects unknown names with `workspace_unregistered`, removed authorizations with `workspace_authorization_removed`, registered names whose local directory no longer exists with `workspace_missing`, and registered names whose local directory is transiently unusable with `workspace_unavailable`.
 
 ## Stream handshake
 
@@ -171,7 +175,8 @@ Remote UI clients should request `get_state` followed by `get_transcript` after 
     "workspaceNames": ["volt", "other-project"],
     "features": ["multi_streams.v1", "conversation_streams.v1", "working_directories.v1"],
     "hostNodeId": "<authoritative-host-node-id>",
-    "relayMode": "default",
+    "relayMode": "production",
+    "relayUrls": ["https://<relay-origin>"],
     "hostName": "macstudio",
     "userName": "jordan",
     "cwd": "/workspace"
@@ -179,7 +184,7 @@ Remote UI clients should request `get_state` followed by `get_transcript` after 
 }
 ```
 
-`remoteHost.workspaceNames` contains names only, never host-local paths. `remoteHost.features` repeats the safe host feature strings advertised during handshake. Conversation clients must validate that the response `sessionId` and `remoteHost.workspace` match the handshake-bound stream identity. Selecting another pinned agent opens another conversation stream; v1 does not switch the cwd or session of an active stream in place.
+`remoteHost.workspaceNames` contains names only, never host-local paths. `remoteHost.features` repeats the safe host feature strings advertised during handshake. `remoteHost.relayMode` and `remoteHost.relayUrls` report the host's current relay configuration so saved-host clients can refresh their relay list without re-pairing; `relayUrls` is present only in `production` relay mode. Conversation clients must validate that the response `sessionId` and `remoteHost.workspace` match the handshake-bound stream identity. Selecting another pinned agent opens another conversation stream; v1 does not switch the cwd or session of an active stream in place.
 
 ## Lifecycle: detach versus cancel
 
