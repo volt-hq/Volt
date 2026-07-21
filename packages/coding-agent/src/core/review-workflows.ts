@@ -144,7 +144,10 @@ export class ReviewWorkflowManager {
 			workflowId,
 			action,
 			status: "running",
-			target: { description: resolution.description, diffCommand: resolution.diffCommand },
+			target: {
+				description: resolution.workflowDescription ?? resolution.description,
+				diffCommand: resolution.diffCommand,
+			},
 			startedAt: Date.now(),
 		};
 		let settle: () => void = () => {};

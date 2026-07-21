@@ -94,6 +94,8 @@ export interface HostActionSlashCommand {
 export const CONTEXT_COMPACT_ACTION_ID = "context.compact";
 export const CONTEXT_COMPACT_SLASH_ALIAS = "compact";
 export const REVIEW_BRANCH_ACTION_ID = "review.branch";
+export const REVIEW_COMMIT_ACTION_ID = "review.commit";
+export const REVIEW_PR_ACTION_ID = "review.pr";
 export const REVIEW_UNCOMMITTED_ACTION_ID = "review.uncommitted";
 export const RUN_CANCEL_ACTION_ID = "run.cancel";
 export const SESSION_NEW_ACTION_ID = "session.new";
@@ -113,6 +115,8 @@ const REMOTE_SAFE_BUILTIN_HOST_ACTION_IDS = new Set<string>([
 	THINKING_FAST_MODE_ACTION_ID,
 	REVIEW_UNCOMMITTED_ACTION_ID,
 	REVIEW_BRANCH_ACTION_ID,
+	REVIEW_PR_ACTION_ID,
+	REVIEW_COMMIT_ACTION_ID,
 ]);
 
 export class HostActionRegistry {
@@ -445,6 +449,61 @@ export function registerBuiltinHostActions(registry: HostActionRegistry): HostAc
 		availability: reviewAvailability,
 		handler: invokeReviewBranchAction,
 	});
+	registry.register({
+		id: REVIEW_PR_ACTION_ID,
+		label: "Review pull request",
+		description:
+			"Review a GitHub pull request using the host's GitHub credentials and network; its metadata and diff are sent to the review model.",
+		category: "review",
+		presentation: { kind: "card", group: "Review", priority: 80, icon: "arrow.triangle.pull" },
+		args: [
+			{
+				name: "number",
+				label: "Pull request number",
+				type: "string",
+				required: false,
+				placeholder: "Current branch",
+				description: "Leave empty to review the pull request for the current branch.",
+			},
+		],
+		destructive: false,
+		requiresConfirmation: true,
+		streamingBehavior: "disabled",
+		remoteSafe: true,
+		slash: {
+			name: "review",
+			example: "/review pr [number]",
+		},
+		availability: reviewAvailability,
+		handler: invokeReviewPullRequestAction,
+	});
+	registry.register({
+		id: REVIEW_COMMIT_ACTION_ID,
+		label: "Review commit",
+		description: "Review a commit from workspace history; its metadata and diff are sent to the review model.",
+		category: "review",
+		presentation: { kind: "card", group: "Review", priority: 70, icon: "clock.arrow.circlepath" },
+		args: [
+			{
+				name: "ref",
+				label: "Commit ref",
+				type: "string",
+				required: true,
+				placeholder: "HEAD",
+				description: "A commit SHA, tag, or revision such as HEAD~1.",
+			},
+		],
+		destructive: false,
+		requiresConfirmation: true,
+		streamingBehavior: "disabled",
+		remoteSafe: true,
+		slash: {
+			name: "review",
+			example: "/review commit <ref>",
+		},
+		availability: reviewAvailability,
+		handler: invokeReviewCommitAction,
+	});
 	return registry;
 }
 
@@ -608,6 +667,30 @@ async function invokeReviewBranchAction(
 	return createReviewInvocationResponse(
 		REVIEW_BRANCH_ACTION_ID,
 		await runReviewHostAction(context, { kind: "branch", base }, createReviewOptions(options)),
+	);
+}
+
+async function invokeReviewPullRequestAction(
+	context: HostActionInvocationContext,
+	args: unknown,
+	options: HostActionInvokeOptions,
+): Promise<UiActionInvocationResponse> {
+	const number = getOptionalStringArg(args, "number")?.trim() || undefined;
+	return createReviewInvocationResponse(
+		REVIEW_PR_ACTION_ID,
+		await runReviewHostAction(context, { kind: "pr", number }, createReviewOptions(options)),
+	);
+}
+
+async function invokeReviewCommitAction(
+	context: HostActionInvocationContext,
+	args: unknown,
+	options: HostActionInvokeOptions,
+): Promise<UiActionInvocationResponse> {
+	const ref = getRequiredStringArg(args, "ref");
+	return createReviewInvocationResponse(
+		REVIEW_COMMIT_ACTION_ID,
+		await runReviewHostAction(context, { kind: "commit", sha: ref }, createReviewOptions(options)),
 	);
 }
 

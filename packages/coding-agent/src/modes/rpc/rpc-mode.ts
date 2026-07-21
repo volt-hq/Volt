@@ -1146,6 +1146,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				modelRegistry: commandSession.modelRegistry,
 				currentModel: commandSession.model,
 				requireProjectTrust: reviewOptions.remote,
+				sanitizeRemoteErrors: reviewOptions.remote,
 			});
 			const thinkingLevel = commandSession.thinkingLevel;
 			const authStorage = commandSession.modelRegistry.authStorage;
@@ -1153,30 +1154,42 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			const settingsManager = commandSession.settingsManager;
 			const { descriptor, launch } = runtimeHost.reviewWorkflows.start({
 				prepared,
-				execute: (hooks) =>
-					executeReviewWorkflow({
-						prepared,
-						cwd: runtimeHost.cwd,
-						agentDir: runtimeHost.services.agentDir,
-						authStorage,
-						modelRegistry,
-						settingsManager,
-						thinkingLevel,
-						// Read-only builtin allowlist and no inherited extension tools:
-						// the reviewer cannot modify the tree, so the working-tree guard
-						// is skipped. Restoring it could revert concurrent agent or user
-						// edits made while the detached review ran.
-						tools: REMOTE_REVIEW_TOOL_NAMES,
-						skipWorkingTreeGuard: true,
-						signal: hooks.signal,
-						onEvent: hooks.onEvent,
-					}),
+				execute: async (hooks) => {
+					try {
+						const result = await executeReviewWorkflow({
+							prepared,
+							cwd: runtimeHost.cwd,
+							agentDir: runtimeHost.services.agentDir,
+							authStorage,
+							modelRegistry,
+							settingsManager,
+							thinkingLevel,
+							// Read-only builtin allowlist and no inherited extension tools:
+							// the reviewer cannot modify the tree, so the working-tree guard
+							// is skipped. Restoring it could revert concurrent agent or user
+							// edits made while the detached review ran.
+							tools: REMOTE_REVIEW_TOOL_NAMES,
+							skipWorkingTreeGuard: true,
+							signal: hooks.signal,
+							onEvent: hooks.onEvent,
+						});
+						if (reviewOptions.remote && result.status === "failed") {
+							return { status: "failed", errorMessage: "The review could not be completed." };
+						}
+						return result;
+					} catch (error) {
+						if (reviewOptions.remote) {
+							return { status: "failed", errorMessage: "The review could not be completed." };
+						}
+						throw error;
+					}
+				},
 			});
 			pendingReviewWorkflowLaunches.set(descriptor.workflowId, launch);
 			return {
 				status: "accepted",
 				workflowId: descriptor.workflowId,
-				...(prepared.modelWarning === undefined ? {} : { message: prepared.modelWarning }),
+				...(prepared.modelWarning === undefined || reviewOptions.remote ? {} : { message: prepared.modelWarning }),
 			};
 		},
 	});

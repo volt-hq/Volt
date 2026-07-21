@@ -78,6 +78,27 @@ describe("ReviewWorkflowManager", () => {
 		expect(sunk.at(-1)).toEqual(end);
 	});
 
+	test("retains the sanitized workflow description instead of richer reviewer-only metadata", async () => {
+		const manager = new ReviewWorkflowManager();
+		const { descriptor, launch } = manager.start({
+			prepared: {
+				...prepared("review:pr"),
+				action: "review.pr",
+				resolution: {
+					...resolution,
+					description: "PR #42 (private title)",
+					workflowDescription: "PR #42",
+					diffCommand: "gh pr diff 42",
+				},
+			},
+			execute: async () => completed(),
+		});
+		expect(descriptor.target).toEqual({ description: "PR #42", diffCommand: "gh pr diff 42" });
+		launch();
+		await manager.waitForIdle();
+		expect(manager.get("review:pr")?.target.description).toBe("PR #42");
+	});
+
 	test("retains bounded raw text when the report had no parseable findings", async () => {
 		const manager = new ReviewWorkflowManager();
 		const { launch } = manager.start({

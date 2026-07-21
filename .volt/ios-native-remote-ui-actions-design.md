@@ -1707,6 +1707,18 @@ The design should not require a flag day.
    - Preference metadata exposes the effective value, whether it is inherited or chat-specific, allowed host-owned actions, reset-to-default behavior, and bounded disabled reasons.
    - Profiles and scoped models remain policy inputs and may constrain available values. Model selection remains blocked over Iroh until a separate remote-safe model option policy exists.
 
+## Superseding Owner Decision 2026-07-21: Remote Commit and Pull Request Reviews
+
+Issue [#80](https://github.com/volt-hq/Volt/issues/80) supersedes the 2026-06-23 deferral in Open Decision 5 for `review.commit` and `review.pr`. Both built-in actions may be invoked by authorized remote clients under the existing `conversation.control.v1` capability; this decision does not add a capability or change ordinary conversation tool grants.
+
+- Both actions require confirmation and use the existing detached review workflow, retained result, and sanitized workflow-event paths.
+- `review.commit` accepts one bounded revision expression, resolves it to a canonical commit object id before inspection, and passes only that id to `git show`, with textconv and external diff drivers disabled. Its descriptor discloses commit-history inspection and submission of commit metadata and diff to the review model.
+- `review.pr` accepts an optional canonical positive decimal pull request number. An omitted number selects the current branch's pull request; explicit `null` is rejected. Its descriptor discloses use of the host's GitHub credentials and network and submission of pull request metadata and diff to the review model.
+- Detached reviewers retain the host-owned read-only `read`, `grep`, `find`, and `ls` tool set regardless of ordinary conversation grants. `review.tools` remains local-only/deferred.
+- Remote workflow metadata exposes bounded target identifiers only: a canonical commit object id or `PR #N`. Pull request title and body remain reviewer-only context, and pull request workflow tool events omit model-controlled string arguments.
+- Configured-model fallback details and raw subprocess/provider diagnostics stay host-local; remote accepted responses, failures, workflow events, and retained results use bounded stable messages.
+- Iroh allows these exact built-in ids through the existing remote-safe action check; near-prefix or unregistered ids remain denied.
+
 ## Acceptance Criteria
 
 - A design exists for native iOS action cards and command palette backed by host-owned action descriptors.

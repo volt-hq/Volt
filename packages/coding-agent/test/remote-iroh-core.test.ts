@@ -6,6 +6,8 @@ import { describe, expect, test, vi } from "vitest";
 import {
 	CONTEXT_COMPACT_ACTION_ID,
 	REVIEW_BRANCH_ACTION_ID,
+	REVIEW_COMMIT_ACTION_ID,
+	REVIEW_PR_ACTION_ID,
 	REVIEW_UNCOMMITTED_ACTION_ID,
 	RUN_CANCEL_ACTION_ID,
 	SESSION_NEW_ACTION_ID,
@@ -1011,6 +1013,8 @@ describe("Iroh remote core helpers", () => {
 			THINKING_FAST_MODE_ACTION_ID,
 			REVIEW_UNCOMMITTED_ACTION_ID,
 			REVIEW_BRANCH_ACTION_ID,
+			REVIEW_PR_ACTION_ID,
+			REVIEW_COMMIT_ACTION_ID,
 		]) {
 			const builtInInvocation = {
 				id: `${action}-1`,
@@ -1055,39 +1059,20 @@ describe("Iroh remote core helpers", () => {
 				},
 			});
 		}
-		expect(
-			getIrohRemoteRpcFilterResult(
-				JSON.stringify({ id: "invoke-local", type: "invoke_ui_action", action: "review.pr" }),
-			),
-		).toEqual({
-			allowed: false,
-			response: {
-				id: "invoke-local",
-				type: "response",
-				command: "invoke_ui_action",
-				success: false,
-				error: "UI action not available over remote host: review.pr",
-			},
-		});
-		expect(
-			getIrohRemoteRpcFilterResult(
-				JSON.stringify({
-					id: "completion-local",
-					type: "get_ui_action_completions",
-					action: "review.pr",
-					argument: "target",
-				}),
-			),
-		).toEqual({
-			allowed: false,
-			response: {
-				id: "completion-local",
-				type: "response",
-				command: "get_ui_action_completions",
-				success: false,
-				error: "UI action not available over remote host: review.pr",
-			},
-		});
+		for (const action of ["review.pr.extra", "review.commitment"]) {
+			expect(
+				getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${action}-1`, type: "invoke_ui_action", action })),
+			).toEqual({
+				allowed: false,
+				response: {
+					id: `${action}-1`,
+					type: "response",
+					command: "invoke_ui_action",
+					success: false,
+					error: `UI action not available over remote host: ${action}`,
+				},
+			});
+		}
 		expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: "get_messages-1", type: "get_messages" }))).toEqual({
 			allowed: false,
 			response: {

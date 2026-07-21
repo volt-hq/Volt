@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,10 +9,14 @@ import type { ExtensionFactory } from "../../src/core/extensions/index.ts";
 import {
 	buildReviewPrompt,
 	createWorkingTreeGuard,
+	executeReviewWorkflow,
 	formatReviewForNewSession,
 	listBaseBranches,
 	listRecentCommits,
+	MAX_GITHUB_PR_NUMBER,
+	MAX_REVIEW_COMMIT_REF_BYTES,
 	MAX_REVIEW_DIFF_CHARS,
+	normalizeReviewPullRequestNumber,
 	parseReviewCommandArgs,
 	parseReviewOutput,
 	type ResolvedReview,
@@ -428,7 +432,9 @@ describe("resolveReviewTarget", () => {
 		if ("error" in result) {
 			throw new Error(result.error);
 		}
-		expect(result.diffCommand).toBe("git diff --cached; git diff");
+		expect(result.diffCommand).toBe(
+			"git diff --no-textconv --no-ext-diff --cached; git diff --no-textconv --no-ext-diff",
+		);
 		expect(result.diff).toContain("+staged content");
 	});
 
@@ -491,7 +497,7 @@ describe("resolveReviewTarget", () => {
 			throw new Error(result.error);
 		}
 		expect(result.description).toBe("branch changes vs origin/main");
-		expect(result.diffCommand).toBe("git diff origin/main...HEAD");
+		expect(result.diffCommand).toBe("git diff --no-textconv --no-ext-diff origin/main...HEAD");
 		expect(result.diff).toContain("+feature");
 	});
 
@@ -508,21 +514,163 @@ describe("resolveReviewTarget", () => {
 			throw new Error(result.error);
 		}
 		expect(result.description).toBe("branch changes vs origin/main");
-		expect(result.diffCommand).toBe("git diff origin/main...HEAD");
+		expect(result.diffCommand).toBe("git diff --no-textconv --no-ext-diff origin/main...HEAD");
 		expect(result.diff).toContain("+feature");
 	});
 
-	it("resolves a single commit", async () => {
+	it("normalizes canonical pull request numbers and rejects malformed selectors", () => {
+		expect(normalizeReviewPullRequestNumber(undefined)).toEqual({});
+		expect(normalizeReviewPullRequestNumber("   ")).toEqual({});
+		expect(normalizeReviewPullRequestNumber(" 42 ")).toEqual({ number: "42" });
+		expect(normalizeReviewPullRequestNumber(String(MAX_GITHUB_PR_NUMBER))).toEqual({
+			number: String(MAX_GITHUB_PR_NUMBER),
+		});
+		for (const number of ["0", "-1", "+1", "01", "1.0", "1e2", " 1 2 ", String(MAX_GITHUB_PR_NUMBER + 1)]) {
+			expect(normalizeReviewPullRequestNumber(number)).toEqual({
+				error: `PR number must be a canonical positive decimal no greater than ${MAX_GITHUB_PR_NUMBER}.`,
+			});
+		}
+	});
+
+	it("provides stable remote pull request errors without exposing GitHub CLI diagnostics", async () => {
+		const repo = createRepo();
+		const binDir = join(repo, "bin");
+		mkdirSync(binDir);
+		const ghPath = join(binDir, "gh");
+		writeFileSync(ghPath, "#!/bin/sh\necho 'private-repository.example' >&2\nexit 1\n");
+		chmodSync(ghPath, 0o755);
+		const originalPath = process.env.PATH;
+		process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
+		try {
+			const result = await resolveReviewTarget({ kind: "pr", number: "42" }, repo);
+			expect(result).toEqual({
+				error: "gh pr view failed: private-repository.example",
+				remoteError: "Could not load pull request metadata with GitHub CLI.",
+			});
+		} finally {
+			if (originalPath === undefined) {
+				delete process.env.PATH;
+			} else {
+				process.env.PATH = originalPath;
+			}
+		}
+	});
+
+	it("returns stable remote errors for uncommitted and branch diff failures", async () => {
+		const uncommittedRepo = createRepo();
+		writeFileSync(join(uncommittedRepo, ".git", "index"), "invalid index\n");
+		const uncommittedResult = await resolveReviewTarget({ kind: "uncommitted" }, uncommittedRepo);
+		expect(uncommittedResult).toMatchObject({
+			remoteError: "Could not load the uncommitted changes diff.",
+		});
+		if (!("error" in uncommittedResult)) {
+			throw new Error("expected uncommitted diff failure");
+		}
+		expect(uncommittedResult.error).toContain("git diff failed:");
+
+		const branchRepo = createRepo();
+		git(branchRepo, "checkout", "-b", "feature");
+		writeFileSync(join(branchRepo, "file.txt"), "one\nfeature\n");
+		git(branchRepo, "add", "file.txt");
+		git(branchRepo, "commit", "-m", "feature change");
+		const headResult = spawnSync("git", ["rev-parse", "HEAD"], { cwd: branchRepo, encoding: "utf-8" });
+		if (headResult.status !== 0) {
+			throw new Error(`git rev-parse HEAD failed: ${headResult.stderr}`);
+		}
+		const head = headResult.stdout.trim();
+		rmSync(join(branchRepo, ".git", "objects", head.slice(0, 2), head.slice(2)));
+		const branchResult = await resolveReviewTarget({ kind: "branch", base: "main" }, branchRepo);
+		expect(branchResult).toMatchObject({ remoteError: "Could not load the branch diff." });
+		if (!("error" in branchResult)) {
+			throw new Error("expected branch diff failure");
+		}
+		expect(branchResult.error).toContain("git diff failed:");
+	});
+
+	it("resolves a commit ref to a canonical object id before showing it", async () => {
 		const repo = createRepo();
 		writeFileSync(join(repo, "file.txt"), "one\ntwo\n");
 		git(repo, "add", "file.txt");
 		git(repo, "commit", "-m", "second");
-		const result = await resolveReviewTarget({ kind: "commit", sha: "HEAD" }, repo);
+		const commitResult = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf-8" });
+		if (commitResult.status !== 0) {
+			throw new Error(`git rev-parse HEAD failed: ${commitResult.stderr}`);
+		}
+		const commit = commitResult.stdout.trim();
+		const result = await resolveReviewTarget({ kind: "commit", sha: " HEAD~0 " }, repo);
 		if ("error" in result) {
 			throw new Error(result.error);
 		}
-		expect(result.description).toBe("commit HEAD");
+		expect(result).toMatchObject({
+			description: `commit ${commit}`,
+			workflowDescription: `commit ${commit}`,
+			diffCommand: `git show --stat --patch --diff-merges=first-parent --no-textconv --no-ext-diff ${commit}`,
+		});
 		expect(result.diff).toContain("+two");
+	});
+
+	it("rejects option-like commit refs without writing files", async () => {
+		const repo = createRepo();
+		const outputPath = join(repo, "injected.patch");
+		const result = await resolveReviewTarget({ kind: "commit", sha: `--output=${outputPath}` }, repo);
+		expect(result).toEqual({ error: "Commit ref was not found or does not resolve to a commit." });
+		expect(existsSync(outputPath)).toBe(false);
+	});
+
+	it("rejects non-commit objects and oversized refs", async () => {
+		const repo = createRepo();
+		const blobPath = join(repo, "blob.txt");
+		writeFileSync(blobPath, "blob\n");
+		const blobResult = spawnSync("git", ["hash-object", "-w", blobPath], { cwd: repo, encoding: "utf-8" });
+		if (blobResult.status !== 0) {
+			throw new Error(`git hash-object failed: ${blobResult.stderr}`);
+		}
+		await expect(resolveReviewTarget({ kind: "commit", sha: blobResult.stdout.trim() }, repo)).resolves.toEqual({
+			error: "Commit ref was not found or does not resolve to a commit.",
+		});
+		await expect(
+			resolveReviewTarget({ kind: "commit", sha: "x".repeat(MAX_REVIEW_COMMIT_REF_BYTES + 1) }, repo),
+		).resolves.toEqual({ error: `Commit ref exceeds ${MAX_REVIEW_COMMIT_REF_BYTES} UTF-8 bytes.` });
+	});
+
+	it("does not execute configured textconv commands for Git-backed review diffs", async () => {
+		const repo = createRepo();
+		const sentinelPath = join(repo, "textconv-ran");
+		const textconvPath = join(repo, "textconv.sh");
+		writeFileSync(textconvPath, `#!/bin/sh\ntouch '${sentinelPath}'\ncat "$1"\n`);
+		chmodSync(textconvPath, 0o755);
+		git(repo, "config", "diff.review-test.textconv", textconvPath);
+		writeFileSync(join(repo, ".gitattributes"), "file.txt diff=review-test\n");
+		git(repo, "add", ".gitattributes");
+		git(repo, "commit", "-m", "configure attributes");
+		writeFileSync(join(repo, "file.txt"), "one\ntwo\n");
+		git(repo, "add", "file.txt");
+		git(repo, "commit", "-m", "target commit");
+
+		const commitResult = await resolveReviewTarget({ kind: "commit", sha: "HEAD" }, repo);
+		if ("error" in commitResult) {
+			throw new Error(commitResult.error);
+		}
+		expect(commitResult.diff).toContain("+two");
+		expect(existsSync(sentinelPath)).toBe(false);
+
+		writeFileSync(join(repo, "file.txt"), "one\ntwo\nthree\n");
+		const uncommittedResult = await resolveReviewTarget({ kind: "uncommitted" }, repo);
+		if ("error" in uncommittedResult) {
+			throw new Error(uncommittedResult.error);
+		}
+		expect(uncommittedResult.diff).toContain("+three");
+		expect(existsSync(sentinelPath)).toBe(false);
+
+		git(repo, "checkout", "-b", "feature");
+		git(repo, "add", "file.txt");
+		git(repo, "commit", "-m", "feature change");
+		const branchResult = await resolveReviewTarget({ kind: "branch", base: "main" }, repo);
+		if ("error" in branchResult) {
+			throw new Error(branchResult.error);
+		}
+		expect(branchResult.diff).toContain("+three");
+		expect(existsSync(sentinelPath)).toBe(false);
 	});
 
 	it("resolves a merge commit with first-parent patch hunks", async () => {
@@ -540,10 +688,10 @@ describe("resolveReviewTarget", () => {
 		expect(result.diff).toContain("+feature");
 	});
 
-	it("errors on a commit target without a sha", async () => {
+	it("errors on a commit target without a ref", async () => {
 		const repo = createRepo();
 		const result = await resolveReviewTarget({ kind: "commit" }, repo);
-		expect(result).toEqual({ error: "Missing commit SHA." });
+		expect(result).toEqual({ error: "Missing commit ref." });
 	});
 
 	it("lists local branches with main and master first for the base picker", async () => {
@@ -728,6 +876,46 @@ describe("runReview", () => {
 		expect(result.parsed?.findings[0]?.title).toBe("Bug in file.txt");
 		// The review runs in its own session: the harness session is untouched.
 		expect(harness.session.messages).toHaveLength(0);
+	});
+
+	it("keeps richer pull request metadata out of detached workflow events", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("grep", { pattern: "private body", path: "." }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage(JSON.stringify({ findings: [] })),
+		]);
+		const events: object[] = [];
+
+		const result = await executeReviewWorkflow({
+			prepared: {
+				workflowId: "review:pr",
+				action: "review.pr",
+				target: { kind: "pr", number: "42" },
+				resolution: {
+					...resolved,
+					description: "PR #42 (private title)",
+					workflowDescription: "PR #42",
+					diffCommand: "gh pr diff 42",
+					extraContext: "PR #42: private title\nDescription:\nprivate body",
+				},
+				model: harness.getModel(),
+			},
+			cwd: harness.tempDir,
+			agentDir: join(harness.tempDir, "agent"),
+			authStorage: harness.authStorage,
+			modelRegistry: harness.session.modelRegistry,
+			settingsManager: harness.settingsManager,
+			skipWorkingTreeGuard: true,
+			onEvent: (event) => events.push(event),
+		});
+
+		expect(result.status).toBe("completed");
+		expect(events[0]).toMatchObject({ type: "workflow_start", message: "Reviewing PR #42." });
+		expect(JSON.stringify(events)).not.toContain("private title");
+		expect(JSON.stringify(events)).not.toContain("private body");
 	});
 
 	it("forwards the review session's full event stream via onSessionEvent", async () => {
