@@ -1022,7 +1022,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				newSession: async (options) => runtimeHost.newSession(options),
 				fork: async (entryId, forkOptions) => {
 					const result = await runtimeHost.fork(entryId, forkOptions);
-					return { cancelled: result.cancelled };
+					return { cancelled: result.cancelled, seeded: result.seeded };
 				},
 				navigateTree: async (targetId, options) => {
 					const result = await session.navigateTree(targetId, {

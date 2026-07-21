@@ -756,7 +756,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 		const fixture = createRuntimeFixture(parentCwd, agentDir);
 
 		const result = await fixture.runtime.newSession({ cwd: worktreeCwd, sessionDir: fixture.parentSessionDir });
-		expect(result).toEqual({ cancelled: false });
+		expect(result).toEqual({ cancelled: false, seeded: false });
 		expect(fixture.createdSessions).toHaveLength(1);
 		const created = fixture.createdSessions[0]!;
 		expect(created.cwd).toBe(worktreeCwd);
