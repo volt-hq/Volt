@@ -3715,7 +3715,7 @@ export class InteractiveMode {
 							retryAttempt > 0
 								? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
 								: "Operation aborted";
-						this.streamingMessage.errorMessage = errorMessage;
+						this.streamingMessage = { ...this.streamingMessage, errorMessage };
 					}
 					if (this.streamingRenderCoalescer) {
 						this.streamingRenderCoalescer.finish(this.streamingMessage);
