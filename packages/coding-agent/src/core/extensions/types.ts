@@ -346,18 +346,25 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	/** Wait for the agent to finish streaming */
 	waitForIdle(): Promise<void>;
 
-	/** Start a new session, optionally with initialization. */
+	/**
+	 * Start a new session, optionally with initialization.
+	 *
+	 * `seeded` is `true` only when the requested `withSession` callback ran to
+	 * completion. A non-cancelled result with `seeded: false` means the
+	 * replacement session was applied but the callback was skipped because
+	 * recovered durable client input failed to replay.
+	 */
 	newSession(options?: {
 		parentSession?: string;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-	}): Promise<{ cancelled: boolean }>;
+	}): Promise<{ cancelled: boolean; seeded: boolean }>;
 
-	/** Fork from a specific entry, creating a new session file. */
+	/** Fork from a specific entry, creating a new session file. See `newSession` for `seeded`. */
 	fork(
 		entryId: string,
 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	): Promise<{ cancelled: boolean }>;
+	): Promise<{ cancelled: boolean; seeded: boolean }>;
 
 	/** Navigate to a different point in the session tree. */
 	navigateTree(
@@ -365,11 +372,11 @@ export interface ExtensionCommandContext extends ExtensionContext {
 		options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
 	): Promise<{ cancelled: boolean }>;
 
-	/** Switch to a different session file. */
+	/** Switch to a different session file. See `newSession` for `seeded`. */
 	switchSession(
 		sessionPath: string,
 		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	): Promise<{ cancelled: boolean }>;
+	): Promise<{ cancelled: boolean; seeded: boolean }>;
 
 	/** Reload extensions, skills, prompts, and themes. */
 	reload(): Promise<void>;
@@ -1581,11 +1588,11 @@ export interface ExtensionCommandContextActions {
 		parentSession?: string;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-	}) => Promise<{ cancelled: boolean }>;
+	}) => Promise<{ cancelled: boolean; seeded: boolean }>;
 	fork: (
 		entryId: string,
 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	) => Promise<{ cancelled: boolean }>;
+	) => Promise<{ cancelled: boolean; seeded: boolean }>;
 	navigateTree: (
 		targetId: string,
 		options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
@@ -1593,7 +1600,7 @@ export interface ExtensionCommandContextActions {
 	switchSession: (
 		sessionPath: string,
 		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	) => Promise<{ cancelled: boolean }>;
+	) => Promise<{ cancelled: boolean; seeded: boolean }>;
 	reload: () => Promise<void>;
 }
 

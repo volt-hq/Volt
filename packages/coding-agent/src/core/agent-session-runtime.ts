@@ -86,6 +86,27 @@ export interface AgentSessionReplacementTarget {
 	sessionId: string;
 }
 
+/**
+ * Result of a structural session replacement operation (`newSession`, `fork`,
+ * `switchSession`, `switchSessionById`).
+ *
+ * - `cancelled: true` — an extension cancelled the operation before teardown;
+ *   the current session is unchanged and no `withSession` callback ran.
+ * - `seeded` — the requested `withSession` callback ran to completion against
+ *   the replacement session. Always `false` when no callback was requested,
+ *   and `false` for no-op switches that target the current session (no
+ *   replacement happens, so the callback never runs). When `cancelled` is
+ *   `false`, a callback was requested, and a replacement actually happened,
+ *   `seeded: false` means the recovered-client-input gate failed and skipped
+ *   the callback: the replacement session and its durable queue remain
+ *   authoritative, but nothing was seeded into it. Callers that treat a
+ *   non-cancelled result as "the seed landed" must check `seeded`.
+ */
+export interface AgentSessionReplacementResult {
+	cancelled: boolean;
+	seeded: boolean;
+}
+
 interface AgentSessionStructuralOperation {
 	expectedSession: AgentSession;
 	expectedRevision: number;
@@ -656,7 +677,7 @@ export class AgentSessionRuntime {
 		create: () => Promise<CreateAgentSessionRuntimeResult>;
 		afterApply?: () => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-	}): Promise<void> {
+	}): Promise<{ seeded: boolean }> {
 		// The entire public operation runs in the lifecycle actor. Re-check at the
 		// ownership boundary so a queued command can never prepare against the
 		// session that happened to be current when the command was admitted.
@@ -709,7 +730,7 @@ export class AgentSessionRuntime {
 					throw new Error("Agent session replacement changed before ownership commit");
 				}
 				await transaction?.commit();
-				await this.finishSessionReplacement(options.withSession, transaction);
+				return await this.finishSessionReplacement(options.withSession, transaction);
 			} catch (error: unknown) {
 				const replacementError = error instanceof Error ? error : new Error(String(error));
 				if (applied) {
@@ -818,7 +839,7 @@ export class AgentSessionRuntime {
 	private async finishSessionReplacement(
 		withSession: ((ctx: ReplacedSessionContext) => Promise<void>) | undefined,
 		transaction: AgentSessionReplacementTransaction | undefined,
-	): Promise<void> {
+	): Promise<{ seeded: boolean }> {
 		try {
 			for (const listener of [...this.sessionWillProjectListeners]) {
 				await listener(this.session);
@@ -845,13 +866,17 @@ export class AgentSessionRuntime {
 			} catch {
 				// The replacement session and its durable queue remain authoritative,
 				// but post-replacement callbacks may submit fresh work. Skip them until
-				// a later attach explicitly retries and drains recovery.
-				return;
+				// a later attach explicitly retries and drains recovery, and surface
+				// the skip so callers cannot mistake the non-cancelled result for a
+				// completed `withSession` seed.
+				return { seeded: false };
 			}
 		}
 		if (withSession) {
 			await withSession(this.session.createReplacedSessionContext());
+			return { seeded: true };
 		}
+		return { seeded: false };
 	}
 
 	private async listWorkspaceSessionInfos(): Promise<SessionInfo[]> {
@@ -892,7 +917,10 @@ export class AgentSessionRuntime {
 		return summaries;
 	}
 
-	async switchSessionById(sessionId: string, options?: AgentSessionSwitchOptions): Promise<{ cancelled: boolean }> {
+	async switchSessionById(
+		sessionId: string,
+		options?: AgentSessionSwitchOptions,
+	): Promise<AgentSessionReplacementResult> {
 		return this.runStructuralOperation(
 			(operation) => this.switchSessionByIdWithinOperation(sessionId, options, operation),
 			options?.assertConversationGenerationCurrent,
@@ -903,10 +931,11 @@ export class AgentSessionRuntime {
 		sessionId: string,
 		options: AgentSessionSwitchOptions | undefined,
 		operation: AgentSessionStructuralOperation,
-	): Promise<{ cancelled: boolean }> {
+	): Promise<AgentSessionReplacementResult> {
 		assertValidSessionId(sessionId);
 		if (sessionId === this.session.sessionId) {
-			return { cancelled: false };
+			// No replacement happens, so a requested withSession callback never runs.
+			return { cancelled: false, seeded: false };
 		}
 		const target = (await this.listWorkspaceSessionInfos()).find((session) => session.id === sessionId);
 		this.assertStructuralOperationCurrent(operation);
@@ -920,7 +949,10 @@ export class AgentSessionRuntime {
 		);
 	}
 
-	async switchSession(sessionPath: string, options?: AgentSessionSwitchOptions): Promise<{ cancelled: boolean }> {
+	async switchSession(
+		sessionPath: string,
+		options?: AgentSessionSwitchOptions,
+	): Promise<AgentSessionReplacementResult> {
 		return this.runStructuralOperation(
 			(operation) => this.switchSessionWithinOperation(sessionPath, options, operation),
 			options?.assertConversationGenerationCurrent,
@@ -931,21 +963,22 @@ export class AgentSessionRuntime {
 		sessionPath: string,
 		options: AgentSessionSwitchOptions | undefined,
 		operation: AgentSessionStructuralOperation,
-	): Promise<{ cancelled: boolean }> {
+	): Promise<AgentSessionReplacementResult> {
 		const resolvedSessionPath = resolvePath(sessionPath);
 		if (this.session.sessionFile !== undefined && resolvedSessionPath === this.session.sessionFile) {
-			return { cancelled: false };
+			// No replacement happens, so a requested withSession callback never runs.
+			return { cancelled: false, seeded: false };
 		}
 		const beforeResult = await this.emitBeforeSwitch("resume", sessionPath);
 		this.assertStructuralOperationCurrent(operation);
 		if (beforeResult.cancelled) {
-			return beforeResult;
+			return { cancelled: true, seeded: false };
 		}
 
 		const previousSessionFile = this.session.sessionFile;
 		const sessionManager = SessionManager.open(resolvedSessionPath, undefined, options?.cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
-		await this.replaceCurrentSession({
+		const replacement = await this.replaceCurrentSession({
 			operation,
 			reason: "resume",
 			sessionManager,
@@ -961,7 +994,7 @@ export class AgentSessionRuntime {
 				}),
 			withSession: options?.withSession,
 		});
-		return { cancelled: false };
+		return { cancelled: false, seeded: replacement.seeded };
 	}
 
 	async newSession(options?: {
@@ -974,7 +1007,7 @@ export class AgentSessionRuntime {
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 		/** Internal remote mutation lease revalidated at every awaited replacement boundary. */
 		assertConversationGenerationCurrent?: () => void;
-	}): Promise<{ cancelled: boolean }> {
+	}): Promise<AgentSessionReplacementResult> {
 		return this.runStructuralOperation(
 			(operation) => this.newSessionWithinOperation(options, operation),
 			options?.assertConversationGenerationCurrent,
@@ -993,11 +1026,11 @@ export class AgentSessionRuntime {
 			  }
 			| undefined,
 		operation: AgentSessionStructuralOperation,
-	): Promise<{ cancelled: boolean }> {
+	): Promise<AgentSessionReplacementResult> {
 		const beforeResult = await this.emitBeforeSwitch("new");
 		this.assertStructuralOperationCurrent(operation);
 		if (beforeResult.cancelled) {
-			return beforeResult;
+			return { cancelled: true, seeded: false };
 		}
 
 		const previousSessionFile = this.session.sessionFile;
@@ -1010,7 +1043,7 @@ export class AgentSessionRuntime {
 			sessionManager.newSession({ parentSession: options.parentSession });
 		}
 
-		await this.replaceCurrentSession({
+		const replacement = await this.replaceCurrentSession({
 			operation,
 			reason: "new",
 			sessionManager,
@@ -1031,13 +1064,13 @@ export class AgentSessionRuntime {
 				: undefined,
 			withSession: options?.withSession,
 		});
-		return { cancelled: false };
+		return { cancelled: false, seeded: replacement.seeded };
 	}
 
 	async fork(
 		entryId: string,
 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	): Promise<{ cancelled: boolean; selectedText?: string }> {
+	): Promise<AgentSessionReplacementResult & { selectedText?: string }> {
 		return this.runStructuralOperation((operation) => this.forkWithinOperation(entryId, options, operation));
 	}
 
@@ -1045,12 +1078,12 @@ export class AgentSessionRuntime {
 		entryId: string,
 		options: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> } | undefined,
 		operation: AgentSessionStructuralOperation,
-	): Promise<{ cancelled: boolean; selectedText?: string }> {
+	): Promise<AgentSessionReplacementResult & { selectedText?: string }> {
 		const position = options?.position ?? "before";
 		const beforeResult = await this.emitBeforeFork(entryId, { position });
 		this.assertStructuralOperationCurrent(operation);
 		if (beforeResult.cancelled) {
-			return { cancelled: true };
+			return { cancelled: true, seeded: false };
 		}
 		let targetLeafId: string | null;
 		let selectedText: string | undefined;
@@ -1081,7 +1114,7 @@ export class AgentSessionRuntime {
 			if (!targetLeafId) {
 				const sessionManager = SessionManager.create(this.cwd, sessionDir);
 				sessionManager.newSession({ parentSession: currentSessionFile });
-				await this.replaceCurrentSession({
+				const replacement = await this.replaceCurrentSession({
 					operation,
 					reason: "fork",
 					previousSessionId,
@@ -1097,7 +1130,7 @@ export class AgentSessionRuntime {
 						}),
 					withSession: options?.withSession,
 				});
-				return { cancelled: false, selectedText };
+				return { cancelled: false, seeded: replacement.seeded, selectedText };
 			}
 
 			const sessionManager = SessionManager.open(currentSessionFile, sessionDir);
@@ -1105,7 +1138,7 @@ export class AgentSessionRuntime {
 			if (!forkedSessionPath) {
 				throw new Error("Failed to create forked session");
 			}
-			await this.replaceCurrentSession({
+			const replacement = await this.replaceCurrentSession({
 				operation,
 				reason: "fork",
 				previousSessionId,
@@ -1121,7 +1154,7 @@ export class AgentSessionRuntime {
 					}),
 				withSession: options?.withSession,
 			});
-			return { cancelled: false, selectedText };
+			return { cancelled: false, seeded: replacement.seeded, selectedText };
 		}
 
 		const sessionManager = this.session.sessionManager;
@@ -1130,7 +1163,7 @@ export class AgentSessionRuntime {
 		} else {
 			sessionManager.createBranchedSession(targetLeafId);
 		}
-		await this.replaceCurrentSession({
+		const replacement = await this.replaceCurrentSession({
 			operation,
 			reason: "fork",
 			previousSessionId,
@@ -1146,7 +1179,7 @@ export class AgentSessionRuntime {
 				}),
 			withSession: options?.withSession,
 		});
-		return { cancelled: false, selectedText };
+		return { cancelled: false, seeded: replacement.seeded, selectedText };
 	}
 
 	/**

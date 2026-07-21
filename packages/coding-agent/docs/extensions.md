@@ -1069,6 +1069,10 @@ const result = await ctx.newSession({
 
 if (result.cancelled) {
   // An extension cancelled the new session
+} else if (!result.seeded) {
+  // The replacement session was applied but your withSession callback was
+  // skipped (recovered durable client input failed to replay). Nothing you
+  // intended to seed reached the new session.
 }
 ```
 
@@ -1076,6 +1080,10 @@ Options:
 - `parentSession`: parent session file to record in the new session header
 - `setup`: mutate the new session's `SessionManager` before `withSession` runs
 - `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `volt` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
+
+Result:
+- `cancelled`: an extension cancelled the operation; the current session is unchanged
+- `seeded`: `true` only when a requested `withSession` callback ran to completion. `cancelled: false` with `seeded: false` after passing `withSession` means the callback did not run: either the switch was a no-op targeting the current session (`switchSession` only), or the replacement was applied but the callback was skipped because recovered durable client input failed to replay. Check `seeded` before assuming your seed landed. `fork()` and `switchSession()` return the same shape.
 
 ### ctx.fork(entryId, options?)
 
@@ -1175,6 +1183,7 @@ Lifecycle and footguns:
 - Captured old `volt` / old command `ctx` session-bound objects are stale after replacement and will throw if used. Use only the `ctx` passed to `withSession` for session-bound work.
 - Previously extracted raw objects are still your responsibility. For example, if you capture `const sm = ctx.sessionManager` before replacement, `sm` is still the old `SessionManager` object. Do not reuse it after replacement.
 - Code in `withSession` should assume any state invalidated by your `session_shutdown` handler is already gone. Only capture plain data that survives shutdown cleanly, such as strings, ids, and serialized config.
+- `withSession` is not guaranteed to run even when the operation is not cancelled: if recovered durable client input fails to replay into the replacement session, the callback is skipped and the result reports `seeded: false`. Check `seeded` whenever your callback delivers state the rest of your flow depends on.
 
 Safe pattern:
 

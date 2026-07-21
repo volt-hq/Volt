@@ -187,7 +187,7 @@ function makeRuntimeHost(options: { seedMessages?: object[] } = {}) {
 					options.seedMessages?.push(message);
 				},
 			});
-			return { cancelled: false };
+			return { cancelled: false, seeded: newSessionOptions?.withSession !== undefined };
 		}),
 		switchSession: vi.fn(async () => ({ cancelled: true })),
 		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
@@ -505,7 +505,7 @@ describe("RPC mode detached review actions", () => {
 
 	test("a declined open keeps the review available in the retained ring", async () => {
 		const runtimeHost = makeRuntimeHost();
-		vi.mocked(runtimeHost.newSession).mockResolvedValue({ cancelled: true });
+		vi.mocked(runtimeHost.newSession).mockResolvedValue({ cancelled: true, seeded: false });
 		const { transport, writes, getLineHandler, getCloseHandler } = createCollectingTransport();
 		const { modePromise } = await startMode(runtimeHost, transport);
 		const lineHandler = getLineHandler();
@@ -531,6 +531,66 @@ describe("RPC mode detached review actions", () => {
 
 		// A declined open must not consume the record: the review stays listed
 		// and its findings stay fetchable and openable.
+		lineHandler(JSON.stringify({ id: "list-1", type: "list_review_workflows" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({
+					id: "list-1",
+					command: "list_review_workflows",
+					success: true,
+					data: expect.objectContaining({
+						workflows: [expect.objectContaining({ workflowId: "review:test", status: "completed" })],
+					}),
+				}),
+			),
+		);
+		lineHandler(JSON.stringify({ id: "result-1", type: "get_review_result", workflowId: "review:test" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({
+					id: "result-1",
+					command: "get_review_result",
+					success: true,
+					data: expect.objectContaining({ workflowId: "review:test", status: "completed" }),
+				}),
+			),
+		);
+
+		getCloseHandler()?.();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("a skipped seed fails the open and keeps the review available in the retained ring", async () => {
+		const runtimeHost = makeRuntimeHost();
+		// Simulate the recovered-client-input gate: the replacement session was
+		// applied, but the withSession seed callback was skipped.
+		vi.mocked(runtimeHost.newSession).mockResolvedValue({ cancelled: false, seeded: false });
+		const { transport, writes, getLineHandler, getCloseHandler } = createCollectingTransport();
+		const { modePromise } = await startMode(runtimeHost, transport);
+		const lineHandler = getLineHandler();
+
+		lineHandler(JSON.stringify({ id: "review-1", type: "invoke_ui_action", action: "review.uncommitted" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({ type: "workflow_end", workflowId: "review:test", status: "completed" }),
+			),
+		);
+
+		lineHandler(JSON.stringify({ id: "open-1", type: "open_review_session", workflowId: "review:test" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({
+					id: "open-1",
+					command: "open_review_session",
+					success: false,
+					error: expect.stringContaining("the seed was skipped"),
+				}),
+			),
+		);
+
+		// The findings were never seeded into the replacement session, so the
+		// record must stay retained: listings keep advertising the review and its
+		// result stays fetchable so clients can retry the open.
 		lineHandler(JSON.stringify({ id: "list-1", type: "list_review_workflows" }));
 		await vi.waitFor(() =>
 			expect(writes).toContainEqual(

@@ -1386,6 +1386,13 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 		});
 		if (newSessionResult.cancelled) {
 			await options.session.sendCustomMessage(reviewMessage);
+		} else if (!newSessionResult.seeded) {
+			// The replacement session was applied, but the recovered-client-input
+			// gate skipped the seed callback: the findings were never delivered
+			// anywhere. Fail loudly instead of reporting a seeded review session.
+			throw new Error(
+				"Review completed, but seeding the findings was skipped: recovered client input failed to replay in the replacement session.",
+			);
 		}
 		const completedResult = {
 			status: "completed" as const,

@@ -81,7 +81,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 				newSession: async (newSessionOptions) => runtimeHost.newSession(newSessionOptions),
 				fork: async (entryId, forkOptions) => {
 					const result = await runtimeHost.fork(entryId, forkOptions);
-					return { cancelled: result.cancelled };
+					return { cancelled: result.cancelled, seeded: result.seeded };
 				},
 				navigateTree: async (targetId, navigateOptions) => {
 					const result = await session.navigateTree(targetId, {

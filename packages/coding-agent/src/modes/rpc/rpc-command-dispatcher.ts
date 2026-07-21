@@ -249,7 +249,7 @@ export async function handleRpcCommand(
 		case "new_session": {
 			const newSessionOptions = command.parentSession ? { parentSession: command.parentSession } : undefined;
 			const result = await runSessionNewHostAction(context.createHostActionContext(), newSessionOptions);
-			return createRpcSuccessResponse(id, "new_session", result);
+			return createRpcSuccessResponse(id, "new_session", { cancelled: result.cancelled });
 		}
 
 		// =================================================================
@@ -432,13 +432,23 @@ export async function handleRpcCommand(
 					await sessionContext.sendMessage(seedMessage);
 				},
 			});
+			if (!result.cancelled && !result.seeded) {
+				// The replacement session was applied but the recovered-client-input
+				// gate skipped the seed callback, so the findings were never seeded.
+				// Fail the open and keep the record retained so clients can retry.
+				return createRpcErrorResponse(
+					id,
+					"open_review_session",
+					`Review session was opened without findings: recovered client input failed to replay, so the seed was skipped. The review remains available: ${command.workflowId}`,
+				);
+			}
 			// The findings now live in the seeded session, so consume the retained
 			// terminal record: list_review_workflows must stop advertising a review
 			// that was already acted on, or every reconciling client re-surfaces an
 			// "open findings" affordance that would seed a duplicate session. A
-			// declined open keeps the review available; a failed seed throws above
-			// and also keeps it.
-			if (!result.cancelled) {
+			// declined open keeps the review available; a failed or skipped seed
+			// errors above and also keeps it.
+			if (result.seeded) {
 				runtimeHost.reviewWorkflows.consume(command.workflowId);
 			}
 			return createRpcSuccessResponse(id, "open_review_session", { cancelled: result.cancelled });
@@ -855,7 +865,7 @@ export async function handleRpcCommand(
 			if (!result.cancelled) {
 				await context.rebindSession();
 			}
-			return createRpcSuccessResponse(id, "switch_session", result);
+			return createRpcSuccessResponse(id, "switch_session", { cancelled: result.cancelled });
 		}
 
 		case "switch_session_by_id": {
@@ -865,7 +875,7 @@ export async function handleRpcCommand(
 			if (!result.cancelled) {
 				await context.rebindSession();
 			}
-			return createRpcSuccessResponse(id, "switch_session_by_id", result);
+			return createRpcSuccessResponse(id, "switch_session_by_id", { cancelled: result.cancelled });
 		}
 
 		case "fork": {

@@ -104,7 +104,7 @@ describe("regression #2860: replaced session callbacks", () => {
 					newSession: async (options) => runtime.newSession(options),
 					fork: async (entryId, options) => {
 						const result = await runtime.fork(entryId, options);
-						return { cancelled: result.cancelled };
+						return { cancelled: result.cancelled, seeded: result.seeded };
 					},
 					navigateTree: async (targetId, options) => {
 						const result = await session.navigateTree(targetId, {

@@ -1659,7 +1659,7 @@ export class InteractiveMode {
 							this.editor.setText(result.selectedText ?? "");
 							this.showStatus("Forked to new session");
 						}
-						return { cancelled: result.cancelled };
+						return { cancelled: result.cancelled, seeded: result.seeded };
 					} catch (error: unknown) {
 						return this.handleFatalRuntimeError("Failed to fork session", error);
 					}
@@ -6515,7 +6515,7 @@ export class InteractiveMode {
 	private async handleResumeSession(
 		sessionPath: string,
 		options?: Parameters<ExtensionCommandContext["switchSession"]>[1],
-	): Promise<{ cancelled: boolean }> {
+	): Promise<{ cancelled: boolean; seeded: boolean }> {
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
@@ -6537,7 +6537,7 @@ export class InteractiveMode {
 				const selectedCwd = await this.promptForMissingSessionCwd(error);
 				if (!selectedCwd) {
 					this.showStatus("Resume cancelled");
-					return { cancelled: true };
+					return { cancelled: true, seeded: false };
 				}
 				const result = await this.runtimeHost.switchSession(sessionPath, {
 					cwdOverride: selectedCwd,

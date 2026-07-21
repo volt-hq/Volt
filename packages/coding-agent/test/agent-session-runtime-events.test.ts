@@ -181,7 +181,10 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const publish = vi.spyOn(runtimeHost.conversationProjectionFeed, "commitSourceRebind");
 		events.length = 0;
 
-		await expect(runtimeHost.switchSession(currentSessionFile!)).resolves.toEqual({ cancelled: false });
+		await expect(runtimeHost.switchSession(currentSessionFile!)).resolves.toEqual({
+			cancelled: false,
+			seeded: false,
+		});
 
 		expect(runtimeHost.session).toBe(originalSession);
 		expect(events).toEqual([]);
@@ -782,12 +785,13 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		await runtimeHost.startRecoveredClientInputs();
 		const phases: string[] = [];
 
-		await runtimeHost.switchSession(targetFile!, {
+		const switchResult = await runtimeHost.switchSession(targetFile!, {
 			withSession: async (ctx) => {
 				phases.push(runtimeHost.session.sessionManager.getClientInput("replacement-older")?.state ?? "missing");
 				await ctx.sendUserMessage("fresh callback input");
 			},
 		});
+		expect(switchResult).toEqual({ cancelled: false, seeded: true });
 
 		const userTexts = runtimeHost.session.messages
 			.filter((message) => message.role === "user")
@@ -817,7 +821,10 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			.spyOn(AgentSession.prototype, "resumeRecoveredClientInputs")
 			.mockRejectedValueOnce(new Error("injected recovery failure"));
 		try {
-			await runtimeHost.switchSession(targetManager.getSessionFile()!, { withSession });
+			const result = await runtimeHost.switchSession(targetManager.getSessionFile()!, { withSession });
+			// The replacement applied, but the skipped callback must be surfaced so
+			// callers cannot mistake the non-cancelled result for a completed seed.
+			expect(result).toEqual({ cancelled: false, seeded: false });
 			expect(withSession).not.toHaveBeenCalled();
 			await expect(
 				runtimeHost.session.prompt("fresh", { clientMessageId: "fresh-after-failed-recovery" }),
@@ -891,7 +898,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				newSession: (options) => runtimeHost.newSession(options),
 				fork: async (entryId, options) => {
 					const result = await runtimeHost.fork(entryId, options);
-					return { cancelled: result.cancelled };
+					return { cancelled: result.cancelled, seeded: result.seeded };
 				},
 				navigateTree: async (targetId, options) => {
 					const result = await originalSession.navigateTree(targetId, options);
@@ -1291,13 +1298,13 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		events.length = 0;
 		cancelNextFork = true;
 		const cancelResult = await runtimeHost.fork(userMessage.entryId);
-		expect(cancelResult).toEqual({ cancelled: true });
+		expect(cancelResult).toEqual({ cancelled: true, seeded: false });
 		expect(events).toEqual([{ type: "session_before_fork", entryId: userMessage.entryId, position: "before" }]);
 
 		events.length = 0;
 		cancelNextFork = true;
 		const cancelAtResult = await runtimeHost.fork("missing-entry", { position: "at" });
-		expect(cancelAtResult).toEqual({ cancelled: true });
+		expect(cancelAtResult).toEqual({ cancelled: true, seeded: false });
 		expect(events).toEqual([{ type: "session_before_fork", entryId: "missing-entry", position: "at" }]);
 	});
 });
