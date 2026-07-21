@@ -80,6 +80,7 @@ import type {
 	RpcMcpToolsResponseSchema,
 	RpcMessageImageSchema,
 	RpcMessageImagesResponseSchema,
+	RpcTranscriptEntryTextResponseSchema,
 } from "./schema/responses.ts";
 import type {
 	RpcActiveCompactionSchema,
@@ -329,6 +330,8 @@ export type RpcTranscriptEntryEvent = Static<typeof RpcTranscriptEntryEventSchem
 /** One recovered image block: an ImageContent record plus its position on the message. */
 export type RpcMessageImage = Static<typeof RpcMessageImageSchema>;
 export type RpcMessageImagesResponse = Static<typeof RpcMessageImagesResponseSchema>;
+/** One bounded chunk of a transcript entry's sanitized canonical text (get_transcript_entry_text). */
+export type RpcTranscriptEntryTextResponse = Static<typeof RpcTranscriptEntryTextResponseSchema>;
 
 /**
  * Host keep-awake (prevent sleep) state as reported to phones. Deliberately

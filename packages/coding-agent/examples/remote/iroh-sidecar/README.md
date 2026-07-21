@@ -36,10 +36,9 @@ npm run iroh:poc:revoke -- <node-id>    # revoke a paired client through the wra
 volt remote revoke <node-id>            # revoke a paired client through the product CLI
 ```
 
-Pass extra host/client flags after `--`, for example:
+Pass extra client flags after `--`, for example:
 
 ```bash
-npm run iroh:poc:host:volt -- --relay default --no-pairing
 npm run iroh:poc:client -- "<ticket>" --message "List top-level files."
 ```
 
@@ -179,17 +178,17 @@ Interactive commands:
 - `/quit` or `/exit` exits the client.
 - Ctrl+C aborts a running prompt; Ctrl+C while idle exits.
 
-The default relay mode is suitable for cross-network testing; the ticket carries the relay mode to the client.
+The daemon's default `production` relay mode is suitable for cross-network testing; the ticket carries the relay configuration to the client.
 
 ## Relay mode
 
-The default is `--relay default`, which keeps saved-host reconnect tickets usable across host restarts. For explicit LAN-only testing:
+The daemon defaults to `production` relay mode on the Volt-operated relay fleet. Set `VOLT_IROH_RELAY_MODE` to `disabled` for LAN-only connections, `development` for the public n0 development relays, or `production` before starting the daemon. For explicit LAN-only testing:
 
 ```bash
-npm run iroh:poc:host -- --relay disabled --once
+VOLT_IROH_RELAY_MODE=disabled volt daemon start
 ```
 
-The ticket records the relay mode and the client uses the same preset. Use the default relay mode for real app validation; same-machine tests do not prove relay reachability.
+The ticket records the running daemon's relay configuration and the client uses the same relays. Use `production` mode for real app validation; same-machine tests do not prove relay reachability.
 
 ## Security notes
 

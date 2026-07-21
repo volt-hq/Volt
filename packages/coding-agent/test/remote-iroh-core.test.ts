@@ -904,6 +904,7 @@ describe("Iroh remote core helpers", () => {
 			"get_state",
 			"get_transcript",
 			"get_message_images",
+			"get_transcript_entry_text",
 			"get_mcp_capabilities",
 			"list_mcp_servers",
 			"get_mcp_server",

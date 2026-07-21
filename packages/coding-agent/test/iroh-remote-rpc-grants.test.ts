@@ -95,6 +95,9 @@ describe("Iroh remote RPC grants", () => {
 			}),
 		).toEqual(["host.manage.v1"]);
 		expect(getIrohRemoteRpcCommandCapabilities({ type: "get_transcript" })).toEqual(["conversation.observe.v1"]);
+		expect(getIrohRemoteRpcCommandCapabilities({ type: "get_transcript_entry_text" })).toEqual([
+			"conversation.observe.v1",
+		]);
 		expect(getIrohRemoteRpcCommandCapabilities({ type: "set_model", persistDefault: false })).toEqual([
 			"model.select.v1",
 		]);

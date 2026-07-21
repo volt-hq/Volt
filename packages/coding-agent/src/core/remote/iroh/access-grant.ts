@@ -152,6 +152,7 @@ const OBSERVE_COMMANDS = new Set([
 	"list_review_workflows",
 	"report_stream_discontinuity",
 	"get_message_images",
+	"get_transcript_entry_text",
 	"get_ui_capabilities",
 	"get_ui_actions",
 	"get_ui_action_completions",

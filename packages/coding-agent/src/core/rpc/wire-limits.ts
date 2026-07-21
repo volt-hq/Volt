@@ -80,6 +80,12 @@ export const RPC_TRANSCRIPT_PAGE_DEFAULT_ITEMS = 100;
 export const RPC_TRANSCRIPT_PAGE_MAX_ITEMS = 200;
 /** Serialized budget for one remote transcript page: half the ordered feed's queue envelope. */
 export const REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES = 2 * 1024 * 1024;
+/**
+ * Scalar cap on one remote transcript item's projected text and on one
+ * get_transcript_entry_text continuation chunk. Clients page a truncated
+ * entry's canonical text in chunks of this size.
+ */
+export const IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS = 12_000;
 
 // ============================================================================
 // Message-image recovery paging (get_message_images)
@@ -146,6 +152,7 @@ export const RPC_REMOTE_ERROR_STRINGS = [
 	"invalid_workspace_payload",
 	"session_mismatch",
 	"unexpected_session_id",
+	"unknown_entry",
 	"unknown_live_activity_token",
 	"unsupported_on_workspace_discovery_stream",
 	"unsupported_on_workspace_management_stream",
