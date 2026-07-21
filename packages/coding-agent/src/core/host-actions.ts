@@ -431,6 +431,7 @@ export function registerBuiltinHostActions(registry: HostActionRegistry): HostAc
 				type: "string",
 				required: false,
 				placeholder: "main",
+				completion: "gitBranches",
 			},
 		],
 		destructive: false,

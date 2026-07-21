@@ -392,7 +392,9 @@ describe("HostActionRegistry", () => {
 				requiresConfirmation: true,
 				remoteSafe: true,
 				slash: { name: "review", example: "/review branch [base]" },
-				args: [expect.objectContaining({ name: "base", type: "string", required: false })],
+				args: [
+					expect.objectContaining({ name: "base", type: "string", required: false, completion: "gitBranches" }),
+				],
 			}),
 		);
 
