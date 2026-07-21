@@ -1,4 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { type Api, fauxAssistantMessage, type Model, type ThinkingLevelMap } from "@hansjm10/volt-ai";
 import { describe, expect, test, vi } from "vitest";
@@ -1056,11 +1059,13 @@ describe("runRpcMode", () => {
 		const prompt = vi.fn(async (_message: string, options?: PromptOptions) => {
 			options?.preflightResult?.({ success: true, outcome: "admitted" });
 		});
+		const repo = createTestGitRepo(["feature/login"]);
 		const runtimeHost = createRuntimeHost(dispose, async () => {}, {
 			commands: [
 				createCommand("deploy", "deploy", "Deploy", sourceInfo),
 				createCommand("unsafe", "unsafe", "Unsafe side effect", sourceInfo, false),
 			],
+			cwd: repo,
 			isStreaming: true,
 			newSession: vi.fn(async () => ({ cancelled: false })),
 			prompts: [
@@ -1157,8 +1162,12 @@ describe("runRpcMode", () => {
 					requiresConfirmation: true,
 					remoteSafe: true,
 					slash: { name: "review", example: "/review branch [base]" },
+					args: [expect.objectContaining({ name: "base", type: "string", completion: "gitBranches" })],
 				}),
 			);
+			await expect(client.getUiActionCompletions(REVIEW_BRANCH_ACTION_ID, "base", "feat")).resolves.toEqual([
+				{ value: "feature/login" },
+			]);
 			expect((await client.getUiActions("palette")).map((action) => action.id)).toEqual([
 				SESSION_NEW_ACTION_ID,
 				extensionAction.id,
@@ -1228,6 +1237,7 @@ describe("runRpcMode", () => {
 			]);
 		} finally {
 			await client.stop();
+			rmSync(repo, { recursive: true, force: true });
 		}
 		await expect(modePromise).resolves.toBeUndefined();
 		expect(dispose).toHaveBeenCalledOnce();
@@ -1774,6 +1784,55 @@ describe("createInProcessRpcClient", () => {
 		expect(dispose).toHaveBeenCalledOnce();
 	});
 
+	test("serves git branch completions for the review.branch base argument", async () => {
+		const repo = createTestGitRepo(["feature/login", "zeta"]);
+		const noRepoDir = mkdtempSync(join(tmpdir(), "volt-rpc-norepo-"));
+		const runtimeHost = createRuntimeHost(
+			vi.fn(async () => {}),
+			async () => {},
+			{ cwd: repo },
+		);
+		const client = await createInProcessRpcClient(runtimeHost);
+
+		try {
+			const actions = await client.getUiActions("all");
+			const reviewBranchAction = actions.find((action) => action.id === REVIEW_BRANCH_ACTION_ID);
+			expect(reviewBranchAction?.args).toEqual([
+				expect.objectContaining({ name: "base", type: "string", required: false, completion: "gitBranches" }),
+			]);
+
+			await expect(client.getUiActionCompletions(REVIEW_BRANCH_ACTION_ID, "base", "")).resolves.toEqual([
+				{ value: "main" },
+				{ value: "feature/login" },
+				{ value: "zeta" },
+			]);
+			await expect(client.getUiActionCompletions(REVIEW_BRANCH_ACTION_ID, "base", "FEAT")).resolves.toEqual([
+				{ value: "feature/login" },
+			]);
+			await expect(client.getUiActionCompletions(REVIEW_BRANCH_ACTION_ID, "missing", "")).rejects.toThrow(
+				"UI action argument not available: missing",
+			);
+			// Built-in args without a completion source serve an empty list.
+			await expect(client.getUiActionCompletions(SESSION_RENAME_ACTION_ID, "name", "")).resolves.toEqual([]);
+		} finally {
+			await client.stop();
+		}
+
+		const noRepoRuntimeHost = createRuntimeHost(
+			vi.fn(async () => {}),
+			async () => {},
+			{ cwd: noRepoDir },
+		);
+		const noRepoClient = await createInProcessRpcClient(noRepoRuntimeHost);
+		try {
+			await expect(noRepoClient.getUiActionCompletions(REVIEW_BRANCH_ACTION_ID, "base", "")).resolves.toEqual([]);
+		} finally {
+			await noRepoClient.stop();
+			rmSync(repo, { recursive: true, force: true });
+			rmSync(noRepoDir, { recursive: true, force: true });
+		}
+	});
+
 	test("queues prompt-like action invocation while streaming", async () => {
 		const sourceInfo = createSourceInfo("/Users/jordan/project/.volt/agent/prompts/fix-tests.md");
 		const prompt = vi.fn(async (_message: string, options?: PromptOptions) => {
@@ -2127,6 +2186,9 @@ function createRuntimeHost(
 					(resources.commands ?? []).find((command) => command.invocationName === name || command.name === name),
 				),
 			},
+			sessionManager: {
+				getCwd: vi.fn(() => resources.cwd ?? tmpdir()),
+			},
 			promptTemplates: resources.prompts ?? [],
 			modelRegistry,
 			settingsManager,
@@ -2148,6 +2210,28 @@ function createRuntimeHost(
 			return operation((this as unknown as AgentSessionRuntime).session);
 		},
 	} as unknown as AgentSessionRuntime;
+}
+
+function gitInTestRepo(cwd: string, ...args: string[]): void {
+	const result = spawnSync("git", args, { cwd, encoding: "utf-8" });
+	if (result.status !== 0) {
+		throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+	}
+}
+
+function createTestGitRepo(branches: string[]): string {
+	const dir = mkdtempSync(join(tmpdir(), "volt-rpc-branches-"));
+	gitInTestRepo(dir, "init", "--initial-branch=main");
+	gitInTestRepo(dir, "config", "user.email", "test@example.com");
+	gitInTestRepo(dir, "config", "user.name", "Test");
+	gitInTestRepo(dir, "config", "commit.gpgsign", "false");
+	writeFileSync(join(dir, "file.txt"), "one\n");
+	gitInTestRepo(dir, "add", "file.txt");
+	gitInTestRepo(dir, "commit", "-m", "initial");
+	for (const branch of branches) {
+		gitInTestRepo(dir, "branch", branch);
+	}
+	return dir;
 }
 
 function createCompactionResult() {

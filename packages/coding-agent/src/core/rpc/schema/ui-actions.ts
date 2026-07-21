@@ -69,7 +69,7 @@ export const UiActionArgumentDescriptorSchema = Type.Object(
 		hint: Type.Optional(Type.String()),
 		defaultValue: Type.Optional(UiActionScalarSchema),
 		options: Type.Optional(Type.Array(UiActionOptionDescriptorSchema)),
-		completion: Type.Optional(openStringEnum(["commandArguments"])),
+		completion: Type.Optional(openStringEnum(["commandArguments", "gitBranches"])),
 	},
 	{ additionalProperties: false },
 );
