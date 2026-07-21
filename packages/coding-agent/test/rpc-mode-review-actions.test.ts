@@ -11,6 +11,15 @@ interface ExecuteReviewWorkflowMockOptions {
 	onEvent?: (event: Record<string, unknown>) => void;
 }
 
+interface PreparedReviewWorkflowMock {
+	workflowId: string;
+	action: string;
+	target: { kind: string };
+	resolution: { description: string; diffCommand: string; diff: string; truncated: boolean };
+	model: { id: string; provider: string };
+	modelWarning?: string;
+}
+
 type ExecuteReviewWorkflowMockResult =
 	| { status: "cancelled" }
 	| { status: "failed"; errorMessage: string }
@@ -64,13 +73,15 @@ const reviewMocks = vi.hoisted(() => {
 		defaultResolution,
 		emitStandardEvents,
 		emitWorkflowStart,
-		prepareReviewWorkflow: vi.fn(async (options: { target: { kind: string } }) => ({
-			workflowId: "review:test",
-			action: "review.uncommitted",
-			target: options.target,
-			resolution: defaultResolution,
-			model: { id: "test-model", provider: "test" },
-		})),
+		prepareReviewWorkflow: vi.fn(
+			async (options: { target: { kind: string } }): Promise<PreparedReviewWorkflowMock> => ({
+				workflowId: "review:test",
+				action: "review.uncommitted",
+				target: options.target,
+				resolution: defaultResolution,
+				model: { id: "test-model", provider: "test" },
+			}),
+		),
 		executeReviewWorkflow: vi.fn(
 			async (options: ExecuteReviewWorkflowMockOptions): Promise<ExecuteReviewWorkflowMockResult> => {
 				emitWorkflowStart(options);
@@ -335,6 +346,105 @@ describe("RPC mode detached review actions", () => {
 				}),
 			),
 		);
+
+		getCloseHandler()?.();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("returns pull request preflight failures without accepting or emitting workflow events", async () => {
+		reviewMocks.prepareReviewWorkflow.mockRejectedValueOnce(
+			new Error("PR number must be a canonical positive decimal no greater than 2147483647."),
+		);
+		const runtimeHost = makeRuntimeHost();
+		const { transport, writes, getLineHandler, getCloseHandler } = createCollectingTransport();
+		const { modePromise } = await startMode(runtimeHost, transport, { requireRemoteSafeUiActions: true });
+
+		getLineHandler()(
+			JSON.stringify({
+				id: "review-pr-invalid",
+				type: "invoke_ui_action",
+				action: "review.pr",
+				args: { number: "--repo" },
+			}),
+		);
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual({
+				id: "review-pr-invalid",
+				type: "response",
+				command: "invoke_ui_action",
+				success: false,
+				error: "PR number must be a canonical positive decimal no greater than 2147483647.",
+			}),
+		);
+		expect(reviewMocks.prepareReviewWorkflow).toHaveBeenCalledWith(
+			expect.objectContaining({
+				target: { kind: "pr", number: "--repo" },
+				requireProjectTrust: true,
+				sanitizeRemoteErrors: true,
+			}),
+		);
+		expect(writes).not.toContainEqual(expect.objectContaining({ type: "workflow_start" }));
+		expect(writes).not.toContainEqual(
+			expect.objectContaining({ data: expect.objectContaining({ status: "accepted" }) }),
+		);
+
+		getCloseHandler()?.();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("keeps model and provider diagnostics out of remote accepted responses and retained failures", async () => {
+		reviewMocks.prepareReviewWorkflow.mockResolvedValueOnce({
+			workflowId: "review:private-errors",
+			action: "review.uncommitted",
+			target: { kind: "uncommitted" },
+			resolution: reviewMocks.defaultResolution,
+			model: { id: "test-model", provider: "test" },
+			modelWarning: 'reviewModel "private/provider-model" not found or not authenticated',
+		});
+		reviewMocks.executeReviewWorkflow.mockResolvedValueOnce({
+			status: "failed",
+			errorMessage: "provider https://private-provider.example rejected secret-model",
+		});
+		const runtimeHost = makeRuntimeHost();
+		const { transport, writes, getLineHandler, getCloseHandler } = createCollectingTransport();
+		const { modePromise } = await startMode(runtimeHost, transport, { requireRemoteSafeUiActions: true });
+		const lineHandler = getLineHandler();
+
+		lineHandler(JSON.stringify({ id: "review-private", type: "invoke_ui_action", action: "review.uncommitted" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({
+					id: "review-private",
+					success: true,
+					data: expect.objectContaining({ status: "accepted", message: "Review started" }),
+				}),
+			),
+		);
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({
+					type: "workflow_end",
+					workflowId: "review:private-errors",
+					status: "failed",
+					message: "Review failed: The review could not be completed.",
+				}),
+			),
+		);
+		lineHandler(JSON.stringify({ id: "list-private", type: "list_review_workflows" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({
+					id: "list-private",
+					success: true,
+					data: {
+						workflows: [expect.objectContaining({ errorMessage: "The review could not be completed." })],
+					},
+				}),
+			),
+		);
+		expect(JSON.stringify(writes)).not.toContain("private/provider-model");
+		expect(JSON.stringify(writes)).not.toContain("private-provider.example");
+		expect(JSON.stringify(writes)).not.toContain("secret-model");
 
 		getCloseHandler()?.();
 		await expect(modePromise).resolves.toBeUndefined();

@@ -6,6 +6,8 @@ import {
 	CONTEXT_COMPACT_SLASH_ALIAS,
 	HostActionRegistry,
 	REVIEW_BRANCH_ACTION_ID,
+	REVIEW_COMMIT_ACTION_ID,
+	REVIEW_PR_ACTION_ID,
 	REVIEW_UNCOMMITTED_ACTION_ID,
 	RUN_CANCEL_ACTION_ID,
 	registerBuiltinHostActions,
@@ -192,6 +194,8 @@ describe("HostActionRegistry", () => {
 			THINKING_FAST_MODE_ACTION_ID,
 			REVIEW_UNCOMMITTED_ACTION_ID,
 			REVIEW_BRANCH_ACTION_ID,
+			REVIEW_PR_ACTION_ID,
+			REVIEW_COMMIT_ACTION_ID,
 		]);
 		expect(descriptors.find((descriptor) => descriptor.id === RUN_CANCEL_ACTION_ID)).toEqual(
 			expect.objectContaining({
@@ -397,6 +401,30 @@ describe("HostActionRegistry", () => {
 				],
 			}),
 		);
+		expect(descriptors.find((descriptor) => descriptor.id === REVIEW_PR_ACTION_ID)).toEqual(
+			expect.objectContaining({
+				label: "Review pull request",
+				description: expect.stringContaining("GitHub credentials and network"),
+				category: "review",
+				presentation: expect.objectContaining({ kind: "card", group: "Review", priority: 80 }),
+				requiresConfirmation: true,
+				remoteSafe: true,
+				slash: { name: "review", example: "/review pr [number]" },
+				args: [expect.objectContaining({ name: "number", type: "string", required: false })],
+			}),
+		);
+		expect(descriptors.find((descriptor) => descriptor.id === REVIEW_COMMIT_ACTION_ID)).toEqual(
+			expect.objectContaining({
+				label: "Review commit",
+				description: expect.stringContaining("workspace history"),
+				category: "review",
+				presentation: expect.objectContaining({ kind: "card", group: "Review", priority: 70 }),
+				requiresConfirmation: true,
+				remoteSafe: true,
+				slash: { name: "review", example: "/review commit <ref>" },
+				args: [expect.objectContaining({ name: "ref", type: "string", required: true })],
+			}),
+		);
 
 		await expect(registry.invoke(REVIEW_UNCOMMITTED_ACTION_ID, context, {})).resolves.toEqual({
 			action: REVIEW_UNCOMMITTED_ACTION_ID,
@@ -414,6 +442,12 @@ describe("HostActionRegistry", () => {
 			actionsChanged: true,
 			message: "Review complete: 2 findings; fresh session created with findings",
 		});
+		await expect(
+			registry.invoke(REVIEW_PR_ACTION_ID, context, { number: " 42 " }, { requireRemoteSafe: true }),
+		).resolves.toMatchObject({ action: REVIEW_PR_ACTION_ID, status: "completed" });
+		await expect(
+			registry.invoke(REVIEW_COMMIT_ACTION_ID, context, { ref: "HEAD~1" }, { requireRemoteSafe: true }),
+		).resolves.toMatchObject({ action: REVIEW_COMMIT_ACTION_ID, status: "completed" });
 
 		expect(runReviewAction).toHaveBeenCalledWith(
 			{ kind: "uncommitted" },
@@ -421,6 +455,14 @@ describe("HostActionRegistry", () => {
 		);
 		expect(runReviewAction).toHaveBeenCalledWith(
 			{ kind: "branch", base: "main" },
+			{ remote: true, requireConfirmation: true },
+		);
+		expect(runReviewAction).toHaveBeenCalledWith(
+			{ kind: "pr", number: "42" },
+			{ remote: true, requireConfirmation: true },
+		);
+		expect(runReviewAction).toHaveBeenCalledWith(
+			{ kind: "commit", sha: "HEAD~1" },
 			{ remote: true, requireConfirmation: true },
 		);
 	});
@@ -477,6 +519,9 @@ describe("HostActionRegistry", () => {
 				{ enabled: "yes" },
 			),
 		).rejects.toThrow('UI action argument "enabled" must be a boolean');
+		await expect(registry.invoke(REVIEW_PR_ACTION_ID, idleContext, { number: null })).rejects.toThrow(
+			'UI action argument "number" must be a string',
+		);
 		await expect(
 			registry.invoke(
 				REVIEW_BRANCH_ACTION_ID,

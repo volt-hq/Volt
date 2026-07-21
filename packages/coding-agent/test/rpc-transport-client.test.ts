@@ -11,6 +11,8 @@ import type { ResolvedCommand } from "../src/core/extensions/types.ts";
 import {
 	CONTEXT_COMPACT_ACTION_ID,
 	REVIEW_BRANCH_ACTION_ID,
+	REVIEW_COMMIT_ACTION_ID,
+	REVIEW_PR_ACTION_ID,
 	REVIEW_UNCOMMITTED_ACTION_ID,
 	RUN_CANCEL_ACTION_ID,
 	SESSION_NEW_ACTION_ID,
@@ -569,6 +571,8 @@ describe("Iroh remote RPC filter", () => {
 			THINKING_FAST_MODE_ACTION_ID,
 			REVIEW_UNCOMMITTED_ACTION_ID,
 			REVIEW_BRANCH_ACTION_ID,
+			REVIEW_PR_ACTION_ID,
+			REVIEW_COMMIT_ACTION_ID,
 		]) {
 			const builtInInvocation = {
 				id: `${action}-1`,
@@ -613,39 +617,22 @@ describe("Iroh remote RPC filter", () => {
 				},
 			});
 		}
-		expect(
-			getIrohRemoteRpcFilterResult(
-				JSON.stringify({ id: "local-action-1", type: "invoke_ui_action", action: "review.pr", args: {} }),
-			),
-		).toEqual({
-			allowed: false,
-			response: {
-				id: "local-action-1",
-				type: "response",
-				command: "invoke_ui_action",
-				success: false,
-				error: "UI action not available over remote host: review.pr",
-			},
-		});
-		expect(
-			getIrohRemoteRpcFilterResult(
-				JSON.stringify({
-					id: "local-completion-1",
-					type: "get_ui_action_completions",
-					action: "review.pr",
-					argument: "target",
-				}),
-			),
-		).toEqual({
-			allowed: false,
-			response: {
-				id: "local-completion-1",
-				type: "response",
-				command: "get_ui_action_completions",
-				success: false,
-				error: "UI action not available over remote host: review.pr",
-			},
-		});
+		for (const action of ["review.pr.extra", "review.commitment"]) {
+			expect(
+				getIrohRemoteRpcFilterResult(
+					JSON.stringify({ id: `${action}-1`, type: "invoke_ui_action", action, args: {} }),
+				),
+			).toEqual({
+				allowed: false,
+				response: {
+					id: `${action}-1`,
+					type: "response",
+					command: "invoke_ui_action",
+					success: false,
+					error: `UI action not available over remote host: ${action}`,
+				},
+			});
+		}
 
 		for (const type of ["get_messages"]) {
 			expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${type}-1`, type }))).toEqual({
@@ -1127,12 +1114,22 @@ describe("runRpcMode", () => {
 			const fastModeAction = actions.find((action) => action.id === THINKING_FAST_MODE_ACTION_ID);
 			const reviewChangesAction = actions.find((action) => action.id === REVIEW_UNCOMMITTED_ACTION_ID);
 			const reviewBranchAction = actions.find((action) => action.id === REVIEW_BRANCH_ACTION_ID);
+			const reviewPullRequestAction = actions.find((action) => action.id === REVIEW_PR_ACTION_ID);
+			const reviewCommitAction = actions.find((action) => action.id === REVIEW_COMMIT_ACTION_ID);
 			expect(actions.find((action) => action.id === CONTEXT_COMPACT_ACTION_ID)).toBeUndefined();
 			expect(actions.find((action) => action.id === SESSION_RENAME_ACTION_ID)).toBeUndefined();
 			if (!extensionAction || !promptAction || !skillAction) {
 				throw new Error("expected remote extension, prompt, and skill actions");
 			}
-			if (!newSessionAction || !cancelAction || !fastModeAction || !reviewChangesAction || !reviewBranchAction) {
+			if (
+				!newSessionAction ||
+				!cancelAction ||
+				!fastModeAction ||
+				!reviewChangesAction ||
+				!reviewBranchAction ||
+				!reviewPullRequestAction ||
+				!reviewCommitAction
+			) {
 				throw new Error("expected remote-safe built-in actions");
 			}
 			expect(newSessionAction.remoteSafe).toBe(true);
@@ -1163,6 +1160,26 @@ describe("runRpcMode", () => {
 					remoteSafe: true,
 					slash: { name: "review", example: "/review branch [base]" },
 					args: [expect.objectContaining({ name: "base", type: "string", completion: "gitBranches" })],
+				}),
+			);
+			expect(reviewPullRequestAction).toEqual(
+				expect.objectContaining({
+					description: expect.stringContaining("GitHub credentials and network"),
+					category: "review",
+					presentation: expect.objectContaining({ kind: "card", group: "Review" }),
+					requiresConfirmation: true,
+					remoteSafe: true,
+					args: [expect.objectContaining({ name: "number", type: "string", required: false })],
+				}),
+			);
+			expect(reviewCommitAction).toEqual(
+				expect.objectContaining({
+					description: expect.stringContaining("workspace history"),
+					category: "review",
+					presentation: expect.objectContaining({ kind: "card", group: "Review" }),
+					requiresConfirmation: true,
+					remoteSafe: true,
+					args: [expect.objectContaining({ name: "ref", type: "string", required: true })],
 				}),
 			);
 			await expect(client.getUiActionCompletions(REVIEW_BRANCH_ACTION_ID, "base", "feat")).resolves.toEqual([
@@ -1221,8 +1238,8 @@ describe("runRpcMode", () => {
 			await expect(
 				client.getUiActionCompletions(CONTEXT_COMPACT_ACTION_ID, "customInstructions", "preserve"),
 			).rejects.toThrow(`UI action not available over remote host: ${CONTEXT_COMPACT_ACTION_ID}`);
-			await expect(client.invokeUiAction("review.pr", { args: {} })).rejects.toThrow(
-				"UI action not available over remote host: review.pr",
+			await expect(client.invokeUiAction(REVIEW_PR_ACTION_ID, { args: { number: "--repo" } })).rejects.toThrow(
+				"PR number must be a canonical positive decimal no greater than 2147483647.",
 			);
 			expect(prompt).toHaveBeenCalledTimes(3);
 			expect(prompt.mock.calls.map(([message]) => message)).toEqual([
@@ -1410,6 +1427,28 @@ describe("createInProcessRpcClient", () => {
 					requiresConfirmation: true,
 					slash: { name: "review", example: "/review branch [base]" },
 				}),
+				expect.objectContaining({
+					id: REVIEW_PR_ACTION_ID,
+					label: "Review pull request",
+					source: "builtin",
+					category: "review",
+					presentation: expect.objectContaining({ kind: "card", group: "Review" }),
+					enabled: true,
+					remoteSafe: true,
+					requiresConfirmation: true,
+					args: [expect.objectContaining({ name: "number", type: "string", required: false })],
+				}),
+				expect.objectContaining({
+					id: REVIEW_COMMIT_ACTION_ID,
+					label: "Review commit",
+					source: "builtin",
+					category: "review",
+					presentation: expect.objectContaining({ kind: "card", group: "Review" }),
+					enabled: true,
+					remoteSafe: true,
+					requiresConfirmation: true,
+					args: [expect.objectContaining({ name: "ref", type: "string", required: true })],
+				}),
 			]);
 			await expect(client.getUiActions("primary")).resolves.toEqual([
 				expect.objectContaining({
@@ -1422,6 +1461,14 @@ describe("createInProcessRpcClient", () => {
 				}),
 				expect.objectContaining({
 					id: REVIEW_BRANCH_ACTION_ID,
+					presentation: expect.objectContaining({ kind: "card" }),
+				}),
+				expect.objectContaining({
+					id: REVIEW_PR_ACTION_ID,
+					presentation: expect.objectContaining({ kind: "card" }),
+				}),
+				expect.objectContaining({
+					id: REVIEW_COMMIT_ACTION_ID,
 					presentation: expect.objectContaining({ kind: "card" }),
 				}),
 			]);
@@ -1627,6 +1674,8 @@ describe("createInProcessRpcClient", () => {
 				THINKING_FAST_MODE_ACTION_ID,
 				REVIEW_UNCOMMITTED_ACTION_ID,
 				REVIEW_BRANCH_ACTION_ID,
+				REVIEW_PR_ACTION_ID,
+				REVIEW_COMMIT_ACTION_ID,
 			]);
 			expect(dynamicActions).toHaveLength(4);
 			expect(dynamicActions.map((action) => action.id)).toEqual([
@@ -1670,6 +1719,8 @@ describe("createInProcessRpcClient", () => {
 				expect.objectContaining({ id: THINKING_FAST_MODE_ACTION_ID }),
 				expect.objectContaining({ id: REVIEW_UNCOMMITTED_ACTION_ID }),
 				expect.objectContaining({ id: REVIEW_BRANCH_ACTION_ID }),
+				expect.objectContaining({ id: REVIEW_PR_ACTION_ID }),
+				expect.objectContaining({ id: REVIEW_COMMIT_ACTION_ID }),
 			]);
 			expect((await client.getUiActions("palette")).map((action) => action.id)).toEqual([
 				SESSION_NEW_ACTION_ID,

@@ -14,7 +14,7 @@ export function validateUiActionArgs(
 	const normalized: Record<string, UiActionScalar> = {};
 	for (const descriptor of descriptors) {
 		const value = record[descriptor.name];
-		if (value === undefined || value === null) {
+		if (value === undefined) {
 			if (descriptor.required === true) {
 				throw new Error(`Missing required UI action argument: ${descriptor.name}`);
 			}

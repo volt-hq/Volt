@@ -13,6 +13,7 @@
  * completes the caller starts a fresh session seeded only with the findings.
  */
 
+import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -90,9 +91,17 @@ export function parseReviewCommandArgs(argsText: string): {
 // ============================================================================
 
 /** A review target resolved to a concrete diff plus reviewer-facing metadata. */
+interface ReviewResolutionError {
+	error: string;
+	/** Stable replacement for subprocess diagnostics returned to remote clients. */
+	remoteError?: string;
+}
+
 export interface ResolvedReview {
 	/** Human-readable description, e.g. `branch changes vs main`. */
 	description: string;
+	/** Bounded description safe for detached workflow events and retained RPC results. */
+	workflowDescription?: string;
 	/** Command the reviewer can re-run to reproduce the diff. */
 	diffCommand: string;
 	/** The diff text (possibly truncated, see `truncated`). */
@@ -105,6 +114,72 @@ export interface ResolvedReview {
 
 /** Maximum diff characters embedded inline in the review prompt. */
 export const MAX_REVIEW_DIFF_CHARS = 150_000;
+/** Maximum UTF-8 bytes accepted for a commit revision expression. */
+export const MAX_REVIEW_COMMIT_REF_BYTES = 1024;
+/** GitHub's GraphQL `Int` ceiling for pull request numbers. */
+export const MAX_GITHUB_PR_NUMBER = 2_147_483_647;
+
+const MAX_GITHUB_PR_NUMBER_TEXT = String(MAX_GITHUB_PR_NUMBER);
+const CANONICAL_GIT_OBJECT_ID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+export function normalizeReviewPullRequestNumber(value: string | undefined): { number?: string } | { error: string } {
+	const number = value?.trim();
+	if (!number) {
+		return {};
+	}
+	const exceedsMaximum =
+		number.length > MAX_GITHUB_PR_NUMBER_TEXT.length ||
+		(number.length === MAX_GITHUB_PR_NUMBER_TEXT.length && number > MAX_GITHUB_PR_NUMBER_TEXT);
+	if (exceedsMaximum || !/^[1-9]\d*$/.test(number)) {
+		return {
+			error: `PR number must be a canonical positive decimal no greater than ${MAX_GITHUB_PR_NUMBER}.`,
+		};
+	}
+	return { number };
+}
+
+interface PullRequestInfo {
+	number: number;
+	title: string;
+	body: string;
+	baseRefName: string;
+	headRefName: string;
+	url: string;
+}
+
+function parsePullRequestInfo(stdout: string): PullRequestInfo | undefined {
+	let value: unknown;
+	try {
+		value = JSON.parse(stdout);
+	} catch {
+		return undefined;
+	}
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return undefined;
+	}
+	const record = value as Record<string, unknown>;
+	if (
+		typeof record.number !== "number" ||
+		!Number.isInteger(record.number) ||
+		record.number < 1 ||
+		record.number > MAX_GITHUB_PR_NUMBER ||
+		typeof record.title !== "string" ||
+		typeof record.body !== "string" ||
+		typeof record.baseRefName !== "string" ||
+		typeof record.headRefName !== "string" ||
+		typeof record.url !== "string"
+	) {
+		return undefined;
+	}
+	return {
+		number: record.number,
+		title: record.title,
+		body: record.body,
+		baseRefName: record.baseRefName,
+		headRefName: record.headRefName,
+		url: record.url,
+	};
+}
 
 interface CommandResult {
 	ok: boolean;
@@ -209,7 +284,7 @@ async function resolveBaseRef(base: string, cwd: string): Promise<string | undef
 export async function resolveReviewTarget(
 	target: ReviewTarget,
 	cwd: string,
-): Promise<ResolvedReview | { error: string }> {
+): Promise<ResolvedReview | ReviewResolutionError> {
 	const inRepo = await runCommand("git", ["rev-parse", "--is-inside-work-tree"], cwd);
 	if (!inRepo.ok) {
 		return { error: "Not inside a git repository." };
@@ -217,19 +292,22 @@ export async function resolveReviewTarget(
 
 	switch (target.kind) {
 		case "uncommitted": {
-			let diffResult = await runCommand("git", ["diff", "HEAD"], cwd);
-			let diffCommand = "git diff HEAD";
+			let diffResult = await runCommand("git", ["diff", "--no-textconv", "--no-ext-diff", "HEAD"], cwd);
+			let diffCommand = "git diff --no-textconv --no-ext-diff HEAD";
 			if (!diffResult.ok) {
 				// No commits yet: combine the staged diff (index vs the empty tree)
 				// with the worktree diff so staged changes are not missed.
-				const stagedResult = await runCommand("git", ["diff", "--cached"], cwd);
-				const worktreeResult = await runCommand("git", ["diff"], cwd);
+				const stagedResult = await runCommand("git", ["diff", "--no-textconv", "--no-ext-diff", "--cached"], cwd);
+				const worktreeResult = await runCommand("git", ["diff", "--no-textconv", "--no-ext-diff"], cwd);
 				if (!stagedResult.ok || !worktreeResult.ok) {
 					const failed = stagedResult.ok ? worktreeResult : stagedResult;
-					return { error: `git diff failed: ${failed.stderr.trim()}` };
+					return {
+						error: `git diff failed: ${failed.stderr.trim()}`,
+						remoteError: "Could not load the uncommitted changes diff.",
+					};
 				}
 				diffResult = { ok: true, stdout: stagedResult.stdout + worktreeResult.stdout, stderr: "" };
-				diffCommand = "git diff --cached; git diff";
+				diffCommand = "git diff --no-textconv --no-ext-diff --cached; git diff --no-textconv --no-ext-diff";
 			}
 			const untrackedResult = await runCommand("git", ["ls-files", "--others", "--exclude-standard"], cwd);
 			const untracked = untrackedResult.ok
@@ -262,9 +340,12 @@ export async function resolveReviewTarget(
 			if (!base) {
 				return { error: `Base branch "${requestedBase}" not found.` };
 			}
-			const diffResult = await runCommand("git", ["diff", `${base}...HEAD`], cwd);
+			const diffResult = await runCommand("git", ["diff", "--no-textconv", "--no-ext-diff", `${base}...HEAD`], cwd);
 			if (!diffResult.ok) {
-				return { error: `git diff failed: ${diffResult.stderr.trim()}` };
+				return {
+					error: `git diff failed: ${diffResult.stderr.trim()}`,
+					remoteError: "Could not load the branch diff.",
+				};
 			}
 			if (!diffResult.stdout.trim()) {
 				return { error: `No changes between ${base} and HEAD.` };
@@ -273,14 +354,18 @@ export async function resolveReviewTarget(
 			const { diff, truncated } = truncateDiff(diffResult.stdout);
 			return {
 				description: `branch changes vs ${base}`,
-				diffCommand: `git diff ${base}...HEAD`,
+				diffCommand: `git diff --no-textconv --no-ext-diff ${base}...HEAD`,
 				diff,
 				truncated,
 				extraContext: logResult.ok && logResult.stdout.trim() ? `Commits:\n${logResult.stdout.trim()}` : undefined,
 			};
 		}
 		case "pr": {
-			const numberArgs = target.number ? [target.number] : [];
+			const normalizedNumber = normalizeReviewPullRequestNumber(target.number);
+			if ("error" in normalizedNumber) {
+				return normalizedNumber;
+			}
+			const numberArgs = normalizedNumber.number ? [normalizedNumber.number] : [];
 			const viewResult = await runCommand(
 				"gh",
 				["pr", "view", ...numberArgs, "--json", "number,title,body,baseRefName,headRefName,url"],
@@ -291,32 +376,30 @@ export async function resolveReviewTarget(
 				if (/ENOENT|not found|not recognized/i.test(stderr)) {
 					return { error: "GitHub CLI (gh) is not installed. Install it from https://cli.github.com/" };
 				}
-				return { error: `gh pr view failed: ${stderr}` };
+				return {
+					error: `gh pr view failed: ${stderr}`,
+					remoteError: "Could not load pull request metadata with GitHub CLI.",
+				};
 			}
-			let prInfo: {
-				number: number;
-				title: string;
-				body: string;
-				baseRefName: string;
-				headRefName: string;
-				url: string;
-			};
-			try {
-				prInfo = JSON.parse(viewResult.stdout);
-			} catch {
+			const prInfo = parsePullRequestInfo(viewResult.stdout);
+			if (!prInfo) {
 				return { error: "Could not parse gh pr view output." };
 			}
 			const diffResult = await runCommand("gh", ["pr", "diff", String(prInfo.number)], cwd);
 			if (!diffResult.ok) {
-				return { error: `gh pr diff failed: ${diffResult.stderr.trim()}` };
+				return {
+					error: `gh pr diff failed: ${diffResult.stderr.trim()}`,
+					remoteError: "Could not load the pull request diff with GitHub CLI.",
+				};
 			}
 			if (!diffResult.stdout.trim()) {
 				return { error: `PR #${prInfo.number} has an empty diff.` };
 			}
 			const { diff, truncated } = truncateDiff(diffResult.stdout);
-			const bodyText = prInfo.body?.trim();
+			const bodyText = prInfo.body.trim();
 			return {
 				description: `PR #${prInfo.number} (${prInfo.title})`,
+				workflowDescription: `PR #${prInfo.number}`,
 				diffCommand: `gh pr diff ${prInfo.number}`,
 				diff,
 				truncated,
@@ -333,24 +416,53 @@ export async function resolveReviewTarget(
 			};
 		}
 		case "commit": {
-			if (!target.sha) {
-				return { error: "Missing commit SHA." };
+			const ref = target.sha?.trim();
+			if (!ref) {
+				return { error: "Missing commit ref." };
+			}
+			if (Buffer.byteLength(ref, "utf8") > MAX_REVIEW_COMMIT_REF_BYTES) {
+				return { error: `Commit ref exceeds ${MAX_REVIEW_COMMIT_REF_BYTES} UTF-8 bytes.` };
+			}
+			const resolveResult = await runCommand(
+				"git",
+				["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`],
+				cwd,
+			);
+			if (!resolveResult.ok) {
+				return { error: "Commit ref was not found or does not resolve to a commit." };
+			}
+			const commit = resolveResult.stdout.trim();
+			if (!CANONICAL_GIT_OBJECT_ID_PATTERN.test(commit)) {
+				return { error: "Git returned an invalid canonical commit id." };
 			}
 			// --diff-merges=first-parent: plain `git show` prints no patch hunks
 			// for merge commits; diff against the first parent shows what the
 			// merge brought into the branch. Non-merge commits are unaffected.
 			const diffResult = await runCommand(
 				"git",
-				["show", "--stat", "--patch", "--diff-merges=first-parent", target.sha],
+				[
+					"show",
+					"--stat",
+					"--patch",
+					"--diff-merges=first-parent",
+					"--no-textconv",
+					"--no-ext-diff",
+					"--end-of-options",
+					commit,
+				],
 				cwd,
 			);
 			if (!diffResult.ok) {
-				return { error: `git show failed: ${diffResult.stderr.trim()}` };
+				return {
+					error: `git show failed: ${diffResult.stderr.trim()}`,
+					remoteError: "Could not load the commit diff.",
+				};
 			}
 			const { diff, truncated } = truncateDiff(diffResult.stdout);
 			return {
-				description: `commit ${target.sha}`,
-				diffCommand: `git show --stat --patch --diff-merges=first-parent ${target.sha}`,
+				description: `commit ${commit}`,
+				workflowDescription: `commit ${commit}`,
+				diffCommand: `git show --stat --patch --diff-merges=first-parent --no-textconv --no-ext-diff ${commit}`,
 				diff,
 				truncated,
 			};
@@ -1149,6 +1261,8 @@ export interface PrepareReviewWorkflowOptions {
 	modelRegistry: ModelRegistry;
 	currentModel?: Model<any>;
 	requireProjectTrust?: boolean;
+	/** Replace subprocess diagnostics with stable messages before returning them remotely. */
+	sanitizeRemoteErrors?: boolean;
 }
 
 /** A review workflow that passed preflight and is ready to execute. */
@@ -1174,7 +1288,9 @@ export async function prepareReviewWorkflow(options: PrepareReviewWorkflowOption
 	}
 	const resolution = await resolveReviewTarget(options.target, options.cwd);
 	if ("error" in resolution) {
-		throw new Error(resolution.error);
+		throw new Error(
+			options.sanitizeRemoteErrors && resolution.remoteError ? resolution.remoteError : resolution.error,
+		);
 	}
 	const reviewModel = resolveReviewModel({
 		settingsManager: options.settingsManager,
@@ -1242,7 +1358,7 @@ export async function executeReviewWorkflow(
 		kind: "review",
 		action: prepared.action,
 		title: "Review",
-		message: `Reviewing ${prepared.resolution.description}.`,
+		message: `Reviewing ${prepared.resolution.workflowDescription ?? prepared.resolution.description}.`,
 		status: "running",
 	});
 	let result: ReviewRunResult;
@@ -1480,6 +1596,7 @@ function createReviewWorkflowToolCallId(workflowId: string | undefined, toolCall
 function sanitizeReviewWorkflowToolArgs(
 	toolName: string | undefined,
 	args: unknown,
+	includeStrings: boolean,
 ): Record<string, unknown> | undefined {
 	if (typeof args !== "object" || args === null || Array.isArray(args)) {
 		return undefined;
@@ -1510,7 +1627,7 @@ function sanitizeReviewWorkflowToolArgs(
 		if (!Object.hasOwn(record, key)) {
 			continue;
 		}
-		const value = sanitizeReviewWorkflowArgValue(record[key]);
+		const value = sanitizeReviewWorkflowArgValue(record[key], includeStrings);
 		if (value !== undefined) {
 			sanitized[key] = value;
 		}
@@ -1518,8 +1635,14 @@ function sanitizeReviewWorkflowToolArgs(
 	return Object.keys(sanitized).length > 0 ? sanitized : undefined;
 }
 
-function sanitizeReviewWorkflowArgValue(value: unknown): string | number | boolean | undefined {
+function sanitizeReviewWorkflowArgValue(
+	value: unknown,
+	includeStrings: boolean,
+): string | number | boolean | undefined {
 	if (typeof value === "string") {
+		if (!includeStrings) {
+			return undefined;
+		}
 		const trimmed = value.replace(/\s+/g, " ").trim();
 		if (!trimmed) {
 			return undefined;
@@ -1553,7 +1676,7 @@ function emitReviewWorkflowToolEvent(
 			workflowAction: options.workflowAction,
 			toolCallId: createReviewWorkflowToolCallId(options.workflowId, event.toolCallId),
 			toolName: event.toolName,
-			args: sanitizeReviewWorkflowToolArgs(event.toolName, event.args),
+			args: sanitizeReviewWorkflowToolArgs(event.toolName, event.args, options.workflowAction !== "review.pr"),
 		});
 		return;
 	}
