@@ -236,16 +236,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		time("resourceLoader.reload");
 	}
 
-	// Check if session has existing data to restore
+	// Check if session has existing branch state to restore, including message-free durable policy.
 	const existingSession = sessionManager.buildSessionContext();
-	const hasExistingSession = existingSession.messages.length > 0;
-	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
+	const existingBranch = sessionManager.getBranch();
+	const hasExistingSessionState = existingBranch.length > 0;
+	const hasExistingMessages = existingSession.messages.length > 0;
+	const hasThinkingEntry = existingBranch.some((entry) => entry.type === "thinking_level_change");
 
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;
 
-	// If session has data, try to restore model from it
-	if (!model && hasExistingSession && existingSession.model) {
+	// Restore branch-local model state even before the first conversation message.
+	if (!model && hasExistingSessionState && existingSession.model) {
 		const restoredModel = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
 		if (restoredModel && modelRegistry.hasConfiguredAuth(restoredModel)) {
 			model = restoredModel;
@@ -259,7 +261,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (!model) {
 		const result = await findInitialModel({
 			scopedModels: [],
-			isContinuing: hasExistingSession,
+			isContinuing: hasExistingSessionState,
 			defaultProvider: settingsManager.getDefaultProvider(),
 			defaultModelId: settingsManager.getDefaultModel(),
 			defaultThinkingLevel: settingsManager.getDefaultThinkingLevel(),
@@ -275,8 +277,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	let thinkingLevel = options.thinkingLevel;
 
-	// If session has data, restore thinking level from it
-	if (thinkingLevel === undefined && hasExistingSession) {
+	// Restore branch-local thinking state even before the first conversation message.
+	if (thinkingLevel === undefined && hasExistingSessionState) {
 		thinkingLevel = hasThinkingEntry
 			? (existingSession.thinkingLevel as ThinkingLevel)
 			: (settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL);
@@ -457,10 +459,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 	});
 
-	// Restore messages if session has existing data
-	if (hasExistingSession) {
+	// Restore messages independently from branch-local model/thinking/Fast policy.
+	if (hasExistingMessages) {
 		agent.state.messages = existingSession.messages;
-		if (!hasThinkingEntry) {
+	}
+	if (hasExistingSessionState) {
+		// Explicit startup overrides are branch mutations. Persist them before
+		// AgentSession restores policy so they durably invalidate Fast mode.
+		if (options.model) {
+			sessionManager.appendModelChange(options.model.provider, options.model.id);
+		}
+		if (options.thinkingLevel !== undefined) {
+			sessionManager.appendThinkingLevelChange(thinkingLevel);
+		} else if (!hasThinkingEntry) {
 			sessionManager.appendThinkingLevelChange(thinkingLevel);
 		}
 	} else {

@@ -524,6 +524,11 @@ describe("InteractiveMode profile selector", () => {
 		});
 		try {
 			const setModel = vi.spyOn(session, "setModel");
+			session.setFastModeEnabled(true);
+			const fastStates: boolean[] = [];
+			session.subscribe((event) => {
+				if (event.type === "ui_action_state_changed") fastStates.push(event.state.value === true);
+			});
 			const context = Object.create(InteractiveMode.prototype) as SwitchProfileContext;
 			Object.defineProperties(context, {
 				settingsManager: { value: settingsManager },
@@ -541,6 +546,9 @@ describe("InteractiveMode profile selector", () => {
 			expect(setModel).not.toHaveBeenCalled();
 			expect(session.model).toBe(reasoningModel);
 			expect(session.thinkingLevel).toBe("high");
+			expect(session.fastModeEnabled).toBe(false);
+			expect(session.baseThinkingLevel).toBe("high");
+			expect(fastStates).toEqual([false]);
 		} finally {
 			session.dispose();
 		}

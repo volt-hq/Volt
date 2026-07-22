@@ -253,14 +253,10 @@ describe("HostActionRegistry", () => {
 
 	test("registers Fast mode as a remote-safe session-local thinking toggle", async () => {
 		let thinkingLevel: ThinkingLevel = "high";
-		let fastModeRestoreThinkingLevel: ThinkingLevel | undefined;
-		const setThinkingLevel = vi.fn(
-			(level: ThinkingLevel, _options?: { persistDefault?: boolean; preserveFastMode?: boolean }) => {
-				thinkingLevel = level;
-			},
-		);
-		const setFastModeRestoreThinkingLevel = vi.fn((level: ThinkingLevel | undefined) => {
-			fastModeRestoreThinkingLevel = level;
+		let fastModeEnabled = false;
+		const setFastModeEnabled = vi.fn((enabled: boolean) => {
+			fastModeEnabled = enabled;
+			thinkingLevel = enabled ? "off" : "high";
 		});
 		const session = {
 			isStreaming: false,
@@ -269,8 +265,8 @@ describe("HostActionRegistry", () => {
 			get thinkingLevel() {
 				return thinkingLevel;
 			},
-			get fastModeRestoreThinkingLevel() {
-				return fastModeRestoreThinkingLevel;
+			get fastModeEnabled() {
+				return fastModeEnabled;
 			},
 		};
 		const context = {
@@ -279,8 +275,7 @@ describe("HostActionRegistry", () => {
 			compactContext: vi.fn(async () => createCompactionResult()),
 			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
 			renameSession: vi.fn(() => {}),
-			setThinkingLevel,
-			setFastModeRestoreThinkingLevel,
+			setFastModeEnabled,
 		};
 		const registry = registerBuiltinHostActions(new HostActionRegistry());
 
@@ -308,8 +303,7 @@ describe("HostActionRegistry", () => {
 			actionsChanged: true,
 			message: "Fast mode enabled: thinking off",
 		});
-		expect(setThinkingLevel).toHaveBeenCalledWith("off", { persistDefault: false, preserveFastMode: true });
-		expect(setFastModeRestoreThinkingLevel).toHaveBeenCalledWith("high");
+		expect(setFastModeEnabled).toHaveBeenCalledWith(true);
 
 		await expect(
 			registry.invoke(THINKING_FAST_MODE_ACTION_ID, context, { enabled: false }, { requireRemoteSafe: true }),
@@ -321,8 +315,7 @@ describe("HostActionRegistry", () => {
 			actionsChanged: true,
 			message: "Fast mode disabled: restored high thinking",
 		});
-		expect(setThinkingLevel).toHaveBeenLastCalledWith("high", { persistDefault: false, preserveFastMode: true });
-		expect(setFastModeRestoreThinkingLevel).toHaveBeenLastCalledWith(undefined);
+		expect(setFastModeEnabled).toHaveBeenLastCalledWith(false);
 	});
 
 	test("disables Fast mode when no lower supported thinking level exists", async () => {
@@ -338,8 +331,7 @@ describe("HostActionRegistry", () => {
 			compactContext: vi.fn(async () => createCompactionResult()),
 			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
 			renameSession: vi.fn(() => {}),
-			setThinkingLevel: vi.fn(() => {}),
-			setFastModeRestoreThinkingLevel: vi.fn(() => {}),
+			setFastModeEnabled: vi.fn(() => {}),
 		};
 
 		expect(registry.getDescriptor(THINKING_FAST_MODE_ACTION_ID, context)).toEqual(
@@ -513,8 +505,7 @@ describe("HostActionRegistry", () => {
 						model: createModel({ reasoning: true }),
 						thinkingLevel: "high",
 					},
-					setThinkingLevel: vi.fn(() => {}),
-					setFastModeRestoreThinkingLevel: vi.fn(() => {}),
+					setFastModeEnabled: vi.fn(() => {}),
 				},
 				{ enabled: "yes" },
 			),

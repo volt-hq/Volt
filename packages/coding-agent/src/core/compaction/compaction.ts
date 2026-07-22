@@ -332,6 +332,7 @@ function findValidCutPoints(entries: SessionEntry[], startIndex: number, endInde
 				break;
 			}
 			case "thinking_level_change":
+			case "fast_mode_change":
 			case "model_change":
 			case "compaction":
 			case "branch_summary":

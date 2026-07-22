@@ -1127,11 +1127,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		renameSession: (name) => {
 			commandSession.setSessionName(name);
 		},
-		setThinkingLevel: (level, options) => {
-			commandSession.setThinkingLevel(level, options);
-		},
-		setFastModeRestoreThinkingLevel: (level) => {
-			commandSession.setFastModeRestoreThinkingLevel(level);
+		setFastModeEnabled: (enabled) => {
+			commandSession.setFastModeEnabled(enabled);
 		},
 		runReviewAction: async (target, reviewOptions) => {
 			// Detached review: run the fast preflight inline so target errors fail

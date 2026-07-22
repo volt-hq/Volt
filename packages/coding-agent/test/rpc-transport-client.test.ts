@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { type Api, fauxAssistantMessage, type Model, type ThinkingLevelMap } from "@hansjm10/volt-ai";
 import { describe, expect, test, vi } from "vitest";
-import type { AgentSession, ExtensionBindings, PromptOptions } from "../src/core/agent-session.ts";
+import type { AgentSession, AgentSessionEvent, ExtensionBindings, PromptOptions } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { ResolvedCommand } from "../src/core/extensions/types.ts";
 import {
@@ -32,6 +32,7 @@ import {
 	type RpcExtensionUIRequest,
 	type RpcLineHandler,
 	type RpcTransport,
+	type RpcUiActionStateChangedEvent,
 } from "../src/core/rpc/index.ts";
 import type { Skill } from "../src/core/skills.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
@@ -1538,6 +1539,10 @@ describe("createInProcessRpcClient", () => {
 			thinkingLevel: "high",
 		});
 		const client = await createInProcessRpcClient(runtimeHost);
+		const fastStates: RpcUiActionStateChangedEvent["state"][] = [];
+		client.onEvent((event) => {
+			if (event.type === "ui_action_state_changed") fastStates.push(event.state);
+		});
 
 		try {
 			const actions = await client.getUiActions("all");
@@ -1589,6 +1594,12 @@ describe("createInProcessRpcClient", () => {
 					state: { type: "boolean", value: false, label: "Normal reasoning" },
 				}),
 			);
+			expect(fastStates).toEqual([
+				{ type: "boolean", value: true, label: "Fast: thinking off" },
+				{ type: "boolean", value: false, label: "Normal reasoning" },
+				{ type: "boolean", value: true, label: "Fast: thinking off" },
+				{ type: "boolean", value: false, label: "Normal reasoning" },
+			]);
 		} finally {
 			await client.stop();
 		}
@@ -2144,19 +2155,22 @@ function createRuntimeHost(
 		prompt?: (message: string, options?: PromptOptions) => Promise<void>;
 		prompts?: PromptTemplate[];
 		thinkingLevel?: ThinkingLevel;
-		fastModeRestoreThinkingLevel?: ThinkingLevel;
-		setThinkingLevel?: (
-			level: ThinkingLevel,
-			options?: { persistDefault?: boolean; preserveFastMode?: boolean },
-		) => void;
-		setFastModeRestoreThinkingLevel?: (level: ThinkingLevel | undefined) => void;
+		fastModeEnabled?: boolean;
+		baseThinkingLevel?: ThinkingLevel;
+		setThinkingLevel?: (level: ThinkingLevel, options?: { persistDefault?: boolean }) => void;
+		setFastModeEnabled?: (enabled: boolean) => void;
 		setSessionName?: (name: string) => void;
 		skills?: Skill[];
 	} = {},
 ): AgentSessionRuntime {
-	let thinkingLevel = resources.thinkingLevel ?? "off";
-	let fastModeRestoreThinkingLevel = resources.fastModeRestoreThinkingLevel;
+	let baseThinkingLevel = resources.baseThinkingLevel ?? resources.thinkingLevel ?? "off";
+	let fastModeEnabled = resources.fastModeEnabled ?? false;
+	let thinkingLevel = resources.thinkingLevel ?? (fastModeEnabled ? "off" : baseThinkingLevel);
 	let currentModel = resources.model;
+	const sessionListeners = new Set<(event: AgentSessionEvent) => void>();
+	const emitSessionEvent = (event: AgentSessionEvent): void => {
+		for (const listener of sessionListeners) listener(event);
+	};
 	const authStorage = {};
 	const modelRegistry = {
 		authStorage,
@@ -2171,18 +2185,34 @@ function createRuntimeHost(
 	const resourceLoader = {
 		getSkills: vi.fn(() => ({ skills: resources.skills ?? [], diagnostics: [] })),
 	};
-	const setThinkingLevel = vi.fn(
-		(level: ThinkingLevel, options?: { persistDefault?: boolean; preserveFastMode?: boolean }) => {
-			if (options?.preserveFastMode !== true) {
-				fastModeRestoreThinkingLevel = undefined;
-			}
-			thinkingLevel = level;
-			resources.setThinkingLevel?.(level, options);
-		},
-	);
-	const setFastModeRestoreThinkingLevel = vi.fn((level: ThinkingLevel | undefined) => {
-		fastModeRestoreThinkingLevel = level;
-		resources.setFastModeRestoreThinkingLevel?.(level);
+	const setThinkingLevel = vi.fn((level: ThinkingLevel, options?: { persistDefault?: boolean }) => {
+		const wasFastModeEnabled = fastModeEnabled;
+		thinkingLevel = level;
+		baseThinkingLevel = level;
+		fastModeEnabled = false;
+		resources.setThinkingLevel?.(level, options);
+		if (wasFastModeEnabled) {
+			emitSessionEvent({
+				type: "ui_action_state_changed",
+				action: "thinking.fast_mode",
+				state: { type: "boolean", value: false, label: "Normal reasoning" },
+			});
+		}
+	});
+	const setFastModeEnabled = vi.fn((enabled: boolean) => {
+		if (enabled === fastModeEnabled) return;
+		fastModeEnabled = enabled;
+		thinkingLevel = enabled ? "off" : baseThinkingLevel;
+		resources.setFastModeEnabled?.(enabled);
+		emitSessionEvent({
+			type: "ui_action_state_changed",
+			action: "thinking.fast_mode",
+			state: {
+				type: "boolean",
+				value: enabled,
+				label: enabled ? "Fast: thinking off" : "Normal reasoning",
+			},
+		});
 	});
 	return {
 		cwd: resources.cwd ?? tmpdir(),
@@ -2191,7 +2221,10 @@ function createRuntimeHost(
 		},
 		session: {
 			bindExtensions: vi.fn(bindExtensions),
-			subscribe: vi.fn(() => () => {}),
+			subscribe: vi.fn((listener: (event: AgentSessionEvent) => void) => {
+				sessionListeners.add(listener);
+				return () => sessionListeners.delete(listener);
+			}),
 			agent: {
 				state: {
 					pendingToolExecutions: new Map(),
@@ -2212,8 +2245,11 @@ function createRuntimeHost(
 				currentModel = model;
 				await resources.setModel?.(model, options);
 			}),
-			get fastModeRestoreThinkingLevel() {
-				return fastModeRestoreThinkingLevel;
+			get fastModeEnabled() {
+				return fastModeEnabled;
+			},
+			get baseThinkingLevel() {
+				return baseThinkingLevel;
 			},
 			isStreaming: resources.isStreaming ?? false,
 			isBusy: resources.isStreaming ?? false,
@@ -2248,7 +2284,7 @@ function createRuntimeHost(
 			abort: resources.abort ?? vi.fn(async () => {}),
 			compact: resources.compact ?? vi.fn(async () => createCompactionResult()),
 			setThinkingLevel,
-			setFastModeRestoreThinkingLevel,
+			setFastModeEnabled,
 			setSessionName: resources.setSessionName ?? vi.fn(() => {}),
 		},
 		newSession: resources.newSession ?? vi.fn(async () => ({ cancelled: true })),

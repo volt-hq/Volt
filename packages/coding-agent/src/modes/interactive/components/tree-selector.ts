@@ -359,6 +359,7 @@ class TreeList implements Component {
 				entry.type === "custom" ||
 				entry.type === "model_change" ||
 				entry.type === "thinking_level_change" ||
+				entry.type === "fast_mode_change" ||
 				entry.type === "session_info";
 
 			switch (this.filterMode) {
@@ -602,6 +603,9 @@ class TreeList implements Component {
 			case "thinking_level_change":
 				parts.push("thinking", entry.thinkingLevel);
 				break;
+			case "fast_mode_change":
+				parts.push("fast mode", entry.enabled ? "enabled" : "disabled", entry.baseThinkingLevel);
+				break;
 			case "custom":
 				parts.push("custom", entry.customType);
 				break;
@@ -826,6 +830,12 @@ class TreeList implements Component {
 				break;
 			case "thinking_level_change":
 				result = theme.fg("dim", `[thinking: ${entry.thinkingLevel}]`);
+				break;
+			case "fast_mode_change":
+				result = theme.fg(
+					"dim",
+					`[fast mode: ${entry.enabled ? "enabled" : "disabled"}, base ${entry.baseThinkingLevel}]`,
+				);
 				break;
 			case "custom":
 				result = theme.fg("dim", `[custom: ${entry.customType}]`);

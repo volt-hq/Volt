@@ -26,7 +26,7 @@ export interface HostActionSessionState {
 	isCompacting: boolean;
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
-	fastModeRestoreThinkingLevel?: ThinkingLevel;
+	fastModeEnabled?: boolean;
 }
 
 export interface HostActionDescriptorContext {
@@ -45,8 +45,7 @@ export interface HostActionInvocationContext extends HostActionDescriptorContext
 	newSession(options?: HostActionNewSessionOptions): Promise<HostActionNewSessionResult>;
 	afterSessionSwitch?: () => Promise<void>;
 	renameSession(name: string): void;
-	setThinkingLevel?(level: ThinkingLevel, options?: { persistDefault?: boolean; preserveFastMode?: boolean }): void;
-	setFastModeRestoreThinkingLevel?(level: ThinkingLevel | undefined): void;
+	setFastModeEnabled?(enabled: boolean): void;
 	runReviewAction?(target: ReviewTarget, options: HostActionReviewOptions): Promise<ReviewWorkflowResult>;
 }
 
@@ -593,56 +592,25 @@ export function runThinkingFastModeHostAction(
 	context: HostActionInvocationContext,
 	enabled: boolean,
 ): UiActionInvocationResponse {
-	if (!context.setThinkingLevel || !context.setFastModeRestoreThinkingLevel) {
+	const setFastModeEnabled = context.setFastModeEnabled;
+	if (!setFastModeEnabled) {
 		throw new Error("Fast mode is not available in this host");
 	}
 
-	const isEnabled = isThinkingFastModeEnabled(context.session);
-	if (enabled) {
-		if (isEnabled) {
-			return {
-				action: THINKING_FAST_MODE_ACTION_ID,
-				status: "completed",
-				state: createThinkingFastModeState(context),
-				stateChanged: false,
-				actionsChanged: false,
-				message: "Fast mode already enabled",
-			};
-		}
-
-		const restoreLevel = context.session.thinkingLevel;
-		const targetLevel = getFastModeTargetThinkingLevel(context.session);
-		if (!restoreLevel || !targetLevel) {
-			throw new Error(getThinkingFastModeDisabledReason(context.session));
-		}
-
-		context.setThinkingLevel(targetLevel, { persistDefault: false, preserveFastMode: true });
-		context.setFastModeRestoreThinkingLevel(restoreLevel);
-		return {
-			action: THINKING_FAST_MODE_ACTION_ID,
-			status: "completed",
-			state: createThinkingFastModeState(context),
-			stateChanged: true,
-			actionsChanged: true,
-			message: `Fast mode enabled: ${formatThinkingLevelLabel(context.session.thinkingLevel ?? targetLevel)}`,
-		};
-	}
-
-	const restoreLevel = context.session.fastModeRestoreThinkingLevel;
-	if (restoreLevel !== undefined) {
-		context.setThinkingLevel(restoreLevel, { persistDefault: false, preserveFastMode: true });
-	}
-	context.setFastModeRestoreThinkingLevel(undefined);
+	const wasEnabled = isThinkingFastModeEnabled(context.session);
+	setFastModeEnabled(enabled);
+	const changed = wasEnabled !== isThinkingFastModeEnabled(context.session);
 	return {
 		action: THINKING_FAST_MODE_ACTION_ID,
 		status: "completed",
 		state: createThinkingFastModeState(context),
-		stateChanged: restoreLevel !== undefined,
-		actionsChanged: restoreLevel !== undefined,
-		message:
-			restoreLevel === undefined
-				? "Fast mode already disabled"
-				: `Fast mode disabled: restored ${formatThinkingLevelLabel(context.session.thinkingLevel ?? restoreLevel)}`,
+		stateChanged: changed,
+		actionsChanged: changed,
+		message: changed
+			? enabled
+				? `Fast mode enabled: ${formatThinkingLevelLabel(context.session.thinkingLevel)}`
+				: `Fast mode disabled: restored ${formatThinkingLevelLabel(context.session.thinkingLevel)}`
+			: `Fast mode already ${enabled ? "enabled" : "disabled"}`,
 	};
 }
 
@@ -819,7 +787,7 @@ function isHostSessionBusy(session: HostActionSessionState): boolean {
 }
 
 function isThinkingFastModeEnabled(session: HostActionSessionState): boolean {
-	return session.fastModeRestoreThinkingLevel !== undefined;
+	return session.fastModeEnabled === true;
 }
 
 function getFastModeTargetThinkingLevel(session: HostActionSessionState): ThinkingLevel | undefined {

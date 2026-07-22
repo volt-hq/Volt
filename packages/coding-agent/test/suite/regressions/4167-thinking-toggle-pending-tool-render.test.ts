@@ -119,6 +119,7 @@ function createSessionContext(messages: AgentMessage[]): SessionContext {
 		messages,
 		thinkingLevel: "off",
 		model: null,
+		fastMode: { enabled: false, baseThinkingLevel: "off" },
 	};
 }
 

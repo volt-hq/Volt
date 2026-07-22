@@ -61,7 +61,6 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
-import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
@@ -102,6 +101,7 @@ import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
+import type { UiActionStateDescriptor } from "./rpc/types.ts";
 import type {
 	BranchSummaryEntry,
 	ClientInputCommand,
@@ -218,6 +218,11 @@ export type AgentSessionEvent =
 	| { type: "compaction_start"; reason: CompactionReason }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
+	| {
+			type: "ui_action_state_changed";
+			action: string;
+			state: UiActionStateDescriptor;
+	  }
 	| {
 			type: "compaction_end";
 			reason: CompactionReason;
@@ -364,7 +369,6 @@ interface ToolDefinitionEntry {
 
 interface DefaultPersistenceOptions {
 	persistDefault?: boolean;
-	preserveFastMode?: boolean;
 }
 
 interface LiveClientInputOperation {
@@ -402,6 +406,7 @@ export class ClientInputOutcomeAmbiguousError extends Error {
 
 /** Standard thinking levels */
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const FAST_MODE_TARGET_LEVELS: ThinkingLevel[] = ["off", "minimal", "low"];
 
 // ============================================================================
 // AgentSession Class
@@ -502,7 +507,8 @@ export class AgentSession {
 
 	// Model registry for API key resolution
 	private _modelRegistry: ModelRegistry;
-	private _fastModeRestoreThinkingLevel: ThinkingLevel | undefined;
+	private _fastModeEnabled = false;
+	private _baseThinkingLevel: ThinkingLevel;
 
 	// LSP diagnostics manager (created unless lsp.enabled is false)
 	private _lspManager?: LspManager;
@@ -531,6 +537,10 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._modelRegistry = config.modelRegistry;
+		this._baseThinkingLevel = this.agent.state.thinkingLevel;
+		if (this.sessionManager.getBranch().length > 0) {
+			this._restoreFastModePolicy(this.sessionManager.buildSessionContext().fastMode);
+		}
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
@@ -1297,14 +1307,14 @@ export class AgentSession {
 		return this.agent.state.thinkingLevel;
 	}
 
-	/** Thinking level to restore when session-local Fast mode is disabled. */
-	get fastModeRestoreThinkingLevel(): ThinkingLevel | undefined {
-		return this._fastModeRestoreThinkingLevel;
+	/** Whether the branch-local Fast mode policy is enabled. */
+	get fastModeEnabled(): boolean {
+		return this._fastModeEnabled;
 	}
 
-	/** Set the session-local Fast mode restore marker. */
-	setFastModeRestoreThinkingLevel(level: ThinkingLevel | undefined): void {
-		this._fastModeRestoreThinkingLevel = level;
+	/** Thinking preference restored when Fast mode is disabled. */
+	get baseThinkingLevel(): ThinkingLevel {
+		return this._baseThinkingLevel;
 	}
 
 	/** Whether the session is processing a response or a session-level continuation. */
@@ -1467,7 +1477,9 @@ export class AgentSession {
 
 	/** Update scoped models for cycling */
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
-		this._clearFastModeUnlessPreserved();
+		if (this._fastModeEnabled) {
+			this.setFastModeEnabled(false);
+		}
 		this._scopedModels = scopedModels;
 	}
 
@@ -2811,14 +2823,18 @@ export class AgentSession {
 		const previousModel = this.model;
 		const persistDefault = options?.persistDefault !== false;
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
-		this.agent.state.model = model;
+		const wasFastModeEnabled = this._fastModeEnabled;
 		this.sessionManager.appendModelChange(model.provider, model.id);
+		this._fastModeEnabled = false;
+		this.agent.state.model = model;
 		if (persistDefault) {
 			this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 		}
 
-		// Re-clamp thinking level for new model's capabilities
-		this.setThinkingLevel(thinkingLevel, { persistDefault });
+		this._applyThinkingLevelForModelSwitch(thinkingLevel, persistDefault);
+		if (wasFastModeEnabled) {
+			this._emitFastModeStateChanged();
+		}
 
 		await this._emitModelSelect(model, previousModel, "set");
 	}
@@ -2848,17 +2864,21 @@ export class AgentSession {
 		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
 		const next = scopedModels[nextIndex];
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.thinkingLevel);
+		const wasFastModeEnabled = this._fastModeEnabled;
 
-		// Apply model
-		this.agent.state.model = next.model;
 		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
+		this._fastModeEnabled = false;
+		this.agent.state.model = next.model;
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
 
-		// Apply thinking level.
-		// - Explicit scoped model thinking level overrides current session level
-		// - Undefined scoped model thinking level inherits the current session preference
-		// setThinkingLevel clamps to model capabilities.
-		this.setThinkingLevel(thinkingLevel);
+		if (next.thinkingLevel !== undefined) {
+			this.setThinkingLevel(thinkingLevel);
+		} else {
+			this._applyThinkingLevelForModelSwitch(thinkingLevel);
+		}
+		if (wasFastModeEnabled) {
+			this._emitFastModeStateChanged();
+		}
 
 		await this._emitModelSelect(next.model, currentModel, "cycle");
 
@@ -2878,12 +2898,16 @@ export class AgentSession {
 		const nextModel = availableModels[nextIndex];
 
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
-		this.agent.state.model = nextModel;
+		const wasFastModeEnabled = this._fastModeEnabled;
 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
+		this._fastModeEnabled = false;
+		this.agent.state.model = nextModel;
 		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 
-		// Re-clamp thinking level for new model's capabilities
-		this.setThinkingLevel(thinkingLevel);
+		this._applyThinkingLevelForModelSwitch(thinkingLevel);
+		if (wasFastModeEnabled) {
+			this._emitFastModeStateChanged();
+		}
 
 		await this._emitModelSelect(nextModel, currentModel, "cycle");
 
@@ -2900,28 +2924,35 @@ export class AgentSession {
 	 * Saves to session and settings only if the level actually changes. Settings persistence can be disabled.
 	 */
 	setThinkingLevel(level: ThinkingLevel, options?: DefaultPersistenceOptions): void {
-		this._clearFastModeUnlessPreserved(options);
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
-
-		// Only persist if actually changing
 		const previousLevel = this.agent.state.thinkingLevel;
 		const isChanging = effectiveLevel !== previousLevel;
+		const wasFastModeEnabled = this._fastModeEnabled;
 		const persistDefault = options?.persistDefault !== false;
 
+		if (!isChanging && !wasFastModeEnabled && effectiveLevel === this._baseThinkingLevel) {
+			return;
+		}
+
+		this.sessionManager.appendThinkingLevelChange(effectiveLevel);
+		this._fastModeEnabled = false;
+		this._baseThinkingLevel = effectiveLevel;
 		this.agent.state.thinkingLevel = effectiveLevel;
 
+		if (persistDefault && (this.supportsThinking() || effectiveLevel !== "off")) {
+			this.settingsManager.setDefaultThinkingLevel(effectiveLevel);
+		}
 		if (isChanging) {
-			this.sessionManager.appendThinkingLevelChange(effectiveLevel);
-			if (persistDefault && (this.supportsThinking() || effectiveLevel !== "off")) {
-				this.settingsManager.setDefaultThinkingLevel(effectiveLevel);
-			}
-			this._emit({ type: "thinking_level_changed", level: effectiveLevel });
+			this._emitCommittedEvent({ type: "thinking_level_changed", level: effectiveLevel });
 			void this._extensionRunner.emit({
 				type: "thinking_level_select",
 				level: effectiveLevel,
 				previousLevel,
 			});
+		}
+		if (wasFastModeEnabled) {
+			this._emitFastModeStateChanged();
 		}
 	}
 
@@ -2957,24 +2988,111 @@ export class AgentSession {
 		return !!this.model?.reasoning;
 	}
 
+	/** Commit a branch-local Fast mode transition before publishing its settled state. */
+	setFastModeEnabled(enabled: boolean): void {
+		if (enabled === this._fastModeEnabled) {
+			return;
+		}
+
+		const baseThinkingLevel = this._baseThinkingLevel;
+		const effectiveLevel = enabled ? this._getFastModeTargetThinkingLevel(baseThinkingLevel) : baseThinkingLevel;
+		if (effectiveLevel === undefined) {
+			throw new Error("Current model is already at its fastest supported thinking level.");
+		}
+
+		const previousLevel = this.thinkingLevel;
+		this.sessionManager.appendFastModeChange({ enabled, baseThinkingLevel });
+		this._fastModeEnabled = enabled;
+		this.agent.state.thinkingLevel = this._clampThinkingLevel(effectiveLevel, this.getAvailableThinkingLevels());
+
+		if (this.thinkingLevel !== previousLevel) {
+			this._emitCommittedEvent({ type: "thinking_level_changed", level: this.thinkingLevel });
+			void this._extensionRunner.emit({
+				type: "thinking_level_select",
+				level: this.thinkingLevel,
+				previousLevel,
+			});
+		}
+		this._emitFastModeStateChanged();
+	}
+
 	private _getThinkingLevelForModelSwitch(explicitLevel?: ThinkingLevel): ThinkingLevel {
 		if (explicitLevel !== undefined) {
 			return explicitLevel;
 		}
-		if (!this.supportsThinking()) {
-			return this.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
+		return this._baseThinkingLevel;
+	}
+
+	private _applyThinkingLevelForModelSwitch(level: ThinkingLevel, persistDefault = true): void {
+		const previousLevel = this.thinkingLevel;
+		const availableLevels = this.getAvailableThinkingLevels();
+		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
+		this.agent.state.thinkingLevel = effectiveLevel;
+		if (effectiveLevel !== previousLevel) {
+			if (persistDefault && (this.supportsThinking() || effectiveLevel !== "off")) {
+				this.settingsManager.setDefaultThinkingLevel(effectiveLevel);
+			}
+			this._emitCommittedEvent({ type: "thinking_level_changed", level: effectiveLevel });
+			void this._extensionRunner.emit({
+				type: "thinking_level_select",
+				level: effectiveLevel,
+				previousLevel,
+			});
 		}
-		return this.thinkingLevel;
+	}
+
+	private _getFastModeTargetThinkingLevel(baseThinkingLevel: ThinkingLevel): ThinkingLevel | undefined {
+		if (!this.model) {
+			return undefined;
+		}
+		const baseRank = THINKING_LEVELS.indexOf(baseThinkingLevel);
+		if (baseRank <= 0) {
+			return undefined;
+		}
+		const supportedLevels = this.getAvailableThinkingLevels();
+		return FAST_MODE_TARGET_LEVELS.find((level) => {
+			const targetRank = THINKING_LEVELS.indexOf(level);
+			return supportedLevels.includes(level) && targetRank >= 0 && targetRank < baseRank;
+		});
+	}
+
+	private _restoreFastModePolicy(policy: { enabled: boolean; baseThinkingLevel: string }): void {
+		const baseThinkingLevel = THINKING_LEVELS.includes(policy.baseThinkingLevel as ThinkingLevel)
+			? (policy.baseThinkingLevel as ThinkingLevel)
+			: this.agent.state.thinkingLevel;
+		const fastTarget = policy.enabled ? this._getFastModeTargetThinkingLevel(baseThinkingLevel) : undefined;
+		this._baseThinkingLevel = baseThinkingLevel;
+		this._fastModeEnabled = policy.enabled && fastTarget !== undefined;
+		const restoredLevel = this._fastModeEnabled ? fastTarget! : baseThinkingLevel;
+		this.agent.state.thinkingLevel = this._clampThinkingLevel(restoredLevel, this.getAvailableThinkingLevels());
+	}
+
+	private _emitFastModeStateChanged(): void {
+		this._emitCommittedEvent({
+			type: "ui_action_state_changed",
+			action: "thinking.fast_mode",
+			state: {
+				type: "boolean",
+				value: this._fastModeEnabled,
+				label: this._fastModeEnabled
+					? `Fast: ${this.thinkingLevel === "off" ? "thinking off" : `${this.thinkingLevel} thinking`}`
+					: "Normal reasoning",
+			},
+		});
+	}
+
+	private _emitCommittedEvent(event: AgentSessionEvent): void {
+		for (const listener of this._eventListeners) {
+			try {
+				listener(event);
+			} catch {
+				// Durable state is authoritative; observers cannot roll back a committed transition.
+			}
+		}
 	}
 
 	private _clampThinkingLevel(level: ThinkingLevel, _availableLevels: ThinkingLevel[]): ThinkingLevel {
 		return this.model ? (clampThinkingLevel(this.model, level) as ThinkingLevel) : "off";
-	}
-
-	private _clearFastModeUnlessPreserved(options?: DefaultPersistenceOptions): void {
-		if (options?.preserveFastMode !== true) {
-			this._fastModeRestoreThinkingLevel = undefined;
-		}
 	}
 
 	// =========================================================================
@@ -3745,9 +3863,14 @@ export class AgentSession {
 		}
 
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
-		this.agent.state.model = fallbackModel;
+		const wasFastModeEnabled = this._fastModeEnabled;
 		this.sessionManager.appendModelChange(fallbackModel.provider, fallbackModel.id);
-		this.setThinkingLevel(thinkingLevel, { persistDefault: false });
+		this._fastModeEnabled = false;
+		this.agent.state.model = fallbackModel;
+		this._applyThinkingLevelForModelSwitch(thinkingLevel, false);
+		if (wasFastModeEnabled) {
+			this._emitFastModeStateChanged();
+		}
 	}
 
 	private _bindExtensionCore(runner: ExtensionRunner): void {
@@ -4702,7 +4825,22 @@ export class AgentSession {
 
 			// Update agent state
 			const sessionContext = this.sessionManager.buildSessionContext();
+			const previousModel = this.model;
+			const wasFastModeEnabled = this._fastModeEnabled;
 			this.agent.state.messages = sessionContext.messages;
+			if (sessionContext.model) {
+				const restoredModel = this._modelRegistry.find(sessionContext.model.provider, sessionContext.model.modelId);
+				if (restoredModel && this._modelRegistry.hasConfiguredAuth(restoredModel)) {
+					this.agent.state.model = restoredModel;
+				}
+			}
+			this._restoreFastModePolicy(sessionContext.fastMode);
+			if (wasFastModeEnabled !== this._fastModeEnabled) {
+				this._emitFastModeStateChanged();
+			}
+			if (this.model) {
+				await this._emitModelSelect(this.model, previousModel, "restore");
+			}
 			this._emitConversationGenerationChange({
 				previousLeafId: oldLeafId,
 				nextLeafId: this.sessionManager.getLeafId(),

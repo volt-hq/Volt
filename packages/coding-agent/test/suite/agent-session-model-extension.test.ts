@@ -104,7 +104,7 @@ describe("AgentSession model and extension characterization", () => {
 		expect(harness.settingsManager.getDefaultModel()).toBe("faux-2");
 	});
 
-	it("clears the Fast mode restore marker on manual model and thinking changes", async () => {
+	it("disables Fast mode on explicit model, thinking, and scoped-model changes", async () => {
 		const harness = await createHarness({
 			models: [
 				{ id: "faux-1", name: "One", reasoning: true },
@@ -115,23 +115,22 @@ describe("AgentSession model and extension characterization", () => {
 		const modelOne = harness.getModel("faux-1")!;
 		const modelTwo = harness.getModel("faux-2")!;
 
-		harness.session.setFastModeRestoreThinkingLevel("high");
-		harness.session.setThinkingLevel("low", { persistDefault: false, preserveFastMode: true });
-		expect(harness.session.fastModeRestoreThinkingLevel).toBe("high");
+		harness.session.setThinkingLevel("high", { persistDefault: false });
+		harness.session.setFastModeEnabled(true);
+		harness.session.setThinkingLevel("low", { persistDefault: false });
+		expect(harness.session.fastModeEnabled).toBe(false);
+		expect(harness.session.baseThinkingLevel).toBe("low");
 
-		harness.session.setThinkingLevel("medium", { persistDefault: false });
-		expect(harness.session.fastModeRestoreThinkingLevel).toBeUndefined();
-
-		harness.session.setFastModeRestoreThinkingLevel("high");
+		harness.session.setFastModeEnabled(true);
 		await harness.session.setModel(modelTwo, { persistDefault: false });
-		expect(harness.session.fastModeRestoreThinkingLevel).toBeUndefined();
+		expect(harness.session.fastModeEnabled).toBe(false);
+		expect(harness.session.baseThinkingLevel).toBe("low");
 
-		harness.session.setFastModeRestoreThinkingLevel("high");
-		harness.session.setScopedModels([{ model: modelOne }] as Array<{
-			model: Model<string>;
-			thinkingLevel?: ThinkingLevel;
-		}>);
-		expect(harness.session.fastModeRestoreThinkingLevel).toBeUndefined();
+		harness.session.setThinkingLevel("high", { persistDefault: false });
+		harness.session.setFastModeEnabled(true);
+		harness.session.setScopedModels([{ model: modelOne }]);
+		expect(harness.session.fastModeEnabled).toBe(false);
+		expect(harness.session.baseThinkingLevel).toBe("high");
 	});
 
 	it("throws when setModel is called without configured auth", async () => {

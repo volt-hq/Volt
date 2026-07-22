@@ -8509,6 +8509,9 @@
 				},
 				{
 					"$ref": "#/$defs/RpcModelsChangedEvent"
+				},
+				{
+					"$ref": "#/$defs/RpcUiActionStateChangedEvent"
 				}
 			]
 		},
@@ -9554,6 +9557,90 @@
 				"palette",
 				"all"
 			]
+		},
+		"RpcUiActionStateChangedEvent": {
+			"type": "object",
+			"required": [
+				"type",
+				"action",
+				"state"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "ui_action_state_changed"
+				},
+				"action": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 160
+				},
+				"state": {
+					"type": "object",
+					"required": [
+						"type",
+						"value"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 64
+						},
+						"value": {
+							"anyOf": [
+								{
+									"type": "string",
+									"maxLength": 240
+								},
+								{
+									"type": "number"
+								},
+								{
+									"type": "boolean"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"label": {
+							"type": "string",
+							"maxLength": 80
+						},
+						"options": {
+							"type": "array",
+							"items": {
+								"type": "object",
+								"required": [
+									"value"
+								],
+								"properties": {
+									"value": {
+										"type": "string",
+										"maxLength": 80
+									},
+									"label": {
+										"type": "string",
+										"maxLength": 80
+									},
+									"description": {
+										"type": "string",
+										"maxLength": 240
+									}
+								},
+								"additionalProperties": false
+							},
+							"maxItems": 50
+						}
+					},
+					"additionalProperties": false
+				},
+				"delivery": {
+					"$ref": "#/$defs/RpcConversationDeliveryPosition"
+				}
+			},
+			"additionalProperties": false
 		},
 		"RpcUnregisterLiveActivityResponse": {
 			"type": "object",

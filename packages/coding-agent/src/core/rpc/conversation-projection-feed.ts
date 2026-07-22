@@ -21,7 +21,17 @@ import {
 	type RpcConversationBootstrapReason,
 	type RpcConversationDiscontinuityReason,
 } from "./types.ts";
-import { DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_ENVELOPES } from "./wire-limits.ts";
+import {
+	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_ENVELOPES,
+	RPC_UI_ACTION_ID_MAX_CHARS,
+	RPC_UI_ACTION_STATE_LABEL_MAX_CHARS,
+	RPC_UI_ACTION_STATE_MAX_OPTIONS,
+	RPC_UI_ACTION_STATE_OPTION_DESCRIPTION_MAX_CHARS,
+	RPC_UI_ACTION_STATE_OPTION_LABEL_MAX_CHARS,
+	RPC_UI_ACTION_STATE_OPTION_VALUE_MAX_CHARS,
+	RPC_UI_ACTION_STATE_TYPE_MAX_CHARS,
+	RPC_UI_ACTION_STATE_VALUE_MAX_CHARS,
+} from "./wire-limits.ts";
 
 export {
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CONTENT_BLOCKS,
@@ -281,6 +291,58 @@ function ownJsonObjectWithin(value: object, maxBytes: number): OwnedJsonObject |
 	}
 }
 
+function isBoundedString(value: unknown, maxLength: number, minLength = 0): value is string {
+	return typeof value === "string" && value.length >= minLength && value.length <= maxLength;
+}
+
+function assertUiActionStateChangedEvent(event: Record<string, unknown>): void {
+	const malformed = (): never => {
+		throw new Error("Conversation action-state event is malformed or exceeds its bounds");
+	};
+	if (
+		!isBoundedString(event.action, RPC_UI_ACTION_ID_MAX_CHARS, 1) ||
+		Object.keys(event).some((key) => key !== "type" && key !== "action" && key !== "state")
+	) {
+		malformed();
+	}
+	const state = event.state;
+	if (!isRecord(state)) {
+		throw new Error("Conversation action-state event is malformed or exceeds its bounds");
+	}
+	if (
+		Object.keys(state).some((key) => key !== "type" && key !== "value" && key !== "label" && key !== "options") ||
+		!isBoundedString(state.type, RPC_UI_ACTION_STATE_TYPE_MAX_CHARS, 1) ||
+		!(
+			state.value === null ||
+			typeof state.value === "boolean" ||
+			(typeof state.value === "number" && Number.isFinite(state.value)) ||
+			isBoundedString(state.value, RPC_UI_ACTION_STATE_VALUE_MAX_CHARS)
+		) ||
+		(state.label !== undefined && !isBoundedString(state.label, RPC_UI_ACTION_STATE_LABEL_MAX_CHARS))
+	) {
+		malformed();
+	}
+	const options = state.options;
+	if (options === undefined) {
+		return;
+	}
+	if (!Array.isArray(options) || options.length > RPC_UI_ACTION_STATE_MAX_OPTIONS) {
+		throw new Error("Conversation action-state event is malformed or exceeds its bounds");
+	}
+	for (const option of options) {
+		if (
+			!isRecord(option) ||
+			Object.keys(option).some((key) => key !== "value" && key !== "label" && key !== "description") ||
+			!isBoundedString(option.value, RPC_UI_ACTION_STATE_OPTION_VALUE_MAX_CHARS) ||
+			(option.label !== undefined && !isBoundedString(option.label, RPC_UI_ACTION_STATE_OPTION_LABEL_MAX_CHARS)) ||
+			(option.description !== undefined &&
+				!isBoundedString(option.description, RPC_UI_ACTION_STATE_OPTION_DESCRIPTION_MAX_CHARS))
+		) {
+			malformed();
+		}
+	}
+}
+
 function isCanonicalExternalIdentifier(value: unknown): value is string {
 	return (
 		typeof value === "string" &&
@@ -487,6 +549,11 @@ function assertCanonicalTranscriptEntry(entry: Record<string, unknown>): void {
 				throw new Error("Conversation transcript thinking-level commit is malformed");
 			}
 			return;
+		case "fast_mode_change":
+			if (typeof entry.enabled !== "boolean" || !isCanonicalExternalIdentifier(entry.baseThinkingLevel)) {
+				throw new Error("Conversation transcript Fast mode commit is malformed");
+			}
+			return;
 		case "model_change":
 			if (!isCanonicalExternalIdentifier(entry.provider) || !isCanonicalExternalIdentifier(entry.modelId)) {
 				throw new Error("Conversation transcript model commit is malformed");
@@ -597,6 +664,7 @@ const CONVERSATION_SOURCE_EVENT_TYPES = new Set([
 	"compaction_end",
 	"session_info_changed",
 	"thinking_level_changed",
+	"ui_action_state_changed",
 	"auto_retry_start",
 	"auto_retry_end",
 	"client_input_outcome",
@@ -1148,6 +1216,9 @@ export class ConversationProjectionFeed {
 			return;
 		}
 		try {
+			if (event.type === "ui_action_state_changed") {
+				assertUiActionStateChangedEvent(event);
+			}
 			// Validate canonical source truth even with zero subscribers. Otherwise an
 			// oversized active assistant could be cached and only fail much later while
 			// assigning an attach/checkpoint cursor.
