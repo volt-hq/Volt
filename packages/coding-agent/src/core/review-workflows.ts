@@ -48,6 +48,8 @@ export interface ReviewWorkflowDescriptor {
 }
 
 export interface ReviewWorkflowResultRecord extends ReviewWorkflowDescriptor {
+	/** Fast mode snapshot captured when this review started. */
+	fastModeEnabled?: boolean;
 	parsed?: ParsedReview;
 	/**
 	 * Bounded reviewer output, retained only when the report had no parseable
@@ -65,6 +67,7 @@ export interface ReviewWorkflowExecuteHooks {
 
 export interface ReviewWorkflowStartOptions {
 	prepared: Pick<PreparedReviewWorkflow, "workflowId" | "action" | "resolution">;
+	fastModeEnabled?: boolean;
 	execute: (hooks: ReviewWorkflowExecuteHooks) => Promise<ExecuteReviewWorkflowResult>;
 }
 
@@ -81,6 +84,7 @@ export interface StartedReviewWorkflow {
 interface ActiveReviewWorkflow {
 	descriptor: ReviewWorkflowDescriptor;
 	abortController: AbortController;
+	fastModeEnabled: boolean;
 	launched: boolean;
 	done: Promise<void>;
 	settle: () => void;
@@ -157,6 +161,7 @@ export class ReviewWorkflowManager {
 		const entry: ActiveReviewWorkflow = {
 			descriptor,
 			abortController: new AbortController(),
+			fastModeEnabled: options.fastModeEnabled === true,
 			launched: false,
 			done,
 			settle,
@@ -280,12 +285,13 @@ export class ReviewWorkflowManager {
 		descriptor.status = result.status;
 		descriptor.endedAt = Date.now();
 
-		let record: ReviewWorkflowResultRecord = { ...descriptor };
+		let record: ReviewWorkflowResultRecord = { ...descriptor, fastModeEnabled: entry.fastModeEnabled };
 		let message: string;
 		if (result.status === "completed") {
 			descriptor.findingsCount = result.findingsCount;
 			record = {
 				...descriptor,
+				fastModeEnabled: entry.fastModeEnabled,
 				...(result.parsed === undefined
 					? { raw: result.raw.slice(0, MAX_RETAINED_REVIEW_RAW_CHARS) }
 					: { parsed: result.parsed }),
@@ -295,7 +301,7 @@ export class ReviewWorkflowManager {
 			message = "Review cancelled.";
 		} else {
 			descriptor.errorMessage = result.errorMessage;
-			record = { ...descriptor };
+			record = { ...descriptor, fastModeEnabled: entry.fastModeEnabled };
 			message = `Review failed: ${result.errorMessage}`;
 		}
 

@@ -39,6 +39,7 @@ describe("ReviewWorkflowManager", () => {
 		let executed = false;
 		const { descriptor, launch } = manager.start({
 			prepared: prepared("review:one"),
+			fastModeEnabled: true,
 			execute: async (hooks: ReviewWorkflowExecuteHooks) => {
 				executed = true;
 				hooks.onEvent({
@@ -67,6 +68,7 @@ describe("ReviewWorkflowManager", () => {
 		expect(record).toMatchObject({
 			workflowId: "review:one",
 			status: "completed",
+			fastModeEnabled: true,
 			findingsCount: 1,
 			target: { description: "uncommitted changes", diffCommand: "git diff HEAD" },
 		});

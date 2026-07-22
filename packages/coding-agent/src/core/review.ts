@@ -1452,6 +1452,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 	};
 
 	try {
+		const fastModeEnabled = options.session.fastModeEnabled === true;
 		let result: ExecuteReviewWorkflowResult;
 		try {
 			result = await executeReviewWorkflow({
@@ -1462,7 +1463,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 				modelRegistry: options.session.modelRegistry,
 				settingsManager: options.settingsManager,
 				thinkingLevel: options.session.thinkingLevel,
-				fastModeEnabled: options.session.fastModeEnabled,
+				fastModeEnabled,
 				parentResourceLoader: options.session.resourceLoader,
 				tools: options.tools,
 				signal: hooks?.signal,
@@ -1500,7 +1501,6 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 		}
 
 		const reviewMessage = createReviewSeedMessage(resolution, result);
-		const fastModeEnabled = options.session.fastModeEnabled === true;
 		const newSessionResult = await options.newSession({
 			setup: async (sessionManager) => {
 				if (fastModeEnabled) {

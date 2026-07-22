@@ -1152,6 +1152,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			const settingsManager = commandSession.settingsManager;
 			const { descriptor, launch } = runtimeHost.reviewWorkflows.start({
 				prepared,
+				fastModeEnabled,
 				execute: async (hooks) => {
 					try {
 						const result = await executeReviewWorkflow({

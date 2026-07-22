@@ -272,6 +272,21 @@ describe("AgentSessionRuntime characterization", () => {
 		]);
 	});
 
+	it("applies new-session setup before constructing the replacement session", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+
+		const result = await runtime.newSession({
+			setup: async (sessionManager) => {
+				sessionManager.appendFastModeChange(true);
+			},
+		});
+
+		expect(result).toEqual({ cancelled: false, seeded: false });
+		expect(runtime.session.sessionManager.buildSessionContext().fastMode.enabled).toBe(true);
+		expect(runtime.session.fastModeEnabled).toBe(true);
+		expect(runtime.session.agent.inferenceSpeed).toBe("fast");
+	});
+
 	it("lists current-workspace sessions and switches by session id", async () => {
 		const { runtime, tempDir } = await createRuntimeForTest(() => {});
 

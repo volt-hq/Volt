@@ -1044,6 +1044,10 @@ export class AgentSessionRuntime {
 		if (options?.parentSession) {
 			sessionManager.newSession({ parentSession: options.parentSession });
 		}
+		if (options?.setup) {
+			await options.setup(sessionManager);
+			this.assertStructuralOperationCurrent(operation);
+		}
 
 		const replacement = await this.replaceCurrentSession({
 			operation,
@@ -1058,12 +1062,6 @@ export class AgentSessionRuntime {
 					profile: this.getReplacementProfile(),
 					subagentContext: this.subagentContext,
 				}),
-			afterApply: options?.setup
-				? async () => {
-						await options.setup?.(this.session.sessionManager);
-						this.session.agent.state.messages = this.session.sessionManager.buildSessionContext().messages;
-					}
-				: undefined,
 			withSession: options?.withSession,
 		});
 		return { cancelled: false, seeded: replacement.seeded };

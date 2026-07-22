@@ -355,6 +355,7 @@ describe("RPC mode detached review actions", () => {
 				expect.objectContaining({ type: "workflow_end", workflowId: "review:test", status: "completed" }),
 			),
 		);
+		expect(runtimeHost.reviewWorkflows.get("review:test")?.fastModeEnabled).toBe(true);
 		expect(writes).toContainEqual(
 			expect.objectContaining({
 				type: "tool_execution_start",
@@ -573,6 +574,9 @@ describe("RPC mode detached review actions", () => {
 		);
 		expect(runtimeHost.newSession).not.toHaveBeenCalled();
 
+		// Opening uses the review's launch-time snapshot, not the parent's current policy.
+		runtimeHost.session.setFastModeEnabled(false);
+		expect(runtimeHost.session.fastModeEnabled).toBe(false);
 		lineHandler(JSON.stringify({ id: "open-1", type: "open_review_session", workflowId: "review:test" }));
 		await vi.waitFor(() =>
 			expect(writes).toContainEqual(

@@ -868,6 +868,7 @@ describe("runReview", () => {
 			(_context, options) => {
 				const streamOptions = options as (typeof options & Pick<SimpleStreamOptions, "inferenceSpeed">) | undefined;
 				observedInferenceSpeeds.push(streamOptions?.inferenceSpeed);
+				harness.session.setFastModeEnabled(false);
 				return fauxAssistantMessage(JSON.stringify({ findings: [] }));
 			},
 		]);
@@ -891,6 +892,7 @@ describe("runReview", () => {
 
 		expect(result.status).toBe("completed");
 		expect(observedInferenceSpeeds).toEqual(["fast"]);
+		expect(harness.session.fastModeEnabled).toBe(false);
 		expect(replacementFastModeEnabled).toBe(true);
 	});
 
