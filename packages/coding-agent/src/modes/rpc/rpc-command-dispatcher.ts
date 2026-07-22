@@ -427,7 +427,13 @@ export async function handleRpcCommand(
 				raw: record.raw ?? "",
 				parsed: record.parsed,
 			});
+			const fastModeEnabled = context.session.fastModeEnabled;
 			const result = await runSessionNewHostAction(context.createHostActionContext(), {
+				setup: async (sessionManager) => {
+					if (fastModeEnabled) {
+						sessionManager.appendFastModeChange(true);
+					}
+				},
 				withSession: async (sessionContext) => {
 					await sessionContext.sendMessage(seedMessage);
 				},

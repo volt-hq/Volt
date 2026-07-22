@@ -159,7 +159,7 @@ export class FooterComponent implements Component {
 				modelSide = modelWithoutProvider;
 			} else if (this.session.fastModeEnabled) {
 				const fastAndThinking = `${fastLabel}${thinking}`;
-				if (visibleWidth(fastAndThinking) >= width) {
+				if (visibleWidth(fastAndThinking) > width) {
 					modelSide = truncateToWidth(fastLabel, width, "");
 				} else {
 					const suffix = `${fast}${thinking}`;

@@ -698,7 +698,8 @@ function thinkingFastModeAvailability(context: HostActionDescriptorContext, args
 	if (context.session.isCompacting) {
 		return { enabled: false, disabledReason: "Fast mode is not available while compaction is running" };
 	}
-	if (getOptionalBooleanArg(args, "enabled") === false) {
+	const requestedEnabled = getOptionalBooleanArg(args, "enabled");
+	if (requestedEnabled === false || (requestedEnabled === undefined && isThinkingFastModeEnabled(context.session))) {
 		return { enabled: true };
 	}
 	if (!context.session.model || !supportsFastInference(context.session.model)) {

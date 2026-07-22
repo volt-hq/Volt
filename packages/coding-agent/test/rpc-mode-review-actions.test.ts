@@ -4,9 +4,11 @@ import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { restoreStdout } from "../src/core/output-guard.ts";
 import { ReviewWorkflowManager } from "../src/core/review-workflows.ts";
 import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "../src/core/rpc/transport.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 
 interface ExecuteReviewWorkflowMockOptions {
 	prepared: { workflowId: string; action: string };
+	fastModeEnabled?: boolean;
 	signal?: AbortSignal;
 	onEvent?: (event: Record<string, unknown>) => void;
 }
@@ -161,7 +163,8 @@ function createCollectingTransport(): CollectingTransport {
 	};
 }
 
-function makeSession(sessionId: string) {
+function makeSession(sessionId: string, initialFastModeEnabled = false) {
+	let fastModeEnabled = initialFastModeEnabled;
 	return {
 		bindExtensions: vi.fn(async () => {}),
 		subscribe: vi.fn(() => vi.fn()),
@@ -169,6 +172,12 @@ function makeSession(sessionId: string) {
 		isStreaming: false,
 		isCompacting: false,
 		thinkingLevel: "off",
+		get fastModeEnabled() {
+			return fastModeEnabled;
+		},
+		setFastModeEnabled: vi.fn((enabled: boolean) => {
+			fastModeEnabled = enabled;
+		}),
 		getAvailableThinkingLevels: vi.fn(() => ["off"]),
 		steeringMode: "all",
 		followUpMode: "all",
@@ -182,8 +191,8 @@ function makeSession(sessionId: string) {
 	};
 }
 
-function makeRuntimeHost(options: { seedMessages?: object[] } = {}) {
-	let currentSession = makeSession("initial-session");
+function makeRuntimeHost(options: { seedMessages?: object[]; fastModeEnabled?: boolean } = {}) {
+	let currentSession = makeSession("initial-session", options.fastModeEnabled);
 	const runtimeHost = {
 		get session() {
 			return currentSession;
@@ -191,15 +200,22 @@ function makeRuntimeHost(options: { seedMessages?: object[] } = {}) {
 		cwd: "/workspace",
 		services: { agentDir: "/workspace/.volt" },
 		reviewWorkflows: new ReviewWorkflowManager(),
-		newSession: vi.fn(async (newSessionOptions?: { withSession?: (ctx: unknown) => Promise<void> }) => {
-			currentSession = makeSession("review-session");
-			await newSessionOptions?.withSession?.({
-				sendMessage: async (message: object) => {
-					options.seedMessages?.push(message);
-				},
-			});
-			return { cancelled: false, seeded: newSessionOptions?.withSession !== undefined };
-		}),
+		newSession: vi.fn(
+			async (newSessionOptions?: {
+				setup?: (sessionManager: SessionManager) => Promise<void>;
+				withSession?: (ctx: unknown) => Promise<void>;
+			}) => {
+				const sessionManager = SessionManager.inMemory("/workspace");
+				await newSessionOptions?.setup?.(sessionManager);
+				currentSession = makeSession("review-session", sessionManager.buildSessionContext().fastMode.enabled);
+				await newSessionOptions?.withSession?.({
+					sendMessage: async (message: object) => {
+						options.seedMessages?.push(message);
+					},
+				});
+				return { cancelled: false, seeded: newSessionOptions?.withSession !== undefined };
+			},
+		),
 		switchSession: vi.fn(async () => ({ cancelled: true })),
 		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
 		dispose: vi.fn(async () => {}),
@@ -255,7 +271,7 @@ describe("RPC mode detached review actions", () => {
 			};
 		});
 
-		const runtimeHost = makeRuntimeHost();
+		const runtimeHost = makeRuntimeHost({ fastModeEnabled: true });
 		const { transport, writes, getLineHandler, getCloseHandler } = createCollectingTransport();
 		const { modePromise } = await startMode(runtimeHost, transport);
 		const lineHandler = getLineHandler();
@@ -278,11 +294,34 @@ describe("RPC mode detached review actions", () => {
 		await vi.waitFor(() =>
 			expect(writes).toContainEqual(expect.objectContaining({ type: "workflow_start", workflowId: "review:test" })),
 		);
+		expect(reviewMocks.executeReviewWorkflow).toHaveBeenCalledWith(
+			expect.objectContaining({ fastModeEnabled: true }),
+		);
 		// The accepted response must precede workflow_start on the wire.
 		const responseIndex = findWriteIndex(writes, (value) => value.command === "invoke_ui_action");
 		const startIndex = findWriteIndex(writes, (value) => value.type === "workflow_start");
 		expect(responseIndex).toBeGreaterThanOrEqual(0);
 		expect(responseIndex).toBeLessThan(startIndex);
+
+		// Fast can be changed on the parent session while the detached review is running.
+		lineHandler(
+			JSON.stringify({
+				id: "fast-off",
+				type: "invoke_ui_action",
+				action: "thinking.fast_mode",
+				args: { enabled: false },
+			}),
+		);
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(
+				expect.objectContaining({
+					id: "fast-off",
+					command: "invoke_ui_action",
+					success: true,
+				}),
+			),
+		);
+		expect(runtimeHost.session.fastModeEnabled).toBe(false);
 
 		// Other commands are served while the review is still running.
 		lineHandler(JSON.stringify({ id: "state-1", type: "get_state" }));
@@ -516,7 +555,7 @@ describe("RPC mode detached review actions", () => {
 
 	test("open_review_session seeds a fresh session with the findings on demand", async () => {
 		const seedMessages: Array<{ customType?: string; content?: string }> = [];
-		const runtimeHost = makeRuntimeHost({ seedMessages });
+		const runtimeHost = makeRuntimeHost({ seedMessages, fastModeEnabled: true });
 		const { transport, writes, getLineHandler, getCloseHandler } = createCollectingTransport();
 		const sessionChanges: string[] = [];
 		const { modePromise } = await startMode(runtimeHost, transport, {
@@ -553,6 +592,7 @@ describe("RPC mode detached review actions", () => {
 			}),
 		]);
 		await vi.waitFor(() => expect(sessionChanges).toContain("review-session"));
+		expect(runtimeHost.session.fastModeEnabled).toBe(true);
 
 		// The acted-on review is consumed from the retained ring: listings stop
 		// advertising it, so reconciling clients cannot re-surface an "open

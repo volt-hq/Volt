@@ -164,7 +164,7 @@ describe("FooterComponent width handling", () => {
 		expect(visibleWidth(workspaceLine)).toBeLessThanOrEqual(width);
 	});
 
-	it.each([12, 13])("keeps the Fast suffix within a narrow width of %s", (width) => {
+	it.each([11, 12, 13])("keeps the Fast suffix within a narrow width of %s", (width) => {
 		const footer = new FooterComponent(
 			createSession({
 				sessionName: "",

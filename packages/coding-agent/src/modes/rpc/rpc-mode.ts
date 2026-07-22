@@ -1146,6 +1146,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				sanitizeRemoteErrors: reviewOptions.remote,
 			});
 			const thinkingLevel = commandSession.thinkingLevel;
+			const fastModeEnabled = commandSession.fastModeEnabled;
 			const authStorage = commandSession.modelRegistry.authStorage;
 			const modelRegistry = commandSession.modelRegistry;
 			const settingsManager = commandSession.settingsManager;
@@ -1161,6 +1162,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 							modelRegistry,
 							settingsManager,
 							thinkingLevel,
+							fastModeEnabled,
 							// Read-only builtin allowlist and no inherited extension tools:
 							// the reviewer cannot modify the tree, so the working-tree guard
 							// is skipped. Restoring it could revert concurrent agent or user
