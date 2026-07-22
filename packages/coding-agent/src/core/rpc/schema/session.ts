@@ -93,6 +93,8 @@ export const RpcSessionStateSchema = Type.Object(
 		model: Type.Optional(RpcModelSchema),
 		thinkingLevel: RpcThinkingLevelSchema,
 		availableThinkingLevels: Type.Array(RpcThinkingLevelSchema),
+		/** Authoritative branch-local Fast mode state for bootstrap/checkpoint recovery. */
+		fastModeEnabled: Type.Boolean(),
 		/** Whether a provider run or session-level continuation is active. */
 		isStreaming: Type.Boolean(),
 		/** Whether any prompt work, including asynchronous preflight, is active. */

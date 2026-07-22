@@ -104,7 +104,7 @@ describe("AgentSession model and extension characterization", () => {
 		expect(harness.settingsManager.getDefaultModel()).toBe("faux-2");
 	});
 
-	it("disables Fast mode on explicit model, thinking, and scoped-model changes", async () => {
+	it("keeps Fast mode enabled across explicit model, thinking, and scoped-model changes", async () => {
 		const harness = await createHarness({
 			models: [
 				{ id: "faux-1", name: "One", reasoning: true },
@@ -118,19 +118,17 @@ describe("AgentSession model and extension characterization", () => {
 		harness.session.setThinkingLevel("high", { persistDefault: false });
 		harness.session.setFastModeEnabled(true);
 		harness.session.setThinkingLevel("low", { persistDefault: false });
-		expect(harness.session.fastModeEnabled).toBe(false);
-		expect(harness.session.baseThinkingLevel).toBe("low");
+		expect(harness.session.fastModeEnabled).toBe(true);
+		expect(harness.session.thinkingLevel).toBe("low");
 
-		harness.session.setFastModeEnabled(true);
 		await harness.session.setModel(modelTwo, { persistDefault: false });
-		expect(harness.session.fastModeEnabled).toBe(false);
-		expect(harness.session.baseThinkingLevel).toBe("low");
+		expect(harness.session.fastModeEnabled).toBe(true);
+		expect(harness.session.thinkingLevel).toBe("low");
 
 		harness.session.setThinkingLevel("high", { persistDefault: false });
-		harness.session.setFastModeEnabled(true);
 		harness.session.setScopedModels([{ model: modelOne }]);
-		expect(harness.session.fastModeEnabled).toBe(false);
-		expect(harness.session.baseThinkingLevel).toBe("high");
+		expect(harness.session.fastModeEnabled).toBe(true);
+		expect(harness.session.thinkingLevel).toBe("high");
 	});
 
 	it("throws when setModel is called without configured auth", async () => {

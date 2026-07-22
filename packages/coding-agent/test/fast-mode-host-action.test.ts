@@ -1,4 +1,3 @@
-import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { Api, Model } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -23,13 +22,11 @@ function model(): Model<Api> {
 }
 
 describe("Fast mode host action", () => {
-	it("delegates each toggle to one AgentSession policy operation", async () => {
-		let thinkingLevel: ThinkingLevel = "high";
+	it("delegates each toggle without changing thinking", async () => {
+		const thinkingLevel = "high" as const;
 		let fastModeEnabled = false;
 		const setFastModeEnabled = vi.fn((enabled: boolean) => {
 			fastModeEnabled = enabled;
-			thinkingLevel = enabled ? "off" : "high";
-			return { changed: true, thinkingLevel };
 		});
 		const session = {
 			isStreaming: false,
@@ -55,13 +52,14 @@ describe("Fast mode host action", () => {
 		await expect(registry.invoke(THINKING_FAST_MODE_ACTION_ID, context, { enabled: true })).resolves.toMatchObject({
 			action: THINKING_FAST_MODE_ACTION_ID,
 			status: "completed",
-			state: { type: "boolean", value: true, label: "Fast: thinking off" },
+			state: { type: "boolean", value: true, label: "Fast mode enabled" },
 			stateChanged: true,
 		});
 		await expect(registry.invoke(THINKING_FAST_MODE_ACTION_ID, context, { enabled: false })).resolves.toMatchObject({
-			state: { type: "boolean", value: false, label: "Normal reasoning" },
+			state: { type: "boolean", value: false, label: "Fast mode disabled" },
 			stateChanged: true,
 		});
 		expect(setFastModeEnabled.mock.calls).toEqual([[true], [false]]);
+		expect(thinkingLevel).toBe("high");
 	});
 });

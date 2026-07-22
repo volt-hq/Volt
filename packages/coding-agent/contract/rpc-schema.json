@@ -8559,6 +8559,7 @@
 			"required": [
 				"thinkingLevel",
 				"availableThinkingLevels",
+				"fastModeEnabled",
 				"isStreaming",
 				"isCompacting",
 				"steeringMode",
@@ -8582,6 +8583,9 @@
 					"items": {
 						"$ref": "#/$defs/RpcThinkingLevel"
 					}
+				},
+				"fastModeEnabled": {
+					"type": "boolean"
 				},
 				"isStreaming": {
 					"type": "boolean"

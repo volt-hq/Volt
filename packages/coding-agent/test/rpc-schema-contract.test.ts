@@ -165,6 +165,7 @@ describe("RPC contract emission conformance", () => {
 			state: {
 				thinkingLevel: "high",
 				availableThinkingLevels: ["off", "high"],
+				fastModeEnabled: true,
 				isStreaming: false,
 				isCompacting: false,
 				steeringMode: "all",

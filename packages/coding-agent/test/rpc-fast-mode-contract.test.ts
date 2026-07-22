@@ -9,7 +9,7 @@ describe("ui_action_state_changed RPC contract", () => {
 		const event: RpcUiActionStateChangedEvent = {
 			type: "ui_action_state_changed",
 			action: "thinking.fast_mode",
-			state: { type: "boolean", value: true, label: "Fast: thinking off" },
+			state: { type: "boolean", value: true, label: "Fast mode enabled" },
 		};
 
 		expect(Compile(RpcUiActionStateChangedEventSchema).Errors(event)).toEqual([]);

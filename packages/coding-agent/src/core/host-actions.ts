@@ -1,6 +1,5 @@
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { Api, Model } from "@hansjm10/volt-ai";
-import { getSupportedThinkingLevels } from "@hansjm10/volt-ai";
 import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
 import type { ReviewTarget, ReviewWorkflowResult } from "./review.ts";
 import type {
@@ -379,7 +378,7 @@ export function registerBuiltinHostActions(registry: HostActionRegistry): HostAc
 	registry.register({
 		id: THINKING_FAST_MODE_ACTION_ID,
 		label: "Fast mode",
-		description: "Prefer lower-latency thinking for the current session.",
+		description: "Request premium low-latency inference capacity for the current session.",
 		category: "model",
 		presentation: { kind: "toggle", group: "Model", priority: 100 },
 		args: [
@@ -607,9 +606,7 @@ export function runThinkingFastModeHostAction(
 		stateChanged: changed,
 		actionsChanged: changed,
 		message: changed
-			? enabled
-				? `Fast mode enabled: ${formatThinkingLevelLabel(context.session.thinkingLevel)}`
-				: `Fast mode disabled: restored ${formatThinkingLevelLabel(context.session.thinkingLevel)}`
+			? `Fast mode ${enabled ? "enabled" : "disabled"}`
 			: `Fast mode already ${enabled ? "enabled" : "disabled"}`,
 	};
 }
@@ -690,13 +687,6 @@ function thinkingFastModeAvailability(context: HostActionDescriptorContext): Hos
 	if (context.session.isCompacting) {
 		return { enabled: false, disabledReason: "Fast mode is not available while compaction is running" };
 	}
-	if (isThinkingFastModeEnabled(context.session)) {
-		return { enabled: true };
-	}
-	const targetLevel = getFastModeTargetThinkingLevel(context.session);
-	if (!targetLevel) {
-		return { enabled: false, disabledReason: getThinkingFastModeDisabledReason(context.session) };
-	}
 	return { enabled: true };
 }
 
@@ -770,15 +760,12 @@ function createDescriptor(action: HostActionDefinition, context: HostActionDescr
 	return descriptor;
 }
 
-const THINKING_LEVEL_ORDER: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-const FAST_MODE_TARGET_ORDER: ThinkingLevel[] = ["off", "minimal", "low"];
-
 function createThinkingFastModeState(context: HostActionDescriptorContext): UiActionStateDescriptor {
 	const enabled = isThinkingFastModeEnabled(context.session);
 	return {
 		type: "boolean",
 		value: enabled,
-		label: enabled ? `Fast: ${formatThinkingLevelLabel(context.session.thinkingLevel)}` : "Normal reasoning",
+		label: enabled ? "Fast mode enabled" : "Fast mode disabled",
 	};
 }
 
@@ -788,42 +775,6 @@ function isHostSessionBusy(session: HostActionSessionState): boolean {
 
 function isThinkingFastModeEnabled(session: HostActionSessionState): boolean {
 	return session.fastModeEnabled === true;
-}
-
-function getFastModeTargetThinkingLevel(session: HostActionSessionState): ThinkingLevel | undefined {
-	if (!session.model || !session.thinkingLevel) {
-		return undefined;
-	}
-	const currentRank = getThinkingLevelRank(session.thinkingLevel);
-	if (currentRank <= 0) {
-		return undefined;
-	}
-	const supportedLevels = getSupportedThinkingLevels(session.model) as ThinkingLevel[];
-	return FAST_MODE_TARGET_ORDER.find((level) => {
-		const targetRank = getThinkingLevelRank(level);
-		return supportedLevels.includes(level) && targetRank >= 0 && targetRank < currentRank;
-	});
-}
-
-function getThinkingFastModeDisabledReason(session: HostActionSessionState): string {
-	if (!session.model) {
-		return "No model is selected.";
-	}
-	if (!session.thinkingLevel) {
-		return "No thinking level is selected.";
-	}
-	return "Current model is already at its fastest supported thinking level.";
-}
-
-function getThinkingLevelRank(level: ThinkingLevel): number {
-	return THINKING_LEVEL_ORDER.indexOf(level);
-}
-
-function formatThinkingLevelLabel(level: ThinkingLevel | undefined): string {
-	if (level === undefined) {
-		return "current thinking";
-	}
-	return level === "off" ? "thinking off" : `${level} thinking`;
 }
 
 function normalizeSlashAlias(alias: string): string {

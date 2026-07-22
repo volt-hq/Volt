@@ -350,7 +350,7 @@ describe("AgentSessionRuntime characterization", () => {
 		await runtime.session.bindExtensions({});
 		expect(runtime.session.sessionId).toBe(fastSessionId);
 		expect(runtime.session.fastModeEnabled).toBe(true);
-		expect(runtime.session.baseThinkingLevel).toBe("high");
+		expect(runtime.session.thinkingLevel).toBe("high");
 	});
 
 	it("honors session_before_switch cancellation for new and resume", async () => {

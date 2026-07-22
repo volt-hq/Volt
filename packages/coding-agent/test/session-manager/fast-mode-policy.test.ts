@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildSessionContext, SessionManager } from "../../src/core/session-manager.ts";
 
 const tempDirs: string[] = [];
@@ -13,60 +13,56 @@ function createTempDir(): string {
 }
 
 afterEach(() => {
+	vi.unstubAllEnvs();
 	while (tempDirs.length > 0) {
 		rmSync(tempDirs.pop()!, { recursive: true, force: true });
 	}
 });
 
 describe("SessionManager Fast mode policy", () => {
-	it("reduces explicit thinking, Fast, and model changes into one branch policy", () => {
+	it("reduces Fast independently from thinking and model changes", () => {
 		const manager = SessionManager.inMemory();
 		manager.appendThinkingLevelChange("high");
-		expect(manager.buildSessionContext().fastMode).toEqual({ enabled: false, baseThinkingLevel: "high" });
+		expect(manager.buildSessionContext().fastMode).toEqual({ enabled: false });
 
-		manager.appendFastModeChange({ enabled: true, baseThinkingLevel: "high" });
+		manager.appendFastModeChange(true);
 		expect(manager.buildSessionContext()).toMatchObject({
 			thinkingLevel: "high",
-			fastMode: { enabled: true, baseThinkingLevel: "high" },
+			fastMode: { enabled: true },
 		});
 
 		manager.appendModelChange("openai-codex", "gpt-codex");
-		expect(manager.buildSessionContext().fastMode).toEqual({ enabled: false, baseThinkingLevel: "high" });
-
-		manager.appendFastModeChange({ enabled: true, baseThinkingLevel: "high" });
 		manager.appendThinkingLevelChange("medium");
-		expect(manager.buildSessionContext().fastMode).toEqual({ enabled: false, baseThinkingLevel: "medium" });
+		expect(manager.buildSessionContext()).toMatchObject({
+			thinkingLevel: "medium",
+			model: { provider: "openai-codex", modelId: "gpt-codex" },
+			fastMode: { enabled: true },
+		});
 	});
 
-	it("keeps sibling branch policies independent", () => {
+	it("keeps sibling branch states independent", () => {
 		const manager = SessionManager.inMemory();
 		const baseId = manager.appendThinkingLevelChange("high");
-		const enabledId = manager.appendFastModeChange({ enabled: true, baseThinkingLevel: "high" });
+		const enabledId = manager.appendFastModeChange(true);
 
 		manager.branch(baseId);
-		const disabledId = manager.appendFastModeChange({ enabled: false, baseThinkingLevel: "medium" });
+		const disabledId = manager.appendFastModeChange(false);
 
-		expect(buildSessionContext(manager.getEntries(), enabledId).fastMode).toEqual({
-			enabled: true,
-			baseThinkingLevel: "high",
-		});
-		expect(buildSessionContext(manager.getEntries(), disabledId).fastMode).toEqual({
-			enabled: false,
-			baseThinkingLevel: "medium",
-		});
+		expect(buildSessionContext(manager.getEntries(), enabledId).fastMode).toEqual({ enabled: true });
+		expect(buildSessionContext(manager.getEntries(), disabledId).fastMode).toEqual({ enabled: false });
 	});
 
-	it("durably writes a first-turn Fast policy without exposing an empty session in normal lists", async () => {
+	it("durably writes first-turn Fast state without exposing an empty session in normal lists", async () => {
 		const dir = createTempDir();
 		const manager = SessionManager.create(dir, dir);
 		manager.appendThinkingLevelChange("high");
-		manager.appendFastModeChange({ enabled: true, baseThinkingLevel: "high" });
+		manager.appendFastModeChange(true);
 		const sessionFile = manager.getSessionFile();
 
 		expect(sessionFile).toBeDefined();
 		expect(existsSync(sessionFile!)).toBe(true);
 		const reopened = SessionManager.open(sessionFile!, dir);
-		expect(reopened.buildSessionContext().fastMode).toEqual({ enabled: true, baseThinkingLevel: "high" });
+		expect(reopened.buildSessionContext().fastMode).toEqual({ enabled: true });
 		expect(await SessionManager.list(dir, dir)).toEqual([]);
 		expect(
 			await SessionManager.list(dir, dir, undefined, {
@@ -74,5 +70,19 @@ describe("SessionManager Fast mode policy", () => {
 			}),
 		).toMatchObject([{ id: manager.getSessionId(), path: sessionFile }]);
 		expect(SessionManager.continueRecent(dir, dir).getSessionId()).toBe(manager.getSessionId());
+	});
+
+	it("honors options passed as the second listAll argument", async () => {
+		const agentDir = createTempDir();
+		const cwd = join(agentDir, "workspace");
+		const sessionDir = join(agentDir, "sessions", "workspace-sessions");
+		vi.stubEnv("VOLT_CODING_AGENT_DIR", agentDir);
+		const manager = SessionManager.create(cwd, sessionDir);
+		manager.appendFastModeChange(true);
+
+		expect(await SessionManager.listAll()).toEqual([]);
+		expect(await SessionManager.listAll(undefined, { includeMessageFreeDurable: true })).toMatchObject([
+			{ id: manager.getSessionId(), path: manager.getSessionFile() },
+		]);
 	});
 });

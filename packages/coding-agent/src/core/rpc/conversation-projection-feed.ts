@@ -550,7 +550,7 @@ function assertCanonicalTranscriptEntry(entry: Record<string, unknown>): void {
 			}
 			return;
 		case "fast_mode_change":
-			if (typeof entry.enabled !== "boolean" || !isCanonicalExternalIdentifier(entry.baseThinkingLevel)) {
+			if (typeof entry.enabled !== "boolean") {
 				throw new Error("Conversation transcript Fast mode commit is malformed");
 			}
 			return;

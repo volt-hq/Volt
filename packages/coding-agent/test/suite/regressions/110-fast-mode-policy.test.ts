@@ -8,6 +8,7 @@ import type { AgentSession, AgentSessionEvent } from "../../../src/core/agent-se
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import { THINKING_FAST_MODE_ACTION_ID } from "../../../src/core/host-actions.ts";
 import { ModelRegistry } from "../../../src/core/model-registry.ts";
+import { buildRpcSessionState } from "../../../src/core/rpc/session-state.ts";
 import { getUiActionDescriptors } from "../../../src/core/rpc/ui-actions.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
@@ -128,83 +129,71 @@ afterEach(() => {
 	for (const tempDir of tempDirs) rmSync(tempDir, { recursive: true, force: true });
 });
 
-describe("issue #110: durable Fast mode policy", () => {
+describe("issue #110: durable Fast mode state", () => {
 	it.each(["openai", "openai-codex"] as const)(
-		"restores enabled/base state for %s sessions and disables back to the base",
-		async (provider: "openai" | "openai-codex") => {
+		"restores enabled state for %s sessions without changing thinking",
+		async (provider) => {
 			const first = await createRuntime({ provider, explicitThinking: "high" });
-			expect(first.session.model?.api).toBe(provider === "openai" ? "openai-responses" : "openai-codex-responses");
+			const initialSettings = settingsSnapshot(first.settings);
 
 			first.session.setFastModeEnabled(true);
 			expect(first.session.fastModeEnabled).toBe(true);
-			expect(first.session.baseThinkingLevel).toBe("high");
-			expect(first.session.thinkingLevel).toBe("off");
-			expect(first.settings.getDefaultThinkingLevel()).toBe("medium");
+			expect(first.session.thinkingLevel).toBe("high");
+			expect(first.manager.buildSessionContext().fastMode).toEqual({ enabled: true });
+			expect(buildRpcSessionState(first.session).fastModeEnabled).toBe(true);
 			const sessionFile = first.manager.getSessionFile()!;
 			first.session.dispose();
 
-			const resumedManager = SessionManager.open(sessionFile, first.tempDir);
 			const resumed = await createRuntime({
 				provider,
-				manager: resumedManager,
+				manager: SessionManager.open(sessionFile, first.tempDir),
 				modelRegistry: first.modelRegistry,
 				faux: first.faux,
 				settings: first.settings,
 				tempDir: first.tempDir,
 			});
 			expect(resumed.session.fastModeEnabled).toBe(true);
-			expect(resumed.session.baseThinkingLevel).toBe("high");
-			expect(resumed.session.thinkingLevel).toBe("off");
+			expect(resumed.session.thinkingLevel).toBe("high");
 			expect(fastDescriptorEnabled(resumed.session)).toBe(true);
 
 			resumed.session.setFastModeEnabled(false);
 			expect(resumed.session.fastModeEnabled).toBe(false);
 			expect(resumed.session.thinkingLevel).toBe("high");
-			expect(resumed.settings.getDefaultThinkingLevel()).toBe("medium");
+			expect(settingsSnapshot(first.settings)).toEqual(initialSettings);
 		},
 	);
 
-	it("treats explicit startup thinking and model overrides as durable Fast invalidations", async () => {
-		const first = await createRuntime({ provider: "openai", explicitThinking: "high" });
+	it("keeps Fast enabled across explicit startup model and thinking overrides", async () => {
+		const first = await createRuntime({
+			provider: "openai",
+			models: [
+				{ id: "first", reasoning: true },
+				{ id: "second", reasoning: true },
+			],
+			explicitThinking: "high",
+		});
 		first.session.setFastModeEnabled(true);
 		const sessionFile = first.manager.getSessionFile()!;
-		const initialSettings = settingsSnapshot(first.settings);
+		const secondModel = first.modelRegistry.find("openai", "second")!;
 		first.session.dispose();
 
-		const thinkingOverride = await createRuntime({
+		const resumed = await createRuntime({
 			provider: "openai",
 			manager: SessionManager.open(sessionFile, first.tempDir),
 			modelRegistry: first.modelRegistry,
 			faux: first.faux,
 			settings: first.settings,
 			tempDir: first.tempDir,
+			explicitModel: secondModel,
 			explicitThinking: "medium",
 		});
-		expect(thinkingOverride.session.fastModeEnabled).toBe(false);
-		expect(thinkingOverride.session.baseThinkingLevel).toBe("medium");
-		expect(thinkingOverride.session.thinkingLevel).toBe("medium");
-		expect(thinkingOverride.manager.buildSessionContext().fastMode.enabled).toBe(false);
-
-		thinkingOverride.session.setThinkingLevel("high", { persistDefault: false });
-		thinkingOverride.session.setFastModeEnabled(true);
-		thinkingOverride.session.dispose();
-		const modelOverride = await createRuntime({
-			provider: "openai",
-			manager: SessionManager.open(sessionFile, first.tempDir),
-			modelRegistry: first.modelRegistry,
-			faux: first.faux,
-			settings: first.settings,
-			tempDir: first.tempDir,
-			explicitModel: first.faux.getModel(),
-		});
-		expect(modelOverride.session.fastModeEnabled).toBe(false);
-		expect(modelOverride.session.baseThinkingLevel).toBe("high");
-		expect(modelOverride.session.thinkingLevel).toBe("high");
-		expect(modelOverride.manager.buildSessionContext().fastMode.enabled).toBe(false);
-		expect(settingsSnapshot(first.settings)).toEqual(initialSettings);
+		expect(resumed.session.model?.id).toBe("second");
+		expect(resumed.session.thinkingLevel).toBe("medium");
+		expect(resumed.session.fastModeEnabled).toBe(true);
+		expect(resumed.manager.buildSessionContext().fastMode).toEqual({ enabled: true });
 	});
 
-	it("keeps two agent sessions independent across reopen", async () => {
+	it("keeps separate sessions independent across reopen", async () => {
 		const sharedSettings = SettingsManager.inMemory({ defaultThinkingLevel: "medium" });
 		const first = await createRuntime({ provider: "openai", explicitThinking: "high", settings: sharedSettings });
 		const second = await createRuntime({
@@ -213,8 +202,6 @@ describe("issue #110: durable Fast mode policy", () => {
 			settings: sharedSettings,
 		});
 		first.session.setFastModeEnabled(true);
-		second.session.setFastModeEnabled(true);
-		second.session.setFastModeEnabled(false);
 		const firstFile = first.manager.getSessionFile()!;
 		const secondFile = second.manager.getSessionFile()!;
 		first.session.dispose();
@@ -238,12 +225,11 @@ describe("issue #110: durable Fast mode policy", () => {
 		});
 
 		expect(reopenedFirst.session.fastModeEnabled).toBe(true);
-		expect(reopenedFirst.session.baseThinkingLevel).toBe("high");
+		expect(reopenedFirst.session.thinkingLevel).toBe("high");
 		expect(reopenedSecond.session.fastModeEnabled).toBe(false);
-		expect(reopenedSecond.session.baseThinkingLevel).toBe("high");
 	});
 
-	it("manual thinking and model/scoped-model changes disable Fast from the captured base", async () => {
+	it("keeps Fast enabled through thinking, model, and scoped-model changes", async () => {
 		const runtime = await createRuntime({
 			provider: "openai",
 			models: [
@@ -252,91 +238,43 @@ describe("issue #110: durable Fast mode policy", () => {
 			],
 			explicitThinking: "high",
 		});
-		const reasoningModel = runtime.faux.getModel("reasoning")!;
-		const nonReasoningModel = runtime.faux.getModel("non-reasoning")!;
+		const reasoningModel = runtime.modelRegistry.find("openai", "reasoning")!;
+		const nonReasoningModel = runtime.modelRegistry.find("openai", "non-reasoning")!;
 		const initialSettings = settingsSnapshot(runtime.settings);
-		const actionStates: boolean[] = [];
+		const fastStates: boolean[] = [];
 		runtime.session.subscribe((event) => {
-			if (event.type === "ui_action_state_changed") actionStates.push(event.state.value === true);
+			if (event.type === "ui_action_state_changed") fastStates.push(event.state.value === true);
 		});
 
 		runtime.session.setFastModeEnabled(true);
-		runtime.session.setThinkingLevel("off", { persistDefault: false });
-		expect(runtime.session.fastModeEnabled).toBe(false);
-		expect(runtime.session.baseThinkingLevel).toBe("off");
-		expect(runtime.session.thinkingLevel).toBe("off");
+		runtime.session.setThinkingLevel("medium", { persistDefault: false });
+		expect(runtime.session.fastModeEnabled).toBe(true);
+		expect(runtime.session.thinkingLevel).toBe("medium");
 
-		runtime.session.setThinkingLevel("high", { persistDefault: false });
-		runtime.session.setFastModeEnabled(true);
-		await runtime.session.setModel(reasoningModel, { persistDefault: false });
-		expect(runtime.session.fastModeEnabled).toBe(false);
-		expect(runtime.session.baseThinkingLevel).toBe("high");
-		expect(runtime.session.thinkingLevel).toBe("high");
-
-		runtime.session.setFastModeEnabled(true);
 		await runtime.session.setModel(nonReasoningModel, { persistDefault: false });
-		expect(runtime.session.fastModeEnabled).toBe(false);
-		expect(runtime.session.baseThinkingLevel).toBe("high");
+		expect(runtime.session.fastModeEnabled).toBe(true);
 		expect(runtime.session.thinkingLevel).toBe("off");
-		await runtime.session.setModel(reasoningModel, { persistDefault: false });
-		expect(runtime.session.thinkingLevel).toBe("high");
 
-		runtime.session.setFastModeEnabled(true);
+		await runtime.session.setModel(reasoningModel, { persistDefault: false });
+		expect(runtime.session.fastModeEnabled).toBe(true);
+		expect(runtime.session.thinkingLevel).toBe("medium");
+
 		runtime.session.setScopedModels([{ model: reasoningModel }]);
-		expect(runtime.session.fastModeEnabled).toBe(false);
-		expect(runtime.session.thinkingLevel).toBe("high");
-		expect(actionStates).toEqual([true, false, true, false, true, false, true, false]);
+		expect(runtime.session.fastModeEnabled).toBe(true);
+		expect(fastStates).toEqual([true]);
 		expect(settingsSnapshot(runtime.settings)).toEqual(initialSettings);
 	});
 
-	it("makes a same-effective explicit thinking choice the new base after model clamping", async () => {
-		const runtime = await createRuntime({
-			provider: "openai",
-			models: [
-				{ id: "reasoning", reasoning: true },
-				{ id: "non-reasoning", reasoning: false },
-			],
-			explicitThinking: "high",
-		});
-		const reasoningModel = runtime.faux.getModel("reasoning")!;
-		const nonReasoningModel = runtime.faux.getModel("non-reasoning")!;
-
-		await runtime.session.setModel(nonReasoningModel, { persistDefault: false });
-		expect(runtime.session.thinkingLevel).toBe("off");
-		expect(runtime.session.baseThinkingLevel).toBe("high");
-
-		runtime.session.setThinkingLevel("off", { persistDefault: false });
-		expect(runtime.session.baseThinkingLevel).toBe("off");
-		expect(runtime.manager.buildSessionContext().fastMode).toEqual({
-			enabled: false,
-			baseThinkingLevel: "off",
-		});
-
-		await runtime.session.setModel(reasoningModel, { persistDefault: false });
-		expect(runtime.session.thinkingLevel).toBe("off");
-		expect(runtime.session.baseThinkingLevel).toBe("off");
-	});
-
-	it("uses the fastest supported target and performs no write when already there", async () => {
-		const runtime = await createRuntime({ provider: "openai", explicitThinking: "high" });
-		Object.assign(runtime.session.model!, { thinkingLevelMap: { off: null, minimal: null } });
-		runtime.session.setFastModeEnabled(true);
-		expect(runtime.session.thinkingLevel).toBe("low");
-		runtime.session.setFastModeEnabled(false);
-		runtime.session.setThinkingLevel("low", { persistDefault: false });
-		const entryCount = runtime.manager.getEntries().length;
-		const events: AgentSessionEvent[] = [];
-		runtime.session.subscribe((event) => events.push(event));
-
-		expect(() => runtime.session.setFastModeEnabled(true)).toThrow(/fastest supported thinking level/);
-		expect(runtime.manager.getEntries()).toHaveLength(entryCount);
-		expect(events).toEqual([]);
-	});
-
-	it("restores the selected branch policy before publishing a navigation generation", async () => {
+	it("restores branch-local Fast and thinking states before publishing navigation", async () => {
 		const runtime = await createRuntime({ provider: "openai", explicitThinking: "high" });
 		const branchPoint = runtime.manager.appendMessage({ role: "user", content: "branch point", timestamp: 1 });
 		runtime.session.agent.state.messages = runtime.manager.buildSessionContext().messages;
+		runtime.session.setFastModeEnabled(true);
+		const enabledLeaf = runtime.manager.getLeafId()!;
+
+		runtime.manager.branch(branchPoint);
+		runtime.session.setFastModeEnabled(false);
+		runtime.session.setThinkingLevel("medium", { persistDefault: false });
 		const generationSnapshots: Array<{ enabled: boolean; thinkingLevel: ThinkingLevel }> = [];
 		runtime.session.subscribeConversationGenerationChanges(() => {
 			generationSnapshots.push({
@@ -344,128 +282,63 @@ describe("issue #110: durable Fast mode policy", () => {
 				thinkingLevel: runtime.session.thinkingLevel,
 			});
 		});
-		runtime.session.setFastModeEnabled(true);
-		const enabledLeaf = runtime.manager.getLeafId()!;
-
-		runtime.manager.branch(branchPoint);
-		runtime.session.setThinkingLevel("medium", { persistDefault: false });
-		expect(runtime.session.fastModeEnabled).toBe(false);
 
 		await runtime.session.navigateTree(enabledLeaf, { summarize: false });
 
 		expect(runtime.session.fastModeEnabled).toBe(true);
-		expect(runtime.session.baseThinkingLevel).toBe("high");
-		expect(runtime.session.thinkingLevel).toBe("off");
+		expect(runtime.session.thinkingLevel).toBe("high");
 		expect(fastDescriptorEnabled(runtime.session)).toBe(true);
-		expect(generationSnapshots).toEqual([{ enabled: true, thinkingLevel: "off" }]);
+		expect(generationSnapshots).toEqual([{ enabled: true, thinkingLevel: "high" }]);
 	});
 
-	it("restores the selected branch model before deriving its Fast thinking target", async () => {
-		const runtime = await createRuntime({
-			provider: "openai",
-			models: [
-				{ id: "supports-off", reasoning: true },
-				{ id: "starts-at-low", reasoning: true },
-			],
-			explicitThinking: "high",
-		});
-		const supportsOff = runtime.modelRegistry.find("openai", "supports-off")!;
-		const startsAtLow = runtime.modelRegistry.find("openai", "starts-at-low")!;
-		Object.assign(startsAtLow, { thinkingLevelMap: { off: null, minimal: null } });
-		const branchPoint = runtime.manager.appendMessage({ role: "user", content: "branch point", timestamp: 1 });
-		runtime.session.agent.state.messages = runtime.manager.buildSessionContext().messages;
-
-		runtime.session.setFastModeEnabled(true);
-		const supportsOffLeaf = runtime.manager.getLeafId()!;
-		runtime.manager.branch(branchPoint);
-		await runtime.session.setModel(startsAtLow, { persistDefault: false });
-		runtime.session.setFastModeEnabled(true);
-		const startsAtLowLeaf = runtime.manager.getLeafId()!;
-		expect(runtime.session.thinkingLevel).toBe("low");
-
-		await runtime.session.navigateTree(supportsOffLeaf, { summarize: false });
-		expect(runtime.session.model?.id).toBe(supportsOff.id);
-		expect(runtime.session.fastModeEnabled).toBe(true);
-		expect(runtime.session.thinkingLevel).toBe("off");
-
-		await runtime.session.navigateTree(startsAtLowLeaf, { summarize: false });
-		expect(runtime.session.model?.id).toBe(startsAtLow.id);
-		expect(runtime.session.fastModeEnabled).toBe(true);
-		expect(runtime.session.thinkingLevel).toBe("low");
-	});
-
-	it("keeps runtime state unchanged when the durable Fast commit fails", async () => {
+	it.each([
+		{ initial: false, next: true, error: "injected enable failure" },
+		{ initial: true, next: false, error: "injected disable failure" },
+	])("keeps runtime state unchanged when a durable transition fails", async ({ initial, next, error }) => {
 		const runtime = await createRuntime({ provider: "openai", explicitThinking: "high" });
+		if (initial) runtime.session.setFastModeEnabled(true);
 		const events: AgentSessionEvent[] = [];
 		runtime.session.subscribe((event) => events.push(event));
 		vi.spyOn(runtime.manager, "appendFastModeChange").mockImplementation(() => {
-			throw new Error("injected append failure");
+			throw new Error(error);
 		});
 
-		expect(() => runtime.session.setFastModeEnabled(true)).toThrow("injected append failure");
-		expect(runtime.session.fastModeEnabled).toBe(false);
-		expect(runtime.session.baseThinkingLevel).toBe("high");
+		expect(() => runtime.session.setFastModeEnabled(next)).toThrow(error);
+		expect(runtime.session.fastModeEnabled).toBe(initial);
 		expect(runtime.session.thinkingLevel).toBe("high");
 		expect(events).toEqual([]);
 	});
 
-	it("keeps enabled runtime state unchanged when the durable disable commit fails", async () => {
+	it("publishes one settled Fast event without thinking events or duplicate writes", async () => {
 		const runtime = await createRuntime({ provider: "openai", explicitThinking: "high" });
-		runtime.session.setFastModeEnabled(true);
-		const events: AgentSessionEvent[] = [];
-		runtime.session.subscribe((event) => events.push(event));
-		vi.spyOn(runtime.manager, "appendFastModeChange").mockImplementation(() => {
-			throw new Error("injected disable failure");
-		});
-
-		expect(() => runtime.session.setFastModeEnabled(false)).toThrow("injected disable failure");
-		expect(runtime.session.fastModeEnabled).toBe(true);
-		expect(runtime.session.baseThinkingLevel).toBe("high");
-		expect(runtime.session.thinkingLevel).toBe("off");
-		expect(events).toEqual([]);
-	});
-
-	it("publishes one settled action event to every listener after the complete commit", async () => {
-		const runtime = await createRuntime({ provider: "openai", explicitThinking: "high" });
-		const firstEvents: boolean[] = [];
-		const secondEvents: boolean[] = [];
-		const thinkingSnapshots: boolean[] = [];
-		const baselineFastEntries = runtime.manager
-			.getEntries()
-			.filter((entry) => entry.type === "fast_mode_change").length;
-		const baselineThinkingEntries = runtime.manager
-			.getEntries()
-			.filter((entry) => entry.type === "thinking_level_change").length;
+		const firstEvents: AgentSessionEvent[] = [];
+		const secondEvents: AgentSessionEvent[] = [];
+		const baselineEntries = runtime.manager.getEntries().length;
 		runtime.session.subscribe((event) => {
-			if (event.type === "thinking_level_changed")
-				thinkingSnapshots.push(fastDescriptorEnabled(runtime.session) === true);
+			firstEvents.push(event);
 			if (event.type === "ui_action_state_changed") {
-				firstEvents.push(event.state.value === true);
-				expect(runtime.manager.buildSessionContext().fastMode).toEqual({
-					enabled: true,
-					baseThinkingLevel: "high",
-				});
+				expect(runtime.manager.buildSessionContext().fastMode).toEqual({ enabled: true });
+				expect(runtime.session.thinkingLevel).toBe("high");
 			}
 		});
-		runtime.session.subscribe((event) => {
-			if (event.type === "ui_action_state_changed") secondEvents.push(event.state.value === true);
-		});
+		runtime.session.subscribe((event) => secondEvents.push(event));
 
 		runtime.session.setFastModeEnabled(true);
+		runtime.session.setFastModeEnabled(true);
 
-		expect(thinkingSnapshots).toEqual([true]);
-		expect(firstEvents).toEqual([true]);
-		expect(secondEvents).toEqual([true]);
-		expect(fastDescriptorEnabled(runtime.session)).toBe(true);
-		expect(runtime.manager.getEntries().filter((entry) => entry.type === "fast_mode_change")).toHaveLength(
-			baselineFastEntries + 1,
-		);
-		expect(runtime.manager.getEntries().filter((entry) => entry.type === "thinking_level_change")).toHaveLength(
-			baselineThinkingEntries,
-		);
+		expect(firstEvents).toEqual([
+			{
+				type: "ui_action_state_changed",
+				action: "thinking.fast_mode",
+				state: { type: "boolean", value: true, label: "Fast mode enabled" },
+			},
+		]);
+		expect(secondEvents).toEqual(firstEvents);
+		expect(runtime.manager.getEntries()).toHaveLength(baselineEntries + 1);
+		expect(runtime.manager.getEntries().filter((entry) => entry.type === "thinking_level_change")).toHaveLength(1);
 	});
 
-	it("does not turn a committed Fast transition into a failure when an event listener throws", async () => {
+	it("does not turn a committed transition into a failure when an event listener throws", async () => {
 		const runtime = await createRuntime({ provider: "openai", explicitThinking: "high" });
 		const observed: AgentSessionEvent[] = [];
 		runtime.session.subscribe(() => {
@@ -475,6 +348,7 @@ describe("issue #110: durable Fast mode policy", () => {
 
 		expect(() => runtime.session.setFastModeEnabled(true)).not.toThrow();
 		expect(runtime.session.fastModeEnabled).toBe(true);
+		expect(runtime.session.thinkingLevel).toBe("high");
 		expect(observed.filter((event) => event.type === "ui_action_state_changed")).toHaveLength(1);
 	});
 });

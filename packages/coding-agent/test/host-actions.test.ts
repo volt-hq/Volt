@@ -1,5 +1,4 @@
-import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
-import type { Api, Model, ThinkingLevelMap } from "@hansjm10/volt-ai";
+import type { Api, Model } from "@hansjm10/volt-ai";
 import { describe, expect, test, vi } from "vitest";
 import {
 	CONTEXT_COMPACT_ACTION_ID,
@@ -251,20 +250,16 @@ describe("HostActionRegistry", () => {
 		expect(renameSession).toHaveBeenCalledWith("D.2 work");
 	});
 
-	test("registers Fast mode as a remote-safe session-local thinking toggle", async () => {
-		let thinkingLevel: ThinkingLevel = "high";
+	test("registers Fast mode as a remote-safe session-local priority toggle", async () => {
 		let fastModeEnabled = false;
 		const setFastModeEnabled = vi.fn((enabled: boolean) => {
 			fastModeEnabled = enabled;
-			thinkingLevel = enabled ? "off" : "high";
 		});
 		const session = {
 			isStreaming: false,
 			isCompacting: false,
-			model: createModel({ reasoning: true }),
-			get thinkingLevel() {
-				return thinkingLevel;
-			},
+			model: createModel(),
+			thinkingLevel: "high" as const,
 			get fastModeEnabled() {
 				return fastModeEnabled;
 			},
@@ -283,13 +278,14 @@ describe("HostActionRegistry", () => {
 			expect.objectContaining({
 				id: THINKING_FAST_MODE_ACTION_ID,
 				label: "Fast mode",
+				description: "Request premium low-latency inference capacity for the current session.",
 				category: "model",
 				presentation: { kind: "toggle", group: "Model", priority: 100 },
 				enabled: true,
 				remoteSafe: true,
 				streamingBehavior: "disabled",
 				args: [expect.objectContaining({ name: "enabled", type: "boolean", required: true })],
-				state: { type: "boolean", value: false, label: "Normal reasoning" },
+				state: { type: "boolean", value: false, label: "Fast mode disabled" },
 			}),
 		);
 
@@ -298,52 +294,25 @@ describe("HostActionRegistry", () => {
 		).resolves.toEqual({
 			action: THINKING_FAST_MODE_ACTION_ID,
 			status: "completed",
-			state: { type: "boolean", value: true, label: "Fast: thinking off" },
+			state: { type: "boolean", value: true, label: "Fast mode enabled" },
 			stateChanged: true,
 			actionsChanged: true,
-			message: "Fast mode enabled: thinking off",
+			message: "Fast mode enabled",
 		});
-		expect(setFastModeEnabled).toHaveBeenCalledWith(true);
+		expect(session.thinkingLevel).toBe("high");
 
 		await expect(
 			registry.invoke(THINKING_FAST_MODE_ACTION_ID, context, { enabled: false }, { requireRemoteSafe: true }),
 		).resolves.toEqual({
 			action: THINKING_FAST_MODE_ACTION_ID,
 			status: "completed",
-			state: { type: "boolean", value: false, label: "Normal reasoning" },
+			state: { type: "boolean", value: false, label: "Fast mode disabled" },
 			stateChanged: true,
 			actionsChanged: true,
-			message: "Fast mode disabled: restored high thinking",
+			message: "Fast mode disabled",
 		});
-		expect(setFastModeEnabled).toHaveBeenLastCalledWith(false);
-	});
-
-	test("disables Fast mode when no lower supported thinking level exists", async () => {
-		const registry = registerBuiltinHostActions(new HostActionRegistry());
-		const context = {
-			session: {
-				isStreaming: false,
-				isCompacting: false,
-				model: createModel({ reasoning: true, thinkingLevelMap: { off: null, minimal: null } }),
-				thinkingLevel: "low" as ThinkingLevel,
-			},
-			abortRun: vi.fn(async () => {}),
-			compactContext: vi.fn(async () => createCompactionResult()),
-			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
-			renameSession: vi.fn(() => {}),
-			setFastModeEnabled: vi.fn(() => {}),
-		};
-
-		expect(registry.getDescriptor(THINKING_FAST_MODE_ACTION_ID, context)).toEqual(
-			expect.objectContaining({
-				enabled: false,
-				disabledReason: "Current model is already at its fastest supported thinking level.",
-				state: { type: "boolean", value: false, label: "Normal reasoning" },
-			}),
-		);
-		await expect(registry.invoke(THINKING_FAST_MODE_ACTION_ID, context, { enabled: true })).rejects.toThrow(
-			"Current model is already at its fastest supported thinking level.",
-		);
+		expect(setFastModeEnabled.mock.calls).toEqual([[true], [false]]);
+		expect(session.thinkingLevel).toBe("high");
 	});
 
 	test("registers review actions as remote-safe cards with shared handlers", async () => {
@@ -502,7 +471,7 @@ describe("HostActionRegistry", () => {
 					session: {
 						isStreaming: false,
 						isCompacting: false,
-						model: createModel({ reasoning: true }),
+						model: createModel(),
 						thinkingLevel: "high",
 					},
 					setFastModeEnabled: vi.fn(() => {}),
@@ -534,15 +503,14 @@ function createCompactionResult() {
 	};
 }
 
-function createModel(options: { reasoning?: boolean; thinkingLevelMap?: ThinkingLevelMap } = {}): Model<Api> {
+function createModel(): Model<Api> {
 	return {
 		id: "faux-fast",
 		name: "Faux Fast",
 		api: "openai-responses",
 		provider: "openai",
 		baseUrl: "https://example.test",
-		reasoning: options.reasoning ?? false,
-		thinkingLevelMap: options.thinkingLevelMap,
+		reasoning: false,
 		input: ["text"],
 		cost: {
 			input: 0,

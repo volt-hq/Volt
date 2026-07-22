@@ -340,8 +340,7 @@ describe("AgentSessionRuntime profile propagation", () => {
 		expect(session.model?.provider).toBe(fallbackProviderName);
 		expect(session.model?.id).toBe(fallbackModelId);
 		expect(session.model?.reasoning).toBe(false);
-		expect(session.fastModeEnabled).toBe(false);
-		expect(session.baseThinkingLevel).toBe("high");
+		expect(session.fastModeEnabled).toBe(true);
 		expect(session.thinkingLevel).toBe("off");
 	});
 });

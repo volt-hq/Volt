@@ -464,8 +464,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		agent.state.messages = existingSession.messages;
 	}
 	if (hasExistingSessionState) {
-		// Explicit startup overrides are branch mutations. Persist them before
-		// AgentSession restores policy so they durably invalidate Fast mode.
+		// Explicit startup overrides are independent branch mutations. Persist them
+		// before AgentSession restores the branch-local Fast policy.
 		if (options.model) {
 			sessionManager.appendModelChange(options.model.provider, options.model.id);
 		}

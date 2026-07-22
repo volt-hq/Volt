@@ -462,7 +462,7 @@ describe("InteractiveMode profile selector", () => {
 		}
 	});
 
-	it("applies profile default thinking when switching profiles on the same model", async () => {
+	it("applies profile default thinking without changing Fast mode", async () => {
 		const provider = "profile-thinking-test";
 		const authStorage = AuthStorage.inMemory();
 		const modelRegistry = ModelRegistry.inMemory(authStorage);
@@ -546,9 +546,8 @@ describe("InteractiveMode profile selector", () => {
 			expect(setModel).not.toHaveBeenCalled();
 			expect(session.model).toBe(reasoningModel);
 			expect(session.thinkingLevel).toBe("high");
-			expect(session.fastModeEnabled).toBe(false);
-			expect(session.baseThinkingLevel).toBe("high");
-			expect(fastStates).toEqual([false]);
+			expect(session.fastModeEnabled).toBe(true);
+			expect(fastStates).toEqual([]);
 		} finally {
 			session.dispose();
 		}

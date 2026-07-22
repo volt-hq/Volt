@@ -1012,6 +1012,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				state: {
 					thinkingLevel: "off",
 					availableThinkingLevels: ["off"],
+					fastModeEnabled: false,
 					isStreaming: false,
 					isCompacting: false,
 					steeringMode: "one-at-a-time",
@@ -1093,6 +1094,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				state: {
 					thinkingLevel: "off",
 					availableThinkingLevels: ["off"],
+					fastModeEnabled: false,
 					isStreaming: false,
 					isCompacting: false,
 					steeringMode: "one-at-a-time",
@@ -1181,6 +1183,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				state: {
 					thinkingLevel: "off",
 					availableThinkingLevels: ["off"],
+					fastModeEnabled: false,
 					isStreaming: false,
 					isCompacting: false,
 					steeringMode: "one-at-a-time",

@@ -368,7 +368,7 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 		fanout.emit({
 			type: "ui_action_state_changed",
 			action: "thinking.fast_mode",
-			state: { type: "boolean", value: true, label: "Fast: thinking off" },
+			state: { type: "boolean", value: true, label: "Fast mode enabled" },
 		} as unknown as AgentSessionEvent);
 		await vi.waitFor(() => {
 			for (const attach of [attachA, attachB]) {
@@ -376,7 +376,7 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 				expect(actionEvent).toMatchObject({
 					type: "ui_action_state_changed",
 					action: "thinking.fast_mode",
-					state: { type: "boolean", value: true, label: "Fast: thinking off" },
+					state: { type: "boolean", value: true, label: "Fast mode enabled" },
 					delivery: { subscriptionId: expect.any(String), cursor: expect.any(Number) },
 				});
 			}

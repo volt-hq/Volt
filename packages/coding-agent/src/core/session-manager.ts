@@ -188,7 +188,6 @@ export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 export interface FastModeChangeEntry extends SessionEntryBase {
 	type: "fast_mode_change";
 	enabled: boolean;
-	baseThinkingLevel: string;
 }
 
 export interface ModelChangeEntry extends SessionEntryBase {
@@ -567,7 +566,7 @@ export interface SessionContext {
 	messages: AgentMessage[];
 	thinkingLevel: string;
 	model: { provider: string; modelId: string } | null;
-	fastMode: { enabled: boolean; baseThinkingLevel: string };
+	fastMode: { enabled: boolean };
 }
 
 export interface SessionInfo {
@@ -799,7 +798,7 @@ export function buildSessionContext(
 			messages: [],
 			thinkingLevel: "off",
 			model: null,
-			fastMode: { enabled: false, baseThinkingLevel: "off" },
+			fastMode: { enabled: false },
 		};
 	}
 	if (leafId) {
@@ -815,7 +814,7 @@ export function buildSessionContext(
 			messages: [],
 			thinkingLevel: "off",
 			model: null,
-			fastMode: { enabled: false, baseThinkingLevel: "off" },
+			fastMode: { enabled: false },
 		};
 	}
 
@@ -830,18 +829,16 @@ export function buildSessionContext(
 	// Extract settings and find compaction
 	let thinkingLevel = "off";
 	let model: { provider: string; modelId: string } | null = null;
-	let fastMode = { enabled: false, baseThinkingLevel: thinkingLevel };
+	let fastMode = { enabled: false };
 	let compaction: CompactionEntry | null = null;
 
 	for (const entry of path) {
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel;
-			fastMode = { enabled: false, baseThinkingLevel: thinkingLevel };
 		} else if (entry.type === "fast_mode_change") {
-			fastMode = { enabled: entry.enabled, baseThinkingLevel: entry.baseThinkingLevel };
+			fastMode = { enabled: entry.enabled };
 		} else if (entry.type === "model_change") {
 			model = { provider: entry.provider, modelId: entry.modelId };
-			fastMode = { enabled: false, baseThinkingLevel: fastMode.baseThinkingLevel };
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
 			model = { provider: entry.message.provider, modelId: entry.message.model };
 		} else if (entry.type === "compaction") {
@@ -2082,14 +2079,13 @@ export class SessionManager {
 	}
 
 	/** Append a Fast mode policy change as child of current leaf, then advance leaf. Returns entry id. */
-	appendFastModeChange(policy: { enabled: boolean; baseThinkingLevel: string }): string {
+	appendFastModeChange(enabled: boolean): string {
 		const entry: FastModeChangeEntry = {
 			type: "fast_mode_change",
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
-			enabled: policy.enabled,
-			baseThinkingLevel: policy.baseThinkingLevel,
+			enabled,
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -2783,7 +2779,11 @@ export class SessionManager {
 		const listOptions =
 			typeof sessionDirOrOnProgress === "function"
 				? (onProgressOrOptions as SessionListOptions | undefined)
-				: options;
+				: sessionDirOrOnProgress === undefined &&
+						typeof onProgressOrOptions === "object" &&
+						onProgressOrOptions !== null
+					? onProgressOrOptions
+					: options;
 		if (customSessionDir) {
 			const sessions = await listSessionsFromDir(
 				customSessionDir,

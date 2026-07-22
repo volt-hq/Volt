@@ -1141,7 +1141,7 @@ describe("runRpcMode", () => {
 					presentation: expect.objectContaining({ kind: "toggle", group: "Model" }),
 					enabled: false,
 					remoteSafe: true,
-					state: { type: "boolean", value: false, label: "Normal reasoning" },
+					state: { type: "boolean", value: false, label: "Fast mode disabled" },
 				}),
 			);
 			expect(reviewChangesAction).toEqual(
@@ -1402,7 +1402,7 @@ describe("createInProcessRpcClient", () => {
 					presentation: expect.objectContaining({ kind: "toggle", group: "Model" }),
 					enabled: false,
 					remoteSafe: true,
-					state: { type: "boolean", value: false, label: "Normal reasoning" },
+					state: { type: "boolean", value: false, label: "Fast mode disabled" },
 				}),
 				expect.objectContaining({
 					id: REVIEW_UNCOMMITTED_ACTION_ID,
@@ -1532,7 +1532,7 @@ describe("createInProcessRpcClient", () => {
 		expect(dispose).toHaveBeenCalledOnce();
 	});
 
-	test("invokes native Fast mode without changing model defaults or exposing model lists", async () => {
+	test("invokes native Fast mode independently from thinking", async () => {
 		const dispose = vi.fn(async () => {});
 		const runtimeHost = createRuntimeHost(dispose, async () => {}, {
 			model: createModel({ reasoning: true }),
@@ -1549,7 +1549,7 @@ describe("createInProcessRpcClient", () => {
 			expect(actions.find((action) => action.id === THINKING_FAST_MODE_ACTION_ID)).toEqual(
 				expect.objectContaining({
 					enabled: true,
-					state: { type: "boolean", value: false, label: "Normal reasoning" },
+					state: { type: "boolean", value: false, label: "Fast mode disabled" },
 				}),
 			);
 
@@ -1558,17 +1558,27 @@ describe("createInProcessRpcClient", () => {
 			).resolves.toEqual({
 				action: THINKING_FAST_MODE_ACTION_ID,
 				status: "completed",
-				state: { type: "boolean", value: true, label: "Fast: thinking off" },
+				state: { type: "boolean", value: true, label: "Fast mode enabled" },
 				stateChanged: true,
 				actionsChanged: true,
-				message: "Fast mode enabled: thinking off",
+				message: "Fast mode enabled",
 			});
-			await expect(client.getState()).resolves.toMatchObject({ thinkingLevel: "off" });
+			await expect(client.getState()).resolves.toMatchObject({ thinkingLevel: "high" });
 			expect(
 				(await client.getUiActions("all")).find((action) => action.id === THINKING_FAST_MODE_ACTION_ID),
 			).toEqual(
 				expect.objectContaining({
-					state: { type: "boolean", value: true, label: "Fast: thinking off" },
+					state: { type: "boolean", value: true, label: "Fast mode enabled" },
+				}),
+			);
+
+			await client.setThinkingLevel("medium");
+			await expect(client.getState()).resolves.toMatchObject({ thinkingLevel: "medium" });
+			expect(
+				(await client.getUiActions("all")).find((action) => action.id === THINKING_FAST_MODE_ACTION_ID),
+			).toEqual(
+				expect.objectContaining({
+					state: { type: "boolean", value: true, label: "Fast mode enabled" },
 				}),
 			);
 
@@ -1577,28 +1587,15 @@ describe("createInProcessRpcClient", () => {
 			).resolves.toEqual({
 				action: THINKING_FAST_MODE_ACTION_ID,
 				status: "completed",
-				state: { type: "boolean", value: false, label: "Normal reasoning" },
+				state: { type: "boolean", value: false, label: "Fast mode disabled" },
 				stateChanged: true,
 				actionsChanged: true,
-				message: "Fast mode disabled: restored high thinking",
+				message: "Fast mode disabled",
 			});
-			await expect(client.getState()).resolves.toMatchObject({ thinkingLevel: "high" });
-
-			await client.invokeUiAction(THINKING_FAST_MODE_ACTION_ID, { args: { enabled: true } });
-			await client.setThinkingLevel("medium");
 			await expect(client.getState()).resolves.toMatchObject({ thinkingLevel: "medium" });
-			expect(
-				(await client.getUiActions("all")).find((action) => action.id === THINKING_FAST_MODE_ACTION_ID),
-			).toEqual(
-				expect.objectContaining({
-					state: { type: "boolean", value: false, label: "Normal reasoning" },
-				}),
-			);
 			expect(fastStates).toEqual([
-				{ type: "boolean", value: true, label: "Fast: thinking off" },
-				{ type: "boolean", value: false, label: "Normal reasoning" },
-				{ type: "boolean", value: true, label: "Fast: thinking off" },
-				{ type: "boolean", value: false, label: "Normal reasoning" },
+				{ type: "boolean", value: true, label: "Fast mode enabled" },
+				{ type: "boolean", value: false, label: "Fast mode disabled" },
 			]);
 		} finally {
 			await client.stop();
@@ -2156,16 +2153,14 @@ function createRuntimeHost(
 		prompts?: PromptTemplate[];
 		thinkingLevel?: ThinkingLevel;
 		fastModeEnabled?: boolean;
-		baseThinkingLevel?: ThinkingLevel;
 		setThinkingLevel?: (level: ThinkingLevel, options?: { persistDefault?: boolean }) => void;
 		setFastModeEnabled?: (enabled: boolean) => void;
 		setSessionName?: (name: string) => void;
 		skills?: Skill[];
 	} = {},
 ): AgentSessionRuntime {
-	let baseThinkingLevel = resources.baseThinkingLevel ?? resources.thinkingLevel ?? "off";
 	let fastModeEnabled = resources.fastModeEnabled ?? false;
-	let thinkingLevel = resources.thinkingLevel ?? (fastModeEnabled ? "off" : baseThinkingLevel);
+	let thinkingLevel = resources.thinkingLevel ?? "off";
 	let currentModel = resources.model;
 	const sessionListeners = new Set<(event: AgentSessionEvent) => void>();
 	const emitSessionEvent = (event: AgentSessionEvent): void => {
@@ -2186,23 +2181,12 @@ function createRuntimeHost(
 		getSkills: vi.fn(() => ({ skills: resources.skills ?? [], diagnostics: [] })),
 	};
 	const setThinkingLevel = vi.fn((level: ThinkingLevel, options?: { persistDefault?: boolean }) => {
-		const wasFastModeEnabled = fastModeEnabled;
 		thinkingLevel = level;
-		baseThinkingLevel = level;
-		fastModeEnabled = false;
 		resources.setThinkingLevel?.(level, options);
-		if (wasFastModeEnabled) {
-			emitSessionEvent({
-				type: "ui_action_state_changed",
-				action: "thinking.fast_mode",
-				state: { type: "boolean", value: false, label: "Normal reasoning" },
-			});
-		}
 	});
 	const setFastModeEnabled = vi.fn((enabled: boolean) => {
 		if (enabled === fastModeEnabled) return;
 		fastModeEnabled = enabled;
-		thinkingLevel = enabled ? "off" : baseThinkingLevel;
 		resources.setFastModeEnabled?.(enabled);
 		emitSessionEvent({
 			type: "ui_action_state_changed",
@@ -2210,7 +2194,7 @@ function createRuntimeHost(
 			state: {
 				type: "boolean",
 				value: enabled,
-				label: enabled ? "Fast: thinking off" : "Normal reasoning",
+				label: enabled ? "Fast mode enabled" : "Fast mode disabled",
 			},
 		});
 	});
@@ -2247,9 +2231,6 @@ function createRuntimeHost(
 			}),
 			get fastModeEnabled() {
 				return fastModeEnabled;
-			},
-			get baseThinkingLevel() {
-				return baseThinkingLevel;
 			},
 			isStreaming: resources.isStreaming ?? false,
 			isBusy: resources.isStreaming ?? false,
