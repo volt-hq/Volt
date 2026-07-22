@@ -2347,11 +2347,11 @@ function createCommand(
 
 function createModel(options: { reasoning?: boolean; thinkingLevelMap?: ThinkingLevelMap } = {}): Model<Api> {
 	return {
-		id: "faux-fast",
-		name: "Faux Fast",
+		id: "gpt-5.4",
+		name: "GPT-5.4",
 		api: "openai-responses",
 		provider: "openai",
-		baseUrl: "https://example.test",
+		baseUrl: "https://api.openai.com/v1",
 		reasoning: options.reasoning ?? false,
 		thinkingLevelMap: options.thinkingLevelMap,
 		input: ["text"],

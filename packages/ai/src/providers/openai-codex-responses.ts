@@ -37,6 +37,7 @@ import type { AssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { createAssistantMessageDiagnostic, formatThrownValue } from "../utils/diagnostics.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
+import { getFastInferenceServiceTier } from "./openai-fast-inference.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
 	convertResponsesMessages,
@@ -432,6 +433,7 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 	return streamOpenAICodexResponses(model, context, {
 		...base,
 		reasoningEffort,
+		serviceTier: getFastInferenceServiceTier(model, options?.inferenceSpeed),
 	} satisfies OpenAICodexResponsesOptions);
 };
 
@@ -497,7 +499,7 @@ function getServiceTierCostMultiplier(
 		case "flex":
 			return 0.5;
 		case "priority":
-			return model.id === "gpt-5.5" ? 2.5 : 2;
+			return model.id === "gpt-5.5" || model.id.startsWith("gpt-5.6-") ? 2.5 : 2;
 		default:
 			return 1;
 	}

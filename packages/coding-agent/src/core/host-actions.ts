@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
-import type { Api, Model } from "@hansjm10/volt-ai";
+import { type Api, type Model, supportsFastInference } from "@hansjm10/volt-ai";
 import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
 import type { ReviewTarget, ReviewWorkflowResult } from "./review.ts";
 import type {
@@ -686,6 +686,12 @@ function thinkingFastModeAvailability(context: HostActionDescriptorContext): Hos
 	}
 	if (context.session.isCompacting) {
 		return { enabled: false, disabledReason: "Fast mode is not available while compaction is running" };
+	}
+	if (!context.session.model || !supportsFastInference(context.session.model)) {
+		return {
+			enabled: false,
+			disabledReason: "Fast mode is not supported for the current provider and model",
+		};
 	}
 	return { enabled: true };
 }

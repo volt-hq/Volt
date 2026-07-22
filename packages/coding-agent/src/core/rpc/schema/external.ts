@@ -45,6 +45,8 @@ export const RpcAssistantContentSchema = Type.Union([
 	RpcToolCallSchema,
 ]);
 
+const rpcServiceTierSchema = stringEnum(["auto", "default", "flex", "scale", "priority"]);
+
 export const RpcUsageSchema = Type.Object(
 	{
 		input: Type.Number(),
@@ -62,6 +64,15 @@ export const RpcUsageSchema = Type.Object(
 				total: Type.Number(),
 			},
 			{ additionalProperties: false },
+		),
+		serviceTier: Type.Optional(
+			Type.Object(
+				{
+					requested: Type.Optional(rpcServiceTierSchema),
+					effective: Type.Optional(rpcServiceTierSchema),
+				},
+				{ additionalProperties: false },
+			),
 		),
 	},
 	{ additionalProperties: false },

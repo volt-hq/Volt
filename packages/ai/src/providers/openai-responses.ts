@@ -17,6 +17,7 @@ import { headersToRecord } from "../utils/headers.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
+import { applyOpenAIPriorityPricing, getFastInferenceServiceTier } from "./openai-fast-inference.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
@@ -171,6 +172,7 @@ export const streamSimpleOpenAIResponses: StreamFunction<"openai-responses", Sim
 	return streamOpenAIResponses(model, context, {
 		...base,
 		reasoningEffort,
+		serviceTier: getFastInferenceServiceTier(model, options?.inferenceSpeed),
 	} satisfies OpenAIResponsesOptions);
 };
 
@@ -289,8 +291,11 @@ function getServiceTierCostMultiplier(
 function applyServiceTierPricing(
 	usage: Usage,
 	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-	model: Pick<Model<"openai-responses">, "id">,
+	model: Pick<Model<"openai-responses">, "api" | "provider" | "baseUrl" | "id">,
 ) {
+	if (serviceTier === "priority" && applyOpenAIPriorityPricing(usage, model)) {
+		return;
+	}
 	const multiplier = getServiceTierCostMultiplier(model, serviceTier);
 	if (multiplier === 1) return;
 

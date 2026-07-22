@@ -9719,6 +9719,32 @@
 						}
 					},
 					"additionalProperties": false
+				},
+				"serviceTier": {
+					"type": "object",
+					"properties": {
+						"requested": {
+							"type": "string",
+							"enum": [
+								"auto",
+								"default",
+								"flex",
+								"scale",
+								"priority"
+							]
+						},
+						"effective": {
+							"type": "string",
+							"enum": [
+								"auto",
+								"default",
+								"flex",
+								"scale",
+								"priority"
+							]
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false

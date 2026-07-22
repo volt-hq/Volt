@@ -8,11 +8,11 @@ import {
 
 function model(): Model<Api> {
 	return {
-		id: "reasoning",
+		id: "gpt-5.4",
 		name: "Reasoning",
 		api: "openai-responses",
 		provider: "openai",
-		baseUrl: "https://example.test",
+		baseUrl: "https://api.openai.com/v1",
 		reasoning: true,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -61,5 +61,36 @@ describe("Fast mode host action", () => {
 		});
 		expect(setFastModeEnabled.mock.calls).toEqual([[true], [false]]);
 		expect(thinkingLevel).toBe("high");
+	});
+
+	it.each([
+		{ provider: "anthropic", api: "anthropic-messages", baseUrl: "https://api.anthropic.com", id: "claude" },
+		{ provider: "openai", api: "openai-responses", baseUrl: "https://gateway.example/v1", id: "gpt-5.4" },
+		{ provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1", id: "gpt-5.4-pro" },
+	])("disables Fast for unsupported model $provider/$id at $baseUrl", async (override) => {
+		const registry = registerBuiltinHostActions(new HostActionRegistry());
+		const session = {
+			isStreaming: false,
+			isCompacting: false,
+			model: { ...model(), ...override } as Model<Api>,
+			thinkingLevel: "high" as const,
+			fastModeEnabled: false,
+		};
+		const context = {
+			session,
+			abortRun: vi.fn(async () => {}),
+			compactContext: vi.fn(async () => ({ summary: "", firstKeptEntryId: "entry", tokensBefore: 0 })),
+			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			renameSession: vi.fn(() => {}),
+			setFastModeEnabled: vi.fn(),
+		};
+
+		expect(registry.getDescriptor(THINKING_FAST_MODE_ACTION_ID, context)).toMatchObject({
+			enabled: false,
+			disabledReason: "Fast mode is not supported for the current provider and model",
+		});
+		await expect(registry.invoke(THINKING_FAST_MODE_ACTION_ID, context, { enabled: true })).rejects.toThrow(
+			"Fast mode is not supported for the current provider and model",
+		);
 	});
 });

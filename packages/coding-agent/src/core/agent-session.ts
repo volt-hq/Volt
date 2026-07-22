@@ -535,9 +535,7 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._modelRegistry = config.modelRegistry;
-		if (this.sessionManager.getBranch().length > 0) {
-			this._restoreFastModePolicy(this.sessionManager.buildSessionContext().fastMode);
-		}
+		this._restoreFastModePolicy(this.sessionManager.buildSessionContext().fastMode);
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
@@ -2956,6 +2954,7 @@ export class AgentSession {
 
 		this.sessionManager.appendFastModeChange(enabled);
 		this._fastModeEnabled = enabled;
+		this.agent.inferenceSpeed = enabled ? "fast" : "standard";
 		this._emitFastModeStateChanged();
 	}
 
@@ -2971,6 +2970,7 @@ export class AgentSession {
 
 	private _restoreFastModePolicy(policy: { enabled: boolean }): void {
 		this._fastModeEnabled = policy.enabled;
+		this.agent.inferenceSpeed = policy.enabled ? "fast" : "standard";
 	}
 
 	private _emitFastModeStateChanged(): void {
