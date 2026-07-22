@@ -44,6 +44,7 @@ type ProxySerializableStreamOptions = Pick<
 	| "temperature"
 	| "maxTokens"
 	| "reasoning"
+	| "inferenceSpeed"
 	| "cacheRetention"
 	| "sessionId"
 	| "headers"
@@ -67,6 +68,7 @@ function buildProxyRequestOptions(options: ProxyStreamOptions): ProxySerializabl
 		temperature: options.temperature,
 		maxTokens: options.maxTokens,
 		reasoning: options.reasoning,
+		inferenceSpeed: options.inferenceSpeed,
 		cacheRetention: options.cacheRetention,
 		sessionId: options.sessionId,
 		headers: options.headers,

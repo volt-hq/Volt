@@ -65,6 +65,8 @@ export type ImagesProvider = KnownImagesProvider | string;
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ModelThinkingLevel = "off" | ThinkingLevel;
 export type ThinkingLevelMap = Partial<Record<ModelThinkingLevel, string | null>>;
+export type InferenceSpeed = "standard" | "fast";
+export type ServiceTier = "auto" | "default" | "flex" | "scale" | "priority";
 
 /** Token budgets for each thinking level (token-based providers only) */
 export interface ThinkingBudgets {
@@ -211,6 +213,8 @@ export type ProviderImagesOptions = ImagesOptions & Record<string, unknown>;
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends StreamOptions {
 	reasoning?: ThinkingLevel;
+	/** Provider-neutral inference speed preference for the primary model request. */
+	inferenceSpeed?: InferenceSpeed;
 	/** Custom token budgets for thinking levels (token-based providers only) */
 	thinkingBudgets?: ThinkingBudgets;
 }
@@ -285,6 +289,11 @@ export interface Usage {
 		cacheRead: number;
 		cacheWrite: number;
 		total: number;
+	};
+	/** Requested and actual provider service tiers, when the provider reports tiered processing. */
+	serviceTier?: {
+		requested?: ServiceTier;
+		effective?: ServiceTier;
 	};
 }
 

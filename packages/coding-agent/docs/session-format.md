@@ -113,6 +113,10 @@ interface Usage {
     cacheWrite: number;
     total: number;
   };
+  serviceTier?: {
+    requested?: "auto" | "default" | "flex" | "scale" | "priority";
+    effective?: "auto" | "default" | "flex" | "scale" | "priority";
+  };
 }
 ```
 
@@ -223,6 +227,14 @@ Emitted when the user changes the thinking/reasoning level.
 {"type":"thinking_level_change","id":"e5f6g7h8","parentId":"d4e5f6g7","timestamp":"2024-12-03T14:06:00.000Z","thinkingLevel":"high"}
 ```
 
+### FastModeChangeEntry
+
+Emitted when the user changes the branch-local inference-speed policy. This is independent of thinking level. Eligible OpenAI requests map enabled Fast mode to Priority processing.
+
+```json
+{"type":"fast_mode_change","id":"f5g6h7i8","parentId":"e5f6g7h8","timestamp":"2024-12-03T14:07:00.000Z","enabled":true}
+```
+
 ### CompactionEntry
 
 Created when context is compacted. Stores a summary of earlier messages.
@@ -309,7 +321,7 @@ Entries form a tree:
 `buildSessionContext()` walks from the current leaf to the root, producing the message list for the LLM:
 
 1. Collects all entries on the path
-2. Extracts current model and thinking level settings
+2. Extracts current model, thinking level, and Fast mode settings
 3. If a `CompactionEntry` is on the path:
    - Emits the summary first
    - Then messages from `firstKeptEntryId` to compaction
@@ -381,6 +393,7 @@ Key methods for working with sessions programmatically.
 ### Instance Methods - Appending (all return entry ID)
 - `appendMessage(message)` - Add message
 - `appendThinkingLevelChange(level)` - Record thinking change
+- `appendFastModeChange(enabled)` - Record branch-local Fast mode change
 - `appendModelChange(provider, modelId)` - Record model change
 - `appendCompaction(summary, firstKeptEntryId, tokensBefore, details?, fromHook?)` - Add compaction
 - `appendCustomEntry(customType, data?)` - Extension state (not in context)

@@ -1,5 +1,6 @@
 import {
 	type ImageContent,
+	type InferenceSpeed,
 	type Message,
 	type Model,
 	type SimpleStreamOptions,
@@ -121,6 +122,7 @@ export interface AgentOptions {
 	sessionId?: string;
 	thinkingBudgets?: ThinkingBudgets;
 	transport?: Transport;
+	inferenceSpeed?: InferenceSpeed;
 	maxRetryDelayMs?: number;
 	toolExecution?: ToolExecutionMode;
 }
@@ -222,6 +224,8 @@ export class Agent {
 	public thinkingBudgets?: ThinkingBudgets;
 	/** Preferred transport forwarded to the stream function. */
 	public transport: Transport;
+	/** Provider-neutral inference speed preference forwarded to primary model turns. */
+	public inferenceSpeed?: InferenceSpeed;
 	/** Optional cap for provider-requested retry delays. */
 	public maxRetryDelayMs?: number;
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
@@ -244,6 +248,7 @@ export class Agent {
 		this.sessionId = options.sessionId;
 		this.thinkingBudgets = options.thinkingBudgets;
 		this.transport = options.transport ?? "auto";
+		this.inferenceSpeed = options.inferenceSpeed;
 		this.maxRetryDelayMs = options.maxRetryDelayMs;
 		this.toolExecution = options.toolExecution ?? "parallel";
 	}
@@ -461,6 +466,7 @@ export class Agent {
 			onPayload: this.onPayload,
 			onResponse: this.onResponse,
 			transport: this.transport,
+			inferenceSpeed: this.inferenceSpeed,
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			toolExecution: this.toolExecution,

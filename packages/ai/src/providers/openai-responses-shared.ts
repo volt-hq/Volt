@@ -20,6 +20,7 @@ import type {
 	Context,
 	ImageContent,
 	Model,
+	ServiceTier,
 	StopReason,
 	TextContent,
 	TextSignatureV1,
@@ -611,10 +612,19 @@ export async function processResponsesStream<TApi extends Api>(
 				};
 			}
 			calculateCost(model, usage);
+			const requestedServiceTier = options?.serviceTier ?? undefined;
+			const responseServiceTier = response?.service_tier ?? undefined;
+			const effectiveServiceTier = responseServiceTier ?? requestedServiceTier;
+			if (requestedServiceTier !== undefined || effectiveServiceTier !== undefined) {
+				usage.serviceTier = {
+					...(requestedServiceTier === undefined ? {} : { requested: requestedServiceTier satisfies ServiceTier }),
+					...(effectiveServiceTier === undefined ? {} : { effective: effectiveServiceTier satisfies ServiceTier }),
+				};
+			}
 			if (options?.applyServiceTierPricing) {
 				const serviceTier = options.resolveServiceTier
-					? options.resolveServiceTier(response?.service_tier, options.serviceTier)
-					: (response?.service_tier ?? options.serviceTier);
+					? options.resolveServiceTier(responseServiceTier, requestedServiceTier)
+					: effectiveServiceTier;
 				options.applyServiceTierPricing(usage, serviceTier);
 			}
 			normalizer.push({ type: "meta", patch: { responseId, usage } });

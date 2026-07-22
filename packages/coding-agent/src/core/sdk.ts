@@ -447,6 +447,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			});
 		},
 		sessionId: sessionManager.getSessionId(),
+		inferenceSpeed: existingSession.fastMode.enabled ? "fast" : "standard",
 		transformContext: async (messages) => {
 			const runner = extensionRunnerRef.current;
 			if (!runner) return messages;
