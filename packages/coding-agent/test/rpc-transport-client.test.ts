@@ -1561,7 +1561,7 @@ describe("createInProcessRpcClient", () => {
 				state: { type: "boolean", value: true, label: "Fast mode enabled" },
 				stateChanged: true,
 				actionsChanged: true,
-				message: "Fast mode enabled",
+				message: "Fast mode enabled. Priority processing may cost more.",
 			});
 			await expect(client.getState()).resolves.toMatchObject({ thinkingLevel: "high" });
 			expect(
