@@ -92,11 +92,16 @@ describe("Fast mode host action", () => {
 			disabledReason: null,
 			state: { type: "boolean", value: true, label: "Fast mode enabled" },
 		});
+		await expect(registry.invoke(THINKING_FAST_MODE_ACTION_ID, context, { enabled: true })).resolves.toMatchObject({
+			state: { type: "boolean", value: true, label: "Fast mode enabled" },
+			stateChanged: false,
+			message: "Fast mode already enabled. Priority processing may cost more.",
+		});
 		await expect(registry.invoke(THINKING_FAST_MODE_ACTION_ID, context, { enabled: false })).resolves.toMatchObject({
 			state: { type: "boolean", value: false, label: "Fast mode disabled" },
 			stateChanged: true,
 		});
-		expect(setFastModeEnabled).toHaveBeenCalledWith(false);
+		expect(setFastModeEnabled.mock.calls).toEqual([[true], [false]]);
 		await expect(registry.invoke(THINKING_FAST_MODE_ACTION_ID, context, { enabled: true })).rejects.toThrow(
 			"Fast mode is not supported for the current provider and model",
 		);
