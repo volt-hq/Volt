@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -70,6 +70,40 @@ describe("SessionManager Fast mode policy", () => {
 			}),
 		).toMatchObject([{ id: manager.getSessionId(), path: sessionFile }]);
 		expect(SessionManager.continueRecent(dir, dir).getSessionId()).toBe(manager.getSessionId());
+	});
+
+	it("durably writes a message-free branched session with Fast state", () => {
+		const dir = createTempDir();
+		const manager = SessionManager.create(dir, dir);
+		manager.appendThinkingLevelChange("high");
+		const fastEntryId = manager.appendFastModeChange(true);
+
+		const branchedFile = manager.createBranchedSession(fastEntryId);
+
+		expect(branchedFile).toBeDefined();
+		expect(existsSync(branchedFile!)).toBe(true);
+		const reopened = SessionManager.open(branchedFile!, dir);
+		expect(reopened.getSessionId()).toBe(manager.getSessionId());
+		expect(reopened.buildSessionContext()).toMatchObject({
+			thinkingLevel: "high",
+			fastMode: { enabled: true },
+		});
+	});
+
+	it("rejects malformed persisted Fast state", () => {
+		const dir = createTempDir();
+		const manager = SessionManager.create(dir, dir);
+		manager.appendFastModeChange(true);
+		const sessionFile = manager.getSessionFile()!;
+		const records = readFileSync(sessionFile, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+		const fastEntry = records.find((entry) => entry.type === "fast_mode_change")!;
+		fastEntry.enabled = "yes";
+		writeFileSync(sessionFile, `${records.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+
+		expect(() => SessionManager.open(sessionFile, dir)).toThrow("has an invalid enabled state");
 	});
 
 	it("honors options passed as the second listAll argument", async () => {

@@ -1606,6 +1606,9 @@ export class SessionManager {
 					throw new Error("Current session contains an invalid or duplicate entry identity");
 				}
 				seenEntryIds.add(entry.id);
+				if (entry.type === "fast_mode_change" && typeof entry.enabled !== "boolean") {
+					throw new Error(`Fast mode entry ${entry.id} has an invalid enabled state`);
+				}
 				if (isClientInputWalEntry(entry)) {
 					if (!Number.isSafeInteger(entry.ordinal) || (entry.ordinal ?? 0) <= lastWalOrdinal) {
 						throw new Error(`Client input WAL entry ${entry.id} has an invalid commit ordinal`);
@@ -2536,13 +2539,14 @@ export class SessionManager {
 			this.sessionFile = newSessionFile;
 			this._buildIndex();
 
-			// Only write the file now if it contains conversation content that should
-			// make a session visible (assistant output or a displayed custom message).
-			// Otherwise defer to _persist(), which creates the file once such content
-			// arrives, matching the newSession() contract and avoiding the
-			// duplicate-header bug when the no-content guard later resets flushed to false.
-			const hasFlushContent = this.fileEntries.some(isSessionFileFlushContent);
-			if (hasFlushContent) {
+			// Fast mode is recoverable by exact session ID even without visible
+			// conversation content, so preserve that durable policy immediately.
+			// Otherwise defer to _persist(), which creates the file once flush content
+			// arrives, matching the newSession() contract and avoiding duplicate headers.
+			const shouldWriteImmediately = this.fileEntries.some(
+				(entry) => isSessionFileFlushContent(entry) || entry.type === "fast_mode_change",
+			);
+			if (shouldWriteImmediately) {
 				this._rewriteFile();
 				this.flushed = true;
 			} else {
