@@ -11,7 +11,7 @@ The interface has four main areas:
 - **Startup header** - shortcuts, loaded context files, prompt templates, skills, and extensions
 - **Messages** - user messages, assistant responses, tool calls, tool results, notifications, errors, and extension UI
 - **Editor** - where you type; border color indicates the current thinking level
-- **Footer** - working directory, session name, token/cache usage, cost, context usage, and current model
+- **Footer** - working directory, session name, token/cache usage, cost, context usage, current model, and active Fast mode
 
 The editor can be replaced temporarily by built-in UI such as `/settings` or by custom extension UI.
 
@@ -37,6 +37,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 |---------|-------------|
 | `/login`, `/logout` | Manage OAuth or API-key credentials |
 | `/model` | Switch models |
+| `/fast [on\|off]` | Toggle or explicitly set Fast mode for the current session |
 | `/profile` | Show, switch, or create the active settings profile |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
@@ -57,6 +58,8 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/remote` | Manage daemon status, pairing, devices, workspaces, leases, and headless policy |
 | `/changelog` | Display version history |
 | `/quit` | Quit volt |
+
+Fast mode requests premium low-latency inference capacity on supported OpenAI and OpenAI Codex models. Enabling it may cost more. It is session-scoped and independent of the thinking level; the footer shows `fast` while it is active.
 
 ## Message Queue
 

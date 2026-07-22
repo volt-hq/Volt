@@ -4,6 +4,7 @@ import {
 	getBuiltinHostActionSlashCommand,
 	SESSION_NEW_SLASH_ALIAS,
 	SESSION_RENAME_SLASH_ALIAS,
+	THINKING_FAST_MODE_SLASH_ALIAS,
 } from "./host-actions.ts";
 import type { SourceInfo } from "./source-info.ts";
 
@@ -33,11 +34,16 @@ const CONTEXT_COMPACT_SLASH_COMMAND = getBuiltinHostActionSlashCommand(CONTEXT_C
 	name: CONTEXT_COMPACT_SLASH_ALIAS,
 	description: "Manually compact the session context",
 };
+const THINKING_FAST_MODE_SLASH_COMMAND = getBuiltinHostActionSlashCommand(THINKING_FAST_MODE_SLASH_ALIAS) ?? {
+	name: THINKING_FAST_MODE_SLASH_ALIAS,
+	description: "Toggle premium low-latency inference for the current session",
+};
 
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "profile", description: "Show, switch, or create the active settings profile" },
 	{ name: "model", description: "Select model (opens selector UI)" },
+	THINKING_FAST_MODE_SLASH_COMMAND,
 	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
 	{ name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },
 	{ name: "import", description: "Import and resume a session from a JSONL file" },

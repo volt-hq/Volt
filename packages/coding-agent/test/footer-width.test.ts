@@ -20,6 +20,7 @@ function createSession(options: {
 	provider?: string;
 	reasoning?: boolean;
 	thinkingLevel?: string;
+	fastModeEnabled?: boolean;
 	usage?: AssistantUsage;
 	usingSubscription?: boolean;
 }): AgentSession {
@@ -38,6 +39,7 @@ function createSession(options: {
 				];
 
 	const session = {
+		fastModeEnabled: options.fastModeEnabled ?? false,
 		state: {
 			model: {
 				id: options.modelId ?? "test-model",
@@ -124,6 +126,87 @@ describe("FooterComponent width handling", () => {
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		}
+	});
+
+	it.each([80, 120, 160])("shows Fast mode alongside thinking at width %s", (width) => {
+		const footer = new FooterComponent(
+			createSession({
+				sessionName: "",
+				modelId: "gpt-5.4",
+				provider: "openai",
+				reasoning: true,
+				thinkingLevel: "high",
+				fastModeEnabled: true,
+			}),
+			createFooterData(2),
+		);
+
+		const workspaceLine = stripAnsi(footer.render(width)[0]);
+		expect(workspaceLine).toContain("fast · high");
+		expect(visibleWidth(workspaceLine)).toBeLessThanOrEqual(width);
+	});
+
+	it("preserves Fast mode and thinking when a long model name is truncated", () => {
+		const width = 40;
+		const footer = new FooterComponent(
+			createSession({
+				sessionName: "",
+				modelId: "gpt-5.4-very-long-model-name-that-needs-truncation",
+				reasoning: true,
+				thinkingLevel: "high",
+				fastModeEnabled: true,
+			}),
+			createFooterData(2),
+		);
+
+		const workspaceLine = stripAnsi(footer.render(width)[0]);
+		expect(workspaceLine).toContain("fast · high");
+		expect(visibleWidth(workspaceLine)).toBeLessThanOrEqual(width);
+	});
+
+	it.each([12, 13])("keeps the Fast suffix within a narrow width of %s", (width) => {
+		const footer = new FooterComponent(
+			createSession({
+				sessionName: "",
+				modelId: "gpt-5.4",
+				reasoning: true,
+				thinkingLevel: "high",
+				fastModeEnabled: true,
+			}),
+			createFooterData(1),
+		);
+
+		const workspaceLine = stripAnsi(footer.render(width)[0]);
+		expect(workspaceLine).toContain("fast · high");
+		expect(visibleWidth(workspaceLine)).toBeLessThanOrEqual(width);
+	});
+
+	it("does not show the Fast marker when Fast mode is disabled", () => {
+		const footer = new FooterComponent(
+			createSession({
+				sessionName: "",
+				reasoning: true,
+				thinkingLevel: "high",
+			}),
+			createFooterData(1),
+		);
+
+		expect(stripAnsi(footer.render(120)[0])).not.toContain("fast");
+	});
+
+	it.each(["off", "low", "high"])("keeps the Fast marker independent of thinking level %s", (thinkingLevel) => {
+		const footer = new FooterComponent(
+			createSession({
+				sessionName: "",
+				reasoning: true,
+				thinkingLevel,
+				fastModeEnabled: true,
+			}),
+			createFooterData(1),
+		);
+
+		const workspaceLine = stripAnsi(footer.render(120)[0]);
+		expect(workspaceLine).toContain(`fast · ${thinkingLevel}`);
 	});
 
 	it("reuses session aggregates until invalidated", () => {

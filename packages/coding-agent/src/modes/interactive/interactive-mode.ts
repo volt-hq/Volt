@@ -81,6 +81,7 @@ import {
 	REVIEW_UNCOMMITTED_ACTION_ID,
 	SESSION_NEW_SLASH_ALIAS,
 	SESSION_RENAME_SLASH_ALIAS,
+	THINKING_FAST_MODE_SLASH_ALIAS,
 } from "../../core/host-actions.ts";
 import type { HostActionRequest, HostActionUpdate, HostInteraction } from "../../core/host-interaction.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
@@ -3364,6 +3365,11 @@ export class InteractiveMode {
 				await this.handleModelCommand(searchTerm);
 				return;
 			}
+			if (text === "/fast" || text.startsWith("/fast ")) {
+				this.editor.setText("");
+				await this.handleFastCommand(text);
+				return;
+			}
 			if (text === "/export" || text.startsWith("/export ")) {
 				await this.handleExportCommand(text);
 				this.editor.setText("");
@@ -3635,6 +3641,10 @@ export class InteractiveMode {
 			case "thinking_level_changed":
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
+				break;
+
+			case "ui_action_state_changed":
+				this.ui.requestRender();
 				break;
 
 			case "message_start":
@@ -7307,6 +7317,36 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("dim", response.message ?? `Session name set: ${name}`), 1, 0));
 		this.ui.requestRender();
+	}
+
+	private async handleFastCommand(text: string): Promise<void> {
+		const argument = text.slice(`/${THINKING_FAST_MODE_SLASH_ALIAS}`.length).trim();
+		let enabled: boolean;
+		if (argument === "") {
+			enabled = !this.session.fastModeEnabled;
+		} else if (argument === "on") {
+			enabled = true;
+		} else if (argument === "off") {
+			enabled = false;
+		} else {
+			this.showWarning("Usage: /fast [on|off]");
+			return;
+		}
+
+		try {
+			const response = await BUILTIN_HOST_ACTION_REGISTRY.invokeBySlashAlias(
+				THINKING_FAST_MODE_SLASH_ALIAS,
+				this.createHostActionContext(),
+				{ enabled },
+			);
+			if (enabled) {
+				this.showWarning(response.message ?? "Fast mode enabled. Priority processing may cost more.");
+			} else {
+				this.showStatus(response.message ?? "Fast mode disabled");
+			}
+		} catch (error: unknown) {
+			this.showWarning(error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	private handleSessionCommand(): void {
