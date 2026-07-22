@@ -462,7 +462,7 @@ describe("InteractiveMode profile selector", () => {
 		}
 	});
 
-	it("applies profile default thinking when switching profiles on the same model", async () => {
+	it("applies profile default thinking without changing Fast mode", async () => {
 		const provider = "profile-thinking-test";
 		const authStorage = AuthStorage.inMemory();
 		const modelRegistry = ModelRegistry.inMemory(authStorage);
@@ -524,6 +524,11 @@ describe("InteractiveMode profile selector", () => {
 		});
 		try {
 			const setModel = vi.spyOn(session, "setModel");
+			session.setFastModeEnabled(true);
+			const fastStates: boolean[] = [];
+			session.subscribe((event) => {
+				if (event.type === "ui_action_state_changed") fastStates.push(event.state.value === true);
+			});
 			const context = Object.create(InteractiveMode.prototype) as SwitchProfileContext;
 			Object.defineProperties(context, {
 				settingsManager: { value: settingsManager },
@@ -541,6 +546,8 @@ describe("InteractiveMode profile selector", () => {
 			expect(setModel).not.toHaveBeenCalled();
 			expect(session.model).toBe(reasoningModel);
 			expect(session.thinkingLevel).toBe("high");
+			expect(session.fastModeEnabled).toBe(true);
+			expect(fastStates).toEqual([]);
 		} finally {
 			session.dispose();
 		}

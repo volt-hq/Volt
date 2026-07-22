@@ -7,6 +7,17 @@
  */
 
 import { Type } from "typebox";
+import {
+	RPC_UI_ACTION_ID_MAX_CHARS,
+	RPC_UI_ACTION_STATE_LABEL_MAX_CHARS,
+	RPC_UI_ACTION_STATE_MAX_OPTIONS,
+	RPC_UI_ACTION_STATE_OPTION_DESCRIPTION_MAX_CHARS,
+	RPC_UI_ACTION_STATE_OPTION_LABEL_MAX_CHARS,
+	RPC_UI_ACTION_STATE_OPTION_VALUE_MAX_CHARS,
+	RPC_UI_ACTION_STATE_TYPE_MAX_CHARS,
+	RPC_UI_ACTION_STATE_VALUE_MAX_CHARS,
+} from "../wire-limits.ts";
+import { RpcConversationDeliveryPositionSchema } from "./conversation.ts";
 import { opaque, stringEnum } from "./helpers.ts";
 
 // ============================================================================
@@ -222,5 +233,43 @@ export const RpcSubagentDisposedEventSchema = Type.Object(
 /** Model catalog changed; clients re-fetch get_available_models. */
 export const RpcModelsChangedEventSchema = Type.Object(
 	{ type: Type.Literal("models_changed") },
+	{ additionalProperties: false },
+);
+
+/** Settled, bounded state for any host UI action. */
+export const RpcUiActionStateChangedEventSchema = Type.Object(
+	{
+		type: Type.Literal("ui_action_state_changed"),
+		action: Type.String({ minLength: 1, maxLength: RPC_UI_ACTION_ID_MAX_CHARS }),
+		state: Type.Object(
+			{
+				type: Type.String({ minLength: 1, maxLength: RPC_UI_ACTION_STATE_TYPE_MAX_CHARS }),
+				value: Type.Union([
+					Type.String({ maxLength: RPC_UI_ACTION_STATE_VALUE_MAX_CHARS }),
+					Type.Number(),
+					Type.Boolean(),
+					Type.Null(),
+				]),
+				label: Type.Optional(Type.String({ maxLength: RPC_UI_ACTION_STATE_LABEL_MAX_CHARS })),
+				options: Type.Optional(
+					Type.Array(
+						Type.Object(
+							{
+								value: Type.String({ maxLength: RPC_UI_ACTION_STATE_OPTION_VALUE_MAX_CHARS }),
+								label: Type.Optional(Type.String({ maxLength: RPC_UI_ACTION_STATE_OPTION_LABEL_MAX_CHARS })),
+								description: Type.Optional(
+									Type.String({ maxLength: RPC_UI_ACTION_STATE_OPTION_DESCRIPTION_MAX_CHARS }),
+								),
+							},
+							{ additionalProperties: false },
+						),
+						{ maxItems: RPC_UI_ACTION_STATE_MAX_OPTIONS },
+					),
+				),
+			},
+			{ additionalProperties: false },
+		),
+		delivery: Type.Optional(RpcConversationDeliveryPositionSchema),
+	},
 	{ additionalProperties: false },
 );

@@ -363,6 +363,25 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 			}
 		});
 
+		// A committed action-state transition uses the same ordered conversation
+		// feed and reaches every co-attached phone with per-subscriber cursors.
+		fanout.emit({
+			type: "ui_action_state_changed",
+			action: "thinking.fast_mode",
+			state: { type: "boolean", value: true, label: "Fast mode enabled" },
+		} as unknown as AgentSessionEvent);
+		await vi.waitFor(() => {
+			for (const attach of [attachA, attachB]) {
+				const actionEvent = attach.phone.receivedFrames().find((frame) => frame.type === "ui_action_state_changed");
+				expect(actionEvent).toMatchObject({
+					type: "ui_action_state_changed",
+					action: "thinking.fast_mode",
+					state: { type: "boolean", value: true, label: "Fast mode enabled" },
+					delivery: { subscriptionId: expect.any(String), cursor: expect.any(Number) },
+				});
+			}
+		});
+
 		// Abort from phone B stops the turn; both relays and streams stay open.
 		attachB.phone.sendLine({
 			id: "a1",

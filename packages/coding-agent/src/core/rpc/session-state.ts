@@ -626,6 +626,7 @@ export function buildRpcSessionState(session: AgentSession): RpcSessionState {
 		...(includeModel ? { model: session.model } : {}),
 		thinkingLevel: session.thinkingLevel,
 		availableThinkingLevels: session.getAvailableThinkingLevels(),
+		fastModeEnabled: session.fastModeEnabled,
 		isStreaming: session.isStreaming,
 		isBusy: session.isBusy,
 		isCompacting: session.isCompacting,

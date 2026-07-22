@@ -36,7 +36,7 @@ export interface UiActionDiscoverySession {
 	isStreaming?: boolean;
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
-	fastModeRestoreThinkingLevel?: ThinkingLevel;
+	fastModeEnabled?: boolean;
 	promptTemplates: ReadonlyArray<PromptTemplate>;
 	resourceLoader: Pick<ResourceLoader, "getSkills">;
 	sessionManager: { getCwd(): string };
@@ -99,7 +99,7 @@ function createHostActionDescriptorContext(
 			isStreaming: session.isStreaming ?? false,
 			model: session.model,
 			thinkingLevel: session.thinkingLevel,
-			fastModeRestoreThinkingLevel: session.fastModeRestoreThinkingLevel,
+			fastModeEnabled: session.fastModeEnabled,
 		},
 		detachedReviews: options.detachedReviews,
 	};

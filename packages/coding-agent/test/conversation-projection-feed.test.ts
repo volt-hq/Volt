@@ -24,6 +24,7 @@ import type {
 	RpcConversationAssistantPart,
 	RpcConversationBootstrapEvent,
 	RpcConversationTranscriptItem,
+	RpcSessionState,
 	RpcWorkflowEvent,
 	RpcWorkflowToolEvent,
 } from "../src/core/rpc/types.ts";
@@ -107,6 +108,7 @@ function snapshotBuilder(source: TestSource, label = "test"): ConversationProjec
 		state: {
 			thinkingLevel: "off",
 			availableThinkingLevels: ["off"],
+			fastModeEnabled: false,
 			isStreaming: activeAssistant !== null,
 			isCompacting: false,
 			steeringMode: "one-at-a-time",
@@ -119,7 +121,7 @@ function snapshotBuilder(source: TestSource, label = "test"): ConversationProjec
 			followUpQueue: [],
 			revision: source.revision,
 			branchEpoch,
-		},
+		} as RpcSessionState & { revision: number; branchEpoch: string },
 		transcript: {
 			sessionId: `session-${label}`,
 			items: [],
@@ -444,6 +446,7 @@ function oracleSnapshotBuilder(
 			state: {
 				thinkingLevel: "off",
 				availableThinkingLevels: ["off"],
+				fastModeEnabled: false,
 				isStreaming: context.activeAssistant !== null,
 				isCompacting: false,
 				steeringMode: "one-at-a-time",
@@ -456,7 +459,7 @@ function oracleSnapshotBuilder(
 				followUpQueue: [],
 				revision: source.revision,
 				oracleFinalAssistant: sanitizedFinal,
-			},
+			} as RpcSessionState & { revision: number; oracleFinalAssistant: AssistantMessage | null },
 			transcript: {
 				sessionId: `session-${label}`,
 				items: finalItem === undefined ? [] : [finalItem],

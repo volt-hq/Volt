@@ -37,6 +37,7 @@ import type {
 	RpcSubagentDisposedEventSchema,
 	RpcSubagentEndEventSchema,
 	RpcSubagentEventSchema,
+	RpcUiActionStateChangedEventSchema,
 } from "./schema/events.ts";
 import type {
 	RpcMcpAuthResponseSchema,
@@ -377,3 +378,5 @@ export type RpcSubagentEndEvent = Static<typeof RpcSubagentEndEventSchema>;
 export type RpcSubagentDisposedEvent = Static<typeof RpcSubagentDisposedEventSchema>;
 /** Model catalog changed; clients re-fetch get_available_models. */
 export type RpcModelsChangedEvent = Static<typeof RpcModelsChangedEventSchema>;
+/** Settled, bounded state of a host UI action. */
+export type RpcUiActionStateChangedEvent = Static<typeof RpcUiActionStateChangedEventSchema>;

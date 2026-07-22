@@ -334,6 +334,25 @@ describe("AgentSessionRuntime characterization", () => {
 		});
 	});
 
+	it("switches by exact id to a message-free session without listing it", async () => {
+		const { runtime } = await createRuntimeForTest(() => {}, { bootstrapModel: false });
+		runtime.session.setThinkingLevel("high", { persistDefault: false });
+		runtime.session.setFastModeEnabled(true);
+		const fastSessionId = runtime.session.sessionId;
+
+		const newSessionResult = await runtime.newSession();
+		expect(newSessionResult.cancelled).toBe(false);
+		await runtime.session.bindExtensions({});
+		expect((await runtime.listSessions()).some((session) => session.sessionId === fastSessionId)).toBe(false);
+
+		const switchResult = await runtime.switchSessionById(fastSessionId);
+		expect(switchResult.cancelled).toBe(false);
+		await runtime.session.bindExtensions({});
+		expect(runtime.session.sessionId).toBe(fastSessionId);
+		expect(runtime.session.fastModeEnabled).toBe(true);
+		expect(runtime.session.thinkingLevel).toBe("high");
+	});
+
 	it("honors session_before_switch cancellation for new and resume", async () => {
 		const events: RecordedSessionEvent[] = [];
 		let cancelReason: "new" | "resume" | undefined;
