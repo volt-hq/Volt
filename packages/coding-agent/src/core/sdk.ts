@@ -240,6 +240,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const existingSession = sessionManager.buildSessionContext();
 	const existingBranch = sessionManager.getBranch();
 	const hasExistingSessionState = existingBranch.length > 0;
+	const isNewSession = !hasExistingSessionState || options.sessionStartEvent?.reason === "new";
 	const hasExistingMessages = existingSession.messages.length > 0;
 	const hasThinkingEntry = existingBranch.some((entry) => entry.type === "thinking_level_change");
 
@@ -260,8 +261,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// If still no model, use findInitialModel (checks settings default, then provider defaults)
 	if (!model) {
 		const result = await findInitialModel({
-			scopedModels: [],
-			isContinuing: hasExistingSessionState,
+			scopedModels: options.scopedModels ?? [],
+			isContinuing: !isNewSession,
 			defaultProvider: settingsManager.getDefaultProvider(),
 			defaultModelId: settingsManager.getDefaultModel(),
 			defaultThinkingLevel: settingsManager.getDefaultThinkingLevel(),
@@ -464,22 +465,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (hasExistingMessages) {
 		agent.state.messages = existingSession.messages;
 	}
-	if (hasExistingSessionState) {
-		// Explicit startup overrides are independent branch mutations. Persist them
-		// before AgentSession restores the branch-local Fast policy.
-		if (options.model) {
-			sessionManager.appendModelChange(options.model.provider, options.model.id);
-		}
-		if (options.thinkingLevel !== undefined) {
-			sessionManager.appendThinkingLevelChange(thinkingLevel);
-		} else if (!hasThinkingEntry) {
-			sessionManager.appendThinkingLevelChange(thinkingLevel);
-		}
-	} else {
-		// Save initial model and thinking level for new sessions so they can be restored on resume
-		if (model) {
-			sessionManager.appendModelChange(model.provider, model.id);
-		}
+	// Persist explicit startup overrides and fill any policy dimensions that were
+	// absent from setup-only sessions (for example a pre-seeded Fast policy).
+	if (model && (options.model !== undefined || existingSession.model === null)) {
+		sessionManager.appendModelChange(model.provider, model.id);
+	}
+	if (options.thinkingLevel !== undefined || !hasThinkingEntry) {
 		sessionManager.appendThinkingLevelChange(thinkingLevel);
 	}
 
