@@ -879,11 +879,13 @@ export class AgentSessionRuntime {
 		return { seeded: false };
 	}
 
-	private async listWorkspaceSessionInfos(): Promise<SessionInfo[]> {
+	private async listWorkspaceSessionInfos(includeMessageFreeDurable = false): Promise<SessionInfo[]> {
 		const workspaceCwd = resolvePath(this.cwd);
-		return (await SessionManager.list(this.cwd, this.session.sessionManager.getSessionDir())).filter(
-			(session) => !session.cwd || resolvePath(session.cwd) === workspaceCwd,
-		);
+		return (
+			await SessionManager.list(this.cwd, this.session.sessionManager.getSessionDir(), undefined, {
+				includeMessageFreeDurable,
+			})
+		).filter((session) => !session.cwd || resolvePath(session.cwd) === workspaceCwd);
 	}
 
 	private getCurrentSessionSummary(): WorkspaceSessionSummary {
@@ -937,7 +939,7 @@ export class AgentSessionRuntime {
 			// No replacement happens, so a requested withSession callback never runs.
 			return { cancelled: false, seeded: false };
 		}
-		const target = (await this.listWorkspaceSessionInfos()).find((session) => session.id === sessionId);
+		const target = (await this.listWorkspaceSessionInfos(true)).find((session) => session.id === sessionId);
 		this.assertStructuralOperationCurrent(operation);
 		if (!target) {
 			throw new Error(`Session not found in current workspace: ${sessionId}`);

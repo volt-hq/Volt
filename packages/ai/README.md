@@ -27,6 +27,7 @@ under the MIT License.
   - [Unified Interface](#unified-interface-streamsimplecompletesimple)
   - [Provider-Specific Options](#provider-specific-options-streamcomplete)
   - [Streaming Thinking Content](#streaming-thinking-content)
+- [Inference Speed](#inference-speed)
 - [Stop Reasons](#stop-reasons)
 - [Error Handling](#error-handling)
   - [Aborting Requests](#aborting-requests)
@@ -589,6 +590,28 @@ for await (const event of s) {
   }
 }
 ```
+
+## Inference Speed
+
+`streamSimple()` and `completeSimple()` accept `inferenceSpeed: "standard" | "fast"`. Use `supportsFastInference(model)` to decide whether to expose the control for a selected model.
+
+```typescript
+import { completeSimple, getModel, supportsFastInference } from '@hansjm10/volt-ai';
+
+const model = getModel('openai', 'gpt-5.4');
+if (supportsFastInference(model)) {
+  const response = await completeSimple(model, context, {
+    inferenceSpeed: 'fast'
+  });
+
+  console.log(response.usage.serviceTier);
+  // { requested: 'priority', effective: 'priority' }
+}
+```
+
+For eligible models on the canonical OpenAI Responses and OpenAI Codex endpoints, `"fast"` sends `service_tier: "priority"` and `"standard"` sends `service_tier: "default"`. Unsupported models, providers, and custom gateways omit the service tier. Fast mode does not change reasoning effort.
+
+OpenAI may return a different effective tier than requested. `usage.serviceTier.requested` records the request and `usage.serviceTier.effective` records the response tier. Direct OpenAI costs use the effective tier and the published Priority rates; OpenAI Codex cost accounting preserves its request-tier policy while still exposing the raw response tier.
 
 ## Stop Reasons
 

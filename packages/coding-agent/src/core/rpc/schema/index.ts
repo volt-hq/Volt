@@ -81,6 +81,7 @@ import {
 	RpcSubagentDisposedEventSchema,
 	RpcSubagentEndEventSchema,
 	RpcSubagentEventSchema,
+	RpcUiActionStateChangedEventSchema,
 } from "./events.ts";
 import {
 	RpcActiveToolCallStateSchema,
@@ -266,6 +267,7 @@ export const RpcServerEventSchema = Type.Union([
 	RpcSubagentEndEventSchema,
 	RpcSubagentDisposedEventSchema,
 	RpcModelsChangedEventSchema,
+	RpcUiActionStateChangedEventSchema,
 ]);
 
 // ============================================================================
@@ -331,6 +333,7 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	UiActionListResponse: UiActionListResponseSchema,
 	UiActionCompletionListResponse: UiActionCompletionListResponseSchema,
 	UiActionInvocationResponse: UiActionInvocationResponseSchema,
+	RpcUiActionStateChangedEvent: RpcUiActionStateChangedEventSchema,
 
 	// Projection metadata + workflows + review
 	RpcWorkflowKind: RpcWorkflowKindSchema,

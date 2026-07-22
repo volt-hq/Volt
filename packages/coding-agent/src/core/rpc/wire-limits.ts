@@ -61,6 +61,19 @@ export const RPC_ACTIVE_TOOL_DETAILS_MAX_SERIALIZED_BYTES = 20 * 1024;
 export const RPC_PROJECTION_STRING_MAX_UTF8_BYTES = 4 * 1024;
 
 // ============================================================================
+// UI action-state events
+// ============================================================================
+
+export const RPC_UI_ACTION_ID_MAX_CHARS = 160;
+export const RPC_UI_ACTION_STATE_TYPE_MAX_CHARS = 64;
+export const RPC_UI_ACTION_STATE_VALUE_MAX_CHARS = 240;
+export const RPC_UI_ACTION_STATE_LABEL_MAX_CHARS = 80;
+export const RPC_UI_ACTION_STATE_MAX_OPTIONS = 50;
+export const RPC_UI_ACTION_STATE_OPTION_VALUE_MAX_CHARS = 80;
+export const RPC_UI_ACTION_STATE_OPTION_LABEL_MAX_CHARS = 80;
+export const RPC_UI_ACTION_STATE_OPTION_DESCRIPTION_MAX_CHARS = 240;
+
+// ============================================================================
 // Ordered-conversation projection budgets
 // ============================================================================
 

@@ -185,6 +185,11 @@ export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 	thinkingLevel: string;
 }
 
+export interface FastModeChangeEntry extends SessionEntryBase {
+	type: "fast_mode_change";
+	enabled: boolean;
+}
+
 export interface ModelChangeEntry extends SessionEntryBase {
 	type: "model_change";
 	provider: string;
@@ -268,6 +273,7 @@ export type SessionEntry =
 	| ClientInputQueuedEntry
 	| ClientInputStateEntry
 	| ThinkingLevelChangeEntry
+	| FastModeChangeEntry
 	| ModelChangeEntry
 	| CompactionEntry
 	| BranchSummaryEntry
@@ -560,6 +566,7 @@ export interface SessionContext {
 	messages: AgentMessage[];
 	thinkingLevel: string;
 	model: { provider: string; modelId: string } | null;
+	fastMode: { enabled: boolean };
 }
 
 export interface SessionInfo {
@@ -787,7 +794,12 @@ export function buildSessionContext(
 	let leaf: SessionEntry | undefined;
 	if (leafId === null) {
 		// Explicitly null - return no messages (navigated to before first entry)
-		return { messages: [], thinkingLevel: "off", model: null };
+		return {
+			messages: [],
+			thinkingLevel: "off",
+			model: null,
+			fastMode: { enabled: false },
+		};
 	}
 	if (leafId) {
 		leaf = byId.get(leafId);
@@ -798,7 +810,12 @@ export function buildSessionContext(
 	}
 
 	if (!leaf) {
-		return { messages: [], thinkingLevel: "off", model: null };
+		return {
+			messages: [],
+			thinkingLevel: "off",
+			model: null,
+			fastMode: { enabled: false },
+		};
 	}
 
 	// Walk from leaf to root, collecting path
@@ -812,11 +829,14 @@ export function buildSessionContext(
 	// Extract settings and find compaction
 	let thinkingLevel = "off";
 	let model: { provider: string; modelId: string } | null = null;
+	let fastMode = { enabled: false };
 	let compaction: CompactionEntry | null = null;
 
 	for (const entry of path) {
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel;
+		} else if (entry.type === "fast_mode_change") {
+			fastMode = { enabled: entry.enabled };
 		} else if (entry.type === "model_change") {
 			model = { provider: entry.provider, modelId: entry.modelId };
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
@@ -876,7 +896,7 @@ export function buildSessionContext(
 		}
 	}
 
-	return { messages, thinkingLevel, model };
+	return { messages, thinkingLevel, model, fastMode };
 }
 
 /** Encode a cwd into the safe `--…--` session-directory name. */
@@ -1200,8 +1220,11 @@ function isSessionFileFlushContent(entry: FileEntry): boolean {
 	);
 }
 
-function isClientInputDurabilityBoundary(entry: SessionEntry): boolean {
+function isSessionDurabilityBoundary(entry: SessionEntry): boolean {
 	return (
+		entry.type === "fast_mode_change" ||
+		entry.type === "thinking_level_change" ||
+		entry.type === "model_change" ||
 		isClientInputWalEntry(entry) ||
 		(entry.type === "message" && entry.message.role === "user" && typeof entry.message.clientMessageId === "string")
 	);
@@ -1282,7 +1305,7 @@ export function summarizeSessionEntries(entries: Iterable<SessionEntry>): Sessio
 	};
 }
 
-async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
+async function buildSessionInfo(filePath: string, includeMessageFreeDurable = false): Promise<SessionInfo | null> {
 	try {
 		hardenPrivateRegularFileSync(filePath);
 		const stats = await stat(filePath);
@@ -1323,8 +1346,12 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 		// conversation in session selectors. Keep the file available for explicit
 		// recovery by path; omit it from enumeration until canonical conversation
 		// content has been committed.
-		if (summary.messageCount === 0 && entries.some(isClientInputWalEntry)) {
-			return null;
+		if (summary.messageCount === 0) {
+			const hasFastModePolicy = entries.some((entry) => entry.type === "fast_mode_change");
+			const hasPrivateClientInputWal = entries.some(isClientInputWalEntry);
+			if ((hasFastModePolicy && !includeMessageFreeDurable) || (!hasFastModePolicy && hasPrivateClientInputWal)) {
+				return null;
+			}
 		}
 		const cwd = typeof header.cwd === "string" ? header.cwd : "";
 		const parentSessionPath = header.parentSession;
@@ -1357,11 +1384,16 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 
 export type SessionListProgress = (loaded: number, total: number) => void;
 
+export interface SessionListOptions {
+	includeMessageFreeDurable?: boolean;
+}
+
 const MAX_CONCURRENT_SESSION_INFO_LOADS = 10;
 
 async function buildSessionInfosWithConcurrency(
 	files: string[],
 	onLoaded: () => void,
+	includeMessageFreeDurable = false,
 ): Promise<(SessionInfo | null)[]> {
 	const results: (SessionInfo | null)[] = new Array(files.length).fill(null);
 	const inFlight = new Set<Promise<void>>();
@@ -1373,7 +1405,7 @@ async function buildSessionInfosWithConcurrency(
 		if (!file) return;
 
 		let task: Promise<void>;
-		task = buildSessionInfo(file)
+		task = buildSessionInfo(file, includeMessageFreeDurable)
 			.then((info) => {
 				results[index] = info;
 			})
@@ -1404,6 +1436,7 @@ async function listSessionsFromDir(
 	onProgress?: SessionListProgress,
 	progressOffset = 0,
 	progressTotal?: number,
+	includeMessageFreeDurable = false,
 ): Promise<SessionInfo[]> {
 	const sessions: SessionInfo[] = [];
 	if (!existsSync(dir)) {
@@ -1417,10 +1450,14 @@ async function listSessionsFromDir(
 		const total = progressTotal ?? files.length;
 
 		let loaded = 0;
-		const results = await buildSessionInfosWithConcurrency(files, () => {
-			loaded++;
-			onProgress?.(progressOffset + loaded, total);
-		});
+		const results = await buildSessionInfosWithConcurrency(
+			files,
+			() => {
+				loaded++;
+				onProgress?.(progressOffset + loaded, total);
+			},
+			includeMessageFreeDurable,
+		);
 		for (const info of results) {
 			if (info) {
 				sessions.push(info);
@@ -1569,6 +1606,9 @@ export class SessionManager {
 					throw new Error("Current session contains an invalid or duplicate entry identity");
 				}
 				seenEntryIds.add(entry.id);
+				if (entry.type === "fast_mode_change" && typeof entry.enabled !== "boolean") {
+					throw new Error(`Fast mode entry ${entry.id} has an invalid enabled state`);
+				}
 				if (isClientInputWalEntry(entry)) {
 					if (!Number.isSafeInteger(entry.ordinal) || (entry.ordinal ?? 0) <= lastWalOrdinal) {
 						throw new Error(`Client input WAL entry ${entry.id} has an invalid commit ordinal`);
@@ -1640,11 +1680,14 @@ export class SessionManager {
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 		const appendEntry = (content: string) =>
-			appendSessionFileEntry(this.sessionFile!, content, isClientInputDurabilityBoundary(entry));
+			appendSessionFileEntry(this.sessionFile!, content, isSessionDurabilityBoundary(entry));
 
 		const hasFlushContent = this.fileEntries.some(isSessionFileFlushContent);
 		if (!hasFlushContent) {
-			if (this.flushed) {
+			if (entry.type === "fast_mode_change" && !this.flushed) {
+				this._rewriteFile();
+				this.flushed = true;
+			} else if (this.flushed) {
 				appendEntry(`${JSON.stringify(entry)}\n`);
 			} else {
 				// Mark as not flushed so when conversation content arrives, all entries get written.
@@ -2033,6 +2076,19 @@ export class SessionManager {
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			thinkingLevel,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append a Fast mode policy change as child of current leaf, then advance leaf. Returns entry id. */
+	appendFastModeChange(enabled: boolean): string {
+		const entry: FastModeChangeEntry = {
+			type: "fast_mode_change",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			enabled,
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -2483,13 +2539,14 @@ export class SessionManager {
 			this.sessionFile = newSessionFile;
 			this._buildIndex();
 
-			// Only write the file now if it contains conversation content that should
-			// make a session visible (assistant output or a displayed custom message).
-			// Otherwise defer to _persist(), which creates the file once such content
-			// arrives, matching the newSession() contract and avoiding the
-			// duplicate-header bug when the no-content guard later resets flushed to false.
-			const hasFlushContent = this.fileEntries.some(isSessionFileFlushContent);
-			if (hasFlushContent) {
+			// Fast mode is recoverable by exact session ID even without visible
+			// conversation content, so preserve that durable policy immediately.
+			// Otherwise defer to _persist(), which creates the file once flush content
+			// arrives, matching the newSession() contract and avoiding duplicate headers.
+			const shouldWriteImmediately = this.fileEntries.some(
+				(entry) => isSessionFileFlushContent(entry) || entry.type === "fast_mode_change",
+			);
+			if (shouldWriteImmediately) {
 				this._rewriteFile();
 				this.flushed = true;
 			} else {
@@ -2682,14 +2739,20 @@ export class SessionManager {
 	 * @param cwd Working directory (used to compute default session directory)
 	 * @param sessionDir Optional session directory. If omitted, uses default (~/.volt/agent/sessions/<encoded-cwd>/).
 	 * @param onProgress Optional callback for progress updates (loaded, total)
+	 * @param options Listing behavior. Message-free durable sessions remain hidden unless explicitly requested.
 	 */
-	static async list(cwd: string, sessionDir?: string, onProgress?: SessionListProgress): Promise<SessionInfo[]> {
+	static async list(
+		cwd: string,
+		sessionDir?: string,
+		onProgress?: SessionListProgress,
+		options?: SessionListOptions,
+	): Promise<SessionInfo[]> {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
 		const filterCwd = sessionDir !== undefined && !isDefaultShapedSessionDir(dir, cwd);
 		const resolvedCwd = resolvePath(cwd);
-		const sessions = (await listSessionsFromDir(dir, onProgress)).filter(
-			(session) => !filterCwd || sessionCwdMatches(session.cwd, resolvedCwd),
-		);
+		const sessions = (
+			await listSessionsFromDir(dir, onProgress, 0, undefined, options?.includeMessageFreeDurable)
+		).filter((session) => !filterCwd || sessionCwdMatches(session.cwd, resolvedCwd));
 		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 		return sessions;
 	}
@@ -2698,17 +2761,41 @@ export class SessionManager {
 	 * List all sessions across all project directories.
 	 * @param onProgress Optional callback for progress updates (loaded, total)
 	 */
-	static async listAll(onProgress?: SessionListProgress): Promise<SessionInfo[]>;
-	static async listAll(sessionDir?: string, onProgress?: SessionListProgress): Promise<SessionInfo[]>;
+	static async listAll(onProgress?: SessionListProgress, options?: SessionListOptions): Promise<SessionInfo[]>;
+	static async listAll(
+		sessionDir?: string,
+		onProgress?: SessionListProgress,
+		options?: SessionListOptions,
+	): Promise<SessionInfo[]>;
 	static async listAll(
 		sessionDirOrOnProgress?: string | SessionListProgress,
-		onProgress?: SessionListProgress,
+		onProgressOrOptions?: SessionListProgress | SessionListOptions,
+		options?: SessionListOptions,
 	): Promise<SessionInfo[]> {
 		const customSessionDir =
 			typeof sessionDirOrOnProgress === "string" ? normalizePath(sessionDirOrOnProgress) : undefined;
-		const progress = typeof sessionDirOrOnProgress === "function" ? sessionDirOrOnProgress : onProgress;
+		const progress =
+			typeof sessionDirOrOnProgress === "function"
+				? sessionDirOrOnProgress
+				: typeof onProgressOrOptions === "function"
+					? onProgressOrOptions
+					: undefined;
+		const listOptions =
+			typeof sessionDirOrOnProgress === "function"
+				? (onProgressOrOptions as SessionListOptions | undefined)
+				: sessionDirOrOnProgress === undefined &&
+						typeof onProgressOrOptions === "object" &&
+						onProgressOrOptions !== null
+					? onProgressOrOptions
+					: options;
 		if (customSessionDir) {
-			const sessions = await listSessionsFromDir(customSessionDir, progress);
+			const sessions = await listSessionsFromDir(
+				customSessionDir,
+				progress,
+				0,
+				undefined,
+				listOptions?.includeMessageFreeDurable,
+			);
 			sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 			return sessions;
 		}
@@ -2741,10 +2828,14 @@ export class SessionManager {
 			const sessions: SessionInfo[] = [];
 			const allFiles = dirFiles.flat();
 
-			const results = await buildSessionInfosWithConcurrency(allFiles, () => {
-				loaded++;
-				progress?.(loaded, totalFiles);
-			});
+			const results = await buildSessionInfosWithConcurrency(
+				allFiles,
+				() => {
+					loaded++;
+					progress?.(loaded, totalFiles);
+				},
+				listOptions?.includeMessageFreeDurable,
+			);
 
 			for (const info of results) {
 				if (info) {

@@ -3251,11 +3251,8 @@ export class InteractiveMode {
 			renameSession: (name) => {
 				this.session.setSessionName(name);
 			},
-			setThinkingLevel: (level, options) => {
-				this.session.setThinkingLevel(level, options);
-			},
-			setFastModeRestoreThinkingLevel: (level) => {
-				this.session.setFastModeRestoreThinkingLevel(level);
+			setFastModeEnabled: (enabled) => {
+				this.session.setFastModeEnabled(enabled);
 			},
 			runReviewAction: (target, reviewOptions) =>
 				this.runInteractiveReviewWorkflow(target, {

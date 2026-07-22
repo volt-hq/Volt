@@ -110,6 +110,7 @@ function createRuntime(largePayload: string): AgentSessionRuntime {
 			settingsManager: undefined,
 			model: undefined,
 			thinkingLevel: "off",
+			fastModeEnabled: false,
 			getAvailableThinkingLevels: () => ["off"],
 			isStreaming: true,
 			isBusy: true,
@@ -456,6 +457,7 @@ describe("conversation projection resource bounds", () => {
 			state: {
 				thinkingLevel: "off",
 				availableThinkingLevels: ["off"],
+				fastModeEnabled: false,
 				isStreaming: true,
 				isCompacting: false,
 				steeringMode: "all",

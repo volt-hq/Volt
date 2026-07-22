@@ -187,6 +187,7 @@ Response:
     "model": {...},
     "thinkingLevel": "medium",
     "availableThinkingLevels": ["off", "minimal", "low", "medium", "high"],
+    "fastModeEnabled": true,
     "isStreaming": false,
     "isBusy": true,
     "isCompacting": true,
@@ -203,7 +204,7 @@ Response:
 }
 ```
 
-The `model` field is a full [Model](#model) object or `null`. `availableThinkingLevels` lists the thinking levels the current model supports (`["off"]` for non-reasoning models). `isStreaming` indicates an active provider run or session-level continuation; `isBusy` also includes asynchronous prompt preflight and standalone session operations such as manual compaction and tree navigation. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `activeCompaction` is present only while context compaction is currently running; `startedAt` is Unix epoch milliseconds.
+The `model` field is a full [Model](#model) object or `null`. `availableThinkingLevels` lists the thinking levels the current model supports (`["off"]` for non-reasoning models). `fastModeEnabled` is the authoritative branch-local Fast state used by initial and replacement conversation bootstraps. `isStreaming` indicates an active provider run or session-level continuation; `isBusy` also includes asynchronous prompt preflight and standalone session operations such as manual compaction and tree navigation. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `activeCompaction` is present only while context compaction is currently running; `startedAt` is Unix epoch milliseconds.
 
 #### get_transcript
 
@@ -601,7 +602,7 @@ Built-in v1 actions currently include:
 | `run.cancel` | none | yes | Aborts the current agent operation through the same host path as `abort`; descriptors may be disabled when no run is active. |
 | `context.compact` | `/compact` | no | Runs host compaction through the same handler as the local `compact` RPC command. |
 | `session.rename` | `/name <name>` | no | Sets the current session display name through the same handler as `set_session_name`. |
-| `thinking.fast_mode` | none | yes | Session-local, non-persistent toggle that lowers current thinking to the fastest supported host-owned level and restores the captured level when disabled. |
+| `thinking.fast_mode` | none | yes | Durable branch-local inference-speed toggle for eligible canonical OpenAI Responses and OpenAI Codex models. Enabled sends Priority processing; disabled sends the default service tier. |
 | `review.uncommitted` | `/review uncommitted` | yes | Starts a detached review of uncommitted changes against `HEAD` using host-owned git/model policy; the response reports `accepted` with a `workflowId` and progress streams as workflow events. |
 | `review.branch` | `/review branch [base]` | yes | Starts a detached review of `HEAD` against a base branch; optional `base` is validated by the host and omitted values use host auto-detection. The `base` argument advertises `"completion": "gitBranches"`. |
 | `review.pr` | `/review pr [number]` | yes | Starts a detached GitHub pull request review using the host's GitHub credentials and network. The optional string `number` must be a canonical positive decimal no greater than `2147483647`; omission selects the current branch's pull request. |
@@ -687,12 +688,25 @@ Possible statuses:
 
 Only `accepted` and `queued` may require waiting for later agent events. Clients must clear pending UI immediately for `completed`, `handled`, `cancelled`, and RPC errors.
 
+Committed action-state transitions may also publish a bounded generic event on the ordered conversation feed so every attached client can update the same action snapshot:
+
+```json
+{
+  "type": "ui_action_state_changed",
+  "action": "thinking.fast_mode",
+  "state": { "type": "boolean", "value": true, "label": "Fast mode enabled" },
+  "delivery": { "subscriptionId": "sub-…", "cursor": 42 }
+}
+```
+
+The initiating `invoke_ui_action` response still includes its resulting state. Other attached clients use `ui_action_state_changed` or a fresh `get_ui_actions` response; reconnect state remains authoritative from persisted session policy.
+
 For projected dynamic actions, invocation uses the host's existing prompt semantics:
 
 - Extension command actions invoke their registered slash command and return `handled` when the command handler completes. They do not require an `agent_end` event.
 - Prompt template and skill actions send their slash alias through host prompt expansion. While idle they return `accepted`; while the agent is streaming they require `streamingBehavior: "steer"` or `"followUp"` and return `queued`.
 - Dynamic action ids are opaque and tied to the current action catalog. After a reload, session replacement, or catalog change, clients must refresh descriptors; stale ids are rejected instead of being remapped to another action.
-- `thinking.fast_mode` uses a required boolean `enabled` argument. Enabling captures the current thinking level, applies the fastest supported lower thinking level among `off`, `minimal`, and `low`, and returns updated boolean state. Disabling restores the captured thinking level after host clamping. It never switches models, exposes model catalogs, changes scoped-model/profile settings, or persists model/thinking defaults. Manual thinking/model/profile/scoped-model changes clear the session-local restore marker.
+- `thinking.fast_mode` uses a required boolean `enabled` argument. The independent boolean policy is durable on the active session branch and does not change the selected model, thinking level, model/thinking defaults, profiles, or project/global settings. Reconnects and tree navigation restore the branch's latest Fast state. The action is enabled only for supported models on the canonical OpenAI Responses and OpenAI Codex endpoints. Enabled maps normal conversation turns to `service_tier: "priority"`; disabled maps them to `service_tier: "default"`. Auxiliary calls such as compaction and session naming do not inherit the toggle.
 - Review actions start a detached host workflow: the host resolves git targets and review-model settings inline (target errors fail the invocation synchronously), then returns `accepted` with a `workflowId` while an isolated review session runs with the approved tool policy. All Git-backed review diffs disable textconv and external diff drivers; `review.commit` additionally resolves the bounded input ref to a canonical commit object id before invoking `git show`. `review.pr` validates the optional number before using the host's GitHub credentials and network. Commit metadata/diffs and pull request metadata/diffs are submitted to the review model. The runtime keeps serving other RPC commands, and the client's session is never force-switched. Progress streams as sanitized `workflow_*` and `tool_execution_*` events; completion is reported by `workflow_end`. Findings are fetched with `get_review_result`, running or retained reviews are listed with `list_review_workflows`, a running review is aborted with `cancel_workflow`, and `open_review_session` seeds a fresh session with the findings when the client asks for one. Responses and events do not include raw diffs, review prompts, pull request titles or bodies, configured model names, auth state, or raw tool output. Pull request workflow tool events omit all model-controlled string arguments; configured-model fallback warnings are suppressed remotely, and subprocess/provider failures use stable remote messages while detailed diagnostics remain host-local. Reviews use the host-owned read-only tool set (`read`, `grep`, `find`, `ls`) without inheriting extension tools; descriptors advertise `requiresConfirmation`, and clients confirm before invoking (there is no host-side confirmation round trip). Hosts cap concurrent reviews and retain a bounded window of terminal results.
 - Over Iroh, v1 invocation is allowlist-based and forwards only exact reviewed built-in ids (`session.new`, `run.cancel`, `thinking.fast_mode`, `review.uncommitted`, `review.branch`, `review.pr`, `review.commit`) plus projected dynamic ids under `extension.command.*`, `prompt.template.*`, and `skill.*`. Local-only built-ins such as `context.compact` and `session.rename`, deferred `review.tools`, and unreviewed prefixes are rejected with a normal RPC error. Model and thinking changes use the direct `set_model`/`set_thinking_level` RPC commands, which are forwarded over Iroh conversation streams.
 
@@ -777,7 +791,7 @@ Clients approve only the advertised host-owned action; they cannot alter the com
 
 #### set_model
 
-Switch to a specific model. Matches CLI `/model` behavior: the change is recorded in the session and persisted as the default model and provider for future sessions. Pass `"persistDefault": false` to change the current session's model without rewriting the host default (used e.g. for per-agent model overrides). Switching models re-clamps the thinking level to the new model's capabilities (emitting `thinking_level_changed` when it changes) and clears any active Fast mode overlay. Unknown provider/model pairs fail with `Model not found: <provider>/<modelId>`.
+Switch to a specific model. Matches CLI `/model` behavior: the change is recorded in the session and persisted as the default model and provider for future sessions. Pass `"persistDefault": false` to change the current session's model without rewriting the host default (used e.g. for per-agent model overrides). Switching models re-clamps the thinking level to the new model's capabilities (emitting `thinking_level_changed` when it changes) without changing the branch-local Fast policy. Unknown provider/model pairs fail with `Model not found: <provider>/<modelId>`.
 
 ```json
 {"type": "set_model", "provider": "anthropic", "modelId": "claude-sonnet-4-20250514"}
@@ -2005,7 +2019,8 @@ The `content` field can be a string or an array of `TextContent`/`ImageContent` 
     "output": 50,
     "cacheRead": 0,
     "cacheWrite": 0,
-    "cost": {"input": 0.0003, "output": 0.00075, "cacheRead": 0, "cacheWrite": 0, "total": 0.00105}
+    "cost": {"input": 0.0003, "output": 0.00075, "cacheRead": 0, "cacheWrite": 0, "total": 0.00105},
+    "serviceTier": {"requested": "priority", "effective": "priority"}
   },
   "stopReason": "stop",
   "timestamp": 1733234567890
@@ -2013,6 +2028,8 @@ The `content` field can be a string or an array of `TextContent`/`ImageContent` 
 ```
 
 Stop reasons: `"stop"`, `"length"`, `"toolUse"`, `"error"`, `"aborted"`
+
+For OpenAI Responses and OpenAI Codex responses, optional `usage.serviceTier` records the requested and effective upstream service tier. The effective value can be `"default"` when a Priority request is downgraded.
 
 ### ToolResultMessage
 

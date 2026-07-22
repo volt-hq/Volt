@@ -116,6 +116,7 @@ export type {
 	RpcTranscriptItem,
 	RpcTranscriptResponse,
 	RpcTranscriptToolStatus,
+	RpcUiActionStateChangedEvent,
 	RpcUnregisterLiveActivityResponse,
 	RpcWorkflowEvent,
 	RpcWorkflowKind,

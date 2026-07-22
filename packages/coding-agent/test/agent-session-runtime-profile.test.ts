@@ -253,6 +253,8 @@ describe("AgentSessionRuntime profile propagation", () => {
 	it("switches away from the current extension provider model when it disappears after reload", async () => {
 		const providerName = "removed-extension-provider";
 		const providerModelId = "removed-extension-model";
+		const fallbackProviderName = "reload-fallback-provider";
+		const fallbackModelId = "reload-fallback-model";
 		let currentExtensionsResult = await createTestExtensionsResult([
 			(volt) => {
 				volt.registerProvider(providerName, {
@@ -263,7 +265,7 @@ describe("AgentSessionRuntime profile propagation", () => {
 						{
 							id: providerModelId,
 							name: "Removed extension model",
-							reasoning: false,
+							reasoning: true,
 							input: ["text"],
 							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 							contextWindow: 128000,
@@ -276,20 +278,37 @@ describe("AgentSessionRuntime profile propagation", () => {
 		const resourceLoader = createTestResourceLoader({ extensionsResult: currentExtensionsResult });
 		resourceLoader.getExtensions = () => currentExtensionsResult;
 		resourceLoader.reload = async () => {
-			currentExtensionsResult = await createTestExtensionsResult([]);
+			currentExtensionsResult = await createTestExtensionsResult([
+				(volt) => {
+					volt.registerProvider(fallbackProviderName, {
+						baseUrl: "http://localhost:0/reload-fallback",
+						apiKey: "reload-fallback-key",
+						api: "reload-fallback-api",
+						models: [
+							{
+								id: fallbackModelId,
+								name: "Reload fallback model",
+								reasoning: false,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 128000,
+								maxTokens: 16384,
+							},
+						],
+					});
+				},
+			]);
 		};
 		const settingsManager = SettingsManager.inMemory();
-		const authStorage = AuthStorage.inMemory();
-		const modelRegistry = ModelRegistry.inMemory(authStorage);
-		const fallbackModel = modelRegistry.getAll()[0];
-		if (!fallbackModel) {
-			throw new Error("No fallback model was registered");
+		const modelRegistry = ModelRegistry.inMemory(AuthStorage.inMemory());
+		const initialModel = modelRegistry.getAll()[0];
+		if (!initialModel) {
+			throw new Error("No initial model was registered");
 		}
-		authStorage.setRuntimeApiKey(fallbackModel.provider, "fallback-key");
 		const session = new AgentSession({
 			agent: new Agent({
 				initialState: {
-					model: fallbackModel,
+					model: initialModel,
 					systemPrompt: "You are a helpful assistant.",
 					tools: [],
 					thinkingLevel: "off",
@@ -304,18 +323,24 @@ describe("AgentSessionRuntime profile propagation", () => {
 
 		cleanups.push(() => {
 			modelRegistry.unregisterProvider(providerName);
+			modelRegistry.unregisterProvider(fallbackProviderName);
 			session.dispose();
 		});
 
 		const extensionModel = modelRegistry.find(providerName, providerModelId);
 		expect(extensionModel).toBeDefined();
 		await session.setModel(extensionModel!, { persistDefault: false });
+		session.setThinkingLevel("high", { persistDefault: false });
+		session.setFastModeEnabled(true);
 		expect(session.model?.provider).toBe(providerName);
 
 		await session.reload();
 
 		expect(modelRegistry.find(providerName, providerModelId)).toBeUndefined();
-		expect(session.model?.provider).toBe(fallbackModel.provider);
-		expect(session.model?.id).toBe(fallbackModel.id);
+		expect(session.model?.provider).toBe(fallbackProviderName);
+		expect(session.model?.id).toBe(fallbackModelId);
+		expect(session.model?.reasoning).toBe(false);
+		expect(session.fastModeEnabled).toBe(true);
+		expect(session.thinkingLevel).toBe("off");
 	});
 });

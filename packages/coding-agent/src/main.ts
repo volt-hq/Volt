@@ -186,7 +186,9 @@ async function findLocalSessionByExactId(
 	cwd: string,
 	sessionDir?: string,
 ): Promise<{ type: "local"; path: string } | undefined> {
-	const localSessions = await SessionManager.list(cwd, sessionDir);
+	const localSessions = await SessionManager.list(cwd, sessionDir, undefined, {
+		includeMessageFreeDurable: true,
+	});
 	const localMatch = localSessions.find((s) => s.id === sessionId);
 	return localMatch ? { type: "local", path: localMatch.path } : undefined;
 }
@@ -197,19 +199,32 @@ async function resolveSessionPath(sessionArg: string, cwd: string, sessionDir?: 
 		return { type: "path", path: resolvePath(sessionArg, cwd) };
 	}
 
-	// Try to match as session ID in current project first
-	const localSessions = await SessionManager.list(cwd, sessionDir);
-	const localMatch =
-		localSessions.find((s) => s.id === sessionArg) ?? localSessions.find((s) => s.id.startsWith(sessionArg));
-
-	if (localMatch) {
-		return { type: "local", path: localMatch.path };
+	// Exact IDs can address message-free durable sessions without exposing them to prefix search or selectors.
+	const localAddressableSessions = await SessionManager.list(cwd, sessionDir, undefined, {
+		includeMessageFreeDurable: true,
+	});
+	const localExactMatch = localAddressableSessions.find((session) => session.id === sessionArg);
+	if (localExactMatch) {
+		return { type: "local", path: localExactMatch.path };
 	}
 
-	// Try global search across all projects
+	// Try to match a visible session ID prefix in the current project.
+	const localSessions = await SessionManager.list(cwd, sessionDir);
+	const localPrefixMatch = localSessions.find((session) => session.id.startsWith(sessionArg));
+	if (localPrefixMatch) {
+		return { type: "local", path: localPrefixMatch.path };
+	}
+
+	// Try global search across all projects.
+	const allAddressableSessions = await SessionManager.listAll(sessionDir, undefined, {
+		includeMessageFreeDurable: true,
+	});
+	const globalExactMatch = allAddressableSessions.find((session) => session.id === sessionArg);
+	if (globalExactMatch) {
+		return { type: "global", path: globalExactMatch.path, cwd: globalExactMatch.cwd };
+	}
 	const allSessions = await SessionManager.listAll(sessionDir);
-	const globalMatch =
-		allSessions.find((s) => s.id === sessionArg) ?? allSessions.find((s) => s.id.startsWith(sessionArg));
+	const globalMatch = allSessions.find((session) => session.id.startsWith(sessionArg));
 
 	if (globalMatch) {
 		return { type: "global", path: globalMatch.path, cwd: globalMatch.cwd };
@@ -379,12 +394,10 @@ function buildSessionOptions(
 	settingsManager: SettingsManager,
 ): {
 	options: CreateAgentSessionOptions;
-	cliThinkingFromModel: boolean;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
 } {
 	const options: CreateAgentSessionOptions = {};
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
-	let cliThinkingFromModel = false;
 
 	// Model from CLI
 	// - supports --provider <name> --model <pattern>
@@ -408,7 +421,6 @@ function buildSessionOptions(
 			// Explicit --thinking still takes precedence (applied later).
 			if (!parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
-				cliThinkingFromModel = true;
 			}
 		}
 	}
@@ -469,7 +481,7 @@ function buildSessionOptions(
 		options.excludeTools = [...parsed.excludeTools];
 	}
 
-	return { options, cliThinkingFromModel, diagnostics };
+	return { options, diagnostics };
 }
 
 function resolveCliPaths(cwd: string, paths: string[] | undefined): string[] | undefined {
@@ -757,14 +769,11 @@ export async function main(args: string[], options?: MainOptions) {
 		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
 		const scopedModels =
 			modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
-		const {
-			options: sessionOptions,
-			cliThinkingFromModel,
-			diagnostics: sessionOptionDiagnostics,
-		} = buildSessionOptions(
+		const hasExistingSession = sessionManager.getBranch().length > 0;
+		const { options: sessionOptions, diagnostics: sessionOptionDiagnostics } = buildSessionOptions(
 			parsed,
 			scopedModels,
-			sessionManager.buildSessionContext().messages.length > 0,
+			hasExistingSession,
 			modelRegistry,
 			settingsManager,
 		);
@@ -803,9 +812,8 @@ export async function main(args: string[], options?: MainOptions) {
 			customTools: sessionOptions.customTools,
 			subagentToolManager: subagentManager,
 		});
-		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
-		if (created.session.model && cliThinkingOverride) {
-			created.session.setThinkingLevel(created.session.thinkingLevel);
+		if (hasExistingSession && parsed.models !== undefined && sessionOptions.scopedModels !== undefined) {
+			created.session.setScopedModels(sessionOptions.scopedModels);
 		}
 
 		return {
