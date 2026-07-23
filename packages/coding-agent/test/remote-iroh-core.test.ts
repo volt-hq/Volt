@@ -3844,6 +3844,27 @@ describe("Iroh remote core helpers", () => {
 		expect(inner.closeCalls).toBe(1);
 	});
 
+	test("retags malformed remote invoke_ui_action correlations as uncorrelated validation failures", () => {
+		for (const id of [undefined, 7, "", "   ", "é".repeat(129)]) {
+			const result = getIrohRemoteRpcFilterResult(
+				JSON.stringify({
+					...(id === undefined ? {} : { id }),
+					type: "invoke_ui_action",
+					action: SESSION_NEW_ACTION_ID,
+				}),
+			);
+			expect(result).toEqual({
+				allowed: false,
+				response: {
+					type: "response",
+					command: "invalid",
+					success: false,
+					error: "invoke_ui_action requires a trimmed, non-empty correlation id of at most 256 UTF-8 bytes",
+				},
+			});
+		}
+	});
+
 	test("routes policy rejections through the installed ordered response sink", async () => {
 		const inner = new ManualRpcTransport();
 		const orderedWrites: object[] = [];
@@ -3893,6 +3914,50 @@ describe("Iroh remote core helpers", () => {
 
 		expect(inner.writes).toEqual([]);
 		expect(events).toEqual(["write:RPC grant is stale; reconnect", "close"]);
+	});
+
+	test("preserves only usable invocation ids on stale-grant responses", async () => {
+		const cases = [
+			{
+				command: { id: "invoke-stale-exact", type: "invoke_ui_action", action: SESSION_NEW_ACTION_ID },
+				expected: {
+					id: "invoke-stale-exact",
+					type: "response",
+					command: "invoke_ui_action",
+					success: false,
+					error: "RPC grant is stale; reconnect",
+				},
+			},
+			{
+				command: { id: " ".repeat(257), type: "invoke_ui_action", action: SESSION_NEW_ACTION_ID },
+				expected: {
+					type: "response",
+					command: "invalid",
+					success: false,
+					error: "RPC grant is stale; reconnect",
+				},
+			},
+		];
+
+		for (const { command, expected } of cases) {
+			const inner = new ManualRpcTransport();
+			const staleWrites: object[] = [];
+			const transport = createIrohRemoteFilteredRpcTransport({
+				transport: inner,
+				rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
+				isRpcGrantCurrent: () => false,
+				writeStaleGrantResponse: (value) => {
+					staleWrites.push(value);
+				},
+			});
+			transport.onLine(() => {
+				throw new Error("stale grants must not dispatch");
+			});
+
+			inner.emitLine(JSON.stringify(command));
+			await vi.waitFor(() => expect(staleWrites).toHaveLength(1));
+			expect(staleWrites[0]).toEqual(expected);
+		}
 	});
 
 	test("retires stale authority even when the courtesy rejection cannot be admitted", async () => {
@@ -3984,6 +4049,41 @@ describe("Iroh remote core helpers", () => {
 			success: false,
 			error: "RPC command not allowed over remote host: bash",
 		});
+	});
+
+	test("normalizes remote host handler failures with the invocation correlation contract", async () => {
+		const inner = new ManualRpcTransport();
+		const transport = createIrohRemoteHostCommandRpcTransport({
+			transport: inner,
+			handleCommand: () => {
+				throw new Error("host handler failed");
+			},
+		});
+		transport.onLine(() => {
+			throw new Error("handled commands must not be forwarded");
+		});
+
+		inner.emitLine(
+			JSON.stringify({ id: "invoke-host-exact", type: "invoke_ui_action", action: SESSION_NEW_ACTION_ID }),
+		);
+		inner.emitLine(JSON.stringify({ type: "invoke_ui_action", action: SESSION_NEW_ACTION_ID }));
+		await transport.flush?.();
+
+		expect(inner.writes).toEqual([
+			{
+				id: "invoke-host-exact",
+				type: "response",
+				command: "invoke_ui_action",
+				success: false,
+				error: "host handler failed",
+			},
+			{
+				type: "response",
+				command: "invalid",
+				success: false,
+				error: "host handler failed",
+			},
+		]);
 	});
 
 	test("routes remote command filter rejections through outbound and close-deferring layers", async () => {
@@ -4687,6 +4787,29 @@ describe("Iroh remote core helpers", () => {
 		expect(closed).toBe(false);
 
 		transport.write({ id: "unknown-1", type: "response", command: "unknown_rpc", success: false });
+		await nextTick();
+
+		expect(closed).toBe(true);
+	});
+
+	test("pairs malformed invocation close deferral with the uncorrelated invalid response", async () => {
+		const inner = new ManualRpcTransport();
+		const transport = createIrohRemoteCloseDeferringRpcTransport({
+			transport: inner,
+			waitForPromptCompletion: () => Promise.resolve(),
+		});
+		let closed = false;
+		transport.onLine(() => {});
+		transport.onClose?.(() => {
+			closed = true;
+		});
+
+		inner.emitLine(JSON.stringify({ type: "invoke_ui_action", action: SESSION_NEW_ACTION_ID }));
+		inner.emitClose();
+		await nextTick();
+		expect(closed).toBe(false);
+
+		transport.write({ type: "response", command: "invalid", success: false, error: "invalid invocation" });
 		await nextTick();
 
 		expect(closed).toBe(true);

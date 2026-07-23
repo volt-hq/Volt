@@ -254,7 +254,7 @@ afterEach(() => {
 });
 
 describe("RPC mode detached review actions", () => {
-	test("preserves a usable invocation id on validation failure and omits an unusable id", async () => {
+	test("preserves a usable invocation id and retags malformed invocation ids as uncorrelated", async () => {
 		const runtimeHost = makeRuntimeHost();
 		const { transport, writes, getLineHandler, getCloseHandler } = createCollectingTransport();
 		const { modePromise } = await startMode(runtimeHost, transport);
@@ -268,12 +268,15 @@ describe("RPC mode detached review actions", () => {
 				args: [],
 			}),
 		);
-		lineHandler(
-			JSON.stringify({
-				type: "invoke_ui_action",
-				action: "review.uncommitted",
-			}),
-		);
+		for (const id of [undefined, 7, "", "   ", "é".repeat(129)]) {
+			lineHandler(
+				JSON.stringify({
+					...(id === undefined ? {} : { id }),
+					type: "invoke_ui_action",
+					action: "review.uncommitted",
+				}),
+			);
+		}
 
 		await vi.waitFor(() => {
 			expect(writes).toContainEqual({
@@ -283,18 +286,18 @@ describe("RPC mode detached review actions", () => {
 				success: false,
 				error: 'Invalid RPC command payload: "args" must be an object',
 			});
-			const idlessFailure = writes.find(
-				(value) =>
-					(value as Record<string, unknown>).command === "invoke_ui_action" &&
-					(value as Record<string, unknown>).error === 'Invalid RPC command payload: "id" is required',
+			const uncorrelatedFailures = writes.filter(
+				(value) => (value as Record<string, unknown>).command === "invalid",
 			);
-			expect(idlessFailure).toBeDefined();
-			expect(JSON.parse(JSON.stringify(idlessFailure))).toEqual({
-				type: "response",
-				command: "invoke_ui_action",
-				success: false,
-				error: 'Invalid RPC command payload: "id" is required',
-			});
+			expect(uncorrelatedFailures).toHaveLength(5);
+			for (const failure of uncorrelatedFailures) {
+				expect(failure).not.toHaveProperty("id");
+				expect(failure).toMatchObject({
+					type: "response",
+					command: "invalid",
+					success: false,
+				});
+			}
 		});
 		expect(reviewMocks.prepareReviewWorkflow).not.toHaveBeenCalled();
 

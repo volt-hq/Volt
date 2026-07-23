@@ -135,7 +135,7 @@ export const RPC_COMMAND_SCHEMAS = {
 	}),
 	invoke_ui_action: Type.Object(
 		{
-			id: Type.String(),
+			id: RpcConversationIdentifierSchema,
 			type: Type.Literal("invoke_ui_action"),
 			conversationAuthority: Type.Optional(RpcConversationAuthoritySchema),
 			action: Type.String(),

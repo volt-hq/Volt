@@ -116,6 +116,26 @@ const invalidPayloadCases: Array<{ name: string; payload: unknown; error: string
 		error: 'Invalid RPC command payload: "id" is required',
 	},
 	{
+		name: "rejects UI action invocations with a non-string correlation id",
+		payload: { id: 7, type: "invoke_ui_action", action: "review" },
+		error: 'Invalid RPC command payload: "id" must be a non-empty string',
+	},
+	{
+		name: "rejects UI action invocations with an empty correlation id",
+		payload: { id: "", type: "invoke_ui_action", action: "review" },
+		error: 'Invalid RPC command payload: "id" must be a non-empty string',
+	},
+	{
+		name: "rejects UI action invocations with a padded correlation id",
+		payload: { id: " invoke-review ", type: "invoke_ui_action", action: "review" },
+		error: 'Invalid RPC command payload: "id" must be a non-empty string',
+	},
+	{
+		name: "rejects UI action invocation ids beyond the identifier byte bound",
+		payload: { id: "é".repeat(129), type: "invoke_ui_action", action: "review" },
+		error: 'Invalid RPC command payload: "id" exceeds the 256-byte UTF-8 limit',
+	},
+	{
 		name: "rejects invalid UI action invocation args",
 		payload: { id: "invoke-review", type: "invoke_ui_action", action: "review", args: [] },
 		error: 'Invalid RPC command payload: "args" must be an object',
@@ -302,7 +322,7 @@ describe("RPC command payload validation", () => {
 		expect(validateRpcCommandPayload({ type: "list_review_workflows" })).toBeUndefined();
 		expect(
 			validateRpcCommandPayload({
-				id: "invoke-review",
+				id: "é".repeat(128),
 				type: "invoke_ui_action",
 				action: "review.uncommitted",
 				args: {},

@@ -300,7 +300,7 @@ export const RPC_RESPONSE_SCHEMAS = {
 	get_ui_action_completions: dataResponse("get_ui_action_completions", UiActionCompletionListResponseSchema),
 	invoke_ui_action: Type.Object(
 		{
-			id: Type.String(),
+			id: RpcConversationIdentifierSchema,
 			type: Type.Literal("response"),
 			command: Type.Literal("invoke_ui_action"),
 			success: Type.Literal(true),
@@ -488,20 +488,36 @@ export const RPC_RESPONSE_SCHEMAS = {
 	),
 } as const satisfies { [K in RpcCommandType]: TObject };
 
+const RpcErrorCodeSchema = Type.Optional(openStringEnum(RPC_STABLE_ERROR_CODES));
+
 /**
- * Error response (any command can fail). `command` echoes the failing command
- * or "unknown"/"parse". The id remains optional because malformed input can
- * fail before the host establishes a valid correlation id.
+ * Error responses are split so invoke_ui_action can never use the generic
+ * id-optional member. A malformed invocation with no usable correlation id is
+ * reported uncorrelated as command "invalid".
  */
-export const RpcErrorResponseSchema = Type.Object(
-	{
-		id: Type.Optional(Type.String()),
-		type: Type.Literal("response"),
-		command: Type.String(),
-		success: Type.Literal(false),
-		error: Type.String(),
-		/** Stable machine-readable code for recovery decisions when one is available. */
-		errorCode: Type.Optional(openStringEnum(RPC_STABLE_ERROR_CODES)),
-	},
-	{ additionalProperties: false },
-);
+export const RpcErrorResponseSchema = Type.Union([
+	Type.Object(
+		{
+			id: RpcConversationIdentifierSchema,
+			type: Type.Literal("response"),
+			command: Type.Literal("invoke_ui_action"),
+			success: Type.Literal(false),
+			error: Type.String(),
+			/** Stable machine-readable code for recovery decisions when one is available. */
+			errorCode: RpcErrorCodeSchema,
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			id: Type.Optional(Type.String()),
+			type: Type.Literal("response"),
+			command: Type.String({ not: Type.Literal("invoke_ui_action") }),
+			success: Type.Literal(false),
+			error: Type.String(),
+			/** Stable machine-readable code for recovery decisions when one is available. */
+			errorCode: RpcErrorCodeSchema,
+		},
+		{ additionalProperties: false },
+	),
+]);

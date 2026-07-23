@@ -1850,7 +1850,7 @@
 			],
 			"properties": {
 				"id": {
-					"type": "string"
+					"$ref": "#/$defs/RpcConversationIdentifier"
 				},
 				"type": {
 					"type": "string",
@@ -3369,41 +3369,88 @@
 			"additionalProperties": false
 		},
 		"RpcErrorResponse": {
-			"type": "object",
-			"required": [
-				"type",
-				"command",
-				"success",
-				"error"
-			],
-			"properties": {
-				"id": {
-					"type": "string"
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"id",
+						"type",
+						"command",
+						"success",
+						"error"
+					],
+					"properties": {
+						"id": {
+							"$ref": "#/$defs/RpcConversationIdentifier"
+						},
+						"type": {
+							"type": "string",
+							"const": "response"
+						},
+						"command": {
+							"type": "string",
+							"const": "invoke_ui_action"
+						},
+						"success": {
+							"type": "boolean",
+							"const": false
+						},
+						"error": {
+							"type": "string"
+						},
+						"errorCode": {
+							"type": "string",
+							"x-volt-known-values": [
+								"client_input_conflict",
+								"client_input_outcome_ambiguous",
+								"stale_conversation_authority"
+							]
+						}
+					},
+					"additionalProperties": false
 				},
-				"type": {
-					"type": "string",
-					"const": "response"
-				},
-				"command": {
-					"type": "string"
-				},
-				"success": {
-					"type": "boolean",
-					"const": false
-				},
-				"error": {
-					"type": "string"
-				},
-				"errorCode": {
-					"type": "string",
-					"x-volt-known-values": [
-						"client_input_conflict",
-						"client_input_outcome_ambiguous",
-						"stale_conversation_authority"
-					]
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"command",
+						"success",
+						"error"
+					],
+					"properties": {
+						"id": {
+							"type": "string"
+						},
+						"type": {
+							"type": "string",
+							"const": "response"
+						},
+						"command": {
+							"type": "string",
+							"not": {
+								"type": "string",
+								"const": "invoke_ui_action"
+							}
+						},
+						"success": {
+							"type": "boolean",
+							"const": false
+						},
+						"error": {
+							"type": "string"
+						},
+						"errorCode": {
+							"type": "string",
+							"x-volt-known-values": [
+								"client_input_conflict",
+								"client_input_outcome_ambiguous",
+								"stale_conversation_authority"
+							]
+						}
+					},
+					"additionalProperties": false
 				}
-			},
-			"additionalProperties": false
+			]
 		},
 		"RpcExtensionErrorEvent": {
 			"type": "object",
@@ -6905,7 +6952,7 @@
 			],
 			"properties": {
 				"id": {
-					"type": "string"
+					"$ref": "#/$defs/RpcConversationIdentifier"
 				},
 				"type": {
 					"type": "string",
