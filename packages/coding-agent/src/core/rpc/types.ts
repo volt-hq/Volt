@@ -137,7 +137,7 @@ import type {
 export { RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES } from "./wire-limits.ts";
 
 export type RpcModel = Model<Api>;
-/** A model as reported to clients: the raw model plus the thinking levels it supports. */
+/** A model as reported to clients with host-owned selectable capabilities. */
 export type RpcCatalogModel = Static<typeof RpcCatalogModelSchema>;
 export type RpcSubagentDefinitionSource = Static<typeof RpcSubagentDefinitionSourceSchema>;
 

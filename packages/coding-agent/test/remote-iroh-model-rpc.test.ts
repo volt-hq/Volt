@@ -61,6 +61,11 @@ describe("Iroh remote model RPC", () => {
 	test("forwards model catalog, set_model, and set_thinking_level while rejecting cycle commands", async () => {
 		const modelOne = createTestModel("model-one");
 		const modelTwo = createTestModel("model-two", { input: ["text", "image"] });
+		const fastModel = createTestModel("gpt-5.6-sol", {
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+		});
 		let currentModel = modelOne;
 		let thinkingLevel: ThinkingLevel = "medium";
 		const setModel = vi.fn(async (model: Model<Api>) => {
@@ -79,7 +84,7 @@ describe("Iroh remote model RPC", () => {
 			},
 			modelRegistry: {
 				authStorage: {},
-				getAvailable: vi.fn(() => [modelOne, modelTwo]),
+				getAvailable: vi.fn(() => [modelOne, modelTwo, fastModel]),
 				refreshFromDisk: vi.fn(),
 			},
 			getAvailableThinkingLevels: vi.fn(() => ["off", "minimal", "low", "medium", "high"]),
@@ -184,12 +189,18 @@ describe("Iroh remote model RPC", () => {
 					expect.objectContaining({
 						id: "model-one",
 						availableThinkingLevels: catalogLevels,
+						supportsFastMode: false,
 						input: ["text"],
 					}),
 					expect.objectContaining({
 						id: "model-two",
 						availableThinkingLevels: catalogLevels,
+						supportsFastMode: false,
 						input: ["text", "image"],
+					}),
+					expect.objectContaining({
+						id: "gpt-5.6-sol",
+						supportsFastMode: true,
 					}),
 				],
 			},
@@ -202,6 +213,7 @@ describe("Iroh remote model RPC", () => {
 				provider: "anthropic",
 				id: "model-two",
 				availableThinkingLevels: catalogLevels,
+				supportsFastMode: false,
 				input: ["text", "image"],
 			}),
 		});

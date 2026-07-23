@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
-import { getSupportedThinkingLevels } from "@hansjm10/volt-ai";
+import { getSupportedThinkingLevels, supportsFastInference } from "@hansjm10/volt-ai";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import {
@@ -105,7 +105,11 @@ function getUiActionCapabilities(invocationEnabled: boolean): UiActionCapabiliti
 }
 
 function toCatalogModel(model: RpcModel): RpcCatalogModel {
-	return { ...model, availableThinkingLevels: getSupportedThinkingLevels(model) as ThinkingLevel[] };
+	return {
+		...model,
+		availableThinkingLevels: getSupportedThinkingLevels(model) as ThinkingLevel[],
+		supportsFastMode: supportsFastInference(model),
+	};
 }
 
 function getPromptExtensionCommandName(message: string): string | undefined {
