@@ -30,6 +30,7 @@ import {
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
 	measureConversationProjectionUtf8BytesWithin,
 } from "../core/rpc/conversation-projection-limits.ts";
+import { getRpcErrorResponseTarget } from "../core/rpc/correlation.ts";
 import { extractMessageImages, projectMessageImages } from "../core/rpc/transcript.ts";
 import type { RpcConversationAssistantPart, RpcKeepAwakeStatus } from "../core/rpc/types.ts";
 import { REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES } from "../core/rpc/wire-limits.ts";
@@ -200,11 +201,11 @@ export interface ConversationCommandContext {
 }
 
 export function createLeaseDrainingRpcErrorResponse(command: RemoteRpcCommand): Record<string, unknown> {
-	const id = getRpcResponseId(command);
+	const target = getRpcErrorResponseTarget(command);
 	return {
-		...(id === undefined ? {} : { id }),
+		...(target.id === undefined ? {} : { id: target.id }),
 		type: "response",
-		command: command.type,
+		command: target.command,
 		success: false,
 		error: {
 			code: "lease_draining",
@@ -215,11 +216,11 @@ export function createLeaseDrainingRpcErrorResponse(command: RemoteRpcCommand): 
 }
 
 export function createHostShutdownRpcErrorResponse(command: RemoteRpcCommand): Record<string, unknown> {
-	const id = getRpcResponseId(command);
+	const target = getRpcErrorResponseTarget(command);
 	return {
-		...(id === undefined ? {} : { id }),
+		...(target.id === undefined ? {} : { id: target.id }),
 		type: "response",
-		command: command.type,
+		command: target.command,
 		success: false,
 		error: {
 			code: "host_shutdown",
@@ -229,11 +230,11 @@ export function createHostShutdownRpcErrorResponse(command: RemoteRpcCommand): R
 }
 
 export function createSubagentSessionReadOnlyRpcErrorResponse(command: RemoteRpcCommand): Record<string, unknown> {
-	const id = getRpcResponseId(command);
+	const target = getRpcErrorResponseTarget(command);
 	return {
-		...(id === undefined ? {} : { id }),
+		...(target.id === undefined ? {} : { id: target.id }),
 		type: "response",
-		command: command.type,
+		command: target.command,
 		success: false,
 		error: {
 			code: "subagent_session_read_only",

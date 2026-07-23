@@ -262,6 +262,42 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		}
 	});
 
+	it("retags malformed invocation ids across daemon admission failures", async () => {
+		const cases = [
+			{
+				command: { type: "invoke_ui_action", action: "session.new" },
+				context: createContext({ isDraining: () => true }),
+				code: "lease_draining",
+			},
+			{
+				command: { id: " padded ", type: "invoke_ui_action", action: "session.new" },
+				context: createContext({ isTurnAdmissionClosed: () => true }),
+				code: "host_shutdown",
+			},
+			{
+				command: { id: "é".repeat(129), type: "invoke_ui_action", action: "session.new" },
+				context: createContext({ isSubagentSession: () => true }),
+				code: "subagent_session_read_only",
+			},
+		];
+
+		for (const { command, context, code } of cases) {
+			const response = (await handleIntegratedConversationRpcCommand(
+				command,
+				createAuthorization(),
+				context,
+				createRuntime(),
+			)) as Record<string, unknown>;
+			expect(response).not.toHaveProperty("id");
+			expect(response).toMatchObject({
+				type: "response",
+				command: "invalid",
+				success: false,
+				error: { code },
+			});
+		}
+	});
+
 	it("lets observation and abort through on subagent sessions", async () => {
 		// abort passes through to the rpc mode so a phone can still stop the run.
 		const abort = await handleIntegratedConversationRpcCommand(

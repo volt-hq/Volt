@@ -1,4 +1,5 @@
 import { isRemoteSafeBuiltinHostActionId } from "../../host-actions.ts";
+import { getRpcErrorResponseTarget, isUsableRpcConversationIdentifier } from "../../rpc/correlation.ts";
 import { serializeJsonLine } from "../../rpc/jsonl.ts";
 import {
 	getIrohRemoteRpcCommandCapabilities,
@@ -175,18 +176,30 @@ export function getStaticIrohRemoteRpcFilterResult(line: string): IrohRemoteStat
 		};
 	}
 	const command = parsed as Record<string, unknown>;
-	const responseId = typeof command.id === "string" ? command.id : undefined;
+	const target = getRpcErrorResponseTarget(command);
 	if (typeof command.type !== "string") {
 		return {
 			allowed: false,
 			response: createIrohRemoteRpcErrorResponse(
-				responseId,
+				target.id,
 				"unknown",
 				"RPC command must be a JSON object with a string type",
 			),
 		};
 	}
 
+	if (command.type === "invoke_ui_action" && !isUsableRpcConversationIdentifier(command.id)) {
+		return {
+			allowed: false,
+			response: createIrohRemoteRpcErrorResponse(
+				undefined,
+				"invalid",
+				"invoke_ui_action requires a trimmed, non-empty correlation id of at most 256 UTF-8 bytes",
+			),
+		};
+	}
+
+	const responseId = target.id;
 	if (command.type === "invoke_ui_action" || command.type === "get_ui_action_completions") {
 		return getIrohRemoteUiActionCommandResult(command, responseId, command.type);
 	}
@@ -286,7 +299,14 @@ export function createIrohRemoteRpcErrorResponse(
 	command: string,
 	error: string,
 ): IrohRemoteRpcErrorResponse {
-	return { id, type: "response", command, success: false, error };
+	const target = getRpcErrorResponseTarget({ id, type: command });
+	return {
+		...(target.id === undefined ? {} : { id: target.id }),
+		type: "response",
+		command: target.command,
+		success: false,
+		error,
+	};
 }
 
 export function createIrohRemoteRpcCapabilityDeniedResponse(
@@ -294,10 +314,11 @@ export function createIrohRemoteRpcCapabilityDeniedResponse(
 	command: string,
 	requiredCapability: IrohRemoteRpcCapability,
 ): IrohRemoteRpcCapabilityDeniedResponse {
+	const target = getRpcErrorResponseTarget({ id, type: command });
 	return {
-		id,
+		...(target.id === undefined ? {} : { id: target.id }),
 		type: "response",
-		command,
+		command: target.command,
 		success: false,
 		error: {
 			code: "rpc_capability_denied",

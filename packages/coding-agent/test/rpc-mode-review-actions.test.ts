@@ -254,6 +254,57 @@ afterEach(() => {
 });
 
 describe("RPC mode detached review actions", () => {
+	test("preserves a usable invocation id and retags malformed invocation ids as uncorrelated", async () => {
+		const runtimeHost = makeRuntimeHost();
+		const { transport, writes, getLineHandler, getCloseHandler } = createCollectingTransport();
+		const { modePromise } = await startMode(runtimeHost, transport);
+		const lineHandler = getLineHandler();
+
+		lineHandler(
+			JSON.stringify({
+				id: "invoke-malformed-args",
+				type: "invoke_ui_action",
+				action: "review.uncommitted",
+				args: [],
+			}),
+		);
+		for (const id of [undefined, 7, "", "   ", "é".repeat(129)]) {
+			lineHandler(
+				JSON.stringify({
+					...(id === undefined ? {} : { id }),
+					type: "invoke_ui_action",
+					action: "review.uncommitted",
+				}),
+			);
+		}
+
+		await vi.waitFor(() => {
+			expect(writes).toContainEqual({
+				id: "invoke-malformed-args",
+				type: "response",
+				command: "invoke_ui_action",
+				success: false,
+				error: 'Invalid RPC command payload: "args" must be an object',
+			});
+			const uncorrelatedFailures = writes.filter(
+				(value) => (value as Record<string, unknown>).command === "invalid",
+			);
+			expect(uncorrelatedFailures).toHaveLength(5);
+			for (const failure of uncorrelatedFailures) {
+				expect(failure).not.toHaveProperty("id");
+				expect(failure).toMatchObject({
+					type: "response",
+					command: "invalid",
+					success: false,
+				});
+			}
+		});
+		expect(reviewMocks.prepareReviewWorkflow).not.toHaveBeenCalled();
+
+		getCloseHandler()?.();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
 	test("returns an accepted response before workflow events and serves other commands mid-review", async () => {
 		let releaseReview: () => void = () => {};
 		const reviewGate = new Promise<void>((resolve) => {

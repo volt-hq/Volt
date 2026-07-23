@@ -1,3 +1,4 @@
+import { getRpcErrorResponseTarget } from "../../rpc/correlation.ts";
 import {
 	createIrohRpcTransport,
 	type IrohRpcTransportOptions,
@@ -92,10 +93,7 @@ export function createIrohRemoteFilteredRpcTransport(
 				if (options.isRpcGrantCurrent && !(await options.isRpcGrantCurrent())) {
 					const staticResult = getStaticIrohRemoteRpcFilterResult(line);
 					const target = staticResult.allowed
-						? {
-								id: typeof staticResult.command.id === "string" ? staticResult.command.id : undefined,
-								command: staticResult.command.type,
-							}
+						? getRpcErrorResponseTarget(staticResult.command)
 						: { id: staticResult.response.id, command: staticResult.response.command };
 					const staleResponse = createIrohRemoteRpcErrorResponse(
 						target.id,

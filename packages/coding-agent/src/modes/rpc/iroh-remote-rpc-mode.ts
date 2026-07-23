@@ -19,6 +19,7 @@ import {
 	sanitizeIrohRemoteOutbound,
 	sanitizeIrohRemoteTranscriptText,
 } from "../../core/remote/iroh/index.ts";
+import { getRpcErrorResponseTarget } from "../../core/rpc/correlation.ts";
 import {
 	type ConversationProjectionPreparedValue,
 	type ConversationProjectionSnapshotBuilder,
@@ -850,13 +851,7 @@ function parseIrohRemoteHostCommandLine(line: string): Record<string, unknown> |
 function getIrohRemoteRpcErrorTarget(line: string): { id: string | undefined; command: string } {
 	try {
 		const parsed: unknown = JSON.parse(line);
-		if (!isRecord(parsed)) {
-			return { id: undefined, command: "unknown" };
-		}
-		return {
-			id: typeof parsed.id === "string" ? parsed.id : undefined,
-			command: typeof parsed.type === "string" ? parsed.type : "unknown",
-		};
+		return getRpcErrorResponseTarget(parsed);
 	} catch {
 		return { id: undefined, command: "parse" };
 	}
@@ -991,7 +986,8 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 		if (command.type === "extension_ui_response" || command.type === "host_action_response") {
 			return undefined;
 		}
-		return createPendingCommand(command.type, typeof command.id === "string" ? command.id : undefined);
+		const target = getRpcErrorResponseTarget(command);
+		return createPendingCommand(target.command, target.id);
 	};
 
 	const notifyCompletedCommand = async (

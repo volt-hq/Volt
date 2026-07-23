@@ -87,6 +87,79 @@ describe("RPC contract schema integrity", () => {
 			expect(check(schema, 7)).toBe(false);
 		}
 	});
+
+	test("requires usable correlation for every invoke_ui_action response", () => {
+		const command = {
+			id: "invoke-exact",
+			type: "invoke_ui_action",
+			action: "session.new",
+		};
+		expect(check(RPC_COMMAND_SCHEMAS.invoke_ui_action, command)).toBe(true);
+		expect(check(RPC_COMMAND_SCHEMAS.invoke_ui_action, { ...command, id: undefined })).toBe(false);
+		expect(check(RPC_COMMAND_SCHEMAS.invoke_ui_action, { ...command, id: "" })).toBe(false);
+		expect(check(RPC_COMMAND_SCHEMAS.invoke_ui_action, { ...command, id: " padded " })).toBe(false);
+
+		const success = createRpcSuccessResponse("invoke-exact", "invoke_ui_action", {
+			action: "session.new",
+			status: "completed",
+		});
+		expect(check(RPC_RESPONSE_SCHEMAS.invoke_ui_action, success)).toBe(true);
+		expect(check(RPC_RESPONSE_SCHEMAS.invoke_ui_action, { ...success, id: undefined })).toBe(false);
+		expect(check(RPC_RESPONSE_SCHEMAS.invoke_ui_action, { ...success, id: " padded " })).toBe(false);
+
+		const correlatedFailure = createRpcErrorResponse("invoke-exact", "invoke_ui_action", "UI action not available");
+		expect(correlatedFailure).toEqual({
+			id: "invoke-exact",
+			type: "response",
+			command: "invoke_ui_action",
+			success: false,
+			error: "UI action not available",
+		});
+		expect(check(RpcErrorResponseSchema, correlatedFailure)).toBe(true);
+
+		for (const id of [undefined, "", " padded ", "x".repeat(257)]) {
+			const uncorrelated = createRpcErrorResponse(id, "invoke_ui_action", "Invalid invocation id");
+			expect(uncorrelated).toEqual({
+				type: "response",
+				command: "invalid",
+				success: false,
+				error: "Invalid invocation id",
+			});
+			expect(check(RpcErrorResponseSchema, uncorrelated)).toBe(true);
+		}
+
+		expect(
+			check(RpcErrorResponseSchema, {
+				type: "response",
+				command: "invoke_ui_action",
+				success: false,
+				error: 'Invalid RPC command payload: "id" is required',
+			}),
+		).toBe(false);
+		expect(
+			check(RpcErrorResponseSchema, {
+				id: " padded ",
+				type: "response",
+				command: "invoke_ui_action",
+				success: false,
+				error: "Invalid invocation id",
+			}),
+		).toBe(false);
+		expect(
+			check(RpcErrorResponseSchema, {
+				type: "response",
+				command: "invalid",
+				success: false,
+				error: 'Invalid RPC command payload: "id" is required',
+			}),
+		).toBe(true);
+		expect(() =>
+			createRpcSuccessResponse("x".repeat(257), "invoke_ui_action", {
+				action: "session.new",
+				status: "completed",
+			}),
+		).toThrow("invoke_ui_action success responses require a usable correlation id");
+	});
 });
 
 describe("RPC contract emission conformance", () => {

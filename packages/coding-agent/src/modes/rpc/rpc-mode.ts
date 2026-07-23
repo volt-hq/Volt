@@ -5,7 +5,7 @@
  * Receives commands as JSON on stdin, outputs events and responses as JSON on stdout.
  *
  * Protocol:
- * - Commands: JSON objects with `type` field, optional `id` for correlation
+ * - Commands: JSON objects with `type` and a correlation `id` where required by the command schema
  * - Responses: JSON objects with `type: "response"`, `command`, `success`, and optional `data`/`error`
  * - Events: AgentSessionEvent objects streamed as they occur
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response

@@ -13,6 +13,7 @@ import {
 import { getMcpRpcCapabilities, listMcpRpcServers } from "../../core/mcp/rpc.ts";
 import type { McpGatewayExecutionContext } from "../../core/mcp/types.ts";
 import { createReviewSeedMessage } from "../../core/review.ts";
+import { getRpcErrorResponseTarget, isUsableRpcConversationIdentifier } from "../../core/rpc/correlation.ts";
 import { buildRpcSessionState } from "../../core/rpc/session-state.ts";
 import { projectMessageImages, projectSessionTranscript } from "../../core/rpc/transcript.ts";
 import {
@@ -126,6 +127,9 @@ export function createRpcSuccessResponse<T extends RpcCommand["type"]>(
 	command: T,
 	data?: object | null,
 ): RpcResponse {
+	if (command === "invoke_ui_action" && !isUsableRpcConversationIdentifier(id)) {
+		throw new Error("invoke_ui_action success responses require a usable correlation id");
+	}
 	if (data === undefined) {
 		return { id, type: "response", command, success: true } as RpcResponse;
 	}
@@ -148,26 +152,18 @@ export function createRpcErrorResponse(
 	error?: unknown,
 ): RpcResponse {
 	const errorCode = getStableRpcErrorCode(error);
+	const target = getRpcErrorResponseTarget({ id, type: command });
 	return {
-		id,
+		...(target.id === undefined ? {} : { id: target.id }),
 		type: "response",
-		command,
+		command: target.command,
 		success: false,
 		error: message,
 		...(errorCode === undefined ? {} : { errorCode }),
 	};
 }
 
-export function getRpcErrorResponseTarget(value: unknown): { id: string | undefined; command: string } {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
-		return { id: undefined, command: "unknown" };
-	}
-	const command = value as Record<string, unknown>;
-	return {
-		id: typeof command.id === "string" ? command.id : undefined,
-		command: typeof command.type === "string" ? command.type : "unknown",
-	};
-}
+export { getRpcErrorResponseTarget };
 
 export async function handleRpcCommand(
 	command: RpcCommand,

@@ -34,7 +34,9 @@ export const RpcMcpAuthFlowSchema = stringEnum(["browser", "device"]);
  * Builds one strict command schema. Shared fields are flattened in (never
  * `Type.Intersect` — intersections composing `additionalProperties: false`
  * are unsatisfiable in JSON Schema): the optional correlation `id` and the
- * optional `conversationAuthority` carried by every command.
+ * optional `conversationAuthority` carried by every command. Commands that
+ * require correlation, such as invoke_ui_action, declare their schema
+ * directly below.
  *
  * The return type is declared explicitly — TypeScript approximates object
  * literals that spread a generic to the bare `TProperties` index signature,
@@ -131,11 +133,17 @@ export const RPC_COMMAND_SCHEMAS = {
 		argument: Type.String(),
 		prefix: Type.Optional(Type.String()),
 	}),
-	invoke_ui_action: commandSchema("invoke_ui_action", {
-		action: Type.String(),
-		args: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-		streamingBehavior: Type.Optional(RpcStreamingBehaviorSchema),
-	}),
+	invoke_ui_action: Type.Object(
+		{
+			id: RpcConversationIdentifierSchema,
+			type: Type.Literal("invoke_ui_action"),
+			conversationAuthority: Type.Optional(RpcConversationAuthoritySchema),
+			action: Type.String(),
+			args: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+			streamingBehavior: Type.Optional(RpcStreamingBehaviorSchema),
+		},
+		{ additionalProperties: false },
+	),
 
 	// Detached review workflows
 	cancel_workflow: commandSchema("cancel_workflow", { workflowId: RpcConversationIdentifierSchema }),
