@@ -337,7 +337,8 @@
 				"cost",
 				"contextWindow",
 				"maxTokens",
-				"availableThinkingLevels"
+				"availableThinkingLevels",
+				"supportsFastMode"
 			],
 			"properties": {
 				"id": {
@@ -490,6 +491,9 @@
 					"items": {
 						"$ref": "#/$defs/RpcThinkingLevel"
 					}
+				},
+				"supportsFastMode": {
+					"type": "boolean"
 				}
 			},
 			"additionalProperties": false

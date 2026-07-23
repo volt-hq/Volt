@@ -119,11 +119,12 @@ export const RpcSessionStateSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-/** A model as reported to clients: the raw model plus the thinking levels it supports. */
+/** A model as reported to clients with host-owned selectable capabilities. */
 export const RpcCatalogModelSchema = Type.Object(
 	{
 		...rpcModelProperties,
 		availableThinkingLevels: Type.Array(RpcThinkingLevelSchema),
+		supportsFastMode: Type.Boolean(),
 	},
 	{ additionalProperties: false },
 );
