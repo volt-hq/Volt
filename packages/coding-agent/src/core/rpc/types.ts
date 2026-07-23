@@ -154,8 +154,9 @@ export type RpcConversationAuthority = Static<typeof RpcConversationAuthoritySch
 
 /**
  * The client→host command union, derived member-by-member from the TypeBox
- * contract schemas (schema/commands.ts). Every member carries an optional
- * correlation `id` (required for report_stream_discontinuity) and an optional
+ * contract schemas (schema/commands.ts). Every member carries a correlation
+ * `id` that is optional except where the command contract requires it
+ * (invoke_ui_action and report_stream_discontinuity), plus an optional
  * `conversationAuthority`.
  */
 export type RpcCommandType = keyof typeof RPC_COMMAND_SCHEMAS;

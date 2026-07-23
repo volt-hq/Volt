@@ -1844,6 +1844,7 @@
 		"RpcCommand.invoke_ui_action": {
 			"type": "object",
 			"required": [
+				"id",
 				"type",
 				"action"
 			],
@@ -6896,6 +6897,7 @@
 		"RpcResponse.invoke_ui_action": {
 			"type": "object",
 			"required": [
+				"id",
 				"type",
 				"command",
 				"success",

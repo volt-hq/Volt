@@ -111,8 +111,13 @@ const invalidPayloadCases: Array<{ name: string; payload: unknown; error: string
 		error: 'Invalid RPC command payload: "argument" is required',
 	},
 	{
+		name: "rejects UI action invocations without a correlation id",
+		payload: { type: "invoke_ui_action", action: "review" },
+		error: 'Invalid RPC command payload: "id" is required',
+	},
+	{
 		name: "rejects invalid UI action invocation args",
-		payload: { type: "invoke_ui_action", action: "review", args: [] },
+		payload: { id: "invoke-review", type: "invoke_ui_action", action: "review", args: [] },
 		error: 'Invalid RPC command payload: "args" must be an object',
 	},
 	{
@@ -295,6 +300,14 @@ describe("RPC command payload validation", () => {
 		expect(validateRpcCommandPayload({ type: "get_review_result", workflowId: "review:one" })).toBeUndefined();
 		expect(validateRpcCommandPayload({ type: "open_review_session", workflowId: "review:one" })).toBeUndefined();
 		expect(validateRpcCommandPayload({ type: "list_review_workflows" })).toBeUndefined();
+		expect(
+			validateRpcCommandPayload({
+				id: "invoke-review",
+				type: "invoke_ui_action",
+				action: "review.uncommitted",
+				args: {},
+			}),
+		).toBeUndefined();
 		expect(
 			validateRpcCommandPayload({
 				id: "recovery-1",

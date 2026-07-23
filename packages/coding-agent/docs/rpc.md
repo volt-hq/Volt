@@ -23,7 +23,7 @@ Common options:
 - **Responses**: JSON objects with `type: "response"` indicating command success/failure
 - **Events**: Agent events streamed to stdout as JSON lines
 
-All commands support an optional `id` field for request/response correlation. If provided, the corresponding response will include the same `id`.
+Commands support an `id` field for request/response correlation. It is required for `invoke_ui_action` (and for `report_stream_discontinuity`) and optional for other commands. Every success or command-level failure response produced for a valid `invoke_ui_action` carries the same `id`; a transport failure can prevent delivery. Generic errors for malformed input may omit `id` when the host cannot establish correlation.
 
 ### Framing
 
@@ -647,14 +647,15 @@ Unknown or stale action ids fail with the normal RPC error shape. Unsupported ar
 Invoke a native UI action by descriptor id.
 
 ```json
-{"type": "invoke_ui_action", "action": "review.uncommitted", "args": {}, "streamingBehavior": "followUp"}
+{"id": "action-42", "type": "invoke_ui_action", "action": "review.uncommitted", "args": {}, "streamingBehavior": "followUp"}
 ```
 
-`args` is an optional object matching the descriptor's argument metadata. V1 hosts validate the supported descriptor subset: `string` and multiline `string` values are JSON strings, `boolean` values are JSON booleans, `enum` values are strings present in `options`, and `integer` values are JSON numbers with integer values. Unknown argument names, unknown argument types, missing required values, and mismatched value types fail before invocation. `streamingBehavior` is optional and may be `"steer"` or `"followUp"` when the descriptor allows queued invocation while the agent is streaming.
+`id` is a required string correlation id. Every success or command-level failure response produced for the invocation echoes it exactly; transport failure can prevent delivery. `args` is an optional object matching the descriptor's argument metadata. V1 hosts validate the supported descriptor subset: `string` and multiline `string` values are JSON strings, `boolean` values are JSON booleans, `enum` values are strings present in `options`, and `integer` values are JSON numbers with integer values. Unknown argument names, unknown argument types, missing required values, and mismatched value types fail before invocation. `streamingBehavior` is optional and may be `"steer"` or `"followUp"` when the descriptor allows queued invocation while the agent is streaming.
 
 Unknown, stale, disabled, unauthorized, or unavailable action ids fail with the normal RPC error shape:
 ```json
 {
+  "id": "action-42",
   "type": "response",
   "command": "invoke_ui_action",
   "success": false,
@@ -666,6 +667,7 @@ Successful response data reports the command disposition:
 
 ```json
 {
+  "id": "action-42",
   "type": "response",
   "command": "invoke_ui_action",
   "success": true,

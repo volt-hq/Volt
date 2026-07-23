@@ -87,6 +87,33 @@ describe("RPC contract schema integrity", () => {
 			expect(check(schema, 7)).toBe(false);
 		}
 	});
+
+	test("requires correlation for UI action invocations and their successful responses", () => {
+		const command = {
+			id: "invoke-exact",
+			type: "invoke_ui_action",
+			action: "session.new",
+		};
+		expect(check(RPC_COMMAND_SCHEMAS.invoke_ui_action, command)).toBe(true);
+		expect(check(RPC_COMMAND_SCHEMAS.invoke_ui_action, { ...command, id: undefined })).toBe(false);
+
+		const success = createRpcSuccessResponse("invoke-exact", "invoke_ui_action", {
+			action: "session.new",
+			status: "completed",
+		});
+		expect(check(RPC_RESPONSE_SCHEMAS.invoke_ui_action, success)).toBe(true);
+		expect(check(RPC_RESPONSE_SCHEMAS.invoke_ui_action, { ...success, id: undefined })).toBe(false);
+
+		// Generic malformed-input errors can predate a usable correlation id.
+		expect(
+			check(RpcErrorResponseSchema, {
+				type: "response",
+				command: "invoke_ui_action",
+				success: false,
+				error: 'Invalid RPC command payload: "id" is required',
+			}),
+		).toBe(true);
+	});
 });
 
 describe("RPC contract emission conformance", () => {

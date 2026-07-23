@@ -254,6 +254,54 @@ afterEach(() => {
 });
 
 describe("RPC mode detached review actions", () => {
+	test("preserves a usable invocation id on validation failure and omits an unusable id", async () => {
+		const runtimeHost = makeRuntimeHost();
+		const { transport, writes, getLineHandler, getCloseHandler } = createCollectingTransport();
+		const { modePromise } = await startMode(runtimeHost, transport);
+		const lineHandler = getLineHandler();
+
+		lineHandler(
+			JSON.stringify({
+				id: "invoke-malformed-args",
+				type: "invoke_ui_action",
+				action: "review.uncommitted",
+				args: [],
+			}),
+		);
+		lineHandler(
+			JSON.stringify({
+				type: "invoke_ui_action",
+				action: "review.uncommitted",
+			}),
+		);
+
+		await vi.waitFor(() => {
+			expect(writes).toContainEqual({
+				id: "invoke-malformed-args",
+				type: "response",
+				command: "invoke_ui_action",
+				success: false,
+				error: 'Invalid RPC command payload: "args" must be an object',
+			});
+			const idlessFailure = writes.find(
+				(value) =>
+					(value as Record<string, unknown>).command === "invoke_ui_action" &&
+					(value as Record<string, unknown>).error === 'Invalid RPC command payload: "id" is required',
+			);
+			expect(idlessFailure).toBeDefined();
+			expect(JSON.parse(JSON.stringify(idlessFailure))).toEqual({
+				type: "response",
+				command: "invoke_ui_action",
+				success: false,
+				error: 'Invalid RPC command payload: "id" is required',
+			});
+		});
+		expect(reviewMocks.prepareReviewWorkflow).not.toHaveBeenCalled();
+
+		getCloseHandler()?.();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
 	test("returns an accepted response before workflow events and serves other commands mid-review", async () => {
 		let releaseReview: () => void = () => {};
 		const reviewGate = new Promise<void>((resolve) => {

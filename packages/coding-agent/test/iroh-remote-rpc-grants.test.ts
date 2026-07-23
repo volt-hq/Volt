@@ -137,6 +137,29 @@ describe("Iroh remote RPC grants", () => {
 		expect(
 			getIrohRemoteRpcFilterResult(
 				JSON.stringify({
+					id: "invoke-capability-denied",
+					type: "invoke_ui_action",
+					action: "session.new",
+				}),
+				observeOnly,
+			),
+		).toEqual({
+			allowed: false,
+			response: {
+				id: "invoke-capability-denied",
+				type: "response",
+				command: "invoke_ui_action",
+				success: false,
+				error: {
+					code: "rpc_capability_denied",
+					message: "RPC capability required: conversation.control.v1",
+					requiredCapability: "conversation.control.v1",
+				},
+			},
+		});
+		expect(
+			getIrohRemoteRpcFilterResult(
+				JSON.stringify({
 					id: "caps",
 					type: "set_client_capabilities",
 					features: ["host_action_requests.v1"],

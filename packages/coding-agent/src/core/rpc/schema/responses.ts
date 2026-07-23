@@ -298,7 +298,16 @@ export const RPC_RESPONSE_SCHEMAS = {
 	get_ui_capabilities: dataResponse("get_ui_capabilities", UiActionCapabilitiesSchema),
 	get_ui_actions: dataResponse("get_ui_actions", UiActionListResponseSchema),
 	get_ui_action_completions: dataResponse("get_ui_action_completions", UiActionCompletionListResponseSchema),
-	invoke_ui_action: dataResponse("invoke_ui_action", UiActionInvocationResponseSchema),
+	invoke_ui_action: Type.Object(
+		{
+			id: Type.String(),
+			type: Type.Literal("response"),
+			command: Type.Literal("invoke_ui_action"),
+			success: Type.Literal(true),
+			data: UiActionInvocationResponseSchema,
+		},
+		{ additionalProperties: false },
+	),
 
 	// Detached review workflows
 	cancel_workflow: voidResponse("cancel_workflow"),
@@ -479,7 +488,11 @@ export const RPC_RESPONSE_SCHEMAS = {
 	),
 } as const satisfies { [K in RpcCommandType]: TObject };
 
-/** Error response (any command can fail). `command` echoes the failing command or "unknown"/"parse". */
+/**
+ * Error response (any command can fail). `command` echoes the failing command
+ * or "unknown"/"parse". The id remains optional because malformed input can
+ * fail before the host establishes a valid correlation id.
+ */
 export const RpcErrorResponseSchema = Type.Object(
 	{
 		id: Type.Optional(Type.String()),

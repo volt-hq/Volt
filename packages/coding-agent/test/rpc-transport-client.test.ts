@@ -536,6 +536,41 @@ describe("RpcTransportClient", () => {
 });
 
 describe("Iroh remote RPC filter", () => {
+	test("preserves the invocation id when the installed RPC grant is stale", async () => {
+		const pair = createLoopbackRpcTransportPair();
+		const responses: Array<Record<string, unknown>> = [];
+		const onRpcGrantStale = vi.fn();
+		pair.client.onLine((line) => {
+			responses.push(JSON.parse(line) as Record<string, unknown>);
+		});
+		const transport = createIrohRemoteFilteredRpcTransport({
+			transport: pair.server,
+			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
+			isRpcGrantCurrent: () => false,
+			onRpcGrantStale,
+		});
+		transport.onLine(() => {
+			throw new Error("stale invocation must not reach RPC mode");
+		});
+
+		pair.client.write({
+			id: "invoke-stale-grant",
+			type: "invoke_ui_action",
+			action: SESSION_NEW_ACTION_ID,
+		});
+
+		await vi.waitFor(() => {
+			expect(responses).toContainEqual({
+				id: "invoke-stale-grant",
+				type: "response",
+				command: "invoke_ui_action",
+				success: false,
+				error: "RPC grant is stale; reconnect",
+			});
+			expect(onRpcGrantStale).toHaveBeenCalledOnce();
+		});
+	});
+
 	test("allows native UI action discovery and dynamic invocation while keeping local commands blocked", () => {
 		for (const type of ["get_ui_capabilities", "get_ui_actions"]) {
 			const command = { id: `${type}-1`, type };
