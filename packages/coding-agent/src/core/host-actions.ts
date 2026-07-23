@@ -72,7 +72,7 @@ export interface HostActionDefinition {
 	state?: UiActionStateDescriptor | ((context: HostActionDescriptorContext) => UiActionStateDescriptor | undefined);
 	slashAliases?: ReadonlyArray<UiActionSlashAlias>;
 	slash?: UiActionSlashAlias;
-	availability?: (context: HostActionDescriptorContext) => HostActionAvailability;
+	availability?: (context: HostActionDescriptorContext, args?: unknown) => HostActionAvailability;
 	handler: (
 		context: HostActionInvocationContext,
 		args: unknown,
@@ -101,6 +101,7 @@ export const SESSION_NEW_SLASH_ALIAS = "clear";
 export const SESSION_RENAME_ACTION_ID = "session.rename";
 export const SESSION_RENAME_SLASH_ALIAS = "name";
 export const THINKING_FAST_MODE_ACTION_ID = "thinking.fast_mode";
+export const THINKING_FAST_MODE_SLASH_ALIAS = "fast";
 
 export interface HostActionReviewOptions {
 	remote: boolean;
@@ -211,14 +212,14 @@ export class HostActionRegistry {
 		if (!action) {
 			throw new Error(`UI action not available: ${actionId}`);
 		}
-		const descriptor = createDescriptor(action, context);
-		if (options.requireRemoteSafe && !descriptor.remoteSafe) {
+		if (options.requireRemoteSafe && !action.remoteSafe) {
 			throw new Error(`UI action not available over remote host: ${actionId}`);
 		}
-		if (!descriptor.enabled) {
-			throw new Error(descriptor.disabledReason ?? `UI action is disabled: ${actionId}`);
+		const availability = action.availability?.(context, args) ?? { enabled: true };
+		if (!availability.enabled) {
+			throw new Error(availability.disabledReason ?? `UI action is disabled: ${actionId}`);
 		}
-		const validatedArgs = validateUiActionArgs(args, descriptor.args ?? []);
+		const validatedArgs = validateUiActionArgs(args, action.args ?? []);
 		return action.handler(context, validatedArgs, options);
 	}
 
@@ -393,6 +394,12 @@ export function registerBuiltinHostActions(registry: HostActionRegistry): HostAc
 		requiresConfirmation: false,
 		streamingBehavior: "disabled",
 		remoteSafe: true,
+		slashAliases: [
+			{
+				name: THINKING_FAST_MODE_SLASH_ALIAS,
+				example: `/${THINKING_FAST_MODE_SLASH_ALIAS} [on|off]`,
+			},
+		],
 		state: createThinkingFastModeState,
 		availability: thinkingFastModeAvailability,
 		handler: invokeThinkingFastModeAction,
@@ -605,9 +612,13 @@ export function runThinkingFastModeHostAction(
 		state: createThinkingFastModeState(context),
 		stateChanged: changed,
 		actionsChanged: changed,
-		message: changed
-			? `Fast mode ${enabled ? "enabled" : "disabled"}`
-			: `Fast mode already ${enabled ? "enabled" : "disabled"}`,
+		message: enabled
+			? changed
+				? "Fast mode enabled. Priority processing may cost more."
+				: "Fast mode already enabled. Priority processing may cost more."
+			: changed
+				? "Fast mode disabled"
+				: "Fast mode already disabled",
 	};
 }
 
@@ -677,7 +688,7 @@ function reviewAvailability(context: HostActionDescriptorContext): HostActionAva
 	return { enabled: true };
 }
 
-function thinkingFastModeAvailability(context: HostActionDescriptorContext): HostActionAvailability {
+function thinkingFastModeAvailability(context: HostActionDescriptorContext, args?: unknown): HostActionAvailability {
 	if (context.session.isStreaming) {
 		return { enabled: false, disabledReason: "Fast mode is not available while the agent is streaming" };
 	}
@@ -686,6 +697,10 @@ function thinkingFastModeAvailability(context: HostActionDescriptorContext): Hos
 	}
 	if (context.session.isCompacting) {
 		return { enabled: false, disabledReason: "Fast mode is not available while compaction is running" };
+	}
+	const requestedEnabled = getOptionalBooleanArg(args, "enabled");
+	if (isThinkingFastModeEnabled(context.session) || requestedEnabled === false) {
+		return { enabled: true };
 	}
 	if (!context.session.model || !supportsFastInference(context.session.model)) {
 		return {

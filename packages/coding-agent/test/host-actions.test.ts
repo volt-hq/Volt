@@ -15,6 +15,7 @@ import {
 	SESSION_RENAME_ACTION_ID,
 	SESSION_RENAME_SLASH_ALIAS,
 	THINKING_FAST_MODE_ACTION_ID,
+	THINKING_FAST_MODE_SLASH_ALIAS,
 } from "../src/core/host-actions.ts";
 
 describe("HostActionRegistry", () => {
@@ -284,6 +285,7 @@ describe("HostActionRegistry", () => {
 				enabled: true,
 				remoteSafe: true,
 				streamingBehavior: "disabled",
+				slash: { name: THINKING_FAST_MODE_SLASH_ALIAS, example: "/fast [on|off]" },
 				args: [expect.objectContaining({ name: "enabled", type: "boolean", required: true })],
 				state: { type: "boolean", value: false, label: "Fast mode disabled" },
 			}),
@@ -297,7 +299,7 @@ describe("HostActionRegistry", () => {
 			state: { type: "boolean", value: true, label: "Fast mode enabled" },
 			stateChanged: true,
 			actionsChanged: true,
-			message: "Fast mode enabled",
+			message: "Fast mode enabled. Priority processing may cost more.",
 		});
 		expect(session.thinkingLevel).toBe("high");
 

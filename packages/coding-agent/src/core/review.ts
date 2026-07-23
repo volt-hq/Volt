@@ -1059,6 +1059,7 @@ export interface RunReviewOptions {
 	agentDir: string;
 	model: Model<any>;
 	thinkingLevel?: ThinkingLevel;
+	fastModeEnabled?: boolean;
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
 	settingsManager: SettingsManager;
@@ -1103,6 +1104,7 @@ export interface ReviewWorkflowSession {
 	isCompacting: boolean;
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
+	fastModeEnabled?: boolean;
 	modelRegistry: ModelRegistry;
 	resourceLoader: ResourceLoader;
 	sendCustomMessage<T = unknown>(
@@ -1318,6 +1320,7 @@ export interface ExecuteReviewWorkflowOptions {
 	modelRegistry: ModelRegistry;
 	settingsManager: SettingsManager;
 	thinkingLevel?: ThinkingLevel;
+	fastModeEnabled?: boolean;
 	/** Parent session resource loader used to inherit configured extension tools. */
 	parentResourceLoader?: ResourceLoader;
 	/** Optional review tool allowlist. Omit to use normal review defaults. */
@@ -1368,6 +1371,7 @@ export async function executeReviewWorkflow(
 			agentDir: options.agentDir,
 			model: prepared.model,
 			thinkingLevel: options.thinkingLevel,
+			fastModeEnabled: options.fastModeEnabled,
 			authStorage: options.authStorage,
 			modelRegistry: options.modelRegistry,
 			settingsManager: options.settingsManager,
@@ -1448,6 +1452,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 	};
 
 	try {
+		const fastModeEnabled = options.session.fastModeEnabled === true;
 		let result: ExecuteReviewWorkflowResult;
 		try {
 			result = await executeReviewWorkflow({
@@ -1458,6 +1463,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 				modelRegistry: options.session.modelRegistry,
 				settingsManager: options.settingsManager,
 				thinkingLevel: options.session.thinkingLevel,
+				fastModeEnabled,
 				parentResourceLoader: options.session.resourceLoader,
 				tools: options.tools,
 				signal: hooks?.signal,
@@ -1496,6 +1502,11 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 
 		const reviewMessage = createReviewSeedMessage(resolution, result);
 		const newSessionResult = await options.newSession({
+			setup: async (sessionManager) => {
+				if (fastModeEnabled) {
+					sessionManager.appendFastModeChange(true);
+				}
+			},
 			withSession: async (ctx: ReplacedSessionContext) => {
 				await ctx.sendMessage(reviewMessage);
 			},
@@ -1832,6 +1843,10 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 async function runReviewSession(options: RunReviewOptions): Promise<ReviewRunResult> {
 	const inheritedTools = collectParentExtensionTools(options.parentResourceLoader);
 	const resourceLoader = createReviewResourceLoader(options.cwd, options.agentDir);
+	const sessionManager = SessionManager.inMemory(options.cwd);
+	if (options.fastModeEnabled) {
+		sessionManager.appendFastModeChange(true);
+	}
 	const { session } = await createAgentSession({
 		cwd: options.cwd,
 		agentDir: options.agentDir,
@@ -1840,7 +1855,7 @@ async function runReviewSession(options: RunReviewOptions): Promise<ReviewRunRes
 		settingsManager: options.settingsManager,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
-		sessionManager: SessionManager.inMemory(options.cwd),
+		sessionManager,
 		resourceLoader,
 		customTools: inheritedTools.length > 0 ? inheritedTools : undefined,
 		tools: options.tools,

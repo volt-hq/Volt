@@ -769,7 +769,7 @@ export async function main(args: string[], options?: MainOptions) {
 		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
 		const scopedModels =
 			modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
-		const hasExistingSession = sessionManager.getBranch().length > 0;
+		const hasExistingSession = sessionStartEvent?.reason !== "new" && sessionManager.getBranch().length > 0;
 		const { options: sessionOptions, diagnostics: sessionOptionDiagnostics } = buildSessionOptions(
 			parsed,
 			scopedModels,

@@ -149,9 +149,30 @@ export class FooterComponent implements Component {
 				? theme.fg("dim", `(${state.model.provider}) `)
 				: "";
 		const thinking = state.model?.reasoning ? theme.fg("dim", ` · ${state.thinkingLevel || "off"}`) : "";
-		let modelSide = `${provider}${theme.fg("text", modelName)}${thinking}`;
+		const model = theme.fg("text", modelName);
+		const fastLabel = theme.bold(theme.fg("warning", "fast"));
+		const fast = this.session.fastModeEnabled ? `${theme.fg("dim", " · ")}${fastLabel}` : "";
+		let modelSide = `${provider}${model}${fast}${thinking}`;
 		if (visibleWidth(modelSide) >= width) {
-			modelSide = truncateToWidth(modelSide, width, "");
+			const modelWithoutProvider = `${model}${fast}${thinking}`;
+			if (visibleWidth(modelWithoutProvider) < width) {
+				modelSide = modelWithoutProvider;
+			} else if (this.session.fastModeEnabled) {
+				const fastAndThinking = `${fastLabel}${thinking}`;
+				if (visibleWidth(fastAndThinking) > width) {
+					modelSide = truncateToWidth(fastLabel, width, "");
+				} else {
+					const suffix = `${fast}${thinking}`;
+					if (visibleWidth(suffix) >= width) {
+						modelSide = fastAndThinking;
+					} else {
+						const modelWidth = width - visibleWidth(suffix);
+						modelSide = `${truncateToWidth(model, modelWidth, "")}${suffix}`;
+					}
+				}
+			} else {
+				modelSide = truncateToWidth(modelWithoutProvider, width, "");
+			}
 		}
 
 		const modelWidth = visibleWidth(modelSide);

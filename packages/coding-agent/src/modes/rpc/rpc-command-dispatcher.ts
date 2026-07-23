@@ -393,7 +393,7 @@ export async function handleRpcCommand(
 			if (!record) {
 				return createRpcErrorResponse(id, "get_review_result", `Unknown review workflow: ${command.workflowId}`);
 			}
-			const { parsed, ...descriptor } = record;
+			const { parsed, fastModeEnabled: _fastModeEnabled, ...descriptor } = record;
 			return createRpcSuccessResponse(id, "get_review_result", {
 				...descriptor,
 				...(parsed === undefined
@@ -427,7 +427,13 @@ export async function handleRpcCommand(
 				raw: record.raw ?? "",
 				parsed: record.parsed,
 			});
+			const fastModeEnabled = record.fastModeEnabled === true;
 			const result = await runSessionNewHostAction(context.createHostActionContext(), {
+				setup: async (sessionManager) => {
+					if (fastModeEnabled) {
+						sessionManager.appendFastModeChange(true);
+					}
+				},
 				withSession: async (sessionContext) => {
 					await sessionContext.sendMessage(seedMessage);
 				},

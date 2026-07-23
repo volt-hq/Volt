@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import { fauxAssistantMessage, fauxToolCall, type SimpleStreamOptions } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionFactory } from "../../src/core/extensions/index.ts";
@@ -22,9 +22,11 @@ import {
 	type ResolvedReview,
 	resolveReviewTarget,
 	runReview,
+	runReviewWorkflow,
 	stripReviewEnvelopeForDisplay,
 	truncateDiff,
 } from "../../src/core/review.ts";
+import { SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 describe("parseReviewCommandArgs", () => {
@@ -843,6 +845,56 @@ describe("runReview", () => {
 		diff: "diff --git a/file.txt b/file.txt\n+two",
 		truncated: false,
 	};
+
+	it("carries Fast mode through the isolated review and fresh findings session", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const runGit = (...args: string[]): void => {
+			const command = spawnSync("git", args, { cwd: harness.tempDir, encoding: "utf-8" });
+			if (command.status !== 0) {
+				throw new Error(`git ${args.join(" ")} failed: ${command.stderr}`);
+			}
+		};
+		runGit("init", "--initial-branch=main");
+		runGit("config", "user.email", "test@example.com");
+		runGit("config", "user.name", "Test");
+		writeFileSync(join(harness.tempDir, "review.txt"), "before\n");
+		runGit("add", "review.txt");
+		runGit("commit", "-m", "initial");
+		writeFileSync(join(harness.tempDir, "review.txt"), "after\n");
+
+		const observedInferenceSpeeds: Array<SimpleStreamOptions["inferenceSpeed"]> = [];
+		harness.setResponses([
+			(_context, options) => {
+				const streamOptions = options as (typeof options & Pick<SimpleStreamOptions, "inferenceSpeed">) | undefined;
+				observedInferenceSpeeds.push(streamOptions?.inferenceSpeed);
+				harness.session.setFastModeEnabled(false);
+				return fauxAssistantMessage(JSON.stringify({ findings: [] }));
+			},
+		]);
+		harness.session.setFastModeEnabled(true);
+		let replacementFastModeEnabled = false;
+
+		const result = await runReviewWorkflow({
+			target: { kind: "uncommitted" },
+			cwd: harness.tempDir,
+			agentDir: join(harness.tempDir, "agent"),
+			session: harness.session,
+			newSession: async (options) => {
+				const sessionManager = SessionManager.inMemory(harness.tempDir);
+				await options?.setup?.(sessionManager);
+				replacementFastModeEnabled = sessionManager.buildSessionContext().fastMode.enabled;
+				return { cancelled: false, seeded: true };
+			},
+			authStorage: harness.authStorage,
+			settingsManager: harness.settingsManager,
+		});
+
+		expect(result.status).toBe("completed");
+		expect(observedInferenceSpeeds).toEqual(["fast"]);
+		expect(harness.session.fastModeEnabled).toBe(false);
+		expect(replacementFastModeEnabled).toBe(true);
+	});
 
 	it("runs an isolated review session and parses findings", async () => {
 		const harness = await createHarness();
