@@ -4,6 +4,7 @@ import {
 	buildSessionContext,
 	type CompactionEntry,
 	type ModelChangeEntry,
+	type PlanningStateChangeEntry,
 	type SessionEntry,
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
@@ -60,6 +61,30 @@ function modelChange(id: string, parentId: string | null, provider: string, mode
 	return { type: "model_change", id, parentId, timestamp: "2025-01-01T00:00:00Z", provider, modelId };
 }
 
+function planning(
+	id: string,
+	parentId: string | null,
+	revision: number,
+	phase: "draft" | "ready",
+): PlanningStateChangeEntry {
+	return {
+		type: "planning_state_change",
+		id,
+		parentId,
+		timestamp: "2025-01-01T00:00:00Z",
+		planning: {
+			mode: "plan",
+			plan: {
+				id: "plan-1",
+				revision,
+				phase,
+				...(phase === "ready" ? { title: "Plan", summary: "Ready plan" } : {}),
+				steps: [{ id: "step-1", text: "Do the work", status: "pending" }],
+			},
+		},
+	};
+}
+
 describe("buildSessionContext", () => {
 	describe("trivial cases", () => {
 		it("empty entries returns empty context", () => {
@@ -99,6 +124,18 @@ describe("buildSessionContext", () => {
 			expect(ctx.messages).toHaveLength(2);
 		});
 
+		it("restores the newest complete planning snapshot", () => {
+			const entries: SessionEntry[] = [
+				planning("1", null, 1, "draft"),
+				msg("2", "1", "user", "feedback"),
+				planning("3", "2", 2, "ready"),
+			];
+			expect(buildSessionContext(entries).planning).toMatchObject({
+				mode: "plan",
+				plan: { id: "plan-1", revision: 2, phase: "ready" },
+			});
+		});
+
 		it("tracks model from assistant message", () => {
 			const entries: SessionEntry[] = [msg("1", null, "user", "hello"), msg("2", "1", "assistant", "hi")];
 			const ctx = buildSessionContext(entries);
@@ -118,6 +155,18 @@ describe("buildSessionContext", () => {
 	});
 
 	describe("with compaction", () => {
+		it("restores planning independently of the compaction message boundary", () => {
+			const entries: SessionEntry[] = [
+				planning("1", null, 1, "draft"),
+				msg("2", "1", "user", "first"),
+				msg("3", "2", "assistant", "response"),
+				compaction("4", "3", "Summary", "2"),
+				planning("5", "4", 2, "ready"),
+			];
+			const context = buildSessionContext(entries);
+			expect(context.planning.plan).toMatchObject({ revision: 2, phase: "ready" });
+			expect(context.messages[0]).toMatchObject({ role: "compactionSummary" });
+		});
 		it("includes summary before kept messages", () => {
 			const entries: SessionEntry[] = [
 				msg("1", null, "user", "first"),

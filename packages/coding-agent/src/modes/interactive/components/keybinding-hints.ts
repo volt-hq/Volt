@@ -49,9 +49,12 @@ export function editorTopBorderLabelForState(state: {
 	bashMode: boolean;
 	streaming: boolean;
 	hasText: boolean;
+	agentMode: "build" | "plan";
 }): string {
 	if (state.bashMode) return editorTopBorderLabel("shell");
-	return editorTopBorderLabel(state.streaming && state.hasText ? "steer" : "ask");
+	if (state.agentMode === "plan") return "PLAN · AGENT READ-ONLY";
+	if (state.streaming && state.hasText) return editorTopBorderLabel("steer");
+	return "ASK VOLT · BUILD";
 }
 
 export function keyHint(keybinding: Keybinding, description: string): string {

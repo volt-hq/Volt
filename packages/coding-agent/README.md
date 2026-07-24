@@ -6,7 +6,7 @@ Volt is maintained and distributed by [Jordan Hans](https://github.com/hansjm10)
 It is derived from [Mario Zechner's Pi project](https://github.com/badlogic/pi-mono)
 under the MIT License.
 
-Volt ships with powerful defaults but skips features like sub agents and plan mode. Instead, you can ask volt to build what you want or install a third party volt package that matches your workflow.
+Volt ships with native subagents and a branch-local Plan mode, while extensions remain available for project-specific workflows.
 
 Volt runs in four modes: interactive, print or JSON, RPC for process integration, and an SDK for embedding in your own apps.
 
@@ -148,6 +148,9 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/profile` | Show, switch, or create the active settings profile |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
+| `/plan` | Enter read-only Plan mode |
+| `/build` | Return to Build mode without activating a ready plan |
+| `/plan-details` | Open the current structured checklist |
 | `/resume` | Pick from previous sessions |
 | `/clear` | Start a new session |
 | `/name <name>` | Set session display name |
@@ -183,7 +186,8 @@ See `/hotkeys` for the full list. Customize via `~/.volt/agent/keybindings.json`
 | Escape twice | Open `/tree` |
 | Ctrl+L | Open model selector |
 | Ctrl+P / Shift+Ctrl+P | Cycle scoped models forward/backward |
-| Shift+Tab | Cycle thinking level |
+| Shift+Tab | Toggle Build / Plan mode |
+| Ctrl+Shift+T | Cycle thinking level |
 | Ctrl+O | Collapse/expand tool output |
 | Ctrl+T | Collapse/expand thinking blocks |
 | Alt+A | Open the subagent inspector |
@@ -200,6 +204,20 @@ Submit messages while the agent is working:
 On Windows Terminal, `Alt+Enter` is fullscreen by default. Remap it in [docs/terminal-setup.md](docs/terminal-setup.md) so volt can receive the follow-up shortcut.
 
 Configure delivery in [settings](docs/settings.md): `steeringMode` and `followUpMode` can be `"one-at-a-time"` (default, waits for response) or `"all"` (delivers all queued at once). `transport` selects provider transport preference (`"sse"`, `"websocket"`, or `"auto"`) for providers that support multiple transports.
+
+---
+
+## Plan Mode
+
+Plan mode lets the agent inspect the workspace with read-only tools and maintain a structured checklist before implementation. Start it with `volt --plan`, `/plan`, or Shift+Tab. Drafts and ready plans are stored on the active session branch and survive compaction, reconnects, and branch switching.
+
+When the agent submits a plan, Volt offers exactly:
+
+1. **Execute Plan** — return to Build mode and execute in the current conversation.
+2. **Execute Plan & Clear Context** — create and select a linked execution session containing the approved plan but none of the prior conversation.
+3. **Change Plan** — return the ready plan to draft and focus the normal editor for feedback.
+
+During execution, the agent keeps checklist progress current with `update_plan`. Switching to Build by itself never approves a ready plan, and explicit `!` shell commands remain available because Plan mode constrains agent tools rather than the host shell.
 
 ---
 
@@ -443,6 +461,7 @@ const { session } = await createAgentSession({
   sessionManager: SessionManager.inMemory(),
   authStorage,
   modelRegistry,
+  agentMode: "plan",
 });
 
 await session.prompt("What files are in the current directory?");
@@ -517,6 +536,7 @@ volt config                    # Enable/disable package resources
 | `-p`, `--print` | Print response and exit |
 | `--mode json` | Output all events as JSON lines (see [docs/json.md](docs/json.md)) |
 | `--mode rpc` | RPC mode for process integration (see [docs/rpc.md](docs/rpc.md)) |
+| `--plan` | Start the initial session in read-only Plan mode |
 | `--export <in> [out]` | Export session to HTML |
 
 ### Remote Access over Iroh (Preview)

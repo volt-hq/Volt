@@ -95,6 +95,7 @@ function createSnapshotBuilder(manager: SessionManager, sessionId: string): Conv
 				thinkingLevel: "off",
 				availableThinkingLevels: ["off"],
 				fastModeEnabled: false,
+				planning: { mode: "build", plan: null },
 				isStreaming: activeAssistant !== null,
 				isBusy: activeAssistant !== null,
 				isCompacting: false,

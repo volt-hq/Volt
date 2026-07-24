@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { resolvePath } from "../utils/paths.ts";
@@ -11,6 +12,13 @@ import type {
 	SessionStartEvent,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import {
+	createPlanExecutionPrompt,
+	type PlanExecution,
+	type PlanExecutionStrategy,
+	type PlanningState,
+	StalePlanRevisionError,
+} from "./planning.ts";
 import { ReviewWorkflowManager } from "./review-workflows.ts";
 import { ConversationProjectionFeed, type ConversationProjectionSource } from "./rpc/conversation-projection-feed.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
@@ -820,6 +828,10 @@ export class AgentSessionRuntime {
 			// Defense in depth: host admission WAL records are never transcript
 			// commits, even if a custom SessionManager emits them.
 			if (isClientInputWalEntry(entry)) return;
+			// Planning snapshots are durable branch-local state, not transcript
+			// rows. Clients receive them through planning_state_changed and every
+			// bootstrap/checkpoint instead.
+			if (entry.type === "planning_state_change") return;
 			this.conversationProjectionFeed.publishExternal({
 				type: "conversation_transcript_committed",
 				entry,
@@ -1014,6 +1026,140 @@ export class AgentSessionRuntime {
 			(operation) => this.newSessionWithinOperation(options, operation),
 			options?.assertConversationGenerationCurrent,
 		);
+	}
+
+	/**
+	 * Approve and start one exact ready-plan revision. The execution snapshot is
+	 * durable before provider work begins, so retries observe the same execution
+	 * identity instead of starting a second run.
+	 */
+	async executePlan(
+		planId: string,
+		expectedRevision: number,
+		strategy: PlanExecutionStrategy,
+		assertConversationGenerationCurrent?: () => void,
+	): Promise<{ planning: PlanningState; selectedSessionId: string; started: boolean }> {
+		const sourceSession = this.session;
+		const sourcePlanning = sourceSession.planningState;
+		const sourcePlan = sourcePlanning.plan;
+		if (
+			sourcePlan?.id === planId &&
+			sourcePlan.execution?.approvedRevision === expectedRevision &&
+			sourcePlan.execution.strategy === strategy
+		) {
+			return {
+				planning: sourcePlanning,
+				selectedSessionId: sourcePlan.execution.targetSessionId,
+				started: false,
+			};
+		}
+		if (!sourcePlan || sourcePlan.id !== planId || sourcePlan.revision !== expectedRevision) {
+			throw new StalePlanRevisionError();
+		}
+		if (sourcePlan.phase !== "ready") {
+			throw new Error("Only a ready plan can be executed");
+		}
+		assertConversationGenerationCurrent?.();
+
+		if (strategy === "retain_context") {
+			const execution: PlanExecution = {
+				id: randomUUID(),
+				approvedRevision: expectedRevision,
+				strategy,
+				sourceSessionId: sourceSession.sessionId,
+				targetSessionId: sourceSession.sessionId,
+			};
+			const result = sourceSession.activatePlan(planId, expectedRevision, execution);
+			if (result.activated) {
+				void sourceSession
+					.sendCustomMessage(
+						{
+							customType: "volt-plan-execution",
+							content: createPlanExecutionPrompt(result.planning.plan!),
+							display: true,
+						},
+						{ triggerTurn: true },
+					)
+					.catch(() => undefined);
+			}
+			return {
+				planning: result.planning,
+				selectedSessionId: sourceSession.sessionId,
+				started: result.activated,
+			};
+		}
+
+		const sourceSessionId = sourceSession.sessionId;
+		const sourceSessionFile = sourceSession.sessionFile;
+		const sourceManager = sourceSession.sessionManager;
+		const sourceModel = sourceSession.model;
+		const sourceThinking = sourceSession.thinkingLevel;
+		const sourceFastMode = sourceSession.fastModeEnabled;
+		let execution: PlanExecution | undefined;
+		const replacement = await this.newSession({
+			...(sourceSessionFile ? { parentSession: sourceSessionFile } : {}),
+			setup: async (sessionManager) => {
+				execution = {
+					id: randomUUID(),
+					approvedRevision: expectedRevision,
+					strategy,
+					sourceSessionId,
+					targetSessionId: sessionManager.getSessionId(),
+				};
+				sessionManager.appendPlanningState({
+					mode: "build",
+					plan: {
+						...sourcePlan,
+						revision: sourcePlan.revision + 1,
+						phase: "active",
+						steps: sourcePlan.steps.map((step) => ({ ...step })),
+						execution,
+					},
+				});
+				if (sourceModel) {
+					sessionManager.appendModelChange(sourceModel.provider, sourceModel.id);
+				}
+				sessionManager.appendThinkingLevelChange(sourceThinking);
+				if (sourceFastMode) {
+					sessionManager.appendFastModeChange(true);
+				}
+			},
+			withSession: async (context) => {
+				if (!execution) {
+					throw new Error("Plan execution session was not initialized");
+				}
+				sourceManager.appendPlanningState({
+					mode: "build",
+					plan: {
+						...sourcePlan,
+						revision: sourcePlan.revision + 1,
+						phase: "handed_off",
+						steps: sourcePlan.steps.map((step) => ({ ...step })),
+						execution,
+					},
+				});
+				const activePlan = this.session.planningState.plan;
+				void context
+					.sendMessage(
+						{
+							customType: "volt-plan-execution",
+							content: createPlanExecutionPrompt(activePlan ?? sourcePlan),
+							display: true,
+						},
+						{ triggerTurn: true },
+					)
+					.catch(() => undefined);
+			},
+			assertConversationGenerationCurrent,
+		});
+		if (replacement.cancelled || !replacement.seeded || !execution) {
+			throw new Error("Plan execution session was not created");
+		}
+		return {
+			planning: this.session.planningState,
+			selectedSessionId: execution.targetSessionId,
+			started: true,
+		};
 	}
 
 	private async newSessionWithinOperation(

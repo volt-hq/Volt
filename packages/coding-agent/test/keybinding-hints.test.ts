@@ -22,13 +22,49 @@ describe("editorTopBorderLabel", () => {
 	});
 
 	it("shows steering controls only while streaming with editor text", () => {
-		expect(editorTopBorderLabelForState({ bashMode: false, streaming: true, hasText: false })).toBe("ASK VOLT");
-		expect(editorTopBorderLabelForState({ bashMode: false, streaming: false, hasText: true })).toBe("ASK VOLT");
-		expect(editorTopBorderLabelForState({ bashMode: false, streaming: true, hasText: true })).toContain("STEER");
+		expect(
+			editorTopBorderLabelForState({
+				bashMode: false,
+				streaming: true,
+				hasText: false,
+				agentMode: "build",
+			}),
+		).toBe("ASK VOLT · BUILD");
+		expect(
+			editorTopBorderLabelForState({
+				bashMode: false,
+				streaming: false,
+				hasText: true,
+				agentMode: "build",
+			}),
+		).toBe("ASK VOLT · BUILD");
+		expect(
+			editorTopBorderLabelForState({
+				bashMode: false,
+				streaming: true,
+				hasText: true,
+				agentMode: "build",
+			}),
+		).toContain("STEER");
+		expect(
+			editorTopBorderLabelForState({
+				bashMode: false,
+				streaming: false,
+				hasText: false,
+				agentMode: "plan",
+			}),
+		).toBe("PLAN · AGENT READ-ONLY");
 	});
 
 	it("keeps idle and shell labels concise", () => {
 		expect(editorTopBorderLabel("ask")).toBe("ASK VOLT");
-		expect(editorTopBorderLabelForState({ bashMode: true, streaming: true, hasText: true })).toBe("SHELL");
+		expect(
+			editorTopBorderLabelForState({
+				bashMode: true,
+				streaming: true,
+				hasText: true,
+				agentMode: "plan",
+			}),
+		).toBe("SHELL");
 	});
 });

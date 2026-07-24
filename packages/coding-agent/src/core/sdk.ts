@@ -21,6 +21,7 @@ import { McpOutputStore } from "./mcp/output-store.ts";
 import { convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel } from "./model-resolver.ts";
+import type { AgentMode } from "./planning.ts";
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
@@ -64,6 +65,8 @@ export interface CreateAgentSessionOptions {
 	model?: Model<any>;
 	/** Thinking level. Default: from settings, else 'medium' (clamped to model capabilities) */
 	thinkingLevel?: ThinkingLevel;
+	/** Initial agent workflow mode. Defaults to Build; an existing branch restores its persisted mode. */
+	agentMode?: AgentMode;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 
@@ -237,7 +240,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	// Check if session has existing branch state to restore, including message-free durable policy.
-	const existingSession = sessionManager.buildSessionContext();
+	let existingSession = sessionManager.buildSessionContext();
+	if (options.agentMode !== undefined && existingSession.planning.mode !== options.agentMode) {
+		sessionManager.appendPlanningState({ ...existingSession.planning, mode: options.agentMode });
+		existingSession = sessionManager.buildSessionContext();
+	}
 	const existingBranch = sessionManager.getBranch();
 	const hasExistingSessionState = existingBranch.length > 0;
 	const isNewSession = !hasExistingSessionState || options.sessionStartEvent?.reason === "new";
@@ -389,6 +396,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
+	const planningSessionRef: { current?: AgentSession } = {};
 
 	agent = new Agent({
 		initialState: {
@@ -451,8 +459,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		inferenceSpeed: existingSession.fastMode.enabled ? "fast" : "standard",
 		transformContext: async (messages) => {
 			const runner = extensionRunnerRef.current;
-			if (!runner) return messages;
-			return runner.emitContext(messages);
+			const extensionMessages = runner ? await runner.emitContext(messages) : messages;
+			return planningSessionRef.current?.decorateProviderMessages(extensionMessages) ?? extensionMessages;
 		},
 		steeringMode: settingsManager.getSteeringMode(),
 		followUpMode: settingsManager.getFollowUpMode(),
@@ -494,6 +502,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		mcpManager,
 		mcpManagerFactory: options.disableMcp || options.mcpManager ? undefined : createDefaultMcpManager,
 	});
+	planningSessionRef.current = session;
 	const extensionsResult = resourceLoader.getExtensions();
 
 	return {

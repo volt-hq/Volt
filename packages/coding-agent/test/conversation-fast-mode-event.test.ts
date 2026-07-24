@@ -37,6 +37,7 @@ const buildSnapshot =
 			thinkingLevel: "high",
 			availableThinkingLevels: ["off", "high"],
 			fastModeEnabled: source.fastModeEnabled,
+			planning: { mode: "build", plan: null },
 			isStreaming: false,
 			isCompacting: false,
 			steeringMode: "all",

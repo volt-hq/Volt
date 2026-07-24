@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { type Api, type Model, supportsFastInference } from "@hansjm10/volt-ai";
 import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
+import type { AgentMode, PlanExecutionStrategy, PlanningState } from "./planning.ts";
 import type { ReviewTarget, ReviewWorkflowResult } from "./review.ts";
 import type {
 	UiActionArgumentDescriptor,
@@ -26,6 +27,7 @@ export interface HostActionSessionState {
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	fastModeEnabled?: boolean;
+	planningState?: PlanningState;
 }
 
 export interface HostActionDescriptorContext {
@@ -45,6 +47,14 @@ export interface HostActionInvocationContext extends HostActionDescriptorContext
 	afterSessionSwitch?: () => Promise<void>;
 	renameSession(name: string): void;
 	setFastModeEnabled?(enabled: boolean): void;
+	setAgentMode?(mode: AgentMode): PlanningState;
+	executePlan?(
+		planId: string,
+		expectedRevision: number,
+		strategy: PlanExecutionStrategy,
+	): Promise<{ planning: PlanningState; selectedSessionId: string; started: boolean }>;
+	changePlan?(planId: string, expectedRevision: number): PlanningState;
+	discardPlan?(planId: string, expectedRevision: number): PlanningState;
 	runReviewAction?(target: ReviewTarget, options: HostActionReviewOptions): Promise<ReviewWorkflowResult>;
 }
 
@@ -102,6 +112,10 @@ export const SESSION_RENAME_ACTION_ID = "session.rename";
 export const SESSION_RENAME_SLASH_ALIAS = "name";
 export const THINKING_FAST_MODE_ACTION_ID = "thinking.fast_mode";
 export const THINKING_FAST_MODE_SLASH_ALIAS = "fast";
+export const AGENT_MODE_ACTION_ID = "agent.mode";
+export const PLAN_EXECUTE_ACTION_ID = "plan.execute";
+export const PLAN_CHANGE_ACTION_ID = "plan.change";
+export const PLAN_DISCARD_ACTION_ID = "plan.discard";
 
 export interface HostActionReviewOptions {
 	remote: boolean;
@@ -112,6 +126,10 @@ const REMOTE_SAFE_BUILTIN_HOST_ACTION_IDS = new Set<string>([
 	SESSION_NEW_ACTION_ID,
 	RUN_CANCEL_ACTION_ID,
 	THINKING_FAST_MODE_ACTION_ID,
+	AGENT_MODE_ACTION_ID,
+	PLAN_EXECUTE_ACTION_ID,
+	PLAN_CHANGE_ACTION_ID,
+	PLAN_DISCARD_ACTION_ID,
 	REVIEW_UNCOMMITTED_ACTION_ID,
 	REVIEW_BRANCH_ACTION_ID,
 	REVIEW_PR_ACTION_ID,
@@ -280,6 +298,87 @@ export async function runReviewHostAction(
 }
 
 export function registerBuiltinHostActions(registry: HostActionRegistry): HostActionRegistry {
+	registry.register({
+		id: AGENT_MODE_ACTION_ID,
+		label: "Agent mode",
+		description: "Switch between Build and read-only Plan mode",
+		category: "session",
+		presentation: { kind: "picker", group: "Session", priority: 110 },
+		args: [
+			{
+				name: "mode",
+				label: "Mode",
+				type: "enum",
+				required: true,
+				options: [
+					{ value: "build", label: "Build" },
+					{ value: "plan", label: "Plan" },
+				],
+			},
+		],
+		streamingBehavior: "disabled",
+		remoteSafe: true,
+		state: createAgentModeState,
+		availability: () => ({ enabled: true }),
+		handler: invokeAgentModeAction,
+	});
+	registry.register({
+		id: PLAN_EXECUTE_ACTION_ID,
+		label: "Execute Plan",
+		description: "Approve the exact ready plan revision and begin execution",
+		category: "session",
+		presentation: { kind: "detail", group: "Plan", priority: 100 },
+		args: [
+			{ name: "planId", label: "Plan ID", type: "string", required: true },
+			{ name: "expectedRevision", label: "Revision", type: "integer", required: true },
+			{
+				name: "strategy",
+				label: "Execution context",
+				type: "enum",
+				required: true,
+				options: [
+					{ value: "retain_context", label: "Execute Plan" },
+					{ value: "new_session", label: "Execute Plan & Clear Context" },
+				],
+			},
+		],
+		streamingBehavior: "disabled",
+		remoteSafe: true,
+		availability: planReadyAvailability,
+		handler: invokePlanExecuteAction,
+	});
+	registry.register({
+		id: PLAN_CHANGE_ACTION_ID,
+		label: "Change Plan",
+		description: "Return the exact ready plan revision to draft",
+		category: "session",
+		presentation: { kind: "detail", group: "Plan", priority: 90 },
+		args: [
+			{ name: "planId", label: "Plan ID", type: "string", required: true },
+			{ name: "expectedRevision", label: "Revision", type: "integer", required: true },
+		],
+		streamingBehavior: "disabled",
+		remoteSafe: true,
+		availability: planReadyAvailability,
+		handler: invokePlanChangeAction,
+	});
+	registry.register({
+		id: PLAN_DISCARD_ACTION_ID,
+		label: "Discard plan",
+		description: "Discard the exact current plan revision",
+		category: "session",
+		presentation: { kind: "detail", group: "Plan", priority: 80 },
+		args: [
+			{ name: "planId", label: "Plan ID", type: "string", required: true },
+			{ name: "expectedRevision", label: "Revision", type: "integer", required: true },
+		],
+		destructive: true,
+		requiresConfirmation: true,
+		streamingBehavior: "disabled",
+		remoteSafe: true,
+		availability: planPresentAvailability,
+		handler: invokePlanDiscardAction,
+	});
 	registry.register({
 		id: SESSION_NEW_ACTION_ID,
 		label: "New session",
@@ -524,6 +623,94 @@ export function getBuiltinHostActionSlashCommand(alias: string): HostActionSlash
 
 export function isRemoteSafeBuiltinHostActionId(actionId: string): boolean {
 	return REMOTE_SAFE_BUILTIN_HOST_ACTION_IDS.has(actionId);
+}
+
+function invokeAgentModeAction(
+	context: HostActionInvocationContext,
+	args: unknown,
+): Promise<UiActionInvocationResponse> {
+	const mode = getRequiredStringArg(args, "mode");
+	if (mode !== "build" && mode !== "plan") {
+		throw new Error('UI action argument "mode" must be "build" or "plan"');
+	}
+	const setAgentMode = context.setAgentMode;
+	if (!setAgentMode) {
+		throw new Error("Agent mode is not available in this host");
+	}
+	const previousMode = context.session.planningState?.mode;
+	setAgentMode(mode);
+	return Promise.resolve({
+		action: AGENT_MODE_ACTION_ID,
+		status: "completed",
+		state: createAgentModeState(context),
+		stateChanged: previousMode !== mode,
+		actionsChanged: previousMode !== mode,
+		message: mode === "plan" ? "Plan mode enabled" : "Build mode enabled",
+	});
+}
+
+async function invokePlanExecuteAction(
+	context: HostActionInvocationContext,
+	args: unknown,
+): Promise<UiActionInvocationResponse> {
+	const executePlan = context.executePlan;
+	if (!executePlan) {
+		throw new Error("Plan execution is not available in this host");
+	}
+	const { planId, expectedRevision, strategy } = getPlanActionArgs(args, true);
+	const result = await executePlan(planId, expectedRevision, strategy);
+	return {
+		action: PLAN_EXECUTE_ACTION_ID,
+		status: "completed",
+		stateChanged: result.started,
+		actionsChanged: result.started,
+		message:
+			strategy === "new_session"
+				? result.started
+					? "Plan started in a clear execution session"
+					: "Plan was already started in its execution session"
+				: result.started
+					? "Plan execution started"
+					: "Plan execution was already started",
+	};
+}
+
+function invokePlanChangeAction(
+	context: HostActionInvocationContext,
+	args: unknown,
+): Promise<UiActionInvocationResponse> {
+	const changePlan = context.changePlan;
+	if (!changePlan) {
+		throw new Error("Changing a plan is not available in this host");
+	}
+	const { planId, expectedRevision } = getPlanActionArgs(args, false);
+	changePlan(planId, expectedRevision);
+	return Promise.resolve({
+		action: PLAN_CHANGE_ACTION_ID,
+		status: "completed",
+		stateChanged: true,
+		actionsChanged: true,
+		message: "Plan returned to draft",
+	});
+}
+
+function invokePlanDiscardAction(
+	context: HostActionInvocationContext,
+	args: unknown,
+): Promise<UiActionInvocationResponse> {
+	const discardPlan = context.discardPlan;
+	if (!discardPlan) {
+		throw new Error("Discarding a plan is not available in this host");
+	}
+	const { planId, expectedRevision } = getPlanActionArgs(args, false);
+	discardPlan(planId, expectedRevision);
+	return Promise.resolve({
+		action: PLAN_DISCARD_ACTION_ID,
+		status: "completed",
+		stateChanged: true,
+		actionsChanged: true,
+		message: "Plan discarded",
+	});
 }
 
 async function invokeSessionNewAction(
@@ -790,6 +977,31 @@ function createThinkingFastModeState(context: HostActionDescriptorContext): UiAc
 	};
 }
 
+function createAgentModeState(context: HostActionDescriptorContext): UiActionStateDescriptor {
+	const mode = context.session.planningState?.mode ?? "build";
+	return {
+		type: "enum",
+		value: mode,
+		label: mode === "plan" ? "Plan" : "Build",
+		options: [
+			{ value: "build", label: "Build" },
+			{ value: "plan", label: "Plan" },
+		],
+	};
+}
+
+function planReadyAvailability(context: HostActionDescriptorContext): HostActionAvailability {
+	return context.session.planningState?.plan?.phase === "ready"
+		? { enabled: true }
+		: { enabled: false, disabledReason: "No plan is ready for approval" };
+}
+
+function planPresentAvailability(context: HostActionDescriptorContext): HostActionAvailability {
+	return context.session.planningState?.plan
+		? { enabled: true }
+		: { enabled: false, disabledReason: "No plan is available" };
+}
+
 function isHostSessionBusy(session: HostActionSessionState): boolean {
 	return session.isBusy ?? session.isStreaming;
 }
@@ -875,4 +1087,37 @@ function getRequiredBooleanArg(args: unknown, name: string): boolean {
 		throw new Error(`UI action argument "${name}" is required`);
 	}
 	return value;
+}
+
+function getPlanActionArgs(
+	args: unknown,
+	requireStrategy: true,
+): { planId: string; expectedRevision: number; strategy: PlanExecutionStrategy };
+function getPlanActionArgs(args: unknown, requireStrategy: false): { planId: string; expectedRevision: number };
+function getPlanActionArgs(
+	args: unknown,
+	requireStrategy: boolean,
+): { planId: string; expectedRevision: number; strategy?: PlanExecutionStrategy } {
+	const record = getArgsRecord(args);
+	const allowedKeys = new Set(["planId", "expectedRevision", ...(requireStrategy ? ["strategy"] : [])]);
+	const unknownKey = Object.keys(record).find((key) => !allowedKeys.has(key));
+	if (unknownKey) {
+		throw new Error(`Unsupported UI action argument: ${unknownKey}`);
+	}
+	const planId = record.planId;
+	if (typeof planId !== "string" || !planId) {
+		throw new Error('UI action argument "planId" must be a non-empty string');
+	}
+	const expectedRevision = record.expectedRevision;
+	if (!Number.isInteger(expectedRevision) || (expectedRevision as number) < 0) {
+		throw new Error('UI action argument "expectedRevision" must be a non-negative integer');
+	}
+	if (!requireStrategy) {
+		return { planId, expectedRevision: expectedRevision as number };
+	}
+	const strategy = record.strategy;
+	if (strategy !== "retain_context" && strategy !== "new_session") {
+		throw new Error('UI action argument "strategy" must select an execution context');
+	}
+	return { planId, expectedRevision: expectedRevision as number, strategy };
 }

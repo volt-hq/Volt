@@ -53,6 +53,7 @@ export const INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES: ReadonlySet<string> 
  */
 export const TURN_INITIATING_RPC_TYPES: ReadonlySet<string> = new Set([
 	"prompt",
+	"plan_execute",
 	"invoke_ui_action",
 	"steer",
 	"follow_up",

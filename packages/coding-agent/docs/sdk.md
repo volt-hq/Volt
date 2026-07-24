@@ -63,9 +63,12 @@ const { session } = await createAgentSession();
 const { session } = await createAgentSession({
   model: myModel,
   tools: ["read", "bash"],
+  agentMode: "plan",
   sessionManager: SessionManager.inMemory(),
 });
 ```
+
+`agentMode` defaults to `"build"`. A new Plan-mode session exposes only read-only exploration and native checklist tools; persisted branches restore their own planning state.
 
 ### AgentSession
 
@@ -93,6 +96,12 @@ interface AgentSession {
   cycleModel(): Promise<ModelCycleResult | undefined>;
   cycleThinkingLevel(): ThinkingLevel | undefined;
 
+  // Planning
+  planningState: PlanningState;
+  setAgentMode(mode: "build" | "plan"): PlanningState;
+  changePlan(planId: string, expectedRevision: number): PlanningState;
+  discardPlan(planId: string, expectedRevision: number): PlanningState;
+
   // State access
   agent: Agent;
   model: Model | undefined;
@@ -117,6 +126,14 @@ interface AgentSession {
 ```
 
 Session replacement APIs such as new-session, resume, fork, and import live on `AgentSessionRuntime`, not on `AgentSession`.
+Approving a ready plan also lives there:
+
+```typescript
+await runtime.executePlan(plan.id, plan.revision, "retain_context");
+await runtime.executePlan(plan.id, plan.revision, "new_session");
+```
+
+All user plan actions are fenced by the exact plan ID and revision. Repeating an already-approved execution request is idempotent.
 
 ### createAgentSessionRuntime() and AgentSessionRuntime
 

@@ -71,6 +71,7 @@ function createState(sessionId: string): RpcSessionState {
 		thinkingLevel: "off",
 		availableThinkingLevels: ["off"],
 		fastModeEnabled: false,
+		planning: { mode: "build", plan: null },
 		isStreaming: false,
 		isCompacting: false,
 		steeringMode: "one-at-a-time",
