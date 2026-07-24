@@ -22,6 +22,7 @@ import {
 	RpcMcpToolSummarySchema,
 	RpcSlashCommandSchema,
 } from "./mcp.ts";
+import { RpcPlanExecutionResultSchema, RpcPlanningStateSchema } from "./planning.ts";
 import { RpcConversationIdentifierSchema, RpcThinkingLevelSchema } from "./primitives.ts";
 import { RpcReviewWorkflowListResponseSchema, RpcReviewWorkflowResultResponseSchema } from "./projections.ts";
 import {
@@ -272,6 +273,10 @@ export const RPC_RESPONSE_SCHEMAS = {
 	follow_up: voidResponse("follow_up"),
 	abort: voidResponse("abort"),
 	new_session: dataResponse("new_session", cancelledDataSchema),
+	set_agent_mode: dataResponse("set_agent_mode", RpcPlanningStateSchema),
+	plan_execute: dataResponse("plan_execute", RpcPlanExecutionResultSchema),
+	plan_change: dataResponse("plan_change", RpcPlanningStateSchema),
+	plan_discard: dataResponse("plan_discard", RpcPlanningStateSchema),
 
 	// Client capabilities and host-initiated actions
 	set_client_capabilities: voidResponse("set_client_capabilities"),

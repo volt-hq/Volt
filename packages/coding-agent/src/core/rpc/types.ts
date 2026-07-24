@@ -45,6 +45,18 @@ import type {
 	RpcSlashCommandSchema,
 } from "./schema/mcp.ts";
 import type {
+	RpcAgentModeSchema,
+	RpcPlanExecutionResultSchema,
+	RpcPlanExecutionSchema,
+	RpcPlanExecutionStrategySchema,
+	RpcPlanningStateChangedEventSchema,
+	RpcPlanningStateSchema,
+	RpcPlanPhaseSchema,
+	RpcPlanStateSchema,
+	RpcPlanStepSchema,
+	RpcPlanStepStatusSchema,
+} from "./schema/planning.ts";
+import type {
 	RpcAssistantStreamPositionSchema,
 	RpcConversationAuthoritySchema,
 	RpcConversationBootstrapReasonSchema,
@@ -290,6 +302,15 @@ export type RpcQueuedMessage = Static<typeof RpcQueuedMessageSchema>;
 export type RpcQueueUpdateProjection = Static<typeof RpcQueueUpdateProjectionSchema>;
 export type RpcSessionStateProjection = Static<typeof RpcSessionStateProjectionSchema>;
 export type RpcSessionState = Static<typeof RpcSessionStateSchema>;
+export type RpcAgentMode = Static<typeof RpcAgentModeSchema>;
+export type RpcPlanPhase = Static<typeof RpcPlanPhaseSchema>;
+export type RpcPlanStepStatus = Static<typeof RpcPlanStepStatusSchema>;
+export type RpcPlanExecutionStrategy = Static<typeof RpcPlanExecutionStrategySchema>;
+export type RpcPlanStep = Static<typeof RpcPlanStepSchema>;
+export type RpcPlanExecution = Static<typeof RpcPlanExecutionSchema>;
+export type RpcPlanState = Static<typeof RpcPlanStateSchema>;
+export type RpcPlanningState = Static<typeof RpcPlanningStateSchema>;
+export type RpcPlanExecutionResult = Static<typeof RpcPlanExecutionResultSchema>;
 
 export type RpcTranscriptToolStatus = Static<typeof RpcTranscriptToolStatusSchema>;
 
@@ -381,3 +402,5 @@ export type RpcSubagentDisposedEvent = Static<typeof RpcSubagentDisposedEventSch
 export type RpcModelsChangedEvent = Static<typeof RpcModelsChangedEventSchema>;
 /** Settled, bounded state of a host UI action. */
 export type RpcUiActionStateChangedEvent = Static<typeof RpcUiActionStateChangedEventSchema>;
+/** Full authoritative planning snapshot emitted after every mutation. */
+export type RpcPlanningStateChangedEvent = Static<typeof RpcPlanningStateChangedEventSchema>;

@@ -148,6 +148,7 @@ export const RPC_RETRY_AFTER_MS_MAX = 30_000;
 export const RPC_STABLE_ERROR_CODES = [
 	"client_input_conflict",
 	"client_input_outcome_ambiguous",
+	"stale_plan_revision",
 	"stale_conversation_authority",
 ] as const;
 export type RpcStableErrorCode = (typeof RPC_STABLE_ERROR_CODES)[number];

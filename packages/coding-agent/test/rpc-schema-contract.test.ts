@@ -18,6 +18,7 @@ import {
 	RpcModelsChangedEventSchema,
 } from "../src/core/rpc/schema/events.ts";
 import { RpcApiSchema } from "../src/core/rpc/schema/external.ts";
+import { RpcPlanningStateChangedEventSchema } from "../src/core/rpc/schema/planning.ts";
 import { RpcWorkflowEventSchema } from "../src/core/rpc/schema/projections.ts";
 import { RPC_RESPONSE_SCHEMAS, RpcErrorResponseSchema } from "../src/core/rpc/schema/responses.ts";
 import { UiActionCapabilityFeatureSchema, UiActionDescriptorSchema } from "../src/core/rpc/schema/ui-actions.ts";
@@ -228,6 +229,53 @@ describe("RPC contract emission conformance", () => {
 		expect(Compile(RpcErrorResponseSchema).Errors(coded)).toEqual([]);
 	});
 
+	test("planning events require complete phase-consistent snapshots", () => {
+		const execution = {
+			id: "execution-1",
+			approvedRevision: 2,
+			strategy: "retain_context",
+			sourceSessionId: "session-1",
+			targetSessionId: "session-1",
+		};
+		const event = {
+			type: "planning_state_changed",
+			planning: {
+				mode: "build",
+				plan: {
+					id: "plan-1",
+					revision: 3,
+					phase: "active",
+					title: "Ship Plan mode",
+					summary: "Implement and verify the native workflow.",
+					steps: [{ id: "step-1", text: "Implement", status: "in_progress" }],
+					execution,
+				},
+			},
+			delivery: { subscriptionId: "sub-1", cursor: 4 },
+		};
+		const validator = Compile(RpcPlanningStateChangedEventSchema);
+		expect(validator.Errors(event)).toEqual([]);
+		expect(
+			validator.Check({
+				...event,
+				planning: {
+					...event.planning,
+					plan: { ...event.planning.plan, execution: undefined },
+				},
+			}),
+		).toBe(false);
+		expect(
+			validator.Check({
+				...event,
+				planning: {
+					...event.planning,
+					plan: { ...event.planning.plan, phase: "ready" },
+				},
+			}),
+		).toBe(false);
+		expect(validator.Check({ ...event, unexpected: true })).toBe(false);
+	});
+
 	test("typed event payloads validate against their schemas", () => {
 		// Typechecked construction + runtime Check proves the compiled schema
 		// accepts exactly what the derived static types describe.
@@ -239,6 +287,7 @@ describe("RPC contract emission conformance", () => {
 				thinkingLevel: "high",
 				availableThinkingLevels: ["off", "high"],
 				fastModeEnabled: true,
+				planning: { mode: "build", plan: null },
 				isStreaming: false,
 				isCompacting: false,
 				steeringMode: "all",

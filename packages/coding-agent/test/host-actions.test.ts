@@ -1,9 +1,13 @@
 import type { Api, Model } from "@hansjm10/volt-ai";
 import { describe, expect, test, vi } from "vitest";
 import {
+	AGENT_MODE_ACTION_ID,
 	CONTEXT_COMPACT_ACTION_ID,
 	CONTEXT_COMPACT_SLASH_ALIAS,
 	HostActionRegistry,
+	PLAN_CHANGE_ACTION_ID,
+	PLAN_DISCARD_ACTION_ID,
+	PLAN_EXECUTE_ACTION_ID,
 	REVIEW_BRANCH_ACTION_ID,
 	REVIEW_COMMIT_ACTION_ID,
 	REVIEW_PR_ACTION_ID,
@@ -86,7 +90,7 @@ describe("HostActionRegistry", () => {
 			description: "Start a new session",
 		});
 
-		const [descriptor] = registry.getDescriptors(context);
+		const descriptor = registry.getDescriptor(SESSION_NEW_ACTION_ID, context);
 		expect(descriptor).toEqual(
 			expect.objectContaining({
 				id: SESSION_NEW_ACTION_ID,
@@ -187,6 +191,10 @@ describe("HostActionRegistry", () => {
 
 		const descriptors = registry.getDescriptors(context);
 		expect(descriptors.map((descriptor) => descriptor.id)).toEqual([
+			AGENT_MODE_ACTION_ID,
+			PLAN_EXECUTE_ACTION_ID,
+			PLAN_CHANGE_ACTION_ID,
+			PLAN_DISCARD_ACTION_ID,
 			SESSION_NEW_ACTION_ID,
 			RUN_CANCEL_ACTION_ID,
 			CONTEXT_COMPACT_ACTION_ID,

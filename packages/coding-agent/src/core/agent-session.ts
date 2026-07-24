@@ -99,6 +99,17 @@ import type { McpManager } from "./mcp/manager.ts";
 import type { McpManagerEvent } from "./mcp/types.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import {
+	type AgentMode,
+	assertPlanningStateWithinBounds,
+	assertPlanRevision,
+	clonePlanningState,
+	formatPlanForAgent,
+	type PlanExecution,
+	type PlanningState,
+	type PlanState,
+	type PlanStepStatus,
+} from "./planning.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import type { UiActionStateDescriptor } from "./rpc/types.ts";
@@ -131,6 +142,12 @@ import {
 	DEFAULT_ACTIVE_TOOL_NAMES,
 	type SubagentToolManager,
 } from "./tools/index.ts";
+import {
+	canonicalizePlanSteps,
+	createPlanningToolDefinitions,
+	NATIVE_PLAN_TOOL_NAMES,
+	PLAN_MODE_READ_ONLY_TOOL_NAMES,
+} from "./tools/planning.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 
 // ============================================================================
@@ -218,6 +235,7 @@ export type AgentSessionEvent =
 	| { type: "compaction_start"; reason: CompactionReason }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
+	| { type: "planning_state_changed"; planning: PlanningState }
 	| {
 			type: "ui_action_state_changed";
 			action: string;
@@ -507,6 +525,9 @@ export class AgentSession {
 	// Model registry for API key resolution
 	private _modelRegistry: ModelRegistry;
 	private _fastModeEnabled = false;
+	private _planningState: PlanningState;
+	private _requestedBuildToolNames: string[] = [];
+	private _planningRuntimeInitialized = false;
 
 	// LSP diagnostics manager (created unless lsp.enabled is false)
 	private _lspManager?: LspManager;
@@ -535,7 +556,9 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._modelRegistry = config.modelRegistry;
-		this._restoreFastModePolicy(this.sessionManager.buildSessionContext().fastMode);
+		const restoredContext = this.sessionManager.buildSessionContext();
+		this._restoreFastModePolicy(restoredContext.fastMode);
+		this._planningState = clonePlanningState(restoredContext.planning);
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
@@ -559,6 +582,9 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		this._requestedBuildToolNames = this.getActiveToolNames();
+		this._planningRuntimeInitialized = true;
+		this._syncPlanningRuntime();
 		this._recoverDurableQueuedClientInputs();
 	}
 
@@ -646,6 +672,15 @@ export class AgentSession {
 	 */
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
+			if (!this.getActiveToolNames().includes(toolCall.name)) {
+				return {
+					block: true,
+					reason:
+						this._planningState.mode === "plan"
+							? `Plan mode policy blocked ${toolCall.name}. Only read-only exploration and native plan tools are available.`
+							: `Tool ${toolCall.name} is no longer active for this session.`,
+				};
+			}
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_call")) {
 				return undefined;
@@ -1307,6 +1342,35 @@ export class AgentSession {
 		return this._fastModeEnabled;
 	}
 
+	get agentMode(): AgentMode {
+		return this._planningState.mode;
+	}
+
+	get planningState(): PlanningState {
+		return clonePlanningState(this._planningState);
+	}
+
+	getPlanningState(): PlanningState {
+		return this.planningState;
+	}
+
+	decorateProviderMessages(messages: AgentMessage[]): AgentMessage[] {
+		const instructions = formatPlanForAgent(this._planningState);
+		if (!instructions) {
+			return messages;
+		}
+		return [
+			...messages,
+			{
+				role: "custom",
+				customType: "volt-planning-state",
+				content: instructions,
+				display: false,
+				timestamp: Date.now(),
+			},
+		];
+	}
+
 	/** Whether the session is processing a response or a session-level continuation. */
 	get isStreaming(): boolean {
 		return this.agent.state.isStreaming || this._activePromptRuns.size > 0;
@@ -1352,7 +1416,7 @@ export class AgentSession {
 			return;
 		}
 		this._baseSystemPrompt = [this._baseSystemPrompt, trimmed].filter(Boolean).join("\n\n");
-		this.agent.state.systemPrompt = this._baseSystemPrompt;
+		this._applyTrustedPlanningInstructionsToSystemPrompt();
 	}
 
 	/** Current retry attempt (0 if not retrying) */
@@ -1380,17 +1444,38 @@ export class AgentSession {
 	 * Get all configured tools with name, description, parameter schema, prompt guidelines, and source metadata.
 	 */
 	getAllTools(): ToolInfo[] {
-		return Array.from(this._toolDefinitions.values()).map(({ definition, sourceInfo }) => ({
-			name: definition.name,
-			description: definition.description,
-			parameters: definition.parameters,
-			promptGuidelines: definition.promptGuidelines,
-			sourceInfo,
-		}));
+		return Array.from(this._toolDefinitions.values())
+			.filter(({ definition }) => this._isToolVisibleToCurrentMode(definition.name))
+			.map(({ definition, sourceInfo }) => ({
+				name: definition.name,
+				description: definition.description,
+				parameters: definition.parameters,
+				promptGuidelines: definition.promptGuidelines,
+				sourceInfo,
+			}));
 	}
 
 	getToolDefinition(name: string): ToolDefinition | undefined {
+		if (!this._isToolVisibleToCurrentMode(name)) {
+			return undefined;
+		}
 		return this._toolDefinitions.get(name)?.definition;
+	}
+
+	private _isToolVisibleToCurrentMode(name: string): boolean {
+		if (this._planningState.mode === "plan") {
+			return this.getActiveToolNames().includes(name);
+		}
+		if (NATIVE_PLAN_TOOL_NAMES.has(name)) {
+			return this.getActiveToolNames().includes(name);
+		}
+		if (PLAN_MODE_READ_ONLY_TOOL_NAMES.includes(name as (typeof PLAN_MODE_READ_ONLY_TOOL_NAMES)[number])) {
+			return (
+				(this._allowedToolNames === undefined || this._allowedToolNames.has(name)) &&
+				!this._excludedToolNames?.has(name)
+			);
+		}
+		return true;
 	}
 
 	/**
@@ -1400,6 +1485,15 @@ export class AgentSession {
 	 * Changes take effect on the next agent turn.
 	 */
 	setActiveToolsByName(toolNames: string[]): void {
+		if (this._planningRuntimeInitialized) {
+			this._requestedBuildToolNames = [...new Set(toolNames.filter((name) => !NATIVE_PLAN_TOOL_NAMES.has(name)))];
+			this._syncPlanningRuntime();
+			return;
+		}
+		this._setEffectiveToolsByName(toolNames);
+	}
+
+	private _setEffectiveToolsByName(toolNames: string[]): void {
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
 		for (const name of toolNames) {
@@ -1414,6 +1508,181 @@ export class AgentSession {
 		// Rebuild base system prompt with new tool set
 		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
+	}
+
+	private _syncPlanningRuntime(): void {
+		if (!this._planningRuntimeInitialized) {
+			return;
+		}
+		const effective =
+			this._planningState.mode === "plan"
+				? [...PLAN_MODE_READ_ONLY_TOOL_NAMES, "update_plan", "submit_plan"]
+				: this._planningState.plan?.phase === "active"
+					? [...this._requestedBuildToolNames, "update_plan"]
+					: [...this._requestedBuildToolNames];
+		this._setEffectiveToolsByName([...new Set(effective)]);
+		this._applyTrustedPlanningInstructionsToSystemPrompt();
+	}
+
+	private _applyTrustedPlanningInstructionsToSystemPrompt(systemPrompt = this._baseSystemPrompt): void {
+		const instructions = formatPlanForAgent(this._planningState);
+		this.agent.state.systemPrompt = instructions
+			? [systemPrompt, instructions].filter(Boolean).join("\n\n")
+			: systemPrompt;
+	}
+
+	private _commitPlanningState(next: PlanningState): PlanningState {
+		assertPlanningStateWithinBounds(next);
+		this.sessionManager.appendPlanningState(next);
+		this._planningState = clonePlanningState(next);
+		this._syncPlanningRuntime();
+		const snapshot = clonePlanningState(this._planningState);
+		this._emit({ type: "planning_state_changed", planning: snapshot });
+		return snapshot;
+	}
+
+	setAgentMode(mode: AgentMode): PlanningState {
+		if (mode === this._planningState.mode) {
+			return this.planningState;
+		}
+		return this._commitPlanningState({ ...clonePlanningState(this._planningState), mode });
+	}
+
+	toggleAgentMode(): PlanningState {
+		return this.setAgentMode(this.agentMode === "plan" ? "build" : "plan");
+	}
+
+	updatePlan(input: {
+		planId?: string;
+		expectedRevision?: number;
+		title?: string;
+		summary?: string;
+		steps: Array<{ id?: string; text: string; status?: PlanStepStatus; note?: string }>;
+	}): PlanState {
+		if (this._planningState.mode !== "plan" && this._planningState.plan?.phase !== "active") {
+			throw new Error("update_plan is available only in Plan mode or during approved plan execution");
+		}
+		if (input.steps.length > 64) {
+			throw new Error("Plans may contain at most 64 steps");
+		}
+		for (const step of input.steps) {
+			if (!step.text.trim()) {
+				throw new Error("Plan steps must have non-empty text");
+			}
+		}
+		const previous = this._planningState.plan;
+		if (previous) {
+			if (input.planId === undefined || input.expectedRevision === undefined) {
+				throw new Error("Updating an existing plan requires planId and expectedRevision");
+			}
+			assertPlanRevision(this._planningState, input.planId, input.expectedRevision);
+		} else if (input.planId !== undefined || input.expectedRevision !== undefined) {
+			throw new Error("A new plan must not provide planId or expectedRevision");
+		}
+		const steps = canonicalizePlanSteps(input.steps, previous ?? undefined);
+		const phase =
+			previous?.phase === "active" || previous?.phase === "completed"
+				? steps.length > 0 && steps.every((step) => step.status === "completed")
+					? "completed"
+					: "active"
+				: "draft";
+		const plan: PlanState = {
+			id: previous?.id ?? randomUUID(),
+			revision: (previous?.revision ?? 0) + 1,
+			phase,
+			...(input.title?.trim() || previous?.title ? { title: input.title?.trim() || previous?.title } : {}),
+			...(input.summary?.trim() || previous?.summary ? { summary: input.summary?.trim() || previous?.summary } : {}),
+			steps,
+			...(previous?.execution ? { execution: { ...previous.execution } } : {}),
+		};
+		this._commitPlanningState({ mode: this._planningState.mode, plan });
+		return { ...plan, steps: plan.steps.map((step) => ({ ...step })) };
+	}
+
+	submitPlan(input: { planId: string; expectedRevision: number; title: string; summary: string }): PlanState {
+		if (this._planningState.mode !== "plan") {
+			throw new Error("submit_plan is available only in Plan mode");
+		}
+		assertPlanRevision(this._planningState, input.planId, input.expectedRevision);
+		if (this._planningState.plan.steps.length === 0) {
+			throw new Error("A plan must contain at least one checklist step");
+		}
+		if (!input.title.trim() || !input.summary.trim()) {
+			throw new Error("A submitted plan requires a non-empty title and summary");
+		}
+		const plan: PlanState = {
+			...this._planningState.plan,
+			revision: this._planningState.plan.revision + 1,
+			phase: "ready",
+			title: input.title.trim(),
+			summary: input.summary.trim(),
+		};
+		this._commitPlanningState({ mode: "plan", plan });
+		return { ...plan, steps: plan.steps.map((step) => ({ ...step })) };
+	}
+
+	changePlan(planId: string, expectedRevision: number): PlanningState {
+		assertPlanRevision(this._planningState, planId, expectedRevision);
+		if (this._planningState.plan.phase !== "ready") {
+			throw new Error("Only a ready plan can be changed");
+		}
+		return this._commitPlanningState({
+			mode: "plan",
+			plan: {
+				...this._planningState.plan,
+				revision: this._planningState.plan.revision + 1,
+				phase: "draft",
+			},
+		});
+	}
+
+	discardPlan(planId: string, expectedRevision: number): PlanningState {
+		assertPlanRevision(this._planningState, planId, expectedRevision);
+		return this._commitPlanningState({ mode: this._planningState.mode, plan: null });
+	}
+
+	activatePlan(
+		planId: string,
+		expectedRevision: number,
+		execution: PlanExecution,
+	): { planning: PlanningState; activated: boolean } {
+		const currentPlan = this._planningState.plan;
+		if (
+			currentPlan?.id === planId &&
+			currentPlan.execution?.approvedRevision === expectedRevision &&
+			currentPlan.execution.strategy === execution.strategy
+		) {
+			return { planning: this.planningState, activated: false };
+		}
+		assertPlanRevision(this._planningState, planId, expectedRevision);
+		if (this._planningState.plan.phase !== "ready") {
+			throw new Error("Only a ready plan can be executed");
+		}
+		return {
+			planning: this._commitPlanningState({
+				mode: "build",
+				plan: {
+					...this._planningState.plan,
+					revision: this._planningState.plan.revision + 1,
+					phase: "active",
+					execution,
+				},
+			}),
+			activated: true,
+		};
+	}
+
+	markPlanHandedOff(planId: string, expectedRevision: number, execution: PlanExecution): PlanningState {
+		assertPlanRevision(this._planningState, planId, expectedRevision);
+		return this._commitPlanningState({
+			mode: "build",
+			plan: {
+				...this._planningState.plan,
+				revision: this._planningState.plan.revision + 1,
+				phase: "handed_off",
+				execution,
+			},
+		});
 	}
 
 	/** Whether compaction or branch summarization is currently running */
@@ -2226,6 +2495,12 @@ export class AgentSession {
 				return "queued";
 			}
 
+			// Ordinary feedback after submission invalidates the ready approval
+			// revision before any provider or extension can act on it.
+			if (this._planningState.plan?.phase === "ready") {
+				this.changePlan(this._planningState.plan.id, this._planningState.plan.revision);
+			}
+
 			// Flush any pending bash messages before the new prompt
 			assertConversationGenerationCurrent();
 			this._flushPendingBashMessages();
@@ -2330,13 +2605,8 @@ export class AgentSession {
 					});
 				}
 			}
-			// Apply extension-modified system prompt, or reset to base
-			if (result?.systemPrompt) {
-				this.agent.state.systemPrompt = result.systemPrompt;
-			} else {
-				// Ensure we're using the base prompt (in case previous turn had modifications)
-				this.agent.state.systemPrompt = this._baseSystemPrompt;
-			}
+			// Apply the per-turn extension prompt before appending trusted planning instructions.
+			this._applyTrustedPlanningInstructionsToSystemPrompt(result?.systemPrompt);
 
 			this._pendingNextTurnMessages.splice(0, pendingNextTurnMessages.length);
 			// Name the session only after all abortable preflight work is accepted.
@@ -3889,13 +4159,16 @@ export class AgentSession {
 
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
-		const previousActiveToolNames = this.getActiveToolNames();
+		const previousActiveToolNames = this._planningRuntimeInitialized
+			? [...this._requestedBuildToolNames]
+			: this.getActiveToolNames();
 		const allowedToolNames = this._allowedToolNames;
 		const allowUnlistedExtensionTools = this._allowUnlistedExtensionTools;
 		const excludedToolNames = this._excludedToolNames;
 		const isExcludedTool = (name: string): boolean => excludedToolNames?.has(name) === true;
 		const isAllowedListedTool = (name: string): boolean =>
-			(!allowedToolNames || allowedToolNames.has(name)) && !isExcludedTool(name);
+			NATIVE_PLAN_TOOL_NAMES.has(name) ||
+			((!allowedToolNames || allowedToolNames.has(name)) && !isExcludedTool(name));
 		const isAllowedExtensionTool = (name: string): boolean =>
 			!isExcludedTool(name) && (!allowedToolNames || allowUnlistedExtensionTools || allowedToolNames.has(name));
 
@@ -3906,7 +4179,9 @@ export class AgentSession {
 				definition,
 				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
 			})),
-		].filter((tool) => isAllowedExtensionTool(tool.definition.name));
+		].filter(
+			(tool) => isAllowedExtensionTool(tool.definition.name) && !NATIVE_PLAN_TOOL_NAMES.has(tool.definition.name),
+		);
 		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
 			Array.from(this._baseToolDefinitions.entries())
 				.filter(([name]) => isAllowedListedTool(name))
@@ -4090,6 +4365,9 @@ export class AgentSession {
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
+		for (const definition of createPlanningToolDefinitions(this)) {
+			this._baseToolDefinitions.set(definition.name, definition as ToolDefinition);
+		}
 		for (const definition of directMcpToolDefinitions) {
 			this._baseToolDefinitions.set(definition.name, definition as ToolDefinition);
 		}
@@ -4151,7 +4429,9 @@ export class AgentSession {
 			this._modelRegistry.clearRegisteredProviders();
 			await this._resourceLoader.reload();
 			await this._reloadMcpManager();
-			const activeToolNames = this.getActiveToolNames();
+			const activeToolNames = this._planningRuntimeInitialized
+				? [...this._requestedBuildToolNames]
+				: this.getActiveToolNames();
 			if (this._mcpManager?.isEnabled() && !this._allowedToolNames && !this._excludedToolNames?.has("mcp")) {
 				if (!activeToolNames.includes("mcp")) {
 					activeToolNames.push("mcp");

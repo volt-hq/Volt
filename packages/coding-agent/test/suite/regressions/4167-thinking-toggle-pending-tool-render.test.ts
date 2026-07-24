@@ -120,6 +120,7 @@ function createSessionContext(messages: AgentMessage[]): SessionContext {
 		thinkingLevel: "off",
 		model: null,
 		fastMode: { enabled: false },
+		planning: { mode: "build", plan: null },
 	};
 }
 

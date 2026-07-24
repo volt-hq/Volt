@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import type { AgentSession, AgentSessionQueuedMessage } from "../agent-session.ts";
+import { DEFAULT_PLANNING_STATE } from "../planning.ts";
 import { isRuntimeQueueEntryId, isValidClientMessageId } from "../session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
 import { projectSubagentDetails } from "./transcript.ts";
@@ -627,6 +628,8 @@ export function buildRpcSessionState(session: AgentSession): RpcSessionState {
 		thinkingLevel: session.thinkingLevel,
 		availableThinkingLevels: session.getAvailableThinkingLevels(),
 		fastModeEnabled: session.fastModeEnabled,
+		planning:
+			typeof session.getPlanningState === "function" ? session.getPlanningState() : { ...DEFAULT_PLANNING_STATE },
 		isStreaming: session.isStreaming,
 		isBusy: session.isBusy,
 		isCompacting: session.isCompacting,

@@ -24,6 +24,11 @@ export { LoginDialogComponent } from "./login-dialog.ts";
 export { ModelSelectorComponent } from "./model-selector.ts";
 export { OAuthSelectorComponent } from "./oauth-selector.ts";
 export {
+	type PlanDetailsAction,
+	PlanDetailsComponent,
+	PlanStatusComponent,
+} from "./plan-status.ts";
+export {
 	createRemoteControlBackend,
 	type RemoteControlBackend,
 	RemoteControlCenterComponent,

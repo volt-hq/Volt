@@ -252,6 +252,39 @@ export async function handleRpcCommand(
 			return createRpcSuccessResponse(id, "new_session", { cancelled: result.cancelled });
 		}
 
+		case "set_agent_mode": {
+			context.assertConversationGenerationCurrent();
+			return createRpcSuccessResponse(id, "set_agent_mode", session.setAgentMode(command.mode));
+		}
+
+		case "plan_execute": {
+			const result = await runtimeHost.executePlan(
+				command.planId,
+				command.expectedRevision,
+				command.strategy,
+				context.assertConversationGenerationCurrent,
+			);
+			return createRpcSuccessResponse(id, "plan_execute", result);
+		}
+
+		case "plan_change": {
+			context.assertConversationGenerationCurrent();
+			return createRpcSuccessResponse(
+				id,
+				"plan_change",
+				session.changePlan(command.planId, command.expectedRevision),
+			);
+		}
+
+		case "plan_discard": {
+			context.assertConversationGenerationCurrent();
+			return createRpcSuccessResponse(
+				id,
+				"plan_discard",
+				session.discardPlan(command.planId, command.expectedRevision),
+			);
+		}
+
 		// =================================================================
 		// Client capabilities and host-initiated actions
 		// =================================================================

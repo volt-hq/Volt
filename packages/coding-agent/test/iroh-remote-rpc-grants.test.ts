@@ -87,6 +87,9 @@ describe("Iroh remote RPC grants", () => {
 			expect(getIrohRemoteRpcCommandCapabilities({ type }), `classification for ${type}`).toBeDefined();
 		}
 		expect(getIrohRemoteRpcCommandCapabilities({ type: "prompt" })).toEqual(["conversation.control.v1"]);
+		for (const type of ["set_agent_mode", "plan_execute", "plan_change", "plan_discard"]) {
+			expect(getIrohRemoteRpcCommandCapabilities({ type })).toEqual(["conversation.control.v1"]);
+		}
 		expect(getIrohRemoteRpcCommandCapabilities({ type: "set_client_capabilities", features: [] })).toEqual([]);
 		expect(
 			getIrohRemoteRpcCommandCapabilities({
