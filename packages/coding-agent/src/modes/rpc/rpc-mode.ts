@@ -193,6 +193,10 @@ const RPC_CONVERSATION_AUTHORITY_MUTATION_TYPES: ReadonlySet<RpcCommand["type"]>
 	"follow_up",
 	"abort",
 	"new_session",
+	"set_agent_mode",
+	"plan_execute",
+	"plan_change",
+	"plan_discard",
 	"switch_session_by_id",
 	"set_model",
 	"set_thinking_level",
@@ -1129,6 +1133,20 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		},
 		setFastModeEnabled: (enabled) => {
 			commandSession.setFastModeEnabled(enabled);
+		},
+		setAgentMode: (mode) => {
+			assertConversationGenerationCurrent?.();
+			return commandSession.setAgentMode(mode);
+		},
+		executePlan: (planId, expectedRevision, strategy) =>
+			runtimeHost.executePlan(planId, expectedRevision, strategy, assertConversationGenerationCurrent),
+		changePlan: (planId, expectedRevision) => {
+			assertConversationGenerationCurrent?.();
+			return commandSession.changePlan(planId, expectedRevision);
+		},
+		discardPlan: (planId, expectedRevision) => {
+			assertConversationGenerationCurrent?.();
+			return commandSession.discardPlan(planId, expectedRevision);
 		},
 		runReviewAction: async (target, reviewOptions) => {
 			// Detached review: run the fast preflight inline so target errors fail

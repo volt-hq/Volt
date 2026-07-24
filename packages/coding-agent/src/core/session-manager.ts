@@ -37,6 +37,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
+import { clonePlanningState, DEFAULT_PLANNING_STATE, type PlanningState, parsePlanningState } from "./planning.ts";
 import {
 	RPC_CLIENT_MESSAGE_ID_MAX_CHARS,
 	RPC_CLIENT_MESSAGE_ID_PATTERN_SOURCE,
@@ -196,6 +197,12 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	modelId: string;
 }
 
+/** Complete branch-local Plan mode snapshot. */
+export interface PlanningStateChangeEntry extends SessionEntryBase {
+	type: "planning_state_change";
+	planning: PlanningState;
+}
+
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	type: "compaction";
 	summary: string;
@@ -275,6 +282,7 @@ export type SessionEntry =
 	| ThinkingLevelChangeEntry
 	| FastModeChangeEntry
 	| ModelChangeEntry
+	| PlanningStateChangeEntry
 	| CompactionEntry
 	| BranchSummaryEntry
 	| CustomEntry
@@ -567,6 +575,7 @@ export interface SessionContext {
 	thinkingLevel: string;
 	model: { provider: string; modelId: string } | null;
 	fastMode: { enabled: boolean };
+	planning: PlanningState;
 }
 
 export interface SessionInfo {
@@ -799,6 +808,7 @@ export function buildSessionContext(
 			thinkingLevel: "off",
 			model: null,
 			fastMode: { enabled: false },
+			planning: clonePlanningState(DEFAULT_PLANNING_STATE),
 		};
 	}
 	if (leafId) {
@@ -815,6 +825,7 @@ export function buildSessionContext(
 			thinkingLevel: "off",
 			model: null,
 			fastMode: { enabled: false },
+			planning: clonePlanningState(DEFAULT_PLANNING_STATE),
 		};
 	}
 
@@ -830,6 +841,7 @@ export function buildSessionContext(
 	let thinkingLevel = "off";
 	let model: { provider: string; modelId: string } | null = null;
 	let fastMode = { enabled: false };
+	let planning = clonePlanningState(DEFAULT_PLANNING_STATE);
 	let compaction: CompactionEntry | null = null;
 
 	for (const entry of path) {
@@ -839,6 +851,8 @@ export function buildSessionContext(
 			fastMode = { enabled: entry.enabled };
 		} else if (entry.type === "model_change") {
 			model = { provider: entry.provider, modelId: entry.modelId };
+		} else if (entry.type === "planning_state_change") {
+			planning = clonePlanningState(entry.planning);
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
 			model = { provider: entry.message.provider, modelId: entry.message.model };
 		} else if (entry.type === "compaction") {
@@ -896,7 +910,7 @@ export function buildSessionContext(
 		}
 	}
 
-	return { messages, thinkingLevel, model, fastMode };
+	return { messages, thinkingLevel, model, fastMode, planning };
 }
 
 /** Encode a cwd into the safe `--…--` session-directory name. */
@@ -1215,6 +1229,7 @@ function isDisplayedCustomMessage(entry: SessionEntry): entry is CustomMessageEn
 function isSessionFileFlushContent(entry: FileEntry): boolean {
 	return (
 		entry.type === "client_input_receipt" ||
+		entry.type === "planning_state_change" ||
 		(entry.type === "message" && entry.message.role === "assistant") ||
 		(entry.type === "custom_message" && entry.display)
 	);
@@ -1223,6 +1238,7 @@ function isSessionFileFlushContent(entry: FileEntry): boolean {
 function isSessionDurabilityBoundary(entry: SessionEntry): boolean {
 	return (
 		entry.type === "fast_mode_change" ||
+		entry.type === "planning_state_change" ||
 		entry.type === "thinking_level_change" ||
 		entry.type === "model_change" ||
 		isClientInputWalEntry(entry) ||
@@ -1684,7 +1700,7 @@ export class SessionManager {
 
 		const hasFlushContent = this.fileEntries.some(isSessionFileFlushContent);
 		if (!hasFlushContent) {
-			if (entry.type === "fast_mode_change" && !this.flushed) {
+			if ((entry.type === "fast_mode_change" || entry.type === "planning_state_change") && !this.flushed) {
 				this._rewriteFile();
 				this.flushed = true;
 			} else if (this.flushed) {
@@ -2103,6 +2119,19 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			provider,
 			modelId,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append one validated atomic Plan mode snapshot as a child of the current leaf. */
+	appendPlanningState(planning: PlanningState): string {
+		const entry: PlanningStateChangeEntry = {
+			type: "planning_state_change",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			planning: parsePlanningState(planning),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -2544,7 +2573,10 @@ export class SessionManager {
 			// Otherwise defer to _persist(), which creates the file once flush content
 			// arrives, matching the newSession() contract and avoiding duplicate headers.
 			const shouldWriteImmediately = this.fileEntries.some(
-				(entry) => isSessionFileFlushContent(entry) || entry.type === "fast_mode_change",
+				(entry) =>
+					isSessionFileFlushContent(entry) ||
+					entry.type === "fast_mode_change" ||
+					entry.type === "planning_state_change",
 			);
 			if (shouldWriteImmediately) {
 				this._rewriteFile();

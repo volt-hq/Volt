@@ -119,6 +119,18 @@ import {
 	RpcSourceInfoSchema,
 } from "./mcp.ts";
 import {
+	RpcAgentModeSchema,
+	RpcPlanExecutionResultSchema,
+	RpcPlanExecutionSchema,
+	RpcPlanExecutionStrategySchema,
+	RpcPlanningStateChangedEventSchema,
+	RpcPlanningStateSchema,
+	RpcPlanPhaseSchema,
+	RpcPlanStateSchema,
+	RpcPlanStepSchema,
+	RpcPlanStepStatusSchema,
+} from "./planning.ts";
+import {
 	RpcAssistantStreamPositionSchema,
 	RpcClientMessageIdSchema,
 	RpcConversationAuthoritySchema,
@@ -268,6 +280,7 @@ export const RpcServerEventSchema = Type.Union([
 	RpcSubagentDisposedEventSchema,
 	RpcModelsChangedEventSchema,
 	RpcUiActionStateChangedEventSchema,
+	RpcPlanningStateChangedEventSchema,
 ]);
 
 // ============================================================================
@@ -376,6 +389,16 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcActiveRetry: RpcActiveRetrySchema,
 	RpcQueuedMessage: RpcQueuedMessageSchema,
 	RpcQueueUpdateProjection: RpcQueueUpdateProjectionSchema,
+	RpcAgentMode: RpcAgentModeSchema,
+	RpcPlanPhase: RpcPlanPhaseSchema,
+	RpcPlanStepStatus: RpcPlanStepStatusSchema,
+	RpcPlanExecutionStrategy: RpcPlanExecutionStrategySchema,
+	RpcPlanStep: RpcPlanStepSchema,
+	RpcPlanExecution: RpcPlanExecutionSchema,
+	RpcPlanState: RpcPlanStateSchema,
+	RpcPlanningState: RpcPlanningStateSchema,
+	RpcPlanningStateChangedEvent: RpcPlanningStateChangedEventSchema,
+	RpcPlanExecutionResult: RpcPlanExecutionResultSchema,
 	RpcSessionStateProjection: RpcSessionStateProjectionSchema,
 	RpcSessionState: RpcSessionStateSchema,
 	RpcCatalogModel: RpcCatalogModelSchema,

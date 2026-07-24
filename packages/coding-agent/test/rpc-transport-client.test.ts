@@ -9,7 +9,11 @@ import type { AgentSession, AgentSessionEvent, ExtensionBindings, PromptOptions 
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { ResolvedCommand } from "../src/core/extensions/types.ts";
 import {
+	AGENT_MODE_ACTION_ID,
 	CONTEXT_COMPACT_ACTION_ID,
+	PLAN_CHANGE_ACTION_ID,
+	PLAN_DISCARD_ACTION_ID,
+	PLAN_EXECUTE_ACTION_ID,
 	REVIEW_BRANCH_ACTION_ID,
 	REVIEW_COMMIT_ACTION_ID,
 	REVIEW_PR_ACTION_ID,
@@ -1401,6 +1405,34 @@ describe("createInProcessRpcClient", () => {
 			const actions = await client.getUiActions("all");
 			expect(actions).toEqual([
 				expect.objectContaining({
+					id: AGENT_MODE_ACTION_ID,
+					label: "Agent mode",
+					source: "builtin",
+					category: "session",
+					remoteSafe: true,
+				}),
+				expect.objectContaining({
+					id: PLAN_EXECUTE_ACTION_ID,
+					label: "Execute Plan",
+					source: "builtin",
+					enabled: false,
+					remoteSafe: true,
+				}),
+				expect.objectContaining({
+					id: PLAN_CHANGE_ACTION_ID,
+					label: "Change Plan",
+					source: "builtin",
+					enabled: false,
+					remoteSafe: true,
+				}),
+				expect.objectContaining({
+					id: PLAN_DISCARD_ACTION_ID,
+					label: "Discard plan",
+					source: "builtin",
+					enabled: false,
+					remoteSafe: true,
+				}),
+				expect.objectContaining({
 					id: SESSION_NEW_ACTION_ID,
 					label: "New session",
 					source: "builtin",
@@ -1710,6 +1742,10 @@ describe("createInProcessRpcClient", () => {
 			const dynamicActions = actions.filter((action) => action.source !== "builtin");
 
 			expect(builtinActions.map((action) => action.id)).toEqual([
+				AGENT_MODE_ACTION_ID,
+				PLAN_EXECUTE_ACTION_ID,
+				PLAN_CHANGE_ACTION_ID,
+				PLAN_DISCARD_ACTION_ID,
 				SESSION_NEW_ACTION_ID,
 				RUN_CANCEL_ACTION_ID,
 				CONTEXT_COMPACT_ACTION_ID,

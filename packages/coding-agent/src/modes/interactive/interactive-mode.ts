@@ -193,6 +193,7 @@ import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
 import { type HotkeySection, HotkeysComponent } from "./components/hotkeys.ts";
+import { type PlanDetailsAction, PlanDetailsComponent, PlanStatusComponent } from "./components/plan-status.ts";
 import { createRemoteControlBackend, RemoteControlCenterComponent } from "./components/remote-control-center.ts";
 import { isCoalescableAssistantUpdate, StreamingRenderCoalescer } from "./components/streaming-render-coalescer.ts";
 import { VoltAnnouncementComponent } from "./components/volt-announcement.ts";
@@ -402,6 +403,10 @@ export class InteractiveMode {
 	private chatContainer: Container;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
+	private planStatusContainer: Container;
+	private planDetailsContainer: Container;
+	private planStatus: PlanStatusComponent;
+	private planDetails: PlanDetailsComponent | undefined;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
 	private editorComponentFactory: EditorFactory | undefined;
@@ -569,6 +574,8 @@ export class InteractiveMode {
 		this.chatContainer = new Container();
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
+		this.planStatusContainer = new Container();
+		this.planDetailsContainer = new Container();
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
 		this.keybindings = KeybindingsManager.create();
@@ -578,12 +585,14 @@ export class InteractiveMode {
 		this.defaultEditor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
 			paddingX: editorPaddingX,
 			autocompleteMaxVisible,
-			topBorderLabel: "ASK VOLT",
+			topBorderLabel: this.session.agentMode === "plan" ? "PLAN · AGENT READ-ONLY" : "ASK VOLT · BUILD",
 			placeholder: "Type a request or / for commands",
 		});
 		this.editor = this.defaultEditor;
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor as Component);
+		this.planStatus = new PlanStatusComponent(this.session.planningState);
+		this.planStatusContainer.addChild(this.planStatus);
 		this.footerDataProvider = new FooterDataProvider(this.sessionManager.getCwd());
 		this.footer = new FooterComponent(this.session, this.footerDataProvider);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
@@ -854,6 +863,8 @@ export class InteractiveMode {
 		this.ui.addChild(this.statusContainer);
 		this.renderWidgets(); // Initialize with default spacer
 		this.ui.addChild(this.widgetContainerAbove);
+		this.ui.addChild(this.planStatusContainer);
+		this.ui.addChild(this.planDetailsContainer);
 		this.ui.addChild(this.editorContainer);
 		this.ui.addChild(this.widgetContainerBelow);
 		this.ui.addChild(this.footer);
@@ -2153,7 +2164,8 @@ export class InteractiveMode {
 		await this.bindCurrentSessionExtensions();
 		this.subscribeToAgent();
 		await this.updateAvailableProviderCount();
-		this.updateEditorBorderColor();
+		this.closePlanDetails();
+		this.refreshPlanningUi();
 		this.updateTerminalTitle();
 		await this.reconcileDaemonLease();
 	}
@@ -2197,6 +2209,7 @@ export class InteractiveMode {
 		this.streamingMessage = undefined;
 		this.disposePendingTools();
 		this.renderInitialMessages();
+		this.refreshPlanningUi();
 	}
 
 	/**
@@ -2954,6 +2967,7 @@ export class InteractiveMode {
 					bashMode: this.isBashMode,
 					streaming: this.session.isStreaming,
 					hasText: currentText.length > 0,
+					agentMode: this.session.agentMode,
 				}),
 			);
 
@@ -3210,6 +3224,7 @@ export class InteractiveMode {
 		this.defaultEditor.onCtrlD = () => this.handleCtrlD();
 		this.defaultEditor.onAction("app.suspend", () => this.handleCtrlZ());
 		this.defaultEditor.onAction("app.thinking.cycle", () => this.cycleThinkingLevel());
+		this.defaultEditor.onAction("app.mode.toggle", () => this.toggleAgentMode());
 		this.defaultEditor.onAction("app.model.cycleForward", () => this.cycleModel("forward"));
 		this.defaultEditor.onAction("app.model.cycleBackward", () => this.cycleModel("backward"));
 
@@ -3255,6 +3270,11 @@ export class InteractiveMode {
 			setFastModeEnabled: (enabled) => {
 				this.session.setFastModeEnabled(enabled);
 			},
+			setAgentMode: (mode) => this.session.setAgentMode(mode),
+			executePlan: (planId, expectedRevision, strategy) =>
+				this.runtimeHost.executePlan(planId, expectedRevision, strategy),
+			changePlan: (planId, expectedRevision) => this.session.changePlan(planId, expectedRevision),
+			discardPlan: (planId, expectedRevision) => this.session.discardPlan(planId, expectedRevision),
 			runReviewAction: (target, reviewOptions) =>
 				this.runInteractiveReviewWorkflow(target, {
 					tools: reviewOptions.remote ? REMOTE_REVIEW_TOOL_NAMES : this.getReviewToolsForRun(),
@@ -3343,6 +3363,23 @@ export class InteractiveMode {
 			}
 
 			// Handle commands
+			if (text === "/plan") {
+				this.editor.setText("");
+				this.refreshPlanningUi(this.session.setAgentMode("plan"));
+				this.showStatus("Plan mode: agent tools are read-only");
+				return;
+			}
+			if (text === "/build") {
+				this.editor.setText("");
+				this.refreshPlanningUi(this.session.setAgentMode("build"));
+				this.showStatus("Build mode");
+				return;
+			}
+			if (text === "/plan-details") {
+				this.editor.setText("");
+				this.showPlanDetails();
+				return;
+			}
 			if (text === "/settings") {
 				this.showSettingsSelector();
 				this.editor.setText("");
@@ -3641,6 +3678,10 @@ export class InteractiveMode {
 			case "thinking_level_changed":
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
+				break;
+
+			case "planning_state_changed":
+				this.refreshPlanningUi(event.planning);
 				break;
 
 			case "ui_action_state_changed":
@@ -4507,9 +4548,89 @@ export class InteractiveMode {
 				bashMode: this.isBashMode,
 				streaming,
 				hasText: this.editor.getText().length > 0,
+				agentMode: this.session.agentMode,
 			}),
 		);
 		this.ui.requestRender();
+	}
+
+	private toggleAgentMode(): void {
+		const planning = this.session.toggleAgentMode();
+		this.refreshPlanningUi(planning);
+		this.showStatus(planning.mode === "plan" ? "Plan mode: agent tools are read-only" : "Build mode");
+	}
+
+	private refreshPlanningUi(planning = this.session.planningState): void {
+		this.planStatus.setPlanning(planning);
+		const plan = planning.plan;
+		if (this.planDetails && plan) {
+			this.planDetails.setPlan(plan);
+		} else if (this.planDetails && !plan) {
+			this.closePlanDetails();
+		}
+		this.updateEditorBorderColor();
+		if (plan?.phase === "ready" && !this.planDetails) {
+			this.showPlanDetails();
+		}
+		this.ui.requestRender();
+	}
+
+	private showPlanDetails(): void {
+		const plan = this.session.planningState.plan;
+		if (!plan) {
+			this.showStatus("No structured plan yet");
+			return;
+		}
+		this.planDetailsContainer.clear();
+		this.planDetails = new PlanDetailsComponent({
+			plan,
+			getTerminalRows: () => this.ui.terminal.rows,
+			onAction: (action) => {
+				void this.handlePlanDetailsAction(action);
+			},
+			onClose: () => this.closePlanDetails(),
+			requestRender: () => this.ui.requestRender(),
+		});
+		this.planDetailsContainer.addChild(this.planDetails);
+		this.ui.setFocus(this.planDetails);
+		this.ui.requestRender();
+	}
+
+	private closePlanDetails(): void {
+		this.planDetailsContainer.clear();
+		this.planDetails = undefined;
+		this.ui.setFocus(this.editor);
+		this.ui.requestRender();
+	}
+
+	private async handlePlanDetailsAction(action: PlanDetailsAction): Promise<void> {
+		const plan = this.session.planningState.plan;
+		if (!plan || plan.phase !== "ready") {
+			this.showWarning("The ready plan changed; reopen Plan Details");
+			this.closePlanDetails();
+			return;
+		}
+		try {
+			if (action === "change") {
+				this.session.changePlan(plan.id, plan.revision);
+				this.closePlanDetails();
+				this.editor.setText("");
+				this.showStatus("Describe the changes you want in the normal composer");
+				return;
+			}
+			this.closePlanDetails();
+			const result = await this.runtimeHost.executePlan(plan.id, plan.revision, action);
+			this.showStatus(
+				action === "new_session"
+					? `Executing plan in session ${result.selectedSessionId}`
+					: result.started
+						? "Plan execution started"
+						: "Plan execution was already started",
+			);
+		} catch (error: unknown) {
+			this.showError(error instanceof Error ? error.message : String(error));
+			this.refreshPlanningUi();
+		}
 	}
 
 	private cycleThinkingLevel(): void {
@@ -4945,6 +5066,8 @@ export class InteractiveMode {
 			this.pendingMessagesContainer,
 			this.statusContainer,
 			this.widgetContainerAbove,
+			this.planStatusContainer,
+			this.planDetailsContainer,
 			this.editorContainer,
 			this.widgetContainerBelow,
 			this.customFooter ?? this.footer,
@@ -7575,6 +7698,7 @@ export class InteractiveMode {
 		const clear = this.getAppKeyDisplay("app.clear");
 		const exit = this.getAppKeyDisplay("app.exit");
 		const suspend = this.getAppKeyDisplay("app.suspend");
+		const toggleAgentMode = this.getAppKeyDisplay("app.mode.toggle");
 		const cycleThinkingLevel = this.getAppKeyDisplay("app.thinking.cycle");
 		const cycleModelForward = this.getAppKeyDisplay("app.model.cycleForward");
 		const selectModel = this.getAppKeyDisplay("app.model.select");
@@ -7597,6 +7721,7 @@ export class InteractiveMode {
 					{ key: dequeue, action: "Restore queued messages" },
 					{ key: expandTools, action: "Toggle tool output expansion" },
 					{ key: selectModel, action: "Open model selector" },
+					{ key: toggleAgentMode, action: "Toggle Build / Plan mode" },
 					{ key: cycleThinkingLevel, action: "Cycle thinking level" },
 					{ key: openSubagents, action: "Switch to subagent conversations" },
 				],
@@ -7640,6 +7765,7 @@ export class InteractiveMode {
 					{ key: clear, action: "Clear editor (first) / exit (second)" },
 					{ key: exit, action: "Exit when editor is empty" },
 					{ key: suspend, action: "Suspend to background" },
+					{ key: toggleAgentMode, action: "Toggle Build / Plan mode" },
 					{ key: cycleThinkingLevel, action: "Cycle thinking level" },
 					{ key: `${cycleModelForward} / ${cycleModelBackward}`, action: "Cycle models" },
 					{ key: selectModel, action: "Open model selector" },

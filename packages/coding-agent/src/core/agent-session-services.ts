@@ -7,6 +7,7 @@ import { AuthStorage } from "./auth-storage.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import type { HostInteraction } from "./host-interaction.ts";
 import { ModelRegistry } from "./model-registry.ts";
+import type { AgentMode } from "./planning.ts";
 import {
 	DefaultResourceLoader,
 	type DefaultResourceLoaderOptions,
@@ -64,6 +65,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	sessionStartEvent?: SessionStartEvent;
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
+	agentMode?: AgentMode;
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 	tools?: string[];
 	allowUnlistedExtensionTools?: CreateAgentSessionOptions["allowUnlistedExtensionTools"];
@@ -211,6 +213,7 @@ export async function createAgentSessionFromServices(
 		sessionManager: options.sessionManager,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
+		agentMode: options.agentMode,
 		scopedModels: options.scopedModels,
 		tools: options.tools,
 		allowUnlistedExtensionTools: options.allowUnlistedExtensionTools,

@@ -182,6 +182,7 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 		subscribe: vi.fn((_handler: (event: AgentSessionEvent) => void) => () => {}),
 		thinkingLevel: "off" as const,
 		fastModeEnabled: false,
+		getPlanningState: () => ({ mode: "build" as const, plan: null }),
 		waitForIdle: vi.fn(async () => {}),
 		agent: {
 			subscribe: vi.fn((_handler: () => Promise<void> | void) => () => {}),
@@ -233,6 +234,10 @@ export function createTestIrohConversationOptions(runtimeHost: AgentSessionRunti
 					thinkingLevel: session.thinkingLevel,
 					availableThinkingLevels: [session.thinkingLevel],
 					fastModeEnabled: session.fastModeEnabled,
+					planning:
+						typeof session.getPlanningState === "function"
+							? session.getPlanningState()
+							: { mode: "build", plan: null },
 					isStreaming: session.isStreaming,
 					isCompacting: session.isCompacting,
 					steeringMode: session.steeringMode,

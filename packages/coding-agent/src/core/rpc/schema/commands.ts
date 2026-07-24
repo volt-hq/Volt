@@ -9,6 +9,7 @@
 
 import { type TLiteral, type TObject, type TOptional, type TProperties, type TString, Type } from "typebox";
 import { openStringEnum, stringEnum } from "./helpers.ts";
+import { RpcAgentModeSchema, RpcPlanExecutionStrategySchema } from "./planning.ts";
 import {
 	RPC_TRIMMED_NON_EMPTY_PATTERN,
 	RpcAssistantStreamPositionSchema,
@@ -27,7 +28,7 @@ import {
 	RpcUiActionListScopeSchema,
 } from "./primitives.ts";
 
-export const RpcClientCapabilityFeatureSchema = openStringEnum(["host_action_requests.v1"]);
+export const RpcClientCapabilityFeatureSchema = openStringEnum(["host_action_requests.v1", "planning_state.v1"]);
 export const RpcMcpAuthFlowSchema = stringEnum(["browser", "device"]);
 
 /**
@@ -99,6 +100,22 @@ export const RPC_COMMAND_SCHEMAS = {
 	abort: commandSchema("abort", {}),
 	new_session: commandSchema("new_session", {
 		parentSession: Type.Optional(Type.String()),
+	}),
+	set_agent_mode: commandSchema("set_agent_mode", {
+		mode: RpcAgentModeSchema,
+	}),
+	plan_execute: commandSchema("plan_execute", {
+		planId: Type.String(),
+		expectedRevision: Type.Integer({ minimum: 0 }),
+		strategy: RpcPlanExecutionStrategySchema,
+	}),
+	plan_change: commandSchema("plan_change", {
+		planId: Type.String(),
+		expectedRevision: Type.Integer({ minimum: 0 }),
+	}),
+	plan_discard: commandSchema("plan_discard", {
+		planId: Type.String(),
+		expectedRevision: Type.Integer({ minimum: 0 }),
 	}),
 
 	// Client capabilities and host-initiated actions

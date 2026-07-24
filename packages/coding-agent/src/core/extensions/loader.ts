@@ -27,6 +27,7 @@ import { resolvePath } from "../../utils/paths.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
+import { RESERVED_PLAN_COMMAND_NAMES, RESERVED_PLAN_TOOL_NAMES } from "../planning.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
 import type {
 	Extension,
@@ -234,6 +235,9 @@ function createExtensionAPI(
 
 		registerTool(tool: ToolDefinition): void {
 			runtime.assertActive();
+			if (RESERVED_PLAN_TOOL_NAMES.has(tool.name)) {
+				throw new Error(`Extension tool '${tool.name}' is reserved by native Plan mode`);
+			}
 			extension.tools.set(tool.name, {
 				definition: tool,
 				sourceInfo: extension.sourceInfo,
@@ -244,6 +248,9 @@ function createExtensionAPI(
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void {
 			runtime.assertActive();
 			validateExtensionCommandName(name);
+			if (RESERVED_PLAN_COMMAND_NAMES.has(name)) {
+				throw new Error(`Extension command '/${name}' is reserved by native Plan mode`);
+			}
 			extension.commands.set(name, {
 				name,
 				sourceInfo: extension.sourceInfo,

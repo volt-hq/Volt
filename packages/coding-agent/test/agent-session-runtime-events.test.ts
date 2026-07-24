@@ -260,6 +260,110 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		});
 	});
 
+	it("starts one revision-fenced retained-context plan execution", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		runtimeHost.session.setAgentMode("plan");
+		const draft = runtimeHost.session.updatePlan({
+			title: "Retain context",
+			summary: "Execute in the current session.",
+			steps: [{ text: "Implement the change", status: "pending" }],
+		});
+		const ready = runtimeHost.session.submitPlan({
+			planId: draft.id,
+			expectedRevision: draft.revision,
+			title: "Retain context",
+			summary: "Execute in the current session.",
+		});
+
+		const started = await runtimeHost.executePlan(ready.id, ready.revision, "retain_context");
+		expect(started).toMatchObject({
+			selectedSessionId: runtimeHost.session.sessionId,
+			started: true,
+			planning: { mode: "build", plan: { phase: "active" } },
+		});
+		await runtimeHost.session.waitForIdle();
+
+		const executionEntries = runtimeHost.session.sessionManager
+			.getBranch()
+			.filter((entry) => entry.type === "custom_message" && entry.customType === "volt-plan-execution");
+		expect(executionEntries).toHaveLength(1);
+
+		const retry = await runtimeHost.executePlan(ready.id, ready.revision, "retain_context");
+		expect(retry.started).toBe(false);
+		expect(
+			runtimeHost.session.sessionManager
+				.getBranch()
+				.filter((entry) => entry.type === "custom_message" && entry.customType === "volt-plan-execution"),
+		).toHaveLength(1);
+	});
+
+	it("hands a ready plan to a clean linked execution session exactly once", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		await runtimeHost.session.prompt("Source-only conversation");
+		const sourceManager = runtimeHost.session.sessionManager;
+		const sourceSessionId = runtimeHost.session.sessionId;
+		const sourceSessionFile = runtimeHost.session.sessionFile;
+		expect(sourceSessionFile).toBeDefined();
+
+		runtimeHost.session.setAgentMode("plan");
+		const draft = runtimeHost.session.updatePlan({
+			title: "Clear context",
+			summary: "Execute from only the approved plan.",
+			steps: [{ text: "Implement the isolated change", status: "pending" }],
+		});
+		const ready = runtimeHost.session.submitPlan({
+			planId: draft.id,
+			expectedRevision: draft.revision,
+			title: "Clear context",
+			summary: "Execute from only the approved plan.",
+		});
+
+		const started = await runtimeHost.executePlan(ready.id, ready.revision, "new_session");
+		expect(started.started).toBe(true);
+		expect(started.selectedSessionId).not.toBe(sourceSessionId);
+		expect(runtimeHost.session.sessionId).toBe(started.selectedSessionId);
+		await runtimeHost.session.waitForIdle();
+
+		expect(runtimeHost.session.sessionManager.getHeader()?.parentSession).toBe(sourceSessionFile);
+		expect(runtimeHost.session.planningState).toMatchObject({
+			mode: "build",
+			plan: {
+				id: ready.id,
+				phase: "active",
+				execution: {
+					approvedRevision: ready.revision,
+					strategy: "new_session",
+					sourceSessionId,
+					targetSessionId: started.selectedSessionId,
+				},
+			},
+		});
+		expect(sourceManager.buildSessionContext().planning).toMatchObject({
+			mode: "build",
+			plan: {
+				id: ready.id,
+				phase: "handed_off",
+				execution: { targetSessionId: started.selectedSessionId },
+			},
+		});
+
+		const childBranch = runtimeHost.session.sessionManager.getBranch();
+		expect(
+			childBranch.some(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "user" &&
+					entry.message.content === "Source-only conversation",
+			),
+		).toBe(false);
+		expect(
+			childBranch.filter((entry) => entry.type === "custom_message" && entry.customType === "volt-plan-execution"),
+		).toHaveLength(1);
+
+		const retry = await runtimeHost.executePlan(ready.id, ready.revision, "new_session");
+		expect(retry).toMatchObject({ selectedSessionId: started.selectedSessionId, started: false });
+	});
+
 	it("rejects session replacement and fork commands while manual compaction owns the persistence leaf", async () => {
 		const { runtimeHost } = await createRuntimeHost(() => {});
 		await runtimeHost.session.prompt("first branch turn");
@@ -1013,6 +1117,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 					thinkingLevel: "off",
 					availableThinkingLevels: ["off"],
 					fastModeEnabled: false,
+					planning: { mode: "build", plan: null },
 					isStreaming: false,
 					isCompacting: false,
 					steeringMode: "one-at-a-time",
@@ -1047,6 +1152,10 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		manager.reserveClientInput("runtime-private-wal", "prompt", { message: "runtime private WAL" });
 		manager.transitionClientInput("runtime-private-wal", "started");
+		await subscription.flush();
+		expect(writes).toHaveLength(bootstrapCount);
+
+		manager.appendPlanningState({ mode: "plan", plan: null });
 		await subscription.flush();
 		expect(writes).toHaveLength(bootstrapCount);
 
@@ -1095,6 +1204,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 					thinkingLevel: "off",
 					availableThinkingLevels: ["off"],
 					fastModeEnabled: false,
+					planning: { mode: "build", plan: null },
 					isStreaming: false,
 					isCompacting: false,
 					steeringMode: "one-at-a-time",
@@ -1184,6 +1294,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 					thinkingLevel: "off",
 					availableThinkingLevels: ["off"],
 					fastModeEnabled: false,
+					planning: { mode: "build", plan: null },
 					isStreaming: false,
 					isCompacting: false,
 					steeringMode: "one-at-a-time",

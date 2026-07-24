@@ -1537,8 +1537,8 @@ Register a custom TUI renderer for messages with your `customType`. See [Custom 
 Register a keyboard shortcut. See [keybindings.md](keybindings.md) for the shortcut format and built-in keybindings.
 
 ```typescript
-volt.registerShortcut("ctrl+shift+p", {
-  description: "Toggle plan mode",
+volt.registerShortcut("ctrl+shift+f", {
+  description: "Toggle focus mode",
   handler: async (ctx) => {
     ctx.ui.notify("Toggled!");
   },
@@ -1550,15 +1550,15 @@ volt.registerShortcut("ctrl+shift+p", {
 Register a CLI flag.
 
 ```typescript
-volt.registerFlag("plan", {
-  description: "Start in plan mode",
+volt.registerFlag("focus-mode", {
+  description: "Start in focus mode",
   type: "boolean",
   default: false,
 });
 
 // Check value
-if (volt.getFlag("plan")) {
-  // Plan mode enabled
+if (volt.getFlag("focus-mode")) {
+  // Focus mode enabled
 }
 ```
 
@@ -2673,7 +2673,6 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `timed-confirm.ts` | Dialogs with timeout | `ui.confirm` with timeout/signal |
 | `mac-system-theme.ts` | Auto-switch theme | `setTheme`, `exec` |
 | **Complex Extensions** |||
-| `plan-mode/` | Full plan mode implementation | All event types, `registerCommand`, `registerShortcut`, `registerFlag`, `setStatus`, `setWidget`, `sendMessage`, `setActiveTools` |
 | `preset.ts` | Saveable presets (model, tools, thinking) | `registerCommand`, `registerShortcut`, `registerFlag`, `setModel`, `setActiveTools`, `setThinkingLevel`, `appendEntry` |
 | `tools.ts` | Toggle tools on/off UI | `registerCommand`, `setActiveTools`, `SettingsList`, session events |
 | **Remote & Sandbox** |||

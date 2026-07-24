@@ -52,7 +52,7 @@ The [`examples/extensions/subagent/`](../examples/extensions/subagent/) implemen
 
 - No durable job recovery beyond normal persisted session state.
 - No sandbox. Subagents run with the same host permissions as Volt.
-- No plan-mode or task-manager policy baked into core.
+- Plan mode excludes subagents in v1; Build mode keeps the existing delegation policy.
 - No multi-user collaboration semantics.
 - No TUI tunneling for child agents.
 - No mandatory Iroh dependency for local subagents.

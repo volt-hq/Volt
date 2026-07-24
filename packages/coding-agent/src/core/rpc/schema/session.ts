@@ -6,6 +6,7 @@
 import { Type } from "typebox";
 import { RpcModelSchema, rpcModelProperties } from "./external.ts";
 import { readonlyArrayOf, stringEnum } from "./helpers.ts";
+import { RpcPlanningStateSchema } from "./planning.ts";
 import { RpcThinkingLevelSchema } from "./primitives.ts";
 import { RpcProjectionCollectionTruncationSchema, RpcProjectionTruncationSchema } from "./projections.ts";
 
@@ -95,6 +96,8 @@ export const RpcSessionStateSchema = Type.Object(
 		availableThinkingLevels: Type.Array(RpcThinkingLevelSchema),
 		/** Authoritative branch-local Fast mode state for bootstrap/checkpoint recovery. */
 		fastModeEnabled: Type.Boolean(),
+		/** Authoritative branch-local agent mode and structured plan snapshot. */
+		planning: RpcPlanningStateSchema,
 		/** Whether a provider run or session-level continuation is active. */
 		isStreaming: Type.Boolean(),
 		/** Whether any prompt work, including asynchronous preflight, is active. */

@@ -17,6 +17,7 @@ export interface Args {
 	systemPrompt?: string;
 	appendSystemPrompt?: string[];
 	thinking?: ThinkingLevel;
+	plan?: boolean;
 	continue?: boolean;
 	resume?: boolean;
 	help?: boolean;
@@ -150,6 +151,8 @@ export function parseArgs(args: string[]): Args {
 					message: `Invalid thinking level "${level}". Valid values: ${VALID_THINKING_LEVELS.join(", ")}`,
 				});
 			}
+		} else if (arg === "--plan") {
+			result.plan = true;
 		} else if (arg === "--print" || arg === "-p") {
 			result.print = true;
 			const next = args[i + 1];
@@ -281,6 +284,7 @@ ${chalk.bold("Options:")}
   --exclude-tools, -xt <tools>   Comma-separated denylist of tool names to disable
                                  Applies to built-in, extension, and custom tools
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh, max
+  --plan                         Start in Plan mode with read-only agent tools
   --extension, -e <path>         Load an extension file (can be used multiple times)
   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)
   --skill <path>                 Load a skill file or directory (can be used multiple times)
@@ -300,7 +304,7 @@ ${chalk.bold("Options:")}
   --help, -h                     Show this help
   --version, -v                  Show version number
 
-Extensions can register additional flags (e.g., --plan from plan-mode extension).${extensionFlagsText}
+Extensions can register additional flags.${extensionFlagsText}
 
 ${chalk.bold("Examples:")}
   # Interactive mode

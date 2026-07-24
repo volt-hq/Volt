@@ -664,6 +664,7 @@ const CONVERSATION_SOURCE_EVENT_TYPES = new Set([
 	"compaction_end",
 	"session_info_changed",
 	"thinking_level_changed",
+	"planning_state_changed",
 	"ui_action_state_changed",
 	"auto_retry_start",
 	"auto_retry_end",
