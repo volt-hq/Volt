@@ -5,6 +5,7 @@ import {
 	CONTEXT_COMPACT_ACTION_ID,
 	CONTEXT_COMPACT_SLASH_ALIAS,
 	HostActionRegistry,
+	isRemoteSafeBuiltinHostActionId,
 	PLAN_CHANGE_ACTION_ID,
 	PLAN_DISCARD_ACTION_ID,
 	PLAN_EXECUTE_ACTION_ID,
@@ -455,6 +456,43 @@ describe("HostActionRegistry", () => {
 			{ kind: "commit", sha: "HEAD~1" },
 			{ remote: true, requireConfirmation: true, controls: {} },
 		);
+	});
+
+	test("keeps review feedback export local-only", async () => {
+		const runReviewLifecycleAction = vi.fn(async () => ({
+			action: REVIEW_EXPORT_FEEDBACK_ACTION_ID,
+			status: "completed" as const,
+		}));
+		const registry = registerBuiltinHostActions(new HostActionRegistry());
+		const context = {
+			session: { isStreaming: false, isCompacting: false },
+			abortRun: vi.fn(async () => {}),
+			compactContext: vi.fn(async () => createCompactionResult()),
+			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			renameSession: vi.fn(() => {}),
+			runReviewLifecycleAction,
+		};
+
+		expect(registry.getDescriptor(REVIEW_EXPORT_FEEDBACK_ACTION_ID, context)).toEqual(
+			expect.objectContaining({ remoteSafe: false }),
+		);
+		expect(isRemoteSafeBuiltinHostActionId(REVIEW_EXPORT_FEEDBACK_ACTION_ID)).toBe(false);
+		await expect(
+			registry.invoke(
+				REVIEW_EXPORT_FEEDBACK_ACTION_ID,
+				context,
+				{ path: "../../package.json" },
+				{ requireRemoteSafe: true },
+			),
+		).rejects.toThrow(`UI action not available over remote host: ${REVIEW_EXPORT_FEEDBACK_ACTION_ID}`);
+		expect(runReviewLifecycleAction).not.toHaveBeenCalled();
+
+		await expect(
+			registry.invoke(REVIEW_EXPORT_FEEDBACK_ACTION_ID, context, { path: "review-feedback.json" }),
+		).resolves.toEqual({ action: REVIEW_EXPORT_FEEDBACK_ACTION_ID, status: "completed" });
+		expect(runReviewLifecycleAction).toHaveBeenCalledWith(REVIEW_EXPORT_FEEDBACK_ACTION_ID, {
+			path: "review-feedback.json",
+		});
 	});
 
 	test("rechecks built-in availability and validates arguments at invocation time", async () => {

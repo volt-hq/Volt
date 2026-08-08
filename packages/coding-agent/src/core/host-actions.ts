@@ -185,7 +185,6 @@ const REMOTE_SAFE_BUILTIN_HOST_ACTION_IDS = new Set<string>([
 	REVIEW_FEEDBACK_ACTION_ID,
 	REVIEW_RERUN_ACTION_ID,
 	REVIEW_PUBLISH_ACTION_ID,
-	REVIEW_EXPORT_FEEDBACK_ACTION_ID,
 ]);
 
 export class HostActionRegistry {
@@ -763,7 +762,7 @@ export function registerBuiltinHostActions(registry: HostActionRegistry): HostAc
 		presentation: { kind: "detail", group: "Review", priority: 20 },
 		args: [{ name: "path", label: "Output path", type: "string", required: false }],
 		requiresConfirmation: false,
-		remoteSafe: true,
+		remoteSafe: false,
 		handler: (context, args) => invokeReviewLifecycleAction(context, REVIEW_EXPORT_FEEDBACK_ACTION_ID, args),
 	});
 	return registry;
