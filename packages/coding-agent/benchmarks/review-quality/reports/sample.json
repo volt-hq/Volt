@@ -1,0 +1,42 @@
+{
+	"schemaVersion": 1,
+	"run": {
+		"mode": "sample",
+		"provider": "checked-in",
+		"model": "semantic-anchor-sample",
+		"latencyMs": 350,
+		"tokenUse": {
+			"input": 850,
+			"output": 140,
+			"cacheRead": 10,
+			"cacheWrite": 0,
+			"total": 1000
+		},
+		"reportedCostUsd": 0.0125
+	},
+	"cases": [
+		{
+			"caseId": "token-refresh-bug",
+			"findings": [
+				{
+					"issueKey": "expired-token-remains-usable",
+					"path": "src/token-cache.ts",
+					"startLine": 7,
+					"endLine": 7
+				}
+			],
+			"coverage": {
+				"reviewedFiles": ["src/token-cache.ts"],
+				"reviewedHunks": ["src/token-cache.ts#1"]
+			}
+		},
+		{
+			"caseId": "token-refresh-clean",
+			"findings": [],
+			"coverage": {
+				"reviewedFiles": ["src/token-cache.ts"],
+				"reviewedHunks": ["src/token-cache.ts#1"]
+			}
+		}
+	]
+}
