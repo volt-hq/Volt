@@ -534,9 +534,9 @@ function parseHunks(path: string, patch: string): ReviewSnapshotHunk[] {
 			const line = lines[index] ?? "";
 			if (line.startsWith("diff --git ")) break;
 			hunkLines.push(line);
-			if (line.startsWith("-") && !line.startsWith("---")) {
+			if (line.startsWith("-")) {
 				baseLines.push(oldLine++);
-			} else if (line.startsWith("+") && !line.startsWith("+++")) {
+			} else if (line.startsWith("+")) {
 				headLines.push(newLine++);
 			} else if (!line.startsWith("\\")) {
 				oldLine++;

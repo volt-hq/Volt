@@ -98,6 +98,21 @@ describe("review snapshots", () => {
 		expect(readFileSync(join(checkout, "untracked.txt"), "utf8")).toBe("untracked\n");
 	});
 
+	it("tracks changed source lines that resemble diff file headers", async () => {
+		const repository = createRepository();
+		writeFileSync(join(repository, "tracked.txt"), "prefix\n--old marker\nold tail\nsuffix\n");
+		git(repository, "add", "tracked.txt");
+		git(repository, "commit", "-m", "add diff marker fixture");
+		writeFileSync(join(repository, "tracked.txt"), "prefix\n++new marker\nnew tail\nsuffix\n");
+
+		const snapshot = await resolve({ kind: "uncommitted" }, repository);
+		const hunk = snapshot.changedFiles.find((file) => file.path === "tracked.txt")?.hunks[0];
+		expect(hunk).toMatchObject({
+			baseChangedLines: [{ startLine: 2, endLine: 3 }],
+			headChangedLines: [{ startLine: 2, endLine: 3 }],
+		});
+	});
+
 	it("uses merge-base and captured HEAD identities for branch reviews", async () => {
 		const repository = createRepository();
 		git(repository, "checkout", "-b", "feature");
