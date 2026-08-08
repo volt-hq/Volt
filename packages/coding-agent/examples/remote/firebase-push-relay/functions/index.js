@@ -3,10 +3,18 @@ const { getAppCheck } = require("firebase-admin/app-check");
 const { initializeApp, getApps } = require("firebase-admin/app");
 const { FieldValue, Timestamp, getFirestore } = require("firebase-admin/firestore");
 const { getMessaging } = require("firebase-admin/messaging");
+const { error: logFirebaseError, info: logFirebaseInfo } = require("firebase-functions/logger");
+const { defineSecret, defineString } = require("firebase-functions/params");
 const { onRequest } = require("firebase-functions/v2/https");
+const {
+	createIrohEnrollmentApiHandler,
+	createIrohRelayAccessHandler,
+} = require("./enrollment-handler.js");
+const { getEnrollmentConfig } = require("./enrollment-core.js");
 const { createPushTargetRegistrationHandler } = require("./registration.js");
 const {
 	RequestError,
+	SERVICE_ACCOUNT_EMAIL_PATTERN,
 	assertRequestEnvelope,
 	assertVerifiedAppCheck,
 	getAllowedFirebaseAppIds,
@@ -14,6 +22,7 @@ const {
 	getConfiguredRelayUrl,
 	getHeader,
 	getPushTargetTtlMs,
+	getRuntimeServiceAccounts,
 	isPushTargetExpired,
 	parseNotification,
 	parsePushTargetRevocation,
@@ -24,6 +33,8 @@ const {
 
 const DEFAULT_COLLECTION = "voltPushTargets";
 const DEFAULT_REGION = "us-central1";
+const ENROLLMENT_DATABASE_ID = "volt-iroh-enrollment";
+const PUSH_RELAY_DATABASE_ID = "volt-push-relay";
 const DELIVERY_QUOTA_WINDOW_MS = 60_000;
 const DEFAULT_DELIVERIES_PER_TARGET_PER_MINUTE = 30;
 const DEFAULT_REGISTRATIONS_PER_INSTANCE_PER_MINUTE = 30;
@@ -53,6 +64,13 @@ const maxRegistrationsPerInstancePerMinute = getBoundedPositiveInteger(
 	DEFAULT_REGISTRATIONS_PER_INSTANCE_PER_MINUTE,
 );
 const registrationWindows = new Map();
+const enrollmentConfig = getEnrollmentConfig();
+const irohEnrollmentServiceAccount = defineServiceAccountParameter("IROH_ENROLLMENT_SERVICE_ACCOUNT");
+const irohRelayAccessServiceAccount = defineServiceAccountParameter("IROH_RELAY_ACCESS_SERVICE_ACCOUNT");
+const pushRelayServiceAccount = defineServiceAccountParameter("PUSH_RELAY_SERVICE_ACCOUNT");
+const irohEnrollmentIpSalt = defineSecret("IROH_ENROLLMENT_IP_SALT");
+const irohRelayAccessSecretCurrent = defineSecret("IROH_RELAY_ACCESS_SECRET_CURRENT");
+const irohRelayAccessSecretNext = defineSecret("IROH_RELAY_ACCESS_SECRET_NEXT");
 const registerPushTarget = createPushTargetRegistrationHandler({
 	enforceRegistrationRateLimit,
 	getPushTargetsCollection,
@@ -63,7 +81,119 @@ const registerPushTarget = createPushTargetRegistrationHandler({
 	timestampFromMillis: (value) => Timestamp.fromMillis(value),
 	verifyRegistrationAppCheck,
 });
+const handleIrohEnrollmentApi = withRuntimeServiceAccountValidation(createIrohEnrollmentApiHandler({
+	config: enrollmentConfig,
+	getFirestore: getEnrollmentFirestore,
+	getIpSalt: () => irohEnrollmentIpSalt.value(),
+	logError: (entry) => logFirebaseError("iroh enrollment request failed", entry),
+	logEvent: (entry) => logFirebaseInfo("iroh enrollment request", entry),
+	now: Date.now,
+	timestampFromMillis: (value) => Timestamp.fromMillis(value),
+	verifyLimitedUseAppCheck: verifyRegistrationAppCheck,
+}));
+const handleIrohRelayAccess = withRuntimeServiceAccountValidation(createIrohRelayAccessHandler({
+	getFirestore: getEnrollmentFirestore,
+	getRelayAccessSecrets: () => [
+		irohRelayAccessSecretCurrent.value(),
+		irohRelayAccessSecretNext.value(),
+	],
+	logError: (entry) => logFirebaseError("Iroh relay access request failed", entry),
+	logEvent: (entry) => logFirebaseInfo("Iroh relay access request", entry),
+	now: Date.now,
+	requestsPerEndpointPerWindow: enrollmentConfig.requestsPerEndpointPerWindow,
+	timestampFromMillis: (value) => Timestamp.fromMillis(value),
+}));
 
+exports.irohEnrollmentApi = onRequest(
+	{
+		concurrency: 40,
+		cors: false,
+		ingressSettings: "ALLOW_INTERNAL_AND_GCLB",
+		invoker: "public",
+		maxInstances: 20,
+		memory: "256MiB",
+		region: process.env.FUNCTION_REGION || DEFAULT_REGION,
+		serviceAccount: irohEnrollmentServiceAccount,
+		secrets: [irohEnrollmentIpSalt],
+		timeoutSeconds: 15,
+	},
+	handleIrohEnrollmentApi,
+);
+
+exports.irohRelayAccess = onRequest(
+	{
+		concurrency: 1,
+		cors: false,
+		ingressSettings: "ALLOW_INTERNAL_AND_GCLB",
+		invoker: "public",
+		maxInstances: 20,
+		memory: "256MiB",
+		region: process.env.FUNCTION_REGION || DEFAULT_REGION,
+		serviceAccount: irohRelayAccessServiceAccount,
+		secrets: [irohRelayAccessSecretCurrent, irohRelayAccessSecretNext],
+		timeoutSeconds: 15,
+	},
+	handleIrohRelayAccess,
+);
+
+// Retained only as the unshipped rollback target during the protected-edge
+// soak. Delete this export after the recorded retirement gate passes.
+exports.irohEnrollment = onRequest(
+	{
+		concurrency: 40,
+		cors: false,
+		ingressSettings: "ALLOW_INTERNAL_AND_GCLB",
+		invoker: "public",
+		maxInstances: 20,
+		memory: "256MiB",
+		region: process.env.FUNCTION_REGION || DEFAULT_REGION,
+		serviceAccount: irohEnrollmentServiceAccount,
+		secrets: [
+			irohEnrollmentIpSalt,
+			irohRelayAccessSecretCurrent,
+			irohRelayAccessSecretNext,
+		],
+		timeoutSeconds: 15,
+	},
+	(request, response) => request.path === "/v1/relay-access"
+		? handleIrohRelayAccess(request, response)
+		: handleIrohEnrollmentApi(request, response),
+);
+
+const handlePushRelayRequest = async (request, response) => {
+	assertRuntimeServiceAccountsConfigured();
+	response.set("cache-control", "no-store");
+	response.set("x-content-type-options", "nosniff");
+	try {
+		await routeRequest(request, response);
+	} catch (error) {
+		if (response.headersSent) return;
+		if (error instanceof RequestError) {
+			response.status(error.status).json({ error: error.publicMessage });
+			return;
+		}
+		console.error("push relay request failed", getSafeErrorLog(error));
+		response.status(500).json({ error: "internal_error" });
+	}
+};
+
+exports.pushRelayApi = onRequest(
+	{
+		concurrency: 20,
+		cors: false,
+		ingressSettings: "ALLOW_INTERNAL_AND_GCLB",
+		invoker: "public",
+		maxInstances: 10,
+		memory: "256MiB",
+		region: process.env.FUNCTION_REGION || DEFAULT_REGION,
+		serviceAccount: pushRelayServiceAccount,
+		timeoutSeconds: 15,
+	},
+	handlePushRelayRequest,
+);
+
+// Retained only as the unshipped rollback target during the protected-edge
+// soak. Delete this export after the recorded retirement gate passes.
 exports.pushRelay = onRequest(
 	{
 		concurrency: 20,
@@ -72,32 +202,50 @@ exports.pushRelay = onRequest(
 		maxInstances: 10,
 		memory: "256MiB",
 		region: process.env.FUNCTION_REGION || DEFAULT_REGION,
+		serviceAccount: pushRelayServiceAccount,
 		timeoutSeconds: 15,
 	},
-	async (request, response) => {
-		response.set("cache-control", "no-store");
-		response.set("x-content-type-options", "nosniff");
-		try {
-			await routeRequest(request, response);
-		} catch (error) {
-			if (response.headersSent) return;
-			if (error instanceof RequestError) {
-				response.status(error.status).json({ error: error.publicMessage });
-				return;
-			}
-			console.error("push relay request failed", getSafeErrorLog(error));
-			response.status(500).json({ error: "internal_error" });
-		}
-	},
+	handlePushRelayRequest,
 );
+
+function defineServiceAccountParameter(name) {
+	return defineString(name, {
+		input: {
+			text: {
+				nonEmpty: true,
+				validationErrorMessage: `${name} must be a dedicated service account email`,
+				validationRegex: SERVICE_ACCOUNT_EMAIL_PATTERN,
+			},
+		},
+	});
+}
+
+let runtimeServiceAccountsValidated = false;
+function assertRuntimeServiceAccountsConfigured() {
+	if (runtimeServiceAccountsValidated) return;
+	getRuntimeServiceAccounts();
+	runtimeServiceAccountsValidated = true;
+}
+
+function withRuntimeServiceAccountValidation(handler) {
+	return async (request, response) => {
+		assertRuntimeServiceAccountsConfigured();
+		return handler(request, response);
+	};
+}
 
 async function routeRequest(request, response) {
 	if (request.method !== "POST") {
 		response.set("allow", "POST");
 		throw new RequestError(405, "method_not_allowed");
 	}
+	for (const target of [request.originalUrl, request.url, request.path]) {
+		if (typeof target === "string" && target.includes("?")) {
+			throw new RequestError(400, "query_not_allowed");
+		}
+	}
 	assertRequestEnvelope(request);
-	const routePath = normalizeRoutePath(request.path || request.originalUrl || request.url || "/");
+	const routePath = typeof request.path === "string" && request.path.length > 0 ? request.path : "/";
 	if (routePath === "/v1/push-targets") {
 		await registerPushTarget(request, response);
 		return;
@@ -117,8 +265,16 @@ async function routeRequest(request, response) {
 	throw new RequestError(404, "not_found");
 }
 
+function getPushFirestore() {
+	return getFirestore(PUSH_RELAY_DATABASE_ID);
+}
+
+function getEnrollmentFirestore() {
+	return getFirestore(ENROLLMENT_DATABASE_ID);
+}
+
 function getPushTargetsCollection() {
-	return getFirestore().collection(DEFAULT_COLLECTION);
+	return getPushFirestore().collection(DEFAULT_COLLECTION);
 }
 
 async function verifyRegistrationAppCheck(request) {
@@ -152,7 +308,7 @@ async function revokePushTarget(request, response) {
 	const revocation = parsePushTargetRevocation(readJsonBody(request));
 	const pushTargetRef = getPushTargetsCollection().doc(revocation.pushTargetId);
 	const status = await revokePushTargetTransaction(
-		getFirestore(),
+		getPushFirestore(),
 		pushTargetRef,
 		revocation.pushTargetAuthToken,
 	);
@@ -209,7 +365,7 @@ async function sendNotification(request, response) {
 
 async function reserveAuthorizedPushTarget(request) {
 	const pushTargetRef = getPushTargetsCollection().doc(request.pushTargetId);
-	return getFirestore().runTransaction(async (transaction) => {
+	return getPushFirestore().runTransaction(async (transaction) => {
 		const snapshot = await transaction.get(pushTargetRef);
 		if (!snapshot.exists) {
 			throw new RequestError(404, "push_target_not_found");
@@ -301,14 +457,6 @@ function respondFcmSendFailed(response, route, request, error) {
 		...getSafeErrorLog(error),
 	});
 	response.status(502).json({ error: "fcm_send_failed", code });
-}
-
-function normalizeRoutePath(rawPath) {
-	let routePath = rawPath.split("?", 1)[0] || "/";
-	if (routePath.startsWith("/pushRelay/")) {
-		routePath = routePath.slice("/pushRelay".length);
-	}
-	return routePath.replace(/\/+$/, "") || "/";
 }
 
 function isInvalidTargetError(error) {
