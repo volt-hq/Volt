@@ -66,7 +66,10 @@ export interface ReviewWorkflowExecuteHooks {
 }
 
 export interface ReviewWorkflowStartOptions {
-	prepared: Pick<PreparedReviewWorkflow, "workflowId" | "action" | "resolution">;
+	prepared: Pick<PreparedReviewWorkflow, "workflowId" | "action"> & {
+		resolution: Pick<PreparedReviewWorkflow["resolution"], "description" | "workflowDescription" | "diffCommand"> &
+			Partial<Pick<PreparedReviewWorkflow["resolution"], "dispose">>;
+	};
 	fastModeEnabled?: boolean;
 	execute: (hooks: ReviewWorkflowExecuteHooks) => Promise<ExecuteReviewWorkflowResult>;
 }
@@ -88,6 +91,7 @@ interface ActiveReviewWorkflow {
 	launched: boolean;
 	done: Promise<void>;
 	settle: () => void;
+	disposePending: () => Promise<void>;
 }
 
 function formatCompletedReviewSummary(findingsCount: number | undefined): string {
@@ -165,6 +169,7 @@ export class ReviewWorkflowManager {
 			launched: false,
 			done,
 			settle,
+			disposePending: () => options.prepared.resolution.dispose?.() ?? Promise.resolve(),
 		};
 		this.active.set(workflowId, entry);
 
@@ -208,18 +213,9 @@ export class ReviewWorkflowManager {
 		// the signal, so finish it here.
 		if (!entry.launched) {
 			entry.launched = true;
+			void entry.disposePending();
 			this.finish(entry, { status: "cancelled" });
 		}
-	}
-
-	/**
-	 * Drop a retained terminal result whose findings were acted on (seeded into
-	 * a session via `open_review_session`), so listings stop advertising the
-	 * review. Never touches running workflows; unknown ids (already consumed or
-	 * evicted) are a no-op.
-	 */
-	consume(workflowId: string): void {
-		this.results.delete(workflowId);
 	}
 
 	/** Terminal result record, or the live descriptor for a running workflow. */
@@ -257,6 +253,7 @@ export class ReviewWorkflowManager {
 			entry.abortController.abort();
 			if (!entry.launched) {
 				entry.launched = true;
+				void entry.disposePending();
 				this.finish(entry, { status: "cancelled" });
 			}
 		}

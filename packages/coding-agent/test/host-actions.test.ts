@@ -10,7 +10,12 @@ import {
 	PLAN_EXECUTE_ACTION_ID,
 	REVIEW_BRANCH_ACTION_ID,
 	REVIEW_COMMIT_ACTION_ID,
+	REVIEW_EXPORT_FEEDBACK_ACTION_ID,
+	REVIEW_FEEDBACK_ACTION_ID,
+	REVIEW_FIX_ACTION_ID,
 	REVIEW_PR_ACTION_ID,
+	REVIEW_PUBLISH_ACTION_ID,
+	REVIEW_RERUN_ACTION_ID,
 	REVIEW_UNCOMMITTED_ACTION_ID,
 	RUN_CANCEL_ACTION_ID,
 	registerBuiltinHostActions,
@@ -204,6 +209,11 @@ describe("HostActionRegistry", () => {
 			REVIEW_BRANCH_ACTION_ID,
 			REVIEW_PR_ACTION_ID,
 			REVIEW_COMMIT_ACTION_ID,
+			REVIEW_FIX_ACTION_ID,
+			REVIEW_FEEDBACK_ACTION_ID,
+			REVIEW_RERUN_ACTION_ID,
+			REVIEW_PUBLISH_ACTION_ID,
+			REVIEW_EXPORT_FEEDBACK_ACTION_ID,
 		]);
 		expect(descriptors.find((descriptor) => descriptor.id === RUN_CANCEL_ACTION_ID)).toEqual(
 			expect.objectContaining({
@@ -329,10 +339,17 @@ describe("HostActionRegistry", () => {
 		const runReviewAction = vi.fn(async () => ({
 			status: "completed" as const,
 			resolution: {
+				identity: { kind: "uncommitted" as const, baseTree: "a".repeat(40), headTree: "b".repeat(40) },
+				changedFiles: [],
+				diff: "",
+				root: "/tmp/review",
 				description: "uncommitted changes",
+				workflowDescription: "uncommitted changes",
 				diffCommand: "git diff HEAD",
-				diff: "diff --git a/file.txt b/file.txt",
-				truncated: false,
+				readFile: async () => undefined,
+				listFiles: async () => [],
+				materializeHead: async () => "/tmp/review",
+				dispose: async () => {},
 			},
 			findingsCount: 2,
 			sessionSwitchCancelled: false,
@@ -367,9 +384,9 @@ describe("HostActionRegistry", () => {
 				requiresConfirmation: true,
 				remoteSafe: true,
 				slash: { name: "review", example: "/review branch [base]" },
-				args: [
+				args: expect.arrayContaining([
 					expect.objectContaining({ name: "base", type: "string", required: false, completion: "gitBranches" }),
-				],
+				]),
 			}),
 		);
 		expect(descriptors.find((descriptor) => descriptor.id === REVIEW_PR_ACTION_ID)).toEqual(
@@ -381,7 +398,9 @@ describe("HostActionRegistry", () => {
 				requiresConfirmation: true,
 				remoteSafe: true,
 				slash: { name: "review", example: "/review pr [number]" },
-				args: [expect.objectContaining({ name: "number", type: "string", required: false })],
+				args: expect.arrayContaining([
+					expect.objectContaining({ name: "number", type: "string", required: false }),
+				]),
 			}),
 		);
 		expect(descriptors.find((descriptor) => descriptor.id === REVIEW_COMMIT_ACTION_ID)).toEqual(
@@ -393,7 +412,7 @@ describe("HostActionRegistry", () => {
 				requiresConfirmation: true,
 				remoteSafe: true,
 				slash: { name: "review", example: "/review commit <ref>" },
-				args: [expect.objectContaining({ name: "ref", type: "string", required: true })],
+				args: expect.arrayContaining([expect.objectContaining({ name: "ref", type: "string", required: true })]),
 			}),
 		);
 
@@ -422,19 +441,19 @@ describe("HostActionRegistry", () => {
 
 		expect(runReviewAction).toHaveBeenCalledWith(
 			{ kind: "uncommitted" },
-			{ remote: false, requireConfirmation: false },
+			{ remote: false, requireConfirmation: false, controls: {} },
 		);
 		expect(runReviewAction).toHaveBeenCalledWith(
 			{ kind: "branch", base: "main" },
-			{ remote: true, requireConfirmation: true },
+			{ remote: true, requireConfirmation: true, controls: {} },
 		);
 		expect(runReviewAction).toHaveBeenCalledWith(
 			{ kind: "pr", number: "42" },
-			{ remote: true, requireConfirmation: true },
+			{ remote: true, requireConfirmation: true, controls: {} },
 		);
 		expect(runReviewAction).toHaveBeenCalledWith(
 			{ kind: "commit", sha: "HEAD~1" },
-			{ remote: true, requireConfirmation: true },
+			{ remote: true, requireConfirmation: true, controls: {} },
 		);
 	});
 

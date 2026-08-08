@@ -1,0 +1,32 @@
+{
+	"schemaVersion": 1,
+	"cases": [
+		{
+			"id": "token-refresh-bug",
+			"kind": "buggy",
+			"description": "A token cache adds an early-refresh window with the expiry comparison reversed.",
+			"before": "token-refresh-bug/before",
+			"after": "token-refresh-bug/after",
+			"expectedIssues": [
+				{
+					"key": "expired-token-remains-usable",
+					"locations": [
+						{
+							"path": "src/token-cache.ts",
+							"startLine": 7,
+							"endLine": 7
+						}
+					]
+				}
+			]
+		},
+		{
+			"id": "token-refresh-clean",
+			"kind": "clean",
+			"description": "A token cache correctly refreshes tokens before their expiry boundary.",
+			"before": "token-refresh-clean/before",
+			"after": "token-refresh-clean/after",
+			"expectedIssues": []
+		}
+	]
+}
