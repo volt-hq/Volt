@@ -1113,11 +1113,13 @@ function createReviewInvocationResponse(action: string, result: ReviewWorkflowRe
 	}
 	const findingCount = result.findingsCount;
 	const summary =
-		findingCount === undefined
-			? "Review complete"
-			: findingCount === 0
-				? "Review complete: no issues found"
-				: `Review complete: ${findingCount} finding${findingCount === 1 ? "" : "s"}`;
+		result.completionStatus === "incomplete"
+			? `Review incomplete${findingCount ? `: ${findingCount} verified finding${findingCount === 1 ? "" : "s"}` : ""}`
+			: findingCount === undefined
+				? "Review complete"
+				: findingCount === 0
+					? "Review complete: no issues found"
+					: `Review complete: ${findingCount} finding${findingCount === 1 ? "" : "s"}`;
 	return {
 		action,
 		status: "completed",

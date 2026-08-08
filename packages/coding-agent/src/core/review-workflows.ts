@@ -42,6 +42,7 @@ export interface ReviewWorkflowDescriptor {
 	status: ReviewWorkflowLifecycleStatus;
 	target: { description: string; diffCommand: string };
 	findingsCount?: number;
+	completionStatus?: ParsedReview["completionStatus"];
 	errorMessage?: string;
 	startedAt: number;
 	endedAt?: number;
@@ -94,7 +95,13 @@ interface ActiveReviewWorkflow {
 	disposePending: () => Promise<void>;
 }
 
-function formatCompletedReviewSummary(findingsCount: number | undefined): string {
+function formatCompletedReviewSummary(
+	completionStatus: ParsedReview["completionStatus"],
+	findingsCount: number | undefined,
+): string {
+	if (completionStatus === "incomplete") {
+		return `Review incomplete${findingsCount ? `: ${findingsCount} verified finding${findingsCount === 1 ? "" : "s"}` : ""}.`;
+	}
 	if (findingsCount === undefined) {
 		return "Review complete.";
 	}
@@ -236,6 +243,7 @@ export class ReviewWorkflowManager {
 			status: record.status,
 			target: { ...record.target },
 			...(record.findingsCount === undefined ? {} : { findingsCount: record.findingsCount }),
+			...(record.completionStatus === undefined ? {} : { completionStatus: record.completionStatus }),
 			...(record.errorMessage === undefined ? {} : { errorMessage: record.errorMessage }),
 			startedAt: record.startedAt,
 			...(record.endedAt === undefined ? {} : { endedAt: record.endedAt }),
@@ -286,6 +294,7 @@ export class ReviewWorkflowManager {
 		let message: string;
 		if (result.status === "completed") {
 			descriptor.findingsCount = result.findingsCount;
+			descriptor.completionStatus = result.completionStatus;
 			record = {
 				...descriptor,
 				fastModeEnabled: entry.fastModeEnabled,
@@ -293,7 +302,7 @@ export class ReviewWorkflowManager {
 					? { raw: result.raw.slice(0, MAX_RETAINED_REVIEW_RAW_CHARS) }
 					: { parsed: result.parsed }),
 			};
-			message = `${formatCompletedReviewSummary(result.findingsCount)} Fetch the findings or open them in a review session.`;
+			message = `${formatCompletedReviewSummary(result.completionStatus, result.findingsCount)} Fetch the findings or open them in a review session.`;
 		} else if (result.status === "cancelled") {
 			message = "Review cancelled.";
 		} else {

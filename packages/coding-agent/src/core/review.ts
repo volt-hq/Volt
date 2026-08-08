@@ -730,7 +730,7 @@ export type ReviewWorkflowResult =
 			status: "completed";
 			resolution: ResolvedReview;
 			findingsCount?: number;
-			completionStatus?: ParsedReview["completionStatus"];
+			completionStatus: ParsedReview["completionStatus"];
 			sessionSwitchCancelled: boolean;
 	  };
 
@@ -783,7 +783,14 @@ export interface ExecuteReviewWorkflowOptions {
 export type ExecuteReviewWorkflowResult =
 	| { status: "cancelled"; record?: ReviewRunRecord }
 	| { status: "failed"; errorMessage: string; record?: ReviewRunRecord }
-	| { status: "completed"; raw: string; parsed: ParsedReview; findingsCount: number; record?: ReviewRunRecord };
+	| {
+			status: "completed";
+			raw: string;
+			parsed: ParsedReview;
+			findingsCount: number;
+			completionStatus: ParsedReview["completionStatus"];
+			record?: ReviewRunRecord;
+	  };
 
 export function createReviewConfirmationMessage(resolution: ResolvedReview): string {
 	return [
@@ -1295,6 +1302,7 @@ export async function executeReviewWorkflow(
 		raw: result.raw,
 		parsed: result.parsed,
 		findingsCount: result.parsed.findings.length,
+		completionStatus: result.parsed.completionStatus,
 		record,
 	};
 }
@@ -1446,7 +1454,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 			status: "completed" as const,
 			resolution,
 			findingsCount: result.findingsCount,
-			completionStatus: result.parsed.completionStatus,
+			completionStatus: result.completionStatus,
 			sessionSwitchCancelled: newSessionResult.cancelled,
 		};
 		terminal({

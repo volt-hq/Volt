@@ -27,6 +27,7 @@ import {
 	THINKING_FAST_MODE_ACTION_ID,
 	THINKING_FAST_MODE_SLASH_ALIAS,
 } from "../src/core/host-actions.ts";
+import type { ReviewWorkflowResult } from "../src/core/review.ts";
 
 describe("HostActionRegistry", () => {
 	test("registers descriptors, availability checks, slash aliases, and handlers", async () => {
@@ -337,24 +338,7 @@ describe("HostActionRegistry", () => {
 	});
 
 	test("registers review actions as remote-safe cards with shared handlers", async () => {
-		const runReviewAction = vi.fn(async () => ({
-			status: "completed" as const,
-			resolution: {
-				identity: { kind: "uncommitted" as const, baseTree: "a".repeat(40), headTree: "b".repeat(40) },
-				changedFiles: [],
-				diff: "",
-				root: "/tmp/review",
-				description: "uncommitted changes",
-				workflowDescription: "uncommitted changes",
-				diffCommand: "git diff HEAD",
-				readFile: async () => undefined,
-				listFiles: async () => [],
-				materializeHead: async () => "/tmp/review",
-				dispose: async () => {},
-			},
-			findingsCount: 2,
-			sessionSwitchCancelled: false,
-		}));
+		const runReviewAction = vi.fn(async () => createCompletedReviewResult());
 		const registry = registerBuiltinHostActions(new HostActionRegistry());
 		const context = {
 			session: { isStreaming: false, isCompacting: false },
@@ -439,6 +423,10 @@ describe("HostActionRegistry", () => {
 		await expect(
 			registry.invoke(REVIEW_COMMIT_ACTION_ID, context, { ref: "HEAD~1" }, { requireRemoteSafe: true }),
 		).resolves.toMatchObject({ action: REVIEW_COMMIT_ACTION_ID, status: "completed" });
+		runReviewAction.mockResolvedValueOnce(createCompletedReviewResult(0, "incomplete"));
+		await expect(registry.invoke(REVIEW_UNCOMMITTED_ACTION_ID, context, {})).resolves.toMatchObject({
+			message: "Review incomplete; fresh session created with findings",
+		});
 
 		expect(runReviewAction).toHaveBeenCalledWith(
 			{ kind: "uncommitted" },
@@ -567,6 +555,31 @@ function createCompactionResult() {
 		summary: "summary",
 		firstKeptEntryId: "entry-1",
 		tokensBefore: 100,
+	};
+}
+
+function createCompletedReviewResult(
+	findingsCount = 2,
+	completionStatus: "complete" | "incomplete" = "complete",
+): Extract<ReviewWorkflowResult, { status: "completed" }> {
+	return {
+		status: "completed",
+		resolution: {
+			identity: { kind: "uncommitted", baseTree: "a".repeat(40), headTree: "b".repeat(40) },
+			changedFiles: [],
+			diff: "",
+			root: "/tmp/review",
+			description: "uncommitted changes",
+			workflowDescription: "uncommitted changes",
+			diffCommand: "git diff HEAD",
+			readFile: async () => undefined,
+			listFiles: async () => [],
+			materializeHead: async () => "/tmp/review",
+			dispose: async () => {},
+		},
+		findingsCount,
+		completionStatus,
+		sessionSwitchCancelled: false,
 	};
 }
 

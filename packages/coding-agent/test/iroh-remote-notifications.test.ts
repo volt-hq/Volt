@@ -66,6 +66,7 @@ const reviewMocks = vi.hoisted(() => ({
 			overallExplanation: "Verification completed.",
 		},
 		findingsCount: 1,
+		completionStatus: "complete" as const,
 	})),
 }));
 
@@ -154,12 +155,15 @@ const TEST_TRANSCRIPT_AUTHORIZATION = {
 
 type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
 
-function completedReview(findingsCount: number): ExecuteReviewWorkflowResult {
+function completedReview(
+	findingsCount: number,
+	completionStatus: "complete" | "incomplete" = "complete",
+): ExecuteReviewWorkflowResult {
 	return {
 		status: "completed",
 		raw: "private",
 		parsed: {
-			completionStatus: "complete",
+			completionStatus,
 			summary: findingsCount === 0 ? "No findings." : `${findingsCount} findings.`,
 			findings: [],
 			coverage: {
@@ -173,10 +177,12 @@ function completedReview(findingsCount: number): ExecuteReviewWorkflowResult {
 				residualRisk: [],
 				modelReportedLimitations: [],
 			},
-			overallCorrectness: "correct",
-			overallExplanation: "Verification completed.",
+			...(completionStatus === "complete" ? { overallCorrectness: "correct" as const } : {}),
+			overallExplanation:
+				completionStatus === "complete" ? "Verification completed." : "Verification was incomplete.",
 		},
 		findingsCount,
+		completionStatus,
 	};
 }
 
@@ -1624,7 +1630,7 @@ describe("Iroh remote notification requests", () => {
 		await expect(modePromise).resolves.toBeUndefined();
 	});
 
-	test("formats zero, one, and many review finding counts from retained workflow records", async () => {
+	test("formats complete and incomplete review results from retained workflow records", async () => {
 		const session = createTestSession("session-one", "review-run");
 		const reviewWorkflows = new ReviewWorkflowManager();
 		const runtimeHost = {
@@ -1641,6 +1647,7 @@ describe("Iroh remote notification requests", () => {
 			["review:zero", completedReview(0)],
 			["review:one", completedReview(1)],
 			["review:many", completedReview(4)],
+			["review:incomplete", completedReview(0, "incomplete")],
 		];
 		for (const [index, [workflowId, result]] of completions.entries()) {
 			startTestReview(reviewWorkflows, workflowId, "PR #123").finish(result);
@@ -1651,11 +1658,13 @@ describe("Iroh remote notification requests", () => {
 			"PR #123 completed with no issues found.",
 			"PR #123 completed with 1 finding.",
 			"PR #123 completed with 4 findings.",
+			"PR #123 review is incomplete.",
 		]);
 		expect(getNotifications(send).map((notification) => notification.workflowId)).toEqual([
 			"review:zero",
 			"review:one",
 			"review:many",
+			"review:incomplete",
 		]);
 
 		recv.end();

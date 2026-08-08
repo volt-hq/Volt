@@ -7,9 +7,9 @@ import {
 	ReviewWorkflowManager,
 } from "../src/core/review-workflows.ts";
 
-function parsed(findingsCount = 1): ParsedReview {
+function parsed(findingsCount = 1, completionStatus: ParsedReview["completionStatus"] = "complete"): ParsedReview {
 	return {
-		completionStatus: "complete",
+		completionStatus,
 		summary: findingsCount === 0 ? "No findings." : "One finding.",
 		findings:
 			findingsCount === 0
@@ -48,15 +48,31 @@ function parsed(findingsCount = 1): ParsedReview {
 			residualRisk: [],
 			modelReportedLimitations: [],
 		},
-		...(findingsCount === 0
-			? { overallCorrectness: "correct" as const }
-			: { overallCorrectness: "incorrect" as const }),
-		overallExplanation: findingsCount === 0 ? "No verified findings." : "One verified finding.",
+		...(completionStatus === "complete"
+			? findingsCount === 0
+				? { overallCorrectness: "correct" as const }
+				: { overallCorrectness: "incorrect" as const }
+			: {}),
+		overallExplanation:
+			completionStatus === "incomplete"
+				? "Verification did not cover the complete change."
+				: findingsCount === 0
+					? "No verified findings."
+					: "One verified finding.",
 	};
 }
 
-function completed(findingsCount = 1): ExecuteReviewWorkflowResult {
-	return { status: "completed", raw: "summary", parsed: parsed(findingsCount), findingsCount };
+function completed(
+	findingsCount = 1,
+	completionStatus: ParsedReview["completionStatus"] = "complete",
+): ExecuteReviewWorkflowResult {
+	return {
+		status: "completed",
+		raw: "summary",
+		parsed: parsed(findingsCount, completionStatus),
+		findingsCount,
+		completionStatus,
+	};
 }
 
 function prepared(workflowId: string, options: { workflowDescription?: string; dispose?: () => Promise<void> } = {}) {
@@ -105,6 +121,27 @@ describe("ReviewWorkflowManager", () => {
 			parsed: { completionStatus: "complete" },
 		});
 		expect(events.at(-1)).toMatchObject({ type: "workflow_end", status: "completed" });
+	});
+
+	test("preserves incomplete status in detached records and terminal summaries", async () => {
+		const events: Array<Record<string, unknown>> = [];
+		const manager = new ReviewWorkflowManager({ publishEvent: (event) => events.push(event) });
+		const started = manager.start({
+			prepared: prepared("review:incomplete"),
+			execute: async () => completed(0, "incomplete"),
+		});
+		started.launch();
+		await manager.waitForIdle();
+		expect(manager.get("review:incomplete")).toMatchObject({
+			status: "completed",
+			completionStatus: "incomplete",
+			findingsCount: 0,
+		});
+		expect(events.at(-1)).toMatchObject({
+			type: "workflow_end",
+			status: "completed",
+			message: "Review incomplete. Fetch the findings or open them in a review session.",
+		});
 	});
 
 	test("retains only the sanitized workflow description", () => {

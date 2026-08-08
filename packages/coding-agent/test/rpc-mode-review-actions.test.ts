@@ -82,7 +82,14 @@ interface ExecuteOptions {
 type ExecuteResult =
 	| { status: "cancelled" }
 	| { status: "failed"; errorMessage: string }
-	| { status: "completed"; raw: string; parsed: ParsedReview; findingsCount: number; record: ReviewRunRecord };
+	| {
+			status: "completed";
+			raw: string;
+			parsed: ParsedReview;
+			findingsCount: number;
+			completionStatus: ParsedReview["completionStatus"];
+			record: ReviewRunRecord;
+	  };
 
 const reviewMocks = vi.hoisted(() => {
 	const dispose = vi.fn(async () => {});
@@ -157,6 +164,7 @@ const reviewMocks = vi.hoisted(() => {
 				raw: record.result?.summary ?? "",
 				parsed: record.result!,
 				findingsCount: 1,
+				completionStatus: record.result!.completionStatus,
 				record,
 			};
 		}),
@@ -333,7 +341,14 @@ describe("RPC durable review actions", () => {
 			await gate;
 			const record = durableRecord();
 			if (options.sessionManager) appendReviewRun(options.sessionManager, record);
-			return { status: "completed", raw: record.result!.summary, parsed: record.result!, findingsCount: 1, record };
+			return {
+				status: "completed",
+				raw: record.result!.summary,
+				parsed: record.result!,
+				findingsCount: 1,
+				completionStatus: record.result!.completionStatus,
+				record,
+			};
 		});
 		const runtimeHost = makeRuntimeHost();
 		const collecting = createCollectingTransport();
