@@ -5148,9 +5148,9 @@ export class AgentSession {
 	 * and assemble the CompactionResult.
 	 *
 	 * When continuation context is requested, auto-compaction supplies the rebuilt
-	 * projection to Harness. Overflow recovery also removes its trailing assistant
-	 * error message before the retry so it is
-	 * excluded from both the retained context and estimatedTokensAfter.
+	 * projection to Harness. Retry placeholders (overflow errors and empty
+	 * length-limited responses) are removed from that projection and from
+	 * estimatedTokensAfter.
 	 */
 	private async _finalizeCompaction(
 		summary: string,
@@ -5158,7 +5158,8 @@ export class AgentSession {
 		tokensBefore: number,
 		details: JsonValue | undefined,
 		fromExtension: boolean,
-		continuation?: { dropTrailingErrorMessage: boolean },
+		reason: CompactionReason,
+		willRetry: boolean,
 		assertConversationGenerationCurrent?: () => void,
 	): Promise<CompactionResult> {
 		assertConversationGenerationCurrent?.();
@@ -5166,19 +5167,26 @@ export class AgentSession {
 		const sessionContext = this.sessionManager.buildSessionContext();
 		const projectMessages = (source: readonly AgentMessage[]): AgentMessage[] => {
 			const messages = [...source];
-			if (!continuation?.dropTrailingErrorMessage) return messages;
+			if (!willRetry) return messages;
 			const lastIndex =
 				messages.at(-1)?.role === "custom" &&
 				(messages.at(-1) as CustomMessage).customType === PLAN_CHECKPOINT_CUSTOM_TYPE
 					? messages.length - 2
 					: messages.length - 1;
 			const candidate = messages[lastIndex];
-			return candidate?.role === "assistant" && (candidate as AssistantMessage).stopReason === "error"
-				? [...messages.slice(0, lastIndex), ...messages.slice(lastIndex + 1)]
-				: messages;
+			if (candidate?.role !== "assistant") return messages;
+			const assistant = candidate as AssistantMessage;
+			const isRetryPlaceholder =
+				assistant.stopReason === "error" ||
+				(assistant.stopReason === "length" &&
+					!assistant.content.some(
+						(content) =>
+							(content.type === "text" && content.text.trim().length > 0) || content.type === "toolCall",
+					));
+			return isRetryPlaceholder ? [...messages.slice(0, lastIndex), ...messages.slice(lastIndex + 1)] : messages;
 		};
 		const messages = projectMessages(sessionContext.messages);
-		if (continuation || this._harness.hasQueuedMessages()) {
+		if (willRetry || this._harness.hasQueuedMessages()) {
 			await this._harness.rebaseContinuationContext({
 				source: "compaction",
 				project: projectMessages,
@@ -5200,6 +5208,8 @@ export class AgentSession {
 				type: "session_compact",
 				compactionEntry: savedCompactionEntry,
 				fromExtension,
+				reason,
+				willRetry,
 			});
 			assertConversationGenerationCurrent?.();
 		}
@@ -5277,6 +5287,8 @@ export class AgentSession {
 					preparation,
 					branchEntries: pathEntries,
 					customInstructions,
+					reason: "manual",
+					willRetry: false,
 					signal: operation.signal,
 				})) as SessionBeforeCompactResult | undefined;
 				assertConversationGenerationCurrent?.();
@@ -5370,7 +5382,8 @@ export class AgentSession {
 				tokensBefore,
 				details,
 				fromExtension,
-				undefined,
+				"manual",
+				false,
 				assertConversationGenerationCurrent,
 			);
 			this._emit({
@@ -5589,6 +5602,7 @@ export class AgentSession {
 		const settings = this.settingsManager.getCompactionSettings();
 		const abortGeneration = this._abortGeneration;
 		const canContinue = (): boolean => !this._disposed && abortGeneration === this._abortGeneration;
+		const willRetryAfterCompaction = willRetry || continueAfterCompaction;
 		let conversationGenerationAssertionFailed = false;
 		const hasExternalAuthorityAssertion = assertConversationGenerationCurrent !== undefined;
 		const assertCapturedConversationCurrent = this._captureConversationGenerationAssertion(
@@ -5632,6 +5646,8 @@ export class AgentSession {
 					type: "session_before_compact",
 					preparation,
 					branchEntries: pathEntries,
+					reason,
+					willRetry: willRetryAfterCompaction,
 					signal: operation.signal,
 				})) as SessionBeforeCompactResult | undefined;
 				assertConversationCurrent();
@@ -5731,7 +5747,8 @@ export class AgentSession {
 				tokensBefore,
 				details,
 				fromExtension,
-				willRetry || continueAfterCompaction ? { dropTrailingErrorMessage: willRetry } : undefined,
+				reason,
+				willRetryAfterCompaction,
 				assertConversationCurrent,
 			);
 			this._emit({
@@ -5739,10 +5756,10 @@ export class AgentSession {
 				reason,
 				result,
 				aborted: false,
-				willRetry: canContinue() && (willRetry || continueAfterCompaction),
+				willRetry: canContinue() && willRetryAfterCompaction,
 			});
 
-			if (willRetry || continueAfterCompaction) {
+			if (willRetryAfterCompaction) {
 				return true;
 			}
 
