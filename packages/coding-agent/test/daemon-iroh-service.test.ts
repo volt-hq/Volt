@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerFauxProvider } from "@hansjm10/volt-ai";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import {
 	type IrohRemoteHandshakeSuccess,
@@ -22,7 +22,10 @@ import {
 	formatIrohLoadError,
 	type IrohConnectionLike,
 	type IrohEndpointLike,
+	type IrohHomeRelayWatchCallback,
 	type IrohIncomingLike,
+	type IrohRelayConfigLike,
+	isIrohWatchApiSafe,
 	loadIrohModule,
 } from "../src/daemon/iroh-native.ts";
 import { DEFAULT_IROH_REMOTE_RESOURCE_LIMITS } from "../src/daemon/iroh-resource-guard.ts";
@@ -31,6 +34,10 @@ import {
 	IrohDaemonAdmissionGate,
 	IrohPhysicalStreamOwner,
 	resolveIrohRelayConfig,
+	resolveIrohRelayCredentialServiceUrl,
+	VOLT_CANARY_RELAY_CREDENTIAL_SERVICE_URL,
+	VOLT_CANARY_RELAY_URLS,
+	VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL,
 	VOLT_PRODUCTION_RELAY_URLS,
 } from "../src/daemon/iroh-service.ts";
 import {
@@ -51,6 +58,14 @@ describe("native Iroh test prerequisite", () => {
 		if (nativeRequired && !native.iroh) {
 			throw new Error(formatIrohLoadError(native.error));
 		}
+	});
+
+	it("enables watcher calls only for releases containing upstream PR #281", () => {
+		expect(isIrohWatchApiSafe(undefined)).toBe(false);
+		expect(isIrohWatchApiSafe("1.1.0")).toBe(false);
+		expect(isIrohWatchApiSafe("1.1.1")).toBe(true);
+		expect(isIrohWatchApiSafe("1.2.0")).toBe(true);
+		expect(native.watchApiSafe).toBe(isIrohWatchApiSafe(native.packageVersion));
 	});
 });
 
@@ -253,6 +268,25 @@ describe("relay config resolution", () => {
 		});
 	});
 
+	it("resolves managed broker origins only for the built-in relay deployments", () => {
+		expect(resolveIrohRelayCredentialServiceUrl("production", VOLT_PRODUCTION_RELAY_URLS)).toBe(
+			VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL,
+		);
+		expect(resolveIrohRelayCredentialServiceUrl("production", VOLT_CANARY_RELAY_URLS)).toBe(
+			VOLT_CANARY_RELAY_CREDENTIAL_SERVICE_URL,
+		);
+		expect(VOLT_CANARY_RELAY_CREDENTIAL_SERVICE_URL).toBe("https://credentials.volt-cli.dev");
+		expect(resolveIrohRelayCredentialServiceUrl("production", ["https://self-managed.example.com"])).toBeUndefined();
+		expect(
+			resolveIrohRelayCredentialServiceUrl(
+				"production",
+				["https://self-managed.example.com"],
+				"https://credentials.volt-cli.dev",
+			),
+		).toBeUndefined();
+		expect(resolveIrohRelayCredentialServiceUrl("disabled", VOLT_PRODUCTION_RELAY_URLS)).toBeUndefined();
+	});
+
 	it("uses VOLT_IROH_RELAY_URLS for a self-managed relay fleet", () => {
 		expect(
 			resolveIrohRelayConfig({}, { VOLT_IROH_RELAY_URLS: " https://r1.example.com , https://r2.example.com ," }),
@@ -260,6 +294,16 @@ describe("relay config resolution", () => {
 			relayMode: "production",
 			relayUrls: ["https://r1.example.com", "https://r2.example.com"],
 		});
+	});
+
+	it("retains persisted managed relay origins across daemon restarts", () => {
+		expect(resolveIrohRelayConfig({}, {}, VOLT_CANARY_RELAY_URLS)).toEqual({
+			relayMode: "production",
+			relayUrls: VOLT_CANARY_RELAY_URLS,
+		});
+		expect(
+			resolveIrohRelayConfig({}, { VOLT_IROH_RELAY_URLS: "https://explicit.example.com" }, VOLT_CANARY_RELAY_URLS),
+		).toEqual({ relayMode: "production", relayUrls: ["https://explicit.example.com"] });
 	});
 
 	it("opts into the n0 public relays only via VOLT_IROH_RELAY_MODE=development", () => {
@@ -294,6 +338,130 @@ describe("relay config resolution", () => {
 		expect(resolved.relayUrls).toEqual(VOLT_PRODUCTION_RELAY_URLS);
 		expect(resolved.warning).toContain("VOLT_IROH_RELAY_MODE");
 	});
+});
+
+describe.skipIf(!nativeAvailable)("voltd Iroh relay restart recovery", () => {
+	it("recycles a lost relay registration without replacing identity or credential authority", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-relay-recovery-"));
+		const relayUrl = "https://relay-recovery.example.com";
+		const relayAuthToken = "unit-test-relay-token";
+		const relayInsertions: IrohRelayConfigLike[] = [];
+		const relayRemovals: string[] = [];
+		const controlEvents: ControlEvent[] = [];
+		let emitRelayUrl: ((url: string | null) => void) | undefined;
+		let endpointCloseCalls = 0;
+		let watchStopped = false;
+		let daemonStopped = false;
+		let control: DaemonClient | undefined;
+		const daemon = runVoltDaemon({ agentDir, foreground: false }, [
+			createIrohDaemonService(
+				{ relayUrls: [relayUrl], relayAuthToken },
+				{
+					relayWatchApiSafe: true,
+					relayRecoveryDelayMs: 20,
+					relayRecoveryRetryMs: 20,
+					decorateEndpoint: (endpoint) => {
+						let watcher: IrohHomeRelayWatchCallback | undefined;
+						emitRelayUrl = (url) => watcher?.(null, url === null ? [] : [url]);
+						return {
+							id: () => endpoint.id(),
+							addr: () => endpoint.addr(),
+							online: () => Promise.resolve(),
+							insertRelay: async (config) => {
+								relayInsertions.push(config);
+								watcher?.(null, [config.url]);
+							},
+							removeRelay: async (url) => {
+								relayRemovals.push(url);
+								return true;
+							},
+							watchHomeRelay: (callback) => {
+								watcher = callback;
+								return {
+									async stop() {
+										watcher = undefined;
+										watchStopped = true;
+									},
+								};
+							},
+							acceptNext: () => endpoint.acceptNext(),
+							secretKey: () => endpoint.secretKey(),
+							async close() {
+								endpointCloseCalls++;
+								await endpoint.close();
+							},
+						};
+					},
+				},
+			),
+		]);
+
+		try {
+			let status: DaemonProbeResult = await probeDaemon(agentDir);
+			for (let attempt = 0; !status.healthy && attempt < 100; attempt++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				status = await probeDaemon(agentDir);
+			}
+			expect(status.healthy).toBe(true);
+			control = createDaemonClient({
+				socketPath: status.socketPath,
+				client: "cli",
+				version: "test",
+				authToken: status.authToken,
+				reconnect: false,
+				onEvent: (event) => controlEvents.push(event),
+			});
+			const pairAndReadNodeId = async (): Promise<string> => {
+				const started = await control?.request({ type: "pair_request" });
+				if (started?.type !== "pair_started") throw new Error("pair request did not start");
+				let ticket: string | undefined;
+				await expect
+					.poll(() => {
+						const event = controlEvents.find(
+							(candidate) =>
+								candidate.type === "pairing_progress" &&
+								candidate.requestId === started.requestId &&
+								candidate.phase === "ticket",
+						);
+						ticket = event?.type === "pairing_progress" ? event.ticket : undefined;
+						return ticket;
+					})
+					.toBeTypeOf("string");
+				expect(await control?.request({ type: "pair_cancel", requestId: started.requestId })).toMatchObject({
+					type: "ok",
+				});
+				const nodeId = decodeIrohRemoteTicketPayload(ticket as string).nodeId;
+				if (nodeId === undefined) throw new Error("pairing ticket node id missing");
+				return nodeId;
+			};
+
+			const nodeIdBeforeLoss = await pairAndReadNodeId();
+			emitRelayUrl?.(relayUrl);
+			emitRelayUrl?.(null);
+			await expect.poll(() => relayInsertions.length).toBe(1);
+			expect(relayRemovals).toEqual([relayUrl]);
+			expect(relayInsertions).toEqual([{ url: relayUrl, authToken: relayAuthToken }]);
+			expect(endpointCloseCalls).toBe(0);
+			expect(await pairAndReadNodeId()).toBe(nodeIdBeforeLoss);
+			const state = JSON.parse(readFileSync(getDaemonPaths(agentDir).statePath, "utf8")) as {
+				settings: { relayAuthToken?: string };
+			};
+			expect(state.settings.relayAuthToken).toBe(relayAuthToken);
+			await new Promise((resolve) => setTimeout(resolve, 80));
+			expect(relayInsertions).toHaveLength(1);
+			expect((await control.request({ type: "shutdown" })).type).toBe("ok");
+			await daemon;
+			daemonStopped = true;
+			expect(watchStopped).toBe(true);
+		} finally {
+			if (!daemonStopped) {
+				await control?.request({ type: "shutdown" }).catch(() => {});
+				await daemon;
+			}
+			await control?.close();
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	}, 30_000);
 });
 
 describe("iroh daemon lifecycle ownership", () => {
@@ -1419,6 +1587,103 @@ describe.skipIf(!nativeAvailable)("voltd iroh control pairing ownership", () => 
 			}
 			await pairingControl?.close();
 			await shutdownControl?.close();
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("cancels managed relay claims with their pairing request and allows immediate replacement", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-managed-pair-cancel-"));
+		const createdClaimIds: string[] = [];
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = input instanceof Request ? input.url : String(input);
+			if (url === `${VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL}/v1/pairing-claims`) {
+				const claimId = String(createdClaimIds.length + 1).padStart(24, "a");
+				createdClaimIds.push(claimId);
+				return new Response(
+					JSON.stringify({ claimId, expiresAt: new Date(Date.now() + 10 * 60_000).toISOString() }),
+					{ status: 201, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (
+				url.startsWith(`${VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL}/v1/pairing-claims/`) &&
+				url.endsWith("/exchange")
+			) {
+				return new Response(JSON.stringify({ status: "pending", retryAfterSeconds: 1 }), {
+					status: 202,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`unexpected managed relay credential request: ${url}`);
+		});
+		let daemonStopped = false;
+		let control: DaemonClient | undefined;
+		let activePairingRequestId: string | undefined;
+		const daemon = runVoltDaemon({ agentDir, foreground: false }, [createIrohDaemonService()]);
+
+		try {
+			let status: DaemonProbeResult = await probeDaemon(agentDir);
+			for (let attempt = 0; !status.healthy && attempt < 100; attempt++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				status = await probeDaemon(agentDir);
+			}
+			expect(status.healthy).toBe(true);
+			control = createDaemonClient({
+				socketPath: status.socketPath,
+				client: "cli",
+				version: "test",
+				authToken: status.authToken,
+				reconnect: false,
+			});
+			const paths = getDaemonPaths(agentDir);
+			const readPairingState = () =>
+				JSON.parse(readFileSync(paths.statePath, "utf8")) as {
+					pendingPairingTickets: unknown[];
+					settings: { relayCredentialClaim?: { claimId: string } };
+				};
+
+			const firstPairing = await control.request({ type: "pair_request" });
+			expect(firstPairing).toMatchObject({ type: "pair_started" });
+			if (firstPairing.type !== "pair_started") throw new Error("first pairing did not start");
+			activePairingRequestId = firstPairing.requestId;
+			expect(readPairingState()).toMatchObject({
+				pendingPairingTickets: [expect.any(Object)],
+				settings: { relayCredentialClaim: { claimId: createdClaimIds[0] } },
+			});
+
+			expect(await control.request({ type: "pair_cancel", requestId: firstPairing.requestId })).toMatchObject({
+				type: "ok",
+			});
+			activePairingRequestId = undefined;
+			const cancelledState = readPairingState();
+			expect(cancelledState.pendingPairingTickets).toEqual([]);
+			expect(cancelledState.settings.relayCredentialClaim).toBeUndefined();
+
+			const replacementPairing = await control.request({ type: "pair_request" });
+			expect(replacementPairing).toMatchObject({ type: "pair_started" });
+			if (replacementPairing.type !== "pair_started") throw new Error("replacement pairing did not start");
+			activePairingRequestId = replacementPairing.requestId;
+			expect(createdClaimIds).toHaveLength(2);
+			expect(readPairingState()).toMatchObject({
+				pendingPairingTickets: [expect.any(Object)],
+				settings: { relayCredentialClaim: { claimId: createdClaimIds[1] } },
+			});
+
+			expect(await control.request({ type: "pair_cancel", requestId: replacementPairing.requestId })).toMatchObject({
+				type: "ok",
+			});
+			activePairingRequestId = undefined;
+			expect(readPairingState()).toMatchObject({ pendingPairingTickets: [], settings: {} });
+		} finally {
+			if (!daemonStopped) {
+				if (activePairingRequestId !== undefined) {
+					await control?.request({ type: "pair_cancel", requestId: activePairingRequestId }).catch(() => {});
+				}
+				await control?.request({ type: "shutdown" }).catch(() => {});
+				await daemon;
+				daemonStopped = true;
+			}
+			await control?.close();
+			fetchSpy.mockRestore();
 			rmSync(agentDir, { recursive: true, force: true });
 		}
 	}, 30_000);
