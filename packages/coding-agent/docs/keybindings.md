@@ -119,11 +119,16 @@ This routing remains configurable through the ordinary action bindings. For exam
 | `app.interrupt` | `escape` | Cancel / abort |
 | `app.clear` | `ctrl+c` | Clear editor |
 | `app.exit` | `ctrl+d` | Exit (when editor empty) |
+| `app.debug` | `f12` | Capture diagnostics without interrupting work (`/debug`) |
 | `app.suspend` | `ctrl+z` (none on Windows) | Suspend to background |
 | `app.mode.toggle` | `shift+tab` | Toggle Build and Plan mode |
 | `app.plan.togglePane` | `alt+p` | Switch focus between the conversation and responsive plan pane |
 | `app.editor.external` | `ctrl+g` | Open in external editor (`$VISUAL` or `$EDITOR`) |
 | `app.clipboard.pasteImage` | `ctrl+v` (`alt+v` on Windows) | Paste image from clipboard |
+
+While work is active, quitting with `Ctrl+D`, double `Ctrl+C`, or `/quit` first shows a warning. Repeat the quit action within three seconds to confirm. Resuming editing or starting another operation requires a new confirmation. `Ctrl+C` always clears a nonempty editor first. Idle exit works immediately (`Ctrl+C` still needs two presses).
+
+Use `F12` or `/debug` to capture diagnostics while a response or tool is active. The shortcut works even when a selector or overlay has focus. Customize it with `app.debug`, or set it to `[]` to use only `/debug`. `F12` does not require extended keyboard encoding. Avoid shifted control shortcuts such as `Ctrl+Shift+D` on terminals that send the same bytes as `Ctrl+D`; they cannot be distinguished there.
 
 ### Sessions
 
