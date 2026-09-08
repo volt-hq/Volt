@@ -44,6 +44,7 @@ import {
 import { MAX_ACTIVE_REVIEW_WORKFLOWS, ReviewWorkflowManager } from "../../src/core/review-workflows.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createSessionManagerTestOwner } from "../session-manager-owner.ts";
+import { createTestBodyOwner } from "../test-body-owner.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function git(cwd: string, ...args: string[]): string {
@@ -128,8 +129,9 @@ function presentationReport(presentationId: string): ReviewPresentationReport {
 
 async function createSnapshotRepository(
 	harness: Harness,
-	options: { agentsPolicy?: string; maxBlobBytes?: number } = {},
+	options: { agentsPolicy?: string; maxBlobBytes?: number; signal?: AbortSignal } = {},
 ): Promise<ReviewSnapshot> {
+	options.signal?.throwIfAborted();
 	mkdirSync(join(harness.tempDir, "src"), { recursive: true });
 	git(harness.tempDir, "init", "--initial-branch=main");
 	git(harness.tempDir, "config", "user.email", "review@example.com");
@@ -150,6 +152,7 @@ async function createSnapshotRepository(
 	const snapshot = await resolveReviewSnapshot({ kind: "uncommitted" }, harness.tempDir, {
 		maxCommitRefBytes: 1_024,
 		maxPullRequestNumber: MAX_PULL_REQUEST_NUMBER,
+		signal: options.signal,
 		...(options.maxBlobBytes === undefined ? {} : { limits: { maxBlobBytes: options.maxBlobBytes } }),
 	});
 	if ("error" in snapshot) throw new Error(snapshot.error);
@@ -705,19 +708,23 @@ describe("review pipeline", () => {
 	const harnesses: Harness[] = [];
 	const snapshots: ReviewSnapshot[] = [];
 	const managerOwner = createSessionManagerTestOwner();
+	const bodyOwner = createTestBodyOwner();
 
 	beforeEach(() => {
+		bodyOwner.start();
 		managerOwner.start();
 		vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "0");
 	});
 
-	afterEach(async () => {
-		vi.unstubAllEnvs();
-		for (const snapshot of snapshots.splice(0)) await snapshot.dispose();
-		await managerOwner.drain();
-		vi.restoreAllMocks();
-		for (const harness of harnesses.splice(0)) await harness.cleanupAsync();
-	});
+	afterEach(() =>
+		bodyOwner.finish(async () => {
+			vi.unstubAllEnvs();
+			for (const snapshot of snapshots.splice(0)) await snapshot.dispose();
+			await managerOwner.drain();
+			vi.restoreAllMocks();
+			for (const harness of harnesses.splice(0)) await harness.cleanupAsync();
+		}),
+	);
 
 	it.each([
 		"disabled",
@@ -793,98 +800,115 @@ describe("review pipeline", () => {
 		}
 	});
 
-	it.each(["complete", "incomplete", "failed", "cancelled"] as const)(
+	it.for(["complete", "incomplete", "failed", "cancelled"] as const)(
 		"preserves the durable %s outcome when diagnostics and the warning observer fail",
-		async (status) => {
-			vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "1");
-			const privateMarker = "private-durable-retention-prose";
-			const observerError = "private-retention-observer-failure";
-			const harness = await createHarness({ settings: { retry: { enabled: false } } });
-			harnesses.push(harness);
-			const snapshot = await createSnapshotRepository(harness);
-			attachGitHubContext(snapshot, privateMarker);
-			snapshots.push(snapshot);
-			const checkout = await snapshot.materializeHead();
-			const diagnosticsDirectory = getReviewPrivateDiagnosticsDirectory(harness.tempDir);
-			writeFileSync(diagnosticsDirectory, "Not a directory");
-			const controller = new AbortController();
-			const responses = privateReviewResponses(privateMarker, status === "incomplete" ? "incomplete" : "complete");
-			harness.setResponses(
-				status === "failed" || status === "cancelled"
-					? [
-							...responses.slice(0, 4),
-							() => {
-								if (status === "cancelled") controller.abort();
-								return fauxAssistantMessage("", {
-									stopReason: "error",
-									errorMessage: "Review provider failed.",
-								});
-							},
-						]
-					: responses,
-			);
-			const sessionManager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "sessions"));
-			const workflowId = `review:retention-${status}`;
-			const events: Array<Record<string, unknown>> = [];
-			const stderrWarning = vi.spyOn(console, "warn").mockImplementation(() => {});
-			const onDiagnosticRetentionWarning = vi.fn((_message: string) => {
-				throw new Error(observerError);
-			});
-			const result = await executeReviewWorkflow({
-				prepared: {
-					workflowId,
-					action: "review.pr",
-					target: { kind: "pr", number: "348" },
-					controls: { scope: ["src/**"], effort: "standard", includeOptional: false, scopeMode: "full" },
-					resolution: snapshot,
-					model: harness.getModel(),
-					verifierModel: harness.getModel(),
-					startedAt: 1,
-					incrementalPlan: {
-						mode: "full",
-						changedPaths: ["src/value.ts"],
-						priorOpenFindings: [],
-						suppressedDismissedFingerprints: [],
-					},
-				},
-				cwd: harness.tempDir,
-				agentDir: harness.tempDir,
-				authStorage: harness.authStorage,
-				modelRegistry: harness.session.modelRegistry,
-				settingsManager: harness.settingsManager,
-				sessionManager,
-				signal: controller.signal,
-				onDiagnosticRetentionWarning,
-				onEvent: (event) => events.push(event),
-			});
-			expect(existsSync(checkout)).toBe(false);
-			expect(onDiagnosticRetentionWarning.mock.calls).toEqual([[DIAGNOSTIC_RETENTION_WARNING]]);
-			expect(stderrWarning.mock.calls).toEqual([[`Warning: ${DIAGNOSTIC_RETENTION_WARNING}`]]);
-			if (status === "complete" || status === "incomplete") {
-				expect(result).toMatchObject({
-					status: "completed",
-					completionStatus: status,
-					durableRecordCommitted: true,
+		(status, context) =>
+			bodyOwner.run(context.signal, async (signal) => {
+				vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "1");
+				const privateMarker = "private-durable-retention-prose";
+				const observerError = "private-retention-observer-failure";
+				const harness = await createHarness({ settings: { retry: { enabled: false } } });
+				harnesses.push(harness);
+				signal.throwIfAborted();
+				const snapshot = await createSnapshotRepository(harness, { signal });
+				attachGitHubContext(snapshot, privateMarker);
+				snapshots.push(snapshot);
+				signal.throwIfAborted();
+				const checkout = await snapshot.materializeHead();
+				signal.throwIfAborted();
+				const diagnosticsDirectory = getReviewPrivateDiagnosticsDirectory(harness.tempDir);
+				writeFileSync(diagnosticsDirectory, "Not a directory");
+				const controller = new AbortController();
+				const responses = privateReviewResponses(
+					privateMarker,
+					status === "incomplete" ? "incomplete" : "complete",
+				);
+				harness.setResponses(
+					status === "failed" || status === "cancelled"
+						? [
+								...responses.slice(0, 4),
+								() => {
+									if (status === "cancelled") controller.abort();
+									return fauxAssistantMessage("", {
+										stopReason: "error",
+										errorMessage: "Review provider failed.",
+									});
+								},
+							]
+						: responses,
+				);
+				const sessionManager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "sessions"));
+				signal.throwIfAborted();
+				const workflowId = `review:retention-${status}`;
+				const events: Array<Record<string, unknown>> = [];
+				const stderrWarning = vi.spyOn(console, "warn").mockImplementation(() => {});
+				const onDiagnosticRetentionWarning = vi.fn((_message: string) => {
+					throw new Error(observerError);
 				});
-				if (result.status !== "completed") throw new Error("Expected a completed review");
-				expect(result.parsed.overallCorrectness).toBe(status === "complete" ? "correct" : undefined);
-			} else {
-				expect(result.status).toBe(status);
-				if (status === "failed") expect(result).toMatchObject({ errorMessage: "Review provider failed." });
-			}
-			const ref = sessionManager.getSessionRef()!;
-			await sessionManager.closePersistence();
-			const reopened = await SessionManager.open(ref);
-			expect(getReviewRun(reopened, workflowId)?.status).toBe(status === "complete" ? "completed" : status);
-			const exportPath = join(harness.tempDir, "retention-review.jsonl");
-			await SessionManager.exportJsonlSnapshot(ref, exportPath);
-			const publicData = JSON.stringify({ result, events, entries: reopened.getEntries() });
-			const exported = readFileSync(exportPath, "utf8");
-			for (const forbidden of [privateMarker, observerError, diagnosticsDirectory, DIAGNOSTIC_RETENTION_WARNING]) {
-				expect(publicData).not.toContain(forbidden);
-				expect(exported).not.toContain(forbidden);
-			}
-		},
+				const result = await executeReviewWorkflow({
+					prepared: {
+						workflowId,
+						action: "review.pr",
+						target: { kind: "pr", number: "348" },
+						controls: { scope: ["src/**"], effort: "standard", includeOptional: false, scopeMode: "full" },
+						resolution: snapshot,
+						model: harness.getModel(),
+						verifierModel: harness.getModel(),
+						startedAt: 1,
+						incrementalPlan: {
+							mode: "full",
+							changedPaths: ["src/value.ts"],
+							priorOpenFindings: [],
+							suppressedDismissedFingerprints: [],
+						},
+					},
+					cwd: harness.tempDir,
+					agentDir: harness.tempDir,
+					authStorage: harness.authStorage,
+					modelRegistry: harness.session.modelRegistry,
+					settingsManager: harness.settingsManager,
+					sessionManager,
+					signal: AbortSignal.any([signal, controller.signal]),
+					onDiagnosticRetentionWarning,
+					onEvent: (event) => events.push(event),
+				});
+				signal.throwIfAborted();
+				expect(existsSync(checkout)).toBe(false);
+				expect(onDiagnosticRetentionWarning.mock.calls).toEqual([[DIAGNOSTIC_RETENTION_WARNING]]);
+				expect(stderrWarning.mock.calls).toEqual([[`Warning: ${DIAGNOSTIC_RETENTION_WARNING}`]]);
+				if (status === "complete" || status === "incomplete") {
+					expect(result).toMatchObject({
+						status: "completed",
+						completionStatus: status,
+						durableRecordCommitted: true,
+					});
+					if (result.status !== "completed") throw new Error("Expected a completed review");
+					expect(result.parsed.overallCorrectness).toBe(status === "complete" ? "correct" : undefined);
+				} else {
+					expect(result.status).toBe(status);
+					if (status === "failed") expect(result).toMatchObject({ errorMessage: "Review provider failed." });
+				}
+				const ref = sessionManager.getSessionRef()!;
+				await sessionManager.closePersistence();
+				signal.throwIfAborted();
+				const reopened = await SessionManager.open(ref);
+				signal.throwIfAborted();
+				expect(getReviewRun(reopened, workflowId)?.status).toBe(status === "complete" ? "completed" : status);
+				const exportPath = join(harness.tempDir, "retention-review.jsonl");
+				await SessionManager.exportJsonlSnapshot(ref, exportPath);
+				signal.throwIfAborted();
+				const publicData = JSON.stringify({ result, events, entries: reopened.getEntries() });
+				const exported = readFileSync(exportPath, "utf8");
+				for (const forbidden of [
+					privateMarker,
+					observerError,
+					diagnosticsDirectory,
+					DIAGNOSTIC_RETENTION_WARNING,
+				]) {
+					expect(publicData).not.toContain(forbidden);
+					expect(exported).not.toContain(forbidden);
+				}
+			}),
 	);
 
 	it.each([false, true])(
