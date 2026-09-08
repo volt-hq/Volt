@@ -152,9 +152,10 @@ export function transformMessages<TApi extends Api>(
 		return msg;
 	});
 
-	// Second pass: insert synthetic empty tool results for orphaned tool calls
-	// This preserves thinking signatures and satisfies API requirements
+	// Second pass: omit interrupted calls and their results, and synthesize missing results for completed calls.
+	// This only changes provider replay; the original diagnostic history remains intact.
 	const result: Message[] = [];
+	const omittedToolCallIds = new Set<string>();
 	let pendingToolCalls: ToolCall[] = [];
 	let existingToolResultIds = new Set<string>();
 	const insertSyntheticToolResults = () => {
@@ -190,11 +191,16 @@ export function transformMessages<TApi extends Api>(
 			// - The model should retry from the last valid state
 			const assistantMsg = msg as AssistantMessage;
 			if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
+				for (const block of assistantMsg.content) {
+					if (block.type === "toolCall") omittedToolCallIds.add(block.id);
+				}
 				continue;
 			}
 
 			// Track tool calls from this assistant message
 			const toolCalls = assistantMsg.content.filter((b) => b.type === "toolCall") as ToolCall[];
+			// A later completed call can reuse an ID from an interrupted attempt.
+			for (const toolCall of toolCalls) omittedToolCallIds.delete(toolCall.id);
 			if (toolCalls.length > 0) {
 				pendingToolCalls = toolCalls;
 				existingToolResultIds = new Set();
@@ -202,6 +208,8 @@ export function transformMessages<TApi extends Api>(
 
 			result.push(msg);
 		} else if (msg.role === "toolResult") {
+			// IDs have already been normalized for both calls and results in the first pass.
+			if (omittedToolCallIds.has(msg.toolCallId)) continue;
 			existingToolResultIds.add(msg.toolCallId);
 			result.push(msg);
 		} else if (msg.role === "user") {
