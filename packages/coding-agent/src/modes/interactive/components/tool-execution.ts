@@ -20,6 +20,7 @@ import { createAllToolDefinitions, type ToolName } from "../../../core/tools/ind
 import { formatDuration, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { keyHint } from "./keybinding-hints.ts";
+import { StreamingRenderCoalescer } from "./streaming-render-coalescer.ts";
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
@@ -129,6 +130,10 @@ export class ToolExecutionComponent extends Container {
 	private disposed = false;
 	private hideComponent = false;
 	private subagentCreationObserved = false;
+	private readonly argumentRenderCoalescer = new StreamingRenderCoalescer<boolean>((requestRender) => {
+		this.updateDisplay();
+		if (requestRender) this.ui.requestRender();
+	});
 
 	constructor(
 		toolName: string,
@@ -258,21 +263,24 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	updateArgs(args: any): void {
+		if (this.disposed) return;
 		this.args = args;
-		this.updateDisplay();
+		if (this.argsComplete || this.executionStarted || this.result) {
+			this.argumentRenderCoalescer.commitNow(true);
+		} else {
+			this.argumentRenderCoalescer.update(true);
+		}
 	}
 
 	markExecutionStarted(): void {
 		this.executionStartedAt ??= Date.now();
 		this.executionStarted = true;
-		this.updateDisplay();
-		this.ui.requestRender();
+		this.argumentRenderCoalescer.commitNow(true);
 	}
 
 	setArgsComplete(): void {
 		this.argsComplete = true;
-		this.updateDisplay();
-		this.ui.requestRender();
+		this.argumentRenderCoalescer.commitNow(true);
 	}
 
 	updateResult(
@@ -299,7 +307,7 @@ export class ToolExecutionComponent extends Container {
 				this.convertedImages.delete(index);
 			}
 		}
-		this.updateDisplay();
+		this.argumentRenderCoalescer.commitNow(false);
 		this.maybeConvertImagesForTerminal();
 	}
 
@@ -361,6 +369,7 @@ export class ToolExecutionComponent extends Container {
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
+		this.argumentRenderCoalescer.dispose();
 		this.releaseImageComponents();
 		this.convertedImages.clear();
 		this.pendingImageConversions.clear();

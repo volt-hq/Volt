@@ -1,7 +1,7 @@
 export const STREAMING_RENDER_INTERVAL_MS = 80;
 
 export function isCoalescableAssistantUpdate(eventType: string | undefined): boolean {
-	return eventType === "text_delta" || eventType === "thinking_delta";
+	return eventType === "text_delta" || eventType === "thinking_delta" || eventType === "toolcall_delta";
 }
 
 export interface StreamingRenderScheduler {

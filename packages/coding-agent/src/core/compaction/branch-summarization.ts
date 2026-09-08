@@ -7,7 +7,7 @@
 
 import type { AgentMessage, StreamFn } from "@hansjm10/volt-agent-core";
 import type { Model, SimpleStreamOptions } from "@hansjm10/volt-ai";
-import { completeSimple } from "@hansjm10/volt-ai";
+import { completeSimple, drainEventStream } from "@hansjm10/volt-ai";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
@@ -361,7 +361,7 @@ export async function generateBranchSummary(
 		maxTokens: maxOutputTokens,
 	};
 	const response = streamFn
-		? await (await streamFn(model, context, requestOptions)).result()
+		? await drainEventStream(await streamFn(model, context, requestOptions))
 		: await completeSimple(model, context, requestOptions);
 
 	// Check if aborted or errored

@@ -9,7 +9,7 @@ import type {
 	StreamFunction,
 	StreamOptions,
 } from "../types.ts";
-import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { AssistantMessageEventStream, EventStreamOverflowError } from "../utils/event-stream.ts";
 import type { BedrockOptions } from "./amazon-bedrock.ts";
 import type { AnthropicOptions } from "./anthropic.ts";
 import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses.ts";
@@ -129,13 +129,14 @@ export function setBedrockProviderModule(module: BedrockProviderModule): void {
 	};
 }
 
-function forwardStream(target: AssistantMessageEventStream, source: AsyncIterable<AssistantMessageEvent>): void {
-	(async () => {
-		for await (const event of source) {
-			target.push(event);
-		}
-		target.end();
-	})();
+async function forwardStream(
+	target: AssistantMessageEventStream,
+	source: AsyncIterable<AssistantMessageEvent>,
+): Promise<void> {
+	for await (const event of source) {
+		target.push(event);
+	}
+	target.end();
 }
 
 function createLazyLoadErrorStream<TApi extends Api>(model: Model<TApi>, error: unknown): AssistantMessageEventStream {
@@ -157,14 +158,21 @@ function createLazyStream<TApi extends Api, TOptions extends StreamOptions, TSim
 ): StreamFunction<TApi, TOptions> {
 	return (model, context, options) => {
 		const outer = new AssistantMessageEventStream();
+		const controller = new AbortController();
+		const signal = options?.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
 
 		loadModule()
 			.then((module) => {
-				const inner = module.stream(model, context, options);
-				forwardStream(outer, inner);
+				const inner = module.stream(model, context, { ...options, signal } as TOptions);
+				return forwardStream(outer, inner);
 			})
-			.catch((error) => {
-				forwardStream(outer, createLazyLoadErrorStream(model, error));
+			.catch(async (error) => {
+				controller.abort(error);
+				try {
+					await forwardStream(outer, createLazyLoadErrorStream(model, error));
+				} catch (overflow) {
+					if (!(overflow instanceof EventStreamOverflowError)) throw overflow;
+				}
 			});
 
 		return outer;
@@ -178,14 +186,21 @@ function createLazySimpleStream<
 >(loadModule: () => Promise<LazyProviderModule<TApi, TOptions, TSimpleOptions>>): StreamFunction<TApi, TSimpleOptions> {
 	return (model, context, options) => {
 		const outer = new AssistantMessageEventStream();
+		const controller = new AbortController();
+		const signal = options?.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
 
 		loadModule()
 			.then((module) => {
-				const inner = module.streamSimple(model, context, options);
-				forwardStream(outer, inner);
+				const inner = module.streamSimple(model, context, { ...options, signal } as TSimpleOptions);
+				return forwardStream(outer, inner);
 			})
-			.catch((error) => {
-				forwardStream(outer, createLazyLoadErrorStream(model, error));
+			.catch(async (error) => {
+				controller.abort(error);
+				try {
+					await forwardStream(outer, createLazyLoadErrorStream(model, error));
+				} catch (overflow) {
+					if (!(overflow instanceof EventStreamOverflowError)) throw overflow;
+				}
 			});
 
 		return outer;
