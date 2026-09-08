@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { convertToLlm, createCustomMessage } from "../src/core/messages.ts";
 import { restoreStdout } from "../src/core/output-guard.ts";
+import type { createReviewSeedMessage } from "../src/core/review-presentation.ts";
 import type { ParsedReview } from "../src/core/review-report.ts";
 import {
 	acknowledgeReviewRun,
@@ -13,6 +15,9 @@ import {
 import { ReviewWorkflowManager } from "../src/core/review-workflows.ts";
 import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { initTheme } from "../src/core/theme/runtime.ts";
+import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
 
 function parsedReview(): ParsedReview {
 	return {
@@ -655,6 +660,93 @@ describe("RPC durable review actions", () => {
 		expect(getReviewRun(replacementManagers[1]!, "review:test")?.acknowledgedAt).toBe(openedAcknowledgedAt);
 		await closeMode(collecting, modePromise);
 	});
+
+	test("opens an explicit empty selection without claiming the full run is clean", async () => {
+		const manager = SessionManager.inMemory("/workspace");
+		appendReviewRun(manager, durableRecord());
+		const seedMessages: object[] = [];
+		const replacementManagers: SessionManager[] = [];
+		const runtimeHost = makeRuntimeHost({ manager, seedMessages, replacementManagers });
+		const collecting = createCollectingTransport();
+		const started = await startMode(runtimeHost, collecting.transport);
+		try {
+			collecting.getLineHandler()(
+				JSON.stringify({ id: "empty", type: "open_review_session", runId: "review:test", findingIds: [] }),
+			);
+			await vi.waitFor(() =>
+				expect(response(collecting.writes, "empty")).toMatchObject({ success: true, data: { cancelled: false } }),
+			);
+			const seed = seedMessages[0] as ReturnType<typeof createReviewSeedMessage>;
+			expect(seed.details.findings).toEqual([]);
+			expect(seed.details.summary).toContain("Selected findings: 0 of 1 retained entries");
+			expect(seed.details.summary).toContain("1 active P0-P2 finding is outside this selection");
+			expect(seed.content).toContain("No findings were selected for this session");
+			expect(seed.content).not.toContain("no verified issues worth flagging");
+			expect(getReviewRun(replacementManagers[0]!, "review:test")?.result?.findings).toHaveLength(1);
+		} finally {
+			await closeMode(collecting, started);
+		}
+	});
+
+	test.each(["fixed", "dismissed"] as const)(
+		"reopens the sole %s finding with historical verdicts and current status",
+		async (status) => {
+			const manager = SessionManager.inMemory("/workspace");
+			appendReviewRun(manager, durableRecord());
+			const seedMessages: object[] = [];
+			const replacementManagers: SessionManager[] = [];
+			const runtimeHost = makeRuntimeHost({ manager, seedMessages, replacementManagers });
+			const collecting = createCollectingTransport();
+			const started = await startMode(runtimeHost, collecting.transport);
+			const line = collecting.getLineHandler();
+			try {
+				line(
+					JSON.stringify({
+						id: "outcome",
+						type: "record_review_finding_outcome",
+						runId: "review:test",
+						findingId: "finding-1",
+						status,
+						...(status === "dismissed" ? { reason: "false_positive" } : {}),
+					}),
+				);
+				await vi.waitFor(() => expect(response(collecting.writes, "outcome")).toMatchObject({ success: true }));
+				line(JSON.stringify({ id: "open-current", type: "open_review_session", runId: "review:test" }));
+				await vi.waitFor(() =>
+					expect(response(collecting.writes, "open-current")).toMatchObject({
+						success: true,
+						data: { cancelled: false },
+					}),
+				);
+				const seed = seedMessages[0] as ReturnType<typeof createReviewSeedMessage>;
+				expect(seed.details.summary).toContain("0 active P0-P2 findings; 1 fixed/dismissed");
+				expect(seed.details.summary).not.toContain("No verified P0-P2 findings in the selected change");
+				expect(seed.details.findings[0]?.status).toBe(status);
+				initTheme("dark");
+				const message = createCustomMessage(
+					seed.customType,
+					seed.content,
+					true,
+					{ summary: seed.details.summary },
+					new Date(0).toISOString(),
+				);
+				const view = new CustomMessageComponent(message);
+				expect(view.render(100).lines.map(stripAnsi).join("\n")).toContain("0 active P0-P2 findings");
+				view.setExpanded(true);
+				const expanded = view.render(100).lines.map(stripAnsi).join("\n");
+				expect(expanded).toContain("Original review conclusion");
+				expect(expanded).toContain("Overall: incorrect");
+				expect(expanded).toContain(`Status: ${status}`);
+				expect(JSON.stringify(convertToLlm([message]))).toContain("Original review conclusion");
+				expect(getReviewRun(replacementManagers[0]!, "review:test")?.result).toMatchObject({
+					overallCorrectness: "incorrect",
+					findings: [{ status }],
+				});
+			} finally {
+				await closeMode(collecting, started);
+			}
+		},
+	);
 
 	test("acknowledges full opens in source and target while retaining durable results", async () => {
 		const manager = SessionManager.inMemory("/workspace");
