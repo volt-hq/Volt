@@ -2,6 +2,8 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { convertToLlm } from "../src/core/messages.ts";
+import { createReviewSeedMessage, STATIC_REVIEW_LIMITATION } from "../src/core/review-presentation.ts";
 import type { ParsedReview, ReviewFinding } from "../src/core/review-report.ts";
 import type { ReviewSnapshot } from "../src/core/review-snapshot.ts";
 import {
@@ -342,6 +344,56 @@ describe("durable review state", () => {
 		const reopened = await SessionManager.open(ref);
 		expect(listReviewRuns(reopened).runs).toMatchObject([{ runId: "run-before-prompt", status: "completed" }]);
 	});
+
+	it.each([false, true])(
+		"persists full review seeds and compact metadata through restart (bounded=%s)",
+		async (bounded) => {
+			const root = join(tmpdir(), `volt-review-seed-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+			mkdirSync(root, { recursive: true });
+			directories.push(root);
+			const manager = await SessionManager.create(root, join(root, "sessions"));
+			const parsed = result();
+			parsed.coverage.residualRisk = [STATIC_REVIEW_LIMITATION];
+			if (bounded)
+				parsed.coverage.filesInspected = Array.from(
+					{ length: 600 },
+					(_, index) => `src/${index}-${"x".repeat(1_000)}`,
+				);
+			const run = createReviewRunRecord({
+				workflowId: "review:persisted-seed",
+				workflowAction: "review.pr",
+				startedAt: 1,
+				endedAt: 2,
+				snapshot: prSnapshot("new-blob", "c".repeat(64), "PRIVATE_CONTEXT_MARKER"),
+				controls: { scope: [], effort: "standard", includeOptional: false, scopeMode: "full" },
+				status: "completed",
+				result: parsed,
+			});
+			await appendReviewRunDurably(manager, run);
+			const seed = createReviewSeedMessage(run);
+			manager.appendCustomMessageEntry(seed.customType, seed.content, seed.display, seed.details);
+			await manager.flush();
+			const ref = manager.getSessionRef()!;
+			await manager.closePersistence();
+			const reopened = await SessionManager.open(ref);
+			const restored = getReviewRun(reopened, run.runId)!;
+			expect(restored.result!.coverage).toEqual(run.result!.coverage);
+			expect(restored.result!.coverage.residualRisk).toContain(STATIC_REVIEW_LIMITATION);
+			expect(createReviewSeedMessage(restored)).toEqual(seed);
+			const messages = reopened.buildSessionContext().messages;
+			expect(messages).toContainEqual(
+				expect.objectContaining({ role: "custom", content: seed.content, details: seed.details }),
+			);
+			const modelContent = JSON.stringify(convertToLlm(messages));
+			expect(modelContent).toContain("Original review conclusion");
+			expect(modelContent).toContain("When asked to fix findings");
+			expect(modelContent).not.toContain("PRIVATE_CONTEXT_MARKER");
+			if (bounded) {
+				expect(restored.result!.coverage.filesInspected.length).toBeLessThan(600);
+				expect(seed.content).toContain("Durable coverage details were compacted");
+			}
+		},
+	);
 
 	it.each([
 		{ limit: "file count", count: MAX_REVIEW_INVENTORY_FILES + 1, padding: 0 },

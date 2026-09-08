@@ -128,6 +128,12 @@ Review policy comes from user `REVIEW.md` in the Volt agent directory and hierar
 
 Completed, incomplete, failed, and cancelled runs plus explicit finding outcomes are stored as bounded host-only records on the current session branch. Existing bounded PR identity includes its title and body, but newly captured linked-issue and discussion text and all free-form prose from context-aware model passes remain ephemeral. Volt declassifies only host-validated finding existence, anchors/evidence, identity, priority/status, and confidence rounded to one percent; durable finding prose comes from the context-blind pass, while summaries, incomplete copy, model-limitation counts, command-attempt counts, and persisted PR failures use host-generated text. Durable and RPC records retain only bounded capture counts/status/limitation codes and a content fingerprint for the captured context. A changed fingerprint forces a full incremental PR rerun. Opening a fix session copies the same public durable result and can select findings by ID; it does not consume the original result. Publishing uses that result, is explicit and PR-only, and is refused if the PR head moved.
 
+New review messages in the TUI show a compact result, active findings, and validation limits. Use the configured `app.tools.expand` action (Ctrl+O by default) to expand the full public report, including retained coverage and finding evidence. This is the same global expansion action used for tool output; it does not rerun the review or start inference. Extension message renderers keep their existing precedence.
+
+A complete review is not a claim that tests passed. Volt reports static-only validation when the host confirms that the review used only its immutable inspection and report tools. Otherwise, the report states that runtime validation is not established. Private PR model-limit text remains private; expanded reports retain the public limitation counts. Selected-finding sessions distinguish their selection from the full run. Original conclusions remain labelled as historical when finding statuses change.
+
+The full report and fix guidance remain in model context and exports. Existing messages without compact presentation data are not rewritten.
+
 Set `reviewModel` to choose the discovery model. Set `reviewVerifierModel` to choose a separate verifier; it defaults to `reviewModel`, which defaults to the active session model. Example: `"anthropic/claude-opus-4-5"`.
 
 ## Subagents (MVP)
