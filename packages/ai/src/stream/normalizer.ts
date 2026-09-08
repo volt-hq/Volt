@@ -7,10 +7,11 @@ import type {
 	Usage,
 } from "../types.ts";
 import type { AssistantMessageDiagnostic } from "../utils/diagnostics.ts";
-import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { AssistantMessageEventStream, EventStreamOverflowError } from "../utils/event-stream.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import type { JsonObject } from "../utils/json-value.ts";
 import type { AssistantMessageInit, AssistantMessageMetaPatch, AssistantStreamFragment } from "./fragments.ts";
+import { ToolArgumentCoalescer } from "./tool-argument-coalescer.ts";
 import { ToolArgumentGuard, type ToolArgumentLimitFailure } from "./tool-argument-guard.ts";
 
 const EMPTY_USAGE: Usage = {
@@ -47,7 +48,7 @@ type SnapshotEventInput = SnapshotEvent extends infer Event
  * events. This is the only accumulator in the provider streaming pipeline.
  */
 export class AssistantStreamNormalizer {
-	readonly stream = new AssistantMessageEventStream();
+	readonly stream = new AssistantMessageEventStream((error) => this.processingErrorEvent(error));
 	readonly signal: AbortSignal;
 	private readonly controller = new AbortController();
 	private readonly guard: ToolArgumentGuard;
@@ -59,6 +60,10 @@ export class AssistantStreamNormalizer {
 	private readonly blocks = new Map<number, StreamBlockState>();
 	private readonly toolArgsText = new Map<number, string>();
 	private toolArgumentFailure: string | undefined;
+	private readonly toolArgumentCoalescer = new ToolArgumentCoalescer(
+		(fragment) => this.pushImmediately(fragment),
+		(error) => this.failProcessing(error),
+	);
 
 	constructor(options?: Pick<StreamOptions, "signal" | "toolArgumentLimits">) {
 		this.signal = this.controller.signal;
@@ -67,6 +72,7 @@ export class AssistantStreamNormalizer {
 		);
 		const parentSignal = options?.signal;
 		const onAbort = () => {
+			this.toolArgumentCoalescer.dispose();
 			this.guard.dispose();
 			this.controller.abort(parentSignal?.reason);
 		};
@@ -76,6 +82,26 @@ export class AssistantStreamNormalizer {
 	}
 
 	push(fragment: AssistantStreamFragment): void {
+		if (this.terminal) return;
+		try {
+			if (!this.validateConfiguration(fragment.type === "start" ? fragment.init : undefined)) return;
+			if (fragment.type === "toolcall_delta") {
+				this.ensureStarted();
+				// An implicit start is a semantic boundary too. Publish the preceding
+				// call's buffered delta before ensureOpenBlock emits that start.
+				if (!this.blocks.has(fragment.contentIndex)) this.toolArgumentCoalescer.flush();
+				if (!this.ensureOpenBlock(fragment.contentIndex, "toolCall")) return;
+				// Charge each raw provider delta before any batching, concatenation, or parsing.
+				if (!this.guard.append(fragment.contentIndex, fragment.argsTextDelta)) return;
+			}
+			this.toolArgumentCoalescer.push(fragment);
+		} catch (error) {
+			this.failProcessing(error);
+			throw error;
+		}
+	}
+
+	private pushImmediately(fragment: AssistantStreamFragment): void {
 		if (this.terminal) {
 			return;
 		}
@@ -166,7 +192,51 @@ export class AssistantStreamNormalizer {
 		if (this.terminal) {
 			return;
 		}
-		this.finishError("error", "Assistant stream ended without a terminal fragment");
+		this.push({ type: "error", reason: "error", errorMessage: "Assistant stream ended without a terminal fragment" });
+	}
+
+	private failProcessing(error: unknown): void {
+		if (this.terminal) return;
+		try {
+			this.stream.push(this.processingErrorEvent(error));
+		} catch (overflow) {
+			// The overflow factory already installed a bounded error terminal.
+			if (!(overflow instanceof EventStreamOverflowError)) throw overflow;
+		}
+	}
+
+	private processingErrorEvent(error: unknown): Extract<AssistantMessageEvent, { type: "error" }> {
+		this.terminal = true;
+		this.cleanup();
+		this.controller.abort(error);
+		// Drop incomplete content after queue overload: retaining the oversized snapshot
+		// in the terminal would defeat the queue budget. Never expose it as an executable call.
+		const message: AssistantMessage = {
+			role: "assistant",
+			api: this.message?.api ?? "unknown",
+			provider: this.message?.provider ?? "unknown",
+			model: this.message?.model ?? "unknown",
+			timestamp: this.message?.timestamp ?? Date.now(),
+			usage: this.message?.usage ?? cloneAndFreeze(EMPTY_USAGE),
+			content: cloneAndFreeze<AssistantMessage["content"]>([]),
+			stopReason: "error",
+			errorMessage:
+				error instanceof EventStreamOverflowError
+					? error.message
+					: "Assistant stream processing failed. No tools from this response were executed. Retry explicitly.",
+			diagnostics: freezeDiagnostics([
+				{
+					type:
+						error instanceof EventStreamOverflowError
+							? "assistant_stream_queue_limit"
+							: "assistant_stream_processing_error",
+					timestamp: Date.now(),
+					details: error instanceof EventStreamOverflowError ? { limit: error.limit, code: error.code } : {},
+				},
+			]),
+		};
+		this.message = Object.freeze(message);
+		return Object.freeze({ type: "error", seq: this.nextSeq(), reason: "error", error: this.message });
 	}
 
 	private handleStart(init: AssistantMessageInit): void {
@@ -383,7 +453,6 @@ export class AssistantStreamNormalizer {
 			this.recordViolation("block_type_mismatch", contentIndex, "toolCall");
 			return;
 		}
-		if (!this.guard.append(contentIndex, argsTextDelta)) return;
 		const argsText = (this.toolArgsText.get(contentIndex) ?? "") + argsTextDelta;
 		this.toolArgsText.set(contentIndex, argsText);
 		const argumentsValue = cloneAndFreeze(parseStreamingJson<JsonObject>(argsText));
@@ -537,11 +606,19 @@ export class AssistantStreamNormalizer {
 			if (state.kind === "toolCall") this.closeBlock(contentIndex);
 		}
 		this.toolArgsText.clear();
-		this.finishError("error", failure.message, [failure.diagnostic]);
-		this.controller.abort(failure);
+		try {
+			this.finishError("error", failure.message, [failure.diagnostic]);
+		} catch (error) {
+			// A deadline may fire while the consumer queue is already full. Its
+			// overflow factory installed the terminal; never throw out of the timer.
+			if (!(error instanceof EventStreamOverflowError)) throw error;
+		} finally {
+			this.controller.abort(failure);
+		}
 	}
 
 	private cleanup(): void {
+		this.toolArgumentCoalescer.dispose();
 		this.guard.dispose();
 		this.cleanupSignal();
 		this.toolArgsText.clear();

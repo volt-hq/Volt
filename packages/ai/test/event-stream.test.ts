@@ -1,7 +1,72 @@
 import { describe, expect, it } from "vitest";
-import { EventStream } from "../src/utils/event-stream.ts";
+import {
+	drainEventStream,
+	EVENT_STREAM_MAX_QUEUED_BYTES,
+	EVENT_STREAM_MAX_QUEUED_EVENTS,
+	EventStream,
+	EventStreamOverflowError,
+} from "../src/utils/event-stream.ts";
 
 describe("EventStream", () => {
+	it("fails explicitly at the event bound and releases stale events immediately", async () => {
+		const stream = new EventStream<number>(
+			(event) => event === -1,
+			(event) => event,
+		);
+		for (let index = 0; index < EVENT_STREAM_MAX_QUEUED_EVENTS; index++) stream.push(index);
+		expect(() => stream.push(0)).toThrow(EventStreamOverflowError);
+		await expect(stream.result()).rejects.toMatchObject({ code: "event_stream_queue_overflow", limit: "events" });
+		await expect(stream[Symbol.asyncIterator]().next()).rejects.toMatchObject({ limit: "events" });
+		stream.push(-1);
+		await expect(stream.result()).rejects.toBeInstanceOf(EventStreamOverflowError);
+	});
+
+	it("bounds queued data even when only one oversized event arrives", async () => {
+		const stream = new EventStream<string>(
+			() => false,
+			(event) => event,
+		);
+		expect(() => stream.push("x".repeat(EVENT_STREAM_MAX_QUEUED_BYTES))).toThrow(EventStreamOverflowError);
+		await expect(stream.result()).rejects.toMatchObject({ limit: "bytes" });
+	});
+
+	it("charges changing children of shallow-frozen events and releases charges when consumed", async () => {
+		const nested = { text: "small" };
+		const event = Object.freeze({ nested });
+		const stream = new EventStream<typeof event>(
+			() => false,
+			(value) => value,
+		);
+		stream.push(event);
+		const iterator = stream[Symbol.asyncIterator]();
+		await iterator.next();
+		nested.text = "x".repeat(EVENT_STREAM_MAX_QUEUED_BYTES);
+		expect(() => stream.push(event)).toThrow(EventStreamOverflowError);
+		await expect(iterator.next()).rejects.toMatchObject({ limit: "bytes" });
+	});
+
+	it("explicit draining supports result-only consumers without changing result replay", async () => {
+		const stream = new EventStream<number>(
+			(event) => event === -1,
+			(event) => event,
+		);
+		const result = drainEventStream(stream);
+		for (let index = 0; index < EVENT_STREAM_MAX_QUEUED_EVENTS * 2; index++) {
+			stream.push(index);
+			await Promise.resolve();
+			await Promise.resolve();
+		}
+		stream.push(-1);
+		await expect(result).resolves.toBe(-1);
+
+		const replay = new EventStream<string>(
+			() => true,
+			(event) => event,
+		);
+		replay.push("done");
+		await expect(replay.result()).resolves.toBe("done");
+		await expect(replay[Symbol.asyncIterator]().next()).resolves.toEqual({ value: "done", done: false });
+	});
 	it("settles every waiting iterator when a completion event arrives", async () => {
 		const stream = new EventStream<string, string>(
 			(event) => event === "done",

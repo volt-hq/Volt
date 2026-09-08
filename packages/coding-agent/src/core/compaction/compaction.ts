@@ -7,7 +7,7 @@
 
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { AssistantMessage, Context, JsonValue, Model, SimpleStreamOptions, Tool, Usage } from "@hansjm10/volt-ai";
-import { completeSimple, estimateToolDefinitionTokens, isContextOverflow } from "@hansjm10/volt-ai";
+import { completeSimple, drainEventStream, estimateToolDefinitionTokens, isContextOverflow } from "@hansjm10/volt-ai";
 import { sleep } from "../../utils/sleep.ts";
 import {
 	convertToLlm,
@@ -598,7 +598,7 @@ async function completeSummarization(
 		return completeSimple(model, context, options);
 	}
 	const stream = await streamFn(model, context, options);
-	return stream.result();
+	return drainEventStream(stream);
 }
 
 function getSummarizationText(response: AssistantMessage, operation: string): string {
