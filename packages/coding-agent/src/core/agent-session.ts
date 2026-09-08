@@ -183,6 +183,7 @@ import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "./subagents/tool-names.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { getThemeByName, theme } from "./theme/runtime.ts";
+import { ToolProgressDiagnostics } from "./tool-progress-diagnostics.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import {
 	BRAVE_SEARCH_AUTH_PROVIDER,
@@ -598,6 +599,7 @@ export class AgentSession {
 	private readonly _harness: AgentHarness;
 	private readonly _harnessSessionStorage: SessionManagerHarnessStorage;
 	private readonly _streamFn: StreamFn;
+	private readonly _toolProgressDiagnostics: ToolProgressDiagnostics;
 	/** Synchronously staged provider policy; Harness publishes it through its ordered configuration lane. */
 	private _streamOptions: AgentHarnessStreamOptions;
 	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
@@ -750,6 +752,10 @@ export class AgentSession {
 	constructor(config: AgentSessionConfig) {
 		this.sessionManager = config.sessionManager;
 		this._streamFn = config.streamFn;
+		this._toolProgressDiagnostics = new ToolProgressDiagnostics(
+			resolvePath(config.agentDir ?? getAgentDir()),
+			() => this.sessionId,
+		);
 		this._harnessSessionStorage = new SessionManagerHarnessStorage(
 			config.sessionManager,
 			() => this._canonicalProducerRetired,
@@ -763,7 +769,11 @@ export class AgentSession {
 			),
 			...(config.model === undefined ? {} : { model: config.model }),
 			thinkingLevel: config.thinkingLevel,
-			streamFn: config.streamFn,
+			streamFn: async (...args) => {
+				const stream = await config.streamFn(...args);
+				this._toolProgressDiagnostics.setQueueMetricsReader(() => stream.getQueueMetrics());
+				return stream;
+			},
 			convertToLlm: config.convertToLlm,
 			...(config.streamOptions === undefined ? {} : { streamOptions: config.streamOptions }),
 			...(config.steeringMode === undefined ? {} : { steeringMode: config.steeringMode }),
@@ -1256,6 +1266,13 @@ export class AgentSession {
 	/** Publish an isolated passive projection to every public session observer. */
 	private _emit(event: AgentSessionEvent): void {
 		if (this.sessionManager.getConversationAuthorityStatus().status !== "available") return;
+		if (isAgentEvent(event)) {
+			try {
+				this._toolProgressDiagnostics.observe(event, this._harness.activeRunSnapshot);
+			} catch {
+				// Diagnostics are passive and cannot change the session outcome.
+			}
+		}
 		if (event.type === "tool_execution_end" || event.type === "agent_settled") {
 			this.gitContextProvider.scheduleRefresh();
 		}
@@ -2287,7 +2304,9 @@ export class AgentSession {
 			} catch (error) {
 				cleanupError = error;
 			} finally {
+				this._toolProgressDiagnostics.dispose();
 				this._canonicalProducerRetired = true;
+				await this._toolProgressDiagnostics.waitForCapture();
 			}
 			let closeError: unknown;
 			try {
@@ -2366,14 +2385,19 @@ export class AgentSession {
 						continue;
 					}
 					const details = this._subagentDetailsForAbortedCall(toolCall);
+					const executionState = this._toolProgressDiagnostics.executionState(toolCall.id);
+					const explanation =
+						executionState === "not_started"
+							? "Tool execution never started: the session closed while preparing this call."
+							: executionState === "interrupted"
+								? "Tool execution was interrupted when the session closed."
+								: "The session closed before this tool call completed; execution state is unknown.";
 					const abortedResult: ToolResultMessage = {
 						role: "toolResult",
 						toolCallId: toolCall.id,
 						toolName: toolCall.name,
-						content: [
-							{ type: "text", text: "Operation aborted: the session closed before this tool call completed." },
-						],
-						...(details ? { details } : {}),
+						content: [{ type: "text", text: `Operation aborted: ${explanation}` }],
+						details: { ...details, execution: { state: executionState, synthetic: true } },
 						isError: true,
 						timestamp: Date.now(),
 					};
@@ -2517,7 +2541,7 @@ export class AgentSession {
 	 * finished cleanly, and registry hydration derives its true terminal state
 	 * from its own transcript.
 	 */
-	private _subagentDetailsForAbortedCall(toolCall: ToolCall): JsonValue | undefined {
+	private _subagentDetailsForAbortedCall(toolCall: ToolCall): JsonObject | undefined {
 		if (toolCall.name !== "subagent") return undefined;
 		const edges = this.sessionManager.getSubagentSpawnEntries().filter((edge) => edge.toolCallId === toolCall.id);
 		if (edges.length === 0) return undefined;
@@ -2542,6 +2566,21 @@ export class AgentSession {
 	// =========================================================================
 	// Read-only State Access
 	// =========================================================================
+
+	/** Read-only, bounded diagnostic snapshot of recent tool preparation and execution. */
+	getToolProgressDiagnostics() {
+		return this._toolProgressDiagnostics.snapshot();
+	}
+
+	/** Save a private diagnostic capture without interrupting the current run. */
+	captureToolProgressDiagnostics(): Promise<string> {
+		return this._toolProgressDiagnostics.capture();
+	}
+
+	/** Wait for diagnostic writes already scheduled by this session. */
+	waitForToolProgressDiagnostics(): Promise<void> {
+		return this._toolProgressDiagnostics.waitForCapture();
+	}
 
 	/** Read-only runtime state snapshot. */
 	get state(): AgentSessionState {
