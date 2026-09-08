@@ -364,7 +364,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					normalizer.push({ type: "text_end", contentIndex: ending.contentIndex });
 				} else if (ending.kind === "thinking") {
 					normalizer.push({ type: "thinking_end", contentIndex: ending.contentIndex });
-				} else {
+				} else if (hasFinishReason && (stopReason === "stop" || stopReason === "toolUse")) {
 					normalizer.push({
 						type: "toolcall_end",
 						contentIndex: ending.state.contentIndex,

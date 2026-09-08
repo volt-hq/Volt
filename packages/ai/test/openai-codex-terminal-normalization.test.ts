@@ -74,6 +74,37 @@ afterEach(() => {
 });
 
 describe("Codex SSE terminal normalization", () => {
+	it.each([undefined, "incomplete", "completed"])(
+		"rejects response.incomplete with status %j after a completed tool block",
+		async (status) => {
+			const item = {
+				type: "function_call",
+				id: "fc_1",
+				call_id: "call-1",
+				name: "edit",
+				arguments: '{"text":"done"}',
+			};
+			const { events, message } = await runCodexStream([
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { ...item, arguments: "", status: "in_progress" },
+				},
+				{ type: "response.function_call_arguments.delta", output_index: 0, delta: item.arguments },
+				{ type: "response.output_item.done", output_index: 0, item: { ...item, status: "completed" } },
+				{ type: "response.incomplete", response: { status } },
+			]);
+			expect(events.at(-1)?.type).toBe("error");
+			expect(message.stopReason).toBe("error");
+			expect(message.diagnostics).toContainEqual(
+				expect.objectContaining({
+					type: "invalid_tool_arguments",
+					details: { code: "length_limit", contentIndex: 0 },
+				}),
+			);
+		},
+	);
+
 	it("turns clean SSE exhaustion without a response terminal into a protocol error", async () => {
 		const { events, message } = await runCodexStream(textEvents("partial"));
 

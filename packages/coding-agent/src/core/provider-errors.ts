@@ -1,3 +1,5 @@
+import type { AssistantMessageDiagnostic } from "@hansjm10/volt-ai";
+
 const NON_RETRYABLE_PROVIDER_LIMIT_PATTERN =
 	/GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i;
 
@@ -10,8 +12,12 @@ export function isNonRetryableProviderLimitError(errorMessage: string): boolean 
 	return NON_RETRYABLE_PROVIDER_LIMIT_PATTERN.test(errorMessage);
 }
 
-export function isTransientProviderError(errorMessage: string): boolean {
+export function isTransientProviderError(
+	errorMessage: string,
+	diagnostics?: readonly AssistantMessageDiagnostic[],
+): boolean {
 	return (
+		!diagnostics?.some((diagnostic) => diagnostic.type === "invalid_tool_arguments") &&
 		!isNonRetryableProviderLimitError(errorMessage) &&
 		(TRANSIENT_PROVIDER_ERROR_PATTERN.test(errorMessage) || TRANSIENT_PROVIDER_STATUS_PATTERN.test(errorMessage))
 	);

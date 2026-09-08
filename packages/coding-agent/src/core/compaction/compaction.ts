@@ -664,7 +664,11 @@ async function completeSummarizationText(
 			}
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			const contextOverflow = response !== undefined && isContextOverflow(response, model.contextWindow);
-			if (retryCount >= maxRetries || contextOverflow || !isTransientProviderError(errorMessage)) {
+			if (
+				retryCount >= maxRetries ||
+				contextOverflow ||
+				!isTransientProviderError(errorMessage, response?.diagnostics)
+			) {
 				if (retryCount === 0) {
 					throw error;
 				}
