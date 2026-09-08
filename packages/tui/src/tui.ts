@@ -5,7 +5,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
-import { isKeyRelease, matchesKey } from "./keys.ts";
+import { isKeyRelease } from "./keys.ts";
 import {
 	concatRenderFrames,
 	createRenderFrame,
@@ -311,7 +311,6 @@ export interface TUI extends Component {
 	readonly mode: TuiMode;
 	children: Component[];
 	terminal: Terminal;
-	onDebug?: () => void;
 	readonly fullRedraws: number;
 	addChild(component: Component): void;
 	removeChild(component: Component): void;
@@ -359,8 +358,6 @@ export abstract class TuiBase extends Container implements TUI {
 	private focusedComponent: Component | null = null;
 	private inputListeners = new Set<TuiInputListener>();
 
-	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
-	public onDebug?: () => void;
 	private renderRequested = false;
 	private forceRenderRequested = false;
 	private immediateRenderScheduled = false;
@@ -1020,12 +1017,6 @@ export abstract class TuiBase extends Container implements TUI {
 
 		// Consume terminal cell size responses without blocking unrelated input.
 		if (this.consumeCellSizeResponse(data)) {
-			return;
-		}
-
-		// Global debug key handler (Shift+Ctrl+D)
-		if (matchesKey(data, "shift+ctrl+d") && this.onDebug) {
-			this.onDebug();
 			return;
 		}
 

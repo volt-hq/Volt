@@ -1,4 +1,4 @@
-import { Editor, type EditorOptions, type EditorTheme, type TUI } from "@hansjm10/volt-tui";
+import { Editor, type EditorOptions, type EditorTheme, isKeyRelease, isKeyRepeat, type TUI } from "@hansjm10/volt-tui";
 import type { AppKeybinding, KeybindingsManager } from "../../../core/keybindings.ts";
 
 /**
@@ -59,6 +59,7 @@ export class CustomEditor extends Editor {
 		// Exit (Ctrl+D) - only when editor is empty
 		if (this.keybindings.matches(data, "app.exit")) {
 			if (this.getText().length === 0) {
+				if (isKeyRelease(data) || isKeyRepeat(data)) return;
 				const handler = this.onCtrlD ?? this.actionHandlers.get("app.exit");
 				if (handler) handler();
 				return;
@@ -69,6 +70,7 @@ export class CustomEditor extends Editor {
 		// Check all other app actions
 		for (const [action, handler] of this.actionHandlers) {
 			if (action !== "app.interrupt" && action !== "app.exit" && this.keybindings.matches(data, action)) {
+				if (action === "app.clear" && (isKeyRelease(data) || isKeyRepeat(data))) return;
 				handler();
 				return;
 			}
