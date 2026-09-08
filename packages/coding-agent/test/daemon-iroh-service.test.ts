@@ -3196,12 +3196,13 @@ describe.skipIf(!nativeAvailable)("voltd iroh pairing storage recovery", () => {
 					authToken: status.authToken,
 					reconnect: false,
 				});
-				await expect
-					.poll(async () => {
-						const current = await control?.request({ type: "status" });
-						return current?.type === "status_result" ? current.remoteTransport : undefined;
-					})
-					.toMatchObject({ state: "ready" });
+				// Wait for the service's startup barrier before arming the storage fault.
+				// Local control can be healthy while Iroh is still persisting its identity.
+				await expectIrohEndpointReady(control);
+				expect(await control.request({ type: "status" })).toMatchObject({
+					type: "status_result",
+					remoteTransport: { state: "ready" },
+				});
 				expect(await control.request({ type: "workspace_register", name: "ws", path: workspaceDir })).toMatchObject(
 					{ type: "ok" },
 				);
