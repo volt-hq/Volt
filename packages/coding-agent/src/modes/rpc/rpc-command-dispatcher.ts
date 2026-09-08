@@ -678,11 +678,7 @@ export async function handleRpcCommand(
 			);
 			if (unknownIds.length > 0)
 				return createRpcErrorResponse(id, "open_review_session", `Unknown finding ids: ${unknownIds.join(", ")}`);
-			const selectedResult = {
-				...record.result,
-				findings: record.result.findings.filter((finding) => selectedIds.has(finding.id)),
-			};
-			const seedMessage = createReviewSeedMessage(record.target, { parsed: selectedResult });
+			const seedMessage = createReviewSeedMessage(record, command.findingIds);
 			let targetSessionManager: SessionManager | undefined;
 			let acknowledgedAt: number | undefined;
 			const result = await runSessionNewHostAction(context.createHostActionContext(), {
