@@ -9164,12 +9164,8 @@ export class InteractiveMode {
 				(findingId) => !record.result?.findings.some((finding) => finding.id === findingId),
 			);
 			if (unknown.length > 0) throw new Error(`Unknown finding ids: ${unknown.join(", ")}`);
-			const selectedResult = {
-				...record.result,
-				findings: record.result.findings.filter((finding) => selectedIds.has(finding.id)),
-			};
 			const sourceSessionManager = this.session.sessionManager;
-			const seedMessage = createReviewSeedMessage(record.target, { parsed: selectedResult });
+			const seedMessage = createReviewSeedMessage(record, requestedFindingIds);
 			let targetSessionManager: SessionManager | undefined;
 			let acknowledgedAt: number | undefined;
 			const opened = await this.runtimeHost.newSession({
@@ -9221,7 +9217,7 @@ export class InteractiveMode {
 				actionsChanged: !opened.cancelled,
 				message: opened.cancelled
 					? "Review fix session cancelled"
-					: `Opened ${selectedResult.findings.length} selected review finding${selectedResult.findings.length === 1 ? "" : "s"}`,
+					: `Opened ${selectedIds.size} selected review finding${selectedIds.size === 1 ? "" : "s"}`,
 			};
 		}
 		if (action === REVIEW_FEEDBACK_ACTION_ID) {
@@ -9372,13 +9368,10 @@ export class InteractiveMode {
 			}
 
 			if (result.sessionSwitchCancelled) {
-				this.showStatus("Review complete (session switch was cancelled; findings added to this session)");
+				this.showStatus("Session switch cancelled; review added to this session.");
 				return result;
 			}
 			this.renderCurrentSessionState();
-			this.showStatus(
-				`${formatReviewWorkflowSummary(result)} This is a fresh session seeded with the review. Tell me which findings to fix (e.g. "fix 1 and 3").`,
-			);
 			return result;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);

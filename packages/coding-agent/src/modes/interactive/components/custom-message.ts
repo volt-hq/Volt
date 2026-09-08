@@ -4,6 +4,7 @@ import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@hansjm10
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
+import { keyDisplayText } from "./keybinding-hints.ts";
 
 /**
  * Component that renders a custom message entry from extensions.
@@ -69,15 +70,27 @@ export class CustomMessageComponent extends Container {
 			}
 		}
 
-		// Default rendering uses a compact label and unboxed prose.
 		this.addChild(this.defaultContainer);
 		this.defaultContainer.clear();
 
-		const label = theme.bg(
-			"customMessageBg",
-			theme.fg("customMessageLabel", theme.bold(` ${this.message.customType} `)),
-		);
-		this.defaultContainer.addChild(new Text(label, 1, 0));
+		const details = this.message.details;
+		const reviewSummary =
+			this.message.customType === "review" &&
+			typeof details === "object" &&
+			details !== null &&
+			!Array.isArray(details) &&
+			typeof details.summary === "string"
+				? details.summary
+				: undefined;
+
+		// Generic messages keep their compact label and unboxed prose.
+		if (reviewSummary === undefined) {
+			const label = theme.bg(
+				"customMessageBg",
+				theme.fg("customMessageLabel", theme.bold(` ${this.message.customType} `)),
+			);
+			this.defaultContainer.addChild(new Text(label, 1, 0));
+		}
 
 		// Extract text content
 		let text: string;
@@ -91,9 +104,23 @@ export class CustomMessageComponent extends Container {
 		}
 
 		this.defaultContainer.addChild(
-			new Markdown(text, 1, 0, this.markdownTheme, {
+			new Markdown(reviewSummary !== undefined && !this._expanded ? reviewSummary : text, 1, 0, this.markdownTheme, {
 				color: (text: string) => theme.fg("customMessageText", text),
 			}),
 		);
+
+		if (reviewSummary !== undefined) {
+			const expandKey = keyDisplayText("app.tools.expand");
+			if (expandKey) {
+				this.defaultContainer.addChild(new Spacer(1));
+				this.defaultContainer.addChild(
+					new Text(
+						theme.fg("dim", `${expandKey} to ${this._expanded ? "collapse" : "expand"} review details`),
+						1,
+						0,
+					),
+				);
+			}
+		}
 	}
 }
