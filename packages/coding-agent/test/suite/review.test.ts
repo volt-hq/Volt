@@ -17,7 +17,6 @@ import {
 	normalizeReviewPullRequestNumber,
 	parseReviewCommandArgs,
 	prepareReviewWorkflow,
-	REMOTE_REVIEW_FAILURE_MESSAGE,
 	type ReviewUsageSnapshot,
 	resolveReviewModel,
 	runReview,
@@ -181,7 +180,7 @@ function attachGitHubContext(snapshot: ReviewSnapshot, marker: string): void {
 const DIAGNOSTIC_RETENTION_WARNING = "Could not retain optional private review diagnostics.";
 
 function privateReviewResponses(marker: string, assessment: "complete" | "incomplete" = "complete") {
-	return [
+	const responses = [
 		fauxAssistantMessage(fauxToolCall("review_context", {}), { stopReason: "toolUse" }),
 		fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
 		fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
@@ -208,6 +207,7 @@ function privateReviewResponses(marker: string, assessment: "complete" | "incomp
 			{ stopReason: "toolUse" },
 		),
 	];
+	return assessment === "incomplete" ? [...responses, ...responses] : responses;
 }
 
 describe("review command controls", () => {
@@ -886,7 +886,10 @@ describe("review pipeline", () => {
 					expect(result.parsed.overallCorrectness).toBe(status === "complete" ? "correct" : undefined);
 				} else {
 					expect(result.status).toBe(status);
-					if (status === "failed") expect(result).toMatchObject({ errorMessage: "Review provider failed." });
+					if (status === "failed")
+						expect(result).toMatchObject({
+							errorMessage: expect.stringContaining("Review verification model request failed"),
+						});
 				}
 				const ref = sessionManager.getSessionRef()!;
 				await sessionManager.closePersistence();
@@ -1302,7 +1305,7 @@ describe("review pipeline", () => {
 			modelRequests++;
 			return message;
 		};
-		harness.setResponses([
+		const responses = [
 			count(fauxAssistantMessage(fauxToolCall("review_context", {}), { stopReason: "toolUse" })),
 			count(fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" })),
 			count(
@@ -1340,7 +1343,8 @@ describe("review pipeline", () => {
 					{ stopReason: "toolUse" },
 				),
 			),
-		]);
+		];
+		harness.setResponses([...responses, ...responses]);
 
 		const sessionManager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "sessions"));
 		const workflowId = "review:private-incomplete-challenge";
@@ -1372,12 +1376,12 @@ describe("review pipeline", () => {
 		snapshots.splice(snapshots.indexOf(snapshot), 1);
 		expect(run.status).toBe("completed");
 		if (run.status !== "completed") throw new Error(`Review ended with ${run.status}`);
-		expect(modelRequests).toBe(8);
+		expect(modelRequests).toBe(16);
 		expect(JSON.stringify(run.parsed)).not.toContain(privateMarker);
 		expect(run.parsed).toMatchObject({
 			completionStatus: "incomplete",
 			summary: "Review incomplete with 0 verified findings.",
-			verificationChallenge: "Independent verification reported a completeness challenge.",
+			verificationChallenge: expect.stringContaining("did not supply a validated changed-code location"),
 			coverage: {
 				uncheckedAreas: [],
 				modelReportedLimitations: withLimitations
@@ -1395,7 +1399,7 @@ describe("review pipeline", () => {
 			status: "incomplete",
 			result: {
 				findings: [],
-				verificationChallenge: "Independent verification reported a completeness challenge.",
+				verificationChallenge: expect.stringContaining("did not supply a validated changed-code location"),
 			},
 		});
 		expect(JSON.stringify(reopened.getEntries())).not.toContain(privateMarker);
@@ -1411,7 +1415,7 @@ describe("review pipeline", () => {
 			.trim()
 			.split("\n")
 			.map((line): unknown => JSON.parse(line));
-		expect(privateRecords).toHaveLength(withLimitations ? 3 : 1);
+		expect(privateRecords).toHaveLength(withLimitations ? 6 : 2);
 		expect(privateRecords.at(-1)).toEqual({
 			schemaVersion: 1,
 			timestamp: expect.any(String),
@@ -1648,7 +1652,7 @@ describe("review pipeline", () => {
 		expect(harness.faux.state.callCount).toBe(0);
 	});
 
-	it("persists only a generic PR error when context-blind presentation fails", async () => {
+	it("persists a safe stage diagnosis when context-blind presentation fails", async () => {
 		const privateMarker = "private-presentation-failure-marker";
 		const harness = await createHarness();
 		harnesses.push(harness);
@@ -1742,14 +1746,14 @@ describe("review pipeline", () => {
 		snapshots.splice(snapshots.indexOf(snapshot), 1);
 		expect(outcome).toMatchObject({
 			status: "failed",
-			errorMessage: expect.stringContaining("did not inspect changed hunk"),
-			record: { errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE },
+			errorMessage: expect.stringContaining("Review presentation report validation failed"),
+			record: { errorMessage: expect.stringContaining("Review presentation report validation failed") },
 		});
 		expect(JSON.stringify(outcome.record)).not.toContain(privateMarker);
 		const reopened = await SessionManager.open(sessionManager.getSessionRef()!);
 		expect(getReviewRun(reopened, "review:private-presentation-failure")).toMatchObject({
 			status: "failed",
-			errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE,
+			errorMessage: expect.stringContaining("Review presentation report validation failed"),
 		});
 		expect(JSON.stringify(getReviewRun(reopened, "review:private-presentation-failure"))).not.toContain(
 			privateMarker,
@@ -1802,14 +1806,14 @@ describe("review pipeline", () => {
 		snapshots.splice(snapshots.indexOf(remoteSnapshot), 1);
 		expect(remoteOutcome).toMatchObject({
 			status: "failed",
-			errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE,
-			record: { errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE },
+			errorMessage: expect.stringContaining("Review discovery model request failed"),
+			record: { errorMessage: expect.stringContaining("Review discovery model request failed") },
 		});
 		expect(JSON.stringify(remoteOutcome)).not.toContain(privateDiagnostic);
 		const reopened = await SessionManager.open(sessionManager.getSessionRef()!);
 		expect(getReviewRun(reopened, "review:remote-provider-failure")).toMatchObject({
 			status: "failed",
-			errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE,
+			errorMessage: expect.stringContaining("Review discovery model request failed"),
 		});
 		expect(JSON.stringify(getReviewRun(reopened, "review:remote-provider-failure"))).not.toContain(privateDiagnostic);
 
@@ -1837,7 +1841,10 @@ describe("review pipeline", () => {
 			settingsManager: harness.settingsManager,
 		});
 		snapshots.splice(snapshots.indexOf(localSnapshot), 1);
-		expect(localOutcome).toMatchObject({ status: "failed", errorMessage: privateDiagnostic });
+		expect(localOutcome).toMatchObject({
+			status: "failed",
+			errorMessage: expect.stringContaining("Review discovery model request failed"),
+		});
 	});
 
 	it("does not credit complete discovery coverage to a verifier that inspects nothing", async () => {

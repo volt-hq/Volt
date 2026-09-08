@@ -63,6 +63,8 @@ export interface ReviewVerificationReport {
 	summary: string;
 	assessment: "complete" | "incomplete";
 	challenge?: string;
+	/** Changed-code anchors for an omitted issue; never private explanatory prose. */
+	challengeLocations?: ReviewLocation[];
 	decisions: ReviewVerificationDecision[];
 	priorFindingDecisions: ReviewPriorFindingDecision[];
 	limitations: string[];
@@ -81,6 +83,12 @@ export interface ReviewFindingPresentation {
 
 export interface ReviewPresentationReport {
 	findings: ReviewFindingPresentation[];
+	challenge?: { explanation: string; nextStep: string };
+}
+
+export interface DeclassifiedReviewChallenge {
+	locations: ReviewLocation[];
+	hunkIds: string[];
 }
 
 export interface DeclassifiedReviewFinding {
@@ -181,6 +189,9 @@ export interface BuildParsedReviewOptions {
 	verificationReport: ReviewVerificationReport;
 	declassifiedFindings?: DeclassifiedReviewFinding[];
 	presentationReport?: ReviewPresentationReport;
+	unresolvedChallenge?: DeclassifiedReviewChallenge;
+	challengePresentation?: ReviewPresentationReport["challenge"];
+	followUpFailure?: string;
 	discoveryCoverage: ReviewObservedCoverage;
 	verificationCoverage: ReviewObservedCoverage;
 	commandsRun: string[];
@@ -251,6 +262,7 @@ export const ReviewVerificationReportSchema = Type.Object(
 		summary: Type.String({ minLength: 1, maxLength: 2_000 }),
 		assessment: Type.Union([Type.Literal("complete"), Type.Literal("incomplete")]),
 		challenge: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000 })),
+		challengeLocations: Type.Optional(Type.Array(LocationSchema, { minItems: 1, maxItems: 4 })),
 		decisions: Type.Array(VerificationDecisionSchema, { maxItems: 50 }),
 		priorFindingDecisions: Type.Array(PriorFindingDecisionSchema, { maxItems: 50 }),
 		limitations: Type.Array(Type.String({ minLength: 1, maxLength: 500 }), { maxItems: 30 }),
@@ -273,7 +285,18 @@ const FindingPresentationSchema = Type.Object(
 );
 
 export const ReviewPresentationReportSchema = Type.Object(
-	{ findings: Type.Array(FindingPresentationSchema, { maxItems: 50 }) },
+	{
+		findings: Type.Array(FindingPresentationSchema, { maxItems: 50 }),
+		challenge: Type.Optional(
+			Type.Object(
+				{
+					explanation: Type.String({ minLength: 1, maxLength: 1_000 }),
+					nextStep: Type.String({ minLength: 1, maxLength: 500 }),
+				},
+				{ additionalProperties: false },
+			),
+		),
+	},
 	{ additionalProperties: false },
 );
 
@@ -550,9 +573,38 @@ export function validateReviewVerification(
 		if (!seenPrior.has(findingId)) errors.push(`Missing prior finding decision for ${findingId}`);
 	if (report.assessment === "incomplete" && !report.challenge?.trim())
 		errors.push("Incomplete verification requires a challenge");
-	if (report.assessment === "complete" && report.challenge !== undefined)
+	if (report.assessment === "complete" && (report.challenge !== undefined || report.challengeLocations !== undefined))
 		errors.push("Complete verification must not include a challenge");
 	return errors;
+}
+
+export async function validateReviewChallenge(
+	snapshot: ReviewSnapshot,
+	report: ReviewVerificationReport,
+	inScopeHunkIds: ReadonlySet<string>,
+): Promise<{ challenge?: DeclassifiedReviewChallenge; errors: string[] }> {
+	const locations = report.challengeLocations ?? [];
+	const errors: string[] = [];
+	const hunkIds = new Set<string>();
+	for (const [index, location] of locations.entries()) {
+		const label = `challengeLocations[${index}]`;
+		errors.push(...(await validateLocationExists(snapshot, location, label)));
+		if (location.endLine - location.startLine + 1 > 10) errors.push(`${label} exceeds 10 lines`);
+		const file = matchingChangedFile(snapshot, location);
+		const matching = file
+			? changedRanges(file, location.side).filter(
+					({ hunkId, range }) => inScopeHunkIds.has(hunkId) && rangesOverlap(location, range),
+				)
+			: [];
+		if (matching.length === 0) errors.push(`${label} must overlap an in-scope changed line`);
+		for (const { hunkId } of matching) hunkIds.add(hunkId);
+	}
+	return {
+		errors,
+		...(locations.length > 0 && errors.length === 0
+			? { challenge: { locations: structuredClone(locations), hunkIds: [...hunkIds] } }
+			: {}),
+	};
 }
 
 export function declassifyReviewFindings(
@@ -583,8 +635,16 @@ export function validateReviewPresentations(
 	findings: readonly DeclassifiedReviewFinding[],
 	report: ReviewPresentationReport,
 	coverage?: ReviewObservedCoverage,
+	challenge?: DeclassifiedReviewChallenge,
 ): string[] {
 	const errors: string[] = [];
+	if (challenge && !report.challenge) errors.push("Missing unresolved challenge explanation and next step");
+	if (!challenge && report.challenge) errors.push("No unresolved challenge was supplied for presentation");
+	if (challenge && coverage) {
+		for (const hunkId of challenge.hunkIds) {
+			if (!coverage.hunksInspected.includes(hunkId)) errors.push(`Challenge did not inspect changed hunk ${hunkId}`);
+		}
+	}
 	const expectedIds = new Set(findings.map((finding) => finding.presentationId));
 	const seen = new Set<string>();
 	for (const [index, presentation] of report.findings.entries()) {
@@ -671,7 +731,15 @@ export function buildParsedReview(options: BuildParsedReviewOptions): ParsedRevi
 					options.verificationReport,
 				));
 	if (!presentationReport) throw new Error("PR findings require a context-blind presentation report.");
-	const presentationErrors = validateReviewPresentations(declassifiedFindings, presentationReport);
+	const presentationErrors = [
+		...validateReviewPresentations(declassifiedFindings, presentationReport),
+		...validateReviewPresentations(
+			[],
+			{ findings: [], ...(options.challengePresentation ? { challenge: options.challengePresentation } : {}) },
+			undefined,
+			options.unresolvedChallenge,
+		),
+	];
 	if (presentationErrors.length > 0)
 		throw new Error(`Review presentation is invalid: ${presentationErrors.join("; ")}`);
 	const presentations = new Map(
@@ -770,11 +838,30 @@ export function buildParsedReview(options: BuildParsedReviewOptions): ParsedRevi
 				? ("incorrect" as const)
 				: ("correct" as const)
 			: undefined;
-	const challenge = options.verificationReport.challenge
-		? protectedContext
-			? "Independent verification reported a completeness challenge."
-			: options.verificationReport.challenge
-		: undefined;
+	const challenge =
+		options.verificationReport.assessment === "incomplete"
+			? [
+					"Independent verification could not resolve the remaining concern.",
+					...(options.followUpFailure ? [options.followUpFailure] : []),
+					...(options.unresolvedChallenge && options.challengePresentation
+						? [
+								`Unverified concern: ${options.challengePresentation.explanation}`,
+								`Next step: ${options.challengePresentation.nextStep}`,
+								...options.unresolvedChallenge.locations.map(
+									(location) =>
+										`Location: ${location.path}:${location.startLine}-${location.endLine} (${location.side}).`,
+								),
+							]
+						: protectedContext
+							? [
+									"The verifier did not supply a validated changed-code location for its remaining concern. Rerun with --focus and a narrower --scope, or inspect the coverage gaps below.",
+								]
+							: [
+									`Unverified concern: ${options.verificationReport.challenge}`,
+									"Next step: inspect the concern against the captured snapshot or rerun with a narrower --scope.",
+								]),
+				].join("\n")
+			: undefined;
 	const residualRisk = [...uncheckedAreas, ...(challenge ? [`Verifier challenge: ${challenge}`] : [])];
 	const modelReportedLimitations = protectedContext
 		? [
@@ -819,7 +906,7 @@ export function buildParsedReview(options: BuildParsedReviewOptions): ParsedRevi
 		...(overallCorrectness ? { overallCorrectness } : {}),
 		overallExplanation:
 			completionStatus === "incomplete"
-				? "Review verification is incomplete; no correctness verdict is available."
+				? [challenge, ...uncheckedAreas, "No correctness verdict is available."].filter(Boolean).join("\n")
 				: overallCorrectness === "incorrect"
 					? `${blockingFindings.length} verified P0-P2 finding${blockingFindings.length === 1 ? " remains" : "s remain"}.`
 					: "No verified P0-P2 findings remain.",

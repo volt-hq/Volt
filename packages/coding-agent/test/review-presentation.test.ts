@@ -244,6 +244,26 @@ describe("review presentation", () => {
 		expect(seed.content).toContain("Status: uncertain");
 	});
 
+	it("shows an unresolved concern, code location, and next step in the collapsed result", () => {
+		const run = record();
+		run.status = "incomplete";
+		run.result!.completionStatus = "incomplete";
+		delete run.result!.overallCorrectness;
+		run.result!.verificationChallenge =
+			"Unverified concern: Reasoning may consume the output allowance.\nNext step: Test a reasoning-only length stop.\nLocation: src/compaction.ts:303-306 (head).";
+		run.result!.coverage.residualRisk.push(run.result!.verificationChallenge);
+		const view = component(run);
+		for (const expanded of [false, true]) {
+			view.setExpanded(expanded);
+			const text = rendered(view).join("\n").replace(/\s+/g, " ");
+			expect(text).toContain("Unverified concern: Reasoning may consume the output allowance.");
+			expect(text).toContain("Next step: Test a reasoning-only length stop.");
+			expect(text).toContain("src/compaction.ts:303-306");
+			expect(text).not.toContain("Overall: correct");
+		}
+		expect(createReviewSeedMessage(run).details.findings).toEqual([]);
+	});
+
 	it("qualifies explicit scope and effective incremental review without inventing coverage totals", () => {
 		const run = record();
 		run.options.scope = ["src/**"];
