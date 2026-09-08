@@ -564,4 +564,36 @@ describe("AgentHarness stream configuration", () => {
 
 		expect(capturedReasoning).toBe("low");
 	});
+
+	it("snapshots tool argument limits and applies per-request replacement and clearing", async () => {
+		const registration = registerFauxProvider();
+		registrations.push(registration);
+		const seen: Array<StreamOptions["toolArgumentLimits"]> = [];
+		registration.setResponses(
+			Array.from({ length: 3 }, () => (_context, options) => {
+				seen.push(options?.toolArgumentLimits);
+				return fauxAssistantMessage("ok");
+			}),
+		);
+		const limits = { maxBytes: 128, maxDurationMs: 1000 };
+		const harness = createHarness({
+			env: new NodeExecutionEnv({ cwd: process.cwd() }),
+			session: new Session(new InMemorySessionStorage()),
+			model: registration.getModel(),
+			streamOptions: { toolArgumentLimits: limits },
+		});
+		limits.maxBytes = 999;
+		const snapshot = harness.getStreamOptions();
+		if (snapshot.toolArgumentLimits) snapshot.toolArgumentLimits.maxBytes = 999;
+		await harness.prompt("base");
+		let clear = false;
+		harness.on("before_provider_request", () => ({
+			streamOptions: { toolArgumentLimits: clear ? undefined : { maxTotalBytes: 512 } },
+		}));
+		await harness.prompt("replace");
+		clear = true;
+		await harness.prompt("clear");
+		expect(seen).toEqual([{ maxBytes: 128, maxDurationMs: 1000 }, { maxTotalBytes: 512 }, undefined]);
+		expect(harness.getStreamOptions().toolArgumentLimits).toEqual({ maxBytes: 128, maxDurationMs: 1000 });
+	});
 });

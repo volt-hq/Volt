@@ -16,6 +16,7 @@ export function isTransientProviderError(
 	errorMessage: string,
 	diagnostics?: readonly AssistantMessageDiagnostic[],
 ): boolean {
+	if (diagnostics?.some((diagnostic) => diagnostic.type === "tool_argument_generation_limit")) return false;
 	return (
 		!diagnostics?.some((diagnostic) => diagnostic.type === "invalid_tool_arguments") &&
 		!isNonRetryableProviderLimitError(errorMessage) &&

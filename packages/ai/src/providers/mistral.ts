@@ -50,7 +50,17 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 	context: Context,
 	options?: MistralOptions,
 ): AssistantMessageEventStream => {
-	const normalizer = new AssistantStreamNormalizer();
+	const normalizer = new AssistantStreamNormalizer(options);
+	if (
+		!normalizer.validateConfiguration({
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+		})
+	)
+		return normalizer.stream;
+	options = { ...options, signal: normalizer.signal };
 	normalizer.push({
 		type: "start",
 		init: {
@@ -391,11 +401,14 @@ async function consumeChatStream(
 			} else {
 				const authoritativeArguments = toMistralToolArguments(argumentsValue);
 				if (block.authoritativeArguments === undefined) {
+					if (!normalizer.checkToolArgumentsObject(block.contentIndex, authoritativeArguments)) return;
 					normalizer.push({
 						type: "toolcall_delta",
 						contentIndex: block.contentIndex,
 						argsTextDelta: JSON.stringify(authoritativeArguments),
 					});
+				} else if (!normalizer.checkToolArgumentsObjectReplacement(block.contentIndex, authoritativeArguments)) {
+					return;
 				}
 				block.authoritativeArguments = authoritativeArguments;
 			}

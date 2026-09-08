@@ -67,7 +67,17 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 	context: Context,
 	options?: GoogleVertexOptions,
 ): AssistantMessageEventStream => {
-	const normalizer = new AssistantStreamNormalizer();
+	const normalizer = new AssistantStreamNormalizer(options);
+	if (
+		!normalizer.validateConfiguration({
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+		})
+	)
+		return normalizer.stream;
+	options = { ...options, signal: normalizer.signal };
 	normalizer.push({
 		type: "start",
 		init: { api: model.api, provider: model.provider, model: model.id, timestamp: Date.now() },
@@ -167,6 +177,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 								id: toolCall.id,
 								name: toolCall.name,
 							});
+							if (!normalizer.checkToolArgumentsObject(contentIndex, args)) return;
 							normalizer.push({
 								type: "toolcall_delta",
 								contentIndex,

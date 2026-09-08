@@ -29,6 +29,7 @@ import type {
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { parseJsonWithRepair } from "../utils/json-parse.ts";
+import type { JsonObject } from "../utils/json-value.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
@@ -340,6 +341,10 @@ async function* iterateSseMessages(
 	const decoder = new TextDecoder();
 	const state: SseDecoderState = { event: null, data: [], raw: [] };
 	let buffer = "";
+	const onAbort = () => {
+		void reader.cancel().catch(() => {});
+	};
+	signal?.addEventListener("abort", onAbort, { once: true });
 
 	try {
 		while (true) {
@@ -348,6 +353,7 @@ async function* iterateSseMessages(
 			}
 
 			const { value, done } = await reader.read();
+			if (signal?.aborted) throw new Error("Request was aborted");
 			if (done) {
 				break;
 			}
@@ -387,6 +393,10 @@ async function* iterateSseMessages(
 			yield trailingEvent;
 		}
 	} finally {
+		signal?.removeEventListener("abort", onAbort);
+		try {
+			await reader.cancel();
+		} catch {}
 		reader.releaseLock();
 	}
 }
@@ -461,7 +471,17 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 	context: Context,
 	options?: AnthropicOptions,
 ): AssistantMessageEventStream => {
-	const normalizer = new AssistantStreamNormalizer();
+	const normalizer = new AssistantStreamNormalizer(options);
+	if (
+		!normalizer.validateConfiguration({
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+		})
+	)
+		return normalizer.stream;
+	options = { ...options, signal: normalizer.signal };
 	normalizer.push({
 		type: "start",
 		init: {
@@ -591,6 +611,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 								? fromClaudeCodeName(event.content_block.name, context.tools)
 								: event.content_block.name,
 						});
+						if (!normalizer.checkToolArgumentsObject(contentIndex, event.content_block.input as JsonObject))
+							return;
 						const seededArgs = JSON.stringify(event.content_block.input) ?? "";
 						toolArgumentSeeds.set(contentIndex, seededArgs);
 						if (seededArgs !== "{}") {

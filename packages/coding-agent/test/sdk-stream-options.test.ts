@@ -7,6 +7,7 @@ import {
 	createAssistantMessageEventStream,
 	type Model,
 	type SimpleStreamOptions,
+	type ToolArgumentLimits,
 } from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -75,8 +76,13 @@ describe("createAgentSession stream options", () => {
 
 	async function captureStreamOptions(
 		api: Api,
-		settings: { httpIdleTimeoutMs?: number; websocketConnectTimeoutMs?: number },
+		settings: {
+			httpIdleTimeoutMs?: number;
+			websocketConnectTimeoutMs?: number;
+			toolArgumentLimits?: ToolArgumentLimits;
+		},
 		requestOptions: SimpleStreamOptions = {},
+		startupLimits?: ToolArgumentLimits,
 	): Promise<SimpleStreamOptions | undefined> {
 		const model = createModel(api);
 		const settingsManager = SettingsManager.inMemory(settings);
@@ -103,10 +109,12 @@ describe("createAgentSession stream options", () => {
 			modelRegistry,
 			settingsManager,
 			sessionManager,
+			...(startupLimits === undefined ? {} : { toolArgumentLimits: startupLimits }),
 		});
 
 		try {
-			await createAgentSessionTestControl(session).getStreamFn()(model, { messages: [] }, requestOptions);
+			if (startupLimits) await session.prompt("hello");
+			else await createAgentSessionTestControl(session).getStreamFn()(model, { messages: [] }, requestOptions);
 			return capturedOptions;
 		} finally {
 			session.dispose();
@@ -150,5 +158,38 @@ describe("createAgentSession stream options", () => {
 		);
 
 		expect(options?.websocketConnectTimeoutMs).toBe(0);
+	});
+
+	it("forwards configured tool generation limits and lets request fields override matching settings", async () => {
+		const options = await captureStreamOptions(
+			"openai-completions",
+			{ toolArgumentLimits: { maxBytes: 128, maxTotalBytes: 512, maxDurationMs: 3000 } },
+			{ toolArgumentLimits: { maxBytes: 256 } },
+		);
+		expect(options?.toolArgumentLimits).toEqual({ maxBytes: 256, maxTotalBytes: 512, maxDurationMs: 3000 });
+	});
+
+	it("forwards SDK startup limits through an actual session prompt", async () => {
+		const options = await captureStreamOptions(
+			"openai-completions",
+			{ toolArgumentLimits: { maxBytes: 128, maxTotalBytes: 512 } },
+			{},
+			{ maxBytes: 256, maxDurationMs: 1000 },
+		);
+		expect(options?.toolArgumentLimits).toEqual({ maxBytes: 256, maxTotalBytes: 512, maxDurationMs: 1000 });
+	});
+
+	it("isolates settings limit objects from callers and preserves omitted defaults", () => {
+		const settings = SettingsManager.inMemory({ toolArgumentLimits: { maxBytes: 128 } });
+		const limits = settings.getToolArgumentLimits();
+		if (!limits) throw new Error("missing limits");
+		limits.maxBytes = 999;
+		expect(settings.getToolArgumentLimits()).toEqual({ maxBytes: 128 });
+		expect(SettingsManager.inMemory().getToolArgumentLimits()).toBeUndefined();
+	});
+
+	it.each([null, [], "unbounded"])("rejects malformed settings limit objects: %j", (value) => {
+		const settings = SettingsManager.inMemory({ toolArgumentLimits: value as unknown as ToolArgumentLimits });
+		expect(() => settings.getToolArgumentLimits()).toThrow("Invalid toolArgumentLimits setting: expected an object");
 	});
 });
