@@ -298,6 +298,7 @@ async function consumeChatStream(
 	mistralStream: AsyncIterable<CompletionEvent>,
 	state: MistralStreamState,
 ): Promise<void> {
+	let hasFinishReason = false;
 	for await (const event of mistralStream) {
 		const chunk = event.data;
 		// Mistral's streamed CompletionChunk carries an id field. Keep the first non-empty one,
@@ -325,6 +326,7 @@ async function consumeChatStream(
 		if (!choice) continue;
 
 		if (choice.finishReason) {
+			hasFinishReason = true;
 			state.stopReason = mapChatStopReason(choice.finishReason);
 		}
 
@@ -380,6 +382,7 @@ async function consumeChatStream(
 
 			const argumentsValue = toolCall.function.arguments;
 			if (typeof argumentsValue === "string") {
+				block.authoritativeArguments = undefined;
 				normalizer.push({
 					type: "toolcall_delta",
 					contentIndex: block.contentIndex,
@@ -400,6 +403,7 @@ async function consumeChatStream(
 	}
 
 	finishMistralContentBlock(normalizer, state);
+	if (!hasFinishReason || (state.stopReason !== "stop" && state.stopReason !== "toolUse")) return;
 	for (const block of state.toolBlocksByKey.values()) {
 		normalizer.push({
 			type: "toolcall_end",
@@ -457,7 +461,7 @@ function toMistralToolArguments(value: unknown): JsonObject {
 	if (value && typeof value === "object" && !Array.isArray(value)) {
 		return value as JsonObject;
 	}
-	return {};
+	throw new Error("Tool arguments must be a complete, valid JSON object");
 }
 
 function toFunctionTools(tools: Tool[]): Array<FunctionTool & { type: "function" }> {

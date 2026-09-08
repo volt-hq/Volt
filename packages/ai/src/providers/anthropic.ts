@@ -391,6 +391,12 @@ async function* iterateSseMessages(
 	}
 }
 
+class InvalidAnthropicToolInputError extends Error {
+	constructor() {
+		super("Anthropic returned malformed JSON for tool arguments. No tools were executed.");
+	}
+}
+
 async function* iterateAnthropicEvents(
 	response: Response,
 	signal?: AbortSignal,
@@ -413,6 +419,17 @@ async function* iterateAnthropicEvents(
 
 		try {
 			const event = parseJsonWithRepair<RawMessageStreamEvent>(sse.data);
+			if (
+				(event.type === "content_block_start" && event.content_block.type === "tool_use") ||
+				(event.type === "content_block_delta" && event.delta.type === "input_json_delta")
+			) {
+				// Repairing the outer event could silently change authoritative tool input.
+				try {
+					JSON.parse(sse.data);
+				} catch {
+					throw new InvalidAnthropicToolInputError();
+				}
+			}
 			if (event.type === "message_start") {
 				sawMessageStart = true;
 			} else if (event.type === "message_stop") {
@@ -420,6 +437,13 @@ async function* iterateAnthropicEvents(
 			}
 			yield event;
 		} catch (error) {
+			if (error instanceof InvalidAnthropicToolInputError) throw error;
+			// If decoding failed before the block type became available, a content
+			// event may still contain tool input. Fail closed without echoing its raw
+			// payload or allowing argument text to influence retry classification.
+			if (sse.event === "content_block_start" || sse.event === "content_block_delta") {
+				throw new InvalidAnthropicToolInputError();
+			}
 			const message = error instanceof Error ? error.message : String(error);
 			throw new Error(
 				`Could not parse Anthropic SSE event ${sse.event}: ${message}; data=${sse.data}; raw=${sse.raw.join("\\n")}`,
@@ -462,6 +486,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 		let nextContentIndex = 0;
 		type AnthropicBlockKind = "text" | "thinking" | "toolCall";
 		const blocksByRawIndex = new Map<number, { contentIndex: number; kind: AnthropicBlockKind }>();
+		const toolArgumentSeeds = new Map<number, string>();
 		const registerBlock = (rawIndex: number, kind: AnthropicBlockKind) => {
 			const block = { contentIndex: nextContentIndex, kind };
 			nextContentIndex += 1;
@@ -566,7 +591,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 								? fromClaudeCodeName(event.content_block.name, context.tools)
 								: event.content_block.name,
 						});
-						const seededArgs = JSON.stringify(event.content_block.input ?? {});
+						const seededArgs = JSON.stringify(event.content_block.input) ?? "";
+						toolArgumentSeeds.set(contentIndex, seededArgs);
 						if (seededArgs !== "{}") {
 							normalizer.push({ type: "toolcall_delta", contentIndex, argsTextDelta: seededArgs });
 						}
@@ -580,6 +606,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						normalizer.push({ type: "thinking_delta", contentIndex, delta: event.delta.thinking });
 					} else if (event.delta.type === "input_json_delta") {
 						const contentIndex = resolveBlock(event.index, "toolCall");
+						if (event.delta.partial_json.length > 0) toolArgumentSeeds.delete(contentIndex);
 						normalizer.push({
 							type: "toolcall_delta",
 							contentIndex,
@@ -601,7 +628,12 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					} else if (block?.kind === "thinking") {
 						normalizer.push({ type: "thinking_end", contentIndex: block.contentIndex });
 					} else if (block?.kind === "toolCall") {
-						normalizer.push({ type: "toolcall_end", contentIndex: block.contentIndex });
+						normalizer.push({
+							type: "toolcall_end",
+							contentIndex: block.contentIndex,
+							argumentsText: toolArgumentSeeds.get(block.contentIndex),
+						});
+						toolArgumentSeeds.delete(block.contentIndex);
 					}
 				} else if (event.type === "message_delta") {
 					if (event.delta.stop_reason) {
@@ -644,6 +676,13 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				type: "error",
 				reason: options?.signal?.aborted ? "aborted" : "error",
 				errorMessage: error instanceof Error ? error.message : JSON.stringify(error),
+				...(error instanceof InvalidAnthropicToolInputError
+					? {
+							diagnostics: [
+								{ type: "invalid_tool_arguments", timestamp: Date.now(), details: { code: "invalid_json" } },
+							],
+						}
+					: {}),
 				usage,
 			});
 		} finally {

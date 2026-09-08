@@ -29,7 +29,6 @@ import type {
 	Usage,
 } from "../types.ts";
 import { shortHash } from "../utils/hash.ts";
-import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -337,6 +336,8 @@ export async function processResponsesStream<TApi extends Api>(
 	let stopReason: StopReason = "stop";
 	let responseId: string | undefined;
 	let sawToolCall = false;
+	let sawTerminalResponse = false;
+	let sawIncompleteToolCall = false;
 
 	const eventOutputIndex = (event: ResponseStreamEvent): number | undefined => {
 		const value = (event as { output_index?: unknown }).output_index;
@@ -540,6 +541,7 @@ export async function processResponsesStream<TApi extends Api>(
 					state.ended = true;
 				}
 			} else if (item.type === "function_call") {
+				if (item.status === "incomplete" || item.status === "in_progress") sawIncompleteToolCall = true;
 				let state = findState(event, "function_call");
 				if (!state) {
 					state = createState(event, item) as Extract<OutputState, { kind: "function_call" }>;
@@ -547,7 +549,7 @@ export async function processResponsesStream<TApi extends Api>(
 				state.callId = item.call_id;
 				state.name = item.name;
 				if (item.id) state.itemId = item.id;
-				const argumentsJson = item.arguments || state.authoritativeArguments || "{}";
+				const argumentsJson = item.arguments ?? state.authoritativeArguments ?? "";
 				state.item = {
 					...item,
 					...(item.id || state.itemId ? { id: item.id ?? state.itemId } : {}),
@@ -558,14 +560,20 @@ export async function processResponsesStream<TApi extends Api>(
 					type: "toolCall",
 					id: toolCallId(state) ?? item.call_id,
 					name: state.name,
-					arguments: parseStreamingJson(argumentsJson),
+					arguments: {},
 				};
-				if (!state.ended) {
-					normalizer.push({ type: "toolcall_end", contentIndex: state.contentIndex, toolCall });
+				if (!state.ended && item.status !== "incomplete" && item.status !== "in_progress") {
+					normalizer.push({
+						type: "toolcall_end",
+						contentIndex: state.contentIndex,
+						toolCall,
+						argumentsText: argumentsJson,
+					});
 					state.ended = true;
 				}
 			}
-		} else if (event.type === "response.completed") {
+		} else if (event.type === "response.completed" || event.type === "response.incomplete") {
+			sawTerminalResponse = true;
 			const response = event.response;
 			for (const state of states) {
 				if (state.kind !== "function_call" || state.ended || state.authoritativeArguments === undefined) {
@@ -579,11 +587,12 @@ export async function processResponsesStream<TApi extends Api>(
 				normalizer.push({
 					type: "toolcall_end",
 					contentIndex: state.contentIndex,
+					argumentsText: state.authoritativeArguments,
 					toolCall: {
 						type: "toolCall",
 						id: toolCallId(state) ?? state.callId,
 						name: state.name,
-						arguments: parseStreamingJson(state.authoritativeArguments),
+						arguments: {},
 					},
 				});
 				state.ended = true;
@@ -628,7 +637,7 @@ export async function processResponsesStream<TApi extends Api>(
 				options.applyServiceTierPricing(usage, serviceTier);
 			}
 			normalizer.push({ type: "meta", patch: { responseId, usage } });
-			stopReason = mapStopReason(response?.status);
+			stopReason = event.type === "response.incomplete" ? "length" : mapStopReason(response?.status);
 			if (sawToolCall && stopReason === "stop") {
 				stopReason = "toolUse";
 			}
@@ -644,6 +653,12 @@ export async function processResponsesStream<TApi extends Api>(
 					: "Unknown error (no error details in response)";
 			throw new Error(msg);
 		}
+	}
+	if (!sawTerminalResponse) {
+		throw new Error("Responses stream ended without response completion");
+	}
+	if (sawIncompleteToolCall) {
+		throw new Error("Responses stream contained an incomplete tool call");
 	}
 
 	return {
@@ -687,10 +702,9 @@ function mapStopReason(status: OpenAI.Responses.ResponseStatus | undefined): Sto
 		case "failed":
 		case "cancelled":
 			return "error";
-		// These two are wonky ...
 		case "in_progress":
 		case "queued":
-			return "stop";
+			return "error";
 		default: {
 			const _exhaustive: never = status;
 			throw new Error(`Unhandled stop reason: ${_exhaustive}`);

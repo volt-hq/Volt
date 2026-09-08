@@ -6693,7 +6693,7 @@ export class AgentSession {
 		if (isContextOverflow(message, contextWindow)) return false;
 
 		const err = message.errorMessage;
-		return isTransientProviderError(err);
+		return isTransientProviderError(err, message.diagnostics);
 	}
 
 	/**

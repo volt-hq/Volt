@@ -46,6 +46,7 @@ export class AssistantStreamNormalizer {
 	private terminal = false;
 	private readonly blocks = new Map<number, StreamBlockState>();
 	private readonly toolArgsText = new Map<number, string>();
+	private toolArgumentFailure: string | undefined;
 
 	push(fragment: AssistantStreamFragment): void {
 		if (this.terminal) {
@@ -85,7 +86,12 @@ export class AssistantStreamNormalizer {
 				this.appendToolCall(fragment.contentIndex, fragment.argsTextDelta, fragment.id, fragment.name);
 				break;
 			case "toolcall_end":
-				this.endToolCall(fragment.contentIndex, fragment.toolCall, fragment.thoughtSignature);
+				this.endToolCall(
+					fragment.contentIndex,
+					fragment.toolCall,
+					fragment.thoughtSignature,
+					fragment.argumentsText,
+				);
 				break;
 			case "done":
 				this.finishSuccess(fragment.reason, fragment.usage);
@@ -339,7 +345,12 @@ export class AssistantStreamNormalizer {
 		});
 	}
 
-	private endToolCall(contentIndex: number, toolCall?: ToolCall, thoughtSignature?: string): void {
+	private endToolCall(
+		contentIndex: number,
+		toolCall?: ToolCall,
+		thoughtSignature?: string,
+		argumentsText?: string,
+	): void {
 		this.ensureStarted();
 		if (!this.ensureOpenBlock(contentIndex, "toolCall")) {
 			return;
@@ -349,11 +360,29 @@ export class AssistantStreamNormalizer {
 			this.recordViolation("block_type_mismatch", contentIndex, "toolCall");
 			return;
 		}
-		const finalToolCall = toolCall
-			? cloneToolCall(toolCall)
-			: thoughtSignature === undefined
-				? block
-				: Object.freeze({ ...block, thoughtSignature });
+		let finalToolCall = block;
+		try {
+			// Tolerant parsing is only a preview. Only an explicit end may admit
+			// the complete provider payload, never the last repaired object.
+			const raw =
+				argumentsText ?? (toolCall ? JSON.stringify(toolCall.arguments) : this.toolArgsText.get(contentIndex));
+			const argumentsValue: unknown = JSON.parse(raw ?? "");
+			if (argumentsValue === null || typeof argumentsValue !== "object" || Array.isArray(argumentsValue)) {
+				throw new Error("Expected a JSON object");
+			}
+			finalToolCall = cloneToolCall({
+				...(toolCall ?? block),
+				arguments: argumentsValue as JsonObject,
+				...(thoughtSignature === undefined ? {} : { thoughtSignature }),
+			});
+		} catch {
+			this.rejectToolArguments("invalid_json", contentIndex);
+		}
+		this.closeToolCall(contentIndex, finalToolCall);
+	}
+
+	/** Close a preview on failure without admitting it as a completed call. */
+	private closeToolCall(contentIndex: number, finalToolCall: ToolCall): void {
 		this.replaceBlock(contentIndex, finalToolCall);
 		this.toolArgsText.delete(contentIndex);
 		this.closeBlock(contentIndex);
@@ -367,6 +396,15 @@ export class AssistantStreamNormalizer {
 
 	private finishSuccess(reason: "stop" | "length" | "toolUse", usage?: Usage): void {
 		this.ensureStarted();
+		for (const [contentIndex, state] of this.blocks) {
+			if (state.kind !== "toolCall") continue;
+			if (reason === "length") this.rejectToolArguments("length_limit", contentIndex);
+			else if (state.open) this.rejectToolArguments("missing_completion", contentIndex);
+		}
+		if (this.toolArgumentFailure) {
+			this.finishError("error", this.toolArgumentFailure, undefined, usage);
+			return;
+		}
 		this.closeOpenBlocks();
 		if (usage) {
 			this.applyMeta({ usage });
@@ -391,12 +429,21 @@ export class AssistantStreamNormalizer {
 		usage?: Usage,
 	): void {
 		this.ensureStarted();
+		if (reason !== "aborted") {
+			for (const [contentIndex, state] of this.blocks) {
+				if (state.kind === "toolCall") this.rejectToolArguments("missing_completion", contentIndex);
+			}
+		}
 		this.closeOpenBlocks();
 		if (usage || diagnostics) {
 			this.applyMeta({ ...(usage === undefined ? {} : { usage }), diagnostics });
 		}
 		const message = this.requireMessage();
-		this.message = Object.freeze({ ...message, stopReason: reason, errorMessage });
+		this.message = Object.freeze({
+			...message,
+			stopReason: reason,
+			errorMessage: this.toolArgumentFailure ?? errorMessage,
+		});
 		this.terminal = true;
 		this.stream.push(
 			Object.freeze({
@@ -421,10 +468,26 @@ export class AssistantStreamNormalizer {
 					this.endThinking(contentIndex);
 					break;
 				case "toolCall":
-					this.endToolCall(contentIndex);
+					this.closeToolCall(contentIndex, this.requireMessage().content[contentIndex] as ToolCall);
 					break;
 			}
 		}
+	}
+
+	private rejectToolArguments(
+		code: "invalid_json" | "missing_completion" | "length_limit",
+		contentIndex: number,
+	): void {
+		if (this.toolArgumentFailure) return;
+		this.toolArgumentFailure =
+			code === "invalid_json"
+				? "Tool arguments must be a complete, valid JSON object. No tools were executed."
+				: code === "length_limit"
+					? "The response reached its length limit while generating tool calls. No tools were executed."
+					: "The provider did not complete its tool-call response. No tools were executed.";
+		this.applyMeta({
+			diagnostics: [{ type: "invalid_tool_arguments", timestamp: Date.now(), details: { code, contentIndex } }],
+		});
 	}
 
 	private ensureOpenBlock(contentIndex: number, kind: StreamBlockKind): boolean {
@@ -565,9 +628,6 @@ function cloneAndFreeze<T>(value: T): T {
 	if (value === null || typeof value !== "object") {
 		return value;
 	}
-	const clone: Record<string, unknown> = {};
-	for (const [key, entry] of Object.entries(value)) {
-		clone[key] = cloneAndFreeze(entry);
-	}
+	const clone = Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, cloneAndFreeze(entry)]));
 	return Object.freeze(clone) as T;
 }
