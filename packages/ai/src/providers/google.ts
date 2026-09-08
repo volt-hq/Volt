@@ -49,7 +49,17 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 	context: Context,
 	options?: GoogleOptions,
 ): AssistantMessageEventStream => {
-	const normalizer = new AssistantStreamNormalizer();
+	const normalizer = new AssistantStreamNormalizer(options);
+	if (
+		!normalizer.validateConfiguration({
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+		})
+	)
+		return normalizer.stream;
+	options = { ...options, signal: normalizer.signal };
 	normalizer.push({
 		type: "start",
 		init: { api: model.api, provider: model.provider, model: model.id, timestamp: Date.now() },
@@ -150,6 +160,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 								id: toolCall.id,
 								name: toolCall.name,
 							});
+							if (!normalizer.checkToolArgumentsObject(contentIndex, args)) return;
 							normalizer.push({
 								type: "toolcall_delta",
 								contentIndex,

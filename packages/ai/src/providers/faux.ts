@@ -295,12 +295,22 @@ function createErrorMessage(error: unknown, api: string, provider: string, model
 	};
 }
 
-function scheduleChunk(chunk: string, tokensPerSecond: number | undefined): Promise<void> {
+function scheduleChunk(chunk: string, tokensPerSecond: number | undefined, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) return Promise.resolve();
 	if (!tokensPerSecond || tokensPerSecond <= 0) {
 		return new Promise((resolve) => queueMicrotask(resolve));
 	}
 	const delayMs = (estimateTokens(chunk) / tokensPerSecond) * 1000;
-	return new Promise((resolve) => setTimeout(resolve, delayMs));
+	return new Promise((resolve) => {
+		const finish = () => {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", finish);
+			resolve();
+		};
+		const timer = setTimeout(finish, delayMs);
+		signal?.addEventListener("abort", finish, { once: true });
+		if (signal?.aborted) finish();
+	});
 }
 
 async function streamWithDeltas(
@@ -366,7 +376,7 @@ async function streamWithDeltas(
 				continue;
 			}
 			for (const chunk of splitStringByTokenSize(block.thinking, minTokenSize, maxTokenSize)) {
-				await scheduleChunk(chunk, tokensPerSecond);
+				await scheduleChunk(chunk, tokensPerSecond, signal);
 				if (signal?.aborted) {
 					normalizer.push({
 						type: "error",
@@ -391,7 +401,7 @@ async function streamWithDeltas(
 		if (block.type === "text") {
 			normalizer.push({ type: "text_start", contentIndex: index });
 			for (const chunk of splitStringByTokenSize(block.text, minTokenSize, maxTokenSize)) {
-				await scheduleChunk(chunk, tokensPerSecond);
+				await scheduleChunk(chunk, tokensPerSecond, signal);
 				if (signal?.aborted) {
 					normalizer.push({
 						type: "error",
@@ -413,8 +423,9 @@ async function streamWithDeltas(
 		}
 
 		normalizer.push({ type: "toolcall_start", contentIndex: index, id: block.id, name: block.name });
+		if (!normalizer.checkToolArgumentsObject(index, block.arguments)) return;
 		for (const chunk of splitStringByTokenSize(JSON.stringify(block.arguments), minTokenSize, maxTokenSize)) {
-			await scheduleChunk(chunk, tokensPerSecond);
+			await scheduleChunk(chunk, tokensPerSecond, signal);
 			if (signal?.aborted) {
 				normalizer.push({
 					type: "error",
@@ -490,7 +501,17 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 	const createQueueStream =
 		(takeStep: () => FauxResponseStep | undefined, recordCall: () => void): StreamFunction<string, StreamOptions> =>
 		(requestModel, context, streamOptions) => {
-			const normalizer = new AssistantStreamNormalizer();
+			const normalizer = new AssistantStreamNormalizer(streamOptions);
+			if (
+				!normalizer.validateConfiguration({
+					api: requestModel.api,
+					provider: requestModel.provider,
+					model: requestModel.id,
+					timestamp: Date.now(),
+				})
+			)
+				return normalizer.stream;
+			streamOptions = { ...streamOptions, signal: normalizer.signal };
 			const step = takeStep();
 			recordCall();
 

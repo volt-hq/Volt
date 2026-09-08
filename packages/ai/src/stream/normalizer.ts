@@ -1,9 +1,17 @@
-import type { ActiveToolCallState, AssistantMessage, AssistantMessageEvent, ToolCall, Usage } from "../types.ts";
+import type {
+	ActiveToolCallState,
+	AssistantMessage,
+	AssistantMessageEvent,
+	StreamOptions,
+	ToolCall,
+	Usage,
+} from "../types.ts";
 import type { AssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import type { JsonObject } from "../utils/json-value.ts";
 import type { AssistantMessageInit, AssistantMessageMetaPatch, AssistantStreamFragment } from "./fragments.ts";
+import { ToolArgumentGuard, type ToolArgumentLimitFailure } from "./tool-argument-guard.ts";
 
 const EMPTY_USAGE: Usage = {
 	input: 0,
@@ -40,6 +48,10 @@ type SnapshotEventInput = SnapshotEvent extends infer Event
  */
 export class AssistantStreamNormalizer {
 	readonly stream = new AssistantMessageEventStream();
+	readonly signal: AbortSignal;
+	private readonly controller = new AbortController();
+	private readonly guard: ToolArgumentGuard;
+	private readonly cleanupSignal: () => void;
 
 	private message: AssistantMessage | undefined;
 	private seq = -1;
@@ -48,10 +60,26 @@ export class AssistantStreamNormalizer {
 	private readonly toolArgsText = new Map<number, string>();
 	private toolArgumentFailure: string | undefined;
 
+	constructor(options?: Pick<StreamOptions, "signal" | "toolArgumentLimits">) {
+		this.signal = this.controller.signal;
+		this.guard = new ToolArgumentGuard(options?.toolArgumentLimits, (failure) =>
+			this.failToolArgumentGeneration(failure),
+		);
+		const parentSignal = options?.signal;
+		const onAbort = () => {
+			this.guard.dispose();
+			this.controller.abort(parentSignal?.reason);
+		};
+		if (parentSignal?.aborted) onAbort();
+		else parentSignal?.addEventListener("abort", onAbort, { once: true });
+		this.cleanupSignal = () => parentSignal?.removeEventListener("abort", onAbort);
+	}
+
 	push(fragment: AssistantStreamFragment): void {
 		if (this.terminal) {
 			return;
 		}
+		if (!this.validateConfiguration(fragment.type === "start" ? fragment.init : undefined)) return;
 
 		switch (fragment.type) {
 			case "start":
@@ -100,6 +128,37 @@ export class AssistantStreamNormalizer {
 				this.finishError(fragment.reason, fragment.errorMessage, fragment.diagnostics, fragment.usage);
 				break;
 		}
+	}
+
+	/** Reject invalid local limits before an adapter starts asynchronous provider work. */
+	validateConfiguration(init?: AssistantMessageInit): boolean {
+		if (this.terminal) return false;
+		if (!this.guard.configurationError) return true;
+		if (init && !this.message) this.handleStart(init);
+		this.failToolArgumentGeneration({
+			message: this.guard.configurationError,
+			diagnostic: {
+				type: "tool_argument_generation_limit",
+				timestamp: Date.now(),
+				details: { code: "invalid_configuration" },
+			},
+		});
+		return false;
+	}
+
+	/** Check authoritative raw arguments before an adapter retains them for completion. */
+	checkToolArgumentsText(contentIndex: number, text: string): boolean {
+		return !this.terminal && this.guard.replace(contentIndex, text);
+	}
+
+	/** Bound native arguments before an adapter serializes them into preview deltas. */
+	checkToolArgumentsObject(contentIndex: number, value: JsonObject): boolean {
+		return !this.terminal && this.guard.inspectObject(contentIndex, value);
+	}
+
+	/** Charge a native replacement before an adapter retains it without a preview delta. */
+	checkToolArgumentsObjectReplacement(contentIndex: number, value: JsonObject): boolean {
+		return !this.terminal && this.guard.replaceObject(contentIndex, value);
 	}
 
 	/** Finish a fragment source, synthesizing an error if it omitted a terminal fragment. */
@@ -304,6 +363,7 @@ export class AssistantStreamNormalizer {
 		this.replaceBlock(contentIndex, block);
 		this.blocks.set(contentIndex, { kind: "toolCall", open: true });
 		this.toolArgsText.set(contentIndex, "");
+		this.guard.start(contentIndex);
 		this.emitSnapshot({
 			type: "toolcall_start",
 			seq: this.nextSeq(),
@@ -323,6 +383,7 @@ export class AssistantStreamNormalizer {
 			this.recordViolation("block_type_mismatch", contentIndex, "toolCall");
 			return;
 		}
+		if (!this.guard.append(contentIndex, argsTextDelta)) return;
 		const argsText = (this.toolArgsText.get(contentIndex) ?? "") + argsTextDelta;
 		this.toolArgsText.set(contentIndex, argsText);
 		const argumentsValue = cloneAndFreeze(parseStreamingJson<JsonObject>(argsText));
@@ -360,6 +421,10 @@ export class AssistantStreamNormalizer {
 			this.recordViolation("block_type_mismatch", contentIndex, "toolCall");
 			return;
 		}
+		if (argumentsText !== undefined && !this.guard.replace(contentIndex, argumentsText)) return;
+		if (argumentsText === undefined && toolCall && !this.guard.replaceObject(contentIndex, toolCall.arguments))
+			return;
+		if (!this.guard.complete(contentIndex)) return;
 		let finalToolCall = block;
 		try {
 			// Tolerant parsing is only a preview. Only an explicit end may admit
@@ -406,12 +471,14 @@ export class AssistantStreamNormalizer {
 			return;
 		}
 		this.closeOpenBlocks();
+		if (this.terminal) return;
 		if (usage) {
 			this.applyMeta({ usage });
 		}
 		const message = this.requireMessage();
 		this.message = Object.freeze({ ...message, stopReason: reason });
 		this.terminal = true;
+		this.cleanup();
 		this.stream.push(
 			Object.freeze({
 				type: "done",
@@ -429,12 +496,19 @@ export class AssistantStreamNormalizer {
 		usage?: Usage,
 	): void {
 		this.ensureStarted();
-		if (reason !== "aborted") {
+		const failureDiagnostics = [...(this.requireMessage().diagnostics ?? []), ...(diagnostics ?? [])];
+		const hasGenerationLimit = failureDiagnostics.some(
+			(diagnostic) => diagnostic.type === "tool_argument_generation_limit",
+		);
+		const hasTypedToolFailure =
+			hasGenerationLimit || failureDiagnostics.some((diagnostic) => diagnostic.type === "invalid_tool_arguments");
+		if (reason !== "aborted" && !hasTypedToolFailure) {
 			for (const [contentIndex, state] of this.blocks) {
 				if (state.kind === "toolCall") this.rejectToolArguments("missing_completion", contentIndex);
 			}
 		}
 		this.closeOpenBlocks();
+		if (this.terminal) return;
 		if (usage || diagnostics) {
 			this.applyMeta({ ...(usage === undefined ? {} : { usage }), diagnostics });
 		}
@@ -442,9 +516,10 @@ export class AssistantStreamNormalizer {
 		this.message = Object.freeze({
 			...message,
 			stopReason: reason,
-			errorMessage: this.toolArgumentFailure ?? errorMessage,
+			errorMessage: hasGenerationLimit ? errorMessage : (this.toolArgumentFailure ?? errorMessage),
 		});
 		this.terminal = true;
+		this.cleanup();
 		this.stream.push(
 			Object.freeze({
 				type: "error",
@@ -453,6 +528,23 @@ export class AssistantStreamNormalizer {
 				error: this.message,
 			}) satisfies AssistantMessageEvent,
 		);
+	}
+
+	private failToolArgumentGeneration(failure: ToolArgumentLimitFailure): void {
+		if (this.terminal) return;
+		// A limit is not tool completion. Retain only already-bounded preview content.
+		for (const [contentIndex, state] of this.blocks) {
+			if (state.kind === "toolCall") this.closeBlock(contentIndex);
+		}
+		this.toolArgsText.clear();
+		this.finishError("error", failure.message, [failure.diagnostic]);
+		this.controller.abort(failure);
+	}
+
+	private cleanup(): void {
+		this.guard.dispose();
+		this.cleanupSignal();
+		this.toolArgsText.clear();
 	}
 
 	private closeOpenBlocks(): void {

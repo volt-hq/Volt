@@ -108,10 +108,21 @@ export interface ProviderResponse {
 	headers: Record<string, string>;
 }
 
+/** Limits apply only while the model prepares tool arguments, before execution. */
+export interface ToolArgumentLimits {
+	/** Maximum UTF-8 argument bytes per call. Default: 1 MiB. */
+	maxBytes?: number;
+	/** Maximum aggregate argument bytes across a response. Default: 8 MiB. */
+	maxTotalBytes?: number;
+	/** Absolute preparation deadline per call, unaffected by incoming bytes. Default: 5 minutes. */
+	maxDurationMs?: number;
+}
+
 export interface StreamOptions {
 	temperature?: number;
 	maxTokens?: number;
 	signal?: AbortSignal;
+	toolArgumentLimits?: ToolArgumentLimits;
 	apiKey?: string;
 	/**
 	 * Preferred transport for providers that support multiple transports.

@@ -216,6 +216,7 @@ function cloneStreamOptions(streamOptions?: AgentHarnessStreamOptions): AgentHar
 		...(streamOptions?.metadata ? { metadata: { ...streamOptions.metadata } } : {}),
 		...(streamOptions?.env ? { env: { ...streamOptions.env } } : {}),
 		...(streamOptions?.thinkingBudgets ? { thinkingBudgets: { ...streamOptions.thinkingBudgets } } : {}),
+		...(streamOptions?.toolArgumentLimits ? { toolArgumentLimits: { ...streamOptions.toolArgumentLimits } } : {}),
 	};
 }
 
@@ -274,6 +275,10 @@ function applyStreamOptionsPatch(
 	if (Object.hasOwn(patch, "thinkingBudgets")) {
 		if (patch.thinkingBudgets === undefined) delete result.thinkingBudgets;
 		else result.thinkingBudgets = { ...patch.thinkingBudgets };
+	}
+	if (Object.hasOwn(patch, "toolArgumentLimits")) {
+		if (patch.toolArgumentLimits === undefined) delete result.toolArgumentLimits;
+		else result.toolArgumentLimits = { ...patch.toolArgumentLimits };
 	}
 	if (Object.hasOwn(patch, "cacheRetention")) {
 		if (patch.cacheRetention === undefined) delete result.cacheRetention;
@@ -1174,6 +1179,9 @@ export class AgentHarness<
 						...(requestOptions.thinkingBudgets === undefined
 							? {}
 							: { thinkingBudgets: requestOptions.thinkingBudgets }),
+						...(requestOptions.toolArgumentLimits === undefined
+							? {}
+							: { toolArgumentLimits: { ...requestOptions.toolArgumentLimits } }),
 						onPayload: async (payload) => await this.emitBeforeProviderPayload(admittedModel, payload),
 						onResponse: async (response) => {
 							const headers = { ...(response.headers as Record<string, string>) };
