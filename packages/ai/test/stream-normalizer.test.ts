@@ -354,7 +354,7 @@ describe("AssistantStreamNormalizer", () => {
 		expect(JSON.stringify(result.diagnostics)).not.toContain(duplicateSecret);
 	});
 
-	it("auto-closes every open block before a success terminal and ignores later fragments", async () => {
+	it("closes previews with an error when a tool omitted completion and ignores later fragments", async () => {
 		const { events, result } = await normalize([
 			startFragment(),
 			{ type: "text_start", contentIndex: 0 },
@@ -378,10 +378,11 @@ describe("AssistantStreamNormalizer", () => {
 			"text_end",
 			"thinking_end",
 			"toolcall_end",
-			"done",
+			"error",
 		]);
 		expectContiguousSeq(events);
-		expect(result.stopReason).toBe("toolUse");
+		expect(result.stopReason).toBe("error");
+		expect(result.diagnostics).toContainEqual(expect.objectContaining({ type: "invalid_tool_arguments" }));
 		expect(result.content).toEqual([
 			{ type: "text", text: "answer" },
 			{ type: "thinking", thinking: "plan" },
@@ -871,7 +872,7 @@ function expectGeneratedMalformedRecovery(
 	result: AssistantMessage,
 ): void {
 	expect(events.filter((event) => event.type === "start")).toHaveLength(1);
-	expect(events.at(-1)?.type).toBe(generated.input.terminal === "done" ? "done" : "error");
+	expect(events.at(-1)?.type).toBe("error");
 	expect(events.filter((event) => event.type === "done" || event.type === "error")).toHaveLength(1);
 	expect(result.content).toEqual(generated.expectedContent);
 	expect(result.model).toBe("original-model");
@@ -892,13 +893,14 @@ function expectGeneratedMalformedRecovery(
 	expect(JSON.stringify(result)).not.toContain(DROPPED_FRAGMENT_SECRET);
 
 	if (generated.input.terminal === "done") {
-		expect(result.stopReason).toBe("toolUse");
+		expect(result.stopReason).toBe("error");
+		expect(result.diagnostics).toContainEqual(expect.objectContaining({ type: "invalid_tool_arguments" }));
 	} else if (generated.input.terminal === "error") {
 		expect(result).toMatchObject({ stopReason: "aborted", errorMessage: "generated abort" });
 	} else {
 		expect(result).toMatchObject({
 			stopReason: "error",
-			errorMessage: "Assistant stream ended without a terminal fragment",
+			errorMessage: "The provider did not complete its tool-call response. No tools were executed.",
 		});
 	}
 

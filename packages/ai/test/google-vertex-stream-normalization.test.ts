@@ -53,6 +53,7 @@ vi.mock("@google/genai", () => {
 });
 
 import { getModel } from "../src/models.ts";
+import { streamGoogle } from "../src/providers/google.ts";
 import { streamGoogleVertex } from "../src/providers/google-vertex.ts";
 import type { AssistantMessage, AssistantMessageEvent, Context } from "../src/types.ts";
 import type { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
@@ -75,6 +76,68 @@ async function collect(
 beforeEach(() => {
 	vertexMock.chunks = [];
 	vertexMock.streamError = undefined;
+});
+
+describe.each(["google", "google-vertex"] as const)("%s tool completion", (provider) => {
+	const run = () =>
+		provider === "google"
+			? streamGoogle(getModel("google", "gemini-3-flash-preview"), context, { apiKey: "test" }).result()
+			: streamGoogleVertex(model, context, { apiKey: "test" }).result();
+
+	it.each([null, [], "not an object", true])("rejects non-object native arguments %j", async (args) => {
+		vertexMock.chunks = [
+			{
+				candidates: [
+					{ content: { parts: [{ functionCall: { id: "call-1", name: "edit", args } }] }, finishReason: "STOP" },
+				],
+			},
+		];
+		const result = await run();
+		expect(result.stopReason).toBe("error");
+		expect(result.diagnostics).toContainEqual(expect.objectContaining({ type: "invalid_tool_arguments" }));
+	});
+
+	it.each([undefined, "MAX_TOKENS", "MALFORMED_FUNCTION_CALL"])(
+		"rejects incomplete/error response %j",
+		async (finishReason) => {
+			vertexMock.chunks = [
+				{
+					candidates: [
+						{
+							content: { parts: [{ functionCall: { id: "call-1", name: "edit", args: { text: "done" } } }] },
+							finishReason,
+						},
+					],
+				},
+			];
+			const result = await run();
+			expect(result.stopReason).toBe("error");
+			expect(result.diagnostics).toContainEqual(expect.objectContaining({ type: "invalid_tool_arguments" }));
+		},
+	);
+
+	it("preserves complete native arguments and no-argument calls", async () => {
+		const args = { text: 'const path = "C:\\notes";\nconsole.log("done");' };
+		vertexMock.chunks = [
+			{
+				candidates: [
+					{
+						content: {
+							parts: [
+								{ functionCall: { id: "call-1", name: "edit", args } },
+								{ functionCall: { id: "call-2", name: "ping" } },
+							],
+						},
+						finishReason: "STOP",
+					},
+				],
+			},
+		];
+		const result = await run();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content[0]).toMatchObject({ arguments: args });
+		expect(result.content[1]).toMatchObject({ arguments: {} });
+	});
 });
 
 describe("Google Vertex stream normalization", () => {

@@ -42,7 +42,14 @@ export type AssistantStreamFragment =
 	  }
 	| { type: "toolcall_start"; contentIndex: number; id?: string; name?: string }
 	| { type: "toolcall_delta"; contentIndex: number; argsTextDelta: string; id?: string; name?: string }
-	| { type: "toolcall_end"; contentIndex: number; toolCall?: ToolCall; thoughtSignature?: string }
+	| {
+			type: "toolcall_end";
+			contentIndex: number;
+			toolCall?: ToolCall;
+			/** Complete provider JSON; takes precedence over structured arguments and streamed previews. */
+			argumentsText?: string;
+			thoughtSignature?: string;
+	  }
 	| {
 			type: "done";
 			reason: Extract<StopReason, "stop" | "length" | "toolUse">;

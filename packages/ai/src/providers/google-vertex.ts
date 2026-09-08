@@ -81,6 +81,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 		let currentBlock: { type: "text" | "thinking"; contentIndex: number; signature?: string } | undefined;
 		const toolCallIds = new Set<string>();
 		let hasToolCalls = false;
+		let hasFinishReason = false;
 
 		const closeCurrentBlock = () => {
 			if (!currentBlock) {
@@ -152,7 +153,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 							toolCallIds.add(toolCallId);
 							hasToolCalls = true;
 							const contentIndex = nextContentIndex++;
-							const args = (part.functionCall.args as JsonObject | undefined) ?? {};
+							const args = (part.functionCall.args === undefined ? {} : part.functionCall.args) as JsonObject;
 							const toolCall: ToolCall = {
 								type: "toolCall",
 								id: toolCallId,
@@ -177,7 +178,9 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 				}
 
 				if (candidate?.finishReason) {
-					stopReason = hasToolCalls ? "toolUse" : mapStopReason(candidate.finishReason);
+					hasFinishReason = true;
+					stopReason = mapStopReason(candidate.finishReason);
+					if (hasToolCalls && stopReason === "stop") stopReason = "toolUse";
 				}
 
 				if (chunk.usageMetadata) {
@@ -203,6 +206,9 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 			}
 
 			closeCurrentBlock();
+			if (hasToolCalls && !hasFinishReason) {
+				throw new Error("Google Vertex stream ended without finishReason");
+			}
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
