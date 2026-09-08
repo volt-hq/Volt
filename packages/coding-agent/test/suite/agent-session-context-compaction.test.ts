@@ -173,6 +173,90 @@ describe("AgentSession cache-preserving compaction", () => {
 		}
 	});
 
+	it.each(["preflight", "provider"] as const)(
+		"carries a previous checkpoint through a split-turn %s fallback with no complete history turns",
+		async (overflow) => {
+			const harness = await createHarness({
+				models: [
+					{
+						id: "summary",
+						reasoning: true,
+						contextWindow: overflow === "preflight" ? 16_384 : 1_000_000,
+						maxTokens: 32_768,
+					},
+				],
+				settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
+			});
+			harnesses.push(harness);
+			harness.session.setSessionName("repeated split compaction");
+			await harness.session.setThinkingLevel("high");
+			const constraint = "Keep the public API unchanged; deployment is not authorized.";
+			harness.sessionManager.appendMessage({ role: "user", content: constraint, timestamp: 1 });
+			const currentTurn = harness.sessionManager.appendMessage({
+				role: "user",
+				content: "Continue the implementation",
+				timestamp: 2,
+			});
+			harness.sessionManager.appendCompaction(constraint, currentTurn, 50_000);
+			harness.sessionManager.appendMessage(fauxAssistantMessage("Investigating the implementation. ".repeat(100)));
+			const retained = fauxAssistantMessage("Next implementation step");
+			const retainedId = harness.sessionManager.appendMessage(retained);
+			const entriesBefore = harness.sessionManager.getEntries();
+			const preparation = prepareCompaction(
+				harness.sessionManager.getBranch(),
+				harness.settingsManager.getCompactionSettings(),
+			);
+			expect(preparation).toMatchObject({
+				previousSummary: constraint,
+				isSplitTurn: true,
+				messagesToSummarize: [],
+				firstKeptEntryId: retainedId,
+			});
+			let historyRequests = 0;
+			let prefixRequests = 0;
+			const summarize = (context: Context) => {
+				const prompt = getMessageText(context.messages.at(-1));
+				if (prompt.includes("<previous-summary>")) {
+					historyRequests++;
+					expect(prompt).toContain(constraint);
+					return fauxAssistantMessage(`## Constraints & Preferences\n${constraint}`);
+				}
+				prefixRequests++;
+				expect(prompt).toContain("Continue the implementation");
+				return fauxAssistantMessage("## Context for Suffix\nImplementation remains unfinished.");
+			};
+			if (overflow === "provider") {
+				harness.setResponses([
+					fauxAssistantMessage("", {
+						stopReason: "error",
+						errorMessage: "Your input exceeds the context window of this model",
+					}),
+				]);
+			}
+			harness.faux.setSimpleResponses([summarize, summarize]);
+			const result = await harness.session.compact();
+			expect(historyRequests).toBe(1);
+			expect(prefixRequests).toBe(1);
+			expect(result.summary).toContain(constraint);
+			expect(result.summary).toContain("Implementation remains unfinished.");
+			expect(result.firstKeptEntryId).toBe(retainedId);
+			expect(harness.session.messages.slice(1)).toEqual([retained]);
+			expect(harness.sessionManager.getEntries().slice(0, entriesBefore.length)).toEqual(entriesBefore);
+			expect((result.details as CompactionDetails).requests?.map((request) => request.strategy)).toEqual([
+				...(overflow === "provider" ? ["native"] : []),
+				"chunked",
+				"chunked",
+			]);
+			harness.setResponses([
+				(context) => {
+					expect(getMessageText(context.messages[0])).toContain(constraint);
+					return fauxAssistantMessage("Continue without changing the API or deploying.");
+				},
+			]);
+			await harness.session.prompt("Continue");
+		},
+	);
+
 	it("persists normal request diagnostics for comparison after reopening the session", async () => {
 		const sessionDirectory = await mkdtemp(join(tmpdir(), "volt-normal-request-diagnostics-"));
 		sessionDirectories.push(sessionDirectory);

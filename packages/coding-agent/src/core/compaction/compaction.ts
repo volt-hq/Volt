@@ -1075,7 +1075,7 @@ export async function compact(
 		try {
 			summaryResults = await Promise.allSettled([
 				runSummary(() =>
-					messagesToSummarize.length > 0
+					messagesToSummarize.length > 0 || previousSummary
 						? generateSummaryInChunks(
 								messagesToSummarize,
 								model,
