@@ -99,7 +99,7 @@ describe("PR #329 manager ownership contract", () => {
 	function prepareCli(mode: "interactive" | "print"): string[] {
 		const workspace = join(harness.tempDir, `${mode}-workspace`);
 		const agentDir = join(harness.tempDir, `${mode}-agent`);
-		mkdirSync(workspace, { recursive: true });
+		mkdirSync(join(workspace, ".agents", "skills"), { recursive: true });
 		mkdirSync(agentDir, { recursive: true });
 		const model = harness.getModel();
 		writeFileSync(
@@ -123,6 +123,8 @@ describe("PR #329 manager ownership contract", () => {
 		return [
 			...(mode === "print" ? ["--print"] : []),
 			"--offline",
+			// These tests exercise ownership, not interactive project-trust selection.
+			"--no-approve",
 			"--no-extensions",
 			"--no-skills",
 			"--no-prompt-templates",

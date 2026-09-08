@@ -1,13 +1,16 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AgentSession } from "../../src/core/agent-session.ts";
+import { convertToLlm } from "../../src/core/messages.ts";
 import {
 	buildReviewPrompt,
 	createReviewSeedMessage,
+	DEFAULT_REVIEW_RUN_CONTROLS,
 	executeReviewWorkflow,
-	formatReviewForNewSession,
 	listBaseBranches,
 	listRecentCommits,
 	MAX_PULL_REQUEST_NUMBER,
@@ -20,6 +23,7 @@ import {
 	runReview,
 	runReviewWorkflow,
 } from "../../src/core/review.ts";
+import { STATIC_REVIEW_LIMITATION } from "../../src/core/review-presentation.ts";
 import {
 	getReviewPrivateDiagnosticsDirectory,
 	REVIEW_PRIVATE_DIAGNOSTICS_ENV,
@@ -31,10 +35,16 @@ import type {
 	ReviewVerificationReport,
 } from "../../src/core/review-report.ts";
 import { type ReviewSnapshot, resolveReviewSnapshot } from "../../src/core/review-snapshot.ts";
-import { getReviewRun, listReviewRuns } from "../../src/core/review-state.ts";
+import {
+	createReviewRunRecord,
+	getReviewRun,
+	listReviewRuns,
+	type ReviewRunRecord,
+} from "../../src/core/review-state.ts";
 import { MAX_ACTIVE_REVIEW_WORKFLOWS, ReviewWorkflowManager } from "../../src/core/review-workflows.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createSessionManagerTestOwner } from "../session-manager-owner.ts";
+import { createTestBodyOwner } from "../test-body-owner.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function git(cwd: string, ...args: string[]): string {
@@ -119,8 +129,9 @@ function presentationReport(presentationId: string): ReviewPresentationReport {
 
 async function createSnapshotRepository(
 	harness: Harness,
-	options: { agentsPolicy?: string; maxBlobBytes?: number } = {},
+	options: { agentsPolicy?: string; maxBlobBytes?: number; signal?: AbortSignal } = {},
 ): Promise<ReviewSnapshot> {
+	options.signal?.throwIfAborted();
 	mkdirSync(join(harness.tempDir, "src"), { recursive: true });
 	git(harness.tempDir, "init", "--initial-branch=main");
 	git(harness.tempDir, "config", "user.email", "review@example.com");
@@ -141,6 +152,7 @@ async function createSnapshotRepository(
 	const snapshot = await resolveReviewSnapshot({ kind: "uncommitted" }, harness.tempDir, {
 		maxCommitRefBytes: 1_024,
 		maxPullRequestNumber: MAX_PULL_REQUEST_NUMBER,
+		signal: options.signal,
 		...(options.maxBlobBytes === undefined ? {} : { limits: { maxBlobBytes: options.maxBlobBytes } }),
 	});
 	if ("error" in snapshot) throw new Error(snapshot.error);
@@ -164,6 +176,38 @@ function attachGitHubContext(snapshot: ReviewSnapshot, marker: string): void {
 		discussionEntries: [{ id: "comment-1", kind: "pr-comment", body: marker }],
 		rendered: marker,
 	};
+}
+
+const DIAGNOSTIC_RETENTION_WARNING = "Could not retain optional private review diagnostics.";
+
+function privateReviewResponses(marker: string, assessment: "complete" | "incomplete" = "complete") {
+	return [
+		fauxAssistantMessage(fauxToolCall("review_context", {}), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(
+			fauxToolCall("report_review_candidates", {
+				summary: marker,
+				candidates: [],
+				limitations: [marker, marker],
+			}),
+			{ stopReason: "toolUse" },
+		),
+		fauxAssistantMessage(fauxToolCall("review_context", {}), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(
+			fauxToolCall("report_review_verification", {
+				summary: marker,
+				assessment,
+				...(assessment === "incomplete" ? { challenge: marker } : {}),
+				decisions: [],
+				priorFindingDecisions: [],
+				limitations: [marker],
+			}),
+			{ stopReason: "toolUse" },
+		),
+	];
 }
 
 describe("review command controls", () => {
@@ -664,15 +708,390 @@ describe("review pipeline", () => {
 	const harnesses: Harness[] = [];
 	const snapshots: ReviewSnapshot[] = [];
 	const managerOwner = createSessionManagerTestOwner();
+	const bodyOwner = createTestBodyOwner();
 
-	beforeEach(() => managerOwner.start());
-
-	afterEach(async () => {
-		vi.unstubAllEnvs();
-		for (const snapshot of snapshots.splice(0)) await snapshot.dispose();
-		await managerOwner.drain();
-		for (const harness of harnesses.splice(0)) await harness.cleanupAsync();
+	beforeEach(() => {
+		bodyOwner.start();
+		managerOwner.start();
+		vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "0");
 	});
+
+	afterEach(() =>
+		bodyOwner.finish(async () => {
+			vi.unstubAllEnvs();
+			for (const snapshot of snapshots.splice(0)) await snapshot.dispose();
+			await managerOwner.drain();
+			vi.restoreAllMocks();
+			for (const harness of harnesses.splice(0)) await harness.cleanupAsync();
+		}),
+	);
+
+	it.each([
+		"disabled",
+		"retained",
+		"stderr",
+		"observer",
+		"throwing observer",
+		"rejecting observer",
+		"pending observer",
+		"throwing stderr",
+	] as const)("keeps optional diagnostic warnings local and passive (%s)", async (delivery) => {
+		vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, delivery === "disabled" ? "0" : "1");
+		const privateMarker = "private-retention-model-prose";
+		const observerError = "private-warning-observer-error";
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const snapshot = await createSnapshotRepository(harness);
+		attachGitHubContext(snapshot, privateMarker);
+		snapshots.push(snapshot);
+		const checkout = await snapshot.materializeHead();
+		expect(existsSync(checkout)).toBe(true);
+		const diagnosticsDirectory = getReviewPrivateDiagnosticsDirectory(harness.tempDir);
+		if (delivery !== "retained") writeFileSync(diagnosticsDirectory, "Not a directory");
+		harness.setResponses(privateReviewResponses(privateMarker));
+		const stderrWarning = vi.spyOn(console, "warn").mockImplementation(() => {
+			if (delivery === "throwing stderr") throw new Error(observerError);
+		});
+		const onDiagnosticRetentionWarning = vi.fn((_message: string): void | Promise<void> => {
+			if (delivery === "throwing observer") throw new Error(observerError);
+			if (delivery === "rejecting observer") return Promise.reject(new Error(observerError));
+			if (delivery === "pending observer") return new Promise<void>(() => {});
+		});
+		const useObserver = delivery.includes("observer") || delivery === "disabled" || delivery === "retained";
+		const events: Array<Record<string, unknown>> = [];
+		const result = await runReview({
+			cwd: harness.tempDir,
+			agentDir: harness.tempDir,
+			model: harness.getModel(),
+			authStorage: harness.authStorage,
+			modelRegistry: harness.session.modelRegistry,
+			settingsManager: harness.settingsManager,
+			resolved: snapshot,
+			controls: { scopeMode: "full", scope: ["src/**"] },
+			workflowId: "review:local-retention-warning",
+			workflowAction: "review.pr",
+			onEvent: (event) => events.push(event),
+			...(useObserver ? { onDiagnosticRetentionWarning } : {}),
+		});
+		expect(result).toMatchObject({
+			aborted: false,
+			parsed: { completionStatus: "complete", overallCorrectness: "correct", findings: [] },
+		});
+		expect(result.errorMessage).toBeUndefined();
+		expect(existsSync(checkout)).toBe(false);
+		expect(harness.faux.state.callCount).toBe(8);
+		const failedRetention = delivery !== "disabled" && delivery !== "retained";
+		expect(onDiagnosticRetentionWarning.mock.calls).toEqual(
+			failedRetention && useObserver ? [[DIAGNOSTIC_RETENTION_WARNING]] : [],
+		);
+		expect(stderrWarning.mock.calls).toEqual(
+			failedRetention && delivery !== "observer" && delivery !== "pending observer"
+				? [[`Warning: ${DIAGNOSTIC_RETENTION_WARNING}`]]
+				: [],
+		);
+		const publicData = JSON.stringify({ result, events, entries: harness.sessionManager.getEntries() });
+		for (const forbidden of [privateMarker, observerError, diagnosticsDirectory, DIAGNOSTIC_RETENTION_WARNING]) {
+			expect(publicData).not.toContain(forbidden);
+		}
+		if (delivery === "retained") {
+			const files = readdirSync(diagnosticsDirectory);
+			expect(files).toHaveLength(1);
+			expect(readFileSync(join(diagnosticsDirectory, files[0]!), "utf8").trim().split("\n")).toHaveLength(4);
+		}
+	});
+
+	it.for(["complete", "incomplete", "failed", "cancelled"] as const)(
+		"preserves the durable %s outcome when diagnostics and the warning observer fail",
+		(status, context) =>
+			bodyOwner.run(context.signal, async (signal) => {
+				vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "1");
+				const privateMarker = "private-durable-retention-prose";
+				const observerError = "private-retention-observer-failure";
+				const harness = await createHarness({ settings: { retry: { enabled: false } } });
+				harnesses.push(harness);
+				signal.throwIfAborted();
+				const snapshot = await createSnapshotRepository(harness, { signal });
+				attachGitHubContext(snapshot, privateMarker);
+				snapshots.push(snapshot);
+				signal.throwIfAborted();
+				const checkout = await snapshot.materializeHead();
+				signal.throwIfAborted();
+				const diagnosticsDirectory = getReviewPrivateDiagnosticsDirectory(harness.tempDir);
+				writeFileSync(diagnosticsDirectory, "Not a directory");
+				const controller = new AbortController();
+				const responses = privateReviewResponses(
+					privateMarker,
+					status === "incomplete" ? "incomplete" : "complete",
+				);
+				harness.setResponses(
+					status === "failed" || status === "cancelled"
+						? [
+								...responses.slice(0, 4),
+								() => {
+									if (status === "cancelled") controller.abort();
+									return fauxAssistantMessage("", {
+										stopReason: "error",
+										errorMessage: "Review provider failed.",
+									});
+								},
+							]
+						: responses,
+				);
+				const sessionManager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "sessions"));
+				signal.throwIfAborted();
+				const workflowId = `review:retention-${status}`;
+				const events: Array<Record<string, unknown>> = [];
+				const stderrWarning = vi.spyOn(console, "warn").mockImplementation(() => {});
+				const onDiagnosticRetentionWarning = vi.fn((_message: string) => {
+					throw new Error(observerError);
+				});
+				const result = await executeReviewWorkflow({
+					prepared: {
+						workflowId,
+						action: "review.pr",
+						target: { kind: "pr", number: "348" },
+						controls: { scope: ["src/**"], effort: "standard", includeOptional: false, scopeMode: "full" },
+						resolution: snapshot,
+						model: harness.getModel(),
+						verifierModel: harness.getModel(),
+						startedAt: 1,
+						incrementalPlan: {
+							mode: "full",
+							changedPaths: ["src/value.ts"],
+							priorOpenFindings: [],
+							suppressedDismissedFingerprints: [],
+						},
+					},
+					cwd: harness.tempDir,
+					agentDir: harness.tempDir,
+					authStorage: harness.authStorage,
+					modelRegistry: harness.session.modelRegistry,
+					settingsManager: harness.settingsManager,
+					sessionManager,
+					signal: AbortSignal.any([signal, controller.signal]),
+					onDiagnosticRetentionWarning,
+					onEvent: (event) => events.push(event),
+				});
+				signal.throwIfAborted();
+				expect(existsSync(checkout)).toBe(false);
+				expect(onDiagnosticRetentionWarning.mock.calls).toEqual([[DIAGNOSTIC_RETENTION_WARNING]]);
+				expect(stderrWarning.mock.calls).toEqual([[`Warning: ${DIAGNOSTIC_RETENTION_WARNING}`]]);
+				if (status === "complete" || status === "incomplete") {
+					expect(result).toMatchObject({
+						status: "completed",
+						completionStatus: status,
+						durableRecordCommitted: true,
+					});
+					if (result.status !== "completed") throw new Error("Expected a completed review");
+					expect(result.parsed.overallCorrectness).toBe(status === "complete" ? "correct" : undefined);
+				} else {
+					expect(result.status).toBe(status);
+					if (status === "failed") expect(result).toMatchObject({ errorMessage: "Review provider failed." });
+				}
+				const ref = sessionManager.getSessionRef()!;
+				await sessionManager.closePersistence();
+				signal.throwIfAborted();
+				const reopened = await SessionManager.open(ref);
+				signal.throwIfAborted();
+				expect(getReviewRun(reopened, workflowId)?.status).toBe(status === "complete" ? "completed" : status);
+				const exportPath = join(harness.tempDir, "retention-review.jsonl");
+				await SessionManager.exportJsonlSnapshot(ref, exportPath);
+				signal.throwIfAborted();
+				const publicData = JSON.stringify({ result, events, entries: reopened.getEntries() });
+				const exported = readFileSync(exportPath, "utf8");
+				for (const forbidden of [
+					privateMarker,
+					observerError,
+					diagnosticsDirectory,
+					DIAGNOSTIC_RETENTION_WARNING,
+				]) {
+					expect(publicData).not.toContain(forbidden);
+					expect(exported).not.toContain(forbidden);
+				}
+			}),
+	);
+
+	it.each([false, true])(
+		"threads the warning outside workflow events and handoff data (managed=%s)",
+		async (managed) => {
+			vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "1");
+			const privateMarker = "private-workflow-retention-prose";
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const initialSnapshot = await createSnapshotRepository(harness);
+			await initialSnapshot.dispose();
+			const diagnosticsDirectory = getReviewPrivateDiagnosticsDirectory(harness.tempDir);
+			writeFileSync(diagnosticsDirectory, "Not a directory");
+			harness.setResponses(privateReviewResponses(privateMarker));
+			const events: Array<Record<string, unknown>> = [];
+			const workflowManager = new ReviewWorkflowManager({ publishEvent: (event) => events.push(event) });
+			const stderrWarning = vi.spyOn(console, "warn").mockImplementation(() => {});
+			const onDiagnosticRetentionWarning = vi.fn((_message: string) => {});
+			const newSession = vi.fn(async () => ({ cancelled: true, seeded: false }));
+			const cleanup = vi.fn();
+			try {
+				const result = await runReviewWorkflow({
+					target: { kind: "uncommitted" },
+					controls: { scope: ["src/**"], scopeMode: "full" },
+					cwd: harness.tempDir,
+					agentDir: harness.tempDir,
+					session: harness.session,
+					newSession,
+					authStorage: harness.authStorage,
+					settingsManager: harness.settingsManager,
+					onDiagnosticRetentionWarning,
+					...(managed ? { workflowManager } : { onEvent: (event) => events.push(event) }),
+					createHooks: () => ({
+						onPrepared: (snapshot) => {
+							attachGitHubContext(snapshot, privateMarker);
+							snapshots.push(snapshot);
+						},
+						cleanup,
+					}),
+				});
+				expect(result).toMatchObject({
+					status: "completed",
+					completionStatus: "complete",
+					sessionSwitchCancelled: true,
+				});
+				expect(cleanup).toHaveBeenCalledOnce();
+				expect(newSession).toHaveBeenCalledOnce();
+				expect(onDiagnosticRetentionWarning.mock.calls).toEqual([[DIAGNOSTIC_RETENTION_WARNING]]);
+				expect(stderrWarning).not.toHaveBeenCalled();
+				expect(events.at(-1)).toMatchObject({ type: "workflow_end", status: "completed" });
+				const publicData = JSON.stringify({
+					events,
+					entries: harness.sessionManager.getEntries(),
+					messages: harness.session.messages,
+					workflows: workflowManager.list().map((workflow) => workflowManager.get(workflow.workflowId)),
+				});
+				expect(harness.session.messages).toHaveLength(1);
+				for (const forbidden of [privateMarker, diagnosticsDirectory, DIAGNOSTIC_RETENTION_WARNING]) {
+					expect(publicData).not.toContain(forbidden);
+				}
+			} finally {
+				await workflowManager.abortAll();
+			}
+		},
+	);
+
+	it("preserves complete initial handoff evidence beyond durable record bounds", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		await (await createSnapshotRepository(harness)).dispose();
+		const candidates = candidateReport();
+		candidates.candidates[0]!.body = `${"Evidence ".repeat(320)}FULL_BODY_END`;
+		candidates.candidates[0]!.trigger = `${"Input ".repeat(120)}FULL_TRIGGER_END`;
+		candidates.candidates[0]!.impact = `${"Failure ".repeat(90)}FULL_IMPACT_END`;
+		const verification = verificationReport();
+		verification.decisions[0]!.rationale = `${"Verified ".repeat(170)}FULL_RATIONALE_END`;
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("report_review_candidates", candidates as never), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("report_review_verification", verification as never), {
+				stopReason: "toolUse",
+			}),
+		]);
+		const outcome = await runReviewWorkflow({
+			target: { kind: "uncommitted" },
+			controls: { scope: ["src/**"], scopeMode: "full" },
+			cwd: harness.tempDir,
+			agentDir: harness.tempDir,
+			session: harness.session,
+			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			authStorage: harness.authStorage,
+			settingsManager: harness.settingsManager,
+		});
+		expect(outcome.status).toBe("completed");
+		const modelContent = JSON.stringify(convertToLlm(harness.session.messages));
+		const durable = listReviewRuns(harness.sessionManager).runs[0]!;
+		for (const marker of ["FULL_BODY_END", "FULL_TRIGGER_END", "FULL_IMPACT_END", "FULL_RATIONALE_END"]) {
+			expect(modelContent).toContain(marker);
+			expect(JSON.stringify(durable.result)).not.toContain(marker);
+		}
+		expect(harness.session.messages).toContainEqual(
+			expect.objectContaining({
+				role: "custom",
+				customType: "review",
+				details: expect.objectContaining({
+					findings: expect.arrayContaining([
+						expect.objectContaining({ trigger: candidates.candidates[0]!.trigger }),
+					]),
+				}),
+			}),
+		);
+		expect(harness.faux.state.callCount).toBe(4);
+	});
+
+	it.each(["snapshot", "bash", "auxiliary", "replaced definition"] as const)(
+		"reports static-only validation only for the effective host-owned surface (%s)",
+		async (surface) => {
+			const toolName = surface === "bash" ? "bash" : "auxiliary";
+			const harness = await createHarness({
+				extensionFactories: [
+					async (volt) => {
+						volt.registerTool({
+							name: toolName,
+							label: toolName,
+							description: "Synthetic auxiliary tool",
+							parameters: Type.Object({}),
+							async execute() {
+								return { content: [{ type: "text", text: "Synthetic result" }] };
+							},
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			const snapshot = await createSnapshotRepository(harness);
+			snapshots.push(snapshot);
+			if (surface === "replaced definition") {
+				const original = AgentSession.prototype.getToolDefinition;
+				vi.spyOn(AgentSession.prototype, "getToolDefinition").mockImplementation(function (
+					this: AgentSession,
+					name,
+				) {
+					const definition = original.call(this, name);
+					return name === "review_file" && definition ? { ...definition } : definition;
+				});
+			}
+			harness.setResponses([
+				fauxAssistantMessage(
+					fauxToolCall("report_review_candidates", { summary: "No candidates.", candidates: [], limitations: [] }),
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(
+					fauxToolCall("report_review_verification", {
+						summary: "Complete.",
+						assessment: "complete",
+						decisions: [],
+						priorFindingDecisions: [],
+						limitations: [],
+					}),
+					{ stopReason: "toolUse" },
+				),
+			]);
+			const run = await runReview({
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				model: harness.getModel(),
+				authStorage: harness.authStorage,
+				modelRegistry: harness.session.modelRegistry,
+				settingsManager: harness.settingsManager,
+				resolved: snapshot,
+				controls: { scope: ["src/**"], scopeMode: "full" },
+				parentResourceLoader: harness.session.resourceLoader,
+				tools: surface === "bash" || surface === "auxiliary" ? [toolName] : [],
+			});
+			expect(run.errorMessage).toBeUndefined();
+			expect(run.parsed?.completionStatus).toBe("complete");
+			expect(run.parsed?.coverage.residualRisk.includes(STATIC_REVIEW_LIMITATION)).toBe(surface === "snapshot");
+			expect(harness.faux.state.callCount).toBe(4);
+		},
+	);
 
 	it("keeps context-exposed prose private and presents findings from code in a fresh context", async () => {
 		vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "1");
@@ -795,7 +1214,17 @@ describe("review pipeline", () => {
 		expect(run.parsed?.findings).toHaveLength(1);
 		expect(JSON.stringify(run.parsed)).not.toContain(privateMarker);
 		if (!run.parsed) throw new Error("Expected a public review result");
-		expect(JSON.stringify(createReviewSeedMessage(snapshot, { parsed: run.parsed }))).not.toContain(privateMarker);
+		expect(run.parsed.coverage.residualRisk).toContain(STATIC_REVIEW_LIMITATION);
+		const record = createReviewRunRecord({
+			workflowId: "review:pr-context",
+			workflowAction: "review.pr",
+			startedAt: 1,
+			snapshot,
+			controls: DEFAULT_REVIEW_RUN_CONTROLS,
+			status: "completed",
+			result: run.parsed,
+		});
+		expect(JSON.stringify(createReviewSeedMessage(record))).not.toContain(privateMarker);
 		expect(requestSnapshots).toHaveLength(3);
 		expect(requestSnapshots[0]?.systemPrompt).toContain("BASE REVIEW POLICY");
 		expect(requestSnapshots[0]?.systemPrompt).toContain("BASE AGENT POLICY");
@@ -854,11 +1283,15 @@ describe("review pipeline", () => {
 		expect(privateRecords).toEqual([
 			expect.objectContaining({ kind: "model_limitation", phase: "discovery", message: privateMarker }),
 			expect.objectContaining({ kind: "model_limitation", phase: "verification", message: privateMarker }),
+			expect.objectContaining({ kind: "verification_assessment", phase: "verification", assessment: "complete" }),
 		]);
 	});
 
-	it("skips presentation for a no-finding PR and replaces private incomplete prose", async () => {
+	it.each([false, true])("keeps PR challenges private (limitations=%s)", async (withLimitations) => {
+		vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "1");
 		const privateMarker = "private-incomplete-challenge-marker";
+		const limitations = withLimitations ? [privateMarker] : [];
+		const workflowEvents: Array<Record<string, unknown>> = [];
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const snapshot = await createSnapshotRepository(harness);
@@ -882,7 +1315,7 @@ describe("review pipeline", () => {
 					fauxToolCall("report_review_candidates", {
 						summary: privateMarker,
 						candidates: [],
-						limitations: [privateMarker],
+						limitations,
 					}),
 					{ stopReason: "toolUse" },
 				),
@@ -902,26 +1335,43 @@ describe("review pipeline", () => {
 						challenge: privateMarker,
 						decisions: [],
 						priorFindingDecisions: [],
-						limitations: [privateMarker],
+						limitations,
 					}),
 					{ stopReason: "toolUse" },
 				),
 			),
 		]);
 
-		const run = await runReview({
+		const sessionManager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "sessions"));
+		const workflowId = "review:private-incomplete-challenge";
+		const run = await executeReviewWorkflow({
+			prepared: {
+				workflowId,
+				action: "review.pr",
+				target: { kind: "pr", number: "1" },
+				controls: { scopeMode: "full", scope: ["src/**"], effort: "standard", includeOptional: false },
+				resolution: snapshot,
+				model: harness.getModel(),
+				verifierModel: harness.getModel(),
+				startedAt: Date.now(),
+				incrementalPlan: {
+					mode: "full",
+					changedPaths: ["src/value.ts"],
+					priorOpenFindings: [],
+					suppressedDismissedFingerprints: [],
+				},
+			},
 			cwd: harness.tempDir,
 			agentDir: harness.tempDir,
-			model: harness.getModel(),
-			verifierModel: harness.getModel(),
 			authStorage: harness.authStorage,
 			modelRegistry: harness.session.modelRegistry,
 			settingsManager: harness.settingsManager,
-			resolved: snapshot,
-			controls: { scopeMode: "full" },
+			sessionManager,
+			onEvent: (event) => workflowEvents.push(event),
 		});
 		snapshots.splice(snapshots.indexOf(snapshot), 1);
-		expect(run.errorMessage).toBeUndefined();
+		expect(run.status).toBe("completed");
+		if (run.status !== "completed") throw new Error(`Review ended with ${run.status}`);
 		expect(modelRequests).toBe(8);
 		expect(JSON.stringify(run.parsed)).not.toContain(privateMarker);
 		expect(run.parsed).toMatchObject({
@@ -929,11 +1379,48 @@ describe("review pipeline", () => {
 			summary: "Review incomplete with 0 verified findings.",
 			verificationChallenge: "Independent verification reported a completeness challenge.",
 			coverage: {
-				modelReportedLimitations: [
-					"Discovery reported 1 model limitation(s).",
-					"Verification reported 1 model limitation(s).",
-				],
+				uncheckedAreas: [],
+				modelReportedLimitations: withLimitations
+					? ["Discovery reported 1 model limitation(s).", "Verification reported 1 model limitation(s)."]
+					: [],
 			},
+		});
+		expect(run.parsed.overallCorrectness).toBeUndefined();
+		expect(JSON.stringify(createReviewSeedMessage(run.record!))).not.toContain(privateMarker);
+		expect(JSON.stringify(run.record)).not.toContain(privateMarker);
+		const ref = sessionManager.getSessionRef()!;
+		await sessionManager.closePersistence();
+		const reopened = await SessionManager.open(ref);
+		expect(getReviewRun(reopened, workflowId)).toMatchObject({
+			status: "incomplete",
+			result: {
+				findings: [],
+				verificationChallenge: "Independent verification reported a completeness challenge.",
+			},
+		});
+		expect(JSON.stringify(reopened.getEntries())).not.toContain(privateMarker);
+		const exportPath = join(harness.tempDir, "review-session.jsonl");
+		await SessionManager.exportJsonlSnapshot(ref, exportPath);
+		expect(readFileSync(exportPath, "utf8")).not.toContain(privateMarker);
+		expect(JSON.stringify(workflowEvents)).not.toContain(privateMarker);
+		expect(harness.session.messages).toHaveLength(0);
+		const diagnosticsDirectory = getReviewPrivateDiagnosticsDirectory(harness.tempDir);
+		const diagnosticFiles = readdirSync(diagnosticsDirectory);
+		expect(diagnosticFiles).toHaveLength(1);
+		const privateRecords = readFileSync(join(diagnosticsDirectory, diagnosticFiles[0]!), "utf8")
+			.trim()
+			.split("\n")
+			.map((line): unknown => JSON.parse(line));
+		expect(privateRecords).toHaveLength(withLimitations ? 3 : 1);
+		expect(privateRecords.at(-1)).toEqual({
+			schemaVersion: 1,
+			timestamp: expect.any(String),
+			runId: "review:private-incomplete-challenge",
+			workflowAction: "review.pr",
+			phase: "verification",
+			kind: "verification_assessment",
+			assessment: "incomplete",
+			challenge: privateMarker,
 		});
 	});
 
@@ -1809,9 +2296,25 @@ describe("review presentation and repository helpers", () => {
 			overallCorrectness: "incorrect" as const,
 			overallExplanation: "A verified issue remains.",
 		};
-		const text = formatReviewForNewSession({ description: "the change", diffCommand: "git diff base..head" }, parsed);
+		const record: ReviewRunRecord = {
+			schemaVersion: 1,
+			runId: "review:format",
+			workflowAction: "review.branch",
+			status: "completed",
+			startedAt: 1,
+			endedAt: 2,
+			target: {
+				description: "the change",
+				diffCommand: "git diff base..head",
+				identity: { kind: "branch", baseTree: "b".repeat(40), headTree: "h".repeat(40) },
+				files: [],
+			},
+			options: DEFAULT_REVIEW_RUN_CONTROLS,
+			result: parsed,
+		};
+		const text = createReviewSeedMessage(record).content;
 		expect(text).toContain("finding-1");
-		expect(text).toContain("src/value.ts:2-2, head");
+		expect(text).toContain("src/value\\.ts:2-2, head");
 	});
 
 	it("lists likely base branches and recent commits", async () => {

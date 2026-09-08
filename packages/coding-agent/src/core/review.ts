@@ -16,6 +16,7 @@ import type { CustomMessageInput } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { findExactModelReferenceMatch } from "./model-resolver.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
+import { createReviewSeedMessage, STATIC_REVIEW_LIMITATION } from "./review-presentation.ts";
 import { createReviewPrivateDiagnostics } from "./review-private-diagnostics.ts";
 import {
 	buildParsedReview,
@@ -64,6 +65,7 @@ import { SessionManager } from "./session-manager.ts";
 import type { SessionUsageProjection, SessionUsageTotals } from "./session-usage.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
+export { createReviewSeedMessage } from "./review-presentation.ts";
 export type { ParsedReview, ReviewCoverage, ReviewFinding, ReviewTarget };
 export type ResolvedReview = ReviewSnapshot;
 
@@ -610,71 +612,6 @@ export function stripReviewEnvelopeForDisplay(text: string): string {
 	return text.trim();
 }
 
-export function formatReviewForNewSession(
-	resolved: Pick<ResolvedReview, "description" | "diffCommand">,
-	parsed: ParsedReview,
-): string {
-	const lines = [
-		`An automated code review of ${resolved.description} was completed in separate discovery and verification sessions, with context-blind presentation for newly accepted PR findings.`,
-		"",
-		`Status: ${parsed.completionStatus}`,
-		`Summary: ${parsed.summary}`,
-		`Overall: ${parsed.overallCorrectness ? `${parsed.overallCorrectness} — ` : ""}${parsed.overallExplanation}`,
-		"",
-		"Coverage:",
-		`- Changed-file inventory complete: ${parsed.coverage.changedFileInventoryComplete ? "yes" : "no"}`,
-		`- Files inspected: ${parsed.coverage.filesInspected.join(", ") || "none"}`,
-		`- Hunks inspected: ${parsed.coverage.hunksInspected.join(", ") || "none"}`,
-		`- Commands run: ${parsed.coverage.commandsRun.join("; ") || "none"}`,
-		`- Failed verification attempts: ${parsed.coverage.failedVerificationAttempts.join("; ") || "none"}`,
-	];
-	if (parsed.coverage.context) {
-		const context = parsed.coverage.context;
-		lines.push(
-			`- Code-host context: capture ${context.captureStatus}; ${context.linkedIssueCount} linked issue${context.linkedIssueCount === 1 ? "" : "s"}, ${context.discussionEntryCount} discussion entr${context.discussionEntryCount === 1 ? "y" : "ies"}; discovery ${context.discoveryInspectionComplete ? "complete" : "incomplete"}; verification ${context.verificationInspectionComplete ? "complete" : "incomplete"}`,
-		);
-	}
-	if (parsed.coverage.exclusions.length > 0)
-		lines.push(
-			`- Exclusions: ${parsed.coverage.exclusions.map((entry) => `${entry.path} (${entry.reason})`).join("; ")}`,
-		);
-	if (parsed.coverage.uncheckedAreas.length > 0)
-		lines.push(`- Unchecked: ${parsed.coverage.uncheckedAreas.join("; ")}`);
-	if (parsed.coverage.residualRisk.length > 0)
-		lines.push(`- Residual risk: ${parsed.coverage.residualRisk.join("; ")}`);
-	if (parsed.coverage.modelReportedLimitations.length > 0)
-		lines.push(`- Model-reported limitations: ${parsed.coverage.modelReportedLimitations.join("; ")}`);
-	lines.push("");
-	if (parsed.findings.length === 0) {
-		lines.push(
-			parsed.completionStatus === "complete"
-				? "The review found no verified issues worth flagging."
-				: "No verified findings were produced, but the review is incomplete.",
-		);
-	} else {
-		lines.push("Verified findings:", "");
-		parsed.findings.forEach((finding, index) => {
-			const location = finding.changeLocation;
-			lines.push(
-				`### ${index + 1}. ${finding.title} [${finding.id}] [P${finding.priority}, confidence ${Math.round(finding.confidence * 100)}%] (${location.path}:${location.startLine}-${location.endLine}, ${location.side})`,
-				"",
-				finding.body,
-				`Trigger: ${finding.trigger}`,
-				`Impact: ${finding.impact}`,
-				`Verification: ${finding.verification.method} — ${finding.verification.rationale}`,
-				"",
-			);
-		});
-	}
-	while (lines.at(-1) === "") lines.pop();
-	lines.push(
-		"",
-		`The original target was identified by \`${resolved.diffCommand}\`; use the retained snapshot/finding ids rather than assuming a moving ref still matches.`,
-		"When asked to fix findings, select them by durable id or displayed number, inspect the current code first, and apply minimal correct fixes.",
-	);
-	return lines.join("\n");
-}
-
 async function readOptionalText(path: string): Promise<string | undefined> {
 	try {
 		return await readFile(path, "utf8");
@@ -788,6 +725,8 @@ export interface RunReviewOptions {
 	onEvent?: (event: ReviewWorkflowToolEvent) => void;
 	onSessionEvent?: (event: AgentSessionEvent) => void;
 	onUsage?: (usage: ReviewUsageSnapshot) => void;
+	/** Local-only observer; never forward this warning into review/session/protocol data. */
+	onDiagnosticRetentionWarning?: (message: string) => void | Promise<void>;
 	workflowId?: string;
 	workflowAction?: string;
 }
@@ -902,6 +841,7 @@ export interface ReviewWorkflowOptions {
 	}) => Promise<boolean>;
 	createHooks?: () => Promise<ReviewWorkflowHooks> | ReviewWorkflowHooks;
 	onReviewModelWarning?: (message: string) => void;
+	onDiagnosticRetentionWarning?: RunReviewOptions["onDiagnosticRetentionWarning"];
 	onEvent?: (event: ReviewWorkflowEvent | ReviewWorkflowToolEvent) => void;
 	/** Runtime-scoped registry used to expose a local TUI review to attached RPC clients. */
 	workflowManager?: ReviewWorkflowManager;
@@ -969,6 +909,7 @@ export interface ExecuteReviewWorkflowOptions {
 	onEvent?: (event: ReviewWorkflowEvent | ReviewWorkflowToolEvent) => void;
 	onSessionEvent?: (event: AgentSessionEvent) => void;
 	onUsage?: (usage: ReviewUsageSnapshot) => void;
+	onDiagnosticRetentionWarning?: RunReviewOptions["onDiagnosticRetentionWarning"];
 }
 
 export type ExecuteReviewWorkflowResult =
@@ -1276,6 +1217,8 @@ interface ReviewPassOptions<TReport> {
 	settingsManager: SettingsManager;
 	resourceLoader: ResourceLoader;
 	customTools: ToolDefinition[];
+	/** Exact host-owned snapshot definitions; auxiliary tools must never be included. */
+	inspectionTools: ToolDefinition[];
 	activeTools: string[];
 	collector: ReviewReportCollector<TReport>;
 	prompt: string;
@@ -1289,6 +1232,7 @@ interface ReviewPassOptions<TReport> {
 interface ReviewPassResult<TReport> {
 	report: TReport;
 	usage: SessionUsageTotals;
+	staticInspectionOnly: boolean;
 }
 
 async function runReviewPass<TReport>(options: ReviewPassOptions<TReport>): Promise<ReviewPassResult<TReport>> {
@@ -1331,6 +1275,8 @@ async function runReviewPass<TReport>(options: ReviewPassOptions<TReport>): Prom
 		}
 		return totals;
 	};
+	const inspectionDefinitions = new Set([...options.inspectionTools, options.collector.tool]);
+	let staticInspectionOnly = true;
 	const onAbort = (): void => {
 		void session.abort();
 	};
@@ -1338,6 +1284,10 @@ async function runReviewPass<TReport>(options: ReviewPassOptions<TReport>): Prom
 	const unsubscribe = session.subscribe(
 		(event) => {
 			try {
+				if (event.type === "tool_execution_start") {
+					const definition = session.getToolDefinition(event.toolName);
+					staticInspectionOnly &&= definition !== undefined && inspectionDefinitions.has(definition);
+				}
 				options.onEvent(event);
 			} finally {
 				if (event.type === "message_end" || event.type === "tool_execution_end") publishUsage();
@@ -1350,6 +1300,10 @@ async function runReviewPass<TReport>(options: ReviewPassOptions<TReport>): Prom
 		let previousErrors: string[] = [];
 		for (let attempt = 0; attempt < 2; attempt++) {
 			if (attempt > 0) options.collector.clear();
+			staticInspectionOnly &&= session.getActiveToolNames().every((name) => {
+				const definition = session.getToolDefinition(name);
+				return definition !== undefined && inspectionDefinitions.has(definition);
+			});
 			await session.prompt(
 				attempt === 0
 					? options.prompt
@@ -1363,7 +1317,7 @@ async function runReviewPass<TReport>(options: ReviewPassOptions<TReport>): Prom
 			}
 			const report = options.collector.getReport();
 			const errors = await options.repair(report);
-			if (report && errors.length === 0) return { report, usage: publishUsage() };
+			if (report && errors.length === 0) return { report, usage: publishUsage(), staticInspectionOnly };
 			previousErrors = errors.length > 0 ? errors : ["The terminating report tool was not called."];
 			if (attempt === 1) throw new Error(`${options.name} report validation failed: ${previousErrors.join("; ")}`);
 		}
@@ -1452,6 +1406,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 			settingsManager: options.settingsManager,
 			resourceLoader: createReviewResourceLoader(REVIEW_SYSTEM_PROMPT, contextFiles),
 			customTools: [...discoverySnapshotTools, ...inherited, candidateCollector.tool],
+			inspectionTools: discoverySnapshotTools,
 			activeTools: [...sharedActiveTools, candidateCollector.tool.name],
 			collector: candidateCollector,
 			prompt: buildReviewPrompt(snapshot, controls, commandCapable, options.incrementalPlan),
@@ -1486,6 +1441,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 			settingsManager: options.settingsManager,
 			resourceLoader: createReviewResourceLoader(REVIEW_VERIFIER_SYSTEM_PROMPT, contextFiles),
 			customTools: [...verificationSnapshotTools, ...inherited, verificationCollector.tool],
+			inspectionTools: verificationSnapshotTools,
 			activeTools: [...sharedActiveTools, verificationCollector.tool.name],
 			collector: verificationCollector,
 			prompt: buildVerificationPrompt(
@@ -1508,11 +1464,13 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 		});
 		const verificationReport = verificationPass.report;
 		privateDiagnostics.recordModelLimitations("verification", verificationReport.limitations);
+		privateDiagnostics.recordVerificationAssessment(verificationReport);
 		const suppressedFingerprints = new Set(options.incrementalPlan?.suppressedDismissedFingerprints ?? []);
 		const declassifiedFindings = declassifyReviewFindings(validatedCandidates, verificationReport).filter(
 			(finding) => !suppressedFingerprints.has(finding.fingerprint),
 		);
 		let presentationReport: ReviewPresentationReport | undefined;
+		let staticInspectionOnly = candidatePass.staticInspectionOnly && verificationPass.staticInspectionOnly;
 		if (snapshot.codeHostContext && declassifiedFindings.length > 0) {
 			const presentationTracker = new ReviewCoverageTracker();
 			const presentationSnapshotTools = createReviewSnapshotTools(snapshot, presentationTracker, {
@@ -1531,6 +1489,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 				settingsManager: options.settingsManager,
 				resourceLoader: createReviewResourceLoader(REVIEW_PRESENTATION_SYSTEM_PROMPT, contextFiles),
 				customTools: [...presentationSnapshotTools, presentationCollector.tool],
+				inspectionTools: presentationSnapshotTools,
 				activeTools: [...presentationSnapshotTools.map((tool) => tool.name), presentationCollector.tool.name],
 				collector: presentationCollector,
 				prompt: buildPresentationPrompt(declassifiedFindings),
@@ -1544,6 +1503,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 				onUsage: options.onUsage,
 			});
 			presentationReport = presentationPass.report;
+			staticInspectionOnly &&= presentationPass.staticInspectionOnly;
 		}
 		const parsed = buildParsedReview({
 			snapshot,
@@ -1558,6 +1518,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 			failedVerificationAttempts,
 			excludedPaths: reviewExclusions(snapshot, controls, options.incrementalPlan),
 		});
+		if (staticInspectionOnly) parsed.coverage.residualRisk.unshift(STATIC_REVIEW_LIMITATION);
 		parsed.findings = reconcileFindingIdentities(parsed.findings, options.incrementalPlan);
 		const currentByFingerprint = new Map(parsed.findings.map((finding) => [finding.fingerprint, finding]));
 		for (const prior of options.incrementalPlan?.priorOpenFindings ?? []) {
@@ -1593,8 +1554,31 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 			return { aborted: true, raw: "" };
 		return { aborted: false, raw: "", errorMessage: error instanceof Error ? error.message : String(error) };
 	} finally {
-		await privateDiagnostics.flush().catch(() => undefined);
-		await snapshot.dispose();
+		try {
+			await privateDiagnostics.flush();
+		} catch {
+			const warning = "Could not retain optional private review diagnostics.";
+			const warnToStderr = (): void => {
+				try {
+					console.warn(`Warning: ${warning}`);
+				} catch {
+					// Optional diagnostics and their warning must not change the review outcome.
+				}
+			};
+			try {
+				if (options.onDiagnosticRetentionWarning) {
+					// Local observers are passive: a never-settling promise cannot hold
+					// review completion or snapshot disposal open.
+					void Promise.resolve(options.onDiagnosticRetentionWarning(warning)).catch(warnToStderr);
+				} else {
+					warnToStderr();
+				}
+			} catch {
+				warnToStderr();
+			}
+		} finally {
+			await snapshot.dispose();
+		}
 	}
 }
 
@@ -1631,6 +1615,7 @@ export async function executeReviewWorkflow(
 		onEvent: options.onEvent,
 		onSessionEvent: options.onSessionEvent,
 		onUsage: options.onUsage,
+		onDiagnosticRetentionWarning: options.onDiagnosticRetentionWarning,
 		workflowId: prepared.workflowId,
 		workflowAction: prepared.action,
 		incrementalPlan: prepared.incrementalPlan,
@@ -1700,22 +1685,6 @@ export async function executeReviewWorkflow(
 	};
 }
 
-export function createReviewSeedMessage(
-	resolution: Pick<ResolvedReview, "description" | "diffCommand">,
-	result: Pick<ExecuteReviewWorkflowResult & { status: "completed" }, "parsed">,
-) {
-	return {
-		customType: "review",
-		content: formatReviewForNewSession(resolution, result.parsed),
-		display: true,
-		details: {
-			target: resolution.description,
-			completionStatus: result.parsed.completionStatus,
-			findings: result.parsed.findings,
-		},
-	};
-}
-
 async function promoteCompletedReview(
 	options: ReviewWorkflowOptions,
 	resolution: ResolvedReview,
@@ -1723,7 +1692,7 @@ async function promoteCompletedReview(
 ): Promise<Extract<ReviewWorkflowResult, { status: "completed" }>> {
 	const runRecord = result.record;
 	if (!runRecord) throw new Error("Review completed without a durable run record.");
-	const reviewMessage = createReviewSeedMessage(resolution, result);
+	const reviewMessage = createReviewSeedMessage(runRecord, undefined, result.parsed);
 	const fastModeEnabled = options.session.fastModeEnabled === true;
 	const newSessionResult = await options.newSession({
 		setup: async (sessionManager) => {
@@ -1846,6 +1815,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 						onProgress: hooks?.onProgress,
 						onSessionEvent: hooks?.onSessionEvent,
 						onUsage: hooks?.onUsage,
+						onDiagnosticRetentionWarning: options.onDiagnosticRetentionWarning,
 						onEvent: managedHooks.onEvent,
 					});
 					return managedExecutionResult.status === "failed"
@@ -2015,6 +1985,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 				onProgress: hooks?.onProgress,
 				onSessionEvent: hooks?.onSessionEvent,
 				onUsage: hooks?.onUsage,
+				onDiagnosticRetentionWarning: options.onDiagnosticRetentionWarning,
 				onEvent: emit,
 			});
 			if (result.status === "cancelled") {
