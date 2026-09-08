@@ -2,12 +2,15 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AgentSession } from "../../src/core/agent-session.ts";
+import { convertToLlm } from "../../src/core/messages.ts";
 import {
 	buildReviewPrompt,
 	createReviewSeedMessage,
+	DEFAULT_REVIEW_RUN_CONTROLS,
 	executeReviewWorkflow,
-	formatReviewForNewSession,
 	listBaseBranches,
 	listRecentCommits,
 	MAX_PULL_REQUEST_NUMBER,
@@ -20,6 +23,7 @@ import {
 	runReview,
 	runReviewWorkflow,
 } from "../../src/core/review.ts";
+import { STATIC_REVIEW_LIMITATION } from "../../src/core/review-presentation.ts";
 import {
 	getReviewPrivateDiagnosticsDirectory,
 	REVIEW_PRIVATE_DIAGNOSTICS_ENV,
@@ -31,7 +35,12 @@ import type {
 	ReviewVerificationReport,
 } from "../../src/core/review-report.ts";
 import { type ReviewSnapshot, resolveReviewSnapshot } from "../../src/core/review-snapshot.ts";
-import { getReviewRun, listReviewRuns } from "../../src/core/review-state.ts";
+import {
+	createReviewRunRecord,
+	getReviewRun,
+	listReviewRuns,
+	type ReviewRunRecord,
+} from "../../src/core/review-state.ts";
 import { MAX_ACTIVE_REVIEW_WORKFLOWS, ReviewWorkflowManager } from "../../src/core/review-workflows.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createSessionManagerTestOwner } from "../session-manager-owner.ts";
@@ -966,6 +975,124 @@ describe("review pipeline", () => {
 		},
 	);
 
+	it("preserves complete initial handoff evidence beyond durable record bounds", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		await (await createSnapshotRepository(harness)).dispose();
+		const candidates = candidateReport();
+		candidates.candidates[0]!.body = `${"Evidence ".repeat(320)}FULL_BODY_END`;
+		candidates.candidates[0]!.trigger = `${"Input ".repeat(120)}FULL_TRIGGER_END`;
+		candidates.candidates[0]!.impact = `${"Failure ".repeat(90)}FULL_IMPACT_END`;
+		const verification = verificationReport();
+		verification.decisions[0]!.rationale = `${"Verified ".repeat(170)}FULL_RATIONALE_END`;
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("report_review_candidates", candidates as never), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("report_review_verification", verification as never), {
+				stopReason: "toolUse",
+			}),
+		]);
+		const outcome = await runReviewWorkflow({
+			target: { kind: "uncommitted" },
+			controls: { scope: ["src/**"], scopeMode: "full" },
+			cwd: harness.tempDir,
+			agentDir: harness.tempDir,
+			session: harness.session,
+			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			authStorage: harness.authStorage,
+			settingsManager: harness.settingsManager,
+		});
+		expect(outcome.status).toBe("completed");
+		const modelContent = JSON.stringify(convertToLlm(harness.session.messages));
+		const durable = listReviewRuns(harness.sessionManager).runs[0]!;
+		for (const marker of ["FULL_BODY_END", "FULL_TRIGGER_END", "FULL_IMPACT_END", "FULL_RATIONALE_END"]) {
+			expect(modelContent).toContain(marker);
+			expect(JSON.stringify(durable.result)).not.toContain(marker);
+		}
+		expect(harness.session.messages).toContainEqual(
+			expect.objectContaining({
+				role: "custom",
+				customType: "review",
+				details: expect.objectContaining({
+					findings: expect.arrayContaining([
+						expect.objectContaining({ trigger: candidates.candidates[0]!.trigger }),
+					]),
+				}),
+			}),
+		);
+		expect(harness.faux.state.callCount).toBe(4);
+	});
+
+	it.each(["snapshot", "bash", "auxiliary", "replaced definition"] as const)(
+		"reports static-only validation only for the effective host-owned surface (%s)",
+		async (surface) => {
+			const toolName = surface === "bash" ? "bash" : "auxiliary";
+			const harness = await createHarness({
+				extensionFactories: [
+					async (volt) => {
+						volt.registerTool({
+							name: toolName,
+							label: toolName,
+							description: "Synthetic auxiliary tool",
+							parameters: Type.Object({}),
+							async execute() {
+								return { content: [{ type: "text", text: "Synthetic result" }] };
+							},
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			const snapshot = await createSnapshotRepository(harness);
+			snapshots.push(snapshot);
+			if (surface === "replaced definition") {
+				const original = AgentSession.prototype.getToolDefinition;
+				vi.spyOn(AgentSession.prototype, "getToolDefinition").mockImplementation(function (
+					this: AgentSession,
+					name,
+				) {
+					const definition = original.call(this, name);
+					return name === "review_file" && definition ? { ...definition } : definition;
+				});
+			}
+			harness.setResponses([
+				fauxAssistantMessage(
+					fauxToolCall("report_review_candidates", { summary: "No candidates.", candidates: [], limitations: [] }),
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(
+					fauxToolCall("report_review_verification", {
+						summary: "Complete.",
+						assessment: "complete",
+						decisions: [],
+						priorFindingDecisions: [],
+						limitations: [],
+					}),
+					{ stopReason: "toolUse" },
+				),
+			]);
+			const run = await runReview({
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				model: harness.getModel(),
+				authStorage: harness.authStorage,
+				modelRegistry: harness.session.modelRegistry,
+				settingsManager: harness.settingsManager,
+				resolved: snapshot,
+				controls: { scope: ["src/**"], scopeMode: "full" },
+				parentResourceLoader: harness.session.resourceLoader,
+				tools: surface === "bash" || surface === "auxiliary" ? [toolName] : [],
+			});
+			expect(run.errorMessage).toBeUndefined();
+			expect(run.parsed?.completionStatus).toBe("complete");
+			expect(run.parsed?.coverage.residualRisk.includes(STATIC_REVIEW_LIMITATION)).toBe(surface === "snapshot");
+			expect(harness.faux.state.callCount).toBe(4);
+		},
+	);
+
 	it("keeps context-exposed prose private and presents findings from code in a fresh context", async () => {
 		vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "1");
 		const privateMarker = "private-github-discussion-marker";
@@ -1087,7 +1214,17 @@ describe("review pipeline", () => {
 		expect(run.parsed?.findings).toHaveLength(1);
 		expect(JSON.stringify(run.parsed)).not.toContain(privateMarker);
 		if (!run.parsed) throw new Error("Expected a public review result");
-		expect(JSON.stringify(createReviewSeedMessage(snapshot, { parsed: run.parsed }))).not.toContain(privateMarker);
+		expect(run.parsed.coverage.residualRisk).toContain(STATIC_REVIEW_LIMITATION);
+		const record = createReviewRunRecord({
+			workflowId: "review:pr-context",
+			workflowAction: "review.pr",
+			startedAt: 1,
+			snapshot,
+			controls: DEFAULT_REVIEW_RUN_CONTROLS,
+			status: "completed",
+			result: run.parsed,
+		});
+		expect(JSON.stringify(createReviewSeedMessage(record))).not.toContain(privateMarker);
 		expect(requestSnapshots).toHaveLength(3);
 		expect(requestSnapshots[0]?.systemPrompt).toContain("BASE REVIEW POLICY");
 		expect(requestSnapshots[0]?.systemPrompt).toContain("BASE AGENT POLICY");
@@ -1249,7 +1386,7 @@ describe("review pipeline", () => {
 			},
 		});
 		expect(run.parsed.overallCorrectness).toBeUndefined();
-		expect(JSON.stringify(createReviewSeedMessage(snapshot, { parsed: run.parsed }))).not.toContain(privateMarker);
+		expect(JSON.stringify(createReviewSeedMessage(run.record!))).not.toContain(privateMarker);
 		expect(JSON.stringify(run.record)).not.toContain(privateMarker);
 		const ref = sessionManager.getSessionRef()!;
 		await sessionManager.closePersistence();
@@ -2159,9 +2296,25 @@ describe("review presentation and repository helpers", () => {
 			overallCorrectness: "incorrect" as const,
 			overallExplanation: "A verified issue remains.",
 		};
-		const text = formatReviewForNewSession({ description: "the change", diffCommand: "git diff base..head" }, parsed);
+		const record: ReviewRunRecord = {
+			schemaVersion: 1,
+			runId: "review:format",
+			workflowAction: "review.branch",
+			status: "completed",
+			startedAt: 1,
+			endedAt: 2,
+			target: {
+				description: "the change",
+				diffCommand: "git diff base..head",
+				identity: { kind: "branch", baseTree: "b".repeat(40), headTree: "h".repeat(40) },
+				files: [],
+			},
+			options: DEFAULT_REVIEW_RUN_CONTROLS,
+			result: parsed,
+		};
+		const text = createReviewSeedMessage(record).content;
 		expect(text).toContain("finding-1");
-		expect(text).toContain("src/value.ts:2-2, head");
+		expect(text).toContain("src/value\\.ts:2-2, head");
 	});
 
 	it("lists likely base branches and recent commits", async () => {

@@ -1295,12 +1295,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					(findingId) => !record.result?.findings.some((finding) => finding.id === findingId),
 				);
 				if (unknown.length > 0) throw new Error(`Unknown finding ids: ${unknown.join(", ")}`);
-				const selectedResult = {
-					...record.result,
-					findings: record.result.findings.filter((finding) => selectedIds.has(finding.id)),
-				};
 				const sourceSessionManager = commandSession.sessionManager;
-				const seedMessage = createReviewSeedMessage(record.target, { parsed: selectedResult });
+				const seedMessage = createReviewSeedMessage(record, requestedFindingIds);
 				let targetSessionManager: SessionManager | undefined;
 				let acknowledgedAt: number | undefined;
 				const opened = await runtimeHost.newSession({
@@ -1352,7 +1348,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					actionsChanged: !opened.cancelled,
 					message: opened.cancelled
 						? "Review fix session cancelled"
-						: `Opened ${selectedResult.findings.length} selected review findings`,
+						: `Opened ${selectedIds.size} selected review findings`,
 				};
 			}
 			if (action === REVIEW_FEEDBACK_ACTION_ID) {
