@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AssistantMessageEvent } from "@hansjm10/volt-ai";
@@ -186,7 +186,13 @@ describe("bounded tool diagnostics", () => {
 		expect(readFileSync(target, "utf8")).toBe("preserve");
 		rmSync(join(directory, "debug"), { recursive: true });
 		symlinkSync(directory, join(directory, "debug"), "dir");
-		await expect(collector.capture()).rejects.toThrow("non-directory private path");
+		await expect(collector.capture()).rejects.toThrow(
+			process.platform === "win32"
+				? "Could not retain private Windows review diagnostics."
+				: "non-directory private path",
+		);
+		expect(existsSync(join(directory, "tool-progress-latest.json"))).toBe(false);
+		expect(readFileSync(target, "utf8")).toBe("preserve");
 	});
 
 	it("preserves late identities and separately tracks interleaved provisional calls", () => {
