@@ -1,9 +1,11 @@
 import type { JsonValue, TextContent } from "@hansjm10/volt-ai";
 import type { Component } from "@hansjm10/volt-tui";
 import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@hansjm10/volt-tui";
+import { BACKGROUND_JOB_NOTIFICATION_TYPE } from "../../../core/background-jobs.ts";
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
+import { renderBackgroundJobNotification } from "./background-job-notification.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
 
 /**
@@ -74,6 +76,13 @@ export class CustomMessageComponent extends Container {
 		this.defaultContainer.clear();
 
 		const details = this.message.details;
+		if (this.message.customType === BACKGROUND_JOB_NOTIFICATION_TYPE) {
+			const notification = renderBackgroundJobNotification(details, this._expanded, theme);
+			if (notification) {
+				this.defaultContainer.addChild(notification);
+				return;
+			}
+		}
 		const reviewSummary =
 			this.message.customType === "review" &&
 			typeof details === "object" &&

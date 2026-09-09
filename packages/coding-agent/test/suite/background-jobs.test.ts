@@ -203,7 +203,9 @@ describe("AgentSession background jobs", () => {
 		]);
 		await harness.session.prompt("Collect the result");
 		expect(notices(harness)).toHaveLength(1);
-		expect(getMessageText(notices(harness)[0])).not.toContain("untrusted payload");
+		const { output: _output, outputTruncated: _truncated, ...summary } = completed;
+		expect(notices(harness)[0]).toMatchObject({ details: { jobIds: [job.id], jobs: [summary] } });
+		expect(JSON.stringify(notices(harness)[0])).not.toContain("untrusted payload");
 		harness.setResponses([fauxAssistantMessage("Still done.")]);
 		await harness.session.prompt("Anything else?");
 		expect(notices(harness)).toHaveLength(1);
