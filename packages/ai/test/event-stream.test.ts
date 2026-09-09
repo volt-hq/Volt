@@ -45,6 +45,48 @@ describe("EventStream", () => {
 		await expect(iterator.next()).rejects.toMatchObject({ limit: "bytes" });
 	});
 
+	it.each([false, true])("does not invoke nested getters while accounting for events (frozen: %s)", async (frozen) => {
+		let reads = 0;
+		const details = {
+			get count(): number {
+				reads++;
+				throw new Error("Invalid diagnostic getter");
+			},
+		};
+		const event = { details };
+		if (frozen) {
+			Object.freeze(details);
+			Object.freeze(event);
+		}
+		const stream = new EventStream<typeof event>(
+			() => true,
+			(value) => value,
+		);
+
+		expect(() => stream.push(event)).not.toThrow();
+		expect(reads).toBe(0);
+		expect(await stream.result()).toBe(event);
+		expect((await stream[Symbol.asyncIterator]().next()).value).toBe(event);
+		expect(reads).toBe(0);
+	});
+
+	it("still enforces the byte bound on data beside an accessor", async () => {
+		const event = {
+			get count(): number {
+				throw new Error("Invalid diagnostic getter");
+			},
+			text: "x".repeat(EVENT_STREAM_MAX_QUEUED_BYTES),
+		};
+		const stream = new EventStream<typeof event>(
+			() => false,
+			(value) => value,
+		);
+
+		expect(() => stream.push(event)).toThrow(EventStreamOverflowError);
+		await expect(stream.result()).rejects.toMatchObject({ limit: "bytes" });
+		await expect(stream[Symbol.asyncIterator]().next()).rejects.toMatchObject({ limit: "bytes" });
+	});
+
 	it("explicit draining supports result-only consumers without changing result replay", async () => {
 		const stream = new EventStream<number>(
 			(event) => event === -1,
