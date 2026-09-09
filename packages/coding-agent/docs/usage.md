@@ -46,6 +46,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/name <name>` | Set session display name |
 | `/session` | Show session store, ID, messages, tokens, and cost |
 | `/usage` | Show remaining subscription quota and local reset times |
+| `/jobs` | Inspect background jobs, view retained output, or cancel one job |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
@@ -108,7 +109,11 @@ Session abort cancels jobs even when the model is idle. Escape uses this cancell
 
 Volt attaches compact completion notices to the next authorized model request. Completion never starts inference by itself while the model is idle. Forced final-response turns defer notices. Job output is untrusted data; notices contain host-generated status and IDs, not worker output.
 
-In the TUI, completion notices show a readable status and command or task name. Expand job details with the configured tool-output shortcut (Ctrl+O by default) to see full job IDs, complete labels, and elapsed times. The model-facing instructions stay in context without cluttering the displayed notice.
+In the TUI, background-job cards show the command or task, worker status, job duration, and the latest three non-empty output lines. Waiting calls identify the target job instead of showing a generic tool timer. Completed `jobs` tool calls retain their post-hook output snapshots; launch cards, pending waits, and the `/jobs` inspector remain live. Running snapshots show their state "at capture" without an advancing timer. A completed inspection is not displayed as successful work when the worker is still running or has failed. Output previews are literal worker output, not inferred test progress. Expand retained output with Ctrl+O; the original launch card also preserves the full submitted command or task.
+
+A compact status above the editor shows running and failed jobs independently of model activity. Open `/jobs` or press Alt+J to select a job and inspect its output without starting inference. Enter opens the scrollable output view. Arrow keys and PageUp/PageDown pause following on a bounded reading snapshot, so retention rollover cannot move the text you are reading. The inspector indicates when newer output is available; End resumes following the latest retained output. Ctrl+K requests cancellation of only the selected job after confirmation. Escape returns or closes the inspector without stopping work. These shortcuts are configurable; see [Keybindings](keybindings.md#background-jobs).
+
+The inspector shows only jobs accessible in the current runtime and branch. Its output uses the existing latest-50-KB/2000-line retention limit, with a visible truncation notice. Task labels in the inspector use the manager's 200-character bound; the full submitted command remains in the original launch card. Saved running snapshots whose handles are no longer accessible are labelled as historical, without a misleading live timer. Completion notices remain metadata-only; model-facing job instructions stay in context without appearing in job cards.
 
 Background support applies only to native tools in `AgentSession`. Extension and SDK execution overrides are not automatically detached. Final native results pass through `tool_result` hooks once at completion; the initial job acknowledgement is not a completed native result. Live progress snapshots are available before those completion hooks run. Hooks for `jobs` can inspect or transform reads of those snapshots.
 

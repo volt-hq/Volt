@@ -1,0 +1,755 @@
+import type { AgentToolResult, AgentToolUpdateCallback } from "@hansjm10/volt-agent-core";
+import {
+	createRenderFrame,
+	getCapabilities,
+	getKeybindings,
+	setCapabilities,
+	setKeybindings,
+	type TUI,
+	visibleWidth,
+} from "@hansjm10/volt-tui";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	BackgroundJobManager,
+	type BackgroundJobSnapshot,
+	type BackgroundJobSummary,
+} from "../src/core/background-jobs.ts";
+import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { initTheme } from "../src/core/theme/runtime.ts";
+import { backgroundJobResult, withBackgroundJobs } from "../src/core/tools/background.ts";
+import * as backgroundRendering from "../src/core/tools/background-render.ts";
+import { BackgroundJobView } from "../src/core/tools/background-render.ts";
+import { createBashToolDefinition } from "../src/core/tools/bash.ts";
+import { createJobsTool, createJobsToolDefinition } from "../src/core/tools/jobs.ts";
+import { BackgroundJobsInspector, BackgroundJobsStatus } from "../src/modes/interactive/components/background-jobs.ts";
+import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
+
+const previousBindings = getKeybindings();
+const cleanup: (() => void | Promise<void>)[] = [];
+
+beforeEach(() => {
+	initTheme("dark");
+	setKeybindings(new KeybindingsManager());
+});
+afterEach(async () => {
+	for (const dispose of cleanup.reverse()) await dispose();
+	cleanup.length = 0;
+	setKeybindings(previousBindings);
+	vi.useRealTimers();
+});
+
+function setup() {
+	const manager = new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 });
+	cleanup.push(() => manager.close());
+	return manager;
+}
+
+function start(manager: BackgroundJobManager, label = "vitest --run test/background-jobs.test.ts") {
+	let update!: AgentToolUpdateCallback<unknown>;
+	let finish!: (result: AgentToolResult<unknown>) => void;
+	const result = new Promise<AgentToolResult<unknown>>((resolve) => {
+		finish = resolve;
+	});
+	const job = manager.start({
+		toolName: "bash",
+		toolCallId: label,
+		label,
+		execute: async (_signal, onUpdate) => {
+			update = onUpdate;
+			return result;
+		},
+	});
+	cleanup.push(() => finish({ content: [] }));
+	return { job, output: (text: string) => update({ content: [{ type: "text", text }] }), finish };
+}
+
+function text(component: { render: (width: number) => { lines: readonly string[] } }, width = 80): string {
+	const frame = component.render(width);
+	for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+	return frame.lines.map(stripAnsi).join("\n");
+}
+
+function inspector(manager: BackgroundJobManager, height = 24) {
+	const requestRender = vi.fn();
+	const onClose = vi.fn();
+	const component = new BackgroundJobsInspector(manager, { getHeight: () => height, requestRender, onClose });
+	cleanup.push(() => component.dispose());
+	return { component, requestRender, onClose };
+}
+
+function tool(manager: BackgroundJobManager, job: BackgroundJobSnapshot, name: "bash" | "jobs", live = true) {
+	const definition =
+		name === "bash"
+			? withBackgroundJobs(createBashToolDefinition(process.cwd()), { manager })
+			: createJobsToolDefinition({ manager });
+	const component = new ToolExecutionComponent(
+		name,
+		job.toolCallId,
+		name === "bash" ? { command: job.label, background: true } : { action: "wait", id: job.id },
+		{ liveProgress: live },
+		definition,
+		{ requestRender: () => {} } as unknown as TUI,
+		process.cwd(),
+	);
+	cleanup.push(() => component.dispose());
+	component.markExecutionStarted();
+	return component;
+}
+
+describe("background job cards", () => {
+	it("caches immutable views until width or presentation changes, while live views remain fresh", () => {
+		let value = "first";
+		const draw = vi.fn(() => createRenderFrame([value]));
+		const cached = new BackgroundJobView(draw, true);
+		expect(text(cached)).toBe("first");
+		value = "next";
+		expect(text(cached)).toBe("first");
+		expect(draw).toHaveBeenCalledTimes(1);
+		expect(text(cached, 40)).toBe("next");
+		expect(draw).toHaveBeenCalledTimes(2);
+		value = "updated";
+		cached.invalidate();
+		expect(text(cached, 40)).toBe("updated");
+		expect(draw).toHaveBeenCalledTimes(3);
+		const live = new BackgroundJobView(draw);
+		expect(text(live)).toBe("updated");
+		value = "live update";
+		expect(text(live)).toBe("live update");
+	});
+
+	it.each([undefined, null, true, 42, "preview", []])(
+		"renders unvalidated argument previews and recovers: %j",
+		(args) => {
+			const card = new ToolExecutionComponent(
+				"jobs",
+				"streamed-arguments",
+				args,
+				{},
+				createJobsToolDefinition(),
+				{ requestRender: () => {} } as unknown as TUI,
+				process.cwd(),
+			);
+			cleanup.push(() => card.dispose());
+			for (const width of [20, 80]) expect(text(card, width).replace(/\s+/g, " ")).toContain("background job");
+			card.updateArgs({ action: "list" });
+			card.setArgsComplete();
+			expect(text(card)).toContain("Listing background jobs");
+			card.updateArgs(args);
+			expect(text(card)).toContain("background job");
+			card.updateResult({ content: [{ type: "text", text: "Arguments must be an object" }], isError: true });
+			expect(text(card)).toContain("Job inspection failed");
+			expect(text(card)).toContain("Arguments must be an object");
+		},
+	);
+
+	it("shows the named worker, actual job duration, output, and completion instead of tool success", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(1000);
+		const manager = setup();
+		const work = start(manager);
+		await Promise.resolve();
+		const card = tool(manager, work.job, "bash");
+		card.updateResult({ ...backgroundJobResult(work.job), isError: false });
+		expect(text(card)).toContain("No output yet");
+		work.output("old line\nPASS cancellation\nPASS snapshots\nTests 12 passed (12)\n");
+		vi.setSystemTime(19_000);
+		let rendered = text(card);
+		expect(rendered).toContain("Running · 18.0s");
+		expect(rendered).toContain(work.job.label);
+		expect(rendered).toContain("Tests 12 passed (12)");
+		expect(rendered).toContain("Last output 18.0s ago");
+		expect(rendered).not.toContain("old line");
+		expect(rendered).not.toContain("[success]");
+		expect(rendered).not.toContain("Use jobs with action");
+		work.finish({ content: [{ type: "text", text: "Tests 12 passed (12)" }] });
+		await manager.wait(work.job.id);
+		rendered = text(card);
+		expect(rendered).toContain("Completed · 18.0s");
+		vi.setSystemTime(30_000);
+		expect(text(card)).toBe(rendered);
+	});
+
+	it("caches expanded settled launch output until width or presentation changes", async () => {
+		const manager = setup();
+		const work = start(manager);
+		await Promise.resolve();
+		const card = tool(manager, work.job, "bash");
+		card.updateResult({ ...backgroundJobResult(work.job), isError: false });
+		const log = Array.from({ length: 400 }, (_, index) => `${index}: ${"x".repeat(100)}`).join("\n");
+		work.finish({ content: [{ type: "text", text: log }] });
+		await manager.wait(work.job.id);
+		card.invalidate();
+		card.setExpanded(true);
+		const rendered = text(card);
+		expect(rendered).toContain("399:");
+		const draw = vi.spyOn(backgroundRendering, "renderBackgroundJobCard");
+		cleanup.push(() => draw.mockRestore());
+		for (let index = 0; index < 5; index++) expect(text(card)).toBe(rendered);
+		expect(draw).not.toHaveBeenCalled();
+		text(card, 40);
+		expect(draw).toHaveBeenCalledOnce();
+		card.invalidate();
+		text(card, 40);
+		expect(draw).toHaveBeenCalledTimes(2);
+		card.setExpanded(false);
+		text(card, 40);
+		expect(draw).toHaveBeenCalledTimes(3);
+	});
+
+	it("renders waits with the target job and does not report success when the wait expires", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(1000);
+		const manager = setup();
+		const work = start(manager);
+		await Promise.resolve();
+		work.output("PASS job lifecycle");
+		vi.setSystemTime(19_000);
+		const card = tool(manager, work.job, "jobs");
+		expect(text(card)).toContain("Waiting for background job");
+		expect(text(card)).toContain("18.0s");
+		expect(text(card)).toContain("PASS job lifecycle");
+		card.updateResult({ ...backgroundJobResult(manager.get(work.job.id)), isError: false });
+		expect(text(card)).toContain("Running");
+		expect(text(card)).not.toContain("[success]");
+		expect(text(card)).not.toContain("Running jobs");
+		expect(text(card)).toContain("Running at capture");
+		const captured = text(card);
+		work.finish({
+			content: [{ type: "text", text: "FAIL cancellation\nCommand exited with code 1" }],
+			isError: true,
+		});
+		await manager.wait(work.job.id);
+		expect(text(card)).toBe(captured);
+		card.updateResult({ ...backgroundJobResult(manager.get(work.job.id)), isError: true });
+		expect(text(card)).toContain("Failed");
+		expect(text(card)).toContain("Command exited with code 1");
+	});
+
+	it.each([true, false])("keeps replay static with a manager-bound definition: %s", async (registered) => {
+		const manager = setup();
+		const work = start(manager);
+		await Promise.resolve();
+		const definition = registered
+			? withBackgroundJobs(createBashToolDefinition(process.cwd()), { manager })
+			: undefined;
+		const card = new ToolExecutionComponent(
+			"bash",
+			work.job.toolCallId,
+			{ command: work.job.label, background: true },
+			{},
+			definition,
+			{ requestRender: () => {} } as unknown as TUI,
+			process.cwd(),
+		);
+		cleanup.push(() => card.dispose());
+		card.updateResult({ ...backgroundJobResult(work.job), isError: false });
+		work.output("LIVE OUTPUT MUST NOT ENTER REPLAY");
+		expect(text(card)).toContain("Running at capture");
+		expect(text(card)).not.toContain("LIVE OUTPUT MUST NOT ENTER REPLAY");
+		expect(text(card)).not.toContain("Use jobs with action");
+	});
+
+	it("renders launch failures with an explicit heading and sanitizes literal worker output", async () => {
+		const manager = setup();
+		const work = start(manager);
+		await Promise.resolve();
+		const card = tool(manager, work.job, "bash");
+		card.updateResult({ content: [{ type: "text", text: "At most 8 background jobs may run" }], isError: true });
+		expect(text(card)).toContain("Background job failed to start");
+		work.output("\x1b[2J\x1b]8;;https://example.com\x07**literal output**\x1b]8;;\x07\u202e\x07");
+		card.updateResult({ ...backgroundJobResult(manager.get(work.job.id)), isError: false });
+		expect(text(card)).toContain("**literal output**");
+		expect(card.render(80).lines.join("\n")).not.toMatch(/\x07|\x1b\[2J|\x1b\]8|\u202e/);
+	});
+
+	it("labels recorded inspections as snapshots without a ticking runtime", async () => {
+		const manager = setup();
+		const work = start(manager);
+		await Promise.resolve();
+		const card = tool(setup(), work.job, "jobs", false);
+		card.updateResult({ ...backgroundJobResult(work.job), isError: false });
+		expect(text(card)).toContain("Running at capture");
+		expect(text(card)).toContain("Output snapshot");
+		expect(text(card)).not.toContain("Last output");
+	});
+
+	it.each([20, 40, 80, 120])("bounds previews and expands retained output and IDs at %i columns", async (width) => {
+		const manager = setup();
+		const work = start(manager, "npm run check --workspace packages/coding-agent");
+		await Promise.resolve();
+		work.output(
+			`\x1b[2J\x1b]8;;https://example.com\x07**literal**\x1b]8;;\x07\n${"界".repeat(120)}\n${"line\n".repeat(3000)}`,
+		);
+		const card = tool(manager, work.job, "bash");
+		card.updateResult({ ...backgroundJobResult(manager.get(work.job.id)), isError: false });
+		expect(text(card, width)).not.toContain(work.job.id);
+		expect(text(card, width).replace(/\s+/g, " ")).toContain("Retained output truncated");
+		card.setExpanded(true);
+		const expanded = text(card, width);
+		expect(expanded.replace(/\s/g, "")).toContain(work.job.id);
+		expect(card.render(width).lines.join("\n")).not.toContain("\x1b[2J");
+	});
+});
+
+describe("background job list metadata", () => {
+	const summary: BackgroundJobSummary = {
+		id: "job_list-item",
+		toolName: "bash",
+		toolCallId: "list-launch",
+		label: "npm run check",
+		status: "completed",
+		startedAt: 1000,
+		endedAt: 2000,
+	};
+	const unsupportedDetails: unknown[] = [
+		undefined,
+		null,
+		"extension replacement",
+		42,
+		true,
+		[],
+		{},
+		{ jobs: null },
+		{ jobs: "not a list" },
+		{ jobs: [null] },
+		{ jobs: [[]] },
+		{ jobs: [summary, null] },
+		{ jobs: [{}] },
+		{ jobs: [{ ...summary, status: "unknown" }] },
+		{ jobs: [{ ...summary, status: "constructor" }] },
+		{ jobs: [{ ...summary, id: "job_\x07" }] },
+		{ jobs: [{ ...summary, toolName: "other" }] },
+		{ jobs: [{ ...summary, toolCallId: null }] },
+		{ jobs: [{ ...summary, label: 42 }] },
+		{ jobs: [{ ...summary, startedAt: "1000" }] },
+		{ jobs: [{ ...summary, endedAt: null }] },
+	];
+
+	it.each(unsupportedDetails)(
+		"uses literal result text for unsupported details in live and replay rows: %j",
+		(details) => {
+			const result = {
+				content: [{ type: "text", text: "\x1b[2JExtension supplied result\x07" }],
+				details,
+				isError: false,
+			};
+			const original = JSON.stringify(result);
+			for (const live of [false, true]) {
+				const card = new ToolExecutionComponent(
+					"jobs",
+					"list",
+					{ action: "list" },
+					{},
+					createJobsToolDefinition(),
+					{ requestRender: () => {} } as unknown as TUI,
+					process.cwd(),
+				);
+				cleanup.push(() => card.dispose());
+				if (live) card.markExecutionStarted();
+				card.updateResult(result);
+				for (const expanded of [false, true]) {
+					card.setExpanded(expanded);
+					for (const width of [20, 80]) {
+						const rendered = text(card, width).replace(/\s+/g, " ");
+						expect(rendered).toContain("Extension supplied result");
+						expect(rendered).not.toContain(summary.label);
+						expect(card.render(width).lines.join("\n")).not.toMatch(/\x07|\x1b\[2J/);
+					}
+					card.invalidate();
+					expect(text(card)).toContain("Extension supplied result");
+				}
+			}
+			expect(JSON.stringify(result)).toBe(original);
+		},
+	);
+
+	it("keeps a failed inspection visible when its metadata was replaced", () => {
+		const card = new ToolExecutionComponent(
+			"jobs",
+			"list-error",
+			{ action: "list" },
+			{},
+			createJobsToolDefinition(),
+			{ requestRender: () => {} } as unknown as TUI,
+			process.cwd(),
+		);
+		cleanup.push(() => card.dispose());
+		card.updateResult({
+			content: [{ type: "text", text: "Extension error text" }],
+			details: "replacement",
+			isError: true,
+		});
+		expect(text(card)).toContain("Job inspection failed");
+		expect(text(card)).toContain("Extension error text");
+	});
+
+	it("preserves native empty, populated, and expanded list rendering", async () => {
+		const manager = setup();
+		const listing = vi.spyOn(manager, "list").mockReturnValue([]);
+		cleanup.push(() => listing.mockRestore());
+		const nativeTool = createJobsTool({ manager });
+		const card = new ToolExecutionComponent(
+			"jobs",
+			"list-valid",
+			{ action: "list" },
+			{},
+			createJobsToolDefinition(),
+			{ requestRender: () => {} } as unknown as TUI,
+			process.cwd(),
+		);
+		cleanup.push(() => card.dispose());
+		card.updateResult({ ...(await nativeTool.execute("empty-list", { action: "list" })), isError: false });
+		expect(text(card)).toContain("No background jobs");
+		const statuses = ["running", "cancelling", "completed", "failed", "cancelled"] as const;
+		const { endedAt, ...activeSummary } = summary;
+		const jobs = statuses.map((status, index) => ({
+			...activeSummary,
+			id: `job_list-${index}`,
+			label: `Command ${index}`,
+			status,
+			...(status === "running" || status === "cancelling" ? {} : { endedAt }),
+		}));
+		listing.mockReturnValue(jobs);
+		card.updateResult({ ...(await nativeTool.execute("populated-list", { action: "list" })), isError: false });
+		for (const expanded of [false, true]) {
+			card.setExpanded(expanded);
+			const rendered = text(card);
+			expect(rendered).toContain("Background jobs");
+			for (const job of jobs) {
+				expect(rendered).toContain(job.label);
+				if (expanded) expect(rendered).toContain(job.id);
+				else expect(rendered).not.toContain(job.id);
+			}
+		}
+	});
+});
+
+describe("transformed job results", () => {
+	it.each(["running", "completed"] as const)(
+		"preserves a consistently redacted %s inspection snapshot",
+		async (status) => {
+			vi.useFakeTimers();
+			vi.setSystemTime(1000);
+			const manager = setup();
+			const work = start(manager, "Original job label");
+			await Promise.resolve();
+			work.output("token=original-secret");
+			if (status === "completed") {
+				work.finish({ content: [{ type: "text", text: "token=original-secret" }] });
+				await manager.wait(work.job.id);
+			}
+			const snapshot = { ...manager.get(work.job.id), label: "Filtered label", output: "token=[REDACTED]" };
+			const result = backgroundJobResult(snapshot);
+			const card = tool(manager, work.job, "jobs");
+			card.updateResult({ ...result, isError: false });
+			for (const expanded of [false, true]) {
+				card.setExpanded(expanded);
+				const captured = text(card);
+				expect(captured).toContain("token=[REDACTED]");
+				expect(captured).toContain("Filtered label");
+				expect(captured).not.toContain("original-secret");
+				expect(captured).toContain("Output snapshot");
+				vi.setSystemTime(100_000);
+				work.output("token=new-secret");
+				card.invalidate();
+				expect(text(card)).toBe(captured);
+			}
+		},
+	);
+
+	it.each([false, true])("preserves the collapse limit for transformed output (error: %s)", (isError) => {
+		setKeybindings(new KeybindingsManager({ "app.tools.expand": "f6" }));
+		const card = new ToolExecutionComponent(
+			"jobs",
+			"long-transformed",
+			{ action: "list" },
+			{},
+			createJobsToolDefinition(),
+			{ requestRender: () => {} } as unknown as TUI,
+			process.cwd(),
+		);
+		cleanup.push(() => card.dispose());
+		card.updateResult({
+			content: [
+				{ type: "text", text: Array.from({ length: 30 }, (_, index) => `Extension line ${index}`).join("\n") },
+			],
+			details: { jobs: [] },
+			isError,
+		});
+		const collapsed = text(card);
+		expect(collapsed).toContain("Extension line 9");
+		expect(collapsed).not.toContain("Extension line 10");
+		expect(collapsed).toContain("20 more lines");
+		expect(collapsed).toContain("F6 expand output");
+		if (isError) expect(collapsed).toContain("Job inspection failed");
+		card.setExpanded(true);
+		expect(text(card)).toContain("Extension line 29");
+		expect(text(card)).not.toContain("20 more lines");
+		card.setExpanded(false);
+		expect(text(card)).toBe(collapsed);
+	});
+
+	it.each([
+		[null, true],
+		["kitty", false],
+	] as const)("shows image placeholders when images cannot be displayed (%s, enabled: %s)", (images, showImages) => {
+		const previousCapabilities = getCapabilities();
+		setCapabilities({ images, trueColor: true, hyperlinks: true });
+		cleanup.push(() => setCapabilities(previousCapabilities));
+		const image = {
+			type: "image" as const,
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+y8fsAAAAASUVORK5CYII=",
+		};
+		const card = new ToolExecutionComponent(
+			"jobs",
+			"image-result",
+			{ action: "list" },
+			{ showImages },
+			createJobsToolDefinition(),
+			{ requestRender: () => {} } as unknown as TUI,
+			process.cwd(),
+		);
+		cleanup.push(() => card.dispose());
+		for (const mixed of [false, true]) {
+			card.updateResult({
+				content: mixed ? [{ type: "text", text: "Extension image result" }, image] : [image],
+				details: { jobs: [] },
+				isError: false,
+			});
+			for (const expanded of [false, true]) {
+				card.setExpanded(expanded);
+				for (const width of [20, 80]) {
+					const rendered = text(card, width).replace(/\s+/g, " ");
+					expect(rendered).toContain("[Image: [image/png] 1x1]");
+					if (mixed) expect(rendered).toContain("Extension image result");
+					expect(card.render(width).images).toHaveLength(0);
+				}
+			}
+		}
+	});
+
+	it.each(["read", "list"] as const)(
+		"preserves post-hook content and errors for %s results with native metadata",
+		async (action) => {
+			const manager = setup();
+			const work = start(manager, "Native job label");
+			await Promise.resolve();
+			work.finish({ content: [{ type: "text", text: "Original worker output" }] });
+			await manager.wait(work.job.id);
+			const args = action === "list" ? { action } : { action, id: work.job.id };
+			const native = await createJobsTool({ manager }).execute("native-result", args);
+			for (const change of ["content", "error", "both"] as const) {
+				const result = {
+					...native,
+					content:
+						change === "error" ? native.content : [{ type: "text" as const, text: "Extension replacement text" }],
+					isError: change !== "content",
+				};
+				const saved = JSON.stringify(result);
+				for (const registered of [false, true]) {
+					for (const live of [false, true]) {
+						const card = new ToolExecutionComponent(
+							"jobs",
+							"transformed-result",
+							args,
+							{},
+							registered ? createJobsToolDefinition({ manager }) : undefined,
+							{ requestRender: () => {} } as unknown as TUI,
+							process.cwd(),
+						);
+						cleanup.push(() => card.dispose());
+						if (live) card.markExecutionStarted();
+						card.updateResult(result);
+						for (const expanded of [false, true]) {
+							card.setExpanded(expanded);
+							const rendered = text(card);
+							if (change !== "error") {
+								expect(rendered).toContain("Extension replacement text");
+								expect(rendered).not.toContain("Original worker output");
+								expect(rendered).not.toContain("Native job label");
+							}
+							if (change !== "content") expect(rendered).toContain("Job inspection failed");
+							else expect(rendered).not.toContain("Job inspection failed");
+							expect(rendered).not.toContain("Completed");
+							card.invalidate();
+							expect(text(card)).toBe(rendered);
+						}
+					}
+				}
+				expect(JSON.stringify(result)).toBe(saved);
+			}
+		},
+	);
+});
+
+describe("background job observers and dock", () => {
+	it("notifies start/output/settlement and contains observer failures", async () => {
+		const manager = setup();
+		const observer = vi.fn();
+		const stop = manager.subscribe(observer);
+		manager.subscribe(() => {
+			throw new Error("broken UI");
+		});
+		const work = start(manager);
+		expect(observer).toHaveBeenCalledTimes(1);
+		await Promise.resolve();
+		work.output("working");
+		expect(observer).toHaveBeenCalledTimes(2);
+		const timestamp = manager.get(work.job.id).lastOutputAt;
+		work.output("working");
+		expect(observer).toHaveBeenCalledTimes(2);
+		expect(manager.get(work.job.id).lastOutputAt).toBe(timestamp);
+		work.finish({ content: [{ type: "text", text: "working" }] });
+		await manager.wait(work.job.id);
+		expect(observer).toHaveBeenCalledTimes(3);
+		stop();
+		await manager.close();
+		expect(observer).toHaveBeenCalledTimes(3);
+	});
+
+	it("shows active and failed counts and switches to the current source", async () => {
+		let manager = setup();
+		const dock = new BackgroundJobsStatus(() => manager);
+		expect(text(dock)).toBe("");
+		const work = start(manager);
+		await Promise.resolve();
+		work.output("PASS recent test");
+		expect(text(dock)).toContain("1 running");
+		expect(text(dock)).toContain("PASS recent test");
+		expect(text(dock)).toContain("/jobs");
+		work.finish({ isError: true, content: [{ type: "text", text: "FAIL timeout" }] });
+		await manager.wait(work.job.id);
+		expect(text(dock)).toContain("1 failed");
+		manager = setup();
+		expect(text(dock)).toBe("");
+	});
+});
+
+describe("background jobs inspector", () => {
+	it.each([20, 40, 80, 120])("keeps controls and bounded output at %i columns", async (width) => {
+		const manager = setup();
+		const work = start(manager, "界".repeat(150));
+		await Promise.resolve();
+		work.output(`\x1b[2J**literal output**\x07\n${"line\n".repeat(3000)}`);
+		const { component } = inspector(manager);
+		expect(text(component, width)).toContain("Background jobs");
+		expect(component.render(width).lines.length).toBeLessThanOrEqual(24);
+		component.handleInput("\r");
+		expect(text(component, width)).not.toContain("\x07");
+		expect(component.render(width).lines.length).toBeLessThanOrEqual(24);
+		expect(text(component, width).replace(/\s+/g, " ")).toContain("back");
+	});
+
+	it("follows new output, pauses scrolling, and resumes with the configured key", async () => {
+		const manager = setup();
+		const work = start(manager);
+		await Promise.resolve();
+		work.output(Array.from({ length: 50 }, (_, i) => `output ${i}`).join("\n"));
+		const { component } = inspector(manager);
+		text(component);
+		component.handleInput("\r");
+		expect(text(component)).toContain("output 49");
+		component.handleInput("\x1b[5~");
+		expect(text(component)).toContain("Scroll paused");
+		expect(text(component)).not.toContain("output 49");
+		work.output(Array.from({ length: 60 }, (_, i) => `output ${i}`).join("\n"));
+		expect(text(component)).not.toContain("output 59");
+		setKeybindings(new KeybindingsManager({ "app.jobs.follow": "f6" }));
+		expect(text(component)).toContain("F6 follow latest");
+		component.handleInput("\x1b[17~");
+		expect(text(component)).toContain("Following latest");
+		expect(text(component)).toContain("output 59");
+	});
+
+	it("keeps a bounded paused reading snapshot when live retention rolls over", async () => {
+		const manager = setup();
+		const work = start(manager);
+		await Promise.resolve();
+		const output = (count: number) =>
+			Array.from({ length: count }, (_, index) => `output ${String(index).padStart(4, "0")}`).join("\n");
+		work.output(output(2000));
+		const { component } = inspector(manager);
+		text(component);
+		component.handleInput("\r");
+		text(component);
+		component.handleInput("\x1b[H");
+		for (let index = 0; index < 30; index++) component.handleInput("\x1b[B");
+		expect(text(component)).toContain("output 0030");
+		work.output(output(2010));
+		expect(manager.get(work.job.id).outputTruncated).toBe(true);
+		expect(text(component)).toContain("output 0030");
+		expect(text(component)).toContain("snapshot; newer output available");
+		work.output(output(5000));
+		expect(manager.get(work.job.id).output).not.toContain("output 0030");
+		expect(text(component)).toContain("output 0030");
+		component.handleInput("\x1b[F");
+		expect(text(component)).toContain("output 4999");
+		expect(text(component)).toContain("Following latest");
+	});
+
+	it("reserves readable output rows for long labels and truncated output at 20x24", async () => {
+		const manager = setup();
+		const work = start(manager, "界".repeat(150));
+		await Promise.resolve();
+		work.output(`${"earlier\n".repeat(3000)}VISIBLE LATEST\n`);
+		const { component } = inspector(manager);
+		text(component, 20);
+		component.handleInput("\r");
+		const rendered = text(component, 20);
+		expect(rendered).toContain("VISIBLE LATEST");
+		expect(rendered).toContain("back");
+		expect(component.render(20).lines.length).toBeLessThanOrEqual(24);
+	});
+
+	it("keeps the selected job stable and confirms cancellation of only that job", async () => {
+		const manager = setup();
+		const first = start(manager, "First job");
+		await Promise.resolve();
+		const { component, onClose } = inspector(manager);
+		text(component);
+		const second = start(manager, "Second job");
+		await Promise.resolve();
+		text(component);
+		component.handleInput("\x0b");
+		expect(text(component)).toContain("Cancel this job?");
+		expect(text(component)).toContain("First job");
+		expect(text(component)).toContain(first.job.id);
+		component.handleInput("\x1b");
+		expect(manager.get(first.job.id).status).toBe("running");
+		component.handleInput("\x0b");
+		component.handleInput("\r");
+		expect(manager.get(first.job.id).status).toBe("cancelling");
+		expect(manager.get(second.job.id).status).toBe("running");
+		expect(text(component)).toContain("waiting for the worker to stop");
+		first.finish({ content: [] });
+		await manager.wait(first.job.id);
+		expect(text(component)).toContain("Cancelled");
+		expect(text(component)).not.toContain("waiting for the worker to stop");
+		component.handleInput("\x1b");
+		expect(onClose).toHaveBeenCalledOnce();
+		expect(manager.get(second.job.id).status).toBe("running");
+	});
+
+	it("shows an empty state after revocation and releases timers and subscriptions", async () => {
+		vi.useFakeTimers();
+		let allowed = true;
+		const manager = new BackgroundJobManager({ isToolAllowed: () => allowed, getGeneration: () => 0 });
+		cleanup.push(() => manager.close());
+		const work = start(manager);
+		await Promise.resolve();
+		const { component, requestRender } = inspector(manager);
+		text(component);
+		allowed = false;
+		manager.cancelInaccessible();
+		expect(text(component)).toContain("No background jobs");
+		component.dispose();
+		requestRender.mockClear();
+		work.finish({ content: [] });
+		await manager.waitForIdle();
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(requestRender).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+});

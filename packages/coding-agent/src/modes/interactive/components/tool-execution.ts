@@ -16,6 +16,11 @@ import {
 } from "@hansjm10/volt-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { theme } from "../../../core/theme/runtime.ts";
+import {
+	BackgroundJobView,
+	getBackgroundJobSnapshot,
+	renderBackgroundJobCard,
+} from "../../../core/tools/background-render.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
 import { formatDuration, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
@@ -186,7 +191,16 @@ export class ToolExecutionComponent extends Container {
 		}
 	}
 
+	private getHistoricalBackgroundJob() {
+		// jobs has its own renderer, including post-hook error/content handling during replay.
+		if (this.toolDefinition || !["bash", "subagent"].includes(this.toolName)) return undefined;
+		return getBackgroundJobSnapshot(this.result?.details);
+	}
+
 	private getCallRenderer(): ToolDefinition<any, any>["renderCall"] | undefined {
+		if (this.getHistoricalBackgroundJob()) {
+			return () => new BackgroundJobView(() => createRenderFrame([]));
+		}
 		if (!this.builtInToolDefinition) {
 			return this.toolDefinition?.renderCall;
 		}
@@ -197,6 +211,22 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private getResultRenderer(): ToolDefinition<any, any>["renderResult"] | undefined {
+		const historicalJob = this.getHistoricalBackgroundJob();
+		if (historicalJob) {
+			return (_result, options, theme) =>
+				new BackgroundJobView((width) =>
+					renderBackgroundJobCard(historicalJob, width, theme, {
+						expanded: options.expanded,
+						historical: true,
+						label:
+							typeof this.args?.command === "string"
+								? this.args.command
+								: typeof this.args?.task === "string"
+									? this.args.task
+									: undefined,
+					}),
+				);
+		}
 		if (!this.builtInToolDefinition) {
 			return this.toolDefinition?.renderResult;
 		}
@@ -596,7 +626,7 @@ export class ToolExecutionComponent extends Container {
 	private withHeaderMetadata(component: Component): Component {
 		// Subagents render as conversation participants with their own explicit
 		// lifecycle state instead of as a generic tool card.
-		if (this.toolName === "subagent") return component;
+		if (this.toolName === "subagent" || component instanceof BackgroundJobView) return component;
 		return new ToolHeaderMetadata(component, () => this.getHeaderMetadata());
 	}
 

@@ -59,8 +59,10 @@ describe("background subagent tool rows", () => {
 				const lines = component.render(width).lines;
 				const rendered = lines.map(stripAnsi).join("\n");
 				expect(rendered).toContain("Background job");
-				// Narrow terminals wrap the ID; no part of it may be hidden or truncated.
-				expect(rendered.replace(/\s/g, "")).toContain(job.id);
+				if (expanded) expect(rendered.replace(/\s/g, "")).toContain(job.id);
+				else expect(rendered).not.toContain(job.id);
+				expect(rendered.replace(/\s+/g, " ")).toContain("Inspect the auth flow");
+				expect(rendered).not.toContain("Use jobs with action");
 				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 			}
 		} finally {

@@ -65,6 +65,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "clone", description: "Duplicate the current session at the current position" },
 	{ name: "tree", description: "Navigate session tree (switch branches)" },
 	{ name: "subagents", description: "Switch to the subagent conversations view" },
+	{ name: "jobs", description: "Inspect background jobs, live output, and per-job cancellation" },
 	{ name: "trust", description: "Save project trust decision for future sessions" },
 	{ name: "worktree", description: "Open a new session in a daemon-managed git worktree (/worktree new [name])" },
 	{ name: "store", description: "Search, inspect, install, remove, and update extension store packages" },

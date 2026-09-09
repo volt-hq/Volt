@@ -25,6 +25,8 @@ export interface BackgroundJobSnapshot extends BackgroundJobSummary {
 	/** Latest bounded output snapshot, not a destructive read or a stream delta. */
 	output: string;
 	outputTruncated: boolean;
+	/** Time the retained output last changed. Absent until the worker produces output. */
+	lastOutputAt?: number;
 }
 
 export interface BackgroundJobManagerOptions {
@@ -54,9 +56,26 @@ export class BackgroundJobManager {
 	private readonly options: BackgroundJobManagerOptions;
 	private readonly records = new Map<string, JobRecord>();
 	private closed = false;
+	private readonly listeners = new Set<() => void>();
 
 	constructor(options: BackgroundJobManagerOptions) {
 		this.options = options;
+	}
+
+	/** UI observers receive no output payload and cannot affect worker settlement. */
+	subscribe(listener: () => void): () => void {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
+	}
+
+	private emitChange(): void {
+		for (const listener of this.listeners) {
+			try {
+				listener();
+			} catch {
+				// Presentation failures must not fail or cancel background work.
+			}
+		}
 	}
 
 	get hasActive(): boolean {
@@ -101,6 +120,7 @@ export class BackgroundJobManager {
 		// Defer dispatch until the handle is registered. Cancellation before that
 		// microtask must prevent the work from starting, not merely hide its result.
 		record.settled = Promise.resolve().then(() => this.run(record, work));
+		this.emitChange();
 		return { ...record.snapshot };
 	}
 
@@ -109,7 +129,12 @@ export class BackgroundJobManager {
 			.filter((record) => this.hasAccess(record))
 			.reverse()
 			.map((record) => {
-				const { output: _output, outputTruncated: _truncated, ...summary } = record.snapshot;
+				const {
+					output: _output,
+					outputTruncated: _truncated,
+					lastOutputAt: _lastOutputAt,
+					...summary
+				} = record.snapshot;
 				return summary;
 			});
 	}
@@ -176,10 +201,12 @@ export class BackgroundJobManager {
 		for (const record of this.records.values()) {
 			if (!this.hasAccess(record)) this.cancelRecord(record);
 		}
+		this.emitChange();
 	}
 
 	close(): Promise<void> {
 		this.closed = true;
+		this.emitChange();
 		return this.cancelAll();
 	}
 
@@ -218,6 +245,7 @@ export class BackgroundJobManager {
 		if (record.snapshot.endedAt !== undefined || record.controller.signal.aborted) return;
 		record.snapshot.status = "cancelling";
 		record.controller.abort();
+		this.emitChange();
 	}
 
 	private captureOutput(record: JobRecord, result: AgentToolResult<unknown>): void {
@@ -226,8 +254,11 @@ export class BackgroundJobManager {
 			.map((part) => part.text)
 			.join("\n");
 		const bounded = truncateTail(text, { maxBytes: BACKGROUND_JOB_MAX_OUTPUT_BYTES });
+		const changed = record.snapshot.output !== bounded.content;
+		if (changed && bounded.content) record.snapshot.lastOutputAt = Date.now();
 		record.snapshot.output = bounded.content;
 		record.snapshot.outputTruncated = bounded.truncated;
+		if (changed) this.emitChange();
 	}
 
 	private async run(record: JobRecord, work: BackgroundJobStart): Promise<void> {
@@ -264,6 +295,10 @@ export class BackgroundJobManager {
 		} finally {
 			acceptingUpdates = false;
 			record.snapshot.endedAt = Date.now();
+			this.emitChange();
 		}
 	}
 }
+
+/** Host UI access; does not admit work or widen the manager's tool/branch grants. */
+export type BackgroundJobSource = Pick<BackgroundJobManager, "list" | "get" | "cancel" | "subscribe">;

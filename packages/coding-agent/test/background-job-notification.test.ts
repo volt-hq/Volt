@@ -223,6 +223,7 @@ describe("background job completion notices", () => {
 				},
 				chatContainer: transcript,
 				pendingTools: new Map(),
+				liveBackgroundJobTools: new Map(),
 				toolOutputExpanded: false,
 				footer: { invalidate: () => undefined },
 				updateEditorBorderColor: () => undefined,

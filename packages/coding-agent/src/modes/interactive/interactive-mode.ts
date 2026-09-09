@@ -208,6 +208,7 @@ import { runIrohRemoteRpcMode } from "../rpc/iroh-remote-rpc-mode.ts";
 import { formatCompactionUsage } from "./compaction-usage.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
+import { BackgroundJobsInspector, BackgroundJobsStatus } from "./components/background-jobs.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
@@ -509,6 +510,8 @@ export class InteractiveMode {
 	private chatContainer: Container;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
+	private backgroundJobsContainer: Container;
+	private backgroundJobsStatus: BackgroundJobsStatus;
 	private planStatusContainer: Container;
 	private planDetailsContainer: Container;
 	private documentContainer: Container;
@@ -569,6 +572,13 @@ export class InteractiveMode {
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
+	/** Launch cards outlive settlement only while their bounded current-runtime records remain accessible. */
+	private liveBackgroundJobTools = new Map<string, { component: ToolExecutionComponent; settled?: boolean }>();
+	private unsubscribeBackgroundJobs: (() => void) | undefined;
+	private backgroundJobsRenderCoalescer: StreamingRenderCoalescer<void> | undefined;
+	private backgroundJobsInspector: BackgroundJobsInspector | undefined;
+	private backgroundJobsOverlay: OverlayHandle | undefined;
+	private dismissBackgroundJobsInspector: (() => void) | undefined;
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -708,12 +718,24 @@ export class InteractiveMode {
 			logDirectory: getAgentDir(),
 			onRightClickPaste: this.onRightClickPaste,
 		});
-		this.ui = createInteractiveTuiReference(() => this.renderer);
+		const ui = createInteractiveTuiReference(() => this.renderer);
+		const setFocus: TUI["setFocus"] = (component) => {
+			// Host loaders can restore focus without changing views. Never leave their input behind this overlay.
+			if (component !== this.backgroundJobsInspector) this.dismissBackgroundJobsInspector?.();
+			ui.setFocus(component);
+		};
+		this.ui = new Proxy(ui, {
+			get: (target, property, receiver) =>
+				property === "setFocus" ? setFocus : Reflect.get(target, property, receiver),
+		});
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
 		this.chatContainer = new Container();
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
+		this.backgroundJobsContainer = new Container();
+		this.backgroundJobsStatus = new BackgroundJobsStatus(() => this.session.backgroundJobs);
+		this.backgroundJobsContainer.addChild(this.backgroundJobsStatus);
 		this.planStatusContainer = new Container();
 		this.planDetailsContainer = new Container();
 		this.widgetContainerAbove = new Container();
@@ -770,6 +792,7 @@ export class InteractiveMode {
 				minSize: 0,
 				visible: () => !this.mainView.isTerminalSplit(),
 			},
+			{ component: this.backgroundJobsContainer, shrink: 2, minSize: 0 },
 			{ component: this.editorContainer, shrink: 1, minSize: 1 },
 			{ component: this.widgetContainerBelow, shrink: 3, minSize: 0 },
 		]);
@@ -784,6 +807,7 @@ export class InteractiveMode {
 				this.pendingMessagesContainer,
 				this.statusContainer,
 				this.widgetContainerAbove,
+				this.backgroundJobsContainer,
 				this.editorContainer,
 				this.widgetContainerBelow,
 			],
@@ -795,6 +819,7 @@ export class InteractiveMode {
 				this.widgetContainerAbove,
 				this.planStatusContainer,
 				this.planDetailsContainer,
+				this.backgroundJobsContainer,
 				this.editorContainer,
 				this.widgetContainerBelow,
 			],
@@ -2405,6 +2430,9 @@ export class InteractiveMode {
 
 	private beginSessionReplacementUi(): void {
 		this.sessionRenderSuspension ??= this.ui.suspendRendering();
+		this.dismissBackgroundJobsInspector?.();
+		this.unsubscribeBackgroundJobs?.();
+		this.unsubscribeBackgroundJobs = undefined;
 		this.dismissSubagentInspector?.();
 		this.resetExtensionUI();
 	}
@@ -2431,6 +2459,9 @@ export class InteractiveMode {
 		}
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		this.dismissBackgroundJobsInspector?.();
+		this.unsubscribeBackgroundJobs?.();
+		this.unsubscribeBackgroundJobs = undefined;
 		this.applyRuntimeSettings(session);
 		session.setHostInteraction(this.createHostInteraction());
 		await this.bindCurrentSessionExtensions(session);
@@ -2438,6 +2469,7 @@ export class InteractiveMode {
 			throw new Error("Agent session changed during interactive rebind");
 		}
 		this.subscribeToAgent(session);
+		this.subscribeToBackgroundJobs(session);
 		await this.updateAvailableProviderCount();
 		this.closePlanDetails();
 		this.refreshPlanningUi();
@@ -2492,8 +2524,9 @@ export class InteractiveMode {
 	 * resources (e.g. the subagent repaint interval) must be released here.
 	 */
 	private disposePendingTools(): void {
-		for (const component of this.pendingTools.values()) {
+		for (const [toolCallId, component] of this.pendingTools) {
 			component.dispose();
+			this.liveBackgroundJobTools.delete(toolCallId);
 		}
 		this.pendingTools.clear();
 	}
@@ -2757,6 +2790,7 @@ export class InteractiveMode {
 	}
 
 	private resetExtensionUI(): void {
+		this.dismissBackgroundJobsInspector?.();
 		if (this.extensionSelector) {
 			this.hideExtensionSelector();
 		}
@@ -3051,6 +3085,7 @@ export class InteractiveMode {
 			};
 			opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
+			this.dismissBackgroundJobsInspector?.();
 			this.extensionSelectorRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
 			this.extensionSelector = new ExtensionSelectorComponent(
 				title,
@@ -3138,6 +3173,7 @@ export class InteractiveMode {
 			};
 			opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
+			this.dismissBackgroundJobsInspector?.();
 			this.extensionInputRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
 			this.extensionInput = new ExtensionInputComponent(
 				title,
@@ -3181,6 +3217,7 @@ export class InteractiveMode {
 	 */
 	private showExtensionEditor(title: string, prefill?: string): Promise<string | undefined> {
 		return new Promise((resolve) => {
+			this.dismissBackgroundJobsInspector?.();
 			this.extensionEditorRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
 			this.extensionEditor = new ExtensionEditorComponent(
 				this.ui,
@@ -3222,6 +3259,7 @@ export class InteractiveMode {
 	 * Pass undefined to restore the default editor.
 	 */
 	private setCustomEditorComponent(factory: EditorFactory | undefined): void {
+		this.dismissBackgroundJobsInspector?.();
 		this.editorComponentFactory = factory;
 
 		// Save text from current editor before switching
@@ -3324,6 +3362,7 @@ export class InteractiveMode {
 	): Promise<T> {
 		const savedText = this.editor.getText();
 		const isOverlay = options?.overlay ?? false;
+		if (!isOverlay) this.dismissBackgroundJobsInspector?.();
 		const previousView = this.activeView;
 		const previousFocus = this.ui.getFocusedComponent();
 
@@ -3336,12 +3375,14 @@ export class InteractiveMode {
 
 		return new Promise((resolve, reject) => {
 			let component: Component & { dispose?(): void };
+			let overlayHandle: OverlayHandle | undefined;
 			let closed = false;
 
 			const close = (result: T) => {
 				if (closed) return;
 				closed = true;
-				if (isOverlay) this.ui.hideOverlay();
+				// A local jobs inspector can be stacked above an asynchronous extension dialog.
+				if (isOverlay) overlayHandle?.hide();
 				else restoreView();
 				resolve(result);
 				try {
@@ -3367,9 +3408,9 @@ export class InteractiveMode {
 							const width = (component as { width?: number }).width;
 							return width ? { width } : undefined;
 						};
-						const handle = this.ui.showOverlay(component, resolveOptions());
+						overlayHandle = this.ui.showOverlay(component, resolveOptions());
 						// Expose handle to caller for visibility control
-						options?.onHandle?.(handle);
+						options?.onHandle?.(overlayHandle);
 					} else {
 						this.activateView(this.createDedicatedView(component), component);
 					}
@@ -3557,6 +3598,13 @@ export class InteractiveMode {
 	private setupGlobalInputRouting(): void {
 		this.globalInputUnsubscribe?.();
 		this.globalInputUnsubscribe = this.ui.addInputListener((data) => {
+			if (this.keybindings.matches(data, "app.jobs.open")) {
+				if (!isKeyRelease(data) && !isKeyRepeat(data)) {
+					if (this.backgroundJobsOverlay?.isFocused()) this.backgroundJobsInspector?.handleInput(data);
+					else this.showBackgroundJobsInspector();
+				}
+				return { consume: true };
+			}
 			if (!this.keybindings.matches(data, "app.debug")) return undefined;
 			if (!isKeyRelease(data) && !isKeyRepeat(data)) {
 				this.runKeyAction(() => this.handleDebugCommand());
@@ -3701,6 +3749,13 @@ export class InteractiveMode {
 		this.defaultEditor.onSubmit = async (text: string) => {
 			text = text.trim();
 			if (!text) return;
+
+			// Local inspection never enters prompt admission or the foreground wait queue.
+			if (text === "/jobs") {
+				this.editor.setText("");
+				this.showBackgroundJobsInspector();
+				return;
+			}
 
 			if (this.isDrainViewerActive()) {
 				// Read-only while the remote turn drains: keep the text in the editor
@@ -3974,6 +4029,69 @@ export class InteractiveMode {
 		});
 	}
 
+	private subscribeToBackgroundJobs(session: AgentSession): void {
+		this.unsubscribeBackgroundJobs?.();
+		const source = session.backgroundJobs;
+		let elapsedTimer: ReturnType<typeof setInterval> | undefined;
+		const coalescer = new StreamingRenderCoalescer<void>(() => {
+			if (this.session !== session || this.isShuttingDown) return;
+			const jobs = source.list();
+			const launchJobs = new Map(jobs.map((job) => [job.toolCallId, job]));
+			const activeJobs = jobs.filter((job) => job.status === "running" || job.status === "cancelling");
+			const activeToolCalls = new Set(activeJobs.map((job) => job.toolCallId));
+			// Settled launch cards survive reconstruction, but no longer need live invalidation.
+			// Retain only one launch per accessible manager record, not every jobs inspection.
+			for (const [toolCallId, binding] of this.liveBackgroundJobTools) {
+				const { component } = binding;
+				const launchJob = launchJobs.get(toolCallId);
+				if (launchJob) {
+					if (!binding.settled) component.invalidate();
+					binding.settled = launchJob.endedAt !== undefined;
+				} else if (this.pendingTools.has(toolCallId)) {
+					component.invalidate();
+				} else {
+					if (binding.settled !== undefined) {
+						component.invalidate();
+						component.dispose();
+					}
+					this.liveBackgroundJobTools.delete(toolCallId);
+				}
+			}
+			this.backgroundJobsStatus.invalidate();
+			this.ui.requestRender();
+			if (activeToolCalls.size > 0 && elapsedTimer === undefined) {
+				elapsedTimer = setInterval(() => coalescer.update(undefined), 1000);
+				elapsedTimer.unref();
+			} else if (activeToolCalls.size === 0 && elapsedTimer !== undefined) {
+				clearInterval(elapsedTimer);
+				elapsedTimer = undefined;
+			}
+		});
+		this.backgroundJobsRenderCoalescer = coalescer;
+		const unsubscribe = source.subscribe(() => {
+			// Release settled bindings immediately on grant/branch changes or eviction, even
+			// if access returns before the next coalesced repaint.
+			const accessibleToolCalls = new Set(source.list().map((job) => job.toolCallId));
+			for (const [toolCallId, binding] of this.liveBackgroundJobTools) {
+				if (binding.settled && !accessibleToolCalls.has(toolCallId)) {
+					binding.component.invalidate();
+					binding.component.dispose();
+					this.liveBackgroundJobTools.delete(toolCallId);
+				}
+			}
+			coalescer.update(undefined);
+		});
+		this.unsubscribeBackgroundJobs = () => {
+			unsubscribe();
+			coalescer.dispose();
+			clearInterval(elapsedTimer);
+			this.backgroundJobsRenderCoalescer = undefined;
+			for (const { component } of this.liveBackgroundJobTools.values()) component.dispose();
+			this.liveBackgroundJobTools.clear();
+		};
+		coalescer.update(undefined);
+	}
+
 	private async handleEvent(event: AgentSessionEvent): Promise<void> {
 		if (!this.isInitialized) {
 			await this.init();
@@ -4167,6 +4285,9 @@ export class InteractiveMode {
 					this.chatContainer.addChild(component);
 					this.pendingTools.set(event.toolCallId, component);
 				}
+				if (event.toolName === "bash" || event.toolName === "subagent" || event.toolName === "jobs") {
+					this.liveBackgroundJobTools.set(event.toolCallId, { component });
+				}
 				component.markExecutionStarted();
 				this.ui.requestRender();
 				break;
@@ -4186,6 +4307,12 @@ export class InteractiveMode {
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
 					this.pendingTools.delete(event.toolCallId);
+					if (event.toolName === "jobs") {
+						// Returned inspection snapshots do not follow worker updates.
+						this.liveBackgroundJobTools.delete(event.toolCallId);
+					} else if (this.liveBackgroundJobTools.has(event.toolCallId)) {
+						this.backgroundJobsRenderCoalescer?.update(undefined);
+					}
 					this.ui.requestRender();
 				}
 				break;
@@ -4496,7 +4623,12 @@ export class InteractiveMode {
 		sessionContext: SessionContext,
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
+		this.backgroundJobsRenderCoalescer?.flush();
+		const liveBackgroundJobTools = new Map(this.liveBackgroundJobTools);
+		// Pending waits have live render state too. Re-register them below instead of disposing them.
+		for (const toolCallId of liveBackgroundJobTools.keys()) this.pendingTools.delete(toolCallId);
 		this.disposePendingTools();
+		this.liveBackgroundJobTools.clear();
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 
 		if (options.updateFooter) {
@@ -4511,18 +4643,27 @@ export class InteractiveMode {
 				// Render tool call components
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
-						const component = new ToolExecutionComponent(
-							content.name,
-							content.id,
-							content.arguments,
-							{
-								showImages: this.settingsManager.getShowImages(),
-								imageWidthCells: this.settingsManager.getImageWidthCells(),
-							},
-							this.getRegisteredToolDefinition(content.name),
-							this.ui,
-							this.sessionManager.getCwd(),
-						);
+						// Reuse this runtime's retained launch cards across compaction/display rebuilds.
+						// Other rows use replay options rather than live progress.
+						const liveCard = liveBackgroundJobTools.get(content.id);
+						const component =
+							liveCard?.component ??
+							new ToolExecutionComponent(
+								content.name,
+								content.id,
+								content.arguments,
+								{
+									showImages: this.settingsManager.getShowImages(),
+									imageWidthCells: this.settingsManager.getImageWidthCells(),
+								},
+								this.getRegisteredToolDefinition(content.name),
+								this.ui,
+								this.sessionManager.getCwd(),
+							);
+						if (liveCard) {
+							this.liveBackgroundJobTools.set(content.id, liveCard);
+							liveBackgroundJobTools.delete(content.id);
+						}
 						component.setExpanded(this.toolOutputExpanded);
 						this.chatContainer.addChild(component);
 
@@ -4556,6 +4697,7 @@ export class InteractiveMode {
 			}
 		}
 
+		for (const { component } of liveBackgroundJobTools.values()) component.dispose();
 		for (const [toolCallId, component] of renderedPendingTools) {
 			this.pendingTools.set(toolCallId, component);
 		}
@@ -4708,6 +4850,9 @@ export class InteractiveMode {
 	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
+		this.dismissBackgroundJobsInspector?.();
+		this.unsubscribeBackgroundJobs?.();
+		this.unsubscribeBackgroundJobs = undefined;
 		// Keep signal handlers registered until terminal cleanup has completed.
 		// `signal-exit` checks the listener list during the same SIGTERM/SIGHUP
 		// dispatch and re-sends the signal if only its own listeners remain.
@@ -4899,6 +5044,11 @@ export class InteractiveMode {
 	private async handleFollowUp(): Promise<void> {
 		const text = (this.editor.getExpandedText?.() ?? this.editor.getText()).trim();
 		if (!text) return;
+		if (text === "/jobs") {
+			this.editor.setText("");
+			this.showBackgroundJobsInspector();
+			return;
+		}
 
 		// Queue input during compaction (extension commands execute immediately)
 		if (this.session.isCompacting) {
@@ -5689,6 +5839,9 @@ export class InteractiveMode {
 	}
 
 	private activateView(view: ActiveViewDescriptor, focus: Component | null, forceRender = true): void {
+		// A dedicated view must never receive input behind the jobs overlay.
+		if (focus === this.backgroundJobsInspector) focus = this.editor;
+		this.dismissBackgroundJobsInspector?.();
 		this.ui.clear();
 		for (const component of view.regularComponents) this.ui.addChild(component);
 		if (isViewportTUI(this.ui)) this.ui.setLayoutRoot(view.fullscreenRoot);
@@ -5715,6 +5868,7 @@ export class InteractiveMode {
 	private showSelector(
 		create: (done: () => void) => { component: Component; focus: Component; dispose?: () => void },
 	): void {
+		this.dismissBackgroundJobsInspector?.();
 		this.dismissSubagentInspector?.();
 		const previousView = this.activeView;
 		const previousFocus = this.ui.getFocusedComponent();
@@ -5738,6 +5892,48 @@ export class InteractiveMode {
 			return;
 		}
 		this.activateView(this.createDedicatedView(component), created.focus);
+	}
+
+	private showBackgroundJobsInspector(): void {
+		if (this.isShuttingDown || this.sessionRenderSuspension) return;
+		if (this.backgroundJobsOverlay) {
+			this.backgroundJobsOverlay.focus();
+			this.backgroundJobsInspector?.refresh();
+			return;
+		}
+		let closed = false;
+		let overlay: OverlayHandle | undefined;
+		const inspector = new BackgroundJobsInspector(this.session.backgroundJobs, {
+			getHeight: () => Math.max(1, this.ui.terminal.rows - 2),
+			requestRender: () => this.ui.requestRender(),
+			onClose: () => close(),
+		});
+		const close = () => {
+			if (closed) return;
+			closed = true;
+			inspector.dispose();
+			// Remove only this overlay; another dialog can be stacked above it.
+			overlay?.hide();
+			if (this.backgroundJobsInspector === inspector) {
+				this.backgroundJobsInspector = undefined;
+				this.backgroundJobsOverlay = undefined;
+				this.dismissBackgroundJobsInspector = undefined;
+			}
+			this.ui.requestRender();
+		};
+		try {
+			overlay = this.ui.showOverlay(inspector, {
+				width: "100%",
+				maxHeight: "100%",
+				margin: { top: 1, bottom: 1, left: 0, right: 0 },
+			});
+		} catch (error) {
+			inspector.dispose();
+			throw error;
+		}
+		this.backgroundJobsInspector = inspector;
+		this.backgroundJobsOverlay = overlay;
+		this.dismissBackgroundJobsInspector = close;
 	}
 
 	private showSubagentInspector(): void {
@@ -7841,6 +8037,7 @@ export class InteractiveMode {
 		await new Promise((resolve) => process.nextTick(resolve));
 
 		const dismissReloadBox = (editor: Component) => {
+			this.dismissBackgroundJobsInspector?.();
 			this.editorContainer.clear();
 			this.editorContainer.addChild(editor);
 			this.ui.setFocus(editor);
@@ -8498,6 +8695,7 @@ export class InteractiveMode {
 		const dequeue = this.getAppKeyDisplay("app.message.dequeue");
 		const pasteImage = this.getAppKeyDisplay("app.clipboard.pasteImage");
 		const openSubagents = this.getAppKeyDisplay("app.subagents.open");
+		const openJobs = this.getAppKeyDisplay("app.jobs.open");
 
 		const sections: HotkeySection[] = [
 			{
@@ -8513,6 +8711,7 @@ export class InteractiveMode {
 					{ key: togglePlanPane, action: "Switch conversation / plan pane focus" },
 					{ key: cycleThinkingLevel, action: "Cycle thinking level" },
 					{ key: openSubagents, action: "Switch to subagent conversations" },
+					{ key: openJobs, action: "Inspect background jobs" },
 				],
 			},
 			{
@@ -8567,6 +8766,7 @@ export class InteractiveMode {
 					{ key: dequeue, action: "Restore queued messages" },
 					{ key: pasteImage, action: "Paste image from clipboard" },
 					{ key: openSubagents, action: "Switch to subagent conversations" },
+					{ key: `${openJobs} / /jobs`, action: "Inspect background jobs without interrupting work" },
 					{ key: "/", action: "Slash commands" },
 					{ key: "!", action: "Run bash command" },
 					{ key: "!!", action: "Run bash command (excluded from context)" },
@@ -9453,6 +9653,9 @@ export class InteractiveMode {
 	}
 
 	stop(fullscreenExitOutput = this.settingsManager.getFullscreenExitOutput()): void {
+		this.dismissBackgroundJobsInspector?.();
+		this.unsubscribeBackgroundJobs?.();
+		this.unsubscribeBackgroundJobs = undefined;
 		this.clearTurnDoneAlertTimer();
 		this.stopWorkingElapsedTicker();
 		this.streamingRenderCoalescer?.dispose();

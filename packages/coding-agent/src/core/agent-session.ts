@@ -76,7 +76,7 @@ import { resolvePath } from "../utils/paths.ts";
 import { PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE } from "../utils/private-files.ts";
 import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
-import { BACKGROUND_JOB_NOTIFICATION_TYPE, BackgroundJobManager } from "./background-jobs.ts";
+import { BACKGROUND_JOB_NOTIFICATION_TYPE, BackgroundJobManager, type BackgroundJobSource } from "./background-jobs.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { cloneCanonicalData } from "./canonical-data.ts";
 import { compactContext } from "./compaction/context-compaction.ts";
@@ -2794,6 +2794,11 @@ export class AgentSession {
 	/** Whether the session is processing a response or a session-level continuation. */
 	get isStreaming(): boolean {
 		return this._agentConversationMutationInFlight;
+	}
+
+	/** Local UI access to this runtime's branch-scoped background jobs. */
+	get backgroundJobs(): BackgroundJobSource {
+		return this._backgroundJobs;
 	}
 
 	/** Whether session-owned background jobs are running or still cancelling. */

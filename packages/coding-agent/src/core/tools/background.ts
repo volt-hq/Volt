@@ -1,11 +1,18 @@
 import type { AgentToolResult } from "@hansjm10/volt-agent-core";
 import type { JsonObject } from "@hansjm10/volt-ai";
-import { Text } from "@hansjm10/volt-tui";
+import { createRenderFrame, Text, wrapTextWithAnsi } from "@hansjm10/volt-tui";
 import { type Static, type TObject, type TProperties, Type } from "typebox";
 import type { BackgroundJobManager, BackgroundJobSnapshot, BackgroundToolName } from "../background-jobs.ts";
 import { cloneCanonicalData } from "../canonical-data.ts";
 import type { ToolDefinition, ToolRenderContext } from "../extensions/types.ts";
 import { withBackgroundCleanup } from "./background-cleanup.ts";
+import {
+	BackgroundJobView,
+	backgroundJobText,
+	findBackgroundJob,
+	getBackgroundJobSnapshot,
+	renderBackgroundJobCard,
+} from "./background-render.ts";
 
 const backgroundParameter = Type.Optional(
 	Type.Boolean({
@@ -141,19 +148,62 @@ export function withBackgroundJobs<T extends TProperties, TDetails, TState>(
 			});
 			return backgroundJobResult(snapshot);
 		},
-		renderCall: definition.renderCall
-			? (args, theme, context) =>
-					definition.renderCall!(args as OriginalArgs, theme, context as ToolRenderContext<TState, OriginalArgs>)
-			: undefined,
+		renderCall(args, theme, context) {
+			const input = args as Record<string, unknown>;
+			if (input.background === true) {
+				return new BackgroundJobView((width) => {
+					if (!context.isPartial) return createRenderFrame([]);
+					const label =
+						typeof input.command === "string"
+							? input.command
+							: typeof input.task === "string"
+								? input.task
+								: "Subagent batch";
+					return createRenderFrame(
+						wrapTextWithAnsi(
+							`${theme.bold(theme.fg("toolTitle", "Background job"))} · ${context.executionStarted ? "Starting" : "Preparing"}\n${backgroundJobText(label)}`,
+							width,
+						),
+					);
+				});
+			}
+			return definition.renderCall
+				? definition.renderCall(args as OriginalArgs, theme, context as ToolRenderContext<TState, OriginalArgs>)
+				: new Text(theme.bold(theme.fg("toolTitle", definition.label)), 0, 0);
+		},
 		renderResult(result, renderOptions, theme, context) {
-			if (result.details && typeof result.details === "object" && "backgroundJob" in result.details) {
-				return new Text(
-					result.content
-						.filter((part) => part.type === "text")
-						.map((part) => part.text)
-						.join("\n"),
-					0,
-					0,
+			const snapshot = getBackgroundJobSnapshot(result.details);
+			if (snapshot) {
+				const current = context.executionStarted ? findBackgroundJob(options.manager, snapshot.id) : undefined;
+				const cache = !current || current.endedAt !== undefined;
+				const input = context.args as Record<string, unknown>;
+				const label =
+					typeof input.command === "string"
+						? input.command
+						: typeof input.task === "string"
+							? input.task
+							: undefined;
+				return new BackgroundJobView((width) => {
+					const live = cache ? current : findBackgroundJob(options.manager, snapshot.id);
+					return renderBackgroundJobCard(live ?? snapshot, width, theme, {
+						expanded: renderOptions.expanded,
+						historical: !live,
+						label,
+					});
+				}, cache);
+			}
+			if ((context.args as Record<string, unknown>).background === true && context.isError) {
+				const output = result.content
+					.filter((part) => part.type === "text")
+					.map((part) => part.text)
+					.join("\n");
+				return new BackgroundJobView((width) =>
+					createRenderFrame(
+						wrapTextWithAnsi(
+							theme.fg("error", `Background job failed to start\n${backgroundJobText(output)}`),
+							width,
+						),
+					),
 				);
 			}
 			return definition.renderResult
