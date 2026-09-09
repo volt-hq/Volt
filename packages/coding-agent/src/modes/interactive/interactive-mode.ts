@@ -7880,6 +7880,7 @@ export class InteractiveMode {
 
 	private showOAuthLoginSelect(dialog: LoginDialogComponent, prompt: OAuthSelectPrompt): Promise<string | undefined> {
 		return new Promise((resolve) => {
+			this.dismissBackgroundJobsInspector?.();
 			const previousView = this.activeView;
 			const previousFocus = this.ui.getFocusedComponent();
 			const restoreDialog = () => this.activateView(previousView, previousFocus ?? dialog);

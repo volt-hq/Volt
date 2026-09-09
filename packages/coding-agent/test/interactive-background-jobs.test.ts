@@ -45,6 +45,10 @@ type InteractiveTestAccess = {
 	setupKeyHandlers(): void;
 	setupEditorSubmitHandler(): void;
 	showExtensionConfirm(title: string, message: string): Promise<boolean>;
+	showOAuthLoginSelect(
+		dialog: Component,
+		prompt: { message: string; options: { id: string; label: string }[] },
+	): Promise<string | undefined>;
 	showExtensionCustom(
 		factory: (ui: TUI, theme: unknown, keys: unknown, done: () => void) => Component | Promise<Component>,
 		options: { overlay: boolean },
@@ -369,6 +373,40 @@ describe("interactive background jobs", () => {
 			close();
 			await extension;
 			expect(access.ui.getFocusedComponent()).toBe(access.editor);
+		},
+	);
+
+	it.each([
+		["regular", false],
+		["regular", true],
+		["fullscreen", false],
+		["fullscreen", true],
+	] as const)(
+		"restores login input after account selection interrupts jobs inspection (%s, cancel: %s)",
+		async (tuiMode, cancel) => {
+			const { access, terminal, jobs, job } = await createFixture(tuiMode);
+			const input = vi.fn();
+			const dialog = Object.assign(new Text("Waiting for login input", 0, 0), { handleInput: input });
+			access.activateView({ regularComponents: [dialog], fullscreenRoot: dialog }, dialog);
+			terminal.sendInput("\x1bj");
+			await terminal.waitForRender();
+			expect(access.ui.getFocusedComponent()).toBeInstanceOf(BackgroundJobsInspector);
+			const selected = access.showOAuthLoginSelect(dialog, {
+				message: "Choose an account",
+				options: [{ id: "first", label: "First account" }],
+			});
+			await terminal.waitForRender();
+			expect(access.backgroundJobsInspector).toBeUndefined();
+			expect(terminal.getViewport().join("\n")).toContain("Choose an account");
+			terminal.sendInput(cancel ? "\x1b" : "\r");
+			expect(await selected).toBe(cancel ? undefined : "first");
+			await terminal.waitForRender();
+			expect(access.ui.getFocusedComponent()).toBe(dialog);
+			terminal.sendInput("login input");
+			terminal.sendInput("\x1b");
+			expect(input).toHaveBeenCalledWith("login input");
+			expect(input).toHaveBeenCalledWith("\x1b");
+			expect(jobs.get(job.id).status).toBe("running");
 		},
 	);
 
