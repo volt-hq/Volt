@@ -228,6 +228,7 @@ describe("package commands", () => {
 	});
 
 	it("lists active profile packages", async () => {
+		mkdirSync(join(projectDir, ".agents", "skills"), { recursive: true });
 		writeFileSync(
 			join(agentDir, "settings.json"),
 			JSON.stringify({
@@ -238,7 +239,7 @@ describe("package commands", () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
 		try {
-			await expect(main(["list", "--profile", "work"])).resolves.toBeUndefined();
+			await expect(main(["list", "--profile", "work", "--no-approve"])).resolves.toBeUndefined();
 
 			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
 			expect(stdout).toContain("npm:@profile/pkg");
@@ -250,6 +251,7 @@ describe("package commands", () => {
 	});
 
 	it("removes packages from the active global profile", async () => {
+		mkdirSync(join(projectDir, ".agents", "skills"), { recursive: true });
 		writeFileSync(
 			join(agentDir, "settings.json"),
 			JSON.stringify(
@@ -266,7 +268,7 @@ describe("package commands", () => {
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
 		try {
-			await expect(main(["remove", packageDir, "--profile", "work"])).resolves.toBeUndefined();
+			await expect(main(["remove", packageDir, "--profile", "work", "--no-approve"])).resolves.toBeUndefined();
 
 			const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as {
 				packages?: string[];
@@ -284,6 +286,7 @@ describe("package commands", () => {
 	});
 
 	it("does not uninstall an inherited global package removed only by an active profile", async () => {
+		mkdirSync(join(projectDir, ".agents", "skills"), { recursive: true });
 		writeFileSync(
 			join(agentDir, "settings.json"),
 			JSON.stringify(
@@ -304,7 +307,7 @@ describe("package commands", () => {
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
 		try {
-			await expect(main(["remove", "npm:@base/pkg", "--profile", "work"])).resolves.toBeUndefined();
+			await expect(main(["remove", "npm:@base/pkg", "--profile", "work", "--no-approve"])).resolves.toBeUndefined();
 
 			const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as {
 				packages?: string[];

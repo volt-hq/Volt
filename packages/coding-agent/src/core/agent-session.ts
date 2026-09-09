@@ -45,6 +45,7 @@ import type {
 import { AgentHarness } from "@hansjm10/volt-agent-core";
 import { NodeExecutionEnv } from "@hansjm10/volt-agent-core/node";
 import type {
+	Api,
 	AssistantMessage,
 	ImageContent,
 	JsonObject,
@@ -75,11 +76,12 @@ import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { cloneCanonicalData } from "./canonical-data.ts";
+import { compactContext } from "./compaction/context-compaction.ts";
 import {
+	type CompactionPreparation,
 	type CompactionResult,
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
-	compact,
 	estimateContextTokens,
 	estimateMessagesTokens,
 	generateBranchSummary,
@@ -166,9 +168,11 @@ import type {
 	ClientInputCommand,
 	ClientInputRecord,
 	CompactionEntry,
+	SessionEntry,
 	SessionManager,
 } from "./session-manager.ts";
 import {
+	buildSessionContext,
 	CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES,
 	createClientInputSemanticDigest,
 	getLatestCompactionEntry,
@@ -579,7 +583,7 @@ export class AgentSessionConstructionCleanupError extends AggregateError {}
 
 /** Standard thinking levels */
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-const MAX_COMPACTION_SUMMARY_RETRIES = 3;
+const MAX_COMPACTION_SUMMARY_RETRIES = 2;
 const MAX_COMPACTION_RETRY_DELAY_MS = 30_000;
 
 // ============================================================================
@@ -600,6 +604,7 @@ export class AgentSession {
 	private readonly _harnessSessionStorage: SessionManagerHarnessStorage;
 	private readonly _streamFn: StreamFn;
 	private readonly _toolProgressDiagnostics: ToolProgressDiagnostics;
+	private readonly _convertToLlm: AgentSessionConfig["convertToLlm"];
 	/** Synchronously staged provider policy; Harness publishes it through its ordered configuration lane. */
 	private _streamOptions: AgentHarnessStreamOptions;
 	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
@@ -756,6 +761,7 @@ export class AgentSession {
 			resolvePath(config.agentDir ?? getAgentDir()),
 			() => this.sessionId,
 		);
+		this._convertToLlm = config.convertToLlm;
 		this._harnessSessionStorage = new SessionManagerHarnessStorage(
 			config.sessionManager,
 			() => this._canonicalProducerRetired,
@@ -769,8 +775,12 @@ export class AgentSession {
 			),
 			...(config.model === undefined ? {} : { model: config.model }),
 			thinkingLevel: config.thinkingLevel,
-			streamFn: async (...args) => {
-				const stream = await config.streamFn(...args);
+			streamFn: async (model, context, options) => {
+				const stream = await config.streamFn(
+					model,
+					context,
+					this._activeCompaction ? { ...options, maxRetries: 0 } : options,
+				);
 				this._toolProgressDiagnostics.setQueueMetricsReader(() => stream.getQueueMetrics());
 				return stream;
 			},
@@ -5361,13 +5371,42 @@ export class AgentSession {
 		};
 	}
 
-	private _getSummarizationThinkingLevel(): ThinkingLevel | undefined {
-		if (!this.model?.reasoning) {
-			return undefined;
-		}
-
-		const level = clampThinkingLevel(this.model, "minimal");
-		return level === "off" ? undefined : level;
+	private _generateCompaction(
+		preparation: CompactionPreparation,
+		model: Model<Api>,
+		pathEntries: SessionEntry[],
+		operation: AgentHarnessStructuralOperationContext,
+		customInstructions?: string,
+	): Promise<CompactionResult> {
+		const firstKeptIndex = pathEntries.findIndex((entry) => entry.id === preparation.firstKeptEntryId);
+		const retainedCount = pathEntries
+			.slice(firstKeptIndex)
+			.filter(
+				(entry) =>
+					entry.type === "message" ||
+					entry.type === "custom_message" ||
+					(entry.type === "branch_summary" && entry.summary),
+			).length;
+		const messages = buildSessionContext(pathEntries).messages;
+		// Keep the full rebuilt conversation warm, including the latest response.
+		// Describe the retained suffix only in the appended checkpoint instruction.
+		return compactContext(preparation, model, {
+			sourceMessageCount: messages.length,
+			retainedMessageCount: retainedCount,
+			context: async (signal) => {
+				const transformed = await this._extensionRunner.emitContext(cloneAgentMessages(messages));
+				signal.throwIfAborted();
+				const llmMessages = await this._convertToLlm(transformed);
+				signal.throwIfAborted();
+				return { systemPrompt: this.systemPrompt, tools: this._harness.getActiveTools(), messages: llmMessages };
+			},
+			streamFn: operation.streamFn,
+			signal: operation.signal,
+			thinkingLevel: this.thinkingLevel,
+			thinkingBudgets: this._harness.getStreamOptions().thinkingBudgets,
+			retry: this._getSummarizationRetryOptions(),
+			customInstructions,
+		});
 	}
 
 	/**
@@ -5536,17 +5575,12 @@ export class AgentSession {
 			} else {
 				// Generate compaction result
 				assertConversationGenerationCurrent?.();
-				const result = await compact(
+				const result = await this._generateCompaction(
 					preparation,
 					model,
-					undefined,
-					undefined,
+					pathEntries,
+					operation,
 					customInstructions,
-					operation.signal,
-					this._getSummarizationThinkingLevel(),
-					operation.streamFn,
-					undefined,
-					this._getSummarizationRetryOptions(),
 				);
 				assertConversationGenerationCurrent?.();
 				summary = result.summary;
@@ -5891,18 +5925,7 @@ export class AgentSession {
 			} else {
 				// Generate compaction result
 				assertConversationCurrent();
-				const compactResult = await compact(
-					preparation,
-					model,
-					undefined,
-					undefined,
-					undefined,
-					operation.signal,
-					this._getSummarizationThinkingLevel(),
-					operation.streamFn,
-					undefined,
-					this._getSummarizationRetryOptions(),
-				);
+				const compactResult = await this._generateCompaction(preparation, model, pathEntries, operation);
 				assertConversationCurrent();
 				summary = compactResult.summary;
 				firstKeptEntryId = compactResult.firstKeptEntryId;

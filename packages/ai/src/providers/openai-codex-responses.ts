@@ -37,6 +37,8 @@ import type { AssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { createAssistantMessageDiagnostic, formatThrownValue } from "../utils/diagnostics.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
+import { getProviderEnvValue } from "../utils/provider-env.ts";
+import { type CodexRequestDispatch, createCodexRequestDiagnostic } from "./openai-codex-request-diagnostics.ts";
 import { getFastInferenceServiceTier } from "./openai-fast-inference.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
@@ -215,6 +217,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 	options = { ...options, signal: normalizer.signal };
 	const timestamp = Date.now();
 	const pendingDiagnostics: AssistantMessageDiagnostic[] = [];
+	const requestDiagnostics: Promise<AssistantMessageDiagnostic | undefined>[] = [];
 	let started = false;
 	const start = () => {
 		if (started) return;
@@ -237,6 +240,11 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			normalizer.push({ type: "meta", patch: { diagnostics: [diagnostic] } });
 		} else {
 			pendingDiagnostics.push(diagnostic);
+		}
+	};
+	const flushRequestDiagnostics = async () => {
+		for (const diagnostic of await Promise.all(requestDiagnostics.splice(0))) {
+			if (diagnostic) addDiagnostic(diagnostic);
 		}
 	};
 
@@ -271,6 +279,22 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			const idleTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
 			const transport = options?.transport || "auto";
+			const diagnosticsEnabled =
+				(options?.env?.VOLT_CODEX_REQUEST_DIAGNOSTICS ?? getProviderEnvValue("VOLT_CODEX_REQUEST_DIAGNOSTICS")) ===
+				"1";
+			const recordRequest = diagnosticsEnabled
+				? (wireJson: string, dispatch: CodexRequestDispatch): void => {
+						requestDiagnostics.push(
+							createCodexRequestDiagnostic(
+								bodyJson,
+								wireJson,
+								transport,
+								requestDiagnostics.length + 1,
+								dispatch,
+							).catch(() => undefined),
+						);
+					}
+				: undefined;
 			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(transportSessionId);
 			if (websocketDisabledForSession) {
 				recordWebSocketSseFallback(transportSessionId);
@@ -293,7 +317,9 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						websocketConnectTimeoutMs,
 						cacheSessionId,
 						options,
+						recordRequest,
 					);
+					if (requestDiagnostics.length > 0) await flushRequestDiagnostics();
 
 					if (options?.signal?.aborted) {
 						throw new Error("Request was aborted");
@@ -343,6 +369,10 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					// Keep caller/limit cancellation connected through the streamed body.
 					cleanupResponseSignal = combinedSignal.cleanup;
 					try {
+						recordRequest?.(bodyJson, {
+							transport: "sse",
+							continuationReason: transport === "sse" ? "sse_requested" : "websocket_fallback",
+						});
 						response = await fetch(resolveCodexUrl(model.baseUrl), {
 							method: "POST",
 							headers: sseHeaders,
@@ -412,6 +442,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 
 			start();
 			const result = await processStream(response, normalizer, model, options);
+			if (requestDiagnostics.length > 0) await flushRequestDiagnostics();
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -422,6 +453,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 
 			normalizer.push({ type: "done", reason: result.stopReason });
 		} catch (error) {
+			if (requestDiagnostics.length > 0) await flushRequestDiagnostics();
 			start();
 			normalizer.push({
 				type: "error",
@@ -1278,41 +1310,47 @@ function requestBodiesMatchExceptInput(a: RequestBody, b: RequestBody): boolean 
 function getCachedWebSocketInputDelta(
 	body: RequestBody,
 	continuation: CachedWebSocketContinuationState,
-): ResponseInput | undefined {
+): { delta?: ResponseInput; reason: CodexRequestDispatch["continuationReason"] } {
 	if (!requestBodiesMatchExceptInput(body, continuation.lastRequestBody)) {
-		return undefined;
+		return { reason: "non_input_changed" };
 	}
 
 	const currentInput = body.input ?? [];
 	const baseline = [...(continuation.lastRequestBody.input ?? []), ...continuation.lastResponseItems];
 	if (currentInput.length < baseline.length) {
-		return undefined;
+		return { reason: "input_shorter" };
 	}
 
 	const prefix = currentInput.slice(0, baseline.length);
 	if (!responseInputsEqual(prefix, baseline)) {
-		return undefined;
+		return { reason: "input_prefix_changed" };
 	}
 
-	return currentInput.slice(baseline.length);
+	return { delta: currentInput.slice(baseline.length), reason: "eligible" };
 }
 
-function buildCachedWebSocketRequestBody(entry: CachedWebSocketConnection, body: RequestBody): RequestBody {
+function buildCachedWebSocketRequestBody(
+	entry: CachedWebSocketConnection,
+	body: RequestBody,
+): { body: RequestBody; reason: CodexRequestDispatch["continuationReason"] } {
 	const continuation = entry.continuation;
 	if (!continuation) {
-		return body;
+		return { body, reason: "no_previous_response" };
 	}
 
-	const delta = getCachedWebSocketInputDelta(body, continuation);
+	const { delta, reason } = getCachedWebSocketInputDelta(body, continuation);
 	if (!delta || !continuation.lastResponseId) {
 		entry.continuation = undefined;
-		return body;
+		return { body, reason: delta ? "missing_response_id" : reason };
 	}
 
 	return {
-		...body,
-		previous_response_id: continuation.lastResponseId,
-		input: delta,
+		body: {
+			...body,
+			previous_response_id: continuation.lastResponseId,
+			input: delta,
+		},
+		reason: "eligible",
 	};
 }
 
@@ -1341,6 +1379,7 @@ async function processWebSocketStream(
 	websocketConnectTimeoutMs: number | undefined,
 	cacheSessionId: string | undefined,
 	options?: OpenAICodexResponsesOptions,
+	recordRequest?: (wireJson: string, dispatch: CodexRequestDispatch) => void,
 ): Promise<ProcessResponsesStreamResult> {
 	const { socket, entry, reused, release } = await acquireWebSocket(
 		url,
@@ -1356,7 +1395,19 @@ async function processWebSocketStream(
 	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
 	const fullBody = body;
-	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
+	const selection: { body: RequestBody; reason: CodexRequestDispatch["continuationReason"] } =
+		useCachedContext && entry
+			? buildCachedWebSocketRequestBody(entry, fullBody)
+			: {
+					body: fullBody,
+					reason:
+						cacheSessionId === undefined
+							? "cache_disabled"
+							: !useCachedContext
+								? "transport_not_cached"
+								: "connection_not_cached",
+				};
+	const requestBody = selection.body;
 	const stats = options?.sessionId ? getOrCreateWebSocketDebugStats(options.sessionId) : undefined;
 	if (stats) {
 		stats.requests++;
@@ -1376,7 +1427,19 @@ async function processWebSocketStream(
 		}
 	}
 	try {
-		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
+		const wireJson = JSON.stringify({ type: "response.create", ...requestBody });
+		if (recordRequest) {
+			try {
+				recordRequest(wireJson, {
+					transport: "websocket",
+					continuationReason: selection.reason,
+					connectionReused: reused,
+				});
+			} catch {
+				// Diagnostic snapshotting must not change request dispatch or fallback.
+			}
+		}
+		socket.send(wireJson);
 		const result = await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
 				mapCodexEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs)),

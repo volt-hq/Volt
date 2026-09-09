@@ -1,8 +1,25 @@
+import type * as fs from "node:fs";
 import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { isAbsolute, join, relative, sep } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../src/core/trust-manager.ts";
+
+const resourceFixture = vi.hoisted(() => ({ root: undefined as string | undefined }));
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof fs>();
+	return {
+		...actual,
+		existsSync(path: Parameters<typeof actual.existsSync>[0]): boolean {
+			if (resourceFixture.root !== undefined) {
+				if (typeof path !== "string") return false;
+				const fromFixture = relative(resourceFixture.root, path);
+				if (fromFixture === ".." || fromFixture.startsWith(`..${sep}`) || isAbsolute(fromFixture)) return false;
+			}
+			return actual.existsSync(path);
+		},
+	};
+});
 
 describe("ProjectTrustStore", () => {
 	let tempDir: string;
@@ -86,6 +103,9 @@ describe("ProjectTrustStore", () => {
 	});
 
 	it("detects trust-requiring project resources", () => {
+		// Only this fixture's resources participate. The OS temp directory may
+		// itself be below a developer's real ~/.agents/skills ancestor.
+		resourceFixture.root = tempDir;
 		const originalHome = process.env.HOME;
 		process.env.HOME = tempDir;
 		try {
@@ -113,7 +133,11 @@ describe("ProjectTrustStore", () => {
 
 			mkdirSync(join(cwd, ".agents", "skills"), { recursive: true });
 			expect(hasTrustRequiringProjectResources(cwd)).toBe(true);
+			const nested = join(cwd, "nested");
+			mkdirSync(nested);
+			expect(hasTrustRequiringProjectResources(nested)).toBe(true);
 		} finally {
+			resourceFixture.root = undefined;
 			if (originalHome === undefined) {
 				delete process.env.HOME;
 			} else {

@@ -190,7 +190,13 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		let bytes = 64;
 		let frozen = Object.isFrozen(value);
 		for (const key of Object.keys(value)) {
-			const nested = this.measureSize((value as Record<string, unknown>)[key], seen);
+			// Measure retained data without executing accessors in extension metadata.
+			// Accessors are opaque and do not establish a deeply immutable subtree.
+			const descriptor = Object.getOwnPropertyDescriptor(value, key);
+			const nested =
+				descriptor && "value" in descriptor
+					? this.measureSize(descriptor.value, seen)
+					: { bytes: 16, frozen: false };
 			bytes += 32 + key.length * 2 + nested.bytes;
 			frozen &&= nested.frozen;
 			if (bytes > EVENT_STREAM_MAX_QUEUED_BYTES) break;
