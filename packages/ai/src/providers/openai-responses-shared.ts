@@ -449,6 +449,13 @@ export async function processResponsesStream<TApi extends Api>(
 		} else if (event.type === "response.output_item.added") {
 			const item = event.item;
 			if (item.type === "reasoning" || item.type === "message" || item.type === "function_call") {
+				if (item.type === "function_call") {
+					const outputIndex = eventOutputIndex(event);
+					const existingState =
+						(outputIndex === undefined ? undefined : statesByOutputIndex.get(outputIndex)) ??
+						(item.id ? statesByItemId.get(item.id) : undefined);
+					if (existingState?.kind === "function_call" && existingState.ended) continue;
+				}
 				createState(event, item);
 			}
 		} else if (event.type === "response.reasoning_summary_part.added") {
@@ -486,7 +493,7 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.function_call_arguments.delta") {
 			const state = findState(event, "function_call");
-			if (state) {
+			if (state && !state.ended) {
 				updateToolCallIdentity(state, event);
 				normalizer.push({
 					type: "toolcall_delta",
@@ -498,8 +505,9 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.function_call_arguments.done") {
 			const state = findState(event, "function_call");
-			if (state) {
+			if (state && !state.ended) {
 				updateToolCallIdentity(state, event);
+				if (!normalizer.checkToolArgumentsText(state.contentIndex, event.arguments)) break;
 				state.authoritativeArguments = event.arguments;
 				state.name = event.name || state.name;
 			}
@@ -541,15 +549,18 @@ export async function processResponsesStream<TApi extends Api>(
 					state.ended = true;
 				}
 			} else if (item.type === "function_call") {
-				if (item.status === "incomplete" || item.status === "in_progress") sawIncompleteToolCall = true;
 				let state = findState(event, "function_call");
+				// Completion freezes the admitted call and its continuation item together.
+				if (state?.ended) continue;
+				if (item.status === "incomplete" || item.status === "in_progress") sawIncompleteToolCall = true;
 				if (!state) {
 					state = createState(event, item) as Extract<OutputState, { kind: "function_call" }>;
 				}
+				const argumentsJson = item.arguments ?? state.authoritativeArguments ?? "";
+				if (!normalizer.checkToolArgumentsText(state.contentIndex, argumentsJson)) break;
 				state.callId = item.call_id;
 				state.name = item.name;
 				if (item.id) state.itemId = item.id;
-				const argumentsJson = item.arguments ?? state.authoritativeArguments ?? "";
 				state.item = {
 					...item,
 					...(item.id || state.itemId ? { id: item.id ?? state.itemId } : {}),
@@ -562,7 +573,7 @@ export async function processResponsesStream<TApi extends Api>(
 					name: state.name,
 					arguments: {},
 				};
-				if (!state.ended && item.status !== "incomplete" && item.status !== "in_progress") {
+				if (item.status !== "incomplete" && item.status !== "in_progress") {
 					normalizer.push({
 						type: "toolcall_end",
 						contentIndex: state.contentIndex,

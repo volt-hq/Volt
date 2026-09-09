@@ -9,6 +9,7 @@ import type {
 	SimpleStreamOptions,
 	TextContent,
 	ThinkingBudgets,
+	ToolArgumentLimits,
 	Transport,
 } from "@hansjm10/volt-ai";
 import type {
@@ -115,6 +116,8 @@ export interface AgentHarnessStreamOptions {
 	inferenceSpeed?: InferenceSpeed;
 	/** Per-level thinking token budgets. */
 	thinkingBudgets?: ThinkingBudgets;
+	/** Bounds for provider tool-argument generation before execution. */
+	toolArgumentLimits?: ToolArgumentLimits;
 	/** Provider-scoped environment overrides. */
 	env?: ProviderEnv;
 	/** Additional request headers merged with auth and lifecycle headers. */
@@ -141,6 +144,8 @@ export interface AgentHarnessStreamOptionsPatch {
 	inferenceSpeed?: InferenceSpeed | undefined;
 	/** Thinking-budget replacement. */
 	thinkingBudgets?: ThinkingBudgets | undefined;
+	/** Tool-argument limit replacement. Explicit `undefined` clears the configured limits. */
+	toolArgumentLimits?: ToolArgumentLimits | undefined;
 	/** Provider environment patch. `undefined` values delete keys. */
 	env?: Record<string, string | undefined> | undefined;
 	/** Cache-retention patch. Explicit `undefined` clears the configured hint. */

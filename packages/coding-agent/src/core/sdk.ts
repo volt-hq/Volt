@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { AgentHarnessStreamOptions, AgentMessage, StreamFn, ThinkingLevel } from "@hansjm10/volt-agent-core";
-import { clampThinkingLevel, type Message, type Model, streamSimple } from "@hansjm10/volt-ai";
+import { clampThinkingLevel, type Message, type Model, streamSimple, type ToolArgumentLimits } from "@hansjm10/volt-ai";
 import { getAgentDir } from "../config.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import { AgentSession, AgentSessionConstructionCleanupError } from "./agent-session.ts";
@@ -95,6 +95,8 @@ export interface CreateAgentSessionOptions {
 	model?: Model<any>;
 	/** Thinking level. Default: from settings, else 'medium' (clamped to model capabilities) */
 	thinkingLevel?: ThinkingLevel;
+	/** Tool-argument generation limits; supplied values override matching settings fields. */
+	toolArgumentLimits?: ToolArgumentLimits;
 	/** Initial agent workflow mode. Defaults to Build; an existing branch restores its persisted mode. */
 	agentMode?: AgentMode;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
@@ -565,6 +567,7 @@ async function createAgentSessionWithTrackedResources(
 			env,
 			timeoutMs,
 			websocketConnectTimeoutMs,
+			toolArgumentLimits: { ...settingsManager.getToolArgumentLimits(), ...options?.toolArgumentLimits },
 			maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
 			maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
 			headers: mergeProviderAttributionHeaders(
@@ -581,6 +584,7 @@ async function createAgentSessionWithTrackedResources(
 		inferenceSpeed: existingSession.fastMode.enabled ? "fast" : "standard",
 		...(transport === undefined ? {} : { transport }),
 		thinkingBudgets: settingsManager.getThinkingBudgets(),
+		...(options.toolArgumentLimits === undefined ? {} : { toolArgumentLimits: { ...options.toolArgumentLimits } }),
 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 	};
 	// Persist explicit startup overrides and fill any policy dimensions that were

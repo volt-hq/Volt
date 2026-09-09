@@ -204,7 +204,17 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 	context: Context,
 	options?: OpenAICodexResponsesOptions,
 ) => {
-	const normalizer = new AssistantStreamNormalizer();
+	const normalizer = new AssistantStreamNormalizer(options);
+	if (
+		!normalizer.validateConfiguration({
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+		})
+	)
+		return normalizer.stream;
+	options = { ...options, signal: normalizer.signal };
 	const timestamp = Date.now();
 	const pendingDiagnostics: AssistantMessageDiagnostic[] = [];
 	const requestDiagnostics: Promise<AssistantMessageDiagnostic | undefined>[] = [];
@@ -239,6 +249,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 	};
 
 	(async () => {
+		let cleanupResponseSignal: (() => void) | undefined;
 		try {
 			const apiKey = options?.apiKey;
 			if (!apiKey) {
@@ -346,6 +357,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
 
 			for (let attempt = 0; attempt <= maxRetries; attempt++) {
+				cleanupResponseSignal?.();
+				cleanupResponseSignal = undefined;
 				if (options?.signal?.aborted) {
 					throw new Error("Request was aborted");
 				}
@@ -353,6 +366,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				try {
 					const headerTimeout = createSSEHeaderTimeout();
 					const combinedSignal = combineAbortSignals([options?.signal, headerTimeout.signal]);
+					// Keep caller/limit cancellation connected through the streamed body.
+					cleanupResponseSignal = combinedSignal.cleanup;
 					try {
 						recordRequest?.(bodyJson, {
 							transport: "sse",
@@ -368,7 +383,6 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						const timeoutError = headerTimeout.error();
 						throw timeoutError && !options?.signal?.aborted ? timeoutError : error;
 					} finally {
-						combinedSignal.cleanup();
 						headerTimeout.clear();
 					}
 					await options?.onResponse?.(
@@ -447,6 +461,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				errorMessage: error instanceof Error ? error.message : String(error),
 			});
 		} finally {
+			cleanupResponseSignal?.();
 			normalizer.end();
 		}
 	})();
