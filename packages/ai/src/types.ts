@@ -114,7 +114,9 @@ export interface ToolArgumentLimits {
 	maxBytes?: number;
 	/** Maximum aggregate argument bytes across a response. Default: 8 MiB. */
 	maxTotalBytes?: number;
-	/** Absolute preparation deadline per call, unaffected by incoming bytes. Default: 5 minutes. */
+	/** Maximum time without new argument bytes per call. Default: 5 minutes. */
+	maxIdleMs?: number;
+	/** Optional absolute preparation deadline per call, unaffected by incoming bytes. No default. */
 	maxDurationMs?: number;
 }
 

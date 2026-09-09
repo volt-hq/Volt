@@ -5,10 +5,116 @@ import type { JsonObject } from "../src/utils/json-value.ts";
 afterEach(() => vi.useRealTimers());
 
 describe("tool argument generation budgets", () => {
+	it.each([undefined, {}])("allows continuing argument bytes beyond five minutes with defaults %j", (limits) => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+		const failure = vi.fn();
+		const guard = new ToolArgumentGuard(limits, failure);
+		guard.start(0);
+		for (let minute = 0; minute < 10; minute++) {
+			vi.advanceTimersByTime(60_000);
+			expect(guard.append(0, "Document section. ")).toBe(true);
+		}
+		expect(guard.complete(0)).toBe(true);
+		expect(failure).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
+		guard.dispose();
+	});
+
+	it("expires after five minutes without argument bytes by default", () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+		const failure = vi.fn();
+		const guard = new ToolArgumentGuard(undefined, failure);
+		guard.start(0);
+		vi.advanceTimersByTime(300_000);
+		expect(failure).toHaveBeenCalledOnce();
+		expect(failure.mock.calls[0]?.[0].diagnostic.details).toMatchObject({
+			limit: "maxIdleMs",
+			limitValue: 300_000,
+			elapsedMs: 300_000,
+			idleMs: 300_000,
+			bytes: 0,
+		});
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("expires relative to the last nonempty delta despite empty updates", () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+		const failure = vi.fn();
+		const guard = new ToolArgumentGuard({ maxIdleMs: 100 }, failure);
+		guard.start(0);
+		vi.advanceTimersByTime(60);
+		expect(guard.append(0, "x")).toBe(true);
+		vi.advanceTimersByTime(60);
+		expect(guard.append(0, "")).toBe(true);
+		expect(failure).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(40);
+		expect(failure).toHaveBeenCalledOnce();
+		expect(failure.mock.calls[0]?.[0].diagnostic.details).toMatchObject({
+			limit: "maxIdleMs",
+			elapsedMs: 160,
+			idleMs: 100,
+		});
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it.each(["string", "object"] as const)("counts growth in %s replacements as progress", (kind) => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+		const failure = vi.fn();
+		const guard = new ToolArgumentGuard({ maxIdleMs: 100 }, failure);
+		guard.start(0);
+		for (let index = 1; index <= 3; index++) {
+			vi.advanceTimersByTime(60);
+			const value = { text: "x".repeat(index) };
+			expect(kind === "object" ? guard.replaceObject(0, value) : guard.replace(0, JSON.stringify(value))).toBe(true);
+		}
+		vi.advanceTimersByTime(60);
+		const unchanged = { text: "xxx" };
+		expect(kind === "object" ? guard.replaceObject(0, unchanged) : guard.replace(0, JSON.stringify(unchanged))).toBe(
+			true,
+		);
+		vi.advanceTimersByTime(40);
+		expect(failure).toHaveBeenCalledOnce();
+		expect(failure.mock.calls[0]?.[0].diagnostic.details).toMatchObject({
+			limit: "maxIdleMs",
+			elapsedMs: 280,
+			idleMs: 100,
+		});
+	});
+
+	it("does not extend another interleaved call's idle deadline", () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+		const failure = vi.fn();
+		const guard = new ToolArgumentGuard({ maxIdleMs: 100 }, failure);
+		guard.start(0);
+		guard.start(1);
+		vi.advanceTimersByTime(60);
+		expect(guard.append(1, "progress")).toBe(true);
+		vi.advanceTimersByTime(40);
+		expect(failure).toHaveBeenCalledOnce();
+		expect(failure.mock.calls[0]?.[0].diagnostic.details).toMatchObject({ contentIndex: 0, limit: "maxIdleMs" });
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("checks idle expiry when a late delta arrives before the timer callback", () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+		const failure = vi.fn();
+		const guard = new ToolArgumentGuard({ maxIdleMs: 100 }, failure);
+		guard.start(0);
+		const now = vi.spyOn(performance, "now").mockReturnValue(100);
+		try {
+			expect(guard.append(0, "too late")).toBe(false);
+			expect(failure.mock.calls[0]?.[0].diagnostic.details).toMatchObject({ limit: "maxIdleMs", bytes: 0 });
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			now.mockRestore();
+			guard.dispose();
+		}
+	});
+
 	it("expires at the original deadline despite nonempty deltas", () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
 		const failures: ToolArgumentLimitFailure[] = [];
-		const guard = new ToolArgumentGuard({ maxDurationMs: 100 }, (failure) => failures.push(failure));
+		const guard = new ToolArgumentGuard({ maxIdleMs: 25, maxDurationMs: 100 }, (failure) => failures.push(failure));
 		guard.start(0);
 		for (let index = 0; index < 9; index++) {
 			vi.advanceTimersByTime(10);
@@ -100,6 +206,14 @@ describe("tool argument generation budgets", () => {
 		const guard = new ToolArgumentGuard({ maxBytes }, vi.fn());
 		expect(guard.configurationError).toContain("maxBytes");
 		guard.dispose();
+	});
+
+	it.each([0, -1, NaN, Infinity, 0.5, 2_147_483_648])("rejects invalid timeout %s", (value) => {
+		for (const key of ["maxIdleMs", "maxDurationMs"] as const) {
+			const guard = new ToolArgumentGuard({ [key]: value }, vi.fn());
+			expect(guard.configurationError).toContain(key);
+			guard.dispose();
+		}
 	});
 
 	it("cleans all interleaved deadlines on cancellation", () => {

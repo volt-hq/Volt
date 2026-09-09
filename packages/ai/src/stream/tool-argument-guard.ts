@@ -5,11 +5,12 @@ import type { JsonObject } from "../utils/json-value.ts";
 export const DEFAULT_TOOL_ARGUMENT_LIMITS = Object.freeze({
 	maxBytes: 1024 * 1024,
 	maxTotalBytes: 8 * 1024 * 1024,
-	maxDurationMs: 5 * 60 * 1000,
+	maxIdleMs: 5 * 60 * 1000,
 });
 
 interface CallBudget {
 	startedAt: number;
+	lastProgressAt: number;
 	bytes: number;
 	lastHighSurrogate: boolean;
 	events: number;
@@ -23,7 +24,7 @@ export interface ToolArgumentLimitFailure {
 
 /** Counts raw input before it is retained or parsed. Deadlines use a monotonic clock. */
 export class ToolArgumentGuard {
-	readonly limits: Required<ToolArgumentLimits>;
+	readonly limits: Required<Omit<ToolArgumentLimits, "maxDurationMs">> & Pick<ToolArgumentLimits, "maxDurationMs">;
 	readonly configurationError: string | undefined;
 	private readonly calls = new Map<number, CallBudget>();
 	private totalBytes = 0;
@@ -34,12 +35,14 @@ export class ToolArgumentGuard {
 		this.limits = {
 			maxBytes: options?.maxBytes ?? DEFAULT_TOOL_ARGUMENT_LIMITS.maxBytes,
 			maxTotalBytes: options?.maxTotalBytes ?? DEFAULT_TOOL_ARGUMENT_LIMITS.maxTotalBytes,
-			maxDurationMs: options?.maxDurationMs ?? DEFAULT_TOOL_ARGUMENT_LIMITS.maxDurationMs,
+			maxIdleMs: options?.maxIdleMs ?? DEFAULT_TOOL_ARGUMENT_LIMITS.maxIdleMs,
+			...(options?.maxDurationMs === undefined ? {} : { maxDurationMs: options.maxDurationMs }),
 		};
 		this.onFailure = onFailure;
 		for (const [key, value] of Object.entries(this.limits)) {
-			if (!Number.isSafeInteger(value) || value <= 0 || (key === "maxDurationMs" && value > 2_147_483_647)) {
-				this.configurationError = `toolArgumentLimits.${key} must be a positive integer${key === "maxDurationMs" ? " no greater than 2147483647" : ""}`;
+			const isTimeout = key === "maxIdleMs" || key === "maxDurationMs";
+			if (!Number.isSafeInteger(value) || value <= 0 || (isTimeout && value > 2_147_483_647)) {
+				this.configurationError = `toolArgumentLimits.${key} must be a positive integer${isTimeout ? " no greater than 2147483647" : ""}`;
 				break;
 			}
 		}
@@ -47,9 +50,21 @@ export class ToolArgumentGuard {
 
 	start(contentIndex: number): void {
 		if (this.disposed || this.calls.has(contentIndex)) return;
-		const call: CallBudget = { startedAt: performance.now(), bytes: 0, lastHighSurrogate: false, events: 0 };
+		const now = performance.now();
+		const call: CallBudget = { startedAt: now, lastProgressAt: now, bytes: 0, lastHighSurrogate: false, events: 0 };
 		this.calls.set(contentIndex, call);
-		call.timer = setTimeout(() => this.fail(contentIndex, "maxDurationMs"), this.limits.maxDurationMs);
+		this.scheduleDeadline(contentIndex, call);
+	}
+
+	private scheduleDeadline(contentIndex: number, call: CallBudget): void {
+		const deadline = Math.min(
+			call.lastProgressAt + this.limits.maxIdleMs,
+			this.limits.maxDurationMs === undefined ? Infinity : call.startedAt + this.limits.maxDurationMs,
+		);
+		call.timer = setTimeout(() => {
+			// Progress moves the idle deadline without allocating a timer for every delta.
+			if (this.checkDeadline(contentIndex)) this.scheduleDeadline(contentIndex, call);
+		}, deadline - performance.now());
 		// A forgotten standalone preview must not keep a Node process alive.
 		if (typeof call.timer === "object" && "unref" in call.timer) call.timer.unref();
 	}
@@ -64,8 +79,12 @@ export class ToolArgumentGuard {
 		const added = utf8Bytes(text, allowance + correction) - correction;
 		call.bytes += added;
 		this.totalBytes += added;
-		if (text.length > 0) call.lastHighSurrogate = isHighSurrogate(text.charCodeAt(text.length - 1));
-		return this.checkBytes(contentIndex);
+		if (!this.checkBytes(contentIndex) || !this.checkDeadline(contentIndex)) return false;
+		if (text.length > 0) {
+			call.lastHighSurrogate = isHighSurrogate(text.charCodeAt(text.length - 1));
+			call.lastProgressAt = performance.now();
+		}
+		return true;
 	}
 
 	/** A final authoritative string replaces the preview, but cannot refund its consumed budget. */
@@ -92,9 +111,12 @@ export class ToolArgumentGuard {
 		// A pre-serialization inspection checks the prospective size. The ensuing raw
 		// delta accounts for those bytes, so a successful inspection must not charge twice.
 		if (!retain && bytes <= allowance) return this.checkDeadline(contentIndex);
+		const grew = bytes > call.bytes;
 		this.totalBytes += Math.max(0, bytes - call.bytes);
 		call.bytes = Math.max(call.bytes, bytes);
-		return this.checkBytes(contentIndex) && this.checkDeadline(contentIndex);
+		if (!this.checkBytes(contentIndex) || !this.checkDeadline(contentIndex)) return false;
+		if (grew) call.lastProgressAt = performance.now();
+		return true;
 	}
 
 	end(contentIndex: number): void {
@@ -119,8 +141,13 @@ export class ToolArgumentGuard {
 		if (this.disposed) return false;
 		this.start(contentIndex);
 		const call = this.calls.get(contentIndex);
-		if (call && performance.now() - call.startedAt >= this.limits.maxDurationMs) {
+		const now = performance.now();
+		if (call && this.limits.maxDurationMs !== undefined && now - call.startedAt >= this.limits.maxDurationMs) {
 			this.fail(contentIndex, "maxDurationMs");
+			return false;
+		}
+		if (call && now - call.lastProgressAt >= this.limits.maxIdleMs) {
+			this.fail(contentIndex, "maxIdleMs");
 			return false;
 		}
 		return true;
@@ -140,7 +167,8 @@ export class ToolArgumentGuard {
 	}
 
 	private fail(contentIndex: number, limit: keyof Required<ToolArgumentLimits>): void {
-		if (this.disposed) return;
+		const limitValue = this.limits[limit];
+		if (this.disposed || limitValue === undefined) return;
 		const call = this.calls.get(contentIndex);
 		const diagnostic: AssistantMessageDiagnostic = {
 			type: "tool_argument_generation_limit",
@@ -148,16 +176,17 @@ export class ToolArgumentGuard {
 			details: {
 				contentIndex,
 				limit,
-				limitValue: this.limits[limit],
+				limitValue,
 				bytes: call?.bytes ?? 0,
 				totalBytes: this.totalBytes,
 				events: call?.events ?? 0,
 				elapsedMs: call ? Math.max(0, performance.now() - call.startedAt) : 0,
+				idleMs: call ? Math.max(0, performance.now() - call.lastProgressAt) : 0,
 			},
 		};
 		this.dispose();
 		this.onFailure({
-			message: `Tool argument preparation exceeded ${limit} (${this.limits[limit]}). No tools from this response were executed. Retry explicitly or adjust toolArgumentLimits.`,
+			message: `Tool argument preparation exceeded ${limit} (${limitValue}). No tools from this response were executed. Retry explicitly or adjust toolArgumentLimits.`,
 			diagnostic,
 		});
 	}
