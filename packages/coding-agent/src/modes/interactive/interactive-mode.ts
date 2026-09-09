@@ -55,7 +55,6 @@ import {
 	TuiAltScreen,
 	TuiMainScreen,
 	VStack,
-	visibleWidth,
 } from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import { spawn, spawnSync } from "child_process";
@@ -64,7 +63,6 @@ import {
 	APP_TITLE,
 	getAgentDir,
 	getAuthPath,
-	getDebugLogPath,
 	getDocsPath,
 	getShareViewerUrl,
 	isStandaloneBinary,
@@ -199,16 +197,9 @@ import {
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
-import { writeDurableAtomicFileSync } from "../../utils/durable-atomic-write.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
-import {
-	createPrivateTempDirectorySync,
-	ensurePrivateDirectorySync,
-	PRIVATE_DIRECTORY_MODE,
-	PRIVATE_FILE_MODE,
-	writePrivateNewFileSync,
-} from "../../utils/private-files.ts";
+import { createPrivateTempDirectorySync, writePrivateNewFileSync } from "../../utils/private-files.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewVoltVersion, type LatestVoltRelease } from "../../utils/version-check.ts";
@@ -3567,7 +3558,7 @@ export class InteractiveMode {
 		this.globalInputUnsubscribe = this.ui.addInputListener((data) => {
 			if (!this.keybindings.matches(data, "app.debug")) return undefined;
 			if (!isKeyRelease(data) && !isKeyRepeat(data)) {
-				this.handleDebugCommand();
+				this.runKeyAction(() => this.handleDebugCommand());
 			}
 			return { consume: true };
 		});
@@ -3897,7 +3888,7 @@ export class InteractiveMode {
 				return;
 			}
 			if (text === "/debug") {
-				this.handleDebugCommand();
+				this.runKeyAction(() => this.handleDebugCommand());
 				this.editor.setText("");
 				return;
 			}
@@ -4091,6 +4082,7 @@ export class InteractiveMode {
 										content.id,
 										content.arguments,
 										{
+											liveProgress: true,
 											showImages: this.settingsManager.getShowImages(),
 											imageWidthCells: this.settingsManager.getImageWidthCells(),
 										},
@@ -4163,6 +4155,7 @@ export class InteractiveMode {
 						event.toolCallId,
 						event.args,
 						{
+							liveProgress: true,
 							showImages: this.settingsManager.getShowImages(),
 							imageWidthCells: this.settingsManager.getImageWidthCells(),
 						},
@@ -8631,44 +8624,23 @@ export class InteractiveMode {
 		}
 	}
 
-	private handleDebugCommand(): void {
+	private async handleDebugCommand(): Promise<void> {
 		this.quitConfirmation = undefined;
 		this.lastSigintTime = 0;
+		const session = this.session;
+		const canNotify = () => this.isInitialized && !this.isShuttingDown && this.session === session;
 		try {
-			const width = this.ui.terminal.columns;
-			const height = this.ui.terminal.rows;
-			const allLines = this.ui.render(width).lines;
-
-			const debugLogPath = getDebugLogPath();
-			const debugData = [
-				`Debug output at ${new Date().toISOString()}`,
-				`Terminal: ${width}x${height}`,
-				`Total lines: ${allLines.length}`,
-				"",
-				"=== All rendered lines with visible widths ===",
-				...allLines.map((line, idx) => {
-					const vw = visibleWidth(line);
-					const escaped = JSON.stringify(line);
-					return `[${idx}] (w=${vw}) ${escaped}`;
-				}),
-				"",
-				"=== Agent messages (JSONL) ===",
-				...this.session.messages.map((msg) => JSON.stringify(msg)),
-				"",
-			].join("\n");
-
-			ensurePrivateDirectorySync(path.dirname(debugLogPath), { hardenExisting: false });
-			writeDurableAtomicFileSync(debugLogPath, debugData, {
-				directoryMode: PRIVATE_DIRECTORY_MODE,
-				fileMode: PRIVATE_FILE_MODE,
-			});
+			const debugLogPath = await session.captureToolProgressDiagnostics();
+			if (!canNotify()) return;
 			this.chatContainer.addChild(new Spacer(1));
 			this.chatContainer.addChild(
-				new Text(`${theme.fg("accent", "✓ Debug log written")}\n${theme.fg("muted", debugLogPath)}`, 1, 1),
+				new Text(`${theme.fg("accent", "✓ Tool progress captured")}\n${theme.fg("muted", debugLogPath)}`, 1, 1),
 			);
 			this.ui.requestRender();
 		} catch (error) {
-			this.showError(`Failed to capture diagnostics: ${error instanceof Error ? error.message : String(error)}`);
+			if (canNotify()) {
+				this.showError(`Failed to write debug log: ${error instanceof Error ? error.message : String(error)}`);
+			}
 		}
 	}
 
@@ -9059,6 +9031,7 @@ export class InteractiveMode {
 		let streamingRenderCoalescer: StreamingRenderCoalescer<AssistantMessage> | undefined;
 		const pending = new Map<string, ToolExecutionComponent>();
 		const toolOptions = () => ({
+			liveProgress: true,
 			showImages: this.settingsManager.getShowImages(),
 			imageWidthCells: this.settingsManager.getImageWidthCells(),
 		});

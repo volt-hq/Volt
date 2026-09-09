@@ -23,6 +23,8 @@ type EventStreamWaiter<T> = {
 export class EventStream<T, R = T> implements AsyncIterable<T> {
 	private queue: { event: T; bytes: number }[] = [];
 	private queuedBytes = 0;
+	private peakQueuedEvents = 0;
+	private peakQueuedBytes = 0;
 	private readonly frozenSizes = new WeakMap<object, number>();
 	private waiting: EventStreamWaiter<T>[] = [];
 	private done = false;
@@ -102,6 +104,8 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		} else {
 			this.queue.push({ event, bytes });
 			this.queuedBytes += bytes;
+			this.peakQueuedEvents = Math.max(this.peakQueuedEvents, this.queue.length);
+			this.peakQueuedBytes = Math.max(this.peakQueuedBytes, this.queuedBytes);
 		}
 
 		if (completesStream) {
@@ -156,6 +160,23 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 
 	result(): Promise<R> {
 		return this.finalResultPromise;
+	}
+
+	/** Passive measurements of retained events and their conservative representation size. */
+	getQueueMetrics(): {
+		queuedEvents: number;
+		peakQueuedEvents: number;
+		queuedBytes: number;
+		peakQueuedBytes: number;
+		waitingConsumers: number;
+	} {
+		return {
+			queuedEvents: this.queue.length,
+			peakQueuedEvents: this.peakQueuedEvents,
+			queuedBytes: this.queuedBytes,
+			peakQueuedBytes: this.peakQueuedBytes,
+			waitingConsumers: this.waiting.length,
+		};
 	}
 
 	private measureSize(value: unknown, seen: Set<object>): { bytes: number; frozen: boolean } {

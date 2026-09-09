@@ -8,6 +8,41 @@ import {
 } from "../src/utils/event-stream.ts";
 
 describe("EventStream", () => {
+	it("reports live event and byte pressure without consuming events", async () => {
+		const stream = new EventStream<string>(
+			(event) => event === "done",
+			(event) => event,
+		);
+		stream.push("first");
+		const firstBytes = stream.getQueueMetrics().queuedBytes;
+		stream.push("second");
+		const totalBytes = stream.getQueueMetrics().queuedBytes;
+		expect(firstBytes).toBeGreaterThan(0);
+		expect(totalBytes).toBeGreaterThan(firstBytes);
+		expect(stream.getQueueMetrics()).toEqual({
+			queuedEvents: 2,
+			peakQueuedEvents: 2,
+			queuedBytes: totalBytes,
+			peakQueuedBytes: totalBytes,
+			waitingConsumers: 0,
+		});
+		const iterator = stream[Symbol.asyncIterator]();
+		await expect(iterator.next()).resolves.toEqual({ value: "first", done: false });
+		expect(stream.getQueueMetrics().queuedBytes).toBe(totalBytes - firstBytes);
+		await iterator.next();
+		const waiting = iterator.next();
+		expect(stream.getQueueMetrics()).toEqual({
+			queuedEvents: 0,
+			peakQueuedEvents: 2,
+			queuedBytes: 0,
+			peakQueuedBytes: totalBytes,
+			waitingConsumers: 1,
+		});
+		stream.push("done");
+		await waiting;
+		expect(stream.getQueueMetrics().waitingConsumers).toBe(0);
+	});
+
 	it("fails explicitly at the event bound and releases stale events immediately", async () => {
 		const stream = new EventStream<number>(
 			(event) => event === -1,
@@ -15,6 +50,12 @@ describe("EventStream", () => {
 		);
 		for (let index = 0; index < EVENT_STREAM_MAX_QUEUED_EVENTS; index++) stream.push(index);
 		expect(() => stream.push(0)).toThrow(EventStreamOverflowError);
+		expect(stream.getQueueMetrics()).toMatchObject({
+			queuedEvents: 0,
+			queuedBytes: 0,
+			peakQueuedEvents: EVENT_STREAM_MAX_QUEUED_EVENTS,
+		});
+		expect(stream.getQueueMetrics().peakQueuedBytes).toBeLessThanOrEqual(EVENT_STREAM_MAX_QUEUED_BYTES);
 		await expect(stream.result()).rejects.toMatchObject({ code: "event_stream_queue_overflow", limit: "events" });
 		await expect(stream[Symbol.asyncIterator]().next()).rejects.toMatchObject({ limit: "events" });
 		stream.push(-1);
