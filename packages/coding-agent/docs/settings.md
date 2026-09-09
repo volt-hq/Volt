@@ -215,27 +215,30 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 
 ### Tool Argument Generation
 
-Tool argument preparation has independent limits, even while a provider keeps sending data. These limits apply before a tool can execute; they do not change tool execution timeouts or the HTTP idle timeout.
+Tool argument preparation has independent byte limits and an idle timeout. By default, long tool calls can continue while argument bytes arrive. These limits apply before a tool can execute; they do not change tool execution timeouts or the HTTP idle timeout.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `toolArgumentLimits.maxBytes` | integer | `1048576` (1 MiB) | Maximum UTF-8 JSON bytes for one tool call |
 | `toolArgumentLimits.maxTotalBytes` | integer | `8388608` (8 MiB) | Maximum aggregate argument bytes across one provider response |
-| `toolArgumentLimits.maxDurationMs` | integer | `300000` (5 minutes) | Maximum elapsed preparation time for each tool call, including time with continuing deltas |
+| `toolArgumentLimits.maxIdleMs` | integer | `300000` (5 minutes) | Maximum time without new argument bytes for each tool call |
+| `toolArgumentLimits.maxDurationMs` | integer | Disabled | Optional maximum elapsed preparation time for each tool call, including time with continuing deltas |
 
-Values must be positive safe integers; `maxDurationMs` must also be at most `2147483647`. Omitted fields use the defaults. If a limit is exceeded, Volt cancels the provider stream and executes no tools from that response. The failure does not automatically retry; explicitly continue after reviewing the failure or adjusting the limit.
+Nonempty argument deltas reset that call's idle timeout. For providers that send replacement argument objects or strings, growth in argument bytes resets it. Empty deltas, unchanged replacements, and activity on other calls do not reset it. Arguments must still be a complete, valid JSON object before execution.
+
+Values must be positive safe integers; `maxIdleMs` and `maxDurationMs` must also be at most `2147483647`. Omitted fields use the defaults; omit `maxDurationMs` to leave total preparation time uncapped. If you previously configured `maxDurationMs` to accommodate long documents, remove it to use only the idle timeout. If a limit is exceeded, Volt cancels the provider stream and executes no tools from that response. The failure does not automatically retry; explicitly continue after reviewing the failure or adjusting the limit.
 
 ```json
 {
   "toolArgumentLimits": {
     "maxBytes": 2097152,
     "maxTotalBytes": 8388608,
-    "maxDurationMs": 180000
+    "maxIdleMs": 300000
   }
 }
 ```
 
-SDK callers can pass `toolArgumentLimits` to `createAgentSession`; supplied fields override matching settings fields. Direct `stream`/`streamSimple` callers and `AgentHarness` stream options accept the same object.
+Add `"maxDurationMs": 1800000` to opt into a 30-minute total preparation cap per call, in addition to the idle timeout. SDK callers can pass `toolArgumentLimits` to `createAgentSession`; supplied fields override matching settings fields. Direct `stream`/`streamSimple` callers and `AgentHarness` stream options accept the same object.
 
 ### Message Delivery
 

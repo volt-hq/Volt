@@ -20,6 +20,52 @@ async function collect(normalizer: AssistantStreamNormalizer) {
 }
 
 describe("tool generation limits in the provider stream", () => {
+	it("completes a long document that keeps streaming past five minutes with default limits", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+		const normalizer = start();
+		normalizer.push({ type: "toolcall_start", contentIndex: 0, id: "document", name: "write" });
+		normalizer.push({ type: "toolcall_delta", contentIndex: 0, argsTextDelta: '{"path":"design.md","content":"' });
+		const section = "Design section. ".repeat(100);
+		for (let minute = 0; minute < 10; minute++) {
+			vi.advanceTimersByTime(60_000);
+			normalizer.push({ type: "toolcall_delta", contentIndex: 0, argsTextDelta: section });
+		}
+		normalizer.push({ type: "toolcall_delta", contentIndex: 0, argsTextDelta: '"}' });
+		normalizer.push({ type: "toolcall_end", contentIndex: 0 });
+		normalizer.push({ type: "done", reason: "toolUse" });
+		const { events, message } = await collect(normalizer);
+		expect(message.stopReason).toBe("toolUse");
+		expect(message.content[0]).toMatchObject({ arguments: { path: "design.md", content: section.repeat(10) } });
+		expect(message.diagnostics).toBeUndefined();
+		expect(normalizer.signal.aborted).toBe(false);
+		expect(events.filter((event) => event.type === "toolcall_end")).toHaveLength(1);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("aborts stalled argument generation despite empty deltas and unrelated text", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+		const normalizer = start({ toolArgumentLimits: { maxIdleMs: 100 } });
+		normalizer.push({ type: "toolcall_start", contentIndex: 0, id: "document", name: "write" });
+		normalizer.push({ type: "toolcall_delta", contentIndex: 0, argsTextDelta: '{"content":"' });
+		normalizer.push({ type: "text_start", contentIndex: 1 });
+		for (let index = 0; index < 9; index++) {
+			vi.advanceTimersByTime(10);
+			normalizer.push({ type: "toolcall_delta", contentIndex: 0, argsTextDelta: "" });
+			normalizer.push({ type: "text_delta", contentIndex: 1, delta: "Still here. " });
+		}
+		vi.advanceTimersByTime(10);
+		const { events, message } = await collect(normalizer);
+		expect(message.stopReason).toBe("error");
+		expect(message.diagnostics?.[0]).toMatchObject({
+			type: "tool_argument_generation_limit",
+			details: { limit: "maxIdleMs", idleMs: 100 },
+		});
+		expect(normalizer.signal.aborted).toBe(true);
+		expect(events.filter((event) => event.type === "error")).toHaveLength(1);
+		expect(events.some((event) => event.type === "toolcall_end")).toBe(false);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
 	it("terminates a progressing call and aborts its provider signal", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
 		const normalizer = start({ toolArgumentLimits: { maxDurationMs: 100 } });
