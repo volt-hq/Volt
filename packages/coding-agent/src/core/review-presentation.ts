@@ -83,14 +83,20 @@ function compactReview(
 		lines.push("Includes evidence retained from a prior review.");
 	if (incomplete) {
 		const coverage = parsed.coverage;
+		if (parsed.verificationChallenge) lines.push(reviewText(parsed.verificationChallenge));
 		if (!coverage.changedFileInventoryComplete) lines.push("The changed-file inventory is incomplete.");
 		if (coverage.context?.captureStatus === "incomplete") lines.push("Code-host context capture is incomplete.");
 		if (coverage.context && !coverage.context.discoveryInspectionComplete)
 			lines.push("Discovery did not inspect all captured code-host context.");
 		if (coverage.context && !coverage.context.verificationInspectionComplete)
 			lines.push("Verification did not inspect all captured code-host context.");
-		if (uncertain) lines.push("At least one retained finding is uncertain.");
-		lines.push("Independent verification or in-scope coverage is incomplete; see details.");
+		if (uncertain)
+			lines.push("At least one retained finding is uncertain; inspect its evidence before treating it as fixed.");
+		for (const gap of coverage.uncheckedAreas.slice(0, 3)) lines.push(reviewText(gap));
+		if (coverage.uncheckedAreas.length > 3)
+			lines.push(`${coverage.uncheckedAreas.length - 3} more coverage gaps are listed in details.`);
+		if (!parsed.verificationChallenge)
+			lines.push("Next step: inspect the listed gaps or rerun with --focus and a narrower --scope.");
 	}
 	for (const [index, finding] of selected.entries()) {
 		if (finding.status === "fixed" || finding.status === "dismissed") continue;
@@ -107,7 +113,6 @@ function compactReview(
 			? STATIC_REVIEW_LIMITATION
 			: "Runtime validation is not established by this report.",
 	);
-	if (parsed.coverage.failedVerificationAttempts.length) lines.push("Some review tool attempts failed; see details.");
 	if (parsed.coverage.modelReportedLimitations.length) lines.push("Model-reported limits are recorded in details.");
 	// Hard line breaks keep independent status and limitation sentences readable in Markdown.
 	return lines.join("  \n");
@@ -149,7 +154,6 @@ function fullReview(
 		`- File paths observed: ${parsed.coverage.filesInspected.map(reviewText).join(", ") || "none"}`,
 		`- Hunks inspected: ${parsed.coverage.hunksInspected.join(", ") || "none"}`,
 		`- Commands recorded: ${parsed.coverage.commandsRun.join("; ") || "none"}`,
-		`- Failed review tool attempts: ${parsed.coverage.failedVerificationAttempts.join("; ") || "none"}`,
 	];
 	if (parsed.coverage.context) {
 		const context = parsed.coverage.context;

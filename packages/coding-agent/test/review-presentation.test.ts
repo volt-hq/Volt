@@ -244,6 +244,26 @@ describe("review presentation", () => {
 		expect(seed.content).toContain("Status: uncertain");
 	});
 
+	it("shows an unresolved concern, code location, and next step in the collapsed result", () => {
+		const run = record();
+		run.status = "incomplete";
+		run.result!.completionStatus = "incomplete";
+		delete run.result!.overallCorrectness;
+		run.result!.verificationChallenge =
+			"Unverified concern: Reasoning may consume the output allowance.\nNext step: Test a reasoning-only length stop.\nLocation: src/compaction.ts:303-306 (head).";
+		run.result!.coverage.residualRisk.push(run.result!.verificationChallenge);
+		const view = component(run);
+		for (const expanded of [false, true]) {
+			view.setExpanded(expanded);
+			const text = rendered(view).join("\n").replace(/\s+/g, " ");
+			expect(text).toContain("Unverified concern: Reasoning may consume the output allowance.");
+			expect(text).toContain("Next step: Test a reasoning-only length stop.");
+			expect(text).toContain("src/compaction.ts:303-306");
+			expect(text).not.toContain("Overall: correct");
+		}
+		expect(createReviewSeedMessage(run).details.findings).toEqual([]);
+	});
+
 	it("qualifies explicit scope and effective incremental review without inventing coverage totals", () => {
 		const run = record();
 		run.options.scope = ["src/**"];
@@ -264,6 +284,43 @@ describe("review presentation", () => {
 		expect(seed.details.summary).not.toMatch(/33|56|files inspected/i);
 	});
 
+	it.each(["complete", "incomplete"] as const)(
+		"omits attempt diagnostics from a %s report while preserving actionable limits",
+		(completionStatus) => {
+			const run = record();
+			run.result!.completionStatus = completionStatus;
+			const failure = "review_file: File does not exist in the head snapshot: missing.ts";
+			run.result!.coverage.failedVerificationAttempts = [failure];
+			const gap = "Changed hunk was not fully inspected: 0123456789abcdef0123";
+			const challenge = "Review verification model request failed. Retry with another review model.";
+			if (completionStatus === "incomplete") {
+				run.status = "incomplete";
+				delete run.result!.overallCorrectness;
+				run.result!.coverage.uncheckedAreas = [gap];
+				run.result!.verificationChallenge = challenge;
+				run.result!.coverage.residualRisk.push(challenge);
+			}
+			const original = structuredClone(run);
+			const seed = createReviewSeedMessage(run);
+			const view = component(run);
+			for (const expanded of [false, true]) {
+				view.setExpanded(expanded);
+				const text = rendered(view).join("\n").replace(/\s+/g, " ");
+				expect(text).not.toMatch(/review tool attempts|missing\.ts/);
+				expect(text).toContain(STATIC_REVIEW_LIMITATION);
+				if (completionStatus === "incomplete") {
+					expect(text).toContain(gap);
+					expect(text).toContain(challenge);
+					expect(text).not.toContain("Overall: correct");
+				}
+			}
+			for (const text of [seed.content, seed.details.summary]) {
+				expect(text).not.toMatch(/review tool attempts|missing\.ts/);
+			}
+			expect(run).toEqual(original);
+		},
+	);
+
 	it("does not infer static-only, absent attempts, or passing tests from completion/failure arrays or model prose", () => {
 		const run = record();
 		run.result!.coverage.residualRisk = [];
@@ -272,7 +329,7 @@ describe("review presentation", () => {
 		run.result!.coverage.modelReportedLimitations = [STATIC_REVIEW_LIMITATION, "PRIVATE_MODEL_PROSE"];
 		const summary = createReviewSeedMessage(run).details.summary;
 		expect(summary).toContain("Runtime validation is not established by this report.");
-		expect(summary).toContain("Some review tool attempts failed");
+		expect(summary).not.toContain("Some review tool attempts failed");
 		expect(summary).not.toContain(STATIC_REVIEW_LIMITATION);
 		expect(summary).not.toContain("PRIVATE_MODEL_PROSE");
 		expect(summary).not.toMatch(/tests passed|no command|tests failed/i);
