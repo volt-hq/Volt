@@ -77,6 +77,39 @@ On Windows Terminal, Alt+Enter is fullscreen by default. Remap it as described i
 
 Configure delivery in [Settings](settings.md) with `steeringMode` and `followUpMode`.
 
+## Background Jobs
+
+Native `bash` and `subagent` spawning calls accept `background: true`. Volt returns a job ID so the model can continue independent work instead of waiting for the entire tool call. Ordinary calls still wait for completion. This is separate from parallel tool batches, which wait for all calls before the model continues.
+
+```json
+{ "command": "./run-checks.sh", "background": true }
+```
+
+Subagent confirmation is unchanged. The first spawning call returns the registry preflight directly without starting a job. Repeat the exact request with its `confirm` token and `background: true` to start a background single, parallel, or chain job. Child concurrency, budget, tool-policy, and duplicate-request safeguards still apply. Background mode does not apply to registry list/follow/resume operations.
+
+The `jobs` tool controls work owned by the current runtime and branch:
+
+```json
+{ "action": "list" }
+{ "action": "read", "id": "job_..." }
+{ "action": "wait", "id": "job_...", "timeoutMs": 30000 }
+{ "action": "cancel", "id": "job_..." }
+```
+
+- `read` returns the latest output snapshot without consuming it. Output is capped at the last 50 KB or 2000 lines; repeated reads may contain the same text.
+- `wait` waits up to 30 seconds by default, with a configurable integer `timeoutMs` from 0 to 30000. A wait timeout does not cancel the job.
+- `cancel` requests cancellation. Status remains `cancelling` until the worker settles, then becomes `cancelled`. A cancellation request is not proof that a process has already stopped.
+- Terminal statuses are `completed`, `failed`, and `cancelled`. Read the result before relying on the work or reporting success.
+- Each session allows 8 active jobs and retains at most 64 records. Older terminal records are evicted when space is needed. Existing Bash wall-clock and silence timeouts remain active.
+
+Both the originating tool and `jobs` must be active. Explicit tool allowlists must include `jobs`; removing either grant cancels affected jobs. Plan mode does not expose jobs. Active jobs block Plan entry, `/reload`, and `/tree` navigation until they finish or are aborted. Compaction preserves active jobs and their IDs.
+
+Session abort cancels jobs even when the model is idle. Escape uses this cancellation path when no foreground Bash command has interrupt priority. Runtime shutdown cancels jobs and waits for cleanup, including pending subagent startup and disposal. A remote client disconnect is still detach, not cancellation, while its host runtime remains alive. Running and cancelling jobs keep a detached daemon runtime active; its idle retention timeout starts after work settles. Jobs do not survive runtime replacement, restart, or a branch change. Tool results and delivered completion notices remain in the transcript, but historical job IDs are not live handles after a restart. Use tmux for independent long-lived terminals.
+
+Volt attaches compact completion notices to the next authorized model request. Completion never starts inference by itself while the model is idle. Forced final-response turns defer notices. Job output is untrusted data; notices contain host-generated status and IDs, not worker output.
+
+Background support applies only to native tools in `AgentSession`. Extension and SDK execution overrides are not automatically detached. Final native results pass through `tool_result` hooks once at completion; the initial job acknowledgement is not a completed native result. Live progress snapshots are available before those completion hooks run. Hooks for `jobs` can inspect or transform reads of those snapshots.
+
 ## Sessions
 
 Sessions are saved automatically in a per-workspace `sessions.sqlite` database under `~/.volt/agent/sessions/`. A custom session directory contains its own authoritative database. Live sessions are addressed by stable IDs. Listing, exact-ID resolution, continuation candidate selection, and RPC discovery use materialized SQLite summaries without reading transcript payloads. Deep search scans extracted searchable text one session at a time, so its cost still grows with searchable history and query complexity.
@@ -146,7 +179,7 @@ Set `reviewModel` to choose the discovery model. Set `reviewVerifierModel` to ch
 
 Subagents are named child Volt sessions with isolated context. Volt includes built-in subagents for common workflows:
 
-Volt's default model policy is local-first: the root agent normally completes work itself. It delegates when the user or project requests it, or when a bounded, self-contained task benefits enough from specialization or context isolation to justify synchronous coordination. Model-facing `subagent` calls are awaited until their child work finishes, so delegation does not let the root agent continue working concurrently.
+Volt's default model policy is local-first: the root agent normally completes work itself. It delegates when the user or project requests it, or when a bounded, self-contained task benefits enough from specialization or context isolation to justify coordination. Ordinary `subagent` calls wait for child completion. Confirmed spawning calls with `background: true` return a job ID and let the root continue independent work; see [Background jobs](#background-jobs).
 
 | Name | Purpose | Tool posture |
 | --- | --- | --- |
@@ -361,7 +394,7 @@ Options to know:
 
 Security and support boundary:
 
-- The default remote tool grant enables the built-in tools `read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp` plus active tools registered by loaded extensions. The `coding` and `full` remote RPC presets use this canonical default, so `image_gen` is enabled automatically when an OpenAI Codex model is selected. A custom `remote.allowTools` list restricts daemon-owned headless runtimes only; name extension tools explicitly when using one. When a desktop TUI owns the conversation lease, phone prompts run with the TUI session's full local tool set (see [Security](security.md)). The `subagent` tool can only run built-in or discovered named definitions, and child tools are clamped by the remote session's active tool grant.
+- The default remote tool grant enables the built-in tools `read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp,jobs` plus active tools registered by loaded extensions. The `coding` and `full` remote RPC presets use this canonical default, so `image_gen` is enabled automatically when an OpenAI Codex model is selected. A custom `remote.allowTools` list restricts daemon-owned headless runtimes only; name extension tools explicitly when using one. When a desktop TUI owns the conversation lease, phone prompts run with the TUI session's full local tool set (see [Security](security.md)). The `subagent` tool can only run built-in or discovered named definitions, and child tools are clamped by the remote session's active tool grant.
 - Granting `bash`, `edit`, or `write` can modify host files or run shell commands. Granting the Codex-only `image_gen` tool lets the session read and upload local reference images and write generated PNG files. Extension tools run code installed on the host and may do the same. Pairing a phone grants it desktop-equivalent power over the workspaces it can reach; pair only devices you control.
 - `volt remote workspace add` is a local desktop action. It stores a workspace name and realpath in the daemon's state file, without starting a remote API for clients to create, rename, browse, or path-map workspaces. Removing a workspace unregisters the saved name from daemon state only; it does not delete files. If any daemon-managed worktree record remains, unregister fails with `workspace_has_worktrees`; run `volt remote worktree list --workspace <name>` and explicitly remove each worktree first. Only per-worktree `remove --force` is allowed to discard dirty or busy work.
 - When interactive Volt connects to the daemon, it auto-registers its working directory when it is not inside a registered workspace (named by basename, with a numeric suffix on collision).
@@ -436,7 +469,7 @@ cat README.md | volt -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
 
-Built-in tools include `read`, `bash`, `edit`, `write`, `image_gen` (when an OpenAI Codex model is selected), `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp` (when enabled), `subagent` (when spawning is available), child-only `subagent_registry`, and `mcp` (when MCP servers are configured). The `image_gen` tool can read and upload local reference images and write generated PNG files. The `subagent` tool only runs built-in or discovered named definitions from the ResourceLoader; `subagent_registry` lists or follows runs in a child runtime's shared session registry; the `mcp` tool is a single gateway for configured MCP servers.
+Built-in tools include `read`, `bash`, `jobs`, `edit`, `write`, `image_gen` (when an OpenAI Codex model is selected), `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp` (when enabled), `subagent` (when spawning is available), child-only `subagent_registry`, and `mcp` (when MCP servers are configured). The `image_gen` tool can read and upload local reference images and write generated PNG files. The `subagent` tool only runs built-in or discovered named definitions from the ResourceLoader; `subagent_registry` lists or follows runs in a child runtime's shared session registry; the `mcp` tool is a single gateway for configured MCP servers.
 
 ### Resource Options
 
@@ -546,6 +579,6 @@ Plan mode provides restricted research, explicit approval, and tracked execution
 
 Native MCP support is intentionally explicit: configured servers are exposed through a single `mcp` gateway tool and project MCP config follows project trust. HTTP/SSE MCP servers that require OAuth can be authenticated with `volt mcp auth <server>` or `volt mcp auth-device <server>`; tokens stay on the host.
 
-Volt does not put a permission popup in front of every tool call. Control capabilities with tool allowlists and exclusions, project trust, Plan mode's restricted research profile, and remote tool grants; use a container or extension when a workflow requires additional isolation or confirmation. Volt also leaves standalone task management and background shell execution outside core: use a TODO file or extension for task tracking and tmux for observable background commands.
+Volt does not put a permission popup in front of every tool call. Control capabilities with tool allowlists and exclusions, project trust, Plan mode's restricted research profile, and remote tool grants; use a container or extension when a workflow requires additional isolation or confirmation. Volt leaves standalone task tracking to TODO files or extensions. Native background jobs provide session-owned shell execution and delegation; use tmux for terminals that must outlive the runtime.
 
 For the full rationale, see the project documentation and extension examples.

@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -31,6 +32,7 @@ import type {
 	AgentHarnessRunReservation,
 	AgentHarnessStreamOptions,
 	AgentHarnessStructuralOperationContext,
+	AgentLoopNextAction,
 	AgentLoopNextActionContext,
 	AgentMessage,
 	AgentRunResult,
@@ -74,6 +76,7 @@ import { resolvePath } from "../utils/paths.ts";
 import { PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE } from "../utils/private-files.ts";
 import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
+import { BACKGROUND_JOB_NOTIFICATION_TYPE, BackgroundJobManager } from "./background-jobs.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { cloneCanonicalData } from "./canonical-data.ts";
 import { compactContext } from "./compaction/context-compaction.ts";
@@ -188,6 +191,7 @@ import { SUBAGENT_REGISTRY_TOOL_NAME } from "./subagents/tool-names.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { getThemeByName, theme } from "./theme/runtime.ts";
 import { ToolProgressDiagnostics } from "./tool-progress-diagnostics.ts";
+import { withBackgroundJobs } from "./tools/background.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import {
 	BRAVE_SEARCH_AUTH_PROVIDER,
@@ -198,6 +202,7 @@ import {
 	isCodexImageGenerationModel,
 	type SubagentToolManager,
 	type SubagentToolMode,
+	type ToolDef,
 } from "./tools/index.ts";
 import {
 	canonicalizePlanSteps,
@@ -679,6 +684,24 @@ export class AgentSession {
 	private _abortGeneration = 0;
 	private _abortPromise: Promise<void> | undefined;
 
+	// Background work outlives individual model turns, but never this session.
+	private readonly _backgroundJobs = new BackgroundJobManager({
+		isToolAllowed: (name) =>
+			!this._disposed &&
+			this._planningState.mode !== "plan" &&
+			this._effectiveActiveToolNames.includes(name) &&
+			this._trustedHostToolNames.has(name) &&
+			this._toolDefinitions.get(name)?.sourceInfo.source === "builtin",
+		getGeneration: () => this._conversationGenerationRevision,
+	});
+	private readonly _backgroundToolContext = new AsyncLocalStorage<{
+		generation: number;
+		runner: ExtensionRunner;
+		signal?: AbortSignal;
+	}>();
+	private readonly _backgroundNotificationDeliveries = new Map<string, { generation: number; jobIds: string[] }>();
+	private readonly _backgroundStartAcknowledgements = new Set<string>();
+
 	// Bash execution state
 	private _bashAbortController: AbortController | undefined = undefined;
 	private _pendingBashMessages: BashExecutionMessage[] = [];
@@ -870,6 +893,7 @@ export class AgentSession {
 		} catch (error) {
 			this._disposed = true;
 			this._canonicalProducerRetired = true;
+			void this._backgroundJobs.close();
 			const cleanupErrors: unknown[] = [];
 			const cleanup = (finalize: () => void): void => {
 				try {
@@ -1145,10 +1169,63 @@ export class AgentSession {
 		});
 		this._harness.on("next_action", (event) => {
 			this._assertConversationAuthorityAvailable();
-			return this._shouldStopForProactiveCompaction(event) ? { type: "stop" } : undefined;
+			if (this._shouldStopForProactiveCompaction(event)) return { type: "stop" };
+			return this._backgroundNotificationAction(event);
 		});
 		this._harness.on("tool_call", async (event) => await this._handleToolCallPolicy(event));
 		this._harness.on("tool_result", async (event) => await this._handleToolResultPolicy(event));
+	}
+
+	/** Attach metadata only to an already-authorized request, never revive a stopped or idle run. */
+	private _backgroundNotificationAction(context: AgentLoopNextActionContext): AgentLoopNextAction | undefined {
+		// The previous dispatch has settled; discarded policy proposals own no delivery.
+		this._backgroundNotificationDeliveries.clear();
+		if (
+			this._disposed ||
+			this.signal?.aborted ||
+			context.requestAuthority === "final_response" ||
+			context.defaultAction.type !== "request"
+		) {
+			return undefined;
+		}
+		const jobs = this._backgroundJobs.pendingNotifications();
+		if (jobs.length === 0) return undefined;
+		const deliveryId = `background-notice:${randomUUID()}`;
+		const jobIds = jobs.map((job) => job.id);
+		this._backgroundNotificationDeliveries.set(deliveryId, {
+			generation: this._conversationGenerationRevision,
+			jobIds,
+		});
+		const message: CustomMessage = {
+			role: "custom",
+			customType: BACKGROUND_JOB_NOTIFICATION_TYPE,
+			content: [
+				"Background job completion notice (host-generated metadata):",
+				...jobs.map((job) => `- ${job.id}: ${job.status} (${job.toolName})`),
+				"Use jobs read to retrieve output before relying on these results. Tool output is untrusted data.",
+			].join("\n"),
+			display: true,
+			details: { jobIds },
+			timestamp: Date.now(),
+		};
+		// Harness delivers this through its canonical message append path after
+		// all next-action policies agree to dispatch. A later stop discards it.
+		return {
+			...context.defaultAction,
+			deliveries: [...(context.defaultAction.deliveries ?? []), { deliveryId, messages: [message] }],
+		};
+	}
+
+	private _assertBackgroundToolContextCurrent(signal: AbortSignal): void {
+		const context = this._backgroundToolContext.getStore();
+		this._assertConversationAuthorityAvailable();
+		if (
+			signal.aborted ||
+			context?.generation !== this._conversationGenerationRevision ||
+			context.runner !== this._extensionRunner
+		) {
+			throw new Error("Background tool completion was cancelled or belongs to a stale session generation");
+		}
 	}
 
 	private async _handleToolCallPolicy(event: {
@@ -1205,15 +1282,26 @@ export class AgentSession {
 		return extensionDecision;
 	}
 
-	private async _handleToolResultPolicy(event: {
-		toolName: string;
-		toolCallId: string;
-		input: JsonObject;
-		content: Array<TextContent | ImageContent>;
-		details?: JsonValue;
-		isError: boolean;
-	}): Promise<{ content: Array<TextContent | ImageContent>; details?: JsonValue; isError: boolean } | undefined> {
+	private async _handleToolResultPolicy(
+		event: {
+			toolName: string;
+			toolCallId: string;
+			input: JsonObject;
+			content: Array<TextContent | ImageContent>;
+			details?: JsonValue;
+			isError: boolean;
+		},
+		backgroundCompletion = false,
+	): Promise<{ content: Array<TextContent | ImageContent>; details?: JsonValue; isError: boolean } | undefined> {
 		this._assertCanonicalProducerAuthorityAvailable();
+		if (
+			!backgroundCompletion &&
+			this._backgroundStartAcknowledgements.delete(`${event.toolName}:${event.toolCallId}`)
+		) {
+			// A start acknowledgement is not the native tool's completed result.
+			// The worker invokes the original result policy once, at settlement.
+			return undefined;
+		}
 		const resolution = this._authorizedOperationResolutions.get(event.toolCallId);
 		this._authorizedOperationResolutions.delete(event.toolCallId);
 		if (
@@ -1704,6 +1792,8 @@ export class AgentSession {
 			// Aborted tool calls can skip afterToolCall, leaving their plan-mode
 			// authorization records behind; no record outlives its run.
 			this._authorizedOperationResolutions.clear();
+			this._backgroundNotificationDeliveries.clear();
+			this._backgroundStartAcknowledgements.clear();
 		}
 		if (!this._isConversationAuthorityAvailable()) {
 			// Agent may emit a synthetic transaction-failure message after the
@@ -1886,7 +1976,19 @@ export class AgentSession {
 		if (this._disposed) return undefined;
 
 		if (handledEvent.type === "message_end") {
-			if (handledEvent.deliveryId !== undefined) return handledEvent.message;
+			if (handledEvent.deliveryId !== undefined) {
+				const notice = this._backgroundNotificationDeliveries.get(handledEvent.deliveryId);
+				if (notice) {
+					// Finalized Harness events follow canonical append. Wait for its
+					// durable watermark before consuming the pending notification.
+					await this.sessionManager.flush();
+					if (!this._disposed && notice.generation === this._conversationGenerationRevision) {
+						this._backgroundJobs.acknowledgeNotifications(notice.jobIds);
+					}
+					this._backgroundNotificationDeliveries.delete(handledEvent.deliveryId);
+				}
+				return handledEvent.message;
+			}
 			if (handledEvent.message.role === "user" && handledEvent.message.clientMessageId !== undefined) {
 				await this.sessionManager.flush();
 				this._completeLiveClientInput(handledEvent.message.clientMessageId, "admitted");
@@ -2231,6 +2333,8 @@ export class AgentSession {
 			// Late Harness events are ignored by the disposed guard and cannot
 			// repopulate these projections.
 			this._disposed = true;
+			this._backgroundNotificationDeliveries.clear();
+			this._backgroundStartAcknowledgements.clear();
 			this._streamingMessage = undefined;
 			this._pendingToolExecutions.clear();
 			this._disposedQueueHandback = {
@@ -2248,12 +2352,21 @@ export class AgentSession {
 			// Retain one observed underlying promise for all current and later callers.
 			void disposal.catch(() => undefined);
 			this._disposePromise = disposal;
-			void this._performDispose(source, acceptReconciliationRequired).then(resolveDisposal, rejectDisposal);
+			// Publish the join before cancellation invokes reentrant abort listeners.
+			const backgroundDrain = this._backgroundJobs.close();
+			void this._performDispose(source, acceptReconciliationRequired, backgroundDrain).then(
+				resolveDisposal,
+				rejectDisposal,
+			);
 		}
 		return this._disposePromise;
 	}
 
-	private async _performDispose(source: AgentAbortSource, acceptReconciliationRequired: boolean): Promise<void> {
+	private async _performDispose(
+		source: AgentAbortSource,
+		acceptReconciliationRequired: boolean,
+		backgroundDrain: Promise<void>,
+	): Promise<void> {
 		this._harness.requestClose(source);
 		this._dequeuedQueueClientMessageIds.clear();
 		const disposalError = new Error("Session disposed before client input completed");
@@ -2343,7 +2456,13 @@ export class AgentSession {
 		this._conversationGenerationListeners.clear();
 		cleanupSessionResources(this.sessionId);
 
-		const results = await Promise.allSettled([persistenceDrain, subagentDrain, mcpDrain, settingsDrain]);
+		const results = await Promise.allSettled([
+			persistenceDrain,
+			subagentDrain,
+			mcpDrain,
+			settingsDrain,
+			backgroundDrain,
+		]);
 		const rejected = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
 		if (rejected.length === 1) throw rejected[0].reason;
 		if (rejected.length > 1) {
@@ -2677,7 +2796,12 @@ export class AgentSession {
 		return this._agentConversationMutationInFlight;
 	}
 
-	/** Whether any tracked prompt or standalone session operation is still active. */
+	/** Whether session-owned background jobs are running or still cancelling. */
+	get hasBackgroundJobs(): boolean {
+		return this._backgroundJobs.hasActive;
+	}
+
+	/** Whether any tracked foreground prompt or standalone session operation is still active. */
 	get isBusy(): boolean {
 		return (
 			this._reloadInProgress ||
@@ -2861,6 +2985,7 @@ export class AgentSession {
 			}
 		}
 		this._effectiveActiveToolNames = validToolNames;
+		this._backgroundJobs.cancelInaccessible();
 		this._applyHarnessMutation(this._harness.setTools([...this._toolRegistry.values()], validToolNames));
 
 		// Rebuild base system prompt with new tool set
@@ -2979,6 +3104,9 @@ export class AgentSession {
 	private _commitPlanningState(next: PlanningState): PlanningState {
 		this._assertConversationAuthorityAvailable();
 		const parsed = parsePlanningState(next);
+		if (parsed.mode === "plan" && this._backgroundJobs.hasActive) {
+			throw new Error("Cannot enter Plan mode while background jobs are active; abort or wait for them to finish");
+		}
 		this.sessionManager.appendPlanningState(parsed);
 		this._planningState = clonePlanningState(parsed);
 		this._syncPlanningRuntime();
@@ -3974,9 +4102,14 @@ export class AgentSession {
 		});
 	}
 
-	/** Wait for the agent and any session-level prompt work to settle. */
+	/** Wait for the agent and any session-level prompt work to settle, excluding background jobs. */
 	async waitForIdle(): Promise<void> {
 		await this._waitForIdle();
+	}
+
+	/** Join background job settlement without cancelling work or blocking foreground prompts. */
+	waitForBackgroundJobs(): Promise<void> {
+		return this._backgroundJobs.waitForIdle();
 	}
 
 	private async _waitForIdle(): Promise<void> {
@@ -5029,20 +5162,48 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	abort(source?: AgentAbortSource): Promise<void> {
-		this._harness.abort(source);
 		if (this._abortPromise) {
 			return this._abortPromise;
 		}
-		this._abortGeneration += 1;
-		this.abortRetry();
-		this.abortCompaction();
-		const idlePromise = this.waitForIdle();
-		const abortPromise = idlePromise.finally(() => {
+		let resolveAbort!: () => void;
+		let rejectAbort!: (error: unknown) => void;
+		const drain = new Promise<void>((resolve, reject) => {
+			resolveAbort = resolve;
+			rejectAbort = reject;
+		});
+		const abortPromise = drain.finally(() => {
 			if (this._abortPromise === abortPromise) {
 				this._abortPromise = undefined;
 			}
 		});
+		// Publish both the admission fence and the join before any cancellation
+		// callback can synchronously start tools or reenter abort().
 		this._abortPromise = abortPromise;
+		this._abortGeneration += 1;
+		const drains: Promise<void>[] = [];
+		for (const cancel of [
+			() => {
+				this._harness.abort(source);
+			},
+			() => this.abortRetry(),
+			() => this.abortCompaction(),
+			() => this._backgroundJobs.cancelAll(),
+			() => this.waitForIdle(),
+		]) {
+			try {
+				drains.push(Promise.resolve(cancel()));
+			} catch (error) {
+				// One failing cancellation participant must not skip the other drains.
+				drains.push(Promise.reject(error));
+			}
+		}
+		void Promise.allSettled(drains)
+			.then((results) => {
+				const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+				if (errors.length === 1) throw errors[0];
+				if (errors.length > 1) throw new AggregateError(errors, "Agent session abort did not complete");
+			})
+			.then(resolveAbort, rejectAbort);
 		return abortPromise;
 	}
 
@@ -6265,7 +6426,7 @@ export class AgentSession {
 				getModel: () => this.model,
 				isIdle: () => !this.isBusy,
 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
-				getSignal: () => this._harness.signal,
+				getSignal: () => this._backgroundToolContext.getStore()?.signal ?? this._harness.signal,
 				abort: () => {
 					if (this._extensionAbortHandler) {
 						this._extensionAbortHandler();
@@ -6414,6 +6575,9 @@ export class AgentSession {
 			this._requestedBuildToolNames = resolvedRequestedToolNames.filter((name) => !NATIVE_PLAN_TOOL_NAMES.has(name));
 		}
 		this.setActiveToolsByName(resolvedRequestedToolNames);
+		// Replacing a native definition can revoke its authority without changing
+		// the active name list, so it needs its own cancellation check.
+		this._backgroundJobs.cancelInaccessible();
 	}
 
 	/**
@@ -6501,7 +6665,7 @@ export class AgentSession {
 				this._subagentToolManager?.followDelegation !== undefined)
 				? this._subagentToolManager
 				: undefined;
-		const baseToolDefinitions = this._baseToolsOverride
+		const baseToolDefinitions: Record<string, ToolDef> = this._baseToolsOverride
 			? Object.fromEntries(
 					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
 						name,
@@ -6509,6 +6673,7 @@ export class AgentSession {
 					]),
 				)
 			: createAllToolDefinitions(this._cwd, {
+					jobs: { manager: this._backgroundJobs },
 					read: { autoResizeImages },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
 					edit: { diagnosticsProvider: this._lspManager },
@@ -6610,6 +6775,61 @@ export class AgentSession {
 						: {}),
 				});
 
+		if (!this._baseToolsOverride) {
+			for (const name of ["bash", "subagent"] as const) {
+				const definition = baseToolDefinitions[name];
+				if (!definition) continue;
+				const wrapped = withBackgroundJobs(definition, {
+					manager: this._backgroundJobs,
+					finalize: async (toolName, toolCallId, input, result, signal) => {
+						this._assertBackgroundToolContextCurrent(signal);
+						const context = this._backgroundToolContext.getStore()!;
+						const owned = cloneCanonicalData(result, `Background ${toolName} result`);
+						const replacement = await this._backgroundToolContext.run({ ...context, signal }, () =>
+							this._handleToolResultPolicy(
+								{
+									toolName,
+									toolCallId,
+									input,
+									content: owned.content,
+									...(owned.details === undefined ? {} : { details: owned.details as JsonValue }),
+									isError: owned.isError === true,
+								},
+								true,
+							),
+						);
+						this._assertBackgroundToolContextCurrent(signal);
+						return cloneCanonicalData({ ...owned, ...replacement }, `Background ${toolName} final result`);
+					},
+				});
+				baseToolDefinitions[name] = {
+					...wrapped,
+					execute: async (...args: Parameters<typeof wrapped.execute>) => {
+						this._assertConversationAuthorityAvailable();
+						if (this._hasSessionOperationBarrier || this._abortPromise) {
+							throw new Error(
+								"Cannot start a native tool during a session mutation or abort; wait for it to finish",
+							);
+						}
+						const result = await this._backgroundToolContext.run(
+							{ generation: this._conversationGenerationRevision, runner: this._extensionRunner },
+							() => wrapped.execute(...args),
+						);
+						if (
+							!this._disposed &&
+							this._pendingToolExecutions.has(args[0]) &&
+							result.details &&
+							typeof result.details === "object" &&
+							"backgroundJob" in result.details
+						) {
+							this._backgroundStartAcknowledgements.add(`${name}:${args[0]}`);
+						}
+						return result;
+					},
+				} as ToolDef;
+			}
+		}
+
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition<any, any>]),
 		);
@@ -6670,7 +6890,7 @@ export class AgentSession {
 
 	private async _reload(): Promise<void> {
 		this._assertConversationAuthorityAvailable();
-		if (this.isStreaming || this.isBashRunning || this.hasActiveSessionMutation) {
+		if (this.isStreaming || this.isBashRunning || this.hasActiveSessionMutation || this._backgroundJobs.hasActive) {
 			throw new Error(
 				"Cannot reload while active session work still owns this runtime; abort or wait for it to finish",
 			);
@@ -7096,10 +7316,10 @@ export class AgentSession {
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
-		if (this.isStreaming || this.isBashRunning) {
+		if (this.isStreaming || this.isBashRunning || this._backgroundJobs.hasActive) {
 			return Promise.reject(
 				new Error(
-					"Cannot navigate the session tree while an agent or bash run is active; abort or wait for it to finish",
+					"Cannot navigate the session tree while an agent, bash run, or background job is active; abort or wait for it to finish",
 				),
 			);
 		}
@@ -7297,6 +7517,8 @@ export class AgentSession {
 				// as the in-memory leaf changes. Observer notification remains behind the
 				// durability boundary below.
 				this._conversationGenerationRevision++;
+				this._backgroundJobs.cancelInaccessible();
+				this._backgroundNotificationDeliveries.clear();
 				this._planResearchGeneration = undefined;
 			}
 

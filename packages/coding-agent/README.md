@@ -514,7 +514,7 @@ Volt includes common coding-agent primitives in core while keeping project-speci
 
 **Task tracking stays lightweight.** Plan mode tracks approved implementation steps. For standalone task management, use a TODO file or an extension.
 
-**Shell work stays observable.** Volt does not provide background bash execution; use tmux for direct visibility and control.
+**Shell work stays observable.** Native Bash and subagent calls support session-owned background jobs. Use `background: true`, then `jobs` to inspect, wait for, or cancel the work. Use tmux for terminals that must outlive a Volt runtime. See [Background jobs](docs/usage.md#background-jobs).
 
 ---
 
@@ -586,7 +586,7 @@ volt remote workspace remove volt
 
 Security defaults and limitations:
 
-- The default remote tool grant enables built-in `read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp` plus active tools registered by loaded extensions. The `coding` and `full` remote RPC presets use this default, so `image_gen` is enabled automatically when an OpenAI Codex model is selected. A custom `remote.allowTools` list restricts daemon-owned headless runtimes; when a desktop TUI owns the conversation, phone prompts use the TUI session's full local tool set.
+- The default remote tool grant enables built-in `read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp,jobs` plus active tools registered by loaded extensions. The `coding` and `full` remote RPC presets use this default, so `image_gen` is enabled automatically when an OpenAI Codex model is selected. A custom `remote.allowTools` list restricts daemon-owned headless runtimes; when a desktop TUI owns the conversation, phone prompts use the TUI session's full local tool set.
 - Granting `bash`, `edit`, `write`, or `image_gen` can modify the host; `image_gen` can read and upload local reference images and write generated PNG files. Extension tools run code installed on the host and may do the same. Pair only devices you control.
 - Pairing tickets are short-lived, one-time credentials. `volt remote pair` talks to the running daemon; it does not generate offline tickets from persisted state.
 - Remote workspaces are selected by saved name, not arbitrary client-provided paths.
@@ -637,7 +637,7 @@ cat README.md | volt -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
 
-Available built-in tools: `read`, `bash`, `edit`, `write`, `image_gen` (when an OpenAI Codex model is selected), `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp` (when enabled), `subagent` (when available), child-only `subagent_registry`, and `mcp` (when MCP servers are configured)
+Available built-in tools: `read`, `bash`, `jobs`, `edit`, `write`, `image_gen` (when an OpenAI Codex model is selected), `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp` (when enabled), `subagent` (when available), child-only `subagent_registry`, and `mcp` (when MCP servers are configured)
 
 ### Resource Options
 

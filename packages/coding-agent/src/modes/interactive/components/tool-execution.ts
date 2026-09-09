@@ -567,8 +567,23 @@ export class ToolExecutionComponent extends Container {
 		if (this.result.isError) {
 			return true;
 		}
-		const mode = (this.result.details as { mode?: unknown } | undefined)?.mode;
-		return mode === "single" || mode === "parallel" || mode === "chain";
+		const details = this.result.details as { mode?: unknown; backgroundJob?: unknown } | undefined;
+		const backgroundJob = details?.backgroundJob;
+		if (typeof backgroundJob === "object" && backgroundJob !== null && !Array.isArray(backgroundJob)) {
+			const job = backgroundJob as Record<string, unknown>;
+			// A background start acknowledges a job before child metadata is available.
+			if (
+				typeof job.id === "string" &&
+				job.id.startsWith("job_") &&
+				job.id.length > 4 &&
+				job.toolName === "subagent" &&
+				job.toolCallId === this.toolCallId &&
+				job.status === "running"
+			) {
+				return true;
+			}
+		}
+		return details?.mode === "single" || details?.mode === "parallel" || details?.mode === "chain";
 	}
 
 	private getTextOutput(): string {

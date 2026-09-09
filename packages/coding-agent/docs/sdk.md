@@ -265,7 +265,7 @@ try {
 }
 ```
 
-`waitForEnd()` resolves after the child session settles, including automatic retries, overflow compaction, and queued continuations. Its result has this contract:
+During normal execution, `waitForEnd()` resolves after the child session settles, including automatic retries, overflow compaction, queued continuations, and child background jobs. Native background delegation keeps parent cancellation and delegation ownership until that work settles. Direct SDK callers using `retainRuntimeOnDispose: true` must abort and drain active child work before disposing the handle; the external owner must retain and eventually dispose the runtime. Retaining a runtime alone does not preserve delegation ownership after direct handle disposal. The result has this contract:
 
 ```typescript
 interface SubagentResult {
@@ -329,6 +329,18 @@ const budgetedSubagents = new SubagentManager({
 ```
 
 Crossing a configured token, cost, or deadline budget aborts that delegation tree and its active descendants. Each child's turn budget instead requests its final report at `maxTurns`; refusing that report by requesting another tool aborts only that child.
+
+### Background jobs
+
+`AgentSession` augments its native `bash` and `subagent` tools with `background: true` and provides a `jobs` control tool. Include `jobs` in explicit tool allowlists when background work is needed. Standalone tool factories and custom/extension execution overrides are not automatically detached.
+
+The initial subagent confirmation preflight remains synchronous. A confirmed single, parallel, or chain spawning call can return a job ID before children finish. The `jobs` tool supports `list`, `read`, `wait`, and `cancel`; `read` and `wait` return bounded, non-consuming snapshots. See [Background jobs](usage.md#background-jobs) for arguments and limits.
+
+`session.waitForIdle()` reports foreground settlement, not completion of background jobs. `session.hasBackgroundJobs` includes running and cancelling jobs; `session.waitForBackgroundJobs()` joins them without cancellation. `session.abort()` cancels both foreground and background work and joins cleanup. `dispose()` synchronously fences new jobs; `waitForClosed()` joins their cleanup. Active jobs block reload, tree navigation, and Plan entry. Compaction keeps their handles valid. Completed-job notices are committed at an authorized provider boundary, never by starting an unsolicited idle inference request.
+
+Jobs are runtime- and branch-scoped. Running work and retained output are not recovered after a restart or runtime replacement. Existing transcript acknowledgements and completion notices remain historical records. A remote transport disconnect does not cancel jobs while the host runtime is retained.
+
+Native `tool_result` hooks run once for actual background completion rather than for the start acknowledgement. Completion hooks receive the job's abort signal through `ctx.signal`. Progress snapshots are available through `jobs` before completion hooks; `jobs` result hooks can inspect or transform those reads. Keep asynchronous completion hooks cancellation-aware and avoid assuming they run during a foreground model turn.
 
 ### Prompting and Message Queueing
 
@@ -626,8 +638,8 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 
 Specify which built-in tools to enable:
 
-- Built-in tool names: `read`, `bash`, `edit`, `write`, `image_gen`, `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp`, `subagent`, child-only `subagent_registry`, and `mcp`
-- Default built-ins: `read`, `bash`, `edit`, `write`, `web_search`, `web_fetch`, `image_gen` when an OpenAI Codex model is selected, `subagent` when spawning is available, and `subagent_registry` when the manager belongs to a child runtime
+- Built-in tool names: `read`, `bash`, `jobs`, `edit`, `write`, `image_gen`, `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp`, `subagent`, child-only `subagent_registry`, and `mcp`
+- Default built-ins: `read`, `bash`, `jobs`, `edit`, `write`, `web_search`, `web_fetch`, `image_gen` when an OpenAI Codex model is selected, `subagent` when spawning is available, and `subagent_registry` when the manager belongs to a child runtime
 - `noTools: "all"` disables all tools
 - `noTools: "builtin"` disables default built-ins, including `subagent`, while keeping extension and custom tools enabled
 - `excludeTools` disables specific built-in, extension, or custom tool names after any `tools` allowlist is applied

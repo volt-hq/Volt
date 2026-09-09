@@ -3472,7 +3472,8 @@ export class InteractiveMode {
 				}
 				return;
 			}
-			if (this.session.isStreaming) {
+			// Preserve foreground Bash's interrupt priority when only background jobs remain.
+			if (this.session.isStreaming || (!this.session.isBashRunning && this.session.hasBackgroundJobs)) {
 				void this.restoreQueuedMessagesToEditor({ abortSource: "keyboard_interrupt" }).catch((error) => {
 					this.showError(`Failed to persist queued-message cancellation: ${String(error)}`);
 				});
@@ -3709,16 +3710,15 @@ export class InteractiveMode {
 			}
 
 			// Handle commands
-			if (text === "/plan") {
+			if (text === "/plan" || text === "/build") {
 				this.editor.setText("");
-				this.refreshPlanningUi(await this.session.setAgentMode("plan"));
-				this.showStatus("Plan mode: agent tools are read-only");
-				return;
-			}
-			if (text === "/build") {
-				this.editor.setText("");
-				this.refreshPlanningUi(await this.session.setAgentMode("build"));
-				this.showStatus("Build mode");
+				const mode = text === "/plan" ? "plan" : "build";
+				try {
+					this.refreshPlanningUi(await this.session.setAgentMode(mode));
+					this.showStatus(mode === "plan" ? "Plan mode: agent tools are read-only" : "Build mode");
+				} catch (error: unknown) {
+					this.showError(error instanceof Error ? error.message : String(error));
+				}
 				return;
 			}
 			if (text === "/plan-details") {
@@ -4655,7 +4655,10 @@ export class InteractiveMode {
 	 */
 	private async requestQuit(): Promise<void> {
 		const now = Date.now();
-		if ((this.session.isBusy || this.activeInteractiveReview) && !this.hasQuitConfirmation(now)) {
+		if (
+			(this.session.isBusy || this.session.hasBackgroundJobs || this.activeInteractiveReview) &&
+			!this.hasQuitConfirmation(now)
+		) {
 			this.quitConfirmation = {
 				warnedAt: now,
 				activityRevision: this.session.activityRevision,

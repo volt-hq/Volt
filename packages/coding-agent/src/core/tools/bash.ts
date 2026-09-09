@@ -16,6 +16,7 @@ import {
 } from "../../utils/shell.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { highlightShellCommand, theme } from "../theme/runtime.ts";
+import { createBackgroundCleanupReceipt } from "./background-cleanup.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { formatDuration, getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -131,6 +132,7 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 				windowsHide: true,
 			});
 			if (child.pid) trackDetachedChildPid(child.pid);
+			const backgroundCleanup = createBackgroundCleanupReceipt();
 			let timedOut = false;
 			let timeoutHandle: NodeJS.Timeout | undefined;
 			// Lets the teardown skip its SIGKILL escalation once the shell is gone,
@@ -145,7 +147,9 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 			const teardown = () => {
 				if (tornDown || exited || !child.pid) return;
 				tornDown = true;
-				void terminateProcessTree(child.pid, () => exited);
+				const termination = terminateProcessTree(child.pid, () => exited);
+				if (backgroundCleanup) backgroundCleanup.track(termination);
+				else void termination;
 			};
 
 			try {
@@ -178,6 +182,9 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 				if (child.pid) untrackDetachedChildPid(child.pid);
 				if (timeoutHandle) clearTimeout(timeoutHandle);
 				if (signal) signal.removeEventListener("abort", teardown);
+				// Shell exit is not proof that descendants or taskkill have finished.
+				// Foreground cancellation keeps its existing fast-return behavior.
+				if (backgroundCleanup) await backgroundCleanup.join();
 			}
 		},
 	};
