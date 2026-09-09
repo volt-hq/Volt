@@ -49,7 +49,17 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 	context: Context,
 	options?: GoogleOptions,
 ): AssistantMessageEventStream => {
-	const normalizer = new AssistantStreamNormalizer();
+	const normalizer = new AssistantStreamNormalizer(options);
+	if (
+		!normalizer.validateConfiguration({
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+		})
+	)
+		return normalizer.stream;
+	options = { ...options, signal: normalizer.signal };
 	normalizer.push({
 		type: "start",
 		init: { api: model.api, provider: model.provider, model: model.id, timestamp: Date.now() },
@@ -63,6 +73,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 		let currentBlock: { type: "text" | "thinking"; contentIndex: number; signature?: string } | undefined;
 		const toolCallIds = new Set<string>();
 		let hasToolCalls = false;
+		let hasFinishReason = false;
 
 		const closeCurrentBlock = () => {
 			if (!currentBlock) {
@@ -135,7 +146,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 							toolCallIds.add(toolCallId);
 							hasToolCalls = true;
 							const contentIndex = nextContentIndex++;
-							const args = (part.functionCall.args as JsonObject | undefined) ?? {};
+							const args = (part.functionCall.args === undefined ? {} : part.functionCall.args) as JsonObject;
 							const toolCall: ToolCall = {
 								type: "toolCall",
 								id: toolCallId,
@@ -149,6 +160,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 								id: toolCall.id,
 								name: toolCall.name,
 							});
+							if (!normalizer.checkToolArgumentsObject(contentIndex, args)) return;
 							normalizer.push({
 								type: "toolcall_delta",
 								contentIndex,
@@ -160,7 +172,9 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 				}
 
 				if (candidate?.finishReason) {
-					stopReason = hasToolCalls ? "toolUse" : mapStopReason(candidate.finishReason);
+					hasFinishReason = true;
+					stopReason = mapStopReason(candidate.finishReason);
+					if (hasToolCalls && stopReason === "stop") stopReason = "toolUse";
 				}
 
 				if (chunk.usageMetadata) {
@@ -186,6 +200,9 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 			}
 
 			closeCurrentBlock();
+			if (hasToolCalls && !hasFinishReason) {
+				throw new Error("Google stream ended without finishReason");
+			}
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");

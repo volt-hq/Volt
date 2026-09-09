@@ -20,10 +20,13 @@ import { createAllToolDefinitions, type ToolName } from "../../../core/tools/ind
 import { formatDuration, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { keyHint } from "./keybinding-hints.ts";
+import { StreamingRenderCoalescer } from "./streaming-render-coalescer.ts";
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
 	imageWidthCells?: number;
+	/** Enable elapsed preparation/execution progress for a live call, not transcript replay. */
+	liveProgress?: boolean;
 }
 
 function hasCreatedSubagent(details: unknown): boolean {
@@ -113,6 +116,9 @@ export class ToolExecutionComponent extends Container {
 	private ui: TUI;
 	private cwd: string;
 	private executionStarted = false;
+	private readonly liveProgress: boolean;
+	private readonly preparationStartedAt = Date.now();
+	private progressTimer?: ReturnType<typeof setInterval>;
 	private executionStartedAt?: number;
 	private executionDurationMs?: number;
 	private argsComplete = false;
@@ -129,6 +135,10 @@ export class ToolExecutionComponent extends Container {
 	private disposed = false;
 	private hideComponent = false;
 	private subagentCreationObserved = false;
+	private readonly argumentRenderCoalescer = new StreamingRenderCoalescer<boolean>((requestRender) => {
+		this.updateDisplay();
+		if (requestRender) this.ui.requestRender();
+	});
 
 	constructor(
 		toolName: string,
@@ -147,6 +157,7 @@ export class ToolExecutionComponent extends Container {
 		this.builtInToolDefinition = createAllToolDefinitions(cwd)[toolName as ToolName];
 		this.showImages = options.showImages ?? true;
 		this.imageWidthCells = options.imageWidthCells ?? 60;
+		this.liveProgress = options.liveProgress ?? false;
 		this.ui = ui;
 		this.cwd = cwd;
 
@@ -166,6 +177,13 @@ export class ToolExecutionComponent extends Container {
 		}
 
 		this.updateDisplay();
+		if (this.liveProgress && toolName !== "subagent") {
+			this.progressTimer = setInterval(() => {
+				if (!this.hasRendererDefinition()) this.contentText.setText(this.formatToolExecution());
+				this.ui.requestRender();
+			}, 1000);
+			this.progressTimer.unref();
+		}
 	}
 
 	private getCallRenderer(): ToolDefinition<any, any>["renderCall"] | undefined {
@@ -258,21 +276,24 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	updateArgs(args: any): void {
+		if (this.disposed) return;
 		this.args = args;
-		this.updateDisplay();
+		if (this.argsComplete || this.executionStarted || this.result) {
+			this.argumentRenderCoalescer.commitNow(true);
+		} else {
+			this.argumentRenderCoalescer.update(true);
+		}
 	}
 
 	markExecutionStarted(): void {
 		this.executionStartedAt ??= Date.now();
 		this.executionStarted = true;
-		this.updateDisplay();
-		this.ui.requestRender();
+		this.argumentRenderCoalescer.commitNow(true);
 	}
 
 	setArgsComplete(): void {
 		this.argsComplete = true;
-		this.updateDisplay();
-		this.ui.requestRender();
+		this.argumentRenderCoalescer.commitNow(true);
 	}
 
 	updateResult(
@@ -292,6 +313,10 @@ export class ToolExecutionComponent extends Container {
 		}
 		this.result = result;
 		this.isPartial = isPartial;
+		if (!isPartial) {
+			clearInterval(this.progressTimer);
+			this.progressTimer = undefined;
+		}
 		const imageBlocks = result.content.filter((content) => content.type === "image");
 		for (const [index, converted] of this.convertedImages) {
 			const source = imageBlocks[index];
@@ -299,7 +324,7 @@ export class ToolExecutionComponent extends Container {
 				this.convertedImages.delete(index);
 			}
 		}
-		this.updateDisplay();
+		this.argumentRenderCoalescer.commitNow(false);
 		this.maybeConvertImagesForTerminal();
 	}
 
@@ -361,6 +386,9 @@ export class ToolExecutionComponent extends Container {
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
+		this.argumentRenderCoalescer.dispose();
+		clearInterval(this.progressTimer);
+		this.progressTimer = undefined;
 		this.releaseImageComponents();
 		this.convertedImages.clear();
 		this.pendingImageConversions.clear();
@@ -561,6 +589,10 @@ export class ToolExecutionComponent extends Container {
 		let state: string;
 		if (this.result?.isError) {
 			state = theme.fg("error", "[failure]");
+			const executionState = this.result.details?.execution?.state;
+			if (executionState === "interrupted") state += theme.fg("muted", " · interrupted");
+			else if (executionState === "not_started" || (this.liveProgress && !this.executionStarted))
+				state += theme.fg("muted", " · not started");
 		} else if (this.result && this.isPartial) {
 			state = theme.fg("warning", "[partial]");
 		} else if (this.result) {
@@ -569,6 +601,18 @@ export class ToolExecutionComponent extends Container {
 			state = theme.fg("warning", "[running]");
 		} else {
 			state = theme.fg("muted", "[pending]");
+		}
+
+		if (this.liveProgress && (!this.result || this.isPartial)) {
+			const phase = this.executionStarted
+				? this.toolName === "edit"
+					? "Applying Edit"
+					: `Running ${this.toolName}`
+				: this.argsComplete
+					? "Ready"
+					: `Preparing ${this.toolName === "edit" ? "Edit" : this.toolName}`;
+			const elapsed = Math.max(0, Date.now() - (this.executionStartedAt ?? this.preparationStartedAt));
+			return `${state} ${theme.fg("muted", `${phase} · ${formatDuration(elapsed)}`)}`;
 		}
 
 		const duration = this.getDurationSuffix();

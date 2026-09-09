@@ -7,7 +7,7 @@
 
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { AssistantMessage, Context, JsonValue, Model, SimpleStreamOptions, Tool, Usage } from "@hansjm10/volt-ai";
-import { completeSimple, estimateToolDefinitionTokens, isContextOverflow } from "@hansjm10/volt-ai";
+import { completeSimple, drainEventStream, estimateToolDefinitionTokens, isContextOverflow } from "@hansjm10/volt-ai";
 import { sleep } from "../../utils/sleep.ts";
 import {
 	convertToLlm,
@@ -33,10 +33,27 @@ import {
 // File Operation Tracking
 // ============================================================================
 
-/** Details stored in CompactionEntry.details for file tracking */
+/** One dispatched session-compaction request, including retries and fallback chunks. */
+export type CompactionRequestUsage = {
+	strategy: "native" | "chunked";
+	/** One-based dispatch order across the entire compaction, not completion order. */
+	attempt: number;
+	provider: string;
+	model: string;
+	/** Omitted when the request failed before a terminal provider response. */
+	stopReason?: AssistantMessage["stopReason"];
+	/** Provider-reported token counts; omitted when unavailable or invalid. */
+	usage?: Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens">;
+	/** Owned, redacted Codex request diagnostics; unrelated or invalid telemetry is omitted. */
+	diagnostics?: Pick<NonNullable<AssistantMessage["diagnostics"]>[number], "type" | "timestamp" | "details">[];
+};
+
+/** Details stored in CompactionEntry.details for file tracking and request accounting. */
 export type CompactionDetails = {
 	readFiles: string[];
 	modifiedFiles: string[];
+	/** Captured by built-in session compaction, not the standalone summarization helper. */
+	requests?: CompactionRequestUsage[];
 };
 
 /**
@@ -598,7 +615,7 @@ async function completeSummarization(
 		return completeSimple(model, context, options);
 	}
 	const stream = await streamFn(model, context, options);
-	return stream.result();
+	return drainEventStream(stream);
 }
 
 function getSummarizationText(response: AssistantMessage, operation: string): string {
@@ -647,7 +664,11 @@ async function completeSummarizationText(
 			}
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			const contextOverflow = response !== undefined && isContextOverflow(response, model.contextWindow);
-			if (retryCount >= maxRetries || contextOverflow || !isTransientProviderError(errorMessage)) {
+			if (
+				retryCount >= maxRetries ||
+				contextOverflow ||
+				!isTransientProviderError(errorMessage, response?.diagnostics)
+			) {
 				if (retryCount === 0) {
 					throw error;
 				}
@@ -1058,7 +1079,7 @@ export async function compact(
 		try {
 			summaryResults = await Promise.allSettled([
 				runSummary(() =>
-					messagesToSummarize.length > 0
+					messagesToSummarize.length > 0 || previousSummary
 						? generateSummaryInChunks(
 								messagesToSummarize,
 								model,

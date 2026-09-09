@@ -39,6 +39,7 @@ import {
 	Container,
 	fuzzyFilter,
 	isKeyRelease,
+	isKeyRepeat,
 	isViewportTUI,
 	Loader,
 	type LoaderIndicatorOptions,
@@ -54,7 +55,6 @@ import {
 	TuiAltScreen,
 	TuiMainScreen,
 	VStack,
-	visibleWidth,
 } from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import { spawn, spawnSync } from "child_process";
@@ -63,7 +63,6 @@ import {
 	APP_TITLE,
 	getAgentDir,
 	getAuthPath,
-	getDebugLogPath,
 	getDocsPath,
 	getShareViewerUrl,
 	isStandaloneBinary,
@@ -198,21 +197,15 @@ import {
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
-import { writeDurableAtomicFileSync } from "../../utils/durable-atomic-write.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
-import {
-	createPrivateTempDirectorySync,
-	ensurePrivateDirectorySync,
-	PRIVATE_DIRECTORY_MODE,
-	PRIVATE_FILE_MODE,
-	writePrivateNewFileSync,
-} from "../../utils/private-files.ts";
+import { createPrivateTempDirectorySync, writePrivateNewFileSync } from "../../utils/private-files.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewVoltVersion, type LatestVoltRelease } from "../../utils/version-check.ts";
 import { getVoltUserAgent } from "../../utils/volt-user-agent.ts";
 import { runIrohRemoteRpcMode } from "../rpc/iroh-remote-rpc-mode.ts";
+import { formatCompactionUsage } from "./compaction-usage.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
@@ -531,6 +524,7 @@ export class InteractiveMode {
 	private mainView: ResponsivePlanLayoutComponent;
 	private planPaneReturnFocus: Component | undefined;
 	private planPaneInputUnsubscribe: (() => void) | undefined;
+	private globalInputUnsubscribe: (() => void) | undefined;
 	private readyPlanFocusKey: string | undefined;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
@@ -643,8 +637,10 @@ export class InteractiveMode {
 	private drainViewer: DrainViewerComponent | undefined;
 	private drainViewerFeedId: string | undefined;
 	private dismissSubagentInspector: (() => void) | undefined;
-	/** Timestamp of the last quit warning (phone attached + turn streaming). */
-	private lastQuitWarningAt = 0;
+	/** Confirmation belongs to the work that was active when the warning appeared. */
+	private quitConfirmation:
+		| { warnedAt: number; activityRevision: number; signal: AbortSignal | undefined }
+		| undefined;
 
 	// Extension UI state
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
@@ -2428,6 +2424,8 @@ export class InteractiveMode {
 	}
 
 	private async rebindCurrentSession(session: AgentSession): Promise<void> {
+		this.quitConfirmation = undefined;
+		this.lastSigintTime = 0;
 		if (this.session !== session) {
 			throw new Error("Agent session changed before interactive rebind");
 		}
@@ -3514,8 +3512,7 @@ export class InteractiveMode {
 			this.runKeyAction(() => this.cycleModel("backward")),
 		);
 
-		// Global debug handler on TUI (works regardless of focus)
-		this.ui.onDebug = () => this.handleDebugCommand();
+		this.setupGlobalInputRouting();
 		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
@@ -3528,7 +3525,19 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.session.resume", () => this.showSessionSelector());
 		this.defaultEditor.onAction("app.subagents.open", () => this.showSubagentInspector());
 
-		this.defaultEditor.onChange = (text: string) => {
+		let previousEditorText = this.editor.getText();
+		this.defaultEditor.onChange = (text, change) => {
+			if (text !== previousEditorText) {
+				this.lastSigintTime = 0;
+				// Keep intent while composing /quit, including completion whitespace,
+				// and through submission. Other drafts or deletion withdraw that intent.
+				if (
+					change?.submittedText !== "/quit" &&
+					(!"/quit".startsWith(text.trim()) || !text.startsWith(previousEditorText))
+				)
+					this.quitConfirmation = undefined;
+				previousEditorText = text;
+			}
 			const wasBashMode = this.isBashMode;
 			const hadText = this.editorHasText;
 			this.isBashMode = text.trimStart().startsWith("!");
@@ -3542,6 +3551,17 @@ export class InteractiveMode {
 		this.defaultEditor.onPasteImage = () => {
 			this.handleClipboardImagePaste();
 		};
+	}
+
+	private setupGlobalInputRouting(): void {
+		this.globalInputUnsubscribe?.();
+		this.globalInputUnsubscribe = this.ui.addInputListener((data) => {
+			if (!this.keybindings.matches(data, "app.debug")) return undefined;
+			if (!isKeyRelease(data) && !isKeyRepeat(data)) {
+				this.runKeyAction(() => this.handleDebugCommand());
+			}
+			return { consume: true };
+		});
 	}
 
 	private setupPlanPaneInputRouting(): void {
@@ -3868,7 +3888,7 @@ export class InteractiveMode {
 				return;
 			}
 			if (text === "/debug") {
-				this.handleDebugCommand();
+				this.runKeyAction(() => this.handleDebugCommand());
 				this.editor.setText("");
 				return;
 			}
@@ -3889,10 +3909,7 @@ export class InteractiveMode {
 			}
 			if (text === "/quit") {
 				this.editor.setText("");
-				if (!this.confirmQuitWithAttachedPhone()) {
-					return;
-				}
-				await this.shutdown();
+				await this.requestQuit();
 				return;
 			}
 
@@ -3966,6 +3983,8 @@ export class InteractiveMode {
 
 		switch (event.type) {
 			case "agent_start":
+				this.quitConfirmation = undefined;
+				this.lastSigintTime = 0;
 				this.disposePendingTools();
 				this.turnStartedAt = event.startedAt;
 				this.startWorkingElapsedTicker();
@@ -4063,6 +4082,7 @@ export class InteractiveMode {
 										content.id,
 										content.arguments,
 										{
+											liveProgress: true,
 											showImages: this.settingsManager.getShowImages(),
 											imageWidthCells: this.settingsManager.getImageWidthCells(),
 										},
@@ -4135,6 +4155,7 @@ export class InteractiveMode {
 						event.toolCallId,
 						event.args,
 						{
+							liveProgress: true,
 							showImages: this.settingsManager.getShowImages(),
 							imageWidthCells: this.settingsManager.getImageWidthCells(),
 						},
@@ -4197,10 +4218,14 @@ export class InteractiveMode {
 				break;
 
 			case "agent_settled":
+				this.quitConfirmation = undefined;
+				this.lastSigintTime = 0;
 				await this.checkShutdownRequested();
 				break;
 
 			case "compaction_start": {
+				this.quitConfirmation = undefined;
+				this.lastSigintTime = 0;
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -4227,6 +4252,8 @@ export class InteractiveMode {
 			}
 
 			case "compaction_end": {
+				this.quitConfirmation = undefined;
+				this.lastSigintTime = 0;
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
@@ -4255,6 +4282,9 @@ export class InteractiveMode {
 							new Date().toISOString(),
 						),
 					);
+					for (const line of formatCompactionUsage(event.result.details)) {
+						this.chatContainer.addChild(new Text(theme.fg("dim", line), 1, 0));
+					}
 					this.footer.invalidate();
 				} else if (event.errorMessage) {
 					if (event.reason === "manual") {
@@ -4596,9 +4626,10 @@ export class InteractiveMode {
 
 	private handleCtrlC(): void {
 		const now = Date.now();
-		if (now - this.lastSigintTime < 500) {
-			void this.shutdown();
+		if (this.editor.getText().length === 0 && (now - this.lastSigintTime < 500 || this.hasQuitConfirmation(now))) {
+			this.runKeyAction(() => this.requestQuit());
 		} else {
+			this.quitConfirmation = undefined;
 			this.clearEditor();
 			this.lastSigintTime = now;
 		}
@@ -4606,30 +4637,37 @@ export class InteractiveMode {
 
 	private handleCtrlD(): void {
 		// Only called when editor is empty (enforced by CustomEditor)
-		if (!this.confirmQuitWithAttachedPhone()) {
-			return;
-		}
-		void this.shutdown();
+		this.runKeyAction(() => this.requestQuit());
+	}
+
+	private hasQuitConfirmation(now: number): boolean {
+		return (
+			this.quitConfirmation !== undefined &&
+			now - this.quitConfirmation.warnedAt < 3000 &&
+			this.quitConfirmation.activityRevision === this.session.activityRevision &&
+			this.quitConfirmation.signal === this.session.signal
+		);
 	}
 
 	/**
-	 * Quit seam (§6.2): when a phone is attached over a relay and a turn is
-	 * streaming, quitting kills the turn (the daemon resumes from the file, not
-	 * the in-flight state). Require a second quit within 3s to confirm.
+	 * Every interactive quit path must confirm before disposing active work.
+	 * Phone attachment does not change local runtime ownership or this protection.
 	 */
-	private confirmQuitWithAttachedPhone(): boolean {
-		if (!this.session.isStreaming || this.daemonAttach.relayCount() < 1) {
-			return true;
-		}
+	private async requestQuit(): Promise<void> {
 		const now = Date.now();
-		if (now - this.lastQuitWarningAt < 3000) {
-			return true;
+		if ((this.session.isBusy || this.activeInteractiveReview) && !this.hasQuitConfirmation(now)) {
+			this.quitConfirmation = {
+				warnedAt: now,
+				activityRevision: this.session.activityRevision,
+				signal: this.session.signal,
+			};
+			this.showWarning(
+				"Work is active; quitting will interrupt it. Quit again within 3 seconds to confirm. Use /debug to capture diagnostics.",
+			);
+			return;
 		}
-		this.lastQuitWarningAt = now;
-		this.showWarning(
-			"A phone is attached and a turn is streaming; quitting will kill the turn. Quit again to confirm.",
-		);
-		return false;
+		this.quitConfirmation = undefined;
+		await this.shutdown();
 	}
 
 	/**
@@ -5600,7 +5638,6 @@ export class InteractiveMode {
 		const terminal = previousUi.terminal;
 		const showHardwareCursor = previousUi.getShowHardwareCursor();
 		const clearOnShrink = previousUi.getClearOnShrink();
-		const onDebug = previousUi.onDebug;
 		if (previousUi instanceof TuiMainScreen) {
 			this.mainScreenRenderState = previousUi.captureRenderState();
 		}
@@ -5619,7 +5656,6 @@ export class InteractiveMode {
 			onRightClickPaste: this.onRightClickPaste,
 		});
 		nextUi.setClearOnShrink(clearOnShrink);
-		nextUi.onDebug = onDebug;
 		if (nextUi instanceof TuiMainScreen && this.mainScreenRenderState) {
 			nextUi.restoreRenderState(this.mainScreenRenderState);
 		}
@@ -5630,6 +5666,7 @@ export class InteractiveMode {
 		this.activateView(this.activeView, focus, false);
 		nextUi.invalidate();
 		if (startRenderer) nextUi.start();
+		this.setupGlobalInputRouting();
 		this.setupPlanPaneInputRouting();
 		this.rebindExtensionTerminalInputListeners();
 		if (
@@ -7286,7 +7323,8 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				},
 				() => {
-					void this.shutdown();
+					done();
+					this.runKeyAction(() => this.requestQuit());
 				},
 				() => this.ui.requestRender(),
 				{
@@ -8442,6 +8480,7 @@ export class InteractiveMode {
 		const interrupt = this.getAppKeyDisplay("app.interrupt");
 		const clear = this.getAppKeyDisplay("app.clear");
 		const exit = this.getAppKeyDisplay("app.exit");
+		const debug = this.getAppKeyDisplay("app.debug");
 		const suspend = this.getAppKeyDisplay("app.suspend");
 		const toggleAgentMode = this.getAppKeyDisplay("app.mode.toggle");
 		const togglePlanPane = this.getAppKeyDisplay("app.plan.togglePane");
@@ -8509,8 +8548,9 @@ export class InteractiveMode {
 				entries: [
 					{ key: tab, action: "Path completion / accept autocomplete" },
 					{ key: interrupt, action: "Cancel autocomplete / abort streaming" },
-					{ key: clear, action: "Clear editor (first) / exit (second)" },
-					{ key: exit, action: "Exit when editor is empty" },
+					{ key: clear, action: "Clear editor / exit; confirm when work is active" },
+					{ key: exit, action: "Exit (empty editor); confirm when work is active" },
+					{ key: `${debug} / /debug`, action: "Capture diagnostics without interrupting work" },
 					{ key: suspend, action: "Suspend to background" },
 					{ key: toggleAgentMode, action: "Toggle Build / Plan mode" },
 					{ key: togglePlanPane, action: "Switch conversation / plan pane focus" },
@@ -8584,45 +8624,24 @@ export class InteractiveMode {
 		}
 	}
 
-	private handleDebugCommand(): void {
-		const width = this.ui.terminal.columns;
-		const height = this.ui.terminal.rows;
-		const allLines = this.ui.render(width).lines;
-
-		const debugLogPath = getDebugLogPath();
-		const debugData = [
-			`Debug output at ${new Date().toISOString()}`,
-			`Terminal: ${width}x${height}`,
-			`Total lines: ${allLines.length}`,
-			"",
-			"=== All rendered lines with visible widths ===",
-			...allLines.map((line, idx) => {
-				const vw = visibleWidth(line);
-				const escaped = JSON.stringify(line);
-				return `[${idx}] (w=${vw}) ${escaped}`;
-			}),
-			"",
-			"=== Agent messages (JSONL) ===",
-			...this.session.messages.map((msg) => JSON.stringify(msg)),
-			"",
-		].join("\n");
-
+	private async handleDebugCommand(): Promise<void> {
+		this.quitConfirmation = undefined;
+		this.lastSigintTime = 0;
+		const session = this.session;
+		const canNotify = () => this.isInitialized && !this.isShuttingDown && this.session === session;
 		try {
-			ensurePrivateDirectorySync(path.dirname(debugLogPath), { hardenExisting: false });
-			writeDurableAtomicFileSync(debugLogPath, debugData, {
-				directoryMode: PRIVATE_DIRECTORY_MODE,
-				fileMode: PRIVATE_FILE_MODE,
-			});
+			const debugLogPath = await session.captureToolProgressDiagnostics();
+			if (!canNotify()) return;
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(
+				new Text(`${theme.fg("accent", "✓ Tool progress captured")}\n${theme.fg("muted", debugLogPath)}`, 1, 1),
+			);
+			this.ui.requestRender();
 		} catch (error) {
-			this.showError(`Failed to write debug log: ${error instanceof Error ? error.message : String(error)}`);
-			return;
+			if (canNotify()) {
+				this.showError(`Failed to write debug log: ${error instanceof Error ? error.message : String(error)}`);
+			}
 		}
-
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(
-			new Text(`${theme.fg("accent", "✓ Debug log written")}\n${theme.fg("muted", debugLogPath)}`, 1, 1),
-		);
-		this.ui.requestRender();
 	}
 
 	private handleArminSaysHi(): void {
@@ -9012,6 +9031,7 @@ export class InteractiveMode {
 		let streamingRenderCoalescer: StreamingRenderCoalescer<AssistantMessage> | undefined;
 		const pending = new Map<string, ToolExecutionComponent>();
 		const toolOptions = () => ({
+			liveProgress: true,
 			showImages: this.settingsManager.getShowImages(),
 			imageWidthCells: this.settingsManager.getImageWidthCells(),
 		});
@@ -9337,6 +9357,8 @@ export class InteractiveMode {
 			return { status: "cancelled" };
 		}
 		this.activeInteractiveReview = true;
+		this.quitConfirmation = undefined;
+		this.lastSigintTime = 0;
 		let diagnosticRetentionWarning: string | undefined;
 		try {
 			const result = await runReviewWorkflow({
@@ -9381,6 +9403,8 @@ export class InteractiveMode {
 			return { status: "cancelled" };
 		} finally {
 			this.activeInteractiveReview = false;
+			this.quitConfirmation = undefined;
+			this.lastSigintTime = 0;
 			// Handoff and renderCurrentSessionState clear transient chat rows. Warn only
 			// after they settle, including cancellation and failure paths, without persistence.
 			if (diagnosticRetentionWarning) {
@@ -9438,6 +9462,8 @@ export class InteractiveMode {
 			this.loadingAnimation = undefined;
 		}
 		this.clearExtensionTerminalInputListeners();
+		this.globalInputUnsubscribe?.();
+		this.globalInputUnsubscribe = undefined;
 		this.planPaneInputUnsubscribe?.();
 		this.planPaneInputUnsubscribe = undefined;
 		this.dismissSubagentInspector?.();

@@ -53,9 +53,13 @@ Never use `__dirname` directly for package assets.
 
 ## Debug Command
 
-`/debug` (hidden) writes to `~/.volt/agent/volt-debug.log`:
-- Rendered TUI lines with ANSI codes
-- Last messages sent to the LLM
+`/debug` captures live tool preparation and execution without submitting a prompt or cancelling the run. It atomically replaces `~/.volt/agent/debug/tool-progress-latest.json` (or the configured agent directory). Generation safeguards also save this record automatically; capture failures cannot change the run outcome. Capture I/O runs asynchronously, with one active snapshot and at most one queued snapshot. Repeated requests replace the queued snapshot with the latest request. Closing the session drains those already captured snapshots; new requests after disposal are rejected.
+
+The record contains up to 16 recent calls, their provider/model and call IDs, phase and elapsed times, last event time, normalized argument byte/event counts, current and peak stream queue event counts and estimated retained bytes, and allowlisted safeguard/abort metadata. Unknown queue measurements are explicitly unavailable. Counts describe the normalized argument stream, not HTTP packet sizes. A new run resets the in-memory records; disposal releases them.
+
+Each call retains at most a 4 KiB UTF-8 argument prefix. Recognizable credential fields, shell assignments, authorization markers, token prefixes, and PEM private-key markers are redacted conservatively before disk. Detection uses a bounded JSON-decoded view of the prefix, including markers split across provider chunks; it does not require a complete JSON value or PEM envelope. This is a diagnostic sample, not a complete JSON object: it may be truncated or redacted and must never be executed. Arbitrary source content can still be sensitive; inspect the file before sharing. Assistant prose, hidden reasoning, transport headers, tool output, and full conversation history are never copied into this capture.
+
+Files and their directory are owner-only on Unix. On Windows the existing ACL-aware diagnostic writer installs a protected current-account DACL before writing; capture fails closed if those permissions cannot be established. Only the latest capture is retained.
 
 ## Testing
 

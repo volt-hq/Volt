@@ -29,8 +29,11 @@ export interface EditorComponent extends Component {
 	/** Called when user submits (e.g., Enter key) */
 	onSubmit?: (text: string) => void;
 
-	/** Called when text changes */
-	onChange?: (text: string) => void;
+	/**
+	 * Called when text changes. Submission-driven clearing includes the normalized
+	 * submitted text, after autocomplete and paste expansion, before onSubmit runs.
+	 */
+	onChange?: (text: string, change?: { submittedText: string }) => void;
 
 	// =========================================================================
 	// History support (optional)

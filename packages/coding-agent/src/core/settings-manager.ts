@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import type { Transport } from "@hansjm10/volt-ai";
+import type { ToolArgumentLimits, Transport } from "@hansjm10/volt-ai";
 import type { TuiMode as RendererTuiMode, ScrollViewScrollbar } from "@hansjm10/volt-tui";
 import { randomUUID } from "crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync } from "fs";
@@ -129,6 +129,8 @@ export interface Settings {
 	compaction?: CompactionSettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
+	/** Independent byte and elapsed-time bounds on tool arguments before execution. */
+	toolArgumentLimits?: ToolArgumentLimits;
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
 	quietStartup?: boolean;
@@ -1351,6 +1353,13 @@ export class SettingsManager {
 			maxRetries: this.settings.retry?.provider?.maxRetries,
 			maxRetryDelayMs: this.settings.retry?.provider?.maxRetryDelayMs ?? 60000,
 		};
+	}
+
+	getToolArgumentLimits(): ToolArgumentLimits | undefined {
+		const limits = this.settings.toolArgumentLimits;
+		if (limits === undefined) return undefined;
+		if (!isSettingsRecord(limits)) throw new Error("Invalid toolArgumentLimits setting: expected an object");
+		return structuredClone(limits);
 	}
 
 	getWebSocketConnectTimeoutMs(): number | undefined {

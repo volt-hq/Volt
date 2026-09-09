@@ -79,7 +79,7 @@ try {
 }
 `;
 
-/** Review-only Windows sink; failure must never fall back to chmod-only storage. */
+/** Owner-only Windows sink; failure must never fall back to chmod-only storage. */
 export async function writeWindowsReviewDiagnostic(filePath: string, content: string): Promise<void> {
 	const systemRoot = process.env.SystemRoot;
 	if (!systemRoot) throw new Error("Windows system directory is unavailable.");

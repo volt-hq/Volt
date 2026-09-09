@@ -70,7 +70,17 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 	context: Context,
 	options?: AzureOpenAIResponsesOptions,
 ) => {
-	const normalizer = new AssistantStreamNormalizer();
+	const normalizer = new AssistantStreamNormalizer(options);
+	if (
+		!normalizer.validateConfiguration({
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+		})
+	)
+		return normalizer.stream;
+	options = { ...options, signal: normalizer.signal };
 	const timestamp = Date.now();
 	let started = false;
 	const start = () => {

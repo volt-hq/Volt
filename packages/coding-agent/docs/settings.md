@@ -213,6 +213,30 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 }
 ```
 
+### Tool Argument Generation
+
+Tool argument preparation has independent limits, even while a provider keeps sending data. These limits apply before a tool can execute; they do not change tool execution timeouts or the HTTP idle timeout.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `toolArgumentLimits.maxBytes` | integer | `1048576` (1 MiB) | Maximum UTF-8 JSON bytes for one tool call |
+| `toolArgumentLimits.maxTotalBytes` | integer | `8388608` (8 MiB) | Maximum aggregate argument bytes across one provider response |
+| `toolArgumentLimits.maxDurationMs` | integer | `300000` (5 minutes) | Maximum elapsed preparation time for each tool call, including time with continuing deltas |
+
+Values must be positive safe integers; `maxDurationMs` must also be at most `2147483647`. Omitted fields use the defaults. If a limit is exceeded, Volt cancels the provider stream and executes no tools from that response. The failure does not automatically retry; explicitly continue after reviewing the failure or adjusting the limit.
+
+```json
+{
+  "toolArgumentLimits": {
+    "maxBytes": 2097152,
+    "maxTotalBytes": 8388608,
+    "maxDurationMs": 180000
+  }
+}
+```
+
+SDK callers can pass `toolArgumentLimits` to `createAgentSession`; supplied fields override matching settings fields. Direct `stream`/`streamSimple` callers and `AgentHarness` stream options accept the same object.
+
 ### Message Delivery
 
 | Setting | Type | Default | Description |

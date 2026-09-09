@@ -108,7 +108,17 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 	context: Context,
 	options: BedrockOptions = {},
 ): AssistantMessageEventStream => {
-	const normalizer = new AssistantStreamNormalizer();
+	const normalizer = new AssistantStreamNormalizer(options);
+	if (
+		!normalizer.validateConfiguration({
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+		})
+	)
+		return normalizer.stream;
+	options = { ...options, signal: normalizer.signal };
 	normalizer.push({
 		type: "start",
 		init: {
@@ -129,6 +139,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 		let stopReason: StopReason = "stop";
+		let hasMessageStop = false;
 		const streamState: BedrockStreamState = { blocksByRawIndex: new Map(), nextContentIndex: 0 };
 
 		try {
@@ -262,6 +273,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 				} else if (item.contentBlockStop) {
 					handleContentBlockStop(item.contentBlockStop, streamState, normalizer);
 				} else if (item.messageStop) {
+					hasMessageStop = true;
 					stopReason = mapStopReason(item.messageStop.stopReason);
 				} else if (item.metadata) {
 					const metadataUsage = parseMetadataUsage(item.metadata, model);
@@ -284,6 +296,10 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 
 			if (options.signal?.aborted) {
 				throw new Error("Request was aborted");
+			}
+
+			if (!hasMessageStop && [...streamState.blocksByRawIndex.values()].some((block) => block.kind === "toolCall")) {
+				throw new Error("Bedrock stream ended before messageStop");
 			}
 
 			if (stopReason === "error" || stopReason === "aborted") {

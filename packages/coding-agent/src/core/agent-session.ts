@@ -45,6 +45,7 @@ import type {
 import { AgentHarness } from "@hansjm10/volt-agent-core";
 import { NodeExecutionEnv } from "@hansjm10/volt-agent-core/node";
 import type {
+	Api,
 	AssistantMessage,
 	ImageContent,
 	JsonObject,
@@ -75,11 +76,12 @@ import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { cloneCanonicalData } from "./canonical-data.ts";
+import { compactContext } from "./compaction/context-compaction.ts";
 import {
+	type CompactionPreparation,
 	type CompactionResult,
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
-	compact,
 	estimateContextTokens,
 	estimateMessagesTokens,
 	generateBranchSummary,
@@ -166,9 +168,11 @@ import type {
 	ClientInputCommand,
 	ClientInputRecord,
 	CompactionEntry,
+	SessionEntry,
 	SessionManager,
 } from "./session-manager.ts";
 import {
+	buildSessionContext,
 	CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES,
 	createClientInputSemanticDigest,
 	getLatestCompactionEntry,
@@ -183,6 +187,7 @@ import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "./subagents/tool-names.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { getThemeByName, theme } from "./theme/runtime.ts";
+import { ToolProgressDiagnostics } from "./tool-progress-diagnostics.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import {
 	BRAVE_SEARCH_AUTH_PROVIDER,
@@ -578,7 +583,7 @@ export class AgentSessionConstructionCleanupError extends AggregateError {}
 
 /** Standard thinking levels */
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-const MAX_COMPACTION_SUMMARY_RETRIES = 3;
+const MAX_COMPACTION_SUMMARY_RETRIES = 2;
 const MAX_COMPACTION_RETRY_DELAY_MS = 30_000;
 
 // ============================================================================
@@ -598,6 +603,8 @@ export class AgentSession {
 	private readonly _harness: AgentHarness;
 	private readonly _harnessSessionStorage: SessionManagerHarnessStorage;
 	private readonly _streamFn: StreamFn;
+	private readonly _toolProgressDiagnostics: ToolProgressDiagnostics;
+	private readonly _convertToLlm: AgentSessionConfig["convertToLlm"];
 	/** Synchronously staged provider policy; Harness publishes it through its ordered configuration lane. */
 	private _streamOptions: AgentHarnessStreamOptions;
 	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
@@ -650,6 +657,7 @@ export class AgentSession {
 	private readonly _admittedAncillaryWork = new Set<Promise<unknown>>();
 	/** Prompt/preflight work is detached during replacement to avoid ctx.newSession self-joins. */
 	private readonly _admittedPromptWork = new Set<Promise<unknown>>();
+	private _activityRevision = 0;
 
 	// Agent-run and compaction state
 	private _activeAgentRun: ActiveAgentRun | undefined = undefined;
@@ -749,6 +757,11 @@ export class AgentSession {
 	constructor(config: AgentSessionConfig) {
 		this.sessionManager = config.sessionManager;
 		this._streamFn = config.streamFn;
+		this._toolProgressDiagnostics = new ToolProgressDiagnostics(
+			resolvePath(config.agentDir ?? getAgentDir()),
+			() => this.sessionId,
+		);
+		this._convertToLlm = config.convertToLlm;
 		this._harnessSessionStorage = new SessionManagerHarnessStorage(
 			config.sessionManager,
 			() => this._canonicalProducerRetired,
@@ -762,7 +775,15 @@ export class AgentSession {
 			),
 			...(config.model === undefined ? {} : { model: config.model }),
 			thinkingLevel: config.thinkingLevel,
-			streamFn: config.streamFn,
+			streamFn: async (model, context, options) => {
+				const stream = await config.streamFn(
+					model,
+					context,
+					this._activeCompaction ? { ...options, maxRetries: 0 } : options,
+				);
+				this._toolProgressDiagnostics.setQueueMetricsReader(() => stream.getQueueMetrics());
+				return stream;
+			},
 			convertToLlm: config.convertToLlm,
 			...(config.streamOptions === undefined ? {} : { streamOptions: config.streamOptions }),
 			...(config.steeringMode === undefined ? {} : { steeringMode: config.steeringMode }),
@@ -1255,6 +1276,13 @@ export class AgentSession {
 	/** Publish an isolated passive projection to every public session observer. */
 	private _emit(event: AgentSessionEvent): void {
 		if (this.sessionManager.getConversationAuthorityStatus().status !== "available") return;
+		if (isAgentEvent(event)) {
+			try {
+				this._toolProgressDiagnostics.observe(event, this._harness.activeRunSnapshot);
+			} catch {
+				// Diagnostics are passive and cannot change the session outcome.
+			}
+		}
 		if (event.type === "tool_execution_end" || event.type === "agent_settled") {
 			this.gitContextProvider.scheduleRefresh();
 		}
@@ -2133,20 +2161,39 @@ export class AgentSession {
 		}
 	}
 
+	/** Monotonic revision of admitted work; changes when an operation begins or settles. */
+	get activityRevision(): number {
+		return this._activityRevision;
+	}
+
 	private _trackAdmittedAncillaryWork<T>(operation: Promise<T>): Promise<T> {
 		this._admittedAncillaryWork.add(operation);
+		this._activityRevision++;
 		void operation.then(
-			() => this._admittedAncillaryWork.delete(operation),
-			() => this._admittedAncillaryWork.delete(operation),
+			() => {
+				this._admittedAncillaryWork.delete(operation);
+				this._activityRevision++;
+			},
+			() => {
+				this._admittedAncillaryWork.delete(operation);
+				this._activityRevision++;
+			},
 		);
 		return operation;
 	}
 
 	private _trackAdmittedPromptWork<T>(operation: Promise<T>): Promise<T> {
 		this._admittedPromptWork.add(operation);
+		this._activityRevision++;
 		void operation.then(
-			() => this._admittedPromptWork.delete(operation),
-			() => this._admittedPromptWork.delete(operation),
+			() => {
+				this._admittedPromptWork.delete(operation);
+				this._activityRevision++;
+			},
+			() => {
+				this._admittedPromptWork.delete(operation);
+				this._activityRevision++;
+			},
 		);
 		return operation;
 	}
@@ -2267,7 +2314,9 @@ export class AgentSession {
 			} catch (error) {
 				cleanupError = error;
 			} finally {
+				this._toolProgressDiagnostics.dispose();
 				this._canonicalProducerRetired = true;
+				await this._toolProgressDiagnostics.waitForCapture();
 			}
 			let closeError: unknown;
 			try {
@@ -2346,14 +2395,19 @@ export class AgentSession {
 						continue;
 					}
 					const details = this._subagentDetailsForAbortedCall(toolCall);
+					const executionState = this._toolProgressDiagnostics.executionState(toolCall.id);
+					const explanation =
+						executionState === "not_started"
+							? "Tool execution never started: the session closed while preparing this call."
+							: executionState === "interrupted"
+								? "Tool execution was interrupted when the session closed."
+								: "The session closed before this tool call completed; execution state is unknown.";
 					const abortedResult: ToolResultMessage = {
 						role: "toolResult",
 						toolCallId: toolCall.id,
 						toolName: toolCall.name,
-						content: [
-							{ type: "text", text: "Operation aborted: the session closed before this tool call completed." },
-						],
-						...(details ? { details } : {}),
+						content: [{ type: "text", text: `Operation aborted: ${explanation}` }],
+						details: { ...details, execution: { state: executionState, synthetic: true } },
 						isError: true,
 						timestamp: Date.now(),
 					};
@@ -2497,7 +2551,7 @@ export class AgentSession {
 	 * finished cleanly, and registry hydration derives its true terminal state
 	 * from its own transcript.
 	 */
-	private _subagentDetailsForAbortedCall(toolCall: ToolCall): JsonValue | undefined {
+	private _subagentDetailsForAbortedCall(toolCall: ToolCall): JsonObject | undefined {
 		if (toolCall.name !== "subagent") return undefined;
 		const edges = this.sessionManager.getSubagentSpawnEntries().filter((edge) => edge.toolCallId === toolCall.id);
 		if (edges.length === 0) return undefined;
@@ -2522,6 +2576,21 @@ export class AgentSession {
 	// =========================================================================
 	// Read-only State Access
 	// =========================================================================
+
+	/** Read-only, bounded diagnostic snapshot of recent tool preparation and execution. */
+	getToolProgressDiagnostics() {
+		return this._toolProgressDiagnostics.snapshot();
+	}
+
+	/** Save a private diagnostic capture without interrupting the current run. */
+	captureToolProgressDiagnostics(): Promise<string> {
+		return this._toolProgressDiagnostics.capture();
+	}
+
+	/** Wait for diagnostic writes already scheduled by this session. */
+	waitForToolProgressDiagnostics(): Promise<void> {
+		return this._toolProgressDiagnostics.waitForCapture();
+	}
 
 	/** Read-only runtime state snapshot. */
 	get state(): AgentSessionState {
@@ -5302,13 +5371,42 @@ export class AgentSession {
 		};
 	}
 
-	private _getSummarizationThinkingLevel(): ThinkingLevel | undefined {
-		if (!this.model?.reasoning) {
-			return undefined;
-		}
-
-		const level = clampThinkingLevel(this.model, "minimal");
-		return level === "off" ? undefined : level;
+	private _generateCompaction(
+		preparation: CompactionPreparation,
+		model: Model<Api>,
+		pathEntries: SessionEntry[],
+		operation: AgentHarnessStructuralOperationContext,
+		customInstructions?: string,
+	): Promise<CompactionResult> {
+		const firstKeptIndex = pathEntries.findIndex((entry) => entry.id === preparation.firstKeptEntryId);
+		const retainedCount = pathEntries
+			.slice(firstKeptIndex)
+			.filter(
+				(entry) =>
+					entry.type === "message" ||
+					entry.type === "custom_message" ||
+					(entry.type === "branch_summary" && entry.summary),
+			).length;
+		const messages = buildSessionContext(pathEntries).messages;
+		// Keep the full rebuilt conversation warm, including the latest response.
+		// Describe the retained suffix only in the appended checkpoint instruction.
+		return compactContext(preparation, model, {
+			sourceMessageCount: messages.length,
+			retainedMessageCount: retainedCount,
+			context: async (signal) => {
+				const transformed = await this._extensionRunner.emitContext(cloneAgentMessages(messages));
+				signal.throwIfAborted();
+				const llmMessages = await this._convertToLlm(transformed);
+				signal.throwIfAborted();
+				return { systemPrompt: this.systemPrompt, tools: this._harness.getActiveTools(), messages: llmMessages };
+			},
+			streamFn: operation.streamFn,
+			signal: operation.signal,
+			thinkingLevel: this.thinkingLevel,
+			thinkingBudgets: this._harness.getStreamOptions().thinkingBudgets,
+			retry: this._getSummarizationRetryOptions(),
+			customInstructions,
+		});
 	}
 
 	/**
@@ -5477,17 +5575,12 @@ export class AgentSession {
 			} else {
 				// Generate compaction result
 				assertConversationGenerationCurrent?.();
-				const result = await compact(
+				const result = await this._generateCompaction(
 					preparation,
 					model,
-					undefined,
-					undefined,
+					pathEntries,
+					operation,
 					customInstructions,
-					operation.signal,
-					this._getSummarizationThinkingLevel(),
-					operation.streamFn,
-					undefined,
-					this._getSummarizationRetryOptions(),
 				);
 				assertConversationGenerationCurrent?.();
 				summary = result.summary;
@@ -5832,18 +5925,7 @@ export class AgentSession {
 			} else {
 				// Generate compaction result
 				assertConversationCurrent();
-				const compactResult = await compact(
-					preparation,
-					model,
-					undefined,
-					undefined,
-					undefined,
-					operation.signal,
-					this._getSummarizationThinkingLevel(),
-					operation.streamFn,
-					undefined,
-					this._getSummarizationRetryOptions(),
-				);
+				const compactResult = await this._generateCompaction(preparation, model, pathEntries, operation);
 				assertConversationCurrent();
 				summary = compactResult.summary;
 				firstKeptEntryId = compactResult.firstKeptEntryId;
@@ -6693,7 +6775,7 @@ export class AgentSession {
 		if (isContextOverflow(message, contextWindow)) return false;
 
 		const err = message.errorMessage;
-		return isTransientProviderError(err);
+		return isTransientProviderError(err, message.diagnostics);
 	}
 
 	/**

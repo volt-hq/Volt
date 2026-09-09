@@ -37,6 +37,8 @@ import type { AssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { createAssistantMessageDiagnostic, formatThrownValue } from "../utils/diagnostics.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
+import { getProviderEnvValue } from "../utils/provider-env.ts";
+import { type CodexRequestDispatch, createCodexRequestDiagnostic } from "./openai-codex-request-diagnostics.ts";
 import { getFastInferenceServiceTier } from "./openai-fast-inference.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
@@ -202,9 +204,20 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 	context: Context,
 	options?: OpenAICodexResponsesOptions,
 ) => {
-	const normalizer = new AssistantStreamNormalizer();
+	const normalizer = new AssistantStreamNormalizer(options);
+	if (
+		!normalizer.validateConfiguration({
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+		})
+	)
+		return normalizer.stream;
+	options = { ...options, signal: normalizer.signal };
 	const timestamp = Date.now();
 	const pendingDiagnostics: AssistantMessageDiagnostic[] = [];
+	const requestDiagnostics: Promise<AssistantMessageDiagnostic | undefined>[] = [];
 	let started = false;
 	const start = () => {
 		if (started) return;
@@ -229,8 +242,14 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			pendingDiagnostics.push(diagnostic);
 		}
 	};
+	const flushRequestDiagnostics = async () => {
+		for (const diagnostic of await Promise.all(requestDiagnostics.splice(0))) {
+			if (diagnostic) addDiagnostic(diagnostic);
+		}
+	};
 
 	(async () => {
+		let cleanupResponseSignal: (() => void) | undefined;
 		try {
 			const apiKey = options?.apiKey;
 			if (!apiKey) {
@@ -260,6 +279,22 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			const idleTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
 			const transport = options?.transport || "auto";
+			const diagnosticsEnabled =
+				(options?.env?.VOLT_CODEX_REQUEST_DIAGNOSTICS ?? getProviderEnvValue("VOLT_CODEX_REQUEST_DIAGNOSTICS")) ===
+				"1";
+			const recordRequest = diagnosticsEnabled
+				? (wireJson: string, dispatch: CodexRequestDispatch): void => {
+						requestDiagnostics.push(
+							createCodexRequestDiagnostic(
+								bodyJson,
+								wireJson,
+								transport,
+								requestDiagnostics.length + 1,
+								dispatch,
+							).catch(() => undefined),
+						);
+					}
+				: undefined;
 			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(transportSessionId);
 			if (websocketDisabledForSession) {
 				recordWebSocketSseFallback(transportSessionId);
@@ -282,7 +317,9 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						websocketConnectTimeoutMs,
 						cacheSessionId,
 						options,
+						recordRequest,
 					);
+					if (requestDiagnostics.length > 0) await flushRequestDiagnostics();
 
 					if (options?.signal?.aborted) {
 						throw new Error("Request was aborted");
@@ -320,6 +357,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
 
 			for (let attempt = 0; attempt <= maxRetries; attempt++) {
+				cleanupResponseSignal?.();
+				cleanupResponseSignal = undefined;
 				if (options?.signal?.aborted) {
 					throw new Error("Request was aborted");
 				}
@@ -327,7 +366,13 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				try {
 					const headerTimeout = createSSEHeaderTimeout();
 					const combinedSignal = combineAbortSignals([options?.signal, headerTimeout.signal]);
+					// Keep caller/limit cancellation connected through the streamed body.
+					cleanupResponseSignal = combinedSignal.cleanup;
 					try {
+						recordRequest?.(bodyJson, {
+							transport: "sse",
+							continuationReason: transport === "sse" ? "sse_requested" : "websocket_fallback",
+						});
 						response = await fetch(resolveCodexUrl(model.baseUrl), {
 							method: "POST",
 							headers: sseHeaders,
@@ -338,7 +383,6 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						const timeoutError = headerTimeout.error();
 						throw timeoutError && !options?.signal?.aborted ? timeoutError : error;
 					} finally {
-						combinedSignal.cleanup();
 						headerTimeout.clear();
 					}
 					await options?.onResponse?.(
@@ -398,6 +442,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 
 			start();
 			const result = await processStream(response, normalizer, model, options);
+			if (requestDiagnostics.length > 0) await flushRequestDiagnostics();
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -408,6 +453,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 
 			normalizer.push({ type: "done", reason: result.stopReason });
 		} catch (error) {
+			if (requestDiagnostics.length > 0) await flushRequestDiagnostics();
 			start();
 			normalizer.push({
 				type: "error",
@@ -415,6 +461,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				errorMessage: error instanceof Error ? error.message : String(error),
 			});
 		} finally {
+			cleanupResponseSignal?.();
 			normalizer.end();
 		}
 	})();
@@ -622,7 +669,11 @@ async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): 
 			const normalizedResponse = response
 				? { ...response, status: normalizeCodexStatus(response.status) }
 				: response;
-			yield { ...event, type: "response.completed", response: normalizedResponse } as ResponseStreamEvent;
+			yield {
+				...event,
+				type: type === "response.incomplete" ? "response.incomplete" : "response.completed",
+				response: normalizedResponse,
+			} as ResponseStreamEvent;
 			return;
 		}
 
@@ -1259,41 +1310,47 @@ function requestBodiesMatchExceptInput(a: RequestBody, b: RequestBody): boolean 
 function getCachedWebSocketInputDelta(
 	body: RequestBody,
 	continuation: CachedWebSocketContinuationState,
-): ResponseInput | undefined {
+): { delta?: ResponseInput; reason: CodexRequestDispatch["continuationReason"] } {
 	if (!requestBodiesMatchExceptInput(body, continuation.lastRequestBody)) {
-		return undefined;
+		return { reason: "non_input_changed" };
 	}
 
 	const currentInput = body.input ?? [];
 	const baseline = [...(continuation.lastRequestBody.input ?? []), ...continuation.lastResponseItems];
 	if (currentInput.length < baseline.length) {
-		return undefined;
+		return { reason: "input_shorter" };
 	}
 
 	const prefix = currentInput.slice(0, baseline.length);
 	if (!responseInputsEqual(prefix, baseline)) {
-		return undefined;
+		return { reason: "input_prefix_changed" };
 	}
 
-	return currentInput.slice(baseline.length);
+	return { delta: currentInput.slice(baseline.length), reason: "eligible" };
 }
 
-function buildCachedWebSocketRequestBody(entry: CachedWebSocketConnection, body: RequestBody): RequestBody {
+function buildCachedWebSocketRequestBody(
+	entry: CachedWebSocketConnection,
+	body: RequestBody,
+): { body: RequestBody; reason: CodexRequestDispatch["continuationReason"] } {
 	const continuation = entry.continuation;
 	if (!continuation) {
-		return body;
+		return { body, reason: "no_previous_response" };
 	}
 
-	const delta = getCachedWebSocketInputDelta(body, continuation);
+	const { delta, reason } = getCachedWebSocketInputDelta(body, continuation);
 	if (!delta || !continuation.lastResponseId) {
 		entry.continuation = undefined;
-		return body;
+		return { body, reason: delta ? "missing_response_id" : reason };
 	}
 
 	return {
-		...body,
-		previous_response_id: continuation.lastResponseId,
-		input: delta,
+		body: {
+			...body,
+			previous_response_id: continuation.lastResponseId,
+			input: delta,
+		},
+		reason: "eligible",
 	};
 }
 
@@ -1322,6 +1379,7 @@ async function processWebSocketStream(
 	websocketConnectTimeoutMs: number | undefined,
 	cacheSessionId: string | undefined,
 	options?: OpenAICodexResponsesOptions,
+	recordRequest?: (wireJson: string, dispatch: CodexRequestDispatch) => void,
 ): Promise<ProcessResponsesStreamResult> {
 	const { socket, entry, reused, release } = await acquireWebSocket(
 		url,
@@ -1337,7 +1395,19 @@ async function processWebSocketStream(
 	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
 	const fullBody = body;
-	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
+	const selection: { body: RequestBody; reason: CodexRequestDispatch["continuationReason"] } =
+		useCachedContext && entry
+			? buildCachedWebSocketRequestBody(entry, fullBody)
+			: {
+					body: fullBody,
+					reason:
+						cacheSessionId === undefined
+							? "cache_disabled"
+							: !useCachedContext
+								? "transport_not_cached"
+								: "connection_not_cached",
+				};
+	const requestBody = selection.body;
 	const stats = options?.sessionId ? getOrCreateWebSocketDebugStats(options.sessionId) : undefined;
 	if (stats) {
 		stats.requests++;
@@ -1357,7 +1427,19 @@ async function processWebSocketStream(
 		}
 	}
 	try {
-		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
+		const wireJson = JSON.stringify({ type: "response.create", ...requestBody });
+		if (recordRequest) {
+			try {
+				recordRequest(wireJson, {
+					transport: "websocket",
+					continuationReason: selection.reason,
+					connectionReused: reused,
+				});
+			} catch {
+				// Diagnostic snapshotting must not change request dispatch or fallback.
+			}
+		}
+		socket.send(wireJson);
 		const result = await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
 				mapCodexEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs)),

@@ -29,6 +29,7 @@ import type {
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { parseJsonWithRepair } from "../utils/json-parse.ts";
+import type { JsonObject } from "../utils/json-value.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
@@ -340,6 +341,10 @@ async function* iterateSseMessages(
 	const decoder = new TextDecoder();
 	const state: SseDecoderState = { event: null, data: [], raw: [] };
 	let buffer = "";
+	const onAbort = () => {
+		void reader.cancel().catch(() => {});
+	};
+	signal?.addEventListener("abort", onAbort, { once: true });
 
 	try {
 		while (true) {
@@ -348,6 +353,7 @@ async function* iterateSseMessages(
 			}
 
 			const { value, done } = await reader.read();
+			if (signal?.aborted) throw new Error("Request was aborted");
 			if (done) {
 				break;
 			}
@@ -387,7 +393,17 @@ async function* iterateSseMessages(
 			yield trailingEvent;
 		}
 	} finally {
+		signal?.removeEventListener("abort", onAbort);
+		try {
+			await reader.cancel();
+		} catch {}
 		reader.releaseLock();
+	}
+}
+
+class InvalidAnthropicToolInputError extends Error {
+	constructor() {
+		super("Anthropic returned malformed JSON for tool arguments. No tools were executed.");
 	}
 }
 
@@ -413,6 +429,17 @@ async function* iterateAnthropicEvents(
 
 		try {
 			const event = parseJsonWithRepair<RawMessageStreamEvent>(sse.data);
+			if (
+				(event.type === "content_block_start" && event.content_block.type === "tool_use") ||
+				(event.type === "content_block_delta" && event.delta.type === "input_json_delta")
+			) {
+				// Repairing the outer event could silently change authoritative tool input.
+				try {
+					JSON.parse(sse.data);
+				} catch {
+					throw new InvalidAnthropicToolInputError();
+				}
+			}
 			if (event.type === "message_start") {
 				sawMessageStart = true;
 			} else if (event.type === "message_stop") {
@@ -420,6 +447,13 @@ async function* iterateAnthropicEvents(
 			}
 			yield event;
 		} catch (error) {
+			if (error instanceof InvalidAnthropicToolInputError) throw error;
+			// If decoding failed before the block type became available, a content
+			// event may still contain tool input. Fail closed without echoing its raw
+			// payload or allowing argument text to influence retry classification.
+			if (sse.event === "content_block_start" || sse.event === "content_block_delta") {
+				throw new InvalidAnthropicToolInputError();
+			}
 			const message = error instanceof Error ? error.message : String(error);
 			throw new Error(
 				`Could not parse Anthropic SSE event ${sse.event}: ${message}; data=${sse.data}; raw=${sse.raw.join("\\n")}`,
@@ -437,7 +471,17 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 	context: Context,
 	options?: AnthropicOptions,
 ): AssistantMessageEventStream => {
-	const normalizer = new AssistantStreamNormalizer();
+	const normalizer = new AssistantStreamNormalizer(options);
+	if (
+		!normalizer.validateConfiguration({
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+		})
+	)
+		return normalizer.stream;
+	options = { ...options, signal: normalizer.signal };
 	normalizer.push({
 		type: "start",
 		init: {
@@ -462,6 +506,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 		let nextContentIndex = 0;
 		type AnthropicBlockKind = "text" | "thinking" | "toolCall";
 		const blocksByRawIndex = new Map<number, { contentIndex: number; kind: AnthropicBlockKind }>();
+		const toolArgumentSeeds = new Map<number, string>();
 		const registerBlock = (rawIndex: number, kind: AnthropicBlockKind) => {
 			const block = { contentIndex: nextContentIndex, kind };
 			nextContentIndex += 1;
@@ -566,7 +611,10 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 								? fromClaudeCodeName(event.content_block.name, context.tools)
 								: event.content_block.name,
 						});
-						const seededArgs = JSON.stringify(event.content_block.input ?? {});
+						const seededInput = event.content_block.input as JsonObject;
+						if (!normalizer.checkToolArgumentsObject(contentIndex, seededInput)) return;
+						const seededArgs = JSON.stringify(seededInput) ?? "";
+						toolArgumentSeeds.set(contentIndex, seededArgs);
 						if (seededArgs !== "{}") {
 							normalizer.push({ type: "toolcall_delta", contentIndex, argsTextDelta: seededArgs });
 						}
@@ -580,6 +628,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						normalizer.push({ type: "thinking_delta", contentIndex, delta: event.delta.thinking });
 					} else if (event.delta.type === "input_json_delta") {
 						const contentIndex = resolveBlock(event.index, "toolCall");
+						if (event.delta.partial_json.length > 0) toolArgumentSeeds.delete(contentIndex);
 						normalizer.push({
 							type: "toolcall_delta",
 							contentIndex,
@@ -601,7 +650,12 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					} else if (block?.kind === "thinking") {
 						normalizer.push({ type: "thinking_end", contentIndex: block.contentIndex });
 					} else if (block?.kind === "toolCall") {
-						normalizer.push({ type: "toolcall_end", contentIndex: block.contentIndex });
+						normalizer.push({
+							type: "toolcall_end",
+							contentIndex: block.contentIndex,
+							argumentsText: toolArgumentSeeds.get(block.contentIndex),
+						});
+						toolArgumentSeeds.delete(block.contentIndex);
 					}
 				} else if (event.type === "message_delta") {
 					if (event.delta.stop_reason) {
@@ -644,6 +698,13 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				type: "error",
 				reason: options?.signal?.aborted ? "aborted" : "error",
 				errorMessage: error instanceof Error ? error.message : JSON.stringify(error),
+				...(error instanceof InvalidAnthropicToolInputError
+					? {
+							diagnostics: [
+								{ type: "invalid_tool_arguments", timestamp: Date.now(), details: { code: "invalid_json" } },
+							],
+						}
+					: {}),
 				usage,
 			});
 		} finally {

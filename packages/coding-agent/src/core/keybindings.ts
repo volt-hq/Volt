@@ -14,6 +14,7 @@ export interface AppKeybindings {
 	"app.interrupt": true;
 	"app.clear": true;
 	"app.exit": true;
+	"app.debug": true;
 	"app.suspend": true;
 	"app.mode.toggle": true;
 	"app.plan.togglePane": true;
@@ -71,6 +72,7 @@ export const KEYBINDINGS = {
 	"app.interrupt": { defaultKeys: "escape", description: "Cancel or abort" },
 	"app.clear": { defaultKeys: "ctrl+c", description: "Clear editor" },
 	"app.exit": { defaultKeys: "ctrl+d", description: "Exit when editor is empty" },
+	"app.debug": { defaultKeys: "f12", description: "Capture diagnostics without interrupting work" },
 	"app.suspend": {
 		defaultKeys: process.platform === "win32" ? [] : "ctrl+z",
 		description: "Suspend to background",
