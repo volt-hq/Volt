@@ -55,12 +55,14 @@ function createContext() {
 			viewerAbort: vi.fn(async () => {}),
 			relayCount: () => 0,
 		},
-		session: { reload: vi.fn(async () => {}), isStreaming: false },
+		session: { reload: vi.fn(async () => {}), isStreaming: false, isBusy: false, activityRevision: 0 },
 		runtimeHost: { startRecoveredClientInputs: vi.fn(async () => {}) },
 		renderCurrentSessionState: vi.fn(),
 		showStatus: vi.fn(),
 		showWarning: vi.fn(),
-		lastQuitWarningAt: 0,
+		quitConfirmation: undefined,
+		hasQuitConfirmation: proto.hasQuitConfirmation,
+		shutdown: vi.fn(async () => {}),
 		enterDrainViewer: proto.enterDrainViewer,
 		finishDrainViewerGrant: proto.finishDrainViewerGrant,
 		// finishDrainViewerGrant reloads the session through this; the mock session
@@ -68,7 +70,6 @@ function createContext() {
 		absorbRemoteSessionChangesFromDisk: proto.absorbRemoteSessionChangesFromDisk,
 		exitDrainViewer: proto.exitDrainViewer,
 		isDrainViewerActive: proto.isDrainViewerActive,
-		confirmQuitWithAttachedPhone: proto.confirmQuitWithAttachedPhone,
 	};
 	return context;
 }
@@ -359,20 +360,23 @@ describe("drain viewer (§6.3)", () => {
 		expect(context.session.reload).not.toHaveBeenCalled();
 	});
 
-	it("quit warns once when a phone is attached mid-turn, then confirms (§6.2)", () => {
+	it("quit warns once when a phone is attached mid-turn, then confirms (§6.2)", async () => {
 		const context = createContext();
 		context.session.isStreaming = true;
+		context.session.isBusy = true;
 		context.daemonAttach.relayCount = () => 1;
 
-		expect(proto.confirmQuitWithAttachedPhone.call(context)).toBe(false);
+		await proto.requestQuit.call(context);
+		expect(context.shutdown).not.toHaveBeenCalled();
 		expect(context.showWarning).toHaveBeenCalledTimes(1);
 		// A second quit within the confirmation window proceeds.
-		expect(proto.confirmQuitWithAttachedPhone.call(context)).toBe(true);
+		await proto.requestQuit.call(context);
+		expect(context.shutdown).toHaveBeenCalledTimes(1);
 
-		// No phone attached or no streaming turn: no warning at all.
+		// Idle sessions still quit immediately.
 		const calm = createContext();
-		calm.session.isStreaming = false;
-		expect(proto.confirmQuitWithAttachedPhone.call(calm)).toBe(true);
+		await proto.requestQuit.call(calm);
+		expect(calm.shutdown).toHaveBeenCalledTimes(1);
 		expect(calm.showWarning).not.toHaveBeenCalled();
 	});
 });

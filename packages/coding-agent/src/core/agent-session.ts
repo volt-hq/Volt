@@ -655,6 +655,7 @@ export class AgentSession {
 	private readonly _admittedAncillaryWork = new Set<Promise<unknown>>();
 	/** Prompt/preflight work is detached during replacement to avoid ctx.newSession self-joins. */
 	private readonly _admittedPromptWork = new Set<Promise<unknown>>();
+	private _activityRevision = 0;
 
 	// Agent-run and compaction state
 	private _activeAgentRun: ActiveAgentRun | undefined = undefined;
@@ -2140,20 +2141,39 @@ export class AgentSession {
 		}
 	}
 
+	/** Monotonic revision of admitted work; changes when an operation begins or settles. */
+	get activityRevision(): number {
+		return this._activityRevision;
+	}
+
 	private _trackAdmittedAncillaryWork<T>(operation: Promise<T>): Promise<T> {
 		this._admittedAncillaryWork.add(operation);
+		this._activityRevision++;
 		void operation.then(
-			() => this._admittedAncillaryWork.delete(operation),
-			() => this._admittedAncillaryWork.delete(operation),
+			() => {
+				this._admittedAncillaryWork.delete(operation);
+				this._activityRevision++;
+			},
+			() => {
+				this._admittedAncillaryWork.delete(operation);
+				this._activityRevision++;
+			},
 		);
 		return operation;
 	}
 
 	private _trackAdmittedPromptWork<T>(operation: Promise<T>): Promise<T> {
 		this._admittedPromptWork.add(operation);
+		this._activityRevision++;
 		void operation.then(
-			() => this._admittedPromptWork.delete(operation),
-			() => this._admittedPromptWork.delete(operation),
+			() => {
+				this._admittedPromptWork.delete(operation);
+				this._activityRevision++;
+			},
+			() => {
+				this._admittedPromptWork.delete(operation);
+				this._activityRevision++;
+			},
 		);
 		return operation;
 	}
