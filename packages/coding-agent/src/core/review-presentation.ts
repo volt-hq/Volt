@@ -113,7 +113,6 @@ function compactReview(
 			? STATIC_REVIEW_LIMITATION
 			: "Runtime validation is not established by this report.",
 	);
-	if (parsed.coverage.failedVerificationAttempts.length) lines.push("Some review tool attempts failed; see details.");
 	if (parsed.coverage.modelReportedLimitations.length) lines.push("Model-reported limits are recorded in details.");
 	// Hard line breaks keep independent status and limitation sentences readable in Markdown.
 	return lines.join("  \n");
@@ -155,7 +154,6 @@ function fullReview(
 		`- File paths observed: ${parsed.coverage.filesInspected.map(reviewText).join(", ") || "none"}`,
 		`- Hunks inspected: ${parsed.coverage.hunksInspected.join(", ") || "none"}`,
 		`- Commands recorded: ${parsed.coverage.commandsRun.join("; ") || "none"}`,
-		`- Failed review tool attempts: ${parsed.coverage.failedVerificationAttempts.join("; ") || "none"}`,
 	];
 	if (parsed.coverage.context) {
 		const context = parsed.coverage.context;
