@@ -900,7 +900,7 @@ function expectGeneratedMalformedRecovery(
 	} else {
 		expect(result).toMatchObject({
 			stopReason: "error",
-			errorMessage: "The provider did not complete its tool-call response. No tools were executed.",
+			errorMessage: "Assistant stream ended without a terminal fragment",
 		});
 	}
 

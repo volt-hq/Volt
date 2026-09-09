@@ -200,7 +200,7 @@ describe("review snapshot tools", () => {
 		const cursor = (page.details as { nextCursor?: string }).nextCursor;
 		await expect(execute(tool(tools, "review_tree"), { cursor })).rejects.toThrow(/another operation/);
 		if (!cursor) throw new Error("Expected a cursor");
-		const tampered = `${cursor.slice(0, -1)}x`;
+		const tampered = `${cursor.slice(0, -1)}${cursor.endsWith("x") ? "y" : "x"}`;
 		await expect(execute(tool(tools, "review_changed_files"), { cursor: tampered })).rejects.toThrow(/invalid/);
 
 		const search = await execute(tool(tools, "review_search"), {
