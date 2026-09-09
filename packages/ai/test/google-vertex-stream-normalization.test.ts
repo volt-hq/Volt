@@ -112,7 +112,18 @@ describe.each(["google", "google-vertex"] as const)("%s tool completion", (provi
 			];
 			const result = await run();
 			expect(result.stopReason).toBe("error");
-			expect(result.diagnostics).toContainEqual(expect.objectContaining({ type: "invalid_tool_arguments" }));
+			if (finishReason === "MAX_TOKENS") {
+				expect(result.diagnostics).toContainEqual(expect.objectContaining({ type: "invalid_tool_arguments" }));
+			} else {
+				expect(result.errorMessage).toBe(
+					finishReason === undefined
+						? `${provider === "google" ? "Google" : "Google Vertex"} stream ended without finishReason`
+						: "An unknown error occurred",
+				);
+				expect(result.diagnostics?.some((diagnostic) => diagnostic.type === "invalid_tool_arguments")).not.toBe(
+					true,
+				);
+			}
 		},
 	);
 

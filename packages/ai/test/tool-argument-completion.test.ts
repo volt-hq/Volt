@@ -60,6 +60,44 @@ describe("strict tool argument completion", () => {
 		expect(result.diagnostics?.[0]?.details?.code).toBe("missing_completion");
 	});
 
+	it.each([false, true])("preserves provider failures after tool completion=%s", async (completed) => {
+		const diagnostic = {
+			type: "provider_transport_failure",
+			timestamp: 1,
+			error: { name: "Error", message: "WebSocket error" },
+		};
+		const { events, result } = await normalize([
+			{ type: "toolcall_delta", contentIndex: 0, argsTextDelta: completed ? '{"text":"done"}' : '{"text":"partial' },
+			...(completed ? [{ type: "toolcall_end" as const, contentIndex: 0 }] : []),
+			{ type: "error", reason: "error", errorMessage: "WebSocket error", diagnostics: [diagnostic] },
+		]);
+		expect(result).toMatchObject({
+			stopReason: "error",
+			errorMessage: "WebSocket error",
+			diagnostics: [diagnostic],
+		});
+		expect(events.at(-1)?.type).toBe("error");
+		expect(events.some((event) => event.type === "done")).toBe(false);
+	});
+
+	it("keeps invalid completed arguments authoritative over a later transport failure", async () => {
+		const { result } = await normalize([
+			{ type: "toolcall_delta", contentIndex: 0, argsTextDelta: '{"text":"unfinished' },
+			{ type: "toolcall_end", contentIndex: 0 },
+			{ type: "error", reason: "error", errorMessage: "WebSocket error" },
+		]);
+		expect(result).toMatchObject({
+			stopReason: "error",
+			errorMessage: "Tool arguments must be a complete, valid JSON object. No tools were executed.",
+		});
+		expect(result.diagnostics).toContainEqual(
+			expect.objectContaining({
+				type: "invalid_tool_arguments",
+				details: { code: "invalid_json", contentIndex: 0 },
+			}),
+		);
+	});
+
 	it("rejects a length-limited response even if an earlier call completed", async () => {
 		const { result } = await normalize([
 			{ type: "toolcall_delta", contentIndex: 0, argsTextDelta: '{"text":"done"}' },

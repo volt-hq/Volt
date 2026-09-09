@@ -569,13 +569,10 @@ export class AssistantStreamNormalizer {
 		const hasGenerationLimit = failureDiagnostics.some(
 			(diagnostic) => diagnostic.type === "tool_argument_generation_limit",
 		);
-		const hasTypedToolFailure =
-			hasGenerationLimit || failureDiagnostics.some((diagnostic) => diagnostic.type === "invalid_tool_arguments");
-		if (reason !== "aborted" && !hasTypedToolFailure) {
-			for (const [contentIndex, state] of this.blocks) {
-				if (state.kind === "toolCall") this.rejectToolArguments("missing_completion", contentIndex);
-			}
-		}
+		// An error terminal already prevents every tool in this response from executing.
+		// Preserve the provider cause for retry policy instead of treating an interrupted
+		// stream as a successful response with missing tool completion. Actual argument
+		// validation failures remain authoritative below and in the retained diagnostics.
 		this.closeOpenBlocks();
 		if (this.terminal) return;
 		if (usage || diagnostics) {

@@ -134,10 +134,24 @@ describe.each(["openai", "mistral", "bedrock"] as const)("%s strict tool complet
 		},
 	);
 
-	it.each(["length", "missing"] as const)("rejects valid previews after %s termination", async (terminal) => {
-		const result = await run('{"text":"done"}', terminal);
+	it("rejects valid previews after length termination", async () => {
+		const result = await run('{"text":"done"}', "length");
 		expect(result.stopReason).toBe("error");
 		expect(result.diagnostics).toContainEqual(expect.objectContaining({ type: "invalid_tool_arguments" }));
+	});
+
+	it("rejects valid previews after missing termination while preserving provider errors", async () => {
+		const result = await run('{"text":"done"}', "missing");
+		expect(result.stopReason).toBe("error");
+		if (provider === "mistral") {
+			// Mistral synthesizes a successful terminal; missing call completion still fails closed.
+			expect(result.diagnostics).toContainEqual(expect.objectContaining({ type: "invalid_tool_arguments" }));
+		} else {
+			expect(result.errorMessage).toBe(
+				provider === "openai" ? "Stream ended without finish_reason" : "Bedrock stream ended before messageStop",
+			);
+			expect(result.diagnostics?.some((diagnostic) => diagnostic.type === "invalid_tool_arguments")).not.toBe(true);
+		}
 	});
 
 	if (provider === "bedrock")
