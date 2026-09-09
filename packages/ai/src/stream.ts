@@ -12,6 +12,7 @@ import type {
 	SimpleStreamOptions,
 	StreamOptions,
 } from "./types.ts";
+import { drainEventStream } from "./utils/event-stream.ts";
 
 export { getEnvApiKey } from "./env-api-keys.ts";
 
@@ -52,7 +53,7 @@ export async function complete<TApi extends Api>(
 	options?: ProviderStreamOptions,
 ): Promise<AssistantMessage> {
 	const s = stream(model, context, options);
-	return s.result();
+	return drainEventStream(s);
 }
 
 export function streamSimple<TApi extends Api>(
@@ -76,5 +77,5 @@ export async function completeSimple<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): Promise<AssistantMessage> {
 	const s = streamSimple(model, context, options);
-	return s.result();
+	return drainEventStream(s);
 }

@@ -16,7 +16,15 @@ export function isTransientProviderError(
 	errorMessage: string,
 	diagnostics?: readonly AssistantMessageDiagnostic[],
 ): boolean {
-	if (diagnostics?.some((diagnostic) => diagnostic.type === "tool_argument_generation_limit")) return false;
+	if (
+		diagnostics?.some(
+			(diagnostic) =>
+				diagnostic.type === "tool_argument_generation_limit" ||
+				diagnostic.type === "assistant_stream_queue_limit" ||
+				diagnostic.type === "assistant_stream_processing_error",
+		)
+	)
+		return false;
 	return (
 		!diagnostics?.some((diagnostic) => diagnostic.type === "invalid_tool_arguments") &&
 		!isNonRetryableProviderLimitError(errorMessage) &&

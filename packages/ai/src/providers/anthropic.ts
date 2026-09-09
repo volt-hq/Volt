@@ -611,9 +611,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 								? fromClaudeCodeName(event.content_block.name, context.tools)
 								: event.content_block.name,
 						});
-						if (!normalizer.checkToolArgumentsObject(contentIndex, event.content_block.input as JsonObject))
-							return;
-						const seededArgs = JSON.stringify(event.content_block.input) ?? "";
+						const seededInput = event.content_block.input as JsonObject;
+						if (!normalizer.checkToolArgumentsObject(contentIndex, seededInput)) return;
+						const seededArgs = JSON.stringify(seededInput) ?? "";
 						toolArgumentSeeds.set(contentIndex, seededArgs);
 						if (seededArgs !== "{}") {
 							normalizer.push({ type: "toolcall_delta", contentIndex, argsTextDelta: seededArgs });
