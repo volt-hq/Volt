@@ -23,6 +23,7 @@ import type {
 	StreamFn,
 	ThinkingLevel,
 } from "../index.ts";
+import type { AgentHarnessAdmissionGate } from "./admission-gate.ts";
 import type { Session } from "./session/session.ts";
 
 /** Result of a fallible operation. Expected failures are returned as `ok: false` instead of thrown. */
@@ -1011,6 +1012,8 @@ export interface AgentHarnessOptions<
 > {
 	env: ExecutionEnv;
 	session: Session;
+	/** Shared host admission fence. Defaults to an independent gate; does not gate queues or cleanup. */
+	admissionGate?: AgentHarnessAdmissionGate;
 	tools?: TTool[];
 	/**
 	 * Concrete resources available to explicit invocation methods and system-prompt callbacks.

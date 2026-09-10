@@ -1089,7 +1089,7 @@ describe("AgentSession background jobs", () => {
 				expect(reentrantAbort).toBe(abort);
 				expect(harness.session.abort("keyboard_interrupt")).toBe(abort);
 				expect(backend.signal?.aborted).toBe(true);
-				await expect(attemptedStart).rejects.toThrow(/during a session mutation or abort/);
+				await expect(attemptedStart).rejects.toThrow("Operation admission is suspended");
 				expect(settled).not.toHaveBeenCalled();
 				expect(harness.session.hasBackgroundJobs).toBe(true);
 				expect(await jobsTool(harness).execute("list-during-abort", { action: "list" })).toMatchObject({
@@ -1131,7 +1131,7 @@ describe("AgentSession background jobs", () => {
 			expect(backend.signal?.aborted).toBe(true);
 			expect(harness.session.abort()).toBe(abort);
 			await expect(bash.execute("during-error", { command: "must not run", background: true })).rejects.toThrow(
-				/during a session mutation or abort/,
+				"Operation admission is suspended",
 			);
 		} finally {
 			backend.finish.resolve();

@@ -44,7 +44,7 @@ import type {
 	ToolCallEvent,
 	ToolCallResult,
 } from "@hansjm10/volt-agent-core";
-import { AgentHarness } from "@hansjm10/volt-agent-core";
+import { AgentHarness, AgentHarnessAdmissionGate } from "@hansjm10/volt-agent-core";
 import { NodeExecutionEnv } from "@hansjm10/volt-agent-core/node";
 import type {
 	Api,
@@ -697,12 +697,17 @@ export class AgentSession {
 	// Retry state
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
-	/** Incremented by abort() so in-flight session continuations cannot start a new core run. */
-	private _abortGeneration = 0;
+	/** One admission authority for foreground operations, native tools, and background jobs. */
+	private readonly _admissionGate = new AgentHarnessAdmissionGate();
+	/** Preflight continuations retain the same revision that fences low-level reservations. */
+	private get _abortGeneration(): number {
+		return this._admissionGate.revision;
+	}
 	private _abortPromise: Promise<void> | undefined;
 
 	// Background work outlives individual model turns, but never this session.
 	private readonly _backgroundJobs = new BackgroundJobManager({
+		admissionGate: this._admissionGate,
 		isToolAllowed: (name) =>
 			!this._disposed &&
 			this._planningState.mode !== "plan" &&
@@ -820,6 +825,7 @@ export class AgentSession {
 			() => this._canonicalProducerRetired,
 		);
 		this._harness = new AgentHarness({
+			admissionGate: this._admissionGate,
 			env: new NodeExecutionEnv({ cwd: config.cwd }),
 			session: createSessionManagerHarnessSession(
 				config.sessionManager,
@@ -2505,6 +2511,8 @@ export class AgentSession {
 			// Late Harness events are ignored by the disposed guard and cannot
 			// repopulate these projections.
 			this._disposed = true;
+			// Teardown never releases its hold, even if an overlapping abort finishes.
+			this._admissionGate.suspend();
 			this._backgroundNotificationDeliveries.clear();
 			this._backgroundStartAcknowledgements.clear();
 			this._streamingMessage = undefined;
@@ -4008,6 +4016,9 @@ export class AgentSession {
 		if (this.isBusy || this._disposed) {
 			return Promise.reject(new Error("Cannot resume recovered client input while the agent runtime is busy"));
 		}
+		if (!this._admissionGate.isOpen) {
+			return Promise.reject(new Error("Operation admission is suspended"));
+		}
 		const abortGeneration = this._abortGeneration;
 		if (this.isReviewDiscussion) this._recoveredClientInputReplayPending = true;
 		const resume = (async () => {
@@ -4421,7 +4432,10 @@ export class AgentSession {
 		assertConversationGenerationCurrent();
 		this._assertRecoveredClientInputOrdering(options?.clientMessageId);
 		const wasRunning = this.isStreaming || this._harness.isReservedOrRunning();
-		const reservedRun = wasRunning || this._harness.hasPendingPrompt() ? undefined : this._harness.reserveRun();
+		const reservedRun =
+			wasRunning || this._harness.hasPendingPrompt() || !this._admissionGate.isOpen
+				? undefined
+				: this._harness.reserveRun();
 		let admission: ClientInputAdmission;
 		try {
 			admission =
@@ -4453,8 +4467,8 @@ export class AgentSession {
 			throw error;
 		}
 		const isRunning = wasRunning;
-		const shouldQueue = isRunning || this._abortPromise !== undefined;
-		const allowQueue = isRunning && this._abortPromise === undefined;
+		const shouldQueue = isRunning || !this._admissionGate.isOpen;
+		const allowQueue = isRunning && this._admissionGate.isOpen;
 		const abortGeneration = this._abortGeneration;
 		if (admission.kind === "completed") {
 			if (reservedRun) this._harness.cancelReservedRun(reservedRun);
@@ -5343,6 +5357,7 @@ export class AgentSession {
 		if (this._abortPromise) {
 			return this._abortPromise;
 		}
+		const releaseAdmission = this._admissionGate.suspend();
 		let resolveAbort!: () => void;
 		let rejectAbort!: (error: unknown) => void;
 		const drain = new Promise<void>((resolve, reject) => {
@@ -5353,11 +5368,11 @@ export class AgentSession {
 			if (this._abortPromise === abortPromise) {
 				this._abortPromise = undefined;
 			}
+			releaseAdmission();
 		});
-		// Publish both the admission fence and the join before any cancellation
-		// callback can synchronously start tools or reenter abort().
+		// Admission is already fenced. Publish the join before any cancellation
+		// callback can synchronously reenter abort().
 		this._abortPromise = abortPromise;
-		this._abortGeneration += 1;
 		const drains: Promise<void>[] = [];
 		for (const cancel of [
 			() => {
@@ -6984,7 +6999,8 @@ export class AgentSession {
 					...wrapped,
 					execute: async (...args: Parameters<typeof wrapped.execute>) => {
 						this._assertConversationAuthorityAvailable();
-						if (this._hasSessionOperationBarrier || this._abortPromise) {
+						this._admissionGate.assertOpen();
+						if (this._hasSessionOperationBarrier) {
 							throw new Error(
 								"Cannot start a native tool during a session mutation or abort; wait for it to finish",
 							);
@@ -7300,6 +7316,7 @@ export class AgentSession {
 		if (this._disposed) {
 			throw new Error("Cannot execute bash on a disposed session");
 		}
+		this._admissionGate.assertOpen();
 		if (this._hasSessionOperationBarrier) {
 			throw new Error("Cannot execute bash while a session mutation is active");
 		}

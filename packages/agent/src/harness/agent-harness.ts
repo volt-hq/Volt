@@ -481,7 +481,7 @@ export class AgentHarness<
 > {
 	readonly env: ExecutionEnv;
 	private session: Session;
-	private readonly operations = new HarnessOperationCoordinator();
+	private readonly operations: HarnessOperationCoordinator;
 	private readonly closeDrains = new Set<Promise<void>>();
 	private readonly closeDrainErrors: Error[] = [];
 	private closePromise: Promise<void> | undefined;
@@ -530,6 +530,7 @@ export class AgentHarness<
 	constructor(options: AgentHarnessOptions<TSkill, TPromptTemplate, TTool>) {
 		this.env = options.env;
 		this.session = options.session;
+		this.operations = new HarnessOperationCoordinator(options.admissionGate);
 		this.resources = options.resources ?? {};
 		this.streamOptions = cloneStreamOptions(options.streamOptions);
 		this.systemPrompt = options.systemPrompt;
@@ -2388,9 +2389,9 @@ export class AgentHarness<
 				"AgentHarness has a retained prompt; call continue() or discardPendingPrompt() before starting another",
 			);
 		}
+		const run = this.admitBoundedRun(operation);
 		this.continuationState = undefined;
 		this.invalidateContinuationContext();
-		const run = this.admitBoundedRun(operation);
 		try {
 			const baseTurnState = await this.createTurnState(
 				run.state.operation.abortGate.signal,
@@ -2493,8 +2494,14 @@ export class AgentHarness<
 		if (!this.operations.reclassify(operation, "compaction")) {
 			throw new AgentHarnessError("invalid_state", "Harness reservation could not enter compaction");
 		}
-		const successor = this.operations.reserveSuccessor("turn");
-		if (!successor) throw new AgentHarnessError("busy", "A successor operation is already reserved");
+		let successor: ReturnType<HarnessOperationCoordinator["reserveSuccessor"]>;
+		try {
+			successor = this.operations.reserveSuccessor("turn");
+			if (!successor) throw new AgentHarnessError("busy", "A successor operation is already reserved");
+		} catch (error) {
+			this.operations.finish(operation);
+			throw error;
+		}
 		let result: TResult;
 		try {
 			result = await this.executeStructuralOperation(operation, strategy);
