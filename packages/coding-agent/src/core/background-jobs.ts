@@ -304,11 +304,22 @@ export class BackgroundJobManager {
 			text = buffer.subarray(start).toString("utf-8");
 		}
 		const bounded = truncateTail(text, { maxBytes: BACKGROUND_JOB_MAX_OUTPUT_BYTES });
+		const details = result.details;
+		const truncation =
+			details && typeof details === "object" && "truncation" in details ? details.truncation : undefined;
+		// Bash progress is already bounded, so its metadata can be the only evidence of dropped output.
+		const upstreamTruncated =
+			truncation !== null &&
+			typeof truncation === "object" &&
+			"truncated" in truncation &&
+			truncation.truncated === true;
+		const outputTruncated = upstreamTruncated || byteTruncated || bounded.truncated;
 		const changed = record.snapshot.output !== bounded.content;
+		const truncationChanged = record.snapshot.outputTruncated !== outputTruncated;
 		if (changed && bounded.content) record.snapshot.lastOutputAt = Date.now();
 		record.snapshot.output = bounded.content;
-		record.snapshot.outputTruncated = byteTruncated || bounded.truncated;
-		if (changed) this.emitChange();
+		record.snapshot.outputTruncated = outputTruncated;
+		if (changed || truncationChanged) this.emitChange();
 	}
 
 	private async run(record: JobRecord, work: BackgroundJobStart): Promise<void> {

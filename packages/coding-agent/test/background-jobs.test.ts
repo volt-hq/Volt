@@ -314,6 +314,80 @@ describe("BackgroundJobManager", () => {
 		}
 	});
 
+	it.each([
+		[undefined, false],
+		[null, false],
+		["unrelated metadata", false],
+		[[], false],
+		[{ truncation: null }, false],
+		[{ truncation: [] }, false],
+		[{ truncation: { truncated: false } }, false],
+		[{ truncation: { truncated: "true" } }, false],
+		[{ truncation: { truncated: true } }, true],
+	] as const)("reads upstream truncation only from an explicit boolean flag: %j", async (details, truncated) => {
+		const jobs = manager();
+		const job = jobs.start({
+			toolName: "bash",
+			toolCallId: "call",
+			label: "bounded output",
+			execute: async () => ({
+				content: [{ type: "text", text: "retained output" }],
+				...(details === undefined ? {} : { details }),
+			}),
+		});
+		expect(await jobs.wait(job.id)).toMatchObject({
+			status: "completed",
+			output: "retained output",
+			outputTruncated: truncated,
+		});
+	});
+
+	it("notifies truncation-only changes without changing output time or latching prior metadata", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(1000);
+		const jobs = manager();
+		const finish = deferred();
+		const result: AgentToolResult<unknown> = { content: [{ type: "text", text: "retained output" }] };
+		let update!: AgentToolUpdateCallback<unknown>;
+		const job = jobs.start({
+			toolName: "bash",
+			toolCallId: "call",
+			label: "repeated output",
+			execute: async (_signal, onUpdate) => {
+				update = onUpdate;
+				onUpdate(result);
+				await finish.promise;
+				return result;
+			},
+		});
+		try {
+			await Promise.resolve();
+			expect(jobs.get(job.id)).toMatchObject({ outputTruncated: false, lastOutputAt: 1000 });
+			const observer = vi.fn();
+			jobs.subscribe(observer);
+			vi.setSystemTime(2000);
+			update({ ...result, details: { truncation: { truncated: true } } });
+			expect(jobs.get(job.id)).toMatchObject({ outputTruncated: true, lastOutputAt: 1000 });
+			expect(observer).toHaveBeenCalledTimes(1);
+			update({ ...result, details: { truncation: { truncated: true } } });
+			expect(observer).toHaveBeenCalledTimes(1);
+			update({ ...result, details: { truncation: { truncated: false } } });
+			expect(jobs.get(job.id).outputTruncated).toBe(false);
+			expect(observer).toHaveBeenCalledTimes(2);
+			update({ ...result, details: { truncation: { truncated: true } } });
+			expect(observer).toHaveBeenCalledTimes(3);
+		} finally {
+			finish.resolve();
+			await jobs.wait(job.id);
+		}
+		expect(jobs.get(job.id)).toMatchObject({
+			status: "completed",
+			output: "retained output",
+			outputTruncated: false,
+			lastOutputAt: 1000,
+		});
+	});
+
 	it("contains invalid progress, aborts the worker, and does not retain late output", async () => {
 		const jobs = manager();
 		let executionSignal!: AbortSignal;
