@@ -26,6 +26,7 @@ import type { JsonObject } from "../utils/json-value.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { resolvePromptCacheRetention } from "./prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
+import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 const MISTRAL_TOOL_CALL_ID_LENGTH = 9;
@@ -87,10 +88,16 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 			});
 
 			const normalizeMistralToolCallId = createMistralToolCallIdNormalizer();
-			const transformedMessages = transformMessages(context.messages, model, (id) => normalizeMistralToolCallId(id));
+			const toolResultPayload = new ToolResultPayloadTracker();
+			const transformedMessages = transformMessages(
+				context.messages,
+				model,
+				(id) => normalizeMistralToolCallId(id),
+				toolResultPayload,
+			);
 
-			let payload = buildChatPayload(model, context, transformedMessages, options);
-			const nextPayload = await options?.onPayload?.(payload, model);
+			let payload = buildChatPayload(model, context, transformedMessages, options, toolResultPayload);
+			const nextPayload = await options?.onPayload?.(payload, model, toolResultPayload.metadata);
 			if (nextPayload !== undefined) {
 				payload = nextPayload as ChatCompletionStreamRequest;
 			}
@@ -240,11 +247,12 @@ function buildChatPayload(
 	context: Context,
 	messages: Message[],
 	options?: MistralOptions,
+	toolResultPayload?: ToolResultPayloadTracker,
 ): ChatCompletionStreamRequest {
 	const payload: ChatCompletionStreamRequest = {
 		model: model.id,
 		stream: true,
-		messages: toChatMessages(messages, model.input.includes("image")),
+		messages: toChatMessages(messages, model.input.includes("image"), toolResultPayload),
 	};
 
 	if (context.tools?.length) payload.tools = toFunctionTools(context.tools);
@@ -505,7 +513,11 @@ function stripSymbolKeys(value: unknown): unknown {
 	return value;
 }
 
-function toChatMessages(messages: Message[], supportsImages: boolean): ChatCompletionStreamRequestMessage[] {
+function toChatMessages(
+	messages: Message[],
+	supportsImages: boolean,
+	toolResultPayload?: ToolResultPayloadTracker,
+): ChatCompletionStreamRequestMessage[] {
 	const result: ChatCompletionStreamRequestMessage[] = [];
 
 	for (const msg of messages) {
@@ -587,6 +599,7 @@ function toChatMessages(messages: Message[], supportsImages: boolean): ChatCompl
 			name: msg.toolName,
 			content: toolContent,
 		});
+		toolResultPayload?.include(msg);
 	}
 
 	return result;

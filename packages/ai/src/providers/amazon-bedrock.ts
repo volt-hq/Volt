@@ -51,6 +51,7 @@ import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { resolvePromptCacheRetention, supportsPromptCacheMode } from "./prompt-cache.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampReasoning } from "./simple-options.ts";
+import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 export type BedrockThinkingDisplay = "summarized" | "omitted";
@@ -234,9 +235,10 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 						})
 					: "none";
 			const inferenceMaxTokens = options.maxTokens ?? (isAnthropicClaudeModel(model) ? model.maxTokens : undefined);
+			const toolResultPayload = new ToolResultPayloadTracker();
 			let commandInput = {
 				modelId: model.id,
-				messages: convertMessages(context, model, cacheRetention),
+				messages: convertMessages(context, model, cacheRetention, toolResultPayload),
 				system: buildSystemPrompt(context.systemPrompt, cacheRetention),
 				inferenceConfig: {
 					...(inferenceMaxTokens !== undefined && { maxTokens: inferenceMaxTokens }),
@@ -246,7 +248,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 				additionalModelRequestFields: buildAdditionalModelRequestFields(model, options),
 				...(options.requestMetadata !== undefined && { requestMetadata: options.requestMetadata }),
 			};
-			const nextCommandInput = await options?.onPayload?.(commandInput, model);
+			const nextCommandInput = await options?.onPayload?.(commandInput, model, toolResultPayload.metadata);
 			if (nextCommandInput !== undefined) {
 				commandInput = nextCommandInput as typeof commandInput;
 			}
@@ -690,9 +692,10 @@ function convertMessages(
 	context: Context,
 	model: Model<"bedrock-converse-stream">,
 	cacheRetention: CacheRetention,
+	toolResultPayload?: ToolResultPayloadTracker,
 ): Message[] {
 	const result: Message[] = [];
-	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
+	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId, toolResultPayload);
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const m = transformedMessages[i];
@@ -805,6 +808,7 @@ function convertMessages(
 						status: m.isError ? ToolResultStatus.ERROR : ToolResultStatus.SUCCESS,
 					},
 				});
+				toolResultPayload?.include(m);
 
 				// Look ahead for consecutive toolResult messages
 				let j = i + 1;
@@ -817,6 +821,7 @@ function convertMessages(
 							status: nextMsg.isError ? ToolResultStatus.ERROR : ToolResultStatus.SUCCESS,
 						},
 					});
+					toolResultPayload?.include(nextMsg);
 					j++;
 				}
 

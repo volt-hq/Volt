@@ -192,6 +192,7 @@ import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-promp
 import { getThemeByName, theme } from "./theme/runtime.ts";
 import { ToolProgressDiagnostics } from "./tool-progress-diagnostics.ts";
 import { withBackgroundJobs } from "./tools/background.ts";
+import { getBackgroundJobSnapshot } from "./tools/background-render.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import {
 	BRAVE_SEARCH_AUTH_PROVIDER,
@@ -204,6 +205,7 @@ import {
 	type SubagentToolMode,
 	type ToolDef,
 } from "./tools/index.ts";
+import { acknowledgeBackgroundJobResult } from "./tools/jobs.ts";
 import {
 	canonicalizePlanSteps,
 	createPlanningToolDefinitions,
@@ -799,11 +801,101 @@ export class AgentSession {
 			...(config.model === undefined ? {} : { model: config.model }),
 			thinkingLevel: config.thinkingLevel,
 			streamFn: async (model, context, options) => {
-				const stream = await config.streamFn(
-					model,
-					context,
-					this._activeCompaction ? { ...options, maxRetries: 0 } : options,
+				const activeRun = this._activeAgentRun;
+				const signal = options?.signal;
+				// Only admitted conversation requests can collect native terminal reads.
+				// Compaction/summary requests and already-collected history do not qualify.
+				const pendingJobIds = new Set(
+					activeRun && !this._disposed && !this._activeCompaction && !signal?.aborted
+						? this._backgroundJobs
+								.listUncollected()
+								.filter((job) => job.endedAt !== undefined)
+								.map((job) => job.id)
+						: [],
 				);
+				const resultCandidates =
+					pendingJobIds.size > 0
+						? context.messages.flatMap((message, messageIndex) => {
+								if (message.role !== "toolResult" || message.toolName !== "jobs") return [];
+								const snapshot = getBackgroundJobSnapshot(message.details);
+								return snapshot?.endedAt !== undefined && pendingJobIds.has(snapshot.id)
+									? [{ message, messageIndex }]
+									: [];
+							})
+						: [];
+				let eligibleResultCandidates: ToolResultMessage[] = [];
+				let payloadCompleted = false;
+				let payloadUnchanged = true;
+				let requestOptions = this._activeCompaction ? { ...options, maxRetries: 0 } : options;
+				if (resultCandidates.length > 0) {
+					requestOptions = {
+						...requestOptions,
+						onPayload: async (payload, payloadModel, metadata) => {
+							payloadCompleted = false;
+							// Copy provider evidence before hooks await. Each payload owns its
+							// source indices; missing evidence cannot inherit an earlier payload's results.
+							const deliveredIndices = new Set(metadata?.toolResultMessageIndices ?? []);
+							eligibleResultCandidates = resultCandidates
+								.filter(({ messageIndex }) => deliveredIndices.has(messageIndex))
+								.map(({ message }) => message);
+							// ExtensionRunner reports hook failures instead of rejecting. Observe
+							// only this callback window without changing its error behavior.
+							const unsubscribe = this._extensionRunner.onError((error) => {
+								if (error.event === "before_provider_request") payloadUnchanged = false;
+							});
+							try {
+								let before: string | undefined;
+								try {
+									// Serialize before awaiting: hooks may mutate the original in place.
+									before = JSON.stringify(payload);
+								} catch {
+									payloadUnchanged = false;
+								}
+								const replacement = await options?.onPayload?.(payload, payloadModel);
+								try {
+									const after = JSON.stringify(replacement === undefined ? payload : replacement);
+									if (before === undefined || after === undefined || before !== after) {
+										payloadUnchanged = false;
+									}
+								} catch {
+									// Comparison failures retain the notice, never fail inference.
+									payloadUnchanged = false;
+								}
+								payloadCompleted = true;
+								return replacement;
+							} catch (error) {
+								payloadUnchanged = false;
+								throw error;
+							} finally {
+								unsubscribe();
+							}
+						},
+					};
+				}
+				const stream = await config.streamFn(model, context, requestOptions);
+				if (resultCandidates.length > 0) {
+					// Observe completion without consuming events or delaying stream delivery.
+					void stream
+						.result()
+						.then((result) => {
+							if (
+								!payloadCompleted ||
+								!payloadUnchanged ||
+								this._activeAgentRun !== activeRun ||
+								this._disposed ||
+								this._activeCompaction ||
+								signal?.aborted ||
+								(result.stopReason !== "stop" &&
+									result.stopReason !== "length" &&
+									result.stopReason !== "toolUse")
+							)
+								return;
+							for (const message of eligibleResultCandidates) {
+								acknowledgeBackgroundJobResult(this._backgroundJobs, message);
+							}
+						})
+						.catch(() => {});
+				}
 				this._toolProgressDiagnostics.setQueueMetricsReader(() => stream.getQueueMetrics());
 				return stream;
 			},

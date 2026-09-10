@@ -72,6 +72,58 @@ describe("BackgroundJobManager", () => {
 		expect(jobs.pendingNotifications()).toEqual([]);
 	});
 
+	it.each(["bash", "subagent"] as const)(
+		"keeps %s results visible until a native terminal read is acknowledged, without consuming history",
+		async (toolName) => {
+			const jobs = manager();
+			const tool = createJobsTool({ manager: jobs });
+			const job = jobs.start({ toolName, toolCallId: "launch", label: "work", execute: async () => completed });
+			const terminal = await jobs.wait(job.id);
+			expect(jobs.listUncollected()).toMatchObject([{ id: job.id }]);
+			jobs.acknowledgeNotifications([job.id]);
+			await tool.execute("list", { action: "list" });
+			await tool.execute("cancel", { action: "cancel", id: job.id });
+			for (const id of ["launch", "list", "cancel"]) jobs.acknowledgeResult(id, terminal);
+			expect(jobs.listUncollected()).toHaveLength(1);
+			const read = snapshot(await tool.execute("read", { action: "read", id: job.id }));
+			expect(jobs.listUncollected()).toHaveLength(1);
+			const observer = vi.fn();
+			jobs.subscribe(observer);
+			jobs.acknowledgeResult("read", { ...read, status: "failed" });
+			expect(jobs.listUncollected()).toHaveLength(1);
+			jobs.acknowledgeResult("read", read);
+			expect(jobs.listUncollected()).toEqual([]);
+			expect(jobs.list()).toHaveLength(1);
+			expect(jobs.get(job.id)).toEqual(terminal);
+			jobs.acknowledgeResult("read", read);
+			expect(observer).toHaveBeenCalledTimes(1);
+		},
+	);
+
+	it("does not let an early read or expired wait acknowledge later completion", async () => {
+		const jobs = manager();
+		const tool = createJobsTool({ manager: jobs });
+		const finish = deferred();
+		const job = jobs.start({
+			toolName: "bash",
+			toolCallId: "launch",
+			label: "work",
+			execute: async () => {
+				await finish.promise;
+				return completed;
+			},
+		});
+		await tool.execute("early-read", { action: "read", id: job.id });
+		await tool.execute("early-wait", { action: "wait", id: job.id, timeoutMs: 0 });
+		finish.resolve();
+		const terminal = await jobs.wait(job.id);
+		for (const id of ["early-read", "early-wait"]) jobs.acknowledgeResult(id, terminal);
+		expect(jobs.listUncollected()).toHaveLength(1);
+		const result = await tool.execute("terminal-wait", { action: "wait", id: job.id });
+		jobs.acknowledgeResult("terminal-wait", snapshot(result));
+		expect(jobs.listUncollected()).toEqual([]);
+	});
+
 	it("distinguishes cancellation request from settled cancellation and prevents pre-dispatch work", async () => {
 		const jobs = manager();
 		const neverStarted = vi.fn(async () => completed);
@@ -217,6 +269,7 @@ describe("BackgroundJobManager", () => {
 			await jobs.wait(job.id);
 		}
 		expect(jobs.list()).toHaveLength(BACKGROUND_JOB_MAX_RETAINED);
+		expect(jobs.listUncollected()).toHaveLength(BACKGROUND_JOB_MAX_RETAINED);
 		expect(jobs.list()[0].label).toHaveLength(200);
 		expect(() => jobs.get(active[0].id)).toThrow("Unknown");
 	});
@@ -290,6 +343,7 @@ describe("BackgroundJobManager", () => {
 		expect(() => manager().get(job.id)).toThrow("Unknown");
 		generation++;
 		expect(jobs.list()).toEqual([]);
+		expect(jobs.listUncollected()).toEqual([]);
 		expect(jobs.pendingNotifications()).toEqual([]);
 		expect(() => jobs.get(job.id)).toThrow("inaccessible");
 		allowed = false;

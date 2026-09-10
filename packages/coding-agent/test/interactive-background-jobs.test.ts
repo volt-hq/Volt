@@ -14,8 +14,9 @@ import {
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { stopThemeWatcher } from "../src/core/theme/runtime.ts";
 import { backgroundJobResult, withBackgroundJobs } from "../src/core/tools/background.ts";
+import { getBackgroundJobSnapshot } from "../src/core/tools/background-render.ts";
 import { createBashToolDefinition } from "../src/core/tools/bash.ts";
-import { createJobsToolDefinition } from "../src/core/tools/jobs.ts";
+import { createJobsTool, createJobsToolDefinition } from "../src/core/tools/jobs.ts";
 import {
 	BackgroundJobsInspector,
 	type BackgroundJobsStatus,
@@ -95,6 +96,7 @@ async function createFixture(
 	const listeners = new Set<() => void>();
 	const source: BackgroundJobSource = {
 		list: () => jobs.list(),
+		listUncollected: () => jobs.listUncollected(),
 		get: (id) => jobs.get(id),
 		cancel: (id) => jobs.cancel(id),
 		subscribe: (listener) => {
@@ -261,16 +263,18 @@ describe("interactive background jobs", () => {
 	);
 
 	it.each(["regular", "fullscreen"] as const)(
-		"keeps the background dock above the editor beside a wide plan (%s)",
+		"keeps a one-row background dock above the editor beside a wide plan (%s)",
 		async (tuiMode) => {
 			const { access, terminal } = await createFixture(tuiMode, 160, true);
 			const viewport = terminal.getViewport();
-			const statusRow = viewport.findIndex((line) => line.includes("Background:"));
+			const statusRow = viewport.findIndex((line) => line.includes("Jobs  running"));
 			const editorRow = viewport.findIndex((line) => line.includes("ASK VOLT"));
 			expect(statusRow).toBeGreaterThanOrEqual(0);
 			expect(editorRow).toBeGreaterThan(statusRow);
 			expect(viewport.join("\n")).toContain("Keep the plan visible");
-			expect(viewport.join("\n")).toContain("first live output");
+			expect(viewport.join("\n")).not.toContain("first live output");
+			expect(viewport.filter((line) => line.includes("Jobs  running"))).toHaveLength(1);
+			expect(access.backgroundJobsStatus.render(80).lines).toHaveLength(1);
 
 			access.ui.setFocus(access.editor);
 			terminal.sendInput("\x1bj");
@@ -279,6 +283,48 @@ describe("interactive background jobs", () => {
 			terminal.sendInput("\x1bj");
 			await terminal.waitForRender();
 			expect(access.ui.getFocusedComponent()).toBe(access.editor);
+		},
+	);
+
+	it.each(["regular", "fullscreen"] as const)(
+		"removes the dock only after collection and keeps inspector history available (%s)",
+		async (tuiMode) => {
+			const { access, terminal, jobs, job, finish } = await createFixture(tuiMode);
+			expect(terminal.getViewport().join("\n")).toContain("Jobs  running");
+			expect(terminal.getViewport().join("\n")).not.toContain("first live output");
+			finish();
+			await jobs.wait(job.id);
+			access.backgroundJobsRenderCoalescer?.flush();
+			await terminal.waitForRender();
+			const settled = terminal.getViewport().join("\n");
+			expect(settled).toContain("Jobs  completed");
+			expect(settled).toContain("awaiting review");
+			expect(settled).not.toContain("final output");
+			expect(access.backgroundJobsStatus.render(80).lines).toHaveLength(1);
+
+			await access.defaultEditor.onSubmit?.("/jobs");
+			await terminal.waitForRender();
+			expect(terminal.getViewport().join("\n")).toContain("final output");
+			terminal.sendInput("\x1b");
+			await terminal.waitForRender();
+			expect(terminal.getViewport().join("\n")).toContain("awaiting review");
+			const result = await createJobsTool({ manager: jobs }).execute("collect-final", {
+				action: "read",
+				id: job.id,
+			});
+			const snapshot = getBackgroundJobSnapshot(result.details);
+			if (!snapshot) throw new Error("Expected the native inspection snapshot");
+			expect(access.backgroundJobsStatus.render(80).lines).toHaveLength(1);
+			jobs.acknowledgeResult("collect-final", snapshot);
+			access.backgroundJobsRenderCoalescer?.flush();
+			await terminal.waitForRender();
+			expect(access.backgroundJobsStatus.render(80).lines).toEqual([]);
+			expect(terminal.getViewport().join("\n")).not.toContain("Jobs  completed");
+			expect(terminal.getViewport().join("\n")).not.toContain("awaiting review");
+			expect(access.ui.getFocusedComponent()).toBe(access.editor);
+			await access.defaultEditor.onSubmit?.("/jobs");
+			await terminal.waitForRender();
+			expect(terminal.getViewport().join("\n")).toContain("final output");
 		},
 	);
 

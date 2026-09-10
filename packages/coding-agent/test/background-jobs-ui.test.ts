@@ -15,7 +15,7 @@ import {
 	type BackgroundJobSummary,
 } from "../src/core/background-jobs.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
-import { initTheme } from "../src/core/theme/runtime.ts";
+import { initTheme, theme } from "../src/core/theme/runtime.ts";
 import { backgroundJobResult, withBackgroundJobs } from "../src/core/tools/background.ts";
 import * as backgroundRendering from "../src/core/tools/background-render.ts";
 import { BackgroundJobView } from "../src/core/tools/background-render.ts";
@@ -609,21 +609,188 @@ describe("background job observers and dock", () => {
 		expect(observer).toHaveBeenCalledTimes(3);
 	});
 
-	it("shows active and failed counts and switches to the current source", async () => {
+	it("shows one metadata-only row with whole seconds and switches to the current source", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(1000);
 		let manager = setup();
 		const dock = new BackgroundJobsStatus(() => manager);
-		expect(text(dock)).toBe("");
-		const work = start(manager);
+		expect(dock.render(80).lines).toEqual([]);
+		const work = start(manager, "npm run check");
 		await Promise.resolve();
-		work.output("PASS recent test");
-		expect(text(dock)).toContain("1 running");
-		expect(text(dock)).toContain("PASS recent test");
-		expect(text(dock)).toContain("/jobs");
+		work.output("PASS recent test\nCommand exited with code 42");
+		vi.setSystemTime(53_999);
+		const get = vi.spyOn(manager, "get");
+		cleanup.push(() => get.mockRestore());
+		const rendered = text(dock);
+		expect(dock.render(80).lines).toHaveLength(1);
+		expect(rendered).toMatch(/^Jobs {2}running · npm run check · 52s\s+(?:Alt|Option)\+J$/);
+		expect(dock.render(80).lines[0]).toContain(theme.fg("accent", "Jobs"));
+		expect(dock.render(80).lines[0]).toContain(theme.fg("warning", "running"));
+		expect(rendered).not.toContain("1 running");
+		expect(rendered).not.toContain("PASS");
+		expect(rendered).not.toContain("code 42");
+		expect(rendered).not.toContain("Last output");
+		expect(get).not.toHaveBeenCalled();
+		work.output("Different raw output");
+		expect(text(dock)).toBe(rendered);
 		work.finish({ isError: true, content: [{ type: "text", text: "FAIL timeout" }] });
 		await manager.wait(work.job.id);
-		expect(text(dock)).toContain("1 failed");
+		expect(text(dock)).toContain("failed · npm run check · 52s · awaiting review");
 		manager = setup();
-		expect(text(dock)).toBe("");
+		expect(dock.render(80).lines).toEqual([]);
+	});
+
+	it.each([
+		["running", "warning"],
+		["cancelling", "warning"],
+		["completed", "success"],
+		["failed", "error"],
+		["cancelled", "muted"],
+	] as const)("keeps a single %s status readable without a redundant count", (status, color) => {
+		const manager = setup();
+		const terminal = status !== "running" && status !== "cancelling";
+		const listing = vi.spyOn(manager, "listUncollected").mockReturnValue([
+			{
+				id: "job_single",
+				toolName: "subagent",
+				toolCallId: "single",
+				label: "Review job output",
+				status,
+				startedAt: 1000,
+				...(terminal ? { endedAt: 53_999 } : {}),
+			},
+		]);
+		cleanup.push(() => listing.mockRestore());
+		const dock = new BackgroundJobsStatus(() => manager);
+		for (const width of [10, 20, 40, 80, 120]) {
+			const rendered = text(dock, width);
+			expect(dock.render(width).lines).toHaveLength(1);
+			expect(rendered).toContain(status);
+			expect(rendered).not.toContain(`1 ${status}`);
+			if (width >= 80) {
+				expect(rendered).toContain("Review job output");
+				expect(rendered.includes("awaiting review")).toBe(terminal);
+				if (terminal) expect(rendered).toContain("52s");
+			}
+		}
+		expect(dock.render(80).lines[0]).toContain(theme.fg(color, status));
+		for (const width of [1, 4, 8]) {
+			text(dock, width);
+			expect(dock.render(width).lines).toHaveLength(1);
+		}
+		expect(dock.render(0).lines).toEqual([]);
+	});
+
+	it.each(["f6", "ctrl+shift+j", []] as const)(
+		"right-aligns the configured shortcut or /jobs fallback: %j",
+		(binding) => {
+			setKeybindings(
+				new KeybindingsManager({ "app.jobs.open": binding === "f6" || binding === "ctrl+shift+j" ? binding : [] }),
+			);
+			const manager = setup();
+			start(manager, "npm run check");
+			const dock = new BackgroundJobsStatus(() => manager);
+			const hint = binding === "f6" ? "F6" : binding === "ctrl+shift+j" ? "Ctrl+Shift+J" : "/jobs";
+			for (const width of [40, 80, 120]) {
+				const rendered = text(dock, width);
+				expect(dock.render(width).lines).toHaveLength(1);
+				expect(visibleWidth(rendered)).toBe(width);
+				expect(rendered.endsWith(`  ${hint}`)).toBe(true);
+				expect(dock.render(width).lines[0]).toContain(theme.fg("dim", hint));
+				expect(rendered).not.toMatch(/(?:Alt|Option)\+J/);
+			}
+		},
+	);
+
+	it.each(["npm run check --workspace packages/coding-agent", "界".repeat(60)])(
+		"truncates long labels without wrapping or losing the state and shortcut: %s",
+		(label) => {
+			setKeybindings(new KeybindingsManager({ "app.jobs.open": "f6" }));
+			const manager = setup();
+			start(manager, label);
+			const dock = new BackgroundJobsStatus(() => manager);
+			for (const width of [20, 40, 80, 160]) {
+				const rendered = text(dock, width);
+				expect(dock.render(width).lines).toHaveLength(1);
+				expect(rendered).toContain("running");
+				if (width <= 40) {
+					expect(rendered).toContain("…");
+					expect(rendered).not.toMatch(/\d+s/);
+				}
+				if (width >= 40) expect(rendered.endsWith("F6")).toBe(true);
+				if (width === 160) expect(rendered).toContain(label);
+			}
+		},
+	);
+
+	it("drops terminal duration before the command and shows awaiting review when it fits", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(1000);
+		setKeybindings(new KeybindingsManager({ "app.jobs.open": "f6" }));
+		const manager = setup();
+		const work = start(manager, "npm run check");
+		await Promise.resolve();
+		vi.setSystemTime(53_999);
+		work.finish({ content: [{ type: "text", text: "Raw terminal output" }] });
+		await manager.wait(work.job.id);
+		const dock = new BackgroundJobsStatus(() => manager);
+		expect(text(dock, 36)).toMatch(/^Jobs {2}completed · npm run check\s+F6$/);
+		expect(text(dock, 53)).toMatch(/^Jobs {2}completed · npm run check · awaiting review\s+F6$/);
+		expect(text(dock, 80)).toContain("completed · npm run check · 52s · awaiting review");
+		const settled = text(dock, 80);
+		vi.setSystemTime(86_400_000);
+		expect(text(dock, 80)).toBe(settled);
+	});
+
+	it("shows stable colored counts for all uncollected states without choosing a job", async () => {
+		const manager = setup();
+		const running = start(manager, "Active command");
+		const cancelling = start(manager, "Cancelling command");
+		const completed = start(manager, "Completed command");
+		const failed = start(manager, "Failed command");
+		const cancelled = start(manager, "Cancelled command");
+		await Promise.resolve();
+		manager.cancel(cancelling.job.id);
+		manager.cancel(cancelled.job.id);
+		completed.finish({ content: [] });
+		failed.finish({ content: [], isError: true });
+		cancelled.finish({ content: [] });
+		await Promise.all([completed, failed, cancelled].map((work) => manager.wait(work.job.id)));
+		const dock = new BackgroundJobsStatus(() => manager);
+		const rendered = text(dock);
+		expect(dock.render(80).lines).toHaveLength(1);
+		expect(rendered).toMatch(
+			/^Jobs {2}1 running · 1 cancelling · 1 failed · 1 completed · 1 cancelled\s+(?:Alt|Option)\+J$/,
+		);
+		expect(rendered).not.toContain("command");
+		for (const [status, style] of Object.entries(backgroundRendering.BACKGROUND_JOB_STYLES)) {
+			expect(dock.render(80).lines[0]).toContain(theme.fg(style.color, `1 ${status}`));
+		}
+		running.output("New output does not select or rotate a job");
+		expect(text(dock)).toBe(rendered);
+		for (const width of [10, 20, 40, 120]) {
+			text(dock, width);
+			expect(dock.render(width).lines).toHaveLength(1);
+		}
+	});
+
+	it("hides a collected terminal result without removing it from the inspector", async () => {
+		const manager = setup();
+		const work = start(manager, "npm run check");
+		await Promise.resolve();
+		work.finish({ content: [{ type: "text", text: "Final result" }] });
+		await manager.wait(work.job.id);
+		const dock = new BackgroundJobsStatus(() => manager);
+		expect(text(dock)).toContain("awaiting review");
+		const result = await createJobsTool({ manager }).execute("collect-result", { action: "read", id: work.job.id });
+		expect(text(dock)).toContain("awaiting review");
+		const snapshot = backgroundRendering.getBackgroundJobSnapshot(result.details);
+		if (!snapshot) throw new Error("Expected the native inspection snapshot");
+		manager.acknowledgeResult("collect-result", snapshot);
+		expect(dock.render(80).lines).toEqual([]);
+		const { component } = inspector(manager);
+		expect(text(component)).toContain("Completed");
+		expect(text(component)).toContain("npm run check");
 	});
 });
 

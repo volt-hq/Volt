@@ -30,7 +30,7 @@ mkdirSync(directory, { recursive: true });
 const previousBindings = getKeybindings();
 setKeybindings(new KeybindingsManager());
 for (const mode of ["regular", "fullscreen"] as const) {
-	for (const width of [80, 120]) {
+	for (const width of [20, 40, 80, 120]) {
 		for (const color of ["dark", "light"] as const) {
 			initTheme(color);
 			const now = Date.now();
@@ -71,8 +71,14 @@ for (const mode of ["regular", "fullscreen"] as const) {
 				},
 			];
 			const listeners = new Set<() => void>();
+			let dockJobs = jobs;
+			const collected = new Set<string>();
 			const source: BackgroundJobSource = {
 				list: () => jobs.map(({ output: _output, outputTruncated: _truncated, ...job }) => ({ ...job })),
+				listUncollected: () =>
+					dockJobs
+						.filter((job) => job.endedAt === undefined || !collected.has(job.id))
+						.map(({ output: _output, outputTruncated: _truncated, ...job }) => ({ ...job })),
 				get: (id) => {
 					const job = jobs.find((job) => job.id === id);
 					if (!job) throw new Error("Unknown fixture job");
@@ -125,6 +131,30 @@ for (const mode of ["regular", "fullscreen"] as const) {
 				captures.push(`=== ${name} · ${mode} · ${width}x24 · ${color} ===\n${terminal.getViewport().join("\n")}`);
 			};
 			await capture("Running tests and persistent job status");
+			for (const status of ["running", "cancelling", "completed", "failed", "cancelled"] as const) {
+				dockJobs = [
+					{
+						...jobs[0],
+						label: "npm run check",
+						status,
+						startedAt: now - 52_000,
+						endedAt: status === "running" || status === "cancelling" ? undefined : now,
+					},
+				];
+				await capture(`Single ${status} job`);
+			}
+			collected.add(jobs[0].id);
+			await capture("Collected terminal result removes the dock row");
+			collected.clear();
+			dockJobs = [
+				jobs[0],
+				{ ...jobs[2], status: "cancelling" },
+				jobs[1],
+				{ ...jobs[0], id: "job_completed", status: "completed", endedAt: now },
+				{ ...jobs[0], id: "job_cancelled", status: "cancelled", endedAt: now },
+			];
+			await capture("Mixed uncollected statuses");
+			dockJobs = jobs;
 			let close = () => {};
 			const inspector = new BackgroundJobsInspector(source, {
 				getHeight: () => 22,

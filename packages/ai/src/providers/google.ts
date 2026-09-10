@@ -31,6 +31,7 @@ import {
 	retainThoughtSignature,
 } from "./google-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
+import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 
 export interface GoogleOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "any";
@@ -101,8 +102,9 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 				throw new Error(`No API key for provider: ${model.provider}`);
 			}
 			const client = createClient(model, apiKey, options?.headers);
-			let params = buildParams(model, context, options);
-			const nextParams = await options?.onPayload?.(params, model);
+			const toolResultPayload = new ToolResultPayloadTracker();
+			let params = buildParams(model, context, options, toolResultPayload);
+			const nextParams = await options?.onPayload?.(params, model, toolResultPayload.metadata);
 			if (nextParams !== undefined) {
 				params = nextParams as GenerateContentParameters;
 			}
@@ -301,8 +303,9 @@ function buildParams(
 	model: Model<"google-generative-ai">,
 	context: Context,
 	options: GoogleOptions = {},
+	toolResultPayload?: ToolResultPayloadTracker,
 ): GenerateContentParameters {
-	const contents = convertMessages(model, context);
+	const contents = convertMessages(model, context, toolResultPayload);
 
 	const generationConfig: GenerateContentConfig = {};
 	if (options.temperature !== undefined) {

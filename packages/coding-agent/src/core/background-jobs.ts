@@ -49,6 +49,9 @@ interface JobRecord {
 	controller: AbortController;
 	settled: Promise<void>;
 	notified: boolean;
+	collected: boolean;
+	/** Native terminal reads awaiting delivery in a model request; never worker-supplied metadata. */
+	resultReads: Set<string>;
 }
 
 /** Session-owned work. Completion never starts an inference request or writes a transcript. */
@@ -115,6 +118,8 @@ export class BackgroundJobManager {
 			controller: new AbortController(),
 			settled: Promise.resolve(),
 			notified: false,
+			collected: false,
+			resultReads: new Set(),
 		};
 		this.records.set(record.snapshot.id, record);
 		// Defer dispatch until the handle is registered. Cancellation before that
@@ -137,6 +142,43 @@ export class BackgroundJobManager {
 				} = record.snapshot;
 				return summary;
 			});
+	}
+
+	/** Active work and terminal results not yet delivered to the model. History stays in list(). */
+	listUncollected(): BackgroundJobSummary[] {
+		return this.list().filter((job) => !this.records.get(job.id)?.collected);
+	}
+
+	/** Native read/wait execution alone does not prove that the model received the result. */
+	recordResultRead(toolCallId: string, snapshot: BackgroundJobSnapshot): void {
+		const record = this.requireRecord(snapshot.id);
+		if (record.collected || snapshot.endedAt === undefined || snapshot.endedAt !== record.snapshot.endedAt) return;
+		record.resultReads.add(toolCallId);
+		// SDK callers can inspect repeatedly without ever submitting a model request.
+		if (record.resultReads.size > BACKGROUND_JOB_MAX_RETAINED) {
+			record.resultReads.delete(record.resultReads.values().next().value!);
+		}
+	}
+
+	/** Host acknowledgement after a native terminal snapshot survives policy and enters a model request. */
+	acknowledgeResult(toolCallId: string, snapshot: BackgroundJobSnapshot): void {
+		const record = this.records.get(snapshot.id);
+		if (
+			!record ||
+			!this.hasAccess(record) ||
+			record.collected ||
+			!record.resultReads.has(toolCallId) ||
+			snapshot.endedAt === undefined ||
+			snapshot.endedAt !== record.snapshot.endedAt ||
+			snapshot.startedAt !== record.snapshot.startedAt ||
+			snapshot.status !== record.snapshot.status ||
+			snapshot.toolName !== record.snapshot.toolName ||
+			snapshot.toolCallId !== record.snapshot.toolCallId
+		)
+			return;
+		record.collected = true;
+		record.resultReads.clear();
+		this.emitChange();
 	}
 
 	get(id: string): BackgroundJobSnapshot {
@@ -301,4 +343,7 @@ export class BackgroundJobManager {
 }
 
 /** Host UI access; does not admit work or widen the manager's tool/branch grants. */
-export type BackgroundJobSource = Pick<BackgroundJobManager, "list" | "get" | "cancel" | "subscribe">;
+export type BackgroundJobSource = Pick<
+	BackgroundJobManager,
+	"list" | "listUncollected" | "get" | "cancel" | "subscribe"
+>;

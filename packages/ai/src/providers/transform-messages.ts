@@ -8,6 +8,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import type { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
@@ -65,13 +66,14 @@ export function transformMessages<TApi extends Api>(
 	messages: Message[],
 	model: Model<TApi>,
 	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
+	toolResultPayload?: ToolResultPayloadTracker,
 ): Message[] {
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();
 	const imageAwareMessages = downgradeUnsupportedImages(messages, model);
 
 	// First pass: transform messages (unsupported image downgrade, thinking blocks, tool call ID normalization)
-	const transformed = imageAwareMessages.map((msg) => {
+	const transformed = imageAwareMessages.map((msg, index) => {
 		// User messages pass through unchanged
 		if (msg.role === "user") {
 			return msg;
@@ -80,10 +82,13 @@ export function transformMessages<TApi extends Api>(
 		// Handle toolResult messages - normalize toolCallId if we have a mapping
 		if (msg.role === "toolResult") {
 			const normalizedId = toolCallIdMap.get(msg.toolCallId);
-			if (normalizedId && normalizedId !== msg.toolCallId) {
-				return { ...msg, toolCallId: normalizedId };
-			}
-			return msg;
+			// A distinct object per input position keeps repeated references distinguishable.
+			const result =
+				toolResultPayload || (normalizedId && normalizedId !== msg.toolCallId)
+					? { ...msg, toolCallId: normalizedId ?? msg.toolCallId }
+					: msg;
+			toolResultPayload?.recordSource(result, index);
+			return result;
 		}
 
 		// Assistant messages need transformation check

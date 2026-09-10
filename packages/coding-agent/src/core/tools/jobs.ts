@@ -1,5 +1,5 @@
 import type { AgentTool, AgentToolResult } from "@hansjm10/volt-agent-core";
-import { StringEnum } from "@hansjm10/volt-ai";
+import { StringEnum, type ToolResultMessage } from "@hansjm10/volt-ai";
 import { createRenderFrame, truncateToWidth, wrapTextWithAnsi } from "@hansjm10/volt-tui";
 import { type Static, Type } from "typebox";
 import { keyDisplayText } from "../../modes/interactive/components/keybinding-hints.ts";
@@ -78,6 +78,15 @@ function hasNativeJobContent(
 			return part.type === "text" && original?.type === "text" && part.text === original.text;
 		})
 	);
+}
+
+/** A transformed inspection counts only when it still delivers a consistent native terminal snapshot. */
+export function acknowledgeBackgroundJobResult(manager: BackgroundJobManager, result: ToolResultMessage): void {
+	if (result.toolName !== "jobs") return;
+	const snapshot = getBackgroundJobSnapshot(result.details);
+	if (snapshot?.endedAt !== undefined && hasNativeJobContent(result, backgroundJobResult(snapshot), result.isError)) {
+		manager.acknowledgeResult(result.toolCallId, snapshot);
+	}
 }
 
 export function createJobsToolDefinition(
@@ -187,7 +196,7 @@ export function createJobsToolDefinition(
 				return createRenderFrame(lines);
 			}, true);
 		},
-		async execute(_toolCallId, params, signal): Promise<AgentToolResult<JobsToolDetails>> {
+		async execute(toolCallId, params, signal): Promise<AgentToolResult<JobsToolDetails>> {
 			if (signal?.aborted) throw new Error("Operation aborted");
 			if (!options?.manager) throw new Error("Background jobs require a session-owned job manager.");
 			if (params.action !== "wait" && params.timeoutMs !== undefined)
@@ -199,11 +208,16 @@ export function createJobsToolDefinition(
 			if (!params.id) throw new Error("A background job id is required.");
 			switch (params.action) {
 				case "read":
-					return backgroundJobResult(options.manager.get(params.id));
+				case "wait": {
+					const snapshot =
+						params.action === "read"
+							? options.manager.get(params.id)
+							: await options.manager.wait(params.id, params.timeoutMs, signal);
+					options.manager.recordResultRead(toolCallId, snapshot);
+					return backgroundJobResult(snapshot);
+				}
 				case "cancel":
 					return backgroundJobResult(options.manager.cancel(params.id));
-				case "wait":
-					return backgroundJobResult(await options.manager.wait(params.id, params.timeoutMs, signal));
 				default:
 					throw new Error("Unknown jobs action.");
 			}

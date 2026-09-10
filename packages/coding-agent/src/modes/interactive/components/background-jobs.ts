@@ -35,41 +35,51 @@ export class BackgroundJobsStatus implements Component {
 	}
 
 	render(width: number): RenderFrame {
-		const source = this.source();
-		const jobs = source.list();
-		if (jobs.length === 0) return createRenderFrame([]);
-		const active = jobs.filter((job) => job.endedAt === undefined);
-		const failed = jobs.filter((job) => job.status === "failed");
-		const counts =
-			active.length || failed.length ? backgroundJobCounts([...active, ...failed]) : backgroundJobCounts(jobs);
-		const open = keyDisplayText("app.jobs.open");
-		const hint = `/jobs${open ? ` (${open})` : ""}`;
-		const lines = [truncateToWidth(`${theme.fg("accent", "Background:")} ${counts} · ${hint}`, width)];
-		const selected = active[0] ?? failed[0];
-		if (selected) {
-			const job = findBackgroundJob(source, selected.id);
-			if (job) {
-				const style = BACKGROUND_JOB_STYLES[job.status];
-				lines.push(
-					truncateToWidth(
-						`${theme.fg(style.color, style.label)} · ${backgroundJobTiming(job)} · ${backgroundJobLabel(job)}`,
-						width,
-					),
-				);
-				const lastLine = backgroundJobText(job.output)
-					.trimEnd()
-					.split("\n")
-					.filter((line) => line.trim())
-					.at(-1);
-				lines.push(
-					truncateToWidth(
-						theme.fg("muted", `${backgroundJobActivity(job)}${lastLine ? ` · ${lastLine}` : ""}`),
-						width,
-					),
-				);
+		const jobs = this.source().listUncollected();
+		if (jobs.length === 0 || width <= 0) return createRenderFrame([]);
+		const title = `${theme.fg("accent", "Jobs")}  `;
+		const separator = theme.fg("dim", " · ");
+		const hint = keyDisplayText("app.jobs.open") || "/jobs";
+		const hintWidth = visibleWidth(hint);
+		let content: string;
+		let showHint: boolean;
+		if (jobs.length === 1) {
+			const job = jobs[0];
+			const status = theme.fg(BACKGROUND_JOB_STYLES[job.status].color, job.status);
+			// At very small widths, keep the worker state rather than the dock title.
+			const heading = visibleWidth(title + status) <= width ? title + status : status;
+			const label = backgroundJobLabel(job);
+			const labelWidth = visibleWidth(label);
+			showHint = visibleWidth(heading) + 3 + Math.min(8, labelWidth) + 2 + hintWidth <= width;
+			const contentWidth = width - (showHint ? hintWidth + 2 : 0);
+			const labelSpace = contentWidth - visibleWidth(heading) - 3;
+			const minimumLabel = Math.min(20, labelWidth);
+			let suffix = "";
+			if (job.endedAt !== undefined && labelSpace >= minimumLabel + 18) {
+				suffix = `${separator}${theme.fg("dim", "awaiting review")}`;
 			}
+			const duration = `${Math.floor(Math.max(0, (job.endedAt ?? Date.now()) - job.startedAt) / 1000)}s`;
+			if (labelSpace >= minimumLabel + visibleWidth(suffix) + 3 + duration.length) {
+				suffix = `${separator}${theme.fg("dim", duration)}${suffix}`;
+			}
+			content = heading;
+			if (labelSpace > 0) {
+				content += `${separator}${truncateToWidth(label, labelSpace - visibleWidth(suffix), "…")}${suffix}`;
+			}
+			content = truncateToWidth(content, contentWidth, "");
+		} else {
+			const counts = (["running", "cancelling", "failed", "completed", "cancelled"] as const).flatMap((status) => {
+				const count = jobs.filter((job) => job.status === status).length;
+				return count ? [theme.fg(BACKGROUND_JOB_STYLES[status].color, `${count} ${status}`)] : [];
+			});
+			const heading = visibleWidth(title + counts[0]) <= width ? title : "";
+			showHint = visibleWidth(heading + counts[0]) + 2 + hintWidth <= width;
+			content = truncateToWidth(heading + counts.join(separator), width - (showHint ? hintWidth + 2 : 0), "…");
 		}
-		return createRenderFrame(lines);
+		if (showHint) {
+			content += `${" ".repeat(width - visibleWidth(content) - hintWidth)}${theme.fg("dim", hint)}`;
+		}
+		return createRenderFrame([content]);
 	}
 
 	invalidate(): void {}
