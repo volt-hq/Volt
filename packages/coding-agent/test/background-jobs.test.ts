@@ -274,9 +274,32 @@ describe("BackgroundJobManager", () => {
 		expect(() => jobs.get(active[0].id)).toThrow("Unknown");
 	});
 
+	it.each(["x", "é", "€", "😀"])("retains a partial %s line before trailing status text", async (character) => {
+		const jobs = manager();
+		const suffix = "\nstatus";
+		const output = character.repeat(BACKGROUND_JOB_MAX_OUTPUT_BYTES) + suffix;
+		const job = jobs.start({
+			toolName: "bash",
+			toolCallId: "call",
+			label: "output with status",
+			execute: async () => ({ content: [{ type: "text", text: output }] }),
+		});
+		const result = await jobs.wait(job.id);
+		const retainedCharacters = Math.floor(
+			(BACKGROUND_JOB_MAX_OUTPUT_BYTES - Buffer.byteLength(suffix)) / Buffer.byteLength(character),
+		);
+		expect(result.output).toBe(character.repeat(retainedCharacters) + suffix);
+		expect(result.outputTruncated).toBe(true);
+		expect(Buffer.byteLength(result.output)).toBeLessThanOrEqual(BACKGROUND_JOB_MAX_OUTPUT_BYTES);
+	});
+
 	it("bounds multibyte and multiline output", async () => {
 		const jobs = manager();
-		for (const output of ["😀".repeat(30_000), "line\n".repeat(3000)]) {
+		for (const output of [
+			"😀".repeat(30_000),
+			"line\n".repeat(3000),
+			`${"x".repeat(BACKGROUND_JOB_MAX_OUTPUT_BYTES)}\n${"line\n".repeat(3000)}`,
+		]) {
 			const job = jobs.start({
 				toolName: "bash",
 				toolCallId: "call",

@@ -291,15 +291,23 @@ export class BackgroundJobManager {
 	}
 
 	private captureOutput(record: JobRecord, result: AgentToolResult<unknown>): void {
-		const text = result.content
+		let text = result.content
 			.filter((part) => part.type === "text")
 			.map((part) => part.text)
 			.join("\n");
+		const byteTruncated = Buffer.byteLength(text, "utf-8") > BACKGROUND_JOB_MAX_OUTPUT_BYTES;
+		if (byteTruncated) {
+			// Bound bytes before lines so a Bash footer cannot displace the entire output line.
+			const buffer = Buffer.from(text, "utf-8");
+			let start = buffer.length - BACKGROUND_JOB_MAX_OUTPUT_BYTES;
+			while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start++;
+			text = buffer.subarray(start).toString("utf-8");
+		}
 		const bounded = truncateTail(text, { maxBytes: BACKGROUND_JOB_MAX_OUTPUT_BYTES });
 		const changed = record.snapshot.output !== bounded.content;
 		if (changed && bounded.content) record.snapshot.lastOutputAt = Date.now();
 		record.snapshot.output = bounded.content;
-		record.snapshot.outputTruncated = bounded.truncated;
+		record.snapshot.outputTruncated = byteTruncated || bounded.truncated;
 		if (changed) this.emitChange();
 	}
 
