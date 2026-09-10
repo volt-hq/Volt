@@ -168,32 +168,74 @@ export function createJobsToolDefinition(
 			return new BackgroundJobView((width) => {
 				const wait = getBackgroundJobWait(result.details);
 				if (wait && hasNativeJobContent(result, backgroundWaitResult(wait), context.isError)) {
-					const heading = `jobs wait · ${wait.reason} (${wait.mode}) · ${backgroundJobCounts(wait.results)}${wait.pending.length ? ` · ${wait.pending.length} pending` : ""}`;
-					if (!renderOptions.expanded)
-						return createRenderFrame([truncateToWidth(theme.fg("toolTitle", heading), width)]);
-					return createRenderFrame(wrapTextWithAnsi(backgroundJobText(getTextOutput(result, false)), width));
+					const key = keyDisplayText("app.tools.expand");
+					const heading = [
+						theme.bold(theme.fg("toolTitle", `jobs wait${wait.ids.length > 1 ? ` (${wait.mode})` : ""}`)),
+						wait.reason === "terminal" ? "" : theme.fg("warning", wait.reason),
+						backgroundJobCounts(wait.results),
+						wait.pending.length ? `${wait.pending.length} pending` : "",
+					]
+						.filter(Boolean)
+						.join(" · ");
+					if (!renderOptions.expanded) {
+						const metadata = [
+							wait.results.some((job) => job.outputTruncated) ? theme.fg("warning", "truncated") : "",
+							key ? theme.fg("dim", `${key} expand`) : "",
+						].filter(Boolean);
+						return createRenderFrame([truncateToWidth([heading, ...metadata].join(" · "), width)]);
+					}
+					const lines = wrapTextWithAnsi(heading, width);
+					for (const job of wait.results) {
+						const style = BACKGROUND_JOB_STYLES[job.status];
+						const tool = job.toolName === "bash" ? "Bash" : "Subagent";
+						lines.push(
+							...wrapTextWithAnsi(
+								`${theme.fg(style.color, style.label)} · ${tool} · ${backgroundJobLabel(job)}`,
+								width,
+							),
+							...wrapTextWithAnsi(theme.fg("dim", job.id), width),
+						);
+						if (job.outputTruncated)
+							lines.push(...wrapTextWithAnsi(theme.fg("warning", "Output truncated"), width));
+						if (job.output)
+							lines.push(
+								...wrapTextWithAnsi(theme.fg("toolOutput", backgroundJobText(job.output).trimEnd()), width),
+							);
+					}
+					for (const job of wait.pending) {
+						const style = BACKGROUND_JOB_STYLES[job.status];
+						lines.push(
+							...wrapTextWithAnsi(
+								`${theme.fg(style.color, `${style.label} at capture`)} · ${backgroundJobLabel(job)}`,
+								width,
+							),
+							...wrapTextWithAnsi(theme.fg("dim", job.id), width),
+						);
+					}
+					const hints = [key ? `${key} collapse output` : "", "/jobs inspect"].filter(Boolean);
+					lines.push(...wrapTextWithAnsi(theme.fg("dim", hints.join(" · ")), width));
+					return createRenderFrame(lines);
 				}
 				const snapshot = getBackgroundJobSnapshot(result.details);
 				// A hook's replacement content/error is authoritative, even if it retains native details.
 				if (snapshot && hasNativeJobContent(result, backgroundJobResult(snapshot), context.isError)) {
 					// Inspection results are post-policy snapshots. Live lookups could undo a hook's redaction.
+					const action = context.args?.action;
+					const heading =
+						action === "read" || action === "wait" || action === "cancel" ? `jobs ${action}` : "jobs";
 					if (!renderOptions.expanded) {
-						const action = context.args?.action;
-						const heading =
-							action === "read" || action === "wait" || action === "cancel" ? `jobs ${action}` : "jobs";
 						const style = BACKGROUND_JOB_STYLES[snapshot.status];
 						const state = snapshot.endedAt === undefined ? `${style.label} at capture` : style.label;
 						const key = keyDisplayText("app.tools.expand");
 						const metadata = [
-							snapshot.outputTruncated ? "snapshot (truncated)" : "snapshot",
-							key ? `${key} expand` : "",
-							snapshot.id.slice(0, 12),
+							snapshot.outputTruncated ? theme.fg("warning", "truncated") : "",
+							key ? theme.fg("dim", `${key} expand`) : "",
 						]
 							.filter(Boolean)
 							.join(" · ");
 						return createRenderFrame([
 							truncateToWidth(
-								`${theme.bold(theme.fg("toolTitle", heading))} · ${theme.fg(style.color, state)}${theme.fg("dim", ` · ${metadata}`)}`,
+								`${theme.bold(theme.fg("toolTitle", heading))} · ${theme.fg(style.color, state)}${metadata ? ` · ${metadata}` : ""}`,
 								width,
 							),
 						]);
@@ -201,7 +243,7 @@ export function createJobsToolDefinition(
 					return renderBackgroundJobCard(snapshot, width, theme, {
 						expanded: renderOptions.expanded,
 						captured: true,
-						heading: "Background job snapshot",
+						heading,
 					});
 				}
 				// tool_result hooks can replace native metadata with any canonical JSON value.

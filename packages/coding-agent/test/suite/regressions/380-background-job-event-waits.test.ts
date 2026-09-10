@@ -293,7 +293,7 @@ describe("multi-job presentation and collection", () => {
 			second.finish.resolve();
 			const result = backgroundWaitResult(await waiting);
 			card.updateResult({ ...result, isError: false });
-			expect(card.render(100).lines.map(stripAnsi).join(" ")).toContain("terminal (all) · 2 completed");
+			expect(card.render(100).lines.map(stripAnsi).join(" ")).toContain("jobs wait (all) · 2 completed");
 		} finally {
 			card.dispose();
 		}

@@ -137,12 +137,12 @@ export function renderBackgroundJobCard(
 	if (options.expanded) lines.push(...wrapTextWithAnsi(theme.fg("text", label), width));
 	else lines.push(truncateToWidth(theme.fg("text", label.replace(/\s+/g, " ")), width));
 
-	if (options.captured) {
-		lines.push(...wrapTextWithAnsi(theme.fg("muted", "Output snapshot · /jobs for current status"), width));
-	} else if (options.historical && job.endedAt === undefined) {
-		lines.push(...wrapTextWithAnsi(theme.fg("muted", "Saved snapshot; live status unavailable"), width));
-	} else if (job.endedAt === undefined || !job.output.trim()) {
-		lines.push(...wrapTextWithAnsi(theme.fg("muted", backgroundJobActivity(job)), width));
+	if (!options.captured) {
+		if (options.historical && job.endedAt === undefined) {
+			lines.push(...wrapTextWithAnsi(theme.fg("muted", "Saved snapshot; live status unavailable"), width));
+		} else if (job.endedAt === undefined || !job.output.trim()) {
+			lines.push(...wrapTextWithAnsi(theme.fg("muted", backgroundJobActivity(job)), width));
+		}
 	}
 	const output = backgroundJobText(job.output).trimEnd();
 	if (output) {
@@ -166,9 +166,10 @@ export function renderBackgroundJobCard(
 	}
 	if (options.expanded) lines.push(...wrapTextWithAnsi(theme.fg("dim", job.id), width));
 	const expand = keyDisplayText("app.tools.expand");
-	const hints = [expand ? `${expand} ${options.expanded ? "collapse" : "expand"} output` : "", "/jobs inspect"].filter(
-		Boolean,
-	);
+	const hints = [
+		expand ? `${expand} ${options.expanded ? "collapse" : "expand"} output` : "",
+		options.captured ? "/jobs for current status" : "/jobs inspect",
+	].filter(Boolean);
 	lines.push(...wrapTextWithAnsi(theme.fg("dim", hints.join(" · ")), width));
 	return createRenderFrame(lines);
 }

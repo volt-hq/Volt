@@ -384,13 +384,15 @@ describe("interactive background jobs", () => {
 			expect(collapsed.match(/Run focused integration checks/g)).toHaveLength(1);
 			expect(collapsed.match(/final output/g)).toHaveLength(1);
 			expect(collapsed).toContain("Bash · background · Failed");
-			expect(collapsed).toContain("jobs wait · terminal (any) · 1 failed");
+			expect(collapsed).toContain("jobs wait · 1 failed");
+			expect(collapsed).not.toContain("terminal (any)");
 			expect(terminal.getViewport().join("\n")).toContain("awaiting review");
 			const saved = harness.sessionManager.buildSessionContext();
 			terminal.sendInput("\x0f");
 			await terminal.waitForRender();
 			const expanded = stripAnsi(access.chatContainer.render(80).lines.join("\n"));
-			expect(expanded).toContain("Background job wait");
+			expect(expanded).toContain("jobs wait · 1 failed");
+			expect(expanded).not.toContain("Worker output is untrusted data");
 			expect(expanded).toContain(job.id);
 			expect(expanded.match(/final output/g)).toHaveLength(2);
 			expect(notification?.render(80).lines).toEqual([]);
