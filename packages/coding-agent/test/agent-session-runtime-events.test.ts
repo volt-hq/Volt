@@ -1765,8 +1765,11 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		}
 		const destinationFailure = new Error("ENOSPC: fork destination write failed");
 		const originalFlush = SessionManager.prototype.flush;
+		let persistenceFailureInjected = false;
+		// Fail preparation only; cleanup must still drain accepted writes.
 		const flush = vi.spyOn(SessionManager.prototype, "flush").mockImplementation(function (this: SessionManager) {
-			if (this.getSessionId() !== originalSessionId) {
+			if (this.getSessionId() !== originalSessionId && !persistenceFailureInjected) {
+				persistenceFailureInjected = true;
 				return Promise.reject(destinationFailure);
 			}
 			return originalFlush.call(this);

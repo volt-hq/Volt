@@ -212,11 +212,14 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		const prompt = session.prompt("active user");
 		await streamStarted;
-		await expect(session.navigateTree(firstAssistantId, { summarize: false })).rejects.toThrow(
-			"Cannot navigate the session tree while an agent or bash run is active",
-		);
-		finishAssistant();
-		await prompt;
+		try {
+			await expect(session.navigateTree(firstAssistantId, { summarize: false })).rejects.toThrow(
+				"Cannot navigate the session tree while an agent, bash run, or background job is active",
+			);
+		} finally {
+			finishAssistant();
+			await prompt;
+		}
 
 		const completedBranch = sessionManager.getBranch().filter((entry) => entry.type === "message");
 		expect(completedBranch.map((entry) => entry.message.role)).toEqual([
