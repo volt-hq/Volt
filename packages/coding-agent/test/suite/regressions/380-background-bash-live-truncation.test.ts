@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BACKGROUND_JOB_MAX_OUTPUT_BYTES } from "../../../src/core/background-jobs.ts";
 import { KeybindingsManager } from "../../../src/core/keybindings.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
+import { getBackgroundJobWait } from "../../../src/core/tools/background-wait.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
 import { DEFAULT_MAX_LINES } from "../../../src/core/tools/truncate.ts";
@@ -67,7 +68,10 @@ describe("background Bash live truncation", () => {
 				let deliveredText: string | undefined;
 				harness.setResponses([
 					fauxAssistantMessage(
-						fauxToolCall("jobs", { action, id: live.id, ...(action === "wait" ? { timeoutMs: 0 } : {}) }),
+						fauxToolCall(
+							"jobs",
+							action === "wait" ? { action, ids: [live.id], timeoutMs: 0 } : { action, id: live.id },
+						),
 						{ stopReason: "toolUse" },
 					),
 					(context) => {
@@ -80,8 +84,21 @@ describe("background Bash live truncation", () => {
 					},
 				]);
 				await harness.session.prompt(`Inspect progress with jobs ${action}`);
-				expect(deliveredText).toContain(live.output.trimEnd());
-				expect(deliveredText?.includes("[Output truncated to the latest 50 KB or 2000 lines.]")).toBe(truncated);
+				const result = harness.session.messages.findLast(
+					(message) => message.role === "toolResult" && message.toolName === "jobs",
+				);
+				expect(result).toMatchObject({ isError: false });
+				if (action === "read") {
+					expect(deliveredText).toContain(live.output.trimEnd());
+					expect(deliveredText?.includes("[Output truncated to the latest 50 KB or 2000 lines.]")).toBe(truncated);
+					expect(result).toMatchObject({ details: { backgroundJob: live } });
+				} else {
+					const wait = result?.role === "toolResult" ? getBackgroundJobWait(result.details) : undefined;
+					expect(wait).toMatchObject({ ids: [live.id], mode: "any", reason: "timeout", results: [] });
+					expect(wait?.pending).toEqual(jobs.list());
+					expect(deliveredText).toContain(`${live.id}: running (pending).`);
+					expect(deliveredText).not.toContain(live.output.trimEnd());
+				}
 				expect(jobs.get(live.id)).toEqual(live);
 			}
 

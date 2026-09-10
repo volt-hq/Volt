@@ -3,6 +3,8 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { describe, expect, it } from "vitest";
 import { BACKGROUND_JOB_MAX_OUTPUT_BYTES } from "../../../src/core/background-jobs.ts";
+import { getBackgroundJobWait } from "../../../src/core/tools/background-wait.ts";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "../../../src/core/tools/truncate.ts";
 import { createHarness, getMessageText } from "../harness.ts";
 
 // PR #380, finding e213d190-0dfb-490e-878e-0f62135d570b: bounding Bash's
@@ -48,7 +50,13 @@ describe("background Bash long-line snapshots", () => {
 			for (const action of ["read", "wait"] as const) {
 				let deliveredText: string | undefined;
 				harness.setResponses([
-					fauxAssistantMessage(fauxToolCall("jobs", { action, id: terminal.id }), { stopReason: "toolUse" }),
+					fauxAssistantMessage(
+						fauxToolCall(
+							"jobs",
+							action === "wait" ? { action, ids: [terminal.id] } : { action, id: terminal.id },
+						),
+						{ stopReason: "toolUse" },
+					),
 					(context) => {
 						deliveredText = getMessageText(
 							context.messages.findLast(
@@ -59,12 +67,31 @@ describe("background Bash long-line snapshots", () => {
 					},
 				]);
 				await harness.session.prompt(`Collect the result with jobs ${action}`);
-				expect(deliveredText).toContain(terminal.output);
-				expect(
-					harness.session.messages.findLast(
-						(message) => message.role === "toolResult" && message.toolName === "jobs",
-					),
-				).toMatchObject({ isError: exitCode !== 0, details: { backgroundJob: terminal } });
+				const result = harness.session.messages.findLast(
+					(message) => message.role === "toolResult" && message.toolName === "jobs",
+				);
+				expect(result).toMatchObject({ isError: exitCode !== 0 });
+				if (action === "read") {
+					expect(deliveredText).toContain(terminal.output);
+					expect(result).toMatchObject({ details: { backgroundJob: terminal } });
+				} else {
+					const wait = result?.role === "toolResult" ? getBackgroundJobWait(result.details) : undefined;
+					expect(wait).toMatchObject({ ids: [terminal.id], mode: "any", reason: "terminal", pending: [] });
+					expect(wait?.results).toHaveLength(1);
+					const snapshot = wait!.results[0];
+					expect(snapshot).toEqual({ ...terminal, output: expect.any(String), outputTruncated: true });
+					// Waits share the response budget with metadata; reads retain the full bounded snapshot.
+					expect(Buffer.byteLength(snapshot.output)).toBeLessThan(Buffer.byteLength(terminal.output));
+					expect(terminal.output.endsWith(snapshot.output)).toBe(true);
+					expect(snapshot.output).toContain("[Showing last");
+					expect(snapshot.output).toContain(`Full output: ${fullOutputPath}]`);
+					if (exitCode !== 0) expect(snapshot.output).toMatch(/Command exited with code 7$/);
+					expect(deliveredText).toContain(snapshot.output);
+					expect(deliveredText).toContain("[Output truncated; use jobs read for the retained snapshot.]");
+					expect(deliveredText).not.toContain("�");
+					expect(Buffer.byteLength(deliveredText!)).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
+					expect(deliveredText!.split("\n").length).toBeLessThanOrEqual(DEFAULT_MAX_LINES);
+				}
 				expect(harness.session.backgroundJobs.get(terminal.id)).toEqual(terminal);
 			}
 		} finally {
