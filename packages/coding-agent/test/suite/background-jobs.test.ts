@@ -18,6 +18,7 @@ import { stopThemeWatcher } from "../../src/core/theme/runtime.ts";
 import { backgroundJobResult } from "../../src/core/tools/background.ts";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
 import * as nativeTools from "../../src/core/tools/index.ts";
+import { getBackgroundJobResultSnapshots } from "../../src/core/tools/jobs.ts";
 import type { CustomEditor } from "../../src/modes/interactive/components/custom-editor.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.ts";
@@ -75,7 +76,7 @@ function controlledBash(holdAbortCleanup = false, exitCode = 0) {
 }
 
 function jobSnapshot(result: unknown): BackgroundJobSnapshot {
-	const snapshot = (result as { details?: { backgroundJob?: BackgroundJobSnapshot } }).details?.backgroundJob;
+	const snapshot = getBackgroundJobResultSnapshots((result as { details?: unknown }).details)[0];
 	if (!snapshot) throw new Error(`Expected background job result: ${JSON.stringify(result)}`);
 	return snapshot;
 }
@@ -107,7 +108,7 @@ async function startJob(harness: Harness): Promise<BackgroundJobSnapshot> {
 }
 
 async function waitJob(harness: Harness, id: string): Promise<BackgroundJobSnapshot> {
-	return jobSnapshot(await jobsTool(harness).execute("host-wait", { action: "wait", id, timeoutMs: 30_000 }));
+	return jobSnapshot(await jobsTool(harness).execute("host-wait", { action: "wait", ids: [id], timeoutMs: 30_000 }));
 }
 
 describe("AgentSession background jobs", () => {
@@ -244,7 +245,7 @@ describe("AgentSession background jobs", () => {
 		const source = harness.session.backgroundJobs;
 		harness.setResponses([
 			fauxAssistantMessage(
-				fauxToolCall("jobs", { action, id: job.id, ...(action === "wait" ? { timeoutMs: 0 } : {}) }),
+				fauxToolCall("jobs", action === "wait" ? { action, ids: [job.id], timeoutMs: 0 } : { action, id: job.id }),
 				{
 					stopReason: "toolUse",
 				},
@@ -269,7 +270,10 @@ describe("AgentSession background jobs", () => {
 		expect(source.listUncollected()).toMatchObject([{ id: job.id, status }]);
 
 		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("jobs", { action, id: job.id }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(
+				fauxToolCall("jobs", action === "wait" ? { action, ids: [job.id] } : { action, id: job.id }),
+				{ stopReason: "toolUse" },
+			),
 			fauxAssistantMessage("Collected the result."),
 		]);
 		await harness.session.prompt("Collect this result");
@@ -566,7 +570,7 @@ describe("AgentSession background jobs", () => {
 			backend.finish.resolve();
 			await harness.session.waitForBackgroundJobs();
 			harness.setResponses([
-				fauxAssistantMessage(fauxToolCall("jobs", { action: "wait", id: job.id }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("jobs", { action: "wait", ids: [job.id] }), { stopReason: "toolUse" }),
 				(context) => {
 					const received = context.messages.some(
 						(message) => message.role === "toolResult" && message.toolName === "jobs",

@@ -19,6 +19,7 @@ import {
 } from "../../src/core/subagents/index.ts";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
 import * as nativeTools from "../../src/core/tools/index.ts";
+import { getBackgroundJobResultSnapshots } from "../../src/core/tools/jobs.ts";
 import { createSubagentTool } from "../../src/core/tools/subagent.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
@@ -168,7 +169,7 @@ async function startSubagent(context: Awaited<ReturnType<typeof setup>>, params:
 }
 
 function jobSnapshot(result: unknown): BackgroundJobSnapshot {
-	const snapshot = (result as { details?: { backgroundJob?: BackgroundJobSnapshot } }).details?.backgroundJob;
+	const snapshot = getBackgroundJobResultSnapshots((result as { details?: unknown }).details)[0];
 	if (!snapshot) throw new Error("Expected background job result");
 	return snapshot;
 }
@@ -247,7 +248,7 @@ describe("native background subagents", () => {
 				finish.resolve();
 				await abort;
 				const result = jobSnapshot(
-					await jobs.execute("parent-done", { action: "wait", id: parentJob.id, timeoutMs: 30_000 }),
+					await jobs.execute("parent-done", { action: "wait", ids: [parentJob.id], timeoutMs: 30_000 }),
 				);
 				expect(result.status).toBe(operation === "abort" ? "cancelled" : "completed");
 				if (operation === "complete") expect(result.output).toContain("Child final report.");
@@ -368,7 +369,8 @@ describe("native background subagents", () => {
 
 				releaseCleanup.resolve();
 				expect(
-					jobSnapshot(await jobs.execute("done", { action: "wait", id: parentJob.id, timeoutMs: 30_000 })).status,
+					jobSnapshot(await jobs.execute("done", { action: "wait", ids: [parentJob.id], timeoutMs: 30_000 }))
+						.status,
 				).toBe("cancelled");
 				expect(child.hasBackgroundJobs).toBe(false);
 				expect(scope.snapshot().activeDescendants).toBe(0);
@@ -430,9 +432,15 @@ describe("native background subagents", () => {
 				expect(job.status).toBe("running");
 				context.finish.resolve();
 				const jobs = context.session.state.tools.find((tool) => tool.name === "jobs")!;
-				const collected = await jobs.execute("collect", { action: "wait", id: job.id, timeoutMs: 30_000 });
+				const collected = await jobs.execute("collect", { action: "wait", ids: [job.id], timeoutMs: 30_000 });
 				expect(collected).toMatchObject({
-					details: { backgroundJob: { status: "completed", output: expect.stringContaining("child report") } },
+					details: {
+						backgroundJobWait: {
+							reason: "terminal",
+							results: [{ id: job.id, status: "completed", output: expect.stringContaining("child report") }],
+							pending: [],
+						},
+					},
 				});
 				expect(context.manager.listDelegations()).toHaveLength(mode === "single" ? 1 : 2);
 				expect(context.manager.listDelegations().every((record) => record.status === "completed")).toBe(true);

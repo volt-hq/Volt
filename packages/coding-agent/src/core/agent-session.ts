@@ -76,6 +76,7 @@ import { resolvePath } from "../utils/paths.ts";
 import { PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE } from "../utils/private-files.ts";
 import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
+import { type BackgroundJobDiagnosticEvent, BackgroundJobDiagnostics } from "./background-job-diagnostics.ts";
 import { BACKGROUND_JOB_NOTIFICATION_TYPE, BackgroundJobManager, type BackgroundJobSource } from "./background-jobs.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { cloneCanonicalData } from "./canonical-data.ts";
@@ -192,7 +193,6 @@ import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-promp
 import { getThemeByName, theme } from "./theme/runtime.ts";
 import { ToolProgressDiagnostics } from "./tool-progress-diagnostics.ts";
 import { withBackgroundJobs } from "./tools/background.ts";
-import { getBackgroundJobSnapshot } from "./tools/background-render.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import {
 	BRAVE_SEARCH_AUTH_PROVIDER,
@@ -205,7 +205,7 @@ import {
 	type SubagentToolMode,
 	type ToolDef,
 } from "./tools/index.ts";
-import { acknowledgeBackgroundJobResult } from "./tools/jobs.ts";
+import { acknowledgeBackgroundJobResult, getBackgroundJobResultSnapshots } from "./tools/jobs.ts";
 import {
 	canonicalizePlanSteps,
 	createPlanningToolDefinitions,
@@ -611,6 +611,21 @@ export class AgentSession {
 	private readonly _harnessSessionStorage: SessionManagerHarnessStorage;
 	private readonly _streamFn: StreamFn;
 	private readonly _toolProgressDiagnostics: ToolProgressDiagnostics;
+	private readonly _backgroundDiagnostics: BackgroundJobDiagnostics;
+	private _diagnosticRequestId?: string;
+
+	private _recordBackgroundDiagnostic(event: BackgroundJobDiagnosticEvent): void {
+		try {
+			const runId = this._harness?.activeRunSnapshot?.runId;
+			this._backgroundDiagnostics.record({
+				...(runId === undefined ? {} : { runId }),
+				...(this._diagnosticRequestId === undefined ? {} : { requestId: this._diagnosticRequestId }),
+				...event,
+			});
+		} catch {
+			// Performance observation cannot affect the session.
+		}
+	}
 	private readonly _convertToLlm: AgentSessionConfig["convertToLlm"];
 	/** Synchronously staged provider policy; Harness publishes it through its ordered configuration lane. */
 	private _streamOptions: AgentHarnessStreamOptions;
@@ -695,6 +710,8 @@ export class AgentSession {
 			this._trustedHostToolNames.has(name) &&
 			this._toolDefinitions.get(name)?.sourceInfo.source === "builtin",
 		getGeneration: () => this._conversationGenerationRevision,
+		getRunIdentity: () => this._activeAgentRun,
+		recordDiagnostic: (event) => this._recordBackgroundDiagnostic(event),
 	});
 	private readonly _backgroundToolContext = new AsyncLocalStorage<{
 		generation: number;
@@ -782,6 +799,17 @@ export class AgentSession {
 	constructor(config: AgentSessionConfig) {
 		this.sessionManager = config.sessionManager;
 		this._streamFn = config.streamFn;
+		this._backgroundDiagnostics = new BackgroundJobDiagnostics({
+			agentDir: resolvePath(config.agentDir ?? getAgentDir()),
+			sessionId: () => this.sessionId,
+			parentSessionId: () => this.sessionManager.getHeader()?.parentSession?.sessionId,
+			warn: () => {
+				const message = "Could not retain optional background-job performance diagnostics.";
+				if (this._extensionUIContext && this._extensionMode === "tui")
+					this._extensionUIContext.notify(message, "warning");
+				else console.error(message);
+			},
+		});
 		this._toolProgressDiagnostics = new ToolProgressDiagnostics(
 			resolvePath(config.agentDir ?? getAgentDir()),
 			() => this.sessionId,
@@ -817,8 +845,10 @@ export class AgentSession {
 					pendingJobIds.size > 0
 						? context.messages.flatMap((message, messageIndex) => {
 								if (message.role !== "toolResult" || message.toolName !== "jobs") return [];
-								const snapshot = getBackgroundJobSnapshot(message.details);
-								return snapshot?.endedAt !== undefined && pendingJobIds.has(snapshot.id)
+								const snapshots = getBackgroundJobResultSnapshots(message.details);
+								return snapshots.some(
+									(snapshot) => snapshot.endedAt !== undefined && pendingJobIds.has(snapshot.id),
+								)
 									? [{ message, messageIndex }]
 									: [];
 							})
@@ -872,7 +902,42 @@ export class AgentSession {
 						},
 					};
 				}
-				const stream = await config.streamFn(model, context, requestOptions);
+				const requestId =
+					activeRun && !this._activeCompaction && this._backgroundDiagnostics.enabled ? randomUUID() : undefined;
+				const runId = this._harness.activeRunSnapshot?.runId;
+				const identity = {
+					...(runId === undefined ? {} : { runId }),
+					...(requestId === undefined ? {} : { requestId }),
+				};
+				if (requestId) {
+					this._diagnosticRequestId = requestId;
+					this._recordBackgroundDiagnostic({
+						kind: "request_start",
+						...identity,
+						provider: model.provider,
+						model: model.id,
+					});
+				}
+				let stream: Awaited<ReturnType<StreamFn>>;
+				try {
+					stream = await config.streamFn(model, context, requestOptions);
+				} catch (error) {
+					if (requestId) this._recordBackgroundDiagnostic({ kind: "request_end", ...identity, isError: true });
+					throw error;
+				}
+				if (requestId) {
+					void stream
+						.result()
+						.then((result) => {
+							this._recordBackgroundDiagnostic({
+								kind: "request_end",
+								...identity,
+								usage: result.usage,
+								isError: result.stopReason === "error" || result.stopReason === "aborted",
+							});
+						})
+						.catch(() => this._recordBackgroundDiagnostic({ kind: "request_end", ...identity, isError: true }));
+				}
 				if (resultCandidates.length > 0) {
 					// Observe completion without consuming events or delaying stream delivery.
 					void stream
@@ -940,6 +1005,8 @@ export class AgentSession {
 
 			// Always subscribe to finalized Harness events for internal handling.
 			this._unsubscribeAgent = this._harness.subscribe(async (event) => {
+				if (event.type === "queue_update" && !this._disposed)
+					this._backgroundJobs.setSteeringPending(event.steer.length > 0);
 				if (isAgentEvent(event)) await this._handleAgentEvent(event);
 			});
 			this._unsubscribeGitContext = () => {
@@ -986,6 +1053,7 @@ export class AgentSession {
 			this._disposed = true;
 			this._canonicalProducerRetired = true;
 			void this._backgroundJobs.close();
+			void this._backgroundDiagnostics.close();
 			const cleanupErrors: unknown[] = [];
 			const cleanup = (finalize: () => void): void => {
 				try {
@@ -1463,9 +1531,21 @@ export class AgentSession {
 				// Diagnostics are passive and cannot change the session outcome.
 			}
 		}
+		if (event.type === "agent_start" || event.type === "agent_end") {
+			this._recordBackgroundDiagnostic({ kind: event.type === "agent_start" ? "run_start" : "run_end" });
+			if (event.type === "agent_end") this._diagnosticRequestId = undefined;
+		} else if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
+			this._recordBackgroundDiagnostic({
+				kind: event.type === "tool_execution_start" ? "tool_start" : "tool_end",
+				toolCallId: event.toolCallId,
+				toolName: event.toolName,
+				...(event.type === "tool_execution_end" ? { isError: event.isError } : {}),
+			});
+		}
 		if (event.type === "tool_execution_end" || event.type === "agent_settled") {
 			this.gitContextProvider.scheduleRefresh();
 		}
+		if (event.type === "agent_settled") this._backgroundDiagnostics.flush();
 		const listeners = [...this._eventListeners];
 		const description = `AgentSession ${event.type} event`;
 		let canonicalEvent: AgentSessionEvent;
@@ -2555,6 +2635,7 @@ export class AgentSession {
 			settingsDrain,
 			backgroundDrain,
 		]);
+		await this._backgroundDiagnostics.close();
 		const rejected = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
 		if (rejected.length === 1) throw rejected[0].reason;
 		if (rejected.length > 1) {

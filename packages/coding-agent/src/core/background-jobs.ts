@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AgentToolResult, AgentToolUpdateCallback } from "@hansjm10/volt-agent-core";
+import type { BackgroundJobDiagnosticEvent } from "./background-job-diagnostics.ts";
 import { cloneCanonicalData } from "./canonical-data.ts";
 import { truncateTail } from "./tools/truncate.ts";
 
@@ -8,7 +9,7 @@ export type BackgroundJobStatus = "running" | "cancelling" | "completed" | "fail
 export const BACKGROUND_JOB_MAX_ACTIVE = 8;
 export const BACKGROUND_JOB_MAX_RETAINED = 64;
 export const BACKGROUND_JOB_MAX_OUTPUT_BYTES = 50 * 1024;
-export const BACKGROUND_JOB_MAX_WAIT_MS = 30_000;
+export const BACKGROUND_JOB_MAX_WAIT_MS = 300_000;
 export const BACKGROUND_JOB_NOTIFICATION_TYPE = "background_job_notification";
 
 export interface BackgroundJobSummary {
@@ -29,11 +30,35 @@ export interface BackgroundJobSnapshot extends BackgroundJobSummary {
 	lastOutputAt?: number;
 }
 
+export interface BackgroundJobWaitSummary {
+	id: string;
+	toolCallId?: string;
+	ids: string[];
+	mode: "any" | "all";
+	startedAt: number;
+}
+
+export interface BackgroundJobWaitResult extends BackgroundJobWaitSummary {
+	reason: "terminal" | "steered" | "timeout";
+	endedAt: number;
+	results: BackgroundJobSnapshot[];
+	pending: BackgroundJobSummary[];
+}
+
+export interface BackgroundJobWaitOptions {
+	mode?: "any" | "all";
+	timeoutMs?: number;
+	signal?: AbortSignal;
+	toolCallId?: string;
+}
+
 export interface BackgroundJobManagerOptions {
 	/** Host-owned capability check, including the jobs control tool. */
 	isToolAllowed: (name: BackgroundToolName | "jobs") => boolean;
 	/** Changes on branch navigation, but not on ordinary turns or compaction. */
 	getGeneration: () => number;
+	getRunIdentity?: () => unknown;
+	recordDiagnostic?: (event: BackgroundJobDiagnosticEvent) => void;
 }
 
 export interface BackgroundJobStart {
@@ -52,6 +77,8 @@ interface JobRecord {
 	collected: boolean;
 	/** Native terminal reads awaiting delivery in a model request; never worker-supplied metadata. */
 	resultReads: Set<string>;
+	pins: number;
+	outputRevision: number;
 }
 
 /** Session-owned work. Completion never starts an inference request or writes a transcript. */
@@ -60,6 +87,25 @@ export class BackgroundJobManager {
 	private readonly records = new Map<string, JobRecord>();
 	private closed = false;
 	private readonly listeners = new Set<() => void>();
+	private readonly waits = new Map<string, BackgroundJobWaitSummary>();
+	private steeringPending = false;
+
+	setSteeringPending(pending: boolean): void {
+		this.steeringPending = pending;
+		this.emitChange();
+	}
+
+	listWaits(): BackgroundJobWaitSummary[] {
+		return [...this.waits.values()].map((wait) => ({ ...wait, ids: [...wait.ids] }));
+	}
+
+	private diagnose(event: BackgroundJobDiagnosticEvent): void {
+		try {
+			this.options.recordDiagnostic?.(event);
+		} catch {
+			// Optional diagnostics cannot change execution.
+		}
+	}
 
 	constructor(options: BackgroundJobManagerOptions) {
 		this.options = options;
@@ -99,7 +145,9 @@ export class BackgroundJobManager {
 	start(work: BackgroundJobStart): BackgroundJobSnapshot {
 		this.assertCanStart(work.toolName);
 		while (this.records.size >= BACKGROUND_JOB_MAX_RETAINED) {
-			const oldest = [...this.records.values()].find((record) => record.snapshot.endedAt !== undefined);
+			const oldest = [...this.records.values()].find(
+				(record) => record.snapshot.endedAt !== undefined && record.pins === 0,
+			);
 			if (!oldest) throw new Error("Background job retention is full.");
 			this.records.delete(oldest.snapshot.id);
 		}
@@ -120,8 +168,17 @@ export class BackgroundJobManager {
 			notified: false,
 			collected: false,
 			resultReads: new Set(),
+			pins: 0,
+			outputRevision: 0,
 		};
 		this.records.set(record.snapshot.id, record);
+		this.diagnose({
+			kind: "job_start",
+			jobId: record.snapshot.id,
+			toolCallId: work.toolCallId,
+			toolName: work.toolName,
+			status: "running",
+		});
 		// Defer dispatch until the handle is registered. Cancellation before that
 		// microtask must prevent the work from starting, not merely hide its result.
 		record.settled = Promise.resolve().then(() => this.run(record, work));
@@ -150,8 +207,17 @@ export class BackgroundJobManager {
 	}
 
 	/** Native read/wait execution alone does not prove that the model received the result. */
-	recordResultRead(toolCallId: string, snapshot: BackgroundJobSnapshot): void {
+	recordResultRead(toolCallId: string, snapshot: BackgroundJobSnapshot, action: "read" | "wait" = "read"): void {
 		const record = this.requireRecord(snapshot.id);
+		this.diagnose({
+			kind: "job_read",
+			toolCallId,
+			jobId: snapshot.id,
+			action,
+			status: snapshot.status,
+			outputBytes: Buffer.byteLength(snapshot.output),
+			outputRevision: record.outputRevision,
+		});
 		if (record.collected || snapshot.endedAt === undefined || snapshot.endedAt !== record.snapshot.endedAt) return;
 		record.resultReads.add(toolCallId);
 		// SDK callers can inspect repeatedly without ever submitting a model request.
@@ -178,6 +244,7 @@ export class BackgroundJobManager {
 			return;
 		record.collected = true;
 		record.resultReads.clear();
+		this.diagnose({ kind: "job_collected", jobId: snapshot.id, toolCallId });
 		this.emitChange();
 	}
 
@@ -185,34 +252,105 @@ export class BackgroundJobManager {
 		return { ...this.requireRecord(id).snapshot };
 	}
 
-	async wait(
-		id: string,
-		timeoutMs = BACKGROUND_JOB_MAX_WAIT_MS,
-		signal?: AbortSignal,
-	): Promise<BackgroundJobSnapshot> {
-		if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > BACKGROUND_JOB_MAX_WAIT_MS) {
+	async wait(ids: readonly string[], options: BackgroundJobWaitOptions = {}): Promise<BackgroundJobWaitResult> {
+		const { timeoutMs, signal, toolCallId } = options;
+		const mode = options.mode ?? "any";
+		if (
+			!Array.isArray(ids) ||
+			ids.length < 1 ||
+			ids.length > BACKGROUND_JOB_MAX_RETAINED ||
+			new Set(ids).size !== ids.length
+		) {
+			throw new Error("Job wait requires 1–64 unique accessible ids.");
+		}
+		if (mode !== "any" && mode !== "all") throw new Error("Job wait mode must be any or all.");
+		if (
+			timeoutMs !== undefined &&
+			(!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > BACKGROUND_JOB_MAX_WAIT_MS)
+		) {
 			throw new Error(`Job wait timeoutMs must be an integer from 0 to ${BACKGROUND_JOB_MAX_WAIT_MS}.`);
 		}
 		if (signal?.aborted) throw new Error("Job wait aborted.");
-		const record = this.requireRecord(id);
-		if (record.snapshot.endedAt !== undefined || timeoutMs === 0) return { ...record.snapshot };
+		if (this.waits.size >= BACKGROUND_JOB_MAX_RETAINED) throw new Error("At most 64 job waits may be active.");
+		const records = ids.map((id) => this.requireRecord(id));
+		const generation = this.options.getGeneration();
+		const runIdentity = this.options.getRunIdentity?.();
+		const wait: BackgroundJobWaitSummary = {
+			id: `wait_${randomUUID()}`,
+			ids: [...ids],
+			mode,
+			startedAt: Date.now(),
+			...(toolCallId === undefined ? {} : { toolCallId }),
+		};
+		const diagnostic = {
+			waitId: wait.id,
+			jobIds: wait.ids,
+			mode,
+			...(toolCallId === undefined ? {} : { toolCallId }),
+		};
+		for (const record of records) record.pins++;
+		this.waits.set(wait.id, wait);
+		this.diagnose({ kind: "wait_start", ...diagnostic });
 		let timer: ReturnType<typeof setTimeout> | undefined;
+		let unsubscribe: (() => void) | undefined;
 		let onAbort: (() => void) | undefined;
+		let expired = timeoutMs === 0;
 		try {
-			await Promise.race([
-				record.settled,
-				new Promise<void>((resolve, reject) => {
-					timer = setTimeout(resolve, timeoutMs);
-					onAbort = () => reject(new Error("Job wait aborted."));
-					signal?.addEventListener("abort", onAbort, { once: true });
-					if (signal?.aborted) onAbort();
-				}),
-			]);
+			const reason = await new Promise<BackgroundJobWaitResult["reason"]>((resolve, reject) => {
+				const check = () => {
+					if (signal?.aborted) return reject(new Error("Job wait aborted."));
+					if (
+						generation !== this.options.getGeneration() ||
+						runIdentity !== this.options.getRunIdentity?.() ||
+						records.some((record) => !this.hasAccess(record))
+					) {
+						return reject(new Error("Job wait belongs to an inaccessible runtime, branch, or run."));
+					}
+					const terminal = records.filter((record) => record.snapshot.endedAt !== undefined).length;
+					if (mode === "all" ? terminal === records.length : terminal > 0) resolve("terminal");
+					else if (this.steeringPending) resolve("steered");
+					else if (expired) resolve("timeout");
+				};
+				unsubscribe = this.subscribe(check);
+				onAbort = check;
+				signal?.addEventListener("abort", check, { once: true });
+				if (timeoutMs !== undefined && timeoutMs > 0)
+					timer = setTimeout(() => {
+						expired = true;
+						check();
+					}, timeoutMs);
+				this.emitChange();
+				check();
+			});
+			// Recheck ownership after promise scheduling, before copying any output.
+			if (signal?.aborted) throw new Error("Job wait aborted.");
+			if (generation !== this.options.getGeneration() || runIdentity !== this.options.getRunIdentity?.())
+				throw new Error("Job wait belongs to a stale run.");
+			const snapshots = wait.ids.map((id) => this.get(id));
+			const result: BackgroundJobWaitResult = {
+				...wait,
+				reason,
+				endedAt: Date.now(),
+				results: snapshots.filter((job) => job.endedAt !== undefined),
+				pending: snapshots
+					.filter((job) => job.endedAt === undefined)
+					.map(
+						({ output: _output, outputTruncated: _truncated, lastOutputAt: _lastOutput, ...summary }) => summary,
+					),
+			};
+			this.diagnose({ kind: "wait_end", ...diagnostic, reason });
+			return result;
+		} catch (error) {
+			this.diagnose({ kind: "wait_end", ...diagnostic, reason: signal?.aborted ? "aborted" : "revoked" });
+			throw error;
 		} finally {
 			if (timer !== undefined) clearTimeout(timer);
+			unsubscribe?.();
 			if (onAbort) signal?.removeEventListener("abort", onAbort);
+			for (const record of records) record.pins--;
+			this.waits.delete(wait.id);
+			this.emitChange();
 		}
-		return this.get(id);
 	}
 
 	/** Requests cancellation; cancelling is not terminal until the worker settles. */
@@ -286,6 +424,7 @@ export class BackgroundJobManager {
 	private cancelRecord(record: JobRecord): void {
 		if (record.snapshot.endedAt !== undefined || record.controller.signal.aborted) return;
 		record.snapshot.status = "cancelling";
+		this.diagnose({ kind: "job_cancel", jobId: record.snapshot.id, status: "cancelling" });
 		record.controller.abort();
 		this.emitChange();
 	}
@@ -316,6 +455,7 @@ export class BackgroundJobManager {
 		const outputTruncated = upstreamTruncated || byteTruncated || bounded.truncated;
 		const changed = record.snapshot.output !== bounded.content;
 		const truncationChanged = record.snapshot.outputTruncated !== outputTruncated;
+		if (changed || truncationChanged) record.outputRevision++;
 		if (changed && bounded.content) record.snapshot.lastOutputAt = Date.now();
 		record.snapshot.output = bounded.content;
 		record.snapshot.outputTruncated = outputTruncated;
@@ -356,6 +496,13 @@ export class BackgroundJobManager {
 		} finally {
 			acceptingUpdates = false;
 			record.snapshot.endedAt = Date.now();
+			this.diagnose({
+				kind: "job_end",
+				jobId: record.snapshot.id,
+				status: record.snapshot.status,
+				outputBytes: Buffer.byteLength(record.snapshot.output),
+				outputRevision: record.outputRevision,
+			});
 			this.emitChange();
 		}
 	}
@@ -364,5 +511,5 @@ export class BackgroundJobManager {
 /** Host UI access; does not admit work or widen the manager's tool/branch grants. */
 export type BackgroundJobSource = Pick<
 	BackgroundJobManager,
-	"list" | "listUncollected" | "get" | "cancel" | "subscribe"
+	"list" | "listUncollected" | "listWaits" | "get" | "cancel" | "subscribe"
 >;

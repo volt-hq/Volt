@@ -24,6 +24,23 @@ If Windows PowerShell is unavailable, times out, or cannot establish these ACLs,
 
 Set `VOLT_REVIEW_PRIVATE_DIAGNOSTICS=0` before launching either script to disable these records.
 
+## Background-job performance diagnostics
+
+`volt-test.sh` and `volt-test.ps1` enable `VOLT_BACKGROUND_JOB_DIAGNOSTICS=1` only when the variable is unset. `volt-test.bat` delegates to PowerShell. Set it to `0` to opt out; only `1` and `true` enable collection. Normal installed and SDK runs are off unless explicitly enabled. Newly created child runtimes inherit the setting. An already-running daemon does not acquire the launcher's environment; restart it with the intended setting when measuring daemon-owned work.
+
+Versioned, metadata-only JSONL batches go to `<agentDir>/background-job-diagnostics` (normally `~/.volt/agent/background-job-diagnostics`). Records correlate runtime, session, parent session when available, run, request, tool, job, and wait identities. They include UTC timestamps, monotonic durations, job lifecycle, wait wake reasons, native read byte counts/output revisions, collection acknowledgement, tool activity, and logical conversation request token/cache usage. Opaque Responses tool IDs containing provider item payloads are represented by stable SHA-256 digests so related records still join without retaining those payloads. They do not contain prompts, commands, arguments, reasoning, worker output, credentials, host paths, or provider payloads. They are never added to session SQLite, model context, RPC, or exports.
+
+Dirty batches flush every 30 seconds, at 64 records, before 256 KiB, and at run settlement/disposal. Records are capped at 4 KiB. The collector keeps one active and one pending write, counts dropped records under pressure, and retains the newest 200 completed files (up to 50 MiB). Writes use the existing private atomic file protections, including ACL-aware creation on Windows. An I/O/privacy failure disables optional logging for that runtime and reports one sanitized local warning. Close drains are best-effort and bounded to ten seconds; incomplete logs must not be treated as complete measurements.
+
+Analyze a directory with the repository-only script:
+
+```bash
+node scripts/summarize-background-job-performance.mjs --dir /path/to/background-job-diagnostics
+node scripts/summarize-background-job-performance.mjs --dir /path/to/background-job-diagnostics --since 2026-09-10T00:00:00Z --until 2026-09-11T00:00:00Z
+```
+
+Use `--session <id>` to narrow the report and `--help` for output details. Reports distinguish root and child usage, requests started during waits, wait durations/reasons, active/unchanged reads, observable job/model/tool overlap, and completion-to-read/acknowledgement latency. Missing ends, sequence gaps, duplicates, dropped events, and partially retained windows are reported. Logical conversation stream invocations are not HTTP retry counts or a complete ledger of review, compaction, and session-name inference. Token counts are not billed cost, and overlapping tool activity is not proof of useful work.
+
 ## Forking / Rebranding
 
 Configure via `package.json`:

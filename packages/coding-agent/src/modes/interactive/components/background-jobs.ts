@@ -37,7 +37,8 @@ export class BackgroundJobsStatus implements Component {
 	render(width: number): RenderFrame {
 		const jobs = this.source().listUncollected();
 		if (jobs.length === 0 || width <= 0) return createRenderFrame([]);
-		const title = `${theme.fg("accent", "Jobs")}  `;
+		const waits = this.source().listWaits();
+		const title = `${theme.fg("accent", waits.length ? `Jobs · waiting (${waits.length === 1 ? waits[0].mode : `${waits.length} waits`})` : "Jobs")}  `;
 		const separator = theme.fg("dim", " · ");
 		const hint = keyDisplayText("app.jobs.open") || "/jobs";
 		const hintWidth = visibleWidth(hint);

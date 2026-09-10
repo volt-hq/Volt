@@ -11,7 +11,7 @@ import {
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { withBackgroundJobs } from "../src/core/tools/background.ts";
 import { createBashToolDefinition } from "../src/core/tools/bash.ts";
-import { createJobsTool } from "../src/core/tools/jobs.ts";
+import { createJobsTool, getBackgroundJobResultSnapshots } from "../src/core/tools/jobs.ts";
 import { wrapToolDefinition } from "../src/core/tools/tool-definition-wrapper.ts";
 
 function deferred() {
@@ -23,7 +23,9 @@ function deferred() {
 }
 
 function snapshot(result: AgentToolResult<unknown>): BackgroundJobSnapshot {
-	return (result.details as { backgroundJob: BackgroundJobSnapshot }).backgroundJob;
+	const job = getBackgroundJobResultSnapshots(result.details)[0];
+	if (!job) throw new Error("Expected background job snapshot");
+	return job;
 }
 
 const completed: AgentToolResult<unknown> = { content: [{ type: "text", text: "finished" }] };
@@ -62,7 +64,7 @@ describe("BackgroundJobManager", () => {
 		expect(jobs.get(job.id).output).toBe("working");
 		expect(jobs.pendingNotifications()).toEqual([]);
 		done.resolve();
-		expect(await jobs.wait(job.id)).toMatchObject({ status: "completed", output: "finished" });
+		expect((await jobs.wait([job.id])).results[0]).toMatchObject({ status: "completed", output: "finished" });
 		update({ content: [{ type: "text", text: "late output" }] });
 		expect(jobs.get(job.id).output).toBe("finished");
 		expect(jobs.get(job.id)).toEqual(jobs.get(job.id));
@@ -78,7 +80,7 @@ describe("BackgroundJobManager", () => {
 			const jobs = manager();
 			const tool = createJobsTool({ manager: jobs });
 			const job = jobs.start({ toolName, toolCallId: "launch", label: "work", execute: async () => completed });
-			const terminal = await jobs.wait(job.id);
+			const terminal = (await jobs.wait([job.id])).results[0];
 			expect(jobs.listUncollected()).toMatchObject([{ id: job.id }]);
 			jobs.acknowledgeNotifications([job.id]);
 			await tool.execute("list", { action: "list" });
@@ -114,12 +116,12 @@ describe("BackgroundJobManager", () => {
 			},
 		});
 		await tool.execute("early-read", { action: "read", id: job.id });
-		await tool.execute("early-wait", { action: "wait", id: job.id, timeoutMs: 0 });
+		await tool.execute("early-wait", { action: "wait", ids: [job.id], timeoutMs: 0 });
 		finish.resolve();
-		const terminal = await jobs.wait(job.id);
+		const terminal = (await jobs.wait([job.id])).results[0];
 		for (const id of ["early-read", "early-wait"]) jobs.acknowledgeResult(id, terminal);
 		expect(jobs.listUncollected()).toHaveLength(1);
-		const result = await tool.execute("terminal-wait", { action: "wait", id: job.id });
+		const result = await tool.execute("terminal-wait", { action: "wait", ids: [job.id] });
 		jobs.acknowledgeResult("terminal-wait", snapshot(result));
 		expect(jobs.listUncollected()).toEqual([]);
 	});
@@ -129,7 +131,7 @@ describe("BackgroundJobManager", () => {
 		const neverStarted = vi.fn(async () => completed);
 		const first = jobs.start({ toolName: "bash", toolCallId: "first", label: "first", execute: neverStarted });
 		expect(jobs.cancel(first.id).status).toBe("cancelling");
-		expect((await jobs.wait(first.id)).status).toBe("cancelled");
+		expect((await jobs.wait([first.id])).results[0].status).toBe("cancelled");
 		expect(neverStarted).not.toHaveBeenCalled();
 		const finish = deferred();
 		let signal!: AbortSignal;
@@ -146,9 +148,9 @@ describe("BackgroundJobManager", () => {
 		await Promise.resolve();
 		expect(jobs.cancel(second.id).status).toBe("cancelling");
 		expect(signal.aborted).toBe(true);
-		expect((await jobs.wait(second.id, 0)).status).toBe("cancelling");
+		expect((await jobs.wait([second.id], { timeoutMs: 0 })).pending[0].status).toBe("cancelling");
 		finish.resolve();
-		expect((await jobs.wait(second.id)).status).toBe("cancelled");
+		expect((await jobs.wait([second.id])).results[0].status).toBe("cancelled");
 	});
 
 	it("joins newly admitted and revoked work without polling or cancelling it", async () => {
@@ -212,21 +214,23 @@ describe("BackgroundJobManager", () => {
 				return completed;
 			},
 		});
-		const waiting = jobs.wait(job.id, 10);
+		const waiting = jobs.wait([job.id], { timeoutMs: 10 });
 		await vi.advanceTimersByTimeAsync(10);
-		expect((await waiting).status).toBe("running");
+		const timedOut = await waiting;
+		expect(timedOut).toMatchObject({ reason: "timeout", results: [], pending: [{ id: job.id, status: "running" }] });
+		expect(timedOut.pending[0]).not.toHaveProperty("output");
 		const controller = new AbortController();
-		const abortedWait = jobs.wait(job.id, 30_000, controller.signal);
+		const abortedWait = jobs.wait([job.id], { timeoutMs: 30_000, signal: controller.signal });
 		const rejected = expect(abortedWait).rejects.toThrow("Job wait aborted");
 		controller.abort();
 		await rejected;
 		expect(jobs.get(job.id).status).toBe("running");
 		expect(vi.getTimerCount()).toBe(0);
 		finish.resolve();
-		await jobs.wait(job.id);
+		await jobs.wait([job.id]);
 	});
 
-	it.each([-1, 30_001, Number.NaN, Number.POSITIVE_INFINITY, 0.5])(
+	it.each([-1, 300_001, Number.NaN, Number.POSITIVE_INFINITY, 0.5])(
 		"rejects invalid wait duration %s",
 		async (timeout) => {
 			const jobs = manager();
@@ -236,7 +240,7 @@ describe("BackgroundJobManager", () => {
 				label: "work",
 				execute: async () => completed,
 			});
-			await expect(jobs.wait(job.id, timeout)).rejects.toThrow("timeoutMs");
+			await expect(jobs.wait([job.id], { timeoutMs: timeout })).rejects.toThrow("timeoutMs");
 		},
 	);
 
@@ -258,7 +262,7 @@ describe("BackgroundJobManager", () => {
 			jobs.start({ toolName: "bash", toolCallId: "overflow", label: "excess", execute: async () => completed }),
 		).toThrow("At most");
 		finish.resolve();
-		await Promise.all(active.map((job) => jobs.wait(job.id)));
+		await Promise.all(active.map((job) => jobs.wait([job.id])));
 		for (let index = 0; index < BACKGROUND_JOB_MAX_RETAINED; index++) {
 			const job = jobs.start({
 				toolName: "bash",
@@ -266,7 +270,7 @@ describe("BackgroundJobManager", () => {
 				label: "x".repeat(500),
 				execute: async () => completed,
 			});
-			await jobs.wait(job.id);
+			await jobs.wait([job.id]);
 		}
 		expect(jobs.list()).toHaveLength(BACKGROUND_JOB_MAX_RETAINED);
 		expect(jobs.listUncollected()).toHaveLength(BACKGROUND_JOB_MAX_RETAINED);
@@ -284,7 +288,7 @@ describe("BackgroundJobManager", () => {
 			label: "output with status",
 			execute: async () => ({ content: [{ type: "text", text: output }] }),
 		});
-		const result = await jobs.wait(job.id);
+		const result = (await jobs.wait([job.id])).results[0];
 		const retainedCharacters = Math.floor(
 			(BACKGROUND_JOB_MAX_OUTPUT_BYTES - Buffer.byteLength(suffix)) / Buffer.byteLength(character),
 		);
@@ -306,7 +310,7 @@ describe("BackgroundJobManager", () => {
 				label: "output",
 				execute: async () => ({ content: [{ type: "text", text: output }] }),
 			});
-			const result = await jobs.wait(job.id);
+			const result = (await jobs.wait([job.id])).results[0];
 			expect(result.outputTruncated).toBe(true);
 			expect(Buffer.byteLength(result.output)).toBeLessThanOrEqual(BACKGROUND_JOB_MAX_OUTPUT_BYTES);
 			expect(result.output).not.toContain("�");
@@ -335,7 +339,7 @@ describe("BackgroundJobManager", () => {
 				...(details === undefined ? {} : { details }),
 			}),
 		});
-		expect(await jobs.wait(job.id)).toMatchObject({
+		expect((await jobs.wait([job.id])).results[0]).toMatchObject({
 			status: "completed",
 			output: "retained output",
 			outputTruncated: truncated,
@@ -378,7 +382,7 @@ describe("BackgroundJobManager", () => {
 			expect(observer).toHaveBeenCalledTimes(3);
 		} finally {
 			finish.resolve();
-			await jobs.wait(job.id);
+			await jobs.wait([job.id]);
 		}
 		expect(jobs.get(job.id)).toMatchObject({
 			status: "completed",
@@ -402,7 +406,7 @@ describe("BackgroundJobManager", () => {
 				return completed;
 			},
 		});
-		const result = await jobs.wait(job.id);
+		const result = (await jobs.wait([job.id])).results[0];
 		expect(executionSignal.aborted).toBe(true);
 		expect(result.status).toBe("failed");
 		expect(result.output).toMatch(/finite/);
@@ -420,14 +424,17 @@ describe("BackgroundJobManager", () => {
 				throw new Error("Result policy rejected output");
 			},
 		});
-		expect(await jobs.wait(throwing.id)).toMatchObject({ status: "failed", output: "Result policy rejected output" });
+		expect((await jobs.wait([throwing.id])).results[0]).toMatchObject({
+			status: "failed",
+			output: "Result policy rejected output",
+		});
 		const failed = jobs.start({
 			toolName: "bash",
 			toolCallId: "call2",
 			label: "failure",
 			execute: async () => ({ ...completed, isError: true }),
 		});
-		expect((await jobs.wait(failed.id)).status).toBe("failed");
+		expect((await jobs.wait([failed.id])).results[0].status).toBe("failed");
 	});
 
 	it("enforces runtime and branch ownership, narrowed grants, and close fencing", async () => {
@@ -436,7 +443,7 @@ describe("BackgroundJobManager", () => {
 		const jobs = new BackgroundJobManager({ isToolAllowed: () => allowed, getGeneration: () => generation });
 		managers.push(jobs);
 		const job = jobs.start({ toolName: "bash", toolCallId: "call", label: "work", execute: async () => completed });
-		await jobs.wait(job.id);
+		await jobs.wait([job.id]);
 		expect(() => manager().get(job.id)).toThrow("Unknown");
 		generation++;
 		expect(jobs.list()).toEqual([]);
@@ -462,7 +469,10 @@ describe("background tool interface", () => {
 		const job = snapshot(
 			await tool.execute("shell-smoke", { command: "printf 'background smoke\\n'", background: true }),
 		);
-		expect(await jobs.wait(job.id)).toMatchObject({ status: "completed", output: "background smoke\n" });
+		expect((await jobs.wait([job.id])).results[0]).toMatchObject({
+			status: "completed",
+			output: "background smoke\n",
+		});
 	});
 
 	const schema = Type.Object({ command: Type.String() });
@@ -487,7 +497,7 @@ describe("background tool interface", () => {
 		expect(job.status).toBe("running");
 		expect(result.content[0]).toMatchObject({ text: expect.stringContaining(job.id) });
 		finish.resolve();
-		expect((await jobs.wait(job.id)).output).toBe("done");
+		expect((await jobs.wait([job.id])).results[0].output).toBe("done");
 		expect(await tool.execute("foreground", { command: "work" })).toMatchObject({ details: { marker: "done" } });
 	});
 
@@ -511,7 +521,7 @@ describe("background tool interface", () => {
 		expect(jobs.list()).toHaveLength(0);
 		expect(finalize).not.toHaveBeenCalled();
 		const job = snapshot(await tool.execute("confirmed", { agent: "general", confirm: "token", background: true }));
-		expect((await jobs.wait(job.id)).status).toBe("failed");
+		expect((await jobs.wait([job.id])).results[0].status).toBe("failed");
 		expect(finalize).toHaveBeenCalledTimes(1);
 	});
 
@@ -519,7 +529,7 @@ describe("background tool interface", () => {
 		const jobs = manager();
 		const tool = createJobsTool({ manager: jobs });
 		const job = jobs.start({ toolName: "bash", toolCallId: "call", label: "work", execute: async () => completed });
-		expect(snapshot(await tool.execute("wait", { action: "wait", id: job.id })).status).toBe("completed");
+		expect(snapshot(await tool.execute("wait", { action: "wait", ids: [job.id] })).status).toBe("completed");
 		expect(snapshot(await tool.execute("read", { action: "read", id: job.id })).output).toBe("finished");
 		expect(await tool.execute("list", { action: "list" })).toMatchObject({ details: { jobs: [{ id: job.id }] } });
 		await expect(tool.execute("bad", { action: "read" })).rejects.toThrow("id is required");

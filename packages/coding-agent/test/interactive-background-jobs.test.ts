@@ -100,6 +100,7 @@ async function createFixture(
 	const source: BackgroundJobSource = {
 		list: () => jobs.list(),
 		listUncollected: () => jobs.listUncollected(),
+		listWaits: () => jobs.listWaits(),
 		get: (id) => jobs.get(id),
 		cancel: (id) => jobs.cancel(id),
 		subscribe: (listener) => {
@@ -237,7 +238,7 @@ describe("interactive background jobs", () => {
 			const abort = vi.spyOn(harness.session, "abort");
 			const cancel = vi.spyOn(jobs, "cancel");
 			let waitSettled = false;
-			const waiting = jobs.wait(job.id).then(() => {
+			const waiting = jobs.wait([job.id]).then(() => {
 				waitSettled = true;
 			});
 
@@ -296,7 +297,7 @@ describe("interactive background jobs", () => {
 			expect(terminal.getViewport().join("\n")).toContain("Jobs  running");
 			expect(terminal.getViewport().join("\n")).not.toContain("first live output");
 			finish();
-			await jobs.wait(job.id);
+			await jobs.wait([job.id]);
 			access.backgroundJobsRenderCoalescer?.flush();
 			await terminal.waitForRender();
 			const settled = terminal.getViewport().join("\n");
@@ -338,7 +339,7 @@ describe("interactive background jobs", () => {
 			const { access, harness, terminal, jobs, job, finish, scope } = fixture;
 			await acknowledgeLaunch(fixture);
 			finish();
-			const snapshot = await jobs.wait(job.id);
+			const snapshot = (await jobs.wait([job.id])).results[0];
 			const notice: CustomMessage = {
 				role: "custom",
 				customType: BACKGROUND_JOB_NOTIFICATION_TYPE,
@@ -361,14 +362,14 @@ describe("interactive background jobs", () => {
 				.buildSessionContext()
 				.messages.find((message) => message.role === "assistant");
 			if (!launch || launch.role !== "assistant") throw new Error("Expected launch message");
-			const args = { action: "wait", id: job.id };
+			const args = { action: "wait" as const, ids: [job.id] };
 			const toolCallId = "collect-failed-job";
 			harness.sessionManager.appendMessage({
 				...launch,
 				content: [{ type: "toolCall", name: "jobs", id: toolCallId, arguments: args }],
 			});
 			await access.handleEvent({ type: "tool_execution_start", toolCallId, toolName: "jobs", args });
-			const result = backgroundJobResult(snapshot);
+			const result = await createJobsTool({ manager: jobs }).execute(toolCallId, args);
 			harness.sessionManager.appendMessage({
 				...result,
 				role: "toolResult",
@@ -383,13 +384,13 @@ describe("interactive background jobs", () => {
 			expect(collapsed.match(/Run focused integration checks/g)).toHaveLength(1);
 			expect(collapsed.match(/final output/g)).toHaveLength(1);
 			expect(collapsed).toContain("Bash · background · Failed");
-			expect(collapsed).toContain("jobs wait · Failed · snapshot");
+			expect(collapsed).toContain("jobs wait · terminal (any) · 1 failed");
 			expect(terminal.getViewport().join("\n")).toContain("awaiting review");
 			const saved = harness.sessionManager.buildSessionContext();
 			terminal.sendInput("\x0f");
 			await terminal.waitForRender();
 			const expanded = stripAnsi(access.chatContainer.render(80).lines.join("\n"));
-			expect(expanded).toContain("Output snapshot");
+			expect(expanded).toContain("Background job wait");
 			expect(expanded).toContain(job.id);
 			expect(expanded.match(/final output/g)).toHaveLength(2);
 			expect(notification?.render(80).lines).toEqual([]);
@@ -547,13 +548,13 @@ describe("interactive background jobs", () => {
 				.messages.find((message) => message.role === "assistant");
 			if (!assistant || assistant.role !== "assistant") throw new Error("Expected launch message");
 			const toolCallId = "pending-job-wait";
-			const args = { action: "wait", id: job.id };
+			const args = { action: "wait" as const, ids: [job.id] };
 			harness.sessionManager.appendMessage({
 				...assistant,
 				content: [{ type: "toolCall", id: toolCallId, name: "jobs", arguments: args }],
 			});
 			await access.handleEvent({ type: "tool_execution_start", toolCallId, toolName: "jobs", args });
-			const waiting = jobs.wait(job.id);
+			const waiting = createJobsTool({ manager: jobs }).execute(toolCallId, args);
 			for (let index = 0; index < 3; index++) {
 				terminal.sendInput("\x14");
 				update({ content: [{ type: "text", text: `live wait output ${index}` }] });
@@ -570,12 +571,12 @@ describe("interactive background jobs", () => {
 				expect(output).not.toContain("Running at capture");
 			}
 			finish();
-			const result = backgroundJobResult(await waiting);
+			const result = await waiting;
 			await access.handleEvent({ type: "tool_execution_end", toolCallId, toolName: "jobs", result, isError: false });
 			const card = access.chatContainer.children.filter((child) => child instanceof ToolExecutionComponent).at(-1);
 			if (!card) throw new Error("Expected completed wait card");
 			const collapsed = stripAnsi(card.render(80).lines.join("\n"));
-			expect(collapsed).toContain("Completed");
+			expect(collapsed).toContain("completed");
 			expect(collapsed).not.toContain("final output");
 			card.setExpanded(true);
 			const output = stripAnsi(card.render(80).lines.join("\n"));
@@ -638,7 +639,7 @@ describe("interactive background jobs", () => {
 		async (tuiMode, failed) => {
 			const { harness, access, terminal, jobs, job, finish, listeners } = await createFixture(tuiMode);
 			finish();
-			await jobs.wait(job.id);
+			await jobs.wait([job.id]);
 			let entered!: () => void;
 			const started = new Promise<void>((resolve) => {
 				entered = resolve;
@@ -687,7 +688,7 @@ describe("interactive background jobs", () => {
 			label: "Other job",
 			execute: async () => ({ content: [] }),
 		});
-		await jobs.wait(other.id);
+		await jobs.wait([other.id]);
 		access.editor.setText("/jobs");
 		await access.handleFollowUp();
 		await terminal.waitForRender();
@@ -734,7 +735,7 @@ describe("interactive background jobs", () => {
 		expect(access.chatContainer.children).toContain(history);
 		expect(stripAnsi(card.render(100).lines.join("\n"))).toContain("output 99");
 		finish();
-		await jobs.wait(job.id);
+		await jobs.wait([job.id]);
 		access.backgroundJobsRenderCoalescer?.flush();
 		expect(stripAnsi(card.render(100).lines.join("\n"))).toContain("Completed");
 		invalidate.mockClear();
@@ -749,7 +750,8 @@ describe("interactive background jobs", () => {
 		const inspections: ToolExecutionComponent[] = [];
 		for (let index = 0; index < 200; index++) {
 			const toolCallId = `completed-inspection-${index}`;
-			const args = { action: index % 2 === 0 ? "read" : "wait", id: job.id };
+			const args: { action: "read"; id: string } | { action: "wait"; ids: string[]; timeoutMs: number } =
+				index % 2 === 0 ? { action: "read", id: job.id } : { action: "wait", ids: [job.id], timeoutMs: 0 };
 			await access.handleEvent({ type: "tool_execution_start", toolCallId, toolName: "jobs", args });
 			const component = access.chatContainer.children.at(-1);
 			if (!(component instanceof ToolExecutionComponent)) throw new Error("Expected inspection component");
@@ -757,7 +759,7 @@ describe("interactive background jobs", () => {
 				type: "tool_execution_end",
 				toolCallId,
 				toolName: "jobs",
-				result: backgroundJobResult(jobs.get(job.id)),
+				result: await createJobsTool({ manager: jobs }).execute(toolCallId, args),
 				isError: false,
 			});
 			inspections.push(component);
@@ -769,7 +771,7 @@ describe("interactive background jobs", () => {
 			type: "tool_execution_start",
 			toolCallId: "pending-inspection",
 			toolName: "jobs",
-			args: { action: "wait", id: job.id },
+			args: { action: "wait", ids: [job.id] },
 		});
 		const pending = access.chatContainer.children.at(-1);
 		if (!(pending instanceof ToolExecutionComponent)) throw new Error("Expected pending inspection");
@@ -797,7 +799,7 @@ describe("interactive background jobs", () => {
 			const transcript = harness.sessionManager.buildSessionContext();
 			const modelMessages = harness.session.messages;
 			finish();
-			await jobs.wait(job.id);
+			await jobs.wait([job.id]);
 			// The first reconstruction must also flush any queued terminal-status repaint.
 			for (let index = 0; index < 3; index++) {
 				terminal.sendInput("\x14"); // Ctrl+T reconstructs the transcript.
@@ -824,7 +826,7 @@ describe("interactive background jobs", () => {
 					return { content: [] };
 				},
 			});
-			await jobs.wait(other.id);
+			await jobs.wait([other.id]);
 			access.backgroundJobsRenderCoalescer?.flush();
 			expect(invalidate).not.toHaveBeenCalled();
 			expect(stripAnsi(access.chatContainer.render(100).lines.join("\n"))).toContain("final output");
@@ -838,7 +840,7 @@ describe("interactive background jobs", () => {
 			const { access, jobs, job, finish, scope, source } = fixture;
 			const card = await acknowledgeLaunch(fixture);
 			finish();
-			await jobs.wait(job.id);
+			await jobs.wait([job.id]);
 			access.backgroundJobsRenderCoalescer?.flush();
 			const dispose = vi.spyOn(card, "dispose");
 			if (reason === "eviction") {
@@ -849,7 +851,7 @@ describe("interactive background jobs", () => {
 						label: "New work",
 						execute: async () => ({ content: [] }),
 					});
-					await jobs.wait(other.id);
+					await jobs.wait([other.id]);
 				}
 				expect(jobs.list()).toHaveLength(BACKGROUND_JOB_MAX_RETAINED);
 			} else {
@@ -903,7 +905,7 @@ describe("interactive background jobs", () => {
 			const card = await acknowledgeLaunch(fixture);
 			if (settled) {
 				finish();
-				await jobs.wait(job.id);
+				await jobs.wait([job.id]);
 				access.backgroundJobsRenderCoalescer?.flush();
 			}
 			const dispose = vi.spyOn(card, "dispose");

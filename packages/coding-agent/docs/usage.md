@@ -93,15 +93,21 @@ The `jobs` tool controls work owned by the current runtime and branch:
 ```json
 { "action": "list" }
 { "action": "read", "id": "job_..." }
-{ "action": "wait", "id": "job_...", "timeoutMs": 30000 }
+{ "action": "wait", "ids": ["job_tests", "job_review"], "mode": "any" }
 { "action": "cancel", "id": "job_..." }
 ```
 
 - `read` returns the latest output snapshot without consuming it. Output is capped at the last 50 KB or 2000 lines; repeated reads may contain the same text.
-- `wait` waits up to 30 seconds by default, with a configurable integer `timeoutMs` from 0 to 30000. A wait timeout does not cancel the job.
+- `wait` takes 1–64 unique accessible `ids` and waits for terminal events without a default deadline. `mode: "any"` (the default) returns when at least one selected job is terminal; `"all"` waits for every selected job. Already-terminal jobs return immediately. An optional integer `timeoutMs` from 0 to 300000 supplies an explicit deadline; it never cancels the jobs. Use `id` only for `read` and `cancel`.
 - `cancel` requests cancellation. Status remains `cancelling` until the worker settles, then becomes `cancelled`. A cancellation request is not proof that a process has already stopped.
 - Terminal statuses are `completed`, `failed`, and `cancelled`. Read the result before relying on the work or reporting success.
-- Each session allows 8 active jobs and retains at most 64 records. Older terminal records are evicted when space is needed. Existing Bash wall-clock and silence timeouts remain active.
+- Each session allows 8 active jobs and retains at most 64 records. Active waits pin their selected records until they return. Older unpinned terminal records are evicted when space is needed; admission fails if no record can be evicted. Existing Bash wall-clock and silence timeouts remain active.
+
+After completing useful independent work, call `wait` once rather than polling or issuing shell `sleep` commands. The parent makes no model requests while the tool call waits. Worker output can update the UI without ending the wait. Admitted steering interrupts the wait but leaves jobs running; follow-up messages remain queued. Ordinary tool-batch boundaries still apply when sibling foreground tools are executing. Abort retains the existing job-cancellation behavior.
+
+A wait returns `terminal`, `steered`, or `timeout` with terminal results and metadata-only pending statuses. Failed and cancelled workers are terminal, not successful work. Simultaneously available results are returned together. Combined result text is capped at 50 KiB/2000 lines, including metadata, with output capacity shared across returned terminal jobs. Truncation does not change retained output; use `read` for a specific job's full retained snapshot. Only terminal results included in the response can become collected after provider-confirmed delivery.
+
+**Wait API migration:** replace `{ "action": "wait", "id": "job_..." }` with `{ "action": "wait", "ids": ["job_..."] }`. Wait metadata is now a `backgroundJobWait` envelope containing `results`, `pending`, and the wake `reason`, rather than a single `backgroundJob` snapshot. To retain a bounded wait, explicitly provide `timeoutMs`. Background completion still never restarts an idle conversation.
 
 Both the originating tool and `jobs` must be active. Explicit tool allowlists must include `jobs`; removing either grant cancels affected jobs. Plan mode does not expose jobs. Active jobs block Plan entry, `/reload`, and `/tree` navigation until they finish or are aborted. Compaction preserves active jobs and their IDs.
 

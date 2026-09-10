@@ -136,7 +136,7 @@ async function setup(withConfiguredAuth = true) {
 			return job.id;
 		},
 		async wait(id: string) {
-			return jobs.execute("collect", { action: "wait", id, timeoutMs: 30_000 });
+			return jobs.execute("collect", { action: "wait", ids: [id], timeoutMs: 30_000 });
 		},
 		async cleanup(expectedCloseFailure = false) {
 			allowPrompt.resolve();
@@ -221,7 +221,9 @@ describe("background subagent spawn persistence", () => {
 				await context.published.promise;
 				context.finishChild.resolve();
 				expect(await context.wait(jobId)).toMatchObject({
-					details: { backgroundJob: { status: "completed" } },
+					details: {
+						backgroundJobWait: { reason: "terminal", results: [{ id: jobId, status: "completed" }], pending: [] },
+					},
 				});
 				expect(context.manager.listDelegations()).toMatchObject([{ status: "completed" }]);
 				expect(context.parent.getSubagentSpawnEntries()).toEqual([]);

@@ -19,6 +19,7 @@ import { initTheme, theme } from "../src/core/theme/runtime.ts";
 import { backgroundJobResult, withBackgroundJobs } from "../src/core/tools/background.ts";
 import * as backgroundRendering from "../src/core/tools/background-render.ts";
 import { BackgroundJobView } from "../src/core/tools/background-render.ts";
+import { backgroundWaitResult } from "../src/core/tools/background-wait.ts";
 import { createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { createJobsTool, createJobsToolDefinition } from "../src/core/tools/jobs.ts";
 import { BackgroundJobsInspector, BackgroundJobsStatus } from "../src/modes/interactive/components/background-jobs.ts";
@@ -86,7 +87,7 @@ function tool(manager: BackgroundJobManager, job: BackgroundJobSnapshot, name: "
 	const component = new ToolExecutionComponent(
 		name,
 		job.toolCallId,
-		name === "bash" ? { command: job.label, background: true } : { action: "wait", id: job.id },
+		name === "bash" ? { command: job.label, background: true } : { action: "wait", ids: [job.id] },
 		{ liveProgress: live },
 		definition,
 		{ requestRender: () => {} } as unknown as TUI,
@@ -163,7 +164,7 @@ describe("background job cards", () => {
 		expect(rendered).not.toContain("[success]");
 		expect(rendered).not.toContain("Use jobs with action");
 		work.finish({ content: [{ type: "text", text: "Tests 12 passed (12)" }] });
-		await manager.wait(work.job.id);
+		await manager.wait([work.job.id]);
 		rendered = text(card);
 		expect(rendered).toContain("Completed · 18.0s");
 		vi.setSystemTime(30_000);
@@ -178,7 +179,7 @@ describe("background job cards", () => {
 		card.updateResult({ ...backgroundJobResult(work.job), isError: false });
 		const log = Array.from({ length: 400 }, (_, index) => `${index}: ${"x".repeat(100)}`).join("\n");
 		work.finish({ content: [{ type: "text", text: log }] });
-		await manager.wait(work.job.id);
+		await manager.wait([work.job.id]);
 		card.invalidate();
 		card.setExpanded(true);
 		const rendered = text(card);
@@ -209,20 +210,31 @@ describe("background job cards", () => {
 		expect(text(card)).toContain("Waiting for background job");
 		expect(text(card)).toContain("18.0s");
 		expect(text(card)).toContain("PASS job lifecycle");
-		card.updateResult({ ...backgroundJobResult(manager.get(work.job.id)), isError: false });
-		expect(text(card)).toContain("Running");
+		const native = createJobsTool({ manager });
+		card.updateResult({
+			...(await native.execute("expired-wait", { action: "wait", ids: [work.job.id], timeoutMs: 0 })),
+			isError: false,
+		});
+		expect(text(card)).toContain("timeout");
+		expect(text(card)).toContain("1 pending");
 		expect(text(card)).not.toContain("[success]");
 		expect(text(card)).not.toContain("Running jobs");
-		expect(text(card)).toContain("Running at capture");
+		card.setExpanded(true);
+		expect(text(card)).toContain("running (pending)");
+		expect(text(card)).not.toContain("PASS job lifecycle");
+		card.setExpanded(false);
 		const captured = text(card);
 		work.finish({
 			content: [{ type: "text", text: "FAIL cancellation\nCommand exited with code 1" }],
 			isError: true,
 		});
-		await manager.wait(work.job.id);
+		await manager.wait([work.job.id]);
 		expect(text(card)).toBe(captured);
-		card.updateResult({ ...backgroundJobResult(manager.get(work.job.id)), isError: true });
-		expect(text(card)).toContain("Failed");
+		card.updateResult({
+			...(await native.execute("terminal-wait", { action: "wait", ids: [work.job.id] })),
+			isError: true,
+		});
+		expect(text(card)).toContain("failed");
 		expect(text(card)).not.toContain("Command exited with code 1");
 		card.setExpanded(true);
 		expect(text(card)).toContain("Command exited with code 1");
@@ -235,7 +247,7 @@ describe("background job cards", () => {
 			const card = new ToolExecutionComponent(
 				"jobs",
 				"snapshot",
-				{ action, id: "job_12345678" },
+				action === "wait" ? { action, ids: ["job_12345678"] } : { action, id: "job_12345678" },
 				{},
 				createJobsToolDefinition(),
 				{ requestRender: () => {} } as unknown as TUI,
@@ -255,7 +267,22 @@ describe("background job cards", () => {
 					output: "Captured output\nFinal captured line",
 					outputTruncated: true,
 				};
-				const result = { ...backgroundJobResult(snapshot), isError: status === "failed" || status === "cancelled" };
+				const { output: _output, outputTruncated: _truncated, ...summary } = snapshot;
+				const result = {
+					...(action === "wait"
+						? backgroundWaitResult({
+								id: "wait_12345678",
+								ids: [snapshot.id],
+								mode: "any",
+								startedAt: 1000,
+								endedAt: 1200,
+								reason: active ? "timeout" : "terminal",
+								results: active ? [] : [snapshot],
+								pending: active ? [summary] : [],
+							})
+						: backgroundJobResult(snapshot)),
+					isError: status === "failed" || status === "cancelled",
+				};
 				const saved = JSON.stringify(result);
 				card.updateResult(result);
 				for (const width of [20, 40, 80, 120]) {
@@ -267,15 +294,21 @@ describe("background job cards", () => {
 					expect(collapsed).not.toContain("Captured output");
 					expect(collapsed).not.toContain("[success]");
 					if (width >= 80) {
-						expect(collapsed).toContain("snapshot (truncated)");
-						expect(collapsed).toContain("F6 expand");
-						expect(collapsed).toContain(backgroundRendering.BACKGROUND_JOB_STYLES[status].label);
-						expect(collapsed.includes("at capture")).toBe(active);
+						if (action === "wait") {
+							expect(collapsed).toContain(active ? "timeout" : "terminal");
+							expect(collapsed).toContain(active ? "1 pending" : `1 ${status}`);
+						} else {
+							expect(collapsed).toContain("snapshot (truncated)");
+							expect(collapsed).toContain("F6 expand");
+							expect(collapsed).toContain(backgroundRendering.BACKGROUND_JOB_STYLES[status].label);
+							expect(collapsed.includes("at capture")).toBe(active);
+						}
 					}
 					card.setExpanded(true);
 					const expanded = text(card, width).replace(/\s+/g, " ");
-					expect(expanded).toContain(snapshot.label);
-					expect(expanded).toContain("Final captured line");
+					if (action !== "wait") expect(expanded).toContain(snapshot.label);
+					if (action === "wait" && active) expect(expanded).not.toContain("Final captured line");
+					else expect(expanded).toContain("Final captured line");
 					expect(expanded).toContain(snapshot.id);
 					card.setExpanded(false);
 					expect(text(card, width)).toBe(collapsed);
@@ -327,6 +360,7 @@ describe("background job cards", () => {
 		const work = start(manager);
 		await Promise.resolve();
 		const card = tool(setup(), work.job, "jobs", false);
+		card.updateArgs({ action: "read", id: work.job.id });
 		card.updateResult({ ...backgroundJobResult(work.job), isError: false });
 		expect(text(card)).toContain("Running at capture");
 		expect(text(card)).toContain("snapshot");
@@ -496,11 +530,12 @@ describe("transformed job results", () => {
 			work.output("token=original-secret");
 			if (status === "completed") {
 				work.finish({ content: [{ type: "text", text: "token=original-secret" }] });
-				await manager.wait(work.job.id);
+				await manager.wait([work.job.id]);
 			}
 			const snapshot = { ...manager.get(work.job.id), label: "Filtered label", output: "token=[REDACTED]" };
 			const result = backgroundJobResult(snapshot);
 			const card = tool(manager, work.job, "jobs");
+			card.updateArgs({ action: "read", id: work.job.id });
 			card.updateResult({ ...result, isError: false });
 			for (const expanded of [false, true]) {
 				card.setExpanded(expanded);
@@ -602,7 +637,7 @@ describe("transformed job results", () => {
 			const work = start(manager, "Native job label");
 			await Promise.resolve();
 			work.finish({ content: [{ type: "text", text: "Original worker output" }] });
-			await manager.wait(work.job.id);
+			await manager.wait([work.job.id]);
 			const args = action === "list" ? { action } : { action, id: work.job.id };
 			const native = await createJobsTool({ manager }).execute("native-result", args);
 			for (const change of ["content", "error", "both"] as const) {
@@ -667,7 +702,7 @@ describe("background job observers and dock", () => {
 		expect(observer).toHaveBeenCalledTimes(2);
 		expect(manager.get(work.job.id).lastOutputAt).toBe(timestamp);
 		work.finish({ content: [{ type: "text", text: "working" }] });
-		await manager.wait(work.job.id);
+		await manager.waitForIdle();
 		expect(observer).toHaveBeenCalledTimes(3);
 		stop();
 		await manager.close();
@@ -699,7 +734,7 @@ describe("background job observers and dock", () => {
 		work.output("Different raw output");
 		expect(text(dock)).toBe(rendered);
 		work.finish({ isError: true, content: [{ type: "text", text: "FAIL timeout" }] });
-		await manager.wait(work.job.id);
+		await manager.wait([work.job.id]);
 		expect(text(dock)).toContain("failed · npm run check · 52s · awaiting review");
 		manager = setup();
 		expect(dock.render(80).lines).toEqual([]);
@@ -797,7 +832,7 @@ describe("background job observers and dock", () => {
 		await Promise.resolve();
 		vi.setSystemTime(53_999);
 		work.finish({ content: [{ type: "text", text: "Raw terminal output" }] });
-		await manager.wait(work.job.id);
+		await manager.wait([work.job.id]);
 		const dock = new BackgroundJobsStatus(() => manager);
 		expect(text(dock, 36)).toMatch(/^Jobs {2}completed · npm run check\s+F6$/);
 		expect(text(dock, 53)).toMatch(/^Jobs {2}completed · npm run check · awaiting review\s+F6$/);
@@ -820,7 +855,7 @@ describe("background job observers and dock", () => {
 		completed.finish({ content: [] });
 		failed.finish({ content: [], isError: true });
 		cancelled.finish({ content: [] });
-		await Promise.all([completed, failed, cancelled].map((work) => manager.wait(work.job.id)));
+		await Promise.all([completed, failed, cancelled].map((work) => manager.wait([work.job.id])));
 		const dock = new BackgroundJobsStatus(() => manager);
 		const rendered = text(dock);
 		expect(dock.render(80).lines).toHaveLength(1);
@@ -844,7 +879,7 @@ describe("background job observers and dock", () => {
 		const work = start(manager, "npm run check");
 		await Promise.resolve();
 		work.finish({ content: [{ type: "text", text: "Final result" }] });
-		await manager.wait(work.job.id);
+		await manager.wait([work.job.id]);
 		const dock = new BackgroundJobsStatus(() => manager);
 		expect(text(dock)).toContain("awaiting review");
 		const result = await createJobsTool({ manager }).execute("collect-result", { action: "read", id: work.job.id });
@@ -956,7 +991,7 @@ describe("background jobs inspector", () => {
 		expect(manager.get(second.job.id).status).toBe("running");
 		expect(text(component)).toContain("waiting for the worker to stop");
 		first.finish({ content: [] });
-		await manager.wait(first.job.id);
+		await manager.wait([first.job.id]);
 		expect(text(component)).toContain("Cancelled");
 		expect(text(component)).not.toContain("waiting for the worker to stop");
 		component.handleInput("\x1b");

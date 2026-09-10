@@ -47,7 +47,7 @@ describe("background native Bash cleanup", () => {
 				expect(manager.get(id).endedAt).toBeUndefined();
 				expect(manager.get(id).status).toBe(cause === "cancel" ? "cancelling" : "running");
 				barrier.finishTeardown.resolve();
-				const final = await manager.wait(id);
+				const final = (await manager.wait([id])).results[0];
 				expect(final.status).toBe(cause === "cancel" ? "cancelled" : "failed");
 				expect(final.output).toContain(cause === "cancel" ? "Command aborted" : "timed out");
 				expect(manager.hasActive).toBe(false);

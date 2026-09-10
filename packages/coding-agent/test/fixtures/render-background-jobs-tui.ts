@@ -83,6 +83,7 @@ for (const mode of ["regular", "fullscreen"] as const) {
 			let dockJobs = jobs;
 			const collected = new Set<string>();
 			const source: BackgroundJobSource = {
+				listWaits: () => [],
 				list: () => jobs.map(({ output: _output, outputTruncated: _truncated, ...job }) => ({ ...job })),
 				listUncollected: () =>
 					dockJobs
