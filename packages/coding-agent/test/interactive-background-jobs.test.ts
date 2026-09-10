@@ -8,9 +8,11 @@ import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import {
 	BACKGROUND_JOB_MAX_RETAINED,
+	BACKGROUND_JOB_NOTIFICATION_TYPE,
 	BackgroundJobManager,
 	type BackgroundJobSource,
 } from "../src/core/background-jobs.ts";
+import type { CustomMessage } from "../src/core/messages.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { stopThemeWatcher } from "../src/core/theme/runtime.ts";
 import { backgroundJobResult, withBackgroundJobs } from "../src/core/tools/background.ts";
@@ -22,6 +24,7 @@ import {
 	type BackgroundJobsStatus,
 } from "../src/modes/interactive/components/background-jobs.ts";
 import type { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
+import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
 import type { StreamingRenderCoalescer } from "../src/modes/interactive/components/streaming-render-coalescer.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -328,6 +331,83 @@ describe("interactive background jobs", () => {
 		},
 	);
 
+	it.each(["regular", "fullscreen"] as const)(
+		"shows one main failed-job card and a compact inspection without a duplicate notice (%s)",
+		async (tuiMode) => {
+			const fixture = await createFixture(tuiMode, 80, false, "failed");
+			const { access, harness, terminal, jobs, job, finish, scope } = fixture;
+			await acknowledgeLaunch(fixture);
+			finish();
+			const snapshot = await jobs.wait(job.id);
+			const notice: CustomMessage = {
+				role: "custom",
+				customType: BACKGROUND_JOB_NOTIFICATION_TYPE,
+				content: "Use jobs read to retrieve output.",
+				display: true,
+				details: { jobs: [{ ...snapshot }] },
+				timestamp: Date.now(),
+			};
+			harness.sessionManager.appendCustomMessageEntry(
+				notice.customType,
+				notice.content,
+				notice.display,
+				notice.details,
+			);
+			await access.handleEvent({ type: "message_start", message: notice });
+			access.backgroundJobsRenderCoalescer?.flush();
+			const notification = access.chatContainer.children.find((child) => child instanceof CustomMessageComponent);
+			expect(notification?.render(80).lines).toEqual([]);
+			const launch = harness.sessionManager
+				.buildSessionContext()
+				.messages.find((message) => message.role === "assistant");
+			if (!launch || launch.role !== "assistant") throw new Error("Expected launch message");
+			const args = { action: "wait", id: job.id };
+			const toolCallId = "collect-failed-job";
+			harness.sessionManager.appendMessage({
+				...launch,
+				content: [{ type: "toolCall", name: "jobs", id: toolCallId, arguments: args }],
+			});
+			await access.handleEvent({ type: "tool_execution_start", toolCallId, toolName: "jobs", args });
+			const result = backgroundJobResult(snapshot);
+			harness.sessionManager.appendMessage({
+				...result,
+				role: "toolResult",
+				toolName: "jobs",
+				toolCallId,
+				isError: true,
+				timestamp: Date.now(),
+			});
+			await access.handleEvent({ type: "tool_execution_end", toolCallId, toolName: "jobs", result, isError: true });
+			await terminal.waitForRender();
+			const collapsed = stripAnsi(access.chatContainer.render(80).lines.join("\n"));
+			expect(collapsed.match(/Run focused integration checks/g)).toHaveLength(1);
+			expect(collapsed.match(/final output/g)).toHaveLength(1);
+			expect(collapsed).toContain("Bash · background · Failed");
+			expect(collapsed).toContain("jobs wait · Failed · snapshot");
+			expect(terminal.getViewport().join("\n")).toContain("awaiting review");
+			const saved = harness.sessionManager.buildSessionContext();
+			terminal.sendInput("\x0f");
+			await terminal.waitForRender();
+			const expanded = stripAnsi(access.chatContainer.render(80).lines.join("\n"));
+			expect(expanded).toContain("Output snapshot");
+			expect(expanded).toContain(job.id);
+			expect(expanded.match(/final output/g)).toHaveLength(2);
+			expect(notification?.render(80).lines).toEqual([]);
+			terminal.sendInput("\x0f");
+			access.renderCurrentSessionState();
+			expect(stripAnsi(access.chatContainer.render(80).lines.join("\n"))).toBe(collapsed);
+			expect(harness.sessionManager.buildSessionContext()).toEqual(saved);
+			// Losing the live binding must not hide the only terminal notice behind a saved Running launch.
+			scope.allowed = false;
+			jobs.cancelInaccessible();
+			access.renderCurrentSessionState();
+			const replay = stripAnsi(access.chatContainer.render(80).lines.join("\n"));
+			expect(replay).toContain("Running at capture");
+			expect(replay).toContain("Failed · Bash · Run focused integration checks");
+			expect(harness.sessionManager.buildSessionContext()).toEqual(saved);
+		},
+	);
+
 	it("keeps the inspector open when an underlying asynchronous extension overlay closes", async () => {
 		const { access, terminal, listeners } = await createFixture("fullscreen");
 		let closeExtension!: () => void;
@@ -494,8 +574,11 @@ describe("interactive background jobs", () => {
 			await access.handleEvent({ type: "tool_execution_end", toolCallId, toolName: "jobs", result, isError: false });
 			const card = access.chatContainer.children.filter((child) => child instanceof ToolExecutionComponent).at(-1);
 			if (!card) throw new Error("Expected completed wait card");
+			const collapsed = stripAnsi(card.render(80).lines.join("\n"));
+			expect(collapsed).toContain("Completed");
+			expect(collapsed).not.toContain("final output");
+			card.setExpanded(true);
 			const output = stripAnsi(card.render(80).lines.join("\n"));
-			expect(output).toContain("Completed");
 			expect(output).toContain("final output");
 			expect(output).not.toContain("live status unavailable");
 		},
@@ -700,6 +783,8 @@ describe("interactive background jobs", () => {
 		expect(pendingInvalidation).toHaveBeenCalled();
 		expect(stripAnsi(launch.render(80).lines.join("\n"))).toContain("latest live output 9");
 		expect(stripAnsi(pending.render(80).lines.join("\n"))).toContain("latest live output 9");
+		expect(stripAnsi(inspections[0].render(80).lines.join("\n"))).not.toContain("first live output");
+		inspections[0].setExpanded(true);
 		expect(stripAnsi(inspections[0].render(80).lines.join("\n"))).toContain("first live output");
 	});
 

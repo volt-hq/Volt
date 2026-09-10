@@ -15,14 +15,23 @@ import {
 	VStack,
 } from "@hansjm10/volt-tui";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
-import type { BackgroundJobSnapshot, BackgroundJobSource } from "../../src/core/background-jobs.ts";
+import {
+	BACKGROUND_JOB_NOTIFICATION_TYPE,
+	type BackgroundJobSnapshot,
+	type BackgroundJobSource,
+} from "../../src/core/background-jobs.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { getEditorTheme, initTheme, theme } from "../../src/core/theme/runtime.ts";
+import { backgroundJobResult } from "../../src/core/tools/background.ts";
 import { BackgroundJobView, renderBackgroundJobCard } from "../../src/core/tools/background-render.ts";
+import { createJobsToolDefinition } from "../../src/core/tools/jobs.ts";
 import {
 	BackgroundJobsInspector,
 	BackgroundJobsStatus,
 } from "../../src/modes/interactive/components/background-jobs.ts";
+
+import { CustomMessageComponent } from "../../src/modes/interactive/components/custom-message.ts";
+import { ToolExecutionComponent } from "../../src/modes/interactive/components/tool-execution.ts";
 
 // Deterministic, model-free screen evidence through both real renderers and xterm.
 const directory = process.argv[2] ?? join(tmpdir(), "volt-background-jobs-ui");
@@ -131,6 +140,40 @@ for (const mode of ["regular", "fullscreen"] as const) {
 				captures.push(`=== ${name} · ${mode} · ${width}x24 · ${color} ===\n${terminal.getViewport().join("\n")}`);
 			};
 			await capture("Running tests and persistent job status");
+			const failedCard = new BackgroundJobView((width) => renderBackgroundJobCard(jobs[1], width, theme));
+			const notice = new CustomMessageComponent(
+				{
+					role: "custom",
+					customType: BACKGROUND_JOB_NOTIFICATION_TYPE,
+					display: true,
+					content: "Use jobs read to retrieve output.",
+					details: { jobs: [{ ...jobs[1] }] },
+					timestamp: now,
+				},
+				undefined,
+				undefined,
+				(id) => id === jobs[1].id,
+			);
+			const inspection = new ToolExecutionComponent(
+				"jobs",
+				"inspect-failed",
+				{ action: "read", id: jobs[1].id },
+				{},
+				createJobsToolDefinition(),
+				ui,
+				process.cwd(),
+			);
+			inspection.updateResult({ ...backgroundJobResult(jobs[1]), isError: true });
+			transcript.addChild(failedCard);
+			transcript.addChild(notice);
+			transcript.addChild(inspection);
+			await capture("One failed-job card with a compact inspection and no duplicate notice");
+			inspection.setExpanded(true);
+			await capture("Expanded captured inspection output");
+			transcript.removeChild(failedCard);
+			transcript.removeChild(notice);
+			transcript.removeChild(inspection);
+			inspection.dispose();
 			for (const status of ["running", "cancelling", "completed", "failed", "cancelled"] as const) {
 				dockJobs = [
 					{

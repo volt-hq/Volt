@@ -4539,7 +4539,19 @@ export class InteractiveMode {
 			case "custom": {
 				if (message.display) {
 					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
-					const component = new CustomMessageComponent(message, renderer, this.getMarkdownThemeWithSettings());
+					const component = new CustomMessageComponent(
+						message,
+						renderer,
+						this.getMarkdownThemeWithSettings(),
+						(id) => {
+							// Replay-only launch snapshots may still say Running; keep their terminal notices visible.
+							for (const { component } of this.liveBackgroundJobTools.values()) {
+								if (component.getBackgroundJobId() === id && this.chatContainer.children.includes(component))
+									return true;
+							}
+							return false;
+						},
+					);
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
 				}

@@ -124,6 +124,36 @@ describe("background job completion notices", () => {
 		expect(expanded).not.toContain("more jobs");
 	});
 
+	it("hides only jobs with launch cards, without blank rows or changes to model content", () => {
+		const other = { ...job, id: "job_other", label: "Other command" };
+		const message = createNotice([job, other]);
+		const saved = JSON.stringify(message);
+		const represented = new Set([job.id]);
+		const component = new CustomMessageComponent(message, undefined, undefined, (id) => represented.has(id));
+		for (const expanded of [false, true]) {
+			component.setExpanded(expanded);
+			const rendered = component.render(80).lines.map(stripAnsi).join("\n");
+			expect(rendered).not.toContain(job.label);
+			expect(rendered).toContain(other.label);
+			represented.add(other.id);
+			expect(component.render(80)).toEqual({ lines: [], images: [] });
+			represented.delete(other.id);
+		}
+		represented.clear();
+		expect(component.render(80).lines.map(stripAnsi).join("\n")).toContain(job.label);
+		expect(JSON.stringify(message)).toBe(saved);
+	});
+
+	it("preserves extension notices even when a native launch card exists", () => {
+		const component = new CustomMessageComponent(
+			createNotice(),
+			() => new Text("Extension notice", 0, 0),
+			undefined,
+			() => true,
+		);
+		expect(component.render(80).lines.map(stripAnsi).join("\n")).toContain("Extension notice");
+	});
+
 	it("renders task labels as literal text without terminal controls", () => {
 		const component = new CustomMessageComponent(
 			createNotice([{ ...job, label: "\x1b[2J**not markdown**\x07\nsecond line" }]),
@@ -183,7 +213,12 @@ describe("background job completion notices", () => {
 		{ jobs: [{ ...job, id: "job_\x07" }] },
 	];
 	it.each(invalidDetails)("keeps generic message content when metadata is invalid: %j", (details) => {
-		const component = new CustomMessageComponent({ ...createNotice(), content: "Original message content", details });
+		const component = new CustomMessageComponent(
+			{ ...createNotice(), content: "Original message content", details },
+			undefined,
+			undefined,
+			() => true,
+		);
 		for (const expanded of [false, true]) {
 			component.setExpanded(expanded);
 			expect(component.render(80).lines.map(stripAnsi).join("\n")).toContain("Original message content");

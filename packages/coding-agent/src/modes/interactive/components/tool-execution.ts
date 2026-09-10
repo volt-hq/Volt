@@ -191,6 +191,18 @@ export class ToolExecutionComponent extends Container {
 		}
 	}
 
+	/** Identify native launch cards without treating extension renderers or inspections as duplicates. */
+	getBackgroundJobId(): string | undefined {
+		if (
+			this.hideComponent ||
+			(this.toolName !== "bash" && this.toolName !== "subagent") ||
+			!(this.resultRendererComponent instanceof BackgroundJobView)
+		)
+			return undefined;
+		const job = getBackgroundJobSnapshot(this.result?.details);
+		return job?.toolName === this.toolName && job.toolCallId === this.toolCallId ? job.id : undefined;
+	}
+
 	private getHistoricalBackgroundJob() {
 		// jobs has its own renderer, including post-hook error/content handling during replay.
 		if (this.toolDefinition || !["bash", "subagent"].includes(this.toolName)) return undefined;

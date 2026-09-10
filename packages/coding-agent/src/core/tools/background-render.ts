@@ -127,8 +127,10 @@ export function renderBackgroundJobCard(
 	const capturedWhileActive = (options.historical || options.captured) && job.endedAt === undefined;
 	const state = capturedWhileActive ? `${style.label} at capture` : style.label;
 	const timing = capturedWhileActive ? "" : ` · ${backgroundJobTiming(job)}`;
+	const heading = options.heading ? `${options.heading} · ${tool}` : tool;
+	const background = options.heading ? "" : theme.fg("dim", " · background");
 	const lines = wrapTextWithAnsi(
-		`${theme.bold(theme.fg("toolTitle", options.heading ?? "Background job"))} · ${tool} · ${theme.fg(style.color, state)}${theme.fg("dim", timing)}`,
+		`${theme.bold(theme.fg("toolTitle", heading))}${background} · ${theme.fg(style.color, state)}${theme.fg("dim", timing)}`,
 		width,
 	);
 	const label = backgroundJobText(options.label ?? job.label).trim() || "(no task label)";
@@ -139,16 +141,19 @@ export function renderBackgroundJobCard(
 		lines.push(...wrapTextWithAnsi(theme.fg("muted", "Output snapshot · /jobs for current status"), width));
 	} else if (options.historical && job.endedAt === undefined) {
 		lines.push(...wrapTextWithAnsi(theme.fg("muted", "Saved snapshot; live status unavailable"), width));
-	} else {
+	} else if (job.endedAt === undefined || !job.output.trim()) {
 		lines.push(...wrapTextWithAnsi(theme.fg("muted", backgroundJobActivity(job)), width));
 	}
 	const output = backgroundJobText(job.output).trimEnd();
 	if (output) {
 		const outputLines = output.split("\n");
 		const preview = options.expanded ? outputLines : outputLines.filter((line) => line.trim()).slice(-3);
+		const indent = width > 2 ? "  " : "";
+		const outputWidth = Math.max(1, width - indent.length);
 		for (const line of preview) {
 			const styled = theme.fg("toolOutput", line);
-			lines.push(...(options.expanded ? wrapTextWithAnsi(styled, width) : [truncateToWidth(styled, width)]));
+			const rows = options.expanded ? wrapTextWithAnsi(styled, outputWidth) : [truncateToWidth(styled, outputWidth)];
+			lines.push(...rows.map((row) => indent + row));
 		}
 		if (!options.expanded && outputLines.length > preview.length) {
 			lines.push(truncateToWidth(theme.fg("dim", `${outputLines.length - preview.length} earlier lines`), width));

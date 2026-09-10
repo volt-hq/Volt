@@ -1,6 +1,7 @@
-import { type Component, Container, Text, TruncatedText } from "@hansjm10/volt-tui";
+import { type Component, Container, createRenderFrame, Text, TruncatedText } from "@hansjm10/volt-tui";
 import { BACKGROUND_JOB_MAX_RETAINED, type BackgroundJobSummary } from "../../../core/background-jobs.ts";
 import type { Theme } from "../../../core/theme/runtime.ts";
+import { BackgroundJobView } from "../../../core/tools/background-render.ts";
 import { formatDuration } from "../../../core/tools/render-utils.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
@@ -37,6 +38,7 @@ export function renderBackgroundJobNotification(
 	details: unknown,
 	expanded: boolean,
 	theme: Theme,
+	hasJobCard?: (id: string) => boolean,
 ): Component | undefined {
 	if (typeof details !== "object" || details === null || !("jobs" in details)) return undefined;
 	const jobs = details.jobs;
@@ -49,6 +51,20 @@ export function renderBackgroundJobNotification(
 		return undefined;
 	}
 
+	let visibleIds = "";
+	let content: Component | undefined;
+	return new BackgroundJobView((width) => {
+		const visibleJobs = jobs.filter((job) => !hasJobCard?.(job.id));
+		const nextIds = visibleJobs.map((job) => job.id).join(",");
+		if (nextIds !== visibleIds) {
+			visibleIds = nextIds;
+			content = visibleJobs.length ? renderCompletedJobs(visibleJobs, expanded, theme) : undefined;
+		}
+		return content?.render(width) ?? createRenderFrame([]);
+	});
+}
+
+function renderCompletedJobs(jobs: CompletedJob[], expanded: boolean, theme: Theme): Component {
 	const container = new Container();
 	const title = jobs.length === 1 ? "Background job" : "Background jobs";
 	container.addChild(new Text(theme.bold(theme.fg("toolTitle", title)), 1, 0));

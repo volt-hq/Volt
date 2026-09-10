@@ -129,6 +129,27 @@ export function createJobsToolDefinition(
 				// A hook's replacement content/error is authoritative, even if it retains native details.
 				if (snapshot && hasNativeJobContent(result, backgroundJobResult(snapshot), context.isError)) {
 					// Inspection results are post-policy snapshots. Live lookups could undo a hook's redaction.
+					if (!renderOptions.expanded) {
+						const action = context.args?.action;
+						const heading =
+							action === "read" || action === "wait" || action === "cancel" ? `jobs ${action}` : "jobs";
+						const style = BACKGROUND_JOB_STYLES[snapshot.status];
+						const state = snapshot.endedAt === undefined ? `${style.label} at capture` : style.label;
+						const key = keyDisplayText("app.tools.expand");
+						const metadata = [
+							snapshot.outputTruncated ? "snapshot (truncated)" : "snapshot",
+							key ? `${key} expand` : "",
+							snapshot.id.slice(0, 12),
+						]
+							.filter(Boolean)
+							.join(" · ");
+						return createRenderFrame([
+							truncateToWidth(
+								`${theme.bold(theme.fg("toolTitle", heading))} · ${theme.fg(style.color, state)}${theme.fg("dim", ` · ${metadata}`)}`,
+								width,
+							),
+						]);
+					}
 					return renderBackgroundJobCard(snapshot, width, theme, {
 						expanded: renderOptions.expanded,
 						captured: true,

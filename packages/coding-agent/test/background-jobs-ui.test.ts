@@ -223,8 +223,67 @@ describe("background job cards", () => {
 		expect(text(card)).toBe(captured);
 		card.updateResult({ ...backgroundJobResult(manager.get(work.job.id)), isError: true });
 		expect(text(card)).toContain("Failed");
+		expect(text(card)).not.toContain("Command exited with code 1");
+		card.setExpanded(true);
 		expect(text(card)).toContain("Command exited with code 1");
 	});
+
+	it.each(["read", "wait", "cancel"] as const)(
+		"collapses %s snapshots into one row without repeating output",
+		(action) => {
+			setKeybindings(new KeybindingsManager({ "app.tools.expand": "f6" }));
+			const card = new ToolExecutionComponent(
+				"jobs",
+				"snapshot",
+				{ action, id: "job_12345678" },
+				{},
+				createJobsToolDefinition(),
+				{ requestRender: () => {} } as unknown as TUI,
+				process.cwd(),
+			);
+			cleanup.push(() => card.dispose());
+			for (const status of ["running", "cancelling", "completed", "failed", "cancelled"] as const) {
+				const active = status === "running" || status === "cancelling";
+				const snapshot: BackgroundJobSnapshot = {
+					id: "job_12345678",
+					toolCallId: "launch",
+					toolName: "bash",
+					label: "DO NOT REPEAT COMMAND",
+					status,
+					startedAt: 1000,
+					...(active ? {} : { endedAt: 1200 }),
+					output: "Captured output\nFinal captured line",
+					outputTruncated: true,
+				};
+				const result = { ...backgroundJobResult(snapshot), isError: status === "failed" || status === "cancelled" };
+				const saved = JSON.stringify(result);
+				card.updateResult(result);
+				for (const width of [20, 40, 80, 120]) {
+					card.setExpanded(false);
+					const collapsed = text(card, width);
+					expect(card.render(width).lines.filter((line) => stripAnsi(line).trim())).toHaveLength(1);
+					expect(collapsed).toContain(`jobs ${action}`);
+					expect(collapsed).not.toContain(snapshot.label);
+					expect(collapsed).not.toContain("Captured output");
+					expect(collapsed).not.toContain("[success]");
+					if (width >= 80) {
+						expect(collapsed).toContain("snapshot (truncated)");
+						expect(collapsed).toContain("F6 expand");
+						expect(collapsed).toContain(backgroundRendering.BACKGROUND_JOB_STYLES[status].label);
+						expect(collapsed.includes("at capture")).toBe(active);
+					}
+					card.setExpanded(true);
+					const expanded = text(card, width).replace(/\s+/g, " ");
+					expect(expanded).toContain(snapshot.label);
+					expect(expanded).toContain("Final captured line");
+					expect(expanded).toContain(snapshot.id);
+					card.setExpanded(false);
+					expect(text(card, width)).toBe(collapsed);
+				}
+				expect(JSON.stringify(result)).toBe(saved);
+			}
+		},
+	);
 
 	it.each([true, false])("keeps replay static with a manager-bound definition: %s", async (registered) => {
 		const manager = setup();
@@ -270,7 +329,7 @@ describe("background job cards", () => {
 		const card = tool(setup(), work.job, "jobs", false);
 		card.updateResult({ ...backgroundJobResult(work.job), isError: false });
 		expect(text(card)).toContain("Running at capture");
-		expect(text(card)).toContain("Output snapshot");
+		expect(text(card)).toContain("snapshot");
 		expect(text(card)).not.toContain("Last output");
 	});
 
@@ -446,10 +505,16 @@ describe("transformed job results", () => {
 			for (const expanded of [false, true]) {
 				card.setExpanded(expanded);
 				const captured = text(card);
-				expect(captured).toContain("token=[REDACTED]");
-				expect(captured).toContain("Filtered label");
+				if (expanded) {
+					expect(captured).toContain("token=[REDACTED]");
+					expect(captured).toContain("Filtered label");
+					expect(captured).toContain("Output snapshot");
+				} else {
+					expect(captured).not.toContain("token=");
+					expect(captured).not.toContain("Filtered label");
+					expect(captured).toContain("snapshot");
+				}
 				expect(captured).not.toContain("original-secret");
-				expect(captured).toContain("Output snapshot");
 				vi.setSystemTime(100_000);
 				work.output("token=new-secret");
 				card.invalidate();

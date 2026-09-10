@@ -58,7 +58,7 @@ describe("background subagent tool rows", () => {
 				component.setExpanded(expanded);
 				const lines = component.render(width).lines;
 				const rendered = lines.map(stripAnsi).join("\n");
-				expect(rendered).toContain("Background job");
+				expect(rendered).toContain("Subagent · background");
 				if (expanded) expect(rendered.replace(/\s/g, "")).toContain(job.id);
 				else expect(rendered).not.toContain(job.id);
 				expect(rendered.replace(/\s+/g, " ")).toContain("Inspect the auth flow");
