@@ -139,6 +139,14 @@ health endpoints return 200, JWKS matches the pre-deployment key set, and the
 three attestation routes reject unauthenticated or invalid requests. No claims
 were created by probes. Real App Store enrollment and pairing remain unvalidated.
 
+Production Cloud Armor policy `relay-credential-broker-production-v1`, rule
+110, now includes the three attestation POST paths in the existing approval
+budget of 60 requests per minute per IP. Exact hostname and method checks,
+default deny, other rules and rate-limit settings were preserved. Unknown
+attestation paths and GET requests to attestation endpoints remain denied.
+The rule's path matcher is
+`^/v1/pairing-claims/[^/]+/(?:approve|attestation/(?:status|challenge|register))$`.
+
 ## Approved parser dependencies
 
 The user approved `github.com/fxamacker/cbor/v2 v2.9.3` and its dependency
