@@ -86,13 +86,13 @@ class ToolHeaderMetadata implements Component {
 				frame,
 				Math.min(frame.lines.length, image.top + image.rows),
 				0,
-				createRenderFrame([metadata]),
+				new Text(metadata, 0, 0).render(width),
 			);
 		}
 		if (visibleWidth(line) + visibleWidth(metadata) + 1 <= width) {
 			return mapRenderFrameLines(frame, (value, row) => (row === index ? `${line} ${metadata}` : value));
 		}
-		return spliceRenderFrameRows(frame, index + 1, 0, createRenderFrame([metadata]));
+		return spliceRenderFrameRows(frame, index + 1, 0, new Text(metadata, 0, 0).render(width));
 	}
 
 	invalidate(): void {
@@ -127,6 +127,7 @@ export class ToolExecutionComponent extends Container {
 	private executionStartedAt?: number;
 	private executionDurationMs?: number;
 	private argsComplete = false;
+	private argsCompletedAt?: number;
 	private result?: {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 		isError: boolean;
@@ -334,6 +335,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	setArgsComplete(): void {
+		this.argsCompletedAt ??= Date.now();
 		this.argsComplete = true;
 		this.argumentRenderCoalescer.commitNow(true);
 	}
@@ -650,25 +652,39 @@ export class ToolExecutionComponent extends Container {
 			if (executionState === "interrupted") state += theme.fg("muted", " · interrupted");
 			else if (executionState === "not_started" || (this.liveProgress && !this.executionStarted))
 				state += theme.fg("muted", " · not started");
-		} else if (this.result && this.isPartial) {
-			state = theme.fg("warning", "[partial]");
-		} else if (this.result) {
+		} else if (this.result && !this.isPartial) {
 			state = theme.fg("success", "[success]");
-		} else if (this.executionStarted) {
+		} else if (this.executionStarted || this.result) {
+			// Partial output is still an executing call, not a terminal outcome.
 			state = theme.fg("warning", "[running]");
+		} else if (this.argsComplete) {
+			state = theme.fg("muted", "[queued]");
+		} else if (this.liveProgress) {
+			state = theme.fg("accent", "[streaming]");
 		} else {
 			state = theme.fg("muted", "[pending]");
 		}
 
-		if (this.liveProgress && (!this.result || this.isPartial)) {
-			const phase = this.executionStarted
-				? this.toolName === "edit"
-					? "Applying Edit"
-					: `Running ${this.toolName}`
-				: this.argsComplete
-					? "Ready"
-					: `Preparing ${this.toolName === "edit" ? "Edit" : this.toolName}`;
-			const elapsed = Math.max(0, Date.now() - (this.executionStartedAt ?? this.preparationStartedAt));
+		if (this.liveProgress && !this.result?.isError && (!this.result || this.isPartial)) {
+			let phase: string;
+			if (this.executionStarted || this.result) {
+				phase =
+					this.toolName === "write" ? "Writing file" : this.toolName === "edit" ? "Applying edits" : "Executing";
+			} else if (this.argsComplete) {
+				phase = "Waiting to run";
+			} else {
+				// Streamed arguments can include a live file preview; no tool has run yet.
+				phase =
+					this.toolName === "write"
+						? "Generating content"
+						: this.toolName === "edit"
+							? "Generating edits"
+							: "Generating arguments";
+			}
+			const elapsed = Math.max(
+				0,
+				Date.now() - (this.executionStartedAt ?? this.argsCompletedAt ?? this.preparationStartedAt),
+			);
 			return `${state} ${theme.fg("muted", `${phase} · ${formatDuration(elapsed)}`)}`;
 		}
 
