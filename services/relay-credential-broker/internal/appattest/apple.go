@@ -220,28 +220,45 @@ func (v *Verifier) verifyAttestation(keyID string, object, clientDataHash []byte
 
 // VerifyAssertion validates the signed request; the broker must atomically
 // enforce returnedCounter > persistedCounter and consume the challenge.
-func (v *Verifier) VerifyAssertion(publicKey, object []byte, clientDataHash [32]byte, bundleVersion string) (uint32, error) {
+func (v *Verifier) VerifyAssertion(publicKey, object []byte, clientDataHash [32]byte, bundleVersion string) (_ uint32, resultErr error) {
+	stage := "assertion_size"
+	defer func() {
+		if resultErr != nil {
+			resultErr = &rejection{reason: stage}
+		}
+	}()
 	if len(object) == 0 || len(object) > maxAssertionBytes || len(publicKey) != 65 {
 		return 0, ErrInvalid
 	}
 	var assertion assertionObject
-	if err := v.decode.Unmarshal(object, &assertion); err != nil || len(assertion.AuthData) < 37 ||
-		!bytes.Equal(assertion.AuthData[:32], v.rpID[:]) || assertion.AuthData[32] != 0 {
+	stage = "assertion_format"
+	if err := v.decode.Unmarshal(object, &assertion); err != nil || len(assertion.AuthData) < 37 {
 		return 0, ErrInvalid
 	}
-	if !v.validExtensions(assertion.AuthData[37:], bundleVersion) {
+	stage = "assertion_app_identifier"
+	if !bytes.Equal(assertion.AuthData[:32], v.rpID[:]) {
 		return 0, ErrInvalid
 	}
+	stage = "assertion_flags"
+	if assertion.AuthData[32] != 0 {
+		return 0, ErrInvalid
+	}
+	if stage = v.extensionRejectionReason(assertion.AuthData[37:], bundleVersion); stage != "" {
+		return 0, ErrInvalid
+	}
+	stage = "assertion_zero_counter"
 	counter := binary.BigEndian.Uint32(assertion.AuthData[33:])
 	if counter == 0 {
 		return 0, ErrInvalid
 	}
+	stage = "assertion_public_key"
 	x, y := elliptic.Unmarshal(elliptic.P256(), publicKey)
 	if x == nil {
 		return 0, ErrInvalid
 	}
 	data := append(append([]byte(nil), assertion.AuthData...), clientDataHash[:]...)
 	digest := sha256.Sum256(data)
+	stage = "assertion_signature"
 	if !ecdsa.VerifyASN1(&ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, digest[:], assertion.Signature) {
 		return 0, ErrInvalid
 	}

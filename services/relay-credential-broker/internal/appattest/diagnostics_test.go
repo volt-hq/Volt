@@ -64,3 +64,37 @@ func TestRegression387AttestationRejectionDiagnostics(t *testing.T) {
 		t.Fatal("arbitrary error exposed")
 	}
 }
+
+func TestAssertionRejectionDiagnostics(t *testing.T) {
+	f := makeAttestationFixtureWithExtensions(t, nil)
+	public, err := f.verifier.VerifyAttestation(f.keyID, f.object, f.hash, "4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		reason string
+		mutate func(*assertionObject)
+	}{
+		{"assertion_format", func(a *assertionObject) { a.AuthData = a.AuthData[:36] }},
+		{"assertion_app_identifier", func(a *assertionObject) { a.AuthData[0]++ }},
+		{"assertion_flags", func(a *assertionObject) { a.AuthData[32] = 0x40 }},
+		{"assertion_zero_counter", func(a *assertionObject) { a.AuthData[36] = 0 }},
+		{"assertion_signature", func(a *assertionObject) { a.Signature[0] ^= 1 }},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			var a assertionObject
+			if err := cbor.Unmarshal(f.assertionWithExtensions(t, 1, f.hash, nil), &a); err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(&a)
+			encoded, err := cbor.Marshal(a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = f.verifier.VerifyAssertion(public, encoded, f.hash, "4")
+			if !errors.Is(err, ErrInvalid) || RejectionReason(err) != tc.reason || err.Error() != ErrInvalid.Error() {
+				t.Fatalf("reason=%s error=%v", RejectionReason(err), err)
+			}
+		})
+	}
+}

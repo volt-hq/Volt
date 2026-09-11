@@ -216,7 +216,13 @@ func (b *Broker) RegisterAttestationKey(ctx context.Context, request appattest.R
 	return tx.Commit(ctx)
 }
 
-func (b *Broker) consumeApprovalAttestation(ctx context.Context, tx pgx.Tx, claim pairingClaim, appCheck AppCheckProof, entitlement appstore.Entitlement, appNodeID string, refreshHash SecretHash, proof ApprovalAttestation, now time.Time) error {
+func (b *Broker) consumeApprovalAttestation(ctx context.Context, tx pgx.Tx, claim pairingClaim, appCheck AppCheckProof, entitlement appstore.Entitlement, appNodeID string, refreshHash SecretHash, proof ApprovalAttestation, now time.Time) (resultErr error) {
+	stage := "approval_request"
+	defer func() {
+		if errors.Is(resultErr, ErrAttestationInvalid) {
+			resultErr = &attestationRejection{reason: stage, cause: resultErr}
+		}
+	}()
 	r := proof.Request
 	if b.config.AttestationVerifier == nil || r.Issuer != b.config.CredentialIssuer ||
 		r.ClaimID != claim.ID || r.HostNodeID != claim.HostNodeID || r.AppNodeID != appNodeID ||
@@ -227,6 +233,7 @@ func (b *Broker) consumeApprovalAttestation(ctx context.Context, tx pgx.Tx, clai
 	var publicKey, deviceHash []byte
 	var subscription string
 	var previousCounter int64
+	stage = "approval_key"
 	err := tx.QueryRow(ctx, `SELECT public_key, assertion_counter, app_transaction_id, device_id_hash
 		FROM pairing_attestation_keys WHERE key_id=$1 FOR UPDATE`, r.KeyID).Scan(&publicKey, &previousCounter, &subscription, &deviceHash)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -236,15 +243,22 @@ func (b *Broker) consumeApprovalAttestation(ctx context.Context, tx pgx.Tx, clai
 		return err
 	}
 	expectedDevice := sha256.Sum256([]byte(r.DeviceID))
+	stage = "approval_owner"
 	if subscription != entitlement.AppTransactionID || !bytes.Equal(deviceHash, expectedDevice[:]) {
 		return ErrAttestationInvalid
 	}
+	stage = "approval_challenge"
 	digest, err := consumeAttestationChallenge(ctx, tx, r, "approve", proof.Challenge, appCheck, now)
 	if err != nil {
 		return err
 	}
+	stage = "apple_verification"
 	counter, err := b.config.AttestationVerifier.VerifyAssertion(publicKey, proof.Assertion, digest, r.BundleVersion)
-	if err != nil || int64(counter) <= previousCounter {
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrAttestationInvalid, err)
+	}
+	stage = "approval_counter"
+	if int64(counter) <= previousCounter {
 		return ErrAttestationInvalid
 	}
 	_, err = tx.Exec(ctx, "UPDATE pairing_attestation_keys SET assertion_counter=$2,last_used_at=$3 WHERE key_id=$1", r.KeyID, int64(counter), now)

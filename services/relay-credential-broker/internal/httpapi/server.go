@@ -337,6 +337,7 @@ func (s *Server) handleApproveClaim(writer http.ResponseWriter, request *http.Re
 			Request: bound, Challenge: body.Challenge, Assertion: assertion,
 		})
 	if err != nil {
+		s.logger.Warn("pairing attestation rejected", "stage", "approve", "reason", broker.AttestationRejectionReason(err))
 		s.writeBrokerError(writer, err, "invalid_app_node_id")
 		return
 	}
