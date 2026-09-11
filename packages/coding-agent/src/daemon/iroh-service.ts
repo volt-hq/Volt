@@ -85,6 +85,7 @@ import {
 	CONTROL_RPC_GRANTS_CAPABILITY,
 	CONTROL_WORKTREES_CAPABILITY,
 	type ControlLeaseStatus,
+	type ControlRelayCredentialStatus,
 	type ControlRequest,
 	createControlClientStatus,
 	isRemoteTransportPairingAvailable,
@@ -428,6 +429,57 @@ function parseRelayUrlsEnv(value: string | undefined): string[] | undefined {
 	return urls.length > 0 ? urls : undefined;
 }
 
+function createRelayCredentialStatus(
+	credential: IrohManagedRelayCredential | undefined,
+	claim: IrohManagedRelayCredentialClaim | undefined,
+	revocationPending = false,
+	subscriptionInactive = false,
+): ControlRelayCredentialStatus {
+	const expiresAt = credential?.accessTokenExpiresAt;
+	const state = revocationPending
+		? "revocation_pending"
+		: subscriptionInactive
+			? "subscription_inactive"
+			: expiresAt !== undefined && expiresAt <= Date.now()
+				? "expired"
+				: claim !== undefined && (claim.expiresAt === undefined || claim.expiresAt > Date.now())
+					? "pairing"
+					: credential !== undefined
+						? "active"
+						: "unpaired";
+	return { state, ...(expiresAt === undefined ? {} : { expiresAt }) };
+}
+
+function initialRelayCredentialStatus(
+	config: IrohDaemonServiceConfig,
+	services: VoltdRuntimeServices,
+): ControlRelayCredentialStatus | undefined {
+	const settings = services.state.state.settings;
+	const credential = config.relayCredential ?? settings.relayCredential;
+	const claim = settings.relayCredentialClaim;
+	const revocation = settings.relayCredentialRevocation;
+	const authority = revocation ?? credential ?? claim;
+	const relay = resolveIrohRelayConfig(config, process.env, authority?.relayUrls);
+	const staticToken =
+		config.relayAuthToken ?? process.env.VOLT_IROH_RELAY_AUTH_TOKEN?.trim() ?? settings.relayAuthToken;
+	if (relay.relayMode !== "production") return undefined;
+	if (authority === undefined) {
+		if (staticToken) return undefined;
+		try {
+			if (resolveIrohRelayCredentialServiceUrl(relay.relayMode, relay.relayUrls) === undefined) return undefined;
+		} catch {
+			// Malformed custom relay URLs must not break local status reporting
+			// after endpoint initialization has already reported its failure.
+			return undefined;
+		}
+	}
+	return createRelayCredentialStatus(
+		revocation === undefined ? credential : undefined,
+		claim,
+		revocation !== undefined,
+	);
+}
+
 interface PendingPairRequest {
 	requestId: string;
 	connectionId: string;
@@ -717,7 +769,7 @@ export function createIrohDaemonService(
 					}
 					return false;
 				},
-				statusExtras: () => ({ remoteTransport }),
+				statusExtras: () => ({ remoteTransport, relayCredential: initialRelayCredentialStatus(config, services) }),
 			};
 		}
 
@@ -751,7 +803,7 @@ export function createIrohDaemonService(
 					});
 					return true;
 				},
-				statusExtras: () => ({ remoteTransport }),
+				statusExtras: () => ({ remoteTransport, relayCredential: initialRelayCredentialStatus(config, services) }),
 			};
 		}
 		service.start();
@@ -792,6 +844,7 @@ class IrohDaemonService {
 	private relayRecoveryUnsupportedLogged = false;
 	private relayCredentialEpoch = 0;
 	private relayCredentialIsRevoking = false;
+	private relayCredentialSubscriptionInactive = false;
 	private readonly relayConfigWarning: string | undefined;
 	private readonly profile: string | undefined;
 	private readonly wrapperVersion: string | undefined;
@@ -912,6 +965,7 @@ class IrohDaemonService {
 		this.relayCredentialServiceUrl =
 			builtInRelayCredentialServiceUrl ??
 			this.managedRelayCredential?.serviceUrl ??
+			this.managedRelayCredentialRevocation?.serviceUrl ??
 			this.managedRelayCredentialClaim?.serviceUrl;
 		const configuredRelayOrigins = this.relayUrls.map((url) => new URL(url).origin).sort();
 		if (this.managedRelayCredential !== undefined) {
@@ -1681,10 +1735,12 @@ class IrohDaemonService {
 	}
 
 	private async createManagedRelayCredentialClaim(): Promise<IrohManagedRelayCredentialClaim | undefined> {
+		if (this.relayCredentialIsRevoking || this.managedRelayCredentialRevocation !== undefined) {
+			throw new Error("Relay credential reset is pending. Retry the reset before pairing.");
+		}
 		if (
 			this.relayMode !== "production" ||
 			this.relayCredentialServiceUrl === undefined ||
-			this.relayCredentialIsRevoking ||
 			(this.managedRelayCredential === undefined && this.relayAuthToken !== undefined)
 		) {
 			return undefined;
@@ -1754,6 +1810,8 @@ class IrohDaemonService {
 	}
 
 	private async authorizeRelayCredentialPairing(claimId: string, remoteNodeId: string): Promise<boolean> {
+		if (this.relayCredentialIsRevoking || this.managedRelayCredentialRevocation !== undefined) return false;
+		const expectedEpoch = this.relayCredentialEpoch;
 		const approved = () =>
 			this.managedRelayAppEndpoints.find((endpoint) => endpoint.claimId === claimId && !endpoint.revocationPending);
 		const existing = approved();
@@ -1766,18 +1824,30 @@ class IrohDaemonService {
 			10_000,
 			"managed relay credential claim exchange did not finish before pairing authorization",
 		).catch(() => {});
-		return approved()?.nodeId === remoteNodeId;
+		return (
+			expectedEpoch === this.relayCredentialEpoch &&
+			!this.relayCredentialIsRevoking &&
+			approved()?.nodeId === remoteNodeId
+		);
 	}
 
 	private startManagedRelayCredentialExchange(): void {
-		if (this.relayCredentialExchangeTask !== undefined || !this.admission.isOpen) return;
+		if (
+			this.relayCredentialExchangeTask !== undefined ||
+			!this.admission.isOpen ||
+			this.relayCredentialIsRevoking ||
+			this.managedRelayCredentialRevocation !== undefined
+		)
+			return;
 		const claim = this.managedRelayCredentialClaim;
 		if (claim?.claimId === undefined || claim.expiresAt === undefined) return;
 		const expectedEpoch = this.relayCredentialEpoch;
 		const task = this.runManagedRelayCredentialExchange(claim, expectedEpoch).finally(() => {
 			if (this.relayCredentialExchangeTask === task) {
 				this.relayCredentialExchangeTask = undefined;
-				this.startManagedRelayCredentialExchange();
+				// Only a replacement claim needs another task. Restarting the same
+				// cancelled/expired claim here can spin forever without yielding.
+				if (this.managedRelayCredentialClaim !== claim) this.startManagedRelayCredentialExchange();
 			}
 		});
 		this.relayCredentialExchangeTask = task;
@@ -1799,6 +1869,13 @@ class IrohDaemonService {
 		) {
 			try {
 				const result = await exchangeIrohManagedRelayCredentialClaim(claim);
+				if (
+					!this.admission.isOpen ||
+					this.relayCredentialIsRevoking ||
+					expectedEpoch !== this.relayCredentialEpoch ||
+					this.managedRelayCredentialClaim !== claim
+				)
+					return;
 				consecutiveFailureCount = 0;
 				if (result.status === "pending") {
 					pendingResponseCount++;
@@ -1838,7 +1915,13 @@ class IrohDaemonService {
 				}
 				return;
 			} catch (error) {
-				if (!this.admission.isOpen || this.relayCredentialIsRevoking) return;
+				if (
+					!this.admission.isOpen ||
+					this.relayCredentialIsRevoking ||
+					expectedEpoch !== this.relayCredentialEpoch ||
+					this.managedRelayCredentialClaim !== claim
+				)
+					return;
 				consecutiveFailureCount++;
 				this.log("warn", "managed Iroh relay credential claim exchange failed", {
 					error: error instanceof Error ? error.message : String(error),
@@ -1967,6 +2050,7 @@ class IrohDaemonService {
 					}
 				}
 			}
+			this.relayCredentialSubscriptionInactive = false;
 			installed = true;
 		});
 		return installed;
@@ -2027,69 +2111,88 @@ class IrohDaemonService {
 	}
 
 	private async revokeManagedRelayCredential(): Promise<void> {
-		const credential = this.managedRelayCredentialRevocation ?? this.managedRelayCredential;
-		if (credential === undefined) {
+		if (this.relayCredentialIsRevoking) {
+			throw new Error("Relay credential reset is already in progress. Wait for it to finish.");
+		}
+		let credential = this.managedRelayCredentialRevocation ?? this.managedRelayCredential;
+		if (credential === undefined && this.managedRelayCredentialClaim === undefined) {
 			throw new Error("no managed Iroh relay credential is configured");
 		}
-		if (this.endpoint !== undefined && this.endpoint.removeRelay === undefined) {
+		const endpoint = this.endpoint ?? this.startupEndpoint;
+		if (endpoint !== undefined && endpoint.removeRelay === undefined) {
 			throw new Error("the installed Iroh binding cannot remove a live relay credential");
 		}
 		this.relayCredentialIsRevoking = true;
 		this.relayCredentialEpoch += 1;
-		await this.stopRelayRecoveryMonitor();
-		if (this.relayCredentialRefreshTimer !== undefined) {
+		let removalError: unknown;
+		try {
+			await this.stopRelayRecoveryMonitor();
 			clearTimeout(this.relayCredentialRefreshTimer);
 			this.relayCredentialRefreshTimer = undefined;
-		}
-		if (this.relayCredentialExpiryTimer !== undefined) {
 			clearTimeout(this.relayCredentialExpiryTimer);
 			this.relayCredentialExpiryTimer = undefined;
-		}
-		const refreshTask = this.relayCredentialRefreshTask;
-		this.relayCredentialRefreshTask = undefined;
-		await refreshTask?.catch(() => {});
 
-		let removalError: unknown;
-		const endpoint = this.endpoint;
-		await this.enqueueRelayConfigurationMutation(async () => {
-			// An exchange installer admitted before the epoch change may still be
-			// crossing native insertion or its state flush. Publish the revocation
-			// tombstone only after that installer, then remove its live relay in the
-			// same serialized authority transition so it cannot restore credentials.
-			this.managedRelayCredential = undefined;
-			this.managedRelayCredentialRevocation = credential;
-			this.relayAuthToken = undefined;
-			this.managedRelayCredentialClaim = undefined;
+			await this.enqueueRelayConfigurationMutation(async () => {
+				// An earlier installer may have persisted authority before seeing the
+				// epoch fence. Revoke that durable grant too, even on first bootstrap.
+				credential =
+					this.services.state.state.settings.relayCredentialRevocation ??
+					this.services.state.state.settings.relayCredential ??
+					credential;
+				this.managedRelayCredential = undefined;
+				this.managedRelayCredentialRevocation = credential;
+				this.relayAuthToken = undefined;
+				this.managedRelayCredentialClaim = undefined;
+				this.services.state.updateSettings({
+					relayAuthToken: undefined,
+					relayCredential: undefined,
+					relayCredentialClaim: undefined,
+					relayCredentialRevocation: credential,
+				});
+				await this.services.state.flush();
+				if (endpoint === undefined) return;
+				for (const url of this.relayUrls) {
+					try {
+						await endpoint.removeRelay?.(url);
+					} catch (error) {
+						removalError ??= error;
+					}
+				}
+			});
+
+			// Include tickets restored after a crash, not just this process's QR
+			// requests. Pairings admitted before the epoch fence self-cancel below.
+			for (const [requestId, pending] of this.pendingPairRequests) {
+				await this.cancelPendingPairing(requestId, pending);
+				this.services.controlServer.sendTo(pending.connectionId, {
+					type: "pairing_progress",
+					requestId,
+					phase: "failed",
+					error: "Relay credential reset cancelled pairing.",
+				});
+			}
+			for (const ticket of (await this.stateManager.getState()).pendingPairingTickets ?? []) {
+				if (this.engine) await this.engine.cancelPairingSecretByHash(ticket.secretHash);
+				else await this.stateManager.removePendingPairingTicket(ticket.secretHash);
+			}
+			if (credential !== undefined) await revokeIrohManagedRelayCredential(credential);
+			if (removalError !== undefined) throw removalError;
 			this.services.state.updateSettings({
-				relayAuthToken: undefined,
-				relayCredential: undefined,
-				relayCredentialClaim: undefined,
-				relayCredentialRevocation: credential,
+				relayCredentialAppEndpoints: undefined,
+				relayCredentialRevocation: undefined,
 			});
 			await this.services.state.flush();
-			if (endpoint === undefined) return;
-			for (const url of this.relayUrls) {
-				try {
-					await endpoint.removeRelay?.(url);
-				} catch (error) {
-					removalError ??= error;
-				}
-			}
-		});
-		await revokeIrohManagedRelayCredential(credential);
-		this.services.state.updateSettings({
-			relayAuthToken: undefined,
-			relayCredential: undefined,
-			relayCredentialClaim: undefined,
-			relayCredentialAppEndpoints: undefined,
-			relayCredentialRevocation: undefined,
-		});
-		await this.services.state.flush();
-		this.managedRelayCredentialRevocation = undefined;
-		this.managedRelayAppEndpoints = [];
-		this.relayCredentialIsRevoking = false;
-		if (removalError !== undefined) {
-			throw removalError;
+			this.managedRelayCredentialRevocation = undefined;
+			this.managedRelayAppEndpoints = [];
+			this.relayCredentialSubscriptionInactive = false;
+		} catch (error) {
+			throw new Error(
+				`Relay credential reset failed. Retry the reset before pairing: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		} finally {
+			// A durable tombstone, not this in-flight guard, blocks pairing after
+			// failure. Releasing the guard makes the same operation retryable.
+			this.relayCredentialIsRevoking = false;
 		}
 	}
 
@@ -2197,6 +2300,7 @@ class IrohDaemonService {
 						return;
 					}
 					const subscriptionInactive = error instanceof IrohRelayCredentialSubscriptionInactiveError;
+					if (subscriptionInactive) this.relayCredentialSubscriptionInactive = true;
 					const nextFailureCount = subscriptionInactive ? 0 : Math.min(consecutiveFailureCount + 1, 6);
 					this.log("warn", "managed Iroh relay credential refresh failed", {
 						error: error instanceof Error ? error.message : String(error),
@@ -2238,7 +2342,15 @@ class IrohDaemonService {
 			// inside the durable quiesce barrier, while its abort signal cancels git.
 			await this.pruneWorktreesOnStart(startupAdmission.signal);
 			if (this.managedRelayCredentialRevocation !== undefined) {
-				await this.revokeManagedRelayCredential();
+				try {
+					await this.revokeManagedRelayCredential();
+				} catch (error) {
+					// A broker outage must not strand the local endpoint. Keep the
+					// tombstone and block pairing until the same reset action succeeds.
+					this.log("warn", "managed relay credential reset remains pending", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
 			}
 			if (this.managedRelayCredential !== undefined) {
 				await this.services.state.flush();
@@ -4920,6 +5032,16 @@ class IrohDaemonService {
 		connection: ControlConnection,
 		request: ControlRequest & { type: "pair_request" },
 	): Promise<void> {
+		if (this.relayCredentialIsRevoking || this.managedRelayCredentialRevocation !== undefined) {
+			connection.send({
+				type: "error",
+				id: request.id,
+				code: "relay_credential_revocation_pending",
+				message: "Relay credential reset is pending. Retry the reset before pairing.",
+			});
+			return;
+		}
+		const expectedEpoch = this.relayCredentialEpoch;
 		try {
 			await withTimeout(
 				this.ready.promise,
@@ -4966,6 +5088,9 @@ class IrohDaemonService {
 							)
 						: createIrohRemotePresetAccess("coding");
 			relayCredentialClaim = await this.createManagedRelayCredentialClaim();
+			if (this.relayCredentialIsRevoking || expectedEpoch !== this.relayCredentialEpoch) {
+				throw new Error("Relay credential reset cancelled pairing. Retry pairing after the reset completes.");
+			}
 			const pairing = await engine.pair({
 				allowTools: access.allowedTools,
 				...(relayCredentialClaim?.expiresAt === undefined
@@ -4996,6 +5121,10 @@ class IrohDaemonService {
 					: {}),
 				...(workspaceName === undefined ? {} : { workspace: workspaceName }),
 			});
+			if (this.relayCredentialIsRevoking || expectedEpoch !== this.relayCredentialEpoch) {
+				await engine.cancelPairingSecretByHash(hashIrohRemotePairingSecret(pairing.secret));
+				throw new Error("Relay credential reset cancelled pairing. Retry pairing after the reset completes.");
+			}
 			this.clearStorageCapacityDegradation();
 			connection.send({ type: "pair_started", id: request.id, requestId });
 			connection.send({
@@ -5331,6 +5460,7 @@ class IrohDaemonService {
 			}
 			case "relay_credential_revoke": {
 				try {
+					await this.startupTask;
 					await this.revokeManagedRelayCredential();
 					connection.send({ type: "ok", id: request.id });
 				} catch (error) {
@@ -5795,6 +5925,7 @@ class IrohDaemonService {
 		phoneConnections: number;
 		relayCount: number;
 		remoteTransport: RemoteTransportHealth;
+		relayCredential?: ControlRelayCredentialStatus;
 	} {
 		const leases: ControlLeaseStatus[] = this.leaseBroker.list().map((record) => ({
 			workspaceName: record.workspaceName,
@@ -5808,6 +5939,18 @@ class IrohDaemonService {
 			phoneConnections: this.clientConnections.size,
 			relayCount: this.relays.activeCount(),
 			remoteTransport: { ...this.remoteTransport },
+			...(this.relayMode !== "production" ||
+			this.relayCredentialServiceUrl === undefined ||
+			(this.managedRelayCredential === undefined && this.relayAuthToken !== undefined)
+				? {}
+				: {
+						relayCredential: createRelayCredentialStatus(
+							this.managedRelayCredential,
+							this.managedRelayCredentialClaim,
+							this.relayCredentialIsRevoking || this.managedRelayCredentialRevocation !== undefined,
+							this.relayCredentialSubscriptionInactive,
+						),
+					}),
 		};
 	}
 

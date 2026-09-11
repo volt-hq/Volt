@@ -32,6 +32,7 @@ import { BRAVE_SEARCH_AUTH_PROVIDER } from "../core/tools/web-search.ts";
 import type {
 	ControlClientStatus,
 	ControlLeaseStatus,
+	ControlRelayCredentialStatus,
 	ControlRequest,
 	ControlRevokedClientStatus,
 	ControlWorkspaceStatus,
@@ -188,6 +189,7 @@ export interface VoltdServiceExtensionInstance {
 		phoneConnections?: number;
 		relayCount?: number;
 		remoteTransport?: RemoteTransportHealth;
+		relayCredential?: ControlRelayCredentialStatus;
 	};
 	/** Redeem a relay hello token; true when the socket was taken over. */
 	admitRelay?(relayId: string, relayToken: string, socket: Socket, bufferedRemainder: Buffer): boolean;
@@ -579,6 +581,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				}));
 				let leases: ControlLeaseStatus[] = [];
 				let phoneConnections = 0;
+				let relayCredential: ControlRelayCredentialStatus | undefined;
 				let remoteTransport: RemoteTransportHealth = {
 					state: "unavailable",
 					reasonCode: "extension_missing",
@@ -590,6 +593,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 						leases = leases.concat(extras.leases);
 					}
 					phoneConnections += extras?.phoneConnections ?? 0;
+					relayCredential = extras?.relayCredential ?? relayCredential;
 					if (extras?.remoteTransport) {
 						remoteTransport = extras.remoteTransport;
 					}
@@ -605,6 +609,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					leases,
 					phoneConnections,
 					remoteTransport,
+					...(relayCredential === undefined ? {} : { relayCredential }),
 					workspaces,
 					clients: toClientStatuses(),
 					revokedClients: toRevokedClientStatuses(),
