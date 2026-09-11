@@ -93,7 +93,7 @@ new key counters or re-enabling a receipt-only approval path.
 
 ## Production requirements
 
-Production is not changed by this rollout. Deploy the matching broker image to
+For production, deploy the matching broker image to
 `relay-credential-broker-production` with `VOLT_APP_ATTEST_APP_ID` set to the
 verified signed App ID, its existing production KMS/database/Firebase authority,
 Production-only App Store verification and the production issuer/audience.
@@ -101,8 +101,9 @@ Its verifier requires App Store validation category 4, not TestFlight category 2
 Add the three POST attestation routes to the production edge allowlist and keep
 the bounded body/rate controls. Take a backup and apply migration 0004 without
 resetting grants, counters or credentials. Validate with an App Store-distributed
-installation; a TestFlight upload is not production acceptance. Deployment and
-App Store publication require separate authorization.
+installation; a TestFlight upload is not production acceptance. The user
+authorized the production broker deployment on September 11, 2026 while CI
+finishes, noting there are no users. App Store publication remains separate.
 
 ## Canary deployment record — September 11, 2026
 
@@ -120,6 +121,23 @@ migration; service recovered after moving traffic to the new revision. Public
 `/livez` and `/readyz` now return 200, JWKS is available, and all three new routes
 reject missing/invalid authentication or input. These probes created no claims
 and do not establish successful real-device App Attest enrollment or pairing.
+
+## Production deployment record — September 11, 2026
+
+Production serves 100% of traffic from
+`relay-credential-broker-production-appattest-c3675d07b`, using the identical
+runtime image digest recorded for canary. Cloud SQL backup `1789147655455`
+completed successfully at `2026-09-11T17:29:06.824Z` before deployment. Migration
+0004 ran through startup, followed immediately by the traffic switch to the
+ready new revision.
+
+Only the image and `VOLT_APP_ATTEST_APP_ID` were changed in the container
+configuration. The production database attachment, service account, secret
+references, KMS authority and all existing environment settings were preserved.
+Production-only purchases and validation category 4 remain required. Public
+health endpoints return 200, JWKS matches the pre-deployment key set, and the
+three attestation routes reject unauthenticated or invalid requests. No claims
+were created by probes. Real App Store enrollment and pairing remain unvalidated.
 
 ## Approved parser dependencies
 
