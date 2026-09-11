@@ -9,7 +9,7 @@ import {
 	parseIrohRemoteRpcGrant,
 } from "./access-grant.ts";
 
-export const IROH_REMOTE_RPC_CANCELLATION_TYPES = new Set(["abort"]);
+export const IROH_REMOTE_RPC_CANCELLATION_TYPES = new Set(["abort", "cancel_job"]);
 
 export const IROH_REMOTE_RPC_UNSUPPORTED_TYPES = new Set(["get_messages"]);
 
@@ -28,6 +28,8 @@ export const IROH_REMOTE_RPC_PASSTHROUGH_TYPES = new Set([
 	"get_pending_host_actions",
 	"host_action_response",
 	"get_state",
+	"list_jobs",
+	"read_job",
 	"get_transcript",
 	"get_subscription_usage",
 	"get_message_images",

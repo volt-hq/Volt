@@ -7,6 +7,7 @@ import { type Api, fauxAssistantMessage, type Model, type ThinkingLevelMap } fro
 import { describe, expect, test, vi } from "vitest";
 import type { AgentSession, AgentSessionEvent, ExtensionBindings, PromptOptions } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { ResolvedCommand } from "../src/core/extensions/types.ts";
 import {
 	AGENT_MODE_ACTION_ID,
@@ -2495,6 +2496,7 @@ function createRuntimeHost(
 			agentDir: resources.agentDir ?? tmpdir(),
 		},
 		session: {
+			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 			bindExtensions: vi.fn(bindExtensions),
 			gitContextProvider: {
 				getSnapshot: () => null,

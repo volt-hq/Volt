@@ -4,6 +4,7 @@ import { DEFAULT_PLANNING_STATE } from "../planning.ts";
 import { projectReviewDiscussionLink } from "../review-discussions.ts";
 import { isRuntimeQueueEntryId, isValidClientMessageId } from "../session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
+import { listRpcBackgroundJobs } from "./background-jobs.ts";
 import { projectSubagentDetails } from "./transcript.ts";
 import type {
 	RpcActiveToolExecution,
@@ -645,6 +646,7 @@ export function buildRpcSessionState(session: AgentSession): RpcSessionState {
 		pendingMessageCount: session.pendingMessageCount,
 		steeringQueue: steeringQueue.value,
 		followUpQueue: followUpQueue.value,
+		backgroundJobs: listRpcBackgroundJobs(session.backgroundJobs),
 		...(activeTools.value.length === 0 ? {} : { activeTools: activeTools.value }),
 		...(activeAgentRun ? { activeAgentRun } : {}),
 		...(activeCompaction ? { activeCompaction } : {}),

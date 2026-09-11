@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { getStaticIrohRemoteRpcFilterResult as getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/index.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import type { RpcSessionState, RpcTranscriptResponse } from "../src/core/rpc/types.ts";
@@ -83,6 +84,7 @@ function createState(sessionId: string): RpcSessionState {
 		pendingMessageCount: 0,
 		steeringQueue: [],
 		followUpQueue: [],
+		backgroundJobs: [],
 	};
 }
 
@@ -158,6 +160,7 @@ function createSession(options: {
 }) {
 	return {
 		bindExtensions: vi.fn(async () => undefined),
+		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 		subscribe: vi.fn(() => () => undefined),
 		activeToolExecutions: new Map(),
 		subscribeRuntimeEvents: vi.fn(() => () => undefined),

@@ -146,6 +146,8 @@ export function cloneIrohRemoteRpcGrant(grant: IrohRemoteRpcGrant): IrohRemoteRp
 
 const BASELINE_COMMANDS = new Set(["register_push_target"]);
 const OBSERVE_COMMANDS = new Set([
+	"list_jobs",
+	"read_job",
 	"get_state",
 	"get_transcript",
 	"get_session_tree",
@@ -167,6 +169,7 @@ const OBSERVE_COMMANDS = new Set([
 	"get_keep_awake",
 ]);
 const CONTROL_COMMANDS = new Set([
+	"cancel_job",
 	"prompt",
 	"steer",
 	"follow_up",

@@ -138,7 +138,7 @@ Client-local reconnect outcomes are not sent by the host: `host_unreachable` mea
 
 `client_revoked` remains authoritative for a revoked client node ID. A generic new pairing ticket does not let that same node silently return. The desktop host must first approve re-pair for the revoked node ID, then issue a fresh active pairing ticket; successful re-pair creates a new active client record and clears the revocation tombstone.
 
-A successful pairing stores the client as authorized for the workstation represented by the host state file. That paired client can use any registered workspace name in that state file, including workspaces registered later, without scanning another QR. Revocation blocks that client node ID from every registered workspace. The client's persisted `allowedTools` value is a **headless agent tool grant** that applies to daemon-owned runtimes across all selected workspaces; registering a workspace does not add built-in tools. The default built-in grant is `read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp`. The Codex-only `image_gen` tool can read and upload local reference images and write generated PNG files on the host. When the persisted grant is the default built-in list, the host also exposes active tools registered by loaded extensions in the selected workspace. A TUI-owned conversation continues to use the TUI session's full local tool set; `review` and `chat` pairing presets do not narrow that local runtime.
+A successful pairing stores the client as authorized for the workstation represented by the host state file. That paired client can use any registered workspace name in that state file, including workspaces registered later, without scanning another QR. Revocation blocks that client node ID from every registered workspace. The client's persisted `allowedTools` value is a **headless agent tool grant** that applies to daemon-owned runtimes across all selected workspaces; registering a workspace does not add built-in tools. The default built-in grant is `read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp,jobs`. The Codex-only `image_gen` tool can read and upload local reference images and write generated PNG files on the host. When the persisted grant is the default built-in list, the host also exposes active tools registered by loaded extensions in the selected workspace. A TUI-owned conversation continues to use the TUI session's full local tool set; `review` and `chat` pairing presets do not narrow that local runtime.
 
 A paired client may open multiple conversation streams, including multiple sessions in the same registered workspace. The identity key is authoritative client node ID, workspace name, and resolved session ID. If the same authoritative client opens the same workspace/session twice on one live Iroh connection, the host rejects the new stream and preserves the existing stream:
 
@@ -222,7 +222,7 @@ The successful response uses the normal RPC response shape:
 {"id":"cancel-1","type":"response","command":"abort","success":true}
 ```
 
-`abort` is the only direct remote cancellation command in v1. Command names such as `cancel`, `cancel_run`, `detach`, and `disconnect` are not forwarded by the remote command allowlist. App-level disconnect without stop should close the stream only; clients reconnect by opening a new authorized stream, then calling `get_state` and `get_transcript`.
+`abort` cancels foreground work and all session-owned background jobs, joining cleanup. `cancel_job` requests cancellation of one accessible background job without stopping the foreground run or its siblings; `cancelling` is not terminal until cleanup settles. Command names such as `cancel`, `cancel_run`, `detach`, and `disconnect` are not forwarded by the remote command allowlist. App-level disconnect without stop should close the stream only; clients reconnect by opening a new authorized stream, then calling `get_state` and `get_transcript`.
 
 The daemon's integrated runtime treats an authorized stream as a subscriber to host-owned session state. When the only subscriber detaches during active work, the prompt continues on the host. The same authoritative Iroh node ID, workspace, and session can reconnect to the detached runtime; `get_state.isStreaming` reports an active provider run or continuation, `get_state.isBusy` additionally covers prompt preflight and standalone session operations, and `get_transcript` recovers persisted output. Idle detached runtimes are retained for 30 minutes by default, configurable with the `remote.detachedRuntimeTtlMs` setting. Distinct paired devices may co-attach to one runtime, and when a desktop TUI owns the conversation lease the daemon transparently relays the stream to it; `remote_terminal` reasons `lease_transferred` and `session_rekeyed_reconnect` signal expected closures the client should reconnect through immediately. Prompt-class commands during an ownership drain fail with the transient error code `lease_draining` (with `retryAfterMs`).
 
@@ -247,6 +247,9 @@ Conversation streams forward or handle these remote commands:
 - `steer`
 - `follow_up`
 - `abort`
+- `list_jobs`
+- `read_job`
+- `cancel_job`
 - `get_state`
 - `get_transcript`
 - `get_subscription_usage`
@@ -292,9 +295,17 @@ Workspace discovery streams are purpose-scoped. `list_sessions` streams accept o
 
 Workspace management streams with purpose `unregister_workspace` accept `unregister_workspace` and `list_workspace_directories`. The directory-listing RPC takes `workspaceName` plus optional relative `path`, and returns `directories:[{name,path}]` with relative paths only. Unregister refuses with `workspace_has_worktrees` while any persisted child worktree remains; clients must remove each worktree through `remove_worktree`, using `force:true` only as the user's explicit destructive choice. Management streams with purpose `manage_worktrees` (worktrees.v1) accept only `create_worktree`, `list_worktrees`, and `remove_worktree`. Any other valid RPC command receives `unsupported_on_workspace_management_stream`. Every management command must include a `workspaceName` matching the stream workspace (`session_mismatch` otherwise) and may not include extra fields (`invalid_request`); inbound host-local filesystem paths are always rejected.
 
-All other command types receive a JSONL `response` with `success:false` and are not forwarded to the local Volt RPC process. This includes local-only subagent lifecycle commands such as `list_subagents`, `subagent_start`, `subagent_abort`, `subagent_get_state`, `subagent_get_transcript`, and `subagent_dispose`. Within the remote surface, only `abort` is a direct cancellation command.
+All other command types receive a JSONL `response` with `success:false` and are not forwarded to the local Volt RPC process. This includes local-only subagent lifecycle commands such as `list_subagents`, `subagent_start`, `subagent_abort`, `subagent_get_state`, `subagent_get_transcript`, and `subagent_dispose`. Background-job controls are independent of the local-only subagent lifecycle commands.
 
 `get_subscription_usage` is an account-level read on a conversation stream. It requires `host.manage.v1` and returns normalized quota windows for stored OAuth logins using the same brief host-side cache as `/usage`; API keys are not queried. Results can report `providers`, `no_subscription`, or `unsupported`, and provider entries independently carry either a snapshot or a categorized error. Credentials, account identity, and raw provider payloads never cross the wire. The standard `coding`, `review`, and `chat` presets include `host.manage.v1`.
+
+### Background jobs on conversation streams
+
+`list_jobs` and `read_job {jobId}` require `conversation.observe.v1`; `cancel_job {jobId}` requires `conversation.control.v1` and the current bootstrap's `conversationAuthority`. All three remain scoped to the owning runtime/branch and the active `jobs` plus originating-tool grants. They are not admitted on discovery or management streams and do not start inference.
+
+`get_state.backgroundJobs` and `conversation_bootstrap.state.backgroundJobs` always contain accessible job summaries, without output. Ordered `background_jobs_changed` events replace those summaries and invalidate cached output; clients read only the selected job. Read/cancel responses contain `data.job`, list responses contain `data.jobs`, and all carry `data.sessionId` plus the ordered `data.branchEpoch`. Discard responses from obsolete session/branch identities.
+
+`read_job` returns a non-consuming retained tail, at most 50 KiB UTF-8 or 2000 lines before remote path sanitization, never arbitrary logfile contents. The normal workspace/worktree path handling applies. RPC reads do not mark results collected by the model. Foreground `agent_settled`/`isBusy` do not imply job completion. Detach keeps retained jobs alive; runtime replacement/restart invalidates their handles. See [RPC background jobs](rpc.md#background-jobs) for the complete contract.
 
 ### Subagent delegation trees on conversation streams
 

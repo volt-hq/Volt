@@ -1489,6 +1489,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 					pendingMessageCount: 0,
 					steeringQueue: [],
 					followUpQueue: [],
+					backgroundJobs: [],
 				},
 				transcript: {
 					sessionId: runtimeHost.session.sessionId,
@@ -1577,6 +1578,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 					pendingMessageCount: 0,
 					steeringQueue: [],
 					followUpQueue: [],
+					backgroundJobs: [],
 				},
 				transcript: {
 					sessionId: runtimeHost.session.sessionId,
@@ -1668,6 +1670,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 					pendingMessageCount: 0,
 					steeringQueue: [],
 					followUpQueue: [],
+					backgroundJobs: [],
 				},
 				transcript: {
 					sessionId: runtimeHost.session.sessionId,

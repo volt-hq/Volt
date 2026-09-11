@@ -6,6 +6,7 @@
 
 import { describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { ExtensionUIContext } from "../src/core/extensions/types.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import { Theme } from "../src/core/theme/runtime.ts";
@@ -13,6 +14,7 @@ import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 
 function createSession() {
 	return {
+		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 		bindExtensions: vi.fn(
 			async (_options: {
 				uiContext: ExtensionUIContext;

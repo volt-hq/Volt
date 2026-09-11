@@ -136,10 +136,38 @@ function sanitizeOutboundValue(
 		return decorated;
 	}
 	if (isConversationBootstrapEnvelope(decorated)) {
-		return sanitizeConversationBootstrapEnvelope(decorated, sanitizer);
+		return boundBackgroundJobLabels(sanitizeConversationBootstrapEnvelope(decorated, sanitizer));
 	}
 	const sanitized = sanitizer.sanitizeValue(decorated, preserveProjectedAssistantSubagentMessage);
-	return isRecord(sanitized) || Array.isArray(sanitized) ? sanitized : {};
+	return isRecord(sanitized) || Array.isArray(sanitized) ? boundBackgroundJobLabels(sanitized) : {};
+}
+
+/** Path replacement can expand labels beyond their canonical 200-character bound. */
+function boundBackgroundJobLabels(value: object): object {
+	if (!isRecord(value)) return value;
+	const target =
+		value.type === "conversation_bootstrap"
+			? value.state
+			: value.type === "background_jobs_changed"
+				? value
+				: value.type === "response" &&
+						value.success === true &&
+						(value.command === "get_state" ||
+							value.command === "list_jobs" ||
+							value.command === "read_job" ||
+							value.command === "cancel_job")
+					? value.data
+					: undefined;
+	if (!isRecord(target)) return value;
+	const jobs = Array.isArray(target.backgroundJobs)
+		? target.backgroundJobs
+		: Array.isArray(target.jobs)
+			? target.jobs
+			: [target.job];
+	for (const job of jobs) {
+		if (isRecord(job) && typeof job.label === "string") job.label = job.label.slice(0, 200);
+	}
+	return value;
 }
 
 function sanitizeConversationBootstrapEnvelope(

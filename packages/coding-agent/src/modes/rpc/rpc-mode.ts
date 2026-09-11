@@ -65,6 +65,7 @@ import {
 	getCanonicalReviewRun,
 	recordReviewFindingOutcome,
 } from "../../core/review-state.ts";
+import { subscribeRpcSessionEvents } from "../../core/rpc/background-jobs.ts";
 import { type ProjectionDiagnostic, StreamProjector } from "../../core/rpc/stream-projection.ts";
 import type { RpcTransport } from "../../core/rpc/transport.ts";
 import { SessionManager, type SessionReference } from "../../core/session-manager.ts";
@@ -210,12 +211,18 @@ type RpcModeStartupAwareTransport = RpcTransport & {
 };
 
 const MAX_PENDING_RPC_INPUT_TASKS = 64;
-const RPC_SESSION_INTERRUPTION_TYPES: ReadonlySet<string> = new Set(["abort", "abort_retry", "abort_bash"]);
+const RPC_SESSION_INTERRUPTION_TYPES: ReadonlySet<string> = new Set([
+	"abort",
+	"abort_retry",
+	"abort_bash",
+	"cancel_job",
+]);
 const RPC_CONVERSATION_AUTHORITY_MUTATION_TYPES: ReadonlySet<RpcCommand["type"]> = new Set([
 	"prompt",
 	"steer",
 	"follow_up",
 	"abort",
+	"cancel_job",
 	"new_session",
 	"set_agent_mode",
 	"plan_execute",
@@ -1021,6 +1028,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	};
 
 	const rebindSession = async (): Promise<void> => {
+		unsubscribe?.();
+		unsubscribe = undefined;
 		// Correlated control replies are capabilities over the conversation state
 		// that minted them. Retire them before a replacement binds extensions, and
 		// bind the same synchronous cut to every in-session branch generation.
@@ -1086,14 +1095,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		if (shuttingDown) return;
 		await notifySessionChanged();
 
-		unsubscribe?.();
-		unsubscribe = undefined;
 		unsubscribeBackpressure?.();
 		unsubscribeBackpressure = undefined;
 		endSessionProjector();
 		if (!options.orderedConversation) {
 			sessionProjector = createStreamProjector();
-			unsubscribe = session.subscribe((event) => {
+			unsubscribe = subscribeRpcSessionEvents(session, (event) => {
 				const batch = sessionProjector?.push(event);
 				if (!batch) {
 					return;
@@ -1481,6 +1488,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			cancelPendingHostActionRequests,
 			assertConversationGenerationCurrent,
 			subscriptionUsageService,
+			conversationBranchEpoch: options.orderedConversation?.branchEpoch,
 			takePendingReviewWorkflow: (workflowId: string) => {
 				const pending = pendingReviewWorkflows.get(workflowId);
 				pendingReviewWorkflows.delete(workflowId);

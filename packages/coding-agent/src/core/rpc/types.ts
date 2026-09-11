@@ -18,6 +18,13 @@ import type {
 	RpcAgentOptionsModelSelectionSchema,
 	RpcAgentOptionsSchema,
 } from "./schema/agent-options.ts";
+import type {
+	RpcBackgroundJobSnapshotSchema,
+	RpcBackgroundJobSummarySchema,
+	RpcCancelJobResponseSchema,
+	RpcListJobsResponseSchema,
+	RpcReadJobResponseSchema,
+} from "./schema/background-jobs.ts";
 import type { RPC_COMMAND_SCHEMAS, RpcClientCapabilityFeatureSchema } from "./schema/commands.ts";
 import type {
 	RpcConversationActiveAssistantSchema,
@@ -34,6 +41,7 @@ import type {
 } from "./schema/conversation.ts";
 import type {
 	RpcAgentStartEventSchema,
+	RpcBackgroundJobsChangedEventSchema,
 	RpcExtensionErrorEventSchema,
 	RpcExtensionUIRequestSchema,
 	RpcExtensionUIResponseSchema,
@@ -313,6 +321,12 @@ export type RpcSlashCommand = Static<typeof RpcSlashCommandSchema>;
 // RPC State
 // ============================================================================
 
+export type RpcBackgroundJobSummary = Static<typeof RpcBackgroundJobSummarySchema>;
+export type RpcBackgroundJobSnapshot = Static<typeof RpcBackgroundJobSnapshotSchema>;
+export type RpcListJobsResponse = Static<typeof RpcListJobsResponseSchema>;
+export type RpcReadJobResponse = Static<typeof RpcReadJobResponseSchema>;
+export type RpcCancelJobResponse = Static<typeof RpcCancelJobResponseSchema>;
+export type RpcBackgroundJobsChangedEvent = Static<typeof RpcBackgroundJobsChangedEventSchema>;
 export type RpcSessionListItem = Static<typeof RpcSessionListItemSchema>;
 export type RpcSessionWorkContext = Static<typeof RpcSessionWorkContextSchema>;
 export type RpcSessionWorkPullRequest = Static<typeof RpcSessionWorkPullRequestSchema>;

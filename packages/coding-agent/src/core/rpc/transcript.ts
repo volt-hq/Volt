@@ -4,6 +4,7 @@ import type { ImageContent } from "@hansjm10/volt-ai";
 import { type BashExecutionMessage, extractVisibleTextContent } from "../messages.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
+import { projectRpcBackgroundJobDetails } from "./background-jobs.ts";
 import { getRemoteVisibleCustomMessageRole } from "./custom-message-projection.ts";
 import { type ResolvedSessionToolCall, resolveSessionToolCallsByResultEntryId } from "./tool-call-resolution.ts";
 import type {
@@ -372,7 +373,13 @@ function projectToolResult(
 	const status: RpcTranscriptToolStatus = message.isError ? "failed" : "completed";
 	const path = getToolPath(message.toolName, args);
 	const details = isRecord(message.details) ? message.details : undefined;
-	const summary = summarizeToolResult(message.toolName, status, args, path);
+	const backgroundDetails = projectRpcBackgroundJobDetails(details);
+	const summary = backgroundDetails
+		? boundSummaryWithMetadata(
+				`Background job ${backgroundDetails.backgroundJob.id}: ${backgroundDetails.backgroundJob.status} (snapshot)`,
+				TOOL_SUMMARY_LIMIT,
+			)
+		: summarizeToolResult(message.toolName, status, args, path);
 	const item: RpcTranscriptToolItem = {
 		id: entryId,
 		role: "tool",
@@ -400,7 +407,9 @@ function projectToolResult(
 	if (projectedArgs) {
 		item.args = projectedArgs;
 	}
-	if (message.toolName === "subagent" || message.toolName === SUBAGENT_REGISTRY_TOOL_NAME) {
+	if (backgroundDetails) {
+		item.details = backgroundDetails;
+	} else if (message.toolName === "subagent" || message.toolName === SUBAGENT_REGISTRY_TOOL_NAME) {
 		const subagentDetails = projectSubagentDetails(details);
 		if (subagentDetails) {
 			item.details = subagentDetails;
@@ -425,6 +434,14 @@ function projectToolArgs(
 		case "bash":
 			copyStringArg(args, projected, "command", TOOL_COMMAND_LIMIT);
 			copyNumberArg(args, projected, "timeout");
+			copyBooleanArg(args, projected, "background");
+			break;
+		case "jobs":
+			copyStringArg(args, projected, "action");
+			copyStringArg(args, projected, "id");
+			copyStringArrayArg(args, projected, "ids");
+			copyStringArg(args, projected, "mode");
+			copyNumberArg(args, projected, "timeoutMs");
 			break;
 		case "read":
 			copyStringArg(args, projected, "path");
@@ -545,6 +562,7 @@ function projectSubagentArgs(args: Record<string, unknown> | undefined): Record<
 	if (chain) {
 		projected.chain = chain;
 	}
+	copyBooleanArg(args, projected, "background");
 	copyBooleanArg(args, projected, "list");
 	copyNumberArg(args, projected, "cursor");
 	copyStringArg(args, projected, "follow", SUBAGENT_ID_LIMIT);

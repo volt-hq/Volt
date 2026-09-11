@@ -342,6 +342,8 @@ While `session.abort()` drains cleanup, a shared admission gate prevents new for
 
 Jobs are runtime- and branch-scoped. Running work and retained output are not recovered after a restart or runtime replacement. Existing transcript acknowledgements and completion notices remain historical records. A remote transport disconnect does not cancel jobs while the host runtime is retained.
 
+RPC clients expose `listJobs()`, `readJob(jobId)`, and `cancelJob(jobId, { conversationAuthority })`. Results include the owning `sessionId`; ordered responses also carry `branchEpoch`. `getState().backgroundJobs` and conversation bootstraps contain metadata-only snapshots, while `background_jobs_changed` invalidates the list and inspected output even after foreground settlement. RPC inspection does not acknowledge model collection. See [RPC background jobs](rpc.md#background-jobs) for remote grants, cancellation authority, and reconnect semantics.
+
 Native `tool_result` hooks run once for actual background completion rather than for the start acknowledgement. Completion hooks receive the job's abort signal through `ctx.signal`. Progress snapshots are available through `jobs` before completion hooks; `jobs` result hooks can inspect or transform those reads. Keep asynchronous completion hooks cancellation-aware and avoid assuming they run during a foreground model turn.
 
 ### Prompting and Message Queueing

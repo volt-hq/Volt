@@ -415,6 +415,143 @@
 			"additionalProperties": false,
 			"x-volt-expected": "be a safe non-negative epoch/seq position"
 		},
+		"RpcBackgroundJobSnapshot": {
+			"type": "object",
+			"required": [
+				"id",
+				"toolName",
+				"label",
+				"status",
+				"startedAt",
+				"outputTruncated",
+				"output"
+			],
+			"properties": {
+				"id": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"toolName": {
+					"type": "string",
+					"enum": [
+						"bash",
+						"subagent"
+					]
+				},
+				"toolCallId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"label": {
+					"type": "string",
+					"maxLength": 200
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"running",
+						"cancelling",
+						"completed",
+						"failed",
+						"cancelled"
+					]
+				},
+				"startedAt": {
+					"type": "number"
+				},
+				"endedAt": {
+					"type": "number"
+				},
+				"lastOutputAt": {
+					"type": "number"
+				},
+				"outputTruncated": {
+					"type": "boolean"
+				},
+				"output": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcBackgroundJobSummary": {
+			"type": "object",
+			"required": [
+				"id",
+				"toolName",
+				"label",
+				"status",
+				"startedAt",
+				"outputTruncated"
+			],
+			"properties": {
+				"id": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"toolName": {
+					"type": "string",
+					"enum": [
+						"bash",
+						"subagent"
+					]
+				},
+				"toolCallId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"label": {
+					"type": "string",
+					"maxLength": 200
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"running",
+						"cancelling",
+						"completed",
+						"failed",
+						"cancelled"
+					]
+				},
+				"startedAt": {
+					"type": "number"
+				},
+				"endedAt": {
+					"type": "number"
+				},
+				"lastOutputAt": {
+					"type": "number"
+				},
+				"outputTruncated": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcBackgroundJobs": {
+			"type": "array",
+			"items": {
+				"$ref": "#/$defs/RpcBackgroundJobSummary"
+			},
+			"maxItems": 64
+		},
+		"RpcBackgroundJobsChangedEvent": {
+			"type": "object",
+			"required": [
+				"type",
+				"jobs"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "background_jobs_changed"
+				},
+				"jobs": {
+					"$ref": "#/$defs/RpcBackgroundJobs"
+				},
+				"delivery": {
+					"$ref": "#/$defs/RpcConversationDeliveryPosition"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcBashResult": {
 			"type": "object",
 			"required": [
@@ -437,6 +574,25 @@
 				},
 				"fullOutputPath": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCancelJobResponse": {
+			"type": "object",
+			"required": [
+				"sessionId",
+				"job"
+			],
+			"properties": {
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"branchEpoch": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"job": {
+					"$ref": "#/$defs/RpcBackgroundJobSummary"
 				}
 			},
 			"additionalProperties": false
@@ -814,6 +970,15 @@
 					"$ref": "#/$defs/RpcCommand.get_transcript_entry_text"
 				},
 				{
+					"$ref": "#/$defs/RpcCommand.list_jobs"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.read_job"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.cancel_job"
+				},
+				{
 					"$ref": "#/$defs/RpcCommand.list_subagents"
 				},
 				{
@@ -1114,6 +1279,15 @@
 					"$ref": "#/$defs/RpcCommand.get_transcript_entry_text"
 				},
 				{
+					"$ref": "#/$defs/RpcCommand.list_jobs"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.read_job"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.cancel_job"
+				},
+				{
 					"$ref": "#/$defs/RpcCommand.list_subagents"
 				},
 				{
@@ -1313,6 +1487,29 @@
 				},
 				"excludeFromContext": {
 					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.cancel_job": {
+			"type": "object",
+			"required": [
+				"type",
+				"jobId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "cancel_job"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"jobId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
 				}
 			},
 			"additionalProperties": false
@@ -2285,6 +2482,25 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcCommand.list_jobs": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "list_jobs"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcCommand.list_mcp_prompts": {
 			"type": "object",
 			"required": [
@@ -2772,6 +2988,29 @@
 				"confirmed": {
 					"type": "boolean",
 					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.read_job": {
+			"type": "object",
+			"required": [
+				"type",
+				"jobId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "read_job"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"jobId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
 				}
 			},
 			"additionalProperties": false
@@ -5015,6 +5254,25 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcListJobsResponse": {
+			"type": "object",
+			"required": [
+				"sessionId",
+				"jobs"
+			],
+			"properties": {
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"branchEpoch": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"jobs": {
+					"$ref": "#/$defs/RpcBackgroundJobs"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcListReviewDiscussions": {
 			"type": "object",
 			"required": [
@@ -6668,6 +6926,25 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcReadJobResponse": {
+			"type": "object",
+			"required": [
+				"sessionId",
+				"job"
+			],
+			"properties": {
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"branchEpoch": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"job": {
+					"$ref": "#/$defs/RpcBackgroundJobSnapshot"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcRegisterPushTargetArgs": {
 			"type": "object",
 			"required": [
@@ -6934,6 +7211,15 @@
 					"$ref": "#/$defs/RpcResponse.get_transcript_entry_text"
 				},
 				{
+					"$ref": "#/$defs/RpcResponse.list_jobs"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.read_job"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.cancel_job"
+				},
+				{
 					"$ref": "#/$defs/RpcResponse.list_subagents"
 				},
 				{
@@ -7171,6 +7457,36 @@
 				},
 				"data": {
 					"$ref": "#/$defs/RpcBashResult"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.cancel_job": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "cancel_job"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcCancelJobResponse"
 				}
 			},
 			"additionalProperties": false
@@ -8671,6 +8987,36 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcResponse.list_jobs": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "list_jobs"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcListJobsResponse"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcResponse.list_mcp_prompts": {
 			"type": "object",
 			"required": [
@@ -9262,6 +9608,36 @@
 						}
 					},
 					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.read_job": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "read_job"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcReadJobResponse"
 				}
 			},
 			"additionalProperties": false
@@ -11786,6 +12162,9 @@
 					"$ref": "#/$defs/RpcAgentStartEvent"
 				},
 				{
+					"$ref": "#/$defs/RpcBackgroundJobsChangedEvent"
+				},
+				{
 					"$ref": "#/$defs/RpcConversationBootstrapEvent"
 				},
 				{
@@ -11916,7 +12295,8 @@
 				"messageCount",
 				"pendingMessageCount",
 				"steeringQueue",
-				"followUpQueue"
+				"followUpQueue",
+				"backgroundJobs"
 			],
 			"properties": {
 				"reviewDiscussion": {
@@ -12001,6 +12381,9 @@
 					"items": {
 						"$ref": "#/$defs/RpcQueuedMessage"
 					}
+				},
+				"backgroundJobs": {
+					"$ref": "#/$defs/RpcBackgroundJobs"
 				},
 				"activeTools": {
 					"type": "array",

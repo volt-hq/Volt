@@ -66,6 +66,14 @@ import {
 	RpcAgentOptionsModelSelectionSchema,
 	RpcAgentOptionsSchema,
 } from "./agent-options.ts";
+import {
+	RpcBackgroundJobSnapshotSchema,
+	RpcBackgroundJobSummarySchema,
+	RpcBackgroundJobsSchema,
+	RpcCancelJobResponseSchema,
+	RpcListJobsResponseSchema,
+	RpcReadJobResponseSchema,
+} from "./background-jobs.ts";
 import { RPC_COMMAND_SCHEMAS, RpcClientCapabilityFeatureSchema, RpcMcpAuthFlowSchema } from "./commands.ts";
 import {
 	RpcConversationActiveAssistantSchema,
@@ -85,6 +93,7 @@ import {
 } from "./conversation.ts";
 import {
 	RpcAgentStartEventSchema,
+	RpcBackgroundJobsChangedEventSchema,
 	RpcExtensionErrorEventSchema,
 	RpcExtensionUIRequestSchema,
 	RpcExtensionUIResponseSchema,
@@ -314,6 +323,7 @@ export const RpcResponseSchema = Type.Union([
  */
 export const RpcServerEventSchema = Type.Union([
 	RpcAgentStartEventSchema,
+	RpcBackgroundJobsChangedEventSchema,
 	RpcConversationBootstrapEventSchema,
 	RpcMessageStartFrameSchema,
 	RpcMessageUpdateFrameSchema,
@@ -461,6 +471,15 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcMcpCapabilitiesResponse: RpcMcpCapabilitiesResponseSchema,
 	RpcSourceInfo: RpcSourceInfoSchema,
 	RpcSlashCommand: RpcSlashCommandSchema,
+
+	// Session-owned background jobs
+	RpcBackgroundJobSummary: RpcBackgroundJobSummarySchema,
+	RpcBackgroundJobSnapshot: RpcBackgroundJobSnapshotSchema,
+	RpcBackgroundJobs: RpcBackgroundJobsSchema,
+	RpcListJobsResponse: RpcListJobsResponseSchema,
+	RpcReadJobResponse: RpcReadJobResponseSchema,
+	RpcCancelJobResponse: RpcCancelJobResponseSchema,
+	RpcBackgroundJobsChangedEvent: RpcBackgroundJobsChangedEventSchema,
 
 	// Session state + transcript + subagents + host status
 	RpcSessionWorkPullRequest: RpcSessionWorkPullRequestSchema,

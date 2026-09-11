@@ -14,6 +14,7 @@ import type { Api, Model } from "@hansjm10/volt-ai";
 import { expect, vi } from "vitest";
 import type { AgentSession, AgentSessionEvent, PromptPreflightResult } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { ConversationProjectionFeed } from "../src/core/rpc/conversation-projection-feed.ts";
 import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/rpc/index.ts";
@@ -130,6 +131,7 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 	const session = {
 		leafId,
 		autoCompactionEnabled: false,
+		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 		bindExtensions: vi.fn(async () => {}),
 		followUpMode: "all" as const,
 		gitContextProvider: {
@@ -254,6 +256,7 @@ export function createTestIrohConversationOptions(runtimeHost: AgentSessionRunti
 					pendingMessageCount: session.pendingMessageCount,
 					steeringQueue: [],
 					followUpQueue: [],
+					backgroundJobs: [],
 				},
 				transcript: {
 					sessionId: session.sessionId,
