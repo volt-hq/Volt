@@ -95,6 +95,29 @@ form. The exact flag value and signature on Jordan's phone were not logged;
 real-device final approval remains the acceptance gate. No signature bypass,
 alternate signature algorithm or relaxed replay requirement is introduced.
 
+### Successful TestFlight acceptance and final deployment
+
+TestFlight 1.0.0 build 5 on Jordan's iPhone, iOS 26.6, connected successfully
+after runtime commit `bc88caa59`. Canary logs confirm the existing registered
+key was usable, approval returned 200 at `2026-09-11T19:14:38.555768Z`, and
+daemon exchange returned 200 at `2026-09-11T19:14:38.798136Z`; the user confirmed
+the app connected. No daemon restart, app update or credential reset was needed.
+
+Canary now serves 100% from `relay-credential-broker-canary-assertionfix-bc88caa59`.
+Under the user's prior production authorization, production also serves 100%
+from `relay-credential-broker-production-assertionfix-bc88caa59`. Both use image
+`sha256:17e6629124813f1b0ba84d872a55ebbe5cfc54a740404fcafbeba0225a3a2bd8`
+from Cloud Build `3e210185-37c3-4f0a-8daf-b46c891a94d4`.
+Both public health checks passed and unauthenticated/invalid attestation requests
+remain rejected. Environment, secret references, service accounts, revision
+annotations and signing keys were preserved; production ingress and
+Production-only purchase settings are unchanged. These image updates require no
+new migration. Earlier deployment records below describe the initial rollout.
+
+Real App Store distribution acceptance, cold reconnect and ordinary credential
+refresh remain separate validation steps; the successful TestFlight pairing
+does not establish those results.
+
 ## Acceptance on the existing TestFlight installation
 
 Install the new TestFlight build through TestFlight, preserving app data. Record
