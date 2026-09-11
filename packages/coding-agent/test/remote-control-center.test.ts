@@ -84,6 +84,9 @@ class FakeBackend implements RemoteControlBackend {
 	recoverCalls: string[] = [];
 	registerCalls: string[] = [];
 	revokeCalls: string[] = [];
+	resetCalls = 0;
+	resetError: Error | undefined;
+	resetPending: Promise<void> | undefined;
 	repairApprovalCalls: string[] = [];
 	pairWorkspace: string | undefined;
 	pairAccess: IrohRemoteAccessPresetName | undefined;
@@ -147,6 +150,18 @@ class FakeBackend implements RemoteControlBackend {
 				this.pairDisposeCalls++;
 			},
 		};
+	}
+
+	async resetRelayCredential(): Promise<void> {
+		this.resetCalls++;
+		await this.resetPending;
+		if (this.resetError) throw this.resetError;
+		if (this.snapshot.kind === "online") {
+			this.snapshot = {
+				kind: "online",
+				status: { ...this.snapshot.status, relayCredential: { state: "unpaired" } },
+			};
+		}
 	}
 
 	async revokeClient(clientNodeId: string): Promise<void> {
@@ -237,6 +252,18 @@ async function settle(): Promise<void> {
 	for (let index = 0; index < 5; index++) await Promise.resolve();
 }
 
+function selectAction(component: RemoteControlCenterComponent, label: string, width = 120): void {
+	for (let attempt = 0; attempt < 30; attempt++) {
+		const text = component.render(width).lines.map(stripAnsi).join("\n");
+		if (text.includes(`› ${label}`)) {
+			component.handleInput("\n");
+			return;
+		}
+		component.handleInput("\x1b[B");
+	}
+	throw new Error(`Action not reachable: ${label}`);
+}
+
 describe("RemoteControlCenterComponent", () => {
 	beforeAll(() => {
 		initTheme(undefined, false);
@@ -309,6 +336,175 @@ describe("RemoteControlCenterComponent", () => {
 
 		expect(text).toContain("Pairing is disabled until phone transport is ready");
 		expect(text).not.toContain("Pair a phone");
+	});
+
+	it.each([
+		["unpaired", "Not set up", true],
+		["pairing", "Pairing in progress", false],
+		["active", "Active", true],
+		["expired", "Access expired", true],
+		["subscription_inactive", "Volt Pro subscription inactive", false],
+		["revocation_pending", "Credential reset pending", false],
+	] as const)("explains %s relay access separately from endpoint readiness", async (state, label, canPair) => {
+		const backend = new FakeBackend({ kind: "online", status: status({ relayCredential: { state } }) });
+		const { component } = createComponent(backend, 45);
+		await component.start();
+		const text = component.render(120).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Daemon endpoint: ready");
+		expect(text).toContain(`Relay access: ${label}`);
+		expect(text).not.toContain("Phone transport: ready");
+		expect(text.includes("  Pair a phone\n")).toBe(canPair);
+		expect(text.includes("credentials and pair again…") || text.includes("credential reset and pair again…")).toBe(
+			state !== "unpaired",
+		);
+		if (state === "subscription_inactive") {
+			expect(text).toContain("Renew the existing subscription");
+			expect(text).not.toContain("Restart voltd");
+		}
+	});
+
+	it("defaults reset confirmation to Cancel and leaves credentials untouched", async () => {
+		const backend = new FakeBackend({ kind: "online", status: status({ relayCredential: { state: "active" } }) });
+		const { component } = createComponent(backend, 24);
+		await component.start();
+		selectAction(component, "Reset credentials and pair again…", 80);
+		let text = component.render(80).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("RESET RELAY CREDENTIALS");
+		expect(text).toContain("all its phones");
+		expect(text).toContain("workspaces, worktrees, and conversations");
+		expect(text).toContain("direct connections are NOT revoked");
+		expect(text).toContain("› Cancel");
+		expect(backend.resetCalls).toBe(0);
+		component.handleInput("\n");
+		await settle();
+		text = component.render(80).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Relay access: Active");
+		expect(backend.resetCalls).toBe(0);
+	});
+
+	it("resets once after confirmation and guides a fresh pairing without restarting or revoking devices", async () => {
+		const backend = new FakeBackend({
+			kind: "online",
+			status: status({ relayCredential: { state: "subscription_inactive" } }),
+		});
+		const { component } = createComponent(backend, 36);
+		await component.start();
+		selectAction(component, "Reset credentials and pair again…");
+		selectAction(component, "Reset credentials and pair again");
+		component.handleInput("\n");
+		await settle();
+		expect(backend.resetCalls).toBe(1);
+		expect(backend.startCalls).toBe(0);
+		expect(backend.revokeCalls).toEqual([]);
+		let text = component.render(120).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Relay credentials reset. Choose access for the new phone.");
+		expect(text).toContain("PAIR A PHONE · ACCESS");
+		expect(backend.pairWorkspace).toBeUndefined();
+		component.handleInput("\n");
+		await settle();
+		expect(backend.pairWorkspace).toBe("volt");
+		expect(backend.pairAccess).toBe("coding");
+		backend.pairingProgress?.({
+			type: "pairing_progress",
+			requestId: "pair-1",
+			phase: "ticket",
+			ticket: verificationTicket(),
+		});
+		text = component.render(120).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Ticket ready");
+		expect(text).toContain("Copy pairing ticket");
+	});
+
+	it("offers a confirmed retry after an offline reset failure without starting pairing", async () => {
+		const backend = new FakeBackend({
+			kind: "online",
+			status: status({ relayCredential: { state: "revocation_pending" } }),
+		});
+		backend.resetError = new Error("Broker unavailable. Retry when online.");
+		const { component } = createComponent(backend, 36);
+		await component.start();
+		selectAction(component, "Retry credential reset and pair again…");
+		selectAction(component, "Retry reset and pair again");
+		await settle();
+		const text = component.render(120).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Reset failed: Broker unavailable. Retry when online.");
+		expect(text).toContain("› Cancel");
+		expect(backend.pairWorkspace).toBeUndefined();
+		backend.resetError = undefined;
+		selectAction(component, "Retry reset and pair again");
+		await settle();
+		expect(backend.resetCalls).toBe(2);
+		expect(component.render(120).lines.map(stripAnsi).join("\n")).toContain("PAIR A PHONE · ACCESS");
+	});
+
+	it("reloads pending revocation status when escaping a failed reset", async () => {
+		const backend = new FakeBackend({ kind: "online", status: status({ relayCredential: { state: "active" } }) });
+		backend.resetError = new Error("Offline");
+		const { component } = createComponent(backend, 36);
+		await component.start();
+		selectAction(component, "Reset credentials and pair again…");
+		selectAction(component, "Reset credentials and pair again");
+		await settle();
+		backend.nextSnapshot = { kind: "online", status: status({ relayCredential: { state: "revocation_pending" } }) };
+		component.handleInput("\x1b");
+		await settle();
+		const text = component.render(120).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Relay access: Credential reset pending");
+		expect(text).toContain("Retry credential reset and pair again…");
+		expect(text).not.toContain("  Pair a phone\n");
+	});
+
+	it("does not open pairing after the reset screen is disposed", async () => {
+		const backend = new FakeBackend({ kind: "online", status: status({ relayCredential: { state: "expired" } }) });
+		let finish: (() => void) | undefined;
+		backend.resetPending = new Promise((resolve) => {
+			finish = resolve;
+		});
+		const { component, requestRender } = createComponent(backend);
+		await component.start();
+		selectAction(component, "Reset credentials and pair again…");
+		selectAction(component, "Reset credentials and pair again");
+		component.dispose();
+		const renders = requestRender.mock.calls.length;
+		finish?.();
+		await settle();
+		expect(requestRender).toHaveBeenCalledTimes(renders);
+		expect(backend.pairWorkspace).toBeUndefined();
+	});
+
+	it("retains workspace registration guidance after reset when no workspaces exist", async () => {
+		const backend = new FakeBackend({
+			kind: "online",
+			status: status({ workspaces: [], relayCredential: { state: "expired" } }),
+		});
+		const { component } = createComponent(backend);
+		await component.start();
+		selectAction(component, "Reset credentials and pair again…");
+		selectAction(component, "Reset credentials and pair again");
+		await settle();
+		const text = component.render(120).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Relay credentials reset. Register a workspace");
+		expect(text).toContain("› Register current directory");
+		expect(backend.pairWorkspace).toBeUndefined();
+	});
+
+	it("keeps credential status and reset confirmation within small viewports", async () => {
+		for (const [width, rows] of [
+			[24, 12],
+			[80, 24],
+			[120, 36],
+		] as const) {
+			const backend = new FakeBackend({
+				kind: "online",
+				status: status({ relayCredential: { state: "subscription_inactive" } }),
+			});
+			const { component } = createComponent(backend, rows);
+			await component.start();
+			selectAction(component, "Reset credentials and pair again…");
+			const lines = component.render(width).lines;
+			expect(lines).toHaveLength(rows);
+			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+		}
 	});
 
 	it("labels default-tracking and deny-all device grants", async () => {
