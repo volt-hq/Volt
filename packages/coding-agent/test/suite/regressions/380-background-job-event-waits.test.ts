@@ -1,11 +1,10 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { AgentToolResult } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { type TUI, visibleWidth } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BackgroundJobManager, type BackgroundJobSnapshot } from "../../../src/core/background-jobs.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
+import * as toolProgressCapture from "../../../src/core/tool-progress-capture.ts";
 import { backgroundWaitResult, getBackgroundJobWait } from "../../../src/core/tools/background-wait.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
@@ -371,6 +370,12 @@ describe("multi-job presentation and collection", () => {
 
 describe("active-run waiting", () => {
 	it.each([false, true])("makes no parent requests during ten minutes with diagnostics=%s", async (diagnostics) => {
+		// Keep wait/metadata assertions independent of Windows PowerShell startup.
+		// The real private sink is covered in background-job-diagnostics.test.ts.
+		const batches: string[] = [];
+		vi.spyOn(toolProgressCapture, "writeToolProgressCapture").mockImplementation(async (_path, content) => {
+			batches.push(content);
+		});
 		const { harness, finish, started, unsubscribe } = await setup(diagnostics);
 		const prompting = harness.session.prompt("Wait for the worker");
 		await started.promise;
@@ -386,14 +391,10 @@ describe("active-run waiting", () => {
 		expect(harness.session.getLastAssistantText()).toBe("Result received");
 		expect(harness.session.backgroundJobs.listWaits()).toEqual([]);
 		unsubscribe();
+		harness.session.dispose();
+		await harness.session.waitForClosed();
 		if (diagnostics) {
-			harness.session.dispose();
-			await harness.session.waitForClosed();
-			const directory = join(harness.tempDir, "background-job-diagnostics");
-			const text = readdirSync(directory)
-				.filter((file) => file.endsWith(".jsonl"))
-				.map((file) => readFileSync(join(directory, file), "utf8"))
-				.join("\n");
+			const text = batches.join("\n");
 			expect(text).not.toContain("private command");
 			expect(text).not.toContain("private worker output");
 			const records = text
@@ -402,6 +403,8 @@ describe("active-run waiting", () => {
 				.map((line) => JSON.parse(line) as { kind: string });
 			expect(records.filter((record) => record.kind === "request_start")).toHaveLength(3);
 			expect(records.filter((record) => record.kind === "wait_end")).toHaveLength(1);
+		} else {
+			expect(batches).toEqual([]);
 		}
 	});
 
