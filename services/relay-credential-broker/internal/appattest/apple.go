@@ -225,7 +225,7 @@ func (v *Verifier) VerifyAssertion(publicKey, object []byte, clientDataHash [32]
 		return 0, ErrInvalid
 	}
 	var assertion assertionObject
-	if err := v.decode.Unmarshal(object, &assertion); err != nil || len(assertion.AuthData) <= 37 ||
+	if err := v.decode.Unmarshal(object, &assertion); err != nil || len(assertion.AuthData) < 37 ||
 		!bytes.Equal(assertion.AuthData[:32], v.rpID[:]) || assertion.AuthData[32] != 0 {
 		return 0, ErrInvalid
 	}
@@ -258,7 +258,10 @@ func (v *Verifier) extensionRejectionReason(data []byte, bundleVersion string) s
 		BundleVersion string `cbor:"apple_bundle_version_01"`
 	}
 	if len(data) == 0 {
-		return "metadata_missing"
+		// Apple introduced these extensions in iOS 27. Earlier authenticators
+		// omit them; the nonce/signature still covers all authenticator bytes.
+		// Nonempty metadata must pass every check below, even if incomplete.
+		return ""
 	}
 	if len(data) > 256 {
 		return "metadata_size"

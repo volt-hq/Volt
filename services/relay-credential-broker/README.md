@@ -296,7 +296,7 @@ The dashboard covers pairing outcomes and logs, broker status and latency, Cloud
 | `VOLT_APP_STORE_PRIVATE_KEY` | required in Apple mode | App Store Server API `.p8` private key from Secret Manager. Never log it. |
 | `VOLT_APP_STORE_KEY_ID` | required in Apple mode | App Store Server API key ID. |
 | `VOLT_APP_STORE_ISSUER_ID` | required in Apple mode | App Store Connect issuer ID. |
-| `VOLT_APP_ATTEST_APP_ID` | required in Apple mode | Exact signing App ID prefix plus bundle ID, verified against the signed release artifact. Canary accepts TestFlight category 2; production accepts App Store category 4. |
+| `VOLT_APP_ATTEST_APP_ID` | required in Apple mode | Exact signing App ID prefix plus bundle ID, verified against the signed release artifact. When signed metadata is present, canary requires TestFlight category 2 and production requires App Store category 4. Valid objects without iOS 27 extensions retain all nonce/signature checks; see [rollout requirements](PAIRING-ATTESTATION.md). |
 | `VOLT_APP_STORE_BUNDLE_ID` | `com.hansjm10.volt` | Exact bundle identifier accepted in Apple-signed data. |
 | `VOLT_APP_STORE_APP_APPLE_ID` | required in Apple mode | Numeric App Store app identifier. |
 | `VOLT_APP_STORE_SUBSCRIPTION_GROUP_ID` | required in Apple mode | Exact Volt Pro subscription-group identifier. |

@@ -97,6 +97,11 @@ type attestationFixture struct {
 
 func makeAttestationFixture(t *testing.T) attestationFixture {
 	t.Helper()
+	return makeAttestationFixtureWithExtensions(t, fixtureExtensions(t))
+}
+
+func makeAttestationFixtureWithExtensions(t *testing.T, extensions []byte) attestationFixture {
+	t.Helper()
 	now := time.Date(2026, 9, 11, 15, 0, 0, 0, time.UTC)
 	generate := func() *ecdsa.PrivateKey {
 		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -139,7 +144,7 @@ func makeAttestationFixture(t *testing.T) attestationFixture {
 		t.Fatal(err)
 	}
 	auth = append(auth, cose...)
-	auth = append(auth, fixtureExtensions(t)...)
+	auth = append(auth, extensions...)
 	hash := sha256.Sum256([]byte("independently bound request"))
 	nonce := sha256.Sum256(append(append([]byte(nil), auth...), hash[:]...))
 	extension, err := asn1.Marshal(struct {
@@ -175,10 +180,15 @@ func fixtureExtensions(t *testing.T) []byte {
 
 func (f attestationFixture) assertion(t *testing.T, counter uint32, hash [32]byte) []byte {
 	t.Helper()
+	return f.assertionWithExtensions(t, counter, hash, fixtureExtensions(t))
+}
+
+func (f attestationFixture) assertionWithExtensions(t *testing.T, counter uint32, hash [32]byte, extensions []byte) []byte {
+	t.Helper()
 	auth := append([]byte(nil), f.verifier.rpID[:]...)
 	auth = append(auth, 0, 0, 0, 0, 0)
 	binary.BigEndian.PutUint32(auth[33:], counter)
-	auth = append(auth, fixtureExtensions(t)...)
+	auth = append(auth, extensions...)
 	digest := sha256.Sum256(append(append([]byte(nil), auth...), hash[:]...))
 	signature, err := ecdsa.SignASN1(rand.Reader, f.key, digest[:])
 	if err != nil {

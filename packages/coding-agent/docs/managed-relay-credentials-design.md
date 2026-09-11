@@ -222,7 +222,7 @@ Before mutation, the broker verifies the Apple chain, signature, exact app/envir
 1. inserts the verified App Check `jti` hash;
 2. upserts and locks the Apple entitlement without allowing an older signed or earlier-started verification to replace newer state;
 3. locks and validates the unexpired claim;
-4. locks the registered App Attest key, verifies its immutable subscription/device owner, consumes the exact request-bound challenge, verifies the assertion signature and signed app/build metadata, and advances its counter;
+4. locks the registered App Attest key, verifies its immutable subscription/device owner, consumes the exact request-bound challenge, verifies the assertion signature and any signed app/build metadata, and advances its counter;
 5. revokes any older daemon grant bound to this subscription, unless a newer claim already superseded this one;
 6. for bootstrap, creates and binds the replacement grant and host endpoint;
 7. creates the app endpoint, or accepts an exact retry with the same node and refresh hash;
@@ -265,11 +265,21 @@ obtains a new limited-use token.
 The broker pins the Apple App Attestation Root CA separately from App Store
 roots. Registration validates the chain, Apple nonce extension, app RP hash,
 production/development AAGUID, credential ID, P-256 key, zero initial counter,
-COSE key and signed extensions. Assertions verify P-256 signatures, app RP hash,
-signed build/category metadata and an increasing counter. Canary requires
-production App Attest with TestFlight validation category 2 and Sandbox App
-Store receipts; production requires category 4 and Production receipts. Missing
-or incompatible signed metadata fails closed and is a real-device release gate.
+COSE key and any signed extensions. Assertions verify P-256 signatures, app RP
+hash, any signed build/category metadata and an increasing counter. Canary
+requires production App Attest and Sandbox App Store receipts; production
+requires production App Attest and Production receipts. When extensions are
+present, require the exact build and category 2 (canary) or 4 (production).
+Malformed, partial or incompatible nonempty metadata fails closed.
+
+Apple introduced build/category extensions in iOS 27. The broker also validates
+the format without extensions using the same authority, nonce and signature
+checks; removing signed extensions breaks these checks. No client-reported OS
+version controls verification. Without extensions, CFBundleVersion remains
+request-bound but is not independently Apple-attested executable metadata, and
+the distribution category is unavailable. The user approved this security
+requirement correction after an iOS 26.6 TestFlight registration was rejected
+solely for absent metadata. Both formats require real-device acceptance.
 
 The app stores App Attest key state in this-device-only Keychain per broker,
 serializes assertion generation through the approval response, and queries

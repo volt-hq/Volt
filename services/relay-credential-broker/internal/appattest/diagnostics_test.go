@@ -19,7 +19,9 @@ func TestRegression387AttestationRejectionDiagnostics(t *testing.T) {
 		{"validation_category_mismatch", func(v *Verifier, _ *attestationObject) { v.category = 4 }},
 		{"authenticator_flags", func(_ *Verifier, a *attestationObject) { a.AuthData[32] = 0xc0 }},
 		{"initial_counter", func(_ *Verifier, a *attestationObject) { a.AuthData[36] = 1 }},
-		{"metadata_missing", func(v *Verifier, a *attestationObject) {
+		// Stripping signed extensions cannot turn an attestation into the
+		// valid format without extensions: its certificate nonce must fail.
+		{"certificate_nonce", func(v *Verifier, a *attestationObject) {
 			var key coseKey
 			rest, err := v.decode.UnmarshalFirst(a.AuthData[87:], &key)
 			if err != nil {
