@@ -202,10 +202,9 @@ func (v *signedDataVerifier) verifyAppTransaction(
 	if !identifierPattern.MatchString(payload.AppTransactionID) {
 		return appTransactionPayload{}, [sha256.Size]byte{}, ErrProofInvalid
 	}
-	createdAt, ok := millisecondsDate(payload.ReceiptCreationDate)
-	if !ok || createdAt.Before(v.now().UTC().Add(-10*time.Minute)) {
-		return appTransactionPayload{}, [sha256.Size]byte{}, ErrProofInvalid
-	}
+	// verifySignedData validates the receipt's signed time and certificate chain.
+	// Installation evidence can be cached; the broker requires a fresh App Attest
+	// challenge and increasing assertion counter for every pairing approval.
 	deviceID, ok := canonicalUUID(deviceVerificationID)
 	if !ok {
 		return appTransactionPayload{}, [sha256.Size]byte{}, ErrDeviceInvalid

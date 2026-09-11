@@ -16,7 +16,9 @@ func TestReconciliationMigrationPreservesExistingEntitlementData(t *testing.T) {
 	// exercise the real migration runner with an existing bound entitlement.
 	if _, err := pool.Exec(ctx, `
 		ALTER TABLE app_store_entitlements DROP COLUMN last_reconcile_attempt_at;
-		DELETE FROM schema_migrations WHERE version = 3;
+		DROP TABLE pairing_attestation_challenges;
+		DROP TABLE pairing_attestation_keys;
+		DELETE FROM schema_migrations WHERE version >= 3;
 		INSERT INTO app_store_entitlements (
 			app_transaction_id, environment, product_id, subscription_group_id,
 			status, entitled_until, source_signed_at, last_verified_at, updated_at
@@ -71,8 +73,8 @@ func TestReconciliationMigrationPreservesExistingEntitlementData(t *testing.T) {
 	if !noAttempt {
 		t.Fatal("migration consumed an attempt for an existing entitlement")
 	}
-	if got := testdatabase.Count(t, pool, "schema_migrations"); got != 3 {
-		t.Fatalf("migration count=%d, want 3", got)
+	if got := testdatabase.Count(t, pool, "schema_migrations"); got != 4 {
+		t.Fatalf("migration count=%d, want 4", got)
 	}
 }
 
@@ -111,6 +113,8 @@ func TestMigrationsCreateAcceptedSchemaAndAreIdempotent(t *testing.T) {
 		"endpoints",
 		"grant_entitlements",
 		"grants",
+		"pairing_attestation_challenges",
+		"pairing_attestation_keys",
 		"pairing_claims",
 	}
 	if len(tables) != len(expected) {
@@ -121,8 +125,8 @@ func TestMigrationsCreateAcceptedSchemaAndAreIdempotent(t *testing.T) {
 			t.Fatalf("tables = %v, want %v", tables, expected)
 		}
 	}
-	if got := testdatabase.Count(t, pool, "schema_migrations"); got != 3 {
-		t.Fatalf("migration row count = %d, want 3", got)
+	if got := testdatabase.Count(t, pool, "schema_migrations"); got != 4 {
+		t.Fatalf("migration row count = %d, want 4", got)
 	}
 	if _, err := pool.Exec(context.Background(), `
 		INSERT INTO schema_migrations (version, name, checksum)
