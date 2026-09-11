@@ -131,7 +131,13 @@ func (b *Broker) CreateAttestationChallenge(ctx context.Context, request appatte
 // RegisterAttestationKey consumes a registration challenge and records immutable
 // key ownership. A lost-response retry can confirm the exact committed object;
 // it cannot overwrite a public key, counter, subscription, or device binding.
-func (b *Broker) RegisterAttestationKey(ctx context.Context, request appattest.Request, challenge string, object []byte, appCheck AppCheckProof, entitlement appstore.Entitlement) error {
+func (b *Broker) RegisterAttestationKey(ctx context.Context, request appattest.Request, challenge string, object []byte, appCheck AppCheckProof, entitlement appstore.Entitlement) (resultErr error) {
+	stage := "registration_request"
+	defer func() {
+		if errors.Is(resultErr, ErrAttestationInvalid) {
+			resultErr = &attestationRejection{reason: stage, cause: resultErr}
+		}
+	}()
 	if b.config.AttestationVerifier == nil || request.Issuer != b.config.CredentialIssuer ||
 		request.Validate() != nil || request.ProofHash != entitlement.ApprovalProofHash ||
 		!appCheck.ReplayProtected || appCheck.JTIHash == (SecretHash{}) || len(object) == 0 || len(object) > 24*1024 {
@@ -146,6 +152,7 @@ func (b *Broker) RegisterAttestationKey(ctx context.Context, request appattest.R
 		return err
 	}
 	now := b.now().UTC()
+	stage = "registration_validity"
 	if !now.Before(appCheck.ExpiresAt) || !entitlement.Active(now) {
 		return ErrAttestationInvalid
 	}
@@ -160,6 +167,7 @@ func (b *Broker) RegisterAttestationKey(ctx context.Context, request appattest.R
 	if err != nil {
 		return err
 	}
+	stage = "registration_claim"
 	if !now.Before(claim.ExpiresAt) || claim.HostNodeID != request.HostNodeID {
 		return ErrAttestationInvalid
 	}
@@ -168,6 +176,7 @@ func (b *Broker) RegisterAttestationKey(ctx context.Context, request appattest.R
 	var existingHash, existingDevice []byte
 	var existingSubscription string
 	err = tx.QueryRow(ctx, "SELECT registration_hash, app_transaction_id, device_id_hash FROM pairing_attestation_keys WHERE key_id=$1 FOR UPDATE", request.KeyID).Scan(&existingHash, &existingSubscription, &existingDevice)
+	stage = "registration_owner"
 	if err == nil {
 		if !bytes.Equal(existingHash, registrationHash[:]) || existingSubscription != entitlement.AppTransactionID || !bytes.Equal(existingDevice, deviceHash[:]) {
 			return ErrAttestationInvalid
@@ -185,12 +194,18 @@ func (b *Broker) RegisterAttestationKey(ctx context.Context, request appattest.R
 	if count >= b.config.MaxEndpoints*2 {
 		return ErrAttestationCapacity
 	}
+	stage = "registration_challenge"
 	digest, err := consumeAttestationChallenge(ctx, tx, request, "register", challenge, appCheck, now)
 	if err != nil {
 		return err
 	}
+	stage = "apple_verification"
 	publicKey, err := b.config.AttestationVerifier.VerifyAttestation(request.KeyID, object, digest, request.BundleVersion)
-	if err != nil || len(publicKey) != 65 {
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrAttestationInvalid, err)
+	}
+	stage = "registration_public_key"
+	if len(publicKey) != 65 {
 		return ErrAttestationInvalid
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO pairing_attestation_keys
