@@ -61,7 +61,7 @@ Each app can revoke itself. The host can revoke one app endpoint or the complete
 2. The daemon creates a bootstrap claim with its node ID and the SHA-256 hashes of those secrets. The broker returns only `claimId` and `expiresAt`.
 3. The reviewed app-facing pairing payload carries `claimId`, never either plaintext daemon secret.
 4. The app generates and stores its own `vrr_` refresh secret, obtains a limited-use App Check token, obtains an App Store-signed device-bound AppTransaction, and approves the claim with its endpoint node ID, refresh-secret hash, signed AppTransaction, and device-verification ID.
-5. The broker verifies Apple's certificate chain, recent receipt creation time, and device digest; consumes the semantic proof identity for this claim; queries the App Store Server API; and accepts only configured Volt Pro products in active or billing-grace state. Approval atomically moves the subscription to this daemon, revoking every refresh key on the previously bound daemon, then returns only the new app access JWT.
+5. The broker verifies Apple's certificate chain, receipt signed time and device digest; verifies a fresh request-bound App Attest assertion and atomically consumes its challenge/counter; queries the App Store Server API; and accepts only configured Volt Pro products in active or billing-grace state. Approval atomically moves the subscription to this daemon, revoking every refresh key on the previously bound daemon, then returns only the new app access JWT.
 6. The daemon polls exchange with its claim secret and receives only a host access JWT. Its pre-persisted host refresh secret is now active, and it records the approved app node/endpoint.
 7. The daemon consumes the pairing secret only from that broker-approved app node. Each endpoint presents its own access JWT to the relay, which requires JWT `sub` to equal the Iroh-handshake-proven endpoint ID.
 
@@ -119,61 +119,13 @@ Database-backed tests isolate each case in a random schema and cover migration i
 
 ## Exercise initial enrollment
 
-The following commands print credentials and are only for an isolated local POC.
-
-In development mode, `signedAppTransaction` must be `<nonce>.<shared secret>`, where the nonce is exactly 64 lowercase hexadecimal characters (32 random bytes) and the secret is the unchanged `VOLT_DEVELOPMENT_APP_STORE_PROOF` value. Bare-secret submissions are no longer accepted. Generate one nonce per new proof instance and retain the composed proof for retries; do not regenerate it inside a retry loop. Retry the same claim with the exact same proof, device-verification ID, app node ID, and app refresh-token hash. New pairings use a fresh nonce while keeping the device-verification ID stable. Reusing the same proof and device on another claim is rejected as a replay. No database reset is required; Apple-mode proofs are unchanged.
-
-```sh
-HOST_NODE_ID="$(printf 'a%.0s' $(seq 1 64))"
-APP_NODE_ID="$(printf 'b%.0s' $(seq 1 64))"
-CLAIM_SECRET="vpc_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
-HOST_REFRESH_TOKEN="vrr_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
-APP_REFRESH_TOKEN="vrr_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
-APP_STORE_PROOF_NONCE="$(openssl rand -hex 32)"
-APP_STORE_PROOF="${APP_STORE_PROOF_NONCE}.${VOLT_DEVELOPMENT_APP_STORE_PROOF}"
-BASE_URL="http://127.0.0.1:8085"
-
-hash_secret() {
-  printf '%s' "$1" | openssl dgst -sha256 -binary \
-    | openssl base64 -A | tr '+/' '-_' | tr -d '='
-}
-
-CLAIM="$(curl -sS -X POST "$BASE_URL/v1/pairing-claims" \
-  -H 'Content-Type: application/json' \
-  -d "{\"hostNodeId\":\"$HOST_NODE_ID\",\"claimSecretHash\":\"$(hash_secret "$CLAIM_SECRET")\",\"hostRefreshTokenHash\":\"$(hash_secret "$HOST_REFRESH_TOKEN")\"}")"
-CLAIM_ID="$(printf '%s' "$CLAIM" | jq -r .claimId)"
-
-# Returns 202 until an attested app approves the claim.
-curl -i -X POST "$BASE_URL/v1/pairing-claims/$CLAIM_ID/exchange" \
-  -H "Authorization: Bearer $CLAIM_SECRET"
-
-APP_CREDENTIAL="$(curl -sS -X POST "$BASE_URL/v1/pairing-claims/$CLAIM_ID/approve" \
-  -H 'Content-Type: application/json' \
-  -H "X-Firebase-AppCheck: $VOLT_DEVELOPMENT_APP_CHECK_TOKEN" \
-  -d "{\"appNodeId\":\"$APP_NODE_ID\",\"appRefreshTokenHash\":\"$(hash_secret "$APP_REFRESH_TOKEN")\",\"signedAppTransaction\":\"$APP_STORE_PROOF\",\"appStoreDeviceVerificationId\":\"11111111-1111-4111-8111-111111111111\"}")"
-
-HOST_CREDENTIAL="$(curl -sS -X POST "$BASE_URL/v1/pairing-claims/$CLAIM_ID/exchange" \
-  -H "Authorization: Bearer $CLAIM_SECRET")"
-
-printf '%s\n' "$APP_CREDENTIAL" | jq
-printf '%s\n' "$HOST_CREDENTIAL" | jq
-
-curl -sS -X POST "$BASE_URL/v1/tokens/refresh" \
-  -H "Authorization: Bearer $HOST_REFRESH_TOKEN" | jq
-curl -sS "$BASE_URL/.well-known/jwks.json" | jq
-```
-
-For Firebase-backed verification, omit the development token and configure the exact Firebase authority and allowlist:
-
-```sh
-export VOLT_CREDENTIAL_SIGNING_MODE=local
-export VOLT_APP_CHECK_MODE=firebase
-export VOLT_FIREBASE_PROJECT_NUMBER=546623825529
-export VOLT_ALLOWED_FIREBASE_APP_IDS=1:546623825529:ios:9f5a707e3f4ef89154d6a8
-go run ./cmd/relay-credential-service
-```
-
-Firebase mode uses Firebase Admin Go to verify limited-use tokens with a `jti`. The verifier returns only a SHA-256 `jti` digest to the broker; PostgreSQL consumes that digest in the approval transaction and provides the global replay barrier.
+Managed approval now requires a real App Attest-capable installation. The
+previous curl/development-token approval recipe cannot grant credentials.
+Simulators and the development deployment script are not substitutes for
+TestFlight acceptance. Use isolated verifier fixtures for local protocol tests,
+and the [attestation rollout instructions](PAIRING-ATTESTATION.md) for a real
+TestFlight pairing. The local broker can still serve non-approval operations;
+its development verifiers cannot satisfy the managed approval contract.
 
 Production signing uses an exact active Cloud KMS `EC_SIGN_ED25519` key version and an optional bounded list of retiring versions:
 
@@ -192,7 +144,7 @@ The service uses Application Default Credentials. Its runtime identity needs per
 | --- | --- | --- |
 | `POST /v1/pairing-claims` | None for bootstrap | Creates a claim from `{hostNodeId,claimSecretHash,hostRefreshTokenHash}`. |
 | `POST /v1/pairing-claims` | Host refresh bearer | Creates a later-pairing claim from `{claimSecretHash}` under the existing grant. |
-| `POST /v1/pairing-claims/{id}/approve` | Exactly one App Check header plus Apple proof | Approves with `{appNodeId,appRefreshTokenHash,signedAppTransaction,appStoreDeviceVerificationId}` and returns app endpoint metadata plus an access JWT. A newer daemon claim moves the subscription and revokes the previous grant. |
+| `POST /v1/pairing-claims/{id}/approve` | Exactly one limited-use App Check header, Apple proof and App Attest assertion | Approves the request-bound fields described in [the design](../../packages/coding-agent/docs/managed-relay-credentials-design.md#approve-claim) and returns app endpoint metadata plus an access JWT. A newer daemon claim moves the subscription and revokes the previous grant. |
 | `POST /v1/pairing-claims/{id}/exchange` | Claim-secret bearer | Returns `202` while pending, then host/app endpoint metadata plus a host access JWT. |
 | `POST /v1/app-store/notifications` | Apple-signed V2 payload | Verifies `{signedPayload}`, reconciles current Apple status, and durably updates the entitlement. Configure this as the App Store Server Notifications V2 URL. |
 | `POST /v1/tokens/refresh` | Endpoint refresh bearer | Extends inactivity and returns a new access JWT only while the bound subscription is active or in billing grace. Inactive subscriptions return `402 subscription_inactive` without deleting refresh authority. Body must be empty. |
@@ -344,6 +296,7 @@ The dashboard covers pairing outcomes and logs, broker status and latency, Cloud
 | `VOLT_APP_STORE_PRIVATE_KEY` | required in Apple mode | App Store Server API `.p8` private key from Secret Manager. Never log it. |
 | `VOLT_APP_STORE_KEY_ID` | required in Apple mode | App Store Server API key ID. |
 | `VOLT_APP_STORE_ISSUER_ID` | required in Apple mode | App Store Connect issuer ID. |
+| `VOLT_APP_ATTEST_APP_ID` | required in Apple mode | Exact signing App ID prefix plus bundle ID, verified against the signed release artifact. When signed metadata is present, canary requires TestFlight category 2 and production requires App Store category 4. Valid objects without iOS 27 extensions retain all nonce/signature checks; see [rollout requirements](PAIRING-ATTESTATION.md). |
 | `VOLT_APP_STORE_BUNDLE_ID` | `com.hansjm10.volt` | Exact bundle identifier accepted in Apple-signed data. |
 | `VOLT_APP_STORE_APP_APPLE_ID` | required in Apple mode | Numeric App Store app identifier. |
 | `VOLT_APP_STORE_SUBSCRIPTION_GROUP_ID` | required in Apple mode | Exact Volt Pro subscription-group identifier. |

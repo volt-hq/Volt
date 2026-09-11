@@ -244,7 +244,7 @@ func TestAppleVerifierRejectsProofFromAnotherDevice(t *testing.T) {
 	}
 }
 
-func TestAppleVerifierRejectsStaleAppTransactionProof(t *testing.T) {
+func TestRegression387CachedInstallationRequiresCurrentSubscription(t *testing.T) {
 	now := time.Date(2026, time.August, 26, 12, 0, 0, 0, time.UTC)
 	authority := newAppleTestAuthority(t, now)
 	deviceID := "11111111-1111-4111-8111-111111111111"
@@ -259,14 +259,22 @@ func TestAppleVerifierRejectsStaleAppTransactionProof(t *testing.T) {
 		"deviceVerificationNonce": nonce,
 		"receiptCreationDate":     now.Add(-11 * time.Minute).UnixMilli(),
 	})
-	verifier := authority.verifier(t, now, "http://127.0.0.1")
-
-	_, err := verifier.VerifyEntitlement(context.Background(), Proof{
-		SignedAppTransaction: appTransaction,
-		DeviceVerificationID: deviceID,
+	lookups := 0
+	statusServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lookups++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"environment": "Sandbox", "bundleId": testBundleID, "appAppleId": testAppAppleID, "data": []any{}})
+	}))
+	defer statusServer.Close()
+	verifier := authority.verifier(t, now, statusServer.URL)
+	entitlement, err := verifier.VerifyEntitlement(context.Background(), Proof{
+		SignedAppTransaction: appTransaction, DeviceVerificationID: deviceID,
 	})
-	if err != ErrProofInvalid {
-		t.Fatalf("stale proof error = %v, want %v", err, ErrProofInvalid)
+	if err != nil || lookups != 1 || entitlement.Active(now) || entitlement.Status != StatusInactive {
+		t.Fatalf("cached installation skipped current subscription lookup: lookups=%d status=%s error=%v", lookups, entitlement.Status, err)
+	}
+	if entitlement.ApprovalProofHash == ([32]byte{}) || !entitlement.ProofCreatedAt.Equal(now.Add(-11*time.Minute)) {
+		t.Fatal("cached installation lost its signed identity or creation time")
 	}
 }
 

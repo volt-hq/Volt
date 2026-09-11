@@ -1,0 +1,4 @@
+appIDPrefix = "1234567890" (teamID)
+bundleID = "com.example.myapp"
+serverChallenge = "example_server_challenge"
+keyID = "zgSY9YSD+7TaDXssY6WlOPVS1K3Lmk+pFhlcSWE+ZV0="

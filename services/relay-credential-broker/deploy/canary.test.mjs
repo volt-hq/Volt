@@ -28,7 +28,10 @@ esac
 		const capturePath = join(dir, "args");
 		const env = Object.fromEntries(
 			Object.entries(process.env).filter(
-				([key]) => !key.startsWith("VOLT_CREDENTIAL_CANARY_") && !key.startsWith("VOLT_APP_STORE_CANARY_"),
+				([key]) =>
+					!key.startsWith("VOLT_CREDENTIAL_CANARY_") &&
+					!key.startsWith("VOLT_APP_STORE_CANARY_") &&
+					!key.startsWith("VOLT_APP_ATTEST_CANARY_"),
 			),
 		);
 		const result = spawnSync("bash", [fileURLToPath(new URL("./canary.sh", import.meta.url)), "deploy"], {
@@ -69,6 +72,7 @@ esac
 			VOLT_APP_CHECK_MODE: "firebase",
 			VOLT_FIREBASE_PROJECT_NUMBER: "546623825529",
 			VOLT_ALLOWED_FIREBASE_APP_IDS: "1:546623825529:ios:9f5a707e3f4ef89154d6a8",
+			VOLT_APP_ATTEST_APP_ID: "FLCDL5CJU2.com.hansjm10.volt",
 			VOLT_APP_STORE_MODE: "apple",
 			VOLT_APP_STORE_BUNDLE_ID: "com.hansjm10.volt",
 			VOLT_APP_STORE_APP_APPLE_ID: "123456789",

@@ -23,7 +23,7 @@ func TestDevelopmentApprovalsHaveDistinctReplayIdentities(t *testing.T) {
 	otherDeviceID := "22222222-2222-4222-8222-222222222222"
 	approve := func(claimID, signedProof, deviceID, appNodeID, appRefresh string) *httptest.ResponseRecorder {
 		t.Helper()
-		return service.request(t, http.MethodPost, "/v1/pairing-claims/"+claimID+"/approve", encodeBody(t, map[string]string{
+		return service.requestWithAttestation(t, http.MethodPost, "/v1/pairing-claims/"+claimID+"/approve", encodeBody(t, map[string]string{
 			"appNodeId":                    appNodeID,
 			"appRefreshTokenHash":          secretHash(appRefresh),
 			"signedAppTransaction":         signedProof,
@@ -105,23 +105,9 @@ func TestDevelopmentApprovalsHaveDistinctReplayIdentities(t *testing.T) {
 	newAppRefresh := testSecret("vrr_", 9)
 	newAppNode := strings.Repeat("f", 64)
 	newClaim := service.createBootstrapClaim(t, strings.Repeat("e", 64), newClaimSecret, newHostRefresh)
-	replay := approve(newClaim.ClaimID, proof, testDeviceVerificationID, newAppNode, newAppRefresh)
-	var replayError errorResponse
-	decodeResponse(t, replay, &replayError)
-	if replay.Code != http.StatusConflict || replayError.Error != "app_store_proof_replayed" {
-		t.Fatalf("cross-claim replay status = %d, body = %s", replay.Code, replay.Body.String())
-	}
-	pending := service.request(t, http.MethodPost, "/v1/pairing-claims/"+newClaim.ClaimID+"/exchange", "", map[string]string{
-		"Authorization": "Bearer " + newClaimSecret,
-	})
-	if pending.Code != http.StatusAccepted {
-		t.Fatalf("replay changed pending claim: status = %d, body = %s", pending.Code, pending.Body.String())
-	}
-	// A rejected replay must not revoke the previously approved authority.
-	service.exchangeClaim(t, firstClaim.ClaimID, firstClaimSecret)
-
-	freshProof := strings.Repeat("cd", 32) + "." + sharedSecret
-	newResponse := approve(newClaim.ClaimID, freshProof, testDeviceVerificationID, newAppNode, newAppRefresh)
+	// Regression #387: cached installation identity is reusable only alongside
+	// a new assertion bound to this claim. The helper obtains that assertion.
+	newResponse := approve(newClaim.ClaimID, proof, testDeviceVerificationID, newAppNode, newAppRefresh)
 	if newResponse.Code != http.StatusOK {
 		t.Fatalf("same-device fresh proof status = %d, body = %s", newResponse.Code, newResponse.Body.String())
 	}

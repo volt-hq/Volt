@@ -72,6 +72,8 @@ const entitlementReconcileAttemptMinInterval = time.Hour
 type SecretHash [sha256.Size]byte
 
 type Config struct {
+	AttestationVerifier     AttestationVerifier
+	CredentialIssuer        string
 	ClaimTTL                time.Duration
 	AccessTokenTTL          time.Duration
 	RefreshInactivityTTL    time.Duration
@@ -353,8 +355,9 @@ func (b *Broker) ApprovePairingClaim(
 	entitlement appstore.Entitlement,
 	appNodeID string,
 	appRefreshHash SecretHash,
+	attestation ApprovalAttestation,
 ) (Approval, error) {
-	if strings.TrimSpace(appCheck.AppID) == "" {
+	if strings.TrimSpace(appCheck.AppID) == "" || !appCheck.ReplayProtected || appCheck.JTIHash == (SecretHash{}) {
 		return Approval{}, ErrAppCheckInvalid
 	}
 	if !ValidNodeID(appNodeID) {
@@ -411,13 +414,10 @@ func (b *Broker) ApprovePairingClaim(
 	if !now.Before(claim.ExpiresAt) {
 		return Approval{}, ErrClaimExpired
 	}
-	if err := consumeAppStoreApprovalProof(
-		ctx,
-		transaction,
-		claim.ID,
-		entitlement,
-		now,
-	); err != nil {
+	// Freshness and replay resistance belong to this signed request, not the
+	// cached installation transaction. Consumption rolls back with approval.
+	if err := b.consumeApprovalAttestation(ctx, transaction, claim, appCheck, entitlement,
+		appNodeID, appRefreshHash, attestation, now); err != nil {
 		return Approval{}, err
 	}
 	if claim.ApprovedAppEndpointID != "" {
@@ -431,6 +431,9 @@ func (b *Broker) ApprovePairingClaim(
 			now,
 		)
 		if err != nil {
+			return Approval{}, err
+		}
+		if err := b.checkApprovalExpiry(ctx, transaction, attestation, appCheck, claim, currentEntitlement); err != nil {
 			return Approval{}, err
 		}
 		if err := transaction.Commit(ctx); err != nil {
@@ -522,6 +525,9 @@ func (b *Broker) ApprovePairingClaim(
 		WHERE id = $1
 	`, claim.ID, grant.ID, app.ID, now); err != nil {
 		return Approval{}, fmt.Errorf("record pairing approval: %w", err)
+	}
+	if err := b.checkApprovalExpiry(ctx, transaction, attestation, appCheck, claim, currentEntitlement); err != nil {
+		return Approval{}, err
 	}
 	if err := transaction.Commit(ctx); err != nil {
 		return Approval{}, fmt.Errorf("commit pairing approval: %w", err)
@@ -1120,54 +1126,6 @@ func (record entitlementRecord) active(now time.Time) bool {
 	return (record.Status == string(appstore.StatusActive) ||
 		record.Status == string(appstore.StatusGrace)) &&
 		record.EntitledUntil.Valid && now.Before(record.EntitledUntil.Time)
-}
-
-func consumeAppStoreApprovalProof(
-	ctx context.Context,
-	transaction pgx.Tx,
-	claimID string,
-	entitlement appstore.Entitlement,
-	now time.Time,
-) error {
-	var zeroHash [sha256.Size]byte
-	if entitlement.ApprovalProofHash == zeroHash ||
-		entitlement.ProofCreatedAt.IsZero() ||
-		entitlement.ProofCreatedAt.Before(now.Add(-10*time.Minute)) ||
-		entitlement.ProofCreatedAt.After(now.Add(time.Minute)) {
-		return ErrSubscriptionRequired
-	}
-	result, err := transaction.Exec(ctx, `
-		INSERT INTO app_store_approval_proofs (
-			proof_identity_hash, claim_id, app_transaction_id,
-			proof_created_at, consumed_at
-		)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT DO NOTHING
-	`, entitlement.ApprovalProofHash[:], claimID,
-		entitlement.AppTransactionID, entitlement.ProofCreatedAt, now)
-	if err != nil {
-		return fmt.Errorf("consume App Store approval proof: %w", err)
-	}
-	if result.RowsAffected() == 1 {
-		return nil
-	}
-	var existingClaimID string
-	var existingAppTransactionID string
-	if err := transaction.QueryRow(ctx, `
-		SELECT claim_id, app_transaction_id
-		FROM app_store_approval_proofs
-		WHERE proof_identity_hash = $1
-	`, entitlement.ApprovalProofHash[:]).Scan(
-		&existingClaimID,
-		&existingAppTransactionID,
-	); err != nil {
-		return fmt.Errorf("read App Store approval proof: %w", err)
-	}
-	if existingClaimID != claimID ||
-		existingAppTransactionID != entitlement.AppTransactionID {
-		return ErrAppStoreProofReplay
-	}
-	return nil
 }
 
 func upsertAndLockEntitlement(
