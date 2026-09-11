@@ -47,6 +47,11 @@ Before deploying the broker:
 4. Back up and apply migration 0004 through normal broker startup. It adds key
    and challenge tables without resetting current grants or credentials. Old
    receipt-consumption records remain available to reviewed privacy deletion.
+   Coordinate the migration and traffic cutover: the old broker rejects unknown
+   migrations on startup, so staging a new revision at zero traffic can make old
+   instances unable to start once migration 0004 is applied. Use a maintenance
+   window and promptly move traffic to the ready new revision. A code-only
+   rollback to the old schema-0003 binary is not safe.
 5. Verify broker readiness, issuer and new-route responses before publishing the
    paired app commit through its signed TestFlight workflow.
 
@@ -98,6 +103,23 @@ the bounded body/rate controls. Take a backup and apply migration 0004 without
 resetting grants, counters or credentials. Validate with an App Store-distributed
 installation; a TestFlight upload is not production acceptance. Deployment and
 App Store publication require separate authorization.
+
+## Canary deployment record — September 11, 2026
+
+The authorized deployment serves 100% of canary traffic from
+`relay-credential-broker-canary-appattest-c3675d07b`, built from runtime commit
+`c3675d07b` (Cloud Build `357cfcc6-6a08-4adf-a87e-2e2fb1170281`). Image digest:
+`sha256:b08b8d5ef578de6c99208d4557e0e1742a59224d47aa8b70128f36f4c2517ecc`.
+Cloud SQL backup `1789145553339` completed before deployment. The existing
+database, signing authority, issuer/audience and Firebase configuration were
+preserved; the new App Attest App ID is the verified value above.
+
+The staged revision passed readiness before traffic cutover. The public canary
+origin returned 503 while traffic still targeted the old revision after the
+migration; service recovered after moving traffic to the new revision. Public
+`/livez` and `/readyz` now return 200, JWKS is available, and all three new routes
+reject missing/invalid authentication or input. These probes created no claims
+and do not establish successful real-device App Attest enrollment or pairing.
 
 ## Approved parser dependencies
 
