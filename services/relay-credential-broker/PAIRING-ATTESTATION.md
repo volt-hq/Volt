@@ -29,14 +29,16 @@ Before deploying the broker:
 
 1. Verify the release archive's signed `application-identifier`; configure that
    complete value as `VOLT_APP_ATTEST_APP_ID`. The prefix need not equal Team ID.
-   The app source currently uses Team ID `FLCDL5CJU2` and bundle
-   `com.hansjm10.volt`; that is not a substitute for inspecting signed authority.
+   The signed TestFlight build 4 artifact was inspected on September 11, 2026:
+   `application-identifier=FLCDL5CJU2.com.hansjm10.volt`, production App Attest,
+   `get-task-allow=false`. Canary defaults to this verified App ID; a future
+   signing-prefix change requires review of the new signed authority.
 2. Preserve the existing canary database, KMS key, issuer/audience and Firebase
    allowlist. Set `VOLT_APP_STORE_MODE=apple`, `VOLT_APP_CHECK_MODE=firebase`,
    `VOLT_APP_STORE_ENVIRONMENTS=Sandbox`, and the exact canary issuer. Startup
    rejects missing App Attest authority. Ensure the deployment environment
-   includes the new variable; the existing `--set-env-vars` script must not erase
-   it. Review this deployment configuration change before executing it.
+   includes the new variable. The updated canary script supplies it through
+   `VOLT_APP_ATTEST_CANARY_APP_ID` with the verified default above.
 3. Permit POST to the three new `/attestation/status`, `/attestation/challenge`
    and `/attestation/register` routes under an existing claim path at the edge,
    with the approval rate budget. Bodies are capped at 128 KiB to accommodate a
@@ -83,3 +85,25 @@ not an automatic credential-reset path.
 A rollback must keep the database and authority intact. Old app/broker approval
 protocols are incompatible; coordinate any code rollback without deleting the
 new key counters or re-enabling a receipt-only approval path.
+
+## Production requirements
+
+Production is not changed by this rollout. Deploy the matching broker image to
+`relay-credential-broker-production` with `VOLT_APP_ATTEST_APP_ID` set to the
+verified signed App ID, its existing production KMS/database/Firebase authority,
+Production-only App Store verification and the production issuer/audience.
+Its verifier requires App Store validation category 4, not TestFlight category 2.
+Add the three POST attestation routes to the production edge allowlist and keep
+the bounded body/rate controls. Take a backup and apply migration 0004 without
+resetting grants, counters or credentials. Validate with an App Store-distributed
+installation; a TestFlight upload is not production acceptance. Deployment and
+App Store publication require separate authorization.
+
+## Approved parser dependencies
+
+The user approved `github.com/fxamacker/cbor/v2 v2.9.3` and its dependency
+`github.com/x448/float16 v0.8.4` on September 11, 2026 after checksum, MIT-license,
+release and decoder-limit review. Only these versions/checksums are added to the
+module files. The decoder rejects duplicate keys, tags, indefinite lengths,
+invalid UTF-8, unknown fields and excessive nesting/collection sizes; outer
+object sizes are bounded before decoding.
