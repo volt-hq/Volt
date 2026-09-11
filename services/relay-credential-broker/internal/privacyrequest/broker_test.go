@@ -39,6 +39,10 @@ func seed(t *testing.T) (*pgxpool.Pool, Scope) {
 	 SELECT decode(repeat(left(host_node_id,1)||'1',32),'hex'),left(host_node_id,1),'transaction-'||left(host_node_id,1),now(),now() FROM grants;
 	INSERT INTO app_store_notifications(notification_uuid,app_transaction_id,source_signed_at,received_at)
 	 SELECT id::text,'transaction-'||left(host_node_id,1),now(),now() FROM grants;
+	INSERT INTO pairing_attestation_keys(key_id, public_key, registration_hash, app_transaction_id, device_id_hash, created_at, last_used_at)
+	 SELECT repeat(left(host_node_id,1),44),decode(repeat('04',65),'hex'),decode(repeat('05',32),'hex'),'transaction-'||left(host_node_id,1),decode(repeat('06',32),'hex'),now(),now() FROM grants;
+	INSERT INTO pairing_attestation_challenges(nonce_hash,purpose,claim_id,key_id,request_hash,app_check_jti_hash,expires_at)
+	 SELECT decode(repeat(left(host_node_id,1)||'2',32),'hex'),'approve',left(host_node_id,1),repeat(left(host_node_id,1),44),decode(repeat('07',32),'hex'),decode(repeat(left(host_node_id,1)||'3',32),'hex'),now()+interval '2 minutes' FROM grants;
 	INSERT INTO consumed_app_check_tokens(jti_hash,expires_at,consumed_at)
 	 VALUES(decode(repeat('03',32),'hex'),now()+interval '1 hour',now());`)
 	if err != nil {

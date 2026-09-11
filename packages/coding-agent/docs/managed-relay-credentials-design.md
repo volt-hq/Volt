@@ -48,8 +48,8 @@ The protocol is replaced in place before production. There are no users and no c
 - The host relay token is never serialized into an app-facing pairing ticket.
 - Refresh and claim tokens are random 256-bit prefixed values. PostgreSQL stores only SHA-256 hashes of the complete prefixed token.
 - App approval requires a valid allowlisted Firebase App Check limited-use token plus an independently verified Apple AppTransaction JWS and device digest.
-- The broker trusts only reviewed Apple roots, validates Apple's certificate OIDs and ES256 signature, requires a freshly refreshed device-bound AppTransaction, consumes its semantic payload identity for one claim only, and re-queries current subscription status from a fixed Apple API origin.
-- App Check `jti` consumption, entitlement binding, old-grant revocation, and endpoint creation commit in the same database transaction as approval.
+- The broker trusts only reviewed Apple roots, validates Apple's certificate OIDs and ES256 signature, accepts a verified cached device-bound AppTransaction as installation identity, requires a fresh request-bound App Attest assertion, and re-queries current subscription status from a fixed Apple API origin.
+- App Attest challenge consumption and monotonic counter update, App Check `jti` consumption, entitlement binding, old-grant revocation, and endpoint creation commit in the same database transaction as approval.
 - Credential-bearing HTTP requests require HTTPS, reject redirects, bound request and response sizes, and never place secrets in URLs or logs.
 - Revocation stops future refreshes. Already issued access JWTs remain valid only through the short access-token TTL.
 - Relay key rotation always has an overlap period in which both active and retiring public keys are accepted.
@@ -154,7 +154,7 @@ The primary key is the global replay barrier. Rows can be pruned after `expires_
 
 ### App Store entitlement tables
 
-`app_store_entitlements` stores one bounded record per Apple `appTransactionID`: environment, configured product/group, normalized status, effective entitlement expiry, Apple source signed time, verification time, and nullable `last_reconcile_attempt_at`. The attempt timestamp is reserved durably before refresh-triggered Apple I/O; failures do not change verification time, and entitlement upserts or grant transfers do not reset the attempt cooldown. `grant_entitlements` has a unique subscription identity and one grant primary key, making one active daemon the database-enforced policy. `app_store_approval_proofs` hashes the verified AppTransaction payload and permits reuse only for an exact retry of the same claim; a different claim must obtain a freshly refreshed proof. `app_store_notifications` deduplicates signed V2 notifications by UUID for a bounded retention period. No compact JWS, device verification ID, Apple API token, or receipt body is persisted.
+`app_store_entitlements` stores one bounded record per Apple `appTransactionID`: environment, configured product/group, normalized status, effective entitlement expiry, Apple source signed time, verification time, and nullable `last_reconcile_attempt_at`. The attempt timestamp is reserved durably before refresh-triggered Apple I/O; failures do not change verification time, and entitlement upserts or grant transfers do not reset the attempt cooldown. `grant_entitlements` has a unique subscription identity and one grant primary key, making one active daemon the database-enforced policy. `app_store_approval_proofs` retains historical consumption records for privacy operations; new approvals do not use that table. `pairing_attestation_keys` stores an immutable Apple-attested public key, registration-object digest, subscription identity, device-ID digest and monotonically increasing assertion counter. `pairing_attestation_challenges` stores nonce and request hashes, key/claim IDs, purpose, App Check token identity, expiry and consumption time. `app_store_notifications` deduplicates signed V2 notifications by UUID for a bounded retention period. No compact JWS, device verification ID, Apple API token, or receipt body is persisted.
 
 ### What is not stored
 
@@ -201,10 +201,15 @@ Authenticated with the existing host refresh secret. The broker derives the gran
 
 `POST /v1/pairing-claims/{claimId}/approve`
 
-Requires exactly one limited-use Firebase App Check token. Body:
+Requires exactly one limited-use Firebase App Check token and a registered App Attest key. Body:
 
 ```json
 {
+  "hostNodeId": "<confirmed-host-node-id>",
+  "keyId": "<base64-App-Attest-key-id>",
+  "bundleVersion": "<CFBundleVersion>",
+  "challenge": "<base64url-32-byte-nonce>",
+  "assertion": "<base64-App-Attest-assertion>",
   "appNodeId": "<node-id>",
   "appRefreshTokenHash": "<base64url-sha256>",
   "signedAppTransaction": "<compact-Apple-JWS>",
@@ -212,20 +217,75 @@ Requires exactly one limited-use Firebase App Check token. Body:
 }
 ```
 
-Before mutation, the broker verifies the Apple chain, signature, exact app/environment, recent receipt creation time, and SHA-384 device digest, then queries Get All Subscription Statuses using the verified `appTransactionID`. The approval transaction:
+Before mutation, the broker verifies the Apple chain, signature, exact app/environment, receipt signed time and SHA-384 device digest, then queries Get All Subscription Statuses using the verified `appTransactionID`. The approval transaction:
 
 1. inserts the verified App Check `jti` hash;
 2. upserts and locks the Apple entitlement without allowing an older signed or earlier-started verification to replace newer state;
 3. locks and validates the unexpired claim;
-4. consumes the verified AppTransaction payload identity for this claim, rejecting cross-claim replay while allowing exact response-loss retry;
+4. locks the registered App Attest key, verifies its immutable subscription/device owner, consumes the exact request-bound challenge, verifies the assertion signature and signed app/build metadata, and advances its counter;
 5. revokes any older daemon grant bound to this subscription, unless a newer claim already superseded this one;
 6. for bootstrap, creates and binds the replacement grant and host endpoint;
 7. creates the app endpoint, or accepts an exact retry with the same node and refresh hash;
-8. records approval.
+8. rechecks challenge, claim, token and entitlement expiry after blocking locks, then records approval.
 
-A reused App Check `jti` fails the entire transaction. A retry after response loss obtains a fresh App Check token and sends the same app refresh hash. After commit, KMS signs an app access JWT. If signing fails, committed approval remains retryable and no secret is lost.
+A reused App Check `jti` fails the entire transaction. A retry after response loss obtains a fresh App Check token, challenge and higher-counter assertion, while retaining the same app node and refresh hash. After commit, KMS signs an app access JWT. If signing fails, committed approval remains retryable and no secret is lost.
 
 The response includes `grantId`, `endpointId`, `hostNodeId`, the app access JWT, and its expiry. The app requires `hostNodeId` to equal the host identity in the confirmed pairing ticket before using or persisting the credential.
+
+### Request-bound installation attestation
+
+The app reads `AppTransaction.shared`. An unavailable or unverified result can
+use explicit `refresh()` recovery within the user-initiated pairing action;
+already verified installation evidence does not trigger forced authentication.
+The broker still verifies Apple's App Store signature/chain, signed time,
+exact app/environment, device digest and current subscription status.
+
+Under `/v1/pairing-claims/{claimId}/attestation/`, POST `status` checks whether the
+installation's key registration committed, `challenge` accepts purpose
+`register` or `approve`, and `register` accepts a base64 attestation and its
+challenge. All carry the same approval identity fields and App Check header;
+status/challenge omit `assertion` and `challenge`, registration omits `assertion`.
+Final `/approve` is the only endpoint that grants credentials.
+
+Each 256-bit random challenge expires within two minutes, bounded by claim and
+App Check expiry. Both sides independently hash this ordered, unambiguous
+encoding: each field is prefixed by its unsigned 32-bit big-endian byte length,
+then all fields are concatenated and SHA-256 hashed:
+
+`volt-pairing-app-attest`, purpose, exact broker issuer, claim ID, confirmed host
+node ID, app node ID, raw refresh SHA-256, raw verified AppTransaction payload
+SHA-256, lowercase device UUID, canonical padded base64 App Attest key ID, raw
+SHA-256 of the submitted App Check token, CFBundleVersion, raw challenge bytes.
+Text is UTF-8. The app never signs a broker-supplied opaque hash. Registration
+and approval use different purpose domains and separate nonces. App Check is
+verified on each request and consumed only with final approval. The database
+permits one issued challenge per token identity and purpose; a new attempt
+obtains a new limited-use token.
+
+The broker pins the Apple App Attestation Root CA separately from App Store
+roots. Registration validates the chain, Apple nonce extension, app RP hash,
+production/development AAGUID, credential ID, P-256 key, zero initial counter,
+COSE key and signed extensions. Assertions verify P-256 signatures, app RP hash,
+signed build/category metadata and an increasing counter. Canary requires
+production App Attest with TestFlight validation category 2 and Sandbox App
+Store receipts; production requires category 4 and Production receipts. Missing
+or incompatible signed metadata fails closed and is a real-device release gate.
+
+The app stores App Attest key state in this-device-only Keychain per broker,
+serializes assertion generation through the approval response, and queries
+registration status before retrying Apple's one-time attestation API. Only an
+interrupted, unregistered App Attest key is replaced. Existing Iroh identities,
+relay refresh secrets and saved hosts are preserved. There is no DeviceCheck,
+unsigned receipt, cached-assertion or simulator fallback.
+
+Challenge rows are capped at four times `MaxClaims` and pruned after expiry.
+Key rows are capped at twice `MaxEndpoints`; counters are never automatically
+forgotten to reclaim capacity. Privacy operations fingerprint and remove the
+new rows within their explicitly reviewed subject scope. The migration adds
+these tables without revoking existing grants or changing credentials.
+
+See the [pairing attestation rollout](https://github.com/volt-hq/Volt/blob/main/services/relay-credential-broker/PAIRING-ATTESTATION.md)
+for deployment prerequisites and real TestFlight validation.
 
 ### Observe/exchange approved claim
 

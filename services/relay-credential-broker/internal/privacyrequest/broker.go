@@ -72,6 +72,8 @@ const selectedClaims = `(SELECT c.id FROM pairing_claims c, scope s WHERE c.gran
 // Delete in dependency order; each predicate is also used to fingerprint the
 // exact rows. Row contents, including credential hashes, never leave the plan.
 var tables = []struct{ name, predicate string }{
+	{"pairing_attestation_challenges", `t.claim_id IN ` + selectedClaims + ` OR t.key_id IN (SELECT k.key_id FROM pairing_attestation_keys k, scope s WHERE k.app_transaction_id = ANY(s.transactions))`},
+	{"pairing_attestation_keys", `t.app_transaction_id = ANY(s.transactions)`},
 	{"app_store_approval_proofs", `t.app_transaction_id = ANY(s.transactions) OR t.claim_id IN ` + selectedClaims},
 	{"app_store_notifications", `t.app_transaction_id = ANY(s.transactions)`},
 	{"grant_entitlements", `t.grant_id = ANY(s.grants) OR t.app_transaction_id = ANY(s.transactions)`},
@@ -105,7 +107,7 @@ func preview(ctx context.Context, tx pgx.Tx, scope Scope) (Plan, error) {
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(max(version),0), count(*) FROM schema_migrations`).Scan(&version, &count); err != nil {
 		return Plan{}, err
 	}
-	if version != 3 || count != 3 {
+	if version != 4 || count != 4 {
 		return Plan{}, errors.New("unsupported schema; review the deletion queries against its migrations")
 	}
 	args := []interface{}{scope.GrantIDs, scope.AppTransactionIDs, scope.ClaimIDs}
@@ -176,7 +178,7 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, scope Scope, fingerprint str
 		return Plan{}, err
 	}
 	if _, err := tx.Exec(ctx, `LOCK TABLE schema_migrations, grants, endpoints, pairing_claims,
-	 grant_entitlements, app_store_entitlements, app_store_approval_proofs, app_store_notifications IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+	 grant_entitlements, app_store_entitlements, app_store_approval_proofs, app_store_notifications, pairing_attestation_keys, pairing_attestation_challenges IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 		return Plan{}, err
 	}
 	plan, err := preview(ctx, tx, scope)

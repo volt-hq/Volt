@@ -22,7 +22,7 @@ func TestReconciliationReservationSurvivesEntitlementUpdatesAndGrantTransfer(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.ApprovePairingClaim(ctx, claim.ClaimID, postgresTestAppCheck(now, "old"), postgresTestEntitlement(now, id), strings.Repeat("b", 64), postgresTestHash(postgresTestSecret("vrr_", 3))); err != nil {
+	if _, err := approvePostgresTestClaim(t, service, ctx, claim.ClaimID, postgresTestAppCheck(now, "old"), postgresTestEntitlement(now, id), strings.Repeat("b", 64), postgresTestHash(postgresTestSecret("vrr_", 3))); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Second)
@@ -62,7 +62,7 @@ func TestReconciliationReservationSurvivesEntitlementUpdatesAndGrantTransfer(t *
 	}
 	active := postgresTestEntitlement(now, id)
 	for _, jti := range []string{"new", "approval-retry"} {
-		if _, err := service.ApprovePairingClaim(ctx, newClaim.ClaimID, postgresTestAppCheck(now, jti), active, strings.Repeat("d", 64), postgresTestHash(postgresTestSecret("vrr_", 6))); err != nil {
+		if _, err := approvePostgresTestClaim(t, service, ctx, newClaim.ClaimID, postgresTestAppCheck(now, jti), active, strings.Repeat("d", 64), postgresTestHash(postgresTestSecret("vrr_", 6))); err != nil {
 			t.Fatal(err)
 		}
 	}

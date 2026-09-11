@@ -46,7 +46,7 @@ func TestConcurrentApprovalIsAtomicAndReplaySafe(t *testing.T) {
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
-			approvals[index], errorsByIndex[index] = service.ApprovePairingClaim(
+			approvals[index], errorsByIndex[index] = approvePostgresTestClaim(t, service,
 				context.Background(),
 				claim.ClaimID,
 				proofs[index],
@@ -75,7 +75,7 @@ func TestConcurrentApprovalIsAtomicAndReplaySafe(t *testing.T) {
 		t.Fatalf("consumed App Check token count = %d, want 2", got)
 	}
 
-	if _, err := service.ApprovePairingClaim(
+	if _, err := approvePostgresTestClaim(t, service,
 		context.Background(),
 		claim.ClaimID,
 		proofs[0],
@@ -87,7 +87,7 @@ func TestConcurrentApprovalIsAtomicAndReplaySafe(t *testing.T) {
 	}
 
 	rollbackProof := postgresTestAppCheck(now, "approval-after-rollback")
-	if _, err := service.ApprovePairingClaim(
+	if _, err := approvePostgresTestClaim(t, service,
 		context.Background(),
 		"missing-claim",
 		rollbackProof,
@@ -100,7 +100,7 @@ func TestConcurrentApprovalIsAtomicAndReplaySafe(t *testing.T) {
 	if got := testdatabase.Count(t, pool, "consumed_app_check_tokens"); got != 2 {
 		t.Fatalf("failed approval consumed App Check token; count = %d", got)
 	}
-	if _, err := service.ApprovePairingClaim(
+	if _, err := approvePostgresTestClaim(t, service,
 		context.Background(),
 		claim.ClaimID,
 		rollbackProof,
@@ -130,7 +130,7 @@ func TestNewDaemonRevokesPreviousSubscriptionGrantAndFencesStaleClaim(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.ApprovePairingClaim(
+	if _, err := approvePostgresTestClaim(t, service,
 		context.Background(),
 		oldClaim.ClaimID,
 		postgresTestAppCheck(now, "transfer-old"),
@@ -148,25 +148,8 @@ func TestNewDaemonRevokesPreviousSubscriptionGrantAndFencesStaleClaim(t *testing
 		t.Fatal(err)
 	}
 
-	replayClaim, err := service.CreateBootstrapPairingClaim(
-		context.Background(),
-		string(bytes.Repeat([]byte{'9'}, 64)),
-		postgresTestHash(postgresTestSecret("vpc_", 60)),
-		postgresTestHash(postgresTestSecret("vrr_", 61)),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.ApprovePairingClaim(
-		context.Background(),
-		replayClaim.ClaimID,
-		postgresTestAppCheck(now, "transfer-replay"),
-		entitlement,
-		string(bytes.Repeat([]byte{'a'}, 64)),
-		postgresTestHash(postgresTestSecret("vrr_", 62)),
-	); !errors.Is(err, ErrAppStoreProofReplay) {
-		t.Fatalf("cross-claim proof replay = %v, want %v", err, ErrAppStoreProofReplay)
-	}
+	// Regression #387: the same verified installation can authorize a new
+	// claim only with a fresh request-bound assertion (covered separately).
 
 	now = now.Add(time.Second)
 	newClaimSecret := postgresTestSecret("vpc_", 44)
@@ -182,7 +165,7 @@ func TestNewDaemonRevokesPreviousSubscriptionGrantAndFencesStaleClaim(t *testing
 		t.Fatal(err)
 	}
 	newEntitlement := postgresTestEntitlement(now, "subscription-transfer")
-	if _, err := service.ApprovePairingClaim(
+	if _, err := approvePostgresTestClaim(t, service,
 		context.Background(),
 		newClaim.ClaimID,
 		postgresTestAppCheck(now, "transfer-new"),
@@ -236,7 +219,7 @@ func TestNewDaemonRevokesPreviousSubscriptionGrantAndFencesStaleClaim(t *testing
 		t.Fatal(err)
 	}
 	latestEntitlement := postgresTestEntitlement(now, "subscription-transfer")
-	if _, err := service.ApprovePairingClaim(
+	if _, err := approvePostgresTestClaim(t, service,
 		context.Background(),
 		latestClaim.ClaimID,
 		postgresTestAppCheck(now, "transfer-latest"),
@@ -250,7 +233,7 @@ func TestNewDaemonRevokesPreviousSubscriptionGrantAndFencesStaleClaim(t *testing
 	staleEntitlement.ApprovalProofHash = sha256.Sum256(
 		[]byte("stale-transfer-proof"),
 	)
-	if _, err := service.ApprovePairingClaim(
+	if _, err := approvePostgresTestClaim(t, service,
 		context.Background(),
 		staleClaim.ClaimID,
 		postgresTestAppCheck(now, "transfer-stale"),
@@ -325,7 +308,7 @@ func TestExchangeRefreshExpiryAndRevocationPersistAcrossBrokerRestart(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := firstService.ApprovePairingClaim(
+	if _, err := approvePostgresTestClaim(t, firstService,
 		context.Background(),
 		claim.ClaimID,
 		postgresTestAppCheck(now, "restart-approval"),
@@ -423,7 +406,7 @@ func TestAppRefreshObservesHostInactivityExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.ApprovePairingClaim(
+	if _, err := approvePostgresTestClaim(t, service,
 		context.Background(),
 		claim.ClaimID,
 		postgresTestAppCheck(now, "host-inactivity-approval"),
@@ -494,6 +477,8 @@ func newPostgresBroker(t *testing.T, pool *pgxpool.Pool, now *time.Time) *Broker
 		MaxClaims:               100,
 		MaxEndpoints:            200,
 		MaxAppEndpointsPerGrant: 8,
+		CredentialIssuer:        "https://credentials.volt.test",
+		AttestationVerifier:     postgresAttestationVerifier{},
 	}, func() time.Time { return *now })
 	if err != nil {
 		t.Fatal(err)

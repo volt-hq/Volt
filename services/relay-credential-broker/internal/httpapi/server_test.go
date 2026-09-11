@@ -117,6 +117,8 @@ func newTestServiceWithPool(t *testing.T, pool *pgxpool.Pool) *testService {
 		now:    time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC),
 	}
 	brokerService, err := broker.New(pool, signer, broker.Config{
+		CredentialIssuer:        "https://credentials.volt.test",
+		AttestationVerifier:     testAttestationVerifier{},
 		ClaimTTL:                10 * time.Minute,
 		AccessTokenTTL:          15 * time.Minute,
 		RefreshInactivityTTL:    30 * 24 * time.Hour,
@@ -128,16 +130,14 @@ func newTestServiceWithPool(t *testing.T, pool *pgxpool.Pool) *testService {
 	if err != nil {
 		t.Fatal(err)
 	}
-	appCheck, err := NewDevelopmentAppCheckVerifier(developmentAppCheckToken)
-	if err != nil {
-		t.Fatal(err)
-	}
+	appCheck := testLimitedUseVerifier{now: func() time.Time { return service.now }}
 	handler, err := NewServer(
 		brokerService,
 		signer,
 		appCheck,
 		testAppStoreVerifier{now: func() time.Time { return service.now }},
 		Config{
+			CredentialIssuer:              "https://credentials.volt.test",
 			MaxConcurrentRequests:         8,
 			RefreshMinInterval:            5 * time.Second,
 			EntitlementReconcileInterval:  24 * time.Hour,
@@ -183,7 +183,7 @@ func TestBootstrapPairingUsesClientGeneratedStableRefreshSecrets(t *testing.T) {
 		t.Fatalf("approval without App Check status = %d", unauthenticatedApproval.Code)
 	}
 
-	approvalResponse := service.request(t, http.MethodPost, "/v1/pairing-claims/"+claim.ClaimID+"/approve", approvalBody, map[string]string{
+	approvalResponse := service.requestWithAttestation(t, http.MethodPost, "/v1/pairing-claims/"+claim.ClaimID+"/approve", approvalBody, map[string]string{
 		"X-Firebase-AppCheck": developmentAppCheckToken,
 	})
 	if approvalResponse.Code != http.StatusOK {
@@ -199,7 +199,7 @@ func TestBootstrapPairingUsesClientGeneratedStableRefreshSecrets(t *testing.T) {
 	}
 	firstAppAccessToken := approval.Credential.AccessToken
 
-	retryApprovalResponse := service.request(t, http.MethodPost, "/v1/pairing-claims/"+claim.ClaimID+"/approve", approvalBody, map[string]string{
+	retryApprovalResponse := service.requestWithAttestation(t, http.MethodPost, "/v1/pairing-claims/"+claim.ClaimID+"/approve", approvalBody, map[string]string{
 		"X-Firebase-AppCheck": developmentAppCheckToken,
 	})
 	if retryApprovalResponse.Code != http.StatusOK {
@@ -214,7 +214,7 @@ func TestBootstrapPairingUsesClientGeneratedStableRefreshSecrets(t *testing.T) {
 		t.Fatal("approval retry replayed the prior access JWT")
 	}
 
-	conflictingApproval := service.request(t, http.MethodPost, "/v1/pairing-claims/"+claim.ClaimID+"/approve", encodeBody(t, map[string]string{
+	conflictingApproval := service.requestWithAttestation(t, http.MethodPost, "/v1/pairing-claims/"+claim.ClaimID+"/approve", encodeBody(t, map[string]string{
 		"appNodeId":                    appNodeID,
 		"appRefreshTokenHash":          secretHash(testSecret("vrr_", 4)),
 		"signedAppTransaction":         testSignedAppTransaction(defaultSubscriptionID, claim.ClaimID),
@@ -348,7 +348,7 @@ func TestExistingGrantAddsAndRevokesOneAppEndpoint(t *testing.T) {
 	}
 	var duplicateNodeClaim broker.PairingClaim
 	decodeResponse(t, duplicateNodeClaimResponse, &duplicateNodeClaim)
-	duplicateNodeApproval := service.request(t, http.MethodPost, "/v1/pairing-claims/"+duplicateNodeClaim.ClaimID+"/approve", encodeBody(t, map[string]string{
+	duplicateNodeApproval := service.requestWithAttestation(t, http.MethodPost, "/v1/pairing-claims/"+duplicateNodeClaim.ClaimID+"/approve", encodeBody(t, map[string]string{
 		"appNodeId":                    secondAppNodeID,
 		"appRefreshTokenHash":          secretHash(testSecret("vrr_", 21)),
 		"signedAppTransaction":         testSignedAppTransaction(defaultSubscriptionID, duplicateNodeClaim.ClaimID),
@@ -514,7 +514,7 @@ func TestPairingClaimsRejectConflictsExpiryAndMalformedInput(t *testing.T) {
 
 	appRefreshToken := testSecret("vrr_", 17)
 	service.approveClaim(t, claim.ClaimID, appNodeID, appRefreshToken)
-	conflict := service.request(t, http.MethodPost, "/v1/pairing-claims/"+claim.ClaimID+"/approve", encodeBody(t, map[string]string{
+	conflict := service.requestWithAttestation(t, http.MethodPost, "/v1/pairing-claims/"+claim.ClaimID+"/approve", encodeBody(t, map[string]string{
 		"appNodeId":                    strings.Repeat("5", 64),
 		"appRefreshTokenHash":          secretHash(appRefreshToken),
 		"signedAppTransaction":         testSignedAppTransaction(defaultSubscriptionID, claim.ClaimID),
@@ -734,7 +734,7 @@ func (s *testService) approveClaimWithSubscription(
 	subscriptionID string,
 ) broker.Approval {
 	t.Helper()
-	response := s.request(t, http.MethodPost, "/v1/pairing-claims/"+claimID+"/approve", encodeBody(t, map[string]string{
+	response := s.requestWithAttestation(t, http.MethodPost, "/v1/pairing-claims/"+claimID+"/approve", encodeBody(t, map[string]string{
 		"appNodeId":                    appNodeID,
 		"appRefreshTokenHash":          secretHash(appRefreshToken),
 		"signedAppTransaction":         testSignedAppTransaction(subscriptionID, claimID),
