@@ -232,6 +232,21 @@ function defineOwnEnumerableProperty(target: Record<string, unknown>, key: strin
 	});
 }
 
+function mergeModifiedModelThresholds(
+	current: unknown,
+	snapshot: unknown,
+	modifiedModels: Set<string> | undefined,
+): unknown {
+	if (!modifiedModels || !isSettingsRecord(snapshot)) {
+		return snapshot;
+	}
+	const merged: Record<string, unknown> = isSettingsRecord(current) ? { ...current } : {};
+	for (const modelReference of modifiedModels) {
+		defineOwnEnumerableProperty(merged, modelReference, snapshot[modelReference]);
+	}
+	return merged;
+}
+
 function normalizeProfileClears(profile: Record<string, unknown>): void {
 	for (const key of Object.keys(profile)) {
 		const value = profile[key];
@@ -455,6 +470,8 @@ export class SettingsManager {
 	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
 	private modifiedProfileFields = new Map<string, Set<keyof Settings>>(); // Track global profile field modifications
 	private modifiedProfileNestedFields: ModifiedProfileNestedFields = new Map(); // Track global profile nested field modifications
+	/** Global threshold edits keyed by profile; undefined denotes the base global settings. */
+	private modifiedCompactionThresholds = new Map<string | undefined, Set<string>>();
 	private modifiedProjectFields = new Set<keyof Settings>(); // Track project fields modified during session
 	private modifiedProjectNestedFields = new Map<keyof Settings, Set<string>>(); // Track project nested field modifications
 	private modifiedProjectProfileFields = new Map<string, Set<keyof Settings>>(); // Track project profile field modifications
@@ -808,6 +825,7 @@ export class SettingsManager {
 		this.modifiedNestedFields.clear();
 		this.modifiedProfileFields.clear();
 		this.modifiedProfileNestedFields.clear();
+		this.modifiedCompactionThresholds.clear();
 		this.modifiedProjectFields.clear();
 		this.modifiedProjectNestedFields.clear();
 		this.modifiedProjectProfileFields.clear();
@@ -911,6 +929,7 @@ export class SettingsManager {
 			this.modifiedNestedFields.clear();
 			this.modifiedProfileFields.clear();
 			this.modifiedProfileNestedFields.clear();
+			this.modifiedCompactionThresholds.clear();
 			return;
 		}
 
@@ -970,6 +989,7 @@ export class SettingsManager {
 		modifiedNestedFields: Map<keyof Settings, Set<string>>,
 		modifiedProfileFields: Map<string, Set<keyof Settings>>,
 		modifiedProfileNestedFields: ModifiedProfileNestedFields,
+		modifiedCompactionThresholds?: Map<string | undefined, Set<string>>,
 	): void {
 		this.storage.withLock(scope, (current) => {
 			const currentFileSettings = current
@@ -1015,7 +1035,14 @@ export class SettingsManager {
 									: {};
 								const mergedNested: Record<string, unknown> = { ...baseNested };
 								for (const nestedKey of nestedModified) {
-									mergedNested[nestedKey] = snapshotValue[nestedKey];
+									mergedNested[nestedKey] =
+										profileField === "compaction" && nestedKey === "modelThresholds"
+											? mergeModifiedModelThresholds(
+													baseNested[nestedKey],
+													snapshotValue[nestedKey],
+													modifiedCompactionThresholds?.get(profileName),
+												)
+											: snapshotValue[nestedKey];
 								}
 								defineOwnEnumerableProperty(mergedProfile, profileField, mergedNested);
 							} else {
@@ -1031,7 +1058,14 @@ export class SettingsManager {
 					const baseNested = isSettingsRecord(currentFileSettings[field]) ? currentFileSettings[field] : {};
 					const mergedNested: Record<string, unknown> = { ...baseNested };
 					for (const nestedKey of nestedModified) {
-						mergedNested[nestedKey] = value[nestedKey];
+						mergedNested[nestedKey] =
+							field === "compaction" && nestedKey === "modelThresholds"
+								? mergeModifiedModelThresholds(
+										baseNested[nestedKey],
+										value[nestedKey],
+										modifiedCompactionThresholds?.get(undefined),
+									)
+								: value[nestedKey];
 					}
 					(mergedSettings as Record<string, unknown>)[field] = mergedNested;
 				} else {
@@ -1055,6 +1089,7 @@ export class SettingsManager {
 		const modifiedNestedFields = this.cloneModifiedNestedFields(this.modifiedNestedFields);
 		const modifiedProfileFields = this.cloneModifiedProfileFields(this.modifiedProfileFields);
 		const modifiedProfileNestedFields = this.cloneModifiedProfileNestedFields(this.modifiedProfileNestedFields);
+		const modifiedCompactionThresholds = structuredClone(this.modifiedCompactionThresholds);
 
 		this.enqueueWrite("global", () => {
 			this.persistScopedSettings(
@@ -1064,6 +1099,7 @@ export class SettingsManager {
 				modifiedNestedFields,
 				modifiedProfileFields,
 				modifiedProfileNestedFields,
+				modifiedCompactionThresholds,
 			);
 		});
 	}
@@ -1298,6 +1334,12 @@ export class SettingsManager {
 		if (!Number.isSafeInteger(tokens) || tokens < 0) {
 			throw new Error("Compaction threshold must be a non-negative safe integer (0 uses the default)");
 		}
+		let modifiedModels = this.modifiedCompactionThresholds.get(this.activeProfile);
+		if (!modifiedModels) {
+			modifiedModels = new Set();
+			this.modifiedCompactionThresholds.set(this.activeProfile, modifiedModels);
+		}
+		modifiedModels.add(modelReference);
 		this.updateGlobalSettings(
 			"compaction",
 			(settings) => {

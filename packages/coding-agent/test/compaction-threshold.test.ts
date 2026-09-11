@@ -1,9 +1,23 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_COMPACTION_SETTINGS, shouldCompact } from "../src/core/compaction/compaction.ts";
-import { InMemorySettingsStorage, SettingsManager } from "../src/core/settings-manager.ts";
+import {
+	FileSettingsStorage,
+	InMemorySettingsStorage,
+	type Settings,
+	SettingsManager,
+} from "../src/core/settings-manager.ts";
 
 const model = { provider: "openai-codex", id: "gpt-6-astra" };
 const reference = `${model.provider}/${model.id}`;
+const temporaryDirectories: string[] = [];
+afterEach(() => {
+	for (const directory of temporaryDirectories.splice(0)) {
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
 
 describe("per-model compaction thresholds", () => {
 	it("triggers at the configured count without changing context or summarization budgets", () => {
@@ -64,6 +78,148 @@ describe("per-model compaction thresholds", () => {
 		expect(manager.getGlobalSettings().profiles?.work?.compaction?.modelThresholds).toEqual({ [reference]: 0 });
 		manager.setActiveProfile(undefined);
 		expect(manager.getCompactionThresholdTokens(reference)).toBe(350_000);
+	});
+
+	describe.each([
+		{ scope: "global", profile: undefined },
+		{ scope: "profile", profile: "work" },
+	])("concurrent $scope persistence", ({ profile }) => {
+		const otherReference = "openai/other";
+
+		function setup(modelThresholds: Record<string, number> = {}) {
+			const directory = mkdtempSync(join(tmpdir(), "volt-model-thresholds-"));
+			temporaryDirectories.push(directory);
+			const storage = new FileSettingsStorage(directory, join(directory, "agent"));
+			const scopedSettings: Settings = {
+				compaction: { enabled: true, reserveTokens: 1234, modelThresholds },
+			};
+			storage.withLock("global", () =>
+				JSON.stringify(
+					profile
+						? {
+								compaction: { modelThresholds: { "inherited/model": 600_000 } },
+								profiles: { [profile]: scopedSettings },
+							}
+						: scopedSettings,
+				),
+			);
+			const first = SettingsManager.fromStorage(storage, { profile });
+			const second = SettingsManager.fromStorage(storage, { profile });
+			return {
+				storage,
+				first,
+				second,
+				readSaved: () => {
+					const saved = SettingsManager.fromStorage(storage).getGlobalSettings();
+					return profile ? saved.profiles![profile] : saved;
+				},
+			};
+		}
+
+		const initialThresholds: Record<string, number>[] = [{}, { [reference]: 100_000, [otherReference]: 200_000 }];
+		it.each(initialThresholds)(
+			"preserves independent edits from stale snapshots starting with %j",
+			async (initial) => {
+				const { first, second, readSaved } = setup(initial);
+				first.setCompactionThresholdTokens(reference, 350_000);
+				first.setCompactionEnabled(false);
+				await first.flush();
+				second.setCompactionThresholdTokens(otherReference, 500_000);
+				await second.flush();
+				expect(readSaved().compaction).toEqual({
+					enabled: false,
+					reserveTokens: 1234,
+					modelThresholds: { [reference]: 350_000, [otherReference]: 500_000 },
+				});
+			},
+		);
+
+		it("preserves reset-to-default entries when another session saves a different model", async () => {
+			const { first, second, readSaved } = setup({ [reference]: 350_000 });
+			first.setCompactionThresholdTokens(reference, 0);
+			await first.flush();
+			second.setCompactionThresholdTokens(otherReference, 500_000);
+			await second.flush();
+			expect(readSaved().compaction?.modelThresholds).toEqual({ [reference]: 0, [otherReference]: 500_000 });
+		});
+
+		it("stops replaying saved model keys and lets the last save win for the same model", async () => {
+			const { first, second, readSaved } = setup();
+			first.setCompactionThresholdTokens(reference, 350_000);
+			await first.flush();
+			second.setCompactionThresholdTokens(reference, 450_000);
+			await second.flush();
+			first.setCompactionThresholdTokens(otherReference, 500_000);
+			await first.flush();
+			expect(readSaved().compaction?.modelThresholds).toEqual({
+				[reference]: 450_000,
+				[otherReference]: 500_000,
+			});
+		});
+
+		it("keeps queued edits isolated from later model-key tracking changes", async () => {
+			const { first, second, readSaved } = setup({ [otherReference]: 200_000 });
+			first.setCompactionThresholdTokens(reference, 350_000);
+			second.setCompactionThresholdTokens("openai/third", 400_000);
+			first.setCompactionThresholdTokens(otherReference, 500_000);
+			await Promise.all([first.flush(), second.flush()]);
+			expect(readSaved().compaction?.modelThresholds).toEqual({
+				[reference]: 350_000,
+				[otherReference]: 500_000,
+				"openai/third": 400_000,
+			});
+		});
+
+		it("retries only dirty model entries after a failed write", async () => {
+			const { storage, second, readSaved } = setup({ [otherReference]: 200_000 });
+			let failWrite = false;
+			const first = SettingsManager.fromStorage(
+				{
+					withLock: (scope, update) => {
+						storage.withLock(scope, (current) => {
+							const next = update(current);
+							if (failWrite && next !== undefined) throw new Error("test write failure");
+							return next;
+						});
+					},
+				},
+				{ profile },
+			);
+			failWrite = true;
+			first.setCompactionThresholdTokens(reference, 350_000);
+			await expect(first.flush()).rejects.toThrow("test write failure");
+			second.setCompactionThresholdTokens(otherReference, 500_000);
+			await second.flush();
+			failWrite = false;
+			first.setTheme("light");
+			await first.flush();
+			expect(readSaved().compaction?.modelThresholds).toEqual({
+				[reference]: 350_000,
+				[otherReference]: 500_000,
+			});
+			expect(readSaved().theme).toBe("light");
+		});
+	});
+
+	it("snapshots threshold edits separately when switching profiles before writes settle", async () => {
+		const storage = new InMemorySettingsStorage();
+		storage.withLock("global", () => JSON.stringify({ profiles: { work: {}, personal: {} } }));
+		const first = SettingsManager.fromStorage(storage);
+		const second = SettingsManager.fromStorage(storage, { profile: "work" });
+		first.setCompactionThresholdTokens(reference, 350_000);
+		first.setActiveProfile("work");
+		first.setCompactionThresholdTokens(reference, 250_000);
+		second.setCompactionThresholdTokens("openai/other", 500_000);
+		first.setActiveProfile("personal");
+		first.setCompactionThresholdTokens(reference, 0);
+		await Promise.all([first.flush(), second.flush()]);
+		const saved = SettingsManager.fromStorage(storage).getGlobalSettings();
+		expect(saved.compaction?.modelThresholds).toEqual({ [reference]: 350_000 });
+		expect(saved.profiles?.work?.compaction?.modelThresholds).toEqual({
+			[reference]: 250_000,
+			"openai/other": 500_000,
+		});
+		expect(saved.profiles?.personal?.compaction?.modelThresholds).toEqual({ [reference]: 0 });
 	});
 
 	it.each([-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])("rejects invalid setter value %s", (value) => {
