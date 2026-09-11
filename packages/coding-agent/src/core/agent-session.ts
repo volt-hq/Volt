@@ -5701,10 +5701,10 @@ export class AgentSession {
 			if (!willContinueForTools && !hasQueuedMessages) return false;
 			const message = context.completedTurn.message;
 			if (message.stopReason === "aborted" || message.stopReason === "error") return false;
-			const settings = this.settingsManager.getCompactionSettings();
-			if (!settings.enabled) return false;
 			const model = this.model;
 			if (!model || message.provider !== model.provider || message.model !== model.id) return false;
+			const settings = this.settingsManager.getCompactionSettings(model);
+			if (!settings.enabled) return false;
 			// Provider usage predates this turn's tool execution. Estimate from the
 			// live context so newly appended tool results are included before the
 			// loop starts another provider request.
@@ -5739,7 +5739,7 @@ export class AgentSession {
 			assertConversationGenerationCurrent?: () => void,
 		) => Promise<boolean> = (...args) => this._runAutoCompaction(...args),
 	): Promise<boolean> {
-		const settings = this.settingsManager.getCompactionSettings();
+		const settings = this.settingsManager.getCompactionSettings(this.model);
 		if (!settings.enabled) return false;
 
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false

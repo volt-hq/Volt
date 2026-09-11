@@ -5785,12 +5785,17 @@ export class InteractiveMode {
 	}
 
 	private showSettingsSelector(): void {
+		const model = this.session.model;
+		const currentModel = model ? `${model.provider}/${model.id}` : undefined;
+		const settingsManager = this.settingsManager;
 		this.session.modelRegistry.refresh();
 		const availableModels = this.session.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`);
 		this.showSelector((done) => {
 			const selector = new SettingsSelectorComponent(
 				{
 					autoCompact: this.session.autoCompactionEnabled,
+					currentModel,
+					compactionThresholdTokens: currentModel ? settingsManager.getCompactionThresholdTokens(currentModel) : 0,
 					personality: this.settingsManager.getPersonality(),
 					showImages: this.settingsManager.getShowImages(),
 					imageWidthCells: this.settingsManager.getImageWidthCells(),
@@ -5829,6 +5834,9 @@ export class InteractiveMode {
 					onAutoCompactChange: (enabled) => {
 						this.session.setAutoCompactionEnabled(enabled);
 						this.footer.setAutoCompactEnabled(enabled);
+					},
+					onCompactionThresholdChange: (tokens) => {
+						if (currentModel) settingsManager.setCompactionThresholdTokens(currentModel, tokens);
 					},
 					onPersonalityChange: (personality) => {
 						this.session.setPersonality(personality);

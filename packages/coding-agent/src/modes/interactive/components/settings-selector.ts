@@ -65,8 +65,15 @@ function parseContextWarningTokens(value: string): number {
 	return Math.floor(Number(value));
 }
 
+function formatCompactionThreshold(tokens: number): string {
+	return tokens === 0 ? "default" : formatContextWarningTokens(tokens);
+}
+
 export interface SettingsConfig {
 	autoCompact: boolean;
+	/** Exact provider/model ID being configured; absent when no model is selected. */
+	currentModel?: string;
+	compactionThresholdTokens: number;
 	personality: Personality;
 	showImages: boolean;
 	imageWidthCells: number;
@@ -105,6 +112,7 @@ export interface SettingsConfig {
 
 export interface SettingsCallbacks {
 	onAutoCompactChange: (enabled: boolean) => void;
+	onCompactionThresholdChange: (tokens: number) => void;
 	onPersonalityChange: (personality: Personality) => void;
 	onShowImagesChange: (enabled: boolean) => void;
 	onImageWidthCellsChange: (width: number) => void;
@@ -487,6 +495,29 @@ export class SettingsSelectorComponent extends Container {
 			},
 		];
 
+		if (config.currentModel) {
+			const thresholds = [
+				...new Set([
+					0,
+					100_000,
+					150_000,
+					200_000,
+					250_000,
+					350_000,
+					500_000,
+					750_000,
+					config.compactionThresholdTokens,
+				]),
+			].sort((a, b) => a - b);
+			items.splice(1, 0, {
+				id: "compact-at",
+				label: "Compact at",
+				description: `Auto-compact ${config.currentModel} at this token count. Default uses the context limit; requires Auto-compact. Custom counts can be set in settings.json.`,
+				currentValue: formatCompactionThreshold(config.compactionThresholdTokens),
+				values: thresholds.map(formatCompactionThreshold),
+			});
+		}
+
 		// Only show image toggle if terminal supports it
 		if (supportsImages) {
 			// Insert after autocompact
@@ -600,6 +631,7 @@ export class SettingsSelectorComponent extends Container {
 
 		const sectionById: Record<string, string> = {
 			autocompact: "Agent",
+			"compact-at": "Agent",
 			personality: "Agent",
 			thinking: "Agent",
 			"review-model": "Agent",
@@ -652,6 +684,11 @@ export class SettingsSelectorComponent extends Container {
 				switch (id) {
 					case "autocompact":
 						callbacks.onAutoCompactChange(newValue === "true");
+						break;
+					case "compact-at":
+						callbacks.onCompactionThresholdChange(
+							newValue === "default" ? 0 : parseContextWarningTokens(newValue),
+						);
 						break;
 					case "personality":
 						callbacks.onPersonalityChange(newValue as Personality);

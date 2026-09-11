@@ -27,13 +27,17 @@ Both use the same structured summary format and track file operations cumulative
 
 ### When It Triggers
 
-Auto-compaction triggers when:
+By default, auto-compaction triggers when:
 
 ```
 contextTokens > contextWindow - reserveTokens
 ```
 
 By default, `reserveTokens` is 16384 tokens (configurable in `~/.volt/agent/settings.json` or `<project-dir>/.volt/settings.json`). This leaves room for the LLM's response.
+
+Set `compaction.modelThresholds["provider/model-id"]` to add an earlier absolute trigger for a specific model. For example, `"openai-codex/gpt-6-astra": 350000` triggers when context usage reaches 350,000 tokens, without changing the model's context window. Configure the current model under **Compact at** in `/settings`, or use JSON for arbitrary counts. Omitted entries and `0` retain the default; invalid counts are ignored. Auto-compaction must be enabled, and the normal context-limit and overflow recovery triggers still apply.
+
+Checks run at safe boundaries after responses and tool batches, and before the next prompt when prior assistant usage is available. Usage includes estimates for trailing tool results, so a single batch can overshoot the configured count. Warning thresholds remain independent. Earlier compaction reduces ongoing context size but adds summarization requests and can lose detail; keep the threshold comfortably above the retained context size. See [Settings](settings.md#compaction) for configuration and scope.
 
 You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary.
 
@@ -447,5 +451,6 @@ Configure compaction in `~/.volt/agent/settings.json` or `<project-dir>/.volt/se
 | `enabled` | `true` | Enable auto-compaction |
 | `reserveTokens` | `16384` | Tokens to reserve for LLM response |
 | `keepRecentTokens` | `20000` | Maximum recent message tokens to keep; active tool definitions can lower the effective budget |
+| `modelThresholds` | `{}` | Absolute token thresholds keyed by exact `provider/model-id`; `0` or omitted uses the context-limit default |
 
 Disable auto-compaction with `"enabled": false`. You can still compact manually with `/compact`.

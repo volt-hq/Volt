@@ -22,6 +22,8 @@ beforeEach(() => {
 function createConfig(personality: Personality): SettingsConfig {
 	return {
 		autoCompact: true,
+		currentModel: "openai-codex/gpt-6-astra",
+		compactionThresholdTokens: 0,
 		personality,
 		showImages: false,
 		imageWidthCells: 80,
@@ -59,6 +61,7 @@ function createConfig(personality: Personality): SettingsConfig {
 function createCallbacks(onPersonalityChange: (personality: Personality) => void): SettingsCallbacks {
 	return {
 		onAutoCompactChange: () => {},
+		onCompactionThresholdChange: () => {},
 		onPersonalityChange,
 		onShowImagesChange: () => {},
 		onImageWidthCellsChange: () => {},
@@ -93,6 +96,38 @@ function createCallbacks(onPersonalityChange: (personality: Personality) => void
 }
 
 describe("SettingsSelectorComponent", () => {
+	test("selects 350k for the current model independently of warnings and can restore the default", () => {
+		const onCompactionThresholdChange = vi.fn();
+		const callbacks = createCallbacks(() => {});
+		callbacks.onCompactionThresholdChange = onCompactionThresholdChange;
+		callbacks.onWarningsChange = vi.fn();
+		callbacks.onAutoCompactChange = vi.fn();
+		const list = new SettingsSelectorComponent(createConfig("default"), callbacks).getSettingsList();
+		for (const character of "compactat") list.handleInput(character);
+		expect(stripAnsi(list.render(100).lines.join("\n"))).toContain("openai-codex/gpt-6-astra");
+		for (let index = 0; index < 5; index++) list.handleInput(" ");
+		expect(onCompactionThresholdChange).toHaveBeenLastCalledWith(350_000);
+		expect(stripAnsi(list.render(100).lines.join("\n"))).toContain("350k");
+		for (let index = 0; index < 3; index++) list.handleInput(" ");
+		expect(onCompactionThresholdChange).toHaveBeenLastCalledWith(0);
+		expect(stripAnsi(list.render(100).lines.join("\n"))).toContain("default");
+		expect(callbacks.onWarningsChange).not.toHaveBeenCalled();
+		expect(callbacks.onAutoCompactChange).not.toHaveBeenCalled();
+	});
+
+	test("displays a custom configured count and hides Compact at without a model", () => {
+		const config = createConfig("default");
+		config.compactionThresholdTokens = 425_123;
+		const callbacks = createCallbacks(() => {});
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+		for (const character of "compactat") list.handleInput(character);
+		expect(stripAnsi(list.render(100).lines.join("\n"))).toContain("425123");
+		delete config.currentModel;
+		const noModel = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+		for (const character of "compactat") noModel.handleInput(character);
+		expect(stripAnsi(noModel.render(100).lines.join("\n"))).not.toContain("Compact at");
+	});
+
 	test("cycles through fullscreen settings", () => {
 		const onTuiModeChange = vi.fn();
 		const onExitOutputChange = vi.fn();

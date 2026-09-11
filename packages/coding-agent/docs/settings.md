@@ -163,6 +163,7 @@ Both options are available under **Warnings** in `/settings`.
 | `compaction.enabled` | boolean | `true` | Enable auto-compaction |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
+| `compaction.modelThresholds` | object | `{}` | Absolute auto-compaction token counts keyed by exact `provider/model-id`. Omitted entries or `0` use the normal context-limit trigger |
 
 ```json
 {
@@ -173,6 +174,25 @@ Both options are available under **Warnings** in `/settings`.
   }
 }
 ```
+
+Under **Agent** in `/settings`, **Compact at** configures the currently selected provider/model. Choose `350k` to compact at 350,000 tokens, or `default` to restore the context-limit trigger. **Auto-compact** must be enabled. The model reference is shown in the description; switch models to configure another one. Changes are saved to global settings (or the active global profile), with trusted project settings taking precedence as usual.
+
+For an arbitrary count, edit `settings.json`:
+
+```json
+{
+  "compaction": {
+    "enabled": true,
+    "modelThresholds": {
+      "openai-codex/gpt-6-astra": 350000
+    }
+  }
+}
+```
+
+Use the exact provider/model reference from `/model`; `openai` and `openai-codex` are separate entries. Counts must be positive safe integers; invalid entries are ignored. `0` explicitly restores the default, including over an inherited profile setting. These thresholds do not change the model's real context window, response reserve, recent-message budget, or `warnings.contextTokens`.
+
+Compaction runs at the next safe turn boundary when usage reaches the configured count (including estimated trailing tool results), or earlier if the normal context-limit trigger fires. A single response or tool batch can overshoot the count; it is not a hard input cap. Keep thresholds comfortably above the retained context size to avoid frequent compactions. See [Compaction](compaction.md) for behavior and tradeoffs. Restart or `/reload` after editing JSON; `/settings` changes apply to subsequent checks immediately.
 
 ### Branch Summary
 

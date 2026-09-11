@@ -19,6 +19,8 @@ export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
 	keepRecentTokens?: number; // default: 20000
+	/** Absolute auto-compaction thresholds keyed by exact provider/model ID. 0 uses the context-limit default. */
+	modelThresholds?: Record<string, number>;
 }
 
 export interface BranchSummarySettings {
@@ -1286,11 +1288,40 @@ export class SettingsManager {
 		return this.settings.compaction?.keepRecentTokens ?? 20000;
 	}
 
-	getCompactionSettings(): { enabled: boolean; reserveTokens: number; keepRecentTokens: number } {
+	getCompactionThresholdTokens(modelReference: string): number {
+		const thresholds = this.settings.compaction?.modelThresholds;
+		const value = thresholds && Object.hasOwn(thresholds, modelReference) ? thresholds[modelReference] : undefined;
+		return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
+	}
+
+	setCompactionThresholdTokens(modelReference: string, tokens: number): void {
+		if (!Number.isSafeInteger(tokens) || tokens < 0) {
+			throw new Error("Compaction threshold must be a non-negative safe integer (0 uses the default)");
+		}
+		this.updateGlobalSettings(
+			"compaction",
+			(settings) => {
+				settings.compaction ??= {};
+				settings.compaction.modelThresholds = {
+					...settings.compaction.modelThresholds,
+					[modelReference]: tokens,
+				};
+			},
+			"modelThresholds",
+		);
+	}
+
+	getCompactionSettings(model?: { provider: string; id: string }): {
+		enabled: boolean;
+		reserveTokens: number;
+		keepRecentTokens: number;
+		thresholdTokens?: number;
+	} {
 		return {
 			enabled: this.getCompactionEnabled(),
 			reserveTokens: this.getCompactionReserveTokens(),
 			keepRecentTokens: this.getCompactionKeepRecentTokens(),
+			...(model ? { thresholdTokens: this.getCompactionThresholdTokens(`${model.provider}/${model.id}`) } : {}),
 		};
 	}
 
