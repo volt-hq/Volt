@@ -22,7 +22,8 @@ import (
 	"github.com/volt-hq/Volt/services/relay-credential-broker/internal/credential"
 )
 
-const maxRequestBodyBytes = 64 * 1024
+// Registration carries both bounded Apple installation and attestation objects.
+const maxRequestBodyBytes = 128 * 1024
 
 type VerifiedAppCheck struct {
 	AppID           string
@@ -64,6 +65,7 @@ func (v *DevelopmentAppCheckVerifier) Verify(request *http.Request) (VerifiedApp
 }
 
 type Config struct {
+	CredentialIssuer              string
 	MaxConcurrentRequests         int
 	RefreshMinInterval            time.Duration
 	EntitlementReconcileInterval  time.Duration
@@ -83,6 +85,7 @@ type requestBudget struct {
 }
 
 type Server struct {
+	credentialIssuer             string
 	broker                       *broker.Broker
 	signer                       *credential.Signer
 	appCheck                     AppCheckVerifier
@@ -110,6 +113,11 @@ type createExistingClaimRequest struct {
 }
 
 type approveClaimRequest struct {
+	HostNodeID                   string `json:"hostNodeId"`
+	KeyID                        string `json:"keyId"`
+	BundleVersion                string `json:"bundleVersion"`
+	Challenge                    string `json:"challenge"`
+	Assertion                    string `json:"assertion"`
 	AppNodeID                    string `json:"appNodeId"`
 	AppRefreshTokenHash          string `json:"appRefreshTokenHash"`
 	SignedAppTransaction         string `json:"signedAppTransaction"`
@@ -163,6 +171,7 @@ func NewServer(
 
 	refreshRetryAfterSeconds := int((config.RefreshMinInterval + time.Second - 1) / time.Second)
 	server := &Server{
+		credentialIssuer:             config.CredentialIssuer,
 		broker:                       brokerService,
 		signer:                       signer,
 		appCheck:                     appCheck,
@@ -183,6 +192,9 @@ func NewServer(
 	mux.HandleFunc("GET /.well-known/jwks.json", server.handleJWKS)
 	mux.HandleFunc("POST /v1/pairing-claims", server.handleCreateClaim)
 	mux.HandleFunc("POST /v1/pairing-claims/{claimID}/approve", server.handleApproveClaim)
+	mux.HandleFunc("POST /v1/pairing-claims/{claimID}/attestation/status", server.handleAttestationStatus)
+	mux.HandleFunc("POST /v1/pairing-claims/{claimID}/attestation/challenge", server.handleAttestationChallenge)
+	mux.HandleFunc("POST /v1/pairing-claims/{claimID}/attestation/register", server.handleAttestationRegister)
 	mux.HandleFunc("POST /v1/pairing-claims/{claimID}/exchange", server.handleExchangeClaim)
 	mux.HandleFunc("POST /v1/app-store/notifications", server.handleAppStoreNotification)
 	mux.HandleFunc("POST /v1/tokens/refresh", server.handleRefresh)
@@ -311,34 +323,21 @@ func (s *Server) handleApproveClaim(writer http.ResponseWriter, request *http.Re
 		writeError(writer, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	verifiedAppCheck, err := s.appCheck.Verify(request)
-	if err != nil {
-		writeError(writer, http.StatusUnauthorized, "app_check_invalid")
+	bound, check, entitlement, ok := s.verifyAttestationInput(writer, request, body)
+	if !ok {
 		return
 	}
-	appRefreshHash, err := broker.ParseSecretHash(body.AppRefreshTokenHash)
+	assertion, err := decodeAttestationObject(body.Assertion, 1024)
 	if err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid_app_refresh_token_hash")
+		writeError(writer, http.StatusBadRequest, "invalid_attestation_request")
 		return
 	}
-	entitlement, err := s.appStore.VerifyEntitlement(
-		request.Context(),
-		appstore.Proof{
-			SignedAppTransaction: body.SignedAppTransaction,
-			DeviceVerificationID: body.AppStoreDeviceVerificationID,
-		},
-	)
+	approval, err := s.broker.ApprovePairingClaim(request.Context(), bound.ClaimID, check,
+		entitlement, bound.AppNodeID, broker.SecretHash(bound.RefreshHash), broker.ApprovalAttestation{
+			Request: bound, Challenge: body.Challenge, Assertion: assertion,
+		})
 	if err != nil {
-		s.writeAppStoreError(writer, err)
-		return
-	}
-	approval, err := s.broker.ApprovePairingClaim(request.Context(), request.PathValue("claimID"), broker.AppCheckProof{
-		AppID:           verifiedAppCheck.AppID,
-		JTIHash:         verifiedAppCheck.JTIHash,
-		ExpiresAt:       verifiedAppCheck.ExpiresAt,
-		ReplayProtected: verifiedAppCheck.ReplayProtected,
-	}, entitlement, body.AppNodeID, appRefreshHash)
-	if err != nil {
+		s.logger.Warn("pairing attestation rejected", "stage", "approve", "reason", broker.AttestationRejectionReason(err))
 		s.writeBrokerError(writer, err, "invalid_app_node_id")
 		return
 	}
@@ -558,6 +557,10 @@ func (s *Server) writeClaimCreationError(writer http.ResponseWriter, err error) 
 
 func (s *Server) writeBrokerError(writer http.ResponseWriter, err error, invalidCode string) {
 	switch {
+	case errors.Is(err, broker.ErrAttestationInvalid):
+		writeError(writer, http.StatusUnauthorized, "app_attest_invalid")
+	case errors.Is(err, broker.ErrAttestationCapacity):
+		writeError(writer, http.StatusTooManyRequests, "app_attest_capacity")
 	case errors.Is(err, broker.ErrAppCheckInvalid), errors.Is(err, broker.ErrAppCheckReplay):
 		writeError(writer, http.StatusUnauthorized, "app_check_invalid")
 	case errors.Is(err, broker.ErrClaimNotFound):

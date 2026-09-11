@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/volt-hq/Volt/services/relay-credential-broker/internal/appattest"
 	"github.com/volt-hq/Volt/services/relay-credential-broker/internal/appstore"
 	"github.com/volt-hq/Volt/services/relay-credential-broker/internal/broker"
 	"github.com/volt-hq/Volt/services/relay-credential-broker/internal/credential"
@@ -43,6 +44,9 @@ type config struct {
 	DevAppCheck                string
 	FirebaseProjectNumber      string
 	AllowedFirebaseAppIDs      []string
+	AppAttestAppID             string
+	AppAttestEnvironment       string
+	AppAttestCategory          uint32
 	AppStoreMode               string
 	DevelopmentAppStoreProof   string
 	AppStoreRootCertificates   []*x509.Certificate
@@ -153,6 +157,15 @@ func main() {
 		logger.Error("configure App Store verifier", "error", err)
 		os.Exit(2)
 	}
+	var attestationVerifier broker.AttestationVerifier
+	if configuration.AppStoreMode == "apple" {
+		attestationVerifier, err = appattest.NewAppleVerifier(configuration.AppAttestAppID,
+			configuration.AppAttestEnvironment, configuration.AppAttestCategory, time.Now)
+		if err != nil {
+			logger.Error("configure App Attest verifier", "error", err)
+			os.Exit(2)
+		}
+	}
 	databaseConfig, err := pgxpool.ParseConfig(configuration.DatabaseURL)
 	if err != nil {
 		logger.Error("invalid PostgreSQL configuration")
@@ -176,6 +189,8 @@ func main() {
 	}
 
 	brokerService, err := broker.New(pool, signer, broker.Config{
+		CredentialIssuer:        configuration.Issuer,
+		AttestationVerifier:     attestationVerifier,
 		ClaimTTL:                configuration.ClaimTTL,
 		AccessTokenTTL:          configuration.AccessTTL,
 		RefreshInactivityTTL:    configuration.RefreshInactivityTTL,
@@ -189,6 +204,7 @@ func main() {
 		os.Exit(2)
 	}
 	handler, err := httpapi.NewServer(brokerService, signer, appCheck, appStoreVerifier, httpapi.Config{
+		CredentialIssuer:              configuration.Issuer,
 		MaxConcurrentRequests:         configuration.MaxConcurrentRequests,
 		RefreshMinInterval:            configuration.RefreshMinInterval,
 		EntitlementReconcileInterval:  configuration.AppStoreReconcileInterval,
@@ -401,6 +417,31 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("unsupported App Store mode %q", appStoreMode)
 	}
 
+	appAttestAppID := strings.TrimSpace(os.Getenv("VOLT_APP_ATTEST_APP_ID"))
+	appAttestEnvironment := "production"
+	var appAttestCategory uint32
+	if appStoreMode == "apple" {
+		// App ID prefix is explicit: Apple's App ID prefix need not equal the
+		// developer Team ID. Do not infer it from a client or an attestation.
+		if appAttestAppID == "" || !strings.HasSuffix(appAttestAppID, "."+appStoreBundleID) {
+			return config{}, errors.New("VOLT_APP_ATTEST_APP_ID must be the signing App ID prefix plus the configured bundle ID")
+		}
+		switch credentialIssuer {
+		case "https://credentials.volt-cli.dev":
+			appAttestCategory = 4
+		case "https://credentials-canary.volt-cli.dev":
+			appAttestCategory = 2
+			if len(appStoreEnvironments) != 1 || appStoreEnvironments[0] != "Sandbox" {
+				return config{}, errors.New("canary credential issuer requires Sandbox-only App Store receipts")
+			}
+		default:
+			return config{}, errors.New("Apple pairing requires an exact managed credential issuer")
+		}
+		if appCheckMode != "firebase" {
+			return config{}, errors.New("Apple pairing requires Firebase limited-use App Check verification")
+		}
+	}
+
 	return config{
 		ListenAddress:              stringEnv("VOLT_CREDENTIAL_LISTEN", defaultListenAddress),
 		Issuer:                     credentialIssuer,
@@ -414,6 +455,9 @@ func loadConfig() (config, error) {
 		DevAppCheck:                devAppCheck,
 		FirebaseProjectNumber:      firebaseProjectNumber,
 		AllowedFirebaseAppIDs:      allowedFirebaseAppIDs,
+		AppAttestAppID:             appAttestAppID,
+		AppAttestEnvironment:       appAttestEnvironment,
+		AppAttestCategory:          appAttestCategory,
 		AppStoreMode:               appStoreMode,
 		DevelopmentAppStoreProof:   developmentAppStoreProof,
 		AppStoreRootCertificates:   appStoreRootCertificates,

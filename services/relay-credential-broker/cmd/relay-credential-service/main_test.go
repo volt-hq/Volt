@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"encoding/base64"
+	"encoding/pem"
+	"os"
+	"testing"
+)
 
 func TestLoadConfigSelectsCloudKMSSigning(t *testing.T) {
 	setMinimumEnvironment(t)
@@ -91,6 +96,7 @@ func setMinimumEnvironment(t *testing.T) {
 		"VOLT_CREDENTIAL_KMS_RETIRING_KEY_VERSIONS",
 		"VOLT_FIREBASE_PROJECT_NUMBER",
 		"VOLT_ALLOWED_FIREBASE_APP_IDS",
+		"VOLT_APP_ATTEST_APP_ID",
 		"VOLT_APP_STORE_MODE",
 		"VOLT_DEVELOPMENT_APP_STORE_PROOF",
 		"VOLT_APP_STORE_PRIVATE_KEY",
@@ -122,4 +128,56 @@ func setMinimumEnvironment(t *testing.T) {
 	t.Setenv("VOLT_DEVELOPMENT_APP_CHECK_TOKEN", "development-app-check-token-value")
 	t.Setenv("VOLT_APP_STORE_MODE", "development")
 	t.Setenv("VOLT_DEVELOPMENT_APP_STORE_PROOF", "development-app-store-proof-value")
+}
+
+// Regression: #387. Sandbox purchases do not imply development App Attest keys.
+func TestRegression387AppAttestDeploymentAuthority(t *testing.T) {
+	for _, fixture := range []struct {
+		issuer, environment string
+		category            uint32
+	}{
+		{"https://credentials-canary.volt-cli.dev", "Sandbox", 2},
+		{"https://credentials.volt-cli.dev", "Production", 4},
+	} {
+		t.Run(fixture.environment, func(t *testing.T) {
+			setMinimumEnvironment(t)
+			t.Setenv("VOLT_CREDENTIAL_SIGNING_MODE", "local")
+			t.Setenv("VOLT_CREDENTIAL_ISSUER", fixture.issuer)
+			t.Setenv("VOLT_APP_CHECK_MODE", "firebase")
+			t.Setenv("VOLT_FIREBASE_PROJECT_NUMBER", "123456")
+			t.Setenv("VOLT_ALLOWED_FIREBASE_APP_IDS", "test-app")
+			t.Setenv("VOLT_APP_STORE_MODE", "apple")
+			t.Setenv("VOLT_APP_STORE_APP_APPLE_ID", "123456")
+			t.Setenv("VOLT_APP_STORE_KEY_ID", "TESTKEY")
+			t.Setenv("VOLT_APP_STORE_PRIVATE_KEY", "test-only-config-placeholder")
+			t.Setenv("VOLT_APP_STORE_ISSUER_ID", "test-issuer")
+			t.Setenv("VOLT_APP_STORE_SUBSCRIPTION_GROUP_ID", "test-group")
+			t.Setenv("VOLT_APP_STORE_ENVIRONMENTS", fixture.environment)
+			root, err := os.ReadFile("../../internal/appattest/apple-root.pem")
+			if err != nil {
+				t.Fatal(err)
+			}
+			block, _ := pem.Decode(root)
+			t.Setenv("VOLT_APP_STORE_ROOT_CERTIFICATES_BASE64", base64.StdEncoding.EncodeToString(block.Bytes))
+			if _, err := loadConfig(); err == nil {
+				t.Fatal("missing App ID accepted")
+			}
+			t.Setenv("VOLT_APP_ATTEST_APP_ID", "ABCDEFGHIJ.wrong.bundle")
+			if _, err := loadConfig(); err == nil {
+				t.Fatal("mismatched App ID accepted")
+			}
+			t.Setenv("VOLT_APP_ATTEST_APP_ID", "ABCDEFGHIJ.com.hansjm10.volt")
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AppAttestEnvironment != "production" || cfg.AppAttestCategory != fixture.category {
+				t.Fatal("incorrect App Attest environment/category")
+			}
+			t.Setenv("VOLT_APP_STORE_ENVIRONMENTS", "Production,Sandbox")
+			if _, err := loadConfig(); err == nil {
+				t.Fatal("mixed receipt environments accepted")
+			}
+		})
+	}
 }
