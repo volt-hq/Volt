@@ -240,7 +240,9 @@ func (v *Verifier) VerifyAssertion(publicKey, object []byte, clientDataHash [32]
 		return 0, ErrInvalid
 	}
 	stage = "assertion_flags"
-	if assertion.AuthData[32] != 0 {
+	// App Attest assertions retain Apple's 0x40 flags byte even though they
+	// omit the attested credential section. This is not a WebAuthn assertion.
+	if assertion.AuthData[32] != 0x40 {
 		return 0, ErrInvalid
 	}
 	if stage = v.extensionRejectionReason(assertion.AuthData[37:], bundleVersion); stage != "" {
@@ -257,7 +259,10 @@ func (v *Verifier) VerifyAssertion(publicKey, object []byte, clientDataHash [32]
 		return 0, ErrInvalid
 	}
 	data := append(append([]byte(nil), assertion.AuthData...), clientDataHash[:]...)
-	digest := sha256.Sum256(data)
+	nonce := sha256.Sum256(data)
+	// Apple signs nonce as a message with ECDSA-SHA256. VerifyASN1 expects
+	// the message digest, unlike CryptoKit's Data-taking verification API.
+	digest := sha256.Sum256(nonce[:])
 	stage = "assertion_signature"
 	if !ecdsa.VerifyASN1(&ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, digest[:], assertion.Signature) {
 		return 0, ErrInvalid

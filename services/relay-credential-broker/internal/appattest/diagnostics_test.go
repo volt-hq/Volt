@@ -77,7 +77,7 @@ func TestAssertionRejectionDiagnostics(t *testing.T) {
 	}{
 		{"assertion_format", func(a *assertionObject) { a.AuthData = a.AuthData[:36] }},
 		{"assertion_app_identifier", func(a *assertionObject) { a.AuthData[0]++ }},
-		{"assertion_flags", func(a *assertionObject) { a.AuthData[32] = 0x40 }},
+		{"assertion_flags", func(a *assertionObject) { a.AuthData[32] = 0 }},
 		{"assertion_zero_counter", func(a *assertionObject) { a.AuthData[36] = 0 }},
 		{"assertion_signature", func(a *assertionObject) { a.Signature[0] ^= 1 }},
 	} {

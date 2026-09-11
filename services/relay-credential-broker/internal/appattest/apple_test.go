@@ -186,10 +186,11 @@ func (f attestationFixture) assertion(t *testing.T, counter uint32, hash [32]byt
 func (f attestationFixture) assertionWithExtensions(t *testing.T, counter uint32, hash [32]byte, extensions []byte) []byte {
 	t.Helper()
 	auth := append([]byte(nil), f.verifier.rpID[:]...)
-	auth = append(auth, 0, 0, 0, 0, 0)
+	auth = append(auth, 0x40, 0, 0, 0, 0)
 	binary.BigEndian.PutUint32(auth[33:], counter)
 	auth = append(auth, extensions...)
-	digest := sha256.Sum256(append(append([]byte(nil), auth...), hash[:]...))
+	nonce := sha256.Sum256(append(append([]byte(nil), auth...), hash[:]...))
+	digest := sha256.Sum256(nonce[:])
 	signature, err := ecdsa.SignASN1(rand.Reader, f.key, digest[:])
 	if err != nil {
 		t.Fatal(err)

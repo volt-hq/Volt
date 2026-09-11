@@ -82,6 +82,19 @@ extensions and deploying that correction to canary. Fresh challenge consumption,
 assertion counters, Apple receipt/device/subscription checks and limited-use
 Firebase App Check remain required. Real-device pairing must still be validated.
 
+The corrected canary accepted build 5's registration at
+`2026-09-11T18:58:18.670839Z`, but final approval returned 401. Extended bounded
+diagnostics identified `approve / apple_assertion_flags` on the next attempt at
+`2026-09-11T19:07:44.095445708Z`. The verifier incorrectly required flags 0;
+independent published iPhone assertions use 0x40. Those signatures also exposed
+a second verifier error: ECDSA-SHA256 verification must hash the constructed
+nonce before passing it to Go's digest-taking `VerifyASN1` API. Four pinned
+public device vectors fail each old check independently and pass only after
+both corrections. Tests reject changed requests and the old single-hash signing
+form. The exact flag value and signature on Jordan's phone were not logged;
+real-device final approval remains the acceptance gate. No signature bypass,
+alternate signature algorithm or relaxed replay requirement is introduced.
+
 ## Acceptance on the existing TestFlight installation
 
 Install the new TestFlight build through TestFlight, preserving app data. Record
