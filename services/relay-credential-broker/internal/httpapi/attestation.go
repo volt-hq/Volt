@@ -26,6 +26,7 @@ func (s *Server) verifyAttestationInput(writer http.ResponseWriter, request *htt
 	}
 	check, err := s.appCheck.Verify(request)
 	if err != nil || !check.ReplayProtected {
+		s.logger.Warn("pairing attestation rejected", "stage", "input", "reason", "app_check")
 		writeError(writer, http.StatusUnauthorized, "app_check_invalid")
 		return fail()
 	}
@@ -37,6 +38,7 @@ func (s *Server) verifyAttestationInput(writer http.ResponseWriter, request *htt
 	entitlement, err := s.appStore.VerifyEntitlement(request.Context(), appstore.Proof{SignedAppTransaction: body.SignedAppTransaction, DeviceVerificationID: body.AppStoreDeviceVerificationID})
 	if err != nil {
 		s.writeAppStoreError(writer, err)
+		s.logger.Warn("pairing attestation rejected", "stage", "input", "reason", "app_store")
 		return fail()
 	}
 	token, _ := singleHeaderValue(request.Header, "X-Firebase-AppCheck")
@@ -90,6 +92,7 @@ func (s *Server) handleAttestationRegister(writer http.ResponseWriter, request *
 		return
 	}
 	if err = s.broker.RegisterAttestationKey(request.Context(), bound, body.Challenge, object, check, entitlement); err != nil {
+		s.logger.Warn("pairing attestation rejected", "stage", "register", "reason", broker.AttestationRejectionReason(err))
 		s.writeBrokerError(writer, err, "invalid_attestation_request")
 		return
 	}

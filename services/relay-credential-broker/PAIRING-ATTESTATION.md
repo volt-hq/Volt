@@ -55,13 +55,68 @@ Before deploying the broker:
 5. Verify broker readiness, issuer and new-route responses before publishing the
    paired app commit through its signed TestFlight workflow.
 
-Canary uses Sandbox purchases but **production App Attest**, validation category
-2 (TestFlight). Production uses Production purchases and category 4 (App Store).
-A development-signed app, simulator, unsupported device or missing signed
-metadata cannot substitute for either. The broker requires signed build version
-and validation-category extensions. Their actual availability on the target
-TestFlight OS/build must be checked during acceptance; there is no silent
-fallback if Apple omits them.
+Canary uses Sandbox purchases but **production App Attest**. Production uses
+Production purchases and production App Attest. When signed extensions are
+present, the broker requires validation category 2 (TestFlight) for canary or 4
+(App Store) for production, and an exact matching build version. Nonempty but
+malformed, partial or incompatible metadata fails closed.
+
+Apple introduced these extensions in iOS 27; valid attestations and assertions
+without extensions are accepted after all nonce/signature and authority checks.
+On that format, the build is request-bound but is not independently Apple-attested
+executable metadata, and the distribution category is unavailable. No client OS
+claim selects a weaker validation path. Removing signed extensions invalidates
+the certificate nonce or assertion signature.
+
+### Confirmed iOS 26 rejection and approved correction
+
+TestFlight 1.0.0 build 5 on Jordan's iPhone, iOS 26.6, reached canary registration
+at `2026-09-11T18:40:32.156682861Z` and failed with the bounded diagnostic
+`stage=register reason=apple_metadata_missing`. The broker had accepted the
+chain, App ID, production AAGUID and credential key, but incorrectly required
+iOS 27 metadata before checking the certificate nonce. Apple's
+[WWDC26 App Attest session](https://developer.apple.com/videos/play/wwdc2026/201/)
+explicitly introduces these extensions on iOS 27 for both object types.
+The user approved accepting cryptographically verified objects without these
+extensions and deploying that correction to canary. Fresh challenge consumption,
+assertion counters, Apple receipt/device/subscription checks and limited-use
+Firebase App Check remain required. Real-device pairing must still be validated.
+
+The corrected canary accepted build 5's registration at
+`2026-09-11T18:58:18.670839Z`, but final approval returned 401. Extended bounded
+diagnostics identified `approve / apple_assertion_flags` on the next attempt at
+`2026-09-11T19:07:44.095445708Z`. The verifier incorrectly required flags 0;
+independent published iPhone assertions use 0x40. Those signatures also exposed
+a second verifier error: ECDSA-SHA256 verification must hash the constructed
+nonce before passing it to Go's digest-taking `VerifyASN1` API. Four pinned
+public device vectors fail each old check independently and pass only after
+both corrections. Tests reject changed requests and the old single-hash signing
+form. The exact flag value and signature on Jordan's phone were not logged;
+real-device final approval remains the acceptance gate. No signature bypass,
+alternate signature algorithm or relaxed replay requirement is introduced.
+
+### Successful TestFlight acceptance and final deployment
+
+TestFlight 1.0.0 build 5 on Jordan's iPhone, iOS 26.6, connected successfully
+after runtime commit `bc88caa59`. Canary logs confirm the existing registered
+key was usable, approval returned 200 at `2026-09-11T19:14:38.555768Z`, and
+daemon exchange returned 200 at `2026-09-11T19:14:38.798136Z`; the user confirmed
+the app connected. No daemon restart, app update or credential reset was needed.
+
+Canary now serves 100% from `relay-credential-broker-canary-assertionfix-bc88caa59`.
+Under the user's prior production authorization, production also serves 100%
+from `relay-credential-broker-production-assertionfix-bc88caa59`. Both use image
+`sha256:17e6629124813f1b0ba84d872a55ebbe5cfc54a740404fcafbeba0225a3a2bd8`
+from Cloud Build `3e210185-37c3-4f0a-8daf-b46c891a94d4`.
+Both public health checks passed and unauthenticated/invalid attestation requests
+remain rejected. Environment, secret references, service accounts, revision
+annotations and signing keys were preserved; production ingress and
+Production-only purchase settings are unchanged. These image updates require no
+new migration. Earlier deployment records below describe the initial rollout.
+
+Real App Store distribution acceptance, cold reconnect and ordinary credential
+refresh remain separate validation steps; the successful TestFlight pairing
+does not establish those results.
 
 ## Acceptance on the existing TestFlight installation
 
@@ -78,8 +133,9 @@ hosts; no purchase, restore, credential reset or daemon restart is required.
 - Relaunch the app and confirm reconnect and ordinary credential refresh.
 - Against isolated fixtures, reject changed claim/host/node/refresh/proof/device/
   issuer/token/key/build, expired nonce, old counter, consumed challenge/token,
-  invalid Apple chains/signatures, wrong environment/category, missing metadata
-  and inactive subscription. Failed approval must roll back all replay state.
+  invalid Apple chains/signatures, wrong environment/category, malformed or
+  stripped metadata and inactive subscription. Accept valid signed objects with
+  and without extensions. Failed approval must roll back all replay state.
 
 Never log or attach raw receipts, JWS, App Attest objects, tokens, pairing secrets,
 account identifiers or device identifiers. App Attest keys are not automatically
@@ -97,7 +153,9 @@ For production, deploy the matching broker image to
 `relay-credential-broker-production` with `VOLT_APP_ATTEST_APP_ID` set to the
 verified signed App ID, its existing production KMS/database/Firebase authority,
 Production-only App Store verification and the production issuer/audience.
-Its verifier requires App Store validation category 4, not TestFlight category 2.
+When signed metadata is present, its verifier requires App Store category 4.
+The iOS 26 correction needs the same broker image update in production after
+canary acceptance; it requires no new app build or database migration.
 Add the three POST attestation routes to the production edge allowlist and keep
 the bounded body/rate controls. Take a backup and apply migration 0004 without
 resetting grants, counters or credentials. Validate with an App Store-distributed

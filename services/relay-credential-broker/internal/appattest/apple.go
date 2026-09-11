@@ -115,57 +115,84 @@ func (v *Verifier) VerifyAttestation(keyID string, object []byte, clientDataHash
 // The internal byte-slice form also permits checking Apple's published fixture,
 // which signs the 24 raw example challenge bytes. Production callers can supply
 // only the 32-byte independently computed request hash through VerifyAttestation.
-func (v *Verifier) verifyAttestation(keyID string, object, clientDataHash []byte, bundleVersion string) ([]byte, error) {
+func (v *Verifier) verifyAttestation(keyID string, object, clientDataHash []byte, bundleVersion string) (_ []byte, resultErr error) {
+	stage := "object_size"
+	defer func() {
+		if resultErr != nil {
+			resultErr = &rejection{reason: stage}
+		}
+	}()
 	if len(object) == 0 || len(object) > maxAttestationBytes {
 		return nil, ErrInvalid
 	}
+	stage = "object_format"
 	var att attestationObject
 	if err := v.decode.Unmarshal(object, &att); err != nil || att.Format != "apple-appattest" ||
 		len(att.Statement.Certificates) != 2 || len(att.Statement.Receipt) == 0 ||
 		len(att.AuthData) < 55 {
 		return nil, ErrInvalid
 	}
+	stage = "leaf_certificate"
 	leaf, err := x509.ParseCertificate(att.Statement.Certificates[0])
 	if err != nil || leaf.IsCA {
 		return nil, ErrInvalid
 	}
+	stage = "intermediate_certificate"
 	intermediate, err := x509.ParseCertificate(att.Statement.Certificates[1])
 	if err != nil || !intermediate.IsCA {
 		return nil, ErrInvalid
 	}
 	intermediates := x509.NewCertPool()
 	intermediates.AddCert(intermediate)
+	stage = "certificate_chain"
 	chains, err := leaf.Verify(x509.VerifyOptions{Roots: v.roots, Intermediates: intermediates, CurrentTime: v.now().UTC(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
 	if err != nil || len(chains) == 0 || len(chains[0]) != 3 || !bytes.Equal(chains[0][1].Raw, intermediate.Raw) {
 		return nil, ErrInvalid
 	}
+	stage = "public_key"
 	publicKey, ok := leaf.PublicKey.(*ecdsa.PublicKey)
 	if !ok || publicKey.Curve != elliptic.P256() {
 		return nil, ErrInvalid
 	}
 	publicBytes := elliptic.Marshal(publicKey.Curve, publicKey.X, publicKey.Y)
 	keyHash := sha256.Sum256(publicBytes)
+	stage = "key_identifier"
 	if base64.StdEncoding.EncodeToString(keyHash[:]) != keyID {
 		return nil, ErrInvalid
 	}
 	// App Attest uses attested credential data (AT), not WebAuthn user presence.
-	if !bytes.Equal(att.AuthData[:32], v.rpID[:]) || att.AuthData[32] != 0x40 ||
-		binary.BigEndian.Uint32(att.AuthData[33:37]) != 0 || !bytes.Equal(att.AuthData[37:53], v.aaguid[:]) {
+	stage = "app_identifier"
+	if !bytes.Equal(att.AuthData[:32], v.rpID[:]) {
 		return nil, ErrInvalid
 	}
+	stage = "authenticator_flags"
+	if att.AuthData[32] != 0x40 {
+		return nil, ErrInvalid
+	}
+	stage = "initial_counter"
+	if binary.BigEndian.Uint32(att.AuthData[33:37]) != 0 {
+		return nil, ErrInvalid
+	}
+	stage = "attestation_environment"
+	if !bytes.Equal(att.AuthData[37:53], v.aaguid[:]) {
+		return nil, ErrInvalid
+	}
+	stage = "credential_identifier"
 	credentialLength := int(binary.BigEndian.Uint16(att.AuthData[53:55]))
 	if credentialLength != 32 || len(att.AuthData) <= 55+credentialLength || !bytes.Equal(att.AuthData[55:87], keyHash[:]) {
 		return nil, ErrInvalid
 	}
+	stage = "credential_public_key"
 	var cose coseKey
 	extensions, err := v.decode.UnmarshalFirst(att.AuthData[87:], &cose)
 	if err != nil || cose.Type != 2 || cose.Algorithm != -7 || cose.Curve != 1 ||
 		len(cose.X) != 32 || len(cose.Y) != 32 || !bytes.Equal(cose.X, publicBytes[1:33]) || !bytes.Equal(cose.Y, publicBytes[33:]) {
 		return nil, ErrInvalid
 	}
-	if !v.validExtensions(extensions, bundleVersion) {
+	if stage = v.extensionRejectionReason(extensions, bundleVersion); stage != "" {
 		return nil, ErrInvalid
 	}
+	stage = "certificate_nonce"
 	data := append(append([]byte(nil), att.AuthData...), clientDataHash[:]...)
 	expectedNonce := sha256.Sum256(data)
 	found := false
@@ -193,28 +220,50 @@ func (v *Verifier) verifyAttestation(keyID string, object, clientDataHash []byte
 
 // VerifyAssertion validates the signed request; the broker must atomically
 // enforce returnedCounter > persistedCounter and consume the challenge.
-func (v *Verifier) VerifyAssertion(publicKey, object []byte, clientDataHash [32]byte, bundleVersion string) (uint32, error) {
+func (v *Verifier) VerifyAssertion(publicKey, object []byte, clientDataHash [32]byte, bundleVersion string) (_ uint32, resultErr error) {
+	stage := "assertion_size"
+	defer func() {
+		if resultErr != nil {
+			resultErr = &rejection{reason: stage}
+		}
+	}()
 	if len(object) == 0 || len(object) > maxAssertionBytes || len(publicKey) != 65 {
 		return 0, ErrInvalid
 	}
 	var assertion assertionObject
-	if err := v.decode.Unmarshal(object, &assertion); err != nil || len(assertion.AuthData) <= 37 ||
-		!bytes.Equal(assertion.AuthData[:32], v.rpID[:]) || assertion.AuthData[32] != 0 {
+	stage = "assertion_format"
+	if err := v.decode.Unmarshal(object, &assertion); err != nil || len(assertion.AuthData) < 37 {
 		return 0, ErrInvalid
 	}
-	if !v.validExtensions(assertion.AuthData[37:], bundleVersion) {
+	stage = "assertion_app_identifier"
+	if !bytes.Equal(assertion.AuthData[:32], v.rpID[:]) {
 		return 0, ErrInvalid
 	}
+	stage = "assertion_flags"
+	// App Attest assertions retain Apple's 0x40 flags byte even though they
+	// omit the attested credential section. This is not a WebAuthn assertion.
+	if assertion.AuthData[32] != 0x40 {
+		return 0, ErrInvalid
+	}
+	if stage = v.extensionRejectionReason(assertion.AuthData[37:], bundleVersion); stage != "" {
+		return 0, ErrInvalid
+	}
+	stage = "assertion_zero_counter"
 	counter := binary.BigEndian.Uint32(assertion.AuthData[33:])
 	if counter == 0 {
 		return 0, ErrInvalid
 	}
+	stage = "assertion_public_key"
 	x, y := elliptic.Unmarshal(elliptic.P256(), publicKey)
 	if x == nil {
 		return 0, ErrInvalid
 	}
 	data := append(append([]byte(nil), assertion.AuthData...), clientDataHash[:]...)
-	digest := sha256.Sum256(data)
+	nonce := sha256.Sum256(data)
+	// Apple signs nonce as a message with ECDSA-SHA256. VerifyASN1 expects
+	// the message digest, unlike CryptoKit's Data-taking verification API.
+	digest := sha256.Sum256(nonce[:])
+	stage = "assertion_signature"
 	if !ecdsa.VerifyASN1(&ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, digest[:], assertion.Signature) {
 		return 0, ErrInvalid
 	}
@@ -222,11 +271,34 @@ func (v *Verifier) VerifyAssertion(publicKey, object []byte, clientDataHash [32]
 }
 
 func (v *Verifier) validExtensions(data []byte, bundleVersion string) bool {
+	return v.extensionRejectionReason(data, bundleVersion) == ""
+}
+
+func (v *Verifier) extensionRejectionReason(data []byte, bundleVersion string) string {
 	var extensions struct {
 		Category      []byte `cbor:"apple_validation_category_01"`
 		BundleVersion string `cbor:"apple_bundle_version_01"`
 	}
-	return len(data) > 0 && len(data) <= 256 && v.decode.Unmarshal(data, &extensions) == nil &&
-		len(extensions.Category) == 4 && binary.LittleEndian.Uint32(extensions.Category) == v.category &&
-		bundleVersion != "" && extensions.BundleVersion == bundleVersion
+	if len(data) == 0 {
+		// Apple introduced these extensions in iOS 27. Earlier authenticators
+		// omit them; the nonce/signature still covers all authenticator bytes.
+		// Nonempty metadata must pass every check below, even if incomplete.
+		return ""
+	}
+	if len(data) > 256 {
+		return "metadata_size"
+	}
+	if v.decode.Unmarshal(data, &extensions) != nil {
+		return "metadata_encoding"
+	}
+	if len(extensions.Category) != 4 {
+		return "validation_category_missing"
+	}
+	if binary.LittleEndian.Uint32(extensions.Category) != v.category {
+		return "validation_category_mismatch"
+	}
+	if bundleVersion == "" || extensions.BundleVersion != bundleVersion {
+		return "bundle_version_mismatch"
+	}
+	return ""
 }
