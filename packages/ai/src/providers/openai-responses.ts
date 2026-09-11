@@ -21,6 +21,7 @@ import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
 import { resolvePromptCacheRetention, supportsPromptCacheMode } from "./prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
+import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 
@@ -104,8 +105,9 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			const cacheRetention = resolvePromptCacheRetention(model, options?.cacheRetention, options?.env);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, options?.env);
-			let params = buildParams(model, context, options);
-			const nextParams = await options?.onPayload?.(params, model);
+			const toolResultPayload = new ToolResultPayloadTracker();
+			let params = buildParams(model, context, options, toolResultPayload);
+			const nextParams = await options?.onPayload?.(params, model, toolResultPayload.metadata);
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
 			}
@@ -216,8 +218,13 @@ function createClient(
 	});
 }
 
-function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
-	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS);
+function buildParams(
+	model: Model<"openai-responses">,
+	context: Context,
+	options: OpenAIResponsesOptions | undefined,
+	toolResultPayload: ToolResultPayloadTracker,
+) {
+	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, { toolResultPayload });
 
 	const cacheRetention = resolvePromptCacheRetention(model, options?.cacheRetention, options?.env);
 	const disableImplicitPromptCache = cacheRetention === "none" && supportsPromptCacheMode(model, "explicit");

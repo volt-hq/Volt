@@ -203,7 +203,7 @@ describe("buildSystemPrompt", () => {
 			);
 			expect(prompt).toContain("when the user or applicable project instructions explicitly request it");
 			expect(prompt).toContain(
-				"the benefit from specialization or isolation materially outweighs the synchronous startup, latency, and coordination cost",
+				"the benefit from specialization or isolation materially outweighs the startup, latency, and coordination cost",
 			);
 			expect(prompt).toContain("If that benefit is not clear, do the task yourself.");
 			expect(prompt).not.toContain("while you continue useful, non-overlapping local work");

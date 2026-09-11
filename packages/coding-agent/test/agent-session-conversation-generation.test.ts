@@ -281,16 +281,19 @@ describe("AgentSession conversation generation commits", () => {
 
 		const prompt = runtime.session.prompt("third user");
 		await updateStarted;
-		await expect(runtime.session.navigateTree(firstAssistantId, { summarize: false })).rejects.toThrow(
-			"Cannot navigate the session tree while an agent or bash run is active",
-		);
-		const structuralError = "Cannot change sessions while an agent run is active; abort or wait for it to finish";
-		await expect(runtime.newSession()).rejects.toThrow(structuralError);
-		await expect(runtime.switchSession(targetManager.getSessionRef()!)).rejects.toThrow(structuralError);
-		await expect(runtime.switchSessionById(targetManager.getSessionId())).rejects.toThrow(structuralError);
-		await expect(runtime.fork(firstAssistantId, { position: "at" })).rejects.toThrow(structuralError);
-		releaseUpdate();
-		await prompt;
+		try {
+			await expect(runtime.session.navigateTree(firstAssistantId, { summarize: false })).rejects.toThrow(
+				"Cannot navigate the session tree while an agent, bash run, or background job is active",
+			);
+			const structuralError = "Cannot change sessions while an agent run is active; abort or wait for it to finish";
+			await expect(runtime.newSession()).rejects.toThrow(structuralError);
+			await expect(runtime.switchSession(targetManager.getSessionRef()!)).rejects.toThrow(structuralError);
+			await expect(runtime.switchSessionById(targetManager.getSessionId())).rejects.toThrow(structuralError);
+			await expect(runtime.fork(firstAssistantId, { position: "at" })).rejects.toThrow(structuralError);
+		} finally {
+			releaseUpdate();
+			await prompt;
+		}
 
 		const branchMessages = manager
 			.getBranch()

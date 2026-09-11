@@ -29,6 +29,8 @@ export interface HostActionSessionState {
 	isBusy?: boolean;
 	isStreaming: boolean;
 	isCompacting: boolean;
+	/** Background work remains cancellable after foreground settlement. */
+	hasBackgroundJobs?: boolean;
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	fastModeEnabled?: boolean;
@@ -463,7 +465,7 @@ export function registerBuiltinHostActions(registry: HostActionRegistry): HostAc
 	registry.register({
 		id: RUN_CANCEL_ACTION_ID,
 		label: "Cancel run",
-		description: "Abort the current agent operation",
+		description: "Abort the current agent operation and all background jobs",
 		category: "session",
 		presentation: { kind: "button", group: "Session" },
 		args: [],
@@ -472,7 +474,7 @@ export function registerBuiltinHostActions(registry: HostActionRegistry): HostAc
 		streamingBehavior: "immediate",
 		remoteSafe: true,
 		availability: (context) =>
-			isHostSessionBusy(context.session) || context.session.isCompacting
+			isHostSessionBusy(context.session) || context.session.isCompacting || context.session.hasBackgroundJobs
 				? { enabled: true }
 				: { enabled: false, disabledReason: "No active run to cancel" },
 		handler: invokeRunCancelAction,

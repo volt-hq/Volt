@@ -163,6 +163,7 @@ function createSnapshotBuilder(manager: SessionManager, sessionId: string): Conv
 				pendingMessageCount: 0,
 				steeringQueue: [],
 				followUpQueue: [],
+				backgroundJobs: [],
 			},
 			transcript: {
 				workspaceName: "scratch",

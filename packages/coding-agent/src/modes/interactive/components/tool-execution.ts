@@ -16,6 +16,11 @@ import {
 } from "@hansjm10/volt-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { theme } from "../../../core/theme/runtime.ts";
+import {
+	BackgroundJobView,
+	getBackgroundJobSnapshot,
+	renderBackgroundJobCard,
+} from "../../../core/tools/background-render.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
 import { formatDuration, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
@@ -81,13 +86,13 @@ class ToolHeaderMetadata implements Component {
 				frame,
 				Math.min(frame.lines.length, image.top + image.rows),
 				0,
-				createRenderFrame([metadata]),
+				new Text(metadata, 0, 0).render(width),
 			);
 		}
 		if (visibleWidth(line) + visibleWidth(metadata) + 1 <= width) {
 			return mapRenderFrameLines(frame, (value, row) => (row === index ? `${line} ${metadata}` : value));
 		}
-		return spliceRenderFrameRows(frame, index + 1, 0, createRenderFrame([metadata]));
+		return spliceRenderFrameRows(frame, index + 1, 0, new Text(metadata, 0, 0).render(width));
 	}
 
 	invalidate(): void {
@@ -122,6 +127,7 @@ export class ToolExecutionComponent extends Container {
 	private executionStartedAt?: number;
 	private executionDurationMs?: number;
 	private argsComplete = false;
+	private argsCompletedAt?: number;
 	private result?: {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 		isError: boolean;
@@ -186,7 +192,28 @@ export class ToolExecutionComponent extends Container {
 		}
 	}
 
+	/** Identify native launch cards without treating extension renderers or inspections as duplicates. */
+	getBackgroundJobId(): string | undefined {
+		if (
+			this.hideComponent ||
+			(this.toolName !== "bash" && this.toolName !== "subagent") ||
+			!(this.resultRendererComponent instanceof BackgroundJobView)
+		)
+			return undefined;
+		const job = getBackgroundJobSnapshot(this.result?.details);
+		return job?.toolName === this.toolName && job.toolCallId === this.toolCallId ? job.id : undefined;
+	}
+
+	private getHistoricalBackgroundJob() {
+		// jobs has its own renderer, including post-hook error/content handling during replay.
+		if (this.toolDefinition || !["bash", "subagent"].includes(this.toolName)) return undefined;
+		return getBackgroundJobSnapshot(this.result?.details);
+	}
+
 	private getCallRenderer(): ToolDefinition<any, any>["renderCall"] | undefined {
+		if (this.getHistoricalBackgroundJob()) {
+			return () => new BackgroundJobView(() => createRenderFrame([]));
+		}
 		if (!this.builtInToolDefinition) {
 			return this.toolDefinition?.renderCall;
 		}
@@ -197,6 +224,22 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private getResultRenderer(): ToolDefinition<any, any>["renderResult"] | undefined {
+		const historicalJob = this.getHistoricalBackgroundJob();
+		if (historicalJob) {
+			return (_result, options, theme) =>
+				new BackgroundJobView((width) =>
+					renderBackgroundJobCard(historicalJob, width, theme, {
+						expanded: options.expanded,
+						historical: true,
+						label:
+							typeof this.args?.command === "string"
+								? this.args.command
+								: typeof this.args?.task === "string"
+									? this.args.task
+									: undefined,
+					}),
+				);
+		}
 		if (!this.builtInToolDefinition) {
 			return this.toolDefinition?.renderResult;
 		}
@@ -292,6 +335,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	setArgsComplete(): void {
+		this.argsCompletedAt ??= Date.now();
 		this.argsComplete = true;
 		this.argumentRenderCoalescer.commitNow(true);
 	}
@@ -567,8 +611,23 @@ export class ToolExecutionComponent extends Container {
 		if (this.result.isError) {
 			return true;
 		}
-		const mode = (this.result.details as { mode?: unknown } | undefined)?.mode;
-		return mode === "single" || mode === "parallel" || mode === "chain";
+		const details = this.result.details as { mode?: unknown; backgroundJob?: unknown } | undefined;
+		const backgroundJob = details?.backgroundJob;
+		if (typeof backgroundJob === "object" && backgroundJob !== null && !Array.isArray(backgroundJob)) {
+			const job = backgroundJob as Record<string, unknown>;
+			// A background start acknowledges a job before child metadata is available.
+			if (
+				typeof job.id === "string" &&
+				job.id.startsWith("job_") &&
+				job.id.length > 4 &&
+				job.toolName === "subagent" &&
+				job.toolCallId === this.toolCallId &&
+				job.status === "running"
+			) {
+				return true;
+			}
+		}
+		return details?.mode === "single" || details?.mode === "parallel" || details?.mode === "chain";
 	}
 
 	private getTextOutput(): string {
@@ -581,7 +640,7 @@ export class ToolExecutionComponent extends Container {
 	private withHeaderMetadata(component: Component): Component {
 		// Subagents render as conversation participants with their own explicit
 		// lifecycle state instead of as a generic tool card.
-		if (this.toolName === "subagent") return component;
+		if (this.toolName === "subagent" || component instanceof BackgroundJobView) return component;
 		return new ToolHeaderMetadata(component, () => this.getHeaderMetadata());
 	}
 
@@ -593,25 +652,39 @@ export class ToolExecutionComponent extends Container {
 			if (executionState === "interrupted") state += theme.fg("muted", " · interrupted");
 			else if (executionState === "not_started" || (this.liveProgress && !this.executionStarted))
 				state += theme.fg("muted", " · not started");
-		} else if (this.result && this.isPartial) {
-			state = theme.fg("warning", "[partial]");
-		} else if (this.result) {
+		} else if (this.result && !this.isPartial) {
 			state = theme.fg("success", "[success]");
-		} else if (this.executionStarted) {
+		} else if (this.executionStarted || this.result) {
+			// Partial output is still an executing call, not a terminal outcome.
 			state = theme.fg("warning", "[running]");
+		} else if (this.argsComplete) {
+			state = theme.fg("muted", "[queued]");
+		} else if (this.liveProgress) {
+			state = theme.fg("accent", "[streaming]");
 		} else {
 			state = theme.fg("muted", "[pending]");
 		}
 
-		if (this.liveProgress && (!this.result || this.isPartial)) {
-			const phase = this.executionStarted
-				? this.toolName === "edit"
-					? "Applying Edit"
-					: `Running ${this.toolName}`
-				: this.argsComplete
-					? "Ready"
-					: `Preparing ${this.toolName === "edit" ? "Edit" : this.toolName}`;
-			const elapsed = Math.max(0, Date.now() - (this.executionStartedAt ?? this.preparationStartedAt));
+		if (this.liveProgress && !this.result?.isError && (!this.result || this.isPartial)) {
+			let phase: string;
+			if (this.executionStarted || this.result) {
+				phase =
+					this.toolName === "write" ? "Writing file" : this.toolName === "edit" ? "Applying edits" : "Executing";
+			} else if (this.argsComplete) {
+				phase = "Waiting to run";
+			} else {
+				// Streamed arguments can include a live file preview; no tool has run yet.
+				phase =
+					this.toolName === "write"
+						? "Generating content"
+						: this.toolName === "edit"
+							? "Generating edits"
+							: "Generating arguments";
+			}
+			const elapsed = Math.max(
+				0,
+				Date.now() - (this.executionStartedAt ?? this.argsCompletedAt ?? this.preparationStartedAt),
+			);
 			return `${state} ${theme.fg("muted", `${phase} · ${formatDuration(elapsed)}`)}`;
 		}
 

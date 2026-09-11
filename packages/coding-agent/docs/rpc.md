@@ -146,6 +146,8 @@ Response:
 
 `abort` is the semantic cancellation command. Closing the RPC transport without sending `abort` requests transport shutdown or remote detach according to the transport, but it does not ask Volt to cancel the active run.
 
+`abort` also cancels all session-owned background jobs and waits for their cleanup. Use `cancel_job` to cancel only one job. `agent_settled` and `get_state.isBusy` describe foreground work; jobs may still be running afterward.
+
 #### new_session
 
 Start a fresh session. Can be cancelled by a `session_before_switch` extension event handler.
@@ -305,6 +307,52 @@ Response:
 ```
 
 Messages are `AgentMessage` objects (see [Message Types](#message-types)).
+
+### Background jobs
+
+Local RPC and Iroh conversation clients can inspect and cancel the bound runtime's background Bash and subagent jobs without prompting the model. These commands do not start jobs; the model starts them through native tools with `background: true`.
+
+#### list_jobs
+
+```json
+{"id":"jobs-1","type":"list_jobs"}
+```
+
+Returns `data: {sessionId, jobs}`. `jobs` is a newest-first array of at most 64 accessible job summaries. Each summary contains `id`, `toolName` (`bash` or `subagent`), `label`, `status`, `startedAt`, `outputTruncated`, and optional `toolCallId`, `endedAt`, and `lastOutputAt`. Timestamps are Unix epoch milliseconds. An oversized originating provider tool-call identity is omitted rather than truncated.
+
+Statuses are `running`, `cancelling`, `completed`, `failed`, and `cancelled`. Lists include retained terminal jobs but never contain output. The same array is always present as `get_state.backgroundJobs` and `conversation_bootstrap.state.backgroundJobs`, including `[]` on fresh or restarted runtimes.
+
+#### read_job
+
+```json
+{"id":"jobs-2","type":"read_job","jobId":"job_..."}
+```
+
+Returns `data: {sessionId, job}`, where `job` contains the summary fields plus `output`: the latest non-destructive output tail, bounded to 50 KiB UTF-8 or 2000 lines before remote path sanitization. Terminal control sequences are removed. `outputTruncated` indicates omitted output. Reads neither consume output nor acknowledge that the model received it, and do not start inference or append transcript entries.
+
+#### cancel_job
+
+```json
+{"id":"jobs-3","type":"cancel_job","jobId":"job_...","conversationAuthority":{"sessionId":"session-1","subscriptionId":"sub-1","branchEpoch":"branch-1"}}
+```
+
+Returns `data: {sessionId, job}` with metadata only. A successful request normally returns `status: "cancelling"`; cancellation is complete only after the worker's cleanup settles and its status becomes `cancelled`. Repeating cancellation on a retained terminal job returns its existing terminal state. Foreground work, sibling jobs, and the connection remain active.
+
+Ordered remote cancellation requires the current bootstrap's `conversationAuthority`; plain local RPC does not. Ordered Jobs responses additionally carry `data.branchEpoch`. Buffered responses from an obsolete branch are discarded, and clients must discard results belonging to an obsolete session/epoch.
+
+Over Iroh, list/read require `conversation.observe.v1` and cancellation requires `conversation.control.v1`. The session's `jobs` tool and the originating `bash`/`subagent` tool must still be active. Unknown, revoked, foreign-runtime, and obsolete branch handles fail with the normal RPC error shape. Discovery and management streams do not expose these commands.
+
+#### background_jobs_changed
+
+```json
+{"type":"background_jobs_changed","jobs":[{"id":"job_...","toolName":"bash","label":"run checks","status":"running","startedAt":1800000000000,"outputTruncated":false}],"delivery":{"subscriptionId":"sub-1","cursor":12}}
+```
+
+This metadata-only event replaces the Jobs list and invalidates cached output. Re-read only the job being inspected; output may have changed even when the summary fields are unchanged. Updates are coalesced to at most ten per second and continue after foreground settlement. Ordered streams carry the normal `delivery` cursor; plain RPC does not. Reconnect/resync uses the authoritative bootstrap snapshot rather than reconstructing jobs from transcript acknowledgements.
+
+Jobs remain runtime- and branch-scoped. Detaching a retained remote runtime does not cancel them; runtime shutdown/replacement or process restart invalidates their handles. Historical tool details and completion notices remain snapshots, not live control authority. The native `run.cancel` action stays enabled while background work remains.
+
+Typed clients expose `listJobs()`, `readJob(jobId)`, and `cancelJob(jobId, {conversationAuthority})`, with `RpcListJobsResponse`, `RpcReadJobResponse`, and `RpcCancelJobResponse` return types.
 
 ### Subagents (local RPC only)
 
@@ -1523,6 +1571,7 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | `extension_error` | Extension threw an error |
 | `models_changed` | Available model catalog changed on disk (login, logout, or API key save) |
 | `git_context_changed` | Full replacement of the active session's nullable cached Git context |
+| `background_jobs_changed` | Metadata-only Jobs replacement and output invalidation, including while foreground work is idle |
 | `mcp_servers_changed` | MCP server list or enablement changed (`servers`: full summary list) |
 | `mcp_server_status_changed` | An MCP server's status or auth state changed (`server`: full summary) |
 | `mcp_auth_request` | An MCP OAuth flow needs user action (`serverId`, `auth`: flow, URL/device-code details) |

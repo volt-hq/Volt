@@ -32,6 +32,7 @@ export interface UiActionDiscoverySession {
 		getRegisteredCommands(): ResolvedCommand[];
 	};
 	isBusy?: boolean;
+	hasBackgroundJobs?: boolean;
 	isCompacting?: boolean;
 	isStreaming?: boolean;
 	model?: Model<Api>;
@@ -95,6 +96,7 @@ function createHostActionDescriptorContext(
 	return {
 		session: {
 			isBusy: session.isBusy ?? session.isStreaming ?? false,
+			hasBackgroundJobs: session.hasBackgroundJobs,
 			isCompacting: session.isCompacting ?? false,
 			isStreaming: session.isStreaming ?? false,
 			model: session.model,

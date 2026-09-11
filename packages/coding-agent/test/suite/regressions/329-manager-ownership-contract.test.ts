@@ -352,6 +352,7 @@ describe("PR #329 manager ownership contract", () => {
 		let cliManager: SessionManager | undefined;
 		let serviceGitContext: GitContextProvider | undefined;
 		let serviceGitDisposeCalls = 0;
+		let persistenceFailureInjected = false;
 		let managerClosed = false;
 		const harnessGitContext = harness.session.gitContextProvider;
 		const createSessionManager = SessionManager.create.bind(SessionManager);
@@ -374,8 +375,12 @@ describe("PR #329 manager ownership contract", () => {
 			if (this === serviceGitContext) serviceGitDisposeCalls++;
 			disposeGitContext.call(this);
 		});
+		// Fail setup only; cleanup must still drain accepted writes.
 		vi.spyOn(SessionManager.prototype, "flush").mockImplementation(function (this: SessionManager): Promise<void> {
-			if (this === cliManager && serviceGitContext) return Promise.reject(setupError);
+			if (this === cliManager && serviceGitContext && !persistenceFailureInjected) {
+				persistenceFailureInjected = true;
+				return Promise.reject(setupError);
+			}
 			return flush.call(this);
 		});
 
@@ -489,8 +494,9 @@ describe("PR #329 manager ownership contract", () => {
 			return disposeMcp.call(this);
 		});
 		const flush = sessionManager.flush.bind(sessionManager);
+		// Fail setup only; cleanup must still drain accepted writes.
 		vi.spyOn(sessionManager, "flush").mockImplementation(async () => {
-			if (sdkMcpManager) {
+			if (sdkMcpManager && !persistenceFailureInjected) {
 				persistenceFailureInjected = true;
 				throw setupError;
 			}

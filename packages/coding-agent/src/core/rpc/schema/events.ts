@@ -17,6 +17,7 @@ import {
 	RPC_UI_ACTION_STATE_TYPE_MAX_CHARS,
 	RPC_UI_ACTION_STATE_VALUE_MAX_CHARS,
 } from "../wire-limits.ts";
+import { RpcBackgroundJobsSchema } from "./background-jobs.ts";
 import { RpcConversationDeliveryPositionSchema } from "./conversation.ts";
 import { RpcGitContextSchema } from "./git-context.ts";
 import { opaque, stringEnum } from "./helpers.ts";
@@ -252,6 +253,16 @@ export const RpcGitContextChangedEventSchema = Type.Object(
 	{
 		type: Type.Literal("git_context_changed"),
 		gitContext: Type.Union([RpcGitContextSchema, Type.Null()]),
+		delivery: Type.Optional(RpcConversationDeliveryPositionSchema),
+	},
+	{ additionalProperties: false },
+);
+
+/** Full metadata replacement and invalidation of cached job output, including while the agent is idle. */
+export const RpcBackgroundJobsChangedEventSchema = Type.Object(
+	{
+		type: Type.Literal("background_jobs_changed"),
+		jobs: RpcBackgroundJobsSchema,
 		delivery: Type.Optional(RpcConversationDeliveryPositionSchema),
 	},
 	{ additionalProperties: false },

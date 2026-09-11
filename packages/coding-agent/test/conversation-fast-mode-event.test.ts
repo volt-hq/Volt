@@ -49,6 +49,7 @@ const buildSnapshot =
 			pendingMessageCount: 0,
 			steeringQueue: [],
 			followUpQueue: [],
+			backgroundJobs: [],
 		},
 		transcript: {
 			sessionId: "session-1",

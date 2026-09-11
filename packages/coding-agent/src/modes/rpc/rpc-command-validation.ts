@@ -329,6 +329,9 @@ function validateLayeredResourceBounds(type: RpcCommandSchemaKey, command: Recor
 				validateConversationIdentifierResourceBound(command, "preserveReviewRunId") ??
 				validateConversationIdentifierResourceBound(command, "parentSessionId")
 			);
+		case "read_job":
+		case "cancel_job":
+			return validateConversationIdentifierResourceBound(command, "jobId");
 		case "cancel_workflow":
 			return validateConversationIdentifierResourceBound(command, "workflowId");
 		case "list_review_discussions":

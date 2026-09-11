@@ -29,6 +29,7 @@ const EMPTY_USAGE: Usage = {
 
 type RenderSessionContextThis = {
 	pendingTools: Map<string, ToolExecutionComponent>;
+	liveBackgroundJobTools: Map<string, { component: ToolExecutionComponent; jobId?: string }>;
 	disposePendingTools(): void;
 	chatContainer: Container;
 	footer: { invalidate(): void };
@@ -58,6 +59,7 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 	const chatContainer = new Container();
 	return {
 		pendingTools: new Map<string, ToolExecutionComponent>(),
+		liveBackgroundJobTools: new Map(),
 		disposePendingTools() {
 			for (const component of this.pendingTools.values()) {
 				component.dispose();

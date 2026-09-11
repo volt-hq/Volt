@@ -148,6 +148,18 @@ Use `F12` or `/debug` to capture diagnostics while a response or tool is active.
 | `app.session.delete` | `ctrl+d` | Delete session |
 | `app.session.deleteNoninvasive` | `ctrl+backspace` | Delete session when query is empty |
 
+### Background Jobs
+
+`/jobs` or Alt+J opens the live background-job inspector, including while the model is waiting. Arrow keys select a job; Enter opens its retained output. In the output view, arrow keys and PageUp/PageDown scroll a paused, bounded reading snapshot. End resumes following new output. Escape returns to the list or closes the inspector without cancelling work.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.jobs.open` | `alt+j` | Open or close the background-job inspector |
+| `app.jobs.cancel` | `ctrl+k` | Request cancellation of the selected job, after confirmation |
+| `app.jobs.follow` | `end` | Follow the latest output in the inspector |
+
+Cancellation uses Enter to confirm and Escape to keep the job running. The job remains **Cancelling** until its worker stops. Navigation and confirmation use the configurable `tui.select.*` actions.
+
 ### Models and Thinking
 
 | Keybinding id | Default | Description |

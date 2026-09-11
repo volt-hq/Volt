@@ -57,7 +57,7 @@ export function getIrohRemoteWorkingDirectoryValidationError(value: string): str
 	return undefined;
 }
 export const DEFAULT_IROH_REMOTE_ALLOW_TOOLS =
-	"read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp";
+	"read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp,jobs";
 // lsp is listed because its rename/fix actions apply workspace-wide edits. image_gen can read/upload local images and write files.
 export const IROH_REMOTE_UNSAFE_TOOL_NAMES = [
 	"bash",

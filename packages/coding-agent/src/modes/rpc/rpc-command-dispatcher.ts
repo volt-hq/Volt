@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import {
@@ -28,6 +29,7 @@ import {
 	recordReviewFindingOutcome,
 } from "../../core/review-state.ts";
 import { createReviewFileMetadata, createReviewPullRequestMetadata } from "../../core/review-workflows.ts";
+import { listRpcBackgroundJobs, projectRpcBackgroundJob } from "../../core/rpc/background-jobs.ts";
 import { getRpcErrorResponseTarget, isUsableRpcConversationIdentifier } from "../../core/rpc/correlation.ts";
 import { buildRpcSessionState } from "../../core/rpc/session-state.ts";
 import { projectSessionTreePage } from "../../core/rpc/session-tree.ts";
@@ -101,6 +103,8 @@ export interface RpcCommandDispatcherContext {
 	): Promise<{ subscriptionId: string; requestId: string; checkpointCursor: number }>;
 	getPendingHostActionRequests(): RpcHostActionRequest[];
 	cancelPendingHostActionRequests(message?: string): void;
+	/** Captured at dispatch for generation-scoped Jobs responses on ordered transports. */
+	conversationBranchEpoch?: string;
 	/** Revalidate the mutation lease after an awaited dispatcher/session preflight boundary. */
 	assertConversationGenerationCurrent(): void;
 	subscriptionUsageService: SubscriptionUsageService;
@@ -1058,6 +1062,43 @@ export async function handleRpcCommand(
 				totalImages: result.totalImages,
 				images: result.images,
 				nextImageIndex: result.nextImageIndex,
+			});
+		}
+
+		// =================================================================
+		// Session-owned background jobs
+		// =================================================================
+
+		case "list_jobs":
+		case "read_job":
+		case "cancel_job": {
+			const scope = {
+				sessionId: session.sessionId,
+				...(context.conversationBranchEpoch === undefined ? {} : { branchEpoch: context.conversationBranchEpoch }),
+			};
+			if (command.type === "list_jobs") {
+				return createRpcSuccessResponse(id, "list_jobs", {
+					...scope,
+					jobs: listRpcBackgroundJobs(session.backgroundJobs),
+				});
+			}
+			context.assertConversationGenerationCurrent();
+			const job =
+				command.type === "cancel_job"
+					? session.backgroundJobs.cancel(command.jobId)
+					: session.backgroundJobs.get(command.jobId);
+			const metadata = projectRpcBackgroundJob(job);
+			return createRpcSuccessResponse(id, command.type, {
+				...scope,
+				job:
+					command.type === "read_job"
+						? {
+								...metadata,
+								output: stripVTControlCharacters(job.output)
+									.replace(/\r\n?/g, "\n")
+									.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ""),
+							}
+						: metadata,
 			});
 		}
 

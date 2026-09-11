@@ -64,11 +64,20 @@ if (-not $privateDiagnosticsWasSet) {
 	$env:VOLT_REVIEW_PRIVATE_DIAGNOSTICS = "1"
 }
 
+# Source-run performance logs contain metadata only. Preserve an explicit opt-out.
+$backgroundDiagnosticsWasSet = Test-Path Env:VOLT_BACKGROUND_JOB_DIAGNOSTICS
+if (-not $backgroundDiagnosticsWasSet) {
+	$env:VOLT_BACKGROUND_JOB_DIAGNOSTICS = "1"
+}
+
 try {
 	$runnerPath = Join-Path $scriptDir "scripts/run-coding-agent-source.mjs"
 	& node $runnerPath @forwardArgs
 	$exitCode = $LASTEXITCODE
 } finally {
+	if (-not $backgroundDiagnosticsWasSet) {
+		Remove-Item Env:VOLT_BACKGROUND_JOB_DIAGNOSTICS -ErrorAction SilentlyContinue
+	}
 	if (-not $privateDiagnosticsWasSet) {
 		Remove-Item Env:VOLT_REVIEW_PRIVATE_DIAGNOSTICS -ErrorAction SilentlyContinue
 	}

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { convertToLlm, createCustomMessage } from "../src/core/messages.ts";
 import { restoreStdout } from "../src/core/output-guard.ts";
 import type { createReviewSeedMessage } from "../src/core/review-presentation.ts";
@@ -315,6 +316,7 @@ function createCollectingTransport(): CollectingTransport {
 function makeSession(sessionId: string, sessionManager = SessionManager.inMemory("/workspace")) {
 	let fastModeEnabled = false;
 	return {
+		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 		bindExtensions: vi.fn(async () => {}),
 		subscribe: vi.fn(() => vi.fn()),
 		activeToolExecutions: new Map(),

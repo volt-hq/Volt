@@ -1,6 +1,7 @@
 import { describe, expect, it, test, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import {
 	createHostThemeTokensFrame,
@@ -42,6 +43,7 @@ describe("host theme token push (§9.5)", () => {
 
 	test("rpc mode reports set_client_capabilities feature lists to the host", async () => {
 		const session = {
+			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 			bindExtensions: vi.fn(async () => undefined),
 			subscribe: vi.fn(() => () => undefined),
 			activeToolExecutions: new Map(),

@@ -12,6 +12,8 @@ Implemented surfaces:
 - Local RPC lifecycle commands for definition-backed subagents.
 - App-visible "new agent with initial prompt" flow through existing Iroh conversation streams followed by `prompt`.
 
+Native spawning calls also support session-owned background jobs through `background: true` and the shared `jobs` control tool. The initial registry preflight remains direct, while a confirmed background batch can outlive the parent model turn. Existing child handles, registry, admission, and budget enforcement remain authoritative. See [Background jobs](usage.md#background-jobs) for lifecycle, limits, and restart boundaries.
+
 Not implemented in this MVP: package-manager `agents` resources, subprocess fallback, remote/Iroh subagent lifecycle commands, protocol handshake changes, app-native subagent action surfaces, or spawning modes beyond single/parallel/chain.
 
 ## Summary
@@ -303,6 +305,8 @@ The result's required `status` (`completed`, `failed`, or `aborted`) is authorit
 These lifecycle commands are local RPC only. Iroh remote transports reject them until a separate remote policy slice defines allowlist, ownership, and redaction rules.
 
 ## TUI behavior
+
+Ordinary calls retain the compact native renderer below. Background starts instead show a job ID and running acknowledgement; the `jobs` tool retrieves progress and results. Child activities remain visible in the existing subagent inspector.
 
 The parent tool row stays compact:
 

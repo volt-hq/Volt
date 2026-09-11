@@ -128,6 +128,18 @@ Rules:
 - system-prompt and `before_agent_start` preflight receive the active signal
 - `waitForIdle()` covers preflight callbacks, terminal listener settlement, and failure cleanup
 
+### Shared host admission
+
+Hosts with work outside the foreground Harness can supply one `AgentHarnessAdmissionGate` through `AgentHarnessOptions.admissionGate`. Without one, each Harness uses an independent gate. Share the same gate with detached-work admission rather than duplicating host lifecycle checks in individual prompt APIs.
+
+`gate.suspend()` synchronously closes admission and advances its revision. It returns an idempotent release function; overlapping suspensions keep admission closed until every holder releases. `gate.assertOpen()` rejects new work with `AgentHarnessError` code `busy`. Hosts that defer dispatch can capture `gate.revision` and check `gate.isCurrent(revision)` before starting it.
+
+The operation coordinator enforces the gate when reserving turns, continuations, compaction, and tree operations. Reserved work also checks its admission revision before execution. Pending successors must retain that revision at promotion; rejected successors settle their waiters without starting. Releasing a suspension never restores an old reservation's authority.
+
+Suspension does not itself cancel executing operations or close the runtime. Install the fence before signaling foreground and detached work, then release it only after all cleanup settles, including rejected cleanup. Queues, non-triggering messages, runtime configuration, cancellation, and teardown remain available. A suspension is not an active foreground operation, so `getPhase()` may still report `idle` while admission is closed.
+
+Coding Agent's `AgentSession` owns one gate for its Harness, native Bash/subagent execution, and background-job manager. Its abort promise is only the shared cleanup join; the gate owns admission and the preflight revision. Disposal keeps a permanent hold, so completion of an overlapping abort cannot reopen admission.
+
 Terminal teardown should:
 
 1. call `requestClose(source)` or its fence-only `dispose()` alias

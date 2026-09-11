@@ -36,6 +36,7 @@ import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { resolvePromptCacheRetention, supportsPromptCacheMode } from "./prompt-cache.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.ts";
+import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 function getCacheControl(
@@ -556,8 +557,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				client = created.client;
 				isOAuth = created.isOAuthToken;
 			}
-			let params = buildParams(model, context, isOAuth, options);
-			const nextParams = await options?.onPayload?.(params, model);
+			const toolResultPayload = new ToolResultPayloadTracker();
+			let params = buildParams(model, context, isOAuth, options, toolResultPayload);
+			const nextParams = await options?.onPayload?.(params, model, toolResultPayload.metadata);
 			if (nextParams !== undefined) {
 				params = nextParams as MessageCreateParamsStreaming;
 			}
@@ -903,12 +905,20 @@ function buildParams(
 	context: Context,
 	isOAuthToken: boolean,
 	options?: AnthropicOptions,
+	toolResultPayload?: ToolResultPayloadTracker,
 ): MessageCreateParamsStreaming {
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention, options?.env);
 	const compat = getAnthropicCompat(model);
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
-		messages: convertMessages(context.messages, model, isOAuthToken, cacheControl, compat.allowEmptySignature),
+		messages: convertMessages(
+			context.messages,
+			model,
+			isOAuthToken,
+			cacheControl,
+			compat.allowEmptySignature,
+			toolResultPayload,
+		),
 		max_tokens: options?.maxTokens ?? model.maxTokens,
 		stream: true,
 	};
@@ -1014,11 +1024,12 @@ function convertMessages(
 	isOAuthToken: boolean,
 	cacheControl?: CacheControlEphemeral,
 	allowEmptySignature = false,
+	toolResultPayload?: ToolResultPayloadTracker,
 ): MessageParam[] {
 	const params: MessageParam[] = [];
 
 	// Transform messages for cross-provider compatibility
-	const transformedMessages = transformMessages(messages, model, normalizeToolCallId);
+	const transformedMessages = transformMessages(messages, model, normalizeToolCallId, toolResultPayload);
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
@@ -1129,6 +1140,7 @@ function convertMessages(
 				content: convertContentBlocks(msg.content),
 				is_error: msg.isError,
 			});
+			toolResultPayload?.include(msg);
 
 			// Look ahead for consecutive toolResult messages
 			let j = i + 1;
@@ -1140,6 +1152,7 @@ function convertMessages(
 					content: convertContentBlocks(nextMsg.content),
 					is_error: nextMsg.isError,
 				});
+				toolResultPayload?.include(nextMsg);
 				j++;
 			}
 

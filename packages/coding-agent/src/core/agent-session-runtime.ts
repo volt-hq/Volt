@@ -29,6 +29,7 @@ import {
 import { prepareReviewGeneralReplacement } from "./review-general.ts";
 import { captureReviewStateForHandoff, listReviewRuns, restoreReviewStateFromHandoff } from "./review-state.ts";
 import { ReviewWorkflowManager } from "./review-workflows.ts";
+import { subscribeRpcSessionEvents } from "./rpc/background-jobs.ts";
 import { ConversationProjectionFeed, type ConversationProjectionSource } from "./rpc/conversation-projection-feed.ts";
 import type { RpcReviewDiscussionLink } from "./rpc/schema/review-discussions.ts";
 import type { RpcGitContext } from "./rpc/types.ts";
@@ -1016,7 +1017,7 @@ export class AgentSessionRuntime {
 		return {
 			subscribe: (listener) =>
 				typeof sessionLike.subscribe === "function"
-					? sessionLike.subscribe((event) => listener(event), { monitorGitContext: false })
+					? subscribeRpcSessionEvents(sessionLike, listener, { monitorGitContext: false })
 					: () => {},
 			retainObservation: () => session.gitContextProvider.retainObservation(),
 			subscribeAuthorityLoss: (listener) =>

@@ -149,3 +149,74 @@ Write-Output "PowerShell launcher diagnostics scoping verified"
 		}
 	},
 );
+
+for (const setting of [undefined, "0", "true", "disabled"]) {
+	test(`Bash source launcher preserves background diagnostics ${setting ?? "default"}`, () => {
+		const env = { ...process.env, VOLT_REVIEW_PRIVATE_DIAGNOSTICS: "0" };
+		delete env.VOLT_BACKGROUND_JOB_DIAGNOSTICS;
+		if (setting !== undefined) env.VOLT_BACKGROUND_JOB_DIAGNOSTICS = setting;
+		const result = spawnSync("bash", ["-c", `node() {
+  printf 'diagnostics:%s\\n' "$VOLT_BACKGROUND_JOB_DIAGNOSTICS"
+  printf 'review:%s\\n' "$VOLT_REVIEW_PRIVATE_DIAGNOSTICS"
+  printf 'arg:%s\\n' "$@"
+  return 17
+}
+export -f node
+exec bash ./volt-test.sh "$@"`, "source-launcher", "--name", "two words"], { cwd: repoRoot, encoding: "utf8", env });
+		assert.equal(result.status, 17, result.stderr);
+		assert.ok(result.stdout.includes(`diagnostics:${setting ?? "1"}`), result.stdout);
+		assert.match(result.stdout, /review:0/);
+		assert.deepEqual(result.stdout.split(/\r?\n/).filter((line) => line.startsWith("arg:")).slice(1), ["arg:--name", "arg:two words"]);
+	});
+}
+
+test("PowerShell source launcher scopes background diagnostics on success and failure", { skip: powerShell === undefined }, () => {
+	const directory = mkdtempSync(join(tmpdir(), "volt-source-background-"));
+	try {
+		const path = join(directory, "verify.ps1");
+		writeFileSync(path, `param([string]$RepoRoot)
+$ErrorActionPreference = 'Stop'
+$global:Expected = '1'
+$global:Fail = $false
+function node {
+  if ($env:VOLT_BACKGROUND_JOB_DIAGNOSTICS -ne $global:Expected) { throw 'Wrong background diagnostics setting' }
+  if ($args[-1] -ne 'two words') { throw 'Argument boundaries changed' }
+  if ($global:Fail) { throw 'fixture failure' }
+  $global:LASTEXITCODE = 0
+}
+$launcher = Join-Path $RepoRoot 'volt-test.ps1'
+foreach ($value in @($null, '0', 'true', 'disabled')) {
+  Remove-Item Env:VOLT_BACKGROUND_JOB_DIAGNOSTICS -ErrorAction SilentlyContinue
+  $global:Expected = '1'
+  if ($null -ne $value) { $env:VOLT_BACKGROUND_JOB_DIAGNOSTICS = $value; $global:Expected = $value }
+  foreach ($fail in @($false, $true)) {
+    $global:Fail = $fail
+    try { & $launcher --name 'two words'; if ($fail) { throw 'Expected failure' } }
+    catch { if (-not $fail -or $_.Exception.Message -ne 'fixture failure') { throw } }
+    if ($null -eq $value) {
+      if (Test-Path Env:VOLT_BACKGROUND_JOB_DIAGNOSTICS) { throw 'Leaked setting' }
+    } elseif ($env:VOLT_BACKGROUND_JOB_DIAGNOSTICS -ne $value) { throw 'Changed existing setting' }
+  }
+}
+Write-Output 'Background diagnostics scoping verified'
+`);
+		const result = spawnSync(powerShell, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path, repoRoot], { encoding: "utf8", windowsHide: true });
+		assert.equal(result.status, 0, result.stderr || result.stdout);
+		assert.match(result.stdout, /Background diagnostics scoping verified/);
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("batch source launcher forwards arguments, defaults diagnostics, and preserves failure exit", { skip: process.platform !== "win32" }, () => {
+	const directory = mkdtempSync(join(tmpdir(), "volt-source-batch-"));
+	try {
+		writeFileSync(join(directory, "node.cmd"), '@echo off\r\necho diagnostics:%VOLT_BACKGROUND_JOB_DIAGNOSTICS%\r\necho arguments:%*\r\nexit /b 17\r\n');
+		const env = { ...process.env };
+		const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "Path";
+		env[pathKey] = `${directory};${env[pathKey] ?? ""}`;
+		delete env.VOLT_BACKGROUND_JOB_DIAGNOSTICS;
+		const result = spawnSync("cmd.exe", ["/d", "/s", "/c", `""${join(repoRoot, "volt-test.bat")}" --name "two words""`], { cwd: repoRoot, encoding: "utf8", env, windowsHide: true, windowsVerbatimArguments: true });
+		assert.equal(result.status, 17, result.stderr || result.stdout);
+		assert.match(result.stdout, /diagnostics:1/);
+		assert.match(result.stdout, /--name "two words"/);
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});

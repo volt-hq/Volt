@@ -34,7 +34,8 @@
 
 - After code changes (not docs): run `npm run check` with full output and no tail. Fix diagnostics caused by your changes. Do not fix pre-existing, unrelated, environmental, or other-session diagnostics; report them. If they prevent required validation or committing, stop and ask before expanding scope. This command does not run tests.
 - Never run `npm run build` or `npm test` unless requested by the user.
-- Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. For all non-e2e tests, run `./test.sh` from the repo root. Otherwise run specific tests from the package root: `node ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`.
+- Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. For all non-e2e tests, run `./test.sh` from the repo root. Otherwise run specific tests from the package root using an installed Vitest CLI.
+- Local environment workaround: Vitest is currently installed under `packages/coding-agent/node_modules` and `packages/ai/node_modules`, not the root `node_modules`. From the affected package root, use `node node_modules/vitest/dist/cli.js --run test/specific.test.ts`. Check the CLI location before running tests; use `../../node_modules/vitest/dist/cli.js` only when that file exists. A missing root-level CLI does not mean dependencies are absent. Do not reinstall dependencies or change dependency metadata merely to restore that path.
 - If you create or modify a test file, run it and iterate on test or implementation until it passes.
 - For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` + the faux provider. No real provider APIs, keys, or paid tokens.
 - Put issue-specific regressions under `packages/coding-agent/test/suite/regressions/` named `<issue-number>-<short-slug>.test.ts`.
