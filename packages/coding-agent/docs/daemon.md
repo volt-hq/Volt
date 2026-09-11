@@ -41,6 +41,7 @@ volt daemon run --foreground      Run in this process (internal; used by start).
 volt remote pair [--workspace <name>]   Create a pairing ticket, wait for the phone.
 volt remote status [--json]             Same status view as volt daemon status.
 volt remote clients                     List paired clients.
+volt remote credential revoke           Reset this daemon's managed relay credentials.
 volt remote revoke <node-id>            Revoke a client and close its connections.
 volt remote approve-repair <node-id>    Allow a revoked node ID to re-pair.
 volt remote workspace add [path] [--name <name>]
@@ -65,6 +66,34 @@ systemd user unit (Linux) that starts the daemon at login. The service does
 not auto-restart after a graceful `volt daemon stop`; on Linux, run
 `loginctl enable-linger` if the daemon should also run without an active
 login session.
+
+## Manage remote access from the TUI
+
+Open `/remote` to inspect connections, pair a phone, and revoke device access.
+For managed relays, **Relay access** reports enrollment, token expiry, inactive
+Volt Pro subscriptions, and pending credential resets separately from the
+local daemon endpoint. An endpoint marked ready does not mean relay access is
+active.
+
+Use **Pair a phone** for another phone using the same active subscription. If
+Volt Pro is inactive, renew the existing subscription; the daemon retries
+credential refresh automatically. **Refresh status** reloads the display, not
+the subscription itself.
+
+To enroll using a different subscribed phone, choose **Reset credentials and
+pair again…**. Review the confirmation (Cancel is selected by default). Reset
+revokes the computer's entire managed relay grant, including its phones' relay
+credentials, and cancels outstanding pairing codes. It preserves the computer
+identity, workspaces, worktrees, conversations, and existing device permissions.
+**It does not revoke direct device access**; revoke old phones separately under
+**Paired devices**.
+
+After reset, choose the new phone's access level and workspace, then scan the
+fresh pairing QR and verify its details. No daemon restart is needed. If the
+broker is unavailable, the reset remains pending: retry it when online before
+pairing. On the CLI, the equivalent is `volt remote credential revoke`, followed
+by `volt remote pair` after revocation succeeds; the CLI revoke command runs
+without an interactive confirmation.
 
 ## File layout
 

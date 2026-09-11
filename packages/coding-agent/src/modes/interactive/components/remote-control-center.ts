@@ -22,6 +22,7 @@ import {
 	CONTROL_PAIR_CANCEL_CAPABILITY,
 	CONTROL_RPC_GRANTS_CAPABILITY,
 	type ControlEvent,
+	type ControlRelayCredentialStatus,
 	type ControlResponse,
 	type DaemonRemotePolicyStatus,
 	isRemoteTransportPairingAvailable,
@@ -80,6 +81,7 @@ export interface RemoteControlBackend {
 		access: IrohRemoteAccessPresetName,
 		onProgress: (event: PairingProgress) => void,
 	): Promise<RemotePairingHandle>;
+	resetRelayCredential(): Promise<void>;
 	revokeClient(clientNodeId: string): Promise<void>;
 	approveClientRepair(clientNodeId: string): Promise<void>;
 	close(): Promise<void>;
@@ -265,6 +267,11 @@ export function createRemoteControlBackend(agentDir: string = getAgentDir()): Re
 				throw error;
 			}
 		},
+		async resetRelayCredential() {
+			const response = await (await connect()).request({ type: "relay_credential_revoke" });
+			if (response.type === "error") throw new RemoteControlRequestError(response.code, response.message);
+			if (response.type !== "ok") throw new Error(`unexpected ${response.type} response`);
+		},
 		async revokeClient(clientNodeId) {
 			const response = await (await connect()).request({ type: "client_revoke", clientNodeId });
 			if (response.type === "error") throw new Error(response.message);
@@ -293,7 +300,8 @@ type View =
 	| { kind: "loading"; label: string }
 	| { kind: "offline"; snapshot: Extract<RemoteControlSnapshot, { kind: "offline" }> }
 	| { kind: "overview"; status: RemoteStatus; notice?: string }
-	| { kind: "access-picker"; status: RemoteStatus }
+	| { kind: "access-picker"; status: RemoteStatus; notice?: string }
+	| { kind: "confirm-credential-reset"; status: RemoteStatus; error?: string }
 	| { kind: "workspace-picker"; status: RemoteStatus; access: IrohRemoteAccessPresetName }
 	| { kind: "confirm-regenerate"; snapshot: Extract<RemoteControlSnapshot, { kind: "offline" }> }
 	| {
@@ -321,6 +329,7 @@ type DisplayRow = {
 	key?: string;
 	text: string;
 	raw?: boolean;
+	wrap?: boolean;
 	tone?: "text" | "muted" | "dim" | "accent" | "success" | "warning" | "error";
 };
 
@@ -338,8 +347,46 @@ function abbreviatedId(value: string, width = 12): string {
 	return value.length <= width ? value : `${value.slice(0, Math.max(4, width - 1))}…`;
 }
 
+const RELAY_CREDENTIAL_DETAILS: Readonly<
+	Record<ControlRelayCredentialStatus["state"], { label: string; guidance: string; tone: DisplayRow["tone"] }>
+> = {
+	unpaired: {
+		label: "Not set up",
+		guidance: "Pair a phone with an active Volt Pro subscription to enable relay access.",
+		tone: "muted",
+	},
+	pairing: {
+		label: "Pairing in progress",
+		guidance: "Finish the current pairing, or reset credentials to start again.",
+		tone: "warning",
+	},
+	active: {
+		label: "Active",
+		guidance: "Pair another phone using the same subscription. Reset only to start a new enrollment.",
+		tone: "success",
+	},
+	expired: {
+		label: "Access expired",
+		guidance: "Relay access is paused. Volt retries automatically; check your connection and subscription.",
+		tone: "warning",
+	},
+	subscription_inactive: {
+		label: "Volt Pro subscription inactive",
+		guidance: "Renew the existing subscription, or reset credentials to enroll with a different subscribed phone.",
+		tone: "warning",
+	},
+	revocation_pending: {
+		label: "Credential reset pending",
+		guidance: "Retry the reset when online. Pairing is blocked until the old relay credentials are revoked.",
+		tone: "warning",
+	},
+};
+
 function supportsSafePairing(status: RemoteStatus): boolean {
 	return (
+		status.relayCredential?.state !== "subscription_inactive" &&
+		status.relayCredential?.state !== "revocation_pending" &&
+		status.relayCredential?.state !== "pairing" &&
 		isRemoteTransportPairingAvailable(status.remoteTransport) &&
 		status.capabilities?.includes(CONTROL_PAIR_CANCEL_CAPABILITY) === true &&
 		status.capabilities.includes(CONTROL_RPC_GRANTS_CAPABILITY)
@@ -428,7 +475,11 @@ export class RemoteControlCenterComponent implements Component {
 		const footer = this.renderFooter(width);
 		const pageSize = Math.max(1, height - header.length - footer.length);
 		this.lastPageSize = pageSize;
-		const rows = this.buildRows(width, pageSize);
+		const rows = this.buildRows(width, pageSize).flatMap((row) => {
+			if (!row.wrap) return [row];
+			const safeText = stripAnsi(row.text).replace(UNSAFE_TERMINAL_CHARACTERS, "");
+			return wrapTextWithAnsi(safeText, Math.max(1, width - 2)).map((text) => ({ ...row, text }));
+		});
 		this.lastRows = rows;
 		this.ensureSelection(rows);
 		const selectedIndex = rows.findIndex((row) => row.key === this.selectedKey);
@@ -446,6 +497,10 @@ export class RemoteControlCenterComponent implements Component {
 	handleInput(data: string): void {
 		const keybindings = getKeybindings();
 		if (keybindings.matches(data, "tui.select.cancel")) {
+			if (this.view.kind === "confirm-credential-reset") {
+				void this.refresh();
+				return;
+			}
 			if (
 				this.view.kind === "access-picker" ||
 				this.view.kind === "workspace-picker" ||
@@ -737,6 +792,52 @@ export class RemoteControlCenterComponent implements Component {
 		if (!this.disposed) this.options.requestRender();
 	}
 
+	private async resetRelayCredential(): Promise<void> {
+		if (this.view.kind !== "confirm-credential-reset") return;
+		const status = this.view.status;
+		const generation = ++this.generation;
+		this.pairingAttempt++;
+		this.pairingHandle?.dispose();
+		this.pairingHandle = undefined;
+		this.view = { kind: "loading", label: "Resetting relay credentials…" };
+		this.options.requestRender();
+		try {
+			await this.backend.resetRelayCredential();
+			if (this.disposed || generation !== this.generation) return;
+			const snapshot = await this.backend.load();
+			if (this.disposed || generation !== this.generation) return;
+			if (snapshot.kind === "offline") {
+				this.view = { kind: "offline", snapshot };
+				this.selectedKey = "refresh";
+			} else if (supportsSafePairing(snapshot.status) && snapshot.status.workspaces.length > 0) {
+				this.view = {
+					kind: "access-picker",
+					status: snapshot.status,
+					notice: "Relay credentials reset. Choose access for the new phone.",
+				};
+				this.selectedKey = "access:coding";
+			} else {
+				this.view = {
+					kind: "overview",
+					status: snapshot.status,
+					notice: "Relay credentials reset. Register a workspace or restore phone transport, then pair a phone.",
+				};
+				this.selectedKey = snapshot.status.workspaces.length === 0 ? "register-current" : "refresh";
+			}
+		} catch (error) {
+			if (this.disposed || generation !== this.generation) return;
+			this.view = {
+				kind: "confirm-credential-reset",
+				status,
+				error: `Reset failed: ${error instanceof Error ? error.message : String(error)}`,
+			};
+			this.selectedKey = "cancel-credential-reset";
+		}
+		this.scrollOffset = 0;
+		this.manualScroll = false;
+		this.options.requestRender();
+	}
+
 	private async revokeClient(clientNodeId: string): Promise<void> {
 		const generation = ++this.generation;
 		this.view = { kind: "loading", label: "Revoking device…" };
@@ -827,6 +928,21 @@ export class RemoteControlCenterComponent implements Component {
 		}
 		if (key === "register-current") {
 			if (this.view.kind === "overview") void this.registerCurrentWorkspace();
+			return;
+		}
+		if (key === "reset-credential" && this.view.kind === "overview" && this.view.status.relayCredential) {
+			this.view = { kind: "confirm-credential-reset", status: this.view.status };
+			this.selectedKey = "cancel-credential-reset";
+			this.scrollOffset = 0;
+			this.manualScroll = false;
+			return;
+		}
+		if (key === "cancel-credential-reset" && this.view.kind === "confirm-credential-reset") {
+			void this.refresh();
+			return;
+		}
+		if (key === "confirm-credential-reset" && this.view.kind === "confirm-credential-reset") {
+			void this.resetRelayCredential();
 			return;
 		}
 		if (key === "pair") {
@@ -939,10 +1055,16 @@ export class RemoteControlCenterComponent implements Component {
 		let state = "loading";
 		if (this.view.kind === "offline") state = this.view.snapshot.state;
 		else if (this.view.kind === "confirm-regenerate" || this.view.kind === "confirm-recover") state = "confirmation";
-		else if ("status" in this.view)
-			state = `${this.view.status.remoteTransport?.state ?? "unavailable"} · ${this.view.status.phoneConnections} phone${this.view.status.phoneConnections === 1 ? "" : "s"}`;
+		else if ("status" in this.view) {
+			const status = this.view.status;
+			const relay = status.relayCredential;
+			state = `${status.remoteTransport?.state !== "ready" ? (status.remoteTransport?.state ?? "unavailable") : relay ? RELAY_CREDENTIAL_DETAILS[relay.state].label : "ready"} · ${status.phoneConnections} phone${status.phoneConnections === 1 ? "" : "s"}`;
+		}
 		const title = theme.bold(theme.fg("accent", "Remote Access"));
-		const remoteUnavailable = "status" in this.view && this.view.status.remoteTransport?.state !== "ready";
+		const remoteUnavailable =
+			"status" in this.view &&
+			(this.view.status.remoteTransport?.state !== "ready" ||
+				(this.view.status.relayCredential !== undefined && this.view.status.relayCredential.state !== "active"));
 		const right = theme.fg(this.view.kind === "offline" || remoteUnavailable ? "warning" : "muted", state);
 		const gap = " ".repeat(Math.max(1, width - visibleWidth(title) - visibleWidth(right) - 2));
 		return [new DynamicBorder().render(width).lines[0]!, truncateToWidth(` ${title}${gap}${right} `, width, ""), ""];
@@ -996,8 +1118,49 @@ export class RemoteControlCenterComponent implements Component {
 				{ key: "confirm-recover-state", text: "Confirm recover and restart", tone: "warning" },
 			];
 		}
+		if (this.view.kind === "confirm-credential-reset") {
+			return [
+				{ text: "RESET RELAY CREDENTIALS", tone: "warning" },
+				...(this.view.error ? [{ text: this.view.error, tone: "error" as const, wrap: true }] : []),
+				{
+					text: "Use this to start a new subscription enrollment, not to renew your existing subscription.",
+					tone: "text",
+					wrap: true,
+				},
+				{
+					text: "This revokes relay credentials for this computer and all its phones, and cancels pending pairing codes.",
+					tone: "warning",
+					wrap: true,
+				},
+				{
+					text: "Your computer identity, workspaces, worktrees, and conversations stay unchanged.",
+					tone: "text",
+					wrap: true,
+				},
+				{
+					text: "Existing device permissions and direct connections are NOT revoked. Revoke old phones separately under Paired devices.",
+					tone: "warning",
+					wrap: true,
+				},
+				{
+					text: "After reset, pair using a phone with an active Volt Pro subscription. No daemon restart is needed.",
+					tone: "text",
+					wrap: true,
+				},
+				{ key: "cancel-credential-reset", text: "Cancel", tone: "text" },
+				{
+					key: "confirm-credential-reset",
+					text:
+						this.view.error || this.view.status.relayCredential?.state === "revocation_pending"
+							? "Retry reset and pair again"
+							: "Reset credentials and pair again",
+					tone: "warning",
+				},
+			];
+		}
 		if (this.view.kind === "access-picker") {
 			return [
+				...(this.view.notice ? [{ text: this.view.notice, tone: "success" as const, wrap: true }] : []),
 				{ text: "PAIR A PHONE · ACCESS", tone: "accent" },
 				{ text: "Choose what this phone may do. Access can be changed later.", tone: "muted" },
 				...IROH_REMOTE_ACCESS_PRESET_NAMES.flatMap((name) => {
@@ -1058,6 +1221,12 @@ export class RemoteControlCenterComponent implements Component {
 			allowTools: null,
 			detachedRuntimeTtlMs: DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS,
 		};
+		const relayCredential = status.relayCredential;
+		const relayDetails = relayCredential === undefined ? undefined : RELAY_CREDENTIAL_DETAILS[relayCredential.state];
+		const credentialBlocksPairing =
+			relayCredential?.state === "subscription_inactive" ||
+			relayCredential?.state === "revocation_pending" ||
+			relayCredential?.state === "pairing";
 		const currentLease = status.leases.find((lease) => lease.sessionId === this.options.currentSessionId);
 		const currentWorkspace =
 			status.workspaces.find((workspace) => workspace.name === this.options.getCurrentWorkspaceName()) ??
@@ -1077,11 +1246,17 @@ export class RemoteControlCenterComponent implements Component {
 				tone: "text",
 			},
 			{
-				text: `Phone transport: ${status.remoteTransport?.state ?? "unavailable"}${status.remoteTransport?.wrapperVersion ? ` · wrapper ${status.remoteTransport.wrapperVersion}` : ""}${status.remoteTransport?.reasonCode ? ` · ${status.remoteTransport.reasonCode}` : ""}`,
+				text: `${relayCredential ? "Daemon endpoint" : "Phone transport"}: ${status.remoteTransport?.state ?? "unavailable"}${status.remoteTransport?.wrapperVersion ? ` · wrapper ${status.remoteTransport.wrapperVersion}` : ""}${status.remoteTransport?.reasonCode ? ` · ${status.remoteTransport.reasonCode}` : ""}`,
 				tone: status.remoteTransport?.state === "ready" ? "success" : "warning",
 			},
 			...(status.remoteTransport?.message
-				? [{ text: status.remoteTransport.message, tone: "warning" as const }]
+				? [{ text: status.remoteTransport.message, tone: "warning" as const, wrap: true }]
+				: []),
+			...(relayDetails
+				? [
+						{ text: `Relay access: ${relayDetails.label}`, tone: relayDetails.tone, wrap: true },
+						{ text: relayDetails.guidance, tone: "muted" as const, wrap: true },
+					]
 				: []),
 			{
 				text: `${status.phoneConnections} attached phone${status.phoneConnections === 1 ? "" : "s"} · ${status.clients.length} paired device${status.clients.length === 1 ? "" : "s"}${status.revokedClients === undefined ? "" : ` · ${status.revokedClients.length} revoked`}`,
@@ -1100,9 +1275,23 @@ export class RemoteControlCenterComponent implements Component {
 				? [{ text: "Pairing is disabled until phone transport is ready.", tone: "warning" as const }]
 				: status.workspaces.length === 0
 					? [{ text: "Pairing needs a registered workspace.", tone: "warning" as const }]
-					: supportsSafePairing(status)
-						? [{ key: "pair", text: "Pair a phone", tone: "text" as const }]
-						: [{ text: "Restart voltd to pair with explicit access grants.", tone: "warning" as const }]),
+					: credentialBlocksPairing
+						? []
+						: supportsSafePairing(status)
+							? [{ key: "pair", text: "Pair a phone", tone: "text" as const }]
+							: [{ text: "Restart voltd to pair with explicit access grants.", tone: "warning" as const }]),
+			...(relayCredential !== undefined && relayCredential.state !== "unpaired"
+				? [
+						{
+							key: "reset-credential",
+							text:
+								relayCredential.state === "revocation_pending"
+									? "Retry credential reset and pair again…"
+									: "Reset credentials and pair again…",
+							tone: "warning" as const,
+						},
+					]
+				: []),
 			{ text: "HEADLESS POLICY", tone: "accent" },
 			...(status.remotePolicy
 				? [

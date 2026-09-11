@@ -305,6 +305,13 @@ export interface DaemonRemotePolicyStatus {
 	detachedRuntimeTtlMs: number;
 }
 
+/** Managed relay access, independent of local endpoint readiness. Contains no credentials. */
+export interface ControlRelayCredentialStatus {
+	state: "unpaired" | "pairing" | "active" | "expired" | "subscription_inactive" | "revocation_pending";
+	/** Current access-token expiry as epoch milliseconds, when a token exists. */
+	expiresAt?: number;
+}
+
 export type RemoteTransportState = "starting" | "ready" | "degraded" | "unavailable";
 
 export const REMOTE_TRANSPORT_REASON_MESSAGES = {
@@ -357,6 +364,8 @@ export type ControlResponse =
 			revokedClients?: ControlRevokedClientStatus[];
 			/** Required phone-transport readiness; local daemon functions remain available when not ready. */
 			remoteTransport: RemoteTransportHealth;
+			/** Omitted for non-managed relay setups. */
+			relayCredential?: ControlRelayCredentialStatus;
 			/** Added to protocol v1 after launch; absent on older running daemons. */
 			remotePolicy?: DaemonRemotePolicyStatus;
 			keepAwake: ControlKeepAwakeStatus;
@@ -877,7 +886,19 @@ export function isControlResponse(value: unknown): value is ControlResponse {
 		case "lease_rekey_prepared":
 			return typeof value.transactionId === "string";
 		case "status_result":
-			return isRemoteTransportHealth(value.remoteTransport);
+			return (
+				isRemoteTransportHealth(value.remoteTransport) &&
+				(value.relayCredential === undefined ||
+					(isRecord(value.relayCredential) &&
+						typeof value.relayCredential.state === "string" &&
+						["unpaired", "pairing", "active", "expired", "subscription_inactive", "revocation_pending"].includes(
+							value.relayCredential.state,
+						) &&
+						(value.relayCredential.expiresAt === undefined ||
+							(typeof value.relayCredential.expiresAt === "number" &&
+								Number.isSafeInteger(value.relayCredential.expiresAt) &&
+								value.relayCredential.expiresAt > 0))))
+			);
 		case "worktree_result":
 			return isRecord(value.worktree);
 		case "worktrees_result":
