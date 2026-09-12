@@ -725,6 +725,21 @@ export class AgentSession {
 	}>();
 	private readonly _backgroundNotificationDeliveries = new Map<string, { generation: number; jobIds: string[] }>();
 	private readonly _backgroundStartAcknowledgements = new Set<string>();
+	private _unsubscribeBackgroundJobs?: () => void;
+	private _backgroundContinuationSchedule?: {
+		timer: ReturnType<typeof setTimeout>;
+		dispatched: Promise<void>;
+		resolve(): void;
+	};
+	/** Present only until the first provider dispatch of an automatically resumed run. */
+	private _backgroundContinuationJobIds?: string[];
+	/** Reserve the single automatic attempt without consuming any job's wake authority. */
+	private _backgroundContinuationAttempt?: { revision: number; decisionResolved: boolean; settled?: Promise<void> };
+	/** Readiness changes on policy registration/removal, explicit runs, and compaction. */
+	private _backgroundContinuationRevision = 0;
+	private _backgroundNotificationDecisionRevision = 0;
+	/** A pause or failed preflight must not spin at foreground settlement. */
+	private _backgroundContinuationDeferredRevision?: number;
 
 	// Bash execution state
 	private _bashAbortController: AbortController | undefined = undefined;
@@ -835,6 +850,15 @@ export class AgentSession {
 			...(config.model === undefined ? {} : { model: config.model }),
 			thinkingLevel: config.thinkingLevel,
 			streamFn: async (model, context, options) => {
+				if (this._backgroundContinuationJobIds) {
+					if (
+						options?.signal?.aborted ||
+						!this._backgroundContinuationJobIds.some((id) => this._backgroundJobs.canContinue(id))
+					) {
+						throw new Error("Background job continuation cancelled before inference");
+					}
+					this._backgroundContinuationJobIds = undefined;
+				}
 				const activeRun = this._activeAgentRun;
 				const signal = options?.signal;
 				// Only admitted conversation requests can collect native terminal reads.
@@ -1055,6 +1079,15 @@ export class AgentSession {
 			this._planningRuntimeInitialized = true;
 			this._syncPlanningRuntime();
 			this._recoverDurableQueuedClientInputs();
+			this._unsubscribeBackgroundJobs = this._backgroundJobs.subscribe(() => {
+				if (
+					this._backgroundContinuationJobIds &&
+					!this._backgroundContinuationJobIds.some((id) => this._backgroundJobs.canContinue(id))
+				) {
+					this._harness.abort("host_action");
+				}
+				this._scheduleBackgroundContinuation();
+			});
 		} catch (error) {
 			this._disposed = true;
 			this._canonicalProducerRetired = true;
@@ -1335,29 +1368,156 @@ export class AgentSession {
 		});
 		this._harness.on("next_action", (event) => {
 			this._assertConversationAuthorityAvailable();
-			if (this._shouldStopForProactiveCompaction(event)) return { type: "stop" };
+			this._backgroundNotificationDecisionRevision = this._backgroundContinuationRevision;
+			if (this._shouldStopForProactiveCompaction(event)) return { type: "pause" };
 			return this._backgroundNotificationAction(event);
+		});
+		this._harness.on("next_action_resolved", (event) => {
+			if (this._backgroundContinuationAttempt) this._backgroundContinuationAttempt.decisionResolved = true;
+			if (
+				event.requestAuthority === "final_response" ||
+				event.stopReason === "policy" ||
+				event.stopReason === "tool"
+			) {
+				// Fence all existing work, including jobs that settle after this run.
+				// Ordinary completion and resumable interruptions retain wake authority.
+				this._backgroundJobs.suppressContinuations();
+				this._cancelBackgroundContinuationSchedule();
+				return undefined;
+			}
+			const acceptedDeliveries = new Set(
+				event.action.type === "request"
+					? (event.action.deliveries ?? []).flatMap((delivery) =>
+							delivery.deliveryId !== undefined &&
+							delivery.messages.some(
+								(message) =>
+									message.role === "custom" && message.customType === BACKGROUND_JOB_NOTIFICATION_TYPE,
+							)
+								? [delivery.deliveryId]
+								: [],
+						)
+					: [],
+			);
+			let discardedNotice = false;
+			for (const [deliveryId, notice] of this._backgroundNotificationDeliveries) {
+				if (acceptedDeliveries.has(deliveryId) && notice.generation === this._conversationGenerationRevision) {
+					// Policy accepted this notice-bearing request. Later provider failure must not rearm it.
+					this._backgroundJobs.claimContinuations(notice.jobIds);
+				} else {
+					discardedNotice = true;
+					this._backgroundNotificationDeliveries.delete(deliveryId);
+				}
+			}
+			if (
+				(event.action.type === "pause" || discardedNotice) &&
+				this._backgroundJobs.pendingContinuations().length > 0
+			) {
+				// Keep authority, but wait for readiness rather than retrying the same policy indefinitely.
+				// Capture before reduction so a policy removing itself already counts as readiness.
+				this._backgroundContinuationDeferredRevision = this._backgroundNotificationDecisionRevision;
+				this._cancelBackgroundContinuationSchedule();
+			}
+			return undefined;
 		});
 		this._harness.on("tool_call", async (event) => await this._handleToolCallPolicy(event));
 		this._harness.on("tool_result", async (event) => await this._handleToolResultPolicy(event));
 	}
 
-	/** Attach metadata only to an already-authorized request, never revive a stopped or idle run. */
+	/** One event-driven wake at idle, shared by Bash and subagents. No worker output enters the prompt. */
+	private _scheduleBackgroundContinuation(): void {
+		if (
+			this._backgroundContinuationSchedule !== undefined ||
+			this._backgroundContinuationAttempt !== undefined ||
+			this._backgroundContinuationDeferredRevision === this._backgroundContinuationRevision ||
+			this._disposed ||
+			!this._admissionGate.isOpen ||
+			this._backgroundJobs.pendingContinuations().length === 0
+		)
+			return;
+		let resolveDispatch!: () => void;
+		const dispatched = new Promise<void>((resolve) => {
+			resolveDispatch = resolve;
+		});
+		// Yield once to coalesce settlements and let user cancellation/navigation win.
+		const timer = setTimeout(() => {
+			this._backgroundContinuationSchedule = undefined;
+			try {
+				if (
+					this._backgroundContinuationAttempt !== undefined ||
+					this._backgroundContinuationDeferredRevision === this._backgroundContinuationRevision ||
+					this._disposed ||
+					!this._admissionGate.isOpen ||
+					!this._isConversationAuthorityAvailable() ||
+					this.isBusy ||
+					this.isStreaming ||
+					this._admittedPromptWork.size > 0 ||
+					this._admittedAncillaryWork.size > 0 ||
+					this._recoveredClientInputReplayPending ||
+					this._harness.hasPendingPrompt()
+				)
+					return;
+				const jobIds = this._backgroundJobs.pendingContinuations().map((job) => job.id);
+				if (jobIds.length === 0) return;
+				const reservedRun = this._harness.reserveRun();
+				const attempt = { revision: this._backgroundContinuationRevision, decisionResolved: false };
+				this._backgroundContinuationAttempt = attempt;
+				this._backgroundContinuationJobIds = jobIds;
+				const work = this._runAgentPrompt([], this._abortGeneration, true, reservedRun)
+					.catch((error: unknown) => {
+						if (this._disposed) return;
+						this._extensionRunner.emitError({
+							extensionPath: "<runtime>",
+							event: "background_job_continuation",
+							error: error instanceof Error ? error.message : String(error),
+						});
+					})
+					.finally(() => {
+						if (!attempt.decisionResolved) this._backgroundContinuationDeferredRevision = attempt.revision;
+						this._backgroundContinuationAttempt = undefined;
+						this._backgroundContinuationJobIds = undefined;
+					});
+				this._backgroundContinuationAttempt.settled = this._trackAdmittedPromptWork(work);
+			} finally {
+				resolveDispatch();
+			}
+		}, 0);
+		this._backgroundContinuationSchedule = { timer, dispatched, resolve: resolveDispatch };
+	}
+
+	private _cancelBackgroundContinuationSchedule(): void {
+		const schedule = this._backgroundContinuationSchedule;
+		this._backgroundContinuationSchedule = undefined;
+		if (schedule) {
+			clearTimeout(schedule.timer);
+			schedule.resolve();
+		}
+	}
+
+	/** Attach metadata at authorized request boundaries; idle completion uses the normal run admission path. */
 	private _backgroundNotificationAction(context: AgentLoopNextActionContext): AgentLoopNextAction | undefined {
 		// The previous dispatch has settled; discarded policy proposals own no delivery.
 		this._backgroundNotificationDeliveries.clear();
+		const action: AgentLoopNextAction =
+			context.defaultAction.type === "stop" &&
+			this._backgroundContinuationJobIds?.some((id) => this._backgroundJobs.canContinue(id))
+				? { type: "request", reason: "delivery" }
+				: context.defaultAction;
 		if (
 			this._disposed ||
 			this.signal?.aborted ||
 			context.requestAuthority === "final_response" ||
-			context.defaultAction.type !== "request"
+			action.type !== "request"
 		) {
 			return undefined;
 		}
 		const jobs = this._backgroundJobs.pendingNotifications();
 		if (jobs.length === 0) return undefined;
+		// Proposals do not consume wake authority; only the final accepted delivery does.
 		const deliveryId = `background-notice:${randomUUID()}`;
 		const jobIds = jobs.map((job) => job.id);
+		if (this._backgroundContinuationJobIds) {
+			this._backgroundContinuationJobIds = jobIds.filter((id) => this._backgroundJobs.canContinue(id));
+		}
 		this._backgroundNotificationDeliveries.set(deliveryId, {
 			generation: this._conversationGenerationRevision,
 			jobIds,
@@ -1377,8 +1537,8 @@ export class AgentSession {
 		// Harness delivers this through its canonical message append path after
 		// all next-action policies agree to dispatch. A later stop discards it.
 		return {
-			...context.defaultAction,
-			deliveries: [...(context.defaultAction.deliveries ?? []), { deliveryId, messages: [message] }],
+			...action,
+			deliveries: [...(action.deliveries ?? []), { deliveryId, messages: [message] }],
 		};
 	}
 
@@ -2144,6 +2304,8 @@ export class AgentSession {
 		if (handledEvent.type === "delivery_start") {
 			const userMessage = handledEvent.messages.find((message) => message.role === "user");
 			if (userMessage) {
+				// Admitted user input independently authorizes this request even if its wake job is cancelled.
+				this._backgroundContinuationJobIds = undefined;
 				this._maybeGenerateSessionName(
 					this._extractUserMessageText(userMessage.content),
 					this._captureConversationGenerationAssertion(),
@@ -2453,10 +2615,12 @@ export class AgentSession {
 			() => {
 				this._admittedAncillaryWork.delete(operation);
 				this._activityRevision++;
+				this._scheduleBackgroundContinuation();
 			},
 			() => {
 				this._admittedAncillaryWork.delete(operation);
 				this._activityRevision++;
+				this._scheduleBackgroundContinuation();
 			},
 		);
 		return operation;
@@ -2469,10 +2633,12 @@ export class AgentSession {
 			() => {
 				this._admittedPromptWork.delete(operation);
 				this._activityRevision++;
+				this._scheduleBackgroundContinuation();
 			},
 			() => {
 				this._admittedPromptWork.delete(operation);
 				this._activityRevision++;
+				this._scheduleBackgroundContinuation();
 			},
 		);
 		return operation;
@@ -2511,6 +2677,9 @@ export class AgentSession {
 			// Late Harness events are ignored by the disposed guard and cannot
 			// repopulate these projections.
 			this._disposed = true;
+			this._unsubscribeBackgroundJobs?.();
+			this._unsubscribeBackgroundJobs = undefined;
+			this._cancelBackgroundContinuationSchedule();
 			// Teardown never releases its hold, even if an overlapping abort finishes.
 			this._admissionGate.suspend();
 			this._backgroundNotificationDeliveries.clear();
@@ -3063,12 +3232,20 @@ export class AgentSession {
 		const unregisterNextAction = policy.nextAction
 			? this._harness.registerNextActionPolicy(policy.nextAction)
 			: undefined;
+		if (unregisterNextAction) {
+			this._backgroundContinuationRevision++;
+			this._scheduleBackgroundContinuation();
+		}
 		let registered = true;
 		return () => {
 			if (!registered) return;
 			registered = false;
 			unregisterToolCall?.();
-			unregisterNextAction?.();
+			if (unregisterNextAction) {
+				unregisterNextAction();
+				this._backgroundContinuationRevision++;
+				this._scheduleBackgroundContinuation();
+			}
 		};
 	}
 
@@ -4201,6 +4378,7 @@ export class AgentSession {
 			if (reservation) this._harness.cancelReservedRun(reservation);
 			return;
 		}
+		if (!this._backgroundContinuationAttempt) this._backgroundContinuationRevision++;
 		this._proactiveCompactionState = "idle";
 		this._drainFollowUpsOnNextContinuation = false;
 		if (!resumeRetainedPrompt) this._harness.invalidateContinuationContext();
@@ -4259,6 +4437,7 @@ export class AgentSession {
 
 	private async _continueAgent(reservedRun?: AgentHarnessRunReservation): Promise<AgentRunResult> {
 		this._assertConversationAuthorityAvailable();
+		this._backgroundContinuationRevision++;
 		const drainFollowUps = this._drainFollowUpsOnNextContinuation;
 		this._drainFollowUpsOnNextContinuation = false;
 		this._agentConversationMutationInFlight = true;
@@ -4281,6 +4460,7 @@ export class AgentSession {
 			const resolveSettlement = this._resolveAgentSettlementBarrier;
 			this._resolveAgentSettlementBarrier = undefined;
 			resolveSettlement?.();
+			this._scheduleBackgroundContinuation();
 		}
 	}
 
@@ -4303,10 +4483,18 @@ export class AgentSession {
 
 	private async _waitForIdle(): Promise<void> {
 		for (;;) {
+			await this._backgroundContinuationSchedule?.dispatched;
+			await this._backgroundContinuationAttempt?.settled;
 			const settlement = this._agentSettlementBarrier;
 			await this._harness.waitForIdle();
 			await settlement;
-			if (settlement === this._agentSettlementBarrier && this._harness.getPhase() === "idle") return;
+			if (
+				settlement === this._agentSettlementBarrier &&
+				this._harness.getPhase() === "idle" &&
+				!this._backgroundContinuationAttempt &&
+				!this._backgroundContinuationSchedule
+			)
+				return;
 		}
 	}
 
@@ -5358,6 +5546,8 @@ export class AgentSession {
 			return this._abortPromise;
 		}
 		const releaseAdmission = this._admissionGate.suspend();
+		this._backgroundJobs.suppressContinuations();
+		this._cancelBackgroundContinuationSchedule();
 		let resolveAbort!: () => void;
 		let rejectAbort!: (error: unknown) => void;
 		const drain = new Promise<void>((resolve, reject) => {
@@ -5828,6 +6018,7 @@ export class AgentSession {
 			assertConversationGenerationCurrent?.();
 		}
 
+		this._backgroundContinuationRevision++;
 		return {
 			summary,
 			firstKeptEntryId,
@@ -5853,10 +6044,12 @@ export class AgentSession {
 			assertConversationGenerationCurrent,
 		);
 		assertConversationCurrent();
-		return this._harness.requestCompaction(
-			(context) => this._compact(context, customInstructions, assertConversationCurrent),
-			this._extensionMode === "rpc" ? "remote_request" : "host_action",
-		);
+		return this._harness
+			.requestCompaction(
+				(context) => this._compact(context, customInstructions, assertConversationCurrent),
+				this._extensionMode === "rpc" ? "remote_request" : "host_action",
+			)
+			.finally(() => this._scheduleBackgroundContinuation());
 	}
 
 	private async _compact(
@@ -7521,7 +7714,9 @@ export class AgentSession {
 		if (this._reloadInProgress || this._harness.getPhase() === "branch_summary") {
 			return Promise.reject(new Error("Cannot navigate the session tree while another session mutation is active"));
 		}
-		return this._harness.requestTreeOperation((operation) => this._navigateTree(operation, targetId, options));
+		return this._harness
+			.requestTreeOperation((operation) => this._navigateTree(operation, targetId, options))
+			.finally(() => this._scheduleBackgroundContinuation());
 	}
 
 	private async _navigateTree(

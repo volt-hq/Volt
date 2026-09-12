@@ -163,7 +163,9 @@ Queue selection happens before delivery leasing:
 2. independent provider/tool continuation when already authorized
 3. follow-up selection when no independent request remains, or when explicitly prioritized
 
-Scoped next-action policies reduce an evolving suggested action in registration order. Policy-generated deliveries are combined with leased inbox deliveries. Runtime-owned `final_response` authority remains tool-free across pause, retry, and compaction continuations. Policy may pause that request but cannot weaken it to an ordinary request or stop.
+Next-action hooks run first, followed by scoped policies in registration order. Return `undefined` for no change; a returned action is an explicit override, including `stop` when the suggestion is already `stop`. Resumable interruptions such as compaction must return `pause`. Policy-generated deliveries are combined with leased inbox deliveries. Runtime-owned `final_response` authority remains tool-free across pause, retry, and compaction continuations. Policy may pause that request but cannot weaken it to an ordinary request or stop.
+
+After reduction and authority normalization, `next_action_resolved` publishes the final `action` and `requestAuthority` before delivery preparation or run settlement. A stop carries `stopReason: "completion" | "policy" | "tool"`. Later request/pause overrides do not retain an earlier stop reason. Awaited `on()` handlers receive isolated clones and cannot replace the decision; hosts use this boundary to revoke outstanding background wake authority on explicit termination, including work that has not settled yet. Passive subscribers receive the same finalized projection. Natural completion and resumable pauses do not themselves revoke independent background work.
 
 ## Persistence and save points
 

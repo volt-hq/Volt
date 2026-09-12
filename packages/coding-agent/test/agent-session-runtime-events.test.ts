@@ -1594,7 +1594,15 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			}),
 		});
 		await subscription.ready;
-		const initialWriteCount = writes.length;
+		const originalSubscriptionId = subscription.subscriptionId;
+		// Old-generation Git observations may complete during replacement
+		// preparation. Exercise that ordering without relying on subprocess timing.
+		runtimeHost.setPrepareSessionReplacement(async () => {
+			execFileSync("git", ["init", "--initial-branch=main"], { cwd: runtimeHost.cwd, stdio: "ignore" });
+			await runtimeHost.session.gitContextProvider.refresh();
+			await subscription.flush();
+			return undefined;
+		});
 		const detachWillProject = runtimeHost.subscribeSessionWillProject(async () => {
 			phases.push("ownership-rekey-started");
 			markRekeyStarted();
@@ -1606,31 +1614,56 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		});
 
 		const replacement = runtimeHost.newSession();
-		await rekeyStarted;
-		expect(writes).toHaveLength(initialWriteCount);
-		expect(() =>
-			runtimeHost.conversationProjectionFeed.attach({
-				write: () => {},
-				buildSnapshot: () => {
-					throw new Error("must remain fenced");
+		try {
+			await Promise.race([rekeyStarted, replacement]);
+			await subscription.flush();
+			expect(phases).toEqual(["ownership-rekey-started"]);
+			expect(writes).toContainEqual(expect.objectContaining({ type: "git_context_changed" }));
+			for (const write of writes) {
+				expect(write).toMatchObject({ delivery: { subscriptionId: originalSubscriptionId } });
+			}
+			const fencedWriteCount = writes.length;
+			execFileSync("git", ["symbolic-ref", "HEAD", "refs/heads/rekey-pending"], {
+				cwd: runtimeHost.cwd,
+				stdio: "ignore",
+			});
+			await runtimeHost.session.gitContextProvider.refresh();
+			await subscription.flush();
+			expect(writes).toHaveLength(fencedWriteCount);
+			expect(() =>
+				runtimeHost.conversationProjectionFeed.attach({
+					write: () => {},
+					buildSnapshot: () => {
+						throw new Error("must remain fenced");
+					},
+				}),
+			).toThrow(/awaiting host ownership rekey/);
+
+			releaseRekey();
+			await replacement;
+			await subscription.flush();
+			expect(phases).toEqual(["ownership-rekey-started", "ownership-rekeyed", "session-rebound"]);
+			expect(subscription.subscriptionId).not.toBe(originalSubscriptionId);
+			expect(writes.filter((write) => "type" in write && write.type === "conversation_bootstrap")).toMatchObject([
+				{ delivery: { subscriptionId: originalSubscriptionId, cursor: 0 } },
+				{
+					type: "conversation_bootstrap",
+					reason: "session_rebind",
+					conversation: { sessionId: runtimeHost.session.sessionId },
+					delivery: { subscriptionId: subscription.subscriptionId, cursor: 0 },
 				},
-			}),
-		).toThrow(/awaiting host ownership rekey/);
-
-		releaseRekey();
-		await replacement;
-		await subscription.flush();
-		expect(phases).toEqual(["ownership-rekey-started", "ownership-rekeyed", "session-rebound"]);
-		expect(writes.at(-1)).toMatchObject({
-			type: "conversation_bootstrap",
-			reason: "session_rebind",
-			conversation: { sessionId: runtimeHost.session.sessionId },
-			delivery: { subscriptionId: subscription.subscriptionId, cursor: 0 },
-		});
-
-		detachWillProject();
-		detachReplaced();
-		subscription.detach();
+			]);
+		} finally {
+			// An assertion must not strand runtime disposal behind the test's gate.
+			releaseRekey();
+			try {
+				await replacement;
+			} finally {
+				detachWillProject();
+				detachReplaced();
+				subscription.detach();
+			}
+		}
 	});
 
 	it("disposes replacement ownership exactly once when a pre-publication barrier fails", async () => {

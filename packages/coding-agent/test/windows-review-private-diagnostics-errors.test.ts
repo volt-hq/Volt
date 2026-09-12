@@ -1,8 +1,14 @@
 import { Buffer } from "node:buffer";
-import type { ExecFileException, ExecFileOptions } from "node:child_process";
+import {
+	type ChildProcessWithoutNullStreams,
+	type ExecFileException,
+	type ExecFileOptions,
+	spawn,
+} from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { PassThrough, type Writable } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { writeWindowsReviewDiagnostic } from "../src/core/windows-review-private-diagnostics.ts";
 
@@ -11,7 +17,10 @@ const processMocks = vi.hoisted(() => ({
 	execFile:
 		vi.fn<(file: string, args: string[], options: ExecFileOptions, callback: Completion) => { stdin: Writable }>(),
 }));
-vi.mock("node:child_process", () => ({ execFile: processMocks.execFile }));
+vi.mock("node:child_process", async (importOriginal) => ({
+	...(await importOriginal()),
+	execFile: processMocks.execFile,
+}));
 
 afterEach(() => {
 	vi.unstubAllEnvs();
@@ -46,7 +55,10 @@ describe("Windows diagnostic subprocess failure containment", () => {
 			const executedScript = Buffer.from(invocation[1].at(-1)!, "base64").toString("utf16le");
 			expect(executedScript).not.toContain("private-path-marker");
 			expect(executedScript).not.toContain("private-content-marker");
-			expect(JSON.parse(Buffer.concat(inputChunks).toString("utf8"))).toEqual({
+			const request = Buffer.concat(inputChunks).toString("utf8");
+			expect(request.split("\n")).toHaveLength(2);
+			expect(request.endsWith("\n")).toBe(true);
+			expect(JSON.parse(request)).toEqual({
 				directory: dirname(path),
 				path,
 				content,
@@ -71,5 +83,43 @@ describe("Windows diagnostic subprocess failure containment", () => {
 			"Windows system directory is unavailable.",
 		);
 		expect(processMocks.execFile).not.toHaveBeenCalled();
+	});
+
+	it.skipIf(process.platform !== "win32")("completes a framed request while its stdin pipe remains open", async () => {
+		const root = mkdtempSync(join(tmpdir(), "volt-diagnostic-stdin-"));
+		const path = join(root, "private '$(); 界", "capture.jsonl");
+		const content = '$(throw \'not code\'); 界\r\n{"capture":"private"}\n';
+		let child: ChildProcessWithoutNullStreams | undefined;
+		processMocks.execFile.mockImplementation((file, args, options, callback) => {
+			const running = spawn(file, args, options);
+			child = running;
+			running.stdout.resume();
+			running.stderr.resume();
+			running.on("error", (error) => callback(error, "", ""));
+			running.on("close", (code) => {
+				callback(code === 0 ? null : new Error("Diagnostic child failed or timed out"), "", "");
+			});
+			const input = new Writable({
+				write(chunk, encoding, done) {
+					running.stdin.write(chunk, encoding, done);
+				},
+				// Deliberately withhold EOF from the actual child. ReadToEnd would
+				// block until the existing subprocess deadline kills it.
+				final(done) {
+					done();
+				},
+			});
+			running.stdin.on("error", (error) => input.destroy(error));
+			return { stdin: input };
+		});
+		try {
+			await writeWindowsReviewDiagnostic(path, content);
+			expect(child?.stdin.writableEnded).toBe(false);
+			expect(readFileSync(path, "utf8")).toBe(content);
+		} finally {
+			child?.stdin.destroy();
+			child?.kill();
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
