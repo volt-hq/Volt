@@ -245,19 +245,27 @@ describe("native background subagents", () => {
 						"already being started",
 					);
 				}
+				if (operation === "complete") {
+					context.children[0]!.setResponses([
+						fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: childJob.id }), {
+							stopReason: "toolUse",
+						}),
+						fauxAssistantMessage("Child collected its background output."),
+					]);
+				}
 				finish.resolve();
 				await abort;
 				const result = jobSnapshot(
 					await jobs.execute("parent-done", { action: "wait", ids: [parentJob.id], timeoutMs: 30_000 }),
 				);
 				expect(result.status).toBe(operation === "abort" ? "cancelled" : "completed");
-				if (operation === "complete") expect(result.output).toContain("Child final report.");
+				if (operation === "complete") expect(result.output).toContain("Child collected its background output.");
 				expect(child.hasBackgroundJobs).toBe(false);
 				expect(context.session.hasBackgroundJobs).toBe(false);
 				expect(context.scopes[0]?.snapshot().activeDescendants).toBe(0);
 				expect(context.manager.listDelegations()[0]?.status).toBe(operation === "abort" ? "aborted" : "completed");
 				expect(getMessageText(await subagent.execute("released", params))).toMatch(/"confirm": "/);
-				expect(context.children[0]?.faux.state.callCount).toBe(2);
+				expect(context.children[0]?.faux.state.callCount).toBe(operation === "complete" ? 4 : 2);
 				// Retention remains intentional after every delegated resource settles.
 				context.children[0]!.setResponses([fauxAssistantMessage("Retained runtime is usable.")]);
 				await child.prompt("Continue through the retained owner");
@@ -388,7 +396,7 @@ describe("native background subagents", () => {
 	);
 
 	it.each(["single", "parallel", "chain"] as const)(
-		"keeps %s preflight direct, returns before children finish, then collects the result",
+		"keeps %s preflight direct, then resumes the idle parent to collect without user input",
 		async (mode) => {
 			const context = await setup();
 			try {
@@ -430,7 +438,18 @@ describe("native background subagents", () => {
 				const result = context.session.messages.filter((message) => message.role === "toolResult").at(-1);
 				const job = (result?.details as { backgroundJob: BackgroundJobSnapshot }).backgroundJob;
 				expect(job.status).toBe("running");
+				context.parentFixture.setResponses([
+					fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), { stopReason: "toolUse" }),
+					(providerContext) => {
+						expect(providerContext.messages.map(getMessageText).join("\n")).toContain("child report");
+						return fauxAssistantMessage("Parent collected the child report automatically.");
+					},
+				]);
 				context.finish.resolve();
+				await vi.waitFor(() =>
+					expect(context.session.getLastAssistantText()).toBe("Parent collected the child report automatically."),
+				);
+				await context.session.waitForIdle();
 				const jobs = context.session.state.tools.find((tool) => tool.name === "jobs")!;
 				const collected = await jobs.execute("collect", { action: "wait", ids: [job.id], timeoutMs: 30_000 });
 				expect(collected).toMatchObject({
@@ -445,7 +464,7 @@ describe("native background subagents", () => {
 				expect(context.manager.listDelegations()).toHaveLength(mode === "single" ? 1 : 2);
 				expect(context.manager.listDelegations().every((record) => record.status === "completed")).toBe(true);
 				if (mode === "chain") expect(context.childInputs[1]).toContain("child report");
-				expect(context.parentFixture.faux.state.callCount).toBe(3);
+				expect(context.parentFixture.faux.state.callCount).toBe(5);
 			} finally {
 				await context.cleanup();
 			}

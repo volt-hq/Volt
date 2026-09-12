@@ -336,7 +336,7 @@ Crossing a configured token, cost, or deadline budget aborts that delegation tre
 
 The initial subagent confirmation preflight remains synchronous. A confirmed single, parallel, or chain spawning call can return a job ID before children finish. The `jobs` tool supports `list`, `read`, `wait`, and `cancel`; `read` and `wait` return bounded, non-consuming snapshots. See [Background jobs](usage.md#background-jobs) for arguments and limits.
 
-`session.waitForIdle()` reports foreground settlement, not completion of background jobs. `session.hasBackgroundJobs` includes running and cancelling jobs; `session.waitForBackgroundJobs()` joins them without cancellation. `session.abort()` cancels both foreground and background work and joins cleanup. `dispose()` synchronously fences new jobs; `waitForClosed()` joins their cleanup. Active jobs block reload, tree navigation, and Plan entry. Compaction keeps their handles valid. Completed-job notices are committed at an authorized provider boundary, never by starting an unsolicited idle inference request.
+`session.waitForIdle()` reports foreground settlement, including already-scheduled background outcome continuations, but does not wait for still-running background jobs. `session.hasBackgroundJobs` includes running and cancelling jobs; `session.waitForBackgroundJobs()` joins them without cancellation. `session.abort()` cancels both foreground and background work and joins cleanup. `dispose()` synchronously fences new jobs; `waitForClosed()` joins their cleanup. Active jobs block reload, tree navigation, and Plan entry. Compaction keeps their handles valid. Background launch authorizes one automatic continuation for a successful or failed outcome, including when the parent has returned to idle. Notices are committed through normal provider boundaries. Explicit job cancellation suppresses its pending continuation without waking the parent; session abort suppresses all outstanding continuations. Natural foreground settlement does not revoke background outcome handling.
 
 While `session.abort()` drains cleanup, a shared admission gate prevents new foreground turns, continuations, compaction/tree operations, and native Bash/subagent work. This includes custom messages with `triggerTurn: true` when they would start a turn. Pending reservations cannot restart after the gate reopens. Queue storage, non-triggering custom messages, and job inspection remain available. Admission reopens after cleanup settles, even when abort reports a cleanup error; disposal keeps it closed permanently.
 
@@ -478,7 +478,7 @@ session.subscribe((event) => {
       // A retry or compaction/queued continuation may still follow.
       break;
     case "agent_settled":
-      // Prompt fully settled: no further retries or continuations.
+      // Foreground prompt settled. Outstanding background jobs may later resume the session.
       break;
     
     // Turn lifecycle (one LLM response + tool calls)
