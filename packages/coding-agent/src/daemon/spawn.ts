@@ -102,8 +102,11 @@ export async function probeDaemon(agentDir: string = getAgentDir()): Promise<Dae
 export function resolveDaemonCliInvocation(): { nodeArgs: string[]; entry: string } {
 	const packageDir = getPackageDir();
 	const sourceEntry = join(packageDir, "src", "cli.ts");
-	if (existsSync(sourceEntry)) {
-		return { nodeArgs: [...DAEMON_NODE_ARGS, "--conditions", "volt-source"], entry: sourceEntry };
+	const sourceRunner = join(packageDir, "..", "..", "scripts", "run-coding-agent-source.mjs");
+	if (existsSync(sourceEntry) && existsSync(sourceRunner)) {
+		// Use the same tsconfig path resolution as volt-test, even from the agent directory.
+		// Native Node execution otherwise resolves workspace dependencies to stale dist files.
+		return { nodeArgs: [...DAEMON_NODE_ARGS], entry: sourceRunner };
 	}
 	const bundledEntry = join(packageDir, "dist", "core", "npm", "cli.js");
 	return {
