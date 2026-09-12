@@ -82,6 +82,9 @@ interface JobRecord {
 	settled: Promise<void>;
 	notified: boolean;
 	collected: boolean;
+	/** A terminal outcome grants one automatic continuation, unless cancellation revokes it. */
+	continuationPending: boolean;
+	continuationSuppressed: boolean;
 	/** Native terminal reads awaiting delivery in a model request; never worker-supplied metadata. */
 	resultReads: Set<string>;
 	pins: number;
@@ -178,6 +181,8 @@ export class BackgroundJobManager {
 			settled: Promise.resolve(),
 			notified: false,
 			collected: false,
+			continuationPending: true,
+			continuationSuppressed: false,
 			resultReads: new Set(),
 			pins: 0,
 			outputRevision: 0,
@@ -215,6 +220,39 @@ export class BackgroundJobManager {
 	/** Active work and terminal results not yet delivered to the model. History stays in list(). */
 	listUncollected(): BackgroundJobSummary[] {
 		return this.list().filter((job) => !this.records.get(job.id)?.collected);
+	}
+
+	/** Successful and failed outcomes authorize one follow-up; cancellation never does. */
+	pendingContinuations(): BackgroundJobSummary[] {
+		return this.list().filter((job) => {
+			const record = this.records.get(job.id)!;
+			return record.continuationPending && !record.notified && this.canContinue(job.id);
+		});
+	}
+
+	/** Rechecked at dispatch so a cancellation after settlement still wins. */
+	canContinue(id: string): boolean {
+		const record = this.records.get(id);
+		return Boolean(
+			record &&
+				this.hasAccess(record) &&
+				!record.continuationSuppressed &&
+				!record.collected &&
+				(record.snapshot.status === "completed" || record.snapshot.status === "failed"),
+		);
+	}
+
+	/** Consume scheduling authority independently of result collection and notice durability. */
+	claimContinuations(ids: readonly string[]): void {
+		for (const id of ids) {
+			const record = this.records.get(id);
+			if (record) record.continuationPending = false;
+		}
+	}
+
+	/** Explicit host stop/final-response policy also fences work that has not settled yet. */
+	suppressContinuations(): void {
+		for (const record of this.records.values()) record.continuationSuppressed = true;
 	}
 
 	/** Native read/wait execution alone does not prove that the model received the result. */
@@ -433,7 +471,11 @@ export class BackgroundJobManager {
 	}
 
 	private cancelRecord(record: JobRecord): void {
-		if (record.snapshot.endedAt !== undefined || record.controller.signal.aborted) return;
+		record.continuationSuppressed = true;
+		if (record.snapshot.endedAt !== undefined || record.controller.signal.aborted) {
+			this.emitChange();
+			return;
+		}
 		record.snapshot.status = "cancelling";
 		this.diagnose({ kind: "job_cancel", jobId: record.snapshot.id, status: "cancelling" });
 		record.controller.abort();

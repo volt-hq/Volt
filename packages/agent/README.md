@@ -269,9 +269,13 @@ Scoped next-action policy is available for bounded host policy such as subagent 
 
 ```typescript
 const unregister = harness.registerNextActionPolicy((context, _signal) => {
-  return budgetExceeded(context) ? { type: "stop" } : context.defaultAction;
+  return budgetExceeded(context) ? { type: "stop" } : undefined;
 });
 ```
+
+Return `undefined` to leave the suggested action unchanged. Returning `{ type: "stop" }` explicitly enforces a policy stop even when the suggestion was already `stop`; use `pause` for resumable interruptions such as compaction.
+
+Harness emits `next_action_resolved` after all hooks and scoped policies, with the authority-normalized `action` and `requestAuthority`. Stop actions include `stopReason`: `completion`, `policy`, or `tool`. An awaited `on("next_action_resolved", ...)` handler can fence host-owned background continuations before the run settles, without changing the decision. Ordinary completion does not revoke independently authorized work. `subscribe()` receives the same finalized decision as a passive cloned projection.
 
 ## Session repositories
 

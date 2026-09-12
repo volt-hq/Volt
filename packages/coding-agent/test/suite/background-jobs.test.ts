@@ -185,7 +185,7 @@ describe("AgentSession background jobs", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	it("lets the parent finish while Bash lives, retrieves completion, and does not start idle inference", async () => {
+	it("lets the parent finish while Bash lives, then automatically collects its completion", async () => {
 		const backend = controlledBash();
 		const harness = await setup();
 		expect(harness.session.hasBackgroundJobs).toBe(false);
@@ -221,7 +221,8 @@ describe("AgentSession background jobs", () => {
 				return fauxAssistantMessage("Collected the result.");
 			},
 		]);
-		await harness.session.prompt("Collect the result");
+		await vi.waitFor(() => expect(harness.session.getLastAssistantText()).toBe("Collected the result."));
+		await harness.session.waitForIdle();
 		expect(notices(harness)).toHaveLength(1);
 		const { output: _output, outputTruncated: _truncated, lastOutputAt: _lastOutputAt, ...summary } = completed;
 		expect(notices(harness)[0]).toMatchObject({ details: { jobIds: [job.id], jobs: [summary] } });

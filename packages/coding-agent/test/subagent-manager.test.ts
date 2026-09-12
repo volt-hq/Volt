@@ -1958,9 +1958,9 @@ describe("SubagentManager", () => {
 		const { manager } = await createTestManager({
 			onRuntimeCreated: (event) => {
 				unregisterExternalPolicy = event.runtime.session.registerTurnPolicy({
-					nextAction: (context) => {
+					nextAction: () => {
 						externalNextActionCalls++;
-						return context.defaultAction;
+						return undefined;
 					},
 				});
 			},

@@ -136,7 +136,11 @@ async function setup(withConfiguredAuth = true) {
 			return job.id;
 		},
 		async wait(id: string) {
-			return jobs.execute("collect", { action: "wait", ids: [id], timeoutMs: 30_000 });
+			const result = await jobs.execute("collect", { action: "wait", ids: [id], timeoutMs: 30_000 });
+			// These tests mutate parent storage directly, outside session run admission.
+			// Suppress terminal-job inference without changing the settled worker outcome.
+			session.backgroundJobs.cancel(id);
+			return result;
 		},
 		async cleanup(expectedCloseFailure = false) {
 			allowPrompt.resolve();

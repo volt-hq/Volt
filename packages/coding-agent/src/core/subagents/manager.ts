@@ -1570,7 +1570,7 @@ export class SubagentManager {
 					if (context.requestAuthority === "final_response") {
 						pendingBudgetDelivery = undefined;
 						finalResponseSatisfiedBudget = requiresFinalTurnReport;
-						return context.defaultAction;
+						return undefined;
 					}
 					if (pendingBudgetDelivery !== undefined) {
 						const content = pendingBudgetDelivery;
@@ -1592,7 +1592,7 @@ export class SubagentManager {
 						};
 					}
 					if (stopAfterTurnForBudget && context.completedTurn) return { type: "stop" };
-					return context.defaultAction;
+					return undefined;
 				},
 			});
 			budgetFinalizers.push(unregisterBudgetPolicy);
