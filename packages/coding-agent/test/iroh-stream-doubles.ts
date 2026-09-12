@@ -20,6 +20,7 @@ import { ConversationProjectionFeed } from "../src/core/rpc/conversation-project
 import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/rpc/index.ts";
 import type { RpcConversationAuthority } from "../src/core/rpc/types.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 
 type QueuedIrohRead = { type: "data"; bytes: IrohBytes } | { type: "end" };
@@ -185,7 +186,7 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 			getSessionId: (): string => sessionId,
 			getStartingGitContext: () => undefined,
 		},
-		settingsManager: { flush: vi.fn(async () => {}) },
+		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
 		steeringMode: "all" as const,
 		subscribe: vi.fn((_handler: (event: AgentSessionEvent) => void) => () => {}),
 		thinkingLevel: "off" as const,

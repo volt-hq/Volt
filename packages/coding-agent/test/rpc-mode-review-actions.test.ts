@@ -16,6 +16,7 @@ import {
 import { ReviewWorkflowManager } from "../src/core/review-workflows.ts";
 import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -338,7 +339,7 @@ function makeSession(sessionId: string, sessionManager = SessionManager.inMemory
 		messages: [],
 		pendingMessageCount: 0,
 		modelRegistry: { authStorage: {} },
-		settingsManager: {},
+		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
 		resourceLoader: {},
 		sessionFile: `/sessions/${sessionId}.jsonl`,
 		sessionId,

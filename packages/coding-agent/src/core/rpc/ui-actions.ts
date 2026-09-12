@@ -6,6 +6,7 @@ import { BUILTIN_HOST_ACTION_REGISTRY, type HostActionDescriptorContext } from "
 import type { PromptTemplate } from "../prompt-templates.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import { listBaseBranches } from "../review.ts";
+import type { SettingsManager } from "../settings-manager.ts";
 import type { Skill } from "../skills.ts";
 import type { SourceInfo } from "../source-info.ts";
 import type {
@@ -38,6 +39,7 @@ export interface UiActionDiscoverySession {
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	fastModeEnabled?: boolean;
+	settingsManager?: SettingsManager;
 	promptTemplates: ReadonlyArray<PromptTemplate>;
 	resourceLoader: Pick<ResourceLoader, "getSkills">;
 	sessionManager: { getCwd(): string };
@@ -102,6 +104,7 @@ function createHostActionDescriptorContext(
 			model: session.model,
 			thinkingLevel: session.thinkingLevel,
 			fastModeEnabled: session.fastModeEnabled,
+			settingsManager: session.settingsManager,
 		},
 		detachedReviews: options.detachedReviews,
 	};
