@@ -1361,8 +1361,21 @@ export class AgentSession {
 		});
 		this._harness.on("next_action", (event) => {
 			this._assertConversationAuthorityAvailable();
-			if (this._shouldStopForProactiveCompaction(event)) return { type: "stop" };
+			if (this._shouldStopForProactiveCompaction(event)) return { type: "pause" };
 			return this._backgroundNotificationAction(event);
+		});
+		this._harness.on("next_action_resolved", (event) => {
+			if (
+				event.requestAuthority === "final_response" ||
+				event.stopReason === "policy" ||
+				event.stopReason === "tool"
+			) {
+				// Fence all existing work, including jobs that settle after this run.
+				// Ordinary completion and resumable interruptions retain wake authority.
+				this._backgroundJobs.suppressContinuations();
+				this._cancelBackgroundContinuationSchedule();
+			}
+			return undefined;
 		});
 		this._harness.on("tool_call", async (event) => await this._handleToolCallPolicy(event));
 		this._harness.on("tool_result", async (event) => await this._handleToolResultPolicy(event));
@@ -1446,9 +1459,6 @@ export class AgentSession {
 			context.requestAuthority === "final_response" ||
 			action.type !== "request"
 		) {
-			if (context.requestAuthority === "final_response" || context.completedTurn?.disposition === "stop") {
-				this._backgroundJobs.suppressContinuations();
-			}
 			return undefined;
 		}
 		const jobs = this._backgroundJobs.pendingNotifications();

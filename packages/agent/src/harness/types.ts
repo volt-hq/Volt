@@ -713,9 +713,19 @@ export interface ContextEvent {
 	messages: AgentMessage[];
 }
 
+/** Return undefined to preserve the suggested action; returning stop explicitly enforces termination. */
 export interface NextActionEvent extends AgentLoopNextActionContext {
 	type: "next_action";
 	signal: AbortSignal;
+}
+
+/** Final policy decision, after authority normalization and before delivery preparation or run settlement. */
+export interface NextActionResolvedEvent {
+	type: "next_action_resolved";
+	action: AgentLoopNextAction;
+	requestAuthority: AgentLoopNextActionContext["requestAuthority"];
+	/** Present only for stop actions. Completion permits independently authorized future work. */
+	stopReason?: "completion" | "policy" | "tool";
 }
 
 export interface BeforeProviderRequestEvent {
@@ -827,6 +837,7 @@ export type AgentHarnessOwnEvent<
 	| BeforeAgentStartEvent<TSkill, TPromptTemplate>
 	| ContextEvent
 	| NextActionEvent
+	| NextActionResolvedEvent
 	| BeforeProviderRequestEvent
 	| BeforeProviderPayloadEvent
 	| AfterProviderResponseEvent
@@ -896,6 +907,7 @@ export type AgentHarnessEventResultMap = {
 	context: ContextResult | undefined;
 	message_end: MessageEndResult | undefined;
 	next_action: AgentLoopNextAction | undefined;
+	next_action_resolved: undefined;
 	before_provider_request: BeforeProviderRequestResult | undefined;
 	before_provider_payload: BeforeProviderPayloadResult | undefined;
 	after_provider_response: undefined;
@@ -945,6 +957,10 @@ export interface AgentHarnessPromptOptions extends AgentHarnessRunOptions {
 	images?: ImageContent[];
 }
 
+/**
+ * Return undefined for no change. Every returned action is an explicit override,
+ * including stop when the suggested action is already stop. Use pause for resumable interruptions.
+ */
 export type AgentHarnessNextActionPolicy = (
 	context: AgentLoopNextActionContext,
 	signal: AbortSignal,

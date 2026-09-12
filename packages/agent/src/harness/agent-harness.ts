@@ -821,10 +821,11 @@ export class AgentHarness<
 	private async reduceNextAction(
 		context: AgentLoopNextActionContext,
 		initialAction: AgentLoopNextAction,
-	): Promise<AgentLoopNextAction> {
+	): Promise<{ action: AgentLoopNextAction; policyOverride: boolean }> {
 		const signal = this.activeRun?.operation.abortGate.signal;
-		if (!signal) return cloneNextAction(initialAction);
+		if (!signal) return { action: cloneNextAction(initialAction), policyOverride: false };
 		let current = cloneNextAction(initialAction);
+		let policyOverride = false;
 		for (const handler of this.getHandlers("next_action") ?? []) {
 			try {
 				const pendingResult = handler({
@@ -833,7 +834,10 @@ export class AgentHarness<
 					signal,
 				});
 				const result = pendingResult instanceof Promise ? await pendingResult : pendingResult;
-				if (result !== undefined) current = cloneNextAction(result);
+				if (result !== undefined) {
+					current = cloneNextAction(result);
+					policyOverride = true;
+				}
 			} catch (error) {
 				throw normalizeHookError(error);
 			}
@@ -842,12 +846,15 @@ export class AgentHarness<
 			try {
 				const pendingResult = registration.policy(cloneNextActionContext(context, current), signal);
 				const result = pendingResult instanceof Promise ? await pendingResult : pendingResult;
-				if (result !== undefined) current = cloneNextAction(result);
+				if (result !== undefined) {
+					current = cloneNextAction(result);
+					policyOverride = true;
+				}
 			} catch (error) {
 				throw normalizeHookError(error);
 			}
 		}
-		return current;
+		return { action: current, policyOverride };
 	}
 
 	private async emitBeforeProviderRequest(
@@ -1350,15 +1357,16 @@ export class AgentHarness<
 		if (requestAuthority === "final_response") {
 			const finalResponseAction: AgentLoopNextAction =
 				runtimeAction.type === "request" ? { type: "request", reason: "final_response" } : runtimeAction;
-			const action = await this.reduceNextAction({ ...context, requestAuthority }, finalResponseAction);
+			const { action } = await this.reduceNextAction({ ...context, requestAuthority }, finalResponseAction);
+			const resolvedAction: AgentLoopNextAction =
+				action.type === "pause" ? { ...action, requestAuthority } : { type: "request", reason: "final_response" };
+			await this.emitOwn({ type: "next_action_resolved", action: resolvedAction, requestAuthority });
 			this.continuationState = {
 				requestAuthority,
 				providerRequestPending: action.type === "pause" ? providerRequestPending : true,
 				systemPrompt,
 			};
-			return action.type === "pause"
-				? { ...action, requestAuthority }
-				: { type: "request", reason: "final_response" };
+			return resolvedAction;
 		}
 
 		let selected: PendingDelivery[] = [];
@@ -1378,10 +1386,24 @@ export class AgentHarness<
 				: hasIndependentRequest
 					? runtimeAction
 					: { type: "stop" };
-		const action = await this.reduceNextAction(
+		const { action, policyOverride } = await this.reduceNextAction(
 			{ ...context, requestAuthority, defaultAction: suggestedAction },
 			suggestedAction,
 		);
+		await this.emitOwn({
+			type: "next_action_resolved",
+			action,
+			requestAuthority,
+			...(action.type === "stop"
+				? {
+						stopReason: policyOverride
+							? "policy"
+							: context.completedTurn?.disposition === "stop"
+								? "tool"
+								: "completion",
+					}
+				: {}),
+		});
 		if (action.type === "pause") {
 			this.continuationState = {
 				requestAuthority: action.requestAuthority ?? requestAuthority,

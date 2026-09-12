@@ -4,7 +4,8 @@ import { AgentHarness } from "../../src/harness/agent-harness.ts";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
 import { InMemorySessionStorage } from "../../src/harness/session/memory-storage.ts";
 import { Session } from "../../src/harness/session/session.ts";
-import type { AgentMessage, AgentTool } from "../../src/types.ts";
+import type { NextActionResolvedEvent } from "../../src/harness/types.ts";
+import type { AgentLoopNextActionContext, AgentMessage, AgentTool } from "../../src/types.ts";
 import { calculateTool } from "../utils/calculate.ts";
 
 const registrations: Array<{ unregister(): void }> = [];
@@ -25,6 +26,458 @@ function textOf(message: AgentMessage): string {
 function createHarness(options: ConstructorParameters<typeof AgentHarness>[0]): AgentHarness {
 	return new AgentHarness(options);
 }
+
+describe("AgentHarness finalized next-action policy", () => {
+	it("awaits ordered hooks and async scoped policies before publishing, dispatching, and settling", async () => {
+		const registration = registerFauxProvider();
+		registrations.push(registration);
+		const order: string[] = [];
+		registration.setResponses([
+			() => {
+				order.push("provider");
+				return fauxAssistantMessage("done");
+			},
+		]);
+		const harness = createHarness({
+			env: new NodeExecutionEnv({ cwd: process.cwd() }),
+			session: new Session(new InMemorySessionStorage()),
+			model: registration.getModel(),
+		});
+		// Scoped policies run after hooks even when registered before them.
+		harness.registerNextActionPolicy(async (context, signal) => {
+			order.push(`policy-first:start:${context.defaultAction.type}`);
+			await Promise.resolve();
+			expect(signal.aborted).toBe(false);
+			order.push(`policy-first:end:${context.defaultAction.type}`);
+			return context.completedTurn ? undefined : { type: "request", reason: "continuation" };
+		});
+		harness.on("next_action", (event) => {
+			order.push(`hook-first:${event.defaultAction.type}`);
+			return event.completedTurn ? undefined : { type: "pause" };
+		});
+		harness.registerNextActionPolicy(async (context) => {
+			await Promise.resolve();
+			order.push(`policy-second:${context.defaultAction.type}`);
+			if (!context.completedTurn) expect(context.defaultAction).toEqual({ type: "request", reason: "continuation" });
+			return undefined;
+		});
+		harness.on("next_action", async (event) => {
+			await Promise.resolve();
+			order.push(`hook-second:${event.defaultAction.type}`);
+			return event.completedTurn ? undefined : { type: "stop" };
+		});
+		const resolved: NextActionResolvedEvent[] = [];
+		harness.on("next_action_resolved", async (event) => {
+			await Promise.resolve();
+			resolved.push(event);
+			order.push(`resolved:${event.action.type}`);
+			return undefined;
+		});
+		harness.on("before_provider_request", () => {
+			order.push("before-provider");
+			return undefined;
+		});
+		harness.subscribe((event) => {
+			if (event.type === "settled") order.push("settled");
+		});
+
+		await expect(harness.runPrompt("hello")).resolves.toMatchObject({ status: "completed" });
+
+		expect(order).toEqual([
+			"hook-first:request",
+			"hook-second:pause",
+			"policy-first:start:stop",
+			"policy-first:end:stop",
+			"policy-second:request",
+			"resolved:request",
+			"before-provider",
+			"provider",
+			"hook-first:stop",
+			"hook-second:stop",
+			"policy-first:start:stop",
+			"policy-first:end:stop",
+			"policy-second:stop",
+			"resolved:stop",
+			"settled",
+		]);
+		expect(resolved).toEqual([
+			{
+				type: "next_action_resolved",
+				action: { type: "request", reason: "continuation" },
+				requestAuthority: "provider",
+			},
+			{
+				type: "next_action_resolved",
+				action: { type: "stop" },
+				requestAuthority: "provider",
+				stopReason: "completion",
+			},
+		]);
+		expect(registration.state.callCount).toBe(1);
+	});
+
+	it.each(["hook", "scoped"] as const)(
+		"attributes an explicit %s stop to policy even when the suggestion is already stop",
+		async (source) => {
+			const registration = registerFauxProvider();
+			registrations.push(registration);
+			registration.setResponses([() => fauxAssistantMessage("done")]);
+			const harness = createHarness({
+				env: new NodeExecutionEnv({ cwd: process.cwd() }),
+				session: new Session(new InMemorySessionStorage()),
+				model: registration.getModel(),
+			});
+			const stop = (context: AgentLoopNextActionContext) => {
+				if (!context.completedTurn) return undefined;
+				expect(context.defaultAction).toEqual({ type: "stop" });
+				return { type: "stop" as const };
+			};
+			if (source === "hook") harness.on("next_action", stop);
+			else harness.registerNextActionPolicy(stop);
+			// Returning undefined must preserve explicit stop provenance, not reset it to completion.
+			harness.registerNextActionPolicy(async () => undefined);
+			const resolved: NextActionResolvedEvent[] = [];
+			harness.on("next_action_resolved", (event) => {
+				resolved.push(event);
+				return undefined;
+			});
+
+			await expect(harness.runPrompt("hello")).resolves.toMatchObject({ status: "completed" });
+
+			expect(resolved).toHaveLength(2);
+			expect(resolved.at(-1)).toEqual({
+				type: "next_action_resolved",
+				action: { type: "stop" },
+				requestAuthority: "provider",
+				stopReason: "policy",
+			});
+			expect(registration.state.callCount).toBe(1);
+		},
+	);
+
+	it.each(["hook", "scoped"] as const)(
+		"publishes an explicit %s stop before settlement without dispatch",
+		async (source) => {
+			const registration = registerFauxProvider();
+			registrations.push(registration);
+			registration.setResponses([() => fauxAssistantMessage("must not run")]);
+			const harness = createHarness({
+				env: new NodeExecutionEnv({ cwd: process.cwd() }),
+				session: new Session(new InMemorySessionStorage()),
+				model: registration.getModel(),
+			});
+			const stop = () => ({ type: "stop" as const });
+			if (source === "hook") harness.on("next_action", stop);
+			else harness.registerNextActionPolicy(stop);
+			const order: string[] = [];
+			const resolved: NextActionResolvedEvent[] = [];
+			harness.on("next_action_resolved", (event) => {
+				resolved.push(event);
+				order.push("resolved");
+				return undefined;
+			});
+			harness.subscribe((event) => {
+				if (event.type === "settled") order.push("settled");
+			});
+
+			await expect(harness.runPrompt("hello")).resolves.toMatchObject({ status: "completed" });
+
+			expect(resolved).toEqual([
+				{
+					type: "next_action_resolved",
+					action: { type: "stop" },
+					requestAuthority: "provider",
+					stopReason: "policy",
+				},
+			]);
+			expect(order).toEqual(["resolved", "settled"]);
+			expect(registration.state.callCount).toBe(0);
+		},
+	);
+
+	it.each([false, true])(
+		"preserves tool stop provenance unless policy explicitly stops (explicit=%s)",
+		async (explicit) => {
+			const registration = registerFauxProvider();
+			registrations.push(registration);
+			registration.setResponses([
+				() =>
+					fauxAssistantMessage(fauxToolCall("calculate", { expression: "1 + 1" }, { id: "stop-call" }), {
+						stopReason: "toolUse",
+					}),
+			]);
+			const harness = createHarness({
+				env: new NodeExecutionEnv({ cwd: process.cwd() }),
+				session: new Session(new InMemorySessionStorage()),
+				model: registration.getModel(),
+				tools: [calculateTool],
+			});
+			harness.on("tool_result", () => ({ disposition: "stop" }));
+			harness.on("next_action", () => undefined);
+			harness.registerNextActionPolicy(async (context) => {
+				if (!context.completedTurn) return undefined;
+				expect(context.completedTurn.toolResults).toHaveLength(1);
+				expect(context.defaultAction).toEqual({ type: "stop" });
+				return explicit ? { type: "stop" } : undefined;
+			});
+			harness.registerNextActionPolicy(() => undefined);
+			const resolved: NextActionResolvedEvent[] = [];
+			harness.on("next_action_resolved", (event) => {
+				resolved.push(event);
+				return undefined;
+			});
+
+			await expect(harness.runPrompt("calculate")).resolves.toMatchObject({ status: "completed" });
+
+			expect(registration.state.callCount).toBe(1);
+			expect(resolved).toHaveLength(2);
+			expect(resolved.at(-1)).toEqual({
+				type: "next_action_resolved",
+				action: { type: "stop" },
+				requestAuthority: "provider",
+				stopReason: explicit ? "policy" : "tool",
+			});
+		},
+	);
+
+	it.each([
+		{ source: "hook", override: "request" },
+		{ source: "scoped", override: "request" },
+		{ source: "hook", override: "pause" },
+		{ source: "scoped", override: "pause" },
+	] as const)(
+		"allows later $override to override a $source stop without stale provenance",
+		async ({ source, override }) => {
+			const registration = registerFauxProvider();
+			registrations.push(registration);
+			let continuationMessages: AgentMessage[] = [];
+			registration.setResponses([
+				() =>
+					fauxAssistantMessage(fauxToolCall("calculate", { expression: "2 + 3" }, { id: "override-call" }), {
+						stopReason: "toolUse",
+					}),
+				(context) => {
+					continuationMessages = context.messages as AgentMessage[];
+					return fauxAssistantMessage("done");
+				},
+			]);
+			const harness = createHarness({
+				env: new NodeExecutionEnv({ cwd: process.cwd() }),
+				session: new Session(new InMemorySessionStorage()),
+				model: registration.getModel(),
+				tools: [calculateTool],
+			});
+			const stop = (context: AgentLoopNextActionContext) =>
+				context.completedTurn?.toolResults.length ? { type: "stop" as const } : undefined;
+			if (source === "hook") harness.on("next_action", stop);
+			else harness.registerNextActionPolicy(stop);
+			harness.registerNextActionPolicy(async (context) => {
+				if (!context.completedTurn?.toolResults.length) return undefined;
+				expect(context.defaultAction).toEqual({ type: "stop" });
+				await Promise.resolve();
+				return override === "pause" ? { type: "pause" } : { type: "request", reason: "continuation" };
+			});
+			harness.registerNextActionPolicy(() => undefined);
+			const resolved: NextActionResolvedEvent[] = [];
+			let toolExecutions = 0;
+			harness.subscribe((event) => {
+				if (event.type === "tool_execution_end") toolExecutions++;
+			});
+			harness.on("next_action_resolved", (event) => {
+				resolved.push(event);
+				return undefined;
+			});
+
+			await expect(harness.runPrompt("calculate")).resolves.toMatchObject({ status: "completed" });
+
+			expect(resolved[1]).toEqual({
+				type: "next_action_resolved",
+				action: override === "pause" ? { type: "pause" } : { type: "request", reason: "continuation" },
+				requestAuthority: "tool_continuation",
+			});
+			if (override === "pause") {
+				expect(registration.state.callCount).toBe(1);
+				expect(harness.getPhase()).toBe("idle");
+				await expect(harness.continue()).resolves.toMatchObject({ status: "completed" });
+			}
+			expect(registration.state.callCount).toBe(2);
+			expect(toolExecutions).toBe(1);
+			expect(continuationMessages.filter((message) => message.role === "toolResult").map(textOf)).toEqual([
+				"2 + 3 = 5",
+			]);
+			expect(resolved.at(-1)).toEqual({
+				type: "next_action_resolved",
+				action: { type: "stop" },
+				requestAuthority: "provider",
+				stopReason: "completion",
+			});
+		},
+	);
+
+	it("isolates finalized hooks and passive subscribers from each other, dispatch, and persistence", async () => {
+		const registration = registerFauxProvider();
+		registrations.push(registration);
+		let providerMessages: AgentMessage[] = [];
+		registration.setResponses([
+			(context) => {
+				providerMessages = context.messages as AgentMessage[];
+				return fauxAssistantMessage("done");
+			},
+		]);
+		const session = new Session(new InMemorySessionStorage());
+		const harness = createHarness({
+			env: new NodeExecutionEnv({ cwd: process.cwd() }),
+			session,
+			model: registration.getModel(),
+		});
+		harness.registerNextActionPolicy((context) =>
+			context.completedTurn
+				? undefined
+				: {
+						type: "request",
+						reason: "delivery",
+						deliveries: [{ messages: [{ role: "user", content: "owned delivery", timestamp: 123 }] }],
+					},
+		);
+		const mutate = (event: NextActionResolvedEvent) => {
+			if (event.action.type === "request") {
+				const delivery = event.action.deliveries?.[0];
+				if (delivery) {
+					delivery.messages[0] = { role: "user", content: "mutated delivery", timestamp: 456 };
+					delivery.messages.push({ role: "user", content: "injected delivery", timestamp: 789 });
+				}
+				event.action = { type: "stop" };
+			} else {
+				event.action = { type: "request", reason: "continuation" };
+			}
+			event.requestAuthority = "final_response";
+			event.stopReason = "policy";
+			return undefined;
+		};
+		const hookEvents: NextActionResolvedEvent[] = [];
+		const subscriberEvents: NextActionResolvedEvent[] = [];
+		harness.on("next_action_resolved", mutate);
+		harness.on("next_action_resolved", (event) => {
+			hookEvents.push(event);
+			return undefined;
+		});
+		harness.subscribe((event) => {
+			if (event.type === "next_action_resolved") mutate(event);
+		});
+		harness.subscribe((event) => {
+			if (event.type === "next_action_resolved") subscriberEvents.push(event);
+		});
+
+		await expect(harness.runPrompt("hello")).resolves.toMatchObject({ status: "completed" });
+
+		const expected: NextActionResolvedEvent[] = [
+			{
+				type: "next_action_resolved",
+				action: {
+					type: "request",
+					reason: "delivery",
+					deliveries: [{ messages: [{ role: "user", content: "owned delivery", timestamp: 123 }] }],
+				},
+				requestAuthority: "provider",
+			},
+			{
+				type: "next_action_resolved",
+				action: { type: "stop" },
+				requestAuthority: "provider",
+				stopReason: "completion",
+			},
+		];
+		expect(hookEvents).toEqual(expected);
+		expect(subscriberEvents).toEqual(expected);
+		expect(registration.state.callCount).toBe(1);
+		expect(providerMessages.map(textOf)).toEqual(["hello", "owned delivery"]);
+		expect((await session.buildContext()).messages.map(textOf)).toEqual(["hello", "owned delivery", "done"]);
+	});
+
+	it.each(["stop", "request", "pause"] as const)(
+		"publishes normalized final-response authority after policy returns %s",
+		async (decision) => {
+			const registration = registerFauxProvider();
+			registrations.push(registration);
+			const finalRequests: Array<{ tools: string[]; systemPrompt: string; texts: string[] }> = [];
+			registration.setResponses([
+				() =>
+					fauxAssistantMessage(fauxToolCall("calculate", { expression: "3 + 4" }, { id: "final-call" }), {
+						stopReason: "toolUse",
+					}),
+				(context) => {
+					finalRequests.push({
+						tools: context.tools?.map((tool) => tool.name) ?? [],
+						systemPrompt: context.systemPrompt ?? "",
+						texts: (context.messages as AgentMessage[]).map(textOf),
+					});
+					return fauxAssistantMessage("final answer");
+				},
+			]);
+			const harness = createHarness({
+				env: new NodeExecutionEnv({ cwd: process.cwd() }),
+				session: new Session(new InMemorySessionStorage()),
+				model: registration.getModel(),
+				tools: [calculateTool],
+			});
+			harness.on("tool_result", () => ({ disposition: "final_response" }));
+			let finalDecisions = 0;
+			harness.on("next_action", (event) =>
+				event.requestAuthority === "final_response" ? { type: "stop" } : undefined,
+			);
+			harness.registerNextActionPolicy(async (context) => {
+				if (context.requestAuthority !== "final_response") return undefined;
+				expect(context.defaultAction).toEqual({ type: "stop" });
+				finalDecisions++;
+				await Promise.resolve();
+				if (decision === "pause" && finalDecisions === 1) return { type: "pause", requestAuthority: "provider" };
+				if (decision === "request")
+					return {
+						type: "request",
+						reason: "delivery",
+						deliveries: [
+							{ messages: [{ role: "user", content: "must not override final response", timestamp: 1 }] },
+						],
+					};
+				return { type: "stop" };
+			});
+			const resolved: NextActionResolvedEvent[] = [];
+			harness.on("next_action_resolved", (event) => {
+				resolved.push(event);
+				return undefined;
+			});
+
+			await expect(harness.runPrompt("calculate")).resolves.toMatchObject({ status: "completed" });
+
+			if (decision === "pause") {
+				expect(registration.state.callCount).toBe(1);
+				expect(finalRequests).toEqual([]);
+				expect(resolved.at(-1)).toEqual({
+					type: "next_action_resolved",
+					action: { type: "pause", requestAuthority: "final_response" },
+					requestAuthority: "final_response",
+				});
+				await expect(harness.continue()).resolves.toMatchObject({ status: "completed" });
+			}
+			expect(finalDecisions).toBe(decision === "pause" ? 2 : 1);
+			expect(
+				resolved.filter((event) => event.requestAuthority === "final_response" && event.action.type !== "pause"),
+			).toEqual([
+				{
+					type: "next_action_resolved",
+					action: { type: "request", reason: "final_response" },
+					requestAuthority: "final_response",
+				},
+			]);
+			expect(registration.state.callCount).toBe(2);
+			expect(finalRequests).toHaveLength(1);
+			expect(finalRequests[0]?.tools).toEqual([]);
+			expect(finalRequests[0]?.systemPrompt).toContain("VOLT FINAL RESPONSE");
+			expect(finalRequests[0]?.texts).toContain("3 + 4 = 7");
+			expect(finalRequests[0]?.texts).not.toContain("must not override final response");
+		},
+	);
+});
 
 describe("AgentHarness host policy", () => {
 	it("allows model-less construction and rejects only model-backed preflight", async () => {
