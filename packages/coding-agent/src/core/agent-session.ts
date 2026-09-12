@@ -733,6 +733,13 @@ export class AgentSession {
 	};
 	/** Present only until the first provider dispatch of an automatically resumed run. */
 	private _backgroundContinuationJobIds?: string[];
+	/** Reserve the single automatic attempt without consuming any job's wake authority. */
+	private _backgroundContinuationAttempt?: { revision: number; decisionResolved: boolean; settled?: Promise<void> };
+	/** Readiness changes on policy registration/removal, explicit runs, and compaction. */
+	private _backgroundContinuationRevision = 0;
+	private _backgroundNotificationDecisionRevision = 0;
+	/** A pause or failed preflight must not spin at foreground settlement. */
+	private _backgroundContinuationDeferredRevision?: number;
 
 	// Bash execution state
 	private _bashAbortController: AbortController | undefined = undefined;
@@ -1361,10 +1368,12 @@ export class AgentSession {
 		});
 		this._harness.on("next_action", (event) => {
 			this._assertConversationAuthorityAvailable();
+			this._backgroundNotificationDecisionRevision = this._backgroundContinuationRevision;
 			if (this._shouldStopForProactiveCompaction(event)) return { type: "pause" };
 			return this._backgroundNotificationAction(event);
 		});
 		this._harness.on("next_action_resolved", (event) => {
+			if (this._backgroundContinuationAttempt) this._backgroundContinuationAttempt.decisionResolved = true;
 			if (
 				event.requestAuthority === "final_response" ||
 				event.stopReason === "policy" ||
@@ -1373,6 +1382,39 @@ export class AgentSession {
 				// Fence all existing work, including jobs that settle after this run.
 				// Ordinary completion and resumable interruptions retain wake authority.
 				this._backgroundJobs.suppressContinuations();
+				this._cancelBackgroundContinuationSchedule();
+				return undefined;
+			}
+			const acceptedDeliveries = new Set(
+				event.action.type === "request"
+					? (event.action.deliveries ?? []).flatMap((delivery) =>
+							delivery.deliveryId !== undefined &&
+							delivery.messages.some(
+								(message) =>
+									message.role === "custom" && message.customType === BACKGROUND_JOB_NOTIFICATION_TYPE,
+							)
+								? [delivery.deliveryId]
+								: [],
+						)
+					: [],
+			);
+			let discardedNotice = false;
+			for (const [deliveryId, notice] of this._backgroundNotificationDeliveries) {
+				if (acceptedDeliveries.has(deliveryId) && notice.generation === this._conversationGenerationRevision) {
+					// Policy accepted this notice-bearing request. Later provider failure must not rearm it.
+					this._backgroundJobs.claimContinuations(notice.jobIds);
+				} else {
+					discardedNotice = true;
+					this._backgroundNotificationDeliveries.delete(deliveryId);
+				}
+			}
+			if (
+				(event.action.type === "pause" || discardedNotice) &&
+				this._backgroundJobs.pendingContinuations().length > 0
+			) {
+				// Keep authority, but wait for readiness rather than retrying the same policy indefinitely.
+				// Capture before reduction so a policy removing itself already counts as readiness.
+				this._backgroundContinuationDeferredRevision = this._backgroundNotificationDecisionRevision;
 				this._cancelBackgroundContinuationSchedule();
 			}
 			return undefined;
@@ -1385,6 +1427,8 @@ export class AgentSession {
 	private _scheduleBackgroundContinuation(): void {
 		if (
 			this._backgroundContinuationSchedule !== undefined ||
+			this._backgroundContinuationAttempt !== undefined ||
+			this._backgroundContinuationDeferredRevision === this._backgroundContinuationRevision ||
 			this._disposed ||
 			!this._admissionGate.isOpen ||
 			this._backgroundJobs.pendingContinuations().length === 0
@@ -1399,6 +1443,8 @@ export class AgentSession {
 			this._backgroundContinuationSchedule = undefined;
 			try {
 				if (
+					this._backgroundContinuationAttempt !== undefined ||
+					this._backgroundContinuationDeferredRevision === this._backgroundContinuationRevision ||
 					this._disposed ||
 					!this._admissionGate.isOpen ||
 					!this._isConversationAuthorityAvailable() ||
@@ -1412,10 +1458,11 @@ export class AgentSession {
 					return;
 				const jobIds = this._backgroundJobs.pendingContinuations().map((job) => job.id);
 				if (jobIds.length === 0) return;
-				// A failed or policy-stopped attempt must not create a repeated inference loop.
-				this._backgroundJobs.claimContinuations(jobIds);
+				const reservedRun = this._harness.reserveRun();
+				const attempt = { revision: this._backgroundContinuationRevision, decisionResolved: false };
+				this._backgroundContinuationAttempt = attempt;
 				this._backgroundContinuationJobIds = jobIds;
-				const work = this._runAgentPrompt([], this._abortGeneration, true, this._harness.reserveRun())
+				const work = this._runAgentPrompt([], this._abortGeneration, true, reservedRun)
 					.catch((error: unknown) => {
 						if (this._disposed) return;
 						this._extensionRunner.emitError({
@@ -1425,9 +1472,11 @@ export class AgentSession {
 						});
 					})
 					.finally(() => {
+						if (!attempt.decisionResolved) this._backgroundContinuationDeferredRevision = attempt.revision;
+						this._backgroundContinuationAttempt = undefined;
 						this._backgroundContinuationJobIds = undefined;
 					});
-				this._trackAdmittedPromptWork(work);
+				this._backgroundContinuationAttempt.settled = this._trackAdmittedPromptWork(work);
 			} finally {
 				resolveDispatch();
 			}
@@ -1463,8 +1512,7 @@ export class AgentSession {
 		}
 		const jobs = this._backgroundJobs.pendingNotifications();
 		if (jobs.length === 0) return undefined;
-		// A later stop policy may discard this proposal. Do not bypass it with an idle wake.
-		this._backgroundJobs.claimContinuations(jobs.map((job) => job.id));
+		// Proposals do not consume wake authority; only the final accepted delivery does.
 		const deliveryId = `background-notice:${randomUUID()}`;
 		const jobIds = jobs.map((job) => job.id);
 		if (this._backgroundContinuationJobIds) {
@@ -3184,12 +3232,20 @@ export class AgentSession {
 		const unregisterNextAction = policy.nextAction
 			? this._harness.registerNextActionPolicy(policy.nextAction)
 			: undefined;
+		if (unregisterNextAction) {
+			this._backgroundContinuationRevision++;
+			this._scheduleBackgroundContinuation();
+		}
 		let registered = true;
 		return () => {
 			if (!registered) return;
 			registered = false;
 			unregisterToolCall?.();
-			unregisterNextAction?.();
+			if (unregisterNextAction) {
+				unregisterNextAction();
+				this._backgroundContinuationRevision++;
+				this._scheduleBackgroundContinuation();
+			}
 		};
 	}
 
@@ -4322,6 +4378,7 @@ export class AgentSession {
 			if (reservation) this._harness.cancelReservedRun(reservation);
 			return;
 		}
+		if (!this._backgroundContinuationAttempt) this._backgroundContinuationRevision++;
 		this._proactiveCompactionState = "idle";
 		this._drainFollowUpsOnNextContinuation = false;
 		if (!resumeRetainedPrompt) this._harness.invalidateContinuationContext();
@@ -4380,6 +4437,7 @@ export class AgentSession {
 
 	private async _continueAgent(reservedRun?: AgentHarnessRunReservation): Promise<AgentRunResult> {
 		this._assertConversationAuthorityAvailable();
+		this._backgroundContinuationRevision++;
 		const drainFollowUps = this._drainFollowUpsOnNextContinuation;
 		this._drainFollowUpsOnNextContinuation = false;
 		this._agentConversationMutationInFlight = true;
@@ -4426,12 +4484,14 @@ export class AgentSession {
 	private async _waitForIdle(): Promise<void> {
 		for (;;) {
 			await this._backgroundContinuationSchedule?.dispatched;
+			await this._backgroundContinuationAttempt?.settled;
 			const settlement = this._agentSettlementBarrier;
 			await this._harness.waitForIdle();
 			await settlement;
 			if (
 				settlement === this._agentSettlementBarrier &&
 				this._harness.getPhase() === "idle" &&
+				!this._backgroundContinuationAttempt &&
 				!this._backgroundContinuationSchedule
 			)
 				return;
@@ -5958,6 +6018,7 @@ export class AgentSession {
 			assertConversationGenerationCurrent?.();
 		}
 
+		this._backgroundContinuationRevision++;
 		return {
 			summary,
 			firstKeptEntryId,
