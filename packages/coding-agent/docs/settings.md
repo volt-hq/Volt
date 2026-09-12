@@ -177,7 +177,11 @@ Both options are available under **Warnings** in `/settings`.
 
 Under **Agent** in `/settings`, **Compact at** configures the currently selected provider/model. Choose `350k` to compact at 350,000 tokens, or `default` to restore the context-limit trigger. **Auto-compact** must be enabled. The model reference is shown in the description; switch models to configure another one. Changes are saved to global settings (or the active global profile), with trusted project settings taking precedence as usual.
 
-For an arbitrary count, edit `settings.json`:
+A paired phone can configure these same preferences through native Context actions: **Auto-compaction** and **Compact at**. They save on the connected host globally, or in its active global profile—not in phone storage or just the current session. **Compact at** targets the exact provider/model shown when the control opens. Switching the host model or profile before saving rejects the stale edit; refresh the controls and try again. The host retains the threshold when auto-compaction is off.
+
+Phone controls show effective values but disable edits when trusted project settings, the active trusted project profile, or a runtime override controls that setting. Edit that override on the host instead; saving a shadowed global preference would have no effect. Controls are also unavailable during an agent operation or compaction, or without a selected model. Saves wait for host persistence and report write errors. See [Native UI actions](rpc.md#native-ui-actions) for the invocation contract.
+
+For an arbitrary count, use the phone's token-count control or edit `settings.json`:
 
 ```json
 {

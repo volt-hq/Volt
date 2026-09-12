@@ -1160,6 +1160,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		assertConversationGenerationCurrent?: () => void,
 	): HostActionInvocationContext => ({
 		session: commandSession,
+		assertCurrent: assertConversationGenerationCurrent,
 		detachedReviews: true,
 		abortRun: () => commandSession.abort("remote_request"),
 		compactContext: (customInstructions) =>

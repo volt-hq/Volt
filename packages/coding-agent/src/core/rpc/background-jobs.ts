@@ -2,6 +2,11 @@ import { stripVTControlCharacters } from "node:util";
 import { Compile } from "typebox/compile";
 import type { AgentSession, AgentSessionEvent } from "../agent-session.ts";
 import type { BackgroundJobSource } from "../background-jobs.ts";
+import {
+	BUILTIN_HOST_ACTION_REGISTRY,
+	CONTEXT_AUTO_COMPACTION_ACTION_ID,
+	CONTEXT_COMPACTION_THRESHOLD_ACTION_ID,
+} from "../host-actions.ts";
 import { isUsableRpcConversationIdentifier } from "./correlation.ts";
 import { RpcBackgroundJobSnapshotSchema } from "./schema/background-jobs.ts";
 import type { RpcBackgroundJobSnapshot, RpcBackgroundJobSummary, RpcBackgroundJobsChangedEvent } from "./types.ts";
@@ -44,11 +49,29 @@ export function listRpcBackgroundJobs(source: BackgroundJobSource): RpcBackgroun
  * old branch's jobs after navigation. Detachment cancels the pending callback.
  */
 export function subscribeRpcSessionEvents(
-	session: Pick<AgentSession, "subscribe" | "backgroundJobs">,
+	session: Pick<AgentSession, "subscribe" | "backgroundJobs"> &
+		Partial<Pick<AgentSession, "settingsManager" | "model" | "isStreaming" | "isCompacting" | "isBusy">>,
 	listener: (event: AgentSessionEvent | RpcBackgroundJobsChangedEvent) => void,
 	options?: { monitorGitContext?: boolean },
 ): () => void {
 	const unsubscribeSession = session.subscribe(listener, options);
+	// The same settings source backs CLI edits and remote actions, in both
+	// headless and TUI-owned runtimes. Convert committed edits/profile reloads
+	// into the existing ordered action-state event, never a second wire schema.
+	const unsubscribeSettings = session.settingsManager?.subscribeCompactionSettings(() => {
+		for (const action of [CONTEXT_AUTO_COMPACTION_ACTION_ID, CONTEXT_COMPACTION_THRESHOLD_ACTION_ID]) {
+			const state = BUILTIN_HOST_ACTION_REGISTRY.getDescriptor(action, {
+				session: {
+					isBusy: session.isBusy,
+					isStreaming: session.isStreaming ?? false,
+					isCompacting: session.isCompacting ?? false,
+					model: session.model,
+					settingsManager: session.settingsManager,
+				},
+			})?.state;
+			if (state) listener({ type: "ui_action_state_changed", action, state });
+		}
+	});
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const unsubscribeJobs = session.backgroundJobs.subscribe(() => {
 		if (timer !== undefined) return;
@@ -64,6 +87,7 @@ export function subscribeRpcSessionEvents(
 	});
 	return () => {
 		unsubscribeSession();
+		unsubscribeSettings?.();
 		unsubscribeJobs();
 		if (timer !== undefined) clearTimeout(timer);
 	};

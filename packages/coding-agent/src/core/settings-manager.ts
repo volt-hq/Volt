@@ -484,6 +484,8 @@ export class SettingsManager {
 	private writeWatermark: Promise<void> = Promise.resolve();
 	private errors: SettingsError[];
 	private sessionOverrides: Settings = {}; // Runtime overrides (e.g. CLI flags), reapplied on every re-merge
+	private readonly compactionListeners = new Set<() => void>();
+	private compactionFingerprint = "";
 
 	private constructor(
 		storage: SettingsStorage,
@@ -532,7 +534,7 @@ export class SettingsManager {
 	}
 
 	/** Re-merge effective settings from global, project, profile overlays, and session overrides */
-	private mergeEffectiveSettings(): void {
+	private mergeEffectiveSettings(notifyCompaction = true): void {
 		const baseSettings = deepMergeSettings(this.globalSettings, this.projectSettings);
 		const profileName = this.requestedProfile ?? normalizeProfileName(baseSettings.defaultProfile);
 		this.activeProfile = profileName;
@@ -553,6 +555,60 @@ export class SettingsManager {
 		if (profileName) {
 			this.reportMissingProfile(profileName);
 		}
+		if (notifyCompaction) this.notifyCompactionSettingsChanged();
+	}
+
+	/** Observe effective compaction preferences and their scope; saves notify after durability. */
+	subscribeCompactionSettings(listener: () => void): () => void {
+		this.compactionListeners.add(listener);
+		return () => this.compactionListeners.delete(listener);
+	}
+
+	private notifyCompactionSettingsChanged(): void {
+		const fingerprint = JSON.stringify({
+			profile: this.activeProfile,
+			compaction: this.settings.compaction,
+			projectTrusted: this.projectTrusted,
+			projectCompaction: this.projectSettings.compaction,
+			projectProfileCompaction: this.getProfileOverlay(this.projectSettings, this.activeProfile).compaction,
+			runtimeCompaction: this.sessionOverrides.compaction,
+			globalLoadError: this.globalSettingsLoadError?.message,
+			projectLoadError: this.projectSettingsLoadError?.message,
+		});
+		if (fingerprint === this.compactionFingerprint) return;
+		this.compactionFingerprint = fingerprint;
+		for (const listener of this.compactionListeners) {
+			try {
+				listener();
+			} catch {
+				// Presentation observers must not affect settings persistence.
+			}
+		}
+	}
+
+	/** Why a global compaction edit would be unsafe or ineffective in this scope. */
+	getCompactionWriteDisabledReason(field: "enabled" | "modelThresholds", modelReference?: string): string | undefined {
+		if (this.globalSettingsLoadError) return "Host global settings could not be loaded; repair them and reload";
+		if (this.projectSettingsLoadError) return "Host project settings could not be loaded; repair them and reload";
+		const path = ["compaction", field, ...(field === "modelThresholds" ? [modelReference ?? ""] : [])];
+		const overridesPath = (settings: Settings): boolean => {
+			let current: unknown = settings;
+			for (const key of path) {
+				if (!isSettingsRecord(current)) return true;
+				if (!Object.hasOwn(current, key) || current[key] === undefined) return false;
+				current = current[key];
+			}
+			return true;
+		};
+		if (overridesPath(this.sessionOverrides))
+			return "A runtime override controls this setting; global edits would not apply";
+		if (this.projectTrusted && overridesPath(this.getProfileOverlay(this.projectSettings, this.activeProfile))) {
+			return `Trusted project profile "${this.activeProfile}" overrides this setting; edit it on the host`;
+		}
+		if (this.projectTrusted && overridesPath(this.projectSettings)) {
+			return "Trusted project settings override this setting; edit them on the host";
+		}
+		return undefined;
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -946,6 +1002,9 @@ export class SettingsManager {
 			}
 			task();
 			this.clearModifiedScope(scope);
+			// A later accepted write may already have changed the effective values.
+			// Publish only once the latest snapshot is durable, not after an older write.
+			if (this.writeWatermark === write) this.notifyCompactionSettingsChanged();
 		});
 		this.writeQueue = write.catch((error) => {
 			this.recordError(scope, error);
@@ -1078,7 +1137,7 @@ export class SettingsManager {
 	}
 
 	private save(): void {
-		this.mergeEffectiveSettings();
+		this.mergeEffectiveSettings(false);
 
 		if (this.globalSettingsLoadError) {
 			return;
