@@ -12,7 +12,7 @@ $ProgressPreference = 'SilentlyContinue'
 $stream = $null
 $created = $false
 try {
-    $request = ConvertFrom-Json ([Console]::In.ReadToEnd())
+    $request = ConvertFrom-Json ([Console]::In.ReadLine())
     $directory = [IO.DirectoryInfo]::new([string]$request.directory)
     $filePath = [IO.Path]::GetFullPath([string]$request.path)
     if ([IO.Path]::GetDirectoryName($filePath) -ne $directory.FullName) { throw 'Invalid diagnostic path.' }
@@ -102,6 +102,8 @@ export async function writeWindowsReviewDiagnostic(filePath: string, content: st
 		// Startup/timeout errors are reported by execFile's callback; don't let an
 		// early pipe closure become an unhandled event or expose its raw diagnostic.
 		child.stdin?.on("error", () => {});
-		child.stdin?.end(JSON.stringify({ directory: dirname(filePath), path: filePath, content }), "utf8");
+		// JSON escapes embedded newlines. Frame the request so PowerShell can
+		// finish without waiting for EOF on the redirected Windows pipe.
+		child.stdin?.end(`${JSON.stringify({ directory: dirname(filePath), path: filePath, content })}\n`, "utf8");
 	});
 }
