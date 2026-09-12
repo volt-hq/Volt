@@ -139,6 +139,8 @@ export interface CompactionSettings {
 	enabled: boolean;
 	reserveTokens: number;
 	keepRecentTokens: number;
+	/** Resolved absolute threshold for the selected model; 0 or omitted uses only the context-limit trigger. */
+	thresholdTokens?: number;
 }
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
@@ -259,7 +261,11 @@ export function estimateContextTokens(messages: AgentMessage[], tools?: readonly
  */
 export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
 	if (!settings.enabled) return false;
-	return contextTokens > contextWindow - settings.reserveTokens;
+	const threshold = settings.thresholdTokens;
+	return (
+		contextTokens > contextWindow - settings.reserveTokens ||
+		(typeof threshold === "number" && Number.isSafeInteger(threshold) && threshold > 0 && contextTokens >= threshold)
+	);
 }
 
 // ============================================================================
