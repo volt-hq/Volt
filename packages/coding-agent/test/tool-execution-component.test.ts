@@ -1221,7 +1221,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(expanded).toContain("second output");
 	});
 
-	test("renders pending, running, partial, success, and failure states as text", () => {
+	test("renders pending, queued, running, success, and failure states as text", () => {
 		const toolDefinition: ToolDefinition = {
 			...createBaseToolDefinition(),
 			renderCall: () => new Text("inspect target.ts", 0, 0),
@@ -1237,10 +1237,12 @@ describe("ToolExecutionComponent parity", () => {
 		);
 
 		expect(stripAnsi(component.render(120).lines.join("\n"))).toContain("inspect target.ts [pending]");
+		component.setArgsComplete();
+		expect(stripAnsi(component.render(120).lines.join("\n"))).toContain("inspect target.ts [queued]");
 		component.markExecutionStarted();
 		expect(stripAnsi(component.render(120).lines.join("\n"))).toContain("inspect target.ts [running]");
 		component.updateResult({ content: [{ type: "text", text: "working" }], isError: false }, true);
-		expect(stripAnsi(component.render(120).lines.join("\n"))).toContain("inspect target.ts [partial]");
+		expect(stripAnsi(component.render(120).lines.join("\n"))).toContain("inspect target.ts [running]");
 		component.updateResult({ content: [{ type: "text", text: "done" }], isError: false }, false);
 		expect(stripAnsi(component.render(120).lines.join("\n"))).toContain("inspect target.ts [success]");
 		component.updateResult({ content: [{ type: "text", text: "broken" }], isError: true }, false);

@@ -546,6 +546,7 @@ class LocalSubagentHandle implements SubagentHandle {
 	private readonly onTerminal: () => void;
 	private readonly onDispose: () => Promise<void>;
 	private waitForIdle: (() => Promise<void>) | undefined;
+	private readonly isIdle: () => boolean;
 	private readonly eventListeners = new Set<SubagentEventListener>();
 	private readonly endPromise: Promise<SubagentResult>;
 	private resolveEnd: (result: SubagentResult) => void = () => {};
@@ -576,6 +577,7 @@ class LocalSubagentHandle implements SubagentHandle {
 		onTerminal: () => void;
 		onDispose: () => Promise<void>;
 		waitForIdle: () => Promise<void>;
+		isIdle: () => boolean;
 	}) {
 		this.id = options.id;
 		this.sessionId = options.sessionId;
@@ -591,6 +593,7 @@ class LocalSubagentHandle implements SubagentHandle {
 		this.onTerminal = options.onTerminal;
 		this.onDispose = options.onDispose;
 		this.waitForIdle = options.waitForIdle;
+		this.isIdle = options.isIdle;
 		this.endPromise = new Promise<SubagentResult>((resolve, reject) => {
 			this.resolveEnd = resolve;
 			this.rejectEnd = reject;
@@ -778,7 +781,12 @@ class LocalSubagentHandle implements SubagentHandle {
 			return;
 		}
 		try {
-			await waitForIdle();
+			do {
+				await waitForIdle();
+				if (this.disposed || this.endSettled) return;
+				// A retained runtime can admit another foreground turn while its
+				// background jobs or persistence drain. Recheck at the ownership cutoff.
+			} while (!this.isIdle());
 		} catch (error) {
 			if (!this.disposed && !this.endSettled) {
 				this.endSettled = true;
@@ -1690,6 +1698,7 @@ export class SubagentManager {
 				this.getRegistry().setTask(id, options.resumeTaskLabel ?? message);
 				this.registerActivity(id, runtime, definitionOptions?.definition, message);
 			};
+			let idleActivityRevision = -1;
 			handle = new LocalSubagentHandle({
 				id,
 				sessionId: runtime.session.sessionId,
@@ -1726,9 +1735,16 @@ export class SubagentManager {
 					await rollbackRuntimeRegistration();
 				},
 				waitForIdle: async () => {
+					idleActivityRevision = runtime.session.activityRevision;
+					await runtime.session.waitForIdle();
+					await runtime.session.waitForBackgroundJobs();
 					await runtime.session.waitForIdle();
 					await runtime.session.sessionManager.flush();
 				},
+				isIdle: () =>
+					idleActivityRevision === runtime.session.activityRevision &&
+					!runtime.session.isStreaming &&
+					!runtime.session.hasBackgroundJobs,
 			});
 			delegation.reservation.commit(id, () => {
 				markRunAbortRequested();

@@ -85,6 +85,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"find",
 			"grep",
 			"inspect",
+			"jobs",
 			"ls",
 			"lsp",
 			"read",

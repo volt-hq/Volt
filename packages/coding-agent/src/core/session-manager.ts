@@ -1286,6 +1286,10 @@ export class SessionManager {
 	private atomicAppendEntries: SessionEntry[] | undefined;
 	/** Fences unrelated writers while an atomic replacement is settling. */
 	private atomicAppendInFlight = false;
+	/** Accepted host-only edges waiting for the current atomic projection to settle. */
+	private deferredSubagentSpawns:
+		| { entries: SubagentSpawnEntry[]; persisted: Promise<void>; settle: (persisted: Promise<void>) => void }
+		| undefined;
 	/** Unforgeable in-process delivery commit capabilities issued by this manager. */
 	private readonly deliveryCommitReceipts = new WeakMap<
 		SessionDeliveryCommitReceipt,
@@ -1667,6 +1671,11 @@ export class SessionManager {
 			throw new Error("An atomic session append is already in progress");
 		}
 		this._assertPersistenceHealthy();
+		this._appendAcceptedEntry(entry);
+	}
+
+	/** Index an admitted entry; deferred spawn edges may drain after persistence is sealed. */
+	private _appendAcceptedEntry(entry: SessionEntry): void {
 		const canonicalEntry = parseSessionEntryForAdmission(entry, `Session ${entry.type} entry`);
 		validateSessionEntryAdmissionReferences(canonicalEntry, this.byId, this.nextOrdinal);
 		canonicalEntry.ordinal = this.nextOrdinal;
@@ -1679,6 +1688,31 @@ export class SessionManager {
 			return;
 		}
 		this._notifyEntryListeners(canonicalEntry);
+	}
+
+	/** Release the atomic fence only after its projection and authority are final. */
+	private _finishAtomicAppend(): void {
+		this.atomicAppendInFlight = false;
+		const deferred = this.deferredSubagentSpawns;
+		if (!deferred) return;
+		this.deferredSubagentSpawns = undefined;
+		try {
+			this.assertConversationAuthorityAvailable();
+			if (this.persistenceError) throw this.persistenceError;
+			// These entries were validated and owned before close. Never stage them
+			// in the parent transaction or derive their parentId from its new leaf.
+			for (const entry of deferred.entries) this._appendAcceptedEntry(entry);
+		} catch (error) {
+			// A deferred admission must not disappear behind the synchronous API.
+			// Preserve fail-stop semantics and expose failure through flush/close.
+			const authorityError = this._requireConversationReconciliation(
+				error instanceof Error ? error : new Error(String(error)),
+			);
+			this._enqueuePersistence(async () => {
+				throw authorityError.cause instanceof Error ? authorityError.cause : authorityError;
+			});
+		}
+		deferred.settle(this.persistenceWatermark);
 	}
 
 	private _notifyEntryListeners(entry: SessionEntry): void {
@@ -1846,7 +1880,7 @@ export class SessionManager {
 			await this.persistenceWatermark;
 			this._assertPersistenceHealthy();
 		} catch (error) {
-			this.atomicAppendInFlight = false;
+			this._finishAtomicAppend();
 			throw error;
 		}
 		const snapshot = {
@@ -1862,7 +1896,7 @@ export class SessionManager {
 		try {
 			beforeStage();
 		} catch (error) {
-			this.atomicAppendInFlight = false;
+			this._finishAtomicAppend();
 			if (error instanceof SessionCanonicalConflictError || error instanceof SessionAtomicAppendError) throw error;
 			throw new SessionAtomicAppendError(
 				error instanceof Error ? error.message : String(error),
@@ -1878,8 +1912,8 @@ export class SessionManager {
 			append();
 		} catch (error) {
 			this.atomicAppendEntries = undefined;
-			this.atomicAppendInFlight = false;
 			restore();
+			this._finishAtomicAppend();
 			throw new SessionAtomicAppendError(
 				error instanceof Error ? error.message : String(error),
 				"rolled_back",
@@ -1898,8 +1932,8 @@ export class SessionManager {
 			payload = entries.length > 0 && this.persist ? this._storePayload(entries) : undefined;
 		} catch (error) {
 			this.atomicAppendEntries = undefined;
-			this.atomicAppendInFlight = false;
 			restore();
+			this._finishAtomicAppend();
 			throw error;
 		}
 		this.atomicAppendEntries = undefined;
@@ -1910,7 +1944,6 @@ export class SessionManager {
 				await this._enqueuePersistence(() => this._commitStorePayload(payload), "propagate");
 			}
 		} catch (error) {
-			this.atomicAppendInFlight = false;
 			const failure =
 				error instanceof AtomicAppendPersistenceFailure
 					? error
@@ -1923,6 +1956,7 @@ export class SessionManager {
 			if (failure.effect === "uncertain") this.persistenceError ??= failure;
 			else this.persistenceWatermark = this.persistenceQueue;
 			if (failure.authority === "reconciliation_required") this._requireConversationReconciliation(failure);
+			this._finishAtomicAppend();
 			throw new SessionAtomicAppendError(failure.message, failure.effect, failure.authority, { cause: failure });
 		}
 
@@ -1945,7 +1979,7 @@ export class SessionManager {
 					this._notifyBranchListeners(snapshot.derivedState.leafId, staged.derivedState.leafId);
 				}
 			} finally {
-				this.atomicAppendInFlight = false;
+				this._finishAtomicAppend();
 			}
 		}
 	}
@@ -2039,7 +2073,7 @@ export class SessionManager {
 			await this.persistenceWatermark;
 			this._assertPersistenceHealthy();
 		} catch (error) {
-			this.atomicAppendInFlight = false;
+			this._finishAtomicAppend();
 			throw error;
 		}
 		try {
@@ -2060,7 +2094,7 @@ export class SessionManager {
 			);
 			return receipt;
 		} finally {
-			this.atomicAppendInFlight = false;
+			this._finishAtomicAppend();
 		}
 	}
 
@@ -2185,14 +2219,19 @@ export class SessionManager {
 
 	/** Wait for every filesystem operation accepted before this call. */
 	flush(): Promise<void> {
-		return this.persistenceWatermark;
+		if (!this.deferredSubagentSpawns) return this.persistenceWatermark;
+		// A failed parent transaction must not let close release the store lease
+		// while an independently accepted spawn edge is still draining.
+		return Promise.allSettled([this.persistenceWatermark, this.deferredSubagentSpawns.persisted]).then((results) => {
+			for (const result of results) if (result.status === "rejected") throw result.reason;
+		});
 	}
 
 	/** Seal persistence and classify only this manager's recorded reconciliation failure. */
 	drainPersistence(): Promise<SessionPersistenceDrainResult> {
 		if (this.persistenceDrainPromise) return this.persistenceDrainPromise;
 		if (this.persist) this.persistenceClosed = true;
-		const watermark = this.persistenceWatermark;
+		const watermark = this.flush();
 		this.persistenceDrainPromise = (async () => {
 			let result: SessionPersistenceDrainResult | undefined;
 			let persistenceError: unknown;
@@ -2739,7 +2778,9 @@ export class SessionManager {
 	 * Record a durable spawn edge for a subagent child whose first prompt was
 	 * accepted. Host metadata only: the entry never advances the branch leaf and
 	 * is invisible to getEntries()/getBranch()/context building. Read back with
-	 * getSubagentSpawnEntries() during registry hydration.
+	 * getSubagentSpawnEntries() during registry hydration. During an atomic commit,
+	 * admission captures the current branch and flush()/closePersistence() drain
+	 * the edge after that commit settles, without changing its staged projection.
 	 */
 	appendSubagentSpawn(spawn: {
 		toolCallId: string;
@@ -2752,7 +2793,10 @@ export class SessionManager {
 		this._assertPersistenceHealthy();
 		const entry: SubagentSpawnEntry = {
 			type: "subagent_spawn",
-			id: generateId(this.byId),
+			id: generateId({
+				has: (id) =>
+					this.byId.has(id) || this.deferredSubagentSpawns?.entries.some((entry) => entry.id === id) === true,
+			}),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			toolCallId: spawn.toolCallId,
@@ -2762,7 +2806,21 @@ export class SessionManager {
 			...(spawn.childSessionRef !== undefined ? { childSessionRef: spawn.childSessionRef } : {}),
 			requestKey: spawn.requestKey,
 		};
-		this._appendEntry(entry);
+		if (this.atomicAppendInFlight && !this.atomicAppendEntries) {
+			const owned = parseSessionEntryForAdmission(entry, "Session subagent_spawn entry") as SubagentSpawnEntry;
+			validateSessionEntryAdmissionReferences(owned, this.byId, this.nextOrdinal);
+			if (!this.deferredSubagentSpawns) {
+				let settle!: (persisted: Promise<void>) => void;
+				const persisted = new Promise<void>((resolve) => {
+					settle = resolve;
+				});
+				void persisted.catch(() => {});
+				this.deferredSubagentSpawns = { entries: [], persisted, settle };
+			}
+			this.deferredSubagentSpawns.entries.push(owned);
+		} else {
+			this._appendEntry(entry);
+		}
 		return entry.id;
 	}
 

@@ -68,6 +68,10 @@ export {
 } from "./transport.ts";
 export type {
 	RpcAssistantStreamPosition,
+	RpcBackgroundJobSnapshot,
+	RpcBackgroundJobSummary,
+	RpcBackgroundJobsChangedEvent,
+	RpcCancelJobResponse,
 	RpcClientCapabilityFeature,
 	RpcCommand,
 	RpcCommandType,
@@ -88,6 +92,7 @@ export type {
 	RpcHostActionRequest,
 	RpcHostActionResponse,
 	RpcHostActionUpdate,
+	RpcListJobsResponse,
 	RpcListSubagentsResponse,
 	RpcMcpCapabilitiesResponse,
 	RpcMcpPromptContentResponse,
@@ -103,6 +108,7 @@ export type {
 	RpcPendingHostActionsResponse,
 	RpcPushPlatform,
 	RpcPushProvider,
+	RpcReadJobResponse,
 	RpcRegisterPushTargetArgs,
 	RpcRegisterPushTargetResponse,
 	RpcResponse,

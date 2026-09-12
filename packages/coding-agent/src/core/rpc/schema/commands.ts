@@ -334,6 +334,11 @@ export const RPC_COMMAND_SCHEMAS = {
 		offset: Type.Optional(Type.Number()),
 	}),
 
+	// Session-owned background jobs
+	list_jobs: commandSchema("list_jobs", {}),
+	read_job: commandSchema("read_job", { jobId: RpcConversationIdentifierSchema }),
+	cancel_job: commandSchema("cancel_job", { jobId: RpcConversationIdentifierSchema }),
+
 	// Subagents (local RPC only)
 	list_subagents: commandSchema("list_subagents", {}),
 	subagent_start: commandSchema("subagent_start", { agent: Type.String(), prompt: Type.String() }),

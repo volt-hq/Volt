@@ -1,5 +1,6 @@
 // Loop functions
 export * from "./agent-loop.ts";
+export * from "./harness/admission-gate.ts";
 export * from "./harness/agent-harness.ts";
 export {
 	type BranchPreparation,

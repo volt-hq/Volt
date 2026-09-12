@@ -437,6 +437,7 @@ describe("RPC contract emission conformance", () => {
 				pendingMessageCount: 0,
 				steeringQueue: [{ clientMessageId: "m-1", text: "queued" }],
 				followUpQueue: [],
+				backgroundJobs: [],
 			},
 			transcript: {
 				sessionId: "session-1",

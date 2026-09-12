@@ -49,6 +49,7 @@ import {
 } from "./openai-responses-shared.ts";
 import { resolvePromptCacheRetention } from "./prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
+import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 
 // ============================================================================
 // Configuration
@@ -261,8 +262,10 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			const transportSessionId = options?.sessionId;
 			const cacheSessionId = cacheRetention === "none" ? undefined : transportSessionId;
 			const promptCacheOptions = options ? { ...options, sessionId: cacheSessionId } : undefined;
-			let body = buildRequestBody(model, context, promptCacheOptions);
-			const nextBody = await options?.onPayload?.(body, model);
+			const toolResultPayload = new ToolResultPayloadTracker();
+			let body = buildRequestBody(model, context, promptCacheOptions, toolResultPayload);
+			// Cached WebSocket continuation removes only a verified prefix already present in model context.
+			const nextBody = await options?.onPayload?.(body, model, toolResultPayload.metadata);
 			if (nextBody !== undefined) {
 				body = nextBody as RequestBody;
 			}
@@ -497,10 +500,12 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 function buildRequestBody(
 	model: Model<"openai-codex-responses">,
 	context: Context,
-	options?: OpenAICodexResponsesOptions,
+	options: OpenAICodexResponsesOptions | undefined,
+	toolResultPayload: ToolResultPayloadTracker,
 ): RequestBody {
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
 		includeSystemPrompt: false,
+		toolResultPayload,
 	});
 
 	const body: RequestBody = {

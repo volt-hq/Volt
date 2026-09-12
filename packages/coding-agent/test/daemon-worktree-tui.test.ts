@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AgentSessionRuntime, type CreateAgentSessionRuntimeResult } from "../src/core/agent-session-runtime.ts";
 import type { AgentSessionServices } from "../src/core/agent-session-services.ts";
+import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteWorkspaceWorktree } from "../src/core/remote/iroh/state.ts";
@@ -703,6 +704,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 		const makeSessionDouble = (sessionManager: SessionManager): AgentSession =>
 			({
 				sessionManager,
+				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 				extensionRunner: { hasHandlers: () => false },
 				disposeSubagentToolManager: vi.fn(),
 				disposeForSessionReplacement: vi.fn(),

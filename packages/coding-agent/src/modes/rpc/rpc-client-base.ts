@@ -8,14 +8,19 @@ import type { ExtensionError } from "../../core/extensions/index.ts";
 import { type ProjectionDiagnostic, StreamProjectionDecoder } from "../../core/rpc/stream-projection.ts";
 import type { SubagentEvent, SubagentResult } from "../../core/subagents/index.ts";
 import type {
+	RpcBackgroundJobsChangedEvent,
+	RpcCancelJobResponse,
 	RpcClientCapabilityFeature,
 	RpcCommand,
+	RpcConversationAuthority,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcHostActionRequest,
 	RpcHostActionResponse,
 	RpcHostActionUpdate,
+	RpcListJobsResponse,
 	RpcListSubagentsResponse,
+	RpcReadJobResponse,
 	RpcResponse,
 	RpcReviewAcknowledgmentResponse,
 	RpcReviewWorkflowListResponse,
@@ -75,6 +80,7 @@ export type RpcSubagentDisposedEvent = { type: "subagent_disposed"; subagentId: 
 export type RpcModelsChangedEvent = { type: "models_changed" };
 export type RpcClientEvent =
 	| AgentSessionEvent
+	| RpcBackgroundJobsChangedEvent
 	| RpcModelsChangedEvent
 	| RpcWorkflowEvent
 	| RpcWorkflowToolEvent
@@ -177,6 +183,24 @@ export abstract class RpcClientBase {
 			beforeEntryId: options.beforeEntryId,
 		});
 		return this.getData(response);
+	}
+
+	/** List accessible background jobs, without output or model-result acknowledgement. */
+	async listJobs(): Promise<RpcListJobsResponse> {
+		return this.getData(await this.send({ type: "list_jobs" }));
+	}
+
+	/** Read the latest bounded job output without consuming it. */
+	async readJob(jobId: string): Promise<RpcReadJobResponse> {
+		return this.getData(await this.send({ type: "read_job", jobId }));
+	}
+
+	/** Request per-job cancellation. Cancelling is not terminal until the worker settles. */
+	async cancelJob(
+		jobId: string,
+		options: { conversationAuthority?: RpcConversationAuthority } = {},
+	): Promise<RpcCancelJobResponse> {
+		return this.getData(await this.send({ type: "cancel_job", jobId, ...options }));
 	}
 
 	/** Get native UI action protocol capabilities. */

@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import type { AssistantMessage, AssistantMessageEvent, Usage } from "@hansjm10/volt-ai";
 import { describe, expect, it } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import { sanitizeIrohRemoteOutbound } from "../src/core/remote/iroh/outbound-filter.ts";
@@ -93,6 +94,7 @@ function createRuntime(largePayload: string): AgentSessionRuntime {
 	return {
 		session: {
 			activeCompaction: undefined,
+			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 			activeToolExecutions: pendingToolExecutions,
 			getSteeringMessages: () =>
 				Array.from({ length: 3 }, (_, index) => ({
@@ -493,6 +495,7 @@ describe("conversation projection resource bounds", () => {
 				pendingMessageCount: 0,
 				steeringQueue: [],
 				followUpQueue: [],
+				backgroundJobs: [],
 			},
 			transcript: {
 				sessionId: "session-active-assistant",

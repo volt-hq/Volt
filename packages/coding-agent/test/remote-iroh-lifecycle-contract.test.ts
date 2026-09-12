@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from "vitest";
 import type { AgentSession, PromptPreflightResult } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
 	createIrohRemotePresetAccess,
@@ -122,6 +123,7 @@ function createPromptRuntime(
 	const detachBackpressure = vi.fn();
 	const runtimeHost = {
 		session: {
+			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 			bindExtensions: vi.fn(async () => {}),
 			subscribe: vi.fn((handler: (event: object) => void) => {
 				sessionEventHandler = handler;
@@ -182,8 +184,8 @@ function createPromptRuntime(
 }
 
 describe("Iroh remote lifecycle command contract", () => {
-	test("allows abort as the only direct remote cancellation command", () => {
-		expect(Array.from(IROH_REMOTE_RPC_CANCELLATION_TYPES)).toEqual(["abort"]);
+	test("allows run and background-job cancellation commands", () => {
+		expect(Array.from(IROH_REMOTE_RPC_CANCELLATION_TYPES)).toEqual(["abort", "cancel_job"]);
 		expect(IROH_REMOTE_RPC_PASSTHROUGH_TYPES.has("abort")).toBe(true);
 
 		expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: "abort-1", type: "abort" }))).toEqual({

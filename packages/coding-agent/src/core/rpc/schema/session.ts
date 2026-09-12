@@ -11,6 +11,7 @@ import {
 	RPC_WORK_PULL_REQUEST_TITLE_MAX_CHARS,
 	RPC_WORK_REPOSITORY_MAX_CHARS,
 } from "../wire-limits.ts";
+import { RpcBackgroundJobsSchema } from "./background-jobs.ts";
 import { RpcModelSchema, rpcModelProperties } from "./external.ts";
 import { RpcGitContextSchema } from "./git-context.ts";
 import { readonlyArrayOf, stringEnum } from "./helpers.ts";
@@ -184,6 +185,8 @@ export const RpcSessionStateSchema = Type.Object(
 		/** Authoritative queue contents for atomic bootstrap/checkpoint recovery. Always emitted; the iOS bootstrap decoder fails closed without them. */
 		steeringQueue: readonlyArrayOf(RpcQueuedMessageSchema),
 		followUpQueue: readonlyArrayOf(RpcQueuedMessageSchema),
+		/** Accessible live-runtime jobs, including retained terminal results. Never contains output. */
+		backgroundJobs: RpcBackgroundJobsSchema,
 		activeTools: Type.Optional(Type.Array(RpcActiveToolExecutionSchema)),
 		activeAgentRun: Type.Optional(RpcActiveAgentRunSchema),
 		activeCompaction: Type.Optional(RpcActiveCompactionSchema),

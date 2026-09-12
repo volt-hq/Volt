@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { AssistantMessage } from "@hansjm10/volt-ai";
+import { Compile } from "typebox/compile";
 import {
 	ConversationProjectionLimitError,
 	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
 } from "./conversation-projection-limits.ts";
+import { RpcBackgroundJobsChangedEventSchema } from "./schema/events.ts";
 import { measureRpcJsonBytesWithin, projectRpcUtf8Prefix } from "./session-state.ts";
 import {
 	assertConversationProjectionSourceAssistantEventWithinLimits,
@@ -54,6 +56,8 @@ export const DEFAULT_CONVERSATION_PROJECTION_MAX_TRANSCRIPT_CURSORS = 1024;
 const CONVERSATION_PROJECTION_TRANSCRIPT_CURSOR_MAX_UTF8_BYTES = 2048;
 const CONVERSATION_PROJECTION_MAX_REBIND_CONTROLS = 128;
 const CONVERSATION_PROJECTION_MAX_REBIND_CONTROL_BYTES = 512 * 1024;
+
+const backgroundJobsChangedValidator = Compile(RpcBackgroundJobsChangedEventSchema);
 
 type ActiveAssistantSourceEvent = object;
 
@@ -631,6 +635,9 @@ function assertCanonicalTranscriptEntry(entry: Record<string, unknown>): void {
 }
 
 const CONVERSATION_PROJECTION_RESPONSE_COMMANDS: ReadonlySet<string> = new Set([
+	"list_jobs",
+	"read_job",
+	"cancel_job",
 	"get_fork_messages",
 	"get_last_assistant_text",
 	"get_message_images",
@@ -654,8 +661,8 @@ function isConversationProjectionControl(
 	);
 }
 
-function isStaleTranscriptControl(value: object, branchEpoch: string): boolean {
-	if (!isConversationProjectionControl(value) || value.command !== "get_transcript") return false;
+function isStaleConversationProjectionControl(value: object, branchEpoch: string): boolean {
+	if (!isConversationProjectionControl(value)) return false;
 	const data = value.data;
 	return isRecord(data) && typeof data.branchEpoch === "string" && data.branchEpoch !== branchEpoch;
 }
@@ -711,6 +718,7 @@ const CONVERSATION_SOURCE_EVENT_TYPES = new Set([
 	"thinking_level_changed",
 	"planning_state_changed",
 	"git_context_changed",
+	"background_jobs_changed",
 	"ui_action_state_changed",
 	"auto_retry_start",
 	"auto_retry_end",
@@ -1302,6 +1310,9 @@ export class ConversationProjectionFeed {
 			if (event.type === "ui_action_state_changed") {
 				assertUiActionStateChangedEvent(event);
 			}
+			if (event.type === "background_jobs_changed" && !backgroundJobsChangedValidator.Check(event)) {
+				throw new Error("Conversation background-jobs event is malformed or exceeds its bounds");
+			}
 			// Validate canonical source truth even with zero subscribers. Otherwise an
 			// oversized active assistant could be cached and only fail much later while
 			// assigning an attach/checkpoint cursor.
@@ -1625,7 +1636,7 @@ export class ConversationProjectionFeed {
 		// Transcript pages mutate the same reducer domain as checkpoint transcript
 		// state. A response captured on an older generation is obsolete, not a
 		// transport failure; omit it while preserving unrelated command responses.
-		if (isStaleTranscriptControl(value, this._branchEpoch)) {
+		if (isStaleConversationProjectionControl(value, this._branchEpoch)) {
 			onAdmitted?.(value);
 			return Promise.resolve();
 		}
@@ -1894,7 +1905,7 @@ export class ConversationProjectionFeed {
 				continue;
 			}
 			if (
-				isStaleTranscriptControl(item.value, this._branchEpoch) ||
+				isStaleConversationProjectionControl(item.value, this._branchEpoch) ||
 				(this.sourceAuthorityError !== undefined && isConversationProjectionControl(item.value))
 			) {
 				item.deferred?.resolve(undefined);

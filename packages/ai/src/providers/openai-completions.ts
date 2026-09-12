@@ -38,6 +38,7 @@ import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copi
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import { resolvePromptCacheRetention, supportsPromptCacheMode } from "./prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
+import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 /**
@@ -145,8 +146,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			const cacheRetention = resolvePromptCacheRetention(model, options?.cacheRetention, options?.env);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, compat, options?.env);
-			let params = buildParams(model, context, options, compat, cacheRetention);
-			const nextParams = await options?.onPayload?.(params, model);
+			const toolResultPayload = new ToolResultPayloadTracker();
+			let params = buildParams(model, context, options, compat, cacheRetention, toolResultPayload);
+			const nextParams = await options?.onPayload?.(params, model, toolResultPayload.metadata);
 			if (nextParams !== undefined) {
 				params = nextParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
 			}
@@ -488,11 +490,12 @@ function createClient(
 function buildParams(
 	model: Model<"openai-completions">,
 	context: Context,
-	options?: OpenAICompletionsOptions,
+	options: OpenAICompletionsOptions | undefined,
 	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
 	cacheRetention: CacheRetention = resolvePromptCacheRetention(model, options?.cacheRetention, options?.env),
+	toolResultPayload: ToolResultPayloadTracker,
 ) {
-	const messages = convertMessages(model, context, compat);
+	const messages = convertMessages(model, context, compat, toolResultPayload);
 	const cacheControl = getCompatCacheControl(model, compat, cacheRetention);
 	const usesAnthropicCacheControl = compat.cacheControlFormat === "anthropic";
 
@@ -760,6 +763,7 @@ export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
 	compat: ResolvedOpenAICompletionsCompat,
+	toolResultPayload?: ToolResultPayloadTracker,
 ): ChatCompletionMessageParam[] {
 	const params: ChatCompletionMessageParam[] = [];
 
@@ -778,7 +782,12 @@ export function convertMessages(
 		return id;
 	};
 
-	const transformedMessages = transformMessages(context.messages, model, (id) => normalizeToolCallId(id));
+	const transformedMessages = transformMessages(
+		context.messages,
+		model,
+		(id) => normalizeToolCallId(id),
+		toolResultPayload,
+	);
 
 	if (context.systemPrompt) {
 		const useDeveloperRole = model.reasoning && compat.supportsDeveloperRole;
@@ -954,6 +963,7 @@ export function convertMessages(
 					(toolResultMsg as any).name = toolMsg.toolName;
 				}
 				params.push(toolResultMsg);
+				toolResultPayload?.include(toolMsg);
 
 				if (hasImages && model.input.includes("image")) {
 					for (const block of toolMsg.content) {

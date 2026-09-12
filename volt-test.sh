@@ -59,6 +59,11 @@ if [[ -z "${VOLT_REVIEW_PRIVATE_DIAGNOSTICS+x}" ]]; then
   export VOLT_REVIEW_PRIVATE_DIAGNOSTICS=1
 fi
 
+# Source-run performance logs contain metadata only. Preserve an explicit opt-out.
+if [[ -z "${VOLT_BACKGROUND_JOB_DIAGNOSTICS+x}" ]]; then
+  export VOLT_BACKGROUND_JOB_DIAGNOSTICS=1
+fi
+
 NODE_BIN="node"
 if ! command -v "$NODE_BIN" >/dev/null 2>&1; then
   if command -v node.exe >/dev/null 2>&1; then
