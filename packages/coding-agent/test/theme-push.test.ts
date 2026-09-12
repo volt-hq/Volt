@@ -56,7 +56,11 @@ describe("host theme token push (§9.5)", () => {
 			getActiveToolNames: () => ["read"],
 			sessionId: "s-caps",
 			sessionFile: undefined,
-			settingsManager: { getTheme: () => undefined, setTheme: vi.fn() },
+			settingsManager: {
+				getTheme: () => undefined,
+				setTheme: vi.fn(),
+				subscribeCompactionSettings: vi.fn(() => () => {}),
+			},
 		};
 		const runtimeHost = {
 			get session() {

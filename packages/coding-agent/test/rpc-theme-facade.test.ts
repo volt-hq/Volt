@@ -35,6 +35,7 @@ function createSession() {
 		sessionId: "s-theme",
 		sessionFile: undefined,
 		settingsManager: {
+			subscribeCompactionSettings: vi.fn(() => () => {}),
 			getTheme: vi.fn(() => undefined),
 			setTheme: vi.fn(),
 		},

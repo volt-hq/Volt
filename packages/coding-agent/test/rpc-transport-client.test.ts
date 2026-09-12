@@ -11,7 +11,9 @@ import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { ResolvedCommand } from "../src/core/extensions/types.ts";
 import {
 	AGENT_MODE_ACTION_ID,
+	CONTEXT_AUTO_COMPACTION_ACTION_ID,
 	CONTEXT_COMPACT_ACTION_ID,
+	CONTEXT_COMPACTION_THRESHOLD_ACTION_ID,
 	PLAN_CHANGE_ACTION_ID,
 	PLAN_DISCARD_ACTION_ID,
 	PLAN_EXECUTE_ACTION_ID,
@@ -44,6 +46,7 @@ import {
 	type RpcTransport,
 	type RpcUiActionStateChangedEvent,
 } from "../src/core/rpc/index.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { Skill } from "../src/core/skills.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import { createInProcessRpcClient } from "../src/modes/rpc/in-process-rpc-client.ts";
@@ -1555,6 +1558,8 @@ describe("createInProcessRpcClient", () => {
 					enabled: true,
 					remoteSafe: true,
 				}),
+				expect.objectContaining({ id: CONTEXT_AUTO_COMPACTION_ACTION_ID, remoteSafe: true }),
+				expect.objectContaining({ id: CONTEXT_COMPACTION_THRESHOLD_ACTION_ID, remoteSafe: true }),
 				expect.objectContaining({
 					id: CONTEXT_COMPACT_ACTION_ID,
 					label: "Compact context",
@@ -1679,6 +1684,7 @@ describe("createInProcessRpcClient", () => {
 				actions.find((action) => action.id === REVIEW_COMMIT_ACTION_ID)?.args?.map((argument) => argument.name),
 			).toEqual(["ref", "focus", "scope", "effort", "includeOptional", "scopeMode"]);
 			await expect(client.getUiActions("primary")).resolves.toEqual([
+				expect.objectContaining({ id: CONTEXT_AUTO_COMPACTION_ACTION_ID }),
 				expect.objectContaining({
 					id: THINKING_FAST_MODE_ACTION_ID,
 					presentation: expect.objectContaining({ kind: "toggle" }),
@@ -1908,6 +1914,8 @@ describe("createInProcessRpcClient", () => {
 				PLAN_DISCARD_ACTION_ID,
 				SESSION_NEW_ACTION_ID,
 				RUN_CANCEL_ACTION_ID,
+				CONTEXT_AUTO_COMPACTION_ACTION_ID,
+				CONTEXT_COMPACTION_THRESHOLD_ACTION_ID,
 				CONTEXT_COMPACT_ACTION_ID,
 				SESSION_RENAME_ACTION_ID,
 				THINKING_FAST_MODE_ACTION_ID,
@@ -1960,6 +1968,7 @@ describe("createInProcessRpcClient", () => {
 				expect.objectContaining({ name: "arguments", type: "string", hint: "paste failing test output" }),
 			]);
 			expect(await client.getUiActions("primary")).toEqual([
+				expect.objectContaining({ id: CONTEXT_AUTO_COMPACTION_ACTION_ID }),
 				expect.objectContaining({ id: THINKING_FAST_MODE_ACTION_ID }),
 				expect.objectContaining({ id: REVIEW_UNCOMMITTED_ACTION_ID }),
 				expect.objectContaining({ id: REVIEW_BRANCH_ACTION_ID }),
@@ -2464,11 +2473,7 @@ function createRuntimeHost(
 		refreshFromDisk: vi.fn(),
 		getAvailable: vi.fn(() => resources.availableModels ?? []),
 	};
-	const settingsManager = {
-		flush: vi.fn(async () => {}),
-		getReviewModel: vi.fn(() => undefined),
-		isProjectTrusted: vi.fn(() => true),
-	};
+	const settingsManager = SettingsManager.inMemory();
 	const resourceLoader = {
 		getSkills: vi.fn(() => ({ skills: resources.skills ?? [], diagnostics: [] })),
 	};
