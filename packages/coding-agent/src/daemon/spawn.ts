@@ -3,7 +3,7 @@ import { closeSync, existsSync, openSync } from "node:fs";
 import { join } from "node:path";
 import { ENV_AGENT_DIR, getAgentDir, getPackageDir, VERSION } from "../config.ts";
 import { type ControlSocketProbe, probeControlSocket } from "./control-server.ts";
-import { type PidfileContents, readPidfile } from "./main.ts";
+import { type PidfileContents, readPidfile, VOLTD_EXIT_STARTUP_CONTENDED } from "./main.ts";
 import { type DaemonPaths, ensureDaemonDirs, getDaemonPaths } from "./paths.ts";
 import { verifyPidfileProcess } from "./process-identity.ts";
 import { type InvalidVoltdStateFile, inspectVoltdStateFiles } from "./state.ts";
@@ -18,7 +18,7 @@ const DAEMON_EXIT_POLL_MS = 200;
 
 export type DaemonProbeState =
 	| "healthy"
-	// A spawned child is still alive, but its readiness wait expired.
+	// Readiness wait expired for a live child or an unconfirmed concurrent starter.
 	| "starting"
 	| "shutting-down"
 	| "protocol-mismatch"
@@ -254,7 +254,10 @@ export async function spawnDetachedDaemon(agentDir: string = getAgentDir()): Pro
 		if (spawnError) {
 			return { ok: false, state: "not-running", socketPath, error: `failed to spawn voltd: ${spawnError.message}` };
 		}
-		if (child.exitCode !== null || child.signalCode !== null) {
+		// Losing the startup lock does not mean startup failed: its owner can still
+		// be loading state before publishing an endpoint. Keep the original deadline.
+		const startupContended = child.exitCode === VOLTD_EXIT_STARTUP_CONTENDED && child.signalCode === null;
+		if (!startupContended && (child.exitCode !== null || child.signalCode !== null)) {
 			const reason = child.signalCode === null ? `exit code ${child.exitCode}` : `signal ${child.signalCode}`;
 			return {
 				ok: false,
@@ -265,6 +268,16 @@ export async function spawnDetachedDaemon(agentDir: string = getAgentDir()): Pro
 			};
 		}
 		if (Date.now() >= deadline) {
+			if (startupContended) {
+				return {
+					ok: false,
+					state: "starting",
+					socketPath,
+					error:
+						`voltd readiness unconfirmed after ${SPAWN_HEALTH_TIMEOUT_MS / 1000}s; another starter held the startup lock. ` +
+						"Check status and logs before retrying.",
+				};
+			}
 			return {
 				ok: false,
 				state: "starting",

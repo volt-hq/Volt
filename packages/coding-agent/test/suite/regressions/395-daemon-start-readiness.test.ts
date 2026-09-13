@@ -3,6 +3,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleDaemonCommand } from "../../../src/daemon/cli.ts";
 import { type ControlSocketProbe, probeControlSocket } from "../../../src/daemon/control-server.ts";
+import * as daemonLock from "../../../src/daemon/daemon-lock.ts";
+import { runVoltDaemon, VOLTD_EXIT_STARTUP_CONTENDED } from "../../../src/daemon/main.ts";
 import { getDaemonPaths } from "../../../src/daemon/paths.ts";
 import { handleRemoteControlCommand } from "../../../src/daemon/remote-cli.ts";
 import { ensureDaemonRunning, probeDaemon, spawnDetachedDaemon } from "../../../src/daemon/spawn.ts";
@@ -101,6 +103,7 @@ describe("#395 detached daemon startup readiness", () => {
 	it.each([
 		{ code: 1, signal: null, reason: "exit code 1" },
 		{ code: 0, signal: null, reason: "exit code 0" },
+		{ code: 4, signal: null, reason: "exit code 4" },
 		{ code: null, signal: "SIGTERM", reason: "signal SIGTERM" },
 	] as const)("reports $reason promptly instead of waiting for the deadline", async ({ code, signal, reason }) => {
 		setTimeout(() => {
@@ -194,6 +197,62 @@ describe("#395 detached daemon startup readiness", () => {
 		child.exitCode = 3;
 		vi.mocked(probeControlSocket).mockResolvedValue(healthyProbe(5151));
 		await expect(spawnDetachedDaemon(harness.tempDir)).resolves.toMatchObject({ ok: true, pid: 5151 });
+	});
+
+	it.each(["held", "contended"] as const)("distinguishes a %s startup lock from bind failure", async (reason) => {
+		vi.spyOn(daemonLock, "acquireDaemonLock").mockResolvedValue({ ok: false, reason });
+		const originalTitle = process.title;
+		try {
+			await expect(runVoltDaemon({ agentDir: harness.tempDir, foreground: false })).resolves.toBe(
+				VOLTD_EXIT_STARTUP_CONTENDED,
+			);
+		} finally {
+			process.title = originalTitle;
+		}
+	});
+
+	it("waits for a delayed concurrent winner after the spawned child loses the startup lock", async () => {
+		setTimeout(() => {
+			child.exitCode = VOLTD_EXIT_STARTUP_CONTENDED;
+			child.emit("exit", child.exitCode, null);
+		}, 25);
+		vi.mocked(probeControlSocket).mockImplementation(async () =>
+			Date.now() >= 30_000 ? healthyProbe(5151) : { kind: "no-listener", cause: "not-found" },
+		);
+		let settled = false;
+		const pending = ensureDaemonRunning(harness.tempDir).then((result) => {
+			settled = true;
+			return result;
+		});
+
+		await vi.advanceTimersByTimeAsync(29_999);
+		expect(settled).toBe(false);
+		await vi.advanceTimersByTimeAsync(1);
+		await expect(pending).resolves.toMatchObject({ healthy: true, state: "healthy", pid: 5151, spawned: true });
+		expect(childProcess.spawn).toHaveBeenCalledOnce();
+		expect(child.kill).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("bounds contention polling without reporting the exited child as alive", async () => {
+		setTimeout(() => {
+			child.exitCode = VOLTD_EXIT_STARTUP_CONTENDED;
+			child.emit("exit", child.exitCode, null);
+		}, 30_000);
+		const pending = ensureDaemonRunning(harness.tempDir);
+		await vi.advanceTimersByTimeAsync(60_000);
+		const result = await pending;
+		expect(result).toMatchObject({
+			healthy: false,
+			state: "starting",
+			spawned: true,
+			error: expect.stringContaining("readiness unconfirmed after 60s; another starter held the startup lock"),
+		});
+		expect(result.pid).toBeUndefined();
+		expect(result.error).not.toContain("process still running");
+		expect(childProcess.spawn).toHaveBeenCalledOnce();
+		expect(child.kill).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
 	});
 
 	it("does not accept a status from its own child after that child has exited", async () => {
