@@ -87,6 +87,9 @@ function fakeServerConfig(options?: {
 	hang?: boolean;
 	initError?: boolean;
 	traceFile?: string;
+	rootMarkers?: string[];
+	navigationUri?: string;
+	workspaceEditFile?: string;
 }) {
 	return resolveLspConfig({
 		enabled: true,
@@ -111,9 +114,11 @@ function fakeServerConfig(options?: {
 					...(options?.hang ? ["--hang"] : []),
 					...(options?.initError ? ["--init-error"] : []),
 					...(options?.publishDelayMs !== undefined ? ["--delay", String(options.publishDelayMs)] : []),
+					...(options?.navigationUri ? ["--navigation-uri", options.navigationUri] : []),
+					...(options?.workspaceEditFile ? ["--workspace-edit", options.workspaceEditFile] : []),
 				],
 				fileExtensions: [".foo"],
-				rootMarkers: [],
+				rootMarkers: options?.rootMarkers ?? [],
 			},
 		},
 	});
@@ -670,6 +675,106 @@ describe("LspManager", () => {
 		expect(diagnostics).toContain("No diagnostics in");
 	});
 
+	it("routes external projects independently and falls back to the file directory for loose files", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const project = join(tempDir, "project");
+		const external = join(tempDir, "external");
+		const nested = join(external, "packages", "app");
+		const markerlessRepo = join(tempDir, "markerless-repo");
+		const loose = join(tempDir, "loose");
+		for (const directory of [project, nested, join(markerlessRepo, "src"), loose])
+			mkdirSync(directory, { recursive: true });
+		writeFileSync(join(external, ".git"), "gitdir: elsewhere\n");
+		writeFileSync(join(external, "priority.marker"), "");
+		writeFileSync(join(nested, "closer.marker"), "");
+		mkdirSync(join(markerlessRepo, ".git"));
+		// An external repository's Git boundary must stop higher-priority parent markers.
+		writeFileSync(join(tempDir, "above.marker"), "");
+		manager = new LspManager({
+			cwd: project,
+			config: fakeServerConfig({ rootMarkers: ["above.marker", "priority.marker", "closer.marker"] }),
+		});
+		const localFile = join(project, "local.foo");
+		const externalFile = join(nested, "external.foo");
+		const repoFile = join(markerlessRepo, "src", "repo.foo");
+		for (const file of [localFile, externalFile, repoFile]) writeFileSync(file, "class FakeClass\n");
+		await manager.documentSymbols(localFile);
+		await manager.documentSymbols(externalFile);
+		await manager.documentSymbols(repoFile);
+		// No marker should turn an unrelated loose file into the current project.
+		rmSync(join(tempDir, "above.marker"));
+		const looseFile = join(loose, "loose.foo");
+		writeFileSync(looseFile, "class FakeClass\n");
+		await manager.documentSymbols(looseFile);
+		expect(manager.getStatus().map((status) => status.root)).toEqual(
+			[project, external, markerlessRepo, loose].map((directory) => realpathSync.native(directory)),
+		);
+	});
+
+	it("includes diagnostics after cross-workspace write and edit tool calls", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const project = join(tempDir, "project");
+		const external = join(tempDir, "external");
+		mkdirSync(project);
+		mkdirSync(external);
+		manager = new LspManager({ cwd: project, config: fakeServerConfig({ pull: true }) });
+		const write = createWriteToolDefinition(project, { diagnosticsProvider: manager });
+		const edit = createEditToolDefinition(project, { diagnosticsProvider: manager });
+		const written = await write.execute(
+			"external-write",
+			{ path: "../external/file.foo", content: "ERROR first\n" },
+			undefined,
+			undefined,
+			{} as never,
+		);
+		expect(written.details?.diagnostics).toContain("error: found ERROR on line 1");
+		const edited = await edit.execute(
+			"external-edit",
+			{ path: join(external, "file.foo"), edits: [{ oldText: "ERROR first", newText: "second ERROR" }] },
+			undefined,
+			undefined,
+			{} as never,
+		);
+		expect(edited.details?.diagnostics).toContain("file.foo(1,8): error: found ERROR on line 1");
+		expect(manager.getStatus()[0].root).toBe(realpathSync.native(external));
+	});
+
+	it("shows external navigation locations and snippets without starting another server", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const project = join(tempDir, "project");
+		const external = join(tempDir, "external.foo");
+		mkdirSync(project);
+		writeFileSync(external, "external definition\nexternal implementation\n");
+		manager = new LspManager({
+			cwd: project,
+			config: fakeServerConfig({ navigationUri: pathToFileURL(external).toString() }),
+		});
+		const source = join(project, "source.foo");
+		writeFileSync(source, "target\n");
+		const externalPath = realpathSync.native(external);
+		expect(await manager.definition(source, "target")).toBe(`${externalPath}:1:1  external definition`);
+		expect(await manager.references(source, "target")).toContain(`${externalPath}:2:3  external implementation`);
+		expect(await manager.implementations(source, "target")).toContain(`${externalPath}:2:1  external implementation`);
+		expect(await manager.typeDefinition(source, "target")).toContain(`${externalPath}:1:1  external definition`);
+		expect(await manager.callHierarchy(source, "target", "incoming")).toContain(`${externalPath}:1`);
+		expect(await manager.callHierarchy(source, "target", "outgoing")).toContain(`${externalPath}:2`);
+		expect(await manager.workspaceSymbols(source, "target")).toContain(`${externalPath}:1`);
+		expect(manager.getStatus()).toHaveLength(1);
+		expect(manager.getStatus()[0].root).toBe(realpathSync.native(project));
+		// Direct queries to the external file use its own server.
+		expect(await manager.hover(external, "definition")).toBe("fake hover text");
+		expect(manager.getStatus()).toHaveLength(2);
+	});
+
+	it("preserves non-file navigation URIs without interpreting them as local paths", async () => {
+		const manager = setup({ navigationUri: "untitled:external.foo" });
+		const source = join(tempDir, "source.foo");
+		writeFileSync(source, "target\n");
+		if (process.platform !== "win32")
+			writeFileSync(join(tempDir, "untitled:external.foo"), "not a navigation snippet\n");
+		expect(await manager.definition(source, "target")).toBe("untitled:external.foo:1:1");
+	});
+
 	it("reports symbol-not-found and no-server errors as text", async () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
@@ -773,6 +878,52 @@ describe("LspManager", () => {
 		expect(await manager.callHierarchy(filePath, "missing", "incoming")).toContain('Symbol "missing" not found');
 	});
 
+	it.each(["rename", "fix", "command"] as const)(
+		"applies cross-project %s edits and refreshes the external server",
+		async (action) => {
+			tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+			const project = join(tempDir, "project");
+			const external = join(tempDir, "external");
+			mkdirSync(project);
+			mkdirSync(external);
+			const source = join(project, "source.foo");
+			const target = join(external, "target.foo");
+			writeFileSync(source, `renameme${action === "command" ? " CMDFIX" : ""}\n`);
+			writeFileSync(target, "renameme\n");
+			const workspaceEditFile = join(tempDir, "edit.json");
+			writeFileSync(
+				workspaceEditFile,
+				JSON.stringify({
+					changes: Object.fromEntries(
+						[source, target].map((path) => [
+							pathToFileURL(path).toString(),
+							[
+								{
+									range: { start: { line: 0, character: 0 }, end: { line: 0, character: 8 } },
+									newText: "renamed",
+								},
+							],
+						]),
+					),
+				}),
+			);
+			manager = new LspManager({ cwd: project, config: fakeServerConfig({ workspaceEditFile, pull: true }) });
+			await manager.documentSymbols(target);
+			const result =
+				action === "rename"
+					? await manager.rename(source, "renameme", "renamed")
+					: await manager.codeFix(source, { line: 1 });
+			expect(result).toContain(action === "rename" ? 'Renamed "renameme"' : 'Applied "Apply workspace edit"');
+			expect(result).toContain("source.foo (1 edit)");
+			expect(result).toContain("target.foo (1 edit)");
+			expect(readFileSync(source, "utf-8")).toBe(`renamed${action === "command" ? " CMDFIX" : ""}\n`);
+			expect(readFileSync(target, "utf-8")).toBe("renamed\n");
+			expect(await manager.workspaceSymbols(target, "renamed")).toContain("renamed (variable)");
+			expect(await manager.workspaceSymbols(target, "renameme")).toContain("No workspace symbols");
+			expect(manager.getStatus()).toHaveLength(2);
+		},
+	);
+
 	it("renames a symbol across open files", async () => {
 		const manager = setup();
 		const fileA = join(tempDir, "a.foo");
@@ -800,7 +951,7 @@ describe("LspManager", () => {
 		expect(readFileSync(filePath, "utf-8")).toBe("this line has FIXED in it\n");
 	});
 
-	it("rejects code action workspace edits outside the server root", async () => {
+	it("applies code action workspace edits outside the server root", async () => {
 		const manager = setup();
 		const outsideDir = mkdtempSync(join(tmpdir(), "volt-lsp-outside-test-"));
 		try {
@@ -811,8 +962,8 @@ describe("LspManager", () => {
 
 			const result = await manager.codeFix(filePath, { line: 1 });
 
-			expect(result).toContain("Refusing LSP access outside project workspace");
-			expect(readFileSync(outsideFile, "utf-8")).toBe("SECRET\n");
+			expect(result).toContain('Applied "Edit outside workspace"');
+			expect(readFileSync(outsideFile, "utf-8")).toBe("PWNED\n");
 		} finally {
 			rmSync(outsideDir, { recursive: true, force: true });
 		}
@@ -1030,6 +1181,22 @@ describe("LspManager", () => {
 		expect(status.launchSource).toBe("project-relative");
 		expect(manager.getTraceFile()).toBe(join(realpathSync.native(projectDir), "logs", "lsp.log"));
 
+		const externalDir = join(tempDir, "external");
+		mkdirSync(externalDir);
+		mkdirSync(join(externalDir, ".git"));
+		mkdirSync(join(externalDir, ".volt"));
+		writeFileSync(
+			join(externalDir, ".volt", "settings.json"),
+			JSON.stringify({ lsp: { servers: { fake: { command: ["must-not-run"] } } } }),
+		);
+		const externalFile = join(externalDir, "external.foo");
+		writeFileSync(externalFile, "class FakeClass\n");
+		expect(await manager.documentSymbols(externalFile)).toContain("FakeClass");
+		expect(manager.getStatus()[1]).toMatchObject({
+			root: realpathSync.native(externalDir),
+			resolvedExecutable: status.resolvedExecutable,
+			launchSource: "project-relative",
+		});
 		await manager.setTraceFile("runtime-trace.log");
 		expect(manager.getTraceFile()).toBe(join(realpathSync.native(projectDir), "runtime-trace.log"));
 	});
@@ -1068,7 +1235,7 @@ describe("LspManager", () => {
 		});
 	});
 
-	it("rejects unregistered external aliases even when they resolve into the project workspace", async () => {
+	it("accepts external aliases and reuses the canonical project server", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
 		const projectDir = join(tempDir, "project");
 		const externalAlias = join(tempDir, "external-alias");
@@ -1082,7 +1249,10 @@ describe("LspManager", () => {
 		}
 		manager = new LspManager({ cwd: projectDir, projectCwd: projectDir, config: fakeServerConfig() });
 
-		expect(await manager.fileDiagnostics(join(externalAlias, "test.foo"))).toContain("outside project workspace");
+		expect(await manager.fileDiagnostics(join(externalAlias, "test.foo"))).toContain("error: found ERROR on line 1");
+		expect(await manager.fileDiagnostics(join(projectDir, "test.foo"))).toContain("error: found ERROR on line 1");
+		expect(manager.getStatus()).toHaveLength(1);
+		expect(manager.getStatus()[0].openDocuments).toBe(1);
 	});
 
 	it("accepts case-variant existing and missing paths on case-insensitive macOS filesystems", async () => {
@@ -1109,7 +1279,7 @@ describe("LspManager", () => {
 		);
 	});
 
-	it("does not refresh tracked documents through symlinks outside projectCwd", async () => {
+	it("refreshes tracked documents redirected through symlinks outside projectCwd", async () => {
 		const manager = setup();
 		const outsideDir = mkdtempSync(join(tmpdir(), "volt-lsp-outside-test-"));
 		try {
@@ -1121,21 +1291,21 @@ describe("LspManager", () => {
 			mkdirSync(dependencyDir);
 			writeFileSync(dependencyPath, "clean dependency\n");
 			writeFileSync(checkedPath, checkedContent);
-			writeFileSync(outsidePath, "outside ERROR must not be read\n");
+			writeFileSync(outsidePath, "outside ERROR dependency\n");
 			expect(await manager.getDiagnostics(dependencyPath, "clean dependency\n")).toBeUndefined();
 			expect(await manager.getDiagnostics(checkedPath, checkedContent)).toBeUndefined();
 
 			rmSync(dependencyDir, { recursive: true });
 			symlinkSync(outsideDir, dependencyDir, directorySymlinkType());
 
-			expect(await manager.getDiagnostics(checkedPath, checkedContent)).toBeUndefined();
-			expect(manager.getStatus()[0].openDocuments).toBe(1);
+			expect(await manager.getDiagnostics(checkedPath, checkedContent)).toContain("cross-file ERROR detected");
+			expect(manager.getStatus()[0].openDocuments).toBe(2);
 		} finally {
 			rmSync(outsideDir, { recursive: true, force: true });
 		}
 	});
 
-	it("closes escaped tracked documents before navigation-triggered refreshes", async () => {
+	it("refreshes externally redirected tracked documents before navigation", async () => {
 		const manager = setup();
 		const outsideDir = mkdtempSync(join(tmpdir(), "volt-lsp-outside-test-"));
 		try {
@@ -1145,16 +1315,16 @@ describe("LspManager", () => {
 			mkdirSync(dependencyDir);
 			writeFileSync(dependencyPath, "original dependency\n");
 			writeFileSync(checkedPath, "checked symbol\n");
-			writeFileSync(join(outsideDir, "dependency.foo"), "outsideSecretSymbol\n");
+			writeFileSync(join(outsideDir, "dependency.foo"), "outsideSecretSymbol with different content length\n");
 			await manager.documentSymbols(dependencyPath);
 
 			rmSync(dependencyDir, { recursive: true });
 			symlinkSync(outsideDir, dependencyDir, directorySymlinkType());
 
 			expect(await manager.workspaceSymbols(checkedPath, "outsideSecretSymbol")).toContain(
-				'No workspace symbols matching "outsideSecretSymbol"',
+				`${realpathSync.native(join(outsideDir, "dependency.foo"))}:1`,
 			);
-			expect(manager.getStatus()[0].openDocuments).toBe(1);
+			expect(manager.getStatus()[0].openDocuments).toBe(2);
 		} finally {
 			rmSync(outsideDir, { recursive: true, force: true });
 		}
@@ -1209,7 +1379,7 @@ describe("LspManager", () => {
 		expect(manager.getStatus()[0].root).toBe(realpathSync.native(projectDir));
 	});
 
-	it("rejects lexical and resolved or dangling symlink access outside projectCwd", async () => {
+	it("accepts external paths and symlinks but still rejects dangling symlinks", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
 		const projectDir = join(tempDir, "project");
 		const outsideDir = join(tempDir, "outside");
@@ -1219,7 +1389,7 @@ describe("LspManager", () => {
 		writeFileSync(outsideFile, "class FakeClass\n");
 		manager = new LspManager({ cwd: projectDir, projectCwd: projectDir, config: fakeServerConfig() });
 
-		expect(await manager.fileDiagnostics(outsideFile)).toContain("outside project workspace");
+		expect(await manager.fileDiagnostics(outsideFile)).toContain("No diagnostics in");
 		const alias = join(projectDir, "alias");
 		try {
 			symlinkSync(outsideDir, alias, directorySymlinkType());
@@ -1227,10 +1397,12 @@ describe("LspManager", () => {
 			if ((error as NodeJS.ErrnoException).code === "EPERM") return;
 			throw error;
 		}
-		expect(await manager.fileDiagnostics(join(alias, "outside.foo"))).toContain(
-			"through a symlink outside project workspace",
-		);
-		rmSync(outsideDir, { recursive: true, force: true });
+		expect(await manager.fileDiagnostics(join(alias, "outside.foo"))).toContain("No diagnostics in");
+		expect(manager.getStatus()).toHaveLength(1);
+		expect(manager.getStatus()[0].root).toBe(realpathSync.native(outsideDir));
+		expect(manager.getStatus()[0].openDocuments).toBe(1);
+		manager.restart();
+		await removeTempDir(outsideDir);
 		expect(await manager.getDiagnostics(join(alias, "outside.foo"), "ERROR\n")).toContain(
 			"through a dangling symlink",
 		);
