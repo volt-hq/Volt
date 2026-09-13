@@ -127,6 +127,7 @@ export function readPidfile(pidfilePath: string): PidfileContents | undefined {
 export const VOLTD_EXIT_ALREADY_RUNNING = 3;
 export const VOLTD_EXIT_BIND_FAILED = 4;
 export const VOLTD_EXIT_INCOMPATIBLE_RUNNING = 5;
+export const VOLTD_EXIT_STARTUP_CONTENDED = 6;
 
 const DAEMON_BIND_WAIT_TIMEOUT_MS = 75_000;
 const DAEMON_BIND_WAIT_POLL_MS = 200;
@@ -273,7 +274,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		}
 		const owner = lockResult.owner ? ` by pid ${lockResult.owner.pid}` : "";
 		log("error", `daemon startup lock is held${owner}; not starting a second daemon`);
-		return VOLTD_EXIT_BIND_FAILED;
+		return VOLTD_EXIT_STARTUP_CONTENDED;
 	}
 	daemonLock = lockResult.lock;
 	if (usingDefaultSocketPath && process.platform === "win32") {
