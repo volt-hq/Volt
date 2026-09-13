@@ -251,7 +251,7 @@ describe("voltd lifecycle", () => {
 			},
 		];
 		const probe = vi.fn(async () => probes.shift()!);
-		const spawn = vi.fn(async () => ({ ok: true, pid: 123, socketPath: freshSocketPath }));
+		const spawn = vi.fn(async () => ({ ok: true as const, pid: 123, socketPath: freshSocketPath }));
 
 		const result = await ensureDaemonRunning(agentDir, {
 			probeDaemon: probe,

@@ -12,6 +12,7 @@ import {
 	isRemoteTransportPairingAvailable,
 	type RemoteTransportHealth,
 } from "./control-protocol.ts";
+import { getDaemonPaths } from "./paths.ts";
 import { ensureDaemonRunning, probeDaemon } from "./spawn.ts";
 
 function printRemoteUsage(): void {
@@ -60,7 +61,14 @@ async function connectToDaemon(options: { autoStart: boolean }): Promise<RemoteC
 	const agentDir = getAgentDir();
 	let probe = await probeDaemon(agentDir);
 	if (!probe.healthy && options.autoStart) {
-		probe = await ensureDaemonRunning(agentDir);
+		const result = await ensureDaemonRunning(agentDir);
+		if (!result.healthy) {
+			console.error(`Error: ${result.error ?? `voltd is not ready (${result.state}).`}`);
+			console.error(`Check the log: ${getDaemonPaths(agentDir).logPath}`);
+			process.exitCode = 1;
+			return undefined;
+		}
+		probe = result;
 	}
 	if (!probe.healthy) {
 		console.error("voltd is not running. Start it with: volt daemon start");

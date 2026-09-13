@@ -269,6 +269,12 @@ supported.
 
 ## Troubleshooting
 
+- `volt daemon start` and `restart` wait up to 60 seconds after spawning for
+  local control readiness, returning sooner when ready or when the child exits.
+  This is separate from phone transport readiness. If the wait expires with the
+  child still alive, the command exits nonzero but leaves it running and reports
+  its PID with “readiness unconfirmed.” Check `volt daemon status` and the reported
+  log before retrying; slow source loading can delay the control endpoint.
 - `volt daemon status --json` reports `remoteTransport.state` as `starting`,
   `ready`, `degraded`, or `unavailable`, plus a safe reason code/message and the
   wrapper version when discoverable. Both daemon and remote status exit nonzero
