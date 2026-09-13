@@ -18,6 +18,17 @@
 //   tests can assert sync behavior.
 // - Exits on the exit notification.
 
+import { readFileSync } from "node:fs";
+
+const navigationUriIndex = process.argv.indexOf("--navigation-uri");
+const navigationUri = navigationUriIndex === -1 ? undefined : process.argv[navigationUriIndex + 1];
+const workspaceEditIndex = process.argv.indexOf("--workspace-edit");
+const workspaceEditFile = workspaceEditIndex === -1 ? undefined : process.argv[workspaceEditIndex + 1];
+
+function configuredWorkspaceEdit() {
+	return JSON.parse(readFileSync(workspaceEditFile, "utf-8"));
+}
+
 const pullMode = process.argv.includes("--pull");
 const pullFlakyMode = process.argv.includes("--pull-flaky");
 const configMode = process.argv.includes("--config");
@@ -209,7 +220,7 @@ function handle(message) {
 							kind: 13,
 							containerName: "fakeContainer",
 							location: {
-								uri,
+								uri: navigationUri ?? uri,
 								range: {
 									start: { line: i, character: index },
 									end: { line: i, character: index + query.length },
@@ -346,7 +357,7 @@ function handle(message) {
 			id,
 			result: [
 				{
-					targetUri: params.textDocument.uri,
+					targetUri: navigationUri ?? params.textDocument.uri,
 					targetRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 10 } },
 					targetSelectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
 				},
@@ -360,7 +371,7 @@ function handle(message) {
 			jsonrpc: "2.0",
 			id,
 			result: [
-				{ uri: params.textDocument.uri, range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } } },
+				{ uri: navigationUri ?? params.textDocument.uri, range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } } },
 			],
 		});
 		return;
@@ -370,7 +381,7 @@ function handle(message) {
 		send({
 			jsonrpc: "2.0",
 			id,
-			result: { uri: params.textDocument.uri, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } } },
+			result: { uri: navigationUri ?? params.textDocument.uri, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } } },
 		});
 		return;
 	}
@@ -379,8 +390,8 @@ function handle(message) {
 			jsonrpc: "2.0",
 			id,
 			result: [
-				{ uri: params.textDocument.uri, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } } },
-				{ uri: params.textDocument.uri, range: { start: { line: 1, character: 2 }, end: { line: 1, character: 7 } } },
+				{ uri: navigationUri ?? params.textDocument.uri, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } } },
+				{ uri: navigationUri ?? params.textDocument.uri, range: { start: { line: 1, character: 2 }, end: { line: 1, character: 7 } } },
 			],
 		});
 		return;
@@ -455,7 +466,7 @@ function handle(message) {
 					from: {
 						name: "callerOne",
 						kind: 12,
-						uri: params.item.uri,
+						uri: navigationUri ?? params.item.uri,
 						range: { start: { line: 0, character: 0 }, end: { line: 0, character: 9 } },
 						selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 9 } },
 					},
@@ -474,7 +485,7 @@ function handle(message) {
 					to: {
 						name: "calleeOne",
 						kind: 6,
-						uri: params.item.uri,
+						uri: navigationUri ?? params.item.uri,
 						range: { start: { line: 1, character: 0 }, end: { line: 1, character: 9 } },
 						selectionRange: { start: { line: 1, character: 2 }, end: { line: 1, character: 11 } },
 					},
@@ -485,6 +496,10 @@ function handle(message) {
 		return;
 	}
 	if (method === "textDocument/rename") {
+		if (workspaceEditFile) {
+			send({ jsonrpc: "2.0", id, result: configuredWorkspaceEdit() });
+			return;
+		}
 		const text = documents.get(params.textDocument.uri) ?? "";
 		const lines = text.split("\n");
 		const word = wordAt(lines[params.position.line] ?? "", params.position.character);
@@ -517,6 +532,17 @@ function handle(message) {
 	if (method === "textDocument/codeAction") {
 		const uri = params.textDocument.uri;
 		const text = documents.get(uri) ?? "";
+		if (workspaceEditFile) {
+			send({
+				jsonrpc: "2.0", id, result: [{
+					title: "Apply workspace edit", kind: "quickfix",
+					...(text.includes("CMDFIX")
+						? { command: { title: "Apply workspace edit", command: "fake.workspaceEdit" } }
+						: { edit: configuredWorkspaceEdit() }),
+				}],
+			});
+			return;
+		}
 		const only = params.context?.only;
 		if (Array.isArray(only) && only.includes("source.organizeImports")) {
 			const actions = text.includes("UNSORTED")
@@ -586,6 +612,12 @@ function handle(message) {
 		return;
 	}
 	if (method === "workspace/executeCommand") {
+		if (params.command === "fake.workspaceEdit") {
+			serverRequest("workspace/applyEdit", { edit: configuredWorkspaceEdit() }, () => {
+				send({ jsonrpc: "2.0", id, result: null });
+			});
+			return;
+		}
 		if (params.command === "fake.fix") {
 			const uri = params.arguments[0];
 			const edit = buildReplaceEdit(uri, documents.get(uri) ?? "", "CMDFIX", "FIXED");

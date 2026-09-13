@@ -10,6 +10,7 @@ import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { lstat, readFile, realpath } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnProcess, spawnProcessSync } from "../../utils/child-process.ts";
@@ -37,7 +38,7 @@ import {
 export interface LspManagerOptions {
 	/** Runtime cwd used only to shorten displayed tool paths. */
 	cwd: string;
-	/** LSP workspace ceiling and base for commands/traces. Defaults to cwd. */
+	/** Default project root and base for commands/traces, not an access boundary. Defaults to cwd. */
 	projectCwd?: string;
 	config: ResolvedLspConfig;
 	hostInteraction?: HostInteraction;
@@ -62,9 +63,9 @@ export type LspInstallRunner = (
 
 export interface LspServerStatus {
 	name: string;
-	/** Canonical project boundary shared by every server root. */
+	/** Canonical session project directory used as the command/trace base. */
 	workspaceRoot: string;
-	/** Canonical nested root used to initialize this server client. */
+	/** Canonical project root used to initialize this server client, possibly outside workspaceRoot. */
 	root: string;
 	alive: boolean;
 	openDocuments: number;
@@ -97,14 +98,6 @@ const MAX_SYMBOL_LINES = 200;
 const MAX_CROSS_FILE_REPORTS = 5;
 const LSP_INSTALL_REQUEST_TIMEOUT_MS = 10 * 60_000;
 const MAX_INSTALL_OUTPUT_CHARS = 12000;
-
-function uriToPath(uri: string): string {
-	try {
-		return fileURLToPath(uri);
-	} catch {
-		return uri;
-	}
-}
 
 function isPathAtOrInside(parentPath: string, candidatePath: string): boolean {
 	const relativePath = relative(parentPath, candidatePath);
@@ -462,7 +455,6 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	private cwd: string;
 	private displayCwd: string;
 	private projectCwd: string;
-	private lexicalWorkspaceRoots: string[];
 	private config: ResolvedLspConfig;
 	private clients = new Map<string, LspClient>();
 	private launches = new Map<string, LspLaunchDescriptor>();
@@ -485,17 +477,8 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 
 	constructor(options: LspManagerOptions) {
 		this.cwd = resolvePath(options.cwd);
-		const lexicalProjectCwd = resolvePath(options.projectCwd ?? this.cwd);
-		this.projectCwd = canonicalizePath(lexicalProjectCwd);
-		const canonicalRuntimeCwd = canonicalizePath(this.cwd);
-		this.displayCwd = canonicalRuntimeCwd;
-		this.lexicalWorkspaceRoots = [
-			...new Set([
-				lexicalProjectCwd,
-				this.projectCwd,
-				...(isPathAtOrInside(this.projectCwd, canonicalRuntimeCwd) ? [this.cwd] : []),
-			]),
-		];
+		this.projectCwd = canonicalizePath(resolvePath(options.projectCwd ?? this.cwd));
+		this.displayCwd = canonicalizePath(this.cwd);
 		this.config = options.config;
 		this.hostInteraction = options.hostInteraction;
 		this.installRunner = options.installRunner ?? runDefaultLspInstallCommand;
@@ -515,10 +498,6 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 
 	private async canonicalizeRequestedPath(inputPath: string): Promise<{ path: string } | { error: string }> {
 		const lexicalPath = resolvePath(inputPath, this.cwd);
-		const lexicallyInside =
-			this.lexicalWorkspaceRoots.some((root) => isPathAtOrInside(root, lexicalPath)) ||
-			this.lexicalWorkspaceRoots.some((root) => isPathAtOrInside(root.toLowerCase(), lexicalPath.toLowerCase()));
-
 		let probe = lexicalPath;
 		const missingSuffix: string[] = [];
 		let canonicalPath: string;
@@ -535,9 +514,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				try {
 					if ((await lstat(probe)).isSymbolicLink()) {
 						return {
-							error: lexicallyInside
-								? `Refusing LSP access through a dangling symlink in project workspace ${this.projectCwd}: ${lexicalPath}`
-								: `Refusing LSP access outside project workspace ${this.projectCwd}: ${lexicalPath}`,
+							error: `Could not resolve LSP path through a dangling symlink: ${lexicalPath}`,
 						};
 					}
 				} catch (lstatError) {
@@ -555,17 +532,15 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				probe = parent;
 			}
 		}
-		if (!lexicallyInside) {
-			return {
-				error: `Refusing LSP access outside project workspace ${this.projectCwd}: ${lexicalPath}`,
-			};
-		}
-		if (!isPathAtOrInside(this.projectCwd, canonicalPath)) {
-			return {
-				error: `Refusing LSP access through a symlink outside project workspace ${this.projectCwd}: ${lexicalPath} -> ${canonicalPath}`,
-			};
-		}
 		return { path: canonicalPath };
+	}
+
+	private async resolveLocationPath(uri: string): Promise<{ path: string } | { error: string }> {
+		try {
+			return await this.canonicalizeRequestedPath(fileURLToPath(uri));
+		} catch {
+			return { error: `Unsupported LSP document URI: ${uri}` };
+		}
 	}
 
 	getWorkspaceRoot(): string {
@@ -909,8 +884,8 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 					continue;
 				}
 				const kind = SYMBOL_KIND_NAMES[target.kind] ?? "symbol";
-				const canonical = await this.canonicalizeRequestedPath(uriToPath(target.uri));
-				const path = "error" in canonical ? "[outside project workspace]" : this.displayPath(canonical.path);
+				const canonical = await this.resolveLocationPath(target.uri);
+				const path = "error" in canonical ? target.uri : this.displayPath(canonical.path);
 				const targetLine = (target.selectionRange ?? target.range).start.line + 1;
 				lines.push(`${target.name} (${kind}) ${path}:${targetLine}`);
 			}
@@ -945,8 +920,8 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 					const container = symbol.containerName ? ` in ${symbol.containerName}` : "";
 					let location = "";
 					if (symbol.location?.uri) {
-						const canonical = await this.canonicalizeRequestedPath(uriToPath(symbol.location.uri));
-						const path = "error" in canonical ? "[outside project workspace]" : this.displayPath(canonical.path);
+						const canonical = await this.resolveLocationPath(symbol.location.uri);
+						const path = "error" in canonical ? symbol.location.uri : this.displayPath(canonical.path);
 						const line = symbol.location.range ? `:${symbol.location.range.start.line + 1}` : "";
 						location = ` ${path}${line}`;
 					}
@@ -1326,9 +1301,9 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	}
 
 	private async formatLocation(location: LspLocation): Promise<string> {
-		const canonical = await this.canonicalizeRequestedPath(uriToPath(location.uri));
+		const canonical = await this.resolveLocationPath(location.uri);
 		if ("error" in canonical) {
-			return `[outside project workspace]:${location.range.start.line + 1}:${location.range.start.character + 1}`;
+			return `${location.uri}:${location.range.start.line + 1}:${location.range.start.character + 1}`;
 		}
 		const path = canonical.path;
 		const line = location.range.start.line + 1;
@@ -1375,24 +1350,32 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	}
 
 	private findRoot(absolutePath: string, rootMarkers: string[]): string {
-		// Markers are priority-ordered, but no lookup may cross projectCwd.
+		const inProject = isPathAtOrInside(this.projectCwd, absolutePath);
+		const home = canonicalizePath(homedir());
+		const directories: string[] = [];
+		let dir = dirname(absolutePath);
+		let fallback = inProject ? this.projectCwd : dir;
+		while (true) {
+			directories.push(dir);
+			if (inProject && dir === this.projectCwd) break;
+			if (!inProject && pathEntryExists(resolve(dir, ".git"))) {
+				fallback = dir;
+				break;
+			}
+			const parent = dirname(dir);
+			// Do not infer a whole home directory or filesystem as an external
+			// project. A file requested directly in either directory still works.
+			if (parent === dir || (!inProject && (parent === home || parent === dirname(parent)))) break;
+			dir = parent;
+		}
+		// Preserve marker priority within the current project or external repo.
 		for (const marker of rootMarkers) {
-			// Root markers are entry names, not paths. This keeps marker probing
-			// from following configured parent components outside the workspace.
 			if (marker !== basename(marker) || marker === "." || marker === "..") continue;
-			let dir = dirname(absolutePath);
-			while (isPathAtOrInside(this.projectCwd, dir)) {
-				const markerPath = resolve(dir, marker);
-				if (isPathAtOrInside(this.projectCwd, markerPath) && pathEntryExists(markerPath)) {
-					return canonicalizePath(dir);
-				}
-				if (dir === this.projectCwd) break;
-				const parent = dirname(dir);
-				if (parent === dir) break;
-				dir = parent;
+			for (const directory of directories) {
+				if (pathEntryExists(resolve(directory, marker))) return directory;
 			}
 		}
-		return this.projectCwd;
+		return fallback;
 	}
 
 	private getClient(server: ResolvedLspServerConfig, root: string): LspClient {
