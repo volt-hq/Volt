@@ -75,7 +75,7 @@ async function daemonStart(agentDir: string): Promise<void> {
 		} else if (result.state === "shutting-down") {
 			console.error("Error: existing voltd did not finish shutting down within the timeout.");
 		} else {
-			console.error(`Error: ${result.error ?? "failed to start voltd (daemon did not become healthy within 5s)."}`);
+			console.error(`Error: ${result.error ?? "failed to start voltd."}`);
 			if (result.invalidState) {
 				console.error("Run `volt daemon regenerate-state` to review and confirm regeneration.");
 			}
