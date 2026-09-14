@@ -130,6 +130,7 @@ import {
 	type IntegratedRuntimeSubscriber,
 } from "./integrated-runtimes.ts";
 import { IrohConnectionSupervisor } from "./iroh-connection-supervisor.ts";
+import { createIrohEndpointTicket } from "./iroh-endpoint-ticket.ts";
 import {
 	formatIrohLoadError,
 	type IrohConnectionLike,
@@ -2505,7 +2506,11 @@ class IrohDaemonService {
 				this.ready.reject(new Error("iroh service shut down during endpoint startup"));
 				return;
 			}
-			const endpointTicket = this.iroh.EndpointTicket.fromAddr(endpoint.addr()).toString();
+			const endpointTicket = createIrohEndpointTicket(
+				this.iroh,
+				endpoint.addr(),
+				this.relayMode === "production" ? this.relayUrls : [],
+			);
 			const engine = new IrohRemoteHostEngine({
 				auditLogger: this.services.auditLogger,
 				authorizeRelayCredentialPairing: (claimId, remoteNodeId) =>

@@ -13,6 +13,7 @@ import type {
 	IrohHomeRelayWatchCallback,
 	IrohIncomingLike,
 	IrohModuleLike,
+	IrohNodeIdLike,
 	IrohRelayConfigLike,
 } from "../src/daemon/iroh-native.ts";
 import {
@@ -93,7 +94,11 @@ function fakeIroh() {
 					binds++;
 					return {
 						id: () => ({ toString: () => HOST }),
-						addr: () => HOST,
+						addr: () => ({
+							id: () => ({ toString: () => HOST }),
+							relayUrl: () => null,
+							directAddresses: () => [],
+						}),
 						secretKey: () => ({ toBytes: () => Array<number>(32).fill(7) }),
 						async online() {},
 						async close() {
@@ -120,6 +125,16 @@ function fakeIroh() {
 					};
 				},
 			}),
+		},
+		EndpointAddr: class {
+			id: () => IrohNodeIdLike;
+			relayUrl: () => string | null;
+			directAddresses: () => string[];
+			constructor(id: IrohNodeIdLike, relayUrl?: string | null, addresses: string[] = []) {
+				this.id = () => id;
+				this.relayUrl = () => relayUrl ?? null;
+				this.directAddresses = () => addresses;
+			}
 		},
 		EndpointTicket: { fromAddr: () => ({ toString: () => "fake-native-ticket" }) },
 		RelayMap: {
