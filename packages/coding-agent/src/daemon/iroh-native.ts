@@ -54,6 +54,8 @@ export interface IrohConnectionLike {
 }
 
 export interface IrohEndpointBuilderLike {
+	/** Required only by private-CA deployment builds. */
+	caRoots?(certificates: number[][]): void;
 	relayMode(mode: unknown): void;
 	secretKey(key: number[]): void;
 	alpns(alpns: number[][]): void;

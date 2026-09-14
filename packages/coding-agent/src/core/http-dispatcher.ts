@@ -1,4 +1,5 @@
 import * as undici from "undici";
+import { IROH_DEPLOYMENT_PROFILE } from "../remote/iroh-deployment.ts";
 
 export const DEFAULT_HTTP_IDLE_TIMEOUT_MS = 300_000;
 
@@ -56,6 +57,12 @@ export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TI
 			allowH2: false,
 			bodyTimeout: normalizedTimeoutMs,
 			headersTimeout: normalizedTimeoutMs,
+			...(IROH_DEPLOYMENT_PROFILE.brokerCaPem === undefined
+				? {}
+				: {
+						connect: { ca: IROH_DEPLOYMENT_PROFILE.brokerCaPem },
+						requestTls: { ca: IROH_DEPLOYMENT_PROFILE.brokerCaPem },
+					}),
 		}),
 	);
 	// Keep fetch and the dispatcher on the same undici implementation. Node 26.0's
