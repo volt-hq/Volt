@@ -5,8 +5,9 @@ import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } 
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import type { LspOperationMetadata } from "../lsp/outcome.ts";
 import type { Theme } from "../theme/runtime.ts";
-import type { ToolDiagnosticsProvider } from "./diagnostics-provider.ts";
+import { collectToolDiagnostics, type ToolDiagnosticsProvider } from "./diagnostics-provider.ts";
 import {
 	applyEditsToNormalizedContent,
 	computeEditsDiff,
@@ -60,6 +61,7 @@ type LegacyEditToolInput = EditToolInput & {
 };
 
 export interface EditToolDetails {
+	lsp?: LspOperationMetadata;
 	/** Display-oriented diff of the changes made */
 	diff: string;
 	/** Standard unified patch of the changes made */
@@ -359,14 +361,13 @@ export function createEditToolDefinition(
 				await ops.writeFile(absolutePath, finalContent);
 				throwIfAborted();
 
-				let diagnostics: string | undefined;
-				if (options?.diagnosticsProvider) {
-					try {
-						diagnostics = await options.diagnosticsProvider.getDiagnostics(absolutePath, finalContent, signal);
-					} catch {
-						// Diagnostics are best-effort and must never fail the edit.
-					}
-				}
+				const { diagnostics, lsp } = await collectToolDiagnostics(
+					options?.diagnosticsProvider,
+					absolutePath,
+					finalContent,
+					"edit",
+					signal,
+				);
 
 				const diffResult = generateDiffString(baseContent, newContent);
 				const patch = generateUnifiedPatch(path, baseContent, newContent);
@@ -379,6 +380,7 @@ export function createEditToolDefinition(
 						...(diagnostics ? [{ type: "text" as const, text: `Diagnostics:\n${diagnostics}` }] : []),
 					],
 					details: {
+						lsp,
 						diff: diffResult.diff,
 						patch,
 						firstChangedLine: diffResult.firstChangedLine,

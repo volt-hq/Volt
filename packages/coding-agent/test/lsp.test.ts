@@ -25,6 +25,7 @@ import { LspClient } from "../src/core/lsp/client.ts";
 import { resolveLspLaunch } from "../src/core/lsp/command-resolver.ts";
 import { installHintForCommand, installRecipeForCommand, resolveLspConfig } from "../src/core/lsp/config.ts";
 import { LspManager } from "../src/core/lsp/manager.ts";
+import { lspResult } from "../src/core/lsp/outcome.ts";
 import { LspTracer } from "../src/core/lsp/trace.ts";
 import { applyTextEdits, normalizeWorkspaceEdit } from "../src/core/lsp/workspace-edit.ts";
 import type { ToolDiagnosticsProvider } from "../src/core/tools/diagnostics-provider.ts";
@@ -216,6 +217,8 @@ describe("installHintForCommand", () => {
 			"install",
 			"-g",
 			"typescript@7.0.2",
+			"--ignore-scripts",
+			"--include=optional",
 		]);
 		expect(installRecipeForCommand([join("/tmp", "gopls")])?.displayCommand).toBe(
 			"go install golang.org/x/tools/gopls@latest",
@@ -574,8 +577,13 @@ describe("LspManager", () => {
 			const filePath = join(tempDir, "test.foo");
 			writeFileSync(filePath, "class FakeClass\n");
 
-			expect(await manager.documentSymbols(filePath)).toContain("FakeClass");
-			expect(manager.getStatus()[0].resolvedExecutable?.toLowerCase()).toBe(process.execPath.toLowerCase());
+			expect(await manager.documentSymbols(filePath).then((result) => result.text)).toContain("FakeClass");
+			expect(
+				manager
+					.getStatus()
+					.filter((entry) => entry.attempts > 0)[0]
+					.resolvedExecutable?.toLowerCase(),
+			).toBe(process.execPath.toLowerCase());
 		} finally {
 			if (previousPathExt === undefined) delete process.env.PATHEXT;
 			else process.env.PATHEXT = previousPathExt;
@@ -587,7 +595,7 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		const content = "ok line\nthis has ERROR here\n";
 		writeFileSync(filePath, content);
-		const result = await manager.getDiagnostics(filePath, content);
+		const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 		expect(result).toBeDefined();
 		expect(result).toContain("test.foo(2,10): error: found ERROR on line 2 [fake 1234]");
 	});
@@ -597,7 +605,7 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		const content = "ERROR at start\n";
 		writeFileSync(filePath, content);
-		const result = await manager.getDiagnostics(filePath, content);
+		const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 		expect(result).toContain("error: found ERROR on line 1");
 	});
 
@@ -606,8 +614,8 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		const content = "only a WARN here\n";
 		writeFileSync(filePath, content);
-		const result = await manager.getDiagnostics(filePath, content);
-		expect(result).toBeUndefined();
+		const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
+		expect(result).toBe("");
 	});
 
 	it("includes warnings when severity is set to warning", async () => {
@@ -615,7 +623,7 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		const content = "only a WARN here\n";
 		writeFileSync(filePath, content);
-		const result = await manager.getDiagnostics(filePath, content);
+		const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 		expect(result).toContain("warning: found WARN on line 1");
 	});
 
@@ -624,7 +632,7 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		const content = "ERROR one\nERROR two\nERROR three\nERROR four\n";
 		writeFileSync(filePath, content);
-		const result = await manager.getDiagnostics(filePath, content);
+		const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 		expect(result).toBeDefined();
 		expect(result?.split("\n")).toHaveLength(3);
 		expect(result).toContain("... and 2 more");
@@ -634,19 +642,21 @@ describe("LspManager", () => {
 		const manager = setup();
 		const fooPath = join(tempDir, "clean.foo");
 		writeFileSync(fooPath, "all good\n");
-		expect(await manager.getDiagnostics(fooPath, "all good\n")).toBeUndefined();
-		expect(await manager.getDiagnostics(join(tempDir, "other.bar"), "ERROR\n")).toBeUndefined();
+		expect(await manager.getDiagnostics(fooPath, "all good\n").then((result) => result.text)).toBe("");
+		expect(await manager.getDiagnostics(join(tempDir, "other.bar"), "ERROR\n").then((result) => result.text)).toBe(
+			"",
+		);
 	});
 
 	it("tracks document versions across repeated checks of the same file", async () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "ok\n");
-		expect(await manager.getDiagnostics(filePath, "ok\n")).toBeUndefined();
-		const second = await manager.getDiagnostics(filePath, "now ERROR\n");
+		expect(await manager.getDiagnostics(filePath, "ok\n").then((result) => result.text)).toBe("");
+		const second = await manager.getDiagnostics(filePath, "now ERROR\n").then((result) => result.text);
 		expect(second).toContain("error: found ERROR on line 1");
-		const third = await manager.getDiagnostics(filePath, "fixed\n");
-		expect(third).toBeUndefined();
+		const third = await manager.getDiagnostics(filePath, "fixed\n").then((result) => result.text);
+		expect(third).toBe("");
 	});
 
 	it("answers navigation queries via the fake server", async () => {
@@ -655,23 +665,23 @@ describe("LspManager", () => {
 		const content = "class FakeClass\n  fakeMethod here\n";
 		writeFileSync(filePath, content);
 
-		const definition = await manager.definition(filePath, "FakeClass");
+		const definition = await manager.definition(filePath, "FakeClass").then((result) => result.text);
 		expect(definition).toContain("test.foo:1:1");
 		expect(definition).toContain("class FakeClass");
 
-		const references = await manager.references(filePath, "fakeMethod", 2);
+		const references = await manager.references(filePath, "fakeMethod", 2).then((result) => result.text);
 		const referenceLines = references.split("\n");
 		expect(referenceLines).toHaveLength(2);
 		expect(referenceLines[0]).toContain("test.foo:1:1");
 		expect(referenceLines[1]).toContain("test.foo:2:3");
 
-		const hover = await manager.hover(filePath, "fakeMethod");
+		const hover = await manager.hover(filePath, "fakeMethod").then((result) => result.text);
 		expect(hover).toBe("fake hover text");
 
-		const symbols = await manager.documentSymbols(filePath);
+		const symbols = await manager.documentSymbols(filePath).then((result) => result.text);
 		expect(symbols).toBe("FakeClass (class):1\n  fakeMethod (method):2");
 
-		const diagnostics = await manager.fileDiagnostics(filePath);
+		const diagnostics = await manager.fileDiagnostics(filePath).then((result) => result.text);
 		expect(diagnostics).toContain("No diagnostics in");
 	});
 
@@ -698,17 +708,20 @@ describe("LspManager", () => {
 		const externalFile = join(nested, "external.foo");
 		const repoFile = join(markerlessRepo, "src", "repo.foo");
 		for (const file of [localFile, externalFile, repoFile]) writeFileSync(file, "class FakeClass\n");
-		await manager.documentSymbols(localFile);
-		await manager.documentSymbols(externalFile);
-		await manager.documentSymbols(repoFile);
+		await manager.documentSymbols(localFile).then((result) => result.text);
+		await manager.documentSymbols(externalFile).then((result) => result.text);
+		await manager.documentSymbols(repoFile).then((result) => result.text);
 		// No marker should turn an unrelated loose file into the current project.
 		rmSync(join(tempDir, "above.marker"));
 		const looseFile = join(loose, "loose.foo");
 		writeFileSync(looseFile, "class FakeClass\n");
-		await manager.documentSymbols(looseFile);
-		expect(manager.getStatus().map((status) => status.root)).toEqual(
-			[project, external, markerlessRepo, loose].map((directory) => realpathSync.native(directory)),
-		);
+		await manager.documentSymbols(looseFile).then((result) => result.text);
+		expect(
+			manager
+				.getStatus()
+				.filter((entry) => entry.attempts > 0)
+				.map((status) => status.root),
+		).toEqual([project, external, markerlessRepo, loose].map((directory) => realpathSync.native(directory)));
 	});
 
 	it("includes diagnostics after cross-workspace write and edit tool calls", async () => {
@@ -736,7 +749,7 @@ describe("LspManager", () => {
 			{} as never,
 		);
 		expect(edited.details?.diagnostics).toContain("file.foo(1,8): error: found ERROR on line 1");
-		expect(manager.getStatus()[0].root).toBe(realpathSync.native(external));
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].root).toBe(realpathSync.native(external));
 	});
 
 	it("shows external navigation locations and snippets without starting another server", async () => {
@@ -752,18 +765,32 @@ describe("LspManager", () => {
 		const source = join(project, "source.foo");
 		writeFileSync(source, "target\n");
 		const externalPath = realpathSync.native(external);
-		expect(await manager.definition(source, "target")).toBe(`${externalPath}:1:1  external definition`);
-		expect(await manager.references(source, "target")).toContain(`${externalPath}:2:3  external implementation`);
-		expect(await manager.implementations(source, "target")).toContain(`${externalPath}:2:1  external implementation`);
-		expect(await manager.typeDefinition(source, "target")).toContain(`${externalPath}:1:1  external definition`);
-		expect(await manager.callHierarchy(source, "target", "incoming")).toContain(`${externalPath}:1`);
-		expect(await manager.callHierarchy(source, "target", "outgoing")).toContain(`${externalPath}:2`);
-		expect(await manager.workspaceSymbols(source, "target")).toContain(`${externalPath}:1`);
-		expect(manager.getStatus()).toHaveLength(1);
-		expect(manager.getStatus()[0].root).toBe(realpathSync.native(project));
+		expect(await manager.definition(source, "target").then((result) => result.text)).toBe(
+			`${externalPath}:1:1  external definition`,
+		);
+		expect(await manager.references(source, "target").then((result) => result.text)).toContain(
+			`${externalPath}:2:3  external implementation`,
+		);
+		expect(await manager.implementations(source, "target").then((result) => result.text)).toContain(
+			`${externalPath}:2:1  external implementation`,
+		);
+		expect(await manager.typeDefinition(source, "target").then((result) => result.text)).toContain(
+			`${externalPath}:1:1  external definition`,
+		);
+		expect(await manager.callHierarchy(source, "target", "incoming").then((result) => result.text)).toContain(
+			`${externalPath}:1`,
+		);
+		expect(await manager.callHierarchy(source, "target", "outgoing").then((result) => result.text)).toContain(
+			`${externalPath}:2`,
+		);
+		expect(await manager.workspaceSymbols(source, "target").then((result) => result.text)).toContain(
+			`${externalPath}:1`,
+		);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(1);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].root).toBe(realpathSync.native(project));
 		// Direct queries to the external file use its own server.
-		expect(await manager.hover(external, "definition")).toBe("fake hover text");
-		expect(manager.getStatus()).toHaveLength(2);
+		expect(await manager.hover(external, "definition").then((result) => result.text)).toBe("fake hover text");
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(2);
 	});
 
 	it("preserves non-file navigation URIs without interpreting them as local paths", async () => {
@@ -772,15 +799,21 @@ describe("LspManager", () => {
 		writeFileSync(source, "target\n");
 		if (process.platform !== "win32")
 			writeFileSync(join(tempDir, "untitled:external.foo"), "not a navigation snippet\n");
-		expect(await manager.definition(source, "target")).toBe("untitled:external.foo:1:1");
+		expect(await manager.definition(source, "target").then((result) => result.text)).toBe(
+			"untitled:external.foo:1:1",
+		);
 	});
 
 	it("reports symbol-not-found and no-server errors as text", async () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "nothing here\n");
-		expect(await manager.definition(filePath, "missingSymbol")).toContain('Symbol "missingSymbol" not found');
-		expect(await manager.hover(join(tempDir, "test.bar"), "x")).toContain("No language server configured for .bar");
+		expect(await manager.definition(filePath, "missingSymbol").then((result) => result.text)).toContain(
+			'Symbol "missingSymbol" not found',
+		);
+		expect(await manager.hover(join(tempDir, "test.bar"), "x").then((result) => result.text)).toContain(
+			"No language server configured for .bar",
+		);
 	});
 
 	it("re-waits for diagnostics when a dependency changed on disk", async () => {
@@ -792,12 +825,12 @@ describe("LspManager", () => {
 		const contentA = "watch CROSS here\n";
 		writeFileSync(fileA, contentA);
 		writeFileSync(fileB, "fine\n");
-		expect(await manager.getDiagnostics(fileA, contentA)).toBeUndefined();
-		expect(await manager.getDiagnostics(fileB, "fine\n")).toBeUndefined();
+		expect(await manager.getDiagnostics(fileA, contentA).then((result) => result.text)).toBe("");
+		expect(await manager.getDiagnostics(fileB, "fine\n").then((result) => result.text)).toBe("");
 
 		// Break the dependency outside the edit/write tools.
 		writeFileSync(fileB, "now has ERROR\n");
-		const result = await manager.getDiagnostics(fileA, contentA);
+		const result = await manager.getDiagnostics(fileA, contentA).then((result) => result.text);
 		expect(result).toContain("cross-file ERROR detected");
 	});
 
@@ -808,7 +841,7 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		const content = "has ERROR here\n";
 		writeFileSync(filePath, content);
-		const result = await manager.getDiagnostics(filePath, content);
+		const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 		expect(result).toContain("error: found ERROR on line 1");
 	});
 
@@ -819,13 +852,13 @@ describe("LspManager", () => {
 		const contentA = "watch CROSS here\n";
 		writeFileSync(fileA, contentA);
 		writeFileSync(fileB, "fine\n");
-		expect(await manager.getDiagnostics(fileA, contentA)).toBeUndefined();
-		expect(await manager.getDiagnostics(fileB, "fine\n")).toBeUndefined();
+		expect(await manager.getDiagnostics(fileA, contentA).then((result) => result.text)).toBe("");
+		expect(await manager.getDiagnostics(fileB, "fine\n").then((result) => result.text)).toBe("");
 
 		// Editing B introduces an error in B and breaks A via the cross-file rule.
 		const brokenB = "now has ERROR\n";
 		writeFileSync(fileB, brokenB);
-		const result = await manager.getDiagnostics(fileB, brokenB);
+		const result = await manager.getDiagnostics(fileB, brokenB).then((result) => result.text);
 		expect(result).toContain("b.foo(1,9): error: found ERROR on line 1");
 		expect(result).toContain("Newly failing in other open files:");
 		expect(result).toContain("a.foo(1,1): error: cross-file ERROR detected");
@@ -833,7 +866,7 @@ describe("LspManager", () => {
 		// Already-failing files are not reported again on the next edit.
 		const stillBrokenB = "still has ERROR\n";
 		writeFileSync(fileB, stillBrokenB);
-		const second = await manager.getDiagnostics(fileB, stillBrokenB);
+		const second = await manager.getDiagnostics(fileB, stillBrokenB).then((result) => result.text);
 		expect(second).toContain("error: found ERROR on line 1");
 		expect(second).not.toContain("Newly failing");
 	});
@@ -842,11 +875,11 @@ describe("LspManager", () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "interface Target\nclass Impl\n");
-		const implementations = await manager.implementations(filePath, "Target");
+		const implementations = await manager.implementations(filePath, "Target").then((result) => result.text);
 		expect(implementations).toContain("test.foo:2:1");
 		expect(implementations).toContain("class Impl");
 
-		const typeDefinition = await manager.typeDefinition(filePath, "Impl", 2);
+		const typeDefinition = await manager.typeDefinition(filePath, "Impl", 2).then((result) => result.text);
 		expect(typeDefinition).toContain("test.foo:1:1");
 		expect(typeDefinition).toContain("interface Target");
 	});
@@ -855,11 +888,11 @@ describe("LspManager", () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "UNSORTED imports here\n");
-		const result = await manager.codeFix(filePath, { kind: "source.organizeImports" });
+		const result = await manager.codeFix(filePath, { kind: "source.organizeImports" }).then((result) => result.text);
 		expect(result).toContain('Applied "Organize imports"');
 		expect(readFileSync(filePath, "utf-8")).toBe("SORTED imports here\n");
 
-		const clean = await manager.codeFix(filePath, { kind: "source.organizeImports" });
+		const clean = await manager.codeFix(filePath, { kind: "source.organizeImports" }).then((result) => result.text);
 		expect(clean).toContain("No code actions available");
 	});
 
@@ -867,15 +900,17 @@ describe("LspManager", () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "function target() {}\n");
-		const incoming = await manager.callHierarchy(filePath, "target", "incoming");
+		const incoming = await manager.callHierarchy(filePath, "target", "incoming").then((result) => result.text);
 		expect(incoming).toContain('Callers of "target":');
 		expect(incoming).toContain("callerOne (function) test.foo:1");
 
-		const outgoing = await manager.callHierarchy(filePath, "target", "outgoing");
+		const outgoing = await manager.callHierarchy(filePath, "target", "outgoing").then((result) => result.text);
 		expect(outgoing).toContain('Calls made by "target":');
 		expect(outgoing).toContain("calleeOne (method) test.foo:2");
 
-		expect(await manager.callHierarchy(filePath, "missing", "incoming")).toContain('Symbol "missing" not found');
+		expect(await manager.callHierarchy(filePath, "missing", "incoming").then((result) => result.text)).toContain(
+			'Symbol "missing" not found',
+		);
 	});
 
 	it.each(["rename", "fix", "command"] as const)(
@@ -908,19 +943,23 @@ describe("LspManager", () => {
 				}),
 			);
 			manager = new LspManager({ cwd: project, config: fakeServerConfig({ workspaceEditFile, pull: true }) });
-			await manager.documentSymbols(target);
+			await manager.documentSymbols(target).then((result) => result.text);
 			const result =
 				action === "rename"
-					? await manager.rename(source, "renameme", "renamed")
-					: await manager.codeFix(source, { line: 1 });
+					? await manager.rename(source, "renameme", "renamed").then((result) => result.text)
+					: await manager.codeFix(source, { line: 1 }).then((result) => result.text);
 			expect(result).toContain(action === "rename" ? 'Renamed "renameme"' : 'Applied "Apply workspace edit"');
 			expect(result).toContain("source.foo (1 edit)");
 			expect(result).toContain("target.foo (1 edit)");
 			expect(readFileSync(source, "utf-8")).toBe(`renamed${action === "command" ? " CMDFIX" : ""}\n`);
 			expect(readFileSync(target, "utf-8")).toBe("renamed\n");
-			expect(await manager.workspaceSymbols(target, "renamed")).toContain("renamed (variable)");
-			expect(await manager.workspaceSymbols(target, "renameme")).toContain("No workspace symbols");
-			expect(manager.getStatus()).toHaveLength(2);
+			expect(await manager.workspaceSymbols(target, "renamed").then((result) => result.text)).toContain(
+				"renamed (variable)",
+			);
+			expect(await manager.workspaceSymbols(target, "renameme").then((result) => result.text)).toContain(
+				"No workspace symbols",
+			);
+			expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(2);
 		},
 	);
 
@@ -931,9 +970,9 @@ describe("LspManager", () => {
 		writeFileSync(fileA, "function renameme() {}\nrenameme();\n");
 		writeFileSync(fileB, "call renameme() twice renameme\n");
 		// Open both documents on the server.
-		await manager.documentSymbols(fileB);
+		await manager.documentSymbols(fileB).then((result) => result.text);
 
-		const result = await manager.rename(fileA, "renameme", "renamed");
+		const result = await manager.rename(fileA, "renameme", "renamed").then((result) => result.text);
 		expect(result).toContain('Renamed "renameme" to "renamed"');
 		expect(result).toContain("a.foo (2 edits)");
 		expect(result).toContain("b.foo (2 edits)");
@@ -945,7 +984,7 @@ describe("LspManager", () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "this line has ERROR in it\n");
-		const result = await manager.codeFix(filePath, { line: 1 });
+		const result = await manager.codeFix(filePath, { line: 1 }).then((result) => result.text);
 		expect(result).toContain('Applied "Replace ERROR with FIXED"');
 		expect(result).toContain("test.foo (1 edit)");
 		expect(readFileSync(filePath, "utf-8")).toBe("this line has FIXED in it\n");
@@ -960,7 +999,7 @@ describe("LspManager", () => {
 			writeFileSync(outsideFile, "SECRET\n");
 			writeFileSync(filePath, `needs OUTSIDE_EDIT ${pathToFileURL(outsideFile).toString()}\n`);
 
-			const result = await manager.codeFix(filePath, { line: 1 });
+			const result = await manager.codeFix(filePath, { line: 1 }).then((result) => result.text);
 
 			expect(result).toContain('Applied "Edit outside workspace"');
 			expect(readFileSync(outsideFile, "utf-8")).toBe("PWNED\n");
@@ -975,13 +1014,13 @@ describe("LspManager", () => {
 		const content = "has ERROR and MULTI here\n";
 		writeFileSync(filePath, content);
 
-		const listed = await manager.codeFix(filePath, { line: 1 });
+		const listed = await manager.codeFix(filePath, { line: 1 }).then((result) => result.text);
 		expect(listed).toContain("Multiple code actions available");
 		expect(listed).toContain("- Replace ERROR with FIXED (quickfix)");
 		expect(listed).toContain("- Replace MULTI with CHOSEN (refactor)");
 		expect(readFileSync(filePath, "utf-8")).toBe(content);
 
-		const applied = await manager.codeFix(filePath, { line: 1, title: "MULTI" });
+		const applied = await manager.codeFix(filePath, { line: 1, title: "MULTI" }).then((result) => result.text);
 		expect(applied).toContain('Applied "Replace MULTI with CHOSEN"');
 		expect(readFileSync(filePath, "utf-8")).toBe("has ERROR and CHOSEN here\n");
 	});
@@ -990,7 +1029,7 @@ describe("LspManager", () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "needs CMDFIX here\n");
-		const result = await manager.codeFix(filePath, { line: 1 });
+		const result = await manager.codeFix(filePath, { line: 1 }).then((result) => result.text);
 		expect(result).toContain('Applied "Fix via command"');
 		expect(result).toContain("test.foo (1 edit)");
 		expect(readFileSync(filePath, "utf-8")).toBe("needs FIXED here\n");
@@ -1003,28 +1042,30 @@ describe("LspManager", () => {
 		writeFileSync(fileA, "has findme here\n");
 		writeFileSync(fileB, "\nalso findme there\n");
 		// Open both documents so the fake server can search them.
-		await manager.documentSymbols(fileA);
-		await manager.documentSymbols(fileB);
+		await manager.documentSymbols(fileA).then((result) => result.text);
+		await manager.documentSymbols(fileB).then((result) => result.text);
 
-		const result = await manager.workspaceSymbols(fileA, "findme");
+		const result = await manager.workspaceSymbols(fileA, "findme").then((result) => result.text);
 		const lines = result.split("\n");
 		expect(lines).toHaveLength(2);
 		expect(lines[0]).toBe("findme (variable) in fakeContainer a.foo:1");
 		expect(lines[1]).toBe("findme (variable) in fakeContainer b.foo:2");
 
-		expect(await manager.workspaceSymbols(fileA, "nomatch")).toContain('No workspace symbols matching "nomatch"');
+		expect(await manager.workspaceSymbols(fileA, "nomatch").then((result) => result.text)).toContain(
+			'No workspace symbols matching "nomatch"',
+		);
 	});
 
 	it("ignores diagnostics published for an older document version", async () => {
 		const manager = setup({ stale: true });
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "clean\n");
-		expect(await manager.getDiagnostics(filePath, "clean\n")).toBeUndefined();
+		expect(await manager.getDiagnostics(filePath, "clean\n").then((result) => result.text)).toBe("");
 
 		// The stale-mode server immediately publishes a bogus result tagged with
 		// the previous version before the real one arrives.
-		const result = await manager.getDiagnostics(filePath, "still clean\n");
-		expect(result).toBeUndefined();
+		const result = await manager.getDiagnostics(filePath, "still clean\n").then((result) => result.text);
+		expect(result).toBe("");
 	});
 
 	it("writes protocol traffic to the trace file", async () => {
@@ -1034,7 +1075,7 @@ describe("LspManager", () => {
 			expect(manager.getTraceFile()).toBe(traceFile);
 			const filePath = join(tempDir, "test.foo");
 			writeFileSync(filePath, "ok\n");
-			await manager.documentSymbols(filePath);
+			await manager.documentSymbols(filePath).then((result) => result.text);
 
 			let content = "";
 			for (let attempt = 0; attempt < 20; attempt++) {
@@ -1067,11 +1108,11 @@ describe("LspManager", () => {
 			expect(manager.getTraceFile()).toBeUndefined();
 			const filePath = join(tempDir, "test.foo");
 			writeFileSync(filePath, "ok\n");
-			await manager.documentSymbols(filePath);
+			await manager.documentSymbols(filePath).then((result) => result.text);
 
 			manager.setTraceFile(traceFile);
 			expect(manager.getTraceFile()).toBe(traceFile);
-			await manager.hover(filePath, "ok");
+			await manager.hover(filePath, "ok").then((result) => result.text);
 
 			let content = "";
 			for (let attempt = 0; attempt < 20; attempt++) {
@@ -1099,13 +1140,13 @@ describe("LspManager", () => {
 
 	it("reports server status and restarts servers", async () => {
 		const manager = setup();
-		expect(manager.getStatus()).toEqual([]);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toEqual([]);
 
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "ok\n");
-		await manager.documentSymbols(filePath);
+		await manager.documentSymbols(filePath).then((result) => result.text);
 
-		const status = manager.getStatus();
+		const status = manager.getStatus().filter((entry) => entry.attempts > 0);
 		expect(status).toHaveLength(1);
 		expect(status[0].name).toBe("fake");
 		expect(status[0].root).toBe(realpathSync.native(tempDir));
@@ -1114,26 +1155,26 @@ describe("LspManager", () => {
 		expect(status[0].idleMs).toBeGreaterThanOrEqual(0);
 
 		expect(manager.restart()).toBe(1);
-		expect(manager.getStatus()).toEqual([]);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toEqual([]);
 
 		// Servers respawn lazily after restart.
-		await manager.documentSymbols(filePath);
-		expect(manager.getStatus()).toHaveLength(1);
+		await manager.documentSymbols(filePath).then((result) => result.text);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(1);
 	});
 
 	it("shuts down idle servers and respawns on next use", async () => {
 		const manager = setup({ idleShutdownMs: 400 });
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "ok\n");
-		await manager.documentSymbols(filePath);
-		expect(manager.getStatus()).toHaveLength(1);
+		await manager.documentSymbols(filePath).then((result) => result.text);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(1);
 
 		await new Promise((resolve) => setTimeout(resolve, 1000));
-		expect(manager.getStatus()).toEqual([]);
+		expect(manager.getStatus().find((entry) => entry.name === "fake")?.state).toBe("idle");
 
-		const result = await manager.documentSymbols(filePath);
+		const result = await manager.documentSymbols(filePath).then((result) => result.text);
 		expect(result).toContain("FakeClass");
-		expect(manager.getStatus()).toHaveLength(1);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(1);
 	});
 
 	it("uses projectCwd for relative commands, marker ceilings, priority, and trace paths", async () => {
@@ -1167,8 +1208,8 @@ describe("LspManager", () => {
 		});
 		const filePath = join(runtimeDir, "test.foo");
 		writeFileSync(filePath, "class FakeClass\n");
-		expect(await manager.documentSymbols(filePath)).toContain("FakeClass");
-		const status = manager.getStatus()[0];
+		expect(await manager.documentSymbols(filePath).then((result) => result.text)).toContain("FakeClass");
+		const status = manager.getStatus().filter((entry) => entry.attempts > 0)[0];
 		expect(status.workspaceRoot).toBe(realpathSync.native(projectDir));
 		expect(status.root).toBe(realpathSync.native(projectDir));
 		const expectedExecutable =
@@ -1191,8 +1232,8 @@ describe("LspManager", () => {
 		);
 		const externalFile = join(externalDir, "external.foo");
 		writeFileSync(externalFile, "class FakeClass\n");
-		expect(await manager.documentSymbols(externalFile)).toContain("FakeClass");
-		expect(manager.getStatus()[1]).toMatchObject({
+		expect(await manager.documentSymbols(externalFile).then((result) => result.text)).toContain("FakeClass");
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[1]).toMatchObject({
 			root: realpathSync.native(externalDir),
 			resolvedExecutable: status.resolvedExecutable,
 			launchSource: "project-relative",
@@ -1224,12 +1265,14 @@ describe("LspManager", () => {
 			config: fakeServerConfig(),
 		});
 
-		expect(await manager.fileDiagnostics(siblingFile)).toContain("error: found ERROR on line 1");
-		expect(await manager.fileDiagnostics(join(runtimeDir, "runtime.foo"))).toContain(
+		expect(await manager.fileDiagnostics(siblingFile).then((result) => result.text)).toContain(
+			"error: found ERROR on line 1",
+		);
+		expect(await manager.fileDiagnostics(join(runtimeDir, "runtime.foo")).then((result) => result.text)).toContain(
 			"runtime.foo(1,5): error: found ERROR on line 1",
 		);
 		expect(manager.getWorkspaceRoot()).toBe(realpathSync.native(realProjectDir));
-		expect(manager.getStatus()[0]).toMatchObject({
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0]).toMatchObject({
 			workspaceRoot: realpathSync.native(realProjectDir),
 			root: realpathSync.native(realProjectDir),
 		});
@@ -1249,10 +1292,14 @@ describe("LspManager", () => {
 		}
 		manager = new LspManager({ cwd: projectDir, projectCwd: projectDir, config: fakeServerConfig() });
 
-		expect(await manager.fileDiagnostics(join(externalAlias, "test.foo"))).toContain("error: found ERROR on line 1");
-		expect(await manager.fileDiagnostics(join(projectDir, "test.foo"))).toContain("error: found ERROR on line 1");
-		expect(manager.getStatus()).toHaveLength(1);
-		expect(manager.getStatus()[0].openDocuments).toBe(1);
+		expect(await manager.fileDiagnostics(join(externalAlias, "test.foo")).then((result) => result.text)).toContain(
+			"error: found ERROR on line 1",
+		);
+		expect(await manager.fileDiagnostics(join(projectDir, "test.foo")).then((result) => result.text)).toContain(
+			"error: found ERROR on line 1",
+		);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(1);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].openDocuments).toBe(1);
 	});
 
 	it("accepts case-variant existing and missing paths on case-insensitive macOS filesystems", async () => {
@@ -1271,12 +1318,12 @@ describe("LspManager", () => {
 		}
 		manager = new LspManager({ cwd: projectDir, projectCwd: projectDir, config: fakeServerConfig() });
 
-		expect(await manager.fileDiagnostics(join(caseVariantDir, "existing.foo"))).toContain(
-			"error: found ERROR on line 1",
-		);
-		expect(await manager.getDiagnostics(join(caseVariantDir, "missing.foo"), "has ERROR\n")).toContain(
-			"error: found ERROR on line 1",
-		);
+		expect(
+			await manager.fileDiagnostics(join(caseVariantDir, "existing.foo")).then((result) => result.text),
+		).toContain("error: found ERROR on line 1");
+		expect(
+			await manager.getDiagnostics(join(caseVariantDir, "missing.foo"), "has ERROR\n").then((result) => result.text),
+		).toContain("error: found ERROR on line 1");
 	});
 
 	it("refreshes tracked documents redirected through symlinks outside projectCwd", async () => {
@@ -1292,14 +1339,18 @@ describe("LspManager", () => {
 			writeFileSync(dependencyPath, "clean dependency\n");
 			writeFileSync(checkedPath, checkedContent);
 			writeFileSync(outsidePath, "outside ERROR dependency\n");
-			expect(await manager.getDiagnostics(dependencyPath, "clean dependency\n")).toBeUndefined();
-			expect(await manager.getDiagnostics(checkedPath, checkedContent)).toBeUndefined();
+			expect(await manager.getDiagnostics(dependencyPath, "clean dependency\n").then((result) => result.text)).toBe(
+				"",
+			);
+			expect(await manager.getDiagnostics(checkedPath, checkedContent).then((result) => result.text)).toBe("");
 
 			rmSync(dependencyDir, { recursive: true });
 			symlinkSync(outsideDir, dependencyDir, directorySymlinkType());
 
-			expect(await manager.getDiagnostics(checkedPath, checkedContent)).toContain("cross-file ERROR detected");
-			expect(manager.getStatus()[0].openDocuments).toBe(2);
+			expect(await manager.getDiagnostics(checkedPath, checkedContent).then((result) => result.text)).toContain(
+				"cross-file ERROR detected",
+			);
+			expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].openDocuments).toBe(2);
 		} finally {
 			rmSync(outsideDir, { recursive: true, force: true });
 		}
@@ -1316,15 +1367,15 @@ describe("LspManager", () => {
 			writeFileSync(dependencyPath, "original dependency\n");
 			writeFileSync(checkedPath, "checked symbol\n");
 			writeFileSync(join(outsideDir, "dependency.foo"), "outsideSecretSymbol with different content length\n");
-			await manager.documentSymbols(dependencyPath);
+			await manager.documentSymbols(dependencyPath).then((result) => result.text);
 
 			rmSync(dependencyDir, { recursive: true });
 			symlinkSync(outsideDir, dependencyDir, directorySymlinkType());
 
-			expect(await manager.workspaceSymbols(checkedPath, "outsideSecretSymbol")).toContain(
-				`${realpathSync.native(join(outsideDir, "dependency.foo"))}:1`,
-			);
-			expect(manager.getStatus()[0].openDocuments).toBe(2);
+			expect(
+				await manager.workspaceSymbols(checkedPath, "outsideSecretSymbol").then((result) => result.text),
+			).toContain(`${realpathSync.native(join(outsideDir, "dependency.foo"))}:1`);
+			expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].openDocuments).toBe(2);
 		} finally {
 			rmSync(outsideDir, { recursive: true, force: true });
 		}
@@ -1341,13 +1392,15 @@ describe("LspManager", () => {
 		writeFileSync(dependencyPath, "original dependency\n");
 		writeFileSync(join(redirectedDir, "dependency.foo"), "redirectedSymbol\n");
 		writeFileSync(checkedPath, "checked symbol\n");
-		await manager.documentSymbols(dependencyPath);
+		await manager.documentSymbols(dependencyPath).then((result) => result.text);
 
 		rmSync(dependencyDir, { recursive: true });
 		symlinkSync(redirectedDir, dependencyDir, directorySymlinkType());
 
-		expect(await manager.workspaceSymbols(checkedPath, "redirectedSymbol")).toContain("redirectedSymbol");
-		expect(manager.getStatus()[0].openDocuments).toBe(2);
+		expect(await manager.workspaceSymbols(checkedPath, "redirectedSymbol").then((result) => result.text)).toContain(
+			"redirectedSymbol",
+		);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].openDocuments).toBe(2);
 	});
 
 	it("does not inherit root markers above projectCwd", async () => {
@@ -1375,8 +1428,8 @@ describe("LspManager", () => {
 		});
 		const filePath = join(nestedDir, "test.foo");
 		writeFileSync(filePath, "class FakeClass\n");
-		await manager.documentSymbols(filePath);
-		expect(manager.getStatus()[0].root).toBe(realpathSync.native(projectDir));
+		await manager.documentSymbols(filePath).then((result) => result.text);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].root).toBe(realpathSync.native(projectDir));
 	});
 
 	it("accepts external paths and symlinks but still rejects dangling symlinks", async () => {
@@ -1389,7 +1442,7 @@ describe("LspManager", () => {
 		writeFileSync(outsideFile, "class FakeClass\n");
 		manager = new LspManager({ cwd: projectDir, projectCwd: projectDir, config: fakeServerConfig() });
 
-		expect(await manager.fileDiagnostics(outsideFile)).toContain("No diagnostics in");
+		expect(await manager.fileDiagnostics(outsideFile).then((result) => result.text)).toContain("No diagnostics in");
 		const alias = join(projectDir, "alias");
 		try {
 			symlinkSync(outsideDir, alias, directorySymlinkType());
@@ -1397,16 +1450,18 @@ describe("LspManager", () => {
 			if ((error as NodeJS.ErrnoException).code === "EPERM") return;
 			throw error;
 		}
-		expect(await manager.fileDiagnostics(join(alias, "outside.foo"))).toContain("No diagnostics in");
-		expect(manager.getStatus()).toHaveLength(1);
-		expect(manager.getStatus()[0].root).toBe(realpathSync.native(outsideDir));
-		expect(manager.getStatus()[0].openDocuments).toBe(1);
+		expect(await manager.fileDiagnostics(join(alias, "outside.foo")).then((result) => result.text)).toContain(
+			"No diagnostics in",
+		);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(1);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].root).toBe(realpathSync.native(outsideDir));
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].openDocuments).toBe(1);
 		manager.restart();
 		await removeTempDir(outsideDir);
-		expect(await manager.getDiagnostics(join(alias, "outside.foo"), "ERROR\n")).toContain(
-			"through a dangling symlink",
-		);
-		expect(manager.getStatus()).toEqual([]);
+		expect(
+			await manager.getDiagnostics(join(alias, "outside.foo"), "ERROR\n").then((result) => result.text),
+		).toContain("through a dangling symlink");
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toEqual([]);
 	});
 
 	it("isolates start breakers by canonical server root and retains failed status", async () => {
@@ -1444,12 +1499,14 @@ describe("LspManager", () => {
 		writeFileSync(badFile, "bad\n");
 		writeFileSync(goodFile, "class FakeClass\n");
 		for (let attempt = 0; attempt < 3; attempt++) {
-			expect(await manager.fileDiagnostics(badFile)).toContain("lsp(fake)");
+			expect(await manager.fileDiagnostics(badFile).then((result) => result.text)).toContain("lsp(fake)");
 		}
-		expect(await manager.fileDiagnostics(badFile)).toContain("server unavailable after 3");
-		expect(await manager.documentSymbols(goodFile)).toContain("FakeClass");
+		expect(await manager.fileDiagnostics(badFile).then((result) => result.text)).toContain(
+			"server unavailable after 3",
+		);
+		expect(await manager.documentSymbols(goodFile).then((result) => result.text)).toContain("FakeClass");
 
-		const statuses = manager.getStatus();
+		const statuses = manager.getStatus().filter((entry) => entry.attempts > 0);
 		const badStatus = statuses.find((status) => status.root === realpathSync.native(badRoot));
 		const goodStatus = statuses.find((status) => status.root === realpathSync.native(goodRoot));
 		expect(badStatus).toMatchObject({ alive: false, attempts: 3 });
@@ -1457,7 +1514,7 @@ describe("LspManager", () => {
 		expect(goodStatus).toMatchObject({ alive: true, attempts: 1 });
 
 		expect(manager.restart()).toBe(1);
-		expect(manager.getStatus()).toEqual([]);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toEqual([]);
 	});
 
 	it("reports a failed server start once, then stays silent", async () => {
@@ -1476,12 +1533,12 @@ describe("LspManager", () => {
 			}),
 		});
 		const filePath = join(tempDir, "test.foo");
-		const first = await manager.getDiagnostics(filePath, "ERROR\n");
+		const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
 		expect(first).toContain("lsp(missing):");
 		// Unknown binaries must not get an install hint
 		expect(first).not.toContain("Install");
-		const second = await manager.getDiagnostics(filePath, "ERROR\n");
-		expect(second).toBeUndefined();
+		const second = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
+		expect(second).toBe("");
 	});
 
 	it("applies the start-failure breaker to fileDiagnostics", async () => {
@@ -1502,13 +1559,13 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "x\n");
 		for (let attempt = 0; attempt < 3; attempt++) {
-			expect(await manager.fileDiagnostics(filePath)).toContain("lsp(missing)");
+			expect(await manager.fileDiagnostics(filePath).then((result) => result.text)).toContain("lsp(missing)");
 		}
 		// After three failed starts the breaker must stop spawn attempts.
-		const fourth = await manager.fileDiagnostics(filePath);
+		const fourth = await manager.fileDiagnostics(filePath).then((result) => result.text);
 		expect(fourth).toContain("server unavailable after 3");
 		// The failed process is gone, but actionable status remains until restart.
-		expect(manager.getStatus()).toEqual([
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toEqual([
 			expect.objectContaining({
 				name: "missing",
 				alive: false,
@@ -1525,7 +1582,9 @@ describe("LspManager", () => {
 		const controller = new AbortController();
 		const abortTimer = setTimeout(() => controller.abort(), 250);
 		const startedAt = Date.now();
-		const result = await manager.hover(filePath, "symbol", undefined, controller.signal);
+		const result = await manager
+			.hover(filePath, "symbol", undefined, controller.signal)
+			.then((result) => result.text);
 		clearTimeout(abortTimer);
 		expect(Date.now() - startedAt).toBeLessThan(5000);
 		expect(result).toContain("aborted");
@@ -1536,11 +1595,11 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		const content = "has ERROR\n";
 		writeFileSync(filePath, content);
-		const first = await manager.getDiagnostics(filePath, content);
+		const first = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 		expect(first).toContain("lsp(fake)");
 		expect(first).toContain("initialize failed");
 		// The failed process must not linger, while status retains startup context.
-		expect(manager.getStatus()).toEqual([
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toEqual([
 			expect.objectContaining({
 				name: "fake",
 				alive: false,
@@ -1578,7 +1637,7 @@ describe("LspManager", () => {
 			},
 		});
 		const filePath = join(tempDir, "test.foo");
-		const first = await manager.getDiagnostics(filePath, "ERROR\n");
+		const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
 		expect(first).toContain("lsp(go):");
 		expect(first).toContain("ENOENT");
 		expect(first).toContain("Launch source: absolute");
@@ -1609,11 +1668,11 @@ describe("LspManager", () => {
 		});
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "x\n");
-		const first = await manager.fileDiagnostics(filePath);
+		const first = await manager.fileDiagnostics(filePath).then((result) => result.text);
 		expect(first).toContain("Startup stderr:");
 		expect(first).toContain("TAIL");
 		expect(first).not.toContain("HEAD");
-		const status = manager.getStatus()[0];
+		const status = manager.getStatus().filter((entry) => entry.attempts > 0)[0];
 		expect(status.lastError).toContain("Resolved executable:");
 		expect(status.lastError!.length).toBeLessThan(9500);
 	});
@@ -1643,7 +1702,7 @@ describe("LspManager", () => {
 				},
 			});
 			const filePath = join(tempDir, "test.foo");
-			const first = await manager.getDiagnostics(filePath, "ERROR\n");
+			const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
 
 			expect(first).toContain("Install with: npm install -g typescript@7.0.2");
 			expect(requests).toEqual([]);
@@ -1688,13 +1747,15 @@ describe("LspManager", () => {
 				},
 			});
 			const filePath = join(tempDir, "test.foo");
-			const first = await manager.getDiagnostics(filePath, "ERROR\n");
+			const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
 
 			expect(first).toContain("is present but not executable");
 			expect(first).toContain("EACCES");
 			expect(first).not.toContain("ENOENT");
 			expect(requests).toEqual([]);
-			expect(manager.getStatus()[0].lastError).toContain(`Unusable executable: ${unusablePath}`);
+			expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].lastError).toContain(
+				`Unusable executable: ${unusablePath}`,
+			);
 		} finally {
 			if (previousPath === undefined) delete process.env.PATH;
 			else process.env.PATH = previousPath;
@@ -1738,7 +1799,7 @@ describe("LspManager", () => {
 				},
 			});
 			const filePath = join(tempDir, "test.foo");
-			const first = await manager.getDiagnostics(filePath, "ERROR\n");
+			const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
 
 			expect(first).toContain("lsp(custom):");
 			expect(first).toContain("Install with: npm install -g typescript@7.0.2");
@@ -1795,16 +1856,18 @@ describe("LspManager", () => {
 			const content = "has ERROR\n";
 			writeFileSync(filePath, content);
 
-			const result = await manager.getDiagnostics(filePath, content);
+			const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 
 			expect(result).toContain("test.foo(1,5): error: found ERROR on line 1");
 			expect(requests).toHaveLength(1);
 			expect(requests[0]).toMatchObject({
 				action: "lsp.install_server",
-				commandPreview: "npm install -g typescript@7.0.2",
+				commandPreview: "npm install -g typescript@7.0.2 --ignore-scripts --include=optional",
 				metadata: { server: "typescript", binary: "tsc" },
 			});
-			expect(installCommands).toEqual([["npm", "install", "-g", "typescript@7.0.2"]]);
+			expect(installCommands).toEqual([
+				["npm", "install", "-g", "typescript@7.0.2", "--ignore-scripts", "--include=optional"],
+			]);
 			expect(updates.map((update) => update.status)).toEqual(["running", "completed"]);
 		} finally {
 			if (previousPath === undefined) {
@@ -1860,8 +1923,8 @@ describe("LspManager", () => {
 			writeFileSync(firstFile, "ERROR first\n");
 			writeFileSync(secondFile, "ERROR second\n");
 			const [first, second] = await Promise.all([
-				manager.getDiagnostics(firstFile, "ERROR first\n"),
-				manager.getDiagnostics(secondFile, "ERROR second\n"),
+				manager.getDiagnostics(firstFile, "ERROR first\n").then((result) => result.text),
+				manager.getDiagnostics(secondFile, "ERROR second\n").then((result) => result.text),
 			]);
 			expect(first).toContain("error: found ERROR");
 			expect(second).toContain("error: found ERROR");
@@ -1923,9 +1986,11 @@ describe("LspManager", () => {
 			writeFileSync(firstFile, "ERROR first\n");
 			writeFileSync(secondFile, "ERROR second\n");
 
-			const firstOperation = manager.getDiagnostics(firstFile, "ERROR first\n");
+			const firstOperation = manager.getDiagnostics(firstFile, "ERROR first\n").then((result) => result.text);
 			await firstPromptStarted.promise;
-			const secondOperation = secondManager.getDiagnostics(secondFile, "ERROR second\n");
+			const secondOperation = secondManager
+				.getDiagnostics(secondFile, "ERROR second\n")
+				.then((result) => result.text);
 			const secondPromptedBeforeFirstSettled = await Promise.race([
 				secondPromptStarted.promise.then(() => true),
 				new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
@@ -2000,9 +2065,11 @@ describe("LspManager", () => {
 			writeFileSync(secondFile, "ERROR second\n");
 			const firstController = new AbortController();
 
-			const firstOperation = manager.getDiagnostics(firstFile, "ERROR first\n", firstController.signal);
+			const firstOperation = manager
+				.getDiagnostics(firstFile, "ERROR first\n", firstController.signal)
+				.then((result) => result.text);
 			await promptStarted.promise;
-			const secondOperation = manager.getDiagnostics(secondFile, "ERROR second\n");
+			const secondOperation = manager.getDiagnostics(secondFile, "ERROR second\n").then((result) => result.text);
 			await new Promise((resolve) => setTimeout(resolve, 50));
 			firstController.abort();
 			const firstResult = await firstOperation;
@@ -2056,25 +2123,23 @@ describe("LspManager", () => {
 			const cancelledResults: Array<string | undefined> = [];
 			for (let attempt = 0; attempt < 3; attempt++) {
 				const controller = new AbortController();
-				const operation = manager.getDiagnostics(filePath, content, controller.signal);
+				const operation = manager
+					.getDiagnostics(filePath, content, controller.signal)
+					.then((result) => result.text);
 				if (attempt === 0) await promptStarted.promise;
 				controller.abort();
 				cancelledResults.push(await operation);
 			}
-			expect(cancelledResults).toEqual([
-				"LSP install cancelled.",
-				"LSP install cancelled.",
-				"LSP install cancelled.",
-			]);
-			expect(manager.getStatus()).toEqual([]);
+			expect(cancelledResults).toEqual(["LSP install cancelled.", "", ""]);
+			expect(manager.getStatus().find((entry) => entry.name === "typescript")?.lastError).toBeUndefined();
 
-			const successfulOperation = manager.getDiagnostics(filePath, content);
+			const successfulOperation = manager.getDiagnostics(filePath, content).then((result) => result.text);
 			promptDecision.resolve({ decision: "approved" });
 			await installFinished.promise;
 			expect(await successfulOperation).toContain("error: found ERROR on line 1");
 			expect(requests).toBe(1);
 			expect(installs).toBe(1);
-			expect(manager.getStatus()[0].lastError).toBeUndefined();
+			expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].lastError).toBeUndefined();
 		} finally {
 			promptDecision.resolve({ decision: "dismissed" });
 			installFinished.resolve();
@@ -2111,7 +2176,7 @@ describe("LspManager", () => {
 			});
 			const filePath = join(tempDir, "test.foo");
 			writeFileSync(filePath, "ERROR\n");
-			const operation = manager.getDiagnostics(filePath, "ERROR\n");
+			const operation = manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
 			await promptStarted.promise;
 
 			manager.dispose();
@@ -2123,7 +2188,7 @@ describe("LspManager", () => {
 			await operation;
 
 			expect(settledBeforeFallback).toBe(true);
-			expect(manager.getStatus()).toEqual([]);
+			expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toEqual([]);
 		} finally {
 			manualDecision.resolve({ decision: "dismissed" });
 			if (previousPath === undefined) delete process.env.PATH;
@@ -2157,11 +2222,11 @@ describe("LspManager", () => {
 				},
 			});
 			const filePath = join(tempDir, "test.foo");
-			const first = await manager.getDiagnostics(filePath, "ERROR\n");
-			const second = await manager.getDiagnostics(filePath, "ERROR\n");
+			const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
+			const second = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
 
 			expect(first).toContain("Install with: npm install -g typescript@7.0.2");
-			expect(second).toBeUndefined();
+			expect(second).toBe("");
 			expect(requests).toHaveLength(1);
 		} finally {
 			if (previousPath === undefined) {
@@ -2560,11 +2625,12 @@ describe("LspClient disk sync", () => {
 		writeFileSync(fileA, content);
 
 		const first = await client.getDiagnostics(fileA, content, 3000);
-		expect(first).toHaveLength(1);
+		expect(first.diagnostics).toHaveLength(1);
 
 		// Same content again: no didChange, reuses the existing publish.
 		const second = await client.getDiagnostics(fileA, content, 3000);
-		expect(second).toEqual(first);
+		expect(second.diagnostics).toEqual(first.diagnostics);
+		expect(second.source).toBe("cache");
 
 		// Excluded path is not refreshed even if it changed on disk.
 		writeFileSync(fileA, "different\n");
@@ -2587,7 +2653,10 @@ describe("tool diagnostics integration", () => {
 
 	const stubProvider: ToolDiagnosticsProvider = {
 		getDiagnostics: async (_absolutePath, content) =>
-			content.includes("ERROR") ? "stub.ts(1,1): error: stub diagnostic" : undefined,
+			lspResult(
+				content.includes("ERROR") ? "success" : "empty",
+				content.includes("ERROR") ? "stub.ts(1,1): error: stub diagnostic" : "",
+			),
 	};
 
 	it("write tool appends diagnostics to result content and details", async () => {
@@ -2612,7 +2681,7 @@ describe("tool diagnostics integration", () => {
 			{} as never,
 		);
 		expect(clean.content).toHaveLength(1);
-		expect(clean.details).toBeUndefined();
+		expect(clean.details?.lsp?.outcome).toBe("empty");
 	});
 
 	it("edit tool appends diagnostics to result content and details", async () => {
@@ -2636,37 +2705,38 @@ describe("tool diagnostics integration", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-tool-test-"));
 		const calls: string[] = [];
 		const navProvider: LspNavigationProvider = {
+			status: async () => lspResult("success", "unused"),
 			definition: async (path, symbol, line) => {
 				calls.push(`definition ${path} ${symbol} ${line}`);
-				return "def-result";
+				return lspResult("success", "def-result");
 			},
-			references: async () => "ref-result",
-			hover: async () => "hover-result",
-			documentSymbols: async () => "symbols-result",
+			references: async () => lspResult("success", "ref-result"),
+			hover: async () => lspResult("success", "hover-result"),
+			documentSymbols: async () => lspResult("success", "symbols-result"),
 			workspaceSymbols: async (path, query) => {
 				calls.push(`workspaceSymbols ${path} ${query}`);
-				return "workspace-symbols-result";
+				return lspResult("success", "workspace-symbols-result");
 			},
 			callHierarchy: async (path, symbol, direction) => {
 				calls.push(`callHierarchy ${path} ${symbol} ${direction}`);
-				return "calls-result";
+				return lspResult("success", "calls-result");
 			},
 			implementations: async (path, symbol) => {
 				calls.push(`implementations ${path} ${symbol}`);
-				return "impl-result";
+				return lspResult("success", "impl-result");
 			},
 			typeDefinition: async (path, symbol) => {
 				calls.push(`typeDefinition ${path} ${symbol}`);
-				return "typedef-result";
+				return lspResult("success", "typedef-result");
 			},
-			fileDiagnostics: async () => "diag-result",
+			fileDiagnostics: async () => lspResult("success", "diag-result"),
 			rename: async (path, symbol, newName) => {
 				calls.push(`rename ${path} ${symbol} ${newName}`);
-				return "rename-result";
+				return lspResult("success", "rename-result");
 			},
 			codeFix: async (path, options) => {
 				calls.push(`fix ${path} ${options.line} ${options.title}`);
-				return "fix-result";
+				return lspResult("success", "fix-result");
 			},
 		};
 		const tool = createLspToolDefinition(tempDir, { provider: navProvider });
@@ -2679,7 +2749,7 @@ describe("tool diagnostics integration", () => {
 			{} as never,
 		);
 		expect(result.content[0]).toEqual({ type: "text", text: "def-result" });
-		expect(result.details).toEqual({ action: "definition" });
+		expect(result.details).toMatchObject({ action: "definition", lsp: { outcome: "success", trigger: "explicit" } });
 		expect(calls[0]).toBe(`definition ${join(tempDir, "a.ts")} foo 12`);
 
 		const symbols = await tool.execute("t2", { action: "symbols", path: "a.ts" }, undefined, undefined, {} as never);
@@ -2697,7 +2767,7 @@ describe("tool diagnostics integration", () => {
 
 		await expect(
 			tool.execute("t3", { action: "references", path: "a.ts" }, undefined, undefined, {} as never),
-		).rejects.toThrow("lsp references requires a symbol name");
+		).resolves.toMatchObject({ isError: true, details: { lsp: { outcome: "invalid-input" } } });
 
 		const callers = await tool.execute(
 			"t3b",
@@ -2761,7 +2831,7 @@ describe("tool diagnostics integration", () => {
 
 		await expect(
 			tool.execute("t6", { action: "rename", path: "a.ts", symbol: "foo" }, undefined, undefined, {} as never),
-		).rejects.toThrow("lsp rename requires newName");
+		).resolves.toMatchObject({ isError: true, details: { lsp: { outcome: "invalid-input" } } });
 	});
 
 	it("lsp tool reports when LSP is disabled", async () => {
@@ -2769,7 +2839,7 @@ describe("tool diagnostics integration", () => {
 		const tool = createLspToolDefinition(tempDir);
 		await expect(
 			tool.execute("t1", { action: "symbols", path: "a.ts" }, undefined, undefined, {} as never),
-		).rejects.toThrow("LSP is disabled");
+		).resolves.toMatchObject({ isError: true, details: { lsp: { reason: "disabled" } } });
 	});
 
 	it("diagnostics provider failures do not fail the write", async () => {
@@ -2782,6 +2852,6 @@ describe("tool diagnostics integration", () => {
 		const writeTool = createWriteToolDefinition(tempDir, { diagnosticsProvider: throwingProvider });
 		const result = await writeTool.execute("t1", { path: "a.ts", content: "x\n" }, undefined, undefined, {} as never);
 		expect(result.content[0].type).toBe("text");
-		expect(result.details).toBeUndefined();
+		expect(result.details?.lsp?.outcome).toBe("request-failed");
 	});
 });

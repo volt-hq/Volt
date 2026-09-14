@@ -1,8 +1,9 @@
 import { accessSync, constants, statSync } from "node:fs";
 import { posix, win32 } from "node:path";
+import { spawnProcessSync } from "../../utils/child-process.ts";
 import { getSubprocessEnv } from "../../utils/process-env.ts";
 
-export type LspLaunchSource = "absolute" | "project-relative" | "path";
+export type LspLaunchSource = "absolute" | "project-relative" | "path" | "xcrun";
 export type LspExecutableProbeResult = "missing" | "unusable" | "executable";
 
 export interface LspLaunchDescriptor {
@@ -27,6 +28,8 @@ export interface ResolveLspLaunchOptions {
 	platform?: NodeJS.Platform;
 	/** Injectable filesystem probe. Defaults to distinguishing missing, unusable, and executable candidates. */
 	probeExecutable?: (path: string, platform: NodeJS.Platform) => LspExecutableProbeResult;
+	/** Host-owned fallback, only for the unchanged built-in Swift command. */
+	builtInSwift?: boolean;
 }
 
 function missingProbeResult(error: unknown): LspExecutableProbeResult {
@@ -167,6 +170,34 @@ export function resolveLspLaunch(
 				break;
 			}
 			unusableExecutable ??= result.unusable;
+		}
+	}
+
+	if (
+		!resolvedExecutable &&
+		!unusableExecutable &&
+		platform === "darwin" &&
+		options.builtInSwift &&
+		configuredCommand.length === 1 &&
+		requestedExecutable === "sourcekit-lsp"
+	) {
+		const found = spawnProcessSync("/usr/bin/xcrun", ["--find", "sourcekit-lsp"], {
+			cwd: options.projectCwd,
+			env: environment,
+			encoding: "utf-8",
+			timeout: 3000,
+			maxBuffer: 8192,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		const candidate = found.stdout?.trim();
+		if (
+			found.status === 0 &&
+			candidate &&
+			pathApi.isAbsolute(candidate) &&
+			probeExecutable(candidate, platform) === "executable"
+		) {
+			resolvedExecutable = candidate;
+			source = "xcrun";
 		}
 	}
 

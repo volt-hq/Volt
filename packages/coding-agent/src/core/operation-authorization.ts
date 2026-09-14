@@ -87,6 +87,7 @@ const STATIC_RESOLVERS = new Map<string, ToolOperationResolver>([
 ]);
 
 const READ_ONLY_LSP_ACTIONS = new Set([
+	"status",
 	"definition",
 	"references",
 	"implementations",

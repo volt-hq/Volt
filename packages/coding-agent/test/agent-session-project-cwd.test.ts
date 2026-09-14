@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -56,10 +56,79 @@ function createSymlinkedProject():
 }
 
 afterEach(() => {
+	vi.unstubAllEnvs();
 	for (const path of tempDirs.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
 describe("AgentSession projectCwd propagation", () => {
+	it("does not offer installation for a missing built-in server in Plan mode", async () => {
+		const root = mkdtempSync(join(tmpdir(), "volt-agent-lsp-plan-"));
+		tempDirs.push(root);
+		const agentDir = join(root, "agent");
+		mkdirSync(agentDir);
+		writeFileSync(join(root, "test.ts"), "const value = 1;\n");
+		const { session } = await createAgentSession({
+			cwd: root,
+			agentDir,
+			disableMcp: true,
+			agentMode: "plan",
+			settingsManager: SettingsManager.inMemory({ lsp: { enabled: true } }),
+			sessionManager: SessionManager.inMemory(root),
+		});
+		const requestAction = vi.fn(async () => ({ decision: "denied" as const }));
+		session.setHostInteraction({ requestAction });
+		vi.stubEnv("PATH", root);
+		vi.stubEnv("VOLT_OFFLINE", "0");
+		try {
+			const result = await session
+				.getToolDefinition("lsp")!
+				.execute(
+					"plan-no-install",
+					{ action: "symbols", path: join(root, "test.ts") },
+					undefined,
+					undefined,
+					{} as never,
+				);
+			expect(result.isError).toBe(true);
+			expect(requestAction).not.toHaveBeenCalled();
+		} finally {
+			session.dispose();
+			await session.waitForClosed();
+		}
+	});
+
+	it("keeps disabled configuration available to session and model status without starting servers", async () => {
+		const root = mkdtempSync(join(tmpdir(), "volt-agent-lsp-disabled-"));
+		tempDirs.push(root);
+		const agentDir = join(root, "agent");
+		mkdirSync(agentDir);
+		const { session } = await createAgentSession({
+			cwd: root,
+			agentDir,
+			disableMcp: true,
+			settingsManager: SettingsManager.inMemory({ lsp: { enabled: false } }),
+			sessionManager: SessionManager.inMemory(root),
+		});
+		try {
+			const status = session.getLspStatus();
+			expect(status.enabled).toBe(false);
+			expect(status.servers.length).toBeGreaterThan(0);
+			expect(
+				status.servers.every((server) => server.state === "disabled" && server.attempts === 0 && !server.alive),
+			).toBe(true);
+			expect(session.getActiveToolNames()).toContain("lsp");
+			const result = await session
+				.getToolDefinition("lsp")!
+				.execute("status-disabled", { action: "status" }, undefined, undefined, {} as never);
+			expect(result.isError).not.toBe(true);
+			expect(result.content).toEqual([expect.objectContaining({ text: expect.stringContaining("disabled") })]);
+			expect(session.getLspStatus().servers.every((server) => server.attempts === 0 && !server.alive)).toBe(true);
+		} finally {
+			session.dispose();
+			await session.waitForClosed();
+		}
+	});
+
 	it("keeps a remote-style nested runtime cwd separate from the canonical LSP workspace across reload", async () => {
 		const root = mkdtempSync(join(tmpdir(), "volt-agent-project-cwd-"));
 		tempDirs.push(root);
@@ -96,8 +165,11 @@ describe("AgentSession projectCwd propagation", () => {
 			expect(session.getLspStatus()).toMatchObject({
 				enabled: true,
 				workspaceRoot: realpathSync.native(projectCwd),
-				servers: [],
 			});
+			expect(session.getLspStatus().servers.length).toBeGreaterThan(0);
+			expect(
+				session.getLspStatus().servers.every((server) => server.state === "unused" && server.attempts === 0),
+			).toBe(true);
 		} finally {
 			session.dispose();
 			await session.waitForClosed();

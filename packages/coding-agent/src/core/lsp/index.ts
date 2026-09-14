@@ -1,4 +1,4 @@
-export { LspClient, type LspClientOptions, type LspDiagnostic } from "./client.ts";
+export { LspClient, type LspClientOptions, type LspDiagnostic, type LspDiagnosticResult } from "./client.ts";
 export {
 	type LspLaunchDescriptor,
 	type LspLaunchSource,
@@ -26,6 +26,15 @@ export {
 	type LspServerStatus,
 	runDefaultLspInstallCommand,
 } from "./manager.ts";
+export {
+	type LspDiagnosticSource,
+	type LspFreshness,
+	type LspOperationMetadata,
+	type LspOutcome,
+	type LspResult,
+	lspResult,
+	lspSucceeded,
+} from "./outcome.ts";
 export { type LspTraceDirection, LspTracer } from "./trace.ts";
 export {
 	applyTextEdits,

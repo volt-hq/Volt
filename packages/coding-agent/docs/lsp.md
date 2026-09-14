@@ -1,8 +1,8 @@
 # LSP Diagnostics & Navigation
 
-Volt can run language servers and feed diagnostics back to the model after every `edit` and `write`. When enabled, the tool result includes a `Diagnostics:` block with errors reported by the matching language server, so the model sees type and compile errors immediately instead of discovering them at build time.
+Volt runs language servers for semantic navigation, refactoring, and best-effort diagnostics after `edit` and `write`. Diagnostics supplement a build or test run; they do not prove that a project is clean.
 
-When LSP is enabled, the model also gets an `lsp` tool for code navigation and refactoring: go-to-definition, find-references, hover, file symbol outlines, on-demand diagnostics, project-wide rename, and quick fixes (e.g. auto-import).
+The `lsp` tool exposes go-to-definition, references, hover, symbol outlines, diagnostics, rename, quick fixes, and a read-only `status` action. Status remains available when LSP is disabled, subject to normal tool grants, and never starts or installs servers.
 
 ## Default and Disabling
 
@@ -28,18 +28,19 @@ Use `volt --lsp` to force-enable LSP for a run when settings disable it.
 - Before every diagnostics collection or navigation query, volt re-syncs any previously opened file whose on-disk content changed outside the `edit`/`write` tools (e.g. via `bash`: `git checkout`, codegen). Deleted files are closed on the server, and servers are notified via `workspace/didChangeWatchedFiles`.
 - Diagnostics at or above the configured `severity` are appended to the tool result and shown in the TUI. Other open files that go from clean to failing as a result of the change are reported in a `Newly failing in other open files` section (capped at 5 files; best-effort, depends on the server republishing within the settle window).
 - One client runs per canonical `(server, server root)` pair. A failure in one nested root does not disable that server in another root. Servers shut down when the session ends or reloads, and after `idleShutdownMs` without use (they respawn lazily on the next operation).
-- `/lsp` shows the project workspace, server root, resolved executable (or unresolved command), launch source, start attempts, open documents, idle time, and retained startup error. `/lsp restart` stops all owned processes and clears failed-start breakers so servers resolve and spawn fresh on next use.
+- `/lsp` shows an on-demand health snapshot: configured unused/disabled servers and per-root starting, ready, degraded, failed, blocked, or idle records. Details include resolved executable, launch source, observed version, advertised capabilities, activity/latency counters, recent successes/failures, startup stderr, and request errors. An alive process is not necessarily ready; an idle shutdown is not a failure. Unknown capabilities differ from an initialized server advertising none. There is no background status polling. `/lsp restart` stops owned processes and clears failed-start breakers so servers resolve and spawn fresh on next use.
 - `/lsp trace [path]` enables protocol tracing at runtime (`/lsp trace off` disables): JSON-RPC traffic in both directions, server stderr, workspace/server roots, resolved launch context, attempts, and lifecycle events are appended with timestamps. Relative runtime paths and persistent `lsp.traceFile` paths resolve from the canonical project workspace, not the process invocation directory or nested runtime cwd.
-- Only a genuinely missing bare command from an unchanged built-in server definition can trigger a trusted automatic install prompt. Install prompts and concurrent attempts coalesce by reviewed recipe; cancelling one caller stops only its wait, while the shared install continues without affecting that root's startup breaker. After success Volt searches PATH again before retrying. Explicit paths, custom commands, manual-install-only servers, and present-but-broken executables are never auto-installed. Their retained status includes the resolved command, bounded startup stderr, and manual repair guidance. After three failed starts only that `(server, root)` record is disabled until `/lsp restart` or `/reload`.
+- Reviewed install prompts apply only to missing unchanged built-in bare commands, plus the built-in TypeScript command with a confirmed incompatible pre-7 compiler. Install prompts and concurrent attempts coalesce by reviewed recipe; cancelling one caller stops only its wait, while the shared install continues without affecting that root's startup breaker. After success Volt searches PATH again before retrying. Explicit paths, custom commands, manual-install-only servers, and present-but-broken or unrecognized executables are never auto-installed. Offline and Plan-mode sessions never offer or run installs. After three failed starts only that `(server, root)` record is blocked until `/lsp restart` or `/reload`.
 
-Diagnostics are best-effort: server failures or timeouts never fail the edit itself.
+Diagnostics are best-effort: server failures or timeouts never fail a successful edit or write. Automatic results retain structured evidence even when repeated failure text is suppressed. Fix only regressions caused by the current change; unrelated diagnostics do not expand the task.
 
 ## The lsp Tool
 
-When LSP is enabled, the `lsp` tool is active by default (it still respects `--tools` and `--exclude-tools`). Actions:
+The `lsp` tool is active by default (it still respects `--tools` and `--exclude-tools`). When disabled, only status is useful; semantic operations report unavailability without starting a server. Status and other non-mutating actions are authorized reads in Plan mode; `rename` and `fix` remain restricted writes. Actions:
 
 | Action | Parameters | Description |
 |--------|------------|-------------|
+| `status` | `path?` | Inspect cached health/capabilities for all configured servers, or route by a file path; no spawn, probe, or install |
 | `definition` | `path`, `symbol`, `line?` | Where a symbol is defined, with a source snippet |
 | `references` | `path`, `symbol`, `line?` | All usages of a symbol across the project (capped at 50) |
 | `implementations` | `path`, `symbol`, `line?` | Implementations of an interface or abstract symbol |
@@ -52,7 +53,7 @@ When LSP is enabled, the `lsp` tool is active by default (it still respects `--t
 | `rename` | `path`, `symbol`, `newName`, `line?` | Rename a symbol across the project (applies the server's WorkspaceEdit to disk) |
 | `fix` | `path`, `symbol?` or `line?`, `title?`, `kind?` | Apply a quick fix (e.g. add a missing import). A single available action applies automatically; multiple actions are listed and chosen via `title`. `kind` filters by code-action kind, e.g. `source.organizeImports` or `source.fixAll` over the whole file |
 
-The symbol is located by name: volt finds its position in the file (preferring a word-boundary match on the hinted `line`) and issues the positional LSP request. Errors such as a missing server or symbol are returned as text so the model can react.
+Every action except `status` requires `path`. The symbol is located by name: Volt finds its position in the file (preferring a word-boundary match on the hinted `line`) and issues the positional LSP request. Failures such as unavailable servers, unsupported methods, invalid inputs, request errors, timeouts, and rejected edits set the normal tool-result `isError` flag. A legitimate empty result or a code-action selection list is not a transport failure.
 
 `rename` and `fix` write the server's `WorkspaceEdit` to disk (including create/rename/delete file operations), re-sync changed open documents, and report a per-file summary. Edits may span projects: filesystem handles expand to cover the explicit edit targets without changing language-server roots. Every operation is preflighted before mutation, retaining document-version, stale-content, and rooted file-operation checks. Non-file URIs and filesystem roots are not valid mutation targets; resource renames between different filesystem volumes are unsupported. Command-based code actions use `workspace/executeCommand`, and server-initiated `workspace/applyEdit` requests use the same edit handling.
 
@@ -60,13 +61,34 @@ The symbol is located by name: volt finds its position in the file (preferring a
 
 The matching server must be installed on the exact inherited `PATH`. Volt does not implicitly execute `node_modules/.bin`. Bare commands are searched in PATH order; relative PATH entries are based at the canonical project workspace. On Windows, commands with an explicit filename extension are probed as named before any `PATHEXT`-derived fallback, while extensionless commands use `PATHEXT` order for PATH, project-relative, and absolute launch forms. Commands containing `/` or `\\` resolve from the project workspace. All remaining command entries are passed as literal argv through Volt's cross-platform spawn wrapper, without shell joining.
 
-When a trusted built-in bare command is missing, interactive and capable RPC hosts can ask to install it automatically, then search PATH again and retry the LSP operation. Non-interactive hosts, clients that do not advertise host action support, overridden command argv, custom commands, explicit paths, and manual-install-only servers fall back to repair context or an install hint. Built-in defaults:
+Interactive and capable RPC hosts can request explicit consent for a reviewed built-in repair, then search PATH again and retry. Non-interactive hosts, clients without host-action support, overridden command argv, custom commands, explicit paths, and manual-install-only servers receive repair context instead. No arbitrary package or custom install command is executed.
 
-The TypeScript default uses TypeScript 7's native language server, so it does not require the `typescript-language-server` bridge.
+### TypeScript
+
+The built-in `tsc --lsp --stdio` command requires TypeScript >=7 and does not use the `typescript-language-server` bridge. Before starting it, Volt probes the **exact resolved executable** with a bounded, cached version check. Status reads do not run this probe. A confirmed older compiler is incompatible; a failed, timed-out, or unrecognized probe is not proof that installation will repair it.
+
+For a missing built-in compiler or a confirmed pre-7 compiler, an eligible host may ask permission for exactly:
+
+```bash
+npm install -g typescript@7.0.2 --ignore-scripts --include=optional
+```
+
+This replaces the global TypeScript compiler. Lifecycle scripts are disabled; optional native dependencies are required. To avoid a global replacement, install a compatible native compiler yourself and set `lsp.servers.typescript.command` to its explicit executable path plus `--lsp`, `--stdio`. Custom and explicit commands are not automatically repaired.
+
+### Swift
+
+The built-in Swift server resolves `sourcekit-lsp` from inherited PATH first. On macOS only, if that unchanged built-in bare command is missing, Volt may use `xcrun` to find SourceKit-LSP in the selected developer toolchain. There is no `xcrun` fallback for custom commands or explicit paths, and no automatic Swift/Xcode installation.
+
+SwiftPM (`Package.swift`) and an existing BSP configuration (`buildServer.json`) provide project context. Module/reference coverage may require a recent build. A loose Swift file or an Xcode project without an already configured build server has limited semantics; a running server does not establish full workspace indexing. Volt defaults Swift initialization options to `backgroundIndexing: false`, does not create build-server configuration, select Xcode, run builds, or automatically set up an index. Explicit initialization options and SourceKit's own project configuration remain user-controlled; see [SourceKit configuration](https://github.com/swiftlang/sourcekit-lsp/blob/main/Documentation/Configuration%20File.md).
+
+SourceKit may finish `initialize` before loading the SwiftPM manifest. Early navigation can be empty while project context loads; an on-demand diagnostics collection can wait for publication evidence before navigation. Even a clean unversioned publication remains best-effort. Use a recent build and search fallback when references are incomplete, rather than repeatedly calling an unavailable server.
+
+### Default definitions
 
 | Name | Command | Extensions | Root markers | Install |
 |------|---------|------------|--------------|---------|
-| `typescript` | `tsc --lsp --stdio` | `.ts` `.tsx` `.mts` `.cts` `.js` `.jsx` `.mjs` `.cjs` | `tsconfig.json`, `jsconfig.json`, `package.json` | `npm install -g typescript@7.0.2` |
+| `typescript` | `tsc --lsp --stdio` | `.ts` `.tsx` `.mts` `.cts` `.js` `.jsx` `.mjs` `.cjs` | `tsconfig.json`, `jsconfig.json`, `package.json` | `npm install -g typescript@7.0.2 --ignore-scripts --include=optional` |
+| `swift` | `sourcekit-lsp` | `.swift` | `buildServer.json`, `Package.swift` | Install Swift/Xcode manually |
 | `python` | `pyright-langserver --stdio` | `.py` `.pyi` | `pyrightconfig.json`, `pyproject.toml`, `setup.py`, `requirements.txt` | `npm install -g pyright` |
 | `go` | `gopls` | `.go` | `go.mod`, `go.work` | `go install golang.org/x/tools/gopls@latest` |
 | `rust` | `rust-analyzer` | `.rs` | `Cargo.toml` | `rustup component add rust-analyzer` |
@@ -142,8 +164,41 @@ Example: tuning pyright through `settings`:
 
 User entries merge field-wise over built-in defaults: overriding only `command` for `typescript` keeps the default extensions and root markers.
 
+## Structured outcomes and freshness
+
+Explicit LSP calls and automatic diagnostics attach bounded machine-readable `details.lsp` metadata: `operationId`, `trigger` (`explicit`, `edit`, or `write`), `action`, `completedAt`, `outcome`, `reason`, `language`, `server`, `durationMs`, `coldStartMs`, `diagnosticCount`, `resultCount`, `freshness`, and `source`. Metadata contains no diagnostic prose or source snippets. Consumers should use these fields and normal `isError`, not parse display text. RPC/mobile consumers use the existing tool-result error projection; there is no separate LSP wire protocol.
+
+Outcomes distinguish `success`, `empty`, `needs-selection`, `skipped`, `unavailable`, `unsupported`, `invalid-input`, `timeout`, `cancelled`, `request-failed`, and `edit-failed`. For automatic diagnostics, these describe diagnostics collection, not whether the file mutation succeeded.
+
+Freshness is separate from severity and result count:
+
+- `fresh`: evidence matches the current synchronized document.
+- `unverified`: diagnostics arrived without sufficient version evidence.
+- `stale`: retained diagnostics belong to an older document version.
+- `unknown`: no usable freshness evidence.
+
+`source` is `pull`, `push`, `cache`, or `none`. Waiting out a publication window without diagnostics is a timeout, **not a clean result**. Likewise an unsupported request is not an empty semantic answer. Use a build/check when freshness or project coverage is uncertain.
+
+## Offline audit
+
+`volt lsp audit` reads persisted operation evidence without starting a session, provider, language server, or daemon:
+
+```bash
+volt lsp audit
+volt lsp audit --json
+volt lsp audit --since 2026-09-01 --until 2026-09-14
+volt lsp audit --session-dir /path/to/session-store
+volt lsp audit --all-workspaces
+```
+
+Text is the default; `--json` provides a machine-readable report. The default window is the last 14 days (`since` inclusive, `until` exclusive), scoped to the current canonical workspace. `--all-workspaces` explicitly broadens scope; `--session-dir` confines scanning to a custom store. No session-store creation, migration, repair, transcript export, authentication, or network request is performed. Unsupported, corrupt, busy, missing, and unreadable stores produce coverage warnings. Exit codes are `0` for complete coverage, `2` for partial coverage or invalid arguments, and `130` for cancellation.
+
+The utilization denominator is distinct tool-active sessions in the window, excluding empty sessions and copied history predating session creation. Root and subagent cohorts are separate. All stored branches participate; operation IDs deduplicate cloned/forked histories, preferring original execution context when available and reporting uncertainty otherwise. Explicit calls and automatic checks are counted separately; disabled/no-server skips remain distinguishable. Historical LSP calls without metadata are uninstrumented/unknown, and historical edits have unknown automatic-check coverage. Grep/bash counts are context only, not missed LSP opportunities.
+
+Duration p50/p95 use recorded monotonic operation durations and report sample counts, cold/warm separation, and startup contribution; timestamp differences are never used as duration estimates. Default scan bounds are 128 stores, 10,000 sessions, 100,000 entries, 64 MiB payloads, 256 KiB per entry, 5 seconds per store and 30 seconds overall. Group output is capped at 128 groups per dimension. Each report includes its denominator, limits and partial-coverage evidence. Audit output is not a benchmark or a claim about project correctness.
+
 ## Limitations
 
 - Disk changes are only detected for files the server has already seen (opened by an earlier edit, write, or `lsp` query). Files created or changed via `bash` that were never touched by a tool are unknown to the server until first opened.
-- Diagnostics are collected only for the edited file, not for other files the change may affect.
+- Diagnostics focus on the requested/edited file. Newly failing previously open files may be included best-effort; this is not whole-project verification.
 - On very large projects the first collection can still miss diagnostics if project loading exceeds `firstSettleMs`; raise it in settings if needed.
