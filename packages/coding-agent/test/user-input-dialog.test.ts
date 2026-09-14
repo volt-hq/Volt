@@ -102,6 +102,24 @@ describe("UserInputDialog", () => {
 		expect(done).toHaveBeenCalledWith({ status: "answered", answers: { storage: { answers: ["xyz"] } } });
 	});
 
+	it("preserves the first custom character from xterm modifyOtherKeys input", () => {
+		const { input, done } = setup();
+		input("\x1b[27;2;69~", "xample", enter);
+		expect(done).toHaveBeenCalledExactlyOnceWith({
+			status: "answered",
+			answers: { storage: { answers: ["Example"] } },
+		});
+	});
+
+	it.each(["\x1b[27;5;101~", "\x1b[27;3;101~"])("does not start a custom answer for modified shortcut %j", (key) => {
+		const { input, done } = setup();
+		input(key, enter);
+		expect(done).toHaveBeenCalledExactlyOnceWith({
+			status: "answered",
+			answers: { storage: { answers: ["SQLite (Recommended)"] } },
+		});
+	});
+
 	it("preserves bracketed multiline paste, including expanded large pastes", () => {
 		const { input, done } = setup();
 		const pasted = Array.from({ length: 15 }, (_, i) => `line ${i}`).join("\n");

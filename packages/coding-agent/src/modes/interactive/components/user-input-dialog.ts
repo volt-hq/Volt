@@ -3,7 +3,7 @@ import {
 	CURSOR_MARKER,
 	concatRenderFrames,
 	createRenderFrame,
-	decodeKittyPrintable,
+	decodePrintableKey,
 	Editor,
 	type Focusable,
 	type Keybinding,
@@ -210,7 +210,7 @@ export class UserInputDialog implements Component, Focusable {
 			else if (kb.matches(data, "tui.select.confirm")) {
 				if (this.draft.selected === optionCount) this.editing = "custom";
 				else this.commit();
-			} else if (decodeKittyPrintable(data) !== undefined || /^[^\x00-\x1f\x7f]/u.test(data)) {
+			} else if (decodePrintableKey(data) !== undefined || /^[^\x00-\x1f\x7f]/u.test(data)) {
 				this.draft.selected = optionCount;
 				this.editing = "custom";
 				this.draft.custom.handleInput(data);
