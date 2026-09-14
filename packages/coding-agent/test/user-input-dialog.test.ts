@@ -155,6 +155,94 @@ describe("UserInputDialog", () => {
 		expect(done).toHaveBeenCalledWith({ status: "answered", answers: { storage: { answers: ["first\nsecond"] } } });
 	});
 
+	describe.each(["custom", "notes"] as const)("backslash newline in %s answers", (mode) => {
+		it.each([
+			{ key: enter, bindings: {} },
+			{ key: "\x1b[13u", bindings: {} },
+			{ key: "\x14", bindings: { "tui.input.submit": "ctrl+t" } },
+		] satisfies { key: string; bindings: KeybindingsConfig }[])(
+			"keeps editing after backslash + $key and submits the completed answer",
+			({ key, bindings }) => {
+				const { input, done } = setup({ bindings });
+				if (mode === "notes") input(notes);
+				input("first", "\\", key);
+				expect(done).not.toHaveBeenCalled();
+				input("second", key);
+				expect(done).toHaveBeenCalledExactlyOnceWith({
+					status: "answered",
+					answers: {
+						storage: {
+							answers: mode === "notes" ? ["SQLite (Recommended)", "first\nsecond"] : ["first\nsecond"],
+						},
+					},
+				});
+			},
+		);
+
+		it("removes only the backslash before a mid-line cursor", () => {
+			const { input, done } = setup();
+			if (mode === "notes") input(notes);
+			input("first\\\\tail", "\x1b[D", "\x1b[D", "\x1b[D", "\x1b[D", enter);
+			expect(done).not.toHaveBeenCalled();
+			input("second ", enter);
+			expect(done).toHaveBeenCalledExactlyOnceWith({
+				status: "answered",
+				answers: {
+					storage: {
+						answers:
+							mode === "notes" ? ["SQLite (Recommended)", "first\\\nsecond tail"] : ["first\\\nsecond tail"],
+					},
+				},
+			});
+		});
+
+		it("commits normally when the backslash is not before the cursor", () => {
+			const { input, done } = setup();
+			if (mode === "notes") input(notes);
+			input("first\\tail", enter);
+			expect(done).toHaveBeenCalledExactlyOnceWith({
+				status: "answered",
+				answers: {
+					storage: { answers: mode === "notes" ? ["SQLite (Recommended)", "first\\tail"] : ["first\\tail"] },
+				},
+			});
+		});
+
+		it("leaves the backslash literal for an explicit newline binding", () => {
+			const { input, done } = setup();
+			if (mode === "notes") input(notes);
+			input("first\\", "\n");
+			expect(done).not.toHaveBeenCalled();
+			input("second", enter);
+			expect(done).toHaveBeenCalledExactlyOnceWith({
+				status: "answered",
+				answers: {
+					storage: {
+						answers: mode === "notes" ? ["SQLite (Recommended)", "first\\\nsecond"] : ["first\\\nsecond"],
+					},
+				},
+			});
+		});
+	});
+
+	it("keeps the current question and preserves paste expansions and cursor when revisiting a multiline draft", () => {
+		const { input, done, text } = setup({ multi: true });
+		const pasted = Array.from({ length: 15 }, (_, i) => `line ${i}`).join("\n");
+		input("\x1b[200~", pasted, "\x1b[201~", "\\", enter);
+		expect(text()).toContain("Storage · 1 of 2");
+		expect(done).not.toHaveBeenCalled();
+		input("second", back, enter, " revised", enter);
+		expect(text()).toContain("Scope · 2 of 2");
+		input(back, enter, " again", enter, enter);
+		expect(text()).toContain("Review answers");
+		expect(done).not.toHaveBeenCalled();
+		input(enter);
+		expect(done).toHaveBeenCalledExactlyOnceWith({
+			status: "answered",
+			answers: { storage: { answers: [`${pasted}\nsecond revised again`] }, scope: { answers: ["Project"] } },
+		});
+	});
+
 	it("preserves custom drafts when returning to choices or previous questions", () => {
 		const { input, text, done } = setup({ multi: true });
 		input("custom draft", back);

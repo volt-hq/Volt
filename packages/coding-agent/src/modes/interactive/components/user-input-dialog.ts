@@ -178,8 +178,21 @@ export class UserInputDialog implements Component, Focusable {
 			} else this.questionIndex = Math.max(0, this.questionIndex - 1);
 			this.scrollOffset = 0;
 		} else if (this.activeEditor) {
-			if (kb.matches(data, "tui.input.submit") && !kb.matches(data, "tui.input.newLine")) this.commit();
-			else this.activeEditor.handleInput(data);
+			const editor = this.activeEditor;
+			if (kb.matches(data, "tui.input.submit") && !kb.matches(data, "tui.input.newLine")) {
+				const { line, col } = editor.getCursor();
+				if (col > 0 && editor.getLines()[line]?.[col - 1] === "\\") {
+					// The editor's backslash-newline workaround runs only with submit enabled.
+					// Delegate this case without clearing the draft, cursor, or paste expansions.
+					const disableSubmit = editor.disableSubmit;
+					editor.disableSubmit = false;
+					try {
+						editor.handleInput(data);
+					} finally {
+						editor.disableSubmit = disableSubmit;
+					}
+				} else this.commit();
+			} else editor.handleInput(data);
 		} else if (
 			kb.matches(data, "app.questions.pageUp") ||
 			kb.matches(data, "app.questions.pageDown") ||
