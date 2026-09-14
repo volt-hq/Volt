@@ -17,6 +17,7 @@ import { ModelRegistry } from "../../src/core/model-registry.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
+import type { SubagentToolManager } from "../../src/core/tools/subagent.ts";
 import type { ExtensionFactory, ResourceLoader } from "../../src/index.ts";
 import { createAgentSessionTestControl, type LegacyPrepareDelivery } from "../agent-session-test-control.ts";
 import {
@@ -67,6 +68,7 @@ export interface HarnessOptions {
 	initialActiveToolNames?: string[];
 	allowedToolNames?: string[];
 	excludedToolNames?: string[];
+	subagentToolManager?: SubagentToolManager;
 	resourceLoader?: ResourceLoader;
 	extensionFactories?: Array<ExtensionFactory | CreateTestExtensionsResultInput>;
 	prepareDelivery?: LegacyPrepareDelivery;
@@ -165,6 +167,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		initialActiveToolNames: options.initialActiveToolNames,
 		allowedToolNames: options.allowedToolNames,
 		excludedToolNames: options.excludedToolNames,
+		subagentToolManager: options.subagentToolManager,
 		extensionRunnerRef,
 	});
 	const control = createAgentSessionTestControl(session);

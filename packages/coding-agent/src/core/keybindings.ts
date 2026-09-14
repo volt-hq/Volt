@@ -55,6 +55,11 @@ export interface AppKeybindings {
 	"app.models.reorderUp": true;
 	"app.models.reorderDown": true;
 	"app.reviewTools.toggle": true;
+	"app.questions.back": true;
+	"app.questions.skip": true;
+	"app.questions.notes": true;
+	"app.questions.pageUp": true;
+	"app.questions.pageDown": true;
 	"app.tree.filter.default": true;
 	"app.tree.filter.noTools": true;
 	"app.tree.filter.userOnly": true;
@@ -199,6 +204,26 @@ export const KEYBINDINGS = {
 	"app.reviewTools.toggle": {
 		defaultKeys: "space",
 		description: "Toggle review tool selection",
+	},
+	"app.questions.back": {
+		defaultKeys: "shift+tab",
+		description: "Return to choices or the previous question, preserving drafts",
+	},
+	"app.questions.skip": {
+		defaultKeys: "ctrl+s",
+		description: "Skip the question request without providing answers",
+	},
+	"app.questions.notes": {
+		defaultKeys: "ctrl+n",
+		description: "Add notes to the highlighted answer",
+	},
+	"app.questions.pageUp": {
+		defaultKeys: "ctrl+pageUp",
+		description: "Scroll a long question or answer review up",
+	},
+	"app.questions.pageDown": {
+		defaultKeys: "ctrl+pageDown",
+		description: "Scroll a long question or answer review down",
 	},
 	"app.tree.filter.default": {
 		defaultKeys: "ctrl+d",
