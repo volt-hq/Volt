@@ -106,8 +106,17 @@ if (args[0] === "pr" && args[1] === "view") {
     ...config.view
   };
   for (const field of config.omitViewFields ?? []) delete view[field];
+  const selector = args[2];
+  if (selector !== view.url && (fields === "headRefOid" || selector !== String(view.number))) {
+    process.stderr.write("Pull request selector does not identify the fixture repository");
+    process.exit(1);
+  }
   process.stdout.write(JSON.stringify(fields === "headRefOid" ? { headRefOid: config.finalHeadOid ?? view.headRefOid } : view));
 } else if (args[0] === "api" && args[1] === "graphql") {
+  if (args[args.indexOf("--hostname") + 1] !== new URL(config.view.url).host) {
+    process.stderr.write("GraphQL hostname does not identify the fixture host");
+    process.exit(1);
+  }
   let input = "";
   for await (const chunk of process.stdin) input += chunk;
   const request = JSON.parse(input);
@@ -1047,7 +1056,7 @@ if (!args.includes("--numstat")) {
 				body: "Body",
 				baseRefName: "main",
 				headRefName: "feature",
-				url: "https://example.test/pr/11",
+				url: "https://example.test/o/r/pull/11",
 				baseRefOid: authoritativeBase,
 				headRefOid: headCommit,
 			},
@@ -1312,7 +1321,7 @@ if (!args.includes("--numstat")) {
 				body: "Body",
 				baseRefName: "main",
 				headRefName: "feature",
-				url: "https://example.test/pr/8",
+				url: "https://example.test/o/r/pull/8",
 				baseRefOid: baseOid,
 				headRefOid: headOid,
 			},
@@ -1348,7 +1357,7 @@ if (!args.includes("--numstat")) {
 				body: "Body",
 				baseRefName: "main",
 				headRefName: "feature",
-				url: "https://example.test/pr/12",
+				url: "https://example.test/o/r/pull/12",
 				baseRefOid: baseCommit,
 				headRefOid: headCommit,
 			},
@@ -1406,7 +1415,7 @@ if (!args.includes("--numstat")) {
 				body: "Body",
 				baseRefName: "main",
 				headRefName: "feature",
-				url: "https://example.test/pr/7",
+				url: "https://example.test/o/r/pull/7",
 				baseRefOid: capturedBase,
 				headRefOid: headOid,
 			},
@@ -1485,7 +1494,7 @@ if (!args.includes("--numstat")) {
 				body: "Body",
 				baseRefName: "main",
 				headRefName: "feature",
-				url: "https://example.test/pr/7",
+				url: "https://example.test/o/r/pull/7",
 				baseRefOid: baseOid,
 				headRefOid: headOid,
 			},
@@ -1546,7 +1555,7 @@ if (!args.includes("--numstat")) {
 					body: "Review context remains available",
 					baseRefName: "main",
 					headRefName: "feature",
-					url: "https://example.test/pr/7",
+					url: "https://example.test/o/r/pull/7",
 					baseRefOid: "a".repeat(40),
 					headRefOid: "b".repeat(40),
 					...(health === "null" ? { state: null, mergeable: null, statusCheckRollup: null } : {}),
@@ -1603,7 +1612,7 @@ if (!args.includes("--numstat")) {
 			body: "Stable body",
 			baseRefName: "main",
 			headRefName: "feature",
-			url: "https://example.test/pr/7",
+			url: "https://example.test/o/r/pull/7",
 			baseRefOid: "a".repeat(40),
 			headRefOid: "b".repeat(40),
 		};
@@ -1760,7 +1769,7 @@ if (!args.includes("--numstat")) {
 				],
 				baseRefName: "main",
 				headRefName: "feature",
-				url: "https://example.test/pr/7",
+				url: "https://example.test/o/r/pull/7",
 				baseRefOid: oid,
 				headRefOid: oid,
 			},
@@ -1857,7 +1866,7 @@ if (!args.includes("--numstat")) {
 			body: "Body",
 			baseRefName: "main",
 			headRefName: "feature",
-			url: "https://example.test/pr/10",
+			url: "https://example.test/o/r/pull/10",
 			baseRefOid: oid,
 			headRefOid: oid,
 		};
@@ -2042,7 +2051,7 @@ if (!args.includes("--numstat")) {
 				body: "Body",
 				baseRefName: "main",
 				headRefName: "feature",
-				url: "https://example.test/pr/8",
+				url: "https://example.test/o/r/pull/8",
 				baseRefOid: oid,
 				headRefOid: oid,
 			},
@@ -2081,7 +2090,7 @@ if (!args.includes("--numstat")) {
 			body: "Body",
 			baseRefName: "main",
 			headRefName: "feature",
-			url: "https://example.test/pr/9",
+			url: "https://example.test/o/r/pull/9",
 			baseRefOid: oid,
 			headRefOid: oid,
 		};
@@ -2142,7 +2151,7 @@ if (!args.includes("--numstat")) {
 			body: "Body",
 			baseRefName: "main",
 			headRefName: "feature",
-			url: "https://example.test/pr/274",
+			url: "https://example.test/o/r/pull/274",
 			baseRefOid: oid,
 			headRefOid: oid,
 		};
@@ -2159,7 +2168,7 @@ if (!args.includes("--numstat")) {
 				]),
 			},
 		});
-		installGitHubShim(repository, configFor(31_615));
+		installGitHubShim(repository, configFor(31_609));
 		process.env.PATH = `${join(repository, "bin")}${delimiter}${initialPath ?? ""}`;
 		const capture = async () => {
 			const captured = await capturePullRequestContextWithGitHubCli({
@@ -2188,7 +2197,7 @@ if (!args.includes("--numstat")) {
 			limitations: [],
 		});
 
-		writeFileSync(configPath, JSON.stringify(configFor(31_616)));
+		writeFileSync(configPath, JSON.stringify(configFor(31_610)));
 		const overLimit = await capture();
 		expect(overLimit.manifest).toMatchObject({
 			status: "incomplete",

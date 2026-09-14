@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { type GitHubCliResult, runGitHubCli } from "./github-cli.ts";
+import { parseGitHubPullRequestUrl, resolveCurrentReviewPullRequest } from "./github-cli-review-target.ts";
 import type {
 	ReviewCodeHostActor,
 	ReviewCodeHostContextCaptureOptions,
@@ -23,6 +24,11 @@ export const REVIEW_GITHUB_DISCUSSION_LIMIT = 200;
 export const REVIEW_GITHUB_RENDERED_MAX_BYTES = 256 * 1024;
 
 const CANONICAL_GIT_OBJECT_ID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+interface GitHubContextSource {
+	cwd: string;
+	hostname: string;
+}
 
 interface PullRequestView extends ReviewPullRequestIdentity {
 	id: string;
@@ -402,12 +408,17 @@ function parsePullRequestView(
 }
 
 async function graphql(
-	cwd: string,
+	github: GitHubContextSource,
 	query: string,
 	variables: Record<string, unknown>,
 	signal?: AbortSignal,
 ): Promise<GitHubCliResult> {
-	return runGh(["api", "graphql", "--input", "-"], cwd, JSON.stringify({ query, variables }), signal);
+	return runGh(
+		["api", "graphql", "--hostname", github.hostname, "--input", "-"],
+		github.cwd,
+		JSON.stringify({ query, variables }),
+		signal,
+	);
 }
 
 function connectionAt(value: unknown, path: string[]): GraphqlConnection | undefined {
@@ -425,7 +436,7 @@ function connectionAt(value: unknown, path: string[]): GraphqlConnection | undef
 }
 
 async function loadConnection(options: {
-	cwd: string;
+	github: GitHubContextSource;
 	query: string;
 	variables: Record<string, unknown>;
 	path: string[];
@@ -433,7 +444,7 @@ async function loadConnection(options: {
 	limitations: ReviewCodeHostContextLimitation[];
 	signal?: AbortSignal;
 }): Promise<GraphqlConnection | undefined> {
-	const result = await graphql(options.cwd, options.query, options.variables, options.signal);
+	const result = await graphql(options.github, options.query, options.variables, options.signal);
 	if (!result.ok) {
 		addLimitation(options.limitations, "api-error", options.source);
 		return undefined;
@@ -494,7 +505,7 @@ function parseLinkedIssue(
 }
 
 async function captureLinkedIssueSet(
-	cwd: string,
+	github: GitHubContextSource,
 	pullRequestId: string,
 	manualOnly: boolean,
 	limitations: ReviewCodeHostContextLimitation[],
@@ -524,7 +535,7 @@ async function captureLinkedIssueSet(
 		const cursor = nextPageCursor(connection, seenCursors, limitations, source);
 		if (!cursor) return { issues, complete: false };
 		connection = await loadConnection({
-			cwd,
+			github,
 			query: LINKED_ISSUES_QUERY,
 			variables: { id: pullRequestId, cursor, manualOnly },
 			path: ["data", "node", "closingIssuesReferences"],
@@ -655,7 +666,7 @@ function parseIssueComment(
 }
 
 async function captureSimpleDiscussionConnection(options: {
-	cwd: string;
+	github: GitHubContextSource;
 	pullRequestId: string;
 	query: string;
 	path: string[];
@@ -677,7 +688,7 @@ async function captureSimpleDiscussionConnection(options: {
 		const cursor = nextPageCursor(connection, seenCursors, options.state.limitations, options.source);
 		if (!cursor) return true;
 		connection = await loadConnection({
-			cwd: options.cwd,
+			github: options.github,
 			query: options.query,
 			variables: { id: options.pullRequestId, cursor },
 			path: options.path,
@@ -713,7 +724,7 @@ function parseThread(value: unknown): ReviewCodeHostDiscussionEntry["thread"] | 
 }
 
 async function captureThreadCommentPages(
-	cwd: string,
+	github: GitHubContextSource,
 	thread: NonNullable<ReviewCodeHostDiscussionEntry["thread"]>,
 	initialConnection: GraphqlConnection,
 	state: CaptureState,
@@ -731,7 +742,7 @@ async function captureThreadCommentPages(
 		const cursor = nextPageCursor(connection, seenCursors, state.limitations, "review-thread-comments");
 		if (!cursor) return true;
 		connection = await loadConnection({
-			cwd,
+			github,
 			query: REVIEW_THREAD_COMMENTS_QUERY,
 			variables: { id: thread.id, cursor },
 			path: ["data", "node", "comments"],
@@ -744,7 +755,7 @@ async function captureThreadCommentPages(
 }
 
 async function captureReviewThreads(
-	cwd: string,
+	github: GitHubContextSource,
 	pullRequestId: string,
 	state: CaptureState,
 	initialConnection: GraphqlConnection | undefined,
@@ -760,13 +771,13 @@ async function captureReviewThreads(
 				addLimitation(state.limitations, "invalid-api-response", "review-threads");
 				continue;
 			}
-			if (!(await captureThreadCommentPages(cwd, thread, comments, state, signal))) return false;
+			if (!(await captureThreadCommentPages(github, thread, comments, state, signal))) return false;
 		}
 		if (!connection.hasNextPage) return true;
 		const cursor = nextPageCursor(connection, seenCursors, state.limitations, "review-threads");
 		if (!cursor) return true;
 		connection = await loadConnection({
-			cwd,
+			github,
 			query: REVIEW_THREADS_QUERY,
 			variables: { id: pullRequestId, cursor },
 			path: ["data", "node", "reviewThreads"],
@@ -779,7 +790,7 @@ async function captureReviewThreads(
 }
 
 async function captureIssueComments(
-	cwd: string,
+	github: GitHubContextSource,
 	issues: ReviewCodeHostLinkedIssue[],
 	state: CaptureState,
 	signal?: AbortSignal,
@@ -789,7 +800,7 @@ async function captureIssueComments(
 		let cursor: string | undefined;
 		while (true) {
 			const connection = await loadConnection({
-				cwd,
+				github,
 				query: ISSUE_COMMENTS_QUERY,
 				variables: { id: issue.id, cursor: cursor ?? null },
 				path: ["data", "node", "comments"],
@@ -927,12 +938,7 @@ async function finalHeadCheck(
 	pullRequest: PullRequestView,
 	signal?: AbortSignal,
 ): Promise<ReviewCodeHostContextCaptureResult | undefined> {
-	const result = await runGh(
-		["pr", "view", String(pullRequest.number), "--json", "headRefOid"],
-		cwd,
-		undefined,
-		signal,
-	);
+	const result = await runGh(["pr", "view", pullRequest.url, "--json", "headRefOid"], cwd, undefined, signal);
 	if (!result.ok) {
 		return {
 			ok: false,
@@ -963,11 +969,13 @@ export async function capturePullRequestContextWithGitHubCli(
 ): Promise<ReviewCodeHostContextCaptureResult> {
 	const initialLimitations: ReviewCodeHostContextLimitation[] = [];
 	options.onProgress?.("Loading pull request metadata…");
+	const target = options.number ? undefined : await resolveCurrentReviewPullRequest(options);
+	if (target && !target.ok) return target;
 	const result = await runGh(
 		[
 			"pr",
 			"view",
-			...(options.number ? [options.number] : []),
+			target?.url ?? options.number!,
 			"--json",
 			"id,number,title,body,baseRefName,headRefName,url,baseRefOid,headRefOid,author,state,isDraft,mergeable,statusCheckRollup",
 		],
@@ -993,6 +1001,20 @@ export async function capturePullRequestContextWithGitHubCli(
 		Date.now(),
 	);
 	if (!pullRequest) return { ok: false, error: "Could not parse gh pr view output." };
+	const locator = parseGitHubPullRequestUrl(pullRequest.url);
+	if (
+		!locator ||
+		locator.number !== pullRequest.number ||
+		(target &&
+			(locator.url !== target.url || pullRequest.id !== target.id || pullRequest.headRefName !== target.headBranch))
+	) {
+		return {
+			ok: false,
+			error: "Pull request identity could not be verified. Check the target on the host and retry.",
+		};
+	}
+	pullRequest.url = locator.url;
+	const github: GitHubContextSource = { cwd: options.cwd, hostname: locator.hostname };
 
 	options.onProgress?.("Capturing pull request context…");
 	const closingLimitations: ReviewCodeHostContextLimitation[] = [];
@@ -1002,7 +1024,7 @@ export async function capturePullRequestContextWithGitHubCli(
 	const threadLimitations: ReviewCodeHostContextLimitation[] = [];
 	const [closingInitial, manualInitial, commentsInitial, reviewsInitial, threadsInitial] = await Promise.all([
 		loadConnection({
-			cwd: options.cwd,
+			github,
 			query: LINKED_ISSUES_QUERY,
 			variables: { id: pullRequest.id, cursor: null, manualOnly: false },
 			path: ["data", "node", "closingIssuesReferences"],
@@ -1011,7 +1033,7 @@ export async function capturePullRequestContextWithGitHubCli(
 			signal: options.signal,
 		}),
 		loadConnection({
-			cwd: options.cwd,
+			github,
 			query: LINKED_ISSUES_QUERY,
 			variables: { id: pullRequest.id, cursor: null, manualOnly: true },
 			path: ["data", "node", "closingIssuesReferences"],
@@ -1020,7 +1042,7 @@ export async function capturePullRequestContextWithGitHubCli(
 			signal: options.signal,
 		}),
 		loadConnection({
-			cwd: options.cwd,
+			github,
 			query: PR_COMMENTS_QUERY,
 			variables: { id: pullRequest.id, cursor: null },
 			path: ["data", "node", "comments"],
@@ -1029,7 +1051,7 @@ export async function capturePullRequestContextWithGitHubCli(
 			signal: options.signal,
 		}),
 		loadConnection({
-			cwd: options.cwd,
+			github,
 			query: PR_REVIEWS_QUERY,
 			variables: { id: pullRequest.id, cursor: null },
 			path: ["data", "node", "reviews"],
@@ -1038,7 +1060,7 @@ export async function capturePullRequestContextWithGitHubCli(
 			signal: options.signal,
 		}),
 		loadConnection({
-			cwd: options.cwd,
+			github,
 			query: REVIEW_THREADS_QUERY,
 			variables: { id: pullRequest.id, cursor: null },
 			path: ["data", "node", "reviewThreads"],
@@ -1049,7 +1071,7 @@ export async function capturePullRequestContextWithGitHubCli(
 	]);
 
 	const closing = await captureLinkedIssueSet(
-		options.cwd,
+		github,
 		pullRequest.id,
 		false,
 		closingLimitations,
@@ -1058,7 +1080,7 @@ export async function capturePullRequestContextWithGitHubCli(
 	);
 	initialLimitations.push(...closingLimitations);
 	const manual = await captureLinkedIssueSet(
-		options.cwd,
+		github,
 		pullRequest.id,
 		true,
 		manualLimitations,
@@ -1074,7 +1096,7 @@ export async function capturePullRequestContextWithGitHubCli(
 	const discussionEntries: ReviewCodeHostDiscussionEntry[] = [];
 	const commentState: CaptureState = { limitations: commentLimitations, discussionEntries };
 	let underDiscussionLimit = await captureSimpleDiscussionConnection({
-		cwd: options.cwd,
+		github,
 		pullRequestId: pullRequest.id,
 		query: PR_COMMENTS_QUERY,
 		path: ["data", "node", "comments"],
@@ -1088,7 +1110,7 @@ export async function capturePullRequestContextWithGitHubCli(
 	if (underDiscussionLimit) {
 		const reviewState: CaptureState = { limitations: reviewLimitations, discussionEntries };
 		underDiscussionLimit = await captureSimpleDiscussionConnection({
-			cwd: options.cwd,
+			github,
 			pullRequestId: pullRequest.id,
 			query: PR_REVIEWS_QUERY,
 			path: ["data", "node", "reviews"],
@@ -1103,7 +1125,7 @@ export async function capturePullRequestContextWithGitHubCli(
 	if (underDiscussionLimit) {
 		const threadState: CaptureState = { limitations: threadLimitations, discussionEntries };
 		underDiscussionLimit = await captureReviewThreads(
-			options.cwd,
+			github,
 			pullRequest.id,
 			threadState,
 			threadsInitial,
@@ -1112,7 +1134,7 @@ export async function capturePullRequestContextWithGitHubCli(
 		initialLimitations.push(...threadLimitations);
 	}
 	const state: CaptureState = { limitations: initialLimitations, discussionEntries };
-	if (underDiscussionLimit) await captureIssueComments(options.cwd, linkedIssues, state, options.signal);
+	if (underDiscussionLimit) await captureIssueComments(github, linkedIssues, state, options.signal);
 
 	options.onProgress?.("Verifying pull request head…");
 	const finalError = await finalHeadCheck(options.cwd, pullRequest, options.signal);
