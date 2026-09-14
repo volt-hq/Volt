@@ -1,7 +1,11 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { type GitHubCliResult, runGitHubCli } from "./github-cli.ts";
-import { parseGitHubPullRequestUrl, resolveCurrentReviewPullRequest } from "./github-cli-review-target.ts";
+import {
+	parseGitHubPullRequestUrl,
+	resolveCurrentReviewPullRequest,
+	resolveNumberedReviewPullRequest,
+} from "./github-cli-review-target.ts";
 import type {
 	ReviewCodeHostActor,
 	ReviewCodeHostContextCaptureOptions,
@@ -969,13 +973,15 @@ export async function capturePullRequestContextWithGitHubCli(
 ): Promise<ReviewCodeHostContextCaptureResult> {
 	const initialLimitations: ReviewCodeHostContextLimitation[] = [];
 	options.onProgress?.("Loading pull request metadata…");
-	const target = options.number ? undefined : await resolveCurrentReviewPullRequest(options);
-	if (target && !target.ok) return target;
+	const target = options.number
+		? await resolveNumberedReviewPullRequest(options)
+		: await resolveCurrentReviewPullRequest(options);
+	if (!target.ok) return target;
 	const result = await runGh(
 		[
 			"pr",
 			"view",
-			target?.url ?? options.number!,
+			target.url,
 			"--json",
 			"id,number,title,body,baseRefName,headRefName,url,baseRefOid,headRefOid,author,state,isDraft,mergeable,statusCheckRollup",
 		],
@@ -1005,8 +1011,8 @@ export async function capturePullRequestContextWithGitHubCli(
 	if (
 		!locator ||
 		locator.number !== pullRequest.number ||
-		(target &&
-			(locator.url !== target.url || pullRequest.id !== target.id || pullRequest.headRefName !== target.headBranch))
+		locator.url.toLowerCase() !== target.url.toLowerCase() ||
+		(target.kind === "current" && (pullRequest.id !== target.id || pullRequest.headRefName !== target.headBranch))
 	) {
 		return {
 			ok: false,

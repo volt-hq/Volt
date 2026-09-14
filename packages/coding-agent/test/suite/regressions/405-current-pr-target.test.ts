@@ -88,10 +88,8 @@ beforeEach(async () => {
 			return response(candidates);
 		}
 		if (args[0] === "pr" && args[1] === "view") {
-			// A bare number is allowed only for an explicitly requested PR's initial lookup.
-			expect(
-				args[2] === `https://${host}/volt-hq/iroh-ffi/pull/4` || (phase === "metadata" && args[2] === "4"),
-			).toBe(true);
+			// Both numbered and current-PR lookups must ignore gh's implicit repository selection.
+			expect(args[2]).toBe(phase === "final" ? view.url : `https://${host}/volt-hq/iroh-ffi/pull/4`);
 			return response(phase === "final" ? { headRefOid: finalHead } : view);
 		}
 		if (args[0] === "api" && args[1] === "graphql") {
@@ -302,8 +300,106 @@ describe("#405 current-PR capture", () => {
 	it("allows explicitly numbered capture without tracking and still pins later reads", async () => {
 		git("branch", "--unset-upstream");
 		expect(await capture("4")).toMatchObject({ ok: true });
-		expect(vi.mocked(runGitHubCli).mock.calls[0]![0].slice(0, 3)).toEqual(["pr", "view", "4"]);
+		expect(vi.mocked(runGitHubCli).mock.calls[0]![0].slice(0, 3)).toEqual(["pr", "view", view.url]);
 		expect(vi.mocked(runGitHubCli).mock.calls.at(-1)![0][2]).toBe(view.url);
+	});
+
+	it("pins a numbered review to the fork even when gh's default is upstream", async () => {
+		git("config", "remote.upstream.gh-resolved", "base");
+		candidates = [];
+		view.headRefName = "another-pr-branch";
+		expect(await capture("4")).toMatchObject({
+			ok: true,
+			pullRequest: { number: 4, url: view.url, headRefName: "another-pr-branch" },
+			context: { manifest: { status: "complete" } },
+		});
+		expect(vi.mocked(runGitHubCli).mock.calls.some(([args]) => args[1] === "list")).toBe(false);
+	});
+
+	it("prefers a numbered review's configured tracking remote over origin", async () => {
+		git("remote", "set-url", "origin", "https://github.com/n0-computer/iroh-ffi.git");
+		git("remote", "set-url", "upstream", "git@github.com:volt-hq/iroh-ffi.git");
+		git("update-ref", `refs/remotes/upstream/${BRANCH}`, "HEAD");
+		git("branch", "--set-upstream-to", `upstream/${BRANCH}`);
+		expect(await capture("4")).toMatchObject({ ok: true, pullRequest: { url: view.url } });
+	});
+
+	it.each(["detached", "local upstream", "single non-origin remote", "unborn"])(
+		"resolves a numbered review with %s through an explicit repository",
+		async (configuration) => {
+			if (configuration === "detached") git("checkout", "--detach");
+			if (configuration === "local upstream") git("config", "branch.review/iroh-pr-4.remote", ".");
+			if (configuration === "single non-origin remote") {
+				git("branch", "--unset-upstream");
+				git("remote", "remove", "upstream");
+				git("remote", "rename", "origin", "fork");
+			}
+			if (configuration === "unborn") git("checkout", "--orphan", "new-branch");
+			expect(await capture("4")).toMatchObject({ ok: true, pullRequest: { url: view.url } });
+		},
+	);
+
+	it("pins numbered GHES metadata, discussion, and final head reads to the selected host", async () => {
+		host = "github.enterprise.test";
+		git("remote", "set-url", "origin", `ssh://git@${host}/volt-hq/iroh-ffi.git`);
+		view.url = candidate().url;
+		paginateComments = true;
+		expect(await capture("4")).toMatchObject({
+			ok: true,
+			pullRequest: { url: view.url },
+			context: { manifest: { status: "complete", discussionEntryCount: 2 } },
+		});
+	});
+
+	it.each(["missing remotes", "ambiguous remotes", "missing tracked remote", "ambiguous URL", "credential URL"])(
+		"does not guess or query GitHub for a numbered PR with %s",
+		async (configuration) => {
+			if (configuration === "missing remotes") {
+				git("remote", "remove", "origin");
+				git("remote", "remove", "upstream");
+			}
+			if (configuration === "ambiguous remotes") {
+				git("branch", "--unset-upstream");
+				git("remote", "rename", "origin", "fork");
+			}
+			if (configuration === "missing tracked remote") git("config", "branch.review/iroh-pr-4.remote", "missing");
+			if (configuration === "ambiguous URL")
+				git("remote", "set-url", "--add", "origin", "https://github.com/other/repo.git");
+			if (configuration === "credential URL")
+				git("remote", "set-url", "origin", "https://credential:private-token@github.com/volt-hq/iroh-ffi.git");
+			const result = await capture("4");
+			expect(result).toMatchObject({ ok: false, remoteError: expect.stringContaining("host") });
+			expect(JSON.stringify(result)).not.toContain("private-token");
+			expect(vi.mocked(runGitHubCli)).not.toHaveBeenCalled();
+		},
+	);
+
+	it("accepts GitHub's canonical repository casing for a numbered PR", async () => {
+		git("remote", "set-url", "origin", "git@github.com:Volt-HQ/Iroh-FFI.git");
+		view.url = "https://github.com/Volt-HQ/Iroh-FFI/pull/4";
+		expect(await capture("4")).toMatchObject({ ok: true, pullRequest: { url: view.url } });
+	});
+
+	it("rejects a different PR number returned by the numbered lookup", async () => {
+		view.number = 5;
+		view.url = "https://github.com/volt-hq/iroh-ffi/pull/5";
+		expect(await capture("4")).toMatchObject({ ok: false, error: expect.stringContaining("identity") });
+		expect(vi.mocked(runGitHubCli)).toHaveBeenCalledTimes(1);
+	});
+
+	it("rejects the same numbered PR from another repository before capturing discussion", async () => {
+		view.url = "https://github.com/n0-computer/iroh-ffi/pull/4";
+		expect(await capture("4")).toMatchObject({ ok: false, error: expect.stringContaining("identity") });
+		expect(vi.mocked(runGitHubCli)).toHaveBeenCalledTimes(1);
+	});
+
+	it.each(["metadata", "final"] as const)("sanitizes numbered PR failures during %s", async (phase) => {
+		failPhase = phase;
+		const result = await capture("4");
+		expect(result.ok).toBe(false);
+		if (result.ok) throw new Error("Expected capture failure");
+		expect(result.remoteError).toBeTruthy();
+		expect(result.remoteError).not.toContain("private-token");
 	});
 
 	it.each(["list", "metadata", "final"] as const)(
@@ -343,20 +439,21 @@ describe("#405 current-PR capture", () => {
 		expect(vi.mocked(runGitHubCli)).toHaveBeenCalledTimes(1);
 	});
 
-	it("retains the existing exact-head movement guard", async () => {
+	it.each([undefined, "4"])("retains the exact-head movement guard (number: %s)", async (number) => {
 		finalHead = "c".repeat(40);
-		expect(await capture()).toMatchObject({
+		expect(await capture(number)).toMatchObject({
 			ok: false,
 			remoteError: expect.stringContaining("pull request changed"),
 		});
 	});
 
-	it("does not issue GitHub requests after cancellation", async () => {
+	it.each([undefined, "4"])("does not issue GitHub requests after cancellation (number: %s)", async (number) => {
 		const controller = new AbortController();
 		controller.abort();
 		await expect(
 			capturePullRequestContextWithGitHubCli({
 				cwd: harness.tempDir,
+				number,
 				maxPullRequestNumber: MAX_PR,
 				signal: controller.signal,
 			}),

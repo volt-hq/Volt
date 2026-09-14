@@ -84,6 +84,12 @@ function graphqlConnection(field: string, nodes: unknown[], hasNextPage = false,
 }
 
 function installGitHubShim(directory: string, config: GitHubShimConfig): string {
+	// Metadata uses a GitHub identity; snapshot transport stays on the local origin fixture.
+	const repositoryUrl = String(config.view.url).replace(/\/pull\/\d+$/, ".git");
+	git(directory, "remote", "add", "review-context", repositoryUrl);
+	const branch = git(directory, "symbolic-ref", "--short", "HEAD");
+	git(directory, "config", `branch.${branch}.remote`, "review-context");
+	git(directory, "config", `branch.${branch}.merge`, `refs/heads/${branch}`);
 	const bin = join(directory, "bin");
 	mkdirSync(bin, { recursive: true });
 	const configPath = join(bin, "gh-config.json");
@@ -107,7 +113,7 @@ if (args[0] === "pr" && args[1] === "view") {
   };
   for (const field of config.omitViewFields ?? []) delete view[field];
   const selector = args[2];
-  if (selector !== view.url && (fields === "headRefOid" || selector !== String(view.number))) {
+  if (selector !== view.url) {
     process.stderr.write("Pull request selector does not identify the fixture repository");
     process.exit(1);
   }
@@ -2277,6 +2283,7 @@ if (!args.includes("--numstat")) {
 
 	it("kills an in-flight GitHub CLI command during PR preparation", async () => {
 		const repository = createRepository();
+		git(repository, "remote", "add", "origin", "https://example.test/o/r.git");
 		const bin = join(repository, "delayed-gh-bin");
 		const startedPath = join(repository, "delayed-gh-started");
 		mkdirSync(bin);
