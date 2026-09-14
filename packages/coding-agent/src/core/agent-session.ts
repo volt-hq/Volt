@@ -3308,6 +3308,13 @@ export class AgentSession {
 	}
 
 	private _isToolAvailableToCurrentModel(name: string): boolean {
+		if (name === "request_user_input" && this._toolDefinitions.get(name)?.sourceInfo.source === "builtin") {
+			return (
+				this._extensionMode === "tui" &&
+				this._extensionUIContext !== undefined &&
+				this._subagentToolManager?.isSubagentRuntime?.() !== true
+			);
+		}
 		return name !== "image_gen" || isCodexImageGenerationModel(this.model);
 	}
 
@@ -6633,6 +6640,8 @@ export class AgentSession {
 		}
 
 		this._applyExtensionBindings(this._extensionRunner);
+		// Interactive-only native tools follow the currently bound host surface.
+		this._syncPlanningRuntime();
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		this._assertConversationAuthorityAvailable();
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");

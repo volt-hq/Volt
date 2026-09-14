@@ -12,6 +12,7 @@ export const OPERATION_CAPABILITIES = [
 	"integration.prompt",
 	"integration.write",
 	"session.plan",
+	"session.input",
 	"session.execution",
 	"delegation.spawn",
 ] as const;
@@ -82,6 +83,7 @@ const STATIC_RESOLVERS = new Map<string, ToolOperationResolver>([
 	["subagent", staticResolver("delegation.spawn")],
 	["update_plan", staticResolver("session.plan")],
 	["submit_plan", staticResolver("session.plan")],
+	["request_user_input", staticResolver("session.input")],
 	["update_plan_progress", staticResolver("session.execution")],
 	["request_replan", staticResolver("session.execution")],
 ]);
@@ -210,6 +212,7 @@ export const RESEARCH_OPERATION_GRANT_PROFILE: OperationGrantProfile = Object.fr
 		"integration.discover",
 		"integration.read",
 		"session.plan",
+		"session.input",
 	]),
 });
 
