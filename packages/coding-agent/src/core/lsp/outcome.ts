@@ -85,10 +85,13 @@ export function lspErrorResult(error: unknown): LspResult {
 	);
 }
 
-/** Cancels only this wait, never a shared startup or repair. */
+/** Cancels only this wait, never shared work; observes its rejection even if already cancelled. */
 export function waitForLsp<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
 	if (!signal) return promise;
-	if (signal.aborted) return Promise.reject(new LspOperationError("cancelled", "aborted", "LSP operation aborted"));
+	if (signal.aborted) {
+		void promise.catch(() => {});
+		return Promise.reject(new LspOperationError("cancelled", "aborted", "LSP operation aborted"));
+	}
 	return new Promise((resolve, reject) => {
 		const onAbort = (): void => {
 			signal.removeEventListener("abort", onAbort);

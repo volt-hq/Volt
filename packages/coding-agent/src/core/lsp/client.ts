@@ -308,6 +308,10 @@ export class LspClient {
 	get isReady(): boolean {
 		return this.isAlive && this.startupComplete;
 	}
+	/** Startup remains owned by this client even when every caller stops waiting. */
+	get isStarting(): boolean {
+		return this.startPromise !== undefined && !this.startupComplete && !this.disposed;
+	}
 	getServerInfo(): { name: string; version?: string } | undefined {
 		return this.serverInfo;
 	}
@@ -375,32 +379,40 @@ export class LspClient {
 		return this.startFailure;
 	}
 
-	/** Spawn the server process and run the initialize handshake. Memoized. */
+	/**
+	 * Own one initialize handshake, including failure cleanup, for this client's lifetime.
+	 * Callers may abandon their waits; the stored rejection remains observable to later callers.
+	 */
 	start(): Promise<void> {
-		if (this.disposed && !this.startPromise)
-			return Promise.reject(new LspOperationError("unavailable", "disposed", "LSP client is disposed"));
 		if (!this.startPromise) {
 			const startedAt = performance.now();
-			this.startPromise = this.doStart()
-				.finally(() => {
-					this.startupDurationMs = performance.now() - startedAt;
-				})
-				.catch(async (error: unknown) => {
-					this.startFailure = true;
-					if (this.startupProcessTerminated) await this.startupStderrDrained;
-					const original = error instanceof Error ? error : new Error(String(error));
-					const stderr = this.startupStderr.trim();
-					const enriched = new LspOperationError(
-						original instanceof LspOperationError && original.outcome === "timeout" ? "timeout" : "unavailable",
-						original instanceof LspOperationError && original.outcome === "timeout"
-							? "startup-timeout"
-							: "startup-failed",
-						stderr ? `${original.message}\nStartup stderr:\n${stderr}` : original.message,
-					);
-					this.exitError = enriched;
-					this.dispose();
-					throw enriched;
-				});
+			this.startPromise = this.disposed
+				? Promise.reject(new LspOperationError("unavailable", "disposed", "LSP client is disposed"))
+				: this.doStart()
+						.finally(() => {
+							this.startupDurationMs = performance.now() - startedAt;
+						})
+						.catch(async (error: unknown) => {
+							this.startFailure = true;
+							if (this.startupProcessTerminated) await this.startupStderrDrained;
+							const original = error instanceof Error ? error : new Error(String(error));
+							const stderr = this.startupStderr.trim();
+							const enriched = new LspOperationError(
+								original instanceof LspOperationError && original.outcome === "timeout"
+									? "timeout"
+									: "unavailable",
+								original instanceof LspOperationError && original.outcome === "timeout"
+									? "startup-timeout"
+									: "startup-failed",
+								stderr ? `${original.message}\nStartup stderr:\n${stderr}` : original.message,
+							);
+							this.exitError = enriched;
+							this.dispose();
+							throw enriched;
+						});
+			// Observe the terminal promise, not just doStart(): the enrichment catch rethrows.
+			// Do not replace it with the caught promise, which would hide failure from callers.
+			void this.startPromise.catch(() => {});
 		}
 		return this.startPromise;
 	}

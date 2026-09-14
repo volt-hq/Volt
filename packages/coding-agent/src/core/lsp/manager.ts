@@ -106,6 +106,11 @@ interface ServerFailureState {
 
 type LspClientErrorResult = { retry: true } | { retry: false; message?: string };
 
+interface ManagedLspStartup {
+	promise: Promise<void>;
+	failure?: LspClientErrorResult;
+}
+
 interface LspInstallAttemptResult {
 	retry: boolean;
 	message?: string;
@@ -487,6 +492,8 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	private projectCwd: string;
 	private config: ResolvedLspConfig;
 	private clients = new Map<string, LspClient>();
+	/** One completion/accounting owner per client, independent of operation waiters. */
+	private startups = new WeakMap<LspClient, ManagedLspStartup>();
 	private launches = new Map<string, LspLaunchDescriptor>();
 	private startAttempts = new Map<string, number>();
 	private versionProbes = new LspVersionProbes();
@@ -820,7 +827,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		const now = Date.now();
 		for (const [key, client] of [...this.clients.entries()]) {
 			const lastUsed = this.lastUsedAt.get(key) ?? now;
-			if (!this.activeOperations.get(key) && now - lastUsed >= this.config.idleShutdownMs) {
+			if (!client.isStarting && !this.activeOperations.get(key) && now - lastUsed >= this.config.idleShutdownMs) {
 				client.dispose();
 				this.clients.delete(key);
 				// Keep launch, timing and failure evidence after idle shutdown.
@@ -849,6 +856,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	): Promise<LspResult> {
 		if (this.disposed) return lspResult("unavailable", "LSP manager disposed", { reason: "disposed" });
 		if (!this.config.enabled) return lspResult("skipped", "", { reason: "disabled" });
+		if (signal?.aborted) return lspResult("cancelled", "LSP operation aborted", { reason: "aborted" });
 		const canonical = await this.canonicalizeRequestedPath(absolutePath);
 		if ("error" in canonical) {
 			return lspResult("invalid-input", `lsp(workspace): ${canonical.error}`);
@@ -888,7 +896,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			const cleanBefore = this.collectCleanOpenDocuments(client, absolutePath);
 			let diagnostics: LspDiagnosticResult;
 			try {
-				await this.ensureStarted(client, signal);
+				await this.ensureStarted(server, key, client, signal);
 				diagnostics = await client.getDiagnostics(
 					absolutePath,
 					content,
@@ -904,7 +912,6 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				return { ...lspErrorResult(error), text: result.message ?? "" };
 			}
 			if (this.disposed) return lspResult("unavailable", "", { reason: "disposed" });
-			this.startFailures.delete(key);
 
 			const ownDiagnostics = this.formatDiagnostics(absolutePath, diagnostics.diagnostics);
 			const crossFile = this.formatNewlyFailing(client, absolutePath, cleanBefore);
@@ -1387,10 +1394,9 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				};
 			}
 			try {
-				await this.ensureStarted(client, signal);
+				await this.ensureStarted(server, key, client, signal);
 				const uri = await client.openDocument(absolutePath, content, signal);
 				await this.refreshStale(client, absolutePath);
-				this.startFailures.delete(key);
 				return { client, uri, content, absolutePath };
 			} catch (error) {
 				const result = await this.handleClientError(server, key, client, error);
@@ -1774,35 +1780,71 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		return fallback;
 	}
 
-	private async ensureStarted(client: LspClient, signal?: AbortSignal): Promise<void> {
+	private async ensureStarted(
+		server: ResolvedLspServerConfig,
+		key: string,
+		client: LspClient,
+		signal?: AbortSignal,
+	): Promise<void> {
+		if (signal?.aborted) throw new LspOperationError("cancelled", "aborted", "LSP operation aborted");
 		if (client.isReady) return;
 		const startedAt = performance.now();
+		let startup = this.startups.get(client);
+		if (!startup) {
+			const owned: ManagedLspStartup = { promise: client.start() };
+			this.startups.set(client, owned);
+			owned.promise = owned.promise.then(
+				() => {
+					if (this.disposed || this.clients.get(key) !== client) return;
+					this.captureStartupEvidence(key, client);
+					this.startFailures.delete(key);
+					// Idle time starts at completion, not at the cancelled caller's last use.
+					this.lastUsedAt.set(key, Date.now());
+				},
+				async (error: unknown) => {
+					if (!this.disposed && this.clients.get(key) === client) {
+						this.captureStartupEvidence(key, client);
+						owned.failure = await this.handleClientError(server, key, client, error);
+					} else {
+						// Restart/disposal revoked ownership. Never account against a replacement client.
+						owned.failure = { retry: false, message: error instanceof Error ? error.message : String(error) };
+					}
+					throw error;
+				},
+			);
+			// This manager-owned chain must settle even when every operation has cancelled.
+			void owned.promise.catch(() => {});
+			startup = owned;
+		}
 		try {
-			await waitForLsp(client.start(), signal);
+			await waitForLsp(startup.promise, signal);
 		} finally {
 			const context = this.operationContext.getStore();
 			if (context) context.coldStartMs += performance.now() - startedAt;
-			const key = [...this.clients].find(([, candidate]) => candidate === client)?.[0];
-			if (key)
-				this.startupEvidence.set(key, {
-					...(client.getServerInfo() ? { serverInfo: client.getServerInfo() } : {}),
-					...(client.getCapabilities()
-						? {
-								capabilities: Object.keys(client.getCapabilities()!).filter((capability) =>
-									Boolean(client.getCapabilities()![capability]),
-								),
-							}
-						: {}),
-					...(client.getStartupStderr() ? { startupStderr: client.getStartupStderr() } : {}),
-				});
 		}
+	}
+
+	private captureStartupEvidence(key: string, client: LspClient): void {
+		this.startupEvidence.set(key, {
+			...(client.getServerInfo() ? { serverInfo: client.getServerInfo() } : {}),
+			...(client.getCapabilities()
+				? {
+						capabilities: Object.keys(client.getCapabilities()!).filter((capability) =>
+							Boolean(client.getCapabilities()![capability]),
+						),
+					}
+				: {}),
+			...(client.getStartupStderr() ? { startupStderr: client.getStartupStderr() } : {}),
+		});
 	}
 
 	private getClient(server: ResolvedLspServerConfig, root: string): LspClient {
 		const key = this.serverKey(server.name, root);
 		this.lastUsedAt.set(key, Date.now());
 		const existing = this.clients.get(key);
-		if (existing?.isAlive) {
+		// A terminated process may still be draining startup stderr. Join its
+		// owned completion rather than replacing it before failure accounting.
+		if (existing?.isAlive || existing?.isStarting) {
 			return existing;
 		}
 		existing?.dispose();
@@ -1889,6 +1931,8 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	): Promise<LspClientErrorResult> {
 		const message = error instanceof Error ? error.message : String(error);
 		if (error instanceof LspOperationError && error.outcome === "cancelled") return { retry: false, message };
+		const startupFailure = this.startups.get(client)?.failure;
+		if (startupFailure) return startupFailure;
 		if (client.isAlive && !client.startFailed) {
 			// Request-level failure on a started, healthy server: report it without
 			// counting toward the start-failure breaker.
