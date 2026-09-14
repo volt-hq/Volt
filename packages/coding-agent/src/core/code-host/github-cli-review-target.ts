@@ -176,6 +176,7 @@ export async function resolveCurrentReviewPullRequest(
 		}
 		const active = new Map<string, { url: string; id: string }>();
 		const historical = new Map<string, { url: string; id: string }>();
+		let hasUnavailableHistoricalHead = false;
 		for (const item of values) {
 			if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error();
 			const value = item as Record<string, unknown>;
@@ -193,13 +194,17 @@ export async function resolveCurrentReviewPullRequest(
 			const head = value.headRepository as Record<string, unknown> | null;
 			const owner = value.headRepositoryOwner as Record<string, unknown> | null;
 			if (
-				!head ||
-				!owner ||
-				typeof head.name !== "string" ||
-				typeof owner.login !== "string" ||
+				(head !== null && (!head || typeof head.name !== "string")) ||
+				(owner !== null && (!owner || typeof owner.login !== "string")) ||
 				typeof value.headRefName !== "string"
 			)
 				throw new Error();
+			if (head === null || owner === null) {
+				if (value.state !== "CLOSED" && value.state !== "MERGED") throw new Error();
+				// Deleted historical heads cannot compete with active matches, but make historical lookup uncertain.
+				hasUnavailableHistoricalHead = true;
+				continue;
+			}
 			if (
 				`${locator.hostname}/${owner.login}/${head.name}`.toLowerCase() !== repository ||
 				value.headRefName !== headBranch
@@ -208,6 +213,10 @@ export async function resolveCurrentReviewPullRequest(
 			if (value.state !== "OPEN" && value.state !== "CLOSED" && value.state !== "MERGED") throw new Error();
 			(value.state === "OPEN" ? active : historical).set(locator.url, { url: locator.url, id: value.id });
 		}
+		if (active.size === 0 && hasUnavailableHistoricalHead)
+			return failure(
+				"Could not establish a unique historical pull request because head repository metadata is unavailable. Specify the intended PR number.",
+			);
 		const matches = active.size > 0 ? active : historical;
 		if (matches.size === 0)
 			return failure(

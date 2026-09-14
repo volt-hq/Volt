@@ -195,6 +195,77 @@ describe("#405 current-PR capture", () => {
 		});
 	});
 
+	describe.each(["CLOSED", "MERGED"])("historical %s PRs with unavailable heads", (state) => {
+		it.each(["headRepository", "headRepositoryOwner", "both"])(
+			"preserves a verified active match with null %s in either list order",
+			async (field) => {
+				const historical = candidate(5, state);
+				if (field !== "headRepositoryOwner") historical.headRepository = null;
+				if (field !== "headRepository") historical.headRepositoryOwner = null;
+				for (const list of [
+					[historical, candidate()],
+					[candidate(), historical],
+				]) {
+					candidates = list;
+					expect(await capture()).toMatchObject({
+						ok: true,
+						pullRequest: { number: 4, url: view.url },
+						context: { manifest: { status: "complete" } },
+					});
+					expect(vi.mocked(runGitHubCli).mock.calls.at(-1)![0]).toEqual([
+						"pr",
+						"view",
+						view.url,
+						"--json",
+						"headRefOid",
+					]);
+				}
+			},
+		);
+
+		it.each([false, true])(
+			"fails closed without an active match (verified historical match: %s)",
+			async (includeVerified) => {
+				candidates = [
+					{ ...candidate(5, state), headRepository: null, headRepositoryOwner: null },
+					...(includeVerified ? [candidate(4, "CLOSED")] : []),
+				];
+				expect(await capture()).toMatchObject({
+					ok: false,
+					remoteError: expect.stringContaining("head repository metadata is unavailable"),
+				});
+				expect(vi.mocked(runGitHubCli)).toHaveBeenCalledTimes(1);
+			},
+		);
+	});
+
+	it("still rejects multiple active matches alongside an unavailable historical head", async () => {
+		candidates = [
+			{ ...candidate(3, "CLOSED"), headRepository: null, headRepositoryOwner: null },
+			candidate(),
+			candidate(5),
+		];
+		expect(await capture()).toMatchObject({
+			ok: false,
+			remoteError: expect.stringContaining("Multiple pull requests"),
+		});
+		expect(vi.mocked(runGitHubCli)).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
+		{ state: "OPEN", headRepository: null },
+		{ state: "OPEN", headRepositoryOwner: null },
+		{ state: "UNKNOWN", headRepository: null },
+		{ state: "CLOSED", headRepository: {} },
+		{ state: "CLOSED", headRepository: null, headRepositoryOwner: {} },
+		{ state: "CLOSED", headRepository: null, headRefName: null },
+		{ state: "CLOSED", headRepository: null, url: "not a URL" },
+	])("does not ignore invalid candidates alongside an active match: %j", async (overrides) => {
+		candidates = [candidate(), { ...candidate(5), ...overrides }];
+		expect(await capture()).toMatchObject({ ok: false });
+		expect(vi.mocked(runGitHubCli)).toHaveBeenCalledTimes(1);
+	});
+
 	it("does not accept another fork or branch with the same branch/PR number", async () => {
 		candidates = [
 			{ ...candidate(), headRepositoryOwner: { login: "other-fork" } },
