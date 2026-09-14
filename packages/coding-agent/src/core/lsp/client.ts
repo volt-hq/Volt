@@ -565,6 +565,11 @@ export class LspClient {
 		if (signal?.aborted) throw new LspOperationError("cancelled", "aborted", "Diagnostics collection aborted");
 
 		const epoch = this.diagnosticEpoch;
+		const document = this.documents.get(key);
+		const version = document?.version;
+		// Recover dependency changes, never a replacement of the requested snapshot.
+		const isCurrentDocument = (): boolean =>
+			this.documents.get(key) === document && document?.version === version && document?.content === content;
 		let pullFailure: LspResult | undefined;
 		const collected = (diagnostics: LspDiagnostic[], evidence: Partial<LspResult>): LspDiagnosticResult => ({
 			...lspResult(diagnostics.length ? "success" : "empty", "", evidence),
@@ -572,22 +577,35 @@ export class LspClient {
 			diagnosticCount: diagnostics.length,
 		});
 		if (this.supportsPullDiagnostics) {
-			// Pull results are request-ordered after the didChange above, so they
-			// can never describe stale content. Retry once before falling back:
-			// servers may reject a pull (e.g. ContentModified) while recomputing.
-			for (let attempt = 0; attempt < 2; attempt++) {
+			// A dependency sync can supersede even a request-ordered pull. Retry
+			// against the latest epoch, sharing the original two-request time budget.
+			// Explicit server rejections still get only one retry.
+			const requestTimeoutMs = this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+			const pullDeadline = performance.now() + 2 * requestTimeoutMs;
+			let rejections = 0;
+			while (rejections < 2 && performance.now() < pullDeadline) {
+				const pullEpoch = this.diagnosticEpoch;
 				try {
-					const result = (await this.request("textDocument/diagnostic", { textDocument: { uri } }, signal)) as
-						| { kind?: string; items?: LspDiagnostic[] }
-						| undefined;
-					if (result?.kind === "full" && validDiagnostics(result.items) && epoch === this.diagnosticEpoch) {
+					const result = (await this.request(
+						"textDocument/diagnostic",
+						{ textDocument: { uri } },
+						signal,
+						Math.min(requestTimeoutMs, pullDeadline - performance.now()),
+					)) as { kind?: string; items?: LspDiagnostic[] } | undefined;
+					if (result?.kind !== "full" || !validDiagnostics(result.items)) {
+						pullFailure = lspResult("request-failed", "Invalid pull diagnostics result", {
+							reason: "invalid-pull",
+						});
+						break;
+					}
+					if (pullEpoch === this.diagnosticEpoch && isCurrentDocument()) {
 						this.everPublished = true;
 						return collected(result.items, { source: "pull", freshness: "fresh", reason: "current-pull" });
 					}
-					pullFailure = lspResult("request-failed", "Invalid or superseded pull diagnostics result", {
-						reason: "invalid-pull",
+					pullFailure = lspResult("timeout", "Pull diagnostics superseded by document synchronization", {
+						reason: "superseded-pull",
 					});
-					break;
+					if (!isCurrentDocument()) break;
 				} catch (error) {
 					// Retry once on an explicit server rejection (e.g. ContentModified
 					// while recomputing): those come back fast, so a retry is cheap.
@@ -597,9 +615,10 @@ export class LspClient {
 					if (pullFailure.outcome === "cancelled" || pullFailure.outcome === "timeout" || !this.isAlive) {
 						return { ...pullFailure, diagnostics: [] };
 					}
-					if (!(error instanceof LspResponseError)) {
+					if (!(error instanceof LspResponseError) || !isCurrentDocument()) {
 						break;
 					}
+					rejections++;
 				}
 			}
 		}
@@ -608,7 +627,13 @@ export class LspClient {
 		// content cannot republish, but refreshed dependencies can change this
 		// document's diagnostics, so any refresh forces a fresh wait.
 		const existing = this.published.get(key);
-		if (!pullFailure && !changed && refreshed.length === 0 && existing?.epoch === this.diagnosticEpoch) {
+		if (
+			!pullFailure &&
+			!changed &&
+			refreshed.length === 0 &&
+			existing?.epoch === this.diagnosticEpoch &&
+			isCurrentDocument()
+		) {
 			return collected(existing.diagnostics, {
 				source: "cache",
 				freshness: existing.version === undefined ? "unverified" : "fresh",
@@ -618,45 +643,59 @@ export class LspClient {
 
 		const timeoutMs = this.everPublished ? settleMs : Math.max(settleMs, firstSettleMs ?? settleMs);
 		const deadline = performance.now() + timeoutMs;
-		await this.waitForPublish(key, sinceSeq, timeoutMs, signal);
-		let entry = this.published.get(key);
-		// An unversioned publish that arrives after our didChange can still have
-		// been computed against the pre-change content (the version field is
-		// optional in LSP, and cross-file invalidation from an earlier edit can
-		// race the sync). When this document's content just changed — or its
-		// dependencies were refreshed, which can equally change its diagnostics —
-		// re-wait once for a fresher publish before trusting an unversioned one.
-		// For servers that tag publishes with versions, an unversioned one is
-		// anomalous and the versioned republish will resolve the wait promptly, so
-		// use the full remaining deadline; for servers that never send versions,
-		// cap the re-wait so every edit does not stall for the whole settle window.
-		if (
-			(changed || refreshed.length > 0) &&
-			entry !== undefined &&
-			entry.seq > sinceSeq &&
-			entry.version === undefined
-		) {
-			const remainingMs = this.everPublishedVersioned
-				? deadline - performance.now()
-				: Math.min(deadline - performance.now(), UNVERSIONED_REPUBLISH_GRACE_MS);
-			if (remainingMs > 0) {
-				await this.waitForPublish(key, entry.seq, remainingMs, signal);
-				entry = this.published.get(key) ?? entry;
+		let waitSinceSeq = sinceSeq;
+		let entry: PublishedDiagnostics | undefined;
+		while (true) {
+			const collectionEpoch = this.diagnosticEpoch;
+			await this.waitForPublish(key, waitSinceSeq, Math.max(0, deadline - performance.now()), signal);
+			entry = this.published.get(key);
+			// Unversioned publications may race a document or dependency sync.
+			// Apply the same grace window after recovery as after our own sync,
+			// but never extend the collection's original deadline.
+			if (
+				(changed || refreshed.length > 0 || collectionEpoch !== epoch) &&
+				entry !== undefined &&
+				entry.epoch === collectionEpoch &&
+				entry.seq > waitSinceSeq &&
+				entry.version === undefined
+			) {
+				// Versioned servers get the remaining deadline to correct an anomalous
+				// unversioned publish; unversioned-only servers get a short grace period.
+				const remainingMs = this.everPublishedVersioned
+					? deadline - performance.now()
+					: Math.min(deadline - performance.now(), UNVERSIONED_REPUBLISH_GRACE_MS);
+				if (remainingMs > 0) {
+					await this.waitForPublish(key, entry.seq, remainingMs, signal);
+					entry = this.published.get(key) ?? entry;
+				}
 			}
-		}
-		if (signal?.aborted)
-			return { ...lspResult("cancelled", "Diagnostics collection aborted", { reason: "aborted" }), diagnostics: [] };
-		if (!this.isAlive)
-			return {
-				...lspResult("unavailable", "Language server exited during diagnostics", { reason: "server-exit" }),
-				diagnostics: [],
-			};
-		if (entry && entry.seq > sinceSeq && entry.epoch === this.diagnosticEpoch && epoch === this.diagnosticEpoch) {
-			return collected(entry.diagnostics, {
-				source: "push",
-				freshness: entry.version === undefined ? "unverified" : "fresh",
-				reason: entry.version === undefined ? "unversioned-publication" : "current-publication",
-			});
+			if (signal?.aborted)
+				return {
+					...lspResult("cancelled", "Diagnostics collection aborted", { reason: "aborted" }),
+					diagnostics: [],
+				};
+			if (!this.isAlive)
+				return {
+					...lspResult("unavailable", "Language server exited during diagnostics", { reason: "server-exit" }),
+					diagnostics: [],
+				};
+			if (!isCurrentDocument()) break;
+			if (
+				entry &&
+				entry.seq > waitSinceSeq &&
+				entry.epoch === this.diagnosticEpoch &&
+				collectionEpoch === this.diagnosticEpoch
+			) {
+				return collected(entry.diagnostics, {
+					source: "push",
+					freshness: entry.version === undefined ? "unverified" : "fresh",
+					reason: entry.version === undefined ? "unversioned-publication" : "current-publication",
+				});
+			}
+			if (performance.now() >= deadline) break;
+			// Restart at the current epoch. Retain a publication already received
+			// in that epoch, but advance past stale entries so they cannot spin the wait.
+			if (entry && entry.epoch !== this.diagnosticEpoch) waitSinceSeq = Math.max(waitSinceSeq, entry.seq);
 		}
 		return {
 			...lspResult(
@@ -1015,7 +1054,12 @@ export class LspClient {
 	// JSON-RPC transport
 	// =========================================================================
 
-	private request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
+	private request(
+		method: string,
+		params: unknown,
+		signal?: AbortSignal,
+		timeoutMs = this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+	): Promise<unknown> {
 		if (!this.alive) {
 			return Promise.reject(this.exitError ?? new Error(`LSP server "${this.options.serverName}" is not running`));
 		}
@@ -1023,7 +1067,6 @@ export class LspClient {
 			return Promise.reject(new LspOperationError("cancelled", "aborted", `LSP request "${method}" was aborted`));
 		}
 		const id = this.nextRequestId++;
-		const timeoutMs = this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 		return new Promise((resolve, reject) => {
 			// Wrap both settle paths so the timer and abort listener are always
 			// cleaned up, no matter who settles the request (response, exit,
