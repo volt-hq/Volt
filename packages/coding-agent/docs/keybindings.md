@@ -160,6 +160,22 @@ Use `F12` or `/debug` to capture diagnostics while a response or tool is active.
 
 Cancellation uses Enter to confirm and Escape to keep the job running. The job remains **Cancelling** until its worker stops. Navigation and confirmation use the configurable `tui.select.*` actions.
 
+### Structured Questions
+
+Questions replace the editor while Volt waits for your preferences. Use `tui.select.up`/`down` to highlight an option and `tui.select.confirm` to answer. Typing or pasting starts a custom answer, including the first character. Custom answers and optional notes use the normal multiline editor (`tui.input.submit` to continue, `tui.input.newLine` for a newline).
+
+Multiple questions end with a review: highlight a question to edit it, or confirm **Submit answers**. Highlighting alone never supplies an answer. Skip discards the entire request's answers; cancel is a distinct result. Neither grants tool permissions.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.questions.back` | `shift+tab` | Return to choices, the previous question, or from review; preserve drafts |
+| `app.questions.skip` | `ctrl+s` | Skip this request without answers |
+| `app.questions.notes` | `ctrl+n` | Add optional notes to the highlighted option |
+| `tui.select.cancel` | `escape`, `ctrl+c` | Cancel the request without answers |
+| `app.questions.pageUp` / `app.questions.pageDown` | `ctrl+pageUp` / `ctrl+pageDown` | Scroll long questions and review summaries |
+
+Plain PageUp/PageDown also scroll the question in regular mode. In fullscreen mode they retain their normal transcript-scrolling behavior; use Ctrl+PageUp/Down for the question panel.
+
 ### Models and Thinking
 
 | Keybinding id | Default | Description |

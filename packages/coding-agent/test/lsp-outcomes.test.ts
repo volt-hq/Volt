@@ -106,7 +106,8 @@ describe("diagnostic evidence", () => {
 		});
 	});
 	it("does not hide pull timeouts with empty publication caches", async () => {
-		const { client: value, path } = client(["--pull", "--hang-pull"], 100);
+		// The request timeout also bounds initialization; allow process startup under suite load.
+		const { client: value, path } = client(["--pull", "--hang-pull"], 2000);
 		expect(await value.getDiagnostics(path, "clean\n", 60)).toMatchObject({
 			outcome: "timeout",
 			reason: "request-deadline",

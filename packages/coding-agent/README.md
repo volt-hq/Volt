@@ -137,6 +137,17 @@ The editor can be temporarily replaced by other UI, like built-in `/settings` or
 
 Standard editing keybindings for delete word, undo, etc. See [docs/keybindings.md](docs/keybindings.md).
 
+### Questions from Volt
+
+When a material preference cannot be discovered from the workspace, the built-in `request_user_input` tool opens a question panel in place of the editor. It is available in local interactive Build and Plan sessions; print, JSON, RPC/phone, and subagent runtimes do not expose it.
+
+- Use the arrow keys to choose an option and Enter to answer. The recommendation appears first.
+- Start typing to write your own answer, or press Ctrl+N to add notes to a selected option. Shift+Enter inserts a newline.
+- Multi-question requests show a review step before submission. Shift+Tab goes back without losing drafts.
+- Ctrl+S skips the entire request without selecting any default. Escape cancels the request and stops the current run.
+
+Questions have no automatic timeout. Skipping is not consent or permission to expand the task; Volt should continue only within existing authorization, stating any reasonable assumptions. Your normal editor draft is restored when the panel closes, and submitted answers remain in the transcript. These shortcuts are configurable in [keybindings](docs/keybindings.md). Use `--exclude-tools request_user_input` to disable structured questions.
+
 ### Commands
 
 Type `/` in the editor to trigger commands. [Extensions](#extensions) can register custom commands, [skills](#skills) are available as `/skill:name`, and [prompt templates](#prompt-templates) expand via `/templatename`.
@@ -642,7 +653,7 @@ cat README.md | volt -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
 
-Available built-in tools: `read`, `bash`, `jobs`, `edit`, `write`, `image_gen` (when an OpenAI Codex model is selected), `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp` (status remains available when disabled), `subagent` (when available), child-only `subagent_registry`, and `mcp` (when MCP servers are configured)
+Available built-in tools: `request_user_input` (root local TUI only), `read`, `bash`, `jobs`, `edit`, `write`, `image_gen` (when an OpenAI Codex model is selected), `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp` (status remains available when disabled), `subagent` (when available), child-only `subagent_registry`, and `mcp` (when MCP servers are configured)
 
 ### Resource Options
 

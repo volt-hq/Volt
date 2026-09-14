@@ -290,6 +290,7 @@ import { SubagentInspectorComponent } from "./components/subagent-inspector.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
+import { UserInputDialog } from "./components/user-input-dialog.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 
@@ -3365,11 +3366,14 @@ export class InteractiveMode {
 		if (!isOverlay) this.dismissBackgroundJobsInspector?.();
 		const previousView = this.activeView;
 		const previousFocus = this.ui.getFocusedComponent();
+		let nativeQuestion = false;
 
 		const restoreView = () => {
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.editor);
-			this.editor.setText(savedText);
+			// Native questions leave the editor untouched, including paste expansions,
+			// cursor/undo state, and queued text restored during an external abort.
+			if (!nativeQuestion) this.editor.setText(savedText);
 			this.activateView(previousView, previousFocus ?? this.editor, false);
 		};
 
@@ -3411,6 +3415,13 @@ export class InteractiveMode {
 						overlayHandle = this.ui.showOverlay(component, resolveOptions());
 						// Expose handle to caller for visibility control
 						options?.onHandle?.(overlayHandle);
+					} else if (component instanceof UserInputDialog) {
+						// Keep native preferences in the conversation with its real status,
+						// footer and plan pane; extensions retain their dedicated view.
+						nativeQuestion = true;
+						this.editorContainer.clear();
+						this.editorContainer.addChild(component);
+						this.activateView(this.conversationView, component);
 					} else {
 						this.activateView(this.createDedicatedView(component), component);
 					}
