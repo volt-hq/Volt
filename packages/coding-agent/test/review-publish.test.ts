@@ -2,11 +2,7 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-	type CodeHostProvider,
-	githubCliCodeHostProvider,
-	type ReviewCodeHostPublishRequest,
-} from "../src/core/code-host/index.ts";
+import type { CodeHostProvider, ReviewCodeHostPublishRequest } from "../src/core/code-host/index.ts";
 import { publishReviewRun } from "../src/core/review-publish.ts";
 import type { ReviewRunRecord } from "../src/core/review-state.ts";
 
@@ -235,9 +231,6 @@ switch (args.slice(0, 2).join(" ")) {
 			displayName: "Test Host",
 			probeCurrentPullRequest: async () => undefined,
 			capturePullRequestContext: async () => ({ ok: false, error: "unused" }),
-			getPullRequestFetchPlan: () => {
-				throw new Error("unused");
-			},
 			verifyPullRequestHead: async (_cwd, pullRequest) => {
 				verifiedHead = pullRequest.headRefOid;
 			},
@@ -267,18 +260,6 @@ switch (args.slice(0, 2).join(" ")) {
 			url: "https://example.test/reviews/101",
 			inlineFindingIds: ["finding-inline"],
 			summaryOnlyFindingIds: ["finding-summary"],
-		});
-	});
-
-	it("describes GitHub pull request refs through the provider fetch plan", () => {
-		const run = reviewRun();
-		const pullRequest = run.target.identity.pullRequest;
-		if (!pullRequest) throw new Error("Expected a PR review fixture");
-		expect(githubCliCodeHostProvider.getPullRequestFetchPlan(pullRequest)).toEqual({
-			remote: "origin",
-			base: { remoteRef: "refs/heads/main", localRef: "refs/review/base" },
-			head: { remoteRef: "refs/pull/7/head", localRef: "refs/review/head" },
-			diffCommand: "gh pr diff 7",
 		});
 	});
 });

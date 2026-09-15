@@ -1203,6 +1203,13 @@ export async function capturePullRequestContextWithGitHubCli(
 			return {
 				ok: true,
 				pullRequest: identity,
+				fetchPlan: {
+					remote: target.remote,
+					remoteUrl: target.remoteUrl,
+					base: { remoteRef: `refs/heads/${identity.baseRefName}`, localRef: "refs/review/base" },
+					head: { remoteRef: `refs/pull/${identity.number}/head`, localRef: "refs/review/head" },
+					diffCommand: `gh pr diff ${identity.url}`,
+				},
 				context: {
 					manifest,
 					linkedIssues,

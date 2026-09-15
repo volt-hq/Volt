@@ -113,21 +113,6 @@ export const githubCliCodeHostProvider: CodeHostProvider = {
 	displayName: "GitHub",
 	probeCurrentPullRequest,
 	capturePullRequestContext: capturePullRequestContextWithGitHubCli,
-	getPullRequestFetchPlan(pullRequest) {
-		assertGitHubPullRequest(pullRequest);
-		return {
-			remote: "origin",
-			base: {
-				remoteRef: `refs/heads/${pullRequest.baseRefName}`,
-				localRef: "refs/review/base",
-			},
-			head: {
-				remoteRef: `refs/pull/${pullRequest.number}/head`,
-				localRef: "refs/review/head",
-			},
-			diffCommand: `gh pr diff ${pullRequest.number}`,
-		};
-	},
 	verifyPullRequestHead,
 	publishPullRequestReview,
 };

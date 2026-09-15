@@ -17,6 +17,7 @@ import { delimiter, join, relative, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { capturePullRequestContextWithGitHubCli } from "../src/core/code-host/github-cli-context.ts";
+import * as githubDiscovery from "../src/core/code-host/github-cli-discovery.ts";
 import { normalizeReviewPath, type ReviewSnapshot, resolveReviewSnapshot } from "../src/core/review-snapshot.ts";
 
 const OPTIONS = { maxCommitRefBytes: 1_024, maxPullRequestNumber: 2_147_483_647 };
@@ -84,12 +85,17 @@ function graphqlConnection(field: string, nodes: unknown[], hasNextPage = false,
 }
 
 function installGitHubShim(directory: string, config: GitHubShimConfig): string {
-	// Metadata uses a GitHub identity; snapshot transport stays on the local origin fixture.
 	const repositoryUrl = String(config.view.url).replace(/\/pull\/\d+$/, ".git");
-	git(directory, "remote", "add", "review-context", repositoryUrl);
-	const branch = git(directory, "symbolic-ref", "--short", "HEAD");
-	git(directory, "config", `branch.${branch}.remote`, "review-context");
-	git(directory, "config", `branch.${branch}.merge`, `refs/heads/${branch}`);
+	if (!git(directory, "remote").split(/\r?\n/).includes("origin")) {
+		git(directory, "remote", "add", "origin", repositoryUrl);
+	}
+	// Model the local transport fixture as its GitHub repository. Remote selection and
+	// snapshot fetching still use the same source; #411 covers real URL validation + SSH.
+	const remoteUrl = git(directory, "remote", "get-url", "origin");
+	const canonicalize = githubDiscovery.canonicalizeGitHubRemoteUrl;
+	vi.spyOn(githubDiscovery, "canonicalizeGitHubRemoteUrl").mockImplementation((value) =>
+		canonicalize(value === remoteUrl ? repositoryUrl : value),
+	);
 	const bin = join(directory, "bin");
 	mkdirSync(bin, { recursive: true });
 	const configPath = join(bin, "gh-config.json");
@@ -193,6 +199,7 @@ describe("review snapshots", () => {
 	);
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		for (const snapshot of snapshots.splice(0)) await snapshot.dispose();
 		for (const server of servers.splice(0)) {
 			server.closeAllConnections();

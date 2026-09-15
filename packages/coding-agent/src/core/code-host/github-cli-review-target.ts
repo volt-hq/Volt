@@ -93,7 +93,7 @@ async function readGit(args: string[], cwd: string, signal?: AbortSignal): Promi
 type PullRequestTargetFailure = { ok: false; error: string; remoteError: string };
 
 type CurrentPullRequestTarget =
-	| { ok: true; kind: "current"; url: string; id: string; headBranch: string }
+	| { ok: true; kind: "current"; url: string; id: string; headBranch: string; remote: string; remoteUrl: string }
 	| PullRequestTargetFailure;
 
 function failure(message: string): PullRequestTargetFailure {
@@ -103,13 +103,14 @@ function failure(message: string): PullRequestTargetFailure {
 async function resolveReviewRemoteRepository(
 	remote: string,
 	options: ReviewCodeHostContextCaptureOptions,
-): Promise<{ ok: true; repository: string } | PullRequestTargetFailure> {
+): Promise<{ ok: true; repository: string; remoteUrl: string } | PullRequestTargetFailure> {
 	if (!/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(remote)) {
 		return failure("The review remote is invalid. Check its configuration on the host.");
 	}
-	const urls = await readGit(["remote", "get-url", "--all", remote], options.cwd, options.signal);
+	const urls =
+		(await readGit(["remote", "get-url", "--all", remote], options.cwd, options.signal))?.split(/\r?\n/) ?? [];
 	const repositories = new Set<string>();
-	for (const value of urls?.split(/\r?\n/) ?? []) {
+	for (const value of urls) {
 		const repository = canonicalizeGitHubRemoteUrl(value);
 		const locator =
 			repository &&
@@ -125,13 +126,14 @@ async function resolveReviewRemoteRepository(
 			"The review remote does not identify one GitHub repository. Configure one unambiguous repository on the host.",
 		);
 	}
-	return { ok: true, repository: repositories.values().next().value! };
+	// Git fetch uses the first URL; retain that exact validated transport, not just its repository name.
+	return { ok: true, repository: repositories.values().next().value!, remoteUrl: urls[0]! };
 }
 
 /** Pin numbered lookups too: gh otherwise prefers a fork's parent repository. */
 export async function resolveNumberedReviewPullRequest(
 	options: ReviewCodeHostContextCaptureOptions,
-): Promise<{ ok: true; kind: "numbered"; url: string } | PullRequestTargetFailure> {
+): Promise<{ ok: true; kind: "numbered"; url: string; remote: string; remoteUrl: string } | PullRequestTargetFailure> {
 	try {
 		const ref = await readGit(["symbolic-ref", "--quiet", "HEAD"], options.cwd, options.signal);
 		let remote: string | undefined;
@@ -156,7 +158,7 @@ export async function resolveNumberedReviewPullRequest(
 		const locator = parseGitHubPullRequestUrl(`https://${repository.repository}/pull/${options.number}`);
 		if (!locator || locator.number > options.maxPullRequestNumber)
 			return failure("Specify a valid positive PR number within the supported range.");
-		return { ok: true, kind: "numbered", url: locator.url };
+		return { ok: true, kind: "numbered", url: locator.url, remote, remoteUrl: repository.remoteUrl };
 	} catch {
 		if (options.signal?.aborted) throw new Error("GitHub context capture was cancelled.");
 		return failure(
@@ -278,7 +280,14 @@ export async function resolveCurrentReviewPullRequest(
 			);
 		if (matches.size > 1)
 			return failure("Multiple pull requests match the tracked branch. Specify the intended PR number.");
-		return { ok: true, kind: "current", ...matches.values().next().value!, headBranch };
+		return {
+			ok: true,
+			kind: "current",
+			...matches.values().next().value!,
+			headBranch,
+			remote,
+			remoteUrl: resolvedRepository.remoteUrl,
+		};
 	} catch {
 		if (options.signal?.aborted) throw new Error("GitHub context capture was cancelled.");
 		return failure(
