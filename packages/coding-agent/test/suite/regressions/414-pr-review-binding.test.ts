@@ -5,12 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	type CreateAgentSessionRuntimeFactory,
+	createAgentSessionRuntime,
+} from "../../../src/core/agent-session-runtime.ts";
 import { githubCliCodeHostProvider } from "../../../src/core/code-host/index.ts";
 import type { ReviewCodeHostContextCaptureResult } from "../../../src/core/code-host/types.ts";
 import { PR_CHECKOUT_CHANGED, readPrReviewBinding } from "../../../src/core/pr-review-binding.ts";
 import type { PrReviewPlacement } from "../../../src/core/pr-review-placement.ts";
 import { executeReviewWorkflow, prepareReviewWorkflow } from "../../../src/core/review.ts";
-import { registerReviewHandoffAliases } from "../../../src/core/review-anchors.ts";
+import { registerReviewHandoffAliases, resolveCanonicalReviewSource } from "../../../src/core/review-anchors.ts";
 import * as snapshots from "../../../src/core/review-snapshot.ts";
 import { appendReviewRun, appendReviewRunDurably, type ReviewRunRecord } from "../../../src/core/review-state.ts";
 import {
@@ -18,7 +22,7 @@ import {
 	validatePersistedSessionEntrySequence,
 } from "../../../src/core/session-entry-codec.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
-import { createHarness } from "../harness.ts";
+import { createHarness, type Harness } from "../harness.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -204,6 +208,48 @@ async function fixture() {
 		record,
 		base,
 	};
+}
+
+async function runtimeFixture() {
+	const f = await fixture();
+	const replacements: Harness[] = [];
+	const factory: CreateAgentSessionRuntimeFactory = async ({ sessionManager, cwd, agentDir }) => {
+		const h =
+			sessionManager === f.manager
+				? f.harness
+				: await createHarness({
+						sessionManager,
+						settings: { lsp: { enabled: false }, compaction: { enabled: false } },
+					});
+		if (h !== f.harness) replacements.push(h);
+		return {
+			session: h.session,
+			extensionsResult: h.session.resourceLoader.getExtensions(),
+			diagnostics: [],
+			services: {
+				cwd,
+				projectCwd: cwd,
+				lexicalProjectCwd: cwd,
+				agentDir,
+				authStorage: h.authStorage,
+				modelRegistry: h.session.modelRegistry,
+				settingsManager: h.settingsManager,
+				resourceLoader: h.session.resourceLoader,
+				gitContextProvider: h.session.gitContextProvider,
+				diagnostics: [],
+			},
+		};
+	};
+	const runtime = await createAgentSessionRuntime(factory, {
+		sessionManager: f.manager,
+		cwd: f.cwd,
+		agentDir: f.root,
+	});
+	cleanups.push(async () => {
+		await runtime.dispose();
+		for (const h of replacements) await h.cleanupAsync();
+	});
+	return { ...f, runtime };
 }
 
 describe("#414 host-owned PR review bindings", () => {
@@ -395,6 +441,131 @@ describe("#414 host-owned PR review bindings", () => {
 		await expect(readPrReviewBinding(moved, record.runId)).rejects.toMatchObject({
 			code: "review_source_unavailable",
 		});
+	});
+
+	it.each(["dirty", "head", "execution-dirty", "execution-remote-head"])(
+		"preserves bound checkout enforcement after handoff, repeated reruns and reopen: %s",
+		async (mutation) => {
+			const f = await runtimeFixture();
+			const { manager, placement, runtime, cwd, base, harness, capture } = f;
+			manager.recordPrReviewBinding(placement);
+			let record: ReviewRunRecord = {
+				...f.record,
+				status: "completed",
+				result: {
+					completionStatus: "complete",
+					summary: "No findings",
+					findings: [],
+					overallExplanation: "No findings",
+					coverage: {
+						changedFileInventoryComplete: true,
+						filesInspected: [],
+						hunksInspected: [],
+						commandsRun: [],
+						failedVerificationAttempts: [],
+						exclusions: [],
+						uncheckedAreas: [],
+						residualRisk: [],
+						modelReportedLimitations: [],
+					},
+				},
+			};
+			await appendReviewRunDurably(manager, record);
+			const original = manager.getSessionRef()!;
+			// The binding must already be durable when the replacement becomes observable.
+			const unsubscribe = runtime.subscribeSessionWillProject(async (session) => {
+				const reader = await SessionManager.open(session.sessionRef!);
+				try {
+					expect(reader.getPrReviewBinding()).toEqual(placement);
+				} finally {
+					await reader.closePersistence();
+				}
+			});
+			await runtime.newSession({ setup: async (target) => appendReviewRun(target, record) });
+			unsubscribe();
+			const target = runtime.session.sessionManager;
+			expect(await resolveCanonicalReviewSource(target, record.runId)).toEqual(original);
+			const prepareRerun = (sessionManager = target) =>
+				prepareReviewWorkflow({
+					target: { kind: "pr", number: "414", expectedUrl: placement.pullRequest.url },
+					parentRunId: record.runId,
+					controls: record.options,
+					cwd,
+					sessionManager,
+					settingsManager: harness.settingsManager,
+					modelRegistry: harness.session.modelRegistry,
+					currentModel: harness.getModel(),
+				});
+			for (const index of [1, 2]) {
+				const prepared = await prepareRerun();
+				expect(prepared.incrementalPlan).toMatchObject({
+					mode: "incremental",
+					previousRun: { runId: record.runId },
+				});
+				record = { ...record, runId: prepared.workflowId, parentRunId: record.runId, endedAt: 2 + index };
+				await appendReviewRunDurably(target, record);
+				await prepared.resolution.dispose();
+				expect(await resolveCanonicalReviewSource(target, record.runId)).toEqual(target.getSessionRef());
+			}
+			await runtime.dispose();
+			const reopened = await SessionManager.open(target.getSessionRef()!);
+			f.managers.push(reopened);
+			expect(await readPrReviewBinding(reopened, record.runId)).toEqual(placement);
+			const prepared = await prepareRerun(reopened);
+			capture.mockClear();
+			const verify = vi.spyOn(githubCliCodeHostProvider, "verifyPullRequestHead").mockResolvedValue();
+			if (mutation.endsWith("dirty")) writeFileSync(join(cwd, "value.txt"), "late edit\n");
+			else if (mutation === "head") git(cwd, "checkout", "--detach", base);
+			else verify.mockRejectedValue(new Error("PR head moved"));
+			if (mutation.startsWith("execution-")) {
+				await expect(
+					executeReviewWorkflow({
+						prepared,
+						cwd,
+						agentDir: f.root,
+						sessionManager: reopened,
+						authStorage: harness.authStorage,
+						modelRegistry: harness.session.modelRegistry,
+						settingsManager: harness.settingsManager,
+					}),
+				).rejects.toThrow(mutation === "execution-remote-head" ? "PR head moved" : PR_CHECKOUT_CHANGED);
+				expect(verify).toHaveBeenCalledWith(f.source, f.snapshot.identity.pullRequest);
+			} else {
+				await expect(prepareRerun(reopened)).rejects.toThrow(PR_CHECKOUT_CHANGED);
+				await prepared.resolution.dispose();
+			}
+			expect(capture).not.toHaveBeenCalled();
+			expect(harness.faux.state.callCount).toBe(0);
+		},
+	);
+
+	it("persists the binding through repeated General replacements without changing the canonical source", async () => {
+		const { manager, placement, runtime, record } = await runtimeFixture();
+		manager.recordPrReviewBinding(placement);
+		await appendReviewRunDurably(manager, record);
+		const original = manager.getSessionRef();
+		for (const _ of [1, 2]) {
+			await runtime.newSession({
+				preserveReviewRunId: record.runId,
+				replaceReviewGeneral: true,
+				setup: async (target) => appendReviewRun(target, record),
+			});
+			expect(runtime.session.sessionManager.getPrReviewBinding()).toEqual(placement);
+			expect(await resolveCanonicalReviewSource(runtime.session.sessionManager, record.runId)).toEqual(original);
+		}
+	});
+
+	it.each(["empty", "copied", "unbound"])("leaves %s session handoffs unbound", async (kind) => {
+		const { manager, placement, runtime, record } = await runtimeFixture();
+		if (kind !== "unbound") manager.recordPrReviewBinding(placement);
+		if (kind === "unbound") await appendReviewRunDurably(manager, record);
+		await runtime.newSession({
+			setup: async (target) => {
+				if (kind !== "empty") appendReviewRun(target, record);
+			},
+		});
+		expect(runtime.session.sessionManager.getPrReviewBinding()).toBeUndefined();
+		expect(await readPrReviewBinding(runtime.session.sessionManager, record.runId)).toBeUndefined();
 	});
 
 	it("ignores injected Git environment and does not restrict ordinary discussion writes", async () => {

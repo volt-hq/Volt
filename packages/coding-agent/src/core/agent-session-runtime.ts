@@ -20,6 +20,7 @@ import {
 	type PlanningState,
 	StalePlanRevisionError,
 } from "./planning.ts";
+import { PR_CHECKOUT_CHANGED, readPrReviewBinding } from "./pr-review-binding.ts";
 import { registerReviewHandoffAliases } from "./review-anchors.ts";
 import {
 	getReviewDiscussionLink,
@@ -1531,6 +1532,20 @@ export class AgentSessionRuntime {
 					.filter((runId) => !generalReplacement || runId !== options?.preserveReviewRunId),
 			);
 			this.assertStructuralOperationCurrent(operation);
+			// Persist the trusted handoff's binding before publication: subsequent runs
+			// are canonical here and must not depend on retained aliases for enforcement.
+			// General replacement grants its alias only at publication, so resolve from
+			// the already-authorized source while preparing that replacement.
+			const binding = generalReplacement
+				? await readPrReviewBinding(this.session.sessionManager, options?.preserveReviewRunId)
+				: await readPrReviewBinding(sessionManager);
+			this.assertStructuralOperationCurrent(operation);
+			if (binding) {
+				if (!sameFilesystemLocation(cwd, binding.cwd)) throw new Error(PR_CHECKOUT_CHANGED);
+				sessionManager.recordPrReviewBinding(binding);
+				await sessionManager.flush();
+				this.assertStructuralOperationCurrent(operation);
+			}
 
 			managerTransferred = true;
 			const replacement = await this.replaceCurrentSession({
