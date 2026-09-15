@@ -1,53 +1,35 @@
 import { Buffer } from "node:buffer";
-import { devNull } from "node:os";
 import { spawnProcess } from "../utils/child-process.ts";
+import {
+	getPrReviewGitArgs,
+	getPrReviewGitEnvironment,
+	PR_REVIEW_GIT_CONFIG_ARGS,
+} from "../utils/pr-review-git-policy.ts";
 import { terminateProcessTree } from "../utils/shell.ts";
 import type { WorktreeGitRunner } from "./worktree-manager.ts";
 
 /** Bounded, noninteractive Git for checkout preparation. No shell or repository hooks. */
 export const runPrReviewGit: WorktreeGitRunner = async (args, cwd, options = {}) => {
 	options.signal?.throwIfAborted();
-	const filterOverrides: string[] = [];
+	let configKeys = "";
 	if (args[0] !== "config") {
-		const filters = await runPrReviewGit(
-			["config", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|smudge|process|required)$"],
-			cwd,
-			options,
-		);
-		if (!filters.ok && filters.code !== 1) return filters;
-		for (const key of filters.stdout.split("\n").filter(Boolean)) {
-			if (!/^filter\.[^\s=\x00-\x1f]+\.(clean|smudge|process|required)$/.test(key))
-				return { ok: false, code: null, stdout: "", stderr: "Invalid checkout filter configuration." };
-			filterOverrides.push("-c", `${key}=${key.endsWith(".required") ? "false" : ""}`);
-		}
+		const config = await runPrReviewGit(PR_REVIEW_GIT_CONFIG_ARGS, cwd, options);
+		if (!config.ok) return config;
+		configKeys = config.stdout;
 	}
-	const env = { ...process.env };
-	for (const key of Object.keys(env)) {
-		if (
-			/^GIT_(?:DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|CEILING_DIRECTORIES|CONFIG(?:_.*)?|TRACE.*)$/.test(
-				key,
-			)
-		)
-			delete env[key];
+	let argv: string[];
+	try {
+		argv = getPrReviewGitArgs(args, configKeys);
+	} catch {
+		return { ok: false, code: null, stdout: "", stderr: "Invalid checkout filter configuration." };
 	}
-	Object.assign(env, {
-		GIT_TERMINAL_PROMPT: "0",
-		GIT_OPTIONAL_LOCKS: "0",
-		GIT_PAGER: "cat",
-		GIT_LFS_SKIP_SMUDGE: "1",
-		GIT_NO_REPLACE_OBJECTS: "1",
-		GIT_NO_LAZY_FETCH: "1",
-	});
+	const env = getPrReviewGitEnvironment("transport");
 	return new Promise((resolve) => {
-		const child = spawnProcess(
-			"git",
-			["-c", `core.hooksPath=${devNull}`, "-c", "core.fsmonitor=false", ...filterOverrides, ...args],
-			{
-				cwd,
-				env,
-				stdio: ["ignore", "pipe", "pipe"],
-			},
-		);
+		const child = spawnProcess("git", argv, {
+			cwd,
+			env,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
 		const chunks: Buffer[] = [];
 		let bytes = 0;
 		let stderrBytes = 0;

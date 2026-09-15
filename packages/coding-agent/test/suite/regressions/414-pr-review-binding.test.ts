@@ -11,7 +11,11 @@ import {
 } from "../../../src/core/agent-session-runtime.ts";
 import { githubCliCodeHostProvider } from "../../../src/core/code-host/index.ts";
 import type { ReviewCodeHostContextCaptureResult } from "../../../src/core/code-host/types.ts";
-import { PR_CHECKOUT_CHANGED, readPrReviewBinding } from "../../../src/core/pr-review-binding.ts";
+import {
+	PR_CHECKOUT_CHANGED,
+	PR_CHECKOUT_UNAVAILABLE,
+	readPrReviewBinding,
+} from "../../../src/core/pr-review-binding.ts";
 import type { PrReviewPlacement } from "../../../src/core/pr-review-placement.ts";
 import { executeReviewWorkflow, prepareReviewWorkflow } from "../../../src/core/review.ts";
 import { registerReviewHandoffAliases, resolveCanonicalReviewSource } from "../../../src/core/review-anchors.ts";
@@ -367,7 +371,9 @@ describe("#414 host-owned PR review bindings", () => {
 			if (mutation === "operation")
 				writeFileSync(git(cwd, "rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"), base);
 			harness.setResponses([fauxAssistantMessage("unused")]);
-			await expect(prepare()).rejects.toThrow(PR_CHECKOUT_CHANGED);
+			await expect(prepare()).rejects.toThrow(
+				mutation === "unreadable" ? PR_CHECKOUT_UNAVAILABLE : PR_CHECKOUT_CHANGED,
+			);
 			expect(capture).not.toHaveBeenCalled();
 			expect(harness.getPendingResponseCount()).toBe(1);
 		},

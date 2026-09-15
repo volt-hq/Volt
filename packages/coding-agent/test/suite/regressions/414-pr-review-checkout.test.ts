@@ -2,10 +2,14 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { githubCliCodeHostProvider, type ResolvedPullRequestCheckout } from "../../../src/core/code-host/index.ts";
-import { assertPrReviewCheckout } from "../../../src/core/pr-review-binding.ts";
+import {
+	assertPrReviewCheckout,
+	PR_CHECKOUT_CHANGED,
+	PR_CHECKOUT_UNAVAILABLE,
+} from "../../../src/core/pr-review-binding.ts";
 import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
 import {
 	createEmptyIrohRemoteHostState,
@@ -15,12 +19,14 @@ import {
 import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-manager.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { PrReviewCheckoutManager, type PrReviewPreparationRequest } from "../../../src/daemon/pr-review-checkout.ts";
+import { runPrReviewGit } from "../../../src/daemon/pr-review-git.ts";
 import { getWorktreeCheckoutPath, WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
 import { createHarness } from "../harness.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
 	vi.restoreAllMocks();
+	vi.unstubAllEnvs();
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 function git(cwd: string, ...args: string[]): string {
@@ -30,6 +36,16 @@ function git(cwd: string, ...args: string[]): string {
 		stdio: ["ignore", "pipe", "pipe"],
 	}).trim();
 }
+function isolateGitHome(root: string): string {
+	const home = join(root, "home");
+	mkdirSync(home);
+	vi.stubEnv("HOME", home);
+	vi.stubEnv("USERPROFILE", home);
+	vi.stubEnv("XDG_CONFIG_HOME", join(home, ".config"));
+	vi.stubEnv("GIT_CONFIG_GLOBAL", undefined);
+	return home;
+}
+
 async function fixture(nested = false, fileBacked = true) {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "volt-414-checkout-")));
 	const source = join(root, "workspace", ...(nested ? ["nested"] : []));
@@ -198,6 +214,94 @@ describe("#414 prepared PR checkouts", () => {
 		).rejects.toMatchObject({ code: "review_preparation_conflict" });
 	});
 
+	it.each(["home", "xdg"])("validates reused checkouts with %s global ignore configuration", async (location) => {
+		const f = await fixture();
+		const home = isolateGitHome(f.root);
+		const ignore = join(home, "ignore");
+		writeFileSync(ignore, "scratch.tmp\n");
+		const config = location === "home" ? join(home, ".gitconfig") : join(home, ".config", "git", "config");
+		if (location === "xdg") mkdirSync(join(home, ".config", "git"), { recursive: true });
+		git(f.source, "config", "--file", config, "core.excludesFile", ignore);
+		const path = join(f.root, "existing");
+		git(f.source, "worktree", "add", path, "topic");
+		expect((await f.worktrees.adopt(f.workspace, { path, id: "existing" })).ok).toBe(true);
+		writeFileSync(join(path, "scratch.tmp"), "ignored before preparation\n");
+		const prepared = await f.manager.prepare(f.workspace, f.request, f.authority);
+		expect(prepared).toMatchObject({ disposition: "reused", worktreeId: "existing" });
+		const placement = (await f.state.listWorktrees())[0].prReviewLaunches![0].placement;
+		for (const _ of [1, 2]) {
+			await expect(assertPrReviewCheckout(placement, path)).resolves.toBeUndefined();
+			expect(await f.manager.prepare(f.workspace, f.request, f.authority)).toEqual(prepared);
+		}
+		writeFileSync(join(path, "not-ignored.txt"), "real change\n");
+		await expect(assertPrReviewCheckout(placement, path)).rejects.toThrow(PR_CHECKOUT_CHANGED);
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"honors explicit global repository trust without bypassing ownership checks",
+		async () => {
+			const f = await fixture();
+			isolateGitHome(f.root);
+			const path = join(f.root, "existing");
+			git(f.source, "worktree", "add", path, "topic");
+			expect((await f.worktrees.adopt(f.workspace, { path, id: "existing" })).ok).toBe(true);
+			const executable = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+			const bin = join(f.root, "bin");
+			mkdirSync(bin);
+			// Exercise Git's actual ownership checks without requiring chown/root.
+			writeFileSync(
+				join(bin, "git"),
+				`#!/bin/sh\nGIT_TEST_ASSUME_DIFFERENT_OWNER=1 exec '${executable.replaceAll("'", "'\\''")}' "$@"\n`,
+				{ mode: 0o755 },
+			);
+			vi.stubEnv("PATH", `${bin}${delimiter}${process.env.PATH}`);
+			await expect(f.manager.prepare(f.workspace, f.request, f.authority)).rejects.toMatchObject({
+				code: "review_preparation_failed",
+			});
+			git(f.root, "config", "--global", "--add", "safe.directory", f.source);
+			git(f.root, "config", "--global", "--add", "safe.directory", path);
+			const prepared = await f.manager.prepare(f.workspace, f.request, f.authority);
+			expect(prepared).toMatchObject({ disposition: "reused", worktreeId: "existing" });
+			const placement = (await f.state.listWorktrees())[0].prReviewLaunches![0].placement;
+			await expect(assertPrReviewCheckout(placement, path)).resolves.toBeUndefined();
+			git(f.root, "config", "--global", "--unset-all", "safe.directory");
+			await expect(assertPrReviewCheckout(placement, path)).rejects.toThrow(PR_CHECKOUT_UNAVAILABLE);
+		},
+	);
+
+	it("ignores injected configuration and repository selectors in both Git runners", async () => {
+		const f = await fixture();
+		await f.manager.prepare(f.workspace, f.request, f.authority);
+		const record = (await f.state.listWorktrees())[0];
+		const injected = join(f.root, "injected.gitconfig");
+		git(f.root, "config", "--file", injected, "core.bare", "true");
+		vi.stubEnv("GIT_CONFIG_GLOBAL", injected);
+		vi.stubEnv("GIT_CONFIG_COUNT", "1");
+		vi.stubEnv("GIT_CONFIG_KEY_0", "core.bare");
+		vi.stubEnv("GIT_CONFIG_VALUE_0", "true");
+		vi.stubEnv("GIT_DIR", join(f.source, ".git"));
+		vi.stubEnv("GIT_WORK_TREE", f.source);
+		vi.stubEnv("GIT_INDEX_FILE", join(f.root, "missing-index"));
+		await expect(runPrReviewGit(["rev-parse", "HEAD"], record.path)).resolves.toMatchObject({
+			ok: true,
+			stdout: `${f.head}\n`,
+		});
+		await expect(assertPrReviewCheckout(record.prReviewLaunches![0].placement, record.path)).resolves.toBeUndefined();
+	});
+
+	it("reports configuration read failures separately from checkout changes", async () => {
+		const f = await fixture();
+		const home = isolateGitHome(f.root);
+		await f.manager.prepare(f.workspace, f.request, f.authority);
+		const record = (await f.state.listWorktrees())[0];
+		writeFileSync(join(home, ".gitconfig"), "[invalid configuration\n");
+		await expect(assertPrReviewCheckout(record.prReviewLaunches![0].placement, record.path)).rejects.toThrow(
+			PR_CHECKOUT_UNAVAILABLE,
+		);
+		writeFileSync(join(home, ".gitconfig"), "");
+		await expect(assertPrReviewCheckout(record.prReviewLaunches![0].placement, record.path)).resolves.toBeUndefined();
+	});
+
 	it.each(["dirty", "busy", "head", "operation", "unreadable"])("does not reuse a %s candidate", async (kind) => {
 		const f = await fixture();
 		const path = join(f.root, "existing");
@@ -266,20 +370,27 @@ describe("#414 prepared PR checkouts", () => {
 		expect(await f.state.listWorktrees()).toEqual([]);
 	});
 
-	it("runs neither checkout hooks nor configured smudge/process filters", async () => {
+	it.each(["local", "global"])("runs neither hooks, fsmonitor nor filters from %s configuration", async (scope) => {
 		const f = await fixture();
+		isolateGitHome(f.root);
 		const marker = join(f.root, "executed");
 		const hooks = join(f.root, "hooks");
 		mkdirSync(hooks);
 		writeFileSync(join(hooks, "post-checkout"), `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o755 });
-		git(f.source, "config", "core.hooksPath", hooks);
-		git(f.source, "config", "filter.test.smudge", `touch '${marker}'; cat`);
-		git(f.source, "config", "filter.test.process", `touch '${marker}'; exit 1`);
-		git(f.source, "config", "filter.test.required", "true");
+		git(f.source, "config", `--${scope}`, "core.hooksPath", hooks);
+		git(f.source, "config", `--${scope}`, "core.fsmonitor", `touch '${marker}'`);
+		git(f.source, "config", `--${scope}`, "filter.test.clean", `touch '${marker}'; cat`);
+		git(f.source, "config", `--${scope}`, "filter.test.smudge", `touch '${marker}'; cat`);
+		git(f.source, "config", `--${scope}`, "filter.test.process", `touch '${marker}'; exit 1`);
+		git(f.source, "config", `--${scope}`, "filter.test.required", "true");
 		writeFileSync(join(f.source, ".git", "info", "attributes"), "value.txt filter=test\n");
 		await f.manager.prepare(f.workspace, f.request, f.authority);
 		const record = (await f.state.listWorktrees())[0];
 		await assertPrReviewCheckout(record.prReviewLaunches![0].placement, record.path);
+		writeFileSync(join(record.path, "value.txt"), "dirty file forces clean-filter evaluation\n");
+		await expect(assertPrReviewCheckout(record.prReviewLaunches![0].placement, record.path)).rejects.toThrow(
+			PR_CHECKOUT_CHANGED,
+		);
 		expect(existsSync(marker)).toBe(false);
 	});
 

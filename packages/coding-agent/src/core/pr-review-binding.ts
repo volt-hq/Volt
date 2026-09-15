@@ -1,9 +1,13 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { devNull } from "node:os";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import {
+	getPrReviewGitArgs,
+	getPrReviewGitEnvironment,
+	PR_REVIEW_GIT_CONFIG_ARGS,
+} from "../utils/pr-review-git-policy.ts";
 import type { ReviewPullRequestIdentity } from "./code-host/types.ts";
 import type { PrReviewPlacement } from "./pr-review-placement.ts";
 import { ReviewSourceUnavailableError, resolveCanonicalReviewSource } from "./review-anchors.ts";
@@ -11,6 +15,10 @@ import { listReviewRuns } from "./review-state.ts";
 import { SessionManager } from "./session-manager.ts";
 
 export const PR_CHECKOUT_CHANGED = "PR checkout changed; prepare a new review.";
+export const PR_CHECKOUT_UNAVAILABLE =
+	"Unable to validate PR checkout; check Git configuration and repository access, then retry.";
+
+class PrReviewGitReadError extends Error {}
 
 /** Display run ids are lookup hints only. Only the exact host-owned anchor grants linkage. */
 export async function readPrReviewBinding(
@@ -65,45 +73,31 @@ export async function readPrReviewBinding(
 
 /** Fixed argv-only local reads. No transport, shell, hooks, fsmonitor, or injected Git environment. */
 async function readGit(cwd: string, args: readonly string[], signal?: AbortSignal): Promise<string> {
-	const filterOverrides: string[] = [];
-	if (args[0] !== "config") {
-		const keys = await readGit(cwd, ["config", "--list", "--name-only"], signal);
-		for (const key of keys.split("\n")) {
-			if (/^filter\.[^\s=\x00-\x1f]+\.(clean|smudge|process|required)$/.test(key)) {
-				filterOverrides.push("-c", `${key}=${key.endsWith(".required") ? "false" : ""}`);
-			}
-		}
+	try {
+		const configKeys = args[0] === "config" ? "" : await readGit(cwd, PR_REVIEW_GIT_CONFIG_ARGS, signal);
+		const argv = getPrReviewGitArgs(args, configKeys);
+		return await new Promise<string>((resolveResult, reject) => {
+			execFile(
+				"git",
+				argv,
+				{
+					cwd,
+					env: getPrReviewGitEnvironment("local"),
+					signal,
+					encoding: "utf8",
+					timeout: 5_000,
+					maxBuffer: 1024 * 1024,
+					windowsHide: true,
+				},
+				(error, stdout) => {
+					if (error) reject(error);
+					else resolveResult(stdout);
+				},
+			);
+		});
+	} catch (cause) {
+		throw new PrReviewGitReadError(PR_CHECKOUT_UNAVAILABLE, { cause });
 	}
-	const env: NodeJS.ProcessEnv = {
-		PATH: process.env.PATH,
-		SystemRoot: process.env.SystemRoot,
-		GIT_CONFIG_NOSYSTEM: "1",
-		GIT_CONFIG_GLOBAL: devNull,
-		GIT_TERMINAL_PROMPT: "0",
-		GIT_OPTIONAL_LOCKS: "0",
-		GIT_NO_REPLACE_OBJECTS: "1",
-		GIT_NO_LAZY_FETCH: "1",
-		LC_ALL: "C",
-	};
-	return new Promise((resolveResult, reject) => {
-		execFile(
-			"git",
-			["--no-pager", "-c", `core.hooksPath=${devNull}`, "-c", "core.fsmonitor=false", ...filterOverrides, ...args],
-			{
-				cwd,
-				env,
-				signal,
-				encoding: "utf8",
-				timeout: 5_000,
-				maxBuffer: 1024 * 1024,
-				windowsHide: true,
-			},
-			(error, stdout) => {
-				if (error) reject(error);
-				else resolveResult(stdout);
-			},
-		);
-	});
 }
 
 /** A prepared checkout is never switched/reset to follow a moved PR head. */
@@ -149,7 +143,9 @@ export async function assertPrReviewCheckout(
 			if (existsSync(resolve(cwd, path.trim()))) throw new Error("Git operation in progress");
 		}
 	} catch (cause) {
-		throw new Error(PR_CHECKOUT_CHANGED, { cause });
+		throw new Error(cause instanceof PrReviewGitReadError ? PR_CHECKOUT_UNAVAILABLE : PR_CHECKOUT_CHANGED, {
+			cause,
+		});
 	}
 }
 
