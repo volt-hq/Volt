@@ -1,22 +1,25 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmSync,
 	statSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatLspAudit, handleLspAuditCommand, parseLspAuditArgs } from "../src/cli/lsp-audit.ts";
 import type { LspOperationMetadata } from "../src/core/lsp/outcome.ts";
+import { getDefaultSessionDirPath } from "../src/core/session-manager.ts";
 import { auditLsp } from "../src/core/session-store/lsp-audit.ts";
 import { initializeSessionStoreSchema } from "../src/core/session-store/schema-migration.ts";
 
@@ -342,6 +345,51 @@ describe("offline LSP audit", () => {
 		const report = await auditLsp({ cwd, sessionDir, now });
 		expect(report.totals.operations).toBe(1);
 		expect(report.window.since).toBe("2026-08-31T12:00:00.000Z");
+	});
+
+	it.each(["absolute", "relative"])(
+		"discovers the writer's default store for a symlink cwd (%s path)",
+		async (spelling) => {
+			const { db, root, cwd, sessionDir } = fixture();
+			const alias = join(root, "Alias");
+			symlinkSync(cwd, alias, process.platform === "win32" ? "junction" : "dir");
+			vi.stubEnv("VOLT_CODING_AGENT_DIR", root);
+			vi.stubEnv("VOLT_CODING_AGENT_SESSION_DIR", "");
+			session(db, "alias", alias);
+			session(db, "real", cwd);
+			session(db, "other", root);
+			result(db, "alias", 1, "lsp", operation("alias"));
+			result(db, "real", 1, "lsp", operation("real"));
+			result(db, "other", 1, "lsp", operation("other"));
+			db.close();
+			const defaultDir = getDefaultSessionDirPath(alias);
+			mkdirSync(join(root, "sessions"));
+			renameSync(sessionDir, defaultDir);
+			const before = files(defaultDir);
+			const report = await auditLsp({
+				cwd: spelling === "relative" ? relative(process.cwd(), alias) : alias,
+				now,
+			});
+			expect(report.coverage).toMatchObject({
+				partial: false,
+				storesDiscovered: 1,
+				storesRead: 1,
+			});
+			expect(report.coverage.skippedStores).toEqual({});
+			expect(report.totals.operations).toBe(2);
+			expect(report.utilization.toolActiveConversations).toBe(2);
+			expect(files(defaultDir)).toEqual(before);
+			expect(existsSync(getDefaultSessionDirPath(cwd))).toBe(false);
+		},
+	);
+
+	it("does not create a missing default session directory during discovery", async () => {
+		const { root, cwd } = fixture();
+		vi.stubEnv("VOLT_CODING_AGENT_DIR", root);
+		vi.stubEnv("VOLT_CODING_AGENT_SESSION_DIR", "");
+		const report = await auditLsp({ cwd, now });
+		expect(report.coverage).toMatchObject({ partial: true, storesRead: 0, skippedStores: { missing: 1 } });
+		expect(existsSync(join(root, "sessions"))).toBe(false);
 	});
 
 	it("reports corrupt, unsupported, missing, and busy stores without repairs", async () => {

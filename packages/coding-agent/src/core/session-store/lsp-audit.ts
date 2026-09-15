@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { Worker } from "node:worker_threads";
 import { ENV_SESSION_DIR, expandTildePath, getSessionsDir } from "../../config.ts";
 import type { LspOperationMetadata } from "../lsp/outcome.ts";
+import { getDefaultSessionDirPath } from "../session-manager.ts";
 import {
 	type AuditEntry,
 	type AuditSession,
@@ -381,13 +382,15 @@ export async function auditLsp(options: LspAuditOptions = {}): Promise<LspAuditR
 		coverage.partial = true;
 		if (!coverage.limitsReached.includes(name)) coverage.limitsReached.push(name);
 	};
-	const cwd = await canonical(options.cwd ?? process.cwd());
+	const cwd = options.cwd ?? process.cwd();
+	const canonicalCwd = await canonical(cwd);
 	const explicitDir = options.sessionDir ?? process.env[ENV_SESSION_DIR];
 	const directories: string[] = [];
 	if (explicitDir) directories.push(await canonical(explicitDir));
-	else if (!options.allWorkspaces)
-		directories.push(join(getSessionsDir(), `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`));
-	else {
+	else if (!options.allWorkspaces) {
+		// Store names encode the writer's lexical cwd, not its canonical workspace identity.
+		directories.push(getDefaultSessionDirPath(cwd));
+	} else {
 		try {
 			const root = await opendir(getSessionsDir());
 			let inspected = 0;
@@ -486,7 +489,7 @@ export async function auditLsp(options: LspAuditOptions = {}): Promise<LspAuditR
 		const sessions = new Map(data.sessions.map((session) => [session.id, session]));
 		for (const session of data.sessions)
 			if (!scopeCache.has(session.cwd))
-				scopeCache.set(session.cwd, !!options.allWorkspaces || (await canonical(session.cwd)) === cwd);
+				scopeCache.set(session.cwd, !!options.allWorkspaces || (await canonical(session.cwd)) === canonicalCwd);
 		for (const entry of data.entries) {
 			const session = sessions.get(entry.sessionId);
 			if (!session) continue;
