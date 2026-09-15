@@ -955,7 +955,7 @@ function cloneWorkspace(workspace: IrohRemoteWorkspace): IrohRemoteWorkspace {
 }
 
 function cloneWorktree(worktree: IrohRemoteWorkspaceWorktree): IrohRemoteWorkspaceWorktree {
-	return { ...worktree, sessionIds: [...worktree.sessionIds] };
+	return structuredClone(worktree);
 }
 
 function getRevokedClients(state: IrohRemoteHostState): IrohRemoteRevokedClient[] {

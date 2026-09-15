@@ -19,6 +19,12 @@ import type { ReplacedSessionContext, ToolDefinition } from "./extensions/types.
 import type { CustomMessageInput } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { findExactModelReferenceMatch } from "./model-resolver.ts";
+import {
+	assertBoundPullRequest,
+	assertPrReviewCheckout,
+	PR_CHECKOUT_CHANGED,
+	readPrReviewBinding,
+} from "./pr-review-binding.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { createReviewSeedMessage, STATIC_REVIEW_LIMITATION } from "./review-presentation.ts";
 import { createReviewPrivateDiagnostics } from "./review-private-diagnostics.ts";
@@ -1045,9 +1051,38 @@ export async function prepareReviewWorkflow(options: PrepareReviewWorkflowOption
 	}
 	const controls = controlsWithDefaults(options.controls);
 	assertReviewControlsPersistLosslessly(controls);
-	const resolution = await resolveReviewTarget(options.target, options.cwd, {
+	const binding =
+		options.target.kind === "pr" ? await readPrReviewBinding(options.sessionManager, options.parentRunId) : undefined;
+	let target = options.target;
+	let codeHostProvider: CodeHostProvider | undefined;
+	if (binding && target.kind === "pr") {
+		const number = String(binding.pullRequest.number);
+		if (
+			(target.number !== undefined && target.number !== number) ||
+			(target.expectedUrl !== undefined &&
+				target.expectedUrl.toLowerCase() !== binding.pullRequest.url.toLowerCase())
+		)
+			throw new Error("This session is bound to a different PR; prepare a new review.");
+		target = { kind: "pr", number, expectedUrl: binding.pullRequest.url };
+		await assertPrReviewCheckout(binding, options.cwd, options.signal);
+		codeHostProvider = {
+			...githubCliCodeHostProvider,
+			async capturePullRequestContext(captureOptions) {
+				const captured = await githubCliCodeHostProvider.capturePullRequestContext({
+					...captureOptions,
+					cwd: binding.sourceCwd,
+					number,
+					expectedUrl: binding.pullRequest.url,
+				});
+				if (captured.ok) assertBoundPullRequest(binding, captured.pullRequest);
+				return captured;
+			},
+		};
+	}
+	const resolution = await resolveReviewTarget(target, options.cwd, {
 		signal: options.signal,
 		onProgress: options.onProgress,
+		codeHostProvider,
 	});
 	if ("error" in resolution) {
 		if (resolution.cancelled || options.signal?.aborted) throw new ReviewPreparationCancelledError();
@@ -1057,6 +1092,13 @@ export async function prepareReviewWorkflow(options: PrepareReviewWorkflowOption
 	}
 	try {
 		throwIfReviewPreparationCancelled(options.signal);
+		if (binding) {
+			await assertPrReviewCheckout(binding, options.cwd, options.signal);
+			if (!resolution.identity.pullRequest || resolution.identity.headCommit !== binding.pullRequest.headRefOid) {
+				throw new Error(PR_CHECKOUT_CHANGED);
+			}
+			assertBoundPullRequest(binding, resolution.identity.pullRequest);
+		}
 		const reviewModel = resolveReviewModel(options);
 		if (!reviewModel.model) throw new Error("No model available for review. Use /model to select one.");
 		const verifier = resolveVerifierModel({
@@ -1067,7 +1109,7 @@ export async function prepareReviewWorkflow(options: PrepareReviewWorkflowOption
 		return {
 			workflowId: options.workflowId ?? createReviewWorkflowId(),
 			action: reviewActionIdForTarget(options.target),
-			target: options.target,
+			target,
 			controls,
 			resolution,
 			model: reviewModel.model,
@@ -1819,6 +1861,19 @@ export async function executeReviewWorkflow(
 			: undefined,
 	);
 	try {
+		if (prepared.target.kind === "pr" && !options.signal?.aborted) {
+			const binding = await readPrReviewBinding(source, prepared.incrementalPlan?.previousRun?.runId);
+			assertSource();
+			if (binding) {
+				const identity = prepared.resolution.identity.pullRequest;
+				if (!identity || prepared.resolution.identity.headCommit !== binding.pullRequest.headRefOid)
+					throw new Error(PR_CHECKOUT_CHANGED);
+				assertBoundPullRequest(binding, identity);
+				await githubCliCodeHostProvider.verifyPullRequestHead(binding.sourceCwd, identity);
+				await assertPrReviewCheckout(binding, options.cwd, options.signal);
+				assertSource();
+			}
+		}
 		if (source) {
 			await appendReviewRunDurably(
 				source,

@@ -230,6 +230,7 @@ switch (args.slice(0, 2).join(" ")) {
 			id: "test-host",
 			displayName: "Test Host",
 			probeCurrentPullRequest: async () => undefined,
+			resolvePullRequestCheckout: async () => ({ ok: false, error: "unused" }),
 			capturePullRequestContext: async () => ({ ok: false, error: "unused" }),
 			verifyPullRequestHead: async (_cwd, pullRequest) => {
 				verifiedHead = pullRequest.headRefOid;

@@ -6,7 +6,7 @@ import { readdir } from "fs/promises";
 import { basename, join } from "path";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
-import { TextDecoder } from "util";
+import { isDeepStrictEqual, TextDecoder } from "util";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { writeDurableAtomicFileSync } from "../utils/durable-atomic-write.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
@@ -25,6 +25,7 @@ import {
 	createCustomMessage,
 } from "./messages.ts";
 import { clonePlanningState, DEFAULT_PLANNING_STATE, type PlanningState, parsePlanningState } from "./planning.ts";
+import type { PrReviewPlacement } from "./pr-review-placement.ts";
 import { RpcGitContextSchema } from "./rpc/schema/git-context.ts";
 import type { RpcGitContext } from "./rpc/types.ts";
 import { RPC_RUNTIME_QUEUE_ENTRY_ID_PREFIX } from "./rpc/wire-limits.ts";
@@ -511,6 +512,12 @@ export interface SessionStartGitContextEntry extends SessionEntryBase {
 	gitContext: RpcGitContext | null;
 }
 
+/** Immutable host-owned PR checkout identity. Never imported, exported, or sent to the model. */
+export interface PrReviewBindingEntry extends SessionEntryBase {
+	type: "pr_review_binding";
+	placement: PrReviewPlacement;
+}
+
 /** Durable host-only active-branch pointer. Never projected into conversation history. */
 export interface LeafEntry extends SessionEntryBase {
 	type: "leaf";
@@ -579,6 +586,7 @@ export type SessionEntry =
 	| LabelEntry
 	| SessionInfoEntry
 	| SessionStartGitContextEntry
+	| PrReviewBindingEntry
 	| LeafEntry
 	| SubagentSpawnEntry;
 
@@ -2664,6 +2672,33 @@ export class SessionManager {
 		});
 		this.acceptsStartingGitContext = false;
 		return true;
+	}
+
+	/** Host admission must flush this immutable entry before publishing the session. */
+	recordPrReviewBinding(placement: PrReviewPlacement): void {
+		this._assertPersistenceHealthy();
+		const entry = parseSessionEntryForAdmission({
+			type: "pr_review_binding",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			placement,
+		}) as PrReviewBindingEntry;
+		if (resolvePath(entry.placement.cwd) !== this.cwd) {
+			throw new Error("PR review binding cwd does not match the session");
+		}
+		const existing = this.derivedState.prReviewBinding;
+		if (existing) {
+			if (!isDeepStrictEqual(existing, entry.placement)) throw new Error("PR review binding is immutable");
+			return;
+		}
+		this._appendEntry(entry);
+	}
+
+	getPrReviewBinding(): PrReviewPlacement | undefined {
+		this.assertConversationAuthorityAvailable();
+		const binding = this.derivedState.prReviewBinding;
+		return binding === undefined ? undefined : cloneCanonicalData(binding, "Session PR review binding");
 	}
 
 	getStartingGitContext(): RpcGitContext | null | undefined {

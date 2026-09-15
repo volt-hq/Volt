@@ -362,6 +362,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 			id: "test",
 			displayName: "Test",
 			probeCurrentPullRequest: async () => undefined,
+			resolvePullRequestCheckout: async () => ({ ok: false, error: "unused" }),
 			capturePullRequestContext: async () => ({ ok: false, error: "unused" }),
 			verifyPullRequestHead: async () => {},
 			publishPullRequestReview: async (value) => {

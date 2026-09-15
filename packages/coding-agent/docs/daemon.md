@@ -155,6 +155,35 @@ daemon to roll unrelated resources back. Prompt retries use the normal stable
 command-ID receipt path, so neither configured attach nor prompt delivery needs
 a launch receipt or transaction store.
 
+## App-started pull-request reviews
+
+Select the repository and PR before creating a review conversation. The app
+resolves the PR without starting an agent, then asks the daemon to prepare its
+exact reviewed commit. This requires `conversation.observe.v1` for discovery
+and both `conversation.control.v1` and `worktrees.manage.v1` for preparation;
+ordinary coding/review/chat presets do not grant worktree management.
+
+The daemon reuses only a clean, idle, registered worktree with the correct
+repository, PR branch and commit (or matching host-owned PR metadata).
+Otherwise it creates a dedicated worktree and local branch at the verified PR
+head, including fork PRs. It never switches, resets or stashes the parent
+checkout, installs dependencies, or runs checkout hooks or filters.
+
+The app keeps one session ID for each launch intent. Preparation durably binds
+that ID to its checkout; identical retries retain the placement across daemon
+restarts. Only after preparation succeeds does the app attach and configure
+that session, then start the review. Changed identities or moved heads fail
+explicitly: select and prepare a new review instead of retargeting an existing
+one. Successful checkouts remain after cancellation or later configuration
+failure, available for retry or explicit worktree removal.
+
+General, findings handoffs and finding discussions inherit the same checkout.
+Ordinary discussion/fix prompts may edit it; resume never undoes those edits.
+Starting another bound PR review requires a clean checkout at the original PR
+head. The original repository selection remains authoritative even though the
+new local branch has a generated name. Local/unprepared and non-PR reviews
+retain their existing behavior. See the [wire contract](iroh-remote-protocol.md#prepared-pull-request-reviews).
+
 ## Conversation leases
 
 Exactly one process owns the live runtime for each `(workspace, session)`

@@ -649,6 +649,7 @@ describe("#409 initial review accounting", () => {
 			id: "mock",
 			displayName: "Mock",
 			probeCurrentPullRequest: vi.fn(),
+			resolvePullRequestCheckout: vi.fn(),
 			capturePullRequestContext: vi.fn(),
 			verifyPullRequestHead: vi.fn(async () => {}),
 			publishPullRequestReview: publish,

@@ -152,6 +152,7 @@ const OBSERVE_COMMANDS = new Set([
 	"get_transcript",
 	"get_session_tree",
 	"get_review_result",
+	"resolve_pr_review",
 	"get_review_general",
 	"list_review_workflows",
 	"list_review_discussions",
@@ -237,6 +238,7 @@ export function getIrohRemoteRpcCommandCapabilities(
 	if (command.type === "set_model" || command.type === "set_thinking_level") {
 		return command.persistDefault === false ? ["model.select.v1"] : ["model.select.v1", "host.manage.v1"];
 	}
+	if (command.type === "prepare_pr_review") return ["conversation.control.v1", "worktrees.manage.v1"];
 	if (command.type === "create_worktree" || command.type === "remove_worktree") {
 		return ["worktrees.manage.v1"];
 	}

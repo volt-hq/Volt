@@ -27,6 +27,11 @@ import {
 	RpcSlashCommandSchema,
 } from "./mcp.ts";
 import { RpcPlanExecutionResultSchema, RpcPlanningStateSchema } from "./planning.ts";
+import {
+	RPC_PR_REVIEW_ERROR_CODES,
+	RpcPreparePrReviewResponseSchema,
+	RpcResolvePrReviewResponseSchema,
+} from "./pr-review.ts";
 import { RpcConversationIdentifierSchema, RpcThinkingLevelSchema } from "./primitives.ts";
 import {
 	RpcReviewAcknowledgmentResponseSchema,
@@ -328,6 +333,9 @@ export const RPC_RESPONSE_SCHEMAS = {
 		{ additionalProperties: false },
 	),
 
+	resolve_pr_review: dataResponse("resolve_pr_review", RpcResolvePrReviewResponseSchema),
+	prepare_pr_review: dataResponse("prepare_pr_review", RpcPreparePrReviewResponseSchema),
+
 	// Detached review workflows
 	start_review_discussions: dataResponse("start_review_discussions", RpcStartReviewDiscussionsSchema),
 	list_review_discussions: dataResponse("list_review_discussions", RpcListReviewDiscussionsSchema),
@@ -567,7 +575,7 @@ export const RPC_RESPONSE_SCHEMAS = {
 	),
 } as const satisfies { [K in RpcCommandType]: TObject };
 
-const RpcErrorCodeSchema = Type.Optional(openStringEnum(RPC_STABLE_ERROR_CODES));
+const RpcErrorCodeSchema = Type.Optional(openStringEnum([...RPC_STABLE_ERROR_CODES, ...RPC_PR_REVIEW_ERROR_CODES]));
 
 /**
  * Error responses are split so invoke_ui_action can never use the generic
