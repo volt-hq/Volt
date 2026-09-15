@@ -28,6 +28,7 @@ import {
 	listCanonicalReviewRuns,
 	recordReviewFindingOutcome,
 } from "../../core/review-state.ts";
+import { UNAVAILABLE_REVIEW_USAGE } from "../../core/review-usage.ts";
 import { createReviewFileMetadata, createReviewPullRequestMetadata } from "../../core/review-workflows.ts";
 import { listRpcBackgroundJobs, projectRpcBackgroundJob } from "../../core/rpc/background-jobs.ts";
 import { getRpcErrorResponseTarget, isUsableRpcConversationIdentifier } from "../../core/rpc/correlation.ts";
@@ -272,7 +273,14 @@ function projectReviewRun(record: HydratedReviewRunRecord, includeResult: boolea
 		workflowAction: record.workflowAction,
 		status: record.status,
 		startedAt: record.startedAt,
-		endedAt: record.endedAt,
+		...(record.endedAt === undefined ? {} : { endedAt: record.endedAt }),
+		usage: record.usage?.summary ?? UNAVAILABLE_REVIEW_USAGE,
+		...(record.usage
+			? {
+					usageUpdatedAt: record.usage.updatedAt,
+					...(includeResult ? { usageBreakdown: record.usage.attempts } : {}),
+				}
+			: {}),
 		...(record.acknowledgedAt === undefined ? {} : { acknowledgedAt: record.acknowledgedAt }),
 		target: {
 			description: record.target.description,

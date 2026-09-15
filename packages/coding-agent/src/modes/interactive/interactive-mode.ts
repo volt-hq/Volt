@@ -138,6 +138,7 @@ import {
 	exportCanonicalReviewFeedback,
 	getCanonicalReviewRun,
 	recordReviewFindingOutcome,
+	resolveReviewAccountingMessage,
 } from "../../core/review-state.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import {
@@ -4551,7 +4552,7 @@ export class InteractiveMode {
 				if (message.display) {
 					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
 					const component = new CustomMessageComponent(
-						message,
+						resolveReviewAccountingMessage(this.sessionManager, message),
 						renderer,
 						this.getMarkdownThemeWithSettings(),
 						(id) => {
@@ -9640,6 +9641,7 @@ export class InteractiveMode {
 			});
 
 			if (result.status !== "completed") {
+				this.renderCurrentSessionState();
 				this.showStatus("Review cancelled");
 				return result;
 			}
@@ -9652,6 +9654,7 @@ export class InteractiveMode {
 			return result;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
+			this.renderCurrentSessionState();
 			this.showError(
 				message.includes("git") || message.includes("repository") ? `${message} ${REVIEW_USAGE}` : message,
 			);

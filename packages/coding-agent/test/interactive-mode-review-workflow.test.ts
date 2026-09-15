@@ -185,9 +185,13 @@ describe("InteractiveMode review workflow", () => {
 				expect(rendered).not.toContain("Original session");
 				expect(rendered).not.toContain("Replacement session before render");
 				expect(rendered.indexOf("Warning:")).toBeGreaterThan(rendered.indexOf("Seeded review findings"));
-			} else {
+			} else if (outcome === "cancelled handoff") {
 				expect(context.renderInitialMessages).not.toHaveBeenCalled();
 				expect(rendered).toContain("Original session");
+			} else {
+				expect(context.renderInitialMessages).toHaveBeenCalledOnce();
+				expect(rendered).toContain("Seeded review findings");
+				expect(rendered.indexOf("Warning:")).toBeGreaterThan(rendered.indexOf("Seeded review findings"));
 			}
 			expect(JSON.stringify(result)).not.toContain(DIAGNOSTIC_RETENTION_WARNING);
 			expect(context.editorContainer.children).toEqual([context.editor]);

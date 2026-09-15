@@ -247,6 +247,7 @@ function assistantOverflowEvent(error: EventStreamOverflowError, event: Assistan
 	Object.freeze(content);
 	Object.freeze(diagnostics);
 	const usage = Object.freeze({
+		availability: "unavailable" as const,
 		input: 0,
 		output: 0,
 		cacheRead: 0,

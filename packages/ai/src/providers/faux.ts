@@ -26,6 +26,7 @@ const DEFAULT_MIN_TOKEN_SIZE = 3;
 const DEFAULT_MAX_TOKEN_SIZE = 5;
 
 const DEFAULT_USAGE: Usage = {
+	availability: "unavailable",
 	input: 0,
 	output: 0,
 	cacheRead: 0,
@@ -77,6 +78,7 @@ export function fauxAssistantMessage(
 		errorMessage?: string;
 		responseId?: string;
 		timestamp?: number;
+		usage?: Usage;
 	} = {},
 ): AssistantMessage {
 	return {
@@ -85,7 +87,7 @@ export function fauxAssistantMessage(
 		api: DEFAULT_API,
 		provider: DEFAULT_PROVIDER,
 		model: DEFAULT_MODEL_ID,
-		usage: DEFAULT_USAGE,
+		usage: options.usage === undefined ? DEFAULT_USAGE : structuredClone(options.usage),
 		stopReason: options.stopReason ?? "stop",
 		...(options.errorMessage === undefined ? {} : { errorMessage: options.errorMessage }),
 		...(options.responseId === undefined ? {} : { responseId: options.responseId }),
@@ -222,6 +224,8 @@ function withUsageEstimate(
 	options: StreamOptions | undefined,
 	promptCache: Map<string, string>,
 ): AssistantMessage {
+	// Only helper-generated defaults request estimates; explicit usage is a test fixture.
+	if (message.usage !== DEFAULT_USAGE) return message;
 	const promptText = serializeContext(context);
 	const promptTokens = estimateTokens(promptText);
 	const outputTokens = estimateTokens(assistantContentToText(message.content));
@@ -247,6 +251,7 @@ function withUsageEstimate(
 	return {
 		...message,
 		usage: {
+			availability: "complete",
 			input,
 			output: outputTokens,
 			cacheRead,
@@ -519,13 +524,12 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 				try {
 					await streamOptions?.onResponse?.({ status: 200, headers: {} }, requestModel);
 					if (!step) {
-						let message = createErrorMessage(
+						const message = createErrorMessage(
 							new Error("No more faux responses queued"),
 							api,
 							provider,
 							requestModel.id,
 						);
-						message = withUsageEstimate(message, context, requestModel, streamOptions, promptCache);
 						await streamWithDeltas(
 							normalizer,
 							message,
@@ -539,8 +543,12 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 
 					const resolved =
 						typeof step === "function" ? await step(context, streamOptions, state, requestModel) : step;
-					let message = cloneMessage(resolved, api, provider, requestModel.id);
-					message = withUsageEstimate(message, context, requestModel, streamOptions, promptCache);
+					const message = cloneMessage(
+						withUsageEstimate(resolved, context, requestModel, streamOptions, promptCache),
+						api,
+						provider,
+						requestModel.id,
+					);
 					await streamWithDeltas(
 						normalizer,
 						message,

@@ -2121,6 +2121,11 @@ describe("review pipeline", () => {
 			releaseMaterialize = resolve;
 		});
 		vi.spyOn(originManager, "materialize").mockImplementation(async () => {
+			// Initial accounting is durable before inference; race only the terminal commit.
+			if (getReviewRun(originManager, "review:durable-origin")?.status === "unfinished") {
+				await originalMaterialize();
+				return;
+			}
 			markMaterializeStarted();
 			await materializeGate;
 			await originalMaterialize();

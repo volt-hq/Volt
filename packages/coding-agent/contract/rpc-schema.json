@@ -11119,7 +11119,6 @@
 				"workflowAction",
 				"status",
 				"startedAt",
-				"endedAt",
 				"target",
 				"options"
 			],
@@ -11137,6 +11136,151 @@
 					"type": "number"
 				},
 				"endedAt": {
+					"type": "number"
+				},
+				"usage": {
+					"anyOf": [
+						{
+							"type": "object",
+							"required": [
+								"status",
+								"costBasis",
+								"requests",
+								"turns",
+								"pendingRequests",
+								"unavailableRequests",
+								"partialRequests"
+							],
+							"properties": {
+								"status": {
+									"anyOf": [
+										{
+											"type": "string",
+											"const": "complete"
+										},
+										{
+											"type": "string",
+											"const": "partial"
+										},
+										{
+											"type": "string",
+											"const": "unavailable"
+										}
+									]
+								},
+								"costBasis": {
+									"type": "string",
+									"const": "model-priced-usd"
+								},
+								"requests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"turns": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"pendingRequests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"unavailableRequests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"partialRequests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"tokens": {
+									"type": "object",
+									"required": [
+										"input",
+										"output",
+										"cacheRead",
+										"cacheWrite"
+									],
+									"properties": {
+										"input": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										},
+										"output": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										},
+										"cacheRead": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										},
+										"cacheWrite": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										}
+									},
+									"additionalProperties": false
+								},
+								"estimatedCost": {
+									"type": "object",
+									"required": [
+										"input",
+										"output",
+										"cacheRead",
+										"cacheWrite",
+										"total"
+									],
+									"properties": {
+										"input": {
+											"type": "number",
+											"minimum": 0
+										},
+										"output": {
+											"type": "number",
+											"minimum": 0
+										},
+										"cacheRead": {
+											"type": "number",
+											"minimum": 0
+										},
+										"cacheWrite": {
+											"type": "number",
+											"minimum": 0
+										},
+										"total": {
+											"type": "number",
+											"minimum": 0
+										}
+									},
+									"additionalProperties": false
+								}
+							},
+							"additionalProperties": false
+						},
+						{
+							"type": "object",
+							"required": [
+								"status"
+							],
+							"properties": {
+								"status": {
+									"type": "string",
+									"const": "unavailable"
+								}
+							},
+							"additionalProperties": false
+						}
+					]
+				},
+				"usageUpdatedAt": {
 					"type": "number"
 				},
 				"acknowledgedAt": {
@@ -11440,6 +11584,7 @@
 		"RpcReviewRunStatus": {
 			"type": "string",
 			"enum": [
+				"unfinished",
 				"completed",
 				"incomplete",
 				"cancelled",
@@ -11815,7 +11960,6 @@
 				"workflowAction",
 				"status",
 				"startedAt",
-				"endedAt",
 				"target",
 				"options"
 			],
@@ -11833,6 +11977,151 @@
 					"type": "number"
 				},
 				"endedAt": {
+					"type": "number"
+				},
+				"usage": {
+					"anyOf": [
+						{
+							"type": "object",
+							"required": [
+								"status",
+								"costBasis",
+								"requests",
+								"turns",
+								"pendingRequests",
+								"unavailableRequests",
+								"partialRequests"
+							],
+							"properties": {
+								"status": {
+									"anyOf": [
+										{
+											"type": "string",
+											"const": "complete"
+										},
+										{
+											"type": "string",
+											"const": "partial"
+										},
+										{
+											"type": "string",
+											"const": "unavailable"
+										}
+									]
+								},
+								"costBasis": {
+									"type": "string",
+									"const": "model-priced-usd"
+								},
+								"requests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"turns": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"pendingRequests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"unavailableRequests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"partialRequests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"tokens": {
+									"type": "object",
+									"required": [
+										"input",
+										"output",
+										"cacheRead",
+										"cacheWrite"
+									],
+									"properties": {
+										"input": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										},
+										"output": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										},
+										"cacheRead": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										},
+										"cacheWrite": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										}
+									},
+									"additionalProperties": false
+								},
+								"estimatedCost": {
+									"type": "object",
+									"required": [
+										"input",
+										"output",
+										"cacheRead",
+										"cacheWrite",
+										"total"
+									],
+									"properties": {
+										"input": {
+											"type": "number",
+											"minimum": 0
+										},
+										"output": {
+											"type": "number",
+											"minimum": 0
+										},
+										"cacheRead": {
+											"type": "number",
+											"minimum": 0
+										},
+										"cacheWrite": {
+											"type": "number",
+											"minimum": 0
+										},
+										"total": {
+											"type": "number",
+											"minimum": 0
+										}
+									},
+									"additionalProperties": false
+								}
+							},
+							"additionalProperties": false
+						},
+						{
+							"type": "object",
+							"required": [
+								"status"
+							],
+							"properties": {
+								"status": {
+									"type": "string",
+									"const": "unavailable"
+								}
+							},
+							"additionalProperties": false
+						}
+					]
+				},
+				"usageUpdatedAt": {
 					"type": "number"
 				},
 				"acknowledgedAt": {
@@ -12122,6 +12411,231 @@
 				},
 				"errorMessage": {
 					"type": "string"
+				},
+				"usageBreakdown": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"required": [
+							"passId",
+							"phase",
+							"purpose",
+							"round",
+							"attempt",
+							"kind",
+							"provider",
+							"model",
+							"requests",
+							"turns",
+							"pendingRequests",
+							"unavailableRequests",
+							"partialRequests"
+						],
+						"properties": {
+							"passId": {
+								"type": "integer",
+								"minimum": 1
+							},
+							"phase": {
+								"anyOf": [
+									{
+										"type": "string",
+										"const": "discovery"
+									},
+									{
+										"type": "string",
+										"const": "verification"
+									},
+									{
+										"type": "string",
+										"const": "presentation"
+									}
+								]
+							},
+							"purpose": {
+								"anyOf": [
+									{
+										"type": "string",
+										"const": "findings"
+									},
+									{
+										"type": "string",
+										"const": "challenge"
+									}
+								]
+							},
+							"round": {
+								"type": "integer",
+								"minimum": 1
+							},
+							"attempt": {
+								"type": "integer",
+								"minimum": 1
+							},
+							"kind": {
+								"anyOf": [
+									{
+										"type": "string",
+										"const": "turn"
+									},
+									{
+										"type": "string",
+										"const": "compaction"
+									}
+								]
+							},
+							"provider": {
+								"type": "string",
+								"minLength": 1,
+								"maxLength": 256
+							},
+							"model": {
+								"type": "string",
+								"minLength": 1,
+								"maxLength": 256
+							},
+							"requestedTier": {
+								"anyOf": [
+									{
+										"type": "string",
+										"const": "auto"
+									},
+									{
+										"type": "string",
+										"const": "default"
+									},
+									{
+										"type": "string",
+										"const": "flex"
+									},
+									{
+										"type": "string",
+										"const": "scale"
+									},
+									{
+										"type": "string",
+										"const": "priority"
+									}
+								]
+							},
+							"effectiveTier": {
+								"anyOf": [
+									{
+										"type": "string",
+										"const": "auto"
+									},
+									{
+										"type": "string",
+										"const": "default"
+									},
+									{
+										"type": "string",
+										"const": "flex"
+									},
+									{
+										"type": "string",
+										"const": "scale"
+									},
+									{
+										"type": "string",
+										"const": "priority"
+									}
+								]
+							},
+							"requests": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 9007199254740991
+							},
+							"turns": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 9007199254740991
+							},
+							"pendingRequests": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 9007199254740991
+							},
+							"unavailableRequests": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 9007199254740991
+							},
+							"partialRequests": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 9007199254740991
+							},
+							"tokens": {
+								"type": "object",
+								"required": [
+									"input",
+									"output",
+									"cacheRead",
+									"cacheWrite"
+								],
+								"properties": {
+									"input": {
+										"type": "integer",
+										"minimum": 0,
+										"maximum": 9007199254740991
+									},
+									"output": {
+										"type": "integer",
+										"minimum": 0,
+										"maximum": 9007199254740991
+									},
+									"cacheRead": {
+										"type": "integer",
+										"minimum": 0,
+										"maximum": 9007199254740991
+									},
+									"cacheWrite": {
+										"type": "integer",
+										"minimum": 0,
+										"maximum": 9007199254740991
+									}
+								},
+								"additionalProperties": false
+							},
+							"estimatedCost": {
+								"type": "object",
+								"required": [
+									"input",
+									"output",
+									"cacheRead",
+									"cacheWrite",
+									"total"
+								],
+								"properties": {
+									"input": {
+										"type": "number",
+										"minimum": 0
+									},
+									"output": {
+										"type": "number",
+										"minimum": 0
+									},
+									"cacheRead": {
+										"type": "number",
+										"minimum": 0
+									},
+									"cacheWrite": {
+										"type": "number",
+										"minimum": 0
+									},
+									"total": {
+										"type": "number",
+										"minimum": 0
+									}
+								},
+								"additionalProperties": false
+							}
+						},
+						"additionalProperties": false
+					},
+					"maxItems": 1024
 				},
 				"completionStatus": {
 					"$ref": "#/$defs/RpcReviewCompletionStatus"
@@ -13890,6 +14404,14 @@
 				"cost"
 			],
 			"properties": {
+				"availability": {
+					"type": "string",
+					"enum": [
+						"complete",
+						"partial",
+						"unavailable"
+					]
+				},
 				"input": {
 					"type": "number"
 				},

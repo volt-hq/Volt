@@ -296,6 +296,7 @@ interface MistralStreamState {
 function createMistralStreamState(): MistralStreamState {
 	return {
 		usage: {
+			availability: "unavailable",
 			input: 0,
 			output: 0,
 			cacheRead: 0,
@@ -326,8 +327,19 @@ async function consumeChatStream(
 			normalizer.push({ type: "meta", patch: { responseId: chunk.id } });
 		}
 
-		if (chunk.usage) {
+		if (
+			chunk.usage &&
+			[chunk.usage.promptTokens, chunk.usage.completionTokens, chunk.usage.totalTokens].some(
+				(value) => typeof value === "number",
+			)
+		) {
 			state.usage = {
+				availability:
+					(hasFinishReason || chunk.choices.length === 0 || chunk.choices[0]?.finishReason) &&
+					typeof chunk.usage.promptTokens === "number" &&
+					typeof chunk.usage.completionTokens === "number"
+						? "complete"
+						: "partial",
 				input: chunk.usage.promptTokens || 0,
 				output: chunk.usage.completionTokens || 0,
 				cacheRead: 0,

@@ -50,6 +50,7 @@ const rpcServiceTierSchema = stringEnum(["auto", "default", "flex", "scale", "pr
 
 export const RpcUsageSchema = Type.Object(
 	{
+		availability: Type.Optional(stringEnum(["complete", "partial", "unavailable"])),
 		input: Type.Number(),
 		output: Type.Number(),
 		cacheRead: Type.Number(),

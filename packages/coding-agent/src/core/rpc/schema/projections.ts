@@ -6,6 +6,7 @@
  */
 
 import { Type } from "typebox";
+import { ReviewUsageAccountingSchema, ReviewUsageSummarySchema } from "../../review-usage.ts";
 import type { RpcProjectionTruncation } from "../types.ts";
 import { openStringEnum, stringEnum } from "./helpers.ts";
 import { RpcSafeNonNegativeIntegerSchema } from "./primitives.ts";
@@ -185,7 +186,7 @@ export const RpcWorkflowToolEventSchema = Type.Union([
 // ============================================================================
 
 export const RpcReviewWorkflowLifecycleStatusSchema = stringEnum(["running", "completed", "cancelled", "failed"]);
-export const RpcReviewRunStatusSchema = stringEnum(["completed", "incomplete", "cancelled", "failed"]);
+export const RpcReviewRunStatusSchema = stringEnum(["unfinished", "completed", "incomplete", "cancelled", "failed"]);
 export const RpcReviewCompletionStatusSchema = stringEnum(["complete", "incomplete"]);
 export const RpcReviewCorrectnessSchema = stringEnum(["correct", "incorrect"]);
 export const RpcReviewFindingStatusSchema = stringEnum(["open", "accepted", "fixed", "dismissed", "uncertain"]);
@@ -327,7 +328,14 @@ const reviewRunProperties = {
 	workflowAction: Type.String(),
 	status: RpcReviewRunStatusSchema,
 	startedAt: Type.Number(),
-	endedAt: Type.Number(),
+	endedAt: Type.Optional(Type.Number()),
+	usage: Type.Optional(
+		Type.Union([
+			ReviewUsageSummarySchema,
+			Type.Object({ status: Type.Literal("unavailable") }, { additionalProperties: false }),
+		]),
+	),
+	usageUpdatedAt: Type.Optional(Type.Number()),
 	acknowledgedAt: Type.Optional(Type.Number()),
 	target: Type.Object(
 		{
@@ -363,6 +371,7 @@ const reviewRunProperties = {
 export const RpcReviewWorkflowResultResponseSchema = Type.Object(
 	{
 		...reviewRunProperties,
+		usageBreakdown: Type.Optional(ReviewUsageAccountingSchema.properties.attempts),
 		completionStatus: Type.Optional(RpcReviewCompletionStatusSchema),
 		summary: Type.Optional(Type.String()),
 		findings: Type.Optional(Type.Array(RpcReviewFindingSchema)),

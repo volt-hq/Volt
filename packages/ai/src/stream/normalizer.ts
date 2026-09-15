@@ -15,6 +15,7 @@ import { ToolArgumentCoalescer } from "./tool-argument-coalescer.ts";
 import { ToolArgumentGuard, type ToolArgumentLimitFailure } from "./tool-argument-guard.ts";
 
 const EMPTY_USAGE: Usage = {
+	availability: "unavailable",
 	input: 0,
 	output: 0,
 	cacheRead: 0,
@@ -277,14 +278,23 @@ export class AssistantStreamNormalizer {
 		const message = this.requireMessage();
 		let usage = message.usage;
 		if (patch.usage) {
-			usage = cloneAndFreeze({
+			const mergedUsage = {
 				...message.usage,
 				...patch.usage,
 				cost: {
 					...message.usage.cost,
 					...patch.usage.cost,
 				},
-			});
+			};
+			// Custom usage must not inherit the synthetic unavailable default.
+			// Keep known evidence for cumulative patches, but omit unknown availability.
+			if (
+				mergedUsage.availability === undefined ||
+				(!("availability" in patch.usage) && message.usage.availability === "unavailable")
+			) {
+				delete mergedUsage.availability;
+			}
+			usage = cloneAndFreeze(mergedUsage);
 		}
 
 		let diagnostics = message.diagnostics;

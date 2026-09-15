@@ -28,6 +28,7 @@ import type {
 	ReviewWorkflowToolEvent,
 } from "./review.ts";
 import type { ReviewChangedFile, ReviewPullRequestIdentity, ReviewSnapshotIdentity } from "./review-snapshot.ts";
+import type { ReviewUsageAccounting } from "./review-usage.ts";
 
 /** Maximum concurrently running detached reviews per runtime. */
 export const MAX_ACTIVE_REVIEW_WORKFLOWS = 3;
@@ -343,6 +344,7 @@ export interface ReviewWorkflowDescriptor {
 }
 
 export interface ReviewWorkflowResultRecord extends ReviewWorkflowDescriptor {
+	usage?: ReviewUsageAccounting;
 	/** Fast mode snapshot captured when this review started. */
 	fastModeEnabled?: boolean;
 	parsed?: ParsedReview;
@@ -699,6 +701,7 @@ export class ReviewWorkflowManager {
 			message = `Review failed: ${result.errorMessage}`;
 		}
 
+		if (result.record?.usage) record.usage = structuredClone(result.record.usage);
 		this.active.delete(descriptor.workflowId);
 		this.results.set(descriptor.workflowId, record);
 		while (this.results.size > MAX_RETAINED_REVIEW_RESULTS) {

@@ -324,6 +324,11 @@ export interface ToolCall {
 }
 
 export interface Usage {
+	/**
+	 * Provider usage evidence: final reported counts, interim counts, or no reported counts.
+	 * Omitted for custom or historical usage of unknown availability; never infer from zeroes.
+	 */
+	availability?: "complete" | "partial" | "unavailable";
 	input: number;
 	output: number;
 	cacheRead: number;
