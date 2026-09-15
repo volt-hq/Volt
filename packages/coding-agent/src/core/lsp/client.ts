@@ -731,7 +731,9 @@ export class LspClient {
 		}
 		const excludeKey = excludePath ? normalizeUri(pathToFileURL(excludePath).toString()) : undefined;
 		const refreshed: Array<{ uri: string; type: number; absolutePath: string }> = [];
+		// Invalidate before each sync: its response may arrive while a later disk read awaits.
 		const closeDocument = (key: string, document: TrackedDocument): void => {
+			this.diagnosticEpoch++;
 			this.documents.delete(key);
 			this.published.delete(key);
 			this.notify("textDocument/didClose", { textDocument: { uri: document.uri } });
@@ -777,6 +779,7 @@ export class LspClient {
 			if (content === document.content) {
 				continue;
 			}
+			this.diagnosticEpoch++;
 			document.content = content;
 			document.version++;
 			this.notify("textDocument/didChange", {
@@ -786,7 +789,6 @@ export class LspClient {
 			refreshed.push({ uri: document.uri, type: FILE_CHANGE_TYPE_CHANGED, absolutePath: document.absolutePath });
 		}
 		if (refreshed.length > 0) {
-			this.diagnosticEpoch++;
 			this.notify("workspace/didChangeWatchedFiles", {
 				changes: refreshed.map(({ uri, type }) => ({ uri, type })),
 			});

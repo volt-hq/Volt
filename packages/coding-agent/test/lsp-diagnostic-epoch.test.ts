@@ -1,13 +1,13 @@
 import type { ChildProcess } from "node:child_process";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { setImmediate } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LspClient, type LspDiagnostic } from "../src/core/lsp/client.ts";
+import { LspClient, type LspClientOptions, type LspDiagnostic } from "../src/core/lsp/client.ts";
 import { withFileMutationQueue } from "../src/core/tools/file-mutation-queue.ts";
 
 interface Message {
@@ -24,7 +24,11 @@ const diagnostic: LspDiagnostic = {
 	message: "Current dependency error",
 };
 
-async function fixture(pull = false, requestTimeoutMs = 100) {
+async function fixture(
+	pull = false,
+	requestTimeoutMs = 100,
+	resolveTrackedDocumentPath?: LspClientOptions["resolveTrackedDocumentPath"],
+) {
 	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
 	const root = mkdtempSync(join(tmpdir(), "volt-lsp-epoch-"));
 	roots.push(root);
@@ -81,6 +85,7 @@ async function fixture(pull = false, requestTimeoutMs = 100) {
 		rootDir: root,
 		command: ["fixture"],
 		requestTimeoutMs,
+		resolveTrackedDocumentPath,
 		serverSpawner: () => child as unknown as ChildProcess,
 	});
 	clients.push(client);
@@ -118,6 +123,73 @@ afterEach(() => {
 });
 
 describe("diagnostics recover after client-wide synchronization", () => {
+	it.each([
+		["change", "unchanged"],
+		["close", "unchanged"],
+		["change", "change"],
+		["change", "close"],
+		["close", "change"],
+		["close", "close"],
+	])("collects refresh diagnostics after %s of B with later %s C", async (operation, laterOperation) => {
+		const gate = new EventEmitter();
+		const blocked = once(gate, "blocked");
+		const released = once(gate, "release");
+		let c = "";
+		const f = await fixture(false, 100, async (path) => {
+			if (path === c) {
+				gate.emit("blocked");
+				await released;
+			}
+			return path;
+		});
+		c = join(dirname(f.b), "c.foo");
+		writeFileSync(c, "later dependency\n");
+		await f.client.openDocument(f.a, "source\n");
+		await f.client.openDocument(f.b, "dependency\n");
+		await f.client.openDocument(c, "later dependency\n");
+		if (operation === "change") writeFileSync(f.b, "changed dependency\n");
+		else rmSync(f.b);
+		if (laterOperation === "change") writeFileSync(c, "changed later dependency\n");
+		else if (laterOperation === "close") rmSync(c);
+
+		const pending = f.client.getDiagnostics(f.a, "source\n", 0);
+		await f.waitForMessage(operation === "change" ? "textDocument/didChange" : "textDocument/didClose");
+		await blocked;
+		// The server responds to B while refresh awaits C. It does not publish
+		// again for the final watched-files notification.
+		f.publish(f.a);
+		expect(f.client.getPublishedDiagnostics(f.a)).toEqual([diagnostic]);
+		gate.emit("release");
+		const result = await pending;
+		await f.waitForMessage("workspace/didChangeWatchedFiles");
+		if (laterOperation === "unchanged") {
+			expect(result).toMatchObject({
+				outcome: "success",
+				source: "push",
+				freshness: "fresh",
+				diagnostics: [diagnostic],
+			});
+			expect(f.client.getPublishedDiagnostics(f.a)).toEqual([diagnostic]);
+		} else {
+			expect(result).toMatchObject({ outcome: "timeout", freshness: "stale", diagnostics: [] });
+			expect(f.client.getPublishedDiagnostics(f.a)).toEqual([]);
+		}
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("preserves cached diagnostics when refresh finds no content changes", async () => {
+		const f = await fixture();
+		await f.client.openDocument(f.a, "source\n");
+		await f.client.openDocument(f.b, "dependency\n");
+		f.publish(f.a);
+		expect(await f.client.getDiagnostics(f.a, "source\n", 0)).toMatchObject({
+			outcome: "success",
+			source: "cache",
+			diagnostics: [diagnostic],
+		});
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
 	it.each(["open", "change"])("accepts A's current publication after a concurrent %s of B", async (operation) => {
 		const f = await fixture();
 		if (operation === "change") await f.client.openDocument(f.b, "dependency\n");
