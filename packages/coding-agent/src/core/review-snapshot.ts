@@ -22,7 +22,7 @@ export type ReviewTarget =
 	| { kind: "uncommitted" }
 	| { kind: "branch"; base?: string; branchBase?: never }
 	| { kind: "branch"; branchBase: ReviewBranchBase; base?: never }
-	| { kind: "pr"; number?: string }
+	| { kind: "pr"; number?: string; expectedUrl?: string }
 	| { kind: "commit"; sha?: string };
 
 export type ReviewSnapshotRevision = "base" | "head";
@@ -1314,23 +1314,16 @@ async function createPullRequestSource(
 	signal?: AbortSignal,
 ): Promise<{ source?: GitSource; temporaryDirectory?: string; error?: ReviewSnapshotResolutionError }> {
 	throwIfResolutionCancelled(signal);
-	const [localObjects, objectFormat, sourceIsShallow, remoteResult, fetchConfig] = await Promise.all([
+	const [localObjects, objectFormat, sourceIsShallow, fetchConfig] = await Promise.all([
 		repositoryObjectDirectory(root, limits, signal),
 		repositoryObjectFormat(root, limits, signal),
 		repositoryIsShallow(root, limits, signal),
-		runCommand("git", ["remote", "get-url", fetchPlan.remote], root, commandOptions(limits, signal)),
 		repositoryFetchConfig(root, fetchPlan.remote, limits, signal),
 	]);
 	throwIfResolutionCancelled(signal);
 	if (!localObjects) return { error: { error: "Could not resolve the Git object directory." } };
 	if (!objectFormat) return { error: { error: "Could not resolve the Git object format." } };
-	const remoteUrl = text(remoteResult).trim();
-	if (!remoteResult.ok || !remoteUrl) {
-		return {
-			error: { error: `Could not resolve the ${fetchPlan.remote} remote for the pull request snapshot.` },
-		};
-	}
-	const fetchUrl = resolveRemoteFetchUrl(root, remoteUrl);
+	const fetchUrl = resolveRemoteFetchUrl(root, fetchPlan.remoteUrl);
 	const temporaryDirectory = await mkdtemp(join(tmpdir(), "volt-review-pr-"));
 	let retainTemporaryDirectory = false;
 	try {
@@ -3179,16 +3172,16 @@ export async function resolveReviewSnapshot(
 				const captured = await codeHostProvider.capturePullRequestContext({
 					cwd: root,
 					...(normalized ? { number: normalized } : {}),
+					...(target.expectedUrl === undefined ? {} : { expectedUrl: target.expectedUrl }),
 					maxPullRequestNumber: options.maxPullRequestNumber,
 					signal: options.signal,
 					onProgress: options.onProgress,
 				});
 				if (!captured.ok) return captured;
-				const { pullRequest } = captured;
+				const { pullRequest, fetchPlan } = captured;
 				if (pullRequest.providerId !== codeHostProvider.id) {
 					return { error: "The code-host provider returned a pull request for a different provider." };
 				}
-				const fetchPlan = codeHostProvider.getPullRequestFetchPlan(pullRequest);
 				options.onProgress?.("Fetching pull request history…");
 				const fetched = await createPullRequestSource(root, pullRequest, fetchPlan, limits, options.signal);
 				if (!fetched.source || !fetched.temporaryDirectory)

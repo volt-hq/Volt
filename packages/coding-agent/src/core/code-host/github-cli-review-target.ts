@@ -3,7 +3,7 @@ import { spawnProcess } from "../../utils/child-process.ts";
 import { terminateProcessTree } from "../../utils/shell.ts";
 import { runGitHubCli } from "./github-cli.ts";
 import { canonicalizeGitHubRemoteUrl } from "./github-cli-discovery.ts";
-import type { ReviewCodeHostContextCaptureOptions } from "./types.ts";
+import type { CodeHostPullRequestSummary, ReviewCodeHostContextCaptureOptions } from "./types.ts";
 
 interface GitHubPullRequestLocator {
 	url: string;
@@ -90,15 +90,94 @@ async function readGit(args: string[], cwd: string, signal?: AbortSignal): Promi
 	return result;
 }
 
+type PullRequestTargetFailure = { ok: false; error: string; remoteError: string };
+
 type CurrentPullRequestTarget =
-	| { ok: true; url: string; id: string; headBranch: string }
-	| { ok: false; error: string; remoteError: string };
+	| (CodeHostPullRequestSummary & {
+			ok: true;
+			kind: "current";
+			id: string;
+			headBranch: string;
+			remote: string;
+			remoteUrl: string;
+	  })
+	| PullRequestTargetFailure;
+
+function failure(message: string): PullRequestTargetFailure {
+	return { ok: false, error: message, remoteError: message };
+}
+
+async function resolveReviewRemoteRepository(
+	remote: string,
+	options: ReviewCodeHostContextCaptureOptions,
+): Promise<{ ok: true; repository: string; remoteUrl: string } | PullRequestTargetFailure> {
+	if (!/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(remote)) {
+		return failure("The review remote is invalid. Check its configuration on the host.");
+	}
+	const urls =
+		(await readGit(["remote", "get-url", "--all", remote], options.cwd, options.signal))?.split(/\r?\n/) ?? [];
+	const repositories = new Set<string>();
+	for (const value of urls) {
+		const repository = canonicalizeGitHubRemoteUrl(value);
+		const locator =
+			repository &&
+			parseGitHubPullRequestUrl(`https://${repository.host}/${repository.owner}/${repository.name}/pull/1`);
+		if (!locator)
+			return failure(
+				"The review remote is not a supported credential-free GitHub URL. Check its configuration on the host.",
+			);
+		repositories.add(locator.repository);
+	}
+	if (repositories.size !== 1) {
+		return failure(
+			"The review remote does not identify one GitHub repository. Configure one unambiguous repository on the host.",
+		);
+	}
+	// Git fetch uses the first URL; retain that exact validated transport, not just its repository name.
+	return { ok: true, repository: repositories.values().next().value!, remoteUrl: urls[0]! };
+}
+
+/** Pin numbered lookups too: gh otherwise prefers a fork's parent repository. */
+export async function resolveNumberedReviewPullRequest(
+	options: ReviewCodeHostContextCaptureOptions,
+): Promise<{ ok: true; kind: "numbered"; url: string; remote: string; remoteUrl: string } | PullRequestTargetFailure> {
+	try {
+		const ref = await readGit(["symbolic-ref", "--quiet", "HEAD"], options.cwd, options.signal);
+		let remote: string | undefined;
+		if (ref !== undefined) {
+			if (!ref.startsWith("refs/heads/") || /[\0\r\n]/.test(ref)) throw new Error();
+			remote = await readGit(
+				["config", "--get", `branch.${ref.slice("refs/heads/".length)}.remote`],
+				options.cwd,
+				options.signal,
+			);
+		}
+		if (!remote || remote === ".") {
+			const names = (await readGit(["remote"], options.cwd, options.signal))?.split(/\r?\n/) ?? [];
+			remote = names.includes("origin") ? "origin" : names.length === 1 ? names[0] : undefined;
+			if (!remote)
+				return failure(
+					"Could not select a repository for the numbered PR. Configure a tracking remote, origin, or a single remote on the host.",
+				);
+		}
+		const repository = await resolveReviewRemoteRepository(remote, options);
+		if (!repository.ok) return repository;
+		const locator = parseGitHubPullRequestUrl(`https://${repository.repository}/pull/${options.number}`);
+		if (!locator || locator.number > options.maxPullRequestNumber)
+			return failure("Specify a valid positive PR number within the supported range.");
+		return { ok: true, kind: "numbered", url: locator.url, remote, remoteUrl: repository.remoteUrl };
+	} catch {
+		if (options.signal?.aborted) throw new Error("GitHub context capture was cancelled.");
+		return failure(
+			"Could not resolve the numbered PR repository safely. Check Git configuration on the host and retry.",
+		);
+	}
+}
 
 /** Resolve only in the tracked repository; never inherit gh's fork/default-repository selection. */
 export async function resolveCurrentReviewPullRequest(
 	options: ReviewCodeHostContextCaptureOptions,
 ): Promise<CurrentPullRequestTarget> {
-	const failure = (message: string): CurrentPullRequestTarget => ({ ok: false, error: message, remoteError: message });
 	try {
 		const ref = await readGit(["symbolic-ref", "--quiet", "HEAD"], options.cwd, options.signal);
 		if (!ref?.startsWith("refs/heads/") || /[\0\r\n]/.test(ref)) {
@@ -126,25 +205,9 @@ export async function resolveCurrentReviewPullRequest(
 				"Current-PR review requires a remote tracking branch. Configure the intended upstream on the host or specify a PR number.",
 			);
 		}
-		const urls = await readGit(["remote", "get-url", "--all", remote], options.cwd, options.signal);
-		const repositories = new Set<string>();
-		for (const value of urls?.split(/\r?\n/) ?? []) {
-			const repository = canonicalizeGitHubRemoteUrl(value);
-			const locator =
-				repository &&
-				parseGitHubPullRequestUrl(`https://${repository.host}/${repository.owner}/${repository.name}/pull/1`);
-			if (!locator)
-				return failure(
-					"The tracking remote is not a supported credential-free GitHub URL. Check its configuration on the host.",
-				);
-			repositories.add(locator.repository);
-		}
-		if (repositories.size !== 1) {
-			return failure(
-				"The tracking remote does not identify one GitHub repository. Configure one unambiguous repository on the host.",
-			);
-		}
-		const repository = repositories.values().next().value!;
+		const resolvedRepository = await resolveReviewRemoteRepository(remote, options);
+		if (!resolvedRepository.ok) return resolvedRepository;
+		const { repository } = resolvedRepository;
 		const headBranch = remoteRef.slice("refs/heads/".length);
 		const result = await runGitHubCli(
 			[
@@ -159,7 +222,7 @@ export async function resolveCurrentReviewPullRequest(
 				"--limit",
 				"100",
 				"--json",
-				"id,number,url,state,headRefName,headRepository,headRepositoryOwner",
+				"id,number,title,url,state,headRefName,headRepository,headRepositoryOwner",
 			],
 			{ cwd: options.cwd, signal: options.signal, stdoutMaxBytes: 256 * 1024 },
 		);
@@ -174,8 +237,8 @@ export async function resolveCurrentReviewPullRequest(
 				"Could not establish a unique pull request for the tracked branch. Specify a PR number or check the repository on the host.",
 			);
 		}
-		const active = new Map<string, { url: string; id: string }>();
-		const historical = new Map<string, { url: string; id: string }>();
+		const active = new Map<string, CodeHostPullRequestSummary & { id: string }>();
+		const historical = new Map<string, CodeHostPullRequestSummary & { id: string }>();
 		let hasUnavailableHistoricalHead = false;
 		for (const item of values) {
 			if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error();
@@ -186,6 +249,7 @@ export async function resolveCurrentReviewPullRequest(
 				locator.repository !== repository ||
 				locator.number !== value.number ||
 				locator.number > options.maxPullRequestNumber ||
+				typeof value.title !== "string" ||
 				typeof value.id !== "string" ||
 				!value.id ||
 				value.id.length > 500
@@ -211,7 +275,12 @@ export async function resolveCurrentReviewPullRequest(
 			)
 				continue;
 			if (value.state !== "OPEN" && value.state !== "CLOSED" && value.state !== "MERGED") throw new Error();
-			(value.state === "OPEN" ? active : historical).set(locator.url, { url: locator.url, id: value.id });
+			(value.state === "OPEN" ? active : historical).set(locator.url, {
+				url: locator.url,
+				id: value.id,
+				number: locator.number,
+				title: value.title,
+			});
 		}
 		if (active.size === 0 && hasUnavailableHistoricalHead)
 			return failure(
@@ -224,7 +293,14 @@ export async function resolveCurrentReviewPullRequest(
 			);
 		if (matches.size > 1)
 			return failure("Multiple pull requests match the tracked branch. Specify the intended PR number.");
-		return { ok: true, ...matches.values().next().value!, headBranch };
+		return {
+			ok: true,
+			kind: "current",
+			...matches.values().next().value!,
+			headBranch,
+			remote,
+			remoteUrl: resolvedRepository.remoteUrl,
+		};
 	} catch {
 		if (options.signal?.aborted) throw new Error("GitHub context capture was cancelled.");
 		return failure(

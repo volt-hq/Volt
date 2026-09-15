@@ -9010,7 +9010,11 @@ export class InteractiveMode {
 			return undefined;
 		}
 		if (choice === currentPullRequestLabel && currentPullRequest) {
-			return { kind: "pr", number: String(currentPullRequest.number) };
+			return {
+				kind: "pr",
+				number: String(currentPullRequest.number),
+				expectedUrl: currentPullRequest.url,
+			};
 		}
 		if (choice === branchLabel) {
 			const base = await this.promptForReviewBaseBranch();

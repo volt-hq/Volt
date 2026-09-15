@@ -17,6 +17,7 @@ import { delimiter, join, relative, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { capturePullRequestContextWithGitHubCli } from "../src/core/code-host/github-cli-context.ts";
+import * as githubDiscovery from "../src/core/code-host/github-cli-discovery.ts";
 import { normalizeReviewPath, type ReviewSnapshot, resolveReviewSnapshot } from "../src/core/review-snapshot.ts";
 
 const OPTIONS = { maxCommitRefBytes: 1_024, maxPullRequestNumber: 2_147_483_647 };
@@ -84,6 +85,17 @@ function graphqlConnection(field: string, nodes: unknown[], hasNextPage = false,
 }
 
 function installGitHubShim(directory: string, config: GitHubShimConfig): string {
+	const repositoryUrl = String(config.view.url).replace(/\/pull\/\d+$/, ".git");
+	if (!git(directory, "remote").split(/\r?\n/).includes("origin")) {
+		git(directory, "remote", "add", "origin", repositoryUrl);
+	}
+	// Model the local transport fixture as its GitHub repository. Remote selection and
+	// snapshot fetching still use the same source; #411 covers real URL validation + SSH.
+	const remoteUrl = git(directory, "remote", "get-url", "origin");
+	const canonicalize = githubDiscovery.canonicalizeGitHubRemoteUrl;
+	vi.spyOn(githubDiscovery, "canonicalizeGitHubRemoteUrl").mockImplementation((value) =>
+		canonicalize(value === remoteUrl ? repositoryUrl : value),
+	);
 	const bin = join(directory, "bin");
 	mkdirSync(bin, { recursive: true });
 	const configPath = join(bin, "gh-config.json");
@@ -107,7 +119,7 @@ if (args[0] === "pr" && args[1] === "view") {
   };
   for (const field of config.omitViewFields ?? []) delete view[field];
   const selector = args[2];
-  if (selector !== view.url && (fields === "headRefOid" || selector !== String(view.number))) {
+  if (selector !== view.url) {
     process.stderr.write("Pull request selector does not identify the fixture repository");
     process.exit(1);
   }
@@ -187,6 +199,7 @@ describe("review snapshots", () => {
 	);
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		for (const snapshot of snapshots.splice(0)) await snapshot.dispose();
 		for (const server of servers.splice(0)) {
 			server.closeAllConnections();
@@ -2277,6 +2290,7 @@ if (!args.includes("--numstat")) {
 
 	it("kills an in-flight GitHub CLI command during PR preparation", async () => {
 		const repository = createRepository();
+		git(repository, "remote", "add", "origin", "https://example.test/o/r.git");
 		const bin = join(repository, "delayed-gh-bin");
 		const startedPath = join(repository, "delayed-gh-started");
 		mkdirSync(bin);
