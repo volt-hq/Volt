@@ -56,6 +56,7 @@ function fixture(maxSeverity = 1, pull = false) {
 	const versions = new Map<string, number>();
 	const messages: Message[] = [];
 	let afterChange = (): void => {};
+	let publishOwn = true;
 	function send(message: object): void {
 		const body = JSON.stringify({ jsonrpc: "2.0", ...message });
 		stdout.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
@@ -90,7 +91,7 @@ function fixture(maxSeverity = 1, pull = false) {
 			versions.set(document.uri, document.version);
 		} else if (message.method === "textDocument/didChange" && document) {
 			versions.set(document.uri, document.version);
-			publish(b, []);
+			if (publishOwn) publish(b, []);
 			afterChange();
 		} else if (message.method === "textDocument/diagnostic") {
 			send({ id: message.id, result: { kind: "full", items: [diagnostic] } });
@@ -120,8 +121,9 @@ function fixture(maxSeverity = 1, pull = false) {
 		async open(path: string): Promise<void> {
 			expect(await manager.hover(path, "value")).toMatchObject({ outcome: "success", text: "Ready" });
 		},
-		async editB(onChange: () => void, content = "value B changed\n") {
+		async editB(onChange: () => void, content = "value B changed\n", publishEdited = true) {
 			afterChange = onChange;
+			publishOwn = publishEdited;
 			writeFileSync(b, content);
 			return manager.getDiagnostics(b, content);
 		},
@@ -184,6 +186,40 @@ describe("cross-file diagnostics require a known clean baseline", () => {
 			});
 		});
 	}
+
+	it.each([true, false])(
+		"preserves new cross-file errors after repeated timeouts (versioned=%s)",
+		async (versioned) => {
+			const f = fixture();
+			await f.open(f.a);
+			await f.open(f.b);
+			const first = await f.editB(() => f.publish(f.a, [], versioned), "value B first\n", false);
+			expect(first).toMatchObject({ outcome: "timeout", reason: "no-current-publication" });
+			expect(first.text).toContain("Diagnostics not verified");
+
+			const repeated = await f.editB(() => f.publish(f.a, [], versioned), "value B second\n", false);
+			expect(repeated).toMatchObject({ outcome: "timeout", reason: "no-current-publication", text: "" });
+
+			const newlyFailing = await f.editB(() => f.publish(f.a, [diagnostic], versioned), "value B third\n", false);
+			expect(newlyFailing).toMatchObject({
+				outcome: "timeout",
+				reason: "no-current-publication",
+				diagnosticCount: 0,
+				text: "Newly failing in other open files:\na.foo(1,1): error: Existing error in A",
+			});
+
+			const stillFailing = await f.editB(() => f.publish(f.a, [diagnostic], versioned), "value B fourth\n", false);
+			expect(stillFailing.text).toBe("");
+			// Recovery resets warning suppression, without relabeling earlier timeouts as success.
+			expect(await f.editB(() => f.publish(f.a, [], versioned), "value B recovered\n")).toMatchObject({
+				outcome: "empty",
+				text: "",
+			});
+			const nextTimeout = await f.editB(() => f.publish(f.a, [], versioned), "value B timeout\n", false);
+			expect(nextTimeout.outcome).toBe("timeout");
+			expect(nextTimeout.text).toContain("Diagnostics not verified");
+		},
+	);
 
 	it("requires a new clean publication before a previously unknown file can become newly failing", async () => {
 		const f = fixture();

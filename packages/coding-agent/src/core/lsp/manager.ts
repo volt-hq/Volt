@@ -98,6 +98,11 @@ export interface LspServerStatus {
 	coverage?: string;
 }
 
+/** Internal display evidence; diagnostic reports must survive health-warning suppression. */
+interface LspOperationResult extends LspResult {
+	diagnosticsText?: string;
+}
+
 interface ServerFailureState {
 	count: number;
 	reported: boolean;
@@ -726,7 +731,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 
 	private async runOperation(
 		absolutePath: string,
-		operation: () => Promise<LspResult>,
+		operation: () => Promise<LspOperationResult>,
 		automatic: boolean,
 	): Promise<LspResult> {
 		const startedAt = performance.now();
@@ -737,17 +742,18 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		const key = this.serverKey(server?.name ?? "none", root);
 		const context = { coldStartMs: 0 };
 		this.activeOperations.set(key, (this.activeOperations.get(key) ?? 0) + 1);
-		let result: LspResult;
+		let operationResult: LspOperationResult;
 		try {
-			result = await this.operationContext.run(context, operation);
+			operationResult = await this.operationContext.run(context, operation);
 		} catch (error) {
-			result = lspErrorResult(error);
+			operationResult = lspErrorResult(error);
 		} finally {
 			this.activeOperations.set(key, Math.max(0, (this.activeOperations.get(key) ?? 1) - 1));
 		}
 		const durationMs = performance.now() - startedAt;
-		result = {
-			...result,
+		const { diagnosticsText, ...evidence } = operationResult;
+		const result: LspResult = {
+			...evidence,
 			language: languageIdForExtension(extname(path)),
 			...(server ? { server: server.name, root } : {}),
 			coldStartMs: Math.min(durationMs, context.coldStartMs),
@@ -768,7 +774,8 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		this.metrics.set(key, metrics);
 		if (automatic) {
 			const transition = `${result.outcome}:${result.reason}`;
-			if (!lspSucceeded(result) && this.automaticTransitions.get(key) === transition) result.text = "";
+			if (!lspSucceeded(result) && this.automaticTransitions.get(key) === transition)
+				result.text = diagnosticsText ?? "";
 			this.automaticTransitions.set(key, transition);
 		}
 		return result;
@@ -853,7 +860,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		absolutePath: string,
 		content: string,
 		signal?: AbortSignal,
-	): Promise<LspResult> {
+	): Promise<LspOperationResult> {
 		if (this.disposed) return lspResult("unavailable", "LSP manager disposed", { reason: "disposed" });
 		if (!this.config.enabled) return lspResult("skipped", "", { reason: "disabled" });
 		if (signal?.aborted) return lspResult("cancelled", "LSP operation aborted", { reason: "aborted" });
@@ -915,18 +922,20 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 
 			const ownDiagnostics = this.formatDiagnostics(absolutePath, diagnostics.diagnostics);
 			const crossFile = this.formatNewlyFailing(client, absolutePath, cleanBefore);
+			const diagnosticsText = [
+				ownDiagnostics && diagnostics.freshness === "unverified"
+					? `Best-effort diagnostics (unversioned):\n${ownDiagnostics}`
+					: ownDiagnostics,
+				crossFile,
+			]
+				.filter(Boolean)
+				.join("\n");
 			const { diagnostics: _items, ...evidence } = diagnostics;
 			return {
 				...evidence,
+				diagnosticsText,
 				text:
-					[
-						ownDiagnostics && diagnostics.freshness === "unverified"
-							? `Best-effort diagnostics (unversioned):\n${ownDiagnostics}`
-							: ownDiagnostics,
-						crossFile,
-					]
-						.filter(Boolean)
-						.join("\n") ||
+					diagnosticsText ||
 					(lspSucceeded(evidence) ? "" : "Diagnostics not verified; use a build/check for confirmation."),
 			};
 		}
