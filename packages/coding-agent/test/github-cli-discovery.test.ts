@@ -35,10 +35,11 @@ if (args[0] === "remote" && args.length === 1) {
 } else if (args[0] === "remote" && args[1] === "get-url") {
   const values = remotes[args.at(-1)] || [];
   process.stdout.write(values.join("\\n") + (values.length ? "\\n" : ""));
-} else if (args[0] === "rev-parse") {
+} else if (args[0] === "for-each-ref" && args[1].includes("upstream:remotename")) {
   const upstream = process.env.VOLT_TEST_UPSTREAM || "";
-  if (upstream) process.stdout.write(upstream + "\\n");
-  else process.exitCode = 1;
+  const remote = Object.keys(remotes).find(name => upstream.startsWith(name + "/"));
+  const remoteRef = remote ? "refs/heads/" + upstream.slice(remote.length + 1) : "";
+  process.stdout.write(args.at(-1) + "\\0" + (remote || "") + "\\0" + remoteRef + "\\n");
 } else if (args[0] === "for-each-ref") {
   process.stdout.write(process.env.VOLT_TEST_REMOTE_REFS || "");
 } else {

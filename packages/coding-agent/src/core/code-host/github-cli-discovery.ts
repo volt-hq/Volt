@@ -218,10 +218,10 @@ function remoteForTrackingRef(ref: string, remotes: readonly RemoteRepository[],
 	return remote ?? null;
 }
 
-async function selectHeadRepository(
+async function selectHeadTarget(
 	request: CodeHostPullRequestDiscoveryRequest,
 	remotes: readonly RemoteRepository[],
-): Promise<CanonicalCodeHostRepository | CodeHostPullRequestDiscoveryOutcome> {
+): Promise<{ repository: CanonicalCodeHostRepository; branch: string } | CodeHostPullRequestDiscoveryOutcome> {
 	const candidates = new Map<string, CanonicalCodeHostRepository>();
 	const addRemote = (remote: string | null): void => {
 		if (!remote) return;
@@ -230,13 +230,55 @@ async function selectHeadRepository(
 		}
 	};
 
+	const localRef = `refs/heads/${request.branch}`;
 	const upstream = await runGit(
-		["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+		["for-each-ref", "--format=%(refname)%00%(upstream:remotename)%00%(upstream:remoteref)", localRef],
 		request.cwd,
 		request.signal,
 	);
-	if (upstream.failure === "cancelled") return { state: "unavailable", reason: "cancelled" };
-	if (upstream.ok) addRemote(remoteForTrackingRef(upstream.stdout.trim(), remotes, request.branch));
+	if (!upstream.ok) {
+		return { state: "unavailable", reason: upstream.failure === "cancelled" ? "cancelled" : "provider_error" };
+	}
+	if (upstream.stdout.trim()) {
+		const [observedRef, remote, remoteRef, extra] = upstream.stdout.trim().split("\0");
+		if (observedRef !== localRef || remote === undefined || remoteRef === undefined || extra !== undefined) {
+			return { state: "unavailable", reason: "invalid_response" };
+		}
+		if (remote && remote !== ".") {
+			const branch = remoteRef.startsWith("refs/heads/") ? remoteRef.slice("refs/heads/".length) : "";
+			if (
+				!REMOTE_NAME_PATTERN.test(remote) ||
+				!branch ||
+				branch.length > MAX_BRANCH_CHARS ||
+				/[\0\r\n]/.test(branch)
+			) {
+				return { state: "unavailable", reason: "invalid_response" };
+			}
+			// Revalidate every URL of the selected remote: discovery omits unsupported URLs.
+			// A mixed supported/credential-bearing remote must not become a partial match.
+			const urls = await runGit(["remote", "get-url", "--all", remote], request.cwd, request.signal);
+			if (!urls.ok) {
+				return { state: "unavailable", reason: urls.failure === "cancelled" ? "cancelled" : "provider_error" };
+			}
+			for (const url of urls.stdout.trim().split(/\r?\n/)) {
+				const repository = canonicalizeGitHubRemoteUrl(url);
+				if (!repository) return { state: "unavailable", reason: "unsupported_repository" };
+				candidates.set(repository.canonicalId, repository);
+			}
+			if (candidates.size !== 1) return { state: "unavailable", reason: "repository_ambiguous" };
+			const repository = candidates.values().next().value!;
+			if (
+				!remotes.some(
+					(candidate) =>
+						candidate.remote === remote && candidate.repository.canonicalId === repository.canonicalId,
+				)
+			) {
+				return { state: "unavailable", reason: "repository_ambiguous" };
+			}
+			return { repository, branch };
+		}
+		if (!remote && remoteRef) return { state: "unavailable", reason: "invalid_response" };
+	}
 
 	if (candidates.size === 0) {
 		const refs = await runGit(
@@ -258,7 +300,7 @@ async function selectHeadRepository(
 		for (const candidate of remotes) candidates.set(candidate.repository.canonicalId, candidate.repository);
 	}
 	if (candidates.size !== 1) return { state: "unavailable", reason: "repository_ambiguous" };
-	return candidates.values().next().value!;
+	return { repository: candidates.values().next().value!, branch: request.branch };
 }
 
 function unavailableReason(
@@ -373,8 +415,8 @@ export async function discoverPullRequestWithGitHubCli(
 	const discovered = await discoverRemoteRepositories({ ...request, branch, headOid });
 	if (!Array.isArray(discovered)) return discovered;
 	if (discovered.length === 0) return { state: "unavailable", reason: "unsupported_repository" };
-	const headRepository = await selectHeadRepository({ ...request, branch, headOid }, discovered);
-	if ("state" in headRepository) return headRepository;
+	const headTarget = await selectHeadTarget({ ...request, branch, headOid }, discovered);
+	if ("state" in headTarget) return headTarget;
 
 	const repositories = new Map<string, CanonicalCodeHostRepository>();
 	for (const candidate of discovered) repositories.set(candidate.repository.canonicalId, candidate.repository);
@@ -392,7 +434,7 @@ export async function discoverPullRequestWithGitHubCli(
 					"--state",
 					"all",
 					"--head",
-					branch,
+					headTarget.branch,
 					"--limit",
 					"100",
 					"--json",
@@ -416,8 +458,8 @@ export async function discoverPullRequestWithGitHubCli(
 			const repositoryMatches = parsePullRequests(
 				result.stdout.toString("utf8"),
 				repository,
-				headRepository,
-				branch,
+				headTarget.repository,
+				headTarget.branch,
 				headOid,
 			);
 			if (!repositoryMatches) return { state: "unavailable", reason: "invalid_response" };

@@ -86,7 +86,10 @@ export function reviewTargetForRerun(record: Pick<ReviewRunRecord, "target">): R
 		return { kind: "branch", branchBase: structuredClone(record.target.branchBase) };
 	}
 	if (identity.kind === "pr") {
-		return { kind: "pr", number: identity.pullRequest ? String(identity.pullRequest.number) : undefined };
+		if (!identity.pullRequest?.url) {
+			throw new Error("Durable PR review run does not retain a pull request identity. Start a new review.");
+		}
+		return { kind: "pr", number: String(identity.pullRequest.number), expectedUrl: identity.pullRequest.url };
 	}
 	return { kind: "commit", sha: identity.headCommit };
 }
