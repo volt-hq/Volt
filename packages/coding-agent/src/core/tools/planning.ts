@@ -449,8 +449,8 @@ export function createPlanningToolDefinitions(
 			name: "update_plan_progress",
 			label: "update plan progress",
 			description:
-				"Update only status and execution evidence for existing approved executable leaf ids. Group outcome status is derived from its substeps. The approved title, summary, outcome and substep text, order, hierarchy, and scope are immutable.",
-			promptSnippet: "Update progress on existing approved plan steps",
+				"Update only status and execution evidence for existing approved executable leaf ids. Mark work in_progress when starting it and completed once its required outcome and verification are supported by evidence, before moving to unrelated work; do not wait until the end. Batch related transitions or leaves genuinely completed together, not mechanical updates after every tool call. Group outcome status is derived from its substeps. The approved title, summary, outcome and substep text, order, hierarchy, and scope are immutable.",
+			promptSnippet: "Keep approved plan progress current as work starts and verified outcomes finish",
 			parameters: updatePlanProgressSchema,
 			renderCall(args, currentTheme, context) {
 				return renderPlanningCall(
