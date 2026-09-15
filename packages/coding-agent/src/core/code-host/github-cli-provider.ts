@@ -1,5 +1,6 @@
 import { runGitHubCli } from "./github-cli.ts";
 import { capturePullRequestContextWithGitHubCli } from "./github-cli-context.ts";
+import { parseGitHubPullRequestUrl } from "./github-cli-review-target.ts";
 import type {
 	CodeHostProvider,
 	ReviewCodeHostInlineComment,
@@ -17,10 +18,15 @@ function parseJsonObject(text: string, label: string): Record<string, unknown> {
 	}
 }
 
-function assertGitHubPullRequest(pullRequest: ReviewPullRequestIdentity): void {
+function githubPullRequestLocator(pullRequest: ReviewPullRequestIdentity) {
 	if (pullRequest.providerId !== "github") {
 		throw new Error(`GitHub CLI cannot operate on code-host provider ${JSON.stringify(pullRequest.providerId)}.`);
 	}
+	const locator = parseGitHubPullRequestUrl(pullRequest.url);
+	if (!locator || locator.number !== pullRequest.number) {
+		throw new Error("The captured GitHub pull request identity is invalid. Run a new review before publishing.");
+	}
+	return locator;
 }
 
 function githubInlineComment(comment: ReviewCodeHostInlineComment): Record<string, unknown> {
@@ -58,8 +64,8 @@ async function probeCurrentPullRequest(cwd: string, signal?: AbortSignal) {
 }
 
 async function verifyPullRequestHead(cwd: string, pullRequest: ReviewPullRequestIdentity): Promise<void> {
-	assertGitHubPullRequest(pullRequest);
-	const result = await runGitHubCli(["pr", "view", String(pullRequest.number), "--json", "headRefOid"], { cwd });
+	const locator = githubPullRequestLocator(pullRequest);
+	const result = await runGitHubCli(["pr", "view", locator.url, "--json", "headRefOid"], { cwd });
 	if (!result.ok) throw new Error(`Could not verify the pull request head: ${result.stderr.trim()}`);
 	const current = parseJsonObject(result.stdout.toString("utf8"), "gh pr view");
 	if (current.headRefOid !== pullRequest.headRefOid) {
@@ -70,17 +76,9 @@ async function verifyPullRequestHead(cwd: string, pullRequest: ReviewPullRequest
 }
 
 async function publishPullRequestReview(request: ReviewCodeHostPublishRequest) {
-	assertGitHubPullRequest(request.pullRequest);
-	const repositoryResult = await runGitHubCli(["repo", "view", "--json", "nameWithOwner"], {
-		cwd: request.cwd,
-	});
-	if (!repositoryResult.ok) {
-		throw new Error(`Could not resolve the GitHub repository: ${repositoryResult.stderr.trim()}`);
-	}
-	const repository = parseJsonObject(repositoryResult.stdout.toString("utf8"), "gh repo view");
-	if (typeof repository.nameWithOwner !== "string" || !repository.nameWithOwner.includes("/")) {
-		throw new Error("gh repo view did not return a repository name.");
-	}
+	const locator = githubPullRequestLocator(request.pullRequest);
+	// The canonical repository includes its host; REST paths need only owner/name.
+	const repository = locator.repository.slice(locator.repository.indexOf("/") + 1);
 	const payload = JSON.stringify({
 		commit_id: request.pullRequest.headRefOid,
 		body: request.body,
@@ -92,7 +90,9 @@ async function publishPullRequestReview(request: ReviewCodeHostPublishRequest) {
 			"api",
 			"--method",
 			"POST",
-			`repos/${repository.nameWithOwner}/pulls/${request.pullRequest.number}/reviews`,
+			`repos/${repository}/pulls/${locator.number}/reviews`,
+			"--hostname",
+			locator.hostname,
 			"--input",
 			"-",
 		],

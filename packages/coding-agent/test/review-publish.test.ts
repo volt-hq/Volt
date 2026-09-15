@@ -26,7 +26,7 @@ function reviewRun(headRefOid = "head-oid"): ReviewRunRecord {
 					number: 7,
 					title: "Fix values",
 					body: "Body",
-					url: "https://example.test/pr/7",
+					url: "https://github.com/volt-hq/Volt/pull/7",
 					baseRefName: "main",
 					headRefName: "feature",
 					baseRefOid: "base-oid",
