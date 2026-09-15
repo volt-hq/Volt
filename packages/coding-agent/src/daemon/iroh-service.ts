@@ -81,6 +81,7 @@ import { SettingsManager } from "../core/settings-manager.ts";
 import { getCurrentThemeName, getResolvedThemeColors } from "../core/theme/runtime.ts";
 import { ProjectTrustStore } from "../core/trust-manager.ts";
 import { runIrohRemoteRpcMode } from "../modes/rpc/iroh-remote-rpc-mode.ts";
+import { IROH_DEPLOYMENT_PROFILE } from "../remote/iroh-deployment.ts";
 import {
 	CONTROL_RPC_GRANTS_CAPABILITY,
 	CONTROL_WORKTREES_CAPABILITY,
@@ -304,10 +305,12 @@ export type IrohRelayMode = "disabled" | "development" | "production";
  * ("production" mode); the n0 public relays ("development" mode) are for
  * development only and must be opted into via VOLT_IROH_RELAY_MODE=development.
  */
-export const VOLT_PRODUCTION_RELAY_URLS = ["https://iroh-relay-us-central.volt-cli.dev"];
-export const VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL = "https://credentials.volt-cli.dev";
-export const VOLT_CANARY_RELAY_URLS = ["https://iroh-relay-us-central-canary.volt-cli.dev"];
-export const VOLT_CANARY_RELAY_CREDENTIAL_SERVICE_URL = "https://credentials-canary.volt-cli.dev";
+export {
+	VOLT_CANARY_RELAY_CREDENTIAL_SERVICE_URL,
+	VOLT_CANARY_RELAY_URLS,
+	VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL,
+	VOLT_PRODUCTION_RELAY_URLS,
+} from "../remote/iroh-deployment.ts";
 
 export interface IrohDaemonServiceConfig {
 	relayMode?: IrohRelayMode;
@@ -387,7 +390,16 @@ export function resolveIrohRelayConfig(
 	const relayMode = config.relayMode ?? envMode ?? "production";
 	const configuredUrls = config.relayUrls ?? envUrls ?? persistedRelayUrls;
 	const relayUrls =
-		relayMode === "production" ? (configuredUrls ?? VOLT_PRODUCTION_RELAY_URLS) : (configuredUrls ?? []);
+		relayMode === "production"
+			? (configuredUrls ?? IROH_DEPLOYMENT_PROFILE.deployments[0].relayUrls)
+			: (configuredUrls ?? []);
+	if (
+		IROH_DEPLOYMENT_PROFILE.caRootsDer !== undefined &&
+		(relayMode !== "production" ||
+			!sameStringSet([...relayUrls].sort(), [...IROH_DEPLOYMENT_PROFILE.deployments[0].relayUrls].sort()))
+	) {
+		throw new Error("private deployment build cannot use another relay authority");
+	}
 	return { relayMode, relayUrls, ...(warning === undefined ? {} : { warning }) };
 }
 
@@ -398,17 +410,16 @@ export function resolveIrohRelayCredentialServiceUrl(
 ): string | undefined {
 	if (relayMode !== "production") return undefined;
 	const normalized = relayUrls.map((value) => new URL(value).origin).sort();
-	const isProductionDeployment = sameStringSet(normalized, [...VOLT_PRODUCTION_RELAY_URLS].sort());
-	const isCanaryDeployment = sameStringSet(normalized, [...VOLT_CANARY_RELAY_URLS].sort());
-	if (!isProductionDeployment && !isCanaryDeployment) return undefined;
-	const deploymentServiceUrl = isProductionDeployment
-		? VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL
-		: VOLT_CANARY_RELAY_CREDENTIAL_SERVICE_URL;
+	const deployment = IROH_DEPLOYMENT_PROFILE.deployments.find((candidate) =>
+		sameStringSet(normalized, [...candidate.relayUrls].sort()),
+	);
+	if (deployment === undefined) return undefined;
+	const deploymentServiceUrl = deployment.credentialServiceUrl;
 	if (explicitServiceUrl !== undefined) {
 		const normalizedServiceUrl = normalizeIrohCredentialServiceUrl(explicitServiceUrl);
 		if (normalizedServiceUrl !== deploymentServiceUrl) {
 			throw new Error(
-				`explicit managed relay credential service URL conflicts with the ${isProductionDeployment ? "production" : "canary"} relay deployment`,
+				`explicit managed relay credential service URL conflicts with the ${deployment.name} relay deployment`,
 			);
 		}
 	}
@@ -2401,6 +2412,12 @@ class IrohDaemonService {
 			} else {
 				this.iroh.presetMinimal(builder);
 				builder.relayMode(this.iroh.RelayMode.disabled());
+			}
+			if (IROH_DEPLOYMENT_PROFILE.caRootsDer !== undefined) {
+				if (builder.caRoots === undefined) {
+					throw new Error("private deployment build requires the native caRoots binding");
+				}
+				builder.caRoots(IROH_DEPLOYMENT_PROFILE.caRootsDer);
 			}
 			const secretKey = this.services.state.state.irohSecretKey;
 			if (secretKey) {
