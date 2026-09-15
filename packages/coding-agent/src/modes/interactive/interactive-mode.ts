@@ -9640,6 +9640,7 @@ export class InteractiveMode {
 			});
 
 			if (result.status !== "completed") {
+				this.renderCurrentSessionState();
 				this.showStatus("Review cancelled");
 				return result;
 			}
@@ -9652,6 +9653,7 @@ export class InteractiveMode {
 			return result;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
+			this.renderCurrentSessionState();
 			this.showError(
 				message.includes("git") || message.includes("repository") ? `${message} ${REVIEW_USAGE}` : message,
 			);
