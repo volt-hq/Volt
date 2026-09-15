@@ -346,6 +346,15 @@ export async function processResponsesStream<TApi extends Api>(
 	let sawToolCall = false;
 	let sawTerminalResponse = false;
 	let sawIncompleteToolCall = false;
+	let usage: Usage = {
+		availability: "unavailable",
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
 
 	const eventOutputIndex = (event: ResponseStreamEvent): number | undefined => {
 		const value = (event as { output_index?: unknown }).output_index;
@@ -451,6 +460,58 @@ export async function processResponsesStream<TApi extends Api>(
 	};
 
 	for await (const event of openaiStream) {
+		// Usage can arrive before completion or on a failed response. Retain that
+		// evidence even if the transport fails or the terminal omits usage.
+		if (
+			"response" in event &&
+			(event.response?.usage || event.type === "response.completed" || event.type === "response.incomplete")
+		) {
+			const response = event.response;
+			const reported = response?.usage;
+			if (
+				reported &&
+				[
+					reported.input_tokens,
+					reported.output_tokens,
+					reported.total_tokens,
+					reported.input_tokens_details?.cached_tokens,
+				].some((value) => typeof value === "number")
+			) {
+				const cachedTokens = reported.input_tokens_details?.cached_tokens || 0;
+				usage = {
+					availability:
+						(event.type === "response.completed" || event.type === "response.incomplete") &&
+						typeof reported.input_tokens === "number" &&
+						typeof reported.output_tokens === "number"
+							? "complete"
+							: "partial",
+					// OpenAI includes cached tokens in input_tokens.
+					input: (reported.input_tokens || 0) - cachedTokens,
+					output: reported.output_tokens || 0,
+					cacheRead: cachedTokens,
+					cacheWrite: 0,
+					totalTokens: reported.total_tokens || 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				};
+			}
+			calculateCost(model, usage);
+			const requestedServiceTier = options?.serviceTier ?? undefined;
+			const responseServiceTier = response?.service_tier ?? undefined;
+			const effectiveServiceTier = responseServiceTier ?? requestedServiceTier;
+			if (requestedServiceTier !== undefined || responseServiceTier !== undefined) {
+				usage.serviceTier = {
+					...(requestedServiceTier === undefined ? {} : { requested: requestedServiceTier satisfies ServiceTier }),
+					...(responseServiceTier === undefined ? {} : { effective: responseServiceTier satisfies ServiceTier }),
+				};
+			}
+			if (options?.applyServiceTierPricing) {
+				const serviceTier = options.resolveServiceTier
+					? options.resolveServiceTier(responseServiceTier, requestedServiceTier)
+					: effectiveServiceTier;
+				options.applyServiceTierPricing(usage, serviceTier);
+			}
+			normalizer.push({ type: "meta", patch: { usage } });
+		}
 		if (event.type === "response.created") {
 			responseId = event.response.id;
 			normalizer.push({ type: "meta", patch: { responseId } });
@@ -619,43 +680,7 @@ export async function processResponsesStream<TApi extends Api>(
 			if (response?.id) {
 				responseId = response.id;
 			}
-			let usage: Usage = {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			};
-			if (response?.usage) {
-				const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
-				usage = {
-					// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input
-					input: (response.usage.input_tokens || 0) - cachedTokens,
-					output: response.usage.output_tokens || 0,
-					cacheRead: cachedTokens,
-					cacheWrite: 0,
-					totalTokens: response.usage.total_tokens || 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				};
-			}
-			calculateCost(model, usage);
-			const requestedServiceTier = options?.serviceTier ?? undefined;
-			const responseServiceTier = response?.service_tier ?? undefined;
-			const effectiveServiceTier = responseServiceTier ?? requestedServiceTier;
-			if (requestedServiceTier !== undefined || effectiveServiceTier !== undefined) {
-				usage.serviceTier = {
-					...(requestedServiceTier === undefined ? {} : { requested: requestedServiceTier satisfies ServiceTier }),
-					...(effectiveServiceTier === undefined ? {} : { effective: effectiveServiceTier satisfies ServiceTier }),
-				};
-			}
-			if (options?.applyServiceTierPricing) {
-				const serviceTier = options.resolveServiceTier
-					? options.resolveServiceTier(responseServiceTier, requestedServiceTier)
-					: effectiveServiceTier;
-				options.applyServiceTierPricing(usage, serviceTier);
-			}
-			normalizer.push({ type: "meta", patch: { responseId, usage } });
+			normalizer.push({ type: "meta", patch: { responseId } });
 			stopReason = event.type === "response.incomplete" ? "length" : mapStopReason(response?.status);
 			if (sawToolCall && stopReason === "stop") {
 				stopReason = "toolUse";

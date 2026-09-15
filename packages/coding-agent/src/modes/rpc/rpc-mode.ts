@@ -65,6 +65,7 @@ import {
 	getCanonicalReviewRun,
 	recordReviewFindingOutcome,
 } from "../../core/review-state.ts";
+import { createEmptyReviewUsage } from "../../core/review-usage.ts";
 import { subscribeRpcSessionEvents } from "../../core/rpc/background-jobs.ts";
 import { type ProjectionDiagnostic, StreamProjector } from "../../core/rpc/stream-projection.ts";
 import type { RpcTransport } from "../../core/rpc/transport.ts";
@@ -1236,7 +1237,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 								onEvent: hooks.onEvent,
 							});
 							if (reviewOptions.remote && result.status === "failed") {
-								return { status: "failed", errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE };
+								return { ...result, errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE };
 							}
 							return result;
 						} catch (error) {
@@ -1269,6 +1270,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 								snapshot: prepared.resolution,
 								controls: prepared.controls,
 								status: "cancelled",
+								usage: createEmptyReviewUsage(),
 								incrementalPlan: prepared.incrementalPlan,
 							}),
 						);

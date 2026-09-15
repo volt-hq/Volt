@@ -301,6 +301,12 @@ Extension state persistence. Does NOT participate in LLM context.
 
 Use `customType` to identify your extension's entries on reload.
 
+### Review accounting custom entries
+
+`volt.review.run` records retain review identity and outcome. An `unfinished` run has no `endedAt` or findings result; this is a persisted observation, not proof that inference is still running. `volt.review.usage` entries contain compact cumulative accounting checkpoints keyed by `runId` and a monotonic revision. Hydration replaces older checkpoints instead of summing them. Terminal run records embed finalized accounting; delayed checkpoints cannot overwrite it.
+
+Accounting retains per-pass/repair provider/model, available service tier, host request attempts, assistant turns, token components, and model-priced USD estimates. Pending or incomplete observations remain partial/unavailable after reopen. Missing historical accounting is unavailable and is never backfilled. Accounting does not retain inference transcripts, enter model context, or contribute to subsequent discussion totals. Host-created aliases resolve the canonical source; copied entries do not create new spend or authority. Ordinary session retention limits still apply; in-memory sessions are not restart-durable.
+
 ### CustomMessageEntry
 
 Extension-injected messages that DO participate in LLM context.

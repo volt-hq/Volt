@@ -6,6 +6,7 @@ import {
 	registerDurableReviewAnchor,
 	resolveCanonicalReviewSource,
 } from "./review-anchors.ts";
+import { createReviewAccountingMessage } from "./review-presentation.ts";
 import type { ParsedReview, ReviewFinding, ReviewFindingOutcomeReason, ReviewFindingStatus } from "./review-report.ts";
 import type {
 	ReviewBranchBase,
@@ -14,9 +15,11 @@ import type {
 	ReviewSnapshotIdentity,
 	ReviewSnapshotTreeEntry,
 } from "./review-snapshot.ts";
+import { parseReviewUsage, type ReviewUsageAccounting } from "./review-usage.ts";
 import { type CustomEntry, type SessionEntry, SessionManager } from "./session-manager.ts";
 
 export const REVIEW_RUN_CUSTOM_ENTRY_TYPE = "volt.review.run";
+export const REVIEW_USAGE_CUSTOM_ENTRY_TYPE = "volt.review.usage";
 export const REVIEW_ACKNOWLEDGMENT_CUSTOM_ENTRY_TYPE = "volt.review.acknowledgment";
 export const REVIEW_FINDING_TRANSITION_CUSTOM_ENTRY_TYPE = "volt.review.finding-transition";
 export const REVIEW_PUBLICATION_CUSTOM_ENTRY_TYPE = "volt.review.publication";
@@ -31,7 +34,7 @@ const MAX_REVIEW_FOCUS_BYTES = 4_000;
 const MAX_REVIEW_SCOPE_PATTERNS = 50;
 const MAX_REVIEW_SCOPE_PATTERN_BYTES = 500;
 
-export type ReviewRunStatus = "completed" | "incomplete" | "failed" | "cancelled";
+export type ReviewRunStatus = "unfinished" | "completed" | "incomplete" | "failed" | "cancelled";
 
 export interface ReviewRunFileIdentity {
 	path: string;
@@ -73,7 +76,9 @@ export interface ReviewRunRecord {
 	workflowAction: string;
 	status: ReviewRunStatus;
 	startedAt: number;
-	endedAt: number;
+	/** Absent for unfinished runs; never inferred from checkpoint time. */
+	endedAt?: number;
+	usage?: ReviewUsageAccounting;
 	target: {
 		description: string;
 		diffCommand: string;
@@ -299,6 +304,7 @@ function parseRun(value: unknown): ReviewRunRecord | undefined {
 	if (!isObject(value) || value.schemaVersion !== REVIEW_STATE_SCHEMA_VERSION) return undefined;
 	if (typeof value.runId !== "string" || typeof value.workflowAction !== "string") return undefined;
 	if (
+		value.status !== "unfinished" &&
 		value.status !== "completed" &&
 		value.status !== "incomplete" &&
 		value.status !== "failed" &&
@@ -307,7 +313,9 @@ function parseRun(value: unknown): ReviewRunRecord | undefined {
 		return undefined;
 	if (
 		!Number.isFinite(value.startedAt) ||
-		!Number.isFinite(value.endedAt) ||
+		(value.status === "unfinished"
+			? value.endedAt !== undefined || value.result !== undefined
+			: !Number.isFinite(value.endedAt)) ||
 		!isObject(value.target) ||
 		!isObject(value.options)
 	)
@@ -319,7 +327,11 @@ function parseRun(value: unknown): ReviewRunRecord | undefined {
 		!Array.isArray(value.target.files)
 	)
 		return undefined;
-	return structuredClone(value) as unknown as ReviewRunRecord;
+	const record = structuredClone(value) as unknown as ReviewRunRecord;
+	delete record.usage;
+	const usage = parseReviewUsage(value.usage);
+	if (usage) record.usage = usage;
+	return record;
 }
 
 function parseAcknowledgment(value: unknown): ReviewAcknowledgmentRecord | undefined {
@@ -397,19 +409,45 @@ function decodeCursor(cursor: string): { endedAt: number; runId: string } {
 }
 
 function compareRuns(left: ReviewRunRecord, right: ReviewRunRecord): number {
-	return right.endedAt - left.endedAt || right.runId.localeCompare(left.runId);
+	return (
+		(right.endedAt ?? right.startedAt) - (left.endedAt ?? left.startedAt) || right.runId.localeCompare(left.runId)
+	);
+}
+
+function hydrateRuns(entries: readonly CustomEntry[]): Map<string, ReviewRunRecord> {
+	const runs = new Map<string, ReviewRunRecord>();
+	const checkpoints = new Map<string, ReviewUsageAccounting>();
+	for (const entry of entries) {
+		if (entry.customType === REVIEW_RUN_CUSTOM_ENTRY_TYPE) {
+			const run = parseRun(entry.data);
+			if (!run) continue;
+			const previous = runs.get(run.runId);
+			if (previous && previous.status !== "unfinished" && run.status === "unfinished") continue;
+			if (previous?.usage && run.usage && previous.usage.revision > run.usage.revision) continue;
+			if (previous?.usage && !run.usage) run.usage = previous.usage;
+			runs.set(run.runId, run);
+		} else if (
+			entry.customType === REVIEW_USAGE_CUSTOM_ENTRY_TYPE &&
+			isObject(entry.data) &&
+			typeof entry.data.runId === "string"
+		) {
+			const usage = parseReviewUsage(entry.data.usage);
+			if (usage && !usage.finalized && usage.revision > (checkpoints.get(entry.data.runId)?.revision ?? -1))
+				checkpoints.set(entry.data.runId, usage);
+		}
+	}
+	for (const run of runs.values()) {
+		const usage = checkpoints.get(run.runId);
+		if (run.status === "unfinished" && usage && usage.revision > (run.usage?.revision ?? -1)) run.usage = usage;
+	}
+	return runs;
 }
 
 export function captureReviewStateForHandoff(sessionManager: SessionManager): ReviewStateHandoffSnapshot {
 	const entries = branchCustomEntries(sessionManager);
 	const acknowledgments = acknowledgmentMap(entries);
 	const transitions = transitionMap(entries);
-	const byRunId = new Map<string, ReviewRunRecord>();
-	for (const entry of entries) {
-		if (entry.customType !== REVIEW_RUN_CUSTOM_ENTRY_TYPE) continue;
-		const run = parseRun(entry.data);
-		if (run) byRunId.set(run.runId, run);
-	}
+	const byRunId = hydrateRuns(entries);
 	const runs = [...byRunId.values()].sort(compareRuns).slice(0, MAX_HYDRATED_REVIEW_RUNS);
 	const retainedFindingKeys = new Set(
 		runs.flatMap((run) => (run.result?.findings ?? []).map((finding) => `${run.runId}\0${finding.id}`)),
@@ -449,16 +487,13 @@ export function listReviewRuns(
 	const entries = branchCustomEntries(sessionManager);
 	const acknowledgments = acknowledgmentMap(entries);
 	const transitions = transitionMap(entries);
-	const byRunId = new Map<string, ReviewRunRecord>();
-	for (const entry of entries) {
-		if (entry.customType !== REVIEW_RUN_CUSTOM_ENTRY_TYPE) continue;
-		const run = parseRun(entry.data);
-		if (run) byRunId.set(run.runId, run);
-	}
+	const byRunId = hydrateRuns(entries);
 	let runs = [...byRunId.values()].sort(compareRuns).slice(0, MAX_HYDRATED_REVIEW_RUNS);
 	if (options.cursor) {
 		const cursor = decodeCursor(options.cursor);
-		const index = runs.findIndex((run) => run.endedAt === cursor.endedAt && run.runId === cursor.runId);
+		const index = runs.findIndex(
+			(run) => (run.endedAt ?? run.startedAt) === cursor.endedAt && run.runId === cursor.runId,
+		);
 		if (index < 0) throw new Error("Review result cursor no longer identifies a retained run.");
 		runs = runs.slice(index + 1);
 	}
@@ -467,7 +502,7 @@ export function listReviewRuns(
 	return {
 		runs: selected,
 		...(runs.length > selected.length && finalRun
-			? { nextCursor: encodeCursor(finalRun.endedAt, finalRun.runId) }
+			? { nextCursor: encodeCursor(finalRun.endedAt ?? finalRun.startedAt, finalRun.runId) }
 			: {}),
 	};
 }
@@ -610,8 +645,23 @@ export function appendReviewRun(sessionManager: SessionManager, record: ReviewRu
 	sessionManager.appendCustomEntry(REVIEW_RUN_CUSTOM_ENTRY_TYPE, persistedRecord);
 }
 
+export function appendReviewUsageCheckpoint(
+	sessionManager: SessionManager,
+	runId: string,
+	usage: ReviewUsageAccounting,
+): void {
+	if (!parseReviewUsage(usage) || usage.finalized) throw new Error("Invalid review accounting checkpoint");
+	const record = { runId, usage };
+	assertRecordSize(record);
+	sessionManager.appendCustomEntry(REVIEW_USAGE_CUSTOM_ENTRY_TYPE, record);
+}
+
 export async function appendReviewRunDurably(sessionManager: SessionManager, record: ReviewRunRecord): Promise<void> {
 	appendReviewRun(sessionManager, record);
+	if (!record.result && (record.status !== "unfinished" || sessionManager.isPersisted())) {
+		const notice = createReviewAccountingMessage(record);
+		sessionManager.appendCustomMessageEntry(notice.customType, notice.content, notice.display, notice.details);
+	}
 	await sessionManager.materialize();
 	await registerDurableReviewAnchor(sessionManager, record.runId);
 }
@@ -733,11 +783,13 @@ export function createReviewRunRecord(options: {
 	snapshot: ReviewSnapshot;
 	controls: ReviewRunControls;
 	status: ReviewRunStatus;
+	usage?: ReviewUsageAccounting;
 	result?: ParsedReview;
 	errorMessage?: string;
 	incrementalPlan?: ReviewIncrementalPlan;
 }): ReviewRunRecord {
 	assertReviewControlsPersistLosslessly(options.controls);
+	if (options.usage && !parseReviewUsage(options.usage)) throw new Error("Invalid review accounting");
 	const fileInventory = snapshotFileInventory(options.snapshot);
 	const createRecord = (includeEvidence: boolean): ReviewRunRecord => ({
 		schemaVersion: REVIEW_STATE_SCHEMA_VERSION,
@@ -745,7 +797,8 @@ export function createReviewRunRecord(options: {
 		workflowAction: options.workflowAction,
 		status: options.status,
 		startedAt: options.startedAt,
-		endedAt: options.endedAt ?? Date.now(),
+		...(options.status === "unfinished" ? {} : { endedAt: options.endedAt ?? Date.now() }),
+		...(options.usage ? { usage: structuredClone(options.usage) } : {}),
 		target: {
 			description: truncateUtf8(options.snapshot.description, 4_000),
 			diffCommand: truncateUtf8(options.snapshot.diffCommand, 4_000),

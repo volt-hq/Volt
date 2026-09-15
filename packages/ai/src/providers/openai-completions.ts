@@ -262,18 +262,26 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					responseModel = chunk.model;
 					normalizer.push({ type: "meta", patch: { responseModel } });
 				}
+				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
+				const usageAvailability =
+					hasFinishReason || choice?.finish_reason || chunk.choices?.length === 0 ? "complete" : "partial";
 				if (chunk.usage) {
-					normalizer.push({ type: "meta", patch: { usage: parseChunkUsage(chunk.usage, model) } });
+					normalizer.push({
+						type: "meta",
+						patch: { usage: parseChunkUsage(chunk.usage, model, usageAvailability) },
+					});
 				}
 
-				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
 				if (!choice) continue;
 
 				// Fallback: some providers (e.g., Moonshot) return usage
 				// in choice.usage instead of the standard chunk.usage
 				const choiceUsage = (choice as ChatCompletionChoiceWithUsage).usage;
 				if (!chunk.usage && choiceUsage) {
-					normalizer.push({ type: "meta", patch: { usage: parseChunkUsage(choiceUsage, model) } });
+					normalizer.push({
+						type: "meta",
+						patch: { usage: parseChunkUsage(choiceUsage, model, usageAvailability) },
+					});
 				}
 
 				if (choice.finish_reason) {
@@ -1032,11 +1040,24 @@ function parseChunkUsage(
 	rawUsage: {
 		prompt_tokens?: number;
 		completion_tokens?: number;
+		total_tokens?: number;
 		prompt_cache_hit_tokens?: number;
 		prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
 	},
 	model: Model<"openai-completions">,
-): Usage {
+	availability: "partial" | "complete",
+): Usage | undefined {
+	if (
+		![
+			rawUsage.prompt_tokens,
+			rawUsage.completion_tokens,
+			rawUsage.total_tokens,
+			rawUsage.prompt_cache_hit_tokens,
+			rawUsage.prompt_tokens_details?.cached_tokens,
+			rawUsage.prompt_tokens_details?.cache_write_tokens,
+		].some((value) => typeof value === "number")
+	)
+		return undefined;
 	const promptTokens = rawUsage.prompt_tokens || 0;
 	const cacheReadTokens = rawUsage.prompt_tokens_details?.cached_tokens ?? rawUsage.prompt_cache_hit_tokens ?? 0;
 	const cacheWriteTokens = rawUsage.prompt_tokens_details?.cache_write_tokens || 0;
@@ -1053,6 +1074,10 @@ function parseChunkUsage(
 	// OpenAI completion_tokens already includes reasoning_tokens.
 	const outputTokens = rawUsage.completion_tokens || 0;
 	const usage: Usage = {
+		availability:
+			typeof rawUsage.prompt_tokens === "number" && typeof rawUsage.completion_tokens === "number"
+				? availability
+				: "partial",
 		input,
 		output: outputTokens,
 		cacheRead: cacheReadTokens,

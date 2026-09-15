@@ -1,6 +1,7 @@
 import { stripVTControlCharacters } from "node:util";
 import type { ParsedReview, ReviewFinding, ReviewLocation } from "./review-report.ts";
 import type { ReviewRunRecord } from "./review-state.ts";
+import { parseReviewUsage } from "./review-usage.ts";
 
 export const STATIC_REVIEW_LIMITATION = "Static review only. This review did not run tests or runtime checks.";
 
@@ -144,7 +145,9 @@ function fullReview(
 		`Finding status when this session opened: ${findingCounts(parsed.findings)}.`,
 		"These statuses are historical transcript data; use the canonical run for later outcomes.",
 		"",
-		`Original review conclusion (${new Date(record.endedAt).toISOString()}):`,
+		record.endedAt === undefined
+			? "Original review conclusion (completion time unavailable):"
+			: `Original review conclusion (${new Date(record.endedAt).toISOString()}):`,
 		`Status: ${parsed.completionStatus}`,
 		`Summary: ${parsed.summary}`,
 		`Overall: ${parsed.overallCorrectness ? `${parsed.overallCorrectness} — ` : ""}${parsed.overallExplanation}`,
@@ -195,6 +198,45 @@ function fullReview(
 	return lines.join("\n");
 }
 
+export function formatReviewUsage(value: unknown, expanded: boolean): string {
+	const usage = parseReviewUsage(value);
+	if (!usage) return "Initial review accounting: unavailable.";
+	const summary = usage.summary;
+	const tokens = summary.tokens;
+	const estimate = summary.estimatedCost;
+	const lines = [
+		`Initial review accounting: ${summary.status}${usage.finalized ? "" : " (unfinished)"}.`,
+		`${summary.requests} host request attempts; ${summary.turns} assistant turns; ${summary.pendingRequests} pending; ${summary.unavailableRequests} unavailable.`,
+		tokens
+			? `Tokens: ${tokens.input} input, ${tokens.output} output, ${tokens.cacheRead} cache read, ${tokens.cacheWrite} cache write.`
+			: "Tokens: unavailable.",
+		estimate
+			? `Model-priced estimate: $${estimate.total.toFixed(6)} USD${summary.status === "complete" ? "" : " (partial subtotal)"}.`
+			: "Model-priced estimate: unavailable.",
+		"Not an invoice or subscription charge. Excludes subsequent discussion usage.",
+	];
+	if (expanded)
+		for (const entry of usage.attempts) {
+			lines.push(
+				`- Pass ${entry.passId}: ${entry.phase}/${entry.purpose}, round ${entry.round}, attempt ${entry.attempt}, ${entry.kind}; ${reviewText(entry.provider)}/${reviewText(entry.model)}; tier ${reviewText(entry.effectiveTier ?? "unavailable")}; ${entry.requests} requests; ${entry.tokens ? `${entry.tokens.input} input, ${entry.tokens.output} output, ${entry.tokens.cacheRead} cache read, ${entry.tokens.cacheWrite} cache write` : "tokens unavailable"}; ${entry.estimatedCost ? `$${entry.estimatedCost.total.toFixed(6)} USD` : "estimate unavailable"}.`,
+			);
+		}
+	return lines.join("  \n");
+}
+
+/** Accounting stays in display details, never model-facing content. */
+export function createReviewAccountingMessage(record: ReviewRunRecord) {
+	return {
+		customType: "review",
+		content: `Review ${record.runId}: ${record.status}.`,
+		display: true,
+		details: {
+			summary: `Review ${reviewText(record.runId)}: ${record.status}.`,
+			...(record.usage ? { usage: structuredClone(record.usage) } : {}),
+		},
+	};
+}
+
 /** Initial promotion can retain the full public result before durable storage bounds its evidence. */
 export function createReviewSeedMessage(
 	record: ReviewRunRecord,
@@ -215,6 +257,7 @@ export function createReviewSeedMessage(
 			target: record.target.description,
 			completionStatus: parsed.completionStatus,
 			findings: structuredClone(selected),
+			...(record.usage ? { usage: structuredClone(record.usage) } : {}),
 			summary: compactReview(record, parsed, selected, ids !== undefined),
 		},
 	};

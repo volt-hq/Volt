@@ -196,8 +196,23 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 					if (hasToolCalls && stopReason === "stop") stopReason = "toolUse";
 				}
 
-				if (chunk.usageMetadata) {
+				if (
+					chunk.usageMetadata &&
+					[
+						chunk.usageMetadata.promptTokenCount,
+						chunk.usageMetadata.candidatesTokenCount,
+						chunk.usageMetadata.thoughtsTokenCount,
+						chunk.usageMetadata.cachedContentTokenCount,
+						chunk.usageMetadata.totalTokenCount,
+					].some((value) => typeof value === "number")
+				) {
 					usage = {
+						availability:
+							hasFinishReason &&
+							typeof chunk.usageMetadata.promptTokenCount === "number" &&
+							typeof chunk.usageMetadata.candidatesTokenCount === "number"
+								? "complete"
+								: "partial",
 						input:
 							(chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
 						output:
@@ -249,6 +264,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 
 function createEmptyUsage(): Usage {
 	return {
+		availability: "unavailable",
 		input: 0,
 		output: 0,
 		cacheRead: 0,

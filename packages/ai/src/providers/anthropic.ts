@@ -495,6 +495,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 
 	(async () => {
 		let usage: Usage = {
+			availability: "unavailable",
 			input: 0,
 			output: 0,
 			cacheRead: 0,
@@ -502,6 +503,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			totalTokens: 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
+		let hasReportedInput = false;
 		let stopReason: StopReason = "stop";
 		let stopErrorMessage: string | undefined;
 		let nextContentIndex = 0;
@@ -575,17 +577,29 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				if (event.type === "message_start") {
 					// Capture initial token usage from message_start event
 					// This ensures we have input token counts even if the stream is aborted early
-					usage = {
-						...usage,
-						input: event.message.usage.input_tokens || 0,
-						output: event.message.usage.output_tokens || 0,
-						cacheRead: event.message.usage.cache_read_input_tokens || 0,
-						cacheWrite: event.message.usage.cache_creation_input_tokens || 0,
-						cacheWrite1h: event.message.usage.cache_creation?.ephemeral_1h_input_tokens || 0,
-					};
-					// Anthropic doesn't provide total_tokens, compute from components
-					usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-					calculateCost(model, usage);
+					if (
+						event.message.usage &&
+						[
+							event.message.usage.input_tokens,
+							event.message.usage.output_tokens,
+							event.message.usage.cache_read_input_tokens,
+							event.message.usage.cache_creation_input_tokens,
+						].some((value) => typeof value === "number")
+					) {
+						hasReportedInput = typeof event.message.usage.input_tokens === "number";
+						usage = {
+							...usage,
+							availability: "partial",
+							input: event.message.usage.input_tokens || 0,
+							output: event.message.usage.output_tokens || 0,
+							cacheRead: event.message.usage.cache_read_input_tokens || 0,
+							cacheWrite: event.message.usage.cache_creation_input_tokens || 0,
+							cacheWrite1h: event.message.usage.cache_creation?.ephemeral_1h_input_tokens || 0,
+						};
+						// Anthropic doesn't provide total_tokens, compute from components
+						usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+						calculateCost(model, usage);
+					}
 					normalizer.push({ type: "meta", patch: { responseId: event.message.id, usage } });
 				} else if (event.type === "content_block_start") {
 					if (event.content_block.type === "text") {
@@ -667,22 +681,37 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					}
 					// Only update usage fields if present (not null).
 					// Preserves input_tokens from message_start when proxies omit it in message_delta.
-					if (event.usage.input_tokens != null) {
-						usage.input = event.usage.input_tokens;
+					if (
+						event.usage &&
+						[
+							event.usage.input_tokens,
+							event.usage.output_tokens,
+							event.usage.cache_read_input_tokens,
+							event.usage.cache_creation_input_tokens,
+						].some((value) => typeof value === "number")
+					) {
+						hasReportedInput ||= typeof event.usage.input_tokens === "number";
+						usage.availability =
+							event.delta.stop_reason && hasReportedInput && typeof event.usage.output_tokens === "number"
+								? "complete"
+								: "partial";
+						if (event.usage.input_tokens != null) {
+							usage.input = event.usage.input_tokens;
+						}
+						if (event.usage.output_tokens != null) {
+							usage.output = event.usage.output_tokens;
+						}
+						if (event.usage.cache_read_input_tokens != null) {
+							usage.cacheRead = event.usage.cache_read_input_tokens;
+						}
+						if (event.usage.cache_creation_input_tokens != null) {
+							usage.cacheWrite = event.usage.cache_creation_input_tokens;
+						}
+						// Anthropic doesn't provide total_tokens, compute from components
+						usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+						calculateCost(model, usage);
+						normalizer.push({ type: "meta", patch: { usage } });
 					}
-					if (event.usage.output_tokens != null) {
-						usage.output = event.usage.output_tokens;
-					}
-					if (event.usage.cache_read_input_tokens != null) {
-						usage.cacheRead = event.usage.cache_read_input_tokens;
-					}
-					if (event.usage.cache_creation_input_tokens != null) {
-						usage.cacheWrite = event.usage.cache_creation_input_tokens;
-					}
-					// Anthropic doesn't provide total_tokens, compute from components
-					usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-					calculateCost(model, usage);
-					normalizer.push({ type: "meta", patch: { usage } });
 				}
 			}
 

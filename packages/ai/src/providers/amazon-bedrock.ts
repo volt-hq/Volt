@@ -132,6 +132,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 
 	(async () => {
 		let usage: Usage = {
+			availability: "unavailable",
 			input: 0,
 			output: 0,
 			cacheRead: 0,
@@ -508,8 +509,22 @@ function parseMetadataUsage(
 	event: ConverseStreamMetadataEvent,
 	model: Model<"bedrock-converse-stream">,
 ): Usage | undefined {
-	if (!event.usage) return undefined;
+	if (
+		!event.usage ||
+		![
+			event.usage.inputTokens,
+			event.usage.outputTokens,
+			event.usage.totalTokens,
+			event.usage.cacheReadInputTokens,
+			event.usage.cacheWriteInputTokens,
+		].some((value) => typeof value === "number")
+	)
+		return undefined;
 	const usage: Usage = {
+		availability:
+			typeof event.usage.inputTokens === "number" && typeof event.usage.outputTokens === "number"
+				? "complete"
+				: "partial",
 		input: event.usage.inputTokens || 0,
 		output: event.usage.outputTokens || 0,
 		cacheRead: event.usage.cacheReadInputTokens || 0,

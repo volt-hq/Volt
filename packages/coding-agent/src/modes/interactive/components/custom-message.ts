@@ -13,6 +13,7 @@ import {
 import { BACKGROUND_JOB_NOTIFICATION_TYPE } from "../../../core/background-jobs.ts";
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
+import { formatReviewUsage } from "../../../core/review-presentation.ts";
 import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
 import { renderBackgroundJobNotification } from "./background-job-notification.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
@@ -147,6 +148,20 @@ export class CustomMessageComponent extends Container {
 		);
 
 		if (reviewSummary !== undefined) {
+			this.defaultContainer.addChild(new Spacer(1));
+			this.defaultContainer.addChild(
+				new Markdown(
+					formatReviewUsage(
+						typeof details === "object" && details !== null && !Array.isArray(details)
+							? details.usage
+							: undefined,
+						this._expanded,
+					),
+					1,
+					0,
+					this.markdownTheme,
+				),
+			);
 			const expandKey = keyDisplayText("app.tools.expand");
 			if (expandKey) {
 				this.defaultContainer.addChild(new Spacer(1));

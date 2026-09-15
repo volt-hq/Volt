@@ -414,6 +414,14 @@ await session.followUp("After you're done, also do this");
 
 Both `steer()` and `followUp()` expand file-based prompt templates but error on extension commands (extension commands cannot be queued).
 
+### Host inference accounting
+
+`createAgentSession({ inferenceAccounting })` accepts an awaited host-only metadata sink. It is used by isolated review sessions and also observes their compaction requests. The callback receives the selected model after auth resolution and returns `{ observe(usage, sequence, terminal, response): Promise<void> }`. `observe` receives cumulative usage snapshots, stream sequence, whether the attempt is terminal, and whether a terminal assistant response was observed (rather than a thrown request/stream failure). Replace earlier snapshots for that request; do not add them. The hook receives no prompt or response content.
+
+The admission callback finishes before provider dispatch. Observer promises are awaited; unlike `session.subscribe` listeners, rejection fails inference. Hosts must preserve request identity, bound retained metadata, and drain writes before reporting durable completion. Provider-internal HTTP retries are not separate admissions. An admitted request interrupted before dispatch is still a pending host attempt, not proof of a provider charge. Ordinary automatic session naming is outside this hook; isolated review sessions use deterministic names to avoid those cosmetic calls.
+
+`Usage.availability` distinguishes complete, partial, and unavailable provider reporting; absent metadata remains unknown. Preserve partial counters on failure instead of claiming zero. Model-priced estimates are not invoices or subscription charges. This hook does not persist anything by itself or enable a general billing service.
+
 ### Session state
 
 `AgentSession` exposes an owned, read-only runtime snapshot through `session.state`. Mutate the session through its explicit methods so persistence and the provider context remain synchronized.

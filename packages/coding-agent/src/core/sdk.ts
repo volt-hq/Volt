@@ -10,6 +10,7 @@ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
 import type { HostInteraction } from "./host-interaction.ts";
+import { accountInference, type InferenceAccounting } from "./inference-accounting.ts";
 import { McpAuditLogger } from "./mcp/audit.ts";
 import { DefaultMcpClientFactory } from "./mcp/client-factory.ts";
 import { loadMcpConfig } from "./mcp/config-loader.ts";
@@ -162,6 +163,8 @@ export interface CreateAgentSessionOptions {
 	 * servers.
 	 */
 	disableMcp?: boolean;
+	/** Awaited host accounting sink for inference metadata, including compaction. */
+	inferenceAccounting?: InferenceAccounting;
 }
 
 /** Result from createAgentSession */
@@ -545,6 +548,7 @@ async function createAgentSessionWithTrackedResources(
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
+	const inferenceAccounting = options.inferenceAccounting;
 	const streamFn: StreamFn = async (model, context, options) => {
 		const auth = await modelRegistry.getApiKeyAndHeaders(model);
 		if (!auth.ok) {
@@ -559,23 +563,28 @@ async function createAgentSessionWithTrackedResources(
 		const timeoutMs = options?.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs;
 		const websocketConnectTimeoutMs =
 			options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
-		return streamSimple(model, context, {
-			...options,
-			apiKey: auth.apiKey,
-			env,
-			timeoutMs,
-			websocketConnectTimeoutMs,
-			toolArgumentLimits: { ...settingsManager.getToolArgumentLimits(), ...options?.toolArgumentLimits },
-			maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
-			maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
-			headers: mergeProviderAttributionHeaders(
-				model,
-				settingsManager,
-				options?.sessionId,
-				auth.headers,
-				options?.headers,
-			),
-		});
+		const dispatch = (signal: AbortSignal | undefined) =>
+			streamSimple(model, context, {
+				...options,
+				signal,
+				apiKey: auth.apiKey,
+				env,
+				timeoutMs,
+				websocketConnectTimeoutMs,
+				toolArgumentLimits: { ...settingsManager.getToolArgumentLimits(), ...options?.toolArgumentLimits },
+				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
+				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
+				headers: mergeProviderAttributionHeaders(
+					model,
+					settingsManager,
+					options?.sessionId,
+					auth.headers,
+					options?.headers,
+				),
+			});
+		return inferenceAccounting
+			? accountInference(model, dispatch, inferenceAccounting, options?.signal)
+			: dispatch(options?.signal);
 	};
 	const transport = settingsManager.getTransport();
 	const streamOptions: AgentHarnessStreamOptions = {
