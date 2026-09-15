@@ -122,6 +122,84 @@ afterEach(() => {
 	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+describe("published diagnostics distinguish unknown from clean", () => {
+	it("requires a publication even for an open document", async () => {
+		const f = await fixture();
+		expect(f.client.getPublishedDiagnostics(f.a)).toBeUndefined();
+		await f.client.openDocument(f.a, "source\n");
+		expect(f.client.getPublishedDiagnostics(f.a)).toBeUndefined();
+		f.publish(f.a, []);
+		expect(f.client.getPublishedDiagnostics(f.a)).toEqual([]);
+		f.publish(f.a);
+		expect(f.client.getPublishedDiagnostics(f.a)).toEqual([diagnostic]);
+	});
+
+	for (const diagnostics of [[], [diagnostic]]) {
+		it.each(["open", "change", "refresh", "close", "workspace-edit"])(
+			`invalidates a ${diagnostics.length ? "failing" : "clean"} publication after dependency %s`,
+			async (operation) => {
+				const f = await fixture();
+				await f.client.openDocument(f.a, "source\n");
+				if (operation !== "open") await f.client.openDocument(f.b, "dependency\n");
+				f.publish(f.a, diagnostics);
+				expect(f.client.getPublishedDiagnostics(f.a)).toEqual(diagnostics);
+				if (operation === "open" || operation === "change") {
+					await f.client.openDocument(f.b, "changed dependency\n");
+				} else if (operation === "workspace-edit") {
+					writeFileSync(f.b, "changed dependency\n");
+					await f.client.applyWorkspaceChanges([{ kind: "edit", path: f.b, content: "changed dependency\n" }]);
+				} else {
+					if (operation === "close") rmSync(f.b);
+					else writeFileSync(f.b, "changed dependency\n");
+					await f.client.refreshStaleDocuments(f.a);
+				}
+				expect(f.client.getPublishedDiagnostics(f.a)).toBeUndefined();
+				f.publish(f.a, []);
+				expect(f.client.getPublishedDiagnostics(f.a)).toEqual([]);
+			},
+		);
+	}
+
+	it("preserves a current clean publication across no-op synchronizations", async () => {
+		const f = await fixture();
+		await f.client.openDocument(f.a, "source\n");
+		await f.client.openDocument(f.b, "dependency\n");
+		f.publish(f.a, []);
+		await f.client.openDocument(f.b, "dependency\n");
+		await f.client.refreshStaleDocuments();
+		await f.client.applyWorkspaceChanges([]);
+		expect(f.client.getPublishedDiagnostics(f.a)).toEqual([]);
+	});
+
+	it("does not restore invalidated evidence from a wrong-version or malformed publication", async () => {
+		const f = await fixture();
+		await f.client.openDocument(f.a, "source\n");
+		f.publish(f.a, []);
+		await f.client.openDocument(f.a, "replacement\n");
+		f.publish(f.a, [], 1);
+		f.publish(f.a, [], 3);
+		f.send({
+			method: "textDocument/publishDiagnostics",
+			params: { uri: pathToFileURL(f.a).toString(), diagnostics: [{}] },
+		});
+		expect(f.client.getPublishedDiagnostics(f.a)).toBeUndefined();
+		f.publish(f.a, [], 2);
+		expect(f.client.getPublishedDiagnostics(f.a)).toEqual([]);
+	});
+
+	it("drops the baseline when a document closes and reopens", async () => {
+		const f = await fixture();
+		await f.client.openDocument(f.a, "source\n");
+		f.publish(f.a, []);
+		rmSync(f.a);
+		await f.client.refreshStaleDocuments();
+		expect(f.client.getPublishedDiagnostics(f.a)).toBeUndefined();
+		writeFileSync(f.a, "source\n");
+		await f.client.openDocument(f.a, "source\n");
+		expect(f.client.getPublishedDiagnostics(f.a)).toBeUndefined();
+	});
+});
+
 describe("diagnostics recover after client-wide synchronization", () => {
 	it.each([
 		["change", "unchanged"],
@@ -172,7 +250,7 @@ describe("diagnostics recover after client-wide synchronization", () => {
 			expect(f.client.getPublishedDiagnostics(f.a)).toEqual([diagnostic]);
 		} else {
 			expect(result).toMatchObject({ outcome: "timeout", freshness: "stale", diagnostics: [] });
-			expect(f.client.getPublishedDiagnostics(f.a)).toEqual([]);
+			expect(f.client.getPublishedDiagnostics(f.a)).toBeUndefined();
 		}
 		expect(vi.getTimerCount()).toBe(0);
 	});

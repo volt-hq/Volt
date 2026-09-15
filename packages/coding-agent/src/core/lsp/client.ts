@@ -830,10 +830,10 @@ export class LspClient {
 		return [...this.documents.values()].map((document) => document.absolutePath);
 	}
 
-	/** Last published diagnostics for a document, if any. */
-	getPublishedDiagnostics(absolutePath: string): LspDiagnostic[] {
+	/** Current-epoch publication, or undefined when missing/stale. Only a published [] is known clean. */
+	getPublishedDiagnostics(absolutePath: string): LspDiagnostic[] | undefined {
 		const entry = this.published.get(normalizeUri(pathToFileURL(absolutePath).toString()));
-		return entry?.epoch === this.diagnosticEpoch ? entry.diagnostics : [];
+		return entry?.epoch === this.diagnosticEpoch ? entry.diagnostics : undefined;
 	}
 
 	/** @internal Capture the exact tracked-document state at the start of an LSP request. */

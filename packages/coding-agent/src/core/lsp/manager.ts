@@ -934,16 +934,17 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		return lspResult("unavailable", "", { reason: "disposed" });
 	}
 
-	/** Paths of other open documents that currently have no reportable diagnostics. */
+	/** Other open documents with a current publication and no reportable diagnostics. */
 	private collectCleanOpenDocuments(client: LspClient, excludePath: string): Set<string> {
 		const clean = new Set<string>();
 		for (const path of client.getOpenDocumentPaths()) {
 			if (path === excludePath) {
 				continue;
 			}
-			const reportable = client
-				.getPublishedDiagnostics(path)
-				.filter((diagnostic) => (diagnostic.severity ?? 1) <= this.config.maxSeverity);
+			const published = client.getPublishedDiagnostics(path);
+			// Missing or invalidated evidence cannot establish a clean baseline.
+			if (published === undefined) continue;
+			const reportable = published.filter((diagnostic) => (diagnostic.severity ?? 1) <= this.config.maxSeverity);
 			if (reportable.length === 0) {
 				clean.add(path);
 			}
@@ -958,7 +959,9 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			if (path === excludePath || !cleanBefore.has(path)) {
 				continue;
 			}
-			const formatted = this.formatDiagnostics(path, client.getPublishedDiagnostics(path));
+			const published = client.getPublishedDiagnostics(path);
+			if (published === undefined) continue;
+			const formatted = this.formatDiagnostics(path, published);
 			if (formatted) {
 				sections.push(formatted);
 			}
@@ -1515,7 +1518,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		// Servers derive quick fixes from the diagnostics passed in the context,
 		// so make sure we have them before asking for code actions.
 		let published = session.client.getPublishedDiagnostics(session.absolutePath);
-		if (published.length === 0) {
+		if (published === undefined || published.length === 0) {
 			try {
 				published = (
 					await session.client.getDiagnostics(
@@ -1530,7 +1533,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				// Code actions may still be available without diagnostics context.
 			}
 		}
-		const diagnostics = published.filter((diagnostic) => rangesOverlap(diagnostic.range, range));
+		const diagnostics = (published ?? []).filter((diagnostic) => rangesOverlap(diagnostic.range, range));
 		try {
 			const snapshots = session.client.captureWorkspaceEditSnapshots();
 			const result = await session.client.sendRequest(
