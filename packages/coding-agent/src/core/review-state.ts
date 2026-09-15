@@ -1,5 +1,7 @@
 import { Buffer } from "node:buffer";
+import type { JsonValue } from "@hansjm10/volt-ai";
 import { minimatch } from "minimatch";
+import type { CustomMessage } from "./messages.ts";
 import type { ReviewRunControls } from "./review.ts";
 import {
 	ReviewSourceUnavailableError,
@@ -516,6 +518,27 @@ export function getReviewRun(sessionManager: SessionManager, runId: string): Hyd
 		cursor = page.nextCursor;
 	} while (cursor);
 	return undefined;
+}
+
+/** Recover unfinished accounting for display without changing transcript or model-facing messages. */
+export function resolveReviewAccountingMessage(sessionManager: SessionManager, message: CustomMessage): CustomMessage {
+	const details = message.details;
+	if (
+		message.customType !== "review" ||
+		!isObject(details) ||
+		details.kind !== "accounting" ||
+		details.status !== "unfinished" ||
+		typeof details.runId !== "string"
+	)
+		return message;
+	// Replay can contain notices older than the recent-run listing window. Stay branch-local
+	// and do not resolve canonical finding outcomes or refresh terminal transcript snapshots.
+	const run = hydrateRuns(branchCustomEntries(sessionManager)).get(details.runId);
+	if (run?.status !== "unfinished" || !run.usage || run.usage.finalized) return message;
+	const savedUsage = parseReviewUsage(details.usage);
+	if (savedUsage && (savedUsage.finalized || savedUsage.revision >= run.usage.revision)) return message;
+	// Session entry admission already guarantees lossless JSON; hydration validated the accounting schema.
+	return { ...message, details: { ...details, usage: run.usage as unknown as JsonValue } };
 }
 
 function reviewConversationGuard(manager: SessionManager): () => void {

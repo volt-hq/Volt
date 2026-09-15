@@ -138,6 +138,7 @@ import {
 	exportCanonicalReviewFeedback,
 	getCanonicalReviewRun,
 	recordReviewFindingOutcome,
+	resolveReviewAccountingMessage,
 } from "../../core/review-state.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import {
@@ -4551,7 +4552,7 @@ export class InteractiveMode {
 				if (message.display) {
 					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
 					const component = new CustomMessageComponent(
-						message,
+						resolveReviewAccountingMessage(this.sessionManager, message),
 						renderer,
 						this.getMarkdownThemeWithSettings(),
 						(id) => {

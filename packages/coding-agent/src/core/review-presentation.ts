@@ -231,6 +231,9 @@ export function createReviewAccountingMessage(record: ReviewRunRecord) {
 		content: `Review ${record.runId}: ${record.status}.`,
 		display: true,
 		details: {
+			kind: "accounting",
+			runId: record.runId,
+			status: record.status,
 			summary: `Review ${reviewText(record.runId)}: ${record.status}.`,
 			...(record.usage ? { usage: structuredClone(record.usage) } : {}),
 		},
