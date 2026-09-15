@@ -292,6 +292,8 @@ export function formatPlanPolicy(mode: AgentMode, phase?: PlanPhase): string {
 			"[VOLT APPROVED PLAN — TRUSTED HOST POLICY]",
 			"Execute the exact approved checklist. Its title, summary, outcome and substep text, ordering, hierarchy, and scope are immutable during execution.",
 			"Use update_plan_progress only to change status or attach concise execution evidence to executable leaf ids. Group status is derived from its substeps.",
+			"Keep progress synchronized at meaningful execution boundaries, not just at kickoff and final verification. Mark a leaf in_progress when beginning its work, and completed once its required outcome and verification are supported by evidence, before moving to unrelated work. Keep unfinished or unverified work open.",
+			"Batch related transitions: completing one leaf and starting the next may share a call, as may multiple leaves genuinely completed together. Do not update mechanically after every tool call or defer unrelated updates until the end. Never infer completion from elapsed time or fabricate evidence. After compaction or resumption, reconcile the canonical checklist with available execution evidence and continue updating at these boundaries.",
 			"If implementation evidence requires a structural change, call request_replan with the reason. It pauses execution, returns the plan to draft, and requires fresh user approval.",
 		].join("\n");
 	}
