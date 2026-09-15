@@ -118,12 +118,19 @@ export interface ReviewCodeHostContext {
 }
 
 export type ReviewCodeHostContextCaptureResult =
-	| { ok: true; pullRequest: ReviewPullRequestIdentity; context: ReviewCodeHostContext }
+	| {
+			ok: true;
+			pullRequest: ReviewPullRequestIdentity;
+			context: ReviewCodeHostContext;
+			fetchPlan: PullRequestFetchPlan;
+	  }
 	| { ok: false; error: string; remoteError?: string };
 
 export interface ReviewCodeHostContextCaptureOptions {
 	cwd: string;
 	number?: string;
+	/** Selected PR identity to verify against workspace resolution, never a repository override. */
+	expectedUrl?: string;
 	maxPullRequestNumber: number;
 	signal?: AbortSignal;
 	onProgress?: (message: string) => void;
@@ -132,6 +139,7 @@ export interface ReviewCodeHostContextCaptureOptions {
 export interface CodeHostPullRequestSummary {
 	number: number;
 	title: string;
+	url: string;
 }
 
 /** Host-only normalized repository identity. Never project canonicalId to clients. */
@@ -192,8 +200,12 @@ export interface PullRequestFetchRef {
 	localRef: string;
 }
 
+/** Ephemeral host-only transport selected during capture, never persisted in review identity. */
 export interface PullRequestFetchPlan {
+	/** Selected remote name, used to preserve its scoped Git transport settings. */
 	remote: string;
+	/** Validated fetch URL with Git URL rewrites already applied. */
+	remoteUrl: string;
 	base: PullRequestFetchRef;
 	head: PullRequestFetchRef;
 	diffCommand: string;
@@ -224,7 +236,6 @@ export interface CodeHostProvider {
 	readonly displayName: string;
 	probeCurrentPullRequest(cwd: string, signal?: AbortSignal): Promise<CodeHostPullRequestSummary | undefined>;
 	capturePullRequestContext(options: ReviewCodeHostContextCaptureOptions): Promise<ReviewCodeHostContextCaptureResult>;
-	getPullRequestFetchPlan(pullRequest: ReviewPullRequestIdentity): PullRequestFetchPlan;
 	verifyPullRequestHead(cwd: string, pullRequest: ReviewPullRequestIdentity): Promise<void>;
 	publishPullRequestReview(request: ReviewCodeHostPublishRequest): Promise<ReviewCodeHostPublishResult>;
 }

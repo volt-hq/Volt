@@ -1,7 +1,11 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { type GitHubCliResult, runGitHubCli } from "./github-cli.ts";
-import { parseGitHubPullRequestUrl, resolveCurrentReviewPullRequest } from "./github-cli-review-target.ts";
+import {
+	parseGitHubPullRequestUrl,
+	resolveCurrentReviewPullRequest,
+	resolveNumberedReviewPullRequest,
+} from "./github-cli-review-target.ts";
 import type {
 	ReviewCodeHostActor,
 	ReviewCodeHostContextCaptureOptions,
@@ -969,13 +973,23 @@ export async function capturePullRequestContextWithGitHubCli(
 ): Promise<ReviewCodeHostContextCaptureResult> {
 	const initialLimitations: ReviewCodeHostContextLimitation[] = [];
 	options.onProgress?.("Loading pull request metadata…");
-	const target = options.number ? undefined : await resolveCurrentReviewPullRequest(options);
-	if (target && !target.ok) return target;
+	const target = options.number
+		? await resolveNumberedReviewPullRequest(options)
+		: await resolveCurrentReviewPullRequest(options);
+	if (!target.ok) return target;
+	if (options.expectedUrl !== undefined) {
+		const expected = parseGitHubPullRequestUrl(options.expectedUrl);
+		if (!expected || expected.url.toLowerCase() !== target.url.toLowerCase()) {
+			const error =
+				"The selected pull request does not match the resolved review target. Reopen the review picker and select it again.";
+			return { ok: false, error, remoteError: error };
+		}
+	}
 	const result = await runGh(
 		[
 			"pr",
 			"view",
-			target?.url ?? options.number!,
+			target.url,
 			"--json",
 			"id,number,title,body,baseRefName,headRefName,url,baseRefOid,headRefOid,author,state,isDraft,mergeable,statusCheckRollup",
 		],
@@ -1005,8 +1019,8 @@ export async function capturePullRequestContextWithGitHubCli(
 	if (
 		!locator ||
 		locator.number !== pullRequest.number ||
-		(target &&
-			(locator.url !== target.url || pullRequest.id !== target.id || pullRequest.headRefName !== target.headBranch))
+		locator.url.toLowerCase() !== target.url.toLowerCase() ||
+		(target.kind === "current" && (pullRequest.id !== target.id || pullRequest.headRefName !== target.headBranch))
 	) {
 		return {
 			ok: false,
@@ -1197,6 +1211,13 @@ export async function capturePullRequestContextWithGitHubCli(
 			return {
 				ok: true,
 				pullRequest: identity,
+				fetchPlan: {
+					remote: target.remote,
+					remoteUrl: target.remoteUrl,
+					base: { remoteRef: `refs/heads/${identity.baseRefName}`, localRef: "refs/review/base" },
+					head: { remoteRef: `refs/pull/${identity.number}/head`, localRef: "refs/review/head" },
+					diffCommand: `gh pr diff ${identity.url}`,
+				},
 				context: {
 					manifest,
 					linkedIssues,
