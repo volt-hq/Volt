@@ -5,6 +5,7 @@
  *
  * Test with: npx tsx src/cli-new.ts [args...]
  */
+import { handleLspAuditCommand } from "./cli/lsp-audit.ts";
 import { APP_NAME } from "./config.ts";
 import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { main } from "./main.ts";
@@ -13,8 +14,11 @@ process.title = APP_NAME;
 process.env.VOLT_CODING_AGENT = "true";
 process.emitWarning = (() => {}) as typeof process.emitWarning;
 
-// Configure undici's global dispatcher before provider SDKs issue requests.
-// Runtime settings are applied once SettingsManager has loaded global/project settings.
-configureHttpDispatcher();
-
-main(process.argv.slice(2));
+const args = process.argv.slice(2);
+void handleLspAuditCommand(args).then((handled) => {
+	if (!handled) {
+		// Configure undici only for normal startup, never for an offline audit.
+		configureHttpDispatcher();
+		return main(args);
+	}
+});

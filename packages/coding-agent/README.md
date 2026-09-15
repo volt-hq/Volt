@@ -168,6 +168,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/name <name>` | Set session display name |
 | `/session` | Show session info (store, ID, messages, tokens, cost) |
 | `/usage` | Show remaining subscription quota and local reset times |
+| `/lsp` | Inspect language-server health without starting servers; `/lsp restart` and `/lsp trace [path\|off]` manage recovery/tracing |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/subagents` | Inspect active or completed subagent conversations and tool flow |
 | `/jobs` | Inspect background jobs, follow their output, or cancel one job |
@@ -521,6 +522,8 @@ Volt includes common coding-agent primitives in core while keeping project-speci
 
 **Planning and delegation are first-class.** [Plan mode](#plan-mode) provides a restricted research and approval workflow, while [native subagents](docs/usage.md#subagents-mvp) provide isolated contexts for bounded delegation. Custom agents and extensions remain available for specialized orchestration.
 
+**LSP provides semantic code intelligence.** Built-in navigation, refactoring, and best-effort edit/write diagnostics report structured outcomes and freshness. `/lsp` and the model's `lsp status` action inspect health without starting or installing servers; `volt lsp audit` summarizes persisted evidence offline. Native TypeScript requires >=7, with explicit consent for pinned global repair; Swift uses SourceKit-LSP with project-dependent coverage. See [LSP](docs/lsp.md).
+
 **MCP stays explicit.** Native MCP support is available through `.mcp.json` or `.volt/mcp.json` and a single gateway tool; project MCP configs follow project trust and MCP server outputs are treated as untrusted data.
 
 **Safety is host-controlled.** Volt does not put a permission popup in front of every tool call. Control capabilities with tool allowlists and exclusions, project trust, Plan mode's restricted research profile, and remote tool grants. Use a container or an extension when a workflow requires additional isolation or confirmation.
@@ -650,7 +653,7 @@ cat README.md | volt -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
 
-Available built-in tools: `request_user_input` (root local TUI only), `read`, `bash`, `jobs`, `edit`, `write`, `image_gen` (when an OpenAI Codex model is selected), `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp` (when enabled), `subagent` (when available), child-only `subagent_registry`, and `mcp` (when MCP servers are configured)
+Available built-in tools: `request_user_input` (root local TUI only), `read`, `bash`, `jobs`, `edit`, `write`, `image_gen` (when an OpenAI Codex model is selected), `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp` (status remains available when disabled), `subagent` (when available), child-only `subagent_registry`, and `mcp` (when MCP servers are configured)
 
 ### Resource Options
 

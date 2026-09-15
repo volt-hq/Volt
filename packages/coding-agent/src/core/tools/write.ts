@@ -5,8 +5,9 @@ import { dirname } from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import type { LspOperationMetadata } from "../lsp/outcome.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../theme/runtime.ts";
-import type { ToolDiagnosticsProvider } from "./diagnostics-provider.ts";
+import { collectToolDiagnostics, type ToolDiagnosticsProvider } from "./diagnostics-provider.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render-utils.ts";
@@ -20,6 +21,7 @@ const writeSchema = Type.Object({
 export type WriteToolInput = Static<typeof writeSchema>;
 
 export interface WriteToolDetails {
+	lsp?: LspOperationMetadata;
 	/** Formatted diagnostics collected after the write (e.g. from LSP) */
 	diagnostics?: string;
 }
@@ -231,21 +233,20 @@ export function createWriteToolDefinition(
 				await ops.writeFile(absolutePath, content);
 				throwIfAborted();
 
-				let diagnostics: string | undefined;
-				if (options?.diagnosticsProvider) {
-					try {
-						diagnostics = await options.diagnosticsProvider.getDiagnostics(absolutePath, content, signal);
-					} catch {
-						// Diagnostics are best-effort and must never fail the write.
-					}
-				}
+				const { diagnostics, lsp } = await collectToolDiagnostics(
+					options?.diagnosticsProvider,
+					absolutePath,
+					content,
+					"write",
+					signal,
+				);
 
 				return {
 					content: [
 						{ type: "text", text: `Successfully wrote ${content.length} bytes to ${path}` },
 						...(diagnostics ? [{ type: "text" as const, text: `Diagnostics:\n${diagnostics}` }] : []),
 					],
-					...(diagnostics ? { details: { diagnostics } } : {}),
+					details: { lsp, ...(diagnostics ? { diagnostics } : {}) },
 				};
 			});
 		},

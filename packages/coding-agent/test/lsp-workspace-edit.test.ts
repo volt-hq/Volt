@@ -903,7 +903,7 @@ describe("LSP WorkspaceEdit integration", () => {
 
 			const result = await manager.codeFix(source, { line: 1 });
 
-			expect(result).toContain('Applied "Edit outside workspace"');
+			expect(result.text).toContain('Applied "Edit outside workspace"');
 			expect(await readFile(sibling, "utf-8")).toBe("PWNED\n");
 			expect(manager.getStatus()[0]).toMatchObject({
 				workspaceRoot: await realpath(projectRoot),
@@ -918,7 +918,7 @@ describe("LSP WorkspaceEdit integration", () => {
 
 			const applied = await manager.codeFix(source, { line: 1 });
 
-			expect(applied).toContain('Applied "Edit outside workspace"');
+			expect(applied.text).toContain('Applied "Edit outside workspace"');
 			expect(await readFile(target, "utf-8")).toBe("PWNED\n");
 		} finally {
 			manager.dispose();
@@ -948,14 +948,15 @@ describe("LSP WorkspaceEdit integration", () => {
 			await new Promise((resolve) => setTimeout(resolve, 75));
 			await writeFile(delayedPath, "changed by write tool", "utf-8");
 			const delayedResult = await delayedFix;
-			expect(delayedResult).toContain("no workspace edits reported");
+			expect(delayedResult.outcome).toBe("edit-failed");
+			expect(delayedResult.text).toContain("changed after the LSP request");
 			expect(await readFile(delayedPath, "utf-8")).toBe("changed by write tool");
 
 			const sequentialPath = join(root, "sequential.foo");
 			await writeFile(sequentialPath, "SEQUENTIAL_CMDFIX", "utf-8");
 			const sequentialResult = await manager.codeFix(sequentialPath, { line: 1 });
-			expect(sequentialResult).toContain('Applied "Fix via sequential command edits"');
-			expect(sequentialResult.match(/sequential\.foo \(1 edit\)/g)).toHaveLength(2);
+			expect(sequentialResult.text).toContain('Applied "Fix via sequential command edits"');
+			expect(sequentialResult.text.match(/sequential\.foo \(1 edit\)/g)).toHaveLength(2);
 			expect(await readFile(sequentialPath, "utf-8")).toBe("FIXED");
 
 			const firstPath = join(root, "first.foo");
@@ -968,10 +969,10 @@ describe("LSP WorkspaceEdit integration", () => {
 				manager.codeFix(firstPath, { line: 1 }),
 				manager.codeFix(secondPath, { line: 1 }),
 			]);
-			expect(firstResult).toContain("first.foo (1 edit)");
-			expect(firstResult).not.toContain("second.foo (1 edit)");
-			expect(secondResult).toContain("second.foo (1 edit)");
-			expect(secondResult).not.toContain("first.foo (1 edit)");
+			expect(firstResult.text).toContain("first.foo (1 edit)");
+			expect(firstResult.text).not.toContain("second.foo (1 edit)");
+			expect(secondResult.text).toContain("second.foo (1 edit)");
+			expect(secondResult.text).not.toContain("first.foo (1 edit)");
 		} finally {
 			manager.dispose();
 		}

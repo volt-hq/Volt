@@ -55,6 +55,7 @@ export interface LspSettings {
 
 export interface ResolvedLspServerConfig {
 	name: string;
+	usesBuiltInCommand?: boolean;
 	command: string[];
 	fileExtensions: string[];
 	rootMarkers: string[];
@@ -76,6 +77,7 @@ export interface LspInstallRecipe {
 export interface ResolvedLspConfig {
 	enabled: boolean;
 	servers: ResolvedLspServerConfig[];
+	disabledServers?: ResolvedLspServerConfig[];
 	settleMs: number;
 	firstSettleMs: number;
 	maxDiagnostics: number;
@@ -93,6 +95,11 @@ const DEFAULT_LSP_SERVERS: Record<
 		command: ["tsc", "--lsp", "--stdio"],
 		fileExtensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
 		rootMarkers: ["tsconfig.json", "jsconfig.json", "package.json"],
+	},
+	swift: {
+		command: ["sourcekit-lsp"],
+		fileExtensions: [".swift"],
+		rootMarkers: ["buildServer.json", "Package.swift"],
 	},
 	python: {
 		command: ["pyright-langserver", "--stdio"],
@@ -138,9 +145,10 @@ const DEFAULT_LSP_SERVERS: Record<
  */
 const INSTALL_RECIPES: Record<string, Omit<LspInstallRecipe, "binary">> = {
 	tsc: {
-		command: ["npm", "install", "-g", "typescript@7.0.2"],
-		displayCommand: "npm install -g typescript@7.0.2",
-		installHint: "Install with: npm install -g typescript@7.0.2",
+		command: ["npm", "install", "-g", "typescript@7.0.2", "--ignore-scripts", "--include=optional"],
+		displayCommand: "npm install -g typescript@7.0.2 --ignore-scripts --include=optional",
+		installHint:
+			"Install with: npm install -g typescript@7.0.2 --ignore-scripts --include=optional. This replaces the global compiler; alternatively configure lsp.servers.typescript.command with an explicit native TypeScript 7 executable",
 	},
 	"pyright-langserver": {
 		command: ["npm", "install", "-g", "pyright"],
@@ -165,6 +173,8 @@ const INSTALL_RECIPES: Record<string, Omit<LspInstallRecipe, "binary">> = {
 };
 
 const MANUAL_INSTALL_HINTS: Record<string, string> = {
+	"sourcekit-lsp":
+		"Install Swift or Xcode manually and select its developer environment, or configure lsp.servers.swift.command with the toolchain sourcekit-lsp executable. Xcode projects require a configured build server; module/reference coverage may require a recent build.",
 	clangd: "Install instructions: https://clangd.llvm.org/installation",
 	zls: "Install instructions: https://github.com/zigtools/zls",
 	"lua-language-server": "Install instructions: https://luals.github.io/#install",
@@ -213,12 +223,10 @@ function normalizeExtension(ext: string): string {
 export function resolveLspConfig(settings: LspSettings | undefined): ResolvedLspConfig {
 	const names = new Set([...Object.keys(DEFAULT_LSP_SERVERS), ...Object.keys(settings?.servers ?? {})]);
 	const servers: ResolvedLspServerConfig[] = [];
+	const disabledServers: ResolvedLspServerConfig[] = [];
 	for (const name of names) {
 		const defaults = DEFAULT_LSP_SERVERS[name] as (typeof DEFAULT_LSP_SERVERS)[string] | undefined;
 		const overrides = settings?.servers?.[name];
-		if (overrides?.enabled === false) {
-			continue;
-		}
 		const command = overrides?.command ?? defaults?.command;
 		const fileExtensions = overrides?.fileExtensions ?? defaults?.fileExtensions;
 		if (!command || command.length === 0 || !fileExtensions || fileExtensions.length === 0) {
@@ -230,12 +238,14 @@ export function resolveLspConfig(settings: LspSettings | undefined): ResolvedLsp
 			command.every((argument, index) => argument === defaults.command[index]);
 		const installRecipe = usesBuiltInCommand ? installRecipeForCommand(command) : undefined;
 		const installHint = installHintForCommand(command);
-		servers.push({
+		(overrides?.enabled === false ? disabledServers : servers).push({
 			name,
+			usesBuiltInCommand,
 			command: [...command],
 			fileExtensions: fileExtensions.map(normalizeExtension),
 			rootMarkers: [...(overrides?.rootMarkers ?? defaults?.rootMarkers ?? [])],
-			initializationOptions: overrides?.initializationOptions,
+			initializationOptions:
+				overrides?.initializationOptions ?? (name === "swift" ? { backgroundIndexing: false } : undefined),
 			settings: overrides?.settings,
 			...(installRecipe ? { installRecipe } : {}),
 			...(installHint ? { installHint } : {}),
@@ -244,6 +254,7 @@ export function resolveLspConfig(settings: LspSettings | undefined): ResolvedLsp
 	return {
 		enabled: settings?.enabled ?? true,
 		servers,
+		disabledServers,
 		settleMs: settings?.settleMs ?? 1500,
 		firstSettleMs: settings?.firstSettleMs ?? 10000,
 		maxDiagnostics: settings?.maxDiagnostics ?? 20,

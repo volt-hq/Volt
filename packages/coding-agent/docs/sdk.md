@@ -348,6 +348,16 @@ RPC clients expose `listJobs()`, `readJob(jobId)`, and `cancelJob(jobId, { conve
 
 Native `tool_result` hooks run once for actual background completion rather than for the start acknowledgement. Completion hooks receive the job's abort signal through `ctx.signal`. Progress snapshots are available through `jobs` before completion hooks; `jobs` result hooks can inspect or transform those reads. Keep asynchronous completion hooks cancellation-aware and avoid assuming they run during a foreground model turn.
 
+### LSP health and outcomes
+
+`session.getLspStatus()` returns an on-demand snapshot with `enabled`, `workspaceRoot`, configured/per-root `servers`, and optional `traceFile`. Disabled and unused servers remain inspectable; reading status never starts a server, probes an executable, or offers an install. Per-root state distinguishes idle from failed and process startup from initialized readiness. Version, capability, coverage, recent error, and operation/latency evidence may be unknown until an operation runs.
+
+The model-facing `lsp` action `status` accepts optional `path`; all other actions require a path. Normal tool allowlists/exclusions still apply. Status is a read in Plan mode; rename/fix remain writes, and Plan never permits automatic installation.
+
+Explicit LSP tool results and automatic edit/write diagnostics carry `details.lsp`: bounded operation identity, trigger/action, completion time, outcome/reason, language/server, duration/cold-start timing, diagnostic/result counts, freshness, and source. Prefer this evidence over parsing human-readable text. Explicit failures set the normal `isError` flag; diagnostic failure never turns a successful edit/write into a failed mutation. No-publication timeouts are not clean results. RPC clients continue to use the existing tool-result error projection.
+
+See [LSP](lsp.md) for exact fields, TypeScript >=7 repair consent, Swift coverage limits, and the offline `volt lsp audit` command. Headless hosts do not install automatically; eligible interactive/RPC hosts must obtain explicit consent for reviewed built-in repairs.
+
 ### Prompting and Message Queueing
 
 `PromptOptions` controls prompt expansion, queueing behavior while streaming, and prompt preflight notifications:
@@ -645,7 +655,7 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 Specify which built-in tools to enable:
 
 - Built-in tool names: `read`, `bash`, `jobs`, `edit`, `write`, `image_gen`, `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp`, `subagent`, child-only `subagent_registry`, and `mcp`
-- Default built-ins: `read`, `bash`, `jobs`, `edit`, `write`, `web_search`, `web_fetch`, `image_gen` when an OpenAI Codex model is selected, `subagent` when spawning is available, and `subagent_registry` when the manager belongs to a child runtime
+- Default built-ins: `read`, `bash`, `jobs`, `edit`, `write`, `web_search`, `web_fetch`, `lsp` (status remains available when LSP is disabled), `image_gen` when an OpenAI Codex model is selected, `subagent` when spawning is available, and `subagent_registry` when the manager belongs to a child runtime
 - `noTools: "all"` disables all tools
 - `noTools: "builtin"` disables default built-ins, including `subagent`, while keeping extension and custom tools enabled
 - `excludeTools` disables specific built-in, extension, or custom tool names after any `tools` allowlist is applied

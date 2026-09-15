@@ -788,8 +788,9 @@ export class AgentSession {
 	private _trustedHostToolNames: Set<string> = new Set();
 	private _authorizedOperationResolutions: Map<string, OperationResolution> = new Map();
 
-	// LSP diagnostics manager (created unless lsp.enabled is false)
+	// Keep disabled configuration inspectable without starting language servers.
 	private _lspManager?: LspManager;
+	private _lspEnabled = false;
 	private _hostInteraction?: HostInteraction;
 	private _subagentToolManager?: SubagentToolManager;
 	private _subagentRecoveryNoticeDone = false;
@@ -1170,7 +1171,7 @@ export class AgentSession {
 	/** LSP status for the /lsp command. */
 	getLspStatus(): { enabled: boolean; workspaceRoot?: string; servers: LspServerStatus[]; traceFile?: string } {
 		return {
-			enabled: this._lspManager !== undefined,
+			enabled: this._lspEnabled && this._lspManager !== undefined,
 			workspaceRoot: this._lspManager?.getWorkspaceRoot(),
 			servers: this._lspManager?.getStatus() ?? [],
 			traceFile: this._lspManager?.getTraceFile(),
@@ -7036,14 +7037,14 @@ export class AgentSession {
 		this._lspManager?.dispose();
 		this._lspManager = undefined;
 		const lspConfig = resolveLspConfig(this.settingsManager.getLspSettings());
-		if (lspConfig.enabled) {
-			this._lspManager = new LspManager({
-				cwd: this._cwd,
-				projectCwd: this._lexicalProjectCwd,
-				config: lspConfig,
-				hostInteraction: this._hostInteraction,
-			});
-		}
+		this._lspEnabled = lspConfig.enabled;
+		this._lspManager = new LspManager({
+			cwd: this._cwd,
+			projectCwd: this._lexicalProjectCwd,
+			config: lspConfig,
+			hostInteraction: this._hostInteraction,
+			installAllowed: () => !this._disposed && this._getOperationGrantProfile() === undefined,
+		});
 
 		const directMcpToolDefinitions = this._mcpManager ? createMcpDirectToolDefinitions(this._mcpManager) : [];
 		this._directMcpToolNames = new Set(directMcpToolDefinitions.map((definition) => definition.name));

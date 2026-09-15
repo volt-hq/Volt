@@ -10,7 +10,6 @@ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
 import type { HostInteraction } from "./host-interaction.ts";
-import { resolveLspConfig } from "./lsp/config.ts";
 import { McpAuditLogger } from "./mcp/audit.ts";
 import { DefaultMcpClientFactory } from "./mcp/client-factory.ts";
 import { loadMcpConfig } from "./mcp/config-loader.ts";
@@ -496,9 +495,8 @@ async function createAgentSessionWithTrackedResources(
 		defaultActiveToolNames.push("mcp");
 		defaultActiveToolNames.push(...mcpManager.getDirectToolCandidates().map((candidate) => candidate.directToolName));
 	}
-	if (resolveLspConfig(settingsManager.getLspSettings()).enabled) {
-		defaultActiveToolNames.push("lsp");
-	}
+	// Status remains available even when language-server execution is disabled.
+	defaultActiveToolNames.push("lsp");
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;
 	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;

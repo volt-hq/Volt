@@ -74,10 +74,10 @@ describe("stale cross-file LSP diagnostics (issue #1)", () => {
 		const manager = setup({ serverArgs: ["--stale-unversioned"] });
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "clean\n");
-		expect(await manager.getDiagnostics(filePath, "clean\n")).toBeUndefined();
+		expect(await manager.getDiagnostics(filePath, "clean\n")).toMatchObject({ outcome: "empty", text: "" });
 
 		const result = await manager.getDiagnostics(filePath, "still clean\n");
-		expect(result).toBeUndefined();
+		expect(result).toMatchObject({ outcome: "empty", text: "" });
 	});
 
 	it("re-waits past an unversioned publish when only dependencies were refreshed", async () => {
@@ -92,12 +92,12 @@ describe("stale cross-file LSP diagnostics (issue #1)", () => {
 		const fileB = join(tempDir, "b.foo");
 		writeFileSync(fileA, "alpha\n");
 		writeFileSync(fileB, "beta\n");
-		expect(await manager.getDiagnostics(fileA, "alpha\n")).toBeUndefined();
-		expect(await manager.getDiagnostics(fileB, "beta\n")).toBeUndefined();
+		expect(await manager.getDiagnostics(fileA, "alpha\n")).toMatchObject({ outcome: "empty", text: "" });
+		expect(await manager.getDiagnostics(fileB, "beta\n")).toMatchObject({ outcome: "empty", text: "" });
 
 		writeFileSync(fileA, "alpha two\n");
 		const result = await manager.getDiagnostics(fileB, "beta\n");
-		expect(result).toBeUndefined();
+		expect(result).toMatchObject({ outcome: "empty", text: "" });
 	});
 
 	it("keeps unversioned end-of-file diagnostics one past the last line", async () => {
@@ -113,7 +113,7 @@ describe("stale cross-file LSP diagnostics (issue #1)", () => {
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "clean");
 		const result = await manager.getDiagnostics(filePath, "clean");
-		expect(result).toContain("missing trailing newline");
+		expect(result.text).toContain("missing trailing newline");
 	});
 
 	it("drops unversioned publishes whose positions point past the synced content", async () => {
@@ -128,10 +128,11 @@ describe("stale cross-file LSP diagnostics (issue #1)", () => {
 		});
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "clean\n");
-		expect(await manager.getDiagnostics(filePath, "clean\n")).toBeUndefined();
+		expect(await manager.getDiagnostics(filePath, "clean\n")).toMatchObject({ outcome: "empty", text: "" });
 
 		const result = await manager.getDiagnostics(filePath, "still clean\n");
-		expect(result).toBeUndefined();
+		expect(result).toMatchObject({ outcome: "timeout", freshness: "stale" });
+		expect(result.text).not.toContain("stale result");
 	});
 
 	it("does not report stale cross-file publishes as newly failing files", async () => {
@@ -144,12 +145,12 @@ describe("stale cross-file LSP diagnostics (issue #1)", () => {
 		const fileB = join(tempDir, "b.foo");
 		writeFileSync(fileA, "alpha\n");
 		writeFileSync(fileB, "beta\n");
-		expect(await manager.getDiagnostics(fileA, "alpha\n")).toBeUndefined();
-		expect(await manager.getDiagnostics(fileB, "beta\n")).toBeUndefined();
+		expect(await manager.getDiagnostics(fileA, "alpha\n")).toMatchObject({ outcome: "empty", text: "" });
+		expect(await manager.getDiagnostics(fileB, "beta\n")).toMatchObject({ outcome: "empty", text: "" });
 
 		writeFileSync(fileB, "beta two\n");
 		const result = await manager.getDiagnostics(fileB, "beta two\n");
-		expect(result).toBeUndefined();
+		expect(result).toMatchObject({ outcome: "empty", text: "" });
 	});
 
 	it("does not stall the full settle window for servers that never send versions", async () => {
@@ -164,12 +165,12 @@ describe("stale cross-file LSP diagnostics (issue #1)", () => {
 		});
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "clean\n");
-		expect(await manager.getDiagnostics(filePath, "clean\n")).toBeUndefined();
+		expect(await manager.getDiagnostics(filePath, "clean\n")).toMatchObject({ outcome: "empty", text: "" });
 
 		const start = Date.now();
 		const result = await manager.getDiagnostics(filePath, "ERROR here\n");
 		const elapsed = Date.now() - start;
-		expect(result).toContain("found ERROR on line 1");
+		expect(result.text).toContain("found ERROR on line 1");
 		expect(elapsed).toBeLessThan(2500);
 	});
 
@@ -187,6 +188,6 @@ describe("stale cross-file LSP diagnostics (issue #1)", () => {
 		const content = "ERROR at start\n";
 		writeFileSync(filePath, content);
 		const result = await manager.getDiagnostics(filePath, content);
-		expect(result).toContain("found ERROR on line 1");
+		expect(result.text).toContain("found ERROR on line 1");
 	});
 });

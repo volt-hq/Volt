@@ -8562,27 +8562,43 @@ export class InteractiveMode {
 					}
 				}
 			}
-		} else if (!status.enabled) {
-			info = "LSP is disabled. Run with --lsp or set lsp.enabled=true in settings.";
-		} else if (status.servers.length === 0) {
-			info = `${theme.bold("LSP Servers")}\n\n${theme.fg("dim", "Workspace root:")} ${status.workspaceRoot}\nNo servers running. Servers spawn on first use of a matching file.`;
 		} else {
-			info = `${theme.bold("LSP Servers")}\n`;
+			info = `${theme.bold("LSP Health")}\n${theme.fg("muted", "Workspace:")} ${status.workspaceRoot ?? "unknown"}\n`;
+			info += `${theme.fg("muted", "Snapshot only; no server starts or installs. /lsp restart · /lsp trace [path|off]")}\n`;
+			if (!status.enabled) {
+				info += `${theme.fg("warning", "LSP is disabled. Enable with --lsp or lsp.enabled=true.")}\n`;
+			}
+			if (status.servers.length === 0) info += "No configured language servers.\n";
 			for (const server of status.servers) {
-				info += `\n${theme.bold(server.name)} ${server.alive ? theme.fg("success", "running") : theme.fg("error", "failed")}\n`;
-				info += `${theme.fg("dim", "Workspace root:")} ${server.workspaceRoot}\n`;
-				info += `${theme.fg("dim", "Server root:")} ${server.root}\n`;
-				info += `${theme.fg("dim", "Executable:")} ${server.resolvedExecutable ?? `unresolved: ${server.unresolvedCommand}`}\n`;
-				info += `${theme.fg("dim", "Launch source:")} ${server.launchSource}\n`;
-				info += `${theme.fg("dim", "Start attempts:")} ${server.attempts}\n`;
-				info += `${theme.fg("dim", "Open documents:")} ${server.openDocuments}\n`;
-				info += `${theme.fg("dim", "Idle:")} ${formatIdle(server.idleMs)}\n`;
-				if (server.lastError) info += `${theme.fg("error", server.lastError)}\n`;
+				const state = server.state ?? (server.alive ? "starting" : server.lastError ? "failed" : "unused");
+				const color =
+					state === "ready"
+						? "success"
+						: state === "failed" || state === "blocked"
+							? "error"
+							: state === "degraded"
+								? "warning"
+								: "muted";
+				info += `\n${theme.bold(server.name)} ${theme.fg(color, state)}`;
+				if (state === "unused" || state === "disabled") {
+					info += ` ${theme.fg("muted", "· capabilities unknown; not started")}\n`;
+					continue;
+				}
+				info += ` ${theme.fg("muted", `· version ${server.version ?? server.serverInfo?.version ?? "unknown"} · breaker ${server.breaker ?? "unknown"}`)}\n`;
+				info += `${theme.fg("muted", "Root:")} ${server.root}\n`;
+				info += `${theme.fg("muted", "Executable:")} ${server.resolvedExecutable ?? `unresolved: ${server.unresolvedCommand ?? "unknown"}`} (${server.launchSource})\n`;
+				if (server.serverInfo) info += `${theme.fg("muted", "Server:")} ${server.serverInfo.name}\n`;
+				info += `${theme.fg("muted", "Capabilities:")} ${server.capabilities === undefined ? "unknown" : server.capabilities.length === 0 ? "none advertised" : server.capabilities.join(", ")}\n`;
+				info += `${theme.fg("muted", "Activity:")} ${server.operations ?? 0} operations · ${server.failures ?? 0} failures · ${server.attempts} starts · ${server.openDocuments} documents · idle ${formatIdle(server.idleMs)}\n`;
+				info += `${theme.fg("muted", "Latency:")} last ${server.lastDurationMs === undefined ? "unknown" : `${Math.round(server.lastDurationMs)}ms`} · total ${Math.round(server.totalDurationMs ?? 0)}ms\n`;
+				if (server.lastSuccess || server.lastFailure)
+					info += `${theme.fg("muted", "Last success:")} ${server.lastSuccess ?? "none"} · last failure: ${server.lastFailure ?? "none"}\n`;
+				if (server.lastError) info += `${theme.fg("error", `Startup: ${server.lastError}`)}\n`;
+				if (server.startupStderr) info += `${theme.fg("muted", `Stderr: ${server.startupStderr}`)}\n`;
+				if (server.requestError) info += `${theme.fg("warning", `Request: ${server.requestError}`)}\n`;
+				if (server.coverage) info += `${theme.fg("warning", `Coverage: ${server.coverage}`)}\n`;
 			}
-			if (status.traceFile) {
-				info += `\n${theme.fg("dim", "Trace:")} ${status.traceFile}\n`;
-			}
-			info += `\n${theme.fg("dim", "Use /lsp restart to restart servers, /lsp trace [path|off] to toggle tracing.")}`;
+			if (status.traceFile) info += `\n${theme.fg("muted", "Trace:")} ${status.traceFile}\n`;
 		}
 
 		this.chatContainer.addChild(new Spacer(1));

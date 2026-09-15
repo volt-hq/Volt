@@ -7,6 +7,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
 import { LspManager } from "../../../src/core/lsp/manager.ts";
+import { lspResult } from "../../../src/core/lsp/outcome.ts";
 import { DefaultMcpClientFactory } from "../../../src/core/mcp/client-factory.ts";
 import type { McpClientConnection } from "../../../src/core/mcp/types.ts";
 import { buildRpcSessionState } from "../../../src/core/rpc/session-state.ts";
@@ -408,11 +409,11 @@ describe("Regression #341: persisted review discussion policy", () => {
 		writeFileSync(path, "const old = 1;");
 		const rename = vi.spyOn(LspManager.prototype, "rename").mockImplementation(async (path, oldName, newName) => {
 			writeFileSync(path, readFileSync(path, "utf8").replace(oldName, newName));
-			return "Renamed";
+			return lspResult("success", "Renamed");
 		});
 		const fix = vi.spyOn(LspManager.prototype, "codeFix").mockImplementation(async (path) => {
 			writeFileSync(path, `${readFileSync(path, "utf8")}\n`);
-			return "Fixed";
+			return lspResult("success", "Fixed");
 		});
 		const item = await harness({
 			sessionManager: await open(childRef),
