@@ -3,7 +3,7 @@ import { spawnProcess } from "../../utils/child-process.ts";
 import { terminateProcessTree } from "../../utils/shell.ts";
 import { runGitHubCli } from "./github-cli.ts";
 import { canonicalizeGitHubRemoteUrl } from "./github-cli-discovery.ts";
-import type { ReviewCodeHostContextCaptureOptions } from "./types.ts";
+import type { CodeHostPullRequestSummary, ReviewCodeHostContextCaptureOptions } from "./types.ts";
 
 interface GitHubPullRequestLocator {
 	url: string;
@@ -93,7 +93,14 @@ async function readGit(args: string[], cwd: string, signal?: AbortSignal): Promi
 type PullRequestTargetFailure = { ok: false; error: string; remoteError: string };
 
 type CurrentPullRequestTarget =
-	| { ok: true; kind: "current"; url: string; id: string; headBranch: string; remote: string; remoteUrl: string }
+	| (CodeHostPullRequestSummary & {
+			ok: true;
+			kind: "current";
+			id: string;
+			headBranch: string;
+			remote: string;
+			remoteUrl: string;
+	  })
 	| PullRequestTargetFailure;
 
 function failure(message: string): PullRequestTargetFailure {
@@ -215,7 +222,7 @@ export async function resolveCurrentReviewPullRequest(
 				"--limit",
 				"100",
 				"--json",
-				"id,number,url,state,headRefName,headRepository,headRepositoryOwner",
+				"id,number,title,url,state,headRefName,headRepository,headRepositoryOwner",
 			],
 			{ cwd: options.cwd, signal: options.signal, stdoutMaxBytes: 256 * 1024 },
 		);
@@ -230,8 +237,8 @@ export async function resolveCurrentReviewPullRequest(
 				"Could not establish a unique pull request for the tracked branch. Specify a PR number or check the repository on the host.",
 			);
 		}
-		const active = new Map<string, { url: string; id: string }>();
-		const historical = new Map<string, { url: string; id: string }>();
+		const active = new Map<string, CodeHostPullRequestSummary & { id: string }>();
+		const historical = new Map<string, CodeHostPullRequestSummary & { id: string }>();
 		let hasUnavailableHistoricalHead = false;
 		for (const item of values) {
 			if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error();
@@ -242,6 +249,7 @@ export async function resolveCurrentReviewPullRequest(
 				locator.repository !== repository ||
 				locator.number !== value.number ||
 				locator.number > options.maxPullRequestNumber ||
+				typeof value.title !== "string" ||
 				typeof value.id !== "string" ||
 				!value.id ||
 				value.id.length > 500
@@ -267,7 +275,12 @@ export async function resolveCurrentReviewPullRequest(
 			)
 				continue;
 			if (value.state !== "OPEN" && value.state !== "CLOSED" && value.state !== "MERGED") throw new Error();
-			(value.state === "OPEN" ? active : historical).set(locator.url, { url: locator.url, id: value.id });
+			(value.state === "OPEN" ? active : historical).set(locator.url, {
+				url: locator.url,
+				id: value.id,
+				number: locator.number,
+				title: value.title,
+			});
 		}
 		if (active.size === 0 && hasUnavailableHistoricalHead)
 			return failure(

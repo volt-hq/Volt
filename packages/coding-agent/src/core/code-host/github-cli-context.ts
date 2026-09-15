@@ -977,6 +977,14 @@ export async function capturePullRequestContextWithGitHubCli(
 		? await resolveNumberedReviewPullRequest(options)
 		: await resolveCurrentReviewPullRequest(options);
 	if (!target.ok) return target;
+	if (options.expectedUrl !== undefined) {
+		const expected = parseGitHubPullRequestUrl(options.expectedUrl);
+		if (!expected || expected.url.toLowerCase() !== target.url.toLowerCase()) {
+			const error =
+				"The selected pull request does not match the resolved review target. Reopen the review picker and select it again.";
+			return { ok: false, error, remoteError: error };
+		}
+	}
 	const result = await runGh(
 		[
 			"pr",

@@ -1,6 +1,6 @@
 import { runGitHubCli } from "./github-cli.ts";
 import { capturePullRequestContextWithGitHubCli } from "./github-cli-context.ts";
-import { parseGitHubPullRequestUrl } from "./github-cli-review-target.ts";
+import { parseGitHubPullRequestUrl, resolveCurrentReviewPullRequest } from "./github-cli-review-target.ts";
 import type {
 	CodeHostProvider,
 	ReviewCodeHostInlineComment,
@@ -42,22 +42,12 @@ function githubInlineComment(comment: ReviewCodeHostInlineComment): Record<strin
 
 async function probeCurrentPullRequest(cwd: string, signal?: AbortSignal) {
 	try {
-		const result = await runGitHubCli(["pr", "view", "--json", "number,title"], {
+		const target = await resolveCurrentReviewPullRequest({
 			cwd,
-			...(signal === undefined ? {} : { signal }),
-			stdoutMaxBytes: 16 * 1024,
+			signal,
+			maxPullRequestNumber: Number.MAX_SAFE_INTEGER,
 		});
-		if (!result.ok) return undefined;
-		const value = parseJsonObject(result.stdout.toString("utf8"), "gh pr view");
-		if (
-			typeof value.number !== "number" ||
-			!Number.isSafeInteger(value.number) ||
-			value.number < 1 ||
-			typeof value.title !== "string"
-		) {
-			return undefined;
-		}
-		return { number: value.number, title: value.title };
+		return target.ok ? { number: target.number, title: target.title, url: target.url } : undefined;
 	} catch {
 		return undefined;
 	}

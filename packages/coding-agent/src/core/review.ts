@@ -9,7 +9,11 @@ import { minimatch } from "minimatch";
 import type { AgentSession, AgentSessionEvent } from "./agent-session.ts";
 import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
 import type { AuthStorage } from "./auth-storage.ts";
-import { type CodeHostProvider, githubCliCodeHostProvider } from "./code-host/index.ts";
+import {
+	type CodeHostProvider,
+	type CodeHostPullRequestSummary,
+	githubCliCodeHostProvider,
+} from "./code-host/index.ts";
 import { createExtensionRuntime } from "./extensions/loader.ts";
 import type { ReplacedSessionContext, ToolDefinition } from "./extensions/types.ts";
 import type { CustomMessageInput } from "./messages.ts";
@@ -315,10 +319,7 @@ export interface RecentCommit {
 	date: string;
 }
 
-export interface CurrentBranchPullRequest {
-	number: number;
-	title: string;
-}
+export type CurrentBranchPullRequest = CodeHostPullRequestSummary;
 
 function truncateProbeTitle(value: string): string {
 	const normalized = value.replace(/\s+/g, " ").trim();
@@ -341,7 +342,7 @@ export async function probeCurrentBranchPullRequest(
 		const pullRequest = await provider.probeCurrentPullRequest(cwd, controller.signal);
 		if (!pullRequest || pullRequest.number > MAX_PULL_REQUEST_NUMBER) return undefined;
 		const title = truncateProbeTitle(pullRequest.title);
-		return title ? { number: pullRequest.number, title } : undefined;
+		return title ? { number: pullRequest.number, title, url: pullRequest.url } : undefined;
 	} finally {
 		clearTimeout(timer);
 	}

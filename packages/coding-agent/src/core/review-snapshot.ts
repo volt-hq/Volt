@@ -22,7 +22,7 @@ export type ReviewTarget =
 	| { kind: "uncommitted" }
 	| { kind: "branch"; base?: string; branchBase?: never }
 	| { kind: "branch"; branchBase: ReviewBranchBase; base?: never }
-	| { kind: "pr"; number?: string }
+	| { kind: "pr"; number?: string; expectedUrl?: string }
 	| { kind: "commit"; sha?: string };
 
 export type ReviewSnapshotRevision = "base" | "head";
@@ -3172,6 +3172,7 @@ export async function resolveReviewSnapshot(
 				const captured = await codeHostProvider.capturePullRequestContext({
 					cwd: root,
 					...(normalized ? { number: normalized } : {}),
+					...(target.expectedUrl === undefined ? {} : { expectedUrl: target.expectedUrl }),
 					maxPullRequestNumber: options.maxPullRequestNumber,
 					signal: options.signal,
 					onProgress: options.onProgress,

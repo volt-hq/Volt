@@ -32,6 +32,7 @@ function candidate(number = 4, state = "OPEN"): Record<string, unknown> {
 	return {
 		id: `PR_${number}`,
 		number,
+		title: "Review fixture",
 		url: `https://${host}/volt-hq/iroh-ffi/pull/${number}`,
 		state,
 		headRefName: BRANCH,

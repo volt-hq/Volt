@@ -129,6 +129,8 @@ export type ReviewCodeHostContextCaptureResult =
 export interface ReviewCodeHostContextCaptureOptions {
 	cwd: string;
 	number?: string;
+	/** Selected PR identity to verify against workspace resolution, never a repository override. */
+	expectedUrl?: string;
 	maxPullRequestNumber: number;
 	signal?: AbortSignal;
 	onProgress?: (message: string) => void;
@@ -137,6 +139,7 @@ export interface ReviewCodeHostContextCaptureOptions {
 export interface CodeHostPullRequestSummary {
 	number: number;
 	title: string;
+	url: string;
 }
 
 /** Host-only normalized repository identity. Never project canonicalId to clients. */
