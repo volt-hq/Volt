@@ -2558,6 +2558,8 @@ function createRuntimeHost(
 			sessionManager: {
 				flush: vi.fn(async () => {}),
 				getCwd: vi.fn(() => resources.cwd ?? tmpdir()),
+				getPrReviewBinding: vi.fn(() => undefined),
+				getSessionRef: vi.fn(() => undefined),
 				getStartingGitContext: vi.fn(() => undefined),
 			},
 			promptTemplates: resources.prompts ?? [],

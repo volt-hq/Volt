@@ -1,11 +1,13 @@
 import { Buffer } from "node:buffer";
 import {
+	ChildProcess,
 	type ChildProcessWithoutNullStreams,
 	type ExecFileException,
 	type ExecFileOptions,
+	type execFile,
 	spawn,
 } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -14,8 +16,7 @@ import { writeWindowsReviewDiagnostic } from "../src/core/windows-review-private
 
 type Completion = (error: ExecFileException | null, stdout: string, stderr: string) => void;
 const processMocks = vi.hoisted(() => ({
-	execFile:
-		vi.fn<(file: string, args: string[], options: ExecFileOptions, callback: Completion) => { stdin: Writable }>(),
+	execFile: vi.fn<(file: string, args: string[], options: ExecFileOptions, callback: Completion) => ChildProcess>(),
 }));
 vi.mock("node:child_process", async (importOriginal) => ({
 	...(await importOriginal()),
@@ -42,7 +43,9 @@ describe("Windows diagnostic subprocess failure containment", () => {
 			let completion: Completion | undefined;
 			processMocks.execFile.mockImplementation((_file, _args, _options, callback) => {
 				completion = callback;
-				return { stdin: input };
+				const child = new ChildProcess();
+				child.stdin = input;
+				return child;
 			});
 			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 			const pending = writeWindowsReviewDiagnostic(path, content);
@@ -77,6 +80,100 @@ describe("Windows diagnostic subprocess failure containment", () => {
 		},
 	);
 
+	it.each([0, 1])("settles exit code %s without waiting for inherited output pipes", async (code) => {
+		vi.stubEnv("SystemRoot", join(tmpdir(), "windows-system-fixture"));
+		const child = new ChildProcess();
+		const input = new PassThrough();
+		const stdout = new PassThrough();
+		const stderr = new PassThrough();
+		child.stdin = input;
+		child.stdout = stdout;
+		child.stderr = stderr;
+		processMocks.execFile.mockImplementation((_file, _args, _options, callback) => {
+			// execFile's completion callback joins process exit and pipe closure.
+			let closed = 0;
+			for (const output of [stdout, stderr]) {
+				output.once("close", () => {
+					if (++closed === 2) callback(code === 0 ? null : new Error("private stderr"), "", "");
+				});
+			}
+			return child;
+		});
+		const pending = writeWindowsReviewDiagnostic(join(tmpdir(), "private.jsonl"), "private");
+		let outcome: string | undefined;
+		const result = pending.then(
+			() => {
+				outcome = "written";
+			},
+			(error: Error) => {
+				outcome = error.message;
+			},
+		);
+		try {
+			child.emit("exit", code, null);
+			await vi.waitFor(() =>
+				expect(outcome).toBe(code === 0 ? "written" : "Could not retain private Windows review diagnostics."),
+			);
+		} finally {
+			input.destroy();
+			stdout.destroy();
+			stderr.destroy();
+			await result;
+		}
+	});
+
+	it("completes after a real child exits while a descendant retains its output handles", async () => {
+		const actual = await vi.importActual<{ execFile: typeof execFile }>("node:child_process");
+		const root = mkdtempSync(join(tmpdir(), "volt-diagnostic-exit-"));
+		const script = join(root, "child.mjs");
+		const pidPath = join(root, "descendant.pid");
+		writeFileSync(
+			script,
+			[
+				'import { spawn } from "node:child_process";',
+				'import { writeFileSync } from "node:fs";',
+				'const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000); process.send(1); process.disconnect();"], {',
+				'  stdio: ["ignore", process.stdout, process.stderr, "ipc"], windowsHide: true, detached: true,',
+				"});",
+				'child.once("message", () => {',
+				"  writeFileSync(process.argv[2], String(child.pid));",
+				"  child.unref();",
+				"});",
+			].join("\n"),
+		);
+		// The Node fixture inherits this environment: retain the real system path on Windows.
+		vi.stubEnv("SystemRoot", process.env.SystemRoot ?? root);
+		let fixtureFailure: string | undefined;
+		processMocks.execFile.mockImplementation((_file, _args, options, callback) =>
+			actual.execFile(
+				process.execPath,
+				[script, pidPath],
+				{ ...options, encoding: "utf8" },
+				(error, stdout, stderr) => {
+					if (error) fixtureFailure = `${error.code}: ${stderr}`;
+					callback(error, stdout, stderr);
+				},
+			),
+		);
+		try {
+			const failure = await writeWindowsReviewDiagnostic(join(root, "capture.jsonl"), "private").catch(
+				(error: unknown) => error,
+			);
+			expect(fixtureFailure).toBeUndefined();
+			expect(failure).toBeUndefined();
+			// Completion must not require the descendant's 30-second lifetime to end.
+			process.kill(Number(readFileSync(pidPath, "utf8")), 0);
+		} finally {
+			try {
+				process.kill(Number(readFileSync(pidPath, "utf8")));
+			} catch (error) {
+				expect(["ENOENT", "ESRCH"]).toContain((error as NodeJS.ErrnoException).code);
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		}
+	}, 15_000);
+
 	it("refuses to search PATH when the Windows system directory is unavailable", async () => {
 		vi.stubEnv("SystemRoot", undefined);
 		await expect(writeWindowsReviewDiagnostic(join(tmpdir(), "private.jsonl"), "private")).rejects.toThrow(
@@ -110,7 +207,12 @@ describe("Windows diagnostic subprocess failure containment", () => {
 				},
 			});
 			running.stdin.on("error", (error) => input.destroy(error));
-			return { stdin: input };
+			const observed = new ChildProcess();
+			observed.stdin = input;
+			observed.stdout = running.stdout;
+			observed.stderr = running.stderr;
+			running.on("exit", (code, signal) => observed.emit("exit", code, signal));
+			return observed;
 		});
 		try {
 			await writeWindowsReviewDiagnostic(path, content);

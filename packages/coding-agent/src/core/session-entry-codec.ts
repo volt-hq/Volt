@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isAbsolute } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@hansjm10/volt-ai";
@@ -246,6 +247,80 @@ function validateSessionReference(value: unknown, path: string): asserts value i
 	idValue(reference.sessionGeneration, `${path}.sessionGeneration`);
 }
 
+function validatePrReviewPlacement(value: unknown): void {
+	const path = "$.placement";
+	const placement = record(value, path);
+	exactKeys(
+		placement,
+		path,
+		[
+			"workspaceName",
+			"workspaceGeneration",
+			"worktreeId",
+			"cwd",
+			"sourceCwd",
+			"commonDirectory",
+			"pullRequest",
+			"repositoryId",
+			"headRepositoryId",
+			"remote",
+		],
+		["sourceRootRelativePath"],
+	);
+	for (const key of ["workspaceName", "worktreeId", "repositoryId", "headRepositoryId", "remote"]) {
+		const text = nonEmptyString(placement[key], `${path}.${key}`);
+		if (text.length > 4096 || /[\r\n]/.test(text)) fail(`${path}.${key}`, "invalid identity");
+	}
+	positiveSafeInteger(placement.workspaceGeneration, `${path}.workspaceGeneration`);
+	for (const key of ["cwd", "sourceCwd", "commonDirectory"]) {
+		const text = nonEmptyString(placement[key], `${path}.${key}`);
+		if (!isAbsolute(text) || text.length > 32768) fail(`${path}.${key}`, "expected an absolute host path");
+	}
+	if (placement.sourceRootRelativePath !== undefined) {
+		const text = nonEmptyString(placement.sourceRootRelativePath, `${path}.sourceRootRelativePath`);
+		if (isAbsolute(text) || text.split(/[\\/]/).some((part) => !part || part === "." || part === "..")) {
+			fail(`${path}.sourceRootRelativePath`, "expected a repository-relative directory");
+		}
+	}
+	const pr = record(placement.pullRequest, `${path}.pullRequest`);
+	exactKeys(pr, `${path}.pullRequest`, [
+		"provider",
+		"url",
+		"number",
+		"title",
+		"repository",
+		"headRefName",
+		"headRefOid",
+	]);
+	if (pr.provider !== "github") fail(`${path}.pullRequest.provider`, "unsupported provider");
+	const number = positiveSafeInteger(pr.number, `${path}.pullRequest.number`);
+	if (number > 2147483647) fail(`${path}.pullRequest.number`, "PR number exceeds limit");
+	for (const key of ["url", "title", "repository", "headRefName", "headRefOid"]) {
+		const text = nonEmptyString(pr[key], `${path}.pullRequest.${key}`);
+		if (text.length > 4096 || /[\u0000-\u001f\u007f]/.test(text))
+			fail(`${path}.pullRequest.${key}`, "invalid or oversized text");
+	}
+	if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(pr.headRefOid as string))
+		fail(`${path}.pullRequest.headRefOid`, "invalid Git object id");
+	const url = new URL(pr.url as string);
+	const repository = pr.repository as string;
+	if (
+		url.protocol !== "https:" ||
+		url.href !== pr.url ||
+		url.username ||
+		url.password ||
+		url.port ||
+		url.search ||
+		url.hash ||
+		!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ||
+		url.pathname.toLowerCase() !== `/${repository}/pull/${number}`.toLowerCase() ||
+		placement.repositoryId !== `github:${url.hostname}/${repository}`.toLowerCase() ||
+		!/^github:[a-z0-9.-]+\/[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(placement.headRepositoryId as string) ||
+		!(placement.headRepositoryId as string).startsWith(`github:${url.hostname}/`)
+	)
+		fail(`${path}.pullRequest`, "inconsistent canonical repository identity");
+}
+
 function baseKeys(mode: "admission" | "persisted"): string[] {
 	return mode === "persisted"
 		? ["type", "id", "parentId", "timestamp", "ordinal"]
@@ -382,6 +457,10 @@ function parseSessionEntry(
 				fail("$.gitContext", "invalid starting Git context");
 			}
 			break;
+		case "pr_review_binding":
+			exactKeys(entry, "$", [...base, "placement"], optionalOrdinal);
+			validatePrReviewPlacement(entry.placement);
+			break;
 		case "leaf":
 			exactKeys(entry, "$", [...base, "targetId"], optionalOrdinal);
 			if (entry.targetId !== null) idValue(entry.targetId, "$.targetId");
@@ -426,6 +505,7 @@ export function isHostOnlySessionEntryType(type: string): boolean {
 		type === "client_input_queued" ||
 		type === "client_input_state" ||
 		type === "session_start_git_context" ||
+		type === "pr_review_binding" ||
 		type === "subagent_spawn" ||
 		type === "leaf"
 	);
@@ -671,6 +751,7 @@ export function validatePersistedSessionEntrySequence(
 	const byId = new Map<string, SessionEntry>();
 	const clientInputs = createClientInputSequenceValidator();
 	let sawStartingGitContext = false;
+	let sawPrReviewBinding = false;
 	for (const [index, value] of values.entries()) {
 		const entry = parsePersistedSessionEntry(value);
 		if (entry.ordinal !== index + 1) {
@@ -681,6 +762,10 @@ export function validatePersistedSessionEntrySequence(
 		if (entry.type === "session_start_git_context") {
 			if (sawStartingGitContext) throw new Error("Session contains more than one starting Git context entry");
 			sawStartingGitContext = true;
+		}
+		if (entry.type === "pr_review_binding") {
+			if (sawPrReviewBinding) throw new Error("Session contains more than one PR review binding entry");
+			sawPrReviewBinding = true;
 		}
 		if (options.snapshot && isHostOnlySessionEntryType(entry.type) && entry.type !== "leaf") {
 			throw new Error(`Session snapshot contains unsupported host-only entry: ${entry.type}`);

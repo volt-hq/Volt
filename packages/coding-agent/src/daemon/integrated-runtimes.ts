@@ -132,7 +132,17 @@ export interface IntegratedRuntimeRegistryOptions {
 		worktree?: IrohRemoteWorkspaceWorktree;
 	}) => Promise<WorkspaceDirectoryResolution>;
 	/** Reserve the worktree before runtime initialization and atomically publish or release it. */
-	prepareWorktreeRuntime?: (workspaceName: string, worktreeId: string) => Promise<WorktreeRuntimePreparation>;
+	prepareWorktreeRuntime?: (
+		workspaceName: string,
+		worktreeId: string,
+		sessionId?: string,
+	) => Promise<WorktreeRuntimePreparation>;
+	/** Validate a prepared PR before session creation; persist its binding before publication. */
+	preparePrReviewSession?: (
+		authorization: IrohRemoteClientAuthorizationSuccess,
+		hello: IrohRemoteHello,
+		signal?: AbortSignal,
+	) => Promise<((manager: SessionManager) => Promise<void>) | undefined>;
 	/** Persist the sessionId → worktree binding after a created worktree conversation. */
 	bindWorktreeSession?: (workspaceName: string, worktreeId: string, sessionId: string) => Promise<void>;
 	/** Lease-broker seam: invoked when a runtime's session id changes (rekey). */
@@ -471,7 +481,7 @@ export class IntegratedRuntimeRegistry {
 				if (!this.options.bindWorktreeSession || !this.options.prepareWorktreeRuntime)
 					throw new Error("Review worktree service unavailable");
 				preparation = await waitForAttachAdmission(
-					this.options.prepareWorktreeRuntime(parent.workspaceName, parent.worktreeId),
+					this.options.prepareWorktreeRuntime(parent.workspaceName, parent.worktreeId, ref.sessionId),
 					admission?.signal,
 					(late) => late.release(),
 				);
@@ -809,9 +819,19 @@ export class IntegratedRuntimeRegistry {
 						options.signal,
 					)
 				: undefined;
+			const bindPrReview = await this.options.preparePrReviewSession?.(
+				authorization,
+				handshake.hello,
+				options.signal,
+			);
+			assertAttachAdmissionOpen(options.signal);
 			if (worktree !== undefined && this.options.prepareWorktreeRuntime) {
 				worktreePreparation = await waitForAttachAdmission(
-					this.options.prepareWorktreeRuntime(authorization.workspace.name, worktree.id),
+					this.options.prepareWorktreeRuntime(
+						authorization.workspace.name,
+						worktree.id,
+						getResolvedTargetSessionId(handshake.hello, authorization),
+					),
 					options.signal,
 					(latePreparation) => latePreparation.release(),
 				);
@@ -866,6 +886,8 @@ export class IntegratedRuntimeRegistry {
 			});
 			runtime = runtimeResult.runtime;
 			sessionSelection = runtimeResult.sessionSelection;
+			assertAttachAdmissionOpen(options.signal);
+			await bindPrReview?.(runtime.session.sessionManager);
 			assertAttachAdmissionOpen(options.signal);
 			const runtimeDirectory = await waitForAttachAdmission(
 				resolveRuntimeWorkingDirectory(rootPath, runtime.cwd),

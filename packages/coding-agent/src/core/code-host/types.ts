@@ -151,6 +151,34 @@ export interface CanonicalCodeHostRepository {
 	canonicalId: string;
 }
 
+/** Host-only checkout identity and validated base repository transport; never project transport to clients. */
+export interface ResolvedPullRequestCheckout {
+	pullRequest: {
+		provider: "github";
+		url: string;
+		number: number;
+		title: string;
+		repository: string;
+		headRefName: string;
+		headRefOid: string;
+	};
+	repository: CanonicalCodeHostRepository;
+	headRepository: CanonicalCodeHostRepository;
+	remote: string;
+	remoteUrl: string;
+	/** GitHub's PR head ref in the selected base repository, including for fork PRs. */
+	headRef: string;
+}
+
+export type ResolvePullRequestCheckoutOptions = Pick<
+	ReviewCodeHostContextCaptureOptions,
+	"cwd" | "number" | "expectedUrl" | "maxPullRequestNumber" | "signal"
+>;
+
+export type ResolvePullRequestCheckoutResult =
+	| { ok: true; target: ResolvedPullRequestCheckout }
+	| { ok: false; error: string; remoteError?: string };
+
 export type CodeHostPullRequestStatus = "open" | "draft" | "merged" | "closed";
 
 /** Bounded exact match retained by daemon Work association state. */
@@ -235,6 +263,7 @@ export interface CodeHostProvider {
 	readonly id: string;
 	readonly displayName: string;
 	probeCurrentPullRequest(cwd: string, signal?: AbortSignal): Promise<CodeHostPullRequestSummary | undefined>;
+	resolvePullRequestCheckout(options: ResolvePullRequestCheckoutOptions): Promise<ResolvePullRequestCheckoutResult>;
 	capturePullRequestContext(options: ReviewCodeHostContextCaptureOptions): Promise<ReviewCodeHostContextCaptureResult>;
 	verifyPullRequestHead(cwd: string, pullRequest: ReviewPullRequestIdentity): Promise<void>;
 	publishPullRequestReview(request: ReviewCodeHostPublishRequest): Promise<ReviewCodeHostPublishResult>;

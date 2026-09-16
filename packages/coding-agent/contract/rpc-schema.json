@@ -77,7 +77,10 @@
 			"stale_plan_revision",
 			"stale_conversation_authority",
 			"review_discussions_unavailable",
-			"review_source_unavailable"
+			"review_source_unavailable",
+			"review_preparation_failed",
+			"review_preparation_stale",
+			"review_preparation_conflict"
 		],
 		"remoteErrorStrings": [
 			"invalid_cursor",
@@ -829,6 +832,12 @@
 					"$ref": "#/$defs/RpcCommand.invoke_ui_action"
 				},
 				{
+					"$ref": "#/$defs/RpcCommand.resolve_pr_review"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.prepare_pr_review"
+				},
+				{
 					"$ref": "#/$defs/RpcCommand.start_review_discussions"
 				},
 				{
@@ -1136,6 +1145,12 @@
 				},
 				{
 					"$ref": "#/$defs/RpcCommand.invoke_ui_action"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.resolve_pr_review"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.prepare_pr_review"
 				},
 				{
 					"$ref": "#/$defs/RpcCommand.start_review_discussions"
@@ -2931,6 +2946,86 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcCommand.prepare_pr_review": {
+			"type": "object",
+			"required": [
+				"type",
+				"workspaceName",
+				"sessionId",
+				"expectedPullRequest"
+			],
+			"properties": {
+				"id": {
+					"type": "string",
+					"pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+					"x-volt-max-utf8-bytes": 256,
+					"x-volt-expected": "be a non-empty string",
+					"maxLength": 256
+				},
+				"type": {
+					"type": "string",
+					"const": "prepare_pr_review"
+				},
+				"workspaceName": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 255,
+					"pattern": "^[^\\u0000-\\u001f\\u007f]+$(?![\\s\\S])"
+				},
+				"workingDirectory": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 4096,
+					"pattern": "^(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.{1,2}|\\.[gG][iI][tT])(?:/|$))[^/\\\\\\u0000-\\u001f\\u007f]+(?:/[^/\\\\\\u0000-\\u001f\\u007f]+)*$(?![\\s\\S])"
+				},
+				"sourceWorktreeId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 64,
+					"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$(?![\\s\\S])"
+				},
+				"number": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 10,
+					"pattern": "^(?:[1-9][0-9]{0,8}|1[0-9]{9}|20[0-9]{8}|21[0-3][0-9]{7}|214[0-6][0-9]{6}|2147[0-3][0-9]{5}|21474[0-7][0-9]{4}|214748[0-2][0-9]{3}|2147483[0-5][0-9]{2}|21474836[0-3][0-9]|214748364[0-7])$(?![\\s\\S])"
+				},
+				"sessionId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 128,
+					"pattern": "^[a-z0-9_-]{1,128}$(?![\\s\\S])"
+				},
+				"expectedPullRequest": {
+					"type": "object",
+					"required": [
+						"url",
+						"headRefOid"
+					],
+					"properties": {
+						"url": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 2048,
+							"pattern": "^https://[^\\s]+$(?![\\s\\S])"
+						},
+						"headRefOid": {
+							"type": "string",
+							"maxLength": 64,
+							"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$(?![\\s\\S])"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false,
+			"not": {
+				"required": [
+					"workingDirectory",
+					"sourceWorktreeId"
+				]
+			}
+		},
 		"RpcCommand.prompt": {
 			"type": "object",
 			"required": [
@@ -3236,6 +3331,57 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"RpcCommand.resolve_pr_review": {
+			"type": "object",
+			"required": [
+				"type",
+				"workspaceName"
+			],
+			"properties": {
+				"id": {
+					"type": "string",
+					"pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+					"x-volt-max-utf8-bytes": 256,
+					"x-volt-expected": "be a non-empty string",
+					"maxLength": 256
+				},
+				"type": {
+					"type": "string",
+					"const": "resolve_pr_review"
+				},
+				"workspaceName": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 255,
+					"pattern": "^[^\\u0000-\\u001f\\u007f]+$(?![\\s\\S])"
+				},
+				"workingDirectory": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 4096,
+					"pattern": "^(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.{1,2}|\\.[gG][iI][tT])(?:/|$))[^/\\\\\\u0000-\\u001f\\u007f]+(?:/[^/\\\\\\u0000-\\u001f\\u007f]+)*$(?![\\s\\S])"
+				},
+				"sourceWorktreeId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 64,
+					"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$(?![\\s\\S])"
+				},
+				"number": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 10,
+					"pattern": "^(?:[1-9][0-9]{0,8}|1[0-9]{9}|20[0-9]{8}|21[0-3][0-9]{7}|214[0-6][0-9]{6}|2147[0-3][0-9]{5}|21474[0-7][0-9]{4}|214748[0-2][0-9]{3}|2147483[0-5][0-9]{2}|21474836[0-3][0-9]|214748364[0-7])$(?![\\s\\S])"
+				}
+			},
+			"additionalProperties": false,
+			"not": {
+				"required": [
+					"workingDirectory",
+					"sourceWorktreeId"
+				]
+			}
 		},
 		"RpcCommand.set_agent_mode": {
 			"type": "object",
@@ -4361,7 +4507,13 @@
 								"stale_plan_revision",
 								"stale_conversation_authority",
 								"review_discussions_unavailable",
-								"review_source_unavailable"
+								"review_source_unavailable",
+								"review_preparation_failed",
+								"review_preparation_stale",
+								"review_preparation_conflict",
+								"review_preparation_failed",
+								"review_preparation_stale",
+								"review_preparation_conflict"
 							]
 						}
 					},
@@ -4405,7 +4557,13 @@
 								"stale_plan_revision",
 								"stale_conversation_authority",
 								"review_discussions_unavailable",
-								"review_source_unavailable"
+								"review_source_unavailable",
+								"review_preparation_failed",
+								"review_preparation_stale",
+								"review_preparation_conflict",
+								"review_preparation_failed",
+								"review_preparation_stale",
+								"review_preparation_conflict"
 							]
 						}
 					},
@@ -7073,6 +7231,12 @@
 					"$ref": "#/$defs/RpcResponse.invoke_ui_action"
 				},
 				{
+					"$ref": "#/$defs/RpcResponse.resolve_pr_review"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.prepare_pr_review"
+				},
+				{
 					"$ref": "#/$defs/RpcResponse.start_review_discussions"
 				},
 				{
@@ -9527,6 +9691,124 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcResponse.prepare_pr_review": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "prepare_pr_review"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"workspaceName",
+						"sessionId",
+						"worktreeId",
+						"pullRequest",
+						"disposition"
+					],
+					"properties": {
+						"workspaceName": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 255,
+							"pattern": "^[^\\u0000-\\u001f\\u007f]+$(?![\\s\\S])"
+						},
+						"sessionId": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 128,
+							"pattern": "^[a-z0-9_-]{1,128}$(?![\\s\\S])"
+						},
+						"worktreeId": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 64,
+							"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$(?![\\s\\S])"
+						},
+						"workingDirectory": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 4096,
+							"pattern": "^(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.{1,2}|\\.[gG][iI][tT])(?:/|$))[^/\\\\\\u0000-\\u001f\\u007f]+(?:/[^/\\\\\\u0000-\\u001f\\u007f]+)*$(?![\\s\\S])"
+						},
+						"pullRequest": {
+							"type": "object",
+							"required": [
+								"provider",
+								"url",
+								"number",
+								"title",
+								"repository",
+								"headRefName",
+								"headRefOid"
+							],
+							"properties": {
+								"provider": {
+									"type": "string",
+									"const": "github"
+								},
+								"url": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 2048,
+									"pattern": "^https://[^\\s]+$(?![\\s\\S])"
+								},
+								"number": {
+									"type": "integer",
+									"minimum": 1,
+									"maximum": 2147483647
+								},
+								"title": {
+									"type": "string",
+									"maxLength": 512
+								},
+								"repository": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 256
+								},
+								"headRefName": {
+									"$ref": "#/$defs/RpcGitRef"
+								},
+								"headRefOid": {
+									"type": "string",
+									"maxLength": 64,
+									"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$(?![\\s\\S])"
+								}
+							},
+							"additionalProperties": false
+						},
+						"disposition": {
+							"type": "string",
+							"enum": [
+								"created",
+								"reused"
+							]
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcResponse.prompt": {
 			"type": "object",
 			"required": [
@@ -9907,6 +10189,96 @@
 				},
 				"data": {
 					"$ref": "#/$defs/RpcResetReviewDiscussion"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.resolve_pr_review": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "resolve_pr_review"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"workspaceName",
+						"pullRequest"
+					],
+					"properties": {
+						"workspaceName": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 255,
+							"pattern": "^[^\\u0000-\\u001f\\u007f]+$(?![\\s\\S])"
+						},
+						"pullRequest": {
+							"type": "object",
+							"required": [
+								"provider",
+								"url",
+								"number",
+								"title",
+								"repository",
+								"headRefName",
+								"headRefOid"
+							],
+							"properties": {
+								"provider": {
+									"type": "string",
+									"const": "github"
+								},
+								"url": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 2048,
+									"pattern": "^https://[^\\s]+$(?![\\s\\S])"
+								},
+								"number": {
+									"type": "integer",
+									"minimum": 1,
+									"maximum": 2147483647
+								},
+								"title": {
+									"type": "string",
+									"maxLength": 512
+								},
+								"repository": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 256
+								},
+								"headRefName": {
+									"$ref": "#/$defs/RpcGitRef"
+								},
+								"headRefOid": {
+									"type": "string",
+									"maxLength": 64,
+									"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$(?![\\s\\S])"
+								}
+							},
+							"additionalProperties": false
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false

@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { Message } from "@hansjm10/volt-ai";
 import { cloneCanonicalData } from "../canonical-data.ts";
+import type { PrReviewPlacement } from "../pr-review-placement.ts";
 import type { RpcGitContext } from "../rpc/types.ts";
 import { RPC_SESSION_QUEUE_MAX_ITEMS } from "../rpc/wire-limits.ts";
 import {
@@ -43,6 +44,7 @@ export interface SessionDerivedState {
 	hasPlanningState: boolean;
 	name: string | undefined;
 	startingGitContext: RpcGitContext | null | undefined;
+	prReviewBinding: PrReviewPlacement | undefined;
 	labelsById: Map<string, string>;
 	labelTimestampsById: Map<string, string>;
 	clientInputsById: Map<string, ClientInputRecord>;
@@ -82,6 +84,7 @@ function createEmptySessionDerivedState(headerTimestamp: string): SessionDerived
 		hasPlanningState: false,
 		name: undefined,
 		startingGitContext: undefined,
+		prReviewBinding: undefined,
 		labelsById: new Map(),
 		labelTimestampsById: new Map(),
 		clientInputsById: new Map(),
@@ -185,6 +188,7 @@ export function cloneSessionDerivedState(state: SessionDerivedState): SessionDer
 		hasPlanningState: state.hasPlanningState,
 		name: state.name,
 		startingGitContext: cloneStartingGitContext(state.startingGitContext),
+		prReviewBinding: state.prReviewBinding === undefined ? undefined : structuredClone(state.prReviewBinding),
 		labelsById: new Map(state.labelsById),
 		labelTimestampsById: new Map(state.labelTimestampsById),
 		clientInputsById: new Map(
@@ -474,6 +478,9 @@ export function applySessionEntry(state: SessionDerivedState, entry: SessionEntr
 	if (entry.type === "session_start_git_context" && state.startingGitContext !== undefined) {
 		throw new Error("Session contains more than one starting Git context entry");
 	}
+	if (entry.type === "pr_review_binding" && state.prReviewBinding !== undefined) {
+		throw new Error("Session contains more than one PR review binding entry");
+	}
 	const nextMessageSummary = { ...state.messageSummary };
 	accumulateMessageSummary(nextMessageSummary, entry);
 	const clientInput = reduceClientInputEntry(state, entry);
@@ -486,6 +493,7 @@ export function applySessionEntry(state: SessionDerivedState, entry: SessionEntr
 	if (entry.type === "session_start_git_context") {
 		state.startingGitContext = cloneStartingGitContext(entry.gitContext);
 	}
+	if (entry.type === "pr_review_binding") state.prReviewBinding = structuredClone(entry.placement);
 	if (entry.type === "label") {
 		if (entry.label) {
 			state.labelsById.set(entry.targetId, entry.label);

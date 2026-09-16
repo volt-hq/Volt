@@ -1505,7 +1505,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		if (!options.requireConversationAuthority || !RPC_CONVERSATION_AUTHORITY_MUTATION_TYPES.has(command.type)) {
 			return;
 		}
-		const authority = command.conversationAuthority;
+		const authority = "conversationAuthority" in command ? command.conversationAuthority : undefined;
 		const orderedConversation = options.orderedConversation;
 		if (
 			!authority ||

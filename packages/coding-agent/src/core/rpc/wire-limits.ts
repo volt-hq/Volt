@@ -181,6 +181,9 @@ export const RPC_STABLE_ERROR_CODES = [
 	"stale_conversation_authority",
 	"review_discussions_unavailable",
 	"review_source_unavailable",
+	"review_preparation_failed",
+	"review_preparation_stale",
+	"review_preparation_conflict",
 ] as const;
 export type RpcStableErrorCode = (typeof RPC_STABLE_ERROR_CODES)[number];
 

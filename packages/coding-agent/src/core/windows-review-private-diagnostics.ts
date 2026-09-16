@@ -99,6 +99,13 @@ export async function writeWindowsReviewDiagnostic(filePath: string, content: st
 				else resolve();
 			},
 		);
+		// This write-only protocol has no output to drain. Inherited Windows pipe
+		// handles must not delay execFile's completion callback after PowerShell exits.
+		child.once("exit", () => {
+			child.stdin?.destroy();
+			child.stdout?.destroy();
+			child.stderr?.destroy();
+		});
 		// Startup/timeout errors are reported by execFile's callback; don't let an
 		// early pipe closure become an unhandled event or expose its raw diagnostic.
 		child.stdin?.on("error", () => {});

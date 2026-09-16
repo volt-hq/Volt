@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { writeDurableAtomicFile } from "../../../utils/durable-atomic-write.ts";
+import { type PrReviewLaunch, parsePrReviewLaunches } from "../../pr-review-placement.ts";
 import { cloneIrohRemoteRpcGrant, type IrohRemoteRpcGrant, parseIrohRemoteRpcGrant } from "./access-grant.ts";
 import {
 	canonicalizePersistedIrohRemoteAllowTools,
@@ -33,6 +34,8 @@ export interface IrohRemoteWorkspaceWorktree {
 	createdAt: number;
 	/** Sessions bound to this worktree (usually exactly one). */
 	sessionIds: string[];
+	/** Host-only PR preparation receipts; at most 64 per checkout. */
+	prReviewLaunches?: PrReviewLaunch[];
 }
 
 export type IrohRemotePushTargetProvider = "fcm";
@@ -298,6 +301,9 @@ export function parseIrohRemoteWorkspaceWorktree(value: unknown): IrohRemoteWork
 		workspaceName: expectString(worktree.workspaceName, "worktree workspaceName"),
 		path: expectString(worktree.path, "worktree path"),
 		...(sourceRootRelativePath === undefined ? {} : { sourceRootRelativePath }),
+		...(worktree.prReviewLaunches === undefined
+			? {}
+			: { prReviewLaunches: parsePrReviewLaunches(worktree.prReviewLaunches) }),
 		branch: expectString(worktree.branch, "worktree branch"),
 		...(baseRef === undefined ? {} : { baseRef }),
 		createdAt: expectNumber(worktree.createdAt, "worktree createdAt"),

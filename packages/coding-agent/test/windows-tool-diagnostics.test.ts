@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { writeWindowsReviewDiagnostic } from "../src/core/windows-review-private-diagnostics.ts";
 
 const mocks = vi.hoisted(() => ({ input: vi.fn(), errors: vi.fn() }));
-vi.mock("node:child_process", () => ({ execFile: vi.fn(() => ({ stdin: { on: mocks.errors, end: mocks.input } })) }));
+vi.mock("node:child_process", () => ({
+	execFile: vi.fn(() => ({ stdin: { on: mocks.errors, end: mocks.input }, once: vi.fn() })),
+}));
 
 describe("Windows private tool capture", () => {
 	afterEach(() => {

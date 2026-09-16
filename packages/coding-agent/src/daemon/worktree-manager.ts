@@ -2,6 +2,7 @@ import { createHash, randomInt } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, readdir, realpath, rename, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+import type { PrReviewLaunch } from "../core/pr-review-placement.ts";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import { IROH_REMOTE_WORKTREE_ID_PATTERN } from "../core/remote/iroh/protocol.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
@@ -16,6 +17,7 @@ import { writeDurableAtomicFile } from "../utils/durable-atomic-write.ts";
 import { ensurePrivateDirectorySync } from "../utils/private-files.ts";
 import type { ControlRequest, ControlWorktreeStatus } from "./control-protocol.ts";
 import type { ControlConnection } from "./control-server.ts";
+import { runPrReviewGit } from "./pr-review-git.ts";
 import { resolveWorkspaceDirectory, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 
 /** join(agentDir, "worktrees") — sibling of sessions/, daemon/, trust.json. */
@@ -370,8 +372,17 @@ export class WorktreeManager {
 	/** git worktree add; persists the record durably after git succeeds. */
 	async create(
 		workspace: IrohRemoteWorkspace,
-		options: { id?: string; branch?: string; baseRef?: string; workingDirectory?: string; signal?: AbortSignal } = {},
+		options: {
+			id?: string;
+			branch?: string;
+			baseRef?: string;
+			workingDirectory?: string;
+			signal?: AbortSignal;
+			prReviewLaunch?: PrReviewLaunch;
+			assertCurrent?: () => void;
+		} = {},
 	): Promise<WorktreeResult<{ worktree: IrohRemoteWorkspaceWorktree }>> {
+		const runGit = options.prReviewLaunch ? runPrReviewGit : this.runGit;
 		const id = options.id ?? generateWorktreeIdSlug();
 		if (!WORKTREE_ID_PATTERN.test(id)) {
 			return { ok: false, error: "invalid_worktree_id" };
@@ -400,9 +411,10 @@ export class WorktreeManager {
 					registeredWorkspace,
 					options.workingDirectory,
 					options.signal,
+					runGit,
 				);
 				if (!source.ok) return { result: source };
-				const repoCheck = await this.runGit(["rev-parse", "--git-common-dir"], source.source.sourceRootPath, {
+				const repoCheck = await runGit(["rev-parse", "--git-common-dir"], source.source.sourceRootPath, {
 					signal: options.signal,
 				});
 				if (!repoCheck.ok) {
@@ -419,8 +431,19 @@ export class WorktreeManager {
 					mode: 0o700,
 				});
 				options.signal?.throwIfAborted();
-				const added = await this.runGit(
-					["worktree", "add", checkoutPath, "-b", branch, baseRef],
+				options.assertCurrent?.();
+				if (options.prReviewLaunch && options.prReviewLaunch.placement.cwd !== checkoutPath)
+					throw new Error("PR checkout placement changed");
+				const added = await runGit(
+					[
+						"worktree",
+						"add",
+						...(options.prReviewLaunch ? ["--no-checkout"] : []),
+						checkoutPath,
+						"-b",
+						branch,
+						baseRef,
+					],
 					source.source.sourceRootPath,
 					{ signal: options.signal },
 				);
@@ -430,6 +453,21 @@ export class WorktreeManager {
 							source.source.sourceRootPath,
 						]),
 					};
+				}
+				if (options.prReviewLaunch) {
+					// Conditional includes can enable filters only on the new branch/gitdir.
+					// Probe and populate in that context, never during worktree add.
+					options.signal?.throwIfAborted();
+					options.assertCurrent?.();
+					const populated = await runGit(["reset", "--hard", "HEAD"], checkoutPath, { signal: options.signal });
+					if (!populated.ok) {
+						// Preserve partial files, but do not publish a prepared checkout or launch.
+						return {
+							result: this.mapGitFailure(populated.stderr, registeredWorkspace, checkoutPath, [
+								source.source.sourceRootPath,
+							]),
+						};
+					}
 				}
 				const worktree: IrohRemoteWorkspaceWorktree = {
 					id,
@@ -442,6 +480,7 @@ export class WorktreeManager {
 					...(recordedBaseRef === undefined ? {} : { baseRef: recordedBaseRef }),
 					createdAt: this.now(),
 					sessionIds: [],
+					...(options.prReviewLaunch ? { prReviewLaunches: [structuredClone(options.prReviewLaunch)] } : {}),
 				};
 				return { result: { ok: true, worktree }, worktree };
 			});
@@ -642,12 +681,13 @@ export class WorktreeManager {
 		workspace: IrohRemoteWorkspace,
 		workingDirectory?: string,
 		signal?: AbortSignal,
+		runGit: WorktreeGitRunner = this.runGit,
 	): Promise<WorktreeResult<{ source: WorktreeSourceResolution }>> {
 		const workspaceDirectory = await this.validateWorkingDirectory(workspace, workingDirectory);
 		if (!workspaceDirectory.ok) {
 			return workspaceDirectory;
 		}
-		const topLevel = await this.runGit(
+		const topLevel = await runGit(
 			["-C", workspaceDirectory.directory.absolutePath, "rev-parse", "--show-toplevel"],
 			workspace.path,
 			{ signal },
@@ -849,6 +889,11 @@ export class WorktreeManager {
 						return { result: { ok: false, error: "worktree_not_found" } };
 					}
 					if (this.runtimePreparations.has(`${current.workspace.name}\0${worktreeId}`)) {
+						return { result: { ok: false, error: "worktree_busy" } };
+					}
+					// Preparation reserves the checkout before session binding. Check under the same
+					// lifecycle lock; only explicit forced removal may cancel a pending launch.
+					if (!force && record.prReviewLaunches?.some((launch) => launch.sessionGeneration === undefined)) {
 						return { result: { ok: false, error: "worktree_busy" } };
 					}
 					if (record.sessionIds.length > 0) {
@@ -1156,12 +1201,27 @@ export class WorktreeManager {
 		return match.worktree;
 	}
 
-	async beginRuntimePreparation(workspaceName: string, worktreeId: string): Promise<WorktreeRuntimePreparation> {
+	isRuntimePreparing(workspaceName: string, worktreeId: string): boolean {
+		return this.runtimePreparations.has(`${workspaceName}\0${worktreeId}`);
+	}
+
+	async beginRuntimePreparation(
+		workspaceName: string,
+		worktreeId: string,
+		sessionId?: string,
+	): Promise<WorktreeRuntimePreparation> {
 		const key = `${workspaceName}\0${worktreeId}`;
 		const token = Symbol(key);
 		await this.stateManager.runWorkspaceWorktreeLifecycle(workspaceName, async (current) => {
 			const record = current.worktrees.find((entry) => entry.id === worktreeId);
-			if (!record || !existsSync(record.path) || this.runtimePreparations.has(key)) {
+			if (
+				!record ||
+				!existsSync(record.path) ||
+				this.runtimePreparations.has(key) ||
+				record.prReviewLaunches?.some(
+					(launch) => launch.sessionGeneration === undefined && launch.sessionId !== sessionId,
+				)
+			) {
 				throw new Error(`Worktree ${worktreeId} is unavailable for runtime preparation`);
 			}
 			this.runtimePreparations.set(key, token);
@@ -1204,7 +1264,12 @@ export class WorktreeManager {
 	): Promise<void> {
 		await this.stateManager.runWorkspaceWorktreeLifecycle(workspaceName, async (current) => {
 			const record = current.worktrees.find((entry) => entry.id === worktreeId);
-			if (record === undefined) {
+			if (
+				record === undefined ||
+				record.prReviewLaunches?.some(
+					(launch) => launch.sessionGeneration === undefined && launch.sessionId !== sessionId,
+				)
+			) {
 				throw new Error(`Worktree ${worktreeId} is unavailable for session binding`);
 			}
 			const bound = structuredClone(record);

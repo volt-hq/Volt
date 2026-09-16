@@ -10,6 +10,7 @@
 import { type TLiteral, type TObject, type TOptional, type TProperties, type TString, Type } from "typebox";
 import { openStringEnum, stringEnum } from "./helpers.ts";
 import { RpcAgentModeSchema, RpcPlanExecutionStrategySchema } from "./planning.ts";
+import { RpcPreparePrReviewCommandSchema, RpcResolvePrReviewCommandSchema } from "./pr-review.ts";
 import {
 	RPC_TRIMMED_NON_EMPTY_PATTERN,
 	RpcAssistantStreamPositionSchema,
@@ -167,6 +168,10 @@ export const RPC_COMMAND_SCHEMAS = {
 		},
 		{ additionalProperties: false },
 	),
+
+	// Workspace utility streams only; never conversation commands.
+	resolve_pr_review: RpcResolvePrReviewCommandSchema,
+	prepare_pr_review: RpcPreparePrReviewCommandSchema,
 
 	// Detached review workflows
 	start_review_discussions: commandSchema("start_review_discussions", {
