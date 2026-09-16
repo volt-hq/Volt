@@ -139,12 +139,26 @@ describe("Windows diagnostic subprocess failure containment", () => {
 				"child.unref();",
 			].join("\n"),
 		);
-		vi.stubEnv("SystemRoot", root);
+		// The Node fixture inherits this environment: retain the real system path on Windows.
+		vi.stubEnv("SystemRoot", process.env.SystemRoot ?? root);
+		let fixtureFailure: string | undefined;
 		processMocks.execFile.mockImplementation((_file, _args, options, callback) =>
-			actual.execFile(process.execPath, [script, pidPath], { ...options, encoding: "utf8" }, callback),
+			actual.execFile(
+				process.execPath,
+				[script, pidPath],
+				{ ...options, encoding: "utf8" },
+				(error, stdout, stderr) => {
+					if (error) fixtureFailure = `${error.code}: ${stderr}`;
+					callback(error, stdout, stderr);
+				},
+			),
 		);
 		try {
-			await writeWindowsReviewDiagnostic(join(root, "capture.jsonl"), "private");
+			const failure = await writeWindowsReviewDiagnostic(join(root, "capture.jsonl"), "private").catch(
+				(error: unknown) => error,
+			);
+			expect(fixtureFailure).toBeUndefined();
+			expect(failure).toBeUndefined();
 			// Completion must not require the descendant's 30-second lifetime to end.
 			process.kill(Number(readFileSync(pidPath, "utf8")), 0);
 		} finally {
