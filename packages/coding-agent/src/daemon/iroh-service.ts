@@ -25,7 +25,10 @@ import {
 	type IrohRemoteAgentOptionsRpcBackend,
 } from "../core/remote/iroh/agent-options.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
-import { hashIrohRemotePairingSecret } from "../core/remote/iroh/authorization.ts";
+import {
+	hashIrohRemotePairingSecret,
+	isIrohRemoteClientAllowedForWorkspace,
+} from "../core/remote/iroh/authorization.ts";
 import {
 	DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS,
 	IrohRemoteHostEngine,
@@ -42,6 +45,7 @@ import {
 	writeIrohRemoteHandshakeResponse,
 } from "../core/remote/iroh/handshake-reader.ts";
 import { resolveIrohRemoteWorkspaceProjectTrusted } from "../core/remote/iroh/host-policy.ts";
+import { type IrohRemotePrReviewRpcBackend, PrReviewPreparationError } from "../core/remote/iroh/pr-review-rpc.ts";
 import {
 	IROH_REMOTE_ALPN,
 	isIrohRemoteHostStorageFullError,
@@ -148,6 +152,11 @@ import {
 } from "./iroh-stream-lifecycle.ts";
 import { type DaemonAttachClaim, LeaseBroker, type LeaseRecord, type LeaseState } from "./lease-broker.ts";
 import type { VoltdRuntimeServices, VoltdServiceExtension } from "./main.ts";
+import {
+	PrReviewCheckoutError,
+	PrReviewCheckoutManager,
+	type PrReviewPreparationAuthority,
+} from "./pr-review-checkout.ts";
 import { createDaemonPushRelayClient } from "./push-relay-client.ts";
 import {
 	activateIrohManagedRelayCredential,
@@ -880,6 +889,7 @@ class IrohDaemonService {
 	private readonly tuiWorkRetirementTasks = new Set<Promise<void>>();
 	private tuiWorkReceiptRevision = 0n;
 	private readonly worktrees: WorktreeManager;
+	private readonly prReviewCheckouts: PrReviewCheckoutManager;
 	private readonly worktreeRetention: WorktreeRetentionSweeper;
 	private readonly leaseBroker: LeaseBroker;
 	private readonly viewerFeeds: ViewerFeedRegistry;
@@ -1036,8 +1046,10 @@ class IrohDaemonService {
 			resolveWorktree: (workspaceName, hello, targetSessionId) =>
 				this.resolveConversationWorktree(workspaceName, hello, targetSessionId),
 			resolveWorkingDirectory: (options) => this.resolveConversationWorkingDirectory(options),
-			prepareWorktreeRuntime: (workspaceName, worktreeId) =>
-				this.worktrees.beginRuntimePreparation(workspaceName, worktreeId),
+			prepareWorktreeRuntime: (workspaceName, worktreeId, sessionId) =>
+				this.worktrees.beginRuntimePreparation(workspaceName, worktreeId, sessionId),
+			preparePrReviewSession: (authorization, hello, signal) =>
+				this.prReviewCheckouts.prepareSession(authorization, hello, this.prReviewAuthority(authorization, signal)),
 			bindWorktreeSession: (workspaceName, worktreeId, sessionId) =>
 				this.worktrees.bindSession(workspaceName, worktreeId, sessionId),
 			beginReviewSiblingAdmission: (parent, sessionId) => {
@@ -1088,6 +1100,18 @@ class IrohDaemonService {
 			reserveSessionsForRemoval: (workspaceName, sessionIds) =>
 				this.leaseBroker.reserveSessionsForWorktreeRemoval(workspaceName, sessionIds),
 			flushState: () => services.state.flush(),
+		});
+		this.prReviewCheckouts = new PrReviewCheckoutManager({
+			agentDir: services.agentDir,
+			stateManager: this.stateManager,
+			worktrees: this.worktrees,
+			hasActiveSession: (workspaceName, sessionId) => {
+				const lease = this.leaseBroker.lookup(workspaceName, sessionId);
+				return (
+					this.runtimes.findOwner(workspaceName, sessionId) !== undefined ||
+					(lease !== undefined && (lease.state !== "unowned" || lease.pendingDaemonAttaches > 0))
+				);
+			},
 		});
 		this.worktreeRetention = new WorktreeRetentionSweeper({
 			manager: this.worktrees,
@@ -3246,7 +3270,12 @@ class IrohDaemonService {
 								purpose: "session_contexts" as const,
 								sessionContexts: this.createSessionContextsRpcBackend(handshake.authorization),
 							}
-						: { purpose: "list_sessions" as const, commandContext: this.getCommandContext() };
+						: purpose === "review"
+							? {
+									purpose: "review" as const,
+									prReviews: this.createPrReviewRpcBackend(handshake.authorization, owner.signal),
+								}
+							: { purpose: "list_sessions" as const, commandContext: this.getCommandContext() };
 			await runWorkspaceDiscoveryStream(
 				{
 					stream,
@@ -3445,11 +3474,69 @@ class IrohDaemonService {
 					auditLogger: this.services.auditLogger,
 					additionalRedactedPaths: sanitizerOverrides.additionalRedactedPaths,
 					worktrees: this.createWorktreeRpcBackend(handshake.authorization.workspace),
+					prReviews: this.createPrReviewRpcBackend(handshake.authorization, owner.signal),
 				},
 			);
 		} finally {
 			activeStream.remove();
 		}
+	}
+
+	private prReviewAuthority(
+		authorization: IrohRemoteClientAuthorizationSuccess,
+		signal?: AbortSignal,
+	): PrReviewPreparationAuthority {
+		return {
+			workspaceGeneration: authorization.workspaceGeneration ?? 0,
+			signal,
+			assertCurrent: () => {
+				signal?.throwIfAborted();
+				const state = this.services.state.getHostState();
+				const client = state.clients.find((entry) => entry.nodeId === authorization.client.nodeId);
+				const workspace = state.workspaces.find((entry) => entry.name === authorization.workspace.name);
+				const generation = state.workspaceGenerations?.find(
+					(entry) => entry.workspaceName === authorization.workspace.name,
+				)?.generation;
+				if (
+					!this.admission.isOpen ||
+					client?.rpcGrant?.revision !== authorization.client.rpcGrant.revision ||
+					!isIrohRemoteClientAllowedForWorkspace(client, authorization.workspace.name) ||
+					client.allowedTools !== authorization.client.allowedTools ||
+					workspace?.path !== authorization.workspace.path ||
+					workspace.allowedTools !== authorization.workspace.allowedTools ||
+					generation !== authorization.workspaceGeneration
+				) {
+					throw new PrReviewPreparationError("review_preparation_failed");
+				}
+			},
+		};
+	}
+
+	private createPrReviewRpcBackend(
+		authorization: IrohRemoteClientAuthorizationSuccess,
+		signal: AbortSignal,
+	): IrohRemotePrReviewRpcBackend {
+		const run = async <T>(operation: (authority: PrReviewPreparationAuthority) => Promise<T>): Promise<T> => {
+			const admission = this.admission.tryAcquire();
+			if (!admission) throw new PrReviewPreparationError("review_preparation_failed");
+			try {
+				const authority = this.prReviewAuthority(authorization, AbortSignal.any([signal, admission.signal]));
+				authority.assertCurrent();
+				return await operation(authority);
+			} catch (error) {
+				throw new PrReviewPreparationError(
+					error instanceof PrReviewCheckoutError ? error.code : "review_preparation_failed",
+				);
+			} finally {
+				admission.release();
+			}
+		};
+		return {
+			resolvePrReview: (_workspaceName, request) =>
+				run((authority) => this.prReviewCheckouts.resolve(authorization.workspace, request, authority)),
+			preparePrReview: (_workspaceName, request) =>
+				run((authority) => this.prReviewCheckouts.prepare(authorization.workspace, request, authority)),
+		};
 	}
 
 	/** Backend for the worktree RPC helpers, bound to the stream's authorized workspace. */

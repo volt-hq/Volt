@@ -12,6 +12,10 @@ import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
 import { isIrohRemoteWorkspaceName } from "../core/remote/iroh/handshake.ts";
 import { sanitizeIrohRemoteOutbound } from "../core/remote/iroh/outbound-filter.ts";
+import {
+	handleIrohRemotePrReviewRpcCommand,
+	type IrohRemotePrReviewRpcBackend,
+} from "../core/remote/iroh/pr-review-rpc.ts";
 import { isIrohRemoteWorkingDirectory } from "../core/remote/iroh/protocol.ts";
 import {
 	createIrohRemoteRpcCapabilityDeniedResponse,
@@ -188,7 +192,8 @@ export async function runWorkspaceDiscoveryStream(
 	hooks:
 		| { purpose: "list_sessions"; commandContext: ConversationCommandContext }
 		| { purpose: "agent_options"; agentOptions: IrohRemoteAgentOptionsRpcBackend }
-		| { purpose: "session_contexts"; sessionContexts: IrohRemoteSessionContextsRpcBackend },
+		| { purpose: "session_contexts"; sessionContexts: IrohRemoteSessionContextsRpcBackend }
+		| { purpose: "review"; prReviews: IrohRemotePrReviewRpcBackend },
 ): Promise<void> {
 	const { stream, authorization } = context;
 	await runWorkspaceUtilityRpcLoop(stream, context.initialInput, async (line) => {
@@ -206,7 +211,9 @@ export async function runWorkspaceDiscoveryStream(
 				? "get_agent_options"
 				: hooks.purpose === "session_contexts"
 					? "get_session_contexts"
-					: "list_sessions";
+					: hooks.purpose === "review"
+						? "resolve_pr_review"
+						: "list_sessions";
 		if (parsed.command.type !== expectedType) {
 			await writeIrohRemoteJsonLine(
 				stream.send,
@@ -222,6 +229,20 @@ export async function runWorkspaceDiscoveryStream(
 		const denied = getUtilityCapabilityDenial(parsed.command, authorization);
 		if (denied) {
 			await writeIrohRemoteJsonLine(stream.send, denied, authorization);
+			return false;
+		}
+		if (hooks.purpose === "review") {
+			const result = await handleIrohRemotePrReviewRpcCommand(parsed.command, {
+				authorizedWorkspaceName: authorization.workspace.name,
+				backend: hooks.prReviews,
+			});
+			if (!(await context.isRpcGrantCurrent())) {
+				context.closeStream("access_updated");
+				return true;
+			}
+			if (result.handled) {
+				await writeIrohRemoteJsonLine(stream.send, result.response, authorization);
+			}
 			return false;
 		}
 		if (hooks.purpose === "agent_options") {
@@ -429,11 +450,13 @@ export async function runWorkspaceManagementStream(
 export interface WorktreeStreamHooks {
 	auditLogger: IrohRemoteAuditLogger;
 	worktrees: IrohRemoteWorktreeRpcBackend;
+	/** Optional host implementation; preparation is never forwarded to a conversation runtime. */
+	prReviews?: IrohRemotePrReviewRpcBackend;
 	/** Extra roots redacted on every frame of this stream (worktrees root). */
 	additionalRedactedPaths?: string[];
 }
 
-/** Serve a manage_worktrees workspaceManagement stream: create/list/remove worktrees only. */
+/** Serve a manage_worktrees workspaceManagement stream, including isolated PR review preparation. */
 export async function runWorktreeManagementStream(
 	context: WorkspaceStreamContext,
 	hooks: WorktreeStreamHooks,
@@ -450,7 +473,10 @@ export async function runWorktreeManagementStream(
 			await writeIrohRemoteJsonLine(stream.send, parsed.response, authorization, sanitizerOverrides);
 			return false;
 		}
-		if (!IROH_REMOTE_WORKTREE_RPC_TYPES.has(parsed.command.type)) {
+		if (
+			!IROH_REMOTE_WORKTREE_RPC_TYPES.has(parsed.command.type) &&
+			!(parsed.command.type === "prepare_pr_review" && hooks.prReviews !== undefined)
+		) {
 			await writeIrohRemoteJsonLine(
 				stream.send,
 				createIrohRemoteRpcErrorResponse(
@@ -466,6 +492,20 @@ export async function runWorktreeManagementStream(
 		const denied = getUtilityCapabilityDenial(parsed.command, authorization);
 		if (denied) {
 			await writeIrohRemoteJsonLine(stream.send, denied, authorization, sanitizerOverrides);
+			return false;
+		}
+		if (parsed.command.type === "prepare_pr_review" && hooks.prReviews !== undefined) {
+			const result = await handleIrohRemotePrReviewRpcCommand(parsed.command, {
+				authorizedWorkspaceName: authorization.workspace.name,
+				backend: hooks.prReviews,
+			});
+			if (!(await context.isRpcGrantCurrent())) {
+				context.closeStream("access_updated");
+				return true;
+			}
+			if (result.handled) {
+				await writeIrohRemoteJsonLine(stream.send, result.response, authorization, sanitizerOverrides);
+			}
 			return false;
 		}
 		const result = await handleIrohRemoteWorktreeRpcCommand(parsed.command, {

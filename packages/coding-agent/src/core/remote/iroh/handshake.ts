@@ -47,7 +47,7 @@ export interface IrohRemoteConversationHandshakeMetadata {
 }
 
 export interface IrohRemoteWorkspaceDiscoveryTarget {
-	purpose: "list_sessions" | "agent_options" | "session_contexts";
+	purpose: "list_sessions" | "agent_options" | "session_contexts" | "review";
 }
 
 export interface IrohRemoteWorkspaceManagementTarget {
@@ -512,7 +512,12 @@ function parseWorkspaceDiscoveryTarget(value: unknown): IrohRemoteWorkspaceDisco
 		"handshake workspaceDiscovery purpose",
 		"invalid_conversation_target",
 	);
-	if (purpose !== "list_sessions" && purpose !== "agent_options" && purpose !== "session_contexts") {
+	if (
+		purpose !== "list_sessions" &&
+		purpose !== "agent_options" &&
+		purpose !== "session_contexts" &&
+		purpose !== "review"
+	) {
 		throw new IrohRemoteHandshakeError("invalid_conversation_target", "unsupported workspaceDiscovery purpose");
 	}
 	return { purpose };
@@ -893,7 +898,8 @@ function parseWorkspaceDiscoveryResponseMetadata(value: unknown): IrohRemoteWork
 	if (
 		metadata.purpose !== "list_sessions" &&
 		metadata.purpose !== "agent_options" &&
-		metadata.purpose !== "session_contexts"
+		metadata.purpose !== "session_contexts" &&
+		metadata.purpose !== "review"
 	) {
 		throw new Error("handshake response workspaceDiscovery purpose must be supported");
 	}
