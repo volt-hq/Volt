@@ -16,6 +16,7 @@ import { PrReviewPreparationError } from "../core/remote/iroh/pr-review-rpc.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
+import { isPrReviewCheckoutClean } from "../utils/pr-review-clean-checkout.ts";
 import { getResolvedTargetSessionId } from "./integrated-runtimes.ts";
 import { runPrReviewGit } from "./pr-review-git.ts";
 import { getWorktreeCheckoutPath, type WorktreeGitRunner, type WorktreeManager } from "./worktree-manager.ts";
@@ -190,10 +191,7 @@ export class PrReviewCheckoutManager {
 			)
 				return false;
 			if ((await this.git(["rev-parse", "--verify", "HEAD"], path, signal)) !== head) return false;
-			if (
-				await this.git(["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"], path, signal)
-			)
-				return false;
+			if (!(await isPrReviewCheckoutClean(path, (cwd, args) => this.git(args, cwd, signal), signal))) return false;
 			const listed = await this.git(["worktree", "list", "--porcelain", "-z"], path, signal);
 			const roots = listed
 				.split("\0")

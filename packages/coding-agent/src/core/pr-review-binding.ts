@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { isPrReviewCheckoutClean } from "../utils/pr-review-clean-checkout.ts";
 import {
 	getPrReviewGitArgs,
 	getPrReviewGitEnvironment,
@@ -113,11 +114,11 @@ export async function assertPrReviewCheckout(
 		const sourceRoot = await realpath(binding.sourceCwd);
 		const common = await realpath(binding.commonDirectory);
 		if ((await realpath(cwd)) !== (await realpath(binding.cwd))) throw new Error("cwd changed");
-		const [root, commonDir, head, status, originalRoot, originalCommon] = await Promise.all([
+		const [root, commonDir, head, clean, originalRoot, originalCommon] = await Promise.all([
 			readGit(cwd, ["rev-parse", "--show-toplevel"], signal),
 			readGit(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], signal),
 			readGit(cwd, ["rev-parse", "--verify", "HEAD"], signal),
-			readGit(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], signal),
+			isPrReviewCheckoutClean(cwd, (path, args) => readGit(path, args, signal), signal),
 			readGit(binding.sourceCwd, ["rev-parse", "--show-toplevel"], signal),
 			readGit(binding.sourceCwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], signal),
 		]);
@@ -127,7 +128,7 @@ export async function assertPrReviewCheckout(
 			(await realpath(originalRoot.trim())) !== sourceRoot ||
 			(await realpath(originalCommon.trim())) !== common ||
 			head.trim() !== binding.pullRequest.headRefOid ||
-			status !== ""
+			!clean
 		)
 			throw new Error("checkout identity or status changed");
 		for (const marker of [

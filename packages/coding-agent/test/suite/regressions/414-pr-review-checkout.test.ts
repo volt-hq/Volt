@@ -1,6 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -168,6 +177,52 @@ async function fixture(nested = false, fileBacked = true, workspaceName = "proje
 			active = false;
 		},
 	};
+}
+
+async function submoduleFixture(nested = false) {
+	const f = await fixture();
+	isolateGitHome(f.root);
+	const leaf = join(f.root, "leaf");
+	mkdirSync(leaf);
+	git(leaf, "init");
+	git(leaf, "config", "user.name", "Test");
+	git(leaf, "config", "user.email", "test@example.test");
+	git(leaf, "config", "commit.gpgsign", "false");
+	writeFileSync(join(leaf, "value.txt"), "base\n");
+	writeFileSync(join(leaf, ".gitattributes"), "value.txt filter=prSub\n");
+	git(leaf, "add", ".");
+	git(leaf, "commit", "-m", "submodule base");
+	const leafHead = git(leaf, "rev-parse", "HEAD");
+	git(leaf, "commit", "--allow-empty", "-m", "submodule next");
+	const nextHead = git(leaf, "rev-parse", "HEAD");
+	git(leaf, "checkout", "--detach", leafHead);
+	let remote = leaf;
+	if (nested) {
+		remote = join(f.root, "middle");
+		git(f.root, "clone", leaf, remote);
+		git(remote, "config", "user.name", "Test");
+		git(remote, "config", "user.email", "test@example.test");
+		git(remote, "config", "commit.gpgsign", "false");
+		git(remote, "-c", "protocol.file.allow=always", "submodule", "add", leaf, "inner");
+		git(remote, "commit", "-am", "nested submodule");
+	}
+	const name = "sub module";
+	git(f.source, "checkout", "topic");
+	git(f.source, "-c", "protocol.file.allow=always", "submodule", "add", remote, name);
+	git(f.source, "commit", "-am", "add submodule");
+	f.head = git(f.source, "rev-parse", "HEAD");
+	f.target.pullRequest.headRefOid = f.head;
+	f.request.expectedPullRequest.headRefOid = f.head;
+	git(f.source, "checkout", "main");
+	const path = join(f.root, "existing");
+	git(f.source, "worktree", "add", path, "topic");
+	git(path, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive");
+	expect((await f.worktrees.adopt(f.workspace, { path, id: "existing" })).ok).toBe(true);
+	const prepared = await f.manager.prepare(f.workspace, f.request, f.authority);
+	expect(prepared.disposition).toBe("reused");
+	const placement = (await f.state.listWorktrees())[0].prReviewLaunches![0].placement;
+	const child = join(path, name, ...(nested ? ["inner"] : []));
+	return { ...f, path, child, placement, prepared, nextHead, name };
 }
 
 describe("#414 prepared PR checkouts", () => {
@@ -536,6 +591,92 @@ describe("#414 prepared PR checkouts", () => {
 		);
 		expect(existsSync(marker)).toBe(false);
 	});
+
+	it.each([
+		[false, "local", "clean"],
+		[false, "local", "process"],
+		[false, "conditional", "clean"],
+		[false, "conditional", "process"],
+		[true, "local", "clean"],
+		[true, "local", "process"],
+		[true, "conditional", "clean"],
+		[true, "conditional", "process"],
+	] as const)("sanitizes nested=%s submodule %s %s filters in both validators", async (nested, scope, driver) => {
+		const f = await submoduleFixture(nested);
+		const marker = join(f.root, "submodule-filter-executed");
+		const command = `touch '${marker}'; ${driver === "clean" ? "cat" : "exit 1"}`;
+		if (scope === "local") {
+			git(f.child, "config", `filter.prSub.${driver}`, command);
+			git(f.child, "config", "filter.prSub.required", "true");
+		} else {
+			const include = join(f.root, "submodule-filters.gitconfig");
+			git(f.child, "config", "--file", include, `filter.prSub.${driver}`, command);
+			git(f.child, "config", "--file", include, "filter.prSub.required", "true");
+			const gitDirectory = git(f.child, "rev-parse", "--absolute-git-dir");
+			git(f.child, "config", "--global", `includeIf.gitdir:${gitDirectory}.path`, include);
+		}
+		expect(git(f.path, "config", "--list", "--name-only")).not.toContain(`filter.prSub.${driver}`);
+		await expect(assertPrReviewCheckout(f.placement, f.path)).resolves.toBeUndefined();
+		expect(await f.manager.prepare(f.workspace, f.request, f.authority)).toEqual(f.prepared);
+		expect(existsSync(marker)).toBe(false);
+		// Same size forces content comparison instead of Git's size-only dirty shortcut.
+		writeFileSync(join(f.child, "value.txt"), "edit\n");
+		await expect(assertPrReviewCheckout(f.placement, f.path)).rejects.toThrow(PR_CHECKOUT_CHANGED);
+		expect(existsSync(marker)).toBe(false);
+		await expect(f.manager.prepare(f.workspace, f.request, f.authority)).rejects.toMatchObject({
+			code: "review_preparation_stale",
+		});
+		expect(existsSync(marker)).toBe(false);
+	});
+
+	it.each([false, true])("preserves nested=%s submodule cleanliness and gitlink checks", async (nested) => {
+		const f = await submoduleFixture(nested);
+		const parent = nested ? join(f.path, f.name) : f.path;
+		const name = nested ? "inner" : f.name;
+		const assertRejected = async () => {
+			await expect(assertPrReviewCheckout(f.placement, f.path)).rejects.toThrow(PR_CHECKOUT_CHANGED);
+			await expect(f.manager.prepare(f.workspace, f.request, f.authority)).rejects.toMatchObject({
+				code: "review_preparation_stale",
+			});
+		};
+		await expect(assertPrReviewCheckout(f.placement, f.path)).resolves.toBeUndefined();
+		writeFileSync(join(f.child, "untracked.txt"), "untracked\n");
+		await assertRejected();
+		rmSync(join(f.child, "untracked.txt"));
+		git(f.child, "checkout", "--detach", f.nextHead);
+		await assertRejected();
+		git(parent, "add", "--", name);
+		await assertRejected(); // HEAD now matches the index, but the gitlink is staged.
+		git(parent, "reset", "HEAD", "--", name);
+		git(parent, "-c", "protocol.file.allow=always", "submodule", "update", "--", name);
+		await expect(assertPrReviewCheckout(f.placement, f.path)).resolves.toBeUndefined();
+		git(parent, "submodule", "deinit", "-f", "--", name);
+		await expect(assertPrReviewCheckout(f.placement, f.path)).resolves.toBeUndefined();
+		expect(await f.manager.prepare(f.workspace, f.request, f.authority)).toEqual(f.prepared);
+	});
+
+	it("fails closed on unreadable submodule configuration without executing filters", async () => {
+		const f = await submoduleFixture(true);
+		const config = git(f.child, "rev-parse", "--path-format=absolute", "--git-path", "config");
+		writeFileSync(config, "[invalid configuration\n");
+		await expect(assertPrReviewCheckout(f.placement, f.path)).rejects.toThrow(PR_CHECKOUT_UNAVAILABLE);
+		await expect(f.manager.prepare(f.workspace, f.request, f.authority)).rejects.toMatchObject({
+			code: "review_preparation_stale",
+		});
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"rejects a symlinked submodule instead of inspecting its target",
+		async () => {
+			const f = await submoduleFixture();
+			rmSync(f.child, { recursive: true });
+			symlinkSync(f.source, f.child, "dir");
+			await expect(assertPrReviewCheckout(f.placement, f.path)).rejects.toThrow(PR_CHECKOUT_CHANGED);
+			await expect(f.manager.prepare(f.workspace, f.request, f.authority)).rejects.toMatchObject({
+				code: "review_preparation_stale",
+			});
+		},
+	);
 
 	it.each([
 		["local", "onbranch", "smudge"],
