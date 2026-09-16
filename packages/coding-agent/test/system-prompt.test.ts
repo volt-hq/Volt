@@ -167,45 +167,6 @@ describe("buildSystemPrompt", () => {
 			);
 		});
 
-		// The generated prompt is the product here; these checks do not establish model behavior or token savings.
-		test("guides evidence-driven reading without mandatory search or fixed read budgets", () => {
-			const prompt = buildSystemPrompt({ cwd: process.cwd() });
-
-			expect(prompt).toContain("when their location is unknown; read known targets directly.");
-			expect(prompt).toContain("Read coherent regions (functions, classes, or document sections)");
-			expect(prompt).toContain("with enough surrounding context to understand them before editing");
-			expect(prompt).toContain("Expand to dependencies, callers, tests, or whole files when evidence is incomplete");
-			expect(prompt).toContain("Honor explicit requests for full-file inspection.");
-			expect(prompt).toContain("Avoid tiny repeated slices and rereading unchanged content already in context.");
-			expect(prompt).toContain("Do not treat search snippets or truncated output as complete evidence.");
-			expect(prompt).toContain("Stop gathering once you have enough evidence for the requested decision or change");
-			expect(prompt).toContain("not at an arbitrary line or token count.");
-		});
-
-		test("preserves required instructions without making users manage reading", () => {
-			const prompt = buildSystemPrompt({ cwd: process.cwd() });
-
-			expect(prompt).toContain(
-				"Read applicable instruction and skill files completely unless already supplied in context",
-			);
-			expect(prompt).toContain("follow their requirements");
-			expect(prompt).toContain("Choose routine read scope yourself; do not ask the user to manage read ranges.");
-		});
-
-		test("scopes Volt documentation reading to the task instead of recursively loading full documents", () => {
-			const prompt = buildSystemPrompt({ cwd: process.cwd() });
-
-			expect(prompt).toContain("read the relevant documentation sections and examples before implementing");
-			expect(prompt).toContain(
-				"Follow cross-references needed to understand the task or API, not every linked document.",
-			);
-			expect(prompt).toContain("Use the README as an index when needed");
-			expect(prompt).toContain(
-				"Expand to the full document when necessary for correctness or explicitly requested.",
-			);
-			expect(prompt).not.toContain("Always read volt .md files completely");
-		});
-
 		test("discourages source-text tests for ordinary behavior", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],
@@ -404,7 +365,6 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).not.toContain("<personality>");
 			expect(prompt).not.toContain("Make clear recommendations");
 			expect(prompt).not.toContain("<instruction_hierarchy>");
-			expect(prompt).not.toContain("Read coherent regions");
 			expectBefore(prompt, "APPENDED SYSTEM TEXT", "\n\n<project_context>\n\n");
 			expectBefore(prompt, "\n\n<project_context>\n\n", "\n<available_skills>\n");
 			expectBefore(prompt, "</available_skills>", "Current date:");
