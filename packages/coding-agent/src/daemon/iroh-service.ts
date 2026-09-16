@@ -1048,24 +1048,8 @@ class IrohDaemonService {
 			resolveWorkingDirectory: (options) => this.resolveConversationWorkingDirectory(options),
 			prepareWorktreeRuntime: (workspaceName, worktreeId, sessionId) =>
 				this.worktrees.beginRuntimePreparation(workspaceName, worktreeId, sessionId),
-			preparePrReviewSession: async (authorization, hello, signal) => {
-				if (hello.mode !== "conversation" || hello.conversation.target !== "new") return undefined;
-				const authority = this.prReviewAuthority(authorization, signal);
-				const target = hello.conversation;
-				const placement = await this.prReviewCheckouts.admit(
-					authorization.workspace,
-					target.sessionId,
-					target.worktreeId,
-					target.workingDirectory,
-					authority,
-				);
-				if (!placement) return undefined;
-				for (const capability of ["conversation.control.v1", "worktrees.manage.v1"] as const) {
-					if (!hasIrohRemoteRpcCapability(authorization.client.rpcGrant, capability))
-						throw new PrReviewPreparationError("review_preparation_failed");
-				}
-				return (manager) => this.prReviewCheckouts.bind(authorization.workspace, manager, placement, authority);
-			},
+			preparePrReviewSession: (authorization, hello, signal) =>
+				this.prReviewCheckouts.prepareSession(authorization, hello, this.prReviewAuthority(authorization, signal)),
 			bindWorktreeSession: (workspaceName, worktreeId, sessionId) =>
 				this.worktrees.bindSession(workspaceName, worktreeId, sessionId),
 			beginReviewSiblingAdmission: (parent, sessionId) => {

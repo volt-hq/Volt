@@ -17,6 +17,7 @@ import type { IrohRemoteClientAuthorizationSuccess } from "../../../src/core/rem
 import { createIrohRemoteHandshakeSuccess, type IrohRemoteHello } from "../../../src/core/remote/iroh/handshake.ts";
 import { createEmptyIrohRemoteHostState, writeIrohRemoteHostState } from "../../../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-manager.ts";
+import { prepareReviewWorkflow } from "../../../src/core/review.ts";
 import { getReviewGeneral } from "../../../src/core/review-general.ts";
 import { createReviewSeedMessage } from "../../../src/core/review-presentation.ts";
 import {
@@ -183,9 +184,11 @@ async function fixture(nested = false) {
 			NonNullable<ConstructorParameters<typeof IntegratedRuntimeRegistry>[0]["createRuntime"]>
 		>(async (options) => {
 			const selected = options.conversationTarget;
-			if (!selected || selected.target === "last" || !selected.sessionId) throw new Error("Expected named target");
+			if (!selected) throw new Error("Expected conversation target");
 			const resolved = await resolveIrohRemoteSessionTarget(
-				{ kind: selected.target, sessionId: selected.sessionId },
+				selected.target === "last"
+					? { kind: "last", resumeSessionId: selected.resumeSessionId }
+					: { kind: selected.target, sessionId: selected.sessionId! },
 				workspace,
 				createSessionManagerTargetStore(options.cwd, options.sessionDir!, {
 					listAll: true,
@@ -203,7 +206,11 @@ async function fixture(nested = false) {
 				sessionSelection:
 					resolved.selection === "created"
 						? { kind: "created", sessionId: resolved.sessionId }
-						: { kind: resolved.selection, sessionId: resolved.sessionId, requestedSessionId: selected.sessionId },
+						: {
+								kind: resolved.selection,
+								sessionId: resolved.sessionId,
+								requestedSessionId: resolved.requestedSessionId ?? resolved.sessionId,
+							},
 			};
 		});
 		const registry = new IntegratedRuntimeRegistry({
@@ -231,18 +238,8 @@ async function fixture(nested = false) {
 				return result.directory;
 			},
 			prepareWorktreeRuntime: (name, id, sessionId) => worktrees.beginRuntimePreparation(name, id, sessionId),
-			preparePrReviewSession: async (auth, hello, signal) => {
-				if (hello.mode !== "conversation" || hello.conversation.target !== "new") return undefined;
-				const current = { ...authority, signal };
-				const placement = await checkouts.admit(
-					auth.workspace,
-					hello.conversation.sessionId,
-					hello.conversation.worktreeId,
-					hello.conversation.workingDirectory,
-					current,
-				);
-				return placement ? (manager) => checkouts.bind(auth.workspace, manager, placement, current) : undefined;
-			},
+			preparePrReviewSession: (auth, hello, signal) =>
+				checkouts.prepareSession(auth, hello, { ...authority, signal }),
 			bindWorktreeSession: (name, id, sessionId) => worktrees.bindSession(name, id, sessionId),
 			withReviewSourceWrite: async (_parent, _ref, write) => write(),
 		});
@@ -282,7 +279,48 @@ async function fixture(nested = false) {
 		await audit.flush();
 		rmSync(root, { recursive: true, force: true });
 	});
-	return { source, base, head, sessionDir, workspace, harness, target, provider, request, authority, host };
+	return {
+		source,
+		base,
+		head,
+		sessionDir,
+		workspace,
+		harness,
+		target,
+		provider,
+		request,
+		authority,
+		authorization,
+		host,
+	};
+}
+
+async function interruptedLaunch(f: Awaited<ReturnType<typeof fixture>>, persistBinding = false) {
+	const host = f.host();
+	const prepared = await host.checkouts.prepare(f.workspace, f.request, f.authority);
+	vi.spyOn(host.checkouts, "bind").mockImplementationOnce(async (_workspace, manager, placement) => {
+		if (persistBinding) {
+			manager.recordPrReviewBinding(placement);
+			await manager.flush();
+		}
+		throw new Error("interrupted launch");
+	});
+	await expect(
+		host.open({
+			target: "new",
+			sessionId: prepared.sessionId,
+			worktreeId: prepared.worktreeId,
+			workingDirectory: prepared.workingDirectory,
+		}),
+	).rejects.toThrow("interrupted launch");
+	expect(host.registry.size).toBe(0);
+	expect(host.worktrees.isRuntimePreparing(f.workspace.name, prepared.worktreeId)).toBe(false);
+	const ref = await SessionManager.findForResume(f.sessionDir, prepared.sessionId);
+	if (!ref) throw new Error("missing interrupted session");
+	const record = (await host.state.listWorktrees())[0]!;
+	expect(record.sessionIds).toEqual([]);
+	expect(record.prReviewLaunches![0].sessionGeneration).toBeUndefined();
+	return { prepared, ref, placement: record.prReviewLaunches![0].placement };
 }
 
 function reviewRecord(source: string, base: string, target: ResolvedPullRequestCheckout): ReviewRunRecord {
@@ -356,6 +394,144 @@ function reviewRecord(source: string, base: string, target: ResolvedPullRequestC
 }
 
 describe("#414 PR review admission and runtime lifecycle", () => {
+	for (const nested of [false, true]) {
+		it.each([
+			{ target: "session", persistBinding: false },
+			{ target: "last", persistBinding: false },
+			{ target: "session", persistBinding: true },
+			{ target: "last", persistBinding: true },
+		] as const)(
+			`recovers an interrupted launch before publication (nested: ${nested}): %j`,
+			async ({ target, persistBinding }) => {
+				const f = await fixture(nested);
+				const { prepared, ref, placement } = await interruptedLaunch(f, persistBinding);
+				f.authorization.client.lastSessionIdByWorkspace = { [f.workspace.name]: prepared.sessionId };
+				const restarted = f.host();
+				const opened = await restarted.open(
+					target === "last" ? { target } : { target, sessionId: prepared.sessionId },
+				);
+				let published = false;
+				try {
+					expect(opened.sessionSelection.kind).toBe("resumed");
+					expect(opened.entry.runtime.session.sessionRef).toEqual(ref);
+					expect(opened.entry.runtime.cwd).toBe(placement.cwd);
+					expect(opened.entry.worktreeId).toBe(prepared.worktreeId);
+					// A separate store reader must see the binding before ownership publication.
+					const reader = await SessionManager.open(ref);
+					try {
+						expect(await readPrReviewBinding(reader)).toEqual(placement);
+					} finally {
+						await reader.closePersistence();
+					}
+					const launch = (await restarted.state.listWorktrees())[0]!.prReviewLaunches![0];
+					expect(launch).toMatchObject({ sessionGeneration: ref.sessionGeneration, storeId: ref.storeId });
+					await restarted.registry.commitEntry(
+						opened.entry,
+						opened.sessionSelection,
+						f.authorization,
+						opened.attachClaim,
+					);
+					published = true;
+				} finally {
+					if (!published)
+						await restarted.registry.abortPreparedEntry(
+							opened.entry,
+							opened.sessionSelection,
+							opened.attachClaim,
+						);
+					opened.attachClaim.release();
+				}
+				const capture = vi
+					.spyOn(githubCliCodeHostProvider, "capturePullRequestContext")
+					.mockRejectedValue(new Error("unexpected ordinary PR resolution"));
+				await expect(
+					prepareReviewWorkflow({
+						target: { kind: "pr", number: "415" },
+						cwd: placement.cwd,
+						sessionManager: opened.entry.runtime.session.sessionManager,
+						settingsManager: f.harness.settingsManager,
+						modelRegistry: f.harness.session.modelRegistry,
+						currentModel: f.harness.getModel(),
+					}),
+				).rejects.toThrow("different PR");
+				expect(capture).not.toHaveBeenCalled();
+				expect(f.harness.faux.state.callCount).toBe(0);
+			},
+		);
+	}
+
+	it.each(["dirty", "head", "remote"] as const)(
+		"rejects %s drift on interrupted-session resume without publication",
+		async (drift) => {
+			const f = await fixture();
+			const { prepared, ref, placement } = await interruptedLaunch(f);
+			if (drift === "dirty") writeFileSync(join(placement.cwd, "value.txt"), "keep this edit\n");
+			if (drift === "head") git(placement.cwd, "checkout", "--detach", f.base);
+			if (drift === "remote") f.target.pullRequest.headRefOid = f.base;
+			const restarted = f.host();
+			await expect(restarted.open({ target: "session", sessionId: prepared.sessionId })).rejects.toMatchObject({
+				code: "review_preparation_stale",
+			});
+			expect(restarted.createRuntime).not.toHaveBeenCalled();
+			expect(restarted.registry.size).toBe(0);
+			const reader = await SessionManager.open(ref);
+			try {
+				expect(reader.getPrReviewBinding()).toBeUndefined();
+			} finally {
+				await reader.closePersistence();
+			}
+			if (drift === "dirty") expect(readFileSync(join(placement.cwd, "value.txt"), "utf8")).toBe("keep this edit\n");
+			expect(readFileSync(join(f.source, "value.txt"), "utf8")).toBe("parent\n");
+		},
+	);
+
+	it("requires preparation capabilities only while resume admission is pending", async () => {
+		const f = await fixture();
+		const { prepared, placement } = await interruptedLaunch(f);
+		f.authorization.client.rpcGrant = createIrohRemotePresetAccess("review").rpcGrant;
+		const restarted = f.host();
+		await expect(restarted.open({ target: "session", sessionId: prepared.sessionId })).rejects.toThrow(
+			"review_preparation_failed",
+		);
+		expect(restarted.createRuntime).not.toHaveBeenCalled();
+		expect(restarted.registry.size).toBe(0);
+		f.authorization.client.rpcGrant = createIrohRemotePresetAccess("full").rpcGrant;
+		await restarted.attach({ target: "session", sessionId: prepared.sessionId });
+		await restarted.registry.stopAll("restart");
+		writeFileSync(join(placement.cwd, "value.txt"), "requested edit\n");
+		f.authorization.client.rpcGrant = createIrohRemotePresetAccess("review").rpcGrant;
+		const resumed = await f.host().attach({ target: "session", sessionId: prepared.sessionId });
+		expect(await readPrReviewBinding(resumed.entry.runtime.session.sessionManager)).toEqual(placement);
+		expect(readFileSync(join(placement.cwd, "value.txt"), "utf8")).toBe("requested edit\n");
+	});
+
+	it("does not publish a resumed runtime when binding persistence fails and permits retry", async () => {
+		const f = await fixture();
+		const { prepared, placement } = await interruptedLaunch(f);
+		const restarted = f.host();
+		const record = vi.spyOn(SessionManager.prototype, "recordPrReviewBinding").mockImplementationOnce(() => {
+			throw new Error("binding persistence failed");
+		});
+		await expect(restarted.open({ target: "session", sessionId: prepared.sessionId })).rejects.toThrow(
+			"binding persistence failed",
+		);
+		expect(restarted.registry.size).toBe(0);
+		expect(restarted.worktrees.isRuntimePreparing(f.workspace.name, prepared.worktreeId)).toBe(false);
+		record.mockRestore();
+		const resumed = await restarted.attach({ target: "session", sessionId: prepared.sessionId });
+		expect(await readPrReviewBinding(resumed.entry.runtime.session.sessionManager)).toEqual(placement);
+	});
+
+	it("leaves ordinary resumed sessions unbound", async () => {
+		const f = await fixture();
+		const manager = await SessionManager.create(f.source, f.sessionDir, { id: "ordinary" });
+		await manager.closePersistence();
+		f.authorization.client.rpcGrant = createIrohRemotePresetAccess("review").rpcGrant;
+		const resumed = await f.host().attach({ target: "session", sessionId: "ordinary" });
+		expect(await readPrReviewBinding(resumed.entry.runtime.session.sessionManager)).toBeUndefined();
+		expect(f.provider.resolvePullRequestCheckout).not.toHaveBeenCalled();
+	});
+
 	it.each(["dirty", "head", "remote"] as const)(
 		"rejects %s drift before the first runtime factory or session creation",
 		async (drift) => {

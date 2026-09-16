@@ -9,9 +9,14 @@ import {
 	type ResolvedPullRequestCheckout,
 } from "../core/code-host/index.ts";
 import type { PrReviewLaunch, PrReviewPlacement } from "../core/pr-review-placement.ts";
+import { hasIrohRemoteRpcCapability } from "../core/remote/iroh/access-grant.ts";
+import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
+import type { IrohRemoteHello } from "../core/remote/iroh/handshake.ts";
+import { PrReviewPreparationError } from "../core/remote/iroh/pr-review-rpc.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
+import { getResolvedTargetSessionId } from "./integrated-runtimes.ts";
 import { runPrReviewGit } from "./pr-review-git.ts";
 import { getWorktreeCheckoutPath, type WorktreeGitRunner, type WorktreeManager } from "./worktree-manager.ts";
 
@@ -421,6 +426,46 @@ export class PrReviewCheckoutManager {
 		)
 			throw new PrReviewCheckoutError("review_preparation_stale");
 		authority.assertCurrent();
+	}
+
+	/** Recover interrupted launches on resume, with the same pre-publication binding as a new attach. */
+	async prepareSession(
+		authorization: IrohRemoteClientAuthorizationSuccess,
+		hello: IrohRemoteHello,
+		authority: PrReviewPreparationAuthority,
+	): Promise<((manager: SessionManager) => Promise<void>) | undefined> {
+		if (hello.mode !== "conversation") return undefined;
+		const sessionId = getResolvedTargetSessionId(hello, authorization);
+		if (sessionId === undefined) return undefined;
+		let target: { worktreeId?: string; workingDirectory?: string };
+		if (hello.conversation.target === "new") {
+			target = hello.conversation;
+		} else {
+			const records = await this.options.stateManager.listWorktrees();
+			const launch = records
+				.flatMap((record) => record.prReviewLaunches ?? [])
+				.find((entry) => entry.sessionId === sessionId);
+			// Completed launches may contain intentional fixes. Only pending admission
+			// needs recovery; ordinary resumes must not revalidate checkout cleanliness.
+			if (!launch || launch.sessionGeneration !== undefined) return undefined;
+			target = {
+				worktreeId: launch.placement.worktreeId,
+				workingDirectory: launch.placement.sourceRootRelativePath,
+			};
+		}
+		const placement = await this.admit(
+			authorization.workspace,
+			sessionId,
+			target.worktreeId,
+			target.workingDirectory,
+			authority,
+		);
+		if (!placement) return undefined;
+		for (const capability of ["conversation.control.v1", "worktrees.manage.v1"] as const) {
+			if (!hasIrohRemoteRpcCapability(authorization.client.rpcGrant, capability))
+				throw new PrReviewPreparationError("review_preparation_failed");
+		}
+		return (manager) => this.bind(authorization.workspace, manager, placement, authority);
 	}
 
 	async admit(
