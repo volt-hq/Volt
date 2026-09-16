@@ -868,6 +868,11 @@ export class WorktreeManager {
 					if (this.runtimePreparations.has(`${current.workspace.name}\0${worktreeId}`)) {
 						return { result: { ok: false, error: "worktree_busy" } };
 					}
+					// Preparation reserves the checkout before session binding. Check under the same
+					// lifecycle lock; only explicit forced removal may cancel a pending launch.
+					if (!force && record.prReviewLaunches?.some((launch) => launch.sessionGeneration === undefined)) {
+						return { result: { ok: false, error: "worktree_busy" } };
+					}
 					if (record.sessionIds.length > 0) {
 						releaseSessionRemoval = this.reserveSessionsForRemoval?.(current.workspace.name, record.sessionIds);
 						if (!releaseSessionRemoval) {

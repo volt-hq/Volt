@@ -20,7 +20,11 @@ import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { PrReviewCheckoutManager, type PrReviewPreparationRequest } from "../../../src/daemon/pr-review-checkout.ts";
 import { runPrReviewGit } from "../../../src/daemon/pr-review-git.ts";
-import { getWorktreeCheckoutPath, WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
+import {
+	createDefaultWorktreeGitRunner,
+	getWorktreeCheckoutPath,
+	WorktreeManager,
+} from "../../../src/daemon/worktree-manager.ts";
 import { createHarness } from "../harness.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -212,6 +216,119 @@ describe("#414 prepared PR checkouts", () => {
 				f.authority,
 			),
 		).rejects.toMatchObject({ code: "review_preparation_conflict" });
+	});
+
+	it.each(["before", "during"] as const)(
+		"protects a reused pending launch prepared %s the retention sweep",
+		async (timing) => {
+			const f = await fixture();
+			const first = await f.manager.prepare(f.workspace, f.request, f.authority);
+			const firstRecord = (await f.state.listWorktrees())[0];
+			const firstSession = await SessionManager.create(firstRecord.path, f.sessionDir, { id: f.request.sessionId });
+			f.sessions.push(firstSession);
+			await f.manager.bind(f.workspace, firstSession, firstRecord.prReviewLaunches![0].placement, f.authority);
+			expect(firstRecord.baseRef).toBe(f.head);
+			expect(git(f.source, "rev-parse", "main")).toBe(f.base);
+
+			// The previous runtime is disposed: its old session can be reserved for removal.
+			const reserveSessionsForRemoval = vi.fn(() => () => {});
+			const runGit = createDefaultWorktreeGitRunner();
+			let beforeRemoval: (() => Promise<void>) | undefined;
+			const worktrees = new WorktreeManager({
+				agentDir: f.options.agentDir,
+				stateManager: f.state,
+				auditLogger: f.audit,
+				hasActiveRuntimeForSession: () => false,
+				reserveSessionsForRemoval,
+				runGit: async (args, cwd, options) => {
+					const result = await runGit(args, cwd, options);
+					if (args[0] === "merge-base") await beforeRemoval?.();
+					return result;
+				},
+			});
+			const manager = new PrReviewCheckoutManager({ ...f.options, worktrees });
+			const request = { ...f.request, sessionId: "next-review" };
+			const prepare = async () => {
+				expect(await manager.prepare(f.workspace, request, f.authority)).toMatchObject({
+					disposition: "reused",
+					worktreeId: first.worktreeId,
+				});
+			};
+			if (timing === "before") await prepare();
+			else beforeRemoval = prepare;
+
+			// This is the operation invoked when the previous runtime's retention timer fires.
+			expect(await worktrees.removeIfCleanAndMerged(f.workspace, first.worktreeId)).toEqual({
+				removed: false,
+				reason: "worktree_busy",
+			});
+			beforeRemoval = undefined;
+			expect(await worktrees.remove(f.workspace, first.worktreeId)).toEqual({ ok: false, error: "worktree_busy" });
+			expect(reserveSessionsForRemoval).not.toHaveBeenCalled();
+			expect(git(firstRecord.path, "rev-parse", "HEAD")).toBe(f.head);
+			const persisted = await new IrohRemoteHostStateManager({ statePath: f.statePath }).listWorktrees();
+			expect(persisted[0].sessionIds).toEqual([f.request.sessionId]);
+			expect(persisted[0].prReviewLaunches).toHaveLength(2);
+			expect(persisted[0].prReviewLaunches![1]).toMatchObject({ sessionId: request.sessionId });
+			expect(persisted[0].prReviewLaunches![1].sessionGeneration).toBeUndefined();
+
+			const placement = await manager.admit(
+				f.workspace,
+				request.sessionId,
+				first.worktreeId,
+				undefined,
+				f.authority,
+			);
+			if (!placement) throw new Error("missing placement");
+			const reservation = await worktrees.beginRuntimePreparation(
+				f.workspace.name,
+				first.worktreeId,
+				request.sessionId,
+			);
+			try {
+				const session = await SessionManager.create(placement.cwd, f.sessionDir, { id: request.sessionId });
+				f.sessions.push(session);
+				await manager.bind(f.workspace, session, placement, f.authority);
+				expect(session.getPrReviewBinding()).toEqual(placement);
+			} finally {
+				await reservation.release();
+			}
+			// Completed, idle launches must not pin a checkout forever.
+			expect(await worktrees.removeIfCleanAndMerged(f.workspace, first.worktreeId)).toEqual({ removed: true });
+			expect(await f.state.listWorktrees()).toEqual([]);
+		},
+	);
+
+	it("allows explicit forced cancellation of a pending launch but not an in-flight runtime preparation", async () => {
+		const f = await fixture();
+		const prepared = await f.manager.prepare(f.workspace, f.request, f.authority);
+		const record = (await f.state.listWorktrees())[0];
+		const placement = record.prReviewLaunches![0].placement;
+		expect(await f.worktrees.remove(f.workspace, prepared.worktreeId)).toEqual({ ok: false, error: "worktree_busy" });
+		const reservation = await f.worktrees.beginRuntimePreparation(
+			f.workspace.name,
+			prepared.worktreeId,
+			f.request.sessionId,
+		);
+		try {
+			expect(await f.worktrees.remove(f.workspace, prepared.worktreeId, { force: true })).toEqual({
+				ok: false,
+				error: "worktree_busy",
+			});
+		} finally {
+			await reservation.release();
+		}
+		const session = await SessionManager.create(placement.cwd, f.sessionDir, { id: f.request.sessionId });
+		f.sessions.push(session);
+		expect(await f.worktrees.remove(f.workspace, prepared.worktreeId, { force: true })).toEqual({ ok: true });
+		expect(existsSync(record.path)).toBe(false);
+		expect(await f.state.listWorktrees()).toEqual([]);
+		await expect(
+			f.worktrees.beginRuntimePreparation(f.workspace.name, prepared.worktreeId, f.request.sessionId),
+		).rejects.toThrow("unavailable");
+		await expect(f.manager.bind(f.workspace, session, placement, f.authority)).rejects.toMatchObject({
+			code: "review_preparation_conflict",
+		});
 	});
 
 	it("prepares and retries the same session ID independently in two workspaces", async () => {
