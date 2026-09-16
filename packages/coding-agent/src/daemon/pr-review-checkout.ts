@@ -251,7 +251,7 @@ export class PrReviewCheckoutManager {
 				}),
 			)
 			.digest("hex");
-		const records = await this.options.stateManager.listWorktrees();
+		const records = await this.options.stateManager.listWorktrees(workspace.name);
 		const matches = records
 			.flatMap((record) => record.prReviewLaunches ?? [])
 			.filter((launch) => launch.sessionId === request.sessionId);
@@ -441,7 +441,7 @@ export class PrReviewCheckoutManager {
 		if (hello.conversation.target === "new") {
 			target = hello.conversation;
 		} else {
-			const records = await this.options.stateManager.listWorktrees();
+			const records = await this.options.stateManager.listWorktrees(authorization.workspace.name);
 			const launch = records
 				.flatMap((record) => record.prReviewLaunches ?? [])
 				.find((entry) => entry.sessionId === sessionId);
@@ -475,7 +475,7 @@ export class PrReviewCheckoutManager {
 		workingDirectory: string | undefined,
 		authority: PrReviewPreparationAuthority,
 	): Promise<PrReviewPlacement | undefined> {
-		const records = await this.options.stateManager.listWorktrees();
+		const records = await this.options.stateManager.listWorktrees(workspace.name);
 		const launch = records
 			.flatMap((record) => record.prReviewLaunches ?? [])
 			.find((entry) => entry.sessionId === sessionId);

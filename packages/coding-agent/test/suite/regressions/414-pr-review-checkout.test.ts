@@ -46,7 +46,7 @@ function isolateGitHome(root: string): string {
 	return home;
 }
 
-async function fixture(nested = false, fileBacked = true) {
+async function fixture(nested = false, fileBacked = true, workspaceName = "project") {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "volt-414-checkout-")));
 	const source = join(root, "workspace", ...(nested ? ["nested"] : []));
 	mkdirSync(source, { recursive: true });
@@ -66,7 +66,7 @@ async function fixture(nested = false, fileBacked = true) {
 	git(root, "init", "--bare", remote);
 	git(source, "push", remote, "HEAD:refs/pull/414/head");
 	git(source, "checkout", "main");
-	const workspace = { name: "project", path: nested ? join(root, "workspace") : source };
+	const workspace = { name: workspaceName, path: nested ? join(root, "workspace") : source };
 	const statePath = join(root, "state.json");
 	await writeIrohRemoteHostState(statePath, {
 		...createEmptyIrohRemoteHostState(),
@@ -212,6 +212,32 @@ describe("#414 prepared PR checkouts", () => {
 				f.authority,
 			),
 		).rejects.toMatchObject({ code: "review_preparation_conflict" });
+	});
+
+	it("prepares and retries the same session ID independently in two workspaces", async () => {
+		const a = await fixture();
+		const b = await fixture(false, true, "other");
+		await a.state.upsertWorkspace(b.workspace);
+		const worktrees = new WorktreeManager({
+			agentDir: a.options.agentDir,
+			stateManager: a.state,
+			auditLogger: a.audit,
+		});
+		const manager = new PrReviewCheckoutManager({
+			...b.options,
+			agentDir: a.options.agentDir,
+			stateManager: a.state,
+			worktrees,
+		});
+		const first = await a.manager.prepare(a.workspace, a.request, a.authority);
+		const second = await manager.prepare(b.workspace, b.request, b.authority);
+		expect(first.sessionId).toBe(second.sessionId);
+		expect(first.workspaceName).toBe(a.workspace.name);
+		expect(second.workspaceName).toBe(b.workspace.name);
+		expect(await a.state.listWorktrees(a.workspace.name)).toHaveLength(1);
+		expect(await a.state.listWorktrees(b.workspace.name)).toHaveLength(1);
+		expect(await a.manager.prepare(a.workspace, a.request, a.authority)).toEqual(first);
+		expect(await manager.prepare(b.workspace, b.request, b.authority)).toEqual(second);
 	});
 
 	it.each(["home", "xdg"])("validates reused checkouts with %s global ignore configuration", async (location) => {

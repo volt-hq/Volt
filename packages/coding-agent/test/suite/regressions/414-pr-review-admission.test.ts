@@ -48,9 +48,9 @@ function git(cwd: string, ...args: string[]): string {
 	}).trim();
 }
 
-async function fixture(nested = false) {
+async function fixture(nested = false, workspaceName = "project") {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "volt-414-admission-")));
-	const workspace = { name: "project", path: join(root, "workspace") };
+	const workspace = { name: workspaceName, path: join(root, "workspace") };
 	const source = nested ? join(workspace.path, "nested") : workspace.path;
 	mkdirSync(source, { recursive: true });
 	git(source, "init", "--initial-branch=main");
@@ -317,7 +317,7 @@ async function interruptedLaunch(f: Awaited<ReturnType<typeof fixture>>, persist
 	expect(host.worktrees.isRuntimePreparing(f.workspace.name, prepared.worktreeId)).toBe(false);
 	const ref = await SessionManager.findForResume(f.sessionDir, prepared.sessionId);
 	if (!ref) throw new Error("missing interrupted session");
-	const record = (await host.state.listWorktrees())[0]!;
+	const record = (await host.state.listWorktrees(f.workspace.name))[0]!;
 	expect(record.sessionIds).toEqual([]);
 	expect(record.prReviewLaunches![0].sessionGeneration).toBeUndefined();
 	return { prepared, ref, placement: record.prReviewLaunches![0].placement };
@@ -531,6 +531,46 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 		expect(await readPrReviewBinding(resumed.entry.runtime.session.sessionManager)).toBeUndefined();
 		expect(f.provider.resolvePullRequestCheckout).not.toHaveBeenCalled();
 	});
+
+	it("recovers a local pending launch despite a completed foreign launch with the same session ID", async () => {
+		const foreign = await fixture(false, "other");
+		const foreignHost = foreign.host();
+		const prepared = await foreignHost.checkouts.prepare(foreign.workspace, foreign.request, foreign.authority);
+		await foreignHost.attach({ target: "new", sessionId: prepared.sessionId, worktreeId: prepared.worktreeId });
+		const f = await fixture();
+		const host = f.host();
+		await host.state.upsertWorkspace(foreign.workspace);
+		await host.state.upsertWorktree((await foreignHost.state.listWorktrees(foreign.workspace.name))[0]!);
+		const { ref, placement } = await interruptedLaunch(f);
+		const opened = await host.attach({ target: "session", sessionId: f.request.sessionId });
+		expect(opened.entry.runtime.session.sessionRef).toEqual(ref);
+		expect(opened.entry.runtime.cwd).toBe(placement.cwd);
+		expect(await readPrReviewBinding(opened.entry.runtime.session.sessionManager)).toEqual(placement);
+	});
+
+	it.each(["new", "session", "last"] as const)(
+		"ignores another workspace's pending launch during ordinary %s admission",
+		async (target) => {
+			const foreign = await fixture(false, "other");
+			const foreignHost = foreign.host();
+			await foreignHost.checkouts.prepare(foreign.workspace, foreign.request, foreign.authority);
+			const f = await fixture();
+			const host = f.host();
+			await host.state.upsertWorkspace(foreign.workspace);
+			await host.state.upsertWorktree((await foreignHost.state.listWorktrees(foreign.workspace.name))[0]!);
+			if (target !== "new") {
+				const manager = await SessionManager.create(f.source, f.sessionDir, { id: f.request.sessionId });
+				await manager.closePersistence();
+			}
+			f.authorization.client.lastSessionIdByWorkspace = { [f.workspace.name]: f.request.sessionId };
+			const opened = await host.attach(target === "last" ? { target } : { target, sessionId: f.request.sessionId });
+			expect(opened.sessionSelection.kind).toBe(target === "new" ? "created" : "resumed");
+			expect(opened.entry.runtime.session.sessionId).toBe(f.request.sessionId);
+			expect(opened.entry.runtime.cwd).toBe(f.source);
+			expect(await readPrReviewBinding(opened.entry.runtime.session.sessionManager)).toBeUndefined();
+			expect(f.provider.resolvePullRequestCheckout).not.toHaveBeenCalled();
+		},
+	);
 
 	it.each(["dirty", "head", "remote"] as const)(
 		"rejects %s drift before the first runtime factory or session creation",
