@@ -250,7 +250,7 @@ export interface ParsedSkillBlock {
 export type CompactionReason = "manual" | "threshold" | "overflow";
 
 export interface ActiveAgentRun {
-	/** Unix epoch milliseconds when the current agent run started. */
+	/** Unix epoch milliseconds when the logical operation started, retained through recovery until settlement. */
 	startedAt: number;
 }
 
@@ -682,7 +682,10 @@ export class AgentSession {
 	private _activityRevision = 0;
 
 	// Agent-run and compaction state
+	/** Per-run identity for background waits and provider-result acknowledgement fences. */
 	private _activeAgentRun: ActiveAgentRun | undefined = undefined;
+	/** Public elapsed timing spans every run and recovery phase before operation settlement. */
+	private _activeAgentOperation: ActiveAgentRun | undefined = undefined;
 	private _activeCompaction: ActiveCompaction | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
 	/**
@@ -2142,6 +2145,7 @@ export class AgentSession {
 		}
 		if (event.type === "agent_start") {
 			this._activeAgentRun = { startedAt: Date.now() };
+			this._activeAgentOperation ??= { ...this._activeAgentRun };
 		}
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
@@ -2288,13 +2292,12 @@ export class AgentSession {
 			this._pendingToolExecutions.clear();
 		}
 
-		// Notify all listeners. Agent runs carry the host timestamp captured at
-		// their lifecycle boundary so remote clients never infer elapsed time from
-		// delayed delivery.
+		// Every continuation carries the original operation timestamp so remote
+		// clients retain elapsed time across recovery and delayed delivery.
 		if (handledEvent.type === "agent_start") {
 			this._emit({
 				type: "agent_start",
-				startedAt: this._activeAgentRun!.startedAt,
+				startedAt: this._activeAgentOperation!.startedAt,
 			});
 		} else if (handledEvent.type === "agent_end") {
 			this._emit({ ...handledEvent, willRetry: this._willRetryAfterAgentEnd(handledEvent) });
@@ -2678,6 +2681,8 @@ export class AgentSession {
 			// Late Harness events are ignored by the disposed guard and cannot
 			// repopulate these projections.
 			this._disposed = true;
+			this._activeAgentOperation = undefined;
+			this._agentConversationMutationInFlight = false;
 			this._unsubscribeBackgroundJobs?.();
 			this._unsubscribeBackgroundJobs = undefined;
 			this._cancelBackgroundContinuationSchedule();
@@ -3853,9 +3858,9 @@ export class AgentSession {
 		});
 	}
 
-	/** Active agent-run timing metadata, if a provider run is currently executing. */
+	/** Active logical-operation timing, including automatic compaction and retry backoff. */
 	get activeAgentRun(): ActiveAgentRun | undefined {
-		return this._activeAgentRun ? { ...this._activeAgentRun } : undefined;
+		return this._activeAgentOperation ? { ...this._activeAgentOperation } : undefined;
 	}
 
 	/** Whether compaction or branch summarization is currently running */
@@ -4413,6 +4418,7 @@ export class AgentSession {
 			} finally {
 				this._agentConversationMutationInFlight = false;
 				this._activeAgentRun = undefined;
+				this._activeAgentOperation = undefined;
 				this._flushPendingBashMessages();
 			}
 		} finally {
@@ -4448,7 +4454,7 @@ export class AgentSession {
 		this._backgroundContinuationRevision++;
 		const drainFollowUps = this._drainFollowUpsOnNextContinuation;
 		this._drainFollowUpsOnNextContinuation = false;
-		this._agentConversationMutationInFlight = true;
+		// The caller owns streaming/timing through the entire post-run recovery chain.
 		try {
 			return await this._runAgentOperation(() =>
 				reservedRun
@@ -4456,7 +4462,6 @@ export class AgentSession {
 					: this._harness.continue({ drainFollowUps }),
 			);
 		} finally {
-			this._agentConversationMutationInFlight = false;
 			this._activeAgentRun = undefined;
 		}
 	}
@@ -4920,6 +4925,8 @@ export class AgentSession {
 				if (this._disposed || abortGeneration !== this._abortGeneration) {
 					throw new Error("Prompt aborted before recovery could continue");
 				}
+				this._beginAgentSettlement();
+				this._agentConversationMutationInFlight = true;
 				try {
 					const continuationConversationGenerationRevision = this._conversationGenerationRevision;
 					const continuationReservation = runReservation;
@@ -4934,8 +4941,13 @@ export class AgentSession {
 						assertConversationGenerationCurrent();
 					}
 				} finally {
-					this._flushPendingBashMessages();
-					this._emitAgentSettledIfIdle();
+					this._agentConversationMutationInFlight = false;
+					this._activeAgentOperation = undefined;
+					try {
+						this._flushPendingBashMessages();
+					} finally {
+						this._emitAgentSettledIfIdle();
+					}
 				}
 				assertConversationGenerationCurrent();
 				runReservation = this._harness.reserveRun();

@@ -101,7 +101,7 @@ export const RpcActiveToolExecutionSchema = Type.Object(
 
 export const RpcActiveAgentRunSchema = Type.Object(
 	{
-		/** Unix epoch milliseconds when the current agent run started. */
+		/** Logical operation start in Unix epoch milliseconds; retained through automatic recovery until settlement. */
 		startedAt: Type.Number(),
 	},
 	{ additionalProperties: false },
