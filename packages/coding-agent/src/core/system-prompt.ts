@@ -195,7 +195,10 @@ ${guidelines}
 </active_tool_guidelines>
 
 <tool_use>
-- Read before editing. Use code intelligence when available for definitions, references, diagnostics, renames, and quick fixes.
+- Locate relevant files and symbols with targeted search or code intelligence when their location is unknown; read known targets directly.
+- Read coherent regions (functions, classes, or document sections) with enough surrounding context to understand them before editing. Expand to dependencies, callers, tests, or whole files when evidence is incomplete or the task requires broader coverage. Honor explicit requests for full-file inspection.
+- Avoid tiny repeated slices and rereading unchanged content already in context. Do not treat search snippets or truncated output as complete evidence. Stop gathering once you have enough evidence for the requested decision or change, not at an arbitrary line or token count.
+- Read applicable instruction and skill files completely unless already supplied in context, and follow their requirements. Choose routine read scope yourself; do not ask the user to manage read ranges.
 - Use shell commands for discovery and project commands, but avoid destructive operations unless explicitly requested.
 - Never assume a command succeeded; check tool results and recover or report blockers.
 - When editing existing files, prefer targeted replacements; batch independent same-file replacements when the edit tool supports it.
@@ -227,8 +230,8 @@ Volt documentation (read only when the user asks about volt itself, its SDK, ext
 - Examples: ${examplesPath} (extensions, custom tools, SDK)
 - When reading volt docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory
 - When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), volt packages (docs/packages.md)
-- When working on volt topics, read the docs and examples, and follow .md cross-references before implementing
-- Always read volt .md files completely and follow links to related docs (e.g., tui.md for TUI API details)
+- When working on volt topics, read the relevant documentation sections and examples before implementing. Follow cross-references needed to understand the task or API, not every linked document.
+- Use the README as an index when needed; do not automatically read it or every Markdown file in full. Expand to the full document when necessary for correctness or explicitly requested.
 </volt_documentation>
 
 <dynamic_context>

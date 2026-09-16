@@ -18,7 +18,7 @@
 
 ## Code Quality
 
-- Read files in full before wide-ranging changes, before editing files you have not fully inspected, and when asked to investigate or audit. Do not rely on search snippets for broad changes.
+- Locate relevant files and symbols, then read coherent functions, classes, or sections with enough surrounding context before editing. Expand to dependencies, callers, tests, or entire files when evidence is incomplete or the change/audit requires broader coverage; honor explicit full-file requests. Avoid tiny repeated slices and rereading unchanged content already in context. Search snippets and truncated output are not complete evidence. Read applicable instruction and skill files fully unless already supplied in context.
 - No `any` unless absolutely necessary.
 - Inline single-line helpers that have only one call site.
 - Check node_modules for external API types; don't guess.
@@ -33,7 +33,8 @@
 ## Commands
 
 - After code changes (not docs): run `npm run check` with full output and no tail. Fix diagnostics caused by your changes. Do not fix pre-existing, unrelated, environmental, or other-session diagnostics; report them. If they prevent required validation or committing, stop and ask before expanding scope. This command does not run tests.
-- Never run `npm run build` or `npm test` unless requested by the user.
+- Never run `npm test` directly unless requested by the user; use `./test.sh` for the full non-e2e suite.
+- In a separate task worktree, you may generate local build artifacts needed to run, test, or type-check the requested change without additional approval (for example, missing workspace `dist` files). Prefer targeted package builds and keep artifacts local to that worktree. This does not authorize dependency changes, dependency lifecycle scripts, publishing, deployment, daemon restarts, or committing generated files. Outside a separate task worktree, run `npm run build` only when requested by the user.
 - Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. For all non-e2e tests, run `./test.sh` from the repo root. Otherwise run specific tests from the package root using an installed Vitest CLI.
 - Local environment workaround: Vitest is currently installed under `packages/coding-agent/node_modules` and `packages/ai/node_modules`, not the root `node_modules`. From the affected package root, use `node node_modules/vitest/dist/cli.js --run test/specific.test.ts`. Check the CLI location before running tests; use `../../node_modules/vitest/dist/cli.js` only when that file exists. A missing root-level CLI does not mean dependencies are absent. Do not reinstall dependencies or change dependency metadata merely to restore that path.
 - If you create or modify a test file, run it and iterate on test or implementation until it passes.
