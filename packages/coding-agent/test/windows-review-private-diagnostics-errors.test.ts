@@ -132,11 +132,13 @@ describe("Windows diagnostic subprocess failure containment", () => {
 			[
 				'import { spawn } from "node:child_process";',
 				'import { writeFileSync } from "node:fs";',
-				'const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {',
-				'  stdio: ["ignore", process.stdout, process.stderr], windowsHide: true,',
+				'const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000); process.send(1); process.disconnect();"], {',
+				'  stdio: ["ignore", process.stdout, process.stderr, "ipc"], windowsHide: true, detached: true,',
 				"});",
-				"writeFileSync(process.argv[2], String(child.pid));",
-				"child.unref();",
+				'child.once("message", () => {',
+				"  writeFileSync(process.argv[2], String(child.pid));",
+				"  child.unref();",
+				"});",
 			].join("\n"),
 		);
 		// The Node fixture inherits this environment: retain the real system path on Windows.
