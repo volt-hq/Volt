@@ -435,7 +435,15 @@ export class WorktreeManager {
 				if (options.prReviewLaunch && options.prReviewLaunch.placement.cwd !== checkoutPath)
 					throw new Error("PR checkout placement changed");
 				const added = await runGit(
-					["worktree", "add", checkoutPath, "-b", branch, baseRef],
+					[
+						"worktree",
+						"add",
+						...(options.prReviewLaunch ? ["--no-checkout"] : []),
+						checkoutPath,
+						"-b",
+						branch,
+						baseRef,
+					],
 					source.source.sourceRootPath,
 					{ signal: options.signal },
 				);
@@ -445,6 +453,21 @@ export class WorktreeManager {
 							source.source.sourceRootPath,
 						]),
 					};
+				}
+				if (options.prReviewLaunch) {
+					// Conditional includes can enable filters only on the new branch/gitdir.
+					// Probe and populate in that context, never during worktree add.
+					options.signal?.throwIfAborted();
+					options.assertCurrent?.();
+					const populated = await runGit(["reset", "--hard", "HEAD"], checkoutPath, { signal: options.signal });
+					if (!populated.ok) {
+						// Preserve partial files, but do not publish a prepared checkout or launch.
+						return {
+							result: this.mapGitFailure(populated.stderr, registeredWorkspace, checkoutPath, [
+								source.source.sourceRootPath,
+							]),
+						};
+					}
 				}
 				const worktree: IrohRemoteWorkspaceWorktree = {
 					id,

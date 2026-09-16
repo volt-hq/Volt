@@ -537,6 +537,93 @@ describe("#414 prepared PR checkouts", () => {
 		expect(existsSync(marker)).toBe(false);
 	});
 
+	it.each([
+		["local", "onbranch", "smudge"],
+		["local", "onbranch", "process"],
+		["local", "gitdir", "smudge"],
+		["local", "gitdir", "process"],
+		["global", "onbranch", "smudge"],
+		["global", "onbranch", "process"],
+		["global", "gitdir", "smudge"],
+		["global", "gitdir", "process"],
+	])("disables destination-only %s %s %s filters before checkout", async (scope, condition, driver) => {
+		const f = await fixture();
+		isolateGitHome(f.root);
+		const marker = join(f.root, "executed");
+		const include = join(f.root, "filters.gitconfig");
+		const match = condition === "onbranch" ? "onbranch:volt/**" : `gitdir:${f.source}/.git/worktrees/**`;
+		git(f.source, "config", "--file", include, `filter.test.${driver}`, `touch '${marker}'; exit 1`);
+		git(f.source, "config", "--file", include, "filter.test.clean", `touch '${marker}'; cat`);
+		git(f.source, "config", "--file", include, "filter.test.required", "true");
+		git(f.source, "config", `--${scope}`, `includeIf.${match}.path`, include);
+		writeFileSync(join(f.source, ".git", "info", "attributes"), "value.txt filter=test\n");
+		expect(git(f.source, "config", "--list", "--name-only")).not.toContain(`filter.test.${driver}`);
+
+		const prepared = await f.manager.prepare(f.workspace, f.request, f.authority);
+		const record = (await f.state.listWorktrees())[0];
+		expect(prepared.disposition).toBe("created");
+		expect(git(record.path, "config", "--list", "--name-only")).toContain(`filter.test.${driver}`);
+		expect(git(record.path, "rev-parse", "HEAD")).toBe(f.head);
+		expect(readFileSync(join(record.path, "value.txt"), "utf8")).toBe("PR head\n");
+		expect(readFileSync(join(f.source, "value.txt"), "utf8")).toBe("base\n");
+		expect(git(f.source, "branch", "--show-current")).toBe("main");
+		await assertPrReviewCheckout(record.prReviewLaunches![0].placement, record.path);
+		writeFileSync(join(record.path, "value.txt"), "dirty file forces clean-filter evaluation\n");
+		await expect(assertPrReviewCheckout(record.prReviewLaunches![0].placement, record.path)).rejects.toThrow(
+			PR_CHECKOUT_CHANGED,
+		);
+		expect(existsSync(marker)).toBe(false);
+	});
+
+	it("does not publish a checkout when destination filter configuration cannot be disabled", async () => {
+		const f = await fixture();
+		isolateGitHome(f.root);
+		const include = join(f.root, "filters.gitconfig");
+		const marker = join(f.root, "executed");
+		git(f.source, "config", "--file", include, "filter.invalid name.smudge", `touch '${marker}'; cat`);
+		git(f.source, "config", "--file", include, "filter.test.smudge", `touch '${marker}'; cat`);
+		git(f.source, "config", "includeIf.onbranch:volt/**.path", include);
+		writeFileSync(join(f.source, ".git", "info", "attributes"), "value.txt filter=test\n");
+		await expect(f.manager.prepare(f.workspace, f.request, f.authority)).rejects.toMatchObject({
+			code: "review_preparation_failed",
+		});
+		const id = `review-${createHash("sha256").update(f.request.sessionId).digest("hex").slice(0, 24)}`;
+		const path = getWorktreeCheckoutPath(f.options.agentDir, f.workspace.path, id);
+		expect(existsSync(join(path, ".git"))).toBe(true);
+		expect(existsSync(join(path, "value.txt"))).toBe(false);
+		expect(existsSync(marker)).toBe(false);
+		expect(await f.state.listWorktrees()).toEqual([]);
+		expect(await SessionManager.list(f.source, f.sessionDir)).toEqual([]);
+	});
+
+	it.each(["cancelled", "revoked"])("does not populate or publish a checkout %s between stages", async (kind) => {
+		const f = await fixture();
+		const controller = new AbortController();
+		const id = `review-${createHash("sha256").update(f.request.sessionId).digest("hex").slice(0, 24)}`;
+		const path = getWorktreeCheckoutPath(f.options.agentDir, f.workspace.path, id);
+		await expect(
+			f.manager.prepare(f.workspace, f.request, {
+				...f.authority,
+				signal: controller.signal,
+				assertCurrent: () => {
+					if (existsSync(join(path, ".git"))) {
+						writeFileSync(join(path, "unrelated.txt"), "preserve\n");
+						if (kind === "cancelled") controller.abort();
+						else f.revoke();
+					}
+					controller.signal.throwIfAborted();
+					f.authority.assertCurrent();
+				},
+			}),
+		).rejects.toThrow();
+		expect(existsSync(join(path, ".git"))).toBe(true);
+		expect(existsSync(join(path, "value.txt"))).toBe(false);
+		expect(readFileSync(join(path, "unrelated.txt"), "utf8")).toBe("preserve\n");
+		expect(readFileSync(join(f.source, "value.txt"), "utf8")).toBe("base\n");
+		expect(await f.state.listWorktrees()).toEqual([]);
+		expect(await SessionManager.list(f.source, f.sessionDir)).toEqual([]);
+	});
+
 	it("retains a successfully created checkout when cancelled before returning its receipt", async () => {
 		const f = await fixture();
 		const controller = new AbortController();
