@@ -20,8 +20,11 @@ volt daemon status         # inspect workspaces, clients, leases
 ```
 
 Every supported interactive Volt process connects to a running daemon,
-registers its working directory as a workspace, and acquires a conversation
-lease for the open session so a paired phone can co-attach to it live. Set
+resolves its working directory to a registered workspace, and acquires a
+conversation lease for the open session so a paired phone can co-attach to it
+live. Automatic attachment uses the nearest registered ancestor (or a managed
+worktree's parent workspace); it registers the directory only when neither
+matches. Set
 `remote.background: true` to additionally start the daemon on demand. A TUI
 that was already open while the daemon was stopped reconnects automatically
 when another process starts it.
@@ -70,6 +73,19 @@ login session.
 ## Manage remote access from the TUI
 
 Open `/remote` to inspect connections, pair a phone, and revoke device access.
+Opening or refreshing the control center does not register a workspace.
+
+Choose **Register current directory** to register the exact current directory,
+even when its parent is already registered. Repeating the action, including via
+a symlink to the same directory, reuses the existing registration. New names
+receive a numeric suffix when needed to avoid existing workspace names. A
+managed worktree or its subdirectory cannot be registered separately: use its
+parent workspace instead.
+
+Registration updates the workspace list but does not move the current
+conversation, change its lease, or modify the parent workspace. The current
+workspace/lease display continues to reflect the active conversation.
+
 For managed relays, **Relay access** reports enrollment, token expiry, inactive
 Volt Pro subscriptions, and pending credential resets separately from the
 local daemon endpoint. An endpoint marked ready does not mean relay access is

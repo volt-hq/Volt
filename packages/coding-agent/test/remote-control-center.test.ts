@@ -83,6 +83,8 @@ class FakeBackend implements RemoteControlBackend {
 	regenerateCalls = 0;
 	recoverCalls: string[] = [];
 	registerCalls: string[] = [];
+	registerError: Error | undefined;
+	registerName = "volt";
 	revokeCalls: string[] = [];
 	resetCalls = 0;
 	resetError: Error | undefined;
@@ -126,7 +128,8 @@ class FakeBackend implements RemoteControlBackend {
 
 	async registerCurrentWorkspace(path: string): Promise<{ name: string; path: string }> {
 		this.registerCalls.push(path);
-		const workspace = { name: "volt", path };
+		if (this.registerError) throw this.registerError;
+		const workspace = { name: this.registerName, path };
 		if (this.snapshot.kind === "online") {
 			this.snapshot = {
 				kind: "online",
@@ -230,14 +233,14 @@ class DeferredPairBackend extends FakeBackend {
 	}
 }
 
-function createComponent(backend: FakeBackend, rows = 36) {
+function createComponent(backend: FakeBackend, rows = 36, currentPath = "/tmp/volt") {
 	const requestRender = vi.fn();
 	const onClose = vi.fn();
 	const copied: string[] = [];
 	const component = new RemoteControlCenterComponent(backend, {
 		getTerminalRows: () => rows,
 		getCurrentWorkspaceName: () => "volt",
-		getCurrentWorkspacePath: () => "/tmp/volt",
+		getCurrentWorkspacePath: () => currentPath,
 		currentSessionId: "session-current",
 		requestRender,
 		copyText: async (text) => {
@@ -654,9 +657,57 @@ describe("RemoteControlCenterComponent", () => {
 
 		expect(backend.registerCalls).toEqual(["/tmp/volt"]);
 		const text = component.render(100).lines.map(stripAnsi).join("\n");
-		expect(text).toContain("Workspace volt is available");
+		expect(text).toContain("Registered directory: /tmp/volt (workspace volt).");
+		expect(text).toContain("Current conversation unchanged.");
 		expect(text).toContain("Current · volt · /tmp/volt");
 		expect(text).toContain("Pair a phone");
+	});
+
+	it("does not register a directory when opening or refreshing the overview", async () => {
+		const backend = new FakeBackend({ kind: "online", status: status() });
+		const { component } = createComponent(backend, 36, "/tmp/volt/child");
+		await component.start();
+		selectAction(component, "Refresh status");
+		await settle();
+		expect(backend.registerCalls).toEqual([]);
+	});
+
+	it("lists the registered child while preserving the active parent workspace and lease", async () => {
+		const originalStatus = status();
+		const backend = new FakeBackend({ kind: "online", status: originalStatus });
+		backend.registerName = "child";
+		const { component } = createComponent(backend, 50, "/tmp/volt/child");
+		await component.start();
+		selectAction(component, "Register current directory");
+		await settle();
+		const text = component.render(120).lines.map(stripAnsi).join("\n");
+		expect(backend.registerCalls).toEqual(["/tmp/volt/child"]);
+		expect(text).toContain("Registered directory: /tmp/volt/child (workspace child).");
+		expect(text).toContain("Current conversation unchanged.");
+		expect(text).toContain("Current · volt · /tmp/volt");
+		expect(text).toContain("child · /tmp/volt/child");
+		expect(text).not.toContain("Current · child");
+		expect(text).toContain("Current · volt/session-current · tui-owned");
+		if (backend.snapshot.kind === "online") expect(backend.snapshot.status.leases).toEqual(originalStatus.leases);
+	});
+
+	it.each([false, true])("shows registration errors even if the daemon goes offline: %s", async (offline) => {
+		const backend = new FakeBackend({ kind: "online", status: status() });
+		backend.registerError = new Error(
+			"Use parent workspace volt; managed worktrees cannot be registered separately.",
+		);
+		const { component } = createComponent(backend, 24, "/tmp/worktree");
+		await component.start();
+		if (offline) backend.nextSnapshot = { kind: "offline", state: "not-running" };
+		selectAction(component, "Register current directory", 80);
+		await settle();
+		const lines = component.render(80).lines;
+		const text = lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Workspace registration failed:");
+		expect(text).toContain("Use parent workspace volt;");
+		expect(text).toContain("cannot be registered separately.");
+		expect(text).not.toContain("Registered directory:");
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(80);
 	});
 
 	it("pairs the current workspace, preserves ticket progress, and copies the ticket", async () => {
