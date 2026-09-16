@@ -67,6 +67,8 @@ async function fixture(nested = false, fileBacked = true, workspaceName = "proje
 	git(source, "config", "user.name", "Test");
 	git(source, "config", "user.email", "test@example.test");
 	git(source, "config", "commit.gpgsign", "false");
+	// Keep byte assertions stable in worktrees and clones, even with core.autocrlf=true.
+	writeFileSync(join(source, ".gitattributes"), "value.txt text eol=lf\n");
 	writeFileSync(join(source, "value.txt"), "base\n");
 	git(source, "add", ".");
 	git(source, "commit", "-m", "base");
@@ -189,7 +191,7 @@ async function submoduleFixture(nested = false) {
 	git(leaf, "config", "user.email", "test@example.test");
 	git(leaf, "config", "commit.gpgsign", "false");
 	writeFileSync(join(leaf, "value.txt"), "base\n");
-	writeFileSync(join(leaf, ".gitattributes"), "value.txt filter=prSub\n");
+	writeFileSync(join(leaf, ".gitattributes"), "value.txt text eol=lf filter=prSub\n");
 	git(leaf, "add", ".");
 	git(leaf, "commit", "-m", "submodule base");
 	const leafHead = git(leaf, "rev-parse", "HEAD");
@@ -440,6 +442,8 @@ describe("#414 prepared PR checkouts", () => {
 		async () => {
 			const f = await fixture();
 			isolateGitHome(f.root);
+			// Hosted runners may trust every repository in their system Git config.
+			git(f.root, "config", "--global", "--add", "safe.directory", "");
 			const path = join(f.root, "existing");
 			git(f.source, "worktree", "add", path, "topic");
 			expect((await f.worktrees.adopt(f.workspace, { path, id: "existing" })).ok).toBe(true);
@@ -462,7 +466,8 @@ describe("#414 prepared PR checkouts", () => {
 			expect(prepared).toMatchObject({ disposition: "reused", worktreeId: "existing" });
 			const placement = (await f.state.listWorktrees())[0].prReviewLaunches![0].placement;
 			await expect(assertPrReviewCheckout(placement, path)).resolves.toBeUndefined();
-			git(f.root, "config", "--global", "--unset-all", "safe.directory");
+			// Keep the reset entry so revoking explicit trust does not restore a system wildcard.
+			git(f.root, "config", "--global", "--replace-all", "safe.directory", "");
 			await expect(assertPrReviewCheckout(placement, path)).rejects.toThrow(PR_CHECKOUT_UNAVAILABLE);
 		},
 	);
@@ -692,7 +697,8 @@ describe("#414 prepared PR checkouts", () => {
 		isolateGitHome(f.root);
 		const marker = join(f.root, "executed");
 		const include = join(f.root, "filters.gitconfig");
-		const match = condition === "onbranch" ? "onbranch:volt/**" : `gitdir:${f.source}/.git/worktrees/**`;
+		const match =
+			condition === "onbranch" ? "onbranch:volt/**" : `gitdir:${f.source.replaceAll("\\", "/")}/.git/worktrees/**`;
 		git(f.source, "config", "--file", include, `filter.test.${driver}`, `touch '${marker}'; exit 1`);
 		git(f.source, "config", "--file", include, "filter.test.clean", `touch '${marker}'; cat`);
 		git(f.source, "config", "--file", include, "filter.test.required", "true");

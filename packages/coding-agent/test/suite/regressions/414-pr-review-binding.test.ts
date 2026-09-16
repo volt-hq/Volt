@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
@@ -92,7 +93,12 @@ async function fixture() {
 	cleanups.push(async () => {
 		for (const owned of managers) await owned.closePersistence();
 		await harness.cleanupAsync();
-		rmSync(root, { recursive: true, force: true });
+		// Git subprocess directory handles can outlive disposal briefly on Windows.
+		await rm(root, {
+			recursive: true,
+			force: true,
+			...(process.platform === "win32" ? { maxRetries: 10, retryDelay: 50 } : {}),
+		});
 	});
 	const pullRequest = {
 		providerId: "github",

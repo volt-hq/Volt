@@ -57,8 +57,10 @@ async function fixture(nested = false, workspaceName = "project") {
 	git(source, "config", "user.name", "Test");
 	git(source, "config", "user.email", "test@example.test");
 	git(source, "config", "commit.gpgsign", "false");
+	// Pin checkout bytes independently of the host's core.autocrlf setting.
+	writeFileSync(join(source, ".gitattributes"), "value.txt text eol=lf\n");
 	writeFileSync(join(source, "value.txt"), "parent\n");
-	git(source, "add", "value.txt");
+	git(source, "add", ".gitattributes", "value.txt");
 	git(source, "commit", "-m", "base");
 	const base = git(source, "rev-parse", "HEAD");
 	git(source, "checkout", "-b", "topic");
