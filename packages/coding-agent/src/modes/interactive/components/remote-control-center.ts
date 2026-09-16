@@ -1,4 +1,5 @@
-import { isAbsolute, relative, resolve } from "node:path";
+import { realpath, stat } from "node:fs/promises";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 import {
 	type Component,
 	createRenderFrame,
@@ -14,8 +15,10 @@ import {
 	type IrohRemoteAccessPresetName,
 	isIrohRemoteAccessPresetName,
 } from "../../../core/remote/iroh/access-grant.ts";
+import { isIrohRemoteWorkspaceName } from "../../../core/remote/iroh/handshake.ts";
 import { formatIrohRemoteTicketQrCode } from "../../../core/remote/iroh/qr.ts";
 import { getIrohRemotePairingVerificationDetails } from "../../../core/remote/iroh/ticket.ts";
+import { getIrohRemoteWorkspaceNameAlias } from "../../../core/remote/iroh/workspace.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 import { createDaemonClient, type DaemonClient } from "../../../daemon/control-client.ts";
 import {
@@ -36,7 +39,6 @@ import {
 } from "../../../daemon/state.ts";
 import { DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS } from "../../../remote/integrated-runtime-retention.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
-import { resolveDaemonWorkspaceForCwd } from "../daemon-attach.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
 
@@ -219,9 +221,39 @@ export function createRemoteControlBackend(agentDir: string = getAgentDir()): Re
 			return { preservedIdentity: recovered.preservedIdentity };
 		},
 		async registerCurrentWorkspace(path) {
-			const workspace = await resolveDaemonWorkspaceForCwd(await connect(), path);
-			if (!workspace) throw new Error("could not register the current directory with voltd");
-			return workspace;
+			const directory = await realpath(path);
+			if (!(await stat(directory)).isDirectory()) throw new Error(`Not a directory: ${directory}`);
+			const active = await connect();
+			const worktree = await active.request({ type: "worktree_resolve", path: directory });
+			if (worktree.type === "worktree_resolve_result") {
+				throw new Error(
+					`This directory belongs to managed worktree ${worktree.worktreeId}. Use parent workspace ${worktree.workspaceName}; managed worktrees cannot be registered separately.`,
+				);
+			}
+			if (worktree.type !== "error") throw new Error(`unexpected ${worktree.type} response`);
+			if (worktree.code !== "not_found") throw new RemoteControlRequestError(worktree.code, worktree.message);
+
+			const status = await active.request({ type: "status" });
+			if (status.type === "error") throw new RemoteControlRequestError(status.code, status.message);
+			if (status.type !== "status_result") throw new Error(`unexpected ${status.type} response`);
+			// Explicit registration must not reuse an enclosing workspace. Daemon
+			// registration stores canonical paths, so aliases reuse the exact entry.
+			const existing = status.workspaces.find((workspace) => workspace.path === directory);
+			if (existing) return { name: existing.name, path: existing.path };
+			const takenNames = new Set(
+				status.workspaces.map((workspace) => getIrohRemoteWorkspaceNameAlias(workspace.name)),
+			);
+			const directoryName = basename(directory);
+			const base = isIrohRemoteWorkspaceName(directoryName) ? directoryName : "workspace";
+			let name = base;
+			for (let suffix = 2; takenNames.has(getIrohRemoteWorkspaceNameAlias(name)); suffix++) {
+				name = `${base}-${suffix}`;
+				if (!isIrohRemoteWorkspaceName(name)) name = `workspace-${suffix}`;
+			}
+			const registered = await active.request({ type: "workspace_register", name, path: directory });
+			if (registered.type === "error") throw new RemoteControlRequestError(registered.code, registered.message);
+			if (registered.type !== "ok") throw new Error(`unexpected ${registered.type} response`);
+			return { name, path: directory };
 		},
 		async beginPairing(workspaceName, access, onProgress) {
 			const queued: PairingProgress[] = [];
@@ -675,19 +707,18 @@ export class RemoteControlCenterComponent implements Component {
 		try {
 			const workspace = await this.backend.registerCurrentWorkspace(currentPath);
 			if (this.disposed || generation !== this.generation) return;
-			await this.refresh(`Workspace ${workspace.name} is available`);
+			await this.refresh(
+				`Registered directory: ${workspace.path} (workspace ${workspace.name}). Current conversation unchanged.`,
+			);
 		} catch (error) {
 			if (this.disposed || generation !== this.generation) return;
 			const snapshot = await this.backend.load();
 			if (this.disposed || generation !== this.generation) return;
+			const notice = `Workspace registration failed: ${error instanceof Error ? error.message : String(error)}`;
 			this.view =
 				snapshot.kind === "online"
-					? {
-							kind: "overview",
-							status: snapshot.status,
-							notice: `Workspace registration failed: ${error instanceof Error ? error.message : String(error)}`,
-						}
-					: { kind: "offline", snapshot };
+					? { kind: "overview", status: snapshot.status, notice }
+					: { kind: "offline", snapshot: { ...snapshot, error: notice } };
 			this.selectedKey = snapshot.kind === "online" ? "register-current" : "start";
 			this.options.requestRender();
 		}
@@ -1085,7 +1116,9 @@ export class RemoteControlCenterComponent implements Component {
 			return [
 				{ text: "DAEMON", tone: "accent" },
 				{ text: `voltd is ${this.view.snapshot.state}`, tone: "warning" },
-				...(this.view.snapshot.error ? [{ text: this.view.snapshot.error, tone: "error" as const }] : []),
+				...(this.view.snapshot.error
+					? [{ text: this.view.snapshot.error, tone: "error" as const, wrap: true }]
+					: []),
 				...(this.view.snapshot.invalidState
 					? [
 							{
@@ -1236,6 +1269,7 @@ export class RemoteControlCenterComponent implements Component {
 				? [
 						{
 							text: this.view.notice,
+							wrap: true,
 							tone: this.view.notice.includes("failed") ? ("error" as const) : ("success" as const),
 						},
 					]
